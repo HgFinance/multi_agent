@@ -220,6 +220,13 @@ purged walk-forward joint model이 함께 포함된다.
   fitting은 허용하지 않으며, 12개 population·ablation·실패 기억을 통한 구조 탐색만 한다.
   quality-diversity 점수는 어떤 후보를 먼저 시험할지 정할 뿐 성과나 승격 판정이 아니다.
 
+- Scout 블록 파서는 실운영 출력 어휘(`PUBLISHED`, `ACCESSED`, `CLAIMED_EDGE`,
+  `TESTABILITY`, `LESSONS_ADDRESSED`)와 일치한다. 알 수 없는 대문자 `KEY:`도 앞 필드의
+  연속 문장이 아니라 메타데이터 경계로 취급해 버리며, 완결된 JSON 뒤의 설명문을
+  `FORMULA_THESIS`나 AST에 붙이지 않는다. JSON 배열형 `OBSERVABLES`는 배열로 해석한 뒤
+  AST field 집합과 비교한다. 따라서 형식 손상은 fail closed하되 정상 중첩 JSON은 그대로
+  접수되고, 출판일·스카우트가 주장한 edge·대응한 과거 교훈도 계보에 보존된다.
+
 - 모든 가격 markout 식은 `queue_imbalance_l1/l10`, `microprice_offset_bps`,
   `trade_flow_imbalance`, `quote_event_ofi`, `normalized_quote_ofi` 중 적어도 하나를
   숫자 값 경로에서 `PRESSURE`로 사용해야 한다. 거래량·호가 수·spread·depth·실현변동성

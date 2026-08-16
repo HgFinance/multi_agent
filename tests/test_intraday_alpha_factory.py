@@ -499,6 +499,48 @@ def test_lead_intake_persists_formula_discovery_contract() -> None:
             without_thesis, without_thesis["MECHANISM"])
 
 
+def test_scout_parser_keeps_live_structured_formula_fields_isolated() -> None:
+    text = """TITLE: Tight-spread order-flow pressure
+PUBLISHED: 2026-04-04
+ACCESSED: 2026-08-17
+CLAIMED_EDGE: Signed quote pressure clears costs only in executable liquidity
+MECHANISM: Signed quote flow consumes the thin side when spreads remain tight.
+READINESS: AST_READY
+RESEARCH_LANE: INTRADAY_EVENT
+SEMANTIC_PLAN: {"event":"ORDER_FLOW","context":["TIGHT_SPREAD"],"qualities":["STATE_CONDITIONAL"],"direction":"FOLLOW","output":"TAKER_NET_PNL","execution":"TAKER","horizon_seconds":60}
+OBSERVABLES: ["normalized_quote_ofi","spread_bps"]
+CANDIDATE_SIGNAL_EXPR: {"op":"where","condition":{"op":"lt","args":[{"op":"field","field":"spread_bps"},{"const":5,"unit":"BPS"}]},"then":{"op":"mul","args":[{"op":"rolling_mean","arg":{"op":"field","field":"normalized_quote_ofi"},"seconds":60},{"op":"field","field":"spread_bps"}]},"else":{"const":0,"unit":"BPS"}}
+TESTABLE_WITH: Compare the tight-spread state with ungated and wide-spread controls.
+DERIVATION_MODE: MECHANISM_MUTATION
+SOURCE_BASELINE_EXPR: {"op":"field","field":"normalized_quote_ofi"}
+DERIVATION_TRANSFORMS: ["STATE_CONDITION","MECHANISM_INTERACTION"]
+NOVELTY_RATIONALE: Makes executable liquidity an explicit state and scale.
+FORMULA_THESIS: {"target":"TAKER_NET_PNL","functional_form":"STATE_CONDITIONAL","expected_sign":"STATE_DEPENDENT","coefficient_policy":"PREREGISTERED_NO_OOS_FIT","decision_rule":"PREDICTED_MARKOUT_CLEARS_COST","terms":{"normalized_quote_ofi":"PRESSURE","spread_bps":"LIQUIDITY"},"identification":"Positive net markout must survive state and scale ablations after locked costs."}
+UNUSED_METADATA: must not be appended to the JSON thesis
+LESSONS_ADDRESSED: COST_SENSITIVE|BASELINE_NOT_BEATEN|OVERFIT_PBO
+URL: https://example.test/tight-spread
+"""
+    block = lead_intake.parse_blocks(text)[0]
+
+    assert block["TITLE"] == "Tight-spread order-flow pressure"
+    assert block["PUBLISHED"] == "2026-04-04"
+    assert block["LESSONS_ADDRESSED"] == (
+        "COST_SENSITIVE|BASELINE_NOT_BEATEN|OVERFIT_PBO")
+    assert block["FORMULA_THESIS"].endswith("locked costs.\"}")
+
+    lead = lead_intake.to_lead(
+        block, lens="PRACTITIONER", source_type="PRACTITIONER",
+        case_id="case-parser-regression", model_version="test-model",
+        prompt_version="scout-parser-v5")
+    contract = lead["ast_contract"]
+    assert contract["observables"] == ["normalized_quote_ofi", "spread_bps"]
+    assert contract["formula_contract_complete"] is True
+    assert contract["lessons_addressed"].startswith("COST_SENSITIVE")
+    assert lead["claimed_edge"].startswith("Signed quote pressure")
+    assert lead["refs"][0]["source_published"] == "2026-04-04"
+    assert lead["refs"][0]["declared_accessed"] == "2026-08-17"
+
+
 def test_intraday_gate_rejects_story_formula_mismatch() -> None:
     proposal = _intraday_proposal()
     proposal["suggested_params"] = {

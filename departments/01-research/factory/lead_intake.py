@@ -69,7 +69,7 @@ def clip_excerpt(text: str, *, limit: int = MAX_EXCERPT_CHARS) -> str:
         return t
     return t[: max(0, limit - len(_TRUNC_MARK))].rstrip() + _TRUNC_MARK
 
-MODULE_VERSION = "research-lead-intake-v4"
+MODULE_VERSION = "research-lead-intake-v5"
 
 # 스카우트가 내는 블록의 필드. 앞의 셋이 없으면 리드가 아니다.
 REQUIRED = ("TITLE", "URL", "MECHANISM", "READINESS")
@@ -80,14 +80,21 @@ OPTIONAL = ("COUNTERPARTY", "TESTABLE_WITH", "REPORTED_EFFECT", "EXCERPT",
             "DERIVATION_MODE", "SOURCE_BASELINE_EXPR",
             "DERIVATION_TRANSFORMS", "NOVELTY_RATIONALE",
             "PARENT_SIGNAL_EXPR", "EVOLUTION_OPERATORS",
-            "EXPECTED_INCREMENT", "ABLATIONS", "FORMULA_THESIS")
+            "EXPECTED_INCREMENT", "ABLATIONS", "FORMULA_THESIS",
+            # These labels are part of the live Scout output vocabulary.  Some
+            # are provenance-only, but they still must terminate the preceding
+            # field instead of being concatenated into a JSON value.
+            "PUBLISHED", "PUBLICATION_DATE", "ACCESSED", "ACCESS_TIME",
+            "CLAIMED_EDGE", "TESTABILITY", "LESSONS_ADDRESSED")
 _FIELD_RE = re.compile(
-    r"^(TITLE|URL|MECHANISM|READINESS|COUNTERPARTY|TESTABLE_WITH|REPORTED_EFFECT|"
-    r"EXCERPT|MARKET_CONTEXT|FAILURE_MODE|OBSERVABLES|CANDIDATE_SIGNAL_EXPR|"
-    r"MISSING_DATA|MAPPING_LOSS|RESEARCH_LANE|SEMANTIC_PLAN|"
-    r"DERIVATION_MODE|SOURCE_BASELINE_EXPR|"
-    r"DERIVATION_TRANSFORMS|NOVELTY_RATIONALE|PARENT_SIGNAL_EXPR|"
-    r"EVOLUTION_OPERATORS|EXPECTED_INCREMENT|ABLATIONS|FORMULA_THESIS)\s*:\s*(.*)$")
+    r"^(" + "|".join(re.escape(k) for k in REQUIRED + OPTIONAL) +
+    r")\s*:\s*(.*)$")
+_ANY_LABEL_RE = re.compile(r"^[A-Z][A-Z0-9_]*\s*:\s*")
+_JSON_FIELDS = frozenset({
+    "OBSERVABLES", "CANDIDATE_SIGNAL_EXPR", "SEMANTIC_PLAN",
+    "SOURCE_BASELINE_EXPR", "DERIVATION_TRANSFORMS", "PARENT_SIGNAL_EXPR",
+    "EVOLUTION_OPERATORS", "ABLATIONS", "FORMULA_THESIS",
+})
 
 AST_READY = "AST_READY"
 DATA_BLOCKED = "DATA_BLOCKED"
@@ -131,6 +138,26 @@ def _as_text(value) -> str:
     return str(value or "").strip()
 
 
+def _strip_json_fence(value: str) -> str:
+    """Remove an optional Markdown JSON fence without accepting trailing prose."""
+    text = str(value or "").strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text, count=1, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text, count=1)
+    return text.strip()
+
+
+def _json_document_complete(value: str) -> bool:
+    """True only when *value* is one complete JSON document."""
+    text = _strip_json_fence(value)
+    if not text:
+        return False
+    try:
+        _, end = json.JSONDecoder().raw_decode(text)
+    except (TypeError, ValueError):
+        return False
+    return not text[end:].strip()
+
+
 def _readiness_metadata(block: dict, mechanism: str) -> dict:
     """Validate whether a sourced idea can enter the current AST/data search space."""
     readiness = _as_text(block.get("READINESS")).upper()
@@ -138,8 +165,17 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
         raise ValueError("READINESS must be AST_READY, DATA_BLOCKED, or SEMANTIC_MISMATCH")
 
     raw_observables = block.get("OBSERVABLES")
-    observable_items = (raw_observables if isinstance(raw_observables, (list, tuple, set))
-                        else _as_text(raw_observables).split(","))
+    if isinstance(raw_observables, (list, tuple, set)):
+        observable_items = raw_observables
+    elif _as_text(raw_observables).startswith("["):
+        try:
+            observable_items = json.loads(_strip_json_fence(_as_text(raw_observables)))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid OBSERVABLES: {exc}") from exc
+        if not isinstance(observable_items, list):
+            raise ValueError("OBSERVABLES JSON must be an array")
+    else:
+        observable_items = _as_text(raw_observables).split(",")
     observables = sorted({_as_text(x) for x in observable_items if _as_text(x)})
     missing_data = _as_text(block.get("MISSING_DATA"))
     mapping_loss = _as_text(block.get("MAPPING_LOSS"))
@@ -152,7 +188,7 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
     if raw_plan not in (None, ""):
         try:
             semantic_plan = (raw_plan if isinstance(raw_plan, dict)
-                             else json.loads(_as_text(raw_plan)))
+                             else json.loads(_strip_json_fence(_as_text(raw_plan))))
         except (TypeError, ValueError) as exc:
             raise ValueError(f"invalid SEMANTIC_PLAN: {exc}") from exc
     candidate = None
@@ -161,7 +197,8 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
         if not observables or not _as_text(raw_expr):
             raise ValueError("AST_READY requires OBSERVABLES and CANDIDATE_SIGNAL_EXPR")
         try:
-            candidate = raw_expr if isinstance(raw_expr, dict) else json.loads(_as_text(raw_expr))
+            candidate = (raw_expr if isinstance(raw_expr, dict)
+                         else json.loads(_strip_json_fence(_as_text(raw_expr))))
             ast = _intraday_ast() if lane == "INTRADAY_EVENT" else _alpha_ast()
             candidate = ast.parse(candidate)
         except (ValueError, TypeError) as exc:
@@ -200,13 +237,13 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
         raw_baseline = block.get("SOURCE_BASELINE_EXPR")
         if raw_baseline not in (None, "") and not isinstance(raw_baseline, dict):
             try:
-                raw_baseline = json.loads(_as_text(raw_baseline))
+                raw_baseline = json.loads(_strip_json_fence(_as_text(raw_baseline)))
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"invalid SOURCE_BASELINE_EXPR: {exc}") from exc
         raw_transforms = block.get("DERIVATION_TRANSFORMS") or ()
         if isinstance(raw_transforms, str) and raw_transforms.strip().startswith("["):
             try:
-                raw_transforms = json.loads(raw_transforms)
+                raw_transforms = json.loads(_strip_json_fence(raw_transforms))
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"invalid DERIVATION_TRANSFORMS: {exc}") from exc
         derivation = _literature_derivation().assess(
@@ -220,20 +257,20 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
         raw_parent = block.get("PARENT_SIGNAL_EXPR")
         if raw_parent not in (None, "") and not isinstance(raw_parent, dict):
             try:
-                raw_parent = json.loads(_as_text(raw_parent))
+                raw_parent = json.loads(_strip_json_fence(_as_text(raw_parent)))
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"invalid PARENT_SIGNAL_EXPR: {exc}") from exc
         raw_evolution_ops = block.get("EVOLUTION_OPERATORS") or ()
         if (isinstance(raw_evolution_ops, str)
                 and raw_evolution_ops.strip().startswith("[")):
             try:
-                raw_evolution_ops = json.loads(raw_evolution_ops)
+                raw_evolution_ops = json.loads(_strip_json_fence(raw_evolution_ops))
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"invalid EVOLUTION_OPERATORS: {exc}") from exc
         raw_ablations = block.get("ABLATIONS") or ()
         if isinstance(raw_ablations, str) and raw_ablations.strip().startswith("["):
             try:
-                raw_ablations = json.loads(raw_ablations)
+                raw_ablations = json.loads(_strip_json_fence(raw_ablations))
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"invalid ABLATIONS: {exc}") from exc
         evolution = _alpha_evolution().assess_lineage(
@@ -248,7 +285,7 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
             raw_thesis = block.get("FORMULA_THESIS")
             if raw_thesis not in (None, "") and not isinstance(raw_thesis, dict):
                 try:
-                    raw_thesis = json.loads(_as_text(raw_thesis))
+                    raw_thesis = json.loads(_strip_json_fence(_as_text(raw_thesis)))
                 except (TypeError, ValueError) as exc:
                     raise ValueError(f"invalid FORMULA_THESIS: {exc}") from exc
             formula_discovery = _formula_discovery().assess(
@@ -301,6 +338,7 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
     return {"ast_readiness": readiness, "observables": observables,
             "candidate_signal_expr": candidate, "missing_data": missing_data,
             "mapping_loss": mapping_loss,
+            "lessons_addressed": _as_text(block.get("LESSONS_ADDRESSED")),
             "research_lane": lane, "semantic_plan": semantic_plan,
             "ast_fingerprint": ast_fingerprint,
             "ast_shape_fingerprint": ast_shape_fingerprint,
@@ -341,8 +379,8 @@ def parse_blocks(text: str, keys: tuple[str, ...] | None = None) -> list[dict]:
     TITLE 이 나오면 새 블록이다. 여러 줄에 걸친 값은 이어 붙인다.
 
     `keys` 로 어휘를 바꿔 기획안·회의론자 산출에도 쓴다. 어휘를 넘기지 않으면
-    스카우트 어휘다. **모르는 키는 값의 일부로 흘려보낸다** - 새 키로 잘못 잡으면
-    앞 필드가 그 줄에서 끊겨 뜻이 바뀐다.
+    스카우트 어휘다. 모르는 대문자 `KEY:` 줄은 메타데이터 경계로 보고 버린다.
+    앞의 구조화 JSON 필드에 붙여 수식을 손상시키지 않기 위해서다.
     """
     stripped = text.strip()
     if stripped.startswith("["):
@@ -372,9 +410,18 @@ def parse_blocks(text: str, keys: tuple[str, ...] | None = None) -> list[dict]:
                 cur[key] = ", ".join(x for x in (cur[key], val) if x)
             else:
                 cur[key] = val
+        elif _ANY_LABEL_RE.match(raw.strip()):
+            # Unknown uppercase labels are metadata boundaries, not prose
+            # continuations. Ignoring one is safer than corrupting the prior
+            # typed JSON field (the live failure was FORMULA_THESIS followed by
+            # an unrecognised LESSONS_ADDRESSED label).
+            key = ""
         elif key and raw.strip() and cur:
             # 이어지는 줄. 값을 자르면 메커니즘 문장이 잘려 뜻이 바뀐다.
-            cur[key] = (cur[key] + " " + raw.strip()).strip()
+            # A complete JSON document is immutable: later prose or a closing
+            # Markdown fence must not be concatenated into it.
+            if key not in _JSON_FIELDS or not _json_document_complete(cur[key]):
+                cur[key] = (cur[key] + " " + raw.strip()).strip()
     if cur:
         blocks.append(cur)
     return blocks
@@ -435,6 +482,13 @@ def to_lead(block: dict, *, lens: str, source_type: str, case_id: str,
             "CROSS_DOMAIN_TRANSFER is only valid for the isolated CROSS_DOMAIN scout lens")
     ref = {"url": url, "title": title, "accessed_at": now.isoformat(),
            "excerpt": excerpt}
+    source_published = _as_text(
+        block.get("PUBLISHED") or block.get("PUBLICATION_DATE"))
+    declared_access = _as_text(block.get("ACCESSED") or block.get("ACCESS_TIME"))
+    if source_published:
+        ref["source_published"] = source_published
+    if declared_access:
+        ref["declared_accessed"] = declared_access
 
     # v1 columns remain compatible; the source-specific verdict lives in refs JSON.
     readiness_value = readiness["ast_readiness"]
@@ -455,7 +509,7 @@ def to_lead(block: dict, *, lens: str, source_type: str, case_id: str,
         "as_known_at": now,
         "refs": [ref],
         "ast_contract": readiness,
-        "claimed_edge": title,
+        "claimed_edge": _as_text(block.get("CLAIMED_EDGE")) or title,
         "stated_mechanism": mech,
         # 반대편을 소스가 밝히지 않았으면 스카우트의 추론이다 - 표시해 둔다.
         "inferred": not counterparty,
