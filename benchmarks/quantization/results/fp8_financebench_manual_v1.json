@@ -1,0 +1,142 @@
+{
+  "rubric_version": "financebench-manual-v1-frozen",
+  "policy": {
+    "correct": [
+      "Core conclusion is semantically equivalent to gold.",
+      "Required quantitative values, units, direction, and comparison target are correct.",
+      "Different wording is allowed when meaning is unchanged."
+    ],
+    "incorrect": [
+      "Core conclusion differs from gold.",
+      "Required numeric value, direction, unit, or target is wrong.",
+      "Answer abstains where benchmark gold provides a determinate answer."
+    ],
+    "lexical_f1_used_for_decision": false
+  },
+  "model": "qwen2.5-14b-instruct-fp8",
+  "n": 15,
+  "correct": 7,
+  "accuracy": 0.4667,
+  "results": [
+    {
+      "id": "financebench_id_00394",
+      "correct": false,
+      "reason": "Gold: Corporate & Investment Bank, $3725M; prediction chose Consumer & Community Banking, $3100M.",
+      "question": "In 2022 Q2, which of JPM's business segments had the highest net income?",
+      "gold": "Corporate & Investment Bank. Its net income was $3725 million.",
+      "prediction": "In 2022 Q2, JPM's Consumer & Community Banking segment had the highest net income with $3,100 million."
+    },
+    {
+      "id": "financebench_id_01079",
+      "correct": false,
+      "reason": "Prediction assigns the Czech acquisition to FY2022, inconsistent with the benchmark gold answer.",
+      "question": "What are major acquisitions that AMCOR has done in FY2023, FY2022 and FY2021?",
+      "gold": "Amcor completed these acquisitions during FY2023:\n-100% equity interest of a flexibles manufacturing company in the Czech Republic\n- 100% equity interest in a medical device packaging manufacturing site in\nShanghai, China.\n-acquisition of a New Zealand-based leading manufacturer of state-of-the-art, automated protein\npackaging machines.",
+      "prediction": "Based on the provided evidence, AMCOR has completed the following major acquisitions:\n\n- **FY2023:**\n  - Acquisition of a medical device packaging manufacturing site in Shanghai, China for $60 million (completed on March 17, 2023).\n  - Acquisition of a New Zealand based leading manufacturer of state-of-the-art, automated protein packaging machines for $45 million (completed on May 31, 2023).\n\n- **FY2022:**\n  - Acquisition of a Czech Republic company operating a world-class flexible packaging manufacturing plant for $59 million (completed on August 1, 2022).\n\nNo acquisitions are mentioned for FY2021 in the given evidence."
+    },
+    {
+      "id": "financebench_id_01490",
+      "correct": true,
+      "reason": "Approximately $20B gain matches gold.",
+      "question": "What is the amount of the gain accruing to JnJ as a result of the separation of its Consumer Health business segment, as of August 30, 2023?",
+      "gold": "JnJ will make a gain of approximately $20 billion from the separation of its Consumer Health business segment.",
+      "prediction": "The gain accruing to Johnson & Johnson as a result of the separation of its Consumer Health business segment, as of August 30, 2023, is approximately $20 billion."
+    },
+    {
+      "id": "financebench_id_00651",
+      "correct": true,
+      "reason": "Correctly concludes adjusted EPS growth decelerates from 3.6% to 3.5%.",
+      "question": "Is growth in JnJ's adjusted EPS expected to accelerate in FY2023?",
+      "gold": "No, rate of growth in adjusted EPS is expected to decelerate slightly from 3.6% in FY2022 to 3.5% in FY2023.",
+      "prediction": "Based on the provided evidence, Johnson & Johnson expects its adjusted EPS for FY2023 to be $10.50, which represents a 3.5% growth compared to the FY2022 adjusted EPS of $10.15 (a 3.6% increase). Therefore, the growth rate in adjusted EPS is slightly decelerating from 3.6% in FY2022 to an expected 3.5% in FY2023. Thus, the growth in JnJ's adjusted EPS is not expected to accelerate but rather slightly decelerate."
+    },
+    {
+      "id": "financebench_id_03473",
+      "correct": false,
+      "reason": "Gold answer rounded in requested ratio format is 0.01; prediction reports 1.43%.",
+      "question": "What is the FY2017 return on assets (ROA) for Coca Cola? ROA is defined as: FY2017 net income / (average total assets between FY2016 and FY2017). Round your answer to two decimal places. Give a response to the question by relying on the details shown in the balance sheet and the P&L statement.",
+      "gold": "0.01",
+      "prediction": "To calculate the Return on Assets (ROA) for FY2017:\n\n1. **Net Income for FY2017**: From the CONSOLIDATED STATEMENTS OF INCOME, the net income attributable to shareowners of The Coca-Cola Company for 2017 is $1,248 million.\n   \n2. **Average Total Assets**: To find the average total assets between FY2016 and FY2017, we take the total assets for both years and average them:\n   - Total Assets for FY2017: $87,896 million\n   - Total Assets for FY2016: $87,270 million\n   - Average Total Assets = ($87,896 + $87,270) / 2 = $87,583 million\n\n3. **ROA Calculation**:\n   \\[\n   \\text{ROA} = \\frac{\\text{Net Income}}{\\text{Average Total Assets}} = \\frac{1,248}{87,583} \\approx 0.01425\n   \\]\n   Converting this to a percentage and rounding to two decimal places:\n   \\[\n   \\text{ROA} \\approx 1.43\\%\n   \\]\n\nTherefore, the FY2017 ROA for Coca-Cola is approximately **1.43%**."
+    },
+    {
+      "id": "financebench_id_07507",
+      "correct": true,
+      "reason": "65.4% matches gold.",
+      "question": "What is Adobe's year-over-year change in unadjusted operating income from FY2015 to FY2016 (in units of percents and round to one decimal place)? Give a solution to the question by using the income statement.",
+      "gold": "65.4%",
+      "prediction": "To calculate the year-over-year change in unadjusted operating income from FY2015 to FY2016:\n\n1. Identify the operating income for both years:\n   - FY2016: $1,493,602,000\n   - FY2015: $903,095,000\n\n2. Calculate the difference:\n   \\[\n   \\Delta \\text{Operating Income} = \\$1,493,602,000 - \\$903,095,000 = \\$590,507,000\n   \\]\n\n3. Calculate the percentage change:\n   \\[\n   \\text{Percentage Change} = \\left(\\frac{\\$590,507,000}{\\$903,095,000}\\right) \\times 100 \\approx 65.4\\%\n   \\]\n\nTherefore, the year-over-year change in unadjusted operating income from FY2015 to FY2016 is approximately **65.4%**."
+    },
+    {
+      "id": "financebench_id_01163",
+      "correct": true,
+      "reason": "Operations having the highest cash flow is semantically identical to gold.",
+      "question": "Among operations, investing, and financing activities, which brought in the most (or lost the least) cash flow for Nike in FY2023?",
+      "gold": "Among the three, cash flow from operations was the highest for Nike in FY2023.",
+      "prediction": "Operations brought in the most cash flow for Nike in FY2023, with cash provided by operations amounting to $5,841 million."
+    },
+    {
+      "id": "financebench_id_00521",
+      "correct": false,
+      "reason": "Gold states no acquisitions in FY2023/FY2022; prediction says evidence is insufficient.",
+      "question": "What are major acquisitions that Ulta Beauty has done in FY2023 and FY2022?",
+      "gold": "Ulta Beauty did not make any acquisitions in FY2023 and FY2022.",
+      "prediction": "The evidence provided does not contain details about specific major acquisitions made by Ulta Beauty in FY2023 and FY2022; it only shows a net acquisition cost of $(1,220) in FY2023. There is no information given for FY2022 regarding acquisitions. Therefore, the evidence is insufficient to identify major acquisitions for these fiscal years."
+    },
+    {
+      "id": "financebench_id_00222",
+      "correct": false,
+      "reason": "Liquidity conclusion agrees, but required quick ratio is 1.57 and prediction calculates 1.76.",
+      "question": "Does AMD have a reasonably healthy liquidity profile based on its quick ratio for FY22? If the quick ratio is not relevant to measure liquidity, please state that and explain why.",
+      "gold": "Yes. The quick ratio is 1.57, calculated as (cash and cash equivalents+Short term investments+Accounts receivable, net+receivables from related parties)/ (current liabilities).",
+      "prediction": "To determine if AMD has a reasonably healthy liquidity profile based on its quick ratio for FY22, we need to calculate the quick ratio using the provided data. The quick ratio is calculated as:\n\n\\[ \\text{Quick Ratio} = \\frac{\\text{Current Assets} - \\text{Inventory}}{\\text{Current Liabilities}} \\]\n\nFrom the evidence:\n- Current Assets (2022) = $15,019 million\n- Inventory (2022) = $3,771 million\n- Current Liabilities (2022) = $6,369 million\n\nSubstituting these values into the formula:\n\n\\[ \\text{Quick Ratio} = \\frac{15,019 - 3,771}{6,369} = \\frac{11,248}{6,369} \\approx 1.76 \\]\n\nA quick ratio of approximately 1.76 indicates that AMD has sufficient liquid assets to cover its short-term liabilities more than once over, suggesting a reasonably healthy liquidity profile."
+    },
+    {
+      "id": "financebench_id_00206",
+      "correct": true,
+      "reason": "Correctly explains gross margin is not a relevant metric for a financial institution like JPM.",
+      "question": "Are JPM's gross margins historically consistent (not fluctuating more than roughly 2% each year)? If gross margins are not a relevant metric for a company like this, then please state that and explain why.",
+      "gold": "Since JPM is a financial institution, gross margin is not a relevant metric.",
+      "prediction": "The evidence provided does not contain specific historical data on JPMorgan Chase's gross margins or any information indicating whether these margins fluctuate by more than 2% each year. Therefore, it is not possible to determine if JPM's gross margins are historically consistent based solely on the given information. Additionally, gross margin may not be the most relevant metric for a diversified financial services firm like JPMorgan Chase, which operates across various business segments including investment banking, consumer and small business banking, commercial banking, and asset management, where profitability metrics can vary significantly between segments."
+    },
+    {
+      "id": "financebench_id_08286",
+      "correct": true,
+      "reason": "$11,588M matches gold.",
+      "question": "By drawing conclusions from the information stated only in the income statement, what is Amazon's FY2019 net income attributable to shareholders (in USD millions)?",
+      "gold": "$11588.00",
+      "prediction": "Amazon's FY2019 net income attributable to shareholders is $11,588 million."
+    },
+    {
+      "id": "financebench_id_00606",
+      "correct": false,
+      "reason": "Gold says wages expense percentage increased; prediction says it cannot determine direction.",
+      "question": "Did Ulta Beauty's wages expense as a percent of net sales increase or decrease in FY2023?",
+      "gold": "Wages expense as a percent of net sales increased in FY2023. The answer here assumes FY2023 refers to the 12 months ended on January 28, 2023 (although the company refers to this period as its fiscal 2022.",
+      "prediction": "The evidence does not provide specific information about Ulta Beauty's wages expense as a percent of net sales for FY2023. It only mentions store payroll and benefits, which saw a deleverage effect in FY2022. Without data for FY2023, it's not possible to determine if wages expense as a percent of net sales increased or decreased."
+    },
+    {
+      "id": "financebench_id_05915",
+      "correct": false,
+      "reason": "Gold is 17.98; prediction is 18.02 for a two-decimal quantitative question.",
+      "question": "What is the FY2018 fixed asset turnover ratio for CVS Health? Fixed asset turnover ratio is defined as: FY2018 revenue / (average PP&E between FY2017 and FY2018). Round your answer to two decimal places. Calculate what was asked by utilizing the line items clearly shown in the P&L statement and the balance sheet.",
+      "gold": "17.98",
+      "prediction": "To calculate the fixed asset turnover ratio for FY2018, we use the formula:\n\n\\[ \\text{Fixed Asset Turnover Ratio} = \\frac{\\text{FY2018 Revenue}}{\\text{Average Property, Plant, and Equipment (PP&E) between FY2017 and FY2018}} \\]\n\nFrom the evidence provided:\n- FY2018 Revenue = $194,579 million\n- Property and equipment, net for FY2018 = $11,349 million\n- Property and equipment, net for FY2017 = $10,292 million\n\nFirst, we calculate the average PP&E between FY2017 and FY2018:\n\n\\[ \\text{Average PP&E} = \\frac{\\text{FY2018 PP&E} + \\text{FY2017 PP&E}}{2} = \\frac{11,349 + 10,292}{2} = \\frac{21,641}{2} = 10,820.5 \\]\n\nNow, we can calculate the fixed asset turnover ratio:\n\n\\[ \\text{Fixed Asset Turnover Ratio} = \\frac{194,579}{10,820.5} \\approx 18.02 \\]\n\nTherefore, the fixed asset turnover ratio for FY2018 is **18.02**."
+    },
+    {
+      "id": "financebench_id_01491",
+      "correct": true,
+      "reason": "$13.2B cash proceeds matches gold.",
+      "question": "What is the amount of the cash proceeds that JnJ realised from the separation of Kenvue (formerly Consumer Health business segment), as of August 30, 2023?",
+      "gold": "JnJ realised $13.2 billion in cash proceeds from the separation of Kenvue.",
+      "prediction": "Johnson & Johnson secured $13.2 billion in cash proceeds from the Kenvue debt offering and initial public offering."
+    },
+    {
+      "id": "financebench_id_06247",
+      "correct": false,
+      "reason": "Gold DPO is 42.69; prediction calculates 45.74.",
+      "question": "What is FY2018 days payable outstanding (DPO) for Walmart? DPO is defined as: 365 * (average accounts payable between FY2017 and FY2018) / (FY2018 COGS + change in inventory between FY2017 and FY2018). Round your answer to two decimal places. Please base your judgments on the information provided primarily in the statement of financial position and the P&L statement.",
+      "gold": "42.69",
+      "prediction": "First, calculate the average accounts payable between FY2017 and FY2018:\n\n\\[\n\\text{Average Accounts Payable} = \\frac{\\text{Accounts Payable}_{2018} + \\text{Accounts Payable}_{2017}}{2} = \\frac{46,092 + 41,433}{2} = 43,762.5 \\text{ million}\n\\]\n\nNext, calculate the change in inventory between FY2017 and FY2018:\n\n\\[\n\\text{Change in Inventory} = \\text{Inventory}_{2018} - \\text{Inventory}_{2017} = 43,783 - 43,046 = 737 \\text{ million}\n\\]\n\nThen, find the sum of FY2018 Cost of Sales (COGS) and the change in inventory:\n\n\\[\n\\text{COGS}_{2018} + \\text{Change in Inventory} = 373,396 + 737 = 374,133 \\text{ million}\n\\]\n\nFinally, calculate the Days Payable Outstanding (DPO):\n\n\\[\n\\text{DPO} = \\frac{365 \\times \\text{Average Accounts Payable}}{\\text{COGS}_{2018} + \\text{Change in Inventory}} = \\frac{365 \\times 43,762.5}{374,133} \\approx 45.74 \\text{ days}\n\\]\n\nTherefore, the FY2018 DPO for Walmart is **45.74** days."
+    }
+  ]
+}
