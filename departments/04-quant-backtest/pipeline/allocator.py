@@ -43,6 +43,18 @@ ALLOCATOR_VERSION = "quant-allocator-v1"
 # 시도 예산. `trial_family.pressure` 가 쓰는 것과 같은 뜻이다 - 이 수를 넘겨
 # 고른 최고치는 실력과 운을 못 가린다.
 DEFAULT_TRIAL_BUDGET = 5
+INTRADAY_LANE = "INTRADAY_EVENT"
+
+
+def can_auto_widen_manifest(research_lane: str | None) -> bool:
+    """Whether this lane has a frozen replacement dataset to widen onto.
+
+    The daily lane can move from (for example) krx-basket-daily/v2 to v3
+    without changing the hypothesis.  The intraday lane reads a growing,
+    point-in-time event hypertable under one governed manifest; substituting a
+    daily snapshot is neither a wider sample nor the same experiment.
+    """
+    return str(research_lane or "").upper() != INTRADAY_LANE
 
 
 @dataclass
@@ -225,8 +237,12 @@ def plan(conn, *, budget: int = DEFAULT_TRIAL_BUDGET,
                 metrics["worst_window_mdd"] = float(w[0])
             # **이 계열이 지금 무슨 데이터셋을 쓰고 있나** - 같은 것으로
             # 넓히자고 하면 낭비다(실측: 그 낭비가 6건이었다)
-            cur.execute("""select m.name||'/'||m.version
+            cur.execute("""select m.name||'/'||m.version,
+                                   coalesce(e.config->>'research_lane',
+                                            h.expected_edge->>'research_lane', '')
                              from quant.experiments e
+                             join quant.hypotheses h
+                               on h.hypothesis_id = e.hypothesis_id
                              join quant.dataset_manifests m
                                on m.dataset_id = e.dataset_id
                             where e.trial_family_id = %s
@@ -234,6 +250,13 @@ def plan(conn, *, budget: int = DEFAULT_TRIAL_BUDGET,
                         (st.family_id,))
             _ds = cur.fetchone()
             current_ds = str(_ds[0]) if _ds and _ds[0] else ""
+            lane = str(_ds[1]) if _ds and len(_ds) > 1 else ""
+            # Daily manifest widening is the allocator's only judgement-free
+            # mutation. Event-time families accrue causal sessions in place;
+            # their next semantic mutation belongs to the research planner,
+            # which receives the durable outcome/lesson ledger.
+            if not can_auto_widen_manifest(lane):
+                continue
             for v in propose(st, metrics, wider_dataset=wider_dataset,
                              current_dataset=current_ds):
                 moves.append(score_move(st, metrics, v, budget=budget,
@@ -444,6 +467,11 @@ def register_variant(conn, move: Move) -> tuple[str, str]:
         (pid, title, rationale, edge, falsify, _req, proposal, leads,
          packets, claims, econ, cp, comp, comp_codes, sign, src,
          parent_fp) = row
+
+        if not can_auto_widen_manifest((edge or {}).get("research_lane")):
+            return "", ("intraday event 계열은 daily manifest 표본확대 대상이 아니다 - "
+                        "같은 live manifest에 causal session이 누적되며, 다음 의미 "
+                        "변형은 결과 원장의 교훈을 읽은 리서치 기획자가 낸다")
 
         # ▶ **이미 기각된 측정은 다시 사지 않는다** (카드 t_1c873601)
         #   변형은 부모의 실질 필드를 그대로 물려받으므로 사전등록 지문이
@@ -701,6 +729,9 @@ def _check_only_deterministic_moves_are_auto_registered():
     spent = Move(family_id="fam_x", kind="표본 확대", dataset="a/v3", score=0.0)
     hid, why = register_variant(_Conn(), spent)
     assert hid == "" and "점수 0" in why, why
+    assert can_auto_widen_manifest("DAILY_CROSS_SECTIONAL")
+    assert can_auto_widen_manifest(None)
+    assert not can_auto_widen_manifest("INTRADAY_EVENT")
     print("  결정론적 수만 자동등록   OK")
 
 
