@@ -36,6 +36,16 @@ MIN_EQUITY_FEE_BPS_PER_SIDE = 10.0
 DATASET = ("krx-intraday-events", "v1")
 KST = ZoneInfo("Asia/Seoul")
 
+
+class StaleIntradayCohortError(ValueError):
+    """A persisted screening cohort predates the executable formula contract.
+
+    This is a non-retryable input-version rejection, not evidence that the
+    economic hypothesis failed. Keeping it distinct from ordinary ValueError
+    lets the queue retire the immutable old hypothesis without spending more
+    full-universe replay attempts.
+    """
+
 _SESSION_DATES_SQL = """
 select distinct (event_time at time zone 'Asia/Seoul')::date as session_date
   from market.market_quotes
@@ -157,7 +167,7 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
         raise ValueError("screening_population must contain at most seven candidates")
     cohort_version = str(edge.get("screening_cohort_version") or "")
     if screening and cohort_version != INTRADAY_SCREENING_COHORT_VERSION:
-        raise ValueError(
+        raise StaleIntradayCohortError(
             "populated intraday screening cohort must use "
             f"{INTRADAY_SCREENING_COHORT_VERSION}; got "
             f"{cohort_version or '(missing)'}. Reassemble it under the current "

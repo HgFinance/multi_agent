@@ -31,7 +31,7 @@ import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-WORKER_VERSION = "quant-experiment-worker-v2"
+WORKER_VERSION = "quant-experiment-worker-v3"
 
 # 가설이 RUNNING 에 갇혀 있다고 보는 시간. lease 만료(30분)보다 짧으면 아직
 # 큐에서 도는 작업을 뺏게 되므로 같은 값을 쓴다.
@@ -98,6 +98,52 @@ def hypothesis_is_terminal(conn, hypothesis_id: str) -> bool:
     반복될 뿐이라 회복 가능하므로, 불확실할 때는 놓아주기 쪽으로 기운다.
     """
     return hypothesis_status(conn, hypothesis_id) in TERMINAL_HYPOTHESIS_STATUSES
+
+
+def stale_intraday_cohort_reason(conn, hypothesis_id: str) -> str:
+    """Return the exact non-retryable cohort-version rejection, if any.
+
+    The check is pure after one metadata read and deliberately runs before the
+    hypothesis-status gate. A legacy job can otherwise remain RUNNING, be
+    released forever, and only reach the runtime version fence after the
+    30-minute stale-hypothesis reclaimer resets it.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "select expected_edge from quant.hypotheses "
+                "where hypothesis_id = %s::uuid", (hypothesis_id,))
+            row = cur.fetchone()
+    except Exception:  # noqa: BLE001 - normal orchestration remains authoritative
+        return ""
+    edge = row[0] if row and isinstance(row[0], dict) else None
+    if not edge or str(edge.get("research_lane") or "").upper() != "INTRADAY_EVENT":
+        return ""
+    try:
+        from intraday_experiment_runner import (  # noqa: PLC0415
+            StaleIntradayCohortError, config_from_edge)
+
+        config_from_edge(edge)
+    except StaleIntradayCohortError as exc:
+        return f"STALE_INTRADAY_COHORT: {exc}"
+    except Exception:  # noqa: BLE001 - other contract failures keep existing semantics
+        return ""
+    return ""
+
+
+def reject_stale_intraday_cohort(conn, hypothesis_id: str, reason: str) -> int:
+    """Terminally reject an immutable old input without claiming a backtest loss."""
+    if not reason.startswith("STALE_INTRADAY_COHORT:"):
+        raise ValueError("stale cohort rejection requires its controlled reason code")
+    with conn.cursor() as cur:
+        cur.execute(
+            """update quant.hypotheses
+                  set status='REJECTED', status_changed_at=now()
+                where hypothesis_id=%s::uuid
+                  and status in ('INTAKE','PROPOSED','PREREGISTERED','RUNNING',
+                                 'TESTING','DATASET_CERTIFIED')""",
+            (hypothesis_id,))
+        return int(cur.rowcount or 0)
 
 
 def gate_for_status(status: str) -> dict:
@@ -216,6 +262,19 @@ def run_one(conn, job: dict) -> dict:
     from job_queue import finish, release
 
     jid, hid = job["job_id"], job["hypothesis_id"]
+
+    # A persisted cohort is immutable. If its version predates the runtime
+    # contract, retries cannot repair it: a fresh proposal must reassemble the
+    # population. Retire it before the RUNNING gate so it cannot bounce between
+    # release and stale reclaim, and classify the job as CANCELLED rather than a
+    # failed alpha experiment (no replay or result exists).
+    stale_reason = stale_intraday_cohort_reason(conn, hid)
+    if stale_reason:
+        from job_queue import cancel  # noqa: PLC0415
+
+        reject_stale_intraday_cohort(conn, hid, stale_reason)
+        cancel(conn, jid, reason=stale_reason)
+        return {"job_id": jid, "result": "CANCELLED", "reason": stale_reason}
 
     # ▶ **전진할 수 없는 가설에 오케스트레이터를 붙이지 않는다** (2026-08-14)
     #   관문이 `orchestrate` 안 맨 끝에 있어서, 못 갈 가설도 데이터 사상·
@@ -1022,6 +1081,70 @@ def _check_gate_asks_the_contract_not_a_copy():
         assert W.gate_for_status(st)["action"] == "RUN", st
 
 
+def _check_stale_cohort_is_retired_without_replay():
+    """An immutable legacy population is cancelled once, not retried as alpha loss."""
+    import types
+
+    import experiment_worker as W
+
+    edge = {
+        "research_lane": "INTRADAY_EVENT", "universe_key": "krx_all",
+        "intraday_signal_expr": {
+            "op": "field", "field": "microprice_offset_bps"},
+        "semantic_plan": {
+            "event": "MICROPRICE_DISLOCATION", "context": ["ALL"],
+            "qualities": ["PERSISTENCE"], "direction": "FOLLOW",
+            "output": "TAKER_NET_PNL", "execution": "TAKER",
+            "horizon_seconds": 5},
+        "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
+        "horizon_seconds": 5, "execution": "TAKER",
+        "screening_population": [{}],
+        "screening_cohort_version": "intraday-screening-cohort-v1",
+    }
+
+    class _Conn:
+        def __init__(self):
+            self.sql = []
+
+        def cursor(self):
+            outer = self
+
+            class _Cur:
+                rowcount = 1
+
+                def __enter__(self_):
+                    return self_
+
+                def __exit__(self_, *args):
+                    return False
+
+                def execute(self_, sql, params=None):
+                    outer.sql.append(" ".join(sql.split()))
+
+                def fetchone(self_):
+                    return (edge,)
+
+            return _Cur()
+
+    calls = []
+    queue = types.ModuleType("job_queue")
+    queue.finish = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("stale cohort must not be recorded as FAILED"))
+    queue.release = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("stale cohort must not return to the queue"))
+    queue.cancel = lambda conn, jid, *, reason: calls.append((jid, reason))
+    sys.modules["job_queue"] = queue
+    try:
+        conn = _Conn()
+        result = W.run_one(conn, {"job_id": "j-old", "hypothesis_id": "h-old"})
+        assert result["result"] == "CANCELLED", result
+        assert calls and calls[0][0] == "j-old", calls
+        assert calls[0][1].startswith("STALE_INTRADAY_COHORT:"), calls
+        assert any("set status='REJECTED'" in sql for sql in conn.sql), conn.sql
+    finally:
+        sys.modules.pop("job_queue", None)
+
+
 def _check_infra_fault_is_not_an_experiment_failure():
     """**실행면 밖에서 난 고장을 실험 실패로 적지 않는다** (2026-08-14 실측).
 
@@ -1609,10 +1732,12 @@ if __name__ == "__main__":
     print("  관문은 계약에 묻는다      OK")
     _check_gate_runs_before_the_orchestrator()
     print("  관문이 오케스트레이터 앞  OK")
+    _check_stale_cohort_is_retired_without_replay()
+    print("  구형 cohort 일회 종결     OK")
     _check_infra_fault_is_not_an_experiment_failure()
     print("  인프라 고장 != 실험 실패  OK")
     _check_transient_classifier_reads_codes_not_prose()
     print("  분류는 코드로 본다        OK")
     _check_broken_transaction_is_rolled_back_before_deferring()
     print("  유예 전에 트랜잭션 물림   OK")
-    print("실험 워커 21개 영역 통과. 상주 실행은 --serve")
+    print("실험 워커 22개 영역 통과. 상주 실행은 --serve")

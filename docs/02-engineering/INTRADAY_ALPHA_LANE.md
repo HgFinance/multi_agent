@@ -167,6 +167,11 @@ purged walk-forward joint model이 함께 포함된다.
   버전이 낡았거나 없으면 원시 데이터를 읽기 전에 fail closed하고 현재 v4 수식·구조적
   ablation 계약으로 다시 조립하게 한다. sidecar가 전혀 없는 primary-only 진단은 이
   전환 경계와 무관하므로 허용한다.
+- 이 버전 거부는 시장에서 가설이 실패했다는 증거가 아니다. Worker v3는 구형 populated
+  cohort를 원시 replay 전에 `STALE_INTRADAY_COHORT`로 식별하고, 불변인 옛 가설은
+  `REJECTED`, 주문은 `CANCELLED`로 한 번만 닫는다. `FAILED` 재시도 예산·DSR/PBO trial에
+  섞거나 `RUNNING` 회수와 재대기를 반복하지 않는다. 새 v2 population은 새 Proposal이
+  현재 리드에서 다시 조립해야 한다.
 - 겹치는 5초 표본을 독립 관측치로 세지 않는다. KRX 세션별 PnL로 축약한 뒤 session
   bootstrap, DSR, walk-forward fold, family PBO를 적용한다. PBO는 현재 실험을 공통
   원장에 기록한 뒤 계산하며, 4개 이상의 비교 가능한 family variant가 없으면
@@ -199,6 +204,12 @@ purged walk-forward joint model이 함께 포함된다.
   Planner 모두에게 준다. 빈 semantic cell, 실패 shape, positive/negative-associated
   component를 보여 주되 인과 기여라고 주장하지 않는다. 다음 후보는 빈 cell 탐색,
   단일 메커니즘 편집, 서로 다른 조각 재결합 중 하나를 명시해야 한다.
+- 서로 다른 독립 primary AST 두 개 이상에서 반복되고, 비용 후 양(+) 결과가 한 번도 없는
+  3-node 이상 부분구조는 `frequent losing subtree`로 기억한다. 같은 exact 식의 재시도와
+  `SCREENING_ONLY` 결과는 지지 건수를 부풀릴 수 없다. 이 기억은 Alpha Jungle식 탐색
+  정체 회피를 위한 작은 QD 패널티(부분구조당 0.04, 최대 0.12)일 뿐 접수 거부가 아니다.
+  새 경제 메커니즘이 같은 구조를 필요로 하면 실패모드가 왜 제거됐는지 명시하고 독립
+  primary 실험으로 뒤집을 수 있다.
 - Hermes/LLM은 숫자를 OOS 결과에 맞추는 optimizer가 아니라 금융수학적 equation
   skeleton과 경제적 prior의 제안자다. 모든 신규 `INTRADAY_EVENT/AST_READY` 리드는
   `FORMULA_THESIS`에 목표(`MIDPRICE_MARKOUT`/`TAKER_NET_PNL`/`PASSIVE_FILL_ADJUSTED_PNL`), 함수형태,
