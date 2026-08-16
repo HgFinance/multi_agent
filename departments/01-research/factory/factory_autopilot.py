@@ -228,7 +228,11 @@ select l.lead_id, l.scout_lens, l.claimed_edge, l.stated_mechanism,
    and l.ast_contract->>'ast_readiness' = 'AST_READY'
    and l.ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
    and coalesce((l.ast_contract->>'alpha_candidate_eligible')::boolean, false)
-order by used asc, l.created_at desc
+order by used asc,
+         case when coalesce(l.ast_contract->>'research_lane',
+                            'DAILY_CROSS_SECTIONAL') = 'INTRADAY_EVENT'
+              then 0 else 1 end,
+         l.created_at desc
 limit %s
 """
 
@@ -2795,6 +2799,10 @@ def cycle(*, dry_run: bool = False) -> int:
                   "최대 3건**을 블록 3개로 **한 번의** factory_submit_proposal "
                   "에 담아 제출하라 - 접수는 다중 블록을 읽는다. 같은 계열의 "
                   "파라미터 변형 여러 개는 금지다(시도 예산 낭비).\n"
+                  "- 미사용 `INTRADAY_EVENT` 리드가 목록에 하나라도 있으면 이번 "
+                  "호출의 첫 기획안은 반드시 그 리드를 사용한다. 익숙한 일봉 리드로 "
+                  "대체하지 마라. 계약상 기획할 수 없다면 다른 레인만 발행하지 말고 "
+                  "그 인트라데이 리드의 정확한 차단 사유를 남겨라.\n"
                   "- 예산이 소진된 계열은 제안하지 마라.\n"
                   "- 쓸 수 있는 리드 목록에 없는 id 를 대지 마라 - 원장에서 다시 "
                   "읽어 대조하므로 막힌다.\n"
@@ -2808,7 +2816,9 @@ def cycle(*, dry_run: bool = False) -> int:
                   "아니라 도구 호출에 실어라 - 카드 텍스트는 납품으로 세지 "
                   "않는다."),
             assignee=RESEARCH_ASSIGNEE,
-            key=f"factory-planner-{pstamp}", dry_run=dry_run, priority=1)
+            # v2 allows the first lane-priority planner to run in a half-hour
+            # where a legacy planner card already completed before deployment.
+            key=f"factory-planner-v2-{pstamp}", dry_run=dry_run, priority=1)
 
         # 회의론자 카드는 **여기서 만들지 않는다**. 기획자 산출이 아직 없는데
         # 걸면 검토할 대상이 없는 채로 돌아 빈 산출을 내거나, 없는 기획안을
@@ -3723,6 +3733,8 @@ def _check_unused_leads_come_first():
     아래에 묻혀 있었다.
     """
     assert "used asc" in _SQL_LEADS, "안 쓴 리드를 앞에 안 놓는다"
+    assert "INTRADAY_EVENT" in _SQL_LEADS and "case when" in _SQL_LEADS, \
+        "event-time 리드를 일봉보다 먼저 소비하지 않는다"
     assert "ast_readiness" in _SQL_LEADS, "AST-ready 리드를 우선하지 않는다"
     assert "primary_data_plane' = 'MICROSTRUCTURE" in _SQL_LEADS, \
         "일봉형 과거 리드를 새 기획에 다시 노출한다"
@@ -3887,8 +3899,10 @@ def _check_design_gaps_and_scout_card():
         "재료가 말라도 스카우트 전용 카드가 안 나간다"
     # 공급 병목 파훼 두 짝 (2026-08-13): 기획 카드 30분 버킷 + 다중 블록 제출.
     # 실행 6분 vs 공급 1건/시간 실측 - 버킷이 시간으로 돌아가면 재발이다.
-    assert "factory-planner-{pstamp}" in cyc, "기획 카드가 시간 버킷으로 돌아갔다"
+    assert "factory-planner-v2-{pstamp}" in cyc, "기획 카드가 시간 버킷으로 돌아갔다"
     assert "서로 다른 계열" in cyc and "블록 3개" in cyc, "다중 블록 제출 지시가 빠졌다"
+    assert "첫 기획안은 반드시" in cyc and "INTRADAY_EVENT" in cyc, \
+        "event-time 리드가 있어도 기획자가 일봉만 고를 수 있다"
     print("  설계 공백·스카우트 소집   OK")
 
 
