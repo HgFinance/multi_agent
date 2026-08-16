@@ -78,13 +78,16 @@ OPTIONAL = ("COUNTERPARTY", "TESTABLE_WITH", "REPORTED_EFFECT", "EXCERPT",
             "CANDIDATE_SIGNAL_EXPR", "MISSING_DATA", "MAPPING_LOSS",
             "RESEARCH_LANE", "SEMANTIC_PLAN",
             "DERIVATION_MODE", "SOURCE_BASELINE_EXPR",
-            "DERIVATION_TRANSFORMS", "NOVELTY_RATIONALE")
+            "DERIVATION_TRANSFORMS", "NOVELTY_RATIONALE",
+            "PARENT_SIGNAL_EXPR", "EVOLUTION_OPERATORS",
+            "EXPECTED_INCREMENT", "ABLATIONS")
 _FIELD_RE = re.compile(
     r"^(TITLE|URL|MECHANISM|READINESS|COUNTERPARTY|TESTABLE_WITH|REPORTED_EFFECT|"
     r"EXCERPT|MARKET_CONTEXT|FAILURE_MODE|OBSERVABLES|CANDIDATE_SIGNAL_EXPR|"
     r"MISSING_DATA|MAPPING_LOSS|RESEARCH_LANE|SEMANTIC_PLAN|"
     r"DERIVATION_MODE|SOURCE_BASELINE_EXPR|"
-    r"DERIVATION_TRANSFORMS|NOVELTY_RATIONALE)\s*:\s*(.*)$")
+    r"DERIVATION_TRANSFORMS|NOVELTY_RATIONALE|PARENT_SIGNAL_EXPR|"
+    r"EVOLUTION_OPERATORS|EXPECTED_INCREMENT|ABLATIONS)\s*:\s*(.*)$")
 
 AST_READY = "AST_READY"
 DATA_BLOCKED = "DATA_BLOCKED"
@@ -108,6 +111,12 @@ def _literature_derivation():
     """Load the deterministic public-baseline novelty policy."""
     import literature_derivation  # noqa: PLC0415
     return literature_derivation
+
+
+def _alpha_evolution():
+    """Load the deterministic parent/child novelty policy."""
+    import alpha_evolution  # noqa: PLC0415
+    return alpha_evolution
 
 
 def _as_text(value) -> str:
@@ -202,6 +211,33 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
             novelty_rationale=block.get("NOVELTY_RATIONALE") or "",
             ast_module=ast,
         )
+        raw_parent = block.get("PARENT_SIGNAL_EXPR")
+        if raw_parent not in (None, "") and not isinstance(raw_parent, dict):
+            try:
+                raw_parent = json.loads(_as_text(raw_parent))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid PARENT_SIGNAL_EXPR: {exc}") from exc
+        raw_evolution_ops = block.get("EVOLUTION_OPERATORS") or ()
+        if (isinstance(raw_evolution_ops, str)
+                and raw_evolution_ops.strip().startswith("[")):
+            try:
+                raw_evolution_ops = json.loads(raw_evolution_ops)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid EVOLUTION_OPERATORS: {exc}") from exc
+        raw_ablations = block.get("ABLATIONS") or ()
+        if isinstance(raw_ablations, str) and raw_ablations.strip().startswith("["):
+            try:
+                raw_ablations = json.loads(raw_ablations)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid ABLATIONS: {exc}") from exc
+        evolution = _alpha_evolution().assess_lineage(
+            candidate=candidate,
+            parent=raw_parent,
+            operators=raw_evolution_ops,
+            expected_increment=block.get("EXPECTED_INCREMENT") or "",
+            ablations=raw_ablations,
+            grammar=ast,
+        )
     else:
         ast_fingerprint = ""
         ast_shape_fingerprint = ""
@@ -217,6 +253,17 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
             "alpha_candidate_eligible": False,
             "novelty_classification": "NON_EXECUTABLE_LEAD",
         }
+        evolution = {
+            "evolution_policy_version": "",
+            "evolution_role": "NON_EXECUTABLE",
+            "parent_signal_expr": None,
+            "parent_ast_fingerprint": "",
+            "parent_ast_shape_fingerprint": "",
+            "child_vs_parent_similarity": None,
+            "evolution_operators": [],
+            "expected_increment": "",
+            "ablations": [],
+        }
     if readiness == DATA_BLOCKED and not missing_data:
         raise ValueError("DATA_BLOCKED requires MISSING_DATA")
     elif readiness == SEMANTIC_MISMATCH and not mapping_loss:
@@ -231,7 +278,7 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
             "primary_data_plane": ("MICROSTRUCTURE" if readiness == AST_READY
                                    else "UNRESOLVED"),
             "daily_data_role": "EXECUTION_BENCHMARK_REGIME_AUXILIARY",
-            **derivation}
+            **derivation, **evolution}
 
 # 링크 판정. 접속 거부는 부재의 증거가 아니다.
 LINK_OK = "OK"

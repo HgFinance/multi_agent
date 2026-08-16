@@ -272,7 +272,18 @@ def _ast_scout_contract() -> str:
         "    claimed executable return target.",
         "  Allowed transforms: STATE_CONDITION, CLOCK_CHANGE, BOOK_DEPTH_CHANGE,",
         "  MECHANISM_INTERACTION, RESIDUALIZE_PUBLIC_SIGNAL, FAILURE_MODE_INVERSION,",
-        "  MARKET_STRUCTURE_TRANSFER, TARGET_CHANGE.",
+        "  MARKET_STRUCTURE_TRANSFER, TARGET_CHANGE, CROSS_SCALE_DISAGREEMENT,",
+        "  L1_L10_DIVERGENCE, EXECUTION_AWARE.",
+        "  EVOLUTIONARY SEARCH CONTRACT: do not return one favorite formula. Produce a",
+        "  population of economically different ASTs, then let the deterministic archive",
+        "  retain one elite per Event/Context/Direction/Execution/Horizon niche. A child",
+        "  of a tested or queued formula must include PARENT_SIGNAL_EXPR, controlled",
+        "  EVOLUTION_OPERATORS, a falsifiable EXPECTED_INCREMENT, and ABLATIONS separated",
+        "  by | (or a JSON list). Allowed evolution operators are STATE_CONDITION,",
+        "  FAILURE_MODE_INVERSION, RESIDUALIZE_PUBLIC_SIGNAL, CROSS_SCALE_DISAGREEMENT,",
+        "  MECHANISM_INTERACTION, CLOCK_CHANGE, L1_L10_DIVERGENCE, EXECUTION_AWARE,",
+        "  TARGET_CHANGE, MARKET_STRUCTURE_TRANSFER. Exact and parameter-only children",
+        "  are rejected. An unrelated new mechanism is a seed and omits all parent fields.",
         "  SOURCE_BASELINE_EXPR is the closest faithful expression of the public method on",
         "  this grammar. Do not call a changed window, threshold, or title a new mechanism.",
         f"  Supported fields ({len(FIELDS)}): {', '.join(sorted(FIELDS))}",
@@ -918,7 +929,17 @@ def _ast_experience_block(conn) -> str:
                                 false) as alpha_candidate_eligible,
                        l.ast_contract->>'derivation_mode' as derivation_mode,
                        coalesce(l.ast_contract->'derivation_transforms', '[]'::jsonb),
-                       l.ast_contract->'source_baseline_expr'
+                       l.ast_contract->'source_baseline_expr',
+                       coalesce(l.ast_contract->>'research_lane',
+                                'DAILY_CROSS_SECTIONAL'),
+                       coalesce(l.ast_contract->'semantic_plan', '{}'::jsonb),
+                       l.ast_contract->>'candidate_vs_source_similarity',
+                       coalesce(l.ast_contract->>'evolution_role', 'SEED'),
+                       coalesce(l.ast_contract->'evolution_operators', '[]'::jsonb),
+                       coalesce(l.ast_contract->>'expected_increment', ''),
+                       coalesce(l.ast_contract->'ablations', '[]'::jsonb),
+                       l.ast_contract->'parent_signal_expr',
+                       coalesce(l.ast_contract->>'parent_ast_fingerprint', '')
                   from research.methodology_leads l
                  where l.status = 'COMPLETE'
                    and l.ast_contract->>'ast_readiness' = 'AST_READY'
@@ -929,7 +950,15 @@ def _ast_experience_block(conn) -> str:
                       "alpha_candidate_eligible": bool(row[4]),
                       "derivation_mode": row[5],
                       "derivation_transforms": row[6] or [],
-                      "source_baseline_expr": row[7]}
+                      "source_baseline_expr": row[7],
+                      "research_lane": row[8], "semantic_plan": row[9] or {},
+                      "candidate_vs_source_similarity": row[10],
+                      "evolution_role": row[11],
+                      "evolution_operators": row[12] or [],
+                      "expected_increment": row[13],
+                      "ablations": row[14] or [],
+                      "parent_signal_expr": row[15],
+                      "parent_ast_fingerprint": row[16]}
                      for row in cur.fetchall()]
             cur.execute("""
                 select e.config->'intraday_signal_expr',
@@ -969,8 +998,14 @@ def _ast_experience_block(conn) -> str:
                 lines.append(f"      반대가설: {str(explanation)[:180]}")
                 lines.append(f"      반증검정: {str(falsification)[:140]}")
             review_memory = "\n".join(lines)
-        return (AX.render(AX.build(experiments, leads)) +
-                IX.render(IX.build(intraday)) + review_memory)
+        daily_leads = [row for row in leads
+                       if row["research_lane"] != "INTRADAY_EVENT"]
+        intraday_leads = [{**row,
+                           "intraday_signal_expr": row["signal_expr"]}
+                          for row in leads
+                          if row["research_lane"] == "INTRADAY_EVENT"]
+        return (AX.render(AX.build(experiments, daily_leads)) +
+                IX.render(IX.build(intraday, intraday_leads)) + review_memory)
     except Exception:  # noqa: BLE001 - memory unavailable must not invent facts
         return ""
 
