@@ -134,11 +134,17 @@ class SourceCoverage:
     rows: int
     first_day: str | None
     last_day: str | None
-    history_days: int      # 관측된 서로 다른 날짜 수. 달력 폭이 아니다.
+    # EXACT이면 관측된 서로 다른 날짜 수, CHUNK_RANGE이면 달력 범위다.
+    # 후자는 최소 이력 판정에 사용하지 않고 bounded runner가 정확히 센다.
+    history_days: int
     symbols: int
+    measurement: str = "EXACT"
+    chunks: int = 0
 
     @property
     def empty(self) -> bool:
+        if self.measurement == "CHUNK_RANGE":
+            return self.chunks <= 0
         return self.rows <= 0
 
 
@@ -224,6 +230,29 @@ def measure_source(market_conn, table: str, interval: str | None,
     conn = market_conn if db == DB_MARKET else meta_conn
     if conn is None:
         return None      # 못 잰 것이다. 0 으로 채우지 않는다.
+
+    # Raw quote/trade hypertables are tens to hundreds of GB. A global
+    # count/distinct coverage probe fans out over every compressed chunk before
+    # the actual bounded experiment even starts. At this eligibility boundary
+    # we only need to know whether a time range exists. Exact sessions,
+    # instruments, rows and lineage are measured by intraday_experiment_runner
+    # inside its preregistered slice.
+    if db == DB_MARKET and tbl in {"market_ticks", "market_quotes"}:
+        cur = conn.cursor()
+        cur.execute("""
+            select min(range_start)::date, max(range_end)::date, count(*)
+              from timescaledb_information.chunks
+             where hypertable_schema = %s and hypertable_name = %s
+        """, (schema, tbl))
+        first, last, chunks = cur.fetchone()
+        calendar_days = ((last - first).days + 1) if first and last else 0
+        return SourceCoverage(
+            table=table, interval=interval, rows=0,
+            first_day=str(first) if first else None,
+            last_day=str(last) if last else None,
+            history_days=calendar_days, symbols=0,
+            measurement="CHUNK_RANGE", chunks=int(chunks or 0),
+        )
 
     # 식별자는 우리 화이트리스트에서만 오고, 값(interval)만 파라미터로 넘긴다.
     where, params = "", []
@@ -351,7 +380,11 @@ def resolve(requirement, *, meta_conn, market_conn) -> Resolution:
             coverage[tbl] = cov
             if cov.empty:
                 empty.append(tbl)
-            elif min_days and cov.history_days < min_days:
+            # 청크 카탈로그의 달력 폭을 거래 세션 수처럼 사용하면 fail-open이다.
+            # 원시 호가·체결의 정확한 세션 수는 intraday runner가 사전등록된
+            # bounded slice에서 세며, 그 결과가 UNDERPOWERED 판정을 담당한다.
+            elif (min_days and cov.measurement != "CHUNK_RANGE"
+                  and cov.history_days < min_days):
                 short.append(f"{tbl}({cov.history_days}일<{min_days}일)")
 
     if unmapped:
@@ -368,8 +401,14 @@ def resolve(requirement, *, meta_conn, market_conn) -> Resolution:
     # 줄 알면 결론의 강도를 잘못 읽는다.
     notes.extend(substituted)
     for tbl, cov in sorted(coverage.items()):
-        notes.append(f"{tbl}: {cov.rows:,}행 {cov.first_day}~{cov.last_day} "
-                     f"{cov.history_days}일 {cov.symbols}종목")
+        if cov.measurement == "CHUNK_RANGE":
+            notes.append(
+                f"{tbl}: LIVE CHUNK_RANGE {cov.first_day}~{cov.last_day} "
+                f"({cov.chunks} chunks); 정확한 세션·종목·행 수는 실험별 "
+                "bounded slice에서 계측")
+        else:
+            notes.append(f"{tbl}: {cov.rows:,}행 {cov.first_day}~{cov.last_day} "
+                         f"{cov.history_days}일 {cov.symbols}종목")
     return Resolution(RESOLVED, datasets=tuple(sorted(k for k, _ in chosen)),
                       coverage=coverage, notes=tuple(notes))
 
@@ -385,6 +424,30 @@ class _Cur:
 class _Conn:
     def __init__(self, rows): self._rows = rows
     def cursor(self): return _Cur(self._rows)
+
+
+class _SqlAwareCur:
+    def __init__(self, conn):
+        self._conn = conn
+        self._rows = []
+
+    def execute(self, sql, params=None):
+        self._conn.executed.append((sql, params))
+        self._rows = self._conn.responses["chunks" if
+            "timescaledb_information.chunks" in sql else "default"]
+
+    def fetchall(self): return self._rows
+    def fetchone(self): return self._rows[0]
+
+
+class _SqlAwareConn:
+    """자체 점검용: 청크 probe가 전역 count로 퇴행하는 것을 잡는다."""
+
+    def __init__(self, *, default, chunks):
+        self.responses = {"default": default, "chunks": chunks}
+        self.executed = []
+
+    def cursor(self): return _SqlAwareCur(self)
 
 
 def _selfcheck() -> int:
@@ -457,11 +520,29 @@ def _selfcheck() -> int:
                  "min_history_days": 30}, meta_conn=meta2, market_conn=FULL)
     check("여러 매니페스트 조합", r.ok and set(r.datasets) == {
         "krx-basket-daily/v2", "krx-microstructure-daily/v1"})
-    # 하나라도 못 덮으면 **그것만** 미사상으로 보고한다 - 요구 전체를 몰지 않는다
+    # 원시 요구를 검증된 유도본이 덮으면 대체 사실을 명시하고 실행 가능하다.
     r = resolve({"tables": ["market_bars", "market_quotes"]},
                 meta_conn=_Conn(META2), market_conn=FULL)
-    check("일부만 미사상", r.verdict == UNMAPPED_SOURCE
-          and r.unmapped == ("market_quotes",))
+    check("원시 요구 유도본 대체", r.ok
+          and set(r.datasets) == {
+              "krx-basket-daily/v2", "krx-microstructure-daily/v1"}
+          and any("market_quotes -> microstructure_features" in n
+                  for n in r.notes))
+
+    # 원시 하이퍼테이블의 eligibility probe는 청크 카탈로그만 읽는다. 정확한
+    # count/distinct는 수백 GB를 훑으므로 반드시 bounded runner 뒤로 미룬다.
+    from datetime import date
+    raw = _SqlAwareConn(
+        default=[(999, date(2026, 1, 1), date(2026, 8, 1), 150, 350)],
+        chunks=[(date(2026, 6, 25), date(2026, 8, 16), 43)],
+    )
+    cov = measure_source(raw, "market_ticks", None)
+    raw_sql = "\n".join(sql for sql, _ in raw.executed).lower()
+    check("원시 청크 bounded probe", cov is not None
+          and cov.measurement == "CHUNK_RANGE" and cov.chunks == 43
+          and cov.history_days == 53 and not cov.empty
+          and "timescaledb_information.chunks" in raw_sql
+          and "count(distinct" not in raw_sql)
 
     for f in fails:
         print(f"  FAIL {f}")
