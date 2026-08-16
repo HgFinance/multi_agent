@@ -170,6 +170,13 @@ class SourceRef(_Base):
     excerpt: str                      # 원문 발췌
     author: str | None = None
     published_at: str | None = None   # 소스가 밝힌 발행일 (형식이 제각각이라 문자열)
+    # Scout v5 preserves the source's own date labels separately from the
+    # system-owned PIT timestamps above. These optional fields are part of
+    # persisted refs JSON, so Planner's strict handoff contract must accept
+    # them when it reloads a lead. ``accessed_at`` and ``as_known_at`` remain
+    # the authoritative ingestion timestamps.
+    source_published: str | None = None
+    declared_accessed: str | None = None
 
     @field_validator("url", "title", "excerpt")
     @classmethod
