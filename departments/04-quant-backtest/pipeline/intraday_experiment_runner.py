@@ -12,14 +12,14 @@ import hashlib
 import json
 from zoneinfo import ZoneInfo
 
-from intraday_alpha_ast import parse as parse_expr
+from intraday_alpha_ast import parse as parse_expr, unit_of
 from intraday_candidate import CandidateAccumulator, EVALUATOR_VERSION
 from intraday_microstructure import (IntradayLaneSpec, build_samples,
                                       load_instrument_events_batch, manifest,
                                       source_quality_batch)
 
 
-RUNNER_VERSION = "intraday-experiment-runner-v3"
+RUNNER_VERSION = "intraday-experiment-runner-v4"
 COST_MODEL_VERSION = "krx-intraday-execution-v1"
 # 2026 listed equities incur 20bp on the sale (KOSPI 5bp STT + 15bp rural,
 # KOSDAQ 20bp STT).  A representative online commission is 1.5bp each side.
@@ -115,6 +115,19 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
     if str(edge.get("universe_key") or "krx_all").lower() != "krx_all":
         raise ValueError("intraday runner currently requires universe_key=krx_all")
     expression = parse_expr(edge.get("intraday_signal_expr"))
+    output = str((edge.get("semantic_plan") or {}).get("output") or "").upper()
+    entry_policy = str(edge.get("entry_policy") or "").upper()
+    if output in {"TAKER_NET_PNL", "PASSIVE_NET_PNL"}:
+        if unit_of(expression) != "BPS":
+            raise ValueError(
+                "net-PnL intraday formulas must predict markout in BPS before "
+                "the execution-cost hurdle is applied")
+        if entry_policy != "PREDICTED_MARKOUT_CLEARS_COST":
+            raise ValueError(
+                "net-PnL intraday formulas require "
+                "entry_policy=PREDICTED_MARKOUT_CLEARS_COST")
+    elif not entry_policy:
+        entry_policy = "POSITIVE_SCORE"
     horizon = _bounded_int(edge, "horizon_seconds", 5, 1, 3600)
     execution = str(edge.get("execution") or "TAKER").upper()
     if execution not in {"TAKER", "PASSIVE_FIFO_LOWER_BOUND"}:
@@ -146,6 +159,9 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
         "execution": execution,
         "position_mode": position_mode,
         "threshold": _bounded_float(edge, "threshold", 0.0, 0.0, 1_000_000.0),
+        "entry_policy": entry_policy,
+        "minimum_predicted_edge_bps": _bounded_float(
+            edge, "minimum_predicted_edge_bps", 0.0, 0.0, 10_000.0),
         "evaluation_days": _bounded_int(edge, "evaluation_days", 60, 10, 250),
         # A shard is only a bounded execution unit. The scientific universe is
         # every causally observed calibration instrument, never a top-N sample.
@@ -514,6 +530,8 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
         expr=config["intraday_signal_expr"], spec=spec,
         horizon_seconds=config["horizon_seconds"], execution=config["execution"],
         position_mode=config["position_mode"], threshold=config["threshold"],
+        entry_policy=config["entry_policy"],
+        minimum_predicted_edge_bps=config["minimum_predicted_edge_bps"],
         trials=int(hyp.get("_trials") or 1), family_pbo=None,
         semantic_plan=config["semantic_plan"])
     shard_size = config["instrument_shard_size"]

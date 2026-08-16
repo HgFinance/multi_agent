@@ -118,6 +118,12 @@ def check_leads(proposal: ExperimentProposalV1,
                 f"리드 {lid} 는 공개 방법론 대조군이다(derivation_mode={mode}) - "
                 "직접 복제나 창 조정은 알파 후보로 발행하지 않고, 메커니즘을 "
                 "변형한 별도 AST 리드가 필요하다")
+        if (proposal.research_lane == ResearchLane.INTRADAY_EVENT
+                and (lead.ast_contract or {}).get("formula_discovery_version")
+                != "formula-discovery-v2"):
+            out.append(
+                f"lead {lid} lacks the cost-aware formula-discovery-v2 contract; "
+                "resubmit a BPS markout equation with an executable cost hurdle")
         if not lead.refs:
             out.append(f"리드 {lid} 에 출처가 없다")
     return out
@@ -130,7 +136,7 @@ def check_microstructure_primary(proposal: ExperimentProposalV1) -> list[str]:
         # Intraday proposals intentionally use a different, seconds-based grammar.
         # Treating it as the daily ``signal_expr`` silently rejects the very raw-event
         # lane this gate is meant to protect.
-        from contracts.intraday_ast_contract import fields_of, parse
+        from contracts.intraday_ast_contract import fields_of, parse, unit_of
 
         raw = (proposal.suggested_params or {}).get("intraday_signal_expr")
         if not isinstance(raw, dict):
@@ -139,11 +145,25 @@ def check_microstructure_primary(proposal: ExperimentProposalV1) -> list[str]:
                 "INTRADAY_EVENT proposal must preregister a seconds-based AST"
             ]
         try:
-            fields = fields_of(parse(raw))
+            parsed = parse(raw)
+            fields = fields_of(parsed)
         except (TypeError, ValueError) as exc:
             return [f"intraday_signal_expr is not an executable AST: {exc}"]
         if not fields:
             out.append("intraday_signal_expr has no raw quote/trade field")
+        output = str((proposal.semantic_plan or {}).get("output") or "").upper()
+        if output in {"TAKER_NET_PNL", "PASSIVE_NET_PNL"}:
+            if unit_of(parsed) != "BPS":
+                out.append(
+                    "net-PnL intraday AST must predict markout in BPS; a "
+                    "dimensionless pressure score is not an executable PnL equation")
+            if str((proposal.suggested_params or {}).get(
+                    "entry_policy") or "").upper() != \
+                    "PREDICTED_MARKOUT_CLEARS_COST":
+                out.append(
+                    "net-PnL intraday proposal requires entry_policy="
+                    "PREDICTED_MARKOUT_CLEARS_COST so predicted edge must clear "
+                    "the live spread and round-trip charges")
         # ExperimentProposalV1 already requires both raw quote and trade tables.
         # microstructure_features is deliberately optional: derived features are
         # computed causally inside each bounded experiment slice.
@@ -387,11 +407,18 @@ def _check_intraday_ast_uses_intraday_contract():
         data_requirements=DataRequirement(
             tables=("market_quotes", "market_ticks"), min_history_days=10),
         suggested_params={"intraday_signal_expr": {
-            "op": "rolling_mean",
-            "arg": {"op": "field", "field": "queue_imbalance_l1"},
-            "seconds": 5,
-        }},
+            "op": "mul", "args": [
+                {"op": "rolling_mean",
+                 "arg": {"op": "field", "field": "queue_imbalance_l1"},
+                 "seconds": 5},
+                {"op": "field", "field": "realized_volatility_bps"}],
+        }, "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST"},
     )
+    leads = {lid: lead.model_copy(update={"ast_contract": {
+        **lead.ast_contract,
+        "formula_discovery_version": "formula-discovery-v2",
+        "formula_contract_complete": True,
+    }}) for lid, lead in leads.items()}
     r = evaluate(p, leads=leads)
     assert r.ok, r.as_dict()
 
