@@ -352,7 +352,7 @@ def _wrap_send(cls: type[Any]) -> None:
         store = _store(self)
         inbound_key = store.inbound_key_for_message(anchor, _profile_name())
         dedup_key = inbound_key or canonical_discord_dedup_key("unknown", chat_id, anchor)
-        response_key = f"{dedup_key}:gateway"
+        response_key = f"{dedup_key}:final"
         context = store.inbound_context(inbound_key, _profile_name()) if inbound_key else {
             "guild_id": "unknown",
             "channel_id": str(chat_id),

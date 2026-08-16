@@ -1,0 +1,28 @@
+{
+  "benchmark": "HgFinance External-50 derived regression set",
+  "evaluation_version": "external50-v1 + scorer-v3-final + financebench-manual-v1",
+  "model": "qwen2.5-14b-instruct-awq",
+  "n": 50,
+  "correct": 37,
+  "accuracy": 0.74,
+  "sources": {
+    "FinQA": {
+      "n": 20,
+      "correct": 14,
+      "accuracy": 0.7
+    },
+    "TAT-QA": {
+      "n": 15,
+      "correct": 15,
+      "accuracy": 1.0
+    },
+    "FinanceBench": {
+      "n": 15,
+      "correct": 8,
+      "accuracy": 0.5333,
+      "scoring": "manual semantic adjudication"
+    }
+  },
+  "auto_mean_finqa_tatqa": 0.827,
+  "note": "Derived fixed regression subset; not an official leaderboard score."
+}

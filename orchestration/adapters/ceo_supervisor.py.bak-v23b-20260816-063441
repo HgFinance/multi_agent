@@ -1481,60 +1481,33 @@ class CeoSupervisorService:
                     decision.action == SupervisorAction.RUN_QA
                     and state.workflow_mode == "analysis"
                 ):
-                    # FAST path with race protection.
-                    #
-                    # Synthesis depends only on the already-terminal primary
-                    # results, not QA. We still need to observe a synthesis that
-                    # may have been created concurrently while RUN_QA was being
-                    # created, but rebuilding the complete workflow is expensive
-                    # because it launches multiple Hermes CLI subprocesses.
-                    #
-                    # Prefer one board-list read and inspect only durable workflow
-                    # markers. Small test/fake clients without list_tasks retain
-                    # the previous full-workflow fallback.
-                    synthesis_exists = False
-                    list_tasks = getattr(self.client, "list_tasks", None)
-
-                    if callable(list_tasks):
-                        for row in list_tasks():
-                            body = str(row.get("body") or "")
-                            row_role = terminal_workflow_role(row) or ""
-                            row_action = (
-                                terminal_action(row)
-                                or terminal_action({"body": body})
-                                or ""
-                            )
-                            row_roots = extract_scope_references(row).root_ids
-
-                            if (
-                                root_id in row_roots
-                                and row_role == "synthesis"
-                                and row_action == "SYNTHESIZE"
-                            ):
-                                synthesis_exists = True
-                                break
-                    else:
-                        _, refreshed_payloads = self.client.workflow(root_id)
-                        synthesis_exists = any(
-                            child.is_in_workflow(root_id)
-                            and child.workflow_role == "synthesis"
-                            and SUPERVISOR_MARKER in child.body
-                            and "action=SYNTHESIZE" in child.body
-                            for child in (
-                                ChildTaskState.from_hermes(payload)
-                                for payload in refreshed_payloads
-                                if payload.get("assignee") is not None
-                            )
-                        )
-
-                    if not synthesis_exists:
-                        synthesis = _analysis_synthesis_decision(state)
-                        if (
-                            synthesis is not None
-                            and synthesis.action == SupervisorAction.SYNTHESIZE
-                        ):
-                            self._execute(synthesis, state)
-                            action = f"{action},SYNTHESIZE"
+                    # QA creation can race with another terminal event. Re-read
+                    # the scoped workflow before creating the fast-path response
+                    # task so a synthesis created by the sibling event is
+                    # observed and not duplicated. This refresh must not turn
+                    # QA into a prerequisite: the decision still inspects only
+                    # primary analysis children.
+                    _, refreshed_payloads = self.client.workflow(root_id)
+                    refreshed_state = SupervisorState(
+                        parent_task_id=root_id,
+                        children=tuple(
+                            ChildTaskState.from_hermes(payload)
+                            for payload in refreshed_payloads
+                            if payload.get("assignee") is not None
+                        ),
+                        wakeups=0,
+                        replan_count=state.replan_count,
+                        max_retries=self.max_retries,
+                        max_wakeups=self.max_wakeups,
+                        qa_required=state.qa_required,
+                        workflow_mode=state.workflow_mode,
+                        has_mandate=state.has_mandate,
+                        selected_primary_profiles=state.selected_primary_profiles,
+                    )
+                    synthesis = _analysis_synthesis_decision(refreshed_state)
+                    if synthesis is not None and synthesis.action == SupervisorAction.SYNTHESIZE:
+                        self._execute(synthesis, refreshed_state)
+                        action = f"{action},SYNTHESIZE"
                 if decision.action == SupervisorAction.CREATE_TASK:
                     self._replans[root_id] = self._replans.get(root_id, 0) + 1
                 self._record_wakeup(
