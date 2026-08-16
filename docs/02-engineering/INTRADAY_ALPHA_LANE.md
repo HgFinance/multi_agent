@@ -156,6 +156,11 @@ purged walk-forward joint model이 함께 포함된다.
 - 호출 시각은 실험 identity에서 제외한다. 같은 세션·종목·원천 계보의 재시도는 완료
   결과를 재사용하고, 원천 행 수나 관측 시각이 달라진 경우에만 새 실험으로 센다. 실패한
   동일 입력은 한 worker만 원자적으로 다시 점유해 무한 호출이 trial 수를 부풀리지 않는다.
+- 전 종목 원시 이벤트 재생은 30분 job lease보다 길 수 있다. 전용 worker는 별도 메타DB
+  연결로 60초마다 `leased_at`을 갱신하고 `leased_by` 소유권이 일치할 때만 heartbeat를
+  인정한다. 따라서 경쟁 worker의 stale reaper가 정상 실행을 `CANCELLED`로 닫지 못한다.
+  Hermes 퀀트 카드는 상주 `experiment_worker.py --serve`를 띄우지 않고 단발
+  orchestrator만 실행하며, 잘못된 daemon 호출은 4시간 카드 runtime cap으로 회수한다.
 - 겹치는 5초 표본을 독립 관측치로 세지 않는다. KRX 세션별 PnL로 축약한 뒤 session
   bootstrap, DSR, walk-forward fold, family PBO를 적용한다. PBO는 현재 실험을 공통
   원장에 기록한 뒤 계산하며, 4개 이상의 비교 가능한 family variant가 없으면
