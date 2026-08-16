@@ -301,6 +301,17 @@ def _ast_scout_contract() -> str:
         "  Event-time operators: " + ", ".join(sorted(INTRADAY_OPS)),
         f"  Event-time limits: depth<={INTRADAY_MAX_DEPTH}, nodes<={INTRADAY_MAX_NODES},",
         "  every lag/rolling/delta/ewma/zscore node has seconds=1..3600.",
+        '  Event-time JSON is exact: a field is {"op":"field","field":',
+        '  "trade_flow_imbalance"}--the key is "field", never "name". A temporal',
+        '  node is {"op":"rolling_mean","arg":{"op":"field","field":',
+        '  "trade_flow_imbalance"},"seconds":300}. OBSERVABLES must equal every',
+        "  field actually present in the AST. Use comma-separated transforms or a valid",
+        "  JSON array with quoted strings; [BARE_WORDS] is not JSON.",
+        '  A declared spread state must be executable, e.g. {"op":"where",',
+        '  "condition":{"op":"lt","args":[{"op":"field","field":',
+        '  "spread_bps"},{"const":5,"unit":"BPS"}]},"then":{"op":',
+        '  "rolling_mean","arg":{"op":"field","field":"trade_flow_imbalance"},',
+        '  "seconds":300},"else":{"const":0,"unit":"RATIO"}}.',
         "  SEMANTIC_PLAN uses Event/Context/Qualities/Direction/Output, for example:",
         '  {"event":"ORDER_FLOW","context":["TIGHT_SPREAD"],',
         '   "qualities":["PERSISTENCE","STATE_CONDITIONAL"],"direction":"FOLLOW",',
@@ -3729,6 +3740,8 @@ def _check_unused_leads_come_first():
     assert "must not be" in contract and "daily proxy" in contract
     assert "THIS REFILL IS LANE-AWARE" in contract
     assert "Daily leads" in contract and "INTRADAY_EVENT buffer" in contract
+    assert 'never "name"' in contract and '"op":"where"' in contract
+    assert "[BARE_WORDS] is not JSON" in contract
     assert "experiment_proposals" in _SQL_LEADS, "사용 여부를 안 본다"
 
     # 표시가 갈려야 한다 - 안 갈리면 봐도 모른다
