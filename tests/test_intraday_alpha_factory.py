@@ -366,3 +366,130 @@ def test_intraday_shadow_progression_requires_execution_calibration() -> None:
                             "execution": "PASSIVE_FIFO_LOWER_BOUND",
                             "fill_calibration_mae": 0.08})
     assert calibrated.approved_by_quant and calibrated.to_state == "PAPER"
+
+
+def _evolution_plan(*, context: str = "ALL", horizon: int = 5) -> dict:
+    return {
+        "event": "ORDER_FLOW", "context": [context],
+        "qualities": (["PERSISTENCE"] if context == "ALL"
+                      else ["PERSISTENCE", "STATE_CONDITIONAL"]),
+        "direction": "FOLLOW", "output": "TAKER_NET_PNL",
+        "execution": "TAKER", "horizon_seconds": horizon,
+    }
+
+
+def test_intraday_evolution_contract_requires_economic_child_and_ablations() -> None:
+    parent = {"op": "rolling_mean", "arg": {
+        "op": "field", "field": "trade_flow_imbalance"}, "seconds": 30}
+    child = {"op": "where", "condition": {"op": "gt", "args": [
+        {"op": "field", "field": "spread_bps"},
+        {"const": 5, "unit": "BPS"}]}, "then": parent,
+        "else": {"const": 0, "unit": "RATIO"}}
+    lead = lead_intake.to_lead({
+        "TITLE": "Wide-spread persistent order flow",
+        "URL": "https://example.com/evolution-paper",
+        "MECHANISM": "Urgent takers persist when spread is wide and liquidity is costly.",
+        "TESTABLE_WITH": "wide spread_bps gates rolling trade_flow_imbalance",
+        "READINESS": "AST_READY", "RESEARCH_LANE": "INTRADAY_EVENT",
+        "SEMANTIC_PLAN": _evolution_plan(context="WIDE_SPREAD"),
+        "OBSERVABLES": ["spread_bps", "trade_flow_imbalance"],
+        "SOURCE_BASELINE_EXPR": parent, "CANDIDATE_SIGNAL_EXPR": child,
+        "DERIVATION_MODE": "MECHANISM_MUTATION",
+        "DERIVATION_TRANSFORMS": ["STATE_CONDITION"],
+        "NOVELTY_RATIONALE": "Condition the public persistence mechanism on liquidity cost.",
+        "PARENT_SIGNAL_EXPR": parent,
+        "EVOLUTION_OPERATORS": ["STATE_CONDITION"],
+        "EXPECTED_INCREMENT": "The gate should improve net markout after spread cost.",
+        "ABLATIONS": ["remove spread gate", "reverse spread gate"],
+    }, lens="ACADEMIC", source_type="PAPER", case_id="evolution-case",
+       model_version="test-model", prompt_version="evolution-v1")
+
+    contract = lead["ast_contract"]
+    assert contract["evolution_role"] == "CHILD"
+    assert contract["evolution_operators"] == ["STATE_CONDITION"]
+    assert len(contract["parent_ast_fingerprint"]) == 16
+
+    tuned = {**parent, "seconds": 60}
+    with pytest.raises(ValueError, match="tunable parameters"):
+        lead_intake.to_lead({
+            "TITLE": "Clock-only child", "URL": "https://example.com/clock",
+            "MECHANISM": "Persistent urgent order flow.",
+            "TESTABLE_WITH": "trade_flow_imbalance rolling mean",
+            "READINESS": "AST_READY", "RESEARCH_LANE": "INTRADAY_EVENT",
+            "SEMANTIC_PLAN": _evolution_plan(),
+            "OBSERVABLES": ["trade_flow_imbalance"],
+            "SOURCE_BASELINE_EXPR": parent, "CANDIDATE_SIGNAL_EXPR": tuned,
+            "DERIVATION_MODE": "MECHANISM_MUTATION",
+            "DERIVATION_TRANSFORMS": ["CLOCK_CHANGE"],
+            "NOVELTY_RATIONALE": "A slower clock.",
+            "PARENT_SIGNAL_EXPR": parent, "EVOLUTION_OPERATORS": ["CLOCK_CHANGE"],
+            "EXPECTED_INCREMENT": "Longer persistence.", "ABLATIONS": ["30 seconds"],
+        }, lens="ACADEMIC", source_type="PAPER", case_id="evolution-case",
+           model_version="test-model", prompt_version="evolution-v1")
+
+
+def test_intraday_quality_diversity_archive_keeps_one_elite_per_niche() -> None:
+    base = {"op": "rolling_mean", "arg": {
+        "op": "field", "field": "trade_flow_imbalance"}, "seconds": 30}
+    tested = [{"intraday_signal_expr": base, "semantic_plan": _evolution_plan(),
+               "decision": "GATE_HOLD", "lesson_codes": ["UNDERPOWERED_DATA"],
+               "oos_summary": {"sessions": 3}}]
+    child_a = {"op": "where", "condition": {"op": "gt", "args": [
+        {"op": "field", "field": "spread_bps"},
+        {"const": 5, "unit": "BPS"}]}, "then": base,
+        "else": {"const": 0, "unit": "RATIO"}}
+    child_b = {"op": "where", "condition": {"op": "gt", "args": [
+        {"op": "field", "field": "spread_bps"},
+        {"const": 10, "unit": "BPS"}]}, "then": base,
+        "else": {"const": 0, "unit": "RATIO"}}
+    common = {
+        "semantic_plan": _evolution_plan(context="WIDE_SPREAD"), "used": False,
+        "alpha_candidate_eligible": True, "candidate_vs_source_similarity": 0.5,
+        "evolution_role": "CHILD", "evolution_operators": ["STATE_CONDITION"],
+        "expected_increment": "cost-conditioned markout",
+        "ablations": ["remove spread gate"],
+    }
+    memory = intraday_experience.build(tested, [
+        {**common, "lead_id": "lead-a", "intraday_signal_expr": child_a},
+        {**common, "lead_id": "lead-b", "intraday_signal_expr": child_b},
+        {**common, "lead_id": "recycled", "intraday_signal_expr": base,
+         "semantic_plan": _evolution_plan()},
+    ])
+
+    assert memory.candidate_population == 3
+    assert len(memory.niche_elites) == 1
+    assert memory.niche_elites[0]["niche_competitors"] == 2
+    assert memory.niche_elites[0]["lineage_complete"] is True
+    assert [row["lead_id"] for row in memory.recycled_candidates] == ["recycled"]
+    rendered = intraday_experience.render(memory)
+    assert "target 12 drafts" in rendered
+    assert "DSR/PBO" in rendered
+
+
+def test_parent_child_tournament_requires_net_increment_and_gate_survival() -> None:
+    from intraday_ast_contract import fingerprint as intraday_fingerprint
+
+    parent = {"op": "rolling_mean", "arg": {
+        "op": "field", "field": "trade_flow_imbalance"}, "seconds": 30}
+    child = {"op": "where", "condition": {"op": "gt", "args": [
+        {"op": "field", "field": "spread_bps"},
+        {"const": 5, "unit": "BPS"}]}, "then": parent,
+        "else": {"const": 0, "unit": "RATIO"}}
+    rows = [
+        {"intraday_signal_expr": parent, "semantic_plan": _evolution_plan(),
+         "decision": "SUBMIT_TO_QA", "lesson_codes": [],
+         "oos_summary": {"mean_net_bps_per_opportunity": 0.2, "sessions": 30}},
+        {"intraday_signal_expr": child,
+         "semantic_plan": _evolution_plan(context="WIDE_SPREAD"),
+         "decision": "SUBMIT_TO_QA", "lesson_codes": [],
+         "oos_summary": {"mean_net_bps_per_opportunity": 0.5, "sessions": 30}},
+    ]
+    memory = intraday_experience.build(rows, [{
+        "lead_id": "child", "intraday_signal_expr": child,
+        "semantic_plan": _evolution_plan(context="WIDE_SPREAD"), "used": True,
+        "parent_ast_fingerprint": intraday_fingerprint(parent),
+    }])
+
+    assert memory.lineage_tournaments[0]["status"] == "CHILD_SURVIVES"
+    assert memory.lineage_tournaments[0]["net_increment_bps"] == pytest.approx(0.3)
+    assert len(memory.breeding_parents) == 2
