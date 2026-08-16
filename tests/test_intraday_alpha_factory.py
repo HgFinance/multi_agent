@@ -179,11 +179,14 @@ def _intraday_proposal() -> dict:
         {"op": "rolling_mean", "seconds": 30,
          "arg": {"op": "field", "field": "trade_flow_imbalance"}},
     ]}
+    predicted_markout = {"op": "mul", "args": [
+        flow, {"op": "field", "field": "realized_volatility_bps"}]}
     expr = {"op": "where",
             "condition": {"op": "lt", "args": [
                 {"op": "field", "field": "spread_bps"},
                 {"const": 5, "unit": "BPS"}]},
-            "then": flow, "else": {"const": 0, "unit": "RATIO"}}
+            "then": predicted_markout,
+            "else": {"const": 0, "unit": "BPS"}}
     return {
         "edge_type": "order_flow_imbalance", "universe_key": "krx_all",
         "research_lane": "INTRADAY_EVENT", "semantic_plan": plan,
@@ -196,6 +199,8 @@ def _intraday_proposal() -> dict:
             "intraday_signal_expr": expr, "horizon_seconds": 5,
             "sample_interval_seconds": 5, "feature_lookback_seconds": 30,
             "order_latency_ms": 250, "execution": "TAKER",
+            "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
+            "minimum_predicted_edge_bps": 1.0,
             "evaluation_days": 60, "instrument_shard_size": 32,
         },
     }
@@ -239,7 +244,7 @@ def test_intraday_family_is_semantic_not_numeric_tuning() -> None:
     # equation structure and therefore the multiple-testing family.
     later_expr = later["suggested_params"]["intraday_signal_expr"]
     later_expr["condition"]["args"][1]["const"] = 7
-    later_expr["then"]["args"][1]["seconds"] = 90
+    later_expr["then"]["args"][0]["args"][1]["seconds"] = 90
     second, _ = expected_edge_for(later)
     a = hypothesis_view(edge_type=first["type"], universe_key=first["universe_key"],
                         research_lane=first["research_lane"],
@@ -275,8 +280,10 @@ def test_llm_formula_thesis_is_typed_and_visible_in_ast() -> None:
         "functional_form": "STATE_CONDITIONAL",
         "expected_sign": "POSITIVE",
         "coefficient_policy": "PREREGISTERED_NO_OOS_FIT",
+        "decision_rule": "PREDICTED_MARKOUT_CLEARS_COST",
         "terms": {"spread_bps": "LIQUIDITY",
-                  "trade_flow_imbalance": "PRESSURE"},
+                  "trade_flow_imbalance": "PRESSURE",
+                  "realized_volatility_bps": "VOLATILITY"},
         "identification": (
             "Persistent aggressive flow must predict positive net markout only "
             "when the spread state is tight."),
@@ -293,6 +300,17 @@ def test_llm_formula_thesis_is_typed_and_visible_in_ast() -> None:
             invalid, candidate=expr, semantic_plan=plan,
             grammar=lead_intake._intraday_ast())
 
+    dimensionless = {"op": "field", "field": "trade_flow_imbalance"}
+    dimensionless_thesis = {
+        **thesis,
+        "functional_form": "MONOTONE",
+        "terms": {"trade_flow_imbalance": "PRESSURE"},
+    }
+    with pytest.raises(ValueError, match="AST output unit must be BPS"):
+        formula_discovery.assess(
+            dimensionless_thesis, candidate=dimensionless,
+            semantic_plan=plan, grammar=lead_intake._intraday_ast())
+
 
 def test_lead_intake_persists_formula_discovery_contract() -> None:
     proposal = _intraday_proposal()
@@ -302,7 +320,7 @@ def test_lead_intake_persists_formula_discovery_contract() -> None:
         "URL": "https://example.com/equation",
         "MECHANISM": "Persistent aggressive flow moves quotes in tight spreads.",
         "READINESS": "AST_READY",
-        "OBSERVABLES": "spread_bps,trade_flow_imbalance",
+        "OBSERVABLES": "spread_bps,trade_flow_imbalance,realized_volatility_bps",
         "CANDIDATE_SIGNAL_EXPR": expr,
         "RESEARCH_LANE": "INTRADAY_EVENT",
         "SEMANTIC_PLAN": proposal["semantic_plan"],
@@ -315,15 +333,17 @@ def test_lead_intake_persists_formula_discovery_contract() -> None:
             "functional_form": "STATE_CONDITIONAL",
             "expected_sign": "POSITIVE",
             "coefficient_policy": "PREREGISTERED_NO_OOS_FIT",
+            "decision_rule": "PREDICTED_MARKOUT_CLEARS_COST",
             "terms": {"spread_bps": "LIQUIDITY",
-                      "trade_flow_imbalance": "PRESSURE"},
+                      "trade_flow_imbalance": "PRESSURE",
+                      "realized_volatility_bps": "VOLATILITY"},
             "identification": "Net markout must be positive only inside the tight-spread state.",
         },
     }
     metadata = lead_intake._readiness_metadata(block, block["MECHANISM"])
     assert metadata["formula_contract_complete"] is True
     assert metadata["formula_thesis"]["functional_form"] == "STATE_CONDITIONAL"
-    assert metadata["formula_math_profile"]["output_unit"] == "RATIO"
+    assert metadata["formula_math_profile"]["output_unit"] == "BPS"
 
     without_thesis = {key: value for key, value in block.items()
                       if key != "FORMULA_THESIS"}
@@ -486,6 +506,32 @@ def test_streaming_shards_equal_single_pass_and_cover_requested_universe() -> No
         "EXACT_PORTFOLIO")
 
 
+def test_cost_hurdle_abstains_until_predicted_markout_clears_execution() -> None:
+    base = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    samples = [
+        _sample("A", base, signal=3.9, net=2.0),
+        _sample("A", base + timedelta(seconds=10), signal=4.1, net=2.0),
+    ]
+    spec = IntradayLaneSpec(
+        sample_interval_seconds=5, feature_lookback_seconds=30,
+        horizons_seconds=(5,), order_latency_ms=0,
+        max_quote_age_seconds=5, fee_bps_per_side=1,
+        maker_fee_bps_per_side=1)
+    report = evaluate_candidate(
+        {"A": samples},
+        expr={"op": "field", "field": "microprice_offset_bps"},
+        spec=spec, horizon_seconds=5, execution="TAKER",
+        entry_policy="PREDICTED_MARKOUT_CLEARS_COST",
+        family_pbo=0.2,
+        criteria={"min_sessions": 1, "min_instruments": 1,
+                  "min_opportunities": 1, "min_deflated_sharpe": -100,
+                  "min_positive_session_ratio": 0})
+    # Current spread is 2bp and round-trip fees are 2bp, so only 4.1bp clears.
+    assert report["summary"]["opportunities"] == 1
+    assert report["lane_manifest"]["entry_policy"] == \
+        "PREDICTED_MARKOUT_CLEARS_COST"
+
+
 def test_capacity_bottom_k_is_independent_of_shard_arrival_order() -> None:
     forward = _CapacityReservoir(limit=100)
     reverse = _CapacityReservoir(limit=100)
@@ -579,13 +625,16 @@ def test_scout_can_submit_raw_event_time_literature_lead() -> None:
             "output": "TAKER_NET_PNL", "execution": "TAKER",
             "horizon_seconds": 5}
     baseline = {"op": "field", "field": "trade_flow_imbalance"}
-    candidate = {"op": "rolling_mean", "seconds": 30, "arg": baseline}
+    candidate = {"op": "mul", "args": [
+        {"op": "rolling_mean", "seconds": 30, "arg": baseline},
+        {"op": "field", "field": "realized_volatility_bps"}]}
     lead = lead_intake.to_lead({
         "TITLE": "Persistent event-time order flow", "URL": "https://example.com/paper",
         "MECHANISM": "urgent takers create persistent order flow and short markout",
         "TESTABLE_WITH": "trade_flow_imbalance rolling_mean 30 seconds",
         "READINESS": "AST_READY", "RESEARCH_LANE": "INTRADAY_EVENT",
-        "SEMANTIC_PLAN": plan, "OBSERVABLES": ["trade_flow_imbalance"],
+        "SEMANTIC_PLAN": plan,
+        "OBSERVABLES": ["trade_flow_imbalance", "realized_volatility_bps"],
         "SOURCE_BASELINE_EXPR": baseline, "CANDIDATE_SIGNAL_EXPR": candidate,
         "DERIVATION_MODE": "MECHANISM_MUTATION",
         "DERIVATION_TRANSFORMS": ["CLOCK_CHANGE"],
@@ -593,7 +642,9 @@ def test_scout_can_submit_raw_event_time_literature_lead() -> None:
         "FORMULA_THESIS": {
             "target": "TAKER_NET_PNL", "functional_form": "MONOTONE",
             "expected_sign": "POSITIVE", "coefficient_policy": "STRUCTURE_ONLY",
-            "terms": {"trade_flow_imbalance": "PRESSURE"},
+            "decision_rule": "PREDICTED_MARKOUT_CLEARS_COST",
+            "terms": {"trade_flow_imbalance": "PRESSURE",
+                      "realized_volatility_bps": "VOLATILITY"},
             "identification": "Persistent signed pressure must predict positive net markout.",
         },
     }, lens="ACADEMIC", source_type="PAPER", case_id="case-1",
@@ -634,8 +685,10 @@ def test_intraday_evolution_contract_requires_economic_child_and_ablations() -> 
         "op": "field", "field": "trade_flow_imbalance"}, "seconds": 30}
     child = {"op": "where", "condition": {"op": "gt", "args": [
         {"op": "field", "field": "spread_bps"},
-        {"const": 5, "unit": "BPS"}]}, "then": parent,
-        "else": {"const": 0, "unit": "RATIO"}}
+        {"const": 5, "unit": "BPS"}]}, "then": {
+            "op": "mul", "args": [
+                parent, {"op": "field", "field": "realized_volatility_bps"}]},
+        "else": {"const": 0, "unit": "BPS"}}
     lead = lead_intake.to_lead({
         "TITLE": "Wide-spread persistent order flow",
         "URL": "https://example.com/evolution-paper",
@@ -643,21 +696,24 @@ def test_intraday_evolution_contract_requires_economic_child_and_ablations() -> 
         "TESTABLE_WITH": "wide spread_bps gates rolling trade_flow_imbalance",
         "READINESS": "AST_READY", "RESEARCH_LANE": "INTRADAY_EVENT",
         "SEMANTIC_PLAN": _evolution_plan(context="WIDE_SPREAD"),
-        "OBSERVABLES": ["spread_bps", "trade_flow_imbalance"],
+        "OBSERVABLES": ["spread_bps", "trade_flow_imbalance",
+                        "realized_volatility_bps"],
         "SOURCE_BASELINE_EXPR": parent, "CANDIDATE_SIGNAL_EXPR": child,
         "DERIVATION_MODE": "MECHANISM_MUTATION",
         "DERIVATION_TRANSFORMS": ["STATE_CONDITION"],
         "NOVELTY_RATIONALE": "Condition the public persistence mechanism on liquidity cost.",
         "PARENT_SIGNAL_EXPR": parent,
-        "EVOLUTION_OPERATORS": ["STATE_CONDITION"],
+        "EVOLUTION_OPERATORS": ["STATE_CONDITION", "MECHANISM_INTERACTION"],
         "EXPECTED_INCREMENT": "The gate should improve net markout after spread cost.",
         "ABLATIONS": ["remove spread gate", "reverse spread gate"],
         "FORMULA_THESIS": {
             "target": "TAKER_NET_PNL", "functional_form": "STATE_CONDITIONAL",
             "expected_sign": "STATE_DEPENDENT",
             "coefficient_policy": "PREREGISTERED_NO_OOS_FIT",
+            "decision_rule": "PREDICTED_MARKOUT_CLEARS_COST",
             "terms": {"spread_bps": "LIQUIDITY",
-                      "trade_flow_imbalance": "PRESSURE"},
+                      "trade_flow_imbalance": "PRESSURE",
+                      "realized_volatility_bps": "VOLATILITY"},
             "identification": "Order-flow pressure must add net markout only in wide spreads.",
         },
     }, lens="ACADEMIC", source_type="PAPER", case_id="evolution-case",
@@ -665,7 +721,8 @@ def test_intraday_evolution_contract_requires_economic_child_and_ablations() -> 
 
     contract = lead["ast_contract"]
     assert contract["evolution_role"] == "CHILD"
-    assert contract["evolution_operators"] == ["STATE_CONDITION"]
+    assert contract["evolution_operators"] == [
+        "MECHANISM_INTERACTION", "STATE_CONDITION"]
     assert len(contract["parent_ast_fingerprint"]) == 16
 
     tuned = {**parent, "seconds": 60}
@@ -752,3 +809,31 @@ def test_parent_child_tournament_requires_net_increment_and_gate_survival() -> N
     assert memory.lineage_tournaments[0]["status"] == "CHILD_SURVIVES"
     assert memory.lineage_tournaments[0]["net_increment_bps"] == pytest.approx(0.3)
     assert len(memory.breeding_parents) == 2
+
+
+def test_measured_negative_elites_become_controlled_stepping_stones() -> None:
+    gross_but_costly = {
+        "intraday_signal_expr": {"op": "field", "field": "microprice_offset_bps"},
+        "semantic_plan": _evolution_plan(), "decision": "GATE_HOLD",
+        "lesson_codes": ["COST_SENSITIVE"],
+        "oos_summary": {"mean_mid_markout_bps": 2.0,
+                        "mean_net_bps_per_opportunity": -20.0,
+                        "sessions": 2},
+    }
+    wrong_direction = {
+        "intraday_signal_expr": {"op": "neg", "arg": {
+            "op": "field", "field": "microprice_offset_bps"}},
+        "semantic_plan": _evolution_plan(context="OPEN"),
+        "decision": "GATE_HOLD", "lesson_codes": ["BASELINE_NOT_BEATEN"],
+        "oos_summary": {"mean_mid_markout_bps": -1.0,
+                        "mean_net_bps_per_opportunity": -23.0,
+                        "sessions": 2},
+    }
+    memory = intraday_experience.build([gross_but_costly, wrong_direction])
+    roles = {row["breeding_role"]: row for row in memory.breeding_parents}
+    assert roles["COST_STEPPING_STONE"]["allowed_child_operators"] == [
+        "EXECUTION_AWARE", "STATE_CONDITION", "TARGET_CHANGE"]
+    assert roles["FAILURE_INVERSION_PARENT"]["allowed_child_operators"] == [
+        "FAILURE_MODE_INVERSION"]
+    assert all(row["breeding_role"] != "NET_SURVIVOR"
+               for row in memory.breeding_parents)

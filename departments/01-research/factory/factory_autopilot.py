@@ -139,7 +139,12 @@ MIN_HISTORY_DAYS: 10 이상 (짧아도 실행은 한다. 단, 60 KRX 세션 미�
   UNDERPOWERED/HOLD이며 검증 알파로 승격하지 않는다)
 SUGGESTED_PARAMS JSON 필수 키:
   intraday_signal_expr, horizon_seconds, sample_interval_seconds,
-  feature_lookback_seconds, order_latency_ms, execution
+  feature_lookback_seconds, order_latency_ms, execution, entry_policy
+Net-PnL proposals must set entry_policy=PREDICTED_MARKOUT_CLEARS_COST. Their AST
+must output a predicted future mid-markout in BPS, not a dimensionless direction
+score. The evaluator enters only when predicted BPS exceeds the current spread,
+the governed round-trip charges, and minimum_predicted_edge_bps. Never use a
+bare OFI/imbalance score with threshold=0 as an executable strategy.
 position_mode은 현재 LONG_ONLY만 허용한다. 대차 가능 여부·차입료·공매도 체결 제약의
 point-in-time 원천이 생기기 전에는 음수 신호를 숏으로 가장하지 않고 abstain한다.
 비용 기본값은 2026 상장주식 거래세와 온라인 위탁수수료를 보수적으로 합친
@@ -237,6 +242,10 @@ select l.lead_id, l.scout_lens, l.claimed_edge, l.stated_mechanism,
    and l.ast_contract->>'ast_readiness' = 'AST_READY'
    and l.ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
    and coalesce((l.ast_contract->>'alpha_candidate_eligible')::boolean, false)
+   and (coalesce(l.ast_contract->>'research_lane',
+                 'DAILY_CROSS_SECTIONAL') <> 'INTRADAY_EVENT'
+        or l.ast_contract->>'formula_discovery_version' =
+           'formula-discovery-v2')
 order by used asc,
          case
            when coalesce(l.ast_contract->>'research_lane',
@@ -307,12 +316,18 @@ def _ast_scout_contract() -> str:
         "  its economic prior; deterministic code validates grammar, dimensions, semantic",
         "  alignment, complexity, and the claimed functional form before any backtest.",
         "  Every INTRADAY_EVENT AST_READY lead must include FORMULA_THESIS JSON with exact",
-        "  keys target, functional_form, expected_sign, coefficient_policy, terms, and",
+        "  keys target, functional_form, expected_sign, coefficient_policy, decision_rule,",
+        "  terms, and",
         "  identification. target must equal SEMANTIC_PLAN.output. functional_form is one",
         "  of MONOTONE, REVERSAL, INTERACTION, STATE_CONDITIONAL, CROSS_SCALE,",
         "  DEPTH_DIVERGENCE; expected_sign is POSITIVE, NEGATIVE, or STATE_DEPENDENT;",
         "  coefficient_policy is FIXED_FROM_SOURCE, PREREGISTERED_NO_OOS_FIT, or",
-        "  STRUCTURE_ONLY. terms maps every AST field exactly once to PRESSURE, LIQUIDITY,",
+        "  STRUCTURE_ONLY. Net-PnL decision_rule must be",
+        "  PREDICTED_MARKOUT_CLEARS_COST and the AST output unit must be BPS. The runtime",
+        "  abstains unless predicted markout clears live spread, statutory round-trip",
+        "  charges, and the preregistered safety margin. A dimensionless OFI sign is a",
+        "  feature, not an executable PnL equation. terms maps every AST field exactly once",
+        "  to PRESSURE, LIQUIDITY,",
         "  STATE, SCALE, VOLATILITY, FRESHNESS, ACTIVITY, or CAPACITY. identification states",
         "  a falsifiable conditional prediction. The AST must visibly implement the claimed",
         "  form (for example where for STATE_CONDITIONAL and two clocks for CROSS_SCALE).",
@@ -323,8 +338,9 @@ def _ast_scout_contract() -> str:
         "  shapes. After screening sources, draft all 12 population members and submit",
         "  contract-valid members through factory_submit_leads (multiple calls are allowed).",
         "  Do not mark the card complete with zero AST_READY merely because blocked/control",
-        "  literature was stored. Either (a) persist at least four AST_READY candidates from",
-        "  distinct economic niches, or (b) report all 12 attempted candidate ASTs and the",
+        "  literature was stored. Either (a) persist all 12 AST_READY candidates from",
+        "  distinct economic niches, including <=30s/>=300s and TAKER/PASSIVE quadrants,",
+        "  or (b) report all 12 attempted candidate ASTs and the",
         "  exact deterministic intake error for each. Never weaken a contract to meet quota.",
         "  SOURCE_BASELINE_EXPR is the closest faithful expression of the public method on",
         "  this grammar. Do not call a changed window, threshold, or title a new mechanism.",
@@ -994,7 +1010,8 @@ def _ast_experience_block(conn) -> str:
                        coalesce(l.ast_contract->>'parent_ast_fingerprint', ''),
                        coalesce((l.ast_contract->>'formula_contract_complete')::boolean,
                                 false),
-                       l.ast_contract->'formula_thesis'
+                       l.ast_contract->'formula_thesis',
+                       coalesce(l.ast_contract->>'formula_discovery_version', '')
                   from research.methodology_leads l
                  where l.status = 'COMPLETE'
                    and l.ast_contract->>'ast_readiness' = 'AST_READY'
@@ -1015,7 +1032,8 @@ def _ast_experience_block(conn) -> str:
                       "parent_signal_expr": row[15],
                       "parent_ast_fingerprint": row[16],
                       "formula_contract_complete": bool(row[17]),
-                      "formula_thesis": row[18]}
+                      "formula_thesis": row[18],
+                      "formula_discovery_version": row[19]}
                      for row in cur.fetchall()]
             cur.execute("""
                 select e.config->'intraday_signal_expr',
@@ -1266,7 +1284,7 @@ INTRADAY_LEADS_LOW = 2
 # Legacy event-time ASTs can satisfy the lane buffer while still lacking the
 # economic equation thesis needed by the symbolic search. Maintain a separate
 # typed-formula buffer so deployment upgrades actually refill the new contract.
-INTRADAY_FORMULA_LEADS_LOW = 2
+INTRADAY_FORMULA_LEADS_LOW = 12
 # 이보다 오래된 리드만 있으면 시장이 바뀌었을 수 있다.
 LEADS_STALE_DAYS = 2
 
@@ -1284,6 +1302,10 @@ def _executable_unused_count(conn) -> int:
                and coalesce(
                      (l.ast_contract->>'alpha_candidate_eligible')::boolean,
                      false)
+               and (coalesce(l.ast_contract->>'research_lane',
+                             'DAILY_CROSS_SECTIONAL') <> 'INTRADAY_EVENT'
+                    or l.ast_contract->>'formula_discovery_version' =
+                       'formula-discovery-v2')
                and not exists (
                      select 1 from research.experiment_proposals p
                       where l.lead_id = any(p.lead_ids))
@@ -1350,6 +1372,8 @@ def _lead_health(conn) -> str:
                            and ast_contract->>'ast_readiness' = 'AST_READY'
                            and ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
                            and ast_contract->>'research_lane' = 'INTRADAY_EVENT'
+                           and ast_contract->>'formula_discovery_version' =
+                               'formula-discovery-v2'
                            and coalesce((ast_contract->>'alpha_candidate_eligible')::boolean,
                                         false)
                            and not exists (
@@ -1366,6 +1390,8 @@ def _lead_health(conn) -> str:
                            and ast_contract->>'ast_readiness' = 'AST_READY'
                            and ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
                            and ast_contract->>'research_lane' = 'INTRADAY_EVENT'
+                           and ast_contract->>'formula_discovery_version' =
+                               'formula-discovery-v2'
                            and coalesce(
                                  (ast_contract->>'alpha_candidate_eligible')::boolean,
                                  false)
@@ -2944,9 +2970,9 @@ def cycle(*, dry_run: bool = False) -> int:
                 # Refill at most once per UTC hour while the executable queue is
                 # dry.  The former six-hour bucket let several planner cycles
                 # consume the same exhausted leads before scouting could run.
-                # v6 adds the typed financial-mathematics thesis; v5 exposed unit/event
-                # constraints but still accepted story-only intraday formulas.
-                key=f"factory-scout-v6-{_now:%Y%m%d}T{_now.hour:02d}",
+                # v7 requires a cost-aware BPS population; v6 still admitted
+                # dimensionless direction scores as executable net-PnL formulas.
+                key=f"factory-scout-v7-{_now:%Y%m%d}T{_now.hour:02d}",
                 dry_run=dry_run)
         elif active_scout:
             print(f"  scout refill skipped - already active: {active_scout}", flush=True)
@@ -3411,9 +3437,15 @@ def _check_execution_rejections_are_attributable():
         "type": "order_flow_imbalance",
         "research_lane": "INTRADAY_EVENT",
         "intraday_signal_expr": {
-            "op": "rolling_mean",
-            "arg": {"op": "field", "field": "queue_imbalance_l1"},
-            "seconds": 5,
+            "op": "mul",
+            "args": [
+                {
+                    "op": "rolling_mean",
+                    "arg": {"op": "field", "field": "queue_imbalance_l1"},
+                    "seconds": 5,
+                },
+                {"op": "field", "field": "realized_volatility_bps"},
+            ],
         },
         "semantic_plan": {
             "event": "QUOTE_IMBALANCE", "output": "TAKER_NET_PNL",
@@ -3425,6 +3457,7 @@ def _check_execution_rejections_are_attributable():
         "feature_lookback_seconds": 5, "order_latency_ms": 100,
         "fee_bps_per_side": 11.5, "maker_fee_bps_per_side": 11.5,
         "execution": "TAKER", "position_mode": "LONG_ONLY",
+        "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
         "universe_key": "krx_all", "semantic_fingerprint": "test",
     }
     assert _edge_execution_rejections(intraday, {}) == [], \
@@ -4059,7 +4092,7 @@ def _check_lead_health_is_surfaced():
 
     # 실측 상태: 리드 12건 · 원시/실행가능 미사용 4건 · 최신 1.2일 전
     #   → 안 쓴 것이 기준(4) 이상이고 1.2일이면 아직 조용하다
-    assert _lead_health(_Rows((12, 4, 4, 2, 2, 1.2))) == ""
+    assert _lead_health(_Rows((22, 14, 14, 12, 12, 1.2))) == ""
 
     # A full daily queue must not hide an empty raw event-time lane.
     intraday_empty = _lead_health(_Rows((55, 9, 9, 0, 0, 0.1)))
@@ -4067,7 +4100,7 @@ def _check_lead_health_is_surfaced():
     assert "별도 기준 2" in intraday_empty, intraday_empty
 
     # Legacy AST-ready event-time leads must not mask starvation of the new
-    # financial-mathematics contract introduced by formula-discovery-v1.
+    # cost-aware financial-mathematics contract introduced by formula-discovery-v2.
     formula_empty = _lead_health(_Rows((55, 9, 9, 5, 0, 0.1)))
     assert "typed formula-thesis event-time 미사용 리드가 0건" in formula_empty, \
         formula_empty
@@ -4256,7 +4289,7 @@ def _check_ast_memory_reaches_scout_and_planner():
         "Event와 observable의 결정론 매핑이 스카우트에게 안 보인다"
     assert "all 12 attempted candidate ASTs" in contract, \
         "blocked 문헌 몇 건만 적재하고 population 작업을 끝낼 수 있다"
-    assert "factory-scout-v6-" in cyc, \
+    assert "factory-scout-v7-" in cyc, \
         "새 population 계약이 완료된 구버전 카드에 흡수된다"
     print("  AST 경험 기억→검색·기획   OK")
 

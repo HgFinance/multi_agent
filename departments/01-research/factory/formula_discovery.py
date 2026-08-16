@@ -11,7 +11,7 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
-CONTRACT_VERSION = "formula-discovery-v1"
+CONTRACT_VERSION = "formula-discovery-v2"
 
 TARGETS = frozenset({"MID_MARKOUT_BPS", "TAKER_NET_PNL", "PASSIVE_NET_PNL"})
 FUNCTIONAL_FORMS = frozenset({
@@ -22,6 +22,10 @@ COEFFICIENT_POLICIES = frozenset({
     "FIXED_FROM_SOURCE", "PREREGISTERED_NO_OOS_FIT", "STRUCTURE_ONLY",
 })
 EXPECTED_SIGNS = frozenset({"POSITIVE", "NEGATIVE", "STATE_DEPENDENT"})
+DECISION_RULES = frozenset({
+    "POSITIVE_SCORE",
+    "PREDICTED_MARKOUT_CLEARS_COST",
+})
 TERM_ROLES = frozenset({
     "PRESSURE", "LIQUIDITY", "STATE", "SCALE", "VOLATILITY",
     "FRESHNESS", "ACTIVITY", "CAPACITY",
@@ -37,6 +41,7 @@ class FormulaThesisV1(BaseModel):
     functional_form: str
     expected_sign: str
     coefficient_policy: str
+    decision_rule: str
     terms: dict[str, str]
     identification: str = Field(min_length=20)
 
@@ -71,16 +76,42 @@ def assess(thesis, *, candidate: dict, semantic_plan: dict, grammar) -> dict:
     sign = _text(thesis.get("expected_sign"), "expected_sign")
     coefficient_policy = _text(
         thesis.get("coefficient_policy"), "coefficient_policy")
+    decision_rule = _text(thesis.get("decision_rule"), "decision_rule")
     for value, allowed, name in (
         (target, TARGETS, "target"),
         (form, FUNCTIONAL_FORMS, "functional_form"),
         (sign, EXPECTED_SIGNS, "expected_sign"),
         (coefficient_policy, COEFFICIENT_POLICIES, "coefficient_policy"),
+        (decision_rule, DECISION_RULES, "decision_rule"),
     ):
         if value not in allowed:
             raise ValueError(f"FORMULA_THESIS.{name}={value!r} is not controlled")
     if target != str(semantic_plan.get("output") or "").upper():
         raise ValueError("FORMULA_THESIS.target must equal SEMANTIC_PLAN.output")
+
+    # A target measured in basis points cannot be represented by a bare,
+    # dimensionless pressure score.  The old contract allowed that mismatch and
+    # the evaluator then interpreted every positive tick as an executable trade.
+    # Keep the LLM on equation structure; deterministic execution policy decides
+    # whether the predicted move clears spread and statutory round-trip costs.
+    if profile["output_unit"] != "BPS":
+        raise ValueError(
+            "FORMULA_THESIS target is measured in BPS, so the AST output unit "
+            f"must be BPS, not {profile['output_unit']}")
+    pnl_target = target in {"TAKER_NET_PNL", "PASSIVE_NET_PNL"}
+    if pnl_target and decision_rule != "PREDICTED_MARKOUT_CLEARS_COST":
+        raise ValueError(
+            "net-PnL targets require decision_rule="
+            "PREDICTED_MARKOUT_CLEARS_COST")
+    execution = str(semantic_plan.get("execution") or "").upper()
+    expected_execution = {
+        "TAKER_NET_PNL": "TAKER",
+        "PASSIVE_NET_PNL": "PASSIVE_FIFO_LOWER_BOUND",
+    }.get(target)
+    if expected_execution and execution != expected_execution:
+        raise ValueError(
+            f"FORMULA_THESIS.target={target} requires "
+            f"SEMANTIC_PLAN.execution={expected_execution}")
 
     raw_terms = thesis.get("terms")
     if not isinstance(raw_terms, dict):
@@ -120,6 +151,7 @@ def assess(thesis, *, candidate: dict, semantic_plan: dict, grammar) -> dict:
         "functional_form": form,
         "expected_sign": sign,
         "coefficient_policy": coefficient_policy,
+        "decision_rule": decision_rule,
         "terms": {field: terms[field] for field in sorted(terms)},
         "identification": identification,
     }
@@ -142,18 +174,23 @@ def _selftest() -> None:
     expr = {"op": "where", "condition": {"op": "lt", "args": [
         {"op": "field", "field": "spread_bps"},
         {"const": 5, "unit": "BPS"}]}, "then": {
-            "op": "rolling_mean", "seconds": 30,
-            "arg": {"op": "field", "field": "normalized_quote_ofi"}},
-        "else": {"const": 0, "unit": "RATIO"}}
+            "op": "mul", "args": [
+                {"op": "rolling_mean", "seconds": 30,
+                 "arg": {"op": "field", "field": "normalized_quote_ofi"}},
+                {"op": "field", "field": "realized_volatility_bps"}]},
+        "else": {"const": 0, "unit": "BPS"}}
     result = assess({
         "target": "TAKER_NET_PNL",
         "functional_form": "STATE_CONDITIONAL",
         "expected_sign": "POSITIVE",
         "coefficient_policy": "PREREGISTERED_NO_OOS_FIT",
+        "decision_rule": "PREDICTED_MARKOUT_CLEARS_COST",
         "terms": {"spread_bps": "LIQUIDITY",
-                  "normalized_quote_ofi": "PRESSURE"},
+                  "normalized_quote_ofi": "PRESSURE",
+                  "realized_volatility_bps": "VOLATILITY"},
         "identification": "Pressure must predict positive net markout only in tight spreads.",
-    }, candidate=expr, semantic_plan={"output": "TAKER_NET_PNL"}, grammar=grammar)
+    }, candidate=expr, semantic_plan={"output": "TAKER_NET_PNL",
+                                      "execution": "TAKER"}, grammar=grammar)
     assert result["formula_contract_complete"]
 
 

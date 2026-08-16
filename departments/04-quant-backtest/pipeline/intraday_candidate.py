@@ -23,8 +23,12 @@ from intraday_microstructure import IntradayLaneSpec, IntradaySample, audit_caus
 from overfit_stats import bootstrap_ci, deflated_sharpe
 
 
-EVALUATOR_VERSION = "intraday-candidate-evaluator-v3"
+EVALUATOR_VERSION = "intraday-candidate-evaluator-v4"
 KST = ZoneInfo("Asia/Seoul")
+ENTRY_POLICIES = frozenset({
+    "POSITIVE_SCORE",
+    "PREDICTED_MARKOUT_CLEARS_COST",
+})
 
 DEFAULT_CRITERIA = {
     # DSR/bootstrap implementation requires 60 independent observations.  Since
@@ -73,21 +77,40 @@ def _label(sample: IntradaySample, horizon_seconds: int):
 
 def _observations(samples: list[IntradaySample], values: list[float | None], *,
                   horizon_seconds: int, threshold: float,
-                  execution: str, position_mode: str) -> list[dict]:
+                  execution: str, position_mode: str,
+                  entry_policy: str = "POSITIVE_SCORE",
+                  fee_bps_per_side: float = 0.0,
+                  maker_fee_bps_per_side: float = 0.0,
+                  minimum_predicted_edge_bps: float = 0.0) -> list[dict]:
     execution = str(execution).upper()
     if execution not in {"TAKER", "PASSIVE_FIFO_LOWER_BOUND"}:
         raise ValueError(f"unsupported execution: {execution}")
     position_mode = str(position_mode).upper()
     if position_mode != "LONG_ONLY":
         raise ValueError("factory intraday evaluator currently supports LONG_ONLY only")
+    entry_policy = str(entry_policy).upper()
+    if entry_policy not in ENTRY_POLICIES:
+        raise ValueError(f"unsupported entry_policy: {entry_policy}")
     rows = []
     for sample, raw in zip(samples, values):
         if raw is None or not math.isfinite(float(raw)):
             continue
         value = float(raw)
+        hurdle = float(threshold)
+        if entry_policy == "PREDICTED_MARKOUT_CLEARS_COST":
+            # The AST predicts future mid-markout in BPS.  A trade is admissible
+            # only if that predicted move clears the executable round trip and
+            # the preregistered safety margin.  This prevents a directionally
+            # useful pressure score from becoming a high-turnover loss machine.
+            hurdle = float(minimum_predicted_edge_bps)
+            if execution == "TAKER":
+                hurdle += float(sample.spread_bps) + 2.0 * float(fee_bps_per_side)
+            else:
+                hurdle += (float(maker_fee_bps_per_side)
+                           + float(fee_bps_per_side))
         # Point-in-time borrow availability/fees are not in the governed source
         # plane.  Negative scores therefore mean abstain, never a free short.
-        side = 1 if value > threshold else 0
+        side = 1 if value > hurdle else 0
         label = _label(sample, horizon_seconds)
         if side == 0 or label is None:
             continue
@@ -105,6 +128,7 @@ def _observations(samples: list[IntradaySample], values: list[float | None], *,
             "session": sample.decision_time.astimezone(KST).date().isoformat(),
             "side": side,
             "score": value,
+            "entry_hurdle_bps": hurdle,
             "mid_markout_bps": float(mid),
             "filled": net is not None,
             # No fill means no position and zero P&L per opportunity.  Reporting
@@ -213,6 +237,8 @@ class CandidateAccumulator:
     def __init__(self, *, expr: dict, spec: IntradayLaneSpec,
                  horizon_seconds: int, execution: str,
                  position_mode: str = "LONG_ONLY", threshold: float = 0.0,
+                 entry_policy: str = "POSITIVE_SCORE",
+                 minimum_predicted_edge_bps: float = 0.0,
                  trials: int = 1, family_pbo: float | None = None,
                  semantic_plan: dict | None = None,
                  criteria: dict | None = None):
@@ -220,12 +246,21 @@ class CandidateAccumulator:
             raise ValueError("horizon_seconds is absent from the lane specification")
         if threshold < 0 or not math.isfinite(float(threshold)):
             raise ValueError("threshold must be finite and non-negative")
+        if (minimum_predicted_edge_bps < 0
+                or not math.isfinite(float(minimum_predicted_edge_bps))):
+            raise ValueError(
+                "minimum_predicted_edge_bps must be finite and non-negative")
+        entry_policy = str(entry_policy).upper()
+        if entry_policy not in ENTRY_POLICIES:
+            raise ValueError(f"unsupported entry_policy: {entry_policy}")
         self.expr = expr
         self.spec = spec
         self.horizon_seconds = horizon_seconds
         self.execution = execution
         self.position_mode = position_mode
         self.threshold = threshold
+        self.entry_policy = entry_policy
+        self.minimum_predicted_edge_bps = float(minimum_predicted_edge_bps)
         self.trials = trials
         self.family_pbo = family_pbo
         self.semantic_plan = semantic_plan or {}
@@ -265,7 +300,11 @@ class CandidateAccumulator:
         observations = _observations(
             eligible_samples, eligible_values,
             horizon_seconds=self.horizon_seconds, threshold=self.threshold,
-            execution=self.execution, position_mode=self.position_mode)
+            execution=self.execution, position_mode=self.position_mode,
+            entry_policy=self.entry_policy,
+            fee_bps_per_side=self.spec.fee_bps_per_side,
+            maker_fee_bps_per_side=self.spec.maker_fee_bps_per_side,
+            minimum_predicted_edge_bps=self.minimum_predicted_edge_bps)
         if observations:
             self.opportunity_instruments.add(instrument_id)
         by_session: dict[str, list[dict]] = defaultdict(list)
@@ -401,6 +440,8 @@ class CandidateAccumulator:
                 "execution": self.execution.upper(),
                 "position_mode": self.position_mode.upper(),
                 "threshold": self.threshold,
+                "entry_policy": self.entry_policy,
+                "minimum_predicted_edge_bps": self.minimum_predicted_edge_bps,
                 "purge_gap_seconds": self.spec.purge_gap.total_seconds(),
                 "semantic_context": list(self.semantic_plan.get("context") or []),
                 "portfolio_capital_model": (
@@ -425,12 +466,16 @@ def evaluate_candidate_stream(instrument_samples, *, expr: dict,
                               horizon_seconds: int, execution: str,
                               position_mode: str = "LONG_ONLY",
                               threshold: float = 0.0, trials: int = 1,
+                              entry_policy: str = "POSITIVE_SCORE",
+                              minimum_predicted_edge_bps: float = 0.0,
                               family_pbo: float | None = None,
                               semantic_plan: dict | None = None,
                               criteria: dict | None = None) -> dict:
     accumulator = CandidateAccumulator(
         expr=expr, spec=spec, horizon_seconds=horizon_seconds,
         execution=execution, position_mode=position_mode, threshold=threshold,
+        entry_policy=entry_policy,
+        minimum_predicted_edge_bps=minimum_predicted_edge_bps,
         trials=trials, family_pbo=family_pbo, semantic_plan=semantic_plan,
         criteria=criteria)
     for instrument_id, samples in instrument_samples:
@@ -443,6 +488,8 @@ def evaluate_candidate(samples_by_instrument: dict[str, list[IntradaySample]], *
                        horizon_seconds: int, execution: str,
                        position_mode: str = "LONG_ONLY",
                        threshold: float = 0.0, trials: int = 1,
+                       entry_policy: str = "POSITIVE_SCORE",
+                       minimum_predicted_edge_bps: float = 0.0,
                        family_pbo: float | None = None,
                        semantic_plan: dict | None = None,
                        criteria: dict | None = None) -> dict:
@@ -452,5 +499,7 @@ def evaluate_candidate(samples_by_instrument: dict[str, list[IntradaySample]], *
          for instrument_id in sorted(samples_by_instrument)),
         expr=expr, spec=spec, horizon_seconds=horizon_seconds,
         execution=execution, position_mode=position_mode, threshold=threshold,
+        entry_policy=entry_policy,
+        minimum_predicted_edge_bps=minimum_predicted_edge_bps,
         trials=trials, family_pbo=family_pbo, semantic_plan=semantic_plan,
         criteria=criteria)

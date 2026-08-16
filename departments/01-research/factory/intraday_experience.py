@@ -130,6 +130,11 @@ def _quality_diversity_frontier(leads: list[dict], tested: list[dict]
     for lead in leads:
         if lead.get("used") or lead.get("alpha_candidate_eligible") is False:
             continue
+        if lead.get("formula_discovery_version") not in (
+                None, "", "formula-discovery-v2"):
+            # Keep legacy outcomes as negative/positive history, but do not let a
+            # dimensionally invalid v1 lead occupy a live evolutionary niche.
+            continue
         try:
             expr = formula.parse(lead.get("intraday_signal_expr"))
             plan = validate(lead.get("semantic_plan") or {})
@@ -156,7 +161,9 @@ def _quality_diversity_frontier(leads: list[dict], tested: list[dict]
             and lead.get("evolution_operators")
             and lead.get("expected_increment")
             and lead.get("ablations"))
-        formula_complete = bool(lead.get("formula_contract_complete"))
+        formula_complete = bool(
+            lead.get("formula_contract_complete")
+            and lead.get("formula_discovery_version") == "formula-discovery-v2")
         row.update(
             nearest_library_similarity=nearest,
             novelty_score=1.0 - nearest,
@@ -302,6 +309,8 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
             "event": best["plan"]["event"], "context": best["plan"]["context"],
             "qualities": best["plan"]["qualities"], "direction": best["plan"]["direction"],
             "execution": best["plan"]["execution"], "fields": best["fields"],
+            "horizon_seconds": best["plan"]["horizon_seconds"],
+            "niche": _niche(best["plan"]),
             "operators": best["operators"], "clocks_seconds": best["clocks"],
             "trials": len(group),
             "decisions": sorted({str(row.get("decision") or "UNDECIDED") for row in group}),
@@ -320,10 +329,40 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
     elites, recycled, candidate_population = _quality_diversity_frontier(
         lead_rows, parsed)
     tournaments = _lineage_tournaments(lead_rows, parsed)
-    breeding = tuple(row for row in history
-                     if (set(row["decisions"]) & {"SUBMIT_TO_QA", "PROMOTED"}
-                         and row["best_net_bps"] is not None
-                         and row["best_net_bps"] > 0))
+    # MAP-Elites needs stepping stones even before a globally profitable formula
+    # exists.  The old archive bred only already-profitable gate survivors, so a
+    # cold start with all-negative formulas had no parents and every cycle became
+    # another unrelated one-shot idea.  Keep one measured elite per economic
+    # niche, but label its permitted use honestly: cost-flipped gross predictors
+    # may breed execution-aware children; negative-gross elites may only seed an
+    # explicit failure-mode inversion.  Neither is promoted as alpha.
+    by_tested_niche: dict[tuple, list[dict]] = defaultdict(list)
+    for row in history:
+        if row["best_net_bps"] is not None:
+            by_tested_niche[row["niche"]].append(row)
+    breeding_rows = []
+    for niche, group in by_tested_niche.items():
+        parent = max(group, key=lambda row: row["best_net_bps"])
+        parent = dict(parent)
+        if (set(parent["decisions"]) & {"SUBMIT_TO_QA", "PROMOTED"}
+                and parent["best_net_bps"] > 0):
+            parent["breeding_role"] = "NET_SURVIVOR"
+            parent["allowed_child_operators"] = [
+                "STATE_CONDITION", "MECHANISM_INTERACTION",
+                "CROSS_SCALE_DISAGREEMENT", "EXECUTION_AWARE"]
+        elif ((parent["best_gross_bps"] or 0.0) > 0
+              and parent["best_net_bps"] <= 0):
+            parent["breeding_role"] = "COST_STEPPING_STONE"
+            parent["allowed_child_operators"] = [
+                "EXECUTION_AWARE", "STATE_CONDITION", "TARGET_CHANGE"]
+        else:
+            parent["breeding_role"] = "FAILURE_INVERSION_PARENT"
+            parent["allowed_child_operators"] = ["FAILURE_MODE_INVERSION"]
+        breeding_rows.append(parent)
+    breeding = tuple(sorted(
+        breeding_rows,
+        key=lambda row: (row["breeding_role"] != "NET_SURVIVOR",
+                         -row["best_net_bps"], row["niche"])))
     return IntradayMemory(
         experiments=len(parsed), semantic_families=len({row["semantic_fingerprint"]
                                                         for row in parsed}),
@@ -392,11 +431,15 @@ def render(memory: IntradayMemory, *, limit: int = 6) -> str:
             lines.append(
                 f"    fp={row['ast_fingerprint']} lead={row.get('lead_id')} "
                 f"niche={'/'.join(row['niche'])}")
-    lines.append(f"  [breeding parents] gate-surviving, positive net={len(memory.breeding_parents)}")
+    lines.append(
+        f"  [breeding parents] measured niche elites={len(memory.breeding_parents)}; "
+        "only NET_SURVIVOR is alpha-like, other roles are controlled stepping stones")
     for row in memory.breeding_parents[:5]:
         lines.append(
-            f"    parent={row['ast_fingerprint']} net={row['best_net_bps']}bps "
-            f"event={row['event']} context={row['context']} decisions={row['decisions']}")
+            f"    parent={row['ast_fingerprint']} role={row['breeding_role']} "
+            f"gross={row['best_gross_bps']}bps net={row['best_net_bps']}bps "
+            f"event={row['event']} context={row['context']} decisions={row['decisions']} "
+            f"allowed_children={row['allowed_child_operators']}")
     if memory.lineage_tournaments:
         lines.append("  [parent-child net-increment tournaments]")
         for row in memory.lineage_tournaments[:8]:
@@ -415,7 +458,9 @@ def render(memory: IntradayMemory, *, limit: int = 6) -> str:
         "    Window/threshold-only edits are the same family, not novelty.",
         "    Submit contract-valid children together. The archive keeps one elite per niche;",
         "    causal backtests, costs, DSR/PBO and the trial ledger--not QD score--decide survival.",
-        "    Only gate-surviving positive-net formulas and CHILD_SURVIVES tournament winners breed;",
-        "    missing net metrics, underpowered samples and gate holds never become zero or a win.",
+        "    NET_SURVIVOR formulas may breed broadly. COST_STEPPING_STONE parents may only",
+        "    breed execution/cost-aware children; FAILURE_INVERSION_PARENT may only breed an",
+        "    explicit failure-mode inversion. These parent roles are search stepping stones,",
+        "    never promotions. Missing net metrics never become zero or a win.",
     ])
     return "\n".join(lines)
