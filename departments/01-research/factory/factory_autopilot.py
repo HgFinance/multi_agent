@@ -238,9 +238,18 @@ select l.lead_id, l.scout_lens, l.claimed_edge, l.stated_mechanism,
    and l.ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
    and coalesce((l.ast_contract->>'alpha_candidate_eligible')::boolean, false)
 order by used asc,
-         case when coalesce(l.ast_contract->>'research_lane',
-                            'DAILY_CROSS_SECTIONAL') = 'INTRADAY_EVENT'
-              then 0 else 1 end,
+         case
+           when coalesce(l.ast_contract->>'research_lane',
+                         'DAILY_CROSS_SECTIONAL') = 'INTRADAY_EVENT'
+                and coalesce(
+                      (l.ast_contract->>'formula_contract_complete')::boolean,
+                      false)
+             then 0
+           when coalesce(l.ast_contract->>'research_lane',
+                         'DAILY_CROSS_SECTIONAL') = 'INTRADAY_EVENT'
+             then 1
+           else 2
+         end,
          l.created_at desc
 limit %s
 """
@@ -1254,6 +1263,10 @@ LEADS_LOW = 4
 # a small independent buffer so daily leads cannot mask starvation of the
 # primary microstructure lane.
 INTRADAY_LEADS_LOW = 2
+# Legacy event-time ASTs can satisfy the lane buffer while still lacking the
+# economic equation thesis needed by the symbolic search. Maintain a separate
+# typed-formula buffer so deployment upgrades actually refill the new contract.
+INTRADAY_FORMULA_LEADS_LOW = 2
 # 이보다 오래된 리드만 있으면 시장이 바뀌었을 수 있다.
 LEADS_STALE_DAYS = 2
 
@@ -1347,6 +1360,26 @@ def _lead_health(conn) -> str:
                               where r.verdict = 'STOP'
                                 and methodology_leads.lead_id = any(r.lead_ids))
                        ) as intraday_usable_unused,
+                       count(*) filter (
+                         where status = 'COMPLETE'
+                           and testability = 'RULE_EXPRESSIBLE'
+                           and ast_contract->>'ast_readiness' = 'AST_READY'
+                           and ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
+                           and ast_contract->>'research_lane' = 'INTRADAY_EVENT'
+                           and coalesce(
+                                 (ast_contract->>'alpha_candidate_eligible')::boolean,
+                                 false)
+                           and coalesce(
+                                 (ast_contract->>'formula_contract_complete')::boolean,
+                                 false)
+                           and not exists (
+                             select 1 from research.experiment_proposals p
+                              where methodology_leads.lead_id = any(p.lead_ids))
+                           and not exists (
+                             select 1 from research.proposal_review_outcomes r
+                              where r.verdict = 'STOP'
+                                and methodology_leads.lead_id = any(r.lead_ids))
+                       ) as intraday_formula_unused,
                        extract(epoch from (
                          now() - max(created_at) filter (
                            where status = 'COMPLETE'
@@ -1358,14 +1391,17 @@ def _lead_health(conn) -> str:
                          )
                        ))/86400.0 as newest_usable_age_days
                   from research.methodology_leads""")
-            total, raw_unused, unused, intraday_unused, age = cur.fetchone()
+            (total, raw_unused, unused, intraday_unused,
+             intraday_formula_unused, age) = cur.fetchone()
     except Exception:  # noqa: BLE001 - 못 세면 안 적는다
         return ""
     total = int(total or 0)
     raw_unused, unused = int(raw_unused or 0), int(unused or 0)
     intraday_unused = int(intraday_unused or 0)
+    intraday_formula_unused = int(intraday_formula_unused or 0)
     age = float(age or 0)
     if (unused >= LEADS_LOW and intraday_unused >= INTRADAY_LEADS_LOW
+            and intraday_formula_unused >= INTRADAY_FORMULA_LEADS_LOW
             and age < LEADS_STALE_DAYS):
         return ""                      # 재료가 넉넉하면 말하지 않는다
 
@@ -1376,13 +1412,19 @@ def _lead_health(conn) -> str:
         why.append(
             f"event-time 미사용 리드가 {intraday_unused}건뿐이다"
             f"(별도 기준 {INTRADAY_LEADS_LOW})")
+    if intraday_formula_unused < INTRADAY_FORMULA_LEADS_LOW:
+        why.append(
+            f"typed formula-thesis event-time 미사용 리드가 "
+            f"{intraday_formula_unused}건뿐이다"
+            f"(별도 기준 {INTRADAY_FORMULA_LEADS_LOW})")
     if age >= LEADS_STALE_DAYS:
         why.append(f"가장 최근 리드가 {age:.1f}일 전이다")
     return "\n".join([
         "",
         f"[재료 부족 - **기획 전에 스카우트가 먼저다**] 리드 {total}건 중 "
         f"원시 미사용 {raw_unused}건 · 실행가능 미사용 {unused}건 · "
-        f"event-time 미사용 {intraday_unused}건",
+        f"event-time 미사용 {intraday_unused}건 · typed formula-thesis 미사용 "
+        f"{intraday_formula_unused}건",
         "  " + " · ".join(why),
         "  ▶ 이 상태로 기획안을 내면 **이미 기각된 계열을 다시 내게 된다.**",
         "    실측(2026-08-12): 그렇게 낸 기획안 2건이 Gate 0 에서 "
@@ -3944,8 +3986,10 @@ def _check_unused_leads_come_first():
     아래에 묻혀 있었다.
     """
     assert "used asc" in _SQL_LEADS, "안 쓴 리드를 앞에 안 놓는다"
-    assert "INTRADAY_EVENT" in _SQL_LEADS and "case when" in _SQL_LEADS, \
+    assert "INTRADAY_EVENT" in _SQL_LEADS and "case" in _SQL_LEADS, \
         "event-time 리드를 일봉보다 먼저 소비하지 않는다"
+    assert "formula_contract_complete" in _SQL_LEADS and "then 0" in _SQL_LEADS, \
+        "typed formula-thesis 리드를 legacy event-time보다 먼저 소비하지 않는다"
     assert "ast_readiness" in _SQL_LEADS, "AST-ready 리드를 우선하지 않는다"
     assert "primary_data_plane' = 'MICROSTRUCTURE" in _SQL_LEADS, \
         "일봉형 과거 리드를 새 기획에 다시 노출한다"
@@ -4007,28 +4051,35 @@ def _check_lead_health_is_surfaced():
 
     # 실측 상태: 리드 12건 · 원시/실행가능 미사용 4건 · 최신 1.2일 전
     #   → 안 쓴 것이 기준(4) 이상이고 1.2일이면 아직 조용하다
-    assert _lead_health(_Rows((12, 4, 4, 2, 1.2))) == ""
+    assert _lead_health(_Rows((12, 4, 4, 2, 2, 1.2))) == ""
 
     # A full daily queue must not hide an empty raw event-time lane.
-    intraday_empty = _lead_health(_Rows((55, 9, 9, 0, 0.1)))
+    intraday_empty = _lead_health(_Rows((55, 9, 9, 0, 0, 0.1)))
     assert "event-time 미사용 0건" in intraday_empty, intraday_empty
     assert "별도 기준 2" in intraday_empty, intraday_empty
 
+    # Legacy AST-ready event-time leads must not mask starvation of the new
+    # financial-mathematics contract introduced by formula-discovery-v1.
+    formula_empty = _lead_health(_Rows((55, 9, 9, 5, 0, 0.1)))
+    assert "typed formula-thesis event-time 미사용 리드가 0건" in formula_empty, \
+        formula_empty
+    assert "typed formula-thesis 미사용 0건" in formula_empty, formula_empty
+
     # PARTIAL 리드가 남아 있어도 실행가능한 COMPLETE/AST_READY 리드가 0이면
     # 스카우트를 불러야 한다. 이것이 2026-08-15 운영 false-negative였다.
-    partial_only = _lead_health(_Rows((55, 7, 0, 0, 0.1)))
+    partial_only = _lead_health(_Rows((55, 7, 0, 0, 0, 0.1)))
     assert "원시 미사용 7건" in partial_only, partial_only
     assert "실행가능 미사용 0건" in partial_only, partial_only
 
     # 안 쓴 것이 줄면 말한다
-    low = _lead_health(_Rows((12, 1, 1, 1, 0.5)))
+    low = _lead_health(_Rows((12, 1, 1, 1, 1, 0.5)))
     assert "재료 부족" in low and "안 쓴 리드가 1건" in low, low
     assert "스카우트가 먼저" in low
     # **어떻게 훑는지**까지 알려줘야 한다 - 도구를 모르면 못 한다
     assert "agent-reach" in low and "r.jina.ai" in low, low
 
     # 오래되면 말한다
-    stale = _lead_health(_Rows((12, 9, 9, 2, 3.4)))
+    stale = _lead_health(_Rows((12, 9, 9, 2, 2, 3.4)))
     assert "3.4일 전" in stale, stale
 
     # 못 세면 안 적는다
