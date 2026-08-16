@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import sys
 
@@ -22,7 +22,8 @@ from intraday_alpha_ast import (IntradayExprError, evaluate, fields_of, parse,
                                 shape_fingerprint, unit_of)
 from intraday_candidate import evaluate_candidate
 from factory_bridge import expected_edge_for, gate0
-from intraday_experiment_runner import _input_hash, config_from_edge
+from intraday_experiment_runner import (_input_hash, config_from_edge,
+                                        select_slice)
 from intraday_microstructure import (HorizonLabel, IntradayLaneSpec,
                                       IntradaySample)
 from trial_family import family_id, hypothesis_view
@@ -277,6 +278,38 @@ def test_intraday_input_identity_ignores_wall_clock_but_tracks_lineage() -> None
                  "source_lineage": [{"source": "market_quotes", "rows": 101}]}
     assert _input_hash("H1", base) == _input_hash("H1", later_call)
     assert _input_hash("H1", base) != _input_hash("H1", late_data)
+
+
+def test_session_discovery_is_partition_bounded_and_cutoff_reproducible() -> None:
+    class Cursor:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+
+        def execute(self, sql, params):
+            self.conn.executed.append((sql, params))
+
+        def fetchall(self):
+            # Not enough calibration sessions: select_slice returns before the
+            # universe query, keeping this regression focused on discovery.
+            return [(date(2026, 8, 12),), (date(2026, 8, 13),),
+                    (date(2026, 8, 14),)]
+
+    class Conn:
+        def __init__(self): self.executed = []
+        def cursor(self): return Cursor(self)
+
+    conn = Conn()
+    cutoff = datetime(2026, 8, 16, 3, 0, tzinfo=timezone.utc)
+    selected = select_slice(
+        conn, {"evaluation_days": 60, "instrument_count": 2}, cutoff=cutoff)
+    sql, params = conn.executed[0]
+    assert selected["status"] == "INSUFFICIENT_SESSIONS"
+    assert "observed_at >= %s" in sql
+    assert "now()" not in sql
+    assert params == (cutoff - timedelta(days=180), cutoff, cutoff, 65)
 
 
 def test_intraday_outcomes_become_creative_search_memory() -> None:

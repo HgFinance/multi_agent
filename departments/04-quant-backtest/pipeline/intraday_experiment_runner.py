@@ -34,9 +34,10 @@ _SESSION_DATES_SQL = """
 select distinct (event_time at time zone 'Asia/Seoul')::date as session_date
   from market.market_quotes
  where received_at is not null
+   and observed_at >= %s
    and observed_at <= %s
    and event_time < (
-         date_trunc('day', now() at time zone 'Asia/Seoul')
+         date_trunc('day', %s at time zone 'Asia/Seoul')
          at time zone 'Asia/Seoul'
        )
  order by session_date desc
@@ -149,9 +150,18 @@ def _session_bounds(day) -> tuple[datetime, datetime]:
 def select_slice(market_conn, config: dict, *, cutoff: datetime) -> dict:
     """Choose instruments only from sessions preceding the evaluation slice."""
     calibration_days = 5
+    # A LIMIT after DISTINCT/ORDER BY does not bound a hypertable scan: without
+    # a lower partition-key predicate Timescale must visit every compressed
+    # chunk to prove which sessions are latest. Three calendar days per desired
+    # KRX session is conservative across weekends/holidays while keeping the
+    # scan finite. The returned sessions, not this calendar window, determine
+    # statistical sufficiency.
+    oldest_possible = cutoff - timedelta(
+        days=max(30, config["evaluation_days"] * 3))
     with market_conn.cursor() as cur:
         cur.execute(_SESSION_DATES_SQL,
-                    (cutoff, config["evaluation_days"] + calibration_days))
+                    (oldest_possible, cutoff, cutoff,
+                     config["evaluation_days"] + calibration_days))
         days = sorted(row[0] for row in cur.fetchall())
     if len(days) <= calibration_days:
         return {"status": "INSUFFICIENT_SESSIONS", "sessions": days,
