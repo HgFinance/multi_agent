@@ -32,7 +32,9 @@ LANE_VERSION = "krx-intraday-causal-v1"
 NUMERIC_FEATURES = frozenset({
     "quote_age_ms", "spread_bps", "queue_imbalance_l1",
     "queue_imbalance_l10", "microprice_offset_bps", "trade_flow_imbalance",
-    "quote_event_ofi", "trade_count", "quote_count", "entry_bid",
+    "quote_event_ofi", "normalized_quote_ofi", "bid_depth_l1",
+    "ask_depth_l1", "book_depth_l1", "book_depth_l10", "trade_count",
+    "quote_count", "trade_intensity", "realized_volatility_bps", "entry_bid",
     "entry_ask", "entry_mid",
 })
 
@@ -200,8 +202,17 @@ class IntradaySample:
     microprice_offset_bps: float
     trade_flow_imbalance: float | None
     quote_event_ofi: float | None
+    normalized_quote_ofi: float | None
+    bid_depth_l1: float
+    ask_depth_l1: float
+    book_depth_l1: float
+    book_depth_l10: float
     trade_count: int
     quote_count: int
+    trade_intensity: float
+    realized_volatility_bps: float | None
+    entry_bid_depth_l1: float
+    entry_ask_depth_l1: float
     entry_bid: float
     entry_ask: float
     entry_mid: float
@@ -215,8 +226,15 @@ class IntradaySample:
             "microprice_offset_bps": self.microprice_offset_bps,
             "trade_flow_imbalance": self.trade_flow_imbalance,
             "quote_event_ofi": self.quote_event_ofi,
+            "normalized_quote_ofi": self.normalized_quote_ofi,
+            "bid_depth_l1": self.bid_depth_l1,
+            "ask_depth_l1": self.ask_depth_l1,
+            "book_depth_l1": self.book_depth_l1,
+            "book_depth_l10": self.book_depth_l10,
             "trade_count": self.trade_count,
             "quote_count": self.quote_count,
+            "trade_intensity": self.trade_intensity,
+            "realized_volatility_bps": self.realized_volatility_bps,
             "quote_age_ms": self.quote_age_ms,
         }
 
@@ -329,11 +347,14 @@ def build_samples(quotes: Sequence[QuoteEvent], trades: Sequence[TradeEvent],
 
     for decision in _fixed_grid(start, end, spec.sample_interval_seconds):
         entry_time = decision + latency
+        decision_quote = _last_known(qs, qa, decision)
         entry_quote = _last_known(qs, qa, entry_time)
-        if entry_quote is None:
+        if decision_quote is None or entry_quote is None:
             continue
-        age = (entry_time - entry_quote.available_at).total_seconds()
-        if age < 0 or age > spec.max_quote_age_seconds:
+        feature_age = (decision - decision_quote.available_at).total_seconds()
+        entry_age = (entry_time - entry_quote.available_at).total_seconds()
+        if (feature_age < 0 or feature_age > spec.max_quote_age_seconds or
+                entry_age < 0 or entry_age > spec.max_quote_age_seconds):
             continue
 
         window_start = decision - lookback
@@ -347,10 +368,27 @@ def build_samples(quotes: Sequence[QuoteEvent], trades: Sequence[TradeEvent],
         signed = sum(float(t.side) * float(t.quantity) for t in visible_trades)
         volume = sum(float(t.quantity) for t in visible_trades if t.side != 0)
         trade_flow = signed / volume if volume > 0 else None
-        midpoint = entry_quote.mid
-        spread_bps = ((entry_quote.best_ask - entry_quote.best_bid) /
-                      midpoint * 10_000.0)
-        microprice_offset = (_microprice(entry_quote) / midpoint - 1.0) * 10_000.0
+        quote_ofi = _quote_ofi(visible_quotes)
+        bid_l1 = float(decision_quote.bid_sizes[0])
+        ask_l1 = float(decision_quote.ask_sizes[0])
+        depth_l1 = bid_l1 + ask_l1
+        depth_l10 = (sum(float(v) for v in decision_quote.bid_sizes[:10]) +
+                     sum(float(v) for v in decision_quote.ask_sizes[:10]))
+        normalized_ofi = (quote_ofi / depth_l1
+                          if quote_ofi is not None and depth_l1 > 0 else None)
+        quote_mids = [quote.mid for quote in visible_quotes]
+        quote_returns = [math.log(right / left) * 10_000.0
+                         for left, right in zip(quote_mids, quote_mids[1:])
+                         if left > 0 and right > 0]
+        realized_volatility = (
+            math.sqrt(sum(value * value for value in quote_returns))
+            if quote_returns else None)
+        feature_mid = decision_quote.mid
+        entry_mid = entry_quote.mid
+        spread_bps = ((decision_quote.best_ask - decision_quote.best_bid) /
+                      feature_mid * 10_000.0)
+        microprice_offset = (
+            _microprice(decision_quote) / feature_mid - 1.0) * 10_000.0
 
         labels: list[HorizonLabel] = []
         for horizon in spec.horizons_seconds:
@@ -362,8 +400,8 @@ def build_samples(quotes: Sequence[QuoteEvent], trades: Sequence[TradeEvent],
             if exit_age < 0 or exit_age > spec.max_quote_age_seconds:
                 continue
             future_mid = exit_quote.mid
-            long_mid = (future_mid / midpoint - 1.0) * 10_000.0
-            short_mid = (midpoint / future_mid - 1.0) * 10_000.0
+            long_mid = (future_mid / entry_mid - 1.0) * 10_000.0
+            short_mid = (entry_mid / future_mid - 1.0) * 10_000.0
             fees = 2.0 * spec.fee_bps_per_side
             # Conservative taker round trip: cross at entry and again at exit.
             long_net = (exit_quote.best_bid / entry_quote.best_ask - 1.0) * 10_000.0 - fees
@@ -404,24 +442,34 @@ def build_samples(quotes: Sequence[QuoteEvent], trades: Sequence[TradeEvent],
         if not labels:
             continue
         samples.append(IntradaySample(
-            instrument_id=entry_quote.instrument_id,
+            instrument_id=decision_quote.instrument_id,
             decision_time=decision,
             entry_time=entry_time,
-            source_quote_event_time=entry_quote.event_time,
-            quote_age_ms=age * 1000.0,
+            source_quote_event_time=decision_quote.event_time,
+            quote_age_ms=feature_age * 1000.0,
             spread_bps=spread_bps,
-            queue_imbalance_l1=_imbalance(entry_quote.bid_sizes,
-                                          entry_quote.ask_sizes, 1),
-            queue_imbalance_l10=_imbalance(entry_quote.bid_sizes,
-                                           entry_quote.ask_sizes, 10),
+            queue_imbalance_l1=_imbalance(decision_quote.bid_sizes,
+                                          decision_quote.ask_sizes, 1),
+            queue_imbalance_l10=_imbalance(decision_quote.bid_sizes,
+                                           decision_quote.ask_sizes, 10),
             microprice_offset_bps=microprice_offset,
             trade_flow_imbalance=trade_flow,
-            quote_event_ofi=_quote_ofi(visible_quotes),
+            quote_event_ofi=quote_ofi,
+            normalized_quote_ofi=normalized_ofi,
+            bid_depth_l1=bid_l1,
+            ask_depth_l1=ask_l1,
+            book_depth_l1=depth_l1,
+            book_depth_l10=depth_l10,
             trade_count=len(visible_trades),
             quote_count=len(visible_quotes),
+            trade_intensity=(len(visible_trades) /
+                             max(1.0, spec.feature_lookback_seconds)),
+            realized_volatility_bps=realized_volatility,
+            entry_bid_depth_l1=float(entry_quote.bid_sizes[0]),
+            entry_ask_depth_l1=float(entry_quote.ask_sizes[0]),
             entry_bid=entry_quote.best_bid,
             entry_ask=entry_quote.best_ask,
-            entry_mid=midpoint,
+            entry_mid=entry_mid,
             labels=tuple(labels),
         ))
     return samples
@@ -431,8 +479,8 @@ def audit_causality(samples: Sequence[IntradaySample],
                     spec: IntradayLaneSpec) -> dict:
     findings: list[str] = []
     for sample in samples:
-        if sample.source_quote_event_time > sample.entry_time:
-            findings.append(f"future entry quote at {sample.decision_time.isoformat()}")
+        if sample.source_quote_event_time > sample.decision_time:
+            findings.append(f"future feature quote at {sample.decision_time.isoformat()}")
         if sample.entry_time < sample.decision_time:
             findings.append(f"negative latency at {sample.decision_time.isoformat()}")
         if sample.quote_age_ms > spec.max_quote_age_seconds * 1000.0:

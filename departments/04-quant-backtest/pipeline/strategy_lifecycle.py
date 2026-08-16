@@ -65,6 +65,10 @@ MIN_OBSERVE_DAYS = {"SHADOW": 20, "PAPER": 40}
 # 0.5 는 "절반으로 깎였다" 는 뜻이고, 그 정도면 가정이 틀린 것이다.
 DEGRADE_RATIO = 0.5
 
+INTRADAY_MIN_SHADOW_EVENTS = 1_000
+INTRADAY_MAX_FILL_CALIBRATION_MAE = 0.15
+INTRADAY_MIN_LIVE_NET_BPS = 0.0
+
 
 @dataclass
 class LifecycleRequest:
@@ -98,7 +102,9 @@ def can_request(frm: str, to: str) -> bool:
 def evaluate_promotion(strategy_code: str, *, current_state: str,
                        gate_decision: str, observed_days: int = 0,
                        live_sharpe: float | None = None,
-                       backtest_sharpe: float | None = None) -> LifecycleRequest:
+                       backtest_sharpe: float | None = None,
+                       research_lane: str = "DAILY_CROSS_SECTIONAL",
+                       execution_evidence: dict | None = None) -> LifecycleRequest:
     """다음 칸으로 갈 자격이 있는가. **판정이지 실행이 아니다.**"""
     frm = (current_state or "").strip().upper()
     reasons: list[str] = []
@@ -134,6 +140,33 @@ def evaluate_promotion(strategy_code: str, *, current_state: str,
         # ▶ 짧은 관찰은 그 기간의 시장 국면만 본 것이다. 통과시키면
         #   "한 달 좋았다" 를 실력으로 읽게 된다.
         reasons.append(f"{frm} 관찰 {observed_days}일 < 최소 {need}일")
+
+    # Event-time edge usually dies at the queue/latency boundary.  Progress from
+    # SHADOW/PAPER is therefore fail-closed on execution calibration, not Sharpe.
+    if (research_lane or "").upper() == "INTRADAY_EVENT" and frm in {"SHADOW", "PAPER"}:
+        evidence = execution_evidence or {}
+        required = ("observed_events", "mean_live_net_bps", "latency_p95_ms",
+                    "registered_latency_ms")
+        missing = [key for key in required if evidence.get(key) is None]
+        if missing:
+            reasons.append(f"intraday execution evidence missing: {missing}")
+        else:
+            if int(evidence["observed_events"]) < INTRADAY_MIN_SHADOW_EVENTS:
+                reasons.append(
+                    f"intraday observed_events {evidence['observed_events']} < "
+                    f"{INTRADAY_MIN_SHADOW_EVENTS}")
+            if float(evidence["mean_live_net_bps"]) <= INTRADAY_MIN_LIVE_NET_BPS:
+                reasons.append("intraday live net edge is not positive")
+            if float(evidence["latency_p95_ms"]) > float(evidence["registered_latency_ms"]):
+                reasons.append("intraday p95 latency exceeds preregistered latency")
+        if str(evidence.get("execution") or "").upper() == "PASSIVE_FIFO_LOWER_BOUND":
+            fill_error = evidence.get("fill_calibration_mae")
+            if fill_error is None:
+                reasons.append("passive fill calibration is unmeasured")
+            elif float(fill_error) > INTRADAY_MAX_FILL_CALIBRATION_MAE:
+                reasons.append(
+                    f"passive fill calibration MAE {fill_error} > "
+                    f"{INTRADAY_MAX_FILL_CALIBRATION_MAE}")
 
     ok = not reasons
     return LifecycleRequest(

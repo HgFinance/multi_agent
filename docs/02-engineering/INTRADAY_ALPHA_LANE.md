@@ -131,3 +131,70 @@ purged walk-forward joint model이 함께 포함된다.
    통과한 것처럼 승격하지 않는다.
 5. 탐색 목적함수를 `mid IC`가 아니라 `net edge × fill probability × capacity`와
    stability/DSR/PBO의 다목적으로 바꾼다.
+
+## 2026-08-16 공장 통합 상태
+
+위의 1~5번은 이제 별도 측정 스크립트가 아니라 정식 연구→퀀트 원장 경로에 연결됐다.
+
+- `ExperimentProposalV1`은 `research_lane`과 Event/Context/Qualities/Direction/Output
+  `semantic_plan`을 보존한다. `INTRADAY_EVENT`는 raw `market_quotes`와
+  `market_ticks`, `intraday_signal_expr`가 없으면 발행되지 않는다.
+- `intraday_alpha_ast.py`는 초 단위 lag/rolling/ewma/z-score와 상태 조건을 지원하고,
+  물리 단위가 다른 값을 더하거나 비교하는 수식을 Gate 0에서 거부한다.
+- Gate 0는 이야기의 event/context와 수식의 실제 관측 필드를 대조한다. 예를 들어
+  `ORDER_FLOW` 가설을 microprice-only 수식으로 제출하거나 `TIGHT_SPREAD` 조건을
+  spread 필드 없이 구현하면 실험 예산을 쓰기 전에 거부된다.
+- 숫자 horizon·threshold 변경은 새 idea family가 아니다. semantic fingerprint가
+  trial family를 정하고 AST shape/fingerprint가 정확·근접 중복을 구분한다.
+- `intraday_experiment_runner.py`는 평가 직전 5개 세션의 quote-event 수로 종목을
+  선택한 뒤 그 다음 세션들만 평가한다. 결과 수익률로 종목을 고르는 hindsight를
+  차단하고, cutoff·세션·종목·원천 행 수·clock 정책을 experiment config에 고정한다.
+- 호출 시각은 실험 identity에서 제외한다. 같은 세션·종목·원천 계보의 재시도는 완료
+  결과를 재사용하고, 원천 행 수나 관측 시각이 달라진 경우에만 새 실험으로 센다. 실패한
+  동일 입력은 한 worker만 원자적으로 다시 점유해 무한 호출이 trial 수를 부풀리지 않는다.
+- 겹치는 5초 표본을 독립 관측치로 세지 않는다. KRX 세션별 PnL로 축약한 뒤 session
+  bootstrap, DSR, walk-forward fold, family PBO를 적용한다. PBO는 현재 실험을 공통
+  원장에 기록한 뒤 계산하며, 4개 이상의 비교 가능한 family variant가 없으면
+  `PBO_UNMEASURED`로 HOLD한다.
+- passive는 미체결 기회를 0 PnL로 포함한다. 체결된 건만 보고하는 selection bias를
+  막으며 snapshot L10의 결과는 계속 `FIFO_NO_CANCELLATION_CREDIT_LOWER_BOUND`이다.
+- 비용을 생략해도 0bp로 돌지 않는다. `krx-intraday-execution-v1`은
+  [2026년 상장주식 매도세](https://kind.krx.co.kr/external/2026/03/18/002312/20260318010780/11011.htm)
+  20bp(KOSPI 거래세 5bp+농특세 15bp, KOSDAQ 거래세 20bp)와
+  [대표 온라인 위탁수수료](https://kind.krx.co.kr/external/2026/05/15/001427/20260515003114/11013.htm)
+  1.5bp/side를 대칭 환산한 11.5bp/side를 기본으로 쓰며, 10bp 미만 입력은
+  Gate 0에서 거부한다. 실제 계좌 비용이 더 높으면 사전등록 값도 올려야 한다.
+- 종목별 point-in-time 대차 가능 여부·차입료·공매도 체결 제약은 현재 원천에 없다.
+  따라서 정식 lane의 `position_mode`는 `LONG_ONLY`만 허용하고 음수 신호는 abstain한다.
+  `LONG_SHORT`를 비용 없는 숏으로 실행해 수익을 부풀리는 경로는 Gate 0에서 막는다.
+- 각 기회의 L1 실행 가능 수량, 하위 10% 수량, horizon 내 최대 동시 포지션 수도
+  원장에 남긴다. 이는 수익 신호와 별개인 capacity/portfolio 병목 진단이며, 실제 주문
+  크기를 자동 승인하는 값은 아니다.
+- Quant의 최대 결정은 `SUBMIT_TO_QA`다. 이 값은 production 승격이 아니며 Risk·QA·CEO
+  승인 경계를 그대로 유지한다.
+- intraday 후보가 SHADOW에서 PAPER 이상으로 가려면 최소 1,000개 실관측 이벤트,
+  양(+)의 live net markout, 사전등록 latency 이내의 p95가 필요하다. Passive라면 예측
+  fill과 실제 fill의 calibration MAE도 0.15 이하여야 한다. 백테스트 Sharpe만으로는
+  이 실행 현실성 관문을 통과할 수 없다.
+- 완주 결과와 실패 교훈은 `intraday_experience.py`가 매 주기 원장에서 재계산해 Scout와
+  Planner 모두에게 준다. 빈 semantic cell, 실패 shape, positive/negative-associated
+  component를 보여 주되 인과 기여라고 주장하지 않는다. 다음 후보는 빈 cell 탐색,
+  단일 메커니즘 편집, 서로 다른 조각 재결합 중 하나를 명시해야 한다.
+
+운영 전제는 `20260816150000_intraday_alpha_factory.sql` 적용과
+`krx-intraday-events/v1` manifest 존재다. 원천에 `received_at`이 없으면 해당 행은
+증거에서 제외한다. 가용 세션이 60개 미만이어도 10세션 이상이면 측정은 수행하되,
+알파 실패로 오인하지 않고
+`INCONCLUSIVE/UNDERPOWERED_DATA`로 환류한다. 즉 짧은 표본의 탐색 비용은 감당하지만
+그 표본을 검증 완료로 과장하지 않는다.
+
+문헌에서 직접 반영한 설계 축은 semantic search의 [AlphaSchema](https://arxiv.org/abs/2607.26642),
+구조 편집 기억의 [AlphaMemo](https://arxiv.org/abs/2606.20625), 성공·실패 skill memory의
+[FactorMiner](https://arxiv.org/abs/2602.14670), 생성·평가·탐색 분리의
+[AlphaBench](https://openreview.net/pdf?id=d97Q8r7ZKZ), 검증 가능한 진화 탐색의
+[AlphaEvolve](https://deepmind.google/blog/alphaevolve-a-gemini-powered-coding-agent-for-designing-advanced-algorithms/),
+그리고 다면 평가의 [AlphaEval](https://arxiv.org/abs/2508.13174)이다. 통계 관문은
+[Deflated Sharpe Ratio](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2460551),
+[SPA](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=264569),
+[PBO](https://escholarship.org/uc/item/4w1110bb)의 “탐색 횟수를 증거에 포함한다”는 원칙을
+따른다.

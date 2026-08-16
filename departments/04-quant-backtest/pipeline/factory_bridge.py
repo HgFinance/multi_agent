@@ -34,6 +34,14 @@ import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
+
+for _research_contracts in (
+    Path("/app/repo/departments/01-research/contracts"),
+    Path(__file__).resolve().parents[2] / "01-research" / "contracts",
+):
+    if _research_contracts.is_dir():
+        sys.path.insert(0, str(_research_contracts))
 
 from data_resolution import SOURCE_TABLES
 from strategy_templates import EDGE_VOCAB, NOT_IMPLEMENTED
@@ -74,6 +82,14 @@ SHORT_SAMPLE_MAX_DAYS = 120
 SHORT_MIN_TEST_DAYS = 10
 SHORT_TARGET_WINDOWS = 6
 
+INTRADAY_LANE = "INTRADAY_EVENT"
+INTRADAY_EDGE_KEYS = frozenset({
+    "intraday_signal_expr", "horizon_seconds", "sample_interval_seconds",
+    "feature_lookback_seconds", "order_latency_ms", "max_quote_age_seconds",
+    "fee_bps_per_side", "maker_fee_bps_per_side", "execution", "threshold",
+    "evaluation_days", "instrument_count", "position_mode",
+})
+
 
 @dataclass
 class Gate0Result:
@@ -113,10 +129,20 @@ def _hyp_view(proposal: dict) -> dict:
       이 함수에 박혀 있었고 실행면은 그 값을 몰라서, 같은 기획안이 접수와 실행에서
       서로 다른 Family 를 받았다 - 세는 장부와 각인하는 장부가 갈렸다.
     """
+    semantic_plan = proposal.get("semantic_plan") or {}
+    semantic_fingerprint = None
+    if semantic_plan:
+        try:
+            from alpha_semantics import fingerprint as semantic_fp
+            semantic_fingerprint = semantic_fp(semantic_plan)
+        except (ImportError, ValueError):
+            pass
     return hypothesis_view(edge_type=proposal.get("edge_type"),
                            universe_key=proposal.get("universe_key"),
                            label=proposal.get("label"),
-                           baseline=proposal.get("baseline"))
+                           baseline=proposal.get("baseline"),
+                           research_lane=proposal.get("research_lane"),
+                           semantic_fingerprint=semantic_fingerprint)
 
 
 def _horizon_of(proposal: dict) -> int:
@@ -189,6 +215,10 @@ def gate0(proposal: dict, *, trials_used: int = 0,
     """
     r = Gate0Result()
     past = list(past_outcomes or [])
+    lane = str(proposal.get("research_lane") or "DAILY_CROSS_SECTIONAL").upper()
+    intraday = lane == INTRADAY_LANE
+    if lane not in {"DAILY_CROSS_SECTIONAL", INTRADAY_LANE}:
+        r.reject("UNMAPPED_RESEARCH_LANE", f"unsupported research_lane={lane!r}")
 
     # ① 통제 어휘 사상. 실행면에 없는 유형을 접수하면 실행 단계에서 죽는다 -
     #    접수는 실행 가능성의 약속이어야 한다.
@@ -211,15 +241,23 @@ def gate0(proposal: dict, *, trials_used: int = 0,
     #     파라미터가 반영된 줄 안다. `type` 을 여기 적어 관문 승인 어휘를
     #     덮으려 한 실측도 있었다(3bb50969) - 그건 이제 무시되지만 조용히
     #     무시하면 같은 실수를 반복한다.
-    _, _dropped_params = expected_edge_for(proposal)
+    try:
+        _, _dropped_params = expected_edge_for(proposal)
+    except (ImportError, TypeError, ValueError) as exc:
+        _dropped_params = []
+        r.reject("INTRADAY_CONTRACT_INVALID" if intraday else "EXECUTION_BINDING_REJECTED",
+                 str(exc))
     if _dropped_params:
         # ▶ 쓸 수 있는 키를 **손으로 적지 않는다** (2026-08-14, 카드 t_e9534028).
         #   여기 "horizon_days·top_n" 이 박혀 있었는데 그 사이 실행면은 위험
         #   손잡이·유동성·구성방식·형성창까지 열렸다. 안내문이 실행면보다 좁으면
         #   리서치는 쓸 수 있는 손잡이를 안 쓴다 - 표를 넓혀도 안 쓰이면 안 넓힌
         #   것과 같다. `EDGE_KEYS` 를 그대로 읽어 자동으로 따라오게 한다.
-        from config_binding import EDGE_KEYS as _EDGE_KEYS   # noqa: PLC0415
-        _usable = sorted(set(_EDGE_KEYS) - {"type", "universe_key"})
+        if intraday:
+            _usable = sorted(INTRADAY_EDGE_KEYS)
+        else:
+            from config_binding import EDGE_KEYS as _EDGE_KEYS   # noqa: PLC0415
+            _usable = sorted(set(_EDGE_KEYS) - {"type", "universe_key"})
         r.warnings.append(
             f"SUGGESTED_PARAMS 의 {_dropped_params} 는 실행면이 읽지 않아 "
             f"등록에서 빠진다 - 쓸 수 있는 키: {_usable}. "
@@ -248,7 +286,7 @@ def gate0(proposal: dict, *, trials_used: int = 0,
     #   IR 구조 진단(2026-08-13 실측)에서 top-20 초집중이 TC 0.114(신호 89%
     #   소실)·TE 연 34.6% 의 주범이었다. 관례가 성적을 결정하는데 그 관례는
     #   누구의 가설도 아니다. 막지 않고 정하라고 말한다.
-    if "top_n" not in sp:
+    if not intraday and "top_n" not in sp:
         r.warn("top_n 미지정 - 실행 관례(기본 20)로 돈다. 집중도가 성적을 크게 "
                "바꾼다(실측 TC: top20 0.114 vs top200 0.316) - 가설이 직접 정하라")
 
@@ -301,7 +339,8 @@ def gate0(proposal: dict, *, trials_used: int = 0,
     try:
         from config_binding import LIMITS      # noqa: PLC0415 (실행면이 정본)
 
-        for k, v in (proposal.get("suggested_params") or {}).items():
+        for k, v in (() if intraday else
+                     (proposal.get("suggested_params") or {}).items()):
             # 형성창·보유창 둘 다 lookback_days 자리의 한도를 받는다
             # (2026-08-14: signal_window_days 개방, 카드 t_e9534028)
             target = ("lookback_days"
@@ -332,9 +371,10 @@ def gate0(proposal: dict, *, trials_used: int = 0,
     try:
         from config_binding import rejection_reasons as _binding_rejections
 
-        _edge, _ = expected_edge_for(proposal)
-        for _why in _binding_rejections({"expected_edge": _edge}):
-            r.reject("EXECUTION_BINDING_REJECTED", _why)
+        if not intraday:
+            _edge, _ = expected_edge_for(proposal)
+            for _why in _binding_rejections({"expected_edge": _edge}):
+                r.reject("EXECUTION_BINDING_REJECTED", _why)
     except ImportError:
         r.warn("config_binding 을 읽지 못해 실행면 어휘·조합 검사를 못 했다")
 
@@ -343,7 +383,7 @@ def gate0(proposal: dict, *, trials_used: int = 0,
     #   실험을 만들어 놓고 중간에 죽는다. 접수는 실행 가능성의 약속이므로
     #   여기서 판정한다 - 연산자·필드·창·복잡도까지 `alpha_ast.parse` 가 본다.
     _expr = (proposal.get("suggested_params") or {}).get("signal_expr")
-    if _expr is not None:
+    if _expr is not None and not intraday:
         try:
             from alpha_ast import check_alignment as _ca  # noqa: PLC0415
             from alpha_ast import needs_micro as _nm
@@ -406,7 +446,39 @@ def gate0(proposal: dict, *, trials_used: int = 0,
     #   126일 형성 창이 634거래일 표본에 안 들어간다는 것은 백테스트를 다 돌린 뒤
     #   walk-forward 에서야 창 0개로 드러났다(2026-08-11 실측). 실험 한 번을
     #   통째로 버린 셈이다 - 어휘·예산은 접수에서 보면서 이건 안 봤다.
-    horizon = _horizon_of(proposal)
+    if intraday:
+        try:
+            from alpha_semantics import (check_observables, fingerprint,
+                                         lane_of, validate)
+            from intraday_alpha_ast import (conditional_fields_of, fields_of,
+                                            operators_of, parse)
+
+            plan = validate(proposal.get("semantic_plan") or {})
+            if lane_of(plan) != INTRADAY_LANE:
+                raise ValueError("semantic plan is not intraday")
+            iexpr = parse(sp.get("intraday_signal_expr"))
+            # Bind every controlled runtime knob at Gate 0 so a bad fee/latency
+            # range cannot consume a trial and fail only inside the worker.
+            edge_for_runtime, _ = expected_edge_for(proposal)
+            from intraday_experiment_runner import config_from_edge
+            config_from_edge(edge_for_runtime)
+            alignment = check_observables(
+                plan, fields_of(iexpr), operators=operators_of(iexpr),
+                conditional_fields=conditional_fields_of(iexpr))
+            if not alignment["ok"]:
+                r.reject("SEMANTIC_FORMULA_MISMATCH", "; ".join(alignment["missing"]))
+            if int(sp.get("horizon_seconds", plan["horizon_seconds"])) != plan["horizon_seconds"]:
+                r.reject("SEMANTIC_HORIZON_MISMATCH",
+                         "semantic_plan and suggested_params use different horizons")
+            if str(sp.get("execution") or plan["execution"]).upper() != plan["execution"]:
+                r.reject("SEMANTIC_EXECUTION_MISMATCH",
+                         "semantic_plan and suggested_params use different execution models")
+            r.warn(f"intraday AST accepted: semantic_family={fingerprint(plan)} "
+                   f"fields={sorted(fields_of(iexpr))}")
+        except (ImportError, TypeError, ValueError) as exc:
+            r.reject("INTRADAY_CONTRACT_INVALID", str(exc))
+
+    horizon = 0 if intraday else _horizon_of(proposal)
     avail = int(available_days or 0)
     if horizon and avail:
         usable = max(0, avail - horizon)
@@ -521,10 +593,29 @@ def expected_edge_for(proposal: dict) -> tuple[dict, list]:
       `walk_forward_window_days` 는 창 분할 = 사전등록 정책이라 실행 손잡이가
       되지 않았다(NON_EXECUTION_KEYS). 그래서 여기서 떨어지는 것은 후자뿐이다.
     """
+    lane = str(proposal.get("research_lane") or "DAILY_CROSS_SECTIONAL").upper()
+    params = proposal.get("suggested_params") or {}
+    if lane == INTRADAY_LANE:
+        from alpha_semantics import fingerprint as semantic_fp
+        from alpha_semantics import validate as validate_semantics
+        from intraday_alpha_ast import parse as parse_intraday
+
+        plan = validate_semantics(proposal.get("semantic_plan") or {})
+        kept = {key: value for key, value in params.items()
+                if key in INTRADAY_EDGE_KEYS}
+        if "intraday_signal_expr" in kept:
+            kept["intraday_signal_expr"] = parse_intraday(kept["intraday_signal_expr"])
+        dropped = sorted(key for key in params if key not in INTRADAY_EDGE_KEYS)
+        return ({**kept,
+                 "type": proposal.get("edge_type"),
+                 "universe_key": proposal.get("universe_key"),
+                 "research_lane": lane,
+                 "semantic_plan": plan,
+                 "semantic_fingerprint": semantic_fp(plan)}, dropped)
+
     from config_binding import EDGE_KEYS      # noqa: PLC0415 (실행면이 정본)
 
     tunable = set(EDGE_KEYS) - {"type", "universe_key"}
-    params = proposal.get("suggested_params") or {}
     kept = {k: v for k, v in params.items() if k in tunable}
     dropped = sorted(k for k in params if k not in tunable)
     # 정체성 키를 마지막에 - suggested_params 가 덮을 수 없다.
@@ -549,6 +640,18 @@ def mapping_loss_of(proposal: dict) -> dict:
       defaulted_keys - 가설이 안 정해 실행 관례가 채울 손잡이
       identity_hints - 파라미터 칸에 적힌 정체성 값 중 전용 필드와 다른 것
     """
+    lane = str(proposal.get("research_lane") or "DAILY_CROSS_SECTIONAL").upper()
+    if lane == INTRADAY_LANE:
+        params = proposal.get("suggested_params") or {}
+        _edge, dropped = expected_edge_for(proposal)
+        loss = {}
+        if dropped:
+            loss["dropped_keys"] = dropped
+        missing = sorted(INTRADAY_EDGE_KEYS - set(params))
+        if missing:
+            loss["defaulted_keys"] = missing
+        return loss
+
     from config_binding import EDGE_KEYS      # noqa: PLC0415 (실행면이 정본)
 
     tunable = set(EDGE_KEYS) - {"type", "universe_key"}
@@ -645,7 +748,7 @@ _SQL_PUBLISHED = """
            p.competing_explanation_codes, p.skeptic_sign, p.lead_ids,
            p.falsification_tests, p.data_requirements, p.suggested_params,
            p.trial_budget, p.prior_check, p.source_reported_effect,
-           p.research_packet_ids, p.claim_ids
+           p.research_packet_ids, p.claim_ids, p.research_lane, p.semantic_plan
       from research.experiment_proposals p
      where p.status = 'PUBLISHED'
        and not exists (select 1 from quant.hypotheses h
@@ -676,7 +779,8 @@ _SQL_EXACT_AST_OUTCOMES = """
      where o.experiment_id = any(
            select e.experiment_id::text
              from quant.experiments e
-            where e.config->'signal_expr' = %s::jsonb)
+            where e.config->'signal_expr' = %s::jsonb
+               or e.config->'intraday_signal_expr' = %s::jsonb)
      order by o.decided_at desc
 """
 
@@ -713,7 +817,7 @@ def fetch_published_proposals(conn, limit: int = 20) -> list[dict]:
             "counterparty competing_explanation competing_explanation_codes "
             "skeptic_sign lead_ids falsification_tests data_requirements "
             "suggested_params trial_budget prior_check source_reported_effect "
-            "research_packet_ids claim_ids").split()
+            "research_packet_ids claim_ids research_lane semantic_plan").split()
     with conn.cursor() as cur:
         cur.execute(_SQL_PUBLISHED, (limit,))
         return [dict(zip(cols, row)) for row in cur.fetchall()]
@@ -967,8 +1071,8 @@ def fetch_exact_ast_outcomes(conn, signal_expr) -> list[dict]:
     except Exception:  # gate0 owns the human-readable invalid-AST rejection
         return []
     with conn.cursor() as cur:
-        cur.execute(_SQL_EXACT_AST_OUTCOMES,
-                    (json.dumps(normalized, sort_keys=True),))
+        encoded = json.dumps(normalized, sort_keys=True)
+        cur.execute(_SQL_EXACT_AST_OUTCOMES, (encoded, encoded))
         return [{"decision": d, "lesson_codes": list(lc or []),
                  "match_scope": "AST_EXACT"}
                 for d, lc in cur.fetchall()]
@@ -1110,7 +1214,8 @@ def promote_published(conn, *, limit: int = 20, created_by: str = "factory-bridg
         fam = probe.trial_family_id
         family_history = fetch_family_outcomes(conn, fam)
         exact_history = fetch_exact_ast_outcomes(
-            conn, (p.get("suggested_params") or {}).get("signal_expr"))
+            conn, ((p.get("suggested_params") or {}).get("signal_expr") or
+                   (p.get("suggested_params") or {}).get("intraday_signal_expr")))
         available_days = _available_days_for_proposal(conn, p)
         gate = gate0(p, trials_used=count_family_trials(conn, fam),
                       past_outcomes=_merge_outcome_evidence(
@@ -1172,13 +1277,15 @@ class _PromoCursor:
             # SQL 문면을 따라간다 - not exists 를 지우면 가짜도 예전(승격분이
             # 창을 차지하는) 동작으로 돌아가 아래 굶주림 자체 점검이 죽는다.
             already = set(self.c.already) if "not exists" in s else set()
-            rows = [tuple(p[k] for k in (
+            rows = [tuple(p.get(k, ({ } if k == "semantic_plan" else
+                                    "DAILY_CROSS_SECTIONAL" if k == "research_lane" else None))
+                          for k in (
                 "proposal_id edge_type universe_key label baseline "
                 "economic_rationale counterparty competing_explanation "
                 "competing_explanation_codes skeptic_sign lead_ids "
                 "falsification_tests data_requirements suggested_params "
                 "trial_budget prior_check source_reported_effect "
-                "research_packet_ids claim_ids").split())
+                "research_packet_ids claim_ids research_lane semantic_plan").split())
                 for p in self.c.published
                 if p["proposal_id"] not in already]
             if params:

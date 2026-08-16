@@ -21,7 +21,13 @@ DEFAULT_ROOT = Path("/app")
 DEFAULT_MANIFEST = DEFAULT_ROOT / ".factory-runtime-contract.json"
 
 CRITICAL_FILES = (
+    "departments/01-research/contracts/alpha_semantics.py",
+    "departments/01-research/contracts/intraday_ast_contract.py",
+    "departments/01-research/factory/lead_intake.py",
+    "departments/01-research/factory/literature_derivation.py",
+    "departments/01-research/factory/proposal_intake.py",
     "departments/01-research/factory/factory_autopilot.py",
+    "departments/01-research/factory/intraday_experience.py",
     "departments/04-quant-backtest/pipeline/alpha_ast.py",
     "departments/04-quant-backtest/pipeline/config_binding.py",
     "departments/04-quant-backtest/pipeline/factory_bridge.py",
@@ -29,7 +35,13 @@ CRITICAL_FILES = (
     "departments/04-quant-backtest/pipeline/db_writer.py",
     "departments/04-quant-backtest/pipeline/experiment_orchestrator.py",
     "departments/04-quant-backtest/pipeline/experiment_worker.py",
+    "departments/04-quant-backtest/pipeline/intraday_alpha_ast.py",
+    "departments/04-quant-backtest/pipeline/intraday_candidate.py",
+    "departments/04-quant-backtest/pipeline/intraday_experiment_runner.py",
+    "departments/04-quant-backtest/pipeline/intraday_microstructure.py",
     "departments/04-quant-backtest/pipeline/job_queue.py",
+    "departments/04-quant-backtest/pipeline/strategy_lifecycle.py",
+    "departments/04-quant-backtest/pipeline/trial_family.py",
 )
 
 # These fields are the current executable microstructure contract.  They are

@@ -126,6 +126,28 @@ def test_late_event_never_enters_feature_window() -> None:
     assert samples[0].quote_count == 1
 
 
+def test_latency_quote_sets_execution_but_never_signal_feature() -> None:
+    decision_quote = quote(4, 99, 101, 10, 10)
+    # This quote is learned 500ms after the decision but before the 1s-latent
+    # order arrives.  It may set the fill price/capacity, never the AST feature.
+    latency_quote = quote(5, 100, 102, 1000, 1, delay_ms=500)
+    exit_quote = quote(10, 101, 103, 10, 10)
+    spec = IntradayLaneSpec(
+        sample_interval_seconds=5, feature_lookback_seconds=10,
+        horizons_seconds=(5,), order_latency_ms=1000,
+        max_quote_age_seconds=6)
+    samples = build_samples(
+        [decision_quote, latency_quote, exit_quote], [], spec,
+        start=BASE + timedelta(seconds=5),
+        end=BASE + timedelta(seconds=6))
+    assert len(samples) == 1
+    sample = samples[0]
+    assert sample.source_quote_event_time == decision_quote.event_time
+    assert sample.queue_imbalance_l1 == 0.0
+    assert sample.entry_bid == latency_quote.best_bid
+    assert sample.entry_ask_depth_l1 == 1.0
+
+
 def test_future_clock_skew_event_falls_back_to_eligible_quote() -> None:
     visible = quote(0, 99, 101, 10, 10)
     # Received before its rounded exchange timestamp.  It is available by the
@@ -242,8 +264,17 @@ def test_walk_forward_purges_labels_and_abstains_below_spread() -> None:
             microprice_offset_bps=feature,
             trade_flow_imbalance=feature,
             quote_event_ofi=feature,
+            normalized_quote_ofi=feature,
+            bid_depth_l1=10.0,
+            ask_depth_l1=10.0,
+            book_depth_l1=20.0,
+            book_depth_l10=200.0,
             trade_count=10,
             quote_count=10,
+            trade_intensity=10.0,
+            realized_volatility_bps=1.0,
+            entry_bid_depth_l1=10.0,
+            entry_ask_depth_l1=10.0,
             entry_bid=99.99,
             entry_ask=100.01,
             entry_mid=100.0,

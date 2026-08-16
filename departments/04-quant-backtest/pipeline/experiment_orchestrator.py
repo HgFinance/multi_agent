@@ -412,6 +412,12 @@ _OOS_KEYS = (
     #   positive_window_ratio·worst_window_mdd·sharpe_std: 관문이 실제로 보는 값
     "walk_forward_efficiency", "positive_window_ratio",
     "worst_window_mdd", "sharpe_std",
+    # Intraday event-time lane.  Session counts, not overlapping ticks, are the
+    # independent evidence unit.
+    "mean_net_bps_per_opportunity", "fill_rate", "sessions", "instruments",
+    "positive_fold_ratio", "session_net_ci_low_bps", "session_net_ci_high_bps",
+    "mean_capacity_shares_l1", "p10_capacity_shares_l1",
+    "max_concurrent_opportunities",
 )
 
 
@@ -696,9 +702,25 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         # edge 로부터 실질 필드를 채운다(가설 발행기가 아직 평평한 스키마다)
         edge = hyp.get("expected_edge") or {}
         spec_row.setdefault("strategy_family", edge.get("type"))
-        spec_row.setdefault("holding_horizon", edge.get("horizon_days"))
-        spec_row.setdefault("cost_model_version", "krx-cost-v2")
-        spec_row.setdefault("universe_version", "krx-basket-daily/v2")
+        intraday_lane = str(edge.get("research_lane") or "").upper() == "INTRADAY_EVENT"
+        if intraday_lane:
+            spec_row.update({
+                "features": [edge.get("intraday_signal_expr")],
+                "label": (edge.get("semantic_plan") or {}).get("output"),
+                "decision_frequency": f"{edge.get('sample_interval_seconds', 5)}s",
+                "holding_horizon": f"{edge.get('horizon_seconds')}s",
+                "entry_exit_rules": {
+                    "execution": edge.get("execution"),
+                    "latency_ms": edge.get("order_latency_ms", 250),
+                    "threshold": edge.get("threshold", 0.0),
+                },
+                "cost_model_version": "krx-intraday-execution-v1",
+                "universe_version": "krx-intraday-events/v1",
+            })
+        else:
+            spec_row.setdefault("holding_horizon", edge.get("horizon_days"))
+            spec_row.setdefault("cost_model_version", "krx-cost-v2")
+            spec_row.setdefault("universe_version", "krx-basket-daily/v2")
         spec_row.setdefault("falsification_tests",
                             hyp.get("falsification_tests"))
 
@@ -776,7 +798,15 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         hyp['_trials'] = int(report.trial_pressure['trial_number'])
 
 
-        chain = run_chain or _default_chain
+        if run_chain is not None:
+            chain = run_chain
+        elif intraday_lane:
+            from intraday_experiment_runner import run as run_intraday
+
+            chain = lambda h, i: run_intraday(  # noqa: E731 - injected DB handles
+                h, i, meta_conn=conn, market_conn=market_conn)
+        else:
+            chain = _default_chain
         try:
             result = chain(hyp, str(hid))   # {"experiment_id", "fragility": FRAGILE|ROBUST}
         except Exception:
@@ -798,6 +828,7 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         # ▶ 이 실험의 Family 배정을 남긴다. **한쪽만 쓰지 않는다** - Family 가
         #   없으면 순번도 없다(DB 제약이 강제한다). 없는 순번을 지어내면
         #   다음 실험의 계수가 틀어진다.
+        family_pbo = None
         if fam and result.get("experiment_id"):
             cur.execute(
                 """update quant.experiments
@@ -816,17 +847,35 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
                 from pbo_cscv import compute as pbo_compute
                 from pbo_cscv import load_family_performance
 
-                pres = pbo_compute(load_family_performance(conn, fam))
+                # A worker retry must replay the decision made for this immutable
+                # input, not recompute it using family variants discovered later.
+                # Otherwise merely retrying could rewrite history and create a
+                # second final-gate row with different dimensions.
+                if intraday_lane and result.get("duplicate"):
+                    replay_pbo = (result.get("intraday_report", {}).get("summary", {})
+                                  .get("pbo"))
+                    pres = {
+                        "probability_of_backtest_overfitting": replay_pbo,
+                        "idempotent_replay": True,
+                    }
+                else:
+                    pres = pbo_compute(load_family_performance(conn, fam))
                 report.trial_pressure.update(pres)
                 # ▶ **지표로도 적재한다.** 릴리스 관문은 report 가 아니라
                 #   experiment_metrics 에서 pbo 를 읽는다 - 여기 안 넣으면
                 #   관문이 늘 None 을 보고 fail-closed 로 전부 HOLD 한다.
                 #   (계약·계산은 됐는데 소비처에 안 닿는 같은 결함이다.)
                 pv = pres.get("probability_of_backtest_overfitting")
+                family_pbo = pv
                 if pv is not None:
                     # cost_model_version 은 NOT NULL 이다 - 빠뜨리면 적재가
                     # 통째로 죽고 관문은 다시 None 을 본다(실측으로 걸렸다)
-                    from backtest_runner import COST_MODEL
+                    if intraday_lane:
+                        from intraday_experiment_runner import COST_MODEL_VERSION
+                        metric_cost_version = COST_MODEL_VERSION
+                    else:
+                        from backtest_runner import COST_MODEL
+                        metric_cost_version = COST_MODEL["version"]
 
                     cur.execute(
                         """insert into quant.experiment_metrics
@@ -835,7 +884,7 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
                            values (%s, 'WALK_FORWARD', 'pbo', %s, '{}'::jsonb, %s)
                            on conflict (experiment_id, split, metric, dimensions)
                            do update set value = excluded.value""",
-                        (result["experiment_id"], pv, COST_MODEL["version"]))
+                        (result["experiment_id"], pv, metric_cost_version))
                     # 표본 수를 함께 남긴다 - 변형 2개짜리 PBO 0.0 을 변형
                     # 20개짜리와 같은 무게로 읽으면 안 된다
                     for k in ("n_variants", "n_splits", "n_windows"):
@@ -850,13 +899,31 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
                                                 dimensions)
                                    do update set value = excluded.value""",
                                 (result["experiment_id"], f"pbo_{k}", pres[k],
-                                 COST_MODEL["version"]))
+                                 metric_cost_version))
                     conn.commit()
             except Exception as e:  # noqa: BLE001
                 # 못 재면 None 이다. **0 을 내지 않는다** - 0 은 "과적합 없음"
                 # 으로 읽히는데 "안 재봤다" 와 정반대다.
                 report.trial_pressure["probability_of_backtest_overfitting"] = None
                 report.trial_pressure["pbo_error"] = f"{type(e).__name__}: {e}"[:200]
+
+        if result.get("research_lane") == "INTRADAY_EVENT":
+            from intraday_candidate import apply_family_pbo
+            from intraday_experiment_runner import persist_final_gate
+
+            result["intraday_report"] = apply_family_pbo(
+                result["intraday_report"], family_pbo)
+            persist_final_gate(conn, result["experiment_id"],
+                               result["intraday_report"])
+            decision = result["intraday_report"]["decision"]
+            result["fragility"] = ("ROBUST" if decision == "SUBMIT_TO_QA" else
+                                   "INSUFFICIENT" if decision == "NO_EVIDENCE" else
+                                   "FRAGILE")
+            report.experiment_refs = {
+                "experiment_id": result["experiment_id"],
+                "fragility": result["fragility"],
+                "idempotent_replay": bool(result.get("duplicate")),
+            }
         # ▶ **실험 후 대조.** 등록 시점과 실질 내용이 다르면 결과를 보고
         #   설정을 바꾼 것이고, 그 실험은 무효다.
         cur.execute("select material_fingerprint from quant.hypotheses "
@@ -876,6 +943,45 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
                 lesson_codes=["LEAKAGE_SUSPECT"],
                 notes=f"사전등록 위반: {vr.reason}"[:400])
             report.transitions.append("RUNNING->REJECTED (사전등록 위반)")
+            return report
+
+        if result.get("research_lane") == "INTRADAY_EVENT":
+            intraday_report = result["intraday_report"]
+            failed = list(intraday_report.get("failed_criteria") or [])
+            decision = intraday_report.get("decision")
+            underpowered = any(item in {
+                "NO_EXECUTABLE_OBSERVATIONS", "SESSIONS_BELOW_MINIMUM",
+                "INSTRUMENTS_BELOW_MINIMUM", "OPPORTUNITIES_BELOW_MINIMUM",
+                "PBO_UNMEASURED",
+            } for item in failed)
+            new_status = ("SUPPORTED" if decision == "SUBMIT_TO_QA" else
+                          "INCONCLUSIVE" if decision == "NO_EVIDENCE" or underpowered
+                          else "REJECTED")
+            report.release = {
+                "decision": decision,
+                "failed": failed,
+                "summary": intraday_report.get("summary") or {},
+                "not_a_promotion": intraday_report.get("not_a_promotion"),
+            }
+            gate_note = json.dumps({
+                "lane": "INTRADAY_EVENT", "decision": decision,
+                "failed": failed, "summary": intraday_report.get("summary") or {},
+            }, ensure_ascii=False, default=str)[:4000]
+            _finalize_with_feedback(
+                conn, report=report, hid=hid, new_status=new_status,
+                experiment_id=result.get("experiment_id"),
+                fragility=result.get("fragility", ""), gate_failed=failed,
+                notes=gate_note)
+            report.transitions.append(f"RUNNING->{new_status}")
+            if new_status == "SUPPORTED":
+                try:
+                    from strategy_lifecycle import evaluate_promotion
+                    lc = evaluate_promotion(
+                        str(title or hid)[:40], current_state="RESEARCH",
+                        gate_decision="SUBMIT_TO_QA")
+                    report.lifecycle = lc.as_dict()
+                except Exception as exc:  # noqa: BLE001
+                    report.lifecycle = {"error": f"lifecycle evaluation failed: {type(exc).__name__}"}
             return report
 
         # ▶ **실험이 성립했는지 먼저 본다** - 거래가 0이면 강건성을 논할
