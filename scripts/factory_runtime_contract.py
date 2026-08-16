@@ -24,6 +24,7 @@ CRITICAL_FILES = (
     "departments/01-research/contracts/alpha_semantics.py",
     "departments/01-research/contracts/intraday_ast_contract.py",
     "departments/01-research/factory/lead_intake.py",
+    "departments/01-research/factory/formula_discovery.py",
     "departments/01-research/factory/literature_derivation.py",
     "departments/01-research/factory/proposal_intake.py",
     "departments/01-research/factory/factory_autopilot.py",

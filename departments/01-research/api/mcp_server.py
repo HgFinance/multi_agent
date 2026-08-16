@@ -1038,9 +1038,13 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
                     "temporal={'op':'rolling_mean','arg':field,'seconds':300}이다. "
                     "'name' 키는 금지다. OBSERVABLES는 AST가 실제 쓴 필드와 정확히 "
                     "같아야 하며, 상태 조건을 SEMANTIC_PLAN에 선언했으면 AST의 where로 "
-                    "구현한다. DERIVATION_TRANSFORMS의 대괄호를 쓰려면 문자열을 인용한 "
-                    "유효 JSON이어야 한다. "
-                    "**네가 적재 여부를 판단하지 않는다** - 반려 사유를 받아 고쳐라.")
+                     "구현한다. DERIVATION_TRANSFORMS의 대괄호를 쓰려면 문자열을 인용한 "
+                     "유효 JSON이어야 한다. 신규 INTRADAY_EVENT AST_READY는 target·"
+                     "functional_form·expected_sign·coefficient_policy·terms·identification "
+                     "키를 가진 FORMULA_THESIS JSON도 필수다. target은 SEMANTIC_PLAN "
+                     "output과 같고 terms는 AST의 모든 field를 경제적 역할에 정확히 "
+                     "한 번씩 사상해야 한다. OOS 결과에 계수를 맞추지 않는다. "
+                     "**네가 적재 여부를 판단하지 않는다** - 반려 사유를 받아 고쳐라.")
     def factory_submit_leads(text: str, lens: str = "ACADEMIC",
                              source_type: str = "PAPER",
                              model_version: str = "", prompt_version: str = "") -> dict:

@@ -13,13 +13,13 @@ rules:
    mid-price classification label.
 
 The implementation is deliberately deterministic and dependency-free.  It is
-small enough to audit, while the database loader streams one instrument/day at
-a time so it never materialises the full tick store in memory.
+small enough to audit, while the database loader materialises only one bounded
+instrument shard/session at a time so it never loads the full tick store.
 """
 
 from __future__ import annotations
 
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 import math
@@ -52,7 +52,7 @@ def _positive(value: float, name: str) -> float:
     return out
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class QuoteEvent:
     event_time: datetime
     received_at: datetime
@@ -104,7 +104,7 @@ class QuoteEvent:
         return (self.best_bid + self.best_ask) / 2.0
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TradeEvent:
     event_time: datetime
     received_at: datetime
@@ -137,7 +137,7 @@ class TradeEvent:
         return max(self.received_at, self.observed_at)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class IntradayLaneSpec:
     sample_interval_seconds: int = 5
     feature_lookback_seconds: int = 30
@@ -172,7 +172,7 @@ class IntradayLaneSpec:
                          milliseconds=self.order_latency_ms)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class HorizonLabel:
     horizon_seconds: int
     exit_time: datetime
@@ -189,7 +189,7 @@ class HorizonLabel:
     short_passive_net_bps: float | None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class IntradaySample:
     instrument_id: str
     decision_time: datetime
@@ -257,21 +257,23 @@ def _microprice(quote: QuoteEvent) -> float:
             (quote.best_bid * ask_size)) / total
 
 
+def _quote_ofi_step(previous: QuoteEvent, current: QuoteEvent) -> float:
+    pb, cb = previous.best_bid, current.best_bid
+    pa, ca = previous.best_ask, current.best_ask
+    pbs, cbs = float(previous.bid_sizes[0]), float(current.bid_sizes[0])
+    pas, cas = float(previous.ask_sizes[0]), float(current.ask_sizes[0])
+    return ((cbs if cb >= pb else 0.0) -
+            (pbs if cb <= pb else 0.0) -
+            (cas if ca <= pa else 0.0) +
+            (pas if ca >= pa else 0.0))
+
+
 def _quote_ofi(events: Sequence[QuoteEvent]) -> float | None:
     """Cont-Kukanov-Stoikov L1 order-flow imbalance over quote updates."""
     if len(events) < 2:
         return None
-    total = 0.0
-    for previous, current in zip(events, events[1:]):
-        pb, cb = previous.best_bid, current.best_bid
-        pa, ca = previous.best_ask, current.best_ask
-        pbs, cbs = float(previous.bid_sizes[0]), float(current.bid_sizes[0])
-        pas, cas = float(previous.ask_sizes[0]), float(current.ask_sizes[0])
-        total += ((cbs if cb >= pb else 0.0) -
-                  (pbs if cb <= pb else 0.0) -
-                  (cas if ca <= pa else 0.0) +
-                  (pas if ca >= pa else 0.0))
-    return total
+    return sum(_quote_ofi_step(previous, current)
+               for previous, current in zip(events, events[1:]))
 
 
 def _passive_fill(events: Sequence[TradeEvent], *, side: int, limit_price: float,
@@ -326,7 +328,8 @@ def _fixed_grid(start: datetime, end: datetime, step_seconds: int) -> Iterable[d
 
 def build_samples(quotes: Sequence[QuoteEvent], trades: Sequence[TradeEvent],
                   spec: IntradayLaneSpec, *, start: datetime,
-                  end: datetime) -> list[IntradaySample]:
+                  end: datetime,
+                  execution_model: str | None = None) -> list[IntradaySample]:
     """Build point-in-time features and multi-horizon executable labels."""
     if not quotes:
         return []
@@ -341,6 +344,38 @@ def build_samples(quotes: Sequence[QuoteEvent], trades: Sequence[TradeEvent],
                                        t.source_event_id))
     qa = [q.available_at for q in qs]
     ta = [t.available_at for t in ts]
+    # Prefix sufficient statistics remove repeated lookback-window list creation.
+    # Rows whose exchange clock is later than their availability clock are rare;
+    # those windows fall back to the exact filtered calculation below.
+    quote_ofi_prefix = [0.0]
+    quote_variance_prefix = [0.0]
+    for index, quote in enumerate(qs):
+        if index == 0:
+            ofi_step = variance_step = 0.0
+        else:
+            previous = qs[index - 1]
+            ofi_step = _quote_ofi_step(previous, quote)
+            change = math.log(quote.mid / previous.mid) * 10_000.0
+            variance_step = change * change
+        quote_ofi_prefix.append(quote_ofi_prefix[-1] + ofi_step)
+        quote_variance_prefix.append(
+            quote_variance_prefix[-1] + variance_step)
+    quote_clock_exceptions = [
+        index for index, quote in enumerate(qs)
+        if quote.event_time > quote.available_at]
+    trade_signed_prefix = [0.0]
+    trade_volume_prefix = [0.0]
+    for trade in ts:
+        trade_signed_prefix.append(
+            trade_signed_prefix[-1] + float(trade.side) * float(trade.quantity))
+        trade_volume_prefix.append(
+            trade_volume_prefix[-1] + (
+                float(trade.quantity) if trade.side != 0 else 0.0))
+    trade_clock_exceptions = [
+        index for index, trade in enumerate(ts)
+        if trade.event_time > trade.available_at]
+    need_passive = (execution_model is None or
+                    str(execution_model).upper().startswith("PASSIVE"))
     latency = timedelta(milliseconds=spec.order_latency_ms)
     lookback = timedelta(seconds=spec.feature_lookback_seconds)
     samples: list[IntradaySample] = []
@@ -360,15 +395,47 @@ def build_samples(quotes: Sequence[QuoteEvent], trades: Sequence[TradeEvent],
         window_start = decision - lookback
         qlo = bisect_right(qa, window_start)
         qhi = bisect_right(qa, decision)
-        visible_quotes = [q for q in qs[qlo:qhi] if q.event_time <= decision]
         tlo = bisect_right(ta, window_start)
         thi = bisect_right(ta, decision)
-        visible_trades = [t for t in ts[tlo:thi] if t.event_time <= decision]
 
-        signed = sum(float(t.side) * float(t.quantity) for t in visible_trades)
-        volume = sum(float(t.quantity) for t in visible_trades if t.side != 0)
+        qx_lo = bisect_left(quote_clock_exceptions, qlo)
+        qx_hi = bisect_left(quote_clock_exceptions, qhi)
+        hidden_quotes = [index for index in quote_clock_exceptions[qx_lo:qx_hi]
+                         if qs[index].event_time > decision]
+        if hidden_quotes:
+            visible_quotes = [q for q in qs[qlo:qhi]
+                              if q.event_time <= decision]
+            quote_count = len(visible_quotes)
+            quote_ofi = _quote_ofi(visible_quotes)
+            quote_mids = [quote.mid for quote in visible_quotes]
+            quote_returns = [math.log(right / left) * 10_000.0
+                             for left, right in zip(quote_mids, quote_mids[1:])]
+            realized_volatility = (
+                math.sqrt(sum(value * value for value in quote_returns))
+                if quote_returns else None)
+        else:
+            quote_count = qhi - qlo
+            quote_ofi = (quote_ofi_prefix[qhi] - quote_ofi_prefix[qlo + 1]
+                         if quote_count >= 2 else None)
+            variance = (quote_variance_prefix[qhi] -
+                        quote_variance_prefix[qlo + 1]
+                        if quote_count >= 2 else None)
+            realized_volatility = (
+                math.sqrt(max(0.0, variance)) if variance is not None else None)
+
+        tx_lo = bisect_left(trade_clock_exceptions, tlo)
+        tx_hi = bisect_left(trade_clock_exceptions, thi)
+        hidden_trades = [index for index in trade_clock_exceptions[tx_lo:tx_hi]
+                         if ts[index].event_time > decision]
+        signed = trade_signed_prefix[thi] - trade_signed_prefix[tlo]
+        volume = trade_volume_prefix[thi] - trade_volume_prefix[tlo]
+        for index in hidden_trades:
+            trade = ts[index]
+            signed -= float(trade.side) * float(trade.quantity)
+            if trade.side != 0:
+                volume -= float(trade.quantity)
+        trade_count = thi - tlo - len(hidden_trades)
         trade_flow = signed / volume if volume > 0 else None
-        quote_ofi = _quote_ofi(visible_quotes)
         bid_l1 = float(decision_quote.bid_sizes[0])
         ask_l1 = float(decision_quote.ask_sizes[0])
         depth_l1 = bid_l1 + ask_l1
@@ -376,13 +443,6 @@ def build_samples(quotes: Sequence[QuoteEvent], trades: Sequence[TradeEvent],
                      sum(float(v) for v in decision_quote.ask_sizes[:10]))
         normalized_ofi = (quote_ofi / depth_l1
                           if quote_ofi is not None and depth_l1 > 0 else None)
-        quote_mids = [quote.mid for quote in visible_quotes]
-        quote_returns = [math.log(right / left) * 10_000.0
-                         for left, right in zip(quote_mids, quote_mids[1:])
-                         if left > 0 and right > 0]
-        realized_volatility = (
-            math.sqrt(sum(value * value for value in quote_returns))
-            if quote_returns else None)
         feature_mid = decision_quote.mid
         entry_mid = entry_quote.mid
         spread_bps = ((decision_quote.best_ask - decision_quote.best_bid) /
@@ -406,16 +466,18 @@ def build_samples(quotes: Sequence[QuoteEvent], trades: Sequence[TradeEvent],
             # Conservative taker round trip: cross at entry and again at exit.
             long_net = (exit_quote.best_bid / entry_quote.best_ask - 1.0) * 10_000.0 - fees
             short_net = (entry_quote.best_bid / exit_quote.best_ask - 1.0) * 10_000.0 - fees
-            future_lo = bisect_right(ta, entry_time)
-            future_hi = bisect_right(ta, exit_time)
-            future_trades = [t for t in ts[future_lo:future_hi]
-                             if entry_time < t.event_time <= exit_time]
-            long_fill = _passive_fill(
-                future_trades, side=1, limit_price=entry_quote.best_bid,
-                queue_ahead=float(entry_quote.bid_sizes[0]))
-            short_fill = _passive_fill(
-                future_trades, side=-1, limit_price=entry_quote.best_ask,
-                queue_ahead=float(entry_quote.ask_sizes[0]))
+            long_fill = short_fill = None
+            if need_passive:
+                future_lo = bisect_right(ta, entry_time)
+                future_hi = bisect_right(ta, exit_time)
+                future_trades = [t for t in ts[future_lo:future_hi]
+                                 if entry_time < t.event_time <= exit_time]
+                long_fill = _passive_fill(
+                    future_trades, side=1, limit_price=entry_quote.best_bid,
+                    queue_ahead=float(entry_quote.bid_sizes[0]))
+                short_fill = _passive_fill(
+                    future_trades, side=-1, limit_price=entry_quote.best_ask,
+                    queue_ahead=float(entry_quote.ask_sizes[0]))
             passive_fees = (spec.maker_fee_bps_per_side +
                             spec.fee_bps_per_side)
             long_passive_net = (
@@ -460,9 +522,9 @@ def build_samples(quotes: Sequence[QuoteEvent], trades: Sequence[TradeEvent],
             ask_depth_l1=ask_l1,
             book_depth_l1=depth_l1,
             book_depth_l10=depth_l10,
-            trade_count=len(visible_trades),
-            quote_count=len(visible_quotes),
-            trade_intensity=(len(visible_trades) /
+            trade_count=trade_count,
+            quote_count=quote_count,
+            trade_intensity=(trade_count /
                              max(1.0, spec.feature_lookback_seconds)),
             realized_volatility_bps=realized_volatility,
             entry_bid_depth_l1=float(entry_quote.bid_sizes[0]),
@@ -732,6 +794,30 @@ select event_time, received_at, observed_at, instrument_id::text,
  order by event_time, source_event_id
 """
 
+_QUOTE_BATCH_SQL = """
+select event_time, received_at, observed_at, instrument_id::text,
+       bid_prices, bid_sizes, ask_prices, ask_sizes, source_event_id
+  from market.market_quotes
+ where instrument_id::text = any(%s)
+   and event_time >= %s and event_time < %s
+   and received_at is not null
+   and greatest(received_at, observed_at) <= %s
+   and bid_prices[1] > 0 and ask_prices[1] > 0
+   and ask_prices[1] >= bid_prices[1]
+ order by instrument_id::text, event_time, source_event_id
+"""
+
+_TRADE_BATCH_SQL = """
+select event_time, received_at, observed_at, instrument_id::text,
+       price, quantity, side, source_event_id
+  from market.market_ticks
+ where instrument_id::text = any(%s)
+   and event_time >= %s and event_time < %s
+   and received_at is not null
+   and greatest(received_at, observed_at) <= %s
+ order by instrument_id::text, event_time, source_event_id
+"""
+
 _SOURCE_QUALITY_SQL = """
 select count(*) as total_quotes,
        count(*) filter (where received_at is null) as quotes_without_received_at,
@@ -746,6 +832,71 @@ select count(*) as total_quotes,
    and greatest(received_at, observed_at) <= %s
 """
 
+_SOURCE_QUALITY_BATCH_SQL = """
+select instrument_id::text,
+       count(*) as total_quotes,
+       count(*) filter (where received_at is null) as quotes_without_received_at,
+       count(*) filter (where bid_prices[1] <= 0 or ask_prices[1] <= 0) as nonpositive_quotes,
+       count(*) filter (where ask_prices[1] < bid_prices[1]) as crossed_quotes,
+       count(*) filter (where received_at is not null
+                         and bid_prices[1] > 0 and ask_prices[1] > 0
+                         and ask_prices[1] >= bid_prices[1]) as eligible_quotes
+  from market.market_quotes
+ where instrument_id::text = any(%s)
+   and event_time >= %s and event_time < %s
+   and greatest(received_at, observed_at) <= %s
+ group by instrument_id
+ order by instrument_id::text
+"""
+
+
+def _quote_event(row) -> QuoteEvent:
+    return QuoteEvent(
+        event_time=row[0], received_at=row[1], observed_at=row[2],
+        instrument_id=row[3],
+        bid_prices=tuple(float(v) for v in row[4]),
+        bid_sizes=tuple(float(v) for v in row[5]),
+        ask_prices=tuple(float(v) for v in row[6]),
+        ask_sizes=tuple(float(v) for v in row[7]),
+        source_event_id=row[8],
+    )
+
+
+def _trade_event(row) -> TradeEvent:
+    return TradeEvent(
+        event_time=row[0], received_at=row[1], observed_at=row[2],
+        instrument_id=row[3], price=float(row[4]), quantity=float(row[5]),
+        side=int(row[6]), source_event_id=row[7],
+    )
+
+
+def _quality_record(total, missing_clock, nonpositive, crossed, eligible) -> dict:
+    rejected = int(missing_clock) + int(nonpositive) + int(crossed)
+    return {
+        "total_quotes": int(total),
+        "eligible_quotes": int(eligible),
+        "quotes_without_received_at": int(missing_clock),
+        "nonpositive_quotes": int(nonpositive),
+        "crossed_quotes": int(crossed),
+        "rejected_category_count_upper_bound": rejected,
+        "status": ("NO_DATA" if int(total) == 0 else
+                   "FAIL" if int(eligible) == 0 else
+                   "WARN" if rejected else "PASS"),
+    }
+
+
+def _fetch_chunks(cursor, size: int = 10_000):
+    """Bound temporary driver-row memory without requiring a named cursor."""
+    fetchmany = getattr(cursor, "fetchmany", None)
+    if fetchmany is None:
+        yield from cursor.fetchall()
+        return
+    while True:
+        rows = fetchmany(size)
+        if not rows:
+            return
+        yield from rows
+
 
 def load_instrument_events(conn, *, instrument_id: str, start: datetime,
                            end: datetime, as_known_at: datetime
@@ -759,22 +910,37 @@ def load_instrument_events(conn, *, instrument_id: str, start: datetime,
     params = (instrument_id, start, end, cutoff)
     with conn.cursor() as cursor:
         cursor.execute(_QUOTE_SQL, params)
-        quotes = [QuoteEvent(
-            event_time=row[0], received_at=row[1], observed_at=row[2],
-            instrument_id=row[3],
-            bid_prices=tuple(float(v) for v in row[4]),
-            bid_sizes=tuple(float(v) for v in row[5]),
-            ask_prices=tuple(float(v) for v in row[6]),
-            ask_sizes=tuple(float(v) for v in row[7]),
-            source_event_id=row[8],
-        ) for row in cursor.fetchall()]
+        quotes = [_quote_event(row) for row in _fetch_chunks(cursor)]
         cursor.execute(_TRADE_SQL, params)
-        trades = [TradeEvent(
-            event_time=row[0], received_at=row[1], observed_at=row[2],
-            instrument_id=row[3], price=float(row[4]), quantity=float(row[5]),
-            side=int(row[6]), source_event_id=row[7],
-        ) for row in cursor.fetchall()]
+        trades = [_trade_event(row) for row in _fetch_chunks(cursor)]
     return quotes, trades
+
+
+def load_instrument_events_batch(conn, *, instrument_ids, start: datetime,
+                                 end: datetime, as_known_at: datetime
+                                 ) -> dict[str, tuple[list[QuoteEvent],
+                                                       list[TradeEvent]]]:
+    """Read a bounded shard in two SQL scans and group rows by instrument."""
+    ids = tuple(dict.fromkeys(
+        str(value) for value in instrument_ids
+        if value is not None and str(value)))
+    if not ids:
+        return {}
+    start = _aware(start, "start")
+    end = _aware(end, "end")
+    cutoff = _aware(as_known_at, "as_known_at")
+    if cutoff < end:
+        raise ValueError("as_known_at must cover the requested event-time interval")
+    grouped = {instrument_id: ([], []) for instrument_id in ids}
+    params = (list(ids), start, end, cutoff)
+    with conn.cursor() as cursor:
+        cursor.execute(_QUOTE_BATCH_SQL, params)
+        for row in _fetch_chunks(cursor):
+            grouped[row[3]][0].append(_quote_event(row))
+        cursor.execute(_TRADE_BATCH_SQL, params)
+        for row in _fetch_chunks(cursor):
+            grouped[row[3]][1].append(_trade_event(row))
+    return grouped
 
 
 def source_quality(conn, *, instrument_id: str, start: datetime, end: datetime,
@@ -787,21 +953,31 @@ def source_quality(conn, *, instrument_id: str, start: datetime, end: datetime,
         cursor.execute(_SOURCE_QUALITY_SQL,
                        (instrument_id, start, end, cutoff))
         total, missing_clock, nonpositive, crossed, eligible = cursor.fetchone()
-    rejected = int(missing_clock) + int(nonpositive) + int(crossed)
-    # Categories can overlap.  This sum is a diagnostic upper bound, while the
+    # Categories can overlap.  Their sum is a diagnostic upper bound, while the
     # exact eligible count is reported by the loader.
-    status = ("NO_DATA" if int(total) == 0 else
-              "FAIL" if int(eligible) == 0 else
-              "WARN" if rejected else "PASS")
-    return {
-        "total_quotes": int(total),
-        "eligible_quotes": int(eligible),
-        "quotes_without_received_at": int(missing_clock),
-        "nonpositive_quotes": int(nonpositive),
-        "crossed_quotes": int(crossed),
-        "rejected_category_count_upper_bound": rejected,
-        "status": status,
-    }
+    return _quality_record(total, missing_clock, nonpositive, crossed, eligible)
+
+
+def source_quality_batch(conn, *, instrument_ids, start: datetime, end: datetime,
+                         as_known_at: datetime) -> dict[str, dict]:
+    """Return source diagnostics for a shard with one grouped query."""
+    ids = tuple(dict.fromkeys(
+        str(value) for value in instrument_ids
+        if value is not None and str(value)))
+    if not ids:
+        return {}
+    start = _aware(start, "start")
+    end = _aware(end, "end")
+    cutoff = _aware(as_known_at, "as_known_at")
+    with conn.cursor() as cursor:
+        cursor.execute(_SOURCE_QUALITY_BATCH_SQL,
+                       (list(ids), start, end, cutoff))
+        rows = cursor.fetchall()
+    out = {instrument_id: _quality_record(0, 0, 0, 0, 0)
+           for instrument_id in ids}
+    for row in rows:
+        out[row[0]] = _quality_record(*row[1:])
+    return out
 
 
 def manifest(spec: IntradayLaneSpec) -> dict:
