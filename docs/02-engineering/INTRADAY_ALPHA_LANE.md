@@ -198,11 +198,18 @@ purged walk-forward joint model이 함께 포함된다.
   fitting은 허용하지 않으며, 12개 population·ablation·실패 기억을 통한 구조 탐색만 한다.
   quality-diversity 점수는 어떤 후보를 먼저 시험할지 정할 뿐 성과나 승격 판정이 아니다.
 
+- 모든 가격 markout 식은 `queue_imbalance_l1/l10`, `microprice_offset_bps`,
+  `trade_flow_imbalance`, `quote_event_ofi`, `normalized_quote_ofi` 중 적어도 하나를
+  숫자 값 경로에서 `PRESSURE`로 사용해야 한다. 거래량·호가 수·spread·depth·실현변동성
+  수준은 상태와 크기를 설명하지만 상승·하락 방향을 단독으로 식별하지 못한다. 이 unsigned
+  변수만으로 만든 `high activity -> always long` 식과 signed field를 gate에만 장식한 식은
+  formula-discovery-v4에서 백테스트 전에 거부한다.
+
 - 단위가 맞는 것만으로도 충분하지 않다. 수식 접수기는 각 field가 값 경로(`VALUE`)나
   명시적 상태 분기(`GATE`)에 실제로 영향을 주는지 구조적으로 감사한다. 항상 음이 아닌
   `trade_count`·depth·spread에 `sign()`을 씌워 거의 상수 +1로 만든 장식 항,
   동일식의 `x-x`/`x/x`, 같은 then/else를 가진 `where`, 0을 곱해 다른 항을 지운 식은
-  백테스트 전에 거부한다. 기존 계약 리드도 Proposal 조립과 Publish Gate에서 현재 v3
+  백테스트 전에 거부한다. 기존 계약 리드도 Proposal 조립과 Publish Gate에서 현재 v4
   감사기를 다시 통과해야 하므로, 과거 validator의 허점을 이용한 식이 그대로 실행되지
   않는다. 거부 응답은 무차원 pressure를 경제적으로 정당화한 BPS scale과 결합하는 법,
   signed change에는 `rolling_zscore`/`delta`, 진짜 상태에는 `where(gt(...))`를 쓰는
@@ -212,14 +219,14 @@ purged walk-forward joint model이 함께 포함된다.
 ### 공유 재생 진화 평가 v6
 
 수식 생성량보다 원시 호가·체결 재생 시간이 훨씬 큰 현재 병목에서는 12개 초안을 각각
-독립 raw replay에 넣지 않는다. Planner는 서로 다른 니치의 계약 유효 v3 리드를 한
+독립 raw replay에 넣지 않는다. Planner는 서로 다른 니치의 계약 유효 v4 리드를 한
 Proposal에 2~8개까지 연결하고, 그중 하나만 주 수식으로 사전등록한다. 접수기는 나머지
 정확한 lead AST와 명시된 lineage parent를 최대 7개의 `SCREENING_ONLY` sidecar로
 자동 부착한다. 이 중 최대 2개는 주 수식에서 상태 gate, 무차원 modulator, 가산항 또는
 시간 변환 하나를 제거한 `STRUCTURAL_ABLATION`에 예약한다. 전체 출력 단위가 BPS이고
 원식보다 node 수가 적은 one-edit control만 허용한다. 에이전트가 sidecar 본문을 직접
 쓰거나 출처·fingerprint·ablation 연산자·경로를 바꾸면 접수기와 Publish Gate가 원본
-v3 lead에서 control을 다시 생성해 `SCREENING_POPULATION_INVALID`로 거부한다.
+v4 lead에서 control을 다시 생성해 `SCREENING_POPULATION_INVALID`로 거부한다.
 
 런타임은 모든 후보가 요구하는 clock과 horizon의 합집합으로 lane spec을 한 번 만들고,
 passive 후보가 하나라도 있으면 passive label까지 포함한 상위집합을 한 번 생성한다.

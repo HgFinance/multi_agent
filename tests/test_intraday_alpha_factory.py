@@ -341,7 +341,9 @@ def test_llm_formula_thesis_is_typed_and_visible_in_ast() -> None:
         thesis, candidate=expr, semantic_plan=plan,
         grammar=lead_intake._intraday_ast())
     assert result["formula_contract_complete"]
-    assert result["formula_discovery_version"] == "formula-discovery-v3"
+    assert result["formula_discovery_version"] == "formula-discovery-v4"
+    assert result["formula_math_profile"]["directional_pressure_fields"] == [
+        "trade_flow_imbalance"]
     assert result["formula_math_profile"]["complexity_nodes"] > 1
     assert result["formula_math_profile"]["term_influence"] == {
         "realized_volatility_bps": ["VALUE"],
@@ -410,6 +412,31 @@ def test_formula_discovery_rejects_exact_symbolic_degeneracy() -> None:
         "identification": "Spread state must change the conditional markout response.",
     }
     with pytest.raises(ValueError, match="identical then/else"):
+        formula_discovery.assess(
+            thesis, candidate=expr,
+            semantic_plan={"output": "TAKER_NET_PNL", "execution": "TAKER"},
+            grammar=lead_intake._intraday_ast())
+
+
+def test_formula_discovery_rejects_magnitude_only_directional_markout() -> None:
+    expr = {"op": "where", "condition": {"op": "gt", "args": [
+        {"op": "rolling_zscore", "seconds": 300,
+         "arg": {"op": "field", "field": "trade_count"}},
+        {"const": 2, "unit": "RATIO"}]},
+        "then": {"op": "rolling_mean", "seconds": 30,
+                 "arg": {"op": "field",
+                         "field": "realized_volatility_bps"}},
+        "else": {"const": 0, "unit": "BPS"}}
+    thesis = {
+        "target": "TAKER_NET_PNL", "functional_form": "STATE_CONDITIONAL",
+        "expected_sign": "POSITIVE",
+        "coefficient_policy": "PREREGISTERED_NO_OOS_FIT",
+        "decision_rule": "PREDICTED_MARKOUT_CLEARS_COST",
+        "terms": {"trade_count": "ACTIVITY",
+                  "realized_volatility_bps": "VOLATILITY"},
+        "identification": "High activity and volatility predict a positive markout.",
+    }
+    with pytest.raises(ValueError, match="no signed directional PRESSURE"):
         formula_discovery.assess(
             thesis, candidate=expr,
             semantic_plan={"output": "TAKER_NET_PNL", "execution": "TAKER"},
@@ -1201,7 +1228,7 @@ def test_positive_screening_evidence_breeds_but_still_allows_confirmation() -> N
         "lead_id": "confirm-me", "intraday_signal_expr": expr,
         "semantic_plan": plan, "used": False,
         "alpha_candidate_eligible": True,
-        "formula_discovery_version": "formula-discovery-v3",
+        "formula_discovery_version": "formula-discovery-v4",
         "formula_contract_complete": True,
     }
     memory = intraday_experience.build(screened, [lead])
@@ -1224,7 +1251,7 @@ def test_previous_formula_contract_does_not_occupy_live_niche() -> None:
         "lead_id": "old-validator-pass", "intraday_signal_expr": expr,
         "semantic_plan": plan, "used": False,
         "alpha_candidate_eligible": True,
-        "formula_discovery_version": "formula-discovery-v2",
+        "formula_discovery_version": "formula-discovery-v3",
         "formula_contract_complete": True,
     }
     memory = intraday_experience.build([], [stale])
