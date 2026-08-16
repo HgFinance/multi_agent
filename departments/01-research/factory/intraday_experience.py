@@ -117,9 +117,8 @@ def _niche(plan: dict) -> tuple[str, str, str, str, str]:
             _horizon_bucket(plan))
 
 
-def _quality_diversity_frontier(leads: list[dict], tested: list[dict],
-                                *, limit: int = 8) -> tuple[tuple[dict, ...],
-                                                          tuple[dict, ...], int]:
+def _quality_diversity_frontier(leads: list[dict], tested: list[dict]
+                                ) -> tuple[tuple[dict, ...], tuple[dict, ...], int]:
     """Select one diverse, contract-complete elite per economic niche.
 
     No backtest result is invented for an unevaluated lead. Quality here means
@@ -186,7 +185,7 @@ def _quality_diversity_frontier(leads: list[dict], tested: list[dict],
         winner["niche_competitors"] = len(group)
         elites.append(winner)
     elites.sort(key=lambda row: (-row["research_quality"], row["niche"]))
-    return tuple(elites[:limit]), tuple(recycled), len(candidates) + len(recycled)
+    return tuple(elites), tuple(recycled), len(candidates) + len(recycled)
 
 
 def _lineage_tournaments(leads: list[dict], tested: list[dict]) -> tuple[dict, ...]:
@@ -367,13 +366,17 @@ def render(memory: IntradayMemory, *, limit: int = 6) -> str:
     lines.append(
         f"  [candidate population] unused={memory.candidate_population} "
         f"elite_shapes={memory.population_shapes} niches={len(memory.niche_elites)}")
-    for row in memory.niche_elites:
+    for row in memory.niche_elites[:8]:
         lines.append(
             f"    QD={row['research_quality']:.3f} novelty={row['novelty_score']:.3f} "
             f"niche={'/'.join(row['niche'])} fp={row['ast_fingerprint']} "
             f"lead={row.get('lead_id')} fields={row['fields']} ops={row['operators']} "
             f"nodes={row['complexity_nodes']} lineage={row['lineage_complete']} "
             f"competitors={row['niche_competitors']}")
+    if len(memory.niche_elites) > 8:
+        lines.append(
+            f"    ... {len(memory.niche_elites) - 8} additional niche elites remain "
+            "in the deterministic archive (prompt display capped at 8)")
     if memory.recycled_candidates:
         lines.append("  [recycled exact formulas - do not spend another trial]")
         for row in memory.recycled_candidates[:5]:

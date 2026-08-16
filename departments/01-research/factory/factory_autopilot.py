@@ -250,6 +250,10 @@ def _ast_scout_contract() -> str:
         ALL_OPS as INTRADAY_OPS, FIELDS as INTRADAY_FIELDS,
         MAX_DEPTH as INTRADAY_MAX_DEPTH, MAX_NODES as INTRADAY_MAX_NODES,
     )
+    from alpha_semantics import CONTEXT_FIELDS, EVENT_FIELDS  # noqa: PLC0415
+    event_fields = {key: sorted(value) for key, value in sorted(EVENT_FIELDS.items())}
+    context_fields = {key: sorted(value)
+                      for key, value in sorted(CONTEXT_FIELDS.items())}
     return "\n".join([
         "[AST-ready literature contract]",
         "  Every submitted lead must declare READINESS as exactly one of:",
@@ -284,6 +288,14 @@ def _ast_scout_contract() -> str:
         "  MECHANISM_INTERACTION, CLOCK_CHANGE, L1_L10_DIVERGENCE, EXECUTION_AWARE,",
         "  TARGET_CHANGE, MARKET_STRUCTURE_TRANSFER. Exact and parameter-only children",
         "  are rejected. An unrelated new mechanism is a seed and omits all parent fields.",
+        "  POPULATION COMPLETION RULE: source count is not candidate count. One directly",
+        "  relevant source may support several auditable revision leads with different AST",
+        "  shapes. After screening sources, draft all 12 population members and submit",
+        "  contract-valid members through factory_submit_leads (multiple calls are allowed).",
+        "  Do not mark the card complete with zero AST_READY merely because blocked/control",
+        "  literature was stored. Either (a) persist at least four AST_READY candidates from",
+        "  distinct economic niches, or (b) report all 12 attempted candidate ASTs and the",
+        "  exact deterministic intake error for each. Never weaken a contract to meet quota.",
         "  SOURCE_BASELINE_EXPR is the closest faithful expression of the public method on",
         "  this grammar. Do not call a changed window, threshold, or title a new mechanism.",
         f"  Supported fields ({len(FIELDS)}): {', '.join(sorted(FIELDS))}",
@@ -322,9 +334,19 @@ def _ast_scout_contract() -> str:
         "  none survives the contract, report the searched sources and exact blockers",
         "  instead of fabricating a lead, then continue the other lenses.",
         "  Event-time fields: " + ", ".join(sorted(INTRADAY_FIELDS)),
+        "  Event-time field units: " + json.dumps(
+            INTRADAY_FIELDS, ensure_ascii=False, sort_keys=True),
         "  Event-time operators: " + ", ".join(sorted(INTRADAY_OPS)),
         f"  Event-time limits: depth<={INTRADAY_MAX_DEPTH}, nodes<={INTRADAY_MAX_NODES},",
         "  every lag/rolling/delta/ewma/zscore node has seconds=1..3600.",
+        "  Unit algebra is enforced before persistence: add/sub/min/max and comparisons",
+        "  require equal units; mul needs one RATIO side; div needs a RATIO denominator",
+        "  or equal-unit numerator/denominator; where needs BOOL condition and equal-unit",
+        "  branches. sign/log1p_abs/sqrt_abs and rolling_zscore output RATIO.",
+        "  Semantic event->field requirements: " + json.dumps(
+            event_fields, ensure_ascii=False, sort_keys=True),
+        "  Semantic context->gating-field requirements: " + json.dumps(
+            context_fields, ensure_ascii=False, sort_keys=True),
         '  Event-time JSON is exact: a field is {"op":"field","field":',
         '  "trade_flow_imbalance"}--the key is "field", never "name". A temporal',
         '  node is {"op":"rolling_mean","arg":{"op":"field","field":',
@@ -2837,9 +2859,9 @@ def cycle(*, dry_run: bool = False) -> int:
                 # Refill at most once per UTC hour while the executable queue is
                 # dry.  The former six-hour bucket let several planner cycles
                 # consume the same exhausted leads before scouting could run.
-                # v4 separates the evolutionary population contract from v3
-                # single-candidate cards completed in the same UTC hour.
-                key=f"factory-scout-v4-{_now:%Y%m%d}T{_now.hour:02d}",
+                # v5 exposes unit/event constraints and makes the population quota
+                # auditable; v4 could finish with only blocked source summaries.
+                key=f"factory-scout-v5-{_now:%Y%m%d}T{_now.hour:02d}",
                 dry_run=dry_run)
         elif active_scout:
             print(f"  scout refill skipped - already active: {active_scout}", flush=True)
@@ -4117,6 +4139,15 @@ def _check_ast_memory_reaches_scout_and_planner():
         "스카우트 검색이 과거 AST 경험을 못 본다"
     assert "starving + \"\\n\" + ast_memory" in cyc, \
         "메모리를 계산만 하고 스카우트 카드에 싣지 않는다"
+    contract = _ast_scout_contract()
+    assert "Event-time field units:" in contract and "Unit algebra" in contract, \
+        "스카우트가 단위를 몰라 유효 후보를 intake에서 잃는다"
+    assert "Semantic event->field requirements:" in contract, \
+        "Event와 observable의 결정론 매핑이 스카우트에게 안 보인다"
+    assert "all 12 attempted candidate ASTs" in contract, \
+        "blocked 문헌 몇 건만 적재하고 population 작업을 끝낼 수 있다"
+    assert "factory-scout-v5-" in cyc, \
+        "새 population 계약이 완료된 구버전 카드에 흡수된다"
     print("  AST 경험 기억→검색·기획   OK")
 
 
