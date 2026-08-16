@@ -47,7 +47,7 @@ from data_resolution import SOURCE_TABLES
 from strategy_templates import EDGE_VOCAB, NOT_IMPLEMENTED
 from trial_family import UNIVERSE_VOCAB, family_id, hypothesis_view, pressure
 
-MODULE_VERSION = "quant-factory-bridge-v1"
+MODULE_VERSION = "quant-factory-bridge-v2"
 
 # 기각으로 보는 판정. 이것들의 교훈에는 대응이 있어야 재도전할 수 있다.
 REJECTING = frozenset({"REJECT", "GATE_HOLD", "KILLED", "DEMOTED"})
@@ -87,7 +87,7 @@ INTRADAY_EDGE_KEYS = frozenset({
     "intraday_signal_expr", "horizon_seconds", "sample_interval_seconds",
     "feature_lookback_seconds", "order_latency_ms", "max_quote_age_seconds",
     "fee_bps_per_side", "maker_fee_bps_per_side", "execution", "threshold",
-    "evaluation_days", "instrument_count", "position_mode",
+    "evaluation_days", "instrument_shard_size", "position_mode",
 })
 
 

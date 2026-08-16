@@ -146,9 +146,11 @@ purged walk-forward joint model이 함께 포함된다.
   spread 필드 없이 구현하면 실험 예산을 쓰기 전에 거부된다.
 - 숫자 horizon·threshold 변경은 새 idea family가 아니다. semantic fingerprint가
   trial family를 정하고 AST shape/fingerprint가 정확·근접 중복을 구분한다.
-- `intraday_experiment_runner.py`는 평가 직전 5개 세션의 quote-event 수로 종목을
-  선택한 뒤 그 다음 세션들만 평가한다. 결과 수익률로 종목을 고르는 hindsight를
-  차단하고, cutoff·세션·종목·원천 행 수·clock 정책을 experiment config에 고정한다.
+- `intraday_experiment_runner.py`는 평가 직전 최대 5개 보정 세션에 인과적으로 유효한
+  quote와 trade가 함께 존재한 `krx_all` 전 종목을 고정하고 그 다음 세션들만 평가한다.
+  수익률이나 quote-event 수로 top-N을 고르지 않는다. 종목은 메모리를 제한하는 내부
+  shard로만 나누며 모든 shard를 동일한 experiment·trial·다중검정 원장에 합친다.
+  shard 크기는 실행 세부사항이라 실험 identity나 새로운 시도로 세지 않는다.
 - 호출 시각은 실험 identity에서 제외한다. 같은 세션·종목·원천 계보의 재시도는 완료
   결과를 재사용하고, 원천 행 수나 관측 시각이 달라진 경우에만 새 실험으로 센다. 실패한
   동일 입력은 한 worker만 원자적으로 다시 점유해 무한 호출이 trial 수를 부풀리지 않는다.
@@ -156,6 +158,10 @@ purged walk-forward joint model이 함께 포함된다.
   bootstrap, DSR, walk-forward fold, family PBO를 적용한다. PBO는 현재 실험을 공통
   원장에 기록한 뒤 계산하며, 4개 이상의 비교 가능한 family variant가 없으면
   `PBO_UNMEASURED`로 HOLD한다.
+- shard 실행기는 원시 호가·체결·표본을 shard가 끝날 때 폐기하고 합계·세션 수익·정확한
+  포트폴리오 동시기회 timestamp delta만 누적한다. capacity 하위 분위수도 결정론적
+  10,000개 reservoir로 제한한다. 요청 종목 중 sample이 생긴 비율이 80% 미만이면
+  `INSTRUMENT_COVERAGE_BELOW_MINIMUM`으로 HOLD하여 일부 종목 결과를 전체처럼 보이지 않는다.
 - passive는 미체결 기회를 0 PnL로 포함한다. 체결된 건만 보고하는 selection bias를
   막으며 snapshot L10의 결과는 계속 `FIFO_NO_CANCELLATION_CREDIT_LOWER_BOUND`이다.
 - 비용을 생략해도 0bp로 돌지 않는다. `krx-intraday-execution-v1`은
@@ -180,6 +186,15 @@ purged walk-forward joint model이 함께 포함된다.
   Planner 모두에게 준다. 빈 semantic cell, 실패 shape, positive/negative-associated
   component를 보여 주되 인과 기여라고 주장하지 않는다. 다음 후보는 빈 cell 탐색,
   단일 메커니즘 편집, 서로 다른 조각 재결합 중 하나를 명시해야 한다.
+- Hermes/LLM은 숫자를 OOS 결과에 맞추는 optimizer가 아니라 금융수학적 equation
+  skeleton과 경제적 prior의 제안자다. 모든 신규 `INTRADAY_EVENT/AST_READY` 리드는
+  `FORMULA_THESIS`에 목표(`MID_MARKOUT_BPS`/`TAKER_NET_PNL`/`PASSIVE_NET_PNL`), 함수형태,
+  예상 부호, 계수 정책, AST 각 field의 경제적 역할, 반증 가능한 식별 예측을 적는다.
+  결정론 validator는 target과 semantic output의 일치, AST의 단위·복잡도와 함께
+  `STATE_CONDITIONAL`의 `where`, `CROSS_SCALE`의 복수 clock, `DEPTH_DIVERGENCE`의
+  L1/L10 동시 사용처럼 주장한 함수형태가 식에 실제로 보이는지 검사한다. OOS 계수
+  fitting은 허용하지 않으며, 12개 population·ablation·실패 기억을 통한 구조 탐색만 한다.
+  quality-diversity 점수는 어떤 후보를 먼저 시험할지 정할 뿐 성과나 승격 판정이 아니다.
 
 운영 전제는 `20260816150000_intraday_alpha_factory.sql` 적용과
 `krx-intraday-events/v1` manifest 존재다. 원천에 `received_at`이 없으면 해당 행은
@@ -193,7 +208,13 @@ purged walk-forward joint model이 함께 포함된다.
 [FactorMiner](https://arxiv.org/abs/2602.14670), 생성·평가·탐색 분리의
 [AlphaBench](https://openreview.net/pdf?id=d97Q8r7ZKZ), 검증 가능한 진화 탐색의
 [AlphaEvolve](https://deepmind.google/blog/alphaevolve-a-gemini-powered-coding-agent-for-designing-advanced-algorithms/),
-그리고 다면 평가의 [AlphaEval](https://arxiv.org/abs/2508.13174)이다. 통계 관문은
+수식 skeleton과 scientific prior 분리의 [LLM-SR](https://arxiv.org/abs/2404.18400),
+evaluator·island·짧은 skeleton을 결합한
+[FunSearch](https://www.nature.com/articles/s41586-023-06924-6), LLM 단독보다 기존 탐색기의
+초기화·정체 탈출에 LLM을 쓰는
+[HARLA](https://journal.hep.com.cn/fcs/EN/10.1007/s11704-025-41061-5), 그리고 다면 평가의
+[AlphaEval](https://arxiv.org/abs/2508.13174)이다. 이들 결과의 수익률을 이 시스템의
+성과로 전용하지 않고 생성기·검증기·기억의 역할 분리만 채택한다. 통계 관문은
 [Deflated Sharpe Ratio](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2460551),
 [SPA](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=264569),
 [PBO](https://escholarship.org/uc/item/4w1110bb)의 “탐색 횟수를 증거에 포함한다”는 원칙을

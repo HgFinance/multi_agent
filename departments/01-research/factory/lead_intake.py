@@ -69,7 +69,7 @@ def clip_excerpt(text: str, *, limit: int = MAX_EXCERPT_CHARS) -> str:
         return t
     return t[: max(0, limit - len(_TRUNC_MARK))].rstrip() + _TRUNC_MARK
 
-MODULE_VERSION = "research-lead-intake-v2"
+MODULE_VERSION = "research-lead-intake-v3"
 
 # 스카우트가 내는 블록의 필드. 앞의 셋이 없으면 리드가 아니다.
 REQUIRED = ("TITLE", "URL", "MECHANISM", "READINESS")
@@ -80,14 +80,14 @@ OPTIONAL = ("COUNTERPARTY", "TESTABLE_WITH", "REPORTED_EFFECT", "EXCERPT",
             "DERIVATION_MODE", "SOURCE_BASELINE_EXPR",
             "DERIVATION_TRANSFORMS", "NOVELTY_RATIONALE",
             "PARENT_SIGNAL_EXPR", "EVOLUTION_OPERATORS",
-            "EXPECTED_INCREMENT", "ABLATIONS")
+            "EXPECTED_INCREMENT", "ABLATIONS", "FORMULA_THESIS")
 _FIELD_RE = re.compile(
     r"^(TITLE|URL|MECHANISM|READINESS|COUNTERPARTY|TESTABLE_WITH|REPORTED_EFFECT|"
     r"EXCERPT|MARKET_CONTEXT|FAILURE_MODE|OBSERVABLES|CANDIDATE_SIGNAL_EXPR|"
     r"MISSING_DATA|MAPPING_LOSS|RESEARCH_LANE|SEMANTIC_PLAN|"
     r"DERIVATION_MODE|SOURCE_BASELINE_EXPR|"
     r"DERIVATION_TRANSFORMS|NOVELTY_RATIONALE|PARENT_SIGNAL_EXPR|"
-    r"EVOLUTION_OPERATORS|EXPECTED_INCREMENT|ABLATIONS)\s*:\s*(.*)$")
+    r"EVOLUTION_OPERATORS|EXPECTED_INCREMENT|ABLATIONS|FORMULA_THESIS)\s*:\s*(.*)$")
 
 AST_READY = "AST_READY"
 DATA_BLOCKED = "DATA_BLOCKED"
@@ -117,6 +117,12 @@ def _alpha_evolution():
     """Load the deterministic parent/child novelty policy."""
     import alpha_evolution  # noqa: PLC0415
     return alpha_evolution
+
+
+def _formula_discovery():
+    """Load the typed financial-mathematics contract for LLM formulas."""
+    import formula_discovery  # noqa: PLC0415
+    return formula_discovery
 
 
 def _as_text(value) -> str:
@@ -238,6 +244,23 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
             ablations=raw_ablations,
             grammar=ast,
         )
+        if lane == "INTRADAY_EVENT":
+            raw_thesis = block.get("FORMULA_THESIS")
+            if raw_thesis not in (None, "") and not isinstance(raw_thesis, dict):
+                try:
+                    raw_thesis = json.loads(_as_text(raw_thesis))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"invalid FORMULA_THESIS: {exc}") from exc
+            formula_discovery = _formula_discovery().assess(
+                raw_thesis, candidate=candidate, semantic_plan=semantic_plan,
+                grammar=ast)
+        else:
+            formula_discovery = {
+                "formula_discovery_version": "",
+                "formula_contract_complete": False,
+                "formula_thesis": None,
+                "formula_math_profile": {},
+            }
     else:
         ast_fingerprint = ""
         ast_shape_fingerprint = ""
@@ -264,6 +287,12 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
             "expected_increment": "",
             "ablations": [],
         }
+        formula_discovery = {
+            "formula_discovery_version": "",
+            "formula_contract_complete": False,
+            "formula_thesis": None,
+            "formula_math_profile": {},
+        }
     if readiness == DATA_BLOCKED and not missing_data:
         raise ValueError("DATA_BLOCKED requires MISSING_DATA")
     elif readiness == SEMANTIC_MISMATCH and not mapping_loss:
@@ -278,7 +307,7 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
             "primary_data_plane": ("MICROSTRUCTURE" if readiness == AST_READY
                                    else "UNRESOLVED"),
             "daily_data_role": "EXECUTION_BENCHMARK_REGIME_AUXILIARY",
-            **derivation, **evolution}
+            **derivation, **evolution, **formula_discovery}
 
 # 링크 판정. 접속 거부는 부재의 증거가 아니다.
 LINK_OK = "OK"

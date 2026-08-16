@@ -23,8 +23,11 @@ from intraday_microstructure import (  # noqa: E402
     IntradaySample,
     walk_forward_linear_score,
     _QUOTE_SQL,
+    _QUOTE_BATCH_SQL,
     _SOURCE_QUALITY_SQL,
+    _SOURCE_QUALITY_BATCH_SQL,
     _TRADE_SQL,
+    _TRADE_BATCH_SQL,
 )
 
 
@@ -230,6 +233,10 @@ def test_invalid_clocks_and_crossed_quotes_fail_closed() -> None:
     assert "ask_prices[1] >= bid_prices[1]" in _QUOTE_SQL
     assert "crossed_quotes" in _SOURCE_QUALITY_SQL
     for sql in (_QUOTE_SQL, _TRADE_SQL, _SOURCE_QUALITY_SQL):
+        assert "greatest(received_at, observed_at) <= %s" in sql
+    for sql in (_QUOTE_BATCH_SQL, _TRADE_BATCH_SQL,
+                _SOURCE_QUALITY_BATCH_SQL):
+        assert "instrument_id::text = any(%s)" in sql
         assert "greatest(received_at, observed_at) <= %s" in sql
 
 

@@ -145,6 +145,10 @@ point-in-time 원천이 생기기 전에는 음수 신호를 숏으로 가장하
 비용 기본값은 2026 상장주식 거래세와 온라인 위탁수수료를 보수적으로 합친
 fee_bps_per_side=11.5, maker_fee_bps_per_side=11.5다. 10bp 미만은 Gate 0에서
 거부한다. 더 높은 실제 계좌 비용을 알면 반드시 그 값으로 올려 적는다.
+유니버스는 `krx_all` 보정 세션에 인과적으로 quote와 trade가 함께 수집된
+전 종목이다. `instrument_count`로 유동성 상위 일부만 자르지 않는다. 실행기는
+메모리를 제한하기 위해 내부적으로 instrument shard를 순회하지만, 모든 shard는
+동일한 실험ㆍtrialㆍ다중검정 장부에 합쳐진다.
 intraday_signal_expr 연산자:
   field; lag/rolling_mean/rolling_std/rolling_sum/delta/ewma/rolling_zscore
   (모두 seconds 명시); neg/abs/sign/log1p_abs/sqrt_abs;
@@ -225,7 +229,9 @@ select l.lead_id, l.scout_lens, l.claimed_edge, l.stated_mechanism,
        l.ast_contract->>'candidate_vs_source_similarity' as source_similarity,
        coalesce(l.ast_contract->>'novelty_rationale', '') as novelty_rationale,
        coalesce(l.ast_contract->>'research_lane', 'DAILY_CROSS_SECTIONAL') as research_lane,
-       coalesce(l.ast_contract->'semantic_plan', '{}'::jsonb) as semantic_plan
+       coalesce(l.ast_contract->'semantic_plan', '{}'::jsonb) as semantic_plan,
+       coalesce((l.ast_contract->>'formula_contract_complete')::boolean, false),
+       l.ast_contract->'formula_thesis'
   from research.methodology_leads l
  where l.status = 'COMPLETE' and l.testability = 'RULE_EXPRESSIBLE'
    and l.ast_contract->>'ast_readiness' = 'AST_READY'
@@ -288,6 +294,21 @@ def _ast_scout_contract() -> str:
         "  MECHANISM_INTERACTION, CLOCK_CHANGE, L1_L10_DIVERGENCE, EXECUTION_AWARE,",
         "  TARGET_CHANGE, MARKET_STRUCTURE_TRANSFER. Exact and parameter-only children",
         "  are rejected. An unrelated new mechanism is a seed and omits all parent fields.",
+        "  FINANCIAL-MATHEMATICS CONTRACT: the LLM proposes a short equation skeleton and",
+        "  its economic prior; deterministic code validates grammar, dimensions, semantic",
+        "  alignment, complexity, and the claimed functional form before any backtest.",
+        "  Every INTRADAY_EVENT AST_READY lead must include FORMULA_THESIS JSON with exact",
+        "  keys target, functional_form, expected_sign, coefficient_policy, terms, and",
+        "  identification. target must equal SEMANTIC_PLAN.output. functional_form is one",
+        "  of MONOTONE, REVERSAL, INTERACTION, STATE_CONDITIONAL, CROSS_SCALE,",
+        "  DEPTH_DIVERGENCE; expected_sign is POSITIVE, NEGATIVE, or STATE_DEPENDENT;",
+        "  coefficient_policy is FIXED_FROM_SOURCE, PREREGISTERED_NO_OOS_FIT, or",
+        "  STRUCTURE_ONLY. terms maps every AST field exactly once to PRESSURE, LIQUIDITY,",
+        "  STATE, SCALE, VOLATILITY, FRESHNESS, ACTIVITY, or CAPACITY. identification states",
+        "  a falsifiable conditional prediction. The AST must visibly implement the claimed",
+        "  form (for example where for STATE_CONDITIONAL and two clocks for CROSS_SCALE).",
+        "  Do not fit constants on OOS data. Prefer compact skeletons with explicit ablations;",
+        "  the evaluator, not the prose or LLM confidence, decides empirical survival.",
         "  POPULATION COMPLETION RULE: source count is not candidate count. One directly",
         "  relevant source may support several auditable revision leads with different AST",
         "  shapes. After screening sources, draft all 12 population members and submit",
@@ -961,7 +982,10 @@ def _ast_experience_block(conn) -> str:
                        coalesce(l.ast_contract->>'expected_increment', ''),
                        coalesce(l.ast_contract->'ablations', '[]'::jsonb),
                        l.ast_contract->'parent_signal_expr',
-                       coalesce(l.ast_contract->>'parent_ast_fingerprint', '')
+                       coalesce(l.ast_contract->>'parent_ast_fingerprint', ''),
+                       coalesce((l.ast_contract->>'formula_contract_complete')::boolean,
+                                false),
+                       l.ast_contract->'formula_thesis'
                   from research.methodology_leads l
                  where l.status = 'COMPLETE'
                    and l.ast_contract->>'ast_readiness' = 'AST_READY'
@@ -980,7 +1004,9 @@ def _ast_experience_block(conn) -> str:
                       "expected_increment": row[13],
                       "ablations": row[14] or [],
                       "parent_signal_expr": row[15],
-                      "parent_ast_fingerprint": row[16]}
+                      "parent_ast_fingerprint": row[16],
+                      "formula_contract_complete": bool(row[17]),
+                      "formula_thesis": row[18]}
                      for row in cur.fetchall()]
             cur.execute("""
                 select e.config->'intraday_signal_expr',
@@ -1049,6 +1075,8 @@ def _compose_research_brief(conn, brief, leads, *, market_conn=None) -> str:
             novelty_rationale = str(row[13]) if len(row) > 13 else ""
             research_lane = str(row[14]) if len(row) > 14 else "DAILY_CROSS_SECTIONAL"
             semantic_plan = row[15] if len(row) > 15 else {}
+            formula_complete = bool(row[16]) if len(row) > 16 else False
+            formula_thesis = row[17] if len(row) > 17 else None
             # **쓴 것과 안 쓴 것을 눈에 보이게 가른다.** 안 가르면 이미
             # 기각된 계열을 다시 내게 된다(2026-08-12 실측으로 공장이 멈췄다)
             tag = "이미 씀" if used else "**미사용**"
@@ -1066,6 +1094,11 @@ def _compose_research_brief(conn, brief, leads, *, market_conn=None) -> str:
             if semantic_plan:
                 out.append("      semantic_plan: " + json.dumps(
                     semantic_plan, ensure_ascii=False, separators=(",", ":")))
+            if formula_complete and formula_thesis:
+                out.append("      formula_thesis: " + json.dumps(
+                    formula_thesis, ensure_ascii=False, separators=(",", ":")))
+            elif research_lane == "INTRADAY_EVENT":
+                out.append("      formula_thesis: LEGACY_MISSING (do not imitate; add one)")
             out.append(
                 f"      문헌 파생: {derivation_mode} transforms={transforms} "
                 f"source_similarity={source_similarity or 'n/a'}")
@@ -2869,9 +2902,9 @@ def cycle(*, dry_run: bool = False) -> int:
                 # Refill at most once per UTC hour while the executable queue is
                 # dry.  The former six-hour bucket let several planner cycles
                 # consume the same exhausted leads before scouting could run.
-                # v5 exposes unit/event constraints and makes the population quota
-                # auditable; v4 could finish with only blocked source summaries.
-                key=f"factory-scout-v5-{_now:%Y%m%d}T{_now.hour:02d}",
+                # v6 adds the typed financial-mathematics thesis; v5 exposed unit/event
+                # constraints but still accepted story-only intraday formulas.
+                key=f"factory-scout-v6-{_now:%Y%m%d}T{_now.hour:02d}",
                 dry_run=dry_run)
         elif active_scout:
             print(f"  scout refill skipped - already active: {active_scout}", flush=True)
@@ -3921,6 +3954,8 @@ def _check_unused_leads_come_first():
     assert "DATA_BLOCKED" in contract and "SEMANTIC_MISMATCH" in contract
     assert "DIRECT_REPLICATION" in contract and "MECHANISM_MUTATION" in contract
     assert "SOURCE_BASELINE_EXPR" in contract and "window/constant-only" in contract
+    assert "FORMULA_THESIS" in contract and "FINANCIAL-MATHEMATICS" in contract
+    assert "PREREGISTERED_NO_OOS_FIT" in contract and "CROSS_SCALE" in contract
     assert "alpha_candidate_eligible" in _SQL_LEADS, \
         "공개 기준선이 신규 알파 후보 목록에 다시 노출된다"
     assert "MICROSTRUCTURE IS PRIMARY" in contract
@@ -3933,6 +3968,8 @@ def _check_unused_leads_come_first():
     assert 'never "name"' in contract and '"op":"where"' in contract
     assert "[BARE_WORDS] is not JSON" in contract
     assert "genuinely non-finance" in contract and "empirical event-time" in contract
+    assert "instrument_count" in INTRADAY_PLANNER_NOTE
+    assert "모든 shard" in INTRADAY_PLANNER_NOTE
     assert "experiment_proposals" in _SQL_LEADS, "사용 여부를 안 본다"
     assert "proposal_review_outcomes" in _SQL_LEADS and "STOP" in _SQL_LEADS, \
         "스켑틱 STOP 리드를 소비 완료로 보지 않는다"
@@ -4156,7 +4193,7 @@ def _check_ast_memory_reaches_scout_and_planner():
         "Event와 observable의 결정론 매핑이 스카우트에게 안 보인다"
     assert "all 12 attempted candidate ASTs" in contract, \
         "blocked 문헌 몇 건만 적재하고 population 작업을 끝낼 수 있다"
-    assert "factory-scout-v5-" in cyc, \
+    assert "factory-scout-v6-" in cyc, \
         "새 population 계약이 완료된 구버전 카드에 흡수된다"
     print("  AST 경험 기억→검색·기획   OK")
 

@@ -156,20 +156,23 @@ def _quality_diversity_frontier(leads: list[dict], tested: list[dict]
             and lead.get("evolution_operators")
             and lead.get("expected_increment")
             and lead.get("ablations"))
+        formula_complete = bool(lead.get("formula_contract_complete"))
         row.update(
             nearest_library_similarity=nearest,
             novelty_score=1.0 - nearest,
             lineage_complete=lineage_complete,
+            formula_contract_complete=formula_complete,
             source_distance=(None if source_similarity is None
                              else 1.0 - source_similarity),
         )
         row["research_quality"] = (
-            0.45 * row["novelty_score"]
-            + 0.20 * float(lineage_complete)
-            + 0.20 * (row["source_distance"]
+            0.35 * row["novelty_score"]
+            + 0.15 * float(lineage_complete)
+            + 0.15 * (row["source_distance"]
                       if row["source_distance"] is not None else 0.5)
             + 0.15 * (1.0 - max(0, row["complexity_nodes"] - 10)
                       / max(1, formula.MAX_NODES - 10))
+            + 0.20 * float(formula_complete)
         )
         candidates.append(row)
 
@@ -377,6 +380,7 @@ def render(memory: IntradayMemory, *, limit: int = 6) -> str:
             f"niche={'/'.join(row['niche'])} fp={row['ast_fingerprint']} "
             f"lead={row.get('lead_id')} fields={row['fields']} ops={row['operators']} "
             f"nodes={row['complexity_nodes']} lineage={row['lineage_complete']} "
+            f"math_contract={row['formula_contract_complete']} "
             f"competitors={row['niche_competitors']}")
     if len(memory.niche_elites) > 8:
         lines.append(
@@ -407,7 +411,8 @@ def render(memory: IntradayMemory, *, limit: int = 6) -> str:
         "    2) 4 local children of admissible parents, each changing one economic coordinate;",
         "    3) 2 mechanism crossovers and 2 failure-mode inversions; target 12 drafts per cycle.",
         "    Every child declares PARENT_SIGNAL_EXPR, EVOLUTION_OPERATORS, EXPECTED_INCREMENT,",
-        "    and ABLATIONS. Window/threshold-only edits are the same family, not novelty.",
+        "    ABLATIONS, and a typed FORMULA_THESIS connecting every field to an economic term.",
+        "    Window/threshold-only edits are the same family, not novelty.",
         "    Submit contract-valid children together. The archive keeps one elite per niche;",
         "    causal backtests, costs, DSR/PBO and the trial ledger--not QD score--decide survival.",
         "    Only gate-surviving positive-net formulas and CHILD_SURVIVES tournament winners breed;",

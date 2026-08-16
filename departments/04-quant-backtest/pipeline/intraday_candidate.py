@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import timezone
+import hashlib
+import heapq
 import math
 from statistics import fmean, pstdev
 from zoneinfo import ZoneInfo
@@ -21,7 +23,7 @@ from intraday_microstructure import IntradayLaneSpec, IntradaySample, audit_caus
 from overfit_stats import bootstrap_ci, deflated_sharpe
 
 
-EVALUATOR_VERSION = "intraday-candidate-evaluator-v2"
+EVALUATOR_VERSION = "intraday-candidate-evaluator-v3"
 KST = ZoneInfo("Asia/Seoul")
 
 DEFAULT_CRITERIA = {
@@ -30,6 +32,7 @@ DEFAULT_CRITERIA = {
     # the same 60 sessions instead of pretending hundreds of ticks are independent.
     "min_sessions": 60,
     "min_instruments": 2,
+    "min_instrument_coverage": 0.80,
     "min_opportunities": 100,
     "min_mean_net_bps_per_opportunity": 0.0,
     "min_positive_session_ratio": 0.60,
@@ -128,23 +131,6 @@ def _time_context_allows(sample: IntradaySample, contexts) -> bool:
     return True
 
 
-def _max_concurrency(observations: list[dict], horizon_seconds: int) -> int:
-    events = []
-    for row in observations:
-        start = row["decision_time"]
-        events.append((start, 1))
-        events.append((start.timestamp() + horizon_seconds, -1))
-    # Exits sort before entries at the same instant so adjacent opportunities do
-    # not count as overlapping capital commitments.
-    normalized = [(value.timestamp() if hasattr(value, "timestamp") else float(value), delta)
-                  for value, delta in events]
-    current = peak = 0
-    for _when, delta in sorted(normalized, key=lambda item: (item[0], item[1])):
-        current += delta
-        peak = max(peak, current)
-    return peak
-
-
 def _bootstrap_mean(values: list[float], *, n_boot: int = 1000,
                     seed: int = 20260816) -> tuple[float | None, float | None]:
     if len(values) < 2:
@@ -181,6 +167,277 @@ def _folds(session_returns: dict[str, float], n_splits: int = 4) -> list[dict]:
     return out
 
 
+class _CapacityReservoir:
+    """Order-independent bottom-k sample for a diagnostic capacity quantile."""
+
+    def __init__(self, limit: int = 10_000):
+        self.limit = limit
+        self.seen = 0
+        self._heap: list[tuple[int, float]] = []
+
+    @property
+    def values(self) -> list[float]:
+        return [row[1] for row in self._heap]
+
+    def add(self, value: float, key: str) -> None:
+        self.seen += 1
+        rank = int.from_bytes(
+            hashlib.sha256(key.encode("utf-8")).digest()[:8], "big")
+        item = (-rank, float(value))
+        if len(self._heap) < self.limit:
+            heapq.heappush(self._heap, item)
+            return
+        if rank < -self._heap[0][0]:
+            heapq.heapreplace(self._heap, item)
+
+    def quantile(self, probability: float) -> float | None:
+        values = self.values
+        if not values:
+            return None
+        ordered = sorted(values)
+        index = max(0, min(len(ordered) - 1,
+                           int(probability * len(ordered)) - 1))
+        return ordered[index]
+
+
+class CandidateAccumulator:
+    """Memory-bounded sufficient statistics for a universe-wide candidate.
+
+    One worker may feed this accumulator shard-by-shard and session-by-session.
+    Shards are an execution detail: the final object is still one preregistered
+    expression, one experiment, and one trial.  Capital is normalized by an exact
+    portfolio-wide event sweep.  Only timestamp deltas and sufficient statistics
+    survive each shard; raw samples and observations do not.
+    """
+
+    def __init__(self, *, expr: dict, spec: IntradayLaneSpec,
+                 horizon_seconds: int, execution: str,
+                 position_mode: str = "LONG_ONLY", threshold: float = 0.0,
+                 trials: int = 1, family_pbo: float | None = None,
+                 semantic_plan: dict | None = None,
+                 criteria: dict | None = None):
+        if horizon_seconds not in spec.horizons_seconds:
+            raise ValueError("horizon_seconds is absent from the lane specification")
+        if threshold < 0 or not math.isfinite(float(threshold)):
+            raise ValueError("threshold must be finite and non-negative")
+        self.expr = expr
+        self.spec = spec
+        self.horizon_seconds = horizon_seconds
+        self.execution = execution
+        self.position_mode = position_mode
+        self.threshold = threshold
+        self.trials = trials
+        self.family_pbo = family_pbo
+        self.semantic_plan = semantic_plan or {}
+        self.rules = {**DEFAULT_CRITERIA, **(criteria or {})}
+        self.requested_instruments: set[str] = set()
+        self.sampled_instruments: set[str] = set()
+        self.opportunity_instruments: set[str] = set()
+        self.causality: list[dict] = []
+        self.session_net_sum: dict[str, float] = defaultdict(float)
+        self.session_capital_deltas: dict[str, dict[float, int]] = defaultdict(
+            lambda: defaultdict(int))
+        self.opportunities = self.fills = 0
+        self.mid_sum = self.net_sum = self.fill_net_sum = 0.0
+        self.implementation_drag_sum = self.capacity_sum = 0.0
+        self.capacity = _CapacityReservoir()
+
+    def add(self, instrument_id: str, samples: list[IntradaySample]) -> None:
+        """Consume one instrument/session slice and immediately release its rows."""
+        instrument_id = str(instrument_id)
+        self.requested_instruments.add(instrument_id)
+        ordered = sorted(samples, key=lambda row: row.decision_time)
+        if any(row.instrument_id != instrument_id for row in ordered):
+            raise ValueError("instrument key does not match sample instrument")
+        audit = audit_causality(ordered, self.spec)
+        self.causality.append({"instrument_id": instrument_id, **audit})
+        if ordered:
+            self.sampled_instruments.add(instrument_id)
+        values = evaluate_ast(ordered, self.expr)
+        if self.semantic_plan:
+            paired = [(sample, value) for sample, value in zip(ordered, values)
+                      if _time_context_allows(
+                          sample, self.semantic_plan.get("context") or ())]
+            eligible_samples = [item[0] for item in paired]
+            eligible_values = [item[1] for item in paired]
+        else:
+            eligible_samples, eligible_values = ordered, values
+        observations = _observations(
+            eligible_samples, eligible_values,
+            horizon_seconds=self.horizon_seconds, threshold=self.threshold,
+            execution=self.execution, position_mode=self.position_mode)
+        if observations:
+            self.opportunity_instruments.add(instrument_id)
+        by_session: dict[str, list[dict]] = defaultdict(list)
+        for row in observations:
+            by_session[row["session"]].append(row)
+            net = row["net_bps_per_opportunity"]
+            mid = row["mid_markout_bps"]
+            capacity = row["capacity_shares_l1"]
+            self.opportunities += 1
+            self.net_sum += net
+            self.mid_sum += mid
+            self.implementation_drag_sum += mid - net
+            self.capacity_sum += capacity
+            self.capacity.add(
+                capacity,
+                f"{instrument_id}|{row['decision_time'].isoformat()}")
+            if row["net_bps_per_fill"] is not None:
+                self.fills += 1
+                self.fill_net_sum += row["net_bps_per_fill"]
+        for session, rows in by_session.items():
+            self.session_net_sum[session] += sum(
+                row["net_bps_per_opportunity"] for row in rows)
+            deltas = self.session_capital_deltas[session]
+            for row in rows:
+                start = row["decision_time"].timestamp()
+                deltas[start] += 1
+                deltas[start + self.horizon_seconds] -= 1
+
+    def finish(self) -> dict:
+        session_peak_capital = {}
+        for session, deltas in self.session_capital_deltas.items():
+            current = peak = 0
+            for when in sorted(deltas):
+                current += deltas[when]
+                peak = max(peak, current)
+            session_peak_capital[session] = peak
+        session_returns = {
+            session: self.session_net_sum[session] / max(1, peak)
+            for session, peak in sorted(session_peak_capital.items())
+        }
+        session_values = list(session_returns.values())
+        folds = _folds(session_returns)
+        positive_ratio = (sum(row["positive"] for row in folds) / len(folds)
+                          if folds else None)
+        mean_ci = _bootstrap_mean(session_values)
+        dsr = deflated_sharpe(
+            [value / 10_000.0 for value in session_values],
+            trials=max(1, self.trials), periods=252)
+        sharpe_ci = bootstrap_ci(
+            [value / 10_000.0 for value in session_values], periods=252)
+        requested = len(self.requested_instruments)
+        sampled = len(self.sampled_instruments)
+        coverage = sampled / requested if requested else 0.0
+        summary = {
+            "sessions": len(session_values),
+            "instruments": len(self.opportunity_instruments),
+            "instruments_requested": requested,
+            "instruments_with_samples": sampled,
+            "instrument_coverage": coverage,
+            "opportunities": self.opportunities,
+            "fills": self.fills,
+            "fill_rate": (self.fills / self.opportunities
+                          if self.opportunities else None),
+            "mean_mid_markout_bps": (
+                self.mid_sum / self.opportunities if self.opportunities else None),
+            "mean_implementation_drag_bps": (
+                self.implementation_drag_sum / self.opportunities
+                if self.opportunities else None),
+            "mean_net_bps_per_fill": (
+                self.fill_net_sum / self.fills if self.fills else None),
+            "mean_net_bps_per_opportunity": (
+                self.net_sum / self.opportunities if self.opportunities else None),
+            "session_mean_net_bps": fmean(session_values) if session_values else None,
+            "session_net_ci_low_bps": mean_ci[0],
+            "session_net_ci_high_bps": mean_ci[1],
+            "positive_fold_ratio": positive_ratio,
+            "deflated_sharpe": dsr.get("deflated_sharpe"),
+            "sharpe": dsr.get("sharpe"),
+            "bootstrap_sharpe_ci_low": sharpe_ci.get("bootstrap_ci_low"),
+            "bootstrap_sharpe_ci_high": sharpe_ci.get("bootstrap_ci_high"),
+            "pbo": self.family_pbo,
+            "trials": self.trials,
+            "mean_capacity_shares_l1": (
+                self.capacity_sum / self.opportunities
+                if self.opportunities else None),
+            "p10_capacity_shares_l1": self.capacity.quantile(0.10),
+            "capacity_quantile_sample_size": len(self.capacity.values),
+            "max_concurrent_opportunities": max(
+                session_peak_capital.values(), default=0),
+        }
+        failed = []
+        if not self.opportunities:
+            failed.append("NO_EXECUTABLE_OBSERVATIONS")
+        if any(row["status"] == "FAIL" for row in self.causality):
+            failed.append("CAUSALITY_NOT_PASS")
+        for metric, rule in (("sessions", "min_sessions"),
+                             ("instruments", "min_instruments"),
+                             ("opportunities", "min_opportunities")):
+            if summary[metric] < self.rules[rule]:
+                failed.append(f"{metric.upper()}_BELOW_MINIMUM")
+        if coverage < self.rules["min_instrument_coverage"]:
+            failed.append("INSTRUMENT_COVERAGE_BELOW_MINIMUM")
+        if (summary["mean_net_bps_per_opportunity"] is None or
+                summary["mean_net_bps_per_opportunity"] <=
+                self.rules["min_mean_net_bps_per_opportunity"]):
+            failed.append("NET_EDGE_NOT_POSITIVE")
+        if (summary["session_net_ci_low_bps"] is None or
+                summary["session_net_ci_low_bps"] <= 0):
+            failed.append("SESSION_BOOTSTRAP_CI_CROSSES_ZERO")
+        if (positive_ratio is None or
+                positive_ratio < self.rules["min_positive_session_ratio"]):
+            failed.append("WALK_FORWARD_FOLDS_FRAGILE")
+        if (summary["deflated_sharpe"] is None or
+                summary["deflated_sharpe"] < self.rules["min_deflated_sharpe"]):
+            failed.append("OVERFIT_DSR")
+        if self.execution.upper() == "PASSIVE_FIFO_LOWER_BOUND" and (
+                summary["fill_rate"] is None or
+                summary["fill_rate"] < self.rules["min_passive_fill_rate"]):
+            failed.append("PASSIVE_FILL_RATE_TOO_LOW")
+        if self.family_pbo is None:
+            failed.append("PBO_UNMEASURED")
+        elif self.family_pbo > self.rules["max_pbo"]:
+            failed.append("OVERFIT_PBO")
+
+        evidence = bool(self.opportunities and session_values)
+        return {
+            "evaluator_version": EVALUATOR_VERSION,
+            "ast_fingerprint": fingerprint(self.expr),
+            "ast_shape_fingerprint": shape_fingerprint(self.expr),
+            "fields": sorted(fields_of(self.expr)),
+            "lane_manifest": {
+                "horizon_seconds": self.horizon_seconds,
+                "execution": self.execution.upper(),
+                "position_mode": self.position_mode.upper(),
+                "threshold": self.threshold,
+                "purge_gap_seconds": self.spec.purge_gap.total_seconds(),
+                "semantic_context": list(self.semantic_plan.get("context") or []),
+                "portfolio_capital_model": (
+                    "EXACT_PORTFOLIO_EVENT_SWEEP_FROM_STREAMED_DELTAS"),
+                "capacity_quantile_method": (
+                    "ORDER_INDEPENDENT_SHA256_BOTTOM_K_10000"),
+            },
+            "causality": self.causality,
+            "folds": folds,
+            "session_returns_bps": session_returns,
+            "summary": summary,
+            "failed_criteria": failed,
+            "decision": ("NO_EVIDENCE" if not evidence else
+                         "SUBMIT_TO_QA" if not failed else "HOLD"),
+            "not_a_promotion": (
+                "SUBMIT_TO_QA is a review request; Risk, QA, and CEO retain promotion authority"),
+        }
+
+
+def evaluate_candidate_stream(instrument_samples, *, expr: dict,
+                              spec: IntradayLaneSpec,
+                              horizon_seconds: int, execution: str,
+                              position_mode: str = "LONG_ONLY",
+                              threshold: float = 0.0, trials: int = 1,
+                              family_pbo: float | None = None,
+                              semantic_plan: dict | None = None,
+                              criteria: dict | None = None) -> dict:
+    accumulator = CandidateAccumulator(
+        expr=expr, spec=spec, horizon_seconds=horizon_seconds,
+        execution=execution, position_mode=position_mode, threshold=threshold,
+        trials=trials, family_pbo=family_pbo, semantic_plan=semantic_plan,
+        criteria=criteria)
+    for instrument_id, samples in instrument_samples:
+        accumulator.add(instrument_id, samples)
+    return accumulator.finish()
+
+
 def evaluate_candidate(samples_by_instrument: dict[str, list[IntradaySample]], *,
                        expr: dict, spec: IntradayLaneSpec,
                        horizon_seconds: int, execution: str,
@@ -190,149 +447,10 @@ def evaluate_candidate(samples_by_instrument: dict[str, list[IntradaySample]], *
                        semantic_plan: dict | None = None,
                        criteria: dict | None = None) -> dict:
     """Evaluate one preregistered expression without tuning it on test results."""
-    if horizon_seconds not in spec.horizons_seconds:
-        raise ValueError("horizon_seconds is absent from the lane specification")
-    if threshold < 0 or not math.isfinite(float(threshold)):
-        raise ValueError("threshold must be finite and non-negative")
-    rules = {**DEFAULT_CRITERIA, **(criteria or {})}
-    observations: list[dict] = []
-    causality = []
-    for instrument_id in sorted(samples_by_instrument):
-        samples = sorted(samples_by_instrument[instrument_id],
-                         key=lambda row: row.decision_time)
-        if any(row.instrument_id != instrument_id for row in samples):
-            raise ValueError("samples_by_instrument key does not match sample instrument")
-        causality.append({"instrument_id": instrument_id,
-                          **audit_causality(samples, spec)})
-        values = evaluate_ast(samples, expr)
-        if semantic_plan:
-            paired = [(sample, value) for sample, value in zip(samples, values)
-                      if _time_context_allows(
-                          sample, semantic_plan.get("context") or ())]
-            eligible_samples = [item[0] for item in paired]
-            eligible_values = [item[1] for item in paired]
-        else:
-            eligible_samples, eligible_values = samples, values
-        observations.extend(_observations(
-            eligible_samples, eligible_values, horizon_seconds=horizon_seconds,
-            threshold=threshold, execution=execution,
-            position_mode=position_mode))
-
-    sessions: dict[str, list[float]] = defaultdict(list)
-    for row in observations:
-        sessions[row["session"]].append(row["net_bps_per_opportunity"])
-    # Treat every opportunity as a horizon-long equal-capital position.  Session
-    # return is cumulative net P&L divided by peak concurrent commitments, not
-    # an average trade that would erase economically meaningful frequency.
-    by_session_observations: dict[str, list[dict]] = defaultdict(list)
-    for row in observations:
-        by_session_observations[row["session"]].append(row)
-    session_returns = {
-        session: sum(values) / max(
-            1, _max_concurrency(by_session_observations[session], horizon_seconds))
-        for session, values in sorted(sessions.items())
-    }
-    session_values = list(session_returns.values())
-    filled = [row["net_bps_per_fill"] for row in observations
-              if row["net_bps_per_fill"] is not None]
-    capacities = sorted(row["capacity_shares_l1"] for row in observations)
-    mid = [row["mid_markout_bps"] for row in observations]
-    implementation_drag = [
-        row["mid_markout_bps"] - row["net_bps_per_opportunity"]
-        for row in observations]
-    folds = _folds(session_returns)
-    positive_ratio = (sum(row["positive"] for row in folds) / len(folds)
-                      if folds else None)
-    mean_ci = _bootstrap_mean(session_values)
-    dsr = deflated_sharpe(
-        [value / 10_000.0 for value in session_values], trials=max(1, trials),
-        periods=252)
-    sharpe_ci = bootstrap_ci(
-        [value / 10_000.0 for value in session_values], periods=252)
-
-    summary = {
-        "sessions": len(session_values),
-        "instruments": len({row["instrument_id"] for row in observations}),
-        "opportunities": len(observations),
-        "fills": len(filled),
-        "fill_rate": len(filled) / len(observations) if observations else None,
-        "mean_mid_markout_bps": fmean(mid) if mid else None,
-        "mean_implementation_drag_bps": (
-            fmean(implementation_drag) if implementation_drag else None),
-        "mean_net_bps_per_fill": fmean(filled) if filled else None,
-        "mean_net_bps_per_opportunity": (
-            fmean(row["net_bps_per_opportunity"] for row in observations)
-            if observations else None),
-        "session_mean_net_bps": fmean(session_values) if session_values else None,
-        "session_net_ci_low_bps": mean_ci[0],
-        "session_net_ci_high_bps": mean_ci[1],
-        "positive_fold_ratio": positive_ratio,
-        "deflated_sharpe": dsr.get("deflated_sharpe"),
-        "sharpe": dsr.get("sharpe"),
-        "bootstrap_sharpe_ci_low": sharpe_ci.get("bootstrap_ci_low"),
-        "bootstrap_sharpe_ci_high": sharpe_ci.get("bootstrap_ci_high"),
-        "pbo": family_pbo,
-        "trials": trials,
-        "mean_capacity_shares_l1": fmean(capacities) if capacities else None,
-        "p10_capacity_shares_l1": (
-            capacities[max(0, int(0.10 * len(capacities)) - 1)] if capacities else None),
-        "max_concurrent_opportunities": _max_concurrency(
-            observations, horizon_seconds),
-    }
-    failed = []
-    if not observations:
-        failed.append("NO_EXECUTABLE_OBSERVATIONS")
-    if any(row["status"] != "PASS" for row in causality):
-        failed.append("CAUSALITY_NOT_PASS")
-    for metric, rule in (("sessions", "min_sessions"),
-                         ("instruments", "min_instruments"),
-                         ("opportunities", "min_opportunities")):
-        if summary[metric] < rules[rule]:
-            failed.append(f"{metric.upper()}_BELOW_MINIMUM")
-    if (summary["mean_net_bps_per_opportunity"] is None or
-            summary["mean_net_bps_per_opportunity"] <=
-            rules["min_mean_net_bps_per_opportunity"]):
-        failed.append("NET_EDGE_NOT_POSITIVE")
-    if (summary["session_net_ci_low_bps"] is None or
-            summary["session_net_ci_low_bps"] <= 0):
-        failed.append("SESSION_BOOTSTRAP_CI_CROSSES_ZERO")
-    if (positive_ratio is None or
-            positive_ratio < rules["min_positive_session_ratio"]):
-        failed.append("WALK_FORWARD_FOLDS_FRAGILE")
-    if (summary["deflated_sharpe"] is None or
-            summary["deflated_sharpe"] < rules["min_deflated_sharpe"]):
-        failed.append("OVERFIT_DSR")
-    if execution.upper() == "PASSIVE_FIFO_LOWER_BOUND" and (
-            summary["fill_rate"] is None or
-            summary["fill_rate"] < rules["min_passive_fill_rate"]):
-        failed.append("PASSIVE_FILL_RATE_TOO_LOW")
-    if family_pbo is None:
-        failed.append("PBO_UNMEASURED")
-    elif family_pbo > rules["max_pbo"]:
-        failed.append("OVERFIT_PBO")
-
-    evidence = bool(observations and session_values)
-    return {
-        "evaluator_version": EVALUATOR_VERSION,
-        "ast_fingerprint": fingerprint(expr),
-        "ast_shape_fingerprint": shape_fingerprint(expr),
-        "fields": sorted(fields_of(expr)),
-        "lane_manifest": {
-            "horizon_seconds": horizon_seconds,
-            "execution": execution.upper(),
-            "position_mode": position_mode.upper(),
-            "threshold": threshold,
-            "purge_gap_seconds": spec.purge_gap.total_seconds(),
-            "semantic_context": list((semantic_plan or {}).get("context") or []),
-        },
-        "causality": causality,
-        "folds": folds,
-        "session_returns_bps": session_returns,
-        "summary": summary,
-        "failed_criteria": failed,
-        # A quant evaluator can only submit evidence to QA.  It never promotes.
-        "decision": ("NO_EVIDENCE" if not evidence else
-                     "SUBMIT_TO_QA" if not failed else "HOLD"),
-        "not_a_promotion": (
-            "SUBMIT_TO_QA is a review request; Risk, QA, and CEO retain promotion authority"),
-    }
+    return evaluate_candidate_stream(
+        ((instrument_id, samples_by_instrument[instrument_id])
+         for instrument_id in sorted(samples_by_instrument)),
+        expr=expr, spec=spec, horizon_seconds=horizon_seconds,
+        execution=execution, position_mode=position_mode, threshold=threshold,
+        trials=trials, family_pbo=family_pbo, semantic_plan=semantic_plan,
+        criteria=criteria)

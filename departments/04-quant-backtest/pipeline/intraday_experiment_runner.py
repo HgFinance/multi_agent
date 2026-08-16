@@ -13,13 +13,13 @@ import json
 from zoneinfo import ZoneInfo
 
 from intraday_alpha_ast import parse as parse_expr
-from intraday_candidate import EVALUATOR_VERSION, evaluate_candidate
+from intraday_candidate import CandidateAccumulator, EVALUATOR_VERSION
 from intraday_microstructure import (IntradayLaneSpec, build_samples,
-                                      load_instrument_events, manifest,
-                                      source_quality)
+                                      load_instrument_events_batch, manifest,
+                                      source_quality_batch)
 
 
-RUNNER_VERSION = "intraday-experiment-runner-v2"
+RUNNER_VERSION = "intraday-experiment-runner-v3"
 COST_MODEL_VERSION = "krx-intraday-execution-v1"
 # 2026 listed equities incur 20bp on the sale (KOSPI 5bp STT + 15bp rural,
 # KOSDAQ 20bp STT).  A representative online commission is 1.5bp each side.
@@ -45,15 +45,26 @@ select distinct (event_time at time zone 'Asia/Seoul')::date as session_date
 """
 
 _LIQUID_UNIVERSE_SQL = """
-select instrument_id::text, count(*) as quote_events
-  from market.market_quotes
- where event_time >= %s and event_time < %s
-   and received_at is not null
-   and greatest(received_at, observed_at) <= %s
-   and bid_prices[1] > 0 and ask_prices[1] >= bid_prices[1]
- group by instrument_id
- order by quote_events desc, instrument_id::text
- limit %s
+with causal_quotes as (
+  select instrument_id::text as instrument_id, count(*) as quote_events
+    from market.market_quotes
+   where event_time >= %s and event_time < %s
+     and received_at is not null
+     and greatest(received_at, observed_at) <= %s
+     and bid_prices[1] > 0 and ask_prices[1] > 0
+     and ask_prices[1] >= bid_prices[1]
+   group by instrument_id
+), causal_trades as (
+  select distinct instrument_id::text as instrument_id
+    from market.market_ticks
+   where event_time >= %s and event_time < %s
+     and received_at is not null
+     and greatest(received_at, observed_at) <= %s
+)
+select q.instrument_id, q.quote_events
+  from causal_quotes q
+  join causal_trades t using (instrument_id)
+ order by q.instrument_id
 """
 
 _LINEAGE_SQL = """
@@ -101,6 +112,8 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
     """Bind only controlled knobs; never silently inherit daily defaults."""
     if str(edge.get("research_lane") or "").upper() != "INTRADAY_EVENT":
         raise ValueError("intraday runner requires research_lane=INTRADAY_EVENT")
+    if str(edge.get("universe_key") or "krx_all").lower() != "krx_all":
+        raise ValueError("intraday runner currently requires universe_key=krx_all")
     expression = parse_expr(edge.get("intraday_signal_expr"))
     horizon = _bounded_int(edge, "horizon_seconds", 5, 1, 3600)
     execution = str(edge.get("execution") or "TAKER").upper()
@@ -134,8 +147,14 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
         "position_mode": position_mode,
         "threshold": _bounded_float(edge, "threshold", 0.0, 0.0, 1_000_000.0),
         "evaluation_days": _bounded_int(edge, "evaluation_days", 60, 10, 250),
-        "instrument_count": _bounded_int(edge, "instrument_count", 2, 2, 20),
+        # A shard is only a bounded execution unit. The scientific universe is
+        # every causally observed calibration instrument, never a top-N sample.
+        "universe_mode": "ALL_CAUSALLY_COLLECTED",
+        "instrument_shard_size": _bounded_int(
+            edge, "instrument_shard_size", 8, 2, 64),
     }
+    if edge.get("instrument_count") is not None:
+        config["legacy_instrument_count_ignored"] = int(edge["instrument_count"])
     spec = IntradayLaneSpec(
         sample_interval_seconds=config["sample_interval_seconds"],
         feature_lookback_seconds=config["feature_lookback_seconds"],
@@ -177,6 +196,7 @@ def select_slice(market_conn, config: dict, *, cutoff: datetime) -> dict:
     common = {
         "causal_sessions_available": len(days),
         "requested_evaluation_sessions": config["evaluation_days"],
+        "universe_mode": "ALL_CAUSALLY_COLLECTED",
     }
     if len(days) < 2:
         return {"status": "INSUFFICIENT_SESSIONS", "sessions": [],
@@ -196,12 +216,16 @@ def select_slice(market_conn, config: dict, *, cutoff: datetime) -> dict:
     with market_conn.cursor() as cur:
         cur.execute(_LIQUID_UNIVERSE_SQL,
                     (calibration_start, calibration_end + timedelta(hours=1),
-                     cutoff, config["instrument_count"]))
+                     cutoff,
+                     calibration_start, calibration_end + timedelta(hours=1),
+                     cutoff))
         instruments = [row[0] for row in cur.fetchall()]
     readiness = ("FULL" if evaluation_count >= config["evaluation_days"]
                  else "SHORT_DIAGNOSTIC")
     return {"status": "PASS" if len(instruments) >= 2 else "INSUFFICIENT_INSTRUMENTS",
-            "selection_rule": "top quote-event count in up to five pre-evaluation sessions",
+            "selection_rule": (
+                "all instruments with valid causally available quotes and trades "
+                "in up to five pre-evaluation sessions"),
             "calibration_sessions": [str(day) for day in calibration],
             "calibration_session_count": len(calibration),
             "evaluation_session_count": len(eval_days),
@@ -231,7 +255,9 @@ def _input_hash(hypothesis_id: str, config: dict) -> str:
     # selected sessions/instruments and source lineage below do change whenever
     # data inside the evaluated slice changes, so retries are idempotent without
     # hiding late-arriving observations.
-    identity = {key: value for key, value in config.items() if key != "cutoff"}
+    identity = {key: value for key, value in config.items()
+                if key not in {"cutoff", "instrument_shard_size",
+                               "legacy_instrument_count_ignored"}}
     payload = json.dumps({"hypothesis_id": hypothesis_id,
                           "runner_version": RUNNER_VERSION,
                           "evaluator_version": EVALUATOR_VERSION,
@@ -484,28 +510,64 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
                     "mean_net_bps_per_opportunity")},
             "intraday_report": report, "research_lane": "INTRADAY_EVENT"}
 
-    samples: dict[str, list] = {instrument: [] for instrument in selected["instruments"]}
-    quality = []
+    accumulator = CandidateAccumulator(
+        expr=config["intraday_signal_expr"], spec=spec,
+        horizon_seconds=config["horizon_seconds"], execution=config["execution"],
+        position_mode=config["position_mode"], threshold=config["threshold"],
+        trials=int(hyp.get("_trials") or 1), family_pbo=None,
+        semantic_plan=config["semantic_plan"])
+    shard_size = config["instrument_shard_size"]
+    shards = [selected["instruments"][index:index + shard_size]
+              for index in range(0, len(selected["instruments"]), shard_size)]
+    quality_counts = {"PASS": 0, "WARN": 0, "FAIL": 0, "NO_DATA": 0}
+    quality_totals = {
+        "total_quotes": 0, "eligible_quotes": 0,
+        "quotes_without_received_at": 0, "nonpositive_quotes": 0,
+        "crossed_quotes": 0,
+    }
+    quality_examples = []
+    shard_reports = []
     try:
-        for day in selected["sessions"]:
-            start, end = _session_bounds(day)
-            load_end = end + spec.purge_gap
-            for instrument in selected["instruments"]:
-                q = source_quality(market_conn, instrument_id=instrument,
-                                   start=start, end=load_end, as_known_at=cutoff)
-                quality.append({"instrument_id": instrument, "session": str(day), **q})
-                quotes, trades = load_instrument_events(
-                    market_conn, instrument_id=instrument, start=start,
+        for shard_number, instruments in enumerate(shards, 1):
+            shard_samples = 0
+            for day in selected["sessions"]:
+                start, end = _session_bounds(day)
+                load_end = end + spec.purge_gap
+                quality = source_quality_batch(
+                    market_conn, instrument_ids=instruments, start=start,
                     end=load_end, as_known_at=cutoff)
-                samples[instrument].extend(build_samples(
-                    quotes, trades, spec, start=start, end=end))
-        report = evaluate_candidate(
-            samples, expr=config["intraday_signal_expr"], spec=spec,
-            horizon_seconds=config["horizon_seconds"], execution=config["execution"],
-            position_mode=config["position_mode"],
-            threshold=config["threshold"], trials=int(hyp.get("_trials") or 1),
-            family_pbo=None, semantic_plan=config["semantic_plan"])
-        report["source_quality"] = quality
+                events = load_instrument_events_batch(
+                    market_conn, instrument_ids=instruments, start=start,
+                    end=load_end, as_known_at=cutoff)
+                for instrument in instruments:
+                    q = quality[instrument]
+                    quality_counts[q["status"]] += 1
+                    for key in quality_totals:
+                        quality_totals[key] += q[key]
+                    if q["status"] != "PASS" and len(quality_examples) < 50:
+                        quality_examples.append({
+                            "instrument_id": instrument, "session": str(day), **q})
+                    quotes, trades = events[instrument]
+                    samples = build_samples(
+                        quotes, trades, spec, start=start, end=end,
+                        execution_model=config["execution"])
+                    shard_samples += len(samples)
+                    accumulator.add(instrument, samples)
+            shard_reports.append({
+                "shard": shard_number,
+                "instrument_count": len(instruments),
+                "sample_count": shard_samples,
+                "instrument_fingerprint": hashlib.sha256(
+                    "|".join(instruments).encode()).hexdigest()[:16],
+            })
+        report = accumulator.finish()
+        report["source_quality"] = {
+            "counts_by_status": quality_counts,
+            "totals": quality_totals,
+            "non_pass_examples": quality_examples,
+        }
+        report["universe_shards"] = shard_reports
+        report["summary"]["universe_shards"] = len(shards)
         report["slice"] = persisted["slice"]
         _store_report(meta_conn, experiment_id, report)
     except Exception:

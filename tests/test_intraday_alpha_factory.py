@@ -16,11 +16,13 @@ for path in (PIPELINE, CONTRACTS, FACTORY):
         sys.path.insert(0, str(path))
 
 import alpha_semantics as semantics
+import formula_discovery
 import intraday_experience
 import lead_intake
 from intraday_alpha_ast import (IntradayExprError, evaluate, fields_of, parse,
                                 shape_fingerprint, unit_of)
-from intraday_candidate import evaluate_candidate
+from intraday_candidate import (_CapacityReservoir, CandidateAccumulator,
+                                evaluate_candidate)
 from factory_bridge import expected_edge_for, gate0
 from factory_bridge import lessons_from
 from intraday_experiment_runner import (_input_hash, config_from_edge,
@@ -194,7 +196,7 @@ def _intraday_proposal() -> dict:
             "intraday_signal_expr": expr, "horizon_seconds": 5,
             "sample_interval_seconds": 5, "feature_lookback_seconds": 30,
             "order_latency_ms": 250, "execution": "TAKER",
-            "evaluation_days": 60, "instrument_count": 2,
+            "evaluation_days": 60, "instrument_shard_size": 32,
         },
     }
 
@@ -212,6 +214,8 @@ def test_gate0_routes_intraday_contract_without_daily_binding() -> None:
     assert config["horizon_seconds"] == 5
     assert config["fee_bps_per_side"] == 11.5
     assert config["position_mode"] == "LONG_ONLY"
+    assert config["universe_mode"] == "ALL_CAUSALLY_COLLECTED"
+    assert config["instrument_shard_size"] == 32
     assert spec.purge_gap == timedelta(milliseconds=5250)
 
     proposal["suggested_params"]["fee_bps_per_side"] = 0
@@ -239,6 +243,71 @@ def test_intraday_family_is_semantic_not_numeric_tuning() -> None:
                         research_lane=second["research_lane"],
                         semantic_fingerprint=second["semantic_fingerprint"])
     assert family_id(a) == family_id(b)
+
+
+def test_llm_formula_thesis_is_typed_and_visible_in_ast() -> None:
+    expr = _intraday_proposal()["suggested_params"]["intraday_signal_expr"]
+    plan = _intraday_proposal()["semantic_plan"]
+    thesis = {
+        "target": "TAKER_NET_PNL",
+        "functional_form": "STATE_CONDITIONAL",
+        "expected_sign": "POSITIVE",
+        "coefficient_policy": "PREREGISTERED_NO_OOS_FIT",
+        "terms": {"spread_bps": "LIQUIDITY",
+                  "trade_flow_imbalance": "PRESSURE"},
+        "identification": (
+            "Persistent aggressive flow must predict positive net markout only "
+            "when the spread state is tight."),
+    }
+    result = formula_discovery.assess(
+        thesis, candidate=expr, semantic_plan=plan,
+        grammar=lead_intake._intraday_ast())
+    assert result["formula_contract_complete"]
+    assert result["formula_math_profile"]["complexity_nodes"] > 1
+
+    invalid = {**thesis, "functional_form": "CROSS_SCALE"}
+    with pytest.raises(ValueError, match="two distinct clocks"):
+        formula_discovery.assess(
+            invalid, candidate=expr, semantic_plan=plan,
+            grammar=lead_intake._intraday_ast())
+
+
+def test_lead_intake_persists_formula_discovery_contract() -> None:
+    proposal = _intraday_proposal()
+    expr = proposal["suggested_params"]["intraday_signal_expr"]
+    block = {
+        "TITLE": "Typed equation hypothesis",
+        "URL": "https://example.com/equation",
+        "MECHANISM": "Persistent aggressive flow moves quotes in tight spreads.",
+        "READINESS": "AST_READY",
+        "OBSERVABLES": "spread_bps,trade_flow_imbalance",
+        "CANDIDATE_SIGNAL_EXPR": expr,
+        "RESEARCH_LANE": "INTRADAY_EVENT",
+        "SEMANTIC_PLAN": proposal["semantic_plan"],
+        "DERIVATION_MODE": "MECHANISM_MUTATION",
+        "SOURCE_BASELINE_EXPR": {"op": "field", "field": "trade_flow_imbalance"},
+        "DERIVATION_TRANSFORMS": "STATE_CONDITION",
+        "NOVELTY_RATIONALE": "Adds an executable liquidity-state interaction.",
+        "FORMULA_THESIS": {
+            "target": "TAKER_NET_PNL",
+            "functional_form": "STATE_CONDITIONAL",
+            "expected_sign": "POSITIVE",
+            "coefficient_policy": "PREREGISTERED_NO_OOS_FIT",
+            "terms": {"spread_bps": "LIQUIDITY",
+                      "trade_flow_imbalance": "PRESSURE"},
+            "identification": "Net markout must be positive only inside the tight-spread state.",
+        },
+    }
+    metadata = lead_intake._readiness_metadata(block, block["MECHANISM"])
+    assert metadata["formula_contract_complete"] is True
+    assert metadata["formula_thesis"]["functional_form"] == "STATE_CONDITIONAL"
+    assert metadata["formula_math_profile"]["output_unit"] == "RATIO"
+
+    without_thesis = {key: value for key, value in block.items()
+                      if key != "FORMULA_THESIS"}
+    with pytest.raises(ValueError, match="FORMULA_THESIS is required"):
+        lead_intake._readiness_metadata(
+            without_thesis, without_thesis["MECHANISM"])
 
 
 def test_intraday_gate_rejects_story_formula_mismatch() -> None:
@@ -279,6 +348,9 @@ def test_intraday_input_identity_ignores_wall_clock_but_tracks_lineage() -> None
     late_data = {**later_call,
                  "source_lineage": [{"source": "market_quotes", "rows": 101}]}
     assert _input_hash("H1", base) == _input_hash("H1", later_call)
+    assert _input_hash("H1", base) == _input_hash(
+        "H1", {**base, "instrument_shard_size": 64,
+               "legacy_instrument_count_ignored": 2})
     assert _input_hash("H1", base) != _input_hash("H1", late_data)
 
 
@@ -303,7 +375,7 @@ def test_session_discovery_is_partition_bounded_and_cutoff_reproducible() -> Non
     conn = Conn()
     cutoff = datetime(2026, 8, 16, 3, 0, tzinfo=timezone.utc)
     selected = select_slice(
-        conn, {"evaluation_days": 60, "instrument_count": 2}, cutoff=cutoff)
+        conn, {"evaluation_days": 60}, cutoff=cutoff)
     sql, params = conn.executed[0]
     assert selected["status"] == "INSUFFICIENT_SESSIONS"
     assert selected["causal_sessions_available"] == 1
@@ -338,7 +410,7 @@ def test_short_live_history_runs_one_calibration_and_two_oos_sessions() -> None:
     conn = Conn()
     cutoff = datetime(2026, 8, 16, 3, 0, tzinfo=timezone.utc)
     selected = select_slice(
-        conn, {"evaluation_days": 60, "instrument_count": 2}, cutoff=cutoff)
+        conn, {"evaluation_days": 60}, cutoff=cutoff)
 
     assert selected["status"] == "PASS"
     assert selected["statistical_readiness"] == "SHORT_DIAGNOSTIC"
@@ -348,7 +420,61 @@ def test_short_live_history_runs_one_calibration_and_two_oos_sessions() -> None:
     assert selected["instruments"] == ["instrument-a", "instrument-b"]
     universe_sql, universe_params = conn.executed[1]
     assert "greatest(received_at, observed_at) <= %s" in universe_sql
+    assert "limit" not in universe_sql.lower()
+    assert "market.market_ticks" in universe_sql
+    assert len(universe_params) == 6
     assert universe_params[2] == cutoff
+    assert universe_params[5] == cutoff
+
+
+def test_streaming_shards_equal_single_pass_and_cover_requested_universe() -> None:
+    spec = IntradayLaneSpec(
+        sample_interval_seconds=5, feature_lookback_seconds=30,
+        horizons_seconds=(5,), order_latency_ms=0,
+        max_quote_age_seconds=5, fee_bps_per_side=1)
+    expr = {"op": "field", "field": "trade_flow_imbalance"}
+    samples = {}
+    for instrument in ("A", "B"):
+        samples[instrument] = [
+            _sample(instrument,
+                    datetime(2026, 1, 2, 0, index, tzinfo=timezone.utc),
+                    signal=1.0, net=2.0)
+            for index in range(4)]
+    expected = evaluate_candidate(
+        samples, expr=expr, spec=spec, horizon_seconds=5, execution="TAKER",
+        criteria={"min_sessions": 1, "min_instruments": 1,
+                  "min_opportunities": 1, "min_deflated_sharpe": -100,
+                  "min_positive_session_ratio": 0})
+    accumulator = CandidateAccumulator(
+        expr=expr, spec=spec, horizon_seconds=5, execution="TAKER",
+        criteria={"min_sessions": 1, "min_instruments": 1,
+                  "min_opportunities": 1, "min_deflated_sharpe": -100,
+                  "min_positive_session_ratio": 0})
+    accumulator.add("A", samples["A"])
+    accumulator.add("B", samples["B"])
+    actual = accumulator.finish()
+
+    for key in ("opportunities", "fills", "mean_mid_markout_bps",
+                "mean_net_bps_per_opportunity", "session_mean_net_bps"):
+        assert actual["summary"][key] == pytest.approx(expected["summary"][key])
+    assert actual["summary"]["instruments_requested"] == 2
+    assert actual["summary"]["instrument_coverage"] == 1.0
+    assert actual["summary"]["max_concurrent_opportunities"] == 2
+    assert actual["lane_manifest"]["portfolio_capital_model"].startswith(
+        "EXACT_PORTFOLIO")
+
+
+def test_capacity_bottom_k_is_independent_of_shard_arrival_order() -> None:
+    forward = _CapacityReservoir(limit=100)
+    reverse = _CapacityReservoir(limit=100)
+    rows = [(f"instrument-{index % 17}|{index}", float(index % 113))
+            for index in range(2_000)]
+    for key, value in rows:
+        forward.add(value, key)
+    for key, value in reversed(rows):
+        reverse.add(value, key)
+    assert sorted(forward.values) == sorted(reverse.values)
+    assert forward.quantile(0.10) == reverse.quantile(0.10)
 
 
 def test_data_feasibility_probe_is_persisted_outside_experiment_ledger() -> None:
@@ -442,6 +568,12 @@ def test_scout_can_submit_raw_event_time_literature_lead() -> None:
         "DERIVATION_MODE": "MECHANISM_MUTATION",
         "DERIVATION_TRANSFORMS": ["CLOCK_CHANGE"],
         "NOVELTY_RATIONALE": "Test persistence duration on the local KRX event clock.",
+        "FORMULA_THESIS": {
+            "target": "TAKER_NET_PNL", "functional_form": "MONOTONE",
+            "expected_sign": "POSITIVE", "coefficient_policy": "STRUCTURE_ONLY",
+            "terms": {"trade_flow_imbalance": "PRESSURE"},
+            "identification": "Persistent signed pressure must predict positive net markout.",
+        },
     }, lens="ACADEMIC", source_type="PAPER", case_id="case-1",
        model_version="test-model", prompt_version="test-prompt")
     assert lead["ast_contract"]["research_lane"] == "INTRADAY_EVENT"
@@ -498,6 +630,14 @@ def test_intraday_evolution_contract_requires_economic_child_and_ablations() -> 
         "EVOLUTION_OPERATORS": ["STATE_CONDITION"],
         "EXPECTED_INCREMENT": "The gate should improve net markout after spread cost.",
         "ABLATIONS": ["remove spread gate", "reverse spread gate"],
+        "FORMULA_THESIS": {
+            "target": "TAKER_NET_PNL", "functional_form": "STATE_CONDITIONAL",
+            "expected_sign": "STATE_DEPENDENT",
+            "coefficient_policy": "PREREGISTERED_NO_OOS_FIT",
+            "terms": {"spread_bps": "LIQUIDITY",
+                      "trade_flow_imbalance": "PRESSURE"},
+            "identification": "Order-flow pressure must add net markout only in wide spreads.",
+        },
     }, lens="ACADEMIC", source_type="PAPER", case_id="evolution-case",
        model_version="test-model", prompt_version="evolution-v1")
 
