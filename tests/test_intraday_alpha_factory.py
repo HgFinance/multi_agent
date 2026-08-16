@@ -327,7 +327,13 @@ def test_llm_formula_thesis_is_typed_and_visible_in_ast() -> None:
         thesis, candidate=expr, semantic_plan=plan,
         grammar=lead_intake._intraday_ast())
     assert result["formula_contract_complete"]
+    assert result["formula_discovery_version"] == "formula-discovery-v3"
     assert result["formula_math_profile"]["complexity_nodes"] > 1
+    assert result["formula_math_profile"]["term_influence"] == {
+        "realized_volatility_bps": ["VALUE"],
+        "spread_bps": ["GATE"],
+        "trade_flow_imbalance": ["VALUE"],
+    }
 
     invalid = {**thesis, "functional_form": "CROSS_SCALE"}
     with pytest.raises(ValueError, match="two distinct clocks"):
@@ -345,6 +351,55 @@ def test_llm_formula_thesis_is_typed_and_visible_in_ast() -> None:
         formula_discovery.assess(
             dimensionless_thesis, candidate=dimensionless,
             semantic_plan=plan, grammar=lead_intake._intraday_ast())
+
+
+def test_formula_discovery_rejects_decorative_nonnegative_sign_term() -> None:
+    expr = {"op": "mul", "args": [
+        {"op": "field", "field": "spread_bps"},
+        {"op": "div", "args": [
+            {"op": "field", "field": "queue_imbalance_l1"},
+            {"op": "sign", "arg": {"op": "field", "field": "trade_count"}},
+        ]},
+    ]}
+    thesis = {
+        "target": "TAKER_NET_PNL",
+        "functional_form": "INTERACTION",
+        "expected_sign": "POSITIVE",
+        "coefficient_policy": "PREREGISTERED_NO_OOS_FIT",
+        "decision_rule": "PREDICTED_MARKOUT_CLEARS_COST",
+        "terms": {"spread_bps": "LIQUIDITY",
+                  "queue_imbalance_l1": "PRESSURE",
+                  "trade_count": "ACTIVITY"},
+        "identification": (
+            "Depth pressure must beat its flow-only and activity-only controls."),
+    }
+    with pytest.raises(ValueError, match="presence-only influence"):
+        formula_discovery.assess(
+            thesis, candidate=expr,
+            semantic_plan={"output": "TAKER_NET_PNL", "execution": "TAKER"},
+            grammar=lead_intake._intraday_ast())
+
+
+def test_formula_discovery_rejects_exact_symbolic_degeneracy() -> None:
+    base = {"op": "field", "field": "microprice_offset_bps"}
+    expr = {"op": "where", "condition": {"op": "lt", "args": [
+        {"op": "field", "field": "spread_bps"},
+        {"const": 5, "unit": "BPS"}]}, "then": base, "else": base}
+    thesis = {
+        "target": "TAKER_NET_PNL",
+        "functional_form": "STATE_CONDITIONAL",
+        "expected_sign": "STATE_DEPENDENT",
+        "coefficient_policy": "PREREGISTERED_NO_OOS_FIT",
+        "decision_rule": "PREDICTED_MARKOUT_CLEARS_COST",
+        "terms": {"spread_bps": "LIQUIDITY",
+                  "microprice_offset_bps": "PRESSURE"},
+        "identification": "Spread state must change the conditional markout response.",
+    }
+    with pytest.raises(ValueError, match="identical then/else"):
+        formula_discovery.assess(
+            thesis, candidate=expr,
+            semantic_plan={"output": "TAKER_NET_PNL", "execution": "TAKER"},
+            grammar=lead_intake._intraday_ast())
 
 
 def test_lead_intake_persists_formula_discovery_contract() -> None:
@@ -1062,7 +1117,7 @@ def test_positive_screening_evidence_breeds_but_still_allows_confirmation() -> N
         "lead_id": "confirm-me", "intraday_signal_expr": expr,
         "semantic_plan": plan, "used": False,
         "alpha_candidate_eligible": True,
-        "formula_discovery_version": "formula-discovery-v2",
+        "formula_discovery_version": "formula-discovery-v3",
         "formula_contract_complete": True,
     }
     memory = intraday_experience.build(screened, [lead])
@@ -1071,3 +1126,22 @@ def test_positive_screening_evidence_breeds_but_still_allows_confirmation() -> N
     assert [row["lead_id"] for row in memory.niche_elites] == ["confirm-me"]
     assert memory.breeding_parents[0]["breeding_role"] == "SCREEN_SURVIVOR"
     assert "SCREEN_SURVIVOR still needs" in intraday_experience.render(memory)
+
+
+def test_previous_formula_contract_does_not_occupy_live_niche() -> None:
+    expr = {"op": "field", "field": "microprice_offset_bps"}
+    plan = {
+        "event": "MICROPRICE_DISLOCATION", "context": ["ALL"],
+        "qualities": ["LEVEL"], "direction": "REVERT",
+        "output": "TAKER_NET_PNL", "execution": "TAKER",
+        "horizon_seconds": 5,
+    }
+    stale = {
+        "lead_id": "old-validator-pass", "intraday_signal_expr": expr,
+        "semantic_plan": plan, "used": False,
+        "alpha_candidate_eligible": True,
+        "formula_discovery_version": "formula-discovery-v2",
+        "formula_contract_complete": True,
+    }
+    memory = intraday_experience.build([], [stale])
+    assert memory.niche_elites == ()

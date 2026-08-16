@@ -314,19 +314,22 @@ def _attach_intraday_screening_cohort(
     if proposal.research_lane.value != "INTRADAY_EVENT":
         return proposal
 
+    import intraday_ast_contract as intraday_grammar  # noqa: PLC0415
     from intraday_ast_contract import fingerprint, parse, unit_of  # noqa: PLC0415
+    from formula_discovery import assess as assess_formula  # noqa: PLC0415
 
     params = dict(proposal.suggested_params or {})
     primary = parse(params.get("intraday_signal_expr"))
     primary_fp = fingerprint(primary)
     candidates: dict[str, dict] = {}
+    rejected_primary: list[str] = []
 
     for lead_id in proposal.lead_ids:
         lead = leads.get(str(lead_id))
         if lead is None:
             continue
         contract = dict(lead.ast_contract or {})
-        if (contract.get("formula_discovery_version") != "formula-discovery-v2"
+        if (contract.get("formula_discovery_version") != "formula-discovery-v3"
                 or not contract.get("formula_contract_complete")
                 or contract.get("alpha_candidate_eligible") is not True
                 or contract.get("research_lane") != "INTRADAY_EVENT"):
@@ -337,6 +340,16 @@ def _attach_intraday_screening_cohort(
             continue
         fp = fingerprint(expr)
         thesis = dict(contract.get("formula_thesis") or {})
+        try:
+            assess_formula(
+                thesis, candidate=expr,
+                semantic_plan=dict(contract.get("semantic_plan") or {}),
+                grammar=intraday_grammar,
+            )
+        except (TypeError, ValueError) as exc:
+            if fp == primary_fp:
+                rejected_primary.append(f"{lead_id}: {exc}")
+            continue
         row = candidates.setdefault(fp, {
             "candidate_role": "LINKED_CANDIDATE",
             "source_lead_ids": [],
@@ -354,9 +367,13 @@ def _attach_intraday_screening_cohort(
         row["source_lead_ids"].append(str(lead_id))
 
     if primary_fp not in candidates:
+        if rejected_primary:
+            raise ValueError(
+                "INTRADAY_EVENT primary formula no longer passes the current "
+                "formula influence audit: " + " | ".join(rejected_primary))
         raise ValueError(
             "INTRADAY_EVENT primary formula must exactly match one linked "
-            "formula-discovery-v2 lead")
+            "formula-discovery-v3 lead")
 
     primary_lead_ids = tuple(candidates[primary_fp]["source_lead_ids"])
     sidecars = [row for fp, row in candidates.items() if fp != primary_fp]
@@ -1115,7 +1132,7 @@ def _check_lane_isolated_history_lookup():
 
 
 def _check_intraday_screening_cohort_is_sourced_and_non_promoting():
-    """Linked v2 formulas become exact sidecars, not silently consumed leads."""
+    """Linked v3 formulas become exact sidecars, not silently consumed leads."""
     from contracts.factory_contracts import SourceRef, lead_id_for
     from publish_gate import check_intraday_screening_population
 
@@ -1138,13 +1155,22 @@ def _check_intraday_screening_cohort_is_sourced_and_non_promoting():
             scout_lens="ACADEMIC", source_type="PAPER", as_known_at=now,
             refs=(ref,), claimed_edge=label, stated_mechanism="mechanism",
             ast_contract={
-                "formula_discovery_version": "formula-discovery-v2",
+                "formula_discovery_version": "formula-discovery-v3",
                 "formula_contract_complete": True,
                 "alpha_candidate_eligible": True,
                 "research_lane": "INTRADAY_EVENT",
                 "candidate_signal_expr": expr, "semantic_plan": plan,
                 "formula_thesis": {
-                    "decision_rule": "PREDICTED_MARKOUT_CLEARS_COST"},
+                    "target": "TAKER_NET_PNL",
+                    "functional_form": "MONOTONE",
+                    "expected_sign": "STATE_DEPENDENT",
+                    "coefficient_policy": "PREREGISTERED_NO_OOS_FIT",
+                    "decision_rule": "PREDICTED_MARKOUT_CLEARS_COST",
+                    "terms": {"microprice_offset_bps": "PRESSURE"},
+                    "identification": (
+                        "Microprice displacement must predict positive net markout "
+                        "after the preregistered execution cost hurdle."),
+                },
                 "evolution_role": "SEED",
             })
 

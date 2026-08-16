@@ -119,11 +119,27 @@ def check_leads(proposal: ExperimentProposalV1,
                 "직접 복제나 창 조정은 알파 후보로 발행하지 않고, 메커니즘을 "
                 "변형한 별도 AST 리드가 필요하다")
         if (proposal.research_lane == ResearchLane.INTRADAY_EVENT
-                and (lead.ast_contract or {}).get("formula_discovery_version")
-                != "formula-discovery-v2"):
+                and ((lead.ast_contract or {}).get("formula_discovery_version")
+                     != "formula-discovery-v3"
+                     or not (lead.ast_contract or {}).get(
+                         "formula_contract_complete"))):
             out.append(
-                f"lead {lid} lacks the cost-aware formula-discovery-v2 contract; "
+                f"lead {lid} lacks the cost-aware formula-discovery-v3 contract; "
                 "resubmit a BPS markout equation with an executable cost hurdle")
+        elif proposal.research_lane == ResearchLane.INTRADAY_EVENT:
+            contract = lead.ast_contract or {}
+            try:
+                from contracts import intraday_ast_contract as intraday_grammar
+                import formula_discovery
+                formula_discovery.assess(
+                    contract.get("formula_thesis"),
+                    candidate=contract.get("candidate_signal_expr"),
+                    semantic_plan=contract.get("semantic_plan") or {},
+                    grammar=intraday_grammar,
+                )
+            except (TypeError, ValueError) as exc:
+                out.append(
+                    f"lead {lid} fails the current formula influence audit: {exc}")
         if not lead.refs:
             out.append(f"리드 {lid} 에 출처가 없다")
     return out
@@ -194,7 +210,7 @@ def check_microstructure_primary(proposal: ExperimentProposalV1) -> list[str]:
 def check_intraday_screening_population(
         proposal: ExperimentProposalV1,
         leads: dict[str, MethodologyLeadV1]) -> list[str]:
-    """Verify that shared-replay sidecars are exact, sourced v2 formulas."""
+    """Verify that shared-replay sidecars are exact, sourced v3 formulas."""
     if proposal.research_lane != ResearchLane.INTRADAY_EVENT:
         return []
     population = (proposal.suggested_params or {}).get(
@@ -205,7 +221,9 @@ def check_intraday_screening_population(
         return ["screening_population exceeds the bounded seven-sidecar limit"]
 
     from contracts.alpha_semantics import validate as validate_plan
+    from contracts import intraday_ast_contract as intraday_grammar
     from contracts.intraday_ast_contract import fingerprint, parse, unit_of
+    import formula_discovery
 
     out: list[str] = []
     try:
@@ -252,8 +270,8 @@ def check_intraday_screening_population(
                 continue
             contract = lead.ast_contract or {}
             if (contract.get("formula_discovery_version") !=
-                    "formula-discovery-v2"):
-                out.append(f"{prefix} source lead {lead_id} is not v2")
+                    "formula-discovery-v3"):
+                out.append(f"{prefix} source lead {lead_id} is not v3")
                 continue
             if (not contract.get("formula_contract_complete")
                     or contract.get("research_lane") != "INTRADAY_EVENT"):
@@ -263,6 +281,12 @@ def check_intraday_screening_population(
                 source_plan = validate_plan(contract.get("semantic_plan") or {})
                 source_policy = str((contract.get("formula_thesis") or {}).get(
                     "decision_rule") or "")
+                formula_discovery.assess(
+                    contract.get("formula_thesis"),
+                    candidate=contract.get("candidate_signal_expr"),
+                    semantic_plan=source_plan,
+                    grammar=intraday_grammar,
+                )
                 if role == "LINKED_CANDIDATE":
                     source_expr = parse(contract.get("candidate_signal_expr"))
                     match = (contract.get("alpha_candidate_eligible") is True
@@ -439,6 +463,36 @@ def _mk_proposal(**kw):
     return ExperimentProposalV1(**base), {lead.lead_id: lead}
 
 
+def _with_current_intraday_contract(proposal, leads):
+    """Make self-check leads obey the same complete contract as production rows."""
+    from contracts import intraday_ast_contract as grammar
+
+    expr = proposal.suggested_params["intraday_signal_expr"]
+    fields = sorted(grammar.fields_of(expr))
+    operators = grammar.operators_of(expr)
+    form = "INTERACTION" if operators & {"mul", "div"} else "MONOTONE"
+    thesis = {
+        "target": proposal.semantic_plan["output"],
+        "functional_form": form,
+        "expected_sign": "STATE_DEPENDENT",
+        "coefficient_policy": "PREREGISTERED_NO_OOS_FIT",
+        "decision_rule": "PREDICTED_MARKOUT_CLEARS_COST",
+        "terms": {field: ("PRESSURE" if "imbalance" in field
+                           or "microprice" in field else "VOLATILITY")
+                  for field in fields},
+        "identification": (
+            "The preregistered markout equation must remain positive after costs."),
+    }
+    return {lid: lead.model_copy(update={"ast_contract": {
+        **lead.ast_contract,
+        "formula_discovery_version": "formula-discovery-v3",
+        "formula_contract_complete": True,
+        "candidate_signal_expr": expr,
+        "semantic_plan": proposal.semantic_plan,
+        "formula_thesis": thesis,
+    }}) for lid, lead in leads.items()}
+
+
 def _check_clean_proposal_passes():
     p, leads = _mk_proposal()
     r = evaluate(p, leads=leads)
@@ -513,11 +567,7 @@ def _check_intraday_ast_uses_intraday_contract():
                 {"op": "field", "field": "realized_volatility_bps"}],
         }, "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST"},
     )
-    leads = {lid: lead.model_copy(update={"ast_contract": {
-        **lead.ast_contract,
-        "formula_discovery_version": "formula-discovery-v2",
-        "formula_contract_complete": True,
-    }}) for lid, lead in leads.items()}
+    leads = _with_current_intraday_contract(p, leads)
     r = evaluate(p, leads=leads)
     assert r.ok, r.as_dict()
 
@@ -543,11 +593,7 @@ def _check_passive_intraday_uses_canonical_target_and_cost_hurdle():
             tables=("market_quotes", "market_ticks"), min_history_days=10),
         suggested_params=params,
     )
-    leads = {lid: lead.model_copy(update={"ast_contract": {
-        **lead.ast_contract,
-        "formula_discovery_version": "formula-discovery-v2",
-        "formula_contract_complete": True,
-    }}) for lid, lead in leads.items()}
+    leads = _with_current_intraday_contract(p, leads)
     blocked = evaluate(p, leads=leads)
     assert not blocked.ok
     assert any("PREDICTED_MARKOUT_CLEARS_COST" in reason

@@ -198,10 +198,21 @@ purged walk-forward joint model이 함께 포함된다.
   fitting은 허용하지 않으며, 12개 population·ablation·실패 기억을 통한 구조 탐색만 한다.
   quality-diversity 점수는 어떤 후보를 먼저 시험할지 정할 뿐 성과나 승격 판정이 아니다.
 
+- 단위가 맞는 것만으로도 충분하지 않다. 수식 접수기는 각 field가 값 경로(`VALUE`)나
+  명시적 상태 분기(`GATE`)에 실제로 영향을 주는지 구조적으로 감사한다. 항상 음이 아닌
+  `trade_count`·depth·spread에 `sign()`을 씌워 거의 상수 +1로 만든 장식 항,
+  동일식의 `x-x`/`x/x`, 같은 then/else를 가진 `where`, 0을 곱해 다른 항을 지운 식은
+  백테스트 전에 거부한다. 기존 계약 리드도 Proposal 조립과 Publish Gate에서 현재 v3
+  감사기를 다시 통과해야 하므로, 과거 validator의 허점을 이용한 식이 그대로 실행되지
+  않는다. 거부 응답은 무차원 pressure를 경제적으로 정당화한 BPS scale과 결합하는 법,
+  signed change에는 `rolling_zscore`/`delta`, 진짜 상태에는 `where(gt(...))`를 쓰는
+  비자동 수리 힌트를 돌려준다. 코드는 가설을 몰래 바꾸지 않고 Hermes가 근거·ablation과
+  함께 다시 제출하게 한다.
+
 ### 공유 재생 진화 평가 v5
 
 수식 생성량보다 원시 호가·체결 재생 시간이 훨씬 큰 현재 병목에서는 12개 초안을 각각
-독립 raw replay에 넣지 않는다. Planner는 서로 다른 니치의 계약 유효 v2 리드를 한
+독립 raw replay에 넣지 않는다. Planner는 서로 다른 니치의 계약 유효 v3 리드를 한
 Proposal에 2~8개까지 연결하고, 그중 하나만 주 수식으로 사전등록한다. 접수기는 나머지
 정확한 lead AST와 명시된 lineage parent를 최대 7개의 `SCREENING_ONLY` sidecar로
 자동 부착한다. 에이전트가 sidecar 본문을 직접 쓰거나 출처·fingerprint를 바꾸면
