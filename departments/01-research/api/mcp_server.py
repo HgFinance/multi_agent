@@ -335,6 +335,47 @@ def render_skeptic_reviews(reviews: list[dict]) -> str:
     return "\n\n".join(blocks)
 
 
+def load_persisted_skeptic_reviews(conn, skeptic_run: str,
+                                    planner_run: str,
+                                    planner_text: str) -> tuple[list[dict], str]:
+    """Recover a previously verified review after an MCP process restart.
+
+    Rows enter this ledger only after ``verified_skeptic_reviews`` has checked
+    the live worker job.  Binding the recovery to the exact draft digest and
+    both run ids preserves that causal signature without making process memory
+    a single point of failure.
+    """
+    digest = _text_digest(planner_text)
+    with conn.cursor() as cur:
+        cur.execute("""
+            select title, competing_explanation, competing_codes, verdict,
+                   falsification_test
+              from research.proposal_review_outcomes
+             where proposal_draft_sha256 = %s
+               and skeptic_run = %s
+               and planner_run = %s
+             order by title
+        """, (digest, str(skeptic_run or "").strip(),
+              str(planner_run or "").strip()))
+        rows = cur.fetchall()
+    if not rows:
+        return [], "no durable skeptic review matches this draft and run binding"
+    reviews = [{
+        "title": row[0],
+        "competing_explanation": row[1],
+        "competing_codes": list(row[2] or []),
+        "verdict": row[3],
+        "falsification_test": row[4],
+    } for row in rows]
+    planner_titles = [match.group(1).strip() for match in re.finditer(
+        r"(?m)^\s*TITLE\s*:\s*(.+?)\s*$", str(planner_text or ""))
+        if match.group(1).strip()]
+    review_titles = [str(review["title"] or "").strip() for review in reviews]
+    if not planner_titles or sorted(planner_titles) != sorted(review_titles):
+        return [], "durable skeptic review TITLE set does not match proposal_draft"
+    return reviews, ""
+
+
 def persist_skeptic_reviews(conn, planner_text: str, reviews: list[dict], *,
                             case_id: str, planner_run: str,
                             skeptic_run: str, known_lead_ids: set[str]) -> int:
@@ -1065,18 +1106,21 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
                     "why": "planner_run must start with the current kanban task id (t_...)"
                 }],
             }
-        skeptic_reviews, critic_error = verified_skeptic_reviews(
-            skeptic_run, planner_text)
-        if critic_error:
-            return {
-                "ok": False, "published": 0, "already_present": 0,
-                "unknown_lead_ids": [], "gate": [],
-                "rejected": [{"title": "(independent skeptic)",
-                              "why": critic_error}],
-            }
-
         conn = _db()
         try:
+            skeptic_reviews, critic_error = verified_skeptic_reviews(
+                skeptic_run, planner_text)
+            if critic_error:
+                skeptic_reviews, durable_error = load_persisted_skeptic_reviews(
+                    conn, skeptic_run, planner_run, planner_text)
+                if durable_error:
+                    return {
+                        "ok": False, "published": 0, "already_present": 0,
+                        "unknown_lead_ids": [], "gate": [],
+                        "rejected": [{"title": "(independent skeptic)",
+                                      "why": (critic_error + "; " +
+                                              durable_error)}],
+                    }
             wanted = {i for b in PI.parse_blocks(planner_text, PI.PLANNER_KEYS)
                       for i in PI._split(b.get("LEAD_IDS", ""))}
             leads = PI.load_leads(conn, sorted(wanted))
@@ -1107,7 +1151,9 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
                               (b.get("UNIVERSE_KEY") or "").strip().lower(),
                               label=(b.get("LABEL") or "").strip(),
                               baseline=(b.get("BASELINE") or "").strip(),
-                              signal_expr=PI.signal_expr_from_block(b)))
+                              signal_expr=PI.signal_expr_from_block(b),
+                              research_lane=(b.get("RESEARCH_LANE") or
+                                             "DAILY_CROSS_SECTIONAL").strip()))
             for prop, _g in r.proposals:
                 setattr(prop, "_planner_prompt", planner_prompt)
                 setattr(prop, "_skeptic_prompt", skeptic_prompt)
@@ -1366,8 +1412,9 @@ def _check_skeptic_review_persistence():
     sys.path.insert(0, str(_BASE / "factory"))
 
     class _Cursor:
-        def __init__(self):
+        def __init__(self, rows=None):
             self.calls = []
+            self.rows = list(rows or [])
 
         def __enter__(self):
             return self
@@ -1381,9 +1428,12 @@ def _check_skeptic_review_persistence():
         def fetchone(self):
             return ("review_test",)
 
+        def fetchall(self):
+            return list(self.rows)
+
     class _Conn:
-        def __init__(self):
-            self.cur = _Cursor()
+        def __init__(self, rows=None):
+            self.cur = _Cursor(rows)
             self.commits = 0
 
         def cursor(self):
@@ -1418,6 +1468,17 @@ def _check_skeptic_review_persistence():
         known_lead_ids=set(),
     ) == 0
     assert not unknown.cur.calls, "unknown lead id was persisted as reviewed"
+
+    recovered = _Conn(rows=[(
+        "Event OFI", "The signal may only proxy spread costs.",
+        ["COST_UNACCOUNTED"], "STOP",
+        "Condition on spread and require net markout.",
+    )])
+    durable, error = load_persisted_skeptic_reviews(
+        recovered, "job_test", "t_test-planner", draft)
+    assert not error and durable[0]["verdict"] == "STOP", (durable, error)
+    _sql, _params = recovered.cur.calls[0]
+    assert _params == (_text_digest(draft), "job_test", "t_test-planner")
     print("  스켑틱 심사 영구기억      OK")
 
 
