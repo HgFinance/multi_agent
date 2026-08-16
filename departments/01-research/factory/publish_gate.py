@@ -120,13 +120,13 @@ def check_leads(proposal: ExperimentProposalV1,
                 "변형한 별도 AST 리드가 필요하다")
         if (proposal.research_lane == ResearchLane.INTRADAY_EVENT
                 and ((lead.ast_contract or {}).get("formula_discovery_version")
-                     != "formula-discovery-v4"
+                     != "formula-discovery-v5"
                      or not (lead.ast_contract or {}).get(
                          "formula_contract_complete"))):
             out.append(
-                f"lead {lid} lacks the directional formula-discovery-v4 contract; "
-                "resubmit a signed-pressure BPS markout equation with an executable "
-                "cost hurdle")
+                f"lead {lid} lacks the directional formula-discovery-v5 contract; "
+                "resubmit a signed-pressure structure or identified BPS equation "
+                "with an executable cost hurdle")
         elif proposal.research_lane == ResearchLane.INTRADAY_EVENT:
             contract = lead.ast_contract or {}
             try:
@@ -170,10 +170,17 @@ def check_microstructure_primary(proposal: ExperimentProposalV1) -> list[str]:
             out.append("intraday_signal_expr has no raw quote/trade field")
         output = str((proposal.semantic_plan or {}).get("output") or "").upper()
         if output in {"TAKER_NET_PNL", "PASSIVE_FILL_ADJUSTED_PNL"}:
-            if unit_of(parsed) != "BPS":
+            coefficient_policy = str((proposal.suggested_params or {}).get(
+                "coefficient_policy") or "PREREGISTERED_NO_OOS_FIT").upper()
+            if coefficient_policy not in {
+                    "FIXED_FROM_SOURCE", "PREREGISTERED_NO_OOS_FIT",
+                    "STRUCTURE_ONLY"}:
+                out.append("intraday proposal has unsupported coefficient_policy")
+            if coefficient_policy != "STRUCTURE_ONLY" and unit_of(parsed) != "BPS":
                 out.append(
-                    "net-PnL intraday AST must predict markout in BPS; a "
-                    "dimensionless pressure score is not an executable PnL equation")
+                    "fixed/preregistered net-PnL AST must predict markout in BPS")
+            if coefficient_policy == "STRUCTURE_ONLY" and unit_of(parsed) == "BOOL":
+                out.append("STRUCTURE_ONLY intraday AST must emit a numeric score")
             if str((proposal.suggested_params or {}).get(
                     "entry_policy") or "").upper() != \
                     "PREDICTED_MARKOUT_CLEARS_COST":
@@ -211,7 +218,7 @@ def check_microstructure_primary(proposal: ExperimentProposalV1) -> list[str]:
 def check_intraday_screening_population(
         proposal: ExperimentProposalV1,
         leads: dict[str, MethodologyLeadV1]) -> list[str]:
-    """Verify shared-replay sidecars against exact sourced v4 formulas."""
+    """Verify shared-replay sidecars against exact sourced v5 formulas."""
     if proposal.research_lane != ResearchLane.INTRADAY_EVENT:
         return []
     population = (proposal.suggested_params or {}).get(
@@ -253,8 +260,15 @@ def check_intraday_screening_population(
             out.append(f"{prefix}.ast_fingerprint does not match its AST")
         output = str(plan.get("output") or "").upper()
         if output in {"TAKER_NET_PNL", "PASSIVE_FILL_ADJUSTED_PNL"}:
-            if unit_of(expr) != "BPS":
-                out.append(f"{prefix} net-PnL AST must output BPS")
+            coefficient_policy = str(row.get("coefficient_policy") or "").upper()
+            if coefficient_policy not in {
+                    "FIXED_FROM_SOURCE", "PREREGISTERED_NO_OOS_FIT",
+                    "STRUCTURE_ONLY"}:
+                out.append(f"{prefix} has unsupported coefficient_policy")
+            elif coefficient_policy != "STRUCTURE_ONLY" and unit_of(expr) != "BPS":
+                out.append(f"{prefix} fixed net-PnL AST must output BPS")
+            elif coefficient_policy == "STRUCTURE_ONLY" and unit_of(expr) == "BOOL":
+                out.append(f"{prefix} STRUCTURE_ONLY AST must output a number")
             if str(row.get("entry_policy") or "").upper() != \
                     "PREDICTED_MARKOUT_CLEARS_COST":
                 out.append(f"{prefix} lacks the executable cost hurdle")
@@ -272,8 +286,8 @@ def check_intraday_screening_population(
                 continue
             contract = lead.ast_contract or {}
             if (contract.get("formula_discovery_version") !=
-                    "formula-discovery-v4"):
-                out.append(f"{prefix} source lead {lead_id} is not v4")
+                    "formula-discovery-v5"):
+                out.append(f"{prefix} source lead {lead_id} is not v5")
                 continue
             if (not contract.get("formula_contract_complete")
                     or contract.get("research_lane") != "INTRADAY_EVENT"):
@@ -283,6 +297,9 @@ def check_intraday_screening_population(
                 source_plan = validate_plan(contract.get("semantic_plan") or {})
                 source_policy = str((contract.get("formula_thesis") or {}).get(
                     "decision_rule") or "")
+                source_coefficient_policy = str(
+                    (contract.get("formula_thesis") or {}).get(
+                        "coefficient_policy") or "")
                 formula_discovery.assess(
                     contract.get("formula_thesis"),
                     candidate=contract.get("candidate_signal_expr"),
@@ -295,13 +312,17 @@ def check_intraday_screening_population(
                              and fingerprint(source_expr) == fp
                              and source_plan == plan
                              and source_policy == str(
-                                 row.get("entry_policy") or ""))
+                                 row.get("entry_policy") or "")
+                             and source_coefficient_policy == str(
+                                 row.get("coefficient_policy") or ""))
                 elif role == "LINEAGE_PARENT":
                     source_expr = parse(contract.get("parent_signal_expr"))
                     match = (fingerprint(source_expr) == fp
                              and source_plan == plan
                              and source_policy == str(
-                                 row.get("entry_policy") or ""))
+                                 row.get("entry_policy") or "")
+                             and source_coefficient_policy == str(
+                                 row.get("coefficient_policy") or ""))
                 elif role == "STRUCTURAL_ABLATION":
                     source_expr = parse(contract.get("candidate_signal_expr"))
                     source_fp = fingerprint(source_expr)
@@ -321,7 +342,9 @@ def check_intraday_screening_population(
                         and row.get("ablation_version") == expected.get(
                             "ablation_version")
                         and source_plan == plan
-                        and source_policy == str(row.get("entry_policy") or ""))
+                        and source_policy == str(row.get("entry_policy") or "")
+                        and source_coefficient_policy == str(
+                            row.get("coefficient_policy") or ""))
                 else:
                     out.append(f"{prefix} has unknown candidate_role={role!r}")
                     break
@@ -507,7 +530,7 @@ def _with_current_intraday_contract(proposal, leads):
     }
     return {lid: lead.model_copy(update={"ast_contract": {
         **lead.ast_contract,
-        "formula_discovery_version": "formula-discovery-v4",
+        "formula_discovery_version": "formula-discovery-v5",
         "formula_contract_complete": True,
         "candidate_signal_expr": expr,
         "semantic_plan": proposal.semantic_plan,

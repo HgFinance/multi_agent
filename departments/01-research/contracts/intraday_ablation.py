@@ -19,7 +19,7 @@ ABLATION_VERSION = "intraday-structural-ablation-v1"
 # The cohort version is a cross-department execution contract, not merely a
 # proposal-intake implementation detail.  Quant imports the same value and
 # refuses stale populated cohorts before they consume a full-universe replay.
-INTRADAY_SCREENING_COHORT_VERSION = "intraday-screening-cohort-v2"
+INTRADAY_SCREENING_COHORT_VERSION = "intraday-screening-cohort-v3"
 
 
 def _is_zero(node: dict) -> bool:
@@ -88,9 +88,10 @@ def _replace(root: dict, path: tuple[str, ...], replacement: dict) -> dict:
 
 
 def generate(expr: dict) -> list[dict]:
-    """Generate all unique one-edit BPS controls, deterministically ordered."""
+    """Generate unique one-edit controls with the source unit preserved."""
     source = grammar.parse(expr)
-    if grammar.unit_of(source) != grammar.BPS:
+    source_unit = grammar.unit_of(source)
+    if source_unit == grammar.BOOL:
         return []
     source_fp = grammar.fingerprint(source)
     source_nodes = grammar.count_nodes(source)
@@ -110,7 +111,7 @@ def generate(expr: dict) -> list[dict]:
         try:
             candidate = grammar.parse(raw)
             fp = grammar.fingerprint(candidate)
-            if (grammar.unit_of(candidate) != grammar.BPS
+            if (grammar.unit_of(candidate) != source_unit
                     or grammar.count_nodes(candidate) >= source_nodes
                     or fp in seen):
                 continue

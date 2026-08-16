@@ -13,7 +13,8 @@ import json
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
-CONTRACT_VERSION = "formula-discovery-v4"
+CONTRACT_VERSION = "formula-discovery-v5"
+CALIBRATION_CONTRACT = "ORIGIN_ANCHORED_POSITIVE_SHRINKAGE_V1"
 
 # These names are the canonical ``alpha_semantics.OUTPUTS`` values.  Keeping a
 # second set of near-synonyms here used to make gross-markout and passive
@@ -220,20 +221,25 @@ def assess(thesis, *, candidate: dict, semantic_plan: dict, grammar) -> dict:
     if target != str(semantic_plan.get("output") or "").upper():
         raise ValueError("FORMULA_THESIS.target must equal SEMANTIC_PLAN.output")
 
-    # A target measured in basis points cannot be represented by a bare,
-    # dimensionless pressure score.  The old contract allowed that mismatch and
-    # the evaluator then interpreted every positive tick as an executable trade.
-    # Keep the LLM on equation structure; deterministic execution policy decides
-    # whether the predicted move clears spread and statutory round-trip costs.
-    if profile["output_unit"] != "BPS":
+    # A fixed/preregistered equation that claims to predict markout must already
+    # be dimensioned in BPS.  A STRUCTURE_ONLY equation is deliberately
+    # different: it describes the economic shape and direction, while a
+    # deterministic calibration-only mapper estimates one positive, shrunken
+    # score->BPS coefficient before the OOS sessions.  This prevents the LLM
+    # from multiplying a useful pressure score by spread/volatility merely to
+    # satisfy units and then having that arbitrary number treated as a calibrated
+    # future markout.
+    structure_only = coefficient_policy == "STRUCTURE_ONLY"
+    if not structure_only and profile["output_unit"] != "BPS":
         raise ValueError(
-            "FORMULA_THESIS target is measured in BPS, so the AST output unit "
-            f"must be BPS, not {profile['output_unit']}. REPAIR: keep the "
-            "economically signed pressure as RATIO and multiply it by an "
-            "economically justified BPS observable such as "
-            "realized_volatility_bps, or start from microprice_offset_bps; "
-            "preregister and ablate the scale term instead of adding a BPS "
-            "field only to satisfy units")
+            "fixed/preregistered FORMULA_THESIS markout equations must output "
+            f"BPS, not {profile['output_unit']}. REPAIR: either provide a "
+            "source-identified BPS equation or set coefficient_policy="
+            "STRUCTURE_ONLY so the runtime estimates one locked score-to-BPS "
+            "coefficient on calibration sessions only; never add a BPS field "
+            "only to satisfy dimensions")
+    if structure_only and profile["output_unit"] == "BOOL":
+        raise ValueError("STRUCTURE_ONLY AST must output a numeric signed score")
     pnl_target = target in {
         "TAKER_NET_PNL", "PASSIVE_FILL_ADJUSTED_PNL",
     }
@@ -297,6 +303,8 @@ def assess(thesis, *, candidate: dict, semantic_plan: dict, grammar) -> dict:
             "and volatility fields only as explicit gates/scales, then ablate them")
     profile["term_influence"] = influence
     profile["directional_pressure_fields"] = directional_value
+    profile["score_calibration"] = (
+        CALIBRATION_CONTRACT if structure_only else "NONE_FIXED_EQUATION")
 
     operators = set(profile["operators"])
     clocks = profile["clocks_seconds"]

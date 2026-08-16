@@ -7,7 +7,7 @@ numeric evidence to the shared quant experiment ledger.
 
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 import hashlib
 import json
 from zoneinfo import ZoneInfo
@@ -18,6 +18,7 @@ from intraday_alpha_ast import (clocks_of, count_nodes, fingerprint,
 from alpha_semantics import validate as validate_semantic_plan
 from intraday_candidate import (CandidateAccumulator,
                                 CandidatePopulationAccumulator,
+                                COEFFICIENT_POLICIES,
                                 EVALUATOR_VERSION)
 from intraday_microstructure import (IntradayLaneSpec, build_samples,
                                       load_instrument_events_batch, manifest,
@@ -25,7 +26,7 @@ from intraday_microstructure import (IntradayLaneSpec, build_samples,
 from intraday_ablation import INTRADAY_SCREENING_COHORT_VERSION
 
 
-RUNNER_VERSION = "intraday-experiment-runner-v6"
+RUNNER_VERSION = "intraday-experiment-runner-v7"
 COST_MODEL_VERSION = "krx-intraday-execution-v1"
 # 2026 listed equities incur 20bp on the sale (KOSPI 5bp STT + 15bp rural,
 # KOSDAQ 20bp STT).  A representative online commission is 1.5bp each side.
@@ -134,11 +135,18 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
     semantic_plan = validate_semantic_plan(edge.get("semantic_plan") or {})
     output = str(semantic_plan.get("output") or "").upper()
     entry_policy = str(edge.get("entry_policy") or "").upper()
+    coefficient_policy = str(edge.get("coefficient_policy") or
+                             "PREREGISTERED_NO_OOS_FIT").upper()
+    if coefficient_policy not in COEFFICIENT_POLICIES:
+        raise ValueError(
+            f"unsupported coefficient_policy={coefficient_policy!r}")
     if output in {"TAKER_NET_PNL", "PASSIVE_FILL_ADJUSTED_PNL"}:
-        if unit_of(expression) != "BPS":
+        if (coefficient_policy != "STRUCTURE_ONLY"
+                and unit_of(expression) != "BPS"):
             raise ValueError(
-                "net-PnL intraday formulas must predict markout in BPS before "
-                "the execution-cost hurdle is applied")
+                "fixed/preregistered net-PnL formulas must predict BPS")
+        if coefficient_policy == "STRUCTURE_ONLY" and unit_of(expression) == "BOOL":
+            raise ValueError("STRUCTURE_ONLY formula must emit a numeric score")
         if entry_policy != "PREDICTED_MARKOUT_CLEARS_COST":
             raise ValueError(
                 "net-PnL intraday formulas require "
@@ -194,11 +202,22 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
         candidate_execution = str(plan["execution"]).upper()
         candidate_output = str(plan["output"]).upper()
         policy = str(raw.get("entry_policy") or "").upper()
+        candidate_coefficient_policy = str(
+            raw.get("coefficient_policy") or
+            "PREREGISTERED_NO_OOS_FIT").upper()
+        if candidate_coefficient_policy not in COEFFICIENT_POLICIES:
+            raise ValueError(
+                f"screening_population[{index}] has unsupported coefficient_policy")
         if candidate_output in {
                 "TAKER_NET_PNL", "PASSIVE_FILL_ADJUSTED_PNL"}:
-            if unit_of(candidate_expr) != "BPS":
+            if (candidate_coefficient_policy != "STRUCTURE_ONLY"
+                    and unit_of(candidate_expr) != "BPS"):
                 raise ValueError(
-                    f"screening_population[{index}] net-PnL AST must output BPS")
+                    f"screening_population[{index}] fixed AST must output BPS")
+            if (candidate_coefficient_policy == "STRUCTURE_ONLY"
+                    and unit_of(candidate_expr) == "BOOL"):
+                raise ValueError(
+                    f"screening_population[{index}] must emit a numeric score")
             if policy != "PREDICTED_MARKOUT_CLEARS_COST":
                 raise ValueError(
                     f"screening_population[{index}] lacks the cost hurdle")
@@ -215,6 +234,7 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
             "horizon_seconds": candidate_horizon,
             "execution": candidate_execution,
             "entry_policy": policy,
+            "coefficient_policy": candidate_coefficient_policy,
             "screening_only": True,
         })
     feature_lookback = max([requested_lookback, *all_clocks])
@@ -244,6 +264,7 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
         "position_mode": position_mode,
         "threshold": _bounded_float(edge, "threshold", 0.0, 0.0, 1_000_000.0),
         "entry_policy": entry_policy,
+        "coefficient_policy": coefficient_policy,
         "minimum_predicted_edge_bps": _bounded_float(
             edge, "minimum_predicted_edge_bps", 0.0, 0.0, 10_000.0),
         "evaluation_days": _bounded_int(edge, "evaluation_days", 60, 10, 250),
@@ -274,6 +295,10 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
 def _session_bounds(day) -> tuple[datetime, datetime]:
     return (datetime.combine(day, time(9, 0), KST).astimezone(timezone.utc),
             datetime.combine(day, time(15, 20), KST).astimezone(timezone.utc))
+
+
+def _session_day(value) -> date:
+    return value if isinstance(value, date) else date.fromisoformat(str(value))
 
 
 def select_slice(market_conn, config: dict, *, cutoff: datetime) -> dict:
@@ -341,7 +366,9 @@ def select_slice(market_conn, config: dict, *, cutoff: datetime) -> dict:
 def _lineage(market_conn, selected: dict, cutoff: datetime) -> list[dict]:
     if not selected["sessions"] or not selected["instruments"]:
         return []
-    start, _ = _session_bounds(selected["sessions"][0])
+    calibration = selected.get("calibration_sessions") or []
+    first = calibration[0] if calibration else selected["sessions"][0]
+    start, _ = _session_bounds(_session_day(first))
     _, end = _session_bounds(selected["sessions"][-1])
     params = (selected["instruments"], start, end + timedelta(hours=1), cutoff)
     with market_conn.cursor() as cur:
@@ -483,6 +510,7 @@ def _candidate_accumulators(config: dict, spec: IntradayLaneSpec, *, trials: int
             horizon_seconds=row["horizon_seconds"], execution=row["execution"],
             position_mode=config["position_mode"], threshold=config["threshold"],
             entry_policy=row["entry_policy"],
+            coefficient_policy=row["coefficient_policy"],
             minimum_predicted_edge_bps=config["minimum_predicted_edge_bps"],
             trials=effective_trials, family_pbo=None,
             semantic_plan=row["semantic_plan"])
@@ -492,6 +520,7 @@ def _candidate_accumulators(config: dict, spec: IntradayLaneSpec, *, trials: int
         "horizon_seconds": config["horizon_seconds"],
         "execution": config["execution"],
         "entry_policy": config["entry_policy"],
+        "coefficient_policy": config["coefficient_policy"],
         "semantic_plan": config["semantic_plan"],
     }
     out = {"PRIMARY": build(primary)}
@@ -668,6 +697,7 @@ def _load_completed_report(meta_conn, experiment_id: str) -> dict:
     screening_meta: dict[str, dict] = {}
     final_dimensions = None
     pre_dimensions = None
+    calibration_dimensions = None
     for metric, value, raw_dimensions in rows:
         dimensions = _as_json(raw_dimensions)
         screening_key = dimensions.get("screening_candidate")
@@ -693,7 +723,12 @@ def _load_completed_report(meta_conn, experiment_id: str) -> dict:
                 "end_session": dimensions.get("end_session"),
             })["mean_net_bps"] = float(value)
         if metric == "intraday_screening_result" and screening_key:
-            screening_meta[str(screening_key)] = dimensions
+            screening_meta.setdefault(str(screening_key), {}).update(dimensions)
+        if metric == "intraday_score_calibration" and not screening_key:
+            calibration_dimensions = dimensions
+        elif metric == "intraday_score_calibration" and screening_key:
+            screening_meta.setdefault(str(screening_key), {})[
+                "score_calibration"] = dimensions
         if metric == "intraday_pre_pbo_gate_pass":
             pre_dimensions = dimensions
         elif metric == "intraday_gate_pass":
@@ -711,6 +746,10 @@ def _load_completed_report(meta_conn, experiment_id: str) -> dict:
             "evaluator_version": EVALUATOR_VERSION,
             "ast_fingerprint": key,
             "summary": screening_summaries.get(key, {}),
+            "lane_manifest": {
+                "coefficient_policy": candidate.get("coefficient_policy"),
+                "score_calibration": meta.get("score_calibration"),
+            },
             "folds": [screening_folds.get(key, {})[fold]
                       for fold in sorted(screening_folds.get(key, {}))],
             "decision": "SCREENING_ONLY",
@@ -742,6 +781,7 @@ def _load_completed_report(meta_conn, experiment_id: str) -> dict:
         "folds": [folds[key] for key in sorted(folds)],
         "session_returns_bps": {},
         "summary": summary,
+        "score_calibration": calibration_dimensions,
         "screening_population": screening_reports,
         "population_evaluation": {
             "shared_raw_replay": True,
@@ -762,6 +802,11 @@ def _store_report(meta_conn, experiment_id: str, report: dict) -> None:
     summary = report.get("summary") or {}
     rows = [(key, value, {"summary": True}) for key, value in summary.items()
             if isinstance(value, (int, float)) and not isinstance(value, bool)]
+    calibration = report.get("score_calibration") or {}
+    rows.append(("intraday_score_calibration",
+                 1 if calibration.get("status") in {
+                     "PASS", "NOT_REQUIRED_FIXED_EQUATION"} else 0,
+                 {**calibration, "calibration": True}))
     for fold in report.get("folds") or []:
         if isinstance(fold.get("mean_net_bps"), (int, float)):
             rows.append(("fold_mean_net_bps", fold["mean_net_bps"],
@@ -804,6 +849,15 @@ def _store_report(meta_conn, experiment_id: str, report: dict) -> None:
                          "candidate_role": candidate.get("candidate_role"),
                          "empirical_influence": candidate.get(
                              "empirical_influence"),
+                     }))
+        candidate_calibration = ((candidate.get("lane_manifest") or {}).get(
+            "score_calibration") or {})
+        rows.append(("intraday_score_calibration",
+                     1 if candidate_calibration.get("status") in {
+                         "PASS", "NOT_REQUIRED_FIXED_EQUATION"} else 0, {
+                         **candidate_calibration,
+                         "calibration": True,
+                         "screening_candidate": key,
                      }))
     rows.append(("intraday_pre_pbo_gate_pass",
                  1 if report.get("decision") == "SUBMIT_TO_QA" else 0,
@@ -892,8 +946,35 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
         "crossed_quotes": 0,
     }
     quality_examples = []
+    calibration_shard_reports = []
     shard_reports = []
     try:
+        # Fit only the one-parameter score scale on sessions strictly preceding
+        # the OOS slice.  All universe shards contribute before the coefficient
+        # is frozen, so shard order cannot turn into a hidden model choice.
+        if population.requires_calibration:
+            for shard_number, instruments in enumerate(shards, 1):
+                shard_samples = 0
+                for raw_day in selected.get("calibration_sessions") or []:
+                    day = _session_day(raw_day)
+                    start, end = _session_bounds(day)
+                    events = load_instrument_events_batch(
+                        market_conn, instrument_ids=instruments, start=start,
+                        end=end + spec.purge_gap, as_known_at=cutoff)
+                    for instrument in instruments:
+                        quotes, trades = events[instrument]
+                        samples = build_samples(
+                            quotes, trades, spec, start=start, end=end,
+                            execution_model=config["population_execution_model"])
+                        shard_samples += len(samples)
+                        population.calibrate(instrument, samples)
+                calibration_shard_reports.append({
+                    "shard": shard_number,
+                    "instrument_count": len(instruments),
+                    "sample_count": shard_samples,
+                })
+        calibration_reports = population.freeze_calibration()
+
         for shard_number, instruments in enumerate(shards, 1):
             shard_samples = 0
             for day in selected["sessions"]:
@@ -933,6 +1014,9 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
             "non_pass_examples": quality_examples,
         }
         report["universe_shards"] = shard_reports
+        report["score_calibration"] = calibration_reports.get("PRIMARY")
+        report["calibration_population"] = calibration_reports
+        report["calibration_shards"] = calibration_shard_reports
         report["summary"]["universe_shards"] = len(shards)
         report["slice"] = persisted["slice"]
         _store_report(meta_conn, experiment_id, report)

@@ -87,7 +87,7 @@ INTRADAY_EDGE_KEYS = frozenset({
     "intraday_signal_expr", "horizon_seconds", "sample_interval_seconds",
     "feature_lookback_seconds", "order_latency_ms", "max_quote_age_seconds",
     "fee_bps_per_side", "maker_fee_bps_per_side", "execution", "threshold",
-    "entry_policy", "minimum_predicted_edge_bps",
+    "entry_policy", "coefficient_policy", "minimum_predicted_edge_bps",
     "evaluation_days", "instrument_shard_size", "position_mode",
     "screening_population", "screening_cohort_version",
 })

@@ -23,12 +23,20 @@ from intraday_microstructure import IntradayLaneSpec, IntradaySample, audit_caus
 from overfit_stats import bootstrap_ci, deflated_sharpe
 
 
-EVALUATOR_VERSION = "intraday-candidate-evaluator-v5"
+EVALUATOR_VERSION = "intraday-candidate-evaluator-v6"
 KST = ZoneInfo("Asia/Seoul")
 ENTRY_POLICIES = frozenset({
     "POSITIVE_SCORE",
     "PREDICTED_MARKOUT_CLEARS_COST",
 })
+COEFFICIENT_POLICIES = frozenset({
+    "FIXED_FROM_SOURCE", "PREREGISTERED_NO_OOS_FIT", "STRUCTURE_ONLY",
+})
+CALIBRATION_VERSION = "origin-anchored-positive-shrinkage-v1"
+CALIBRATION_SHRINKAGE_FRACTION = 0.10
+MIN_CALIBRATION_OBSERVATIONS = 1_000
+MIN_CALIBRATION_NONZERO_SCORES = 100
+MIN_CALIBRATION_INSTRUMENTS = 2
 
 DEFAULT_CRITERIA = {
     # DSR/bootstrap implementation requires 60 independent observations.  Since
@@ -238,6 +246,7 @@ class CandidateAccumulator:
                  horizon_seconds: int, execution: str,
                  position_mode: str = "LONG_ONLY", threshold: float = 0.0,
                  entry_policy: str = "POSITIVE_SCORE",
+                 coefficient_policy: str = "PREREGISTERED_NO_OOS_FIT",
                  minimum_predicted_edge_bps: float = 0.0,
                  trials: int = 1, family_pbo: float | None = None,
                  semantic_plan: dict | None = None,
@@ -253,6 +262,10 @@ class CandidateAccumulator:
         entry_policy = str(entry_policy).upper()
         if entry_policy not in ENTRY_POLICIES:
             raise ValueError(f"unsupported entry_policy: {entry_policy}")
+        coefficient_policy = str(coefficient_policy).upper()
+        if coefficient_policy not in COEFFICIENT_POLICIES:
+            raise ValueError(
+                f"unsupported coefficient_policy: {coefficient_policy}")
         self.expr = expr
         self.spec = spec
         self.horizon_seconds = horizon_seconds
@@ -260,6 +273,7 @@ class CandidateAccumulator:
         self.position_mode = position_mode
         self.threshold = threshold
         self.entry_policy = entry_policy
+        self.coefficient_policy = coefficient_policy
         self.minimum_predicted_edge_bps = float(minimum_predicted_edge_bps)
         self.trials = trials
         self.family_pbo = family_pbo
@@ -276,6 +290,102 @@ class CandidateAccumulator:
         self.mid_sum = self.net_sum = self.fill_net_sum = 0.0
         self.implementation_drag_sum = self.capacity_sum = 0.0
         self.capacity = _CapacityReservoir()
+        self.calibration_observations = 0
+        self.calibration_nonzero_scores = 0
+        self.calibration_instruments: set[str] = set()
+        self.calibration_sessions: set[str] = set()
+        self.calibration_sum_score_sq = 0.0
+        self.calibration_sum_score_markout = 0.0
+        self.calibration_beta = (
+            None if coefficient_policy == "STRUCTURE_ONLY" else 1.0)
+        self.calibration_status = (
+            "PENDING" if coefficient_policy == "STRUCTURE_ONLY"
+            else "NOT_REQUIRED_FIXED_EQUATION")
+
+    def calibrate(self, instrument_id: str,
+                  samples: list[IntradaySample]) -> None:
+        """Accumulate a pooled score->markout scale without retaining raw rows.
+
+        Calibration is origin anchored so an AST state gate that emits zero
+        remains an abstention after mapping.  Only a positive coefficient is
+        admissible: a negative fitted relation falsifies the proposed direction
+        instead of silently turning it into a different strategy.
+        """
+        if self.coefficient_policy != "STRUCTURE_ONLY":
+            return
+        if self.calibration_status != "PENDING":
+            raise ValueError("score calibration is already frozen")
+        instrument_id = str(instrument_id)
+        ordered = sorted(samples, key=lambda row: row.decision_time)
+        if any(row.instrument_id != instrument_id for row in ordered):
+            raise ValueError("instrument key does not match calibration sample")
+        audit_causality(ordered, self.spec)
+        values = evaluate_ast(ordered, self.expr)
+        contributed = False
+        for sample, raw in zip(ordered, values):
+            if (self.semantic_plan and not _time_context_allows(
+                    sample, self.semantic_plan.get("context") or ())):
+                continue
+            label = _label(sample, self.horizon_seconds)
+            if label is None or raw is None:
+                continue
+            score = float(raw)
+            markout = float(label.long_mid_markout_bps)
+            if not math.isfinite(score) or not math.isfinite(markout):
+                continue
+            self.calibration_observations += 1
+            self.calibration_sessions.add(
+                sample.decision_time.astimezone(KST).date().isoformat())
+            if score == 0.0:
+                continue
+            contributed = True
+            self.calibration_nonzero_scores += 1
+            self.calibration_sum_score_sq += score * score
+            self.calibration_sum_score_markout += score * markout
+        if contributed:
+            self.calibration_instruments.add(instrument_id)
+
+    def freeze_calibration(self) -> dict:
+        """Lock one scale coefficient before any evaluation sample is consumed."""
+        if self.coefficient_policy != "STRUCTURE_ONLY":
+            return self._calibration_report()
+        if self.calibration_status != "PENDING":
+            return self._calibration_report()
+        sufficient = (
+            self.calibration_observations >= MIN_CALIBRATION_OBSERVATIONS
+            and self.calibration_nonzero_scores >= MIN_CALIBRATION_NONZERO_SCORES
+            and len(self.calibration_instruments) >= MIN_CALIBRATION_INSTRUMENTS
+            and self.calibration_sum_score_sq > 0.0
+        )
+        if not sufficient:
+            self.calibration_beta = 0.0
+            self.calibration_status = "INSUFFICIENT_CALIBRATION"
+            return self._calibration_report()
+        denominator = self.calibration_sum_score_sq * (
+            1.0 + CALIBRATION_SHRINKAGE_FRACTION)
+        raw_beta = self.calibration_sum_score_markout / denominator
+        self.calibration_beta = max(0.0, raw_beta) if math.isfinite(raw_beta) else 0.0
+        self.calibration_status = (
+            "PASS" if self.calibration_beta > 0.0
+            else "NON_POSITIVE_DIRECTIONAL_RELATION")
+        return self._calibration_report()
+
+    def _calibration_report(self) -> dict:
+        return {
+            "version": CALIBRATION_VERSION,
+            "coefficient_policy": self.coefficient_policy,
+            "status": self.calibration_status,
+            "origin_anchored": True,
+            "positive_coefficient_required": True,
+            "shrinkage_fraction": CALIBRATION_SHRINKAGE_FRACTION,
+            "beta_bps_per_score_unit": self.calibration_beta,
+            "observations": self.calibration_observations,
+            "nonzero_scores": self.calibration_nonzero_scores,
+            "instruments": len(self.calibration_instruments),
+            "sessions": len(self.calibration_sessions),
+            "session_ids": sorted(self.calibration_sessions),
+            "oos_fit_forbidden": True,
+        }
 
     def add(self, instrument_id: str, samples: list[IntradaySample]) -> None:
         """Consume one instrument/session slice and immediately release its rows."""
@@ -295,11 +405,19 @@ class CandidateAccumulator:
         below performs the validation once, then fans the immutable samples out
         to independent sufficient-statistic accumulators.
         """
+        if (self.coefficient_policy == "STRUCTURE_ONLY"
+                and self.calibration_status == "PENDING"):
+            raise ValueError(
+                "STRUCTURE_ONLY score calibration must be frozen before OOS replay")
         self.requested_instruments.add(instrument_id)
         self.causality.append({"instrument_id": instrument_id, **audit})
         if ordered:
             self.sampled_instruments.add(instrument_id)
         values = evaluate_ast(ordered, self.expr)
+        if self.coefficient_policy == "STRUCTURE_ONLY":
+            beta = float(self.calibration_beta or 0.0)
+            values = [None if value is None else float(value) * beta
+                      for value in values]
         if self.semantic_plan:
             paired = [(sample, value) for sample, value in zip(ordered, values)
                       if _time_context_allows(
@@ -439,6 +557,8 @@ class CandidateAccumulator:
             failed.append("PBO_UNMEASURED")
         elif self.family_pbo > self.rules["max_pbo"]:
             failed.append("OVERFIT_PBO")
+        if self.calibration_status not in {"PASS", "NOT_REQUIRED_FIXED_EQUATION"}:
+            failed.append("SCORE_CALIBRATION_NOT_USABLE")
 
         evidence = bool(self.opportunities and session_values)
         return {
@@ -452,6 +572,8 @@ class CandidateAccumulator:
                 "position_mode": self.position_mode.upper(),
                 "threshold": self.threshold,
                 "entry_policy": self.entry_policy,
+                "coefficient_policy": self.coefficient_policy,
+                "score_calibration": self._calibration_report(),
                 "minimum_predicted_edge_bps": self.minimum_predicted_edge_bps,
                 "purge_gap_seconds": self.spec.purge_gap.total_seconds(),
                 "semantic_context": list(self.semantic_plan.get("context") or []),
@@ -489,6 +611,11 @@ class CandidatePopulationAccumulator:
             raise ValueError("candidate population must share one lane specification")
         self.spec = next(iter(specs))
 
+    @property
+    def requires_calibration(self) -> bool:
+        return any(candidate.coefficient_policy == "STRUCTURE_ONLY"
+                   for candidate in self.candidates.values())
+
     def add(self, instrument_id: str, samples: list[IntradaySample]) -> None:
         instrument_id = str(instrument_id)
         ordered = sorted(samples, key=lambda row: row.decision_time)
@@ -497,6 +624,15 @@ class CandidatePopulationAccumulator:
         audit = audit_causality(ordered, self.spec)
         for candidate in self.candidates.values():
             candidate._add_prepared(instrument_id, ordered, audit)
+
+    def calibrate(self, instrument_id: str,
+                  samples: list[IntradaySample]) -> None:
+        for candidate in self.candidates.values():
+            candidate.calibrate(instrument_id, samples)
+
+    def freeze_calibration(self) -> dict[str, dict]:
+        return {key: candidate.freeze_calibration()
+                for key, candidate in self.candidates.items()}
 
     def finish(self) -> dict[str, dict]:
         return {key: candidate.finish()
@@ -509,6 +645,7 @@ def evaluate_candidate_stream(instrument_samples, *, expr: dict,
                               position_mode: str = "LONG_ONLY",
                               threshold: float = 0.0, trials: int = 1,
                               entry_policy: str = "POSITIVE_SCORE",
+                              coefficient_policy: str = "PREREGISTERED_NO_OOS_FIT",
                               minimum_predicted_edge_bps: float = 0.0,
                               family_pbo: float | None = None,
                               semantic_plan: dict | None = None,
@@ -517,6 +654,7 @@ def evaluate_candidate_stream(instrument_samples, *, expr: dict,
         expr=expr, spec=spec, horizon_seconds=horizon_seconds,
         execution=execution, position_mode=position_mode, threshold=threshold,
         entry_policy=entry_policy,
+        coefficient_policy=coefficient_policy,
         minimum_predicted_edge_bps=minimum_predicted_edge_bps,
         trials=trials, family_pbo=family_pbo, semantic_plan=semantic_plan,
         criteria=criteria)
@@ -531,6 +669,7 @@ def evaluate_candidate(samples_by_instrument: dict[str, list[IntradaySample]], *
                        position_mode: str = "LONG_ONLY",
                        threshold: float = 0.0, trials: int = 1,
                        entry_policy: str = "POSITIVE_SCORE",
+                       coefficient_policy: str = "PREREGISTERED_NO_OOS_FIT",
                        minimum_predicted_edge_bps: float = 0.0,
                        family_pbo: float | None = None,
                        semantic_plan: dict | None = None,
@@ -542,6 +681,7 @@ def evaluate_candidate(samples_by_instrument: dict[str, list[IntradaySample]], *
         expr=expr, spec=spec, horizon_seconds=horizon_seconds,
         execution=execution, position_mode=position_mode, threshold=threshold,
         entry_policy=entry_policy,
+        coefficient_policy=coefficient_policy,
         minimum_predicted_edge_bps=minimum_predicted_edge_bps,
         trials=trials, family_pbo=family_pbo, semantic_plan=semantic_plan,
         criteria=criteria)

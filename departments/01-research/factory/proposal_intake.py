@@ -344,7 +344,7 @@ def _attach_intraday_screening_cohort(
         if lead is None:
             continue
         contract = dict(lead.ast_contract or {})
-        if (contract.get("formula_discovery_version") != "formula-discovery-v4"
+        if (contract.get("formula_discovery_version") != "formula-discovery-v5"
                 or not contract.get("formula_contract_complete")
                 or contract.get("alpha_candidate_eligible") is not True
                 or contract.get("research_lane") != "INTRADAY_EVENT"):
@@ -373,6 +373,7 @@ def _attach_intraday_screening_cohort(
             "intraday_signal_expr": expr,
             "semantic_plan": dict(contract.get("semantic_plan") or {}),
             "entry_policy": str(thesis.get("decision_rule") or ""),
+            "coefficient_policy": str(thesis.get("coefficient_policy") or ""),
             "evolution_role": str(contract.get("evolution_role") or "SEED"),
             "parent_ast_fingerprint": str(
                 contract.get("parent_ast_fingerprint") or ""),
@@ -388,12 +389,12 @@ def _attach_intraday_screening_cohort(
                 "formula influence audit: " + " | ".join(rejected_primary))
         raise ValueError(
             "INTRADAY_EVENT primary formula must exactly match one linked "
-            "formula-discovery-v4 lead")
+            "formula-discovery-v5 lead")
 
     primary_lead_ids = tuple(candidates[primary_fp]["source_lead_ids"])
     linked_sidecars = [row for fp, row in candidates.items() if fp != primary_fp]
 
-    # An explicit BPS parent is a valuable within-replay ablation.  It receives
+    # An explicit parent is a valuable within-replay ablation.  It receives
     # the child's semantic/execution contract and remains SCREENING_ONLY.
     known_fps = set(candidates)
     lineage_parents = []
@@ -404,7 +405,10 @@ def _attach_intraday_screening_cohort(
         try:
             parent = parse(parent_raw)
             parent_fp = fingerprint(parent)
-            if unit_of(parent) != "BPS" or parent_fp in known_fps:
+            child_structure_only = child["coefficient_policy"] == "STRUCTURE_ONLY"
+            if ((not child_structure_only and unit_of(parent) != "BPS")
+                    or (child_structure_only and unit_of(parent) == "BOOL")
+                    or parent_fp in known_fps):
                 continue
         except (TypeError, ValueError):
             continue
@@ -417,6 +421,7 @@ def _attach_intraday_screening_cohort(
             "intraday_signal_expr": parent,
             "semantic_plan": dict(child["semantic_plan"]),
             "entry_policy": child["entry_policy"],
+            "coefficient_policy": child["coefficient_policy"],
             "evolution_role": "PARENT_ABLATION",
             "parent_of_ast_fingerprint": child["ast_fingerprint"],
             "screening_cohort_version": INTRADAY_SCREENING_COHORT_VERSION,
@@ -435,6 +440,7 @@ def _attach_intraday_screening_cohort(
             "title": f"structural control of {primary_source['title']}",
             "semantic_plan": dict(primary_source["semantic_plan"]),
             "entry_policy": primary_source["entry_policy"],
+            "coefficient_policy": primary_source["coefficient_policy"],
             "evolution_role": "EMPIRICAL_TERM_INFLUENCE",
             "screening_cohort_version": INTRADAY_SCREENING_COHORT_VERSION,
         })
@@ -453,6 +459,8 @@ def _attach_intraday_screening_cohort(
         row.pop("_parent_signal_expr", None)
     params["screening_population"] = sidecars[:MAX_INTRADAY_COHORT - 1]
     params["screening_cohort_version"] = INTRADAY_SCREENING_COHORT_VERSION
+    params["entry_policy"] = primary_source["entry_policy"]
+    params["coefficient_policy"] = primary_source["coefficient_policy"]
     return proposal.model_copy(update={
         "proposal_id": proposal_id_for(
             primary_lead_ids, proposal.edge_type, proposal.universe_key),
@@ -582,7 +590,7 @@ def load_leads(conn, lead_ids, *, _expand_current: bool = True) -> dict:
     # non-promotable shared-replay sidecars.
     wants_current_intraday = any(
         (lead.ast_contract or {}).get("formula_discovery_version")
-        == "formula-discovery-v4"
+        == "formula-discovery-v5"
         and (lead.ast_contract or {}).get("research_lane")
         == "INTRADAY_EVENT"
         for lead in out.values()
@@ -594,7 +602,7 @@ def load_leads(conn, lead_ids, *, _expand_current: bool = True) -> dict:
              where l.status = 'COMPLETE'
                and l.testability = 'RULE_EXPRESSIBLE'
                and l.ast_contract->>'formula_discovery_version' =
-                   'formula-discovery-v4'
+                   'formula-discovery-v5'
                and l.ast_contract->>'research_lane' = 'INTRADAY_EVENT'
                and l.ast_contract->>'ast_readiness' = 'AST_READY'
                and coalesce(
@@ -1246,7 +1254,7 @@ def _check_intraday_screening_cohort_is_sourced_and_non_promoting():
             scout_lens="ACADEMIC", source_type="PAPER", as_known_at=now,
             refs=(ref,), claimed_edge=label, stated_mechanism="mechanism",
             ast_contract={
-                "formula_discovery_version": "formula-discovery-v4",
+                "formula_discovery_version": "formula-discovery-v5",
                 "formula_contract_complete": True,
                 "alpha_candidate_eligible": True,
                 "research_lane": "INTRADAY_EVENT",
