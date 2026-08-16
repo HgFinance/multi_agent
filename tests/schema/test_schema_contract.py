@@ -145,6 +145,8 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260816120000_methodology_lead_revision_lineage.sql",
                 # Typed research lane + governed raw quote/trade dataset contract.
                 "20260816150000_intraday_alpha_factory.sql",
+                # Independent skeptic STOP/PROCEED artifacts survive MCP restarts.
+                "20260816170000_proposal_review_outcomes.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 
@@ -259,7 +261,8 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             # +2 (재일, 2026-08-03): claim_evidence(주장↔근거 인용 링크),
             # document_revisions(뉴스 정정 이력 - 저장본은 PIT 상 최초 관측
             # 문장을 유지하므로 정정 사실은 이 테이블이 유일한 흔적이다)
-            "research": 26,
+            # +1 (재일, 2026-08-16): durable independent proposal review outcomes.
+            "research": 27,
             "risk": 19,
             "strategy": 9,
             "workforce": 25,

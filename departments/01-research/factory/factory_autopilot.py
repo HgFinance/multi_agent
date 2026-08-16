@@ -212,8 +212,11 @@ def _conn():
 _SQL_LEADS = """
 select l.lead_id, l.scout_lens, l.claimed_edge, l.stated_mechanism,
        l.testability, l.status,
-       exists (select 1 from research.experiment_proposals p
-                where l.lead_id = any(p.lead_ids)) as used,
+       (exists (select 1 from research.experiment_proposals p
+                 where l.lead_id = any(p.lead_ids))
+        or exists (select 1 from research.proposal_review_outcomes r
+                    where r.verdict = 'STOP'
+                      and l.lead_id = any(r.lead_ids))) as used,
        coalesce(l.ast_contract->>'ast_readiness', 'LEGACY') as ast_readiness,
        coalesce(l.ast_contract->'observables', '[]'::jsonb) as observables,
        l.ast_contract->'candidate_signal_expr' as candidate_signal_expr,
@@ -450,7 +453,7 @@ def _near_miss(conn, *, keep: int = 4) -> str:
     return "\n".join(lines)
 
 
-def _dataset_news(conn) -> str:
+def _dataset_news(conn, market_conn=None) -> str:
     """지금 쓸 수 있는 데이터셋과 **그것이 무엇을 바꾸는가.**
 
     ▶ 왜 필요한가 (2026-08-12)
@@ -478,6 +481,12 @@ def _dataset_news(conn) -> str:
         return ""
     lines = ["\n[지금 쓸 수 있는 데이터셋 - 무엇으로 검정할 수 있는가]"]
     for r in rows:
+        if r["dataset"] == "krx-intraday-events/v1" and market_conn is not None:
+            lines.append(
+                "  krx-intraday-events/v1         LIVE_TIMESCALE_RAW                 "
+                "실험별 bounded slice; manifest partition 0은 의도된 상태"
+            )
+            continue
         # ▶ **못 센 것을 0 으로 찍지 않는다** (2026-08-12). 유니버스가 안 걸린
         #   데이터셋이 `0종목` 으로 보여 "빈 데이터셋" 처럼 읽혔다 - 실제로는
         #   148,931행이 들어 있었다. 횡단면 순위를 매기려면 유니버스가 필요하니
@@ -856,13 +865,17 @@ def research_brief() -> str:
     #   "리서치에 보여 준다" 고 적어 놓은 블록이 정작 도달한 적이 없었다.
     #   WAL 걱정으로 일찍 닫은 것인데, 일찍 닫으면 안 닫은 것만 못하다.
     conn = _conn()
+    market_conn = _market_conn()
     try:
-        brief = cycle_brief.build(conn)
+        brief = cycle_brief.build(conn, market_conn=market_conn)
         with conn.cursor() as cur:
             cur.execute(_SQL_LEADS, (12,))
             leads = cur.fetchall()
-        return _compose_research_brief(conn, brief, leads)
+        return _compose_research_brief(
+            conn, brief, leads, market_conn=market_conn)
     finally:
+        if market_conn is not None:
+            market_conn.close()
         conn.close()      # WAL 을 남기지 않는다 - with 는 커밋만 하고 안 닫는다
 
 
@@ -895,8 +908,12 @@ def _ast_experience_block(conn) -> str:
             cur.execute("""
                 select l.lead_id, l.claimed_edge,
                        l.ast_contract->'candidate_signal_expr',
-                       exists (select 1 from research.experiment_proposals p
-                                where l.lead_id = any(p.lead_ids)) as used,
+                       (exists (select 1 from research.experiment_proposals p
+                                 where l.lead_id = any(p.lead_ids))
+                        or exists (
+                          select 1 from research.proposal_review_outcomes r
+                           where r.verdict = 'STOP'
+                             and l.lead_id = any(r.lead_ids))) as used,
                        coalesce((l.ast_contract->>'alpha_candidate_eligible')::boolean,
                                 false) as alpha_candidate_eligible,
                        l.ast_contract->>'derivation_mode' as derivation_mode,
@@ -935,13 +952,30 @@ def _ast_experience_block(conn) -> str:
                 "decision": row[2], "lesson_codes": list(row[3] or []),
                 "oos_summary": row[4] or {}, "title": row[5],
             } for row in cur.fetchall()]
+            cur.execute("""
+                select lead_ids, title, verdict, competing_codes,
+                       competing_explanation, falsification_test
+                  from research.proposal_review_outcomes
+                 order by created_at desc limit 12""")
+            reviews = cur.fetchall()
+        review_memory = ""
+        if reviews:
+            lines = ["\n[독립 스켑틱 심사 기억 - 같은 리드 버전을 반복하지 않는다]"]
+            for ids, title, verdict, codes, explanation, falsification in reviews:
+                lines.append(
+                    f"  - {verdict} leads={list(ids or [])} title={str(title)[:70]} "
+                    f"codes={list(codes or [])}"
+                )
+                lines.append(f"      반대가설: {str(explanation)[:180]}")
+                lines.append(f"      반증검정: {str(falsification)[:140]}")
+            review_memory = "\n".join(lines)
         return (AX.render(AX.build(experiments, leads)) +
-                IX.render(IX.build(intraday)))
+                IX.render(IX.build(intraday)) + review_memory)
     except Exception:  # noqa: BLE001 - memory unavailable must not invent facts
         return ""
 
 
-def _compose_research_brief(conn, brief, leads) -> str:
+def _compose_research_brief(conn, brief, leads, *, market_conn=None) -> str:
     """브리핑 본문. **연결이 살아 있는 동안** 조회 블록을 다 만든다."""
     out = [brief.as_prompt()]
     if leads:
@@ -1008,7 +1042,7 @@ def _compose_research_brief(conn, brief, leads) -> str:
     # 근접 계열을 어휘 바로 뒤에 둔다 - 손잡이 목록을 읽은 직후에 "어디에
     # 쓸지" 가 나와야 한다. 멀리 떨어뜨리면 둘을 잇지 못한다.
     out.append(_near_miss(conn))
-    out.append(_dataset_news(conn))
+    out.append(_dataset_news(conn, market_conn=market_conn))
     # ▶ **막힌 가설을 리서치에 보여 준다** (2026-08-12)
     #   발주 게이트가 "못 돈다" 고 판정한 가설이 원장에 앉아 있는데, 그 사실이
     #   리서치에 안 갔다. 그래서 기획자는 자기 기획안이 왜 실험까지 못 가는지
@@ -1150,6 +1184,10 @@ def _executable_unused_count(conn) -> int:
                and not exists (
                      select 1 from research.experiment_proposals p
                       where l.lead_id = any(p.lead_ids))
+               and not exists (
+                     select 1 from research.proposal_review_outcomes r
+                      where r.verdict = 'STOP'
+                        and l.lead_id = any(r.lead_ids))
         """)
         return int((cur.fetchone() or (0,))[0] or 0)
 
@@ -1183,6 +1221,10 @@ def _lead_health(conn) -> str:
                          where not exists (
                            select 1 from research.experiment_proposals p
                             where methodology_leads.lead_id = any(p.lead_ids))
+                           and not exists (
+                             select 1 from research.proposal_review_outcomes r
+                              where r.verdict = 'STOP'
+                                and methodology_leads.lead_id = any(r.lead_ids))
                        ) as raw_unused,
                        count(*) filter (
                          where status = 'COMPLETE'
@@ -1194,6 +1236,10 @@ def _lead_health(conn) -> str:
                            and not exists (
                              select 1 from research.experiment_proposals p
                               where methodology_leads.lead_id = any(p.lead_ids))
+                           and not exists (
+                             select 1 from research.proposal_review_outcomes r
+                              where r.verdict = 'STOP'
+                                and methodology_leads.lead_id = any(r.lead_ids))
                        ) as usable_unused,
                        count(*) filter (
                          where status = 'COMPLETE'
@@ -1206,6 +1252,10 @@ def _lead_health(conn) -> str:
                            and not exists (
                              select 1 from research.experiment_proposals p
                               where methodology_leads.lead_id = any(p.lead_ids))
+                           and not exists (
+                             select 1 from research.proposal_review_outcomes r
+                              where r.verdict = 'STOP'
+                                and methodology_leads.lead_id = any(r.lead_ids))
                        ) as intraday_usable_unused,
                        extract(epoch from (
                          now() - max(created_at) filter (
@@ -3643,6 +3693,19 @@ def _check_brief_blocks_run_before_close():
     for need in ("_vocab_block", "_dataset_news", "_near_miss",
                  "_structurally_blocked"):
         assert need in called, f"{need} 가 브리핑 조립부에서 빠졌다"
+    source = Path(__file__).read_text(encoding="utf-8")
+    research_fn = next(n for n in ast.walk(tree)
+                       if isinstance(n, ast.FunctionDef)
+                       and n.name == "research_brief")
+    research_body = ast.get_source_segment(source, research_fn) or ""
+    assert "cycle_brief.build(conn, market_conn=market_conn)" in research_body, \
+        "실제 플래너 브리프가 Timescale 원시 커버리지를 받지 않는다"
+    dataset_fn = next(n for n in ast.walk(tree)
+                      if isinstance(n, ast.FunctionDef)
+                      and n.name == "_dataset_news")
+    dataset_body = ast.get_source_segment(source, dataset_fn) or ""
+    assert "LIVE_TIMESCALE_RAW" in dataset_body, \
+        "라이브 intraday manifest를 0행 데이터셋처럼 표시한다"
     print("  브리핑 블록이 살아있는 연결에서 돎  OK")
 
 
@@ -3763,6 +3826,8 @@ def _check_unused_leads_come_first():
     assert "[BARE_WORDS] is not JSON" in contract
     assert "genuinely non-finance" in contract and "empirical event-time" in contract
     assert "experiment_proposals" in _SQL_LEADS, "사용 여부를 안 본다"
+    assert "proposal_review_outcomes" in _SQL_LEADS and "STOP" in _SQL_LEADS, \
+        "스켑틱 STOP 리드를 소비 완료로 보지 않는다"
 
     # 표시가 갈려야 한다 - 안 갈리면 봐도 모른다
     import ast
