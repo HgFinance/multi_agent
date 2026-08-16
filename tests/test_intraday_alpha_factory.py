@@ -30,7 +30,8 @@ from intraday_candidate import (_CapacityReservoir, CandidateAccumulator,
 from factory_bridge import (_SQL_FAMILY_OR_EXACT_TRIALS, _normalized_formula,
                             count_family_trials, expected_edge_for, gate0)
 from factory_bridge import lessons_from
-from intraday_experiment_runner import (_annotate_population, _input_hash,
+from intraday_experiment_runner import (StaleIntradayCohortError,
+                                        _annotate_population, _input_hash,
                                         _load_completed_report, config_from_edge,
                                         record_data_feasibility, select_slice)
 from intraday_microstructure import (HorizonLabel, IntradayLaneSpec,
@@ -292,7 +293,8 @@ def test_stale_populated_screening_cohort_is_rejected_before_replay() -> None:
         "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
     }]
     edge["screening_cohort_version"] = "intraday-screening-cohort-v1"
-    with pytest.raises(ValueError, match="intraday-screening-cohort-v2"):
+    with pytest.raises(StaleIntradayCohortError,
+                       match="intraday-screening-cohort-v2"):
         config_from_edge(edge)
 
 
@@ -943,6 +945,44 @@ def test_intraday_outcomes_become_creative_search_memory() -> None:
     assert "underexplored events" in text
     assert "implementation_drag=" in text
     assert "숫자 horizon만 바꾼 것은 새 아이디어가 아니다" in text
+
+
+def test_repeated_losing_subtrees_become_soft_search_memory() -> None:
+    shared = {"op": "mul", "args": [
+        {"op": "rolling_mean", "seconds": 30,
+         "arg": {"op": "field", "field": "trade_flow_imbalance"}},
+        {"op": "field", "field": "realized_volatility_bps"},
+    ]}
+    gated = {
+        "op": "where",
+        "condition": {"op": "lt", "args": [
+            {"op": "field", "field": "spread_bps"},
+            {"const": 5, "unit": "BPS"}]},
+        "then": shared, "else": {"const": 0, "unit": "BPS"},
+    }
+    base_plan = {
+        "event": "ORDER_FLOW", "context": ["ALL"],
+        "qualities": ["PERSISTENCE"], "direction": "FOLLOW",
+        "output": "TAKER_NET_PNL", "execution": "TAKER",
+        "horizon_seconds": 5,
+    }
+    gated_plan = {**base_plan, "context": ["TIGHT_SPREAD"],
+                  "qualities": ["PERSISTENCE", "STATE_CONDITIONAL"]}
+    memory = intraday_experience.build([
+        {"intraday_signal_expr": shared, "semantic_plan": base_plan,
+         "decision": "GATE_HOLD", "evidence_tier": "PRIMARY",
+         "oos_summary": {"mean_net_bps_per_opportunity": -2.0}},
+        {"intraday_signal_expr": gated, "semantic_plan": gated_plan,
+         "decision": "GATE_HOLD", "evidence_tier": "PRIMARY",
+         "oos_summary": {"mean_net_bps_per_opportunity": -1.0}},
+    ])
+    assert memory.frequent_losing_subtrees
+    repeated = memory.frequent_losing_subtrees[0]
+    assert repeated["losing_support"] == 2
+    assert repeated["positive_support"] == 0
+    rendered = intraday_experience.render(memory)
+    assert "frequent losing subtrees" in rendered
+    assert "soft search prior" in rendered
 
 
 def test_intraday_feedback_separates_bad_signal_from_cost_flip() -> None:

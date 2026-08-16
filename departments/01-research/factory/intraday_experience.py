@@ -44,6 +44,7 @@ class IntradayMemory:
     lineage_tournaments: tuple[dict, ...]
     breeding_parents: tuple[dict, ...]
     empirical_term_influence: tuple[dict, ...]
+    frequent_losing_subtrees: tuple[dict, ...]
 
 
 def _walk(node, fields: set[str], operators: set[str], clocks: set[int]) -> None:
@@ -79,6 +80,85 @@ def _shape(node):
 def _shape_fp(expr: dict) -> str:
     payload = json.dumps(_shape(expr), sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def _subtree_shapes(expr: dict, *, min_nodes: int = 3) -> dict[str, dict]:
+    """Canonical non-trivial subtree shapes, with clocks/constants masked.
+
+    Field names remain visible because a rolling transform over signed OFI is
+    economically different from the same syntax over unsigned activity.  Each
+    shape is counted once per formula so repeated syntax inside one AST cannot
+    manufacture frequency.
+    """
+    out: dict[str, dict] = {}
+
+    def walk(node) -> None:
+        if not isinstance(node, dict):
+            return
+        if formula.count_nodes(node) >= min_nodes:
+            shaped = _shape(node)
+            payload = json.dumps(shaped, sort_keys=True, separators=(",", ":"))
+            key = hashlib.sha256(payload.encode()).hexdigest()[:16]
+            out.setdefault(key, shaped)
+        for name in ("arg", "condition", "then", "else"):
+            walk(node.get(name))
+        for child in node.get("args") or ():
+            walk(child)
+
+    walk(expr)
+    return out
+
+
+def _frequent_losing_subtrees(rows: list[dict], *, min_support: int = 2
+                              ) -> tuple[dict, ...]:
+    """Find repeated losing structures across independently evaluated formulas.
+
+    This is a search prior, never a gate.  Screening-only sidecars and repeated
+    trials of the same exact AST cannot create support.  Any independently
+    positive-net occurrence prevents a shape from entering the losing list.
+    """
+    by_formula: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        if row.get("evidence_tier") == "SCREENING_ONLY":
+            continue
+        by_formula[row["ast_fingerprint"]].append(row)
+
+    stats: dict[str, dict] = {}
+    for ast_fp, trials in by_formula.items():
+        measured = any(
+            _number(row.get("oos_summary") or {},
+                    "mean_net_bps_per_opportunity") is not None
+            or str(row.get("decision") or "").upper() in NEGATIVE | {
+                "SUBMIT_TO_QA", "PROMOTED"}
+            for row in trials)
+        if not measured:
+            continue
+        positive = any(
+            str(row.get("decision") or "").upper() in {
+                "SUBMIT_TO_QA", "PROMOTED"}
+            or (_number(row.get("oos_summary") or {},
+                        "mean_net_bps_per_opportunity") or 0.0) > 0.0
+            for row in trials)
+        shapes = _subtree_shapes(trials[0]["expr"])
+        for key, shape in shapes.items():
+            item = stats.setdefault(key, {
+                "subtree_fingerprint": key, "shape": shape,
+                "support": 0, "losing_support": 0, "positive_support": 0,
+                "formula_fingerprints": [],
+            })
+            item["support"] += 1
+            item["positive_support" if positive else "losing_support"] += 1
+            item["formula_fingerprints"].append(ast_fp)
+
+    losing = [item for item in stats.values()
+              if item["support"] >= min_support
+              and item["losing_support"] >= min_support
+              and item["positive_support"] == 0]
+    for item in losing:
+        item["shape_label"] = json.dumps(
+            item["shape"], sort_keys=True, separators=(",", ":"))
+    return tuple(sorted(losing, key=lambda item: (
+        -item["losing_support"], item["subtree_fingerprint"])))
 
 
 def _number(summary: dict, key: str):
@@ -118,7 +198,8 @@ def _niche(plan: dict) -> tuple[str, str, str, str, str]:
             _horizon_bucket(plan))
 
 
-def _quality_diversity_frontier(leads: list[dict], tested: list[dict]
+def _quality_diversity_frontier(leads: list[dict], tested: list[dict],
+                                losing_subtree_fps: set[str] | None = None
                                 ) -> tuple[tuple[dict, ...], tuple[dict, ...], int]:
     """Select one diverse, contract-complete elite per economic niche.
 
@@ -128,6 +209,7 @@ def _quality_diversity_frontier(leads: list[dict], tested: list[dict]
     # Screening evidence informs novelty and breeding, but is deliberately not
     # independent confirmation.  Keep the corresponding lead eligible for a
     # later primary preregistration instead of falsely marking it recycled.
+    losing_subtree_fps = set(losing_subtree_fps or ())
     tested_fps = {row["ast_fingerprint"] for row in tested
                   if row.get("evidence_tier") != "SCREENING_ONLY"}
     references = [(row["expr"], row["plan"]) for row in tested]
@@ -169,11 +251,16 @@ def _quality_diversity_frontier(leads: list[dict], tested: list[dict]
         formula_complete = bool(
             lead.get("formula_contract_complete")
             and lead.get("formula_discovery_version") == "formula-discovery-v4")
+        losing_overlap = sorted(
+            set(_subtree_shapes(expr)) & losing_subtree_fps)
+        losing_penalty = min(0.12, 0.04 * len(losing_overlap))
         row.update(
             nearest_library_similarity=nearest,
             novelty_score=1.0 - nearest,
             lineage_complete=lineage_complete,
             formula_contract_complete=formula_complete,
+            frequent_losing_subtree_overlap=losing_overlap,
+            frequent_losing_subtree_penalty=losing_penalty,
             source_distance=(None if source_similarity is None
                              else 1.0 - source_similarity),
         )
@@ -185,6 +272,7 @@ def _quality_diversity_frontier(leads: list[dict], tested: list[dict]
             + 0.15 * (1.0 - max(0, row["complexity_nodes"] - 10)
                       / max(1, formula.MAX_NODES - 10))
             + 0.20 * float(formula_complete)
+            - losing_penalty
         )
         candidates.append(row)
 
@@ -340,9 +428,11 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
         })
     history.sort(key=lambda row: (row["best_net_bps"] is not None,
                                   row["best_net_bps"] or float("-inf")), reverse=True)
+    frequent_losers = _frequent_losing_subtrees(parsed)
     lead_rows = list(leads or ())
     elites, recycled, candidate_population = _quality_diversity_frontier(
-        lead_rows, parsed)
+        lead_rows, parsed, {row["subtree_fingerprint"]
+                            for row in frequent_losers})
     tournaments = _lineage_tournaments(lead_rows, parsed)
     # MAP-Elites needs stepping stones even before a globally profitable formula
     # exists.  The old archive bred only already-profitable gate survivors, so a
@@ -427,6 +517,7 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
         lineage_tournaments=tournaments,
         breeding_parents=breeding,
         empirical_term_influence=tuple(influence),
+        frequent_losing_subtrees=frequent_losers,
     )
 
 
@@ -459,6 +550,18 @@ def render(memory: IntradayMemory, *, limit: int = 6) -> str:
         f"  underexplored contexts: {list(memory.underexplored_contexts)}",
         f"  underexplored qualities: {list(memory.underexplored_qualities)}",
     ])
+    if memory.frequent_losing_subtrees:
+        lines.append(
+            "  [frequent losing subtrees - soft search prior, rejection rule 아님]")
+        for row in memory.frequent_losing_subtrees[:6]:
+            lines.append(
+                f"    fp={row['subtree_fingerprint']} "
+                f"losing/support={row['losing_support']}/{row['support']} "
+                f"shape={row['shape_label'][:220]}")
+        lines.append(
+            "    그대로 반복하는 후보는 QD 점수에 작은 패널티를 받는다. 새 경제 "
+            "메커니즘이 이 부분구조를 필요로 하면 제거한 실패모드를 명시하고 "
+            "독립 실험으로 반증할 수 있다.")
     lines.append(
         f"  [candidate population] unused={memory.candidate_population} "
         f"elite_shapes={memory.population_shapes} niches={len(memory.niche_elites)}")
@@ -469,6 +572,7 @@ def render(memory: IntradayMemory, *, limit: int = 6) -> str:
             f"lead={row.get('lead_id')} fields={row['fields']} ops={row['operators']} "
             f"nodes={row['complexity_nodes']} lineage={row['lineage_complete']} "
             f"math_contract={row['formula_contract_complete']} "
+            f"losing_subtrees={len(row['frequent_losing_subtree_overlap'])} "
             f"competitors={row['niche_competitors']}")
     if len(memory.niche_elites) > 8:
         lines.append(
