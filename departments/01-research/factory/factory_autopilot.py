@@ -2418,16 +2418,9 @@ def _structurally_blocked(conn, hypothesis_ids: list) -> dict:
                     out[hid] = f"없는 데이터셋: {', '.join(missing_ds)}"
                     continue
 
-            # 데이터가 되면 남는 것은 전략 구현·어휘다. 이건 목록 대조라
-            # `feasibility` 를 부르지 않고 같은 표를 직접 본다(모양 가정 없음).
-            etype = str((edge or {}).get("type") or "").strip().lower()
-            if not etype:
-                out[hid] = "expected_edge.type 이 비었다"
-                continue
-            if etype not in STRATEGY_CATALOG:
-                out[hid] = (f"'{etype}' 는 어휘에 없다 - "
-                            f"사용 가능: {', '.join(sorted(STRATEGY_CATALOG))}")
-                continue
+            # 데이터가 되면 남는 것은 lane별 실행 계약이다. 인트라데이
+            # 가설을 일봉 바인더에 넣으면 정상 파라미터를 전부 미지 키로
+            # 오판하므로 실제로 선택될 러너에게 묻는다.
             # ▶ 실행면이 안 읽는 파라미터도 **영원히 실패하는 부류**다 (2026-08-12)
             #   `config_binding.bind` 가 EDGE_KEYS 밖의 키를 거부한다. 오늘
             #   `expected_edge` 오염은 접수 단계에서 막았지만(관문 우회 차단),
@@ -2442,16 +2435,36 @@ def _structurally_blocked(conn, hypothesis_ids: list) -> dict:
             #     음수여야 한다)로 **3회** 발주-실행-거부를 반복했다. 값 검사는
             #     이름 검사보다 늦게 알 이유가 없다 - 등록된 값은 이미 다 있다.
             #     `rejection_reasons` 가 미지 키와 범위 위반을 **둘 다** 돌려준다.
-            try:
-                from config_binding import rejection_reasons   # noqa: PLC0415
-                bad = rejection_reasons({"expected_edge": edge})
-            except Exception:  # noqa: BLE001
-                bad = []
+            bad = _edge_execution_rejections(edge or {}, STRATEGY_CATALOG)
             if bad:
                 out[hid] = _execution_rejection_line(bad)
     except Exception:  # noqa: BLE001 - 못 세면 막지 않는다
         return {}
     return out
+
+
+def _edge_execution_rejections(edge: dict, strategy_catalog) -> list[str]:
+    """Validate an expected edge against the runner selected by its lane."""
+    lane = str((edge or {}).get("research_lane") or "").upper()
+    if lane == "INTRADAY_EVENT":
+        try:
+            from intraday_experiment_runner import config_from_edge  # noqa: PLC0415
+            config_from_edge(edge)
+            return []
+        except (ImportError, TypeError, ValueError) as exc:
+            return [f"인트라데이 실행 계약이 거부한다: {exc}"]
+
+    etype = str((edge or {}).get("type") or "").strip().lower()
+    if not etype:
+        return ["expected_edge.type 이 비었다"]
+    if etype not in strategy_catalog:
+        return [f"'{etype}' 는 어휘에 없다 - "
+                f"사용 가능: {', '.join(sorted(strategy_catalog))}"]
+    try:
+        from config_binding import rejection_reasons  # noqa: PLC0415
+        return rejection_reasons({"expected_edge": edge})
+    except Exception:  # noqa: BLE001 - 진단을 못 읽었다고 실행을 막지는 않는다
+        return []
 
 
 def _execution_rejection_line(bad) -> str:
@@ -3243,6 +3256,32 @@ def _check_execution_rejections_are_attributable():
 
     from config_binding import rejection_reasons  # noqa: PLC0415
     import attribution as _attr  # noqa: PLC0415
+
+    intraday = {
+        "type": "order_flow_imbalance",
+        "research_lane": "INTRADAY_EVENT",
+        "intraday_signal_expr": {
+            "op": "rolling_mean",
+            "arg": {"op": "field", "field": "queue_imbalance_l1"},
+            "seconds": 5,
+        },
+        "semantic_plan": {
+            "event": "QUOTE_IMBALANCE", "output": "TAKER_NET_PNL",
+            "context": ["ALL"], "direction": "FOLLOW",
+            "execution": "TAKER", "qualities": ["PERSISTENCE"],
+            "horizon_seconds": 1,
+        },
+        "horizon_seconds": 1, "sample_interval_seconds": 1,
+        "feature_lookback_seconds": 5, "order_latency_ms": 100,
+        "fee_bps_per_side": 11.5, "maker_fee_bps_per_side": 11.5,
+        "execution": "TAKER", "position_mode": "LONG_ONLY",
+        "universe_key": "krx_all", "semantic_fingerprint": "test",
+    }
+    assert _edge_execution_rejections(intraday, {}) == [], \
+        "정상 인트라데이 가설을 일봉 실행면이 가로막았다"
+    invalid_intraday = {**intraday, "order_latency_ms": -1}
+    assert _edge_execution_rejections(invalid_intraday, {}), \
+        "잘못된 인트라데이 실행 계약이 발주 전 검사를 통과했다"
 
     # 각 입력이 `bind` 안의 서로 다른 거부 갈래를 하나씩 때린다.
     cases = [
