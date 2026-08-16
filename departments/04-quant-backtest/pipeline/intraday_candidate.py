@@ -21,7 +21,7 @@ from intraday_microstructure import IntradayLaneSpec, IntradaySample, audit_caus
 from overfit_stats import bootstrap_ci, deflated_sharpe
 
 
-EVALUATOR_VERSION = "intraday-candidate-evaluator-v1"
+EVALUATOR_VERSION = "intraday-candidate-evaluator-v2"
 KST = ZoneInfo("Asia/Seoul")
 
 DEFAULT_CRITERIA = {
@@ -237,6 +237,9 @@ def evaluate_candidate(samples_by_instrument: dict[str, list[IntradaySample]], *
               if row["net_bps_per_fill"] is not None]
     capacities = sorted(row["capacity_shares_l1"] for row in observations)
     mid = [row["mid_markout_bps"] for row in observations]
+    implementation_drag = [
+        row["mid_markout_bps"] - row["net_bps_per_opportunity"]
+        for row in observations]
     folds = _folds(session_returns)
     positive_ratio = (sum(row["positive"] for row in folds) / len(folds)
                       if folds else None)
@@ -254,6 +257,8 @@ def evaluate_candidate(samples_by_instrument: dict[str, list[IntradaySample]], *
         "fills": len(filled),
         "fill_rate": len(filled) / len(observations) if observations else None,
         "mean_mid_markout_bps": fmean(mid) if mid else None,
+        "mean_implementation_drag_bps": (
+            fmean(implementation_drag) if implementation_drag else None),
         "mean_net_bps_per_fill": fmean(filled) if filled else None,
         "mean_net_bps_per_opportunity": (
             fmean(row["net_bps_per_opportunity"] for row in observations)

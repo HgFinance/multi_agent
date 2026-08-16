@@ -304,6 +304,9 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
             "decisions": sorted({str(row.get("decision") or "UNDECIDED") for row in group}),
             "lesson_codes": sorted({str(code) for row in group
                                     for code in (row.get("lesson_codes") or [])}),
+            "best_gross_bps": _number(summary, "mean_mid_markout_bps"),
+            "best_implementation_drag_bps": _number(
+                summary, "mean_implementation_drag_bps"),
             "best_net_bps": _number(summary, "mean_net_bps_per_opportunity"),
             "best_fill_rate": _number(summary, "fill_rate"),
             "best_sessions": _number(summary, "sessions"),
@@ -354,6 +357,8 @@ def render(memory: IntradayMemory, *, limit: int = 6) -> str:
             f"{row['event']} {row['direction']} context={row['context']} "
             f"quality={row['qualities']} fields={row['fields']} clocks={row['clocks_seconds']} "
             f"trials={row['trials']} decisions={row['decisions']} "
+            f"gross={row['best_gross_bps']}bps "
+            f"implementation_drag={row['best_implementation_drag_bps']}bps "
             f"net={row['best_net_bps']}bps fill={row['best_fill_rate']} "
             f"sessions={row['best_sessions']} lessons={row['lesson_codes']}")
     lines.extend([
