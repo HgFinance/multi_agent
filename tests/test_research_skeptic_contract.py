@@ -60,9 +60,38 @@ def test_skeptic_review_forbids_unknown_fields_and_codes() -> None:
             _review(competing_codes=["UNKNOWN_CODE"]))
 
 
-def test_skeptic_review_rejects_ambiguous_extra_reviews() -> None:
+def test_skeptic_review_rejects_surplus_reviews_without_active_title() -> None:
     with pytest.raises(ValueError, match="exactly 1 item"):
         research_workers._validate_skeptic_reviews_against_input(
-            [_review(), _review(title="Invented second proposal")],
+            [
+                _review(title="Invented first proposal"),
+                _review(title="Invented second proposal"),
+            ],
+            {"proposal_draft": "TITLE: Deep-book OFI"},
+        )
+
+
+def test_skeptic_review_discards_exactly_identifiable_context_echoes() -> None:
+    reviews = research_workers._validate_skeptic_reviews_against_input(
+        [
+            _review(title="Unrelated retrieved proposal A"),
+            _review(title="Deep-book OFI"),
+            _review(title="Unrelated retrieved proposal B"),
+        ],
+        {"proposal_draft": "TITLE: Deep-book OFI"},
+    )
+
+    assert len(reviews) == 1
+    assert reviews[0]["title"] == "Deep-book OFI"
+
+
+def test_skeptic_review_rejects_duplicate_active_title_among_context_echoes() -> None:
+    with pytest.raises(ValueError, match="exactly 1 item"):
+        research_workers._validate_skeptic_reviews_against_input(
+            [
+                _review(title="Deep-book OFI"),
+                _review(title="Deep-book OFI"),
+                _review(title="Unrelated retrieved proposal"),
+            ],
             {"proposal_draft": "TITLE: Deep-book OFI"},
         )

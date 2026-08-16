@@ -94,6 +94,24 @@ def _validate_skeptic_reviews_against_input(value: Any,
     if not titles:
         raise ValueError("proposal_draft must contain at least one TITLE line")
     reviews = list(value) if isinstance(value, list) else []
+
+    # Small reviewer models occasionally echo reviews for proposals that were
+    # present in retrieved context even though proposal_draft contains only one
+    # active block.  Do not let those unrelated, explicitly named artifacts
+    # poison the active review.  Exact title binding is safe to recover because
+    # the planner title is the join key; ambiguous duplicates and renamed
+    # surplus reviews still fail closed below.
+    if len(reviews) != len(titles):
+        title_set = set(titles)
+        exact = [review for review in reviews
+                 if isinstance(review, Mapping)
+                 and str(review.get("title") or "").strip() in title_set]
+        exact_titles = [str(review.get("title") or "").strip()
+                        for review in exact]
+        if (len(exact) == len(titles)
+                and len(set(exact_titles)) == len(titles)
+                and set(exact_titles) == title_set):
+            reviews = exact
     if len(reviews) != len(titles):
         raise ValueError(
             f"skeptic_reviews must contain exactly {len(titles)} item(s), one for "
