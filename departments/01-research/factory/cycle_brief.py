@@ -156,13 +156,24 @@ def load_coverage(market_conn) -> dict:
     d, s, e, n = cur.fetchone()
     if d:
         out["일봉"] = f"{d}거래일 {s}~{e}, {n}종목"
+    # Raw event tables are hundreds of GB. A full-table count(distinct ...) in
+    # every 15-minute factory cycle was observed to fan out across Timescale
+    # workers and stall the producer for over a minute. Two indexed edge probes
+    # establish truthful live coverage without pretending to know an exact
+    # session/symbol count; the bounded evaluator measures those per experiment.
     for t, label in (("market_ticks", "체결"), ("market_quotes", "호가")):
-        cur.execute(f"""select count(distinct observed_at::date), min(observed_at)::date,
-                               max(observed_at)::date, count(distinct instrument_id)
-                          from market.{t}""")
-        d, s, e, n = cur.fetchone()
-        if d:
-            out[label] = f"{d}거래일 {s}~{e}, {n}종목"
+        cur.execute(f"""select observed_at::date from market.{t}
+                          order by observed_at asc limit 1""")
+        first = cur.fetchone()
+        cur.execute(f"""select observed_at::date from market.{t}
+                          order by observed_at desc limit 1""")
+        last = cur.fetchone()
+        s = first[0] if first else None
+        e = last[0] if last else None
+        if s and e:
+            out[label] = (
+                f"LIVE {s}~{e}; 세션·종목 수는 실험별 bounded slice에서 계측"
+            )
     return out
 
 
@@ -227,9 +238,22 @@ def _selfcheck() -> int:
     # 커버리지 없으면 조용히 비운다(지어내지 않는다)
     check("커버리지 미측정", b2.coverage == {})
 
+    market = _Conn([
+        [(627, "2024-01-02", "2026-07-30", 3924)],
+        [("2026-06-25",)], [("2026-08-15",)],
+        [("2026-06-25",)], [("2026-08-15",)],
+    ])
+    coverage = load_coverage(market)
+    check("raw event edge coverage", "LIVE 2026-06-25~2026-08-15" in coverage["체결"]
+          and "bounded slice" in coverage["호가"])
+    import inspect
+    source = inspect.getsource(load_coverage)
+    check("raw event full scan forbidden",
+          "select count(distinct observed_at::date)" not in source)
+
     for f in fails:
         print(f"  FAIL {f}")
-    print(f"cycle_brief 자체 점검: {9 - len(fails)}/9 통과")
+    print(f"cycle_brief 자체 점검: {11 - len(fails)}/11 통과")
     return 1 if fails else 0
 
 
