@@ -152,7 +152,7 @@ def check_microstructure_primary(proposal: ExperimentProposalV1) -> list[str]:
         if not fields:
             out.append("intraday_signal_expr has no raw quote/trade field")
         output = str((proposal.semantic_plan or {}).get("output") or "").upper()
-        if output in {"TAKER_NET_PNL", "PASSIVE_NET_PNL"}:
+        if output in {"TAKER_NET_PNL", "PASSIVE_FILL_ADJUSTED_PNL"}:
             if unit_of(parsed) != "BPS":
                 out.append(
                     "net-PnL intraday AST must predict markout in BPS; a "
@@ -522,6 +522,44 @@ def _check_intraday_ast_uses_intraday_contract():
     assert r.ok, r.as_dict()
 
 
+def _check_passive_intraday_uses_canonical_target_and_cost_hurdle():
+    """Passive formulas use the same output vocabulary at every boundary."""
+    from contracts.factory_contracts import DataRequirement
+
+    params = {"intraday_signal_expr": {
+        "op": "rolling_mean", "seconds": 5,
+        "arg": {"op": "field", "field": "microprice_offset_bps"}},
+        "execution": "PASSIVE_FIFO_LOWER_BOUND"}
+    p, leads = _mk_proposal(
+        research_lane=ResearchLane.INTRADAY_EVENT,
+        semantic_plan={
+            "event": "MICROPRICE_DISLOCATION",
+            "output": "PASSIVE_FILL_ADJUSTED_PNL",
+            "context": ["ALL"], "direction": "FOLLOW",
+            "execution": "PASSIVE_FIFO_LOWER_BOUND",
+            "qualities": ["PERSISTENCE"], "horizon_seconds": 1,
+        },
+        data_requirements=DataRequirement(
+            tables=("market_quotes", "market_ticks"), min_history_days=10),
+        suggested_params=params,
+    )
+    leads = {lid: lead.model_copy(update={"ast_contract": {
+        **lead.ast_contract,
+        "formula_discovery_version": "formula-discovery-v2",
+        "formula_contract_complete": True,
+    }}) for lid, lead in leads.items()}
+    blocked = evaluate(p, leads=leads)
+    assert not blocked.ok
+    assert any("PREDICTED_MARKOUT_CLEARS_COST" in reason
+               for reason in blocked.blockers), \
+        blocked.as_dict()
+
+    executable = p.model_copy(update={"suggested_params": {
+        **params, "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST"}})
+    accepted = evaluate(executable, leads=leads)
+    assert accepted.ok, accepted.as_dict()
+
+
 def _check_unaddressed_rejection_is_blocked():
     """**회사가 이미 산 실험을 다시 사지 않는다.**"""
     p, leads = _mk_proposal()
@@ -612,6 +650,9 @@ def _check_lesson_vocabulary_is_shared():
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
+
+    _check_passive_intraday_uses_canonical_target_and_cost_hurdle()
+    print("  passive target/cost contract OK")
 
     print(f"{MODULE_VERSION} 자체 점검 (네트워크·DB 없음)")
     _check_clean_proposal_passes();             print("  정상 기획안 통과         OK")

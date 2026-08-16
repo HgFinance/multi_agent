@@ -13,7 +13,13 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 CONTRACT_VERSION = "formula-discovery-v2"
 
-TARGETS = frozenset({"MID_MARKOUT_BPS", "TAKER_NET_PNL", "PASSIVE_NET_PNL"})
+# These names are the canonical ``alpha_semantics.OUTPUTS`` values.  Keeping a
+# second set of near-synonyms here used to make gross-markout and passive
+# formulas impossible to submit: the thesis had to equal SEMANTIC_PLAN.output,
+# while the two validators accepted different spellings.
+TARGETS = frozenset({
+    "MIDPRICE_MARKOUT", "TAKER_NET_PNL", "PASSIVE_FILL_ADJUSTED_PNL",
+})
 FUNCTIONAL_FORMS = frozenset({
     "MONOTONE", "REVERSAL", "INTERACTION", "STATE_CONDITIONAL",
     "CROSS_SCALE", "DEPTH_DIVERGENCE",
@@ -98,7 +104,9 @@ def assess(thesis, *, candidate: dict, semantic_plan: dict, grammar) -> dict:
         raise ValueError(
             "FORMULA_THESIS target is measured in BPS, so the AST output unit "
             f"must be BPS, not {profile['output_unit']}")
-    pnl_target = target in {"TAKER_NET_PNL", "PASSIVE_NET_PNL"}
+    pnl_target = target in {
+        "TAKER_NET_PNL", "PASSIVE_FILL_ADJUSTED_PNL",
+    }
     if pnl_target and decision_rule != "PREDICTED_MARKOUT_CLEARS_COST":
         raise ValueError(
             "net-PnL targets require decision_rule="
@@ -106,7 +114,7 @@ def assess(thesis, *, candidate: dict, semantic_plan: dict, grammar) -> dict:
     execution = str(semantic_plan.get("execution") or "").upper()
     expected_execution = {
         "TAKER_NET_PNL": "TAKER",
-        "PASSIVE_NET_PNL": "PASSIVE_FIFO_LOWER_BOUND",
+        "PASSIVE_FILL_ADJUSTED_PNL": "PASSIVE_FIFO_LOWER_BOUND",
     }.get(target)
     if expected_execution and execution != expected_execution:
         raise ValueError(

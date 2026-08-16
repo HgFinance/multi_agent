@@ -17,6 +17,7 @@ for path in (PIPELINE, CONTRACTS, FACTORY):
 
 import alpha_semantics as semantics
 import formula_discovery
+import intraday_alpha_ast as intraday_grammar
 import intraday_candidate as candidate_module
 import intraday_experience
 import lead_intake
@@ -939,6 +940,49 @@ def test_intraday_quality_diversity_archive_keeps_one_elite_per_niche() -> None:
     rendered = intraday_experience.render(memory)
     assert "target 12 drafts" in rendered
     assert "DSR/PBO" in rendered
+
+
+@pytest.mark.parametrize(
+    ("target", "execution", "decision_rule"),
+    [
+        ("MIDPRICE_MARKOUT", "TAKER", "POSITIVE_SCORE"),
+        ("PASSIVE_FILL_ADJUSTED_PNL", "PASSIVE_FIFO_LOWER_BOUND",
+         "PREDICTED_MARKOUT_CLEARS_COST"),
+    ],
+)
+def test_formula_thesis_uses_canonical_semantic_targets(
+        target: str, execution: str, decision_rule: str) -> None:
+    expr = {"op": "field", "field": "microprice_offset_bps"}
+    result = formula_discovery.assess({
+        "target": target,
+        "functional_form": "MONOTONE",
+        "expected_sign": "POSITIVE",
+        "coefficient_policy": "STRUCTURE_ONLY",
+        "decision_rule": decision_rule,
+        "terms": {"microprice_offset_bps": "PRESSURE"},
+        "identification": (
+            "Microprice displacement must predict the signed future markout."),
+    }, candidate=expr, semantic_plan={
+        "output": target, "execution": execution,
+    }, grammar=intraday_grammar)
+    assert result["formula_contract_complete"] is True
+    assert result["formula_thesis"]["target"] == target
+
+    legacy = "PASSIVE_NET_PNL" if target.startswith("PASSIVE") \
+        else "MID_MARKOUT_BPS"
+    with pytest.raises(ValueError, match="is not controlled"):
+        formula_discovery.assess({
+            "target": legacy,
+            "functional_form": "MONOTONE",
+            "expected_sign": "POSITIVE",
+            "coefficient_policy": "STRUCTURE_ONLY",
+            "decision_rule": decision_rule,
+            "terms": {"microprice_offset_bps": "PRESSURE"},
+            "identification": (
+                "Microprice displacement must predict the signed future markout."),
+        }, candidate=expr, semantic_plan={
+            "output": legacy, "execution": execution,
+        }, grammar=intraday_grammar)
 
 
 def test_parent_child_tournament_requires_net_increment_and_gate_survival() -> None:
