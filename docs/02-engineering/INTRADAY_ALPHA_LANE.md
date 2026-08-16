@@ -209,14 +209,17 @@ purged walk-forward joint model이 함께 포함된다.
   비자동 수리 힌트를 돌려준다. 코드는 가설을 몰래 바꾸지 않고 Hermes가 근거·ablation과
   함께 다시 제출하게 한다.
 
-### 공유 재생 진화 평가 v5
+### 공유 재생 진화 평가 v6
 
 수식 생성량보다 원시 호가·체결 재생 시간이 훨씬 큰 현재 병목에서는 12개 초안을 각각
 독립 raw replay에 넣지 않는다. Planner는 서로 다른 니치의 계약 유효 v3 리드를 한
 Proposal에 2~8개까지 연결하고, 그중 하나만 주 수식으로 사전등록한다. 접수기는 나머지
 정확한 lead AST와 명시된 lineage parent를 최대 7개의 `SCREENING_ONLY` sidecar로
-자동 부착한다. 에이전트가 sidecar 본문을 직접 쓰거나 출처·fingerprint를 바꾸면
-`SCREENING_POPULATION_INVALID`로 거부한다.
+자동 부착한다. 이 중 최대 2개는 주 수식에서 상태 gate, 무차원 modulator, 가산항 또는
+시간 변환 하나를 제거한 `STRUCTURAL_ABLATION`에 예약한다. 전체 출력 단위가 BPS이고
+원식보다 node 수가 적은 one-edit control만 허용한다. 에이전트가 sidecar 본문을 직접
+쓰거나 출처·fingerprint·ablation 연산자·경로를 바꾸면 접수기와 Publish Gate가 원본
+v3 lead에서 control을 다시 생성해 `SCREENING_POPULATION_INVALID`로 거부한다.
 
 런타임은 모든 후보가 요구하는 clock과 horizon의 합집합으로 lane spec을 한 번 만들고,
 passive 후보가 하나라도 있으면 passive label까지 포함한 상위집합을 한 번 생성한다.
@@ -232,6 +235,13 @@ passive 후보가 하나라도 있으면 passive label까지 포함한 상위집
 아니므로 현재 DSR trial 수와 이후 exact-formula trial 조회에 포함한다. sidecar의 source
 lead id는 소비하지 않아 독립 확인 경로를 남기되, 반복 선별도 장부에서 누적된다.
 
+구조 대조군에는 같은 replay에서 `주 수식 - 대조식`의 net/gross/implementation drag/
+coverage 차이를 계산해 `empirical_influence`로 남긴다. 이 값은 항의 인과 효과나 유의성을
+증명하지 않는 descriptive point estimate다. Hermes 경험 메모리는 양의 비용 후 증분을
+보인 메커니즘은 보존 후보로, 0 이하인 메커니즘은 단순화·교체 후보로 제시하되, 어느
+경우에도 독립 주 실험 없이 승격하지 않는다. 원시 이벤트 재생은 한 번뿐이므로 항별
+피드백을 얻기 위해 같은 대용량 데이터를 다시 읽지는 않는다.
+
 이 구조는 희소한 최종 보상 하나보다 구조·신규성 피드백을 쓰는
 [AlphaSAGE](https://arxiv.org/abs/2509.25055), 성공·실패를 다음 생성에 증류하는
 [FactorMiner](https://arxiv.org/abs/2602.14670), 항별 영향도를 탐색 신호로 쓰는
@@ -246,6 +256,15 @@ lead id는 소비하지 않아 독립 확인 경로를 남기되, 반복 선별�
 [호가장 GP 일중 전략 연구](https://www.jstage.jst.go.jp/article/iscie1988/21/12/21_12_400/_article/-char/ja/)는
 호가 정보와 거래 규칙의 공동 평가를 다룬다. 이 문헌의 보고 수익을 우리 성과로
 간주하지 않고 생성기와 검증기의 결합 방식만 참고한다.
+
+v6의 세부 진단 루프는 coarse scalar reward 대신 항별 influence와 search tree를 쓰는
+[IGSR](https://arxiv.org/abs/2605.29184), 제안과 탐색 제어를 분리하고 실패 trajectory를
+재사용하는 [Deliberate Evolution](https://arxiv.org/abs/2606.04360), 역할별로 다른 평가
+증거를 주는 [A-SR](https://arxiv.org/abs/2608.04872), backtest 피드백으로 저수익 subtree를
+피하는 [Alpha Jungle](https://arxiv.org/abs/2505.11122), 수식 구조 수정과 수치 최적화를
+분리하는 [FactorEngine](https://arxiv.org/abs/2603.16365)의 방향을 제한적으로 반영한다.
+우리는 이 논문들의 benchmark 성과를 재현했다고 주장하지 않으며, deterministic typed
+ablation과 screening-only 기억이라는 검증 가능한 최소 단위만 채택한다.
 
 운영 전제는 `20260816150000_intraday_alpha_factory.sql` 적용과
 `krx-intraday-events/v1` manifest 존재다. 원천에 `received_at`이 없으면 해당 행은

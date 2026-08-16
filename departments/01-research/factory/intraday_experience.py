@@ -43,6 +43,7 @@ class IntradayMemory:
     recycled_candidates: tuple[dict, ...]
     lineage_tournaments: tuple[dict, ...]
     breeding_parents: tuple[dict, ...]
+    empirical_term_influence: tuple[dict, ...]
 
 
 def _walk(node, fields: set[str], operators: set[str], clocks: set[int]) -> None:
@@ -384,6 +385,31 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
         key=lambda row: ({"NET_SURVIVOR": 0, "SCREEN_SURVIVOR": 1}.get(
                              row["breeding_role"], 2),
                          -row["best_net_bps"], row["niche"])))
+    influence = []
+    for row in parsed:
+        measured = row.get("empirical_influence")
+        if (row.get("candidate_role") != "STRUCTURAL_ABLATION"
+                or not isinstance(measured, dict)):
+            continue
+        influence.append({
+            "ablation_of_ast_fingerprint": str(
+                measured.get("ablation_of_ast_fingerprint") or
+                row.get("ablation_of_ast_fingerprint") or ""),
+            "ablation_ast_fingerprint": row["ast_fingerprint"],
+            "ablation_operator": str(measured.get("ablation_operator") or
+                                      row.get("ablation_operator") or ""),
+            "ablation_path": str(measured.get("ablation_path") or
+                                  row.get("ablation_path") or ""),
+            "net_increment_bps": _number(measured, "net_increment_bps"),
+            "gross_increment_bps": _number(measured, "gross_increment_bps"),
+            "implementation_drag_increment_bps": _number(
+                measured, "implementation_drag_increment_bps"),
+            "interpretation": str(measured.get("interpretation") or
+                                  "NOT_MEASURED"),
+        })
+    influence.sort(key=lambda row: (
+        row["net_increment_bps"] is not None,
+        row["net_increment_bps"] or float("-inf")), reverse=True)
     return IntradayMemory(
         experiments=len(parsed), semantic_families=len({row["semantic_fingerprint"]
                                                         for row in parsed}),
@@ -400,6 +426,7 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
         recycled_candidates=recycled,
         lineage_tournaments=tournaments,
         breeding_parents=breeding,
+        empirical_term_influence=tuple(influence),
     )
 
 
@@ -471,6 +498,18 @@ def render(memory: IntradayMemory, *, limit: int = 6) -> str:
                 f"status={row['status']} parent_net={row['parent_net_bps']} "
                 f"child_net={row['child_net_bps']} increment={row['net_increment_bps']} "
                 f"decision={row['child_decision']}")
+    if memory.empirical_term_influence:
+        lines.append(
+            "  [same-replay empirical term influence - screening, causal claim 아님]")
+        for row in memory.empirical_term_influence[:8]:
+            lines.append(
+                f"    parent={row['ablation_of_ast_fingerprint']} "
+                f"control={row['ablation_ast_fingerprint']} "
+                f"operator={row['ablation_operator']} path={row['ablation_path']} "
+                f"primary-minus-control net={row['net_increment_bps']}bps "
+                f"gross={row['gross_increment_bps']}bps "
+                f"drag={row['implementation_drag_increment_bps']}bps "
+                f"interpretation={row['interpretation']}")
     lines.extend([
         "  [next generation protocol] Generate a population, not one favorite formula:",
         "    1) 4 exploration children in underfilled Event/Context/Quality niches;",
@@ -485,5 +524,9 @@ def render(memory: IntradayMemory, *, limit: int = 6) -> str:
         "    breed execution/cost-aware children; FAILURE_INVERSION_PARENT may only breed an",
         "    explicit failure-mode inversion. These parent roles are search stepping stones,",
         "    never promotions. Missing net metrics never become zero or a win.",
+        "    Use empirical term-influence point estimates diagnostically: retain mechanisms",
+        "    whose primary-minus-control net increment is positive; simplify or replace",
+        "    non-positive mechanisms. This same-replay screen is not causal proof and cannot",
+        "    promote a formula without an independent primary experiment.",
     ])
     return "\n".join(lines)

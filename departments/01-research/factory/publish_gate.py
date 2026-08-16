@@ -223,6 +223,7 @@ def check_intraday_screening_population(
     from contracts.alpha_semantics import validate as validate_plan
     from contracts import intraday_ast_contract as intraday_grammar
     from contracts.intraday_ast_contract import fingerprint, parse, unit_of
+    from contracts.intraday_ablation import generate as generate_ablations
     import formula_discovery
 
     out: list[str] = []
@@ -300,6 +301,26 @@ def check_intraday_screening_population(
                              and source_plan == plan
                              and source_policy == str(
                                  row.get("entry_policy") or ""))
+                elif role == "STRUCTURAL_ABLATION":
+                    source_expr = parse(contract.get("candidate_signal_expr"))
+                    source_fp = fingerprint(source_expr)
+                    expected = {
+                        candidate["ast_fingerprint"]: candidate
+                        for candidate in generate_ablations(source_expr)
+                    }.get(fp)
+                    match = (
+                        contract.get("alpha_candidate_eligible") is True
+                        and source_fp == primary_fp
+                        and row.get("ablation_of_ast_fingerprint") == source_fp
+                        and expected is not None
+                        and row.get("ablation_operator") == expected.get(
+                            "ablation_operator")
+                        and row.get("ablation_path") == expected.get(
+                            "ablation_path")
+                        and row.get("ablation_version") == expected.get(
+                            "ablation_version")
+                        and source_plan == plan
+                        and source_policy == str(row.get("entry_policy") or ""))
                 else:
                     out.append(f"{prefix} has unknown candidate_role={role!r}")
                     break
