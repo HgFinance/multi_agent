@@ -1384,6 +1384,42 @@ def _executable_unused_count(conn) -> int:
         return int((cur.fetchone() or (0,))[0] or 0)
 
 
+def _intraday_formula_unused_count(conn) -> int:
+    """Count unused leads satisfying the current primary-lane equation contract.
+
+    The aggregate executable queue also contains daily leads.  Those rows must
+    not authorize Planner while the event-time formula queue is empty: Planner
+    otherwise wins the research profile's single worker slot and Scout waits
+    behind a consumer that cannot consume the missing primary material.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            select count(*)
+              from research.methodology_leads l
+             where l.status = 'COMPLETE'
+               and l.testability = 'RULE_EXPRESSIBLE'
+               and l.ast_contract->>'ast_readiness' = 'AST_READY'
+               and l.ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
+               and l.ast_contract->>'research_lane' = 'INTRADAY_EVENT'
+               and l.ast_contract->>'formula_discovery_version' =
+                   'formula-discovery-v3'
+               and coalesce(
+                     (l.ast_contract->>'formula_contract_complete')::boolean,
+                     false)
+               and coalesce(
+                     (l.ast_contract->>'alpha_candidate_eligible')::boolean,
+                     false)
+               and not exists (
+                     select 1 from research.experiment_proposals p
+                      where l.lead_id = any(p.lead_ids))
+               and not exists (
+                     select 1 from research.proposal_review_outcomes r
+                      where r.verdict = 'STOP'
+                        and l.lead_id = any(r.lead_ids))
+        """)
+        return int((cur.fetchone() or (0,))[0] or 0)
+
+
 def _lead_health(conn) -> str:
     """**재료가 남아 있나.** 마르면 스카우트가 먼저다.
 
@@ -2188,23 +2224,27 @@ def _active_card_by_key_prefix(prefix: str) -> str | None:
 
 
 def _should_schedule_planner(research_brief: str,
-                             executable_unused: int | None) -> bool:
-    """Consume any executable lead, while discovery replenishes the buffer.
+                             executable_unused: int | None,
+                             intraday_formula_unused: int | None) -> bool:
+    """Consume only after the primary intraday producer has material.
 
     The research profile executes one card at a time.  Scheduling a planner
     while there are zero executable unused leads makes
     the planner run first (higher queue priority), spend a model turn rejecting
     stale families, and then leaves the newly discovered leads waiting for the
-    next 30-minute planner bucket.  A low-watermark warning is *not* an empty
-    queue, however: Scout should refill in parallel while Planner consumes the
-    valid lead that already exists.  Conflating ``unused < LEADS_LOW`` with
-    ``unused == 0`` deadlocks the factory at one to three fresh leads.
+    next 30-minute planner bucket.  The aggregate count can be positive solely
+    because daily leads remain.  The Planner contract prioritizes event-time and
+    refuses a daily fallback when that lane is empty, so both counts must be
+    non-empty.  A low watermark is still not an empty queue: one v3 formula is
+    enough to let Planner consume while Scout replenishes the population.
 
     ``None`` means the count could not be measured and is fail-closed.
     """
     return (bool(str(research_brief or "").strip())
             and executable_unused is not None
-            and int(executable_unused) > 0)
+            and intraday_formula_unused is not None
+            and int(executable_unused) > 0
+            and int(intraday_formula_unused) > 0)
 
 
 def _board_rows(sql: str, params: tuple = ()) -> list[tuple]:
@@ -2994,6 +3034,7 @@ def cycle(*, dry_run: bool = False) -> int:
     #   Scout도 중복 생성하지 않는다.
     starving = ""
     executable_unused: int | None = None
+    intraday_formula_unused: int | None = None
     try:
         _sc = _conn()
         try:
@@ -3002,6 +3043,7 @@ def cycle(*, dry_run: bool = False) -> int:
             # deliberately separate.  One fresh lead is enough for Planner,
             # even though Scout should concurrently refill toward LEADS_LOW.
             executable_unused = _executable_unused_count(_sc)
+            intraday_formula_unused = _intraday_formula_unused_count(_sc)
             ast_memory = _ast_experience_block(_sc)
         finally:
             _sc.close()
@@ -3061,7 +3103,8 @@ def cycle(*, dry_run: bool = False) -> int:
               f"{str(exc)[:180]}", flush=True)
         rb = ""
         fails += 1
-    if _should_schedule_planner(rb, executable_unused):
+    if _should_schedule_planner(
+            rb, executable_unused, intraday_formula_unused):
         # ▶ **기획자와 회의론자를 다른 카드로 낸다** (2026-08-11).
         #   `proposal_intake` 는 두 산출의 실행 id 가 같으면 거부한다 - 자기가
         #   낸 가설을 자기가 검토하면 서명이 무의미하기 때문이다. 한 카드에서
@@ -3138,7 +3181,7 @@ def cycle(*, dry_run: bool = False) -> int:
                   "않는다."),
             assignee=RESEARCH_ASSIGNEE,
             # v5 consumes a bounded typed cohort in one shared event replay.
-            key=f"factory-planner-v5-{pstamp}", dry_run=dry_run, priority=1)
+            key=f"factory-planner-v6-{pstamp}", dry_run=dry_run, priority=1)
 
         # 회의론자 카드는 **여기서 만들지 않는다**. 기획자 산출이 아직 없는데
         # 걸면 검토할 대상이 없는 채로 돌아 빈 산출을 내거나, 없는 기획안을
@@ -3146,8 +3189,14 @@ def cycle(*, dry_run: bool = False) -> int:
     elif rb and executable_unused == 0:
         print("  planner deferred - executable lead queue is empty; "
               "scout must replenish it first", flush=True)
+    elif rb and intraday_formula_unused == 0:
+        print("  planner deferred - formula-discovery-v3 intraday queue is empty; "
+              "scout must replenish the primary lane first", flush=True)
     elif rb and executable_unused is None:
         print("  planner deferred - executable lead queue could not be measured",
+              flush=True)
+    elif rb and intraday_formula_unused is None:
+        print("  planner deferred - intraday formula queue could not be measured",
               flush=True)
 
     # ── 퀀트: 대기 중인 가설 실험 ──
@@ -4289,7 +4338,7 @@ def _check_design_gaps_and_scout_card():
         "재료가 말라도 스카우트 전용 카드가 안 나간다"
     # 공급 병목 파훼 두 짝 (2026-08-13): 기획 카드 30분 버킷 + 다중 블록 제출.
     # 실행 6분 vs 공급 1건/시간 실측 - 버킷이 시간으로 돌아가면 재발이다.
-    assert "factory-planner-v5-{pstamp}" in cyc, "기획 카드가 시간 버킷으로 돌아갔다"
+    assert "factory-planner-v6-{pstamp}" in cyc, "기획 카드가 시간 버킷으로 돌아갔다"
     assert "서로 다른 계열" in cyc and "블록 3개" in cyc, "다중 블록 제출 지시가 빠졌다"
     assert "정확히 한" in cyc and "INTRADAY_EVENT" in cyc, \
         "event-time 리드가 있어도 기획자가 일봉만 고를 수 있다"
@@ -4336,16 +4385,22 @@ def _check_research_queue_prefers_consumption():
 
     assert "--priority" in captured
     assert captured[captured.index("--priority") + 1] == "1"
-    assert _should_schedule_planner("brief", 1) is True
-    assert _should_schedule_planner("brief", 3) is True, \
+    assert _should_schedule_planner("brief", 1, 1) is True
+    assert _should_schedule_planner("brief", 3, 1) is True, \
         "low-watermark queue was mistaken for an empty queue"
-    assert _should_schedule_planner("brief", 0) is False
-    assert _should_schedule_planner("brief", None) is False
-    assert _should_schedule_planner("", 1) is False
+    assert _should_schedule_planner("brief", 9, 0) is False, \
+        "daily leads can still steal the single worker slot from intraday Scout"
+    assert _should_schedule_planner("brief", 0, 1) is False
+    assert _should_schedule_planner("brief", None, 1) is False
+    assert _should_schedule_planner("brief", 1, None) is False
+    assert _should_schedule_planner("", 1, 1) is False
     cyc = inspect.getsource(cycle)
     assert '_active_card_by_key_prefix("factory-scout-")' in cyc
-    assert "_should_schedule_planner(rb, executable_unused)" in cyc, \
-        "planner can still consume an empty executable-lead queue"
+    assert "intraday_formula_unused" in cyc
+    assert "_should_schedule_planner(" in cyc, \
+        "planner can still consume an empty primary-lane queue"
+    assert "factory-planner-v6-" in cyc, \
+        "corrected scheduling can be absorbed by an old planner key"
     assert "priority=1" in cyc, "planner priority was lost after replenishment"
     print("  research producer-before-consumer dependency OK")
 
