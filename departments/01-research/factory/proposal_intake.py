@@ -457,7 +457,8 @@ def _pair_skeptic(title: str, skeptics: dict, planners: list, sk_blocks: list):
 
 def load_past_outcomes(conn, edge_type: str, universe_key: str,
                        *, label: str = "", baseline: str = "",
-                       signal_expr: dict | None = None) -> list[dict]:
+                       signal_expr: dict | None = None,
+                       research_lane: str = "DAILY_CROSS_SECTIONAL") -> list[dict]:
     """같은 계열 또는 exact AST의 지난 판정.
 
     계열명은 LLM이 바꿀 수 있지만 실행된 수식의 지문은 바뀌지 않는다. 따라서
@@ -509,24 +510,34 @@ def load_past_outcomes(conn, edge_type: str, universe_key: str,
     """
     edge = str(edge_type or "").strip().lower()
     uni = str(universe_key or "").strip().lower()
+    lane = str(research_lane or "DAILY_CROSS_SECTIONAL").strip().upper()
+    if lane not in {"DAILY_CROSS_SECTIONAL", "INTRADAY_EVENT"}:
+        raise ValueError(f"unknown research_lane {lane!r}")
     with conn.cursor() as cur:
-        cur.execute("""
+        lane_predicate = (
+            "upper(coalesce(expected_edge->>'research_lane','')) = 'INTRADAY_EVENT'"
+            if lane == "INTRADAY_EVENT" else
+            "upper(coalesce(expected_edge->>'research_lane',"
+            "'DAILY_CROSS_SECTIONAL')) = 'DAILY_CROSS_SECTIONAL'"
+        )
+        cur.execute(f"""
             select hypothesis_id::text from quant.hypotheses
              where lower(coalesce(expected_edge->>'type','')) = %s
                and lower(coalesce(expected_edge->>'universe_key',
                                   expected_edge->>'universe','')) = %s
+               and {lane_predicate}
         """, (edge, uni))
         hyp_ids = [r[0] for r in cur.fetchall()]
         experiment_ids: list[str] = []
         if signal_expr is not None:
             # jsonb equality ignores object key order.  Invalid expressions are left
             # to the canonical AST gate; history lookup must not silently repair one.
-            cur.execute("""
+            ast_key = ("intraday_signal_expr" if lane == "INTRADAY_EVENT"
+                       else "signal_expr")
+            cur.execute(f"""
                 select experiment_id::text from quant.experiments
-                 where config->'signal_expr' = %s::jsonb
-                    or config->'intraday_signal_expr' = %s::jsonb
-            """, (json.dumps(signal_expr, sort_keys=True),
-                  json.dumps(signal_expr, sort_keys=True)))
+                 where config->'{ast_key}' = %s::jsonb
+            """, (json.dumps(signal_expr, sort_keys=True),))
             experiment_ids = [r[0] for r in cur.fetchall()]
         if not hyp_ids and not experiment_ids:
             return []
@@ -959,6 +970,46 @@ def _check_agent_can_answer_the_gate():
     print("  에이전트가 게이트에 답할 수 있다  OK")
 
 
+def _check_lane_isolated_history_lookup():
+    """Daily outcomes must not spend an intraday family's trial budget."""
+    class Cursor:
+        def __init__(self):
+            self.calls = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql, params):
+            self.calls.append((sql, params))
+
+        def fetchall(self):
+            sql, params = self.calls[-1]
+            if "from quant.hypotheses" in sql:
+                assert "= 'INTRADAY_EVENT'" in sql, sql
+                return []
+            if "from quant.experiments" in sql:
+                assert "config->'intraday_signal_expr'" in sql, sql
+                assert len(params) == 1, params
+                return []
+            raise AssertionError(sql)
+
+    class Conn:
+        def __init__(self):
+            self.cur = Cursor()
+
+        def cursor(self):
+            return self.cur
+
+    rows = load_past_outcomes(
+        Conn(), "order_flow_imbalance", "krx_all",
+        signal_expr={"op": "field", "field": "queue_imbalance_l1"},
+        research_lane="INTRADAY_EVENT")
+    assert rows == []
+
+
 if __name__ == "__main__":
     if "--check" in sys.argv:
         if hasattr(sys.stdout, "reconfigure"):
@@ -969,5 +1020,6 @@ if __name__ == "__main__":
         _check_trailing_prose_does_not_kill_codes()
         print("  코드 뒤 산문이 기획안을 안 죽인다  OK")
         _check_agent_can_answer_the_gate()
+        _check_lane_isolated_history_lookup()
         raise SystemExit(0)
     raise SystemExit(_cli(sys.argv[1:]))

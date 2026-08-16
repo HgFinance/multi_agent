@@ -38,6 +38,7 @@ from contracts.factory_contracts import (  # noqa: E402
     ExperimentProposalV1,
     LessonCode,
     MethodologyLeadV1,
+    ResearchLane,
     Testability,
 )
 from contracts.alpha_ast_surface import (  # noqa: E402
@@ -125,6 +126,29 @@ def check_leads(proposal: ExperimentProposalV1,
 def check_microstructure_primary(proposal: ExperimentProposalV1) -> list[str]:
     """Signal discovery is microstructure-first; daily data only executes/scores it."""
     out = []
+    if proposal.research_lane == ResearchLane.INTRADAY_EVENT:
+        # Intraday proposals intentionally use a different, seconds-based grammar.
+        # Treating it as the daily ``signal_expr`` silently rejects the very raw-event
+        # lane this gate is meant to protect.
+        from contracts.intraday_ast_contract import fields_of, parse
+
+        raw = (proposal.suggested_params or {}).get("intraday_signal_expr")
+        if not isinstance(raw, dict):
+            return [
+                "SUGGESTED_PARAMS.intraday_signal_expr is missing - an "
+                "INTRADAY_EVENT proposal must preregister a seconds-based AST"
+            ]
+        try:
+            fields = fields_of(parse(raw))
+        except (TypeError, ValueError) as exc:
+            return [f"intraday_signal_expr is not an executable AST: {exc}"]
+        if not fields:
+            out.append("intraday_signal_expr has no raw quote/trade field")
+        # ExperimentProposalV1 already requires both raw quote and trade tables.
+        # microstructure_features is deliberately optional: derived features are
+        # computed causally inside each bounded experiment slice.
+        return out
+
     raw = (proposal.suggested_params or {}).get("signal_expr")
     if not isinstance(raw, dict):
         return [
@@ -322,6 +346,30 @@ def _check_daily_only_signal_is_blocked():
     assert any("MICROSTRUCTURE_PRIMARY_REQUIRED" in b for b in r.blockers), r.as_dict()
 
 
+def _check_intraday_ast_uses_intraday_contract():
+    """The raw-event lane must not be parsed as a daily signal_expr."""
+    from contracts.factory_contracts import DataRequirement
+
+    p, leads = _mk_proposal(
+        research_lane=ResearchLane.INTRADAY_EVENT,
+        semantic_plan={
+            "event": "QUOTE_IMBALANCE", "output": "TAKER_NET_PNL",
+            "context": ["ALL"], "direction": "FOLLOW",
+            "execution": "TAKER", "qualities": ["PERSISTENCE"],
+            "horizon_seconds": 1,
+        },
+        data_requirements=DataRequirement(
+            tables=("market_quotes", "market_ticks"), min_history_days=10),
+        suggested_params={"intraday_signal_expr": {
+            "op": "rolling_mean",
+            "arg": {"op": "field", "field": "queue_imbalance_l1"},
+            "seconds": 5,
+        }},
+    )
+    r = evaluate(p, leads=leads)
+    assert r.ok, r.as_dict()
+
+
 def _check_unaddressed_rejection_is_blocked():
     """**회사가 이미 산 실험을 다시 사지 않는다.**"""
     p, leads = _mk_proposal()
@@ -404,6 +452,7 @@ if __name__ == "__main__":
     _check_unusable_lead_is_blocked();          print("  UNUSABLE 리드 거부       OK")
     _check_public_baseline_control_is_blocked(); print("  공개식 대조군 발행 차단  OK")
     _check_daily_only_signal_is_blocked();      print("  일봉 단독 신호 거부      OK")
+    _check_intraday_ast_uses_intraday_contract(); print("  인트라데이 AST 계약 분리  OK")
     _check_unaddressed_rejection_is_blocked();  print("  기각 교훈 미대응 거부    OK")
     _check_addressed_rejection_passes();        print("  대응하면 재도전 허용     OK")
     _check_budget_exhaustion_is_blocked();      print("  예산 소진 차단           OK")

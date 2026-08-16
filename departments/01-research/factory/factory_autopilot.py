@@ -2269,7 +2269,9 @@ def harvest(*, dry_run: bool = False) -> int:
                               (b.get("UNIVERSE_KEY") or "").strip().lower(),
                               label=(b.get("LABEL") or "").strip(),
                               baseline=(b.get("BASELINE") or "").strip(),
-                              signal_expr=PI.signal_expr_from_block(b)))
+                              signal_expr=PI.signal_expr_from_block(b),
+                              research_lane=(b.get("RESEARCH_LANE") or
+                                             "DAILY_CROSS_SECTIONAL").strip()))
             pub = r.publishable
             if dry_run:
                 print(f"  [dry-run] {stamp}: 발행가능 {len(pub)}건 "
