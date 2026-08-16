@@ -2837,9 +2837,9 @@ def cycle(*, dry_run: bool = False) -> int:
                 # Refill at most once per UTC hour while the executable queue is
                 # dry.  The former six-hour bucket let several planner cycles
                 # consume the same exhausted leads before scouting could run.
-                # v3 separates the empirical event-time refill from older
-                # cards completed in the same hour before this contract.
-                key=f"factory-scout-v3-{_now:%Y%m%d}T{_now.hour:02d}",
+                # v4 separates the evolutionary population contract from v3
+                # single-candidate cards completed in the same UTC hour.
+                key=f"factory-scout-v4-{_now:%Y%m%d}T{_now.hour:02d}",
                 dry_run=dry_run)
         elif active_scout:
             print(f"  scout refill skipped - already active: {active_scout}", flush=True)
