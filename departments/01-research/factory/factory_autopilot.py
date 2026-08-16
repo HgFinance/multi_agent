@@ -245,7 +245,7 @@ select l.lead_id, l.scout_lens, l.claimed_edge, l.stated_mechanism,
    and (coalesce(l.ast_contract->>'research_lane',
                  'DAILY_CROSS_SECTIONAL') <> 'INTRADAY_EVENT'
         or l.ast_contract->>'formula_discovery_version' =
-           'formula-discovery-v3')
+           'formula-discovery-v4')
 order by used asc,
          case
            when coalesce(l.ast_contract->>'research_lane',
@@ -353,6 +353,13 @@ def _ast_scout_contract() -> str:
         "  must actually influence the AST. sign(non-negative count/depth/spread) usually",
         "  collapses to +1 and is rejected as a decorative term. Use rolling_zscore/delta",
         "  for signed change, or an explicit where(gt(...)) for a true state gate.",
+        "  DIRECTIONAL MARKOUT RULE: activity, spread, depth, and realized-volatility",
+        "  levels describe state or magnitude, not whether price moves up or down. Every",
+        "  executable markout equation must carry at least one signed field on its numeric",
+        "  VALUE path and label it PRESSURE: queue_imbalance_l1/l10,",
+        "  microprice_offset_bps, trade_flow_imbalance, quote_event_ofi, or",
+        "  normalized_quote_ofi. A directional field used only as a where gate is not",
+        "  enough. Use unsigned fields only to gate or scale that signed pressure.",
         "  POPULATION COMPLETION RULE: source count is not candidate count. One directly",
         "  relevant source may support several auditable revision leads with different AST",
         "  shapes. After screening sources, draft all 12 population members and submit",
@@ -1380,7 +1387,7 @@ def _executable_unused_count(conn) -> int:
                and (coalesce(l.ast_contract->>'research_lane',
                              'DAILY_CROSS_SECTIONAL') <> 'INTRADAY_EVENT'
                     or l.ast_contract->>'formula_discovery_version' =
-                       'formula-discovery-v3')
+                       'formula-discovery-v4')
                and not exists (
                      select 1 from research.experiment_proposals p
                       where l.lead_id = any(p.lead_ids))
@@ -1410,7 +1417,7 @@ def _intraday_formula_unused_count(conn) -> int:
                and l.ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
                and l.ast_contract->>'research_lane' = 'INTRADAY_EVENT'
                and l.ast_contract->>'formula_discovery_version' =
-                   'formula-discovery-v3'
+                   'formula-discovery-v4'
                and coalesce(
                      (l.ast_contract->>'formula_contract_complete')::boolean,
                      false)
@@ -1484,7 +1491,7 @@ def _lead_health(conn) -> str:
                            and ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
                            and ast_contract->>'research_lane' = 'INTRADAY_EVENT'
                            and ast_contract->>'formula_discovery_version' =
-                               'formula-discovery-v3'
+                               'formula-discovery-v4'
                            and coalesce((ast_contract->>'alpha_candidate_eligible')::boolean,
                                         false)
                            and not exists (
@@ -1502,7 +1509,7 @@ def _lead_health(conn) -> str:
                            and ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
                            and ast_contract->>'research_lane' = 'INTRADAY_EVENT'
                            and ast_contract->>'formula_discovery_version' =
-                               'formula-discovery-v3'
+                               'formula-discovery-v4'
                            and coalesce(
                                  (ast_contract->>'alpha_candidate_eligible')::boolean,
                                  false)
@@ -3163,7 +3170,7 @@ def cycle(*, dry_run: bool = False) -> int:
                   "최대 3건**을 블록 3개로 **한 번의** factory_submit_proposal "
                   "에 담아 제출하라 - 접수는 다중 블록을 읽는다. 같은 계열의 "
                   "파라미터 변형 여러 개는 금지다(시도 예산 낭비).\n"
-                  "- 미사용 formula-discovery-v3 `INTRADAY_EVENT` 리드가 있으면 "
+                  "- 미사용 formula-discovery-v4 `INTRADAY_EVENT` 리드가 있으면 "
                   "경제 니치가 다른 유효 수식을 가능하면 **2~8개 LEAD_IDS로 묶되**, "
                   "SUGGESTED_PARAMS의 `intraday_signal_expr`에는 그중 독립 확인할 "
                   "**주 수식 하나를 정확히 복사**한다. 접수기가 나머지를 승격 불가 "
@@ -3198,7 +3205,7 @@ def cycle(*, dry_run: bool = False) -> int:
         print("  planner deferred - executable lead queue is empty; "
               "scout must replenish it first", flush=True)
     elif rb and intraday_formula_unused == 0:
-        print("  planner deferred - formula-discovery-v3 intraday queue is empty; "
+        print("  planner deferred - formula-discovery-v4 intraday queue is empty; "
               "scout must replenish the primary lane first", flush=True)
     elif rb and executable_unused is None:
         print("  planner deferred - executable lead queue could not be measured",
@@ -4170,6 +4177,8 @@ def _check_unused_leads_come_first():
     assert "SOURCE_BASELINE_EXPR" in contract and "window/constant-only" in contract
     assert "FORMULA_THESIS" in contract and "FINANCIAL-MATHEMATICS" in contract
     assert "PREREGISTERED_NO_OOS_FIT" in contract and "CROSS_SCALE" in contract
+    assert "DIRECTIONAL MARKOUT RULE" in contract
+    assert "signed field on its numeric" in contract and "label it PRESSURE" in contract
     from intraday_alpha_ast import parse as parse_intraday, unit_of as intraday_unit
     bps_examples = [line.strip().split("=", 1)[1]
                     for line in contract.splitlines()
@@ -4237,7 +4246,7 @@ def _check_lead_health_is_surfaced():
     assert "별도 기준 2" in intraday_empty, intraday_empty
 
     # Legacy AST-ready event-time leads must not mask starvation of the new
-    # cost-aware, term-influence-audited contract introduced by formula-discovery-v3.
+    # directional, cost-aware contract required by formula-discovery-v4.
     formula_empty = _lead_health(_Rows((55, 9, 9, 5, 0, 0.1)))
     assert "typed formula-thesis event-time 미사용 리드가 0건" in formula_empty, \
         formula_empty

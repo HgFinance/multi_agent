@@ -13,7 +13,7 @@ import json
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
-CONTRACT_VERSION = "formula-discovery-v3"
+CONTRACT_VERSION = "formula-discovery-v4"
 
 # These names are the canonical ``alpha_semantics.OUTPUTS`` values.  Keeping a
 # second set of near-synonyms here used to make gross-markout and passive
@@ -54,6 +54,17 @@ _ALWAYS_NONNEGATIVE_OPS = frozenset({"abs", "rolling_std"})
 _NONNEGATIVE_PRESERVING_OPS = frozenset({
     "lag", "rolling_mean", "rolling_sum", "ewma",
     "log1p_abs", "sqrt_abs", "sign",
+})
+
+# Signed supply/demand observables that can identify the direction of a future
+# price markout.  Activity, spread, depth and realised volatility may condition
+# or scale an edge, but their level alone predicts magnitude/state rather than
+# whether the next price move is up or down.  Requiring a VALUE path (not merely
+# a where gate) also prevents ``high activity -> always buy`` from masquerading
+# as a directional microstructure equation.
+_DIRECTIONAL_PRESSURE_FIELDS = frozenset({
+    "queue_imbalance_l1", "queue_imbalance_l10", "microprice_offset_bps",
+    "trade_flow_imbalance", "quote_event_ofi", "normalized_quote_ofi",
 })
 
 
@@ -273,7 +284,19 @@ def assess(thesis, *, candidate: dict, semantic_plan: dict, grammar) -> dict:
             "delta for a signed change, or express a true activity state as "
             "an explicit where(gt(...)) gate; do not hide the term in a "
             "denominator")
+    directional_value = sorted(
+        field for field in _DIRECTIONAL_PRESSURE_FIELDS
+        if "VALUE" in influence.get(field, ()) and terms.get(field) == "PRESSURE")
+    if not directional_value:
+        raise ValueError(
+            "FORMULA_THESIS has no signed directional PRESSURE field on the "
+            "numeric VALUE path. Activity, spread, depth, and realized-volatility "
+            "levels can gate or scale a markout but cannot by themselves identify "
+            "up versus down. REPAIR: carry queue imbalance, microprice offset, "
+            "trade-flow imbalance, or signed quote OFI into the score; use state "
+            "and volatility fields only as explicit gates/scales, then ablate them")
     profile["term_influence"] = influence
+    profile["directional_pressure_fields"] = directional_value
 
     operators = set(profile["operators"])
     clocks = profile["clocks_seconds"]

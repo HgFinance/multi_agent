@@ -136,7 +136,7 @@ def _quality_diversity_frontier(leads: list[dict], tested: list[dict]
         if lead.get("used") or lead.get("alpha_candidate_eligible") is False:
             continue
         if lead.get("formula_discovery_version") not in (
-                None, "", "formula-discovery-v3"):
+                None, "", "formula-discovery-v4"):
             # Keep legacy outcomes as negative/positive history, but do not let a
             # dimensionally invalid v1 lead occupy a live evolutionary niche.
             continue
@@ -168,7 +168,7 @@ def _quality_diversity_frontier(leads: list[dict], tested: list[dict]
             and lead.get("ablations"))
         formula_complete = bool(
             lead.get("formula_contract_complete")
-            and lead.get("formula_discovery_version") == "formula-discovery-v3")
+            and lead.get("formula_discovery_version") == "formula-discovery-v4")
         row.update(
             nearest_library_similarity=nearest,
             novelty_score=1.0 - nearest,

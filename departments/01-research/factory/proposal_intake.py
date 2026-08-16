@@ -328,9 +328,9 @@ def _attach_intraday_screening_cohort(
     rejected_primary: list[str] = []
 
     # The planner chooses the preregistered primary, but it is not a reliable
-    # cohort assembler: a live run linked one valid v3 lead even though four
-    # more unused v3 formulas were present in its own brief.  ``load_leads``
-    # therefore supplies a bounded unused-v3 pool.  Consider that pool here so
+    # cohort assembler: a live run linked one valid current-contract lead even
+    # though four more unused formulas were present in its own brief.  ``load_leads``
+    # therefore supplies a bounded current-contract pool. Consider that pool here so
     # shared replay is deterministic rather than dependent on an LLM copying
     # 2--8 ids correctly.  Only the exact primary remains in ``lead_ids``;
     # every other formula is SCREENING_ONLY and remains unused for a later
@@ -342,7 +342,7 @@ def _attach_intraday_screening_cohort(
         if lead is None:
             continue
         contract = dict(lead.ast_contract or {})
-        if (contract.get("formula_discovery_version") != "formula-discovery-v3"
+        if (contract.get("formula_discovery_version") != "formula-discovery-v4"
                 or not contract.get("formula_contract_complete")
                 or contract.get("alpha_candidate_eligible") is not True
                 or contract.get("research_lane") != "INTRADAY_EVENT"):
@@ -386,7 +386,7 @@ def _attach_intraday_screening_cohort(
                 "formula influence audit: " + " | ".join(rejected_primary))
         raise ValueError(
             "INTRADAY_EVENT primary formula must exactly match one linked "
-            "formula-discovery-v3 lead")
+            "formula-discovery-v4 lead")
 
     primary_lead_ids = tuple(candidates[primary_fp]["source_lead_ids"])
     linked_sidecars = [row for fp, row in candidates.items() if fp != primary_fp]
@@ -535,7 +535,7 @@ def intake(planner_text: str, skeptic_text: str, *, case_id: str,
 
 
 # ── DB ─────────────────────────────────────────────────────────────────────
-def load_leads(conn, lead_ids, *, _expand_v3: bool = True) -> dict:
+def load_leads(conn, lead_ids, *, _expand_current: bool = True) -> dict:
     """근거 리드를 **DB 에서** 읽는다. 에이전트가 말한 리드를 그대로 믿지 않는다."""
     if not lead_ids:
         return {}
@@ -573,26 +573,26 @@ def load_leads(conn, lead_ids, *, _expand_v3: bool = True) -> dict:
                 ref["excerpt"] = clip_excerpt(ref["excerpt"])
         out[d["lead_id"]] = MethodologyLeadV1.model_validate(d)
 
-    # If the submitted primary is a live v3 intraday formula, supplement the
-    # LLM-selected ids with a bounded pool of other unused v3 formulas.  This
+    # If the submitted primary is a live current-contract intraday formula,
+    # supplement the LLM-selected ids with a bounded pool of other unused formulas. This
     # does not mark those leads used: _attach_intraday_screening_cohort keeps
     # only the primary id on the proposal and records the rest as sourced,
     # non-promotable shared-replay sidecars.
-    wants_v3_intraday = any(
+    wants_current_intraday = any(
         (lead.ast_contract or {}).get("formula_discovery_version")
-        == "formula-discovery-v3"
+        == "formula-discovery-v4"
         and (lead.ast_contract or {}).get("research_lane")
         == "INTRADAY_EVENT"
         for lead in out.values()
     )
-    if _expand_v3 and wants_v3_intraday:
+    if _expand_current and wants_current_intraday:
         cur.execute("""
             select l.lead_id
               from research.methodology_leads l
              where l.status = 'COMPLETE'
                and l.testability = 'RULE_EXPRESSIBLE'
                and l.ast_contract->>'formula_discovery_version' =
-                   'formula-discovery-v3'
+                   'formula-discovery-v4'
                and l.ast_contract->>'research_lane' = 'INTRADAY_EVENT'
                and l.ast_contract->>'ast_readiness' = 'AST_READY'
                and coalesce(
@@ -616,7 +616,7 @@ def load_leads(conn, lead_ids, *, _expand_v3: bool = True) -> dict:
         if extra_ids:
             # Reuse the canonical row validator without recursively expanding
             # the pool again.
-            extras = load_leads(conn, extra_ids, _expand_v3=False)
+            extras = load_leads(conn, extra_ids, _expand_current=False)
             out.update(extras)
     return out
 
@@ -1219,7 +1219,7 @@ def _check_lane_isolated_history_lookup():
 
 
 def _check_intraday_screening_cohort_is_sourced_and_non_promoting():
-    """Linked v3 formulas become exact sidecars, not silently consumed leads."""
+    """Linked current-contract formulas become exact, non-consumed sidecars."""
     from contracts.factory_contracts import SourceRef, lead_id_for
     from publish_gate import check_intraday_screening_population
 
@@ -1244,7 +1244,7 @@ def _check_intraday_screening_cohort_is_sourced_and_non_promoting():
             scout_lens="ACADEMIC", source_type="PAPER", as_known_at=now,
             refs=(ref,), claimed_edge=label, stated_mechanism="mechanism",
             ast_contract={
-                "formula_discovery_version": "formula-discovery-v3",
+                "formula_discovery_version": "formula-discovery-v4",
                 "formula_contract_complete": True,
                 "alpha_candidate_eligible": True,
                 "research_lane": "INTRADAY_EVENT",
@@ -1269,7 +1269,7 @@ def _check_intraday_screening_cohort_is_sourced_and_non_promoting():
     proposal = ExperimentProposalV1(
         proposal_id="before", case_id="cohort-check", as_known_at=now,
         # Reproduce the live failure mode: the planner linked only its primary,
-        # while the intake loader supplied another unused v3 formula.
+        # while the intake loader supplied another unused current-contract formula.
         lead_ids=(primary_lead.lead_id,),
         economic_rationale="quote dislocation meets urgent liquidity demand",
         counterparty="urgent liquidity taker",

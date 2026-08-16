@@ -120,12 +120,13 @@ def check_leads(proposal: ExperimentProposalV1,
                 "변형한 별도 AST 리드가 필요하다")
         if (proposal.research_lane == ResearchLane.INTRADAY_EVENT
                 and ((lead.ast_contract or {}).get("formula_discovery_version")
-                     != "formula-discovery-v3"
+                     != "formula-discovery-v4"
                      or not (lead.ast_contract or {}).get(
                          "formula_contract_complete"))):
             out.append(
-                f"lead {lid} lacks the cost-aware formula-discovery-v3 contract; "
-                "resubmit a BPS markout equation with an executable cost hurdle")
+                f"lead {lid} lacks the directional formula-discovery-v4 contract; "
+                "resubmit a signed-pressure BPS markout equation with an executable "
+                "cost hurdle")
         elif proposal.research_lane == ResearchLane.INTRADAY_EVENT:
             contract = lead.ast_contract or {}
             try:
@@ -210,7 +211,7 @@ def check_microstructure_primary(proposal: ExperimentProposalV1) -> list[str]:
 def check_intraday_screening_population(
         proposal: ExperimentProposalV1,
         leads: dict[str, MethodologyLeadV1]) -> list[str]:
-    """Verify that shared-replay sidecars are exact, sourced v3 formulas."""
+    """Verify shared-replay sidecars against exact sourced v4 formulas."""
     if proposal.research_lane != ResearchLane.INTRADAY_EVENT:
         return []
     population = (proposal.suggested_params or {}).get(
@@ -271,8 +272,8 @@ def check_intraday_screening_population(
                 continue
             contract = lead.ast_contract or {}
             if (contract.get("formula_discovery_version") !=
-                    "formula-discovery-v3"):
-                out.append(f"{prefix} source lead {lead_id} is not v3")
+                    "formula-discovery-v4"):
+                out.append(f"{prefix} source lead {lead_id} is not v4")
                 continue
             if (not contract.get("formula_contract_complete")
                     or contract.get("research_lane") != "INTRADAY_EVENT"):
@@ -506,7 +507,7 @@ def _with_current_intraday_contract(proposal, leads):
     }
     return {lid: lead.model_copy(update={"ast_contract": {
         **lead.ast_contract,
-        "formula_discovery_version": "formula-discovery-v3",
+        "formula_discovery_version": "formula-discovery-v4",
         "formula_contract_complete": True,
         "candidate_signal_expr": expr,
         "semantic_plan": proposal.semantic_plan,
