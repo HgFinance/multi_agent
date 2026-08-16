@@ -261,6 +261,12 @@ def _ast_scout_contract() -> str:
         "    NOVELTY_RATIONALE. Exact reuse and window/constant-only tuning are rejected.",
         "  - CROSS_DOMAIN_TRANSFER: include MARKET_STRUCTURE_TRANSFER in",
         "    DERIVATION_TRANSFORMS and explain the mapping in NOVELTY_RATIONALE.",
+        "    Use CROSS_DOMAIN_TRANSFER only for a genuinely non-finance source. A market-",
+        "    microstructure paper stays DIRECT_REPLICATION or MECHANISM_MUTATION even when",
+        "    its venue or clock differs. Prefer empirical event-time evidence that links",
+        "    an observable directly to subsequent midprice/markout over a purely theoretical",
+        "    model; retain theory as a control or blocked lead when it cannot support the",
+        "    claimed executable return target.",
         "  Allowed transforms: STATE_CONDITION, CLOCK_CHANGE, BOOK_DEPTH_CHANGE,",
         "  MECHANISM_INTERACTION, RESIDUALIZE_PUBLIC_SIGNAL, FAILURE_MODE_INVERSION,",
         "  MARKET_STRUCTURE_TRANSFER, TARGET_CHANGE.",
@@ -2731,10 +2737,9 @@ def cycle(*, dry_run: bool = False) -> int:
                 # Refill at most once per UTC hour while the executable queue is
                 # dry.  The former six-hour bucket let several planner cycles
                 # consume the same exhausted leads before scouting could run.
-                # v2 separates the first lane-aware refill from legacy cards
-                # already completed in the same hour before this contract was
-                # deployed. Future cycles remain bounded to one card per hour.
-                key=f"factory-scout-v2-{_now:%Y%m%d}T{_now.hour:02d}",
+                # v3 separates the empirical event-time refill from older
+                # cards completed in the same hour before this contract.
+                key=f"factory-scout-v3-{_now:%Y%m%d}T{_now.hour:02d}",
                 dry_run=dry_run)
         elif active_scout:
             print(f"  scout refill skipped - already active: {active_scout}", flush=True)
@@ -2800,9 +2805,11 @@ def cycle(*, dry_run: bool = False) -> int:
                   "에 담아 제출하라 - 접수는 다중 블록을 읽는다. 같은 계열의 "
                   "파라미터 변형 여러 개는 금지다(시도 예산 낭비).\n"
                   "- 미사용 `INTRADAY_EVENT` 리드가 목록에 하나라도 있으면 이번 "
-                  "호출의 첫 기획안은 반드시 그 리드를 사용한다. 익숙한 일봉 리드로 "
-                  "대체하지 마라. 계약상 기획할 수 없다면 다른 레인만 발행하지 말고 "
-                  "그 인트라데이 리드의 정확한 차단 사유를 남겨라.\n"
+                  "`factory_submit_proposal` 호출에는 **그 리드만 사용한 정확히 한 "
+                  "블록**을 넣는다. 일봉 블록을 함께 넣지 마라 - 다른 블록의 오류가 "
+                  "원자적 배치 전체를 막는다. 성공한 뒤 다음 주기에 일봉을 처리한다. "
+                  "계약상 기획할 수 없다면 다른 레인만 발행하지 말고 그 인트라데이 "
+                  "리드의 정확한 차단 사유를 남겨라.\n"
                   "- 예산이 소진된 계열은 제안하지 마라.\n"
                   "- 쓸 수 있는 리드 목록에 없는 id 를 대지 마라 - 원장에서 다시 "
                   "읽어 대조하므로 막힌다.\n"
@@ -2816,9 +2823,9 @@ def cycle(*, dry_run: bool = False) -> int:
                   "아니라 도구 호출에 실어라 - 카드 텍스트는 납품으로 세지 "
                   "않는다."),
             assignee=RESEARCH_ASSIGNEE,
-            # v2 allows the first lane-priority planner to run in a half-hour
-            # where a legacy planner card already completed before deployment.
-            key=f"factory-planner-v2-{pstamp}", dry_run=dry_run, priority=1)
+            # v3 allows the first single-block intraday planner to run in a
+            # half-hour where older mixed-lane planners already completed.
+            key=f"factory-planner-v3-{pstamp}", dry_run=dry_run, priority=1)
 
         # 회의론자 카드는 **여기서 만들지 않는다**. 기획자 산출이 아직 없는데
         # 걸면 검토할 대상이 없는 채로 돌아 빈 산출을 내거나, 없는 기획안을
@@ -3754,6 +3761,7 @@ def _check_unused_leads_come_first():
     assert "Daily leads" in contract and "INTRADAY_EVENT buffer" in contract
     assert 'never "name"' in contract and '"op":"where"' in contract
     assert "[BARE_WORDS] is not JSON" in contract
+    assert "genuinely non-finance" in contract and "empirical event-time" in contract
     assert "experiment_proposals" in _SQL_LEADS, "사용 여부를 안 본다"
 
     # 표시가 갈려야 한다 - 안 갈리면 봐도 모른다
@@ -3899,10 +3907,12 @@ def _check_design_gaps_and_scout_card():
         "재료가 말라도 스카우트 전용 카드가 안 나간다"
     # 공급 병목 파훼 두 짝 (2026-08-13): 기획 카드 30분 버킷 + 다중 블록 제출.
     # 실행 6분 vs 공급 1건/시간 실측 - 버킷이 시간으로 돌아가면 재발이다.
-    assert "factory-planner-v2-{pstamp}" in cyc, "기획 카드가 시간 버킷으로 돌아갔다"
+    assert "factory-planner-v3-{pstamp}" in cyc, "기획 카드가 시간 버킷으로 돌아갔다"
     assert "서로 다른 계열" in cyc and "블록 3개" in cyc, "다중 블록 제출 지시가 빠졌다"
-    assert "첫 기획안은 반드시" in cyc and "INTRADAY_EVENT" in cyc, \
+    assert "정확히 한" in cyc and "INTRADAY_EVENT" in cyc, \
         "event-time 리드가 있어도 기획자가 일봉만 고를 수 있다"
+    assert "일봉 블록을 함께 넣지 마라" in cyc, \
+        "mixed-lane batch failure가 인트라데이 제안을 인질로 잡는다"
     print("  설계 공백·스카우트 소집   OK")
 
 
