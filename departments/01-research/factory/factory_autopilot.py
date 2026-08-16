@@ -2092,6 +2092,12 @@ _EXEC_SURFACE = """
   quant-py pipeline/pit_dataset.py --build --name <n> --version <v> --from <d> --to <d>
   quant-py pipeline/<모듈>.py            # 인자 없이 = 자체점검
 
+  이 카드 안에서는 `pipeline/experiment_worker.py --serve` 를 실행하지 마라.
+  상주 큐 소비자는 별도 `factory-experiment-worker` 컨테이너가 이미 맡고 있다.
+  카드는 위 `experiment_orchestrator.py --run` 단발 명령의 결과를 판정하고 끝낸다.
+  `--serve` 는 카드와 에이전트 슬롯을 영구 점유하고, 카드 workspace 의 낡은
+  코드를 상주시키므로 실행 완료가 아니다.
+
   "실행면이 없다"고 쓰기 전에 위 경로를 실제로 열어 본다. 진짜로 없으면
   무엇이 없는지 정확히 적는다 - 그 구분이 이 카드의 값이다."""
 
@@ -2099,7 +2105,8 @@ _EXEC_SURFACE = """
 # ── 카드 생성 ────────────────────────────────────────────────────────────────
 
 def _create_card(*, title: str, body: str, assignee: str, key: str,
-                 dry_run: bool, priority: int = 0) -> str | None:
+                 dry_run: bool, priority: int = 0,
+                 max_runtime: str | None = None) -> str | None:
     """칸반 카드 하나. **같은 주기에 두 번 돌아도 카드는 하나다**(idempotency-key).
 
     중복 카드는 같은 실험을 두 번 사는 것과 같다 - 공장의 존재 이유에 반한다.
@@ -2111,6 +2118,8 @@ def _create_card(*, title: str, body: str, assignee: str, key: str,
             "--created-by", MODULE_VERSION,
             "--priority", str(priority),
             "--body", body]
+    if max_runtime:
+        argv.extend(["--max-runtime", max_runtime])
     if dry_run:
         print(f"  [dry-run] {assignee} <- {title}")
         print(f"            key={key} 본문 {len(body)}자")
@@ -3252,7 +3261,12 @@ def cycle(*, dry_run: bool = False) -> int:
                   "- 이 노트는 다음 주기 브리핑에 실려 **네가 읽는다.** "
                   "지금 안 적으면 다음 주기의 네가 같은 자리에서 다시 생각한다."),
             assignee=QUANT_ASSIGNEE,
-            key=f"factory-quant-{stamp}", dry_run=dry_run)
+            key=f"factory-quant-{stamp}", dry_run=dry_run,
+            # Six queued hypotheses may legitimately take hours, but a
+            # mistaken `experiment_worker.py --serve` must not own a Kanban
+            # worker forever. Hermes enforces this per-attempt cap and
+            # re-queues the card after terminating the worker.
+            max_runtime="4h")
     elif not qb:
         print("  퀀트: 실험 대기 가설 0건 - 카드를 만들지 않는다"
               "(할 일이 없는데 부르면 없는 일을 지어낸다)", flush=True)
@@ -4395,13 +4409,16 @@ def _check_research_queue_prefers_consumption():
 
         subprocess.run = _run
         _create_card(title="test", body="body", assignee=RESEARCH_ASSIGNEE,
-                     key="queue-priority-selfcheck", dry_run=False, priority=1)
+                     key="queue-priority-selfcheck", dry_run=False, priority=1,
+                     max_runtime="4h")
     finally:
         globals()["_board_rows"] = saved_rows
         subprocess.run = saved_run
 
     assert "--priority" in captured
     assert captured[captured.index("--priority") + 1] == "1"
+    assert "--max-runtime" in captured
+    assert captured[captured.index("--max-runtime") + 1] == "4h"
     assert _should_schedule_planner("brief", 1, 1) is True
     assert _should_schedule_planner("brief", 3, 1) is True, \
         "low-watermark queue was mistaken for an empty queue"
