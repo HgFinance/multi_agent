@@ -261,6 +261,12 @@ def _ast_scout_contract() -> str:
         "    NOVELTY_RATIONALE. Exact reuse and window/constant-only tuning are rejected.",
         "  - CROSS_DOMAIN_TRANSFER: include MARKET_STRUCTURE_TRANSFER in",
         "    DERIVATION_TRANSFORMS and explain the mapping in NOVELTY_RATIONALE.",
+        "    Use CROSS_DOMAIN_TRANSFER only for a genuinely non-finance source. A market-",
+        "    microstructure paper stays DIRECT_REPLICATION or MECHANISM_MUTATION even when",
+        "    its venue or clock differs. Prefer empirical event-time evidence that links",
+        "    an observable directly to subsequent midprice/markout over a purely theoretical",
+        "    model; retain theory as a control or blocked lead when it cannot support the",
+        "    claimed executable return target.",
         "  Allowed transforms: STATE_CONDITION, CLOCK_CHANGE, BOOK_DEPTH_CHANGE,",
         "  MECHANISM_INTERACTION, RESIDUALIZE_PUBLIC_SIGNAL, FAILURE_MODE_INVERSION,",
         "  MARKET_STRUCTURE_TRANSFER, TARGET_CHANGE.",
@@ -2731,10 +2737,9 @@ def cycle(*, dry_run: bool = False) -> int:
                 # Refill at most once per UTC hour while the executable queue is
                 # dry.  The former six-hour bucket let several planner cycles
                 # consume the same exhausted leads before scouting could run.
-                # v2 separates the first lane-aware refill from legacy cards
-                # already completed in the same hour before this contract was
-                # deployed. Future cycles remain bounded to one card per hour.
-                key=f"factory-scout-v2-{_now:%Y%m%d}T{_now.hour:02d}",
+                # v3 separates the empirical event-time refill from older
+                # cards completed in the same hour before this contract.
+                key=f"factory-scout-v3-{_now:%Y%m%d}T{_now.hour:02d}",
                 dry_run=dry_run)
         elif active_scout:
             print(f"  scout refill skipped - already active: {active_scout}", flush=True)
@@ -3756,6 +3761,7 @@ def _check_unused_leads_come_first():
     assert "Daily leads" in contract and "INTRADAY_EVENT buffer" in contract
     assert 'never "name"' in contract and '"op":"where"' in contract
     assert "[BARE_WORDS] is not JSON" in contract
+    assert "genuinely non-finance" in contract and "empirical event-time" in contract
     assert "experiment_proposals" in _SQL_LEADS, "사용 여부를 안 본다"
 
     # 표시가 갈려야 한다 - 안 갈리면 봐도 모른다
