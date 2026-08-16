@@ -20,6 +20,7 @@ import formula_discovery
 import intraday_alpha_ast as intraday_grammar
 import intraday_candidate as candidate_module
 import intraday_experience
+import intraday_ablation
 import lead_intake
 from intraday_alpha_ast import (IntradayExprError, evaluate, fields_of, parse,
                                 shape_fingerprint, unit_of)
@@ -109,6 +110,19 @@ def test_intraday_ast_enforces_units_and_explicit_clocks() -> None:
             {"op": "field", "field": "spread_bps"},
             {"op": "field", "field": "book_depth_l1"},
         ]})
+
+
+def test_structural_ablations_are_deterministic_simpler_bps_controls() -> None:
+    expr = _intraday_proposal()["suggested_params"]["intraday_signal_expr"]
+    controls = intraday_ablation.generate(expr)
+    assert controls == intraday_ablation.generate(expr)
+    assert controls[0]["ablation_operator"] == "REMOVE_STATE_GATE_KEEP_THEN"
+    assert any(row["ablation_operator"] == "REMOVE_RATIO_MODULATOR_LEFT"
+               for row in controls)
+    assert all(intraday_grammar.unit_of(row["intraday_signal_expr"]) == "BPS"
+               for row in controls)
+    assert all(intraday_grammar.count_nodes(row["intraday_signal_expr"])
+               < intraday_grammar.count_nodes(expr) for row in controls)
 
 
 def test_temporal_ast_never_reads_future_samples() -> None:
@@ -719,6 +733,76 @@ def test_population_sorts_and_audits_once_but_keeps_candidate_statistics(
     assert screened["screening_gate_decision"] == "NO_EVIDENCE"
     assert annotated["population_evaluation"]["promotion_authority"] == \
         "PRIMARY_ONLY"
+
+
+def test_structural_control_reports_primary_minus_ablation_influence() -> None:
+    primary_expr = {"op": "rolling_mean", "seconds": 10,
+                    "arg": {"op": "field",
+                            "field": "microprice_offset_bps"}}
+    control = intraday_ablation.generate(primary_expr)[0]
+    reports = {
+        "PRIMARY": {
+            "decision": "HOLD",
+            "summary": {"mean_net_bps_per_opportunity": 1.2,
+                        "mean_mid_markout_bps": 3.0,
+                        "mean_implementation_drag_bps": 1.8,
+                        "instrument_coverage": .8, "trials": 4}},
+        control["ast_fingerprint"]: {
+            "decision": "HOLD",
+            "summary": {"mean_net_bps_per_opportunity": .5,
+                        "mean_mid_markout_bps": 2.0,
+                        "mean_implementation_drag_bps": 1.5,
+                        "instrument_coverage": .7}},
+    }
+    annotated = _annotate_population({
+        "intraday_signal_expr": primary_expr,
+        "screening_population": [{
+            **control, "candidate_role": "STRUCTURAL_ABLATION",
+            "source_lead_ids": ["lead-primary"], "title": "control",
+        }],
+    }, reports)
+    influence = annotated["screening_population"][0]["empirical_influence"]
+    assert influence["net_increment_bps"] == pytest.approx(.7)
+    assert influence["gross_increment_bps"] == pytest.approx(1.0)
+    assert influence["implementation_drag_increment_bps"] == pytest.approx(.3)
+    assert influence["interpretation"] == "POSITIVE_POINT_ESTIMATE"
+    assert "not causal" in influence["evidence_warning"]
+
+
+def test_empirical_term_influence_reaches_next_generation_memory() -> None:
+    primary = {"op": "rolling_mean", "seconds": 10,
+               "arg": {"op": "field", "field": "microprice_offset_bps"}}
+    control = intraday_ablation.generate(primary)[0]
+    memory = intraday_experience.build([{
+        "intraday_signal_expr": control["intraday_signal_expr"],
+        "semantic_plan": {
+            "event": "MICROPRICE_DISLOCATION", "context": ["ALL"],
+            "qualities": ["PERSISTENCE"], "direction": "FOLLOW",
+            "output": "TAKER_NET_PNL", "execution": "TAKER",
+            "horizon_seconds": 5,
+        },
+        "decision": "SCREENING_ONLY", "evidence_tier": "SCREENING_ONLY",
+        "candidate_role": "STRUCTURAL_ABLATION",
+        "ablation_operator": control["ablation_operator"],
+        "ablation_path": control["ablation_path"],
+        "ablation_of_ast_fingerprint": control[
+            "ablation_of_ast_fingerprint"],
+        "oos_summary": {"mean_net_bps_per_opportunity": .5},
+        "empirical_influence": {
+            "ablation_operator": control["ablation_operator"],
+            "ablation_path": control["ablation_path"],
+            "ablation_of_ast_fingerprint": control[
+                "ablation_of_ast_fingerprint"],
+            "net_increment_bps": .7, "gross_increment_bps": 1.0,
+            "implementation_drag_increment_bps": .3,
+            "interpretation": "POSITIVE_POINT_ESTIMATE",
+        },
+    }])
+    assert memory.empirical_term_influence[0]["net_increment_bps"] == \
+        pytest.approx(.7)
+    rendered = intraday_experience.render(memory)
+    assert "empirical term influence" in rendered
+    assert "primary-minus-control net=0.7bps" in rendered
 
 
 def test_cost_hurdle_abstains_until_predicted_markout_clears_execution() -> None:

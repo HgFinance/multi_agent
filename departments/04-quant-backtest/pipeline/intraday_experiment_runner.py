@@ -24,7 +24,7 @@ from intraday_microstructure import (IntradayLaneSpec, build_samples,
                                       source_quality_batch)
 
 
-RUNNER_VERSION = "intraday-experiment-runner-v5"
+RUNNER_VERSION = "intraday-experiment-runner-v6"
 COST_MODEL_VERSION = "krx-intraday-execution-v1"
 # 2026 listed equities incur 20bp on the sale (KOSPI 5bp STT + 15bp rural,
 # KOSDAQ 20bp STT).  A representative online commission is 1.5bp each side.
@@ -527,6 +527,7 @@ def _pareto_ranks(rows: list[dict]) -> dict[str, int]:
 def _annotate_population(config: dict, reports: dict[str, dict]) -> dict:
     """Label screen evidence without granting it promotion authority."""
     primary = reports["PRIMARY"]
+    primary_summary = primary.get("summary") or {}
     primary_expr = config["intraday_signal_expr"]
     metadata = {row["ast_fingerprint"]: row
                 for row in config["screening_population"]}
@@ -549,6 +550,39 @@ def _annotate_population(config: dict, reports: dict[str, dict]) -> dict:
         key, report = row["key"], row["report"]
         source = metadata[key]
         gate_decision = report.get("decision")
+        empirical_influence = None
+        if source.get("candidate_role") == "STRUCTURAL_ABLATION":
+            ablation_summary = report.get("summary") or {}
+
+            def difference(metric: str):
+                left, right = primary_summary.get(metric), ablation_summary.get(metric)
+                if (not isinstance(left, (int, float)) or isinstance(left, bool)
+                        or not isinstance(right, (int, float))
+                        or isinstance(right, bool)):
+                    return None
+                return float(left) - float(right)
+
+            net_increment = difference("mean_net_bps_per_opportunity")
+            empirical_influence = {
+                "comparison": "PRIMARY_MINUS_STRUCTURAL_ABLATION",
+                "ablation_operator": source.get("ablation_operator"),
+                "ablation_path": source.get("ablation_path"),
+                "ablation_of_ast_fingerprint": source.get(
+                    "ablation_of_ast_fingerprint"),
+                "net_increment_bps": net_increment,
+                "gross_increment_bps": difference("mean_mid_markout_bps"),
+                "implementation_drag_increment_bps": difference(
+                    "mean_implementation_drag_bps"),
+                "coverage_increment": difference("instrument_coverage"),
+                "interpretation": (
+                    "POSITIVE_POINT_ESTIMATE" if net_increment is not None
+                    and net_increment > 0 else
+                    "NON_POSITIVE_POINT_ESTIMATE" if net_increment is not None
+                    else "NOT_MEASURED"),
+                "evidence_warning": (
+                    "same-replay screening contrast; descriptive, not causal or "
+                    "promotion evidence"),
+            }
         report.update({
             "screening_only": True,
             "evidence_tier": "SCREENING_ONLY",
@@ -561,6 +595,12 @@ def _annotate_population(config: dict, reports: dict[str, dict]) -> dict:
             "parent_ast_fingerprint": source.get("parent_ast_fingerprint"),
             "parent_of_ast_fingerprint": source.get(
                 "parent_of_ast_fingerprint"),
+            "ablation_operator": source.get("ablation_operator"),
+            "ablation_path": source.get("ablation_path"),
+            "ablation_of_ast_fingerprint": source.get(
+                "ablation_of_ast_fingerprint"),
+            "ablation_version": source.get("ablation_version"),
+            "empirical_influence": empirical_influence,
             "novelty_vs_primary": row["novelty"],
             "complexity_nodes": row["complexity"],
             "pareto_rank": ranks[key],
@@ -575,7 +615,9 @@ def _annotate_population(config: dict, reports: dict[str, dict]) -> dict:
         "shared_raw_replay": True,
         "candidate_count": 1 + len(screening_reports),
         "selection_adjusted_trials": primary["summary"].get("trials"),
-        "selection_rule": "cost-net/coverage/novelty/complexity Pareto screen",
+        "selection_rule": (
+            "cost-net/coverage/novelty/complexity Pareto screen plus "
+            "same-replay structural-ablation influence"),
         "promotion_authority": "PRIMARY_ONLY",
     }
     primary["summary"].update({
@@ -660,6 +702,12 @@ def _load_completed_report(meta_conn, experiment_id: str) -> dict:
             "failed_criteria": list(meta.get("failed_criteria") or []),
             "candidate_role": candidate.get("candidate_role"),
             "source_lead_ids": list(candidate.get("source_lead_ids") or []),
+            "ablation_operator": candidate.get("ablation_operator"),
+            "ablation_path": candidate.get("ablation_path"),
+            "ablation_of_ast_fingerprint": candidate.get(
+                "ablation_of_ast_fingerprint"),
+            "ablation_version": candidate.get("ablation_version"),
+            "empirical_influence": meta.get("empirical_influence"),
             "pareto_rank": meta.get("pareto_rank"),
             "pareto_front": meta.get("pareto_front"),
             "novelty_vs_primary": meta.get("novelty_vs_primary"),
@@ -735,6 +783,9 @@ def _store_report(meta_conn, experiment_id: str, report: dict) -> None:
                          "complexity_nodes": candidate.get("complexity_nodes"),
                          "source_lead_ids": candidate.get(
                              "source_lead_ids") or [],
+                         "candidate_role": candidate.get("candidate_role"),
+                         "empirical_influence": candidate.get(
+                             "empirical_influence"),
                      }))
     rows.append(("intraday_pre_pbo_gate_pass",
                  1 if report.get("decision") == "SUBMIT_TO_QA" else 0,

@@ -1109,6 +1109,12 @@ def _ast_experience_block(conn) -> str:
                         "evidence_tier": "SCREENING_ONLY",
                         "source_lead_ids": list(
                             candidate.get("source_lead_ids") or []),
+                        "candidate_role": candidate.get("candidate_role"),
+                        "ablation_operator": candidate.get(
+                            "ablation_operator"),
+                        "ablation_path": candidate.get("ablation_path"),
+                        "ablation_of_ast_fingerprint": candidate.get(
+                            "ablation_of_ast_fingerprint"),
                     })
                 metric_fp = str(dimensions.get("screening_candidate") or "")
                 target = screened.get((experiment_id, metric_fp))
@@ -1122,6 +1128,8 @@ def _ast_experience_block(conn) -> str:
                     target["screening_gate_decision"] = dimensions.get(
                         "screening_gate_decision")
                     target["pareto_rank"] = dimensions.get("pareto_rank")
+                    target["empirical_influence"] = dimensions.get(
+                        "empirical_influence")
             intraday.extend(screened.values())
             cur.execute("""
                 select lead_ids, title, verdict, competing_codes,

@@ -45,8 +45,8 @@ from contracts.factory_contracts import (  # noqa: E402
 from lead_intake import clip_excerpt, parse_blocks  # noqa: E402
 from publish_gate import evaluate  # noqa: E402
 
-MODULE_VERSION = "research-proposal-intake-v2"
-INTRADAY_SCREENING_COHORT_VERSION = "intraday-screening-cohort-v1"
+MODULE_VERSION = "research-proposal-intake-v3"
+INTRADAY_SCREENING_COHORT_VERSION = "intraday-screening-cohort-v2"
 MAX_INTRADAY_COHORT = 8
 
 PLANNER_KEYS = ("TITLE", "LEAD_IDS", "ECONOMIC_RATIONALE", "COUNTERPARTY",
@@ -316,6 +316,9 @@ def _attach_intraday_screening_cohort(
 
     import intraday_ast_contract as intraday_grammar  # noqa: PLC0415
     from intraday_ast_contract import fingerprint, parse, unit_of  # noqa: PLC0415
+    from contracts.intraday_ablation import (  # noqa: PLC0415
+        generate as generate_ablations,
+    )
     from formula_discovery import assess as assess_formula  # noqa: PLC0415
 
     params = dict(proposal.suggested_params or {})
@@ -386,11 +389,12 @@ def _attach_intraday_screening_cohort(
             "formula-discovery-v3 lead")
 
     primary_lead_ids = tuple(candidates[primary_fp]["source_lead_ids"])
-    sidecars = [row for fp, row in candidates.items() if fp != primary_fp]
+    linked_sidecars = [row for fp, row in candidates.items() if fp != primary_fp]
 
     # An explicit BPS parent is a valuable within-replay ablation.  It receives
     # the child's semantic/execution contract and remains SCREENING_ONLY.
     known_fps = set(candidates)
+    lineage_parents = []
     for child in list(candidates.values()):
         parent_raw = child.pop("_parent_signal_expr", None)
         if parent_raw in (None, ""):
@@ -403,7 +407,7 @@ def _attach_intraday_screening_cohort(
         except (TypeError, ValueError):
             continue
         known_fps.add(parent_fp)
-        sidecars.append({
+        lineage_parents.append({
             "candidate_role": "LINEAGE_PARENT",
             "source_lead_ids": list(child["source_lead_ids"]),
             "title": f"parent of {child['title']}",
@@ -416,6 +420,33 @@ def _attach_intraday_screening_cohort(
             "screening_cohort_version": INTRADAY_SCREENING_COHORT_VERSION,
         })
 
+    controls = []
+    primary_source = candidates[primary_fp]
+    for control in generate_ablations(primary)[:2]:
+        if control["ast_fingerprint"] in known_fps:
+            continue
+        known_fps.add(control["ast_fingerprint"])
+        controls.append({
+            **control,
+            "candidate_role": "STRUCTURAL_ABLATION",
+            "source_lead_ids": list(primary_lead_ids),
+            "title": f"structural control of {primary_source['title']}",
+            "semantic_plan": dict(primary_source["semantic_plan"]),
+            "entry_policy": primary_source["entry_policy"],
+            "evolution_role": "EMPIRICAL_TERM_INFLUENCE",
+            "screening_cohort_version": INTRADAY_SCREENING_COHORT_VERSION,
+        })
+
+    # Preserve broad exploration while reserving at most two of the seven
+    # sidecar slots for same-replay mechanism controls.  Any unused control
+    # capacity is returned to independent candidates and explicit parents.
+    sidecars = linked_sidecars[:4] + controls
+    for row in linked_sidecars[4:] + lineage_parents:
+        if len(sidecars) >= MAX_INTRADAY_COHORT - 1:
+            break
+        if row["ast_fingerprint"] not in {
+                item["ast_fingerprint"] for item in sidecars}:
+            sidecars.append(row)
     for row in sidecars:
         row.pop("_parent_signal_expr", None)
     params["screening_population"] = sidecars[:MAX_INTRADAY_COHORT - 1]
@@ -1199,7 +1230,9 @@ def _check_intraday_screening_cohort_is_sourced_and_non_promoting():
         "output": "TAKER_NET_PNL", "execution": "TAKER",
         "horizon_seconds": 5,
     }
-    primary_expr = {"op": "field", "field": "microprice_offset_bps"}
+    raw_microprice = {"op": "field", "field": "microprice_offset_bps"}
+    primary_expr = {"op": "rolling_mean", "seconds": 10,
+                    "arg": raw_microprice}
     side_expr = {"op": "rolling_mean", "seconds": 30,
                  "arg": primary_expr}
 
@@ -1254,8 +1287,11 @@ def _check_intraday_screening_cohort_is_sourced_and_non_promoting():
     attached = _attach_intraday_screening_cohort(proposal, leads)
     assert attached.lead_ids == (primary_lead.lead_id,)
     population = attached.suggested_params["screening_population"]
-    assert len(population) == 1
+    assert len(population) == 2
     assert population[0]["source_lead_ids"] == [side_lead.lead_id]
+    assert population[1]["candidate_role"] == "STRUCTURAL_ABLATION"
+    assert population[1]["ablation_operator"] == "REMOVE_TEMPORAL_TRANSFORM"
+    assert population[1]["source_lead_ids"] == [primary_lead.lead_id]
     assert check_intraday_screening_population(attached, leads) == []
 
     corrupt = dict(population[0])
@@ -1265,6 +1301,14 @@ def _check_intraday_screening_cohort_is_sourced_and_non_promoting():
                              "screening_population": [corrupt]}})
     assert any("fingerprint" in error for error in
                check_intraday_screening_population(tampered, leads))
+
+    false_control = dict(population[1])
+    false_control["ablation_operator"] = "FABRICATED_CONTROL"
+    tampered_control = attached.model_copy(update={
+        "suggested_params": {**attached.suggested_params,
+                             "screening_population": [false_control]}})
+    assert any("does not match" in error for error in
+               check_intraday_screening_population(tampered_control, leads))
 
 
 if __name__ == "__main__":
