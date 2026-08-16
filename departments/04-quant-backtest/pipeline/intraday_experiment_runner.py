@@ -22,6 +22,7 @@ from intraday_candidate import (CandidateAccumulator,
 from intraday_microstructure import (IntradayLaneSpec, build_samples,
                                       load_instrument_events_batch, manifest,
                                       source_quality_batch)
+from intraday_ablation import INTRADAY_SCREENING_COHORT_VERSION
 
 
 RUNNER_VERSION = "intraday-experiment-runner-v6"
@@ -154,6 +155,13 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
     screening = edge.get("screening_population") or []
     if not isinstance(screening, list) or len(screening) > 7:
         raise ValueError("screening_population must contain at most seven candidates")
+    cohort_version = str(edge.get("screening_cohort_version") or "")
+    if screening and cohort_version != INTRADAY_SCREENING_COHORT_VERSION:
+        raise ValueError(
+            "populated intraday screening cohort must use "
+            f"{INTRADAY_SCREENING_COHORT_VERSION}; got "
+            f"{cohort_version or '(missing)'}. Reassemble it under the current "
+            "formula and structural-ablation contract before replay")
     parsed_screening = []
     known = {fingerprint(expression)}
     all_clocks = set(clocks_of(expression))
@@ -235,7 +243,7 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
         "instrument_shard_size": _bounded_int(
             edge, "instrument_shard_size", 8, 2, 64),
         "screening_population": parsed_screening,
-        "screening_cohort_version": edge.get("screening_cohort_version"),
+        "screening_cohort_version": cohort_version or None,
         "screening_trial_exposure": len(parsed_screening),
         "population_execution_model": population_execution,
     }

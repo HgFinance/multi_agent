@@ -42,11 +42,13 @@ from contracts.factory_contracts import (  # noqa: E402
     CompetingExplanation, DataRequirement, ExperimentProposalV1,
     MethodologyLeadV1, PriorCheck,
 )
+from contracts.intraday_ablation import (  # noqa: E402
+    INTRADAY_SCREENING_COHORT_VERSION,
+)
 from lead_intake import clip_excerpt, parse_blocks  # noqa: E402
 from publish_gate import evaluate  # noqa: E402
 
 MODULE_VERSION = "research-proposal-intake-v3"
-INTRADAY_SCREENING_COHORT_VERSION = "intraday-screening-cohort-v2"
 MAX_INTRADAY_COHORT = 8
 
 PLANNER_KEYS = ("TITLE", "LEAD_IDS", "ECONOMIC_RATIONALE", "COUNTERPARTY",

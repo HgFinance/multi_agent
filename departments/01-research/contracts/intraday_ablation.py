@@ -16,6 +16,10 @@ except ImportError:  # direct self-check with this directory on sys.path
 
 
 ABLATION_VERSION = "intraday-structural-ablation-v1"
+# The cohort version is a cross-department execution contract, not merely a
+# proposal-intake implementation detail.  Quant imports the same value and
+# refuses stale populated cohorts before they consume a full-universe replay.
+INTRADAY_SCREENING_COHORT_VERSION = "intraday-screening-cohort-v2"
 
 
 def _is_zero(node: dict) -> bool:

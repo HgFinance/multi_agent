@@ -272,7 +272,7 @@ def test_screening_population_unifies_clocks_horizons_and_execution_labels() -> 
         "semantic_plan": passive_plan,
         "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
     }]
-    edge["screening_cohort_version"] = "intraday-screening-cohort-v1"
+    edge["screening_cohort_version"] = "intraday-screening-cohort-v2"
 
     config, spec = config_from_edge(edge)
     assert spec.horizons_seconds == (5, 30)
@@ -280,6 +280,20 @@ def test_screening_population_unifies_clocks_horizons_and_execution_labels() -> 
     assert config["population_execution_model"] == "PASSIVE_FIFO_LOWER_BOUND"
     assert config["screening_trial_exposure"] == 1
     assert config["screening_population"][0]["screening_only"] is True
+
+
+def test_stale_populated_screening_cohort_is_rejected_before_replay() -> None:
+    edge, _ = expected_edge_for(_intraday_proposal())
+    edge["screening_population"] = [{
+        "title": "stale directionless sidecar",
+        "semantic_plan": edge["semantic_plan"],
+        "intraday_signal_expr": {
+            "op": "field", "field": "realized_volatility_bps"},
+        "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
+    }]
+    edge["screening_cohort_version"] = "intraday-screening-cohort-v1"
+    with pytest.raises(ValueError, match="intraday-screening-cohort-v2"):
+        config_from_edge(edge)
 
 
 def test_intraday_family_is_semantic_not_numeric_tuning() -> None:

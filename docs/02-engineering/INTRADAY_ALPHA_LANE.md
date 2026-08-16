@@ -161,6 +161,12 @@ purged walk-forward joint model이 함께 포함된다.
   인정한다. 따라서 경쟁 worker의 stale reaper가 정상 실행을 `CANCELLED`로 닫지 못한다.
   Hermes 퀀트 카드는 상주 `experiment_worker.py --serve`를 띄우지 않고 단발
   orchestrator만 실행하며, 잘못된 daemon 호출은 4시간 카드 runtime cap으로 회수한다.
+- 실행 시점에도 populated screening cohort가 `intraday-screening-cohort-v2`인지 다시
+  확인한다. 이미 PROPOSED에 들어간 v1 가설은 새 worker가 자동으로 최신 계약을 얻지
+  않으므로, 그대로 돌리면 방향성 없는 옛 sidecar가 몇 시간짜리 replay를 선점한다.
+  버전이 낡았거나 없으면 원시 데이터를 읽기 전에 fail closed하고 현재 v4 수식·구조적
+  ablation 계약으로 다시 조립하게 한다. sidecar가 전혀 없는 primary-only 진단은 이
+  전환 경계와 무관하므로 허용한다.
 - 겹치는 5초 표본을 독립 관측치로 세지 않는다. KRX 세션별 PnL로 축약한 뒤 session
   bootstrap, DSR, walk-forward fold, family PBO를 적용한다. PBO는 현재 실험을 공통
   원장에 기록한 뒤 계산하며, 4개 이상의 비교 가능한 family variant가 없으면
