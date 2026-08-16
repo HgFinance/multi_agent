@@ -23,7 +23,7 @@ from intraday_alpha_ast import (IntradayExprError, evaluate, fields_of, parse,
                                 shape_fingerprint, unit_of)
 from intraday_candidate import (_CapacityReservoir, CandidateAccumulator,
                                 evaluate_candidate)
-from factory_bridge import expected_edge_for, gate0
+from factory_bridge import _normalized_formula, expected_edge_for, gate0
 from factory_bridge import lessons_from
 from intraday_experiment_runner import (_input_hash, config_from_edge,
                                         record_data_feasibility, select_slice)
@@ -235,14 +235,36 @@ def test_intraday_family_is_semantic_not_numeric_tuning() -> None:
     later["semantic_plan"] = {**later["semantic_plan"], "horizon_seconds": 30}
     later["suggested_params"] = {**later["suggested_params"],
                                  "horizon_seconds": 30}
+    # Constants and clocks are tuning dimensions: changing them preserves the
+    # equation structure and therefore the multiple-testing family.
+    later_expr = later["suggested_params"]["intraday_signal_expr"]
+    later_expr["condition"]["args"][1]["const"] = 7
+    later_expr["then"]["args"][1]["seconds"] = 90
     second, _ = expected_edge_for(later)
     a = hypothesis_view(edge_type=first["type"], universe_key=first["universe_key"],
                         research_lane=first["research_lane"],
-                        semantic_fingerprint=first["semantic_fingerprint"])
+                        semantic_fingerprint=first["semantic_fingerprint"],
+                        intraday_signal_expr=first["intraday_signal_expr"])
     b = hypothesis_view(edge_type=second["type"], universe_key=second["universe_key"],
                         research_lane=second["research_lane"],
-                        semantic_fingerprint=second["semantic_fingerprint"])
+                        semantic_fingerprint=second["semantic_fingerprint"],
+                        intraday_signal_expr=second["intraday_signal_expr"])
     assert family_id(a) == family_id(b)
+    assert _normalized_formula(second["intraday_signal_expr"]) is not None
+
+    different = _intraday_proposal()
+    different["suggested_params"]["intraday_signal_expr"] = {
+        "op": "mul", "args": [
+            {"op": "field", "field": "normalized_quote_ofi"},
+            {"op": "field", "field": "trade_flow_imbalance"},
+        ]}
+    third, _ = expected_edge_for(different)
+    c = hypothesis_view(
+        edge_type=third["type"], universe_key=third["universe_key"],
+        research_lane=third["research_lane"],
+        semantic_fingerprint=third["semantic_fingerprint"],
+        intraday_signal_expr=third["intraday_signal_expr"])
+    assert family_id(a) != family_id(c)
 
 
 def test_llm_formula_thesis_is_typed_and_visible_in_ast() -> None:
