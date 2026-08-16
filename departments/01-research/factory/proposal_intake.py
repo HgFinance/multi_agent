@@ -238,6 +238,22 @@ def _prior_check(past_outcomes, lessons_text: str) -> PriorCheck:
                       lessons_addressed=_lessons_addressed(lessons_text))
 
 
+def _canonical_universe_key(raw: str, research_lane: str) -> str:
+    """Normalize the one known intraday cohort/version identity mix-up.
+
+    ``intraday-screening-cohort-v3`` names the deterministic screening contract,
+    not an execution universe.  Preserve every other value so the downstream
+    controlled-vocabulary gate can continue to reject unknown universes rather
+    than silently changing the experiment.
+    """
+    universe = raw.strip().lower()
+    lane = research_lane.strip().upper()
+    if (lane == "INTRADAY_EVENT"
+            and universe == INTRADAY_SCREENING_COHORT_VERSION):
+        return "krx_all"
+    return universe
+
+
 def build(planner: dict, skeptic: dict, *, case_id: str,
           planner_run: str, skeptic_run: str,
           past_outcomes: list | None = None,
@@ -260,7 +276,9 @@ def build(planner: dict, skeptic: dict, *, case_id: str,
 
     lead_ids = _split(planner["LEAD_IDS"])
     edge = planner["EDGE_TYPE"].strip().lower()
-    universe = planner["UNIVERSE_KEY"].strip()
+    research_lane = (planner.get("RESEARCH_LANE") or
+                     "DAILY_CROSS_SECTIONAL").strip().upper()
+    universe = _canonical_universe_key(planner["UNIVERSE_KEY"], research_lane)
 
     tables = _split(planner.get("DATA_TABLES", "")) or ("market_bars",)
     try:
@@ -286,8 +304,7 @@ def build(planner: dict, skeptic: dict, *, case_id: str,
         data_requirements=DataRequirement(tables=list(tables),
                                           min_history_days=min_days),
         suggested_params=_maybe_json(planner.get("SUGGESTED_PARAMS", "")),
-        research_lane=(planner.get("RESEARCH_LANE") or
-                       "DAILY_CROSS_SECTIONAL").strip().upper(),
+        research_lane=research_lane,
         semantic_plan=_maybe_json(planner.get("SEMANTIC_PLAN", "")),
         trial_budget=_trial_budget(planner.get("TRIAL_BUDGET", "")),
         # ▶ **이력은 원장에서, 대응은 에이전트에게서** (2026-08-12)
@@ -913,6 +930,15 @@ def _selfcheck() -> int:
     check("기획안 id 결정론",
           proposal_id_for(["a", "b"], "MOMENTUM", "krx_all")
           == proposal_id_for(["b", "a"], "momentum", "krx_all"))
+    check("intraday cohort version is not a universe",
+          _canonical_universe_key(INTRADAY_SCREENING_COHORT_VERSION,
+                                  "INTRADAY_EVENT") == "krx_all"
+          and _canonical_universe_key("unknown-intraday-universe",
+                                      "INTRADAY_EVENT")
+          == "unknown-intraday-universe"
+          and _canonical_universe_key(INTRADAY_SCREENING_COHORT_VERSION,
+                                      "DAILY_CROSS_SECTIONAL")
+          == INTRADAY_SCREENING_COHORT_VERSION)
 
     # ▶ **접수가 계열 이력을 읽는다** (2026-08-13 실측 사고)
     #   `harvest` 가 `past_outcomes` 를 안 넘겨서 모든 기획안이 "이 계열은

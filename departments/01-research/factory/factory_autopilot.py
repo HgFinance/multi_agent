@@ -133,6 +133,9 @@ COMPETING_EXPLANATION 은 **결과를 보기 전에** 적는 것이다. 이걸 �
 # this next to the planner contract prevents the agent from putting second-based
 # windows into the daily ``signal_expr`` field.
 INTRADAY_PLANNER_NOTE = """
+UNIVERSE_KEY must be exactly krx_all for every INTRADAY_EVENT proposal.
+intraday-screening-cohort-v3 is a screening_cohort_version attached by intake;
+it is not a universe and must never be written in UNIVERSE_KEY.
 [INTRADAY_EVENT 추가 계약]
 DATA_TABLES: market_quotes, market_ticks
 MIN_HISTORY_DAYS: 10 이상 (짧아도 실행은 한다. 단, 60 KRX 세션 미만은
@@ -4241,6 +4244,8 @@ def _check_unused_leads_come_first():
     assert "[BARE_WORDS] is not JSON" in contract
     assert "genuinely non-finance" in contract and "empirical event-time" in contract
     assert "instrument_count" in INTRADAY_PLANNER_NOTE
+    assert "UNIVERSE_KEY must be exactly krx_all" in INTRADAY_PLANNER_NOTE
+    assert "not a universe" in INTRADAY_PLANNER_NOTE
     assert "모든 shard" in INTRADAY_PLANNER_NOTE
     assert "experiment_proposals" in _SQL_LEADS, "사용 여부를 안 본다"
     assert "proposal_review_outcomes" in _SQL_LEADS and "STOP" in _SQL_LEADS, \
