@@ -245,7 +245,7 @@ select l.lead_id, l.scout_lens, l.claimed_edge, l.stated_mechanism,
    and (coalesce(l.ast_contract->>'research_lane',
                  'DAILY_CROSS_SECTIONAL') <> 'INTRADAY_EVENT'
         or l.ast_contract->>'formula_discovery_version' =
-           'formula-discovery-v2')
+           'formula-discovery-v3')
 order by used asc,
          case
            when coalesce(l.ast_contract->>'research_lane',
@@ -333,6 +333,26 @@ def _ast_scout_contract() -> str:
         "  form (for example where for STATE_CONDITIONAL and two clocks for CROSS_SCALE).",
         "  Do not fit constants on OOS data. Prefer compact skeletons with explicit ablations;",
         "  the evaluator, not the prose or LLM confidence, decides empirical survival.",
+        "  BPS EQUATION SKELETONS (adapt the mechanism; do not copy mechanically):",
+        '  BPS_DIRECT={"op":"field","field":"microprice_offset_bps"}',
+        '  BPS_SCALED={"op":"mul","args":[{"op":"div","args":['
+        '{"op":"field","field":"quote_event_ofi"},{"op":"field","field":'
+        '"book_depth_l1"}]},{"op":"field","field":"realized_volatility_bps"}]}',
+        '  BPS_STATE={"op":"where","condition":{"op":"lt","args":['
+        '{"op":"field","field":"spread_bps"},{"const":5,"unit":"BPS"}]},'
+        '"then":{"op":"mul","args":[{"op":"rolling_mean","arg":{"op":'
+        '"field","field":"trade_flow_imbalance"},"seconds":30},{"op":"field",'
+        '"field":"realized_volatility_bps"}]},"else":{"const":0,"unit":"BPS"}}',
+        '  BPS_CROSS_SCALE={"op":"mul","args":[{"op":"sub","args":['
+        '{"op":"rolling_mean","arg":{"op":"field","field":'
+        '"normalized_quote_ofi"},"seconds":5},{"op":"rolling_mean","arg":'
+        '{"op":"field","field":"normalized_quote_ofi"},"seconds":300}]},'
+        '{"op":"field","field":"realized_volatility_bps"}]}',
+        "  A BPS scale must have an economic role and its no-scale/base-only ablation; do",
+        "  not attach spread or volatility merely to pass units. Every FORMULA_THESIS term",
+        "  must actually influence the AST. sign(non-negative count/depth/spread) usually",
+        "  collapses to +1 and is rejected as a decorative term. Use rolling_zscore/delta",
+        "  for signed change, or an explicit where(gt(...)) for a true state gate.",
         "  POPULATION COMPLETION RULE: source count is not candidate count. One directly",
         "  relevant source may support several auditable revision leads with different AST",
         "  shapes. After screening sources, draft all 12 population members and submit",
@@ -1352,7 +1372,7 @@ def _executable_unused_count(conn) -> int:
                and (coalesce(l.ast_contract->>'research_lane',
                              'DAILY_CROSS_SECTIONAL') <> 'INTRADAY_EVENT'
                     or l.ast_contract->>'formula_discovery_version' =
-                       'formula-discovery-v2')
+                       'formula-discovery-v3')
                and not exists (
                      select 1 from research.experiment_proposals p
                       where l.lead_id = any(p.lead_ids))
@@ -1420,7 +1440,7 @@ def _lead_health(conn) -> str:
                            and ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
                            and ast_contract->>'research_lane' = 'INTRADAY_EVENT'
                            and ast_contract->>'formula_discovery_version' =
-                               'formula-discovery-v2'
+                               'formula-discovery-v3'
                            and coalesce((ast_contract->>'alpha_candidate_eligible')::boolean,
                                         false)
                            and not exists (
@@ -1438,7 +1458,7 @@ def _lead_health(conn) -> str:
                            and ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
                            and ast_contract->>'research_lane' = 'INTRADAY_EVENT'
                            and ast_contract->>'formula_discovery_version' =
-                               'formula-discovery-v2'
+                               'formula-discovery-v3'
                            and coalesce(
                                  (ast_contract->>'alpha_candidate_eligible')::boolean,
                                  false)
@@ -3092,7 +3112,7 @@ def cycle(*, dry_run: bool = False) -> int:
                   "최대 3건**을 블록 3개로 **한 번의** factory_submit_proposal "
                   "에 담아 제출하라 - 접수는 다중 블록을 읽는다. 같은 계열의 "
                   "파라미터 변형 여러 개는 금지다(시도 예산 낭비).\n"
-                  "- 미사용 formula-discovery-v2 `INTRADAY_EVENT` 리드가 있으면 "
+                  "- 미사용 formula-discovery-v3 `INTRADAY_EVENT` 리드가 있으면 "
                   "경제 니치가 다른 유효 수식을 가능하면 **2~8개 LEAD_IDS로 묶되**, "
                   "SUGGESTED_PARAMS의 `intraday_signal_expr`에는 그중 독립 확인할 "
                   "**주 수식 하나를 정확히 복사**한다. 접수기가 나머지를 승격 불가 "
@@ -4093,6 +4113,14 @@ def _check_unused_leads_come_first():
     assert "SOURCE_BASELINE_EXPR" in contract and "window/constant-only" in contract
     assert "FORMULA_THESIS" in contract and "FINANCIAL-MATHEMATICS" in contract
     assert "PREREGISTERED_NO_OOS_FIT" in contract and "CROSS_SCALE" in contract
+    from intraday_alpha_ast import parse as parse_intraday, unit_of as intraday_unit
+    bps_examples = [line.strip().split("=", 1)[1]
+                    for line in contract.splitlines()
+                    if line.strip().startswith("BPS_")]
+    assert len(bps_examples) == 4
+    assert all(intraday_unit(parse_intraday(json.loads(example))) == "BPS"
+               for example in bps_examples), \
+        "Scout prompt contains a BPS skeleton that the runtime cannot execute"
     assert "alpha_candidate_eligible" in _SQL_LEADS, \
         "공개 기준선이 신규 알파 후보 목록에 다시 노출된다"
     assert "MICROSTRUCTURE IS PRIMARY" in contract
@@ -4152,7 +4180,7 @@ def _check_lead_health_is_surfaced():
     assert "별도 기준 2" in intraday_empty, intraday_empty
 
     # Legacy AST-ready event-time leads must not mask starvation of the new
-    # cost-aware financial-mathematics contract introduced by formula-discovery-v2.
+    # cost-aware, term-influence-audited contract introduced by formula-discovery-v3.
     formula_empty = _lead_health(_Rows((55, 9, 9, 5, 0, 0.1)))
     assert "typed formula-thesis event-time 미사용 리드가 0건" in formula_empty, \
         formula_empty

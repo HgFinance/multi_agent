@@ -8,10 +8,12 @@ occurs here; empirical survival remains the quant evaluator's job.
 
 from __future__ import annotations
 
+import json
+
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
-CONTRACT_VERSION = "formula-discovery-v2"
+CONTRACT_VERSION = "formula-discovery-v3"
 
 # These names are the canonical ``alpha_semantics.OUTPUTS`` values.  Keeping a
 # second set of near-synonyms here used to make gross-markout and passive
@@ -37,6 +39,23 @@ TERM_ROLES = frozenset({
     "FRESHNESS", "ACTIVITY", "CAPACITY",
 })
 
+# These observables cannot be negative by construction.  Applying ``sign`` to
+# one of them (or to a non-negative rolling transform of it) discards magnitude
+# and normally collapses to the constant +1.  That is especially dangerous when
+# an LLM puts the result in a denominator merely to make a field appear in the
+# equation/thesis.  A genuine presence state remains expressible and auditable
+# as an explicit ``where(gt(...))`` gate.
+_NONNEGATIVE_FIELDS = frozenset({
+    "spread_bps", "bid_depth_l1", "ask_depth_l1", "book_depth_l1",
+    "book_depth_l10", "trade_count", "quote_count", "trade_intensity",
+    "realized_volatility_bps", "quote_age_ms",
+})
+_ALWAYS_NONNEGATIVE_OPS = frozenset({"abs", "rolling_std"})
+_NONNEGATIVE_PRESERVING_OPS = frozenset({
+    "lag", "rolling_mean", "rolling_sum", "ewma",
+    "log1p_abs", "sqrt_abs", "sign",
+})
+
 
 class FormulaThesisV1(BaseModel):
     """Decoder/runtime schema; AST-dependent invariants are checked by ``assess``."""
@@ -57,6 +76,101 @@ def _text(value, name: str) -> str:
     if not result:
         raise ValueError(f"FORMULA_THESIS.{name} is required")
     return result
+
+
+def _canonical(node: dict) -> str:
+    return json.dumps(node, sort_keys=True, separators=(",", ":"))
+
+
+def _guaranteed_nonnegative(node: dict) -> bool:
+    """Conservative symbolic domain analysis; false means unknown, not negative."""
+    if "const" in node:
+        return float(node["const"]) >= 0.0
+    op = node.get("op")
+    if op == "field":
+        return node.get("field") in _NONNEGATIVE_FIELDS
+    if op in _ALWAYS_NONNEGATIVE_OPS:
+        return True
+    if op in _NONNEGATIVE_PRESERVING_OPS:
+        return _guaranteed_nonnegative(node["arg"])
+    if op in {"add", "mul", "min", "max"}:
+        return all(_guaranteed_nonnegative(arg) for arg in node["args"])
+    if op == "div":
+        return all(_guaranteed_nonnegative(arg) for arg in node["args"])
+    if op == "where":
+        return (_guaranteed_nonnegative(node["then"])
+                and _guaranteed_nonnegative(node["else"]))
+    return False
+
+
+def _symbolic_degeneracies(candidate: dict) -> list[str]:
+    """Find exact algebraic identities that make an advertised term decorative."""
+    out: list[str] = []
+
+    def walk(node: dict) -> None:
+        op = node.get("op")
+        if op == "where":
+            if _canonical(node["then"]) == _canonical(node["else"]):
+                out.append("where has identical then/else branches")
+            walk(node["condition"])
+            walk(node["then"])
+            walk(node["else"])
+            return
+        if "arg" in node:
+            walk(node["arg"])
+            return
+        args = node.get("args") or ()
+        if len(args) == 2:
+            same = _canonical(args[0]) == _canonical(args[1])
+            if same and op == "sub":
+                out.append("sub uses the same expression twice and collapses to zero")
+            elif same and op == "div":
+                out.append("div uses the same expression twice and collapses to one")
+            elif same and op in {"min", "max"}:
+                out.append(f"{op} repeats the same expression")
+            if op == "mul" and any(
+                    "const" in arg and float(arg["const"]) == 0.0
+                    for arg in args):
+                out.append("mul by zero erases the other term")
+            for arg in args:
+                walk(arg)
+
+    walk(candidate)
+    return list(dict.fromkeys(out))
+
+
+def _term_influence(candidate: dict, fields: list[str]) -> dict[str, list[str]]:
+    """Classify how each declared observable can affect the executable score.
+
+    This is deliberately structural rather than fitted: ``VALUE`` preserves a
+    numeric path, ``GATE`` controls a where branch, and ``PRESENCE_ONLY`` is a
+    lossy sign transform of an observable known to be non-negative.  A term that
+    appears only through the last path is not an identified equation term.
+    """
+    modes = {field: set() for field in fields}
+
+    def walk(node: dict, mode: str = "VALUE") -> None:
+        op = node.get("op")
+        if op == "field":
+            modes[node["field"]].add(mode)
+            return
+        if op == "where":
+            walk(node["condition"], "GATE")
+            walk(node["then"], mode)
+            walk(node["else"], mode)
+            return
+        if "arg" in node:
+            child_mode = mode
+            if (mode != "GATE" and op == "sign"
+                    and _guaranteed_nonnegative(node["arg"])):
+                child_mode = "PRESENCE_ONLY"
+            walk(node["arg"], child_mode)
+            return
+        for child in node.get("args") or ():
+            walk(child, mode)
+
+    walk(candidate)
+    return {field: sorted(value) for field, value in sorted(modes.items())}
 
 
 def assess(thesis, *, candidate: dict, semantic_plan: dict, grammar) -> dict:
@@ -103,7 +217,12 @@ def assess(thesis, *, candidate: dict, semantic_plan: dict, grammar) -> dict:
     if profile["output_unit"] != "BPS":
         raise ValueError(
             "FORMULA_THESIS target is measured in BPS, so the AST output unit "
-            f"must be BPS, not {profile['output_unit']}")
+            f"must be BPS, not {profile['output_unit']}. REPAIR: keep the "
+            "economically signed pressure as RATIO and multiply it by an "
+            "economically justified BPS observable such as "
+            "realized_volatility_bps, or start from microprice_offset_bps; "
+            "preregister and ablate the scale term instead of adding a BPS "
+            "field only to satisfy units")
     pnl_target = target in {
         "TAKER_NET_PNL", "PASSIVE_FILL_ADJUSTED_PNL",
     }
@@ -135,6 +254,26 @@ def assess(thesis, *, candidate: dict, semantic_plan: dict, grammar) -> dict:
     identification = str(thesis.get("identification") or "").strip()
     if len(identification) < 20:
         raise ValueError("FORMULA_THESIS.identification must be falsifiable and specific")
+
+    degeneracies = _symbolic_degeneracies(candidate)
+    if degeneracies:
+        raise ValueError(
+            "FORMULA_THESIS contains a symbolic degeneracy: "
+            + "; ".join(degeneracies)
+            + ". REPAIR: remove the cancelled/decorative term and state the "
+              "actual economic interaction")
+    influence = _term_influence(candidate, profile["fields"])
+    presence_only = [field for field, modes in influence.items()
+                     if modes == ["PRESENCE_ONLY"]]
+    if presence_only:
+        raise ValueError(
+            "FORMULA_THESIS terms have presence-only influence after sign() "
+            f"on non-negative observables: {presence_only}. REPAIR: preserve "
+            "their magnitude with a justified transform, use rolling_zscore/"
+            "delta for a signed change, or express a true activity state as "
+            "an explicit where(gt(...)) gate; do not hide the term in a "
+            "denominator")
+    profile["term_influence"] = influence
 
     operators = set(profile["operators"])
     clocks = profile["clocks_seconds"]
