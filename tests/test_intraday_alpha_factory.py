@@ -22,6 +22,7 @@ import intraday_candidate as candidate_module
 import intraday_experience
 import intraday_ablation
 import lead_intake
+from factory_contracts import MethodologyLeadV1
 from intraday_alpha_ast import (IntradayExprError, evaluate, fields_of, parse,
                                 shape_fingerprint, unit_of)
 from intraday_candidate import (_CapacityReservoir, CandidateAccumulator,
@@ -624,6 +625,9 @@ URL: https://example.test/tight-spread
     assert lead["claimed_edge"].startswith("Signed quote pressure")
     assert lead["refs"][0]["source_published"] == "2026-04-04"
     assert lead["refs"][0]["declared_accessed"] == "2026-08-17"
+    typed_lead = MethodologyLeadV1.model_validate(lead)
+    assert typed_lead.refs[0].source_published == "2026-04-04"
+    assert typed_lead.refs[0].declared_accessed == "2026-08-17"
 
     with pytest.raises(ValueError, match="source medium.*not the Scout lens"):
         lead_intake.to_lead(
