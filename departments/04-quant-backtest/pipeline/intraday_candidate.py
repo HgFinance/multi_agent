@@ -581,6 +581,9 @@ class CandidateAccumulator:
             "time_buckets": time_cells,
             "session_cluster_count": len(session_cells),
             "selection_boundary": "OOS_DIAGNOSTIC_SCREENING_ONLY",
+            "adaptive_search_memory_only": True,
+            "independent_confirmation": False,
+            "forward_new_sessions_required": True,
             "promotion_authority": False,
         }
 

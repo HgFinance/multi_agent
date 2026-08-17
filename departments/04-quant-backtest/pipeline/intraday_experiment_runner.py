@@ -652,6 +652,9 @@ def _residual_qd_archive(rows: list[dict]) -> tuple[dict[str, dict], list[dict]]
                     "median_time_bucket_mae_bps"],
                 "median_time_bucket_mae_improvement_vs_null_bps": item[
                     "median_time_bucket_mae_improvement_vs_null_bps"],
+                "adaptive_search_memory_only": True,
+                "independent_confirmation": False,
+                "forward_new_sessions_required": True,
                 "promotion_authority": False,
             }
     return annotations, archive
@@ -759,6 +762,8 @@ def _annotate_population(config: dict, reports: dict[str, dict]) -> dict:
         "residual_archive": residual_archive,
         "residual_archive_cells": len(residual_archive),
         "residual_archive_boundary": "OOS_DIAGNOSTIC_SCREENING_ONLY",
+        "residual_archive_independent_confirmation": False,
+        "residual_archive_forward_new_sessions_required": True,
         "promotion_authority": "PRIMARY_ONLY",
     }
     primary["summary"].update({

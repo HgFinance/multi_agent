@@ -942,8 +942,10 @@ def render(memory: IntradayMemory, *, limit: int = 6) -> str:
                 f"nodes={row['complexity_nodes']}")
         lines.append(
             "    Preserve distinct failure allocations as search stepping stones. "
-            "Do not fit, select, or promote on these OOS descriptors; nominate any "
-            "assembled descendant for a fresh preregistered primary experiment.")
+            "Archive selection may seed search only: it is not independent evidence, "
+            "must not fit coefficients, and cannot promote. A descendant remains "
+            "adaptively selected until it passes a preregistered primary experiment "
+            "on forward sessions unseen by its lineage.")
     if memory.reusable_term_bank:
         lines.append(
             "  [typed reusable term bank - set-level search material, no causal credit]")
