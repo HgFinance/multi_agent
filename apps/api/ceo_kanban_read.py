@@ -185,8 +185,31 @@ def _timeout() -> float:
 #
 # 캐시하지 않는 것: 쓰기 명령(`archive`)과 **예외**. 실패를 캐시하면 일시적인
 # CLI 장애가 TTL 동안 고정되어 fail-closed가 아니라 fail-stuck이 된다.
+#
+# ── 끝난 Task 는 더 길게 캐시한다 (2026-08-14) ──
+#
+# 위 TTL 은 "한 요청 안의 중복"만 걷어낸다. 목록 조회의 진짜 비용은 **서로 다른**
+# Task 를 노드 수만큼 `show` 하는 것이라, 중복 제거만으로는 남는다.
+#
+# 그런데 `done`/`completed`/`archived` 로 끝난 Task 의 `show` 결과는 **더 이상
+# 바뀌지 않는다.** 그래서 그 응답만 길게 캐시하면, 이미 끝난 과거 대화를 다시 그릴
+# 때 CLI 를 아예 안 부른다 - 계정을 오가며 이력을 다시 여는 화면이 정확히 이 경우다.
+#
+# `failed`/`blocked` 는 길게 캐시하지 않는다. Retry·Replan 으로 다시 running 이
+# 될 수 있어서(위 `Workflow.status` 주석) 끝난 상태가 아니다.
+#
+# ▶ 이 방식을 고른 이유(그리고 "마커가 있으면 `list` 만으로 목록을 만든다"를
+#   포기한 이유): `list --json` 행에는 `parents`·`runs`·`latest_summary` 가 없다
+#   (Hermes `_task_to_dict` 실측). `Workflow.status` 는 `archived`/`synthesis.done`
+#   에서 run_outcome 보다 먼저 단락되므로 거기까지는 증명이 되지만,
+#   `selected_departments` 가 `self.metadata`(= `show` 의 runs/metadata)와 노드
+#   **탐색 순서**에 함께 의존해서 `list` 만으로는 같은 답을 보장할 수 없다.
+#   여기서는 정확도를 깎지 않는 쪽을 택한다 - 같은 `show` 응답을 그대로 쓰되,
+#   변하지 않는 것만 오래 들고 있는다.
 _READ_ONLY_KANBAN_COMMANDS = frozenset({"show", "list"})
 _cache_lock = threading.Lock()
+# key -> (만료 시각, stdout). 항목마다 TTL 이 다르므로 저장 시각이 아니라 만료
+# 시각을 넣는다.
 _cache: dict[tuple[str, ...], tuple[float, str]] = {}
 
 
@@ -197,6 +220,35 @@ def _cache_ttl() -> float:
         return max(0.0, float(os.getenv("KANBAN_READ_CACHE_TTL_SECONDS", "3")))
     except ValueError:
         return 3.0
+
+
+def _terminal_cache_ttl() -> float:
+    try:
+        return max(0.0, float(os.getenv("KANBAN_DONE_CACHE_TTL_SECONDS", "300")))
+    except ValueError:
+        return 300.0
+
+
+def _entry_ttl(key: tuple[str, ...], stdout: str, base_ttl: float) -> float:
+    """이 응답을 얼마나 들고 있을지. 끝난 `show` 만 길게 잡는다.
+
+    판정에 실패하면(형태가 예상과 다르면) 조용히 긴 TTL 로 넘어가지 않고 기본
+    TTL 로 떨어진다 - 확신이 없을 때 오래 들고 있는 쪽이 위험하다.
+    """
+
+    if key[0] != "show":
+        return base_ttl
+    try:
+        payload = json.loads(stdout)
+        task = payload.get("task", payload) if isinstance(payload, Mapping) else None
+        if not isinstance(task, Mapping):
+            return base_ttl
+        status = str(task.get("status") or "").casefold()
+    except (TypeError, ValueError):
+        return base_ttl
+    if status in _DONE_STATUSES:
+        return max(base_ttl, _terminal_cache_ttl())
+    return base_ttl
 
 
 def clear_kanban_cache() -> None:
@@ -236,7 +288,7 @@ def run_kanban(args: Sequence[str]) -> str:
         now = time.monotonic()
         with _cache_lock:
             hit = _cache.get(key)
-            if hit is not None and now - hit[0] < ttl:
+            if hit is not None and now < hit[0]:
                 return hit[1]
 
     command = hermes_boundary.argv_for(None, ["kanban", *args])
@@ -267,8 +319,9 @@ def run_kanban(args: Sequence[str]) -> str:
             message[:200] or f"hermes kanban {args[0]} exited {process.returncode}"
         )
     if cacheable and ttl > 0:
+        entry_ttl = _entry_ttl(key, process.stdout, ttl)
         with _cache_lock:
-            _cache[key] = (time.monotonic(), process.stdout)
+            _cache[key] = (time.monotonic() + entry_ttl, process.stdout)
     return process.stdout
 
 

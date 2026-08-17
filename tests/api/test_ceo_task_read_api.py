@@ -914,6 +914,76 @@ class KanbanReadCacheTest(unittest.TestCase):
 
         self.assertEqual(subcommands, ["list", "archive", "list"])
 
+    def _show_stdout(self, status: str) -> str:
+        import json as _json
+
+        return _json.dumps({"task": {"id": "t_a", "status": status, "body": "b"}})
+
+    def _count_calls_across_base_ttl(self, status: str) -> int:
+        """기본 TTL을 실제로 넘긴 뒤 CLI가 다시 불리는지 센다."""
+
+        import time as _time
+
+        calls = []
+
+        def run(command, **_kwargs):
+            calls.append(command)
+            return type(
+                "P", (), {"returncode": 0, "stdout": self._show_stdout(status), "stderr": ""}
+            )()
+
+        env = {
+            "KANBAN_READ_CACHE_TTL_SECONDS": "0.3",
+            "KANBAN_DONE_CACHE_TTL_SECONDS": "60",
+        }
+        ceo_kanban_read.clear_kanban_cache()
+        with patch.dict(ceo_kanban_read.os.environ, env):
+            with patch.object(ceo_kanban_read.subprocess, "run", side_effect=run):
+                ceo_kanban_read.run_kanban(("show", "t_a", "--json"))
+                _time.sleep(0.45)
+                ceo_kanban_read.run_kanban(("show", "t_a", "--json"))
+        return len(calls)
+
+    def test_finished_tasks_are_cached_longer(self) -> None:
+        """끝난 Task의 `show` 결과는 더 이상 바뀌지 않으므로 오래 들고 있는다.
+
+        과거 대화 이력을 다시 그릴 때(계정 전환 등) CLI를 아예 안 부르게 하는 것이
+        목적이다. 목록 조회의 실제 비용은 서로 다른 Task를 노드 수만큼 `show`하는
+        것이라, 한 요청 안의 중복 제거만으로는 남는다.
+        """
+
+        self.assertEqual(self._count_calls_across_base_ttl("done"), 1)
+
+    def test_unfinished_tasks_keep_the_short_ttl(self) -> None:
+        """진행 중이거나 막힌 Task는 Retry/Replan으로 다시 바뀔 수 있다."""
+
+        self.assertEqual(self._count_calls_across_base_ttl("running"), 2)
+        self.assertEqual(self._count_calls_across_base_ttl("blocked"), 2)
+        self.assertEqual(self._count_calls_across_base_ttl("failed"), 2)
+
+    def test_unparsable_show_output_does_not_get_the_long_ttl(self) -> None:
+        """형태를 못 읽으면 조용히 오래 들고 있지 않는다 - 확신 없을 때가 더 위험하다."""
+
+        import time as _time
+
+        calls = []
+
+        def run(command, **_kwargs):
+            calls.append(command)
+            return type("P", (), {"returncode": 0, "stdout": "not json", "stderr": ""})()
+
+        env = {
+            "KANBAN_READ_CACHE_TTL_SECONDS": "0.3",
+            "KANBAN_DONE_CACHE_TTL_SECONDS": "60",
+        }
+        with patch.dict(ceo_kanban_read.os.environ, env):
+            with patch.object(ceo_kanban_read.subprocess, "run", side_effect=run):
+                ceo_kanban_read.run_kanban(("show", "t_a", "--json"))
+                _time.sleep(0.45)
+                ceo_kanban_read.run_kanban(("show", "t_a", "--json"))
+
+        self.assertEqual(len(calls), 2)
+
     def test_ttl_zero_disables_the_cache(self) -> None:
         calls = []
 
