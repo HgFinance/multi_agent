@@ -13,6 +13,14 @@ from typing import Self
 from apps.api.ceo_mirror import CanonicalIngress, LockedRedisMirrorStore
 
 ROOT = Path(__file__).resolve().parents[2]
+_COMPOSE_TEST_ENV = {
+    "DATABASE_URL": "postgresql://test:test@localhost/test",
+    "HEDGEFUND_TSDB_PASSWORD": "compose-contract-test",
+    "NAVER_CLIENT_ID": "compose-contract-test",
+    "NAVER_CLIENT_SECRET": "compose-contract-test",
+    "SUPABASE_URL": "https://compose-contract-test.invalid",
+    "SUPABASE_SERVICE_ROLE_KEY": "compose-contract-test",
+}
 
 
 class _FakeRedisLock:
@@ -56,8 +64,7 @@ class BffConsolidationTest(unittest.TestCase):
             text=True,
             env={
                 **os.environ,
-                "DATABASE_URL": "postgresql://test:test@localhost/test",
-                "HEDGEFUND_TSDB_PASSWORD": "compose-contract-test",
+                **_COMPOSE_TEST_ENV,
             },
             check=False,
         )
@@ -94,8 +101,7 @@ class BffConsolidationTest(unittest.TestCase):
             text=True,
             env={
                 **os.environ,
-                "DATABASE_URL": "postgresql://test:test@localhost/test",
-                "HEDGEFUND_TSDB_PASSWORD": "compose-contract-test",
+                **_COMPOSE_TEST_ENV,
             },
             check=False,
         )

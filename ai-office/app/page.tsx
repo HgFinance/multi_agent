@@ -174,13 +174,18 @@ export default function Home() {
   return (
     <div className="bg-background text-on-background min-h-screen flex flex-col font-sans">
       <TopNav current="ai-office" />
-      <main className="w-full max-w-app mx-auto p-margin-mobile md:p-margin-desktop flex flex-col lg:flex-row gap-gutter items-start">
-        <div className="flex-1 min-w-0 w-full">
-          <OfficeControls engine={engine} snap={snap} onDuty={onDuty} onStart={() => engine.start()} />
-          {/* 픽셀 오피스 월드는 손대지 않는다. 자체 스타일(office.css)을 그대로 쓴다. */}
-          <OfficeWorld engine={engine} snap={snap} selectedId={selectedId} follow onSelect={onSelect} />
+      <main className="w-full max-w-app mx-auto p-margin-mobile md:p-margin-desktop flex flex-col gap-gutter">
+        {/* 상단: 개요&컨트롤 — 가로 전체 폭 */}
+        <OfficeControls engine={engine} snap={snap} onDuty={onDuty} onStart={() => engine.start()} />
+
+        {/* 하단: 좌측 픽셀 오피스 / 우측 나머지 위젯(live.feed, staff.roster) */}
+        <div className="flex flex-col lg:flex-row gap-gutter items-start">
+          <div className="flex-1 min-w-0 w-full">
+            {/* 픽셀 오피스 월드는 손대지 않는다. 자체 스타일(office.css)을 그대로 쓴다. */}
+            <OfficeWorld engine={engine} snap={snap} selectedId={selectedId} follow onSelect={onSelect} />
+          </div>
+          <RightRail engine={engine} snap={snap} selectedId={selectedId} onSelect={onSelect} />
         </div>
-        <RightRail engine={engine} snap={snap} selectedId={selectedId} onSelect={onSelect} />
       </main>
       {selected ? <ProfileModal agent={selected} onClose={() => setSelectedId(null)} /> : null}
     </div>

@@ -545,6 +545,40 @@ class CeoRootFilterTest(unittest.TestCase):
 
         self.assertEqual(len(roots), 2)
 
+    def test_owner_id_filters_to_that_account_only(self) -> None:
+        """계정별 이력은 서버가 거른다. 다른 계정의 질의 텍스트는 응답에 실리지 않는다."""
+
+        rows = [
+            {"id": "t_mine", "body": build_root_body("내 질의", "req-a", requested_by="user-a")},
+            {"id": "t_theirs", "body": build_root_body("남의 질의", "req-b", requested_by="user-b")},
+        ]
+        with patch.object(ceo_kanban_read, "list_tasks", return_value=rows):
+            roots = ceo_kanban_read.list_ceo_roots(limit=20, owner_id="user-a")
+
+        self.assertEqual([row["id"] for row in roots], ["t_mine"])
+
+    def test_legacy_roots_without_requested_by_belong_to_no_account(self) -> None:
+        """`requested_by`가 없는 과거 Root는 "계정 불명"이라 어떤 계정 이력에도 안 넣는다."""
+
+        rows = [{"id": "t_legacy", "body": build_root_body("옛 질의", "req-old")}]
+        with patch.object(ceo_kanban_read, "list_tasks", return_value=rows):
+            self.assertEqual(ceo_kanban_read.list_ceo_roots(limit=20, owner_id="user-a"), [])
+            # 필터를 안 걸면 그대로 보인다 - 데이터를 숨기는 게 아니라 귀속만 안 한다.
+            self.assertEqual(len(ceo_kanban_read.list_ceo_roots(limit=20)), 1)
+
+    def test_owner_filter_runs_before_the_limit_cutoff(self) -> None:
+        """다른 계정 Root가 `limit` 자리를 차지해 진짜 대상이 잘려나가면 안 된다."""
+
+        rows = [
+            {"id": f"t_other{index}", "body": build_root_body("남", f"req-o{index}", requested_by="user-b")}
+            for index in range(5)
+        ]
+        rows.append({"id": "t_mine", "body": build_root_body("내 질의", "req-a", requested_by="user-a")})
+        with patch.object(ceo_kanban_read, "list_tasks", return_value=rows):
+            roots = ceo_kanban_read.list_ceo_roots(limit=2, owner_id="user-a")
+
+        self.assertEqual([row["id"] for row in roots], ["t_mine"])
+
 
 def _client() -> TestClient:
     app = FastAPI()
@@ -664,6 +698,78 @@ class CeoTaskApiTest(unittest.TestCase):
         self.assertEqual(body["block_reason"], "인용 근거 부족")
         self.assertIsNone(body["result"])
 
+    def test_result_falls_back_to_root_summary_when_ceo_answers_directly(self) -> None:
+        """2026-08-13 AWS 실측(t_51190ad2): CEO가 부서에 위임하지 않고 root Task
+        안에서 직접 답한 경우("지금 막혀 있는 업무와 이유를 알려줘").
+
+        `synthesis_node`가 없다는 이유로 `result`를 계속 `null`로 두면, 실제로는
+        Task가 진짜 요약을 달고 완료됐는데도 화면에 답이 영원히 안 뜬다.
+        """
+
+        solo_root = "t_51190ad2"
+        board = {
+            solo_root: _task(
+                solo_root,
+                assignee="ceo-agent",
+                status="done",
+                body=build_root_body("지금 막혀 있는 업무와 이유를 알려줘", "req-solo"),
+                title="사용자 질의: 지금 막혀 있는 업무와 이유를 알려줘",
+                latest_summary=(
+                    "현재 Kanban을 읽기 전용으로 점검해 차단·대기 업무와 원인을 분류했다."
+                ),
+                completed_at=_CREATED_AT + 41,
+            ),
+        }
+        workflow = load_workflow(solo_root, fetch=_fetch_from(board))
+        self.assertIsNone(workflow.synthesis_node)
+        self.assertEqual(workflow.descendants, ())
+
+        with patch.object(ceo, "load_workflow", return_value=workflow):
+            response = self.client.get(f"/ui/ceo/tasks/{solo_root}/result")
+
+        body = response.json()
+        self.assertEqual(body["status"], "completed")
+        self.assertIsNotNone(body["result"])
+        self.assertEqual(
+            body["result"]["summary"],
+            "현재 Kanban을 읽기 전용으로 점검해 차단·대기 업무와 원인을 분류했다.",
+        )
+
+    def test_result_does_not_fall_back_while_departments_are_still_working(self) -> None:
+        """자식이 있는 워크플로는 root 자체가 done이어도(planning 종료) 이 경로를
+        타지 않는다 - root의 "접수했다"류 planning 문구가 최종 답으로 잘못
+        노출되면 안 된다. root가 `done`인데 자식(research)은 아직 `running`인
+        상태를 명시적으로 만든다(root는 계획 즉시 done - `ceo_workflow_scope.py`
+        `planning_terminal_state=done_after_child_creation`).
+        """
+
+        board = {
+            ROOT_ID: _task(
+                ROOT_ID,
+                assignee="ceo-agent",
+                status="done",
+                body=build_root_body("엔비디아 최신 사업 리스크만 분석해줘.", "req-1"),
+                title="사용자 질의: 엔비디아 최신 사업 리스크만 분석해줘.",
+                children=(RESEARCH_ID,),
+                latest_summary="리서치 부서에 배정했습니다.",
+                completed_at=_CREATED_AT + 5,
+            ),
+            RESEARCH_ID: _task(
+                RESEARCH_ID,
+                assignee="research-department",
+                status="running",
+                parents=(ROOT_ID,),
+            ),
+        }
+        workflow = load_workflow(ROOT_ID, fetch=_fetch_from(board))
+        self.assertIsNone(workflow.synthesis_node)
+        self.assertNotEqual(workflow.descendants, ())
+
+        with patch.object(ceo, "load_workflow", return_value=workflow):
+            response = self.client.get(f"/ui/ceo/tasks/{ROOT_ID}/result")
+
+        self.assertIsNone(response.json()["result"])
+
     def test_archive_covers_the_whole_graph_children_first(self) -> None:
         workflow = load_workflow(ROOT_ID, fetch=_fetch_from(_board()))
         with patch.object(ceo, "load_workflow", return_value=workflow):
@@ -745,6 +851,152 @@ class KanbanCliErrorMappingTest(unittest.TestCase):
         with patch.object(ceo_kanban_read.subprocess, "run", side_effect=FileNotFoundError):
             with self.assertRaises(KanbanUnavailable):
                 ceo_kanban_read.run_kanban(("list", "--json"))
+
+
+class KanbanReadCacheTest(unittest.TestCase):
+    """읽기 CLI TTL 캐시(2026-08-14). CLI 프로세스 수를 줄이되 안전 속성을 지킨다."""
+
+    def setUp(self) -> None:
+        ceo_kanban_read.clear_kanban_cache()
+        self.addCleanup(ceo_kanban_read.clear_kanban_cache)
+
+    @staticmethod
+    def _ok(stdout: str = "[]"):
+        return type("P", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+    def test_repeated_reads_run_the_cli_once(self) -> None:
+        """`/ui/ceo/tasks`가 root마다 같은 보드를 다시 읽던 중복을 걷어낸다."""
+
+        calls: list[tuple[str, ...]] = []
+
+        def run(command, **_kwargs):
+            calls.append(tuple(command))
+            return self._ok()
+
+        with patch.object(ceo_kanban_read.subprocess, "run", side_effect=run):
+            for _ in range(20):
+                ceo_kanban_read.run_kanban(("list", "--json"))
+            for _ in range(5):
+                ceo_kanban_read.run_kanban(("show", "t_a", "--json"))
+
+        self.assertEqual(len(calls), 2, f"고유 명령 2개만 실행돼야 한다: {calls}")
+
+    def test_failures_are_not_cached(self) -> None:
+        """실패를 캐시하면 일시 장애가 TTL 동안 고정된다(fail-closed가 아니라 fail-stuck)."""
+
+        attempts = []
+
+        def run(command, **_kwargs):
+            attempts.append(command)
+            return type("P", (), {"returncode": 2, "stdout": "", "stderr": "database is locked"})()
+
+        with patch.object(ceo_kanban_read.subprocess, "run", side_effect=run):
+            for _ in range(3):
+                with self.assertRaises(KanbanUnavailable):
+                    ceo_kanban_read.run_kanban(("list", "--json"))
+
+        self.assertEqual(len(attempts), 3, "예외는 캐시하지 않는다")
+
+    def test_archive_invalidates_the_cache(self) -> None:
+        """archive 직후 목록에 방금 치운 카드가 남아 있으면 안 된다."""
+
+        subcommands: list[str] = []
+
+        def run(command, **_kwargs):
+            subcommands.append(tuple(command)[2])
+            return self._ok()
+
+        with patch.object(ceo_kanban_read.subprocess, "run", side_effect=run):
+            ceo_kanban_read.run_kanban(("list", "--json"))
+            ceo_kanban_read.run_kanban(("list", "--json"))  # 캐시 히트
+            ceo_kanban_read.archive_tasks(["t_x"])
+            ceo_kanban_read.run_kanban(("list", "--json"))  # 무효화 후 재실행
+
+        self.assertEqual(subcommands, ["list", "archive", "list"])
+
+    def _show_stdout(self, status: str) -> str:
+        import json as _json
+
+        return _json.dumps({"task": {"id": "t_a", "status": status, "body": "b"}})
+
+    def _count_calls_across_base_ttl(self, status: str) -> int:
+        """기본 TTL을 실제로 넘긴 뒤 CLI가 다시 불리는지 센다."""
+
+        import time as _time
+
+        calls = []
+
+        def run(command, **_kwargs):
+            calls.append(command)
+            return type(
+                "P", (), {"returncode": 0, "stdout": self._show_stdout(status), "stderr": ""}
+            )()
+
+        env = {
+            "KANBAN_READ_CACHE_TTL_SECONDS": "0.3",
+            "KANBAN_DONE_CACHE_TTL_SECONDS": "60",
+        }
+        ceo_kanban_read.clear_kanban_cache()
+        with patch.dict(ceo_kanban_read.os.environ, env):
+            with patch.object(ceo_kanban_read.subprocess, "run", side_effect=run):
+                ceo_kanban_read.run_kanban(("show", "t_a", "--json"))
+                _time.sleep(0.45)
+                ceo_kanban_read.run_kanban(("show", "t_a", "--json"))
+        return len(calls)
+
+    def test_finished_tasks_are_cached_longer(self) -> None:
+        """끝난 Task의 `show` 결과는 더 이상 바뀌지 않으므로 오래 들고 있는다.
+
+        과거 대화 이력을 다시 그릴 때(계정 전환 등) CLI를 아예 안 부르게 하는 것이
+        목적이다. 목록 조회의 실제 비용은 서로 다른 Task를 노드 수만큼 `show`하는
+        것이라, 한 요청 안의 중복 제거만으로는 남는다.
+        """
+
+        self.assertEqual(self._count_calls_across_base_ttl("done"), 1)
+
+    def test_unfinished_tasks_keep_the_short_ttl(self) -> None:
+        """진행 중이거나 막힌 Task는 Retry/Replan으로 다시 바뀔 수 있다."""
+
+        self.assertEqual(self._count_calls_across_base_ttl("running"), 2)
+        self.assertEqual(self._count_calls_across_base_ttl("blocked"), 2)
+        self.assertEqual(self._count_calls_across_base_ttl("failed"), 2)
+
+    def test_unparsable_show_output_does_not_get_the_long_ttl(self) -> None:
+        """형태를 못 읽으면 조용히 오래 들고 있지 않는다 - 확신 없을 때가 더 위험하다."""
+
+        import time as _time
+
+        calls = []
+
+        def run(command, **_kwargs):
+            calls.append(command)
+            return type("P", (), {"returncode": 0, "stdout": "not json", "stderr": ""})()
+
+        env = {
+            "KANBAN_READ_CACHE_TTL_SECONDS": "0.3",
+            "KANBAN_DONE_CACHE_TTL_SECONDS": "60",
+        }
+        with patch.dict(ceo_kanban_read.os.environ, env):
+            with patch.object(ceo_kanban_read.subprocess, "run", side_effect=run):
+                ceo_kanban_read.run_kanban(("show", "t_a", "--json"))
+                _time.sleep(0.45)
+                ceo_kanban_read.run_kanban(("show", "t_a", "--json"))
+
+        self.assertEqual(len(calls), 2)
+
+    def test_ttl_zero_disables_the_cache(self) -> None:
+        calls = []
+
+        def run(command, **_kwargs):
+            calls.append(command)
+            return self._ok()
+
+        with patch.dict(ceo_kanban_read.os.environ, {"KANBAN_READ_CACHE_TTL_SECONDS": "0"}):
+            with patch.object(ceo_kanban_read.subprocess, "run", side_effect=run):
+                for _ in range(4):
+                    ceo_kanban_read.run_kanban(("list", "--json"))
+
+        self.assertEqual(len(calls), 4, "TTL=0이면 매번 실행한다")
 
 
 if __name__ == "__main__":

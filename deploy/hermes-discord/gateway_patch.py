@@ -220,7 +220,7 @@ def _wrap_handle_message(cls: type[Any]) -> None:
         return
     original = cls._handle_message
 
-    def with_routing_context(message: Any) -> Any:
+    def with_routing_context(message: Any, adapter: Any) -> Any:
         """Expose explicit correlation to the direct CEO planner.
 
         The direct Discord session does not call the BFF.  A private-looking
@@ -234,7 +234,7 @@ def _wrap_handle_message(cls: type[Any]) -> None:
         message_id = str(getattr(message, "id", "") or "")
         if not message_id:
             return message
-        context = _message_context(message, self)
+        context = _message_context(message, adapter)
         content = str(getattr(message, "content", "") or "")
         marker = "[hgfinance discord routing context]"
         if marker in content:
@@ -263,7 +263,7 @@ def _wrap_handle_message(cls: type[Any]) -> None:
         try:
             result = await original(
                 self,
-                with_routing_context(message),
+                with_routing_context(message, self),
                 *args,
                 **kwargs,
             )
@@ -352,7 +352,7 @@ def _wrap_send(cls: type[Any]) -> None:
         store = _store(self)
         inbound_key = store.inbound_key_for_message(anchor, _profile_name())
         dedup_key = inbound_key or canonical_discord_dedup_key("unknown", chat_id, anchor)
-        response_key = f"{dedup_key}:final"
+        response_key = f"{dedup_key}:gateway"
         context = store.inbound_context(inbound_key, _profile_name()) if inbound_key else {
             "guild_id": "unknown",
             "channel_id": str(chat_id),

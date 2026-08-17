@@ -38,7 +38,13 @@ from contracts.factory_contracts import (  # noqa: E402
     ExperimentProposalV1,
     LessonCode,
     MethodologyLeadV1,
+    ResearchLane,
     Testability,
+)
+from contracts.alpha_ast_surface import (  # noqa: E402
+    MICRO_FIELDS,
+    fields_of as ast_fields_of,
+    parse as parse_ast,
 )
 
 MODULE_VERSION = "research-publish-gate-v1"
@@ -102,8 +108,251 @@ def check_leads(proposal: ExperimentProposalV1,
             out.append(
                 f"리드 {lid} 는 testability={lead.testability.value} 다 - "
                 f"규칙으로 서술할 수 없는 주장을 기획안 근거로 쓰지 않는다")
+        if (lead.ast_contract or {}).get("primary_data_plane") != "MICROSTRUCTURE":
+            out.append(
+                f"리드 {lid} 는 미시구조 우선 계약으로 검증되지 않았다 - "
+                "짧은 호가·체결 표본을 일봉 대리변수로 바꾸지 않는다")
+        if (lead.ast_contract or {}).get("alpha_candidate_eligible") is not True:
+            mode = (lead.ast_contract or {}).get("derivation_mode") or "UNCLASSIFIED"
+            out.append(
+                f"리드 {lid} 는 공개 방법론 대조군이다(derivation_mode={mode}) - "
+                "직접 복제나 창 조정은 알파 후보로 발행하지 않고, 메커니즘을 "
+                "변형한 별도 AST 리드가 필요하다")
+        if (proposal.research_lane == ResearchLane.INTRADAY_EVENT
+                and ((lead.ast_contract or {}).get("formula_discovery_version")
+                     != "formula-discovery-v5"
+                     or not (lead.ast_contract or {}).get(
+                         "formula_contract_complete"))):
+            out.append(
+                f"lead {lid} lacks the directional formula-discovery-v5 contract; "
+                "resubmit a signed-pressure structure or identified BPS equation "
+                "with an executable cost hurdle")
+        elif proposal.research_lane == ResearchLane.INTRADAY_EVENT:
+            contract = lead.ast_contract or {}
+            try:
+                from contracts import intraday_ast_contract as intraday_grammar
+                import formula_discovery
+                formula_discovery.assess(
+                    contract.get("formula_thesis"),
+                    candidate=contract.get("candidate_signal_expr"),
+                    semantic_plan=contract.get("semantic_plan") or {},
+                    grammar=intraday_grammar,
+                )
+            except (TypeError, ValueError) as exc:
+                out.append(
+                    f"lead {lid} fails the current formula influence audit: {exc}")
         if not lead.refs:
             out.append(f"리드 {lid} 에 출처가 없다")
+    return out
+
+
+def check_microstructure_primary(proposal: ExperimentProposalV1) -> list[str]:
+    """Signal discovery is microstructure-first; daily data only executes/scores it."""
+    out = []
+    if proposal.research_lane == ResearchLane.INTRADAY_EVENT:
+        # Intraday proposals intentionally use a different, seconds-based grammar.
+        # Treating it as the daily ``signal_expr`` silently rejects the very raw-event
+        # lane this gate is meant to protect.
+        from contracts.intraday_ast_contract import fields_of, parse, unit_of
+
+        raw = (proposal.suggested_params or {}).get("intraday_signal_expr")
+        if not isinstance(raw, dict):
+            return [
+                "SUGGESTED_PARAMS.intraday_signal_expr is missing - an "
+                "INTRADAY_EVENT proposal must preregister a seconds-based AST"
+            ]
+        try:
+            parsed = parse(raw)
+            fields = fields_of(parsed)
+        except (TypeError, ValueError) as exc:
+            return [f"intraday_signal_expr is not an executable AST: {exc}"]
+        if not fields:
+            out.append("intraday_signal_expr has no raw quote/trade field")
+        output = str((proposal.semantic_plan or {}).get("output") or "").upper()
+        if output in {"TAKER_NET_PNL", "PASSIVE_FILL_ADJUSTED_PNL"}:
+            coefficient_policy = str((proposal.suggested_params or {}).get(
+                "coefficient_policy") or "PREREGISTERED_NO_OOS_FIT").upper()
+            if coefficient_policy not in {
+                    "FIXED_FROM_SOURCE", "PREREGISTERED_NO_OOS_FIT",
+                    "STRUCTURE_ONLY"}:
+                out.append("intraday proposal has unsupported coefficient_policy")
+            if coefficient_policy != "STRUCTURE_ONLY" and unit_of(parsed) != "BPS":
+                out.append(
+                    "fixed/preregistered net-PnL AST must predict markout in BPS")
+            if coefficient_policy == "STRUCTURE_ONLY" and unit_of(parsed) == "BOOL":
+                out.append("STRUCTURE_ONLY intraday AST must emit a numeric score")
+            if str((proposal.suggested_params or {}).get(
+                    "entry_policy") or "").upper() != \
+                    "PREDICTED_MARKOUT_CLEARS_COST":
+                out.append(
+                    "net-PnL intraday proposal requires entry_policy="
+                    "PREDICTED_MARKOUT_CLEARS_COST so predicted edge must clear "
+                    "the live spread and round-trip charges")
+        # ExperimentProposalV1 already requires both raw quote and trade tables.
+        # microstructure_features is deliberately optional: derived features are
+        # computed causally inside each bounded experiment slice.
+        return out
+
+    raw = (proposal.suggested_params or {}).get("signal_expr")
+    if not isinstance(raw, dict):
+        return [
+            "SUGGESTED_PARAMS.signal_expr 가 없다 - 새 전략은 호가·체결 AST로 "
+            "사전등록하고 일봉은 실행가격·벤치마크·레짐 보조로만 쓴다"]
+    try:
+        fields = ast_fields_of(parse_ast(raw))
+    except (TypeError, ValueError) as exc:
+        return [f"signal_expr가 실행 가능한 AST가 아니다: {exc}"]
+    micro = sorted(fields & set(MICRO_FIELDS))
+    if not micro:
+        out.append(
+            "signal_expr에 호가·체결 미시구조 필드가 없다 - close/notional/returns "
+            "단독 신호는 이 공장의 핵심 탐색 대상으로 발행하지 않는다")
+    tables = set(proposal.data_requirements.tables)
+    if "microstructure_features" not in tables:
+        out.append(
+            "DATA_TABLES에 microstructure_features가 없다 - 짧은 표본도 직접 "
+            "검증하며 market_bars는 체결·벤치마크 보조로 함께 둔다")
+    return out
+
+
+def check_intraday_screening_population(
+        proposal: ExperimentProposalV1,
+        leads: dict[str, MethodologyLeadV1]) -> list[str]:
+    """Verify shared-replay sidecars against exact sourced v5 formulas."""
+    if proposal.research_lane != ResearchLane.INTRADAY_EVENT:
+        return []
+    population = (proposal.suggested_params or {}).get(
+        "screening_population") or []
+    if not isinstance(population, list):
+        return ["screening_population must be a JSON list"]
+    if len(population) > 7:
+        return ["screening_population exceeds the bounded seven-sidecar limit"]
+
+    from contracts.alpha_semantics import validate as validate_plan
+    from contracts import intraday_ast_contract as intraday_grammar
+    from contracts.intraday_ast_contract import fingerprint, parse, unit_of
+    from contracts.intraday_ablation import generate as generate_ablations
+    import formula_discovery
+
+    out: list[str] = []
+    try:
+        primary_fp = fingerprint(parse(
+            (proposal.suggested_params or {}).get("intraday_signal_expr")))
+    except (TypeError, ValueError):
+        return []  # the primary formula gate reports the precise parse error
+    seen = {primary_fp}
+    for index, row in enumerate(population):
+        prefix = f"screening_population[{index}]"
+        if not isinstance(row, dict):
+            out.append(f"{prefix} must be an object")
+            continue
+        try:
+            expr = parse(row.get("intraday_signal_expr"))
+            fp = fingerprint(expr)
+            plan = validate_plan(row.get("semantic_plan") or {})
+        except (TypeError, ValueError) as exc:
+            out.append(f"{prefix} is not executable: {exc}")
+            continue
+        if fp in seen:
+            out.append(f"{prefix} duplicates the primary or another sidecar")
+        seen.add(fp)
+        if str(row.get("ast_fingerprint") or "") != fp:
+            out.append(f"{prefix}.ast_fingerprint does not match its AST")
+        output = str(plan.get("output") or "").upper()
+        if output in {"TAKER_NET_PNL", "PASSIVE_FILL_ADJUSTED_PNL"}:
+            coefficient_policy = str(row.get("coefficient_policy") or "").upper()
+            if coefficient_policy not in {
+                    "FIXED_FROM_SOURCE", "PREREGISTERED_NO_OOS_FIT",
+                    "STRUCTURE_ONLY"}:
+                out.append(f"{prefix} has unsupported coefficient_policy")
+            elif coefficient_policy != "STRUCTURE_ONLY" and unit_of(expr) != "BPS":
+                out.append(f"{prefix} fixed net-PnL AST must output BPS")
+            elif coefficient_policy == "STRUCTURE_ONLY" and unit_of(expr) == "BOOL":
+                out.append(f"{prefix} STRUCTURE_ONLY AST must output a number")
+            if str(row.get("entry_policy") or "").upper() != \
+                    "PREDICTED_MARKOUT_CLEARS_COST":
+                out.append(f"{prefix} lacks the executable cost hurdle")
+
+        source_ids = [str(value) for value in row.get("source_lead_ids") or []]
+        if not source_ids:
+            out.append(f"{prefix} has no source_lead_ids")
+            continue
+        role = str(row.get("candidate_role") or "")
+        sourced = False
+        for lead_id in source_ids:
+            lead = leads.get(lead_id)
+            if lead is None:
+                out.append(f"{prefix} source lead {lead_id} is unavailable")
+                continue
+            contract = lead.ast_contract or {}
+            if (contract.get("formula_discovery_version") !=
+                    "formula-discovery-v5"):
+                out.append(f"{prefix} source lead {lead_id} is not v5")
+                continue
+            if (not contract.get("formula_contract_complete")
+                    or contract.get("research_lane") != "INTRADAY_EVENT"):
+                out.append(f"{prefix} source lead {lead_id} is not contract-complete")
+                continue
+            try:
+                source_plan = validate_plan(contract.get("semantic_plan") or {})
+                source_policy = str((contract.get("formula_thesis") or {}).get(
+                    "decision_rule") or "")
+                source_coefficient_policy = str(
+                    (contract.get("formula_thesis") or {}).get(
+                        "coefficient_policy") or "")
+                formula_discovery.assess(
+                    contract.get("formula_thesis"),
+                    candidate=contract.get("candidate_signal_expr"),
+                    semantic_plan=source_plan,
+                    grammar=intraday_grammar,
+                )
+                if role == "LINKED_CANDIDATE":
+                    source_expr = parse(contract.get("candidate_signal_expr"))
+                    match = (contract.get("alpha_candidate_eligible") is True
+                             and fingerprint(source_expr) == fp
+                             and source_plan == plan
+                             and source_policy == str(
+                                 row.get("entry_policy") or "")
+                             and source_coefficient_policy == str(
+                                 row.get("coefficient_policy") or ""))
+                elif role == "LINEAGE_PARENT":
+                    source_expr = parse(contract.get("parent_signal_expr"))
+                    match = (fingerprint(source_expr) == fp
+                             and source_plan == plan
+                             and source_policy == str(
+                                 row.get("entry_policy") or "")
+                             and source_coefficient_policy == str(
+                                 row.get("coefficient_policy") or ""))
+                elif role == "STRUCTURAL_ABLATION":
+                    source_expr = parse(contract.get("candidate_signal_expr"))
+                    source_fp = fingerprint(source_expr)
+                    expected = {
+                        candidate["ast_fingerprint"]: candidate
+                        for candidate in generate_ablations(source_expr)
+                    }.get(fp)
+                    match = (
+                        contract.get("alpha_candidate_eligible") is True
+                        and source_fp == primary_fp
+                        and row.get("ablation_of_ast_fingerprint") == source_fp
+                        and expected is not None
+                        and row.get("ablation_operator") == expected.get(
+                            "ablation_operator")
+                        and row.get("ablation_path") == expected.get(
+                            "ablation_path")
+                        and row.get("ablation_version") == expected.get(
+                            "ablation_version")
+                        and source_plan == plan
+                        and source_policy == str(row.get("entry_policy") or "")
+                        and source_coefficient_policy == str(
+                            row.get("coefficient_policy") or ""))
+                else:
+                    out.append(f"{prefix} has unknown candidate_role={role!r}")
+                    break
+            except (TypeError, ValueError):
+                match = False
+            sourced = sourced or match
+        if not sourced:
+            out.append(f"{prefix} does not match its cited lead contract")
     return out
 
 
@@ -116,7 +365,19 @@ def check_prior_art(proposal: ExperimentProposalV1,
     기획안은 회사가 이미 산 실험을 다시 사자는 제안이다.
     """
     out = []
-    rejected = [o for o in past_outcomes
+    has_formula = bool(
+        (proposal.suggested_params or {}).get("signal_expr") is not None
+        or (proposal.suggested_params or {}).get("intraday_signal_expr") is not None
+    )
+    # A broad EDGE_TYPE/universe label is a prior, not formula identity.  Treating
+    # every formula under e.g. order_flow_imbalance as one hard budget made a
+    # never-tested cross-scale AST inherit five unrelated trials and die before
+    # Quant could assign its formula-shaped trial family.  Exact AST history stays
+    # a hard blocker; broad-family history is surfaced as a warning in evaluate().
+    hard_outcomes = ([o for o in past_outcomes
+                      if str(o.get("match_scope") or "") == "AST_EXACT"]
+                     if has_formula else list(past_outcomes))
+    rejected = [o for o in hard_outcomes
                 if str(o.get("decision")) in ("REJECT", "KILLED", "GATE_HOLD", "DEMOTED")]
     if not rejected:
         return out
@@ -133,7 +394,8 @@ def check_prior_art(proposal: ExperimentProposalV1,
             f"대응 없는 재도전은 회사가 이미 산 실험을 다시 사는 것이다")
 
     # 예산은 Gate 0 이 최종 판정하지만, 여기서 미리 알려 기획 비용을 아낀다
-    used = len([o for o in past_outcomes if str(o.get("decision")) != "BLOCKED"])
+    used = len([o for o in hard_outcomes
+                if str(o.get("decision")) != "BLOCKED"])
     if used >= proposal.trial_budget:
         out.append(
             f"시도 예산 소진: 이 계열에서 이미 {used}회 시도했다"
@@ -162,10 +424,31 @@ def evaluate(proposal: ExperimentProposalV1, *,
     for why in check_leads(proposal, leads or {}):
         r.block("LEAD_UNUSABLE", why)
 
+    # ④ 탐색 데이터 우선순위. 짧은 표본은 불확실성으로 판정하며 일봉으로
+    #    대체하지 않는다.
+    for why in check_microstructure_primary(proposal):
+        r.block("MICROSTRUCTURE_PRIMARY_REQUIRED", why)
+
+    for why in check_intraday_screening_population(proposal, leads or {}):
+        r.block("SCREENING_POPULATION_INVALID", why)
+
     # ④ 기각 이력 대응 (중복 실험 방지)
     for why in check_prior_art(proposal, past_outcomes or []):
         code = "OVER_BUDGET" if "예산 소진" in why else "DUPLICATE_UNADDRESSED"
         r.block(code, why)
+
+    if ((proposal.suggested_params or {}).get("signal_expr") is not None
+            or (proposal.suggested_params or {}).get(
+                "intraday_signal_expr") is not None):
+        broad_negative = [o for o in (past_outcomes or [])
+                          if str(o.get("match_scope") or "") == "EDGE_UNIVERSE"
+                          and str(o.get("decision") or "") in
+                          ("REJECT", "KILLED", "GATE_HOLD", "DEMOTED")]
+        broad_lessons = sorted({str(code) for outcome in broad_negative
+                                for code in (outcome.get("lesson_codes") or [])})
+        if broad_lessons:
+            r.warn("같은 edge/universe의 부정 선행 결과(새 수식의 시도 예산에는 "
+                   f"합산하지 않음): {broad_lessons}")
 
     # ⑤ 경고: 막지는 않지만 퀀트가 알아야 하는 것
     if not proposal.source_reported_effect:
@@ -190,6 +473,11 @@ def _mk_lead(lead_id=None, testability=Testability.RULE_EXPRESSIBLE):
         lead_id=lead_id or lead_id_for(list(refs)), case_id="rc_1",
         scout_lens=ScoutLens.ACADEMIC, source_type=SourceType.PAPER,
         as_known_at=datetime(2026, 8, 10, tzinfo=timezone.utc), refs=refs,
+        ast_contract={"ast_readiness": "AST_READY",
+                      "primary_data_plane": "MICROSTRUCTURE",
+                      "daily_data_role": "EXECUTION_BENCHMARK_REGIME_AUXILIARY",
+                      "derivation_mode": "MECHANISM_MUTATION",
+                      "alpha_candidate_eligible": True},
         claimed_edge="모멘텀 붕괴는 변동성으로 예측된다", testability=testability)
 
 
@@ -210,11 +498,44 @@ def _mk_proposal(**kw):
         skeptic_sign="worker_run_42",
         edge_type="liquidity_shock_reversal", universe_key="krx_all",
         falsification_tests=("하락장 초과수익이 0 미만이면 기각",),
-        data_requirements=DataRequirement(tables=("market_bars",), min_history_days=750),
+        data_requirements=DataRequirement(
+            tables=("market_bars", "microstructure_features"), min_history_days=58),
+        suggested_params={"signal_expr": {
+            "op": "ts_mean", "field": "order_flow_imbalance", "n": 3}},
         prior_check=PriorCheck(),
     )
     base.update(kw)
     return ExperimentProposalV1(**base), {lead.lead_id: lead}
+
+
+def _with_current_intraday_contract(proposal, leads):
+    """Make self-check leads obey the same complete contract as production rows."""
+    from contracts import intraday_ast_contract as grammar
+
+    expr = proposal.suggested_params["intraday_signal_expr"]
+    fields = sorted(grammar.fields_of(expr))
+    operators = grammar.operators_of(expr)
+    form = "INTERACTION" if operators & {"mul", "div"} else "MONOTONE"
+    thesis = {
+        "target": proposal.semantic_plan["output"],
+        "functional_form": form,
+        "expected_sign": "STATE_DEPENDENT",
+        "coefficient_policy": "PREREGISTERED_NO_OOS_FIT",
+        "decision_rule": "PREDICTED_MARKOUT_CLEARS_COST",
+        "terms": {field: ("PRESSURE" if "imbalance" in field
+                           or "microprice" in field else "VOLATILITY")
+                  for field in fields},
+        "identification": (
+            "The preregistered markout equation must remain positive after costs."),
+    }
+    return {lid: lead.model_copy(update={"ast_contract": {
+        **lead.ast_contract,
+        "formula_discovery_version": "formula-discovery-v5",
+        "formula_contract_complete": True,
+        "candidate_signal_expr": expr,
+        "semantic_plan": proposal.semantic_plan,
+        "formula_thesis": thesis,
+    }}) for lid, lead in leads.items()}
 
 
 def _check_clean_proposal_passes():
@@ -245,11 +566,97 @@ def _check_unusable_lead_is_blocked():
     assert not r.ok and any("testability=UNUSABLE" in b for b in r.blockers), r.as_dict()
 
 
+def _check_public_baseline_control_is_blocked():
+    """공개식을 그대로 재현한 것은 기준선이지 신규 알파 후보가 아니다."""
+    lead = _mk_lead()
+    lead = lead.model_copy(update={"ast_contract": {
+        **lead.ast_contract,
+        "derivation_mode": "DIRECT_REPLICATION",
+        "alpha_candidate_eligible": False,
+    }})
+    p, _ = _mk_proposal(lead_ids=(lead.lead_id,))
+    r = evaluate(p, leads={lead.lead_id: lead})
+    assert not r.ok
+    assert any("공개 방법론 대조군" in b for b in r.blockers), r.as_dict()
+
+
+def _check_daily_only_signal_is_blocked():
+    p, leads = _mk_proposal(
+        data_requirements={"tables": ["market_bars"], "min_history_days": 58},
+        suggested_params={"signal_expr": {
+            "op": "ts_mean", "field": "returns", "n": 5}})
+    r = evaluate(p, leads=leads)
+    assert not r.ok
+    assert any("MICROSTRUCTURE_PRIMARY_REQUIRED" in b for b in r.blockers), r.as_dict()
+
+
+def _check_intraday_ast_uses_intraday_contract():
+    """The raw-event lane must not be parsed as a daily signal_expr."""
+    from contracts.factory_contracts import DataRequirement
+
+    p, leads = _mk_proposal(
+        research_lane=ResearchLane.INTRADAY_EVENT,
+        semantic_plan={
+            "event": "QUOTE_IMBALANCE", "output": "TAKER_NET_PNL",
+            "context": ["ALL"], "direction": "FOLLOW",
+            "execution": "TAKER", "qualities": ["PERSISTENCE"],
+            "horizon_seconds": 1,
+        },
+        data_requirements=DataRequirement(
+            tables=("market_quotes", "market_ticks"), min_history_days=10),
+        suggested_params={"intraday_signal_expr": {
+            "op": "mul", "args": [
+                {"op": "rolling_mean",
+                 "arg": {"op": "field", "field": "queue_imbalance_l1"},
+                 "seconds": 5},
+                {"op": "field", "field": "realized_volatility_bps"}],
+        }, "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST"},
+    )
+    leads = _with_current_intraday_contract(p, leads)
+    r = evaluate(p, leads=leads)
+    assert r.ok, r.as_dict()
+
+
+def _check_passive_intraday_uses_canonical_target_and_cost_hurdle():
+    """Passive formulas use the same output vocabulary at every boundary."""
+    from contracts.factory_contracts import DataRequirement
+
+    params = {"intraday_signal_expr": {
+        "op": "rolling_mean", "seconds": 5,
+        "arg": {"op": "field", "field": "microprice_offset_bps"}},
+        "execution": "PASSIVE_FIFO_LOWER_BOUND"}
+    p, leads = _mk_proposal(
+        research_lane=ResearchLane.INTRADAY_EVENT,
+        semantic_plan={
+            "event": "MICROPRICE_DISLOCATION",
+            "output": "PASSIVE_FILL_ADJUSTED_PNL",
+            "context": ["ALL"], "direction": "FOLLOW",
+            "execution": "PASSIVE_FIFO_LOWER_BOUND",
+            "qualities": ["PERSISTENCE"], "horizon_seconds": 1,
+        },
+        data_requirements=DataRequirement(
+            tables=("market_quotes", "market_ticks"), min_history_days=10),
+        suggested_params=params,
+    )
+    leads = _with_current_intraday_contract(p, leads)
+    blocked = evaluate(p, leads=leads)
+    assert not blocked.ok
+    assert any("PREDICTED_MARKOUT_CLEARS_COST" in reason
+               for reason in blocked.blockers), \
+        blocked.as_dict()
+
+    executable = p.model_copy(update={"suggested_params": {
+        **params, "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST"}})
+    accepted = evaluate(executable, leads=leads)
+    assert accepted.ok, accepted.as_dict()
+
+
 def _check_unaddressed_rejection_is_blocked():
     """**회사가 이미 산 실험을 다시 사지 않는다.**"""
     p, leads = _mk_proposal()
     past = [{"outcome_id": "out_1", "decision": "REJECT",
-             "lesson_codes": ["BEAR_FRAGILE", "OVERFIT_PBO"]}]
+             "lesson_codes": ["BEAR_FRAGILE", "OVERFIT_PBO"],
+             "match_scope": "AST_EXACT"}]
     r = evaluate(p, leads=leads, past_outcomes=past)
     assert not r.ok
     assert any("DUPLICATE_UNADDRESSED" in b for b in r.blockers), r.as_dict()
@@ -264,7 +671,8 @@ def _check_addressed_rejection_passes():
         lessons_addressed={"BEAR_FRAGILE": "하락장 표본을 2창에서 5창으로 늘린다",
                            "OVERFIT_PBO": "변형 수를 줄이고 사전에 파라미터를 고정한다"}))
     past = [{"outcome_id": "out_1", "decision": "REJECT",
-             "lesson_codes": ["BEAR_FRAGILE", "OVERFIT_PBO"]}]
+             "lesson_codes": ["BEAR_FRAGILE", "OVERFIT_PBO"],
+             "match_scope": "AST_EXACT"}]
     r = evaluate(p, leads=leads, past_outcomes=past)
     assert r.ok, r.as_dict()
 
@@ -274,10 +682,23 @@ def _check_budget_exhaustion_is_blocked():
     p, leads = _mk_proposal(trial_budget=2, prior_check=PriorCheck(
         trial_family_id="fam_1", trials_used=2, past_outcomes=("o1", "o2"),
         lessons_addressed={"OVERFIT_PBO": "파라미터 고정"}))
-    past = [{"outcome_id": "o1", "decision": "REJECT", "lesson_codes": ["OVERFIT_PBO"]},
-            {"outcome_id": "o2", "decision": "REVISE", "lesson_codes": []}]
+    past = [{"outcome_id": "o1", "decision": "REJECT",
+             "lesson_codes": ["OVERFIT_PBO"], "match_scope": "AST_EXACT"},
+            {"outcome_id": "o2", "decision": "REVISE", "lesson_codes": [],
+             "match_scope": "AST_EXACT"}]
     r = evaluate(p, leads=leads, past_outcomes=past)
     assert not r.ok and any("OVER_BUDGET" in b for b in r.blockers), r.as_dict()
+
+
+def _check_broad_family_does_not_spend_new_formula_budget():
+    """A new AST gets its own trial budget even under a familiar edge label."""
+    p, leads = _mk_proposal(trial_budget=1)
+    broad = [{"decision": "GATE_HOLD", "lesson_codes": ["BASELINE_NOT_BEATEN"],
+              "match_scope": "EDGE_UNIVERSE"} for _ in range(5)]
+    r = evaluate(p, leads=leads, past_outcomes=broad)
+    assert r.ok, r.as_dict()
+    assert any("새 수식의 시도 예산에는 합산하지 않음" in warning
+               for warning in r.warnings), r.as_dict()
 
 
 def _check_success_history_does_not_block():
@@ -309,7 +730,8 @@ def _check_lesson_vocabulary_is_shared():
     """게이트가 대조하는 교훈 코드는 계약의 통제 어휘와 같은 집합이어야 한다."""
     p, leads = _mk_proposal()
     past = [{"outcome_id": "o1", "decision": "REJECT",
-             "lesson_codes": [c.value for c in LessonCode]}]
+             "lesson_codes": [c.value for c in LessonCode],
+             "match_scope": "AST_EXACT"}]
     r = evaluate(p, leads=leads, past_outcomes=past)
     assert not r.ok
     for c in LessonCode:
@@ -320,16 +742,23 @@ if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
 
+    _check_passive_intraday_uses_canonical_target_and_cost_hurdle()
+    print("  passive target/cost contract OK")
+
     print(f"{MODULE_VERSION} 자체 점검 (네트워크·DB 없음)")
     _check_clean_proposal_passes();             print("  정상 기획안 통과         OK")
     _check_performance_only_rationale_is_blocked(); print("  성과 서술만 = 거부      OK")
     _check_missing_lead_is_blocked();           print("  끊어진 리드 참조 거부    OK")
     _check_unusable_lead_is_blocked();          print("  UNUSABLE 리드 거부       OK")
+    _check_public_baseline_control_is_blocked(); print("  공개식 대조군 발행 차단  OK")
+    _check_daily_only_signal_is_blocked();      print("  일봉 단독 신호 거부      OK")
+    _check_intraday_ast_uses_intraday_contract(); print("  인트라데이 AST 계약 분리  OK")
     _check_unaddressed_rejection_is_blocked();  print("  기각 교훈 미대응 거부    OK")
     _check_addressed_rejection_passes();        print("  대응하면 재도전 허용     OK")
     _check_budget_exhaustion_is_blocked();      print("  예산 소진 차단           OK")
+    _check_broad_family_does_not_spend_new_formula_budget(); print("  새 수식 독립 예산        OK")
     _check_success_history_does_not_block();    print("  성공 이력은 안 막음      OK")
     _check_deterministic();                     print("  결정론                   OK")
     _check_warnings_do_not_block();             print("  경고 != 차단             OK")
     _check_lesson_vocabulary_is_shared();       print("  교훈 어휘 공유           OK")
-    print("발행 게이트 11개 영역 통과.")
+    print("발행 게이트 13개 영역 통과.")

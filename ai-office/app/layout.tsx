@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import "./office.css";
 import { COMPANY } from "../company.config";
+import { QueryProvider } from "./lib/QueryProvider";
 
 export const metadata: Metadata = {
   title: COMPANY.pageTitle,
@@ -26,7 +27,9 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
       </head>
-      <body>{children}</body>
+      <body>
+        <QueryProvider>{children}</QueryProvider>
+      </body>
     </html>
   );
 }

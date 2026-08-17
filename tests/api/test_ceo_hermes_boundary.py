@@ -282,7 +282,22 @@ class CeoRootTaskBoundaryTest(unittest.TestCase):
                 {"assignee": "quant-backtest-department", "body": "workflow_role=primary"}
             ],
         }
-        with patch.object(ceo.hermes_boundary, "show_kanban_task", return_value=root):
+        workflow = MagicMock()
+        workflow.root_task_id = "t_root"
+        workflow.status = "running"
+        workflow.root.profile = "ceo-agent"
+        workflow.root.created_at = None
+        workflow.root.completed_at = None
+        workflow.query = None
+        workflow.selected_departments = ("quant-backtest-department",)
+        workflow.qa_required = True
+        workflow.primary_nodes = (MagicMock(done=False),)
+        workflow.qa_stage = "todo"
+        workflow.synthesis_stage = "todo"
+        with (
+            patch.object(ceo, "_load", return_value=workflow),
+            patch.object(ceo.hermes_boundary, "show_kanban_task", return_value=root),
+        ):
             response = ceo.ceo_task_status("t_root")
         self.assertEqual(response["task_id"], "t_root")
         self.assertEqual(
@@ -306,8 +321,22 @@ class CeoRootTaskBoundaryTest(unittest.TestCase):
         self.assertEqual(response["planning"]["selected_departments"], [])
 
     def test_route_returns_accepted_status(self) -> None:
-        route = next(route for route in ceo.router.routes if route.path == "/ui/ceo/ask")
+        """`POST /ui/ceo/ask`는 이제 `ceo.router`가 아니라 `ceo_mirror_api.router`가
+        유일하게 등록한다 - `ceo.ceo_query`는 순수 함수라 자체 route가 없다
+        (`tests/api/test_main_routes.py`가 이 단일 소유 상태를 앱 전체 기준으로 고정).
+        """
+        from apps.api import ceo_mirror_api
+
+        route = next(
+            route
+            for route in ceo_mirror_api.router.routes
+            if route.path == "/ui/ceo/ask"
+        )
         self.assertEqual(route.status_code, 202)
+        self.assertFalse(
+            any(route.path == "/ui/ceo/ask" for route in ceo.router.routes),
+            "ceo.router가 /ask를 다시 등록하면 mirror와 경로가 또 겹친다",
+        )
 
 
 if __name__ == "__main__":

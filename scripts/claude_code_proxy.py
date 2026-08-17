@@ -59,13 +59,27 @@ DEFAULT_PORT = int(os.environ.get("CLAUDE_PROXY_PORT", "8787"))
 # 겹쳐 어느 쪽이 죽었는지 알 수 없게 된다).
 MAX_CONCURRENT = int(os.environ.get("CLAUDE_PROXY_CONCURRENCY", "2"))
 CLI_TIMEOUT = float(os.environ.get("CLAUDE_PROXY_TIMEOUT", "300"))
+# 슬롯이 빌 때까지 기다려 주는 상한.
+# ▶ 2026-08-14 실측 정정: 처음엔 "한 호출 30초"로 보고 120초를 줬는데, 그건 짧은
+#   프롬프트였다. 실제 공장 호출 35건의 **중앙값이 408초(6.8분), 최대 1,060초**다
+#   (`claude -p` 가 단발 완성이 아니라 도구를 쓰는 에이전트 루프이기 때문).
+#   슬롯 3개가 그 길이로 물려 있으면 120초 대기로는 못 기다려 429 가 났다(13건).
+#   CLI_TIMEOUT(1200초)보다는 짧게 둬서 "대기하다 클라이언트가 먼저 죽는" 상황은
+#   여전히 만들지 않는다.
+ACQUIRE_TIMEOUT = float(os.environ.get("CLAUDE_PROXY_ACQUIRE_TIMEOUT", "600"))
 
 # 모델 별칭 - 헤르메스가 보내는 이름을 CLI 가 아는 이름으로.
 # CLI 는 sonnet/opus/haiku 별칭을 받는다(정확한 날짜 ID 는 버전마다 갈린다).
+# ▶ Claude 5 세대 (2026-08-13, 부서장 fable 전환 실측): 별칭표에 없는 ID 는
+#   DEFAULT_ALIAS(sonnet)로 강등된다 - claude-fable-5 요청이 조용히 sonnet
+#   으로 돌았다(프록시 로그로 발견). 5세대는 **전체 ID 그대로** CLI 에 넘긴다
+#   (CLI 는 전체 모델 ID 도 받는다).
 MODEL_ALIASES = {
     "claude-sonnet-4-5": "sonnet", "claude-sonnet-4-5-20250929": "sonnet",
     "claude-opus-4-5": "opus", "claude-haiku-4-5": "haiku",
     "sonnet": "sonnet", "opus": "opus", "haiku": "haiku",
+    "claude-fable-5": "claude-fable-5", "fable": "claude-fable-5",
+    "claude-opus-5": "claude-opus-5", "claude-sonnet-5": "claude-sonnet-5",
 }
 DEFAULT_ALIAS = "sonnet"
 
@@ -190,21 +204,71 @@ def parse_cli_json(raw: str) -> tuple[str, dict]:
     raise RuntimeError(f"CLI 응답에서 본문을 못 찾았다 - 키: {sorted(d)[:12]}")
 
 
+def _kill_tree(proc: "subprocess.Popen") -> None:
+    """CLI 프로세스 **트리 전체**를 죽인다.
+
+    ▶ 왜 트리인가 (2026-08-14 실측, 프록시 영구 정지 사고)
+      `cli` 는 `claude.CMD` 래퍼다. `Popen.kill()` 은 그 래퍼(cmd.exe)만 죽이고
+      실제 일을 하는 손자 `claude.exe` 는 살아남는다. 그 손자가 stdout/stderr
+      파이프를 그대로 물고 있어서 EOF 가 영원히 안 오고, 뒤이은 파이프 읽기가
+      무한정 막힌다. 그 스레드는 세마포어를 든 채 멈추므로 슬롯이 반납되지
+      않는다 - 그런 호출이 3 번 쌓이면 프록시가 통째로 죽는다(성공 15 에서
+      정지, 오류·거부만 증가, in-flight 프로세스가 타임아웃 300 초를 훌쩍 넘겨
+      15 분째 생존).
+    """
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=20, check=False)
+        else:
+            import signal
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except Exception:
+        pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    # 파이프를 닫아 준다. 손자가 아직 붙어 있어도 우리 쪽 fd 는 놓아야 한다.
+    for pipe in (proc.stdin, proc.stdout, proc.stderr):
+        try:
+            if pipe is not None:
+                pipe.close()
+        except Exception:
+            pass
+
+
 def call_cli(prompt: str, alias: str, *, cli: str) -> tuple[str, dict]:
     """claude -p 한 번. 프롬프트는 **stdin 으로** 넣는다.
 
     argv 로 넘기면 Windows 명령줄 길이 상한(~32KB)에 걸린다 - Packet 총괄
     프롬프트는 그보다 쉽게 커진다(분석가 6인 readout 이 들어간다).
+
+    ▶ `subprocess.run(timeout=...)` 을 쓰지 않는다. 그 구현은 타임아웃 뒤
+      자식을 죽이고 **다시 파이프를 읽어** 종료를 기다리는데, 손자가 살아서
+      파이프를 물고 있으면 그 대기가 안 끝난다(`_kill_tree` 주석 참조).
+      타임아웃이 있는데도 슬롯이 영영 반납되지 않는 원인이었다.
     """
-    proc = subprocess.run(
+    proc = subprocess.Popen(
         [cli, "-p", "--model", alias, "--output-format", "json"],
-        check=False, input=prompt, capture_output=True, text=True, encoding="utf-8",
-        errors="replace", timeout=CLI_TIMEOUT,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace",
+        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )
+    try:
+        stdout, stderr = proc.communicate(prompt, timeout=CLI_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        # 트리를 죽이고 **즉시** 올린다. 여기서 파이프를 더 읽으면 그 순간
+        # 다시 무한 대기가 된다 - 그게 이 사고의 정확한 재현 경로다.
+        _kill_tree(proc)
+        raise
+    except BaseException:
+        _kill_tree(proc)
+        raise
     if proc.returncode != 0:
         raise RuntimeError(
-            f"CLI exit={proc.returncode}: {(proc.stderr or proc.stdout)[:300]}")
-    return parse_cli_json(proc.stdout)
+            f"CLI exit={proc.returncode}: {(stderr or stdout)[:300]}")
+    return parse_cli_json(stdout)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -289,6 +353,14 @@ class Handler(BaseHTTPRequestHandler):
         #                         api.anthropic.com 으로 직행한다**(프로필 키·
         #                         환경변수 둘 다 무시). 그래서 custom 경로가
         #                         실제로 쓰이는 길이다.
+        # ▶ /anthropic 접두 (2026-08-13 정정): 지금 이미지의 hermes 는
+        #   `_anthropic_base_url_override_ok` 가 **경로가 /anthropic 으로 끝나는
+        #   오버라이드만** 인정하고, 아니면 조용히 api.anthropic.com 직행으로
+        #   폴백한다(부서장 fable 전환 때 400 으로 실측). 그 관례로 들어오는
+        #   요청의 접두를 벗겨 같은 핸들러로 받는다 -
+        #   base_url=http://host.docker.internal:8787/anthropic 이 정본이다.
+        if path.startswith("/anthropic/") or path == "/anthropic":
+            path = path[len("/anthropic"):] or "/"
         openai_style = path.endswith("/v1/chat/completions")
         if not (openai_style or path.endswith("/v1/messages")):
             self._json(404, {"type": "error",
@@ -324,15 +396,32 @@ class Handler(BaseHTTPRequestHandler):
                                        "message": "빈 프롬프트"}})
             return
 
-        # 대기시키지 않고 거절한다 - 대기하면 헤르메스 타임아웃과 겹쳐
-        # 어느 쪽이 죽었는지 알 수 없게 된다
-        if not _sem.acquire(blocking=False):
+        # ▶ 즉시 거절이 아니라 **유한 대기** 후 거절한다 (2026-08-14 정정)
+        #   원래는 "대기하면 헤르메스 타임아웃과 겹쳐 어느 쪽이 죽었는지 모른다"는
+        #   이유로 즉시 429 였다. 그런데 실측에서 그 즉시성이 카드를 죽이고 있었다:
+        #     · 한 호출은 30~36초 걸린다(단발, turns=1 실측).
+        #     · 헤르메스는 429 를 받으면 3회만 재시도하고 총 대기가 ~15초다.
+        #     → 슬롯이 비는 데 30초 걸리는데 15초만 기다리므로, 경합이 조금만
+        #       있어도 카드가 crash 2회로 blocked 에 굳는다. 실제로 blocked 183 장
+        #       중 상당수가 이 경로였고 429 는 04:25 에도 재발했다.
+        #   그래서 클라이언트 타임아웃보다 충분히 짧은 유한 대기로 흡수한다.
+        #   대기해도 못 얻으면 그때 429 - "누가 죽었는지 모른다"는 문제는
+        #   대기 시간을 로그로 남겨 해소한다.
+        wait_started = time.time()
+        if not _sem.acquire(timeout=ACQUIRE_TIMEOUT):
             _stats["rejected"] += 1
+            print(f"  [{time.strftime('%H:%M:%S')}] 슬롯 대기 {ACQUIRE_TIMEOUT:.0f}초 "
+                  f"초과 - 429 (상한 {MAX_CONCURRENT})", file=sys.stderr, flush=True)
             self._json(429, {"type": "error",
                              "error": {"type": "rate_limit_error",
                                        "message": f"동시 실행 상한 {MAX_CONCURRENT} "
-                                                  f"- 잠시 뒤 재시도"}})
+                                                  f"- {ACQUIRE_TIMEOUT:.0f}초 대기 후에도 "
+                                                  f"슬롯 없음"}})
             return
+        waited = time.time() - wait_started
+        if waited > 1.0:
+            _stats["waited_total_s"] = _stats.get("waited_total_s", 0.0) + waited
+            _stats["waited_calls"] = _stats.get("waited_calls", 0) + 1
         t0 = time.time()
         try:
             text, meta = call_cli(prompt, alias, cli=cli)
@@ -470,7 +559,13 @@ def _check_openai_shape():
 def _check_model_alias():
     assert MODEL_ALIASES["claude-sonnet-4-5"] == "sonnet"
     assert MODEL_ALIASES.get("모르는모델", DEFAULT_ALIAS) == "sonnet"
-    assert set(MODEL_ALIASES.values()) <= {"sonnet", "opus", "haiku"}
+    # ▶ 5세대는 강등 금지 (2026-08-13 실측: claude-fable-5 가 조용히 sonnet
+    #   으로 돌았다). 부서장 전환의 전제라 여기서 고정한다.
+    assert MODEL_ALIASES["claude-fable-5"] == "claude-fable-5"
+    assert MODEL_ALIASES["fable"] == "claude-fable-5"
+    assert set(MODEL_ALIASES.values()) <= {
+        "sonnet", "opus", "haiku",
+        "claude-fable-5", "claude-opus-5", "claude-sonnet-5"}
     print("  모델 별칭                OK")
 
 

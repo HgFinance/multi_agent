@@ -74,3 +74,6 @@ dist/
 #   루트에 빈 디렉터리가 생기고, 부서 프로필이 하나도 안 올라간 껍데기가 된다.
 #   2026-08-12 병합에서 `git add -A` 로 한 번 딸려 들어갔다가 되돌렸다.
 docker-compose.override.yml
+*.bak
+*.bak-*
+*.bak.*

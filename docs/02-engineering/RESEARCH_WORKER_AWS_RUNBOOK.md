@@ -141,9 +141,57 @@ docker logs --tail 5 hedgefund-research-mcp   # "research-mcp-v1: 0.0.0.0:8037/m
 오버레이 없이 `docker compose up -d research-mcp` 를 돌리면 모델 env 와
 런타임 파일 마운트가 빠진 채 재생성돼, 이후 모든 run_research_workers job 이
 `ModuleNotFoundError: No module named 'worker_model_gateway'` 로 FAILED 가 된다
-(§7 첫 행). 매번 -f 두 개가 번거로우면 `.env` 에
-`COMPOSE_FILE=docker-compose.yml:docker-compose.model.yml` 을 넣어도 된다
-(단, 이 EC2 의 다른 작업자와 합의 후).
+(§7 첫 행).
+
+⚠ **compose 파일 목록 규칙** — `-f` 나 `COMPOSE_FILE` 을 쓰는 순간
+`docker-compose.override.yml`(§4.5 에서 만드는 EC2 호스트 적응)은 **자동
+적용에서 빠진다.** 그래서 매번 -f 를 나열하는 대신 `.env` 에 넣으려면
+override 를 반드시 포함해야 한다 (§4.5 를 먼저 실행한 뒤, 이 EC2 의 다른
+작업자와 합의 후):
+
+```
+COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:docker-compose.model.yml
+```
+
+이걸 빠뜨리면 timescaledb 가 재생성되는 날 cpuset 거부가 되살아난다(§7).
+
+## 4.5 부서 읽기면 기동 (Evidence First 의 데이터 원천)
+
+`run_research_workers` 는 symbol 이 오면 Worker 호출 전에 research-api(뉴스·공시,
+Supabase)와 market-api(가격, TSDB)에서 근거를 모은다(§11 Evidence First).
+소스별 독립 시도라 market-api 가 없어도 뉴스·공시는 산다.
+
+⚠ **EC2 최초 1회**: 기본 compose 의 timescaledb 는 로컬 24코어 PC 용
+`cpuset: "22,23"` 이 박혀 있어 EC2(vCPU 8)에서 생성이 거부된다. compose 주석
+(160행)이 "서버로 옮길 때는 cpuset 을 지운다" 라고 정한 그대로, **호스트 전용
+override** 로 푼다. `docker-compose.override.yml` 은 gitignore 라 pull 과
+충돌하지 않는다. 단 자동 적용은 **-f 도 COMPOSE_FILE 도 없이 부르는 명령에만**
+된다 - §3/§4 처럼 -f 를 쓰는 명령이나 COMPOSE_FILE 사용 시에는 목록에
+override 를 직접 포함해야 한다(§4 의 규칙 참고).
+
+```bash
+# 기존 override 가 있으면 덮어쓰지 말고 내용을 합칠 것
+[ -f docker-compose.override.yml ] && { echo "override 가 이미 있다 - 아래 내용을 수동으로 합쳐라"; cat docker-compose.override.yml; } || cat > docker-compose.override.yml <<'EOF'
+# EC2 호스트 적응 (gitignored). timescaledb 의 로컬 PC 용 코어 핀을 해제한다.
+services:
+  timescaledb:
+    cpuset: ""
+EOF
+
+# 검증: 아무것도 안 나와야 정상 (cpuset 이 병합에서 제거됨)
+docker compose config timescaledb 2>/dev/null | grep cpuset
+
+docker compose up -d research-api                  # Supabase 만 필요, 의존 없음
+docker compose up -d timescaledb market-api        # TSDB 는 비어 있어도 뜬다
+docker compose ps research-api market-api timescaledb
+curl -s http://127.0.0.1:8035/health | python3 -m json.tool   # research-api 확인
+curl -s http://127.0.0.1:8036/health                          # market-api 확인
+```
+
+참고: AWS `.env` 는 `TOOL_GATEWAY_ENFORCE=true` 라 research-api 는 persona
+헤더 없는 호출을 403 으로 막는다 - 러너는 `X-Agent-Persona:
+holdings-analyst-worker` 명의로 부르므로 통과한다(해당 persona 가
+news/disclosures/snapshot/bars 스코프를 전부 보유).
 
 ## 5. Worker 직접 스모크 (Hermes 우회 - 러너·게이트웨이·vLLM 검증)
 
@@ -180,10 +228,14 @@ PY
 docker exec -u hermes -i hedgefund-research-hermes hermes chat -Q \
   -q 'worker_model_health 도구를 호출하고 결과 JSON 을 그대로 보여줘'
 
-# 6-2. 본질 E2E: 질문 → run_research_workers → get_worker_job → 산출 보고
+# 6-2. 본질 E2E: 질문 → Evidence First(실데이터) → Worker → 산출 보고
 docker exec -u hermes -i hedgefund-research-hermes hermes chat -Q \
-  -q 'run_research_workers 도구를 holding_question="005930 삼성전자: 보유 관점에서 최근 확인된 사실과 미확인 사항을 정리하라" 로 실행해라. job_id 를 받으면 get_worker_job 을 완료될 때까지 반복 조회하고, 완료되면 워커 산출의 summary, confidence, evidence_refs, escalate 값을 요약하지 말고 그대로 보고하라. degraded 가 true 면 그 사실도 보고하라.'
+  -q 'run_research_workers 도구를 symbol="005930", holding_question="삼성전자를 보유 중이다. 러너가 모아준 최근 뉴스·공시·가격 근거만으로, 확인된 사실과 미확인 사항을 나눠 정리하고 각 주장에 근거 ref(n1, d1 형식)를 달아라" 로 실행해라. job_id 를 받으면 get_worker_job 을 완료될 때까지 반복 조회하고, 완료되면 evidence.sources 상태와 워커 산출의 summary, confidence, evidence_refs, escalate 값을 요약하지 말고 그대로 보고하라. degraded 나 FAILED 소스가 있으면 그 사실도 보고하라.'
 ```
+
+기대: `evidence.sources.news = OK(n건)` (Supabase 에 로컬 수집기가 쌓아온
+실데이터), TSDB 가 비어 있으면 `price_context = UNAVAILABLE` 로 정직하게
+표시되고 Worker 는 뉴스·공시 근거만으로 답한다.
 
 턴이 job RUNNING 상태에서 끝나면 이어서 물으면 된다:
 
@@ -202,6 +254,10 @@ docker exec -u hermes -i hedgefund-research-hermes hermes chat -Q \
 | worker DEGRADED `worker_output_schema_invalid` | 모델이 계약(JSON) 이탈 → 재시도 3회 후 fail-closed. 반복되면 모델·프롬프트 문제, WORKER_MODEL_MATRIX 절차로 벤치마크 |
 | vLLM OOM / KV 부족 | `VLLM_MAX_MODEL_LEN` 축소, `VLLM_GPU_MEMORY_UTILIZATION=0.85` |
 | Hermes 가 새 도구를 모른다 | research-hermes 재시작 (MCP 도구 목록 캐시) |
+| evidence.sources.news FAILED `URLError` | research-api 미기동 → §4.5 |
+| evidence.sources.news FAILED `ApiForbidden` | TOOL_GATEWAY_ENFORCE 켜짐 + persona 스코프 문제 → research-api 로그의 violation 확인 |
+| price_context UNAVAILABLE | market-api 미기동 또는 TSDB 에 해당 종목 일봉 없음 - AWS TSDB 는 원래 비어 있다(정상). 뉴스·공시 근거로는 계속 동작한다 |
+| timescaledb 생성 거부 `Requested CPUs are not available` | 로컬 PC 용 cpuset → §4.5 의 override 생성. **override 를 이미 만들었는데 재발하면** 그 명령의 -f/COMPOSE_FILE 목록에 override 가 빠진 것이다(§4 규칙) - `docker compose config timescaledb \| grep cpuset` 이 값을 보여주면 누락 확정 |
 
 ## 8. 다음 단계 (오늘 범위 밖)
 

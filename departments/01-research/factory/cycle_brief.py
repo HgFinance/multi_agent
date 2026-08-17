@@ -156,13 +156,26 @@ def load_coverage(market_conn) -> dict:
     d, s, e, n = cur.fetchone()
     if d:
         out["일봉"] = f"{d}거래일 {s}~{e}, {n}종목"
-    for t, label in (("market_ticks", "체결"), ("market_quotes", "호가")):
-        cur.execute(f"""select count(distinct observed_at::date), min(observed_at)::date,
-                               max(observed_at)::date, count(distinct instrument_id)
-                          from market.{t}""")
-        d, s, e, n = cur.fetchone()
-        if d:
-            out[label] = f"{d}거래일 {s}~{e}, {n}종목"
+    # Raw event tables are hundreds of GB. Both count(distinct ...) and global
+    # ORDER BY ... LIMIT 1 probes were observed to fan out over compressed
+    # chunks. Read only Timescale's chunk catalog here. This is explicitly a
+    # chunk range, not an observed-row claim; the bounded evaluator measures
+    # exact sessions, instruments and lineage for each experiment.
+    cur.execute("""
+        select hypertable_name, min(range_start)::date, max(range_end)::date,
+               count(*)
+          from timescaledb_information.chunks
+         where hypertable_schema = 'market'
+           and hypertable_name in ('market_ticks', 'market_quotes')
+         group by hypertable_name
+    """)
+    labels = {"market_ticks": "체결", "market_quotes": "호가"}
+    for table, s, e, chunks in cur.fetchall():
+        if s and e:
+            out[labels[str(table)]] = (
+                f"LIVE CHUNK_RANGE {s}~{e} ({int(chunks)} chunks); "
+                "정확한 세션·종목 수는 실험별 bounded slice에서 계측"
+            )
     return out
 
 
@@ -227,9 +240,26 @@ def _selfcheck() -> int:
     # 커버리지 없으면 조용히 비운다(지어내지 않는다)
     check("커버리지 미측정", b2.coverage == {})
 
+    market = _Conn([
+        [(627, "2024-01-02", "2026-07-30", 3924)],
+        [("market_ticks", "2026-06-25", "2026-08-15", 43),
+         ("market_quotes", "2026-06-25", "2026-08-15", 45)],
+    ])
+    coverage = load_coverage(market)
+    check("raw event chunk coverage", "CHUNK_RANGE 2026-06-25~2026-08-15" in coverage["체결"]
+          and "bounded slice" in coverage["호가"])
+    import inspect
+    source = inspect.getsource(load_coverage)
+    check("raw event full scan forbidden",
+          "select count(distinct observed_at::date)" not in source)
+    check("raw event catalog probe",
+          "timescaledb_information.chunks" in source
+          and "order by event_time" not in source
+          and "order by observed_at" not in source)
+
     for f in fails:
         print(f"  FAIL {f}")
-    print(f"cycle_brief 자체 점검: {9 - len(fails)}/9 통과")
+    print(f"cycle_brief 자체 점검: {12 - len(fails)}/12 통과")
     return 1 if fails else 0
 
 

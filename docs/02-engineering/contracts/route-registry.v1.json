@@ -703,6 +703,10 @@
           "path": "/governance/v1/mandates"
         },
         {
+          "method": "PUT",
+          "path": "/governance/v1/mandates/{mandate_id}"
+        },
+        {
           "method": "GET",
           "path": "/governance/v1/mandates/by-fund/{fund_id}/current"
         },
@@ -926,6 +930,10 @@
         },
         {
           "method": "GET",
+          "path": "/ui/discord/messages"
+        },
+        {
+          "method": "GET",
           "path": "/ui/integrations"
         },
         {
@@ -955,6 +963,10 @@
         {
           "method": "POST",
           "path": "/ui/mandates"
+        },
+        {
+          "method": "PUT",
+          "path": "/ui/mandates/{mandate_id}"
         },
         {
           "method": "GET",

@@ -177,7 +177,8 @@ class MandatePolicy(BaseModel):
     """mandate_versions 한 Version 의 구조화 정책 전체.
 
     상단 필드는 mandate_versions 의 개별 컬럼(allowed_assets/forbidden_assets)과,
-    하위 모델은 jsonb 컬럼(risk_bounds/universe_policy/approval_rules)과 1:1 대응한다.
+    하위 모델은 jsonb 컬럼(risk_bounds/universe_policy/approval_rules/execution_rules)과
+    1:1 대응한다.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -191,6 +192,15 @@ class MandatePolicy(BaseModel):
     risk_bounds: RiskBounds
     universe_policy: UniversePolicy
     approval_rules: ApprovalRules
+    # 파일 상단 주석대로 jsonb로만 선언하고 내부 형태는 아직 정의하지 않는다 -
+    # System Enforcement가 아직 이 컬럼을 쓰지 않는다(2026-08-14 확인). 이 필드가
+    # 빠져 있어서 GET .../current가 돌려준 policy(row.execution_rules 포함)를
+    # previous_policy로 그대로 되돌려 보내면 extra="forbid"에 걸려 422가 났다 -
+    # 읽기·쓰기 양쪽이 같은 4개 jsonb 컬럼을 다뤄야 이 모델이 실제 저장 행과
+    # 1:1이 된다.
+    execution_rules: dict = Field(
+        default_factory=dict, description="아직 내부 형태가 정의되지 않은 실행 규칙(jsonb)"
+    )
 
     @model_validator(mode="after")
     def _check_asset_lists(self) -> MandatePolicy:
@@ -248,6 +258,13 @@ if __name__ == "__main__":
     ok = MandatePolicy(**_valid_policy())
     assert ok.risk_bounds.max_instrument_weight == Decimal("0.1")
     assert ok.approval_rules.risk_expansion_requires_user_approval is True
+    assert ok.execution_rules == {}  # execution_rules 생략 시 기본값
+
+    # 1-b) GET .../current가 policy 안에 중첩해 돌려주는 execution_rules를
+    # previous_policy로 그대로 되돌려 보내도 거부되지 않는다 - 2026-08-14,
+    # 이 필드가 모델에 없어서 extra="forbid"에 걸려 재저장이 매번 422였다.
+    round_tripped = MandatePolicy(**_valid_policy(execution_rules={}))
+    assert round_tripped.execution_rules == {}
 
     def _rejects(label: str, factory) -> None:
         try:

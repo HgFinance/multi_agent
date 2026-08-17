@@ -1,22 +1,22 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import {
-  departmentStage,
   fetchOperations,
   readableRuntimeMessage,
-  readableRuntimeStatus,
+  subscribeOperationsStream,
   type OperationsDepartment,
   type OperationsView,
 } from "../lib/operationsClient";
 import DepartmentInspector from "./DepartmentInspector";
+import { KANBAN_BASE_URL, resolveKanbanUrl } from "../lib/kanbanUrl";
 
 /**
  * Agent Logs — 페이지 상단(전체 부서 실행 현황).
  *
  * 데이터·판정은 main의 `ops/RiskQaPanel.tsx` 로직 그대로이고, 겉모습만
  * 우리 디자인 토큰으로 옮겼다. 부서 수·Worker 수의 출처는 각 Hermes Profile의
- * Worker Registry이고 실행 상태는 BFF `/ui/snapshot` 이다 — 화면에서 합치지 않는다.
+ * Worker Registry이고 실행 상태는 BFF `/ui/snapshot`과 `/ws/operations`에서 받는다.
  */
 
 const STATUS_VIEW: Record<string, { label: string; tone: string }> = {
@@ -29,6 +29,17 @@ const STATUS_VIEW: Record<string, { label: string; tone: string }> = {
   BLOCKED: { label: "실행 차단", tone: "border-error/40 bg-error-container text-on-error-container" },
   ERROR: { label: "오류", tone: "border-error/40 bg-error-container text-on-error-container" },
 };
+
+const EMPTY_DEPARTMENTS: OperationsDepartment[] = [];
+const NO_SUBSCRIBE = () => () => {};
+
+function usePageHost(): string {
+  return useSyncExternalStore(
+    NO_SUBSCRIBE,
+    () => window.location.hostname,
+    () => "",
+  );
+}
 
 function DepartmentCard({
   department,
@@ -88,19 +99,48 @@ export default function AgentLogsView() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
+  const [streamState, setStreamState] = useState<"connecting" | "connected" | "degraded">("connecting");
+  const [lastKeepalive, setLastKeepalive] = useState<string | null>(null);
+  const [kanbanState, setKanbanState] = useState<"loading" | "ready" | "error">("loading");
+
+  const pageHost = usePageHost();
+  const kanbanUrl = useMemo(() => resolveKanbanUrl(KANBAN_BASE_URL, pageHost || undefined), [pageHost]);
+  const kanbanFailed = !kanbanUrl || kanbanState === "error";
 
   useEffect(() => {
     let alive = true;
-    fetchOperations()
-      .then((next) => alive && setData(next))
-      .catch((cause) => alive && setError(cause instanceof Error ? cause.message : String(cause)))
-      .finally(() => alive && setLoading(false));
+    const refresh = () => {
+      fetchOperations()
+        .then((next) => alive && setData(next))
+        .catch((cause) => alive && setError(cause instanceof Error ? cause.message : String(cause)))
+        .finally(() => alive && setLoading(false));
+    };
+
+    refresh();
+    const unsubscribe = subscribeOperationsStream({
+      onOpen: () => alive && setStreamState("connected"),
+      onSnapshotRequired: refresh,
+      onStatus: refresh,
+      onKeepalive: (observedAt) => {
+        if (!alive) return;
+        setLastKeepalive(observedAt || new Date().toISOString());
+        setStreamState("connected");
+      },
+      onError: () => alive && setStreamState("degraded"),
+    });
     return () => {
       alive = false;
+      unsubscribe();
     };
   }, []);
 
-  const departments = data?.departments ?? [];
+  useEffect(() => {
+    if (!kanbanUrl || kanbanState !== "loading") return undefined;
+    const timer = window.setTimeout(() => setKanbanState("error"), 8000);
+    return () => window.clearTimeout(timer);
+  }, [kanbanState, kanbanUrl]);
+
+  const departments = data?.departments ?? EMPTY_DEPARTMENTS;
   const registeredWorkers = departments.reduce((total, item) => total + item.worker_count, 0);
   const activeWorkers = departments.reduce((total, item) => total + item.active_worker_count, 0);
   const degraded = departments.filter((item) => ["DEGRADED", "BLOCKED", "ERROR"].includes(item.status)).length;
@@ -126,21 +166,106 @@ export default function AgentLogsView() {
             Backend Read Model · 8 Departments
           </p>
           <h1 className="text-headline-lg font-headline-lg text-primary font-bold tracking-tight mt-2">
-            전체 부서 실행 현황
+            Agent Logs
           </h1>
           <p className="text-body-sm font-body-sm text-on-surface-variant mt-2 max-w-3xl">
-            HgFinance 전체 부서의 Registry와 현재 runtime 상태를 표시합니다.
+            BFF snapshot과 수신된 runtime event를 기준으로 부서 Registry와 최근 로그를 표시합니다.
           </p>
         </div>
-        <span
-          className={`shrink-0 px-3 py-1 rounded-full border text-label-md font-label-md ${
-            data?.runtime_connected
-              ? "border-tertiary-fixed-dim bg-tertiary-fixed/30 text-on-tertiary-fixed-variant"
-              : "border-outline text-on-surface-variant"
-          }`}
-        >
-          {data?.runtime_connected ? "RUNTIME CONNECTED" : "DEGRADED"}
-        </span>
+        <div className="flex items-center gap-2 flex-wrap">
+          <span
+            className={`shrink-0 px-3 py-1 rounded-full border text-label-md font-label-md ${
+              data?.runtime_connected
+                ? "border-tertiary-fixed-dim bg-tertiary-fixed/30 text-on-tertiary-fixed-variant"
+                : "border-outline text-on-surface-variant"
+            }`}
+          >
+            {data ? (data.runtime_connected ? "RUNTIME CONNECTED" : "RUNTIME NOT OBSERVED") : "RUNTIME CHECKING"}
+          </span>
+          <span
+            className={`shrink-0 px-3 py-1 rounded-full border text-label-md font-label-md ${
+              streamState === "connected"
+                ? "border-tertiary-fixed-dim bg-tertiary-fixed/30 text-on-tertiary-fixed-variant"
+                : "border-outline text-on-surface-variant"
+            }`}
+          >
+            {streamState === "connected" ? "BFF EVENT STREAM CONNECTED" : streamState === "connecting" ? "BFF STREAM CONNECTING" : "BFF STREAM DEGRADED"}
+          </span>
+        </div>
+      </section>
+
+      <section className="bg-surface-container-lowest border border-outline-variant rounded-lg overflow-hidden shadow-sm flex flex-col">
+        <div className="bg-surface-container-low border-b border-outline-variant px-4 py-2.5 flex items-center justify-between gap-2">
+          <span className="flex items-center gap-2 text-label-md font-label-md text-on-surface-variant">
+            <span className="material-symbols-outlined text-[16px]" aria-hidden="true">dashboard</span>
+            Hermes Kanban Dashboard
+          </span>
+          <span className="flex gap-1.5" aria-hidden="true">
+            <span className="w-2.5 h-2.5 rounded-full bg-outline-variant" />
+            <span className="w-2.5 h-2.5 rounded-full bg-outline-variant" />
+            <span className="w-2.5 h-2.5 rounded-full bg-outline-variant" />
+          </span>
+        </div>
+
+        <div className="p-6 pb-4 flex justify-between items-start gap-4 flex-wrap">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 mb-2 flex-wrap">
+              <span className="bg-primary text-on-primary px-2 py-1 rounded text-label-md font-label-md">SOURCE OF TRUTH</span>
+              <span className="flex items-center gap-1.5 text-xs text-on-surface-variant">
+                <span className="w-2 h-2 rounded-full bg-tertiary-fixed-dim" aria-hidden="true" />
+                Hermes
+              </span>
+            </div>
+            <h2 className="text-headline-md font-headline-md text-primary">공용 Task Graph / Kanban</h2>
+            <p className="text-body-sm font-body-sm text-on-surface-variant mt-1">
+              Agent Logs에서 확인할 업무 배정과 부서별 Task 상태를 이 보드에서 확인합니다.
+            </p>
+          </div>
+          {kanbanUrl ? (
+            <a
+              href={kanbanUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="px-4 py-2 border border-outline-variant bg-surface-container-lowest rounded font-bold text-label-md font-label-md text-primary hover:bg-surface-container transition-colors inline-flex items-center gap-1 shrink-0"
+            >
+              보드 새 창으로 열기
+              <span className="material-symbols-outlined text-[16px]" aria-hidden="true">open_in_new</span>
+            </a>
+          ) : null}
+        </div>
+
+        <div className="mx-6 mb-6 flex-1 min-h-80 bg-surface-container-low border border-outline-variant rounded relative overflow-auto">
+          {kanbanUrl ? (
+            <iframe
+              title="Hermes Kanban 화면"
+              src={kanbanUrl}
+              onLoad={() => setKanbanState("ready")}
+              onError={() => setKanbanState("error")}
+              className="w-full h-[560px] border-0 bg-white"
+            />
+          ) : null}
+          <div className="absolute top-3 right-3 rounded border border-outline-variant bg-surface-container-lowest/95 px-2 py-1 text-xs text-on-surface-variant">
+            {kanbanFailed ? "보드를 불러오지 못함" : kanbanState === "loading" ? "보드 불러오는 중…" : "Hermes 화면 표시됨"}
+          </div>
+          {kanbanFailed ? (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-surface-container-low p-6 text-center">
+              <span className="material-symbols-outlined text-[40px] text-outline-variant" aria-hidden="true">account_tree</span>
+              <p className="text-body-sm font-body-sm text-on-surface-variant m-0 max-w-lg">
+                {kanbanUrl
+                  ? "Hermes 보드를 불러오지 못했습니다. 새 창으로 열어 인증 상태와 Hermes 실행 여부를 확인하세요."
+                  : "Hermes Kanban 주소 설정이 올바르지 않습니다. 관리자 설정을 확인하세요."}
+              </p>
+              {kanbanUrl ? <code className="text-xs text-outline bg-surface-container px-2 py-1 rounded">{kanbanUrl}</code> : null}
+            </div>
+          ) : null}
+        </div>
+        {kanbanUrl && pageHost && new URL(kanbanUrl).hostname !== pageHost ? (
+          <p role="status" className="mx-6 mb-6 -mt-4 text-xs text-error">
+            이 페이지({pageHost})와 보드({new URL(kanbanUrl).hostname})의 호스트가 달라 iframe 안에서 로그인 세션이 유지되지 않습니다.
+            주소창을 <code className="bg-surface-container px-1 rounded">{new URL(kanbanUrl).hostname}</code>으로 맞춰 접속하거나,
+            보드를 새 창으로 여세요.
+          </p>
+        ) : null}
       </section>
 
       <section className="flex flex-wrap gap-2" aria-label="전체 부서 요약">
@@ -152,6 +277,42 @@ export default function AgentLogsView() {
             {metric.label} <b className="font-data-mono text-on-surface">{metric.value}</b>
           </span>
         ))}
+      </section>
+      <section className="flex flex-wrap gap-2" aria-label="Runtime event status">
+        <span className="px-4 py-2 rounded border border-outline-variant bg-surface-container-lowest text-body-sm font-body-sm text-on-surface-variant">
+          BFF event stream <b className="font-data-mono text-on-surface">{streamState === "connected" ? "connected" : "waiting"}</b>
+        </span>
+        <span className="px-4 py-2 rounded border border-outline-variant bg-surface-container-lowest text-body-sm font-body-sm text-on-surface-variant">
+          BFF keepalive <b className="font-data-mono text-on-surface">{lastKeepalive ? new Date(lastKeepalive).toLocaleTimeString("ko-KR") : "waiting"}</b>
+        </span>
+        <span className="px-4 py-2 rounded border border-outline-variant bg-surface-container-lowest text-body-sm font-body-sm text-on-surface-variant">
+          agent.status.v1 <b className="font-data-mono text-on-surface">{data ? (data.eventBridgeConnected ? "events observed" : "no live events") : "checking"}</b>
+        </span>
+      </section>
+
+      <section className="bg-surface-container-lowest border border-outline-variant rounded-lg p-4 flex flex-col gap-3" aria-label="Recent agent logs">
+        <div className="flex justify-between items-center gap-3 flex-wrap">
+          <h2 className="text-title-md font-title-md text-primary m-0">Recent agent logs</h2>
+          <span className="text-xs text-on-surface-variant">{data?.messages.length ?? 0} runtime events</span>
+        </div>
+        {data?.messages.length ? (
+          <ol className="flex flex-col gap-2 m-0 p-0 list-none">
+            {[...data.messages].slice(-8).reverse().map((message) => (
+              <li key={message.id} className="border border-outline-variant rounded-md px-3 py-2">
+                <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-on-surface-variant">
+                  <span className="font-data-mono">{new Date(message.occurred_at).toLocaleTimeString("ko-KR")}</span>
+                  <span>{message.kind}</span>
+                  <span>{message.department_code ?? "system"}</span>
+                </div>
+                <p className="text-body-sm font-body-sm text-on-surface m-0 mt-1">{message.text}</p>
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p className="text-body-sm font-body-sm text-on-surface-variant m-0">
+            현재 수신된 runtime message가 없습니다. Registry snapshot만 표시 중입니다.
+          </p>
+        )}
       </section>
 
       {departments.length > 0 ? (
@@ -193,7 +354,7 @@ export default function AgentLogsView() {
       ) : null}
 
       <p className="text-xs text-outline">
-        실행 상태 Source: BFF <code>/ui/snapshot</code> · 부서 수와 Worker 수 Source: 각 Hermes Profile의 Worker Registry
+        BFF event stream + keepalive Source: <code>/ui/snapshot</code> + <code>/ws/operations</code> · 부서 수와 Worker 수 Source: 각 Hermes Profile의 Worker Registry
       </p>
     </main>
   );

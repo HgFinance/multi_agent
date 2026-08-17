@@ -108,9 +108,9 @@ class Cell:
     def alive(self) -> bool:
         """**신호가 살아 있는 칸.** Breadth 는 이것만 센다.
 
-        IC 가 있으면 IC 를 믿는다 - 오늘 실측에서 백테스트가 데이터 결함에
-        속고 IC 는 안 속았다(`low_volatility` 초과 +855.92%p vs IC t -7.09).
-        IC 가 없으면 초과수익으로 보되, 그건 약한 근거다.
+        IC 가 있으면 IC 를 우선한다 - 포트폴리오 구성과 신호 예측력을 분리하기
+        위해서다. 단 IC 는 집중도·데이터 결함 검사를 대신하지 않으므로 별도
+        관문과 함께 본다. IC 가 없으면 초과수익으로 보되, 그건 약한 근거다.
         """
         if self.best_ic_t is not None:
             return self.best_ic_t > 0

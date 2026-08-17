@@ -3,9 +3,9 @@
   "department": "research",
   "_comment": "worker_id → adapter 해석 정본. Worker 는 adapter_id 를 직접 고르지 않는다(FINAL_RUNTIME_ARCHITECTURE §7.2). adapter 는 status 가 'enabled' 일 때만 서빙에 적용된다 - registered/implemented 상태는 base model 로 돈다. LoRA 가 QA·CEO 승인을 통과하면 이 파일만 바꾼다.",
   "base_model": {
-    "served_model_name": "qwen2.5-14b-instruct-fp8",
-    "source": "RedHatAI/Qwen2.5-14B-Instruct-FP8-dynamic",
-    "quantization": "fp8-dynamic (weights static per-channel FP8, activations dynamic per-token, lm_head bf16)"
+    "served_model_name": "qwen2.5-14b-instruct-awq",
+    "source": "/models/Qwen2.5-14B-Instruct-AWQ",
+    "quantization": "AWQ W4A16 (Marlin serving kernel)"
   },
   "workers": {
     "competing-explanation-worker": {

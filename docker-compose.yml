@@ -176,7 +176,10 @@ services:
   # ── 상주형 뉴스 수집 (재일님 지시 2026-07-31: 수집기 컨테이너로 DB 즉시 적재) ──
   # NAVER 폴링 -> NewsSink -> Supabase(research.documents). 적재 지연은
   # research.news_ingest_latency(_hourly) View 로 확인한다.
+  # ▶ 2026-08-13 기본 기동 제외 (재일 결정: 정성 적재 전면 정리 - MCP 도입 의의).
+  #   NAVER 뉴스 적재는 news_search MCP 조회가 대체한다. 되돌리려면 profiles 줄만 지운다.
   news-watcher:
+    profiles: ["legacy-collectors"]
     build:
       context: departments/01-research
     container_name: hedgefund-news-watcher
@@ -374,7 +377,10 @@ services:
   # ── LS 실시간 뉴스 (NWS push - NAVER 와 병행 실측 중, 재일님 방침 2026-07-31) ──
   # 진짜 push 라 폴링 주기·일 한도가 없고 종목코드가 패킷에 붙어 온다.
   # 본문(t3102)은 약관 확인 전까지 저장하지 않는다 - 제목·메타만 적재.
+  # ▶ 2026-08-13 기본 기동 제외 (재일 결정: 정성 적재 전면 정리 - MCP 도입 의의).
+  #   LS 뉴스 push 적재는 news_search MCP 조회가 대체한다. 되돌리려면 profiles 줄만 지운다.
   ls-news:
+    profiles: ["legacy-collectors"]
     build:
       context: departments/01-research
     container_name: hedgefund-ls-news
@@ -399,6 +405,33 @@ services:
     cpus: 0.3
     pids_limit: 64
     stop_grace_period: 20s
+
+  # ── quant-api: 실험 제출·조회면 (전략 공장의 주문 창구) ──────────────────
+  # Factory operations submit through this boundary; Hermes never receives a
+  # DB secret or a write-capable MCP surface.
+  # QUANT_DATABASE_URL may point at the least-privilege svc_quant role; the
+  # shared URL remains a migration fallback until that role is configured.
+  quant-api:
+    build:
+      context: .
+      dockerfile: departments/04-quant-backtest/Dockerfile
+    container_name: hedgefund-quant-api
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      # Inject exactly one selected DSN.  Supplying the scoped role must not
+      # leave the broader fallback credential readable in the API process.
+      DATABASE_URL: ${QUANT_DATABASE_URL:-${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}}
+      MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
+    ports:
+      - "127.0.0.1:8037:8037"
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
 
   # ── market-api: 시세 읽기 전용 조회면 (F03 "DB 없이 Snapshot API" + 통합계획 6.2) ──
   # 트레이딩·리스크·팀원은 TSDB Credential 없이 이 API 로 Snapshot/Bar/Breadth/DQ 조회.
@@ -514,6 +547,21 @@ services:
       MARKET_API_URL: http://market-api:8036
       RESEARCH_API_URL: http://research-api:8035
       OLLAMA_BASE_URL: http://host.docker.internal:11434
+      # ▶ 외부 정보원 질의 도구 (external_sources.py, 2026-08-13 재일 결정)
+      #   DART 는 수집기와 **같은 키**를 나눠 쓴다 - 에이전트 몫 일일 상한이
+      #   수집기 예산(공시 10분 폴링·저녁 재무 배치)을 지킨다.
+      #   스냅샷(cache-on-cite)은 reports 마운트에 남아 재빌드에도 산다.
+      OPEN_DART_API_KEY: ${OPEN_DART_API_KEY:-}
+      NAVER_CLIENT_ID: ${NAVER_CLIENT_ID:-}
+      NAVER_CLIENT_SECRET: ${NAVER_CLIENT_SECRET:-}
+      ECOS_API_KEY: ${ECOS_API_KEY:-}
+      FRED_API_KEY: ${FRED_API_KEY:-}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      MCP_DART_DAILY_CAP: ${MCP_DART_DAILY_CAP:-2000}
+      MCP_NAVER_DAILY_CAP: ${MCP_NAVER_DAILY_CAP:-5000}
+      MCP_ECOS_DAILY_CAP: ${MCP_ECOS_DAILY_CAP:-2000}
+      MCP_FRED_DAILY_CAP: ${MCP_FRED_DAILY_CAP:-2000}
+      MCP_CITE_LOG_DIR: /app/departments/01-research/reports/mcp_citations
       # ▶ LS 자격을 뺐다 (2026-08-02). 예전에는 파이프라인 첫 노드
       #   (universe_manager)가 거래가능 여부를 LS REST 로 직접 물어 이 컨테이너에
       #   LS 키가 필요했다. 이제 universe_restriction_collector(수집기)가 제한
@@ -528,12 +576,135 @@ services:
       # - 2026-08-02 실측: 없으면 분석가 6인을 다 돌린 뒤 마지막에 실패한다.
       # COPY 대신 마운트인 이유: 페르소나를 고칠 때마다 이미지를 다시 굽지 않는다.
       - ./departments/01-research/hermes:/app/departments/01-research/hermes:ro
+      # Worker 실행기는 부서 공용 코드다. 기본(로컬 Ollama)과 AWS vLLM 모두
+      # 같은 파일을 써야 하므로 모델 오버레이가 아니라 control plane에 둔다.
+      # 이 마운트가 빠지면 경쟁설 검토 job이 ModuleNotFoundError로 끝나고,
+      # 독립 회의론자 서명을 만들 수 없어 기획안 접수가 영구 차단된다.
+      - ./departments/employee_worker_runtime.py:/app/departments/employee_worker_runtime.py:ro
+      - ./departments/worker_model_gateway.py:/app/departments/worker_model_gateway.py:ro
+      - ./departments/01-research/employee_workers.py:/app/departments/01-research/employee_workers.py:ro
+      # employee_worker_runtime의 LLM 호출 계측(record_llm_call)
+      - ./orchestration:/app/orchestration:ro
       # Packet MD 리포트를 호스트에서 바로 열어보기 위해 (읽기 전용 아님 - 쓴다)
       - ./departments/01-research/reports:/app/departments/01-research/reports
     # 파이프라인이 분석가 6인 x LLM 이라 오래 돈다 - 넉넉히 준다
     mem_limit: 1g
     cpus: 2.0
     pids_limit: 256
+    stop_grace_period: 30s
+
+  # ── research-liaison-mcp: 리서치 응대 창구(도서관) 도구 면 (2026-08-13) ──
+  # 같은 이미지·같은 코드가 RESEARCH_MCP_SURFACE=liaison 으로 뜬다 - 파이프라인
+  # 생성·factory 쓰기 도구(run_research_packet·factory_submit_*)가 **등록에서
+  # 빠진** 조회 전용 면이다(도서관/연구소 분리). 사용자 질의 파생 카드를 받는
+  # research-liaison·quant-liaison 프로필만 이 서버를 물고, 부서 본체 프로필은
+  # 위 research-mcp(full)를 그대로 쓴다. 창구가 쓰기 손을 못 갖는 것은 프롬프트
+  # 지시가 아니라 capability 절단이다 - 서버가 제거를 검증 못 하면 기동을 거부한다.
+  # 포트는 호스트에 게시하지 않는다(research-liaison-mcp:8037, compose 안 전용).
+  # ▶ OpenBB Platform MCP (2026-08-13, 재일 결정 "쓸만한 MCP 싹다") - 기성 채용.
+  #   대형 OSS 공식 확장(도구 200+, 옵션체인·ETF·채권·매크로). 무료 프로바이더
+  #   (yfinance 등)만 쓰므로 우리 키가 서드파티 코드를 통과하지 않는다.
+  #   도구 과부하는 자체 --tool-discovery 가 푼다. 호스트 미게시(내부 8039).
+  openbb-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.openbb-mcp
+    container_name: hedgefund-openbb-mcp
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    mem_limit: 1g
+    cpus: 1.0
+    pids_limit: 256
+    stop_grace_period: 15s
+
+  # ▶ LS 증권 OpenAPI MCP (2026-08-13, 재일 결정 "TR 목록을 정제해서 질문에 답하게")
+  #   research-mcp 와 **다른 컨테이너**인 이유: 2026-08-02 결정(LS 자격은 퍼뜨리지
+  #   않는다)을 유지한다 - 키는 여기에만 있고 에이전트는 도구만 받는다.
+  #   도구 2층: ls_tr_catalog(정제 색인 365 TR 검색) + 큐레이션 실행(수급 t1717 부터).
+  #   포트는 호스트에 게시하지 않는다(ls-mcp:8038, compose 안 전용).
+  ls-mcp:
+    build:
+      context: departments/01-research
+    container_name: hedgefund-ls-mcp
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    working_dir: /app/departments/01-research
+    command: ["python", "api/ls_mcp_server.py", "--serve"]
+    environment:
+      MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
+      # LS 자격 - 수집기(batch-collectors)와 같은 목록·같은 격리 지위.
+      # 조회는 LS_MARKET_ENV(기본 LIVE) - 모의 서버는 수급 TR 에 빈 값을 준다.
+      LS_MARKET_ENV: ${LS_MARKET_ENV:-LIVE}
+      LS_ENV: ${LS_ENV:-PAPER}
+      LS_APP_KEY: ${LS_APP_KEY:-}
+      LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
+      LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:-}
+      LS_APP_SECRET_KEY_PAPER: ${LS_APP_SECRET_KEY_PAPER:-}
+      LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}
+      LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
+      # 종목명 해석은 DART corp 색인 재사용(external_sources._resolve)
+      OPEN_DART_API_KEY: ${OPEN_DART_API_KEY:-}
+      MCP_LS_DAILY_CAP: ${MCP_LS_DAILY_CAP:-2000}
+      MCP_CITE_LOG_DIR: /app/departments/01-research/reports/mcp_citations
+    volumes:
+      - ./departments/01-research/config:/app/departments/01-research/config:ro
+      - ./departments/01-research/reports:/app/departments/01-research/reports
+    mem_limit: 512m
+    cpus: 0.5
+    pids_limit: 128
+    stop_grace_period: 15s
+
+  research-liaison-mcp:
+    build:
+      context: departments/01-research
+    container_name: hedgefund-research-liaison-mcp
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    working_dir: /app/departments/01-research
+    command: ["python", "api/mcp_server.py", "--serve"]
+    environment:
+      RESEARCH_MCP_SURFACE: liaison
+      DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
+      MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
+      MARKET_API_URL: http://market-api:8036
+      RESEARCH_API_URL: http://research-api:8035
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      # 외부 정보원 도구는 읽기 전용이라 창구에도 남는다(external_sources.py).
+      # 창구의 reports 는 읽기 전용 마운트라 스냅샷은 컨테이너 로컬로 - v2 과제.
+      OPEN_DART_API_KEY: ${OPEN_DART_API_KEY:-}
+      NAVER_CLIENT_ID: ${NAVER_CLIENT_ID:-}
+      NAVER_CLIENT_SECRET: ${NAVER_CLIENT_SECRET:-}
+      ECOS_API_KEY: ${ECOS_API_KEY:-}
+      FRED_API_KEY: ${FRED_API_KEY:-}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      MCP_DART_DAILY_CAP: ${MCP_DART_DAILY_CAP:-2000}
+      MCP_NAVER_DAILY_CAP: ${MCP_NAVER_DAILY_CAP:-5000}
+      MCP_ECOS_DAILY_CAP: ${MCP_ECOS_DAILY_CAP:-2000}
+      MCP_FRED_DAILY_CAP: ${MCP_FRED_DAILY_CAP:-2000}
+      MCP_CITE_LOG_DIR: /tmp/mcp_citations
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./departments/01-research/config:/app/departments/01-research/config:ro
+      - ./departments/01-research/hermes:/app/departments/01-research/hermes:ro
+      # 창구는 산출물(Packet 리포트)을 **읽기 전용**으로만 본다 - 도서관은
+      # 카탈로그를 읽지, 만들지 않는다
+      - ./departments/01-research/reports:/app/departments/01-research/reports:ro
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 128
     stop_grace_period: 30s
 
   # ▶ **부서별 컨테이너 1개 = 부서별 데이터 디렉터리 1개** (계획서 3.1~3.2)
@@ -590,7 +761,12 @@ services:
         max-file: "3"
     volumes:
       - /home/ubuntu/.hermes/profiles/research-department:/opt/data
-      - ./skills/finance:/opt/shared-skills/finance:ro
+      # 저장소 skills/ **전체**를 건다. finance 만 걸면 다른 범주의 스킬을
+      # 요구한 카드가 'Unknown skill(s)' 로 65초 만에 죽는다(2026-08-14 실측:
+      # wiring-audit·dataset-engineering 요구 카드 3장). 저장소에는 스킬이
+      # 10 갈래인데 마운트는 한 갈래뿐이었다. 노출 != 배정이다 -
+      # 어느 프로필이 무엇을 쓸 수 있는지는 orchestration/skill_contract.py 가 정한다.
+      - ./skills:/opt/shared-skills:ro
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
     environment:
       HERMES_UID: 1000
@@ -627,7 +803,12 @@ services:
         max-file: "3"
     volumes:
       - /home/ubuntu/.hermes/profiles/quant-backtest-department:/opt/data
-      - ./skills/finance:/opt/shared-skills/finance:ro
+      # 저장소 skills/ **전체**를 건다. finance 만 걸면 다른 범주의 스킬을
+      # 요구한 카드가 'Unknown skill(s)' 로 65초 만에 죽는다(2026-08-14 실측:
+      # wiring-audit·dataset-engineering 요구 카드 3장). 저장소에는 스킬이
+      # 10 갈래인데 마운트는 한 갈래뿐이었다. 노출 != 배정이다 -
+      # 어느 프로필이 무엇을 쓸 수 있는지는 orchestration/skill_contract.py 가 정한다.
+      - ./skills:/opt/shared-skills:ro
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
     environment:
       HERMES_UID: 1000
@@ -637,6 +818,10 @@ services:
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      # Profile MCP headers expand this token for the read-only research
+      # liaison.  Job mutation stays on quant-api/factory workers; Hermes gets
+      # neither a database credential nor an implied write-capable MCP tool.
+      MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0
@@ -800,7 +985,12 @@ services:
         max-file: "3"
     volumes:
       - /home/ubuntu/.hermes/profiles/risk-management:/opt/data
-      - ./skills/finance:/opt/shared-skills/finance:ro
+      # 저장소 skills/ **전체**를 건다. finance 만 걸면 다른 범주의 스킬을
+      # 요구한 카드가 'Unknown skill(s)' 로 65초 만에 죽는다(2026-08-14 실측:
+      # wiring-audit·dataset-engineering 요구 카드 3장). 저장소에는 스킬이
+      # 10 갈래인데 마운트는 한 갈래뿐이었다. 노출 != 배정이다 -
+      # 어느 프로필이 무엇을 쓸 수 있는지는 orchestration/skill_contract.py 가 정한다.
+      - ./skills:/opt/shared-skills:ro
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
     environment:
       HERMES_UID: 1000
@@ -828,7 +1018,12 @@ services:
         max-file: "3"
     volumes:
       - /home/ubuntu/.hermes/profiles/qa-department:/opt/data
-      - ./skills/finance:/opt/shared-skills/finance:ro
+      # 저장소 skills/ **전체**를 건다. finance 만 걸면 다른 범주의 스킬을
+      # 요구한 카드가 'Unknown skill(s)' 로 65초 만에 죽는다(2026-08-14 실측:
+      # wiring-audit·dataset-engineering 요구 카드 3장). 저장소에는 스킬이
+      # 10 갈래인데 마운트는 한 갈래뿐이었다. 노출 != 배정이다 -
+      # 어느 프로필이 무엇을 쓸 수 있는지는 orchestration/skill_contract.py 가 정한다.
+      - ./skills:/opt/shared-skills:ro
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
     environment:
       HERMES_UID: 1000
@@ -940,6 +1135,27 @@ services:
   #   모두 접근 가능하다. 그래서 ports:를 절대 열지 않는다(외부/호스트에서 직접 접근할
   #   이유가 없다). security_opt(no-new-privileges) 등 추가 하드닝은 E2E 성공 후
   #   최소 변경 원칙에 따라 별도로 검토한다.
+  #
+  # ▶ 레인 예산 - 공장이 슬롯을 독점해 사용자 질의가 굶는 것을 막는다 (2026-08-14)
+  #   dispatcher 의 HERMES_HOME config.yaml 에 아래를 둔다(런타임 설정이라 저장소에는
+  #   값이 아니라 근거만 남긴다):
+  #       kanban:
+  #         max_in_progress: 3              # 보드 전체 동시 실행
+  #         max_in_progress_per_profile: 1  # 한 부서가 슬롯을 다 먹지 못하게
+  #   실측 근거: 공장 카드가 running 3 개를 전부 물어 CEO 질의 카드가 6 분 넘게
+  #   ready 에 앉았다. 초과분은 skipped_per_profile_capped 로 분류돼 보인다.
+  #
+  #   ⚠ **`hermes kanban daemon` 으로 돌리면 이 설정이 조용히 무시된다.**
+  #     run_daemon 은 dispatch_once 에 max_spawn/failure_limit 만 넘기고 상한 두 개를
+  #     전달하지 않는다(kanban_db.py 실측). 같은 순간 통제 시험에서 daemon 경로는
+  #     4 장(3 장이 동일 프로필)을 띄웠고 dispatch 경로는 0 장이었다.
+  #     이 서비스의 기본값(게이트웨이 내장 dispatcher, kanban_watchers.py)과
+  #     일회성 `hermes kanban dispatch` 는 둘 다 설정을 읽으므로 문제없다 -
+  #     deprecated 된 standalone daemon 으로 바꿀 때만 주의하면 된다.
+  #
+  #   최종 형태는 보드 분리다: 공장 전용 board + 전용 dispatcher 컨테이너
+  #   (`hermes kanban --board <slug>`; 보드마다 DB·workspace·dispatcher 루프가 독립).
+  #   그때 이 상한은 공장 쪽만 낮추면 된다.
   kanban-dispatcher:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-kanban-dispatcher
@@ -957,9 +1173,20 @@ services:
     # Kanban dispatcher만 실행하므로 per-profile gateway를 supervise하지 않는다.
     command:
       ["kanban", "daemon", "--force", "--interval", "${KANBAN_DISPATCH_INTERVAL:-60}", "--pidfile", "/opt/data/shared-kanban/dispatcher.pid", "--verbose"]
+    # ▶ uid 1000 고정 (2026-08-14 장애 실측). 이미지 기본 사용자(uid 10000)로
+    #   돌면 데몬이 기동 시 /opt/data 를 10000·700 으로 재소유해 버려서,
+    #   uid 1000 인 부서 게이트웨이·CLI 경유 카드 생성이 전부
+    #   PermissionError 로 죽었다(21:13Z 공장 전면 장애, chown 복구 후 21:53Z
+    #   재발로 자기-재소유 확인). 전 컨테이너의 HERMES_UID=1000 과 정합시킨다.
+    user: "1000:1000"
     volumes:
       - /home/ubuntu/.hermes:/opt/data
-      - ./skills/finance:/opt/shared-skills/finance:ro
+      # 저장소 skills/ **전체**를 건다. finance 만 걸면 다른 범주의 스킬을
+      # 요구한 카드가 'Unknown skill(s)' 로 65초 만에 죽는다(2026-08-14 실측:
+      # wiring-audit·dataset-engineering 요구 카드 3장). 저장소에는 스킬이
+      # 10 갈래인데 마운트는 한 갈래뿐이었다. 노출 != 배정이다 -
+      # 어느 프로필이 무엇을 쓸 수 있는지는 orchestration/skill_contract.py 가 정한다.
+      - ./skills:/opt/shared-skills:ro
       # ▶ **에이전트는 여기서 뜬다 - 저장소가 보여야 한다** (2026-08-12 실측)
       #   이 두 줄이 override 에만 있어서 로컬에서만 보이고 AWS 에서는 안 보였다.
       #   그러면 같은 카드가 환경에 따라 다른 판정을 낸다 - 실제로 에이전트가
@@ -978,6 +1205,18 @@ services:
       HERMES_KANBAN_HOME: /opt/data/shared-kanban
       HERMES_KANBAN_DB: /opt/data/shared-kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      # The dispatcher spawns the department workers, so MCP profile headers are
+      # expanded from this process environment rather than a gateway container.
+      MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
+      # ▶ 에이전트는 이 컨테이너 **안에서** 뜨므로 자격도 여기 있어야 한다
+      #   (2026-08-14 실측). 프로필 config 의 `env:` 에 ANTHROPIC_API_KEY 가 적혀
+      #   있어도 hermes 는 그것으로 자격을 만들지 않는다 - 프로세스 환경변수를 본다.
+      #   이 줄이 없으면 spawn 된 에이전트가 첫 호출에서 "No Anthropic credentials
+      #   found" 로 즉사하고, 카드는 "worker exited cleanly without calling
+      #   kanban_complete" 로 blocked 에 굳는다 - 원인이 카드 오류에 안 드러나는
+      #   유형이라 컨테이너 재생성 후 한참 헤맸다.
+      #   값 자체는 프록시가 무시한다(과금 경로는 base_url 의 호스트 프록시다).
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0
@@ -1119,7 +1358,9 @@ services:
               "--serve"]
     depends_on:
       factory-autopilot:
-        condition: service_started
+        # The worker must not consume hypotheses from a factory whose AST
+        # registry or execution files differ from the sealed image contract.
+        condition: service_healthy
       timescaledb:
         condition: service_healthy
     environment:
@@ -1135,6 +1376,9 @@ services:
       #   이던 동안에는 로드까지 가지 못해 이 구멍이 드러나지 않았다.
       #   pit_dataset.DATA_ROOT 가 `parents[3]/quant-data` = /app/quant-data 다.
       - ./quant-data:/app/quant-data
+      # Keep the rebuildable evolutionary-screen cache off the host OneDrive
+      # bind while retaining governed datasets on the canonical quant-data path.
+      - intraday_sample_cache:/app/quant-data/intraday-discovery-cache
 
   card-watchdog:
     image: hedgefund-factory:latest
@@ -1240,3 +1484,4 @@ volumes:
   tsdb_data:
   portfolio_runtime_data:
   factory_state:
+  intraday_sample_cache:

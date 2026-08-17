@@ -1,0 +1,30 @@
+# OpenBB Platform MCP - 기성 채용 (2026-08-13 재일 결정 "쓸만한 MCP 싹다").
+#
+# ▶ 왜 기성인가: 개인 저장소가 아니라 대형 OSS(OpenBB)의 공식 MCP 확장이고,
+#   무료 프로바이더(yfinance·FRED) 기준 우리 키가 코드를 통과하지 않는다.
+#   도구 200+ 의 선택 과부하는 자체 discovery(--tool-discovery)가 푼다 -
+#   우리 LS 카탈로그 2층과 같은 철학을 그쪽이 이미 구현했다.
+# ▶ 버전 고정: openbb-mcp-server==1.4.1 (2026-08-13 pip index 실측 최신).
+#
+# ▶ **프로바이더를 같이 깐다** (2026-08-14 실측 사고)
+#   `openbb-mcp-server` 만 깔면 `openbb-core` 만 따라오고 **데이터 확장이
+#   하나도 없다.** 그 상태로 22시간을 떠 있었는데 `available_categories` 가
+#   빈 배열을 돌려줬다 - 도구 0개다(노출되는 10개는 전부 discovery 유틸).
+#   위 주석이 "무료 프로바이더(yfinance·FRED) 기준" 이라고 적어 두고 정작
+#   그 프로바이더를 설치하지 않은 것이다. **도입 선언은 있는데 실물이 0** 인
+#   상태가 제일 나쁘다 - 있다고 믿고 그 위에 계획을 쌓는다.
+#
+#   선별 설치로 간다(메타패키지 `openbb` 는 유료 포함 전량이라 무겁다):
+#     openbb-equity   - equity.fundamental.* 라우터(재무제표·비율·지표)
+#     openbb-yfinance - 무료 프로바이더(한국 종목은 005930.KS 형식)
+#     openbb-economy  - 매크로 라우터
+#     openbb-fred     - 무료 매크로 프로바이더
+FROM python:3.12-slim
+RUN pip install --no-cache-dir \
+      openbb-mcp-server==1.4.1 \
+      openbb-equity \
+      openbb-yfinance \
+      openbb-economy \
+      openbb-fred
+# streamable-http, 포트는 compose 에서 8039 로 - 호스트 미게시(내부 전용)
+CMD ["openbb-mcp", "--host", "0.0.0.0", "--port", "8039",      "--transport", "streamable-http", "--tool-discovery"]

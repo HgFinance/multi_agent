@@ -27,12 +27,19 @@ import json
 import os
 import re
 import subprocess
+import threading
+import time
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+
+try:
+    from . import hermes_boundary
+except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
+    import hermes_boundary  # type: ignore[no-redef]
 
 from orchestration.adapters.ceo_supervisor import (
     FAILURE_OUTCOMES,
@@ -46,6 +53,7 @@ from orchestration.canonical_profiles import (
 )
 from orchestration.ceo_workflow_scope import (
     CEO_WORKFLOW_SCOPE_MARKER,
+    requested_by_from_body,
     selected_primary_profiles_from_task,
 )
 
@@ -160,6 +168,96 @@ def _timeout() -> float:
     return float(os.getenv("KANBAN_CLI_TIMEOUT_SECONDS", "8"))
 
 
+# ── 읽기 전용 CLI 호출 TTL 캐시 (2026-08-14) ────────────────────────────────
+#
+# `hermes kanban ...`는 호출마다 파이썬 프로세스가 새로 뜬다. 그 자체는 수십 ms지만
+# 호출 **횟수**가 문제였다 - `load_workflow`가 워크플로 하나를 읽을 때
+#   (1) `resolve_root_id`와 본문에서 root를 두 번 `show` 하고
+#   (2) 소속 판정을 위해 보드 전체를 `list` 하며(아래 `load_workflow` 참고)
+#   (3) 노드 수만큼 `show` 한다.
+# `/ui/ceo/tasks`는 이걸 root 개수만큼 반복하므로, root 20개면 동일한
+# `list --json`만 20번 돌고 전체 프로세스는 수백 개가 된다.
+#
+# 짧은 TTL 캐시가 이 중복을 걷어낸다. 주 목적은 **한 요청 안의 중복 제거**이고,
+# 화면 폴링 주기(본부 진행 10초 / 최종 답변 15초)보다 TTL이 훨씬 짧아 다음
+# polling은 항상 새 값을 받는다 - 진행 상황이 캐시 때문에 멈춰 보이지 않는다.
+# 회계 스냅샷이 쓰는 2초 TTL과 같은 패턴이다(`apps/api/main.py`).
+#
+# 캐시하지 않는 것: 쓰기 명령(`archive`)과 **예외**. 실패를 캐시하면 일시적인
+# CLI 장애가 TTL 동안 고정되어 fail-closed가 아니라 fail-stuck이 된다.
+#
+# ── 끝난 Task 는 더 길게 캐시한다 (2026-08-14) ──
+#
+# 위 TTL 은 "한 요청 안의 중복"만 걷어낸다. 목록 조회의 진짜 비용은 **서로 다른**
+# Task 를 노드 수만큼 `show` 하는 것이라, 중복 제거만으로는 남는다.
+#
+# 그런데 `done`/`completed`/`archived` 로 끝난 Task 의 `show` 결과는 **더 이상
+# 바뀌지 않는다.** 그래서 그 응답만 길게 캐시하면, 이미 끝난 과거 대화를 다시 그릴
+# 때 CLI 를 아예 안 부른다 - 계정을 오가며 이력을 다시 여는 화면이 정확히 이 경우다.
+#
+# `failed`/`blocked` 는 길게 캐시하지 않는다. Retry·Replan 으로 다시 running 이
+# 될 수 있어서(위 `Workflow.status` 주석) 끝난 상태가 아니다.
+#
+# ▶ 이 방식을 고른 이유(그리고 "마커가 있으면 `list` 만으로 목록을 만든다"를
+#   포기한 이유): `list --json` 행에는 `parents`·`runs`·`latest_summary` 가 없다
+#   (Hermes `_task_to_dict` 실측). `Workflow.status` 는 `archived`/`synthesis.done`
+#   에서 run_outcome 보다 먼저 단락되므로 거기까지는 증명이 되지만,
+#   `selected_departments` 가 `self.metadata`(= `show` 의 runs/metadata)와 노드
+#   **탐색 순서**에 함께 의존해서 `list` 만으로는 같은 답을 보장할 수 없다.
+#   여기서는 정확도를 깎지 않는 쪽을 택한다 - 같은 `show` 응답을 그대로 쓰되,
+#   변하지 않는 것만 오래 들고 있는다.
+_READ_ONLY_KANBAN_COMMANDS = frozenset({"show", "list"})
+_cache_lock = threading.Lock()
+# key -> (만료 시각, stdout). 항목마다 TTL 이 다르므로 저장 시각이 아니라 만료
+# 시각을 넣는다.
+_cache: dict[tuple[str, ...], tuple[float, str]] = {}
+
+
+def _cache_ttl() -> float:
+    """0이면 캐시를 끈다. 결정론이 필요한 테스트가 그렇게 쓴다."""
+
+    try:
+        return max(0.0, float(os.getenv("KANBAN_READ_CACHE_TTL_SECONDS", "3")))
+    except ValueError:
+        return 3.0
+
+
+def _terminal_cache_ttl() -> float:
+    try:
+        return max(0.0, float(os.getenv("KANBAN_DONE_CACHE_TTL_SECONDS", "300")))
+    except ValueError:
+        return 300.0
+
+
+def _entry_ttl(key: tuple[str, ...], stdout: str, base_ttl: float) -> float:
+    """이 응답을 얼마나 들고 있을지. 끝난 `show` 만 길게 잡는다.
+
+    판정에 실패하면(형태가 예상과 다르면) 조용히 긴 TTL 로 넘어가지 않고 기본
+    TTL 로 떨어진다 - 확신이 없을 때 오래 들고 있는 쪽이 위험하다.
+    """
+
+    if key[0] != "show":
+        return base_ttl
+    try:
+        payload = json.loads(stdout)
+        task = payload.get("task", payload) if isinstance(payload, Mapping) else None
+        if not isinstance(task, Mapping):
+            return base_ttl
+        status = str(task.get("status") or "").casefold()
+    except (TypeError, ValueError):
+        return base_ttl
+    if status in _DONE_STATUSES:
+        return max(base_ttl, _terminal_cache_ttl())
+    return base_ttl
+
+
+def clear_kanban_cache() -> None:
+    """캐시를 비운다. 보드를 바꾼 직후(archive)와 테스트가 부른다."""
+
+    with _cache_lock:
+        _cache.clear()
+
+
 def _cli_environment() -> dict[str, str]:
     environment = os.environ.copy()
     environment.setdefault(
@@ -169,9 +267,31 @@ def _cli_environment() -> dict[str, str]:
 
 
 def run_kanban(args: Sequence[str]) -> str:
-    """`hermes kanban ...`를 실행하고 stdout을 준다. shell=False로만 부른다."""
+    """`hermes kanban ...`를 실행하고 stdout을 준다. shell=False로만 부른다.
 
-    command = [os.environ.get("HERMES_BIN", "hermes"), "kanban", *args]
+    argv 조립은 `hermes_boundary.argv_for(None, ...)`에 맡긴다 - 여기서 직접
+    `[HERMES_BIN, "kanban", ...]`을 만들면 `HERMES_EXEC_MODE=docker` 환경에서
+    이 경로만 호스트의 `hermes`를 찾아 실패한다(2026-08-14 발견). 쓰기 경로
+    (`hermes_boundary.create_kanban_task`)는 이미 그 모드를 존중하고 있었으므로,
+    같은 보드를 읽는 이 경로만 규칙이 달랐던 것이다. `department=None`은 부서에
+    매이지 않는 kanban 명령을 뜻하고, docker 모드에서는 `KANBAN_CLI_CONTAINER`
+    안에서 실행된다.
+
+    읽기 명령(`show`/`list`)의 성공 결과만 짧은 TTL 동안 캐시한다 - 근거는
+    `_READ_ONLY_KANBAN_COMMANDS` 위 주석 참고.
+    """
+
+    key = tuple(str(arg) for arg in args)
+    cacheable = bool(key) and key[0] in _READ_ONLY_KANBAN_COMMANDS
+    ttl = _cache_ttl()
+    if cacheable and ttl > 0:
+        now = time.monotonic()
+        with _cache_lock:
+            hit = _cache.get(key)
+            if hit is not None and now < hit[0]:
+                return hit[1]
+
+    command = hermes_boundary.argv_for(None, ["kanban", *args])
     try:
         process = subprocess.run(
             command,
@@ -198,6 +318,10 @@ def run_kanban(args: Sequence[str]) -> str:
         raise KanbanUnavailable(
             message[:200] or f"hermes kanban {args[0]} exited {process.returncode}"
         )
+    if cacheable and ttl > 0:
+        entry_ttl = _entry_ttl(key, process.stdout, ttl)
+        with _cache_lock:
+            _cache[key] = (time.monotonic() + entry_ttl, process.stdout)
     return process.stdout
 
 
@@ -244,6 +368,9 @@ def archive_tasks(task_ids: Sequence[str]) -> None:
     if not task_ids:
         return
     run_kanban(("archive", *task_ids))
+    # 보드를 바꿨으므로 읽기 캐시를 버린다 - 그러지 않으면 archive 직후 목록에
+    # 방금 치운 카드가 TTL 동안 그대로 남는다.
+    clear_kanban_cache()
 
 
 def _text(value: Any) -> str:
@@ -789,14 +916,24 @@ def load_workflow(
     )
 
 
-def list_ceo_roots(*, limit: int, include_archived: bool = False) -> list[dict[str, Any]]:
-    """사용자가 만든 CEO Root만 최신순으로. Supervisor 제어 Task는 뺀다."""
+def list_ceo_roots(
+    *, limit: int, include_archived: bool = False, owner_id: str | None = None
+) -> list[dict[str, Any]]:
+    """사용자가 만든 CEO Root만 최신순으로. Supervisor 제어 Task는 뺀다.
+
+    `owner_id`가 주어지면 `requested_by=` 줄이 그 값과 일치하는 Root만 남긴다
+    (`limit` 컷오프 전에 걸러야 다른 계정 Root가 자리를 차지해 진짜 대상이
+    잘려나가지 않는다). `requested_by`가 없는 과거 Root는 "계정 불명"으로
+    보고 어떤 `owner_id` 필터에도 포함하지 않는다.
+    """
 
     rows = list_tasks(assignee=CEO_PROFILE, include_archived=include_archived)
     roots: list[dict[str, Any]] = []
     for row in rows:
         body = _text(row.get("body"))
         if not is_ceo_root_body(body):
+            continue
+        if owner_id is not None and requested_by_from_body(body) != owner_id:
             continue
         roots.append(row)
         if len(roots) >= limit:
@@ -824,6 +961,7 @@ __all__ = [
     "Workflow",
     "WorkflowNode",
     "archive_tasks",
+    "clear_kanban_cache",
     "extract_user_query",
     "is_ceo_root_body",
     "list_ceo_roots",

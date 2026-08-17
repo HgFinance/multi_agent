@@ -1,35 +1,87 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { MINDSET_BY_RISK_PROFILE, MandateSubmissionError, submitMandateDraft } from "../lib/mandateClient";
-import { sliderDefaultsFor } from "../lib/mandatePresets";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import {
+  DEFAULT_DRAFT,
+  INTERVIEW,
+  INTERVIEW_DONE,
+  MINDSET_BY_RISK_PROFILE,
+  MandateSubmissionError,
+  applyChoice,
+  applySuggestions,
+  capitalUnitFor,
+  digitsOf,
+  loadInvestorProfile,
+  loadMandateForFund,
+  mergeLocalDraft,
+  nextStep,
+  policyToDraft,
+  requestMandateSuggestion,
+  submitMandateDraft,
+  validateDraft,
+} from "../lib/mandateClient";
+import { provisionalRiskScore, type Experience } from "../lib/mandatePresets";
+import {
+  DEFAULT_ACCOUNT,
+  accountFor,
+  readStoredAccountId,
+  subscribeToAccountChange,
+} from "../lib/currentAccount";
 
 /**
  * 운용 지침 설정 화면.
  *
- * 제출("지침 제출 및 검토")은 `../lib/mandateClient.ts`를 거쳐
- * `POST /ui/mandates`(최초 1회, 없을 때만) + `POST /ui/mandates/{id}/versions`
- * (항상)로 BFF에 전달된다. 이 화면은 정책 version을 저장할 뿐, 주문·원장·한도나
- * Risk/QA 승인 흐름을 시작하지 않는다.
+ * 좌측은 정책 폼, 우측은 그 폼을 채우는 인터뷰 콘솔이다.
  *
- * "임시 저장"은 여전히 브라우저(localStorage)에만 남는다 - 완성 전 초안까지
- * Mandate Version으로 만들면 `content_hash` 중복·승인 흐름이 매번 발동한다
- * (USER_INPUT_API_SPEC §2.4와 같은 이유).
+ * "지침 저장"은 `../lib/mandateClient.ts`를 거쳐 `POST /ui/mandates`(최초 1회,
+ * 없을 때만) + `PUT /ui/mandates/{id}`(현재 metadata 교체) + `POST /ui/investor-profiles`
+ * 로 BFF에 전달된다. 이 화면은 현재 Mandate metadata와 적합성 프로필을 저장할 뿐,
+ * 주문·원장·한도나 Risk/QA 승인 흐름을 시작하지 않는다.
+ *
+ * "임시 저장"은 브라우저(localStorage)에만 남는다 - 완성 전 초안까지 Mandate
+ * Version으로 만들면 `content_hash` 중복·승인 흐름이 매번 발동한다
+ * (USER_INPUT_API_SPEC §2.4와 같은 이유). **사용자별로 키를 나눈다** - 단일
+ * 키면 계정을 전환했을 때 남의 초안이 보인다.
+ *
+ * ## 우측 콘솔이 좌측 폼을 어디까지 고칠 수 있는가
+ *
+ * LLM이 닿는 값은 **투자 목표 문장·투자 기간·유동성 필요도 셋뿐**이다
+ * (서버 `ALLOWED_SUGGESTION_FIELDS`). 위험 성향·투자 경험·자본·승인 방식은
+ * 칩 버튼과 숫자 입력, 즉 사용자의 명시적 선택에서만 나온다 —
+ * `USER_INPUT_SPEC` 4.1과 `suitability.py`가 LLM의 성향·경험 추론을 영구
+ * 금지하기 때문이다. 대본(`INTERVIEW`)이 그 경계를 구조로 강제한다.
  */
 
 export type RiskProfile = "conservative" | "neutral" | "aggressive";
 export type ApprovalMode = "auto" | "manual";
 export type AssetClassId = "equity" | "etf" | "leverage" | "futures" | "options" | "derivatives" | "crypto";
+/** `suitability.py` `LiquidityNeed`와 같은 값. 현금이 급히 필요할 가능성. */
+export type LiquidityNeed = "HIGH" | "MEDIUM" | "LOW";
 
 export interface MandateDraft {
   objective: string;
   riskProfile: RiskProfile;
+  /**
+   * 2026-08-14 추가. 이 필드가 없어서 이 화면과 `mandateClient.ts`가 각각
+   * INTERMEDIATE를 자리표시자로 박았고, 등급이 `min(mindset, experience)`라
+   * RISK_SEEKING(3)이 항상 2로 잘렸다 - "공격적"을 눌러도 "중립적"과 똑같은
+   * 기본값이 나오고 등급 3은 이 화면에서 도달 자체가 불가능했다.
+   * 두 자리가 같은 필드를 읽으면 그 어긋남이 구조적으로 불가능해진다.
+   */
+  experience: Experience;
+  /**
+   * `InvestorProfileIn` 필수 필드(1~100). 아직 안 물어봤으면 `null`이다 -
+   * 0으로 채우면 "0년 투자"라는 답을 사용자가 한 것처럼 저장된다.
+   */
+  investmentHorizonYears: number | null;
+  /** 위와 같은 이유로 미응답은 `null`. */
+  liquidityNeed: LiquidityNeed | null;
   baseCapital: number;
   currency: string;
   maxSingleWeightPct: number;
   grossExposurePct: number;
   /**
-   * 2026-08-12 추가. `governance.mandate_versions.risk_bounds.max_drawdown_pct`의
+   * 2026-08-12 추가. `governance.mandates.metadata.policy.risk_bounds.max_drawdown_pct`의
    * 필수값이라, 슬라이더가 없으면 제출 자체가 서버에서 422로 거부된다
    * (USER_INPUT_SPEC.md §2 6번 "전체 최대 손실" — 프리셋이 아니라 직접 선택 항목).
    */
@@ -61,41 +113,52 @@ const APPROVAL_MODES: { id: ApprovalMode; icon: string; label: string; note: str
   { id: "manual", icon: "pan_tool", label: "Manual Approval Required", note: "모든 제안된 주문은 실행 전 관리자의 승인이 필요합니다." },
 ];
 
-// 초기 화면도 "conservative를 골랐을 때"와 같은 값이어야 한다 - 페이지를 막
-// 열었을 때 보이는 슬라이더가 이미 선택된 성향(conservative)의 기본값과
-// 다르면, 이 작업이 고치려는 "성향 선택 시 기본값이 바뀐다"는 기대와 첫
-// 화면부터 어긋난다. `sliderDefaultsFor`를 그대로 불러서 값을 중복해서
-// 적지 않는다.
-const INITIAL_SLIDER_DEFAULTS = sliderDefaultsFor(MINDSET_BY_RISK_PROFILE.conservative, "INTERMEDIATE");
+const EXPERIENCES: { id: Experience; label: string; note: string }[] = [
+  { id: "BEGINNER", label: "초보", note: "1년 미만" },
+  { id: "INTERMEDIATE", label: "중급", note: "1~5년" },
+  { id: "EXPERIENCED", label: "숙련", note: "5년 이상" },
+];
 
-const DEFAULT_DRAFT: MandateDraft = {
-  objective: "",
-  riskProfile: "conservative",
-  baseCapital: 100_000_000,
-  currency: "USD",
-  maxSingleWeightPct: INITIAL_SLIDER_DEFAULTS.maxSingleWeightPct,
-  grossExposurePct: INITIAL_SLIDER_DEFAULTS.grossExposurePct,
-  maxDrawdownPct: INITIAL_SLIDER_DEFAULTS.maxDrawdownPct,
-  maxDailyLossPct: INITIAL_SLIDER_DEFAULTS.maxDailyLossPct,
-  // 기본은 현물 Long-only. 레버리지·파생·가상자산은 정책 계층에서 꺼둔 상태로 시작한다.
-  allowedAssets: { equity: true, etf: true, leverage: false, futures: false, options: false, derivatives: false, crypto: false },
-  approvalMode: "manual",
-};
+/** 사용자별로 나눈다 - 단일 키면 계정을 전환했을 때 남의 초안이 보인다. */
+function storageKeyFor(userId: string): string {
+  return `sentient.mandate.draft.${userId}`;
+}
 
-const STORAGE_KEY = "sentient.mandate.draft";
+/**
+ * 임시 저장해둔 초안을 **DB에서 불러온 값 위에** 얹는다. 없으면 `null`.
+ *
+ * `base`가 `DEFAULT_DRAFT`가 아니라 서버 저장본이어야 하는 이유(2026-08-14 수정):
+ * 임시 초안에 없는 키를 공장 기본값으로 채우면, 서버에는 멀쩡히 있는 위험 성향·
+ * 투자 경험이 "보수적/초보"로 덮여 **일부 항목만 안 불러와지는 것처럼 보인다.**
+ * 특히 이 필드들이 나중에 추가돼서, 그 전에 저장된 초안에는 키 자체가 없다.
+ *
+ * `null`/`undefined`도 덮지 않는다 - "아직 답 안 함"이 서버에 저장된 답을 지우면
+ * 안 된다. 임시 초안은 **사용자가 고친 것만** 이기는 것이지, 안 고친 항목까지
+ * 되돌리는 게 아니다.
+ */
+function readLocalDraft(userId: string, base: MandateDraft): MandateDraft | null {
+  try {
+    const raw = window.localStorage.getItem(storageKeyFor(userId));
+    if (!raw) return null;
+    return mergeLocalDraft(base, JSON.parse(raw) as Partial<MandateDraft>);
+  } catch {
+    return null;
+  }
+}
 
 type ChatMessage = { from: "agent" | "user"; text: string };
 
+/**
+ * 첫 인사. 두 번째 줄을 손으로 적지 않고 대본 1번을 그대로 쓴다 - 따로 적으면
+ * 대본을 고쳤을 때 인사말만 옛 질문에 남는다.
+ */
 const OPENING: ChatMessage[] = [
-  { from: "agent", text: "안녕하세요. 저는 김세리 AI 투자 어시스턴트입니다. 운용 지침 설정을 위한 기본 구성을 준비했습니다. 세부 조건을 정교화하기 위해 몇 가지 질문을 드릴게요." },
-  { from: "agent", text: '먼저, 투자 기간을 알려주시겠어요? 예를 들어 "3년 이상", "은퇴 전까지", 혹은 "단기 전술 자금" 등이 있습니다.' },
+  { from: "agent", text: "안녕하세요. 저는 김세리 AI 투자 어시스턴트입니다. 몇 가지 여쭤보면서 좌측 운용 지침을 함께 채워드릴게요." },
+  { from: "agent", text: INTERVIEW[0].prompt },
 ];
 
-const FOLLOW_UPS = [
-  "현금화가 필요한 시점이나 유동성 조건이 있나요?",
-  "특정 업종이나 피하고 싶은 자산이 있나요?",
-  "손실이 발생했을 때 어느 수준까지 감내할 수 있나요?",
-];
+const RESTORED_PLACEHOLDER = "예: 장기적인 자산 가치 보존과 안정적인 수익 창출을 목표로 하며, 하락 리스크는 최소화하고 싶어.";
+const LOCKED_PLACEHOLDER = "화면 우측의 콘솔창을 이용해서 대화하세요.";
 
 /** 폼과 같은 색·굵기를 쓰는 섹션 제목. */
 function SectionHeading({ index, title, suffix }: { index: number; title: string; suffix?: string }) {
@@ -146,44 +209,80 @@ function FieldLabel({ children, hint }: { children: React.ReactNode; hint?: stri
   );
 }
 
+/**
+ * 계정 전환을 구독하고, **`key`로 폼을 통째로 다시 마운트한다.**
+ *
+ * 계정이 바뀔 때 상태를 손으로 되돌리면(`setDraft(DEFAULT_DRAFT)` 등) 두 가지가
+ * 생긴다 - 상태를 하나 추가할 때마다 초기화도 같이 적어야 하고(빠뜨리면 옛
+ * 사용자 값이 남는다), effect 안에서 동기 `setState`를 하게 돼 렌더가 한 번 더
+ * 돈다. `key`를 바꾸면 React가 알아서 전부 버린다.
+ *
+ * `TopNav`가 같은 탭에서 계정을 바꾸면 `ACCOUNT_CHANGED_EVENT`가, 다른 탭이면
+ * `storage`가 날아온다 - `currentAccount.ts`가 둘 다 듣는 구독을 이미 갖고 있어
+ * 그대로 쓴다.
+ */
 export default function MandateConfig() {
+  const userId = useSyncExternalStore(
+    subscribeToAccountChange,
+    readStoredAccountId,
+    () => DEFAULT_ACCOUNT.userId,
+  );
+  return <MandateConfigForm key={userId} userId={userId} />;
+}
+
+function MandateConfigForm({ userId }: { userId: string }) {
   const [draft, setDraft] = useState<MandateDraft>(DEFAULT_DRAFT);
   const [messages, setMessages] = useState<ChatMessage[]>(OPENING);
   const [reply, setReply] = useState("");
   const [step, setStep] = useState(0);
   const [notice, setNotice] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  /** 어시스턴트 응답 대기 중. 입력창을 잠가 같은 질문에 두 번 답하지 않게 한다. */
+  const [busy, setBusy] = useState(false);
+  /** 서버가 정한 실질 위험 등급. **화면이 재계산하지 않는다**(API_SPEC 2.3). */
+  const [riskBand, setRiskBand] = useState("");
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const resetDialogRef = useRef<HTMLDialogElement>(null);
+
+  /**
+   * 어느 계정으로 보고 있는지. `TopNav`가 같은 탭에서 계정을 바꾸면
+   * `ACCOUNT_CHANGED_EVENT`가 날아오고, 다른 탭이면 `storage`가 날아온다 -
+   * `currentAccount.ts`가 둘 다 듣는 구독을 이미 갖고 있어 그대로 쓴다.
+   */
+  /** 인터뷰가 끝나야 투자 목표 입력창이 열린다. 파생값이라 따로 상태를 두지 않는다. */
+  const locked = step < INTERVIEW.length;
+  const violations = useMemo(() => validateDraft(draft), [draft]);
+
+  /**
+   * 지금 물어보고 있는 질문. 칩 단계에서는 자유 입력을 막는다 - 선택지가 있는
+   * 질문에 자유 문장을 받아봐야 어느 칩을 고른 것인지 판정해야 하고, 그 판정은
+   * LLM이 성향을 정하는 것과 같아진다(USER_INPUT_SPEC 4.1).
+   */
+  const currentStep = INTERVIEW[step];
+  const inputDisabled = busy || !currentStep || Boolean(currentStep.choices);
+  const inputPlaceholder = busy
+    ? "답변을 기다리는 중입니다…"
+    : !currentStep
+      ? "설정이 끝났습니다. 좌측 폼에서 직접 수정하세요."
+      : currentStep.choices
+        ? "아래 버튼에서 골라주세요."
+        : "답변을 입력하세요...";
 
   const patch = useCallback(<K extends keyof MandateDraft>(key: K, value: MandateDraft[K]) => {
     setDraft((current) => ({ ...current, [key]: value }));
   }, []);
 
   /**
-   * 위험 성향을 고르면 슬라이더 4개가 그 등급의 잠정 기본값으로 바뀐다.
-   * `riskProfile`과 슬라이더 값을 `setDraft` 한 번으로 같이 갱신하는 이유:
-   * 따로따로 `patch`를 두 번 부르면 그 사이 렌더에서 잠깐 "성향은 바뀌었는데
-   * 슬라이더는 옛값"인 상태가 생긴다.
-   *
-   * `sliderDefaultsFor`가 등급을 낼 때 이 화면이 안 묻는 투자 경험을
-   * `mandateClient.ts`와 같은 자리표시자(INTERMEDIATE)로 고정한다 - 그래야
-   * 여기서 보여주는 기본값과 실제 제출 시 서버로 가는 숨김 필드가 같은
-   * 등급을 가리킨다(다르면 전에 겪은 슬라이더-프리셋 어긋남과 같은 문제가
-   * 다시 생긴다).
-   *
-   * 이건 **제안 기본값일 뿐**이다 - 고른 뒤에도 슬라이더는 그대로 움직일 수
-   * 있고, 실제 제출값은 그 시점의 슬라이더 값이다.
+   * 위험 성향·투자 경험을 고르면 슬라이더 4개가 그 등급의 잠정 기본값으로 바뀐다.
+   * 두 선택 모두 `applyChoice` 하나를 거치는 이유는 그쪽 주석에 적어뒀다 -
+   * 요약하면 등급이 `min(성향, 경험)`이라 어느 쪽이 바뀌어도 재계산해야 한다.
    */
   const selectRiskProfile = useCallback((profile: RiskProfile) => {
-    const defaults = sliderDefaultsFor(MINDSET_BY_RISK_PROFILE[profile], "INTERMEDIATE");
-    setDraft((current) => ({
-      ...current,
-      riskProfile: profile,
-      maxSingleWeightPct: defaults.maxSingleWeightPct,
-      grossExposurePct: defaults.grossExposurePct,
-      maxDrawdownPct: defaults.maxDrawdownPct,
-      maxDailyLossPct: defaults.maxDailyLossPct,
-    }));
+    setDraft((current) => applyChoice(current, { riskProfile: profile }));
+  }, []);
+
+  const selectExperience = useCallback((experience: Experience) => {
+    setDraft((current) => applyChoice(current, { experience }));
   }, []);
 
   useEffect(() => {
@@ -197,11 +296,149 @@ export default function MandateConfig() {
     return () => window.clearTimeout(timer);
   }, [notice]);
 
-  const capitalDisplay = useMemo(() => draft.baseCapital.toLocaleString("en-US"), [draft.baseCapital]);
+  /**
+   * 이 사용자의 저장본을 불러온다. 계정 전환 시 폼 초기화는 상위의 `key`가
+   * 담당하므로(아래 `MandateConfig` 참고) 여기서 손으로 되돌리지 않는다.
+   *
+   * 저장된 지침이 있으면 인터뷰를 건너뛴다 - 이미 답한 사람에게 같은 질문을
+   * 7개 다시 시키지 않는다. 없으면 기본값 + 인터뷰 1단계부터다.
+   *
+   * `cancelled` 가드는 응답 도착 전에 언마운트된 경우를 막는다 - 계정을 빠르게
+   * 두 번 바꾸면 옛 인스턴스의 응답이 뒤늦게 도착한다.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    const account = accountFor(userId);
+
+    async function hydrate() {
+      if (!account.fundId) {
+        if (!cancelled) setNotice("이 계정에는 연결된 Fund가 없어 저장된 지침을 불러올 수 없습니다.");
+        return;
+      }
+      let next = DEFAULT_DRAFT;
+      let hasStoredMandate = false;
+
+      try {
+        const stored = await loadMandateForFund(account.fundId);
+        if (cancelled) return;
+        if (stored?.policy) {
+          next = policyToDraft(next, stored.policy, stored.objectiveText);
+          hasStoredMandate = true;
+        }
+      } catch (cause) {
+        if (!cancelled) {
+          setNotice(cause instanceof Error ? cause.message : "저장된 지침을 불러오지 못했습니다.");
+        }
+        return;
+      }
+
+      // 성향·경험·기간·유동성은 정책(`MandatePolicy`)에 없다. 적합성 프로필에서
+      // 따로 채운다 - 없으면(404) 아직 프로필을 안 만든 사용자다.
+      let profileMissing = false;
+      try {
+        const profile = await loadInvestorProfile(account.userId, account.fundId);
+        if (cancelled) return;
+        if (profile) {
+          next = {
+            ...next,
+            riskProfile: profile.riskProfile,
+            experience: profile.experience,
+            investmentHorizonYears: profile.investmentHorizonYears,
+            liquidityNeed: profile.liquidityNeed,
+          };
+          setRiskBand(profile.effectiveRiskReason || profile.effectiveRiskBand);
+        } else {
+          profileMissing = true;
+        }
+      } catch (cause) {
+        if (cancelled) return;
+        // 조용히 넘기지 않는다. 이걸 삼키면 위험 성향·투자 경험만 기본값으로
+        // 남고 사용자는 "일부만 안 불러와진다"고만 느낀다 - 원인을 볼 방법이 없다.
+        setNotice(
+          `위험 성향·투자 경험을 불러오지 못해 기본값으로 표시합니다: ${
+            cause instanceof Error ? cause.message : "적합성 프로필 조회 실패"
+          }`,
+        );
+      }
+      if (cancelled) return;
+
+      // 저장하지 않은 임시 초안은 **서버 저장본 위에** 얹는다(그쪽 주석 참고).
+      // 사용자가 고친 항목만 이기고, 안 고친 항목은 서버 값이 남는다.
+      const local = readLocalDraft(account.userId, next);
+      if (local) {
+        setDraft(local);
+        // 인터뷰 단계를 저장하지 않으므로(이어하기 기능이 아니다) 폼은 열어둔다.
+        // 대신 인터뷰 중에 임시 저장한 초안이면 적합성 프로필에 필요한 답이
+        // 비어 있을 수 있어, 저장 때 가서야 알게 되지 않도록 지금 알린다.
+        setStep(INTERVIEW.length);
+        setNotice("저장되지 않은 임시 초안을 복원했습니다. DB 저장본과 다를 수 있습니다.");
+        setMessages([
+          { from: "agent", text: "저장되지 않은 임시 초안을 불러왔습니다. 좌측에서 이어서 수정하세요." },
+          ...(local.investmentHorizonYears === null || local.liquidityNeed === null
+            ? [{
+                from: "agent" as const,
+                text: "투자 기간·유동성 응답이 초안에 없습니다. 이대로 저장하면 지침은 저장되지만 적합성 프로필은 저장되지 않습니다.",
+              }]
+            : []),
+        ]);
+        return;
+      }
+
+      setDraft(next);
+      if (hasStoredMandate) {
+        setStep(INTERVIEW.length);
+        setMessages([
+          { from: "agent", text: "저장된 지침을 불러왔습니다. 좌측에서 바로 수정하실 수 있어요." },
+          // 지침은 있는데 적합성 프로필이 없는 상태가 실제로 생긴다(프로필 저장
+          // 경로가 지침보다 늦게 붙었다). 그때 위험 성향·투자 경험만 기본값으로
+          // 보이는데, 말해주지 않으면 "일부만 안 불러와진다"로만 보인다.
+          ...(profileMissing
+            ? [{
+                from: "agent" as const,
+                text: "다만 위험 성향·투자 경험은 아직 저장된 적이 없어 기본값으로 표시했습니다. 좌측에서 고른 뒤 저장하면 다음부터 그대로 불러옵니다.",
+              }]
+            : []),
+        ]);
+      }
+    }
+
+    void hydrate();
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
+
+  /**
+   * 기본 자산 입력 단위. KRW면 만원이다(`capitalUnitFor`).
+   *
+   * 저장값이 단위로 딱 나눠떨어지지 않으면(다른 경로가 넣은 금액) 입력칸은
+   * 반올림해 보여준다. 그래도 실제 저장값은 사용자가 이 칸을 **직접 고치기
+   * 전까지** 그대로다 - 그래서 정확한 원 금액을 항상 아래에 같이 적는다.
+   * 금액 필드에서 화면 표시와 저장값이 소리 없이 달라지면 안 된다.
+   */
+  const capitalUnit = useMemo(() => capitalUnitFor(draft.currency), [draft.currency]);
+  const capitalDisplay = useMemo(
+    () => Math.round(draft.baseCapital / capitalUnit.multiplier).toLocaleString("en-US"),
+    [draft.baseCapital, capitalUnit.multiplier],
+  );
+
+  /**
+   * 투자 경험이 성향을 끌어내렸는지. `EXPERIENCED`는 `min()`에서 항상 성향 쪽이
+   * 이기므로 "경험 상한이 없을 때의 등급"과 같다.
+   *
+   * **등급 이름을 여기서 보여주지 않는다** - 사용자에게 보이는 실질 등급은
+   * 서버(`effective_risk_band`)만 정한다(`mandatePresets.ts` 주석과 API_SPEC 2.3).
+   * 이 값은 "왜 공격적을 눌렀는데 슬라이더가 안 올라가지"를 설명하는 용도다.
+   */
+  const clampedByExperience = useMemo(() => {
+    const mindset = MINDSET_BY_RISK_PROFILE[draft.riskProfile];
+    return provisionalRiskScore(mindset, draft.experience) < provisionalRiskScore(mindset, "EXPERIENCED");
+  }, [draft.riskProfile, draft.experience]);
 
   function onCapitalChange(raw: string) {
-    const digits = raw.replace(/[^\d]/g, "");
-    patch("baseCapital", digits ? Number(digits) : 0);
+    // 입력은 단위(만원) 기준, 저장은 원 기준. 정수 곱이라 소수 오차가 없다.
+    const units = digitsOf(raw);
+    patch("baseCapital", units === null ? 0 : units * capitalUnit.multiplier);
   }
 
   function toggleAsset(id: AssetClassId) {
@@ -211,22 +448,127 @@ export default function MandateConfig() {
     }));
   }
 
-  function sendReply() {
-    const value = reply.trim();
-    if (!value) return;
+  /** 대본의 다음 질문(또는 완료 문구)을 붙이고 단계를 옮긴다. */
+  function advance(from: number, next: MandateDraft, extra: ChatMessage[] = []) {
+    const target = nextStep(next, from);
+    setStep(target);
     setMessages((current) => [
       ...current,
-      { from: "user", text: value },
-      { from: "agent", text: FOLLOW_UPS[step] ?? "확인했어요. 이 내용은 지침 초안에 메모해둘게요." },
+      ...extra,
+      { from: "agent", text: INTERVIEW[target]?.prompt ?? INTERVIEW_DONE },
     ]);
-    setStep((current) => Math.min(current + 1, FOLLOW_UPS.length));
+  }
+
+  /** 칩 버튼 하나를 고른 것. LLM을 거치지 않는 결정론 경로다. */
+  function choose(label: string, choicePatch: Partial<MandateDraft>) {
+    if (busy) return;
+    const next = applyChoice(draft, choicePatch);
+    setDraft(next);
+    setMessages((current) => [...current, { from: "user", text: label }]);
+    advance(step + 1, next);
+  }
+
+  async function send() {
+    const value = reply.trim();
+    const current = INTERVIEW[step];
+    if (!value || busy || !current) return;
     setReply("");
+    setMessages((existing) => [...existing, { from: "user", text: value }]);
+
+    // 숫자 응답은 화면이 직접 해석한다 - 자본·기간을 LLM에 맡길 이유가 없고,
+    // 맡기면 같은 입력이 다르게 읽힐 수 있다.
+    if (current.parse) {
+      const parsed = current.parse(value);
+      if (!parsed) {
+        setMessages((existing) => [
+          ...existing,
+          { from: "agent", text: current.retry ?? "다시 한 번 입력해 주세요." },
+        ]);
+        return;
+      }
+      const next = applyChoice(draft, parsed);
+      setDraft(next);
+      advance(step + 1, next);
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const history = [...messages, { from: "user" as const, text: value }].map((message) => ({
+        role: message.from === "agent" ? ("assistant" as const) : ("user" as const),
+        content: message.text,
+      }));
+      const result = await requestMandateSuggestion(history, draft);
+      const applied = applySuggestions(draft, result.suggestions);
+      // 제안이 목표 문장을 못 뽑았어도(LLM 장애 시 서버가 빈 제안으로 감싼다)
+      // 사용자가 직접 쓴 문장은 그대로 남긴다 - 추론이 아니라 사용자의 말이다.
+      const next = applied.draft.objective ? applied.draft : { ...applied.draft, objective: value };
+      setDraft(next);
+
+      const extra: ChatMessage[] = [{ from: "agent", text: result.reply }];
+      const skipped = [...applied.unapplied, ...result.dropped_fields];
+      if (skipped.length > 0) {
+        extra.push({
+          from: "agent",
+          text: `${skipped.join(", ")}은(는) 제가 정할 수 있는 항목이 아니라 반영하지 않았습니다. 아래에서 직접 골라주세요.`,
+        });
+      }
+      advance(step + 1, next, extra);
+    } catch (cause) {
+      /*
+       * 어시스턴트가 죽어도 대본을 멈추지 않는다. 여기서 단계를 붙잡으면
+       * 인터뷰가 끝나야 열리는 투자 목표 입력창이 영영 안 열려서, LLM 장애
+       * 하나가 폼 전체를 잠그는 교착이 된다.
+       *
+       * 대신 **사용자가 방금 친 문장을 그대로** 목표로 넣고 넘어간다 - 추론이
+       * 아니라 사용자의 말 그대로라 원칙 5에 걸리지 않는다. 어시스턴트가 하려던
+       * 일은 문장을 다듬는 것뿐이었고, 기간·유동성은 어차피 뒤 단계에서 직접
+       * 물어본다(`skipIf`가 null이라 안 건너뛴다).
+       */
+      const next = { ...draft, objective: draft.objective || value };
+      setDraft(next);
+      advance(step + 1, next, [
+        {
+          from: "agent",
+          text: `${cause instanceof Error ? cause.message : "제안을 받지 못했습니다."} 적어주신 내용은 목표에 그대로 넣어뒀습니다.`,
+        },
+      ]);
+    } finally {
+      setBusy(false);
+    }
   }
 
   function saveDraft() {
-    // BFF 미연결 상태라 서버로 보내지 않는다. 브라우저 안에만 남긴다.
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(draft));
-    setNotice("브라우저에 임시 저장했습니다. 서버(BFF)에는 아직 전송되지 않았습니다.");
+    // 이 브라우저에만 남긴다. DB 저장은 "지침 저장"이다.
+    try {
+      window.localStorage.setItem(storageKeyFor(userId), JSON.stringify(draft));
+      setNotice("이 브라우저에만 임시 저장했습니다. DB에 남기려면 [지침 저장]을 누르세요.");
+    } catch {
+      // Safari 사생활 보호 모드 등에서 던진다. 저장을 못 하는 것이 화면을 멈출 이유는 아니다.
+      setNotice("이 브라우저가 임시 저장을 허용하지 않습니다. [지침 저장]으로 DB에 저장하세요.");
+    }
+  }
+
+  /**
+   * 폼·콘솔을 첫 방문 상태로 되돌린다. 상위의 `key` 리마운트를 쓰지 않는 이유:
+   * 리마운트하면 hydrate가 다시 돌아 DB 저장본을 불러오고 인터뷰를 건너뛴다 -
+   * 그건 초기화가 아니라 새로고침이다.
+   *
+   * localStorage 초안도 지운다. 남겨두면 다음 방문에 방금 지운 값이 복원된다.
+   * **DB에 저장된 지침·프로필은 건드리지 않는다** - 이 화면에 삭제 권한이 없다.
+   */
+  function resetAll() {
+    try {
+      window.localStorage.removeItem(storageKeyFor(userId));
+    } catch {
+      /* 저장소를 막아둔 브라우저. 지울 것도 없으니 그대로 진행한다. */
+    }
+    setDraft(DEFAULT_DRAFT);
+    setMessages(OPENING);
+    setStep(0);
+    setReply("");
+    setRiskBand("");
+    setNotice("설정을 초기화했습니다. DB에 저장된 지침은 그대로입니다.");
   }
 
   async function submit() {
@@ -240,7 +582,20 @@ export default function MandateConfig() {
       const objectiveText = draft.objective.trim() || fallbackObjective;
 
       const result = await submitMandateDraft(draft, objectiveText);
-      setNotice(`v${result.version}이 DB에 저장됐습니다.`);
+      // 커밋됐으므로 임시 초안은 지운다 - 남겨두면 다음 방문에 DB 저장본 대신
+      // 옛 초안이 복원돼 방금 저장한 값이 안 보인다.
+      try {
+        window.localStorage.removeItem(storageKeyFor(userId));
+      } catch {
+        /* 삭제 실패는 무시한다 - 저장 자체는 이미 성공했다. */
+      }
+      // 정책과 적합성 프로필은 서비스가 달라 한 트랜잭션이 아니다. 하나만
+      // 저장됐으면 둘 다 됐다고 말하지 않는다.
+      setNotice(
+        result.profileError
+          ? `지침은 DB에 저장됐습니다. 다만 적합성 프로필은 저장되지 않았습니다 - ${result.profileError}`
+          : "지침과 적합성 프로필이 DB에 저장됐습니다.",
+      );
     } catch (error) {
       setNotice(
         error instanceof MandateSubmissionError
@@ -290,16 +645,21 @@ export default function MandateConfig() {
                     <textarea
                       value={draft.objective}
                       onChange={(event) => patch("objective", event.target.value)}
-                      className="w-full h-32 p-4 bg-surface rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary focus:outline-none text-body-md font-body-md resize-none shadow-inner"
-                      placeholder="예: 장기적인 자산 가치 보존과 안정적인 수익 창출을 목표로 하며, 하락 리스크는 최소화하고 싶어."
+                      disabled={locked}
+                      className="w-full h-32 p-4 bg-surface rounded-lg border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary focus:outline-none text-body-md font-body-md resize-none shadow-inner disabled:opacity-60 disabled:cursor-not-allowed"
+                      placeholder={locked ? LOCKED_PLACEHOLDER : RESTORED_PLACEHOLDER}
                     />
                   </label>
-                  <p className="text-xs text-on-surface-variant mt-2">구체적인 종목이나 기간은 AI 어시스턴트가 다음 질문으로 확인합니다.</p>
+                  <p className="text-xs text-on-surface-variant mt-2">
+                    {locked
+                      ? "대화가 끝나면 이 칸을 직접 수정할 수 있습니다."
+                      : "구체적인 종목이나 기간은 AI 어시스턴트가 다음 질문으로 확인합니다."}
+                  </p>
                 </div>
 
                 <div>
                   <FieldLabel hint="select one">위험 성향</FieldLabel>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 lg:h-32" role="radiogroup" aria-label="위험 성향">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4" role="radiogroup" aria-label="위험 성향">
                     {RISK_PROFILES.map((item) => {
                       const on = draft.riskProfile === item.id;
                       return (
@@ -325,6 +685,47 @@ export default function MandateConfig() {
                       );
                     })}
                   </div>
+
+                  {/*
+                    투자 경험. 예전엔 이 문항이 없어서 화면과 `mandateClient.ts`가
+                    각각 INTERMEDIATE를 자리표시자로 박았고, 등급이
+                    `min(성향, 경험)`이라 "공격적"이 영원히 "중립적"과 같은
+                    기본값을 냈다. 사용자에게 직접 묻는 것이 그 자리표시자를
+                    없애는 유일한 방법이다.
+                  */}
+                  <div className="mt-4">
+                    <FieldLabel hint="select one">투자 경험</FieldLabel>
+                    <div className="grid grid-cols-3 gap-2" role="radiogroup" aria-label="투자 경험">
+                      {EXPERIENCES.map((item) => {
+                        const on = draft.experience === item.id;
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            role="radio"
+                            aria-checked={on}
+                            onClick={() => selectExperience(item.id)}
+                            className={`border rounded-lg py-2 px-1 text-center transition-colors ${
+                              on ? "border-primary bg-secondary-container shadow-sm" : "border-outline-variant hover:bg-surface-container"
+                            }`}
+                          >
+                            <span className={`block font-semibold text-body-sm font-body-sm ${on ? "text-primary" : "text-on-surface"}`}>
+                              {item.label}
+                            </span>
+                            <span className="block text-[10px] text-on-surface-variant">{item.note}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {clampedByExperience ? (
+                      <p className="text-[11px] text-on-surface-variant mt-2 leading-relaxed">
+                        투자 경험이 성향보다 낮아 더 보수적인 등급의 기본값이 제안됐습니다. 아래 슬라이더로 직접 조정할 수 있습니다.
+                      </p>
+                    ) : null}
+                    {riskBand ? (
+                      <p className="text-[11px] text-secondary mt-1 leading-relaxed">저장된 적합성 판정: {riskBand}</p>
+                    ) : null}
+                  </div>
                 </div>
               </div>
             </section>
@@ -335,16 +736,32 @@ export default function MandateConfig() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                 <div>
                   <label>
-                    <span className="block text-label-md font-label-md text-secondary mb-1 uppercase">기본 자산</span>
+                    <span className="block text-label-md font-label-md text-secondary mb-1 uppercase">
+                      기본 자산 <span className="normal-case font-normal text-on-surface-variant">({capitalUnit.label} 단위)</span>
+                    </span>
                     <span className="text-[10px] text-outline block mb-2 font-mono">risk_bounds.base_capital</span>
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      value={capitalDisplay}
-                      onChange={(event) => onCapitalChange(event.target.value)}
-                      className="w-full p-3 bg-surface rounded border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary focus:outline-none text-data-mono font-data-mono font-bold tracking-wider"
-                    />
+                    <span className="relative block">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        value={capitalDisplay}
+                        onChange={(event) => onCapitalChange(event.target.value)}
+                        aria-describedby="capital-exact"
+                        className="w-full p-3 pr-14 bg-surface rounded border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary focus:outline-none text-data-mono font-data-mono font-bold tracking-wider"
+                      />
+                      <span className="absolute right-3 top-3.5 text-body-sm font-body-sm text-on-surface-variant pointer-events-none">
+                        {capitalUnit.label}
+                      </span>
+                    </span>
                   </label>
+                  {/*
+                    실제로 저장되는 금액을 그대로 적는다. 입력 단위와 저장 단위가
+                    다른 칸에서 이걸 안 보여주면 1만 배 오입력을 저장 전에 알아챌
+                    방법이 없다.
+                  */}
+                  <p id="capital-exact" className="text-xs text-on-surface-variant mt-2 font-data-mono">
+                    = {draft.baseCapital.toLocaleString("en-US")} {draft.currency}
+                  </p>
                 </div>
                 <div>
                   <label>
@@ -441,9 +858,15 @@ export default function MandateConfig() {
                     value={draft.maxDrawdownPct}
                     onChange={(event) => {
                       const next = Number(event.target.value);
-                      patch("maxDrawdownPct", next);
                       // daily <= drawdown 제약. 슬라이더 두 개가 서로 어긋나게 두지 않는다.
-                      if (draft.maxDailyLossPct > next) patch("maxDailyLossPct", next);
+                      // `setDraft` 한 번으로 둘을 같이 옮긴다 - `patch`를 두 번 부르면
+                      // 두 번째가 렌더 클로저의 옛 `draft.maxDailyLossPct`를 읽어서,
+                      // 슬라이더를 빠르게 끌 때 제약 위반이 그대로 남는다.
+                      setDraft((current) => ({
+                        ...current,
+                        maxDrawdownPct: next,
+                        maxDailyLossPct: Math.min(current.maxDailyLossPct, next),
+                      }));
                     }}
                     className="w-full h-2 bg-surface-container-highest rounded-lg appearance-none cursor-pointer accent-primary"
                   />
@@ -547,9 +970,17 @@ export default function MandateConfig() {
           <footer className="border-t border-outline-variant p-4 bg-surface-bright flex justify-between items-center gap-4 flex-wrap mt-auto">
             <div className="text-xs text-on-surface-variant flex items-center gap-1 font-medium">
               <span className="material-symbols-outlined text-[16px]" aria-hidden="true">info</span>
-              제출하면 새 지침 version만 저장됩니다. 활성화·주문·원장 변경은 수행하지 않습니다.
+              저장하면 현재 지침 metadata와 적합성 프로필을 덮어씁니다. 주문·원장 변경은 수행하지 않습니다.
             </div>
             <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={() => resetDialogRef.current?.showModal()}
+                disabled={busy || submitting}
+                className="px-6 py-2 border border-outline text-on-surface-variant rounded font-bold text-body-sm hover:bg-surface-container-high transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                초기화
+              </button>
               <button
                 type="button"
                 onClick={saveDraft}
@@ -560,15 +991,64 @@ export default function MandateConfig() {
               <button
                 type="button"
                 onClick={submit}
-                disabled={submitting}
+                disabled={submitting || violations.length > 0}
                 className="px-6 py-2 bg-primary text-on-primary rounded font-bold text-body-sm hover:bg-primary-container transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {submitting ? "저장 중..." : "지침 저장"}
               </button>
             </div>
+            {/*
+              서버가 어차피 같은 제약으로 거절하지만, 422를 받고 나서야 알려주면
+              어느 슬라이더를 만져야 하는지 화면이 설명할 수 없다. 위반이 있는
+              동안은 저장 버튼도 잠근다.
+            */}
+            {violations.length > 0 ? (
+              <ul role="alert" className="w-full text-xs text-error list-disc pl-4 space-y-0.5">
+                {violations.map((violation) => (
+                  <li key={violation.rule}>
+                    {violation.rule} ({violation.detail})
+                  </li>
+                ))}
+              </ul>
+            ) : null}
             {notice ? (
               <p role="status" className="w-full text-xs text-on-surface-variant">{notice}</p>
             ) : null}
+
+            {/*
+              확인 팝업. `showModal()`이 화면 중앙 배치·backdrop·Escape 닫기·포커스
+              트랩을 브라우저에서 주므로 모달 상태나 컴포넌트를 따로 두지 않는다.
+              `m-auto`는 필수 - Tailwind v4 preflight가 모든 요소의 margin을 0으로
+              만들어서 `<dialog>`의 기본 중앙 정렬(margin:auto)이 지워진다.
+              `method="dialog"`라 두 버튼 다 눌리면 알아서 닫힌다.
+            */}
+            <dialog
+              ref={resetDialogRef}
+              aria-labelledby="reset-dialog-title"
+              className="m-auto w-[min(24rem,90vw)] p-6 rounded-lg bg-surface-container-lowest text-on-surface border border-outline-variant shadow-sm backdrop:bg-black/40"
+            >
+              <h2 id="reset-dialog-title" className="text-body-md font-body-md font-bold flex items-center gap-2 text-error">
+                <span className="material-symbols-outlined text-[20px]" aria-hidden="true">warning</span>
+                설정을 초기화할까요?
+              </h2>
+              <p className="text-body-sm font-body-sm text-on-surface-variant mt-3 leading-relaxed">
+                좌측 폼이 기본값으로 돌아가고, 우측 대화도 처음부터 다시 시작합니다.
+                이 브라우저의 임시 저장 초안도 지워집니다. 되돌릴 수 없습니다.
+                <br />
+                DB에 저장된 지침과 적합성 프로필은 지워지지 않습니다.
+              </p>
+              <form method="dialog" className="flex justify-end gap-2 mt-5">
+                <button className="px-4 py-2 border border-outline-variant rounded font-bold text-body-sm hover:bg-surface-container-high transition-colors">
+                  취소
+                </button>
+                <button
+                  onClick={resetAll}
+                  className="px-4 py-2 bg-error text-on-error rounded font-bold text-body-sm hover:opacity-90 transition-opacity"
+                >
+                  Yes
+                </button>
+              </form>
+            </dialog>
           </footer>
           </div>
         </div>
@@ -633,6 +1113,40 @@ export default function MandateConfig() {
                 </div>
               </div>
             ))}
+
+            {/*
+              대기 표시를 `messages`에 넣지 않는 이유: 응답이 오면 다시 빼야
+              하고, 실패 경로에서 빼는 걸 빠뜨리면 영원히 "생각 중"이 남는다.
+              조건부 렌더는 정리할 것이 없다.
+            */}
+            {busy ? (
+              <div className="flex flex-col gap-1 max-w-[85%] items-start">
+                <span className="text-[10px] text-secondary mx-1 font-medium">김세리</span>
+                <div className="p-3 text-body-sm font-body-sm shadow-sm rounded-2xl rounded-tl-sm bg-surface-container border border-outline-variant text-on-surface-variant italic">
+                  답변을 생각하고 있습니다…
+                </div>
+              </div>
+            ) : null}
+
+            {/*
+              칩 버튼. 성향·경험·유동성·승인 방식은 **여기서만** 정해진다 -
+              LLM이 고르지 않는다(USER_INPUT_SPEC 4.1).
+            */}
+            {!busy && currentStep?.choices ? (
+              <div className="flex flex-wrap gap-2" role="group" aria-label="선택지">
+                {currentStep.choices.map((choice) => (
+                  <button
+                    key={choice.label}
+                    type="button"
+                    onClick={() => choose(choice.label, choice.patch)}
+                    className="border border-primary text-primary rounded-full px-3 py-1.5 text-body-sm font-body-sm font-medium hover:bg-secondary-container transition-colors"
+                  >
+                    {choice.label}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+
             <div ref={chatEndRef} aria-hidden="true" />
           </div>
 
@@ -644,25 +1158,27 @@ export default function MandateConfig() {
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && !event.shiftKey) {
                     event.preventDefault();
-                    sendReply();
+                    void send();
                   }
                 }}
+                disabled={inputDisabled}
                 aria-label="AI 어시스턴트 답변"
-                placeholder="답변을 입력하세요..."
-                className="flex-1 min-w-0 bg-surface-container-lowest border border-outline-variant rounded-lg p-2 text-body-sm font-body-sm resize-none h-[44px] focus:border-primary focus:ring-1 focus:ring-primary focus:outline-none"
+                placeholder={inputPlaceholder}
+                className="flex-1 min-w-0 bg-surface-container-lowest border border-outline-variant rounded-lg p-2 text-body-sm font-body-sm resize-none h-[44px] focus:border-primary focus:ring-1 focus:ring-primary focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed"
               />
               <button
                 type="button"
-                onClick={sendReply}
-                disabled={!reply.trim()}
+                onClick={() => void send()}
+                disabled={inputDisabled || !reply.trim()}
                 aria-label="전송"
-                className="bg-primary text-on-primary w-[44px] h-[44px] rounded-lg flex items-center justify-center hover:bg-primary-container transition-colors shrink-0 disabled:opacity-40"
+                className="bg-primary text-on-primary w-[44px] h-[44px] rounded-lg flex items-center justify-center hover:bg-primary-container transition-colors shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 <span className="material-symbols-outlined" aria-hidden="true">send</span>
               </button>
             </div>
-            <p className="text-[10px] text-on-surface-variant text-center mt-2">
-              Conversation context is synchronized with the mandate draft.
+            <p className="text-[10px] text-on-surface-variant text-center mt-2 leading-relaxed">
+              대화에서 자동 반영되는 값은 투자 목표·기간·유동성뿐입니다.<br />
+              성향·경험·자본·승인 방식은 직접 선택합니다.
             </p>
           </div>
         </div>

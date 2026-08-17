@@ -120,6 +120,23 @@ THEMES = {
                                # (Bali-Cakici-Whitelaw) - 저변동과 형제 테마
     "illiquidity_premium": "거래마찰",
     "liquidity_shock_reversal": "거래마찰",
+    "price_delay": "거래마찰",  # Hou-Moskowitz: 지연 프리미엄은 인지·거래 마찰의
+                               # 대가 - 비유동성과 같은 군집 (카드 t_2334a259)
+    "order_flow_imbalance": "거래마찰",
+                               # Cont-Kukanov-Stoikov 2014: OFI 는 호가 갱신
+                               # 압력이 만드는 가격 충격이다. 재는 대상이
+                               # 유동성 공급의 대가라는 점에서 비유동성·지연과
+                               # 같은 군집이고, 다른 것은 관측 창(호가·체결)뿐이다.
+    "signal_composite": "복합",
+                               # ▶ **한 부모에게 수축시키지 않는다** (카드 t_fa233e6b).
+                               #   완제품 층(COMBO)은 위 부품 전체의 결합이라 그
+                               #   π₀ 가 구성 신호들의 혼합이고, 어느 단일 테마의
+                               #   사전확률로도 대표되지 않는다. 추세에 끼워 넣으면
+                               #   추세의 기각율이 결합의 성적으로 오염되고
+                               #   (역방향도 마찬가지), Bühlmann 수축이 결합을 틀린
+                               #   평균으로 끌어당긴다. 결합은 BR 이 다른 층이다
+                               #   (Grinold-Kahn) - 자기 테마를 갖는 것이 맞다.
+                               #   부품이 늘어도 이 한 칸은 그대로다.
 }
 
 
@@ -131,7 +148,7 @@ def theme_of(edge_type: str) -> str:
 def family_key(hyp: dict) -> dict:
     """가설 -> Family 를 정하는 재료. **튜닝 값·자유 서술은 안 들어간다.**"""
     edge = hyp.get("expected_edge") or {}
-    return {
+    key = {
         "edge_type": str(edge.get("type") or "").strip().lower(),
         # 구조화된 키가 있으면 그것을, 없으면 서술에서 사상한다
         "universe_key": (str(edge.get("universe_key") or "").strip().lower()
@@ -140,20 +157,45 @@ def family_key(hyp: dict) -> dict:
         "label": _norm_text(hyp.get("label") or edge.get("label")),
         "baseline": _norm_text(hyp.get("baseline")),
     }
+    if str(edge.get("research_lane") or "").upper() == "INTRADAY_EVENT":
+        key["research_lane"] = "INTRADAY_EVENT"
+        key["semantic_fingerprint"] = str(
+            edge.get("semantic_fingerprint") or "").strip().lower()
+        expr = edge.get("intraday_signal_expr")
+        if expr is not None:
+            # Different executable equation structures are different economic
+            # trials even when they share an execution target/clock.  Constants
+            # and windows remain tuning dimensions, so identity uses the shape
+            # fingerprint rather than the exact formula fingerprint.
+            from intraday_alpha_ast import shape_fingerprint
+            key["formula_shape_fingerprint"] = shape_fingerprint(expr)
+    elif edge.get("signal_expr") is not None:
+        from alpha_ast_surface import shape_fingerprint
+        key["formula_shape_fingerprint"] = shape_fingerprint(
+            edge["signal_expr"])
+    return key
 
 
 def hypothesis_view(*, edge_type=None, universe_key=None, universe=None,
-                    label=None, baseline=None) -> dict:
+                    label=None, baseline=None, research_lane=None,
+                    semantic_fingerprint=None, signal_expr=None,
+                    intraday_signal_expr=None) -> dict:
     """Family 계산 입력의 **정본**. 접수(Gate 0)와 실행면이 이 함수를 함께 쓴다.
 
     양쪽이 각자 dict 를 만들면 기본값이 갈리고, 갈리면 같은 컨셉이 두 개의
     Family 로 쪼개져 **한쪽이 세는 계열에 다른 쪽이 아무것도 각인하지 않는다.**
     실제로 그렇게 됐다(모듈 상단 주석). 만드는 곳을 하나로 둔다.
     """
+    edge = {"type": edge_type, "universe_key": universe_key,
+            "universe": universe}
+    if str(research_lane or "").upper() == "INTRADAY_EVENT":
+        edge.update({"research_lane": "INTRADAY_EVENT",
+                     "semantic_fingerprint": semantic_fingerprint,
+                     "intraday_signal_expr": intraday_signal_expr})
+    elif signal_expr is not None:
+        edge["signal_expr"] = signal_expr
     return {
-        "expected_edge": {"type": edge_type,
-                          "universe_key": universe_key,
-                          "universe": universe},
+        "expected_edge": edge,
         "label": label or DEFAULT_LABEL,
         "baseline": baseline or DEFAULT_BASELINE,
     }
@@ -172,7 +214,11 @@ def family_of_hypothesis_row(row: dict) -> str:
         universe_key=edge.get("universe_key"),
         universe=edge.get("universe") or row.get("universe"),
         label=row.get("label") or edge.get("label"),
-        baseline=row.get("baseline")))
+        baseline=row.get("baseline"),
+        research_lane=edge.get("research_lane"),
+        semantic_fingerprint=edge.get("semantic_fingerprint"),
+        signal_expr=edge.get("signal_expr"),
+        intraday_signal_expr=edge.get("intraday_signal_expr")))
 
 
 def family_id(hyp: dict) -> str:
@@ -285,11 +331,19 @@ def _check_theme_is_a_lens_not_identity():
     테마가 정체성이면 분류 교정이 곧 계열 갈라짐(다중검정 분모 오염)이다.
     조회 층이면 교정이 공짜다. 그리고 어휘 전체에 테마가 있어야 파레토·
     π₀ 집계가 구멍 없이 돈다 - 단 모르는 유형은 '미분류'로 정직하게.
+
+    ▶ **거울 검사가 `strategy_templates` 쪽에도 있다** (카드 t_fa233e6b).
+      이 검사는 제 일을 했는데도 어휘가 두 번 넓어지는 동안(signal_composite ·
+      order_flow_imbalance) 아무도 못 봤다 - 어휘를 넓히는 사람은 이 파일을
+      열지 않기 때문이다. 넓히는 자리에서도 터지게 해 뒀으니 둘 중 아무 쪽을
+      돌려도 걸린다.
     """
     from strategy_templates import EDGE_VOCAB as _EV
 
     for e in _EV:
-        assert theme_of(e) != "미분류", f"어휘 {e} 에 테마가 없다"
+        assert theme_of(e) != "미분류", (
+            f"어휘 {e} 에 테마가 없다 - THEMES 에 넣어라. 없으면 이 계열이 "
+            f"테마별 집계에서 '미분류' 한 칸에 무관한 유형들과 섞인다")
     assert theme_of("듣도못한유형") == "미분류"
     assert theme_of(None) == "미분류"
     # 해시 불변: 테마 사전이 통째로 바뀌어도 family_id 는 같아야 한다

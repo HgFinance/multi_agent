@@ -37,13 +37,17 @@ technical/fundamental/news-macro/evidence-rag)이었고 산출물은 종목별 R
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+import re
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
 
 try:
     from departments.employee_worker_runtime import (
         WorkerLLM,
         WorkerLLMFactory,
         WorkerSpec,
+        StructuredArtifactSpec,
         run_worker_registry,
         tools_for_specs,
     )
@@ -52,9 +56,111 @@ except ModuleNotFoundError:
         WorkerLLM,
         WorkerLLMFactory,
         WorkerSpec,
+        StructuredArtifactSpec,
         run_worker_registry,
         tools_for_specs,
     )
+
+class SkepticReviewV1(BaseModel):
+    """Typed independent-review artifact consumed by proposal intake."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    title: str = Field(min_length=1)
+    competing_explanation: str = Field(min_length=1)
+    competing_codes: tuple[
+        Literal["BETA_EXPOSURE", "LIQUIDITY_PREMIUM", "DATA_MINING",
+                "COST_UNACCOUNTED"], ...
+    ] = Field(min_length=1)
+    verdict: Literal["PROCEED", "STOP"]
+    falsification_test: str = Field(min_length=1)
+
+
+def _validate_skeptic_review(value: Any) -> dict[str, Any]:
+    return SkepticReviewV1.model_validate(value).model_dump(mode="json")
+
+
+def _validate_skeptic_reviews_against_input(value: Any,
+                                            payload: Mapping[str, Any]) -> list[dict]:
+    """Bind one typed review to each source TITLE without ambiguous guessing."""
+    draft = payload.get("proposal_draft", "")
+    if isinstance(draft, Mapping):
+        candidate = draft.get("title") or draft.get("proposal_id")
+        titles = [str(candidate).strip()] if candidate else []
+    else:
+        titles = [match.group(1).strip() for match in re.finditer(
+            r"(?m)^\s*TITLE\s*:\s*(.+?)\s*$", str(draft or ""))
+            if match.group(1).strip()]
+    if not titles:
+        raise ValueError("proposal_draft must contain at least one TITLE line")
+    reviews = list(value) if isinstance(value, list) else []
+
+    def _merge_single_proposal(items: list[Any]) -> list[dict]:
+        """Conservatively fold over-generation into one independent review.
+
+        A small model often emits several alternative attacks on one proposal.
+        Dropping all of them wastes a valid skeptic run; selecting one weakens
+        it arbitrarily. Unioning codes/tests and letting STOP dominate retains
+        every objection without granting any additional authority.
+        """
+        validated = [_validate_skeptic_review(item) for item in items]
+        if not validated:
+            raise ValueError("skeptic_reviews must contain exactly 1 item")
+
+        def unique_text(key: str) -> str:
+            seen, parts = set(), []
+            for item in validated:
+                text = str(item[key]).strip()
+                if text and text not in seen:
+                    seen.add(text)
+                    parts.append(text)
+            return "; ".join(parts)
+
+        allowed = ("BETA_EXPOSURE", "LIQUIDITY_PREMIUM", "DATA_MINING",
+                   "COST_UNACCOUNTED")
+        present = {code for item in validated
+                   for code in item["competing_codes"]}
+        return [{
+            "title": titles[0],
+            "competing_explanation": unique_text("competing_explanation"),
+            "competing_codes": [code for code in allowed if code in present],
+            "verdict": ("STOP" if any(item["verdict"] == "STOP"
+                                       for item in validated) else "PROCEED"),
+            "falsification_test": unique_text("falsification_test"),
+        }]
+
+    # Small reviewer models occasionally echo reviews for proposals that were
+    # present in retrieved context even though proposal_draft contains only one
+    # active block.  Do not let those unrelated, explicitly named artifacts
+    # poison the active review.  Exact title binding is safe to recover because
+    # the planner title is the join key; ambiguous duplicates and renamed
+    # surplus reviews still fail closed below.
+    if len(reviews) != len(titles):
+        title_set = set(titles)
+        exact = [review for review in reviews
+                 if isinstance(review, Mapping)
+                 and str(review.get("title") or "").strip() in title_set]
+        exact_titles = [str(review.get("title") or "").strip()
+                        for review in exact]
+        if (len(exact) == len(titles)
+                and len(set(exact_titles)) == len(titles)
+                and set(exact_titles) == title_set):
+            reviews = exact
+    if len(titles) == 1 and len(reviews) != 1:
+        reviews = _merge_single_proposal(reviews)
+    if len(reviews) != len(titles):
+        raise ValueError(
+            f"skeptic_reviews must contain exactly {len(titles)} item(s), one for "
+            f"each TITLE line; got {len(reviews)}")
+    if len(titles) == 1:
+        normalized = [dict(reviews[0])]
+        normalized[0]["title"] = titles[0]
+        return normalized
+    review_titles = [str(review.get("title") or "").strip() for review in reviews]
+    if sorted(review_titles) != sorted(titles):
+        raise ValueError("skeptic_reviews title set must exactly match TITLE lines")
+    return reviews
+
 
 # ▶ 방법론 스카우트는 여기 없다. 웹 검색·열람·검증 도구가 **본부장(Hermes)에만**
 #   있어서 로컬 모델 워커로는 조사 자체가 성립하지 않기 때문이다 - 자리를 남겨두면
@@ -68,7 +174,46 @@ except ModuleNotFoundError:
 #   도구가 `research.*` **읽기 API** 라 본부장 전용 웹 도구와 사정이 다르다 -
 #   로컬 모델로도 성립한다(스카우트를 뺀 근거가 이 워커에는 해당하지 않는다).
 WORKER_SPECS = (
-    WorkerSpec("competing-explanation-worker", "Competing explanation and falsification analyst", ("research.outcomes.read", "research.evidence.search"), "proposal_draft", ("proposal_draft",)),
+    WorkerSpec(
+        "competing-explanation-worker",
+        "Competing explanation and falsification analyst",
+        ("research.outcomes.read", "research.evidence.search"),
+        "proposal_draft",
+        ("proposal_draft",),
+        # Keep the shared non-binding envelope; skeptic_reviews is a validated
+        # station-specific artifact inside it, not a new authority boundary.
+        output_contract="research.worker-context.v1",
+        prompt_instructions=(
+            "Review every proposal block in proposal_draft independently. A block begins "
+            "ONLY at a line starting `TITLE:`; LEAD_IDS, ECONOMIC_RATIONALE, COUNTERPARTY, "
+            "EDGE_TYPE, UNIVERSE_KEY, COMPETING_EXPLANATION, and COMPETING_CODES are fields, "
+            "NOT additional proposal titles. Copy the exact text after each TITLE: into "
+            "exactly one skeptic_reviews item. Every item MUST contain all five keys in "
+            "this exact shape: {\"title\":\"exact title\",\"competing_explanation\":\"strongest "
+            "non-alpha explanation\",\"competing_codes\":[\"DATA_MINING\"],\"verdict\":"
+            "\"PROCEED\",\"falsification_test\":\"one concrete test as a STRING, not an "
+            "array\"}. Choose one or more allowed competing_codes yourself; do not omit "
+            "that key. PROCEED means the proposal is testable after recording that "
+            "challenge; STOP means it is too vague or invalid to spend a trial. Do not "
+            "soften the review to make it pass. Even when you identify several attacks "
+            "on one proposal, combine them inside that proposal's single review item; "
+            "never emit alternative review items for the same TITLE."
+        ),
+        structured_artifact=StructuredArtifactSpec(
+            key="skeptic_reviews",
+            required_strings=("title", "competing_explanation", "verdict",
+                              "falsification_test"),
+            required_string_lists=("competing_codes",),
+            enum_values=(
+                ("competing_codes", ("BETA_EXPOSURE", "LIQUIDITY_PREMIUM",
+                                     "DATA_MINING", "COST_UNACCOUNTED")),
+                ("verdict", ("PROCEED", "STOP")),
+            ),
+            many=True,
+            validator=_validate_skeptic_review,
+            context_validator=_validate_skeptic_reviews_against_input,
+        ),
+    ),
     WorkerSpec("holdings-analyst-worker", "Portfolio holdings question-answering analyst", ("research.evidence.search", "research.news.read", "research.market_snapshot.read"), "holding_question", ("holding_question", "portfolio_state", "news")),
 )
 

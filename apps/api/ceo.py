@@ -30,7 +30,6 @@ try:
     from .governance_client import fetch_current_mandate_by_fund
     from .ceo_schemas import (
         CeoPlanning,
-        CeoQueryAcceptedResponse,
         GraphNode,
         TaskArchiveResponse,
         TaskGraphResponse,
@@ -57,7 +56,6 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
     from governance_client import fetch_current_mandate_by_fund  # type: ignore[no-redef]
     from ceo_schemas import (  # type: ignore[no-redef]
         CeoPlanning,
-        CeoQueryAcceptedResponse,
         GraphNode,
         TaskArchiveResponse,
         TaskGraphResponse,
@@ -79,6 +77,7 @@ from orchestration.canonical_profiles import (
 from orchestration.ceo_workflow_scope import (
     build_root_body,
     infer_workflow_mode,
+    requested_by_from_body,
     selected_primary_profiles_from_task,
 )
 
@@ -428,18 +427,33 @@ def _accepted_response(task: Mapping[str, object], planning: Mapping[str, object
     }
 
 
-@router.post(
-    "/ask",
-    operation_id="ceo_query",
-    status_code=202,
-    response_model=CeoQueryAcceptedResponse,
-    summary="CEO에게 새 분석을 요청한다",
-)
 def ceo_query(
     req: CeoAsk,
     owner_id: str | None = Depends(optional_current_user),
 ) -> dict[str, object]:
     """Create the CEO root task; supervisor execution remains asynchronous.
+
+    **이 함수는 `POST /ui/ceo/ask`의 유일한 구현이지만, 여기서는 route로
+    등록하지 않는다.** `apps.api.ceo_mirror_api.mirror_ask`가 이 함수를 그대로
+    감싸(dedup + Web/Discord 공용 event journal) 그 경로의 유일한 소유자로
+    등록한다.
+
+    ## 왜 여기서 `@router.post("/ask", ...)`를 안 붙이나
+
+    예전에는 이 모듈도 같은 경로에 `@router.post("/ask", ...)`를 붙였고, 실제
+    서비스에서는 `ceo_mirror_router`가 `main.py`에서 먼저 등록돼 그 라우트를
+    항상 그림자로 덮었다(FastAPI는 같은 (path, method) 조합이 여러 라우터에
+    있으면 등록 순서가 먼저인 쪽이 이긴다). 그 결과 실제 요청은 항상 mirror의
+    자체 파싱 경로를 탔는데, mirror가 이 함수의 파라미터를 그대로 재사용하지
+    않고 `fund_id` 없는 별도 모델을 새로 만들어 넘겨서, Mandate 스냅샷이
+    항상 유실되는 사고가 났다(2026-08-14 AWS 실측) - 코드는 여기 있는데
+    실행되는 코드는 따로 있었던 것이다.
+
+    같은 경로를 두 라우터가 나눠 갖고 등록 순서로 승부하는 구조 자체가
+    위험하므로, 이제는 이 함수 하나만 존재하고 mirror가 그 함수를 감싸는
+    형태로 되돌린다 - "두 번째 구현"이 아예 존재할 수 없게 한다.
+    `tests/api/test_main_routes.py`가 실제 앱에 같은 (path, method) 조합이
+    두 번 이상 등록되면 실패하도록 고정한다.
 
     `owner_id`(`X-User-Id`)는 2026-08-12에 추가됐다. 그 전까지 이 경로는 요청자를
     **아예 몰랐다** - `AgentAsk`에 `query`와 `request_id`만 있어서, CEO는 누가
@@ -462,6 +476,7 @@ def ceo_query(
             req.request_id,
             workflow_mode=infer_workflow_mode(req.query),
             mandate=mandate,
+            requested_by=owner_id,
         ),
         idempotency_key=req.request_id,
     )
@@ -531,9 +546,21 @@ def _status_payload(workflow: Workflow) -> dict[str, object]:
 def ceo_task_list(
     limit: int = Query(default=20, ge=1, le=100),
     include_archived: bool = Query(default=False),
+    owner_id: str | None = Query(default=None),
 ) -> TaskListResponse:
+    """계정별 이력 조회. `owner_id`는 반드시 서버가 걸러서 내려준다.
+
+    `X-User-Id`는 인증이 아니지만, 그렇다고 프론트가 전체 목록을 받아 클라이언트
+    에서 골라내면 다른 계정의 질문·답변 텍스트가 네트워크 응답에 그대로 실려
+    나간다 - 계정 간 대화가 새는 것과 같다(2026-08-14). 그래서 필터는
+    `list_ceo_roots(owner_id=...)`가 Root Body만 보고 조회 단계에서 처리한다.
+    """
+
+    normalized_owner_id = owner_id.strip() if owner_id and owner_id.strip() else None
     try:
-        rows = list_ceo_roots(limit=limit, include_archived=include_archived)
+        rows = list_ceo_roots(
+            limit=limit, include_archived=include_archived, owner_id=normalized_owner_id
+        )
     except KanbanUnavailable as exc:
         raise HTTPException(status_code=503, detail=f"Hermes Kanban을 읽지 못했습니다: {exc}") from exc
     identified = [
@@ -558,6 +585,7 @@ def ceo_task_list(
                 status=workflow.status,
                 created_at=workflow.root.created_at,
                 selected_departments=list(workflow.selected_departments),
+                owner_id=requested_by_from_body(body),
             )
             for (task_id, body), workflow in zip(identified, workflows)
         ]
@@ -646,6 +674,19 @@ def ceo_task_result(task_id: str = _TASK_ID_PATH) -> TaskResultResponse:
     if synthesis is not None and synthesis.done and synthesis.summary:
         result = TaskResult(
             summary=synthesis.summary,
+            decision=workflow.decision,
+            qa_verdict=workflow.qa_verdict,
+        )
+    elif not workflow.descendants and workflow.root.done and workflow.root.summary:
+        # CEO가 부서에 위임하지 않고 root Task 안에서 직접 답한 경우(동적 라우팅 -
+        # 이벤트에 맞는 페르소나가 없으면 CEO 혼자 처리한다). synthesis_node가
+        # 없다는 이유로 결과를 계속 비워두면, 실제로 완료된 답이 있는데도 화면에
+        # 영원히 안 뜬다 - 2026-08-13 "지금 막혀 있는 업무와 이유를 알려줘"에서
+        # 실사용 중 확인. `not descendants`로 좁힌 이유: 부서가 있는데 아직
+        # synthesis만 안 끝난 진행 중 상태(root의 "접수했다" 문구)를 답으로
+        # 잘못 노출하면 안 된다 - 자식이 하나도 없을 때만 root가 곧 답이다.
+        result = TaskResult(
+            summary=workflow.root.summary,
             decision=workflow.decision,
             qa_verdict=workflow.qa_verdict,
         )

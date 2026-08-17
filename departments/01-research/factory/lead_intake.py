@@ -20,15 +20,18 @@
   발굴한 것인지 나중에 구분할 수 없다. 비어 있으면 적재를 거부한다 - 계보를 잃은
   리드는 재현할 수 없고, 재현할 수 없는 입력으로 만든 전략은 검증된 것이 아니다.
 
-▶ 중복은 접는다
+▶ 중복은 접되, 해석은 덮지 않는다
   24시간 상주에서 같은 논문을 매일 새 리드로 만들면 `independent_mentions` 가
-  의미를 잃고 예산 계산이 망가진다. `lead_id_for()` 가 url+title 로 접는다.
+  의미를 잃고 예산 계산이 망가진다. 같은 url+title·같은 AST 계약은
+  `lead_id_for()` 로 접는다. 다만 데이터면 확장 뒤 같은 문헌에서 새 메커니즘
+  변형이 나오면 원 리드를 바꾸지 않고 결정론적 revision ID 로 별도 보존한다.
 
 자체 점검: python departments/01-research/factory/lead_intake.py
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -36,10 +39,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+_RESEARCH = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_RESEARCH / "contracts"))
 
-from contracts.factory_contracts import (  # noqa: E402
+from factory_contracts import (  # noqa: E402
     MAX_EXCERPT_CHARS,
+    ScoutLens,
+    SourceType,
     lead_id_for,
 )
 
@@ -65,15 +71,283 @@ def clip_excerpt(text: str, *, limit: int = MAX_EXCERPT_CHARS) -> str:
         return t
     return t[: max(0, limit - len(_TRUNC_MARK))].rstrip() + _TRUNC_MARK
 
-MODULE_VERSION = "research-lead-intake-v1"
+MODULE_VERSION = "research-lead-intake-v5"
 
 # 스카우트가 내는 블록의 필드. 앞의 셋이 없으면 리드가 아니다.
-REQUIRED = ("TITLE", "URL", "MECHANISM")
+REQUIRED = ("TITLE", "URL", "MECHANISM", "READINESS")
 OPTIONAL = ("COUNTERPARTY", "TESTABLE_WITH", "REPORTED_EFFECT", "EXCERPT",
-            "MARKET_CONTEXT", "FAILURE_MODE")
+            "MARKET_CONTEXT", "FAILURE_MODE", "OBSERVABLES",
+            "CANDIDATE_SIGNAL_EXPR", "MISSING_DATA", "MAPPING_LOSS",
+            "RESEARCH_LANE", "SEMANTIC_PLAN",
+            "DERIVATION_MODE", "SOURCE_BASELINE_EXPR",
+            "DERIVATION_TRANSFORMS", "NOVELTY_RATIONALE",
+            "PARENT_SIGNAL_EXPR", "EVOLUTION_OPERATORS",
+            "EXPECTED_INCREMENT", "ABLATIONS", "FORMULA_THESIS",
+            # These labels are part of the live Scout output vocabulary.  Some
+            # are provenance-only, but they still must terminate the preceding
+            # field instead of being concatenated into a JSON value.
+            "PUBLISHED", "PUBLICATION_DATE", "ACCESSED", "ACCESS_TIME",
+            "CLAIMED_EDGE", "TESTABILITY", "LESSONS_ADDRESSED")
 _FIELD_RE = re.compile(
-    r"^(TITLE|URL|MECHANISM|COUNTERPARTY|TESTABLE_WITH|REPORTED_EFFECT|"
-    r"EXCERPT|MARKET_CONTEXT|FAILURE_MODE)\s*:\s*(.*)$")
+    r"^(" + "|".join(re.escape(k) for k in REQUIRED + OPTIONAL) +
+    r")\s*:\s*(.*)$")
+_ANY_LABEL_RE = re.compile(r"^[A-Z][A-Z0-9_]*\s*:\s*")
+_JSON_FIELDS = frozenset({
+    "OBSERVABLES", "CANDIDATE_SIGNAL_EXPR", "SEMANTIC_PLAN",
+    "SOURCE_BASELINE_EXPR", "DERIVATION_TRANSFORMS", "PARENT_SIGNAL_EXPR",
+    "EVOLUTION_OPERATORS", "ABLATIONS", "FORMULA_THESIS",
+})
+
+AST_READY = "AST_READY"
+DATA_BLOCKED = "DATA_BLOCKED"
+SEMANTIC_MISMATCH = "SEMANTIC_MISMATCH"
+READINESS_VALUES = frozenset({AST_READY, DATA_BLOCKED, SEMANTIC_MISMATCH})
+
+
+def _alpha_ast():
+    """Load the container-neutral grammar shared with quant execution."""
+    import alpha_ast_surface  # noqa: PLC0415
+    return alpha_ast_surface
+
+
+def _intraday_ast():
+    """Load the exact event-time grammar used by the quant worker."""
+    import intraday_ast_contract  # noqa: PLC0415
+    return intraday_ast_contract
+
+
+def _literature_derivation():
+    """Load the deterministic public-baseline novelty policy."""
+    import literature_derivation  # noqa: PLC0415
+    return literature_derivation
+
+
+def _alpha_evolution():
+    """Load the deterministic parent/child novelty policy."""
+    import alpha_evolution  # noqa: PLC0415
+    return alpha_evolution
+
+
+def _formula_discovery():
+    """Load the typed financial-mathematics contract for LLM formulas."""
+    import formula_discovery  # noqa: PLC0415
+    return formula_discovery
+
+
+def _as_text(value) -> str:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return str(value or "").strip()
+
+
+def _strip_json_fence(value: str) -> str:
+    """Remove an optional Markdown JSON fence without accepting trailing prose."""
+    text = str(value or "").strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text, count=1, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text, count=1)
+    return text.strip()
+
+
+def _json_document_complete(value: str) -> bool:
+    """True only when *value* is one complete JSON document."""
+    text = _strip_json_fence(value)
+    if not text:
+        return False
+    try:
+        _, end = json.JSONDecoder().raw_decode(text)
+    except (TypeError, ValueError):
+        return False
+    return not text[end:].strip()
+
+
+def _readiness_metadata(block: dict, mechanism: str) -> dict:
+    """Validate whether a sourced idea can enter the current AST/data search space."""
+    readiness = _as_text(block.get("READINESS")).upper()
+    if readiness not in READINESS_VALUES:
+        raise ValueError("READINESS must be AST_READY, DATA_BLOCKED, or SEMANTIC_MISMATCH")
+
+    raw_observables = block.get("OBSERVABLES")
+    if isinstance(raw_observables, (list, tuple, set)):
+        observable_items = raw_observables
+    elif _as_text(raw_observables).startswith("["):
+        try:
+            observable_items = json.loads(_strip_json_fence(_as_text(raw_observables)))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid OBSERVABLES: {exc}") from exc
+        if not isinstance(observable_items, list):
+            raise ValueError("OBSERVABLES JSON must be an array")
+    else:
+        observable_items = _as_text(raw_observables).split(",")
+    observables = sorted({_as_text(x) for x in observable_items if _as_text(x)})
+    missing_data = _as_text(block.get("MISSING_DATA"))
+    mapping_loss = _as_text(block.get("MAPPING_LOSS"))
+    raw_expr = block.get("CANDIDATE_SIGNAL_EXPR")
+    lane = _as_text(block.get("RESEARCH_LANE") or "DAILY_CROSS_SECTIONAL").upper()
+    if lane not in {"DAILY_CROSS_SECTIONAL", "INTRADAY_EVENT"}:
+        raise ValueError("RESEARCH_LANE must be DAILY_CROSS_SECTIONAL or INTRADAY_EVENT")
+    raw_plan = block.get("SEMANTIC_PLAN")
+    semantic_plan = {}
+    if raw_plan not in (None, ""):
+        try:
+            semantic_plan = (raw_plan if isinstance(raw_plan, dict)
+                             else json.loads(_strip_json_fence(_as_text(raw_plan))))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid SEMANTIC_PLAN: {exc}") from exc
+    candidate = None
+
+    if readiness == AST_READY:
+        if not observables or not _as_text(raw_expr):
+            raise ValueError("AST_READY requires OBSERVABLES and CANDIDATE_SIGNAL_EXPR")
+        try:
+            candidate = (raw_expr if isinstance(raw_expr, dict)
+                         else json.loads(_strip_json_fence(_as_text(raw_expr))))
+            ast = _intraday_ast() if lane == "INTRADAY_EVENT" else _alpha_ast()
+            candidate = ast.parse(candidate)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"invalid CANDIDATE_SIGNAL_EXPR: {exc}") from exc
+        fields = sorted(ast.fields_of(candidate))
+        if observables != fields:
+            raise ValueError(f"OBSERVABLES {observables} do not match AST fields {fields}")
+        if lane == "INTRADAY_EVENT":
+            if not semantic_plan:
+                raise ValueError("INTRADAY_EVENT AST_READY requires SEMANTIC_PLAN")
+            from alpha_semantics import check_observables, validate  # noqa: PLC0415
+            plan = validate(semantic_plan)
+            alignment = check_observables(
+                plan, fields, operators=ast.operators_of(candidate),
+                conditional_fields=ast.conditional_fields_of(candidate))
+            if not alignment["ok"]:
+                raise ValueError(
+                    "SEMANTIC_MISMATCH: " + "; ".join(alignment["missing"]))
+            semantic_plan = plan
+        else:
+            micro_fields = sorted(set(fields) & set(ast.MICRO_FIELDS))
+            if not micro_fields:
+                raise ValueError(
+                    "MICROSTRUCTURE_PRIMARY_REQUIRED: AST_READY must use at least one "
+                    "quote/trade microstructure field; daily close/notional/returns are "
+                    "auxiliary execution, benchmark, and regime inputs only")
+            alignment = ast.check_alignment(
+                candidate, " ".join((mechanism, _as_text(block.get("TESTABLE_WITH")))))
+            if not alignment["ok"]:
+                raise ValueError(f"SEMANTIC_MISMATCH: {alignment['note']}")
+        # The source identity (lead_id) and formula identity are different things.
+        # Persist both so independent papers supporting the same executable formula
+        # can be consolidated instead of masquerading as novel experiments.
+        ast_fingerprint = ast.fingerprint(candidate)
+        ast_shape_fingerprint = ast.shape_fingerprint(candidate)
+        raw_baseline = block.get("SOURCE_BASELINE_EXPR")
+        if raw_baseline not in (None, "") and not isinstance(raw_baseline, dict):
+            try:
+                raw_baseline = json.loads(_strip_json_fence(_as_text(raw_baseline)))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid SOURCE_BASELINE_EXPR: {exc}") from exc
+        raw_transforms = block.get("DERIVATION_TRANSFORMS") or ()
+        if isinstance(raw_transforms, str) and raw_transforms.strip().startswith("["):
+            try:
+                raw_transforms = json.loads(_strip_json_fence(raw_transforms))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid DERIVATION_TRANSFORMS: {exc}") from exc
+        derivation = _literature_derivation().assess(
+            candidate=candidate,
+            mode=block.get("DERIVATION_MODE"),
+            source_baseline=raw_baseline,
+            transforms=raw_transforms,
+            novelty_rationale=block.get("NOVELTY_RATIONALE") or "",
+            ast_module=ast,
+        )
+        raw_parent = block.get("PARENT_SIGNAL_EXPR")
+        if raw_parent not in (None, "") and not isinstance(raw_parent, dict):
+            try:
+                raw_parent = json.loads(_strip_json_fence(_as_text(raw_parent)))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid PARENT_SIGNAL_EXPR: {exc}") from exc
+        raw_evolution_ops = block.get("EVOLUTION_OPERATORS") or ()
+        if (isinstance(raw_evolution_ops, str)
+                and raw_evolution_ops.strip().startswith("[")):
+            try:
+                raw_evolution_ops = json.loads(_strip_json_fence(raw_evolution_ops))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid EVOLUTION_OPERATORS: {exc}") from exc
+        raw_ablations = block.get("ABLATIONS") or ()
+        if isinstance(raw_ablations, str) and raw_ablations.strip().startswith("["):
+            try:
+                raw_ablations = json.loads(_strip_json_fence(raw_ablations))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid ABLATIONS: {exc}") from exc
+        evolution = _alpha_evolution().assess_lineage(
+            candidate=candidate,
+            parent=raw_parent,
+            operators=raw_evolution_ops,
+            expected_increment=block.get("EXPECTED_INCREMENT") or "",
+            ablations=raw_ablations,
+            grammar=ast,
+        )
+        if lane == "INTRADAY_EVENT":
+            raw_thesis = block.get("FORMULA_THESIS")
+            if raw_thesis not in (None, "") and not isinstance(raw_thesis, dict):
+                try:
+                    raw_thesis = json.loads(_strip_json_fence(_as_text(raw_thesis)))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"invalid FORMULA_THESIS: {exc}") from exc
+            formula_discovery = _formula_discovery().assess(
+                raw_thesis, candidate=candidate, semantic_plan=semantic_plan,
+                grammar=ast)
+        else:
+            formula_discovery = {
+                "formula_discovery_version": "",
+                "formula_contract_complete": False,
+                "formula_thesis": None,
+                "formula_math_profile": {},
+            }
+    else:
+        ast_fingerprint = ""
+        ast_shape_fingerprint = ""
+        derivation = {
+            "novelty_policy_version": "",
+            "derivation_mode": "",
+            "derivation_transforms": [],
+            "novelty_rationale": "",
+            "source_baseline_expr": None,
+            "source_baseline_fingerprint": "",
+            "source_baseline_shape_fingerprint": "",
+            "candidate_vs_source_similarity": None,
+            "alpha_candidate_eligible": False,
+            "novelty_classification": "NON_EXECUTABLE_LEAD",
+        }
+        evolution = {
+            "evolution_policy_version": "",
+            "evolution_role": "NON_EXECUTABLE",
+            "parent_signal_expr": None,
+            "parent_ast_fingerprint": "",
+            "parent_ast_shape_fingerprint": "",
+            "child_vs_parent_similarity": None,
+            "evolution_operators": [],
+            "expected_increment": "",
+            "ablations": [],
+        }
+        formula_discovery = {
+            "formula_discovery_version": "",
+            "formula_contract_complete": False,
+            "formula_thesis": None,
+            "formula_math_profile": {},
+        }
+    if readiness == DATA_BLOCKED and not missing_data:
+        raise ValueError("DATA_BLOCKED requires MISSING_DATA")
+    elif readiness == SEMANTIC_MISMATCH and not mapping_loss:
+        raise ValueError("SEMANTIC_MISMATCH requires MAPPING_LOSS")
+
+    return {"ast_readiness": readiness, "observables": observables,
+            "candidate_signal_expr": candidate, "missing_data": missing_data,
+            "mapping_loss": mapping_loss,
+            "lessons_addressed": _as_text(block.get("LESSONS_ADDRESSED")),
+            "research_lane": lane, "semantic_plan": semantic_plan,
+            "ast_fingerprint": ast_fingerprint,
+            "ast_shape_fingerprint": ast_shape_fingerprint,
+            "primary_data_plane": ("MICROSTRUCTURE" if readiness == AST_READY
+                                   else "UNRESOLVED"),
+            "daily_data_role": "EXECUTION_BENCHMARK_REGIME_AUXILIARY",
+            **derivation, **evolution, **formula_discovery}
 
 # 링크 판정. 접속 거부는 부재의 증거가 아니다.
 LINK_OK = "OK"
@@ -107,8 +381,8 @@ def parse_blocks(text: str, keys: tuple[str, ...] | None = None) -> list[dict]:
     TITLE 이 나오면 새 블록이다. 여러 줄에 걸친 값은 이어 붙인다.
 
     `keys` 로 어휘를 바꿔 기획안·회의론자 산출에도 쓴다. 어휘를 넘기지 않으면
-    스카우트 어휘다. **모르는 키는 값의 일부로 흘려보낸다** - 새 키로 잘못 잡으면
-    앞 필드가 그 줄에서 끊겨 뜻이 바뀐다.
+    스카우트 어휘다. 모르는 대문자 `KEY:` 줄은 메타데이터 경계로 보고 버린다.
+    앞의 구조화 JSON 필드에 붙여 수식을 손상시키지 않기 위해서다.
     """
     stripped = text.strip()
     if stripped.startswith("["):
@@ -129,10 +403,27 @@ def parse_blocks(text: str, keys: tuple[str, ...] | None = None) -> list[dict]:
             if key == "TITLE" and cur:
                 blocks.append(cur)
                 cur = {}
-            cur[key] = val
+            if key in cur:
+                # Preserve repeated fields instead of silently keeping only the
+                # last one. This matters for structured list/map fields such as
+                # LESSONS_ADDRESSED: an agent may emit one line per lesson.
+                # Scalar/JSON repetition now fails closed downstream instead of
+                # quietly changing the registered hypothesis to the last value.
+                cur[key] = ", ".join(x for x in (cur[key], val) if x)
+            else:
+                cur[key] = val
+        elif _ANY_LABEL_RE.match(raw.strip()):
+            # Unknown uppercase labels are metadata boundaries, not prose
+            # continuations. Ignoring one is safer than corrupting the prior
+            # typed JSON field (the live failure was FORMULA_THESIS followed by
+            # an unrecognised LESSONS_ADDRESSED label).
+            key = ""
         elif key and raw.strip() and cur:
             # 이어지는 줄. 값을 자르면 메커니즘 문장이 잘려 뜻이 바뀐다.
-            cur[key] = (cur[key] + " " + raw.strip()).strip()
+            # A complete JSON document is immutable: later prose or a closing
+            # Markdown fence must not be concatenated into it.
+            if key not in _JSON_FIELDS or not _json_document_complete(cur[key]):
+                cur[key] = (cur[key] + " " + raw.strip()).strip()
     if cur:
         blocks.append(cur)
     return blocks
@@ -175,18 +466,51 @@ def to_lead(block: dict, *, lens: str, source_type: str, case_id: str,
 
     now = as_known_at or datetime.now(timezone.utc)
     url, title = block["URL"].strip(), block["TITLE"].strip()
+    lens_value = str(getattr(lens, "value", lens)).strip().upper().replace("-", "_")
+    if lens_value == "CROSSDOMAIN":
+        lens_value = "CROSS_DOMAIN"
+    try:
+        lens_value = ScoutLens(lens_value).value
+    except ValueError as exc:
+        allowed = [item.value for item in ScoutLens]
+        raise ValueError(f"lens must be one of {allowed}") from exc
+    source_value = str(getattr(source_type, "value", source_type)).strip().upper()
+    try:
+        source_value = SourceType(source_value).value
+    except ValueError as exc:
+        allowed = [item.value for item in SourceType]
+        raise ValueError(
+            f"source_type={source_type!r} is invalid; choose the source medium "
+            f"from {allowed}, not the Scout lens") from exc
     # MECHANISM 대체분은 길이 규율이 없다 - 계약 상한으로 자른다(clip_excerpt 참고).
     excerpt = clip_excerpt(block.get("EXCERPT") or block.get("MECHANISM") or "")
-    ref = {"url": url, "title": title, "accessed_at": now.isoformat(),
-           "excerpt": excerpt}
-
     mech = (block.get("MECHANISM") or "").strip()
     reported = (block.get("REPORTED_EFFECT") or "").strip()
     testable = (block.get("TESTABLE_WITH") or "").strip()
     counterparty = (block.get("COUNTERPARTY") or "").strip()
 
     # 우리 데이터로 어떻게 재현하는지 못 적었으면 규칙으로 못 옮긴다.
-    testability = "RULE_EXPRESSIBLE" if testable else "VAGUE"
+    readiness = _readiness_metadata(block, mech)
+    if (readiness.get("derivation_mode") == "CROSS_DOMAIN_TRANSFER"
+            and lens_value != "CROSS_DOMAIN"):
+        raise ValueError(
+            "CROSS_DOMAIN_TRANSFER is only valid for the isolated CROSS_DOMAIN scout lens")
+    ref = {"url": url, "title": title, "accessed_at": now.isoformat(),
+           "excerpt": excerpt}
+    source_published = _as_text(
+        block.get("PUBLISHED") or block.get("PUBLICATION_DATE"))
+    declared_access = _as_text(block.get("ACCESSED") or block.get("ACCESS_TIME"))
+    if source_published:
+        ref["source_published"] = source_published
+    if declared_access:
+        ref["declared_accessed"] = declared_access
+
+    # v1 columns remain compatible; the source-specific verdict lives in refs JSON.
+    readiness_value = readiness["ast_readiness"]
+    testability = {AST_READY: "RULE_EXPRESSIBLE", DATA_BLOCKED: "VAGUE",
+                   SEMANTIC_MISMATCH: "UNUSABLE"}[readiness_value]
+    status = {AST_READY: "COMPLETE", DATA_BLOCKED: "BLOCKED",
+              SEMANTIC_MISMATCH: "UNUSABLE"}[readiness_value]
 
     context = (block.get("MARKET_CONTEXT") or "").strip()
     if not context and reported and reported.upper() != "NONE":
@@ -195,11 +519,12 @@ def to_lead(block: dict, *, lens: str, source_type: str, case_id: str,
     return {
         "lead_id": lead_id_for([ref]),
         "case_id": case_id,
-        "scout_lens": lens,
-        "source_type": source_type,
+        "scout_lens": lens_value,
+        "source_type": source_value,
         "as_known_at": now,
         "refs": [ref],
-        "claimed_edge": title,
+        "ast_contract": readiness,
+        "claimed_edge": _as_text(block.get("CLAIMED_EDGE")) or title,
         "stated_mechanism": mech,
         # 반대편을 소스가 밝히지 않았으면 스카우트의 추론이다 - 표시해 둔다.
         "inferred": not counterparty,
@@ -207,7 +532,7 @@ def to_lead(block: dict, *, lens: str, source_type: str, case_id: str,
         "stated_failure_mode": (block.get("FAILURE_MODE") or "").strip(),
         "independent_mentions": 1,
         "testability": testability,
-        "status": "COMPLETE" if (mech and testable) else "PARTIAL",
+        "status": status,
         "model_version": model_version.strip(),
         "prompt_version": prompt_version.strip(),
     }
@@ -244,29 +569,88 @@ def intake(text: str, *, lens: str, source_type: str, case_id: str,
 # ── 적재 ───────────────────────────────────────────────────────────────────
 _SQL_UPSERT = """
 insert into research.methodology_leads
-  (lead_id, case_id, scout_lens, source_type, as_known_at, refs, claimed_edge,
+  (lead_id, case_id, scout_lens, source_type, as_known_at, refs, ast_contract, claimed_edge,
    stated_mechanism, inferred, market_context, stated_failure_mode,
    independent_mentions, testability, status, model_version, prompt_version)
 values (%(lead_id)s, %(case_id)s, %(scout_lens)s, %(source_type)s,
-        %(as_known_at)s, %(refs)s, %(claimed_edge)s, %(stated_mechanism)s,
+        %(as_known_at)s, %(refs)s, %(ast_contract)s, %(claimed_edge)s, %(stated_mechanism)s,
         %(inferred)s, %(market_context)s, %(stated_failure_mode)s,
         %(independent_mentions)s, %(testability)s, %(status)s,
         %(model_version)s, %(prompt_version)s)
 on conflict (lead_id) do update set
   -- 같은 소스를 다시 주웠다. 새 리드가 아니라 **언급이 하나 는 것**이다.
-  independent_mentions = research.methodology_leads.independent_mentions + 1,
-  as_known_at = excluded.as_known_at
+  -- 최초 수집의 PIT 의미와 그 리드를 이미 인용한 proposal 계보는 불변이다.
+  -- 뒤의 Scout가 같은 문헌을 다른 렌즈로 해석했다고 ast_contract/as_known_at을
+  -- 덮으면 과거 실험의 입력 의미까지 소급해 바뀐다. persist가 다른 계약은
+  -- revision ID로 먼저 분기하므로 여기 도달한 행은 같은 해석의 재언급이다.
+  independent_mentions = research.methodology_leads.independent_mentions + 1
 returning (xmax = 0) as inserted
 """
 
+_SQL_LOCK_SOURCE = "select pg_advisory_xact_lock(hashtextextended(%s, 0))"
+_SQL_EXISTING_CONTRACT = """
+select ast_contract
+  from research.methodology_leads
+ where lead_id = %s
+"""
 
-def persist(conn, leads: list[dict]) -> tuple[int, int]:
-    """(신규, 중복접힘). 커밋은 한 번에 - 반쯤 적재된 스카우트 회차를 남기지 않는다."""
+
+def _canonical_contract(contract: dict | str | None) -> str:
+    if isinstance(contract, str):
+        try:
+            contract = json.loads(contract)
+        except ValueError:
+            contract = {"_invalid_legacy_contract": contract}
+    return json.dumps(contract or {}, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"))
+
+
+def revision_lead_id(source_lead_id: str, ast_contract: dict) -> str:
+    """같은 출처의 다른 해석을 불변 별도 리드로 식별한다."""
+    digest = hashlib.sha256(
+        _canonical_contract(ast_contract).encode("utf-8")).hexdigest()[:12]
+    return f"{source_lead_id}_r{digest}"
+
+
+def routed_lead_id(source_lead_id: str, existing_contract: dict | str | None,
+                   candidate_contract: dict) -> str:
+    """최초/동일 해석은 source ID, 다른 해석만 revision ID 로 보낸다."""
+    if existing_contract is None:
+        return source_lead_id
+    if _canonical_contract(existing_contract) == _canonical_contract(candidate_contract):
+        return source_lead_id
+    return revision_lead_id(source_lead_id, candidate_contract)
+
+
+def persist(conn, leads: list[dict], *, return_ids: bool = False
+            ) -> tuple[int, int] | tuple[int, int, list[str]]:
+    """리드를 한 트랜잭션으로 적재한다.
+
+    기본 반환값 ``(신규, 중복접힘)`` 은 기존 CLI/호출자와 호환된다. 쓰기 API처럼
+    이어서 proposal을 만들어야 하는 호출자는 ``return_ids=True`` 로 요청해
+    ``(신규, 중복접힘, 실제_리드_ID들)`` 을 받는다. 같은 출처에서 AST 해석이
+    갈려 revision ID로 라우팅된 경우에도 원래 ID가 아니라 실제 저장 ID를 준다.
+    """
     cur = conn.cursor()
     new = dup = 0
+    persisted_ids: list[str] = []
     for lead in leads:
         payload = dict(lead)
+        source_lead_id = str(payload["lead_id"])
+        # 없는 행까지 SELECT FOR UPDATE 로 잠글 수 없으므로 출처 해시 advisory
+        # lock을 잡는다. 두 Scout가 동시에 처음 본 같은 문헌을 서로 다른 AST로
+        # 해석해도 한쪽 계약이 단순 upsert에 먹혀 사라지지 않는다.
+        cur.execute(_SQL_LOCK_SOURCE, (source_lead_id,))
+        cur.fetchone()
+        cur.execute(_SQL_EXISTING_CONTRACT, (source_lead_id,))
+        existing = cur.fetchone()
+        payload["lead_id"] = routed_lead_id(
+            source_lead_id, existing[0] if existing else None,
+            lead["ast_contract"])
+        if payload["lead_id"] not in persisted_ids:
+            persisted_ids.append(payload["lead_id"])
         payload["refs"] = json.dumps(lead["refs"], ensure_ascii=False)
+        payload["ast_contract"] = json.dumps(lead["ast_contract"], ensure_ascii=False)
         cur.execute(_SQL_UPSERT, payload)
         row = cur.fetchone()
         if row and row[0]:
@@ -274,26 +658,36 @@ def persist(conn, leads: list[dict]) -> tuple[int, int]:
         else:
             dup += 1
     conn.commit()
+    if return_ids:
+        return new, dup, persisted_ids
     return new, dup
 
 
 # ── 자체 점검 ──────────────────────────────────────────────────────────────
 _SAMPLE = """TITLE: Short-Term Reversal as Returns to Liquidity Provision
 URL: https://www.nber.org/system/files/working_papers/w17653/w17653.pdf
-MECHANISM: 유동성 공급자가 재고위험을 지고 일시적 가격압력의 반전에서
-보상을 얻는다.
-COUNTERPARTY: 즉시성이 필요한 비정보성 투자자가 가격양보를 지불한다.
-TESTABLE_WITH: t-1~t-5 시장조정 수익률을 횡단면 순위화해 롱숏.
-REPORTED_EFFECT: 미국 CRSP 1998~2010, 약 0.1%/일.
+MECHANISM: Order flow imbalance reveals urgent liquidity demand that liquidity providers absorb.
+COUNTERPARTY: Urgent liquidity demanders.
+TESTABLE_WITH: Rank the negative five-day mean of order_flow_imbalance.
+READINESS: AST_READY
+OBSERVABLES: order_flow_imbalance
+CANDIDATE_SIGNAL_EXPR: {"op":"neg","arg":{"op":"ts_mean","field":"order_flow_imbalance","n":5}}
+DERIVATION_MODE: MECHANISM_MUTATION
+SOURCE_BASELINE_EXPR: {"op":"ts_mean","field":"order_flow_imbalance","n":5}
+DERIVATION_TRANSFORMS: FAILURE_MODE_INVERSION
+NOVELTY_RATIONALE: Test the reversal implied by liquidity absorption, not the published pressure direction.
 
-TITLE: 메커니즘 없는 성과 자랑
+TITLE: Missing mechanism
 URL: https://example.com/backtest
-REPORTED_EFFECT: 연 40%
+READINESS: SEMANTIC_MISMATCH
+MAPPING_LOSS: no mechanism
 
-TITLE: 죽은 링크
+TITLE: Broken link
 URL: https://example.com/gone
-MECHANISM: 있긴 하다
-TESTABLE_WITH: 재현 가능
+MECHANISM: Some mechanism
+TESTABLE_WITH: measurable
+READINESS: DATA_BLOCKED
+MISSING_DATA: unavailable series
 """
 
 
@@ -334,7 +728,7 @@ def _selfcheck() -> int:
     check("재현법 있으면 RULE_EXPRESSIBLE",
           lead["testability"] == "RULE_EXPRESSIBLE")
     check("COMPLETE", lead["status"] == "COMPLETE")
-    check("여러 줄 이어붙임", "보상을 얻는다" in lead["stated_mechanism"])
+    check("mechanism retained", "liquidity providers" in lead["stated_mechanism"])
 
     # 계보 없이는 못 만든다
     try:
@@ -346,25 +740,82 @@ def _selfcheck() -> int:
         check("계보 없는 리드 차단", True)
 
     # 같은 소스는 같은 ID (중복 접기)
-    a = to_lead({"TITLE": "T", "URL": "http://x/1", "MECHANISM": "m"},
+    a = to_lead({"TITLE": "T", "URL": "http://x/1", "MECHANISM": "m",
+                 "READINESS": "DATA_BLOCKED", "MISSING_DATA": "x"},
                 lens="ACADEMIC", source_type="PAPER", case_id="c1",
                 model_version="m1", prompt_version="p1")
-    b = to_lead({"TITLE": "T", "URL": "http://x/1", "MECHANISM": "m2"},
+    b = to_lead({"TITLE": "T", "URL": "http://x/1", "MECHANISM": "m2",
+                 "READINESS": "DATA_BLOCKED", "MISSING_DATA": "x"},
                 lens="COMMUNITY", source_type="BLOG", case_id="c2",
                 model_version="m1", prompt_version="p1")
     check("같은 소스 = 같은 ID", a["lead_id"] == b["lead_id"])
+    upsert_sql = " ".join(_SQL_UPSERT.lower().split())
+    check("중복은 PIT·AST 계보 불변",
+          "ast_contract = excluded" not in upsert_sql
+          and "as_known_at = excluded" not in upsert_sql)
+    base = "lead_0123456789abcdef"
+    old = {"ast_readiness": "DATA_BLOCKED", "missing_data": "queue events"}
+    new = {"ast_readiness": "AST_READY", "candidate_signal_expr": {"field": "ofi"}}
+    check("같은 해석은 원 리드로 접힘",
+          routed_lead_id(base, old, dict(reversed(list(old.items())))) == base)
+    revised = routed_lead_id(base, old, new)
+    check("새 해석은 불변 revision",
+          revised.startswith(base + "_r")
+          and revised == revision_lead_id(base, new))
 
     # JSON 입력도 받는다
-    j = json.dumps([{"TITLE": "J", "URL": "http://x/2", "MECHANISM": "m",
-                     "TESTABLE_WITH": "t"}], ensure_ascii=False)
+    j = json.dumps([{"TITLE": "J", "URL": "http://x/2",
+                     "MECHANISM": "order flow imbalance predicts reversal",
+                     "TESTABLE_WITH": "lagged order_flow_imbalance",
+                     "READINESS": "AST_READY", "OBSERVABLES": ["order_flow_imbalance"],
+                     "DERIVATION_MODE": "MECHANISM_MUTATION",
+                     "SOURCE_BASELINE_EXPR": {
+                         "op": "ts_mean", "field": "order_flow_imbalance", "n": 5},
+                     "DERIVATION_TRANSFORMS": ["FAILURE_MODE_INVERSION"],
+                     "NOVELTY_RATIONALE": "Test reversal rather than pressure continuation.",
+                     "CANDIDATE_SIGNAL_EXPR": {"op": "neg", "arg": {
+                         "op": "ts_mean", "field": "order_flow_imbalance", "n": 5}}}],
+                   ensure_ascii=False)
     rj = intake(j, lens="ACADEMIC", source_type="PAPER", case_id="c",
                 model_version="m", prompt_version="p",
                 opener=lambda u: 200)
     check("JSON 입력", len(rj.leads) == 1)
 
+    blocked = to_lead(
+        {"TITLE": "Needs borrow data", "URL": "http://x/3",
+         "MECHANISM": "borrow pressure predicts returns", "READINESS": "DATA_BLOCKED",
+         "MISSING_DATA": "point-in-time borrow fee"},
+        lens="ACADEMIC", source_type="PAPER", case_id="c",
+        model_version="m", prompt_version="p")
+    check("data-blocked is preserved", blocked["status"] == "BLOCKED")
+    check("readiness metadata is auditable",
+          blocked["ast_contract"]["ast_readiness"] == "DATA_BLOCKED")
+
+    try:
+        to_lead({"TITLE": "Bad fields", "URL": "http://x/4",
+                 "MECHANISM": "returns reversal", "READINESS": "AST_READY",
+                 "OBSERVABLES": "close", "CANDIDATE_SIGNAL_EXPR": {
+                     "op": "ts_mean", "field": "returns", "n": 5}},
+                lens="ACADEMIC", source_type="PAPER", case_id="c",
+                model_version="m", prompt_version="p")
+        check("observable/AST mismatch rejected", False)
+    except ValueError:
+        check("observable/AST mismatch rejected", True)
+
+    try:
+        to_lead({"TITLE": "Proxy substitution", "URL": "http://x/5",
+                 "MECHANISM": "news sentiment predicts returns", "READINESS": "AST_READY",
+                 "OBSERVABLES": "spread_bps", "CANDIDATE_SIGNAL_EXPR": {
+                     "op": "ts_mean", "field": "spread_bps", "n": 5}},
+                lens="ACADEMIC", source_type="PAPER", case_id="c",
+                model_version="m", prompt_version="p")
+        check("semantic mismatch rejected", False)
+    except ValueError:
+        check("semantic mismatch rejected", True)
+
     for f in fails:
         print(f"  FAIL {f}")
-    total = 16
+    total = 23
     print(f"lead_intake 자체 점검: {total - len(fails)}/{total} 통과")
     return 1 if fails else 0
 
@@ -437,10 +888,12 @@ def _check_excerpt_fits_contract():
 
 def _check_truncated_lead_passes_validation():
     """계약 검증을 실제로 통과하는지 본다 - 길이만 맞추고 끝내지 않는다."""
-    from contracts.factory_contracts import MethodologyLeadV1  # noqa: PLC0415
+    from factory_contracts import MethodologyLeadV1  # noqa: PLC0415
 
     block = {"URL": "https://example.org/p", "TITLE": "t",
-             "MECHANISM": "나" * (MAX_EXCERPT_CHARS + 900)}
+             "MECHANISM": "나" * (MAX_EXCERPT_CHARS + 900),
+             "READINESS": "DATA_BLOCKED",
+             "MISSING_DATA": "point-in-time quote/trade feature"}
     lead = to_lead(block, lens="ACADEMIC", source_type="PAPER", case_id="c1",
                    model_version="m1", prompt_version="p1")
     MethodologyLeadV1.model_validate(lead)      # 여기서 터지면 수확이 또 죽는다

@@ -62,6 +62,10 @@ class CanonicalIngress(BaseModel):
     actor_id: str = Field(default="anonymous", min_length=1, max_length=256)
     actor_type: MirrorActorType = "user"
     mirrored: bool = False
+    # Web 어댑터가 `/ui/ceo/ask`로 실어 보내는 Mandate 조회 키. Discord 어댑터는
+    # 아직 Fund 개념이 없어 안 보내므로 Optional이다 - 없으면 CEO Mandate
+    # 스냅샷 없이 그대로 진행한다(개발 원칙 9, `ceo.ceo_query`와 동일한 정책).
+    fund_id: str | None = None
 
     @model_validator(mode="after")
     def default_source_message_id(self) -> CanonicalIngress:
