@@ -1186,7 +1186,37 @@ if __name__ == "__main__":
         "/ui/ceo/tasks/{task_id}/graph",
         "/ui/ceo/tasks/{task_id}/result",
         "/ui/ceo/tasks/{task_id}/archive",
-    }, c.get("/openapi.json").json()["paths"].keys()
+        # Web/Discord 공용 mirror. ingress는 ask와 같은 dedup 경계를 타고,
+        # events 계열은 sanitized 이벤트 저널 조회·발행이라 원장을 건드리지 않는다.
+        "/ui/ceo/ingress",
+        "/ui/ceo/events",
+        "/ui/ceo/events/stream",
+        # 준비 상태 조회. /health와 달리 의존성까지 확인한다.
+        "/health/ready",
+        # 대시보드 Domain Read Model(문서 10.4). 전부 읽기 전용 projection이다.
+        "/ui/research",
+        "/ui/strategy",
+        "/ui/risk",
+        "/ui/qa",
+        "/ui/risk-qa",
+        # 안전 Command 접수·감사. trading-state는 PENDING_APPROVAL/NOT_EXECUTED만
+        # 돌려주고 OMS·Risk Engine·Broker·Ledger를 바꾸지 않는다.
+        "/ui/commands/trading-state",
+        "/ui/commands/audit",
+        # Broker(LS) 조회 projection. authoritative=false이며 공식 NAV가 아니다.
+        "/ui/account/snapshot",
+        # QA 도메인 위임 조회. 판정은 qa-api가 소유한다.
+        "/ui/qa/verifications/{verification_id}/assess",
+    }
+    # ▶ 2026-08-14 수정: 예전에는 위 집합 뒤에 `, c.get(...).keys()` 가 붙어 있어
+    #   `required_paths` 가 (set, keys) 튜플이 되고 **비교 자체가 없었다.** 그래서
+    #   "경로가 늘면 여기서 깨진다"는 위 주석이 실제로는 아무것도 막지 못했고,
+    #   선언 33개 / 실제 46개까지 벌어진 뒤에야 발견됐다. 이제 정확히 비교한다.
+    assert paths == required_paths, (
+        f"OpenAPI 경로가 선언과 다르다.\n"
+        f"  선언에 없는 실제 경로: {sorted(paths - required_paths)}\n"
+        f"  실제에 없는 선언 경로: {sorted(required_paths - paths)}"
+    )
 
     # portfolio-api는 참조만 준다. 수치를 실으면 공식 출처가 둘로 갈린다
     schema = c.get("/openapi.json").json()
