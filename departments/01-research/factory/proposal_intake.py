@@ -205,11 +205,53 @@ def _competing_codes(raw: str) -> tuple[list, str]:
     return codes, " ".join(rest)[:120]
 
 
-def proposal_id_for(lead_ids, edge_type: str, universe_key: str) -> str:
-    """같은 리드로 같은 엣지·유니버스를 또 기획하면 같은 기획안이다."""
+def proposal_id_for(lead_ids, edge_type: str, universe_key: str, *,
+                    material: dict | None = None) -> str:
+    """Return the identity of one immutable material preregistration.
+
+    A lead/edge/universe-only id made a corrected parameter contract collide
+    with the already rejected row, so ``ON CONFLICT DO NOTHING`` silently ate
+    the repair.  Material execution/design fields now distinguish a genuinely
+    corrected proposal.  Prose rewrites and shared-replay sidecars do not: they
+    must not manufacture fresh trials.
+    """
+    if material is None:
+        # Preserve the legacy helper contract for callers that only need the
+        # coarse family-style identity.  Newly built proposals always pass a
+        # material specification below.
+        blob = json.dumps(
+            [sorted(str(x) for x in lead_ids), edge_type.strip().lower(),
+             universe_key.strip().lower()],
+            ensure_ascii=False, separators=(",", ":"))
+        return "prop_" + hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+    material = dict(material)
+    params = dict(material.get("suggested_params") or {})
+    # Screening sidecars are compute amortisation only and never hold promotion
+    # authority.  Their membership/version may change as the unused lead queue
+    # changes without changing the primary preregistration.
+    params.pop("screening_population", None)
+    params.pop("screening_cohort_version", None)
+    material["suggested_params"] = params
+    if isinstance(material.get("falsification_tests"), (list, tuple)):
+        material["falsification_tests"] = sorted(
+            str(value) for value in material["falsification_tests"])
+    requirements = dict(material.get("data_requirements") or {})
+    if isinstance(requirements.get("tables"), (list, tuple)):
+        requirements["tables"] = sorted(str(value)
+                                         for value in requirements["tables"])
+    if requirements:
+        material["data_requirements"] = requirements
+    plan = dict(material.get("semantic_plan") or {})
+    for key in ("context", "qualities"):
+        if isinstance(plan.get(key), (list, tuple)):
+            plan[key] = sorted(str(value) for value in plan[key])
+    if plan:
+        material["semantic_plan"] = plan
     blob = json.dumps([sorted(str(x) for x in lead_ids),
-                       edge_type.strip().lower(), universe_key.strip().lower()],
-                      ensure_ascii=False, separators=(",", ":"))
+                       edge_type.strip().lower(), universe_key.strip().lower(),
+                       material], ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"), default=str)
     return "prop_" + hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
@@ -286,8 +328,34 @@ def build(planner: dict, skeptic: dict, *, case_id: str,
     except ValueError:
         min_days = 0
 
+    data_requirements = DataRequirement(tables=list(tables),
+                                        min_history_days=min_days)
+    suggested_params = _maybe_json(planner.get("SUGGESTED_PARAMS", ""))
+    semantic_plan = _maybe_json(planner.get("SEMANTIC_PLAN", ""))
+    trial_budget = _trial_budget(planner.get("TRIAL_BUDGET", ""))
+    label = (planner.get("LABEL") or "forward_return").strip()
+    baseline = (planner.get("BASELINE") or "equal_weight_buy_and_hold").strip()
+    falsification_tests = _split(planner.get("FALSIFICATION_TESTS", ""))
+    prior_check = _prior_check(
+        past_outcomes, planner.get("LESSONS_ADDRESSED", ""))
+    material = {
+        "label": label,
+        "baseline": baseline,
+        "falsification_tests": list(falsification_tests),
+        "research_lane": research_lane,
+        "data_requirements": data_requirements.model_dump(mode="json"),
+        "suggested_params": suggested_params,
+        "semantic_plan": semantic_plan,
+        "trial_budget": trial_budget,
+        # Only the planner-authored repair belongs in identity.  Ledger-derived
+        # family/trial history changes over time and would make an unchanged
+        # proposal churn ids on every harvest.
+        "lessons_addressed": dict(prior_check.lessons_addressed),
+    }
+
     return ExperimentProposalV1(
-        proposal_id=proposal_id_for(lead_ids, edge, universe),
+        proposal_id=proposal_id_for(
+            lead_ids, edge, universe, material=material),
         case_id=case_id,
         as_known_at=as_known_at or datetime.now(timezone.utc),
         lead_ids=lead_ids,
@@ -298,22 +366,20 @@ def build(planner: dict, skeptic: dict, *, case_id: str,
         skeptic_sign=skeptic_run.strip(),
         edge_type=edge,
         universe_key=universe,
-        label=(planner.get("LABEL") or "forward_return").strip(),
-        baseline=(planner.get("BASELINE") or "equal_weight_buy_and_hold").strip(),
-        falsification_tests=_split(planner.get("FALSIFICATION_TESTS", "")),
-        data_requirements=DataRequirement(tables=list(tables),
-                                          min_history_days=min_days),
-        suggested_params=_maybe_json(planner.get("SUGGESTED_PARAMS", "")),
+        label=label,
+        baseline=baseline,
+        falsification_tests=falsification_tests,
+        data_requirements=data_requirements,
+        suggested_params=suggested_params,
         research_lane=research_lane,
-        semantic_plan=_maybe_json(planner.get("SEMANTIC_PLAN", "")),
-        trial_budget=_trial_budget(planner.get("TRIAL_BUDGET", "")),
+        semantic_plan=semantic_plan,
+        trial_budget=trial_budget,
         # ▶ **이력은 원장에서, 대응은 에이전트에게서** (2026-08-12)
         #   몇 번 돌았는지·무엇으로 기각됐는지는 사실이라 우리가 채운다.
         #   그것에 어떻게 대응할지는 판단이라 에이전트가 쓴다. 예전엔 둘 다
         #   비워 두어 Gate 0 의 "교훈에 대응이 없다" 검사가 **발동할 수도,
         #   통과할 수도 없는** 상태였다.
-        prior_check=_prior_check(past_outcomes,
-                                 planner.get("LESSONS_ADDRESSED", "")),
+        prior_check=prior_check,
         source_reported_effect=_maybe_json(
             planner.get("SOURCE_REPORTED_EFFECT", "")),
     )
@@ -478,9 +544,21 @@ def _attach_intraday_screening_cohort(
     params["screening_cohort_version"] = INTRADAY_SCREENING_COHORT_VERSION
     params["entry_policy"] = primary_source["entry_policy"]
     params["coefficient_policy"] = primary_source["coefficient_policy"]
+    material = {
+        "label": proposal.label,
+        "baseline": proposal.baseline,
+        "falsification_tests": list(proposal.falsification_tests),
+        "research_lane": proposal.research_lane.value,
+        "data_requirements": proposal.data_requirements.model_dump(mode="json"),
+        "suggested_params": params,
+        "semantic_plan": proposal.semantic_plan,
+        "trial_budget": proposal.trial_budget,
+        "lessons_addressed": dict(proposal.prior_check.lessons_addressed),
+    }
     return proposal.model_copy(update={
         "proposal_id": proposal_id_for(
-            primary_lead_ids, proposal.edge_type, proposal.universe_key),
+            primary_lead_ids, proposal.edge_type, proposal.universe_key,
+            material=material),
         "lead_ids": primary_lead_ids,
         "suggested_params": params,
     })
@@ -631,7 +709,8 @@ def load_leads(conn, lead_ids, *, _expand_current: bool = True) -> dict:
                and not (l.lead_id = any(%s))
                and not exists (
                      select 1 from research.experiment_proposals p
-                      where l.lead_id = any(p.lead_ids))
+                      where l.lead_id = any(p.lead_ids)
+                        and p.status in ('PUBLISHED','ACCEPTED'))
                and not exists (
                      select 1 from research.proposal_review_outcomes r
                       where r.verdict = 'STOP'
@@ -930,6 +1009,58 @@ def _selfcheck() -> int:
     check("기획안 id 결정론",
           proposal_id_for(["a", "b"], "MOMENTUM", "krx_all")
           == proposal_id_for(["b", "a"], "momentum", "krx_all"))
+    rejected_material = {
+        "suggested_params": {"max_drawdown_stop": 0.35, "top_n": 20},
+        "trial_budget": 5,
+    }
+    repaired_material = {
+        "suggested_params": {"max_drawdown_stop": -0.35, "top_n": 20},
+        "trial_budget": 5,
+    }
+    check("교정 사전등록은 새 id",
+          proposal_id_for(["a"], "momentum", "krx_all",
+                          material=rejected_material)
+          != proposal_id_for(["a"], "momentum", "krx_all",
+                             material=repaired_material))
+    lesson_material = {
+        **repaired_material,
+        "lessons_addressed": {"OVERFIT_PBO": "새 상태 조건을 사전등록한다"},
+    }
+    check("교훈 대응 교정은 새 id",
+          proposal_id_for(["a"], "momentum", "krx_all",
+                          material=repaired_material)
+          != proposal_id_for(["a"], "momentum", "krx_all",
+                             material=lesson_material))
+    sidecar_a = {**repaired_material,
+                 "suggested_params": {
+                     **repaired_material["suggested_params"],
+                     "screening_population": [{"ast_fingerprint": "a"}],
+                     "screening_cohort_version": "cohort-a"}}
+    sidecar_b = {**repaired_material,
+                 "suggested_params": {
+                     **repaired_material["suggested_params"],
+                     "screening_population": [{"ast_fingerprint": "b"}],
+                     "screening_cohort_version": "cohort-b"}}
+    check("sidecar 변화는 id 불변",
+          proposal_id_for(["a"], "momentum", "krx_all", material=sidecar_a)
+          == proposal_id_for(["a"], "momentum", "krx_all", material=sidecar_b))
+    unordered_a = {
+        **repaired_material,
+        "falsification_tests": ["cost", "regime"],
+        "data_requirements": {"tables": ["market_ticks", "market_quotes"]},
+        "semantic_plan": {"context": ["OPEN", "TIGHT_SPREAD"],
+                          "qualities": ["PERSISTENCE", "STATE_CONDITIONAL"]},
+    }
+    unordered_b = {
+        **repaired_material,
+        "falsification_tests": ["regime", "cost"],
+        "data_requirements": {"tables": ["market_quotes", "market_ticks"]},
+        "semantic_plan": {"context": ["TIGHT_SPREAD", "OPEN"],
+                          "qualities": ["STATE_CONDITIONAL", "PERSISTENCE"]},
+    }
+    check("집합 순서는 id 불변",
+          proposal_id_for(["a"], "momentum", "krx_all", material=unordered_a)
+          == proposal_id_for(["a"], "momentum", "krx_all", material=unordered_b))
     check("intraday cohort version is not a universe",
           _canonical_universe_key(INTRADAY_SCREENING_COHORT_VERSION,
                                   "INTRADAY_EVENT") == "krx_all"
@@ -1003,7 +1134,7 @@ def _selfcheck() -> int:
     for f in fails:
         if f:
             print(f"  FAIL {f}")
-    total = 22
+    total = 26
     print(f"proposal_intake 자체 점검: {total - len([x for x in fails if x])}/{total} 통과")
     return 1 if [x for x in fails if x] else 0
 
@@ -1256,8 +1387,16 @@ def _check_lane_isolated_history_lookup():
 
 def _check_intraday_screening_cohort_is_sourced_and_non_promoting():
     """Linked current-contract formulas become exact, non-consumed sidecars."""
+    import inspect
+
     from contracts.factory_contracts import SourceRef, lead_id_for
     from publish_gate import check_intraday_screening_population
+
+    assert "p.status in ('PUBLISHED','ACCEPTED')" in inspect.getsource(load_leads), \
+        "REJECTED primary lead를 sidecar pool에서도 영구 소비하면 교정 재제안이 막힌다"
+    assert ("proposal_review_outcomes" in inspect.getsource(load_leads)
+            and "r.verdict = 'STOP'" in inspect.getsource(load_leads)), \
+        "독립 스켑틱 STOP primary를 sidecar 후보로 다시 쓰면 안 된다"
 
     now = datetime(2026, 8, 16, tzinfo=timezone.utc)
     plan = {

@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta, timezone
 import hashlib
 import json
+import math
 from zoneinfo import ZoneInfo
 
 from intraday_alpha_ast import (clocks_of, count_nodes, fingerprint,
@@ -31,7 +32,7 @@ from intraday_sample_cache import (SampleCache, identity as cache_identity,
 
 
 RUNNER_VERSION = "intraday-experiment-runner-v9"
-FAST_SCREEN_VERSION = "intraday-fast-discovery-screen-v1"
+FAST_SCREEN_VERSION = "intraday-fast-discovery-screen-v2"
 COST_MODEL_VERSION = "krx-intraday-execution-v1"
 # 2026 listed equities incur 20bp on the sale (KOSPI 5bp STT + 15bp rural,
 # KOSDAQ 20bp STT).  A representative online commission is 1.5bp each side.
@@ -352,7 +353,8 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
         "evaluation_days": _bounded_int(edge, "evaluation_days", 60, 10, 250),
         # Raw external L10/tape validation spans roughly 92GB.  Most generated
         # equations must first clear a deterministic, non-promoting discovery
-        # panel; only a positive primary proceeds to all collected instruments.
+        # panel; only a primary not shown futile proceeds to all collected
+        # instruments. A six-session point estimate need not itself be positive.
         "fast_screen_enabled": _strict_bool(
             edge, "fast_screen_enabled", True),
         "fast_screen_sessions": _bounded_int(
@@ -363,6 +365,12 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
             edge, "fast_screen_min_opportunities", 100, 1, 1_000_000),
         "fast_screen_min_net_bps": _bounded_float(
             edge, "fast_screen_min_net_bps", 0.0, -100.0, 1_000.0),
+        # The default six-session screen is a futility test, not an estimate
+        # precise enough to demand a positive point return.  Preserve a
+        # deliberately preregistered point floor when the proposal explicitly
+        # supplied one, while keeping the default path CI-based.
+        "fast_screen_hard_net_floor_enabled": (
+            edge.get("fast_screen_min_net_bps") is not None),
         # A shard is only a bounded execution unit. The scientific universe is
         # every causally observed calibration instrument, never a top-N sample.
         "universe_mode": "ALL_CAUSALLY_COLLECTED",
@@ -419,18 +427,33 @@ def _fast_screen_gate(report: dict, config: dict) -> dict:
         (row.get("ast_fingerprint") or "", row)
         for row in report.get("screening_population") or []]
 
+    def numeric(value) -> bool:
+        return (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(float(value)))
+
     def qualifies(row: dict) -> bool:
         summary = row.get("summary") or {}
+        opportunities = summary.get("opportunities")
         net = summary.get("mean_net_bps_per_opportunity")
-        session_net = summary.get("session_mean_net_bps")
-        return (
-            int(summary.get("opportunities") or 0) >=
-            config["fast_screen_min_opportunities"]
-            and isinstance(net, (int, float)) and not isinstance(net, bool)
-            and float(net) > config["fast_screen_min_net_bps"]
-            and isinstance(session_net, (int, float))
-            and not isinstance(session_net, bool) and float(session_net) > 0
-        )
+        session_ci_high = summary.get("session_net_ci_high_bps")
+        # A malformed/non-finite count must fail the resource gate instead of
+        # raising from ``int(nan)`` and aborting the entire discovery run.
+        if (not numeric(opportunities)
+                or float(opportunities) <
+                config["fast_screen_min_opportunities"]):
+            return False
+        if not numeric(net) or not numeric(session_ci_high):
+            return False
+        # With only six sessions, a negative point estimate is not by itself
+        # sufficient evidence of futility.  Allocate more replay only while the
+        # session-level 95% interval still admits positive cost-net performance.
+        # This gate never promotes a candidate; the 60-session evaluator still
+        # requires a positive lower CI, DSR, PBO, coverage and cost survival.
+        if float(session_ci_high) <= 0:
+            return False
+        if config.get("fast_screen_hard_net_floor_enabled", False):
+            return float(net) > config["fast_screen_min_net_bps"]
+        return True
 
     survivors = [key for key, row in candidates if qualifies(row)]
     return {
@@ -440,9 +463,15 @@ def _fast_screen_gate(report: dict, config: dict) -> dict:
         "linked_survivor_count": sum(key != "PRIMARY" for key in survivors),
         "criteria": {
             "minimum_opportunities": config["fast_screen_min_opportunities"],
-            "minimum_mean_net_bps_per_opportunity_exclusive": config[
-                "fast_screen_min_net_bps"],
-            "session_mean_net_bps_must_be_positive": True,
+            "futility_rule": (
+                "session_net_95pct_upper_ci_bps_must_exceed_zero"),
+            "positive_point_estimate_required_by_default": False,
+            "hard_mean_net_floor_enabled": bool(config.get(
+                "fast_screen_hard_net_floor_enabled", False)),
+            "hard_mean_net_bps_per_opportunity_exclusive": (
+                config["fast_screen_min_net_bps"]
+                if config.get("fast_screen_hard_net_floor_enabled", False)
+                else None),
         },
         "boundary": "DISCOVERY_RESOURCE_GATE_ONLY",
         "promotion_authority": False,

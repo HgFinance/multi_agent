@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+import json
 from pathlib import Path
 import sys
 
@@ -308,8 +309,19 @@ def test_gate0_routes_intraday_contract_without_daily_binding() -> None:
     assert config["fast_screen_enabled"] is True
     assert config["fast_screen_sessions"] == 6
     assert config["fast_screen_instruments"] == 16
+    assert config["fast_screen_hard_net_floor_enabled"] is False
     assert config["instrument_shard_size"] == 32
     assert spec.purge_gap == timedelta(milliseconds=5250)
+
+    explicit_screen = _intraday_proposal()
+    explicit_screen["suggested_params"]["fast_screen_min_net_bps"] = 1.5
+    explicit_gate = gate0(explicit_screen)
+    assert explicit_gate.ok, explicit_gate.as_dict()
+    explicit_edge, dropped = expected_edge_for(explicit_screen)
+    assert "fast_screen_min_net_bps" not in dropped
+    explicit_config, _ = config_from_edge(explicit_edge)
+    assert explicit_config["fast_screen_hard_net_floor_enabled"] is True
+    assert explicit_config["fast_screen_min_net_bps"] == pytest.approx(1.5)
 
     proposal["suggested_params"]["fee_bps_per_side"] = 0
     gate = gate0(proposal)
@@ -899,6 +911,7 @@ def test_fast_discovery_screen_is_stratified_and_never_substitutes_sidecar() -> 
             "opportunities": 1_000,
             "mean_net_bps_per_opportunity": -1.0,
             "session_mean_net_bps": -2.0,
+            "session_net_ci_high_bps": -0.2,
         },
         "screening_population": [{
             "ast_fingerprint": "linked-positive",
@@ -906,6 +919,7 @@ def test_fast_discovery_screen_is_stratified_and_never_substitutes_sidecar() -> 
                 "opportunities": 1_000,
                 "mean_net_bps_per_opportunity": 1.0,
                 "session_mean_net_bps": 2.0,
+                "session_net_ci_high_bps": 3.0,
             },
         }],
     }
@@ -920,8 +934,37 @@ def test_fast_discovery_screen_is_stratified_and_never_substitutes_sidecar() -> 
         "opportunities": 1_000,
         "mean_net_bps_per_opportunity": 0.01,
         "session_mean_net_bps": 0.02,
+        "session_net_ci_high_bps": 0.5,
     }}
     assert _fast_screen_gate(positive, config)["primary_pass"] is True
+
+    # Six sessions are too weak to kill an uncertain candidate solely because
+    # its point estimate is negative.  The screen advances it for more evidence
+    # only while the session-level upper interval remains positive.
+    uncertain = {**negative, "summary": {
+        "opportunities": 1_000,
+        "mean_net_bps_per_opportunity": -0.10,
+        "session_mean_net_bps": -0.20,
+        "session_net_ci_high_bps": 0.40,
+    }}
+    uncertain_gate = _fast_screen_gate(uncertain, config)
+    assert uncertain_gate["primary_pass"] is True
+    assert uncertain_gate["criteria"][
+        "positive_point_estimate_required_by_default"] is False
+    assert uncertain_gate["promotion_authority"] is False
+
+    # An explicitly preregistered point floor remains binding; only the default
+    # path changes from a point-estimate filter to a futility filter.
+    hard_floor = {**config, "fast_screen_hard_net_floor_enabled": True}
+    assert _fast_screen_gate(uncertain, hard_floor)["primary_pass"] is False
+
+    non_finite = {**positive, "summary": {
+        **positive["summary"], "session_net_ci_high_bps": float("nan")}}
+    assert _fast_screen_gate(non_finite, config)["primary_pass"] is False
+
+    non_finite_count = {**positive, "summary": {
+        **positive["summary"], "opportunities": float("nan")}}
+    assert _fast_screen_gate(non_finite_count, config)["primary_pass"] is False
 
 
 def test_streaming_shards_equal_single_pass_and_cover_requested_universe() -> None:
@@ -1685,7 +1728,12 @@ def test_measured_negative_elites_become_controlled_stepping_stones() -> None:
 
 
 def test_positive_screening_evidence_breeds_but_still_allows_confirmation() -> None:
-    expr = {"op": "field", "field": "microprice_offset_bps"}
+    expr = {"op": "where",
+            "condition": {"op": "gt", "args": [
+                {"op": "field", "field": "spread_bps"},
+                {"const": 2, "unit": "BPS"}]},
+            "then": {"op": "field", "field": "microprice_offset_bps"},
+            "else": {"const": 0, "unit": "BPS"}}
     plan = {
         "event": "MICROPRICE_DISLOCATION", "context": ["ALL"],
         "qualities": ["LEVEL"], "direction": "REVERT",
@@ -1695,10 +1743,13 @@ def test_positive_screening_evidence_breeds_but_still_allows_confirmation() -> N
     screened = [{
         "intraday_signal_expr": expr, "semantic_plan": plan,
         "decision": "SCREENING_ONLY", "evidence_tier": "SCREENING_ONLY",
+        "candidate_role": "STRUCTURAL_ABLATION",
+        "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
+        "coefficient_policy": "STRUCTURE_ONLY",
         "lesson_codes": [],
         "oos_summary": {"mean_mid_markout_bps": 25.0,
-                        "mean_net_bps_per_opportunity": 2.0,
-                        "sessions": 60},
+                         "mean_net_bps_per_opportunity": 2.0,
+                        "opportunities": 26, "sessions": 4},
     }]
     lead = {
         "lead_id": "confirm-me", "intraday_signal_expr": expr,
@@ -1712,7 +1763,36 @@ def test_positive_screening_evidence_breeds_but_still_allows_confirmation() -> N
     assert not memory.recycled_candidates
     assert [row["lead_id"] for row in memory.niche_elites] == ["confirm-me"]
     assert memory.breeding_parents[0]["breeding_role"] == "SCREEN_SURVIVOR"
-    assert "SCREEN_SURVIVOR still needs" in intraday_experience.render(memory)
+    rendered = intraday_experience.render(memory)
+    assert "SCREEN_SURVIVOR still needs" in rendered
+    encoded = next(line.split("=", 1)[1] for line in rendered.splitlines()
+                   if "SCREEN_SURVIVOR_JSON=" in line)
+    payload = json.loads(encoded)
+    assert payload["intraday_signal_expr"] == expr
+    assert payload["semantic_plan"] == plan
+    assert payload["execution_contract"] == {
+        "output": "TAKER_NET_PNL", "execution": "TAKER",
+        "horizon_seconds": 5,
+        "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
+        "coefficient_policy": "STRUCTURE_ONLY"}
+    assert payload["candidate_role"] == "STRUCTURAL_ABLATION"
+    assert payload["evidence"]["opportunities"] == 26
+    assert payload["evidence"]["sessions"] == 4
+    assert "adaptive same-replay" in payload["evidence"]["caveat"]
+    assert payload["authority"] == {
+        "promotion_authority": False,
+        "independent_primary_required": True,
+        "forward_new_sessions_required": True,
+    }
+    assert len(encoded) <= intraday_experience.SCREEN_SURVIVOR_JSON_MAX_CHARS
+
+    crowded = intraday_experience.build([
+        {**screened[0], "semantic_plan": {**plan, "context": [context]}}
+        for context in ("ALL", "OPEN", "CLOSE", "WIDE_SPREAD")])
+    crowded_text = intraday_experience.render(crowded)
+    assert crowded_text.count("SCREEN_SURVIVOR_JSON=") == \
+        intraday_experience.SCREEN_SURVIVOR_RENDER_LIMIT
+    assert "1 additional screening survivors omitted" in crowded_text
 
 
 def test_previous_formula_contract_does_not_occupy_live_niche() -> None:

@@ -149,6 +149,9 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 "20260816170000_proposal_review_outcomes.sql",
                 # Intraday causal coverage probes stay outside experiment trials.
                 "20260816180000_intraday_data_feasibility.sql",
+                # quant-api's scoped role may read only the packet claims used
+                # by its research seed endpoint; no research write is granted.
+                "20260817000100_quant_api_seed_read.sql",
         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 

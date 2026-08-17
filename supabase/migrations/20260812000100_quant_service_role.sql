@@ -3,8 +3,8 @@ begin;
 -- svc_quant - 퀀트 작업 컨테이너 전용 롤
 --
 -- ▶ 왜 필요한가 (2026-08-12)
---   퀀트본부 Hermes 를 작업 컨테이너로 만들면서 DB 자격이 그 컨테이너에
---   들어간다. 지금은 공용 DATABASE_URL 을 그대로 쓰고 있는데, 그 자격은
+--   quant-api/worker가 DB 작업을 맡고 Hermes는 인증된 API/MCP만 호출한다.
+--   공용 DATABASE_URL 을 API에 그대로 주면 그 자격은
 --   execution·accounting·governance 원장 전체에 닿는다. 퀀트가 주문이나
 --   분개에 닿을 이유는 없다 - 권한 분리는 이름이 아니라 GRANT 다.
 --
@@ -20,7 +20,7 @@ begin;
 --
 -- ▶ 적용 후 할 일
 --   비밀번호를 정하고 `.env` 의 QUANT_DATABASE_URL 을 이 롤로 채운다.
---   그때까지 quant-hermes 는 공용 DATABASE_URL 로 돈다(compose override 주석).
+--   그때까지 quant-api 는 공용 DATABASE_URL fallback으로 돈다.
 --   비밀번호는 이 파일에 적지 않는다.
 
 do $$

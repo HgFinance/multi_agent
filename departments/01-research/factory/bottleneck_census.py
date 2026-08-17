@@ -422,9 +422,14 @@ def _idle_leads(cur) -> list[Bottleneck]:
         cur.execute("""
             select l.lead_id, left(coalesce(l.claimed_edge,''), 78),
                    (now() - l.created_at)
-              from research.methodology_leads l
+             from research.methodology_leads l
              where not exists (select 1 from research.experiment_proposals p
-                                where l.lead_id = any(p.lead_ids))
+                                where l.lead_id = any(p.lead_ids)
+                                  and p.status in ('PUBLISHED','ACCEPTED'))
+               and not exists (
+                     select 1 from research.proposal_review_outcomes r
+                      where r.verdict = 'STOP'
+                        and l.lead_id = any(r.lead_ids))
                and l.created_at < now() - interval '%s days'
              order by l.created_at
         """ % int(LEAD_IDLE_DAYS))
@@ -938,6 +943,10 @@ def _check_idle_leads_reach_the_builder():
         def execute(self, sql, *a):
             assert "methodology_leads" in sql
             assert "not exists" in sql, "이미 기획된 리드까지 세면 안 된다"
+            assert "p.status in ('PUBLISHED','ACCEPTED')" in sql, \
+                "Gate 0 REJECTED 리드를 계속 소비된 것으로 세면 교정 경로가 막힌다"
+            assert "proposal_review_outcomes" in sql and "r.verdict = 'STOP'" in sql, \
+                "독립 스켑틱 STOP 리드를 미사용으로 다시 소집하면 안 된다"
 
         def fetchall(self):
             return [("lead_a", "Maxing Out: Stocks as Lotteries", timedelta(days=9)),
