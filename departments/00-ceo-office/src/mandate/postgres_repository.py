@@ -213,6 +213,98 @@ class PostgresMandateVersionRepository(MandateVersionRepository):
         finally:
             self._pool.putconn(conn)
 
+    def get_mandate_current_snapshot(self, mandate_id: str) -> dict[str, Any] | None:
+        """`app.py`의 `get_mandate_current()`와 **바이트 단위로 동일한 응답 dict**를
+        한 번의 왕복으로 만든다(2026-08-14, 성능 최적화).
+
+        기존 경로는 `get_mandate_current` + `get_mandate_version_id` +
+        `get_mandate_content_hash` + `get()` 네 번을 순차로 왕복했다(각자
+        `getconn`/`commit`/`putconn` 사이클 포함) - `by-fund` 조회까지 합치면 한
+        Mandate를 읽는 데 5번 왕복했다. 이 메서드는 `governance.mandates`와
+        `governance.mandate_versions`를 LEFT JOIN 한 쿼리 하나로 같은 결과를 만든다.
+
+        **선택적 메서드다** - `MandateVersionRepository` 추상 인터페이스에는 없다.
+        `app.py`가 `getattr(repo, "get_mandate_current_snapshot", None)`으로 있으면
+        쓰고 없으면(In-Memory 등) 기존 4단계 경로로 그대로 떨어진다. In-Memory는
+        이미 메모리 접근이라 이 최적화가 필요 없다 - Postgres 왕복 비용에만
+        해당하는 문제라서 이 클래스에만 추가한다.
+
+        `None`을 돌려주는 경우는 이 메서드가 판단을 유보한다는 뜻이다(예: 응답
+        모양이 자기가 예상한 것과 다른 극단적 race) - 호출부는 그때 기존 4단계
+        경로로 안전하게 다시 시도한다. 정상적으로 mandates 행이 아예 없는 경우는
+        `None`이 아니라 `{"mandate_id":..., "current_version": 0, "status": "DRAFT"}`다
+        (기존 `get_mandate_current()`의 `(0, "DRAFT")` 기본값과 동일).
+        """
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    select m.current_version, m.status,
+                           mv.mandate_version_id, mv.content_hash, mv.objective_text,
+                           mv.objective, mv.allowed_assets, mv.forbidden_assets,
+                           mv.universe_policy, mv.risk_bounds, mv.approval_rules,
+                           mv.execution_rules, mv.effective_from, mv.effective_to
+                    from governance.mandates m
+                    left join governance.mandate_versions mv
+                      on mv.mandate_id = m.mandate_id and mv.version = m.current_version
+                    where m.mandate_id = %s
+                    """,
+                    (mandate_id,),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            # 최적화 경로의 실패로 정상 조회 자체를 막지 않는다 - 기존 4단계
+            # 경로가 fail-closed(503) 판정까지 포함해 그대로 처리한다.
+            return None
+        finally:
+            self._pool.putconn(conn)
+
+        if row is None:
+            # governance.mandates 행 자체가 없다 - get_mandate_current()의 (0, 'DRAFT')와 동일.
+            return {"mandate_id": mandate_id, "current_version": 0, "status": "DRAFT"}
+
+        (
+            version, status, mandate_version_id, content_hash, objective_text,
+            objective, allowed_assets, forbidden_assets, universe_policy,
+            risk_bounds, approval_rules, execution_rules, effective_from, effective_to,
+        ) = row
+
+        if version <= 0:
+            # 기존 경로의 조기 반환과 동일하게 이 세 필드만 준다(mandate_version_id/
+            # policy_hash/case_id 키를 넣지 않는다 - 응답 모양이 달라지면 안 된다).
+            return {"mandate_id": mandate_id, "current_version": version, "status": status}
+
+        mandate_version_id = str(mandate_version_id) if mandate_version_id else None
+        policy_hash = str(content_hash) if content_hash else None
+        response: dict[str, Any] = {
+            "mandate_id": mandate_id,
+            "case_id": None,
+            "current_version": version,
+            "mandate_version_id": mandate_version_id,
+            "policy_hash": policy_hash,
+            "status": status,
+        }
+        if mandate_version_id is not None:
+            response.update({
+                "effective_from": effective_from.isoformat(),
+                "effective_to": effective_to.isoformat() if effective_to else None,
+                "content_hash": content_hash,
+                "objective_text": objective_text,
+                "objective": objective,
+                "policy": {
+                    "allowed_assets": allowed_assets,
+                    "forbidden_assets": forbidden_assets,
+                    "universe_policy": universe_policy,
+                    "risk_bounds": risk_bounds,
+                    "approval_rules": approval_rules,
+                    "execution_rules": execution_rules,
+                },
+            })
+        return response
+
     def create_mandate(self, *, fund_id: str, owner_user_id: str, name: str) -> str:
         """`governance.mandates` 부모 행 하나. 2026-08-12 신설.
 
@@ -661,6 +753,51 @@ if __name__ == "__main__":
             assert isinstance(fetched_v2.allowed_assets, list)
             assert repo.get(mandate_id, 99) is None, "없는 Version 은 None"
             print("ok - get() (실 DB) 통과 - jsonb 컬럼 dict/list 왕복 확인")
+
+            # 4c2) get_mandate_current_snapshot() - 성능 최적화 경로(2026-08-14)가
+            # 기존 4단계 조합(app.py get_mandate_current)과 바이트 단위로 같은 dict를
+            # 내는지 직접 비교한다. 여기서 어긋나면 app.py는 자동으로 느린 경로로
+            # 떨어지므로 정답이 깨지진 않지만, 최적화 자체가 죽은 것이므로 자체
+            # 점검에서 반드시 잡는다.
+            def _slow_get_mandate_current(mid: str) -> dict:
+                v, st = repo.get_mandate_current(mid)
+                if v <= 0:
+                    return {"mandate_id": mid, "current_version": v, "status": st}
+                mv_id = repo.get_mandate_version_id(mid, v)
+                p_hash = repo.get_mandate_content_hash(mid, v)
+                out = {
+                    "mandate_id": mid, "case_id": None, "current_version": v,
+                    "mandate_version_id": mv_id, "policy_hash": p_hash, "status": st,
+                }
+                fetched = repo.get(mid, v)
+                if fetched is not None:
+                    out.update({
+                        "effective_from": fetched.effective_from.isoformat(),
+                        "effective_to": fetched.effective_to.isoformat() if fetched.effective_to else None,
+                        "content_hash": fetched.content_hash,
+                        "objective_text": fetched.objective_text,
+                        "objective": fetched.objective,
+                        "policy": {
+                            "allowed_assets": fetched.allowed_assets,
+                            "forbidden_assets": fetched.forbidden_assets,
+                            "universe_policy": fetched.universe_policy,
+                            "risk_bounds": fetched.risk_bounds,
+                            "approval_rules": fetched.approval_rules,
+                            "execution_rules": fetched.execution_rules,
+                        },
+                    })
+                return out
+
+            fast_response = repo.get_mandate_current_snapshot(mandate_id)
+            assert fast_response == _slow_get_mandate_current(mandate_id), (
+                f"빠른 경로와 느린 경로의 응답이 다르다:\n{fast_response}\n!=\n"
+                f"{_slow_get_mandate_current(mandate_id)}"
+            )
+            missing_snapshot = repo.get_mandate_current_snapshot(missing)
+            assert missing_snapshot == {
+                "mandate_id": missing, "current_version": 0, "status": "DRAFT",
+            }, missing_snapshot
+            print("ok - get_mandate_current_snapshot() (실 DB) 통과 - 느린 4단계 경로와 응답 동일")
 
             # 4d) mandate_ids_for_fund() - 방금 만든 mandate_id 가 포함되는지만 확인한다
             # (TEST-CEO-MANDATE Fund 에 다른 자체 점검이 남긴 행이 있을 수 있어 exact match 안 함).
