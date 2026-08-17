@@ -853,5 +853,81 @@ class KanbanCliErrorMappingTest(unittest.TestCase):
                 ceo_kanban_read.run_kanban(("list", "--json"))
 
 
+class KanbanReadCacheTest(unittest.TestCase):
+    """읽기 CLI TTL 캐시(2026-08-14). CLI 프로세스 수를 줄이되 안전 속성을 지킨다."""
+
+    def setUp(self) -> None:
+        ceo_kanban_read.clear_kanban_cache()
+        self.addCleanup(ceo_kanban_read.clear_kanban_cache)
+
+    @staticmethod
+    def _ok(stdout: str = "[]"):
+        return type("P", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+    def test_repeated_reads_run_the_cli_once(self) -> None:
+        """`/ui/ceo/tasks`가 root마다 같은 보드를 다시 읽던 중복을 걷어낸다."""
+
+        calls: list[tuple[str, ...]] = []
+
+        def run(command, **_kwargs):
+            calls.append(tuple(command))
+            return self._ok()
+
+        with patch.object(ceo_kanban_read.subprocess, "run", side_effect=run):
+            for _ in range(20):
+                ceo_kanban_read.run_kanban(("list", "--json"))
+            for _ in range(5):
+                ceo_kanban_read.run_kanban(("show", "t_a", "--json"))
+
+        self.assertEqual(len(calls), 2, f"고유 명령 2개만 실행돼야 한다: {calls}")
+
+    def test_failures_are_not_cached(self) -> None:
+        """실패를 캐시하면 일시 장애가 TTL 동안 고정된다(fail-closed가 아니라 fail-stuck)."""
+
+        attempts = []
+
+        def run(command, **_kwargs):
+            attempts.append(command)
+            return type("P", (), {"returncode": 2, "stdout": "", "stderr": "database is locked"})()
+
+        with patch.object(ceo_kanban_read.subprocess, "run", side_effect=run):
+            for _ in range(3):
+                with self.assertRaises(KanbanUnavailable):
+                    ceo_kanban_read.run_kanban(("list", "--json"))
+
+        self.assertEqual(len(attempts), 3, "예외는 캐시하지 않는다")
+
+    def test_archive_invalidates_the_cache(self) -> None:
+        """archive 직후 목록에 방금 치운 카드가 남아 있으면 안 된다."""
+
+        subcommands: list[str] = []
+
+        def run(command, **_kwargs):
+            subcommands.append(tuple(command)[2])
+            return self._ok()
+
+        with patch.object(ceo_kanban_read.subprocess, "run", side_effect=run):
+            ceo_kanban_read.run_kanban(("list", "--json"))
+            ceo_kanban_read.run_kanban(("list", "--json"))  # 캐시 히트
+            ceo_kanban_read.archive_tasks(["t_x"])
+            ceo_kanban_read.run_kanban(("list", "--json"))  # 무효화 후 재실행
+
+        self.assertEqual(subcommands, ["list", "archive", "list"])
+
+    def test_ttl_zero_disables_the_cache(self) -> None:
+        calls = []
+
+        def run(command, **_kwargs):
+            calls.append(command)
+            return self._ok()
+
+        with patch.dict(ceo_kanban_read.os.environ, {"KANBAN_READ_CACHE_TTL_SECONDS": "0"}):
+            with patch.object(ceo_kanban_read.subprocess, "run", side_effect=run):
+                for _ in range(4):
+                    ceo_kanban_read.run_kanban(("list", "--json"))
+
+        self.assertEqual(len(calls), 4, "TTL=0이면 매번 실행한다")
+
+
 if __name__ == "__main__":
     unittest.main()
