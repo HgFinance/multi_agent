@@ -925,6 +925,8 @@ def test_population_sorts_and_audits_once_but_keeps_candidate_statistics(
     assert residual[
         "median_time_bucket_mae_improvement_vs_null_bps"] == pytest.approx(1.0)
     assert residual["promotion_authority"] is False
+    assert residual["independent_confirmation"] is False
+    assert residual["forward_new_sessions_required"] is True
     assert reports["side"]["summary"]["opportunities"] == 0
     assert reports["side"]["decision"] == "NO_EVIDENCE"
 
@@ -947,6 +949,10 @@ def test_population_sorts_and_audits_once_but_keeps_candidate_statistics(
     assert annotated["population_evaluation"]["residual_archive_cells"] == 1
     assert annotated["population_evaluation"][
         "residual_archive_boundary"] == "OOS_DIAGNOSTIC_SCREENING_ONLY"
+    assert annotated["population_evaluation"][
+        "residual_archive_independent_confirmation"] is False
+    assert annotated["population_evaluation"][
+        "residual_archive_forward_new_sessions_required"] is True
     assert annotated["population_evaluation"]["promotion_authority"] == \
         "PRIMARY_ONLY"
 
@@ -1317,6 +1323,7 @@ def test_residual_qd_elite_reaches_next_generation_memory_without_authority() ->
     assert "residual-behavior QD elites" in rendered
     assert "mae_gain_vs_null=0.4bps" in rendered
     assert "OOS diagnostic only, no promotion" in rendered
+    assert "forward sessions unseen by its lineage" in rendered
 
 
 def test_intraday_feedback_separates_bad_signal_from_cost_flip() -> None:
