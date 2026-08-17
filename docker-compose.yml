@@ -1345,6 +1345,9 @@ services:
       #   이던 동안에는 로드까지 가지 못해 이 구멍이 드러나지 않았다.
       #   pit_dataset.DATA_ROOT 가 `parents[3]/quant-data` = /app/quant-data 다.
       - ./quant-data:/app/quant-data
+      # Keep the rebuildable evolutionary-screen cache off the host OneDrive
+      # bind while retaining governed datasets on the canonical quant-data path.
+      - intraday_sample_cache:/app/quant-data/intraday-discovery-cache
 
   card-watchdog:
     image: hedgefund-factory:latest
@@ -1450,3 +1453,4 @@ volumes:
   tsdb_data:
   portfolio_runtime_data:
   factory_state:
+  intraday_sample_cache:
