@@ -1148,6 +1148,108 @@ def test_repeated_losing_subtrees_become_soft_search_memory() -> None:
     assert "soft search prior" in rendered
 
 
+def test_reusable_term_bank_keeps_evidence_tiers_and_executable_ast() -> None:
+    term = {"op": "rolling_mean", "seconds": 30,
+            "arg": {"op": "field", "field": "trade_flow_imbalance"}}
+    positive = {"op": "mul", "args": [
+        term, {"op": "field", "field": "realized_volatility_bps"}]}
+    negative = {"op": "add", "args": [
+        term, {"op": "field", "field": "queue_imbalance_l1"}]}
+    plan = {
+        "event": "ORDER_FLOW", "context": ["ALL"],
+        "qualities": ["PERSISTENCE"], "direction": "FOLLOW",
+        "output": "TAKER_NET_PNL", "execution": "TAKER",
+        "horizon_seconds": 5,
+    }
+    memory = intraday_experience.build([
+        {"intraday_signal_expr": positive, "semantic_plan": plan,
+         "decision": "SUBMIT_TO_QA", "evidence_tier": "PRIMARY",
+         "oos_summary": {"mean_net_bps_per_opportunity": 0.4}},
+        {"intraday_signal_expr": negative, "semantic_plan": plan,
+         "decision": "GATE_HOLD", "evidence_tier": "PRIMARY",
+         "oos_summary": {"mean_net_bps_per_opportunity": -0.8}},
+    ])
+
+    reused = next(row for row in memory.reusable_term_bank
+                  if row["term_ast"] == term)
+    assert reused["status"] == "PRIMARY_POSITIVE_ASSOCIATION"
+    assert reused["formula_support"] == 2
+    assert reused["primary_positive_support"] == 1
+    assert reused["primary_negative_support"] == 1
+    assert reused["unit"] == "RATIO"
+    assert reused["search_action"] == "SET_LEVEL_REUSE_WITH_ABLATION"
+    rendered = intraday_experience.render(memory)
+    assert "typed reusable term bank" in rendered
+    assert "no causal credit" in rendered
+
+
+def test_generation_arm_audit_is_balanced_but_never_promotes() -> None:
+    plan = {
+        "event": "ORDER_FLOW", "context": ["ALL"],
+        "qualities": ["LEVEL"], "direction": "FOLLOW",
+        "output": "TAKER_NET_PNL", "execution": "TAKER",
+        "horizon_seconds": 5,
+    }
+    expressions = [
+        {"op": "field", "field": "trade_flow_imbalance"},
+        {"op": "field", "field": "normalized_quote_ofi"},
+        {"op": "rolling_mean", "seconds": 30,
+         "arg": {"op": "field", "field": "trade_flow_imbalance"}},
+        {"op": "neg", "arg": {
+            "op": "field", "field": "microprice_offset_bps"}},
+    ]
+    rows = [
+        {"intraday_signal_expr": expr, "semantic_plan": plan,
+         "decision": "GATE_HOLD",
+         "oos_summary": {"mean_net_bps_per_opportunity": net}}
+        for expr, net in zip(expressions, (0.2, -0.1, 0.4, -0.3))
+    ]
+    leads = [
+        {"lead_id": f"lead-{index}", "intraday_signal_expr": expr,
+         "semantic_plan": plan,
+         "evolution_role": "SEED" if index < 2 else "CHILD"}
+        for index, expr in enumerate(expressions)
+    ]
+    audit = intraday_experience.build(rows, leads).generation_arm_audit
+
+    assert audit["status"] == "TOO_FEW_PER_ARM"
+    assert audit["matched_net_sample_size"] == 2
+    assert audit["arms"]["FRESH"]["net_measured_unique"] == 2
+    assert audit["arms"]["LINEAGE"]["net_measured_unique"] == 2
+    assert audit["promotion_authority"] is False
+    rendered = intraday_experience.render(
+        intraday_experience.build(rows, leads))
+    assert "Keep the 6/6 LLM-call budget fixed" in rendered
+
+
+def test_recurring_untested_terms_are_moved_to_saturation_queue() -> None:
+    term = {"op": "rolling_mean", "seconds": 30,
+            "arg": {"op": "field", "field": "trade_flow_imbalance"}}
+    plan = {
+        "event": "ORDER_FLOW", "context": ["ALL"],
+        "qualities": ["PERSISTENCE"], "direction": "FOLLOW",
+        "output": "TAKER_NET_PNL", "execution": "TAKER",
+        "horizon_seconds": 5,
+    }
+    leads = []
+    for index, other in enumerate(("queue_imbalance_l1",
+                                   "normalized_quote_ofi")):
+        leads.append({
+            "lead_id": f"repeat-{index}", "semantic_plan": plan,
+            "intraday_signal_expr": {"op": "add", "args": [
+                term, {"op": "field", "field": other}]},
+        })
+    memory = intraday_experience.build([], leads)
+    repeated = next(row for row in memory.reusable_term_bank
+                    if row["term_ast"] == term)
+
+    assert repeated["status"] == "RECURRING_UNTESTED"
+    assert repeated["search_action"] == "EVALUATE_OR_STOP_REPROPOSING"
+    rendered = intraday_experience.render(memory)
+    assert "term saturation/avoidance queue" in rendered
+    assert "do not treat as preferred material" in rendered
+
+
 def test_intraday_feedback_separates_bad_signal_from_cost_flip() -> None:
     bad_signal = lessons_from(
         failed_criteria=["NET_EDGE_NOT_POSITIVE"],
