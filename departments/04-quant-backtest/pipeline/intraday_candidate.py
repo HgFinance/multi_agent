@@ -14,16 +14,17 @@ from datetime import timezone
 import hashlib
 import heapq
 import math
-from statistics import fmean, pstdev
+from statistics import fmean, median, pstdev
 from zoneinfo import ZoneInfo
 
 from intraday_alpha_ast import evaluate as evaluate_ast
-from intraday_alpha_ast import fields_of, fingerprint, shape_fingerprint
+from intraday_alpha_ast import (fields_of, fingerprint, shape_fingerprint,
+                                unit_of)
 from intraday_microstructure import IntradayLaneSpec, IntradaySample, audit_causality
 from overfit_stats import bootstrap_ci, deflated_sharpe
 
 
-EVALUATOR_VERSION = "intraday-candidate-evaluator-v6"
+EVALUATOR_VERSION = "intraday-candidate-evaluator-v7"
 KST = ZoneInfo("Asia/Seoul")
 ENTRY_POLICIES = frozenset({
     "POSITIVE_SCORE",
@@ -161,6 +162,39 @@ def _time_context_allows(sample: IntradaySample, contexts) -> bool:
                                      (local.hour, local.minute) < (15, 20)):
         return False
     return True
+
+
+def _time_behavior_bucket(sample: IntradaySample) -> str:
+    """Stable KRX time cluster used as a residual behavior descriptor."""
+    local = sample.decision_time.astimezone(KST).time()
+    if local.hour == 9 and local.minute < 30:
+        return "OPEN"
+    if (local.hour, local.minute) >= (11, 30) and \
+            (local.hour, local.minute) < (13, 30):
+        return "MIDDAY"
+    if (local.hour, local.minute) >= (14, 50) and \
+            (local.hour, local.minute) < (15, 20):
+        return "CLOSE"
+    return "CONTINUOUS"
+
+
+def _residual_cell(stats: list[float]) -> dict:
+    (count, signed_sum, absolute_sum, squared_sum,
+     null_absolute_sum, null_squared_sum) = stats
+    mae = absolute_sum / count
+    null_mae = null_absolute_sum / count
+    rmse = math.sqrt(squared_sum / count)
+    null_rmse = math.sqrt(null_squared_sum / count)
+    return {
+        "observations": int(count),
+        "mean_error_bps": signed_sum / count,
+        "mean_absolute_error_bps": mae,
+        "rmse_bps": rmse,
+        "null_mean_absolute_error_bps": null_mae,
+        "null_rmse_bps": null_rmse,
+        "mae_improvement_vs_null_bps": null_mae - mae,
+        "rmse_improvement_vs_null_bps": null_rmse - rmse,
+    }
 
 
 def _bootstrap_mean(values: list[float], *, n_boot: int = 1000,
@@ -301,6 +335,13 @@ class CandidateAccumulator:
         self.calibration_status = (
             "PENDING" if coefficient_policy == "STRUCTURE_ONLY"
             else "NOT_REQUIRED_FIXED_EQUATION")
+        self.residual_prediction_unit = (
+            "BPS" if coefficient_policy == "STRUCTURE_ONLY"
+            or unit_of(expr) == "BPS" else None)
+        self.time_residual_stats: dict[str, list[float]] = defaultdict(
+            lambda: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        self.session_residual_stats: dict[str, list[float]] = defaultdict(
+            lambda: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
     def calibrate(self, instrument_id: str,
                   samples: list[IntradaySample]) -> None:
@@ -426,6 +467,7 @@ class CandidateAccumulator:
             eligible_values = [item[1] for item in paired]
         else:
             eligible_samples, eligible_values = ordered, values
+        self._add_residuals(eligible_samples, eligible_values)
         observations = _observations(
             eligible_samples, eligible_values,
             horizon_seconds=self.horizon_seconds, threshold=self.threshold,
@@ -462,7 +504,88 @@ class CandidateAccumulator:
                 deltas[start] += 1
                 deltas[start + self.horizon_seconds] -= 1
 
+    def _add_residuals(self, samples: list[IntradaySample],
+                       predictions: list[float | None]) -> None:
+        """Retain bounded cluster statistics, never OOS rows or fitted choices."""
+        if self.residual_prediction_unit != "BPS":
+            return
+        for sample, raw in zip(samples, predictions):
+            label = _label(sample, self.horizon_seconds)
+            if label is None or raw is None:
+                continue
+            prediction = float(raw)
+            target = float(label.long_mid_markout_bps)
+            if not math.isfinite(prediction) or not math.isfinite(target):
+                continue
+            residual = target - prediction
+            session = sample.decision_time.astimezone(KST).date().isoformat()
+            for stats in (self.time_residual_stats[_time_behavior_bucket(sample)],
+                          self.session_residual_stats[session]):
+                stats[0] += 1.0
+                stats[1] += residual
+                stats[2] += abs(residual)
+                stats[3] += residual * residual
+                stats[4] += abs(target)
+                stats[5] += target * target
+
+    def _residual_behavior(self) -> dict:
+        status = "PASS"
+        if self.residual_prediction_unit != "BPS":
+            status = "NOT_APPLICABLE_NON_BPS"
+        elif (self.coefficient_policy == "STRUCTURE_ONLY"
+              and self.calibration_status != "PASS"):
+            status = "UNUSABLE_CALIBRATION"
+        elif not self.time_residual_stats:
+            status = "NO_RESIDUAL_OBSERVATIONS"
+        time_cells = {key: _residual_cell(value) for key, value in sorted(
+            self.time_residual_stats.items()) if value[0]}
+        session_cells = {key: _residual_cell(value) for key, value in sorted(
+            self.session_residual_stats.items()) if value[0]}
+        worst_time = (sorted(time_cells, key=lambda key: (
+            -time_cells[key]["mean_absolute_error_bps"], key))[0]
+                      if time_cells else None)
+        worst_session = (sorted(session_cells, key=lambda key: (
+            -session_cells[key]["mean_absolute_error_bps"], key))[0]
+                         if session_cells else None)
+        total = [sum(stats[index] for stats in self.time_residual_stats.values())
+                 for index in range(6)]
+        aggregate = _residual_cell(total) if total[0] else {}
+        return {
+            "version": "krx-domain-residual-qd-v1",
+            "status": status,
+            "target": "LONG_MIDPRICE_MARKOUT_BPS",
+            "prediction_unit": self.residual_prediction_unit,
+            "observations": int(total[0]),
+            "mean_error_bps": aggregate.get("mean_error_bps"),
+            "mean_absolute_error_bps": aggregate.get(
+                "mean_absolute_error_bps"),
+            "rmse_bps": aggregate.get("rmse_bps"),
+            "null_mean_absolute_error_bps": aggregate.get(
+                "null_mean_absolute_error_bps"),
+            "mae_improvement_vs_null_bps": aggregate.get(
+                "mae_improvement_vs_null_bps"),
+            "worst_time_bucket": worst_time,
+            "worst_time_bucket_mae_bps": (
+                time_cells[worst_time]["mean_absolute_error_bps"]
+                if worst_time else None),
+            "median_time_bucket_mae_bps": (
+                median(cell["mean_absolute_error_bps"]
+                       for cell in time_cells.values()) if time_cells else None),
+            "median_time_bucket_mae_improvement_vs_null_bps": (
+                median(cell["mae_improvement_vs_null_bps"]
+                       for cell in time_cells.values()) if time_cells else None),
+            "worst_session": worst_session,
+            "worst_session_mae_bps": (
+                session_cells[worst_session]["mean_absolute_error_bps"]
+                if worst_session else None),
+            "time_buckets": time_cells,
+            "session_cluster_count": len(session_cells),
+            "selection_boundary": "OOS_DIAGNOSTIC_SCREENING_ONLY",
+            "promotion_authority": False,
+        }
+
     def finish(self) -> dict:
+        residual_behavior = self._residual_behavior()
         session_peak_capital = {}
         for session, deltas in self.session_capital_deltas.items():
             current = peak = 0
@@ -523,6 +646,15 @@ class CandidateAccumulator:
             "capacity_quantile_sample_size": len(self.capacity.values),
             "max_concurrent_opportunities": max(
                 session_peak_capital.values(), default=0),
+            "residual_observations": residual_behavior["observations"],
+            "mean_absolute_residual_bps": residual_behavior[
+                "mean_absolute_error_bps"],
+            "residual_rmse_bps": residual_behavior["rmse_bps"],
+            "median_time_bucket_mae_bps": residual_behavior[
+                "median_time_bucket_mae_bps"],
+            "median_time_bucket_mae_improvement_vs_null_bps": (
+                residual_behavior[
+                    "median_time_bucket_mae_improvement_vs_null_bps"]),
         }
         failed = []
         if not self.opportunities:
@@ -585,6 +717,7 @@ class CandidateAccumulator:
             "causality": self.causality,
             "folds": folds,
             "session_returns_bps": session_returns,
+            "residual_behavior": residual_behavior,
             "summary": summary,
             "failed_criteria": failed,
             "decision": ("NO_EVIDENCE" if not evidence else

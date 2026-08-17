@@ -1086,7 +1086,8 @@ def _ast_experience_block(conn) -> str:
                        coalesce(o.decision, ''),
                        coalesce(o.lesson_codes, '{}'::text[]),
                        coalesce(o.oos_summary, '{}'::jsonb), h.title,
-                       coalesce(c.dimensions, '{}'::jsonb)
+                       coalesce(c.dimensions, '{}'::jsonb),
+                       coalesce(rb.dimensions, '{}'::jsonb)
                   from quant.experiments e
                   join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
                   left join lateral (
@@ -1103,6 +1104,14 @@ def _ast_experience_block(conn) -> str:
                        and m.dimensions->>'screening_candidate' is null
                      order by m.experiment_metric_id limit 1
                   ) c on true
+                  left join lateral (
+                    select dimensions
+                      from quant.experiment_metrics m
+                     where m.experiment_id = e.experiment_id
+                       and m.metric = 'intraday_residual_behavior'
+                       and m.dimensions->>'screening_candidate' is null
+                     order by m.experiment_metric_id limit 1
+                  ) rb on true
                  where e.config ? 'intraday_signal_expr'
                  order by e.created_at desc""")
             intraday = [{
@@ -1110,6 +1119,10 @@ def _ast_experience_block(conn) -> str:
                 "decision": row[2], "lesson_codes": list(row[3] or []),
                 "oos_summary": row[4] or {}, "title": row[5],
                 "score_calibration": row[6] or {},
+                "residual_behavior": {
+                    key: value for key, value in (row[7] or {}).items()
+                    if key != "residual_qd"},
+                "residual_qd": (row[7] or {}).get("residual_qd") or {},
             } for row in cur.fetchall()]
             # Shared-replay candidates are useful measured memory, but they are
             # not independent confirmations.  Read their candidate-scoped
@@ -1165,8 +1178,14 @@ def _ast_experience_block(conn) -> str:
                     target["pareto_rank"] = dimensions.get("pareto_rank")
                     target["empirical_influence"] = dimensions.get(
                         "empirical_influence")
+                    target["residual_qd"] = dimensions.get("residual_qd") or {}
                 elif metric == "intraday_score_calibration":
                     target["score_calibration"] = dimensions
+                elif metric == "intraday_residual_behavior":
+                    target["residual_behavior"] = {
+                        key: value for key, value in dimensions.items()
+                        if key not in {"screening_candidate", "residual_qd"}}
+                    target["residual_qd"] = dimensions.get("residual_qd") or {}
             intraday.extend(screened.values())
             cur.execute("""
                 select lead_ids, title, verdict, competing_codes,

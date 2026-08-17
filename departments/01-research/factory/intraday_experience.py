@@ -48,6 +48,7 @@ class IntradayMemory:
     frequent_losing_subtrees: tuple[dict, ...]
     reusable_term_bank: tuple[dict, ...]
     generation_arm_audit: dict
+    residual_qd_elites: tuple[dict, ...]
 
 
 def _walk(node, fields: set[str], operators: set[str], clocks: set[int]) -> None:
@@ -672,6 +673,24 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
                 "beta_bps_per_score_unit"),
             "score_calibration_observations": _number(
                 best.get("score_calibration") or {}, "observations"),
+            "residual_status": str(
+                (best.get("residual_behavior") or {}).get("status") or
+                "NOT_RECORDED"),
+            "worst_residual_time_bucket": (
+                (best.get("residual_behavior") or {}).get(
+                    "worst_time_bucket")),
+            "median_time_bucket_mae_bps": _number(
+                best.get("residual_behavior") or {},
+                "median_time_bucket_mae_bps"),
+            "median_time_bucket_mae_improvement_vs_null_bps": _number(
+                best.get("residual_behavior") or {},
+                "median_time_bucket_mae_improvement_vs_null_bps"),
+            "residual_rmse_bps": _number(
+                best.get("residual_behavior") or {}, "rmse_bps"),
+            "residual_qd_cell": (
+                (best.get("residual_qd") or {}).get("cell")),
+            "residual_qd_elite": bool(
+                (best.get("residual_qd") or {}).get("elite")),
         })
     history.sort(key=lambda row: (row["best_net_bps"] is not None,
                                   row["best_net_bps"] or float("-inf")), reverse=True)
@@ -749,6 +768,41 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
     influence.sort(key=lambda row: (
         row["net_increment_bps"] is not None,
         row["net_increment_bps"] or float("-inf")), reverse=True)
+    residual_elites = []
+    seen_residual_elites = set()
+    for row in parsed:
+        behavior = row.get("residual_behavior") or {}
+        qd = row.get("residual_qd") or {}
+        key = (row["ast_fingerprint"], str(qd.get("cell") or ""))
+        if (behavior.get("status") != "PASS" or not qd.get("elite")
+                or key in seen_residual_elites):
+            continue
+        seen_residual_elites.add(key)
+        residual_elites.append({
+            "ast_fingerprint": row["ast_fingerprint"],
+            "event": row["plan"]["event"],
+            "evidence_tier": row["evidence_tier"],
+            "cell": qd.get("cell"),
+            "worst_time_bucket": behavior.get("worst_time_bucket"),
+            "median_time_bucket_mae_bps": _number(
+                behavior, "median_time_bucket_mae_bps"),
+            "median_time_bucket_mae_improvement_vs_null_bps": _number(
+                behavior,
+                "median_time_bucket_mae_improvement_vs_null_bps"),
+            "rmse_bps": _number(behavior, "rmse_bps"),
+            "net_bps": _number(
+                row.get("oos_summary") or {},
+                "mean_net_bps_per_opportunity"),
+            "complexity_nodes": formula.count_nodes(row["expr"]),
+        })
+    residual_elites.sort(key=lambda row: (
+        row["median_time_bucket_mae_improvement_vs_null_bps"] is None,
+        -(row["median_time_bucket_mae_improvement_vs_null_bps"]
+          if row["median_time_bucket_mae_improvement_vs_null_bps"] is not None
+          else float("-inf")),
+        -(row["net_bps"] if row["net_bps"] is not None else float("-inf")),
+        row["ast_fingerprint"],
+    ))
     return IntradayMemory(
         experiments=len(parsed), semantic_families=len({row["semantic_fingerprint"]
                                                         for row in parsed}),
@@ -769,6 +823,7 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
         frequent_losing_subtrees=frequent_losers,
         reusable_term_bank=term_bank,
         generation_arm_audit=arm_audit,
+        residual_qd_elites=tuple(residual_elites),
     )
 
 
@@ -797,6 +852,10 @@ def render(memory: IntradayMemory, *, limit: int = 6) -> str:
             f"calibration={row['score_calibration_status']} "
             f"beta={row['score_calibration_beta']} "
             f"calibration_n={row['score_calibration_observations']} "
+            f"residual={row['residual_status']} "
+            f"worst_residual_time={row['worst_residual_time_bucket']} "
+            f"residual_med_mae={row['median_time_bucket_mae_bps']}bps "
+            f"residual_rmse={row['residual_rmse_bps']}bps "
             f"lessons={row['lesson_codes']}")
     lines.extend([
         f"  positive-associated components (causal claim 아님): {list(memory.positive_components)}",
@@ -869,6 +928,22 @@ def render(memory: IntradayMemory, *, limit: int = 6) -> str:
                 f"gross={row['gross_increment_bps']}bps "
                 f"drag={row['implementation_drag_increment_bps']}bps "
                 f"interpretation={row['interpretation']}")
+    if memory.residual_qd_elites:
+        lines.append(
+            "  [residual-behavior QD elites - OOS diagnostic only, no promotion]")
+        for row in memory.residual_qd_elites[:8]:
+            lines.append(
+                f"    cell={row['cell']} fp={row['ast_fingerprint']} "
+                f"event={row['event']} evidence={row['evidence_tier']} "
+                f"worst_time={row['worst_time_bucket']} "
+                f"median_cluster_mae={row['median_time_bucket_mae_bps']}bps "
+                f"mae_gain_vs_null={row['median_time_bucket_mae_improvement_vs_null_bps']}bps "
+                f"rmse={row['rmse_bps']}bps net={row['net_bps']}bps "
+                f"nodes={row['complexity_nodes']}")
+        lines.append(
+            "    Preserve distinct failure allocations as search stepping stones. "
+            "Do not fit, select, or promote on these OOS descriptors; nominate any "
+            "assembled descendant for a fresh preregistered primary experiment.")
     if memory.reusable_term_bank:
         lines.append(
             "  [typed reusable term bank - set-level search material, no causal credit]")
@@ -939,6 +1014,8 @@ def render(memory: IntradayMemory, *, limit: int = 6) -> str:
         "    ABLATIONS, and a typed FORMULA_THESIS connecting every field to an economic term.",
         "    Fresh SEED drafts declare no parent. Use the typed term bank as external material,",
         "    but select economically coherent term sets rather than trusting per-term scores.",
+        "    When residual-QD evidence exists, preserve candidates from different worst-time",
+        "    cells and propose a mechanism for each failure allocation; never tune on OOS cells.",
         "    Window/threshold-only edits are the same family, not novelty.",
         "    Submit contract-valid children together. The archive keeps one elite per niche;",
         "    causal backtests, costs, DSR/PBO and the trial ledger--not QD score--decide survival.",
