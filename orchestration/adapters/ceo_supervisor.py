@@ -52,6 +52,7 @@ from orchestration.ceo_workflow_scope import (
     selected_primary_profiles_from_task,
     validate_workflow_scope,
     workflow_mode_from_body,
+    workflow_role_from_body,
 )
 
 logger = logging.getLogger(__name__)
@@ -170,6 +171,18 @@ def child_handoff_payload(child: ChildTaskState, **extra: Any) -> dict[str, Any]
             )
     payload.update(extra)
     return payload
+
+
+def _is_direct_ceo_response_synthesis(*, role: str, body: str) -> bool:
+    """Return True for a CEO-authored response synthesis in the current workflow."""
+
+    if str(role or "").casefold() != "synthesis":
+        return False
+
+    return any(
+        line.strip().casefold() == "producer=ceo-hermes-direct"
+        for line in str(body or "").splitlines()
+    )
 
 
 @dataclass(frozen=True)
@@ -415,6 +428,23 @@ class SupervisorState:
         return tuple(child for child in self.children if child.is_supervisor)
 
     def has_action(self, action: SupervisorAction) -> bool:
+        if action == SupervisorAction.SYNTHESIZE:
+            return any(
+                child.is_in_workflow(self.parent_task_id)
+                and child.workflow_role == "synthesis"
+                and (
+                    (
+                        SUPERVISOR_MARKER in child.body
+                        and action.value in child.body
+                    )
+                    or _is_direct_ceo_response_synthesis(
+                        role=child.workflow_role,
+                        body=child.body,
+                    )
+                )
+                for child in self.children
+            )
+
         return any(
             child.is_in_workflow(self.parent_task_id)
             and SUPERVISOR_MARKER in child.body
@@ -962,10 +992,25 @@ class HermesKanbanClient:
                 cache[current_id] = self.show(current_id)
             return cache[current_id]
 
-        scoped_root_ids = extract_scope_references(fetch(task_id)).root_ids
-        if scoped_root_ids:
-            root_id = scoped_root_ids[0]
+        starting_payload = fetch(task_id)
+        scoped_root_ids = extract_scope_references(starting_payload).root_ids
+
+        # A scoped primary/QA/synthesis declares workflow_root_task_id directly.
+        # The root itself deliberately does not point to itself; identify it by
+        # the durable workflow marker + workflow_role=root and perform the same
+        # marker-based discovery. This keeps parentless primaries inside the
+        # workflow scope without turning the root into an execution dependency.
+        starting_body = str(starting_payload.get("body") or "")
+        starting_role = workflow_role_from_body(starting_body)
+        is_scoped_root = (
+            CEO_WORKFLOW_SCOPE_MARKER in starting_body
+            and starting_role == "root"
+        )
+
+        if scoped_root_ids or is_scoped_root:
+            root_id = scoped_root_ids[0] if scoped_root_ids else task_id
             fetch(root_id)
+
             scoped_ids = {root_id}
             for row in self.list_tasks():
                 row_id = str(row.get("id") or row.get("task_id") or "")
@@ -973,10 +1018,14 @@ class HermesKanbanClient:
                     continue
                 if root_id in extract_scope_references(row).root_ids:
                     scoped_ids.add(row_id)
+
             for scoped_id in scoped_ids:
                 fetch(scoped_id)
+
             return root_id, tuple(
-                payload for current_id, payload in cache.items() if current_id != root_id
+                payload
+                for current_id, payload in cache.items()
+                if current_id != root_id
             )
 
         root_id = task_id
@@ -1151,9 +1200,18 @@ class CeoSupervisorService:
         body = str(task.get("body") or "")
         role = terminal_workflow_role(task) or ""
         task_action = terminal_action(task) or terminal_action({"body": body})
+        supervisor_synthesis = (
+            role == "synthesis" and task_action == "SYNTHESIZE"
+        )
+        direct_ceo_synthesis = _is_direct_ceo_response_synthesis(
+            role=role,
+            body=body,
+        )
+        response_synthesis = supervisor_synthesis or direct_ceo_synthesis
+
         projection = (
             self.synthesis_projection
-            if role == "synthesis" and task_action == "SYNTHESIZE"
+            if supervisor_synthesis
             else self.qa_projection
             if role == "qa" and task_action == "RUN_QA"
             else None
@@ -1171,13 +1229,14 @@ class CeoSupervisorService:
                     "terminal projection observer failed",
                     extra={"root_task_id": root_task_id, "task_id": task_id, "error": str(exc)},
         )
-        if role == "synthesis" and task_action == "SYNTHESIZE":
+        if response_synthesis:
             logger.info(
-                "synthesis-complete root=%s task=%s",
+                "synthesis-complete root=%s task=%s producer=%s",
                 root_task_id,
                 task_id,
+                "ceo-hermes-direct" if direct_ceo_synthesis else "ceo-supervisor",
             )
-        if role == "synthesis" and task_action == "SYNTHESIZE" and self.discord_delivery:
+        if response_synthesis and self.discord_delivery:
             content = _text(
                 task.get("latest_summary")
                 or task.get("summary")
@@ -1509,7 +1568,13 @@ class CeoSupervisorService:
                             if (
                                 root_id in row_roots
                                 and row_role == "synthesis"
-                                and row_action == "SYNTHESIZE"
+                                and (
+                                    row_action == "SYNTHESIZE"
+                                    or _is_direct_ceo_response_synthesis(
+                                        role=row_role,
+                                        body=body,
+                                    )
+                                )
                             ):
                                 synthesis_exists = True
                                 break
@@ -1518,8 +1583,16 @@ class CeoSupervisorService:
                         synthesis_exists = any(
                             child.is_in_workflow(root_id)
                             and child.workflow_role == "synthesis"
-                            and SUPERVISOR_MARKER in child.body
-                            and "action=SYNTHESIZE" in child.body
+                            and (
+                                (
+                                    SUPERVISOR_MARKER in child.body
+                                    and "action=SYNTHESIZE" in child.body
+                                )
+                                or _is_direct_ceo_response_synthesis(
+                                    role=child.workflow_role,
+                                    body=child.body,
+                                )
+                            )
                             for child in (
                                 ChildTaskState.from_hermes(payload)
                                 for payload in refreshed_payloads

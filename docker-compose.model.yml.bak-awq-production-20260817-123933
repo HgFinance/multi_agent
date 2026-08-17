@@ -1,0 +1,96 @@
+# Worker Model Plane 오버레이 - Control Plane compose 위에 얹는다.
+#
+# 소유: 재일 (리서치본부 첫 적용)
+# 근거: docs/02-engineering/FINAL_RUNTIME_ARCHITECTURE.md §3.2(worker-model-gateway),
+#       §7.2(Multi-LoRA), §8.4(EBS=Runtime Cache), §12 Phase 4.
+#
+# ▶ 쓰는 법 (AWS EC2, GPU 필수)
+#     docker compose -f docker-compose.yml -f docker-compose.model.yml up -d vllm
+#     docker compose -f docker-compose.yml -f docker-compose.model.yml up -d research-mcp
+#   모델 파일은 먼저 EBS 에 있어야 한다:
+#     scripts/model_plane/fetch_base_model.sh   (HF → EBS 최초 1회)
+#   S3 가 Source of Truth, EBS(/opt/hgfinance/models)는 Runtime Cache 다(§8.3-8.4).
+#
+# ▶ 이 파일이 기본 compose 에 안 들어가는 이유
+#   Control Plane(EC2 CPU)과 Model Plane(GPU)은 수명이 다르다. GPU 가 없는
+#   개발자 로컬·EB 배포가 vllm 서비스 정의 때문에 깨지면 안 된다 - 오버레이를
+#   명시적으로 -f 로 얹은 곳에서만 존재한다.
+#
+# ▶ 보안 경계 (§11)
+#   vLLM 은 compose 네트워크 안에서 vllm:8000 으로만 불린다. 호스트 게시는
+#   127.0.0.1 한정 - EC2 보안그룹과 무관하게 외부 노출이 없다.
+
+services:
+  vllm:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
+    container_name: hedgefund-vllm
+    restart: unless-stopped
+    # PyTorch 공유 메모리 - 없으면 tensor 로딩이 죽는다
+    ipc: host
+    ports:
+      - "127.0.0.1:8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      # EBS 캐시에서만 읽는다 - 부팅 때 HF 네트워크에 나가지 않는다.
+      # 모델이 없으면 즉시 실패해야 한다(조용히 28GB 를 받기 시작하면 안 된다).
+      HF_HOME: /models/hf-cache
+      HF_HUB_OFFLINE: "1"
+      # LoRA 를 재시작 없이 /v1/load_lora_adapter 로 올릴 수 있게 한다
+      VLLM_ALLOW_RUNTIME_LORA_UPDATING: "True"
+    volumes:
+      # EBS Runtime Cache (§8.4). adapters/ 하위는 LoRA 승격 시 쓴다.
+      - ${HGF_MODEL_DIR:-/opt/hgfinance/models}:/models
+    command:
+      - --model
+      - /models/${WORKER_BASE_MODEL_DIRNAME:-Qwen2.5-14B-Instruct-FP8-dynamic}
+      # 계약 문자열 - tests/contracts/test_unified_api_contract.py 와
+      # departments/01-research/config/worker_model_registry.json 이 같은 이름을 쓴다
+      - --served-model-name
+      - ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-fp8}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      # L4 24GB 기준 보수값. g6e(L40S 48GB)면 32768 로 올린다.
+      - --max-model-len
+      - ${VLLM_MAX_MODEL_LEN:-16384}
+      - --gpu-memory-utilization
+      - ${VLLM_GPU_MEMORY_UTILIZATION:-0.90}
+      # KV 를 FP8 로 - 24GB 에서 동시성 여유가 이걸로 벌어진다
+      - --kv-cache-dtype
+      - ${VLLM_KV_CACHE_DTYPE:-fp8}
+      # Multi-LoRA 준비 - adapter 가 아직 없어도 켜 둔다. 승인된 LoRA 는
+      # /v1/load_lora_adapter 로 올리고 worker_model_registry.json 에 적는다.
+      - --enable-lora
+      - --max-loras
+      - "4"
+      - --max-lora-rank
+      - "32"
+      - --max-cpu-loras
+      - "8"
+    healthcheck:
+      test: ["CMD", "python3", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 30
+      # 14B 로딩 + CUDA 그래프 캡처가 수 분 걸린다
+      start_period: 600s
+    stop_grace_period: 60s
+
+  # ── research-mcp 에 Worker 모델 좌표만 주입한다 ──────────────────────────
+  # 공용 Worker 소스 마운트는 기본 compose에 있다. 그래야 이 오버레이가 없는
+  # 로컬 Ollama 경로도 독립 회의론자 Worker를 똑같이 실행할 수 있다.
+  research-mcp:
+    environment:
+      WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-http://vllm:8000/v1}
+      WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-fp8}
+      WORKER_MODEL_API_KEY: ${WORKER_MODEL_API_KEY:-vllm}
+      WORKER_MODEL_TIMEOUT_SECONDS: ${WORKER_MODEL_TIMEOUT_SECONDS:-120}
+      WORKER_MODEL_REGISTRY_PATH: /app/departments/01-research/config/worker_model_registry.json

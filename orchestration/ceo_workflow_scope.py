@@ -449,16 +449,37 @@ def workflow_mode_from_body(body: str) -> str:
     text = str(body or "")
     raw = read_marker(text, "workflow_mode")
     if not raw:
-        # Direct Discord producers may predate ``workflow_mode=`` while still
-        # declaring the request class.  An explicit non-binding/advisory
-        # request must not fall into the legacy binding fallback merely
-        # because it carries the workflow scope marker.
+        # Legacy scoped roots default to binding. Direct CEO roots may explicitly
+        # declare an asynchronous non-binding response workflow and must not be
+        # promoted into the QA-gated binding path solely because they carry the
+        # durable workflow scope marker.
         request_class = re.search(r"(?mi)^request_class=(.+?)\s*$", text)
         if request_class:
             request_class_text = request_class.group(1).casefold()
             if "non-binding" in request_class_text or "advisory" in request_class_text:
                 return "analysis"
+
+        producer = (read_marker(text, "producer") or "").casefold()
+        qa_marker = (read_marker(text, "qa_required") or "").casefold()
+        lowered = text.casefold()
+
+        direct_async_analysis = (
+            producer == "ceo-hermes-direct"
+            and qa_marker == "false"
+            and (
+                "not a prerequisite for synthesis or user response" in lowered
+                or "non-binding analysis" in lowered
+                or "no action or authority change" in lowered
+                or "read-only" in lowered
+                or "read only" in lowered
+            )
+        )
+
+        if direct_async_analysis:
+            return "analysis"
+
         return "binding" if CEO_WORKFLOW_SCOPE_MARKER in text else "analysis"
+
     mode = raw.casefold()
     if mode not in WORKFLOW_MODES:
         raise WorkflowScopeViolation(f"unknown workflow_mode: {mode}")
