@@ -34,6 +34,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+try:
+    from . import hermes_boundary
+except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
+    import hermes_boundary  # type: ignore[no-redef]
+
 from orchestration.adapters.ceo_supervisor import (
     FAILURE_OUTCOMES,
     SUPERVISOR_MARKER,
@@ -170,9 +175,18 @@ def _cli_environment() -> dict[str, str]:
 
 
 def run_kanban(args: Sequence[str]) -> str:
-    """`hermes kanban ...`를 실행하고 stdout을 준다. shell=False로만 부른다."""
+    """`hermes kanban ...`를 실행하고 stdout을 준다. shell=False로만 부른다.
 
-    command = [os.environ.get("HERMES_BIN", "hermes"), "kanban", *args]
+    argv 조립은 `hermes_boundary.argv_for(None, ...)`에 맡긴다 - 여기서 직접
+    `[HERMES_BIN, "kanban", ...]`을 만들면 `HERMES_EXEC_MODE=docker` 환경에서
+    이 경로만 호스트의 `hermes`를 찾아 실패한다(2026-08-14 발견). 쓰기 경로
+    (`hermes_boundary.create_kanban_task`)는 이미 그 모드를 존중하고 있었으므로,
+    같은 보드를 읽는 이 경로만 규칙이 달랐던 것이다. `department=None`은 부서에
+    매이지 않는 kanban 명령을 뜻하고, docker 모드에서는 `KANBAN_CLI_CONTAINER`
+    안에서 실행된다.
+    """
+
+    command = hermes_boundary.argv_for(None, ["kanban", *args])
     try:
         process = subprocess.run(
             command,
