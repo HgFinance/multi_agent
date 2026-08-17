@@ -22,7 +22,7 @@
 
 ▶ 해석 규칙 (환경변수 계약)
   WORKER_MODEL_BASE_URL 이 설정돼 있으면 → vLLM(OpenAI 호환) 경로:
-    WORKER_MODEL_NAME             (기본 qwen2.5-14b-instruct-fp8)
+    WORKER_MODEL_NAME             (기본 qwen2.5-14b-instruct-awq)
     WORKER_MODEL_API_KEY          (기본 vllm - vLLM 은 키를 검사하지 않지만
                                    OpenAI 호환 헤더 형식은 지킨다)
     WORKER_MODEL_TIMEOUT_SECONDS  (기본 120 - 14B 는 8초 안에 못 끝난다.
@@ -54,7 +54,7 @@ from pathlib import Path
 MODULE_VERSION = "worker-model-gateway-v1"
 REGISTRY_VERSION = "worker-model-registry.v1"
 
-DEFAULT_VLLM_MODEL = "qwen2.5-14b-instruct-fp8"
+DEFAULT_VLLM_MODEL = "qwen2.5-14b-instruct-awq"
 DEFAULT_VLLM_TIMEOUT = 120.0
 DEFAULT_OLLAMA_BASE = "http://127.0.0.1:11434/v1"
 DEFAULT_OLLAMA_MODEL = "qwen3:1.7b"
@@ -411,7 +411,7 @@ def _check_payload_shape():
         return _FakeResp()
 
     binding = resolve("w", env={"WORKER_MODEL_BASE_URL": "http://vllm:8000",
-                                "WORKER_MODEL_NAME": "qwen2.5-14b-instruct-fp8"})
+                                "WORKER_MODEL_NAME": "qwen2.5-14b-instruct-awq"})
     call = worker_llm(binding)
     schema = {
         "type": "object",
@@ -430,7 +430,7 @@ def _check_payload_shape():
     assert seen["timeout"] == 120.0
     assert seen["auth"] == "Bearer vllm"
     b = seen["body"]
-    assert b["model"] == "qwen2.5-14b-instruct-fp8"
+    assert b["model"] == "qwen2.5-14b-instruct-awq"
     assert b["temperature"] == 0, "Worker 는 재현성이 우선이다 - temperature 0"
     assert [m["role"] for m in b["messages"]] == ["system", "user"]
     assert b["response_format"] == {
