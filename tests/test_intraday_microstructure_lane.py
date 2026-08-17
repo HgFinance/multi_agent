@@ -12,6 +12,7 @@ PIPELINE = ROOT / "departments" / "04-quant-backtest" / "pipeline"
 sys.path.insert(0, str(PIPELINE))
 
 from intraday_microstructure import (  # noqa: E402
+    EXTERNAL_EVENT_SOURCE,
     IntradayLaneSpec,
     QuoteEvent,
     TradeEvent,
@@ -28,7 +29,11 @@ from intraday_microstructure import (  # noqa: E402
     _SOURCE_QUALITY_BATCH_SQL,
     _TRADE_SQL,
     _TRADE_BATCH_SQL,
+    _EXTERNAL_QUOTE_SQL,
+    _EXTERNAL_SOURCE_QUALITY_SQL,
+    _EXTERNAL_TRADE_SQL,
 )
+from intraday_sample_cache import (SampleCache, identity as cache_identity)  # noqa: E402
 
 
 UTC = timezone.utc
@@ -105,6 +110,64 @@ def test_causal_lane_builds_features_and_executable_labels() -> None:
     assert audit_causality(samples, spec)["status"] == "PASS"
     assert manifest(spec)["execution_model"] == "TAKER_BOTH_SIDES"
     assert manifest(spec)["purge_gap_seconds"] == pytest.approx(15.25)
+
+
+def test_external_replay_contract_is_explicit_and_schema_safe() -> None:
+    # Sparse deeper L10 levels are normalized before QuoteEvent float parsing,
+    # while the best quote remains subject to the executable-market filter.
+    assert "coalesce(bid10,0)" in _EXTERNAL_QUOTE_SQL
+    assert "coalesce(ask_vol10,0)" in _EXTERNAL_QUOTE_SQL
+    assert "symbol = %s" in _EXTERNAL_QUOTE_SQL
+    assert "case when ofi_contrib > 0 then 1" in _EXTERNAL_TRADE_SQL
+    assert "when ofi_contrib < 0 then -1" in _EXTERNAL_TRADE_SQL
+    assert "count(*) as quotes_without_received_at" in \
+        _EXTERNAL_SOURCE_QUALITY_SQL
+
+    replay = manifest(IntradayLaneSpec(), source=EXTERNAL_EVENT_SOURCE)
+    assert replay["event_source"] == EXTERNAL_EVENT_SOURCE
+    assert replay["arrival_clock_pit"] is False
+    assert replay["historical_replay_only"] is True
+    assert "receipt clock unavailable" in replay["clock"]
+    assert "forward receipt-clock confirmation required" in \
+        replay["evidence_limit"]
+
+
+def test_discovery_cache_identity_is_spec_and_lineage_bound() -> None:
+    base = cache_identity(
+        spec=IntradayLaneSpec(horizons_seconds=(5, 30)),
+        event_source=EXTERNAL_EVENT_SOURCE, execution_model="TAKER",
+        source_lineage=[{"source": "ext_src.quotes", "rows": 10}])
+    assert base == cache_identity(
+        spec=IntradayLaneSpec(horizons_seconds=(5, 30)),
+        event_source=EXTERNAL_EVENT_SOURCE, execution_model="TAKER",
+        source_lineage=[{"source": "ext_src.quotes", "rows": 10}])
+    assert base != cache_identity(
+        spec=IntradayLaneSpec(horizons_seconds=(5, 60)),
+        event_source=EXTERNAL_EVENT_SOURCE, execution_model="TAKER",
+        source_lineage=[{"source": "ext_src.quotes", "rows": 10}])
+    assert base != cache_identity(
+        spec=IntradayLaneSpec(horizons_seconds=(5, 30)),
+        event_source=EXTERNAL_EVENT_SOURCE, execution_model="TAKER",
+        source_lineage=[{"source": "ext_src.quotes", "rows": 11}])
+
+
+def test_discovery_parquet_cache_round_trip(tmp_path) -> None:
+    pytest.importorskip("pyarrow")
+    spec = IntradayLaneSpec(
+        sample_interval_seconds=5, feature_lookback_seconds=10,
+        horizons_seconds=(5,), order_latency_ms=0, max_quote_age_seconds=6)
+    samples = build_samples(
+        [quote(0, 99, 101, 10, 10), quote(4, 100, 102, 20, 10),
+         quote(10, 101, 103, 10, 10)],
+        [trade(2, 1, 20)], spec,
+        start=BASE + timedelta(seconds=5),
+        end=BASE + timedelta(seconds=6))
+    cache = SampleCache("a" * 64, root=tmp_path)
+    assert cache.load("2026-08-14", "005930") is None
+    assert cache.store("2026-08-14", "005930", samples)
+    assert cache.load("2026-08-14", "005930") == samples
+    assert cache.store("2026-08-14", "000020", [])
+    assert cache.load("2026-08-14", "000020") == []
 
 
 def test_late_event_never_enters_feature_window() -> None:

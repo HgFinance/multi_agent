@@ -40,6 +40,7 @@ CRITICAL_FILES = (
     "departments/04-quant-backtest/pipeline/intraday_candidate.py",
     "departments/04-quant-backtest/pipeline/intraday_experiment_runner.py",
     "departments/04-quant-backtest/pipeline/intraday_microstructure.py",
+    "departments/04-quant-backtest/pipeline/intraday_sample_cache.py",
     "departments/04-quant-backtest/pipeline/job_queue.py",
     "departments/04-quant-backtest/pipeline/strategy_lifecycle.py",
     "departments/04-quant-backtest/pipeline/trial_family.py",

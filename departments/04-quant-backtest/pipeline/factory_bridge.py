@@ -1667,11 +1667,11 @@ def _check_unrunnable_falsification_is_disclosed():
     # 패턴에도 안 걸리는 미분류다 - 미분류도 "못 돌린다" 로 세는 것이 맞다.
     g = gate0(_prop(falsification_tests=[
         "거래비용 차감 후 초과수익이 소멸하면 기각",   # 실행 가능(cost_stress)
-        "베타 중립화 후 효과 소멸 여부",               # 실행 불가
+        "하락장 초과수익 < 0이면 기각",                 # 실행 불가(미분류)
     ]))
     assert g.ok, "고지가 접수를 막았다 - 경고여야 한다"
     joined = " ".join(g.warnings)
-    assert "못 돌린다" in joined and "베타" in joined, g.warnings
+    assert "못 돌린다" in joined and "하락장 초과수익" in joined, g.warnings
     # 전부 실행 가능하면 이 경고는 없어야 한다(늑대 없는 경보 금지)
     g2 = gate0(_prop(falsification_tests=[
         "거래비용 차감 후 초과수익이 소멸하면 기각",
