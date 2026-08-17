@@ -32,11 +32,13 @@ from factory_bridge import (_SQL_FAMILY_OR_EXACT_TRIALS, _normalized_formula,
                             count_family_trials, expected_edge_for, gate0)
 from factory_bridge import lessons_from
 from intraday_experiment_runner import (StaleIntradayCohortError,
+                                        FAST_SCREEN_VERSION,
                                         _annotate_population, _input_hash,
+                                        _fast_screen_gate, _stratified,
                                         _load_completed_report, config_from_edge,
                                         record_data_feasibility, select_slice)
 from intraday_microstructure import (HorizonLabel, IntradayLaneSpec,
-                                      IntradaySample)
+                                      IntradaySample, EXTERNAL_EVENT_SOURCE)
 from trial_family import family_id, hypothesis_view
 from strategy_lifecycle import evaluate_promotion
 
@@ -302,6 +304,10 @@ def test_gate0_routes_intraday_contract_without_daily_binding() -> None:
     assert config["fee_bps_per_side"] == 11.5
     assert config["position_mode"] == "LONG_ONLY"
     assert config["universe_mode"] == "ALL_CAUSALLY_COLLECTED"
+    assert config["data_source"] == "AUTO"
+    assert config["fast_screen_enabled"] is True
+    assert config["fast_screen_sessions"] == 6
+    assert config["fast_screen_instruments"] == 16
     assert config["instrument_shard_size"] == 32
     assert spec.purge_gap == timedelta(milliseconds=5250)
 
@@ -841,6 +847,81 @@ def test_short_live_history_runs_one_calibration_and_two_oos_sessions() -> None:
     assert len(universe_params) == 6
     assert universe_params[2] == cutoff
     assert universe_params[5] == cutoff
+
+
+def test_external_61_session_ledger_selects_one_calibration_and_60_oos() -> None:
+    days = [date(2026, 5, 18) + timedelta(days=index)
+            for index in range(61)]
+
+    class Cursor:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+
+        def execute(self, sql, params):
+            self.conn.executed.append((sql, params))
+
+        def fetchall(self):
+            if len(self.conn.executed) == 1:
+                return [(day,) for day in reversed(days)]
+            return [("005930", 100_000), ("000660", 90_000)]
+
+    class Conn:
+        def __init__(self): self.executed = []
+        def cursor(self): return Cursor(self)
+
+    conn = Conn()
+    selected = select_slice(
+        conn, {"evaluation_days": 60, "data_source": EXTERNAL_EVENT_SOURCE},
+        cutoff=datetime(2026, 8, 17, tzinfo=timezone.utc))
+
+    assert selected["status"] == "PASS"
+    assert selected["event_source"] == EXTERNAL_EVENT_SOURCE
+    assert selected["arrival_clock_pit"] is False
+    assert selected["historical_replay_only"] is True
+    assert selected["calibration_session_count"] == 1
+    assert selected["evaluation_session_count"] == 60
+    assert selected["instruments"] == ["005930", "000660"]
+    assert "market.microstructure_features" in conn.executed[0][0]
+    assert "limit" not in conn.executed[1][0].lower()
+
+
+def test_fast_discovery_screen_is_stratified_and_never_substitutes_sidecar() -> None:
+    assert _stratified(list(range(10)), 4) == [0, 3, 6, 9]
+    config = {
+        "fast_screen_min_opportunities": 100,
+        "fast_screen_min_net_bps": 0.0,
+    }
+    negative = {
+        "summary": {
+            "opportunities": 1_000,
+            "mean_net_bps_per_opportunity": -1.0,
+            "session_mean_net_bps": -2.0,
+        },
+        "screening_population": [{
+            "ast_fingerprint": "linked-positive",
+            "summary": {
+                "opportunities": 1_000,
+                "mean_net_bps_per_opportunity": 1.0,
+                "session_mean_net_bps": 2.0,
+            },
+        }],
+    }
+    gate = _fast_screen_gate(negative, config)
+    assert gate["version"] == FAST_SCREEN_VERSION
+    assert gate["primary_pass"] is False
+    assert gate["survivors"] == ["linked-positive"]
+    assert gate["linked_survivor_count"] == 1
+    assert gate["promotion_authority"] is False
+
+    positive = {**negative, "summary": {
+        "opportunities": 1_000,
+        "mean_net_bps_per_opportunity": 0.01,
+        "session_mean_net_bps": 0.02,
+    }}
+    assert _fast_screen_gate(positive, config)["primary_pass"] is True
 
 
 def test_streaming_shards_equal_single_pass_and_cover_requested_universe() -> None:

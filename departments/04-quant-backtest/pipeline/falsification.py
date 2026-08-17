@@ -66,16 +66,19 @@ _PATTERNS = (
     # 창별 최악 낙폭·창간 Sharpe 산포는 `fragility_summary` 가 이미 재는 값이다
     ("window_mdd", re.compile(r"창.{0,10}(MDD|낙폭)")),
     ("window_sharpe_std", re.compile(r"창간?\s*Sharpe.{0,10}(표준편차|산포|std)")),
-)
-
-# 기계가 못 하는 것 - **있다고 표시하되 판정하지 않는다**
-_UNRUNNABLE = (
+    # These checks are executable when the deterministic runner supplies the
+    # explicit result key. Missing keys remain NOT_RUN (never zero/pass).
     ("beta_neutral", re.compile(r"(베타|beta).{0,20}(통제|중립)")),
     ("liquidity_strat", re.compile(r"(유동성|저유동성|Amihud|분위).{0,20}"
                                    r"(층화|통제|분위|제외)")),
     ("placebo", re.compile(r"(placebo|위약|셔플|무작위|뒤집|반전).{0,20}"
                            r"(형성일|검정|신호|시점|식별자)?")),
     ("monotonic", re.compile(r"(분위수|quantile).{0,20}(단조)")),
+)
+
+# Legacy fallback labels are retained for unusual prose, but the normal
+# criteria above are now runnable whenever their measured result key exists.
+_UNRUNNABLE = (
 )
 
 
@@ -114,6 +117,37 @@ def _pct(text: str, default: float) -> float:
     return float(m.group(1)) if m else default
 
 
+def _criteria_texts(criteria) -> list[str]:
+    """저장된 반증 기준을 실행 가능한 문장 목록으로 정규화한다.
+
+    원장에는 기준이 보통 문자열 목록으로 오지만, 과거 실행면은
+    ``["note", {"fragility_rules": [...]}]`` 처럼 dict를 목록 원소로
+    저장했다. dict의 repr을 정규식에 넘기면 실제 문장을 놓치므로, 의미 있는
+    ``fragility_rules`` 값을 먼저 펼치고 그 밖의 dict도 값만 재귀적으로
+    펼친다. 값이 없으면 기준을 만들어 내지 않고 빈 목록으로 둔다.
+    """
+    if criteria is None:
+        return []
+    if isinstance(criteria, str):
+        # Legacy list placeholders are storage labels, not tests.
+        if criteria.strip().lower() in {"note", "fragility_rules"}:
+            return []
+        return [criteria]
+    if isinstance(criteria, dict):
+        if "fragility_rules" in criteria:
+            return _criteria_texts(criteria["fragility_rules"])
+        out: list[str] = []
+        for value in criteria.values():
+            out.extend(_criteria_texts(value))
+        return out
+    if isinstance(criteria, (list, tuple)):
+        out: list[str] = []
+        for item in criteria:
+            out.extend(_criteria_texts(item))
+        return out
+    return [str(criteria)]
+
+
 def run(tests, metrics: dict, *, window_metrics=None,
         cost_stress_metrics=None, window_mdds=None,
         window_sharpes=None) -> list[TestResult]:
@@ -124,7 +158,7 @@ def run(tests, metrics: dict, *, window_metrics=None,
     """
     out: list[TestResult] = []
     wins = list(window_metrics or [])
-    for t in tests or ():
+    for t in _criteria_texts(tests):
         kind, runnable = classify(t)
         if not runnable:
             out.append(TestResult(text=str(t), kind=kind, ran=False,
@@ -189,6 +223,25 @@ def run(tests, metrics: dict, *, window_metrics=None,
                 survived=(float(ex) > 0) if ex is not None else None,
                 detail=(f"초과수익 {float(ex):+.2f}%p" if ex is not None
                         else "초과수익이 없다")))
+        elif kind in {"beta_neutral", "liquidity_strat", "placebo"}:
+            keys = {
+                "beta_neutral": ("beta_neutral_excess_return_pct", "alpha_ann_pct"),
+                "liquidity_strat": ("liquidity_strat_excess_return_pct",),
+                "placebo": ("placebo_excess_return_pct",),
+            }[kind]
+            ex = next((metrics.get(k) for k in keys if metrics.get(k) is not None), None)
+            out.append(TestResult(
+                text=str(t), kind=kind, ran=ex is not None,
+                survived=(float(ex) > 0) if ex is not None else None,
+                detail=(f"{kind} 초과수익 {float(ex):+.2f}%p" if ex is not None
+                        else f"{kind} 측정 결과가 없다")))
+        elif kind == "monotonic":
+            mono = metrics.get("quantile_monotonic")
+            out.append(TestResult(
+                text=str(t), kind=kind, ran=mono is not None,
+                survived=bool(mono) if mono is not None else None,
+                detail=(f"분위수 단조성={bool(mono)}" if mono is not None
+                        else "분위수 단조성 측정 결과가 없다")))
     return out
 
 
@@ -243,13 +296,21 @@ def _check_real_sentences_are_classified():
     assert kinds[_REAL[1]] == ("window_count", True), kinds[_REAL[1]]
     assert kinds[_REAL[2]] == ("cost_stress", True), kinds[_REAL[2]]
     assert kinds[_REAL[3]] == ("cost_stress", True), kinds[_REAL[3]]
-    assert kinds[_REAL[4]][0] == "beta_neutral" and not kinds[_REAL[4]][1]
-    assert kinds[_REAL[5]][0] == "liquidity_strat" and not kinds[_REAL[5]][1]
+    assert kinds[_REAL[4]] == ("beta_neutral", True)
+    assert kinds[_REAL[5]] == ("liquidity_strat", True)
     assert kinds[_REAL[6]] == ("window_signs", True), kinds[_REAL[6]]
-    assert kinds[_REAL[7]][0] == "placebo" and not kinds[_REAL[7]][1]
-    assert kinds[_REAL[8]][0] == "monotonic" and not kinds[_REAL[8]][1]
+    assert kinds[_REAL[7]] == ("placebo", True)
+    assert kinds[_REAL[8]] == ("monotonic", True)
     runnable = sum(1 for k, r in kinds.values() if r)
     print(f"  실제 문장 분류           OK ({runnable}/{len(_REAL)} 실행 가능)")
+
+
+def _check_nested_criteria_are_executed():
+    """과거 dict-in-list 저장도 기준을 잃지 않고 실행한다."""
+    tests = ["note", {"fragility_rules": ["거래비용 차감 후 초과수익 소멸"]}]
+    rs = run(tests, {}, cost_stress_metrics={"excess_return_pct": -1.0})
+    assert len(rs) == 1 and rs[0].ran and rs[0].survived is False, rs
+    print("  dict 기준 정규화          OK")
 
 
 def _check_unrun_is_not_pass():
@@ -278,6 +339,22 @@ def _check_cost_stress_can_refute():
     assert bad[0].ran and bad[0].survived is False, bad[0]
     assert "반증된 것" in note(bad), note(bad)
     print("  비용 스트레스가 반증한다  OK")
+
+
+def _check_explicit_falsifications_use_measured_keys():
+    """Measured keys execute; absent keys stay NOT_RUN (2026-08-16)."""
+    tests = _REAL[4:5] + _REAL[5:6] + _REAL[7:9]
+    missing = run(tests, {})
+    assert all(not r.ran and r.survived is None for r in missing), missing
+    measured = run(tests, {
+        "beta_neutral_excess_return_pct": -1.0,
+        "liquidity_strat_excess_return_pct": 2.0,
+        "placebo_excess_return_pct": -0.5,
+        "quantile_monotonic": True,
+    })
+    assert all(r.ran for r in measured), measured
+    assert [r.survived for r in measured] == [False, True, False, True], measured
+    print("  명시적 반증 키 실행       OK")
 
 
 def _check_fragility_rules_are_executable():
@@ -341,7 +418,9 @@ def _selfcheck() -> int:
     print(f"{FALSIFICATION_VERSION} 자체 점검 (DB 없음)")
     _check_real_sentences_are_classified()
     _check_unrun_is_not_pass()
+    _check_nested_criteria_are_executed()
     _check_cost_stress_can_refute()
+    _check_explicit_falsifications_use_measured_keys()
     _check_window_signs()
     _check_fragility_rules_are_executable()
     _check_cost_multiplier_is_one_way()

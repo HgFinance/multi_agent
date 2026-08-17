@@ -29,6 +29,9 @@ from typing import Callable, Iterable, Sequence
 
 UTC = timezone.utc
 LANE_VERSION = "krx-intraday-causal-v1"
+LOCAL_EVENT_SOURCE = "LOCAL_RECEIPT_CLOCK"
+EXTERNAL_EVENT_SOURCE = "EXTERNAL_FDW_EVENT_TIME"
+EVENT_SOURCES = frozenset({LOCAL_EVENT_SOURCE, EXTERNAL_EVENT_SOURCE})
 NUMERIC_FEATURES = frozenset({
     "quote_age_ms", "spread_bps", "queue_imbalance_l1",
     "queue_imbalance_l10", "microprice_offset_bps", "trade_flow_imbalance",
@@ -849,6 +852,99 @@ select instrument_id::text,
  order by instrument_id::text
 """
 
+# Trading_bot kept the complete 61-session L10/tape history in its own
+# TimescaleDB.  ``ext_src`` is a read-only postgres_fdw mapping already owned by
+# the market database.  The legacy schema has only the exchange-second clock
+# ``ts``; it does not preserve a separate receipt clock.  We therefore set the
+# in-memory availability clock to ``ts`` and mark every such quote as
+# ``quotes_without_received_at`` in the quality report.  This is an explicit
+# event-time historical replay, never a claim of arrival-clock PIT evidence.
+_EXTERNAL_QUOTE_SQL = """
+select ts, ts, ts, btrim(symbol),
+       array[coalesce(bid1,0),coalesce(bid2,0),coalesce(bid3,0),
+             coalesce(bid4,0),coalesce(bid5,0),coalesce(bid6,0),
+             coalesce(bid7,0),coalesce(bid8,0),coalesce(bid9,0),
+             coalesce(bid10,0)],
+       array[coalesce(bid_vol1,0),coalesce(bid_vol2,0),
+             coalesce(bid_vol3,0),coalesce(bid_vol4,0),
+             coalesce(bid_vol5,0),coalesce(bid_vol6,0),
+             coalesce(bid_vol7,0),coalesce(bid_vol8,0),
+             coalesce(bid_vol9,0),coalesce(bid_vol10,0)],
+       array[coalesce(ask1,0),coalesce(ask2,0),coalesce(ask3,0),
+             coalesce(ask4,0),coalesce(ask5,0),coalesce(ask6,0),
+             coalesce(ask7,0),coalesce(ask8,0),coalesce(ask9,0),
+             coalesce(ask10,0)],
+       array[coalesce(ask_vol1,0),coalesce(ask_vol2,0),
+             coalesce(ask_vol3,0),coalesce(ask_vol4,0),
+             coalesce(ask_vol5,0),coalesce(ask_vol6,0),
+             coalesce(ask_vol7,0),coalesce(ask_vol8,0),
+             coalesce(ask_vol9,0),coalesce(ask_vol10,0)],
+       concat('extq:',btrim(symbol),':',extract(epoch from ts)::bigint,':',
+              bid1,':',ask1,':',bid_vol1,':',ask_vol1)
+  from ext_src.quotes
+ where symbol = %s
+   and ts >= %s and ts < %s and ts <= %s
+   and bid1 > 0 and ask1 > 0 and ask1 >= bid1
+ order by ts, 9
+"""
+
+_EXTERNAL_TRADE_SQL = """
+select ts, ts, ts, btrim(symbol), price, volume,
+       case when ofi_contrib > 0 then 1
+            when ofi_contrib < 0 then -1 else 0 end,
+       concat('extt:',btrim(symbol),':',extract(epoch from ts)::bigint,':',
+              price,':',volume,':',ofi_contrib)
+  from ext_src.ticks
+ where symbol = %s
+   and ts >= %s and ts < %s and ts <= %s
+   and price > 0 and volume > 0
+ order by ts, 8
+"""
+
+_EXTERNAL_QUOTE_BATCH_SQL = _EXTERNAL_QUOTE_SQL.replace(
+    "symbol = %s", "symbol = any(%s)").replace(
+        "order by ts, 9", "order by btrim(symbol), ts, 9")
+_EXTERNAL_TRADE_BATCH_SQL = _EXTERNAL_TRADE_SQL.replace(
+    "symbol = %s", "symbol = any(%s)").replace(
+        "order by ts, 8", "order by btrim(symbol), ts, 8")
+
+_EXTERNAL_SOURCE_QUALITY_SQL = """
+select count(*) as total_quotes,
+       count(*) as quotes_without_received_at,
+       count(*) filter (where bid1 <= 0 or ask1 <= 0) as nonpositive_quotes,
+       count(*) filter (where ask1 < bid1) as crossed_quotes,
+       count(*) filter (where bid1 > 0 and ask1 > 0 and ask1 >= bid1)
+         as eligible_quotes
+  from ext_src.quotes
+ where symbol = %s
+   and ts >= %s and ts < %s and ts <= %s
+"""
+
+_EXTERNAL_SOURCE_QUALITY_BATCH_SQL = """
+select btrim(symbol), count(*) as total_quotes,
+       count(*) as quotes_without_received_at,
+       count(*) filter (where bid1 <= 0 or ask1 <= 0) as nonpositive_quotes,
+       count(*) filter (where ask1 < bid1) as crossed_quotes,
+       count(*) filter (where bid1 > 0 and ask1 > 0 and ask1 >= bid1)
+         as eligible_quotes
+  from ext_src.quotes
+ where symbol = any(%s)
+   and ts >= %s and ts < %s and ts <= %s
+ group by btrim(symbol)
+ order by btrim(symbol)
+"""
+
+
+def _event_source(value: str | None) -> str:
+    source = str(value or LOCAL_EVENT_SOURCE).upper()
+    if source not in EVENT_SOURCES:
+        raise ValueError(f"unsupported intraday event source: {value!r}")
+    return source
+
+
+def _source_sql(source: str, local: str, external: str) -> str:
+    return external if _event_source(source) == EXTERNAL_EVENT_SOURCE else local
+
 
 def _quote_event(row) -> QuoteEvent:
     return QuoteEvent(
@@ -899,9 +995,10 @@ def _fetch_chunks(cursor, size: int = 10_000):
 
 
 def load_instrument_events(conn, *, instrument_id: str, start: datetime,
-                           end: datetime, as_known_at: datetime
+                           end: datetime, as_known_at: datetime,
+                           source: str = LOCAL_EVENT_SOURCE,
                            ) -> tuple[list[QuoteEvent], list[TradeEvent]]:
-    """Read one bounded instrument slice with an explicit knowledge cutoff."""
+    """Read one bounded instrument slice from an explicit source contract."""
     start = _aware(start, "start")
     end = _aware(end, "end")
     cutoff = _aware(as_known_at, "as_known_at")
@@ -909,15 +1006,18 @@ def load_instrument_events(conn, *, instrument_id: str, start: datetime,
         raise ValueError("as_known_at must cover the requested event-time interval")
     params = (instrument_id, start, end, cutoff)
     with conn.cursor() as cursor:
-        cursor.execute(_QUOTE_SQL, params)
+        cursor.execute(_source_sql(source, _QUOTE_SQL, _EXTERNAL_QUOTE_SQL),
+                       params)
         quotes = [_quote_event(row) for row in _fetch_chunks(cursor)]
-        cursor.execute(_TRADE_SQL, params)
+        cursor.execute(_source_sql(source, _TRADE_SQL, _EXTERNAL_TRADE_SQL),
+                       params)
         trades = [_trade_event(row) for row in _fetch_chunks(cursor)]
     return quotes, trades
 
 
 def load_instrument_events_batch(conn, *, instrument_ids, start: datetime,
-                                 end: datetime, as_known_at: datetime
+                                 end: datetime, as_known_at: datetime,
+                                 source: str = LOCAL_EVENT_SOURCE,
                                  ) -> dict[str, tuple[list[QuoteEvent],
                                                        list[TradeEvent]]]:
     """Read a bounded shard in two SQL scans and group rows by instrument."""
@@ -934,23 +1034,28 @@ def load_instrument_events_batch(conn, *, instrument_ids, start: datetime,
     grouped = {instrument_id: ([], []) for instrument_id in ids}
     params = (list(ids), start, end, cutoff)
     with conn.cursor() as cursor:
-        cursor.execute(_QUOTE_BATCH_SQL, params)
+        cursor.execute(_source_sql(
+            source, _QUOTE_BATCH_SQL, _EXTERNAL_QUOTE_BATCH_SQL), params)
         for row in _fetch_chunks(cursor):
             grouped[row[3]][0].append(_quote_event(row))
-        cursor.execute(_TRADE_BATCH_SQL, params)
+        cursor.execute(_source_sql(
+            source, _TRADE_BATCH_SQL, _EXTERNAL_TRADE_BATCH_SQL), params)
         for row in _fetch_chunks(cursor):
             grouped[row[3]][1].append(_trade_event(row))
     return grouped
 
 
 def source_quality(conn, *, instrument_id: str, start: datetime, end: datetime,
-                   as_known_at: datetime) -> dict:
+                   as_known_at: datetime,
+                   source: str = LOCAL_EVENT_SOURCE) -> dict:
     """Count source rows rejected before object construction."""
     start = _aware(start, "start")
     end = _aware(end, "end")
     cutoff = _aware(as_known_at, "as_known_at")
     with conn.cursor() as cursor:
-        cursor.execute(_SOURCE_QUALITY_SQL,
+        cursor.execute(_source_sql(
+                       source, _SOURCE_QUALITY_SQL,
+                       _EXTERNAL_SOURCE_QUALITY_SQL),
                        (instrument_id, start, end, cutoff))
         total, missing_clock, nonpositive, crossed, eligible = cursor.fetchone()
     # Categories can overlap.  Their sum is a diagnostic upper bound, while the
@@ -959,7 +1064,8 @@ def source_quality(conn, *, instrument_id: str, start: datetime, end: datetime,
 
 
 def source_quality_batch(conn, *, instrument_ids, start: datetime, end: datetime,
-                         as_known_at: datetime) -> dict[str, dict]:
+                         as_known_at: datetime,
+                         source: str = LOCAL_EVENT_SOURCE) -> dict[str, dict]:
     """Return source diagnostics for a shard with one grouped query."""
     ids = tuple(dict.fromkeys(
         str(value) for value in instrument_ids
@@ -970,7 +1076,9 @@ def source_quality_batch(conn, *, instrument_ids, start: datetime, end: datetime
     end = _aware(end, "end")
     cutoff = _aware(as_known_at, "as_known_at")
     with conn.cursor() as cursor:
-        cursor.execute(_SOURCE_QUALITY_BATCH_SQL,
+        cursor.execute(_source_sql(
+                       source, _SOURCE_QUALITY_BATCH_SQL,
+                       _EXTERNAL_SOURCE_QUALITY_BATCH_SQL),
                        (list(ids), start, end, cutoff))
         rows = cursor.fetchall()
     out = {instrument_id: _quality_record(0, 0, 0, 0, 0)
@@ -980,13 +1088,28 @@ def source_quality_batch(conn, *, instrument_ids, start: datetime, end: datetime
     return out
 
 
-def manifest(spec: IntradayLaneSpec) -> dict:
+def manifest(spec: IntradayLaneSpec,
+             *, source: str = LOCAL_EVENT_SOURCE) -> dict:
     """Serializable contract persisted with every intraday experiment."""
+    event_source = _event_source(source)
+    external = event_source == EXTERNAL_EVENT_SOURCE
     payload = asdict(spec)
     payload.update({
         "lane_version": LANE_VERSION,
-        "clock": "AVAILABLE_AT=max(received_at,observed_at)",
-        "feature_cutoff": "event_time<=decision_time and available_at<=decision_time",
+        "event_source": event_source,
+        "clock": ("EVENT_TIME_ONLY(ts); separate receipt clock unavailable"
+                  if external else
+                  "AVAILABLE_AT=max(received_at,observed_at)"),
+        "arrival_clock_pit": not external,
+        "historical_replay_only": external,
+        "evidence_limit": (
+            "external source cannot audit network arrival latency or "
+            "out-of-order receipt; forward receipt-clock confirmation required"
+            if external else None),
+        "feature_cutoff": (
+            "event_time<=decision_time (event-time historical replay)"
+            if external else
+            "event_time<=decision_time and available_at<=decision_time"),
         "entry_rule": "latest visible quote at decision_time+order_latency",
         "label_rule": "latest visible quote at entry_time+horizon",
         "execution_model": "TAKER_BOTH_SIDES",

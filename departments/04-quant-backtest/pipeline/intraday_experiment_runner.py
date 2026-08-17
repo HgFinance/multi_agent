@@ -20,13 +20,18 @@ from intraday_candidate import (CandidateAccumulator,
                                 CandidatePopulationAccumulator,
                                 COEFFICIENT_POLICIES,
                                 EVALUATOR_VERSION)
-from intraday_microstructure import (IntradayLaneSpec, build_samples,
+from intraday_microstructure import (EXTERNAL_EVENT_SOURCE,
+                                      LOCAL_EVENT_SOURCE, IntradayLaneSpec,
+                                      build_samples,
                                       load_instrument_events_batch, manifest,
                                       source_quality_batch)
 from intraday_ablation import INTRADAY_SCREENING_COHORT_VERSION
+from intraday_sample_cache import (SampleCache, identity as cache_identity,
+                                   prune as prune_sample_cache)
 
 
-RUNNER_VERSION = "intraday-experiment-runner-v8"
+RUNNER_VERSION = "intraday-experiment-runner-v9"
+FAST_SCREEN_VERSION = "intraday-fast-discovery-screen-v1"
 COST_MODEL_VERSION = "krx-intraday-execution-v1"
 # 2026 listed equities incur 20bp on the sale (KOSPI 5bp STT + 15bp rural,
 # KOSDAQ 20bp STT).  A representative online commission is 1.5bp each side.
@@ -103,6 +108,71 @@ select 'market_ticks' as source, count(*)::bigint,
 order by source
 """
 
+_EXTERNAL_SOURCE_READY_SQL = """
+select to_regclass('ext_src.quotes') is not null
+   and to_regclass('ext_src.ticks') is not null
+   and to_regclass('market.microstructure_features') is not null
+   and to_regclass('market.symbol_map') is not null
+"""
+
+# The daily feature ledger is tiny relative to the 92GB raw FDW source.  It is
+# used only to discover immutable sessions and the causally collected universe;
+# candidate features and labels are still rebuilt from ext_src L10/tape rows.
+_EXTERNAL_SESSION_DATES_SQL = """
+select distinct (event_time at time zone 'Asia/Seoul')::date as session_date
+  from market.microstructure_features
+ where feature_set_version = 'ms-daily-v5'
+   and values->>'origin' = 'external'
+   and event_time >= %s
+   and event_time < (
+         date_trunc('day', %s at time zone 'Asia/Seoul')
+         at time zone 'Asia/Seoul'
+       )
+   and coalesce((values->>'n_quotes')::bigint, 0) > 0
+   and coalesce((values->>'n_ticks')::bigint, 0) > 0
+ order by session_date desc
+ limit %s
+"""
+
+_EXTERNAL_UNIVERSE_SQL = """
+select sm.symbol,
+       sum(coalesce((mf.values->>'n_quotes')::bigint, 0)) as quote_events
+  from market.microstructure_features mf
+  join market.symbol_map sm using (instrument_id)
+ where mf.feature_set_version = 'ms-daily-v5'
+   and mf.values->>'origin' = 'external'
+   and (mf.event_time at time zone 'Asia/Seoul')::date = any(%s)
+ group by sm.symbol
+having sum(coalesce((mf.values->>'n_quotes')::bigint, 0)) > 0
+   and sum(coalesce((mf.values->>'n_ticks')::bigint, 0)) > 0
+ order by sm.symbol
+"""
+
+_EXTERNAL_LINEAGE_SQL = """
+select 'ext_src.quotes' as source,
+       sum(coalesce((mf.values->>'n_quotes')::bigint, 0))::bigint,
+       min(mf.event_time), max(mf.event_time), max(mf.input_watermark),
+       null::timestamptz
+  from market.microstructure_features mf
+  join market.symbol_map sm using (instrument_id)
+ where mf.feature_set_version = 'ms-daily-v5'
+   and mf.values->>'origin' = 'external'
+   and sm.symbol = any(%s)
+   and (mf.event_time at time zone 'Asia/Seoul')::date = any(%s)
+union all
+select 'ext_src.ticks' as source,
+       sum(coalesce((mf.values->>'n_ticks')::bigint, 0))::bigint,
+       min(mf.event_time), max(mf.event_time), max(mf.input_watermark),
+       null::timestamptz
+  from market.microstructure_features mf
+  join market.symbol_map sm using (instrument_id)
+ where mf.feature_set_version = 'ms-daily-v5'
+   and mf.values->>'origin' = 'external'
+   and sm.symbol = any(%s)
+   and (mf.event_time at time zone 'Asia/Seoul')::date = any(%s)
+order by source
+"""
+
 
 def _bounded_int(edge: dict, key: str, default: int, lo: int, hi: int) -> int:
     try:
@@ -125,12 +195,23 @@ def _bounded_float(edge: dict, key: str, default: float,
     return value
 
 
+def _strict_bool(edge: dict, key: str, default: bool) -> bool:
+    value = edge.get(key, default)
+    if not isinstance(value, bool):
+        raise ValueError(f"{key} must be boolean")
+    return value
+
+
 def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
     """Bind only controlled knobs; never silently inherit daily defaults."""
     if str(edge.get("research_lane") or "").upper() != "INTRADAY_EVENT":
         raise ValueError("intraday runner requires research_lane=INTRADAY_EVENT")
     if str(edge.get("universe_key") or "krx_all").lower() != "krx_all":
         raise ValueError("intraday runner currently requires universe_key=krx_all")
+    data_source = str(edge.get("data_source") or "AUTO").upper()
+    if data_source not in {"AUTO", LOCAL_EVENT_SOURCE,
+                           EXTERNAL_EVENT_SOURCE}:
+        raise ValueError(f"unsupported intraday data_source={data_source!r}")
     expression = parse_expr(edge.get("intraday_signal_expr"))
     semantic_plan = validate_semantic_plan(edge.get("semantic_plan") or {})
     output = str(semantic_plan.get("output") or "").upper()
@@ -245,6 +326,7 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
         if "PASSIVE_FIFO_LOWER_BOUND" in executions else "TAKER")
     config = {
         "research_lane": "INTRADAY_EVENT",
+        "data_source": data_source,
         "semantic_plan": semantic_plan,
         "semantic_fingerprint": edge.get("semantic_fingerprint"),
         "intraday_signal_expr": expression,
@@ -268,6 +350,19 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
         "minimum_predicted_edge_bps": _bounded_float(
             edge, "minimum_predicted_edge_bps", 0.0, 0.0, 10_000.0),
         "evaluation_days": _bounded_int(edge, "evaluation_days", 60, 10, 250),
+        # Raw external L10/tape validation spans roughly 92GB.  Most generated
+        # equations must first clear a deterministic, non-promoting discovery
+        # panel; only a positive primary proceeds to all collected instruments.
+        "fast_screen_enabled": _strict_bool(
+            edge, "fast_screen_enabled", True),
+        "fast_screen_sessions": _bounded_int(
+            edge, "fast_screen_sessions", 6, 3, 20),
+        "fast_screen_instruments": _bounded_int(
+            edge, "fast_screen_instruments", 16, 8, 128),
+        "fast_screen_min_opportunities": _bounded_int(
+            edge, "fast_screen_min_opportunities", 100, 1, 1_000_000),
+        "fast_screen_min_net_bps": _bounded_float(
+            edge, "fast_screen_min_net_bps", 0.0, -100.0, 1_000.0),
         # A shard is only a bounded execution unit. The scientific universe is
         # every causally observed calibration instrument, never a top-N sample.
         "universe_mode": "ALL_CAUSALLY_COLLECTED",
@@ -301,6 +396,59 @@ def _session_day(value) -> date:
     return value if isinstance(value, date) else date.fromisoformat(str(value))
 
 
+def _stratified(values, count: int) -> list:
+    """Deterministically cover the beginning, middle and end of a population."""
+    rows = list(values)
+    if count >= len(rows):
+        return rows
+    if count <= 1:
+        return [rows[len(rows) // 2]] if rows else []
+    indices = [round(index * (len(rows) - 1) / (count - 1))
+               for index in range(count)]
+    return [rows[index] for index in dict.fromkeys(indices)]
+
+
+def _fast_screen_gate(report: dict, config: dict) -> dict:
+    """Decide whether the preregistered primary merits the 92GB replay.
+
+    This is a resource gate, never alpha evidence. Linked candidates that pass
+    remain screening-only evolutionary nominations and cannot cause a different
+    primary equation to be silently substituted into the confirmatory run.
+    """
+    candidates = [("PRIMARY", report)] + [
+        (row.get("ast_fingerprint") or "", row)
+        for row in report.get("screening_population") or []]
+
+    def qualifies(row: dict) -> bool:
+        summary = row.get("summary") or {}
+        net = summary.get("mean_net_bps_per_opportunity")
+        session_net = summary.get("session_mean_net_bps")
+        return (
+            int(summary.get("opportunities") or 0) >=
+            config["fast_screen_min_opportunities"]
+            and isinstance(net, (int, float)) and not isinstance(net, bool)
+            and float(net) > config["fast_screen_min_net_bps"]
+            and isinstance(session_net, (int, float))
+            and not isinstance(session_net, bool) and float(session_net) > 0
+        )
+
+    survivors = [key for key, row in candidates if qualifies(row)]
+    return {
+        "version": FAST_SCREEN_VERSION,
+        "primary_pass": "PRIMARY" in survivors,
+        "survivors": survivors,
+        "linked_survivor_count": sum(key != "PRIMARY" for key in survivors),
+        "criteria": {
+            "minimum_opportunities": config["fast_screen_min_opportunities"],
+            "minimum_mean_net_bps_per_opportunity_exclusive": config[
+                "fast_screen_min_net_bps"],
+            "session_mean_net_bps_must_be_positive": True,
+        },
+        "boundary": "DISCOVERY_RESOURCE_GATE_ONLY",
+        "promotion_authority": False,
+    }
+
+
 def select_slice(market_conn, config: dict, *, cutoff: datetime) -> dict:
     """Choose a causal calibration universe strictly before the OOS slice.
 
@@ -318,15 +466,42 @@ def select_slice(market_conn, config: dict, *, cutoff: datetime) -> dict:
     # statistical sufficiency.
     oldest_possible = cutoff - timedelta(
         days=max(30, config["evaluation_days"] * 3))
+    requested_source = str(
+        config.get("data_source") or LOCAL_EVENT_SOURCE).upper()
+    event_source = requested_source
+    if requested_source == "AUTO":
+        with market_conn.cursor() as cur:
+            cur.execute(_EXTERNAL_SOURCE_READY_SQL)
+            ready = bool(cur.fetchone()[0])
+        event_source = (EXTERNAL_EVENT_SOURCE if ready
+                        else LOCAL_EVENT_SOURCE)
+    if event_source not in {LOCAL_EVENT_SOURCE, EXTERNAL_EVENT_SOURCE}:
+        raise ValueError(f"unsupported intraday data_source={requested_source!r}")
+
     with market_conn.cursor() as cur:
-        cur.execute(_SESSION_DATES_SQL,
-                    (oldest_possible, cutoff, cutoff,
-                     config["evaluation_days"] + calibration_days))
+        if event_source == EXTERNAL_EVENT_SOURCE:
+            cur.execute(_EXTERNAL_SESSION_DATES_SQL,
+                        (oldest_possible, cutoff,
+                         config["evaluation_days"] + calibration_days))
+        else:
+            cur.execute(_SESSION_DATES_SQL,
+                        (oldest_possible, cutoff, cutoff,
+                         config["evaluation_days"] + calibration_days))
         days = sorted(row[0] for row in cur.fetchall())
     common = {
         "causal_sessions_available": len(days),
         "requested_evaluation_sessions": config["evaluation_days"],
-        "universe_mode": "ALL_CAUSALLY_COLLECTED",
+        "universe_mode": (
+            "ALL_COLLECTED_DYNAMIC_FIRST_OBSERVED"
+            if event_source == EXTERNAL_EVENT_SOURCE else
+            "ALL_CAUSALLY_COLLECTED"),
+        "event_source": event_source,
+        "arrival_clock_pit": event_source == LOCAL_EVENT_SOURCE,
+        "historical_replay_only": event_source == EXTERNAL_EVENT_SOURCE,
+        "membership_clock": (
+            "first raw quote+trade observation; no pre-observation backfill"
+            if event_source == EXTERNAL_EVENT_SOURCE else
+            "causally available calibration sessions"),
     }
     if len(days) < 2:
         return {"status": "INSUFFICIENT_SESSIONS", "sessions": [],
@@ -341,19 +516,31 @@ def select_slice(market_conn, config: dict, *, cutoff: datetime) -> dict:
     eval_days = days[-evaluation_count:]
     preceding = days[:-evaluation_count]
     calibration = preceding[-calibration_days:]
-    calibration_start, _ = _session_bounds(calibration[0])
-    _, calibration_end = _session_bounds(calibration[-1])
     with market_conn.cursor() as cur:
-        cur.execute(_LIQUID_UNIVERSE_SQL,
-                    (calibration_start, calibration_end + timedelta(hours=1),
-                     cutoff,
-                     calibration_start, calibration_end + timedelta(hours=1),
-                     cutoff))
+        if event_source == EXTERNAL_EVENT_SOURCE:
+            # Include later listings/collection starts without fabricating their
+            # earlier membership. Missing pre-first-observation days yield no
+            # events, while the fixed union makes coverage and sharding auditable.
+            cur.execute(_EXTERNAL_UNIVERSE_SQL,
+                        ([*calibration, *eval_days],))
+        else:
+            calibration_start, _ = _session_bounds(calibration[0])
+            _, calibration_end = _session_bounds(calibration[-1])
+            cur.execute(
+                _LIQUID_UNIVERSE_SQL,
+                (calibration_start, calibration_end + timedelta(hours=1),
+                 cutoff,
+                 calibration_start, calibration_end + timedelta(hours=1),
+                 cutoff))
         instruments = [row[0] for row in cur.fetchall()]
     readiness = ("FULL" if evaluation_count >= config["evaluation_days"]
                  else "SHORT_DIAGNOSTIC")
     return {"status": "PASS" if len(instruments) >= 2 else "INSUFFICIENT_INSTRUMENTS",
             "selection_rule": (
+                "union of every instrument with raw external quote and trade "
+                "counts in the frozen 61-session slice; each joins only from its "
+                "first observed session; event-time replay only"
+                if event_source == EXTERNAL_EVENT_SOURCE else
                 "all instruments with valid causally available quotes and trades "
                 "in up to five pre-evaluation sessions"),
             "calibration_sessions": [str(day) for day in calibration],
@@ -366,18 +553,26 @@ def select_slice(market_conn, config: dict, *, cutoff: datetime) -> dict:
 def _lineage(market_conn, selected: dict, cutoff: datetime) -> list[dict]:
     if not selected["sessions"] or not selected["instruments"]:
         return []
+    external = selected.get("event_source") == EXTERNAL_EVENT_SOURCE
     calibration = selected.get("calibration_sessions") or []
-    first = calibration[0] if calibration else selected["sessions"][0]
-    start, _ = _session_bounds(_session_day(first))
-    _, end = _session_bounds(selected["sessions"][-1])
-    params = (selected["instruments"], start, end + timedelta(hours=1), cutoff)
     with market_conn.cursor() as cur:
-        cur.execute(_LINEAGE_SQL, params + params)
+        if external:
+            sessions = [*calibration, *selected["sessions"]]
+            params = (selected["instruments"], sessions)
+            cur.execute(_EXTERNAL_LINEAGE_SQL, params + params)
+        else:
+            first = calibration[0] if calibration else selected["sessions"][0]
+            start, _ = _session_bounds(_session_day(first))
+            _, end = _session_bounds(selected["sessions"][-1])
+            params = (selected["instruments"], start,
+                      end + timedelta(hours=1), cutoff)
+            cur.execute(_LINEAGE_SQL, params + params)
         rows = cur.fetchall()
     return [{"source": row[0], "rows": int(row[1]),
              "min_event_time": row[2].isoformat() if row[2] else None,
              "max_event_time": row[3].isoformat() if row[3] else None,
-             "max_observed_at": row[4].isoformat() if row[4] else None,
+             ("max_source_watermark" if external else "max_observed_at"):
+                 row[4].isoformat() if row[4] else None,
              "max_available_at": row[5].isoformat() if row[5] else None}
             for row in rows]
 
@@ -1044,6 +1239,124 @@ def persist_final_gate(meta_conn, experiment_id: str, report: dict) -> None:
     meta_conn.commit()
 
 
+def _run_fast_screen(config: dict, spec: IntradayLaneSpec, selected: dict, *,
+                     market_conn, cutoff: datetime, event_source: str,
+                     trials: int, source_lineage) -> tuple[dict, dict]:
+    """Replay a small deterministic panel before an all-universe raw run."""
+    sessions = _stratified(
+        selected["sessions"], config["fast_screen_sessions"])
+    instruments = _stratified(
+        selected["instruments"], config["fast_screen_instruments"])
+    # A liquid symbol can contain roughly 600k event rows per session. Keep an
+    # external shard to one instrument so Python object materialization cannot
+    # multiply that footprint before build_samples releases the raw events.
+    shard_size = (1 if event_source == EXTERNAL_EVENT_SOURCE else
+                  min(config["instrument_shard_size"], 8))
+    shards = [instruments[index:index + shard_size]
+              for index in range(0, len(instruments), shard_size)]
+    cache = SampleCache(cache_identity(
+        spec=spec, event_source=event_source,
+        execution_model=config["population_execution_model"],
+        source_lineage=source_lineage))
+    cache_stats = {"hits": 0, "misses": 0, "writes": 0,
+                   "write_disabled": 0}
+    try:
+        cache_stats["prune"] = prune_sample_cache()
+    except OSError as exc:
+        cache_stats["prune"] = {
+            "status": "UNAVAILABLE", "error": type(exc).__name__}
+
+    def samples_for(day, shard) -> dict[str, list]:
+        session = _session_day(day)
+        start, end = _session_bounds(session)
+        if event_source != EXTERNAL_EVENT_SOURCE:
+            events = load_instrument_events_batch(
+                market_conn, instrument_ids=shard, start=start,
+                end=end + spec.purge_gap, as_known_at=cutoff,
+                source=event_source)
+            return {instrument: build_samples(
+                *events[instrument], spec, start=start, end=end,
+                execution_model=config["population_execution_model"])
+                for instrument in shard}
+
+        # External shards are deliberately one symbol wide. This also makes a
+        # cache file the exact bounded unit rebuilt after a miss or corruption.
+        instrument = shard[0]
+        cached = cache.load(session, instrument)
+        if cached is not None:
+            cache_stats["hits"] += 1
+            return {instrument: cached}
+        cache_stats["misses"] += 1
+        events = load_instrument_events_batch(
+            market_conn, instrument_ids=shard, start=start,
+            end=end + spec.purge_gap, as_known_at=cutoff,
+            source=event_source)
+        samples = build_samples(
+            *events[instrument], spec, start=start, end=end,
+            execution_model=config["population_execution_model"])
+        if cache.store(session, instrument, samples):
+            cache_stats["writes"] += 1
+        else:
+            cache_stats["write_disabled"] += 1
+        return {instrument: samples}
+
+    population = CandidatePopulationAccumulator(_candidate_accumulators(
+        config, spec, trials=trials))
+    calibration_shards = []
+    if population.requires_calibration:
+        for shard_number, shard in enumerate(shards, 1):
+            sample_count = 0
+            for raw_day in selected.get("calibration_sessions") or []:
+                by_instrument = samples_for(raw_day, shard)
+                for instrument in shard:
+                    samples = by_instrument[instrument]
+                    sample_count += len(samples)
+                    population.calibrate(instrument, samples)
+            calibration_shards.append({
+                "shard": shard_number, "instrument_count": len(shard),
+                "sample_count": sample_count,
+            })
+    calibration = population.freeze_calibration()
+
+    screen_shards = []
+    for shard_number, shard in enumerate(shards, 1):
+        sample_count = 0
+        for raw_day in sessions:
+            by_instrument = samples_for(raw_day, shard)
+            for instrument in shard:
+                samples = by_instrument[instrument]
+                sample_count += len(samples)
+                population.add(instrument, samples)
+        screen_shards.append({
+            "shard": shard_number, "instrument_count": len(shard),
+            "sample_count": sample_count,
+            "instrument_fingerprint": hashlib.sha256(
+                "|".join(shard).encode()).hexdigest()[:16],
+        })
+
+    report = _annotate_population(config, population.finish())
+    gate = _fast_screen_gate(report, config)
+    report["fast_discovery_screen"] = {
+        **gate,
+        "sessions": [str(day) for day in sessions],
+        "session_count": len(sessions),
+        "instrument_count": len(instruments),
+        "instrument_fingerprint": hashlib.sha256(
+            "|".join(instruments).encode()).hexdigest(),
+        "selection": "deterministic evenly-spaced coverage of frozen slice",
+        "full_universe_instrument_count": len(selected["instruments"]),
+        "full_evaluation_session_count": len(selected["sessions"]),
+        "sample_cache": {**cache_stats, "identity": cache.identity,
+                         "scope": "DISCOVERY_PANEL_ONLY"},
+    }
+    report["score_calibration"] = calibration.get("PRIMARY")
+    report["calibration_population"] = calibration
+    report["calibration_shards"] = calibration_shards
+    report["universe_shards"] = screen_shards
+    report["lane_manifest"].update(manifest(spec, source=event_source))
+    return report, gate
+
+
 def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
     prepared = hyp.get("_intraday_preflight") or prepare(
         hyp, market_conn=market_conn)
@@ -1056,10 +1369,16 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
             "intraday run called with non-executable feasibility slice: "
             f"{selected.get('status')}")
     lineage = _lineage(market_conn, selected, cutoff)
-    persisted = {**config, "cutoff": cutoff.isoformat(),
+    event_source = selected.get("event_source", LOCAL_EVENT_SOURCE)
+    effective_shard_size = (1 if event_source == EXTERNAL_EVENT_SOURCE else
+                            config["instrument_shard_size"])
+    persisted = {**config,
+                 "effective_instrument_shard_size": effective_shard_size,
+                 "cutoff": cutoff.isoformat(),
                  "slice": {**selected,
                            "sessions": [str(day) for day in selected["sessions"]]},
-                 "source_lineage": lineage, "lane_manifest": manifest(spec)}
+                 "source_lineage": lineage,
+                 "lane_manifest": manifest(spec, source=event_source)}
     experiment_id, duplicate = _register(meta_conn, hypothesis_id, persisted)
     if duplicate:
         report = _load_completed_report(meta_conn, experiment_id)
@@ -1074,9 +1393,56 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
                     "mean_net_bps_per_opportunity")},
             "intraday_report": report, "research_lane": "INTRADAY_EVENT"}
 
+    if (event_source == EXTERNAL_EVENT_SOURCE
+            and config["fast_screen_enabled"]):
+        screen_report, screen_gate = _run_fast_screen(
+            config, spec, selected, market_conn=market_conn, cutoff=cutoff,
+            event_source=event_source, trials=int(hyp.get("_trials") or 1),
+            source_lineage=lineage)
+        if not screen_gate["primary_pass"]:
+            failed = list(screen_report.get("failed_criteria") or [])
+            for code in ("FAST_DISCOVERY_SCREEN_REJECTED",
+                         "FULL_UNIVERSE_CONFIRMATION_NOT_RUN"):
+                if code not in failed:
+                    failed.append(code)
+            screen_report.update({
+                "decision": "NO_EVIDENCE",
+                "evidence_tier": "DISCOVERY_SCREEN_ONLY",
+                "failed_criteria": failed,
+                "not_a_promotion": (
+                    "The deterministic discovery panel rejected the primary "
+                    "resource allocation. Linked survivors are evolutionary "
+                    "nominations only; all-universe confirmation was not run."),
+                "source_quality": {
+                    "status": "NOT_RUN_DISCOVERY_SCREEN",
+                    "reason": "quality scan is reserved for full confirmation",
+                },
+                "slice": {
+                    **persisted["slice"],
+                    "evaluated_sessions": screen_report[
+                        "fast_discovery_screen"]["sessions"],
+                    "evaluated_instrument_count": screen_report[
+                        "fast_discovery_screen"]["instrument_count"],
+                    "evidence_tier": "DISCOVERY_SCREEN_ONLY",
+                },
+            })
+            _store_report(meta_conn, experiment_id, screen_report)
+            return {
+                "experiment_id": experiment_id,
+                "fragility": "INSUFFICIENT",
+                "backtest_metrics": {
+                    "turnover_total": screen_report["summary"].get(
+                        "opportunities", 0),
+                    "total_return": screen_report["summary"].get(
+                        "mean_net_bps_per_opportunity"),
+                },
+                "intraday_report": screen_report,
+                "research_lane": "INTRADAY_EVENT",
+            }
+
     population = CandidatePopulationAccumulator(_candidate_accumulators(
         config, spec, trials=int(hyp.get("_trials") or 1)))
-    shard_size = config["instrument_shard_size"]
+    shard_size = effective_shard_size
     shards = [selected["instruments"][index:index + shard_size]
               for index in range(0, len(selected["instruments"]), shard_size)]
     quality_counts = {"PASS": 0, "WARN": 0, "FAIL": 0, "NO_DATA": 0}
@@ -1100,7 +1466,8 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
                     start, end = _session_bounds(day)
                     events = load_instrument_events_batch(
                         market_conn, instrument_ids=instruments, start=start,
-                        end=end + spec.purge_gap, as_known_at=cutoff)
+                        end=end + spec.purge_gap, as_known_at=cutoff,
+                        source=event_source)
                     for instrument in instruments:
                         quotes, trades = events[instrument]
                         samples = build_samples(
@@ -1122,10 +1489,10 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
                 load_end = end + spec.purge_gap
                 quality = source_quality_batch(
                     market_conn, instrument_ids=instruments, start=start,
-                    end=load_end, as_known_at=cutoff)
+                    end=load_end, as_known_at=cutoff, source=event_source)
                 events = load_instrument_events_batch(
                     market_conn, instrument_ids=instruments, start=start,
-                    end=load_end, as_known_at=cutoff)
+                    end=load_end, as_known_at=cutoff, source=event_source)
                 for instrument in instruments:
                     q = quality[instrument]
                     quality_counts[q["status"]] += 1
@@ -1159,6 +1526,14 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
         report["calibration_shards"] = calibration_shard_reports
         report["summary"]["universe_shards"] = len(shards)
         report["slice"] = persisted["slice"]
+        report["lane_manifest"].update(manifest(spec, source=event_source))
+        if (event_source == EXTERNAL_EVENT_SOURCE
+                and config["fast_screen_enabled"]):
+            report["fast_discovery_screen"] = {
+                **screen_report["fast_discovery_screen"],
+                "primary_pass": True,
+                "full_universe_confirmation_run": True,
+            }
         _store_report(meta_conn, experiment_id, report)
     except Exception:
         with meta_conn.cursor() as cur:

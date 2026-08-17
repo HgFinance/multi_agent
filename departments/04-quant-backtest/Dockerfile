@@ -21,9 +21,12 @@ ENV PYTHONUNBUFFERED=1 \
 
 # 퀀트 파이프라인은 표준 라이브러리 위주다 - 과적합 통계도 math 만 쓴다.
 # psycopg2(Repository), pydantic(계약), dotenv(.env), fastapi/uvicorn(API).
+# pyarrow is limited to the bounded discovery-sample cache: it prevents every
+# evolved AST cohort from replaying the same external 92GB source. Remove it
+# when a database/object-store feature service replaces that cache contract.
 RUN pip install --no-cache-dir \
     psycopg2-binary==2.9.10 pydantic==2.11.7 python-dotenv==1.1.1 \
-    fastapi==0.116.1 "uvicorn[standard]==0.35.0"
+    fastapi==0.116.1 "uvicorn[standard]==0.35.0" pyarrow==25.0.0
 
 WORKDIR /app
 
