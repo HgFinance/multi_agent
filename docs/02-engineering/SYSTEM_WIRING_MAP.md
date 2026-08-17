@@ -1,5 +1,9 @@
 # 시스템 배선 지도 (System Wiring Map)
 
+> **Snapshot status:** 이 문서는 `origin/main`과 당시 컨테이너 상태를 대조한
+> 배선 snapshot이다. 현재 아키텍처·worker registry·serving 상태는
+> [CURRENT_PROJECT_ARCHITECTURE.md](../CURRENT_PROJECT_ARCHITECTURE.md)를 우선한다.
+
 > **코드 기준: `origin/main@5054d2d` (2026-08-13 14:02, PR #237까지).** 컨테이너 36개 Up 상태의 실측 + origin/main 60커밋 대조로 그렸다.
 > 교차 검증 통과: 워커 10명 = CLAUDE.md 편제표와 1:1 일치, 러너 5개 = `RUNNER_ID` 상수 5곳 실측, 컨테이너 전수 일치.
 > 각 절의 근거는 `파일:행`으로 남겼다. 이 문서는 **스냅샷**이며 정본은 코드다.

@@ -1,7 +1,11 @@
 # HgFinance 최종 Runtime 아키텍처
 
-상태: **구현 기준선(DESIGN BASELINE)**  
+상태: **상세 구현 기준선(DESIGN BASELINE)**
 범위: Natural Language Query + Mandate를 받아 부서 Task를 동적으로 라우팅하고, Hermes·LangGraph Worker·결정론 Engine·QA를 거쳐 비구속적 결과를 반환하는 TEST/INTEGRATION/PRODUCTION_ADVISORY 경로
+
+> **Current snapshot link:** 현재 worker registry·실제 구현 상태·serving 설정은
+> [CURRENT_PROJECT_ARCHITECTURE.md](../CURRENT_PROJECT_ARCHITECTURE.md)를 우선한다.
+> 이 문서는 상세 실행 계약과 historical/design baseline이다.
 
 이 문서는 구현자가 별도 구두 설명 없이 기본 Pipeline을 구현할 수 있도록 작성한 실행 계약이다. Master Plan과 Domain API·DB Contract를 대체하지 않으며, 충돌 시 다음 우선순위를 따른다.
 
@@ -23,6 +27,33 @@
 - TEST의 Worker는 Ollama `qwen3:1.7b`를 사용할 수 있다. Production Worker는 Worker Model Gateway의 `Qwen2.5-14B-Instruct FP8`와 버전이 고정된 Department LoRA를 사용한다. 두 모델은 같은 Contract를 사용하지만 별도 Golden/Adversarial Eval을 통과해야 한다.
 - Claude/Codex Head는 Provider Adapter 뒤에 둔다. Claude 구독을 일반 API Credential처럼 자동화 Container에서 사용한다고 가정하지 않는다. Production Provider는 사용 계약·인증·비용·자동화 허용 범위가 확인된 Adapter만 사용한다.
 - Self-Evolution은 자동 Candidate 생성까지 자동화할 수 있지만, Profile·Skill·Tool Allowlist의 Production 변경은 HR → QA → CEO 승인 → Shadow → Rollback/Promotion 절차를 통과해야 한다.
+
+### QA execution topology clarification
+
+QA has two different paths and must not be described as either always blocking or
+always asynchronous:
+
+1. In the general response workflow, the supervisor can synthesize terminal
+   primary department results while QA runs independently in an asynchronous
+   governance lane. `orchestration/adapters/ceo_supervisor.py` records
+   `governance_plane=async_qa` and explicitly states that QA is not a synthesis
+   prerequisite.
+2. Inside the QA department, eligible conditional LangGraph workers are
+   concurrently fanned out and gathered by
+   `qa_employee_workers.py::run_employee_workers_async`; the deterministic
+   `qa-runner` result is then combined with the worker reports.
+3. The blocking `portfolio_recommendation` graph is different: its explicit
+   barriers preserve `research → quant → trading → risk → qa → accounting → ceo`.
+   For that graph, QA remains a gate after Risk precheck and is not converted to
+   async merely because the general response lane is async.
+
+```mermaid
+flowchart LR
+    P[Primary department results] --> C[CEO synthesis]
+    P --> Q[QA async governance lane]
+    Q --> F[Post-hoc feedback / audit finding]
+    C -. high-risk or decision request .-> B[Blocking Risk/QA gate]
+```
 
 ## 2. 환경 분리
 

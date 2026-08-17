@@ -1,5 +1,10 @@
 # Hermes 기반 전 종목 실시간 멀티 에이전트 RAG 헤지펀드 마스터 플랜
 
+> **Current snapshot pointer:** 이 문서의 날짜가 붙은 runtime count와 목표
+> architecture는 historical/plan 문맥이다. 현재 구현 상태·worker registry·model
+> serving은 [CURRENT_PROJECT_ARCHITECTURE.md](CURRENT_PROJECT_ARCHITECTURE.md)를
+> 우선한다. 기존 snapshot 수치를 현재 runtime으로 재사용하지 않는다.
+
 > **Local Compose runtime baseline (2026-08-10)**: 현재 로컬 통합 실행 기준은 루트 [`docker-compose.yml`](../docker-compose.yml)과 [로컬 Compose Runtime 기준선](02-engineering/LOCAL_COMPOSE_RUNTIME_BASELINE.md)이다. Compose 병합 결과는 기본 서비스 26개이며 `portfolio`와 `dashboard` Profile을 모두 켜면 29개다. 이 서비스 수는 Hermes Head·Worker의 논리적 수와 별도 축이다. `docker compose config`로 확인한 선언 수와 실제 컨테이너 실행 상태를 혼동하지 않는다.
 
 > **Current runtime override (2026-08-07)**: 현재 실행 계층은 8개 Hermes Head, 25개 LLM Worker, 4개 결정론 runner(`desk-runner`, `risk-runner`, `qa-runner`, `back-office-runner`)로 구성된 총 29명이다. 도현님 담당 부서는 Trading 3명(LLM 2 + `desk-runner`), Accounting/Portfolio 2명(LLM 1 + `back-office-runner`)이다. 상세 역할 경계는 [WORKER_ROLE_BOUNDARIES.md](02-engineering/WORKER_ROLE_BOUNDARIES.md)가 우선하며, 이 문서의 목표 아키텍처·과거 구현 스냅샷은 현재 Runtime과 섞어 해석하지 않는다.

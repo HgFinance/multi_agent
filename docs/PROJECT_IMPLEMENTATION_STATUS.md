@@ -1,5 +1,10 @@
 # Personal Hedge Fund Agent 실행 현황과 통합 계획
 
+> **Current snapshot:** 최신 저장소 구조·worker registry·모델 serving 불일치와
+> 구현/계획 상태는 [HgFinance Current Architecture](CURRENT_PROJECT_ARCHITECTURE.md)를
+> 우선 확인한다. 이 문서의 날짜가 붙은 실행 감사·DB·Container 수치는 해당
+> 시점의 historical snapshot이며 현재 runtime 증거로 재사용하지 않는다.
+
 > **Prototype boundary (2026-08-03)**: 일부 부서의 기존 `scripts.py`, `scripts/test_*_ollama_agent.py`, `Modelfile`은 초기 단일 호출·수동 smoke prototype이다. 이 파일들에 남은 `Nous/Laguna`, `qwen2.5`, `qwen3:14b`, `agent-*` 기본값은 현재 Hermes Head/독립 Worker Registry를 덮어쓰지 않는다. 현재 runtime 판정은 Profile `model`, `staff_registry`, `runtime_personalities`와 실제 Worker Registry를 기준으로 한다. 해당 prototype을 현재 pipeline adapter로 승격하려면 별도 migration과 테스트가 필요하다.
 
 > **문서 해석 규칙(2026-08-03)**: 최신 런타임 사실은 상단 Registry와 각 부서 `config.yaml`·Worker 구현을 기준으로 한다. 날짜가 붙은 Commit·DB·Container 수치는 당시의 Historical snapshot이다. `IMPLEMENTED`는 코드·계약 존재, `TEST_VERIFIED`는 재실행 테스트 통과, `RUNTIME_VERIFIED`는 실제 API·DB 입출력 확인, `BLOCKED`는 안전한 중단 상태를 뜻한다. 과거 모델·Profile row·외부 연동 성공을 현재 운영 완료로 승격하지 않는다.
