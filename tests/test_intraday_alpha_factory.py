@@ -724,6 +724,19 @@ def test_idempotent_replay_keeps_screening_metrics_out_of_primary_summary() -> N
             "screening_gate_decision": "SUBMIT_TO_QA", "pareto_rank": 1,
             "pareto_front": True, "failed_criteria": [],
         }),
+        ("intraday_residual_behavior", 1.5, {
+            "status": "PASS", "worst_time_bucket": "OPEN",
+            "median_time_bucket_mae_bps": 1.5,
+            "promotion_authority": False,
+            "residual_qd": {"cell": "OPEN/NODES_1_5", "elite": True},
+        }),
+        ("intraday_residual_behavior", 2.5, {
+            "screening_candidate": "side-fp", "status": "PASS",
+            "worst_time_bucket": "CLOSE",
+            "median_time_bucket_mae_bps": 2.5,
+            "promotion_authority": False,
+            "residual_qd": {"cell": "CLOSE/NODES_1_5", "elite": True},
+        }),
     ]
 
     class Cursor:
@@ -743,6 +756,11 @@ def test_idempotent_replay_keeps_screening_metrics_out_of_primary_summary() -> N
         "mean_net_bps_per_opportunity"] == 99.0
     assert report["decision"] == "HOLD"
     assert report["screening_population"][0]["decision"] == "SCREENING_ONLY"
+    assert report["residual_behavior"]["worst_time_bucket"] == "OPEN"
+    assert report["residual_qd"]["cell"] == "OPEN/NODES_1_5"
+    assert report["screening_population"][0]["residual_behavior"][
+        "worst_time_bucket"] == "CLOSE"
+    assert report["screening_population"][0]["residual_qd"]["elite"] is True
 
     for relative in (
             "departments/04-quant-backtest/pipeline/experiment_orchestrator.py",
@@ -897,6 +915,16 @@ def test_population_sorts_and_audits_once_but_keeps_candidate_statistics(
 
     assert calls == 1
     assert reports["PRIMARY"]["summary"]["opportunities"] == 3
+    residual = reports["PRIMARY"]["residual_behavior"]
+    assert residual["status"] == "PASS"
+    assert residual["observations"] == 3
+    assert residual["worst_time_bucket"] == "OPEN"
+    assert residual["mean_absolute_error_bps"] == pytest.approx(2.0)
+    assert residual["null_mean_absolute_error_bps"] == pytest.approx(3.0)
+    assert residual["mae_improvement_vs_null_bps"] == pytest.approx(1.0)
+    assert residual[
+        "median_time_bucket_mae_improvement_vs_null_bps"] == pytest.approx(1.0)
+    assert residual["promotion_authority"] is False
     assert reports["side"]["summary"]["opportunities"] == 0
     assert reports["side"]["decision"] == "NO_EVIDENCE"
 
@@ -911,6 +939,14 @@ def test_population_sorts_and_audits_once_but_keeps_candidate_statistics(
     screened = annotated["screening_population"][0]
     assert screened["decision"] == "SCREENING_ONLY"
     assert screened["screening_gate_decision"] == "NO_EVIDENCE"
+    assert screened["residual_qd"]["cell"] == "OPEN/NODES_1_5"
+    assert screened["residual_qd"]["elite"] is False
+    assert annotated["residual_qd"]["elite"] is True
+    assert annotated["residual_qd"][
+        "median_time_bucket_mae_improvement_vs_null_bps"] == pytest.approx(1.0)
+    assert annotated["population_evaluation"]["residual_archive_cells"] == 1
+    assert annotated["population_evaluation"][
+        "residual_archive_boundary"] == "OOS_DIAGNOSTIC_SCREENING_ONLY"
     assert annotated["population_evaluation"]["promotion_authority"] == \
         "PRIMARY_ONLY"
 
@@ -1248,6 +1284,39 @@ def test_recurring_untested_terms_are_moved_to_saturation_queue() -> None:
     rendered = intraday_experience.render(memory)
     assert "term saturation/avoidance queue" in rendered
     assert "do not treat as preferred material" in rendered
+
+
+def test_residual_qd_elite_reaches_next_generation_memory_without_authority() -> None:
+    plan = {
+        "event": "MICROPRICE_DISLOCATION", "context": ["ALL"],
+        "qualities": ["LEVEL"], "direction": "FOLLOW",
+        "output": "TAKER_NET_PNL", "execution": "TAKER",
+        "horizon_seconds": 5,
+    }
+    memory = intraday_experience.build([{
+        "intraday_signal_expr": {
+            "op": "field", "field": "microprice_offset_bps"},
+        "semantic_plan": plan, "decision": "SCREENING_ONLY",
+        "evidence_tier": "SCREENING_ONLY",
+        "oos_summary": {"mean_net_bps_per_opportunity": -3.0},
+        "residual_behavior": {
+            "status": "PASS", "worst_time_bucket": "CLOSE",
+            "median_time_bucket_mae_bps": 1.2, "rmse_bps": 1.8,
+            "median_time_bucket_mae_improvement_vs_null_bps": 0.4,
+            "promotion_authority": False,
+        },
+        "residual_qd": {
+            "status": "ELIGIBLE", "cell": "CLOSE/NODES_1_5",
+            "elite": True, "promotion_authority": False,
+        },
+    }])
+
+    assert memory.residual_qd_elites[0]["cell"] == "CLOSE/NODES_1_5"
+    assert memory.history[0]["worst_residual_time_bucket"] == "CLOSE"
+    rendered = intraday_experience.render(memory)
+    assert "residual-behavior QD elites" in rendered
+    assert "mae_gain_vs_null=0.4bps" in rendered
+    assert "OOS diagnostic only, no promotion" in rendered
 
 
 def test_intraday_feedback_separates_bad_signal_from_cost_flip() -> None:

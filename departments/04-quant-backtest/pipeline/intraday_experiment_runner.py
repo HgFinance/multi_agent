@@ -26,7 +26,7 @@ from intraday_microstructure import (IntradayLaneSpec, build_samples,
 from intraday_ablation import INTRADAY_SCREENING_COHORT_VERSION
 
 
-RUNNER_VERSION = "intraday-experiment-runner-v7"
+RUNNER_VERSION = "intraday-experiment-runner-v8"
 COST_MODEL_VERSION = "krx-intraday-execution-v1"
 # 2026 listed equities incur 20bp on the sale (KOSPI 5bp STT + 15bp rural,
 # KOSDAQ 20bp STT).  A representative online commission is 1.5bp each side.
@@ -571,6 +571,92 @@ def _pareto_ranks(rows: list[dict]) -> dict[str, int]:
     return ranks
 
 
+def _complexity_bucket(nodes: int) -> str:
+    if nodes <= 5:
+        return "NODES_1_5"
+    if nodes <= 10:
+        return "NODES_6_10"
+    if nodes <= 20:
+        return "NODES_11_20"
+    return "NODES_21_PLUS"
+
+
+def _residual_qd_archive(rows: list[dict]) -> tuple[dict[str, dict], list[dict]]:
+    """Keep one screening elite per worst-residual/complexity behavior cell.
+
+    Residuals are measured on the shared OOS replay, so this archive is only a
+    search diagnostic.  It cannot alter the preregistered primary decision or
+    grant promotion authority.
+    """
+    annotations: dict[str, dict] = {}
+    cells: dict[str, list[dict]] = {}
+    for row in rows:
+        behavior = row["report"].get("residual_behavior") or {}
+        worst = behavior.get("worst_time_bucket")
+        robust_gain = behavior.get(
+            "median_time_bucket_mae_improvement_vs_null_bps")
+        eligible = (behavior.get("status") == "PASS" and worst
+                    and isinstance(robust_gain, (int, float))
+                    and not isinstance(robust_gain, bool))
+        if not eligible:
+            annotations[row["key"]] = {
+                "status": "NOT_ELIGIBLE", "cell": None, "elite": False,
+                "reason": behavior.get("status") or "MISSING_RESIDUAL_BEHAVIOR",
+            }
+            continue
+        cell = f"{worst}/{_complexity_bucket(row['complexity'])}"
+        summary = row["report"].get("summary") or {}
+        net = summary.get("mean_net_bps_per_opportunity")
+        coverage = summary.get("instrument_coverage")
+        item = {
+            "key": row["key"], "cell": cell,
+            "worst_time_bucket": worst,
+            "complexity_bucket": _complexity_bucket(row["complexity"]),
+            "median_time_bucket_mae_bps": behavior.get(
+                "median_time_bucket_mae_bps"),
+            "median_time_bucket_mae_improvement_vs_null_bps": float(
+                robust_gain),
+            "mean_net_bps_per_opportunity": (
+                float(net) if isinstance(net, (int, float))
+                and not isinstance(net, bool) else None),
+            "instrument_coverage": (
+                float(coverage) if isinstance(coverage, (int, float))
+                and not isinstance(coverage, bool) else None),
+            "complexity_nodes": row["complexity"],
+        }
+        cells.setdefault(cell, []).append(item)
+
+    archive = []
+    for cell, group in sorted(cells.items()):
+        def quality(item: dict) -> tuple:
+            return (
+                item["median_time_bucket_mae_improvement_vs_null_bps"],
+                item["mean_net_bps_per_opportunity"]
+                if item["mean_net_bps_per_opportunity"] is not None
+                else float("-inf"),
+                item["instrument_coverage"]
+                if item["instrument_coverage"] is not None else float("-inf"),
+                -item["complexity_nodes"],
+                item["key"],
+            )
+
+        winner = max(group, key=quality)
+        archive.append({**winner, "competitors": len(group)})
+        for item in group:
+            annotations[item["key"]] = {
+                "status": "ELIGIBLE",
+                "cell": cell,
+                "elite": item["key"] == winner["key"],
+                "competitors": len(group),
+                "median_time_bucket_mae_bps": item[
+                    "median_time_bucket_mae_bps"],
+                "median_time_bucket_mae_improvement_vs_null_bps": item[
+                    "median_time_bucket_mae_improvement_vs_null_bps"],
+                "promotion_authority": False,
+            }
+    return annotations, archive
+
+
 def _annotate_population(config: dict, reports: dict[str, dict]) -> dict:
     """Label screen evidence without granting it promotion authority."""
     primary = reports["PRIMARY"]
@@ -592,6 +678,8 @@ def _annotate_population(config: dict, reports: dict[str, dict]) -> dict:
             "complexity": count_nodes(expression),
         })
     ranks = _pareto_ranks(ranking_rows)
+    residual_qd, residual_archive = _residual_qd_archive(ranking_rows)
+    primary["residual_qd"] = residual_qd["PRIMARY"]
     screening_reports = []
     for row in ranking_rows[1:]:
         key, report = row["key"], row["report"]
@@ -652,6 +740,7 @@ def _annotate_population(config: dict, reports: dict[str, dict]) -> dict:
             "complexity_nodes": row["complexity"],
             "pareto_rank": ranks[key],
             "pareto_front": ranks[key] == 1,
+            "residual_qd": residual_qd[key],
             "not_a_promotion": (
                 "SCREENING_ONLY evidence may nominate an independent "
                 "confirmatory primary experiment; it cannot promote alpha"),
@@ -664,7 +753,12 @@ def _annotate_population(config: dict, reports: dict[str, dict]) -> dict:
         "selection_adjusted_trials": primary["summary"].get("trials"),
         "selection_rule": (
             "cost-net/coverage/novelty/complexity Pareto screen plus "
-            "same-replay structural-ablation influence"),
+            "same-replay structural-ablation influence and residual-behavior "
+            "MAP-Elites archive"),
+        "residual_archive_version": "krx-domain-residual-qd-v1",
+        "residual_archive": residual_archive,
+        "residual_archive_cells": len(residual_archive),
+        "residual_archive_boundary": "OOS_DIAGNOSTIC_SCREENING_ONLY",
         "promotion_authority": "PRIMARY_ONLY",
     }
     primary["summary"].update({
@@ -674,6 +768,9 @@ def _annotate_population(config: dict, reports: dict[str, dict]) -> dict:
         "screening_positive_net": sum(
             ((row.get("summary") or {}).get("mean_net_bps_per_opportunity")
              or 0.0) > 0 for row in screening_reports),
+        "screening_residual_qd_elites": sum(
+            bool((row.get("residual_qd") or {}).get("elite"))
+            for row in screening_reports),
     })
     return primary
 
@@ -698,6 +795,8 @@ def _load_completed_report(meta_conn, experiment_id: str) -> dict:
     final_dimensions = None
     pre_dimensions = None
     calibration_dimensions = None
+    residual_dimensions = None
+    primary_residual_qd = None
     for metric, value, raw_dimensions in rows:
         dimensions = _as_json(raw_dimensions)
         screening_key = dimensions.get("screening_candidate")
@@ -729,6 +828,16 @@ def _load_completed_report(meta_conn, experiment_id: str) -> dict:
         elif metric == "intraday_score_calibration" and screening_key:
             screening_meta.setdefault(str(screening_key), {})[
                 "score_calibration"] = dimensions
+        if metric == "intraday_residual_behavior":
+            behavior = {key: value for key, value in dimensions.items()
+                        if key not in {"screening_candidate", "residual_qd"}}
+            if screening_key:
+                target = screening_meta.setdefault(str(screening_key), {})
+                target["residual_behavior"] = behavior
+                target["residual_qd"] = dimensions.get("residual_qd")
+            else:
+                residual_dimensions = behavior
+                primary_residual_qd = dimensions.get("residual_qd")
         if metric == "intraday_pre_pbo_gate_pass":
             pre_dimensions = dimensions
         elif metric == "intraday_gate_pass":
@@ -767,6 +876,8 @@ def _load_completed_report(meta_conn, experiment_id: str) -> dict:
             "empirical_influence": meta.get("empirical_influence"),
             "pareto_rank": meta.get("pareto_rank"),
             "pareto_front": meta.get("pareto_front"),
+            "residual_behavior": meta.get("residual_behavior") or {},
+            "residual_qd": meta.get("residual_qd") or {},
             "novelty_vs_primary": meta.get("novelty_vs_primary"),
             "complexity_nodes": meta.get("complexity_nodes"),
             "idempotent_replay": True,
@@ -782,10 +893,14 @@ def _load_completed_report(meta_conn, experiment_id: str) -> dict:
         "session_returns_bps": {},
         "summary": summary,
         "score_calibration": calibration_dimensions,
+        "residual_behavior": residual_dimensions or {},
+        "residual_qd": primary_residual_qd or {},
         "screening_population": screening_reports,
         "population_evaluation": {
             "shared_raw_replay": True,
             "candidate_count": 1 + len(screening_reports),
+            "residual_archive_version": "krx-domain-residual-qd-v1",
+            "residual_archive_boundary": "OOS_DIAGNOSTIC_SCREENING_ONLY",
             "promotion_authority": "PRIMARY_ONLY",
         },
         "failed_criteria": list(gate.get("failed_criteria") or []),
@@ -807,6 +922,13 @@ def _store_report(meta_conn, experiment_id: str, report: dict) -> None:
                  1 if calibration.get("status") in {
                      "PASS", "NOT_REQUIRED_FIXED_EQUATION"} else 0,
                  {**calibration, "calibration": True}))
+    residual = report.get("residual_behavior") or {}
+    residual_value = residual.get("median_time_bucket_mae_bps")
+    rows.append(("intraday_residual_behavior",
+                 float(residual_value) if isinstance(
+                     residual_value, (int, float))
+                 and not isinstance(residual_value, bool) else 0.0,
+                 {**residual, "residual_qd": report.get("residual_qd") or {}}))
     for fold in report.get("folds") or []:
         if isinstance(fold.get("mean_net_bps"), (int, float)):
             rows.append(("fold_mean_net_bps", fold["mean_net_bps"],
@@ -849,6 +971,7 @@ def _store_report(meta_conn, experiment_id: str, report: dict) -> None:
                          "candidate_role": candidate.get("candidate_role"),
                          "empirical_influence": candidate.get(
                              "empirical_influence"),
+                         "residual_qd": candidate.get("residual_qd") or {},
                      }))
         candidate_calibration = ((candidate.get("lane_manifest") or {}).get(
             "score_calibration") or {})
@@ -857,6 +980,18 @@ def _store_report(meta_conn, experiment_id: str, report: dict) -> None:
                          "PASS", "NOT_REQUIRED_FIXED_EQUATION"} else 0, {
                          **candidate_calibration,
                          "calibration": True,
+                         "screening_candidate": key,
+                     }))
+        candidate_residual = candidate.get("residual_behavior") or {}
+        candidate_residual_value = candidate_residual.get(
+            "median_time_bucket_mae_bps")
+        rows.append(("intraday_residual_behavior",
+                     float(candidate_residual_value) if isinstance(
+                         candidate_residual_value, (int, float))
+                     and not isinstance(candidate_residual_value, bool) else 0.0,
+                     {
+                         **candidate_residual,
+                         "residual_qd": candidate.get("residual_qd") or {},
                          "screening_candidate": key,
                      }))
     rows.append(("intraday_pre_pbo_gate_pass",
