@@ -98,7 +98,9 @@ RESEARCH_LANE: DAILY_CROSS_SECTIONAL 또는 INTRADAY_EVENT
 SEMANTIC_PLAN: (Event/Context/Qualities/Direction/Output JSON. intraday는 필수.
     예: {"event":"ORDER_FLOW","context":["TIGHT_SPREAD"],
     "qualities":["PERSISTENCE","STATE_CONDITIONAL"],"direction":"FOLLOW",
-    "output":"TAKER_NET_PNL","execution":"TAKER","horizon_seconds":30})
+    "output":"TAKER_NET_PNL","execution":"TAKER","horizon_seconds":30}
+    passive 정확한 쌍은 output="PASSIVE_FILL_ADJUSTED_PNL",
+    execution="PASSIVE_FIFO_LOWER_BOUND"다. PASSIVE/PASSIVE_FIFO 별칭은 금지.)
 LABEL: forward_return
 BASELINE: equal_weight_buy_and_hold
 FALSIFICATION_TESTS: (무엇이 나오면 기각인가. 쉼표로 나열)
@@ -144,6 +146,14 @@ SUGGESTED_PARAMS JSON 필수 키:
   intraday_signal_expr, horizon_seconds, sample_interval_seconds,
   feature_lookback_seconds, order_latency_ms, execution, entry_policy,
   coefficient_policy
+Execution/output is an exact controlled pair:
+  TAKER_NET_PNL -> TAKER
+  PASSIVE_FILL_ADJUSTED_PNL -> PASSIVE_FIFO_LOWER_BOUND
+For the passive pair set execution=PASSIVE_FIFO_LOWER_BOUND and
+entry_policy=PREDICTED_MARKOUT_CLEARS_COST. PASSIVE and PASSIVE_FIFO are invalid
+aliases. A passive revision must also change the economic AST (for example a
+spread/depth/adverse-selection state gate); relabeling the identical formula
+does not create a new candidate.
 Net-PnL proposals must set entry_policy=PREDICTED_MARKOUT_CLEARS_COST. Prefer
 coefficient_policy=STRUCTURE_ONLY: the AST expresses a signed economic score and
 the runtime fits exactly one positive, origin-anchored, shrunken score-to-BPS
@@ -231,7 +241,8 @@ _SQL_LEADS = """
 select l.lead_id, l.scout_lens, l.claimed_edge, l.stated_mechanism,
        l.testability, l.status,
        (exists (select 1 from research.experiment_proposals p
-                 where l.lead_id = any(p.lead_ids))
+                 where l.lead_id = any(p.lead_ids)
+                   and p.status in ('PUBLISHED','ACCEPTED'))
         or exists (select 1 from research.proposal_review_outcomes r
                     where r.verdict = 'STOP'
                       and l.lead_id = any(r.lead_ids))) as used,
@@ -453,6 +464,17 @@ def _ast_scout_contract() -> str:
         '  {"event":"ORDER_FLOW","context":["TIGHT_SPREAD"],',
         '   "qualities":["PERSISTENCE","STATE_CONDITIONAL"],"direction":"FOLLOW",',
         '   "output":"TAKER_NET_PNL","execution":"TAKER","horizon_seconds":5}.',
+        "  Passive execution uses this exact output/execution pair (no aliases):",
+        '  {"event":"ORDER_FLOW","context":["TIGHT_SPREAD"],',
+        '   "qualities":["STATE_CONDITIONAL"],"direction":"FOLLOW",',
+        '   "output":"PASSIVE_FILL_ADJUSTED_PNL",',
+        '   "execution":"PASSIVE_FIFO_LOWER_BOUND","horizon_seconds":30}.',
+        "  PASSIVE and PASSIVE_FIFO are invalid aliases. A passive child also needs an",
+        "  economic AST mutation (spread/depth/adverse-selection state, clock, or scale);",
+        "  changing only the execution label is an exact-formula duplicate, not novelty.",
+        "  Treat public OFI/queue formulas as controls. Prefer residual, state-conditional",
+        "  or execution-timing mutations that reduce crossing/adverse selection; do not",
+        "  create extra turnover merely because a short-horizon direction is predictable.",
         "  State contexts must be implemented in a where-condition; declared qualities",
         "  must be visible in the AST. Queue position, cancellations and order lifetime",
         "  remain DATA_BLOCKED; raw quote/trade event time itself is no longer blocked.",
@@ -935,7 +957,7 @@ def _split_blocked(blocked: dict, orphan_ids) -> tuple[dict, dict]:
 
 
 REJECT_PATH = Path.home() / ".factory_autopilot_rejections"
-REJECT_KEEP = 6      # 브리핑에 싣는 최근 반려 수 - 오래된 것까지 실으면 잡음이 된다
+REJECT_KEEP = 12     # 최근의 서로 다른 원인만 싣는다. 동일 반복은 아래서 접는다.
 
 
 def record_rejections(rejected, *, stamp: str, path: Path | None = None) -> int:
@@ -946,8 +968,32 @@ def record_rejections(rejected, *, stamp: str, path: Path | None = None) -> int:
     try:
         with path.open("a", encoding="utf-8") as fh:
             for x in rejected:
-                one = f"{stamp}\t{x.title[:70]}\t{x.reason[:160]}"
-                fh.write(one.replace("\n", " ") + "\n")
+                def clean(value, limit: int) -> str:
+                    return (str(value).replace("\r", " ").replace("\n", " ")
+                            .replace("\t", " ")[:limit])
+
+                def clean_reason(value) -> str:
+                    raw = str(value)
+                    try:
+                        payload = json.loads(raw)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        return clean(raw, 1200)
+                    # ``Promotion.feedback`` is deterministically bounded by
+                    # Gate 0.  Re-serialise it instead of character-truncating
+                    # a JSON token and handing the planner malformed repairs.
+                    if (isinstance(payload, dict)
+                            and isinstance(payload.get("codes"), list)
+                            and isinstance(payload.get("repairs"), list)):
+                        return json.dumps(payload, ensure_ascii=False,
+                                          sort_keys=True, separators=(",", ":"))
+                    return clean(raw, 1200)
+
+                # Typed Gate 0 feedback carries field/range choices.  The old
+                # 160-character cut routinely retained only "rejected" while
+                # deleting the repair the next planner needed.
+                one = (f"{clean(stamp, 80)}\t{clean(x.title, 70)}\t"
+                       f"{clean_reason(x.reason)}")
+                fh.write(one + "\n")
     except OSError as e:
         print(f"      ⚠ 반려 기록 실패 - 다음 주기가 같은 실수를 반복할 수 있다: "
               f"{e}", flush=True)
@@ -956,13 +1002,36 @@ def record_rejections(rejected, *, stamp: str, path: Path | None = None) -> int:
 
 
 def recent_rejections(*, keep: int = REJECT_KEEP, path: Path | None = None) -> list[str]:
-    """최근 반려 몇 건. 못 읽으면 빈 목록 - 없는 교훈을 지어내지 않는다."""
+    """최근의 서로 다른 반려 원인. 못 읽으면 빈 목록을 반환한다."""
     path = path or REJECT_PATH
     try:
         lines = [x for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
     except OSError:
         return []
-    return lines[-keep:]
+    selected, seen = [], set()
+    for line in reversed(lines):
+        parts = line.split("\t", 2)
+        # Proposal ids differ across immutable repairs; the structured cause is
+        # what should collapse when the same Gate 0 error repeats 18 times.
+        cause = parts[2] if len(parts) == 3 else line
+        marker = cause
+        try:
+            payload = json.loads(cause)
+            if (isinstance(payload, dict)
+                    and isinstance(payload.get("codes"), list)
+                    and isinstance(payload.get("repairs"), list)):
+                marker = json.dumps({
+                    "codes": payload["codes"], "repairs": payload["repairs"]},
+                    ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+        if marker in seen:
+            continue
+        seen.add(marker)
+        selected.append(line)
+        if len(selected) >= keep:
+            break
+    return list(reversed(selected))
 
 
 def research_brief() -> str:
@@ -1033,7 +1102,8 @@ def _ast_experience_block(conn) -> str:
                 select l.lead_id, l.claimed_edge,
                        l.ast_contract->'candidate_signal_expr',
                        (exists (select 1 from research.experiment_proposals p
-                                 where l.lead_id = any(p.lead_ids))
+                                 where l.lead_id = any(p.lead_ids)
+                                   and p.status in ('PUBLISHED','ACCEPTED'))
                         or exists (
                           select 1 from research.proposal_review_outcomes r
                            where r.verdict = 'STOP'
@@ -1151,6 +1221,9 @@ def _ast_experience_block(conn) -> str:
                         "intraday_signal_expr": candidate.get(
                             "intraday_signal_expr"),
                         "semantic_plan": candidate.get("semantic_plan") or {},
+                        "entry_policy": candidate.get("entry_policy"),
+                        "coefficient_policy": candidate.get(
+                            "coefficient_policy"),
                         "decision": "SCREENING_ONLY",
                         "lesson_codes": [], "oos_summary": {},
                         "title": f"{title} [screen {candidate_fp[:8]}]",
@@ -1374,7 +1447,11 @@ def _compose_research_brief(conn, brief, leads, *, market_conn=None) -> str:
             "넓혀 그 개념을 만들어도 된다. 어느 쪽이든 **무엇이 없어서 그랬는지 "
             "본문에 남겨라** - 조용히 깎으면 그 수요는 아무 데도 안 남고, 다음 "
             "주기의 너는 같은 것을 또 깎는다(실측: 기획안 11건 전부 어휘 안이라 "
-            "어휘 반려가 한 번도 없었다. 안 막힌 게 아니라 아무도 안 물은 것이다).")
+            "어휘 반려가 한 번도 없었다. 안 막힌 게 아니라 아무도 안 물은 것이다).\n"
+            "  Gate 0 JSON은 `codes`와 `repairs`가 정본이다. `field/current/allowed`를 "
+            "읽어 **새 기획안**에 반영하되 `auto_apply:false`이면 기존 사전등록을 "
+            "고치지 마라. `OVER_BUDGET`은 이름·상수만 바꿔 우회하지 말고 새 "
+            "메커니즘을 스카우트하거나 명시적 예산 결정을 받아라.")
     return "\n".join(out)
 
 
@@ -1439,7 +1516,8 @@ def _executable_unused_count(conn) -> int:
                        'formula-discovery-v5')
                and not exists (
                      select 1 from research.experiment_proposals p
-                      where l.lead_id = any(p.lead_ids))
+                      where l.lead_id = any(p.lead_ids)
+                        and p.status in ('PUBLISHED','ACCEPTED'))
                and not exists (
                      select 1 from research.proposal_review_outcomes r
                       where r.verdict = 'STOP'
@@ -1475,7 +1553,8 @@ def _intraday_formula_unused_count(conn) -> int:
                      false)
                and not exists (
                      select 1 from research.experiment_proposals p
-                      where l.lead_id = any(p.lead_ids))
+                      where l.lead_id = any(p.lead_ids)
+                        and p.status in ('PUBLISHED','ACCEPTED'))
                and not exists (
                      select 1 from research.proposal_review_outcomes r
                       where r.verdict = 'STOP'
@@ -1512,7 +1591,8 @@ def _lead_health(conn) -> str:
                        count(*) filter (
                          where not exists (
                            select 1 from research.experiment_proposals p
-                            where methodology_leads.lead_id = any(p.lead_ids))
+                            where methodology_leads.lead_id = any(p.lead_ids)
+                              and p.status in ('PUBLISHED','ACCEPTED'))
                            and not exists (
                              select 1 from research.proposal_review_outcomes r
                               where r.verdict = 'STOP'
@@ -1527,7 +1607,8 @@ def _lead_health(conn) -> str:
                                          false)
                            and not exists (
                              select 1 from research.experiment_proposals p
-                              where methodology_leads.lead_id = any(p.lead_ids))
+                              where methodology_leads.lead_id = any(p.lead_ids)
+                                and p.status in ('PUBLISHED','ACCEPTED'))
                            and not exists (
                              select 1 from research.proposal_review_outcomes r
                               where r.verdict = 'STOP'
@@ -1545,7 +1626,8 @@ def _lead_health(conn) -> str:
                                         false)
                            and not exists (
                              select 1 from research.experiment_proposals p
-                              where methodology_leads.lead_id = any(p.lead_ids))
+                              where methodology_leads.lead_id = any(p.lead_ids)
+                                and p.status in ('PUBLISHED','ACCEPTED'))
                            and not exists (
                              select 1 from research.proposal_review_outcomes r
                               where r.verdict = 'STOP'
@@ -1567,7 +1649,8 @@ def _lead_health(conn) -> str:
                                  false)
                            and not exists (
                              select 1 from research.experiment_proposals p
-                              where methodology_leads.lead_id = any(p.lead_ids))
+                              where methodology_leads.lead_id = any(p.lead_ids)
+                                and p.status in ('PUBLISHED','ACCEPTED'))
                            and not exists (
                              select 1 from research.proposal_review_outcomes r
                               where r.verdict = 'STOP'
@@ -2676,7 +2759,7 @@ def _promote(*, dry_run: bool = False) -> int:
             # **거부도 결과다.** 조용히 사라지면 리서치가 대응할 수 없다.
             print(f"      게이트 거부: {p.proposal_id} <- {p.why[:110]}", flush=True)
             record_rejections(
-                [SimpleNamespace(title=p.proposal_id, reason=p.why)],
+                [SimpleNamespace(title=p.proposal_id, reason=p.feedback)],
                 stamp="gate0")
     return 0
 
@@ -3437,6 +3520,39 @@ def _check_rejection_feedback(tmp: Path) -> None:
     got = recent_rejections(path=path)
     assert len(got) == 1 and "REGIME_ARTIFACT" in got[0], got
     assert "\n" not in got[0], "여러 줄이 섞이면 다음 읽기가 어긋난다"
+
+    # 같은 Gate 0 원인이 제안 id만 바꿔 18번 와도 브리핑에는 한 번이다.
+    dup_path = tmp / "duplicate-rejections.tsv"
+    shared_repair = [{"field": "suggested_params.max_drawdown_stop",
+                      "auto_apply": False}]
+    first_reason = json.dumps({
+        "codes": ["PARAM_OUT_OF_RANGE"], "repairs": shared_repair,
+        "proposal": {"proposal_id": "prop_a", "lead_ids": ["lead_a"]}},
+        ensure_ascii=False)
+    second_reason = json.dumps({
+        "codes": ["PARAM_OUT_OF_RANGE"], "repairs": shared_repair,
+        "proposal": {"proposal_id": "prop_b", "lead_ids": ["lead_b"]}},
+        ensure_ascii=False)
+    record_rejections([SimpleNamespace(title="prop_a", reason=first_reason)],
+                      stamp="gate0", path=dup_path)
+    record_rejections([SimpleNamespace(title="prop_b", reason=second_reason)],
+                      stamp="gate0", path=dup_path)
+    collapsed = recent_rejections(path=dup_path)
+    assert len(collapsed) == 1 and "prop_b" in collapsed[0], collapsed
+
+    long_path = tmp / "long-typed-repair.tsv"
+    long_payload = json.dumps({
+        "codes": ["UNMAPPED_VOCAB"],
+        "repairs": [{"field": "edge_type", "auto_apply": False,
+                     "instruction": "x" * 1400}],
+    }, ensure_ascii=False)
+    record_rejections(
+        [SimpleNamespace(title="long", reason=long_payload)],
+        stamp="gate0", path=long_path)
+    stored_payload = recent_rejections(path=long_path)[0].split("\t", 2)[2]
+    round_trip = json.loads(stored_payload)
+    assert len(round_trip["repairs"][0]["instruction"]) == 1400, \
+        "typed repair JSON을 문자 중간에서 잘랐다"
 
     # 최근 것만 싣는다 - 오래된 반려까지 다 실으면 브리핑이 잡음이 된다
     for i in range(REJECT_KEEP + 3):
@@ -4262,11 +4378,25 @@ def _check_unused_leads_come_first():
     assert 'never "name"' in contract and '"op":"where"' in contract
     assert "[BARE_WORDS] is not JSON" in contract
     assert "genuinely non-finance" in contract and "empirical event-time" in contract
+    assert "PASSIVE_FILL_ADJUSTED_PNL" in contract
+    assert "PASSIVE_FIFO_LOWER_BOUND" in contract
+    assert "PASSIVE and PASSIVE_FIFO are invalid aliases" in contract
+    assert "execution-timing mutations" in contract and "extra turnover" in contract
+    assert "PASSIVE_FILL_ADJUSTED_PNL" in PLANNER_FORMAT
+    assert "PASSIVE_FIFO_LOWER_BOUND" in INTRADAY_PLANNER_NOTE
     assert "instrument_count" in INTRADAY_PLANNER_NOTE
     assert "UNIVERSE_KEY must be exactly krx_all" in INTRADAY_PLANNER_NOTE
     assert "not a universe" in INTRADAY_PLANNER_NOTE
     assert "모든 shard" in INTRADAY_PLANNER_NOTE
     assert "experiment_proposals" in _SQL_LEADS, "사용 여부를 안 본다"
+    assert "p.status in ('PUBLISHED','ACCEPTED')" in _SQL_LEADS, \
+        "Gate 0 REJECTED 리드까지 영구 소비해 교정 재제안을 막는다"
+    import inspect as _inspect
+    for _counter in (_executable_unused_count, _intraday_formula_unused_count,
+                     _lead_health):
+        assert "p.status in ('PUBLISHED','ACCEPTED')" in \
+            _inspect.getsource(_counter), \
+            "REJECTED 리드가 producer/consumer queue에서 계속 사용됨으로 남는다"
     assert "proposal_review_outcomes" in _SQL_LEADS and "STOP" in _SQL_LEADS, \
         "스켑틱 STOP 리드를 소비 완료로 보지 않는다"
 
@@ -4496,12 +4626,16 @@ def _check_ast_memory_reaches_scout_and_planner():
 
     brief = inspect.getsource(_compose_research_brief)
     cyc = inspect.getsource(cycle)
+    memory_loader = inspect.getsource(_ast_experience_block)
     assert "_ast_experience_block(conn)" in brief, \
         "기획자가 exact/near AST 이력과 성과를 못 본다"
     assert "ast_memory = _ast_experience_block(_sc)" in cyc, \
         "스카우트 검색이 과거 AST 경험을 못 본다"
     assert "starving + \"\\n\" + ast_memory" in cyc, \
         "메모리를 계산만 하고 스카우트 카드에 싣지 않는다"
+    assert ('"entry_policy": candidate.get("entry_policy")' in memory_loader
+            and '"coefficient_policy": candidate.get(' in memory_loader), \
+        "screening survivor의 실행 계약을 DB에서 읽고도 경험 메모리 전에 버린다"
     contract = _ast_scout_contract()
     assert "Event-time field units:" in contract and "Unit algebra" in contract, \
         "스카우트가 단위를 몰라 유효 후보를 intake에서 잃는다"

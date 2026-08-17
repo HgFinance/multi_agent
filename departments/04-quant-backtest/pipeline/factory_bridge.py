@@ -89,6 +89,8 @@ INTRADAY_EDGE_KEYS = frozenset({
     "fee_bps_per_side", "maker_fee_bps_per_side", "execution", "threshold",
     "entry_policy", "coefficient_policy", "minimum_predicted_edge_bps",
     "evaluation_days", "instrument_shard_size", "position_mode",
+    "fast_screen_enabled", "fast_screen_sessions", "fast_screen_instruments",
+    "fast_screen_min_opportunities", "fast_screen_min_net_bps",
     "screening_population", "screening_cohort_version",
 })
 
@@ -106,6 +108,9 @@ class Gate0Result:
     # 막지는 않지만 사람이 봐야 하는 것. 경고를 거부로 올리면 게이트가
     # "의심스러우면 차단"이 되고, 그건 신규 가설을 영영 못 사게 만든다.
     warnings: list[str] = field(default_factory=list)
+    # The gate never edits a preregistration.  These are machine-readable
+    # instructions for a *new* proposal, not values to clamp onto this one.
+    repairs: list[dict] = field(default_factory=list)
 
     def reject(self, code: str, why: str) -> None:
         self.ok = False
@@ -121,7 +126,8 @@ class Gate0Result:
                 "trial_family_id": self.trial_family_id,
                 "trial_number": self.trial_number,
                 "trials_used": self.trials_used,
-                "warnings": list(self.warnings)}
+                "warnings": list(self.warnings),
+                "repairs": [dict(x) for x in self.repairs]}
 
 
 def _hyp_view(proposal: dict) -> dict:
@@ -202,6 +208,124 @@ def _embargo_of(proposal: dict) -> int:
         if value >= 1:
             return value
     return 0
+
+
+def _repair_suggestions(proposal: dict, result: Gate0Result, *,
+                        available_days: int = 0) -> list[dict]:
+    """Return deterministic instructions for the planner's next proposal.
+
+    Gate 0 is a preregistration boundary: fixing the object in place would make
+    the tested hypothesis differ from the published one.  Suggestions therefore
+    name constraints and choices but deliberately contain no ``apply``/clamp
+    operation.  The planner must submit a new, independently identified
+    proposal.
+    """
+    if result.ok:
+        return []
+    codes = set(result.codes)
+    params = proposal.get("suggested_params") or {}
+    repairs: list[dict] = []
+
+    def add(code: str, action: str, **details) -> None:
+        item = {"code": code, "action": action, "auto_apply": False, **details}
+        marker = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+        if all(json.dumps(old, ensure_ascii=False, sort_keys=True, default=str)
+               != marker for old in repairs):
+            repairs.append(item)
+
+    if "UNMAPPED_RESEARCH_LANE" in codes:
+        add("UNMAPPED_RESEARCH_LANE", "RESUBMIT_NEW_PROPOSAL",
+            field="research_lane",
+            allowed=["DAILY_CROSS_SECTIONAL", INTRADAY_LANE])
+
+    if "UNMAPPED_VOCAB" in codes:
+        edge = str(proposal.get("edge_type") or "").strip().lower()
+        universe = str(proposal.get("universe_key") or "").strip().lower()
+        if edge not in EDGE_VOCAB:
+            add("UNMAPPED_VOCAB", "RESUBMIT_NEW_PROPOSAL",
+                field="edge_type", current=edge, allowed=sorted(EDGE_VOCAB),
+                instruction="choose an implemented edge or request implementation")
+        if universe not in UNIVERSE_VOCAB:
+            add("UNMAPPED_VOCAB", "RESUBMIT_NEW_PROPOSAL",
+                field="universe_key", current=universe,
+                allowed=sorted(UNIVERSE_VOCAB))
+
+    # Mirror the runtime-owned numeric limits only to *describe* the repair.
+    # The gate above remains the decision maker and the planner chooses the new
+    # value; no sign flip or clipping is performed here.
+    if "PARAM_OUT_OF_RANGE" in codes or "EXECUTION_BINDING_REJECTED" in codes:
+        try:
+            from config_binding import LIMITS  # noqa: PLC0415
+
+            for key, value in params.items():
+                target = ("lookback_days"
+                          if key in ("horizon_days", "signal_window_days")
+                          else key)
+                lo, hi = LIMITS.get(target, (None, None))
+                if lo is None:
+                    continue
+                try:
+                    numeric = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if not lo <= numeric <= hi:
+                    add("PARAM_OUT_OF_RANGE", "RESUBMIT_NEW_PROPOSAL",
+                        field=f"suggested_params.{key}", current=value,
+                        allowed={"minimum": lo, "maximum": hi},
+                        instruction=("choose a negative drawdown fraction"
+                                     if key == "max_drawdown_stop"
+                                     else "choose a value inside the runtime range"))
+        except ImportError:
+            pass
+
+    if "UNDERPOWERED_DESIGN" in codes:
+        current_warmup = _horizon_of(proposal)
+        embargo = _embargo_of(proposal)
+        avail = int(available_days or 0)
+        max_warmup = None
+        if avail and avail < SHORT_SAMPLE_MAX_DAYS:
+            max_warmup = max(
+                0, avail - MIN_WF_WINDOWS * (SHORT_MIN_TEST_DAYS + embargo))
+        add("UNDERPOWERED_DESIGN", "RESUBMIT_NEW_PROPOSAL",
+            field="suggested_params/data_requirements",
+            available_days=avail, current_warmup_days=current_warmup,
+            embargo_days=embargo, minimum_walk_forward_windows=MIN_WF_WINDOWS,
+            maximum_warmup_days=max_warmup,
+            choices=["preregister shorter signal/risk windows",
+                     "require a longer auditable history"])
+
+    if "OVER_BUDGET" in codes:
+        add("OVER_BUDGET", "NEW_MECHANISM_OR_CEO_BUDGET_DECISION",
+            field="trial_family", trials_used=result.trials_used,
+            trial_budget=int(proposal.get("trial_budget") or 5),
+            instruction=("do not rename or retune the exhausted family; use a "
+                         "genuinely new mechanism or obtain an explicit budget decision"))
+
+    intraday_codes = {
+        "INTRADAY_CONTRACT_INVALID", "SEMANTIC_FORMULA_MISMATCH",
+        "SEMANTIC_HORIZON_MISMATCH", "SEMANTIC_EXECUTION_MISMATCH",
+    }
+    if codes & intraday_codes:
+        expected_version = None
+        try:
+            # The contracts directory itself is on sys.path above.
+            from intraday_ablation import (  # noqa: PLC0415
+                INTRADAY_SCREENING_COHORT_VERSION,
+            )
+            expected_version = INTRADAY_SCREENING_COHORT_VERSION
+        except ImportError:
+            pass
+        add(sorted(codes & intraday_codes)[0], "RESUBMIT_NEW_PROPOSAL",
+            field="semantic_plan/suggested_params",
+            expected_screening_cohort_version=expected_version,
+            instruction=("rebuild from current typed intraday leads; keep semantic "
+                         "plan, AST units, horizon, execution and cohort version aligned"))
+
+    if not repairs:
+        add(result.codes[0] if result.codes else "GATE0_REJECTED",
+            "RESUBMIT_NEW_PROPOSAL",
+            instruction="remove the reported cause without changing the rejected record")
+    return repairs
 
 
 def gate0(proposal: dict, *, trials_used: int = 0,
@@ -566,6 +690,8 @@ def gate0(proposal: dict, *, trials_used: int = 0,
             f"이 계열의 실행 기록은 0인데 기각 교훈이 있다: {missing}. "
             "원장 정합성을 확인하되, 아직 실행된 적이 없으므로 접수는 막지 않는다."
         )
+    r.repairs = _repair_suggestions(
+        proposal, r, available_days=int(available_days or 0))
     return r
 
 
@@ -763,14 +889,10 @@ _SQL_PUBLISHED = """
      limit %s
 """
 # ▶ 이미 승격된 기획안을 창에서 빼는 not exists 가 생명선이다 (2026-08-13
-#   실측, 카드 t_7cd9bd5f). 승격돼도 status 는 영원히 PUBLISHED 로 남는데
-#   창은 "가장 오래된 limit 건" 이라, 오래된 승격분 18건 + 영구 게이트거부
-#   2건이 창을 다 채운 시점부터 새 기획안은 fetch 자체가 안 됐다(PUBLISHED
-#   23건 중 21~23위 3건이 어떤 주기에도 승격·거부 판정을 받지 못했다).
-#   리서치가 아무리 발행해도 공장에 신규 가설 공급이 0 이 되는 조용한 정지다.
-#   게이트거부분은 quant.hypotheses 에 없어 창에 남는다 - 종결 상태 각인
-#   (PROMOTED/GATE_REJECTED 등)은 원장 상태 어휘라 별도 합의 사항(카드의
-#   B안). 거부가 20건 쌓이면 같은 병이 재발하므로 그때는 B안이 필요하다.
+#   실측, 카드 t_7cd9bd5f). 새 승격은 proposal lifecycle도 ACCEPTED로 바꾸지만,
+#   과거 승격분은 PUBLISHED로 남아 있다. 창은 "가장 오래된 limit 건" 이라 그런
+#   레거시 행이 앞을 채우면 신규가 fetch되지 않는다. 상태 전이와 not exists를
+#   함께 유지해야 신규 공급과 이전 데이터 호환을 둘 다 지킨다.
 
 _SQL_FAMILY_OUTCOMES = """
     select decision, lesson_codes
@@ -1202,6 +1324,13 @@ def _available_days_for_proposal(conn, proposal: dict) -> int:
         return 0
 
 _SQL_INSERT_HYPOTHESIS = """
+with accepted as (
+  update research.experiment_proposals p
+     set status = 'ACCEPTED'
+   where p.proposal_id = %s
+     and p.status = 'PUBLISHED'
+  returning p.proposal_id
+)
 insert into quant.hypotheses
   (title, rationale, expected_edge, falsification_criteria,
    required_data_products, status, created_by, trace_id,
@@ -1209,9 +1338,23 @@ insert into quant.hypotheses
    economic_rationale, counterparty, competing_explanation,
    competing_explanation_codes, skeptic_sign, source_reported_effect,
    mapping_loss)
-values (%s,%s,%s,%s,%s,'PROPOSED',%s, gen_random_uuid(),
-        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+select %s,%s,%s,%s,%s,'PROPOSED',%s, gen_random_uuid(),
+       accepted.proposal_id,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
+  from accepted
+on conflict (proposal_id) where proposal_id is not null do nothing
 returning hypothesis_id
+"""
+
+# A Gate 0 rejection is the terminal result for this immutable
+# preregistration.  Only its lifecycle status changes; none of the hypothesis
+# fields are repaired in place.  Intake must publish any corrected material as
+# a distinct proposal instead of reopening this rejected record.
+_SQL_REJECT_PROPOSAL = """
+update research.experiment_proposals
+   set status = 'REJECTED'
+ where proposal_id = %s
+   and status = 'PUBLISHED'
+returning proposal_id
 """
 
 
@@ -1223,11 +1366,47 @@ class Promotion:
     accepted: bool
     hypothesis_id: str = ""
     gate: dict = field(default_factory=dict)
+    proposal: dict = field(default_factory=dict, repr=False, compare=False)
 
     @property
     def why(self) -> str:
         g = self.gate
         return "; ".join(g.get("reasons") or []) or ",".join(g.get("codes") or [])
+
+    @property
+    def feedback(self) -> str:
+        """Compact typed feedback consumed by the next planner/scout brief."""
+        params = dict(self.proposal.get("suggested_params") or {})
+        # Shared-replay sidecars are not independently repairable proposals and
+        # can make the brief enormous.  Preserve the rejected primary material.
+        params.pop("screening_population", None)
+        prior = dict(self.proposal.get("prior_check") or {})
+        payload = {
+            "codes": list(self.gate.get("codes") or []),
+            "repairs": list(self.gate.get("repairs") or []),
+            "proposal": {
+                "proposal_id": self.proposal_id,
+                "title": self.proposal.get("title"),
+                "lead_ids": list(self.proposal.get("lead_ids") or []),
+                "edge_type": self.proposal.get("edge_type"),
+                "universe_key": self.proposal.get("universe_key"),
+                "label": self.proposal.get("label"),
+                "baseline": self.proposal.get("baseline"),
+                "research_lane": self.proposal.get("research_lane"),
+                "falsification_tests": list(
+                    self.proposal.get("falsification_tests") or []),
+                "data_requirements": dict(
+                    self.proposal.get("data_requirements") or {}),
+                "suggested_params": params,
+                "semantic_plan": dict(
+                    self.proposal.get("semantic_plan") or {}),
+                "trial_budget": self.proposal.get("trial_budget"),
+                "lessons_addressed": dict(
+                    prior.get("lessons_addressed") or {}),
+            },
+        }
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"), default=str)
 
 
 def promote_published(conn, *, limit: int = 20, created_by: str = "factory-bridge",
@@ -1276,24 +1455,48 @@ def promote_published(conn, *, limit: int = 20, created_by: str = "factory-bridg
                       past_outcomes=_merge_outcome_evidence(
                           family_history, exact_history),
                       available_days=available_days)
-        if not gate.ok or dry_run:
-            out.append(Promotion(p["proposal_id"], gate.ok, gate=gate.as_dict()))
+        if not gate.ok:
+            persisted = True
+            if not dry_run:
+                # Do not leave the same immutable rejection at the head of the
+                # PUBLISHED window forever.  This is a lifecycle transition,
+                # not a mutation/clamp of the preregistered material.
+                with conn.cursor() as cur:
+                    cur.execute(_SQL_REJECT_PROPOSAL, (p["proposal_id"],))
+                    persisted = cur.fetchone() is not None
+                conn.commit()
+            # Another promoter may have accepted or rejected this immutable
+            # proposal while this worker evaluated it.  Only the transaction
+            # that won the lifecycle update reports the result.
+            if persisted:
+                out.append(Promotion(p["proposal_id"], False,
+                                     gate=gate.as_dict(), proposal=p))
+            continue
+        if dry_run:
+            out.append(Promotion(p["proposal_id"], True, gate=gate.as_dict(),
+                                 proposal=p))
             continue
         row = to_hypothesis_row(p, gate, created_by=created_by)
         with conn.cursor() as cur:
             cur.execute(_SQL_INSERT_HYPOTHESIS, (
+                row["proposal_id"],
                 row["title"], row["rationale"], json.dumps(row["expected_edge"]),
                 json.dumps(row["falsification_criteria"]),
                 json.dumps(row["required_data_products"]), row["created_by"],
-                row["proposal_id"], row["lead_ids"], row["research_packet_ids"],
+                row["lead_ids"], row["research_packet_ids"],
                 row["claim_ids"], row["economic_rationale"], row["counterparty"],
                 row["competing_explanation"], row["competing_explanation_codes"],
                 row["skeptic_sign"], json.dumps(row["source_reported_effect"]),
                 json.dumps(row["mapping_loss"])))
-            hid = str(cur.fetchone()[0])
+            inserted = cur.fetchone()
         conn.commit()
+        if inserted is None:
+            # A concurrent lifecycle transition won the row lock.  It owns the
+            # only result and this worker must not publish a contradictory one.
+            continue
+        hid = str(inserted[0])
         out.append(Promotion(p["proposal_id"], True, hypothesis_id=hid,
-                             gate=gate.as_dict()))
+                             gate=gate.as_dict(), proposal=p))
     return out
 
 
@@ -1303,6 +1506,8 @@ class _PromoConn:
     def __init__(self, published, already=(), family_trials=0, outcomes=(),
                  micro_available_days=61):
         self.published, self.already = published, list(already)
+        self.rejected: set[str] = set()
+        self.accepted: set[str] = set()
         self.family_trials, self.outcomes = family_trials, list(outcomes)
         self.micro_available_days = int(micro_available_days)
         self.micro_dataset_queries: list[tuple] = []
@@ -1342,7 +1547,9 @@ class _PromoCursor:
                 "trial_budget prior_check source_reported_effect "
                 "research_packet_ids claim_ids research_lane semantic_plan").split())
                 for p in self.c.published
-                if p["proposal_id"] not in already]
+                if p["proposal_id"] not in already
+                and p["proposal_id"] not in self.c.rejected
+                and p["proposal_id"] not in self.c.accepted]
             if params:
                 rows = rows[: int(params[0])]
             self._rows = rows
@@ -1354,8 +1561,17 @@ class _PromoCursor:
             self.c.micro_dataset_queries.append(tuple(params or ()))
             self._rows = [(self.c.micro_available_days,)]
         elif "insert into quant.hypotheses" in s:
+            self.c.accepted.add(str(params[0]))
             self.c.inserted.append(params)
             self._rows = [("hyp-" + str(len(self.c.inserted)),)]
+        elif "update research.experiment_proposals" in s:
+            proposal_id = str(params[0])
+            if (proposal_id in self.c.accepted
+                    or proposal_id in self.c.rejected):
+                self._rows = []
+            else:
+                self.c.rejected.add(proposal_id)
+                self._rows = [(proposal_id,)]
         else:
             self._rows = list(self.c.outcomes)
 
@@ -1369,11 +1585,10 @@ class _PromoCursor:
 def _check_fetch_window_excludes_promoted():
     """승격분이 창을 차지하면 새 기획안이 영영 못 들어온다 (t_7cd9bd5f).
 
-    status 는 승격 후에도 PUBLISHED 로 남으므로, 창(가장 오래된 limit 건)에서
-    승격분을 빼는 것은 SQL 의 not exists 몫이다. 이게 빠지면 오래된 승격분이
-    창을 다 채운 시점부터 promote_published 는 매 주기 0건으로 끝나고,
-    리서치 발행 -> 퀀트 승격 공급이 조용히 0 이 된다(실측: PUBLISHED 23건 중
-    미소진 3건이 21~23위라 어떤 주기에도 판정을 받지 못했다).
+    현재 승격은 proposal 상태도 ACCEPTED 로 원자 전이하지만, 과거 PUBLISHED
+    상태로 남은 승격분도 창(가장 오래된 limit 건)에서 빼야 한다. SQL 의
+    not exists 가 빠지면 그런 오래된 승격분이 창을 다 채운 시점부터
+    promote_published 는 매 주기 0건으로 끝난다.
     """
     s = " ".join(_SQL_PUBLISHED.lower().split())
     assert "not exists" in s and "quant.hypotheses" in s, \
@@ -1405,6 +1620,7 @@ def _check_promotion_is_idempotent_and_records_rejection():
     got = promote_published(conn, limit=5)
     assert len(got) == 1 and got[0].accepted, got
     assert len(conn.inserted) == 1 and conn.commits == 1
+    assert conn.accepted == {"prop_ok"}, "승격과 proposal lifecycle 이 갈렸다"
     # 계보가 실제로 실렸는가 - 참조가 아니라 복사여야 사전등록이 성립한다
     assert "prop_ok" in conn.inserted[0], conn.inserted[0]
 
@@ -1413,6 +1629,18 @@ def _check_promotion_is_idempotent_and_records_rejection():
     assert promote_published(again, limit=5) == []
     assert again.inserted == [] and again.commits == 0
 
+    # ACCEPTED/REJECTED are competing terminal transitions on the same row.
+    # Both SQL paths must claim PUBLISHED and return the transition they won;
+    # otherwise concurrent workers can create a hypothesis whose proposal says
+    # REJECTED.
+    accept_sql = " ".join(_SQL_INSERT_HYPOTHESIS.lower().split())
+    reject_sql = " ".join(_SQL_REJECT_PROPOSAL.lower().split())
+    assert "set status = 'accepted'" in accept_sql
+    assert "p.status = 'published'" in accept_sql
+    assert "set status = 'rejected'" in reject_sql
+    assert "status = 'published'" in reject_sql
+    assert "returning proposal_id" in reject_sql
+
     # 거부는 **결과로 남는다** - ok=False 가 목록에 들어오고 INSERT 는 없다
     bad = _prop(proposal_id="prop_bad", edge_type="없는_엣지_유형")
     rej = _PromoConn([bad])
@@ -1420,11 +1648,26 @@ def _check_promotion_is_idempotent_and_records_rejection():
     assert len(res) == 1 and not res[0].accepted, res
     assert rej.inserted == [], "거부된 기획안이 가설이 됐다"
     assert res[0].why, "거부 사유가 비었다 - 리서치가 대응할 수 없다"
+    assert res[0].gate.get("repairs"), "다음 새 기획안의 구조화 교정이 비었다"
+    assert res[0].feedback.startswith('{"codes"'), res[0].feedback
+    feedback = json.loads(res[0].feedback)
+    assert feedback["proposal"]["lead_ids"] == ["lead_a"], feedback
+    assert feedback["proposal"]["suggested_params"] == {
+        "lookback_days": 20}, feedback
+    assert feedback["proposal"]["proposal_id"] == "prop_bad", feedback
+    assert rej.rejected == {"prop_bad"} and rej.commits == 1, (
+        "거부된 불변 기획안이 PUBLISHED 창에 남아 다음 주기에 다시 돈다")
+    assert promote_published(rej, limit=5) == [], \
+        "종결된 Gate 0 거부를 다음 주기가 다시 판정한다"
 
     # dry_run 은 판정만 하고 쓰지 않는다
     dry = _PromoConn([good])
     assert promote_published(dry, limit=5, dry_run=True)[0].accepted
     assert dry.inserted == [] and dry.commits == 0
+    dry_bad = _PromoConn([bad])
+    assert not promote_published(dry_bad, limit=5, dry_run=True)[0].accepted
+    assert not dry_bad.rejected and dry_bad.commits == 0, \
+        "dry-run 이 기획안 상태를 바꿨다"
     print("  기획안->가설 승격 멱등   OK")
 
 
@@ -1552,6 +1795,8 @@ def _check_unmapped_vocabulary_is_rejected():
     """**접수는 실행 가능성의 약속이다** - 실행면에 없는 유형을 받으면 나중에 죽는다."""
     g = gate0(_prop(edge_type="volatility_risk_premium"))
     assert not g.ok and "UNMAPPED_VOCAB" in g.codes
+    assert any(x.get("field") == "edge_type" and x["auto_apply"] is False
+               for x in g.repairs), g.as_dict()
     assert "미구현" in g.reasons[0], g.reasons
     g2 = gate0(_prop(universe_key="내가 만든 유니버스"))
     assert not g2.ok and "UNMAPPED_VOCAB" in g2.codes
@@ -1565,6 +1810,15 @@ def _check_budget_is_enforced():
               past_outcomes=[{"decision": "REJECT", "lesson_codes": ["OVERFIT_PBO"]}])
     assert not g.ok and "OVER_BUDGET" in g.codes, g.as_dict()
     assert g.trials_used == 5
+    assert any(x.get("action") == "NEW_MECHANISM_OR_CEO_BUDGET_DECISION"
+               and x["auto_apply"] is False for x in g.repairs), g.as_dict()
+
+
+def _check_intraday_repair_names_current_contract():
+    result = Gate0Result(ok=False, codes=["INTRADAY_CONTRACT_INVALID"])
+    repair = _repair_suggestions(_prop(), result)[0]
+    assert repair["expected_screening_cohort_version"], repair
+    assert repair["auto_apply"] is False, repair
 
 
 def _check_trial_count_comes_from_executions_not_outcomes():
@@ -1813,9 +2067,16 @@ def _check_out_of_range_param_rejected_at_intake():
     """
     p = _prop()
     p["suggested_params"] = {"top_n": 20, "max_drawdown_stop": 0.35}
+    before = json.dumps(p, ensure_ascii=False, sort_keys=True)
     g = gate0(p)
     assert not g.ok and "PARAM_OUT_OF_RANGE" in g.codes, g.as_dict()
     assert "음수다" in "; ".join(g.reasons), g.reasons
+    assert json.dumps(p, ensure_ascii=False, sort_keys=True) == before, \
+        "Gate 0 가 기존 사전등록의 양수 낙폭 값을 몰래 고쳤다"
+    repair = next(x for x in g.repairs
+                  if x.get("field") == "suggested_params.max_drawdown_stop")
+    assert repair["current"] == 0.35 and repair["auto_apply"] is False
+    assert repair["allowed"]["maximum"] < 0, repair
     # 정상 사양은 통과한다 - 특히 horizon_days=126 (자리 기준 한도)
     p2 = _prop()
     p2["suggested_params"] = {"horizon_days": 126, "top_n": 200,
@@ -1847,6 +2108,12 @@ def _check_micro_coverage_is_used_before_promotion():
     assert conn.micro_dataset_queries[-1] == ("krx-microstructure-daily", "v3")
     blocked = gate0(p, available_days=61)
     assert "UNDERPOWERED_DESIGN" in blocked.codes, blocked.as_dict()
+    power = next(x for x in blocked.repairs
+                 if x.get("code") == "UNDERPOWERED_DESIGN")
+    assert power["available_days"] == 61
+    assert power["current_warmup_days"] == 61
+    assert power["maximum_warmup_days"] == 13, power
+    assert power["auto_apply"] is False
 
     p["data_requirements"]["min_history_days"] = 3
     viable = gate0(p, available_days=61)
@@ -2076,6 +2343,7 @@ if __name__ == "__main__":
     _check_clean_proposal_is_accepted();        print("  정상 기획안 접수         OK")
     _check_unmapped_vocabulary_is_rejected();   print("  어휘 미사상 거부         OK")
     _check_budget_is_enforced();                print("  시도 예산 강제           OK")
+    _check_intraday_repair_names_current_contract()
     _check_trial_count_comes_from_executions_not_outcomes()
     print("  계수=실행기록(종결 아님)  OK")
     _check_unaddressed_lessons_block();         print("  기각 교훈 미대응 차단    OK")

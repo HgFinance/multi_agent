@@ -202,7 +202,8 @@ STATION_SQL = (
         select count(*) from research.methodology_leads""", """
         select count(*) from research.methodology_leads l
          where exists (select 1 from research.experiment_proposals p
-                        where l.lead_id = any(p.lead_ids))"""),
+                        where l.lead_id = any(p.lead_ids)
+                          and p.status in ('PUBLISHED','ACCEPTED'))"""),
     ("기획", "기획안", """
         select count(*) from research.experiment_proposals""", """
         select count(*) from research.experiment_proposals p
@@ -554,6 +555,10 @@ def _check_weakest_station_is_the_dead_one():
     assert st3[0].yield_pct is None and not st3[0].dead
     assert weakest(st3) is None
     assert funnel({}) == [] and weakest([]) is None
+
+    collection_out = STATION_SQL[0][3]
+    assert "p.status in ('PUBLISHED','ACCEPTED')" in collection_out, \
+        "Gate 0 REJECTED 리드를 수집→기획 전환으로 세면 재제안과 수율이 모두 틀린다"
     assert weakest(None) is None
 
 

@@ -406,6 +406,33 @@ services:
     pids_limit: 64
     stop_grace_period: 20s
 
+  # ── quant-api: 실험 제출·조회면 (전략 공장의 주문 창구) ──────────────────
+  # Factory operations submit through this boundary; Hermes never receives a
+  # DB secret or a write-capable MCP surface.
+  # QUANT_DATABASE_URL may point at the least-privilege svc_quant role; the
+  # shared URL remains a migration fallback until that role is configured.
+  quant-api:
+    build:
+      context: .
+      dockerfile: departments/04-quant-backtest/Dockerfile
+    container_name: hedgefund-quant-api
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      # Inject exactly one selected DSN.  Supplying the scoped role must not
+      # leave the broader fallback credential readable in the API process.
+      DATABASE_URL: ${QUANT_DATABASE_URL:-${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}}
+      MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
+    ports:
+      - "127.0.0.1:8037:8037"
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+
   # ── market-api: 시세 읽기 전용 조회면 (F03 "DB 없이 Snapshot API" + 통합계획 6.2) ──
   # 트레이딩·리스크·팀원은 TSDB Credential 없이 이 API 로 Snapshot/Bar/Breadth/DQ 조회.
   market-api:
@@ -791,6 +818,10 @@ services:
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      # Profile MCP headers expand this token for the read-only research
+      # liaison.  Job mutation stays on quant-api/factory workers; Hermes gets
+      # neither a database credential nor an implied write-capable MCP tool.
+      MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0

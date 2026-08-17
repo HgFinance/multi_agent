@@ -25,6 +25,8 @@ import intraday_ast_contract as formula  # noqa: E402
 
 
 NEGATIVE = frozenset({"REJECT", "GATE_HOLD", "KILLED", "DEMOTED"})
+SCREEN_SURVIVOR_RENDER_LIMIT = 3
+SCREEN_SURVIVOR_JSON_MAX_CHARS = 8192
 
 
 @dataclass(frozen=True)
@@ -646,6 +648,11 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
         summary = best.get("oos_summary") or {}
         history.append({
             "ast_fingerprint": best["ast_fingerprint"],
+            # A fingerprint is not executable material.  Preserve the exact,
+            # validated expression and semantic contract selected as `best` so
+            # the next scout/planner can reproduce a measured screening parent.
+            "intraday_signal_expr": best["expr"],
+            "semantic_plan": best["plan"],
             "semantic_fingerprint": semantic_fp, "shape_fingerprint": shape_fp,
             "event": best["plan"]["event"], "context": best["plan"]["context"],
             "qualities": best["plan"]["qualities"], "direction": best["plan"]["direction"],
@@ -665,6 +672,10 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
             "best_net_bps": _number(summary, "mean_net_bps_per_opportunity"),
             "best_fill_rate": _number(summary, "fill_rate"),
             "best_sessions": _number(summary, "sessions"),
+            "best_opportunities": _number(summary, "opportunities"),
+            "candidate_role": str(best.get("candidate_role") or ""),
+            "entry_policy": str(best.get("entry_policy") or ""),
+            "coefficient_policy": str(best.get("coefficient_policy") or ""),
             "score_calibration_status": str(
                 (best.get("score_calibration") or {}).get("status") or
                 "NOT_RECORDED"),
@@ -827,6 +838,63 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
     )
 
 
+def _screen_survivor_json(row: dict) -> str:
+    """Bounded, executable memory for one measured screening-only parent.
+
+    The AST and semantic plan have already passed the governed parsers in
+    ``build``.  Keep the payload deliberately narrow: it is search material,
+    never an outcome that can carry promotion authority.
+    """
+    plan = row["semantic_plan"]
+    payload = {
+        "schema": "intraday-screen-survivor-parent-v1",
+        "ast_fingerprint": row["ast_fingerprint"],
+        "candidate_role": (
+            row["candidate_role"]
+            if row["candidate_role"] in {"LINKED_CANDIDATE", "STRUCTURAL_ABLATION"}
+            else "SCREENING_CANDIDATE"),
+        "intraday_signal_expr": row["intraday_signal_expr"],
+        "semantic_plan": plan,
+        "execution_contract": {
+            "output": plan["output"],
+            "execution": plan["execution"],
+            "horizon_seconds": plan["horizon_seconds"],
+            "entry_policy": row["entry_policy"],
+            "coefficient_policy": row["coefficient_policy"],
+        },
+        "evidence": {
+            "tier": "SCREENING_ONLY",
+            "mean_gross_bps_per_opportunity": row["best_gross_bps"],
+            "mean_implementation_drag_bps": row[
+                "best_implementation_drag_bps"],
+            "mean_net_bps_per_opportunity": row["best_net_bps"],
+            "opportunities": row["best_opportunities"],
+            "sessions": row["best_sessions"],
+            "caveat": (
+                "adaptive same-replay screen; sample size is descriptive only; "
+                "requires an independently preregistered primary experiment on "
+                "forward sessions unseen by this lineage"),
+        },
+        "authority": {
+            "promotion_authority": False,
+            "independent_primary_required": True,
+            "forward_new_sessions_required": True,
+        },
+        "allowed_child_operators": row["allowed_child_operators"],
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"))
+    # Governed ASTs are capped at formula.MAX_NODES (48), while every other
+    # value above comes from controlled vocabularies or numeric evidence.  Keep
+    # an explicit prompt-budget assertion so future payload growth cannot become
+    # silent context flooding.
+    if len(encoded) > SCREEN_SURVIVOR_JSON_MAX_CHARS:
+        raise ValueError(
+            "screen-survivor executable payload exceeds prompt budget: "
+            f"{len(encoded)} > {SCREEN_SURVIVOR_JSON_MAX_CHARS}")
+    return encoded
+
+
 def render(memory: IntradayMemory, *, limit: int = 6) -> str:
     lines = [
         "", "[INTRADAY AST 경험 메모리 - 원장에서 매 주기 재계산]",
@@ -902,6 +970,18 @@ def render(memory: IntradayMemory, *, limit: int = 6) -> str:
         f"  [breeding parents] measured niche elites={len(memory.breeding_parents)}; "
         "only NET_SURVIVOR is alpha-like; SCREEN_SURVIVOR still needs an "
         "independent primary run, and other roles are controlled stepping stones")
+    screen_survivors = [row for row in memory.breeding_parents
+                        if row["breeding_role"] == "SCREEN_SURVIVOR"]
+    if screen_survivors:
+        lines.append(
+            "  [SCREEN_SURVIVOR executable JSON - screening only, no promotion; "
+            f"capped at {SCREEN_SURVIVOR_RENDER_LIMIT}]")
+        for row in screen_survivors[:SCREEN_SURVIVOR_RENDER_LIMIT]:
+            lines.append(f"    SCREEN_SURVIVOR_JSON={_screen_survivor_json(row)}")
+        if len(screen_survivors) > SCREEN_SURVIVOR_RENDER_LIMIT:
+            lines.append(
+                f"    ... {len(screen_survivors) - SCREEN_SURVIVOR_RENDER_LIMIT} "
+                "additional screening survivors omitted by prompt budget")
     for row in memory.breeding_parents[:5]:
         lines.append(
             f"    parent={row['ast_fingerprint']} role={row['breeding_role']} "
