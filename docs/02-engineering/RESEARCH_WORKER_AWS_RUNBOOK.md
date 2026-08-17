@@ -1,5 +1,10 @@
 # 리서치본부 Worker Runtime + Model Plane AWS 런북
 
+> **Scope/status:** 이 런북은 tracked FP8 model-plane 절차의 historical/design
+> baseline이다. 현재 AWS가 AWQ로 전환되었다는 외부 runtime 상태는 이 저장소에서
+> 검증되지 않았으며, 최신 구현 상태는
+> [CURRENT_PROJECT_ARCHITECTURE.md](../CURRENT_PROJECT_ARCHITECTURE.md)를 따른다.
+
 소유: 재일 · 작성 2026-08-13 · 상태: Phase 2/3 첫 수직 슬라이스 (Research)
 
 이 문서는 **이미 떠 있는 Control Plane**(portfolio-bff → CEO → Kanban → dispatcher →
