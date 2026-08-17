@@ -663,7 +663,11 @@ def _labelled_ids(text: str, labels: frozenset[str]) -> tuple[str, ...]:
     ids: list[str] = []
     for label in labels:
         match = re.search(
-            rf"\b{re.escape(label)}\s*[:=]\s*([^\n]+)", text,
+            # A labelled field in a human-readable comment ends at a
+            # statement delimiter.  Do not let workflow_root_task_id consume
+            # later prose such as "Primary child created: t_xxx" on the same
+            # line and accidentally promote that child ID into root_ids.
+            rf"\b{re.escape(label)}\s*[:=]\s*([^;\n]+)", text,
             flags=re.IGNORECASE,
         )
         if match:
