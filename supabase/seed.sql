@@ -228,4 +228,18 @@ values
    'PLACEHOLDER User 3 (계정 전환 테스트용)', 'Asia/Seoul', 'ACTIVE')
 on conflict (user_id) do nothing;
 
+-- 프론트의 currentAccount.ts가 위 세 사용자와 이 세 Fund UUID를 한 쌍으로
+-- 하드코딩한다. Fund가 없으면 최초 Mandate 생성이 FK 위반으로 실패한다.
+-- Mandate 자체는 화면의 lookupOrCreateMandate()가 사용자별로 최초 1회 생성한다.
+insert into accounting.funds
+  (fund_id, fund_code, name, base_currency, inception_date, status)
+values
+  ('b13f5cd1-5df0-4025-92cf-9be03b1a0296',
+   'TEST-CEO-MANDATE', 'Test CEO Mandate Fund', 'USD', date '2026-08-01', 'ACTIVE'),
+  ('50a3c28c-6cee-4bcf-ab07-fa97093dca8e',
+   'TEST-USER2-MANDATE', 'Test User 2 Mandate Fund', 'USD', date '2026-08-01', 'ACTIVE'),
+  ('3838f7d6-0c7c-4e54-85f3-316a451e7eeb',
+   'TEST-USER3-MANDATE', 'Test User 3 Mandate Fund', 'USD', date '2026-08-01', 'ACTIVE')
+on conflict do nothing;
+
 commit;

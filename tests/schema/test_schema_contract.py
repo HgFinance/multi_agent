@@ -192,6 +192,9 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  # Narrow owner-evaluated stock identity projection for the
                  # scoped quant runtime; raw instrument metadata stays private.
                  "20260818001200_quant_stock_identity_projection.sql",
+                 # Fund 생성 시 보수 발생주의 계정(2100/5200/5300)을 같은
+                 # 트랜잭션에서 만들고, 기존 Fund도 idempotent하게 보정한다.
+                 "20260818001300_fund_fee_account_provisioning.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 
