@@ -77,6 +77,12 @@ MODULE_VERSION = "quant-config-binding-v1"
 NON_EXECUTION_KEYS = frozenset({"observation_refs", "universe",
                                 "walk_forward_window_days"})
 
+# Trusted pipeline provenance is neither a strategy knob nor agent-authored
+# preregistration context.  Keep it separate from NON_EXECUTION_KEYS so bind()
+# does not report the misleading "preregistration includes it" ignored-field
+# message.  The orchestrator validates this payload before it reaches a runner.
+SYSTEM_METADATA_KEYS = frozenset({"_trial_family_reservation_v1"})
+
 EDGE_KEYS = frozenset({
     "type",            # edge_type - 어느 시그널 템플릿인가
     "universe_key",    # 유니버스
@@ -302,7 +308,9 @@ def unknown_edge_keys(edge: dict | None) -> list[str]:
       넓히는 순간 세 곳이 같이 넓어진다 - 규칙이 아니라 구조로 막는다.
     """
     return sorted(k for k in (edge or {})
-                  if k not in EDGE_KEYS and k not in NON_EXECUTION_KEYS)
+                  if (k not in EDGE_KEYS
+                      and k not in NON_EXECUTION_KEYS
+                      and k not in SYSTEM_METADATA_KEYS))
 
 
 def rejection_reasons(hyp: dict) -> list[str]:
@@ -934,6 +942,10 @@ def _check_preregistration_keys_are_not_unknown():
             f"실행면이 받아 줄 가설을 막는다")
 
     # 모르는 이름은 여전히 거부한다 - 넓힌 것이 아니라 맞춘 것이다
+    for k in SYSTEM_METADATA_KEYS:
+        assert unknown_edge_keys({"type": "momentum", k: {}}) == [], (
+            f"system metadata {k!r} was rejected as an execution parameter")
+
     assert unknown_edge_keys({"formation_window_days": 42}) == \
         ["formation_window_days"], "모르는 이름까지 통과시키면 안 된다"
     print("  사전등록 키 != 미지 파라미터 OK")

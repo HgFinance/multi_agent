@@ -118,19 +118,20 @@ def intraday_execution_retirement_reason(conn, hypothesis_id: str) -> str:
     except Exception:  # noqa: BLE001 - normal orchestration remains authoritative
         return ""
     edge = row[0] if row and isinstance(row[0], dict) else None
-    if not edge or str(edge.get("research_lane") or "").upper() != "INTRADAY_EVENT":
+    if not edge or str(edge.get("research_lane") or "").strip().upper() != \
+            "INTRADAY_EVENT":
         return ""
     try:
         from intraday_experiment_runner import (  # noqa: PLC0415
             StaleIntradayCohortError,
-            config_from_edge,
             current_intraday_execution_contract_rejection,
+            validate_current_explicit_v2_execution_edge,
         )
 
         contract_reason = current_intraday_execution_contract_rejection(edge)
         if contract_reason:
             return contract_reason
-        config_from_edge(edge)
+        validate_current_explicit_v2_execution_edge(edge)
     except StaleIntradayCohortError as exc:
         return f"STALE_INTRADAY_COHORT: {exc}"
     except Exception:  # noqa: BLE001 - other contract failures keep existing semantics

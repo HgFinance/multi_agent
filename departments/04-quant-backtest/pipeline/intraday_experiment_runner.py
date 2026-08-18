@@ -136,6 +136,68 @@ DATASET_BY_EVENT_SOURCE = {
 }
 KST = ZoneInfo("Asia/Seoul")
 
+INTRADAY_LANE = "INTRADAY_EVENT"
+TRIAL_RESERVATION_KEY = "_trial_family_reservation_v1"
+
+# The proposal bridge may expose only these knobs to the research agent.  Keep
+# this set here, next to the decoder that actually consumes the values, so a
+# bridge/runner drift cannot silently discard a proposed experiment parameter.
+INTRADAY_PROPOSAL_PARAMETER_KEYS = frozenset({
+    "intraday_signal_expr", "source_baseline_expr",
+    "parent_ast_fingerprint", "parent_candidate_identity_fingerprint",
+    "horizon_seconds", "sample_interval_seconds",
+    "feature_lookback_seconds", "order_latency_ms", "max_quote_age_seconds",
+    "fee_bps_per_side", "maker_fee_bps_per_side", "execution", "threshold",
+    "entry_policy", "coefficient_policy", "minimum_predicted_edge_bps",
+    "evaluation_days", "instrument_shard_size", "position_mode",
+    "fast_screen_enabled", "fast_screen_sessions", "fast_screen_instruments",
+    "fast_screen_min_opportunities", "fast_screen_min_net_bps",
+    "screening_population", "screening_cohort_version",
+    "feature_window_contract_version",
+    "migration_parent_ast_fingerprint",
+    "migration_parent_feature_window_contract_version",
+})
+
+# These additional fields are controlled execution contracts rather than LLM
+# proposal knobs.  They are still legitimate inputs to the current explicit-V2
+# decoder and therefore belong to the production admission surface.
+CURRENT_EXPLICIT_V2_EXECUTION_KEYS = frozenset({
+    "type", "research_lane", "universe_key", "semantic_plan",
+    *INTRADAY_PROPOSAL_PARAMETER_KEYS,
+    "feature_cube_spec",
+    "intermediate_screen_enabled", "intermediate_screen_sessions",
+    "intermediate_screen_instruments", "intermediate_candidate_budget",
+    "successive_halving_eta", "forward_confirmation_min_new_sessions",
+})
+
+# Only trusted pipeline components may stamp these fields.  They are accepted
+# by admission but are not candidate formula knobs and must never be copied
+# into the evaluator config unless config_from_edge explicitly binds them.
+INTRADAY_SYSTEM_METADATA_KEYS = frozenset({
+    "semantic_fingerprint", "data_source", "resolved_data_contract",
+    "primary_attempts_before", "historical_exact_screening_exposures",
+    TRIAL_RESERVATION_KEY,
+})
+
+CURRENT_EXPLICIT_V2_ALLOWED_EDGE_KEYS = frozenset(
+    CURRENT_EXPLICIT_V2_EXECUTION_KEYS | INTRADAY_SYSTEM_METADATA_KEYS)
+
+# Every sidecar is executable during adaptive screening.  Unknown nested keys
+# are therefore just as dangerous as unknown primary keys: config_from_edge
+# preserves sidecar provenance with ``**raw`` and would otherwise make a typo
+# look as though it had affected the replay.
+CURRENT_EXPLICIT_V2_SCREENING_CANDIDATE_KEYS = frozenset({
+    "candidate_role", "source_lead_ids", "title", "ast_fingerprint",
+    "intraday_signal_expr", "semantic_plan", "entry_policy",
+    "coefficient_policy", "source_baseline_expr",
+    "feature_window_contract_version", "evolution_role",
+    "evolution_operators", "parent_ast_fingerprint",
+    "parent_candidate_identity_fingerprint",
+    "parent_feature_window_contract_version", "parent_of_ast_fingerprint",
+    "screening_cohort_version", "ablation_operator", "ablation_path",
+    "ablation_of_ast_fingerprint", "ablation_version",
+})
+
 # Historical V1/V11 configs remain decodable below for audit replay and as
 # migration parents. Production entry points use this separate preflight so a
 # missing contract can never silently select the legacy evaluator for a new
@@ -155,7 +217,7 @@ def current_intraday_execution_contract_rejection(edge: dict) -> str:
     """
     if not isinstance(edge, dict):
         return ""
-    if str(edge.get("research_lane") or "").upper() != "INTRADAY_EVENT":
+    if str(edge.get("research_lane") or "").strip().upper() != INTRADAY_LANE:
         return ""
 
     primary_contract = str(
@@ -189,6 +251,47 @@ def current_intraday_execution_contract_rejection(edge: dict) -> str:
                 f"{EXPLICIT_FEATURE_WINDOW_CONTRACT!r}; got "
                 f"{candidate_contract or '(missing)'!r}")
     return ""
+
+
+def current_explicit_v2_unknown_edge_keys(edge: dict) -> list[str]:
+    """Return unbound primary and sidecar keys for production V2 admission."""
+    if not isinstance(edge, dict):
+        return ["expected_edge"]
+    unknown = [
+        str(key) for key in edge
+        if key not in CURRENT_EXPLICIT_V2_ALLOWED_EDGE_KEYS
+    ]
+    screening = edge.get("screening_population")
+    if isinstance(screening, list):
+        for index, candidate in enumerate(screening):
+            if not isinstance(candidate, dict):
+                continue
+            unknown.extend(
+                f"screening_population[{index}].{key}"
+                for key in candidate
+                if key not in CURRENT_EXPLICIT_V2_SCREENING_CANDIDATE_KEYS)
+    return sorted(unknown)
+
+
+def validate_current_explicit_v2_execution_edge(
+        edge: dict) -> tuple[dict, IntradayLaneSpec]:
+    """Fail closed, then decode one current production intraday edge.
+
+    Historical configs continue to call :func:`config_from_edge` directly so
+    frozen V1 evidence remains reproducible.  New production admissions use
+    this stricter wrapper and cannot silently ignore a misspelled field.
+    """
+    if not isinstance(edge, dict):
+        raise ValueError("intraday expected_edge must be an object")
+    unknown = current_explicit_v2_unknown_edge_keys(edge)
+    if unknown:
+        raise ValueError(
+            "current explicit-v2 intraday edge contains unsupported keys: "
+            f"{unknown}; allowed={sorted(CURRENT_EXPLICIT_V2_ALLOWED_EDGE_KEYS)}")
+    contract_rejection = current_intraday_execution_contract_rejection(edge)
+    if contract_rejection:
+        raise ValueError(contract_rejection)
+    return config_from_edge(edge)
 
 
 def _feature_window_contract(config: dict) -> str:
@@ -937,7 +1040,7 @@ def _assert_resolved_data_contract(config: dict, *, selected: dict | None = None
 
 def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
     """Bind only controlled knobs; never silently inherit daily defaults."""
-    if str(edge.get("research_lane") or "").upper() != "INTRADAY_EVENT":
+    if str(edge.get("research_lane") or "").strip().upper() != INTRADAY_LANE:
         raise ValueError("intraday runner requires research_lane=INTRADAY_EVENT")
     if str(edge.get("universe_key") or "krx_all").lower() != "krx_all":
         raise ValueError("intraday runner currently requires universe_key=krx_all")
@@ -2203,7 +2306,7 @@ def prepare(hyp: dict, *, market_conn, meta_conn=None,
         raise RuntimeError(
             "intraday preparation requires reference-plane stock validation")
     edge = hyp.get("expected_edge") or {}
-    config, spec = config_from_edge(edge)
+    config, spec = validate_current_explicit_v2_execution_edge(edge)
     _assert_resolved_data_contract(config)
     frozen_cutoff = cutoff or datetime.now(timezone.utc)
     selected = select_slice(market_conn, config, cutoff=frozen_cutoff)

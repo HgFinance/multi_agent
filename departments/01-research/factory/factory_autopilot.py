@@ -3658,11 +3658,19 @@ def _structurally_blocked(conn, hypothesis_ids: list) -> dict:
 
 def _edge_execution_rejections(edge: dict, strategy_catalog) -> list[str]:
     """Validate an expected edge against the runner selected by its lane."""
-    lane = str((edge or {}).get("research_lane") or "").upper()
+    lane = str((edge or {}).get("research_lane") or "").strip().upper()
+    allowed_lanes = {"", "DAILY_CROSS_SECTIONAL", "INTRADAY_EVENT"}
+    if lane not in allowed_lanes:
+        return [
+            f"unsupported research_lane={edge.get('research_lane')!r}; "
+            f"expected one of {sorted(allowed_lanes)}"
+        ]
     if lane == "INTRADAY_EVENT":
         try:
-            from intraday_experiment_runner import config_from_edge  # noqa: PLC0415
-            config_from_edge(edge)
+            from intraday_experiment_runner import (  # noqa: PLC0415
+                validate_current_explicit_v2_execution_edge,
+            )
+            validate_current_explicit_v2_execution_edge(edge)
             return []
         except (ImportError, TypeError, ValueError) as exc:
             return [f"인트라데이 실행 계약이 거부한다: {exc}"]
@@ -3675,7 +3683,9 @@ def _edge_execution_rejections(edge: dict, strategy_catalog) -> list[str]:
                 f"사용 가능: {', '.join(sorted(strategy_catalog))}"]
     try:
         from config_binding import rejection_reasons  # noqa: PLC0415
-        return rejection_reasons({"expected_edge": edge})
+        daily_edge = dict(edge or {})
+        daily_edge.pop("research_lane", None)
+        return rejection_reasons({"expected_edge": daily_edge})
     except Exception:  # noqa: BLE001 - 진단을 못 읽었다고 실행을 막지는 않는다
         return []
 
@@ -4719,9 +4729,12 @@ def _check_execution_rejections_are_attributable():
                     "arg": {"op": "field", "field": "queue_imbalance_l1"},
                     "seconds": 5,
                 },
-                {"op": "field", "field": "realized_volatility_bps"},
+                {"op": "field", "field": "realized_volatility_bps",
+                 "seconds": 5},
             ],
         },
+        "feature_window_contract_version":
+            CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT,
         "semantic_plan": {
             "event": "QUOTE_IMBALANCE", "output": "TAKER_NET_PNL",
             "context": ["ALL"], "direction": "FOLLOW",

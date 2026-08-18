@@ -47,6 +47,16 @@ for _research_collectors in (
 
 ORCH_VERSION = "quant-experiment-orchestrator-v2"
 TRIAL_RESERVATION_KEY = "_trial_family_reservation_v1"
+DAILY_RESEARCH_LANE = "DAILY_CROSS_SECTIONAL"
+INTRADAY_RESEARCH_LANE = "INTRADAY_EVENT"
+ALLOWED_RESEARCH_LANES = frozenset({
+    "", DAILY_RESEARCH_LANE, INTRADAY_RESEARCH_LANE,
+})
+TRIAL_RESERVATION_REQUIRED_KEYS = frozenset({
+    "reservation_id", "trial_family_id", "trial_number", "trial_budget",
+    "orchestrator_version",
+})
+TRIAL_RESERVATION_OPTIONAL_KEYS = frozenset({"counted_aliases"})
 
 from strategy_templates import (           # noqa: E402  (같은 디렉터리 모듈)
     NOT_IMPLEMENTED,
@@ -271,6 +281,71 @@ def feasibility(hypothesis: dict, existing_datasets: set,
             else f"'{edge}' 는 어휘에 없다 - 사용 가능: {sorted(catalog)}"
         )
     return (not missing), missing, backlog
+
+
+def normalized_research_lane(edge: dict) -> str:
+    """Canonicalize the optional lane discriminator without guessing typos."""
+    if not isinstance(edge, dict):
+        return ""
+    return str(edge.get("research_lane") or "").strip().upper()
+
+
+def research_lane_rejection_reason(edge: dict) -> str:
+    lane = normalized_research_lane(edge)
+    if lane in ALLOWED_RESEARCH_LANES:
+        return ""
+    return (
+        f"unsupported research_lane={edge.get('research_lane')!r}; expected "
+        f"one of {sorted(ALLOWED_RESEARCH_LANES)}")
+
+
+def execution_surface_rejection_reasons(hypothesis: dict) -> list[str]:
+    """Validate the execution contract for the hypothesis' actual lane.
+
+    The daily binder and the intraday runner intentionally expose different
+    parameter surfaces.  Passing an ``explicit-v2`` microstructure edge to the
+    daily binder makes every intraday-only key look unknown; passing a daily
+    edge through the intraday decoder is equally wrong.  Keep the dispatch in
+    one pre-lifecycle gate and fail closed if either validator itself raises.
+    """
+
+    if not isinstance(hypothesis, dict):
+        return ["hypothesis must be an object"]
+    edge = hypothesis.get("expected_edge") or {}
+    if not isinstance(edge, dict):
+        return ["expected_edge must be an object"]
+    lane_rejection = research_lane_rejection_reason(edge)
+    if lane_rejection:
+        return [lane_rejection]
+    lane = normalized_research_lane(edge)
+    try:
+        if TRIAL_RESERVATION_KEY in edge:
+            _reservation_payload(edge[TRIAL_RESERVATION_KEY])
+        if lane == INTRADAY_RESEARCH_LANE:
+            from intraday_experiment_runner import (
+                validate_current_explicit_v2_execution_edge,
+            )
+
+            validate_current_explicit_v2_execution_edge(edge)
+            return []
+
+        from config_binding import bind
+
+        # research_lane is an orchestrator discriminator, not a daily strategy
+        # parameter.  Validate a copy so explicit DAILY and an omitted lane are
+        # execution-equivalent and the caller's preregistration is not mutated.
+        daily_edge = dict(edge)
+        daily_edge.pop("research_lane", None)
+        daily_hypothesis = dict(hypothesis)
+        daily_hypothesis["expected_edge"] = daily_edge
+        return list(bind(daily_hypothesis, {}).rejected)
+    except Exception as exc:  # noqa: BLE001 - execution admission boundary
+        scope = (INTRADAY_RESEARCH_LANE if lane ==
+                 INTRADAY_RESEARCH_LANE else "DAILY")
+        return [
+            f"{scope} execution-surface validation failed closed "
+            f"({type(exc).__name__}): {exc}"
+        ]
 
 
 # ▶ **상태 머신이 세 갈래로 갈라져 있다** (2026-08-04 실측)
@@ -680,13 +755,58 @@ def _reservation_payload(value) -> dict:
             raise ValueError("invalid trial reservation JSON") from exc
     if not isinstance(value, dict):
         raise ValueError("trial reservation must be a JSON object")
-    family = str(value.get("trial_family_id") or "")
-    try:
-        number = int(value.get("trial_number"))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("trial reservation number is invalid") from exc
-    if not family or number < 1:
-        raise ValueError("trial reservation family/number is invalid")
+
+    keys = set(value)
+    missing = sorted(TRIAL_RESERVATION_REQUIRED_KEYS - keys)
+    unknown = sorted(
+        keys - TRIAL_RESERVATION_REQUIRED_KEYS -
+        TRIAL_RESERVATION_OPTIONAL_KEYS)
+    if missing or unknown:
+        raise ValueError(
+            "trial reservation schema mismatch: "
+            f"missing={missing}, unknown={unknown}")
+
+    version = value.get("orchestrator_version")
+    if not isinstance(version, str) or version != ORCH_VERSION:
+        raise ValueError(
+            "trial reservation orchestrator_version is invalid: "
+            f"expected {ORCH_VERSION!r}")
+
+    reservation_id = value.get("reservation_id")
+    if not isinstance(reservation_id, str) or not reservation_id.strip() \
+            or reservation_id != reservation_id.strip():
+        raise ValueError("trial reservation id is invalid")
+    if reservation_id.startswith("legacy-experiment:"):
+        if not reservation_id.removeprefix("legacy-experiment:").strip():
+            raise ValueError("legacy trial reservation id is invalid")
+    else:
+        try:
+            uuid.UUID(reservation_id)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("trial reservation id must be a UUID") from exc
+
+    family = value.get("trial_family_id")
+    if (not isinstance(family, str) or family != family.strip()
+            or not family.startswith("fam_") or len(family) <= 4):
+        raise ValueError("trial reservation family is invalid")
+
+    number = value.get("trial_number")
+    budget = value.get("trial_budget")
+    if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+        raise ValueError("trial reservation number is invalid")
+    if isinstance(budget, bool) or not isinstance(budget, int) or budget < 1:
+        raise ValueError("trial reservation budget is invalid")
+
+    aliases = value.get("counted_aliases", [])
+    if not isinstance(aliases, list) or any(
+            not isinstance(alias, str)
+            or alias != alias.strip()
+            or not alias.startswith("fam_")
+            or len(alias) <= 4
+            for alias in aliases):
+        raise ValueError("trial reservation counted_aliases are invalid")
+    if len(aliases) != len(set(aliases)) or family in aliases:
+        raise ValueError("trial reservation counted_aliases are not unique")
     return dict(value)
 
 
@@ -775,6 +895,8 @@ def _reserve_trial_family(conn, cur, *, hypothesis_id: str, hyp: dict,
             }
             if len(families) > 1:
                 current["counted_aliases"] = list(families[1:])
+
+        current = _reservation_payload(current)
 
         cur.execute(
             f"""update quant.hypotheses
@@ -903,8 +1025,25 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         # V11 evidence. The runtime decoder remains backward compatible for
         # historical reproduction and formula migration.
         execution_edge = hyp["expected_edge"]
-        if str(execution_edge.get("research_lane") or "").upper() == \
-                "INTRADAY_EVENT":
+        if not isinstance(execution_edge, dict):
+            return OrchestratorReport(
+                hypothesis_id=str(hid), title=title,
+                verdict="NOT_RUNNABLE",
+                missing=["contract:EXPECTED_EDGE_OBJECT"],
+                backlog=["expected_edge must be a JSON object"])
+        lane_rejection = research_lane_rejection_reason(execution_edge)
+        if lane_rejection:
+            return OrchestratorReport(
+                hypothesis_id=str(hid), title=title,
+                verdict="NOT_RUNNABLE",
+                missing=["contract:RESEARCH_LANE"],
+                backlog=[lane_rejection])
+        research_lane = normalized_research_lane(execution_edge)
+        if "research_lane" in execution_edge:
+            execution_edge = dict(execution_edge)
+            execution_edge["research_lane"] = research_lane
+            hyp["expected_edge"] = execution_edge
+        if research_lane == INTRADAY_RESEARCH_LANE:
             from intraday_experiment_runner import (
                 SUPERSEDED_INTRADAY_FEATURE_WINDOW_CONTRACT,
                 current_intraday_execution_contract_rejection,
@@ -933,8 +1072,7 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
 
         res = resolve_data(
             execution_products, meta_conn=conn, market_conn=market_conn,
-            research_lane=str((hyp.get("expected_edge") or {}).get(
-                "research_lane") or ""),
+            research_lane=research_lane,
             requested_event_source=str((hyp.get("expected_edge") or {}).get(
                 "data_source") or "AUTO"))
         if not res.ok:
@@ -959,14 +1097,35 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         if not ok:
             return report          # PROPOSED 유지 - 수단 부족은 가설의 죄가 아니다
 
+        # Validate execution-surface parameter ranges before changing lifecycle
+        # state or consuming a trial reservation.  A signed hypothesis with an
+        # invalid value is not evidence against the idea and must fail closed as
+        # NOT_RUNNABLE rather than crash inside the evaluator.
+        binding_rejections = execution_surface_rejection_reasons(hyp)
+        if binding_rejections:
+            report.verdict = "NOT_RUNNABLE"
+            report.missing.extend([f"preregistration:{reason}"
+                                   for reason in binding_rejections])
+            report.backlog.append(
+                "Execution-surface parameter validation failed; keep the hypothesis "
+                "PROPOSED and register a corrected value as a new proposal/trial.")
+            return report
+
+        # The daily binder has now validated an immutable copy without the lane
+        # discriminator.  Remove it from the actual daily execution copy too so
+        # the later default chain sees the same config and input hash.
+        if research_lane != INTRADAY_RESEARCH_LANE:
+            daily_edge = dict(hyp.get("expected_edge") or {})
+            daily_edge.pop("research_lane", None)
+            hyp["expected_edge"] = daily_edge
+
         # Intraday source coverage is a pre-trial concern. Probe and persist it
         # before preregistration, experiment registration, or family pressure is
         # calculated.  The governed 6/20/60 funnel requires 60 evaluation
         # sessions plus at least one strictly prior calibration session; shorter
         # history is retried later without polluting DSR/PBO trial accounting.
         edge = hyp.get("expected_edge") or {}
-        intraday_lane = (
-            str(edge.get("research_lane") or "").upper() == "INTRADAY_EVENT")
+        intraday_lane = research_lane == INTRADAY_RESEARCH_LANE
         if intraday_lane:
             if market_conn is None:
                 report.verdict = "NOT_RUNNABLE"
@@ -1006,7 +1165,7 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         # edge 로부터 실질 필드를 채운다(가설 발행기가 아직 평평한 스키마다)
         edge = hyp.get("expected_edge") or {}
         spec_row.setdefault("strategy_family", edge.get("type"))
-        intraday_lane = str(edge.get("research_lane") or "").upper() == "INTRADAY_EVENT"
+        intraday_lane = research_lane == INTRADAY_RESEARCH_LANE
         if intraday_lane:
             spec_row.update({
                 "features": [edge.get("intraday_signal_expr")],

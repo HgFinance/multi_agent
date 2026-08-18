@@ -17,6 +17,25 @@ for path in (FACTORY, PIPELINE):
 import factory_autopilot as autopilot  # noqa: E402
 
 
+def test_execution_diagnostic_normalizes_daily_lane_and_rejects_typos() -> None:
+    catalog = {"momentum": {}}
+    assert autopilot._edge_execution_rejections({
+        "type": "momentum",
+        "universe_key": "krx_all",
+        "research_lane": " daily_cross_sectional ",
+    }, catalog) == []
+    rejection = autopilot._edge_execution_rejections({
+        "type": "momentum",
+        "universe_key": "krx_all",
+        "research_lane": "INTRDAY_EVENT",
+    }, catalog)
+    assert rejection and "unsupported research_lane" in rejection[0]
+
+
+def test_execution_rejection_selfcheck_uses_current_explicit_v2_edge() -> None:
+    autopilot._check_execution_rejections_are_attributable()
+
+
 def test_current_v2_memory_excludes_legacy_execution_evidence() -> None:
     evidence = autopilot._CURRENT_V2_INTRADAY_MEMORY_EVIDENCE
     assert autopilot.CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT in evidence

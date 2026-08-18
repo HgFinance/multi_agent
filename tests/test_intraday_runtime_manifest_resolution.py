@@ -443,7 +443,8 @@ def test_autopilot_and_orchestrator_pass_the_same_lane_to_resolution() -> None:
         encoding="utf-8")
     assert 'manifest_index(\n            conn, research_lane="INTRADAY_EVENT")' in autopilot
     assert "lane == \"INTRADAY_EVENT\"" in autopilot
-    assert "research_lane=str((hyp.get(\"expected_edge\") or {}).get(" in orchestrator
+    assert "research_lane = normalized_research_lane(execution_edge)" in orchestrator
+    assert "research_lane=research_lane," in orchestrator
     assert "requested_event_source=str((hyp.get(\"expected_edge\") or {}).get(" \
         in orchestrator
     assert 'resolved_edge["data_source"] = res.execution_contract[' in orchestrator
