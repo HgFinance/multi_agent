@@ -1240,7 +1240,17 @@ def get_mandate_current(mandate_id: str):
     between two incompatible shapes.  Older repository implementations may
     not expose ``get`` yet; in that case the canonical binding remains
     available and an ACTIVE mandate fails closed when its binding is absent.
+
+    성능(2026-08-14): Postgres 구현이 있으면 `get_mandate_current_snapshot()` 한 번의
+    JOIN 왕복으로 아래 4단계(각자 별도 커넥션 체크아웃)를 대신한다 - 없거나
+    `None`을 돌려주면(판단 유보) 기존 4단계 경로로 그대로 떨어진다. 응답 모양은
+    두 경로가 동일해야 하고, `postgres_repository.py`의 `get_mandate_current_snapshot`
+    docstring에 그 계약이 적혀 있다.
     """
+    # 2026-08-14 UI 저장 경로(PUT .../mandates/{id})가 만드는 override다. 이
+    # metadata 행이 있으면 그게 사용자가 마지막으로 저장한 최신 상태이므로
+    # version 기반 경로보다 always 우선한다 - version 시스템은 이 override가
+    # 없을 때만 쓰는 레거시 경로다.
     get_metadata = getattr(_mandate_repo, "get_mandate_metadata", None)
     metadata = get_metadata(mandate_id) if callable(get_metadata) else None
     if metadata:
@@ -1260,6 +1270,18 @@ def get_mandate_current(mandate_id: str):
             "policy": policy,
             "metadata": metadata,
         }
+
+    # metadata override가 없을 때만 아래 legacy version 경로를 탄다 - 그 경로
+    # 안에서 fast path(성능 최적화, 2026-08-14)를 먼저 시도한다.
+    fast_snapshot = getattr(_mandate_repo, "get_mandate_current_snapshot", None)
+    if callable(fast_snapshot):
+        response = fast_snapshot(mandate_id)
+        if response is not None:
+            if response["status"] == "ACTIVE" and (
+                not response.get("mandate_version_id") or not response.get("policy_hash")
+            ):
+                raise HTTPException(status_code=503, detail="canonical_mandate_binding_unavailable")
+            return response
 
     version, status = _mandate_repo.get_mandate_current(mandate_id)
     if version <= 0:
