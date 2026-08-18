@@ -22,6 +22,9 @@ websockets
 # Agent와 결정론적 서비스의 경계에서 입력을 검증한다. fastapi가 끌어오지만
 # 계약 모듈이 직접 의존하므로 명시한다.
 pydantic>=2
+# PAPER order orchestration exposes an authenticated FastMCP endpoint directly;
+# do not rely on the separately installed Hermes CLI to provide this runtime.
+mcp>=1.26,<2
 # Portfolio BFF verifies hosted Supabase Auth access tokens locally via the
 # project's asymmetric JWKS. ``crypto`` supplies RSA/EC/EdDSA verification.
 PyJWT[crypto]>=2.8,<3
