@@ -1,5 +1,26 @@
 # Personal Hedge Fund Agent 실행 현황과 통합 계획
 
+## Current status board (source audit: 2026-08-18)
+
+이 표가 이 문서의 현재 상태 요약이다. 상세 구조와 책임 경계는
+[CURRENT_PROJECT_ARCHITECTURE.md](CURRENT_PROJECT_ARCHITECTURE.md), 실행 계약은
+[FINAL_RUNTIME_ARCHITECTURE.md](02-engineering/FINAL_RUNTIME_ARCHITECTURE.md)를
+참조한다. `TRACKED_MAIN`은 `origin/main`에 존재한다는 뜻이며, 실제 AWS/API
+동작은 별도의 `RUNTIME_VERIFIED` 증거가 없으면 주장하지 않는다.
+
+| Area | Status | Tracked-main evidence | Runtime evidence | Blocking gap | Next action |
+|---|---|---|---|---|---|
+| Branch/source relationship | HISTORICAL / DRIFT | `qa-department` `6e35972`; `origin/main` `6d2327c`; branch is 217 commits behind | none in this checkout | branch does not contain latest main model-plane changes | review main-derived docs before branch merge |
+| Hermes heads and employee registry | IMPLEMENTED / TRACKED_MAIN | 8 profiles; 10 LLM-capable workers; 5 deterministic runners; worker tests | not current-process verified | end-to-end production lifecycle remains partial | run environment-specific smoke/contract probes |
+| Worker model serving | IMPLEMENTED / TRACKED_MAIN | `origin/main` AWQ promotion `b3fb8c5`; Compose, gateway, registry | AWS process health unavailable | live digest, startup/restart, API health, VRAM not tracked here | capture runtime evidence without changing config |
+| FP8/AWQ quality evaluation | TRACKED_MAIN | External-50, Internal-50 v1/v2 result files under `benchmarks/quantization/results/` | inference not run in this audit | AWQ+LoRA column and infrastructure metrics are absent | run only under a separately approved benchmark protocol |
+| QA topology | IMPLEMENTED / PARTIAL | async general-response lane, conditional worker fan-out, blocking portfolio graph | not runtime verified | topology-specific integration evidence | preserve async-vs-blocking distinction |
+| QLoRA training pipeline | PLANNED | no reusable NF4 notebook/script/validator/promotion run found | none | training implementation and adapter artifacts | define and validate pipeline separately |
+| Full production order lifecycle | PARTIAL | contracts/runners exist | no continuous live lifecycle evidence | cross-department integration and external runtime proof | close acceptance scenarios before promotion |
+
+The dated status material below is retained as historical evidence and is not a
+replacement for this board.
+
 > **Current snapshot:** 최신 저장소 구조·worker registry·모델 serving 불일치와
 > 구현/계획 상태는 [HgFinance Current Architecture](CURRENT_PROJECT_ARCHITECTURE.md)를
 > 우선 확인한다. 이 문서의 날짜가 붙은 실행 감사·DB·Container 수치는 해당
@@ -11,7 +32,10 @@
 
 > **Risk/QA 보안 보정(2026-08-05)**: Worker Scope fail-closed, QA runtime 미설정 DENY, Risk/QA 명령 인증과 공통 Replay contract는 `IMPLEMENTED`/`TEST_VERIFIED`다. Redis 두 Decision Event Replay probe와 rollback형 DB/Event smoke, Risk/QA Compose 기동·formal healthcheck는 `RUNTIME_VERIFIED`다. Claude 환경에서 Risk/QA 전체 `ruff check`·`ruff format --check`가 통과했고 참조 없는 legacy Worker Graph·구형 fixture·중복 Counterparty self-check를 제거했다. Production preflight는 Event Redis와 Research Packet URL을 명시적으로 요구하며, 실제 API·PostgreSQL Decision/Case Replay, 승인 Corpus, 전역 Issuer·mTLS·IAM 매핑은 여전히 `BLOCKED`다.
 
-> 전사 런타임 기준(2026-08-07): 8개 부서장은 Hermes + Codex/Claude Code다. LLM Worker Registry는 CEO 1·HR 5·Research 6·Trading 2·Risk 1·Quant 7·Accounting 1·QA 2이고, 결정론 runner는 `desk-runner`·`risk-runner`·`qa-runner`·`back-office-runner` 4개다. 따라서 실제 직원 수는 부서별 1·5·6·3·2·7·2·3, 총 29명이다. 기존 역할명은 감사·Profile 호환 Alias일 수 있으며 현재 실행 수는 각 Profile의 `workers`, `runtime_personalities`와 결정론 Worker Registry를 따른다.
+> **HISTORICAL snapshot (2026-08-07):** 당시 기록은 8개 부서장과
+> 부서별 worker 수를 정리한 자료이며, 현재 worker registry의 값으로
+> 재사용하지 않는다. 현재 수치는 상단 status board와
+> `departments/*/hermes/config.yaml`을 따른다.
 
 > 문서 상태: Confirmed Execution and Coordination Plan v2.2
 > 감사 기준일: 2026-08-03 10:20 KST

@@ -2,6 +2,12 @@
 
 > **Status:** current repository snapshot · **reviewed:** 2026-08-18 KST
 >
+> **Source audit:** this checkout is `qa-department` at `6e35972`, which is 217
+> commits behind `origin/main` at `6d2327c`. Current implementation claims in
+> this document follow the newer `origin/main` executable/config state where
+> the two differ. Branch-only facts are labeled `TRACKED_BRANCH`; main facts
+> are labeled `TRACKED_MAIN`.
+>
 > This document is an implementation audit, not a target-state specification. The
 > repository, its contracts, tests, and tracked configuration are the source of
 > truth. `RUNTIME_VERIFIED` is reserved for evidence of an actual process/API/DB
@@ -25,10 +31,13 @@ The repository currently verifies the following shape:
 - Trading, risk, accounting, quant, and QA contracts and deterministic modules
   exist, but the repository does not prove one continuously operated,
   end-to-end production order lifecycle.
-- Tracked model-serving configuration still defaults to **Qwen2.5-14B FP8**,
-  `max-model-len=16384`, and `gpu-memory-utilization=0.90`. The requested
-  AWS AWQ production state and the associated benchmark result files are not
-  present in this checkout; they are therefore not stated as implemented.
+- `origin/main` tracks the promoted **Qwen2.5-14B-Instruct-AWQ** worker model,
+  served as `qwen2.5-14b-instruct-awq`, with 8192/0.85 serving defaults and
+  FP8 KV cache. The checked-out branch still contains the older FP8/16384/0.90
+  defaults; that is branch drift, not the latest tracked-main state.
+- `origin/main` tracks FP8/AWQ quality result artifacts. Infrastructure VRAM,
+  KV-token, and throughput measurements are not present in the tracked result
+  files and are not inferred here.
 
 ## 2. Why HgFinance Exists
 
@@ -179,62 +188,73 @@ preserves its Risk → QA barrier.
 flowchart LR
     L[LLM-capable workers] --> G[worker_model_gateway.py]
     G --> V[vLLM OpenAI-compatible endpoint]
-    V --> F[Tracked Compose default: Qwen2.5-14B-Instruct-FP8-dynamic]
+    V --> F[TRACKED_MAIN: Qwen2.5-14B-Instruct-AWQ]
     G --> A[Registry-selected LoRA adapter when enabled]
-    A -. requested AWQ production state .-> X[Not verified in this checkout]
+    A --> E[AWQ base + adapter request]
 ```
 
-`docker-compose.model.yml`, `departments/worker_model_gateway.py`, and
-`departments/01-research/config/worker_model_registry.json` currently agree on
-the FP8 model family and served name. The tracked overlay also enables LoRA,
-with `max-loras=4`, `max-lora-rank=32`, and `max-cpu-loras=8`.
+`origin/main` commit `b3fb8c5` updates `docker-compose.model.yml`,
+`departments/worker_model_gateway.py`, and
+`departments/01-research/config/worker_model_registry.json` to AWQ. The
+checked-out branch still has the previous FP8 values. The main-tracked overlay
+enables LoRA with `max-loras=4`, `max-lora-rank=32`, and `max-cpu-loras=8`.
 
-The tracked defaults are:
-
-| Setting | Current tracked value | Evidence/status |
-|---|---|---|
-| base model directory | `Qwen2.5-14B-Instruct-FP8-dynamic` | Compose default; IMPLEMENTED in tracked config |
-| served model name | `qwen2.5-14b-instruct-fp8` | Compose/gateway/registry; IMPLEMENTED in tracked config |
-| max model length | `16384` | Compose default; IMPLEMENTED in tracked config |
-| GPU memory utilization | `0.90` | Compose default; IMPLEMENTED in tracked config |
-| KV cache dtype | `fp8` | Compose default; IMPLEMENTED in tracked config |
-| LoRA | enabled; 4/32/8 limits | Compose default; IMPLEMENTED in tracked config |
-| AWS L4 runtime state | not available from this checkout | NOT VERIFIED |
-
-The task description states an AWS production migration to AWQ with 8192/0.85
-settings. That state is not represented by the tracked Compose, gateway,
-registry, or model-plane scripts. It may exist only in an external runtime or
-unmerged work; this document does not treat it as current implementation.
+| Setting | `origin/main` tracked value | `qa-department` branch value | Evidence/status |
+|---|---|---|---|
+| base model directory | `Qwen2.5-14B-Instruct-AWQ` | `Qwen2.5-14B-Instruct-FP8-dynamic` | TRACKED_MAIN / TRACKED_BRANCH |
+| served model name | `qwen2.5-14b-instruct-awq` | `qwen2.5-14b-instruct-fp8` | TRACKED_MAIN / TRACKED_BRANCH |
+| max model length | `8192` | `16384` | TRACKED_MAIN / TRACKED_BRANCH |
+| GPU memory utilization | `0.85` | `0.90` | TRACKED_MAIN / TRACKED_BRANCH |
+| KV cache dtype | `fp8` | `fp8` | TRACKED_MAIN and TRACKED_BRANCH |
+| LoRA | enabled; 4/32/8 limits | enabled; 4/32/8 limits | IMPLEMENTED serving plumbing |
+| actual AWS process health | not proven by repository artifact | not inspected | RUNTIME_VERIFIED unavailable |
 
 ## 8. FP8 → AWQ Optimization
 
-**Status: NOT VERIFIED / PLANNED FROM THIS CHECKOUT.**
+**Status: COMPLETED infrastructure promotion in `origin/main`; runtime health
+still requires external observation.**
 
-The repository contains an FP8 model fetch/quantization path:
-`scripts/model_plane/fetch_base_model.sh`, `scripts/model_plane/quantize_fp8.py`,
-and `scripts/model_plane/run_quantize_fp8.sh`. It contains no AWQ model,
-AWQ quantization script, AWQ serving default, or tracked AWQ result artifact.
+Commit `b3fb8c5` (`deploy: promote AWQ worker model record v2 benchmark`) changes
+the tracked model plane from FP8 to AWQ. The serving configuration and registry
+are therefore `TRACKED_MAIN`; the older FP8 values remain `TRACKED_BRANCH` on
+this checkout and are retained as the comparison baseline.
 
-The requested FP8/AWQ memory and throughput numbers, including KV-token
-capacity, theoretical concurrency, resident VRAM, C1/C2/C4 throughput, and
-restart count, could not be located in tracked benchmark files on this branch.
-They are therefore recorded as **unverified claims**, not measurements of this
-repository. The term “theoretical concurrency” must in any future report mean
-a KV/memory capacity estimate, never a number of agents.
+The repository tracks the following quality artifacts:
+
+- `benchmarks/quantization/results/fp8_external50_final_v1.json`
+- `benchmarks/quantization/results/awq_external50_final_v1.json`
+- `benchmarks/quantization/results/fp8_internal50_score_v1.json`
+- `benchmarks/quantization/results/awq_internal50_score_v1.json`
+- `benchmarks/quantization/results/fp8_internal50_v2_score.json`
+- `benchmarks/quantization/results/awq_internal50_v2_score.json`
+
+The requested infrastructure values for model-load GiB, KV-cache GiB/tokens,
+resident/free VRAM, C1/C2/C4 throughput, E2E, and restart/health were not found
+in the tracked Git artifacts or history inspected here. They must not be
+reconstructed from quality result files. “Theoretical concurrency” means a
+KV/memory-based 8192-token capacity estimate, never a number of agents.
 
 ## 9. Quality Evaluation
 
-The current checkout contains benchmark helper/candidate files under
-`benchmarks/quantization/`, but no tracked External-50/Internal-50 final result
-artifacts or result manifest that supports the FP8/AWQ percentages supplied in
-the task. The candidate JSON files are evaluation inputs, not scores.
+Results below come from the immutable result files on `origin/main`; candidate
+JSON is not used to infer scores. `External-50`, `Internal-50 v1`, and
+`Internal-50 v2` remain held out from future LoRA train/dev data.
 
-| Evaluation | Repository-verifiable result | Interpretation |
-|---|---|---|
-| External-50 | no final FP8/AWQ result file found | not scored here |
-| Internal-50 v1 | candidate/design material only; no final score found | HgFinance contract-adherence candidate, not a base capability score |
-| Internal-50 v2 | no final score found | no regression claim made |
-| FP8 vs AWQ vs AWQ+LoRA | no comparable result table found | must be rerun and frozen with hashes before use |
+| Evaluation | FP8 | AWQ | Interpretation |
+|---|---:|---:|---|
+| External-50 | 37/50 (74%) | 37/50 (74%) | overall external accuracy preserved; derived subset, not an official leaderboard score |
+| Internal-50 v1 | 15/50 (30%) | 12/50 (24%) | HgFinance Production Contract Adherence Benchmark; not pure base-model capability |
+| Internal-50 v2 Employee Reasoning | 37/50 (74%) | 36/50 (72%) | employee reasoning decreased by 1 case; critical failures remained 1 → 1 with the same `v2-046` ID |
+
+Internal-v1 critical failures are `20/24` for both base variants, so the
+benchmark exposes substantial contract-adherence weakness rather than proving
+production readiness. Internal-v2 financial arithmetic is weak for both
+variants (`3/10` FP8, `2/10` AWQ); exact arithmetic should remain in
+deterministic tools.
+
+The tracked result paths are the benchmark evidence. No AWQ+LoRA result is
+tracked yet, so the final comparison remains `FP8 | AWQ | AWQ + LoRA` with the
+third column pending.
 
 The evaluation separation remains architecturally important: External-50,
 Internal-50 v1, and Internal-50 v2 must be held out from future adapter
@@ -266,11 +286,16 @@ and no bypass of Risk/QA/accounting controls. Department data adds specialist
 behavior. The production AWQ checkpoint must not be described as the QLoRA
 training checkpoint unless an implementation file proves that workflow.
 
-The repository has adapter-selection and manifest concepts in
-`departments/worker_model_gateway.py` and `scripts/model_plane/model_manifest.py`,
-but that is serving/registration plumbing, not evidence of a reusable Colab
-QLoRA training pipeline. No training notebook, CSV schema validator, NF4
-training script, or adapter promotion run was found in the tracked source.
+`origin/main` implements serving/registration plumbing in
+`docker-compose.model.yml`, `departments/worker_model_gateway.py`, and
+`departments/01-research/config/worker_model_registry.json`: vLLM LoRA is
+enabled, adapter resolution is registry-controlled, and base-model fallback is
+explicit. The registry currently records base-model entries rather than proving
+that a department adapter is enabled in the runtime.
+
+That plumbing is not a reusable Colab QLoRA training pipeline. No training
+notebook, CSV schema validator, NF4 training script, or adapter promotion run
+was found in tracked source; QLoRA training remains `PLANNED`.
 
 ## 11. Data & Infrastructure
 
@@ -338,14 +363,20 @@ The repository supports these findings:
    canonical cross-department order/fill/journal path as incomplete or
    historical. A fresh AWS/runtime probe is needed before calling it
    production-ready.
-2. **Model-plane drift:** tracked deployment wiring is FP8 while the requested
+2. **Model-plane branch drift:** `qa-department` still contains the older
+   FP8/16K/0.90 defaults, while `origin/main` tracks the AWQ/8K/0.85 promotion.
+   The current architecture follows `origin/main`; the branch values remain
+   documented only to make the divergence explicit. The requested
    current production claim is AWQ. This is the most direct documentation and
-   operational source-of-truth mismatch.
+ operational source-of-truth mismatch. The current architecture follows
+ `origin/main`; the branch values are retained only to make the divergence
+ explicit and are not treated as the latest production state.
 3. **Governance integration:** QA/Risk engines and APIs are present, but active
    policy corpus, credentials, production evidence, and continuous runtime
    records are environment-dependent and not verifiable from this checkout.
-4. **Benchmark reproducibility:** result artifacts/manifests for the claimed
-   FP8/AWQ comparisons are absent from the tracked benchmark directory.
+4. **Benchmark reproducibility:** FP8/AWQ quality result artifacts are tracked
+   on `origin/main`; the requested VRAM/KV/throughput/restart measurements are
+   not tracked and must not be inferred from quality scores.
 5. **Orchestration measurement:** direct/fast-path code exists, but the current
    checkout has no reliable measurement proving whether delegate initial ACK,
    GPU inference, or another step is the dominant latency bottleneck.
@@ -354,15 +385,16 @@ The repository supports these findings:
 
 | Area | Status | Evidence |
 |---|---|---|
-| 8 department profiles and current worker registry | IMPLEMENTED | `departments/*/hermes/config.yaml`, `employee_workers.py`, `tests/test_worker_architecture.py` |
+| 8 department profiles and current worker registry | IMPLEMENTED / TRACKED_MAIN | `departments/*/hermes/config.yaml`, `employee_workers.py`, `tests/test_worker_architecture.py`; 8 heads, 10 LLM-capable workers, 5 deterministic runners |
 | worker context and department handoff contracts | IMPLEMENTED | `docs/02-engineering/contracts/worker-context.v1.json`, `department-handoff.v1.json` |
-| deterministic trading contracts/OMS/paper broker | IMPLEMENTED/PARTIAL | `departments/02-trading/contracts`, `oms`, `broker`, paper-loop tests |
-| deterministic Risk Engine and fail-closed state | IMPLEMENTED/PARTIAL | `departments/03-risk/engine`, `harness`, Risk tests |
-| PIT quant dataset and strategy lifecycle | IMPLEMENTED/PARTIAL | `departments/04-quant-backtest/pipeline/pit_dataset.py`, `strategy_lifecycle.py` |
-| deterministic accounting ledger/reconciliation/reporting | IMPLEMENTED/PARTIAL | `departments/05-accounting-portfolio`, accounting close-loop tests |
-| QA evidence/model-risk/eval runners | IMPLEMENTED/PARTIAL | `departments/06-ai-qa-audit/evidence`, `model_risk.py`, `eval_runner.py` |
-| external AWS AWQ serving checkpoint | NOT VERIFIED in repo | tracked Compose and registry still specify FP8 |
-| FP8/AWQ final result table | NOT VERIFIED in repo | no final result artifacts found under `benchmarks/quantization/` |
+| deterministic trading contracts/OMS/paper broker | IMPLEMENTED / PARTIAL | `departments/02-trading/contracts`, `oms`, `broker`, paper-loop tests |
+| deterministic Risk Engine and fail-closed state | IMPLEMENTED / PARTIAL | `departments/03-risk/engine`, `harness`, Risk tests |
+| PIT quant dataset and strategy lifecycle | IMPLEMENTED / PARTIAL | `departments/04-quant-backtest/pipeline/pit_dataset.py`, `strategy_lifecycle.py` |
+| deterministic accounting ledger/reconciliation/reporting | IMPLEMENTED / PARTIAL | `departments/05-accounting-portfolio`, accounting close-loop tests |
+| QA evidence/model-risk/eval runners | IMPLEMENTED / PARTIAL | `departments/06-ai-qa-audit/evidence`, `model_risk.py`, `eval_runner.py` |
+| external AWS AWQ serving checkpoint | TRACKED_MAIN; RUNTIME_VERIFIED unavailable | `origin/main` commit `b3fb8c5` and its Compose/gateway/registry changes; live AWS health is not proven |
+| FP8/AWQ quality result table | TRACKED_MAIN | immutable result files under `benchmarks/quantization/results/`; no external runtime observation is claimed |
+| VRAM/KV/throughput infrastructure table | NOT VERIFIED | requested memory/throughput/restart values are not present in tracked result artifacts or inspected history |
 | reusable Common + Department QLoRA pipeline | PLANNED | no training notebook/script/validator found |
 | continuously operated end-to-end production runtime | PARTIAL / NOT RUNTIME-VERIFIED | historical status records and code exist; current runtime evidence absent |
 
@@ -375,7 +407,7 @@ run, and `RUNTIME_VERIFIED` requires an actual API/DB/process observation.
 1. Reconcile the tracked model-plane source of truth with the actual AWS
    runtime: record the AWQ model digest, served name, 8192/0.85 settings, LoRA
    limits, startup/restart behavior, and VRAM from the target environment.
-2. Add immutable, hashed benchmark protocol/result manifests for FP8, AWQ,
+2. Add immutable, hashed infrastructure benchmark manifests for FP8, AWQ,
    and AWQ+LoRA. Keep External-50, Internal-50 v1, and Internal-50 v2 held out
    from adapter training.
 3. Establish the Common + Department QLoRA pipeline on the original Qwen
@@ -388,6 +420,26 @@ run, and `RUNTIME_VERIFIED` requires an actual API/DB/process observation.
 6. Replace historical status tables with dated, reproducible runtime evidence;
    preserve historical snapshots separately rather than presenting them as
    current state.
+
+### Documentation ownership map
+
+| Path | Role | Audit classification | Overlap/authority |
+|---|---|---|---|
+| `docs/README.md` | documentation portal | CURRENT | links only; does not own detailed current-state facts |
+| `docs/CURRENT_PROJECT_ARCHITECTURE.md` | canonical current architecture | CURRENT / TRACKED_MAIN-aware | owns current architecture summary and source audit |
+| `docs/PROJECT_IMPLEMENTATION_STATUS.md` | implementation/readiness board | CURRENT + HISTORICAL snapshots | owns status vocabulary and dated evidence; links here for architecture |
+| `docs/02-engineering/FINAL_RUNTIME_ARCHITECTURE.md` | detailed runtime contracts | CURRENT detail / PARTIAL implementation | owns execution boundaries, retries, adapters, and gate topology |
+| `docs/02-engineering/WORKER_ROLE_BOUNDARIES.md` | worker permissions and roles | CURRENT reference | owns detailed role/authority matrix |
+| `docs/HEDGE_FUND_MASTER_PLAN.md` | target state and long-term plan | TARGET STATE / HISTORICAL snapshots | does not override current implementation evidence |
+| `docs/02-engineering/CEO_CONVERSATIONAL_ROUTING_SPEC.md` | routing design and implementation notes | PARTIAL | department-local routing detail; current topology is cross-checked here |
+| `docs/02-engineering/WORKER_MODEL_MATRIX.md` | model assignment target/history | HISTORICAL / TARGET | does not override main registry or serving config |
+| `docs/02-engineering/RESEARCH_WORKER_AWS_RUNBOOK.md` | Research worker AWS procedure | HISTORICAL FP8 runbook | main AWQ serving config supersedes its FP8 commands |
+| `docs/02-engineering/SYSTEM_WIRING_MAP.md` | dated wiring snapshot | HISTORICAL / PARTIAL | useful audit snapshot; not a live topology source |
+| `docs/06-integrations/*` and generated provider references | provider/API reference | INTEGRATION REFERENCE | excluded from architecture consolidation |
+
+No document was deleted in this audit. Potential archival/removal candidates
+require a separate review because some contain historical rationale or dated
+runtime evidence.
 
 ### Evidence index
 
