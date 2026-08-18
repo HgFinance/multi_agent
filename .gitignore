@@ -77,3 +77,7 @@ docker-compose.override.yml
 *.bak
 *.bak-*
 *.bak.*
+
+# 회계 원장 durable 저장소 (apps/api/ledger_store.py) - 계좌 거래 기록이라 커밋하지 않는다
+var/
+*.sqlite3

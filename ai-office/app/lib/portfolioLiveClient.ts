@@ -50,6 +50,25 @@ export type Holding = {
   weight: string | null;
 };
 
+export type DailyReturnPoint = {
+  date: string;
+  return_rate: string;
+};
+
+export type TodayTradingActivityData = {
+  trade_count: number;
+  summary: {
+    buy_quantity: string | null;
+    sell_quantity: string | null;
+    buy_amount: string | null;
+    sell_amount: string | null;
+    total_amount: string | null;
+    total_fee: string | null;
+    total_tax: string | null;
+    total_settlement: string | null;
+  };
+};
+
 export type PortfolioLive = {
   schema_version: string;
   environment: "PAPER" | "LIVE" | string;
@@ -69,6 +88,8 @@ export type PortfolioLive = {
     kinds: { kind: string; label: string }[];
     counts: Record<string, number>;
     recent: OrderEvent[];
+    source?: string;
+    error?: string | null;
   };
   holdings: {
     as_of: string | null;
@@ -82,6 +103,16 @@ export type PortfolioLive = {
     valuation: string | null;
     valuation_pnl: string | null;
     rows: Holding[];
+  };
+  performance?: {
+    daily_returns: DailyReturnPoint[];
+    as_of: string | null;
+    error: string | null;
+  };
+  today_activity?: {
+    as_of: string | null;
+    error: string | null;
+    data: TodayTradingActivityData | null;
   };
   server_time: string;
   authoritative: boolean;
