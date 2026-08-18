@@ -321,26 +321,34 @@ function MandateConfigForm({ userId }: { userId: string }) {
       let next = DEFAULT_DRAFT;
       let hasStoredMandate = false;
 
-      try {
-        const stored = await loadMandateForFund(account.fundId);
-        if (cancelled) return;
-        if (stored?.policy) {
-          next = policyToDraft(next, stored.policy, stored.objectiveText);
-          hasStoredMandate = true;
-        }
-      } catch (cause) {
-        if (!cancelled) {
-          setNotice(cause instanceof Error ? cause.message : "저장된 지침을 불러오지 못했습니다.");
-        }
+      // 두 값은 서로 의존하지 않으므로 병렬로 조회한다. 화면 초기화 시간은 합계가 아니라
+      // 느린 한 요청의 시간에 수렴한다.
+      const [mandateResult, profileResult] = await Promise.allSettled([
+        loadMandateForFund(account.fundId),
+        loadInvestorProfile(account.userId, account.fundId),
+      ]);
+      if (cancelled) return;
+
+      if (mandateResult.status === "rejected") {
+        setNotice(
+          mandateResult.reason instanceof Error
+            ? mandateResult.reason.message
+            : "저장된 지침을 불러오지 못했습니다.",
+        );
         return;
+      }
+
+      const stored = mandateResult.value;
+      if (stored?.policy) {
+        next = policyToDraft(next, stored.policy, stored.objectiveText);
+        hasStoredMandate = true;
       }
 
       // 성향·경험·기간·유동성은 정책(`MandatePolicy`)에 없다. 적합성 프로필에서
       // 따로 채운다 - 없으면(404) 아직 프로필을 안 만든 사용자다.
       let profileMissing = false;
-      try {
-        const profile = await loadInvestorProfile(account.userId, account.fundId);
-        if (cancelled) return;
+      if (profileResult.status === "fulfilled") {
+        const profile = profileResult.value;
         if (profile) {
           next = {
             ...next,
@@ -353,13 +361,12 @@ function MandateConfigForm({ userId }: { userId: string }) {
         } else {
           profileMissing = true;
         }
-      } catch (cause) {
-        if (cancelled) return;
+      } else {
         // 조용히 넘기지 않는다. 이걸 삼키면 위험 성향·투자 경험만 기본값으로
         // 남고 사용자는 "일부만 안 불러와진다"고만 느낀다 - 원인을 볼 방법이 없다.
         setNotice(
           `위험 성향·투자 경험을 불러오지 못해 기본값으로 표시합니다: ${
-            cause instanceof Error ? cause.message : "적합성 프로필 조회 실패"
+            profileResult.reason instanceof Error ? profileResult.reason.message : "적합성 프로필 조회 실패"
           }`,
         );
       }
