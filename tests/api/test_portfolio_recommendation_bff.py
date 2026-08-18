@@ -76,6 +76,19 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.headers.get("access-control-allow-origin"), "http://localhost:3003")
 
+    def test_mandate_put_preflight_is_allowed_by_bff_cors(self) -> None:
+        response = TestClient(app).options(
+            "/ui/mandates/mandate-1",
+            headers={
+                "Origin": "http://localhost:3001",
+                "Access-Control-Request-Method": "PUT",
+                "Access-Control-Request-Headers": "content-type,x-user-id",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers.get("access-control-allow-origin"), "http://localhost:3001")
+        self.assertIn("PUT", response.headers.get("access-control-allow-methods", ""))
+
     def test_health_ready_exposes_safe_dependency_projection(self) -> None:
         response = TestClient(app).get("/health/ready")
         self.assertEqual(response.status_code, 200, response.text)

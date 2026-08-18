@@ -32,8 +32,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "contracts"))
 
-from contracts.factory_contracts import (  # noqa: E402
+from factory_contracts import (  # noqa: E402
     CompetingExplanation,
     ExperimentProposalV1,
     LessonCode,
@@ -41,7 +42,7 @@ from contracts.factory_contracts import (  # noqa: E402
     ResearchLane,
     Testability,
 )
-from contracts.alpha_ast_surface import (  # noqa: E402
+from alpha_ast_surface import (  # noqa: E402
     MICRO_FIELDS,
     fields_of as ast_fields_of,
     parse as parse_ast,
@@ -153,7 +154,7 @@ def check_microstructure_primary(proposal: ExperimentProposalV1) -> list[str]:
         # Intraday proposals intentionally use a different, seconds-based grammar.
         # Treating it as the daily ``signal_expr`` silently rejects the very raw-event
         # lane this gate is meant to protect.
-        from contracts.intraday_ast_contract import fields_of, parse, unit_of
+        from intraday_ast_contract import fields_of, parse, unit_of
 
         raw = (proposal.suggested_params or {}).get("intraday_signal_expr")
         if not isinstance(raw, dict):
@@ -228,10 +229,10 @@ def check_intraday_screening_population(
     if len(population) > 7:
         return ["screening_population exceeds the bounded seven-sidecar limit"]
 
-    from contracts.alpha_semantics import validate as validate_plan
+    from alpha_semantics import validate as validate_plan
     from contracts import intraday_ast_contract as intraday_grammar
-    from contracts.intraday_ast_contract import fingerprint, parse, unit_of
-    from contracts.intraday_ablation import generate as generate_ablations
+    from intraday_ast_contract import fingerprint, parse, unit_of
+    from intraday_ablation import generate as generate_ablations
     import formula_discovery
 
     out: list[str] = []
@@ -375,7 +376,8 @@ def check_prior_art(proposal: ExperimentProposalV1,
     # Quant could assign its formula-shaped trial family.  Exact AST history stays
     # a hard blocker; broad-family history is surfaced as a warning in evaluate().
     hard_outcomes = ([o for o in past_outcomes
-                      if str(o.get("match_scope") or "") == "AST_EXACT"]
+                      if str(o.get("match_scope") or "") in
+                      {"AST_EXACT", "AST_EXACT_PRIMARY", "FAMILY_PRIMARY"}]
                      if has_formula else list(past_outcomes))
     rejected = [o for o in hard_outcomes
                 if str(o.get("decision")) in ("REJECT", "KILLED", "GATE_HOLD", "DEMOTED")]
@@ -465,7 +467,7 @@ def evaluate(proposal: ExperimentProposalV1, *,
 def _mk_lead(lead_id=None, testability=Testability.RULE_EXPRESSIBLE):
     from datetime import datetime, timezone
 
-    from contracts.factory_contracts import ScoutLens, SourceRef, SourceType, lead_id_for
+    from factory_contracts import ScoutLens, SourceRef, SourceType, lead_id_for
     refs = (SourceRef(url="https://arxiv.org/abs/1234.5678", title="Momentum crashes",
                       accessed_at=datetime(2026, 8, 10, tzinfo=timezone.utc),
                       excerpt="We document..."),)
@@ -484,7 +486,7 @@ def _mk_lead(lead_id=None, testability=Testability.RULE_EXPRESSIBLE):
 def _mk_proposal(**kw):
     from datetime import datetime, timezone
 
-    from contracts.factory_contracts import DataRequirement, PriorCheck
+    from factory_contracts import DataRequirement, PriorCheck
     lead = _mk_lead()
     base = dict(
         proposal_id="prop_1", case_id="rc_1",
@@ -592,7 +594,7 @@ def _check_daily_only_signal_is_blocked():
 
 def _check_intraday_ast_uses_intraday_contract():
     """The raw-event lane must not be parsed as a daily signal_expr."""
-    from contracts.factory_contracts import DataRequirement
+    from factory_contracts import DataRequirement
 
     p, leads = _mk_proposal(
         research_lane=ResearchLane.INTRADAY_EVENT,
@@ -619,7 +621,7 @@ def _check_intraday_ast_uses_intraday_contract():
 
 def _check_passive_intraday_uses_canonical_target_and_cost_hurdle():
     """Passive formulas use the same output vocabulary at every boundary."""
-    from contracts.factory_contracts import DataRequirement
+    from factory_contracts import DataRequirement
 
     params = {"intraday_signal_expr": {
         "op": "rolling_mean", "seconds": 5,
@@ -665,7 +667,7 @@ def _check_unaddressed_rejection_is_blocked():
 
 def _check_addressed_rejection_passes():
     """대응을 적으면 재도전은 정상이다 - 막는 것이 목적이 아니라 배우게 하는 것이다."""
-    from contracts.factory_contracts import PriorCheck
+    from factory_contracts import PriorCheck
     p, leads = _mk_proposal(prior_check=PriorCheck(
         trial_family_id="fam_1", trials_used=1, past_outcomes=("out_1",),
         lessons_addressed={"BEAR_FRAGILE": "하락장 표본을 2창에서 5창으로 늘린다",
@@ -678,7 +680,7 @@ def _check_addressed_rejection_passes():
 
 
 def _check_budget_exhaustion_is_blocked():
-    from contracts.factory_contracts import PriorCheck
+    from factory_contracts import PriorCheck
     p, leads = _mk_proposal(trial_budget=2, prior_check=PriorCheck(
         trial_family_id="fam_1", trials_used=2, past_outcomes=("o1", "o2"),
         lessons_addressed={"OVERFIT_PBO": "파라미터 고정"}))

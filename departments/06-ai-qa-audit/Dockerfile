@@ -13,8 +13,9 @@
 #   sys.path에 넣는다. compose에서는 build.context: . / build.dockerfile: departments/06-ai-qa-audit/Dockerfile.
 #
 # ▶ 하나의 Image, command만 바꿔 audit-api와 qa-worker를 둘 다 돌린다(계획서 3.1).
-#   qa_events/worker.py는 REDIS_URL(또는 RISK_QA_EVENT_REDIS_URL)이 없으면 즉시 종료한다 -
-#   compose에서 REDIS_URL을 `:?` 필수로 준다.
+#   qa_events/worker.py는 DATABASE_URL(또는 RISK_QA_DATABASE_URL)과
+#   REDIS_URL(또는 RISK_QA_EVENT_REDIS_URL)이 모두 필요하다. compose가 DB 연결과
+#   내부 Redis 기본값을 명시적으로 전달한다.
 
 FROM python:3.12-slim
 
@@ -22,10 +23,15 @@ FROM python:3.12-slim
 RUN pip install --no-cache-dir \
     fastapi==0.128.8 "uvicorn[standard]==0.39.0" pydantic==2.13.3 \
     psycopg2-binary==2.9.12 python-dotenv==1.2.1 redis==7.0.1 \
-    openai==2.35.1 langgraph==0.6.11
+    openai==2.35.1 langgraph==0.6.11 numpy==2.3.2
 
 WORKDIR /app
 COPY departments/06-ai-qa-audit ./departments/06-ai-qa-audit
+# The independent reproduction worker reuses the frozen, pure forward
+# evaluator in a separate process.  It does not import quant's DB writer or
+# receive svc_quant privileges.
+COPY departments/04-quant-backtest/pipeline ./departments/04-quant-backtest/pipeline
+COPY departments/01-research/contracts ./departments/01-research/contracts
 COPY skills/agentic-rag ./skills/agentic-rag
 COPY apps/observability ./apps/observability
 COPY apps/security ./apps/security

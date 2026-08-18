@@ -14,8 +14,10 @@ _CONTRACTS = Path(__file__).resolve().parents[1] / "contracts"
 if str(_CONTRACTS) not in sys.path:
     sys.path.insert(0, str(_CONTRACTS))
 
+from alpha_semantics import check_microstructure_mutations  # noqa: E402
 
-POLICY_VERSION = "alpha-evolution-v1"
+
+POLICY_VERSION = "alpha-evolution-v2"
 
 # Operators change an economic coordinate, not merely a threshold or lookback.
 EVOLUTION_OPERATORS = frozenset({
@@ -26,6 +28,10 @@ EVOLUTION_OPERATORS = frozenset({
     "MECHANISM_INTERACTION",
     "CLOCK_CHANGE",
     "L1_L10_DIVERGENCE",
+    "L1_L10_CONVERGENCE",
+    "QUOTE_TAPE_CONFIRMATION",
+    "EVENT_NORMALIZATION",
+    "VOLUME_NORMALIZATION",
     "EXECUTION_AWARE",
     "TARGET_CHANGE",
     "MARKET_STRUCTURE_TRANSFER",
@@ -51,6 +57,14 @@ def assess_lineage(*, candidate: dict, parent=None, operators=(),
     unknown = sorted(set(ops) - EVOLUTION_OPERATORS)
     if unknown:
         raise ValueError(f"unknown EVOLUTION_OPERATORS: {unknown}")
+    mutation_alignment = check_microstructure_mutations(
+        ops, grammar.fields_of(child),
+        operators=(grammar.operators_of(child)
+                   if hasattr(grammar, "operators_of") else ()))
+    if not mutation_alignment["ok"]:
+        raise ValueError(
+            "EVOLUTION_OPERATORS do not match the child AST: "
+            + "; ".join(mutation_alignment["missing"]))
     ablation_items = tuple(str(item).strip() for item in (
         ablations if isinstance(ablations, (list, tuple, set))
         else str(ablations or "").split("|")

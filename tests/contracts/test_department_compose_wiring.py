@@ -20,6 +20,41 @@ def _service_block(compose_text: str, service_name: str) -> str:
 
 
 class DepartmentComposeWiringTests(unittest.TestCase):
+    def test_redis_stream_transport_is_aof_persistent(self) -> None:
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        service = _service_block(compose, "redis")
+
+        self.assertIn('"--appendonly", "yes"', service)
+        self.assertIn('"--appendfsync", "everysec"', service)
+        self.assertIn("- redis_data:/data", service)
+        self.assertIn("\n  redis_data:\n", compose)
+
+    def test_research_liaison_packages_stock_evidence_contract(self) -> None:
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        services = (
+            _service_block(compose, "research-mcp"),
+            _service_block(compose, "research-liaison-mcp"),
+        )
+        dockerfile = (
+            ROOT / "departments/01-research/Dockerfile.mcp"
+        ).read_text(encoding="utf-8")
+
+        for service in services:
+            self.assertIn("context: .", service)
+            self.assertIn(
+                "dockerfile: departments/01-research/Dockerfile.mcp", service
+            )
+        self.assertIn(
+            "departments/04-quant-backtest/pipeline/stock_universe.py",
+            dockerfile,
+        )
+        self.assertIn(
+            "/app/departments/04-quant-backtest/pipeline/stock_universe.py",
+            dockerfile,
+        )
+        self.assertIn("mcp==1.26.0", dockerfile)
+        self.assertNotRegex(dockerfile, r"(?m)^\s+mcp\s*\\$")
+
     def test_quant_api_owns_database_access_and_supports_scoped_role(self) -> None:
         compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         service = _service_block(compose, "quant-api")

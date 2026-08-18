@@ -1,0 +1,35 @@
+FROM python:3.12-slim
+
+RUN pip install --no-cache-dir \
+    psycopg2-binary==2.9.10 \
+    pydantic==2.11.7 \
+    python-dotenv==1.1.1 \
+    websockets==15.0.1 \
+    fastapi==0.116.1 \
+    "uvicorn[standard]==0.35.0" \
+    pyarrow==25.0.0 \
+    mcp==1.26.0 \
+    xlrd==2.0.2
+
+WORKDIR /app/departments/01-research
+
+COPY departments/01-research/collectors ./collectors
+COPY departments/01-research/contracts ./contracts
+COPY departments/01-research/repository ./repository
+COPY departments/01-research/api ./api
+COPY departments/01-research/factory ./factory
+COPY departments/01-research/evidence ./evidence
+COPY departments/01-research/agents ./agents
+COPY departments/01-research/scripts.py ./scripts.py
+
+# Factory read/write tools share the quant-owned fail-closed KRX stock evidence
+# predicate.  MCP imports are lazy, so an image can otherwise look healthy but
+# fail only when Hermes submits or reads a proposal.
+COPY departments/04-quant-backtest/pipeline/stock_universe.py \
+     /app/departments/04-quant-backtest/pipeline/stock_universe.py
+
+RUN pip install --no-cache-dir langgraph==0.6.7
+
+ENV PYTHONUNBUFFERED=1
+
+CMD ["python", "api/mcp_server.py", "--serve"]

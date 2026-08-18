@@ -37,19 +37,25 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "contracts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]
+                       / "04-quant-backtest" / "pipeline"))
 
-from contracts.factory_contracts import (  # noqa: E402
+from factory_contracts import (  # noqa: E402
     CompetingExplanation, DataRequirement, ExperimentProposalV1,
     MethodologyLeadV1, PriorCheck,
 )
-from contracts.intraday_ablation import (  # noqa: E402
+from intraday_ablation import (  # noqa: E402
     INTRADAY_SCREENING_COHORT_VERSION,
 )
 from lead_intake import clip_excerpt, parse_blocks  # noqa: E402
 from publish_gate import evaluate  # noqa: E402
+from stock_universe import governed_stock_evidence_sql  # noqa: E402
 
 MODULE_VERSION = "research-proposal-intake-v3"
 MAX_INTRADAY_COHORT = 8
+_GOVERNED_PAST_OUTCOME = governed_stock_evidence_sql(
+    experiment_alias="e", dataset_alias="m", hypothesis_alias="h")
 
 PLANNER_KEYS = ("TITLE", "LEAD_IDS", "ECONOMIC_RATIONALE", "COUNTERPARTY",
                 "EDGE_TYPE", "UNIVERSE_KEY", "LABEL", "BASELINE",
@@ -75,6 +81,117 @@ SKEPTIC_KEYS = ("TITLE", "COMPETING_EXPLANATION", "COMPETING_CODES", "VERDICT")
 PLANNER_REQUIRED = ("TITLE", "LEAD_IDS", "ECONOMIC_RATIONALE", "COUNTERPARTY",
                     "EDGE_TYPE", "UNIVERSE_KEY")
 SKEPTIC_PASS = "PROCEED"          # 회의론자가 본가설을 살려 둔 경우만
+
+
+def _set_distance(left, right) -> float:
+    """Jaccard distance with two empty descriptions treated as identical."""
+    lhs, rhs = frozenset(left), frozenset(right)
+    union = lhs | rhs
+    return 0.0 if not union else 1.0 - len(lhs & rhs) / len(union)
+
+
+def _semantic_tokens(value, prefix: str = "semantic") -> frozenset[str]:
+    """Flatten a semantic plan without depending on JSON/list input order."""
+    out: set[str] = set()
+
+    def walk(current, path: str) -> None:
+        if isinstance(current, dict):
+            for key in sorted(current):
+                walk(current[key], f"{path}.{key}")
+            return
+        if isinstance(current, (list, tuple, set, frozenset)):
+            for item in current:
+                walk(item, path)
+            return
+        out.add(f"{path}={json.dumps(current, ensure_ascii=False, sort_keys=True)}")
+
+    walk(value, prefix)
+    return frozenset(out)
+
+
+def _intraday_novelty_signature(row: dict, grammar) -> dict:
+    """Content-only structural and economic signature for cohort selection."""
+    expr = grammar.parse(row["intraday_signal_expr"])
+    return {
+        "shape": grammar.shape_fingerprint(expr),
+        "fields": frozenset(grammar.fields_of(expr)),
+        "operators": frozenset(grammar.operators_of(expr)),
+        "clocks": frozenset(str(value) for value in grammar.clocks_of(expr)),
+        "semantic": _semantic_tokens(row.get("semantic_plan") or {}),
+    }
+
+
+def _intraday_pairwise_novelty(left: dict, right: dict) -> tuple[float, float,
+                                                                  float]:
+    """Return combined, structural, and semantic distances in ``[0, 1]``.
+
+    Shape/field/operator differences dominate numeric-window tuning. Economic
+    semantics still separate formulas whose executable trees look alike but
+    encode different events, states, or directions.
+    """
+    structural = (
+        0.50 * float(left["shape"] != right["shape"])
+        + 0.25 * _set_distance(left["fields"], right["fields"])
+        + 0.15 * _set_distance(left["operators"], right["operators"])
+        + 0.10 * _set_distance(left["clocks"], right["clocks"])
+    )
+    semantic = _set_distance(left["semantic"], right["semantic"])
+    return 0.75 * structural + 0.25 * semantic, structural, semantic
+
+
+def _intraday_novelty_key(row: dict) -> tuple[str, str]:
+    """Stable tie-breaker based on formula/semantics, never lead UUID or order."""
+    return (
+        str(row.get("ast_fingerprint") or ""),
+        json.dumps(row.get("semantic_plan") or {}, ensure_ascii=False,
+                   sort_keys=True, separators=(",", ":")),
+    )
+
+
+def _select_novel_intraday_sidecars(primary: dict, candidates: list[dict], *,
+                                    limit: int, grammar) -> list[dict]:
+    """Deterministic farthest-first max-min structural/semantic frontier.
+
+    The primary is the first anchor. Each next sidecar maximizes its minimum
+    pairwise novelty to every already selected formula. Stable content hashes
+    resolve exact ties, making the result invariant to database row order and
+    lead UUIDs while keeping numeric-window near-clones from crowding the four
+    independent-candidate slots.
+    """
+    if limit <= 0:
+        return []
+    unique: dict[str, dict] = {}
+    primary_fp = str(primary.get("ast_fingerprint") or "")
+    for row in candidates:
+        key = str(row.get("ast_fingerprint") or "")
+        if not key or key == primary_fp:
+            continue
+        current = unique.get(key)
+        if current is None or _intraday_novelty_key(row) < \
+                _intraday_novelty_key(current):
+            unique[key] = row
+    pool = sorted(unique.values(), key=_intraday_novelty_key)
+    anchors = [_intraday_novelty_signature(primary, grammar)]
+    selected: list[dict] = []
+    while pool and len(selected) < limit:
+        scored = []
+        for row in pool:
+            signature = _intraday_novelty_signature(row, grammar)
+            distances = [_intraday_pairwise_novelty(signature, anchor)
+                         for anchor in anchors]
+            minimums = tuple(min(values) for values in zip(*distances))
+            scored.append((row, signature, minimums))
+        row, signature, _ = min(
+            scored,
+            key=lambda item: (
+                -item[2][0], -item[2][1], -item[2][2],
+                _intraday_novelty_key(item[0]),
+            ),
+        )
+        selected.append(row)
+        anchors.append(signature)
+        pool.remove(row)
+    return selected
 
 
 @dataclass
@@ -228,10 +345,11 @@ def proposal_id_for(lead_ids, edge_type: str, universe_key: str, *,
     material = dict(material)
     params = dict(material.get("suggested_params") or {})
     # Screening sidecars are compute amortisation only and never hold promotion
-    # authority.  Their membership/version may change as the unused lead queue
-    # changes without changing the primary preregistration.
+    # authority, so membership changes must not manufacture fresh trials.  The
+    # cohort version is different: it binds the execution/screening contract.
+    # A repaired proposal under a new contract must not collide with a rejected
+    # legacy row through ``ON CONFLICT DO NOTHING``.
     params.pop("screening_population", None)
-    params.pop("screening_cohort_version", None)
     material["suggested_params"] = params
     if isinstance(material.get("falsification_tests"), (list, tuple)):
         material["falsification_tests"] = sorted(
@@ -262,6 +380,14 @@ def _prior_check(past_outcomes, lessons_text: str) -> PriorCheck:
     우리가 대응까지 지어내면 Gate 0 의 견제가 형식만 남는다.
     """
     rows = list(past_outcomes or [])
+    primary_scopes = {"AST_EXACT", "AST_EXACT_PRIMARY", "FAMILY_PRIMARY"}
+    # Broad edge/universe outcomes are useful failure memory, not evidence that
+    # this executable equation spent a PRIMARY budget slot.  Legacy callers
+    # without scope annotations retain their historical all-row behaviour.
+    scoped = any(str(r.get("match_scope") or "") for r in rows)
+    budget_rows = ([r for r in rows
+                    if str(r.get("match_scope") or "") in primary_scopes]
+                   if scoped else rows)
     rejecting = {"REJECT", "GATE_HOLD", "KILL"}
     codes: list[str] = []
     fam = ""
@@ -275,7 +401,11 @@ def _prior_check(past_outcomes, lessons_text: str) -> PriorCheck:
     #   금지)만 보고, "맞는 교훈에 대응했나" 는 Gate 0 이 본다. 여기서
     #   미리 걸러 내면 대응 맵이 비어 계약이 엉뚱한 사유로 죽는다(실측).
     #   층마다 볼 것을 정해 두고 겹치지 않는다.
-    return PriorCheck(trial_family_id=fam, trials_used=len(rows),
+    budget_family = next((str(r.get("trial_family_id") or "")
+                          for r in budget_rows
+                          if r.get("trial_family_id")), "")
+    return PriorCheck(trial_family_id=budget_family or fam,
+                      trials_used=len(budget_rows),
                       past_outcomes=tuple(codes),
                       lessons_addressed=_lessons_addressed(lessons_text))
 
@@ -283,7 +413,7 @@ def _prior_check(past_outcomes, lessons_text: str) -> PriorCheck:
 def _canonical_universe_key(raw: str, research_lane: str) -> str:
     """Normalize the one known intraday cohort/version identity mix-up.
 
-    ``intraday-screening-cohort-v3`` names the deterministic screening contract,
+    ``intraday-screening-cohort-v4`` names the deterministic screening contract,
     not an execution universe.  Preserve every other value so the downstream
     controlled-vocabulary gate can continue to reject unknown universes rather
     than silently changing the experiment.
@@ -400,14 +530,31 @@ def _attach_intraday_screening_cohort(
         return proposal
 
     import intraday_ast_contract as intraday_grammar  # noqa: PLC0415
-    from intraday_ast_contract import fingerprint, parse, unit_of  # noqa: PLC0415
-    from contracts.intraday_ablation import (  # noqa: PLC0415
+    from intraday_ast_contract import (  # noqa: PLC0415
+        COMPLETED_SECOND_SCREENING_COHORT_VERSION,
+        fingerprint,
+        parse,
+        unit_of,
+        validate_completed_second_candidate,
+    )
+    from intraday_ablation import (  # noqa: PLC0415
         generate as generate_ablations,
     )
     from formula_discovery import assess as assess_formula  # noqa: PLC0415
 
+    if (INTRADAY_SCREENING_COHORT_VERSION
+            != COMPLETED_SECOND_SCREENING_COHORT_VERSION):
+        raise RuntimeError(
+            "research intake and completed-second capability contracts disagree: "
+            f"{INTRADAY_SCREENING_COHORT_VERSION!r} != "
+            f"{COMPLETED_SECOND_SCREENING_COHORT_VERSION!r}")
     params = dict(proposal.suggested_params or {})
-    primary = parse(params.get("intraday_signal_expr"))
+    proposal_execution = (
+        params.get("execution")
+        or dict(proposal.semantic_plan or {}).get("execution")
+    )
+    primary = validate_completed_second_candidate(
+        params.get("intraday_signal_expr"), execution=proposal_execution)
     primary_fp = fingerprint(primary)
     candidates: dict[str, dict] = {}
     rejected_primary: list[str] = []
@@ -438,10 +585,13 @@ def _attach_intraday_screening_cohort(
             continue
         fp = fingerprint(expr)
         thesis = dict(contract.get("formula_thesis") or {})
+        semantic_plan = dict(contract.get("semantic_plan") or {})
         try:
+            validate_completed_second_candidate(
+                expr, execution=semantic_plan.get("execution"))
             assess_formula(
                 thesis, candidate=expr,
-                semantic_plan=dict(contract.get("semantic_plan") or {}),
+                semantic_plan=semantic_plan,
                 grammar=intraday_grammar,
             )
         except (TypeError, ValueError) as exc:
@@ -454,7 +604,7 @@ def _attach_intraday_screening_cohort(
             "title": str(lead.claimed_edge),
             "ast_fingerprint": fp,
             "intraday_signal_expr": expr,
-            "semantic_plan": dict(contract.get("semantic_plan") or {}),
+            "semantic_plan": semantic_plan,
             "entry_policy": str(thesis.get("decision_rule") or ""),
             "coefficient_policy": str(thesis.get("coefficient_policy") or ""),
             "evolution_role": str(contract.get("evolution_role") or "SEED"),
@@ -474,6 +624,10 @@ def _attach_intraday_screening_cohort(
             "INTRADAY_EVENT primary formula must exactly match one linked "
             "formula-discovery-v5 lead")
 
+    # Duplicate formula leads may arrive in arbitrary DB/input order. Keep the
+    # provenance set canonical before it participates in a persisted cohort.
+    for row in candidates.values():
+        row["source_lead_ids"] = sorted(set(row["source_lead_ids"]))
     primary_lead_ids = tuple(candidates[primary_fp]["source_lead_ids"])
     linked_sidecars = [row for fp, row in candidates.items() if fp != primary_fp]
 
@@ -487,6 +641,10 @@ def _attach_intraday_screening_cohort(
             continue
         try:
             parent = parse(parent_raw)
+            validate_completed_second_candidate(
+                parent,
+                execution=dict(child["semantic_plan"]).get("execution"),
+            )
             parent_fp = fingerprint(parent)
             child_structure_only = child["coefficient_policy"] == "STRUCTURE_ONLY"
             if ((not child_structure_only and unit_of(parent) != "BPS")
@@ -529,10 +687,17 @@ def _attach_intraday_screening_cohort(
         })
 
     # Preserve broad exploration while reserving at most two of the seven
-    # sidecar slots for same-replay mechanism controls.  Any unused control
-    # capacity is returned to independent candidates and explicit parents.
-    sidecars = linked_sidecars[:4] + controls
-    for row in linked_sidecars[4:] + lineage_parents:
+    # sidecar slots for same-replay mechanism controls. The four independent
+    # formulas are a content-addressed max-min novelty frontier, not whichever
+    # lead UUIDs happened to sort first. Any unused control capacity is returned
+    # to the remaining novelty ranking and explicit parents.
+    linked_ranked = _select_novel_intraday_sidecars(
+        primary_source, linked_sidecars, limit=len(linked_sidecars),
+        grammar=intraday_grammar)
+    sidecars = linked_ranked[:4] + controls
+    remaining = linked_ranked[4:] + sorted(
+        lineage_parents, key=_intraday_novelty_key)
+    for row in remaining:
         if len(sidecars) >= MAX_INTRADAY_COHORT - 1:
             break
         if row["ast_fingerprint"] not in {
@@ -842,32 +1007,75 @@ def load_past_outcomes(conn, edge_type: str, universe_key: str,
                and {lane_predicate}
         """, (edge, uni))
         hyp_ids = [r[0] for r in cur.fetchall()]
-        experiment_ids: list[str] = []
+        exact_primary: dict[str, str] = {}
         if signal_expr is not None:
             # jsonb equality ignores object key order.  Invalid expressions are left
             # to the canonical AST gate; history lookup must not silently repair one.
             ast_key = ("intraday_signal_expr" if lane == "INTRADAY_EVENT"
                        else "signal_expr")
             cur.execute(f"""
-                select experiment_id::text from quant.experiments
-                 where config->'{ast_key}' = %s::jsonb
+                select e.experiment_id::text, e.trial_family_id
+                  from quant.experiments e
+                 where e.config->'{ast_key}' = %s::jsonb
+                   and (
+                       e.status in ('QUEUED', 'RUNNING', 'COMPLETED')
+                       or exists (
+                            select 1 from quant.backtest_runs run
+                             where run.experiment_id = e.experiment_id)
+                       or exists (
+                            select 1 from quant.experiment_metrics metric
+                             where metric.experiment_id = e.experiment_id)
+                       or exists (
+                            select 1 from research.experiment_outcomes outcome
+                             where outcome.experiment_id = e.experiment_id::text)
+                       or exists (
+                            select 1
+                              from quant.intraday_experiment_rungs rung
+                              join quant.intraday_session_accesses access
+                                on access.experiment_rung_id =
+                                   rung.experiment_rung_id
+                             where rung.experiment_id = e.experiment_id)
+                   )
             """, (json.dumps(signal_expr, sort_keys=True),))
-            experiment_ids = [r[0] for r in cur.fetchall()]
+            exact_primary = {str(r[0]): str(r[1] or "")
+                             for r in cur.fetchall()}
+        experiment_ids = list(exact_primary)
         if not hyp_ids and not experiment_ids:
             return []
-        cur.execute("""
-            select decision, lesson_codes, trial_family_id, experiment_id
-              from research.experiment_outcomes
-             where hypothesis_id = any(%s::text[])
-                or experiment_id = any(%s::text[])
-             order by decided_at desc
+        cur.execute(f"""
+            select o.decision, o.lesson_codes, o.trial_family_id,
+                   o.experiment_id
+              from research.v_current_experiment_outcomes o
+              join quant.experiments e
+                on e.experiment_id::text = o.experiment_id
+              join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+              join quant.dataset_manifests m on m.dataset_id = e.dataset_id
+             where (o.hypothesis_id = any(%s::text[])
+                or o.experiment_id = any(%s::text[]))
+               and {_GOVERNED_PAST_OUTCOME}
+             order by o.decided_at desc
         """, (hyp_ids, experiment_ids))
         exact = set(experiment_ids)
-        return [{"decision": r[0], "lesson_codes": list(r[1] or []),
-                 "trial_family_id": r[2],
-                 "match_scope": ("AST_EXACT" if r[3] in exact
+        rows = [{"decision": r[0], "lesson_codes": list(r[1] or []),
+                 "trial_family_id": r[2], "experiment_id": str(r[3]),
+                 "match_scope": ("AST_EXACT_PRIMARY" if str(r[3]) in exact
                                  else "EDGE_UNIVERSE")}
                 for r in cur.fetchall()]
+        settled = {r["experiment_id"] for r in rows if
+                   r["match_scope"] == "AST_EXACT_PRIMARY"}
+        # PRIMARY attempts remain in resource pressure even when their result
+        # is pending or ineligible for promotion evidence.  They carry no
+        # performance lesson or breeding authority.
+        rows.extend({
+            "decision": "PRIMARY_ATTEMPT",
+            "lesson_codes": [],
+            "trial_family_id": exact_primary[experiment_id],
+            "experiment_id": experiment_id,
+            "match_scope": "AST_EXACT_PRIMARY",
+            "promotion_authority": False,
+            "statistical_pressure_only": True,
+        } for experiment_id in experiment_ids if experiment_id not in settled)
+        return rows
 
 
 _SQL_INSERT = """
@@ -1036,14 +1244,23 @@ def _selfcheck() -> int:
                      **repaired_material["suggested_params"],
                      "screening_population": [{"ast_fingerprint": "a"}],
                      "screening_cohort_version": "cohort-a"}}
-    sidecar_b = {**repaired_material,
+    same_contract_sidecar = {**repaired_material,
                  "suggested_params": {
                      **repaired_material["suggested_params"],
                      "screening_population": [{"ast_fingerprint": "b"}],
-                     "screening_cohort_version": "cohort-b"}}
+                     "screening_cohort_version": "cohort-a"}}
     check("sidecar 변화는 id 불변",
           proposal_id_for(["a"], "momentum", "krx_all", material=sidecar_a)
-          == proposal_id_for(["a"], "momentum", "krx_all", material=sidecar_b))
+          == proposal_id_for(["a"], "momentum", "krx_all",
+                             material=same_contract_sidecar))
+    upgraded_contract = {**same_contract_sidecar,
+                         "suggested_params": {
+                             **same_contract_sidecar["suggested_params"],
+                             "screening_cohort_version": "cohort-b"}}
+    check("execution cohort version changes proposal id",
+          proposal_id_for(["a"], "momentum", "krx_all", material=sidecar_a)
+          != proposal_id_for(["a"], "momentum", "krx_all",
+                             material=upgraded_contract))
     unordered_a = {
         **repaired_material,
         "falsification_tests": ["cost", "regime"],
@@ -1236,7 +1453,7 @@ def _check_stored_long_excerpt_does_not_kill_harvest():
     터져 **그 배치 전체**가 버려졌다 - 같은 카드가 매 주기 같은 자리에서 죽었다.
     적재 쪽을 고쳐도 이미 들어간 행은 남으므로 읽는 경계에서도 맞춘다.
     """
-    from contracts.factory_contracts import (  # noqa: PLC0415
+    from factory_contracts import (  # noqa: PLC0415
         MAX_EXCERPT_CHARS, lead_id_for)
 
     ref = {"url": "https://example.org/p", "title": "t",
@@ -1389,7 +1606,7 @@ def _check_intraday_screening_cohort_is_sourced_and_non_promoting():
     """Linked current-contract formulas become exact, non-consumed sidecars."""
     import inspect
 
-    from contracts.factory_contracts import SourceRef, lead_id_for
+    from factory_contracts import SourceRef, lead_id_for
     from publish_gate import check_intraday_screening_population
 
     assert "p.status in ('PUBLISHED','ACCEPTED')" in inspect.getsource(load_leads), \

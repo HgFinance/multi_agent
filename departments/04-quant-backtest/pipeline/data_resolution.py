@@ -36,7 +36,9 @@ import sys
 from pathlib import Path
 from dataclasses import dataclass, field
 
-MODULE_VERSION = "quant-data-resolution-v1"
+MODULE_VERSION = "quant-data-resolution-v2"
+INTRADAY_EVENT = "INTRADAY_EVENT"
+LIVE_INTRADAY_DATASET = "krx-intraday-events/v1"
 
 # ── 원천 테이블 화이트리스트 ────────────────────────────────────────────────
 # 표는 **우리 것**이다. 기획안이 준 문자열을 테이블명으로 쓰면 주입이 되고, 모르는
@@ -191,14 +193,86 @@ def normalize_requirement(value) -> tuple[tuple[str, ...], int, tuple[str, ...]]
 # ── 매니페스트 색인 ────────────────────────────────────────────────────────
 _SQL_MANIFESTS = """
 select name, version, coalesce(source_versions, '{}'::jsonb)
-  from quant.dataset_manifests
+  from quant.dataset_manifests manifest
+ where not (manifest.name = 'krx-intraday-events'
+            and manifest.version = 'v1')
+   and exists (
+       select 1
+         from quant.universe_members member
+        where member.universe_version_id = manifest.universe_version_id
+       )
+   and not exists (
+       select 1
+         from quant.universe_members member
+         left join reference.instruments instrument
+           on instrument.instrument_id = member.instrument_id
+        where member.universe_version_id = manifest.universe_version_id
+          and (
+            instrument.instrument_id is null
+            or coalesce(upper(instrument.instrument_type), '') <> 'STOCK'
+            or coalesce(upper(instrument.asset_class), '') <> 'EQUITY'
+            or coalesce(upper(instrument.market), '') <> 'KRX'
+            or coalesce(upper(instrument.status), '') <> 'ACTIVE'
+          )
+       )
 """
 
+# The raw event manifest is deliberately not an immutable materialized panel:
+# its exact cutoff, sessions and observed stock subset are frozen by the
+# intraday runner for every experiment.  It may therefore participate only in
+# INTRADAY_EVENT source-availability resolution, never in the generic/daily
+# manifest index or reusable performance evidence.  Exact identity, clocks and
+# audit markers are all required so a different NULL-universe manifest cannot
+# enter through this exception.
+_SQL_LIVE_INTRADAY_MANIFEST = """
+select manifest.name, manifest.version,
+       coalesce(manifest.source_versions, '{}'::jsonb)
+  from quant.dataset_manifests manifest
+ where manifest.name = 'krx-intraday-events'
+   and manifest.version = 'v1'
+   and manifest.universe_version_id is null
+   and manifest.row_count is null
+   and manifest.partitions = '[]'::jsonb
+   and manifest.object_path =
+       'timescaledb://market/{market_quotes,market_ticks}'
+   and manifest.source_versions ?& array['market_quotes', 'market_ticks']
+   and nullif(manifest.source_versions->>'market_quotes', '') is not null
+   and nullif(manifest.source_versions->>'market_ticks', '') is not null
+   and manifest.quality_summary->>'status' =
+       'LIVE_SLICE_REQUIRES_PER_EXPERIMENT_AUDIT'
+   and manifest.point_in_time_policy->>'knowledge_clock' =
+       'available_at=max(received_at,observed_at)'
+   and manifest.point_in_time_policy->>'feature_cutoff' =
+       'event_time<=decision_time and available_at<=decision_time'
+   and manifest.point_in_time_policy->>'label_cutoff' =
+       'entry_time+horizon'
+   and manifest.point_in_time_policy->>'instrument_isolation' = 'true'
+   and manifest.schema_definition->'market_quotes'->'required' @>
+       '["event_time","received_at","observed_at","instrument_id"]'::jsonb
+   and manifest.schema_definition->'market_ticks'->'required' @>
+       '["event_time","received_at","observed_at","instrument_id"]'::jsonb
+"""
 
-def manifest_index(meta_conn) -> list[tuple[str, str, dict]]:
-    """(이름, 버전, source_versions) 목록. 사상의 근거는 전부 여기서 나온다."""
+_SQL_INTRADAY_MANIFESTS = (
+    _SQL_MANIFESTS.rstrip() + "\nunion\n" +
+    _SQL_LIVE_INTRADAY_MANIFEST.strip() + "\n")
+
+
+def manifest_index(meta_conn, *, research_lane: str = "") \
+        -> list[tuple[str, str, dict]]:
+    """Return manifests eligible for this execution lane.
+
+    Generic and daily callers receive only immutable governed stock panels.
+    ``INTRADAY_EVENT`` additionally receives the single typed live Timescale
+    source manifest.  That extra row grants source availability only; the
+    runner must still freeze and attest the exact stock slice before a trial is
+    registered.
+    """
     cur = meta_conn.cursor()
-    cur.execute(_SQL_MANIFESTS)
+    sql = (_SQL_INTRADAY_MANIFESTS
+           if str(research_lane or "").upper() == INTRADAY_EVENT
+           else _SQL_MANIFESTS)
+    cur.execute(sql)
     out = []
     for name, version, sources in cur.fetchall():
         if isinstance(sources, str):
@@ -276,7 +350,8 @@ def measure_source(market_conn, table: str, interval: str | None,
 
 
 # ── 사상 ───────────────────────────────────────────────────────────────────
-def resolve(requirement, *, meta_conn, market_conn) -> Resolution:
+def resolve(requirement, *, meta_conn, market_conn,
+            research_lane: str = "") -> Resolution:
     """원천 요구를 실행 가능한 데이터셋 이름으로 옮긴다.
 
     통과 조건은 셋을 **모두** 만족해야 한다:
@@ -291,7 +366,8 @@ def resolve(requirement, *, meta_conn, market_conn) -> Resolution:
         # 재지 못한 것을 통과로 세면 이 관문 전체가 장식이 된다.
         return Resolution(NOT_VERIFIED, notes=("시장 DB 연결이 없어 커버리지를 재지 못했다",))
 
-    index = manifest_index(meta_conn)
+    lane = str(research_lane or "").upper()
+    index = manifest_index(meta_conn, research_lane=lane)
     known = {f"{n}/{v}": (n, v, s) for n, v, s in index}
 
     # 이미 실행면 이름으로 온 것: 사상은 건너뛰되 검증은 한다.
@@ -400,6 +476,12 @@ def resolve(requirement, *, meta_conn, market_conn) -> Resolution:
     # **대체를 맨 앞에 싣는다.** 읽는 쪽이 커버리지 숫자만 보고 원시로 검정한
     # 줄 알면 결론의 강도를 잘못 읽는다.
     notes.extend(substituted)
+    if any(key == LIVE_INTRADAY_DATASET for key, _sources in chosen):
+        notes.append(
+            "krx-intraday-events/v1: LIVE_RUNTIME_SOURCE_ONLY; exact cutoff, "
+            "sessions and KRX ACTIVE EQUITY/STOCK identities are frozen and "
+            "fail-closed by the bounded intraday runner; this manifest alone "
+            "is not reusable performance evidence")
     for tbl, cov in sorted(coverage.items()):
         if cov.measurement == "CHUNK_RANGE":
             notes.append(

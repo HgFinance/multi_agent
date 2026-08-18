@@ -49,11 +49,21 @@ _HERE = Path(__file__).resolve().parent
 _RESEARCH = _HERE.parent
 _ROOT = _RESEARCH.parents[1]
 for p in (str(_HERE), str(_RESEARCH), str(_RESEARCH / "collectors"),
+          str(_RESEARCH / "contracts"),
           str(_ROOT / "departments" / "04-quant-backtest" / "pipeline")):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+from stock_universe import (  # noqa: E402
+    governed_stock_dataset_sql,
+    governed_stock_evidence_sql,
+)
+
 MODULE_VERSION = "factory-autopilot-v1"
+
+_GOVERNED_HISTORICAL_EVIDENCE = governed_stock_evidence_sql(
+    experiment_alias="e", dataset_alias="m", hypothesis_alias="h")
+_GOVERNED_STOCK_DATASET = governed_stock_dataset_sql(dataset_alias="m")
 
 # 카드를 만들 때 쓰는 CLI 컨테이너. 어느 프로필이든 같은 보드를 본다
 # (/opt/kanban 이 8개 컨테이너에 공유 마운트다).
@@ -98,9 +108,8 @@ RESEARCH_LANE: DAILY_CROSS_SECTIONAL 또는 INTRADAY_EVENT
 SEMANTIC_PLAN: (Event/Context/Qualities/Direction/Output JSON. intraday는 필수.
     예: {"event":"ORDER_FLOW","context":["TIGHT_SPREAD"],
     "qualities":["PERSISTENCE","STATE_CONDITIONAL"],"direction":"FOLLOW",
-    "output":"TAKER_NET_PNL","execution":"TAKER","horizon_seconds":30}
-    passive 정확한 쌍은 output="PASSIVE_FILL_ADJUSTED_PNL",
-    execution="PASSIVE_FIFO_LOWER_BOUND"다. PASSIVE/PASSIVE_FIFO 별칭은 금지.)
+    "output":"TAKER_NET_PNL","execution":"TAKER","horizon_seconds":30}.
+    현재 61-session completed-second external-history cohort는 TAKER만 허용한다.)
 LABEL: forward_return
 BASELINE: equal_weight_buy_and_hold
 FALSIFICATION_TESTS: (무엇이 나오면 기각인가. 쉼표로 나열)
@@ -136,9 +145,9 @@ COMPETING_EXPLANATION 은 **결과를 보기 전에** 적는 것이다. 이걸 �
 # windows into the daily ``signal_expr`` field.
 INTRADAY_PLANNER_NOTE = """
 UNIVERSE_KEY must be exactly krx_all for every INTRADAY_EVENT proposal.
-intraday-screening-cohort-v3 is a screening_cohort_version attached by intake;
+intraday-screening-cohort-v4 is a screening_cohort_version attached by intake;
 it is not a universe and must never be written in UNIVERSE_KEY.
-[INTRADAY_EVENT 추가 계약]
+[INTRADAY_EVENT completed-second 추가 계약]
 DATA_TABLES: market_quotes, market_ticks
 MIN_HISTORY_DAYS: 10 이상 (짧아도 실행은 한다. 단, 60 KRX 세션 미만은
   UNDERPOWERED/HOLD이며 검증 알파로 승격하지 않는다)
@@ -146,14 +155,11 @@ SUGGESTED_PARAMS JSON 필수 키:
   intraday_signal_expr, horizon_seconds, sample_interval_seconds,
   feature_lookback_seconds, order_latency_ms, execution, entry_policy,
   coefficient_policy
-Execution/output is an exact controlled pair:
+Current 61-session external-history execution/output is exactly:
   TAKER_NET_PNL -> TAKER
-  PASSIVE_FILL_ADJUSTED_PNL -> PASSIVE_FIFO_LOWER_BOUND
-For the passive pair set execution=PASSIVE_FIFO_LOWER_BOUND and
-entry_policy=PREDICTED_MARKOUT_CLEARS_COST. PASSIVE and PASSIVE_FIFO are invalid
-aliases. A passive revision must also change the economic AST (for example a
-spread/depth/adverse-selection state gate); relabeling the identical formula
-does not create a new candidate.
+TAKER only. PASSIVE_FILL_ADJUSTED_PNL/PASSIVE_FIFO_LOWER_BOUND remains a local
+strict-grammar capability for a future sequenced/MBO feed, but is not admissible
+in intraday-screening-cohort-v4 and receives no population quota.
 Net-PnL proposals must set entry_policy=PREDICTED_MARKOUT_CLEARS_COST. Prefer
 coefficient_policy=STRUCTURE_ONLY: the AST expresses a signed economic score and
 the runtime fits exactly one positive, origin-anchored, shrunken score-to-BPS
@@ -167,21 +173,39 @@ and minimum_predicted_edge_bps.
 position_mode은 현재 LONG_ONLY만 허용한다. 대차 가능 여부·차입료·공매도 체결 제약의
 point-in-time 원천이 생기기 전에는 음수 신호를 숏으로 가장하지 않고 abstain한다.
 비용 기본값은 2026 상장주식 거래세와 온라인 위탁수수료를 보수적으로 합친
-fee_bps_per_side=11.5, maker_fee_bps_per_side=11.5다. 10bp 미만은 Gate 0에서
-거부한다. 더 높은 실제 계좌 비용을 알면 반드시 그 값으로 올려 적는다.
-유니버스는 `krx_all` 보정 세션에 인과적으로 quote와 trade가 함께 수집된
-전 종목이다. `instrument_count`로 유동성 상위 일부만 자르지 않는다. 실행기는
-메모리를 제한하기 위해 내부적으로 instrument shard를 순회하지만, 모든 shard는
-동일한 실험ㆍtrialㆍ다중검정 장부에 합쳐진다.
-intraday_signal_expr 연산자:
+fee_bps_per_side=11.5다. 10bp 미만은 Gate 0에서 거부한다. 더 높은 실제 계좌
+비용을 알면 반드시 그 값으로 올려 적는다.
+유니버스는 `krx_all` 보정 세션에 인과적으로 quote와 trade가 함께 수집된 KRX
+상장주식(instrument_type=STOCK) 전 종목이다. ETF·ETN·파생상품·암호화폐는 이
+백테스트에서 제외한다. `instrument_count`로 유동성 상위 일부만 자르지 않는다.
+실행기는 메모리를 제한하기 위해 내부적으로 instrument shard를 순회하지만,
+모든 shard는 동일한 실험ㆍtrialㆍ다중검정 장부에 합쳐진다.
+intraday_signal_expr local strict 연산자:
   field; lag/rolling_mean/rolling_std/rolling_sum/delta/ewma/rolling_zscore
   (모두 seconds 명시); neg/abs/sign/log1p_abs/sqrt_abs;
   add/sub/mul/div/min/max/gt/lt/and/or/where
-필드:
+현재 v4 권장 coarse-state/tape 필드:
   queue_imbalance_l1, queue_imbalance_l10, microprice_offset_bps,
-  trade_flow_imbalance, quote_event_ofi, normalized_quote_ofi, spread_bps,
-  bid_depth_l1, ask_depth_l1, book_depth_l1, book_depth_l10,
-  trade_count, quote_count, trade_intensity, realized_volatility_bps, quote_age_ms
+  depth_imbalance_slope, trade_flow_imbalance, signed_trade_volume,
+  trade_volume, trade_side_known_ratio, spread_bps, bid_depth_l1,
+  ask_depth_l1, book_depth_l1, book_depth_l10, trade_count, quote_count,
+  trade_intensity, realized_volatility_bps, quote_age_ms
+현재 v4 결정론적 금지 필드(동일 초 내부 quote 순서 필요):
+  quote_event_ofi, normalized_quote_ofi, multi_level_quote_ofi_l10,
+  normalized_multi_level_quote_ofi_l10, quote_ofi_depth_divergence,
+  quote_event_transition_count, normalized_quote_ofi_per_event,
+  quote_ofi_per_trade_volume
+현재 외부 기록의 동일 초 snapshot은 unordered completed-second multiset이다.
+따라서 last quote, add/cancel chronology, MBO queue position, event OFI 또는
+passive fill을 복원하지 않는다. 대신 완료된 초의 L1/L10 queue imbalance,
+microprice, depth slope, signed trade flow/volume, spread/depth/activity/RV를
+1/5/30/300초 WALL_TIME_SECONDS 창으로 조합한다. quote_count는 exchange event
+count가 아니라 수집된 snapshot-row activity로만 해석한다.
+권장 경제 변형(공개식을 그대로 복사하지 말고 source baseline과 분리):
+  L1_L10_CONVERGENCE, L1_L10_DIVERGENCE, QUOTE_TAPE_CONFIRMATION,
+  STATE_CONDITION, CROSS_SCALE. EVENT_NORMALIZATION/VOLUME_NORMALIZATION과
+  EVENT_NORMALIZED/VOLUME_NORMALIZED는 sequence가 있는 local strict feed용이며
+  현재 v4 후보에는 쓰지 않는다. 모든 선언은 실제 AST observable path와 일치해야 한다.
 상수는 {"const":2,"unit":"BPS"}처럼 단위를 쓴다. 서로 다른 단위의 add/sub,
 미래시각, 3600초 초과 창은 접수에서 거부된다. 공개 논문 수식을 그대로 복제하지
 말고 상태조건·L1/L10 차이·다중시간창·실패모드 역전 중 메커니즘에 맞는 변형을 낸다.
@@ -293,11 +317,50 @@ def _ast_scout_contract() -> str:
     from intraday_alpha_ast import (  # noqa: PLC0415
         ALL_OPS as INTRADAY_OPS, FIELDS as INTRADAY_FIELDS,
         MAX_DEPTH as INTRADAY_MAX_DEPTH, MAX_NODES as INTRADAY_MAX_NODES,
+        AST_VERSION as INTRADAY_AST_VERSION,
+        QUOTE_EVENT_CLOCK_FIELDS, TRADE_VOLUME_CLOCK_FIELDS,
+        QUOTE_EVENT_CLOCK, TRADE_VOLUME_CLOCK, WALL_TIME_CLOCK,
+        COMPLETED_SECOND_RECOMMENDED_FIELDS,
+        COMPLETED_SECOND_REPLAYABLE_FIELDS,
+        COMPLETED_SECOND_SCREENING_COHORT_VERSION,
+        COMPLETED_SECOND_SEQUENCE_DEPENDENT_FIELDS,
     )
-    from alpha_semantics import CONTEXT_FIELDS, EVENT_FIELDS  # noqa: PLC0415
+    from alpha_semantics import (  # noqa: PLC0415
+        CONTEXT_FIELDS, EVENT_FIELDS, QUALITIES,
+        EVENT_NORMALIZED_FIELDS, VOLUME_NORMALIZED_FIELDS,
+        L1_QUOTE_PRESSURE_FIELDS, L10_QUOTE_PRESSURE_FIELDS,
+        EXPLICIT_L1_L10_FIELDS, QUOTE_PRESSURE_FIELDS,
+        TAPE_PRESSURE_FIELDS,
+    )
+    from alpha_evolution import EVOLUTION_OPERATORS  # noqa: PLC0415
+    from literature_derivation import DERIVATION_TRANSFORMS  # noqa: PLC0415
+    from formula_discovery import (  # noqa: PLC0415
+        DIRECTIONAL_PRESSURE_FIELDS, FUNCTIONAL_FORMS, TERM_ROLES,
+    )
     event_fields = {key: sorted(value) for key, value in sorted(EVENT_FIELDS.items())}
     context_fields = {key: sorted(value)
                       for key, value in sorted(CONTEXT_FIELDS.items())}
+    completed_second_fields = set(COMPLETED_SECOND_REPLAYABLE_FIELDS)
+    quality_observable_groups = {
+        "L1_L10_DIVERGENCE_OR_CONVERGENCE": sorted(
+            (L1_QUOTE_PRESSURE_FIELDS | L10_QUOTE_PRESSURE_FIELDS |
+             EXPLICIT_L1_L10_FIELDS) & completed_second_fields),
+        "QUOTE_TAPE_CONFIRMATION": {
+            "quote": sorted(QUOTE_PRESSURE_FIELDS & completed_second_fields),
+            "tape": sorted(TAPE_PRESSURE_FIELDS & completed_second_fields),
+        },
+        "EVENT_NORMALIZED": [],
+        "VOLUME_NORMALIZED": [],
+    }
+    current_derivation_transforms = set(DERIVATION_TRANSFORMS) - {
+        "EVENT_NORMALIZATION", "VOLUME_NORMALIZATION",
+    }
+    current_evolution_operators = set(EVOLUTION_OPERATORS) - {
+        "EVENT_NORMALIZATION", "VOLUME_NORMALIZATION",
+    }
+    current_directional_fields = (
+        set(DIRECTIONAL_PRESSURE_FIELDS) & completed_second_fields
+    )
     return "\n".join([
         "[AST-ready literature contract]",
         "  Every submitted lead must declare READINESS as exactly one of:",
@@ -318,19 +381,16 @@ def _ast_scout_contract() -> str:
         "    an observable directly to subsequent midprice/markout over a purely theoretical",
         "    model; retain theory as a control or blocked lead when it cannot support the",
         "    claimed executable return target.",
-        "  Allowed transforms: STATE_CONDITION, CLOCK_CHANGE, BOOK_DEPTH_CHANGE,",
-        "  MECHANISM_INTERACTION, RESIDUALIZE_PUBLIC_SIGNAL, FAILURE_MODE_INVERSION,",
-        "  MARKET_STRUCTURE_TRANSFER, TARGET_CHANGE, CROSS_SCALE_DISAGREEMENT,",
-        "  L1_L10_DIVERGENCE, EXECUTION_AWARE.",
+        "  Current completed-second transforms: "
+        + ", ".join(sorted(current_derivation_transforms)) + ".",
         "  EVOLUTIONARY SEARCH CONTRACT: do not return one favorite formula. Produce a",
         "  population of economically different ASTs, then let the deterministic archive",
         "  retain one elite per Event/Context/Direction/Execution/Horizon niche. A child",
         "  of a tested or queued formula must include PARENT_SIGNAL_EXPR, controlled",
         "  EVOLUTION_OPERATORS, a falsifiable EXPECTED_INCREMENT, and ABLATIONS separated",
-        "  by | (or a JSON list). Allowed evolution operators are STATE_CONDITION,",
-        "  FAILURE_MODE_INVERSION, RESIDUALIZE_PUBLIC_SIGNAL, CROSS_SCALE_DISAGREEMENT,",
-        "  MECHANISM_INTERACTION, CLOCK_CHANGE, L1_L10_DIVERGENCE, EXECUTION_AWARE,",
-        "  TARGET_CHANGE, MARKET_STRUCTURE_TRANSFER. Exact and parameter-only children",
+        "  by | (or a JSON list). Current completed-second evolution operators are "
+        + ", ".join(sorted(current_evolution_operators))
+        + ". Exact and parameter-only children",
         "  are rejected. An unrelated new mechanism is a seed and omits all parent fields.",
         "  FINANCIAL-MATHEMATICS CONTRACT: the LLM proposes a short equation skeleton and",
         "  its economic prior; deterministic code validates grammar, dimensions, semantic",
@@ -339,8 +399,8 @@ def _ast_scout_contract() -> str:
         "  keys target, functional_form, expected_sign, coefficient_policy, decision_rule,",
         "  terms, and",
         "  identification. target must equal SEMANTIC_PLAN.output. functional_form is one",
-        "  of MONOTONE, REVERSAL, INTERACTION, STATE_CONDITIONAL, CROSS_SCALE,",
-        "  DEPTH_DIVERGENCE; expected_sign is POSITIVE, NEGATIVE, or STATE_DEPENDENT;",
+        "  of " + ", ".join(sorted(FUNCTIONAL_FORMS))
+        + "; expected_sign is POSITIVE, NEGATIVE, or STATE_DEPENDENT;",
         "  coefficient_policy is FIXED_FROM_SOURCE, PREREGISTERED_NO_OOS_FIT, or",
         "  STRUCTURE_ONLY. Net-PnL decision_rule must be",
         "  PREDICTED_MARKOUT_CLEARS_COST. STRUCTURE_ONLY is preferred and may emit a",
@@ -349,24 +409,44 @@ def _ast_scout_contract() -> str:
         "  calibration sessions preceding OOS. Fixed/preregistered policies must emit",
         "  BPS directly. Never attach spread/volatility only to satisfy units. The runtime",
         "  abstains unless locked predicted markout clears live spread, statutory round-trip",
-        "  charges, and the preregistered safety margin. A dimensionless OFI sign is a",
+        "  charges, and the preregistered safety margin. A dimensionless pressure score is a",
         "  feature, not an executable PnL equation. terms maps every AST field exactly once",
-        "  to PRESSURE, LIQUIDITY,",
-        "  STATE, SCALE, VOLATILITY, FRESHNESS, ACTIVITY, or CAPACITY. identification states",
+        "  to one controlled role: " + ", ".join(sorted(TERM_ROLES))
+        + ". identification states",
         "  a falsifiable conditional prediction. The AST must visibly implement the claimed",
         "  form (for example where for STATE_CONDITIONAL and two clocks for CROSS_SCALE).",
         "  Do not fit constants on OOS data. Prefer compact skeletons with explicit ablations;",
         "  the evaluator, not the prose or LLM confidence, decides empirical survival.",
         "  STRUCTURE-FIRST SKELETONS (adapt the mechanism; do not copy mechanically):",
-        '  SCORE_OFI={"op":"rolling_mean","seconds":30,"arg":{"op":"field",'
-        '"field":"normalized_quote_ofi"}}',
+        '  SCORE_TRADE_FLOW={"op":"rolling_mean","seconds":30,"arg":{"op":"field",'
+        '"field":"trade_flow_imbalance"}}',
         '  SCORE_DEPTH_DIVERGENCE={"op":"sub","args":[{"op":"field",'
         '"field":"queue_imbalance_l1"},{"op":"field","field":'
         '"queue_imbalance_l10"}]}',
+        '  SCORE_DEPTH_SLOPE={"op":"field","field":"depth_imbalance_slope"}',
+        '  SCORE_L1_L10_CONVERGENCE={"op":"where","condition":{"op":"lt",'
+        '"args":[{"op":"abs","arg":{"op":"sub","args":[{"op":"field",'
+        '"field":"queue_imbalance_l1"},{"op":"field","field":'
+        '"queue_imbalance_l10"}]}},{"const":0.25,"unit":'
+        '"RATIO"}]},"then":{"op":"mul","args":[{"op":"add","args":['
+        '{"op":"field","field":"queue_imbalance_l1"},{"op":"field",'
+        '"field":"queue_imbalance_l10"}]},{"const":0.5,'
+        '"unit":"RATIO"}]},"else":{"const":0,"unit":"RATIO"}}',
+        '  SCORE_QUOTE_TAPE_CONFIRMATION={"op":"where","condition":{"op":"gt",'
+        '"args":[{"op":"mul","args":[{"op":"field","field":'
+        '"queue_imbalance_l1"},{"op":"field","field":'
+        '"trade_flow_imbalance"}]},{"const":0,"unit":"RATIO"}]},"then":'
+        '{"op":"mul","args":[{"op":"add","args":[{"op":"field",'
+        '"field":"queue_imbalance_l1"},{"op":"field","field":'
+        '"trade_flow_imbalance"}]},{"const":0.5,"unit":"RATIO"}]},"else":'
+        '{"const":0,"unit":"RATIO"}}',
+        '  SCORE_TAPE_QUALITY_GATE={"op":"where","condition":{"op":"gt",'
+        '"args":[{"op":"field","field":"trade_side_known_ratio"},{"const":0.8,'
+        '"unit":"RATIO"}]},"then":{"op":"field","field":'
+        '"trade_flow_imbalance"},"else":{"const":0,"unit":"RATIO"}}',
         '  BPS_DIRECT={"op":"field","field":"microprice_offset_bps"}',
-        '  BPS_SCALED={"op":"mul","args":[{"op":"div","args":['
-        '{"op":"field","field":"quote_event_ofi"},{"op":"field","field":'
-        '"book_depth_l1"}]},{"op":"field","field":"realized_volatility_bps"}]}',
+        '  BPS_SCALED={"op":"mul","args":[{"op":"field","field":'
+        '"queue_imbalance_l1"},{"op":"field","field":"realized_volatility_bps"}]}',
         '  BPS_STATE={"op":"where","condition":{"op":"lt","args":['
         '{"op":"field","field":"spread_bps"},{"const":5,"unit":"BPS"}]},'
         '"then":{"op":"mul","args":[{"op":"rolling_mean","arg":{"op":'
@@ -374,8 +454,8 @@ def _ast_scout_contract() -> str:
         '"field":"realized_volatility_bps"}]},"else":{"const":0,"unit":"BPS"}}',
         '  BPS_CROSS_SCALE={"op":"mul","args":[{"op":"sub","args":['
         '{"op":"rolling_mean","arg":{"op":"field","field":'
-        '"normalized_quote_ofi"},"seconds":5},{"op":"rolling_mean","arg":'
-        '{"op":"field","field":"normalized_quote_ofi"},"seconds":300}]},'
+        '"trade_flow_imbalance"},"seconds":5},{"op":"rolling_mean","arg":'
+        '{"op":"field","field":"trade_flow_imbalance"},"seconds":300}]},'
         '{"op":"field","field":"realized_volatility_bps"}]}',
         "  A BPS scale must have an economic role and its no-scale/base-only ablation; do",
         "  not attach spread or volatility merely to pass units. Every FORMULA_THESIS term",
@@ -385,9 +465,9 @@ def _ast_scout_contract() -> str:
         "  DIRECTIONAL MARKOUT RULE: activity, spread, depth, and realized-volatility",
         "  levels describe state or magnitude, not whether price moves up or down. Every",
         "  executable markout equation must carry at least one signed field on its numeric",
-        "  VALUE path and label it PRESSURE: queue_imbalance_l1/l10,",
-        "  microprice_offset_bps, trade_flow_imbalance, quote_event_ofi, or",
-        "  normalized_quote_ofi. A directional field used only as a where gate is not",
+        "  VALUE path and label it PRESSURE: "
+        + ", ".join(sorted(current_directional_fields)) + ".",
+        "  A directional field used only as a where gate is not",
         "  enough. Use unsigned fields only to gate or scale that signed pressure.",
         "  POPULATION COMPLETION RULE: source count is not candidate count. One directly",
         "  relevant source may support several auditable revision leads with different AST",
@@ -395,7 +475,8 @@ def _ast_scout_contract() -> str:
         "  contract-valid members through factory_submit_leads (multiple calls are allowed).",
         "  Do not mark the card complete with zero AST_READY merely because blocked/control",
         "  literature was stored. Either (a) persist all 12 AST_READY candidates from",
-        "  distinct economic niches, including <=30s/>=300s and TAKER/PASSIVE quadrants,",
+        "  distinct economic niches, including <=30s/>=300s, book-state/tape mechanisms,",
+        "  and TAKER-only execution states (there is no passive quota in this cohort),",
         "  or (b) report all 12 attempted candidate ASTs and the",
         "  exact deterministic intake error for each. Never weaken a contract to meet quota.",
         "  SOURCE_BASELINE_EXPR is the closest faithful expression of the public method on",
@@ -428,16 +509,36 @@ def _ast_scout_contract() -> str:
         "  or regime auxiliaries. Short microstructure history is accepted and must not be",
         "  replaced with a price-only daily proxy; report the uncertainty honestly.",
         "  Search for mechanisms around these observables; do not retrofit an unrelated paper.",
-        "  RAW EVENT-TIME LANE IS NOW EXECUTABLE. Set RESEARCH_LANE: INTRADAY_EVENT",
+        "  COMPLETED-SECOND EVENT LANE IS EXECUTABLE. Set RESEARCH_LANE: INTRADAY_EVENT",
         "  and include a typed SEMANTIC_PLAN whenever the mechanism lives at seconds/ticks.",
         "  THIS REFILL IS LANE-AWARE: search event-time microstructure first. Daily leads",
         "  do not satisfy an empty INTRADAY_EVENT buffer. Submit at least one executable",
         "  INTRADAY_EVENT AST_READY lead when a cited mechanism maps to the grammar; if",
         "  none survives the contract, report the searched sources and exact blockers",
         "  instead of fabricating a lead, then continue the other lenses.",
-        "  Event-time fields: " + ", ".join(sorted(INTRADAY_FIELDS)),
+        f"  Event-time local strict grammar version: {INTRADAY_AST_VERSION}.",
+        "  Local strict event-time fields (not all current-history replayable): "
+        + ", ".join(sorted(INTRADAY_FIELDS)),
         "  Event-time field units: " + json.dumps(
             INTRADAY_FIELDS, ensure_ascii=False, sort_keys=True),
+        f"  CURRENT EXTERNAL CONTRACT: {COMPLETED_SECOND_SCREENING_COHORT_VERSION}; "
+        "61-session KRX STOCK history; TAKER only; unordered completed-second snapshots.",
+        "  Current replayable/recommended fields: "
+        + ", ".join(sorted(COMPLETED_SECOND_RECOMMENDED_FIELDS)) + ".",
+        "  Deterministically blocked sequence-dependent fields: "
+        + ", ".join(sorted(COMPLETED_SECOND_SEQUENCE_DEPENDENT_FIELDS)) + ".",
+        f"  Physical clock domains: {WALL_TIME_CLOCK}, {QUOTE_EVENT_CLOCK}, "
+        f"{TRADE_VOLUME_CLOCK}.",
+        f"  {WALL_TIME_CLOCK} is the only temporal-operator clock: every lag/rolling/"
+        "delta/ewma/zscore seconds window uses decision wall time. Never rewrite seconds",
+        "  as 'N quote events' or 'N shares'. The local strict quote-event clock fields are "
+        + ", ".join(sorted(QUOTE_EVENT_CLOCK_FIELDS)) + "; fields in the blocked list above",
+        "  require a future sequenced feed. Printed-trade fields are "
+        + ", ".join(sorted(TRADE_VOLUME_CLOCK_FIELDS)) + ".",
+        "  Same-source-timestamp snapshots form an unordered completed-second multiset:",
+        "  do not choose a synthetic last quote or infer transitions. The current feed has",
+        "  no MBO queue ids or add/cancel attribution. Build on L1/L10 queue imbalance,",
+        "  microprice, depth slope, signed tape, spread/depth/activity/RV instead.",
         "  Event-time operators: " + ", ".join(sorted(INTRADAY_OPS)),
         f"  Event-time limits: depth<={INTRADAY_MAX_DEPTH}, nodes<={INTRADAY_MAX_NODES},",
         "  every lag/rolling/delta/ewma/zscore node has seconds=1..3600.",
@@ -449,6 +550,11 @@ def _ast_scout_contract() -> str:
             event_fields, ensure_ascii=False, sort_keys=True),
         "  Semantic context->gating-field requirements: " + json.dumps(
             context_fields, ensure_ascii=False, sort_keys=True),
+        "  Controlled semantic qualities: " + ", ".join(sorted(QUALITIES)),
+        "  Microstructure quality->observable groups: " + json.dumps(
+            quality_observable_groups, ensure_ascii=False, sort_keys=True),
+        "  EVENT_NORMALIZED/VOLUME_NORMALIZED and EVENT_NORMALIZATION/"
+        "VOLUME_NORMALIZATION are local-strict-only and unavailable in current v4 history.",
         '  Event-time JSON is exact: a field is {"op":"field","field":',
         '  "trade_flow_imbalance"}--the key is "field", never "name". A temporal',
         '  node is {"op":"rolling_mean","arg":{"op":"field","field":',
@@ -464,20 +570,25 @@ def _ast_scout_contract() -> str:
         '  {"event":"ORDER_FLOW","context":["TIGHT_SPREAD"],',
         '   "qualities":["PERSISTENCE","STATE_CONDITIONAL"],"direction":"FOLLOW",',
         '   "output":"TAKER_NET_PNL","execution":"TAKER","horizon_seconds":5}.',
-        "  Passive execution uses this exact output/execution pair (no aliases):",
-        '  {"event":"ORDER_FLOW","context":["TIGHT_SPREAD"],',
-        '   "qualities":["STATE_CONDITIONAL"],"direction":"FOLLOW",',
-        '   "output":"PASSIVE_FILL_ADJUSTED_PNL",',
-        '   "execution":"PASSIVE_FIFO_LOWER_BOUND","horizon_seconds":30}.',
-        "  PASSIVE and PASSIVE_FIFO are invalid aliases. A passive child also needs an",
-        "  economic AST mutation (spread/depth/adverse-selection state, clock, or scale);",
-        "  changing only the execution label is an exact-formula duplicate, not novelty.",
-        "  Treat public OFI/queue formulas as controls. Prefer residual, state-conditional",
-        "  or execution-timing mutations that reduce crossing/adverse selection; do not",
+        "  Current external history accepts only output=TAKER_NET_PNL and execution=TAKER.",
+        "  Passive output/execution remains in local strict contracts for a future sequenced/",
+        "  MBO feed, but current v4 intake rejects it and assigns it no candidate quota.",
+        "  Treat public OFI/queue formulas as controls. Prefer state-conditional or",
+        "  cross-scale mutations that reduce crossing/adverse selection; do not",
         "  create extra turnover merely because a short-horizon direction is predictable.",
+        "  Public OFI and MLOFI are mechanism seeds, not current replayable measurements or",
+        "  presumed surviving alpha. Preserve them as DATA_BLOCKED local-strict controls;",
+        "  never rename unordered book-state changes as OFI. Current executable mutations",
+        "  use L1/L10 queue-imbalance convergence/divergence, depth slope, quote-state vs",
+        "  signed-tape confirmation, and wall-time cross-scale persistence. Each must name",
+        "  the counterparty and an expected incremental net-cost prediction. Pre-register",
+        "  paired ablations (L1-only vs L10-only, book-only vs tape-only, short vs long).",
+        "  Adding every new field without a matching quality, transform and ablation is not",
+        "  novelty and is rejected by deterministic intake.",
         "  State contexts must be implemented in a where-condition; declared qualities",
-        "  must be visible in the AST. Queue position, cancellations and order lifetime",
-        "  remain DATA_BLOCKED; raw quote/trade event time itself is no longer blocked.",
+        "  must be visible in the AST. Queue position, cancellations, order lifetime, same-",
+        "  second quote chronology and sequence-derived OFI remain DATA_BLOCKED. Completed-",
+        "  second book-state and printed-trade summaries are executable.",
     ])
 
 
@@ -559,10 +670,18 @@ def _near_miss(conn, *, keep: int = 4) -> str:
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                select trial_family_id, coalesce(notes, ''), lesson_codes
-                  from research.experiment_outcomes
-                 where notes like '관문%%통과%%'
-                 order by decided_at desc limit 40""")
+                select o.trial_family_id, coalesce(o.notes, ''),
+                       o.lesson_codes
+                  from research.v_current_experiment_outcomes o
+                  join quant.experiments e
+                    on e.experiment_id::text = o.experiment_id
+                  join quant.hypotheses h
+                    on h.hypothesis_id = e.hypothesis_id
+                 join quant.dataset_manifests m
+                    on m.dataset_id = e.dataset_id
+                 where o.notes like '관문%%통과%%'
+                   and """ + _GOVERNED_HISTORICAL_EVIDENCE + """
+                 order by o.decided_at desc limit 40""")
             rows = cur.fetchall() or []
     except Exception:      # noqa: BLE001 - 못 읽으면 적지 않는다(지어내지 않는다)
         return ""
@@ -708,7 +827,7 @@ def _vocab_block(conn=None) -> str:
     from strategy_templates import EDGE_VOCAB      # noqa: PLC0415
     from trial_family import UNIVERSE_VOCAB        # noqa: PLC0415
 
-    from contracts.factory_contracts import (      # noqa: PLC0415
+    from factory_contracts import (                # noqa: PLC0415
         CompetingExplanation, SourceType)
 
     # ▶ **목록에 있다고 데이터셋이 있는 것은 아니다** (2026-08-12 실측)
@@ -726,7 +845,8 @@ def _vocab_block(conn=None) -> str:
         if conn is not None:
             from data_resolution import manifest_index  # noqa: PLC0415
 
-            for _n, _v, srcs in manifest_index(conn):
+            for _n, _v, srcs in manifest_index(
+                    conn, research_lane="INTRADAY_EVENT"):
                 covered |= set(srcs or {})
         rest = sorted(set(SOURCE_TABLES) - covered)
         if covered:
@@ -869,9 +989,16 @@ def _pareto_line(conn) -> str:
 
         out = []
         with conn.cursor() as cur:
-            cur.execute("""select root_cause, count(*)
-                             from research.experiment_outcomes
-                            where root_cause is not null
+            cur.execute(f"""select o.root_cause, count(*)
+                             from research.v_current_experiment_outcomes o
+                             join quant.experiments e
+                               on e.experiment_id::text = o.experiment_id
+                             join quant.hypotheses h
+                               on h.hypothesis_id = e.hypothesis_id
+                             join quant.dataset_manifests m
+                               on m.dataset_id = e.dataset_id
+                            where o.root_cause is not null
+                              and {_GOVERNED_HISTORICAL_EVIDENCE}
                             group by 1 order by 2 desc""")
             pareto = cur.fetchall()
             if pareto:
@@ -881,11 +1008,16 @@ def _pareto_line(conn) -> str:
                     out.append(f"  {rc:<10} {n}건 ({100*n//total}%)")
                 out.append("  ▶ 1위 결함을 없애는 개선이 같은 노력의 다른 어떤 "
                            "개선보다 크다 - 카드를 고를 때 이 표를 먼저 봐라.")
-            cur.execute("""
+            cur.execute(f"""
                 select coalesce(h.expected_edge->>'type',''), o.decision
-                  from research.experiment_outcomes o
+                  from research.v_current_experiment_outcomes o
+                  join quant.experiments e
+                    on e.experiment_id::text = o.experiment_id
                   join quant.hypotheses h
-                    on h.hypothesis_id::text = o.hypothesis_id""")
+                    on h.hypothesis_id = e.hypothesis_id
+                  join quant.dataset_manifests m
+                    on m.dataset_id = e.dataset_id
+                 where {_GOVERNED_HISTORICAL_EVIDENCE}""")
             agg: dict = {}
             for edge, dec in cur.fetchall():
                 t = theme_of(edge)
@@ -1085,13 +1217,15 @@ def _ast_experience_block(conn) -> str:
                        coalesce(o.oos_summary, '{}'::jsonb), h.title
                   from quant.experiments e
                   join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+                  join quant.dataset_manifests m on m.dataset_id = e.dataset_id
                   left join lateral (
                     select decision, lesson_codes, oos_summary
-                      from research.experiment_outcomes x
+                      from research.v_current_experiment_outcomes x
                      where x.experiment_id = e.experiment_id::text
                      order by x.decided_at desc limit 1
                   ) o on true
                  where e.config ? 'signal_expr'
+                   and """ + _GOVERNED_HISTORICAL_EVIDENCE + """
                  order by e.created_at desc""")
             experiments = [{
                 "signal_expr": row[0], "decision": row[1],
@@ -1156,16 +1290,23 @@ def _ast_experience_block(conn) -> str:
                        coalesce(o.decision, ''),
                        coalesce(o.lesson_codes, '{}'::text[]),
                        coalesce(o.oos_summary, '{}'::jsonb), h.title,
-                       coalesce(c.dimensions, '{}'::jsonb),
-                       coalesce(rb.dimensions, '{}'::jsonb)
+                       coalesce(manifest.report->'score_calibration',
+                                c.dimensions, '{}'::jsonb),
+                       coalesce(manifest.report->'residual_behavior',
+                                rb.dimensions, '{}'::jsonb),
+                       coalesce(manifest.report->'residual_qd',
+                                rb.dimensions->'residual_qd', '{}'::jsonb)
                   from quant.experiments e
                   join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+                  join quant.dataset_manifests m on m.dataset_id = e.dataset_id
                   left join lateral (
                     select decision, lesson_codes, oos_summary
-                      from research.experiment_outcomes x
+                      from research.v_current_experiment_outcomes x
                      where x.experiment_id = e.experiment_id::text
                      order by x.decided_at desc limit 1
                   ) o on true
+                  left join quant.intraday_report_manifests manifest
+                    on manifest.experiment_id = e.experiment_id
                   left join lateral (
                     select dimensions
                       from quant.experiment_metrics m
@@ -1183,6 +1324,7 @@ def _ast_experience_block(conn) -> str:
                      order by m.experiment_metric_id limit 1
                   ) rb on true
                  where e.config ? 'intraday_signal_expr'
+                   and """ + _GOVERNED_HISTORICAL_EVIDENCE + """
                  order by e.created_at desc""")
             intraday = [{
                 "intraday_signal_expr": row[0], "semantic_plan": row[1] or {},
@@ -1192,7 +1334,7 @@ def _ast_experience_block(conn) -> str:
                 "residual_behavior": {
                     key: value for key, value in (row[7] or {}).items()
                     if key != "residual_qd"},
-                "residual_qd": (row[7] or {}).get("residual_qd") or {},
+                "residual_qd": row[8] or {},
             } for row in cur.fetchall()]
             # Shared-replay candidates are useful measured memory, but they are
             # not independent confirmations.  Read their candidate-scoped
@@ -1200,23 +1342,33 @@ def _ast_experience_block(conn) -> str:
             cur.execute("""
                 select e.experiment_id::text,
                        coalesce(e.config->'screening_population', '[]'::jsonb),
-                       h.title, m.metric, m.value, m.dimensions
+                       h.title, metric.metric, metric.value,
+                       metric.dimensions,
+                       coalesce(manifest.report->'screening_candidates',
+                                '{}'::jsonb)
                   from quant.experiments e
                   join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
-                  left join quant.experiment_metrics m
-                    on m.experiment_id = e.experiment_id
-                   and m.dimensions->>'screening_candidate' is not null
+                  join quant.dataset_manifests m on m.dataset_id = e.dataset_id
+                  left join quant.experiment_metrics metric
+                    on metric.experiment_id = e.experiment_id
+                   and metric.dimensions->>'screening_candidate' is not null
+                  left join quant.intraday_report_manifests manifest
+                    on manifest.experiment_id = e.experiment_id
                  where e.config ? 'screening_population'
-                 order by e.created_at desc, m.metric""")
+                   and """ + _GOVERNED_HISTORICAL_EVIDENCE + """
+                 order by e.created_at desc, metric.metric""")
             screened: dict[tuple[str, str], dict] = {}
-            for experiment_id, population, title, metric, value, dimensions in \
+            for (experiment_id, population, title, metric, value, dimensions,
+                 manifest_candidates) in \
                     cur.fetchall():
                 dimensions = dimensions or {}
+                manifest_candidates = manifest_candidates or {}
                 by_fp = {str(candidate.get("ast_fingerprint") or ""): candidate
                          for candidate in (population or [])
                          if isinstance(candidate, dict)}
                 for candidate_fp, candidate in by_fp.items():
                     key = (experiment_id, candidate_fp)
+                    artifact = manifest_candidates.get(candidate_fp) or {}
                     screened.setdefault(key, {
                         "intraday_signal_expr": candidate.get(
                             "intraday_signal_expr"),
@@ -1225,7 +1377,7 @@ def _ast_experience_block(conn) -> str:
                         "coefficient_policy": candidate.get(
                             "coefficient_policy"),
                         "decision": "SCREENING_ONLY",
-                        "lesson_codes": [], "oos_summary": {},
+                        "oos_summary": {},
                         "title": f"{title} [screen {candidate_fp[:8]}]",
                         "evidence_tier": "SCREENING_ONLY",
                         "source_lead_ids": list(
@@ -1236,6 +1388,18 @@ def _ast_experience_block(conn) -> str:
                         "ablation_path": candidate.get("ablation_path"),
                         "ablation_of_ast_fingerprint": candidate.get(
                             "ablation_of_ast_fingerprint"),
+                        "score_calibration": artifact.get(
+                            "score_calibration") or {},
+                        "residual_behavior": artifact.get(
+                            "residual_behavior") or {},
+                        "residual_qd": artifact.get("residual_qd") or {},
+                        "lesson_codes": list(
+                            artifact.get("failed_criteria") or []),
+                        "screening_gate_decision": artifact.get(
+                            "screening_gate_decision"),
+                        "pareto_rank": artifact.get("pareto_rank"),
+                        "empirical_influence": artifact.get(
+                            "empirical_influence"),
                     })
                 metric_fp = str(dimensions.get("screening_candidate") or "")
                 target = screened.get((experiment_id, metric_fp))
@@ -1244,21 +1408,32 @@ def _ast_experience_block(conn) -> str:
                 if dimensions.get("summary") is True:
                     target["oos_summary"][metric] = float(value)
                 elif metric == "intraday_screening_result":
+                    artifact = manifest_candidates.get(metric_fp) or {}
+                    source = artifact or dimensions
                     target["lesson_codes"] = list(
-                        dimensions.get("failed_criteria") or [])
-                    target["screening_gate_decision"] = dimensions.get(
+                        source.get("failed_criteria") or [])
+                    target["screening_gate_decision"] = source.get(
                         "screening_gate_decision")
-                    target["pareto_rank"] = dimensions.get("pareto_rank")
-                    target["empirical_influence"] = dimensions.get(
+                    target["pareto_rank"] = source.get("pareto_rank")
+                    target["empirical_influence"] = source.get(
                         "empirical_influence")
-                    target["residual_qd"] = dimensions.get("residual_qd") or {}
+                    target["residual_qd"] = (
+                        artifact.get("residual_qd") or
+                        dimensions.get("residual_qd") or {})
                 elif metric == "intraday_score_calibration":
-                    target["score_calibration"] = dimensions
+                    artifact = manifest_candidates.get(metric_fp) or {}
+                    target["score_calibration"] = (
+                        artifact.get("score_calibration") or dimensions)
                 elif metric == "intraday_residual_behavior":
-                    target["residual_behavior"] = {
-                        key: value for key, value in dimensions.items()
-                        if key not in {"screening_candidate", "residual_qd"}}
-                    target["residual_qd"] = dimensions.get("residual_qd") or {}
+                    artifact = manifest_candidates.get(metric_fp) or {}
+                    target["residual_behavior"] = (
+                        artifact.get("residual_behavior") or {
+                            key: value for key, value in dimensions.items()
+                            if key not in {
+                                "screening_candidate", "residual_qd"}})
+                    target["residual_qd"] = (
+                        artifact.get("residual_qd") or
+                        dimensions.get("residual_qd") or {})
             intraday.extend(screened.values())
             cur.execute("""
                 select lead_ids, title, verdict, competing_codes,
@@ -1463,14 +1638,15 @@ def _widest_price_dataset(conn) -> tuple[str, int | None]:
     """
     try:
         with conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(f"""
                 select m.name, m.version,
                        (select count(*) from quant.dataset_partitions p
                          where p.dataset_id = m.dataset_id) parts,
                        m.row_count
-                  from quant.dataset_manifests m
+                 from quant.dataset_manifests m
                  where m.source_versions ? 'market_bars'
-                 order by m.row_count desc limit 1""")
+                   and {_GOVERNED_STOCK_DATASET}
+                 order by m.row_count desc, m.version desc limit 1""")
             got = cur.fetchone()
     except Exception:  # noqa: BLE001
         return "", None
@@ -2802,27 +2978,31 @@ def _structurally_blocked(conn, hypothesis_ids: list) -> dict:
     try:
         sys.path.insert(0, str(_ROOT / "departments" / "04-quant-backtest" / "pipeline"))
         pass  # feasibility 는 아래에서 모양별로 직접 대조한다
-        from data_resolution import manifest_index          # noqa: PLC0415
+        from data_resolution import (DERIVED_FROM,          # noqa: PLC0415
+                                     manifest_index)
     except Exception:  # noqa: BLE001
         return {}
 
     out: dict = {}
     try:
-        datasets = {f"{n}/{v}" for n, v, _ in manifest_index(conn)}
-        covered: set = set()
-        for _n, _v, srcs in manifest_index(conn):
-            covered |= set(srcs or {})
-        # ▶ 유도본으로 대체 가능한 원시도 **덮인 것으로 본다** (2026-08-12)
-        #   `resolve` 는 `market_quotes` 요구를 `microstructure_features` 로
-        #   잇는다(DERIVED_FROM). 여기서 그걸 모르면 발주 게이트가 실제로는
-        #   돌 수 있는 가설을 보류한다 - 같은 표를 봐야 판정이 일치한다.
-        try:
-            from data_resolution import DERIVED_FROM   # noqa: PLC0415
+        strict_index = manifest_index(conn)
+        intraday_index = manifest_index(
+            conn, research_lane="INTRADAY_EVENT")
+
+        def execution_surface(index):
+            datasets = {f"{n}/{v}" for n, v, _ in index}
+            covered: set = set()
+            for _n, _v, srcs in index:
+                covered |= set(srcs or {})
+            # ▶ 유도본으로 대체 가능한 원시도 **덮인 것으로 본다**
+            #   `resolve` 와 발주 게이트가 같은 표를 봐야 판정이 일치한다.
             for derived, raws in DERIVED_FROM.items():
                 if derived in covered:
                     covered |= set(raws)
-        except Exception:  # noqa: BLE001 - 못 읽으면 좁게 본다(막는 쪽이 안전)
-            pass
+            return datasets, covered
+
+        strict_surface = execution_surface(strict_index)
+        intraday_surface = execution_surface(intraday_index)
         with conn.cursor() as cur:
             cur.execute(
                 "select hypothesis_id::text, expected_edge, required_data_products "
@@ -2832,6 +3012,10 @@ def _structurally_blocked(conn, hypothesis_ids: list) -> dict:
         from experiment_orchestrator import STRATEGY_CATALOG  # noqa: PLC0415
 
         for hid, edge, req in rows:
+            lane = str((edge or {}).get("research_lane") or "").upper()
+            datasets, covered = (intraday_surface
+                                 if lane == "INTRADAY_EVENT"
+                                 else strict_surface)
             # ▶ `required_data_products` 는 **두 모양**이다 - 옛 가설은
             #   `["krx-basket-daily/v1"]`(데이터셋 이름 목록), 새 가설은
             #   `{"tables": [...], "min_history_days": N}`(원천 요구). 한 모양만
@@ -3046,6 +3230,14 @@ def _enact_top_move(conn, *, dry_run: bool = False) -> int:
             return 0
         moves = allocator.plan(conn, wider_dataset=wider, wider_days=days)
     except Exception as exc:  # noqa: BLE001 - 못 세면 아무것도 안 둔다
+        # A database parse/execution error leaves psycopg2's transaction in
+        # INERROR.  This helper deliberately fails open, so it must also clear
+        # that state before _dispatch_experiments performs its ordering query
+        # on the same connection.  Everything before this point is read-only.
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001 - preserve the original diagnosis
+            pass
         print(f"  배분자 실행 실패 - 자동 등록 생략: {type(exc).__name__}",
               flush=True)
         return 0
@@ -3235,9 +3427,10 @@ def cycle(*, dry_run: bool = False) -> int:
                 # Refill at most once per UTC hour while the executable queue is
                 # dry.  The former six-hour bucket let several planner cycles
                 # consume the same exhausted leads before scouting could run.
-                # v7 requires a cost-aware BPS population; v6 still admitted
-                # dimensionless direction scores as executable net-PnL formulas.
-                key=f"factory-scout-v7-{_now:%Y%m%d}T{_now.hour:02d}",
+                # v8 exposes the v2 event/volume/depth observable surface; v7
+                # had the cost-aware formula contract but could not ask for or
+                # label these economic mutations explicitly.
+                key=f"factory-scout-v9-{_now:%Y%m%d}T{_now.hour:02d}",
                 dry_run=dry_run)
         elif active_scout:
             print(f"  scout refill skipped - already active: {active_scout}", flush=True)
@@ -3337,7 +3530,7 @@ def cycle(*, dry_run: bool = False) -> int:
                   "않는다."),
             assignee=RESEARCH_ASSIGNEE,
             # v5 consumes a bounded typed cohort in one shared event replay.
-            key=f"factory-planner-v6-{pstamp}", dry_run=dry_run, priority=1)
+            key=f"factory-planner-v8-{pstamp}", dry_run=dry_run, priority=1)
 
         # 회의론자 카드는 **여기서 만들지 않는다**. 기획자 산출이 아직 없는데
         # 걸면 검토할 대상이 없는 채로 돌아 빈 산출을 내거나, 없는 기획안을
@@ -4378,12 +4571,14 @@ def _check_unused_leads_come_first():
     assert 'never "name"' in contract and '"op":"where"' in contract
     assert "[BARE_WORDS] is not JSON" in contract
     assert "genuinely non-finance" in contract and "empirical event-time" in contract
-    assert "PASSIVE_FILL_ADJUSTED_PNL" in contract
-    assert "PASSIVE_FIFO_LOWER_BOUND" in contract
-    assert "PASSIVE and PASSIVE_FIFO are invalid aliases" in contract
-    assert "execution-timing mutations" in contract and "extra turnover" in contract
-    assert "PASSIVE_FILL_ADJUSTED_PNL" in PLANNER_FORMAT
-    assert "PASSIVE_FIFO_LOWER_BOUND" in INTRADAY_PLANNER_NOTE
+    assert "TAKER only" in contract and "no candidate quota" in contract
+    assert "unordered completed-second" in contract
+    assert "normalized_quote_ofi_per_event" in contract
+    assert "Deterministically blocked sequence-dependent fields" in contract
+    assert "cross-scale mutations" in contract and "extra turnover" in contract
+    assert "TAKER만 허용" in PLANNER_FORMAT
+    assert "TAKER only" in INTRADAY_PLANNER_NOTE
+    assert "instrument_type=STOCK" in INTRADAY_PLANNER_NOTE
     assert "instrument_count" in INTRADAY_PLANNER_NOTE
     assert "UNIVERSE_KEY must be exactly krx_all" in INTRADAY_PLANNER_NOTE
     assert "not a universe" in INTRADAY_PLANNER_NOTE
@@ -4550,7 +4745,7 @@ def _check_design_gaps_and_scout_card():
         "재료가 말라도 스카우트 전용 카드가 안 나간다"
     # 공급 병목 파훼 두 짝 (2026-08-13): 기획 카드 30분 버킷 + 다중 블록 제출.
     # 실행 6분 vs 공급 1건/시간 실측 - 버킷이 시간으로 돌아가면 재발이다.
-    assert "factory-planner-v6-{pstamp}" in cyc, "기획 카드가 시간 버킷으로 돌아갔다"
+    assert "factory-planner-v8-{pstamp}" in cyc, "기획 카드가 시간 버킷으로 돌아갔다"
     assert "서로 다른 계열" in cyc and "블록 3개" in cyc, "다중 블록 제출 지시가 빠졌다"
     assert "정확히 한" in cyc and "INTRADAY_EVENT" in cyc, \
         "event-time 리드가 있어도 기획자가 일봉만 고를 수 있다"
@@ -4614,7 +4809,7 @@ def _check_research_queue_prefers_consumption():
     assert "intraday_formula_unused" in cyc
     assert "_should_schedule_planner(" in cyc, \
         "planner can still consume an empty primary-lane queue"
-    assert "factory-planner-v6-" in cyc, \
+    assert "factory-planner-v8-" in cyc, \
         "corrected scheduling can be absorbed by an old planner key"
     assert "priority=1" in cyc, "planner priority was lost after replenishment"
     print("  research producer-before-consumer dependency OK")
@@ -4643,7 +4838,7 @@ def _check_ast_memory_reaches_scout_and_planner():
         "Event와 observable의 결정론 매핑이 스카우트에게 안 보인다"
     assert "all 12 attempted candidate ASTs" in contract, \
         "blocked 문헌 몇 건만 적재하고 population 작업을 끝낼 수 있다"
-    assert "factory-scout-v7-" in cyc, \
+    assert "factory-scout-v9-" in cyc, \
         "새 population 계약이 완료된 구버전 카드에 흡수된다"
     print("  AST 경험 기억→검색·기획   OK")
 
