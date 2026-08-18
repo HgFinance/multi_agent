@@ -450,6 +450,16 @@ def test_release_script_is_worktree_only_and_fail_closed() -> None:
     assert "--volumes" not in script
     assert "set -x" not in script
 
+    build_command = (
+        'compose_release "$RELEASE" --profile deployment build --pull'
+    )
+    pull_command = (
+        'compose_release "$RELEASE" pull --ignore-buildable --policy missing'
+    )
+    assert build_command in script
+    assert pull_command in script
+    assert script.index(build_command) < script.index(pull_command)
+
     installer = PROFILE_INSTALLER.read_text(encoding="utf-8")
     assert "departments/00-ceo-office/hermes" in installer
     assert "departments/02-trading/hermes" in installer
