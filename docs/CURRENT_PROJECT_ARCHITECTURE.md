@@ -2,11 +2,13 @@
 
 > **Status:** current repository snapshot · **reviewed:** 2026-08-18 KST
 >
-> **Source audit:** this checkout is `qa-department` at `6e35972`, which is 217
-> commits behind `origin/main` at `6d2327c`. Current implementation claims in
+> **Source audit:** this checkout is `qa-department` at `3a6607f`, 7 commits behind
+> `origin/main` at `4149454`. Current implementation claims in
 > this document follow the newer `origin/main` executable/config state where
-> the two differ. Branch-only facts are labeled `TRACKED_BRANCH`; main facts
-> are labeled `TRACKED_MAIN`.
+> the two differ. The model-serving files are identical between this branch
+> and `origin/main`; newer main changes are primarily forward-QA, quant
+> experiment, Compose, migration, and contract-test additions. Claims sourced
+> from main are labeled `TRACKED_MAIN`; branch-only facts are `TRACKED_BRANCH`.
 >
 > This document is an implementation audit, not a target-state specification. The
 > repository, its contracts, tests, and tracked configuration are the source of
@@ -31,10 +33,11 @@ The repository currently verifies the following shape:
 - Trading, risk, accounting, quant, and QA contracts and deterministic modules
   exist, but the repository does not prove one continuously operated,
   end-to-end production order lifecycle.
-- `origin/main` tracks the promoted **Qwen2.5-14B-Instruct-AWQ** worker model,
-  served as `qwen2.5-14b-instruct-awq`, with 8192/0.85 serving defaults and
-  FP8 KV cache. The checked-out branch still contains the older FP8/16384/0.90
-  defaults; that is branch drift, not the latest tracked-main state.
+- Both this checkout and `origin/main` track the promoted
+  **Qwen2.5-14B-Instruct-AWQ** worker model, served as
+  `qwen2.5-14b-instruct-awq`, with 8192/0.85 serving defaults and FP8 KV
+  cache. FP8/16384/0.90 is retained only where historical benchmark or
+  runbook material explicitly describes the former baseline.
 - `origin/main` tracks FP8/AWQ quality result artifacts. Infrastructure VRAM,
   KV-token, and throughput measurements are not present in the tracked result
   files and are not inferred here.
@@ -174,6 +177,7 @@ The repository has two different, intentional execution topologies:
 | General response workflow | QA is an independent asynchronous governance lane. CEO may synthesize terminal primary results before QA completes; QA is not a response-synthesis prerequisite. | `orchestration/adapters/ceo_supervisor.py` (`governance_plane=async_qa`, `primary_results_ready_fast_path`); `orchestration/ceo_workflow_scope.py` |
 | QA department internals | Eligible conditional QA graphs fan out concurrently, then their reports are fanned in; deterministic `qa-runner` is added to the combined result. | `departments/06-ai-qa-audit/qa_employee_workers.py::run_employee_workers_async`, `asyncio.gather` |
 | Blocking decision / paper pipeline | Department stages use explicit barriers. QA remains a blocking gate after the upstream Risk stage for this graph; it is not made asynchronous merely because general responses have an async QA lane. | `orchestration/workflows/portfolio_recommendation.py::build_portfolio_graph` |
+| Intraday forward-QA lane (`origin/main`) | Accepted forward evidence is dispatched through a durable outbox/Redis stream, then independently reproduced by a lease-fenced QA worker. Scientific mismatches produce QA verdicts; this is separate from the general-response QA lane. | `departments/06-ai-qa-audit/qa_events/worker.py`, `reproduction_worker.py`, `docker-compose.yml`, `supabase/migrations/20260818000300_intraday_forward_qa_dispatch.sql` |
 
 Therefore “QA is asynchronous” is only correct for the general response
 governance lane. “QA is always after everything” is also incomplete: the
@@ -193,21 +197,25 @@ flowchart LR
     A --> E[AWQ base + adapter request]
 ```
 
-`origin/main` commit `b3fb8c5` updates `docker-compose.model.yml`,
-`departments/worker_model_gateway.py`, and
-`departments/01-research/config/worker_model_registry.json` to AWQ. The
-checked-out branch still has the previous FP8 values. The main-tracked overlay
-enables LoRA with `max-loras=4`, `max-lora-rank=32`, and `max-cpu-loras=8`.
+`origin/main` commit `b3fb8c5` introduced the AWQ model plane in
+`docker-compose.model.yml`, `departments/worker_model_gateway.py`, and
+`departments/01-research/config/worker_model_registry.json`. The checked-out
+branch contains the same executable serving defaults. Both configurations
+enable LoRA with `max-loras=4`, `max-lora-rank=32`, and `max-cpu-loras=8`.
 
 | Setting | `origin/main` tracked value | `qa-department` branch value | Evidence/status |
 |---|---|---|---|
-| base model directory | `Qwen2.5-14B-Instruct-AWQ` | `Qwen2.5-14B-Instruct-FP8-dynamic` | TRACKED_MAIN / TRACKED_BRANCH |
-| served model name | `qwen2.5-14b-instruct-awq` | `qwen2.5-14b-instruct-fp8` | TRACKED_MAIN / TRACKED_BRANCH |
-| max model length | `8192` | `16384` | TRACKED_MAIN / TRACKED_BRANCH |
-| GPU memory utilization | `0.85` | `0.90` | TRACKED_MAIN / TRACKED_BRANCH |
+| base model directory | `Qwen2.5-14B-Instruct-AWQ` | `Qwen2.5-14B-Instruct-AWQ` | TRACKED_MAIN / TRACKED_BRANCH |
+| served model name | `qwen2.5-14b-instruct-awq` | `qwen2.5-14b-instruct-awq` | TRACKED_MAIN / TRACKED_BRANCH |
+| max model length | `8192` | `8192` | TRACKED_MAIN / TRACKED_BRANCH |
+| GPU memory utilization | `0.85` | `0.85` | TRACKED_MAIN / TRACKED_BRANCH |
 | KV cache dtype | `fp8` | `fp8` | TRACKED_MAIN and TRACKED_BRANCH |
 | LoRA | enabled; 4/32/8 limits | enabled; 4/32/8 limits | IMPLEMENTED serving plumbing |
 | actual AWS process health | not proven by repository artifact | not inspected | RUNTIME_VERIFIED unavailable |
+
+`departments/worker_model_gateway.py`의 모듈 docstring에는 아직 FP8 표현이
+남아 있지만, 실행 기본값·Compose·registry는 AWQ로 일치한다. 해당 docstring은
+현재 model-plane source of truth가 아닌 stale comment로 분류한다.
 
 ## 8. FP8 → AWQ Optimization
 
@@ -363,14 +371,11 @@ The repository supports these findings:
    canonical cross-department order/fill/journal path as incomplete or
    historical. A fresh AWS/runtime probe is needed before calling it
    production-ready.
-2. **Model-plane branch drift:** `qa-department` still contains the older
-   FP8/16K/0.90 defaults, while `origin/main` tracks the AWQ/8K/0.85 promotion.
-   The current architecture follows `origin/main`; the branch values remain
-   documented only to make the divergence explicit. The requested
-   current production claim is AWQ. This is the most direct documentation and
- operational source-of-truth mismatch. The current architecture follows
- `origin/main`; the branch values are retained only to make the divergence
- explicit and are not treated as the latest production state.
+2. **Main integration drift:** the model plane is aligned on this branch and
+`origin/main` is seven commits ahead with additional forward-QA
+dispatch/reproduction, quant experiment, Compose, migration, and contract-test
+changes. This document follows main for current architecture; runtime health
+remains unverified.
 3. **Governance integration:** QA/Risk engines and APIs are present, but active
    policy corpus, credentials, production evidence, and continuous runtime
    records are environment-dependent and not verifiable from this checkout.
@@ -392,6 +397,8 @@ The repository supports these findings:
 | PIT quant dataset and strategy lifecycle | IMPLEMENTED / PARTIAL | `departments/04-quant-backtest/pipeline/pit_dataset.py`, `strategy_lifecycle.py` |
 | deterministic accounting ledger/reconciliation/reporting | IMPLEMENTED / PARTIAL | `departments/05-accounting-portfolio`, accounting close-loop tests |
 | QA evidence/model-risk/eval runners | IMPLEMENTED / PARTIAL | `departments/06-ai-qa-audit/evidence`, `model_risk.py`, `eval_runner.py` |
+| forward-QA dispatch and lease-fenced reproduction | IMPLEMENTED / PARTIAL / TRACKED_MAIN | `departments/06-ai-qa-audit/qa_events/worker.py`, `reproduction_worker.py`, Compose service, forward-QA migrations and tests; runtime health not verified |
+| intraday quant experiment/forward-confirmation gates | IMPLEMENTED / PARTIAL / TRACKED_MAIN | `departments/04-quant-backtest/pipeline/intraday_experiment_runner.py`, `intraday_trial_ledger.py`, `intraday_candidate.py`, release/publish tests; operational data not verified |
 | external AWS AWQ serving checkpoint | TRACKED_MAIN; RUNTIME_VERIFIED unavailable | `origin/main` commit `b3fb8c5` and its Compose/gateway/registry changes; live AWS health is not proven |
 | FP8/AWQ quality result table | TRACKED_MAIN | immutable result files under `benchmarks/quantization/results/`; no external runtime observation is claimed |
 | VRAM/KV/throughput infrastructure table | NOT VERIFIED | requested memory/throughput/restart values are not present in tracked result artifacts or inspected history |
@@ -421,7 +428,7 @@ run, and `RUNTIME_VERIFIED` requires an actual API/DB/process observation.
    preserve historical snapshots separately rather than presenting them as
    current state.
 
-### Documentation ownership map
+## 16. Documentation Ownership
 
 | Path | Role | Audit classification | Overlap/authority |
 |---|---|---|---|
@@ -429,11 +436,12 @@ run, and `RUNTIME_VERIFIED` requires an actual API/DB/process observation.
 | `docs/CURRENT_PROJECT_ARCHITECTURE.md` | canonical current architecture | CURRENT / TRACKED_MAIN-aware | owns current architecture summary and source audit |
 | `docs/PROJECT_IMPLEMENTATION_STATUS.md` | implementation/readiness board | CURRENT + HISTORICAL snapshots | owns status vocabulary and dated evidence; links here for architecture |
 | `docs/02-engineering/FINAL_RUNTIME_ARCHITECTURE.md` | detailed runtime contracts | CURRENT detail / PARTIAL implementation | owns execution boundaries, retries, adapters, and gate topology |
+| `docs/02-engineering/RISK_QA_DOCKER_RUNBOOK.md` | Risk/QA container and preflight procedure | DEPARTMENT RUNTIME DOC / TRACKED_MAIN | operational runbook; does not replace this architecture or status board |
 | `docs/02-engineering/WORKER_ROLE_BOUNDARIES.md` | worker permissions and roles | CURRENT reference | owns detailed role/authority matrix |
 | `docs/HEDGE_FUND_MASTER_PLAN.md` | target state and long-term plan | TARGET STATE / HISTORICAL snapshots | does not override current implementation evidence |
 | `docs/02-engineering/CEO_CONVERSATIONAL_ROUTING_SPEC.md` | routing design and implementation notes | PARTIAL | department-local routing detail; current topology is cross-checked here |
 | `docs/02-engineering/WORKER_MODEL_MATRIX.md` | model assignment target/history | HISTORICAL / TARGET | does not override main registry or serving config |
-| `docs/02-engineering/RESEARCH_WORKER_AWS_RUNBOOK.md` | Research worker AWS procedure | HISTORICAL FP8 runbook | main AWQ serving config supersedes its FP8 commands |
+| `docs/02-engineering/RESEARCH_WORKER_AWS_RUNBOOK.md` | Research worker AWS procedure | DEPARTMENT DOC / not edited in this audit | ownership-sensitive; current model source remains Compose/gateway/registry |
 | `docs/02-engineering/SYSTEM_WIRING_MAP.md` | dated wiring snapshot | HISTORICAL / PARTIAL | useful audit snapshot; not a live topology source |
 | `docs/06-integrations/*` and generated provider references | provider/API reference | INTEGRATION REFERENCE | excluded from architecture consolidation |
 
@@ -441,7 +449,7 @@ No document was deleted in this audit. Potential archival/removal candidates
 require a separate review because some contain historical rationale or dated
 runtime evidence.
 
-### Evidence index
+## 17. Evidence Index
 
 - `CLAUDE.md`
 - `docs/PROJECT_IMPLEMENTATION_STATUS.md`
@@ -453,10 +461,15 @@ runtime evidence.
 - `departments/*/hermes/config.yaml`
 - `departments/*/employee_workers.py` and `departments/03-risk/risk_employee_workers.py`
 - `departments/06-ai-qa-audit/qa_employee_workers.py`
+- `departments/06-ai-qa-audit/qa_events/worker.py`
+- `departments/06-ai-qa-audit/qa_events/reproduction_worker.py`
 - `departments/02-trading/contracts/contracts.py`
 - `departments/03-risk/engine/risk_engine.py`
 - `departments/04-quant-backtest/pipeline/pit_dataset.py`
 - `departments/04-quant-backtest/pipeline/strategy_lifecycle.py`
+- `departments/04-quant-backtest/pipeline/intraday_experiment_runner.py`
+- `departments/04-quant-backtest/pipeline/intraday_trial_ledger.py`
+- `departments/04-quant-backtest/pipeline/intraday_candidate.py`
 - `departments/05-accounting-portfolio/ledger/ledger.py`
 - `departments/06-ai-qa-audit/evidence/evidence_qa_engine.py`
 - `departments/06-ai-qa-audit/model_risk.py`
@@ -464,6 +477,7 @@ runtime evidence.
 - `orchestration/workflows/runner.py`
 - `orchestration/adapters/ceo_supervisor.py`
 - `docker-compose.model.yml`
+- `docker-compose.yml` (`qa-reproduction-worker`, role-scoped QA/Quant services)
 - `departments/worker_model_gateway.py`
 - `departments/01-research/config/worker_model_registry.json`
 - `scripts/model_plane/fetch_base_model.sh`

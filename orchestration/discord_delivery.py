@@ -123,18 +123,38 @@ def _message_id_from_request_id(request_id: str | None) -> str | None:
 
 
 def _token_from_env(env: Mapping[str, str], profile: str) -> str | None:
+    """Resolve the Discord identity for the requested Hermes profile.
+
+    A profile-specific token is authoritative. The process-level token is only
+    a compatibility fallback for deployments that do not keep per-profile
+    Discord credentials.
+    """
+    home = Path(env.get("HERMES_HOME", "/opt/data"))
+
+    profile_env = home / "profiles" / profile / ".env"
+    try:
+        for line in profile_env.read_text(encoding="utf-8").splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key.strip() == "DISCORD_BOT_TOKEN":
+                token = value.strip().strip('"').strip("'")
+                if token:
+                    return token
+    except OSError:
+        pass
+
     token = env.get("DISCORD_BOT_TOKEN")
     if token:
         return token.strip()
-    home = Path(env.get("HERMES_HOME", "/opt/data"))
-    for env_path in (home / ".env", home / "profiles" / profile / ".env"):
-        try:
-            for line in env_path.read_text(encoding="utf-8").splitlines():
-                key, separator, value = line.partition("=")
-                if separator and key.strip() == "DISCORD_BOT_TOKEN":
-                    return value.strip().strip('"').strip("'") or None
-        except OSError:
-            continue
+
+    global_env = home / ".env"
+    try:
+        for line in global_env.read_text(encoding="utf-8").splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key.strip() == "DISCORD_BOT_TOKEN":
+                return value.strip().strip('"').strip("'") or None
+    except OSError:
+        pass
+
     return None
 
 
@@ -169,6 +189,170 @@ class DiscordFinalDelivery:
         decoded = json.loads(body) if body else {}
         return decoded if isinstance(decoded, Mapping) else {}
 
+    @staticmethod
+    def _detail_chunks(content: str, limit: int = 1700) -> tuple[str, ...]:
+        """Split long department detail safely below Discord's message limit."""
+        remaining = str(content or "").strip()
+        if not remaining:
+            return ()
+
+        chunks: list[str] = []
+
+        while len(remaining) > limit:
+            cut = remaining.rfind("\n", 0, limit + 1)
+            if cut < max(200, limit // 2):
+                cut = remaining.rfind(" ", 0, limit + 1)
+            if cut < max(200, limit // 2):
+                cut = limit
+
+            chunk = remaining[:cut].strip()
+            if chunk:
+                chunks.append(chunk)
+
+            remaining = remaining[cut:].lstrip()
+
+        if remaining:
+            chunks.append(remaining)
+
+        return tuple(chunks)
+
+    def deliver_to_existing_thread(
+        self,
+        *,
+        root_task_id: str,
+        source_task: Mapping[str, Any],
+        root_task: Mapping[str, Any] | None = None,
+        content: str,
+        title: str,
+        store: DiscordIdempotencyStore,
+        profile: str,
+        response_key_suffix: str,
+    ) -> str:
+        """Publish full department detail into the request's existing thread."""
+
+        correlation = _correlation_from_synthesis(source_task, root_task)
+        thread_id = correlation.thread_id
+
+        if not thread_id:
+            logger.info(
+                "discord-detail-thread root=%s profile=%s status=missing_thread",
+                root_task_id,
+                profile,
+            )
+            return "missing_thread"
+
+        token = _token_from_env(self.environment, profile)
+        if not token:
+            logger.error(
+                "discord-detail-thread root=%s profile=%s "
+                "status=failed error=credential_unavailable",
+                root_task_id,
+                profile,
+            )
+            return "failed"
+
+        chunks = self._detail_chunks(content)
+        if not chunks:
+            return "empty"
+
+        guild_id = correlation.guild_id or "unknown"
+        message_id = (
+            correlation.message_id
+            or _message_id_from_request_id(correlation.request_id)
+            or root_task_id
+        )
+
+        dedup_key = canonical_discord_dedup_key(
+            guild_id,
+            str(thread_id),
+            str(message_id),
+        )
+
+        safe_suffix = re.sub(
+            r"[^A-Za-z0-9_.:-]+",
+            "-",
+            str(response_key_suffix or "detail"),
+        )[:150]
+
+        total = len(chunks)
+
+        for index, chunk in enumerate(chunks, start=1):
+            response_key = (
+                f"{dedup_key}:{safe_suffix}:chunk-{index}-of-{total}"
+            )
+
+            try:
+                claim = store.claim_outbound(
+                    response_key=response_key,
+                    dedup_key=dedup_key,
+                    profile=profile,
+                )
+            except IdempotencyStoreUnavailable:
+                logger.error(
+                    "discord-detail-thread root=%s profile=%s "
+                    "status=failed error=ledger_unavailable",
+                    root_task_id,
+                    profile,
+                )
+                return "failed"
+
+            if not claim.admitted:
+                continue
+
+            if total > 1:
+                header = f"**{title} [{index}/{total}]**\n\n"
+            else:
+                header = f"**{title}**\n\n"
+
+            body = {
+                "content": header + chunk,
+            }
+
+            try:
+                response = self.sender(
+                    str(thread_id),
+                    json.dumps(body, ensure_ascii=False),
+                    {
+                        "Authorization": f"Bot {token}",
+                        "Content-Type": "application/json",
+                        "User-Agent": "HgFinance-DiscordDelivery/2.5",
+                    },
+                )
+            except (HTTPError, URLError, OSError, TimeoutError, ValueError):
+                store.mark_outbound(response_key, "FAILED", profile)
+                logger.exception(
+                    "discord-detail-thread root=%s profile=%s "
+                    "chunk=%d/%d status=failed",
+                    root_task_id,
+                    profile,
+                    index,
+                    total,
+                )
+                return "failed"
+
+            response_message_id = (
+                str(response.get("id") or "")
+                if isinstance(response, Mapping)
+                else ""
+            )
+
+            store.mark_outbound(
+                response_key,
+                "COMPLETED",
+                profile,
+                response_message_id or None,
+            )
+
+        logger.info(
+            "discord-detail-thread root=%s profile=%s "
+            "thread_id=%s chunks=%d status=sent",
+            root_task_id,
+            profile,
+            thread_id,
+            total,
+        )
+        return "sent"
+
     def deliver(
         self,
         *,
@@ -178,6 +362,7 @@ class DiscordFinalDelivery:
         content: str,
         store: DiscordIdempotencyStore,
         profile: str = "ceo-agent",
+        response_key_suffix: str = "final",
     ) -> str:
         correlation = _correlation_from_synthesis(synthesis_task, root_task)
         explicit_message_id = (
@@ -247,7 +432,12 @@ class DiscordFinalDelivery:
             if inbound_key
             else canonical_discord_dedup_key(guild_id, channel_id, message_id)
         )
-        response_key = f"{dedup_key}:final"
+        safe_suffix = re.sub(
+            r"[^A-Za-z0-9_.:-]+",
+            "-",
+            str(response_key_suffix or "final"),
+        )[:180]
+        response_key = f"{dedup_key}:{safe_suffix}"
         try:
             claim = store.claim_outbound(
                 response_key=response_key,

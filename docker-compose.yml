@@ -1236,12 +1236,9 @@ services:
     # Kanban dispatcher만 실행하므로 per-profile gateway를 supervise하지 않는다.
     command:
       ["kanban", "daemon", "--force", "--interval", "${KANBAN_DISPATCH_INTERVAL:-60}", "--pidfile", "/opt/data/shared-kanban/dispatcher.pid", "--verbose"]
-    # ▶ uid 1000 고정 (2026-08-14 장애 실측). 이미지 기본 사용자(uid 10000)로
-    #   돌면 데몬이 기동 시 /opt/data 를 10000·700 으로 재소유해 버려서,
-    #   uid 1000 인 부서 게이트웨이·CLI 경유 카드 생성이 전부
-    #   PermissionError 로 죽었다(21:13Z 공장 전면 장애, chown 복구 후 21:53Z
-    #   재발로 자기-재소유 확인). 전 컨테이너의 HERMES_UID=1000 과 정합시킨다.
-    user: "1000:1000"
+    # Hermes 최신 s6 이미지에서는 Docker `user:` 고정을 사용하지 않는다.
+    # 컨테이너는 root로 bootstrap한 뒤 HERMES_UID/HERMES_GID=1000으로
+    # runtime user와 /opt/data 소유권을 host UID/GID에 맞춘다.
     volumes:
       - /home/ubuntu/.hermes:/opt/data
       # 저장소 skills/ **전체**를 건다. finance 만 걸면 다른 범주의 스킬을
@@ -1262,6 +1259,8 @@ services:
       - ./departments/04-quant-backtest:/app/departments/04-quant-backtest
       - ./quant-data:/app/quant-data
     environment:
+      PYTHONPATH: /app/repo/deploy/hermes-dispatch-guard
+      HGFINANCE_DISPATCH_GUARD: "1"
       HERMES_HOME: /opt/data
       HERMES_UID: 1000
       HERMES_GID: 1000

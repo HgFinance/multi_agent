@@ -52,7 +52,7 @@
 이번 이관은 `FINAL_RUNTIME_ARCHITECTURE.md`의 단일 EC2 Pilot을 따른다.
 
 - Compute: Ubuntu 24.04의 `g6.xlarge`, Docker Compose, NVIDIA L4 24GB
-- Model Plane: 공용 vLLM `Qwen2.5-14B-Instruct FP8`; 부서마다 vLLM을 복제하지 않음
+- Model Plane: 공용 vLLM `Qwen2.5-14B-Instruct-AWQ`; 부서마다 vLLM을 복제하지 않음
 - Model artifact: S3가 정본, EBS `/opt/hgfinance/models`는 검증된 cache
 - Operational SoR: 환경이 분리된 Supabase PostgreSQL
 - Market time series: 현재 TimescaleDB 계약을 유지하되 AWS 물리 형태는 별도 승인 전 임의 변경 금지

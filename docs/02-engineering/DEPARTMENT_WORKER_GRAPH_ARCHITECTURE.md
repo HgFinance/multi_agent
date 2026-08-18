@@ -1,5 +1,7 @@
 # 부서 실행 계층 v2: Hermes 부서장과 LangGraph 직원
 
+> The Bull/Bear rows retained in the legacy graph table are historical role examples, not active workers. Current worker IDs and counts come from the department registries and [CURRENT_PROJECT_ARCHITECTURE.md](../CURRENT_PROJECT_ARCHITECTURE.md).
+
 > **Current implementation pointer:** 현재 worker 이름·개수·실행 분류는
 > [CURRENT_PROJECT_ARCHITECTURE.md](../CURRENT_PROJECT_ARCHITECTURE.md)와 각 부서
 > `hermes/config.yaml`/`employee_workers.py`를 정본으로 사용한다. 이 문서는

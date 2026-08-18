@@ -930,6 +930,8 @@ class SupervisorWakeupTest(unittest.TestCase):
                 self.root_body = (
                     "hgfinance.ceo-workflow-scope.v1\n"
                     "workflow_role=planning\n"
+                    "root_task_role=scope_and_planning\n"
+                    "planning_terminal_state=done_after_child_creation\n"
                     "producer=ceo-hermes-direct\n"
                     "request_class=non-binding advisory analysis\n"
                     "selected_primary_profiles="

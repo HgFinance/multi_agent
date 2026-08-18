@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import {
   fetchOperations,
-  readableRuntimeMessage,
   subscribeOperationsStream,
   type OperationsDepartment,
   type OperationsView,
@@ -52,7 +51,6 @@ function DepartmentCard({
 }) {
   const status = String(department.status).toUpperCase();
   const view = STATUS_VIEW[status] ?? { label: status, tone: "border-outline-variant bg-surface-container text-on-surface-variant" };
-  const message = readableRuntimeMessage(department.status_reason);
 
   return (
     <button
@@ -70,7 +68,9 @@ function DepartmentCard({
           <h3 className="text-body-lg font-body-lg font-bold text-primary mt-1">{department.name}</h3>
           <code className="text-xs text-outline">{department.department_code}</code>
         </div>
-        <span className={`shrink-0 px-2 py-0.5 rounded-full border text-xs font-medium ${view.tone}`}>{view.label}</span>
+        {status !== "OFFLINE" ? (
+          <span className={`shrink-0 px-2 py-0.5 rounded-full border text-xs font-medium ${view.tone}`}>{view.label}</span>
+        ) : null}
       </div>
 
       <div className="flex flex-wrap gap-1.5 text-xs">
@@ -87,8 +87,6 @@ function DepartmentCard({
         </span>
       </div>
 
-      <p className="text-body-sm font-body-sm text-on-surface-variant m-0">{message.summary}</p>
-      {message.action ? <p className="text-xs text-outline m-0">{message.action}</p> : null}
       {/* executor·model·contract 줄은 카드에서 빼고 선택 상세(DepartmentInspector)로 옮겼다. */}
     </button>
   );
@@ -290,10 +288,10 @@ export default function AgentLogsView() {
         </span>
       </section>
 
-      <section className="bg-surface-container-lowest border border-outline-variant rounded-lg p-4 flex flex-col gap-3" aria-label="Recent agent logs">
+      <section className="bg-surface-container-lowest border border-outline-variant rounded-lg p-4 flex flex-col gap-3" aria-label="부서 내부 메시지">
         <div className="flex justify-between items-center gap-3 flex-wrap">
-          <h2 className="text-title-md font-title-md text-primary m-0">Recent agent logs</h2>
-          <span className="text-xs text-on-surface-variant">{data?.messages.length ?? 0} runtime events</span>
+          <h2 className="text-title-md font-title-md text-primary m-0">부서 내부 메시지</h2>
+          <span className="text-xs text-on-surface-variant">전체 {data?.messages.length ?? 0}개 메시지</span>
         </div>
         {data?.messages.length ? (
           <ol className="flex flex-col gap-2 m-0 p-0 list-none">
@@ -349,7 +347,7 @@ export default function AgentLogsView() {
         <DepartmentInspector department={selected} data={data} />
       ) : departments.length > 0 ? (
         <p className="text-body-sm font-body-sm text-on-surface-variant">
-          부서 카드를 누르면 직원 Registry와 실시간 상태가 아래에 펼쳐집니다.
+          부서 카드를 누르면 부서 상태와 연결된 결과물이 아래에 펼쳐집니다.
         </p>
       ) : null}
 

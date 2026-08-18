@@ -274,6 +274,9 @@ on conflict (user_id) do nothing;
 -- ⚠ 옛 프로젝트에는 같은 fund_id가 다른 name/inception_date로 들어 있었다
 -- ('CEO Mandate Contract Test Fund', 2026-01-01 등). 옛 DB를 근거로 이 값을
 -- 되돌리지 않는다 - 기준은 현재 프로젝트다.
+--
+-- Mandate 자체는 여기서 만들지 않는다. 화면의 `lookupOrCreateMandate()`가
+-- 사용자별로 최초 1회 생성한다 - Fund가 없으면 그 최초 생성이 FK 위반으로 실패한다.
 insert into accounting.funds (fund_id, fund_code, name, base_currency, inception_date, status)
 values
   ('b13f5cd1-5df0-4025-92cf-9be03b1a0296', 'TEST-CEO-MANDATE',
@@ -282,7 +285,7 @@ values
    'Test User 2 Mandate Fund', 'USD', date '2026-08-01', 'ACTIVE'),
   ('3838f7d6-0c7c-4e54-85f3-316a451e7eeb', 'TEST-USER3-MANDATE',
    'Test User 3 Mandate Fund', 'USD', date '2026-08-01', 'ACTIVE')
-on conflict (fund_id) do nothing;
+on conflict do nothing;
 
 -- 2) 소유 관계 3행 — 각 계정이 자기 Fund의 OWNER
 --
