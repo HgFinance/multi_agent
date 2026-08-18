@@ -96,6 +96,7 @@ from account_snapshot import router as account_snapshot_router
 from current_user import current_user, require_owner
 from department_agents import router as department_agent_router
 from discord_read import router as discord_read_router
+from ls_account_stream import router as portfolio_live_router
 from domain_read_models import build_domain_read_model
 from portfolio_profile_client import (
     PortfolioProxyError,
@@ -197,6 +198,9 @@ app.include_router(account_snapshot_router)
 # Discord 대화 원문 읽기. 봇 토큰이 브라우저에 내려가면 발송 권한까지 같이
 # 나가므로 토큰은 이 프로세스에만 둔다.
 app.include_router(discord_read_router)
+# 브로커 계좌 실시간(계좌등록 → 주문상태·체결 → 잔고 확인). 브로커 푸시라
+# 우리 원장이 아니다 — 응답의 `authoritative: false`가 그 경계다.
+app.include_router(portfolio_live_router)
 app.include_router(risk_router)
 app.include_router(qa_router)
 
