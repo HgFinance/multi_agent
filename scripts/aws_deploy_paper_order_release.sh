@@ -616,8 +616,15 @@ trap 'rollback_release 143' TERM
 
 say "Validating and building release $RELEASE_COMMIT..."
 compose_release "$RELEASE" config --quiet
-compose_release "$RELEASE" pull --ignore-buildable
 compose_release "$RELEASE" --profile deployment build --pull
+# Build first because several runtime-only services intentionally reuse a
+# locally produced image (for example hedgefund-factory:latest) without their
+# own `build` stanza.  Pulling those services before the producer is built
+# incorrectly treats the local image name as a registry image and aborts the
+# deployment.  Once local images exist, `--policy missing` downloads only
+# genuinely absent external images while `--ignore-buildable` leaves locally
+# reproducible images to the build step above.
+compose_release "$RELEASE" pull --ignore-buildable --policy missing
 
 DATABASE_CONTAINER_EXISTED=0
 if docker inspect hedgefund-timescaledb >/dev/null 2>&1; then
