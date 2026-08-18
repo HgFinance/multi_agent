@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 OVERLAY_PATH = ROOT / "deploy" / "aws" / "docker-compose.paper-order.yml"
 DEPLOY_SCRIPT = ROOT / "scripts" / "aws_deploy_paper_order_release.sh"
 PROFILE_INSTALLER = ROOT / "scripts" / "aws_install_hermes_profiles.py"
+DOCKERIGNORE = ROOT / ".dockerignore"
 
 
 class _ComposeLoader(yaml.SafeLoader):
@@ -122,6 +123,22 @@ def test_overlay_separates_private_control_and_market_databases() -> None:
     assert "ports" not in reference
     assert "volumes" not in reference
     assert "TRADING_BROKER_ADAPTER" not in reference["environment"]
+
+
+def test_database_bootstrap_image_receives_canonical_migration_trees() -> None:
+    dockerignore = DOCKERIGNORE.read_text(encoding="utf-8")
+
+    assert "timescaledb/*" in dockerignore
+    assert "!timescaledb/migrations/" in dockerignore
+    assert "!timescaledb/migrations/**" in dockerignore
+    assert "\ntimescaledb/\n" not in dockerignore
+    assert "\nsupabase\n" not in dockerignore
+    assert "\nsupabase/\n" not in dockerignore
+
+    dockerfile = (ROOT / "apps" / "api" / "Dockerfile").read_text(
+        encoding="utf-8"
+    )
+    assert "COPY . ." in dockerfile
 
 
 def test_production_bff_uses_supabase_jwt_but_private_operational_data() -> None:
