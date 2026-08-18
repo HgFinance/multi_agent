@@ -66,17 +66,20 @@ Worker를 별도 프로세스나 Queue로 분리해도 내부 계약은 worker-c
 
 | App | OpenAPI 상태 | actual operation | 기본 상태 |
 |---|---:|---:|---|
-| research-evidence-api | ready | 9 | Legacy implemented |
-| market-read-api | ready | 8 | Legacy implemented |
-| trading-api | ready | 15 | Paper only |
-| risk-api | ready | 10 | Production blocked |
-| qa-api | ready | 29 | Production blocked |
-| workforce-api | ready | 17 | Test implementation |
-| governance-api | ready | 19 | Test implementation |
-| operator-bff | ready | 21 | Projection/Test |
-| Research Workflow, Quant, Accounting, MSU Case | planned | 0 | Planned |
+| research-evidence-api | ready | 11 | Legacy implemented |
+| market-read-api | ready | 10 | Legacy implemented |
+| trading-api | ready | 16 | Paper only |
+| risk-api | ready | 13 | Production blocked |
+| qa-api | ready | 35 | Production blocked |
+| workforce-api | ready | 34 | Test implementation |
+| governance-api | ready | 31 | Test implementation |
+| accounting-api | ready | 21 | Paper only |
+| operator-bff | ready | 47 | Projection/Test |
+| Research Workflow, Quant, MSU Case | planned | 0 | Planned |
 
-현재 Registry에는 ready 앱의 112개 actual operation과 55개 planned operation이 분리되어 있다. Quant와 Accounting의 FastAPI Route는 계획에 기록되어 있지만 현재 구현 Route로 세지 않는다.
+현재 Registry에는 ready 앱의 218개 actual operation과 33개 planned operation이 분리되어 있다. Research Workflow·Quant·MSU Case의 FastAPI Route는 계획에 기록되어 있지만 현재 구현 Route로 세지 않는다. Accounting은 `accounting-api`가 ready로 전환되어 더 이상 planned가 아니다(2026-08-14 실측).
+
+이 표의 수치는 [Route Status Registry](contracts/route-registry.v1.json)의 `actual_routes`를 센 값이고, Registry는 각 앱의 `app.openapi()`와 exact comparison으로 검증된다. 표와 Registry가 어긋나면 **Registry가 기준**이다 - 표는 사람이 읽는 요약이라 갱신이 늦을 수 있다.
 
 ## 3. 공통 API 계약
 
@@ -419,6 +422,47 @@ CEO 라우터는 `category`를 최소 부서 집합의 시작점으로 삼고 `q
 - 현재 제품 범위는 국내 주식이며, 기본 `KOREA_EQUITY_WATCHLIST`는 `KOREA_EQUITY`만 노출하고 채권·글로벌 주식·파생상품·현금성 자산을 후보 목록에 포함하지 않는다.
 - Supabase live 실행에서는 `reference.instruments`와 `reference.instrument_symbols`를 `execution.market_snapshots`와 Point-in-Time 조인해 티커를 만든다. 연결 실패나 PIT 종목 부재 시 정적 TEST 카탈로그로 조용히 대체하지 않고 `UNAVAILABLE/HOLD`로 종료한다.
 - Worker 모델 실행은 `PORTFOLIO_WORKER_RUNTIME=ollama`, `OLLAMA_BASE_URL=http://localhost:11434/v1`, `OLLAMA_CHAT_MODEL=qwen3:1.7b`를 사용한다. Ollama 장애·계약 오류는 `DEGRADED/HOLD`이며 자동 승격하지 않는다.
+
+### 10.7 BFF CEO Kanban 질의 Surface
+
+CEO 자연어 질의와 그 실행 추적은 `/ui/ceo/*` 10개 Route가 담당한다. 이 경로군은 **Hermes Kanban을 실행 Source of Truth로 삼는 읽기 전용 Projection + Task 생성 경계**이며, 주문·Risk 승인·원장 변경 권한이 없다(`binding: false` 유지).
+
+| Route | Method | 소유 모듈 | 역할 |
+|---|---|---|---|
+| `/ui/ceo/ask` | POST | `ceo_mirror_api.py` | CEO root Kanban Task 생성. dedup + mirror event journal이 `ceo.ceo_query`를 감싼다 |
+| `/ui/ceo/ingress` | POST | `ceo_mirror_api.py` | Web/Discord 공용 canonical ingress. 같은 dedup 경로 |
+| `/ui/ceo/events` | GET·POST | `ceo_mirror_api.py` | request_id 기준 mirror event 조회 / sanitized event 발행 |
+| `/ui/ceo/events/stream` | GET | `ceo_mirror_api.py` | 단명 SSE. 클라이언트는 마지막 event_id cursor로 재연결 |
+| `/ui/ceo/tasks` | GET | `ceo.py` | 계정별 root Task 목록. `owner_id` 필터는 **서버가** 적용한다 |
+| `/ui/ceo/tasks/{task_id}` | GET | `ceo.py` | 상태 + planning projection |
+| `/ui/ceo/tasks/{task_id}/graph` | GET | `ceo.py` | 워크플로 그래프 node·edge |
+| `/ui/ceo/tasks/{task_id}/result` | GET | `ceo.py` | Synthesis 요약·decision·QA verdict |
+| `/ui/ceo/tasks/{task_id}/archive` | POST | `ceo.py` | Archive. **DELETE는 의도적으로 없다** - 기록을 지우지 않는다 |
+
+- `POST /ui/ceo/ask`의 등록 지점은 `ceo_mirror_api.py` 하나다. `ceo.ceo_query`는 route를 스스로 등록하지 않는 순수 함수이며, 같은 (path, method)를 두 라우터가 나눠 갖고 등록 순서로 승부하는 구조를 금지한다(`tests/api/test_main_routes.py`가 중복 등록을 차단한다).
+- `X-User-Id`는 인증이 아니다. 그럼에도 `owner_id` 필터링을 **서버 측에서** 수행한다 - 클라이언트가 전체 목록을 받아 걸러내면 다른 계정의 질의·답변 텍스트가 네트워크 응답에 그대로 실린다.
+- root Task body의 `requested_by=` 줄이 없는 과거 Task는 "계정 불명"으로 남기고 어떤 `owner_id` 필터에도 포함하지 않는다. 기본값을 지어내지 않는다.
+- Kanban CLI를 쓸 수 없으면 503이다. 목록·그래프·결과를 빈 값이나 캐시로 대체하지 않는다.
+
+### 10.8 BFF Governance·적합성·계좌 Proxy Surface
+
+아래 경로군은 BFF가 소유한 계산이 아니라 **Domain API로 넘기는 pass-through Projection**이다. BFF는 governance·accounting 원장을 직접 쓰지 않는다.
+
+| Route 그룹 | Method | 대상 Domain |
+|---|---|---|
+| `/ui/mandates`, `/ui/mandates/{id}/current`, `/ui/mandates/{id}/versions`, `/ui/mandates/{id}/change-requests`, `/ui/mandates/by-fund/{fund_id}/current` | POST·GET | `GOVERNANCE_API_URL` (governance-api) |
+| `/ui/mandate-cases/{id}/advance`, `/ui/mandate-cases/{id}/timeline` | POST·GET | governance-api |
+| `/ui/mandate-approvals`, `/ui/mandate-approvals/{id}/decide` | GET·POST | governance-api |
+| `/ui/mandate-assistant/suggest` | POST | governance-api (stateless 제안, 저장 없음) |
+| `/ui/investor-profiles`, `/ui/investor-profiles/current` | POST·GET | `PORTFOLIO_API_URL` (accounting-api) |
+| `/ui/account/snapshot` | GET | Broker(LS) 조회, `authoritative: false` |
+| `/ui/risk/mandates/{mandate_id}/assess` | POST | `RISK_API_URL` |
+| `/ui/qa/verifications/{verification_id}/assess` | POST | `QA_API_URL` |
+| `/ui/commands/audit` | GET | BFF 내부 Command Audit Event 조회 |
+
+- **투자성향(`mindset`)·투자경험(`experience`)은 Mandate가 아니라 적합성 프로필에 있다.** `accounting.investor_profiles`가 그 저장소이고 `/ui/investor-profiles/current`가 조회 경로다. `GET /ui/mandates/.../current`의 `policy`에는 숫자 한도(`risk_bounds`·`universe_policy` 등)만 있으며 성향·경험 필드가 존재하지 않는다 - 두 값을 같은 곳에서 찾지 않는다.
+- Domain API 미설정·연결 실패는 인메모리 후퇴 없이 503(`governance_api_unavailable`/`portfolio_api_unavailable`)이다.
+- `/ui/account/snapshot`은 Broker 조회 Projection이며 공식 NAV·원장 잔고가 아니다.
 
 ## 11. 연계 문서
 

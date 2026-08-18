@@ -50,6 +50,13 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+try:  # package import from factory workers
+    from .alpha_semantics import lane_of as semantic_lane_of
+    from .alpha_semantics import validate as validate_semantic_plan
+except ImportError:  # direct-file self-check
+    from alpha_semantics import lane_of as semantic_lane_of
+    from alpha_semantics import validate as validate_semantic_plan
+
 CONTRACT_VERSION = "research-quant-factory-v1"
 
 MAX_EXCERPT_CHARS = 500
@@ -70,6 +77,11 @@ class ScoutLens(str, Enum):
     PRACTITIONER = "PRACTITIONER"
     COMMUNITY = "COMMUNITY"
     CROSS_DOMAIN = "CROSS_DOMAIN"
+
+
+class ResearchLane(str, Enum):
+    DAILY_CROSS_SECTIONAL = "DAILY_CROSS_SECTIONAL"
+    INTRADAY_EVENT = "INTRADAY_EVENT"
 
 
 class Testability(str, Enum):
@@ -158,6 +170,13 @@ class SourceRef(_Base):
     excerpt: str                      # 원문 발췌
     author: str | None = None
     published_at: str | None = None   # 소스가 밝힌 발행일 (형식이 제각각이라 문자열)
+    # Scout v5 preserves the source's own date labels separately from the
+    # system-owned PIT timestamps above. These optional fields are part of
+    # persisted refs JSON, so Planner's strict handoff contract must accept
+    # them when it reloads a lead. ``accessed_at`` and ``as_known_at`` remain
+    # the authoritative ingestion timestamps.
+    source_published: str | None = None
+    declared_accessed: str | None = None
 
     @field_validator("url", "title", "excerpt")
     @classmethod
@@ -211,6 +230,7 @@ class MethodologyLeadV1(_Base):
     source_type: SourceType
     as_known_at: datetime
     refs: tuple[SourceRef, ...]
+    ast_contract: dict = Field(default_factory=dict)
     claimed_edge: str                 # 소스가 주장하는 엣지 (스카우트의 해석이 아니다)
     stated_mechanism: str = ""        # 왜 지속되는가에 대한 소스의 설명
     inferred: bool = False            # 메커니즘이 인용이 아니라 추론이면 True
@@ -319,6 +339,8 @@ class ExperimentProposalV1(_Base):
     falsification_tests: tuple[str, ...] = ()
     data_requirements: DataRequirement | None = None
     suggested_params: dict = Field(default_factory=dict)
+    research_lane: ResearchLane = ResearchLane.DAILY_CROSS_SECTIONAL
+    semantic_plan: dict = Field(default_factory=dict)
     trial_budget: int = 5
     prior_check: PriorCheck = Field(default_factory=PriorCheck)
 
@@ -364,6 +386,22 @@ class ExperimentProposalV1(_Base):
                 "반증 검사가 없다 - '이게 나오면 죽는다'가 없는 가설은 반증 가능하지 않다")
         if self.data_requirements is None:
             raise ValueError("data_requirements 가 없다 - 퀀트가 실행 가능성을 판정할 수 없다")
+        if self.semantic_plan:
+            parsed = validate_semantic_plan(self.semantic_plan)
+            if semantic_lane_of(parsed) != self.research_lane.value:
+                raise ValueError(
+                    "semantic_plan clock and research_lane disagree - the formula "
+                    "would be routed to the wrong evaluator")
+        elif self.research_lane == ResearchLane.INTRADAY_EVENT:
+            raise ValueError("INTRADAY_EVENT requires a typed semantic_plan")
+        if self.research_lane == ResearchLane.INTRADAY_EVENT:
+            if not self.suggested_params.get("intraday_signal_expr"):
+                raise ValueError("INTRADAY_EVENT requires intraday_signal_expr")
+            required = set(self.data_requirements.tables)
+            if not {"market_quotes", "market_ticks"} <= required:
+                raise ValueError(
+                    "INTRADAY_EVENT requires raw market_quotes and market_ticks; "
+                    "daily aggregates cannot prove execution alpha")
         return self
 
 
@@ -381,6 +419,14 @@ class OosSummary(_Base):
     pbo: float | None = None
     ci_low: float | None = None
     ci_high: float | None = None
+    mean_net_bps_per_opportunity: float | None = None
+    fill_rate: float | None = None
+    sessions: int | None = None
+    instruments: int | None = None
+    positive_fold_ratio: float | None = None
+    mean_capacity_shares_l1: float | None = None
+    p10_capacity_shares_l1: float | None = None
+    max_concurrent_opportunities: int | None = None
 
 
 class ExperimentOutcomeV1(_Base):

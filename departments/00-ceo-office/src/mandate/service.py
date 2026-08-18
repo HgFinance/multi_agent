@@ -3,7 +3,9 @@
 #       TEAM_YOUNGJU_CEO_HR_GUIDE.md 5.1(사용자 Mandate 변경), 10.1(Version/Effective Time),
 #       docs/02-engineering/USER_INPUT_API_SPEC.md 1.3(2026-08-05 결정 B/C-1/D 방향 판정)
 #
-# F01 의 Version/Effective Time 저장과 장중 변경 방향 판정.
+# F01 의 레거시 Version/Effective Time 저장과 장중 변경 방향 판정.
+# 사용자 온보딩 화면의 현재 지침 저장은 별도 metadata 교체 경로를 사용하며,
+# 아래 Version Service는 승인·변경 워크플로 호환을 위해 유지한다.
 #   - 기존 Version 을 덮어쓰지 않고 새 Version 을 만든다 (10.1, DDL 의 unique(mandate_id, version)).
 #   - content_hash 로 무의미한 중복 Version 을 막는다 (DDL 의 unique(mandate_id, content_hash)).
 #   - 장중 변경을 TIGHTEN(완화=더 안전) / LOOSEN(확대=더 위험) / NEUTRAL 로 분류한다:
@@ -22,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -329,6 +332,14 @@ class MandateVersionRepository:
     ) -> list[str]:
         raise NotImplementedError
 
+    def get_mandate_metadata(self, mandate_id: str) -> dict | None:
+        """Return the single current UI metadata object, if one exists."""
+        raise NotImplementedError
+
+    def replace_mandate_metadata(self, mandate_id: str, metadata: dict) -> None:
+        """Replace the current UI metadata in place; do not create a version."""
+        raise NotImplementedError
+
 
 class InMemoryMandateVersionRepository(MandateVersionRepository):
     def __init__(self) -> None:
@@ -338,6 +349,8 @@ class InMemoryMandateVersionRepository(MandateVersionRepository):
         self._fund_currency: dict[str, str] = {}
         self._fund_of: dict[str, str] = {}
         self._owner_of: dict[str, str] = {}
+        self._name_of: dict[str, str] = {}
+        self._metadata: dict[str, dict] = {}
 
     def set_fund_base_currency(self, mandate_id: str, currency: str) -> None:
         """테스트·개발용 seed. 실 구현에서는 accounting.funds 를 조회한다."""
@@ -353,6 +366,20 @@ class InMemoryMandateVersionRepository(MandateVersionRepository):
     def set_owner_user_id(self, mandate_id: str, owner_user_id: str) -> None:
         self._owner_of[mandate_id] = owner_user_id
 
+    def create_mandate(self, *, fund_id: str, owner_user_id: str, name: str) -> str:
+        for mandate_id, existing_fund_id in self._fund_of.items():
+            if existing_fund_id == fund_id and self._name_of.get(mandate_id) == name:
+                raise MandateAlreadyExistsError(
+                    f"fund_id={fund_id} 에 name={name!r} Mandate 가 이미 있습니다",
+                    mandate_id=mandate_id,
+                )
+        mandate_id = str(uuid.uuid4())
+        self._fund_of[mandate_id] = fund_id
+        self._owner_of[mandate_id] = owner_user_id
+        self._name_of[mandate_id] = name
+        self._mandate_state[mandate_id] = (0, "DRAFT")
+        return mandate_id
+
     def mandate_ids_for_fund(self, fund_id: str) -> list[str]:
         return [mid for mid, fid in self._fund_of.items() if fid == fund_id]
 
@@ -364,6 +391,16 @@ class InMemoryMandateVersionRepository(MandateVersionRepository):
             for mid, fid in self._fund_of.items()
             if fid == fund_id and self._owner_of.get(mid) == owner_user_id
         ]
+
+    def get_mandate_metadata(self, mandate_id: str) -> dict | None:
+        metadata = self._metadata.get(mandate_id)
+        return dict(metadata) if metadata is not None else None
+
+    def replace_mandate_metadata(self, mandate_id: str, metadata: dict) -> None:
+        if mandate_id not in self._fund_of and mandate_id not in self._mandate_state:
+            raise ValueError(f"존재하지 않는 Mandate: {mandate_id}")
+        self._metadata[mandate_id] = dict(metadata)
+        self._mandate_state[mandate_id] = (0, "ACTIVE")
 
     def latest_version(self, mandate_id: str) -> int:
         versions = [r.version for r in self._rows if r.mandate_id == mandate_id]

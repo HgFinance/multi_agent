@@ -26,7 +26,7 @@
   2.0 을 쓰면 순수한 잡음에서도 통과가 나온다.
 
   그리고 **부호를 본다.** |t| 로 재면 역방향 신호가 "통과" 로 찍힌다
-  (실측으로 `low_volatility` 가 t=-7.09 인데 통과로 나왔다). 역방향은
+  (실측으로 방향 정규화 전 음의 t 가 통과로 나왔다). 역방향은
   역방향이라고 적는다 - 그것도 정보다.
 
 ▶ PIT 를 같이 싣는다
@@ -62,7 +62,19 @@ MICRO_FEATURES = (
     ("order_flow_imbalance", +1,
      "매수 주도 체결이 우세하면 그 압력이 다음 구간까지 이어진다(주문흐름 관성)"),
     ("depth_imbalance", +1,
-     "호가 잔량이 매수 쪽으로 기울면 단기 상승 압력이다"),
+     "최우선호가 잔량이 매수 쪽으로 기울면 단기 상승 압력이다"),
+    ("depth_imbalance_l1", +1,
+     "최우선호가 잔량 불균형은 즉시 체결 가능한 유동성 압력을 나타낸다"),
+    ("depth_imbalance_l10", +1,
+     "10단계 누적 잔량 불균형은 표면 아래의 깊은 유동성 지지를 나타낸다"),
+    ("depth_imbalance_slope", 0,
+     "최우선호가와 깊은 호가의 방향 차이는 호가장 공간 구조의 취약성을 나타낸다"),
+    ("size_weighted_ofi", +1,
+     "큰 체결이 주도한 방향은 작은 체결 수만 많은 흐름보다 정보성이 높다는 가설"),
+    ("book_depth_notional_l1", 0,
+     "최우선호가의 가격×잔량 합계는 즉시 주문충격을 흡수할 유동성 수용력이다"),
+    ("book_depth_notional_l10", 0,
+     "10단계 가격×잔량 합계는 표면 아래까지 포함한 전체 호가 수용력이다"),
     ("spread_bps", -1,
      "스프레드가 넓으면 거래비용이 크고, 비용을 넘는 초과수익이 남기 어렵다"),
     ("trade_intensity", 0,
@@ -143,6 +155,7 @@ class Catalog:
 
     features: list = field(default_factory=list)
     horizon: int = 5
+    feature_set_version: str = ""
 
     def passing(self) -> list:
         return [f for f in self.features if f.verdict in ("통과", "역방향")]
@@ -154,7 +167,8 @@ class Catalog:
     def summary(self) -> str:
         if not self.features:
             return "피처 카탈로그: 잰 것이 없다"
-        lines = [f"[피처 카탈로그 h={self.horizon}일] "
+        version = f" {self.feature_set_version}" if self.feature_set_version else ""
+        lines = [f"[피처 카탈로그{version} h={self.horizon}일] "
                  f"검정 {len(self.features)}종 · 통과/역방향 {len(self.passing())}종 "
                  f"· 거래가능 {len(self.usable())}종"]
         for f in sorted(self.features, key=lambda x: -(x.t_stat or 0)):
@@ -230,6 +244,7 @@ _SQL_FEATURE = """
 select event_time::date d, instrument_id, {col}
   from market.microstructure_features
  where {col} is not null
+   and feature_set_version = %s
    and event_time::date = any(%s)
 """
 
@@ -247,9 +262,11 @@ select a.d, a.instrument_id, b.close / a.close - 1.0
 """
 
 
-def _dates(cur, horizon: int) -> list:
+def _dates(cur, horizon: int, feature_set_version: str) -> list:
     cur.execute("""select distinct event_time::date
-                     from market.microstructure_features order by 1""")
+                     from market.microstructure_features
+                    where feature_set_version = %s order by 1""",
+                (feature_set_version,))
     all_days = [r[0] for r in cur.fetchall()]
     # 겹치지 않게 h 간격으로 자른다. 마지막 h 일은 미래수익이 없으므로 뺀다.
     return all_days[:-horizon:horizon] if len(all_days) > horizon else []
@@ -323,11 +340,12 @@ def _pit_of(conn, cur, days) -> str:
     return str(kind) or "?"
 
 
-def measure(conn, *, horizon: int = 5, features=MICRO_FEATURES) -> Catalog:
+def measure(conn, *, horizon: int = 5, features=MICRO_FEATURES,
+            feature_set_version: str = "ms-daily-v5") -> Catalog:
     """원장에 대고 피처를 하나씩 검정한다."""
-    cat = Catalog(horizon=horizon)
+    cat = Catalog(horizon=horizon, feature_set_version=feature_set_version)
     cur = conn.cursor()
-    days = _dates(cur, horizon)
+    days = _dates(cur, horizon, feature_set_version)
     if not days:
         return cat
     fwd = _forward_returns(cur, days, horizon)
@@ -335,7 +353,7 @@ def measure(conn, *, horizon: int = 5, features=MICRO_FEATURES) -> Catalog:
 
     for col, direction, mech in features:
         try:
-            cur.execute(_SQL_FEATURE.format(col=col), (days,))
+            cur.execute(_SQL_FEATURE.format(col=col), (feature_set_version, days))
             by_date: dict = {}
             for d, iid, v in cur.fetchall():
                 by_date.setdefault(d, {})[iid] = v
@@ -359,7 +377,7 @@ def measure(conn, *, horizon: int = 5, features=MICRO_FEATURES) -> Catalog:
 def _check_reverse_signal_is_not_a_pass():
     """**역방향을 통과로 찍지 않는다.** |t| 로 재면 뒤집힌 신호가 합격한다.
 
-    실측: `low_volatility` 가 t=-7.09 인데 통과로 나왔다. 역방향은 역방향으로
+    실측: 방향 정규화 전 음의 t 가 통과로 나왔다. 역방향은 역방향으로
     적어야 전략가가 부호를 뒤집어 쓸 수 있다 - 그것도 정보다.
     """
     good = FeatureQuality("x", 5, t_stat=4.2, periods=12, avg_names=100)
@@ -485,10 +503,12 @@ def _cli(argv) -> int:
     from source_registry import load_project_env  # noqa: PLC0415
 
     h = int(argv[argv.index("--horizon") + 1]) if "--horizon" in argv else 5
+    fsv = (argv[argv.index("--feature-set-version") + 1]
+           if "--feature-set-version" in argv else "ms-daily-v5")
     conn = psycopg2.connect(load_project_env()["TIMESCALE_DATABASE_URL"],
                             connect_timeout=30)
     try:
-        print(measure(conn, horizon=h).summary())
+        print(measure(conn, horizon=h, feature_set_version=fsv).summary())
     finally:
         conn.close()
     return 0

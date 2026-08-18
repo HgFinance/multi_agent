@@ -1,26 +1,16 @@
 /**
- * Mandate 저장·조회·인터뷰 로직 — `POST /ui/mandates` + `POST /ui/mandates/{id}/versions`
+ * Mandate 저장·조회·인터뷰 로직 — `POST /ui/mandates` + `PUT /ui/mandates/{id}`
  * + `POST /ui/investor-profiles` + `POST /ui/mandate-assistant/suggest`.
  *
  * 근거: docs/02-engineering/USER_INPUT_API_SPEC.md 2.1~2.4
  *
- * ## 왜 PUT이 아니라 두 POST 조합인가
+ * ## 현재 Mandate 저장 의미론
  *
- * 이 화면은 기존 `versions` 경로로 정책 버전만 기록한다. Mandate는 덮어쓰기
- * 리소스가 아니라 **버전이 쌓이는** 모델이다
- * (`governance.mandate_versions`, 매번 새 version 행 + 이전 버전은
- * `effective_to`로 닫힘) — "그때 어떤 기준으로 승인됐는가"가 감사 대상이라
- * PUT의 "전체 교체" 의미론과 안 맞는다.
+ * 이 화면은 Mandate 부모 행의 `metadata` JSONB를 한 행으로 갱신한다. 기존
+ * `mandate_versions` 이력 경로는 이 화면에서 사용하지 않는다.
  *
- * 그래서 최초 입력과 이후 수정이 이미 같은 메커니즘이다: 둘 다 "새 정책을
- * 제안"하는 것이고, 차이는 Mandate 껍데기가 있냐 없냐뿐이다.
- *
- * ## 왜 갱신 시 기존 정책을 반드시 함께 보내는가
- *
- * `previous_policy`는 버전의 변경 방향을 계산하는 메타데이터로 함께 보낸다.
- * 이 저장 경로는 그 방향에 따라 승인 Case를 만들거나 활성화하지 않는다.
- *
- * 이 호출의 성공은 DB 저장만 뜻하며, 활성 mandate나 주문 권한을 만들지 않는다.
+ * 이 호출의 성공은 현재 사용자 입력을 DB에 저장했다는 뜻이며, 주문 제출이나
+ * 원장 변경을 수행하지 않는다.
  *
  * ## 왜 화면 로직이 `.tsx`가 아니라 이 파일에 있는가
  *
@@ -115,8 +105,8 @@ export const DEFAULT_DRAFT: MandateDraft = {
   investmentHorizonYears: null,
   liquidityNeed: null,
   baseCapital: 100_000_000,
-  // KRW. `FIXED_POLICY_VALUES.allowed_markets`가 KRX이고 시드 Fund 3개가 전부
-  // KRW라, USD 기본값은 저장 시 Fund 기준통화 불일치로 확정적으로 거절당한다.
+  // 신규 Fund를 위한 안전 기본값은 KRW다. 현재 테스트 계정 3개는 저장된 USD
+  // policy를 먼저 불러오므로 이 값으로 덮이지 않는다.
   currency: "KRW",
   ...sliderDefaultsFor(MINDSET_BY_RISK_PROFILE.conservative, DEFAULT_EXPERIENCE),
   allowedAssets: { ...NO_ASSETS, equity: true, etf: true },
@@ -149,6 +139,11 @@ export interface MandatePolicyPayload {
     paper_order_mode: "AUTO" | "USER_APPROVAL";
     risk_expansion_requires_user_approval: boolean;
   };
+  /**
+   * 화면에 아직 전용 입력칸이 없는 실행 규칙. 조회 응답에는 포함되며, 사용자가
+   * 다른 필드를 고쳐 저장해도 그대로 보존해야 한다.
+   */
+  execution_rules?: Record<string, unknown>;
 }
 
 /**
@@ -227,6 +222,56 @@ export function draftToPolicy(draft: MandateDraft): MandatePolicyPayload {
       paper_order_mode: draft.approvalMode === "auto" ? "AUTO" : "USER_APPROVAL",
       risk_expansion_requires_user_approval: FIXED_POLICY_VALUES.risk_expansion_requires_user_approval,
     },
+  };
+}
+
+const EDITABLE_ASSET_CLASS_CODES = new Set(Object.values(ASSET_CLASS_CODE));
+
+function unique(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
+/**
+ * 현재 폼이 편집할 수 있는 항목만 새 draft 값으로 바꾸고, 나머지 정책은 보존한다.
+ *
+ * DB에 직접 적재되거나 다른 화면에서 만든 세부 자산군·시장·거래시간·실행 규칙은
+ * 이 화면에 대응 입력칸이 없다. `draftToPolicy()` 결과로 통째로 교체하면 사용자가
+ * 자본금 하나만 고쳐도 그 정보가 사라지므로, 이 함수가 저장 직전 병합 경계다.
+ */
+export function mergePolicyForSave(
+  draft: MandateDraft,
+  previous: MandatePolicyPayload | null,
+): MandatePolicyPayload {
+  const edited = draftToPolicy(draft);
+  if (!previous) return edited;
+
+  const previousUniverse = previous.universe_policy;
+  const preservedAllowedClasses = (previousUniverse.allowed_asset_classes ?? []).filter(
+    (code) => !EDITABLE_ASSET_CLASS_CODES.has(code),
+  );
+  const preservedForbiddenClasses = (previousUniverse.forbidden_asset_classes ?? []).filter(
+    (code) => !EDITABLE_ASSET_CLASS_CODES.has(code),
+  );
+
+  return {
+    // 개별 instrument allow/deny 목록은 이 화면에서 편집하지 않는다.
+    allowed_assets: [...(previous.allowed_assets ?? [])],
+    forbidden_assets: [...(previous.forbidden_assets ?? [])],
+    risk_bounds: edited.risk_bounds,
+    universe_policy: {
+      // 시장·선호/제외 섹터·거래시간도 현재 화면에 입력칸이 없으므로 유지한다.
+      ...previousUniverse,
+      allowed_asset_classes: unique([
+        ...preservedAllowedClasses,
+        ...edited.universe_policy.allowed_asset_classes,
+      ]),
+      forbidden_asset_classes: unique([
+        ...preservedForbiddenClasses,
+        ...edited.universe_policy.forbidden_asset_classes,
+      ]),
+    },
+    approval_rules: edited.approval_rules,
+    execution_rules: { ...(previous.execution_rules ?? {}) },
   };
 }
 
@@ -584,9 +629,8 @@ export async function requestMandateSuggestion(
 
 export interface StoredMandate {
   mandateId: string;
-  /** 0이면 껍데기만 있고 아직 정책 version이 없다. */
-  version: number;
   objectiveText: string;
+  objective: Record<string, unknown>;
   policy: MandatePolicyPayload | null;
 }
 
@@ -609,8 +653,8 @@ export interface StoredProfile {
 export async function loadMandateForFund(fundId: string): Promise<StoredMandate | null> {
   const { status, body } = await bffJson<{
     mandate_id: string;
-    current_version: number;
     objective_text?: string;
+    objective?: Record<string, unknown>;
     policy?: MandatePolicyPayload;
   }>(`/ui/mandates/by-fund/${fundId}/current`);
 
@@ -618,9 +662,9 @@ export async function loadMandateForFund(fundId: string): Promise<StoredMandate 
   if (status !== 200 || !body) throw new MandateSubmissionError(errorMessage(body, status));
   return {
     mandateId: body.mandate_id,
-    version: body.current_version,
     objectiveText: body.objective_text ?? "",
-    policy: body.current_version > 0 && body.policy ? body.policy : null,
+    objective: body.objective ?? {},
+    policy: body.policy ?? null,
   };
 }
 
@@ -655,8 +699,7 @@ export async function loadInvestorProfile(
 
 interface MandateLookup {
   mandateId: string;
-  /** 기존 활성 정책. 첫 제출(Version 없음)이면 `null`. */
-  previousPolicy: MandatePolicyPayload | null;
+  existing: StoredMandate | null;
 }
 
 /**
@@ -668,7 +711,7 @@ interface MandateLookup {
 async function lookupOrCreateMandate(fundId: string, ownerUserId: string): Promise<MandateLookup> {
   const existing = await loadMandateForFund(fundId);
   if (existing) {
-    return { mandateId: existing.mandateId, previousPolicy: existing.policy };
+    return { mandateId: existing.mandateId, existing };
   }
 
   // 404 - 이 Fund에 Mandate가 아직 없다. 최초 1회이므로 껍데기를 만든다.
@@ -683,7 +726,7 @@ async function lookupOrCreateMandate(fundId: string, ownerUserId: string): Promi
   if (created.status !== 201 || !created.body) {
     throw new MandateSubmissionError(errorMessage(created.body, created.status));
   }
-  return { mandateId: created.body.mandate_id, previousPolicy: null };
+  return { mandateId: created.body.mandate_id, existing: null };
 }
 
 /**
@@ -711,17 +754,17 @@ export function draftToInvestorProfile(
     liquidity_need: draft.liquidityNeed,
     // 필수 필드이고 **타임존이 없으면 서버가 거절한다**(`suitability.py`
     // `validate_as_of`). `toISOString()`은 항상 Z가 붙는다.
-    // 정책 version의 `effective_from`과 같은 시각을 쓴다 - 저장 한 번이
-    // 두 시각으로 갈라지면 나중에 어느 프로필이 어느 version 것인지 못 맞춘다.
+    // 프로필 자체의 기준 시각이다. Mandate metadata는 version을 만들지 않지만,
+    // 두 서비스에 걸친 저장 결과를 화면에서 같은 저장 시점으로 설명한다.
     as_of: asOf,
   };
 }
 
 export interface MandateSubmitResult {
-  version: number;
+  saved: true;
   /**
    * 적합성 프로필이 저장되지 않은 사유. `undefined`면 둘 다 저장됐다.
-   * **mandate version은 이미 저장된 상태다** - 호출부가 "둘 다 성공"으로
+   * **Mandate metadata는 이미 저장된 상태다** - 호출부가 "둘 다 성공"으로
    * 뭉뚱그리지 않도록 분리해서 돌려준다.
    */
   profileError?: string;
@@ -732,15 +775,12 @@ export interface MandateSubmitResult {
  * 호출부가 user_id를 따로 넘기지 않는 이유는 `withAccountHeaders`와 같다:
  * 한 곳에서만 계정을 읽어야 다른 사용자로 잘못 나가는 경로가 안 생긴다.
  *
- * 쓰기가 둘이다 — 정책 version(거버넌스)과 적합성 프로필. 순서는 정책이 먼저다:
+ * 쓰기가 둘이다 — 현재 Mandate metadata(거버넌스)와 적합성 프로필. 순서는 정책이 먼저다:
  * 정책이 주 산출물이고, 적합성 저장소 장애가 거버넌스 저장을 막는 것은 방향이
  * 반대다.
  *
  * ponytail: 두 서비스에 걸친 트랜잭션이 없다. 정책만 저장되고 프로필이 실패하는
- * 부분 성공이 가능하며, 그때 롤백하지 않고 `profileError`로 사실대로 알린다
- * (Posted Journal을 수정하지 않는 것과 같은 이유 - 이미 발급된 version을
- * 되돌리지 않는다). 한 번의 원자적 저장이 필요해지면 서버에 두 쓰기를 묶는
- * 엔드포인트를 만들어야 한다.
+ * 부분 성공이 가능하며, 그때 롤백하지 않고 `profileError`로 사실대로 알린다.
  */
 export async function submitMandateDraft(
   draft: MandateDraft,
@@ -762,33 +802,35 @@ export async function submitMandateDraft(
     );
   }
   const account = readStoredAccount();
-  const { mandateId, previousPolicy } = await lookupOrCreateMandate(fundId, account.userId);
+  const { mandateId, existing } = await lookupOrCreateMandate(fundId, account.userId);
+  const policy = mergePolicyForSave(draft, existing?.policy ?? null);
 
   const nowIso = new Date().toISOString();
   const { status, body } = await bffJson<{
-    version: number;
-  }>(`/ui/mandates/${mandateId}/versions`, {
-    method: "POST",
+    mandate_id: string;
+    updated_at: string;
+  }>(`/ui/mandates/${mandateId}`, {
+    method: "PUT",
     body: JSON.stringify({
-      policy: draftToPolicy(draft),
+      policy,
       objective_text: objectiveText,
-      objective: {},
-      effective_from: nowIso,
-      // Case 감사 표지(자유 텍스트)와 mandate_versions.created_by(uuid FK)는
-      // 컬럼 타입이 달라 분리한다 - change_workflow.submit() 계약과 같은 이유.
+      // 구조화 objective는 아직 폼에서 직접 편집하지 않으므로 기존 값을 보존한다.
+      objective: existing?.objective ?? {},
+      // Governance API가 최종 metadata를 만들 때 top-level 값을 사용하므로 별도로
+      // 전달한다. policy 안에만 두면 기본값 `{}`가 기존 실행 규칙을 덮는다.
+      execution_rules: policy.execution_rules ?? {},
       created_by: account.userId,
-      previous_policy: previousPolicy,
     }),
   });
   if ((status !== 200 && status !== 201) || !body) {
     throw new MandateSubmissionError(errorMessage(body, status));
   }
 
-  return { version: body.version, profileError: await saveInvestorProfile(draft, fundId, nowIso) };
+  return { saved: true, profileError: await saveInvestorProfile(draft, fundId, nowIso) };
 }
 
 /**
- * 적합성 프로필 저장. **실패해도 던지지 않는다** - 정책 version은 이미 저장된
+ * 적합성 프로필 저장. **실패해도 던지지 않는다** - Mandate metadata는 이미 저장된
  * 뒤라, 여기서 예외를 던지면 호출부가 "저장 실패"로만 보고해 사용자가 이미
  * 저장된 지침을 다시 저장하려 든다. 사유 문자열을 돌려 사실대로 알린다.
  */

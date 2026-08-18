@@ -31,7 +31,9 @@
 """
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -57,13 +59,36 @@ MAX_JOBS_KEPT = 50
 # 모양이 다르다(Packet 은 subprocess tail 파싱, Worker 는 registry 결과 dict).
 _WORKER_JOBS: dict[str, dict] = {}
 _WORKER_JOBS_LOCK = threading.Lock()
+_TASK_ID_RE = re.compile(r"^(t_[0-9A-Za-z]+)(?:$|[-:#/])")
+
+
+def _writer_connection(dsn: str, *, connector=None):
+    """Open a connection whose transactions are explicitly READ WRITE.
+
+    ``DATABASE_URL`` points at Supabase's transaction pooler (port 6543).  A
+    read-only service can leave ``default_transaction_read_only=on`` on a
+    pooled server connection, which may then be handed to this write-capable
+    MCP surface.  Transaction characteristics belong on the client
+    connection, not in a session-level ``SET`` that can leak back into the
+    pool.
+    """
+    if connector is None:
+        import psycopg2
+
+        connector = psycopg2.connect
+    conn = connector(dsn, connect_timeout=15)
+    try:
+        conn.set_session(readonly=False)
+    except Exception:
+        conn.close()
+        raise
+    return conn
 
 
 def _db():
-    import psycopg2
     from source_registry import load_project_env
 
-    return psycopg2.connect(load_project_env()["DATABASE_URL"], connect_timeout=15)
+    return _writer_connection(load_project_env()["DATABASE_URL"])
 
 
 def _rows(sql: str, params: tuple = ()) -> list[dict]:
@@ -158,14 +183,27 @@ def finish_job(job_id: str, *, exit_code: int, tail: str, now: datetime) -> dict
         return dict(j)
 
 
-def register_worker_job(payload_fields: list[str], *, now: datetime) -> str:
+def _text_digest(value: str) -> str:
+    """Stable fingerprint for binding a review job to the submitted draft."""
+    normalized = str(value or "").replace("\r\n", "\n").strip()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def register_worker_job(payload_fields: list[str], *, now: datetime,
+                        symbol: str = "", proposal_draft: str = "") -> str:
     job_id = uuid.uuid4().hex[:12]
     with _WORKER_JOBS_LOCK:
         _WORKER_JOBS[job_id] = {
             "job_id": job_id, "kind": "employee_workers",
-            "payload_fields": payload_fields, "status": "RUNNING",
+            "payload_fields": payload_fields, "symbol": symbol or None,
+            # Keep only a digest: enough for causal validation without copying a
+            # potentially long unpublished proposal into the job status surface.
+            "proposal_draft_sha256": (
+                _text_digest(proposal_draft)
+                if "proposal_draft" in payload_fields else None),
+            "status": "RUNNING",
             "started_at": now.isoformat(), "ended_at": None,
-            "result": None, "model_plane": None, "error": None,
+            "result": None, "model_plane": None, "evidence": None, "error": None,
         }
         if len(_WORKER_JOBS) > MAX_JOBS_KEPT:
             # RUNNING 은 퇴거하지 않는다 - 몇 분짜리 실행 도중에 자리가
@@ -181,7 +219,7 @@ def register_worker_job(payload_fields: list[str], *, now: datetime) -> str:
 
 def finish_worker_job(job_id: str, *, result: dict | None,
                       model_plane: dict | None, error: str | None,
-                      now: datetime) -> dict:
+                      now: datetime, evidence: dict | None = None) -> dict:
     with _WORKER_JOBS_LOCK:
         j = _WORKER_JOBS.get(job_id)
         if j is None:
@@ -195,8 +233,195 @@ def finish_worker_job(job_id: str, *, result: dict | None,
         j["ended_at"] = now.isoformat()
         j["result"] = result
         j["model_plane"] = model_plane
+        j["evidence"] = evidence
         j["error"] = error
         return dict(j)
+
+
+def planner_task_id(planner_run: str) -> str | None:
+    """Return the causal board task id, ignoring an agent-added run label."""
+    match = _TASK_ID_RE.match(str(planner_run or "").strip())
+    return match.group(1) if match else None
+
+
+def verified_skeptic_reviews(skeptic_run: str,
+                             planner_text: str) -> tuple[list[dict], str]:
+    """Return typed reviews from the causally bound independent Worker job.
+
+    A caller-provided label is not a signature.  The worker job is created and
+    retained by this MCP process, so the proposal boundary can verify the
+    actual execution, its trigger input, and its structured output before
+    allowing the id to enter the ledger as ``skeptic_sign``.  The returned
+    artifact, rather than agent-transcribed prose, is the canonical hand-off.
+    """
+    job_id = str(skeptic_run or "").strip()
+    if not job_id:
+        return [], "skeptic_run is required and must be a run_research_workers job_id"
+    with _WORKER_JOBS_LOCK:
+        job = _WORKER_JOBS.get(job_id)
+        if job is not None:
+            job = dict(job)
+    if job is None:
+        return [], "skeptic_run does not identify a worker job in this MCP process"
+    if job.get("status") != "COMPLETED":
+        return [], f"skeptic worker is not completed: {job.get('status')}"
+    if "proposal_draft" not in (job.get("payload_fields") or []):
+        return [], "skeptic worker did not review a proposal_draft"
+    if job.get("proposal_draft_sha256") != _text_digest(planner_text):
+        return [], "skeptic worker reviewed a different proposal_draft"
+    result = job.get("result") or {}
+    if result.get("degraded"):
+        return [], "skeptic worker completed in degraded mode"
+    if "competing-explanation-worker" not in (result.get("executed") or []):
+        return [], "competing-explanation-worker did not complete"
+    report = next(
+        (item for item in (result.get("workers") or [])
+         if item.get("worker_id") == "competing-explanation-worker"),
+        None,
+    )
+    output = (report or {}).get("output") or {}
+    if ((report or {}).get("status") != "COMPLETED"
+            or output.get("schema_valid") is not True
+            or not str(output.get("summary") or "").strip()):
+        return [], "skeptic worker output is missing or schema-invalid"
+    reviews = output.get("skeptic_reviews")
+    if not isinstance(reviews, list) or not reviews:
+        return [], "skeptic worker typed artifact skeptic_reviews is missing"
+    required = ("title", "competing_explanation", "competing_codes",
+                "verdict", "falsification_test")
+    if any(not isinstance(review, dict)
+           or any(review.get(field) in (None, "", []) for field in required)
+           for review in reviews):
+        return [], "skeptic worker typed artifact is incomplete"
+    planner_titles = [match.group(1).strip() for match in re.finditer(
+        r"(?m)^\s*TITLE\s*:\s*(.+?)\s*$", str(planner_text or ""))
+        if match.group(1).strip()]
+    if not planner_titles:
+        return [], "proposal_draft has no TITLE for skeptic review pairing"
+    if len(planner_titles) == 1 and len(reviews) == 1:
+        # TITLE is an identifier, not analytical content.  Small local models
+        # sometimes paraphrase it even when the review body is valid.  With a
+        # one-to-one causal input the only safe mapping is unambiguous, so use
+        # the source title.  Never guess positionally when there are many.
+        normalized = [dict(reviews[0])]
+        normalized[0]["title"] = planner_titles[0]
+        return normalized, ""
+    review_titles = [str(review.get("title") or "").strip() for review in reviews]
+    if len(review_titles) != len(planner_titles) or sorted(review_titles) != sorted(planner_titles):
+        return [], "skeptic review TITLE set does not exactly match proposal_draft"
+    return reviews, ""
+
+
+def skeptic_job_error(skeptic_run: str, planner_text: str) -> str:
+    """Compatibility wrapper used by diagnostics and older callers."""
+    _reviews, error = verified_skeptic_reviews(skeptic_run, planner_text)
+    return error
+
+
+def render_skeptic_reviews(reviews: list[dict]) -> str:
+    """Deterministically bridge typed Worker output to proposal-intake blocks."""
+    blocks = []
+    for review in reviews:
+        one_line = lambda value: " ".join(str(value).split())  # noqa: E731
+        explanation = one_line(review["competing_explanation"])
+        falsification = one_line(review["falsification_test"])
+        codes = ", ".join(one_line(code) for code in review["competing_codes"])
+        blocks.append("\n".join([
+            f"TITLE: {one_line(review['title'])}",
+            f"COMPETING_EXPLANATION: {explanation} FALSIFICATION_TEST: {falsification}",
+            f"COMPETING_CODES: {codes}",
+            f"VERDICT: {one_line(review['verdict']).upper()}",
+        ]))
+    return "\n\n".join(blocks)
+
+
+def load_persisted_skeptic_reviews(conn, skeptic_run: str,
+                                    planner_run: str,
+                                    planner_text: str) -> tuple[list[dict], str]:
+    """Recover a previously verified review after an MCP process restart.
+
+    Rows enter this ledger only after ``verified_skeptic_reviews`` has checked
+    the live worker job.  Binding the recovery to the exact draft digest and
+    both run ids preserves that causal signature without making process memory
+    a single point of failure.
+    """
+    digest = _text_digest(planner_text)
+    with conn.cursor() as cur:
+        cur.execute("""
+            select title, competing_explanation, competing_codes, verdict,
+                   falsification_test
+              from research.proposal_review_outcomes
+             where proposal_draft_sha256 = %s
+               and skeptic_run = %s
+               and planner_run = %s
+             order by title
+        """, (digest, str(skeptic_run or "").strip(),
+              str(planner_run or "").strip()))
+        rows = cur.fetchall()
+    if not rows:
+        return [], "no durable skeptic review matches this draft and run binding"
+    reviews = [{
+        "title": row[0],
+        "competing_explanation": row[1],
+        "competing_codes": list(row[2] or []),
+        "verdict": row[3],
+        "falsification_test": row[4],
+    } for row in rows]
+    planner_titles = [match.group(1).strip() for match in re.finditer(
+        r"(?m)^\s*TITLE\s*:\s*(.+?)\s*$", str(planner_text or ""))
+        if match.group(1).strip()]
+    review_titles = [str(review["title"] or "").strip() for review in reviews]
+    if not planner_titles or sorted(planner_titles) != sorted(review_titles):
+        return [], "durable skeptic review TITLE set does not match proposal_draft"
+    return reviews, ""
+
+
+def persist_skeptic_reviews(conn, planner_text: str, reviews: list[dict], *,
+                            case_id: str, planner_run: str,
+                            skeptic_run: str, known_lead_ids: set[str]) -> int:
+    """Persist causally verified reviews even when STOP blocks publication."""
+    import proposal_intake as PI
+
+    blocks = PI.parse_blocks(planner_text, PI.PLANNER_KEYS)
+    if not blocks or not reviews:
+        return 0
+    by_title = {str(r.get("title") or "").strip(): r for r in reviews}
+    singleton = reviews[0] if len(blocks) == len(reviews) == 1 else None
+    draft_digest = _text_digest(planner_text)
+    written = 0
+    with conn.cursor() as cur:
+        for block in blocks:
+            title = str(block.get("TITLE") or "").strip()
+            review = by_title.get(title) or singleton
+            if not title or review is None:
+                continue
+            lead_ids = sorted(
+                lead_id for lead_id in PI._split(block.get("LEAD_IDS", ""))
+                if lead_id in known_lead_ids
+            )
+            if not lead_ids:
+                continue
+            review_id = "review_" + hashlib.sha256(
+                f"{draft_digest}|{title}".encode("utf-8")
+            ).hexdigest()[:16]
+            cur.execute("""
+                insert into research.proposal_review_outcomes
+                  (review_id, case_id, lead_ids, title, proposal_draft_sha256,
+                   verdict, competing_explanation, competing_codes,
+                   falsification_test, planner_run, skeptic_run)
+                values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                on conflict (proposal_draft_sha256, title) do nothing
+                returning review_id
+            """, (
+                review_id, case_id, lead_ids, title, draft_digest,
+                str(review["verdict"]).upper(),
+                str(review["competing_explanation"]),
+                list(review["competing_codes"]),
+                str(review["falsification_test"]), planner_run, skeptic_run,
+            ))
+            written += int(cur.fetchone() is not None)
+    conn.commit()
+    return written
 
 
 def build_worker_payload(holding_question: str = "", proposal_draft: str = "",
@@ -219,6 +444,167 @@ def build_worker_payload(holding_question: str = "", proposal_draft: str = "",
             "holding_question 또는 proposal_draft 중 하나는 있어야 한다 - "
             "리서치 Worker 2인의 트리거가 그 둘뿐이다")
     return payload
+
+
+# ── Evidence First (FINAL_RUNTIME_ARCHITECTURE §11) ─────────────────────────
+# Runner 는 Worker 를 부르기 전에 Tool/Evidence 부터 모은다 - Worker 가 근거
+# 없이 추론하지 않게 하기 위해서다. 소스(뉴스·공시·가격)별로 **독립 시도**하고
+# 실패는 status 로 정직하게 남긴다. evidence/bundle.assemble_bundle 을 안 쓰는
+# 이유: 그건 첫 실패를 전체 실패로 전파하는 파이프라인 계약이라, market-api
+# (TSDB)가 비어 있는 환경에서 Supabase 뉴스·공시까지 같이 죽는다.
+
+HOLDINGS_EVIDENCE_PERSONA = "holdings-analyst-worker"
+
+
+def _evidence_getter():
+    """읽기면 호출자. X-Agent-Persona 를 워커 명의로 싣는다.
+
+    research-api 가 TOOL_GATEWAY_ENFORCE=true 로 돌면 persona 없는 요청은
+    403 이다 - holdings-analyst-worker 는 news/disclosures/snapshot/bars
+    스코프를 전부 가진 persona 다(hermes/config.yaml tool_allowlist).
+    """
+    from evidence.api_client import get_json
+
+    def get(url: str):
+        return get_json(url, persona=HOLDINGS_EVIDENCE_PERSONA, timeout=10)
+
+    return get
+
+
+def gather_holdings_evidence(symbol: str, *, get=None) -> dict:
+    """보유 질문용 근거를 부서 읽기면에서 모은다. 소스별 독립·정직 보고.
+
+    뉴스는 48시간(주말을 넘겨도 최근 흐름이 잡히게), 공시는 7일. 값이 비면
+    빈 대로 싣는다 - "없다" 는 사실이고, 지어내는 것보다 낫다.
+    """
+    research = (os.environ.get("RESEARCH_API_URL")
+                or "http://127.0.0.1:8035").rstrip("/")
+    if get is None:
+        get = _evidence_getter()
+    sources: dict[str, dict] = {}
+    out: dict = {"symbol": symbol, "sources": sources}
+
+    try:
+        news = get(f"{research}/evidence/news?symbol={symbol}&hours=48&limit=10")
+        # ref('n1'..)는 짧아서 LLM 이 정확히 인용한다. evidence_id(document_id)
+        # 는 코드가 대조할 진짜 좌표다(evidence/bundle.py 의 계약과 동형).
+        out["news_headlines"] = [
+            {"ref": f"n{i + 1}", "evidence_id": n.get("document_id"),
+             "title": n.get("title"), "relation": n.get("relation_type"),
+             "url": n.get("url"), "published_at": str(n.get("published_at") or ""),
+             "observed_at": str(n.get("observed_at") or "")}
+            for i, n in enumerate(news)]
+        sources["news"] = {"status": "OK", "count": len(news)}
+    except Exception as e:  # noqa: BLE001 - 소스 하나의 실패가 전체를 못 죽인다
+        sources["news"] = {"status": "FAILED",
+                           "reason": f"{type(e).__name__}: {e}"}
+
+    try:
+        disc = get(f"{research}/evidence/disclosures?symbol={symbol}&days=7&limit=5")
+        out["disclosures_7d"] = [
+            {"ref": f"d{i + 1}", "evidence_id": d.get("document_id"),
+             "title": d.get("title"), "url": d.get("url"),
+             "published_at": str(d.get("published_at") or ""),
+             "observed_at": str(d.get("observed_at") or "")}
+            for i, d in enumerate(disc)]
+        sources["disclosures"] = {"status": "OK", "count": len(disc)}
+    except Exception as e:  # noqa: BLE001
+        sources["disclosures"] = {"status": "FAILED",
+                                  "reason": f"{type(e).__name__}: {e}"}
+
+    try:
+        from evidence import bundle as evidence_bundle
+        # fetch_price_context 는 실패를 스스로 UNAVAILABLE 로 기술한다 -
+        # TSDB 가 빈 환경에서도 뉴스·공시와 독립적으로 동작한다.
+        ctx = evidence_bundle.fetch_price_context(symbol, get=get)
+        out["price_context"] = ctx
+        sources["price_context"] = {"status": ctx.get("status", "UNKNOWN")}
+    except Exception as e:  # noqa: BLE001
+        sources["price_context"] = {"status": "FAILED",
+                                    "reason": f"{type(e).__name__}: {e}"}
+    return out
+
+
+# Worker 프롬프트 예산. employee_worker_runtime._compact 가 tool_output 직렬화를
+# **문자 단위 raw[:8000]** 으로 자른다 - 넘치면 JSON 이 중간에서 끊겨 '수집은
+# OK 인데 수치는 없는' 오정보가 된다(2026-08-13 리뷰 실측: 뉴스 10건+공시 5건+
+# price_context ≈ 5,400~7,000자, 본부장이 3KB 텍스트를 얹으면 절벽을 넘는다).
+# 어댑터 래핑(worker_id·tools 키) 오버헤드 몫을 빼고 7,200자를 상한으로 잡아
+# **항목 단위로** 덜어낸다 - 덜어낸 사실은 evidence_truncated 로 남긴다.
+_EVIDENCE_CHAR_BUDGET = 7200
+_USER_TEXT_CAP = 1000
+
+
+def _clip_text(value, limit: int = _USER_TEXT_CAP):
+    s = str(value)
+    return s if len(s) <= limit else s[:limit] + "…(잘림)"
+
+
+def merge_holdings_evidence(payload: dict, evidence: dict) -> dict:
+    """수집한 근거를 Worker input_fields(news·portfolio_state)에 접어 넣는다.
+
+    holdings-analyst-worker 의 tool 어댑터는 payload 투영이라, 여기 안 실린
+    근거는 Worker 에게 영원히 안 보인다. 사용자가 준 텍스트는 user_note/
+    user_state 로 보존한다(단 1,000자 캡) - 덮어쓰면 질문에 실어준 맥락이
+    사라지고, 캡이 없으면 본부장이 실은 긴 텍스트가 가격 블록을 통째로
+    밀어낸다. 전체 직렬화가 예산을 넘으면 오래된 뉴스·공시부터 항목 단위로
+    덜어내고 그 사실을 evidence_truncated 에 남긴다.
+    """
+    import json
+
+    p = dict(payload)
+    # closes(일봉 21개 리스트)는 요약 통계(last_close·수익률)와 중복인 원자료라
+    # 프롬프트에서 뺀다 - 수치 근거는 price_context 의 요약 필드가 이미 든다.
+    ctx = evidence.get("price_context")
+    if isinstance(ctx, dict) and "closes" in ctx:
+        ctx = {k: v for k, v in ctx.items() if k != "closes"}
+    news_block = {
+        "user_note": _clip_text(p["news"]) if p.get("news") else None,
+        "headlines": list(evidence.get("news_headlines") or []),
+        "disclosures_7d": list(evidence.get("disclosures_7d") or []),
+        "source_status": evidence.get("sources"),
+    }
+    p["news"] = {k: v for k, v in news_block.items() if v}
+    state_block = {
+        "user_state": (_clip_text(p["portfolio_state"])
+                       if p.get("portfolio_state") else None),
+        "price_context": ctx,
+    }
+    merged_state = {k: v for k, v in state_block.items() if v}
+    if merged_state:
+        p["portfolio_state"] = merged_state
+
+    def _size(d: dict) -> int:
+        # _compact 와 같은 직렬화 규칙으로 잰다(ensure_ascii=False, sort_keys)
+        return len(json.dumps(d, ensure_ascii=False, sort_keys=True, default=str))
+
+    news_dict = p.get("news") if isinstance(p.get("news"), dict) else None
+    dropped = 0
+    while news_dict and _size(p) > _EVIDENCE_CHAR_BUDGET:
+        if news_dict.get("headlines"):
+            news_dict["headlines"].pop()       # 뒤(오래된 것)부터 통째로
+        elif news_dict.get("disclosures_7d"):
+            news_dict["disclosures_7d"].pop()
+        else:
+            break
+        dropped += 1
+    if dropped:
+        news_dict["evidence_truncated"] = {
+            "dropped_items": dropped,
+            "reason": f"Worker 프롬프트 예산({_EVIDENCE_CHAR_BUDGET}자) 초과",
+        }
+    # 항목을 다 덜어냈는데도 넘으면(사용자 텍스트가 지배하는 경우) 텍스트를
+    # 단계적으로 더 죈다 - 예산 보장을 _compact 의 문자 절단에 맡기지 않는다.
+    if _size(p) > _EVIDENCE_CHAR_BUDGET:
+        if news_dict and news_dict.get("user_note"):
+            news_dict["user_note"] = _clip_text(news_dict["user_note"], 300)
+        ps = p.get("portfolio_state")
+        if isinstance(ps, dict) and ps.get("user_state"):
+            ps["user_state"] = _clip_text(ps["user_state"], 300)
+    for key in ("holding_question", "proposal_draft"):
+        if _size(p) > _EVIDENCE_CHAR_BUDGET and isinstance(p.get(key), str):
+            p[key] = _clip_text(p[key], 3000)
+    return p
 
 
 def summarize_health(rows: list[dict]) -> dict:
@@ -256,7 +642,49 @@ def _server_class():
         return FastMCP, "fastmcp"
 
 
-def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
+# ── 응대 창구(도서관) 면에서 빼는 도구 (2026-08-13, 도서관/연구소 분리) ────
+# **프롬프트로 금지하는 게 아니라 등록에서 뺀다** - OWASP LLM06(Excessive
+# Agency)의 도구 최소화, capability 원칙(건네지 않은 권한은 우회 불가).
+# 창구는 조회·설명 전용이고, 상태를 바꾸거나 파이프라인을 낳는 손은
+# 실험대(부서 본체) 프로필에만 있다.
+#   run_research_packet     - 30분짜리 분석 파이프라인 생성(쓰기·고비용)
+#   factory_submit_leads    - 공장 리드 적재(쓰기)
+#   factory_submit_proposal - 공장 기획안 발행(쓰기) = 질의→공장 순환의 입구
+LIAISON_EXCLUDED_TOOLS = frozenset({
+    "run_research_packet", "factory_submit_leads", "factory_submit_proposal"})
+
+
+def _restrict_to_liaison(server) -> None:
+    """등록된 도구에서 쓰기 면을 **제거**한다. 검증 불능이면 기동 거부(fail-closed).
+
+    지우는 API 가 SDK 판마다 달라 두 경로를 시도하고, 마지막에 list_tools 로
+    실제 표면을 재확인한다 - "지웠다고 믿었는데 남아 있는" 것이 최악의 상태라
+    재확인이 최종 판정이다.
+    """
+    import asyncio
+
+    for name in sorted(LIAISON_EXCLUDED_TOOLS):
+        remove = getattr(server, "remove_tool", None)
+        if callable(remove):
+            try:
+                remove(name)
+                continue
+            except Exception:  # noqa: BLE001 - 아래 경로와 재확인이 받는다
+                pass
+        tm = getattr(server, "_tool_manager", None)
+        tools = getattr(tm, "_tools", None)
+        if isinstance(tools, dict):
+            tools.pop(name, None)
+    names = {t.name for t in asyncio.run(server.list_tools())}
+    leaked = names & LIAISON_EXCLUDED_TOOLS
+    if leaked:
+        raise RuntimeError(
+            f"liaison 면에서 쓰기 도구를 제거하지 못했다: {sorted(leaked)} - "
+            f"창구가 공장 쓰기 손을 가진 채 뜨는 것은 금지다(기동 거부)")
+
+
+def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
+                 surface: str = "full"):
     cls, flavor = _server_class()
     kwargs = {"instructions": None}
     # 신판만 title 을 받는다 - 옛판에 넘기면 TypeError 다
@@ -265,14 +693,22 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
     else:
         kwargs.update(host=host, port=port)      # 1.x 는 생성 시 settings 로 받는다
 
+    liaison = str(surface).strip().lower() == "liaison"
+    instructions = (
+        "리서치본부 응대 창구(도서관)다. 조회·설명 전용 - 실험을 만들거나 "
+        "공장에 무엇도 제출하지 않으며, 그 도구 자체가 이 면에 없다. 사용자 "
+        "질의에는 조회 도구의 결과만으로 답하고, 새 분석·실험·수집이 필요한 "
+        "요청은 즉석 수행 대신 '연구소 격상 필요'를 명시해 접수 사실만 답한다. "
+        "도구 결과는 결정론 산출물이므로 그대로 인용하고, 수치를 다시 계산하거나 "
+        "지어내지 않는다.") if liaison else (
+        "리서치본부(RES)의 도구 면이다. 시세·Evidence 조회와 Research Packet "
+        "생성만 한다. 주문 제출·리스크 판정·원장 기록은 이 본부의 권한이 "
+        "아니며 여기에 도구도 없다. 도구 결과는 결정론 산출물이므로 그대로 "
+        "인용하고, 수치를 다시 계산하거나 지어내지 않는다.")
     server = cls(
-        name="research-department",
+        name="research-liaison" if liaison else "research-department",
         **{k: v for k, v in kwargs.items() if k != "instructions"},
-        instructions=(
-            "리서치본부(RES)의 도구 면이다. 시세·Evidence 조회와 Research Packet "
-            "생성만 한다. 주문 제출·리스크 판정·원장 기록은 이 본부의 권한이 "
-            "아니며 여기에 도구도 없다. 도구 결과는 결정론 산출물이므로 그대로 "
-            "인용하고, 수치를 다시 계산하거나 지어내지 않는다."),
+        instructions=instructions,
     )
 
     @server.tool(
@@ -346,24 +782,47 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
         description="리서치 직원 Worker(LangGraph 2인)를 실행한다. "
                     "holding_question 을 주면 holdings-analyst-worker, "
                     "proposal_draft 를 주면 competing-explanation-worker 가 돈다 "
-                    "(둘 다 주면 둘 다 돈다). portfolio_state·news 는 "
-                    "holdings-analyst 의 보조 근거다. 모델 추론이 수십 초 "
-                    "걸리므로 job_id 만 즉시 돌려준다 - get_worker_job 으로 "
-                    "결과(worker-context, 비구속)를 조회한다. Worker 산출은 "
-                    "요약하지 말고 summary·confidence·evidence_refs·escalate "
-                    "를 그대로 인용하라.")
+                    "(둘 다 주면 둘 다 돈다). **보유 질문이 특정 종목에 관한 "
+                    "것이면 symbol(6자리 종목코드)을 반드시 함께 줘라** - 러너가 "
+                    "Worker 호출 전에 부서 읽기면(research-api·market-api)에서 "
+                    "최근 뉴스·공시·가격 근거를 모아 Worker 에게 준다(Evidence "
+                    "First). symbol 없이 주는 portfolio_state·news 텍스트는 "
+                    "보조 근거로만 실린다. 모델 추론이 수십 초 걸리므로 job_id "
+                    "만 즉시 돌려준다 - get_worker_job 으로 결과(worker-context, "
+                    "비구속)를 조회한다. Worker 산출은 요약하지 말고 summary·"
+                    "confidence·evidence_refs·escalate 를 그대로 인용하고, "
+                    "job 의 evidence.sources 에 FAILED 가 있으면 그 사실도 "
+                    "함께 보고하라.")
     def run_research_workers(holding_question: str = "", proposal_draft: str = "",
-                             portfolio_state: str = "", news: str = "") -> dict:
+                             portfolio_state: str = "", news: str = "",
+                             symbol: str = "") -> dict:
         try:
             payload = build_worker_payload(holding_question, proposal_draft,
                                            portfolio_state, news)
+            sym = normalize_symbol(symbol) if str(symbol or "").strip() else ""
         except ValueError as e:
             return {"ok": False, "error": str(e)}
-        job_id = register_worker_job(sorted(payload), now=datetime.now(KST))
+        job_id = register_worker_job(
+            sorted(payload), now=datetime.now(KST), symbol=sym,
+            proposal_draft=payload.get("proposal_draft", ""))
 
         def _run():
+            # try 밖에서 초기화한다 - 근거를 모은 뒤 Worker 단계에서 죽어도
+            # FAILED job 에 evidence 요약이 남아야 진단이 된다.
+            evidence_summary = None
             try:
                 gateway, employee_workers = _worker_modules()
+                # Evidence First (§11) - Worker 를 부르기 전에 근거부터 모은다.
+                # 실패해도 job 을 죽이지 않는다 - 소스별 상태가 evidence 에
+                # 그대로 남고, Worker 는 모인 만큼의 근거로 판단한다.
+                if sym and "holding_question" in payload:
+                    evidence = gather_holdings_evidence(sym)
+                    payload_with_evidence = merge_holdings_evidence(
+                        payload, evidence)
+                    evidence_summary = {"symbol": sym,
+                                        "sources": evidence.get("sources")}
+                else:
+                    payload_with_evidence = payload
                 # ▶ 워커별로 binding 을 해석한다 (2026-08-13 리뷰 반영).
                 #   단일 llm 을 공유하면 registry 의 worker→adapter 해석이
                 #   전달되지 않아 LoRA 승격이 조용한 no-op 이 된다.
@@ -375,7 +834,7 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
                     return llm
 
                 result = employee_workers.run_employee_workers(
-                    payload, llm_factory=llm_factory)
+                    payload_with_evidence, llm_factory=llm_factory)
                 default_binding = gateway.resolve()
                 # runtime 블록의 provider/model 은 공용 런타임이 Ollama 를
                 # 하드코딩한 값이다 - 실제 사용한 게이트웨이 좌표로 바로잡는다.
@@ -391,15 +850,19 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
                                       "default": default_binding.as_metadata(),
                                       "workers": worker_bindings,
                                   },
-                                  error=None, now=datetime.now(KST))
+                                  error=None, now=datetime.now(KST),
+                                  evidence=evidence_summary)
             except Exception as e:  # noqa: BLE001 - 실패를 실패로 남긴다
                 finish_worker_job(job_id, result=None, model_plane=None,
                                   error=f"{type(e).__name__}: {e}",
-                                  now=datetime.now(KST))
+                                  now=datetime.now(KST),
+                                  evidence=evidence_summary)
 
         threading.Thread(target=_run, daemon=True).start()
         return {"job_id": job_id, "status": "RUNNING",
                 "payload_fields": sorted(payload),
+                "symbol": sym or None,
+                "evidence_first": bool(sym and "holding_question" in payload),
                 "note": "get_worker_job(job_id) 으로 결과를 조회한다"}
 
     @server.tool(
@@ -559,10 +1022,34 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
 
     @server.tool(
         name="factory_submit_leads",
-        description="스카우트 산출을 방법론 리드로 제출한다. TITLE/URL/MECHANISM "
+        description="스카우트 산출을 방법론 리드로 제출한다. TITLE/URL/MECHANISM/READINESS "
                     "블록 형식 원문을 그대로 넣어라. 코드가 링크를 실제로 열어 보고, "
                     "메커니즘 없는 블록을 반려하고, 중복을 접어서 적재한다. "
-                    "**네가 적재 여부를 판단하지 않는다** - 반려 사유를 받아 고쳐라.")
+                    "lens는 탐색 관점이고 source_type은 자료 매체다. source_type은 "
+                    "PAPER, BLOG, VIDEO, COMMUNITY, INVESTOR_LETTER, INTERNAL_FAILURE 중 "
+                    "하나만 쓰며 PRACTITIONER/CROSS_DOMAIN 같은 lens 값을 넣지 않는다. "
+                    "AST_READY에는 OBSERVABLES와 CANDIDATE_SIGNAL_EXPR, DATA_BLOCKED에는 "
+                    "MISSING_DATA, SEMANTIC_MISMATCH에는 MAPPING_LOSS가 필수다. "
+                    "AST_READY는 DERIVATION_MODE도 필수다. DIRECT_REPLICATION은 공개식 "
+                    "대조군으로만 보존되고, MECHANISM_MUTATION은 SOURCE_BASELINE_EXPR·"
+                    "DERIVATION_TRANSFORMS·NOVELTY_RATIONALE가 필요하며 창만 바꾼 식은 "
+                    "신규 후보가 아니다. CROSS_DOMAIN_TRANSFER는 시장 구조 대응을 적는다. "
+                    "AST_READY 수식은 반드시 호가·체결 미시구조 필드를 하나 이상 "
+                    "사용해야 한다. 짧은 미시구조 표본을 returns/close 일봉 대리식으로 "
+                    "바꾸지 말고, 일봉은 실행가격·벤치마크·레짐 보조로만 사용한다. "
+                    "INTRADAY_EVENT 노드는 field={'op':'field','field':'필드명'}이고 "
+                    "temporal={'op':'rolling_mean','arg':field,'seconds':300}이다. "
+                    "'name' 키는 금지다. OBSERVABLES는 AST가 실제 쓴 필드와 정확히 "
+                    "같아야 하며, 상태 조건을 SEMANTIC_PLAN에 선언했으면 AST의 where로 "
+                     "구현한다. DERIVATION_TRANSFORMS의 대괄호를 쓰려면 문자열을 인용한 "
+                     "유효 JSON이어야 한다. 신규 INTRADAY_EVENT AST_READY는 target·"
+                     "functional_form·expected_sign·coefficient_policy·terms·identification "
+                     "키를 가진 FORMULA_THESIS JSON도 필수다. target은 SEMANTIC_PLAN "
+                     "output과 같고 terms는 AST의 모든 field를 경제적 역할에 정확히 "
+                     "한 번씩 사상해야 한다. OOS 결과에 계수를 맞추지 않는다. "
+                     "**네가 적재 여부를 판단하지 않는다** - 반려 사유를 받아 고쳐라. "
+                     "성공 응답의 lead_ids는 revision 라우팅까지 끝난 실제 원장 ID다. "
+                     "후속 factory_submit_proposal에는 이 ID만 사용하라.")
     def factory_submit_leads(text: str, lens: str = "ACADEMIC",
                              source_type: str = "PAPER",
                              model_version: str = "", prompt_version: str = "") -> dict:
@@ -582,14 +1069,17 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
                                case_id=case_id, model_version=model_version,
                                prompt_version=prompt_version)
         new = dup = 0
+        lead_ids: list[str] = []
         if r.leads:
             conn = _db()
             try:
-                new, dup = lead_intake.persist(conn, r.leads)
+                new, dup, lead_ids = lead_intake.persist(
+                    conn, r.leads, return_ids=True)
             finally:
                 conn.close()
         return {"ok": bool(r.leads), "accepted": len(r.leads),
                 "new": new, "merged_as_mention": dup,
+                "lead_ids": lead_ids,
                 "rejected": [{"title": x.title, "why": x.reason} for x in r.rejected],
                 "link_checks": r.link_notes}
 
@@ -598,8 +1088,12 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
         description="기획안을 발행 게이트에 제출한다. **이 호출이 곧 납품이다** - "
                     "카드 텍스트·요약은 납품으로 세지 않는다. `planner_run` 에 "
                     "지금 작업 중인 칸반 카드 ID(t_ 로 시작)를 넣으면 납품이 그 "
-                    "카드 몫으로 대조된다. 기획자 산출과 **독립 회의론자** 산출을 "
-                    "함께 넣어라 - 서명이 기획자와 같은 실행이면 거부된다. 근거 "
+                    "카드 몫으로 대조된다. 먼저 run_research_workers에 "
+                    "proposal_draft를 주고 get_worker_job에서 COMPLETED·비-degraded "
+                    "결과를 확인하라. 반환된 실제 job_id를 skeptic_run에 넣으면 "
+                    "typed skeptic_reviews를 이 도구가 직접 접수 형식으로 변환한다. "
+                    "skeptic_text는 구버전 호출 호환용이며 판정 근거로 쓰지 않는다. "
+                    "자기 서명이나 임의 실행명은 거부된다. 근거 "
                     "리드는 원장에서 다시 읽어 대조하므로 없는 리드를 대면 막힌다. "
                     "차단 사유가 이 도구의 결과로 즉시 돌아온다 - 사유에 답해 같은 "
                     "카드 안에서 다시 제출하라. `llm_model_id` 와 "
@@ -614,10 +1108,31 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
         _factory_path()
         import proposal_intake as PI
 
-        from datetime import datetime as _dt, timezone as _tz
-
+        task_id = planner_task_id(planner_run)
+        if task_id is None:
+            return {
+                "ok": False, "published": 0, "already_present": 0,
+                "unknown_lead_ids": [], "gate": [],
+                "rejected": [{
+                    "title": "(submission)",
+                    "why": "planner_run must start with the current kanban task id (t_...)"
+                }],
+            }
         conn = _db()
         try:
+            skeptic_reviews, critic_error = verified_skeptic_reviews(
+                skeptic_run, planner_text)
+            if critic_error:
+                skeptic_reviews, durable_error = load_persisted_skeptic_reviews(
+                    conn, skeptic_run, planner_run, planner_text)
+                if durable_error:
+                    return {
+                        "ok": False, "published": 0, "already_present": 0,
+                        "unknown_lead_ids": [], "gate": [],
+                        "rejected": [{"title": "(independent skeptic)",
+                                      "why": (critic_error + "; " +
+                                              durable_error)}],
+                    }
             wanted = {i for b in PI.parse_blocks(planner_text, PI.PLANNER_KEYS)
                       for i in PI._split(b.get("LEAD_IDS", ""))}
             leads = PI.load_leads(conn, sorted(wanted))
@@ -632,10 +1147,14 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
             #   찍는다. 수확기 `_mcp_deliveries` 가 이 각인으로 "이 카드가
             #   납품했는가" 를 원장에서 결정론적으로 대조한다 - 텍스트 채널의
             #   2,434자/123자 변동성이 납품 판정과 무관해지는 자리다.
-            _pr = str(planner_run or "").strip()
-            r = PI.intake(planner_text, skeptic_text,
-                          case_id=(f"card-{_pr[:40]}" if _pr.startswith("t_")
-                                   else f"plan-{_dt.now(_tz.utc):%Y%m%d}"),
+            canonical_skeptic_text = render_skeptic_reviews(skeptic_reviews)
+            review_records = persist_skeptic_reviews(
+                conn, planner_text, skeptic_reviews,
+                case_id=f"card-{task_id}", planner_run=planner_run,
+                skeptic_run=skeptic_run, known_lead_ids=set(leads),
+            )
+            r = PI.intake(planner_text, canonical_skeptic_text,
+                          case_id=f"card-{task_id}",
                           planner_run=planner_run, skeptic_run=skeptic_run,
                           leads=leads,
                           outcomes_for=lambda b: PI.load_past_outcomes(
@@ -643,7 +1162,10 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
                               (b.get("EDGE_TYPE") or "").strip().lower(),
                               (b.get("UNIVERSE_KEY") or "").strip().lower(),
                               label=(b.get("LABEL") or "").strip(),
-                              baseline=(b.get("BASELINE") or "").strip()))
+                              baseline=(b.get("BASELINE") or "").strip(),
+                              signal_expr=PI.signal_expr_from_block(b),
+                              research_lane=(b.get("RESEARCH_LANE") or
+                                             "DAILY_CROSS_SECTIONAL").strip()))
             for prop, _g in r.proposals:
                 setattr(prop, "_planner_prompt", planner_prompt)
                 setattr(prop, "_skeptic_prompt", skeptic_prompt)
@@ -671,6 +1193,7 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
                     conn.commit()
             return {
                 "ok": bool(pub), "published": new, "already_present": dup,
+                "review_records": review_records,
                 "unknown_lead_ids": missing,
                 "rejected": [{"title": x.title, "why": x.reason} for x in r.rejected],
                 "gate": [{"proposal_id": p.proposal_id, "passed": g.ok,
@@ -693,6 +1216,83 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT):
             from research.experiment_outcomes
             order by created_at desc limit %s""", (n,))
 
+    # ── Library 조회 면 (2026-08-14) ────────────────────────────────────────
+    # ▶ 왜 필요했나 (코드 실측)
+    #   공장은 원장에 계속 쌓는데 **읽을 면이 없었다** - factory 테이블 위
+    #   view 0건, BFF/UI 참조 0건, 창구는 `factory_outcomes`(최근 N건 덤프)
+    #   하나뿐. 그래서 "저변동 계열은 어디까지 갔나" 같은 질문에 답할 수
+    #   없었고, 사용자 질의가 Library 를 먼저 읽는 구조가 성립하지 않았다.
+    #
+    # ▶ 전부 읽기 전용이라 창구(liaison) 면에도 그대로 열린다. 계산은
+    #   뷰(research.v_*)가 하고 여기서는 꺼내기만 한다 - 도구가 자기 산수를
+    #   하면 원장과 다른 두 번째 진실이 생긴다.
+
+    @server.tool(
+        name="library_signal_shelf",
+        description="신호 서가 - 엣지 유형별로 몇 번 시험했고 최고 IR·IC t·DSR 이 "
+                    "얼마였나. **부품(단일 신호)의 천장을 한눈에 본다.** "
+                    "IC t 의 부호를 반드시 함께 읽어라: 음수인데 절대값이 크면 "
+                    "신호가 없는 게 아니라 방향이 반대라는 뜻이다.")
+    def library_signal_shelf() -> list[dict]:
+        return _rows("""
+            select edge_type, experiments, rejects, best_ir, best_ic_t,
+                   best_dsr, worst_mdd, last_decided, top_n_tried
+              from research.v_signal_shelf
+             order by coalesce(best_ic_t, -99) desc, coalesce(best_ir, -99) desc""")
+
+    @server.tool(
+        name="library_families",
+        description="계열 현황 - 같은 아이디어를 몇 번 시도했고 마지막 판정이 "
+                    "무엇이며 어떤 교훈이 쌓였나. 새 기획 전에 읽으면 이미 산 "
+                    "실험을 다시 사지 않는다.")
+    def library_families(limit: int = 15) -> list[dict]:
+        n = max(1, min(int(limit), 60))
+        return _rows("""
+            select trial_family_id, outcomes, rejects, holds, advanced,
+                   last_decision, last_root_cause, last_lessons,
+                   coalesce(last_note,'') as last_note, all_lessons,
+                   first_decided, last_decided
+              from research.v_trial_family_status
+             where trial_family_id <> ''
+             order by last_decided desc nulls last limit %s""", (n,))
+
+    @server.tool(
+        name="library_scorecard",
+        description="실험 성적표 - 관문 지표(IR·초과·DSR·MDD)에 더해 위험조정 "
+                    "계측(M²·alpha·appraisal·전략vol/벤치vol)과 부품 채점표"
+                    "(IC·IC t·회전율)를 한 행으로 준다. `edge_type` 을 주면 그 "
+                    "유형만. **명목 초과가 나쁜데 M² 가 다르면 그것은 신호의 "
+                    "실패가 아니라 위험 수준 차이다.**")
+    def library_scorecard(edge_type: str = "", limit: int = 20) -> list[dict]:
+        n = max(1, min(int(limit), 60))
+        et = str(edge_type or "").strip().lower()
+        cond = "and edge_type = %s" if et else ""
+        params = ((et, n) if et else (n,))
+        return _rows(f"""
+            select experiment_id, edge_type, top_n, decision, decided_at,
+                   excess_return_pct, information_ratio, max_drawdown_pct,
+                   deflated_sharpe, pbo,
+                   m2_excess_ann_pct, alpha_ann_pct, appraisal_ratio,
+                   strategy_ann_vol_pct, benchmark_ann_vol_pct,
+                   signal_ic, signal_ic_t, turnover_total,
+                   lesson_codes, root_cause, coalesce(notes,'') as notes,
+                   mapping_loss, coalesce(llm_model_id,'') as llm_model_id
+              from research.v_experiment_scorecard
+             where 1=1 {cond}
+             order by decided_at desc limit %s""", params)
+
+    # 외부 정보원(DART·네이버·ECOS·FRED) 질의 도구 - 정성 데이터의 MCP 검색 통합
+    # (재일 결정 2026-08-13, docs/02-engineering/MCP_ONDEMAND_ARCHITECTURE.md).
+    # 별도 모듈인 이유: 예산·스냅샷·정직성 규약이 한 파일에 살아야 감사가 쉽다.
+    from external_sources import register_external_tools
+    from external_macro import register_macro_tools
+    from external_global import register_global_tools
+    register_external_tools(server)
+    register_macro_tools(server)
+    register_global_tools(server)
+
+    if liaison:
+        _restrict_to_liaison(server)
     return server
 
 
@@ -751,6 +1351,7 @@ def _check_worker_payload():
 
 def _check_worker_job_lifecycle():
     now = datetime(2026, 8, 13, 10, tzinfo=KST)
+    draft = "TITLE: Liquidity pressure reversal"
     jid = register_worker_job(["holding_question"], now=now)
     with _WORKER_JOBS_LOCK:
         assert _WORKER_JOBS[jid]["status"] == "RUNNING"
@@ -766,9 +1367,212 @@ def _check_worker_job_lifecycle():
     fail = finish_worker_job(jid2, result=None, model_plane=None,
                              error="ImportError: worker_model_gateway", now=now)
     assert fail["status"] == "FAILED" and "ImportError" in fail["error"]
+    assert skeptic_job_error(jid2, draft), \
+        "failed critic was accepted as a signature"
+
+    jid3 = register_worker_job(["proposal_draft"], now=now,
+                               proposal_draft=draft)
+    critic = {
+        "executed": ["competing-explanation-worker"],
+        "degraded": False,
+        "workers": [{
+            "worker_id": "competing-explanation-worker",
+            "status": "COMPLETED",
+            "output": {
+                "summary": "The effect may be a liquidity premium.",
+                "confidence": 0.7,
+                "evidence_refs": [],
+                "escalate": False,
+                "schema_valid": True,
+                "skeptic_reviews": [{
+                    "title": "Paraphrased liquidity review",
+                    "competing_explanation": "The return may be a liquidity premium.",
+                    "competing_codes": ["LIQUIDITY_PREMIUM"],
+                    "verdict": "PROCEED",
+                    "falsification_test": "Neutralize spread and depth buckets.",
+                }],
+            },
+        }],
+    }
+    finish_worker_job(jid3, result=critic, model_plane={"provider": "test"},
+                      error=None, now=now)
+    assert skeptic_job_error(jid3, draft) == ""
+    reviews, error = verified_skeptic_reviews(jid3, draft)
+    rendered = render_skeptic_reviews(reviews)
+    assert not error and "TITLE: Liquidity pressure reversal" in rendered
+    assert "COMPETING_CODES: LIQUIDITY_PREMIUM" in rendered
+    assert "FALSIFICATION_TEST: Neutralize spread and depth buckets." in rendered
+    assert "different proposal_draft" in skeptic_job_error(
+        jid3, "TITLE: Different proposal")
+    assert skeptic_job_error("invented-label", draft), \
+        "unverifiable label was accepted"
+    many = "TITLE: First proposal\nTITLE: Second proposal"
+    jid4 = register_worker_job(["proposal_draft"], now=now, proposal_draft=many)
+    finish_worker_job(jid4, result=critic, model_plane={"provider": "test"},
+                      error=None, now=now)
+    assert "TITLE set" in skeptic_job_error(jid4, many), \
+        "ambiguous multi-proposal review was paired positionally"
+    assert planner_task_id("t_59e3616a-planner-20260815-10a") == "t_59e3616a"
+    assert planner_task_id("planner-20260815") is None
     assert finish_worker_job("없는아이디", result=None, model_plane=None,
                              error=None, now=now) == {}
     print("  Worker 작업 수명주기     OK")
+
+
+def _check_skeptic_review_persistence():
+    """STOP is durable even though it correctly publishes no proposal."""
+    sys.path.insert(0, str(_BASE / "factory"))
+
+    class _Cursor:
+        def __init__(self, rows=None):
+            self.calls = []
+            self.rows = list(rows or [])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql, params):
+            self.calls.append((sql, params))
+
+        def fetchone(self):
+            return ("review_test",)
+
+        def fetchall(self):
+            return list(self.rows)
+
+    class _Conn:
+        def __init__(self, rows=None):
+            self.cur = _Cursor(rows)
+            self.commits = 0
+
+        def cursor(self):
+            return self.cur
+
+        def commit(self):
+            self.commits += 1
+
+    conn = _Conn()
+    draft = "TITLE: Event OFI\nLEAD_IDS: lead_event_1"
+    reviews = [{
+        "title": "Event OFI",
+        "competing_explanation": "The signal may only proxy spread costs.",
+        "competing_codes": ["COST_UNACCOUNTED"],
+        "verdict": "STOP",
+        "falsification_test": "Condition on spread and require net markout.",
+    }]
+    assert persist_skeptic_reviews(
+        conn, draft, reviews, case_id="card-t_test",
+        planner_run="t_test-planner", skeptic_run="job_test",
+        known_lead_ids={"lead_event_1"},
+    ) == 1
+    assert conn.commits == 1
+    sql, params = conn.cur.calls[0]
+    assert "proposal_review_outcomes" in sql
+    assert params[2] == ["lead_event_1"] and params[5] == "STOP"
+
+    unknown = _Conn()
+    assert persist_skeptic_reviews(
+        unknown, draft, reviews, case_id="card-t_test",
+        planner_run="t_test-planner", skeptic_run="job_test",
+        known_lead_ids=set(),
+    ) == 0
+    assert not unknown.cur.calls, "unknown lead id was persisted as reviewed"
+
+    recovered = _Conn(rows=[(
+        "Event OFI", "The signal may only proxy spread costs.",
+        ["COST_UNACCOUNTED"], "STOP",
+        "Condition on spread and require net markout.",
+    )])
+    durable, error = load_persisted_skeptic_reviews(
+        recovered, "job_test", "t_test-planner", draft)
+    assert not error and durable[0]["verdict"] == "STOP", (durable, error)
+    _sql, _params = recovered.cur.calls[0]
+    assert _params == (_text_digest(draft), "job_test", "t_test-planner")
+    print("  스켑틱 심사 영구기억      OK")
+
+
+def _check_holdings_evidence():
+    """Evidence First - 소스별 독립 시도·정직 보고·payload 병합 계약."""
+    def fake_get(url: str):
+        if "/evidence/news" in url:
+            return [{"document_id": "doc-1", "title": "제목",
+                     "relation_type": "direct", "url": "http://u",
+                     "published_at": "2026-08-13", "observed_at": "2026-08-13"}]
+        if "/evidence/disclosures" in url:
+            raise RuntimeError("research-api down")
+        raise ValueError("tsdb empty")          # /bars → price_context 경로
+
+    ev = gather_holdings_evidence("005930", get=fake_get)
+    assert ev["symbol"] == "005930"
+    assert ev["sources"]["news"] == {"status": "OK", "count": 1}
+    assert ev["news_headlines"][0]["ref"] == "n1"
+    assert ev["news_headlines"][0]["evidence_id"] == "doc-1"
+    # 한 소스의 실패가 다른 소스를 못 죽인다 - 사유는 그대로 남는다
+    assert ev["sources"]["disclosures"]["status"] == "FAILED"
+    assert "research-api down" in ev["sources"]["disclosures"]["reason"]
+    # price_context 는 자기 기술 UNAVAILABLE (fetch_price_context 내장 규율)
+    assert ev["sources"]["price_context"]["status"] == "UNAVAILABLE", ev["sources"]
+
+    merged = merge_holdings_evidence(
+        {"holding_question": "q", "news": "사용자 메모", "portfolio_state": "10주"},
+        ev)
+    assert merged["holding_question"] == "q", "질문은 그대로 남는다"
+    assert merged["news"]["user_note"] == "사용자 메모", "사용자 텍스트를 보존한다"
+    assert merged["news"]["headlines"][0]["ref"] == "n1"
+    assert merged["news"]["source_status"]["disclosures"]["status"] == "FAILED"
+    assert merged["portfolio_state"]["user_state"] == "10주"
+    # price_context 는 UNAVAILABLE 상태 그대로 실린다 - 실패를 숨기지 않는다
+    assert merged["portfolio_state"]["price_context"]["status"] == "UNAVAILABLE"
+
+    # 근거가 하나도 없으면 news 는 상태 보고만 남는다(빈 성공으로 위장 금지)
+    def all_down(url: str):
+        raise RuntimeError("down")
+
+    ev2 = gather_holdings_evidence("005930", get=all_down)
+    merged2 = merge_holdings_evidence({"holding_question": "q"}, ev2)
+    assert set(merged2["news"]) == {"source_status"}, merged2["news"]
+
+    # ── 프롬프트 예산 경계 (2026-08-13 리뷰) ──
+    # _compact 는 문자 단위 raw[:8000] 절단이라, 예산을 넘기면 JSON 이 중간에서
+    # 끊겨 '수집 OK 인데 수치 없음' 오정보가 된다. 최대 픽스처로 항목 단위
+    # 절단이 예산을 지키는지 잰다.
+    import json as _json
+
+    def big_get(url: str):
+        if "/evidence/news" in url:
+            return [{"document_id": f"doc-{i}", "title": "제" * 80,
+                     "relation_type": "direct", "url": "http://u/" + "x" * 150,
+                     "published_at": "2026-08-13T09:00:00+09:00",
+                     "observed_at": "2026-08-13T09:00:00+09:00"}
+                    for i in range(10)]
+        if "/evidence/disclosures" in url:
+            return [{"document_id": f"d-{i}", "title": "공" * 80,
+                     "url": "http://d/" + "y" * 150,
+                     "published_at": "2026-08-13", "observed_at": "2026-08-13"}
+                    for i in range(5)]
+        return [{"bucket_time": f"2026-08-{i:02d}T00:00:00", "close": 70000.0 + i}
+                for i in range(1, 22)]          # /bars → closes 21개
+
+    ev3 = gather_holdings_evidence("005930", get=big_get)
+    merged3 = merge_holdings_evidence(
+        {"holding_question": "질문" * 100, "news": "뉴스요약" * 800,
+         "portfolio_state": "상태" * 800}, ev3)
+    size = len(_json.dumps(merged3, ensure_ascii=False, sort_keys=True, default=str))
+    assert size <= _EVIDENCE_CHAR_BUDGET, f"예산 초과: {size}자"
+    assert merged3["news"]["evidence_truncated"]["dropped_items"] >= 1
+    # 사용자 텍스트 캡 - 본부장이 실은 긴 텍스트가 가격 블록을 밀어내지 않는다
+    assert len(merged3["news"]["user_note"]) <= _USER_TEXT_CAP + 8
+    assert len(merged3["portfolio_state"]["user_state"]) <= _USER_TEXT_CAP + 8
+    # closes 원자료는 프롬프트에서 빠지고 요약 수치는 남는다
+    assert "closes" not in merged3["portfolio_state"]["price_context"]
+    assert "last_close" in merged3["portfolio_state"]["price_context"], \
+        merged3["portfolio_state"]["price_context"]
+    # 작은 픽스처는 절단 없이 그대로 - 예산 로직이 과절단하지 않는다
+    assert "evidence_truncated" not in merged["news"]
+    print("  Evidence First 계약     OK (예산 경계 포함)")
 
 
 def _check_health_summary():
@@ -803,6 +1607,44 @@ def _check_bearer_auth():
     print("  Bearer 인증 판정         OK")
 
 
+def _check_writer_connection_mode():
+    """A pooled read-only server session must be overridden for MCP writes."""
+    class _Conn:
+        def __init__(self, *, fail=False):
+            self.fail = fail
+            self.readonly = None
+            self.closed = False
+
+        def set_session(self, *, readonly):
+            if self.fail:
+                raise RuntimeError("cannot set transaction mode")
+            self.readonly = readonly
+
+        def close(self):
+            self.closed = True
+
+    made = []
+
+    def _connect(dsn, *, connect_timeout):
+        made.append((dsn, connect_timeout, _Conn()))
+        return made[-1][2]
+
+    conn = _writer_connection("postgresql://example/test", connector=_connect)
+    assert made[0][:2] == ("postgresql://example/test", 15)
+    assert conn.readonly is False, "write MCP did not force READ WRITE transactions"
+
+    failed = _Conn(fail=True)
+    try:
+        _writer_connection("postgresql://example/test",
+                           connector=lambda *a, **k: failed)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("set_session failure was hidden")
+    assert failed.closed, "failed pooled connection was not closed"
+    print("  write DB transaction mode       OK")
+
+
 def _check_tool_surface():
     """권한 경계 - 주문·원장·리스크 도구가 노출되지 않았는가."""
     try:
@@ -825,6 +1667,34 @@ def _check_tool_surface():
     print(f"  도구 면·권한 경계        OK ({len(names)}개)")
 
 
+def _check_liaison_surface():
+    """**창구 면에는 쓰기 손이 없어야 한다** (2026-08-13, 도서관/연구소 분리).
+
+    질의→공장 무한루프의 유일한 코드 수준 입구가 factory_submit_* 이다.
+    창구가 그 도구를 가진 채 뜨면 SOUL.md 의 산문 금지는 장식이 된다 -
+    프롬프트가 아니라 등록 제거(capability 절단)로 막고, 여기서 고정한다.
+    """
+    import asyncio
+
+    srv = build_server(surface="liaison")
+    names = {t.name for t in asyncio.run(srv.list_tools())}
+    leaked = names & LIAISON_EXCLUDED_TOOLS
+    assert not leaked, f"창구 면에 쓰기 도구가 남았다: {sorted(leaked)}"
+    # 창구의 존재 이유인 조회 도구는 살아 있어야 한다 - 다 지우면 그건
+    # 분리가 아니라 불구다. 보유 질의 응답 간선(run_research_workers)도 창구
+    # 몫이다(비구속 worker-context, 원장에 닿지 않는다).
+    for required in ("factory_brief", "factory_outcomes", "list_recent_packets",
+                     "collector_health", "run_research_workers",
+                     "get_worker_job",
+                     # Library 조회 면 (2026-08-14) - 질의가 공장에 일을 시키지
+                     # 않고 **먼저 읽는** 대상이다. 창구에 없으면 그 구조가
+                     # 성립하지 않는다.
+                     "library_signal_shelf", "library_families",
+                     "library_scorecard"):
+        assert required in names, f"창구 면에서 {required} 가 사라졌다: {names}"
+    print(f"  창구 면 capability 절단  OK ({len(names)}개, 쓰기 0개)")
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -833,16 +1703,21 @@ if __name__ == "__main__":
         import uvicorn
 
         token = os.environ.get("MCP_RESEARCH_API_KEY", "").strip()
-        srv = build_server(host="0.0.0.0", port=DEFAULT_PORT)
+        # 같은 이미지가 두 면으로 뜬다(도서관/연구소 분리, 2026-08-13):
+        #   full    - 부서 본체(실험대). 공장 쓰기 도구 포함.
+        #   liaison - 응대 창구(도서관). 쓰기 도구가 등록에서 빠진다.
+        surface = os.environ.get("RESEARCH_MCP_SURFACE", "full").strip().lower()
+        srv = build_server(host="0.0.0.0", port=DEFAULT_PORT, surface=surface)
         s = getattr(srv, "settings", None)
         if s is not None:
             s.host, s.port = "0.0.0.0", DEFAULT_PORT
+        face = "창구(liaison·읽기 전용)" if surface == "liaison" else "본체(full)"
         if token:
-            print(f"{MCP_VERSION}: 0.0.0.0:{DEFAULT_PORT}/mcp (Bearer 인증 켜짐)",
-                  flush=True)
+            print(f"{MCP_VERSION}: 0.0.0.0:{DEFAULT_PORT}/mcp [{face}] "
+                  f"(Bearer 인증 켜짐)", flush=True)
         else:
             # 잊은 것과 일부러 연 것을 구분되게 남긴다 - 조용한 무인증 금지
-            print(f"{MCP_VERSION}: 0.0.0.0:{DEFAULT_PORT}/mcp "
+            print(f"{MCP_VERSION}: 0.0.0.0:{DEFAULT_PORT}/mcp [{face}] "
                   f"⚠ MCP_RESEARCH_API_KEY 미설정 - 인증 없이 연다. compose "
                   f"네트워크 밖으로 노출하지 말 것", flush=True)
         uvicorn.run(build_app(srv, token=token or None),
@@ -852,9 +1727,13 @@ if __name__ == "__main__":
     print(f"{MCP_VERSION} 자체 점검 (네트워크·DB 없음)")
     _check_symbol_guard()
     _check_bearer_auth()
+    _check_writer_connection_mode()
     _check_job_lifecycle()
     _check_worker_payload()
     _check_worker_job_lifecycle()
+    _check_skeptic_review_persistence()
+    _check_holdings_evidence()
     _check_health_summary()
     _check_tool_surface()
-    print("리서치 MCP 7개 영역 통과. 서버는 --serve")
+    _check_liaison_surface()
+    print("리서치 MCP 11개 영역 통과. 서버는 --serve")

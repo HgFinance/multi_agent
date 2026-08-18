@@ -42,13 +42,18 @@ from contracts.factory_contracts import (  # noqa: E402
     CompetingExplanation, DataRequirement, ExperimentProposalV1,
     MethodologyLeadV1, PriorCheck,
 )
+from contracts.intraday_ablation import (  # noqa: E402
+    INTRADAY_SCREENING_COHORT_VERSION,
+)
 from lead_intake import clip_excerpt, parse_blocks  # noqa: E402
 from publish_gate import evaluate  # noqa: E402
 
-MODULE_VERSION = "research-proposal-intake-v1"
+MODULE_VERSION = "research-proposal-intake-v3"
+MAX_INTRADAY_COHORT = 8
 
 PLANNER_KEYS = ("TITLE", "LEAD_IDS", "ECONOMIC_RATIONALE", "COUNTERPARTY",
                 "EDGE_TYPE", "UNIVERSE_KEY", "LABEL", "BASELINE",
+                "RESEARCH_LANE", "SEMANTIC_PLAN",
                 "FALSIFICATION_TESTS", "DATA_TABLES", "MIN_HISTORY_DAYS",
                 "SUGGESTED_PARAMS", "SOURCE_REPORTED_EFFECT", "TRIAL_BUDGET",
                 # ▶ **여기 없으면 앞 필드가 오염된다** (2026-08-13 실측)
@@ -116,8 +121,10 @@ def _lessons_addressed(v: str) -> dict:
     text = str(v or "").strip()
     if not text:
         return out
-    # `CODE=` 가 나오는 자리에서만 자른다(값 안의 쉼표는 안 자른다)
-    parts = re.split(r",\s*(?=[A-Z][A-Z0-9_]{2,}\s*=)", text)
+    # `CODE=` 가 나오는 자리에서만 자른다(값 안의 쉼표·세미콜론은
+    # 안 자른다). LLM이 내는 `A=..., B=...`·`A=...; B=...`를 둘 다
+    # 받되, 다음 토큰이 통제 코드일 때만 경계로 본다.
+    parts = re.split(r"[,;]\s*(?=[A-Z][A-Z0-9_]{2,}\s*=)", text)
     for p in parts:
         if "=" not in p:
             continue
@@ -135,6 +142,12 @@ def _maybe_json(v: str) -> dict:
         return d if isinstance(d, dict) else {}
     except ValueError:
         return {}
+
+
+def signal_expr_from_block(block: dict):
+    """Return the executable AST regardless of its research clock."""
+    params = _maybe_json(block.get("SUGGESTED_PARAMS", ""))
+    return params.get("signal_expr") or params.get("intraday_signal_expr")
 
 
 def _trial_budget(v) -> int:
@@ -192,11 +205,53 @@ def _competing_codes(raw: str) -> tuple[list, str]:
     return codes, " ".join(rest)[:120]
 
 
-def proposal_id_for(lead_ids, edge_type: str, universe_key: str) -> str:
-    """같은 리드로 같은 엣지·유니버스를 또 기획하면 같은 기획안이다."""
+def proposal_id_for(lead_ids, edge_type: str, universe_key: str, *,
+                    material: dict | None = None) -> str:
+    """Return the identity of one immutable material preregistration.
+
+    A lead/edge/universe-only id made a corrected parameter contract collide
+    with the already rejected row, so ``ON CONFLICT DO NOTHING`` silently ate
+    the repair.  Material execution/design fields now distinguish a genuinely
+    corrected proposal.  Prose rewrites and shared-replay sidecars do not: they
+    must not manufacture fresh trials.
+    """
+    if material is None:
+        # Preserve the legacy helper contract for callers that only need the
+        # coarse family-style identity.  Newly built proposals always pass a
+        # material specification below.
+        blob = json.dumps(
+            [sorted(str(x) for x in lead_ids), edge_type.strip().lower(),
+             universe_key.strip().lower()],
+            ensure_ascii=False, separators=(",", ":"))
+        return "prop_" + hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+    material = dict(material)
+    params = dict(material.get("suggested_params") or {})
+    # Screening sidecars are compute amortisation only and never hold promotion
+    # authority.  Their membership/version may change as the unused lead queue
+    # changes without changing the primary preregistration.
+    params.pop("screening_population", None)
+    params.pop("screening_cohort_version", None)
+    material["suggested_params"] = params
+    if isinstance(material.get("falsification_tests"), (list, tuple)):
+        material["falsification_tests"] = sorted(
+            str(value) for value in material["falsification_tests"])
+    requirements = dict(material.get("data_requirements") or {})
+    if isinstance(requirements.get("tables"), (list, tuple)):
+        requirements["tables"] = sorted(str(value)
+                                         for value in requirements["tables"])
+    if requirements:
+        material["data_requirements"] = requirements
+    plan = dict(material.get("semantic_plan") or {})
+    for key in ("context", "qualities"):
+        if isinstance(plan.get(key), (list, tuple)):
+            plan[key] = sorted(str(value) for value in plan[key])
+    if plan:
+        material["semantic_plan"] = plan
     blob = json.dumps([sorted(str(x) for x in lead_ids),
-                       edge_type.strip().lower(), universe_key.strip().lower()],
-                      ensure_ascii=False, separators=(",", ":"))
+                       edge_type.strip().lower(), universe_key.strip().lower(),
+                       material], ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"), default=str)
     return "prop_" + hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
@@ -225,6 +280,22 @@ def _prior_check(past_outcomes, lessons_text: str) -> PriorCheck:
                       lessons_addressed=_lessons_addressed(lessons_text))
 
 
+def _canonical_universe_key(raw: str, research_lane: str) -> str:
+    """Normalize the one known intraday cohort/version identity mix-up.
+
+    ``intraday-screening-cohort-v3`` names the deterministic screening contract,
+    not an execution universe.  Preserve every other value so the downstream
+    controlled-vocabulary gate can continue to reject unknown universes rather
+    than silently changing the experiment.
+    """
+    universe = raw.strip().lower()
+    lane = research_lane.strip().upper()
+    if (lane == "INTRADAY_EVENT"
+            and universe == INTRADAY_SCREENING_COHORT_VERSION):
+        return "krx_all"
+    return universe
+
+
 def build(planner: dict, skeptic: dict, *, case_id: str,
           planner_run: str, skeptic_run: str,
           past_outcomes: list | None = None,
@@ -247,7 +318,9 @@ def build(planner: dict, skeptic: dict, *, case_id: str,
 
     lead_ids = _split(planner["LEAD_IDS"])
     edge = planner["EDGE_TYPE"].strip().lower()
-    universe = planner["UNIVERSE_KEY"].strip()
+    research_lane = (planner.get("RESEARCH_LANE") or
+                     "DAILY_CROSS_SECTIONAL").strip().upper()
+    universe = _canonical_universe_key(planner["UNIVERSE_KEY"], research_lane)
 
     tables = _split(planner.get("DATA_TABLES", "")) or ("market_bars",)
     try:
@@ -255,8 +328,34 @@ def build(planner: dict, skeptic: dict, *, case_id: str,
     except ValueError:
         min_days = 0
 
+    data_requirements = DataRequirement(tables=list(tables),
+                                        min_history_days=min_days)
+    suggested_params = _maybe_json(planner.get("SUGGESTED_PARAMS", ""))
+    semantic_plan = _maybe_json(planner.get("SEMANTIC_PLAN", ""))
+    trial_budget = _trial_budget(planner.get("TRIAL_BUDGET", ""))
+    label = (planner.get("LABEL") or "forward_return").strip()
+    baseline = (planner.get("BASELINE") or "equal_weight_buy_and_hold").strip()
+    falsification_tests = _split(planner.get("FALSIFICATION_TESTS", ""))
+    prior_check = _prior_check(
+        past_outcomes, planner.get("LESSONS_ADDRESSED", ""))
+    material = {
+        "label": label,
+        "baseline": baseline,
+        "falsification_tests": list(falsification_tests),
+        "research_lane": research_lane,
+        "data_requirements": data_requirements.model_dump(mode="json"),
+        "suggested_params": suggested_params,
+        "semantic_plan": semantic_plan,
+        "trial_budget": trial_budget,
+        # Only the planner-authored repair belongs in identity.  Ledger-derived
+        # family/trial history changes over time and would make an unchanged
+        # proposal churn ids on every harvest.
+        "lessons_addressed": dict(prior_check.lessons_addressed),
+    }
+
     return ExperimentProposalV1(
-        proposal_id=proposal_id_for(lead_ids, edge, universe),
+        proposal_id=proposal_id_for(
+            lead_ids, edge, universe, material=material),
         case_id=case_id,
         as_known_at=as_known_at or datetime.now(timezone.utc),
         lead_ids=lead_ids,
@@ -267,23 +366,202 @@ def build(planner: dict, skeptic: dict, *, case_id: str,
         skeptic_sign=skeptic_run.strip(),
         edge_type=edge,
         universe_key=universe,
-        label=(planner.get("LABEL") or "forward_return").strip(),
-        baseline=(planner.get("BASELINE") or "equal_weight_buy_and_hold").strip(),
-        falsification_tests=_split(planner.get("FALSIFICATION_TESTS", "")),
-        data_requirements=DataRequirement(tables=list(tables),
-                                          min_history_days=min_days),
-        suggested_params=_maybe_json(planner.get("SUGGESTED_PARAMS", "")),
-        trial_budget=_trial_budget(planner.get("TRIAL_BUDGET", "")),
+        label=label,
+        baseline=baseline,
+        falsification_tests=falsification_tests,
+        data_requirements=data_requirements,
+        suggested_params=suggested_params,
+        research_lane=research_lane,
+        semantic_plan=semantic_plan,
+        trial_budget=trial_budget,
         # ▶ **이력은 원장에서, 대응은 에이전트에게서** (2026-08-12)
         #   몇 번 돌았는지·무엇으로 기각됐는지는 사실이라 우리가 채운다.
         #   그것에 어떻게 대응할지는 판단이라 에이전트가 쓴다. 예전엔 둘 다
         #   비워 두어 Gate 0 의 "교훈에 대응이 없다" 검사가 **발동할 수도,
         #   통과할 수도 없는** 상태였다.
-        prior_check=_prior_check(past_outcomes,
-                                 planner.get("LESSONS_ADDRESSED", "")),
+        prior_check=prior_check,
         source_reported_effect=_maybe_json(
             planner.get("SOURCE_REPORTED_EFFECT", "")),
     )
+
+
+def _attach_intraday_screening_cohort(
+        proposal: ExperimentProposalV1,
+        leads: dict[str, MethodologyLeadV1]) -> ExperimentProposalV1:
+    """Turn linked typed leads into a provenance-checked shared-replay cohort.
+
+    Only the formula copied into ``SUGGESTED_PARAMS`` remains a preregistered
+    primary lead.  Other linked formulas are screening sidecars: they share the
+    expensive raw-event replay but cannot be promoted from that evidence.  Their
+    lead ids therefore stay unused and can later receive an independent
+    confirmatory experiment.
+    """
+    if proposal.research_lane.value != "INTRADAY_EVENT":
+        return proposal
+
+    import intraday_ast_contract as intraday_grammar  # noqa: PLC0415
+    from intraday_ast_contract import fingerprint, parse, unit_of  # noqa: PLC0415
+    from contracts.intraday_ablation import (  # noqa: PLC0415
+        generate as generate_ablations,
+    )
+    from formula_discovery import assess as assess_formula  # noqa: PLC0415
+
+    params = dict(proposal.suggested_params or {})
+    primary = parse(params.get("intraday_signal_expr"))
+    primary_fp = fingerprint(primary)
+    candidates: dict[str, dict] = {}
+    rejected_primary: list[str] = []
+
+    # The planner chooses the preregistered primary, but it is not a reliable
+    # cohort assembler: a live run linked one valid current-contract lead even
+    # though four more unused formulas were present in its own brief.  ``load_leads``
+    # therefore supplies a bounded current-contract pool. Consider that pool here so
+    # shared replay is deterministic rather than dependent on an LLM copying
+    # 2--8 ids correctly.  Only the exact primary remains in ``lead_ids``;
+    # every other formula is SCREENING_ONLY and remains unused for a later
+    # independent confirmation.
+    lead_order = list(proposal.lead_ids)
+    lead_order.extend(sorted(set(leads) - set(lead_order)))
+    for lead_id in lead_order:
+        lead = leads.get(str(lead_id))
+        if lead is None:
+            continue
+        contract = dict(lead.ast_contract or {})
+        if (contract.get("formula_discovery_version") != "formula-discovery-v5"
+                or not contract.get("formula_contract_complete")
+                or contract.get("alpha_candidate_eligible") is not True
+                or contract.get("research_lane") != "INTRADAY_EVENT"):
+            continue
+        try:
+            expr = parse(contract.get("candidate_signal_expr"))
+        except (TypeError, ValueError):
+            continue
+        fp = fingerprint(expr)
+        thesis = dict(contract.get("formula_thesis") or {})
+        try:
+            assess_formula(
+                thesis, candidate=expr,
+                semantic_plan=dict(contract.get("semantic_plan") or {}),
+                grammar=intraday_grammar,
+            )
+        except (TypeError, ValueError) as exc:
+            if fp == primary_fp:
+                rejected_primary.append(f"{lead_id}: {exc}")
+            continue
+        row = candidates.setdefault(fp, {
+            "candidate_role": "LINKED_CANDIDATE",
+            "source_lead_ids": [],
+            "title": str(lead.claimed_edge),
+            "ast_fingerprint": fp,
+            "intraday_signal_expr": expr,
+            "semantic_plan": dict(contract.get("semantic_plan") or {}),
+            "entry_policy": str(thesis.get("decision_rule") or ""),
+            "coefficient_policy": str(thesis.get("coefficient_policy") or ""),
+            "evolution_role": str(contract.get("evolution_role") or "SEED"),
+            "parent_ast_fingerprint": str(
+                contract.get("parent_ast_fingerprint") or ""),
+            "screening_cohort_version": INTRADAY_SCREENING_COHORT_VERSION,
+            "_parent_signal_expr": contract.get("parent_signal_expr"),
+        })
+        row["source_lead_ids"].append(str(lead_id))
+
+    if primary_fp not in candidates:
+        if rejected_primary:
+            raise ValueError(
+                "INTRADAY_EVENT primary formula no longer passes the current "
+                "formula influence audit: " + " | ".join(rejected_primary))
+        raise ValueError(
+            "INTRADAY_EVENT primary formula must exactly match one linked "
+            "formula-discovery-v5 lead")
+
+    primary_lead_ids = tuple(candidates[primary_fp]["source_lead_ids"])
+    linked_sidecars = [row for fp, row in candidates.items() if fp != primary_fp]
+
+    # An explicit parent is a valuable within-replay ablation.  It receives
+    # the child's semantic/execution contract and remains SCREENING_ONLY.
+    known_fps = set(candidates)
+    lineage_parents = []
+    for child in list(candidates.values()):
+        parent_raw = child.pop("_parent_signal_expr", None)
+        if parent_raw in (None, ""):
+            continue
+        try:
+            parent = parse(parent_raw)
+            parent_fp = fingerprint(parent)
+            child_structure_only = child["coefficient_policy"] == "STRUCTURE_ONLY"
+            if ((not child_structure_only and unit_of(parent) != "BPS")
+                    or (child_structure_only and unit_of(parent) == "BOOL")
+                    or parent_fp in known_fps):
+                continue
+        except (TypeError, ValueError):
+            continue
+        known_fps.add(parent_fp)
+        lineage_parents.append({
+            "candidate_role": "LINEAGE_PARENT",
+            "source_lead_ids": list(child["source_lead_ids"]),
+            "title": f"parent of {child['title']}",
+            "ast_fingerprint": parent_fp,
+            "intraday_signal_expr": parent,
+            "semantic_plan": dict(child["semantic_plan"]),
+            "entry_policy": child["entry_policy"],
+            "coefficient_policy": child["coefficient_policy"],
+            "evolution_role": "PARENT_ABLATION",
+            "parent_of_ast_fingerprint": child["ast_fingerprint"],
+            "screening_cohort_version": INTRADAY_SCREENING_COHORT_VERSION,
+        })
+
+    controls = []
+    primary_source = candidates[primary_fp]
+    for control in generate_ablations(primary)[:2]:
+        if control["ast_fingerprint"] in known_fps:
+            continue
+        known_fps.add(control["ast_fingerprint"])
+        controls.append({
+            **control,
+            "candidate_role": "STRUCTURAL_ABLATION",
+            "source_lead_ids": list(primary_lead_ids),
+            "title": f"structural control of {primary_source['title']}",
+            "semantic_plan": dict(primary_source["semantic_plan"]),
+            "entry_policy": primary_source["entry_policy"],
+            "coefficient_policy": primary_source["coefficient_policy"],
+            "evolution_role": "EMPIRICAL_TERM_INFLUENCE",
+            "screening_cohort_version": INTRADAY_SCREENING_COHORT_VERSION,
+        })
+
+    # Preserve broad exploration while reserving at most two of the seven
+    # sidecar slots for same-replay mechanism controls.  Any unused control
+    # capacity is returned to independent candidates and explicit parents.
+    sidecars = linked_sidecars[:4] + controls
+    for row in linked_sidecars[4:] + lineage_parents:
+        if len(sidecars) >= MAX_INTRADAY_COHORT - 1:
+            break
+        if row["ast_fingerprint"] not in {
+                item["ast_fingerprint"] for item in sidecars}:
+            sidecars.append(row)
+    for row in sidecars:
+        row.pop("_parent_signal_expr", None)
+    params["screening_population"] = sidecars[:MAX_INTRADAY_COHORT - 1]
+    params["screening_cohort_version"] = INTRADAY_SCREENING_COHORT_VERSION
+    params["entry_policy"] = primary_source["entry_policy"]
+    params["coefficient_policy"] = primary_source["coefficient_policy"]
+    material = {
+        "label": proposal.label,
+        "baseline": proposal.baseline,
+        "falsification_tests": list(proposal.falsification_tests),
+        "research_lane": proposal.research_lane.value,
+        "data_requirements": proposal.data_requirements.model_dump(mode="json"),
+        "suggested_params": params,
+        "semantic_plan": proposal.semantic_plan,
+        "trial_budget": proposal.trial_budget,
+        "lessons_addressed": dict(proposal.prior_check.lessons_addressed),
+    }
+    return proposal.model_copy(update={
+        "proposal_id": proposal_id_for(
+            primary_lead_ids, proposal.edge_type, proposal.universe_key,
+            material=material),
+        "lead_ids": primary_lead_ids,
+        "suggested_params": params,
+    })
 
 
 def intake(planner_text: str, skeptic_text: str, *, case_id: str,
@@ -318,23 +596,6 @@ def intake(planner_text: str, skeptic_text: str, *, case_id: str,
             out.rejected.append(Rejected(title, f"필수 항목 없음: {','.join(missing)}"))
             continue
         s = _pair_skeptic(title, skeptics, _pl_valid, _sk_blocks)
-        if s is None and (p.get("COMPETING_EXPLANATION") or "").strip():
-            # ▶ **자기서명 경로** (2026-08-11, 재일 결정).
-            #   독립 회의론자를 별도 실행으로 두면 주기가 두 배가 되고, 그 카드가
-            #   막히면 공장이 통째로 선다(실측). 그래서 기획자가 경쟁 설명을 직접
-            #   쓰는 경로를 연다 - 사전등록 시점에 반대 가설을 **적어두는 것**이
-            #   이 필드의 본래 목적이고, 그건 자기서명으로도 지켜진다.
-            #
-            #   **잃는 것은 숨기지 않는다.** 독립 서명이 막던 것은 사후
-            #   스토리텔링(결과를 보고 설명을 갖다 붙이기)이다. 자기서명은 그걸
-            #   못 막으므로 `skeptic_sign` 에 `#self` 를 박아 **원장에서 구분되게**
-            #   한다. 나중에 승격을 판정할 때 이 표식이 있는 기획안은 독립 검토를
-            #   거친 것과 같은 무게로 읽으면 안 된다.
-            s = {"TITLE": title,
-                 "COMPETING_EXPLANATION": p.get("COMPETING_EXPLANATION", ""),
-                 "COMPETING_CODES": p.get("COMPETING_CODES", ""),
-                 "VERDICT": SKEPTIC_PASS}
-            skeptic_run = f"{planner_run}#self"
         if s is None:
             # ▶ **왜 짝이 안 맞았는지 말해 준다** (2026-08-13 실측)
             #   에이전트가 MCP 로 12번 넘게 제출했고 매번 이 사유로 거부됐다.
@@ -345,13 +606,13 @@ def intake(planner_text: str, skeptic_text: str, *, case_id: str,
             seen = sorted(k for k in skeptics if k)
             out.rejected.append(Rejected(
                 title,
-                ("회의론자 검토도 COMPETING_EXPLANATION 도 없다 - 반대 가설을 "
-                 "사전에 적지 않은 기획안은 접수하지 않는다")
+                ("독립 worker의 회의론자 검토가 없다 - 반대 가설인 "
+                 "COMPETING_EXPLANATION을 기획자가 적었어도 독립 검증이 아니므로 "
+                 "접수하지 않는다")
                 if not seen else
                 (f"회의론자 블록은 {len(seen)}개 왔는데 이 기획안과 **제목이 "
                  f"맞지 않는다.** 기획자 제목={title!r} · 회의론자 제목={seen}. "
-                 f"제목을 똑같이 맞추거나, 기획자 블록에 "
-                 f"COMPETING_EXPLANATION 을 직접 적어라(자기서명 경로)")))
+                 f"제목을 똑같이 맞추고 독립 worker 실행 ID를 제출하라")))
             continue
         # 이 기획안 **자기 계열**의 이력. 못 읽으면 조용히 0 으로 넘기지 않는다 -
         # 미측정과 "이력 없음" 을 섞는 순간 계약이 무력해진다(그게 이 사고였다).
@@ -369,6 +630,7 @@ def intake(planner_text: str, skeptic_text: str, *, case_id: str,
             prop = build(p, s, case_id=case_id, planner_run=planner_run,
                          skeptic_run=skeptic_run, as_known_at=as_known_at,
                          past_outcomes=past)
+            prop = _attach_intraday_screening_cohort(prop, leads or {})
         except Exception as e:          # 계약 위반·독립성 위반 모두 여기로
             out.rejected.append(Rejected(title, str(e)))
             continue
@@ -378,20 +640,20 @@ def intake(planner_text: str, skeptic_text: str, *, case_id: str,
 
 
 # ── DB ─────────────────────────────────────────────────────────────────────
-def load_leads(conn, lead_ids) -> dict:
+def load_leads(conn, lead_ids, *, _expand_current: bool = True) -> dict:
     """근거 리드를 **DB 에서** 읽는다. 에이전트가 말한 리드를 그대로 믿지 않는다."""
     if not lead_ids:
         return {}
     cur = conn.cursor()
     cur.execute("""
-        select lead_id, case_id, scout_lens, source_type, as_known_at, refs,
+        select lead_id, case_id, scout_lens, source_type, as_known_at, refs, ast_contract,
                claimed_edge, stated_mechanism, inferred, market_context,
                stated_failure_mode, independent_mentions, testability, status,
                model_version, prompt_version
           from research.methodology_leads where lead_id = any(%s)
     """, (list(lead_ids),))
     cols = ("lead_id", "case_id", "scout_lens", "source_type", "as_known_at",
-            "refs", "claimed_edge", "stated_mechanism", "inferred",
+            "refs", "ast_contract", "claimed_edge", "stated_mechanism", "inferred",
             "market_context", "stated_failure_mode", "independent_mentions",
             "testability", "status", "model_version", "prompt_version")
     out = {}
@@ -399,6 +661,8 @@ def load_leads(conn, lead_ids) -> dict:
         d = dict(zip(cols, row))
         if isinstance(d["refs"], str):
             d["refs"] = json.loads(d["refs"])
+        if isinstance(d["ast_contract"], str):
+            d["ast_contract"] = json.loads(d["ast_contract"])
         # ▶ **원장에 이미 계약을 넘는 값이 들어가 있다** (2026-08-12 실측)
         #   `lead_intake.to_lead` 가 EXCERPT 없을 때 MECHANISM 으로 대체하는데
         #   길이 규율이 없어 500자를 넘겼고, 그게 그대로 적재됐다. 그 뒤로 이
@@ -413,6 +677,53 @@ def load_leads(conn, lead_ids) -> dict:
             if isinstance(ref, dict) and ref.get("excerpt"):
                 ref["excerpt"] = clip_excerpt(ref["excerpt"])
         out[d["lead_id"]] = MethodologyLeadV1.model_validate(d)
+
+    # If the submitted primary is a live current-contract intraday formula,
+    # supplement the LLM-selected ids with a bounded pool of other unused formulas. This
+    # does not mark those leads used: _attach_intraday_screening_cohort keeps
+    # only the primary id on the proposal and records the rest as sourced,
+    # non-promotable shared-replay sidecars.
+    wants_current_intraday = any(
+        (lead.ast_contract or {}).get("formula_discovery_version")
+        == "formula-discovery-v5"
+        and (lead.ast_contract or {}).get("research_lane")
+        == "INTRADAY_EVENT"
+        for lead in out.values()
+    )
+    if _expand_current and wants_current_intraday:
+        cur.execute("""
+            select l.lead_id
+              from research.methodology_leads l
+             where l.status = 'COMPLETE'
+               and l.testability = 'RULE_EXPRESSIBLE'
+               and l.ast_contract->>'formula_discovery_version' =
+                   'formula-discovery-v5'
+               and l.ast_contract->>'research_lane' = 'INTRADAY_EVENT'
+               and l.ast_contract->>'ast_readiness' = 'AST_READY'
+               and coalesce(
+                     (l.ast_contract->>'formula_contract_complete')::boolean,
+                     false)
+               and coalesce(
+                     (l.ast_contract->>'alpha_candidate_eligible')::boolean,
+                     false)
+               and not (l.lead_id = any(%s))
+               and not exists (
+                     select 1 from research.experiment_proposals p
+                      where l.lead_id = any(p.lead_ids)
+                        and p.status in ('PUBLISHED','ACCEPTED'))
+               and not exists (
+                     select 1 from research.proposal_review_outcomes r
+                      where r.verdict = 'STOP'
+                        and l.lead_id = any(r.lead_ids))
+             order by l.created_at desc, l.lead_id
+             limit %s
+        """, (list(out), MAX_INTRADAY_COHORT - 1))
+        extra_ids = [row[0] for row in cur.fetchall()]
+        if extra_ids:
+            # Reuse the canonical row validator without recursively expanding
+            # the pool again.
+            extras = load_leads(conn, extra_ids, _expand_current=False)
+            out.update(extras)
     return out
 
 
@@ -459,8 +770,14 @@ def _pair_skeptic(title: str, skeptics: dict, planners: list, sk_blocks: list):
 
 
 def load_past_outcomes(conn, edge_type: str, universe_key: str,
-                       *, label: str = "", baseline: str = "") -> list[dict]:
-    """같은 계열의 지난 판정. **승격 관문과 같은 경로로 센다.**
+                       *, label: str = "", baseline: str = "",
+                       signal_expr: dict | None = None,
+                       research_lane: str = "DAILY_CROSS_SECTIONAL") -> list[dict]:
+    """같은 계열 또는 exact AST의 지난 판정.
+
+    계열명은 LLM이 바꿀 수 있지만 실행된 수식의 지문은 바뀌지 않는다. 따라서
+    edge/universe 이력과 exact ``signal_expr`` 이력을 합쳐 보여 준다. 같은 outcome은
+    SQL의 OR 조건으로 한 번만 읽고, AST로 맞은 행에는 ``match_scope``를 각인한다.
 
     ▶ 여기가 `발주 0건` 의 실제 지점이었다 (2026-08-13 실측)
       두 가지가 겹쳐 있었다.
@@ -507,24 +824,50 @@ def load_past_outcomes(conn, edge_type: str, universe_key: str,
     """
     edge = str(edge_type or "").strip().lower()
     uni = str(universe_key or "").strip().lower()
+    lane = str(research_lane or "DAILY_CROSS_SECTIONAL").strip().upper()
+    if lane not in {"DAILY_CROSS_SECTIONAL", "INTRADAY_EVENT"}:
+        raise ValueError(f"unknown research_lane {lane!r}")
     with conn.cursor() as cur:
-        cur.execute("""
+        lane_predicate = (
+            "upper(coalesce(expected_edge->>'research_lane','')) = 'INTRADAY_EVENT'"
+            if lane == "INTRADAY_EVENT" else
+            "upper(coalesce(expected_edge->>'research_lane',"
+            "'DAILY_CROSS_SECTIONAL')) = 'DAILY_CROSS_SECTIONAL'"
+        )
+        cur.execute(f"""
             select hypothesis_id::text from quant.hypotheses
              where lower(coalesce(expected_edge->>'type','')) = %s
                and lower(coalesce(expected_edge->>'universe_key',
                                   expected_edge->>'universe','')) = %s
+               and {lane_predicate}
         """, (edge, uni))
         hyp_ids = [r[0] for r in cur.fetchall()]
-        if not hyp_ids:
+        experiment_ids: list[str] = []
+        if signal_expr is not None:
+            # jsonb equality ignores object key order.  Invalid expressions are left
+            # to the canonical AST gate; history lookup must not silently repair one.
+            ast_key = ("intraday_signal_expr" if lane == "INTRADAY_EVENT"
+                       else "signal_expr")
+            cur.execute(f"""
+                select experiment_id::text from quant.experiments
+                 where config->'{ast_key}' = %s::jsonb
+            """, (json.dumps(signal_expr, sort_keys=True),))
+            experiment_ids = [r[0] for r in cur.fetchall()]
+        if not hyp_ids and not experiment_ids:
             return []
         cur.execute("""
-            select decision, lesson_codes, trial_family_id
+            select decision, lesson_codes, trial_family_id, experiment_id
               from research.experiment_outcomes
-             where hypothesis_id = any(%s)
+             where hypothesis_id = any(%s::text[])
+                or experiment_id = any(%s::text[])
              order by decided_at desc
-        """, (hyp_ids,))
+        """, (hyp_ids, experiment_ids))
+        exact = set(experiment_ids)
         return [{"decision": r[0], "lesson_codes": list(r[1] or []),
-                 "trial_family_id": r[2]} for r in cur.fetchall()]
+                 "trial_family_id": r[2],
+                 "match_scope": ("AST_EXACT" if r[3] in exact
+                                 else "EDGE_UNIVERSE")}
+                for r in cur.fetchall()]
 
 
 _SQL_INSERT = """
@@ -533,9 +876,10 @@ insert into research.experiment_proposals
    counterparty, competing_explanation, competing_explanation_codes,
    skeptic_sign, edge_type, universe_key, label, baseline,
    falsification_tests, data_requirements, suggested_params,
+   research_lane, semantic_plan,
    trial_budget, prior_check, source_reported_effect,
    planner_prompt_version, skeptic_prompt_version, status)
-values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PUBLISHED')
+values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'PUBLISHED')
 on conflict (proposal_id) do nothing
 returning proposal_id
 """
@@ -553,7 +897,8 @@ def persist(conn, proposals) -> tuple[int, int]:
             p.edge_type, p.universe_key, p.label, p.baseline,
             list(p.falsification_tests),
             json.dumps(p.data_requirements.model_dump(mode="json")),
-            json.dumps(p.suggested_params), p.trial_budget,
+            json.dumps(p.suggested_params), p.research_lane.value,
+            json.dumps(p.semantic_plan), p.trial_budget,
             json.dumps(p.prior_check.model_dump(mode="json")),
             json.dumps(p.source_reported_effect),
             getattr(p, "_planner_prompt", ""), getattr(p, "_skeptic_prompt", "")))
@@ -566,16 +911,16 @@ def persist(conn, proposals) -> tuple[int, int]:
 
 
 # ── 자체 점검 ──────────────────────────────────────────────────────────────
-_PLANNER = """TITLE: 복권형 수익 회피
+_PLANNER = """TITLE: 주문흐름 불균형 반전
 LEAD_IDS: lead_aaa
-ECONOMIC_RATIONALE: 복권형 payoff 선호로 극단 상승 종목이 과대평가되고,
-그 대가로 다음 달 수익이 낮다.
-COUNTERPARTY: 분산이 덜 된 개인이 복권형 종목에 프리미엄을 지불한다.
-EDGE_TYPE: mean_reversion
+ECONOMIC_RATIONALE: 긴급 매수 주문의 불균형을 유동성 공급자가 흡수한 뒤 가격 압력이 되돌아온다.
+COUNTERPARTY: 즉시 체결을 위해 스프레드와 가격충격을 지불하는 긴급 주문자.
+EDGE_TYPE: liquidity_shock_reversal
 UNIVERSE_KEY: krx_all
 FALSIFICATION_TESTS: 국면 분해, 비용 민감도
-DATA_TABLES: market_bars
-MIN_HISTORY_DAYS: 400
+DATA_TABLES: market_bars, microstructure_features
+MIN_HISTORY_DAYS: 58
+SUGGESTED_PARAMS: {"horizon_days":2,"top_n":20,"signal_expr":{"op":"neg","arg":{"op":"ts_mean","field":"order_flow_imbalance","n":3}}}
 SOURCE_REPORTED_EFFECT: {"monthly_alpha_pct": -1.0, "market": "US"}
 
 TITLE: 필수 항목 빠진 기획
@@ -583,7 +928,7 @@ LEAD_IDS: lead_bbb
 ECONOMIC_RATIONALE: 뭔가 된다
 """
 
-_SKEPTIC = """TITLE: 복권형 수익 회피
+_SKEPTIC = """TITLE: 주문흐름 불균형 반전
 COMPETING_EXPLANATION: 소형·저유동성 종목에 몰려 유동성 프리미엄일 수 있다.
 COMPETING_CODES: LIQUIDITY_PREMIUM, DATA_MINING
 VERDICT: PROCEED
@@ -616,8 +961,9 @@ def _selfcheck() -> int:
     check("경쟁 설명 코드 2개", len(prop.competing_explanation_codes) == 2)
     check("회의론자 서명", prop.skeptic_sign == "run-skeptic")
     # 계약이 tables 를 튜플로 정규화한다(불변 - 발행 뒤 바뀌면 안 된다).
-    check("데이터 요구", tuple(prop.data_requirements.tables) == ("market_bars",)
-          and prop.data_requirements.min_history_days == 400)
+    check("데이터 요구", tuple(prop.data_requirements.tables) ==
+          ("market_bars", "microstructure_features")
+          and prop.data_requirements.min_history_days == 58)
     check("소스 수치 분리 보관",
           prop.source_reported_effect.get("monthly_alpha_pct") == -1.0)
 
@@ -639,10 +985,8 @@ def _selfcheck() -> int:
     check("반대 가설 없으면 반려",
           any("반대 가설" in x.reason for x in r4.rejected))
 
-    # ▶ 자기서명 경로 (2026-08-11). 회의론자 카드를 없앤 대신 기획자가
-    #   COMPETING_EXPLANATION 을 직접 쓰면 접수한다. **다만 서명에 `#self` 가
-    #   박혀 원장에서 독립 검토와 구분된다** - 승격 판정 때 같은 무게로 읽으면
-    #   안 되므로, 표식이 사라지면 이 점검이 죽는다.
+    # 자기서명은 독립 검토가 아니다. 기획자가 경쟁 설명을 직접 썼더라도
+    # 별도 회의론자 블록과 실행 ID가 없으면 접수하지 않는다.
     #   `_PLANNER` 는 블록이 둘이라(뒤엣것은 일부러 불완전) 끝에 덧붙이면 그
     #   불완전한 블록에 들어간다 - 첫 블록만 잘라 쓴다.
     _first = planner.split("TITLE:")[1]
@@ -651,9 +995,9 @@ def _selfcheck() -> int:
                      " 보상일 수 있다\nCOMPETING_CODES: DATA_MINING\n")
     r4b = intake(self_signed, "", case_id="c", planner_run="p", skeptic_run="s",
                  leads=leads)
-    check("자기서명 접수됨", bool(r4b.proposals))
-    check("자기서명 표식 남음",
-          bool(r4b.proposals) and r4b.proposals[0][0].skeptic_sign.endswith("#self"))
+    check("자기서명 접수 차단", not r4b.proposals)
+    check("독립 worker 요구를 설명",
+          any("독립 worker" in x.reason for x in r4b.rejected))
 
     # 근거 리드가 DB 에 없으면 게이트가 막는다
     r5 = intake(planner, _SKEPTIC, case_id="c", planner_run="p",
@@ -665,6 +1009,67 @@ def _selfcheck() -> int:
     check("기획안 id 결정론",
           proposal_id_for(["a", "b"], "MOMENTUM", "krx_all")
           == proposal_id_for(["b", "a"], "momentum", "krx_all"))
+    rejected_material = {
+        "suggested_params": {"max_drawdown_stop": 0.35, "top_n": 20},
+        "trial_budget": 5,
+    }
+    repaired_material = {
+        "suggested_params": {"max_drawdown_stop": -0.35, "top_n": 20},
+        "trial_budget": 5,
+    }
+    check("교정 사전등록은 새 id",
+          proposal_id_for(["a"], "momentum", "krx_all",
+                          material=rejected_material)
+          != proposal_id_for(["a"], "momentum", "krx_all",
+                             material=repaired_material))
+    lesson_material = {
+        **repaired_material,
+        "lessons_addressed": {"OVERFIT_PBO": "새 상태 조건을 사전등록한다"},
+    }
+    check("교훈 대응 교정은 새 id",
+          proposal_id_for(["a"], "momentum", "krx_all",
+                          material=repaired_material)
+          != proposal_id_for(["a"], "momentum", "krx_all",
+                             material=lesson_material))
+    sidecar_a = {**repaired_material,
+                 "suggested_params": {
+                     **repaired_material["suggested_params"],
+                     "screening_population": [{"ast_fingerprint": "a"}],
+                     "screening_cohort_version": "cohort-a"}}
+    sidecar_b = {**repaired_material,
+                 "suggested_params": {
+                     **repaired_material["suggested_params"],
+                     "screening_population": [{"ast_fingerprint": "b"}],
+                     "screening_cohort_version": "cohort-b"}}
+    check("sidecar 변화는 id 불변",
+          proposal_id_for(["a"], "momentum", "krx_all", material=sidecar_a)
+          == proposal_id_for(["a"], "momentum", "krx_all", material=sidecar_b))
+    unordered_a = {
+        **repaired_material,
+        "falsification_tests": ["cost", "regime"],
+        "data_requirements": {"tables": ["market_ticks", "market_quotes"]},
+        "semantic_plan": {"context": ["OPEN", "TIGHT_SPREAD"],
+                          "qualities": ["PERSISTENCE", "STATE_CONDITIONAL"]},
+    }
+    unordered_b = {
+        **repaired_material,
+        "falsification_tests": ["regime", "cost"],
+        "data_requirements": {"tables": ["market_quotes", "market_ticks"]},
+        "semantic_plan": {"context": ["TIGHT_SPREAD", "OPEN"],
+                          "qualities": ["STATE_CONDITIONAL", "PERSISTENCE"]},
+    }
+    check("집합 순서는 id 불변",
+          proposal_id_for(["a"], "momentum", "krx_all", material=unordered_a)
+          == proposal_id_for(["a"], "momentum", "krx_all", material=unordered_b))
+    check("intraday cohort version is not a universe",
+          _canonical_universe_key(INTRADAY_SCREENING_COHORT_VERSION,
+                                  "INTRADAY_EVENT") == "krx_all"
+          and _canonical_universe_key("unknown-intraday-universe",
+                                      "INTRADAY_EVENT")
+          == "unknown-intraday-universe"
+          and _canonical_universe_key(INTRADAY_SCREENING_COHORT_VERSION,
+                                      "DAILY_CROSS_SECTIONAL")
+          == INTRADAY_SCREENING_COHORT_VERSION)
 
     # ▶ **접수가 계열 이력을 읽는다** (2026-08-13 실측 사고)
     #   `harvest` 가 `past_outcomes` 를 안 넘겨서 모든 기획안이 "이 계열은
@@ -682,7 +1087,7 @@ def _selfcheck() -> int:
     check("접수가 기획안마다 계열 이력을 읽는다", bool(seen))
     # 좌표가 그대로 넘어가야 남의 계열 이력을 읽는 일이 없다
     check("좌표가 조회에 전달된다",
-          any((b.get("EDGE_TYPE") or "").strip() == "mean_reversion"
+          any((b.get("EDGE_TYPE") or "").strip() == "liquidity_shock_reversal"
               and (b.get("UNIVERSE_KEY") or "").strip() == "krx_all"
               for b in seen))
     # 기각 이력이 있는데 대응이 없으면 **접수에서** 걸려야 한다(승격까지 가면
@@ -712,13 +1117,13 @@ def _selfcheck() -> int:
           bool(r8.proposals) and r8.proposals[0][0].skeptic_sign == "run-skeptic")
 
     # 하나:하나면 제목이 아주 달라도 모호하지 않다
-    sk_other = _SKEPTIC.replace("TITLE: 복권형 수익 회피", "TITLE: 전혀 다른 제목")
+    sk_other = _SKEPTIC.replace("TITLE: 주문흐름 불균형 반전", "TITLE: 전혀 다른 제목")
     r9 = intake(planner, sk_other, case_id="c-9", planner_run="run-plan",
                 skeptic_run="run-skeptic", leads=leads)
     check("1:1 이면 제목이 달라도 짝짓는다", len(r9.proposals) == 1)
 
     # **여럿일 때는 위치로 잇지 않는다** - 남의 반대 가설로 통과시키면 안 된다
-    two_sk = sk_other + "\n" + _SKEPTIC.replace("TITLE: 복권형 수익 회피",
+    two_sk = sk_other + "\n" + _SKEPTIC.replace("TITLE: 주문흐름 불균형 반전",
                                                 "TITLE: 또 다른 제목")
     r10 = intake(planner, two_sk, case_id="c-10", planner_run="run-plan",
                  skeptic_run="run-skeptic", leads=leads)
@@ -729,7 +1134,7 @@ def _selfcheck() -> int:
     for f in fails:
         if f:
             print(f"  FAIL {f}")
-    total = 22
+    total = 26
     print(f"proposal_intake 자체 점검: {total - len([x for x in fails if x])}/{total} 통과")
     return 1 if [x for x in fails if x] else 0
 
@@ -899,6 +1304,17 @@ def _check_agent_can_answer_the_gate():
         "BEAR_FRAGILE=낙폭 정지를 -0.28 로 건다")
     assert set(got) == {"SINGLE_REGIME_ONLY", "BEAR_FRAGILE"}, got
     assert got["SINGLE_REGIME_ONLY"] == "국면 필터를 빼고, 전 기간을 쓴다", got
+    got2 = _lessons_addressed(
+        "BASELINE_NOT_BEATEN=공개 기준선을 OOS 비용 후 이긴다; "
+        "UNDERPOWERED_DATA=워밍업을 6일로 고정해 4창을 확보한다")
+    assert set(got2) == {"BASELINE_NOT_BEATEN", "UNDERPOWERED_DATA"}, got2
+    repeated = parse_blocks(
+        "TITLE: t\nLESSONS_ADDRESSED: BASELINE_NOT_BEATEN=기준선 대조\n"
+        "LESSONS_ADDRESSED: UNDERPOWERED_DATA=4창 확보\n", PLANNER_KEYS)
+    assert _lessons_addressed(repeated[0]["LESSONS_ADDRESSED"]) == {
+        "BASELINE_NOT_BEATEN": "기준선 대조",
+        "UNDERPOWERED_DATA": "4창 확보",
+    }, repeated
     assert _lessons_addressed("") == {} and _lessons_addressed("아무말") == {}
 
     # ③ 이력은 원장에서 오고 대응은 에이전트에게서 온다
@@ -929,6 +1345,147 @@ def _check_agent_can_answer_the_gate():
     print("  에이전트가 게이트에 답할 수 있다  OK")
 
 
+def _check_lane_isolated_history_lookup():
+    """Daily outcomes must not spend an intraday family's trial budget."""
+    class Cursor:
+        def __init__(self):
+            self.calls = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, sql, params):
+            self.calls.append((sql, params))
+
+        def fetchall(self):
+            sql, params = self.calls[-1]
+            if "from quant.hypotheses" in sql:
+                assert "= 'INTRADAY_EVENT'" in sql, sql
+                return []
+            if "from quant.experiments" in sql:
+                assert "config->'intraday_signal_expr'" in sql, sql
+                assert len(params) == 1, params
+                return []
+            raise AssertionError(sql)
+
+    class Conn:
+        def __init__(self):
+            self.cur = Cursor()
+
+        def cursor(self):
+            return self.cur
+
+    rows = load_past_outcomes(
+        Conn(), "order_flow_imbalance", "krx_all",
+        signal_expr={"op": "field", "field": "queue_imbalance_l1"},
+        research_lane="INTRADAY_EVENT")
+    assert rows == []
+
+
+def _check_intraday_screening_cohort_is_sourced_and_non_promoting():
+    """Linked current-contract formulas become exact, non-consumed sidecars."""
+    import inspect
+
+    from contracts.factory_contracts import SourceRef, lead_id_for
+    from publish_gate import check_intraday_screening_population
+
+    assert "p.status in ('PUBLISHED','ACCEPTED')" in inspect.getsource(load_leads), \
+        "REJECTED primary lead를 sidecar pool에서도 영구 소비하면 교정 재제안이 막힌다"
+    assert ("proposal_review_outcomes" in inspect.getsource(load_leads)
+            and "r.verdict = 'STOP'" in inspect.getsource(load_leads)), \
+        "독립 스켑틱 STOP primary를 sidecar 후보로 다시 쓰면 안 된다"
+
+    now = datetime(2026, 8, 16, tzinfo=timezone.utc)
+    plan = {
+        "event": "MICROPRICE_DISLOCATION", "context": ["ALL"],
+        "qualities": ["LEVEL"], "direction": "REVERT",
+        "output": "TAKER_NET_PNL", "execution": "TAKER",
+        "horizon_seconds": 5,
+    }
+    raw_microprice = {"op": "field", "field": "microprice_offset_bps"}
+    primary_expr = {"op": "rolling_mean", "seconds": 10,
+                    "arg": raw_microprice}
+    side_expr = {"op": "rolling_mean", "seconds": 30,
+                 "arg": primary_expr}
+
+    def make_lead(label: str, expr: dict) -> MethodologyLeadV1:
+        ref = SourceRef(url=f"https://example.com/{label}", title=label,
+                        accessed_at=now, excerpt="bounded excerpt")
+        return MethodologyLeadV1(
+            lead_id=lead_id_for([ref]), case_id="cohort-check",
+            scout_lens="ACADEMIC", source_type="PAPER", as_known_at=now,
+            refs=(ref,), claimed_edge=label, stated_mechanism="mechanism",
+            ast_contract={
+                "formula_discovery_version": "formula-discovery-v5",
+                "formula_contract_complete": True,
+                "alpha_candidate_eligible": True,
+                "research_lane": "INTRADAY_EVENT",
+                "candidate_signal_expr": expr, "semantic_plan": plan,
+                "formula_thesis": {
+                    "target": "TAKER_NET_PNL",
+                    "functional_form": "MONOTONE",
+                    "expected_sign": "STATE_DEPENDENT",
+                    "coefficient_policy": "PREREGISTERED_NO_OOS_FIT",
+                    "decision_rule": "PREDICTED_MARKOUT_CLEARS_COST",
+                    "terms": {"microprice_offset_bps": "PRESSURE"},
+                    "identification": (
+                        "Microprice displacement must predict positive net markout "
+                        "after the preregistered execution cost hurdle."),
+                },
+                "evolution_role": "SEED",
+            })
+
+    primary_lead = make_lead("primary", primary_expr)
+    side_lead = make_lead("side", side_expr)
+    leads = {row.lead_id: row for row in (primary_lead, side_lead)}
+    proposal = ExperimentProposalV1(
+        proposal_id="before", case_id="cohort-check", as_known_at=now,
+        # Reproduce the live failure mode: the planner linked only its primary,
+        # while the intake loader supplied another unused current-contract formula.
+        lead_ids=(primary_lead.lead_id,),
+        economic_rationale="quote dislocation meets urgent liquidity demand",
+        counterparty="urgent liquidity taker",
+        competing_explanation="data mining",
+        competing_explanation_codes=(CompetingExplanation.DATA_MINING,),
+        skeptic_sign="independent-worker", edge_type="order_flow_imbalance",
+        universe_key="krx_all", falsification_tests=("net <= 0",),
+        data_requirements=DataRequirement(
+            tables=("market_quotes", "market_ticks"), min_history_days=60),
+        suggested_params={
+            "intraday_signal_expr": primary_expr, "horizon_seconds": 5,
+            "execution": "TAKER",
+            "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST"},
+        research_lane="INTRADAY_EVENT", semantic_plan=plan)
+    attached = _attach_intraday_screening_cohort(proposal, leads)
+    assert attached.lead_ids == (primary_lead.lead_id,)
+    population = attached.suggested_params["screening_population"]
+    assert len(population) == 2
+    assert population[0]["source_lead_ids"] == [side_lead.lead_id]
+    assert population[1]["candidate_role"] == "STRUCTURAL_ABLATION"
+    assert population[1]["ablation_operator"] == "REMOVE_TEMPORAL_TRANSFORM"
+    assert population[1]["source_lead_ids"] == [primary_lead.lead_id]
+    assert check_intraday_screening_population(attached, leads) == []
+
+    corrupt = dict(population[0])
+    corrupt["ast_fingerprint"] = "wrong"
+    tampered = attached.model_copy(update={
+        "suggested_params": {**attached.suggested_params,
+                             "screening_population": [corrupt]}})
+    assert any("fingerprint" in error for error in
+               check_intraday_screening_population(tampered, leads))
+
+    false_control = dict(population[1])
+    false_control["ablation_operator"] = "FABRICATED_CONTROL"
+    tampered_control = attached.model_copy(update={
+        "suggested_params": {**attached.suggested_params,
+                             "screening_population": [false_control]}})
+    assert any("does not match" in error for error in
+               check_intraday_screening_population(tampered_control, leads))
+
+
 if __name__ == "__main__":
     if "--check" in sys.argv:
         if hasattr(sys.stdout, "reconfigure"):
@@ -939,5 +1496,8 @@ if __name__ == "__main__":
         _check_trailing_prose_does_not_kill_codes()
         print("  코드 뒤 산문이 기획안을 안 죽인다  OK")
         _check_agent_can_answer_the_gate()
+        _check_lane_isolated_history_lookup()
+        _check_intraday_screening_cohort_is_sourced_and_non_promoting()
+        print("  공유 재생 cohort 출처·비승격 계약  OK")
         raise SystemExit(0)
     raise SystemExit(_cli(sys.argv[1:]))

@@ -34,6 +34,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import re
 import subprocess
@@ -55,7 +57,7 @@ MODULE_VERSION = "factory-autopilot-v1"
 
 # 카드를 만들 때 쓰는 CLI 컨테이너. 어느 프로필이든 같은 보드를 본다
 # (/opt/kanban 이 8개 컨테이너에 공유 마운트다).
-KANBAN_CLI_CONTAINER = os.getenv("KANBAN_CLI_CONTAINER", "hedgefund-qa-hermes")
+KANBAN_CLI_CONTAINER = os.getenv("KANBAN_CLI_CONTAINER", "hedgefund-kanban-dispatcher")
 
 RESEARCH_ASSIGNEE = "research-department"
 QUANT_ASSIGNEE = "quant-backtest-department"
@@ -92,12 +94,20 @@ ECONOMIC_RATIONALE: (왜 이 초과수익이 존재할 수 있는가 - 메커니
 COUNTERPARTY: (누가 반대편에서 손해를 보는가. 이게 없으면 공짜 점심 주장이다)
 EDGE_TYPE: (아래 통제 어휘 중 하나)
 UNIVERSE_KEY: (아래 통제 어휘 중 하나)
+RESEARCH_LANE: DAILY_CROSS_SECTIONAL 또는 INTRADAY_EVENT
+SEMANTIC_PLAN: (Event/Context/Qualities/Direction/Output JSON. intraday는 필수.
+    예: {"event":"ORDER_FLOW","context":["TIGHT_SPREAD"],
+    "qualities":["PERSISTENCE","STATE_CONDITIONAL"],"direction":"FOLLOW",
+    "output":"TAKER_NET_PNL","execution":"TAKER","horizon_seconds":30}
+    passive 정확한 쌍은 output="PASSIVE_FILL_ADJUSTED_PNL",
+    execution="PASSIVE_FIFO_LOWER_BOUND"다. PASSIVE/PASSIVE_FIFO 별칭은 금지.)
 LABEL: forward_return
 BASELINE: equal_weight_buy_and_hold
 FALSIFICATION_TESTS: (무엇이 나오면 기각인가. 쉼표로 나열)
-DATA_TABLES: (필요한 원천 테이블. 파생지표는 실행면이 계산하므로 적지 마라)
-MIN_HISTORY_DAYS: (정수)
-SUGGESTED_PARAMS: {"horizon_days": 20, "top_n": 20}
+DATA_TABLES: market_bars, microstructure_features
+MIN_HISTORY_DAYS: (현재 표본 길이가 아니라 신호·AST·위험관리 계산에 실제로 필요한
+    워밍업 거래일. signal_expr의 최대 n, vol_lookback_days 등을 포함한 최댓값)
+SUGGESTED_PARAMS: {"horizon_days": 2, "top_n": 20, "signal_expr": {미시구조 필드를 포함한 AST}}
 SOURCE_REPORTED_EFFECT: {"sharpe": null}
 TRIAL_BUDGET: 5
 COMPETING_EXPLANATION: (이 결과를 알파 말고 무엇으로 설명할 수 있는가 - 구체적으로)
@@ -120,6 +130,62 @@ LESSONS_ADDRESSED: (이 계열이 전에 기각됐다면 **교훈코드=이번�
 COMPETING_EXPLANATION 은 **결과를 보기 전에** 적는 것이다. 이걸 미리 안 적으면
 나중에 어떤 결과가 나와도 설명이 붙는다 - 그 순간 실험은 검증이 아니라 서사가
 된다. '과적합일 수 있다' 같은 일반론은 아무것도 막지 못하므로 구체적으로 써라."""
+
+# Intraday proposals use a different clock and therefore a different AST.  Keeping
+# this next to the planner contract prevents the agent from putting second-based
+# windows into the daily ``signal_expr`` field.
+INTRADAY_PLANNER_NOTE = """
+UNIVERSE_KEY must be exactly krx_all for every INTRADAY_EVENT proposal.
+intraday-screening-cohort-v3 is a screening_cohort_version attached by intake;
+it is not a universe and must never be written in UNIVERSE_KEY.
+[INTRADAY_EVENT 추가 계약]
+DATA_TABLES: market_quotes, market_ticks
+MIN_HISTORY_DAYS: 10 이상 (짧아도 실행은 한다. 단, 60 KRX 세션 미만은
+  UNDERPOWERED/HOLD이며 검증 알파로 승격하지 않는다)
+SUGGESTED_PARAMS JSON 필수 키:
+  intraday_signal_expr, horizon_seconds, sample_interval_seconds,
+  feature_lookback_seconds, order_latency_ms, execution, entry_policy,
+  coefficient_policy
+Execution/output is an exact controlled pair:
+  TAKER_NET_PNL -> TAKER
+  PASSIVE_FILL_ADJUSTED_PNL -> PASSIVE_FIFO_LOWER_BOUND
+For the passive pair set execution=PASSIVE_FIFO_LOWER_BOUND and
+entry_policy=PREDICTED_MARKOUT_CLEARS_COST. PASSIVE and PASSIVE_FIFO are invalid
+aliases. A passive revision must also change the economic AST (for example a
+spread/depth/adverse-selection state gate); relabeling the identical formula
+does not create a new candidate.
+Net-PnL proposals must set entry_policy=PREDICTED_MARKOUT_CLEARS_COST. Prefer
+coefficient_policy=STRUCTURE_ONLY: the AST expresses a signed economic score and
+the runtime fits exactly one positive, origin-anchored, shrunken score-to-BPS
+coefficient on calibration sessions strictly before OOS. Zero must remain zero,
+and a negative calibration relation is a failed hypothesis, never an automatic
+sign flip. Use FIXED_FROM_SOURCE or PREREGISTERED_NO_OOS_FIT only when the BPS
+scale is genuinely identified before the experiment. Never multiply by spread or
+volatility merely to manufacture BPS units. The evaluator enters only when the
+locked predicted BPS exceeds the current spread, governed round-trip charges,
+and minimum_predicted_edge_bps.
+position_mode은 현재 LONG_ONLY만 허용한다. 대차 가능 여부·차입료·공매도 체결 제약의
+point-in-time 원천이 생기기 전에는 음수 신호를 숏으로 가장하지 않고 abstain한다.
+비용 기본값은 2026 상장주식 거래세와 온라인 위탁수수료를 보수적으로 합친
+fee_bps_per_side=11.5, maker_fee_bps_per_side=11.5다. 10bp 미만은 Gate 0에서
+거부한다. 더 높은 실제 계좌 비용을 알면 반드시 그 값으로 올려 적는다.
+유니버스는 `krx_all` 보정 세션에 인과적으로 quote와 trade가 함께 수집된
+전 종목이다. `instrument_count`로 유동성 상위 일부만 자르지 않는다. 실행기는
+메모리를 제한하기 위해 내부적으로 instrument shard를 순회하지만, 모든 shard는
+동일한 실험ㆍtrialㆍ다중검정 장부에 합쳐진다.
+intraday_signal_expr 연산자:
+  field; lag/rolling_mean/rolling_std/rolling_sum/delta/ewma/rolling_zscore
+  (모두 seconds 명시); neg/abs/sign/log1p_abs/sqrt_abs;
+  add/sub/mul/div/min/max/gt/lt/and/or/where
+필드:
+  queue_imbalance_l1, queue_imbalance_l10, microprice_offset_bps,
+  trade_flow_imbalance, quote_event_ofi, normalized_quote_ofi, spread_bps,
+  bid_depth_l1, ask_depth_l1, book_depth_l1, book_depth_l10,
+  trade_count, quote_count, trade_intensity, realized_volatility_bps, quote_age_ms
+상수는 {"const":2,"unit":"BPS"}처럼 단위를 쓴다. 서로 다른 단위의 add/sub,
+미래시각, 3600초 초과 창은 접수에서 거부된다. 공개 논문 수식을 그대로 복제하지
+말고 상태조건·L1/L10 차이·다중시간창·실패모드 역전 중 메커니즘에 맞는 변형을 낸다.
+"""
 
 SKEPTIC_FORMAT = """\
 [산출 형식 - 이대로 쓰지 않으면 한 글자도 접수되지 않는다]
@@ -157,10 +223,9 @@ select trial_family_id, count(*), max(trial_number)
 
 def _conn():
     from source_registry import load_project_env   # noqa: PLC0415
+    from db_writer import connect                  # noqa: PLC0415
 
-    import psycopg2                                # noqa: PLC0415
-
-    return psycopg2.connect(load_project_env()["DATABASE_URL"], connect_timeout=20)
+    return connect(load_project_env()["DATABASE_URL"], connect_timeout=20)
 
 
 # ▶ **안 쓴 리드를 맨 앞에 둔다** (2026-08-12 실측)
@@ -175,13 +240,245 @@ def _conn():
 _SQL_LEADS = """
 select l.lead_id, l.scout_lens, l.claimed_edge, l.stated_mechanism,
        l.testability, l.status,
-       exists (select 1 from research.experiment_proposals p
-                where l.lead_id = any(p.lead_ids)) as used
+       (exists (select 1 from research.experiment_proposals p
+                 where l.lead_id = any(p.lead_ids)
+                   and p.status in ('PUBLISHED','ACCEPTED'))
+        or exists (select 1 from research.proposal_review_outcomes r
+                    where r.verdict = 'STOP'
+                      and l.lead_id = any(r.lead_ids))) as used,
+       coalesce(l.ast_contract->>'ast_readiness', 'LEGACY') as ast_readiness,
+       coalesce(l.ast_contract->'observables', '[]'::jsonb) as observables,
+       l.ast_contract->'candidate_signal_expr' as candidate_signal_expr,
+       coalesce(l.ast_contract->>'derivation_mode', 'UNCLASSIFIED') as derivation_mode,
+       coalesce(l.ast_contract->'derivation_transforms', '[]'::jsonb) as derivation_transforms,
+       l.ast_contract->>'candidate_vs_source_similarity' as source_similarity,
+       coalesce(l.ast_contract->>'novelty_rationale', '') as novelty_rationale,
+       coalesce(l.ast_contract->>'research_lane', 'DAILY_CROSS_SECTIONAL') as research_lane,
+       coalesce(l.ast_contract->'semantic_plan', '{}'::jsonb) as semantic_plan,
+       coalesce((l.ast_contract->>'formula_contract_complete')::boolean, false),
+       l.ast_contract->'formula_thesis'
   from research.methodology_leads l
- where l.status in ('COMPLETE', 'PARTIAL')
- order by used asc, (l.status = 'COMPLETE') desc, l.created_at desc
- limit %s
+ where l.status = 'COMPLETE' and l.testability = 'RULE_EXPRESSIBLE'
+   and l.ast_contract->>'ast_readiness' = 'AST_READY'
+   and l.ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
+   and coalesce((l.ast_contract->>'alpha_candidate_eligible')::boolean, false)
+   and (coalesce(l.ast_contract->>'research_lane',
+                 'DAILY_CROSS_SECTIONAL') <> 'INTRADAY_EVENT'
+        or l.ast_contract->>'formula_discovery_version' =
+           'formula-discovery-v5')
+order by used asc,
+         case
+           when coalesce(l.ast_contract->>'research_lane',
+                         'DAILY_CROSS_SECTIONAL') = 'INTRADAY_EVENT'
+                and coalesce(
+                      (l.ast_contract->>'formula_contract_complete')::boolean,
+                      false)
+             then 0
+           when coalesce(l.ast_contract->>'research_lane',
+                         'DAILY_CROSS_SECTIONAL') = 'INTRADAY_EVENT'
+             then 1
+           else 2
+         end,
+         l.created_at desc
+limit %s
 """
+
+
+def _ast_scout_contract() -> str:
+    """Expose the executable search space to scouts from the runtime grammar itself."""
+    sys.path.insert(0, str(_ROOT / "departments" / "04-quant-backtest" / "pipeline"))
+    from alpha_ast import (  # noqa: PLC0415
+        ALL_OPS, FIELDS, MAX_DEPTH, MAX_NODES, MICRO_FIELDS,
+    )
+    from intraday_alpha_ast import (  # noqa: PLC0415
+        ALL_OPS as INTRADAY_OPS, FIELDS as INTRADAY_FIELDS,
+        MAX_DEPTH as INTRADAY_MAX_DEPTH, MAX_NODES as INTRADAY_MAX_NODES,
+    )
+    from alpha_semantics import CONTEXT_FIELDS, EVENT_FIELDS  # noqa: PLC0415
+    event_fields = {key: sorted(value) for key, value in sorted(EVENT_FIELDS.items())}
+    context_fields = {key: sorted(value)
+                      for key, value in sorted(CONTEXT_FIELDS.items())}
+    return "\n".join([
+        "[AST-ready literature contract]",
+        "  Every submitted lead must declare READINESS as exactly one of:",
+        "  - AST_READY: include exact OBSERVABLES and a valid CANDIDATE_SIGNAL_EXPR JSON AST.",
+        "  - DATA_BLOCKED: include MISSING_DATA; preserve it for acquisition, do not proxy it.",
+        "  - SEMANTIC_MISMATCH: include MAPPING_LOSS; do not substitute a different factor.",
+        "  PUBLICATION IS A BASELINE, NOT AN ALPHA CANDIDATE. Every AST_READY lead also",
+        "  declares one deterministic derivation mode:",
+        "  - DIRECT_REPLICATION: SOURCE_BASELINE_EXPR equals CANDIDATE_SIGNAL_EXPR. It is",
+        "    retained as a control but cannot be published as a new alpha candidate.",
+        "  - MECHANISM_MUTATION: include SOURCE_BASELINE_EXPR, DERIVATION_TRANSFORMS and",
+        "    NOVELTY_RATIONALE. Exact reuse and window/constant-only tuning are rejected.",
+        "  - CROSS_DOMAIN_TRANSFER: include MARKET_STRUCTURE_TRANSFER in",
+        "    DERIVATION_TRANSFORMS and explain the mapping in NOVELTY_RATIONALE.",
+        "    Use CROSS_DOMAIN_TRANSFER only for a genuinely non-finance source. A market-",
+        "    microstructure paper stays DIRECT_REPLICATION or MECHANISM_MUTATION even when",
+        "    its venue or clock differs. Prefer empirical event-time evidence that links",
+        "    an observable directly to subsequent midprice/markout over a purely theoretical",
+        "    model; retain theory as a control or blocked lead when it cannot support the",
+        "    claimed executable return target.",
+        "  Allowed transforms: STATE_CONDITION, CLOCK_CHANGE, BOOK_DEPTH_CHANGE,",
+        "  MECHANISM_INTERACTION, RESIDUALIZE_PUBLIC_SIGNAL, FAILURE_MODE_INVERSION,",
+        "  MARKET_STRUCTURE_TRANSFER, TARGET_CHANGE, CROSS_SCALE_DISAGREEMENT,",
+        "  L1_L10_DIVERGENCE, EXECUTION_AWARE.",
+        "  EVOLUTIONARY SEARCH CONTRACT: do not return one favorite formula. Produce a",
+        "  population of economically different ASTs, then let the deterministic archive",
+        "  retain one elite per Event/Context/Direction/Execution/Horizon niche. A child",
+        "  of a tested or queued formula must include PARENT_SIGNAL_EXPR, controlled",
+        "  EVOLUTION_OPERATORS, a falsifiable EXPECTED_INCREMENT, and ABLATIONS separated",
+        "  by | (or a JSON list). Allowed evolution operators are STATE_CONDITION,",
+        "  FAILURE_MODE_INVERSION, RESIDUALIZE_PUBLIC_SIGNAL, CROSS_SCALE_DISAGREEMENT,",
+        "  MECHANISM_INTERACTION, CLOCK_CHANGE, L1_L10_DIVERGENCE, EXECUTION_AWARE,",
+        "  TARGET_CHANGE, MARKET_STRUCTURE_TRANSFER. Exact and parameter-only children",
+        "  are rejected. An unrelated new mechanism is a seed and omits all parent fields.",
+        "  FINANCIAL-MATHEMATICS CONTRACT: the LLM proposes a short equation skeleton and",
+        "  its economic prior; deterministic code validates grammar, dimensions, semantic",
+        "  alignment, complexity, and the claimed functional form before any backtest.",
+        "  Every INTRADAY_EVENT AST_READY lead must include FORMULA_THESIS JSON with exact",
+        "  keys target, functional_form, expected_sign, coefficient_policy, decision_rule,",
+        "  terms, and",
+        "  identification. target must equal SEMANTIC_PLAN.output. functional_form is one",
+        "  of MONOTONE, REVERSAL, INTERACTION, STATE_CONDITIONAL, CROSS_SCALE,",
+        "  DEPTH_DIVERGENCE; expected_sign is POSITIVE, NEGATIVE, or STATE_DEPENDENT;",
+        "  coefficient_policy is FIXED_FROM_SOURCE, PREREGISTERED_NO_OOS_FIT, or",
+        "  STRUCTURE_ONLY. Net-PnL decision_rule must be",
+        "  PREDICTED_MARKOUT_CLEARS_COST. STRUCTURE_ONLY is preferred and may emit a",
+        "  signed numeric score in its natural unit; deterministic code maps it to BPS",
+        "  with one positive, origin-anchored, shrunken coefficient fitted only on",
+        "  calibration sessions preceding OOS. Fixed/preregistered policies must emit",
+        "  BPS directly. Never attach spread/volatility only to satisfy units. The runtime",
+        "  abstains unless locked predicted markout clears live spread, statutory round-trip",
+        "  charges, and the preregistered safety margin. A dimensionless OFI sign is a",
+        "  feature, not an executable PnL equation. terms maps every AST field exactly once",
+        "  to PRESSURE, LIQUIDITY,",
+        "  STATE, SCALE, VOLATILITY, FRESHNESS, ACTIVITY, or CAPACITY. identification states",
+        "  a falsifiable conditional prediction. The AST must visibly implement the claimed",
+        "  form (for example where for STATE_CONDITIONAL and two clocks for CROSS_SCALE).",
+        "  Do not fit constants on OOS data. Prefer compact skeletons with explicit ablations;",
+        "  the evaluator, not the prose or LLM confidence, decides empirical survival.",
+        "  STRUCTURE-FIRST SKELETONS (adapt the mechanism; do not copy mechanically):",
+        '  SCORE_OFI={"op":"rolling_mean","seconds":30,"arg":{"op":"field",'
+        '"field":"normalized_quote_ofi"}}',
+        '  SCORE_DEPTH_DIVERGENCE={"op":"sub","args":[{"op":"field",'
+        '"field":"queue_imbalance_l1"},{"op":"field","field":'
+        '"queue_imbalance_l10"}]}',
+        '  BPS_DIRECT={"op":"field","field":"microprice_offset_bps"}',
+        '  BPS_SCALED={"op":"mul","args":[{"op":"div","args":['
+        '{"op":"field","field":"quote_event_ofi"},{"op":"field","field":'
+        '"book_depth_l1"}]},{"op":"field","field":"realized_volatility_bps"}]}',
+        '  BPS_STATE={"op":"where","condition":{"op":"lt","args":['
+        '{"op":"field","field":"spread_bps"},{"const":5,"unit":"BPS"}]},'
+        '"then":{"op":"mul","args":[{"op":"rolling_mean","arg":{"op":'
+        '"field","field":"trade_flow_imbalance"},"seconds":30},{"op":"field",'
+        '"field":"realized_volatility_bps"}]},"else":{"const":0,"unit":"BPS"}}',
+        '  BPS_CROSS_SCALE={"op":"mul","args":[{"op":"sub","args":['
+        '{"op":"rolling_mean","arg":{"op":"field","field":'
+        '"normalized_quote_ofi"},"seconds":5},{"op":"rolling_mean","arg":'
+        '{"op":"field","field":"normalized_quote_ofi"},"seconds":300}]},'
+        '{"op":"field","field":"realized_volatility_bps"}]}',
+        "  A BPS scale must have an economic role and its no-scale/base-only ablation; do",
+        "  not attach spread or volatility merely to pass units. Every FORMULA_THESIS term",
+        "  must actually influence the AST. sign(non-negative count/depth/spread) usually",
+        "  collapses to +1 and is rejected as a decorative term. Use rolling_zscore/delta",
+        "  for signed change, or an explicit where(gt(...)) for a true state gate.",
+        "  DIRECTIONAL MARKOUT RULE: activity, spread, depth, and realized-volatility",
+        "  levels describe state or magnitude, not whether price moves up or down. Every",
+        "  executable markout equation must carry at least one signed field on its numeric",
+        "  VALUE path and label it PRESSURE: queue_imbalance_l1/l10,",
+        "  microprice_offset_bps, trade_flow_imbalance, quote_event_ofi, or",
+        "  normalized_quote_ofi. A directional field used only as a where gate is not",
+        "  enough. Use unsigned fields only to gate or scale that signed pressure.",
+        "  POPULATION COMPLETION RULE: source count is not candidate count. One directly",
+        "  relevant source may support several auditable revision leads with different AST",
+        "  shapes. After screening sources, draft all 12 population members and submit",
+        "  contract-valid members through factory_submit_leads (multiple calls are allowed).",
+        "  Do not mark the card complete with zero AST_READY merely because blocked/control",
+        "  literature was stored. Either (a) persist all 12 AST_READY candidates from",
+        "  distinct economic niches, including <=30s/>=300s and TAKER/PASSIVE quadrants,",
+        "  or (b) report all 12 attempted candidate ASTs and the",
+        "  exact deterministic intake error for each. Never weaken a contract to meet quota.",
+        "  SOURCE_BASELINE_EXPR is the closest faithful expression of the public method on",
+        "  this grammar. Do not call a changed window, threshold, or title a new mechanism.",
+        f"  Supported fields ({len(FIELDS)}): {', '.join(sorted(FIELDS))}",
+        f"  Supported operators ({len(ALL_OPS)}): {', '.join(sorted(ALL_OPS))}",
+        f"  Limits: depth<={MAX_DEPTH}, nodes<={MAX_NODES}, windows 1..250.",
+        '  JSON SCHEMA EXAMPLE: {"op":"ts_mean","field":"realized_volatility","n":5}.',
+        '  The window key is exactly "n"--never "window" or "lookback". ts_corr uses',
+        '  {"op":"ts_corr","field_a":"...","field_b":"...","n":5}; unary nodes',
+        '  use "arg" and binary nodes use exactly two "args". Unknown keys are rejected.',
+        "  DATA REALITY: every supported quote/trade field above is already available as a",
+        "  point-in-time Korean-equity DAILY AGGREGATE. AST windows therefore mean trading",
+        "  days, not seconds or order-book events. The current microstructure history is short.",
+        "  AST_READY needs a cited mechanism that maps to those local fields; the source does",
+        "  NOT need to ship a reusable dataset, Korean observations, or its own OOS backtest.",
+        "  A foreign venue is an external-validity risk to record, not MISSING_DATA, when the",
+        "  mechanism and observable map exactly to a supported local field.",
+        "  Use DATA_BLOCKED only when the test truly needs unavailable granularity/fields",
+        "  (for example queue position, cancellations, order lifetime, or event-time seconds).",
+        "  For AST_READY, OBSERVABLES must exactly equal the fields used by the AST, and",
+        "  mechanism/TESTABLE_WITH must explain those fields economically.",
+        "  AST_READY targets subsequent RETURN alpha. A volatility forecast, execution-cost",
+        "  forecast, or regime classifier alone is not alpha. It must cite and state the",
+        "  causal route/counterparty from the observable to subsequent return; otherwise",
+        "  submit SEMANTIC_MISMATCH with MAPPING_LOSS instead of inventing a return edge.",
+        "  MICROSTRUCTURE IS PRIMARY: every AST_READY expression must use at least one",
+        f"  quote/trade field: {', '.join(sorted(MICRO_FIELDS))}",
+        "  close/notional/returns may only accompany microstructure as execution, benchmark,",
+        "  or regime auxiliaries. Short microstructure history is accepted and must not be",
+        "  replaced with a price-only daily proxy; report the uncertainty honestly.",
+        "  Search for mechanisms around these observables; do not retrofit an unrelated paper.",
+        "  RAW EVENT-TIME LANE IS NOW EXECUTABLE. Set RESEARCH_LANE: INTRADAY_EVENT",
+        "  and include a typed SEMANTIC_PLAN whenever the mechanism lives at seconds/ticks.",
+        "  THIS REFILL IS LANE-AWARE: search event-time microstructure first. Daily leads",
+        "  do not satisfy an empty INTRADAY_EVENT buffer. Submit at least one executable",
+        "  INTRADAY_EVENT AST_READY lead when a cited mechanism maps to the grammar; if",
+        "  none survives the contract, report the searched sources and exact blockers",
+        "  instead of fabricating a lead, then continue the other lenses.",
+        "  Event-time fields: " + ", ".join(sorted(INTRADAY_FIELDS)),
+        "  Event-time field units: " + json.dumps(
+            INTRADAY_FIELDS, ensure_ascii=False, sort_keys=True),
+        "  Event-time operators: " + ", ".join(sorted(INTRADAY_OPS)),
+        f"  Event-time limits: depth<={INTRADAY_MAX_DEPTH}, nodes<={INTRADAY_MAX_NODES},",
+        "  every lag/rolling/delta/ewma/zscore node has seconds=1..3600.",
+        "  Unit algebra is enforced before persistence: add/sub/min/max and comparisons",
+        "  require equal units; mul needs one RATIO side; div needs a RATIO denominator",
+        "  or equal-unit numerator/denominator; where needs BOOL condition and equal-unit",
+        "  branches. sign/log1p_abs/sqrt_abs and rolling_zscore output RATIO.",
+        "  Semantic event->field requirements: " + json.dumps(
+            event_fields, ensure_ascii=False, sort_keys=True),
+        "  Semantic context->gating-field requirements: " + json.dumps(
+            context_fields, ensure_ascii=False, sort_keys=True),
+        '  Event-time JSON is exact: a field is {"op":"field","field":',
+        '  "trade_flow_imbalance"}--the key is "field", never "name". A temporal',
+        '  node is {"op":"rolling_mean","arg":{"op":"field","field":',
+        '  "trade_flow_imbalance"},"seconds":300}. OBSERVABLES must equal every',
+        "  field actually present in the AST. Use comma-separated transforms or a valid",
+        "  JSON array with quoted strings; [BARE_WORDS] is not JSON.",
+        '  A declared spread state must be executable, e.g. {"op":"where",',
+        '  "condition":{"op":"lt","args":[{"op":"field","field":',
+        '  "spread_bps"},{"const":5,"unit":"BPS"}]},"then":{"op":',
+        '  "rolling_mean","arg":{"op":"field","field":"trade_flow_imbalance"},',
+        '  "seconds":300},"else":{"const":0,"unit":"RATIO"}}.',
+        "  SEMANTIC_PLAN uses Event/Context/Qualities/Direction/Output, for example:",
+        '  {"event":"ORDER_FLOW","context":["TIGHT_SPREAD"],',
+        '   "qualities":["PERSISTENCE","STATE_CONDITIONAL"],"direction":"FOLLOW",',
+        '   "output":"TAKER_NET_PNL","execution":"TAKER","horizon_seconds":5}.',
+        "  Passive execution uses this exact output/execution pair (no aliases):",
+        '  {"event":"ORDER_FLOW","context":["TIGHT_SPREAD"],',
+        '   "qualities":["STATE_CONDITIONAL"],"direction":"FOLLOW",',
+        '   "output":"PASSIVE_FILL_ADJUSTED_PNL",',
+        '   "execution":"PASSIVE_FIFO_LOWER_BOUND","horizon_seconds":30}.',
+        "  PASSIVE and PASSIVE_FIFO are invalid aliases. A passive child also needs an",
+        "  economic AST mutation (spread/depth/adverse-selection state, clock, or scale);",
+        "  changing only the execution label is an exact-formula duplicate, not novelty.",
+        "  Treat public OFI/queue formulas as controls. Prefer residual, state-conditional",
+        "  or execution-timing mutations that reduce crossing/adverse selection; do not",
+        "  create extra turnover merely because a short-horizon direction is predictable.",
+        "  State contexts must be implemented in a where-condition; declared qualities",
+        "  must be visible in the AST. Queue position, cancellations and order lifetime",
+        "  remain DATA_BLOCKED; raw quote/trade event time itself is no longer blocked.",
+    ])
 
 
 # ▶ **스카우트 접근면을 카드에 싣는다** (2026-08-12, 재일 지시로 Agent-Reach 도입)
@@ -302,7 +599,7 @@ def _near_miss(conn, *, keep: int = 4) -> str:
     return "\n".join(lines)
 
 
-def _dataset_news(conn) -> str:
+def _dataset_news(conn, market_conn=None) -> str:
     """지금 쓸 수 있는 데이터셋과 **그것이 무엇을 바꾸는가.**
 
     ▶ 왜 필요한가 (2026-08-12)
@@ -330,6 +627,12 @@ def _dataset_news(conn) -> str:
         return ""
     lines = ["\n[지금 쓸 수 있는 데이터셋 - 무엇으로 검정할 수 있는가]"]
     for r in rows:
+        if r["dataset"] == "krx-intraday-events/v1" and market_conn is not None:
+            lines.append(
+                "  krx-intraday-events/v1         LIVE_TIMESCALE_RAW                 "
+                "실험별 bounded slice; manifest partition 0은 의도된 상태"
+            )
+            continue
         # ▶ **못 센 것을 0 으로 찍지 않는다** (2026-08-12). 유니버스가 안 걸린
         #   데이터셋이 `0종목` 으로 보여 "빈 데이터셋" 처럼 읽혔다 - 실제로는
         #   148,931행이 들어 있었다. 횡단면 순위를 매기려면 유니버스가 필요하니
@@ -477,11 +780,20 @@ def _vocab_block(conn=None) -> str:
     except Exception:  # noqa: BLE001 - 못 읽으면 적지 않는다(지어내지 않는다)
         pass
     try:
-        from config_binding import EDGE_KEYS      # noqa: PLC0415
+        from config_binding import (              # noqa: PLC0415
+            CHOICE_KEYS,
+            EDGE_KEYS,
+            REBALANCE_POLICIES,
+        )
 
         params = ("\n  SUGGESTED_PARAMS 에 쓸 수 있는 키: "
                   f"{', '.join(sorted(EDGE_KEYS))}\n"
                   "    이 밖의 키는 실행면이 읽지 않아 거부된다.\n"
+                  "  선택형 값(뜻이 비슷한 자유어를 쓰지 말고 **아래 문자열 그대로**):\n"
+                  f"    portfolio_construction: {', '.join(CHOICE_KEYS['portfolio_construction'])}\n"
+                  "      TOP_N = 상위 N개 동일가중. `equal_weight`가 아니라 TOP_N이다.\n"
+                  "      EXCLUDE_BOTTOM = 하위 분위만 제외하고 나머지 동일가중.\n"
+                  f"    rebalance: {', '.join(REBALANCE_POLICIES)}\n"
                   "  ▶ 위험관리 손잡이(2026-08-12 개방). **엣지를 바꾸지 않고 낙폭을\n"
                   "    줄이는 길이다** - 지금까지 실행면은 완전투자 동일가중밖에\n"
                   "    표현하지 못했고, 그래서 알파가 있는 전략도 낙폭에서 죽었다.\n"
@@ -645,7 +957,7 @@ def _split_blocked(blocked: dict, orphan_ids) -> tuple[dict, dict]:
 
 
 REJECT_PATH = Path.home() / ".factory_autopilot_rejections"
-REJECT_KEEP = 6      # 브리핑에 싣는 최근 반려 수 - 오래된 것까지 실으면 잡음이 된다
+REJECT_KEEP = 12     # 최근의 서로 다른 원인만 싣는다. 동일 반복은 아래서 접는다.
 
 
 def record_rejections(rejected, *, stamp: str, path: Path | None = None) -> int:
@@ -656,8 +968,32 @@ def record_rejections(rejected, *, stamp: str, path: Path | None = None) -> int:
     try:
         with path.open("a", encoding="utf-8") as fh:
             for x in rejected:
-                one = f"{stamp}\t{x.title[:70]}\t{x.reason[:160]}"
-                fh.write(one.replace("\n", " ") + "\n")
+                def clean(value, limit: int) -> str:
+                    return (str(value).replace("\r", " ").replace("\n", " ")
+                            .replace("\t", " ")[:limit])
+
+                def clean_reason(value) -> str:
+                    raw = str(value)
+                    try:
+                        payload = json.loads(raw)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        return clean(raw, 1200)
+                    # ``Promotion.feedback`` is deterministically bounded by
+                    # Gate 0.  Re-serialise it instead of character-truncating
+                    # a JSON token and handing the planner malformed repairs.
+                    if (isinstance(payload, dict)
+                            and isinstance(payload.get("codes"), list)
+                            and isinstance(payload.get("repairs"), list)):
+                        return json.dumps(payload, ensure_ascii=False,
+                                          sort_keys=True, separators=(",", ":"))
+                    return clean(raw, 1200)
+
+                # Typed Gate 0 feedback carries field/range choices.  The old
+                # 160-character cut routinely retained only "rejected" while
+                # deleting the repair the next planner needed.
+                one = (f"{clean(stamp, 80)}\t{clean(x.title, 70)}\t"
+                       f"{clean_reason(x.reason)}")
+                fh.write(one + "\n")
     except OSError as e:
         print(f"      ⚠ 반려 기록 실패 - 다음 주기가 같은 실수를 반복할 수 있다: "
               f"{e}", flush=True)
@@ -666,13 +1002,36 @@ def record_rejections(rejected, *, stamp: str, path: Path | None = None) -> int:
 
 
 def recent_rejections(*, keep: int = REJECT_KEEP, path: Path | None = None) -> list[str]:
-    """최근 반려 몇 건. 못 읽으면 빈 목록 - 없는 교훈을 지어내지 않는다."""
+    """최근의 서로 다른 반려 원인. 못 읽으면 빈 목록을 반환한다."""
     path = path or REJECT_PATH
     try:
         lines = [x for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
     except OSError:
         return []
-    return lines[-keep:]
+    selected, seen = [], set()
+    for line in reversed(lines):
+        parts = line.split("\t", 2)
+        # Proposal ids differ across immutable repairs; the structured cause is
+        # what should collapse when the same Gate 0 error repeats 18 times.
+        cause = parts[2] if len(parts) == 3 else line
+        marker = cause
+        try:
+            payload = json.loads(cause)
+            if (isinstance(payload, dict)
+                    and isinstance(payload.get("codes"), list)
+                    and isinstance(payload.get("repairs"), list)):
+                marker = json.dumps({
+                    "codes": payload["codes"], "repairs": payload["repairs"]},
+                    ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+        if marker in seen:
+            continue
+        seen.add(marker)
+        selected.append(line)
+        if len(selected) >= keep:
+            break
+    return list(reversed(selected))
 
 
 def research_brief() -> str:
@@ -699,17 +1058,238 @@ def research_brief() -> str:
     #   "리서치에 보여 준다" 고 적어 놓은 블록이 정작 도달한 적이 없었다.
     #   WAL 걱정으로 일찍 닫은 것인데, 일찍 닫으면 안 닫은 것만 못하다.
     conn = _conn()
+    market_conn = _market_conn()
     try:
-        brief = cycle_brief.build(conn)
+        brief = cycle_brief.build(conn, market_conn=market_conn)
         with conn.cursor() as cur:
             cur.execute(_SQL_LEADS, (12,))
             leads = cur.fetchall()
-        return _compose_research_brief(conn, brief, leads)
+        return _compose_research_brief(
+            conn, brief, leads, market_conn=market_conn)
     finally:
+        if market_conn is not None:
+            market_conn.close()
         conn.close()      # WAL 을 남기지 않는다 - with 는 커밋만 하고 안 닫는다
 
 
-def _compose_research_brief(conn, brief, leads) -> str:
+def _ast_experience_block(conn) -> str:
+    """Deterministic positive/negative AST memory for both scout and planner."""
+    try:
+        import ast_experience as AX                 # noqa: PLC0415
+        import intraday_experience as IX            # noqa: PLC0415
+
+        with conn.cursor() as cur:
+            cur.execute("""
+                select e.config->'signal_expr', coalesce(o.decision, ''),
+                       coalesce(o.lesson_codes, '{}'::text[]),
+                       coalesce(o.oos_summary, '{}'::jsonb), h.title
+                  from quant.experiments e
+                  join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+                  left join lateral (
+                    select decision, lesson_codes, oos_summary
+                      from research.experiment_outcomes x
+                     where x.experiment_id = e.experiment_id::text
+                     order by x.decided_at desc limit 1
+                  ) o on true
+                 where e.config ? 'signal_expr'
+                 order by e.created_at desc""")
+            experiments = [{
+                "signal_expr": row[0], "decision": row[1],
+                "lesson_codes": list(row[2] or []), "oos_summary": row[3] or {},
+                "title": row[4],
+            } for row in cur.fetchall()]
+            cur.execute("""
+                select l.lead_id, l.claimed_edge,
+                       l.ast_contract->'candidate_signal_expr',
+                       (exists (select 1 from research.experiment_proposals p
+                                 where l.lead_id = any(p.lead_ids)
+                                   and p.status in ('PUBLISHED','ACCEPTED'))
+                        or exists (
+                          select 1 from research.proposal_review_outcomes r
+                           where r.verdict = 'STOP'
+                             and l.lead_id = any(r.lead_ids))) as used,
+                       coalesce((l.ast_contract->>'alpha_candidate_eligible')::boolean,
+                                false) as alpha_candidate_eligible,
+                       l.ast_contract->>'derivation_mode' as derivation_mode,
+                       coalesce(l.ast_contract->'derivation_transforms', '[]'::jsonb),
+                       l.ast_contract->'source_baseline_expr',
+                       coalesce(l.ast_contract->>'research_lane',
+                                'DAILY_CROSS_SECTIONAL'),
+                       coalesce(l.ast_contract->'semantic_plan', '{}'::jsonb),
+                       l.ast_contract->>'candidate_vs_source_similarity',
+                       coalesce(l.ast_contract->>'evolution_role', 'SEED'),
+                       coalesce(l.ast_contract->'evolution_operators', '[]'::jsonb),
+                       coalesce(l.ast_contract->>'expected_increment', ''),
+                       coalesce(l.ast_contract->'ablations', '[]'::jsonb),
+                       l.ast_contract->'parent_signal_expr',
+                       coalesce(l.ast_contract->>'parent_ast_fingerprint', ''),
+                       coalesce((l.ast_contract->>'formula_contract_complete')::boolean,
+                                false),
+                       l.ast_contract->'formula_thesis',
+                       coalesce(l.ast_contract->>'formula_discovery_version', '')
+                  from research.methodology_leads l
+                 where l.status = 'COMPLETE'
+                   and l.ast_contract->>'ast_readiness' = 'AST_READY'
+                   and l.ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
+                 order by l.created_at desc""")
+            leads = [{"lead_id": row[0], "title": row[1],
+                      "signal_expr": row[2], "used": bool(row[3]),
+                      "alpha_candidate_eligible": bool(row[4]),
+                      "derivation_mode": row[5],
+                      "derivation_transforms": row[6] or [],
+                      "source_baseline_expr": row[7],
+                      "research_lane": row[8], "semantic_plan": row[9] or {},
+                      "candidate_vs_source_similarity": row[10],
+                      "evolution_role": row[11],
+                      "evolution_operators": row[12] or [],
+                      "expected_increment": row[13],
+                      "ablations": row[14] or [],
+                      "parent_signal_expr": row[15],
+                      "parent_ast_fingerprint": row[16],
+                      "formula_contract_complete": bool(row[17]),
+                      "formula_thesis": row[18],
+                      "formula_discovery_version": row[19]}
+                     for row in cur.fetchall()]
+            cur.execute("""
+                select e.config->'intraday_signal_expr',
+                       e.config->'semantic_plan',
+                       coalesce(o.decision, ''),
+                       coalesce(o.lesson_codes, '{}'::text[]),
+                       coalesce(o.oos_summary, '{}'::jsonb), h.title,
+                       coalesce(c.dimensions, '{}'::jsonb),
+                       coalesce(rb.dimensions, '{}'::jsonb)
+                  from quant.experiments e
+                  join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+                  left join lateral (
+                    select decision, lesson_codes, oos_summary
+                      from research.experiment_outcomes x
+                     where x.experiment_id = e.experiment_id::text
+                     order by x.decided_at desc limit 1
+                  ) o on true
+                  left join lateral (
+                    select dimensions
+                      from quant.experiment_metrics m
+                     where m.experiment_id = e.experiment_id
+                       and m.metric = 'intraday_score_calibration'
+                       and m.dimensions->>'screening_candidate' is null
+                     order by m.experiment_metric_id limit 1
+                  ) c on true
+                  left join lateral (
+                    select dimensions
+                      from quant.experiment_metrics m
+                     where m.experiment_id = e.experiment_id
+                       and m.metric = 'intraday_residual_behavior'
+                       and m.dimensions->>'screening_candidate' is null
+                     order by m.experiment_metric_id limit 1
+                  ) rb on true
+                 where e.config ? 'intraday_signal_expr'
+                 order by e.created_at desc""")
+            intraday = [{
+                "intraday_signal_expr": row[0], "semantic_plan": row[1] or {},
+                "decision": row[2], "lesson_codes": list(row[3] or []),
+                "oos_summary": row[4] or {}, "title": row[5],
+                "score_calibration": row[6] or {},
+                "residual_behavior": {
+                    key: value for key, value in (row[7] or {}).items()
+                    if key != "residual_qd"},
+                "residual_qd": (row[7] or {}).get("residual_qd") or {},
+            } for row in cur.fetchall()]
+            # Shared-replay candidates are useful measured memory, but they are
+            # not independent confirmations.  Read their candidate-scoped
+            # metrics separately so they cannot overwrite the primary outcome.
+            cur.execute("""
+                select e.experiment_id::text,
+                       coalesce(e.config->'screening_population', '[]'::jsonb),
+                       h.title, m.metric, m.value, m.dimensions
+                  from quant.experiments e
+                  join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+                  left join quant.experiment_metrics m
+                    on m.experiment_id = e.experiment_id
+                   and m.dimensions->>'screening_candidate' is not null
+                 where e.config ? 'screening_population'
+                 order by e.created_at desc, m.metric""")
+            screened: dict[tuple[str, str], dict] = {}
+            for experiment_id, population, title, metric, value, dimensions in \
+                    cur.fetchall():
+                dimensions = dimensions or {}
+                by_fp = {str(candidate.get("ast_fingerprint") or ""): candidate
+                         for candidate in (population or [])
+                         if isinstance(candidate, dict)}
+                for candidate_fp, candidate in by_fp.items():
+                    key = (experiment_id, candidate_fp)
+                    screened.setdefault(key, {
+                        "intraday_signal_expr": candidate.get(
+                            "intraday_signal_expr"),
+                        "semantic_plan": candidate.get("semantic_plan") or {},
+                        "entry_policy": candidate.get("entry_policy"),
+                        "coefficient_policy": candidate.get(
+                            "coefficient_policy"),
+                        "decision": "SCREENING_ONLY",
+                        "lesson_codes": [], "oos_summary": {},
+                        "title": f"{title} [screen {candidate_fp[:8]}]",
+                        "evidence_tier": "SCREENING_ONLY",
+                        "source_lead_ids": list(
+                            candidate.get("source_lead_ids") or []),
+                        "candidate_role": candidate.get("candidate_role"),
+                        "ablation_operator": candidate.get(
+                            "ablation_operator"),
+                        "ablation_path": candidate.get("ablation_path"),
+                        "ablation_of_ast_fingerprint": candidate.get(
+                            "ablation_of_ast_fingerprint"),
+                    })
+                metric_fp = str(dimensions.get("screening_candidate") or "")
+                target = screened.get((experiment_id, metric_fp))
+                if target is None or metric is None:
+                    continue
+                if dimensions.get("summary") is True:
+                    target["oos_summary"][metric] = float(value)
+                elif metric == "intraday_screening_result":
+                    target["lesson_codes"] = list(
+                        dimensions.get("failed_criteria") or [])
+                    target["screening_gate_decision"] = dimensions.get(
+                        "screening_gate_decision")
+                    target["pareto_rank"] = dimensions.get("pareto_rank")
+                    target["empirical_influence"] = dimensions.get(
+                        "empirical_influence")
+                    target["residual_qd"] = dimensions.get("residual_qd") or {}
+                elif metric == "intraday_score_calibration":
+                    target["score_calibration"] = dimensions
+                elif metric == "intraday_residual_behavior":
+                    target["residual_behavior"] = {
+                        key: value for key, value in dimensions.items()
+                        if key not in {"screening_candidate", "residual_qd"}}
+                    target["residual_qd"] = dimensions.get("residual_qd") or {}
+            intraday.extend(screened.values())
+            cur.execute("""
+                select lead_ids, title, verdict, competing_codes,
+                       competing_explanation, falsification_test
+                  from research.proposal_review_outcomes
+                 order by created_at desc limit 12""")
+            reviews = cur.fetchall()
+        review_memory = ""
+        if reviews:
+            lines = ["\n[독립 스켑틱 심사 기억 - 같은 리드 버전을 반복하지 않는다]"]
+            for ids, title, verdict, codes, explanation, falsification in reviews:
+                lines.append(
+                    f"  - {verdict} leads={list(ids or [])} title={str(title)[:70]} "
+                    f"codes={list(codes or [])}"
+                )
+                lines.append(f"      반대가설: {str(explanation)[:180]}")
+                lines.append(f"      반증검정: {str(falsification)[:140]}")
+            review_memory = "\n".join(lines)
+        daily_leads = [row for row in leads
+                       if row["research_lane"] != "INTRADAY_EVENT"]
+        intraday_leads = [{**row,
+                           "intraday_signal_expr": row["signal_expr"]}
+                          for row in leads
+                          if row["research_lane"] == "INTRADAY_EVENT"]
+        return (AX.render(AX.build(experiments, daily_leads)) +
+                IX.render(IX.build(intraday, intraday_leads)) + review_memory)
+    except Exception:  # noqa: BLE001 - memory unavailable must not invent facts
+        return ""
+
+
+def _compose_research_brief(conn, brief, leads, *, market_conn=None) -> str:
     """브리핑 본문. **연결이 살아 있는 동안** 조회 블록을 다 만든다."""
     out = [brief.as_prompt()]
     if leads:
@@ -717,12 +1297,44 @@ def _compose_research_brief(conn, brief, leads) -> str:
         for row in leads:
             lid, lens, edge, mech, test, status = row[:6]
             used = bool(row[6]) if len(row) > 6 else False
+            readiness = str(row[7]) if len(row) > 7 else "LEGACY"
+            observables = row[8] if len(row) > 8 else []
+            candidate = row[9] if len(row) > 9 else None
+            derivation_mode = str(row[10]) if len(row) > 10 else "UNCLASSIFIED"
+            transforms = row[11] if len(row) > 11 else []
+            source_similarity = row[12] if len(row) > 12 else None
+            novelty_rationale = str(row[13]) if len(row) > 13 else ""
+            research_lane = str(row[14]) if len(row) > 14 else "DAILY_CROSS_SECTIONAL"
+            semantic_plan = row[15] if len(row) > 15 else {}
+            formula_complete = bool(row[16]) if len(row) > 16 else False
+            formula_thesis = row[17] if len(row) > 17 else None
             # **쓴 것과 안 쓴 것을 눈에 보이게 가른다.** 안 가르면 이미
             # 기각된 계열을 다시 내게 된다(2026-08-12 실측으로 공장이 멈췄다)
             tag = "이미 씀" if used else "**미사용**"
-            out.append(f"  - {lid}  [{lens}/{status}] {tag} {str(edge)[:62]}")
+            out.append(f"  - {lid}  [{lens}/{status}/{readiness}] {tag} {str(edge)[:62]}")
             if mech:
                 out.append(f"      메커니즘: {str(mech)[:110]}")
+            if observables:
+                out.append(f"      관측변수: {observables}")
+            if candidate:
+                expr_label = ("intraday_signal_expr" if research_lane == "INTRADAY_EVENT"
+                              else "signal_expr")
+                out.append(f"      후보 {expr_label}: " + json.dumps(
+                    candidate, ensure_ascii=False, separators=(",", ":")))
+            out.append(f"      연구 lane: {research_lane}")
+            if semantic_plan:
+                out.append("      semantic_plan: " + json.dumps(
+                    semantic_plan, ensure_ascii=False, separators=(",", ":")))
+            if formula_complete and formula_thesis:
+                out.append("      formula_thesis: " + json.dumps(
+                    formula_thesis, ensure_ascii=False, separators=(",", ":")))
+            elif research_lane == "INTRADAY_EVENT":
+                out.append("      formula_thesis: LEGACY_MISSING (do not imitate; add one)")
+            out.append(
+                f"      문헌 파생: {derivation_mode} transforms={transforms} "
+                f"source_similarity={source_similarity or 'n/a'}")
+            if novelty_rationale:
+                out.append(f"      신규성 근거: {novelty_rationale[:140]}")
     else:
         out.append("\n**쓸 수 있는 리드가 없다.** 리드 없이 기획안을 내지 마라 - "
                    "LEAD_IDS 가 비면 접수 전에 반려된다.")
@@ -739,10 +1351,19 @@ def _compose_research_brief(conn, brief, leads) -> str:
     #   낭비다 - 이미 기각된 계열을 다시 내게 된다(2026-08-12 실측으로
     #   그렇게 공장이 멈췄다). 무엇을 낼지 고르기 전에 낼 재료가 있는지부터.
     out.append(_lead_health(conn))
+    # ▶ 재료 부족 바로 뒤에 설계 공백을 둔다 - "리드가 말랐다" 다음 줄에
+    #   "그래도 후보는 있다(격자)" 가 와야 기획이 멈추지 않는다.
+    out.append(_design_gap_line(conn))
+    # 표현 수단은 격자 바로 뒤에 둔다 - "어디가 비었나" 다음에
+    # "그것을 어떻게 적나" 가 와야 둘을 잇는다.
+    out.append(_alpha_expr_line(conn))
+    # Formula identity and outcomes are a separate memory axis from edge-family
+    # history.  Without this block the same AST can be renamed and rediscovered.
+    out.append(_ast_experience_block(conn))
     # 근접 계열을 어휘 바로 뒤에 둔다 - 손잡이 목록을 읽은 직후에 "어디에
     # 쓸지" 가 나와야 한다. 멀리 떨어뜨리면 둘을 잇지 못한다.
     out.append(_near_miss(conn))
-    out.append(_dataset_news(conn))
+    out.append(_dataset_news(conn, market_conn=market_conn))
     # ▶ **막힌 가설을 리서치에 보여 준다** (2026-08-12)
     #   발주 게이트가 "못 돈다" 고 판정한 가설이 원장에 앉아 있는데, 그 사실이
     #   리서치에 안 갔다. 그래서 기획자는 자기 기획안이 왜 실험까지 못 가는지
@@ -826,7 +1447,11 @@ def _compose_research_brief(conn, brief, leads) -> str:
             "넓혀 그 개념을 만들어도 된다. 어느 쪽이든 **무엇이 없어서 그랬는지 "
             "본문에 남겨라** - 조용히 깎으면 그 수요는 아무 데도 안 남고, 다음 "
             "주기의 너는 같은 것을 또 깎는다(실측: 기획안 11건 전부 어휘 안이라 "
-            "어휘 반려가 한 번도 없었다. 안 막힌 게 아니라 아무도 안 물은 것이다).")
+            "어휘 반려가 한 번도 없었다. 안 막힌 게 아니라 아무도 안 물은 것이다).\n"
+            "  Gate 0 JSON은 `codes`와 `repairs`가 정본이다. `field/current/allowed`를 "
+            "읽어 **새 기획안**에 반영하되 `auto_apply:false`이면 기존 사전등록을 "
+            "고치지 마라. `OVER_BUDGET`은 이름·상수만 바꿔 우회하지 말고 새 "
+            "메커니즘을 스카우트하거나 명시적 예산 결정을 받아라.")
     return "\n".join(out)
 
 
@@ -860,8 +1485,82 @@ def _widest_price_dataset(conn) -> tuple[str, int | None]:
 # 안 쓴 리드가 이보다 적으면 재료가 마른 것이다. 기획안 하나가 리드 하나를
 # 쓰므로, 이 아래로 떨어지면 다음 주기에 낼 것이 없다.
 LEADS_LOW = 4
+# A healthy aggregate queue can still contain zero raw event-time ideas. Keep
+# a small independent buffer so daily leads cannot mask starvation of the
+# primary microstructure lane.
+INTRADAY_LEADS_LOW = 2
+# Legacy event-time ASTs can satisfy the lane buffer while still lacking the
+# economic equation thesis needed by the symbolic search. Maintain a separate
+# typed-formula buffer so deployment upgrades actually refill the new contract.
+INTRADAY_FORMULA_LEADS_LOW = 12
 # 이보다 오래된 리드만 있으면 시장이 바뀌었을 수 있다.
 LEADS_STALE_DAYS = 2
+
+
+def _executable_unused_count(conn) -> int:
+    """Return the exact producer/consumer queue depth used by Planner gating."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            select count(*)
+              from research.methodology_leads l
+             where l.status = 'COMPLETE'
+               and l.testability = 'RULE_EXPRESSIBLE'
+               and l.ast_contract->>'ast_readiness' = 'AST_READY'
+               and l.ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
+               and coalesce(
+                     (l.ast_contract->>'alpha_candidate_eligible')::boolean,
+                     false)
+               and (coalesce(l.ast_contract->>'research_lane',
+                             'DAILY_CROSS_SECTIONAL') <> 'INTRADAY_EVENT'
+                    or l.ast_contract->>'formula_discovery_version' =
+                       'formula-discovery-v5')
+               and not exists (
+                     select 1 from research.experiment_proposals p
+                      where l.lead_id = any(p.lead_ids)
+                        and p.status in ('PUBLISHED','ACCEPTED'))
+               and not exists (
+                     select 1 from research.proposal_review_outcomes r
+                      where r.verdict = 'STOP'
+                        and l.lead_id = any(r.lead_ids))
+        """)
+        return int((cur.fetchone() or (0,))[0] or 0)
+
+
+def _intraday_formula_unused_count(conn) -> int:
+    """Count unused leads satisfying the current primary-lane equation contract.
+
+    The aggregate executable queue also contains daily leads.  Those rows must
+    not authorize Planner while the event-time formula queue is empty: Planner
+    otherwise wins the research profile's single worker slot and Scout waits
+    behind a consumer that cannot consume the missing primary material.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            select count(*)
+              from research.methodology_leads l
+             where l.status = 'COMPLETE'
+               and l.testability = 'RULE_EXPRESSIBLE'
+               and l.ast_contract->>'ast_readiness' = 'AST_READY'
+               and l.ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
+               and l.ast_contract->>'research_lane' = 'INTRADAY_EVENT'
+               and l.ast_contract->>'formula_discovery_version' =
+                   'formula-discovery-v5'
+               and coalesce(
+                     (l.ast_contract->>'formula_contract_complete')::boolean,
+                     false)
+               and coalesce(
+                     (l.ast_contract->>'alpha_candidate_eligible')::boolean,
+                     false)
+               and not exists (
+                     select 1 from research.experiment_proposals p
+                      where l.lead_id = any(p.lead_ids)
+                        and p.status in ('PUBLISHED','ACCEPTED'))
+               and not exists (
+                     select 1 from research.proposal_review_outcomes r
+                      where r.verdict = 'STOP'
+                        and l.lead_id = any(r.lead_ids))
+        """)
+        return int((cur.fetchone() or (0,))[0] or 0)
 
 
 def _lead_health(conn) -> str:
@@ -878,36 +1577,130 @@ def _lead_health(conn) -> str:
       아예 없었다.** 페르소나는 "스카우트를 파견하라" 고 하는데 카드는
       "기획안을 내라" 만 요구했다.
 
-      우리가 스카우트를 강제하지 않는다 - **사실을 보여주고 판단은 에이전트가**
-      한다. 재료가 있는데 억지로 스카우트하면 그것도 낭비다.
+      (2026-08-13 갱신) **사실 표시만으로는 안 됐다.** 이 경고가 다섯 주기
+      연속 브리핑에 실렸는데도 기획 카드 안에서 스카우트는 반려 대응·기획에
+      항상 밀렸다(138초 턴 실측). March(1991)가 보인 착취 쏠림이 그대로다 -
+      그래서 cycle 이 이 함수가 경고를 내면 **임무가 리드 수집 하나뿐인
+      스카우트 전용 카드**를 따로 건다(임무 분리). 여기는 여전히 사실만 적고,
+      재료가 넉넉하면 카드도 안 나간다 - 억지 스카우트는 여전히 낭비다.
     """
     try:
         with conn.cursor() as cur:
             cur.execute("""
-                select count(*),
+                select count(*) as total,
                        count(*) filter (
                          where not exists (
                            select 1 from research.experiment_proposals p
-                            where methodology_leads.lead_id = any(p.lead_ids))),
-                       extract(epoch from (now() - max(created_at)))/86400.0
+                            where methodology_leads.lead_id = any(p.lead_ids)
+                              and p.status in ('PUBLISHED','ACCEPTED'))
+                           and not exists (
+                             select 1 from research.proposal_review_outcomes r
+                              where r.verdict = 'STOP'
+                                and methodology_leads.lead_id = any(r.lead_ids))
+                       ) as raw_unused,
+                       count(*) filter (
+                         where status = 'COMPLETE'
+                           and testability = 'RULE_EXPRESSIBLE'
+                            and ast_contract->>'ast_readiness' = 'AST_READY'
+                            and ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
+                            and coalesce((ast_contract->>'alpha_candidate_eligible')::boolean,
+                                         false)
+                           and not exists (
+                             select 1 from research.experiment_proposals p
+                              where methodology_leads.lead_id = any(p.lead_ids)
+                                and p.status in ('PUBLISHED','ACCEPTED'))
+                           and not exists (
+                             select 1 from research.proposal_review_outcomes r
+                              where r.verdict = 'STOP'
+                                and methodology_leads.lead_id = any(r.lead_ids))
+                       ) as usable_unused,
+                       count(*) filter (
+                         where status = 'COMPLETE'
+                           and testability = 'RULE_EXPRESSIBLE'
+                           and ast_contract->>'ast_readiness' = 'AST_READY'
+                           and ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
+                           and ast_contract->>'research_lane' = 'INTRADAY_EVENT'
+                           and ast_contract->>'formula_discovery_version' =
+                               'formula-discovery-v5'
+                           and coalesce((ast_contract->>'alpha_candidate_eligible')::boolean,
+                                        false)
+                           and not exists (
+                             select 1 from research.experiment_proposals p
+                              where methodology_leads.lead_id = any(p.lead_ids)
+                                and p.status in ('PUBLISHED','ACCEPTED'))
+                           and not exists (
+                             select 1 from research.proposal_review_outcomes r
+                              where r.verdict = 'STOP'
+                                and methodology_leads.lead_id = any(r.lead_ids))
+                       ) as intraday_usable_unused,
+                       count(*) filter (
+                         where status = 'COMPLETE'
+                           and testability = 'RULE_EXPRESSIBLE'
+                           and ast_contract->>'ast_readiness' = 'AST_READY'
+                           and ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
+                           and ast_contract->>'research_lane' = 'INTRADAY_EVENT'
+                           and ast_contract->>'formula_discovery_version' =
+                               'formula-discovery-v5'
+                           and coalesce(
+                                 (ast_contract->>'alpha_candidate_eligible')::boolean,
+                                 false)
+                           and coalesce(
+                                 (ast_contract->>'formula_contract_complete')::boolean,
+                                 false)
+                           and not exists (
+                             select 1 from research.experiment_proposals p
+                              where methodology_leads.lead_id = any(p.lead_ids)
+                                and p.status in ('PUBLISHED','ACCEPTED'))
+                           and not exists (
+                             select 1 from research.proposal_review_outcomes r
+                              where r.verdict = 'STOP'
+                                and methodology_leads.lead_id = any(r.lead_ids))
+                       ) as intraday_formula_unused,
+                       extract(epoch from (
+                         now() - max(created_at) filter (
+                           where status = 'COMPLETE'
+                             and testability = 'RULE_EXPRESSIBLE'
+                              and ast_contract->>'ast_readiness' = 'AST_READY'
+                              and ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
+                              and coalesce((ast_contract->>'alpha_candidate_eligible')::boolean,
+                                           false)
+                         )
+                       ))/86400.0 as newest_usable_age_days
                   from research.methodology_leads""")
-            total, unused, age = cur.fetchone()
+            (total, raw_unused, unused, intraday_unused,
+             intraday_formula_unused, age) = cur.fetchone()
     except Exception:  # noqa: BLE001 - 못 세면 안 적는다
         return ""
-    total, unused = int(total or 0), int(unused or 0)
+    total = int(total or 0)
+    raw_unused, unused = int(raw_unused or 0), int(unused or 0)
+    intraday_unused = int(intraday_unused or 0)
+    intraday_formula_unused = int(intraday_formula_unused or 0)
     age = float(age or 0)
-    if unused >= LEADS_LOW and age < LEADS_STALE_DAYS:
+    if (unused >= LEADS_LOW and intraday_unused >= INTRADAY_LEADS_LOW
+            and intraday_formula_unused >= INTRADAY_FORMULA_LEADS_LOW
+            and age < LEADS_STALE_DAYS):
         return ""                      # 재료가 넉넉하면 말하지 않는다
 
     why = []
     if unused < LEADS_LOW:
         why.append(f"안 쓴 리드가 {unused}건뿐이다(기준 {LEADS_LOW})")
+    if intraday_unused < INTRADAY_LEADS_LOW:
+        why.append(
+            f"event-time 미사용 리드가 {intraday_unused}건뿐이다"
+            f"(별도 기준 {INTRADAY_LEADS_LOW})")
+    if intraday_formula_unused < INTRADAY_FORMULA_LEADS_LOW:
+        why.append(
+            f"typed formula-thesis event-time 미사용 리드가 "
+            f"{intraday_formula_unused}건뿐이다"
+            f"(별도 기준 {INTRADAY_FORMULA_LEADS_LOW})")
     if age >= LEADS_STALE_DAYS:
         why.append(f"가장 최근 리드가 {age:.1f}일 전이다")
     return "\n".join([
         "",
         f"[재료 부족 - **기획 전에 스카우트가 먼저다**] 리드 {total}건 중 "
-        f"안 쓴 것 {unused}건",
+        f"원시 미사용 {raw_unused}건 · 실행가능 미사용 {unused}건 · "
+        f"event-time 미사용 {intraday_unused}건 · typed formula-thesis 미사용 "
+        f"{intraday_formula_unused}건",
         "  " + " · ".join(why),
         "  ▶ 이 상태로 기획안을 내면 **이미 기각된 계열을 다시 내게 된다.**",
         "    실측(2026-08-12): 그렇게 낸 기획안 2건이 Gate 0 에서 "
@@ -918,6 +1711,303 @@ def _lead_health(conn) -> str:
         "    렌즈를 순서대로 돌리고 **어느 렌즈가 말랐는지 말해라** - 빈 것도 사실이다.",
         "  ▶ 재검증 가능한 URL 을 반드시 들고 와라. 다시 열 수 없는 리드는 접수에서 막힌다.",
     ])
+
+
+# top_n 대역. 실행 한도(5~300)를 셋으로 가른다 - 현행 관례(5-50), 중간, 광폭.
+TOPN_BANDS = (("5-50", 5, 50), ("51-150", 51, 150), ("151-300", 151, 300))
+
+
+def _alpha_expr_line(conn) -> str:
+    """**표현 수단 안내 - 수식(AST)으로 알파를 적을 수 있다.**
+
+    ▶ 왜 브리핑에 싣나 (2026-08-14)
+      실행면에 AST 를 열었지만 **기획자가 그 표현이 있는 줄 모르면 안 쓴다.**
+      실측이 그것을 보여준다 - 제안 42건의 데이터 요구가 전부 `market_bars`
+      였고 가격 밖 근거는 2건(4.8%)이었다. 어휘가 아니라 **표현 수단이 상상의
+      경계**였고, 그 경계는 알려주는 것으로 넓어진다(top_n 광폭 진단이 실험
+      0건 -> 31건으로 바뀐 것이 같은 경로다).
+
+      리서치 프로필(다른 부서 소유)을 건드리지 않고 여기서 전달한다.
+    """
+    try:
+        from alpha_ast import ALL_OPS, FIELDS, MAX_DEPTH, MAX_NODES  # noqa: PLC0415
+
+        with conn.cursor() as cur:
+            cur.execute("""
+                select count(*) from quant.experiments
+                 where config ? 'signal_expr'""")
+            used = int(cur.fetchone()[0] or 0)
+            cur.execute("select count(*) from quant.experiments")
+            total = int(cur.fetchone()[0] or 0)
+            # ▶ **미시구조 표본 길이를 기계가 센다** (2026-08-14)
+            #   서술로 적어 두면 무시된다(실측: 서술형 진단이 5주기 연속
+            #   무시됐고, 기계가 센 격자는 실험 31건으로 채택됐다). 그래서
+            #   커버리지를 원장에서 직접 세어 **숫자로** 준다.
+            cur.execute("""
+                select count(distinct p.partition_key),
+                       min(p.min_event_time)::date, max(p.max_event_time)::date
+                  from quant.dataset_manifests m
+                  join quant.dataset_partitions p on p.dataset_id = m.dataset_id
+                 where m.name = 'krx-microstructure-daily'""")
+            mcov = cur.fetchone() or (0, None, None)
+    except Exception:  # noqa: BLE001 - 못 세면 안 적는다(지어내지 않는다)
+        return ""
+    micro_lines = []
+    if mcov and int(mcov[0] or 0) > 0:
+        micro_lines = [
+            f"  ▶ **미시구조 표본은 {int(mcov[0])}거래일이다**"
+            f"({mcov[1]}~{mcov[2]}). 일봉 2016~ 이 아니다.",
+            "    미시구조 필드를 쓰면 실행면이 표본을 이 구간으로 자른다 - "
+            "형성·보유 창을",
+            "    이 안에서 잡아야 walk-forward 창이 나온다.",
+            "  ▶ **일별 집계 OFI 는 이미 격자로 재 봤다 - 회전을 조절해도 안 "
+            "산다**(2026-08-14,",
+            "    58거래일 표본, 원장 밖 진단이라 시도 예산은 안 먹었다):",
+            "      매일/top200  초과 -5.29%p · 회전 33.3x · 수수료 5.69%",
+            "      5일/top200   초과 -9.83%p · 회전 11.4x · 수수료 1.89%",
+            "      5일/top50    초과 -9.66%p   ·  5일/top20  초과 -9.65%p",
+            "    수수료를 3.8%p 줄였는데 성적은 4.5%p 더 나빠졌다 - **비용으로 "
+            "아낀 것보다",
+            "    신호를 잃은 것이 크다.** OFI 는 짧은 지평 신호라 며칠을 들면 "
+            "죽는다. top_n 을",
+            "    200->20 으로 줄여도 초과가 안 변하는 것(-9.83/-9.66/-9.65)은 "
+            "상위 분위가",
+            "    평균과 구별되지 않는다는 뜻이고, IC +0.012(t 0.79)와 같은 "
+            "이야기다.",
+            "    ▶ 그러니 **같은 `order_flow_imbalance` 를 사양만 바꿔 다시 "
+            "내지 마라.**",
+            "      진단: 하루를 **평균 하나로 접은 것**이 병목이었다. "
+            "`sum(side*qty)/sum(qty)` 는",
+            "      오전에 팔고 오후에 산 종목을 중립으로 찍어 정보를 상쇄한다.",
+            "",
+            "  ▶ **그래서 일중 구간 필드를 새로 열었다**(2026-08-14, 데이터셋 v3). "
+            "일별 한 행",
+            "    그대로라 실행면 규약은 안 바뀐다 - 하루를 뭉개지 않을 뿐이다:",
+            "      ofi_close          14:50~15:30 주문흐름불균형. **체결이 t+1 "
+            "시가라 시점이 맞다**",
+            "      ofi_open           09:00~09:30. 밤사이 정보의 반영",
+            "      ofi_intraday_std   4구간 OFI 의 표준편차. 한 방향인 날 vs "
+            "오락가락한 날",
+            "      close_vs_vwap      종가/VWAP - 1. 하루 내내 매수 압력이 "
+            "있었으면 양수",
+            "      spread_close_ratio 마감 스프레드 / 개장 스프레드. 유동성의 "
+            "일중 변화",
+            "    서로 다른 것을 잰다 - 상관 일간vs마감 0.349 · 일간vs개장 0.457 · "
+            "마감vs개장 0.145.",
+            "",
+            "  ▶ **아래 과거 IC 측정은 무효화됐다**(v3 외부 원천 side 인코딩 결함): "
+            "(61거래일 · 58창,",
+            "    t 일 신호 -> t+1 시가 매수 -> t+2 시가 매도, 횡단면 Spearman):",
+            "      order_flow_imbalance  IC +0.0243  t 2.64",
+            "      ofi_open              IC +0.0199  t 2.07",
+            "      ofi_intraday_std      IC +0.0289  t 1.58",
+            "      close_vs_vwap         IC -0.0102  t -0.67",
+            "      ofi_close             IC +0.0017  t **0.23**   <- 분산은 "
+            "1.82배인데 예측력 0",
+            "      spread_close_ratio    IC -0.0001  t -0.03",
+            "    외부 ticks.side 는 1=매수, 5=매도인데 이를 ±1처럼 곱해 OFI가 "
+            "[-1,1]을 벗어났다.",
+            "    v4는 ofi_contrib(+volume/-volume)로 고쳤다. 위 수치를 성과 근거·"
+            "실패 기억으로 쓰지 말고 v4에서 재측정하라.",
+            "    ▷ 표본을 11일로 줄여 재면 close_vs_vwap 이 t -2.24 로 보였다가 "
+            "58일에서 -0.67 로",
+            "      사라졌다. **6개를 동시에 재면 |t|>2 하나쯤은 우연히 나온다** - "
+            "짧은 표본의",
+            "      단일 지표를 근거로 사양을 고르지 마라.",
+            "    ▷ 분산이 크다 != 예측력이 있다. v4에서 단독·결합 수식을 모두 "
+            "사전등록해 다시 재라.",
+            "",
+            "  ▶ **v4 는 시간 구간뿐 아니라 호가의 공간·체결크기 축을 연다.**",
+            "    실측상 과거 `depth_imbalance` 는 내부 경로=L10, 외부 경로=L1로 의미가",
+            "    달랐다. v4 에서는 legacy 열을 L1로 통일하고 다음을 명시적으로 분리한다:",
+            "      depth_imbalance_l1    최우선호가 잔량 불균형",
+            "      depth_imbalance_l10   가용 1~10호가 누적 잔량 불균형",
+            "      depth_imbalance_slope L1-L10. 표면과 깊은 장부가 반대인지 측정",
+            "      size_weighted_ofi     수량 제곱 가중 체결 OFI. 큰 체결 방향을 강조",
+            "  ▶ **v5 는 방향과 절대 수용력을 분리한다.** v4 불균형은 얇은 장과",
+            "    두꺼운 장이 같은 +0.2일 수 있었다. 가격×잔량을 백만원으로 접어",
+            "    OFI 충격을 실제 흡수할 양방향 용량을 직접 표현한다:",
+            "      book_depth_notional_l1   최우선 양방향 가격×잔량. 즉시 흡수 용량",
+            "      book_depth_notional_l10  1~10호가 가격×잔량. 전체 흡수 용량",
+            "    단독 깊이는 방향 알파가 아니다. OFI와 div/mul로 상호작용시키거나",
+            "    저용량 상태 조건으로 쓰고 그 경제적 반대편을 명시하라.",
+            "    공개식을 그대로 복제하지 말고, 예를 들어 L1 압력에서 L10 지지를 빼거나",
+            "    일반 OFI와 대형체결 OFI의 불일치를 비용·스프레드와 결합해 메커니즘을 적어라.",
+            "    이벤트 순번/거래량 버킷은 원천으로 계산 가능하지만 대규모 정렬 비용과",
+            "    체결 지평 엔진이 아직 검증 전이므로 현재 AST 필드인 척 쓰지 마라.",
+            "  ▶ 회전을 직접 정하려면 `suggested_params.rebalance` 를 적는다"
+            "(EVERY_TRADING_DAY / EVERY_2_TRADING_DAYS /",
+            "    EVERY_5_TRADING_DAYS / MONTH_FIRST_TRADING_DAY). 안 적으면 "
+            "horizon 에서 유도되고",
+            "    horizon=2 는 2거래일마다, horizon=1·3 은 매일이 된다. "
+            "**horizon 을 늘리는 것과 다르다** - "
+            "그건 신호 자체를",
+            "    바꿔 다른 실험이 되고, 이건 같은 신호를 덜 자주 거래하는 것이다.",
+            "  ▶ MIN_HISTORY_DAYS 는 현재 커버리지 숫자를 복사하는 칸이 아니다. "
+            "61일 표본의 2일 지평에서",
+            "    강건성 4창(유효 각 10일 + embargo 2일)을 만들려면 워밍업이 "
+            "13일 이하여야 한다. "
+            "60일 변동성 창을",
+            "    켜면 평가구간이 남지 않으므로 그 제안은 실행 전에 반려된다.",
+        ]
+    return "\n".join([
+        "",
+        f"[알파를 **수식으로** 적을 수 있다 - 지금까지 {used}/{total} 건이 썼다]",
+        "  완성된 신호 이름을 고르는 대신 `suggested_params.signal_expr` 에 수식",
+        "  트리를 적으면 그것이 신호가 된다. 두 피처를 결합하거나 방향을 뒤집는",
+        "  가설은 이 방법으로만 표현된다 - 이름 목록에는 그런 칸이 없다.",
+        "  예: 호가 매수압력이 크면서 스프레드가 좁은 종목",
+        '    {"op":"sub","args":['
+        '{"op":"rank","arg":{"op":"ts_mean","field":"order_flow_imbalance","n":3}},',
+        '                       '
+        '{"op":"rank","arg":{"op":"ts_mean","field":"spread_bps","n":10}}]}',
+        f"  연산자({len(ALL_OPS)}): {', '.join(sorted(ALL_OPS))}",
+        f"  필드({len(FIELDS)}): {', '.join(sorted(FIELDS))}",
+        f"  제약: 깊이<={MAX_DEPTH} · 노드<={MAX_NODES} · 창 1~250."
+        "  **큰 값을 산다**(방향을 뒤집으려면 neg 를 쓴다).",
+        "  ▶ 값이 없는 종목은 점수를 안 낸다(0 으로 안 채운다). 미시구조 필드를",
+        "    쓰면 그 데이터셋이 자동으로 실린다 - 따로 적지 않아도 된다.",
+        "  ▶ 수식은 **접수에서 검증**된다. 모르는 연산자·필드·범위 밖 창은",
+        "    SIGNAL_EXPR_INVALID 로 반려되니 위 목록 안에서 쓴다.",
+        "  ▶ **경제 논리에 그 필드 이야기를 써라.** 수식이 읽는 필드가",
+        "    economic_rationale·counterparty 어디에도 안 나오면",
+        "    HYPOTHESIS_FACTOR_MISMATCH 로 반려된다. 실험은 수식대로 돌지만",
+        "    판정은 논리 이름으로 원장에 남아서, 둘이 다르면 그 결과는 무엇의",
+        "    증거도 아니게 된다 - 위 예시라면 논리에 '매수 압력' 과 '스프레드'",
+        "    가 왜 들어가는지 적으면 된다(표현은 자유, 영어도 된다).",
+        *micro_lines,
+    ])
+
+
+def _design_gap_line(conn) -> str:
+    """**설계 공간의 빈 니치 - 기계가 센 사실.** 격자가 곧 후보 공급원이다.
+
+    ▶ 왜 (2026-08-13 실측 + 문헌, idea-starvation-sweep 검증 5/5)
+      스카우트 유입이 이틀 멈추자 기획이 부채 청소만 반복했고, 서술형 진단
+      (TC 0.114 vs 0.316)은 다섯 주기 연속 무시됐다 - 신규 기획 prop_56f65361
+      이 진단을 읽고도 top_n=20 을 또 썼다. 자율 실험실 문헌의 공통 구조가
+      처방이다: 후보는 유한 목록이 아니라 **파라미터 공간**이고(ChemOS 는
+      옵티마이저가 다음 점을 미리 채워 큐가 마르지 않는다), 미시도 셀은
+      불확실성이 커서 획득 점수가 자동으로 붙으며(GP-UCB 의 σ 항), 실험 49건이
+      top_n 5-50 한 열에 몰린 것은 MAP-Elites 가 말하는 한 니치 과밀이다.
+      기계는 빈 칸을 세고 **살 가치(경제 논리·반증)는 에이전트가 정한다** -
+      여기는 조회층이고, 접수·예산·DSR 관문은 그대로다.
+    """
+    try:
+        from strategy_templates import EDGE_VOCAB      # noqa: PLC0415 (실행면 정본)
+
+        with conn.cursor() as cur:
+            cur.execute("""
+                select coalesce(h.expected_edge->>'type',''),
+                       coalesce((e.config->>'top_n')::int, 0),
+                       upper(coalesce(e.config->>'portfolio_construction',
+                                      'TOP_N')),
+                       (e.config ? 'trend_filter_days')
+                  from quant.experiments e
+                  left join quant.hypotheses h
+                         on h.hypothesis_id = e.hypothesis_id""")
+            tried: set = set()
+            builds: dict = {}
+            trend_used = 0
+            for et, tn, pc, tf in cur.fetchall():
+                band = next((b for b, lo, hi in TOPN_BANDS
+                             if lo <= int(tn or 0) <= hi), TOPN_BANDS[0][0])
+                tried.add((str(et), band))
+                builds[str(pc)] = builds.get(str(pc), 0) + 1
+                if tf:
+                    trend_used += 1
+        edges = sorted(EDGE_VOCAB)
+    except Exception:  # noqa: BLE001 - 못 세면 안 적는다(지어내지 않는다)
+        return ""
+    empty = [(e, b) for e in edges for b, _, _ in TOPN_BANDS
+             if (e, b) not in tried]
+    if not empty:
+        return ""
+    # 광폭 대역 먼저 - IR 구조 진단(실측 TC: top20 0.114 vs top200 0.316)이
+    # 격자의 그 열을 가리킨다. 순서는 후보 순위이지 명령이 아니다.
+    order = {"151-300": 0, "51-150": 1, "5-50": 2}
+    empty.sort(key=lambda x: (order[x[1]], x[0]))
+    bands_tried = {b for _, b in tried}
+    crowd = (" · 지금까지의 실험은 **전부 top_n 5-50 한 대역**이었다"
+             if bands_tried <= {"5-50"} else "")
+    # ▶ **어휘에만 있고 실험 0건인 항목은 자산이 아니라 부채다** (2026-08-14)
+    #   문헌(대규모 실험 조직 실측): 아이디어의 3분의 1 미만만 목표 지표를
+    #   실제로 움직이고, 전문가의 사전 판단은 신뢰할 수 없다. 어휘에 등재된
+    #   것은 "돌 수 있다는 약속" 일 뿐이고 그 약속은 한 번도 검증된 적이 없다 -
+    #   접수는 실행 가능성의 약속인데 그 약속이 미검증이면 다음 주기가 그
+    #   위에 기획을 쌓는다. 싸고 작게 먼저 한 번 돌리는 것이 정석이다.
+    never = sorted({e for e in edges if not any(k[0] == e for k in tried)})
+    debt = []
+    if never:
+        debt = [
+            f"  ▶ **미검증 부채**: 어휘에 있는데 실험이 0건인 유형 "
+            f"{len(never)}개 - {', '.join(never[:6])}",
+            "    등재는 '돌 수 있다'는 약속이고 그 약속은 아직 검증된 적이 "
+            "없다. 새 계열을 열기 전에 이 중 하나를 **작게 한 번** 돌려 "
+            "약속을 사실로 바꾸는 편이 싸다.",
+        ]
+
+    # ▶ **구성 방식 축** (2026-08-14 분위 곡선 실측)
+    #   격자는 "무엇을 사는가(edge)" 와 "몇 개를 사는가(top_n)" 만 셌다. 그런데
+    #   실측이 가른 것은 **어떻게 담는가** 였다 - signal_composite 를 체결가능
+    #   유니버스(1,689종목) 10분위로 갈라 보니 롱온리 초과(Q10-평균)가
+    #   +0.06%p/월인데 숏다리 몫(평균-Q1)은 +1.00%p/월이었다. 상위를 고르는
+    #   구성으로는 못 먹는 신호이고, top_n 을 어떻게 흔들어도 곡선은 그대로다.
+    #   `BASELINE_NOT_BEATEN` 이 계열 14개에서 되풀이된 것도 같은 벽이다.
+    #   실행면에 하위 배제를 열었으므로(portfolio_construction=EXCLUDE_BOTTOM),
+    #   그 열이 실제로 비었는지 세어서 사실로 알린다 - 명령이 아니라 빈 칸이다.
+    build_gap: list = []
+    if not builds.get("EXCLUDE_BOTTOM"):
+        _tot = sum(builds.values()) or 0
+        build_gap = [
+            f"  ▶ **구성 방식 축이 통째로 비었다**: 실험 {_tot}건이 전부 "
+            f"상위 N개를 사는 구성(TOP_N)이고, 하위 배제는 0건이다.",
+            "    실측(signal_composite 분위 곡선, 체결가능 1,689종목·비용 전): "
+            "롱온리 초과(Q10-평균) +0.06%p/월 vs 숏다리 몫(평균-Q1) +1.00%p/월 - "
+            "알파가 상위가 아니라 하위에 있다.",
+            "    실행면 손잡이: portfolio_construction=EXCLUDE_BOTTOM · "
+            "exclude_bottom_pct(1~90). 하위 q% 를 빼고 나머지 전체를 동일가중으로 "
+            "든다(top_n 은 이때 관여하지 않는다).",
+        ]
+
+    # ▶ **위험 수단 축** (2026-08-14 조사)
+    #   원장 실측이 양쪽으로 막혀 있다 - 손잡이를 끄면 momentum 이 IR 1.255·
+    #   초과 +157.5%p 인데 낙폭 -50.5% 로 강건성에 걸리고, 변동성 타게팅을
+    #   켜면 낙폭은 잡히는데 IR 이 -0.45 로 무너진다. 관문은 정당하다(업계
+    #   OOS 승률 임계 60%·Millennium 낙폭 -5% 자본 반감 대비 우리 -25% 는
+    #   오히려 관대) - 그러니 **수단이 모자란 것**이다. 문헌은 이동평균 등
+    #   타이밍 요소가 장기 하락장 노출 축소에 효과적이고 변동성 타게팅과 달리
+    #   강세장 참여를 덜 희생한다고 본다. 실행면에 그 손잡이를 열었다.
+    trend_gap: list = []
+    if not trend_used:
+        trend_gap = [
+            f"  ▶ **위험 수단 축이 비었다**: 시장 추세 필터를 쓴 실험 0건 "
+            f"(전체 {sum(builds.values())}건).",
+            "    지금 손잡이는 변동성 타게팅·낙폭 정지 둘뿐인데, 실측상 둘 다 "
+            "낙폭을 잡는 대신 IR 을 무너뜨린다(1.255 → -0.45).",
+            "    실행면 손잡이: trend_filter_days(20~250) · "
+            "trend_filter_exposure(0~0.9). 시장 수익률 중앙값이 음(-)인 구간에만 "
+            "노출을 줄인다 - 강세장에는 관여하지 않는다.",
+        ]
+
+    lines = [
+        "",
+        f"[설계 공간의 빈 니치 - 기계가 센 사실] "
+        f"{len(edges) * len(TOPN_BANDS)}칸(edge×top_n 대역) 중 "
+        f"빈 칸 {len(empty)}개{crowd}",
+        *build_gap,
+        *trend_gap,
+        *debt,
+        "  우선 후보 (광폭 대역 우선 - 실측 TC: top20 0.114 vs top200 0.316):",
+    ]
+    for e, b in empty[:6]:
+        lines.append(f"    · {e} × top_n {b}")
+    lines += [
+        "  ▶ 빈 칸은 사실이고 **살 가치는 네가 정한다** - 경제 논리(누가 반대편에",
+        "    서는가)·반증 없이 칸만 채우는 기획은 접수에서 반려된다. 리드가",
+        "    말랐어도 이 격자가 후보 공급원이다 - 후보는 목록이 아니라 공간이다.",
+    ]
+    return "\n".join(lines)
 
 
 def _unrunnable_falsifications(conn, *, keep: int = 4) -> str:
@@ -1134,6 +2224,12 @@ _EXEC_SURFACE = """
   quant-py pipeline/pit_dataset.py --build --name <n> --version <v> --from <d> --to <d>
   quant-py pipeline/<모듈>.py            # 인자 없이 = 자체점검
 
+  이 카드 안에서는 `pipeline/experiment_worker.py --serve` 를 실행하지 마라.
+  상주 큐 소비자는 별도 `factory-experiment-worker` 컨테이너가 이미 맡고 있다.
+  카드는 위 `experiment_orchestrator.py --run` 단발 명령의 결과를 판정하고 끝낸다.
+  `--serve` 는 카드와 에이전트 슬롯을 영구 점유하고, 카드 workspace 의 낡은
+  코드를 상주시키므로 실행 완료가 아니다.
+
   "실행면이 없다"고 쓰기 전에 위 경로를 실제로 열어 본다. 진짜로 없으면
   무엇이 없는지 정확히 적는다 - 그 구분이 이 카드의 값이다."""
 
@@ -1141,17 +2237,21 @@ _EXEC_SURFACE = """
 # ── 카드 생성 ────────────────────────────────────────────────────────────────
 
 def _create_card(*, title: str, body: str, assignee: str, key: str,
-                 dry_run: bool) -> str | None:
+                 dry_run: bool, priority: int = 0,
+                 max_runtime: str | None = None) -> str | None:
     """칸반 카드 하나. **같은 주기에 두 번 돌아도 카드는 하나다**(idempotency-key).
 
     중복 카드는 같은 실험을 두 번 사는 것과 같다 - 공장의 존재 이유에 반한다.
     """
-    argv = ["docker", "exec", "-u", "hermes", "-i", KANBAN_CLI_CONTAINER,
+    argv = ["docker", "exec", "-u", "1000", "-i", KANBAN_CLI_CONTAINER,
             "hermes", "kanban", "create", title,
             "--assignee", assignee,
             "--idempotency-key", key,
             "--created-by", MODULE_VERSION,
+            "--priority", str(priority),
             "--body", body]
+    if max_runtime:
+        argv.extend(["--max-runtime", max_runtime])
     if dry_run:
         print(f"  [dry-run] {assignee} <- {title}")
         print(f"            key={key} 본문 {len(body)}자")
@@ -1170,6 +2270,139 @@ def _create_card(*, title: str, body: str, assignee: str, key: str,
     return out
 
 
+def _scope_key(items) -> str:
+    """개선 카드의 **범위 지문.** 같은 병목 묶음이면 같은 지문이다.
+
+    ▶ 왜 stamp 를 키에서 뺐나 (2026-08-14 보드 실측)
+      키가 `factory-bottleneck-{owner}-{stamp}` 였다. stamp 가 매 주기 바뀌니
+      idempotency 가 **주기를 넘는 순간 무력화**된다 - 같은 주기에 두 번 도는
+      것만 막고, 주기를 넘는 중복은 하나도 못 막았다. 그 결과 같은 개선 카드가
+      이틀에 **96장** 나갔고, 앞 카드가 `blocked` 로 서 있는 동안에도 새 카드가
+      나갔다. 에이전트는 못 하겠다고 말했고 공장은 매 시간 같은 질문을 다시
+      걸었다(`_create_card` 는 "중복 카드는 같은 실험을 두 번 사는 것" 이라고
+      스스로 적어 놓고 키에 stamp 를 넣어 그 성질을 무력화했다).
+
+      지문은 **병목 목록**에서 뽑는다. 병목이 그대로면 지문도 그대로여서 앞
+      카드가 살아 있는 한 새 카드가 안 나가고, 하나라도 없애면 지문이 달라져
+      새 카드가 나간다. "없애면 저절로 사라진다" 는 성질을 그대로 쓴다.
+    """
+    keys = sorted({str(getattr(b, "key", "")) for b in items})
+    return hashlib.sha1("|".join(keys).encode("utf-8")).hexdigest()[:10]
+
+
+def _kind_scope_key(items) -> str:
+    """개선 카드의 **억제 지문.** 같은 종류 묶음이면 같은 지문이다.
+
+    ▶ 왜 `_scope_key` 로는 안 되나 (2026-08-14 보드 실측)
+      범위 지문을 키에 넣은 지 **48분 만에** 퀀트 카드가 또 나갔다.
+
+        10:12  t_8699a48f  ...-71f357a631-20260814T10   병목 13건
+        11:00  t_0759eb9f  ...-4240f506a0-20260814T10   병목 14건
+
+      두 장의 **종류 집합은 완전히 같다.** 갈린 것은 그 안의 개체뿐이다 -
+      `job:BAD_TRANSITION…` -> `job:OSError Errno 12…`,
+      `sound:max_drawdown_stop:…` -> `sound:order_flow_imbalance:…:고아`.
+
+      `_scope_key` 는 `Bottleneck.key` 를 해시하는데, census 가 만드는 key 는
+      **개체 수준**이다(`job:{sig}`, `sound:{clause}:{level}`, `gate:{crit}`,
+      `lesson:{code}`). 그중 `job:{sig}` 는 실패 순위표를 따라가고 순위표는
+      매 주기 바뀐다. 그러니 지문도 매 주기 새 값이 되고, 억제는 **구조적으로
+      절대 못 건다.** 96장을 만든 고리가 형태만 바꿔 남아 있었던 것이다.
+
+      `kind` 는 census 의 **고정 어휘**(11종)라 개체가 갈려도 안 흔들린다.
+      억제는 이쪽으로 건다. `_scope_key` 는 키에 그대로 남겨 **개체가 언제
+      갈렸는지**를 눈으로 볼 수 있게 둔다(추적용, 억제용이 아니다).
+
+      **반대 방향도 지킨다:** 종류가 하나라도 늘거나 줄면 지문이 달라져 새
+      카드가 나간다. 억제가 새 병목을 삼키면 "겉만 덮은 것" 이 조용해지는데,
+      그건 개선 카드가 금지한 바로 그 실패다.
+    """
+    kinds = sorted({str(getattr(b, "kind", "") or getattr(b, "key", ""))
+                    for b in items})
+    return hashlib.sha1("|".join(kinds).encode("utf-8")).hexdigest()[:10]
+
+
+def _unresolved_card(owner: str, scope: str) -> str | None:
+    """같은 범위의 **아직 안 끝난** 카드. 없으면 None.
+
+    끝난 카드(done/failed)는 억제 근거가 못 된다 - 병목이 그대로면 다시
+    걸어야 한다. 억제가 지나치면 **겉만 덮은 것이 조용해진다**, 그건 개선
+    카드가 금지한 바로 그 실패다.
+
+    보드를 못 읽으면 **걸어 준다**(fail-open). 조회 실패로 개선 카드를 통째로
+    잃는 쪽이, 중복 한 장보다 나쁘다.
+    """
+    prefix = f"factory-bottleneck-{owner}-{scope}-"
+    try:
+        rows = _board_rows(
+            "select id, status, idempotency_key from tasks "
+            "where idempotency_key like ? "
+            "  and status in ('ready','running','blocked')", (prefix + "%",))
+    except Exception as exc:  # noqa: BLE001
+        print(f"  보드 조회 실패 - 중복 억제 생략({type(exc).__name__}): "
+              f"카드는 그대로 건다", flush=True)
+        return None
+    for row in rows:
+        tid = row[0]
+        status = row[1] if len(row) > 1 else "?"
+        return f"{tid}({status})"
+    return None
+
+
+def _active_card_by_key_prefix(prefix: str) -> str | None:
+    """Return one ready/running card whose idempotency key starts with *prefix*.
+
+    Time-bucket idempotency prevents duplicates inside one bucket, but it does
+    not protect a long-running card that crosses an hour boundary.  Scout work
+    is deliberately expensive and the research profile currently consumes one
+    card at a time, so a second active scout would only duplicate discovery
+    without increasing the executable-lead production rate.
+
+    Board-read failures are fail-open: the hourly idempotency key still bounds
+    duplication, while a transient read failure must not stop discovery.
+    """
+    try:
+        rows = _board_rows(
+            "select id, status, idempotency_key from tasks "
+            "where idempotency_key like ? "
+            "  and status in ('ready','running') "
+            "order by created_at asc limit 1",
+            (prefix + "%",),
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"  board lookup failed - active-card guard skipped "
+              f"({type(exc).__name__})", flush=True)
+        return None
+    if not rows:
+        return None
+    row = rows[0]
+    return f"{row[0]}({row[1] if len(row) > 1 else '?'})"
+
+
+def _should_schedule_planner(research_brief: str,
+                             executable_unused: int | None,
+                             intraday_formula_unused: int | None) -> bool:
+    """Consume only after the primary intraday producer has material.
+
+    The research profile executes one card at a time.  Scheduling a planner
+    while there are zero executable unused leads makes
+    the planner run first (higher queue priority), spend a model turn rejecting
+    stale families, and then leaves the newly discovered leads waiting for the
+    next 30-minute planner bucket.  The aggregate count can be positive solely
+    because daily leads remain.  The Planner contract prioritizes event-time and
+    refuses a daily fallback when that lane is empty, so both counts must be
+    non-empty.  A low watermark is still not an empty queue: one v3 formula is
+    enough to let Planner consume while Scout replenishes the population.
+
+    ``None`` means the count could not be measured and is fail-closed.
+    """
+    return (bool(str(research_brief or "").strip())
+            and executable_unused is not None
+            and intraday_formula_unused is not None
+            and int(executable_unused) > 0
+            and int(intraday_formula_unused) > 0)
+
+
 def _board_rows(sql: str, params: tuple = ()) -> list[tuple]:
     """칸반 보드를 **컨테이너를 통해** 읽는다.
 
@@ -1183,7 +2416,7 @@ def _board_rows(sql: str, params: tuple = ()) -> list[tuple]:
         "finally: c.close()\n")
     import json as _json
     r = subprocess.run(
-        ["docker", "exec", "-u", "hermes", "-i", KANBAN_CLI_CONTAINER,
+        ["docker", "exec", "-u", "1000", "-i", KANBAN_CLI_CONTAINER,
          "python3", "-c", code, sql, _json.dumps(list(params))],
         capture_output=True, text=True, encoding="utf-8", timeout=120)
     if r.returncode != 0:
@@ -1278,8 +2511,17 @@ DELIVERY_RULES = (
     "자리에 전문 2,434자와 요약 123자가 번갈아 와서 본문을 잃은 실측이 있다.\n"
     "- 호출할 때 `planner_run` 에 **이 카드의 ID**(t_ 로 시작)를 그대로 넣어라. "
     "그래야 납품이 이 카드 몫으로 대조된다.\n"
+    "- 제출 전에 `run_research_workers(proposal_draft=<기획자 초안>)` 를 호출하고 "
+    "`get_worker_job` 으로 COMPLETED 를 확인하라. 결과의 typed "
+    "`skeptic_reviews`는 제출 도구가 직접 접수 블록으로 바꾼다 - 요약을 손으로 "
+    "옮기지 마라. 반환된 **실제 job_id를 바꾸지 말고 `skeptic_run` 에 넣어라.** "
+    "FAILED·DEGRADED면 "
+    "제출하지 말고 차단 사유를 남겨라. 자기 서명(`#self`)이나 임의 실행명은 "
+    "접수 경계에서 거부된다.\n"
     "- 반려를 받으면 사유가 도구 결과로 즉시 돌아온다 - 그 사유에 답해 **같은 "
     "카드 안에서** 다시 제출하라.\n"
+    "- 작업 완료 명령을 찾으려고 `/opt/data` 전체를 재귀 검색하지 마라. 도구 "
+    "납품 뒤 최종 응답을 반환하면 작업 실행기가 카드를 종결한다.\n"
     "- 제출하지 못했으면 왜인지를 metadata 에 구조화해 남겨라 - **기권도 1급 "
     "산출물이다.** 조용한 미제출이 제일 나쁘다.\n")
 
@@ -1296,8 +2538,8 @@ def _mcp_deliveries(planner_id: str, conn=None) -> int:
       텍스트에서 원장으로 옮기면 그 채널의 불안정이 무의미해진다.**
 
     대조 두 겹: ① `case_id = 'card-<카드ID>'` 정확 대조(MCP 가 찍는다)
-              ② 카드 실행 시간창 안에 생긴 기획안(에이전트가 planner_run 을
-                 다르게 넣은 경우의 안전망)
+              ② `card-<카드ID>-...` 결정론적 레거시 접두 대조. 시간창은
+                 동시 카드의 인과관계를 증명하지 못하므로 사용하지 않는다.
 
     못 재면 0 을 돌려준다. 미측정!=0 원칙의 예외가 아니다 - 이 함수의 실패는
     **멱등한 텍스트 폴백으로 떨어질 뿐**이고(proposal_id 가 리드·엣지·유니버스
@@ -1307,24 +2549,16 @@ def _mcp_deliveries(planner_id: str, conn=None) -> int:
     try:
         if own:
             conn = _conn()
+        case_id = f"card-{planner_id}"
         with conn.cursor() as cur:
-            cur.execute("select count(*) from research.experiment_proposals"
-                        " where case_id = %s", (f"card-{planner_id}",))
-            exact = int(cur.fetchone()[0] or 0)
-        if exact:
-            return exact
-        rows = _board_rows(
-            "select min(started_at), max(ended_at) from task_runs"
-            " where task_id=? and status='done'", (planner_id,))
-        if not rows or not rows[0] or not rows[0][0]:
-            return 0
-        t0 = int(rows[0][0])
-        t1 = int(rows[0][1] or rows[0][0])
-        with conn.cursor() as cur:
+            # New submissions are exact.  The prefix is a deterministic legacy
+            # bridge for agents that appended a planner label.  Never use a time
+            # window: concurrent cards can publish in the same minute and
+            # temporal proximity is not causal provenance.
             cur.execute(
                 "select count(*) from research.experiment_proposals"
-                " where created_at between to_timestamp(%s) and to_timestamp(%s)",
-                (t0 - 60, t1 + 180))
+                " where case_id = %s or case_id like %s",
+                (case_id, case_id + "-%"))
             return int(cur.fetchone()[0] or 0)
     except Exception as exc:  # noqa: BLE001
         print(f"  (납품 대조 실패 - 텍스트 폴백으로 진행: "
@@ -1455,7 +2689,10 @@ def harvest(*, dry_run: bool = False) -> int:
                               (b.get("EDGE_TYPE") or "").strip().lower(),
                               (b.get("UNIVERSE_KEY") or "").strip().lower(),
                               label=(b.get("LABEL") or "").strip(),
-                              baseline=(b.get("BASELINE") or "").strip()))
+                              baseline=(b.get("BASELINE") or "").strip(),
+                              signal_expr=PI.signal_expr_from_block(b),
+                              research_lane=(b.get("RESEARCH_LANE") or
+                                             "DAILY_CROSS_SECTIONAL").strip()))
             pub = r.publishable
             if dry_run:
                 print(f"  [dry-run] {stamp}: 발행가능 {len(pub)}건 "
@@ -1522,7 +2759,7 @@ def _promote(*, dry_run: bool = False) -> int:
             # **거부도 결과다.** 조용히 사라지면 리서치가 대응할 수 없다.
             print(f"      게이트 거부: {p.proposal_id} <- {p.why[:110]}", flush=True)
             record_rejections(
-                [SimpleNamespace(title=p.proposal_id, reason=p.why)],
+                [SimpleNamespace(title=p.proposal_id, reason=p.feedback)],
                 stamp="gate0")
     return 0
 
@@ -1536,6 +2773,16 @@ select h.hypothesis_id::text, left(h.title, 60)
    and not exists (select 1 from quant.experiment_jobs j
                     where j.hypothesis_id = h.hypothesis_id
                       and j.status in ('QUEUED','LEASED'))
+   -- A blocked coverage probe is not a failed experiment. Recheck hourly so a
+   -- newly arriving causal session automatically unblocks the candidate while
+   -- avoiding a tight queue/retry loop.
+   and not exists (
+         select 1
+           from quant.data_feasibility_checks f
+          where f.hypothesis_id = h.hypothesis_id
+            and f.status = 'NEEDS_DATA'
+            and f.last_checked_at >= now() - interval '1 hour'
+       )
  order by h.created_at
  limit %s
 """
@@ -1602,32 +2849,64 @@ def _structurally_blocked(conn, hypothesis_ids: list) -> dict:
                     out[hid] = f"없는 데이터셋: {', '.join(missing_ds)}"
                     continue
 
-            # 데이터가 되면 남는 것은 전략 구현·어휘다. 이건 목록 대조라
-            # `feasibility` 를 부르지 않고 같은 표를 직접 본다(모양 가정 없음).
-            etype = str((edge or {}).get("type") or "").strip().lower()
-            if not etype:
-                out[hid] = "expected_edge.type 이 비었다"
-                continue
-            if etype not in STRATEGY_CATALOG:
-                out[hid] = (f"'{etype}' 는 어휘에 없다 - "
-                            f"사용 가능: {', '.join(sorted(STRATEGY_CATALOG))}")
-                continue
+            # 데이터가 되면 남는 것은 lane별 실행 계약이다. 인트라데이
+            # 가설을 일봉 바인더에 넣으면 정상 파라미터를 전부 미지 키로
+            # 오판하므로 실제로 선택될 러너에게 묻는다.
             # ▶ 실행면이 안 읽는 파라미터도 **영원히 실패하는 부류**다 (2026-08-12)
             #   `config_binding.bind` 가 EDGE_KEYS 밖의 키를 거부한다. 오늘
             #   `expected_edge` 오염은 접수 단계에서 막았지만(관문 우회 차단),
             #   **그 전에 등록된 가설**은 이미 오염된 채로 남아 매 주기 같은
             #   자리에서 죽는다. 데이터·어휘만 보고 발주하면 이걸 못 거른다.
-            try:
-                from config_binding import EDGE_KEYS   # noqa: PLC0415
-                bad = sorted(k for k in (edge or {}) if k not in EDGE_KEYS)
-            except Exception:  # noqa: BLE001
-                bad = []
+            #   ▶ 판정은 실행면에 묻는다 (2026-08-14). `EDGE_KEYS` 만 보고 여기서
+            #     직접 세면 실행면보다 엄격해진다 - 사전등록용 키
+            #     (`observation_refs`/`universe`)는 `bind` 가 받아 주는데 관문이
+            #     막아, 실험을 한 번도 못 돌고 폐기된 가설이 4건 나왔다.
+            #   ▶ **값의 범위·부호도 같이 본다** (2026-08-14 실측). 이름만 보고
+            #     발주했더니 `a266a02d` 가 `max_drawdown_stop=0.35`(낙폭 정지는
+            #     음수여야 한다)로 **3회** 발주-실행-거부를 반복했다. 값 검사는
+            #     이름 검사보다 늦게 알 이유가 없다 - 등록된 값은 이미 다 있다.
+            #     `rejection_reasons` 가 미지 키와 범위 위반을 **둘 다** 돌려준다.
+            bad = _edge_execution_rejections(edge or {}, STRATEGY_CATALOG)
             if bad:
-                out[hid] = (f"실행면이 안 읽는 파라미터: {', '.join(bad)} - "
-                            f"가설을 다시 등록해야 한다(재시도로는 안 풀린다)")
+                out[hid] = _execution_rejection_line(bad)
     except Exception:  # noqa: BLE001 - 못 세면 막지 않는다
         return {}
     return out
+
+
+def _edge_execution_rejections(edge: dict, strategy_catalog) -> list[str]:
+    """Validate an expected edge against the runner selected by its lane."""
+    lane = str((edge or {}).get("research_lane") or "").upper()
+    if lane == "INTRADAY_EVENT":
+        try:
+            from intraday_experiment_runner import config_from_edge  # noqa: PLC0415
+            config_from_edge(edge)
+            return []
+        except (ImportError, TypeError, ValueError) as exc:
+            return [f"인트라데이 실행 계약이 거부한다: {exc}"]
+
+    etype = str((edge or {}).get("type") or "").strip().lower()
+    if not etype:
+        return ["expected_edge.type 이 비었다"]
+    if etype not in strategy_catalog:
+        return [f"'{etype}' 는 어휘에 없다 - "
+                f"사용 가능: {', '.join(sorted(strategy_catalog))}"]
+    try:
+        from config_binding import rejection_reasons  # noqa: PLC0415
+        return rejection_reasons({"expected_edge": edge})
+    except Exception:  # noqa: BLE001 - 진단을 못 읽었다고 실행을 막지는 않는다
+        return []
+
+
+def _execution_rejection_line(bad) -> str:
+    """실행면 거부 목록 -> 카드에 실리는 한 줄. **점검이 부를 수 있게 뺐다.**
+
+    안에 박아 두면 점검이 같은 문자열을 **다시 적어야** 하고, 그러면 포장이
+    바뀔 때 점검만 초록인 채로 남는다 - 이 카드가 잡은 결함이 정확히 그
+    모양이었다(픽스처가 아무도 발신하지 않는 문장이었다).
+    """
+    return (f"실행면이 거부한다: {'; '.join(bad)[:240]} - "
+            f"가설을 다시 등록해야 한다(재시도로는 안 풀린다)")
 
 
 _SQL_RECENT_EXP_FAILURES = """
@@ -1684,7 +2963,7 @@ def _feed_back_experiment_failures(conn, *, limit: int = 6) -> int:
 
 
 _DATASET_MARK = Path.home() / ".factory_autopilot_dataset_day"
-_MS_DATASET = "krx-microstructure-daily/v1"
+_MS_DATASET = "krx-microstructure-daily/v5"
 
 
 def _refresh_datasets(*, dry_run: bool = False) -> int:
@@ -1898,6 +3177,78 @@ def cycle(*, dry_run: bool = False) -> int:
               flush=True)
         fails += 1
 
+    # ── 리서치: 스카우트 전용 카드 (재료가 마르면, 임무 분리로) ──
+    #   ▶ 사실 표시만으로는 안 됐다 (2026-08-13 실측 + idea-starvation-sweep
+    #     검증 5/5). _lead_health 경고가 다섯 주기 연속 브리핑에 실렸는데도
+    #     기획 카드 안에서 스카우트는 반려 대응·기획에 항상 밀렸다(138초 턴).
+    #     March(1991): 방치된 학습 시스템은 착취로 쏠리는 게 기본 경로.
+    #     3M/구글 실측: 탐색 시간은 선언이 아니라 **예약**이어야 지켜진다.
+    #     ChemOS: 프로듀서(후보 생성)와 컨슈머(실행)는 분리된 프로세스다.
+    #     그래서 재료가 마르면 임무가 리드 수집 하나뿐인 카드를 따로 건다 -
+    #     수집 강제가 아니다. 마른 렌즈는 "말랐다" 보고도 유효한 산출이다.
+    #   멱등키는 1시간 버킷이고, 별도 active-card 가드가 시간 경계를 넘은
+    #   Scout도 중복 생성하지 않는다.
+    starving = ""
+    executable_unused: int | None = None
+    intraday_formula_unused: int | None = None
+    try:
+        _sc = _conn()
+        try:
+            starving = _lead_health(_sc)
+            # The refill low-watermark and the consumer empty-queue gate are
+            # deliberately separate.  One fresh lead is enough for Planner,
+            # even though Scout should concurrently refill toward LEADS_LOW.
+            executable_unused = _executable_unused_count(_sc)
+            intraday_formula_unused = _intraday_formula_unused_count(_sc)
+            ast_memory = _ast_experience_block(_sc)
+        finally:
+            _sc.close()
+        active_scout = _active_card_by_key_prefix("factory-scout-") if starving else None
+        if starving and not active_scout:
+            _now = datetime.now(timezone.utc)
+            _create_card(
+                title=f"공장 스카우트 소집: 리드 수집 {stamp}",
+                body=("이 카드의 임무는 **리드 수집·납품 하나뿐이다** - 기획안을 "
+                      "쓰지 마라(기획은 기획 카드 몫이다).\n"
+                      + starving + "\n" + ast_memory + "\n" + _SCOUT_SURFACE + "\n\n"
+                      + _ast_scout_contract() + "\n\n"
+                      "[납품] 렌즈(ACADEMIC·PRACTITIONER·COMMUNITY·CROSS_DOMAIN)를 "
+                      "순서대로 돌리고, 수집분은 `factory_submit_leads` **도구 "
+                      "호출**로만 납품한다 - 카드 텍스트는 납품이 아니다. "
+                      "렌즈별 수집 수와 마른 렌즈를 요약에 남겨라 - 빈 것도 "
+                      "사실이다.\n"
+                  "[질 기준] STATED_MECHANISM 없는 블록은 접수가 반려한다. "
+                  "READINESS별 필수 칸을 채우고 AST_READY의 TESTABLE_WITH에는 "
+                  "정확한 필드명·연산·창을 적어라. DATA_BLOCKED나 "
+                  "SEMANTIC_MISMATCH를 AST_READY로 꾸미지 마라. "
+                  "공개 수식은 DIRECT_REPLICATION 대조군으로 따로 남기고, 알파 후보는 "
+                  "MECHANISM_MUTATION 또는 CROSS_DOMAIN_TRANSFER로 파생하라. 창·상수만 "
+                  "바꾼 식은 신규성이 없어서 접수에서 거부된다. "
+                  "소스 자체에 데이터셋·한국 표본·OOS 결과가 없다는 이유만으로 "
+                  "DATA_BLOCKED라 하지 마라. 일별 메커니즘은 DAILY_CROSS_SECTIONAL, "
+                  "초·틱 메커니즘은 INTRADAY_EVENT로 적는다. raw quote/trade event는 "
+                  "이미 실행 가능하다. 다만 큐 위치·취소 수명처럼 스냅샷으로 복원할 "
+                  "수 없는 관측이 핵심이면 정직하게 차단하라. "
+                  "현재 리드가 ACADEMIC 11/12 로 편중돼 있다 - COMMUNITY·"
+                  "CROSS_DOMAIN 우물을 우선하라."),
+                assignee="research-department",
+                # Refill at most once per UTC hour while the executable queue is
+                # dry.  The former six-hour bucket let several planner cycles
+                # consume the same exhausted leads before scouting could run.
+                # v7 requires a cost-aware BPS population; v6 still admitted
+                # dimensionless direction scores as executable net-PnL formulas.
+                key=f"factory-scout-v7-{_now:%Y%m%d}T{_now.hour:02d}",
+                dry_run=dry_run)
+        elif active_scout:
+            print(f"  scout refill skipped - already active: {active_scout}", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  !! 스카우트 카드 실패: {type(exc).__name__}: {str(exc)[:150]}",
+              flush=True)
+        # 리드 상태를 못 쟀다는 것은 "실행 재료가 충분하다"는 뜻이 아니다.
+        # 빈 문자열로 두면 아래 planner 의존성이 fail-open 된다.
+        starving = "리드 상태 측정/보충 실패 - Planner를 보류한다"
+        fails += 1
+
     # ── 리서치: 다음 기획안 ──
     try:
         rb = research_brief()
@@ -1908,14 +3259,23 @@ def cycle(*, dry_run: bool = False) -> int:
               f"{str(exc)[:180]}", flush=True)
         rb = ""
         fails += 1
-    if rb:
+    if _should_schedule_planner(
+            rb, executable_unused, intraday_formula_unused):
         # ▶ **기획자와 회의론자를 다른 카드로 낸다** (2026-08-11).
         #   `proposal_intake` 는 두 산출의 실행 id 가 같으면 거부한다 - 자기가
         #   낸 가설을 자기가 검토하면 서명이 무의미하기 때문이다. 한 카드에서
         #   둘 다 쓰게 하면 그 규칙을 형식만 만족시키게 된다.
+        # ▶ 기획 카드는 **30분 버킷** (2026-08-13). 실행 사슬은 6분(승격→발주→
+        #   실험→판정)인데 기획 공급이 시간 버킷 멱등키로 **1카드/시간**에 묶여
+        #   있었다 - 공급이 상한이면 주기를 아무리 돌려도 새 가설이 안 는다.
+        #   문헌: Tail at Scale(하위 큐를 얕게), Cooper(유입은 상시 스트림).
+        #   비용 상한은 기획 카드 2장/시간이다.
+        _pnow = datetime.now(timezone.utc)
+        pstamp = f"{_pnow:%Y%m%dT%H}{'a' if _pnow.minute < 30 else 'b'}"
         _create_card(
-            title=f"공장 주기 [기획자]: 다음 실험 기획안 {stamp}",
-            body=(rb + "\n\n---\n" + PLANNER_FORMAT + "\n\n"
+            title=f"공장 주기 [기획자]: 다음 실험 기획안 {pstamp}",
+            body=(rb + "\n\n---\n" + PLANNER_FORMAT + "\n\n" +
+                  INTRADAY_PLANNER_NOTE + "\n\n"
                   + DELIVERY_RULES + "\n"
                   "[규칙]\n"
                   # ▶ **칸 이름을 바로잡았다** (2026-08-13 실측)
@@ -1934,6 +3294,35 @@ def cycle(*, dry_run: bool = False) -> int:
                   "  메커니즘 설명은 ECONOMIC_RATIONALE 에 그대로 쓰되, "
                   "**대응 자체는 반드시 위 칸에도 적어라** - 계약은 그 칸만 "
                   "읽으므로 본문에만 있으면 '대응 없음' 으로 막힌다.\n"
+                  "- 이 카드는 **Planner**다. `factory_submit_leads`를 호출하거나 "
+                  "새 문헌·새 리드를 조사하지 마라. 위 `쓸 수 있는 리드` 목록에 "
+                  "이미 적재된 재료만 `factory_submit_proposal`로 소비하라.\n"
+                  "- 목록에 `formula_contract_complete=true`인 미사용 "
+                  "`INTRADAY_EVENT` typed 수식이 있으면 그것이 최우선이다. 목록 "
+                  "순서대로 첫 계약 유효 수식을 기획하고, `OVER_BUDGET`이면 새 "
+                  "리드를 만들지 말고 같은 카드의 다음 미사용 typed 수식을 "
+                  "시도하라.\n"
+                  # ▶ 다중 블록 제출 (2026-08-13). 접수 파서(parse_blocks)는
+                  #   원래 여러 블록을 읽는다 - 카드당 1건은 관례였지 계약이
+                  #   아니었다. 공급 병목(실행 6분 vs 공급 1건/시간)의 나머지
+                  #   반쪽을 여기서 연다. 단 같은 계열 변형 남발은 시도 예산을
+                  #   태우므로 서로 다른 계열로 제한한다.
+                  "- 재료(미사용 리드·빈 니치)가 충분하면 **서로 다른 계열 "
+                  "최대 3건**을 블록 3개로 **한 번의** factory_submit_proposal "
+                  "에 담아 제출하라 - 접수는 다중 블록을 읽는다. 같은 계열의 "
+                  "파라미터 변형 여러 개는 금지다(시도 예산 낭비).\n"
+                  "- 미사용 formula-discovery-v5 `INTRADAY_EVENT` 리드가 있으면 "
+                  "경제 니치가 다른 유효 수식을 가능하면 **2~8개 LEAD_IDS로 묶되**, "
+                  "SUGGESTED_PARAMS의 `intraday_signal_expr`에는 그중 독립 확인할 "
+                  "**주 수식 하나를 정확히 복사**한다. 접수기가 나머지를 승격 불가 "
+                  "`SCREENING_ONLY` 공유재생 cohort로 자동 부착한다. "
+                  "`screening_population`을 직접 작성하지 마라. 양의 선별 결과도 "
+                  "다음 주기의 독립 주 실험을 통과하기 전에는 알파가 아니다. "
+                  "이번 호출에는 이 인트라데이 **정확히 한 블록**만 넣고 "
+                  "**일봉 블록을 함께 넣지 마라** - 다른 블록의 오류가 "
+                  "원자적 배치 전체를 막는다. 성공한 뒤 다음 주기에 일봉을 처리한다. "
+                  "계약상 기획할 수 없다면 다른 레인만 발행하지 말고 그 인트라데이 "
+                  "리드의 정확한 차단 사유를 남겨라.\n"
                   "- 예산이 소진된 계열은 제안하지 마라.\n"
                   "- 쓸 수 있는 리드 목록에 없는 id 를 대지 마라 - 원장에서 다시 "
                   "읽어 대조하므로 막힌다.\n"
@@ -1947,11 +3336,24 @@ def cycle(*, dry_run: bool = False) -> int:
                   "아니라 도구 호출에 실어라 - 카드 텍스트는 납품으로 세지 "
                   "않는다."),
             assignee=RESEARCH_ASSIGNEE,
-            key=f"factory-planner-{stamp}", dry_run=dry_run)
+            # v5 consumes a bounded typed cohort in one shared event replay.
+            key=f"factory-planner-v6-{pstamp}", dry_run=dry_run, priority=1)
 
         # 회의론자 카드는 **여기서 만들지 않는다**. 기획자 산출이 아직 없는데
         # 걸면 검토할 대상이 없는 채로 돌아 빈 산출을 내거나, 없는 기획안을
         # 검토한 척하게 된다. 기획자가 끝난 것을 보고 수확기가 건다.
+    elif rb and executable_unused == 0:
+        print("  planner deferred - executable lead queue is empty; "
+              "scout must replenish it first", flush=True)
+    elif rb and intraday_formula_unused == 0:
+        print("  planner deferred - formula-discovery-v5 intraday queue is empty; "
+              "scout must replenish the primary lane first", flush=True)
+    elif rb and executable_unused is None:
+        print("  planner deferred - executable lead queue could not be measured",
+              flush=True)
+    elif rb and intraday_formula_unused is None:
+        print("  planner deferred - intraday formula queue could not be measured",
+              flush=True)
 
     # ── 퀀트: 대기 중인 가설 실험 ──
     try:
@@ -1991,7 +3393,12 @@ def cycle(*, dry_run: bool = False) -> int:
                   "- 이 노트는 다음 주기 브리핑에 실려 **네가 읽는다.** "
                   "지금 안 적으면 다음 주기의 네가 같은 자리에서 다시 생각한다."),
             assignee=QUANT_ASSIGNEE,
-            key=f"factory-quant-{stamp}", dry_run=dry_run)
+            key=f"factory-quant-{stamp}", dry_run=dry_run,
+            # Six queued hypotheses may legitimately take hours, but a
+            # mistaken `experiment_worker.py --serve` must not own a Kanban
+            # worker forever. Hermes enforces this per-attempt cap and
+            # re-queues the card after terminating the worker.
+            max_runtime="4h")
     elif not qb:
         print("  퀀트: 실험 대기 가설 0건 - 카드를 만들지 않는다"
               "(할 일이 없는데 부르면 없는 일을 지어낸다)", flush=True)
@@ -2033,7 +3440,7 @@ def _issue_bottleneck_cards(*, stamp: str, dry_run: bool = False) -> int:
 
     assignees = {"research-department": RESEARCH_ASSIGNEE,
                  "quant-backtest-department": QUANT_ASSIGNEE}
-    made = 0
+    made = held = 0
     for owner, group in sorted(by_owner.items(),
                                key=lambda kv: -sum(b.cost for b in kv[1])):
         who = assignees.get(owner)
@@ -2041,6 +3448,20 @@ def _issue_bottleneck_cards(*, stamp: str, dry_run: bool = False) -> int:
             continue
         body = bottleneck_census.card_body(group, top=3)
         if not body:
+            continue
+        # ▶ **같은 범위의 카드가 아직 살아 있으면 또 걸지 않는다** (2026-08-14)
+        #   앞 카드가 ready/running/blocked 인데 새 카드를 걸면, 부서는 같은
+        #   질문을 두 번 받고 공장은 답을 한 번도 안 듣는다. 실측 96장.
+        # 억제는 **종류 지문**으로 건다. 개체 지문(`_scope_key`)은 매 주기
+        # 갈리므로 억제 기준이 못 된다 - 실측 48분 만에 재발행됐다.
+        kscope = _kind_scope_key(group)
+        scope = _scope_key(group)
+        alive = _unresolved_card(owner, kscope)
+        if alive:
+            print(f"  {owner}: 같은 종류 묶음의 카드가 아직 안 끝났다 {alive} - "
+                  f"새 카드를 안 건다(종류 {kscope}/개체 {scope}). 종류가 "
+                  f"없어지면 지문이 바뀌어 저절로 다시 걸린다", flush=True)
+            held += 1
             continue
         _create_card(
             title=f"공장 개선: 관측된 병목 {len(group)}건 ({stamp})",
@@ -2069,10 +3490,13 @@ def _issue_bottleneck_cards(*, stamp: str, dry_run: bool = False) -> int:
                   "바꾸는지 **먼저** 적고, 자체 점검을 같이 내라.\n"
                   "- 뚫었으면 `skill-authoring` 으로 스킬에 남겨라. 남기지 않으면 "
                   "다음 주기의 네가 같은 자리를 다시 판다."),
-            assignee=who, key=f"factory-bottleneck-{owner}-{stamp}",
+            assignee=who,
+            key=f"factory-bottleneck-{owner}-{kscope}-{scope}-{stamp}",
             dry_run=dry_run)
         made += 1
-    print(f"  병목: {len(items)}건 관측 -> 개선 카드 {made}건", flush=True)
+    print(f"  병목: {len(items)}건 관측 -> 개선 카드 {made}건"
+          + (f" (같은 범위로 아직 안 끝난 카드 {held}건은 다시 안 걺)"
+             if held else ""), flush=True)
     return 0
 
 
@@ -2097,6 +3521,39 @@ def _check_rejection_feedback(tmp: Path) -> None:
     assert len(got) == 1 and "REGIME_ARTIFACT" in got[0], got
     assert "\n" not in got[0], "여러 줄이 섞이면 다음 읽기가 어긋난다"
 
+    # 같은 Gate 0 원인이 제안 id만 바꿔 18번 와도 브리핑에는 한 번이다.
+    dup_path = tmp / "duplicate-rejections.tsv"
+    shared_repair = [{"field": "suggested_params.max_drawdown_stop",
+                      "auto_apply": False}]
+    first_reason = json.dumps({
+        "codes": ["PARAM_OUT_OF_RANGE"], "repairs": shared_repair,
+        "proposal": {"proposal_id": "prop_a", "lead_ids": ["lead_a"]}},
+        ensure_ascii=False)
+    second_reason = json.dumps({
+        "codes": ["PARAM_OUT_OF_RANGE"], "repairs": shared_repair,
+        "proposal": {"proposal_id": "prop_b", "lead_ids": ["lead_b"]}},
+        ensure_ascii=False)
+    record_rejections([SimpleNamespace(title="prop_a", reason=first_reason)],
+                      stamp="gate0", path=dup_path)
+    record_rejections([SimpleNamespace(title="prop_b", reason=second_reason)],
+                      stamp="gate0", path=dup_path)
+    collapsed = recent_rejections(path=dup_path)
+    assert len(collapsed) == 1 and "prop_b" in collapsed[0], collapsed
+
+    long_path = tmp / "long-typed-repair.tsv"
+    long_payload = json.dumps({
+        "codes": ["UNMAPPED_VOCAB"],
+        "repairs": [{"field": "edge_type", "auto_apply": False,
+                     "instruction": "x" * 1400}],
+    }, ensure_ascii=False)
+    record_rejections(
+        [SimpleNamespace(title="long", reason=long_payload)],
+        stamp="gate0", path=long_path)
+    stored_payload = recent_rejections(path=long_path)[0].split("\t", 2)[2]
+    round_trip = json.loads(stored_payload)
+    assert len(round_trip["repairs"][0]["instruction"]) == 1400, \
+        "typed repair JSON을 문자 중간에서 잘랐다"
+
     # 최근 것만 싣는다 - 오래된 반려까지 다 실으면 브리핑이 잡음이 된다
     for i in range(REJECT_KEEP + 3):
         record_rejections([SimpleNamespace(title=f"t{i}", reason=f"r{i}")],
@@ -2120,6 +3577,10 @@ def _check_delivery_is_the_tool_call_not_text():
     # 카드가 규약을 싣는다 - 에이전트가 어디에 뭘 넣어야 하는지
     assert "factory_submit_proposal" in DELIVERY_RULES
     assert "planner_run" in DELIVERY_RULES and "카드의 ID" in DELIVERY_RULES
+    assert "run_research_workers" in DELIVERY_RULES
+    assert "get_worker_job" in DELIVERY_RULES and "실제 job_id" in DELIVERY_RULES
+    assert "FAILED·DEGRADED" in DELIVERY_RULES and "#self" in DELIVERY_RULES
+    assert "/opt/data" in DELIVERY_RULES
     assert "기권도 1급" in DELIVERY_RULES
 
     # **모순 신호가 없어야 한다** (2026-08-13 실측 - 내가 만들 뻔했다).
@@ -2138,13 +3599,14 @@ def _check_delivery_is_the_tool_call_not_text():
         "옛 문구(카드에 KEY:value 로 내라)가 남아 납품 규약과 모순된다"
 
     class _Cur:
-        def __init__(self, exact, window):
-            self._e, self._w = exact, window
+        def __init__(self, exact):
+            self._e = exact
 
         def execute(self, sql, params=()):
-            self._last = "case_id" in sql
+            assert "case_id = %s or case_id like %s" in sql
+            assert params == ("card-t_x", "card-t_x-%")
         def fetchone(self):
-            return (self._e,) if self._last else (self._w,)
+            return (self._e,)
         def __enter__(self):  return self
         def __exit__(self, *a):  return False
 
@@ -2152,24 +3614,16 @@ def _check_delivery_is_the_tool_call_not_text():
         def __init__(self, cur):  self._c = cur
         def cursor(self):  return self._c
 
-    saved = globals()["_board_rows"]
-    try:
-        globals()["_board_rows"] = lambda sql, params=(): [(1000, 1100)]
-        # ① case_id 각인이 있으면 그것으로 끝 - 시간창은 안 본다
-        assert _mcp_deliveries("t_x", _Conn(_Cur(2, 99))) == 2
-        # ② 각인이 없으면 실행 시간창으로 안전망
-        assert _mcp_deliveries("t_x", _Conn(_Cur(0, 1))) == 1
-        # ③ 실행 기록이 없으면 0 - 시간창을 지어내지 않는다
-        globals()["_board_rows"] = lambda sql, params=(): [(None, None)]
-        assert _mcp_deliveries("t_x", _Conn(_Cur(0, 7))) == 0
+    # Exact and deterministic legacy-prefix lineage are accepted.  A temporal
+    # window is deliberately not consulted.
+    assert _mcp_deliveries("t_x", _Conn(_Cur(2))) == 2
+    assert _mcp_deliveries("t_x", _Conn(_Cur(0))) == 0
 
-        # ④ 못 재면 0 = 멱등한 텍스트 폴백으로 (이중 발행은 proposal_id 해시가 막는다)
-        class _Boom:
-            def cursor(self):
-                raise RuntimeError("원장 연결 실패")
-        assert _mcp_deliveries("t_x", _Boom()) == 0
-    finally:
-        globals()["_board_rows"] = saved
+    # 못 재면 0 = 멱등한 텍스트 폴백으로 (이중 발행은 proposal_id 해시가 막는다)
+    class _Boom:
+        def cursor(self):
+            raise RuntimeError("원장 연결 실패")
+    assert _mcp_deliveries("t_x", _Boom()) == 0
     print("  납품 = 도구 호출          OK")
 
 
@@ -2266,6 +3720,132 @@ def _check_soundness_verdict_is_measured_not_assumed():
     print("  건전성은 재서만 말함      OK")
 
 
+def _check_execution_rejections_are_attributable():
+    """**실행면이 내는 거부 사유는 전부 귀속돼야 한다.** (2026-08-14, 카드 t_ad5f27e1 #2)
+
+    ▶ 무엇이 뚫려 있었나
+      건전성 census 가 `[불명 수준] 실행면이 거부한다: ...` 를 매 주기 실었다.
+      층을 갈라 보니 판정자가 나쁜 게 아니라 **발신자와 판정자가 서로 다른
+      문장을 쓰고 있었다.** `config_binding.bind` 의 거부 갈래 10개를 실제로
+      굴려 `attribution.attribute` 에 먹였더니 **20개 표면 전부가 `불명`**
+      이었다 - 값 범위·부호, 형변환, 통제 어휘, 짝, 알파 수식, 미지 키,
+      미구현 엣지. 즉 실행면이 거부한 가설은 **아무 데로도 라우팅되지 않았다.**
+
+    ▶ 왜 아무도 몰랐나 - **자체점검이 지어낸 문장으로 초록이었다**
+      `soundness`·`bottleneck_census`·여기 `_check_soundness_verdict...` 셋 다
+      픽스처가 "실행면이 안 읽는 파라미터: universe" 였는데, 발신자는 그
+      문장을 **한 번도 낸 적이 없다**(실제로는 "실행면이 **읽지 않는**
+      파라미터가 있다: [...]"). 선언과 실재가 갈린 전형이다.
+
+    ▶ 그래서 이 점검은 문장을 적지 않는다
+      `config_binding.bind` 를 **실제로 불러** 거부 사유를 받아 내고, 그것을
+      진짜 포장(`_execution_rejection_line`)에 넣어 판정자에 먹인다. 규칙만
+      고치면 다음에 실행면이 갈래를 하나 더 얻을 때 또 뚫린다 - 그래서
+      **갈래 수까지 센다.**
+    """
+    import re as _re  # noqa: PLC0415
+
+    from config_binding import rejection_reasons  # noqa: PLC0415
+    import attribution as _attr  # noqa: PLC0415
+
+    intraday = {
+        "type": "order_flow_imbalance",
+        "research_lane": "INTRADAY_EVENT",
+        "intraday_signal_expr": {
+            "op": "mul",
+            "args": [
+                {
+                    "op": "rolling_mean",
+                    "arg": {"op": "field", "field": "queue_imbalance_l1"},
+                    "seconds": 5,
+                },
+                {"op": "field", "field": "realized_volatility_bps"},
+            ],
+        },
+        "semantic_plan": {
+            "event": "QUOTE_IMBALANCE", "output": "TAKER_NET_PNL",
+            "context": ["ALL"], "direction": "FOLLOW",
+            "execution": "TAKER", "qualities": ["PERSISTENCE"],
+            "horizon_seconds": 1,
+        },
+        "horizon_seconds": 1, "sample_interval_seconds": 1,
+        "feature_lookback_seconds": 5, "order_latency_ms": 100,
+        "fee_bps_per_side": 11.5, "maker_fee_bps_per_side": 11.5,
+        "execution": "TAKER", "position_mode": "LONG_ONLY",
+        "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
+        "universe_key": "krx_all", "semantic_fingerprint": "test",
+    }
+    assert _edge_execution_rejections(intraday, {}) == [], \
+        "정상 인트라데이 가설을 일봉 실행면이 가로막았다"
+    invalid_intraday = {**intraday, "order_latency_ms": -1}
+    assert _edge_execution_rejections(invalid_intraday, {}), \
+        "잘못된 인트라데이 실행 계약이 발주 전 검사를 통과했다"
+
+    # 각 입력이 `bind` 안의 서로 다른 거부 갈래를 하나씩 때린다.
+    cases = [
+        ("범위/부호(실측 a266a02d)",
+         {"type": "low_max", "max_drawdown_stop": 0.35}),
+        ("범위 - 레버리지", {"type": "low_max", "max_exposure": 99.0}),
+        ("정수 형변환", {"type": "momentum", "top_n": "스물"}),
+        ("수 형변환", {"type": "low_max", "vol_target_annual": "높게"}),
+        ("통제 어휘 밖",
+         {"type": "momentum", "portfolio_construction": "등가중"}),
+        ("알파 수식", {"type": "momentum", "signal_expr": "close +* 3"}),
+        ("짝 - 비율만", {"type": "momentum", "exclude_bottom_pct": 10}),
+        ("짝 - 구성만",
+         {"type": "momentum", "portfolio_construction": "EXCLUDE_BOTTOM"}),
+        ("미지 파라미터",
+         {"type": "momentum", "formation_window_days": 42}),
+        # 마지막 갈래는 표면이 둘이다 - 같은 append 가 갈린다.
+        ("엣지 미구현", {"type": "pairs_trading"}),
+        ("엣지 어휘 없음", {"type": "짜장면_전략"}),
+    ]
+
+    unknown, silent = [], []
+    for label, edge in cases:
+        bad = rejection_reasons({"expected_edge": edge})
+        if not bad:
+            # 실행면이 더는 거부하지 않으면 이 입력은 낡은 것이다. 조용히
+            # 넘기면 점검이 **아무것도 안 재면서 초록**이 된다.
+            silent.append(label)
+            continue
+        for surface, text in (("발신자 원문", bad[0]),
+                              ("포장 후", _execution_rejection_line(bad))):
+            if _attr.attribute(text).level == _attr.UNKNOWN:
+                unknown.append(f"{label}/{surface}: {text[:70]}")
+
+    assert not silent, (
+        f"실행면이 더는 거부하지 않는 입력이 있다: {silent} - 점검 입력을 "
+        f"갱신해라. 안 고치면 아무것도 안 재면서 초록이다")
+    assert not unknown, (
+        "실행면 거부 사유가 `불명` 이다 - 그 가설은 아무 데로도 라우팅되지 "
+        f"않는다. `attribution._RULES` 에 규칙을 남겨라: {unknown}")
+
+    # ▶ **갈래 수를 센다.** 규칙만 맞춰 두면 실행면이 거부 갈래를 하나 더
+    #   얻는 순간 그것만 조용히 `불명` 이 된다 - 이 카드의 발단이 그것이다.
+    _cb = Path(_ROOT / "departments" / "04-quant-backtest" / "pipeline"
+               / "config_binding.py").read_text(encoding="utf-8")
+    branches = len(_re.findall(r"b\.rejected\.append\(", _cb))
+    assert len(cases) >= branches, (
+        f"`config_binding` 의 거부 갈래는 {branches}개인데 점검은 "
+        f"{len(cases)}개만 때린다 - 새 갈래가 생겼다. 사례를 더하고, "
+        f"`attribution._RULES` 에 그 갈래의 규칙이 있는지 확인해라")
+
+    # 미구현 엣지는 **구현** 이어야 한다 - 리서치로 보내면 되돌아온다
+    _imp = rejection_reasons({"expected_edge": {"type": "pairs_trading"}})
+    assert _attr.attribute(_imp[0]).level == _attr.IMPLEMENTATION
+    # 값·형·어휘·짝은 **가설** 이다 - 러너가 자르면 등록 != 실행이 된다
+    _hyp = rejection_reasons(
+        {"expected_edge": {"type": "low_max", "max_drawdown_stop": 0.35}})
+    assert _attr.attribute(_hyp[0]).level == _attr.HYPOTHESIS
+    assert _attr.attribute(_hyp[0]).owner == "research-department"
+    # `어휘에 없다` 변형은 템플릿 추가 지시를 그대로 받아야 한다(순서 고정)
+    _voc = rejection_reasons({"expected_edge": {"type": "짜장면_전략"}})
+    assert "TEMPLATES" in _attr.attribute(_voc[0]).action, \
+        "미구현 규칙이 `어휘에 없다` 의 더 나은 지시를 가로챘다 - 순서를 봐라"
+    print("  실행면 거부가 전부 갈림   OK")
+
+
 def _check_orphan_blocked_gets_a_different_instruction():
     """**고칠 주체가 없는 가설에 "다시 등록해라"고 말하지 않는다.** (2026-08-12)
 
@@ -2300,6 +3880,200 @@ def _check_orphan_blocked_gets_a_different_instruction():
     print("  고아 가설은 다른 지시      OK")
 
 
+def _check_unresolved_bottleneck_card_is_not_reminted():
+    """**앞 카드가 안 끝났으면 같은 개선 카드를 또 걸지 않는다.** (2026-08-14)
+
+    보드 실측: `공장 개선: 관측된 병목 N건` 이 이틀에 **96장** 나갔다. 키가
+    `factory-bottleneck-{owner}-{stamp}` 라 stamp 가 매 주기 바뀌었고, 그래서
+    idempotency 가 주기를 넘는 순간 아무것도 못 막았다. 앞 카드가 `blocked`
+    (`block_kind=capability`)로 서 있는 동안에도 다음 카드가 나갔다 - 에이전트는
+    못 하겠다고 말했고 공장은 매 시간 같은 질문을 다시 걸었다.
+
+    양쪽을 다 지킨다: 안 끝난 카드가 있으면 안 걸고, 끝났으면 다시 건다.
+    """
+    import bottleneck_census as bc                     # noqa: PLC0415
+
+    group = [bc.Bottleneck(
+        kind="막힘: 역량 부족(재라우팅 후보)",
+        key="cap:research-department:capability", cost=7.0, unit="건",
+        evidence="카드 7건을 막았다", owner="research-department",
+        hint="적어라", ids=["t_f7c959c7"])]
+    scope = _scope_key(group)
+    assert scope and scope != _scope_key(
+        [bc.Bottleneck(kind="k", key="gate:fragility", cost=1.0, unit="건",
+                       evidence="", owner="research-department", hint="")]), \
+        "다른 병목 묶음이 같은 범위 지문을 받는다 - 억제가 새 병목을 삼킨다"
+
+    made: list[str] = []
+    saved_create = globals()["_create_card"]
+    saved_rows = globals()["_board_rows"]
+    saved_census = bc.census
+    try:
+        globals()["_create_card"] = lambda **kw: (made.append(kw["key"]),
+                                                  "t_new")[1]
+        bc.census = lambda conn=None: list(group)
+
+        # ① 같은 범위의 카드가 아직 살아 있다 -> 안 건다
+        globals()["_board_rows"] = lambda sql, params=(): [
+            ("t_813944f2", "blocked",
+             f"factory-bottleneck-research-department-{scope}-20260813T05")]
+        _issue_bottleneck_cards(stamp="20260814T09", dry_run=False)
+        assert not made, f"안 끝난 카드가 있는데 또 걸었다: {made}"
+
+        # ② 앞 카드가 끝났다 -> 병목이 남았으면 다시 건다(겉만 덮은 것이
+        #    조용해지면 안 된다)
+        globals()["_board_rows"] = lambda sql, params=(): []
+        _issue_bottleneck_cards(stamp="20260814T09", dry_run=False)
+        assert len(made) == 1, f"병목이 남았는데 카드를 안 걸었다: {made}"
+        assert scope in made[0], f"키에 범위 지문이 없다: {made[0]}"
+
+        # ③ 보드를 못 읽으면 **걸어 준다** - 조회 실패로 개선을 통째로 잃지 않는다
+        made.clear()
+
+        def _boom(sql, params=()):
+            raise RuntimeError("보드 조회 실패")
+
+        globals()["_board_rows"] = _boom
+        _issue_bottleneck_cards(stamp="20260814T09", dry_run=False)
+        assert len(made) == 1, "보드를 못 읽었다고 개선 카드를 잃었다"
+    finally:
+        globals()["_create_card"] = saved_create
+        globals()["_board_rows"] = saved_rows
+        bc.census = saved_census
+    print("  안 끝난 개선 카드 재발행 없음 OK")
+
+
+def _check_briefed_example_actually_passes_intake():
+    """**브리핑이 주는 예시는 접수를 통과해야 한다** (2026-08-14).
+
+    안내와 관문이 어긋나면 최악이다 - 기획자는 시킨 대로 썼는데 반려되고,
+    그 반려 사유는 안내를 준 쪽이 아니라 자기 아이디어를 탓하게 만든다.
+    그래서 브리핑 본문에 박힌 수식 예시를 **꺼내서 진짜 Gate 0 에 태운다.**
+    """
+    import json as _json
+    import re as _re
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    _p = (_Path(__file__).resolve().parents[3]
+          / "04-quant-backtest" / "pipeline")
+    if str(_p) not in _sys.path:
+        _sys.path.insert(0, str(_p))
+    try:
+        from factory_bridge import gate0  # noqa: PLC0415
+    except ImportError:
+        return                              # 실행면이 없으면 볼 것이 없다
+
+    # **브리핑을 실제로 생성해서** 예시를 꺼낸다. 여기에 손으로 옮겨 적으면
+    # 브리핑 쪽이 바뀌어도 이 검사는 옛 예시를 계속 통과시킨다.
+    from datetime import date as _date
+    body = _alpha_expr_line(_RowsConn([(0,), (0,),
+                                       (58, _date(2026, 5, 18), _date(2026, 8, 14))]))
+    assert body, "수식 안내가 브리핑에서 사라졌다"
+    # **표본 길이를 숫자로 준다.** 서술만 하면 무시된다(실측: 서술형 진단
+    # 5주기 연속 무시, 기계가 센 격자는 실험 31건으로 채택).
+    assert "58거래일" in body, f"미시구조 표본 길이가 브리핑에 없다: {body[-400:]}"
+
+    i = body.index('{"op"')
+    depth, j = 0, i
+    for j in range(i, len(body)):            # 균형 중괄호까지 잘라낸다
+        depth += (body[j] == "{") - (body[j] == "}")
+        if depth == 0:
+            break
+    expr = _json.loads(_re.sub(r"\s+", " ", body[i:j + 1]))
+    assert expr["op"] == "sub", expr         # 예시가 바뀌면 여기서 먼저 깨진다
+
+    g = gate0({"edge_type": "momentum", "universe_key": "krx_all",
+               # 브리핑이 시키는 대로 쓴 논리 - 필드 이야기가 들어 있다
+               "economic_rationale": "호가 매수 압력이 크면서 스프레드가 좁은 "
+                                     "종목이 이후 초과수익을 낸다",
+               "counterparty": "유동성을 급히 요구하는 청산 매매",
+               "falsification_tests": ["IC t<2 면 기각"], "trial_budget": 5,
+               "suggested_params": {"horizon_days": 2, "signal_expr": expr}})
+    assert g.ok, f"브리핑 예시가 접수에서 반려된다: {g.as_dict()}"
+
+    # 정합 요구를 브리핑이 실제로 말하는가 - 말 안 하면 걸린 사람이 이유를 모른다
+    assert "HYPOTHESIS_FACTOR_MISMATCH" in body, "정합 반려 사유가 안내에 없다"
+
+    # ▶ **시킬 수 없는 것을 시키지 않는다** (2026-08-14).
+    #   브리핑이 "회전을 줄여라" 라고 쓰던 시점에 `rebalance` 는 horizon 에서
+    #   자동 유도만 됐다 - 손잡이가 없었다. 안내가 가리키는 손잡이가 실제로
+    #   접수를 통과해 **실행 계약까지 살아 가는지** 여기서 고정한다.
+    from factory_bridge import expected_edge_for  # noqa: PLC0415
+    assert "rebalance" in body, "회전을 줄이는 손잡이 이름이 안내에 없다"
+    prop = {"edge_type": "momentum", "universe_key": "krx_all",
+            "economic_rationale": "호가 매수 압력이 크면 이후 오른다",
+            "counterparty": "청산 매매", "falsification_tests": ["IC t<2"],
+            "trial_budget": 5,
+            "suggested_params": {"horizon_days": 2, "signal_expr": expr,
+                                 "rebalance": "EVERY_5_TRADING_DAYS"}}
+    g2 = gate0(prop)
+    assert g2.ok, f"안내대로 쓴 rebalance 가 접수에서 막힌다: {g2.as_dict()}"
+    edge, dropped = expected_edge_for(prop)
+    assert edge.get("rebalance") == "EVERY_5_TRADING_DAYS", (edge, dropped)
+
+
+def _check_kind_scope_survives_instance_churn():
+    """**개체가 갈려도 종류가 같으면 같은 카드다.** (2026-08-14 t_2bbfa8d3)
+
+    보드 실측: 범위 지문을 붙인 지 48분 만에 같은 종류 묶음의 퀀트 카드가 또
+    나갔다(`71f357a631` -> `4240f506a0`). 실패 서명 하나가 갈린 것이 전부였다.
+
+    이 검사의 board 대역은 **`like ?` 접두사를 실제로 따진다.** 억제를 거는
+    것이 바로 그 접두사이므로, 대역이 그것을 지우면 검사가 지문이 갈리는 것을
+    영영 못 본다(앞 주기 검사가 그랬다).
+    """
+    import bottleneck_census as bc                     # noqa: PLC0415
+
+    owner = "quant-backtest-department"
+
+    def _b(kind, key):
+        return bc.Bottleneck(kind=kind, key=key, cost=1.0, unit="건",
+                             evidence="세었다", owner=owner, hint="열어라")
+
+    common = [_b("리드 사장", "lead:idle"),
+              _b("시세 미관측", "market:zero_volume")]
+    a = common + [_b("작업 되풀이 실패", "job:BAD_TRANSITION")]
+    b = common + [_b("작업 되풀이 실패", "job:OSError Errno 12")]
+    c = b + [_b("관문 상습 조항", "gate:fragility")]
+
+    alive = ("ready", "running", "blocked")
+
+    def _cycle(group, board, stamp):
+        made = []
+        saved = (globals()["_create_card"], globals()["_board_rows"], bc.census)
+
+        def _rows(sql, params=()):
+            assert "like" in sql.lower(), f"접두사 조회가 아니다: {sql}"
+            prefix = str(params[0]).rstrip("%")
+            return [r for r in board
+                    if r[2].startswith(prefix) and r[1] in alive]
+
+        try:
+            globals()["_create_card"] = lambda **kw: (made.append(kw["key"]),
+                                                      "t_new")[1]
+            globals()["_board_rows"] = _rows
+            bc.census = lambda conn=None: list(group)
+            _issue_bottleneck_cards(stamp=stamp, dry_run=False)
+        finally:
+            (globals()["_create_card"], globals()["_board_rows"],
+             bc.census) = saved
+        return made
+
+    first = _cycle(a, [], "20260814T10")
+    assert len(first) == 1, f"첫 카드가 안 나갔다: {first}"
+    board = [("t_8699a48f", "ready", first[0])]
+
+    assert not _cycle(b, board, "20260814T11"), \
+        "개체가 갈렸다는 이유로 같은 종류의 카드를 또 걸었다 - 실측 48분 재발행"
+    assert len(_cycle(c, board, "20260814T11")) == 1, \
+        "새 종류가 생겼는데 카드를 안 걸었다 - 억제가 새 병목을 삼킨다"
+    assert len(_cycle(a, [("t_8699a48f", "done", first[0])],
+                      "20260814T11")) == 1, \
+        "끝난 카드가 억제 근거가 됐다 - 겉만 덮은 것이 조용해진다"
+    print("  종류 지문이 개체 churn 견딤 OK")
+
+
 def _selfcheck() -> int:
     import tempfile
 
@@ -2310,10 +4084,14 @@ def _selfcheck() -> int:
     assert "REGIME_ARTIFACT" not in v, "내가 지어낸 어휘가 아직 브리핑에 있다"
     for token in ("EDGE_TYPE", "UNIVERSE_KEY", "COMPETING_CODES", "DATA_TABLES"):
         assert token in v, f"통제 어휘에 {token} 이 빠졌다"
+    assert "`equal_weight`가 아니라 TOP_N" in v
+    assert "EVERY_2_TRADING_DAYS" in v
     # IR 구조 진단이 브리핑에 실려 있는가 - 진단이 원장·보고서에만 남으면
     # 기획자는 다음 주기에도 관례 top-20 으로 낸다(2026-08-13)
     assert "TC 0.114" in v and "top_n" in v, "IR 구조 진단이 브리핑에서 빠졌다"
     print("  통제 어휘 출처            OK")
+    _check_design_gaps_and_scout_card()
+    _check_ast_memory_reaches_scout_and_planner()
     _check_dataset_refresh_is_daily_and_ordered()
     _check_near_miss_surfaces_the_winner()
     _check_brief_blocks_run_before_close()
@@ -2323,12 +4101,17 @@ def _selfcheck() -> int:
     _check_unused_leads_come_first()
     _check_factory_enacts_its_own_top_move()
     _check_orphan_blocked_gets_a_different_instruction()
+    _check_execution_rejections_are_attributable()
     _check_soundness_verdict_is_measured_not_assumed()
     _check_progress_is_measured_not_assumed()
     _check_lost_output_is_not_called_empty()
     _check_delivery_is_the_tool_call_not_text()
     _check_improvement_cards_carry_acceptance()
-    print("자동 조종 16개 영역 통과. 실행은 --once / --loop")
+    _check_unresolved_bottleneck_card_is_not_reminted()
+    _check_research_queue_prefers_consumption()
+    _check_kind_scope_survives_instance_churn()
+    _check_briefed_example_actually_passes_intake()
+    print("자동 조종 21개 영역 통과. 실행은 --once / --loop")
     return 0
 
 
@@ -2339,11 +4122,16 @@ class _RowsConn:
 
     def cursor(self):
         rows = self._rows
+        pos = [0]
         class _C:
             def __enter__(self_): return self_
             def __exit__(self_, *a): return False
             def execute(self_, *a, **k): return None
             def fetchall(self_): return rows
+            def fetchone(self_):        # 넘겨준 순서대로 하나씩 - 여러 번 묻는
+                i = pos[0]              # 조회(count 두 번 등)를 흉내 낸다
+                pos[0] = i + 1
+                return rows[i] if i < len(rows) else None
         return _C()
 
 
@@ -2444,6 +4232,19 @@ def _check_brief_blocks_run_before_close():
     for need in ("_vocab_block", "_dataset_news", "_near_miss",
                  "_structurally_blocked"):
         assert need in called, f"{need} 가 브리핑 조립부에서 빠졌다"
+    source = Path(__file__).read_text(encoding="utf-8")
+    research_fn = next(n for n in ast.walk(tree)
+                       if isinstance(n, ast.FunctionDef)
+                       and n.name == "research_brief")
+    research_body = ast.get_source_segment(source, research_fn) or ""
+    assert "cycle_brief.build(conn, market_conn=market_conn)" in research_body, \
+        "실제 플래너 브리프가 Timescale 원시 커버리지를 받지 않는다"
+    dataset_fn = next(n for n in ast.walk(tree)
+                      if isinstance(n, ast.FunctionDef)
+                      and n.name == "_dataset_news")
+    dataset_body = ast.get_source_segment(source, dataset_fn) or ""
+    assert "LIVE_TIMESCALE_RAW" in dataset_body, \
+        "라이브 intraday manifest를 0행 데이터셋처럼 표시한다"
     print("  브리핑 블록이 살아있는 연결에서 돎  OK")
 
 
@@ -2540,8 +4341,64 @@ def _check_unused_leads_come_first():
     기각됐다" 로 거부해 발주가 0건이 됐다. 그때 안 쓴 리드 4건이 목록
     아래에 묻혀 있었다.
     """
-    assert "order by used asc" in _SQL_LEADS, "안 쓴 리드를 앞에 안 놓는다"
+    assert "used asc" in _SQL_LEADS, "안 쓴 리드를 앞에 안 놓는다"
+    assert "INTRADAY_EVENT" in _SQL_LEADS and "case" in _SQL_LEADS, \
+        "event-time 리드를 일봉보다 먼저 소비하지 않는다"
+    assert "formula_contract_complete" in _SQL_LEADS and "then 0" in _SQL_LEADS, \
+        "typed formula-thesis 리드를 legacy event-time보다 먼저 소비하지 않는다"
+    assert "ast_readiness" in _SQL_LEADS, "AST-ready 리드를 우선하지 않는다"
+    assert "primary_data_plane' = 'MICROSTRUCTURE" in _SQL_LEADS, \
+        "일봉형 과거 리드를 새 기획에 다시 노출한다"
+    contract = _ast_scout_contract()
+    assert "AST_READY" in contract and "CANDIDATE_SIGNAL_EXPR" in contract
+    assert "DATA_BLOCKED" in contract and "SEMANTIC_MISMATCH" in contract
+    assert "DIRECT_REPLICATION" in contract and "MECHANISM_MUTATION" in contract
+    assert "SOURCE_BASELINE_EXPR" in contract and "window/constant-only" in contract
+    assert "FORMULA_THESIS" in contract and "FINANCIAL-MATHEMATICS" in contract
+    assert "PREREGISTERED_NO_OOS_FIT" in contract and "CROSS_SCALE" in contract
+    assert "DIRECTIONAL MARKOUT RULE" in contract
+    assert "signed field on its numeric" in contract and "label it PRESSURE" in contract
+    from intraday_alpha_ast import parse as parse_intraday, unit_of as intraday_unit
+    bps_examples = [line.strip().split("=", 1)[1]
+                    for line in contract.splitlines()
+                    if line.strip().startswith("BPS_")]
+    assert len(bps_examples) == 4
+    assert all(intraday_unit(parse_intraday(json.loads(example))) == "BPS"
+               for example in bps_examples), \
+        "Scout prompt contains a BPS skeleton that the runtime cannot execute"
+    assert "alpha_candidate_eligible" in _SQL_LEADS, \
+        "공개 기준선이 신규 알파 후보 목록에 다시 노출된다"
+    assert "MICROSTRUCTURE IS PRIMARY" in contract
+    assert "DAILY AGGREGATE" in contract and "source does" in contract
+    assert "NOT need to ship a reusable dataset" in contract
+    assert "external-validity risk" in contract and "queue position" in contract
+    assert "must not be" in contract and "daily proxy" in contract
+    assert "THIS REFILL IS LANE-AWARE" in contract
+    assert "Daily leads" in contract and "INTRADAY_EVENT buffer" in contract
+    assert 'never "name"' in contract and '"op":"where"' in contract
+    assert "[BARE_WORDS] is not JSON" in contract
+    assert "genuinely non-finance" in contract and "empirical event-time" in contract
+    assert "PASSIVE_FILL_ADJUSTED_PNL" in contract
+    assert "PASSIVE_FIFO_LOWER_BOUND" in contract
+    assert "PASSIVE and PASSIVE_FIFO are invalid aliases" in contract
+    assert "execution-timing mutations" in contract and "extra turnover" in contract
+    assert "PASSIVE_FILL_ADJUSTED_PNL" in PLANNER_FORMAT
+    assert "PASSIVE_FIFO_LOWER_BOUND" in INTRADAY_PLANNER_NOTE
+    assert "instrument_count" in INTRADAY_PLANNER_NOTE
+    assert "UNIVERSE_KEY must be exactly krx_all" in INTRADAY_PLANNER_NOTE
+    assert "not a universe" in INTRADAY_PLANNER_NOTE
+    assert "모든 shard" in INTRADAY_PLANNER_NOTE
     assert "experiment_proposals" in _SQL_LEADS, "사용 여부를 안 본다"
+    assert "p.status in ('PUBLISHED','ACCEPTED')" in _SQL_LEADS, \
+        "Gate 0 REJECTED 리드까지 영구 소비해 교정 재제안을 막는다"
+    import inspect as _inspect
+    for _counter in (_executable_unused_count, _intraday_formula_unused_count,
+                     _lead_health):
+        assert "p.status in ('PUBLISHED','ACCEPTED')" in \
+            _inspect.getsource(_counter), \
+            "REJECTED 리드가 producer/consumer queue에서 계속 사용됨으로 남는다"
+    assert "proposal_review_outcomes" in _SQL_LEADS and "STOP" in _SQL_LEADS, \
+        "스켑틱 STOP 리드를 소비 완료로 보지 않는다"
 
     # 표시가 갈려야 한다 - 안 갈리면 봐도 모른다
     import ast
@@ -2574,19 +4431,37 @@ def _check_lead_health_is_surfaced():
                 def fetchone(self_): return row
             return _C()
 
-    # 실측 상태: 리드 12건 · 안 쓴 것 4건 · 최신 1.2일 전
+    # 실측 상태: 리드 12건 · 원시/실행가능 미사용 4건 · 최신 1.2일 전
     #   → 안 쓴 것이 기준(4) 이상이고 1.2일이면 아직 조용하다
-    assert _lead_health(_Rows((12, 4, 1.2))) == ""
+    assert _lead_health(_Rows((22, 14, 14, 12, 12, 1.2))) == ""
+
+    # A full daily queue must not hide an empty raw event-time lane.
+    intraday_empty = _lead_health(_Rows((55, 9, 9, 0, 0, 0.1)))
+    assert "event-time 미사용 0건" in intraday_empty, intraday_empty
+    assert "별도 기준 2" in intraday_empty, intraday_empty
+
+    # Legacy AST-ready event-time leads must not mask starvation of the new
+    # directional, cost-aware contract required by formula-discovery-v5.
+    formula_empty = _lead_health(_Rows((55, 9, 9, 5, 0, 0.1)))
+    assert "typed formula-thesis event-time 미사용 리드가 0건" in formula_empty, \
+        formula_empty
+    assert "typed formula-thesis 미사용 0건" in formula_empty, formula_empty
+
+    # PARTIAL 리드가 남아 있어도 실행가능한 COMPLETE/AST_READY 리드가 0이면
+    # 스카우트를 불러야 한다. 이것이 2026-08-15 운영 false-negative였다.
+    partial_only = _lead_health(_Rows((55, 7, 0, 0, 0, 0.1)))
+    assert "원시 미사용 7건" in partial_only, partial_only
+    assert "실행가능 미사용 0건" in partial_only, partial_only
 
     # 안 쓴 것이 줄면 말한다
-    low = _lead_health(_Rows((12, 1, 0.5)))
+    low = _lead_health(_Rows((12, 1, 1, 1, 1, 0.5)))
     assert "재료 부족" in low and "안 쓴 리드가 1건" in low, low
     assert "스카우트가 먼저" in low
     # **어떻게 훑는지**까지 알려줘야 한다 - 도구를 모르면 못 한다
     assert "agent-reach" in low and "r.jina.ai" in low, low
 
     # 오래되면 말한다
-    stale = _lead_health(_Rows((12, 9, 3.4)))
+    stale = _lead_health(_Rows((12, 9, 9, 2, 2, 3.4)))
     assert "3.4일 전" in stale, stale
 
     # 못 세면 안 적는다
@@ -2602,6 +4477,175 @@ def _check_lead_health_is_surfaced():
         and n.name == "_compose_research_brief")) or ""
     assert "_lead_health(conn)" in body, "브리핑이 재료 부족을 안 싣는다"
     print("  재료 부족을 카드가 말함   OK")
+
+
+def _check_design_gaps_and_scout_card():
+    """**빈 니치는 기계가 세고, 재료가 마르면 전용 카드가 나간다.** (2026-08-13)
+
+    실측: 서술형 진단은 다섯 주기 연속 무시됐고(신규 기획이 top_n=20 재사용),
+    스카우트는 기획 카드 안에서 항상 밀렸다. 문헌(ChemOS 프로듀서 분리·
+    MAP-Elites 니치 격자·March 착취 쏠림·3M 예약 시간)이 처방한 두 장치를
+    여기 고정한다 - 격자 후보 공급원과 임무 분리 카드.
+    """
+    class _Grid:
+        def __init__(self, rows): self._rows = rows
+
+        def cursor(self):
+            rows = self._rows
+
+            class _C:
+                def __enter__(self_): return self_
+                def __exit__(self_, *a): return False
+                def execute(self_, *a, **k): return None
+                def fetchall(self_): return rows
+            return _C()
+
+    line = _design_gap_line(_Grid([("momentum", 20, "TOP_N", False),
+                                   ("low_volatility", 20, "TOP_N", False)]))
+    assert "빈 니치" in line and "× top_n 151-300" in line, line
+    # ▶ 구성 방식 축 (2026-08-14 분위 곡선 실측). 전부 상위 N개를 사는 구성이면
+    #   그 사실과 실행면 손잡이 이름이 함께 떠야 한다 - 격자가 "몇 개를 사는가"
+    #   만 세고 "어떻게 담는가" 를 안 세면 그 열은 영원히 비어 있다.
+    assert "구성 방식 축이 통째로 비었다" in line, line
+    assert "EXCLUDE_BOTTOM" in line and "exclude_bottom_pct" in line, line
+    assert "+1.00%p" in line, "왜 그 축을 봐야 하는지 근거 수치가 빠졌다"
+    # 하위 배제 실험이 하나라도 있으면 그 줄은 사라진다 - **없는 공백을 지어내지
+    #   않는다.** 사실이 아닌 재촉은 다음 주기에 무시당하는 서술이 된다.
+    line_done = _design_gap_line(_Grid([("momentum", 20, "TOP_N", False),
+                                        ("low_max", 200, "EXCLUDE_BOTTOM", False)]))
+    assert "구성 방식 축이 통째로 비었다" not in line_done, line_done
+
+    # ▶ 위험 수단 축 (2026-08-14). 관문이 정당한데도 양쪽으로 막히는 실측을
+    #   근거와 함께 싣고, 실제로 쓴 실험이 생기면 조용해져야 한다 -
+    #   **없는 공백을 지어내지 않는다.**
+    assert "위험 수단 축이 비었다" in line, line
+    assert "trend_filter_days" in line and "1.255" in line, line
+    line_trend = _design_gap_line(_Grid([("momentum", 20, "TOP_N", True)]))
+    assert "위험 수단 축이 비었다" not in line_trend, line_trend
+    # 실험이 한 대역에 몰린 사실이 그대로 실린다
+    assert "전부 top_n 5-50 한 대역" in line, line
+    # 광폭 대역이 먼저 온다 - 상위 6후보가 전부 151-300 이므로 관례 대역(5-50)
+    # 셀은 후보 목록에 나타나지 않아야 한다(순위는 결정론이다)
+    assert "× top_n 5-50" not in line, line
+    # 살 가치 판단은 에이전트 몫임을 명시한다 - 기계는 명령하지 않는다
+    assert "살 가치는 네가 정한다" in line, line
+    # 미검증 부채: 어휘에 있는데 실험 0건인 유형이 이름으로 뜬다 (2026-08-14)
+    assert "미검증 부채" in line, line
+    assert "low_max" in line or "illiquidity_premium" in line, line
+
+    class _Boom2:
+        def cursor(self): raise RuntimeError("표 없음")
+    assert _design_gap_line(_Boom2()) == "", "못 셌는데 공백을 지어냈다"
+
+    import ast
+    src = Path(__file__).read_text(encoding="utf-8")
+    body = ast.get_source_segment(src, next(
+        n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.FunctionDef)
+        and n.name == "_compose_research_brief")) or ""
+    assert "_design_gap_line(conn)" in body, "브리핑이 설계 공백을 안 싣는다"
+    cyc = ast.get_source_segment(src, next(
+        n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.FunctionDef)
+        and n.name == "cycle")) or ""
+    assert "factory-scout-" in cyc and "_lead_health" in cyc, \
+        "재료가 말라도 스카우트 전용 카드가 안 나간다"
+    # 공급 병목 파훼 두 짝 (2026-08-13): 기획 카드 30분 버킷 + 다중 블록 제출.
+    # 실행 6분 vs 공급 1건/시간 실측 - 버킷이 시간으로 돌아가면 재발이다.
+    assert "factory-planner-v6-{pstamp}" in cyc, "기획 카드가 시간 버킷으로 돌아갔다"
+    assert "서로 다른 계열" in cyc and "블록 3개" in cyc, "다중 블록 제출 지시가 빠졌다"
+    assert "정확히 한" in cyc and "INTRADAY_EVENT" in cyc, \
+        "event-time 리드가 있어도 기획자가 일봉만 고를 수 있다"
+    assert "일봉 블록을 함께 넣지 마라" in cyc, \
+        "mixed-lane batch failure가 인트라데이 제안을 인질로 잡는다"
+    assert "factory_submit_leads`를 호출하거나" in cyc, \
+        "Planner가 기존 리드를 두고 다시 Scout 역할로 샌다"
+    assert "formula_contract_complete=true" in cyc and "다음 미사용 typed 수식" in cyc, \
+        "typed 수식 우선순위와 예산 초과 fallback이 빠졌다"
+    print("  설계 공백·스카우트 소집   OK")
+
+
+def _check_research_queue_prefers_consumption():
+    """Discovery must precede planning when executable material is empty."""
+    import inspect
+
+    saved_rows = globals()["_board_rows"]
+    saved_run = subprocess.run
+    captured: list[str] = []
+    try:
+        globals()["_board_rows"] = lambda sql, params=(): [
+            ("t_scout", "running", "factory-scout-20260815T17")
+        ]
+        assert _active_card_by_key_prefix("factory-scout-") == "t_scout(running)"
+
+        globals()["_board_rows"] = lambda sql, params=(): []
+        assert _active_card_by_key_prefix("factory-scout-") is None
+
+        class _Result:
+            returncode = 0
+            stdout = "t_test"
+            stderr = ""
+
+        def _run(argv, **kwargs):
+            captured.extend(argv)
+            return _Result()
+
+        subprocess.run = _run
+        _create_card(title="test", body="body", assignee=RESEARCH_ASSIGNEE,
+                     key="queue-priority-selfcheck", dry_run=False, priority=1,
+                     max_runtime="4h")
+    finally:
+        globals()["_board_rows"] = saved_rows
+        subprocess.run = saved_run
+
+    assert "--priority" in captured
+    assert captured[captured.index("--priority") + 1] == "1"
+    assert "--max-runtime" in captured
+    assert captured[captured.index("--max-runtime") + 1] == "4h"
+    assert _should_schedule_planner("brief", 1, 1) is True
+    assert _should_schedule_planner("brief", 3, 1) is True, \
+        "low-watermark queue was mistaken for an empty queue"
+    assert _should_schedule_planner("brief", 9, 0) is False, \
+        "daily leads can still steal the single worker slot from intraday Scout"
+    assert _should_schedule_planner("brief", 0, 1) is False
+    assert _should_schedule_planner("brief", None, 1) is False
+    assert _should_schedule_planner("brief", 1, None) is False
+    assert _should_schedule_planner("", 1, 1) is False
+    cyc = inspect.getsource(cycle)
+    assert '_active_card_by_key_prefix("factory-scout-")' in cyc
+    assert "intraday_formula_unused" in cyc
+    assert "_should_schedule_planner(" in cyc, \
+        "planner can still consume an empty primary-lane queue"
+    assert "factory-planner-v6-" in cyc, \
+        "corrected scheduling can be absorbed by an old planner key"
+    assert "priority=1" in cyc, "planner priority was lost after replenishment"
+    print("  research producer-before-consumer dependency OK")
+
+
+def _check_ast_memory_reaches_scout_and_planner():
+    """Outcome memory must shape both literature search and proposal generation."""
+    import inspect
+
+    brief = inspect.getsource(_compose_research_brief)
+    cyc = inspect.getsource(cycle)
+    memory_loader = inspect.getsource(_ast_experience_block)
+    assert "_ast_experience_block(conn)" in brief, \
+        "기획자가 exact/near AST 이력과 성과를 못 본다"
+    assert "ast_memory = _ast_experience_block(_sc)" in cyc, \
+        "스카우트 검색이 과거 AST 경험을 못 본다"
+    assert "starving + \"\\n\" + ast_memory" in cyc, \
+        "메모리를 계산만 하고 스카우트 카드에 싣지 않는다"
+    assert ('"entry_policy": candidate.get("entry_policy")' in memory_loader
+            and '"coefficient_policy": candidate.get(' in memory_loader), \
+        "screening survivor의 실행 계약을 DB에서 읽고도 경험 메모리 전에 버린다"
+    contract = _ast_scout_contract()
+    assert "Event-time field units:" in contract and "Unit algebra" in contract, \
+        "스카우트가 단위를 몰라 유효 후보를 intake에서 잃는다"
+    assert "Semantic event->field requirements:" in contract, \
+        "Event와 observable의 결정론 매핑이 스카우트에게 안 보인다"
+    assert "all 12 attempted candidate ASTs" in contract, \
+        "blocked 문헌 몇 건만 적재하고 population 작업을 끝낼 수 있다"
+    assert "factory-scout-v7-" in cyc, \
+        "새 population 계약이 완료된 구버전 카드에 흡수된다"
+    print("  AST 경험 기억→검색·기획   OK")
 
 
 def _check_dataset_refresh_is_daily_and_ordered():

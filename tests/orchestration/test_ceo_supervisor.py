@@ -39,6 +39,7 @@ def child(
     block_reason: str = "",
     retry_count: int = 0,
     summary: str = "summary",
+    result: str = "",
 ) -> ChildTaskState:
     if "workflow_root_task_id=" not in body:
         body = f"workflow_root_task_id=root\n{body}" if body else "workflow_root_task_id=root"
@@ -54,7 +55,119 @@ def child(
         block_reason=block_reason,
         retry_count=retry_count,
         summary=summary,
+        result=result,
     )
+
+
+class NoAnalysisChildrenOriginGuardTest(unittest.TestCase):
+    """자식 없는 루트에 '사용자에게 물어보라' 카드를 찍는 조건을 고정한다.
+
+    회귀 근거(2026-08-14 실측): 공장 자동 생성 카드(공장 주기·공장 개선)는 자식
+    없이 혼자 끝나는 게 정상인데 supervisor 가 그것까지 워크플로로 보고
+    REQUEST_USER_INPUT 카드를 만들었다. CEO 에이전트는 "무엇을 물어야 하는지
+    지시에 없다"며 blocked 로 보냈고, 같은 제목의 카드가 43 장 쌓였다.
+    """
+
+    def test_factory_root_does_not_get_user_input_card(self) -> None:
+        decision = decide_supervisor(
+            SupervisorState("root", (), root_is_user_query=False)
+        )
+        self.assertIsNone(decision)
+
+    def test_user_query_root_still_asks(self) -> None:
+        decision = decide_supervisor(
+            SupervisorState("root", (), root_is_user_query=True)
+        )
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.action, SupervisorAction.REQUEST_USER_INPUT)
+
+
+class UserQueryPriorityTest(unittest.TestCase):
+    """사람이 기다리는 카드가 공장 카드보다 대기열 앞에 서는지 고정한다.
+
+    근거(2026-08-14 실측): Hermes ready 큐가 priority DESC 정렬인데 우리는
+    아무 카드에도 우선순위를 안 줘서, 공장이 슬롯을 물고 ready 23 장이 쌓인
+    사이 사용자 질의가 6 분 넘게 대기했다.
+    """
+
+    def test_user_query_body_gets_priority_over_factory_default(self) -> None:
+        from orchestration.canonical_profiles import (
+            USER_QUERY_PRIORITY,
+            CanonicalKanbanTaskRequest,
+        )
+
+        self.assertGreater(USER_QUERY_PRIORITY, 0)
+        factory = CanonicalKanbanTaskRequest(
+            "research-department", "공장 주기", "body", "k1"
+        )
+        self.assertEqual(factory.priority, 0)
+        query = CanonicalKanbanTaskRequest(
+            "research-liaison", "질의", "origin=user-query\nbody", "k2",
+            priority=USER_QUERY_PRIORITY,
+        )
+        self.assertGreater(query.priority, factory.priority)
+
+    def test_priority_must_be_int(self) -> None:
+        from orchestration.canonical_profiles import CanonicalKanbanTaskRequest
+
+        with self.assertRaises(ValueError):
+            CanonicalKanbanTaskRequest("qa-department", "t", "b", "k", priority="9")
+
+
+class AnswerBodyHandoffTest(unittest.TestCase):
+    """부서가 만든 답변 본문이 QA·종합까지 살아서 가는지 고정한다.
+
+    회귀 근거(2026-08-14 실측): 창구가 외국인 순매수 상위 10 표를 만들었는데
+    QA·종합 카드에 summary 한 줄만 실려 사용자 응답이 result:null 로 나갔다.
+    """
+
+    # 실제 창구 답변의 형태 - 표 + 근거 좌표 + 기준일 + 한계 명시.
+    # answer_contract 가 보는 네 항목이 전부 들어 있어야 gaps 가 비어야 한다.
+    ANSWER = "\n".join(
+        (
+            "2026-08-13 기준 외국인 순매수 상위",
+            "| 1 | SK하이닉스 | 000660 | 649,842주 |",
+            "근거: investor_flow TR=t1717 citation=150ae2d8b8c1849e",
+            "2026-08-14 는 장중 미집계라 제외했다.",
+        )
+    )
+
+    def _bodies_for(self, **child_kwargs: str) -> list[str]:
+        bodies = []
+        for role_body in ("workflow_role=primary", ""):
+            state = SupervisorState(
+                "root",
+                (child("r", "research-department", "done", body=role_body,
+                       **child_kwargs),),
+            )
+            decision = decide_supervisor(state)
+            self.assertIsNotNone(decision)
+            bodies.append(decision.body or "")
+        return bodies
+
+    def test_answer_body_reaches_downstream_cards(self) -> None:
+        for body in self._bodies_for(result=self.ANSWER):
+            self.assertIn("SK하이닉스", body)
+            self.assertNotIn("answer_body_missing", body)
+
+    def test_complete_answer_is_graded_trustworthy(self) -> None:
+        # 본문·근거·기준일·한계가 모두 있으면 QA 가 의심할 항목이 없어야 한다.
+        for body in self._bodies_for(result=self.ANSWER):
+            self.assertIn('"answer_trustworthy": true', body)
+            self.assertNotIn("answer_gaps", body)
+
+    def test_answer_without_evidence_is_flagged_for_qa(self) -> None:
+        # 본문은 있는데 근거가 없는 답이 조용히 통과하는 것이 가장 위험하다.
+        bare = "삼성전자 외국인 순매수는 649,842주로 집계됐습니다. 상위 종목입니다."
+        for body in self._bodies_for(result=bare):
+            self.assertIn('"answer_usable": true', body)
+            self.assertIn('"answer_trustworthy": false', body)
+            self.assertIn("근거 좌표 없음", body)
+
+    def test_missing_answer_body_is_flagged_not_papered_over(self) -> None:
+        # 요약만 있고 본문이 없으면 그 사실이 그대로 보여야 한다.
+        for body in self._bodies_for(result=""):
+            self.assertIn("answer_body_missing", body)
 
 
 class SupervisorPolicyTest(unittest.TestCase):
@@ -575,6 +688,43 @@ class SupervisorPolicyTest(unittest.TestCase):
         self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
         self.assertNotIn("qa", decision.parent_task_ids)
 
+    def test_analysis_synthesis_includes_terminal_blocked_primary(self) -> None:
+        selected = (
+            "research-department",
+            "quant-backtest-department",
+            "risk-management",
+            "accounting-portfolio-department",
+        )
+        body = "workflow_root_task_id=root\nworkflow_role=primary"
+        children = tuple(
+            child(
+                profile.split("-")[0],
+                profile,
+                "blocked" if profile == "accounting-portfolio-department" else "done",
+                body=body,
+                block_reason=(
+                    "financial statement unavailable"
+                    if profile == "accounting-portfolio-department"
+                    else ""
+                ),
+            )
+            for profile in selected
+        )
+
+        decision = decide_supervisor(
+            SupervisorState(
+                "root",
+                children,
+                qa_required=False,
+                selected_primary_profiles=selected,
+            )
+        )
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
+        self.assertEqual(decision.parent_task_ids, tuple(item.task_id for item in children))
+        self.assertIn("financial statement unavailable", decision.body)
+
     def test_four_selected_primary_parents_exclude_unmarked_duplicates(self) -> None:
         selected = (
             "research-department",
@@ -767,6 +917,63 @@ class FakeClient:
 
 
 class SupervisorWakeupTest(unittest.TestCase):
+    def test_startup_reconciliation_recovers_direct_root_and_blocked_primary(self) -> None:
+        class ExistingRootClient(FakeClient):
+            def __init__(self) -> None:
+                super().__init__()
+                selected = (
+                    "research-department",
+                    "quant-backtest-department",
+                    "risk-management",
+                    "accounting-portfolio-department",
+                )
+                self.root_body = (
+                    "hgfinance.ceo-workflow-scope.v1\n"
+                    "workflow_role=planning\n"
+                    "producer=ceo-hermes-direct\n"
+                    "request_class=non-binding advisory analysis\n"
+                    "selected_primary_profiles="
+                    + ",".join(selected)
+                )
+                self.payloads = [
+                    {
+                        "id": f"{profile}-task",
+                        "assignee": profile,
+                        "status": "blocked" if profile.endswith("portfolio-department") else "done",
+                        "summary": profile,
+                        "block_reason": "data gap"
+                        if profile.endswith("portfolio-department")
+                        else "",
+                        "body": "workflow_root_task_id=root\nworkflow_role=primary",
+                    }
+                    for profile in selected
+                ]
+
+            def list_tasks(self):
+                return ({"id": "root", "status": "done", "body": self.root_body},)
+
+            def show(self, task_id: str):
+                payload = super().show(task_id)
+                if task_id == "root":
+                    payload.update(status="done", body=self.root_body)
+                return payload
+
+        client = ExistingRootClient()
+        decisions = CeoSupervisorService(client).reconcile_existing_workflows()
+
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0].action, SupervisorAction.RUN_QA)
+        self.assertEqual([item["assignee"] for item in client.created], ["qa-department", "ceo-agent"])
+        self.assertEqual(
+            set(client.created[1]["parent_task_ids"]),
+            {
+                "research-department-task",
+                "quant-backtest-department-task",
+                "risk-management-task",
+                "accounting-portfolio-department-task",
+            },
+        )
+
     def test_terminal_child_creates_parallel_qa_and_synthesis(self) -> None:
         client = FakeClient()
         service = CeoSupervisorService(client)
@@ -943,6 +1150,15 @@ class SupervisorWakeupTest(unittest.TestCase):
         )
         self.assertEqual(workflow_mode_from_body(build_root_body("q", "r")), "analysis")
         self.assertEqual(workflow_mode_from_body("hgfinance.ceo-workflow-scope.v1"), "binding")
+
+    def test_direct_non_binding_root_without_workflow_mode_is_analysis(self) -> None:
+        body = (
+            "hgfinance.ceo-workflow-scope.v1\n"
+            "workflow_role=planning\n"
+            "request_class=non-binding advisory analysis\n"
+            "selected_primary_profiles=research-department"
+        )
+        self.assertEqual(workflow_mode_from_body(body), "analysis")
 
     def test_invalid_workflow_mode_aborts_only_current_workflow(self) -> None:
         client = FakeClient()

@@ -86,11 +86,16 @@ def _edge_for_execution(edge) -> dict:
     if not src.get("type"):
         src["type"] = "none"            # 강건성 검증은 엣지를 주장하지 않는다
     try:
-        from config_binding import EDGE_KEYS  # noqa: PLC0415
+        from config_binding import unknown_edge_keys  # noqa: PLC0415
     except Exception:  # noqa: BLE001 - 못 읽으면 그대로 둔다(막지 않는다)
         return src
-    kept = {k: v for k, v in src.items() if k in EDGE_KEYS}
-    dropped = sorted(k for k in src if k not in EDGE_KEYS)
+    # ▶ **실행면이 거부할 것만 뺀다** (2026-08-14). `EDGE_KEYS` 만 보고 빼면
+    #   사전등록 키까지 떨어지는데, `universe` 는 `bind` 가 `universe_key` 로
+    #   사상하는 **구 계약 철자**다. 그걸 빼면 강건성 검증이 부모와 **다른
+    #   유니버스**에서 돌고, 그 성적은 그 가설의 증거가 아니다.
+    #   실측으로 `universe` 만 가진 가설이 있다(ced2d8f9·d28d18b6).
+    dropped = unknown_edge_keys(src)
+    kept = {k: v for k, v in src.items() if k not in set(dropped)}
     if dropped:
         print(f"  ⚠ expected_edge 에서 실행면이 안 읽는 키를 뺐다: "
               f"{', '.join(dropped)} (설명은 rationale 에 있다)", flush=True)
@@ -152,9 +157,76 @@ def half_calendar_end(label: str) -> date:
     return date(year, 6, 30) if label.endswith("H1") else date(year, 12, 31)
 
 
+# 짧은 표본에서 쓰는 창 규격. **관문 임계가 아니라 자(尺)의 눈금이다.**
+#
+# ▶ 왜 필요한가 (2026-08-14)
+#   미시구조 커버리지가 61거래일인데 반기 창을 요구하면 창이 **0개**가 되고
+#   `fragility_summary` 가 INSUFFICIENT 를 돌려준다. 그건 "전략이 나쁘다" 가
+#   아니라 "못 쟀다" 이고, 그 상태로는 어떤 신호도 판정에 못 오른다.
+#
+#   61일에 반기 창을 대는 것은 엄격한 잣대가 아니라 **틀린 잣대**다. 표본에
+#   맞는 눈금을 쓰는 것은 관문을 낮추는 것과 다르다 - 합격선(양의 창 비율
+#   0.6·최악 창 MDD -25%)은 **그대로 두고** 창 길이만 표본에 맞춘다.
+#
+# ▶ 긴 표본은 건드리지 않는다
+#   반기 창이 2개 이상 나오면 예전 경로 그대로다. 창 구성이 input_hash 에
+#   들어가므로, 여기서 규칙이 바뀌면 기존 실험이 전부 다른 실험이 된다.
+# 이 길이 미만이면 **반기 창이 구조적으로 성립하지 않는** 표본으로 본다.
+# 반기가 약 125 거래일이므로 그보다 짧으면 창이 0~1개밖에 안 나온다.
+# 길이로 가르는 이유: '반기 창 수' 로 가르면 1년짜리 표본(반기 1개)까지
+# 새 규칙에 걸려 **기존 실험의 창 구성이 바뀐다**(input_hash 가 깨진다).
+SHORT_SAMPLE_MAX_DAYS = 120
+SHORT_MIN_TEST_DAYS = 10      # 이보다 짧은 창은 성적이 잡음이라 만들지 않는다
+SHORT_TARGET_WINDOWS = 6      # 통계를 낼 만한 창 수 - 표본이 허락하는 만큼만
+
+
+def _short_sample_windows(dates: list[date], warmup_days: int,
+                          embargo_days: int) -> list[WFWindow]:
+    """반기 창이 성립하지 않는 표본을 **균등 분할**한다.
+
+    창은 무겹침이고 시각 순서를 지킨다(walk-forward 성질 유지). 창 하나가
+    `SHORT_MIN_TEST_DAYS` 미만이면 만들지 않는다 - 억지로 쪼개면 각 창의
+    성적이 잡음이라 부호 일관성이 우연에 지배된다.
+    """
+    emb = max(0, int(embargo_days))
+    usable = dates[warmup_days:]
+    # SHORT_MIN_TEST_DAYS is the evidence left *after* embargo.  Allocating
+    # ten calendar observations and then removing a two-day embargo used to
+    # create eight-day windows that the fragility judge correctly discarded.
+    min_segment_days = SHORT_MIN_TEST_DAYS + emb
+    if len(usable) < min_segment_days:
+        return []
+    # 표본이 허락하는 창 수. 창 길이가 최소를 밑돌지 않게 위에서 깎는다.
+    n_win = min(SHORT_TARGET_WINDOWS, len(usable) // min_segment_days)
+    if n_win < 1:
+        return []
+    size = len(usable) // n_win
+    out: list[WFWindow] = []
+    for k in range(n_win):
+        seg = usable[k * size: (k + 1) * size] if k < n_win - 1 \
+            else usable[k * size:]          # 마지막 창이 나머지를 흡수한다
+        if len(seg) < min_segment_days:
+            continue
+        eff = seg[emb:]
+        if len(eff) < SHORT_MIN_TEST_DAYS:
+            continue
+        i0 = dates.index(seg[0])
+        out.append(WFWindow(
+            label=f"W{k + 1:02d}-{seg[0].isoformat()}",
+            warmup_start=dates[max(0, i0 - warmup_days)],
+            test_start=seg[0], test_end=seg[-1],
+            n_warmup_days=warmup_days, n_test_days=len(eff),
+            embargo_days=emb, embargoed_start=eff[0],
+            partial=False))
+    return out
+
+
 def make_windows(dates: list[date], warmup_days: int,
                  embargo_days: int = 0) -> list[WFWindow]:
-    """오름차순 거래일 -> 무겹침 반기 시험창. 웜업을 확보 못 하는 앞 반기는 제외.
+    """오름차순 거래일 -> 무겹침 시험창. 웜업을 확보 못 하는 앞 구간은 제외.
+
+    기본은 **반기 창**이다. 반기 창이 2개 미만이면(짧은 표본) 표본에 맞는
+    균등 분할로 물러난다 - `_short_sample_windows` 의 주석에 근거가 있다.
 
     순수 함수다 - 같은 (dates, warmup_days)는 언제나 같은 창 목록이고,
     이 목록이 input_hash 의 일부가 된다.
@@ -184,6 +256,13 @@ def make_windows(dates: list[date], warmup_days: int,
             embargo_days=emb,
             embargoed_start=eff[0],
             partial=half_calendar_end(label) > dates[-1]))
+    # ▶ 반기 창이 2개 미만이면 **표본에 맞는 눈금으로 물러난다.**
+    #   1개짜리는 창간 비교(부호 일관성·Sharpe 산포)가 성립하지 않아 강건성을
+    #   재는 의미가 없다 - 그럴 바엔 표본을 고르게 갈라 여러 창을 만든다.
+    if len(dates) < SHORT_SAMPLE_MAX_DAYS and len(out) < 2:
+        short = _short_sample_windows(dates, warmup_days, embargo_days)
+        if len(short) > len(out):
+            return short
     return out
 
 
@@ -195,8 +274,25 @@ def slice_market(market: Market, w: WFWindow) -> Market:
     kset = set(keep)
     opens = {k: v for k, v in market.opens.items() if k[0] in kset}
     closes = {k: v for k, v in market.closes.items() if k[0] in kset}
+    # ▶ **거래대금도 같이 자른다** (2026-08-14 실측)
+    #   여기서 `notionals` 를 안 넘기고 있었다. `Market` 의 기본값이 빈 dict 라
+    #   창 안에서는 거래대금이 **통째로 사라졌고**, 그 결과:
+    #     · 유동성 필터가 `min_trading_days` 를 못 채워 전 종목을 버린다
+    #       (실측 b71f1db0: 21개 창 전부 total_return/MDD/Sharpe = 0)
+    #     · 그 0 들이 `positive_window_ratio = 0` 을 만들어 강건성이 **항상**
+    #       SIGN_INCONSISTENT -> FRAGILE -> REJECTED 로 굳는다
+    #     · `illiquidity_premium` 신호와 비용 모델의 유동성 계층도 거래대금을
+    #       읽으므로, 필터를 켜기 전부터 창 안 성적이 조용히 오염돼 있었다
+    #   전체 기간 백테스트(TEST)는 회전 223배로 멀쩡히 거래하는데 창 안만 0 인
+    #   비대칭이 단서였다 - 창을 자를 때 열 하나를 빠뜨린 것이 원인이다.
+    notionals = {k: v for k, v in market.notionals.items() if k[0] in kset}
+    # 미시구조도 같은 규칙으로 자른다 - 위 사고가 이 열에서 반복되지 않게
+    # 자체점검이 두 열을 함께 검사한다(2026-08-14).
+    micro = {k: v for k, v in getattr(market, "micro", {}).items()
+             if k[0] in kset}
     symbols = sorted({s for (_, s) in closes})
-    return Market(dates=keep, opens=opens, closes=closes, symbols=symbols)
+    return Market(dates=keep, opens=opens, closes=closes, symbols=symbols,
+                  notionals=notionals, micro=micro)
 
 
 def run_window(sub: Market, w: WFWindow, config: dict) -> dict:
@@ -602,6 +698,13 @@ def _synth_market(start: date, end: date, series: dict) -> Market:
             rows.append({"instrument_id": s, "trade_date": d,
                          "open": px, "high": px, "low": px, "close": px,
                          "volume": 1000,
+                         # ▶ **거래대금을 실물처럼 싣는다** (2026-08-14)
+                         #   이 픽스처에 `notional` 이 없어서 슬라이스가 그 열을
+                         #   통째로 잃어도 검사가 통과했다(실측: 창 21개 전부
+                         #   지표 0). 실물 단위는 백만원이고 중앙값이 269 이므로
+                         #   그 근방 값을 쓴다 - 픽스처가 실물과 다르면 검사는
+                         #   늘 통과하고 현장만 죽는다.
+                         "notional": 300.0,
                          "observed_at": datetime(2026, 7, 31, tzinfo=timezone.utc)})
     return Market.from_rows(rows)
 
@@ -628,9 +731,53 @@ def _check_windows_pure():
     print("  창 분할(무겹침·웜업 보장) OK")
 
 
+def _check_short_sample_gets_its_own_ruler():
+    """**표본에 맞는 눈금을 쓰되 합격선은 그대로** (2026-08-14).
+
+    미시구조 커버리지가 61거래일인데 반기 창을 대면 창이 0개가 되고 강건성이
+    INSUFFICIENT 로 끝난다 - "나쁘다" 가 아니라 "못 쟀다" 다. 표본에 맞는 창
+    길이를 쓰는 것은 관문을 낮추는 것과 다르다. 여기서 고정하는 것 셋:
+      ① 긴 표본은 **예전 그대로**(창 구성이 input_hash 라 바뀌면 재현이 깨진다)
+      ② 짧은 표본은 무겹침·시각순으로 균등 분할
+      ③ 너무 짧으면 **만들지 않는다**(억지 창은 잡음이라 판정을 오도한다)
+    """
+    # ① 긴 표본 - 반기 그대로
+    long_days = _weekdays(date(2024, 1, 2), date(2026, 7, 30))
+    ws = make_windows(long_days, WARMUP_TRADING_DAYS)
+    assert [w.label for w in ws] == ["2024H2", "2025H1", "2025H2",
+                                     "2026H1", "2026H2"], [w.label for w in ws]
+
+    # ② 짧은 표본 - 미시구조 실측 구간(2026-05-18 ~ 08-14, 약 65 거래일)
+    short_days = _weekdays(date(2026, 5, 18), date(2026, 8, 14))
+    short = make_windows(short_days, 30)
+    assert len(short) >= 2, f"짧은 표본에서 창이 {len(short)}개 - 강건성을 못 잰다"
+    assert all(not w.label.endswith(("H1", "H2")) for w in short), \
+        "짧은 표본에 반기 라벨이 붙었다 - 어느 눈금을 썼는지 구분이 안 된다"
+    for a, b in itertools.pairwise(short):
+        assert a.test_end < b.test_start, "창이 겹쳤다 - walk-forward 가 아니다"
+    assert all(w.n_test_days >= 1 for w in short)
+    # 웜업이 시험 시작보다 앞선다(창 독립성)
+    assert all(w.warmup_start <= w.test_start for w in short)
+    # 순수 함수 - 같은 입력이면 같은 창
+    assert make_windows(short_days, 30) == short
+
+    # ③ 너무 짧으면 아예 안 만든다
+    tiny = _weekdays(date(2026, 8, 1), date(2026, 8, 14))
+    assert make_windows(tiny, 30) == [], "표본이 없는데 창을 지어냈다"
+
+    # ④ 합격선은 손대지 않았다 - 눈금만 바꾼 것이 전부다
+    assert FRAGILITY_RULES["min_positive_window_ratio"] == 0.6, FRAGILITY_RULES
+    assert FRAGILITY_RULES["max_worst_window_mdd"] == -0.25, FRAGILITY_RULES
+    print("  짧은 표본 = 짧은 눈금    OK")
+
+
 def _check_slice_no_future():
     m = _synth_market(date(2024, 1, 2), date(2024, 12, 31),
                       {"A": lambda i, d: 100.0, "B": lambda i, d: 200.0})
+    # ▶ 픽스처에 미시구조도 싣는다 - **실물에 있는 열이 픽스처에 없으면 그 열을
+    #   잃어도 검사가 통과한다**(2026-08-14 실측: notional 이 없어서 못 잡았다).
+    m.micro = {(d, s): {"spread_bps": 12.5, "order_flow_imbalance": 0.1}
+               for d in m.dates for s in m.symbols}
     (w,) = make_windows(m.dates, WARMUP_TRADING_DAYS)
     sub = slice_market(m, w)
     assert all(w.warmup_start <= d <= w.test_end for d in sub.dates), "창 밖 날짜 유입"
@@ -639,6 +786,34 @@ def _check_slice_no_future():
     warm = [d for d in sub.dates if d < w.test_start]
     assert len(warm) == WARMUP_TRADING_DAYS and max(warm) < w.test_start
     assert sub.dates[-1] == w.test_end
+    # ▶ **창 안에서도 거래대금이 살아 있어야 한다** (2026-08-14 실측)
+    #   이 열을 안 넘기고 있었다. 그러면 유동성 필터가 min_trading_days 를 못
+    #   채워 전 종목을 버리고, 창 지표가 전부 0 이 되어 강건성이 **항상**
+    #   FRAGILE 로 굳는다(실측 b71f1db0: 21창 63행 전부 0). 비용 모델의 유동성
+    #   계층과 illiquidity_premium 신호도 같은 열을 읽는다.
+    assert sub.notionals, \
+        "슬라이스가 거래대금을 통째로 잃었다 - 유동성 필터·비용 계층·ILLIQ 신호가 다 죽는다"
+    # ▶ **열 하나가 아니라 전부를 본다** (2026-08-14 처방)
+    #   `notionals` 만 검사하면 다음에 늘린 열에서 같은 사고가 난다. `Market`
+    #   의 (날짜, 종목) 키 dict 를 전부 순회해 슬라이스가 보존했는지 확인하면,
+    #   **필드를 늘리는 순간 이 검사가 자동으로 따라온다** - 규칙이 아니라
+    #   구조로 막는다.
+    import dataclasses  # noqa: PLC0415
+
+    for _f in dataclasses.fields(Market):
+        _orig = getattr(m, _f.name, None)
+        if not isinstance(_orig, dict) or not _orig:
+            continue                      # 비어 있으면 검사할 것이 없다
+        if not all(isinstance(k, tuple) and len(k) == 2 for k in _orig):
+            continue                      # (날짜, 종목) 키가 아닌 dict 는 대상 아님
+        _got = getattr(sub, _f.name, None)
+        _want = {k for k in _orig if w.warmup_start <= k[0] <= w.test_end}
+        assert isinstance(_got, dict) and set(_got) == _want, (
+            f"슬라이스가 '{_f.name}' 을 보존하지 못했다 "
+            f"(원본 {len(_want)}개 -> 슬라이스 {len(_got or {})}개). "
+            f"Market 에 열을 늘렸으면 slice_market 도 같이 늘려야 한다 - "
+            f"안 그러면 창 안에서 그 열이 통째로 사라진다(2026-08-14 실측: "
+            f"notionals 누락으로 21창 전부 0)")
     print("  슬라이스(창 밖 미래 차단) OK")
 
 
@@ -649,8 +824,15 @@ def _check_no_lookahead_through_window():
     (w,) = [x for x in ws if x.label == "2025H2"]
     series = {
         "UP": lambda i, d: 100.0 * (1.002 ** i),                          # 꾸준한 상승
-        "SPIKE_T0": lambda i, d: 300.0 if d >= w.test_start else 100.0,   # 시험창 당일 급등
-        "SPIKE_MID": lambda i, d: 300.0 if d >= date(2025, 7, 15) else 100.0,
+        "SPIKE_T0": lambda i, d: 240.0 if d >= w.test_start else 100.0,   # 시험창 당일 급등
+        # ▶ 배수를 ×3.0 -> ×2.4 로 바꿨다 (2026-08-14)
+        #   `strategy_templates._adjustment_break` 가 **하루 만의 정수배 점프**를
+        #   미조정 액면분할로 보고 그 이전 이력을 버린다. 한국은 상한가 30% 라
+        #   하루에 ×2 는 제도적으로 불가능하므로 그 판정이 옳고, 정확히 ×3.00
+        #   인 이 픽스처가 실물에 없는 경로였다(실물이라면 여러 날에 걸친다).
+        #   이 검사의 의도는 "웜업 경계가 시험창 안 정보를 막지 않는다" 이지
+        #   정수배 급등을 사는 것이 아니므로, 방어선에 걸리지 않는 배수로 둔다.
+        "SPIKE_MID": lambda i, d: 240.0 if d >= date(2025, 7, 15) else 100.0,
         "FLAT": lambda i, d: 100.0,
     }
     sub = slice_market(_synth_market(start, end, series), w)
@@ -732,10 +914,17 @@ def _check_edge_only_carries_executable_keys():
     assert got.get("type") == "none", got
     assert set(got) <= set(EDGE_KEYS), got
 
-    # 사고 원문: 호출부가 universe(오타·비어휘)를 실었다
+    # 사고 원문: 호출부가 설명(note)을 실어 발주가 영구 보류됐다
     got2 = _edge_for_execution({"type": "momentum", "universe": "krx",
                                 "note": "설명", "horizon_days": 20})
-    assert set(got2) == {"type", "horizon_days"}, got2
+    # ▶ **`universe` 는 남는다** (2026-08-14 계약 변경 반영).
+    #   `bind` 가 `universe_key` 로 사상하는 구 철자라 실행면이 거부하지 않고,
+    #   빼면 강건성 검증이 부모와 다른 유니버스에서 돌아 그 성적이 그 가설의
+    #   증거가 아니게 된다(위 `_edge_for_execution` 주석의 근거).
+    #   구현은 그렇게 바뀌었는데 이 기대값만 옛 계약에 남아 저장소가 자체점검
+    #   실패 상태로 있었다 - 실행면이 진짜 거부하는 것만 빠지는지로 고정한다.
+    assert set(got2) == {"type", "universe", "horizon_days"}, got2
+    assert "note" not in got2, "설명을 실으면 발주가 영구 보류된다"
     assert got2["horizon_days"] == 20, "읽는 키까지 버렸다"
 
     # 정상 입력은 그대로 통과한다 - 오탐이 있으면 멀쩡한 가설이 깎인다
@@ -827,10 +1016,11 @@ if __name__ == "__main__":
     _check_embargo_removes_leading_days()
     print("  embargo 적용            OK")
     _check_windows_pure()
+    _check_short_sample_gets_its_own_ruler()
     _check_slice_no_future()
     _check_no_lookahead_through_window()
     _check_window_metrics_determinism()
     _check_edge_only_carries_executable_keys()
     _check_fragility_rules()
     _check_input_hash()
-    print("Walk-Forward 8개 영역 통과. 실행은 --run")
+    print("Walk-Forward 9개 영역 통과. 실행은 --run")

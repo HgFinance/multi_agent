@@ -85,8 +85,11 @@ class Job:
 JOBS: tuple[Job, ...] = (
     # 공시는 증분 폴링. 기본 범위 = 최근 3일(주말·야간 공시 누락 방지), 멱등이라
     # 겹쳐도 안전. --max-pages 30: 3일 창이 25페이지까지 나온 실측 + 여유
-    Job("disclosure", ("collectors/opendart_collector.py", "--collect", "--max-pages", "30"),
-        every_minutes=10, window=(time(7, 0), time(19, 0))),
+    # ▶ 2026-08-13 내림 (재일 결정: 정성·문서·재무 적재 전면 정리 - MCP 도입 의의).
+    #   공시 목록 조회는 research-mcp 의 dart_search_disclosures 가 대체한다.
+    #   되돌리려면 주석만 벗기면 된다 - 코드·계약은 그대로다.
+    # Job("disclosure", ("collectors/opendart_collector.py", "--collect", "--max-pages", "30"),
+    # every_minutes=10, window=(time(7, 0), time(19, 0))),
     # 시장 Breadth - 세션 판정은 수집기 자신이 한다 (휴장이면 exit 2 = SKIP)
     Job("breadth", ("collectors/market_breadth_collector.py", "--collect"),
         every_minutes=10, window=(time(8, 30), time(16, 10))),
@@ -213,15 +216,18 @@ JOBS: tuple[Job, ...] = (
     # --limit 명시: CLI 기본값(재무 20, CA 40)은 프로브용이라 스케줄이 그대로 쓰면
     # 발행사 1,049곳 중 꼬리만 돌게 된다 (2026-07-31 점검에서 발견).
     # 재무는 corp_code 콤마 배치 조회라 1,200 이어도 호출 수십 회다.
-    Job("financial", ("collectors/opendart_financial.py", "--collect", "--limit", "1500"),
-        daily_at=time(18, 10)),
+    # ▶ 2026-08-13 내림 (동일 결정). 재무는 dart_financials 가 대체.
+    #   ⚠ QF-F/QF-D 팩터 설계는 이 적재를 전제했다 - 팩터 구현 시 재검토.
+    # Job("financial", ("collectors/opendart_financial.py", "--collect", "--limit", "1500"),
+    # daily_at=time(18, 10)),
     # 전종목 바스켓 재생성 - 제한 스냅샷(07:05) 뒤라 그날의 정지·관리 종목이
     # 반영된다. 파일은 config 에 쓰므로 이 Job 은 호스트 권한이 필요하다 -
     # 컨테이너 config 는 읽기 전용이라 실패한다(알려진 제약, 백로그).
     # 현금흐름표 - F-Score 를 6/9 에서 9/9 로 올리는 재료. 회사당 1호출이라
     # 감시 바스켓(400)만 받는다. 18:50: 재무(18:10) 뒤, CA(18:30) 사이 여유.
-    Job("cashflow", ("collectors/opendart_cashflow.py", "--collect", "--limit", "3000"),
-        daily_at=time(18, 50)),
+    # ▶ 2026-08-13 내림 (동일 결정). financial 과 같은 축.
+    # Job("cashflow", ("collectors/opendart_cashflow.py", "--collect", "--limit", "3000"),
+    # daily_at=time(18, 50)),
     Job("corporate-action", ("collectors/corporate_action_collector.py", "--collect", "--limit", "1500"),
         daily_at=time(18, 30)),
     # ▶ document-archive 는 내렸다 (2026-08-12, 재일님 결정)
@@ -255,8 +261,9 @@ JOBS: tuple[Job, ...] = (
     # 개황이 빈 issuer 보강 (전량 보강은 완료 - 이후는 신규 필러 몫).
     # 300: 공시 백필 하루치가 신규 143 corp 를 만든 실측(2026-07-31) + 여유.
     # 2건/초 제한이라 300개 = 2.5분이면 끝난다.
-    Job("company-profile", ("collectors/opendart_company_collector.py", "--collect", "--limit", "300"),
-        daily_at=time(19, 0)),
+    # ▶ 2026-08-13 내림 (동일 결정). 기업개황은 dart_company 가 대체.
+    # Job("company-profile", ("collectors/opendart_company_collector.py", "--collect", "--limit", "300"),
+    # daily_at=time(19, 0)),
     # 역량 격차 감사 - "쓸 수 있는데 안 쓰는 것"을 스스로 찾는다. 매일 07:40
     # (지정학 07:20 뒤). LS 호출 1회 + 질의 몇 개라 가볍다. 발견만 하고
     # 채택은 사람이 한다 - 리포트가 reports/capability_audit_*.md 로 남는다.
@@ -265,8 +272,10 @@ JOBS: tuple[Job, ...] = (
     # Packet 사후 채점 - 선순환의 되먹임. 지평(5·20 거래일)이 지난 Packet 을
     # 시세로 대조해 research.packet_outcomes 에 남긴다. 18:00: 당일 종가가
     # 확정되고 밤 배치가 시작되기 전.
-    Job("packet-outcome", ("collectors/packet_outcome_scorer.py", "--score"),
-        daily_at=time(18, 0)),
+    # ▶ 2026-08-13 내림 (동일 결정). 뉴스 적재 중단으로 Packet 파이프라인 동면 -
+    #   채점 대상이 더 생기지 않는다. 부활 시 MARKET_API_URL env 수리부터(주소 하드코딩).
+    # Job("packet-outcome", ("collectors/packet_outcome_scorer.py", "--score"),
+    # daily_at=time(18, 0)),
     # ▶ geopolitical 은 내렸다 (2026-08-12, 재일님 결정 - macro 와 같은 이유)
     #
     #   하던 일: GPR 일별 지수 + GDELT 테마 보도량·톤을 매일 07:20 에 적재.
@@ -286,8 +295,9 @@ JOBS: tuple[Job, ...] = (
     # 60분 주기면 계정당 피드 50건 버퍼가 최고 볼륨(Reuters ~57건/일)도 20시간
     # 이상 덮는다 - 놓칠 수 없는 구조. 창 06:00~23:50: 미 장중(KST 밤)은 다음날
     # 아침 첫 폴링이 버퍼로 회수하므로 새벽 상주가 필요 없다.
-    Job("bluesky-watch", ("collectors/bluesky_watch_collector.py", "--collect"),
-        every_minutes=60, window=(time(6, 0), time(23, 50))),
+    # ▶ 2026-08-13 내림 (동일 결정). 소셜 축은 필요 시 MCP 웹검색으로.
+    # Job("bluesky-watch", ("collectors/bluesky_watch_collector.py", "--collect"),
+    # every_minutes=60, window=(time(6, 0), time(23, 50))),
 )
 
 

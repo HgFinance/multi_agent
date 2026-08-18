@@ -2,7 +2,12 @@
 
 검토일: 2026-08-10 (KST)
 작성: 영주 (CEO Office)
-상태: **설계 초안** — §3 이후는 미구현. §2는 구현·문서화 완료분 정리
+상태: **PARTIAL** — §2와 `CATEGORY_WORKFLOWS`/기본 부서 집합은 구현·문서화됨.
+실제 `strategy-research` BFF dispatch와 후속 HITL 설계는 미구현.
+
+> 현재 worker registry와 전체 구현 상태는
+> [CURRENT_PROJECT_ARCHITECTURE.md](../CURRENT_PROJECT_ARCHITECTURE.md)를
+> 우선한다. 이 문서는 라우팅 설계의 상세/잔여 backlog를 보존한다.
 
 > 상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)
 > 관련: [USER_INPUT_SPEC.md](../01-product/USER_INPUT_SPEC.md)(온보딩 1회), [MAS_PIPELINE_CONTRACTS.md](MAS_PIPELINE_CONTRACTS.md)(부서 연결 계약), [UNIFIED_DOMAIN_API_SPEC.md](UNIFIED_DOMAIN_API_SPEC.md) 10.5(자유 질의 라우팅)

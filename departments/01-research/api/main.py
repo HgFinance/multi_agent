@@ -73,9 +73,21 @@ def get_conn():
     if _conn is not None and not _conn.closed:
         return _conn
     _conn = psycopg2.connect(load_project_env()["DATABASE_URL"], connect_timeout=10)
-    with _conn.cursor() as cur:
-        cur.execute("set default_transaction_read_only = on")
-    _conn.commit()
+    # ▶ **세션 수준 SET 을 여기서 걸지 않는다** (2026-08-14 실측)
+    #   `DATABASE_URL` 은 Supabase **transaction pooler(6543)** 를 가리킨다.
+    #   그 모드에서는 서버 세션이 트랜잭션 단위로 **다른 클라이언트에 재사용**
+    #   되므로, 여기서 `set default_transaction_read_only = on` 을 걸면 그
+    #   설정이 세션에 남아 다음 사용자에게 물려진다.
+    #
+    #   실측 피해: 실험 워커가 `lease()` 의 `select ... for update skip locked`
+    #   를 돌리다 `ReadOnlySqlTransaction: cannot execute SELECT FOR UPDATE in a
+    #   read-only transaction` 으로 순회가 반복 실패했다 - **읽기 전용 면이
+    #   공장의 작업 큐를 멈춰 세운 것이다.** 조회층 안전장치가 실행층을 죽이면
+    #   그건 안전장치가 아니다.
+    #
+    #   그래서 보장을 **트랜잭션 한정(`set local`)** 으로 옮긴다. 아래 `_query`
+    #   가 매 요청마다 걸고 rollback 에서 자동 해제되므로 이 면의 읽기 전용성은
+    #   그대로이고, 세션에는 아무것도 남지 않는다.
     return _conn
 
 
@@ -83,6 +95,8 @@ def _query(sql: str, params: tuple):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            # 트랜잭션 한정 - 커밋/롤백과 함께 사라진다(세션 오염 없음).
+            cur.execute("set local default_transaction_read_only = on")
             cur.execute(sql, params)
             cols = [d[0] for d in cur.description]
             rows = cur.fetchall()
@@ -693,6 +707,36 @@ def _check_readonly_surface():
     print("  읽기 전용 표면           OK")
 
 
+def _check_readonly_is_transaction_scoped_not_session():
+    """**읽기 전용을 세션에 걸지 않는다** (2026-08-14 실측).
+
+    `DATABASE_URL` 은 Supabase transaction pooler(6543)를 가리키고, 그 모드의
+    서버 세션은 트랜잭션이 끝나면 **다른 클라이언트에 재사용**된다. 그래서
+    세션 수준 `set default_transaction_read_only = on` 은 이 면을 떠나 남의
+    연결에 물려진다.
+
+    실측 피해: 실험 워커의 `lease()` 가 `select ... for update skip locked` 에서
+    `ReadOnlySqlTransaction` 으로 반복 실패해 **작업 큐가 멈췄다.** 조회층
+    안전장치가 실행층을 죽이면 그건 안전장치가 아니다. 보장은 트랜잭션
+    한정(`set local`)으로만 건다 - 읽기 전용성은 같고 세션에는 안 남는다.
+    """
+    import pathlib  # noqa: PLC0415
+
+    src = pathlib.Path(__file__).read_text(encoding="utf-8")
+    code = "\n".join(ln for ln in src.splitlines()
+                     if not ln.lstrip().startswith("#"))
+    # ▶ 패턴을 조각으로 조립한다 - 통째로 적으면 **이 검사 자신의 리터럴**이
+    #   소스에 걸려 자기를 사고로 신고한다(실제로 그렇게 오탐이 났다).
+    #   실행문(`cur.execute(...)`)만 보므로 주석·설명은 걸리지 않는다.
+    call = 'cur.execute("' + "set "
+    session_set = call + "default_transaction_read_only"
+    local_set = call + "local default_transaction_read_only"
+    assert local_set in code, "읽기 전용 보장이 사라졌다"
+    assert session_set not in code.replace(local_set, ""), \
+        "세션 수준 읽기전용 SET 이 돌아왔다 - pooler 에서 남의 연결을 오염시킨다"
+    print("  읽기전용=트랜잭션 한정   OK")
+
+
 def _check_gateway_installed():
     """게이트웨이가 실제로 붙었는가.
 
@@ -864,6 +908,7 @@ if __name__ == "__main__":
     _check_weight()
     _check_as_of()
     _check_readonly_surface()
+    _check_readonly_is_transaction_scoped_not_session()
     _check_gateway_installed()
     _check_search_rules()
     _check_stories_rules()

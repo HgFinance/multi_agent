@@ -1,3 +1,5 @@
+begin;
+
 -- 사상 손실 각인 (2026-08-13)
 -- 가설-실행 정합성 감사 실측: 실험이 돈 가설 41건이 서로 다른 config 19개로
 -- 접혔고(SMA20 매도 4건이 전부 REV-5 로, MAX 가설이 LOWVOL 로 실행),
@@ -12,3 +14,5 @@ comment on column quant.hypotheses.mapping_loss is
   'defaulted_keys=가설이 안 정해 실행 관례가 채우는 손잡이, '
   'identity_hints=파라미터 칸에 적힌 정체성 값 중 전용 필드와 다른 것. '
   '빈 객체 = 무손실. factory_bridge.mapping_loss_of 가 접수 시점에 계산한다.';
+
+commit;

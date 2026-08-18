@@ -1,5 +1,11 @@
 # Worker 모델 배치 기준
 
+> **Historical/target matrix:** 현재 worker 이름·분류·개수의 정본은
+> [CURRENT_PROJECT_ARCHITECTURE.md](../CURRENT_PROJECT_ARCHITECTURE.md)와
+> 각 부서 `hermes/config.yaml`/`employee_workers.py`다. 이 문서의 Research·Quant
+> 목표 편제와 기준 커밋은 현재 checkout과 다를 수 있으며, serving model 전환의
+> runtime 증거로 사용하지 않는다.
+
 검토 기준: 2026-08-11 (KST)
 
 이 문서는 8개 Hermes Profile 안에서 실행되는 부서장과 직원 Worker의 모델 및 배치 기준을 정의한다. 직원 수는 Profile의 호환용 `agent.personalities`가 아니라 각 부서의 Worker Registry와 `employee_workers.py`를 기준으로 센다.

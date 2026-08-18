@@ -291,6 +291,7 @@ class DiscordFinalDelivery:
                 {
                     "Authorization": f"Bot {token}",
                     "Content-Type": "application/json",
+                    "User-Agent": "HgFinance-DiscordDelivery/2.4",
                 },
             )
         except (HTTPError, URLError, OSError, TimeoutError, ValueError):

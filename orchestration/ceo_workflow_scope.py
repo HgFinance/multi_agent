@@ -22,6 +22,55 @@ CONTINUOUS_RESEARCH_PLANE = "continuous_research"
 BACKGROUND_RESEARCH_ROLE = "background_research"
 PRIMARY_SELECTION_FIELD = "selected_primary_profiles"
 WORKFLOW_MODES = frozenset({"analysis", "binding"})
+# 역할 유효값. 이전에는 build_scoped_task_body 안의 인라인 집합으로만 있어서
+# 읽는 쪽은 무엇이 유효한지 알 수 없었다(2026-08-14: 없는 값을 쓴 카드가 CEO
+# 감독관에게 abort 당했는데, 유효값 목록이 어디에도 노출돼 있지 않았다).
+WORKFLOW_ROLES = frozenset({"primary", "qa", "synthesis", "control"})
+
+# ▶ 마커는 **이 모듈이 쓰고 이 모듈이 읽는다.**
+#   2026-08-14 실측: 같은 마커를 5곳에서 4가지 방식으로 파싱하고 있었다 -
+#   `(?m)^k=(\S+)\s*$` 두 벌, `(?:^|\n)k=(\w+)` 한 벌, 그리고 단순 문자열 포함
+#   (`"origin=user-query" in body`). 마지막 것은 본문 산문에 그 문자열이 있으면
+#   그대로 오인한다. 패턴이 갈리면 같은 카드가 읽는 쪽마다 다르게 해석된다.
+_MARKER_CACHE: dict[str, "re.Pattern[str]"] = {}
+
+
+def _marker_re(key: str) -> "re.Pattern[str]":
+    if key not in _MARKER_CACHE:
+        _MARKER_CACHE[key] = re.compile(rf"(?m)^{re.escape(key)}=(\S+)\s*$")
+    return _MARKER_CACHE[key]
+
+
+def read_marker(body: str, key: str) -> str:
+    """카드 본문에서 `key=값` 마커 하나를 읽는다. 없으면 빈 문자열.
+
+    줄 전체가 마커일 때만 인정한다 - 산문 안에 같은 문자열이 있어도 마커가 아니다.
+    """
+
+    match = _marker_re(key).search(str(body or ""))
+    return match.group(1).strip() if match else ""
+
+
+def is_user_query_body(body: str) -> bool:
+    """사람이 발원한 카드인가 (RFC 3834 동형 도장).
+
+    공장 자동 생성물과 사용자 질의를 가르는 유일한 신호다. 이 판정이 틀리면
+    공장 카드에 "사용자에게 물어보라" 카드를 찍어내는 순환이 생긴다(실측 53장).
+    """
+
+    return read_marker(body, "origin") == "user-query"
+
+
+def workflow_role_from_body(body: str) -> str:
+    """워크플로 역할. 없으면 빈 문자열(역할 없는 카드는 워크플로 밖이다)."""
+
+    return read_marker(body, "workflow_role").casefold()
+
+
+def workflow_root_from_body(body: str) -> str:
+    """이 카드가 속한 워크플로 루트 ID. 없으면 빈 문자열."""
+
+    return read_marker(body, "workflow_root_task_id")
 
 # These aliases make the CEO planner's durable selection machine-readable.
 # They do not choose departments; the planner remains the source of truth.
@@ -397,10 +446,41 @@ def infer_workflow_mode(query: str) -> str:
 
 def workflow_mode_from_body(body: str) -> str:
     """Read the explicit workflow mode, preserving the legacy gate."""
-    match = re.search(r"(?m)^workflow_mode=(\S+)\s*$", str(body or ""))
-    if not match:
-        return "binding" if CEO_WORKFLOW_SCOPE_MARKER in str(body or "") else "analysis"
-    mode = match.group(1).casefold()
+    text = str(body or "")
+    raw = read_marker(text, "workflow_mode")
+    if not raw:
+        # Legacy scoped roots default to binding. Direct CEO roots may explicitly
+        # declare an asynchronous non-binding response workflow and must not be
+        # promoted into the QA-gated binding path solely because they carry the
+        # durable workflow scope marker.
+        request_class = re.search(r"(?mi)^request_class=(.+?)\s*$", text)
+        if request_class:
+            request_class_text = request_class.group(1).casefold()
+            if "non-binding" in request_class_text or "advisory" in request_class_text:
+                return "analysis"
+
+        producer = (read_marker(text, "producer") or "").casefold()
+        qa_marker = (read_marker(text, "qa_required") or "").casefold()
+        lowered = text.casefold()
+
+        direct_async_analysis = (
+            producer == "ceo-hermes-direct"
+            and qa_marker == "false"
+            and (
+                "not a prerequisite for synthesis or user response" in lowered
+                or "non-binding analysis" in lowered
+                or "no action or authority change" in lowered
+                or "read-only" in lowered
+                or "read only" in lowered
+            )
+        )
+
+        if direct_async_analysis:
+            return "analysis"
+
+        return "binding" if CEO_WORKFLOW_SCOPE_MARKER in text else "analysis"
+
+    mode = raw.casefold()
     if mode not in WORKFLOW_MODES:
         raise WorkflowScopeViolation(f"unknown workflow_mode: {mode}")
     return mode
@@ -442,6 +522,10 @@ def build_root_body(
         "response_plane=primary_results_ready\n"
         "governance_plane=async_qa\n"
         "qa_is_not_synthesis_prerequisite=true\n"
+        # RFC 3834 동형(2026-08-13): 사람이 발원한 카드에만 이 도장이 찍힌다.
+        # 공장 자동 생성물은 origin=factory 를 찍는다 - 자동 생성물이 질의
+        # 응답 경로를 다시 부르는 순환은 이 도장의 대조로 끊는다.
+        "origin=user-query\n"
         "analysis_response_rule=primary_results_ready_allows_immediate_ceo_synthesis\n"
         "qa_rule=async_post_hoc_audit_not_user_response_prerequisite\n"
         "root_task_role=scope_and_planning\n"
@@ -516,7 +600,7 @@ def build_scoped_task_body(
     if not root_task_id:
         raise ValueError("root_task_id must not be empty")
     role = str(role).strip().casefold()
-    if role not in {"primary", "qa", "synthesis", "control"}:
+    if role not in WORKFLOW_ROLES:
         raise ValueError("workflow task role must be primary, qa, synthesis, or control")
     if workflow_mode not in WORKFLOW_MODES:
         raise ValueError("workflow_mode must be analysis or binding")
@@ -526,6 +610,10 @@ def build_scoped_task_body(
         f"workflow_root_task_id={root_task_id}",
         f"workflow_role={role}",
         f"workflow_mode={workflow_mode}",
+        # 질의 파생 카드 전체에 발원 도장이 전파된다(RFC 3834 동형, 2026-08-13).
+        # 창구(liaison)는 이 도장 없는 자동 생성물(origin=factory·공장 접두어)
+        # 을 MISROUTED 로 되돌린다 - 순환의 가장 싼 절단점이 수신 거부다.
+        "origin=user-query",
     ]
     if request_id:
         metadata.append(f"request_id={request_id}")
@@ -575,7 +663,11 @@ def _labelled_ids(text: str, labels: frozenset[str]) -> tuple[str, ...]:
     ids: list[str] = []
     for label in labels:
         match = re.search(
-            rf"\b{re.escape(label)}\s*[:=]\s*([^\n]+)", text,
+            # A labelled field in a human-readable comment ends at a
+            # statement delimiter.  Do not let workflow_root_task_id consume
+            # later prose such as "Primary child created: t_xxx" on the same
+            # line and accidentally promote that child ID into root_ids.
+            rf"\b{re.escape(label)}\s*[:=]\s*([^;\n]+)", text,
             flags=re.IGNORECASE,
         )
         if match:
@@ -682,6 +774,11 @@ __all__ = [
     "CONTINUOUS_RESEARCH_PLANE",
     "PRIMARY_SELECTION_FIELD",
     "WORKFLOW_MODES",
+    "workflow_root_from_body",
+    "workflow_role_from_body",
+    "is_user_query_body",
+    "read_marker",
+    "WORKFLOW_ROLES",
     "WorkflowScopeReferences",
     "WorkflowScopeViolation",
     "build_mandate_reference_line",

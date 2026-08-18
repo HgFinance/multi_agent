@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import csv
+import gc
 import gzip
 import hashlib
 import json
@@ -305,22 +306,151 @@ def export_partitions(rows: list[dict], out_dir: Path) -> list[dict]:
     return parts
 
 
-def load_partition(path: Path) -> list[dict]:
-    """CSV.gz -> 행 dict (빌드 시와 같은 타입으로 복원 - 해시 재검증용)."""
+# ---------------------------------------------------------------------------
+# 행 표현 - 같은 데이터를 더 적은 자리에
+# ---------------------------------------------------------------------------
+# ▶ **왜 dict 를 그만두는가** (2026-08-14 실측)
+#   한 행을 dict 로 들면 1,062B 다(2021-05 파티션 50,434행, tracemalloc 실측).
+#   v3 는 7,257,952행이므로 `backtest_runner._load_dataset` 이 데이터셋 하나를
+#   **들기만 해도 7.71GB** 다. 컨테이너 50개가 도는 32GB 호스트에서 그만한
+#   덩어리는 자주 못 얻는다 - 그때 나는 것이 `OSError: [Errno 12] Cannot
+#   allocate memory` 이고, 원장에 최근 1일 14시도/가설 10건으로 남아 있었다
+#   (카드 t_ad5f27e1 재집계 기준 그 시점 최다 낭비).
+#
+#   실패가 아니라 **자리 부족**이라 재시도로는 안 풀린다. 이미 `Market` 을
+#   만든 뒤 원본 행을 놓는 수(backtest_runner:1370 `del rows`)는 들어가 있고,
+#   그래도 죽는다 - 놓기 **전에** 한 번은 다 들어야 하기 때문이다. 그러니
+#   줄일 것은 보유 시간이 아니라 행 하나의 크기다.
+#
+#   dict 는 행마다 해시표를 한 벌씩 더 든다. 그런데 열 이름은 이미 COLUMNS 로
+#   고정돼 있다 - 그 표는 행마다가 아니라 **클래스가 한 번** 들면 된다.
+#
+# ▶ 값 자체도 되풀이다
+#   한 파티션 안에서 거래일은 20여 종, 종목은 2천여 종, 관측시각은 손에 꼽고,
+#   가격 문자열도 호가 단위로 양자화돼 있어 많이 겹친다. 같은 값을 같은 객체로
+#   들면(interning) 나머지가 줄어든다. str·date·datetime·Decimal 은 전부
+#   불변이라 공유가 안전하다.
+#
+# ▶ **바꾸지 않는 것**: 값도 타입도 그대로다. 그래서 content_hash 가 한 비트도
+#   안 바뀐다 - 이 파일 위쪽의 "Dataset 은 불변이다" 계약을 건드리지 않는다는
+#   뜻이고, 이미 등재된 매니페스트가 전부 그대로 검증된다. 소비자도 dict 로
+#   읽던 그대로 읽는다(`r["close"]`, `r.get("notional")`).
+ROW_BYTES_BUDGET = 600
+"""행 하나가 넘으면 안 되는 자리(바이트). dict 시절은 1,062B 였다.
+
+이 숫자를 올리는 것은 곧 7.26M 행짜리 데이터셋의 적재 비용을 올리는 것이다 -
+올리려면 위 실측을 다시 하고 왜 올려도 되는지 같이 적어라."""
+
+
+class BarRow:
+    """일봉 한 행. **dict 처럼 읽히지만 dict 가 아니다.**
+
+    지원하는 것은 소비자가 실제로 쓰는 읽기 규약이다 - `r[k]`, `r.get(k)`,
+    `k in r`, `keys/values/items`, 순회, dict 와의 동등 비교. 쓰기(`r[k]=v`)도
+    받되 **열에 없는 이름은 거절한다**: dict 였다면 새 열이 조용히 생기고
+    content_hash 는 그것을 못 보므로, 데이터가 달라졌는데 같은 해시가 된다.
+    """
+
+    __slots__ = COLUMNS
+
+    def __init__(self, instrument_id, trade_date, open, high, low, close,
+                 volume, notional, observed_at):
+        self.instrument_id = instrument_id
+        self.trade_date = trade_date
+        self.open = open
+        self.high = high
+        self.low = low
+        self.close = close
+        self.volume = volume
+        self.notional = notional
+        self.observed_at = observed_at
+
+    # ── dict 읽기 규약 ─────────────────────────────────────────────────
+    def __getitem__(self, key):
+        try:
+            return getattr(self, key)
+        except (AttributeError, TypeError):
+            raise KeyError(key) from None
+
+    def get(self, key, default=None):
+        try:
+            return getattr(self, key, default)
+        except TypeError:            # 문자열이 아닌 키 = dict 에서도 없는 키다
+            return default
+
+    def __setitem__(self, key, value):
+        if key not in COLUMNS:
+            raise KeyError(
+                f"{key!r} 는 이 스키마의 열이 아니다 - 열을 늘리려면 COLUMNS 를 "
+                f"바꿔라(열 순서가 content_hash 의 일부라 새 스키마가 된다)")
+        setattr(self, key, value)
+
+    def __contains__(self, key):
+        return key in COLUMNS
+
+    def keys(self):
+        return COLUMNS
+
+    def values(self):
+        return tuple(getattr(self, k) for k in COLUMNS)
+
+    def items(self):
+        return tuple((k, getattr(self, k)) for k in COLUMNS)
+
+    def __iter__(self):
+        return iter(COLUMNS)
+
+    def __len__(self):
+        return len(COLUMNS)
+
+    def __eq__(self, other):
+        if isinstance(other, BarRow):
+            return self.values() == other.values()
+        if isinstance(other, dict):
+            return dict(self.items()) == other
+        return NotImplemented
+
+    def __repr__(self):
+        return f"BarRow({dict(self.items())!r})"
+
+
+def _shared(cache: dict, raw: str, make):
+    """같은 문자열이면 **같은 객체**를 준다. 값은 안 바꾸고 만드는 횟수만 줄인다.
+
+    캐시는 호출 하나 안에서만 살아 파티션을 넘겨 자라지 않는다.
+    """
+    got = cache.get(raw)
+    if got is None:
+        got = cache[raw] = make(raw)
+    return got
+
+
+def load_partition(path: Path) -> list[BarRow]:
+    """CSV.gz -> 행 (빌드 시와 같은 타입으로 복원 - 해시 재검증용).
+
+    dict 대신 `BarRow` 를 돌려준다. **값도 타입도 읽는 법도 같고**, 다른 것은
+    한 행이 차지하는 자리뿐이다(위 설명 참고).
+    """
     rows = []
+    ids: dict = {}
+    days: dict = {}
+    stamps: dict = {}
+    nums: dict = {}
     with gzip.open(path, "rt", encoding="utf-8", newline="") as f:
         for rec in csv.DictReader(f):
-            rows.append({
-                "instrument_id": rec["instrument_id"],
-                "trade_date": date.fromisoformat(rec["trade_date"]),
-                "open": Decimal(rec["open"]), "high": Decimal(rec["high"]),
-                "low": Decimal(rec["low"]), "close": Decimal(rec["close"]),
-                "volume": Decimal(rec["volume"]),
-                # 옛 파티션엔 이 열이 없다 - get 으로 읽고 빈 값은 None
-                "notional": (Decimal(rec["notional"])
-                             if (rec.get("notional") or "").strip() else None),
-                "observed_at": datetime.fromisoformat(rec["observed_at"]),
-            })
+            # 옛 파티션엔 이 열이 없다 - 빈 값은 None(거래대금 0 과 구분한다)
+            raw_n = (rec.get("notional") or "").strip()
+            rows.append(BarRow(
+                _shared(ids, rec["instrument_id"], str),
+                _shared(days, rec["trade_date"], date.fromisoformat),
+                _shared(nums, rec["open"], Decimal),
+                _shared(nums, rec["high"], Decimal),
+                _shared(nums, rec["low"], Decimal),
+                _shared(nums, rec["close"], Decimal),
+                _shared(nums, rec["volume"], Decimal),
+                _shared(nums, raw_n, Decimal) if raw_n else None,
+                _shared(stamps, rec["observed_at"], datetime.fromisoformat),
+            ))
     return rows
 
 
@@ -486,6 +616,148 @@ def _check_partition_roundtrip(tmp: Path):
     print("  Partition 왕복·재검증    OK")
 
 
+def _check_row_reads_like_a_dict_but_is_not_one():
+    """**행이 dict 가 아니어도 소비자가 읽던 그대로 읽힌다.**
+
+    이 검사가 없으면 자리를 줄이려다 소비자를 소리 없이 깬다. 실제로 읽는
+    쪽은 `Market.from_rows`(`r["open"]`, `r.get("notional")`),
+    `content_hash`/`row_line`(`row["..."]`, `row.get("notional")`),
+    `attach_micro`(`r.get(...)`) 이고 - 여기서 그 접근을 전부 dict 와 맞대
+    본다. 마지막 두 줄이 핵심이다: **같은 행을 dict 로 든 것과 해시가 같아야
+    한다.** 다르면 이미 등재된 매니페스트가 전부 깨진 것이다.
+    """
+    d = {"instrument_id": "A005930", "trade_date": date(2026, 7, 1),
+         "open": Decimal("70000"), "high": Decimal("71000"),
+         "low": Decimal("69500"), "close": Decimal("70500"),
+         "volume": Decimal("1234567"), "notional": Decimal("87000000000"),
+         "observed_at": datetime(2026, 7, 1, 15, 30, tzinfo=timezone.utc)}
+    r = BarRow(**d)
+
+    # 자리: 클래스가 열 이름을 들고 행은 값만 든다
+    assert not hasattr(r, "__dict__"), "슬롯이 아니면 자리를 안 줄인다"
+    assert BarRow.__slots__ == COLUMNS, "행의 모양은 스키마가 정한다"
+    assert sys.getsizeof(r) * 2 < sys.getsizeof(d), \
+        (sys.getsizeof(r), sys.getsizeof(d))
+
+    # 읽기: dict 와 같은 답
+    for k in COLUMNS:
+        assert r[k] == d[k], k
+        assert r.get(k) == d[k], k
+        assert k in r, k
+    assert tuple(r.keys()) == COLUMNS
+    assert dict(r.items()) == d
+    assert list(r) == list(COLUMNS)
+    assert len(r) == len(COLUMNS)
+    assert r == d and d == r, "dict 와 같은 값이면 같다고 답해야 한다"
+
+    # 없는 열: dict 와 같은 방식으로 없다고 답한다
+    assert r.get("nope") is None
+    assert r.get("nope", 7) == 7
+    assert r.get(3) is None, "문자열이 아닌 키도 그냥 없는 키다"
+    try:
+        r["nope"]
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("없는 열을 읽었는데 KeyError 가 안 났다")
+
+    # 쓰기: 있는 열은 받고, 없는 열은 거절한다(조용히 새 열이 생기면 안 된다)
+    r["close"] = Decimal("70600")
+    assert r["close"] == Decimal("70600")
+    try:
+        r["surprise"] = 1
+    except KeyError:
+        pass
+    else:
+        raise AssertionError("스키마에 없는 열이 조용히 생겼다 - 그 값은 "
+                             "content_hash 에 안 들어가므로 데이터가 달라도 "
+                             "같은 해시가 된다")
+    r["close"] = d["close"]
+
+    # **해시 동일성** - 자리를 줄였다고 데이터가 달라지면 안 된다
+    assert row_line(r) == row_line(d)
+    assert content_hash([r]) == content_hash([d])
+    # 거래대금 없는 옛 행도 같은 답(빈 문자열로 정규화되는 자리)
+    d2 = dict(d, notional=None)
+    assert row_line(BarRow(**d2)) == row_line(d2)
+    print("  행은 dict 처럼 읽힌다    OK")
+
+
+def _check_loader_holds_a_row_in_less_than_the_budget():
+    """**행 하나가 예산 안에 들어온다** (2026-08-14 실측이 만든 검사).
+
+    dict 시절 1,062B x 7,257,952행 = 7.71GB 를 `_load_dataset` 이 한 번에
+    들었고, 그 자리를 못 얻어 실험이 `OSError: [Errno 12]` 로 죽었다. 여기서
+    재는 것은 그 비용 자체다 - 진짜 파티션을 하나 만들어 읽고, 읽은 뒤에도
+    남아 있는(=행이 붙들고 있는) 바이트를 행수로 나눈다.
+
+    같이 고정하는 것: **되풀이되는 값은 한 벌만 만든다.** 날짜·종목·시각이
+    행마다 새 객체면 예산은 다시 넘는다.
+    """
+    import tempfile
+    import tracemalloc
+
+    global DATA_ROOT
+    n_sym, n_day = 200, 100                      # 20,000 행
+    base = date(2026, 1, 5)
+    obs = datetime(2026, 7, 31, 6, 0, tzinfo=timezone.utc)
+    rows = []
+    for s in range(n_sym):
+        for i in range(n_day):
+            px = Decimal(10000 + (s * 37 + i * 11) % 5000)
+            rows.append({
+                "instrument_id": f"A{s:06d}",
+                "trade_date": base + timedelta(days=i),
+                "open": px, "high": px + 100, "low": px - 100, "close": px,
+                "volume": Decimal((s * 13 + i) % 9999 + 1),
+                "notional": px * Decimal((s * 13 + i) % 9999 + 1),
+                "observed_at": obs,
+            })
+    assert len(rows) == n_sym * n_day
+
+    orig_root = DATA_ROOT
+    with tempfile.TemporaryDirectory() as td:
+        DATA_ROOT = Path(td) / "quant-data"
+        try:
+            parts = export_partitions(rows, DATA_ROOT / "budget-v1")
+            paths = [resolve_object_path(p["object_path"]) for p in parts]
+            hashes = [p["content_hash"] for p in parts]
+
+            gc.collect()
+            tracemalloc.start()
+            start = tracemalloc.get_traced_memory()[0]
+            loaded = [r for p in paths for r in load_partition(p)]
+            held = tracemalloc.get_traced_memory()[0] - start
+            tracemalloc.stop()
+            # **줄인 것은 자리뿐이다** - 파티션 해시는 그대로여야 한다.
+            # (임시 폴더가 살아 있는 동안 확인한다)
+            for p, h in zip(paths, hashes):
+                assert content_hash(load_partition(p)) == h, p.name
+        finally:
+            DATA_ROOT = orig_root
+
+    per_row = held / len(loaded)
+    assert len(loaded) == len(rows), (len(loaded), len(rows))
+    assert per_row <= ROW_BYTES_BUDGET, (
+        f"행 하나가 {per_row:.0f}B 다 - 예산 {ROW_BYTES_BUDGET}B 를 넘었다. "
+        f"7,257,952행짜리 v3 로 치면 {per_row * 7257952 / 1e9:.2f}GB 이고, "
+        f"그 자리를 못 얻으면 실험이 OSError:[Errno 12] 로 죽는다")
+
+    # 되풀이 값은 한 벌만 - 아니면 예산은 곧 다시 넘는다
+    same_day = [r for r in loaded if r["trade_date"] == base]
+    assert len(same_day) == n_sym
+    assert len({id(r["trade_date"]) for r in same_day}) == 1, \
+        "같은 거래일을 행마다 새로 만들고 있다"
+    assert len({id(r["observed_at"]) for r in loaded[:1000]}) == 1, \
+        "같은 관측시각을 행마다 새로 만들고 있다"
+
+    # 전체 해시도 그대로다 - 매니페스트 등재값이 여기서 나온다
+    assert content_hash(loaded) == content_hash(rows), (
+        "행 표현을 바꿨더니 데이터셋 해시가 달라졌다 - 등재된 매니페스트가 "
+        "전부 깨진다")
+    print(f"  행 자리 {per_row:.0f}B/행       OK")
+
+
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -513,4 +785,6 @@ if __name__ == "__main__":
             _check_partition_roundtrip(DATA_ROOT)
         finally:
             DATA_ROOT = _orig
-    print("PIT Dataset 3개 영역 통과. 빌드는 --build")
+    _check_row_reads_like_a_dict_but_is_not_one()
+    _check_loader_holds_a_row_in_less_than_the_budget()
+    print("PIT Dataset 5개 영역 통과. 빌드는 --build")

@@ -504,7 +504,21 @@ class _Psycopg2Fetcher:
             raise SupabaseReadOnlyError("psycopg2-binary is required for DB reads") from exc
         connection = psycopg2.connect(self.dsn, connect_timeout=8)
         try:
-            connection.set_session(readonly=True, autocommit=False)
+            # ▶ **`set_session(readonly=True)` 를 쓰지 않는다** (2026-08-14 실측)
+            #   그것은 psycopg2 에서 **세션 수준**으로
+            #   `default_transaction_read_only = on` 을 건다. Supabase 풀러의
+            #   transaction mode(6543, 아래 asyncpg 주석 참조)는 서버 세션을
+            #   트랜잭션마다 다른 클라이언트에 물려주므로, 그 설정이 이 면을
+            #   떠나 **남의 연결에 남는다.**
+            #
+            #   실측 피해: 퀀트 실험 워커가 물려받아
+            #   `ReadOnlySqlTransaction: cannot execute INSERT in a read-only
+            #   transaction` 으로 실험이 FAILED 났다(같은 원인으로 앞서
+            #   `SELECT FOR UPDATE` 도 죽어 작업 큐가 멈췄다).
+            #
+            #   아래 `SET TRANSACTION READ ONLY` 가 **현재 트랜잭션에만** 같은
+            #   보장을 걸고 `rollback()` 과 함께 사라진다 - 읽기 전용성은
+            #   그대로이고 세션에는 아무것도 남지 않는다.
             with connection.cursor(cursor_factory=RealDictCursor) as cursor:
                 cursor.execute("SET TRANSACTION READ ONLY")
                 cursor.execute(query, args)

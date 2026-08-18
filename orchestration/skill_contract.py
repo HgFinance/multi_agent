@@ -10,22 +10,25 @@ from types import MappingProxyType
 
 
 CANONICAL_SHARED_SKILL_ROOT = Path(__file__).resolve().parents[1] / "skills"
-CANONICAL_PROFILES = frozenset(
-    {
-        "ceo-agent",
-        "hr-department",
-        "research-department",
-        "quant-backtest-department",
-        "trading-department",
-        "accounting-portfolio-department",
-        "risk-management",
-        "qa-department",
-    }
+
+# 프로필 목록은 **여기서 다시 적지 않는다.** 2026-08-14 실측: 이 모듈이 자기
+# 목록을 따로 들고 있었고 그 사이 창구 2종(research-liaison·quant-liaison)이
+# 추가돼 두 계약이 갈렸다 - 창구에 스킬을 배정하면 "unknown Hermes profile" 로
+# 거부되는데, 정작 에이전트는 이 경계를 안 지나므로 아무도 모른 채 굴러갔다.
+# 정본은 canonical_profiles.py 하나다.
+from orchestration.canonical_profiles import (  # noqa: E402
+    CANONICAL_PROFILES,
+    LEGACY_PROFILE_ALIASES,
 )
 
-# Repository-owned skill names. The four financial-* entries are retained in
-# the contract even while their source is absent from this checkout: a task
-# may not make them executable until the canonical repository source exists.
+# Repository-owned skill names.
+#
+# ▶ 소스가 아직 없는 항목은 아래 PENDING_SOURCE_SKILLS 에 **명시**한다.
+#   2026-08-14 정정: 이 자리 주석이 오래 "financial-* 네 개가 없다"고 적고
+#   있었는데 실제로는 두 개가 이미 들어와 있었다. 산문 주석은 낡아도 아무도
+#   모른다 - 감사 스크립트(scripts/audit_contracts.py)가 읽을 수 있게 집합으로
+#   옮긴다. 계약에 이름만 남기는 이유는 그대로다: 소스가 생기기 전까지 카드가
+#   그 스킬을 실행 가능하다고 착각하면 안 된다.
 CANONICAL_SKILLS = frozenset(
     {
         "agentic-rag",
@@ -41,7 +44,19 @@ CANONICAL_SKILLS = frozenset(
         "hermes-multi-agent-pipelines",
         "methodology-scout",
         "skill-authoring",
+        # 2026-08-13: 카탈로그 우선 탐색 - "없다" 선언 전 정보원 4층 검색 규율.
+        # KRX 유료 결제를 막은 실측(t3320 발견)이 탄생 계기.
+        "source-catalog-first",
         "wiring-audit",
+    }
+)
+
+# 계약에는 있으나 이 체크아웃에 소스가 아직 없는 스킬. 감사가 "누락"이 아니라
+# "대기"로 구분해 보고한다. 소스가 들어오면 이 집합에서 빼는 것이 완료 신호다.
+PENDING_SOURCE_SKILLS = frozenset(
+    {
+        "financial-research-memos",
+        "financial-risk-research",
     }
 )
 
@@ -75,6 +90,13 @@ SKILL_OWNER_BY_NAME = MappingProxyType(
         "methodology-scout": frozenset({"research-department"}),
         "skill-authoring": frozenset(
             {"quant-backtest-department", "research-department"}
+        ),
+        # 창구도 소유자다 - "없다"고 답하기 전에 카탈로그를 뒤지는 규율은
+        # 사용자 질의를 받는 쪽에 가장 필요하다(2026-08-14 창구 카드가 실제로
+        # 이 스킬로 t1637 을 찾아냈다).
+        "source-catalog-first": frozenset(
+            {"research-department", "quant-backtest-department", "qa-department",
+             "research-liaison", "quant-liaison"}
         ),
         "wiring-audit": frozenset(
             {"quant-backtest-department", "research-department", "qa-department"}
@@ -241,6 +263,7 @@ __all__ = [
     "CANONICAL_SHARED_SKILL_ROOT",
     "CANONICAL_PROFILES",
     "CANONICAL_SKILLS",
+    "PENDING_SOURCE_SKILLS",
     "CanonicalSkillError",
     "SHARED_PORTFOLIO_SKILL_PROFILES",
     "SKILL_OWNER_BY_NAME",

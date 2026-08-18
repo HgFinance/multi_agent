@@ -18,6 +18,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
+from orchestration.answer_contract import grade_answer
 from orchestration.adapters.terminal_projection_utils import (
     action as terminal_action,
 )
@@ -31,6 +32,7 @@ from orchestration.adapters.terminal_projection_utils import (
     workflow_root as terminal_workflow_root,
 )
 from orchestration.canonical_profiles import (
+    USER_QUERY_PRIORITY,
     CanonicalKanbanTaskRequest,
     CanonicalProfileError,
     canonical_profile_for_department,
@@ -40,7 +42,9 @@ from orchestration.canonical_profiles import (
 from orchestration.discord_delivery import DiscordFinalDelivery
 from orchestration.discord_idempotency import DiscordIdempotencyStore
 from orchestration.ceo_workflow_scope import (
+    CEO_WORKFLOW_SCOPE_MARKER,
     WorkflowScopeViolation,
+    is_user_query_body,
     build_scoped_task_body,
     extract_scope_references,
     mandate_snapshot_present,
@@ -48,6 +52,7 @@ from orchestration.ceo_workflow_scope import (
     selected_primary_profiles_from_task,
     validate_workflow_scope,
     workflow_mode_from_body,
+    workflow_role_from_body,
 )
 
 logger = logging.getLogger(__name__)
@@ -135,6 +140,51 @@ def _ids(values: Any) -> tuple[str, ...]:
     return tuple(task_id for item in values if (task_id := _child_id(item)))
 
 
+def child_handoff_payload(child: ChildTaskState, **extra: Any) -> dict[str, Any]:
+    """Hand a finished child to QA/synthesis **with its answer body**.
+
+    요약만 넘기면 뒤 단계가 원문을 못 본다 - QA 는 인용을 검증할 대상이 없고
+    (본 적 없는 문장을 통과시키게 된다), 종합은 표·수치를 다시 만들 수 없어
+    사용자 응답이 요약 한 줄로 쪼그라든다. 실측 2026-08-14 t_79e42ca4.
+
+    본문이 비어 있으면 그 사실을 명시한다 - 없는 것을 요약으로 때우면
+    "답이 있었는데 사라진 것"과 "애초에 못 만든 것"이 구분되지 않는다.
+    """
+
+    payload: dict[str, Any] = {
+        "task_id": child.task_id,
+        "summary": child.summary,
+        "result": child.result,
+        "error": child.error,
+        "block_reason": child.block_reason,
+    }
+    if child.terminal:
+        # 답변 품질 등급을 함께 싣는다 - 차단이 아니라 신호다(answer_contract).
+        # QA 는 "무엇을 의심해야 하는지" 를 알고 시작해야 검증이 성립한다.
+        grade = grade_answer(child.result, summary=child.summary)
+        payload.update(grade.as_payload())
+        if not grade.has_body:
+            payload["answer_body_missing"] = True
+            payload["answer_body_missing_note"] = (
+                "이 부서 카드는 result(답변 본문) 없이 종료됐다. 요약만으로 본문을 "
+                "복원하지 말고, 근거가 없는 수치·목록은 만들지 마라."
+            )
+    payload.update(extra)
+    return payload
+
+
+def _is_direct_ceo_response_synthesis(*, role: str, body: str) -> bool:
+    """Return True for a CEO-authored response synthesis in the current workflow."""
+
+    if str(role or "").casefold() != "synthesis":
+        return False
+
+    return any(
+        line.strip().casefold() == "producer=ceo-hermes-direct"
+        for line in str(body or "").splitlines()
+    )
+
+
 @dataclass(frozen=True)
 class ChildTaskState:
     """Relevant, read-only task projection used by the supervisor."""
@@ -143,6 +193,10 @@ class ChildTaskState:
     profile: str
     status: str
     summary: str = ""
+    # 부서가 낸 **답변 본문**. summary 와 따로 든다 - 실측 2026-08-14: 창구가
+    # 외국인 순매수 상위 10 표를 만들어 놓고 kanban_complete 에는 요약 한 줄만
+    # 넣어, QA 도 종합도 표를 못 보고 사용자 응답이 result:null 로 나갔다.
+    result: str = ""
     error: str = ""
     block_reason: str = ""
     block_kind: str = ""
@@ -158,6 +212,7 @@ class ChildTaskState:
         status = str(payload.get("status") or "unknown").casefold()
         latest = payload.get("latest_summary")
         summary = _text(payload.get("summary") or latest or payload.get("result"))
+        result = _text(payload.get("result"))
         error = _text(payload.get("error") or payload.get("last_error"))
         block_reason = _text(
             payload.get("block_reason")
@@ -191,6 +246,7 @@ class ChildTaskState:
             profile=profile,
             status=status,
             summary=summary,
+            result=result,
             error=error,
             block_reason=block_reason,
             block_kind=block_kind,
@@ -286,6 +342,9 @@ class SupervisorState:
     # Durable planner selection.  An empty tuple preserves compatibility for
     # legacy roots whose body predates the machine-readable field.
     selected_primary_profiles: tuple[str, ...] = ()
+    # 이 루트가 **사람이 발원한 질의**인가 (origin=user-query 도장, RFC 3834 동형).
+    # 공장 자동 생성 카드는 CEO 워크플로가 아니다 - 사용자에게 물어볼 것이 없다.
+    root_is_user_query: bool = False
 
     @property
     def analysis_children(self) -> tuple[ChildTaskState, ...]:
@@ -369,6 +428,23 @@ class SupervisorState:
         return tuple(child for child in self.children if child.is_supervisor)
 
     def has_action(self, action: SupervisorAction) -> bool:
+        if action == SupervisorAction.SYNTHESIZE:
+            return any(
+                child.is_in_workflow(self.parent_task_id)
+                and child.workflow_role == "synthesis"
+                and (
+                    (
+                        SUPERVISOR_MARKER in child.body
+                        and action.value in child.body
+                    )
+                    or _is_direct_ceo_response_synthesis(
+                        role=child.workflow_role,
+                        body=child.body,
+                    )
+                )
+                for child in self.children
+            )
+
         return any(
             child.is_in_workflow(self.parent_task_id)
             and SUPERVISOR_MARKER in child.body
@@ -471,7 +547,7 @@ def _analysis_synthesis_decision(
         return None
 
     primary_ids = tuple(
-        child.task_id for child in state.analysis_children if child.done
+        child.task_id for child in state.analysis_children if child.terminal
     )
     if not primary_ids:
         return None
@@ -484,18 +560,14 @@ def _analysis_synthesis_decision(
             f"{SUPERVISOR_MARKER} action=SYNTHESIZE\n"
             "workflow_plane=response\n"
             "governance_plane=async_qa\n"
-            "Synthesize completed primary department work. QA runs independently "
+            "Synthesize available primary department work, including terminal "
+            "blocked results. QA runs independently "
             "in an async governance lane and is not a synthesis prerequisite.\n"
             + json.dumps(
                 [
-                    {
-                        "task_id": child.task_id,
-                        "profile": child.profile,
-                        "status": child.status,
-                        "summary": child.summary,
-                        "error": child.error,
-                        "block_reason": child.block_reason,
-                    }
+                    child_handoff_payload(
+                        child, profile=child.profile, status=child.status
+                    )
                     for child in state.analysis_children
                 ],
                 ensure_ascii=False,
@@ -523,6 +595,18 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
                 len(state.selected_primary_profiles),
                 0,
                 ",".join(state.missing_primary_profiles),
+            )
+            return None
+        # 사람이 발원한 질의일 때만 사용자에게 되묻는다. 공장 자동 생성 카드
+        # (공장 주기·공장 개선 등)는 자식 없이 혼자 끝나는 게 정상인데, 그것까지
+        # 워크플로로 보고 REQUEST_USER_INPUT 카드를 찍어내면 **아무도 답할 수 없는
+        # 카드**가 쌓인다 - CEO 에이전트가 "무엇을 물어야 하는지 지시에 없다"며
+        # blocked 로 보내고, 그게 43 장 쌓여 있었다(2026-08-14 실측, 전부 같은 제목
+        # "CEO planner produced no executable child task").
+        if not state.root_is_user_query:
+            logger.info(
+                "no-analysis-children on non-user root=%s - skipping user-input card",
+                state.parent_task_id,
             )
             return None
         return SupervisorDecision(
@@ -565,6 +649,11 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
         if not child.terminal:
             continue
         if child.blocked:
+            if state.workflow_mode == "analysis" and state.selected_primary_profiles:
+                # A blocked selected primary is terminal for ordinary analysis.
+                # Preserve its block_reason in the synthesis payload instead of
+                # waiting forever or turning an advisory workflow into a gate.
+                continue
             return _blocked_decision(state, child)
         if child.failed:
             if child.retry_count < state.max_retries:
@@ -584,7 +673,7 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
 
     if any(not child.terminal for child in state.analysis_children):
         return None
-    primary_ids = tuple(child.task_id for child in state.analysis_children if child.done)
+    primary_ids = tuple(child.task_id for child in state.analysis_children if child.terminal)
 
     if state.workflow_mode == "analysis":
         if state.qa_required and not state.qa_children:
@@ -600,14 +689,14 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
                     "feedback_consumer=hr-department\n"
                     "store_reasoning_trace=false\n"
                     + json.dumps(
-                        [{
-                            "task_id": child.task_id,
-                            "department": child.department,
-                            "actor_type": "department_head",
-                            "summary": child.summary,
-                            "error": child.error,
-                            "block_reason": child.block_reason,
-                        } for child in state.analysis_children],
+                        [
+                            child_handoff_payload(
+                                child,
+                                department=child.department,
+                                actor_type="department_head",
+                            )
+                            for child in state.analysis_children
+                        ],
                         ensure_ascii=False,
                     )
                 ),
@@ -633,7 +722,7 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
                     " reject unsupported claims, and report blocked findings.\n"
                     + json.dumps(
                         [
-                            {"task_id": child.task_id, "summary": child.summary}
+                            child_handoff_payload(child)
                             for child in state.analysis_children
                         ],
                         ensure_ascii=False,
@@ -824,7 +913,13 @@ class HermesKanbanClient:
         idempotency_key: str,
         initial_status: str | None = None,
     ) -> dict[str, Any]:
-        request = CanonicalKanbanTaskRequest(assignee, title, body, idempotency_key)
+        # 사용자 발원(origin=user-query) 워크플로의 자식은 대기열에서 공장 카드보다
+        # 앞선다. 루트만 앞세우면 소용이 없다 - 실제로 답을 만드는 것은 자식이고,
+        # 자식이 공장 뒤에 서면 사용자 지연은 그대로다(2026-08-14 실측).
+        priority = USER_QUERY_PRIORITY if is_user_query_body(body) else 0
+        request = CanonicalKanbanTaskRequest(
+            assignee, title, body, idempotency_key, priority=priority
+        )
         args: list[str] = ["kanban", "create", request.title, "--body", request.body]
         args.extend(("--assignee", request.assignee))
         for parent_task_id in parent_task_ids:
@@ -835,6 +930,8 @@ class HermesKanbanClient:
                 request.idempotency_key,
                 "--created-by",
                 "ceo-supervisor",
+                "--priority",
+                str(request.priority),
                 "--json",
             )
         )
@@ -895,10 +992,25 @@ class HermesKanbanClient:
                 cache[current_id] = self.show(current_id)
             return cache[current_id]
 
-        scoped_root_ids = extract_scope_references(fetch(task_id)).root_ids
-        if scoped_root_ids:
-            root_id = scoped_root_ids[0]
+        starting_payload = fetch(task_id)
+        scoped_root_ids = extract_scope_references(starting_payload).root_ids
+
+        # A scoped primary/QA/synthesis declares workflow_root_task_id directly.
+        # The root itself deliberately does not point to itself; identify it by
+        # the durable workflow marker + workflow_role=root and perform the same
+        # marker-based discovery. This keeps parentless primaries inside the
+        # workflow scope without turning the root into an execution dependency.
+        starting_body = str(starting_payload.get("body") or "")
+        starting_role = workflow_role_from_body(starting_body)
+        is_scoped_root = (
+            CEO_WORKFLOW_SCOPE_MARKER in starting_body
+            and starting_role == "root"
+        )
+
+        if scoped_root_ids or is_scoped_root:
+            root_id = scoped_root_ids[0] if scoped_root_ids else task_id
             fetch(root_id)
+
             scoped_ids = {root_id}
             for row in self.list_tasks():
                 row_id = str(row.get("id") or row.get("task_id") or "")
@@ -906,10 +1018,14 @@ class HermesKanbanClient:
                     continue
                 if root_id in extract_scope_references(row).root_ids:
                     scoped_ids.add(row_id)
+
             for scoped_id in scoped_ids:
                 fetch(scoped_id)
+
             return root_id, tuple(
-                payload for current_id, payload in cache.items() if current_id != root_id
+                payload
+                for current_id, payload in cache.items()
+                if current_id != root_id
             )
 
         root_id = task_id
@@ -1084,9 +1200,18 @@ class CeoSupervisorService:
         body = str(task.get("body") or "")
         role = terminal_workflow_role(task) or ""
         task_action = terminal_action(task) or terminal_action({"body": body})
+        supervisor_synthesis = (
+            role == "synthesis" and task_action == "SYNTHESIZE"
+        )
+        direct_ceo_synthesis = _is_direct_ceo_response_synthesis(
+            role=role,
+            body=body,
+        )
+        response_synthesis = supervisor_synthesis or direct_ceo_synthesis
+
         projection = (
             self.synthesis_projection
-            if role == "synthesis" and task_action == "SYNTHESIZE"
+            if supervisor_synthesis
             else self.qa_projection
             if role == "qa" and task_action == "RUN_QA"
             else None
@@ -1104,13 +1229,14 @@ class CeoSupervisorService:
                     "terminal projection observer failed",
                     extra={"root_task_id": root_task_id, "task_id": task_id, "error": str(exc)},
         )
-        if role == "synthesis" and task_action == "SYNTHESIZE":
+        if response_synthesis:
             logger.info(
-                "synthesis-complete root=%s task=%s",
+                "synthesis-complete root=%s task=%s producer=%s",
                 root_task_id,
                 task_id,
+                "ceo-hermes-direct" if direct_ceo_synthesis else "ceo-supervisor",
             )
-        if role == "synthesis" and task_action == "SYNTHESIZE" and self.discord_delivery:
+        if response_synthesis and self.discord_delivery:
             content = _text(
                 task.get("latest_summary")
                 or task.get("summary")
@@ -1147,6 +1273,76 @@ class CeoSupervisorService:
                     store=DiscordIdempotencyStore(delivery_home),
                     profile=canonical_profile_for_department("ceo"),
                 )
+
+    def reconcile_existing_workflows(self) -> tuple[SupervisorDecision, ...]:
+        """Reconcile terminal roots whose watch event was missed.
+
+        The supervisor is normally event-driven, but a restart cannot replay
+        terminal events that happened before ``kanban watch`` subscribed. A
+        narrow startup reconciliation covers only completed planning roots
+        with a durable primary selection and at least one terminal primary.
+        It reuses ``handle_terminal_event`` so the normal scope validation,
+        idempotency comments, and action guards remain authoritative.
+        """
+
+        list_tasks = getattr(self.client, "list_tasks", None)
+        show = getattr(self.client, "show", None)
+        if not callable(list_tasks) or not callable(show):
+            return ()
+
+        roots: dict[str, Mapping[str, Any]] = {}
+        for row in list_tasks():
+            task_id = str(row.get("id") or row.get("task_id") or "")
+            body = str(row.get("body") or "")
+            role = terminal_workflow_role(row) or ""
+            if (
+                not task_id
+                or CEO_WORKFLOW_SCOPE_MARKER not in body
+                or role not in {"planning", "scope_and_planning"}
+            ):
+                continue
+            roots[task_id] = row
+
+        decisions: list[SupervisorDecision] = []
+        for root_id in sorted(roots):
+            root_payload = show(root_id)
+            root_status = str(root_payload.get("status") or "").casefold()
+            if root_status not in {"done", "completed", "archived"}:
+                continue
+            if not selected_primary_profiles_from_task(root_payload):
+                continue
+
+            _, payloads = self.client.workflow(root_id)
+            children = tuple(
+                ChildTaskState.from_hermes(payload)
+                for payload in payloads
+                if payload.get("assignee") is not None
+            )
+            terminal_primary = tuple(
+                child
+                for child in children
+                if child.is_in_workflow(root_id)
+                and child.is_analysis
+                and child.terminal
+            )
+            if not terminal_primary:
+                continue
+
+            wake_child = next(
+                (child for child in terminal_primary if child.done),
+                terminal_primary[0],
+            )
+            event = {
+                "event_id": (
+                    f"reconcile:{root_id}:{wake_child.task_id}:{wake_child.status}"
+                ),
+                "task_id": wake_child.task_id,
+                "kind": "blocked" if wake_child.blocked else "completed",
+            }
+            decision = self.handle_terminal_event(event)
+            if decision is not None:
+                decisions.append(decision)
+        return tuple(decisions)
 
     def handle_terminal_event(self, event: Mapping[str, Any]) -> SupervisorDecision | None:
         task_id = str(event.get("task_id") or event.get("id") or "")
@@ -1259,6 +1455,7 @@ class CeoSupervisorService:
                     workflow_mode=workflow_mode,
                     has_mandate=mandate_snapshot_present(root_body),
                     selected_primary_profiles=selected_primary_profiles_from_task(root_payload),
+                    root_is_user_query=is_user_query_body(root_body),
                 )
                 decision = self.decider(state)
                 if (
@@ -1343,33 +1540,74 @@ class CeoSupervisorService:
                     decision.action == SupervisorAction.RUN_QA
                     and state.workflow_mode == "analysis"
                 ):
-                    # QA creation can race with another terminal event. Re-read
-                    # the scoped workflow before creating the fast-path response
-                    # task so a synthesis created by the sibling event is
-                    # observed and not duplicated. This refresh must not turn
-                    # QA into a prerequisite: the decision still inspects only
-                    # primary analysis children.
-                    _, refreshed_payloads = self.client.workflow(root_id)
-                    refreshed_state = SupervisorState(
-                        parent_task_id=root_id,
-                        children=tuple(
-                            ChildTaskState.from_hermes(payload)
-                            for payload in refreshed_payloads
-                            if payload.get("assignee") is not None
-                        ),
-                        wakeups=0,
-                        replan_count=state.replan_count,
-                        max_retries=self.max_retries,
-                        max_wakeups=self.max_wakeups,
-                        qa_required=state.qa_required,
-                        workflow_mode=state.workflow_mode,
-                        has_mandate=state.has_mandate,
-                        selected_primary_profiles=state.selected_primary_profiles,
-                    )
-                    synthesis = _analysis_synthesis_decision(refreshed_state)
-                    if synthesis is not None and synthesis.action == SupervisorAction.SYNTHESIZE:
-                        self._execute(synthesis, refreshed_state)
-                        action = f"{action},SYNTHESIZE"
+                    # FAST path with race protection.
+                    #
+                    # Synthesis depends only on the already-terminal primary
+                    # results, not QA. We still need to observe a synthesis that
+                    # may have been created concurrently while RUN_QA was being
+                    # created, but rebuilding the complete workflow is expensive
+                    # because it launches multiple Hermes CLI subprocesses.
+                    #
+                    # Prefer one board-list read and inspect only durable workflow
+                    # markers. Small test/fake clients without list_tasks retain
+                    # the previous full-workflow fallback.
+                    synthesis_exists = False
+                    list_tasks = getattr(self.client, "list_tasks", None)
+
+                    if callable(list_tasks):
+                        for row in list_tasks():
+                            body = str(row.get("body") or "")
+                            row_role = terminal_workflow_role(row) or ""
+                            row_action = (
+                                terminal_action(row)
+                                or terminal_action({"body": body})
+                                or ""
+                            )
+                            row_roots = extract_scope_references(row).root_ids
+
+                            if (
+                                root_id in row_roots
+                                and row_role == "synthesis"
+                                and (
+                                    row_action == "SYNTHESIZE"
+                                    or _is_direct_ceo_response_synthesis(
+                                        role=row_role,
+                                        body=body,
+                                    )
+                                )
+                            ):
+                                synthesis_exists = True
+                                break
+                    else:
+                        _, refreshed_payloads = self.client.workflow(root_id)
+                        synthesis_exists = any(
+                            child.is_in_workflow(root_id)
+                            and child.workflow_role == "synthesis"
+                            and (
+                                (
+                                    SUPERVISOR_MARKER in child.body
+                                    and "action=SYNTHESIZE" in child.body
+                                )
+                                or _is_direct_ceo_response_synthesis(
+                                    role=child.workflow_role,
+                                    body=child.body,
+                                )
+                            )
+                            for child in (
+                                ChildTaskState.from_hermes(payload)
+                                for payload in refreshed_payloads
+                                if payload.get("assignee") is not None
+                            )
+                        )
+
+                    if not synthesis_exists:
+                        synthesis = _analysis_synthesis_decision(state)
+                        if (
+                            synthesis is not None
+                            and synthesis.action == SupervisorAction.SYNTHESIZE
+                        ):
+                            self._execute(synthesis, state)
+                            action = f"{action},SYNTHESIZE"
                 if decision.action == SupervisorAction.CREATE_TASK:
                     self._replans[root_id] = self._replans.get(root_id, 0) + 1
                 self._record_wakeup(
@@ -1481,7 +1719,11 @@ class CeoSupervisorService:
                     )
             elif decision.action == SupervisorAction.SYNTHESIZE:
                 expected = (
-                    {child.task_id for child in state.analysis_children if child.done}
+                    {
+                        child.task_id
+                        for child in state.analysis_children
+                        if child.terminal
+                    }
                     if state.workflow_mode == "analysis"
                     else {child.task_id for child in state.qa_children if child.done}
                 )
@@ -1528,8 +1770,12 @@ class CeoSupervisorService:
                 primary_idempotency_key(state.parent_task_id, decision.assignee)
                 if role == "primary"
                 else f"{state.parent_task_id}:supervisor:{decision.action.value}:{decision.target_task_id or 'root'}"
-            
-        )
+                + (
+                    f":replan-{state.replan_count}"
+                    if decision.action == SupervisorAction.CREATE_TASK
+                    else ""
+                )
+            )
             created = self.client.create_task(
                 title=decision.title,
                 body=build_scoped_task_body(
@@ -1543,20 +1789,20 @@ class CeoSupervisorService:
                 parent_task_ids=decision.parent_task_ids,
                 idempotency_key=idempotency_key,
             )
-        if role == "primary":
-            logger.info(
-                "primary-create root=%s assignee=%s producer=ceo-supervisor dedup_key=%s created=%s",
-                state.parent_task_id,
-                decision.assignee,
-                idempotency_key,
-                bool(created),
-            )
-        elif role == "synthesis":
-            logger.info(
-                "synthesis-create root=%s parents=%d",
-                state.parent_task_id,
-                len(decision.parent_task_ids),
-            )
+            if role == "primary":
+                logger.info(
+                    "primary-create root=%s assignee=%s producer=ceo-supervisor dedup_key=%s created=%s",
+                    state.parent_task_id,
+                    decision.assignee,
+                    idempotency_key,
+                    bool(created),
+                )
+            elif role == "synthesis":
+                logger.info(
+                    "synthesis-create root=%s parents=%d",
+                    state.parent_task_id,
+                    len(decision.parent_task_ids),
+                )
 
 
 __all__ = [

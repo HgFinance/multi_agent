@@ -1,5 +1,10 @@
 # 부서 실행 계층 v2: Hermes 부서장과 LangGraph 직원
 
+> **Current implementation pointer:** 현재 worker 이름·개수·실행 분류는
+> [CURRENT_PROJECT_ARCHITECTURE.md](../CURRENT_PROJECT_ARCHITECTURE.md)와 각 부서
+> `hermes/config.yaml`/`employee_workers.py`를 정본으로 사용한다. 이 문서는
+> worker graph의 상세 설계를 보존한다.
+
 상태: 확정 설계 · 8개 부서 Worker Registry 적용
 
 이 문서는 전체 투자 파이프라인의 공통 실행 계층과 Worker 수·역할·모델 경계를 정의한다. 전체 직원 수의 Source of Truth는 각 부서 `config.yaml`의 `staff_registry`, `workers`, `runtime_personalities`와 해당 부서 `employee_workers.py`다.

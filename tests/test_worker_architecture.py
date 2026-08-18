@@ -49,14 +49,21 @@ def _fake_worker_llm(_system: str, prompt: str) -> str:
         (line.split(":", 1)[1].strip() for line in prompt.splitlines() if line.startswith("Worker id:")),
         "unknown-worker",
     )
-    return json.dumps(
-        {
-            "summary": f"synthetic worker context for {worker_id}",
-            "confidence": 0.8,
-            "evidence_refs": ["test:evidence"],
-            "escalate": False,
-        }
-    )
+    output = {
+        "summary": f"synthetic worker context for {worker_id}",
+        "confidence": 0.8,
+        "evidence_refs": ["test:evidence"],
+        "escalate": False,
+    }
+    if worker_id == "competing-explanation-worker":
+        output["skeptic_reviews"] = [{
+            "title": "proposal-test",
+            "competing_explanation": "The result may reflect data mining.",
+            "competing_codes": ["DATA_MINING"],
+            "verdict": "PROCEED",
+            "falsification_test": "Use a nested walk-forward holdout.",
+        }]
+    return json.dumps(output)
 
 
 def _payload() -> dict[str, Any]:

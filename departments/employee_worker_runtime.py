@@ -23,13 +23,15 @@ from langgraph.graph import END, StateGraph
 
 from orchestration.llm_observability import record_llm_call
 
-WorkerLLM = Callable[[str, str], str]
+WorkerLLM = Callable[..., str]
 # worker_id -> WorkerLLM. 부서별 LoRA adapter 처럼 **워커마다 모델 좌표가
 # 다를 수 있는** 주입 경로다(2026-08-13). 단일 llm 인자는 워커 정체를 모른 채
 # 공유되므로 Worker Model Gateway 의 worker_id→adapter 해석이 전달될 수 없었다
 # - registry 에 adapter 를 켜도 조용한 no-op 이 되는 결함이 리뷰에서 잡혔다.
 WorkerLLMFactory = Callable[[str], WorkerLLM]
 WorkerTool = Callable[[Mapping[str, Any]], Mapping[str, Any]]
+ArtifactValidator = Callable[[Any], dict[str, Any]]
+ArtifactContextValidator = Callable[[Any, Mapping[str, Any]], Any]
 
 
 class WorkerState(TypedDict, total=False):
@@ -40,6 +42,24 @@ class WorkerState(TypedDict, total=False):
     status: str
     attempts: int
     error: str | None
+
+
+@dataclass(frozen=True)
+class StructuredArtifactSpec:
+    """Machine-checkable Worker-specific payload inside worker-context.
+
+    The common envelope is intentionally small.  A Worker that feeds a
+    deterministic downstream parser can additionally declare this contract,
+    so prose does not have to be transcribed by another agent.
+    """
+
+    key: str
+    required_strings: tuple[str, ...] = ()
+    required_string_lists: tuple[str, ...] = ()
+    enum_values: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    many: bool = False
+    validator: ArtifactValidator | None = None
+    context_validator: ArtifactContextValidator | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +94,8 @@ class WorkerSpec:
     tech_profile: Any = None
     # 이 Worker 가 스스로 query_mode 를 판단해야 하는가(Risk 전용, §11).
     route_query_mode: bool = False
+    # 공통 worker-context 외에 다음 결정론 공정이 직접 소비할 typed artifact.
+    structured_artifact: StructuredArtifactSpec | None = None
 
 
 def model_name() -> str:
@@ -86,7 +108,8 @@ def _ollama_base_url() -> str:
     return raw if raw.endswith("/v1") else f"{raw}/v1"
 
 
-def default_worker_llm(system: str, prompt: str) -> str:
+def default_worker_llm(system: str, prompt: str, *,
+                       json_schema: Mapping[str, Any] | None = None) -> str:
     """Call the configured local Ollama OpenAI-compatible endpoint."""
 
     from openai import OpenAI
@@ -98,11 +121,18 @@ def default_worker_llm(system: str, prompt: str) -> str:
     )
     started = time.perf_counter()
     try:
-        response = client.chat.completions.create(
-            model=model_name(),
-            temperature=0,
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-        )
+        kwargs: dict[str, Any] = {
+            "model": model_name(),
+            "temperature": 0,
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user", "content": prompt}],
+        }
+        if json_schema is not None:
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "worker_context", "schema": json_schema},
+            }
+        response = client.chat.completions.create(**kwargs)
         record_llm_call(
             usage=getattr(response, "usage", None),
             latency_ms=int((time.perf_counter() - started) * 1000),
@@ -111,6 +141,12 @@ def default_worker_llm(system: str, prompt: str) -> str:
     except Exception:
         record_llm_call(latency_ms=int((time.perf_counter() - started) * 1000), error=True)
         raise
+
+
+# Explicit capability marker avoids catching an unrelated TypeError from a
+# model client merely to discover whether a two-argument test double accepts a
+# schema.  Gateway callables set the same marker.
+default_worker_llm._json_schema_capable = True  # type: ignore[attr-defined]
 
 
 def _compact(value: Any, limit: int = 8000) -> str:
@@ -179,7 +215,45 @@ def tools_for_specs(specs: tuple[WorkerSpec, ...]) -> dict[str, WorkerTool]:
     return {spec.worker_id: make_tool(spec) for spec in specs}
 
 
-def _parse_output(raw: str, worker_id: str) -> tuple[dict[str, Any], bool]:
+def _valid_artifact_item(item: Any, contract: StructuredArtifactSpec) -> bool:
+    if not isinstance(item, dict):
+        return False
+    if any(not isinstance(item.get(field), str) or not item[field].strip()
+           for field in contract.required_strings):
+        return False
+    if any(not isinstance(item.get(field), list) or not item[field]
+           or any(not isinstance(value, str) or not value.strip()
+                  for value in item[field])
+           for field in contract.required_string_lists):
+        return False
+    for field, allowed in contract.enum_values:
+        value = item.get(field)
+        values = value if isinstance(value, list) else [value]
+        if not values or any(candidate not in allowed for candidate in values):
+            return False
+    return True
+
+
+def _validated_artifact(parsed: dict[str, Any],
+                        contract: StructuredArtifactSpec | None) -> tuple[Any, bool]:
+    if contract is None:
+        return None, True
+    artifact = parsed.get(contract.key)
+    items = artifact if contract.many and isinstance(artifact, list) else [artifact]
+    valid = bool(items) and (not contract.many or isinstance(artifact, list))
+    if not valid or not all(_valid_artifact_item(item, contract) for item in items):
+        return artifact, False
+    normalized = []
+    for item in items:
+        try:
+            normalized.append(contract.validator(item) if contract.validator else item)
+        except Exception:  # noqa: BLE001 - schema boundary fails closed.
+            return artifact, False
+    return (normalized if contract.many else normalized[0]), True
+
+
+def _parse_output(raw: str, spec: WorkerSpec) -> tuple[dict[str, Any], bool, str]:
+    worker_id = spec.worker_id
     candidate = raw.replace("```json", "").replace("```", "").strip()
     try:
         parsed = json.loads(candidate)
@@ -194,9 +268,10 @@ def _parse_output(raw: str, worker_id: str) -> tuple[dict[str, Any], bool]:
                 "schema_valid": False,
             },
             False,
+            "invalid_json",
         )
     if not isinstance(parsed, dict) or not isinstance(parsed.get("summary"), str):
-        return ({"worker_id": worker_id, "summary": "invalid_worker_schema", "confidence": 0.0, "evidence_refs": [], "escalate": True, "schema_valid": False}, False)
+        return ({"worker_id": worker_id, "summary": "invalid_worker_schema", "confidence": 0.0, "evidence_refs": [], "escalate": True, "schema_valid": False}, False, "root_or_summary_type")
     refs = parsed.get("evidence_refs", [])
     confidence = parsed.get("confidence")
     escalate = parsed.get("escalate", False)
@@ -211,6 +286,7 @@ def _parse_output(raw: str, worker_id: str) -> tuple[dict[str, Any], bool]:
     #     2. 실패가 `worker_context_contract_invalid:ValidationError` 로만 보여
     #        **어느 필드가 왜 틀렸는지 알 수 없다.**
     #   실측(qwen3:1.7b)에서 confidence=90 이 여기를 통과하고 경계에서 죽었다.
+    artifact, artifact_valid = _validated_artifact(parsed, spec.structured_artifact)
     valid = (
         isinstance(refs, list)
         and all(isinstance(item, str) for item in refs)
@@ -221,6 +297,7 @@ def _parse_output(raw: str, worker_id: str) -> tuple[dict[str, Any], bool]:
         and isinstance(escalate, bool)
         # 근거가 없으면 반드시 escalate 다(WorkerContextOutput.require_evidence_or_escalation).
         and (bool(refs) or escalate)
+        and artifact_valid
     )
     output = {
         "worker_id": worker_id,
@@ -232,7 +309,106 @@ def _parse_output(raw: str, worker_id: str) -> tuple[dict[str, Any], bool]:
     }
     if "proposal" in parsed:
         output["proposal"] = parsed["proposal"]
-    return output, valid
+    if spec.structured_artifact is not None and artifact is not None:
+        output[spec.structured_artifact.key] = artifact
+    problems: list[str] = []
+    if not isinstance(refs, list) or not all(isinstance(item, str) for item in refs):
+        problems.append("evidence_refs_type")
+    if (not isinstance(confidence, (int, float)) or isinstance(confidence, bool)
+            or not 0.0 <= float(confidence) <= 1.0):
+        problems.append("confidence_range")
+    if not isinstance(escalate, bool):
+        problems.append("escalate_type")
+    elif not refs and not escalate:
+        problems.append("evidence_or_escalation")
+    if not artifact_valid:
+        problems.append(
+            f"{spec.structured_artifact.key}_invalid"
+            if spec.structured_artifact else "artifact_invalid")
+    return output, valid, ",".join(problems) if problems else ""
+
+
+def _artifact_prompt(contract: StructuredArtifactSpec | None) -> str:
+    if contract is None:
+        return ""
+    cardinality = "a non-empty array of objects" if contract.many else "an object"
+    lines = [
+        f'  "{contract.key}": {cardinality}.',
+        "    Required non-empty strings: "
+        + (", ".join(contract.required_strings) or "(none)"),
+        "    Required non-empty string arrays: "
+        + (", ".join(contract.required_string_lists) or "(none)"),
+    ]
+    for field, allowed in contract.enum_values:
+        lines.append(f"    {field} allows only: {', '.join(allowed)}")
+    return "\n".join(lines)
+
+
+def _worker_output_json_schema(spec: WorkerSpec) -> dict[str, Any]:
+    """Build the decoder-level JSON Schema for one WorkerSpec.
+
+    Prompt instructions remain useful for semantics, but required keys, types,
+    arrays, and enums are generation constraints rather than suggestions when
+    the model gateway supports structured output.
+    """
+    properties: dict[str, Any] = {
+        "summary": {"type": "string", "minLength": 1},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "evidence_refs": {"type": "array", "items": {"type": "string"}},
+        "escalate": {"type": "boolean"},
+        # Legacy Workers may still return a non-binding proposal payload.
+        "proposal": {},
+    }
+    required = ["summary", "confidence", "evidence_refs", "escalate"]
+    contract = spec.structured_artifact
+    if contract is not None:
+        enum_map = dict(contract.enum_values)
+        item_properties: dict[str, Any] = {}
+        item_required: list[str] = []
+        for field in contract.required_strings:
+            schema: dict[str, Any] = {"type": "string", "minLength": 1}
+            if field in enum_map:
+                schema["enum"] = list(enum_map[field])
+            item_properties[field] = schema
+            item_required.append(field)
+        for field in contract.required_string_lists:
+            item_schema: dict[str, Any] = {"type": "string", "minLength": 1}
+            if field in enum_map:
+                item_schema["enum"] = list(enum_map[field])
+            item_properties[field] = {
+                "type": "array", "minItems": 1, "items": item_schema,
+            }
+            item_required.append(field)
+        # An enum-only field is still required by the runtime contract.
+        for field, allowed in contract.enum_values:
+            if field not in item_properties:
+                item_properties[field] = {"type": "string", "enum": list(allowed)}
+                item_required.append(field)
+        item = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": item_properties,
+            "required": list(dict.fromkeys(item_required)),
+        }
+        properties[contract.key] = (
+            {"type": "array", "minItems": 1, "items": item}
+            if contract.many else item
+        )
+        required.append(contract.key)
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": properties,
+        "required": required,
+    }
+
+
+def _invoke_worker_llm(worker_llm: WorkerLLM, system: str, prompt: str,
+                       spec: WorkerSpec) -> str:
+    if getattr(worker_llm, "_json_schema_capable", False):
+        return worker_llm(system, prompt,
+                          json_schema=_worker_output_json_schema(spec))
+    return worker_llm(system, prompt)
 
 
 def build_independent_worker_graph(spec: WorkerSpec, tool: WorkerTool, llm: WorkerLLM | None = None):
@@ -251,6 +427,7 @@ def build_independent_worker_graph(spec: WorkerSpec, tool: WorkerTool, llm: Work
         #   계약(WorkerContextOutput)은 confidence float 0~1, escalate bool 을
         #   요구하므로 전부 DEGRADED 가 됐고, 원인이 모델 크기처럼 보였다.
         #   크기 문제가 아니라 **지시 누락**이었다.
+        artifact_prompt = _artifact_prompt(spec.structured_artifact)
         system = (
             f"You are the {spec.role}. You are one employee Worker in a department. "
             "Use only the supplied tool evidence. Produce advisory context only. "
@@ -264,7 +441,9 @@ def build_independent_worker_graph(spec: WorkerSpec, tool: WorkerTool, llm: Work
             '(e.g. ["mandate:max_symbol_weight"]). Use [] if you had none.\n'
             '  "escalate": boolean true or false — NOT an object, NOT a string.\n'
             "If evidence_refs is empty you MUST set escalate to true. "
-            "Do not wrap the JSON in code fences and do not add any other field."
+            + (("\nThe JSON MUST also include this Worker-specific typed artifact:\n"
+                + artifact_prompt) if artifact_prompt else "")
+            + "\nDo not wrap the JSON in code fences."
         )
         if spec.prompt_instructions:
             system = f"{system}\nAdditional Worker contract: {spec.prompt_instructions}"
@@ -275,12 +454,39 @@ def build_independent_worker_graph(spec: WorkerSpec, tool: WorkerTool, llm: Work
             f"Evidence:\n{_compact(state.get('tool_output', {}))}"
         )
         errors: list[str] = []
+        attempt_prompt = prompt
         for attempt in range(1, spec.max_attempts + 1):
             try:
-                output, valid = _parse_output(worker_llm(system, prompt), spec.worker_id)
+                raw = _invoke_worker_llm(worker_llm, system, attempt_prompt, spec)
+                output, valid, validation_note = _parse_output(raw, spec)
+                contract = spec.structured_artifact
+                if valid and contract is not None and contract.context_validator:
+                    try:
+                        output[contract.key] = contract.context_validator(
+                            output[contract.key], state.get("input", {}))
+                    except Exception as exc:  # noqa: BLE001 - fail-closed relation check.
+                        valid = False
+                        validation_note = str(exc)[:500]
                 if valid:
                     return {"output": output, "status": "COMPLETED", "attempts": attempt, "error": None}
-                errors.append("worker_output_schema_invalid")
+                errors.append(
+                    "worker_output_schema_invalid"
+                    + (f":{validation_note}" if validation_note else ""))
+                # Repeating an identical temperature-0 prompt buys no new information.
+                # Give the next bounded attempt its own failed JSON as data plus the
+                # machine contract.  Validation still fails closed; this never fills in
+                # missing analytical content on the model's behalf.
+                attempt_prompt = (
+                    prompt
+                    + "\n\nYour previous JSON failed machine validation. Return a corrected "
+                    "JSON object only. Do not defend or explain the prior answer. Every "
+                    "required field must be present, strings must not be arrays, string "
+                    "arrays must be non-empty, and enum values must use the allowed "
+                    "spelling from the system contract."
+                    + (f"\nValidation error: {validation_note}" if validation_note else "")
+                    + "\nPrevious invalid JSON:\n"
+                    + raw[:4000]
+                )
             except Exception as exc:  # noqa: BLE001 - employee boundary is fail-closed.
                 errors.append(type(exc).__name__)
         return {

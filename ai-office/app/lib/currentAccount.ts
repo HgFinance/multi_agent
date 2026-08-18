@@ -53,21 +53,21 @@ export const TEST_ACCOUNTS: readonly TestAccount[] = [
   {
     userId: "00000000-0000-4000-8000-00000000cec0",
     label: "Fund Owner",
-    // TEST-CEO-MANDATE (KRW). 유일하게 활성 Mandate(v11, ACTIVE)를 가진 계정.
+    // TEST-CEO-MANDATE (USD). Aggressive Alpha Hunter 현재 metadata를 가진 계정.
     fundId: "b13f5cd1-5df0-4025-92cf-9be03b1a0296",
     colorClass: "bg-primary",
   },
   {
     userId: "00000000-0000-4000-8000-00000000cec1",
     label: "User 2",
-    // TEST-USER2-MANDATE (KRW). Fund는 있고 Mandate는 아직 제출 전(DRAFT).
+    // TEST-USER2-MANDATE (USD). Balanced Growth & Macro 현재 metadata를 가진 계정.
     fundId: "50a3c28c-6cee-4bcf-ab07-fa97093dca8e",
     colorClass: "bg-tertiary-container",
   },
   {
     userId: "00000000-0000-4000-8000-00000000cec2",
     label: "User 3",
-    // TEST-USER3-MANDATE (KRW). Fund는 있고 Mandate는 아직 제출 전(DRAFT).
+    // TEST-USER3-MANDATE (USD). Capital Preservation Neutral 현재 metadata를 가진 계정.
     fundId: "3838f7d6-0c7c-4e54-85f3-316a451e7eeb",
     colorClass: "bg-secondary",
   },
@@ -75,7 +75,7 @@ export const TEST_ACCOUNTS: readonly TestAccount[] = [
 
 const STORAGE_KEY = "hgfinance.currentAccount.v1";
 
-/** 기본값은 목록 첫 계정(Mandate를 가진 유일한 계정)이다. */
+/** 기본값은 목록 첫 계정이다. 세 계정 모두 현재 Mandate를 가진다. */
 export const DEFAULT_ACCOUNT = TEST_ACCOUNTS[0];
 
 export function accountFor(userId: string | null | undefined): TestAccount {

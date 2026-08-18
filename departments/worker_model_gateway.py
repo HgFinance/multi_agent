@@ -22,7 +22,7 @@
 
 ▶ 해석 규칙 (환경변수 계약)
   WORKER_MODEL_BASE_URL 이 설정돼 있으면 → vLLM(OpenAI 호환) 경로:
-    WORKER_MODEL_NAME             (기본 qwen2.5-14b-instruct-fp8)
+    WORKER_MODEL_NAME             (기본 qwen2.5-14b-instruct-awq)
     WORKER_MODEL_API_KEY          (기본 vllm - vLLM 은 키를 검사하지 않지만
                                    OpenAI 호환 헤더 형식은 지킨다)
     WORKER_MODEL_TIMEOUT_SECONDS  (기본 120 - 14B 는 8초 안에 못 끝난다.
@@ -54,13 +54,13 @@ from pathlib import Path
 MODULE_VERSION = "worker-model-gateway-v1"
 REGISTRY_VERSION = "worker-model-registry.v1"
 
-DEFAULT_VLLM_MODEL = "qwen2.5-14b-instruct-fp8"
+DEFAULT_VLLM_MODEL = "qwen2.5-14b-instruct-awq"
 DEFAULT_VLLM_TIMEOUT = 120.0
 DEFAULT_OLLAMA_BASE = "http://127.0.0.1:11434/v1"
 DEFAULT_OLLAMA_MODEL = "qwen3:1.7b"
 DEFAULT_OLLAMA_TIMEOUT = 8.0
 
-WorkerLLM = Callable[[str, str], str]
+WorkerLLM = Callable[..., str]
 
 
 @dataclass(frozen=True)
@@ -230,13 +230,22 @@ def worker_llm(binding: ModelBinding) -> WorkerLLM:
     실패는 예외로 올린다 - Worker 그래프의 재시도(max_attempts)가 잡는다.
     """
 
-    def call(system: str, prompt: str) -> str:
+    def call(system: str, prompt: str, *,
+             json_schema: Mapping | None = None) -> str:
         payload = {
             "model": binding.model,
             "temperature": 0,
             "messages": [{"role": "system", "content": system},
                          {"role": "user", "content": prompt}],
         }
+        if json_schema is not None:
+            # vLLM and Ollama both implement the OpenAI-compatible JSON Schema
+            # response_format.  This constrains decoding; Pydantic validation at
+            # the Worker boundary still fails closed on semantic/context errors.
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {"name": "worker_context", "schema": json_schema},
+            }
         req = urllib.request.Request(
             binding.base_url + "/chat/completions", method="POST",
             headers={"Content-Type": "application/json",
@@ -255,6 +264,7 @@ def worker_llm(binding: ModelBinding) -> WorkerLLM:
             latency_ms=int((time.perf_counter() - started) * 1000))
         return str(out["choices"][0]["message"]["content"] or "")
 
+    call._json_schema_capable = True  # type: ignore[attr-defined]
     return call
 
 
@@ -401,12 +411,17 @@ def _check_payload_shape():
         return _FakeResp()
 
     binding = resolve("w", env={"WORKER_MODEL_BASE_URL": "http://vllm:8000",
-                                "WORKER_MODEL_NAME": "qwen2.5-14b-instruct-fp8"})
+                                "WORKER_MODEL_NAME": "qwen2.5-14b-instruct-awq"})
     call = worker_llm(binding)
+    schema = {
+        "type": "object",
+        "properties": {"summary": {"type": "string"}},
+        "required": ["summary"],
+    }
     orig = urllib.request.urlopen
     urllib.request.urlopen = fake_urlopen
     try:
-        out = call("sys-text", "user-text")
+        out = call("sys-text", "user-text", json_schema=schema)
     finally:
         urllib.request.urlopen = orig
 
@@ -415,9 +430,13 @@ def _check_payload_shape():
     assert seen["timeout"] == 120.0
     assert seen["auth"] == "Bearer vllm"
     b = seen["body"]
-    assert b["model"] == "qwen2.5-14b-instruct-fp8"
+    assert b["model"] == "qwen2.5-14b-instruct-awq"
     assert b["temperature"] == 0, "Worker 는 재현성이 우선이다 - temperature 0"
     assert [m["role"] for m in b["messages"]] == ["system", "user"]
+    assert b["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {"name": "worker_context", "schema": schema},
+    }
     print("  요청 payload 계약        OK")
 
 

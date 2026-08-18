@@ -10,6 +10,7 @@ import {
   draftToInvestorProfile,
   draftToPolicy,
   mergeLocalDraft,
+  mergePolicyForSave,
   nextStep,
   policyToDraft,
   validateDraft,
@@ -232,6 +233,41 @@ test("자산군은 서버 값 위에 초안이 겹쳐진다", () => {
   assert.equal(merged.allowedAssets.leverage, true, "서버가 켠 항목이 사라졌다");
   assert.equal(merged.allowedAssets.crypto, true);
   assert.equal(merged.allowedAssets.equity, true);
+});
+
+test("화면에 없는 세부 정책은 다시 저장해도 사라지지 않는다", () => {
+  const previous = draftToPolicy(DEFAULT_DRAFT);
+  previous.allowed_assets = ["AAPL"];
+  previous.universe_policy = {
+    ...previous.universe_policy,
+    allowed_markets: ["US", "GLOBAL"],
+    allowed_asset_classes: ["US_LARGE_CAP_EQUITY", "INDEX_FUTURES_HEDGE"],
+    forbidden_asset_classes: ["NAKED_OPTION_SHORT", "PROVISIONAL_CRYPTO"],
+    preferred_sectors: ["TECH"],
+    trading_start: "09:30",
+    trading_end: "16:00",
+  };
+  previous.execution_rules = {
+    net_exposure: { min: "0.30", max: "0.70" },
+    portfolio_stop: "-7%에서 헤지 확대",
+  };
+
+  const editedDraft = {
+    ...DEFAULT_DRAFT,
+    baseCapital: 50_000_000,
+    allowedAssets: { ...DEFAULT_DRAFT.allowedAssets, crypto: false, leverage: true },
+  };
+  const merged = mergePolicyForSave(editedDraft, previous);
+
+  assert.equal(merged.risk_bounds.base_capital, "50000000", "화면 수정값은 반영되어야 한다");
+  assert.deepEqual(merged.allowed_assets, ["AAPL"], "개별 종목 목록이 사라졌다");
+  assert.deepEqual(merged.universe_policy.allowed_markets, ["US", "GLOBAL"]);
+  assert.ok(merged.universe_policy.allowed_asset_classes.includes("US_LARGE_CAP_EQUITY"));
+  assert.ok(merged.universe_policy.allowed_asset_classes.includes("INDEX_FUTURES_HEDGE"));
+  assert.ok(merged.universe_policy.allowed_asset_classes.includes("LEVERAGED_ETF"));
+  assert.ok(merged.universe_policy.forbidden_asset_classes.includes("NAKED_OPTION_SHORT"));
+  assert.ok(!merged.universe_policy.forbidden_asset_classes.includes("LEVERAGED_ETF"));
+  assert.deepEqual(merged.execution_rules, previous.execution_rules);
 });
 
 test("기본 draft는 정책 제약을 위반하지 않는다", () => {

@@ -150,6 +150,54 @@ class PostgresMandateVersionRepository(MandateVersionRepository):
         finally:
             self._pool.putconn(conn)
 
+    def get_mandate_metadata(self, mandate_id: str) -> dict | None:
+        """Return the single current UI metadata object for a Mandate."""
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select metadata from governance.mandates where mandate_id = %s",
+                    (mandate_id,),
+                )
+                row = cur.fetchone()
+            conn.commit()
+            if not row or not row[0]:
+                return None
+            return dict(row[0])
+        finally:
+            self._pool.putconn(conn)
+
+    def replace_mandate_metadata(self, mandate_id: str, metadata: dict) -> None:
+        """Replace the current Mandate metadata in one parent row."""
+        Json, _ = _load_postgres_driver()
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    update governance.mandates
+                       set metadata = %s,
+                           status = 'ACTIVE',
+                           current_version = 0,
+                           updated_at = now()
+                     where mandate_id = %s
+                    """,
+                    (Json(_json_safe(metadata)), mandate_id),
+                )
+                if cur.rowcount == 0:
+                    raise MandatePersistenceError(
+                        f"governance.mandates에 mandate_id={mandate_id} 행이 없다"
+                    )
+            conn.commit()
+        except MandatePersistenceError:
+            conn.rollback()
+            raise
+        except Exception as exc:
+            conn.rollback()
+            raise MandatePersistenceError(f"Mandate metadata 갱신 실패: {exc}") from exc
+        finally:
+            self._pool.putconn(conn)
+
     def get_fund_base_currency(self, mandate_id: str) -> str | None:
         conn = self._pool.getconn()
         try:

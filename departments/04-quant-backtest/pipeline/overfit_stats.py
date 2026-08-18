@@ -44,14 +44,23 @@ TRADING_DAYS = 252
 
 
 def _mean(xs: Sequence[float]) -> float:
-    return sum(xs) / len(xs)
+    # Built-in sum accumulates rounding error linearly.  A constant series such
+    # as [0.001] * 200 then gets a mean a few ulps away from every observation
+    # and appears to have non-zero variance (and an enormous Sharpe).
+    return math.fsum(xs) / len(xs)
 
 
 def _std(xs: Sequence[float]) -> float:
     if len(xs) < 2:
         return 0.0
-    m = _mean(xs)
-    return (sum((x - m) ** 2 for x in xs) / (len(xs) - 1)) ** 0.5
+    # Centre on an observed value first.  For a truly constant sequence every
+    # deviation is exactly zero, independent of mean-accumulation rounding.
+    anchor = xs[0]
+    deviations = [x - anchor for x in xs]
+    centred_mean = math.fsum(deviations) / len(deviations)
+    variance = math.fsum(
+        (d - centred_mean) ** 2 for d in deviations) / (len(xs) - 1)
+    return math.sqrt(variance)
 
 
 def _skew_kurt(xs: Sequence[float]) -> tuple[float, float]:
@@ -71,9 +80,10 @@ def sharpe(returns: Sequence[float], *, periods: int = TRADING_DAYS) -> float | 
     if len(returns) < MIN_RETURNS:
         return None
     sd = _std(returns)
-    if sd == 0:
+    mean = _mean(returns)
+    if not math.isfinite(sd) or not math.isfinite(mean) or sd == 0:
         return None                    # 변동이 없으면 Sharpe 가 정의되지 않는다
-    return _mean(returns) / sd * math.sqrt(periods)
+    return mean / sd * math.sqrt(periods)
 
 
 def _norm_cdf(x: float) -> float:

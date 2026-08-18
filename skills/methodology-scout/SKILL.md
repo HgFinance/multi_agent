@@ -61,6 +61,25 @@ metadata:
 `testability: UNUSABLE` — 규칙으로 서술할 수 없으면 그렇게 적는다. **실패가 아니라
 정상 산출이다.** 억지로 다듬어 넘기면 그 비용은 실험 예산에서 나간다.
 
+### 1.1 공개식은 기준선이고, 후보는 별도로 파생한다
+
+논문·글에 공개된 수식을 이름이나 창만 바꿔 신규 알파로 제출하지 않는다. `AST_READY`
+리드는 다음 세 모드 중 하나와 함께 공개 기준선과 후보를 분리해 기록한다.
+
+- `DIRECT_REPLICATION` — `SOURCE_BASELINE_EXPR`와 `CANDIDATE_SIGNAL_EXPR`가 같다.
+  재현·데이터 QA 대조군으로 보존하지만 알파 후보로 발행되지 않는다.
+- `MECHANISM_MUTATION` — 공개 기준식에서 경제적으로 무엇을 바꿨는지
+  `DERIVATION_TRANSFORMS`와 `NOVELTY_RATIONALE`에 기록한다. exact 재사용과 창·상수만
+  바꾼 동일 AST shape는 결정론 검사에서 거부된다.
+- `CROSS_DOMAIN_TRANSFER` — 금융 밖 구조를 시장에 옮긴다. 반드시
+  `MARKET_STRUCTURE_TRANSFER`와 시장 변수 대응 논리를 적는다.
+
+허용 변형은 `STATE_CONDITION`, `CLOCK_CHANGE`, `BOOK_DEPTH_CHANGE`,
+`MECHANISM_INTERACTION`, `RESIDUALIZE_PUBLIC_SIGNAL`, `FAILURE_MODE_INVERSION`,
+`MARKET_STRUCTURE_TRANSFER`, `TARGET_CHANGE`다. 변형 이름만 선언해서는 안 되며 실제
+후보 AST도 공개 기준선과 달라야 한다. 공개 문헌은 메커니즘과 반증 조건의 근거이지,
+그 공개 수식이 지금도 수익을 낸다는 근거가 아니다.
+
 ### 2. 기각 이력 대조 — 회사가 이미 산 실험인가
 
 기획안을 쓰기 **전에** 같은 trial family 의 `ExperimentOutcomeV1` 을 조회한다.
