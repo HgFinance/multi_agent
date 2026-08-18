@@ -41,8 +41,9 @@ CODE_SURFACE_DIR = Path(__file__).resolve().parent
 CODE_SURFACE_GLOB = "*.py"
 
 # 런타임에 실제로 쓰는 패키지. **설치된 버전**을 읽는다(선언이 아니라).
-RUNTIME_PACKAGES = ("psycopg2-binary", "pydantic", "python-dotenv",
-                    "fastapi", "uvicorn")
+# Packages imported by the deterministic quant pipeline. API server packages
+# belong to the separate API image and are not part of experiment replay.
+RUNTIME_PACKAGES = ("psycopg2-binary", "pydantic", "python-dotenv")
 
 # 버전을 못 읽었을 때 적는 값. **건너뛰지 않는다** - 건너뛰면 있는 환경과
 # 없는 환경이 같은 해시가 된다.

@@ -120,8 +120,16 @@ MAX_DEPTH, MAX_NODES = 6, 40
 
 # Research intake runs in a smaller image.  Fail closed if its shared grammar surface
 # ever drifts from this evaluator's executable catalog.
-_CONTRACTS = (Path(__file__).resolve().parents[3] / "departments" /
-              "01-research" / "contracts")
+# The writable quant mount is not a git checkout: its parent is
+# /app/departments while shared research contracts live under /app/repo.
+# Keep a local-checkout fallback for developer/test environments.
+_CONTRACT_CANDIDATES = (
+    Path("/app/repo/departments/01-research/contracts"),
+    Path(__file__).resolve().parents[3] / "departments" /
+    "01-research" / "contracts",
+)
+_CONTRACTS = next((p for p in _CONTRACT_CANDIDATES if p.is_dir()),
+                  _CONTRACT_CANDIDATES[0])
 sys.path.insert(0, str(_CONTRACTS))
 from alpha_ast_surface import (  # noqa: E402
     ALL_OPS as CONTRACT_ALL_OPS,
