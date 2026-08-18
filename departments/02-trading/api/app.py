@@ -44,7 +44,7 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import UUID, uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -52,12 +52,14 @@ from pydantic import BaseModel, Field, ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 _DEPT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_DEPT))
 for _sub in ("contracts", "oms", "broker", "multileg", "capability"):
     sys.path.insert(0, str(_DEPT / _sub))
 
 from contracts import (
     LOT_SIZE,
     BrokerOrderState,
+    ExecutionAuthority,
     MarketSnapshot,
     OrderIntent,
     OrderType,
@@ -70,10 +72,35 @@ from oms import OMS, BrokerOrder, OMSError, OrderIntentRecord
 from oms import OrderStore
 from store_postgres import OrderStorePersistenceError, PostgresOrderStore
 from paper_broker import PaperBroker, Quote
+from directive_routes import configure_directive_runtime, router as directive_router
+from directives.service import DirectiveServiceError, require_paper_execution_mode
+from internal_service_auth import (
+    BROKER_EVENT_POLICY,
+    CASE_PAPER_ORDER_POLICY,
+    INTENT_WRITER_POLICY,
+    ORDER_CANCEL_POLICY,
+    ORDER_SUBMIT_POLICY,
+    RISK_DECISION_POLICY,
+    InternalServiceAuthError,
+    InternalServiceIdentity,
+    MutationAuthPolicy,
+    authenticate_internal_service,
+    required_internal_auth_config,
+)
 
 API_VERSION = "v1"
 
 app = FastAPI(title="Trading Domain API", version=API_VERSION)
+app.include_router(directive_router)
+
+
+@app.on_event("startup")
+def _validate_trading_runtime() -> None:
+    """Fail startup unless the authenticated order plane is strictly PAPER."""
+    require_paper_execution_mode()
+    if os.environ.get("APP_ENV", "").strip().lower() in {"prod", "production"}:
+        required_internal_auth_config()
+    configure_directive_runtime()
 
 # ── 저장 모드 ──────────────────────────────────────────────────────────────────
 # PAPER_DB is an explicit opt-in.  A missing/failed durable dependency never
@@ -122,6 +149,15 @@ def _now() -> datetime:
 
 def _envelope(code: str, message: str, **extra) -> dict:
     return {"error_code": code, "message": message, **extra}
+
+
+def _legacy_offline_fixture_enabled() -> bool:
+    return (
+        os.environ.get("APP_ENV", "").strip().lower() in {"local", "test"}
+        and os.environ.get("TRADING_LEGACY_OFFLINE_MODE", "").strip().lower() == "fixture"
+    )
+
+
 def _require_paper_store() -> None:
     if _paper_db_error is not None:
         raise HTTPException(
@@ -129,6 +165,77 @@ def _require_paper_store() -> None:
             detail=_envelope(
                 "TRADING_PAPER_DB_UNAVAILABLE",
                 _paper_db_error,
+                action="HOLD",
+            ),
+        )
+    if not _paper_db_durable and not _legacy_offline_fixture_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail=_envelope(
+                "TRADING_DURABLE_STORE_REQUIRED",
+                "legacy Trading mutations require the durable PAPER database; "
+                "only an explicit local/test fixture may use memory",
+                action="HOLD",
+            ),
+        )
+
+
+def _require_mutation_identity(
+    authorization: str | None,
+    policy: MutationAuthPolicy,
+) -> InternalServiceIdentity:
+    try:
+        return authenticate_internal_service(authorization, policy=policy)
+    except InternalServiceAuthError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=_envelope(exc.code, str(exc), action="HOLD"),
+        ) from exc
+
+
+def _require_intent_writer(
+    authorization: str | None = Header(default=None),
+) -> InternalServiceIdentity:
+    return _require_mutation_identity(authorization, INTENT_WRITER_POLICY)
+
+
+def _require_risk_decision_writer(
+    authorization: str | None = Header(default=None),
+) -> InternalServiceIdentity:
+    return _require_mutation_identity(authorization, RISK_DECISION_POLICY)
+
+
+def _require_order_submitter(
+    authorization: str | None = Header(default=None),
+) -> InternalServiceIdentity:
+    return _require_mutation_identity(authorization, ORDER_SUBMIT_POLICY)
+
+
+def _require_broker_event_writer(
+    authorization: str | None = Header(default=None),
+) -> InternalServiceIdentity:
+    return _require_mutation_identity(authorization, BROKER_EVENT_POLICY)
+
+
+def _require_order_canceller(
+    authorization: str | None = Header(default=None),
+) -> InternalServiceIdentity:
+    return _require_mutation_identity(authorization, ORDER_CANCEL_POLICY)
+
+
+def _require_case_paper_executor(
+    authorization: str | None = Header(default=None),
+) -> InternalServiceIdentity:
+    return _require_mutation_identity(authorization, CASE_PAPER_ORDER_POLICY)
+
+
+def _bind_declared_actor(identity: InternalServiceIdentity, declared_actor: str) -> None:
+    if declared_actor.strip() != identity.subject:
+        raise HTTPException(
+            status_code=403,
+            detail=_envelope(
+                "TRADING_INTERNAL_AUTH_SUBJECT_MISMATCH",
+                "authenticated service subject must match the declared actor",
                 action="HOLD",
             ),
         )
@@ -144,6 +251,14 @@ def _on_persistence_error(request, exc: OrderStorePersistenceError):
             action="HOLD",
         ),
     )
+
+
+@app.exception_handler(DirectiveServiceError)
+def _on_directive_error(request, exc: DirectiveServiceError):
+    body = _envelope(exc.code, str(exc))
+    if exc.directive_id is not None:
+        body["directive_id"] = str(exc.directive_id)
+    return JSONResponse(status_code=exc.status_code, content=body)
 @app.exception_handler(OMSError)
 def _on_oms_error(request, exc: OMSError):
     """OMS 불변식 위반. 400이지 500이 아니다 - 호출자가 고칠 수 있는 요청이다."""
@@ -378,7 +493,10 @@ class PaperOrderIn(BrokerOrderIn):
 
 
 @app.post(f"/trading/{API_VERSION}/order-intents", status_code=201)
-def create_order_intent(body: OrderIntentIn) -> dict:
+def create_order_intent(
+    body: OrderIntentIn,
+    identity: InternalServiceIdentity = Depends(_require_intent_writer),
+) -> dict:
     """OrderIntent 를 DRAFT 로 등록한다. Agent 가 만들 수 있는 유일한 산출물이다.
 
     같은 idempotency_key 로 다시 부르면 기존 기록을 그대로 돌려준다(불변식 2) -
@@ -386,6 +504,7 @@ def create_order_intent(body: OrderIntentIn) -> dict:
     것이 아닐 수 있고, 그 구분은 응답의 intent_status 와 version 으로 한다.
     """
     _require_paper_store()
+    _bind_declared_actor(identity, body.created_by)
     if body.asset_class != "EQUITY":
         raise HTTPException(
             409,
@@ -411,19 +530,27 @@ def get_order_intent(order_intent_id: UUID) -> dict:
 
 
 @app.post(f"/trading/{API_VERSION}/order-intents/{{order_intent_id}}/risk-review")
-def request_risk_review(order_intent_id: UUID) -> dict:
+def request_risk_review(
+    order_intent_id: UUID,
+    _identity: InternalServiceIdentity = Depends(_require_intent_writer),
+) -> dict:
     """RISK_PENDING 으로 넘긴다. 심사 요청일 뿐 승인이 아니다."""
     return _intent_view(_oms.request_risk_review(_intent_record(order_intent_id)))
 
 
 @app.post(f"/trading/{API_VERSION}/order-intents/{{order_intent_id}}/risk-decision")
-def apply_risk_decision(order_intent_id: UUID, body: RiskDecisionIn) -> dict:
+def apply_risk_decision(
+    order_intent_id: UUID,
+    body: RiskDecisionIn,
+    identity: InternalServiceIdentity = Depends(_require_risk_decision_writer),
+) -> dict:
     """리스크본부 판정을 반영한다.
 
     **판정 권한은 리스크본부에 있다.** 여기서 verdict 를 계산하지 않고, 받은 값을
     RiskDecision 계약으로 검증한 뒤 기록만 한다(reject 인데 승인수량이 있으면 계약
     자체가 거부한다). approve/resize 면 OMS 가 READY_TO_SUBMIT 까지 진행시킨다.
     """
+    _bind_declared_actor(identity, body.decided_by)
     if body.order_intent_id != order_intent_id:
         raise HTTPException(400, _envelope("TRADING_INTENT_MISMATCH",
                                            "경로와 본문의 order_intent_id 가 다릅니다"))
@@ -436,7 +563,10 @@ def apply_risk_decision(order_intent_id: UUID, body: RiskDecisionIn) -> dict:
 
 
 @app.post(f"/trading/{API_VERSION}/orders", status_code=201)
-def create_broker_order(body: BrokerOrderIn) -> dict:
+def create_broker_order(
+    body: BrokerOrderIn,
+    _identity: InternalServiceIdentity = Depends(_require_order_submitter),
+) -> dict:
     """READY_TO_SUBMIT Intent 로 Broker Order 를 만든다. 아직 전송 전(CREATED)이다.
 
     두 상태 머신의 유일한 접점이자 Risk Gate 다. 상태 전이가 아니라 새 객체 생성인
@@ -452,7 +582,10 @@ def get_order(order_id: UUID) -> dict:
 
 
 @app.post(f"/trading/{API_VERSION}/orders/{{order_id}}/submit")
-def submit_order(order_id: UUID) -> dict:
+def submit_order(
+    order_id: UUID,
+    _identity: InternalServiceIdentity = Depends(_require_order_submitter),
+) -> dict:
     """브로커 전송. Risk Gate 의 마지막 관문이다.
 
     생성 때 통과했다고 전송 때도 통과라고 가정하지 않는다 - 판정 만료·수량 초과·
@@ -464,7 +597,11 @@ def submit_order(order_id: UUID) -> dict:
 
 
 @app.post(f"/trading/{API_VERSION}/orders/{{order_id}}/cancel")
-def request_cancel(order_id: UUID, body: CancelIn) -> dict:
+def request_cancel(
+    order_id: UUID,
+    body: CancelIn,
+    _identity: InternalServiceIdentity = Depends(_require_order_canceller),
+) -> dict:
     """취소 요청. **아직 취소된 것이 아니다** - CANCEL_PENDING 이다.
 
     브로커가 cancel 이벤트를 돌려주기 전까지 CANCELLED 로 쓰지 않는다. 취소 요청과
@@ -474,7 +611,11 @@ def request_cancel(order_id: UUID, body: CancelIn) -> dict:
 
 
 @app.post(f"/trading/{API_VERSION}/orders/{{order_id}}/broker-events")
-def on_broker_event(order_id: UUID, body: BrokerEventIn) -> dict:
+def on_broker_event(
+    order_id: UUID,
+    body: BrokerEventIn,
+    _identity: InternalServiceIdentity = Depends(_require_broker_event_writer),
+) -> dict:
     """브로커가 보낸 사실을 반영한다. 상태를 바꾸는 유일한 입구다.
 
     같은 broker_event_id 를 두 번 받으면 두 번째는 무시한다(불변식 4).
@@ -487,7 +628,11 @@ def on_broker_event(order_id: UUID, body: BrokerEventIn) -> dict:
 
 
 @app.post(f"/trading/{API_VERSION}/orders/{{order_id}}/unknown")
-def mark_unknown(order_id: UUID, body: CancelIn) -> dict:
+def mark_unknown(
+    order_id: UUID,
+    body: CancelIn,
+    _identity: InternalServiceIdentity = Depends(_require_broker_event_writer),
+) -> dict:
     """브로커 응답이 없을 때. FILLED 나 CANCELLED 로 추정하지 않는다.
 
     UNKNOWN 은 종료 상태가 아니며, 이후 같은 Fund 의 신규 주문이 막힌다.
@@ -528,7 +673,11 @@ def get_tick_size(price: Decimal) -> dict:
 
 
 @app.post("/investment-cases/{case_id}/paper-orders", status_code=201)
-def create_paper_order(case_id: UUID, body: PaperOrderIn) -> dict:
+def create_paper_order(
+    case_id: UUID,
+    body: PaperOrderIn,
+    _identity: InternalServiceIdentity = Depends(_require_case_paper_executor),
+) -> dict:
     """Case 에서 Paper 주문을 만들고 전송까지 한다. 체결은 별개다.
 
     Broker Order 생성 -> submit -> Paper Broker accept(ack) 까지가 한 호출이다.
@@ -563,7 +712,11 @@ def create_paper_order(case_id: UUID, body: PaperOrderIn) -> dict:
 
 
 @app.post("/investment-cases/{case_id}/cancel")
-def cancel_case_orders(case_id: UUID, body: CancelIn) -> dict:
+def cancel_case_orders(
+    case_id: UUID,
+    body: CancelIn,
+    _identity: InternalServiceIdentity = Depends(_require_order_canceller),
+) -> dict:
     """Case 의 미종료 주문에 취소를 요청한다. 요청이지 취소 완료가 아니다.
 
     ponytail: Case -> 주문 역인덱스가 없어 전체 주문을 훑는다. 주문이 수천 건이
@@ -651,12 +804,143 @@ def health_ready() -> dict:
 # TestClient 로 실제 요청을 태운다. 네트워크·DB 없음.
 
 if __name__ == "__main__":
+    import base64
+    import hashlib
+    import hmac
+    import json
     from datetime import timedelta
 
     from fastapi.testclient import TestClient
 
-    c = TestClient(app)
+    os.environ.setdefault("TRADING_EXECUTION_MODE", "PAPER")
+    os.environ.setdefault("APP_ENV", "test")
+    os.environ.setdefault("TRADING_LEGACY_OFFLINE_MODE", "fixture")
+    os.environ.setdefault("TRADING_AUTH_MODE", "fixture")
+    os.environ.setdefault("TRADING_DIRECTIVE_REPOSITORY", "memory")
+    os.environ.setdefault(
+        "TRADING_INTERNAL_SERVICE_AUTH_SECRET",
+        "self-check-internal-trading-auth-secret-32-bytes",
+    )
+    os.environ.setdefault("TRADING_INTERNAL_SERVICE_AUTH_ISSUER", "self-check-service-issuer")
+    os.environ.setdefault("TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE", "trading-api")
     now = _now()
+
+    def _self_check_token(
+        *, subject: str, department: str, service: str, scopes: list[str]
+    ) -> str:
+        def encode(value: dict) -> str:
+            raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+            return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+        issued_at = now.timestamp()
+        header = encode({"alg": "HS256", "typ": "JWT"})
+        payload = encode(
+            {
+                "iss": os.environ["TRADING_INTERNAL_SERVICE_AUTH_ISSUER"],
+                "aud": os.environ["TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE"],
+                "sub": subject,
+                "department": department,
+                "service": service,
+                "scopes": scopes,
+                "jti": f"self-check-{uuid4()}",
+                "iat": issued_at,
+                "nbf": issued_at,
+                "exp": issued_at + 60,
+            }
+        )
+        signature = hmac.new(
+            os.environ["TRADING_INTERNAL_SERVICE_AUTH_SECRET"].encode(),
+            f"{header}.{payload}".encode(),
+            hashlib.sha256,
+        ).digest()
+        encoded_signature = base64.urlsafe_b64encode(signature).decode().rstrip("=")
+        return f"Bearer {header}.{payload}.{encoded_signature}"
+
+    _self_check_headers = {
+        "intent": {
+            "Authorization": _self_check_token(
+                subject="svc_selfcheck",
+                department="trading-department",
+                service="trading-hermes",
+                scopes=["trading.intent.write"],
+            )
+        },
+        "risk": {
+            "Authorization": _self_check_token(
+                subject="svc_risk_engine",
+                department="risk-management",
+                service="risk-api",
+                scopes=["trading.risk_decision.write"],
+            )
+        },
+        "submit": {
+            "Authorization": _self_check_token(
+                subject="svc_trading_oms",
+                department="trading-department",
+                service="trading-oms",
+                scopes=["trading.order.submit", "trading.broker_event.write"],
+            )
+        },
+        "broker": {
+            "Authorization": _self_check_token(
+                subject="svc_paper_broker",
+                department="trading-department",
+                service="paper-broker-adapter",
+                scopes=["trading.broker_event.write"],
+            )
+        },
+        "cancel": {
+            "Authorization": _self_check_token(
+                subject="svc_trading_oms",
+                department="trading-department",
+                service="trading-oms",
+                scopes=["trading.order.cancel"],
+            )
+        },
+    }
+
+    class _AuthenticatedSelfCheckClient:
+        def __init__(self) -> None:
+            self._client = TestClient(app)
+
+        def get(self, path: str, **kwargs):
+            return self._client.get(path, **kwargs)
+
+        def post(self, path: str, **kwargs):
+            if path.endswith("/risk-decision"):
+                role = "risk"
+            elif path.endswith("/broker-events") or path.endswith("/unknown"):
+                role = "broker"
+            elif path.endswith("/cancel"):
+                role = "cancel"
+            elif "/orders" in path or path.endswith("/paper-orders"):
+                role = "submit"
+            else:
+                role = "intent"
+            headers = dict(_self_check_headers[role])
+            headers.update(kwargs.pop("headers", {}))
+            response = self._client.post(path, headers=headers, **kwargs)
+            # The legacy self-check models an already promoted automated
+            # strategy. Production callers must persist a real promotion;
+            # this explicit local/test fixture merely keeps the historical
+            # API state-machine check executable after the authority gate.
+            if (
+                role == "risk"
+                and response.status_code == 200
+                and response.json().get("intent_status") == "READY_TO_SUBMIT"
+            ):
+                intent_id = UUID(path.split("/")[-2])
+                record = _intent_record(intent_id)
+                record.authority = ExecutionAuthority.STRATEGY
+                record.authority_ref = "SELF-CHECK-STRATEGY"
+                _oms.strategy_switchboard.enable(
+                    record.authority_ref,
+                    actor="user:self-check",
+                    reason="explicit local/test fixture",
+                )
+            return response
+
+    c = _AuthenticatedSelfCheckClient()
     ids = {k: str(uuid4()) for k in ("case", "fund", "book", "strategy", "instrument")}
 
     def intent_body(key: str, qty: str = "100") -> dict:
@@ -716,7 +1000,8 @@ if __name__ == "__main__":
     assert created.status_code == 201 and created.json()["state"] == "CREATED", created.text
     order_id = created.json()["order_id"]
     assert c.post("/trading/v1/orders", json={"order_intent_id": oid}).json()["order_id"] == order_id
-    assert c.post(f"/trading/v1/orders/{order_id}/submit").json()["state"] == "SUBMITTED"
+    submitted = c.post(f"/trading/v1/orders/{order_id}/submit")
+    assert submitted.status_code == 200 and submitted.json()["state"] == "SUBMITTED", submitted.text
     ack = c.post(f"/trading/v1/orders/{order_id}/broker-events",
                  json={"event_type": "ack", "broker_event_id": "bev_ack_1",
                        "event_time": now.isoformat(), "payload": {"broker_order_id": "B-1"}})

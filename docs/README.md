@@ -13,7 +13,7 @@
 - CEO, 6개 본부장과 Agent Workforce 인사팀장용 Hermes Profile 8개와 `SOUL.md`
 - Mandate 정책·Version Lifecycle과 승인형 Workforce Improvement Candidate Prototype
 - [Engineering 문서 안내](02-engineering/README.md) · 루트 Docker Compose에서 관리하는 기본 26개 Service(Research 수집·조회·MCP·Hermes, TimescaleDB, Redis, Risk·QA, CEO·Trading·Accounting·Workforce)와 선택 Profile 3개 서비스(`portfolio` 2개, `dashboard` 1개). 선언 수와 실제 실행 상태는 [로컬 Compose Runtime 기준선](02-engineering/LOCAL_COMPOSE_RUNTIME_BASELINE.md)과 실행 현황 문서에서 구분한다.
-- LS 종목 Master·구독 계획·실시간 Payload 정규화, DART·거시·Calendar·Corporate Action·뉴스 수집 Adapter
+- LS 종목 Master·구독 계획·실시간 Payload 정규화와 가격·거래가능성·Calendar 시장 데이터 수집기, DART·거시·뉴스 요청형 Research MCP
 - Timescale Market Repository, Supabase 운영 DB Migration, Workforce Seed, RLS와 Schema Test
 - 결정론적 Risk Engine, Redis Trading State, Order Contract, Paper OMS/Broker, Ledger·Portfolio·Reconciliation Prototype
 - Risk P1, Risk·QA Repository·Redis Event·Harness·Replay, QA Model Risk·Internal Audit와 Agentic RAG 회복성
@@ -366,7 +366,7 @@ Repository Scaffold
 multi_agent/
 ├── departments/
 │   ├── 00-ceo-office/hermes/
-│   ├── 01-research/{hermes/, collectors/}       # 뉴스 수집: collectors/news.py
+│   ├── 01-research/{hermes/, collectors/, api/} # 시장 데이터 수집 + 요청형 Research MCP
 │   ├── 02-trading/{hermes/, contracts/, oms/, broker/}
 │   ├── 03-risk/hermes/
 │   ├── 04-quant-backtest/hermes/

@@ -20,7 +20,44 @@ _COMPOSE_TEST_ENV = {
     "NAVER_CLIENT_SECRET": "compose-contract-test",
     "SUPABASE_URL": "https://compose-contract-test.invalid",
     "SUPABASE_SERVICE_ROLE_KEY": "compose-contract-test",
+    "TRADING_SERVICE_AUTH_SECRET": "compose-contract-trading-proof-secret-32-bytes",
+    "TRADING_INTERNAL_SERVICE_AUTH_SECRET": (
+        "compose-contract-internal-trading-secret-32-bytes"
+    ),
+    "MCP_TRADING_ORDER_API_KEY": "compose-contract-paper-order-mcp-key-32-bytes",
 }
+
+
+def _run_compose(*args: str) -> subprocess.CompletedProcess[str]:
+    """Render Compose with either the v2 plugin or legacy standalone binary."""
+
+    candidates: list[list[str]] = []
+    if shutil.which("docker") is not None:
+        candidates.append(["docker", "compose"])
+    if shutil.which("docker-compose") is not None:
+        candidates.append(["docker-compose"])
+    if not candidates:
+        raise unittest.SkipTest("Docker Compose is not installed")
+
+    failures: list[str] = []
+    for prefix in candidates:
+        result = subprocess.run(
+            [*prefix, *args],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env={
+                **os.environ,
+                **_COMPOSE_TEST_ENV,
+            },
+            check=False,
+        )
+        if result.returncode == 0:
+            return result
+        failures.append(result.stderr or result.stdout)
+    raise AssertionError("\n".join(failures))
 
 
 class _FakeRedisLock:
@@ -55,21 +92,7 @@ class _FakeRedis:
 class BffConsolidationTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        if shutil.which("docker") is None:
-            raise unittest.SkipTest("docker is not installed")
-        result = subprocess.run(
-            ["docker", "compose", "config", "--format", "json"],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            env={
-                **os.environ,
-                **_COMPOSE_TEST_ENV,
-            },
-            check=False,
-        )
-        if result.returncode != 0:
-            raise AssertionError(result.stderr or result.stdout)
+        result = _run_compose("config", "--format", "json")
         cls.compose = json.loads(result.stdout)
         cls.services = cls.compose["services"]
 
@@ -86,26 +109,9 @@ class BffConsolidationTest(unittest.TestCase):
         self.assertNotIn("ui-bff", self.services)
 
     def test_legacy_ui_bff_has_no_host_port_when_explicitly_loaded(self) -> None:
-        result = subprocess.run(
-            [
-                "docker",
-                "compose",
-                "--profile",
-                "legacy-ui-bff",
-                "config",
-                "--format",
-                "json",
-            ],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            env={
-                **os.environ,
-                **_COMPOSE_TEST_ENV,
-            },
-            check=False,
+        result = _run_compose(
+            "--profile", "legacy-ui-bff", "config", "--format", "json"
         )
-        self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
         service = json.loads(result.stdout)["services"]["ui-bff"]
         self.assertEqual(service.get("profiles"), ["legacy-ui-bff"])
         self.assertNotIn("ports", service)

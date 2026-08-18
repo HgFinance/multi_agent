@@ -12,20 +12,19 @@
   DART·네이버 공식 REST 로 재현한다 - 키는 우리 코드만 통과한다.
 
 ▶ 이 계층의 세 가지 의무 (MCP_ONDEMAND_ARCHITECTURE §6-1)
-  1. 예산: DART 무료 20,000/일을 수집기(공시 10분 폴링·저녁 재무 배치)와
-     **같은 키로** 나눠 쓴다. 에이전트 몫 상한을 두고, 넘으면 호출을 거부해
-     수집기 예산을 지킨다(조용한 잠식 금지).
-  2. 스냅샷(cache-on-cite v1): 모든 외부 호출의 요청·응답을 append-only
-     JSONL 로 남긴다. 웹은 소멸·무통보 수정되므로(Pew 2024: 38% 소멸)
-     "그때 무엇을 읽고 답했나"는 이 기록만이 증언한다. v2 에서 '실제 인용분만'
-     으로 좁힌다.
+  1. 예산: DART·NAVER 요청형 MCP 호출에 소스별 일일 상한을 둔다. 상주 수집기가
+     같은 키를 소비하지 않으므로 이 상한이 Research Runtime의 전체 자동 호출
+     예산이다.
+  2. 비영속 인용 좌표: 외부 응답의 해시만 계산해 그 요청의 인용 좌표로
+     돌려준다. 응답·snippet·본문은 파일, DB, Storage, pgvector 어디에도
+     적재하지 않는다. 필요한 정보는 에이전트가 요청 시점에 다시 조회한다.
   3. 정직성(mcp_server.py 머리말과 동일): 결과를 요약·해석하지 않는다.
      원 응답을 그대로 돌려주고 출처(rcept_no·URL)를 반드시 동봉한다.
      실패는 실패로 돌려준다.
 
-▶ 이 도구들은 **질의 응대 전용**이다. 팩터 산출·백테스트·사후 채점은 적재
-  평면(observed_at PIT)만 읽는다 - 여기 결과를 그쪽에 재사용하면 look-ahead
-  가 조용히 생긴다(같은 문서 §7 위험 1).
+▶ 이 도구들은 **질의 응대와 경제적 가설 발상 전용**이다. typed AST 계산·백테스트·
+  사후 채점은 보유한 시장 시계열만 읽는다. 여기 결과를 역사 수치 입력으로 재사용하면
+  look-ahead가 조용히 생긴다(같은 문서 §7 위험 1).
 
 자체 점검: python api/external_sources.py  (네트워크 필요 없는 검사만)
 """
@@ -39,14 +38,12 @@ import json
 import os
 import re
 import sys
-import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
 from datetime import date, datetime, timedelta, timezone
 from html.parser import HTMLParser
-from pathlib import Path
 from threading import Lock
 
 KST = timezone(timedelta(hours=9))
@@ -59,8 +56,8 @@ DART_VIEWER = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo="
 REPORT_CODES = {"q1": "11013", "half": "11012", "q3": "11014", "annual": "11011"}
 
 # ── 예산 ────────────────────────────────────────────────────────────────────
-# 에이전트 몫 일일 상한. DART 전체 무료 한도는 20,000/일이고 수집기가 같은
-# 키를 쓴다 - 여기 상한은 "에이전트가 수집기 몫을 침범하지 못하게" 하는 벽이다.
+# 요청형 Research MCP의 일일 상한. 정성 데이터 상주 수집기는 이 키를 쓰지 않는다.
+# 공급자 한도보다 낮게 두어 반복 에이전트 호출이 외부 계정을 소진하지 않게 한다.
 DART_DAILY_CAP = int(os.environ.get("MCP_DART_DAILY_CAP", "2000"))
 NAVER_DAILY_CAP = int(os.environ.get("MCP_NAVER_DAILY_CAP", "5000"))
 
@@ -101,27 +98,16 @@ def budget_state() -> dict:
                 **{s: {"used": _budget.get(s, 0), "cap": caps[s]} for s in srcs}}
 
 
-# ── 스냅샷 (cache-on-cite v1) ───────────────────────────────────────────────
-CITE_DIR = Path(os.environ.get("MCP_CITE_LOG_DIR", "/app/reports/mcp_citations"))
-_cite_lock = Lock()
-
-
 def _snapshot(tool: str, args: dict, response) -> str:
-    """호출 전량을 append-only 로 남기고 응답 해시를 돌려준다(인용 좌표)."""
-    body = json.dumps(response, ensure_ascii=False, default=str)
-    digest = hashlib.sha256(body.encode()).hexdigest()[:16]
-    rec = {"ts": datetime.now(KST).isoformat(), "tool": tool, "args": args,
-           "sha256_16": digest, "bytes": len(body),
-           # 20KB 넘는 응답은 절단 저장 - 좌표(해시)는 전체 기준이다
-           "response": body[:20480]}
-    try:
-        CITE_DIR.mkdir(parents=True, exist_ok=True)
-        fname = CITE_DIR / f"{date.today().isoformat()}.jsonl"
-        with _cite_lock, open(fname, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    except OSError:
-        pass  # 스냅샷 실패가 조회를 막지는 않는다 - 다만 기록 없는 답이 된다
-    return digest
+    """Return a request-scoped citation hash without persisting the response.
+
+    ``tool`` and ``args`` are deliberately included so identical response
+    bodies reached through different requests do not share a misleading
+    coordinate.  This function performs no filesystem or database write.
+    """
+    envelope = {"tool": tool, "args": args, "response": response}
+    body = json.dumps(envelope, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(body.encode()).hexdigest()[:16]
 
 
 # ── HTTP ───────────────────────────────────────────────────────────────────
@@ -152,20 +138,15 @@ def _dart_json(endpoint: str, **params) -> dict:
     return body
 
 
-# ── 기업 코드 색인 (corpCode.xml - 최초 1회 받아 캐시) ──────────────────────
+# ── 기업 코드 색인 (corpCode.xml - 프로세스 메모리에서만 재사용) ────────────
 _corp_index: list | None = None
 _corp_lock = Lock()
-_CORP_CACHE = Path(os.environ.get("MCP_CORP_CACHE",
-                                  "/tmp/dart_corp_index.json"))
 
 
 def _load_corp_index() -> list:
     global _corp_index
     with _corp_lock:
         if _corp_index is not None:
-            return _corp_index
-        if _CORP_CACHE.exists() and time.time() - _CORP_CACHE.stat().st_mtime < 86400 * 7:
-            _corp_index = json.loads(_CORP_CACHE.read_text(encoding="utf-8"))
             return _corp_index
         _spend("dart", DART_DAILY_CAP)
         q = urllib.parse.urlencode({"crtfc_key": _dart_key()})
@@ -180,12 +161,8 @@ def _load_corp_index() -> list:
             out.append({"corp_code": el.findtext("corp_code"),
                         "corp_name": (el.findtext("corp_name") or "").strip(),
                         "stock_code": stock})
-        try:
-            _CORP_CACHE.parent.mkdir(parents=True, exist_ok=True)
-            _CORP_CACHE.write_text(json.dumps(out, ensure_ascii=False),
-                                   encoding="utf-8")
-        except OSError:
-            pass
+        # corpCode.xml도 외부 응답이다. 디스크 캐시는 작은 편의 기능이지만
+        # "시세 외 응답 비영속" 경계를 깨므로 프로세스 수명 안에서만 재사용한다.
         _corp_index = out
         return out
 
@@ -437,11 +414,11 @@ def tavily_search(query: str, max_results: int = 5, days: int = 0) -> dict:
 
 
 def record_citations(citations: list, note: str = "") -> dict:
-    """답변에 **실제로 인용한** 조회의 citation 해시를 표시한다 (cache-on-cite v2).
+    """답변에 **실제로 인용한** 조회의 citation 해시를 비영속으로 표시한다.
 
-    모든 호출은 이미 스냅샷된다 - 이 도구는 그중 어느 것이 최종 답변의 근거가
-    됐는지를 append-only 로 남겨, QA 가 '읽은 것'과 '인용한 것'을 구분해
-    재검증할 수 있게 한다. 답변을 마치기 직전에 한 번 호출하라.
+    이 도구는 어느 조회가 최종 답변의 근거였는지를 응답 객체에 묶을 뿐 파일이나
+    DB에 기록하지 않는다. 호출자는 답변을 마치기 직전에 한 번 호출하고 반환된
+    좌표를 같은 응답 계보에 포함한다.
     """
     marks = [str(c).strip() for c in (citations or []) if str(c).strip()]
     rec = {"marked": len(marks), "citations": marks, "note": note[:500]}
@@ -518,9 +495,10 @@ if __name__ == "__main__":
         raise AssertionError("없는 report 가 통과했다")
     except KeyError:
         print("  report 코드 검증          OK")
-    # 스냅샷이 해시를 돌려주나 (임시 디렉터리로)
-    CITE_DIR = Path(os.environ.get("TMP", "/tmp")) / "cite_test"  # noqa: F811
+    # 응답을 저장하지 않고 결정론적 인용 해시만 돌려주나
     d = _snapshot("self-test", {"a": 1}, {"ok": True})
     assert len(d) == 16
-    print("  스냅샷 해시              OK")
+    assert d == _snapshot("self-test", {"a": 1}, {"ok": True})
+    assert d != _snapshot("self-test", {"a": 2}, {"ok": True})
+    print("  비영속 인용 해시          OK")
     print("자체 점검 통과")

@@ -36,7 +36,14 @@ def _row_with_fallback(
 def collect_status() -> dict[str, object]:
     ls_env = os.environ.get("LS_ENV", "PAPER").strip().upper()
     suffix = "_PAPER" if ls_env == "PAPER" else ""
-    production_ingestion = os.environ.get("QA_INGEST_MODE", "production").lower() == "production"
+    ingest_mode = os.environ.get("QA_INGEST_MODE", "disabled").strip().lower()
+    legacy_ingestion = (
+        os.environ.get("QA_ENABLE_LEGACY_EVIDENCE_INGESTION", "")
+        .strip()
+        .lower()
+        == "true"
+        and ingest_mode == "legacy-manual"
+    )
     required = [
         _row(f"LS_APP_KEY{suffix}", required=ls_env in {"PAPER", "LIVE"}, reason="LS OAuth"),
         _row(
@@ -50,13 +57,27 @@ def collect_status() -> dict[str, object]:
             required=ls_env in {"PAPER", "LIVE"},
             reason="LS REST endpoint",
         ),
-        _row("DATABASE_URL", required=production_ingestion, reason="Supabase/Postgres ingestion"),
-        _row("QA_POLICY_SOURCE_ID", required=production_ingestion, reason="research source FK"),
-        _row("OPENAI_API_KEY", required=production_ingestion, reason="policy embeddings"),
+        _row(
+            "DATABASE_URL",
+            required=legacy_ingestion,
+            reason="legacy manual evidence migration only",
+        ),
+        _row(
+            "QA_POLICY_SOURCE_ID",
+            required=legacy_ingestion,
+            reason="legacy manual evidence migration only",
+        ),
+        _row(
+            "OPENAI_API_KEY",
+            required=legacy_ingestion,
+            reason="legacy manual evidence migration only",
+        ),
     ]
     return {
         "ls_environment": ls_env,
-        "qa_ingest_mode": os.environ.get("QA_INGEST_MODE", "production"),
+        "qa_ingest_mode": ingest_mode,
+        "non_market_evidence_mode": "request_time_mcp",
+        "legacy_evidence_ingestion_enabled": legacy_ingestion,
         "credentials": required,
         "all_required_configured": all(
             not item["required"] or item["configured"] for item in required

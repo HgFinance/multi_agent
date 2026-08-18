@@ -40,14 +40,14 @@ import argparse
 import hashlib
 import json
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]
                        / "01-research" / "collectors"))
 
-BUILDER_VERSION = "quant-microstructure-builder-v6"
+BUILDER_VERSION = "quant-microstructure-builder-v7"
 SOURCE_CONTENT_HASH_CONTRACT = "pg-composite-row-xor0-sum1-sha256-v1"
 # ▶ 판본 (2026-08-14). **옛 판본 행은 안 건드린다** - 그 판본으로 돈 실험의
 #   재현이 살아야 한다.
@@ -65,6 +65,8 @@ KST = timezone(timedelta(hours=9))
 # 정규장만 접는다. 시간외·프리마켓은 체결 규칙이 달라 같은 통계에 섞으면
 # 스프레드·체결강도가 왜곡된다(가이드 8.2 와 같은 이유).
 SESSION_START, SESSION_END = "09:00", "15:30"
+EXTERNAL_CONTENT_WINDOW_CONTRACT = \
+    "KRX_REGULAR_SESSION_HALF_OPEN_0900_1530_KST_V1"
 
 # 그날 이 미만이면 통계가 아니라 잡음이다. 버리지 않고 quality_status 로 표시해
 # 소비자가 거르게 한다 - 조용히 빼면 유니버스가 왜 줄었는지 알 수 없다.
@@ -628,6 +630,23 @@ def session_bounds(day: date) -> tuple[str, str]:
             f"{day.isoformat()} {SESSION_END}+09")
 
 
+def external_session_content_window(day: date) \
+        -> tuple[datetime, datetime]:
+    """Return the sole raw-content hash window used by builder and runner.
+
+    This is a fixed half-open regular-session interval.  Prediction horizon,
+    latency, purge gap, and whether a formula needs score calibration may limit
+    sample construction, but they must never change which raw rows identify a
+    session/instrument cell.
+    """
+
+    start = datetime.combine(day, time.fromisoformat(SESSION_START), KST)
+    end = datetime.combine(day, time.fromisoformat(SESSION_END), KST)
+    if not start < end:
+        raise RuntimeError("external source content window must be non-empty")
+    return start, end
+
+
 # ▶ 일중 구간 경계(KST). 개장 09:00-09:30 · 오전 -12:00 · 오후 -14:50 · 마감 -15:30.
 #   마감을 40분으로 잡은 것은 15:20 이후 동시호가에 체결이 몰리기 때문이다 -
 #   30분으로 자르면 그 물량이 통째로 빠진다.
@@ -944,6 +963,11 @@ def _check_session_bounds_exclude_after_hours():
     lo, hi = session_bounds(date(2026, 8, 11))
     assert lo.endswith("09:00+09") and hi.endswith("15:30+09"), (lo, hi)
     assert "2026-08-11" in lo and "2026-08-11" in hi
+    start, end = external_session_content_window(date(2026, 8, 11))
+    assert start.isoformat() == "2026-08-11T09:00:00+09:00"
+    assert end.isoformat() == "2026-08-11T15:30:00+09:00"
+    assert EXTERNAL_CONTENT_WINDOW_CONTRACT.endswith(
+        "HALF_OPEN_0900_1530_KST_V1")
     print("  정규장 구간 한정         OK")
 
 

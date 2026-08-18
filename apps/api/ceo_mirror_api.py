@@ -6,7 +6,7 @@ import os
 import time
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 try:
@@ -25,6 +25,7 @@ try:
     )
     from .ceo import CeoAsk
     from .ceo_schemas import CeoQueryAcceptedResponse
+    from .current_user import current_user, require_fund_membership
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
     from ceo_mirror import (  # type: ignore[no-redef]
         CanonicalIngress,
@@ -41,6 +42,7 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
     )
     from ceo import CeoAsk  # type: ignore[no-redef]
     from ceo_schemas import CeoQueryAcceptedResponse  # type: ignore[no-redef]
+    from current_user import current_user, require_fund_membership  # type: ignore[no-redef]
 
 
 router = APIRouter(prefix="/ui/ceo", tags=["ceo-mirror"])
@@ -48,6 +50,30 @@ MIRROR_STORE: MirrorStore = build_default_mirror_store()
 
 
 _ANONYMOUS_ACTOR_IDS = frozenset({"anonymous", "web-user"})
+
+
+def _resolved_owner(owner_id: object) -> str | None:
+    """Return a dependency-resolved subject, not FastAPI's direct-call sentinel."""
+
+    return owner_id if isinstance(owner_id, str) and owner_id.strip() else None
+
+
+def _require_mirror_request_owner(
+    request_id: str, owner_id: object
+) -> Any:
+    """Authorize a mirror journal by the immutable ingress actor and Fund."""
+
+    owner = _resolved_owner(owner_id)
+    record = MIRROR_STORE.get_request(request_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="ceo_mirror_request_not_found")
+    if owner is None:
+        return record
+    if record.request.actor_type != "user" or record.request.actor_id != owner:
+        raise HTTPException(status_code=403, detail="ceo_mirror_request_forbidden")
+    if record.request.fund_id is not None:
+        require_fund_membership(owner, record.request.fund_id)
+    return record
 
 
 def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
@@ -71,6 +97,7 @@ def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
             query=request.query,
             request_id=request.request_id,
             fund_id=request.fund_id,
+            book_id=request.book_id,
         ),
         owner_id=owner_id,
     )
@@ -174,7 +201,7 @@ def mirror_ask(
     request: CeoAsk,
     x_source_message_id: str | None = Header(default=None),
     x_actor_id: str | None = Header(default=None),
-    x_user_id: str | None = Header(default=None, alias="X-User-Id"),
+    owner_id: str | None = Depends(current_user),
 ) -> dict[str, Any]:
     """`POST /ui/ceo/ask`의 유일한 등록 지점 - `ceo.py`는 이 경로를 스스로 등록하지
     않는다(`ceo.ceo_query`는 순수 함수로 남는다).
@@ -187,22 +214,23 @@ def mirror_ask(
     dedup(`_execute`/`MirrorStore`)과 Web/Discord 공용 event journal
     (`_publish_workflow_projection`)이 이 함수를 감싸는 layer다.
 
-    `X-User-Id`(2026-08-14 추가)는 `fund_id`와 같은 이유로 여기서 빠져 있었다 -
-    이 핸들러가 헤더를 받지 않으면 그 값이 실제로 요청을 실행하는 `_ceo_query`
-    (그리고 `ceo.ceo_query`의 root body)까지 절대 도달할 수 없다. `actor_id`를
-    그대로 재사용하는 이유는 dedup 키(`source`+`source_message_id`)가
+    `owner_id`는 중앙 인증 경계가 검증한 Supabase JWT `sub`다. 로컬/test fixture
+    모드에서만 같은 의존성이 `X-User-Id`를 읽는다. `actor_id`를 그대로 재사용하는
+    이유는 dedup 키(`source`+`source_message_id`)가
     `actor_id`를 쓰지 않아 안전하기 때문이다 - `ceo_mirror.py`의
     `InMemoryMirrorStore._source_key`/`RedisMirrorStore._source_key` 참고.
     """
 
+    require_fund_membership(owner_id, request.fund_id)
     canonical = CanonicalIngress(
         query=request.query,
         request_id=request.request_id,
         source="web",
         source_message_id=x_source_message_id or request.request_id,
-        actor_id=x_user_id or x_actor_id or "web-user",
+        actor_id=owner_id or x_actor_id or "web-user",
         actor_type="user",
         fund_id=request.fund_id,
+        book_id=request.book_id,
     )
     execution = _execute(canonical)
     if execution.response is None:
@@ -211,18 +239,34 @@ def mirror_ask(
 
 
 @router.post("/ingress", status_code=202, response_model=MirrorIngressResponse)
-def mirror_ingress(request: CanonicalIngress) -> MirrorIngressResponse:
+def mirror_ingress(
+    request: CanonicalIngress,
+    owner_id: str | None = Depends(current_user),
+) -> MirrorIngressResponse:
     """Canonical ingress for a human Web or Discord message."""
 
-    execution = _execute(request)
+    owner = _resolved_owner(owner_id)
+    canonical = request
+    if owner is not None:
+        if (
+            request.actor_id not in _ANONYMOUS_ACTOR_IDS
+            and request.actor_id != owner
+        ):
+            raise HTTPException(status_code=403, detail="ceo_mirror_actor_mismatch")
+        if request.fund_id is not None:
+            require_fund_membership(owner, request.fund_id)
+        canonical = request.model_copy(
+            update={"actor_id": owner, "actor_type": "user"}
+        )
+    execution = _execute(canonical)
     response = execution.response
     return MirrorIngressResponse(
         accepted=execution.accepted,
         duplicate=execution.duplicate,
         ignored=execution.ignored,
         reason=execution.reason,
-        request_id=request.request_id,
-        source=request.source,
+        request_id=canonical.request_id,
+        source=canonical.source,
         task_id=str(response.get("task_id"))
         if response and response.get("task_id")
         else None,
@@ -235,7 +279,9 @@ def mirror_ingress(request: CanonicalIngress) -> MirrorIngressResponse:
 def mirror_events(
     request_id: str = Query(min_length=8, max_length=128),
     after: str | None = Query(default=None, min_length=8, max_length=128),
+    owner_id: str | None = Depends(current_user),
 ) -> MirrorEventListResponse:
+    _require_mirror_request_owner(request_id, owner_id)
     _publish_workflow_projection(request_id)
     return MirrorEventListResponse(
         request_id=request_id, events=MIRROR_STORE.read_events(request_id, after)
@@ -246,8 +292,11 @@ def mirror_events(
 def mirror_event_stream(
     request_id: str = Query(min_length=8, max_length=128),
     after: str | None = Query(default=None, min_length=8, max_length=128),
+    owner_id: str | None = Depends(current_user),
 ) -> StreamingResponse:
     """Short-lived SSE; clients reconnect with the last event_id cursor."""
+
+    _require_mirror_request_owner(request_id, owner_id)
 
     def generate():
         cursor = after
@@ -272,9 +321,16 @@ def mirror_event_stream(
 
 
 @router.post("/events", response_model=MirrorEvent, status_code=202)
-def publish_event(event: MirrorEvent) -> MirrorEvent:
+def publish_event(
+    event: MirrorEvent,
+    owner_id: str | None = Depends(current_user),
+) -> MirrorEvent:
     """Sanitized adapter for supervisor, department, QA, and HR events."""
 
+    if _resolved_owner(owner_id) is not None:
+        # Browser users cannot forge agent/supervisor timeline records. Runtime
+        # producers publish through the internal store/service boundary.
+        raise HTTPException(status_code=403, detail="ceo_mirror_event_publish_forbidden")
     MIRROR_STORE.publish_event(event)
     return event
 

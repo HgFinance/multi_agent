@@ -16,9 +16,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
-from intraday_alpha_ast import (clocks_of, count_nodes, fields_of, fingerprint,
-                                parse as parse_expr, structural_similarity,
-                                unit_of)
+from intraday_alpha_ast import (clocks_of, count_nodes,
+                                effective_clock_domains_of, fields_of,
+                                fingerprint, parse as parse_expr,
+                                structural_similarity, unit_of)
+from intraday_search_exposure_contract import (
+    ADAPTIVE_SEARCH_EXPOSURE_VERSION,
+    FINGERPRINT_CONTRACT as SEARCH_EXPOSURE_FINGERPRINT_CONTRACT,
+    IDENTIFIER_EXCLUSIONS as SEARCH_EXPOSURE_IDENTIFIER_EXCLUSIONS,
+    assert_strict_exposure,
+    exposure_fingerprint as search_exposure_fingerprint,
+)
 from alpha_semantics import validate as validate_semantic_plan
 from intraday_candidate import (CandidateAccumulator,
                                  CandidatePopulationAccumulator,
@@ -32,7 +40,9 @@ from intraday_microstructure import (COMPLETED_SECOND_POLICY,
                                       effective_purge_gap,
                                       load_instrument_events_batch, manifest,
                                       source_quality_batch)
-from microstructure_builder import external_content_fingerprints
+from microstructure_builder import (EXTERNAL_CONTENT_WINDOW_CONTRACT,
+                                    external_content_fingerprints,
+                                    external_session_content_window)
 from intraday_ablation import INTRADAY_SCREENING_COHORT_VERSION
 from intraday_sample_cache import (SampleCache, identity as cache_identity,
                                    prune as prune_sample_cache)
@@ -63,7 +73,7 @@ from stock_universe import (INTRADAY_REPORT_MANIFEST_VERSION,
                             governed_stock_evidence_sql)
 
 
-RUNNER_VERSION = "intraday-experiment-runner-v15"
+RUNNER_VERSION = "intraday-experiment-runner-v17"
 FORWARD_RUNNER_VERSION = "intraday-forward-confirmation-v6"
 FORWARD_GATE_VERSION = "intraday-forward-fixed-horizon-gate-v1"
 FORWARD_RAW_DIGEST_VERSION = "ACTUAL_RAW_REPLAY_V1"
@@ -71,6 +81,9 @@ EXTERNAL_SOURCE_CONTENT_HASH_CONTRACT = \
     "pg-composite-row-xor0-sum1-sha256-v1"
 LOCAL_SOURCE_CONTENT_HASH_CONTRACT = "pg-composite-row-xor0-sum1-v1"
 FAST_SCREEN_VERSION = "intraday-fast-discovery-screen-v3"
+SEARCH_OBJECTIVES_VERSION = "intraday-search-objectives-v1"
+EXTERNAL_RAW_REPLAY_CONTENT_VERSION = "external-raw-replay-content-v3"
+EXTERNAL_REPLAY_MAX_HORIZON_SECONDS = 600
 COST_MODEL_VERSION = "krx-intraday-execution-v3"
 REPORT_MANIFEST_VERSION = INTRADAY_REPORT_MANIFEST_VERSION
 FORWARD_REPORT_REVISION_VERSION = "intraday-forward-report-revision-v1"
@@ -97,6 +110,11 @@ MIN_EQUITY_FEE_BPS_PER_SIDE = 10.0
 MIN_DSR_DISPERSION_FORMULAS = 4
 DSR_TRIAL_SHARPE_STD_FLOOR = 1.0
 DATASET = ("krx-intraday-events", "v1")
+EXTERNAL_DATASET = ("krx-intraday-completed-second", "v1")
+DATASET_BY_EVENT_SOURCE = {
+    LOCAL_EVENT_SOURCE: DATASET,
+    EXTERNAL_EVENT_SOURCE: EXTERNAL_DATASET,
+}
 KST = ZoneInfo("Asia/Seoul")
 
 # Keep every forward boundary on the same fail-closed evidence definition used
@@ -352,13 +370,6 @@ select 'market_ticks' as source, count(*)::bigint,
        coalesce(sum(h2)::text, 'EMPTY')
   from trade_rows
 order by source
-"""
-
-_EXTERNAL_SOURCE_READY_SQL = """
-select to_regclass('ext_src.quotes') is not null
-   and to_regclass('ext_src.ticks') is not null
-   and to_regclass('market.microstructure_features') is not null
-   and to_regclass('market.symbol_map') is not null
 """
 
 # The daily feature ledger is tiny relative to the 92GB raw FDW source.  It is
@@ -701,6 +712,77 @@ def _strict_bool(edge: dict, key: str, default: bool) -> bool:
     return value
 
 
+def _expected_resolved_data_contract(event_source: str) -> dict:
+    event_source = str(event_source or "").upper()
+    dataset = DATASET_BY_EVENT_SOURCE.get(event_source)
+    if dataset is None:
+        raise RuntimeError(f"unsupported resolved event source: {event_source!r}")
+    if event_source == EXTERNAL_EVENT_SOURCE:
+        return {
+            "dataset": "/".join(dataset),
+            "event_source": EXTERNAL_EVENT_SOURCE,
+            "timestamp_policy": COMPLETED_SECOND_POLICY,
+            "physical_sources": {
+                "market_quotes": "ext_src.quotes",
+                "market_ticks": "ext_src.ticks",
+            },
+            "source_versions": {
+                "market_quotes": "trading-bot-completed-second-book-v1",
+                "market_ticks": "trading-bot-completed-second-trade-v1",
+            },
+            "knowledge_clock": "EVENT_TIME_ONLY_NO_RECEIPT_CLOCK",
+            "evidence_scope": "HISTORICAL_SEARCH_ONLY",
+            "content_window": {
+                "timezone": "Asia/Seoul",
+                "start": "09:00:00",
+                "end_exclusive": "15:30:00",
+            },
+            "maximum_horizon_seconds": EXTERNAL_REPLAY_MAX_HORIZON_SECONDS,
+            "execution": "TAKER_ONLY",
+        }
+    return {
+        "dataset": "/".join(dataset),
+        "event_source": LOCAL_EVENT_SOURCE,
+        "timestamp_policy": STRICT_TIMESTAMP_POLICY,
+        "physical_sources": {
+            "market_quotes": "market.market_quotes",
+            "market_ticks": "market.market_ticks",
+        },
+        "source_versions": {
+            "market_quotes": "ls-realtime-book-v1",
+            "market_ticks": "ls-realtime-trade-v1",
+        },
+        "knowledge_clock": "AVAILABLE_AT_RECEIPT_CLOCK",
+        "evidence_scope": "ARRIVAL_TIME_CAUSAL",
+    }
+
+
+def _assert_resolved_data_contract(config: dict, *, selected: dict | None = None,
+                                   require: bool = True) -> dict:
+    """Fail closed if resolver, runner source, dataset, or clock diverge."""
+
+    contract = config.get("resolved_data_contract")
+    if not isinstance(contract, dict) or not contract:
+        if require:
+            raise RuntimeError(
+                "intraday replay requires a resolver-approved data contract")
+        return {}
+    event_source = str(config.get("data_source") or "").upper()
+    expected = _expected_resolved_data_contract(event_source)
+    mismatches = [key for key, value in expected.items()
+                  if contract.get(key) != value]
+    if config.get("timestamp_policy") not in (None, expected["timestamp_policy"]):
+        mismatches.append("runtime_timestamp_policy")
+    if selected is not None and str(selected.get("event_source") or "").upper() \
+            != event_source:
+        mismatches.append("selected_event_source")
+    if mismatches:
+        raise RuntimeError(
+            "resolved intraday dataset/source/clock contract mismatch: "
+            + ",".join(sorted(set(mismatches))))
+    return contract
+
+
 def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
     """Bind only controlled knobs; never silently inherit daily defaults."""
     if str(edge.get("research_lane") or "").upper() != "INTRADAY_EVENT":
@@ -711,7 +793,15 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
     if data_source not in {"AUTO", LOCAL_EVENT_SOURCE,
                            EXTERNAL_EVENT_SOURCE}:
         raise ValueError(f"unsupported intraday data_source={data_source!r}")
+    resolved_data_contract = edge.get("resolved_data_contract")
+    if resolved_data_contract not in (None, {}) and not isinstance(
+            resolved_data_contract, dict):
+        raise ValueError("resolved_data_contract must be an object")
     expression = parse_expr(edge.get("intraday_signal_expr"))
+    raw_source_baseline = edge.get("source_baseline_expr")
+    source_baseline = (
+        parse_expr(raw_source_baseline)
+        if raw_source_baseline not in (None, "") else None)
     semantic_plan = validate_semantic_plan(edge.get("semantic_plan") or {})
     output = str(semantic_plan.get("output") or "").upper()
     entry_policy = str(edge.get("entry_policy") or "").upper()
@@ -815,6 +905,10 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
             "execution": candidate_execution,
             "entry_policy": policy,
             "coefficient_policy": candidate_coefficient_policy,
+            "source_baseline_expr": (
+                parse_expr(raw["source_baseline_expr"])
+                if raw.get("source_baseline_expr") not in (None, "")
+                else None),
             "screening_only": True,
         })
     feature_lookback = max([requested_lookback, *all_clocks])
@@ -826,10 +920,15 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
     config = {
         "research_lane": "INTRADAY_EVENT",
         "data_source": data_source,
+        "resolved_data_contract": dict(resolved_data_contract or {}),
         "semantic_plan": semantic_plan,
         "semantic_fingerprint": edge.get("semantic_fingerprint"),
         "intraday_signal_expr": expression,
-        "source_baseline_expr": edge.get("source_baseline_expr"),
+        "source_baseline_expr": source_baseline,
+        "parent_ast_fingerprint": str(
+            edge.get("parent_ast_fingerprint") or ""),
+        "parent_candidate_identity_fingerprint": edge.get(
+            "parent_candidate_identity_fingerprint"),
         "horizon_seconds": horizon,
         "sample_interval_seconds": sample_interval,
         "feature_lookback_seconds": feature_lookback,
@@ -927,6 +1026,8 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
         fee_bps_per_side=config["fee_bps_per_side"],
         maker_fee_bps_per_side=config["maker_fee_bps_per_side"],
     )
+    if config["resolved_data_contract"]:
+        _assert_resolved_data_contract(config)
     return config, spec
 
 
@@ -1354,13 +1455,11 @@ def select_slice(market_conn, config: dict, *, cutoff: datetime) -> dict:
         days=max(30, config["evaluation_days"] * 3))
     requested_source = str(
         config.get("data_source") or LOCAL_EVENT_SOURCE).upper()
-    event_source = requested_source
     if requested_source == "AUTO":
-        with market_conn.cursor() as cur:
-            cur.execute(_EXTERNAL_SOURCE_READY_SQL)
-            ready = bool(cur.fetchone()[0])
-        event_source = (EXTERNAL_EVENT_SOURCE if ready
-                        else LOCAL_EVENT_SOURCE)
+        raise RuntimeError(
+            "AUTO is a resolver-only policy; runner requires one approved "
+            "intraday event source")
+    event_source = requested_source
     if event_source not in {LOCAL_EVENT_SOURCE, EXTERNAL_EVENT_SOURCE}:
         raise ValueError(f"unsupported intraday data_source={requested_source!r}")
 
@@ -1506,15 +1605,53 @@ def _all_symbolic_candidates_cost_infeasible(
                 "coefficient_policy") or "").upper() != "STRUCTURE_ONLY":
             return False
         status = str((report or {}).get("status") or "").upper()
-        return (
-            (report or {}).get("cost_feasible_entry_possible") is False
-            or status in {
-                "NO_COST_FEASIBLE_ENTRY",
-                "NON_POSITIVE_DIRECTIONAL_RELATION",
-                "INSUFFICIENT_CALIBRATION",
-            })
+        return (status in {
+            "NO_COST_FEASIBLE_ENTRY",
+            "NON_POSITIVE_DIRECTIONAL_RELATION",
+        } and int((report or {}).get("observations") or 0) > 0)
 
     return bool(reports) and all(infeasible(report) for report in reports)
+
+
+def _annotate_calibration_only_failures(
+        candidate_reports: dict[str, dict],
+        calibration_reports: dict[str, dict]) -> None:
+    """Keep measured calibration failure distinct from missing raw data.
+
+    The candidate has no OOS observations because the resource gate deliberately
+    skipped replay.  Its calibration relationship and cost-capacity gap are still
+    valid adaptive search memory, but never promotion evidence.
+    """
+    for candidate_key, candidate_report in candidate_reports.items():
+        candidate_calibration = calibration_reports.get(candidate_key) or {}
+        calibration_status = str(
+            candidate_calibration.get("status") or "").upper()
+        failure_code = {
+            "NO_COST_FEASIBLE_ENTRY": "CALIBRATION_COST_INFEASIBLE",
+            "NON_POSITIVE_DIRECTIONAL_RELATION":
+                "CALIBRATION_DIRECTION_NON_POSITIVE",
+        }.get(calibration_status, "CALIBRATION_SYMBOLIC_INFEASIBLE")
+        failed = list(candidate_report.get("failed_criteria") or [])
+        if failure_code not in failed:
+            failed.append(failure_code)
+        candidate_report["failed_criteria"] = failed
+        candidate_report["adaptive_failure_memory"] = {
+            "classification": failure_code,
+            "calibration_status": calibration_status,
+            "evidence_scope": "CALIBRATION_ONLY_ADAPTIVE_SEARCH",
+            "observations": candidate_calibration.get("observations"),
+            "minimum_observed_entry_hurdle_bps": candidate_calibration.get(
+                "minimum_observed_entry_hurdle_bps"),
+            "maximum_calibrated_predicted_markout_bps":
+                candidate_calibration.get(
+                    "maximum_calibrated_predicted_markout_bps"),
+            "evaluation_skipped": True,
+            "evaluation_skip_reason":
+                "ALL_SYMBOLIC_CANDIDATES_INFEASIBLE",
+            "raw_data_absence_inferred": False,
+            "adaptive_selection": True,
+            "promotion_authority": False,
+        }
 
 
 def _external_raw_replay_row(day: date, instrument: str,
@@ -1545,6 +1682,100 @@ def _external_raw_replay_row(day: date, instrument: str,
     }
 
 
+def _external_content_window(day: date) -> tuple[datetime, datetime]:
+    """Fixed half-open raw identity window shared with the feature builder."""
+
+    start, end = external_session_content_window(day)
+    return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+
+
+def _external_content_end(day: date) -> datetime:
+    """Exclusive end of the immutable completed-second source contract."""
+
+    return _external_content_window(day)[1]
+
+
+def _replay_load_end(day: date, event_source: str,
+                     sample_load_end: datetime) -> datetime:
+    """Keep sample reach separate from the immutable raw identity window."""
+
+    if event_source != EXTERNAL_EVENT_SOURCE:
+        return sample_load_end
+    start, content_end = _external_content_window(day)
+    if not start < sample_load_end <= content_end:
+        raise RuntimeError(
+            "external sample reach falls outside the frozen content window")
+    return content_end
+
+
+def _external_replay_cell_keys(selected: dict) -> list[tuple[str, str]]:
+    sessions = [*(selected.get("calibration_sessions") or []),
+                *(selected.get("sessions") or [])]
+    normalized_sessions = [_session_day(value).isoformat()
+                           for value in sessions]
+    instruments = [str(value).strip()
+                   for value in (selected.get("instruments") or [])]
+    if (not normalized_sessions or not instruments
+            or len(set(normalized_sessions)) != len(normalized_sessions)
+            or len(set(instruments)) != len(instruments)
+            or any(not value for value in instruments)):
+        raise RuntimeError(
+            "external raw replay requires unique sessions and instruments")
+    return [(session, instrument) for session in normalized_sessions
+            for instrument in instruments]
+
+
+def _external_replay_manifest(rows: list[dict], selected: dict) -> dict:
+    """Reconcile the exact session/instrument cells before hashing content."""
+
+    canonical = []
+    for row in rows:
+        quote_rows = row.get("quote_rows")
+        trade_rows = row.get("trade_rows")
+        content_fingerprint = str(
+            row.get("source_content_fingerprint") or "")
+        if (isinstance(quote_rows, bool) or not isinstance(quote_rows, int)
+                or quote_rows < 0 or isinstance(trade_rows, bool)
+                or not isinstance(trade_rows, int) or trade_rows < 0
+                or len(content_fingerprint) != 64
+                or any(char not in "0123456789abcdef"
+                       for char in content_fingerprint)):
+            raise RuntimeError(
+                "external raw replay row lacks valid counts/content hash")
+        canonical.append({
+            "session": str(row.get("session") or ""),
+            "instrument": str(row.get("instrument") or "").strip(),
+            "quote_rows": quote_rows,
+            "trade_rows": trade_rows,
+            "source_content_fingerprint": content_fingerprint,
+        })
+    canonical.sort(key=lambda row: (row["session"], row["instrument"]))
+    expected_keys = sorted(_external_replay_cell_keys(selected))
+    observed_keys = [(row["session"], row["instrument"])
+                     for row in canonical]
+    if observed_keys != expected_keys:
+        raise RuntimeError(
+            "external raw replay cell set differs from frozen "
+            "calibration+evaluation panel")
+    identity = {
+        "version": EXTERNAL_RAW_REPLAY_CONTENT_VERSION,
+        "content_window_contract": EXTERNAL_CONTENT_WINDOW_CONTRACT,
+        "content_window": {
+            "timezone": "Asia/Seoul",
+            "start": "09:00:00",
+            "end_exclusive": "15:30:00",
+            "interval": "HALF_OPEN",
+        },
+        "rows": canonical,
+    }
+    return {
+        "rows": canonical,
+        "manifest_rows": len(canonical),
+        "fingerprint": stable_fingerprint(identity),
+        "identity": identity,
+    }
+
+
 def _lineage(market_conn, selected: dict, cutoff: datetime) -> list[dict]:
     if not selected["sessions"] or not selected["instruments"]:
         return []
@@ -1568,49 +1799,65 @@ def _lineage(market_conn, selected: dict, cutoff: datetime) -> list[dict]:
             rows = cur.fetchall()
             raw_evidence = []
     if external:
-        evidence = []
-        evaluation_sessions = {str(_session_day(value))
-                               for value in selected["sessions"]}
+        observed_evidence = {}
+        expected_cell_keys = set(_external_replay_cell_keys(selected))
         for row in raw_evidence:
             session, instrument = str(row[0]), str(row[1]).strip()
+            key = (session, instrument)
+            if key not in expected_cell_keys or key in observed_evidence:
+                raise RuntimeError(
+                    "external feature ledger has duplicate or unexpected "
+                    f"session/instrument evidence: {session}/{instrument}")
             identity = _external_source_content_identity(
                 row[4], row[5], row[6],
                 context=f"{session}/{instrument}")
-            evidence.append({
+            observed_evidence[key] = {
                 "session": session,
                 "instrument": instrument,
                 "quote_rows": int(row[2] or 0),
                 "trade_rows": int(row[3] or 0),
                 **identity,
                 "input_watermark": row[7].isoformat() if row[7] else None,
-            })
-        replay_evidence = [{
-            "session": row["session"],
-            "instrument": row["instrument"],
-            "quote_rows": row["quote_rows"],
-            "trade_rows": row["trade_rows"],
-            "source_content_fingerprint": row["source_content_fingerprint"],
-        } for row in evidence if row["session"] in evaluation_sessions]
+            }
+        # The selected universe is a union across sessions.  A stock may first
+        # appear on day two, leaving no daily sidecar on day one.  Materialize
+        # that missing cell as an expected empty raw multiset so the direct
+        # replay either proves zero rows or fails; do not let an omitted row and
+        # an explicit zero row produce different immutable identities.
+        evidence = []
+        for session, instrument in _external_replay_cell_keys(selected):
+            day = date.fromisoformat(session)
+            row = observed_evidence.get((session, instrument))
+            if row is None:
+                row = _external_raw_replay_row(day, instrument, {})
+                row["source_content_hash_contract"] = \
+                    EXTERNAL_SOURCE_CONTENT_HASH_CONTRACT
+                row["input_hash"] = row["source_content_fingerprint"]
+                row["input_watermark"] = None
+            evidence.append(row)
+        replay_manifest = _external_replay_manifest(evidence, selected)
         content_fingerprint = stable_fingerprint({
-            "version": "external-daily-source-content-manifest-v2",
+            "version": "external-daily-source-content-manifest-v3",
+            "content_window_contract": EXTERNAL_CONTENT_WINDOW_CONTRACT,
             "rows": evidence,
         })
         content_metadata = {
             "content_hash_contract": (
-                "external-daily-source-content-manifest-v2"),
+                "external-daily-source-content-manifest-v3"),
             "source_content_hash_contract": (
                 EXTERNAL_SOURCE_CONTENT_HASH_CONTRACT),
+            "source_content_window_contract": (
+                EXTERNAL_CONTENT_WINDOW_CONTRACT),
             "content_fingerprint": content_fingerprint,
             "content_manifest_rows": len(evidence),
             "content_quote_rows": sum(row["quote_rows"] for row in evidence),
             "content_trade_rows": sum(row["trade_rows"] for row in evidence),
-            "evaluation_replay_content_contract": (
-                "external-raw-replay-content-v1"),
-            "evaluation_replay_content_fingerprint": stable_fingerprint({
-                "version": "external-raw-replay-content-v1",
-                "rows": replay_evidence,
-            }),
-            "evaluation_replay_content_manifest_rows": len(replay_evidence),
+            "consumed_replay_content_contract": (
+                EXTERNAL_RAW_REPLAY_CONTENT_VERSION),
+            "consumed_replay_content_fingerprint": replay_manifest[
+                "fingerprint"],
+            "consumed_replay_content_manifest_rows": replay_manifest[
+                "manifest_rows"],
         }
         return [{
             "source": row[0], "rows": int(row[1]),
@@ -1708,6 +1955,7 @@ def prepare(hyp: dict, *, market_conn, meta_conn=None,
             "intraday preparation requires reference-plane stock validation")
     edge = hyp.get("expected_edge") or {}
     config, spec = config_from_edge(edge)
+    _assert_resolved_data_contract(config)
     frozen_cutoff = cutoff or datetime.now(timezone.utc)
     selected = select_slice(market_conn, config, cutoff=frozen_cutoff)
     selected = _stock_only_slice(meta_conn, market_conn, selected)
@@ -1717,6 +1965,22 @@ def prepare(hyp: dict, *, market_conn, meta_conn=None,
         if selected.get("event_source") == EXTERNAL_EVENT_SOURCE else
         STRICT_TIMESTAMP_POLICY)
     config["timestamp_policy"] = timestamp_policy
+    _assert_resolved_data_contract(config, selected=selected)
+    if (selected.get("status") == "PASS"
+            and timestamp_policy == COMPLETED_SECOND_POLICY
+            and max(spec.horizons_seconds) >
+            EXTERNAL_REPLAY_MAX_HORIZON_SECONDS):
+        selected = {
+            **selected,
+            "status": "HORIZON_EXCEEDS_FROZEN_SOURCE_WINDOW",
+            "statistical_readiness": "NEEDS_LONGER_VERIFIED_EVENT_WINDOW",
+            "maximum_supported_horizon_seconds":
+                EXTERNAL_REPLAY_MAX_HORIZON_SECONDS,
+            "requested_maximum_horizon_seconds": max(spec.horizons_seconds),
+            "horizon_blocker": (
+                "completed-second source identity ends at 15:30 KST while "
+                "decision sampling ends at 15:20 KST"),
+        }
     if (selected.get("status") == "PASS" and
             timestamp_policy == COMPLETED_SECOND_POLICY and
             config["population_execution_model"] != "TAKER"):
@@ -1778,15 +2042,129 @@ def record_data_feasibility(meta_conn, hypothesis_id: str,
             "details": details}
 
 
+def _json_object(value, field: str) -> dict:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"intraday dataset manifest has invalid {field}") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(
+            f"intraday dataset manifest lacks object {field}")
+    return value
+
+
+def _assert_dataset_manifest_projection(row, contract: dict) -> str:
+    """Revalidate mutable catalog fields at experiment registration time."""
+
+    if not row or len(row) != 6:
+        raise RuntimeError(
+            f"dataset manifest missing: {contract.get('dataset')}")
+    dataset_id, source_versions, pit, quality, object_path, schema = row
+    source_versions = _json_object(source_versions, "source_versions")
+    pit = _json_object(pit, "point_in_time_policy")
+    quality = _json_object(quality, "quality_summary")
+    schema = _json_object(schema, "schema_definition")
+    external = contract["event_source"] == EXTERNAL_EVENT_SOURCE
+    expected_path = ("postgresql+fdw://ext_src/{quotes,ticks}" if external
+                     else "timescaledb://market/{market_quotes,market_ticks}")
+    expected_pit = ({
+        "knowledge_clock": "event_time_only_no_receipt_clock",
+        "feature_cutoff": "completed_source_second<=decision_time",
+        "label_cutoff": "effective_entry_time+horizon",
+        "instrument_isolation": True,
+        "evidence_scope": "HISTORICAL_SEARCH_ONLY",
+        "content_window": "[09:00:00,15:30:00) Asia/Seoul",
+        "maximum_horizon_seconds": 600,
+    } if external else {
+        "knowledge_clock": "available_at=max(received_at,observed_at)",
+        "feature_cutoff": (
+            "event_time<=decision_time and available_at<=decision_time"),
+        "label_cutoff": "entry_time+horizon",
+        "instrument_isolation": True,
+    })
+    expected_quality = ({
+        "status": (
+            "HISTORICAL_COMPLETED_SECOND_REQUIRES_PER_EXPERIMENT_AUDIT"),
+        "timestamp_resolution": "SECOND",
+        "intra_second_order": "UNAVAILABLE",
+        "execution": "TAKER_ONLY",
+    } if external else {
+        "status": "LIVE_SLICE_REQUIRES_PER_EXPERIMENT_AUDIT",
+        "missing_received_at": "reject",
+    })
+    required_schema = ({
+        "market_quotes": {
+            "physical_table": "ext_src.quotes",
+            "required": {"ts", "symbol", "bid1", "ask1", "bid_vol1",
+                         "ask_vol1", "bid10", "ask10", "bid_vol10",
+                         "ask_vol10"},
+        },
+        "market_ticks": {
+            "physical_table": "ext_src.ticks",
+            "required": {"ts", "symbol", "price", "volume", "ofi_contrib"},
+        },
+    } if external else {
+        "market_quotes": {
+            "required": {"event_time", "received_at", "observed_at",
+                         "instrument_id", "bid_prices", "bid_sizes",
+                         "ask_prices", "ask_sizes", "source_event_id"},
+        },
+        "market_ticks": {
+            "required": {"event_time", "received_at", "observed_at",
+                         "instrument_id", "price", "quantity", "side",
+                         "source_event_id"},
+        },
+    })
+    mismatches = []
+    if source_versions != contract["source_versions"]:
+        mismatches.append("source_versions")
+    if str(object_path or "") != expected_path:
+        mismatches.append("object_path")
+    for key, value in expected_pit.items():
+        if pit.get(key) != value:
+            mismatches.append(f"point_in_time_policy.{key}")
+    for key, value in expected_quality.items():
+        if quality.get(key) != value:
+            mismatches.append(f"quality_summary.{key}")
+    for table, expected in required_schema.items():
+        actual = schema.get(table) or {}
+        if not isinstance(actual, dict):
+            mismatches.append(f"schema_definition.{table}")
+            continue
+        if expected.get("physical_table") is not None and actual.get(
+                "physical_table") != expected["physical_table"]:
+            mismatches.append(f"schema_definition.{table}.physical_table")
+        if not expected["required"].issubset(set(actual.get("required") or [])):
+            mismatches.append(f"schema_definition.{table}.required")
+    if mismatches:
+        raise RuntimeError(
+            "registered intraday dataset/source/clock manifest drift: "
+            + ",".join(sorted(set(mismatches))))
+    return str(dataset_id)
+
+
 def _register(meta_conn, hypothesis_id: str, config: dict) -> tuple[str, str, bool]:
     digest = _input_hash(hypothesis_id, config)
+    contract = _assert_resolved_data_contract(config)
+    dataset_name, separator, dataset_version = str(
+        contract.get("dataset") or "").rpartition("/")
+    if separator != "/" or not dataset_name or not dataset_version:
+        raise RuntimeError("resolved intraday dataset identity is malformed")
     with meta_conn.cursor() as cur:
-        cur.execute("select dataset_id::text from quant.dataset_manifests where name=%s and version=%s",
-                    DATASET)
+        cur.execute("""
+            select dataset_id::text,
+                   coalesce(source_versions, '{}'::jsonb),
+                   coalesce(point_in_time_policy, '{}'::jsonb),
+                   coalesce(quality_summary, '{}'::jsonb),
+                   object_path,
+                   coalesce(schema_definition, '{}'::jsonb)
+              from quant.dataset_manifests
+             where name=%s and version=%s
+        """, (dataset_name, dataset_version))
         row = cur.fetchone()
-        if not row:
-            raise RuntimeError(f"dataset manifest missing: {DATASET[0]}/{DATASET[1]}")
-        dataset_id = str(row[0])
+        dataset_id = _assert_dataset_manifest_projection(row, contract)
         cur.execute("""
             insert into quant.experiments
               (hypothesis_id, dataset_id, code_version, config, seed,
@@ -1945,6 +2323,21 @@ def _assert_same_hypothesis_retry_identity(existing, *, primary_row: dict,
             + ", ".join(changed))
 
 
+def _candidate_source_contract(row: dict, *, feature_spec: dict,
+                               label_spec: dict, model_spec: dict) -> dict:
+    """Return every component that defines one durable evaluation identity."""
+    return {
+        "candidate_ast": row["intraday_signal_expr"],
+        "semantic_plan": row["semantic_plan"],
+        "baseline_ast": row.get("source_baseline_expr"),
+        "feature_spec": feature_spec,
+        "label_spec": label_spec,
+        "model_spec": model_spec,
+        "evaluator_version": EVALUATOR_VERSION,
+        "cost_model_version": COST_MODEL_VERSION,
+    }
+
+
 def _find_same_hypothesis_ast_lineage(meta_conn, *, hypothesis_id: str,
                                       candidate_ast: dict):
     """Return the hypothesis' existing exact-AST node before global ancestry.
@@ -1985,8 +2378,82 @@ def _register_trial_lineages(meta_conn, *, hypothesis_id: str,
         "entry_policy": config["entry_policy"],
         "coefficient_policy": config["coefficient_policy"],
         "source_baseline_expr": config.get("source_baseline_expr"),
+        "parent_ast_fingerprint": config.get("parent_ast_fingerprint"),
+        "parent_candidate_identity_fingerprint": config.get(
+            "parent_candidate_identity_fingerprint"),
     }
     feature_spec, label_spec, model_spec = _candidate_specs(config, primary_row)
+    pending = list(config.get("screening_population") or [])
+    lineages: dict[str, object] = {}
+    population_by_fp = {
+        str(row.get("ast_fingerprint") or ""): row for row in pending}
+
+    def register_population_parent(parent_fp: str,
+                                   trail: frozenset[str] = frozenset()):
+        """Register a declared parent chain before its child, fail closed."""
+        if parent_fp in lineages:
+            return lineages[parent_fp]
+        if parent_fp in trail:
+            raise RuntimeError("cyclic explicit evolutionary parent chain")
+        row = population_by_fp.get(parent_fp)
+        if row is None:
+            raise RuntimeError(
+                "declared evolutionary parent is absent from frozen cohort")
+        row_parent_fp = str(row.get("parent_ast_fingerprint") or "")
+        declared_identity = str(row.get(
+            "parent_candidate_identity_fingerprint") or "").strip()
+        parent = None
+        parent_reason = "EXACT_CANDIDATE_IDENTITY_REUSE"
+        if row_parent_fp:
+            parent = register_population_parent(
+                row_parent_fp, trail | frozenset({parent_fp}))
+            parent_reason = "EXPLICIT_POPULATION_PARENT"
+            if (declared_identity and
+                    parent.candidate_identity_fingerprint !=
+                    declared_identity):
+                raise RuntimeError(
+                    "declared evolutionary parent AST and identity disagree")
+        elif declared_identity:
+            parent = find_latest_candidate_lineage(
+                meta_conn, candidate_identity=declared_identity)
+            if parent is None:
+                raise RuntimeError(
+                    "declared evolutionary parent identity is not durable")
+            parent_reason = "EXPLICIT_DURABLE_PARENT_IDENTITY"
+
+        row_feature, row_label, row_model = _candidate_specs(config, row)
+        if parent is None:
+            parent = find_latest_candidate_lineage(
+                meta_conn, source_contract=_candidate_source_contract(
+                    row, feature_spec=row_feature, label_spec=row_label,
+                    model_spec=row_model))
+        lineage = register_candidate_lineage(
+            meta_conn, hypothesis_id=hypothesis_id,
+            candidate_ast=row["intraday_signal_expr"],
+            semantic_plan=row["semantic_plan"],
+            baseline_ast=row.get("source_baseline_expr"),
+            feature_spec=row_feature, label_spec=row_label,
+            model_spec=row_model,
+            economic_family_id=_economic_family_id(row["semantic_plan"]),
+            evaluator_version=EVALUATOR_VERSION,
+            cost_model_version=COST_MODEL_VERSION,
+            created_by="svc_quant/intraday-experiment-runner",
+            parent=parent,
+            metadata={
+                "candidate_role": row.get("candidate_role") or
+                                  "LINEAGE_PARENT",
+                "declared_parent_ast_fingerprint": row_parent_fp or None,
+                "parent_resolution": parent_reason if parent else None,
+                "pre_registered_as_explicit_parent": True,
+                "screening_only": True,
+                "runner_version": RUNNER_VERSION,
+            },
+        )
+        lineages[parent_fp] = lineage
+        if row in pending:
+            pending.remove(row)
+        return lineage
+
     retry_primary = _find_same_hypothesis_ast_lineage(
         meta_conn, hypothesis_id=hypothesis_id,
         candidate_ast=primary_row["intraday_signal_expr"])
@@ -1996,11 +2463,46 @@ def _register_trial_lineages(meta_conn, *, hypothesis_id: str,
             feature_spec=feature_spec, label_spec=label_spec,
             model_spec=model_spec)
     inherited_parent = None
-    inheritance_reason = "EXACT_AST_REUSE"
+    inheritance_reason = "EXACT_CANDIDATE_IDENTITY_REUSE"
+    primary_parent_fp = str(primary_row.get("parent_ast_fingerprint") or "")
+    if retry_primary is not None and primary_parent_fp:
+        parent_row = population_by_fp.get(primary_parent_fp)
+        if (parent_row is None or retry_primary.parent_lineage_id is None):
+            raise RuntimeError(
+                "retried evolved primary lacks its immutable explicit parent")
+        durable_parent = load_candidate_lineage(
+            meta_conn, retry_primary.parent_lineage_id)
+        if durable_parent.candidate_ast_fingerprint != stable_fingerprint(
+                parent_row["intraday_signal_expr"]):
+            raise RuntimeError(
+                "retried evolved primary points to a different parent AST")
+        lineages[primary_parent_fp] = durable_parent
+        pending.remove(parent_row)
     if retry_primary is None:
-        inherited_parent = find_latest_candidate_lineage(
-            meta_conn, primary_row["intraday_signal_expr"])
-        if (inherited_parent is not None and
+        declared_parent_identity = str(primary_row.get(
+            "parent_candidate_identity_fingerprint") or "").strip()
+        if primary_parent_fp:
+            inherited_parent = register_population_parent(primary_parent_fp)
+            if (declared_parent_identity and
+                    inherited_parent.candidate_identity_fingerprint !=
+                    declared_parent_identity):
+                raise RuntimeError(
+                    "primary parent AST and candidate identity disagree")
+            inheritance_reason = "EXPLICIT_POPULATION_PARENT"
+        elif declared_parent_identity:
+            inherited_parent = find_latest_candidate_lineage(
+                meta_conn, candidate_identity=declared_parent_identity)
+            if inherited_parent is None:
+                raise RuntimeError(
+                    "declared evolutionary parent identity is not durable")
+            inheritance_reason = "EXPLICIT_EVOLUTION_PARENT_IDENTITY"
+        else:
+            inherited_parent = find_latest_candidate_lineage(
+                meta_conn, source_contract=_candidate_source_contract(
+                    primary_row, feature_spec=feature_spec,
+                    label_spec=label_spec, model_spec=model_spec))
+        if (inheritance_reason == "EXACT_CANDIDATE_IDENTITY_REUSE"
+                and inherited_parent is not None and
                 inherited_parent.hypothesis_id == str(hypothesis_id)):
             # A concurrent insert between the dedicated lookup and this global
             # fallback is still a same-hypothesis retry, never a new parent.
@@ -2010,11 +2512,6 @@ def _register_trial_lineages(meta_conn, *, hypothesis_id: str,
                 model_spec=model_spec)
             retry_primary = inherited_parent
             inherited_parent = None
-    if (retry_primary is None and inherited_parent is None
-            and primary_row.get("source_baseline_expr")):
-        inherited_parent = find_latest_candidate_lineage(
-            meta_conn, primary_row["source_baseline_expr"])
-        inheritance_reason = "DECLARED_BASELINE_AST"
     primary = retry_primary or register_candidate_lineage(
         meta_conn,
         hypothesis_id=hypothesis_id,
@@ -2034,20 +2531,39 @@ def _register_trial_lineages(meta_conn, *, hypothesis_id: str,
             "runner_version": RUNNER_VERSION,
             "cross_hypothesis_parent_reason": (
                 inheritance_reason if inherited_parent else None),
-            "declared_baseline_parent_found": bool(
-                inherited_parent and primary_row.get("source_baseline_expr")),
+            "source_baseline_is_identity_not_ancestry": bool(
+                primary_row.get("source_baseline_expr")),
         },
     )
-    lineages: dict[str, object] = {fingerprint(
-        primary_row["intraday_signal_expr"]): primary}
-    pending = list(config.get("screening_population") or [])
+    lineages[fingerprint(primary_row["intraday_signal_expr"])] = primary
     while pending:
         progressed = False
         for row in list(pending):
             parent_fp = str(row.get("parent_ast_fingerprint") or "")
             if parent_fp and parent_fp not in lineages:
                 continue
-            parent = lineages.get(parent_fp, primary)
+            declared_parent_identity = str(row.get(
+                "parent_candidate_identity_fingerprint") or "").strip()
+            if parent_fp:
+                # A parent explicitly included in this frozen population is
+                # stronger provenance than any cross-hypothesis lookup.
+                parent = lineages[parent_fp]
+                if (declared_parent_identity and
+                        parent.candidate_identity_fingerprint !=
+                        declared_parent_identity):
+                    raise RuntimeError(
+                        "declared evolutionary parent AST and identity disagree")
+                parent_reason = "EXPLICIT_POPULATION_PARENT"
+            elif declared_parent_identity:
+                parent = find_latest_candidate_lineage(
+                    meta_conn, candidate_identity=declared_parent_identity)
+                if parent is None:
+                    raise RuntimeError(
+                        "declared screening parent identity is not durable")
+                parent_reason = "EXPLICIT_DURABLE_PARENT_IDENTITY"
+            else:
+                parent = primary
+                parent_reason = "SHARED_REPLAY_PRIMARY_ROOT"
             feature_spec, label_spec, model_spec = _candidate_specs(config, row)
             lineage = register_candidate_lineage(
                 meta_conn,
@@ -2067,6 +2583,7 @@ def _register_trial_lineages(meta_conn, *, hypothesis_id: str,
                     "candidate_role": row.get("candidate_role") or
                                       "LINKED_SCREENING_CANDIDATE",
                     "declared_parent_ast_fingerprint": parent_fp or None,
+                    "parent_resolution": parent_reason,
                     "screening_only": True,
                     "runner_version": RUNNER_VERSION,
                 },
@@ -2075,30 +2592,14 @@ def _register_trial_lineages(meta_conn, *, hypothesis_id: str,
             pending.remove(row)
             progressed = True
         if not progressed:
-            # A missing/cyclic declared parent must not prevent exact identity
-            # capture. Attach it to the frozen root and preserve the unresolved
-            # declaration in metadata rather than inventing ancestry.
-            row = pending.pop(0)
-            feature_spec, label_spec, model_spec = _candidate_specs(config, row)
-            lineage = register_candidate_lineage(
-                meta_conn, hypothesis_id=hypothesis_id,
-                candidate_ast=row["intraday_signal_expr"],
-                semantic_plan=row["semantic_plan"],
-                baseline_ast=row.get("source_baseline_expr"),
-                feature_spec=feature_spec, label_spec=label_spec,
-                model_spec=model_spec,
-                economic_family_id=_economic_family_id(row["semantic_plan"]),
-                evaluator_version=EVALUATOR_VERSION,
-                cost_model_version=COST_MODEL_VERSION,
-                created_by="svc_quant/intraday-experiment-runner",
-                parent=primary,
-                metadata={"candidate_role": row.get("candidate_role"),
-                          "unresolved_declared_parent": row.get(
-                              "parent_ast_fingerprint"),
-                          "screening_only": True,
-                          "runner_version": RUNNER_VERSION},
-            )
-            lineages[str(row["ast_fingerprint"])] = lineage
+            unresolved = sorted({
+                str(row.get("parent_ast_fingerprint") or "")
+                for row in pending
+                if str(row.get("parent_ast_fingerprint") or "")
+            })
+            raise RuntimeError(
+                "screening population has missing or cyclic explicit parent: "
+                + ", ".join(unresolved))
     return primary, lineages
 
 
@@ -2328,12 +2829,19 @@ def _record_rung_exposures(meta_conn, market_conn, *, schedule_row: dict,
             "session_content_fingerprint": daily["content_fingerprint"],
             "quote_rows": daily["quote_rows"],
             "trade_rows": daily["trade_rows"],
+            # This is the source-side content contract observed for the whole
+            # frozen universe on this session.  Keep it in the append-only
+            # report so an adaptive result never has to reconstruct or infer
+            # provenance from a later database state.
+            "source_watermark": daily["source_watermark"],
         })
     return {
         "rung": rung.rung,
         "experiment_rung_id": rung.experiment_rung_id,
         "candidate_lineage_id": rung.candidate.candidate_lineage_id,
         "root_lineage_id": rung.candidate.root_lineage_id,
+        "dataset_id": rung.dataset_id,
+        "dataset_cutoff": str(knowledge_cutoff),
         "session_count": len(evidence),
         "instrument_count": len(keys),
         # Repeat the immutable rung identities in the report/metric projection.
@@ -2345,6 +2853,317 @@ def _record_rung_exposures(meta_conn, market_conn, *, schedule_row: dict,
         "sessions": evidence,
         "append_before_raw_replay": True,
     }
+
+
+def _canonical_report_value(value):
+    """Return the JSON form used by the durable report manifest."""
+
+    def encode(item):
+        if isinstance(item, (date, datetime)):
+            return item.isoformat()
+        raise TypeError(f"not JSON serializable: {type(item).__name__}")
+
+    return json.loads(json.dumps(
+        value, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+        default=encode))
+
+
+def _required_aware_iso(value, field: str) -> str:
+    """Normalize one persisted timestamp without inventing a timezone."""
+    try:
+        parsed = value if isinstance(value, datetime) else datetime.fromisoformat(
+            str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"{field} must be an ISO timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise RuntimeError(f"{field} must be timezone aware")
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def _candidate_search_contracts(config: dict) -> list[dict]:
+    """Canonical formula/evaluator contracts for the exact rung population."""
+    primary = {
+        "intraday_signal_expr": config["intraday_signal_expr"],
+        "semantic_plan": config["semantic_plan"],
+        "horizon_seconds": config["horizon_seconds"],
+        "execution": config["execution"],
+        "entry_policy": config["entry_policy"],
+        "coefficient_policy": config["coefficient_policy"],
+    }
+    rows = [("PRIMARY", primary)] + sorted((
+        (str(row["ast_fingerprint"]), row)
+        for row in config.get("screening_population") or []),
+        key=lambda item: item[0])
+    contracts = []
+    for candidate, row in rows:
+        expression = parse_expr(row["intraday_signal_expr"])
+        feature_spec, label_spec, model_spec = _candidate_specs(config, row)
+        contracts.append({
+            "candidate": candidate,
+            "ast_fingerprint": fingerprint(expression),
+            "semantic_plan_fingerprint": stable_fingerprint(
+                row["semantic_plan"]),
+            "horizon_seconds": int(row["horizon_seconds"]),
+            "clock_domains": sorted(effective_clock_domains_of(expression)),
+            "clock_windows_seconds": sorted(clocks_of(expression)),
+            "execution": str(row["execution"]).upper(),
+            "entry_policy": str(row["entry_policy"]).upper(),
+            "coefficient_policy": str(row["coefficient_policy"]).upper(),
+            "feature_contract": feature_spec,
+            "label_contract": label_spec,
+            "model_contract": model_spec,
+        })
+    return _canonical_report_value(contracts)
+
+
+def _adaptive_rung_search_exposure(
+        *, config: dict, spec: IntradayLaneSpec, selected: dict,
+        schedule_row: dict, exposure_manifest: dict, screen: dict,
+        dataset_id: str, dataset_cutoff, event_source: str,
+        source_lineage: list[dict]) -> dict:
+    """Build an ID-independent, fail-closed adaptive-rung exposure identity.
+
+    The ledger's rung/access/evidence fingerprints deliberately bind UUIDs and
+    are therefore unsuitable for comparing the same scientific exposure across
+    retries or experiments.  This identity verifies those durable rows and then
+    hashes only the dataset, content, exact panel and evaluator contracts.  It
+    contains no outcome and grants no promotion authority.
+    """
+    rung = schedule_row.get("rung")
+    if rung is None or str(getattr(rung, "rung", "")) not in {
+            DISCOVERY_6, VALIDATION_20}:
+        raise RuntimeError("search exposure requires an adaptive discovery rung")
+    rung_name = str(rung.rung)
+    if (str(screen.get("rung") or "") != rung_name
+            or str(exposure_manifest.get("rung") or "") != rung_name):
+        raise RuntimeError("adaptive screen, schedule and exposure rung differ")
+    if (str(getattr(rung, "dataset_id", "")) != str(dataset_id)
+            or not str(dataset_id)):
+        raise RuntimeError("adaptive exposure dataset differs from frozen rung")
+    cutoff = _required_aware_iso(dataset_cutoff, "dataset_cutoff")
+    if (str(exposure_manifest.get("dataset_id") or "") != str(dataset_id)
+            or _required_aware_iso(
+                exposure_manifest.get("dataset_cutoff"),
+                "exposure dataset_cutoff") != cutoff):
+        raise RuntimeError(
+            "adaptive exposure dataset/cutoff differs from frozen schedule")
+
+    planned_sessions = [value.isoformat() if isinstance(value, date)
+                        else str(value)
+                        for value in rung.planned_session_dates]
+    exposure_rows = list(exposure_manifest.get("sessions") or [])
+    exposed_sessions = [str(row.get("session") or "")
+                        for row in exposure_rows]
+    screen_sessions = [str(value) for value in screen.get("sessions") or []]
+    evaluated_sessions = [str(value) for value in
+                          screen.get("evaluated_sessions") or []]
+    if (not planned_sessions or len(set(planned_sessions)) != len(
+            planned_sessions)):
+        raise RuntimeError("adaptive rung lacks unique planned sessions")
+    if exposed_sessions != planned_sessions or screen_sessions != planned_sessions:
+        raise RuntimeError(
+            "adaptive exposure sessions differ from the frozen rung plan")
+    expected_session_fp = stable_fingerprint(planned_sessions)
+    if (str(rung.session_set_fingerprint) != expected_session_fp
+            or str(exposure_manifest.get("session_set_fingerprint") or "")
+            != expected_session_fp
+            or int(exposure_manifest.get("session_count") or -1)
+            != len(planned_sessions)
+            or int(screen.get("session_count") or -1) != len(planned_sessions)
+            or isinstance(screen.get("evaluated_session_count"), bool)
+            or not isinstance(screen.get("evaluated_session_count"), int)
+            or screen.get("evaluated_session_count")
+            != len(evaluated_sessions)):
+        raise RuntimeError("adaptive session counts/fingerprints do not reconcile")
+    evaluation_status = str(screen.get("evaluation_status") or "")
+    if evaluation_status == "EVALUATED":
+        if evaluated_sessions != planned_sessions:
+            raise RuntimeError("evaluated adaptive rung omitted a planned session")
+    elif evaluation_status == "SKIPPED_COST_INFEASIBLE":
+        if evaluated_sessions:
+            raise RuntimeError("skipped adaptive rung claims evaluated sessions")
+    else:
+        raise RuntimeError("adaptive rung lacks an explicit evaluation status")
+
+    full_keys = [str(value) for value in schedule_row.get("keys") or []]
+    panel_keys = [str(value) for value in
+                  schedule_row.get("evaluation_keys") or []]
+    selected_keys = [str(value) for value in selected.get("instruments") or []]
+    if (not full_keys or full_keys != selected_keys
+            or not panel_keys or len(set(panel_keys)) != len(panel_keys)
+            or not set(panel_keys).issubset(full_keys)):
+        raise RuntimeError("adaptive rung lacks an exact nested panel membership")
+    reference_identity_fp = str(
+        selected.get("reference_identity_fingerprint") or "")
+    if (len(reference_identity_fp) != 64
+            or any(char not in "0123456789abcdef"
+                   for char in reference_identity_fp)):
+        raise RuntimeError(
+            "adaptive rung lacks exact governed reference identity evidence")
+    identity_map = _reference_id_map(selected)
+    panel_reference_ids = [identity_map[key] for key in panel_keys]
+    full_reference_ids = sorted(identity_map[key] for key in full_keys)
+    expected_full_fp = stable_fingerprint(full_reference_ids)
+    if (tuple(full_reference_ids) != tuple(rung.planned_instrument_ids)
+            or int(rung.planned_instrument_count) != len(full_keys)
+            or str(rung.instrument_set_fingerprint) != expected_full_fp
+            or int(exposure_manifest.get("instrument_count") or -1)
+            != len(full_keys)
+            or str(exposure_manifest.get("instrument_ids_fingerprint") or "")
+            != expected_full_fp):
+        raise RuntimeError(
+            "adaptive full-universe counts/fingerprints do not reconcile")
+    expected_legacy_panel_fp = hashlib.sha256(
+        "|".join(panel_keys).encode()).hexdigest()
+    if (int(screen.get("instrument_count") or -1) != len(panel_keys)
+            or str(screen.get("instrument_fingerprint") or "")
+            != expected_legacy_panel_fp):
+        raise RuntimeError("adaptive panel counts/fingerprints do not reconcile")
+
+    panel_manifest = _canonical_report_value(
+        schedule_row.get("panel") or {})
+    if (_canonical_report_value(screen.get("panel_manifest") or {})
+            != panel_manifest
+            or panel_manifest.get("promotion_authority") is not False):
+        raise RuntimeError("adaptive panel manifest is missing or changed")
+    manifest_members = [str(value) for value in (
+        list(panel_manifest.get("information_rich") or [])
+        + list(panel_manifest.get("representative_guard") or []))]
+    if (manifest_members and (len(set(manifest_members)) != len(panel_keys)
+                              or set(manifest_members) != set(panel_keys))):
+        raise RuntimeError("panel manifest membership differs from replay panel")
+
+    content_rows = []
+    for expected_session, row in zip(planned_sessions, exposure_rows):
+        content_fp = str(row.get("session_content_fingerprint") or "")
+        watermark = row.get("source_watermark")
+        quote_rows = row.get("quote_rows")
+        trade_rows = row.get("trade_rows")
+        if (str(row.get("session") or "") != expected_session
+                or len(content_fp) != 64
+                or any(char not in "0123456789abcdef" for char in content_fp)
+                or not isinstance(watermark, dict) or not watermark
+                or isinstance(quote_rows, bool) or not isinstance(quote_rows, int)
+                or quote_rows < 0
+                or isinstance(trade_rows, bool) or not isinstance(trade_rows, int)
+                or trade_rows < 0):
+            raise RuntimeError(
+                "adaptive rung lacks exact per-session content evidence")
+        content_rows.append({
+            "session": expected_session,
+            "session_content_fingerprint": content_fp,
+            "quote_rows": quote_rows,
+            "trade_rows": trade_rows,
+            "source_watermark": watermark,
+        })
+
+    if not isinstance(source_lineage, list) or not source_lineage:
+        raise RuntimeError("adaptive rung lacks frozen source lineage")
+    canonical_lineage = _canonical_report_value(source_lineage)
+    candidate_contracts = _candidate_search_contracts(config)
+    data_contract = _assert_resolved_data_contract(config)
+    dataset_name, _, dataset_version = data_contract["dataset"].rpartition("/")
+    panel_is_full_universe = (
+        len(panel_keys) == len(full_keys) and set(panel_keys) == set(full_keys))
+    identity = {
+        "version": ADAPTIVE_SEARCH_EXPOSURE_VERSION,
+        "fingerprint_contract": SEARCH_EXPOSURE_FINGERPRINT_CONTRACT,
+        "identifier_exclusions": list(
+            SEARCH_EXPOSURE_IDENTIFIER_EXCLUSIONS),
+        "evidence_purpose": ADAPTIVE_SEARCH,
+        "adaptive_search_only": True,
+        "promotion_authority": False,
+        "dataset": {
+            "name": dataset_name,
+            "version": dataset_version,
+            "dataset_id": str(dataset_id),
+            "dataset_cutoff": cutoff,
+            "asset_scope": STOCK_ASSET_SCOPE,
+            "stock_universe_contract_version": STOCK_UNIVERSE_VERSION,
+            "reference_identity_fingerprint": reference_identity_fp,
+        },
+        "rung": rung_name,
+        "evaluation": {
+            "status": evaluation_status,
+            "measurement_scope": (
+                "ADAPTIVE_RUNG_MEASURED" if evaluation_status == "EVALUATED"
+                else "CALIBRATION_ONLY_RESOURCE_STOP"),
+            "planned_sessions": planned_sessions,
+            "planned_session_count": len(planned_sessions),
+            "evaluated_sessions": evaluated_sessions,
+            "evaluated_session_count": len(evaluated_sessions),
+            "session_set_fingerprint": expected_session_fp,
+            "panel_replay_keys": panel_keys,
+            "panel_reference_instrument_ids": panel_reference_ids,
+            "panel_instrument_count": len(panel_keys),
+            "panel_order_fingerprint": stable_fingerprint(panel_keys),
+            "panel_reference_set_fingerprint": stable_fingerprint(
+                sorted(panel_reference_ids)),
+            "panel_manifest": panel_manifest,
+            "full_universe_instrument_count": len(full_keys),
+            "full_universe_reference_set_fingerprint": expected_full_fp,
+        },
+        "content_evidence": {
+            "scope": "FULL_FROZEN_STOCK_UNIVERSE_PER_SESSION",
+            "per_session": content_rows,
+            "panel_only_content_fingerprints_available":
+                panel_is_full_universe,
+            "conservative_full_universe_content_limitation": (
+                None if panel_is_full_universe else
+                "Session content hashes cover the full frozen STOCK universe, "
+                "not only the evaluated panel. They conservatively invalidate "
+                "the exposure when any non-panel source content changes and "
+                "cannot prove panel-only byte equivalence."),
+        },
+        "source_contract": {
+            "event_source": str(event_source),
+            "source_lineage": canonical_lineage,
+            "source_lineage_fingerprint": stable_fingerprint(
+                canonical_lineage),
+            "knowledge_clock_mode": EVENT_TIME_HISTORICAL_ONLY,
+            "timestamp_policy": str(config["timestamp_policy"]),
+        },
+        "lane_contract": _canonical_report_value(manifest(
+            spec, source=event_source,
+            timestamp_policy=config["timestamp_policy"])),
+        "execution_contract": {
+            "population_execution_model": config[
+                "population_execution_model"],
+            "position_mode": config["position_mode"],
+            "order_latency_ms": config["order_latency_ms"],
+            "max_quote_age_seconds": config["max_quote_age_seconds"],
+            "minimum_predicted_edge_bps": config[
+                "minimum_predicted_edge_bps"],
+        },
+        "cost_contract": {
+            "cost_model_version": COST_MODEL_VERSION,
+            "fee_bps_per_side": config["fee_bps_per_side"],
+            "maker_fee_bps_per_side": config[
+                "maker_fee_bps_per_side"],
+        },
+        "evaluator_contract": {
+            "runner_version": RUNNER_VERSION,
+            "evaluator_version": EVALUATOR_VERSION,
+            "fast_screen_version": FAST_SCREEN_VERSION,
+            "candidate_contracts": candidate_contracts,
+            "candidate_set_fingerprint": stable_fingerprint(
+                candidate_contracts),
+        },
+        "cross_checks": {
+            "ledger_session_set_fingerprint_verified": True,
+            "ledger_full_universe_fingerprint_verified": True,
+            "screen_panel_fingerprint_verified": True,
+            "screen_panel_manifest_verified": True,
+            "per_session_content_evidence_verified": True,
+        },
+    }
+    canonical = _canonical_report_value(identity)
+    sealed = {
+        **canonical,
+        "search_exposure_fingerprint": search_exposure_fingerprint(canonical),
+    }
+    assert_strict_exposure(sealed)
+    return sealed
 
 
 def _as_json(value):
@@ -2564,7 +3383,7 @@ def _annotate_population(config: dict, reports: dict[str, dict]) -> dict:
                 for row in config["screening_population"]}
     ranking_rows = [{
         "key": "PRIMARY", "report": primary, "novelty": 0.0,
-        "complexity": count_nodes(primary_expr),
+        "complexity": count_nodes(primary_expr), "expression": primary_expr,
     }]
     for key, report in reports.items():
         if key == "PRIMARY":
@@ -2573,8 +3392,16 @@ def _annotate_population(config: dict, reports: dict[str, dict]) -> dict:
         ranking_rows.append({
             "key": key, "report": report,
             "novelty": 1.0 - structural_similarity(primary_expr, expression),
-            "complexity": count_nodes(expression),
+            "complexity": count_nodes(expression), "expression": expression,
         })
+    for row in ranking_rows:
+        rivals = [other for other in ranking_rows if other is not row]
+        population_novelty = (min(
+            1.0 - structural_similarity(
+                row["expression"], other["expression"])
+            for other in rivals) if rivals else 1.0)
+        row["report"]["search_structural_novelty"] = population_novelty
+        row["report"]["complexity_nodes"] = row["complexity"]
     ranks = _pareto_ranks(ranking_rows)
     residual_qd, residual_archive = _residual_qd_archive(ranking_rows)
     primary["residual_qd"] = residual_qd["PRIMARY"]
@@ -2981,8 +3808,19 @@ def _apply_population_dsr_gate(report: dict, multiple_testing: dict) -> dict:
     return report
 
 
-def _rung_candidate_evidence(report: dict) -> list[dict]:
+def _rung_candidate_evidence(
+        report: dict, *, observed_at=None,
+        search_exposure_fingerprint: str | None = None,
+        evidence_scope: str | None = None,
+        measurement_scope: str | None = None) -> list[dict]:
     """Compact immutable search outcomes retained after candidates are halved."""
+    observed = (_required_aware_iso(observed_at, "observed_at")
+                if observed_at is not None else None)
+    if (search_exposure_fingerprint is not None
+            and (len(search_exposure_fingerprint) != 64
+                 or any(char not in "0123456789abcdef"
+                        for char in search_exposure_fingerprint))):
+        raise RuntimeError("candidate evidence has invalid search exposure hash")
     rows = [("PRIMARY", report)] + [
         (str(row.get("ast_fingerprint") or ""), row)
         for row in report.get("screening_population") or []]
@@ -2997,7 +3835,113 @@ def _rung_candidate_evidence(report: dict) -> list[dict]:
         "session_returns_bps": row.get("session_returns_bps") or {},
         "decision": row.get("decision"),
         "failed_criteria": list(row.get("failed_criteria") or []),
+        "adaptive_failure_memory": row.get("adaptive_failure_memory") or {},
+        "search_objectives": _search_objective_payload(row),
+        "observed_at": observed,
+        "search_exposure_fingerprint": search_exposure_fingerprint,
+        "evidence_scope": evidence_scope,
+        "measurement_scope": measurement_scope,
+        "adaptive_search_only": True,
+        "promotion_authority": False,
     } for key, row in rows]
+
+
+def _completed_adaptive_rung_evidence(
+        report: dict, *, screen: dict, config: dict, spec: IntradayLaneSpec,
+        selected: dict, schedule_row: dict, exposure_manifest: dict,
+        dataset_id: str, dataset_cutoff, event_source: str,
+        source_lineage: list[dict], completed_at) -> dict:
+    """Bind measured outcomes to one exact, non-promoting search exposure."""
+    completion = _required_aware_iso(completed_at, "completed_at")
+    search_exposure = _adaptive_rung_search_exposure(
+        config=config, spec=spec, selected=selected,
+        schedule_row=schedule_row, exposure_manifest=exposure_manifest,
+        screen=screen, dataset_id=dataset_id, dataset_cutoff=dataset_cutoff,
+        event_source=event_source, source_lineage=source_lineage)
+    rung_name = str(screen.get("rung") or "")
+    evidence_scope = {
+        DISCOVERY_6: "F1",
+        VALIDATION_20: "F2",
+    }.get(rung_name)
+    if evidence_scope is None:
+        raise RuntimeError("completed adaptive evidence has an unknown rung")
+    exposure_fp = search_exposure["search_exposure_fingerprint"]
+    measurement_scope = search_exposure["evaluation"]["measurement_scope"]
+    return {
+        **screen,
+        "candidate_count": 1 + len(config.get("screening_population") or []),
+        "candidate_evidence": _rung_candidate_evidence(
+            report, observed_at=completion,
+            search_exposure_fingerprint=exposure_fp,
+            evidence_scope=evidence_scope,
+            measurement_scope=measurement_scope),
+        "multiple_testing": report.get("multiple_testing"),
+        "search_exposure": search_exposure,
+        "search_exposure_fingerprint": exposure_fp,
+        "completed_at": completion,
+        "completion_clock": "UTC_WALL_CLOCK_AFTER_EVALUATOR_RETURN",
+        "adaptive_search_only": True,
+        "promotion_authority": False,
+    }
+
+
+def _search_objective_payload(report: dict) -> dict:
+    """Return a versioned, no-imputation quality vector for adaptive search."""
+    summary = report.get("summary") or {}
+    raw = {
+        "cost_net_bps": summary.get("mean_net_bps_per_opportunity"),
+        "oos_sharpe": summary.get("sharpe"),
+        "coverage_ratio": summary.get("instrument_coverage"),
+        "robustness_score": summary.get("positive_fold_ratio"),
+        "novelty_score": report.get("search_structural_novelty"),
+        "complexity_nodes": report.get("complexity_nodes"),
+    }
+    missing = []
+    values = {}
+    for name, value in raw.items():
+        if name == "complexity_nodes":
+            valid = (isinstance(value, int) and not isinstance(value, bool)
+                     and value > 0)
+            if valid:
+                values[name] = int(value)
+        else:
+            valid = (isinstance(value, (int, float))
+                     and not isinstance(value, bool)
+                     and math.isfinite(float(value)))
+            if valid and name in {
+                    "coverage_ratio", "robustness_score", "novelty_score"}:
+                valid = 0.0 <= float(value) <= 1.0
+            if valid:
+                values[name] = float(value)
+        if not valid:
+            missing.append(name)
+    sessions = summary.get("sessions")
+    opportunities = summary.get("opportunities")
+    for name, value in (("sessions", sessions),
+                        ("opportunities", opportunities)):
+        if (not isinstance(value, (int, float)) or isinstance(value, bool)
+                or not math.isfinite(float(value)) or float(value) <= 0):
+            missing.append(name)
+    complete = not missing
+    return {
+        "version": SEARCH_OBJECTIVES_VERSION,
+        "complete": complete,
+        "values": values if complete else {
+            key: values[key] for key in sorted(values)},
+        "missing": sorted(set(missing)),
+        "sessions": (int(sessions) if isinstance(sessions, (int, float))
+                     and not isinstance(sessions, bool)
+                     and math.isfinite(float(sessions))
+                     and float(sessions).is_integer() else None),
+        "opportunities": (
+            int(opportunities) if isinstance(opportunities, (int, float))
+            and not isinstance(opportunities, bool)
+            and math.isfinite(float(opportunities))
+            and float(opportunities).is_integer() else None),
+        "imputation": "NONE",
+        "adaptive_search_only": True,
+        "promotion_authority": False,
+    }
 
 
 def _next_rung_config(config: dict, report: dict, gate: dict, *,
@@ -3367,6 +4311,11 @@ def _load_completed_report(meta_conn, experiment_id: str) -> dict:
             "residual_qd": meta.get("residual_qd") or {},
             "novelty_vs_primary": meta.get("novelty_vs_primary"),
             "complexity_nodes": meta.get("complexity_nodes"),
+            "search_structural_novelty": meta.get(
+                "search_structural_novelty"),
+            "search_objectives": meta.get("search_objectives") or {},
+            "adaptive_failure_memory": meta.get(
+                "adaptive_failure_memory") or {},
             "idempotent_replay": True,
         })
     report = {
@@ -3382,6 +4331,12 @@ def _load_completed_report(meta_conn, experiment_id: str) -> dict:
         "score_calibration": calibration_dimensions,
         "residual_behavior": residual_dimensions or {},
         "residual_qd": primary_residual_qd or {},
+        "search_structural_novelty": governance.get(
+            "primary_search_structural_novelty"),
+        "complexity_nodes": governance.get("primary_complexity_nodes"),
+        "search_objectives": governance.get("primary_search_objectives") or {},
+        "adaptive_failure_memory": governance.get(
+            "primary_adaptive_failure_memory") or {},
         "screening_population": screening_reports,
         "supervised_control": governance.get("supervised_control") or {},
         "hybrid_control": governance.get("hybrid_control") or {},
@@ -3474,6 +4429,11 @@ def _store_report(meta_conn, experiment_id: str, report: dict) -> None:
             "source_lead_ids": candidate.get("source_lead_ids") or [],
             "candidate_role": candidate.get("candidate_role"),
             "empirical_influence": candidate.get("empirical_influence"),
+            "search_structural_novelty": candidate.get(
+                "search_structural_novelty"),
+            "search_objectives": _search_objective_payload(candidate),
+            "adaptive_failure_memory": candidate.get(
+                "adaptive_failure_memory") or {},
         }
         rows.append(("intraday_screening_result",
                      1 if candidate.get("pareto_front") else 0, {
@@ -3529,6 +4489,12 @@ def _store_report(meta_conn, experiment_id: str, report: dict) -> None:
         "score_calibration": calibration,
         "residual_behavior": residual,
         "residual_qd": primary_residual_qd,
+        "primary_search_structural_novelty": report.get(
+            "search_structural_novelty"),
+        "primary_complexity_nodes": report.get("complexity_nodes"),
+        "primary_search_objectives": _search_objective_payload(report),
+        "primary_adaptive_failure_memory": report.get(
+            "adaptive_failure_memory") or {},
         "screening_candidates": screening_artifacts,
         "pre_pbo_gate": pre_pbo_gate,
         "supervised_control": report.get("supervised_control") or {},
@@ -5946,10 +6912,13 @@ def _run_fast_screen(config: dict, spec: IntradayLaneSpec, selected: dict, *,
     def samples_for(day, shard) -> dict[str, list]:
         session = _session_day(day)
         start, end = _session_bounds(session)
+        load_end = end + purge_gap
+        if event_source == EXTERNAL_EVENT_SOURCE:
+            load_end = min(load_end, _external_content_end(session))
         if event_source != EXTERNAL_EVENT_SOURCE:
             events = load_instrument_events_batch(
                 market_conn, instrument_ids=shard, start=start,
-                end=end + purge_gap, as_known_at=cutoff,
+                end=load_end, as_known_at=cutoff,
                 source=event_source)
             return {instrument: build_samples(
                 *events[instrument], spec, start=start, end=end,
@@ -5967,7 +6936,7 @@ def _run_fast_screen(config: dict, spec: IntradayLaneSpec, selected: dict, *,
         cache_stats["misses"] += 1
         events = load_instrument_events_batch(
             market_conn, instrument_ids=shard, start=start,
-            end=end + purge_gap, as_known_at=cutoff,
+            end=load_end, as_known_at=cutoff,
             source=event_source)
         samples = build_samples(
             *events[instrument], spec, start=start, end=end,
@@ -6016,12 +6985,38 @@ def _run_fast_screen(config: dict, spec: IntradayLaneSpec, selected: dict, *,
                     "|".join(shard).encode()).hexdigest()[:16],
             })
 
-    report = _annotate_population(config, population.finish())
+    finished_population = population.finish()
+    if calibration_only_fail_fast:
+        _annotate_calibration_only_failures(finished_population, calibration)
+    report = _annotate_population(config, finished_population)
     report["multiple_testing"] = _population_multiple_testing(report)
     _apply_population_dsr_gate(report, report["multiple_testing"])
     gate = _fast_screen_gate(report, config)
+    measured_calibration_observations = max(
+        (int((row or {}).get("observations") or 0)
+         for row in calibration.values()), default=0)
+    measured_calibration_instruments = max(
+        (int((row or {}).get("instruments") or 0)
+         for row in calibration.values()), default=0)
     report["fast_discovery_screen"] = {
         **gate,
+        "evaluation_status": (
+            "SKIPPED_COST_INFEASIBLE" if calibration_only_fail_fast
+            else "EVALUATED"),
+        "evaluation_skip_reason": (
+            "ALL_SYMBOLIC_CANDIDATES_INFEASIBLE"
+            if calibration_only_fail_fast else None),
+        "calibration_sample_count": sum(
+            int(row.get("sample_count") or 0) for row in calibration_shards),
+        "calibration_instrument_count": measured_calibration_instruments,
+        "calibration_observations": measured_calibration_observations,
+        "calibration_is_measured_search_memory": bool(
+            calibration_only_fail_fast
+            and measured_calibration_observations > 0
+            and measured_calibration_instruments > 0),
+        "raw_data_absence_inferred": (
+            False if calibration_only_fail_fast
+            and measured_calibration_observations > 0 else None),
         "rung": str(rung),
         "sessions": [str(day) for day in sessions],
         "evaluated_sessions": (
@@ -6099,6 +7094,7 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
         raise RuntimeError(
             "intraday run called with non-executable feasibility slice: "
             f"{selected.get('status')}")
+    _assert_resolved_data_contract(config, selected=selected)
     lineage = _lineage(market_conn, selected, cutoff)
     event_source = selected.get("event_source", LOCAL_EVENT_SOURCE)
     effective_shard_size = (1 if event_source == EXTERNAL_EVENT_SOURCE else
@@ -6224,6 +7220,7 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
 
     if (event_source == EXTERNAL_EVENT_SOURCE
             and config["fast_screen_enabled"]):
+        rung_exposure_manifests = {}
         for schedule_key in ("calibration", "discovery"):
             exposure_manifest = _guard_experiment_step(
                 meta_conn, experiment_id, _record_rung_exposures,
@@ -6232,6 +7229,7 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
                 cutoff=cutoff, event_source=event_source,
                 knowledge_cutoff=trial_schedule["dataset_cutoff"])
             trial_lockbox["exposures"].append(exposure_manifest)
+            rung_exposure_manifests[schedule_key] = exposure_manifest
         discovery_plan = trial_schedule["discovery"]
         screen_report, screen_gate = _guard_experiment_step(
             meta_conn, experiment_id, _run_fast_screen,
@@ -6241,12 +7239,15 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
             planned_sessions=discovery_plan["rung"].planned_session_dates,
             planned_instruments=discovery_plan["evaluation_keys"],
             planned_panel_manifest=discovery_plan["panel"])
-        discovery_rungs.append({
-            **screen_report["fast_discovery_screen"],
-            "candidate_count": 1 + len(config["screening_population"]),
-            "candidate_evidence": _rung_candidate_evidence(screen_report),
-            "multiple_testing": screen_report.get("multiple_testing"),
-        })
+        discovery_rungs.append(_completed_adaptive_rung_evidence(
+            screen_report, screen=screen_report["fast_discovery_screen"],
+            config=config, spec=spec, selected=selected,
+            schedule_row=discovery_plan,
+            exposure_manifest=rung_exposure_manifests["discovery"],
+            dataset_id=dataset_id,
+            dataset_cutoff=trial_schedule["dataset_cutoff"],
+            event_source=event_source, source_lineage=lineage,
+            completed_at=datetime.now(timezone.utc)))
         if not screen_gate["primary_pass"]:
             return stop_after_screen(
                 screen_report, failure_code="FAST_DISCOVERY_SCREEN_REJECTED",
@@ -6261,11 +7262,12 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
             if validation_plan is None:
                 raise RuntimeError(
                     "intermediate replay lacks a frozen VALIDATION_20 rung")
-            trial_lockbox["exposures"].append(_guard_experiment_step(
+            validation_exposure_manifest = _guard_experiment_step(
                 meta_conn, experiment_id, _record_rung_exposures,
                 meta_conn, market_conn, schedule_row=validation_plan,
                 selected=selected, cutoff=cutoff, event_source=event_source,
-                knowledge_cutoff=trial_schedule["dataset_cutoff"]))
+                knowledge_cutoff=trial_schedule["dataset_cutoff"])
+            trial_lockbox["exposures"].append(validation_exposure_manifest)
             intermediate_run_config = {
                 **intermediate_config,
                 "fast_screen_sessions": config[
@@ -6287,15 +7289,15 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
                 "fast_discovery_screen")
             intermediate_report["intermediate_discovery_screen"] = \
                 intermediate_screen
-            discovery_rungs.append({
-                **intermediate_screen,
-                "candidate_count": 1 + len(
-                    intermediate_config["screening_population"]),
-                "candidate_evidence": _rung_candidate_evidence(
-                    intermediate_report),
-                "multiple_testing": intermediate_report.get(
-                    "multiple_testing"),
-            })
+            discovery_rungs.append(_completed_adaptive_rung_evidence(
+                intermediate_report, screen=intermediate_screen,
+                config=intermediate_run_config, spec=spec, selected=selected,
+                schedule_row=validation_plan,
+                exposure_manifest=validation_exposure_manifest,
+                dataset_id=dataset_id,
+                dataset_cutoff=trial_schedule["dataset_cutoff"],
+                event_source=event_source, source_lineage=lineage,
+                completed_at=datetime.now(timezone.utc)))
             if not intermediate_gate["primary_pass"]:
                 return stop_after_screen(
                     intermediate_report,
@@ -6369,38 +7371,57 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
     expected_raw_replay_fingerprint = None
     expected_raw_replay_rows = None
     if event_source == EXTERNAL_EVENT_SOURCE:
-        fingerprints = {row.get("evaluation_replay_content_fingerprint")
+        fingerprints = {row.get("consumed_replay_content_fingerprint")
                         for row in lineage}
         manifest_counts = {row.get(
-            "evaluation_replay_content_manifest_rows") for row in lineage}
+            "consumed_replay_content_manifest_rows") for row in lineage}
         if (len(fingerprints) != 1 or None in fingerprints
                 or len(manifest_counts) != 1 or None in manifest_counts):
             raise RuntimeError(
-                "external lineage lacks one frozen evaluation replay manifest")
+                "external lineage lacks one frozen consumed replay manifest")
         expected_raw_replay_fingerprint = next(iter(fingerprints))
         expected_raw_replay_rows = int(next(iter(manifest_counts)))
     try:
         # Fit only the one-parameter score scale on sessions strictly preceding
         # the OOS slice.  All universe shards contribute before the coefficient
         # is frozen, so shard order cannot turn into a hidden model choice.
-        if population.requires_calibration:
+        if (population.requires_calibration
+                or event_source == EXTERNAL_EVENT_SOURCE):
             for shard_number, instruments in enumerate(shards, 1):
                 shard_samples = 0
                 for raw_day in selected.get("calibration_sessions") or []:
                     day = _session_day(raw_day)
                     start, end = _session_bounds(day)
+                    sample_load_end = min(
+                        end + purge_gap, _external_content_end(day)) \
+                        if event_source == EXTERNAL_EVENT_SOURCE else \
+                        end + purge_gap
+                    replay_load_end = _replay_load_end(
+                        day, event_source, sample_load_end)
                     events = load_instrument_events_batch(
                         market_conn, instrument_ids=instruments, start=start,
-                        end=end + purge_gap, as_known_at=cutoff,
-                        source=event_source)
-                    for instrument in instruments:
-                        quotes, trades = events[instrument]
-                        samples = build_samples(
-                            quotes, trades, spec, start=start, end=end,
-                            execution_model=config["population_execution_model"],
-                            timestamp_policy=config["timestamp_policy"])
-                        shard_samples += len(samples)
-                        population.calibrate(instrument, samples)
+                        end=replay_load_end, as_known_at=cutoff,
+                        source=event_source,
+                        raw_content_evidence=(raw_content := {})
+                        if event_source == EXTERNAL_EVENT_SOURCE else None,
+                        content_end=(_external_content_end(day)
+                                     if event_source == EXTERNAL_EVENT_SOURCE
+                                     else None))
+                    if event_source == EXTERNAL_EVENT_SOURCE:
+                        raw_replay_rows.extend(
+                            _external_raw_replay_row(
+                                day, instrument, raw_content[instrument])
+                            for instrument in instruments)
+                    if population.requires_calibration:
+                        for instrument in instruments:
+                            quotes, trades = events[instrument]
+                            samples = build_samples(
+                                quotes, trades, spec, start=start, end=end,
+                                execution_model=config[
+                                    "population_execution_model"],
+                                timestamp_policy=config["timestamp_policy"])
+                            shard_samples += len(samples)
+                            population.calibrate(instrument, samples)
                 calibration_shard_reports.append({
                     "shard": shard_number,
                     "instrument_count": len(instruments),
@@ -6412,18 +7433,25 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
             shard_samples = 0
             for day in selected["sessions"]:
                 start, end = _session_bounds(day)
-                load_end = end + purge_gap
+                sample_load_end = end + purge_gap
+                if event_source == EXTERNAL_EVENT_SOURCE:
+                    sample_load_end = min(
+                        sample_load_end, _external_content_end(day))
+                replay_load_end = _replay_load_end(
+                    day, event_source, sample_load_end)
                 quality = source_quality_batch(
                     market_conn, instrument_ids=instruments, start=start,
-                    end=load_end, as_known_at=cutoff, source=event_source)
+                    end=sample_load_end, as_known_at=cutoff,
+                    source=event_source)
                 events = load_instrument_events_batch(
                     market_conn, instrument_ids=instruments, start=start,
-                    end=load_end, as_known_at=cutoff, source=event_source,
+                    end=replay_load_end, as_known_at=cutoff,
+                    source=event_source,
                     raw_content_evidence=(raw_content := {})
                     if event_source == EXTERNAL_EVENT_SOURCE else None,
-                    content_end=(datetime.combine(
-                        day, time(15, 30), KST).astimezone(timezone.utc)
-                        if event_source == EXTERNAL_EVENT_SOURCE else None))
+                    content_end=(_external_content_end(day)
+                                 if event_source == EXTERNAL_EVENT_SOURCE
+                                 else None))
                 if event_source == EXTERNAL_EVENT_SOURCE:
                     raw_replay_rows.extend(
                         _external_raw_replay_row(day, instrument,
@@ -6453,22 +7481,20 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
             })
         raw_replay_verification = None
         if event_source == EXTERNAL_EVENT_SOURCE:
-            raw_replay_rows.sort(
-                key=lambda row: (row["session"], row["instrument"]))
-            observed_raw_replay_fingerprint = stable_fingerprint({
-                "version": "external-raw-replay-content-v1",
-                "rows": raw_replay_rows,
-            })
+            observed_manifest = _external_replay_manifest(
+                raw_replay_rows, selected)
+            observed_raw_replay_fingerprint = observed_manifest["fingerprint"]
             raw_replay_verification = {
-                "contract": "external-raw-replay-content-v1",
+                "contract": EXTERNAL_RAW_REPLAY_CONTENT_VERSION,
                 "expected_fingerprint": expected_raw_replay_fingerprint,
                 "observed_fingerprint": observed_raw_replay_fingerprint,
                 "expected_manifest_rows": expected_raw_replay_rows,
-                "observed_manifest_rows": len(raw_replay_rows),
+                "observed_manifest_rows": observed_manifest["manifest_rows"],
                 "status": "PASS" if (
                     observed_raw_replay_fingerprint ==
                     expected_raw_replay_fingerprint
-                    and len(raw_replay_rows) == expected_raw_replay_rows)
+                    and observed_manifest["manifest_rows"] ==
+                    expected_raw_replay_rows)
                 else "FAIL",
             }
             if raw_replay_verification["status"] != "PASS":

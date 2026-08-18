@@ -1,0 +1,459 @@
+from __future__ import annotations
+
+import os
+from unittest.mock import AsyncMock, patch
+from uuid import uuid4
+
+import pytest
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
+
+from apps.api import main as bff_main
+from apps.api import ceo_mirror_api
+from apps.api.ceo_mirror import CanonicalIngress, InMemoryMirrorStore, execute_once
+from apps.api.main import app
+
+
+def test_ui_boundary_rejects_unsigned_identity_in_jwt_mode() -> None:
+    with patch.dict(
+        os.environ,
+        {
+            "APP_ENV": "production",
+            "PORTFOLIO_AUTH_MODE": "supabase_jwt",
+            "PORTFOLIO_AUTH_REQUIRED": "false",
+            "SUPABASE_URL": "https://test-project.supabase.co",
+        },
+        clear=False,
+    ):
+        response = TestClient(app).get(
+            "/ui/integrations", headers={"X-User-Id": str(uuid4())}
+        )
+    assert response.status_code == 401
+    assert response.json() == {"detail": "portfolio_authentication_required"}
+
+
+def test_ui_boundary_rejects_fixture_mode_in_production() -> None:
+    with patch.dict(
+        os.environ,
+        {"APP_ENV": "production", "PORTFOLIO_AUTH_MODE": "fixture"},
+        clear=False,
+    ):
+        response = TestClient(app).get(
+            "/ui/integrations", headers={"X-User-Id": str(uuid4())}
+        )
+    assert response.status_code == 503
+    assert response.json() == {"detail": "portfolio_authentication_unavailable"}
+
+
+def test_ui_boundary_allows_explicit_local_fixture_mode() -> None:
+    with patch.dict(
+        os.environ,
+        {
+            "APP_ENV": "test",
+            "PORTFOLIO_AUTH_MODE": "fixture",
+            "PORTFOLIO_AUTH_REQUIRED": "false",
+        },
+        clear=False,
+    ):
+        response = TestClient(app).get("/ui/integrations")
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "json_body"),
+    [
+        ("post", "/research/agent/ask", {"query": "status"}),
+        ("post", "/risk/agent/ask", {"query": "status"}),
+        ("post", "/quant/agent/ask", {"query": "status"}),
+        ("post", "/qa/agent/ask", {"query": "status"}),
+        ("post", "/trading/agent/ask", {"query": "status"}),
+        ("post", "/accounting/agent/ask", {"query": "status"}),
+        (
+            "get",
+            f"/accounting/v1/portfolio-snapshot?fund_id={uuid4()}",
+            None,
+        ),
+    ],
+)
+def test_non_ui_domain_routes_share_the_fail_closed_boundary(
+    method: str, path: str, json_body: dict[str, str] | None
+) -> None:
+    with patch.dict(
+        os.environ,
+        {
+            "APP_ENV": "production",
+            "PORTFOLIO_AUTH_MODE": "supabase_jwt",
+            "PORTFOLIO_AUTH_REQUIRED": "false",
+            "SUPABASE_URL": "https://test-project.supabase.co",
+        },
+        clear=False,
+    ):
+        response = TestClient(app).request(method, path, json=json_body)
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "portfolio_authentication_required"}
+
+
+def test_only_health_probes_are_anonymous_in_production() -> None:
+    with patch.dict(
+        os.environ,
+        {
+            "APP_ENV": "production",
+            "PORTFOLIO_AUTH_MODE": "supabase_jwt",
+            "PORTFOLIO_AUTH_REQUIRED": "false",
+        },
+        clear=False,
+    ):
+        client = TestClient(app)
+        assert client.get("/health").status_code == 200
+        assert client.get("/health/ready").status_code in {200, 503}
+        assert client.get("/openapi.json").status_code == 401
+
+
+def test_operations_websocket_rejects_before_snapshot_without_identity() -> None:
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "APP_ENV": "production",
+                "PORTFOLIO_AUTH_MODE": "supabase_jwt",
+                "PORTFOLIO_AUTH_REQUIRED": "false",
+            },
+            clear=False,
+        ),
+        patch.object(bff_main, "build_operations_snapshot") as snapshot,
+        pytest.raises(WebSocketDisconnect) as error,
+    ):
+        with TestClient(app).websocket_connect("/ws/operations"):
+            pass
+
+    assert error.value.code == 4401
+    snapshot.assert_not_called()
+
+
+def test_authorization_put_preflight_bypasses_auth_and_is_explicitly_allowed() -> None:
+    response = TestClient(app).options(
+        "/ui/mandates/mnd-1",
+        headers={
+            "Origin": "http://localhost:3000",
+            "Access-Control-Request-Method": "PUT",
+            "Access-Control-Request-Headers": "authorization,content-type",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+    assert "PUT" in response.headers["access-control-allow-methods"]
+    assert "Authorization" in response.headers["access-control-allow-headers"]
+    assert response.headers.get("access-control-allow-credentials") is None
+
+
+def test_allowed_origin_receives_cors_headers_on_authentication_failure() -> None:
+    with patch.dict(
+        os.environ,
+        {
+            "APP_ENV": "production",
+            "PORTFOLIO_AUTH_MODE": "supabase_jwt",
+            "PORTFOLIO_AUTH_REQUIRED": "false",
+        },
+        clear=False,
+    ):
+        response = TestClient(app).get(
+            "/ui/integrations", headers={"Origin": "http://localhost:3000"}
+        )
+
+    assert response.status_code == 401
+    assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+
+
+def test_cors_origin_configuration_is_exact_and_fail_closed() -> None:
+    with patch.dict(
+        os.environ,
+        {
+            "APP_ENV": "production",
+            "PORTFOLIO_CORS_ALLOW_ORIGINS": (
+                "https://app.example.com,https://ops.example.com/"
+            ),
+        },
+        clear=False,
+    ):
+        assert bff_main._portfolio_cors_origins() == [
+            "https://app.example.com",
+            "https://ops.example.com",
+        ]
+
+    with patch.dict(
+        os.environ,
+        {"APP_ENV": "production", "PORTFOLIO_CORS_ALLOW_ORIGINS": ""},
+        clear=False,
+    ):
+        assert bff_main._portfolio_cors_origins() == []
+
+    with patch.dict(
+        os.environ,
+        {"APP_ENV": "production", "PORTFOLIO_CORS_ALLOW_ORIGINS": "*"},
+        clear=False,
+    ):
+        with pytest.raises(RuntimeError, match="invalid PORTFOLIO_CORS"):
+            bff_main._portfolio_cors_origins()
+
+
+def test_ui_me_returns_only_verified_profile_and_effective_funds() -> None:
+    owner_id = str(uuid4())
+    fund_id = str(uuid4())
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "APP_ENV": "test",
+                "PORTFOLIO_AUTH_MODE": "fixture",
+                "PORTFOLIO_AUTH_REQUIRED": "false",
+            },
+            clear=False,
+        ),
+        patch.object(
+            bff_main,
+            "active_user_profile",
+            return_value={"display_name": "Operator", "status": "ACTIVE"},
+        ),
+        patch.object(
+            bff_main,
+            "authorized_fund_memberships",
+            return_value=[
+                {"fund_id": fund_id, "role": "TRADER"},
+                {"fund_id": fund_id, "role": "OWNER"},
+            ],
+        ),
+        patch.object(
+            bff_main,
+            "authorized_trading_books",
+            return_value=[
+                {
+                    "fund_id": fund_id,
+                    "book_id": "00000000-0000-0000-0000-000000000123",
+                    "name": "Main Paper Book",
+                }
+            ],
+        ),
+    ):
+        response = TestClient(app).get(
+            "/ui/me", headers={"X-User-Id": owner_id}
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "schema_version": "portfolio.current-user.v1",
+        "user_id": owner_id,
+        "display_name": "Operator",
+        "status": "ACTIVE",
+        "funds": [
+            {
+                "fund_id": fund_id,
+                "roles": ["OWNER", "TRADER"],
+                "books": [
+                    {
+                        "book_id": "00000000-0000-0000-0000-000000000123",
+                        "name": "Main Paper Book",
+                    }
+                ],
+            }
+        ],
+        "onboarding_required": False,
+    }
+
+
+def test_ui_me_requires_an_identity_even_in_optional_fixture_mode() -> None:
+    with patch.dict(
+        os.environ,
+        {
+            "APP_ENV": "test",
+            "PORTFOLIO_AUTH_MODE": "fixture",
+            "PORTFOLIO_AUTH_REQUIRED": "false",
+        },
+        clear=False,
+    ):
+        response = TestClient(app).get("/ui/me")
+    assert response.status_code == 401
+
+
+def _production_auth_environment() -> dict[str, str]:
+    return {
+        "APP_ENV": "production",
+        "PORTFOLIO_AUTH_MODE": "supabase_jwt",
+        "PORTFOLIO_AUTH_REQUIRED": "true",
+    }
+
+
+def test_opaque_mandate_id_is_authorized_by_canonical_fund() -> None:
+    owner_id = str(uuid4())
+    fund_id = str(uuid4())
+    governance = AsyncMock(return_value={"mandate_id": "m-foreign", "fund_id": fund_id})
+    with (
+        patch.dict(os.environ, _production_auth_environment(), clear=False),
+        patch.object(bff_main, "authenticate_request_headers", return_value=owner_id),
+        patch.object(bff_main, "_governance_request", governance),
+        patch.object(
+            bff_main,
+            "require_fund_membership",
+            side_effect=HTTPException(403, "portfolio_fund_forbidden"),
+        ) as membership,
+    ):
+        response = TestClient(app).get("/ui/mandates/m-foreign/current")
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "portfolio_fund_forbidden"}
+    membership.assert_called_once_with(owner_id, fund_id)
+    governance.assert_awaited_once_with(
+        "GET", "/governance/v1/mandates/m-foreign/current"
+    )
+
+
+def test_mandate_mutation_rejects_caller_fund_mismatch_before_put() -> None:
+    owner_id = str(uuid4())
+    canonical_fund_id = str(uuid4())
+    submitted_fund_id = str(uuid4())
+    governance = AsyncMock(
+        return_value={"mandate_id": "m-1", "fund_id": canonical_fund_id}
+    )
+    with (
+        patch.dict(os.environ, _production_auth_environment(), clear=False),
+        patch.object(bff_main, "authenticate_request_headers", return_value=owner_id),
+        patch.object(bff_main, "_governance_request", governance),
+        patch.object(bff_main, "require_fund_membership"),
+    ):
+        response = TestClient(app).put(
+            "/ui/mandates/m-1",
+            json={"fund_id": submitted_fund_id},
+        )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "portfolio_canonical_fund_binding_mismatch"
+    }
+    assert governance.await_count == 1
+
+
+def test_opaque_approval_id_is_checked_before_decision() -> None:
+    owner_id = str(uuid4())
+    fund_id = str(uuid4())
+    governance = AsyncMock(
+        return_value={"approval_id": "a-foreign", "fund_id": fund_id}
+    )
+    with (
+        patch.dict(os.environ, _production_auth_environment(), clear=False),
+        patch.object(bff_main, "authenticate_request_headers", return_value=owner_id),
+        patch.object(bff_main, "_governance_request", governance),
+        patch.object(
+            bff_main,
+            "require_fund_membership",
+            side_effect=HTTPException(403, "portfolio_fund_forbidden"),
+        ),
+    ):
+        response = TestClient(app).post(
+            "/ui/mandate-approvals/a-foreign/decide",
+            json={"decision": "APPROVED"},
+        )
+
+    assert response.status_code == 403
+    assert governance.await_count == 1
+    governance.assert_awaited_once_with(
+        "GET", "/governance/v1/approvals/a-foreign"
+    )
+
+
+@pytest.mark.parametrize(
+    "path", ["/ui/research", "/ui/strategy", "/ui/risk", "/ui/qa", "/ui/risk-qa"]
+)
+def test_global_operator_projection_requires_a_provisioned_fund(path: str) -> None:
+    owner_id = str(uuid4())
+    with (
+        patch.dict(os.environ, _production_auth_environment(), clear=False),
+        patch.object(bff_main, "authenticate_request_headers", return_value=owner_id),
+        patch.object(
+            bff_main,
+            "require_any_fund_membership",
+            side_effect=HTTPException(403, "portfolio_fund_membership_required"),
+        ),
+    ):
+        response = TestClient(app).get(path)
+    assert response.status_code == 403
+
+
+def test_command_audit_is_filtered_to_authorized_funds() -> None:
+    owner_id = str(uuid4())
+    allowed_fund = str(uuid4())
+    foreign_fund = str(uuid4())
+    with (
+        patch.dict(os.environ, _production_auth_environment(), clear=False),
+        patch.object(bff_main, "authenticate_request_headers", return_value=owner_id),
+        patch.object(
+            bff_main,
+            "require_any_fund_membership",
+            return_value=[{"fund_id": allowed_fund, "role": "OWNER"}],
+        ),
+        patch.object(
+            bff_main.COMMAND_SERVICE,
+            "audit_events",
+            return_value=[
+                {"audit_event_id": "allowed", "fund_id": allowed_fund},
+                {"audit_event_id": "foreign", "fund_id": foreign_fund},
+            ],
+        ),
+    ):
+        response = TestClient(app).get("/ui/commands/audit")
+
+    assert response.status_code == 200
+    assert response.json()["events"] == [
+        {"audit_event_id": "allowed", "fund_id": allowed_fund}
+    ]
+
+
+def test_ceo_mirror_journal_rejects_a_different_authenticated_owner() -> None:
+    owner_id = str(uuid4())
+    foreign_owner = str(uuid4())
+    store = InMemoryMirrorStore()
+    ingress = CanonicalIngress(
+        query="private request",
+        request_id="request-private-owner",
+        source="web",
+        actor_id=foreign_owner,
+        actor_type="user",
+    )
+    execute_once(ingress, store=store, execute=lambda: {"task_id": "task-private"})
+
+    with (
+        patch.dict(os.environ, _production_auth_environment(), clear=False),
+        patch.object(bff_main, "authenticate_request_headers", return_value=owner_id),
+        patch.object(ceo_mirror_api, "MIRROR_STORE", store),
+    ):
+        response = TestClient(app).get(
+            "/ui/ceo/events", params={"request_id": ingress.request_id}
+        )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "ceo_mirror_request_forbidden"}
+
+
+def test_ceo_mirror_ingress_binds_actor_to_verified_subject() -> None:
+    owner_id = str(uuid4())
+    foreign_owner = str(uuid4())
+    with (
+        patch.dict(os.environ, _production_auth_environment(), clear=False),
+        patch.object(bff_main, "authenticate_request_headers", return_value=owner_id),
+        patch.object(ceo_mirror_api, "_execute") as execute,
+    ):
+        response = TestClient(app).post(
+            "/ui/ceo/ingress",
+            json={
+                "query": "spoofed actor",
+                "request_id": "request-spoofed-actor",
+                "source": "web",
+                "actor_id": foreign_owner,
+                "actor_type": "user",
+            },
+        )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "ceo_mirror_actor_mismatch"}
+    execute.assert_not_called()

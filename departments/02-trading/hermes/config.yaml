@@ -186,6 +186,16 @@ known_builtin_toolsets:
 known_plugin_toolsets:
  cli: [spotify]
 
+# Single-purpose user PAPER-order interpretation boundary. The bearer value is
+# expanded by the dispatcher when it spawns this profile; no DB or Trading
+# service-proof credential is present in the Hermes process.
+mcp_servers:
+  user-paper-order:
+    url: http://paper-order-orchestrator-mcp:8046/mcp
+    headers:
+      Authorization: Bearer ${MCP_TRADING_ORDER_API_KEY}
+    enabled: true
+
 # Employee runtime v2: every listed employee is an independent LangGraph
 # Worker.  Hermes remains the department-head runtime and has no order submit
 # authority.

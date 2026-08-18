@@ -1,0 +1,12 @@
+# This directory is a standalone Docker build context for the Research image.
+# The repository-root .dockerignore does not apply when Compose builds from
+# departments/01-research, so repeat the secret/runtime-artifact boundary here.
+**/__pycache__
+**/*.pyc
+**/*.pyo
+.env*
+.dev.vars*
+**/auth.json
+**/*.sqlite3
+**/state.db*
+reports/

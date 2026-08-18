@@ -81,6 +81,7 @@ services:
     command: ["python", "departments/05-accounting-portfolio/ledger/consumer.py", "--serve"]
     environment:
       DATABASE_URL: ${DATABASE_URL:-}
+      ACCOUNTING_DATABASE_ROLE: ${ACCOUNTING_DATABASE_ROLE:-svc_accounting_ledger}
       LEDGER_CONSUMER_POLL_SECONDS: ${LEDGER_CONSUMER_POLL_SECONDS:-1.0}
       # 평가 시세. 컨테이너 안이라 127.0.0.1이 아니라 서비스 이름이다(market-api 주석과
       # 같은 사정). 못 붙으면 분개는 그대로 가고 NAV만 보류된다 - 시세가 없다고 체결

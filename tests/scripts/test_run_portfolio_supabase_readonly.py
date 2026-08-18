@@ -57,11 +57,11 @@ def test_diagnose_only_does_not_require_a_profile(monkeypatch, capsys) -> None:
     class Snapshot:
         def as_pipeline_context(self):
             return {
-                "source": "SUPABASE",
+                "source": "CONTROL_DB",
                 "as_of": "2026-08-04T00:00:00+00:00",
                 "quality_status": "PASS",
                 "candidates": [{"portfolio_id": "balanced"}],
-                "research": {"documents": [{}]},
+                "research": {"status": "REQUEST_TIME_MCP", "documents": []},
                 "market": {"snapshots": [{}]},
                 "reasons": [],
                 "read_only": True,
@@ -88,6 +88,8 @@ def test_diagnose_only_does_not_require_a_profile(monkeypatch, capsys) -> None:
     )
 
     assert exit_code == 0
-    assert '"candidate_count": 1' in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert '"candidate_count": 1' in output
+    assert '"research_mode": "REQUEST_TIME_MCP"' in output
     assert os.environ.get("DATABASE_URL") == before_database_url
     assert os.environ.get("LANGCHAIN_TRACING_V2") == before_tracing

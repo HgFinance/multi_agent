@@ -127,4 +127,4 @@ finally { $zip.Dispose() }
 
 $sizeMb = [Math]::Round((Get-Item $out).Length / 1MB, 1)
 Write-Host "ok - $out ($sizeMb MB)"
-Write-Host "다음: eb setenv DATABASE_URL=... 후 eb deploy (deploy/eb/README.md 3절)"
+Write-Host "다음: deploy/eb/README.md 3절대로 CONTROL_DATABASE_URL, PORTFOLIO_CORS_ALLOW_ORIGINS, SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY 등 필수값을 eb setenv 한 뒤 eb deploy"

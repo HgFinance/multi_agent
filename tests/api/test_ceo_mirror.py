@@ -10,8 +10,41 @@ from apps.api.ceo_mirror import (
     CanonicalIngress,
     InMemoryMirrorStore,
     MirrorEvent,
+    MirrorRequestConflict,
+    RedisMirrorStore,
     execute_once,
 )
+
+
+class _FakeRedis:
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+
+    def get(self, key: str) -> str | None:
+        return self.values.get(key)
+
+    def set(
+        self,
+        key: str,
+        value: str,
+        *,
+        nx: bool = False,
+        ex: int | None = None,
+    ) -> bool:
+        del ex
+        if nx and key in self.values:
+            return False
+        self.values[key] = value
+        return True
+
+
+def _fake_redis_mirror_store() -> RedisMirrorStore:
+    store = object.__new__(RedisMirrorStore)
+    store.client = _FakeRedis()
+    store.ttl_seconds = 60
+    store.request_prefix = "test:request:"
+    store.source_prefix = "test:source:"
+    return store
 
 
 class CeoMirrorExecutionTest(unittest.TestCase):
@@ -54,6 +87,44 @@ class CeoMirrorExecutionTest(unittest.TestCase):
         self.assertEqual(first.task_id, "t_web")
         self.assertFalse(first.duplicate)
         self.assertTrue(second.duplicate)
+
+    def test_request_id_cannot_be_rebound_across_any_authority_field(self) -> None:
+        original_values = {
+            "query": "삼성전자 10주 시장가 매수",
+            "request_id": "request-authority-1",
+            "source": "web",
+            "source_message_id": "web:authority:1",
+            "actor_id": "user-a",
+            "actor_type": "user",
+            "fund_id": "fund-a",
+            "book_id": "book-a",
+            "mirrored": False,
+        }
+        variants = {
+            "query": "삼성전자 11주 시장가 매수",
+            "source": "discord",
+            "source_message_id": "web:authority:2",
+            "actor_id": "user-b",
+            "actor_type": "system",
+            "fund_id": "fund-b",
+            "book_id": "book-b",
+            "mirrored": True,
+        }
+
+        for store_name, factory in (
+            ("memory", InMemoryMirrorStore),
+            ("redis", _fake_redis_mirror_store),
+        ):
+            for field, changed_value in variants.items():
+                with self.subTest(store=store_name, field=field):
+                    store = factory()
+                    original = CanonicalIngress(**original_values)
+                    store.claim_request(original)
+                    rebound = CanonicalIngress(
+                        **(original_values | {field: changed_value})
+                    )
+                    with self.assertRaises(MirrorRequestConflict):
+                        store.claim_request(rebound)
 
     def test_discord_runs_ceo_once_and_bot_echo_is_ignored(self) -> None:
         calls: list[str] = []
@@ -175,7 +246,7 @@ class CeoMirrorExecutionTest(unittest.TestCase):
         self.assertEqual(events[3].event_type, "CEO_FINAL")
         self.assertEqual(events[4].event_type, "QA_RESULT")
 
-    def test_mirror_ask_forwards_fund_id_to_ceo_query(self) -> None:
+    def test_mirror_ask_forwards_fund_and_book_to_ceo_query(self) -> None:
         """`/ui/ceo/ask`가 실제로 처리되는 곳은 여기다 - `ceo_router`가 아니라
         `ceo_mirror_router`가 `main.py`에서 먼저 등록돼 같은 경로를 가로챈다.
 
@@ -198,15 +269,17 @@ class CeoMirrorExecutionTest(unittest.TestCase):
                     query="mandate 인식 확인",
                     request_id="request-fund-1",
                     fund_id="fund-abc",
+                    book_id="book-abc",
                 ),
                 x_source_message_id=None,
                 x_actor_id=None,
-                x_user_id=None,
+                owner_id=None,
             )
 
         self.assertEqual(response["task_id"], "t_mandate")
         self.assertEqual(len(captured), 1)
         self.assertEqual(captured[0].fund_id, "fund-abc")
+        self.assertEqual(captured[0].book_id, "book-abc")
 
     def test_mirror_ask_without_fund_id_still_works(self) -> None:
         from apps.api.ceo import CeoAsk
@@ -222,7 +295,7 @@ class CeoMirrorExecutionTest(unittest.TestCase):
                 CeoAsk(query="fund 없는 질의", request_id="request-no-fund-1"),
                 x_source_message_id=None,
                 x_actor_id=None,
-                x_user_id=None,
+                owner_id=None,
             )
 
         self.assertEqual(response["task_id"], "t_no_fund")
@@ -249,7 +322,7 @@ class CeoMirrorExecutionTest(unittest.TestCase):
                 CeoAsk(query="계정 이력 확인", request_id="request-owner-1"),
                 x_source_message_id=None,
                 x_actor_id=None,
-                x_user_id="user-a",
+                owner_id="user-a",
             )
 
         self.assertEqual(captured, ["user-a"])
@@ -270,7 +343,7 @@ class CeoMirrorExecutionTest(unittest.TestCase):
                 CeoAsk(query="익명 질의", request_id="request-anon-1"),
                 x_source_message_id=None,
                 x_actor_id=None,
-                x_user_id=None,
+                owner_id=None,
             )
 
         self.assertEqual(captured, [None])

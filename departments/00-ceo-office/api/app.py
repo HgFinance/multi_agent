@@ -1251,12 +1251,19 @@ def get_mandate_current(mandate_id: str):
     # metadata 행이 있으면 그게 사용자가 마지막으로 저장한 최신 상태이므로
     # version 기반 경로보다 always 우선한다 - version 시스템은 이 override가
     # 없을 때만 쓰는 레거시 경로다.
+    get_access_context = getattr(
+        _mandate_repo, "get_mandate_access_context", None
+    )
+    access_context = (
+        get_access_context(mandate_id) if callable(get_access_context) else None
+    ) or {}
     get_metadata = getattr(_mandate_repo, "get_mandate_metadata", None)
     metadata = get_metadata(mandate_id) if callable(get_metadata) else None
     if metadata:
         policy = metadata.get("policy")
         return {
             "mandate_id": mandate_id,
+            **access_context,
             "case_id": None,
             "current_version": 0,
             "mandate_version_id": None,
@@ -1281,11 +1288,16 @@ def get_mandate_current(mandate_id: str):
                 not response.get("mandate_version_id") or not response.get("policy_hash")
             ):
                 raise HTTPException(status_code=503, detail="canonical_mandate_binding_unavailable")
-            return response
+            return {**access_context, **response}
 
     version, status = _mandate_repo.get_mandate_current(mandate_id)
     if version <= 0:
-        return {"mandate_id": mandate_id, "current_version": version, "status": status}
+        return {
+            "mandate_id": mandate_id,
+            **access_context,
+            "current_version": version,
+            "status": status,
+        }
     mandate_version_id = (
         _mandate_repo.get_mandate_version_id(mandate_id, version)
         if version > 0 else None
@@ -1298,6 +1310,7 @@ def get_mandate_current(mandate_id: str):
         raise HTTPException(status_code=503, detail="canonical_mandate_binding_unavailable")
     response = {
         "mandate_id": mandate_id,
+        **access_context,
         "case_id": None,
         "current_version": version,
         "mandate_version_id": mandate_version_id,

@@ -9,6 +9,7 @@ import {
   type PortfolioReadModel,
   type PortfolioPosition,
 } from "../lib/portfolioSnapshotClient";
+import { PORTFOLIO_SCOPE_CHANGED_EVENT } from "../lib/currentFund";
 import { ACCOUNT_CHANGED_EVENT } from "../lib/currentAccount";
 
 const STATUS_LABELS: Record<string, string> = {
@@ -293,9 +294,11 @@ export default function PortfolioSnapshotPanel() {
     };
 
     refresh();
+    window.addEventListener(PORTFOLIO_SCOPE_CHANGED_EVENT, refresh);
     window.addEventListener(ACCOUNT_CHANGED_EVENT, refresh);
     return () => {
       alive = false;
+      window.removeEventListener(PORTFOLIO_SCOPE_CHANGED_EVENT, refresh);
       window.removeEventListener(ACCOUNT_CHANGED_EVENT, refresh);
     };
   }, [reloadKey]);

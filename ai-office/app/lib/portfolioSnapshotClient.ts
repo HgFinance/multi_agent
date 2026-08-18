@@ -5,8 +5,8 @@
  * 바꾸지 않아 Decimal 정밀도와 DEMO/PAPER 출처 구분을 그대로 유지한다.
  */
 
-import { BFF } from "./ceoClient";
-import { currentFundId, withAccountHeaders } from "./currentAccount";
+import { BFF, bffFetch } from "./bffClient";
+import { currentFundId } from "./currentFund";
 import { loadMandateForFund } from "./mandateClient";
 
 export type SnapshotMode = "DEMO" | "PAPER" | "LIVE";
@@ -37,8 +37,12 @@ export type PortfolioSnapshot = {
   nav: string | null;
   cash: string | null;
   securities_value: string | null;
+  gross_exposure: string | null;
+  net_exposure: string | null;
   realized_pnl: string | null;
   unrealized_pnl: string | null;
+  fees: string | null;
+  taxes: string | null;
   allocation: AssetAllocation[];
   positions: PortfolioPosition[];
 };
@@ -179,9 +183,9 @@ export async function fetchPortfolioSnapshot(): Promise<PortfolioReadModel> {
   const query = fundId ? `?fund_id=${encodeURIComponent(fundId)}` : "";
   let response: Response;
   try {
-    response = await fetch(`${BFF}/ui/snapshot${query}`, {
+    response = await bffFetch(`/ui/snapshot${query}`, {
       cache: "no-store",
-      headers: withAccountHeaders({ Accept: "application/json" }),
+      headers: { Accept: "application/json" },
     });
   } catch {
     throw new Error(

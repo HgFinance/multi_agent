@@ -910,7 +910,9 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         res = resolve_data(
             execution_products, meta_conn=conn, market_conn=market_conn,
             research_lane=str((hyp.get("expected_edge") or {}).get(
-                "research_lane") or ""))
+                "research_lane") or ""),
+            requested_event_source=str((hyp.get("expected_edge") or {}).get(
+                "data_source") or "AUTO"))
         if not res.ok:
             return OrchestratorReport(
                 hypothesis_id=str(hid), title=title, verdict="NOT_RUNNABLE",
@@ -918,6 +920,13 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
                 backlog=list(res.notes))
         # 이후 단계는 실행면 이름만 쓴다 - 원천 이름이 더 내려가면 안 된다.
         hyp["required_data_products"] = list(res.datasets)
+        if getattr(res, "execution_contract", None):
+            resolved_edge = dict(hyp.get("expected_edge") or {})
+            resolved_edge["data_source"] = res.execution_contract[
+                "event_source"]
+            resolved_edge["resolved_data_contract"] = dict(
+                res.execution_contract)
+            hyp["expected_edge"] = resolved_edge
 
         ok, missing, backlog = feasibility(hyp, set(res.datasets))
         report = OrchestratorReport(hypothesis_id=str(hid), title=title,
@@ -986,7 +995,9 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
                     "threshold": edge.get("threshold", 0.0),
                 },
                 "cost_model_version": "krx-intraday-execution-v3",
-                "universe_version": "krx-intraday-events/v1",
+                "universe_version": (
+                    (edge.get("resolved_data_contract") or {}).get("dataset")
+                    or "krx-intraday-events/v1"),
             })
         else:
             spec_row.setdefault("holding_horizon", edge.get("horizon_days"))

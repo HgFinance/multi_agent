@@ -157,7 +157,7 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 | AI Office Server Render Test | `2/2 passed` | 이전 조직명 Test Blocker 해소 |
 | AI Office dependency audit | 18건 | High 13, Moderate 4, Low 1. Upgrade 영향 검토 필요 |
 | Hermes Profile Contract | 실패 2건, 경고 5건 | Risk·QA 모델 선언 불일치, 5개 Profile Tool Allowlist 미선언 |
-| Risk·QA Credential Preflight | 필수 2개 누락 | `QA_POLICY_SOURCE_ID`, `OPENAI_API_KEY` |
+| Risk·QA Credential Preflight | 비시장 적재 경계 변경 | 요청형 MCP 사용, legacy evidence writer 기본 비활성화 |
 | Risk·QA Report/Notion 회귀 | `18 passed` | Reporter 실패가 Risk·QA 판정을 바꾸지 않는지 검증 |
 
 전체 Python Test의 유일한 Assertion 실패는 `20260802002200_research_as_known_at.sql`을
@@ -255,7 +255,7 @@ Market API의 2026-08-03 거래일 DQ 응답은 348개 Symbol, 최근 10분 Tick
 **애로사항과 남은 경계**
 
 - Risk·QA는 Compose Service가 아니며 Canonical Risk Decision과 Run Log가 0건이다.
-- 운영 Credential에서 `QA_POLICY_SOURCE_ID`, `OPENAI_API_KEY`가 비어 있다.
+- 비시장 근거는 요청형 MCP로 조회하며 legacy evidence writer는 운영에서 비활성화한다.
 - Risk·QA 부서장 모델은 `head_runtime`의 `openai-codex/gpt-5.6-luna`, 직원 모델은 `employee_runtime`의 LangGraph/Ollama `qwen3:1.7b`로 분리됐다. Profile Checker도 이 두 계층을 각각 검증해야 한다.
 - QA/Risk Script의 직원 Ollama 주소·모델은 `OLLAMA_BASE_URL`·`OLLAMA_CHAT_MODEL` 환경변수로 주입된다. 실제 Ollama Health와 응답 증거는 운영 전 별도 확인한다.
 - Risk·QA의 기존 Profile row는 FK·감사 이력용 DRAFT/PROBATION 호환 레코드이며, 현재 실행 직원 수는 Risk 2명(LLM 1 + `risk-runner`)·QA 3명(LLM 2 + `qa-runner`)이다. Governed Fund·Policy·ACTIVE 승인 경로는 여전히 운영 조건이다.

@@ -17,6 +17,7 @@ from orchestration.adapters.ceo_supervisor import (
     parse_supervisor_output,
 )
 from orchestration.ceo_workflow_scope import (
+    UserPaperOrderScope,
     WorkflowScopeViolation,
     build_root_body,
     build_scoped_task_body,
@@ -1126,6 +1127,50 @@ class SupervisorWakeupTest(unittest.TestCase):
         self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
         self.assertEqual(client.created[0]["parent_task_ids"], ("qa",))
         self.assertIn("workflow_mode=binding", client.created[0]["body"])
+
+    def test_user_paper_order_skips_strategy_qa_even_if_event_requests_it(self) -> None:
+        client = FakeClient()
+        client.root_body = build_root_body(
+            "삼성전자 10주 시장가 매수",
+            "req-paper-order",
+            workflow_mode="binding",
+            user_paper_order_scope=UserPaperOrderScope(
+                order_request_id="order-request-1",
+                raw_instruction_sha256="a" * 64,
+                fund_id="fund-a",
+                book_id="book-a",
+            ),
+        )
+        client.payloads = [
+            {
+                "id": "trading",
+                "assignee": "trading-department",
+                "status": "done",
+                "summary": "PAPER order tool completed",
+                "body": "workflow_root_task_id=root\nworkflow_role=primary",
+            }
+        ]
+        client.comments = [
+            {
+                "task_id": "root",
+                "body": "selected_primary_profiles=trading-department",
+            }
+        ]
+
+        decision = CeoSupervisorService(client).handle_terminal_event(
+            {
+                "event_id": "paper-order-done",
+                "task_id": "trading",
+                "kind": "completed",
+                "qa_required": True,
+            }
+        )
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
+        self.assertEqual(
+            [item["assignee"] for item in client.created], ["ceo-agent"]
+        )
 
     def test_root_body_declares_scope_only_planning_contract(self) -> None:
         body = build_root_body("Samsung", "req-1")

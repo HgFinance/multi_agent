@@ -115,6 +115,7 @@ ALL_OPS = frozenset({FIELD_OP}) | TEMPORAL_OPS | UNARY_OPS | BINARY_OPS | TERNAR
 WALL_TIME_CLOCK = "WALL_TIME_SECONDS"
 QUOTE_EVENT_CLOCK = "QUOTE_SNAPSHOT_EVENT"
 TRADE_VOLUME_CLOCK = "PRINTED_TRADE_VOLUME"
+DECISION_SNAPSHOT_CLOCK = "DECISION_SNAPSHOT"
 QUOTE_EVENT_CLOCK_FIELDS = frozenset({
     "quote_event_ofi", "normalized_quote_ofi",
     "multi_level_quote_ofi_l10", "normalized_multi_level_quote_ofi_l10",
@@ -396,6 +397,18 @@ def clock_domains_of(expr: dict) -> set[str]:
     if any(operator in TEMPORAL_OPS for operator in operators_of(node)):
         domains.add(WALL_TIME_CLOCK)
     return domains
+
+
+def effective_clock_domains_of(expr: dict) -> set[str]:
+    """Return a non-empty behavior clock for search/archive coordinates.
+
+    A level-only formula has no rolling, event-count, or volume window.  It is
+    nevertheless evaluated causally at the current decision snapshot.  Keeping
+    that coordinate explicit avoids conflating an instantaneous state with the
+    separate EVENT_TIME_HISTORICAL_ONLY knowledge-clock policy.
+    """
+    domains = clock_domains_of(expr)
+    return domains or {DECISION_SNAPSHOT_CLOCK}
 
 
 def operators_of(expr: dict) -> set[str]:

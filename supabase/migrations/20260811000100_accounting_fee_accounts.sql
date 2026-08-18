@@ -13,11 +13,19 @@ begin;
 -- 며칠 안에 현금으로 나간다. 보수는 확정(crystallization) 전까지 남아 있는 부채라
 -- 한 계정에 섞이면 결제 사다리와 보수 잔액을 구분할 수 없다.
 
-insert into accounting.ledger_accounts (account_id, account_code, name, account_type, currency)
-values
-  ('00000000-0000-0000-0000-000000002100', '2100', '미지급보수',   'LIABILITY', 'KRW'),
-  ('00000000-0000-0000-0000-000000005200', '5200', '관리보수비용', 'EXPENSE',   'KRW'),
-  ('00000000-0000-0000-0000-000000005300', '5300', '성과보수비용', 'EXPENSE',   'KRW')
-on conflict (account_code) do nothing;
+-- ledger_accounts is fund-scoped: both the NOT NULL column and the durable
+-- uniqueness contract are `(fund_id, account_code)`.  A previous version of
+-- this migration omitted fund_id and targeted a non-existent global unique
+-- constraint, which made a clean local/preview database unreproducible.
+insert into accounting.ledger_accounts
+  (fund_id, account_code, name, account_type, currency)
+select f.fund_id, v.account_code, v.name, v.account_type, f.base_currency
+  from accounting.funds f
+ cross join (values
+   ('2100', '미지급보수',   'LIABILITY'),
+   ('5200', '관리보수비용', 'EXPENSE'),
+   ('5300', '성과보수비용', 'EXPENSE')
+ ) as v(account_code, name, account_type)
+on conflict (fund_id, account_code) do nothing;
 
 commit;

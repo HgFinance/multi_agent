@@ -29,7 +29,8 @@
 #   그러면 `/ui/investor-profiles`가 503이고 적합성 프로필이 저장되지 않는다.
 #   `departments/05-accounting-portfolio/api/app.py`는 `load_dotenv`를 부르지
 #   않으므로 `DATABASE_URL`도 반드시 프로세스 환경으로 넘겨야 한다.
-# - 저장 대상은 `.env`의 `DATABASE_URL`이 가리키는 DB다(현재 AWS Supabase).
+# - 저장 대상은 `LOCAL_CONTROL_DATABASE_URL`이다. 값이 없으면 로컬 Supabase
+#   PostgreSQL(`127.0.0.1:54322`)을 사용하며, hosted Supabase 주소는 거부한다.
 #
 # 사용: ./scripts/run_local_stack.sh [start|stop|status]
 
@@ -75,23 +76,37 @@ case "${1:-start}" in
     ;;
 esac
 
-# `.env`에서 DATABASE_URL만 꺼낸다. 값은 출력하지 않는다.
-DATABASE_URL="$("$PY" -c "
-import io,sys
+# `.env`에서는 로컬 control DB 계약만 꺼낸다. 값은 출력하지 않는다.
+# 일반 DATABASE_URL은 hosted DB를 가리킬 수 있으므로 의도적으로 무시한다.
+LOCAL_CONTROL_DATABASE_URL="${LOCAL_CONTROL_DATABASE_URL:-$("$PY" -c "
+import io
 try:
     for l in io.open('.env',encoding='utf-8',errors='replace'):
         l=l.strip()
-        if l.startswith('DATABASE_URL='):
+        if l.startswith('LOCAL_CONTROL_DATABASE_URL='):
             print(l.split('=',1)[1].strip().strip('\"').strip(\"'\")); break
 except FileNotFoundError: pass
-")"
-if [ -z "$DATABASE_URL" ]; then
-  echo "경고: .env에 DATABASE_URL이 없습니다. 저장이 되지 않고 인메모리로 뜹니다." >&2
+")}"
+LOCAL_CONTROL_DATABASE_URL="${LOCAL_CONTROL_DATABASE_URL:-postgresql://postgres:postgres@127.0.0.1:54322/postgres}"
+if ! LOCAL_CONTROL_DATABASE_URL="$LOCAL_CONTROL_DATABASE_URL" "$PY" -c '
+import os, sys
+from urllib.parse import urlsplit
+host = (urlsplit(os.environ["LOCAL_CONTROL_DATABASE_URL"]).hostname or "").lower()
+if not host or host.endswith(".supabase.co") or host.endswith(".supabase.com"):
+    sys.exit(1)
+'; then
+  echo "오류: LOCAL_CONTROL_DATABASE_URL은 hosted Supabase가 아닌 로컬/private control DB여야 합니다." >&2
+  exit 1
 fi
-export DATABASE_URL
+export LOCAL_CONTROL_DATABASE_URL
+export CONTROL_DATABASE_URL="$LOCAL_CONTROL_DATABASE_URL"
+export DATABASE_URL="$LOCAL_CONTROL_DATABASE_URL"
 export ACCOUNTING_MODE="${ACCOUNTING_MODE:-PAPER_DB}"
 export GOVERNANCE_API_URL="http://127.0.0.1:$GOV_PORT"
 export PORTFOLIO_API_URL="http://127.0.0.1:$ACC_PORT"
+export APP_ENV="local"
+export PORTFOLIO_AUTH_MODE="fixture"
+export PORTFOLIO_AUTH_REQUIRED="false"
 
 mkdir -p "$LOG_DIR"
 for p in "$BFF_PORT" "$GOV_PORT" "$ACC_PORT"; do stop_port "$p"; done

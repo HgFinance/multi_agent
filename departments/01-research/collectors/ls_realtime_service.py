@@ -10,13 +10,13 @@
       ^                       |  WebSocket -> normalize -> MarketSink -> TimescaleDB
       +-----------------------+  세션 끝/오류 -> 통계 출력 -> 다음 세션 대기
 
-  ▶ 뉴스(news_watch_service)와 달리 **세션 창 개념이 있다.** 뉴스는 24시간
+  ▶ 실시간 시세에는 **거래 세션 창 개념이 있다.**
     폴링이지만 시세는 장 밖에서 소켓을 열어 봐야 조용한 연결만 유지된다.
     세션 판정은 Calendar 를 따르되, Calendar 가 오늘을 모르면
     make_trading_day_check 와 같은 원칙으로 **평일은 거래일로 간주**하고
     calendar_unverified 로 기록한다 (주말은 KRX 개장 전례가 없어 비거래로 본다).
 
-  ▶ 구독은 news 와 같은 watchlist 파일을 쓴다 (시가총액 상위 70종목 = 140구독,
+  ▶ 구독은 명시적 시장 Universe 파일을 쓴다 (시가총액 상위 70종목 = 140구독,
     소켓당 한도 200 이내). venue 별 tr_cd 는 subscription_plan.TR_MATRIX 가
     권위다 - 코스피 S3_/H1_, 코스닥 K3_/HA_ 를 섞어 한 소켓으로 받는다.
 
@@ -25,7 +25,7 @@
 
 환경변수 (전부 선택)
   LS_WATCH_SYMBOLS            쉼표 구분 KRX 종목코드 (최우선)
-  LS_WATCH_SYMBOLS_FILE       기본 config/news_watchlist.txt (뉴스와 같은 70종목)
+  LS_WATCH_SYMBOLS_FILE       기본 config/full_universe.txt (국내 주식 전종목)
   LS_PRE_OPEN_MINUTES         개장 전 수집 시작 여유, 기본 35 (동시호가 08:30 포함)
   LS_POST_CLOSE_MINUTES       마감 후 잔여 수신 여유, 기본 10
 
@@ -59,7 +59,7 @@ from ls_realtime_worker import (
     market_env,
     market_rest_client,
 )
-from news_watch_service import parse_watchlist_file
+from symbol_universe import parse_symbol_file
 from source_registry import SourceRegistry, load_project_env
 from subscription_plan import (
     SUBSCRIPTIONS_PER_SOCKET,
@@ -331,10 +331,10 @@ def load_symbols(env: dict) -> tuple[str, ...]:
     )
     if explicit:
         return explicit
-    path = Path((env.get("LS_WATCH_SYMBOLS_FILE") or "config/news_watchlist.txt").strip())
+    path = Path((env.get("LS_WATCH_SYMBOLS_FILE") or "config/full_universe.txt").strip())
     if not path.exists():
         raise LsRealtimeError(f"LS_WATCH_SYMBOLS_FILE 이 없다: {path}")
-    symbols = parse_watchlist_file(path.read_text(encoding="utf-8"))
+    symbols = parse_symbol_file(path.read_text(encoding="utf-8"))
     if not symbols:
         raise LsRealtimeError(f"LS_WATCH_SYMBOLS_FILE 이 비어 있다: {path}")
     return symbols

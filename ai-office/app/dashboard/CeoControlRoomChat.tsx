@@ -8,11 +8,17 @@ import {
   ceoWorkflowResult,
   ceoWorkflowStatus,
   listCeoTasks,
+  paperOrderWorkflowStatus,
   TERMINAL_WORKFLOW_STATUSES,
   type CardOutcome,
   type CeoQueryPlanning,
 } from "../lib/ceoClient";
-import { readStoredAccountId, subscribeToAccountChange } from "../lib/currentAccount";
+import { useAuth } from "../lib/AuthProvider";
+import { usePortfolioSession } from "../lib/PortfolioSessionProvider";
+import {
+  authorizedBooksForFund,
+  selectedAuthorizedBook,
+} from "../lib/paperOrderClient";
 import { PanelBar } from "./PanelBar";
 
 /**
@@ -36,7 +42,7 @@ const QUICK_QUESTIONS = [
 const INITIAL_AI_MESSAGE: ChatMessage = {
   id: "ai-intro",
   role: "ai",
-  text: "자연어로 질문하면 CEO Hermes가 업무를 만들고, 결과는 Kanban에서 추적됩니다.",
+  text: "자연어로 자문을 요청하거나 PAPER 주문을 지시하면 CEO Hermes가 업무를 만들고, 결과는 Kanban에서 추적됩니다.",
 };
 
 /** 워크플로 단계 상태 -> 이력 말풍선에 보여줄 한국어. */
@@ -48,6 +54,14 @@ const WORKFLOW_STATUS_LABEL: Record<string, string> = {
   completed: "완료",
   archived: "보관됨",
 };
+
+const PAPER_ORDER_TERMINAL_STATES = new Set([
+  "CLARIFICATION_REQUIRED",
+  "NOT_ORDER",
+  "REJECTED",
+  "COMPLETED",
+  "FAILED",
+]);
 
 type ChatMessage = {
   id: string;
@@ -72,21 +86,40 @@ const OUTCOME_VIEW: Record<CardOutcome, { label: string; tone: string }> = {
 };
 
 export function CeoControlRoomChat() {
+  const auth = useAuth();
+  const portfolio = usePortfolioSession();
+  const accountId = auth.userId ?? "unauthenticated";
+  const scopeKey = `${accountId}:${portfolio.activeFundId ?? "no-fund"}`;
+  return <CeoControlRoomChatSession key={scopeKey} accountId={accountId} />;
+}
+
+function CeoControlRoomChatSession({ accountId }: { accountId: string }) {
+  const portfolio = usePortfolioSession();
+  const authorizedBooks = useMemo(
+    () => authorizedBooksForFund(portfolio.profile, portfolio.activeFundId),
+    [portfolio.activeFundId, portfolio.profile],
+  );
+  const [requestedBookId, setRequestedBookId] = useState("");
+  const selectedBook =
+    authorizedBooks.length === 1
+      ? authorizedBooks[0]
+      : selectedAuthorizedBook(authorizedBooks, requestedBookId);
+  const selectedBookId = selectedBook?.bookId ?? "";
   const [draft, setDraft] = useState("");
   // 이번 방문에서 사용자가 보낸 대화만 담는다 - 서버 이력은 아래 `historyMessages`가
   // 쿼리 캐시에서 따로 만든다. 계정 전환 시 이 배열만 비우면 되고, 이력 조회
   // 자체가 실패해도 여기 담긴 대화는 지워지지 않는다(캐시된 `data`는 refetch가
   // 실패해도 이전 값을 유지하는 TanStack Query의 기본 동작).
   const [sessionMessages, setSessionMessages] = useState<ChatMessage[]>([]);
-  const [accountId, setAccountId] = useState<string>(() => readStoredAccountId());
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const [activeOrderRequestId, setActiveOrderRequestId] = useState<string | null>(null);
 
   // 계정별 이력 목록. 계정을 전환했다가 다시 돌아오면 캐시 히트로 즉시 뜨고,
   // 재조회가 실패해도 `data`는 마지막 성공값 그대로 남는다 - 화면이 비는 대신
   // `isError`만 별도로 받는다.
   const tasksQuery = useQuery({
     queryKey: ["ceo", "tasks", accountId],
-    queryFn: () => listCeoTasks(accountId),
+    queryFn: () => listCeoTasks(),
   });
 
   // 서버는 최신순으로 준다 - 채팅은 오래된 것부터 쌓여야 한다.
@@ -161,16 +194,6 @@ export function CeoControlRoomChat() {
   // 구독되고, 진행 중이던 이번 세션 대화는 새 계정 것이 아니므로 비운다.
   // 이 setState들은 effect 본문이 아니라 이벤트 콜백 안에서만 실행되므로
   // 커밋 중 렌더 캐스케이드가 생기지 않는다.
-  useEffect(
-    () =>
-      subscribeToAccountChange(() => {
-        setAccountId(readStoredAccountId());
-        setSessionMessages([]);
-        setActiveTaskId(null);
-      }),
-    [],
-  );
-
   // 본부별 진행 — 10초 간격. `all_terminal`은 status+graph만으로 계산되므로
   // (요약 유무는 ANSWERED/NO_ANSWER만 가르고 둘 다 terminal) 아직 안 온
   // `resultQuery` 없이도 멈춤 여부를 판정할 수 있다.
@@ -200,7 +223,22 @@ export function CeoControlRoomChat() {
     [statusQuery.data, resultQuery.data],
   );
 
-  const sendMutation = useMutation({ mutationFn: (text: string) => askCeo(text) });
+  const sendMutation = useMutation({
+    mutationFn: ({ text, bookId }: { text: string; bookId?: string }) =>
+      askCeo(text, undefined, bookId),
+  });
+
+  const orderStatusQuery = useQuery({
+    queryKey: ["ceo", "paper-order", activeOrderRequestId],
+    queryFn: () => paperOrderWorkflowStatus(activeOrderRequestId as string),
+    enabled: Boolean(activeOrderRequestId),
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      const state = data?.state;
+      if (state === "UNKNOWN") return data?.directive ? 10_000 : false;
+      return state && PAPER_ORDER_TERMINAL_STATES.has(state) ? false : 2_000;
+    },
+  });
 
   async function send(text: string) {
     const value = text.trim();
@@ -208,7 +246,10 @@ export function CeoControlRoomChat() {
     setDraft("");
     setSessionMessages((prev) => [...prev, { id: `u-${Date.now()}`, role: "user", text: value }]);
     try {
-      const response = await sendMutation.mutateAsync(value);
+      const response = await sendMutation.mutateAsync({
+        text: value,
+        ...(selectedBookId ? { bookId: selectedBookId } : {}),
+      });
       setSessionMessages((prev) => [
         ...prev,
         {
@@ -220,6 +261,7 @@ export function CeoControlRoomChat() {
         },
       ]);
       setActiveTaskId(response.task_id);
+      setActiveOrderRequestId(response.order_request_id ?? null);
     } catch {
       // 실패 원인은 `sendMutation.error`로 이미 들고 있다 - 아래 에러 배너가 보여준다.
     }
@@ -239,11 +281,56 @@ export function CeoControlRoomChat() {
   return (
     <section className="lg:col-span-1 bg-surface-container-lowest border border-outline-variant rounded-lg overflow-hidden shadow-sm flex flex-col">
       <PanelBar icon="terminal" title="CEO Control Room">
-        <span className="flex items-center gap-1.5 text-xs text-on-surface-variant">
-          <span className="w-2 h-2 rounded-full bg-tertiary-fixed-dim" aria-hidden="true" />
-          Hermes endpoint
+        <span className="rounded-full border border-error/40 bg-error-container px-2 py-0.5 text-[10px] font-bold text-on-error-container">
+          PAPER ONLY · LIVE 아님
         </span>
       </PanelBar>
+
+      <div className="border-b border-outline-variant bg-surface-container-low px-4 py-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="m-0 text-xs font-bold text-error">모든 주문 명령은 PAPER로만 실행됩니다.</p>
+            <p className="mt-1 mb-0 text-[11px] text-on-surface-variant">
+              같은 채팅에서 일반 자문과 주문 명령을 전달할 수 있으며 LIVE 주문은 지원하지 않습니다.
+            </p>
+          </div>
+
+          {authorizedBooks.length > 1 ? (
+            <label className="min-w-[190px] text-[11px] font-bold text-on-surface-variant">
+              PAPER 주문 Book
+              <select
+                value={selectedBookId}
+                onChange={(event) => setRequestedBookId(event.target.value)}
+                className="mt-1 block w-full rounded border border-outline-variant bg-surface px-2 py-1.5 text-xs font-normal text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+                aria-describedby="ceo-paper-book-help"
+              >
+                <option value="">주문할 Book 선택</option>
+                {authorizedBooks.map((book) => (
+                  <option key={book.bookId} value={book.bookId}>
+                    {book.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+        </div>
+
+        <p
+          id="ceo-paper-book-help"
+          role={authorizedBooks.length === 0 ? "status" : undefined}
+          className={`mt-2 mb-0 text-[11px] ${
+            authorizedBooks.length === 0 ? "text-error" : "text-on-surface-variant"
+          }`}
+        >
+          {authorizedBooks.length === 0
+            ? "이 펀드에 승인된 PAPER Book이 없어 주문은 실행할 수 없습니다. 일반 조회와 자문은 계속 사용할 수 있습니다."
+            : authorizedBooks.length === 1
+              ? `주문 대상: ${authorizedBooks[0].name} (자동 선택)`
+              : selectedBook
+                ? `주문 대상: ${selectedBook.name}`
+                : "주문 명령을 보낼 때만 Book을 선택하세요. 선택하지 않아도 일반 조회와 자문은 사용할 수 있습니다."}
+        </p>
+      </div>
 
       <div
         ref={chatRef}
@@ -367,6 +454,36 @@ export function CeoControlRoomChat() {
                     ) : null}
                   </div>
                 ) : null}
+
+                {activeOrderRequestId ? (
+                  <div
+                    className="self-start max-w-[92%] border border-primary/30 rounded p-3 bg-secondary-container/20"
+                    aria-live="polite"
+                  >
+                    <div className="text-xs font-bold text-primary">PAPER 주문 상태</div>
+                    <p className="mt-1 mb-0 text-xs text-on-surface">
+                      {orderStatusQuery.data?.state ?? "INTERPRETING"}
+                    </p>
+                    {orderStatusQuery.data?.clarification_code ? (
+                      <p className="mt-1 mb-0 text-[11px] text-error">
+                        확인 필요: {orderStatusQuery.data.clarification_code}
+                      </p>
+                    ) : null}
+                    {orderStatusQuery.data?.error_code ? (
+                      <p className="mt-1 mb-0 text-[11px] text-error">
+                        {orderStatusQuery.data.error_code}
+                      </p>
+                    ) : null}
+                    {orderStatusQuery.isError ? (
+                      <p className="mt-1 mb-0 text-[11px] text-error">
+                        주문 상태를 다시 확인하고 있습니다.
+                      </p>
+                    ) : null}
+                    <code className="mt-1 block text-[10px] text-outline">
+                      {activeOrderRequestId}
+                    </code>
+                  </div>
+                ) : null}
               </>
             ) : null}
           </div>
@@ -392,13 +509,15 @@ export function CeoControlRoomChat() {
                 void send(draft);
               }
             }}
-            placeholder="예: 오늘 리스크가 큰 업무만 먼저 브리핑해줘"
+            placeholder="예: 오늘 리스크를 브리핑해줘 / 삼성전자 10주 시장가 매수"
             className="w-full p-3 bg-surface rounded border border-outline-variant focus:border-primary focus:ring-1 focus:ring-primary focus:outline-none text-body-sm font-body-sm resize-none"
           />
         </label>
 
         <div className="flex justify-between items-center gap-3 mt-2">
-          <span className="text-xs text-outline">{draft.length}/2000 · 조회와 자문만 수행합니다</span>
+          <span className="text-xs text-outline">
+            {draft.length}/2000 · 자문 + PAPER 주문 · LIVE 아님
+          </span>
           <button
             type="button"
             onClick={() => void send(draft)}

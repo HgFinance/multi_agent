@@ -34,6 +34,7 @@ COPY oms ./oms
 COPY broker ./broker
 COPY multileg ./multileg
 COPY capability ./capability
+COPY directives ./directives
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 

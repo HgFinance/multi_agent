@@ -1,4 +1,4 @@
-"""Async TEST/Supabase-read-only pipeline for user suitability and all investment departments.
+"""Async TEST/control-DB-read-only pipeline for suitability and investment departments.
 
 The graph connects Research -> Trading -> Risk -> QA -> Accounting -> CEO.
 Each department stage uses LangGraph ``Send`` fan-out to independent Worker
@@ -466,14 +466,14 @@ def _load_suitability() -> Any:
     return module
 
 
-def _load_supabase_adapter() -> Any:
-    name = "portfolio_supabase_readonly"
+def _load_control_db_adapter() -> Any:
+    name = "portfolio_control_db_readonly"
     if name in sys.modules:
         return sys.modules[name]
     path = ROOT / "departments/05-accounting-portfolio/portfolio/supabase_readonly.py"
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
-        raise ImportError(f"Supabase read-only adapter unavailable: {path}")
+        raise ImportError(f"control-database read-only adapter unavailable: {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)
@@ -643,7 +643,7 @@ def _stage_payload(state: PortfolioPipelineState, stage: str) -> dict[str, Any]:
     research_context = data_context.get("research", {})
     market_context = data_context.get("market", {})
     accounting_context = data_context.get("accounting", {})
-    live_source = data_context.get("source") == "SUPABASE"
+    live_source = data_context.get("source") == "CONTROL_DB"
     default_status = "LIVE" if live_source else "TEST"
     optional_inputs: dict[str, Any] = {
         "compliance": data_context.get("compliance", state.get("compliance", {})),
@@ -1220,7 +1220,7 @@ def build_portfolio_recommendation_graph(
         )
         # The TEST fixture deliberately carries one unsupported claim so the
         # hallucination worker is exercised without turning WARN into PASS.
-        unsupported_claim_fixture = state.get("data_context", {}).get("source") != "SUPABASE"
+        unsupported_claim_fixture = state.get("data_context", {}).get("source") != "CONTROL_DB"
         live_data_quality = state.get("data_context", {}).get("quality_status", "TEST")
         upstream_safe = upstream_contracts_safe(state, ("research", "risk"))
         decision = (
@@ -1255,7 +1255,7 @@ def build_portfolio_recommendation_graph(
             return True
         market = data_context.get("market", {})
         return (
-            data_context.get("source") == "SUPABASE"
+            data_context.get("source") == "CONTROL_DB"
             and data_context.get("quality_status") == "PASS"
             and bool(state.get("portfolio_candidates"))
             and bool(market.get("snapshots"))
@@ -1267,7 +1267,7 @@ def build_portfolio_recommendation_graph(
         reasons = diagnostics.get("reasons") or data_context.get("reasons") or ["PIT_DATA_NOT_READY"]
         counts = (
             f"후보 {diagnostics.get('candidate_count', len(state.get('portfolio_candidates', [])))}개 · "
-            f"연구 문서 {diagnostics.get('research_document_count', 0)}개 · "
+            f"research {diagnostics.get('research_mode', 'REQUEST_TIME_MCP')} · "
             f"시장 스냅샷 {diagnostics.get('market_snapshot_count', 0)}개 · "
             f"국내 종목 {diagnostics.get('domestic_instrument_count', 0)}개"
         )
@@ -1711,17 +1711,17 @@ async def run_portfolio_recommendation_pipeline_async(
     data_adapter: Any | None = None,
     event_callback: RuntimeEventCallback | None = None,
 ) -> dict[str, Any]:
-    """Run complete async graph with TEST or Supabase read-only inputs.
+    """Run complete async graph with TEST or private control-database inputs.
 
     Passing candidates explicitly keeps deterministic TEST callers stable. If
-    omitted, the adapter loads canonical PIT data from Supabase and an adapter
+    omitted, the adapter loads canonical PIT data from the control database and an adapter
     failure remains a degraded, HOLD result.
     """
 
     data_context: Mapping[str, Any] | None = None
     if candidates is None:
-        adapter_module = _load_supabase_adapter()
-        adapter = data_adapter or adapter_module.SupabaseReadOnlyAdapter()
+        adapter_module = _load_control_db_adapter()
+        adapter = data_adapter or adapter_module.ControlDbReadOnlyAdapter()
         snapshot = await adapter.load_snapshot(
             as_of=profile.get("as_of", ""),
             fund_id=profile.get("fund_id"),

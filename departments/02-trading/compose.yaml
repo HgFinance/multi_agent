@@ -42,8 +42,49 @@ services:
       # 로컬 오프라인/테스트 모드를 선택할 수 있다.
       PAPER_DB: ${PAPER_DB:-true}
       DATABASE_URL: ${DATABASE_URL:-}
+      APP_ENV: ${APP_ENV:-development}
+      TRADING_EXECUTION_MODE: PAPER
+      TRADING_BROKER_ADAPTER: paper
+      TRADING_DIRECTIVE_REPOSITORY: postgres
+      TRADING_DATABASE_ROLE: ${TRADING_DATABASE_ROLE:-svc_trading_api}
+      TRADING_AUTH_MODE: ${TRADING_AUTH_MODE:-service}
+      TRADING_SERVICE_AUTH_SECRET: ${TRADING_SERVICE_AUTH_SECRET:?A 32-byte trading service proof secret is required}
+      TRADING_SERVICE_AUTH_ISSUER: ${TRADING_SERVICE_AUTH_ISSUER:-portfolio-bff}
+      TRADING_SERVICE_AUTH_AUDIENCE: ${TRADING_SERVICE_AUTH_AUDIENCE:-trading-api}
+      # Separate verifier for legacy OMS mutations. Never mount this secret in
+      # Hermes; a trusted internal issuer grants the route-specific scopes.
+      TRADING_INTERNAL_SERVICE_AUTH_SECRET: ${TRADING_INTERNAL_SERVICE_AUTH_SECRET:?A separate 32-byte internal Trading auth secret is required}
+      TRADING_INTERNAL_SERVICE_AUTH_ISSUER: ${TRADING_INTERNAL_SERVICE_AUTH_ISSUER:-hedgefund-service-issuer}
+      TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE: ${TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE:-trading-api}
+      MARKET_API_URL: ${MARKET_API_URL:-http://market-api:8036}
     ports:
       - "127.0.0.1:8045:8000"   # 로컬 전용 - 외부 노출 금지 (risk-api 8041 이하 같은 정책)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+
+  trading-directive-worker:
+    build:
+      context: .
+    container_name: hedgefund-trading-directive-worker
+    restart: unless-stopped
+    command: ["python", "-m", "directives.worker"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-}
+      APP_ENV: ${APP_ENV:-development}
+      TRADING_EXECUTION_MODE: PAPER
+      TRADING_BROKER_ADAPTER: paper
+      TRADING_DIRECTIVE_REPOSITORY: postgres
+      TRADING_DATABASE_ROLE: ${TRADING_DATABASE_ROLE:-svc_trading_api}
+      MARKET_API_URL: ${MARKET_API_URL:-http://market-api:8036}
+      TRADING_DIRECTIVE_WORKER_POLL_SECONDS: ${TRADING_DIRECTIVE_WORKER_POLL_SECONDS:-1.0}
+      TRADING_DIRECTIVE_WORKER_BATCH_SIZE: ${TRADING_DIRECTIVE_WORKER_BATCH_SIZE:-100}
     mem_limit: 256m
     cpus: 0.5
     pids_limit: 64
@@ -102,6 +143,9 @@ services:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-trading-hermes
     restart: unless-stopped
+    depends_on:
+      paper-order-orchestrator-mcp:
+        condition: service_healthy
     command: ["sleep", "infinity"]
     logging:
       driver: "json-file"
@@ -119,6 +163,10 @@ services:
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      # The profile can submit only a non-binding interpretation to the
+      # internal MCP boundary. It never receives DATABASE_URL or either
+      # Trading service-proof secret.
+      MCP_TRADING_ORDER_API_KEY: ${MCP_TRADING_ORDER_API_KEY:?A generated 32-byte PAPER-order MCP key is required}
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0

@@ -181,23 +181,28 @@ python scripts/run_risk_qa_production_preflight.py \
 
 다음 조건 중 하나라도 실패하면 실행하지 않고 원인을 먼저 해결한다.
 
-- `RISK_QA_DATABASE_URL` 또는 `DATABASE_URL`, `REDIS_URL`(Trading State 필수), `QA_POLICY_SOURCE_ID`, `OPENAI_API_KEY`
+- `RISK_QA_DATABASE_URL` 또는 `DATABASE_URL`, `REDIS_URL`(Trading State 필수)
 - `RISK_SERVICE_AUTH_SECRET`, `RISK_SERVICE_AUTH_ISSUER`, `RISK_SERVICE_AUTH_AUDIENCE`, `QA_SERVICE_AUTH_SECRET`, `QA_SERVICE_AUTH_ISSUER`, `QA_SERVICE_AUTH_AUDIENCE` (Secret Manager 주입; secret은 32자 이상)
 - `RISK_QA_RUNTIME=production`, `RISK_QA_PRODUCTION_ENABLED=true`
 - `QA_CHECK_CONTRACT_APPROVED=true`, `QA_TRACE_PERSIST=true`, `RISK_REQUIRE_P1_ANALYTICS=true`
+- `QA_INGEST_MODE=disabled`, `QA_ENABLE_LEGACY_EVIDENCE_INGESTION=false`
 - `RISK_CONTEXT_SOURCE=database`와 실제 `RISK_BROKER_ADAPTER` 설정
-- 실제 정책 문서 경로 `QA_POLICY_CORPUS_DIR`가 설정되고 `SAMPLE_PLACEHOLDER`가 없음
 - Supabase canonical table, RLS policy, active worker profile, PIT Fund/Policy/Portfolio/Market 데이터
 - Redis PING 성공
 
-정책 문서는 저장소 샘플을 운영 근거로 사용하지 않는다. 실제 문서를 별도 경로에 배치한 뒤 ingestion한다.
+뉴스·문헌 등 비시장 근거는 MCP로 요청 시점에 조회하며 운영 DB에 지속 적재하지 않는다.
 
 ```bash
-export QA_POLICY_CORPUS_DIR=/secure/path/policies
-export QA_INGEST_MODE=production
-python departments/06-ai-qa-audit/evidence/production_ingestion.py \
-  "$QA_POLICY_CORPUS_DIR"
+# Normal production boundary: request-time MCP, no non-market evidence writer.
+export QA_INGEST_MODE=disabled
+export QA_ENABLE_LEGACY_EVIDENCE_INGESTION=false
 ```
+
+`production_ingestion.py` is retained only for an exceptional one-off legacy
+migration. It fails closed unless both
+`QA_ENABLE_LEGACY_EVIDENCE_INGESTION=true` and
+`QA_INGEST_MODE=legacy-manual` are explicitly supplied. Those switches must
+not be set on continuously running services.
 
 Risk/QA의 실제 DB write-through와 Redis 중복·재시작 검증은 별도 smoke에서 수행한다. 이 검증도 Broker 주문과 Ledger Posting은 호출하지 않는다.
 

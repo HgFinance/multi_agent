@@ -13,6 +13,9 @@ import {
   storeAccount,
   subscribeToAccountChange,
 } from "../lib/currentAccount";
+import { fixtureAuthEnabled } from "../lib/authMode";
+import { useAuth } from "../lib/AuthProvider";
+import { usePortfolioSession } from "../lib/PortfolioSessionProvider";
 
 /**
  * 상단 네비게이션. DESIGN.md 토큰만 쓰고 색·간격을 직접 박지 않는다.
@@ -135,6 +138,53 @@ function AccountSwitcher() {
   );
 }
 
+function ProductionSessionMenu() {
+  const auth = useAuth();
+  const portfolio = usePortfolioSession();
+  const funds = portfolio.profile?.funds ?? [];
+  const label = portfolio.profile?.displayName || auth.email || "Authenticated user";
+
+  return (
+    <div className="flex min-w-0 items-center gap-2">
+      <div className="hidden min-w-0 text-right lg:block">
+        <p className="truncate text-label-md font-bold text-on-surface">{label}</p>
+        <p className="truncate text-[10px] text-on-surface-variant">
+          {portfolio.loading
+            ? "권한 확인 중"
+            : portfolio.profile?.onboardingRequired
+              ? "펀드 권한 설정 필요"
+              : "Supabase session"}
+        </p>
+      </div>
+      {funds.length > 0 ? (
+        <select
+          aria-label="허가된 펀드 선택"
+          value={portfolio.activeFundId ?? funds[0].fundId}
+          onChange={(event) => portfolio.selectFund(event.target.value)}
+          className="max-w-44 rounded-md border border-outline-variant bg-surface-container-lowest px-2 py-1.5 text-label-md text-on-surface"
+        >
+          {funds.map((fund) => (
+            <option key={fund.fundId} value={fund.fundId}>
+              {fund.fundId.slice(0, 8)} · {fund.roles.join(", ") || "MEMBER"}
+            </option>
+          ))}
+        </select>
+      ) : null}
+      <button
+        type="button"
+        onClick={() => void auth.signOut()}
+        className="rounded-md border border-outline-variant px-2.5 py-1.5 text-label-md font-semibold text-secondary hover:bg-surface-container"
+      >
+        로그아웃
+      </button>
+    </div>
+  );
+}
+
+function IdentityControls() {
+  return fixtureAuthEnabled ? <AccountSwitcher /> : <ProductionSessionMenu />;
+}
+
 export default function TopNav({ current }: { current: NavKey }) {
   return (
     <nav className="bg-surface-container-lowest border-b border-outline-variant flex items-center justify-between w-full px-margin-mobile md:px-margin-desktop h-16 shrink-0 z-50 font-sans">
@@ -173,7 +223,7 @@ export default function TopNav({ current }: { current: NavKey }) {
           })}
         </div>
       </div>
-      <AccountSwitcher />
+      <IdentityControls />
     </nav>
   );
 }

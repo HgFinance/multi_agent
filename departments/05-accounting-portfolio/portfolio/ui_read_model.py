@@ -283,10 +283,10 @@ if __name__ == "__main__":
     #    갈아끼우지 않은 구간의 출처가 사라지면 화면이 그 절반을 뭘로 믿을지 모른다
     swapped = build_ui_snapshot(
         oms=loop.oms, ledger=loop.ledger, snapshot=final,
-        overrides={"portfolio": {"nav": "1"}, "sources": {"portfolio": "supabase"}})
+        overrides={"portfolio": {"nav": "1"}, "sources": {"portfolio": "control-db"}})
     assert set(swapped["sources"]) == {"portfolio", "trading", "ledger", "treasury"}, \
         swapped["sources"]
-    assert swapped["sources"]["portfolio"] == "supabase"
+    assert swapped["sources"]["portfolio"] == "control-db"
     assert swapped["sources"]["trading"] == "scripted-loop", "안 바꾼 구간의 출처가 사라졌다"
     assert swapped["portfolio"]["nav"] == "1", "override가 반영되지 않았다"
 

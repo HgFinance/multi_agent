@@ -190,6 +190,13 @@ class CeoQueryAcceptedResponse(BaseModel):
     session_id: str | None = None
     status: Literal["accepted", "planned"] | None = None
     planning: CeoPlanning | None = None
+    # Present only when the CEO ingress deterministically routed a possible
+    # natural-language order to Trading Hermes. These are asynchronous PAPER
+    # workflow identifiers, not a fill or completion claim.
+    order_request_id: str | None = None
+    order_state: str | None = None
+    order_mode: Literal["PAPER"] | None = None
+    trading_task_id: str | None = None
 
 
 __all__ = [

@@ -29,10 +29,12 @@ from typing import Callable, Iterable, Sequence
 
 
 UTC = timezone.utc
-LANE_VERSION = "krx-intraday-causal-v5"
+KST = timezone(timedelta(hours=9))
+LANE_VERSION = "krx-intraday-causal-v6"
 LOCAL_EVENT_SOURCE = "LOCAL_RECEIPT_CLOCK"
 EXTERNAL_EVENT_SOURCE = "EXTERNAL_FDW_EVENT_TIME"
 EVENT_SOURCES = frozenset({LOCAL_EVENT_SOURCE, EXTERNAL_EVENT_SOURCE})
+RAW_EVENT_GRANULARITY = "RAW_QUOTE_TRADE_EVENTS"
 STRICT_TIMESTAMP_POLICY = "STRICT_RECEIPT_ORDER_V1"
 COMPLETED_SECOND_POLICY = "COMPLETED_SECOND_MEDIAN_ENVELOPE_V1"
 TIMESTAMP_POLICIES = frozenset({
@@ -1605,18 +1607,35 @@ select btrim(symbol), count(*) as total_quotes,
 def _event_source(value: str | None) -> str:
     source = str(value or LOCAL_EVENT_SOURCE).upper()
     if source not in EVENT_SOURCES:
-        raise ValueError(f"unsupported intraday event source: {value!r}")
+        raise ValueError(
+            f"unsupported intraday event source: {value!r}; only raw "
+            "quote/trade event contracts are replayable (daily aggregates "
+            "are not event sources)")
     return source
+
+
+def _instrument_key(value, source: str) -> str:
+    """Return the exact replay key and reject ambiguous external identities."""
+    event_source = _event_source(source)
+    key = str(value).strip() if value is not None else ""
+    if not key:
+        raise ValueError("intraday replay instrument identifier is required")
+    if (event_source == EXTERNAL_EVENT_SOURCE
+            and (len(key) != 6 or not key.isascii() or not key.isdigit())):
+        raise ValueError(
+            "external replay requires an exact six-digit KRX trading symbol; "
+            f"received {value!r}")
+    return key
 
 
 def _source_sql(source: str, local: str, external: str) -> str:
     return external if _event_source(source) == EXTERNAL_EVENT_SOURCE else local
 
 
-def _quote_event(row) -> QuoteEvent:
+def _quote_event(row, *, instrument_id: str | None = None) -> QuoteEvent:
     return QuoteEvent(
         event_time=row[0], received_at=row[1], observed_at=row[2],
-        instrument_id=row[3],
+        instrument_id=instrument_id or str(row[3]).strip(),
         bid_prices=tuple(float(v) for v in row[4]),
         bid_sizes=tuple(float(v) for v in row[5]),
         ask_prices=tuple(float(v) for v in row[6]),
@@ -1625,10 +1644,11 @@ def _quote_event(row) -> QuoteEvent:
     )
 
 
-def _trade_event(row) -> TradeEvent:
+def _trade_event(row, *, instrument_id: str | None = None) -> TradeEvent:
     return TradeEvent(
         event_time=row[0], received_at=row[1], observed_at=row[2],
-        instrument_id=row[3], price=float(row[4]), quantity=float(row[5]),
+        instrument_id=instrument_id or str(row[3]).strip(),
+        price=float(row[4]), quantity=float(row[5]),
         side=int(row[6]), source_event_id=row[7],
     )
 
@@ -1666,7 +1686,7 @@ def _raw_content_add(raw_content_evidence: dict, source: str, row,
     """Fold the exact external composite hashes consumed by the replay query."""
     if content_end is not None and row[0] >= content_end:
         return
-    symbol = str(row[3])
+    symbol = _instrument_key(row[3], EXTERNAL_EVENT_SOURCE)
     state = raw_content_evidence.setdefault(symbol, {
         "quotes": {"row_count": 0, "xor_seed_0": 0, "sum_seed_1": 0},
         "ticks": {"row_count": 0, "xor_seed_0": 0, "sum_seed_1": 0},
@@ -1685,6 +1705,8 @@ def load_instrument_events(conn, *, instrument_id: str, start: datetime,
                            source: str = LOCAL_EVENT_SOURCE,
                            ) -> tuple[list[QuoteEvent], list[TradeEvent]]:
     """Read one bounded instrument slice from an explicit source contract."""
+    event_source = _event_source(source)
+    instrument_id = _instrument_key(instrument_id, event_source)
     start = _aware(start, "start")
     end = _aware(end, "end")
     cutoff = _aware(as_known_at, "as_known_at")
@@ -1692,12 +1714,26 @@ def load_instrument_events(conn, *, instrument_id: str, start: datetime,
         raise ValueError("as_known_at must cover the requested event-time interval")
     params = (instrument_id, start, end, cutoff)
     with conn.cursor() as cursor:
-        cursor.execute(_source_sql(source, _QUOTE_SQL, _EXTERNAL_QUOTE_SQL),
+        cursor.execute(_source_sql(event_source, _QUOTE_SQL,
+                                   _EXTERNAL_QUOTE_SQL),
                        params)
-        quotes = [_quote_event(row) for row in _fetch_chunks(cursor)]
-        cursor.execute(_source_sql(source, _TRADE_SQL, _EXTERNAL_TRADE_SQL),
+        quotes = [_quote_event(
+            row, instrument_id=_instrument_key(row[3], event_source))
+            for row in _fetch_chunks(cursor)]
+        cursor.execute(_source_sql(event_source, _TRADE_SQL,
+                                   _EXTERNAL_TRADE_SQL),
                        params)
-        trades = [_trade_event(row) for row in _fetch_chunks(cursor)]
+        trades = [_trade_event(
+            row, instrument_id=_instrument_key(row[3], event_source))
+            for row in _fetch_chunks(cursor)]
+    unexpected = (
+        {event.instrument_id for event in quotes}
+        | {event.instrument_id for event in trades}
+    ) - {instrument_id}
+    if unexpected:
+        raise ValueError(
+            "intraday source returned events for unrequested instruments: "
+            f"{sorted(unexpected)}")
     return quotes, trades
 
 
@@ -1709,9 +1745,10 @@ def load_instrument_events_batch(conn, *, instrument_ids, start: datetime,
                                  ) -> dict[str, tuple[list[QuoteEvent],
                                                        list[TradeEvent]]]:
     """Read a bounded shard in two SQL scans and group rows by instrument."""
+    event_source = _event_source(source)
     ids = tuple(dict.fromkeys(
-        str(value) for value in instrument_ids
-        if value is not None and str(value)))
+        _instrument_key(value, event_source) for value in instrument_ids
+        if value is not None and str(value).strip()))
     if not ids:
         return {}
     start = _aware(start, "start")
@@ -1721,12 +1758,23 @@ def load_instrument_events_batch(conn, *, instrument_ids, start: datetime,
         raise ValueError("as_known_at must cover the requested event-time interval")
     grouped = {instrument_id: ([], []) for instrument_id in ids}
     if raw_content_evidence is not None:
-        if _event_source(source) != EXTERNAL_EVENT_SOURCE:
+        if event_source != EXTERNAL_EVENT_SOURCE:
             raise ValueError(
                 "raw_content_evidence is supported only for external replay")
         if content_end is None:
             raise ValueError("content_end is required for external raw evidence")
         content_end = _aware(content_end, "content_end")
+        local_day = start.astimezone(KST).date()
+        expected_start = datetime.combine(
+            local_day, datetime.min.time(), KST).replace(
+                hour=9).astimezone(UTC)
+        expected_end = datetime.combine(
+            local_day, datetime.min.time(), KST).replace(
+                hour=15, minute=30).astimezone(UTC)
+        if start != expected_start or content_end != expected_end or end != expected_end:
+            raise ValueError(
+                "external raw evidence requires the fixed half-open "
+                "[09:00,15:30) Asia/Seoul query window")
         for instrument_id in ids:
             raw_content_evidence.setdefault(instrument_id, {
                 "quotes": {"row_count": 0, "xor_seed_0": 0,
@@ -1737,22 +1785,34 @@ def load_instrument_events_batch(conn, *, instrument_ids, start: datetime,
     params = (list(ids), start, end, cutoff)
     with conn.cursor() as cursor:
         cursor.execute(_source_sql(
-            source, _QUOTE_BATCH_SQL, _EXTERNAL_QUOTE_BATCH_SQL), params)
+            event_source, _QUOTE_BATCH_SQL, _EXTERNAL_QUOTE_BATCH_SQL), params)
         for row in _fetch_chunks(cursor):
+            instrument = _instrument_key(row[3], event_source)
+            if instrument not in grouped:
+                raise ValueError(
+                    "intraday quote source returned an unrequested "
+                    f"instrument: {instrument!r}")
             if raw_content_evidence is not None:
                 _raw_content_add(raw_content_evidence, "quotes", row,
                                  content_end=content_end)
             if (float(row[4][0]) > 0 and float(row[6][0]) > 0
                     and float(row[6][0]) >= float(row[4][0])):
-                grouped[row[3]][0].append(_quote_event(row))
+                grouped[instrument][0].append(
+                    _quote_event(row, instrument_id=instrument))
         cursor.execute(_source_sql(
-            source, _TRADE_BATCH_SQL, _EXTERNAL_TRADE_BATCH_SQL), params)
+            event_source, _TRADE_BATCH_SQL, _EXTERNAL_TRADE_BATCH_SQL), params)
         for row in _fetch_chunks(cursor):
+            instrument = _instrument_key(row[3], event_source)
+            if instrument not in grouped:
+                raise ValueError(
+                    "intraday trade source returned an unrequested "
+                    f"instrument: {instrument!r}")
             if raw_content_evidence is not None:
                 _raw_content_add(raw_content_evidence, "ticks", row,
                                  content_end=content_end)
             if float(row[5]) > 0:
-                grouped[row[3]][1].append(_trade_event(row))
+                grouped[instrument][1].append(
+                    _trade_event(row, instrument_id=instrument))
     return grouped
 
 
@@ -1760,12 +1820,14 @@ def source_quality(conn, *, instrument_id: str, start: datetime, end: datetime,
                    as_known_at: datetime,
                    source: str = LOCAL_EVENT_SOURCE) -> dict:
     """Count source rows rejected before object construction."""
+    event_source = _event_source(source)
+    instrument_id = _instrument_key(instrument_id, event_source)
     start = _aware(start, "start")
     end = _aware(end, "end")
     cutoff = _aware(as_known_at, "as_known_at")
     with conn.cursor() as cursor:
         cursor.execute(_source_sql(
-                       source, _SOURCE_QUALITY_SQL,
+                       event_source, _SOURCE_QUALITY_SQL,
                        _EXTERNAL_SOURCE_QUALITY_SQL),
                        (instrument_id, start, end, cutoff))
         total, missing_clock, nonpositive, crossed, eligible = cursor.fetchone()
@@ -1778,9 +1840,10 @@ def source_quality_batch(conn, *, instrument_ids, start: datetime, end: datetime
                          as_known_at: datetime,
                          source: str = LOCAL_EVENT_SOURCE) -> dict[str, dict]:
     """Return source diagnostics for a shard with one grouped query."""
+    event_source = _event_source(source)
     ids = tuple(dict.fromkeys(
-        str(value) for value in instrument_ids
-        if value is not None and str(value)))
+        _instrument_key(value, event_source) for value in instrument_ids
+        if value is not None and str(value).strip()))
     if not ids:
         return {}
     start = _aware(start, "start")
@@ -1788,14 +1851,19 @@ def source_quality_batch(conn, *, instrument_ids, start: datetime, end: datetime
     cutoff = _aware(as_known_at, "as_known_at")
     with conn.cursor() as cursor:
         cursor.execute(_source_sql(
-                       source, _SOURCE_QUALITY_BATCH_SQL,
+                       event_source, _SOURCE_QUALITY_BATCH_SQL,
                        _EXTERNAL_SOURCE_QUALITY_BATCH_SQL),
                        (list(ids), start, end, cutoff))
         rows = cursor.fetchall()
     out = {instrument_id: _quality_record(0, 0, 0, 0, 0)
            for instrument_id in ids}
     for row in rows:
-        out[row[0]] = _quality_record(*row[1:])
+        instrument = _instrument_key(row[0], event_source)
+        if instrument not in out:
+            raise ValueError(
+                "intraday quality source returned an unrequested "
+                f"instrument: {instrument!r}")
+        out[instrument] = _quality_record(*row[1:])
     return out
 
 
@@ -1818,6 +1886,8 @@ def manifest(spec: IntradayLaneSpec,
     payload.update({
         "lane_version": LANE_VERSION,
         "event_source": event_source,
+        "source_granularity": RAW_EVENT_GRANULARITY,
+        "daily_aggregate_replay_allowed": False,
         "timestamp_policy": policy,
         "clock_aggregation_version": (
             "completed-second-state-median-taker-envelope-v1"

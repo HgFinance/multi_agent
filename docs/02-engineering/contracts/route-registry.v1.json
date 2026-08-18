@@ -269,6 +269,14 @@
         {
           "method": "POST",
           "path": "/trading/v1/orders/{order_id}/unknown"
+        },
+        {
+          "method": "POST",
+          "path": "/trading/v1/user-directives"
+        },
+        {
+          "method": "GET",
+          "path": "/trading/v1/user-directives/{directive_id}"
         }
       ]
     },
@@ -877,6 +885,10 @@
           "path": "/trading/agent/ask"
         },
         {
+          "method": "POST",
+          "path": "/trading/agent/order"
+        },
+        {
           "method": "GET",
           "path": "/ui/account/snapshot"
         },
@@ -935,6 +947,10 @@
         {
           "method": "GET",
           "path": "/ui/integrations"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/me"
         },
         {
           "method": "GET",
@@ -1003,6 +1019,30 @@
         {
           "method": "GET",
           "path": "/ui/portfolio-universes"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/paper-order-requests/{order_request_id}"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/paper-orders"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/paper-orders/cancel-all"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/paper-orders/sell-all"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/paper-orders/{directive_id}"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/paper-orders/{directive_id}/status"
         },
         {
           "method": "GET",

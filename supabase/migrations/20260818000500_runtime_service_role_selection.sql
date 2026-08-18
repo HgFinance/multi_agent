@@ -7,10 +7,9 @@ begin;
 -- the role in Compose could not enforce the boundary.
 
 do $runtime_service_role_membership$
+declare
+  pool_login name := session_user;
 begin
-  if not exists (select 1 from pg_roles where rolname = 'postgres') then
-    raise exception 'postgres pool login role is missing';
-  end if;
   if not exists (select 1 from pg_roles where rolname = 'svc_quant') then
     raise exception 'svc_quant runtime role is missing';
   end if;
@@ -18,10 +17,12 @@ begin
     raise exception 'service_role QA runtime role is missing';
   end if;
 
-  -- This grants only permission to reduce the already broader postgres pool
+  -- This grants only permission to reduce the migration/session pool login
   -- session to svc_quant. INHERIT stays false, so the login does not silently
   -- acquire svc_quant semantics without an explicit SET ROLE.
-  grant svc_quant to postgres with set true, inherit false;
+  execute format(
+    'grant svc_quant to %I with set true, inherit false', pool_login
+  );
 
   if not exists (
     select 1
@@ -29,25 +30,32 @@ begin
       join pg_roles granted_role on granted_role.oid = membership.roleid
       join pg_roles member_role on member_role.oid = membership.member
      where granted_role.rolname = 'svc_quant'
-       and member_role.rolname = 'postgres'
+       and member_role.rolname = pool_login
        and membership.set_option
        and not membership.inherit_option
   ) then
-    raise exception 'postgres cannot explicitly reduce to non-inherited svc_quant';
+    raise exception '% cannot explicitly reduce to non-inherited svc_quant',
+      pool_login;
   end if;
 
-  -- Supabase owns this standard membership. Do not mutate it here; fail the
-  -- deployment if the pool credential cannot reduce to the QA service role.
+  -- On the private control database service_role is an inert NOLOGIN
+  -- compatibility role created by the foundation migration.  Preserve the
+  -- transitional relay boundary until migration 006 installs the dedicated
+  -- svc_qa_worker role.
+  execute format(
+    'grant service_role to %I with set true, inherit false', pool_login
+  );
+
   if not exists (
     select 1
       from pg_auth_members membership
       join pg_roles granted_role on granted_role.oid = membership.roleid
       join pg_roles member_role on member_role.oid = membership.member
      where granted_role.rolname = 'service_role'
-       and member_role.rolname = 'postgres'
+       and member_role.rolname = pool_login
        and membership.set_option
   ) then
-    raise exception 'postgres cannot explicitly reduce to service_role';
+    raise exception '% cannot explicitly reduce to service_role', pool_login;
   end if;
 end
 $runtime_service_role_membership$;

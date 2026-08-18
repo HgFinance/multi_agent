@@ -474,6 +474,7 @@ def test_proposal_intake_filters_unsafe_completed_second_sidecars() -> None:
                 "alpha_candidate_eligible": True,
                 "research_lane": "INTRADAY_EVENT",
                 "candidate_signal_expr": expr,
+                "source_baseline_expr": raw,
                 "semantic_plan": plan,
                 "formula_thesis": {
                     "target": plan["output"],
@@ -488,7 +489,10 @@ def test_proposal_intake_filters_unsafe_completed_second_sidecars() -> None:
                         "Signed pressure must predict positive stock net markout "
                         "after the preregistered crossing-cost hurdle."),
                 },
-                "evolution_role": "SEED",
+                "evolution_role": "CHILD" if label == "primary" else "SEED",
+                "parent_signal_expr": raw if label == "primary" else None,
+                "parent_ast_fingerprint": (
+                    grammar.fingerprint(raw) if label == "primary" else ""),
             },
         )
 
@@ -543,6 +547,15 @@ def test_proposal_intake_filters_unsafe_completed_second_sidecars() -> None:
         for row in population
     )
 
+    assert attached.suggested_params["source_baseline_expr"] == raw
+    assert all(row["source_baseline_expr"] == raw for row in population)
+    assert attached.suggested_params["parent_ast_fingerprint"] == \
+        grammar.fingerprint(raw)
+    assert any(
+        row["ast_fingerprint"] == grammar.fingerprint(raw)
+        and row["candidate_role"] == "LINEAGE_PARENT"
+        for row in population)
+
     blocked_primary = proposal.model_copy(update={
         "suggested_params": {
             **proposal.suggested_params,
@@ -553,6 +566,114 @@ def test_proposal_intake_filters_unsafe_completed_second_sidecars() -> None:
             grammar.IntradayExprError, match="blocked fields: normalized_quote_ofi"):
         proposal_intake._attach_intraday_screening_cohort(
             blocked_primary, leads)
+
+
+def test_same_ast_conflicting_candidate_contracts_do_not_merge_provenance() -> None:
+    now = datetime(2026, 8, 18, tzinfo=timezone.utc)
+    expr = {
+        "op": "rolling_mean",
+        "seconds": 30,
+        "arg": {"op": "field", "field": "microprice_offset_bps"},
+    }
+    follow_30 = {
+        "event": "MICROPRICE_DISLOCATION",
+        "context": ["ALL"],
+        "qualities": ["PERSISTENCE"],
+        "direction": "FOLLOW",
+        "output": "TAKER_NET_PNL",
+        "execution": "TAKER",
+        "horizon_seconds": 30,
+    }
+    revert_600 = {
+        **follow_30,
+        "direction": "REVERT",
+        "horizon_seconds": 600,
+    }
+
+    def make_lead(label: str, plan: dict, coefficient_policy: str) \
+            -> MethodologyLeadV1:
+        ref = SourceRef(
+            url=f"https://example.test/contract/{label}", title=label,
+            accessed_at=now, excerpt="bounded exact-contract evidence")
+        return MethodologyLeadV1(
+            lead_id=lead_id_for([ref]), case_id="exact-contract-cohort",
+            scout_lens="ACADEMIC", source_type="PAPER", as_known_at=now,
+            refs=(ref,), claimed_edge=label,
+            stated_mechanism="microprice displacement persistence",
+            ast_contract={
+                "formula_discovery_version": "formula-discovery-v5",
+                "formula_contract_complete": True,
+                "alpha_candidate_eligible": True,
+                "research_lane": "INTRADAY_EVENT",
+                "candidate_signal_expr": expr,
+                "semantic_plan": plan,
+                "formula_thesis": {
+                    "target": "TAKER_NET_PNL",
+                    "functional_form": "MONOTONE",
+                    "expected_sign": "STATE_DEPENDENT",
+                    "coefficient_policy": coefficient_policy,
+                    "decision_rule": "PREDICTED_MARKOUT_CLEARS_COST",
+                    "terms": {"microprice_offset_bps": "PRESSURE"},
+                    "identification": (
+                        "Microprice displacement must predict positive net "
+                        "markout after the preregistered cost hurdle."),
+                },
+                "evolution_role": "SEED",
+            })
+
+    exact_a = make_lead(
+        "follow-30-a", follow_30, "PREREGISTERED_NO_OOS_FIT")
+    exact_b = make_lead(
+        "follow-30-b", follow_30, "PREREGISTERED_NO_OOS_FIT")
+    wrong_semantics = make_lead(
+        "revert-600", revert_600, "PREREGISTERED_NO_OOS_FIT")
+    wrong_coefficient = make_lead(
+        "follow-30-structure-only", follow_30, "STRUCTURE_ONLY")
+    all_leads = (wrong_semantics, exact_b, wrong_coefficient, exact_a)
+    proposal = ExperimentProposalV1(
+        proposal_id="before", case_id="exact-contract-cohort",
+        as_known_at=now, lead_ids=tuple(row.lead_id for row in all_leads),
+        economic_rationale="microprice pressure meets urgent liquidity demand",
+        counterparty="urgent KRX stock liquidity taker",
+        competing_explanation="data mining",
+        competing_explanation_codes=(CompetingExplanation.DATA_MINING,),
+        skeptic_sign="independent-worker", edge_type="order_flow_imbalance",
+        universe_key="krx_all", falsification_tests=("net <= 0",),
+        data_requirements=DataRequirement(
+            tables=("market_quotes", "market_ticks"), min_history_days=60),
+        suggested_params={
+            "intraday_signal_expr": expr,
+            "horizon_seconds": 30,
+            "execution": "TAKER",
+            "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
+            "coefficient_policy": "PREREGISTERED_NO_OOS_FIT",
+        },
+        research_lane="INTRADAY_EVENT", semantic_plan=follow_30)
+
+    expected_sources = tuple(sorted((exact_a.lead_id, exact_b.lead_id)))
+    forward = proposal_intake._attach_intraday_screening_cohort(
+        proposal, {row.lead_id: row for row in all_leads})
+    reverse = proposal_intake._attach_intraday_screening_cohort(
+        proposal, {row.lead_id: row for row in reversed(all_leads)})
+
+    assert forward.lead_ids == expected_sources
+    assert reverse.lead_ids == expected_sources
+    assert reverse.proposal_id == forward.proposal_id
+    cited = set(forward.lead_ids)
+    for row in forward.suggested_params["screening_population"]:
+        cited.update(row.get("source_lead_ids") or [])
+    assert wrong_semantics.lead_id not in cited
+    assert wrong_coefficient.lead_id not in cited
+    assert proposal_intake._exact_semantic_plan_fingerprint(follow_30) != \
+        proposal_intake._exact_semantic_plan_fingerprint(revert_600)
+
+    mismatched_config = proposal.model_copy(update={
+        "suggested_params": {**proposal.suggested_params,
+                             "horizon_seconds": 600},
+    })
+    with pytest.raises(ValueError, match="horizon_seconds does not match"):
+        proposal_intake._attach_intraday_screening_cohort(
+            mismatched_config, {row.lead_id: row for row in all_leads})
 
 
 def test_proposal_identity_binds_cohort_contract_not_sidecar_membership() -> None:

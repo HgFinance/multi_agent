@@ -1,7 +1,9 @@
 begin;
 
--- Raw point-in-time inputs are retained for Risk projection/replay.  They are
--- service-role-only because the JSON payload can contain portfolio details.
+-- Raw point-in-time inputs are retained for Risk projection/replay.  This
+-- private control database is reached only by domain services; browser JWT
+-- roles have no direct table policy because the JSON payload can contain
+-- portfolio details.
 create table if not exists risk.input_snapshots (
   event_id uuid primary key,
   event_type text not null,
@@ -18,11 +20,6 @@ create index if not exists risk_input_snapshots_stream_time_idx
 alter table risk.input_snapshots enable row level security;
 
 drop policy if exists risk_input_snapshots_service_role_all on risk.input_snapshots;
-create policy risk_input_snapshots_service_role_all
-  on risk.input_snapshots
-  for all
-  using (auth.role() = 'service_role')
-  with check (auth.role() = 'service_role');
 
 drop trigger if exists risk_input_snapshots_append_only on risk.input_snapshots;
 create trigger risk_input_snapshots_append_only

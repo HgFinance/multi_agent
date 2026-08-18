@@ -29,6 +29,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 _HERE = Path(__file__).resolve().parent
 _RESEARCH = _HERE.parents[1] / "01-research"
@@ -62,14 +63,38 @@ TAG = "e2e"
 NOW = datetime.now(timezone.utc)
 
 
-def _conn():
+def _local_control_database_url() -> str:
+    """Resolve only the local E2E control-DB contract.
+
+    ``DATABASE_URL`` is intentionally ignored: developer ``.env`` files may
+    retain the retired hosted Supabase operational DSN.  This destructive E2E
+    utility must never infer its write target from that generic setting.
+    """
+
+    value = os.getenv("LOCAL_CONTROL_DATABASE_URL", "").strip()
     env = Path(__file__).resolve().parents[3] / ".env"
-    if env.exists():
+    if not value and env.exists():
         for line in env.read_text(encoding="utf-8").splitlines():
-            if line.startswith("DATABASE_URL="):
-                os.environ.setdefault("DATABASE_URL", line.split("=", 1)[1].strip())
+            if line.startswith("LOCAL_CONTROL_DATABASE_URL="):
+                value = line.split("=", 1)[1].strip().strip("\"").strip("'")
+                break
+    value = value or "postgresql://postgres:postgres@127.0.0.1:54322/postgres"
+    hostname = (urlsplit(value).hostname or "").casefold()
+    if (
+        not hostname
+        or hostname.endswith(".supabase.co")
+        or hostname.endswith(".supabase.com")
+    ):
+        raise RuntimeError(
+            "LOCAL_CONTROL_DATABASE_URL must target the local/private control DB"
+        )
+    return value
+
+
+def _conn():
     import psycopg2
-    return psycopg2.connect(os.environ["DATABASE_URL"])
+
+    return psycopg2.connect(_local_control_database_url())
 
 
 def _say(step: str, msg: str) -> None:

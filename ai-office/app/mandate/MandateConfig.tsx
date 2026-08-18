@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   DEFAULT_DRAFT,
   INTERVIEW,
@@ -21,12 +21,8 @@ import {
   validateDraft,
 } from "../lib/mandateClient";
 import { provisionalRiskScore, type Experience } from "../lib/mandatePresets";
-import {
-  DEFAULT_ACCOUNT,
-  accountFor,
-  readStoredAccountId,
-  subscribeToAccountChange,
-} from "../lib/currentAccount";
+import { useAuth } from "../lib/AuthProvider";
+import { usePortfolioSession } from "../lib/PortfolioSessionProvider";
 
 /**
  * 운용 지침 설정 화면.
@@ -222,15 +218,25 @@ function FieldLabel({ children, hint }: { children: React.ReactNode; hint?: stri
  * 그대로 쓴다.
  */
 export default function MandateConfig() {
-  const userId = useSyncExternalStore(
-    subscribeToAccountChange,
-    readStoredAccountId,
-    () => DEFAULT_ACCOUNT.userId,
-  );
-  return <MandateConfigForm key={userId} userId={userId} />;
+  const auth = useAuth();
+  const portfolio = usePortfolioSession();
+  const userId = auth.userId;
+  const fundId = portfolio.activeFundId;
+  if (!userId || !fundId) {
+    return (
+      <section className="m-auto max-w-xl rounded-lg border border-outline-variant bg-surface-container-lowest p-6">
+        <h1 className="text-headline-md font-bold text-primary">펀드 권한 설정이 필요합니다</h1>
+        <p className="mt-3 text-body-md text-on-surface-variant">
+          로그인은 확인됐지만 활성 Fund membership이 없습니다. 운영 관리자에게 접근 권한을 요청하세요.
+        </p>
+      </section>
+    );
+  }
+  const scopeKey = `${userId}:${fundId}`;
+  return <MandateConfigForm key={scopeKey} userId={userId} fundId={fundId} />;
 }
 
-function MandateConfigForm({ userId }: { userId: string }) {
+function MandateConfigForm({ userId, fundId }: { userId: string; fundId: string }) {
   const [draft, setDraft] = useState<MandateDraft>(DEFAULT_DRAFT);
   const [messages, setMessages] = useState<ChatMessage[]>(OPENING);
   const [reply, setReply] = useState("");
@@ -241,6 +247,7 @@ function MandateConfigForm({ userId }: { userId: string }) {
   const [busy, setBusy] = useState(false);
   /** 서버가 정한 실질 위험 등급. **화면이 재계산하지 않는다**(API_SPEC 2.3). */
   const [riskBand, setRiskBand] = useState("");
+  const draftScopeId = `${userId}.${fundId}`;
   const chatEndRef = useRef<HTMLDivElement>(null);
   const resetDialogRef = useRef<HTMLDialogElement>(null);
 
@@ -308,18 +315,12 @@ function MandateConfigForm({ userId }: { userId: string }) {
    */
   useEffect(() => {
     let cancelled = false;
-    const account = accountFor(userId);
-
     async function hydrate() {
-      if (!account.fundId) {
-        if (!cancelled) setNotice("이 계정에는 연결된 Fund가 없어 저장된 지침을 불러올 수 없습니다.");
-        return;
-      }
       let next = DEFAULT_DRAFT;
       let hasStoredMandate = false;
 
       try {
-        const stored = await loadMandateForFund(account.fundId);
+        const stored = await loadMandateForFund(fundId);
         if (cancelled) return;
         if (stored?.policy) {
           next = policyToDraft(next, stored.policy, stored.objectiveText);
@@ -336,7 +337,7 @@ function MandateConfigForm({ userId }: { userId: string }) {
       // 따로 채운다 - 없으면(404) 아직 프로필을 안 만든 사용자다.
       let profileMissing = false;
       try {
-        const profile = await loadInvestorProfile(account.userId, account.fundId);
+        const profile = await loadInvestorProfile(userId, fundId);
         if (cancelled) return;
         if (profile) {
           next = {
@@ -364,7 +365,7 @@ function MandateConfigForm({ userId }: { userId: string }) {
 
       // 저장하지 않은 임시 초안은 **서버 저장본 위에** 얹는다(그쪽 주석 참고).
       // 사용자가 고친 항목만 이기고, 안 고친 항목은 서버 값이 남는다.
-      const local = readLocalDraft(account.userId, next);
+      const local = readLocalDraft(draftScopeId, next);
       if (local) {
         setDraft(local);
         // 인터뷰 단계를 저장하지 않으므로(이어하기 기능이 아니다) 폼은 열어둔다.
@@ -406,7 +407,7 @@ function MandateConfigForm({ userId }: { userId: string }) {
     return () => {
       cancelled = true;
     };
-  }, [userId]);
+  }, [draftScopeId, fundId, userId]);
 
   /**
    * 기본 자산 입력 단위. KRW면 만원이다(`capitalUnitFor`).
@@ -541,7 +542,7 @@ function MandateConfigForm({ userId }: { userId: string }) {
   function saveDraft() {
     // 이 브라우저에만 남긴다. DB 저장은 "지침 저장"이다.
     try {
-      window.localStorage.setItem(storageKeyFor(userId), JSON.stringify(draft));
+      window.localStorage.setItem(storageKeyFor(draftScopeId), JSON.stringify(draft));
       setNotice("이 브라우저에만 임시 저장했습니다. DB에 남기려면 [지침 저장]을 누르세요.");
     } catch {
       // Safari 사생활 보호 모드 등에서 던진다. 저장을 못 하는 것이 화면을 멈출 이유는 아니다.
@@ -559,7 +560,7 @@ function MandateConfigForm({ userId }: { userId: string }) {
    */
   function resetAll() {
     try {
-      window.localStorage.removeItem(storageKeyFor(userId));
+      window.localStorage.removeItem(storageKeyFor(draftScopeId));
     } catch {
       /* 저장소를 막아둔 브라우저. 지울 것도 없으니 그대로 진행한다. */
     }
@@ -581,11 +582,11 @@ function MandateConfigForm({ userId }: { userId: string }) {
       const fallbackObjective = `${RISK_PROFILES.find((p) => p.id === draft.riskProfile)?.label ?? "균형"} 성향 · 지침`;
       const objectiveText = draft.objective.trim() || fallbackObjective;
 
-      const result = await submitMandateDraft(draft, objectiveText);
+      const result = await submitMandateDraft(draft, objectiveText, userId);
       // 커밋됐으므로 임시 초안은 지운다 - 남겨두면 다음 방문에 DB 저장본 대신
       // 옛 초안이 복원돼 방금 저장한 값이 안 보인다.
       try {
-        window.localStorage.removeItem(storageKeyFor(userId));
+        window.localStorage.removeItem(storageKeyFor(draftScopeId));
       } catch {
         /* 삭제 실패는 무시한다 - 저장 자체는 이미 성공했다. */
       }

@@ -122,23 +122,56 @@ def pending_fill_events(repo: LedgerRepository, fund_id: UUID, book_id: UUID) ->
     with repo.cursor() as cur:
         cur.execute(
             """
-            select o.event_id, o.case_id, o.trace_id, o.schema_version,
-                   o.occurred_at, o.producer, o.idempotency_key, o.payload_ref,
-                   f.fill_id, f.instrument_id, f.side, f.quantity, f.price,
-                   f.fee_amount, f.tax_amount, f.event_time, f.broker_fill_id
-              from execution.outbox o
-              join execution.fills f
-                on f.fill_id = (o.payload_ref ->> 'artifact_id')::uuid
-              join execution.orders ord on ord.order_id = f.order_id
-              join execution.order_intents i on i.order_intent_id = ord.order_intent_id
-              left join execution.outbox_consumed c
-                on c.event_id = o.event_id and c.consumer = %s
-             where o.event_type = %s and o.status = 'SENT'
-               and c.event_id is null
-               and i.fund_id = %s and i.book_id = %s
-             order by o.outbox_id
+            select delivered.event_id,delivered.case_id,delivered.trace_id,
+                   delivered.schema_version,delivered.occurred_at,
+                   delivered.producer,delivered.idempotency_key,
+                   delivered.payload_ref,delivered.fill_id,
+                   delivered.instrument_id,delivered.side,delivered.quantity,
+                   delivered.price,delivered.fee_amount,delivered.tax_amount,
+                   delivered.event_time,delivered.broker_fill_id
+              from (
+                select o.outbox_id,o.event_id,o.case_id,o.trace_id,o.schema_version,
+                       o.occurred_at,o.producer,o.idempotency_key,o.payload_ref,
+                       f.fill_id,f.instrument_id,f.side,f.quantity,f.price,
+                       f.fee_amount,f.tax_amount,f.event_time,f.broker_fill_id
+                  from execution.outbox o
+                  join execution.fills f
+                    on f.fill_id=(o.payload_ref->>'artifact_id')::uuid
+                  join execution.orders ord on ord.order_id=f.order_id
+                  join execution.order_intents i
+                    on i.order_intent_id=ord.order_intent_id
+                  left join execution.outbox_consumed c
+                    on c.event_id=o.event_id and c.consumer=%s
+                 where o.event_type=%s and o.status='SENT'
+                   and o.payload_ref->>'artifact_type'='FILL'
+                   and (o.payload_ref->>'artifact_schema') is distinct from
+                       'trading-user-directive-fill-v1'
+                   and c.event_id is null
+                   and i.fund_id=%s and i.book_id=%s
+                union all
+                select o.outbox_id,o.event_id,o.case_id,o.trace_id,o.schema_version,
+                       o.occurred_at,o.producer,o.idempotency_key,o.payload_ref,
+                       f.fill_id,f.instrument_id,f.side,f.quantity,f.price,
+                       f.fee_amount,f.tax_amount,f.event_time,f.broker_fill_id
+                  from execution.outbox o
+                  join execution.paper_user_directive_fills f
+                    on f.fill_id=(o.payload_ref->>'artifact_id')::uuid
+                  join execution.user_directives directive
+                    on directive.directive_id=f.directive_id
+                  left join execution.outbox_consumed c
+                    on c.event_id=o.event_id and c.consumer=%s
+                 where o.event_type=%s and o.status='SENT'
+                   and o.payload_ref->>'artifact_type'='FILL'
+                   and o.payload_ref->>'artifact_schema'='trading-user-directive-fill-v1'
+                   and c.event_id is null
+                   and directive.fund_id=%s and directive.book_id=%s
+              ) delivered
+             order by delivered.outbox_id
             """,
-            (CONSUMER, FILL_EVENT, fund_id, book_id),
+            (
+                CONSUMER, FILL_EVENT, fund_id, book_id,
+                CONSUMER, FILL_EVENT, fund_id, book_id,
+            ),
         )
         rows = cur.fetchall()
 
@@ -192,6 +225,119 @@ def ack_fill_events(
     with repo.cursor() as cur:
         inserted = 0
         if event_ids:
+            # Direct USER fills have no strategy order/order_intent by design.
+            # Acknowledge them only if their exact Journal already exists, and
+            # decrement the Trading reservation in the same transaction as
+            # the consumer receipt.  A crash before this block is conservative
+            # (the reservation remains); a crash within it rolls everything
+            # back together.
+            cur.execute(
+                """
+                select o.event_id,f.fill_id,f.leg_id,f.side,f.quantity,
+                       f.gross_amount,f.fee_amount,f.tax_amount
+                  from execution.outbox o
+                  join execution.paper_user_directive_fills f
+                    on f.fill_id=(o.payload_ref->>'artifact_id')::uuid
+                 where o.event_type=%s and o.status='SENT'
+                   and o.event_id=any(%s)
+                   and o.payload_ref->>'artifact_schema'=
+                       'trading-user-directive-fill-v1'
+                   and f.accounting_acknowledged_at is null
+                   and exists (
+                     select 1 from accounting.journals journal
+                      where journal.event_type='fill'
+                        and journal.source_event_id=f.broker_fill_id
+                   )
+                 order by o.outbox_id
+                 for update of f
+                """,
+                (FILL_EVENT, event_ids),
+            )
+            seen_direct_fills: set[UUID] = set()
+            for event_id, fill_id, leg_id, side, quantity, gross, fee, tax in cur.fetchall():
+                if fill_id in seen_direct_fills:
+                    raise LedgerPersistenceError(
+                        f"multiple direct Fill envelopes reference fill_id={fill_id}"
+                    )
+                seen_direct_fills.add(fill_id)
+                cur.execute(
+                    """
+                    insert into execution.outbox_consumed (consumer,event_id)
+                    values (%s,%s) on conflict do nothing
+                    returning event_id
+                    """,
+                    (CONSUMER, event_id),
+                )
+                if cur.fetchone() is None:
+                    continue
+                inserted += 1
+                if side == "BUY":
+                    cur.execute(
+                        """
+                        update execution.paper_order_reservations
+                           set reserved_cash=case
+                                 when reserved_cash>(%s+%s+%s)
+                                   then reserved_cash-(%s+%s+%s)
+                                 else reserved_cash end,
+                               state=case
+                                 when reserved_cash<=(%s+%s+%s)
+                                   then 'RELEASED' else state end,
+                               released_at=case
+                                 when reserved_cash<=(%s+%s+%s)
+                                   then now() else released_at end,
+                               version=version+1
+                         where leg_id=%s and reservation_type='CASH'
+                           and state='ACTIVE'
+                        """,
+                        (
+                            gross, fee, tax, gross, fee, tax,
+                            gross, fee, tax, gross, fee, tax, leg_id,
+                        ),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        update execution.paper_order_reservations
+                           set reserved_quantity=case
+                                 when reserved_quantity>%s
+                                   then reserved_quantity-%s
+                                 else reserved_quantity end,
+                               state=case when reserved_quantity<=%s
+                                          then 'RELEASED' else state end,
+                               released_at=case when reserved_quantity<=%s
+                                                then now() else released_at end,
+                               version=version+1
+                         where leg_id=%s and reservation_type='POSITION'
+                           and state='ACTIVE'
+                        """,
+                        (quantity, quantity, quantity, quantity, leg_id),
+                    )
+                cur.execute(
+                    """
+                    update execution.paper_user_directive_fills
+                       set accounting_acknowledged_at=now()
+                     where fill_id=%s and accounting_acknowledged_at is null
+                    """,
+                    (fill_id,),
+                )
+                cur.execute(
+                    """
+                    update execution.paper_order_reservations reservation
+                       set state='RELEASED',released_at=now(),version=version+1
+                      from execution.user_directive_legs leg
+                     where reservation.leg_id=%s
+                       and leg.leg_id=reservation.leg_id
+                       and reservation.state='ACTIVE'
+                       and leg.state in ('FILLED','CANCELLED','EXPIRED','REJECTED')
+                       and not exists (
+                         select 1
+                           from execution.paper_user_directive_fills pending
+                          where pending.leg_id=reservation.leg_id
+                            and pending.accounting_acknowledged_at is null
+                       )
+                    """,
+                    (leg_id,),
+                )
             cur.execute(
                 """
                 insert into execution.outbox_consumed (consumer, event_id)
@@ -199,9 +345,11 @@ def ack_fill_events(
                   from execution.outbox o
                  where o.event_type = %s and o.status = 'SENT'
                    and o.event_id = any(%s)
+                   and (o.payload_ref->>'artifact_schema') is distinct from
+                       'trading-user-directive-fill-v1'
                 on conflict do nothing
                 """,
-                (CONSUMER, FILL_EVENT, [str(e) for e in event_ids]),
+                (CONSUMER, FILL_EVENT, event_ids),
             )
             inserted += cur.rowcount
         if fill_ids:
@@ -212,9 +360,11 @@ def ack_fill_events(
                   from execution.outbox o
                  where o.event_type = %s and o.status = 'SENT'
                    and (o.payload_ref ->> 'artifact_id')::uuid = any(%s)
+                   and (o.payload_ref->>'artifact_schema') is distinct from
+                       'trading-user-directive-fill-v1'
                 on conflict do nothing
                 """,
-                (CONSUMER, FILL_EVENT, [str(f) for f in fill_ids]),
+                (CONSUMER, FILL_EVENT, fill_ids),
             )
             inserted += cur.rowcount
         return inserted
@@ -301,10 +451,6 @@ def run_once(
             if fill.event_id is None:
                 raise LedgerPersistenceError("canonical Fill is missing event_id")
             event_ids.append(fill.event_id)
-        # Journal first, acknowledgement second. A restart re-selects SENT
-        # rows whose Journal already exists and safely acknowledges exact IDs.
-        ack_fill_events(repo, event_ids=event_ids)
-
     if fixture_only:
         journals.extend(consume_fill(ledger, fill)
                         for fill in pending_fills(repo, fund_id, book_id))
@@ -313,7 +459,12 @@ def run_once(
     # 분개만 쌓이고 현금은 영원히 안 움직인다 - 매수 대금이 안 나간 것처럼 보여
     # 가용 현금이 실제보다 많아진다. Projection 앞에 둬야 그 주기 스냅샷에 반영된다.
     journals.extend(settle_due(ledger, as_of.date(), now=as_of))
-    return journals, project(repo, ledger, marks, as_of)
+    snapshot = project(repo, ledger, marks, as_of)
+    # Journal and accounting projections are durable before the reservation is
+    # decremented.  If projection fails, the reservation remains conservative;
+    # a restart replays the idempotent Journal and finishes this acknowledgement.
+    ack_fill_events(repo, event_ids=event_ids)
+    return journals, snapshot
 
 
 if __name__ == "__main__":

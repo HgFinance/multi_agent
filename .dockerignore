@@ -21,3 +21,14 @@ node_modules
 **/auth.json
 **/*.sqlite3
 **/state.db*
+
+# Governed/runtime data is mounted after the image is built.  None of the
+# repository Dockerfiles COPY these paths; sending multi-gigabyte archives as
+# build context only slows Windows/OneDrive builds and risks data leakage.
+market-archive/
+quant-data/
+timescaledb/
+artifacts/
+audit-artifacts/
+test-results/
+dist/

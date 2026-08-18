@@ -55,6 +55,7 @@ for p in (str(_HERE), str(_RESEARCH), str(_RESEARCH / "collectors"),
         sys.path.insert(0, p)
 
 from stock_universe import (  # noqa: E402
+    INTRADAY_REPORT_MANIFEST_VERSION,
     governed_stock_dataset_sql,
     governed_stock_evidence_sql,
 )
@@ -64,6 +65,69 @@ MODULE_VERSION = "factory-autopilot-v1"
 _GOVERNED_HISTORICAL_EVIDENCE = governed_stock_evidence_sql(
     experiment_alias="e", dataset_alias="m", hypothesis_alias="h")
 _GOVERNED_STOCK_DATASET = governed_stock_dataset_sql(dataset_alias="m")
+_GOVERNED_CALIBRATION_FAILURE_EVIDENCE = """
+  e.config->>'asset_scope' = 'REFERENCE_INSTRUMENT_TYPE_STOCK_ONLY'
+  and manifest.manifest_version = '""" + \
+    INTRADAY_REPORT_MANIFEST_VERSION + """'
+  and """ + _GOVERNED_STOCK_DATASET + """
+  and exists (
+      select 1
+        from quant.intraday_experiment_rungs calibration_rung
+       where calibration_rung.experiment_id = e.experiment_id
+         and calibration_rung.dataset_id = e.dataset_id
+         and calibration_rung.rung = 'CALIBRATION'
+         and calibration_rung.evidence_purpose = 'ADAPTIVE_SEARCH'
+         and calibration_rung.planned_session_count between 1 and 5
+         and calibration_rung.planned_instrument_count >= 1
+         and cardinality(calibration_rung.planned_session_dates) =
+             calibration_rung.planned_session_count
+         and cardinality(calibration_rung.planned_instrument_ids) =
+             calibration_rung.planned_instrument_count
+         and not exists (
+             select 1
+               from unnest(calibration_rung.planned_instrument_ids)
+                    planned_instrument(instrument_id)
+               cross join unnest(calibration_rung.planned_session_dates)
+                    planned_session(session_date)
+               left join quant.current_krx_stock_instrument_identity identity
+                 on identity.instrument_id = planned_instrument.instrument_id
+              where identity.instrument_id is null
+                 or coalesce(upper(identity.instrument_type), '') <> 'STOCK'
+                 or coalesce(upper(identity.asset_class), '') <> 'EQUITY'
+                 or coalesce(upper(identity.market), '') <> 'KRX'
+                 or coalesce(upper(identity.status), '') <> 'ACTIVE'
+                 or coalesce(identity.is_spac, true)
+                 or (identity.listed_from is not null and
+                     identity.listed_from > planned_session.session_date)
+                 or (identity.listed_to is not null and
+                     identity.listed_to < planned_session.session_date)
+         )
+         and (
+             select count(distinct exposure.session_date)
+               from quant.intraday_session_exposures exposure
+              where exposure.experiment_rung_id =
+                    calibration_rung.experiment_rung_id
+                and exposure.root_lineage_id =
+                    calibration_rung.root_lineage_id
+                and exposure.dataset_id = calibration_rung.dataset_id
+                and exposure.exposure_purpose = 'CALIBRATION'
+                and exposure.knowledge_clock_mode =
+                    'EVENT_TIME_HISTORICAL_ONLY'
+                and exposure.session_date = any(
+                    calibration_rung.planned_session_dates)
+                and exposure.instrument_count =
+                    calibration_rung.planned_instrument_count
+                and exposure.instrument_set_fingerprint =
+                    calibration_rung.instrument_set_fingerprint
+                and exposure.instrument_ids <@
+                    calibration_rung.planned_instrument_ids
+                and calibration_rung.planned_instrument_ids <@
+                    exposure.instrument_ids
+                and exposure.quote_row_count > 0
+                and exposure.trade_row_count > 0
+         ) = calibration_rung.planned_session_count
+  )
+"""
 
 # 카드를 만들 때 쓰는 CLI 컨테이너. 어느 프로필이든 같은 보드를 본다
 # (/opt/kanban 이 8개 컨테이너에 공유 마운트다).
@@ -488,15 +552,16 @@ def _ast_scout_contract() -> str:
         '  The window key is exactly "n"--never "window" or "lookback". ts_corr uses',
         '  {"op":"ts_corr","field_a":"...","field_b":"...","n":5}; unary nodes',
         '  use "arg" and binary nodes use exactly two "args". Unknown keys are rejected.',
-        "  DATA REALITY: every supported quote/trade field above is already available as a",
-        "  point-in-time Korean-equity DAILY AGGREGATE. AST windows therefore mean trading",
-        "  days, not seconds or order-book events. The current microstructure history is short.",
+        "  DAILY_CROSS_SECTIONAL LANE ONLY: every supported field in the daily grammar above",
+        "  is a point-in-time Korean-equity daily aggregate, and its AST windows mean trading",
+        "  days. This paragraph does not describe or restrict the INTRADAY_EVENT lane below.",
         "  AST_READY needs a cited mechanism that maps to those local fields; the source does",
         "  NOT need to ship a reusable dataset, Korean observations, or its own OOS backtest.",
         "  A foreign venue is an external-validity risk to record, not MISSING_DATA, when the",
         "  mechanism and observable map exactly to a supported local field.",
-        "  Use DATA_BLOCKED only when the test truly needs unavailable granularity/fields",
-        "  (for example queue position, cancellations, order lifetime, or event-time seconds).",
+        "  In the daily lane, route second/tick mechanisms to INTRADAY_EVENT instead of",
+        "  marking them blocked. Use DATA_BLOCKED only for truly unavailable fields such as",
+        "  MBO queue position, attributed cancellations, or individual-order lifetime.",
         "  For AST_READY, OBSERVABLES must exactly equal the fields used by the AST, and",
         "  mechanism/TESTABLE_WITH must explain those fields economically.",
         "  AST_READY targets subsequent RETURN alpha. A volatility forecast, execution-cost",
@@ -1669,6 +1734,117 @@ INTRADAY_LEADS_LOW = 2
 # economic equation thesis needed by the symbolic search. Maintain a separate
 # typed-formula buffer so deployment upgrades actually refill the new contract.
 INTRADAY_FORMULA_LEADS_LOW = 12
+FORMULA_BREEDER_POPULATION = 64
+_LIVE_INTRADAY_EVOLUTION_PARENTS_SQL = """
+    select count(*)
+      from research.methodology_leads l
+     where l.status = 'COMPLETE'
+       and l.testability = 'RULE_EXPRESSIBLE'
+       and l.ast_contract->>'ast_readiness' = 'AST_READY'
+       and l.ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
+       and l.ast_contract->>'research_lane' = 'INTRADAY_EVENT'
+       and l.ast_contract->>'formula_discovery_version' =
+           'formula-discovery-v5'
+       and coalesce(
+             (l.ast_contract->>'formula_contract_complete')::boolean,
+             false)
+       and coalesce(
+             (l.ast_contract->>'alpha_candidate_eligible')::boolean,
+             false)
+       and jsonb_typeof(l.ast_contract->'candidate_signal_expr') = 'object'
+       and not exists (
+             select 1
+               from quant.experiments e
+               join quant.hypotheses h
+                 on h.hypothesis_id = e.hypothesis_id
+               join quant.dataset_manifests m
+                 on m.dataset_id = e.dataset_id
+               join quant.intraday_report_manifests manifest
+                 on manifest.experiment_id = e.experiment_id
+               cross join lateral (
+                 -- Primary and screening formulas are both durable adaptive
+                 -- observations. JSONB equality deliberately compares the
+                 -- complete typed AST, not a title or lossy printed formula.
+                 select manifest.report->'score_calibration' as calibration
+                  where e.config->'intraday_signal_expr' =
+                        l.ast_contract->'candidate_signal_expr'
+                 union all
+                 select manifest.report->'screening_candidates'
+                                      ->(screen_candidate->>'ast_fingerprint')
+                                      ->'score_calibration' as calibration
+                   from jsonb_array_elements(
+                          case
+                            when jsonb_typeof(
+                                   e.config->'screening_population') = 'array'
+                            then e.config->'screening_population'
+                            else '[]'::jsonb
+                          end) screen_candidate
+                  where screen_candidate->'intraday_signal_expr' =
+                        l.ast_contract->'candidate_signal_expr'
+               ) measured
+              where """ + _GOVERNED_CALIBRATION_FAILURE_EVIDENCE + """
+                and jsonb_typeof(measured.calibration) = 'object'
+                and measured.calibration->>'status' =
+                    'NO_COST_FEASIBLE_ENTRY'
+                and measured.calibration->>'cost_feasible_entry_possible' =
+                    'false'
+                and jsonb_typeof(
+                      measured.calibration->'observations') = 'number'
+                and (measured.calibration->>'observations')::numeric > 0
+                and jsonb_typeof(
+                      measured.calibration->
+                        'minimum_observed_entry_hurdle_bps') = 'number'
+                and jsonb_typeof(
+                      measured.calibration->
+                        'maximum_calibrated_predicted_markout_bps') = 'number'
+                and (measured.calibration->>
+                       'maximum_calibrated_predicted_markout_bps')::numeric <=
+                    (measured.calibration->>
+                       'minimum_observed_entry_hurdle_bps')::numeric
+       )
+"""
+
+
+def _formula_breeder_generation(moment: datetime) -> int:
+    """Return one deterministic, monotonically changing generation per UTC hour."""
+    if moment.tzinfo is None:
+        raise ValueError("formula breeder generation requires a timezone")
+    return int(moment.astimezone(timezone.utc).timestamp() // 3600)
+
+
+def _formula_breeder_card_body(*, generation: int, starvation: str) -> str:
+    """Build the operational breeder contract without asking for a report."""
+    return (
+        "This is a FORMULA BREEDER task, not a literature-scout or report task.\n"
+        "Do not browse the web, collect new sources, write a research memo, or call "
+        "factory_submit_leads. The persisted parents already carry source provenance.\n\n"
+        "1. Call factory_generate_formula_population once with population_size="
+        f"{FORMULA_BREEDER_POPULATION} and generation={generation}. Generation is "
+        "the current UTC-hour identity; use it exactly so a later hourly card cannot "
+        "replay the previous deterministic batch. The tool uses adaptive experiment "
+        "results, cost failures, failed subtrees, exact/shape deduplication, and "
+        "economic niches.\n"
+        "2. ALREADY_PERSISTED_SEED, NO_SOURCE_PARENT_MAPPING, CROSSOVER_*, and every "
+        "draft whose parent_lead_ids length is not exactly 1 are generator diagnostics, "
+        "not candidates. Do not enrich, submit, or count them as valid throughput. "
+        "Spend Hermes tokens only on submission_ready=true single-parent drafts. Choose "
+        "up to 12 across different pressure/mechanism/regime/clock niches; do not "
+        "select parameter-only near-clones.\n"
+        "3. Replace every REQUIRES_HERMES placeholder. For each child write a concrete "
+        "economic_mechanism, falsifiable formula_thesis.identification, expected_increment, "
+        "novelty_rationale, and structural ablations. Preserve the full 23bp governed "
+        "round-trip hurdle; never tune a coefficient or threshold to clear it. A family "
+        "with NO_COST_FEASIBLE_ENTRY and max calibrated markout below its hurdle is spent, "
+        "not a direction-flip parent.\n"
+        "4. Group selected children by their single parent_lead_id and call "
+        "factory_submit_evolved_formulas. Deterministic intake must accept the actual "
+        "formula revisions; a narrative in the card is not delivery.\n"
+        "5. Complete only after reporting generated/single-parent-ready/accepted counts, "
+        "unique niches, and exact rejection reasons. Never claim alpha: every child "
+        "remains adaptive, promotion_authority=false, and requires preregistered "
+        "evaluation.\n\n"
+        + starvation
+    )
 # 이보다 오래된 리드만 있으면 시장이 바뀌었을 수 있다.
 LEADS_STALE_DAYS = 2
 
@@ -1736,6 +1912,19 @@ def _intraday_formula_unused_count(conn) -> int:
                       where r.verdict = 'STOP'
                         and l.lead_id = any(r.lead_ids))
         """)
+        return int((cur.fetchone() or (0,))[0] or 0)
+
+
+def _intraday_evolution_parent_count(conn) -> int:
+    """Count source-backed formulas that still have adaptive breeding value.
+
+    Used formulas remain lineage parents, but a formula is no longer live once
+    the exact JSONB AST has durable, governed stock-only calibration evidence
+    proving that its calibrated markout cannot clear the observed execution-cost
+    hurdle. This prevents spent adaptive parents from suppressing Scout forever.
+    """
+    with conn.cursor() as cur:
+        cur.execute(_LIVE_INTRADAY_EVOLUTION_PARENTS_SQL)
         return int((cur.fetchone() or (0,))[0] or 0)
 
 
@@ -3383,6 +3572,7 @@ def cycle(*, dry_run: bool = False) -> int:
     starving = ""
     executable_unused: int | None = None
     intraday_formula_unused: int | None = None
+    intraday_evolution_parents: int | None = None
     try:
         _sc = _conn()
         try:
@@ -3392,11 +3582,33 @@ def cycle(*, dry_run: bool = False) -> int:
             # even though Scout should concurrently refill toward LEADS_LOW.
             executable_unused = _executable_unused_count(_sc)
             intraday_formula_unused = _intraday_formula_unused_count(_sc)
+            intraday_evolution_parents = _intraday_evolution_parent_count(_sc)
             ast_memory = _ast_experience_block(_sc)
         finally:
             _sc.close()
+        breeder_needed = bool(
+            starving
+            and intraday_evolution_parents
+            and intraday_formula_unused is not None
+            and intraday_formula_unused < INTRADAY_FORMULA_LEADS_LOW)
+        active_breeder = (_active_card_by_key_prefix("factory-formula-breeder-")
+                          if breeder_needed else None)
+        if breeder_needed and not active_breeder:
+            _bnow = datetime.now(timezone.utc)
+            _bgeneration = _formula_breeder_generation(_bnow)
+            _create_card(
+                title=f"Formula breeder: outcome-conditioned AST population {stamp}",
+                body=_formula_breeder_card_body(
+                    generation=_bgeneration, starvation=starving),
+                assignee="research-department",
+                key=f"factory-formula-breeder-v1-{_bnow:%Y%m%d}T{_bnow.hour:02d}",
+                dry_run=dry_run, priority=0)
+        elif active_breeder:
+            print(f"  formula breeder skipped - already active: {active_breeder}",
+                  flush=True)
+
         active_scout = _active_card_by_key_prefix("factory-scout-") if starving else None
-        if starving and not active_scout:
+        if starving and not breeder_needed and not active_scout:
             _now = datetime.now(timezone.utc)
             _create_card(
                 title=f"공장 스카우트 소집: 리드 수집 {stamp}",
@@ -3432,7 +3644,7 @@ def cycle(*, dry_run: bool = False) -> int:
                 # label these economic mutations explicitly.
                 key=f"factory-scout-v9-{_now:%Y%m%d}T{_now.hour:02d}",
                 dry_run=dry_run)
-        elif active_scout:
+        elif active_scout and not breeder_needed:
             print(f"  scout refill skipped - already active: {active_scout}", flush=True)
     except Exception as exc:  # noqa: BLE001
         print(f"  !! 스카우트 카드 실패: {type(exc).__name__}: {str(exc)[:150]}",
@@ -4267,6 +4479,65 @@ def _check_kind_scope_survives_instance_churn():
     print("  종류 지문이 개체 churn 견딤 OK")
 
 
+def _check_formula_breeder_live_routing() -> None:
+    """Spent parents must release Scout and hourly breeder calls must advance."""
+    import inspect
+
+    sql = _LIVE_INTRADAY_EVOLUTION_PARENTS_SQL
+    for token in (
+            "e.config->'intraday_signal_expr' =",
+            "l.ast_contract->'candidate_signal_expr'",
+            "screen_candidate->'intraday_signal_expr' =",
+            "quant.intraday_report_manifests manifest",
+            "NO_COST_FEASIBLE_ENTRY",
+            "cost_feasible_entry_possible",
+            "minimum_observed_entry_hurdle_bps",
+            "maximum_calibrated_predicted_markout_bps",
+            "ADAPTIVE_SEARCH",
+            "EVENT_TIME_HISTORICAL_ONLY",
+            "intraday-governance-report-v7",
+            "REFERENCE_INSTRUMENT_TYPE_STOCK_ONLY"):
+        assert token in sql, f"live-parent evidence boundary missing: {token}"
+    assert "v_current_experiment_outcomes" not in sql, \
+        "QA/forward-revised outcome views must not retire adaptive parents"
+
+    class _Cursor:
+        def __init__(self):
+            self.executed = ""
+
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def execute(self, query): self.executed = query
+        def fetchone(self): return (7,)
+
+    class _Conn:
+        def __init__(self): self.cur = _Cursor()
+        def cursor(self): return self.cur
+
+    conn = _Conn()
+    assert _intraday_evolution_parent_count(conn) == 7
+    assert conn.cur.executed == _LIVE_INTRADAY_EVOLUTION_PARENTS_SQL
+
+    hour = datetime(2026, 8, 18, 3, 1, tzinfo=timezone.utc)
+    same_hour = datetime(2026, 8, 18, 3, 59, tzinfo=timezone.utc)
+    next_hour = datetime(2026, 8, 18, 4, 0, tzinfo=timezone.utc)
+    generation = _formula_breeder_generation(hour)
+    assert generation == _formula_breeder_generation(same_hour)
+    assert _formula_breeder_generation(next_hour) == generation + 1
+    body = _formula_breeder_card_body(
+        generation=generation, starvation="STARVING")
+    assert f"generation={generation}" in body
+    assert "CROSSOVER_*" in body and "parent_lead_ids length is not exactly 1" in body
+    assert "Do not enrich, submit, or count them as valid throughput" in body
+    assert "submission_ready=true single-parent drafts" in body
+
+    cyc = inspect.getsource(cycle)
+    assert "and intraday_evolution_parents" in cyc
+    assert "if starving and not breeder_needed and not active_scout" in cyc, \
+        "zero live parents must route a starving factory back to Scout"
+    print("  formula breeder live-parent/hour routing  OK")
+
+
 def _selfcheck() -> int:
     import tempfile
 
@@ -4284,6 +4555,7 @@ def _selfcheck() -> int:
     assert "TC 0.114" in v and "top_n" in v, "IR 구조 진단이 브리핑에서 빠졌다"
     print("  통제 어휘 출처            OK")
     _check_design_gaps_and_scout_card()
+    _check_formula_breeder_live_routing()
     _check_ast_memory_reaches_scout_and_planner()
     _check_dataset_refresh_is_daily_and_ordered()
     _check_near_miss_surfaces_the_winner()
@@ -4304,7 +4576,7 @@ def _selfcheck() -> int:
     _check_research_queue_prefers_consumption()
     _check_kind_scope_survives_instance_churn()
     _check_briefed_example_actually_passes_intake()
-    print("자동 조종 21개 영역 통과. 실행은 --once / --loop")
+    print("자동 조종 22개 영역 통과. 실행은 --once / --loop")
     return 0
 
 
@@ -4562,7 +4834,7 @@ def _check_unused_leads_come_first():
     assert "alpha_candidate_eligible" in _SQL_LEADS, \
         "공개 기준선이 신규 알파 후보 목록에 다시 노출된다"
     assert "MICROSTRUCTURE IS PRIMARY" in contract
-    assert "DAILY AGGREGATE" in contract and "source does" in contract
+    assert "DAILY_CROSS_SECTIONAL LANE ONLY" in contract and "source does" in contract
     assert "NOT need to ship a reusable dataset" in contract
     assert "external-validity risk" in contract and "queue position" in contract
     assert "must not be" in contract and "daily proxy" in contract

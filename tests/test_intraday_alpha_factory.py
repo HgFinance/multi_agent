@@ -18,6 +18,7 @@ for path in (PIPELINE, CONTRACTS, FACTORY):
         sys.path.insert(0, str(path))
 
 import alpha_semantics as semantics
+import data_resolution as data_resolution_module
 import formula_discovery
 import intraday_alpha_ast as intraday_grammar
 import intraday_candidate as candidate_module
@@ -42,16 +43,22 @@ from intraday_experiment_runner import (StaleIntradayCohortError,
                                          _annotate_population,
                                          _all_symbolic_candidates_cost_infeasible,
                                          _apply_population_dsr_gate,
+                                         _assert_dataset_manifest_projection,
                                          _candidate_accumulators,
+                                         _external_content_end,
+                                         _external_replay_manifest,
                                          _input_hash,
                                          _population_multiple_testing,
                                          _fast_screen_gate, _stratified,
                                         _lineage, _load_completed_report,
+                                        _replay_load_end, _session_bounds,
                                         _stable_dataset_cutoff, config_from_edge,
                                         record_data_feasibility,
                                         run as run_intraday, select_slice)
-from intraday_microstructure import (HorizonLabel, IntradayLaneSpec,
-                                      IntradaySample, EXTERNAL_EVENT_SOURCE)
+from intraday_microstructure import (COMPLETED_SECOND_POLICY, HorizonLabel,
+                                      IntradayLaneSpec, IntradaySample,
+                                      EXTERNAL_EVENT_SOURCE,
+                                      effective_purge_gap)
 from trial_family import family_id, hypothesis_view
 from strategy_lifecycle import evaluate_promotion
 
@@ -309,6 +316,7 @@ def test_calibration_proves_bounded_formula_cannot_clear_stock_costs() -> None:
             "status": "NON_POSITIVE_DIRECTIONAL_RELATION",
             "coefficient_policy": "STRUCTURE_ONLY",
             "cost_feasible_entry_possible": False,
+            "observations": 1_000,
         },
     }) is True
     assert _all_symbolic_candidates_cost_infeasible({
@@ -619,6 +627,68 @@ def test_gate0_routes_intraday_contract_without_daily_binding() -> None:
     gate = gate0(proposal)
     assert not gate.ok and "INTRADAY_CONTRACT_INVALID" in gate.codes
 
+
+def test_runner_revalidates_resolver_dataset_source_and_clock_contract() -> None:
+    edge, _ = expected_edge_for(_intraday_proposal())
+    contract = data_resolution_module._copy_authority_contract(
+        data_resolution_module.EXTERNAL_INTRADAY_DATASET)
+    edge["data_source"] = EXTERNAL_EVENT_SOURCE
+    edge["resolved_data_contract"] = contract
+
+    config, _spec = config_from_edge(edge)
+    assert config["resolved_data_contract"] == contract
+
+    drifted = {**edge, "resolved_data_contract": {
+        **contract, "timestamp_policy": "STRICT_RECEIPT_ORDER_V1"}}
+    with pytest.raises(RuntimeError, match="contract mismatch"):
+        config_from_edge(drifted)
+
+    wrong_dataset = {**edge, "resolved_data_contract": {
+        **contract, "dataset": data_resolution_module.LIVE_INTRADAY_DATASET}}
+    with pytest.raises(RuntimeError, match="contract mismatch"):
+        config_from_edge(wrong_dataset)
+
+
+def test_registration_revalidates_external_manifest_catalog_projection() -> None:
+    contract = data_resolution_module._copy_authority_contract(
+        data_resolution_module.EXTERNAL_INTRADAY_DATASET)
+    pit = {
+        "knowledge_clock": "event_time_only_no_receipt_clock",
+        "feature_cutoff": "completed_source_second<=decision_time",
+        "label_cutoff": "effective_entry_time+horizon",
+        "instrument_isolation": True,
+        "evidence_scope": "HISTORICAL_SEARCH_ONLY",
+        "content_window": "[09:00:00,15:30:00) Asia/Seoul",
+        "maximum_horizon_seconds": 600,
+    }
+    quality = {
+        "status": "HISTORICAL_COMPLETED_SECOND_REQUIRES_PER_EXPERIMENT_AUDIT",
+        "timestamp_resolution": "SECOND",
+        "intra_second_order": "UNAVAILABLE",
+        "execution": "TAKER_ONLY",
+    }
+    schema = {
+        "market_quotes": {
+            "physical_table": "ext_src.quotes",
+            "required": ["ts", "symbol", "bid1", "ask1", "bid_vol1",
+                         "ask_vol1", "bid10", "ask10", "bid_vol10",
+                         "ask_vol10"],
+        },
+        "market_ticks": {
+            "physical_table": "ext_src.ticks",
+            "required": ["ts", "symbol", "price", "volume", "ofi_contrib"],
+        },
+    }
+    row = (
+        "dataset-id", contract["source_versions"], pit, quality,
+        "postgresql+fdw://ext_src/{quotes,ticks}", schema)
+
+    assert _assert_dataset_manifest_projection(row, contract) == "dataset-id"
+    with pytest.raises(RuntimeError, match="manifest drift"):
+        _assert_dataset_manifest_projection(
+            (*row[:2], {**pit, "content_window": "[09:00,15:25)"},
+             *row[3:]), contract)
+
     proposal = _intraday_proposal()
     proposal["suggested_params"]["position_mode"] = "LONG_SHORT"
     gate = gate0(proposal)
@@ -627,7 +697,11 @@ def test_gate0_routes_intraday_contract_without_daily_binding() -> None:
 
 def test_screening_population_unifies_clocks_horizons_and_execution_labels() -> None:
     proposal = _intraday_proposal()
-    edge, _ = expected_edge_for(proposal)
+    primary_baseline = {"op": "field", "field": "spread_bps"}
+    proposal["suggested_params"][
+        "source_baseline_expr"] = primary_baseline
+    edge, dropped = expected_edge_for(proposal)
+    assert "source_baseline_expr" not in dropped
     passive_plan = {
         "event": "MICROPRICE_DISLOCATION", "context": ["ALL"],
         "qualities": ["PERSISTENCE"], "direction": "REVERT",
@@ -642,6 +716,7 @@ def test_screening_population_unifies_clocks_horizons_and_execution_labels() -> 
         "source_lead_ids": ["lead-passive"],
         "ast_fingerprint": candidate_module.fingerprint(sidecar_expr),
         "intraday_signal_expr": sidecar_expr,
+        "source_baseline_expr": sidecar_expr,
         "semantic_plan": passive_plan,
         "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
     }]
@@ -653,6 +728,9 @@ def test_screening_population_unifies_clocks_horizons_and_execution_labels() -> 
     assert config["population_execution_model"] == "PASSIVE_FIFO_LOWER_BOUND"
     assert config["screening_trial_exposure"] == 1
     assert config["screening_population"][0]["screening_only"] is True
+    assert config["source_baseline_expr"] == primary_baseline
+    assert config["screening_population"][0][
+        "source_baseline_expr"] == sidecar_expr
 
 
 def test_runner_accepts_structure_only_score_but_not_unscaled_fixed_score() -> None:
@@ -1032,6 +1110,110 @@ def test_external_content_correction_invalidates_identity_with_same_shape() -> N
         "content_fingerprint"]
     assert _input_hash("H1", {"source_lineage": first}) != _input_hash(
         "H1", {"source_lineage": corrected})
+
+
+def test_external_consumed_replay_identity_includes_calibration_and_empty_cells() -> None:
+    at = datetime(2026, 8, 14, 6, 30, tzinfo=timezone.utc)
+    aggregate = [
+        ("ext_src.quotes", 100, at, at, at, None),
+        ("ext_src.ticks", 50, at, at, at, None),
+    ]
+
+    class Cursor:
+        def __init__(self):
+            self.responses = iter([aggregate, [
+                (date(2026, 8, 14), "005930", 100, 50, "a" * 64,
+                 "pg-composite-row-xor0-sum1-sha256-v1", "a" * 64, at),
+            ]])
+            self.current = []
+
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+        def execute(self, *_): self.current = next(self.responses)
+        def fetchall(self): return self.current
+
+    class Conn:
+        def cursor(self): return Cursor()
+
+    selected = {
+        "status": "PASS", "event_source": EXTERNAL_EVENT_SOURCE,
+        "calibration_sessions": [date(2026, 8, 13)],
+        "sessions": [date(2026, 8, 14)],
+        "instruments": ["005930"],
+    }
+    lineage = _lineage(Conn(), selected, at)
+
+    assert lineage[0]["consumed_replay_content_contract"] == \
+        "external-raw-replay-content-v3"
+    assert lineage[0]["consumed_replay_content_manifest_rows"] == 2
+    assert len(lineage[0]["consumed_replay_content_fingerprint"]) == 64
+
+
+@pytest.mark.parametrize("horizon_seconds", [5, 30, 60, 300, 599, 600])
+def test_external_raw_identity_window_is_horizon_independent(
+        horizon_seconds: int) -> None:
+    day = date(2026, 8, 14)
+    _start, decision_end = _session_bounds(day)
+    spec = IntradayLaneSpec(
+        sample_interval_seconds=5,
+        feature_lookback_seconds=30,
+        horizons_seconds=(horizon_seconds,),
+        order_latency_ms=250,
+        max_quote_age_seconds=5.0,
+        fee_bps_per_side=11.5,
+        maker_fee_bps_per_side=11.5,
+    )
+    content_end = _external_content_end(day)
+    sample_load_end = min(
+        decision_end + effective_purge_gap(spec, COMPLETED_SECOND_POLICY),
+        content_end)
+
+    assert sample_load_end <= content_end
+    assert _replay_load_end(
+        day, EXTERNAL_EVENT_SOURCE, sample_load_end) == content_end
+    assert content_end == datetime(
+        2026, 8, 14, 6, 30, tzinfo=timezone.utc)
+
+
+def test_external_raw_manifest_requires_calibration_and_evaluation_cell_set() -> None:
+    selected = {
+        "calibration_sessions": [date(2026, 8, 13)],
+        "sessions": [date(2026, 8, 14)],
+        "instruments": ["005930", "000660"],
+    }
+    rows = []
+    for index, (session, instrument) in enumerate((
+            ("2026-08-13", "005930"),
+            ("2026-08-13", "000660"),
+            ("2026-08-14", "005930"),
+            ("2026-08-14", "000660")), 1):
+        rows.append({
+            "session": session, "instrument": instrument,
+            "quote_rows": index, "trade_rows": index,
+            "source_content_fingerprint": f"{index:064x}",
+        })
+
+    manifest = _external_replay_manifest(list(reversed(rows)), selected)
+    assert manifest["manifest_rows"] == 4
+    assert manifest["identity"]["content_window"] == {
+        "timezone": "Asia/Seoul", "start": "09:00:00",
+        "end_exclusive": "15:30:00", "interval": "HALF_OPEN",
+    }
+    with pytest.raises(RuntimeError, match="cell set differs"):
+        _external_replay_manifest(rows[2:], selected)
+    with pytest.raises(RuntimeError, match="cell set differs"):
+        _external_replay_manifest([*rows, rows[0]], selected)
+
+
+def test_runner_never_resolves_auto_from_table_existence() -> None:
+    class NeverRead:
+        def cursor(self):
+            raise AssertionError("runner must reject AUTO before database reads")
+
+    with pytest.raises(RuntimeError, match="resolver-only policy"):
+        select_slice(
+            NeverRead(), {"evaluation_days": 60, "data_source": "AUTO"},
+            cutoff=datetime(2026, 8, 17, tzinfo=timezone.utc))
 
 
 def test_dataset_cutoff_is_retry_stable_and_covers_replay_floor() -> None:

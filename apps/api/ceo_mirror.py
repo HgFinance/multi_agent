@@ -66,6 +66,10 @@ class CanonicalIngress(BaseModel):
     # 아직 Fund 개념이 없어 안 보내므로 Optional이다 - 없으면 CEO Mandate
     # 스냅샷 없이 그대로 진행한다(개발 원칙 9, `ceo.ceo_query`와 동일한 정책).
     fund_id: str | None = None
+    # Direct natural-language PAPER orders are authorized against one exact
+    # Book. Keeping it in the canonical envelope prevents a replayed request
+    # id from being rebound to a different account boundary.
+    book_id: str | None = None
 
     @model_validator(mode="after")
     def default_source_message_id(self) -> CanonicalIngress:
@@ -154,6 +158,27 @@ class MirrorStoreUnavailable(RuntimeError):
     """The durable deduplication store cannot safely claim a request."""
 
 
+def _canonical_request_identity(request: CanonicalIngress) -> tuple[object, ...]:
+    """Return every field that fixes one ingress's content and authority."""
+
+    return (
+        request.query,
+        request.source,
+        request.source_message_id,
+        request.actor_id,
+        request.actor_type,
+        request.fund_id,
+        request.book_id,
+        request.mirrored,
+    )
+
+
+def _same_canonical_request(
+    left: CanonicalIngress, right: CanonicalIngress
+) -> bool:
+    return _canonical_request_identity(left) == _canonical_request_identity(right)
+
+
 class InMemoryMirrorStore:
     """Deterministic store used by tests and as a safe local fallback."""
 
@@ -180,10 +205,7 @@ class InMemoryMirrorStore:
                 )
             existing = self._requests.get(request.request_id)
             if existing is not None:
-                if (
-                    existing.request.query != request.query
-                    or existing.request.source != request.source
-                ):
+                if not _same_canonical_request(existing.request, request):
                     raise MirrorRequestConflict(
                         "request_id is already bound to a different canonical request"
                     )
@@ -266,8 +288,13 @@ class RedisMirrorStore:
         existing = self.client.get(request_key)
         if existing:
             payload = json.loads(existing)
+            stored_request = CanonicalIngress.model_validate(payload["request"])
+            if not _same_canonical_request(stored_request, request):
+                raise MirrorRequestConflict(
+                    "request_id is already bound to a different canonical request"
+                )
             return MirrorRequestRecord(
-                request=CanonicalIngress.model_validate(payload["request"]),
+                request=stored_request,
                 response=payload.get("response"),
             ), False
         payload = {"request": request.model_dump(mode="json"), "response": None}
@@ -282,10 +309,7 @@ class RedisMirrorStore:
                 raise RuntimeError("request deduplication record disappeared")
             stored = json.loads(existing)
             stored_request = CanonicalIngress.model_validate(stored["request"])
-            if (
-                stored_request.query != request.query
-                or stored_request.source != request.source
-            ):
+            if not _same_canonical_request(stored_request, request):
                 raise MirrorRequestConflict(
                     "request_id is already bound to a different canonical request"
                 )

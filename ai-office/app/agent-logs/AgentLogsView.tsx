@@ -16,7 +16,7 @@ import { KANBAN_BASE_URL, resolveKanbanUrl } from "../lib/kanbanUrl";
  *
  * 데이터·판정은 main의 `ops/RiskQaPanel.tsx` 로직 그대로이고, 겉모습만
  * 우리 디자인 토큰으로 옮겼다. 부서 수·Worker 수의 출처는 각 Hermes Profile의
- * Worker Registry이고 실행 상태는 BFF `/ui/snapshot`과 `/ws/operations`에서 받는다.
+ * Worker Registry와 실행 상태는 인증된 BFF `/ui/snapshot` polling으로 받는다.
  */
 
 const STATUS_VIEW: Record<string, { label: string; tone: string }> = {
@@ -189,7 +189,7 @@ export default function AgentLogsView() {
                 : "border-outline text-on-surface-variant"
             }`}
           >
-            {streamState === "connected" ? "BFF EVENT STREAM CONNECTED" : streamState === "connecting" ? "BFF STREAM CONNECTING" : "BFF STREAM DEGRADED"}
+            {streamState === "connected" ? "BFF AUTH POLLING CONNECTED" : streamState === "connecting" ? "BFF POLLING STARTING" : "BFF POLLING DEGRADED"}
           </span>
         </div>
       </section>
@@ -280,7 +280,7 @@ export default function AgentLogsView() {
       </section>
       <section className="flex flex-wrap gap-2" aria-label="Runtime event status">
         <span className="px-4 py-2 rounded border border-outline-variant bg-surface-container-lowest text-body-sm font-body-sm text-on-surface-variant">
-          BFF event stream <b className="font-data-mono text-on-surface">{streamState === "connected" ? "connected" : "waiting"}</b>
+          BFF auth polling <b className="font-data-mono text-on-surface">{streamState === "connected" ? "connected" : "waiting"}</b>
         </span>
         <span className="px-4 py-2 rounded border border-outline-variant bg-surface-container-lowest text-body-sm font-body-sm text-on-surface-variant">
           BFF keepalive <b className="font-data-mono text-on-surface">{lastKeepalive ? new Date(lastKeepalive).toLocaleTimeString("ko-KR") : "waiting"}</b>
@@ -354,7 +354,7 @@ export default function AgentLogsView() {
       ) : null}
 
       <p className="text-xs text-outline">
-        BFF event stream + keepalive Source: <code>/ui/snapshot</code> + <code>/ws/operations</code> · 부서 수와 Worker 수 Source: 각 Hermes Profile의 Worker Registry
+        BFF authenticated polling + keepalive Source: <code>/ui/snapshot</code> · WebSocket은 one-use ticket 도입 전 비활성 · 부서 수와 Worker 수 Source: 각 Hermes Profile의 Worker Registry
       </p>
     </main>
   );

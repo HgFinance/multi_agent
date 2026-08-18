@@ -36,7 +36,12 @@ except ImportError:
     import hermes_boundary
 import psycopg2
 from dotenv import load_dotenv
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+
+try:
+    from .current_user import current_user, require_fund_membership
+except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
+    from current_user import current_user, require_fund_membership
 
 DEPARTMENT = "accounting-portfolio-department"   # Hermes Profile 이름
 CONFIG = "departments/05-accounting-portfolio/hermes/config.yaml"  # 저장소 사본
@@ -135,12 +140,17 @@ def _query_latest_snapshot(fund_id: UUID, as_of: datetime) -> tuple[str, datetim
 
 
 @router.get("/v1/portfolio-snapshot")
-def portfolio_snapshot(fund_id: UUID, as_of: datetime | None = None) -> dict:
+def portfolio_snapshot(
+    fund_id: UUID,
+    as_of: datetime | None = None,
+    owner_id: str | None = Depends(current_user),
+) -> dict:
     """확정된 Portfolio Snapshot의 참조를 돌려준다.
 
     없으면 404다. 값을 지어내거나 가장 가까운 것을 대신 주지 않는다 - 존재하지
     않는 snapshot_id가 CEO 보고서에 실리면 추적 불가능한 근거가 된다.
     """
+    require_fund_membership(owner_id, str(fund_id))
     as_of = as_of or datetime.now(timezone.utc)
     if as_of.tzinfo is None:
         as_of = as_of.replace(tzinfo=timezone.utc)

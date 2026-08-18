@@ -13,7 +13,7 @@
         "asset_class": "KOREA_EQUITY",
         "currency": "KRW",
         "data_status": "TEST",
-        "evidence_refs": ["research:news_watchlist"]
+        "evidence_refs": ["research:portfolio-universe-fixture:v1"]
       },
       {
         "symbol": "000660",
@@ -22,7 +22,7 @@
         "asset_class": "KOREA_EQUITY",
         "currency": "KRW",
         "data_status": "TEST",
-        "evidence_refs": ["research:news_watchlist"]
+        "evidence_refs": ["research:portfolio-universe-fixture:v1"]
       },
       {
         "symbol": "005380",
@@ -31,7 +31,7 @@
         "asset_class": "KOREA_EQUITY",
         "currency": "KRW",
         "data_status": "TEST",
-        "evidence_refs": ["research:news_watchlist"]
+        "evidence_refs": ["research:portfolio-universe-fixture:v1"]
       },
       {
         "symbol": "035420",
@@ -40,7 +40,7 @@
         "asset_class": "KOREA_EQUITY",
         "currency": "KRW",
         "data_status": "TEST",
-        "evidence_refs": ["research:news_watchlist"]
+        "evidence_refs": ["research:portfolio-universe-fixture:v1"]
       }
     ]
   }

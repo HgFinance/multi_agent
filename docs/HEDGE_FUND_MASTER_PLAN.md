@@ -70,8 +70,8 @@
 2. 모든 종목의 실시간 특징과 신호를 지속적으로 계산한다.
 3. 이벤트 중요도, 불확실성, 유동성, 포트폴리오 영향을 기준으로 분석 우선순위를 정한다.
 4. 중요한 종목에만 멀티 에이전트 투자위원회를 동적으로 실행한다.
-5. 모든 주문 후보를 결정론적 Risk Engine으로 검증한다.
-6. 승인된 주문만 OMS로 전송하며 출시 단계에 따라 Paper Broker 또는 인증된 실제 Broker/FCM으로 Routing한다.
+5. 모든 Agent·alpha·자동 전략 주문 후보를 결정론적 Risk Engine으로 검증한다. 인증 사용자의 명시적 PAPER 주문은 ADR-0007의 별도 authority와 기계적 admission으로 검증한다.
+6. Risk 승인된 자동 주문 또는 admission을 통과한 사용자 PAPER directive만 OMS로 전송하며, LIVE Broker/FCM Routing은 별도 승인 전 활성화하지 않는다.
 7. 데이터, 근거, 판단, 주문, 체결 및 사후 성과를 재현 가능한 형태로 기록한다.
 8. 축적된 데이터를 이용해 신규 전략과 모델을 연구하고 Shadow 및 Paper 환경에 자동 배포한다.
 9. 운용 결과를 다시 연구 데이터로 환류해 전략을 개선하거나 자동 중단한다.
@@ -282,7 +282,7 @@ TradingAgents의 역할 분리와 토론 구조를 참고한 금융 도메인 �
 
 Hermes 내부 구현에 금융 상태를 모두 결합하지 않고 독립 서비스 또는 명확한 모듈 경계로 유지한다.
 
-실제 헤지펀드 운영을 모방하기 위해 투자위원회가 모든 주문을 승인하지는 않는다. 투자위원회는 Strategy Mandate, 자본 배분, Risk Budget 및 예외 상황을 심의한다. 일상적인 주문은 승인된 Mandate 안에서 트레이딩본부의 PM Pod 또는 전략 실행기가 만들고 리스크본부의 Risk/Compliance Gate를 통과해 집행한다. 대규모 포지션, Mandate 변경, 손실 한도 변경 및 신규 전략 승격만 CEO 에이전트 또는 Cross-Department 위원회로 Escalation한다.
+실제 헤지펀드 운영을 모방하기 위해 투자위원회가 모든 주문을 승인하지는 않는다. 투자위원회는 Strategy Mandate, 자본 배분, Risk Budget 및 예외 상황을 심의한다. 일상적인 자동 주문은 승인된 Mandate 안에서 트레이딩본부의 PM Pod 또는 전략 실행기가 만들고 리스크본부의 Risk/Compliance Gate를 통과해 집행한다. 인증 사용자의 직접 PAPER 명령은 이 자동 주문 레인이 아니라 ADR-0007의 `USER_DIRECTIVE` 레인으로 집행한다. 대규모 포지션, Mandate 변경, 손실 한도 변경 및 신규 전략 승격만 CEO 에이전트 또는 Cross-Department 위원회로 Escalation한다.
 
 ### 5.3 Risk Engine과 OMS
 
@@ -292,7 +292,8 @@ Risk Engine과 OMS는 에이전트 런타임과 분리한다.
 - 위험 축소와 청산 경로 유지
 - 중복 주문 방지
 - 주문 상태 전이의 일관성 보장
-- 모든 주문에 Risk Approval ID 요구
+- Agent·alpha·자동 전략 주문에 Risk Approval ID 요구
+- 사용자 직접 PAPER 주문에는 Risk Approval ID 대신 검증된 사용자 authority, Fund/Book binding, mechanical admission과 idempotency 증거 요구(ADR-0007)
 
 ### 5.4 Strategy Planning Committee
 
@@ -889,7 +890,7 @@ Trading의 기존 Trader/PM·Execution·Venue Cost·Derivatives 역할과 Accoun
 | 2. 트레이딩본부 | Bear Researcher | 반증, 하락 위험과 논리 취약점 제시 | 심층 분석 |
 | 2. 트레이딩본부 | Trader/PM Agent | 진입, 청산, 크기, 만료와 무효화 조건 제안 | 심층 분석 |
 | 2. 트레이딩본부 | Execution Agent | 주문 분할, Limit, 참여율, Slippage와 Routing 제안 | 승인 주문 |
-| 3. 리스크본부 | Risk Supervisor | 주문 심사 통합과 승인·축소·거부 결정 | 모든 주문 |
+| 3. 리스크본부 | Risk Supervisor | Agent·alpha·자동 전략 주문 심사 통합과 승인·축소·거부 결정 | 자동 주문 후보 |
 | 3. 리스크본부 | Market/Liquidity Risk Agent | Exposure, VaR, Stress, 집중도와 청산 가능성 검사 | 실시간 |
 | 3. 리스크본부 | Derivatives/Margin Risk Agent | Greeks, Basis, Margin, Assignment와 Tail Risk 검사 | 파생상품 이벤트 |
 | 3. 리스크본부 | Compliance Policy Agent | Mandate, Restricted List와 거래 제한 검사 | 사전/사후 거래 |
@@ -1128,7 +1129,7 @@ CREATED | ACKNOWLEDGED -> EXPIRED
 BROKER_STATE_AMBIGUOUS -> UNKNOWN
 ```
 
-`RISK_APPROVED`는 Broker Order 상태가 아니라 유효한 `risk_decision_id` 제출 전제조건이다. 사용자 승인이 필요한 Mandate는 OrderIntent 승인 흐름에만 `USER_PENDING -> USER_APPROVED`를 추가한다. `UNKNOWN` 상태에서는 신규 주문을 차단하고 Broker Reconciliation으로만 상태를 확정한다.
+`RISK_APPROVED`는 Broker Order 상태가 아니라 Agent·alpha·자동 전략 OrderIntent의 유효한 `risk_decision_id` 제출 전제조건이다. 사용자 승인이 필요한 Mandate는 해당 자동 OrderIntent 승인 흐름에만 `USER_PENDING -> USER_APPROVED`를 추가한다. 인증된 사용자가 자기 Fund/Book에 명시한 PAPER 주문은 [ADR-0007](02-engineering/adr/0007-authenticated-user-paper-directive-authority.md)의 별도 `USER_DIRECTIVE` authority와 기계적 admission 계약을 따르며, Hermes/LLM이 그 권한을 소유하지 않는다. `UNKNOWN` 상태에서는 신규 주문을 차단하고 Broker Reconciliation으로만 상태를 확정한다.
 
 ### 12.2 필수 기능
 
@@ -3553,7 +3554,7 @@ Production 이후에도 자동 전략 승격과 자본 확대는 Error Budget, I
 - 이벤트별로 필요한 에이전트만 호출한다.
 - 에이전트 결정이 구조화 스키마를 통과한다.
 - 모든 결정에 Feature Snapshot과 Evidence ID가 존재한다.
-- Risk Engine이 모든 주문 후보를 검증한다.
+- Risk Engine이 모든 Agent·alpha·자동 전략 주문 후보를 검증한다. 인증 사용자의 명시적 PAPER `USER_DIRECTIVE`는 ADR-0007의 auth·Fund/Book·account mechanics·멱등·PAPER-only admission을 별도로 통과한다.
 - Paper OMS가 주문 상태와 포지션을 일관되게 관리한다.
 - 데이터 단절, 위험 한도 초과 및 상태 불일치 시 신규 주문을 차단한다.
 - 장중 세션을 Replay하여 데이터와 판단 과정을 조사할 수 있다.
@@ -3745,7 +3746,8 @@ Production 이후에도 자동 전략 승격과 자본 확대는 Error Budget, I
 - 확정: 그 외 본부는 TimescaleDB Credential 없이 `market-api`의 Snapshot·Bar·Feature Endpoint로 조회
 - 확정: 초기 Core는 한국 상장주식·ETF의 Multi-Strategy Paper 연구를 지원하며 Long/Short, Market Neutral, Event Driven과 Quant 전략을 사전 배제하지 않음
 - 확정: 실제 공매도와 파생상품은 Borrow·Margin·OMS·Risk·Accounting Capability Gate 통과 후 환경별로 활성화
-- 미정: Paper/Live Broker와 주문 API 운영 계정
+- 확정: 사용자 직접 PAPER 주문은 local durable PaperBroker canonical 계정만 사용하고, LS LIVE는 시장데이터 read-only로 분리
+- 미정: Live Broker, LIVE 주문 API와 운영 계정
 - TimescaleDB의 Chunk, 압축, Retention과 장기 Archive 정책
 - ClickHouse는 TimescaleDB가 부하·비용 SLO를 충족하지 못할 때 Benchmark
 - Cloud Provider: AWS, Azure, GCP 또는 Hybrid 후보 평가
