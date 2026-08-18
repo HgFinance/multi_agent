@@ -130,6 +130,11 @@ bash /home/ubuntu/hgfinance-releases/current/scripts/aws_deploy_paper_order_rele
   --ref main
 ```
 
+The current deployer fetches the requested commit and, before changing runtime
+state, hands control to that target worktree's deploy script. This one-time
+self-handoff ensures a release can fix its own deployment gates instead of
+being deployed by stale logic from the previous release.
+
 On this host, never run `docker compose up`, `build`, `restart` or `pull` from
 `/home/ubuntu/hgfinance`.  That legacy checkout is not a deployment root: even
 one service-specific invocation can silently replace a release-owned container
@@ -142,6 +147,9 @@ The deployment sequence is fail-closed:
 1. fetch into the dedicated bare repository and create a detached worktree;
 2. validate the secret contract and merged Compose model without printing it;
 3. pull/build the new release before touching running services;
+   when a previous release exists, first rebuild its four local order-path
+   images from that exact worktree and protect all five prior image IDs under
+   private rollback tags, so mutable Compose tags cannot defeat rollback;
 4. when the Timescale container already exists, require it to be running and
    write mode-0600 custom-format dumps to
    `hgfinance-releases/backups/<commit>/` **before** any Compose reconciliation;
@@ -159,21 +167,24 @@ The deployment sequence is fail-closed:
    sections in CEO/Trading `SOUL.md` into `/home/ubuntu/.hermes/profiles`,
    preserving host-only integrations and rendering the Trading MCP Bearer from
    private `runtime.env` without logging it;
-8. start the release, force-recreate the five stateless user-order path
-   services from that exact worktree, and require Timescale, Redis, Trading,
-   MCP, both Hermes profiles, BFF and Accounting readiness;
+8. stop the CEO and Trading Hermes gateways, reconcile non-order services,
+   then start and verify Trading API followed by MCP+BFF; only after those
+   deterministic backends are ready may both Hermes gateways be recreated;
 9. require those five containers' Compose project, working directory, config
    files and config hash to match the detached release; also require the CEO
-   and BFF to have the private Discord ingress contract without printing its
-   bearer credential;
+   and BFF to have the private Discord ingress contract and require an
+   authenticated empty-object probe to reach BFF validation as HTTP 422,
+   without printing its bearer credential or creating a directive;
 10. inside the running Trading Hermes container, require an authenticated MCP
    tools/list exchange that discovers exactly `process_user_paper_order`;
 11. update the `current` symlink only after all gates pass.
 
-If a post-switch health gate fails, the previous worktree is brought back with
-the same project and runtime environment.  Database migrations are additive
-and are not automatically reversed; the protected pre-migration dumps remain
-available for an operator-controlled restore.  The deployer never runs
+If a post-switch health gate fails, the protected prior image IDs are restored
+to their original Compose tags and the same ordered backend-before-Hermes
+activation is force-recreated from the previous worktree. Ownership, ingress
+and MCP discovery are rechecked before rollback is considered usable. Database
+migrations are additive and are not automatically reversed; the protected
+pre-migration dumps remain available for an operator-controlled restore. The deployer never runs
 `git pull`, `git reset`, `git clean`, `docker compose down`, or volume removal
 against the legacy checkout or live data.
 

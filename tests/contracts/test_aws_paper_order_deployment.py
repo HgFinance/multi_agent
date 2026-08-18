@@ -399,6 +399,13 @@ def test_release_script_is_worktree_only_and_fail_closed() -> None:
     assert '-f "$release_path/docker-compose.yml"' in script
     assert '-f "$release_path/deploy/aws/docker-compose.paper-order.yml"' in script
     assert '--env-file "$RUNTIME_ENV"' in script
+    assert 'ORIGINAL_ARGS=("$@")' in script
+    assert 'TARGET_DEPLOY_SCRIPT="$RELEASE/scripts/aws_deploy_paper_order_release.sh"' in script
+    assert 'HGFINANCE_DEPLOY_HANDOFF_COMMIT' in script
+    assert 'exec bash "$TARGET_DEPLOY_SCRIPT" "${ORIGINAL_ARGS[@]}"' in script
+    assert script.index('exec bash "$TARGET_DEPLOY_SCRIPT"') < script.index(
+        'RUNTIME_ENV="$RELEASES_ROOT/state/runtime.env"'
+    )
     assert "--allow-first-deploy" in script
     assert "--skip-database-backup" in script
     assert "pg_dump" in script
@@ -434,17 +441,44 @@ def test_release_script_is_worktree_only_and_fail_closed() -> None:
     assert 'com.docker.compose.project.config_files' in script
     assert 'com.docker.compose.config-hash' in script
     assert 'config --hash "$service_name"' in script
-    assert 'compose_release "$RELEASE" up -d --no-deps --force-recreate' in script
-    assert "trading-api paper-order-orchestrator-mcp portfolio-bff" in script
+    ownership_gate = script.split("assert_release_owned_container()", 1)[1].split(
+        "\n}", 1
+    )[0]
+    assert ownership_gate.count("|| return 1") >= 7
+    activation = script.split("activate_release_services()", 1)[1].split("\n}", 1)[0]
+    assert 'stop_order_hermes || return 1' in activation
+    assert '"${non_order_services[@]}" || return 1' in activation
+    assert 'force-recreate trading-api || return 1' in activation
+    assert 'paper-order-orchestrator-mcp portfolio-bff || return 1' in activation
+    assert 'ceo-hermes trading-hermes || return 1' in activation
     assert (
-        script.index('compose_release "$RELEASE" up -d --no-deps --force-recreate')
-        < script.index('assert_release_owned_container "$RELEASE"')
-        < script.index('printf \'%s\\n\' "$RELEASE_COMMIT"')
+        activation.index('force-recreate trading-api')
+        < activation.index('wait_container hedgefund-trading-api')
+        < activation.index('paper-order-orchestrator-mcp portfolio-bff')
+        < activation.index('ceo-hermes trading-hermes')
+        < activation.index('wait_hermes_gateway hedgefund-ceo-hermes')
+        < activation.index('smoke_ceo_discord_ingress')
     )
+    assert 'capture_rollback_images' in script
+    assert 'compose_release "$PREVIOUS_RELEASE" build' in script
+    assert 'hgfinance-rollback/${container_name#hedgefund-}' in script
+    assert 'restore_rollback_images' in script
+    rollback = script.split("rollback_release()", 1)[1].split("\n}", 1)[0]
+    assert (
+        rollback.index("restore_rollback_images")
+        < rollback.index('activate_release_services "$PREVIOUS_RELEASE"')
+    )
+    assert 'mv -Tf -- "$rollback_link" "$CURRENT_LINK"' in rollback
+    assert '"$previous_commit" >"$RELEASES_ROOT/state/current-commit"' in rollback
+    main_activation = script.rindex('activate_release_services "$RELEASE"')
+    assert main_activation < script.index('printf \'%s\\n\' "$RELEASE_COMMIT"')
     assert "smoke_ceo_discord_ingress" in script
     ceo_smoke = script.split("smoke_ceo_discord_ingress()", 1)[1].split("\n}", 1)[0]
     assert 'test -n "${CEO_DISCORD_INGRESS_API_KEY:-}"' in ceo_smoke
     assert 'test "${HGFINANCE_DISCORD_INGRESS_URL:-}" =' in ceo_smoke
+    assert 'data=b"{}"' in ceo_smoke
+    assert "exc.code == 422" in ceo_smoke
+    assert "urllib.request.urlopen" in ceo_smoke
     assert "CEO_DISCORD_INGRESS_API_KEY:-}" not in script.split(
         "smoke_ceo_discord_ingress()", 1
     )[1].split("\n}", 1)[0].replace(
