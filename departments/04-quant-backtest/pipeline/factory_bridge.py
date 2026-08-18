@@ -44,6 +44,10 @@ for _research_contracts in (
         sys.path.insert(0, str(_research_contracts))
 
 from data_resolution import SOURCE_TABLES
+from intraday_experiment_runner import (
+    INTRADAY_LANE,
+    INTRADAY_PROPOSAL_PARAMETER_KEYS,
+)
 from stock_universe import governed_stock_evidence_sql
 from strategy_templates import EDGE_VOCAB, NOT_IMPLEMENTED
 from trial_family import UNIVERSE_VOCAB, family_id, hypothesis_view, pressure
@@ -83,23 +87,9 @@ SHORT_SAMPLE_MAX_DAYS = 120
 SHORT_MIN_TEST_DAYS = 10
 SHORT_TARGET_WINDOWS = 6
 
-INTRADAY_LANE = "INTRADAY_EVENT"
-INTRADAY_EDGE_KEYS = frozenset({
-    "intraday_signal_expr", "source_baseline_expr",
-    "parent_ast_fingerprint", "parent_candidate_identity_fingerprint",
-    "horizon_seconds",
-    "sample_interval_seconds",
-    "feature_lookback_seconds", "order_latency_ms", "max_quote_age_seconds",
-    "fee_bps_per_side", "maker_fee_bps_per_side", "execution", "threshold",
-    "entry_policy", "coefficient_policy", "minimum_predicted_edge_bps",
-    "evaluation_days", "instrument_shard_size", "position_mode",
-    "fast_screen_enabled", "fast_screen_sessions", "fast_screen_instruments",
-    "fast_screen_min_opportunities", "fast_screen_min_net_bps",
-    "screening_population", "screening_cohort_version",
-    "feature_window_contract_version",
-    "migration_parent_ast_fingerprint",
-    "migration_parent_feature_window_contract_version",
-})
+# Backward-compatible public name.  The runner is the single source of truth
+# for the proposal surface it can execute.
+INTRADAY_EDGE_KEYS = INTRADAY_PROPOSAL_PARAMETER_KEYS
 
 
 @dataclass
@@ -609,8 +599,8 @@ def gate0(proposal: dict, *, trials_used: int = 0,
             # range cannot consume a trial and fail only inside the worker.
             edge_for_runtime, _ = expected_edge_for(proposal)
             from intraday_experiment_runner import (
-                config_from_edge,
                 current_intraday_execution_contract_rejection,
+                validate_current_explicit_v2_execution_edge,
             )
             contract_rejection = \
                 current_intraday_execution_contract_rejection(edge_for_runtime)
@@ -618,7 +608,7 @@ def gate0(proposal: dict, *, trials_used: int = 0,
                 raise ValueError(
                     f"{contract_rejection}; migrate legacy formulas into a "
                     "new V2 child before Gate 0")
-            config_from_edge(edge_for_runtime)
+            validate_current_explicit_v2_execution_edge(edge_for_runtime)
             alignment = check_observables(
                 plan, fields_of(iexpr), operators=operators_of(iexpr),
                 conditional_fields=conditional_fields_of(iexpr))

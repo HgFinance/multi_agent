@@ -17,9 +17,13 @@ for path in (PIPELINE, RESEARCH_COLLECTORS):
         sys.path.insert(0, str(path))
 
 import data_resolution  # noqa: E402
+import backtest_runner  # noqa: E402
+import config_binding  # noqa: E402
 import experiment_orchestrator as orchestrator  # noqa: E402
 import factory_bridge  # noqa: E402
+import intraday_experiment_runner as intraday_runner  # noqa: E402
 import release_gate  # noqa: E402
+from intraday_alpha_ast import EXPLICIT_FEATURE_WINDOW_CONTRACT  # noqa: E402
 from trial_family import pressure  # noqa: E402
 
 
@@ -109,6 +113,254 @@ def _state():
     return {"reservations": {}, "experiments": [], "locks": []}
 
 
+def _explicit_intraday_edge() -> dict:
+    return {
+        "type": "order_flow_imbalance",
+        "research_lane": "INTRADAY_EVENT",
+        "universe_key": "krx_all",
+        "feature_window_contract_version":
+            EXPLICIT_FEATURE_WINDOW_CONTRACT,
+        "intraday_signal_expr": {
+            "op": "field",
+            "field": "realized_volatility_bps",
+            "seconds": 2,
+        },
+        "semantic_plan": {
+            "event": "VOLATILITY_BURST",
+            "context": ["ALL"],
+            "qualities": ["PERSISTENCE"],
+            "direction": "FOLLOW",
+            "output": "TAKER_NET_PNL",
+            "execution": "TAKER",
+            "horizon_seconds": 5,
+        },
+        "horizon_seconds": 5,
+        "execution": "TAKER",
+        "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
+        "coefficient_policy": "PREREGISTERED_NO_OOS_FIT",
+    }
+
+
+def _resolved_intraday(*_args, **_kwargs):
+    return SimpleNamespace(
+        ok=True,
+        datasets=("krx-intraday-events/v1",),
+        verdict="PASS",
+        unmapped=(),
+        notes=(),
+        execution_contract=None,
+    )
+
+
+def test_lane_aware_preflight_accepts_current_explicit_intraday_contract():
+    hyp = {"expected_edge": _explicit_intraday_edge()}
+
+    assert orchestrator.execution_surface_rejection_reasons(hyp) == []
+
+
+def test_intraday_proposal_surface_has_one_runner_source_of_truth():
+    assert factory_bridge.INTRADAY_EDGE_KEYS is \
+        intraday_runner.INTRADAY_PROPOSAL_PARAMETER_KEYS
+    assert orchestrator.TRIAL_RESERVATION_KEY == \
+        intraday_runner.TRIAL_RESERVATION_KEY
+    assert orchestrator.TRIAL_RESERVATION_KEY in \
+        intraday_runner.INTRADAY_SYSTEM_METADATA_KEYS
+    assert config_binding.SYSTEM_METADATA_KEYS == frozenset({
+        orchestrator.TRIAL_RESERVATION_KEY,
+    })
+
+
+@pytest.mark.parametrize(
+    "lane",
+    (None, "", "DAILY_CROSS_SECTIONAL", " daily_cross_sectional "),
+)
+def test_daily_lane_preflight_normalizes_missing_case_and_whitespace(lane):
+    edge = {"type": "momentum", "universe_key": "krx_all"}
+    if lane is not None:
+        edge["research_lane"] = lane
+
+    assert orchestrator.execution_surface_rejection_reasons({
+        "expected_edge": edge,
+    }) == []
+
+
+def test_intraday_lane_preflight_normalizes_case_and_whitespace():
+    edge = {**_explicit_intraday_edge(),
+            "research_lane": " intraday_event "}
+
+    assert orchestrator.execution_surface_rejection_reasons({
+        "expected_edge": edge,
+    }) == []
+
+
+def test_unknown_lane_is_rejected_instead_of_falling_through_to_daily():
+    reasons = orchestrator.execution_surface_rejection_reasons({
+        "expected_edge": {
+            "type": "momentum", "universe_key": "krx_all",
+            "research_lane": "INTRDAY_EVENT",
+        },
+    })
+
+    assert len(reasons) == 1
+    assert "unsupported research_lane" in reasons[0]
+    assert "INTRDAY_EVENT" in reasons[0]
+
+
+def test_unknown_lane_is_blocked_before_resolution_or_lifecycle(monkeypatch):
+    row = (
+        "h-unknown-lane",
+        "unknown lane",
+        {
+            "type": "momentum", "universe_key": "krx_all",
+            "research_lane": "INTRDAY_EVENT",
+        },
+        ["krx-basket-daily/v2"],
+        "PROPOSED",
+    )
+    cursor = orchestrator._FakeCursor(row, ["krx-basket-daily/v2"])
+    conn = orchestrator._FakeConn(cursor)
+
+    def forbidden_resolution(*_args, **_kwargs):
+        raise AssertionError("unknown lane must be rejected before resolution")
+
+    monkeypatch.setattr(data_resolution, "resolve", forbidden_resolution)
+    report = orchestrator.orchestrate(
+        "h-unknown-lane", conn=conn, market_conn=object())
+
+    assert report.verdict == "NOT_RUNNABLE"
+    assert report.missing == ["contract:RESEARCH_LANE"]
+    assert "unsupported research_lane" in report.backlog[0]
+    assert cursor.updates == []
+    assert conn.commits == 0
+
+
+def test_current_intraday_preflight_rejects_unknown_primary_key():
+    edge = {**_explicit_intraday_edge(), "evaluation_day": 60}
+
+    reasons = orchestrator.execution_surface_rejection_reasons({
+        "expected_edge": edge,
+    })
+
+    assert len(reasons) == 1
+    assert "unsupported keys" in reasons[0]
+    assert "evaluation_day" in reasons[0]
+
+
+def test_current_intraday_preflight_rejects_unknown_sidecar_key():
+    edge = {
+        **_explicit_intraday_edge(),
+        "screening_population": [{"evaluation_day": 60}],
+    }
+
+    reasons = orchestrator.execution_surface_rejection_reasons({
+        "expected_edge": edge,
+    })
+
+    assert len(reasons) == 1
+    assert "screening_population[0].evaluation_day" in reasons[0]
+
+
+def test_intraday_preflight_validator_exception_fails_closed(monkeypatch):
+    def broken_validator(_edge):
+        raise RuntimeError("validator unavailable")
+
+    monkeypatch.setattr(intraday_runner, "config_from_edge", broken_validator)
+
+    reasons = orchestrator.execution_surface_rejection_reasons({
+        "expected_edge": _explicit_intraday_edge(),
+    })
+
+    assert len(reasons) == 1
+    assert "INTRADAY_EVENT execution-surface validation failed closed" in reasons[0]
+    assert "RuntimeError" in reasons[0]
+
+
+def test_invalid_intraday_contract_is_blocked_before_lifecycle_or_trial(
+        monkeypatch):
+    edge = {**_explicit_intraday_edge(), "evaluation_days": 59}
+    row = (
+        "h-invalid-intraday",
+        "invalid intraday execution surface",
+        edge,
+        ["market_quotes", "market_ticks"],
+        "PROPOSED",
+    )
+    cursor = orchestrator._FakeCursor(row, ["krx-intraday-events/v1"])
+    conn = orchestrator._FakeConn(cursor)
+    calls = {"reservation": 0, "prepare": 0, "chain": 0}
+
+    monkeypatch.setattr(data_resolution, "resolve", _resolved_intraday)
+
+    def forbidden_reservation(*_args, **_kwargs):
+        calls["reservation"] += 1
+        raise AssertionError("invalid contract must not reserve a trial")
+
+    def forbidden_prepare(*_args, **_kwargs):
+        calls["prepare"] += 1
+        raise AssertionError("invalid contract must not prepare a replay")
+
+    def forbidden_chain(*_args, **_kwargs):
+        calls["chain"] += 1
+        raise AssertionError("invalid contract must not enter the run chain")
+
+    monkeypatch.setattr(
+        orchestrator, "_reserve_trial_family", forbidden_reservation)
+    monkeypatch.setattr(intraday_runner, "prepare", forbidden_prepare)
+
+    report = orchestrator.orchestrate(
+        "h-invalid-intraday",
+        conn=conn,
+        market_conn=object(),
+        run_chain=forbidden_chain,
+    )
+
+    assert report.verdict == "NOT_RUNNABLE"
+    assert any("evaluation_days" in reason for reason in report.missing)
+    assert calls == {"reservation": 0, "prepare": 0, "chain": 0}
+    assert cursor.updates == []
+    assert conn.commits == 0
+
+
+def test_current_explicit_intraday_reaches_data_preflight_not_not_runnable(
+        monkeypatch):
+    row = (
+        "h-current-intraday",
+        "current explicit intraday execution surface",
+        _explicit_intraday_edge(),
+        ["market_quotes", "market_ticks"],
+        "PROPOSED",
+    )
+    cursor = orchestrator._FakeCursor(row, ["krx-intraday-events/v1"])
+    conn = orchestrator._FakeConn(cursor)
+    monkeypatch.setattr(data_resolution, "resolve", _resolved_intraday)
+    monkeypatch.setattr(
+        intraday_runner,
+        "prepare",
+        lambda *_args, **_kwargs: {
+            "selected": {
+                "status": "INSUFFICIENT_SESSIONS",
+                "causal_sessions_available": 60,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        intraday_runner,
+        "record_data_feasibility",
+        lambda *_args, **_kwargs: {"status": "NEEDS_DATA"},
+    )
+
+    report = orchestrator.orchestrate(
+        "h-current-intraday",
+        conn=conn,
+        market_conn=object(),
+    )
+
+    assert report.verdict == "NEEDS_DATA"
+    assert report.verdict != "NOT_RUNNABLE"
+    assert cursor.updates == []
+    assert conn.commits == 0
+
+
 @pytest.mark.parametrize(
     ("provisional", "decision", "failed", "unmeasured", "expected"),
     (
@@ -128,6 +380,120 @@ def test_release_gate_overlays_robustness_fail_closed(
         failed=failed,
         unmeasured=unmeasured,
     ) == expected
+
+
+def _valid_reservation(**updates) -> dict:
+    payload = {
+        "reservation_id": "cb6735d6-29ed-456c-bfba-5b2619cab88c",
+        "trial_family_id": "fam_0123456789abcdef",
+        "trial_number": 2,
+        "trial_budget": 10,
+        "orchestrator_version": orchestrator.ORCH_VERSION,
+    }
+    payload.update(updates)
+    return payload
+
+
+def test_trial_reservation_payload_accepts_current_and_legacy_ids():
+    current = _valid_reservation()
+    legacy = _valid_reservation(
+        reservation_id="legacy-experiment:e-existing")
+
+    assert orchestrator._reservation_payload(current) == current
+    assert orchestrator._reservation_payload(legacy) == legacy
+
+
+def test_trial_reservation_payload_requires_exact_schema():
+    for field in orchestrator.TRIAL_RESERVATION_REQUIRED_KEYS:
+        payload = _valid_reservation()
+        payload.pop(field)
+        with pytest.raises(ValueError, match="schema mismatch"):
+            orchestrator._reservation_payload(payload)
+
+    with pytest.raises(ValueError, match="schema mismatch"):
+        orchestrator._reservation_payload({
+            **_valid_reservation(), "unexpected": True,
+        })
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("orchestrator_version", "old", "orchestrator_version"),
+        ("reservation_id", "not-a-uuid", "UUID"),
+        ("trial_family_id", "family", "family"),
+        ("trial_number", True, "number"),
+        ("trial_number", "2", "number"),
+        ("trial_number", 0, "number"),
+        ("trial_budget", True, "budget"),
+        ("trial_budget", "10", "budget"),
+        ("trial_budget", 0, "budget"),
+    ),
+)
+def test_trial_reservation_payload_rejects_invalid_typed_fields(
+        field, value, message):
+    with pytest.raises(ValueError, match=message):
+        orchestrator._reservation_payload(_valid_reservation(**{field: value}))
+
+
+def test_trial_reservation_payload_validates_alias_schema():
+    with pytest.raises(ValueError, match="counted_aliases"):
+        orchestrator._reservation_payload(_valid_reservation(
+            counted_aliases="fam_alias"))
+    with pytest.raises(ValueError, match="not unique"):
+        orchestrator._reservation_payload(_valid_reservation(
+            counted_aliases=["fam_alias", "fam_alias"]))
+
+
+def test_execution_preflight_rejects_malformed_system_reservation():
+    reasons = orchestrator.execution_surface_rejection_reasons({
+        "expected_edge": {
+            "type": "momentum", "universe_key": "krx_all",
+            orchestrator.TRIAL_RESERVATION_KEY: {"trial_number": 1},
+        },
+    })
+
+    assert len(reasons) == 1
+    assert "execution-surface validation failed closed" in reasons[0]
+    assert "schema mismatch" in reasons[0]
+
+
+def test_trial_reservation_metadata_does_not_change_runner_configs_or_hashes():
+    reservation = _valid_reservation()
+    daily_edge = {"type": "momentum", "universe_key": "krx_all"}
+    daily_with_reservation = {
+        **daily_edge,
+        orchestrator.TRIAL_RESERVATION_KEY: reservation,
+    }
+    base = dict(backtest_runner.DEFAULT_CONFIG)
+    daily_before = config_binding.bind(
+        {"expected_edge": daily_edge}, base)
+    daily_after = config_binding.bind(
+        {"expected_edge": daily_with_reservation}, base)
+
+    assert daily_before.rejected == daily_after.rejected == []
+    assert daily_before.ignored == daily_after.ignored
+    assert daily_before.config == daily_after.config
+    assert backtest_runner.input_hash(
+        "dataset", daily_before.config, "code", 0) == \
+        backtest_runner.input_hash(
+            "dataset", daily_after.config, "code", 0)
+
+    intraday_edge = _explicit_intraday_edge()
+    intraday_before, spec_before = intraday_runner.config_from_edge(
+        intraday_edge)
+    intraday_after, spec_after = intraday_runner.config_from_edge({
+        **intraday_edge,
+        orchestrator.TRIAL_RESERVATION_KEY: reservation,
+    })
+    assert intraday_runner.validate_current_explicit_v2_execution_edge({
+        **intraday_edge,
+        orchestrator.TRIAL_RESERVATION_KEY: reservation,
+    }) == (intraday_after, spec_after)
+    assert intraday_before == intraday_after
+    assert spec_before == spec_after
+    assert intraday_runner._input_hash("h", intraday_before) == \
+        intraday_runner._input_hash("h", intraday_after)
 
 
 def test_failed_exposed_trial_keeps_family_pressure_and_retry_is_idempotent():
@@ -172,7 +538,12 @@ def test_failed_exposed_trial_keeps_family_pressure_and_retry_is_idempotent():
 
 
 def test_pressure_query_failure_blocks_orchestrator_evaluation(monkeypatch):
-    edge = {"type": "momentum", "universe_key": "krx_all"}
+    # An explicit, non-canonical daily discriminator must route daily, while
+    # the actual binder receives the execution-equivalent lane-free copy.
+    edge = {
+        "type": "momentum", "universe_key": "krx_all",
+        "research_lane": " daily_cross_sectional ",
+    }
     row = ("h-pressure", "pressure failure", edge,
            ["krx-basket-daily/v2"], "PROPOSED")
     state = _state()
