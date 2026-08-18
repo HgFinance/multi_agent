@@ -136,6 +136,60 @@ DATASET_BY_EVENT_SOURCE = {
 }
 KST = ZoneInfo("Asia/Seoul")
 
+# Historical V1/V11 configs remain decodable below for audit replay and as
+# migration parents. Production entry points use this separate preflight so a
+# missing contract can never silently select the legacy evaluator for a new
+# experiment.
+SUPERSEDED_INTRADAY_FEATURE_WINDOW_CONTRACT = \
+    "SUPERSEDED_INTRADAY_FEATURE_WINDOW_CONTRACT"
+
+
+def current_intraday_execution_contract_rejection(edge: dict) -> str:
+    """Return a typed reason when a production intraday edge is not V2.
+
+    This deliberately does not call :func:`config_from_edge`: the decoder must
+    keep accepting frozen legacy evidence. Gate 0, the worker, and the direct
+    orchestrator CLI call this preflight before data access or trial
+    reservation. Every populated screening row is executable in the adaptive
+    cohort, so sidecars may not inherit the primary's contract implicitly.
+    """
+    if not isinstance(edge, dict):
+        return ""
+    if str(edge.get("research_lane") or "").upper() != "INTRADAY_EVENT":
+        return ""
+
+    primary_contract = str(
+        edge.get("feature_window_contract_version") or "").strip()
+    if primary_contract != EXPLICIT_FEATURE_WINDOW_CONTRACT:
+        return (
+            f"{SUPERSEDED_INTRADAY_FEATURE_WINDOW_CONTRACT}: primary requires "
+            f"feature_window_contract_version="
+            f"{EXPLICIT_FEATURE_WINDOW_CONTRACT!r}; got "
+            f"{primary_contract or '(missing)'!r}")
+
+    screening = edge.get("screening_population")
+    if screening in (None, []):
+        return ""
+    if not isinstance(screening, list):
+        return (
+            f"{SUPERSEDED_INTRADAY_FEATURE_WINDOW_CONTRACT}: "
+            "screening_population must be a list")
+    for index, candidate in enumerate(screening):
+        if not isinstance(candidate, dict):
+            return (
+                f"{SUPERSEDED_INTRADAY_FEATURE_WINDOW_CONTRACT}: "
+                f"screening_population[{index}] must be an object")
+        candidate_contract = str(
+            candidate.get("feature_window_contract_version") or "").strip()
+        if candidate_contract != EXPLICIT_FEATURE_WINDOW_CONTRACT:
+            return (
+                f"{SUPERSEDED_INTRADAY_FEATURE_WINDOW_CONTRACT}: "
+                f"screening_population[{index}] requires "
+                f"feature_window_contract_version="
+                f"{EXPLICIT_FEATURE_WINDOW_CONTRACT!r}; got "
+                f"{candidate_contract or '(missing)'!r}")
+    return ""
+
 
 def _feature_window_contract(config: dict) -> str:
     raw = config.get("feature_window_contract_version")

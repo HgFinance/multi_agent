@@ -54,6 +54,7 @@ from stock_universe import governed_stock_evidence_sql  # noqa: E402
 
 MODULE_VERSION = "research-proposal-intake-v3"
 MAX_INTRADAY_COHORT = 8
+CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT = "explicit-primitive-window-v2"
 _GOVERNED_PAST_OUTCOME = governed_stock_evidence_sql(
     experiment_alias="e", dataset_alias="m", hypothesis_alias="h")
 
@@ -576,6 +577,11 @@ def _attach_intraday_screening_cohort(
             "research intake and completed-second capability contracts disagree: "
             f"{INTRADAY_SCREENING_COHORT_VERSION!r} != "
             f"{COMPLETED_SECOND_SCREENING_COHORT_VERSION!r}")
+    if (CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT !=
+            EXPLICIT_FEATURE_WINDOW_CONTRACT):
+        raise RuntimeError(
+            "proposal intake current feature-window contract drifted from "
+            "the deployed evaluator")
     params = dict(proposal.suggested_params or {})
     proposal_plan = validate_plan(dict(proposal.semantic_plan or {}))
     proposal_execution = str(
@@ -617,6 +623,12 @@ def _attach_intraday_screening_cohort(
     primary_window_contract = feature_window_contract_for(
         params.get("intraday_signal_expr"),
         params.get("feature_window_contract_version"))
+    if primary_window_contract != EXPLICIT_FEATURE_WINDOW_CONTRACT:
+        raise ValueError(
+            "current INTRADAY_EVENT proposals require "
+            f"feature_window_contract_version="
+            f"{EXPLICIT_FEATURE_WINDOW_CONTRACT!r}; legacy formulas must first "
+            "be migrated into a new V2 child")
     primary = validate_feature_window_contract(
         params.get("intraday_signal_expr"),
         contract_version=primary_window_contract)
@@ -643,6 +655,8 @@ def _attach_intraday_screening_cohort(
             continue
         contract = dict(lead.ast_contract or {})
         if (contract.get("formula_discovery_version") != "formula-discovery-v5"
+                or contract.get("feature_window_contract_version") !=
+                EXPLICIT_FEATURE_WINDOW_CONTRACT
                 or not contract.get("formula_contract_complete")
                 or contract.get("alpha_candidate_eligible") is not True
                 or contract.get("research_lane") != "INTRADAY_EVENT"):
@@ -1102,6 +1116,8 @@ def load_leads(conn, lead_ids, *, _expand_current: bool = True) -> dict:
         == "formula-discovery-v5"
         and (lead.ast_contract or {}).get("research_lane")
         == "INTRADAY_EVENT"
+        and (lead.ast_contract or {}).get("feature_window_contract_version")
+        == CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT
         for lead in out.values()
     )
     if _expand_current and wants_current_intraday:
@@ -1113,6 +1129,7 @@ def load_leads(conn, lead_ids, *, _expand_current: bool = True) -> dict:
                and l.ast_contract->>'formula_discovery_version' =
                    'formula-discovery-v5'
                and l.ast_contract->>'research_lane' = 'INTRADAY_EVENT'
+               and l.ast_contract->>'feature_window_contract_version' = %s
                and l.ast_contract->>'ast_readiness' = 'AST_READY'
                and coalesce(
                      (l.ast_contract->>'formula_contract_complete')::boolean,
@@ -1131,7 +1148,8 @@ def load_leads(conn, lead_ids, *, _expand_current: bool = True) -> dict:
                         and l.lead_id = any(r.lead_ids))
              order by l.created_at desc, l.lead_id
              limit %s
-        """, (list(out), MAX_INTRADAY_COHORT - 1))
+        """, (CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT,
+              list(out), MAX_INTRADAY_COHORT - 1))
         extra_ids = [row[0] for row in cur.fetchall()]
         if extra_ids:
             # Reuse the canonical row validator without recursively expanding
@@ -1863,6 +1881,8 @@ def _check_intraday_screening_cohort_is_sourced_and_non_promoting():
     assert ("proposal_review_outcomes" in inspect.getsource(load_leads)
             and "r.verdict = 'STOP'" in inspect.getsource(load_leads)), \
         "독립 스켑틱 STOP primary를 sidecar 후보로 다시 쓰면 안 된다"
+    assert "feature_window_contract_version" in inspect.getsource(load_leads), \
+        "legacy formula를 current V2 screening pool에 자동 부착한다"
 
     now = datetime(2026, 8, 16, tzinfo=timezone.utc)
     plan = {
@@ -1886,6 +1906,8 @@ def _check_intraday_screening_cohort_is_sourced_and_non_promoting():
             refs=(ref,), claimed_edge=label, stated_mechanism="mechanism",
             ast_contract={
                 "formula_discovery_version": "formula-discovery-v5",
+                "feature_window_contract_version":
+                    CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT,
                 "formula_contract_complete": True,
                 "alpha_candidate_eligible": True,
                 "research_lane": "INTRADAY_EVENT",
@@ -1923,7 +1945,9 @@ def _check_intraday_screening_cohort_is_sourced_and_non_promoting():
         suggested_params={
             "intraday_signal_expr": primary_expr, "horizon_seconds": 5,
             "execution": "TAKER",
-            "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST"},
+            "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
+            "feature_window_contract_version":
+                CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT},
         research_lane="INTRADAY_EVENT", semantic_plan=plan)
     attached = _attach_intraday_screening_cohort(proposal, leads)
     assert attached.lead_ids == (primary_lead.lead_id,)

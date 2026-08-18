@@ -672,12 +672,14 @@ def _intraday_proposal() -> dict:
         "execution": "TAKER", "horizon_seconds": 5,
     }
     flow = {"op": "sub", "args": [
-        {"op": "field", "field": "trade_flow_imbalance"},
+        {"op": "field", "field": "trade_flow_imbalance", "seconds": 5},
         {"op": "rolling_mean", "seconds": 30,
-         "arg": {"op": "field", "field": "trade_flow_imbalance"}},
+         "arg": {"op": "field", "field": "trade_flow_imbalance",
+                 "seconds": 5}},
     ]}
     predicted_markout = {"op": "mul", "args": [
-        flow, {"op": "field", "field": "realized_volatility_bps"}]}
+        flow, {"op": "field", "field": "realized_volatility_bps",
+               "seconds": 30}]}
     expr = {"op": "where",
             "condition": {"op": "lt", "args": [
                 {"op": "field", "field": "spread_bps"},
@@ -697,6 +699,8 @@ def _intraday_proposal() -> dict:
             "sample_interval_seconds": 5, "feature_lookback_seconds": 30,
             "order_latency_ms": 250, "execution": "TAKER",
             "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
+            "feature_window_contract_version":
+                EXPLICIT_FEATURE_WINDOW_CONTRACT,
             "minimum_predicted_edge_bps": 1.0,
             "evaluation_days": 60, "instrument_shard_size": 32,
         },
@@ -836,7 +840,12 @@ def test_screening_population_unifies_clocks_horizons_and_execution_labels() -> 
 
     config, spec = config_from_edge(edge)
     assert spec.horizons_seconds == (5, 30)
-    assert spec.feature_lookback_seconds == 90
+    # V2 freezes one shared multiscale feature cube. A sidecar's later temporal
+    # transform remains in its AST rather than mutating the primary cube/cache
+    # identity or the teacher's preregistered base lookback.
+    assert spec.feature_lookback_seconds == 30
+    assert temporal_windows_of(
+        config["screening_population"][0]["intraday_signal_expr"]) == {90}
     assert config["population_execution_model"] == "PASSIVE_FIFO_LOWER_BOUND"
     assert config["screening_trial_exposure"] == 1
     assert config["screening_population"][0]["screening_only"] is True
@@ -904,7 +913,8 @@ def test_runner_accepts_structure_only_score_but_not_unscaled_fixed_score() -> N
     edge, _ = expected_edge_for(_intraday_proposal())
     edge["intraday_signal_expr"] = {
         "op": "rolling_mean", "seconds": 30,
-        "arg": {"op": "field", "field": "normalized_quote_ofi"},
+        "arg": {"op": "field", "field": "normalized_quote_ofi",
+                "seconds": 5},
     }
     edge["coefficient_policy"] = "STRUCTURE_ONLY"
     config, _ = config_from_edge(edge)
@@ -1000,10 +1010,23 @@ def test_llm_formula_thesis_is_typed_and_visible_in_ast() -> None:
         "trade_flow_imbalance": ["VALUE"],
     }
 
-    invalid = {**thesis, "functional_form": "CROSS_SCALE"}
+    cross_scale = {**thesis, "functional_form": "CROSS_SCALE"}
+    assert formula_discovery.assess(
+        cross_scale, candidate=expr, semantic_plan=plan,
+        grammar=lead_intake._intraday_ast())["formula_contract_complete"]
+
+    invalid = {
+        **cross_scale,
+        "coefficient_policy": "STRUCTURE_ONLY",
+        "terms": {"trade_flow_imbalance": "PRESSURE"},
+    }
     with pytest.raises(ValueError, match="two distinct clocks"):
         formula_discovery.assess(
-            invalid, candidate=expr, semantic_plan=plan,
+            invalid,
+            candidate={
+                "op": "field", "field": "trade_flow_imbalance", "seconds": 5,
+            },
+            semantic_plan=plan,
             grammar=lead_intake._intraday_ast())
 
     dimensionless = {"op": "field", "field": "trade_flow_imbalance"}
@@ -1110,10 +1133,14 @@ def test_lead_intake_persists_formula_discovery_contract() -> None:
         "READINESS": "AST_READY",
         "OBSERVABLES": "spread_bps,trade_flow_imbalance,realized_volatility_bps",
         "CANDIDATE_SIGNAL_EXPR": expr,
+        "FEATURE_WINDOW_CONTRACT_VERSION":
+            EXPLICIT_FEATURE_WINDOW_CONTRACT,
         "RESEARCH_LANE": "INTRADAY_EVENT",
         "SEMANTIC_PLAN": proposal["semantic_plan"],
         "DERIVATION_MODE": "MECHANISM_MUTATION",
-        "SOURCE_BASELINE_EXPR": {"op": "field", "field": "trade_flow_imbalance"},
+        "SOURCE_BASELINE_EXPR": {
+            "op": "field", "field": "trade_flow_imbalance", "seconds": 5,
+        },
         "DERIVATION_TRANSFORMS": "STATE_CONDITION",
         "NOVELTY_RATIONALE": "Adds an executable liquidity-state interaction.",
         "FORMULA_THESIS": {

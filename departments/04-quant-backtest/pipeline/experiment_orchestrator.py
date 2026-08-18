@@ -897,6 +897,30 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
                #   쓰지 않으면 조회하지 않은 것과 같다.
                "status": _status}
 
+        # Direct Hermes/CLI execution is a production entry point too. Keep
+        # the broad selector so a legacy row is surfaced, but retire it before
+        # data resolution, preregistration, or trial reservation can create new
+        # V11 evidence. The runtime decoder remains backward compatible for
+        # historical reproduction and formula migration.
+        execution_edge = hyp["expected_edge"]
+        if str(execution_edge.get("research_lane") or "").upper() == \
+                "INTRADAY_EVENT":
+            from intraday_experiment_runner import (
+                SUPERSEDED_INTRADAY_FEATURE_WINDOW_CONTRACT,
+                current_intraday_execution_contract_rejection,
+            )
+            contract_rejection = current_intraday_execution_contract_rejection(
+                execution_edge)
+            if contract_rejection:
+                return OrchestratorReport(
+                    hypothesis_id=str(hid), title=title,
+                    verdict="NOT_RUNNABLE",
+                    missing=[
+                        "contract:"
+                        f"{SUPERSEDED_INTRADAY_FEATURE_WINDOW_CONTRACT}"
+                    ],
+                    backlog=[contract_rejection])
+
         # ── 데이터 요구 사상 + 실측 ──────────────────────────────────────
         # ▶ 여기가 매니페스트 **이름만 대조**하던 자리다. 리서치는 원천 이름으로
         #   말하고(`market_bars`) 실행면은 매니페스트 이름으로 물어서
@@ -1958,6 +1982,21 @@ def _check_orchestrate_paths():
 
     cur4 = _FakeCursor(None, [])
     assert orchestrate("none", conn=_FakeConn(cur4), market_conn=_FakeMarket()).verdict == "NO_HYPOTHESIS"
+
+    # The selector intentionally sees legacy intraday rows, then the execution
+    # preflight stops them before resolver/preregistration/trial side effects.
+    legacy_intraday = (
+        "h-v11", "legacy intraday",
+        {"type": "short_term_reversal", "research_lane": "INTRADAY_EVENT"},
+        ["krx-intraday-events/v1"], "PROPOSED")
+    legacy_cur = _FakeCursor(legacy_intraday, ["krx-intraday-events/v1"])
+    legacy_report = orchestrate(
+        "h-v11", conn=_FakeConn(legacy_cur), market_conn=_FakeMarket())
+    assert legacy_report.verdict == "NOT_RUNNABLE", legacy_report
+    assert legacy_report.missing == [
+        "contract:SUPERSEDED_INTRADAY_FEATURE_WINDOW_CONTRACT"]
+    assert "primary requires" in legacy_report.backlog[0]
+    assert not legacy_cur.updates, legacy_cur.updates
     print("  오케스트레이션 경로       OK")
     _check_dataset_comes_from_hypothesis()
     print("  데이터셋=사상 결과       OK")
