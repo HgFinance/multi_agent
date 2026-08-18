@@ -58,6 +58,7 @@ from stock_universe import (INTRADAY_REPORT_MANIFEST_VERSION,  # noqa: E402
 MODULE_VERSION = "outcome-conditioned-formula-breeder-v4"
 MIN_POPULATION = 8
 MAX_POPULATION = 128
+MAX_DELIVERY_CANDIDATES = 12
 LEGACY_EVALUATOR_VERSION = "intraday-candidate-evaluator-v11"
 EXPLICIT_EVALUATOR_VERSION = "intraday-candidate-evaluator-v12"
 # Backward-compatible public default for direct/unit callers.  The production
@@ -1977,7 +1978,152 @@ def generate(conn, *, population_size: int = 64,
             grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT))
 
 
+def _delivery_order(candidates: Iterable[Mapping[str, Any]]) -> list[dict]:
+    """Rank valid single-parent drafts by deterministic niche coverage.
+
+    The evolution engine intentionally emits a large population.  Sending all
+    of it through MCP, however, can exceed an agent's tool-result budget before
+    the first AST is visible.  This greedy order keeps the search population
+    large while putting structurally different, submission-safe drafts first.
+    """
+    remaining = [deepcopy(dict(row)) for row in candidates
+                 if row.get("submission_ready") is True
+                 and len(row.get("parent_lead_ids") or ()) == 1]
+    remaining.sort(key=lambda row: str(row.get("candidate_id") or ""))
+    ordered: list[dict] = []
+    seen_niches: set[str] = set()
+    seen_dimensions: dict[str, set[str]] = {
+        key: set() for key in (
+            "pressure_source", "mechanism", "regime", "clock_bucket",
+            "output_unit")
+    }
+    seen_parents: set[str] = set()
+    seen_operations: set[str] = set()
+
+    while remaining:
+        def score(row: Mapping[str, Any]) -> int:
+            niche = row.get("niche") or {}
+            value = 32 * (str(niche.get("key") or "") not in seen_niches)
+            value += sum(
+                str(niche.get(key) or "") not in seen_dimensions[key]
+                for key in seen_dimensions)
+            parent = str((row.get("parent_lead_ids") or [""])[0])
+            value += 2 * (parent not in seen_parents)
+            value += str(row.get("operation") or "") not in seen_operations
+            return int(value)
+
+        best = min(
+            remaining,
+            key=lambda row: (-score(row), str(row.get("candidate_id") or "")))
+        remaining.remove(best)
+        ordered.append(best)
+        niche = best.get("niche") or {}
+        seen_niches.add(str(niche.get("key") or ""))
+        for key in seen_dimensions:
+            seen_dimensions[key].add(str(niche.get(key) or ""))
+        seen_parents.add(str((best.get("parent_lead_ids") or [""])[0]))
+        seen_operations.add(str(best.get("operation") or ""))
+    return ordered
+
+
+def _submission_template(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the exact intake shape while keeping the generated AST immutable."""
+    thesis = deepcopy(candidate.get("formula_thesis_skeleton") or {})
+    thesis["identification"] = \
+        "REQUIRES_HERMES_FALSIFIABLE_ECONOMIC_IDENTIFICATION"
+    niche = candidate.get("niche") or {}
+    mechanism = str(niche.get("mechanism") or "formula").replace("_", " ")
+    candidate_id = str(candidate.get("candidate_id") or "")
+    operators = deepcopy(candidate.get("suggested_evolution_operators") or [])
+    return {
+        "title": f"{mechanism.title()} child {candidate_id[:8]}",
+        "candidate_signal_expr": deepcopy(candidate.get("expression")),
+        "feature_window_contract_version": str(
+            candidate.get("feature_window_contract_version") or ""),
+        "semantic_plan": deepcopy(candidate.get("semantic_plan_hint") or {}),
+        "formula_thesis": thesis,
+        "evolution_operators": operators,
+        "derivation_transforms": deepcopy(operators),
+        "expected_increment":
+            "REQUIRES_HERMES_EXPECTED_NET_INCREMENT_AFTER_FULL_COSTS",
+        "ablations": [
+            "REQUIRES_HERMES_STRUCTURAL_ABLATION_ONE",
+            "REQUIRES_HERMES_STRUCTURAL_ABLATION_TWO",
+        ],
+        "economic_mechanism":
+            "REQUIRES_HERMES_CONCRETE_ECONOMIC_MECHANISM",
+        "novelty_rationale":
+            "REQUIRES_HERMES_STRUCTURAL_NOVELTY_VERSUS_PARENT_AND_LIBRARY",
+    }
+
+
+def delivery_view(batch: Mapping[str, Any], *,
+                  limit: int = MAX_DELIVERY_CANDIDATES) -> dict[str, Any]:
+    """Bound a full population for reliable MCP delivery without shrinking it.
+
+    Internal callers retain the complete ``candidates`` population.  The MCP
+    surface receives only diverse, exact, ready-to-enrich submission templates,
+    keeping the response comfortably below common tool-result truncation limits.
+    """
+    if not isinstance(limit, int) or isinstance(limit, bool):
+        raise TypeError("delivery limit must be an integer")
+    if not 1 <= limit <= MAX_DELIVERY_CANDIDATES:
+        raise ValueError(
+            f"delivery limit must be in [1, {MAX_DELIVERY_CANDIDATES}]")
+    candidates = batch.get("candidates") or []
+    if not isinstance(candidates, list):
+        raise TypeError("batch candidates must be a list")
+    ordered = _delivery_order(candidates)
+    selected = ordered[:limit]
+    summary_keys = (
+        "ok", "module_version", "engine_version",
+        "feature_window_contract_version", "evaluator_version", "generation",
+        "source_leads", "unique_source_formulas", "outcome_memory_rows",
+        "failure_memory_rows", "requested_population", "emitted_population",
+        "submission_ready_count", "submission_ready_niches", "kpi",
+        "batch_fingerprint",
+    )
+    result = {key: deepcopy(batch.get(key)) for key in summary_keys}
+    full_audit = batch.get("audit") or {}
+    result["audit"] = {key: deepcopy(full_audit.get(key)) for key in (
+        "source_backed_search_elites", "search_memory_state_fingerprint",
+        "forward_lockbox_used_for_generation", "coefficients_fitted_by_breeder",
+        "cost_hurdle_modified_by_breeder", "agent_output_contract",
+        "feature_window_contract_version", "target_evaluator_version",
+    )}
+    delivery_candidates = [{
+        "candidate_id": row.get("candidate_id"),
+        "parent_lead_id": (row.get("parent_lead_ids") or [None])[0],
+        "parent_lead_ids": deepcopy(row.get("parent_lead_ids") or []),
+        "niche": deepcopy(row.get("niche") or {}),
+        "arm": row.get("arm"),
+        "operation": row.get("operation"),
+        "economic_mechanism_hint": row.get("economic_mechanism"),
+        "adaptive_selection": row.get("adaptive_selection"),
+        "promotion_authority": row.get("promotion_authority"),
+        "requires_preregistered_evaluation": row.get(
+            "requires_preregistered_evaluation"),
+        "submission_template": _submission_template(row),
+    } for row in selected]
+    result.update({
+        "candidate_payload_scope": "DIVERSE_SUBMISSION_READY_SLICE",
+        "full_population_count": len(candidates),
+        "delivery_candidate_count": len(selected),
+        "delivery_candidate_limit": limit,
+        "delivery_candidates": delivery_candidates,
+        "delivery_fingerprint": hashlib.sha256(json.dumps(
+            delivery_candidates, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":")).encode()).hexdigest(),
+        "agent_copy_rule": (
+            "Copy each submission_template exactly. Replace only string values "
+            "beginning REQUIRES_HERMES; never rewrite candidate_signal_expr, "
+            "semantic_plan, feature-window contract, or evolution operators."),
+    })
+    return result
+
+
 __all__ = [
-    "MAX_POPULATION", "MIN_POPULATION", "MODULE_VERSION", "generate",
-    "generate_from_records", "load_records",
+    "MAX_DELIVERY_CANDIDATES", "MAX_POPULATION", "MIN_POPULATION",
+    "MODULE_VERSION", "delivery_view", "generate", "generate_from_records",
+    "load_records",
 ]

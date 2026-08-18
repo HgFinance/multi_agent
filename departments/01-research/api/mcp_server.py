@@ -1193,11 +1193,12 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
             "Generate 8-128 deterministic, typed intraday AST drafts from persisted "
             "source-backed seeds plus governed experiment/failure memory. Use this instead "
             "of writing a research report when a formula-breeder card is assigned. The "
-            "result contains lineage, economic niches, semantic/thesis hints, and throughput "
-            "KPIs. Hints containing REQUIRES_HERMES are deliberately non-persistable: enrich "
-            "economics, identification, expected increment and ablations, then submit "
-            "single-parent candidates with factory_submit_evolved_formulas. The generator "
-            "does not fit coefficients, weaken costs, read a forward lockbox, or promote alpha."
+            "engine still builds the full population, but the MCP result carries at most 12 "
+            "diverse, single-parent delivery_candidates so exact ASTs cannot be lost to tool "
+            "output truncation. Copy each submission_template exactly and replace only its "
+            "REQUIRES_HERMES text values before calling factory_submit_evolved_formulas. "
+            "The generator does not fit coefficients, weaken costs, read a forward lockbox, "
+            "or promote alpha."
         ))
     def factory_generate_formula_population(
             population_size: int = 64, generation: int = 1) -> dict:
@@ -1206,8 +1207,9 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
 
         conn = _db()
         try:
-            return formula_breeder.generate(
+            batch = formula_breeder.generate(
                 conn, population_size=population_size, generation=generation)
+            return formula_breeder.delivery_view(batch)
         except (TypeError, ValueError) as exc:
             conn.rollback()
             return {"ok": False, "error": str(exc)}
