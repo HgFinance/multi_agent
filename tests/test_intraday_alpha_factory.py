@@ -1076,6 +1076,58 @@ def test_formula_discovery_rejects_decorative_nonnegative_sign_term() -> None:
             grammar=lead_intake._intraday_ast())
 
 
+def test_formula_discovery_rejects_additive_nonnegative_confirmation() -> None:
+    pressure = {
+        "op": "field", "field": "trade_flow_imbalance", "seconds": 600,
+    }
+    quality = {
+        "op": "field", "field": "trade_side_known_ratio", "seconds": 600,
+    }
+    thesis = {
+        "target": "TAKER_NET_PNL",
+        "functional_form": "MONOTONE",
+        "expected_sign": "POSITIVE",
+        "coefficient_policy": "STRUCTURE_ONLY",
+        "decision_rule": "PREDICTED_MARKOUT_CLEARS_COST",
+        "terms": {
+            "trade_flow_imbalance": "PRESSURE",
+            "trade_side_known_ratio": "CONFIRMATION",
+        },
+        "identification": (
+            "Signed flow must retain its direction while side coverage only "
+            "confirms measurement quality."),
+    }
+    with pytest.raises(ValueError, match="non-negative CONFIRMATION"):
+        formula_discovery.assess(
+            thesis,
+            candidate={"op": "add", "args": [pressure, quality]},
+            semantic_plan={"output": "TAKER_NET_PNL", "execution": "TAKER"},
+            grammar=lead_intake._intraday_ast())
+
+    multiplied = formula_discovery.assess(
+        {**thesis, "functional_form": "INTERACTION"},
+        candidate={"op": "mul", "args": [pressure, quality]},
+        semantic_plan={"output": "TAKER_NET_PNL", "execution": "TAKER"},
+        grammar=lead_intake._intraday_ast())
+    assert multiplied["formula_math_profile"][
+        "role_path_contract_version"] == "nonnegative-confirmation-path-v1"
+
+    gated = formula_discovery.assess(
+        {**thesis, "functional_form": "STATE_CONDITIONAL"},
+        candidate={
+            "op": "where",
+            "condition": {"op": "gt", "args": [
+                quality, {"const": 0.8, "unit": "RATIO"},
+            ]},
+            "then": pressure,
+            "else": {"const": 0.0, "unit": "RATIO"},
+        },
+        semantic_plan={"output": "TAKER_NET_PNL", "execution": "TAKER"},
+        grammar=lead_intake._intraday_ast())
+    assert gated["formula_math_profile"]["term_influence"][
+        "trade_side_known_ratio"] == ["GATE"]
+
+
 def test_formula_discovery_rejects_exact_symbolic_degeneracy() -> None:
     base = {"op": "field", "field": "microprice_offset_bps"}
     expr = {"op": "where", "condition": {"op": "lt", "args": [

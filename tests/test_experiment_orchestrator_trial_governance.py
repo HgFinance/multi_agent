@@ -158,6 +158,48 @@ def test_lane_aware_preflight_accepts_current_explicit_intraday_contract():
     assert orchestrator.execution_surface_rejection_reasons(hyp) == []
 
 
+def test_current_v2_preflight_rejects_additive_quality_intercept():
+    edge = _explicit_intraday_edge()
+    edge["intraday_signal_expr"] = {
+        "op": "add",
+        "args": [
+            {
+                "op": "field", "field": "trade_flow_imbalance",
+                "seconds": 30,
+            },
+            {
+                "op": "field", "field": "trade_side_known_ratio",
+                "seconds": 30,
+            },
+        ],
+    }
+    with pytest.raises(ValueError, match="directional intercept"):
+        intraday_runner.validate_current_explicit_v2_execution_edge(edge)
+
+
+def test_current_v2_preflight_checks_every_screening_formula_path():
+    edge = _explicit_intraday_edge()
+    edge["screening_population"] = [{
+        "feature_window_contract_version":
+            EXPLICIT_FEATURE_WINDOW_CONTRACT,
+        "intraday_signal_expr": {
+            "op": "max",
+            "args": [
+                {
+                    "op": "field", "field": "queue_imbalance_l1",
+                },
+                {
+                    "op": "field", "field": "trade_side_known_ratio",
+                    "seconds": 10,
+                },
+            ],
+        },
+    }]
+    with pytest.raises(
+            ValueError, match=r"screening_population\[0\].*quality-path"):
+        intraday_runner.validate_current_explicit_v2_execution_edge(edge)
+
+
 def test_intraday_proposal_surface_has_one_runner_source_of_truth():
     assert factory_bridge.INTRADAY_EDGE_KEYS is \
         intraday_runner.INTRADAY_PROPOSAL_PARAMETER_KEYS

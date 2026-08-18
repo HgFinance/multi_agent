@@ -187,6 +187,44 @@ def test_completed_second_gate_is_taker_only_and_exposes_safe_surface() -> None:
         grammar.COMPLETED_SECOND_REPLAYABLE_FIELDS)
 
 
+def test_directional_quality_paths_reject_additive_intercepts() -> None:
+    assert formula_discovery.DIRECTIONAL_PRESSURE_FIELDS == \
+        grammar.DIRECTIONAL_PRESSURE_FIELDS
+    pressure = {
+        "op": "field", "field": "trade_flow_imbalance", "seconds": 30,
+    }
+    quality = {
+        "op": "field", "field": "trade_side_known_ratio", "seconds": 30,
+    }
+    additive = {"op": "add", "args": [pressure, quality]}
+
+    with pytest.raises(
+            grammar.IntradayExprError,
+            match="non-negative directional quality fields must gate or multiply"):
+        grammar.validate_directional_quality_paths(additive)
+
+    interaction = {"op": "mul", "args": [pressure, quality]}
+    assert grammar.validate_directional_quality_paths(interaction) == \
+        grammar.parse(interaction)
+
+    gated = {
+        "op": "where",
+        "condition": {
+            "op": "gt",
+            "args": [quality, {"const": 0.8, "unit": "RATIO"}],
+        },
+        "then": pressure,
+        "else": {"const": 0.0, "unit": "RATIO"},
+    }
+    assert grammar.validate_directional_quality_paths(gated) == \
+        grammar.parse(gated)
+
+    # A quality-only sidecar is a legal negative-control structure.  The
+    # screening cohort, not this AST invariant, withholds promotion authority.
+    assert grammar.validate_directional_quality_paths(quality) == \
+        grammar.parse(quality)
+
+
 def test_semantic_quality_labels_require_their_observable_paths() -> None:
     plan = {
         "event": "ORDER_FLOW",

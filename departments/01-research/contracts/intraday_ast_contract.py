@@ -158,6 +158,24 @@ TRADE_VOLUME_CLOCK_FIELDS = frozenset({
     "trade_side_known_ratio", "quote_ofi_per_trade_volume", "trade_count",
 })
 
+# A non-negative data-quality ratio can attenuate or gate a signed pressure,
+# but it cannot identify the direction of a future markout by itself.  Keep
+# this executable invariant in the shared contract so a formula admitted by an
+# older research image is still checked immediately before current-V2 replay.
+NONNEGATIVE_DIRECTIONAL_QUALITY_FIELDS = frozenset({
+    "trade_side_known_ratio",
+})
+DIRECTIONAL_PRESSURE_FIELDS = frozenset({
+    "queue_imbalance_l1", "queue_imbalance_l10", "microprice_offset_bps",
+    "trade_flow_imbalance", "quote_event_ofi", "normalized_quote_ofi",
+    "multi_level_quote_ofi_l10", "normalized_multi_level_quote_ofi_l10",
+    "depth_imbalance_slope", "quote_ofi_depth_divergence",
+    "normalized_quote_ofi_per_event", "signed_trade_volume",
+    "quote_ofi_per_trade_volume",
+})
+DIRECTIONAL_QUALITY_PATH_CONTRACT_VERSION = \
+    "nonnegative-directional-quality-path-v1"
+
 
 class IntradayExprError(ValueError):
     pass
@@ -514,6 +532,87 @@ def validate_completed_second_candidate(
             f"{COMPLETED_SECOND_SCREENING_COHORT_VERSION} completed-second "
             "external history has no deterministic within-second quote "
             f"sequence; blocked fields: {', '.join(blocked)}")
+    return parsed
+
+
+def validate_directional_quality_paths(expr: dict) -> dict:
+    """Reject non-negative quality terms used as directional intercepts.
+
+    When an expression contains both a signed pressure and a non-negative
+    quality observable, every numeric quality occurrence must either be in a
+    ``where`` condition or be multiplied by a distinct pressure subtree.  This
+    permits economically meaningful gates and attenuation while rejecting, for
+    example, ``add(trade_flow_imbalance, trade_side_known_ratio)``.  A
+    quality-only structural ablation remains legal; its lack of promotion
+    authority is governed by the screening-cohort contract.
+    """
+    parsed = parse(expr)
+    present = fields_of(parsed)
+    quality_fields = present & NONNEGATIVE_DIRECTIONAL_QUALITY_FIELDS
+    pressure_fields = present & DIRECTIONAL_PRESSURE_FIELDS
+    if not quality_fields or not pressure_fields:
+        return parsed
+
+    def subtree_fields(node: dict) -> set[str]:
+        if node.get("op") == FIELD_OP:
+            return {str(node["field"])}
+        found: set[str] = set()
+        if isinstance(node.get("arg"), dict):
+            found.update(subtree_fields(node["arg"]))
+        for child in node.get("args") or ():
+            if isinstance(child, dict):
+                found.update(subtree_fields(child))
+        for key in ("condition", "then", "else"):
+            if isinstance(node.get(key), dict):
+                found.update(subtree_fields(node[key]))
+        return found
+
+    unsupported: set[str] = set()
+
+    def walk(node: dict, *, gate: bool, pressure_coupled: bool) -> None:
+        op = node.get("op")
+        if op == FIELD_OP:
+            field = str(node["field"])
+            if (field in quality_fields and not gate
+                    and not pressure_coupled):
+                unsupported.add(field)
+            return
+        if op == "where":
+            walk(node["condition"], gate=True,
+                 pressure_coupled=pressure_coupled)
+            walk(node["then"], gate=gate,
+                 pressure_coupled=pressure_coupled)
+            walk(node["else"], gate=gate,
+                 pressure_coupled=pressure_coupled)
+            return
+        if isinstance(node.get("arg"), dict):
+            walk(node["arg"], gate=gate,
+                 pressure_coupled=pressure_coupled)
+            return
+
+        children = [child for child in node.get("args") or ()
+                    if isinstance(child, dict)]
+        child_fields = [subtree_fields(child) for child in children]
+        for index, child in enumerate(children):
+            sibling_has_pressure = (
+                op == "mul" and any(
+                    child_fields[other] & pressure_fields
+                    for other in range(len(children)) if other != index
+                )
+            )
+            walk(
+                child,
+                gate=gate,
+                pressure_coupled=(pressure_coupled or sibling_has_pressure),
+            )
+
+    walk(parsed, gate=False, pressure_coupled=False)
+    if unsupported:
+        raise IntradayExprError(
+            f"{DIRECTIONAL_QUALITY_PATH_CONTRACT_VERSION}: non-negative "
+            "directional quality fields must gate or multiply a distinct "
+            "signed pressure subtree; additive/min/max numeric paths create "
+            f"a directional intercept: {sorted(unsupported)}")
     return parsed
 
 

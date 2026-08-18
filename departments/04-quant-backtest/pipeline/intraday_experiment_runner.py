@@ -30,6 +30,7 @@ from intraday_alpha_ast import (
     structural_similarity,
     temporal_windows_of,
     unit_of,
+    validate_directional_quality_paths,
     validate_feature_window_contract,
 )
 from intraday_search_exposure_contract import (
@@ -291,6 +292,15 @@ def validate_current_explicit_v2_execution_edge(
     contract_rejection = current_intraday_execution_contract_rejection(edge)
     if contract_rejection:
         raise ValueError(contract_rejection)
+    validate_directional_quality_paths(edge.get("intraday_signal_expr"))
+    for index, candidate in enumerate(edge.get("screening_population") or []):
+        try:
+            validate_directional_quality_paths(
+                candidate.get("intraday_signal_expr"))
+        except ValueError as exc:
+            raise ValueError(
+                f"screening_population[{index}] violates the directional "
+                f"quality-path contract: {exc}") from exc
     return config_from_edge(edge)
 
 
