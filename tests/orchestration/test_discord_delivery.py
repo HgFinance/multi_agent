@@ -218,6 +218,116 @@ class DiscordDeliveryTests(unittest.TestCase):
 
             self.assertEqual(result, "missing_context")
             self.assertEqual(sent, [])
+    def test_department_detail_is_chunked_into_existing_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = DiscordIdempotencyStore(Path(directory))
+            sent: list[dict[str, object]] = []
+
+            def sender(channel: str, payload: str, _headers: dict[str, str]):
+                sent.append(
+                    {
+                        "channel": channel,
+                        "payload": json.loads(payload),
+                    }
+                )
+                return {"id": f"detail-{len(sent)}"}
+
+            delivery = DiscordFinalDelivery(
+                environment={"DISCORD_BOT_TOKEN": "test-token"},
+                sender=sender,
+            )
+
+            task = {
+                "root_task": {
+                    "body": (
+                        "discord_message_id=message\n"
+                        "discord_channel_id=channel\n"
+                        "discord_thread_id=thread-123\n"
+                        "discord_guild_id=guild\n"
+                    )
+                }
+            }
+
+            content = "A" * 3600
+
+            result = delivery.deliver_to_existing_thread(
+                root_task_id="root",
+                source_task=task,
+                content=content,
+                title="Quant 상세 분석",
+                store=store,
+                profile="quant-backtest-department",
+                response_key_suffix="department-detail:task-1",
+            )
+
+            self.assertEqual(result, "sent")
+            self.assertGreaterEqual(len(sent), 2)
+            self.assertTrue(
+                all(item["channel"] == "thread-123" for item in sent)
+            )
+
+            # Re-delivery of the same task is idempotent.
+            second = delivery.deliver_to_existing_thread(
+                root_task_id="root",
+                source_task=task,
+                content=content,
+                title="Quant 상세 분석",
+                store=store,
+                profile="quant-backtest-department",
+                response_key_suffix="department-detail:task-1",
+            )
+
+            self.assertEqual(second, "sent")
+            self.assertGreaterEqual(len(sent), 2)
+
+
+
+
+    def test_department_detail_uses_starter_message_as_existing_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = DiscordIdempotencyStore(
+                Path(directory) / "discord.sqlite3"
+            )
+
+            sent: list[dict[str, object]] = []
+
+            def sender(channel: str, payload: str, _headers: dict[str, str]):
+                sent.append(
+                    {
+                        "channel": channel,
+                        "payload": json.loads(payload),
+                    }
+                )
+                return {"id": "detail-message"}
+
+            delivery = DiscordFinalDelivery(
+                environment={"DISCORD_BOT_TOKEN": "test-token"},
+                sender=sender,
+            )
+
+            result = delivery.deliver_to_existing_thread(
+                root_task_id="root",
+                source_task={
+                    "root_task": {
+                        "body": (
+                            "discord_message_id=1539153165784584263\n"
+                            "discord_channel_id=1536997434507657261\n"
+                            "discord_thread_id=\n"
+                        )
+                    }
+                },
+                content="department full analysis",
+                title="📊 Quant / Backtest 부서 상세 분석",
+                store=store,
+                profile="quant-backtest-department",
+                response_key_suffix="department-detail:test",
+            )
+
+            self.assertEqual(result, "sent")
+            self.assertEqual(
+                sent[0]["channel"],
+                "1539153165784584263",
+            )
 
 
 if __name__ == "__main__":

@@ -198,6 +198,9 @@ class ChildTaskState:
     # 외국인 순매수 상위 10 표를 만들어 놓고 kanban_complete 에는 요약 한 줄만
     # 넣어, QA 도 종합도 표를 못 보고 사용자 응답이 result:null 로 나갔다.
     result: str = ""
+    # A concise, user-ready answer produced by the primary department.
+    # This is deliberately separate from the structured/internal result.
+    final_answer: str = ""
     error: str = ""
     block_reason: str = ""
     block_kind: str = ""
@@ -212,13 +215,46 @@ class ChildTaskState:
         raw_profile = str(payload.get("assignee") or payload.get("profile") or "")
         status = str(payload.get("status") or "unknown").casefold()
         latest = payload.get("latest_summary")
-        summary = _text(payload.get("summary") or latest or payload.get("result"))
-        result = _text(payload.get("result"))
-        error = _text(payload.get("error") or payload.get("last_error"))
+
+        # Hermes stores structured terminal handoff fields in the latest run
+        # metadata even when the task-level result remains null. Prefer explicit
+        # task-level fields, then fall back to the newest run metadata.
+        run_metadata: Mapping[str, Any] = {}
+        runs = payload.get("runs")
+        if isinstance(runs, Sequence) and not isinstance(runs, (str, bytes)):
+            for run in reversed(runs):
+                if not isinstance(run, Mapping):
+                    continue
+                metadata = run.get("metadata")
+                if isinstance(metadata, Mapping):
+                    run_metadata = metadata
+                    break
+
+        summary = _text(
+            payload.get("summary")
+            or latest
+            or payload.get("result")
+            or run_metadata.get("summary")
+            or run_metadata.get("result")
+        )
+        result = _text(
+            payload.get("result")
+            or run_metadata.get("result")
+        )
+        final_answer = _text(
+            payload.get("final_answer")
+            or run_metadata.get("final_answer")
+        )
+        error = _text(
+            payload.get("error")
+            or payload.get("last_error")
+            or run_metadata.get("error")
+        )
         block_reason = _text(
             payload.get("block_reason")
             or payload.get("blocked_reason")
             or payload.get("reason")
+            or run_metadata.get("block_reason")
         )
         block_kind = str(payload.get("block_kind") or payload.get("kind") or "").casefold()
         outcome = str(payload.get("outcome") or "").casefold()
@@ -248,6 +284,7 @@ class ChildTaskState:
             status=status,
             summary=summary,
             result=result,
+            final_answer=final_answer,
             error=error,
             block_reason=block_reason,
             block_kind=block_kind,
@@ -346,6 +383,8 @@ class SupervisorState:
     # 이 루트가 **사람이 발원한 질의**인가 (origin=user-query 도장, RFC 3834 동형).
     # 공장 자동 생성 카드는 CEO 워크플로가 아니다 - 사용자에게 물어볼 것이 없다.
     root_is_user_query: bool = False
+    # Enabled only by the production service when final Discord delivery exists.
+    allow_primary_passthrough: bool = False
 
     @property
     def analysis_children(self) -> tuple[ChildTaskState, ...]:
@@ -527,6 +566,52 @@ def _blocked_decision(
     )
 
 
+def _single_primary_passthrough_child(
+    state: SupervisorState,
+) -> ChildTaskState | None:
+    """Return the one user-ready primary that may bypass CEO LLM synthesis.
+
+    This optimization is intentionally narrow:
+    - analysis workflow only
+    - user-originated root only
+    - exactly one explicitly selected primary
+    - complete/unique primary set
+    - primary completed successfully
+    - a dedicated user-ready final_answer exists
+    - final Discord delivery is configured
+
+    Multi-primary, blocked/failed, binding, legacy, or incomplete work keeps the
+    existing CEO synthesis path.
+    """
+
+    if not state.allow_primary_passthrough:
+        return None
+    if state.workflow_mode != "analysis" or not state.root_is_user_query:
+        return None
+    if len(state.selected_primary_profiles) != 1:
+        return None
+    if (
+        state.missing_primary_profiles
+        or state.duplicate_primary_profiles
+        or not state.primary_ready
+    ):
+        return None
+
+    children = state.analysis_children
+    if len(children) != 1:
+        return None
+
+    child = children[0]
+    if not child.done or child.blocked or child.failed:
+        return None
+    if child.error or child.block_reason:
+        return None
+    if not child.final_answer.strip():
+        return None
+
+    return child
+
+
 def _analysis_synthesis_decision(
     state: SupervisorState,
 ) -> SupervisorDecision | None:
@@ -547,11 +632,17 @@ def _analysis_synthesis_decision(
     if not state.primary_ready:
         return None
 
-    primary_ids = tuple(
-        child.task_id for child in state.analysis_children if child.terminal
-    )
-    if not primary_ids:
+    # A successful single-primary read/analysis that already produced a
+    # user-ready answer does not need a second CEO LLM rewrite.
+    if _single_primary_passthrough_child(state) is not None:
         return None
+
+    # Execution dependencies must contain only successful primaries.
+    # Blocked/failed terminal primaries remain in the synthesis payload so the
+    # CEO can disclose missing evidence, but they must not gate dispatch.
+    primary_ids = tuple(
+        child.task_id for child in state.analysis_children if child.done
+    )
     return SupervisorDecision(
         SupervisorAction.SYNTHESIZE,
         state.parent_task_id,
@@ -674,7 +765,12 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
 
     if any(not child.terminal for child in state.analysis_children):
         return None
-    primary_ids = tuple(child.task_id for child in state.analysis_children if child.terminal)
+    # Async QA receives every primary in its payload, but only successful
+    # primaries are execution dependencies. A blocked advisory primary must
+    # not prevent QA or CEO synthesis from running.
+    primary_ids = tuple(
+        child.task_id for child in state.analysis_children if child.done
+    )
 
     if state.workflow_mode == "analysis":
         if state.qa_required and not state.qa_children:
@@ -1054,6 +1150,73 @@ class HermesKanbanClient:
         return root_id, tuple(task for current, task in cache.items() if current != root_id)
 
 
+DEPARTMENT_DISCORD_LABELS: dict[str, tuple[str, str]] = {
+    "research-department": ("🔬", "Research 부서"),
+    "quant-backtest-department": ("📊", "Quant / Backtest 부서"),
+    "risk-management": ("🛡️", "Risk 부서"),
+    "accounting-portfolio-department": ("📒", "Accounting / Portfolio 부서"),
+    "trading-department": ("💹", "Trading 부서"),
+    "hr-department": ("👥", "HR 부서"),
+    "qa-department": ("✅", "QA 부서"),
+}
+
+
+def _department_progress_text(
+    profile: str,
+    kind: str,
+    *,
+    summary: str = "",
+) -> str | None:
+    icon, label = DEPARTMENT_DISCORD_LABELS.get(
+        profile,
+        ("🏢", profile),
+    )
+
+    normalized = str(kind or "").casefold()
+
+    if normalized in {"claimed", "spawned", "started", "running"}:
+        return f"{icon} **{label}**\n분석을 시작했습니다."
+
+    if normalized in {"done", "completed"}:
+        tail = str(summary or "").strip()
+
+        # Keep department completion messages useful in Discord without
+        # dumping an entire artifact or report into the channel.
+        has_detail_thread = len(tail) > 600
+
+        if len(tail) > 450:
+            tail = tail[:447].rstrip() + "..."
+
+        if tail:
+            quoted = "\n".join(
+                f"> {line}" if line.strip() else ">"
+                for line in tail.splitlines()
+            )
+            detail_hint = (
+                "\n\n🧵 **전체 상세 분석은 이 요청의 스레드에서 확인할 수 있습니다.**"
+                if has_detail_thread
+                else ""
+            )
+
+            return (
+                f"{icon} **{label}**\n"
+                f"분석을 완료했습니다.\n\n"
+                f"**핵심 결과**\n"
+                f"{quoted}"
+                f"{detail_hint}"
+            )
+
+        return f"{icon} **{label}**\n분석을 완료했습니다."
+
+    if normalized == "blocked":
+        return f"{icon} **{label}**\n현재 필요한 입력 또는 의존성이 부족해 작업이 지연되고 있습니다."
+
+    if normalized in {"failed", "error"}:
+        return f"{icon} **{label}**\n작업 중 오류가 발생했습니다. CEO가 가능한 결과와 누락 범위를 확인합니다."
+
+    return None
+
+
 class CeoSupervisorService:
     """Wake once per terminal event and execute at most one bounded action."""
 
@@ -1238,8 +1401,10 @@ class CeoSupervisorService:
                 "ceo-hermes-direct" if direct_ceo_synthesis else "ceo-supervisor",
             )
         if response_synthesis and self.discord_delivery:
+            synthesized = ChildTaskState.from_hermes(task)
             content = _text(
-                task.get("latest_summary")
+                synthesized.final_answer
+                or task.get("latest_summary")
                 or task.get("summary")
                 or task.get("result")
             )
@@ -1267,13 +1432,254 @@ class CeoSupervisorService:
                     if os.path.isdir(ceo_profile_home)
                     else hermes_home
                 )
-                self.discord_delivery.deliver(
+                delivery_store = DiscordIdempotencyStore(delivery_home)
+                ceo_profile = canonical_profile_for_department("ceo")
+
+                # Keep the normal CEO final response in the parent channel.
+                # Multi-primary CEO synthesis is delivered only inside the request thread.
+
+                # Also preserve the complete CEO synthesis in the SAME
+                # request thread as the department detailed outputs.
+                thread_status = self.discord_delivery.deliver_to_existing_thread(
                     root_task_id=root_task_id,
-                    synthesis_task=delivery_task,
+                    source_task=delivery_task,
+                    root_task=root_payload,
                     content=content,
-                    store=DiscordIdempotencyStore(delivery_home),
-                    profile=canonical_profile_for_department("ceo"),
+                    title="🧠 CEO 종합",
+                    store=delivery_store,
+                    profile=ceo_profile,
+                    response_key_suffix=f"synthesis-detail:{task_id}",
                 )
+
+                logger.info(
+                    "synthesis-discord-thread root=%s task=%s status=%s",
+                    root_task_id,
+                    task_id,
+                    thread_status,
+                )
+
+    def _reconcile_department_start_progress(
+        self,
+        *,
+        root_task_id: str,
+        root_payload: Mapping[str, Any],
+        task_payloads: Sequence[Mapping[str, Any]],
+    ) -> None:
+        """Recover department start messages from durable task state.
+
+        Hermes kanban watch can coalesce or miss sibling claimed/spawned
+        transitions that happen in the same polling window. Whenever any
+        execution activity is observed, inspect all selected primary tasks and
+        project a synthetic started event for every task that is already
+        running. Discord idempotency keeps the projection exactly-once.
+        """
+        if self.discord_delivery is None:
+            return
+
+        root_body = str(root_payload.get("body") or "")
+        if workflow_mode_from_body(root_body) != "analysis":
+            return
+        if not is_user_query_body(root_body):
+            return
+
+        selected = selected_primary_profiles_from_task(root_payload)
+        if len(selected) < 2:
+            return
+
+        show = getattr(self.client, "show", None)
+
+        for payload in task_payloads:
+            child = ChildTaskState.from_hermes(payload)
+
+            if (
+                child.workflow_role != "primary"
+                or child.profile not in selected
+                or not child.is_in_workflow(root_task_id)
+            ):
+                continue
+
+            candidate = payload
+            if callable(show):
+                try:
+                    candidate = show(child.task_id)
+                    child = ChildTaskState.from_hermes(candidate)
+                except HermesKanbanCommandError:
+                    candidate = payload
+
+            status = str(
+                candidate.get("status")
+                or child.status
+                or ""
+            ).casefold()
+
+            started_at = candidate.get("started_at")
+
+            if (
+                status not in {"running", "claimed", "in_progress"}
+                and started_at is None
+            ):
+                continue
+
+            try:
+                self._deliver_department_progress(
+                    root_task_id=root_task_id,
+                    root_payload=root_payload,
+                    task_payload=candidate,
+                    event={
+                        "event_id": f"state-start:{child.task_id}",
+                        "task_id": child.task_id,
+                        "kind": "started",
+                    },
+                )
+            except Exception as exc:
+                logger.warning(
+                    "department-start-reconcile-failed "
+                    "root=%s task=%s profile=%s error=%s",
+                    root_task_id,
+                    child.task_id,
+                    child.profile,
+                    type(exc).__name__,
+                )
+
+
+    def _deliver_department_progress(
+        self,
+        *,
+        root_task_id: str,
+        root_payload: Mapping[str, Any],
+        task_payload: Mapping[str, Any],
+        event: Mapping[str, Any],
+    ) -> str | None:
+        if self.discord_delivery is None:
+            return None
+
+        root_body = str(root_payload.get("body") or "")
+        if workflow_mode_from_body(root_body) != "analysis":
+            return None
+        if not is_user_query_body(root_body):
+            return None
+
+        selected = selected_primary_profiles_from_task(root_payload)
+        if len(selected) < 2:
+            # Keep the existing single-primary fast path quiet.
+            return None
+
+        child = ChildTaskState.from_hermes(task_payload)
+        if (
+            child.workflow_role != "primary"
+            or child.profile not in selected
+            or not child.is_in_workflow(root_task_id)
+        ):
+            return None
+
+        kind = str(
+            event.get("kind")
+            or event.get("event_type")
+            or event.get("status")
+            or ""
+        ).casefold()
+
+        department_result = (
+            child.final_answer
+            or child.result
+            or child.summary
+        )
+
+        content = _department_progress_text(
+            child.profile,
+            kind,
+            summary=department_result,
+        )
+        if not content:
+            return None
+
+        logical_kind = (
+            "started"
+            if kind in {"claimed", "spawned", "started", "running"}
+            else kind
+        )
+
+        delivery_task = dict(task_payload)
+        delivery_task["root_task"] = root_payload
+
+        delivery_environment = getattr(
+            self.client,
+            "environment",
+            os.environ,
+        )
+        hermes_home = delivery_environment.get(
+            "HERMES_HOME",
+            "/opt/data",
+        )
+        ceo_profile_home = os.path.join(
+            hermes_home,
+            "profiles",
+            canonical_profile_for_department("ceo"),
+        )
+        delivery_home = (
+            ceo_profile_home
+            if os.path.isdir(ceo_profile_home)
+            else hermes_home
+        )
+
+        icon, detail_label = DEPARTMENT_DISCORD_LABELS.get(
+            child.profile,
+            ("🏢", child.profile),
+        )
+
+        if logical_kind == "started":
+            card_content = (
+                f"{icon} **{detail_label}**\n"
+                "⏳ 분석 중입니다..."
+            )
+        elif kind in {"done", "completed"}:
+            result_text = str(department_result or "").strip()
+
+            card_content = (
+                f"{icon} **{detail_label}**\n"
+                "✅ 분석을 완료했습니다."
+            )
+
+            if result_text:
+                card_content += f"\n\n{result_text}"
+        else:
+            card_content = content
+
+        try:
+            status = self.discord_delivery.upsert_thread_card(
+                root_task_id=root_task_id,
+                source_task=delivery_task,
+                root_task=root_payload,
+                content=card_content,
+                store=DiscordIdempotencyStore(delivery_home),
+                profile=child.profile,
+                response_key_suffix=(
+                    f"department-card:{child.task_id}"
+                ),
+                update_existing=(logical_kind != "started"),
+            )
+        except Exception as exc:
+            logger.warning(
+                "department-thread-card-failed "
+                "root=%s task=%s profile=%s error=%s",
+                root_task_id,
+                child.task_id,
+                child.profile,
+                type(exc).__name__,
+            )
+            return "failed"
+
+        logger.info(
+            "department-thread-card root=%s task=%s "
+            "profile=%s kind=%s status=%s",
+            root_task_id,
+            child.task_id,
+            child.profile,
+            kind,
+            status,
+        )
+
+        return status
 
     def reconcile_existing_workflows(self) -> tuple[SupervisorDecision, ...]:
         """Reconcile terminal roots whose watch event was missed.
@@ -1296,10 +1702,15 @@ class CeoSupervisorService:
             task_id = str(row.get("id") or row.get("task_id") or "")
             body = str(row.get("body") or "")
             role = terminal_workflow_role(row) or ""
+            explicit_legacy_planning_root = (
+                role in {"planning", "scope_and_planning"}
+                and "root_task_role=scope_and_planning" in body
+                and "planning_terminal_state=done_after_child_creation" in body
+            )
             if (
                 not task_id
                 or CEO_WORKFLOW_SCOPE_MARKER not in body
-                or role not in {"planning", "scope_and_planning"}
+                or not explicit_legacy_planning_root
             ):
                 continue
             roots[task_id] = row
@@ -1348,7 +1759,43 @@ class CeoSupervisorService:
     def handle_terminal_event(self, event: Mapping[str, Any]) -> SupervisorDecision | None:
         task_id = str(event.get("task_id") or event.get("id") or "")
         kind = str(event.get("kind") or event.get("event_type") or event.get("status") or "").casefold()
-        if not task_id or kind in NON_TERMINAL_EVENT_KINDS:
+        if not task_id:
+            return None
+
+        if kind in {"claimed", "spawned", "started", "running"}:
+            try:
+                root_id, payloads = self.client.workflow(task_id)
+                show = getattr(self.client, "show", None)
+
+                if callable(show):
+                    root_payload = show(root_id)
+
+                    task_payload = show(task_id)
+                    self._deliver_department_progress(
+                        root_task_id=root_id,
+                        root_payload=root_payload,
+                        task_payload=task_payload,
+                        event=event,
+                    )
+
+                    # Recover sibling starts that the CLI watch may have
+                    # coalesced or missed in the same polling interval.
+                    self._reconcile_department_start_progress(
+                        root_task_id=root_id,
+                        root_payload=root_payload,
+                        task_payloads=payloads,
+                    )
+            except Exception as exc:
+                # Progress projection must never interfere with execution.
+                logger.warning(
+                    "department-discord-progress-failed task=%s kind=%s error=%s",
+                    task_id,
+                    kind,
+                    type(exc).__name__,
+                )
+            return None
+
+        if kind in NON_TERMINAL_EVENT_KINDS:
             return None
         if kind not in TERMINAL_EVENT_KINDS and kind not in TERMINAL_STATUSES:
             return None
@@ -1374,11 +1821,21 @@ class CeoSupervisorService:
                 # workflow is ready for synthesis. Primary child events are the
                 # wake-up boundary.
                 root_body = str(root_payload.get("body") or "")
-                if root_id == task_id and kind in {"done", "completed"} and (
-                    "root_task_role=scope_and_planning" in root_body
-                    and "planning_terminal_state=done_after_child_creation" in root_body
-                ):
-                    return None
+                if root_id == task_id and kind in {"done", "completed"}:
+                    legacy_planning_root = (
+                        "root_task_role=scope_and_planning" in root_body
+                        and "planning_terminal_state=done_after_child_creation" in root_body
+                    )
+                    if legacy_planning_root:
+                        # Preserve compatibility for legacy planning roots whose
+                        # execution-parent linkage may not yet be durable when
+                        # the root completion event arrives.
+                        logger.info(
+                            "root-planning-complete-ignored root=%s event=%s",
+                            root_id,
+                            event_key,
+                        )
+                        return None
                 try:
                     validate_workflow_scope(
                         root_task_id=root_id,
@@ -1410,6 +1867,39 @@ class CeoSupervisorService:
                     task_payloads=(root_payload, *payloads),
                     event=event,
                 )
+
+                terminal_task_payload = next(
+                    (
+                        payload
+                        for payload in payloads
+                        if str(
+                            payload.get("id")
+                            or payload.get("task_id")
+                            or ""
+                        ) == task_id
+                    ),
+                    None,
+                )
+                if terminal_task_payload is not None:
+                    try:
+                        show_task = getattr(self.client, "show", None)
+                        if callable(show_task):
+                            terminal_task_payload = show_task(task_id)
+
+                        self._deliver_department_progress(
+                            root_task_id=root_id,
+                            root_payload=root_payload,
+                            task_payload=terminal_task_payload,
+                            event=event,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "department-discord-progress-failed "
+                            "task=%s kind=%s error=%s",
+                            task_id,
+                            kind,
+                            type(exc).__name__,
+                        )
 
                 children = tuple(
                     ChildTaskState.from_hermes(payload)
@@ -1444,6 +1934,51 @@ class CeoSupervisorService:
                     if SUPERVISOR_MARKER in child.body
                     and "action=CREATE_TASK" in child.body
                 )
+                # Single-primary passthrough needs the terminal run metadata
+                # (especially final_answer). workflow() may carry only a shallow
+                # task projection, so hydrate exactly one selected primary with
+                # show() before building SupervisorState.
+                selected_profiles = selected_primary_profiles_from_task(root_payload)
+                if (
+                    workflow_mode == "analysis"
+                    and is_user_query_body(root_body)
+                    and len(selected_profiles) == 1
+                ):
+                    selected_profile = selected_profiles[0]
+                    hydrated_children = []
+                    for child in children:
+                        if (
+                            child.profile == selected_profile
+                            and child.is_in_workflow(root_id)
+                            and child.workflow_role == "primary"
+                            and (child.done or child.blocked or child.failed)
+                        ):
+                            try:
+                                hydrated_payload = self.client.show(child.task_id)
+                                child = ChildTaskState.from_hermes(hydrated_payload)
+                                logger.info(
+                                    "single-primary-hydrated root=%s task=%s "
+                                    "profile=%s final_answer=%s",
+                                    root_id,
+                                    child.task_id,
+                                    child.profile,
+                                    str(bool(child.final_answer)).lower(),
+                                )
+                            except HermesKanbanCommandError as exc:
+                                # Safe fallback: if hydration fails, keep the
+                                # shallow child. The existing CEO synthesis path
+                                # remains available because final_answer will be
+                                # empty.
+                                logger.warning(
+                                    "single-primary-hydration-failed root=%s "
+                                    "task=%s error=%s",
+                                    root_id,
+                                    child.task_id,
+                                    type(exc).__name__,
+                                )
+                        hydrated_children.append(child)
+                    children = tuple(hydrated_children)
+
                 state = SupervisorState(
                     parent_task_id=root_id,
                     children=children,
@@ -1465,9 +2000,62 @@ class CeoSupervisorService:
                     ),
                     workflow_mode=workflow_mode,
                     has_mandate=mandate_snapshot_present(root_body),
-                    selected_primary_profiles=selected_primary_profiles_from_task(root_payload),
+                    selected_primary_profiles=selected_profiles,
                     root_is_user_query=is_user_query_body(root_body),
+                    allow_primary_passthrough=self.discord_delivery is not None,
                 )
+
+                passthrough = _single_primary_passthrough_child(state)
+                if (
+                    passthrough is not None
+                    and passthrough.task_id == task_id
+                    and self.discord_delivery is not None
+                ):
+                    primary_payload = next(
+                        (
+                            payload
+                            for payload in payloads
+                            if str(payload.get("id") or payload.get("task_id") or "")
+                            == passthrough.task_id
+                        ),
+                        {},
+                    )
+                    delivery_task = dict(primary_payload)
+                    delivery_task["root_task"] = root_payload
+
+                    delivery_environment = getattr(
+                        self.client, "environment", os.environ
+                    )
+                    hermes_home = delivery_environment.get(
+                        "HERMES_HOME", "/opt/data"
+                    )
+                    ceo_profile_home = os.path.join(
+                        hermes_home,
+                        "profiles",
+                        canonical_profile_for_department("ceo"),
+                    )
+                    delivery_home = (
+                        ceo_profile_home
+                        if os.path.isdir(ceo_profile_home)
+                        else hermes_home
+                    )
+
+                    delivery_status = self.discord_delivery.deliver(
+                        root_task_id=root_id,
+                        synthesis_task=delivery_task,
+                        content=passthrough.final_answer,
+                        store=DiscordIdempotencyStore(delivery_home),
+                        profile=canonical_profile_for_department("ceo"),
+                    )
+                    logger.info(
+                        "single-primary-passthrough root=%s task=%s "
+                        "profile=%s status=%s",
+                        root_id,
+                        passthrough.task_id,
+                        passthrough.profile,
+                        delivery_status,
+                    )
+
                 decision = self.decider(state)
                 if (
                     wakeups >= self.max_wakeups
@@ -1721,7 +2309,11 @@ class CeoSupervisorService:
             if not decision.assignee or not decision.title or not decision.body:
                 raise SupervisorValidationError(f"{decision.action.value} lacks create fields")
             if decision.action == SupervisorAction.RUN_QA:
-                expected = {child.task_id for child in state.analysis_children}
+                expected = {
+                    child.task_id
+                    for child in state.analysis_children
+                    if child.done
+                }
                 if requested_parent_ids != expected:
                     raise SupervisorValidationError(
                         "RUN_QA dependencies must be the current root's "
@@ -1733,7 +2325,7 @@ class CeoSupervisorService:
                     {
                         child.task_id
                         for child in state.analysis_children
-                        if child.terminal
+                        if child.done
                     }
                     if state.workflow_mode == "analysis"
                     else {child.task_id for child in state.qa_children if child.done}

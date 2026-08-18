@@ -228,4 +228,83 @@ values
    'PLACEHOLDER User 3 (계정 전환 테스트용)', 'Asia/Seoul', 'ACTIVE')
 on conflict (user_id) do nothing;
 
+-- ===========================================================================
+-- [CEO Office] 테스트 계정 3개의 Fund + 소유 관계 (2026-08-18)
+-- 소유: 영주. 근거: supabase/migrations/20260729000100_foundation_reference.sql
+--   (accounting.funds, governance.fund_memberships, governance.can_access_fund)
+--
+-- ## 왜 이제야 넣나 (놓쳤던 것)
+--
+-- 위 플레이스홀더 회원 3명(2026-08-12)은 seed에 들어왔는데, 그 회원이 소유하는
+-- Fund 3개는 라이브 DB에 직접 만들고 seed에는 넣지 않았다(2026-08-13). 그래서
+-- `supabase db reset` 이후 프론트엔드가 하드코딩한 fund_id 3개
+-- (ai-office/app/lib/currentAccount.ts)가 전부 존재하지 않는 행을 가리켰고,
+-- `POST /ui/ceo/ask`의 Mandate 조회와 `POST /ui/investor-profiles`가 FK 위반으로
+-- 실패한다. 회원만 심고 그 아래 체인(Fund -> 소유 관계)을 안 심은 것이 원인이다.
+--
+-- ## 왜 fund_memberships가 필요한가
+--
+-- 지금 서버에는 `user_id -> fund_id` 역참조 경로가 없다. 그래서 프론트엔드가
+-- `fund_id`를 짝으로 들고 다니고(currentAccount.ts), BFF는 그걸 요청 body로
+-- 받는다(apps/api/ceo.py CeoAsk.fund_id). 이 표가 채워지면 그 우회가 필요 없어지고,
+-- migration에 이미 있는 `governance.can_access_fund()` RLS 함수도 그제서야
+-- 실제로 동작한다(지금은 membership이 0건이라 service_role 외 전부 false).
+--
+-- **이 seed는 그 우회를 자동으로 걷어내지 않는다.** BFF가 이 표를 읽도록 바꾸는
+-- 것은 별도 작업이고, 그 전까지 프론트엔드 하드코딩은 그대로 둔다.
+--
+-- ## 이건 인증이 아니다
+--
+-- `X-User-Id`는 서명이 없어 누구나 아무 UUID나 보낼 수 있다
+-- (apps/api/current_user.py 머리말). 여기 심는 소유 관계는 "표시·조회 필터의
+-- 근거"이지 접근 통제가 아니다. 공개망 노출 전에 실제 인증으로 교체해야 한다.
+-- ===========================================================================
+
+-- 1) 테스트 Fund 3개
+--
+-- fund_id는 프론트엔드(currentAccount.ts)와 CEO Office 모듈 __main__ 자체 점검
+-- (approval.py / case_root.py / committee.py의 fund = "b13f5cd1-...")이 이미
+-- 하드코딩한 값이다. **여기서 바꾸면 그쪽이 전부 깨진다** — 함께 고쳐야 한다.
+--
+-- 아래 값은 **추정이 아니라 새 Supabase 프로젝트 조회 결과**다(2026-08-18,
+-- `select fund_id, fund_code, name, base_currency, inception_date, status
+-- from accounting.funds`). 이 파일이 실 DB와 어긋나 있던 것이 원래 문제였으므로,
+-- 값을 바꿀 때는 반드시 실 DB와 대조한다(scripts/check_test_user_wiring.py).
+--
+-- ⚠ 옛 프로젝트에는 같은 fund_id가 다른 name/inception_date로 들어 있었다
+-- ('CEO Mandate Contract Test Fund', 2026-01-01 등). 옛 DB를 근거로 이 값을
+-- 되돌리지 않는다 - 기준은 현재 프로젝트다.
+--
+-- Mandate 자체는 여기서 만들지 않는다. 화면의 `lookupOrCreateMandate()`가
+-- 사용자별로 최초 1회 생성한다 - Fund가 없으면 그 최초 생성이 FK 위반으로 실패한다.
+insert into accounting.funds (fund_id, fund_code, name, base_currency, inception_date, status)
+values
+  ('b13f5cd1-5df0-4025-92cf-9be03b1a0296', 'TEST-CEO-MANDATE',
+   'Test CEO Mandate Fund', 'USD', date '2026-08-01', 'ACTIVE'),
+  ('50a3c28c-6cee-4bcf-ab07-fa97093dca8e', 'TEST-USER2-MANDATE',
+   'Test User 2 Mandate Fund', 'USD', date '2026-08-01', 'ACTIVE'),
+  ('3838f7d6-0c7c-4e54-85f3-316a451e7eeb', 'TEST-USER3-MANDATE',
+   'Test User 3 Mandate Fund', 'USD', date '2026-08-01', 'ACTIVE')
+on conflict do nothing;
+
+-- 2) 소유 관계 3행 — 각 계정이 자기 Fund의 OWNER
+--
+-- 역할을 OWNER 하나만 넣는 이유: 세 계정은 서로 다른 Mandate를 가진 **각자의**
+-- Fund 소유자다. 교차 역할(CIO/VIEWER 등)을 임의로 넣으면 "다른 사용자에게는
+-- 안 보인다"를 검증하려고 만든 계정 구분이 흐려진다. 교차 접근이 실제로 필요해질
+-- 때 그 요구사항과 함께 추가한다(개발 원칙 9).
+--
+-- effective_to는 비운다(무기한 ACTIVE). can_access_fund()가
+-- `effective_from <= now() and (effective_to is null or effective_to > now())`로
+-- 판정하므로 기본값 그대로면 즉시 유효하다.
+insert into governance.fund_memberships (fund_id, user_id, role, status)
+values
+  ('b13f5cd1-5df0-4025-92cf-9be03b1a0296',
+   '00000000-0000-4000-8000-00000000cec0', 'OWNER', 'ACTIVE'),
+  ('50a3c28c-6cee-4bcf-ab07-fa97093dca8e',
+   '00000000-0000-4000-8000-00000000cec1', 'OWNER', 'ACTIVE'),
+  ('3838f7d6-0c7c-4e54-85f3-316a451e7eeb',
+   '00000000-0000-4000-8000-00000000cec2', 'OWNER', 'ACTIVE')
+on conflict (fund_id, user_id, role) do nothing;
+
 commit;

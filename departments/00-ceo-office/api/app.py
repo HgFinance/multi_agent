@@ -1382,6 +1382,58 @@ def get_mandate_current_by_fund(
     return get_mandate_current(mandate_ids[0])
 
 
+@app.get(
+    "/governance/v1/users/{user_id}/fund",
+    dependencies=[Depends(_require_internal_auth)],
+)
+def get_fund_for_user(user_id: str):
+    """`user_id -> fund_id` 역참조. 2026-08-18 추가.
+
+    ## 왜 필요한가
+
+    이 경로가 없어서 **프론트엔드가 `fund_id`를 계정과 쌍으로 하드코딩**해
+    요청 body에 실어 보내고 있었다(`ai-office/app/lib/currentAccount.ts`,
+    `apps/api/ceo.py`의 `CeoAsk.fund_id`). Discord 작성자 매핑표
+    (`apps/api/discord_actor_map.py`)도 같은 이유로 fund를 함께 적어야 했다.
+    `governance.fund_memberships`가 0건이라 서버가 알 방법이 없었기 때문이고,
+    2026-08-18 seed로 소유 관계가 채워지면서 조회가 가능해졌다.
+
+    ## 왜 단수(`/fund`)인가
+
+    호출자가 원하는 건 "이 사용자의 Fund 하나"다. 여러 개면 어느 것의 Mandate로
+    판단할지가 모호하므로 **임의로 고르지 않고 409로 닫는다** -
+    `GET .../mandates/by-fund/{fund_id}/current`와 같은 규약이다. 목록이 필요한
+    화면이 생기면 그때 별도 복수형 경로를 만든다.
+
+    ## 상태 코드
+
+    | 상황 | 응답 |
+    |---|---|
+    | 소유 Fund 1개 | 200 `{"user_id", "fund_id"}` |
+    | 0개 | 404 - "이 사용자는 아직 Fund가 없다"가 정확한 사실이다 |
+    | 2개 이상 | 409 - 모호. 임의 선택 금지 |
+    | Repository가 역참조 미지원(구형 Prototype) | 503 - fail-closed |
+    """
+    lookup = getattr(_mandate_repo, "fund_ids_for_user", None)
+    if not callable(lookup):
+        # 조용히 빈 값을 주면 호출자는 "Fund 없음"과 "조회 불가"를 구분할 수 없다.
+        raise HTTPException(status_code=503, detail="user_fund_lookup_unavailable")
+    fund_ids = lookup(user_id)
+    if not fund_ids:
+        raise HTTPException(
+            status_code=404, detail=f"user_id={user_id}에 연결된 Fund가 없습니다"
+        )
+    if len(fund_ids) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"user_id={user_id}가 소유한 Fund가 {len(fund_ids)}개라 단일 조회가 "
+                f"모호합니다: {fund_ids}"
+            ),
+        )
+    return {"user_id": user_id, "fund_id": fund_ids[0]}
+
+
 # --- 2.4 Mandate 온보딩 챗봇 제안 (mandate_assistant.py) ----------------------------
 #
 # USER_INPUT_API_SPEC.md 2.4. Stateless - 이 endpoint 는 governance.mandate_versions나
@@ -2098,6 +2150,14 @@ if __name__ == "__main__":
     _mandate_repo.set_fund_id("m1b", "f1")
     r5e = client.get("/governance/v1/mandates/by-fund/f1/current")
     assert r5e.status_code == 409, r5e.text
+
+    # 4b. user -> fund 역참조. In-Memory Repository는 `fund_ids_for_user`가 없으므로
+    # **503으로 닫힌다** - 조용히 404("Fund 없음")를 주면 호출자가 "이 사용자는
+    # Fund가 없다"와 "이 저장소는 역참조를 못 한다"를 구분할 수 없다. Postgres
+    # Repository를 쓰면 governance.fund_memberships를 실제로 읽는다.
+    r5f = client.get("/governance/v1/users/u1/fund")
+    assert r5f.status_code == 503, r5f.text
+    assert r5f.json()["detail"] == "user_fund_lookup_unavailable", r5f.text
 
     # 5. Report 조립 - 필수 Section 없으면 FAILED.
     r6 = client.post("/reporting/v1/reports", json={

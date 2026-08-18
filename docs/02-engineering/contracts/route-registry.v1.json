@@ -1005,6 +1005,10 @@
           "path": "/ui/investor-profiles/current"
         },
         {
+          "method": "GET",
+          "path": "/ui/portfolio/live"
+        },
+        {
           "method": "POST",
           "path": "/ui/portfolio-recommendations"
         },

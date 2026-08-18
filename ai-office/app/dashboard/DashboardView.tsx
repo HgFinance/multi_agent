@@ -4,9 +4,11 @@ import { useMemo } from "react";
 import { COMPANY } from "../../company.config";
 import { Company } from "../game/sim";
 import { STAFF } from "../game/staff";
-import PortfolioSnapshotPanel from "../components/PortfolioSnapshotPanel";
+import LivePortfolioPanel from "../components/LivePortfolioPanel";
 import { CeoControlRoomChat } from "./CeoControlRoomChat";
+import { MarketRankingCard } from "./MarketRankingCard";
 import { PanelBar } from "./PanelBar";
+import { TodayTradingSummaryCard } from "./TodayTradingSummaryCard";
 
 /**
  * 대표 Dashboard.
@@ -52,10 +54,14 @@ export default function DashboardView() {
           </span>
         </section>
 
-        {/* ── CEO Control Room / Portfolio Snapshot ─────── */}
+        {/* ── CEO Control Room / 실시간 포트폴리오 ───────── */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-gutter items-start">
-          <CeoControlRoomChat />
-          <PortfolioSnapshotPanel />
+          <div className="flex min-w-0 flex-col gap-gutter">
+            <CeoControlRoomChat />
+            <TodayTradingSummaryCard />
+            <MarketRankingCard />
+          </div>
+          <LivePortfolioPanel />
         </div>
 
         {/* ── 오늘 업무 요약 ────────────────────────────── */}

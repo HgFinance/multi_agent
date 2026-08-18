@@ -40,7 +40,7 @@
 
 1. **이 저장소에는 자체 에이전트 루프가 없다.** 에이전트 세션·칸반 보드·워커 스폰은 전부 외부 오픈소스 **NousResearch `hermes-agent` CLI**가 소유한다. 저장소가 기여하는 것은 그 주변의 (a) 루트 카드를 만드는 FastAPI BFF, (b) 카드 본문에 심는 workflow-scope 계약, (c) 종료 이벤트에 반응하는 결정론적 supervisor, (d) 죽은 부모 카드를 강제 종료하는 watchdog이다 (`orchestration/adapters/ceo_supervisor.py:1-7`).
 2. **부서 간 계약의 실체는 HTTP가 아니라 DB 행이다.** 리서치→퀀트 핸드오프는 `research.experiment_proposals` → `quant.hypotheses` → `research.experiment_outcomes`라는 세 테이블의 상태 전이이고 (§6.3), 체결→회계는 `execution.outbox` → Redis 스트림 → 원장 분개다 (§8.4). 칸반 카드는 계약이 아니라 **디스패치 수단**이다.
-3. **LLM은 3계층으로 분리돼 있다.** 부서장(Hermes head) = OpenAI Codex `gpt-5.6-luna`, 대안 경로 = 호스트 프록시 경유 Claude, 직원 워커(LangGraph) = Ollama `qwen3:1.7b`(개발) 또는 vLLM `qwen2.5-14b-instruct-fp8`(AWS GPU). 백테스트 판정·리스크 게이트·QA 판정은 **LLM이 아니라 결정론적 코드**다.
+3. **LLM은 3계층으로 분리돼 있다.** 부서장(Hermes head) = OpenAI Codex `gpt-5.6-luna`, 대안 경로 = 호스트 프록시 경유 Claude, 직원 워커(LangGraph) = Ollama `qwen3:1.7b`(개발) 또는 vLLM `qwen2.5-14b-instruct-awq`(AWS GPU). 백테스트 판정·리스크 게이트·QA 판정은 **LLM이 아니라 결정론적 코드**다.
 
 ---
 
@@ -236,12 +236,12 @@ Hermes는 이 저장소의 코드가 아니다. 업스트림 **NousResearch `her
 |---|---|---|---|
 | 부서장 (Hermes head) | `openai-codex` | `gpt-5.6-luna` (`https://chatgpt.com/backend-api/codex`) | 8개 프로필 전부, 예: `departments/00-ceo-office/hermes/config.yaml:8-11` |
 | 부서장 대안 | `anthropic-claude-code` | sonnet/opus/haiku 별칭 | `docker-compose.claude.yml:28-41` + 호스트 프록시 `scripts/claude_code_proxy.py` (`hermes → host.docker.internal:8787 → claude -p`). `ANTHROPIC_API_KEY`는 **의도적으로 미주입** — 종량 과금 방지 (`claude.yml:19-24`) |
-| 직원 워커 (LangGraph) | `ollama` (dev) / `vllm-openai` (AWS) | `qwen3:1.7b` / `qwen2.5-14b-instruct-fp8` | `departments/worker_model_gateway.py:163-201` — `WORKER_MODEL_BASE_URL` 유무로 분기 |
+| 직원 워커 (LangGraph) | `ollama` (dev) / `vllm-openai` (AWS) | `qwen3:1.7b` / `qwen2.5-14b-instruct-awq` | `departments/worker_model_gateway.py:163-201` — `WORKER_MODEL_BASE_URL` 유무로 분기 |
 
 프로바이더는 compose에 하드코딩하지 않고 `/opt/data/config.yaml`의 `provider:`와 `auth.json`이 결정한다 (`docker-compose.yml:708-711`).
 
 **모델 플레인 (GPU 오버레이)** — `docker-compose.model.yml`:
-- vLLM `vllm/vllm-openai:latest`, `127.0.0.1:8000` 루프백 전용, `--model /models/Qwen2.5-14B-Instruct-FP8-dynamic --served-model-name qwen2.5-14b-instruct-fp8 --max-model-len 16384 --gpu-memory-utilization 0.90 --kv-cache-dtype fp8 --enable-lora --max-loras 4` (`:49-76`), `HF_HUB_OFFLINE=1` (28GB 무단 다운로드 방지), healthcheck start_period 600s.
+- vLLM `vllm/vllm-openai:latest`, `127.0.0.1:8000` 루프백 전용, `--model /models/Qwen2.5-14B-Instruct-AWQ --served-model-name qwen2.5-14b-instruct-awq --max-model-len 8192 --gpu-memory-utilization 0.85 --kv-cache-dtype fp8 --enable-lora --max-loras 4` (`:49-76`), `HF_HUB_OFFLINE=1` (28GB 무단 다운로드 방지), healthcheck start_period 600s.
 - 모델 준비 스크립트: `scripts/model_plane/fetch_base_model.sh` (S3→EBS, RedHatAI FP8 사전 양자화 체크포인트), `quantize_fp8.py` (llm-compressor, 파이프라인 검증용 1.5B), `model_manifest.py` (파일별 sha256 + 복합 digest).
 - ⚠️ `WORKER_MODEL_*`/`VLLM_*`/`HGF_MODEL_DIR`는 `.env`/.env.example 어디에도 없다 — 오버레이를 잊으면 **조용히 Ollama 1.7b + 8초 타임아웃으로 강등**된다. LoRA 어댑터는 레지스트리(`departments/01-research/config/worker_model_registry.json`)에 `enabled`가 하나도 없어 Multi-LoRA 장치 전체가 현재 무의미.
 

@@ -1,8 +1,34 @@
 # Personal Hedge Fund Agent
 
+> **Documentation portal:** 이 문서는 링크와 문서 역할만 안내한다. 현재
+> 아키텍처의 기준은 [CURRENT_PROJECT_ARCHITECTURE.md](CURRENT_PROJECT_ARCHITECTURE.md),
+> 구현 상태 표는 [PROJECT_IMPLEMENTATION_STATUS.md](PROJECT_IMPLEMENTATION_STATUS.md),
+> 상세 실행 계약은
+> [FINAL_RUNTIME_ARCHITECTURE.md](02-engineering/FINAL_RUNTIME_ARCHITECTURE.md)다.
+> `origin/main`과 현재 branch가 다르면 canonical current-state 문서의 source
+> audit를 우선한다.
+
+## Canonical documentation hierarchy
+
+| Document | Role |
+|---|---|
+| [Current Architecture](CURRENT_PROJECT_ARCHITECTURE.md) | 현재 구조와 source audit |
+| [Implementation Status](PROJECT_IMPLEMENTATION_STATUS.md) | 구현/검증/계획 상태 board |
+| [Final Runtime Architecture](02-engineering/FINAL_RUNTIME_ARCHITECTURE.md) | Hermes·worker·runner·gateway·gate 실행 계약 |
+| [Master Plan](HEDGE_FUND_MASTER_PLAN.md) | target state / long-term plan |
+| [Worker Role Boundaries](02-engineering/WORKER_ROLE_BOUNDARIES.md) | worker 권한과 책임의 세부 기준 |
+| [Contracts](02-engineering/contracts/README.md) | schema와 handoff 계약 |
+
+아래의 날짜가 붙은 개요·실행 감사·roadmap은 historical 또는 planning
+자료일 수 있다. 현재 구현 여부를 판단할 때는 위 canonical 문서와 실제
+config/code/test evidence를 먼저 확인한다.
+
 전체 부서 실행 계층은 [Department Worker Graph Architecture](02-engineering/DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)를 따른다.
 
-> 전 종목을 실시간으로 감시하고, 투자 전략을 발굴·검증·배포하며, 위험 한도 안에서 Paper Trading까지 수행하는 개인형 멀티 에이전트 헤지펀드 시스템
+> HgFinance는 전 종목 모니터링, 투자 전략 연구·검증, 위험 한도 안의 Paper
+> Trading을 목표로 하는 개인형 멀티 에이전트 금융 시스템이다. 현재 구현 상태는
+> 아키텍처와 status board의 evidence를 기준으로 판단하며, 제품 목표를 운영 완료로
+> 해석하지 않는다.
 
 [Current Architecture](CURRENT_PROJECT_ARCHITECTURE.md) · [Master Plan](HEDGE_FUND_MASTER_PLAN.md) · [Execution Status v2.2](PROJECT_IMPLEMENTATION_STATUS.md) · [Advancement Roadmap](01-product/WHOLE_SYSTEM_ADVANCEMENT_ROADMAP.md) · [Research-Quant Framework](02-engineering/RESEARCH_QUANT_AGENTIC_FRAMEWORK.md) · [Research Output Strategy](02-engineering/RESEARCH_OUTPUT_ADVANCEMENT_STRATEGY.md) · [Investment Doctrine Model Factory](02-engineering/INVESTMENT_DOCTRINE_MODEL_FACTORY.md) · [Core Plan](01-product/HEDGE_FUND_CORE_PLAN.md) · [Competitive Analysis](01-product/MULTI_AGENT_TRADING_COMPETITIVE_ANALYSIS.md) · [Feature Backlog](02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md) · [Backend/Docker](02-engineering/DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md) · [Runtime Contracts](02-engineering/contracts/README.md) · [Hermes Docker Runbook](02-engineering/HERMES_DOCKER_RUNBOOK.md) · [AI Office Frontend](02-engineering/AI_OFFICE_FRONTEND_PLAN.md) · [Investment Case](01-product/MINIMUM_SERVICE_UNIT_SPEC.md) · [Tech Stack](02-engineering/TECH_STACK_DECISIONS.md) · [Repository Structure](02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md) · [Database Schema](database/README.md) · [LS Open API](06-integrations/ls-openapi/README.md) · [OpenDART Open API](06-integrations/opendart/README.md) · [KRX Open API](06-integrations/krx-openapi/README.md) · [SerpApi](06-integrations/serpapi/README.md)
 

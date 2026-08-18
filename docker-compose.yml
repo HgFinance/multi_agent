@@ -76,6 +76,9 @@ services:
       APP_ENV: ${APP_ENV:-production}
       PORTFOLIO_AUTH_MODE: ${PORTFOLIO_AUTH_MODE:-supabase_jwt}
       PORTFOLIO_AUTH_REQUIRED: ${PORTFOLIO_AUTH_REQUIRED:-true}
+      # Local/test fixture mode must still receive an explicit user/fund/book
+      # grant.  Production Supabase-JWT mode ignores this value.
+      PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: ${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:-[]}
       # This stack includes shared Kanban, dispatcher, Trading Hermes and the
       # authenticated MCP bridge, so the CEO natural-language PAPER lane may
       # be admitted. Deployment bundles without that runtime must set false.
@@ -122,6 +125,17 @@ services:
       QA_API_URL: ${QA_API_URL:-http://audit-api:8000}
       KANBAN_ATTACH_ROOT: /opt/kanban/kanban/attachments
       KANBAN_WORKSPACE_ROOT: /opt/kanban/kanban/workspaces
+      # Discord 연동(2026-08-18). 셋 다 비어 있으면 관련 기능만 조용히 꺼지고
+      # CEO 질의 자체는 그대로 동작한다 - Discord 장애/미설정이 질의 접수를
+      # 막지 않는다는 정책(apps/api/discord_mirror.py 머리말).
+      #   토큰: 읽기(apps/api/discord_read.py) + 미러 게시(discord_mirror.py) 공용.
+      #         값은 .env에만 두고 이 파일·프론트 번들·이벤트 payload에 넣지 않는다.
+      # 미러 게시 opt-in. 기본 꺼짐 - 토큰이 환경에 있다는 이유만으로 팀 채널에
+      # 글을 쓰지 않는다(2026-08-18: 테스트가 실제 채널에 글을 쓴 사고).
+      DISCORD_MIRROR_ENABLED: ${DISCORD_MIRROR_ENABLED:-false}
+      DISCORD_BOT_TOKEN_CEO: ${DISCORD_BOT_TOKEN_CEO:-}
+      DISCORD_CEO_CHANNEL_ID: ${DISCORD_CEO_CHANNEL_ID:-}
+      DISCORD_ACTOR_MAP: ${DISCORD_ACTOR_MAP:-}
     volumes:
       - portfolio_runtime_data:/var/lib/portfolio
       # BFF uses Hermes CLI only for the repository-owned Kanban create
@@ -1218,12 +1232,9 @@ services:
     # Kanban dispatcher만 실행하므로 per-profile gateway를 supervise하지 않는다.
     command:
       ["kanban", "daemon", "--force", "--interval", "${KANBAN_DISPATCH_INTERVAL:-60}", "--pidfile", "/opt/data/shared-kanban/dispatcher.pid", "--verbose"]
-    # ▶ uid 1000 고정 (2026-08-14 장애 실측). 이미지 기본 사용자(uid 10000)로
-    #   돌면 데몬이 기동 시 /opt/data 를 10000·700 으로 재소유해 버려서,
-    #   uid 1000 인 부서 게이트웨이·CLI 경유 카드 생성이 전부
-    #   PermissionError 로 죽었다(21:13Z 공장 전면 장애, chown 복구 후 21:53Z
-    #   재발로 자기-재소유 확인). 전 컨테이너의 HERMES_UID=1000 과 정합시킨다.
-    user: "1000:1000"
+    # Hermes 최신 s6 이미지에서는 Docker `user:` 고정을 사용하지 않는다.
+    # 컨테이너는 root로 bootstrap한 뒤 HERMES_UID/HERMES_GID=1000으로
+    # runtime user와 /opt/data 소유권을 host UID/GID에 맞춘다.
     volumes:
       - /home/ubuntu/.hermes:/opt/data
       # 저장소 skills/ **전체**를 건다. finance 만 걸면 다른 범주의 스킬을
@@ -1244,6 +1255,8 @@ services:
       - ./departments/04-quant-backtest:/app/departments/04-quant-backtest
       - ./quant-data:/app/quant-data
     environment:
+      PYTHONPATH: /app/repo/deploy/hermes-dispatch-guard
+      HGFINANCE_DISPATCH_GUARD: "1"
       HERMES_HOME: /opt/data
       HERMES_UID: 1000
       HERMES_GID: 1000

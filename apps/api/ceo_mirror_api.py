@@ -26,6 +26,9 @@ try:
     from .ceo import CeoAsk
     from .ceo_schemas import CeoQueryAcceptedResponse
     from .current_user import current_user, require_fund_membership
+    from .discord_actor_map import resolve as resolve_discord_actor
+    from .discord_mirror import post_question
+    from .governance_client import fetch_fund_id_by_user
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
     from ceo_mirror import (  # type: ignore[no-redef]
         CanonicalIngress,
@@ -43,6 +46,9 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
     from ceo import CeoAsk  # type: ignore[no-redef]
     from ceo_schemas import CeoQueryAcceptedResponse  # type: ignore[no-redef]
     from current_user import current_user, require_fund_membership  # type: ignore[no-redef]
+    from discord_actor_map import resolve as resolve_discord_actor  # type: ignore[no-redef]
+    from discord_mirror import post_question  # type: ignore[no-redef]
+    from governance_client import fetch_fund_id_by_user  # type: ignore[no-redef]
 
 
 router = APIRouter(prefix="/ui/ceo", tags=["ceo-mirror"])
@@ -92,14 +98,69 @@ def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
         if request.actor_type == "user" and request.actor_id not in _ANONYMOUS_ACTOR_IDS
         else None
     )
+    fund_id = request.fund_id
+
+    # Discord로 들어온 요청의 `actor_id`는 **Discord 작성자 id**다 - 테스트 계정
+    # UUID가 아니다. 그대로 두면 `requested_by=`에 Discord 숫자 id가 박혀 계정별
+    # 이력 필터가 영영 비고, `fund_id`가 없어 Mandate 스냅샷도 안 붙는다
+    # (2026-08-18 이전 Discord 질의의 상태).
+    #
+    # 매핑이 없으면 **아무것도 바꾸지 않는다.** 임의의 기본 계정으로 채우면
+    # 사용자가 정하지 않은 한도가 판단 근거가 된다(개발 원칙 9).
+    if request.source == "discord" and request.actor_type == "user":
+        binding = resolve_discord_actor(request.actor_id)
+        if binding is not None:
+            owner_id = binding.user_id
+            # 요청이 이미 fund를 실어 보냈으면 그쪽이 우선한다 - 매핑은 fund를
+            # 모르는 경로를 위한 기본값이지, 명시된 값을 덮어쓰는 규칙이 아니다.
+            fund_id = fund_id or binding.fund_id
+
+    # `user_id -> fund_id` 역참조(2026-08-18). `governance.fund_memberships`가
+    # 채워지면서 서버가 직접 풀 수 있게 됐다 - 그 전까지는 프론트엔드가 계정과
+    # fund를 쌍으로 하드코딩해 보내는 것 말고 방법이 없었다.
+    #
+    # 명시된 `fund_id`가 있으면 조회하지 않는다: 호출자가 지정한 Fund를 서버
+    # 추론으로 덮으면, 화면이 보고 있는 Fund와 판단 근거가 달라진다.
+    if owner_id and not fund_id:
+        fund_id = fetch_fund_id_by_user(owner_id)
+
+    # Discord 발송 좌표. `deliver()`가 channel_id와 message_id를 **둘 다** 요구한다.
+    #
+    # 출처에 따라 좌표의 출처가 다르다:
+    #   - Discord: 사용자가 쓴 원본이 이미 채널에 있다. **다시 게시하지 않는다** -
+    #     그러면 원본 옆에 봇이 같은 내용을 한 번 더 올린다. 어댑터가 준 좌표를
+    #     그대로 쓰면 답변이 사용자가 쓴 그 메시지에 붙는다.
+    #   - Web: 채널에 아무것도 없다. 질의를 미러 게시하고 **그 게시물의** 좌표를 쓴다.
+    #
+    # 게시 판단이 여기 있는 이유는 `ceo.ceo_query`가 출처를 모르기 때문이다 -
+    # 거기서 무조건 게시하면 Discord 요청까지 중복 게시되고, 그 함수를 부르는
+    # 단위 테스트가 전부 실제 채널로 나간다(2026-08-18 실측).
+    if request.source == "discord":
+        discord_channel_id = request.discord_channel_id
+        discord_message_id = request.discord_message_id
+        discord_guild_id = request.discord_guild_id
+        # Discord 원본에는 아직 스레드가 없다 - Hermes 세션이 나중에 만든다.
+        # 없는 값을 지어내지 않는다.
+        discord_thread_id = None
+    else:
+        mirror = post_question(request.query, asked_by=owner_id)
+        discord_channel_id = mirror.channel_id if mirror else None
+        discord_message_id = mirror.message_id if mirror else None
+        discord_guild_id = mirror.guild_id if mirror else None
+        discord_thread_id = mirror.thread_id if mirror else None
+
     return ceo.ceo_query(
         CeoAsk(
             query=request.query,
             request_id=request.request_id,
-            fund_id=request.fund_id,
+            fund_id=fund_id,
             book_id=request.book_id,
         ),
         owner_id=owner_id,
+        discord_channel_id=discord_channel_id,
+        discord_message_id=discord_message_id,
+        discord_guild_id=discord_guild_id,
+        discord_thread_id=discord_thread_id,
     )
 
 

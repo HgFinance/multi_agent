@@ -70,8 +70,13 @@ export function clearAuthorizedFunds(): void {
 }
 
 export function currentFundId(): string | undefined {
+  // Once `/ui/me` has projected the authorized funds, that server-backed
+  // selection is canonical even in local fixture mode.  The hard-coded test
+  // account fund is only an offline bootstrap fallback; preferring it here
+  // could route a PAPER command to a fund that has no authorized trading book.
+  if (activeFundId) return activeFundId;
   if (fixtureAuthEnabled) return readStoredAccount().fundId ?? undefined;
-  return activeFundId ?? undefined;
+  return undefined;
 }
 
 export function readCurrentFundId(): string {

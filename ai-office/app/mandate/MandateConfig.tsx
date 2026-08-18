@@ -206,16 +206,11 @@ function FieldLabel({ children, hint }: { children: React.ReactNode; hint?: stri
 }
 
 /**
- * 계정 전환을 구독하고, **`key`로 폼을 통째로 다시 마운트한다.**
+ * 인증된 사용자와 서버가 허용한 활성 Fund를 함께 폼 scope로 사용한다.
  *
- * 계정이 바뀔 때 상태를 손으로 되돌리면(`setDraft(DEFAULT_DRAFT)` 등) 두 가지가
- * 생긴다 - 상태를 하나 추가할 때마다 초기화도 같이 적어야 하고(빠뜨리면 옛
- * 사용자 값이 남는다), effect 안에서 동기 `setState`를 하게 돼 렌더가 한 번 더
- * 돈다. `key`를 바꾸면 React가 알아서 전부 버린다.
- *
- * `TopNav`가 같은 탭에서 계정을 바꾸면 `ACCOUNT_CHANGED_EVENT`가, 다른 탭이면
- * `storage`가 날아온다 - `currentAccount.ts`가 둘 다 듣는 구독을 이미 갖고 있어
- * 그대로 쓴다.
+ * 어느 한쪽이 바뀌면 `key`가 달라져 React가 이전 사용자의 초안·인터뷰 상태를
+ * 통째로 폐기한다. 로그인만 있고 Fund membership이 없으면 임의 Fund를 추측하지
+ * 않고 안내 화면에서 멈춘다.
  */
 export default function MandateConfig() {
   const auth = useAuth();
@@ -243,6 +238,8 @@ function MandateConfigForm({ userId, fundId }: { userId: string; fundId: string 
   const [step, setStep] = useState(0);
   const [notice, setNotice] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  /** 저장된 Mandate·적합성 프로필을 불러오는 동안 폼을 가린다. */
+  const [hydrating, setHydrating] = useState(true);
   /** 어시스턴트 응답 대기 중. 입력창을 잠가 같은 질문에 두 번 답하지 않게 한다. */
   const [busy, setBusy] = useState(false);
   /** 서버가 정한 실질 위험 등급. **화면이 재계산하지 않는다**(API_SPEC 2.3). */
@@ -251,11 +248,6 @@ function MandateConfigForm({ userId, fundId }: { userId: string; fundId: string 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const resetDialogRef = useRef<HTMLDialogElement>(null);
 
-  /**
-   * 어느 계정으로 보고 있는지. `TopNav`가 같은 탭에서 계정을 바꾸면
-   * `ACCOUNT_CHANGED_EVENT`가 날아오고, 다른 탭이면 `storage`가 날아온다 -
-   * `currentAccount.ts`가 둘 다 듣는 구독을 이미 갖고 있어 그대로 쓴다.
-   */
   /** 인터뷰가 끝나야 투자 목표 입력창이 열린다. 파생값이라 따로 상태를 두지 않는다. */
   const locked = step < INTERVIEW.length;
   const violations = useMemo(() => validateDraft(draft), [draft]);
@@ -316,52 +308,60 @@ function MandateConfigForm({ userId, fundId }: { userId: string; fundId: string 
   useEffect(() => {
     let cancelled = false;
     async function hydrate() {
-      let next = DEFAULT_DRAFT;
-      let hasStoredMandate = false;
-
       try {
-        const stored = await loadMandateForFund(fundId);
+        let next = DEFAULT_DRAFT;
+        let hasStoredMandate = false;
+
+        // Mandate와 적합성 프로필은 독립된 조회다. 최신 UI의 병렬 hydration을
+        // 유지하되, 인증된 현재 사용자와 활성 Fund만 조회 범위로 사용한다.
+        const [mandateResult, profileResult] = await Promise.allSettled([
+          loadMandateForFund(fundId),
+          loadInvestorProfile(userId, fundId),
+        ]);
         if (cancelled) return;
+
+        if (mandateResult.status === "rejected") {
+          setNotice(
+            mandateResult.reason instanceof Error
+              ? mandateResult.reason.message
+              : "저장된 지침을 불러오지 못했습니다.",
+          );
+          return;
+        }
+
+        const stored = mandateResult.value;
         if (stored?.policy) {
           next = policyToDraft(next, stored.policy, stored.objectiveText);
           hasStoredMandate = true;
         }
-      } catch (cause) {
-        if (!cancelled) {
-          setNotice(cause instanceof Error ? cause.message : "저장된 지침을 불러오지 못했습니다.");
-        }
-        return;
-      }
 
       // 성향·경험·기간·유동성은 정책(`MandatePolicy`)에 없다. 적합성 프로필에서
       // 따로 채운다 - 없으면(404) 아직 프로필을 안 만든 사용자다.
-      let profileMissing = false;
-      try {
-        const profile = await loadInvestorProfile(userId, fundId);
-        if (cancelled) return;
-        if (profile) {
-          next = {
-            ...next,
-            riskProfile: profile.riskProfile,
-            experience: profile.experience,
-            investmentHorizonYears: profile.investmentHorizonYears,
-            liquidityNeed: profile.liquidityNeed,
-          };
-          setRiskBand(profile.effectiveRiskReason || profile.effectiveRiskBand);
+        let profileMissing = false;
+        if (profileResult.status === "fulfilled") {
+          const profile = profileResult.value;
+          if (profile) {
+            next = {
+              ...next,
+              riskProfile: profile.riskProfile,
+              experience: profile.experience,
+              investmentHorizonYears: profile.investmentHorizonYears,
+              liquidityNeed: profile.liquidityNeed,
+            };
+            setRiskBand(profile.effectiveRiskReason || profile.effectiveRiskBand);
+          } else {
+            profileMissing = true;
+          }
         } else {
-          profileMissing = true;
+          // 조용히 넘기지 않는다. 이걸 삼키면 위험 성향·투자 경험만 기본값으로
+          // 남고 사용자는 "일부만 안 불러와진다"고만 느낀다 - 원인을 볼 방법이 없다.
+          setNotice(
+            `위험 성향·투자 경험을 불러오지 못해 기본값으로 표시합니다: ${
+              profileResult.reason instanceof Error ? profileResult.reason.message : "적합성 프로필 조회 실패"
+            }`,
+          );
         }
-      } catch (cause) {
         if (cancelled) return;
-        // 조용히 넘기지 않는다. 이걸 삼키면 위험 성향·투자 경험만 기본값으로
-        // 남고 사용자는 "일부만 안 불러와진다"고만 느낀다 - 원인을 볼 방법이 없다.
-        setNotice(
-          `위험 성향·투자 경험을 불러오지 못해 기본값으로 표시합니다: ${
-            cause instanceof Error ? cause.message : "적합성 프로필 조회 실패"
-          }`,
-        );
-      }
-      if (cancelled) return;
 
       // 저장하지 않은 임시 초안은 **서버 저장본 위에** 얹는다(그쪽 주석 참고).
       // 사용자가 고친 항목만 이기고, 안 고친 항목은 서버 값이 남는다.
@@ -400,6 +400,9 @@ function MandateConfigForm({ userId, fundId }: { userId: string; fundId: string 
               }]
             : []),
         ]);
+      }
+      } finally {
+        if (!cancelled) setHydrating(false);
       }
     }
 
@@ -628,13 +631,23 @@ function MandateConfigForm({ userId, fundId }: { userId: string; fundId: string 
                 거버넌스 버전은 제출 후 생성돼요.
               </p>
             </div>
-            <div className="flex items-center gap-2 bg-surface-container-high px-3 py-1 rounded-full text-xs font-medium text-secondary shrink-0">
-              <span className="w-2 h-2 rounded-full bg-tertiary-fixed-dim animate-pulse" aria-hidden="true" />
-              CONNECTING
+            <div
+              className="flex items-center gap-2 bg-surface-container-high px-3 py-1 rounded-full text-xs font-medium text-secondary shrink-0"
+              role="status"
+              aria-live="polite"
+            >
+              <span className={`w-2 h-2 rounded-full ${hydrating ? "bg-tertiary-fixed-dim animate-pulse" : "bg-secondary"}`} aria-hidden="true" />
+              {hydrating ? "CONNECTING" : "CONNECTED"}
             </div>
           </header>
 
-          <div className="flex-1 min-h-0 bg-surface-container-lowest border border-outline-variant rounded-lg flex flex-col overflow-hidden shadow-sm">
+          <div className="relative flex-1 min-h-0 bg-surface-container-lowest border border-outline-variant rounded-lg flex flex-col overflow-hidden shadow-sm">
+          {hydrating ? (
+            <div className="absolute inset-0 z-20 flex flex-col items-center justify-start gap-3 pt-8 bg-surface-container-lowest/85 backdrop-blur-sm" role="status" aria-live="polite">
+              <span className="material-symbols-outlined animate-spin text-3xl text-primary" aria-hidden="true">progress_activity</span>
+              <p className="text-body-sm font-medium text-on-surface">저장된 지침을 불러오는 중입니다…</p>
+            </div>
+          ) : null}
           <div className="p-6 space-y-10 overflow-y-auto">
             {/* 1. 목표와 위험 성향 */}
             <section>

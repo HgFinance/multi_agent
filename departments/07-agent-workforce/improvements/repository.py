@@ -100,6 +100,26 @@ class PostgresImprovementRepository(ImprovementRepository):
         finally:
             self._pool.putconn(conn)
 
+    def list_candidates(self) -> list[ImprovementCandidate]:
+        """현재 improvement candidate 원장의 전체 스냅샷을 반환한다."""
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    select candidate_id, target_type, target_ref, target_current_version,
+                           rollback_target_version, author, evidence_ids, expected_effect,
+                           risk_class, status
+                    from workforce.improvement_candidates
+                    order by candidate_id
+                    """
+                )
+                rows = cur.fetchall()
+            conn.commit()
+            return [self._to_candidate(row) for row in rows]
+        finally:
+            self._pool.putconn(conn)
+
     def save_candidate(
         self,
         candidate: ImprovementCandidate,

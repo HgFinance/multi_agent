@@ -398,10 +398,37 @@ class WorkflowScopeReferences:
 def build_mandate_snapshot_block(mandate: Mapping[str, Any] | None) -> str:
     """`GET .../mandates/.../current` 응답을 root body용 스냅샷 블록으로 만든다.
 
-    `mandate`가 `None`이거나 아직 활성 Version이 없으면(`current_version=0`) 빈
-    문자열을 준다 - **없는 한도를 지어내지 않는다.** 그 경우 부서는 Mandate 블록을
-    못 찾고, 그건 "이 사용자는 아직 Mandate가 없다"는 정확한 사실이다. 기본값을
-    채워 넣으면 사용자가 정하지 않은 한도가 판단 근거로 쓰인다(개발 원칙 9).
+    `mandate`가 `None`이거나 실제 한도(`policy.risk_bounds`)가 없으면 빈 문자열을
+    준다 - **없는 한도를 지어내지 않는다.** 그 경우 부서는 Mandate 블록을 못 찾고,
+    그건 "이 사용자는 아직 Mandate가 없다"는 정확한 사실이다. 기본값을 채워 넣으면
+    사용자가 정하지 않은 한도가 판단 근거로 쓰인다(개발 원칙 9).
+
+    ## ⚠ 2026-08-18 수정: `current_version`으로 판정하지 않는다
+
+    이 함수는 원래 `if not version: return ""`으로 걸렀다. 그런데 프론트엔드의
+    Mandate 저장 경로는 `POST /ui/mandates` + `PUT /ui/mandates/{id}`뿐이고
+    (`ai-office/app/lib/mandateClient.ts`), `POST .../versions`를 부르지 않는다.
+    그래서 사용자가 화면에서 저장한 Mandate는 전부 `mandates.metadata` override로
+    들어가고, `GET .../mandates/{id}/current`의 metadata 경로는
+    **`current_version`을 0으로 박아서 돌려준다**
+    (`departments/00-ceo-office/api/app.py`의 metadata override 분기).
+
+    `0`은 falsy라 위 판정이 항상 참이 됐고, 그 결과 **화면에서 저장한 Mandate는
+    스냅샷이 한 번도 붙지 않았다.** CEO는 사용자 한도를 모른 채 답하고 있었다.
+
+    그래서 판정 기준을 "Version이 있는가"에서 **"실제 한도가 있는가"**로 바꾼다.
+    Version은 이 블록을 나중에 되짚기 위한 식별자이지, 한도의 존재 조건이 아니다.
+
+    ## 버전 없는 스냅샷을 어떻게 표시하나
+
+    metadata override에는 버전 번호가 없다(`content_hash`만 있다). 없는 번호를
+    지어내지 않고 `mandate_version=unversioned`로 적은 뒤,
+    `snapshot_resolvable=false`로 **"이 값은 불변 Version 행으로 되짚을 수 없다"**를
+    명시한다. override는 다음 저장 때 덮어써지므로 `content_hash`가 가리키는 원본이
+    사라지기 때문이다 - 값 자체는 이 Task body에 그대로 얼어 있으니 워크플로 판단
+    기준은 유지되지만(PIT, 개발 원칙 5), 사후 감사에서 원본 대조는 불가능하다.
+    이 한계를 지우려면 화면 저장 경로가 `mandate_versions`에 행을 쌓아야 한다 -
+    별도 안건이고 이 함수가 대신 해결할 수 없다.
 
     한 줄 `key=value` 형태로 쓰는 이유: 부서가 LLM으로 이 블록을 읽으므로 중첩
     JSON보다 평평한 줄이 오독될 여지가 적고, `grep`·정규식으로도 뽑을 수 있다.
@@ -409,18 +436,27 @@ def build_mandate_snapshot_block(mandate: Mapping[str, Any] | None) -> str:
 
     if not mandate:
         return ""
-    version = mandate.get("current_version")
     policy = mandate.get("policy")
-    if not version or not isinstance(policy, Mapping):
-        # Version이 없으면 정책도 없다. 껍데기만 있는 Mandate는 근거가 아니다.
+    if not isinstance(policy, Mapping) or not policy.get("risk_bounds"):
+        # 껍데기만 있는 Mandate는 근거가 아니다. `risk_bounds`가 이 블록의 알맹이라
+        # 그게 없으면 실을 것이 없다.
         return ""
 
+    version = mandate.get("current_version")
+    content_hash = str(mandate.get("content_hash") or "").strip()
+    if not version and not content_hash:
+        # 버전도 해시도 없으면 이 스냅샷을 나중에 무엇으로도 식별할 수 없다.
+        # 값만 실어 보내면 "어디서 온 한도인지 모르는 숫자"가 되므로 싣지 않는다.
+        return ""
+
+    resolvable = bool(version)
     lines = [
         CEO_MANDATE_SNAPSHOT_MARKER,
         "snapshot_policy=frozen_at_request_time",
         f"mandate_id={mandate.get('mandate_id', '')}",
-        f"mandate_version={version}",
-        f"content_hash={mandate.get('content_hash', '')}",
+        f"mandate_version={version if resolvable else 'unversioned'}",
+        f"snapshot_resolvable={'true' if resolvable else 'false'}",
+        f"content_hash={content_hash}",
     ]
     fund_id = mandate.get("fund_id")
     if fund_id:
@@ -565,6 +601,10 @@ def build_root_body(
     mandate: Mapping[str, Any] | None = None,
     requested_by: str | None = None,
     user_paper_order_scope: UserPaperOrderScope | None = None,
+    discord_channel_id: str | None = None,
+    discord_message_id: str | None = None,
+    discord_guild_id: str | None = None,
+    discord_thread_id: str | None = None,
 ) -> str:
     """Build a root body that is unambiguous before the root ID exists.
 
@@ -578,7 +618,21 @@ def build_root_body(
     이력을 서버에서 걸러낼 수 있다. 없으면 줄 자체를 넣지 않는다 - "요청자
     불명"을 임의 기본값으로 채우지 않는다(개발 원칙 9).
 
-    셋 다 선택 인자다 - 기존 호출부는 그대로 동작한다.
+    `user_paper_order_scope`는 인증된 PAPER 주문의 request/Fund/Book 및 원문 해시를
+    root에 고정한다. Discord 상관관계와 독립된 권한 블록이므로 두 값이 함께 있을
+    때도 어느 한쪽이 다른 쪽을 덮어쓰지 않는다.
+
+    `discord_*`(2026-08-18 추가)는 이 질의를 Discord 채널에 미러 게시했을 때 그
+    메시지의 좌표다. 채워지면 `discord_channel_id=` / `discord_message_id=` 줄이
+    실리고, `orchestration/discord_delivery.py`의 `correlation_from_task()`가 그
+    줄을 읽어 부서 진행 상황과 CEO 최종 답변을 **그 메시지에 붙인다.**
+
+    이 줄이 없으면 `deliver()`가 `missing_context`로 조용히 반환한다 - 그게
+    2026-08-18 이전 웹 질의의 상태였다(Discord에 아무것도 안 떴다). 게시에
+    실패했을 때도 줄을 넣지 않는다: 없는 메시지를 가리키면 이후 발송이 엉뚱한
+    곳에 붙거나 dedup 키가 오염된다.
+
+    선택 인자는 전부 기본값이 있다 - 기존 호출부는 그대로 동작한다.
     """
 
     if workflow_mode not in WORKFLOW_MODES:
@@ -589,6 +643,22 @@ def build_root_body(
         if user_paper_order_scope is not None
         else ""
     )
+    # channel과 message는 **둘 다** 있어야 의미가 있다(`deliver()`가 둘 다 요구).
+    # 하나만 싣으면 "좌표가 있는 것처럼 보이는데 발송은 안 되는" 카드가 된다.
+    discord_lines = ""
+    if discord_channel_id and discord_message_id:
+        discord_lines = (
+            f"discord_channel_id={discord_channel_id}\n"
+            f"discord_message_id={discord_message_id}\n"
+        )
+        if discord_guild_id:
+            discord_lines += f"discord_guild_id={discord_guild_id}\n"
+        # 스레드가 있어야 부서 진행 **상세**가 나간다
+        # (`discord_delivery.deliver_to_existing_thread()`는 thread_id가 없으면
+        # `missing_thread`로 조용히 끝난다). 최종 답변은 스레드 없이도
+        # `message_reference` 답글로 나가므로 이 값은 선택이다.
+        if discord_thread_id:
+            discord_lines += f"discord_thread_id={discord_thread_id}" + chr(10)
     return (
         f"{CEO_WORKFLOW_SCOPE_MARKER}\n"
         f"workflow_scope={CEO_WORKFLOW_SCOPE_POLICY}\n"
@@ -597,6 +667,7 @@ def build_root_body(
         f"workflow_mode={workflow_mode}\n"
         f"{requested_by_line}"
         f"{paper_order_block}"
+        f"{discord_lines}"
         "response_plane=primary_results_ready\n"
         "governance_plane=async_qa\n"
         "qa_is_not_synthesis_prerequisite=true\n"

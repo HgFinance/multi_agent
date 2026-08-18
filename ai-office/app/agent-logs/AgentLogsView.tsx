@@ -3,13 +3,13 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import {
   fetchOperations,
-  readableRuntimeMessage,
   subscribeOperationsStream,
   type OperationsDepartment,
   type OperationsView,
 } from "../lib/operationsClient";
 import DepartmentInspector from "./DepartmentInspector";
 import { KANBAN_BASE_URL, resolveKanbanUrl } from "../lib/kanbanUrl";
+import { readDiscordMessages, type DiscordMessage } from "../lib/discordClient";
 
 /**
  * Agent Logs — 페이지 상단(전체 부서 실행 현황).
@@ -52,7 +52,6 @@ function DepartmentCard({
 }) {
   const status = String(department.status).toUpperCase();
   const view = STATUS_VIEW[status] ?? { label: status, tone: "border-outline-variant bg-surface-container text-on-surface-variant" };
-  const message = readableRuntimeMessage(department.status_reason);
 
   return (
     <button
@@ -70,7 +69,9 @@ function DepartmentCard({
           <h3 className="text-body-lg font-body-lg font-bold text-primary mt-1">{department.name}</h3>
           <code className="text-xs text-outline">{department.department_code}</code>
         </div>
-        <span className={`shrink-0 px-2 py-0.5 rounded-full border text-xs font-medium ${view.tone}`}>{view.label}</span>
+        {status !== "OFFLINE" ? (
+          <span className={`shrink-0 px-2 py-0.5 rounded-full border text-xs font-medium ${view.tone}`}>{view.label}</span>
+        ) : null}
       </div>
 
       <div className="flex flex-wrap gap-1.5 text-xs">
@@ -87,10 +88,88 @@ function DepartmentCard({
         </span>
       </div>
 
-      <p className="text-body-sm font-body-sm text-on-surface-variant m-0">{message.summary}</p>
-      {message.action ? <p className="text-xs text-outline m-0">{message.action}</p> : null}
       {/* executor·model·contract 줄은 카드에서 빼고 선택 상세(DepartmentInspector)로 옮겼다. */}
     </button>
+  );
+}
+
+function formatMessageTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("ko-KR", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function summarizeMessage(value: string, limit = 240): string {
+  const compact = value.replace(/<@!?\d+>/g, "@멘션").replace(/\s+/g, " ").trim();
+  if (!compact) return "첨부 또는 임베드만 있는 메시지";
+  return compact.length > limit ? `${compact.slice(0, limit).trimEnd()}…` : compact;
+}
+
+function formatMessageKind(value: string): string {
+  return value.replace(/[_-]+/g, " ").trim() || "runtime event";
+}
+
+function DiscordChat({ department }: { department: string }) {
+  const [messages, setMessages] = useState<DiscordMessage[] | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    readDiscordMessages(department, 50, controller.signal)
+      .then((body) => setMessages(body.messages))
+      .catch((cause: unknown) => {
+        if (controller.signal.aborted) return;
+        setError(cause instanceof Error ? cause.message : "Discord 대화를 불러오지 못했습니다.");
+      });
+    return () => controller.abort();
+  }, [department]);
+
+  if (error) {
+    return (
+      <p
+        role="alert"
+        className="text-body-sm font-body-sm text-on-error-container bg-error-container border border-error/40 rounded px-3 py-2 m-0"
+      >
+        {error}
+      </p>
+    );
+  }
+  if (messages === null) return <p className="text-body-sm font-body-sm text-on-surface-variant m-0">Discord 대화를 불러오는 중입니다…</p>;
+  if (messages.length === 0) return <p className="text-body-sm font-body-sm text-on-surface-variant m-0">아직 표시할 Discord 대화가 없습니다.</p>;
+
+  return (
+    // 카드 한 장이 한 줄을 차지한다. 2열로 쪼개면 좌우 두 카드의 시각이 뒤섞여
+    // 읽는 순서가 사라진다 - 대화는 위에서 아래로 흐르는 것이 읽기 쉽다.
+    <div className="flex flex-col gap-3 max-h-96 overflow-y-auto pr-1">
+      {messages.map((message) => (
+        <article
+          key={message.id}
+          className={`rounded-lg border p-3 ${
+            message.is_department_bot
+              ? "border-primary/30 bg-secondary-container/40"
+              : "border-outline-variant bg-surface-container-low"
+          }`}
+        >
+          {/* 봇·사용자 배지는 두지 않는다. 카드 배경색이 이미 그 구분을 하고 있어
+              같은 사실을 두 번 말하면 정작 읽어야 할 작성자·시각이 묻힌다. */}
+          <div className="min-w-0">
+            <strong className="block truncate text-body-sm font-body-sm text-on-surface">{message.author}</strong>
+            <time className="block text-xs text-outline" dateTime={message.created_at}>
+              {formatMessageTime(message.created_at)}
+            </time>
+          </div>
+          <p className="m-0 mt-3 text-body-sm font-body-sm leading-6 text-on-surface">
+            {summarizeMessage(message.text)}
+          </p>
+        </article>
+      ))}
+    </div>
   );
 }
 
@@ -150,6 +229,7 @@ export default function AgentLogsView() {
     () => departments.find((item) => item.department_code === selectedCode) ?? null,
     [departments, selectedCode],
   );
+  const discordDepartment = selected ?? departments[0] ?? null;
 
   const metrics = [
     { label: "부서", value: departments.length || 8 },
@@ -290,29 +370,55 @@ export default function AgentLogsView() {
         </span>
       </section>
 
-      <section className="bg-surface-container-lowest border border-outline-variant rounded-lg p-4 flex flex-col gap-3" aria-label="Recent agent logs">
-        <div className="flex justify-between items-center gap-3 flex-wrap">
-          <h2 className="text-title-md font-title-md text-primary m-0">Recent agent logs</h2>
-          <span className="text-xs text-on-surface-variant">{data?.messages.length ?? 0} runtime events</span>
-        </div>
+      {/* 접기는 native `<details>`가 한다 - 열림 상태·키보드·스크린리더가 전부 딸려
+          온다. `<details>`에 flex를 주면 닫혀도 내용이 보이므로 레이아웃은 안쪽
+          div가 맡는다. `<section aria-label>`은 landmark라 남겨 둔다. */}
+      <section className="bg-surface-container-lowest border border-outline-variant rounded-lg p-4" aria-label="부서 내부 메시지">
+       <details className="group">
+        <summary className="flex justify-between items-center gap-3 flex-wrap cursor-pointer list-none [&::-webkit-details-marker]:hidden">
+          <h2 className="text-title-md font-title-md text-primary m-0 flex items-center gap-1.5">
+            <span
+              className="material-symbols-outlined text-[18px] text-on-surface-variant transition-transform group-open:rotate-180"
+              aria-hidden="true"
+            >
+              expand_more
+            </span>
+            부서 내부 메시지
+          </h2>
+          <span className="text-xs text-on-surface-variant">전체 {data?.messages.length ?? 0}개 메시지</span>
+        </summary>
+        <div className="flex flex-col gap-3 mt-3">
         {data?.messages.length ? (
           <ol className="flex flex-col gap-2 m-0 p-0 list-none">
             {[...data.messages].slice(-8).reverse().map((message) => (
-              <li key={message.id} className="border border-outline-variant rounded-md px-3 py-2">
-                <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-on-surface-variant">
-                  <span className="font-data-mono">{new Date(message.occurred_at).toLocaleTimeString("ko-KR")}</span>
-                  <span>{message.kind}</span>
-                  <span>{message.department_code ?? "system"}</span>
+              <li key={message.id} className="rounded-lg border border-outline-variant bg-surface-container-low p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-on-surface-variant">
+                    <span className="rounded-full border border-outline-variant bg-surface-container-lowest px-2 py-0.5 font-semibold">
+                      {formatMessageKind(message.kind)}
+                    </span>
+                    <span>{message.department_code ?? "공용"}</span>
+                  </div>
+                  <time className="text-xs text-outline" dateTime={message.occurred_at}>
+                    {formatMessageTime(message.occurred_at)}
+                  </time>
                 </div>
-                <p className="text-body-sm font-body-sm text-on-surface m-0 mt-1">{message.text}</p>
+                <p className="text-body-sm font-body-sm text-on-surface m-0 mt-2">{summarizeMessage(message.text)}</p>
               </li>
             ))}
           </ol>
-        ) : (
-          <p className="text-body-sm font-body-sm text-on-surface-variant m-0">
-            현재 수신된 runtime message가 없습니다. Registry snapshot만 표시 중입니다.
-          </p>
-        )}
+        ) : null}
+        {discordDepartment ? (
+          <div className="border-t border-outline-variant pt-3">
+            <div className="flex justify-between items-center gap-3 flex-wrap mb-2">
+              <h3 className="text-body-md font-body-md font-bold text-on-surface m-0">Discord 대화</h3>
+              <span className="text-xs text-on-surface-variant">{discordDepartment.name}</span>
+            </div>
+            <DiscordChat key={discordDepartment.department_code} department={discordDepartment.department_code} />
+          </div>
+        ) : null}
+        </div>
+       </details>
       </section>
 
       {departments.length > 0 ? (
@@ -349,7 +455,7 @@ export default function AgentLogsView() {
         <DepartmentInspector department={selected} data={data} />
       ) : departments.length > 0 ? (
         <p className="text-body-sm font-body-sm text-on-surface-variant">
-          부서 카드를 누르면 직원 Registry와 실시간 상태가 아래에 펼쳐집니다.
+          부서 카드를 누르면 부서 상태와 연결된 결과물이 아래에 펼쳐집니다.
         </p>
       ) : null}
 

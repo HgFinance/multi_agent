@@ -192,9 +192,12 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  # Narrow owner-evaluated stock identity projection for the
                  # scoped quant runtime; raw instrument metadata stays private.
                  "20260818001200_quant_stock_identity_projection.sql",
+                 # Fund 생성 시 보수 발생주의 계정(2100/5200/5300)을 같은
+                 # 트랜잭션에서 만들고, 기존 Fund도 idempotent하게 보정한다.
+                 "20260818001300_fund_fee_account_provisioning.sql",
                  # Hosted Supabase owns Auth while the private control DB keeps
                  # only a PII-minimal verified-subject projection.
-                 "20260818001300_external_auth_subject_projection.sql",
+                 "20260818001350_external_auth_subject_projection.sql",
                  # The imported 61-session completed-second archive is a
                  # distinct historical-search authority, never the live
                  # receipt-clock event manifest.
@@ -249,7 +252,7 @@ class SupabaseSchemaContractTest(unittest.TestCase):
 
         migration = (
             SUPABASE_MIGRATIONS
-            / "20260818001300_external_auth_subject_projection.sql"
+            / "20260818001350_external_auth_subject_projection.sql"
         ).read_text(encoding="utf-8").lower()
         self.assertIn(
             "drop constraint if exists user_profiles_user_id_fkey",

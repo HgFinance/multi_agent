@@ -121,6 +121,12 @@ class InMemoryImprovementRepository(ImprovementRepository):
     def get_candidate(self, candidate_id: str) -> ImprovementCandidate | None:
         return self._candidates.get(candidate_id)
 
+    def list_candidates(self) -> list[ImprovementCandidate]:
+        return [
+            self._candidates[candidate_id]
+            for candidate_id in sorted(self._candidates)
+        ]
+
     def save_candidate(self, candidate: ImprovementCandidate) -> None:
         self._candidates[candidate.candidate_id] = candidate
 

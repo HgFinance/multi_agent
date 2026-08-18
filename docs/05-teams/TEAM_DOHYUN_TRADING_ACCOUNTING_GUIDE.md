@@ -2,6 +2,7 @@
 
 > Override v2.0 · 기준일 2026-08-05
 >
+> This dated worker roster is a historical team snapshot. Current worker IDs, counts, and authority boundaries are defined by the department registries and [CURRENT_PROJECT_ARCHITECTURE.md](../CURRENT_PROJECT_ARCHITECTURE.md).
 > 이 문서는 이전 Trading/Accounting 팀 가이드의 운영 기준을 덮어쓴다. Trading의 Paper 구현과 Accounting의 API 주입 Fill 검증을 Production E2E로 해석하지 않는다. 최상위 기준은 [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md), [PROJECT_IMPLEMENTATION_STATUS.md](../PROJECT_IMPLEMENTATION_STATUS.md), [UNIFIED_DOMAIN_API_SPEC.md](../02-engineering/UNIFIED_DOMAIN_API_SPEC.md)다.
 
 > **2026-08-18 권한 보정:** 아래의 “Risk 승인 없는 Submit 차단”과 “BFF

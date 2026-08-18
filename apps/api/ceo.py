@@ -766,6 +766,11 @@ def _route_user_paper_order(
 def ceo_query(
     req: CeoAsk,
     owner_id: str | None = Depends(optional_current_user),
+    *,
+    discord_channel_id: str | None = None,
+    discord_message_id: str | None = None,
+    discord_guild_id: str | None = None,
+    discord_thread_id: str | None = None,
 ) -> dict[str, object]:
     """Create the CEO root task; supervisor execution remains asynchronous.
 
@@ -794,6 +799,20 @@ def ceo_query(
     `owner_id`(`X-User-Id`)는 2026-08-12에 추가됐다. 그 전까지 이 경로는 요청자를
     **아예 몰랐다** - `AgentAsk`에 `query`와 `request_id`만 있어서, CEO는 누가
     물었는지도 그 사람의 Mandate가 무엇인지도 알 수 없었다.
+
+    ## 왜 여기서 Discord에 게시하지 않나 (2026-08-18 이동)
+
+    `discord_*` 좌표는 **받기만 한다.** 한때 이 함수가 직접
+    `discord_mirror.post_question()`을 불렀는데, 그러면 두 가지가 깨진다:
+
+    1. **출처를 모른다.** 이 함수는 요청이 웹에서 왔는지 Discord에서 왔는지
+       알 수 없다. Discord에서 온 요청까지 게시하면 사용자가 쓴 원본 옆에 봇이
+       같은 내용을 한 번 더 올린다.
+    2. **이 함수를 부르는 모든 경로가 네트워크로 나간다.** 단위 테스트가 이
+       함수를 부르는 것만으로 실제 팀 채널에 글이 올라갔다(2026-08-18 실측).
+
+    그래서 게시 여부 판단은 출처를 아는 `apps/api/ceo_mirror_api._ceo_query`가
+    하고, 이 함수는 그 결과 좌표를 root body에 적기만 한다.
     """
 
     # Mandate 스냅샷. 못 읽으면 None이고 그때는 블록 없이 진행한다 - 이것 때문에
@@ -822,6 +841,10 @@ def ceo_query(
             workflow_mode=infer_workflow_mode(req.query),
             mandate=mandate,
             requested_by=owner_id,
+            discord_channel_id=discord_channel_id,
+            discord_message_id=discord_message_id,
+            discord_guild_id=discord_guild_id,
+            discord_thread_id=discord_thread_id,
         ),
         idempotency_key=req.request_id,
     )

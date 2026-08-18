@@ -1,13 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import {
-  departmentStage,
   readableRuntimeStatus,
   type OperationsDepartment,
   type OperationsView,
 } from "../lib/operationsClient";
-import { readDiscordMessages, type DiscordMessage } from "../lib/discordClient";
+import AccountingLedgerPanel from "../components/AccountingLedgerPanel";
+import LivePortfolioPanel from "../components/LivePortfolioPanel";
 
 /**
  * 선택한 부서 한 곳의 직원 Registry·내부 메시지·LLM 성과.
@@ -61,62 +60,6 @@ function Empty({ children }: { children: React.ReactNode }) {
   return <p className="text-body-sm font-body-sm text-on-surface-variant m-0 py-2">{children}</p>;
 }
 
-/**
- * 이 부서의 Discord 대화.
- *
- * **호출부가 `key={부서}`로 리마운트한다**(아래 `DepartmentInspector`). 부서가
- * 바뀔 때 effect 안에서 상태를 손으로 되돌리면 렌더가 한 번 더 돌고, 상태를
- * 늘릴 때마다 초기화도 같이 적어야 한다 - `key`를 주면 React가 알아서 버린다.
- * 그래도 `AbortController`는 남긴다: 응답이 도착하기 전에 부서를 옮기면 옛
- * 요청은 여전히 날아오고 있고, 끊지 않으면 버려진 인스턴스가 setState 한다.
- */
-function DiscordThread({ department }: { department: string }) {
-  const [messages, setMessages] = useState<DiscordMessage[] | null>(null);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    const controller = new AbortController();
-    readDiscordMessages(department, 50, controller.signal)
-      .then((body) => setMessages(body.messages))
-      .catch((cause: unknown) => {
-        if (controller.signal.aborted) return;
-        setError(cause instanceof Error ? cause.message : "Discord 대화를 불러오지 못했습니다.");
-      });
-    return () => controller.abort();
-  }, [department]);
-
-  if (error) {
-    return (
-      <p
-        role="alert"
-        className="text-body-sm font-body-sm text-on-error-container bg-error-container border border-error/40 rounded px-3 py-2 m-0"
-      >
-        {error}
-      </p>
-    );
-  }
-  if (messages === null) return <Empty>Discord 대화를 불러오는 중입니다…</Empty>;
-  if (messages.length === 0) return <Empty>이 부서 봇이 오간 대화가 아직 없습니다.</Empty>;
-
-  return (
-    <div className="flex flex-col gap-2 max-h-96 overflow-y-auto">
-      {messages.map((message) => (
-        <div key={message.id} className="flex flex-col gap-0.5">
-          <span className="text-[10px] text-outline">
-            <b className={message.is_department_bot ? "text-primary" : "text-secondary"}>{message.author}</b>
-            {message.is_department_bot ? " · 부서 봇" : message.is_bot ? " · 봇" : ""}
-            {" · "}
-            {message.created_at.slice(0, 16).replace("T", " ")}
-          </span>
-          <span className="text-body-sm font-body-sm text-on-surface whitespace-pre-wrap break-words">
-            {message.text || <i className="text-outline">(첨부·임베드만 있는 메시지)</i>}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 export default function DepartmentInspector({
   department,
   data,
@@ -152,15 +95,11 @@ export default function DepartmentInspector({
     };
   });
 
-  const messages = data.messages.filter((m) => m.department_code === code && m.worker_id);
-  const metrics = data.metrics.filter((m) => m.stage === departmentStage(department));
   const running = workers.filter((w) => String(w.status).toUpperCase() === "RUNNING").length;
 
   const meta = [
     { label: "등록 Worker", value: workers.length },
     { label: "업무 중", value: running },
-    { label: "내부 메시지", value: messages.length },
-    { label: "LLM 성과", value: metrics.length },
   ];
 
   return (
@@ -220,61 +159,10 @@ export default function DepartmentInspector({
         )}
       </Disclosure>
 
-      {/*
-        두 패널은 각각 한 줄을 쓴다. 2열 grid에 묶여 있으면 접기/펼치기가
-        옆 칸 높이에 끌려다녀서, 한쪽만 펼쳐도 다른 쪽 카드가 같이 늘어난다.
-      */}
-      <Disclosure title="부서 내부 메시지" meta={`Worker 메시지 ${messages.length}개 · Discord 대화`}>
-        {messages.length > 0 ? (
-          <div className="flex flex-col gap-2">
-            {messages.map((message) => (
-              <div key={message.id} className="flex gap-2 text-body-sm font-body-sm">
-                <code className="text-xs text-outline shrink-0">{message.worker_id}</code>
-                <span className="text-on-surface min-w-0">{message.text}</span>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <Empty>Worker 실행 중 남긴 내부 메시지는 아직 없습니다.</Empty>
-        )}
-
-        {/*
-          Discord 대화는 출처가 다르므로 구분선을 두고 따로 적는다. Worker
-          실행 기록과 섞어 놓으면 잡담이 실행 근거처럼 보인다(개발원칙 5).
-        */}
-        <div className="mt-4 pt-3 border-t border-outline-variant">
-          <p className="text-xs text-outline m-0 mb-2">
-            Discord · 이 부서 봇과 사람의 대화 (비공식 · 원장 근거 아님)
-          </p>
-          <DiscordThread key={code} department={code} />
-        </div>
-      </Disclosure>
-
-      <Disclosure title="LLM 성과 · 원문 비활성화" meta={`${metrics.length}개 metric`}>
-        {metrics.length > 0 ? (
-          <div className="flex flex-col gap-2">
-            {metrics.map((metric) => (
-              <div
-                key={`${metric.worker_id}-${metric.latency_ms}-${metric.attempts}`}
-                className="flex flex-wrap gap-x-3 gap-y-1 text-body-sm font-body-sm"
-              >
-                <b className="text-on-surface">{metric.worker_id}</b>
-                <span className="text-on-surface-variant">{metric.model_name}</span>
-                <span className="font-data-mono text-on-surface-variant">{metric.latency_ms}ms</span>
-                <span className="text-on-surface-variant">
-                  eval {metric.eval_score == null ? "—" : metric.eval_score.toFixed(2)}
-                </span>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <Empty>Worker 실행 후 정량 성과가 표시됩니다.</Empty>
-        )}
-      </Disclosure>
-
-      <p className="text-xs text-outline text-center m-0">
-        LangSmith Input/Output 원문은 정책상 비활성화되어 있으며, 정량 메타데이터와 해시 식별자만 추적합니다.
-      </p>
+      {department.domain === "trading" ? <LivePortfolioPanel /> : null}
+      {/* 회계는 주문 상태가 아니라 확정된 거래와 비용을 본다. 같은 패널을
+          돌려 쓰면 미확정 주문이 장부 화면에 올라온다. */}
+      {department.domain === "accounting" ? <AccountingLedgerPanel /> : null}
     </section>
   );
 }

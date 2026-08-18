@@ -528,6 +528,54 @@ class PostgresMandateVersionRepository(MandateVersionRepository):
         finally:
             self._pool.putconn(conn)
 
+    def fund_ids_for_user(self, user_id: str) -> list[str]:
+        """`user_id -> fund_id` 역참조. 2026-08-18 추가.
+
+        ## 왜 이제야 생겼나
+
+        `governance.fund_memberships`는 2026-07-29 migration부터 있었지만 **0건**
+        이었다. 그래서 서버에는 사용자가 어느 Fund의 것인지 알 방법이 없었고,
+        프론트엔드가 `fund_id`를 계정과 쌍으로 하드코딩해 요청 body에 실어
+        보냈다(`ai-office/app/lib/currentAccount.ts`, `apps/api/ceo.py`의
+        `CeoAsk.fund_id`). Discord 경로도 같은 이유로 매핑표에 fund를 함께 적어야
+        했다. 2026-08-18에 seed로 소유 관계가 채워지면서 이 조회가 가능해졌다.
+
+        ## 무엇을 세는가
+
+        **지금 유효한 ACTIVE 소유 관계**만 본다. `effective_to`가 지난 행은
+        과거의 소속이고, 그걸 세면 부서를 옮긴 사용자가 옛 Fund의 한도로
+        판단된다(개발 원칙 5와 같은 취지 - 지난 사실을 현재로 쓰지 않는다).
+
+        역할은 `OWNER`로 좁힌다. `VIEWER`/`AUDITOR`도 그 Fund를 **볼** 수는
+        있지만, "이 사람의 Mandate"는 소유자의 것이다. 조회 권한을 소유로 읽으면
+        감사자가 남의 한도로 질문하게 된다.
+
+        여러 건이면 전부 돌려준다 - 여기서 하나를 임의로 고르지 않는다. 몇 개인지
+        판단은 호출자(app.py)가 한다(0=404, 1=단일, 2개 이상=409 모호).
+        `mandate_ids_for_fund`와 같은 규약이다.
+        """
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    select fund_id
+                      from governance.fund_memberships
+                     where user_id = %s
+                       and role = 'OWNER'
+                       and status = 'ACTIVE'
+                       and effective_from <= now()
+                       and (effective_to is null or effective_to > now())
+                     order by effective_from
+                    """,
+                    (user_id,),
+                )
+                rows = cur.fetchall()
+            conn.commit()
+            return [str(row[0]) for row in rows]
+        finally:
+            self._pool.putconn(conn)
+
     # --- 쓰기 (governance.mandates 부모 행이 이미 있어야 한다) ------------------
 
     def insert(self, row: MandateVersionRow) -> None:

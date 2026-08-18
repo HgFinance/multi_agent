@@ -152,7 +152,9 @@ test("production clients have no raw EventSource, WebSocket, or direct BFF fetch
     "mandateClient.ts",
     "operationsClient.ts",
     "paperOrderClient.ts",
-    "portfolioSnapshotClient.ts",
+    "accountingLedgerClient.ts",
+    "marketRankingClient.ts",
+    "portfolioLiveClient.ts",
   ];
   for (const file of files) {
     const source = await readFile(new URL(`../app/lib/${file}`, import.meta.url), "utf8");
@@ -162,4 +164,11 @@ test("production clients have no raw EventSource, WebSocket, or direct BFF fetch
   }
   const authModeSource = await readFile(new URL("../app/lib/authMode.ts", import.meta.url), "utf8");
   assert.match(authModeSource, /assertSafeAuthMode\(\);/);
+
+  const currentFundSource = await readFile(new URL("../app/lib/currentFund.ts", import.meta.url), "utf8");
+  const activeFundGuard = currentFundSource.indexOf("if (activeFundId) return activeFundId;");
+  const fixtureFallback = currentFundSource.indexOf("if (fixtureAuthEnabled) return readStoredAccount().fundId ?? undefined;");
+  assert.notEqual(activeFundGuard, -1, "currentFund must return the authorized active fund");
+  assert.notEqual(fixtureFallback, -1, "currentFund must retain the offline fixture fallback");
+  assert.ok(activeFundGuard < fixtureFallback, "the server-authorized active fund must win over the fixture fallback");
 });
