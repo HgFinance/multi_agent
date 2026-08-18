@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import random
 import sys
@@ -16,9 +17,11 @@ from intraday_microstructure import (  # noqa: E402
     COMPLETED_SECOND_POLICY,
     EXTERNAL_EVENT_SOURCE,
     IntradayLaneSpec,
+    IntradaySampleBatch,
     QuoteEvent,
     TradeEvent,
     audit_causality,
+    build_sample_batch,
     build_samples,
     manifest,
     score_signal,
@@ -36,8 +39,15 @@ from intraday_microstructure import (  # noqa: E402
     _EXTERNAL_SOURCE_QUALITY_SQL,
     _EXTERNAL_TRADE_SQL,
     load_instrument_events_batch,
+    _instrument_key,
 )
 from intraday_sample_cache import (SampleCache, identity as cache_identity)  # noqa: E402
+from intraday_alpha_ast import (  # noqa: E402
+    EXPLICIT_FEATURE_WINDOW_CONTRACT,
+    PRIMITIVE_WINDOWS_SECONDS,
+    WINDOWED_FIELDS,
+    evaluate as evaluate_ast,
+)
 
 
 UTC = timezone.utc
@@ -114,6 +124,105 @@ def test_causal_lane_builds_features_and_executable_labels() -> None:
     assert audit_causality(samples, spec)["status"] == "PASS"
     assert manifest(spec)["execution_model"] == "TAKER_BOTH_SIDES"
     assert manifest(spec)["purge_gap_seconds"] == pytest.approx(30.25)
+
+
+def test_multiscale_cube_matches_every_single_lookback_builder() -> None:
+    quotes = [
+        quote(second, 100 + second * 0.001, 101 + second * 0.001,
+              10 + second % 7, 12 + second % 5)
+        for second in range(621)
+    ]
+    trades = [trade(second, 1 if second % 2 else -1,
+                    quantity=5 + second % 11)
+              for second in range(0, 621, 3)]
+    spec = IntradayLaneSpec(
+        sample_interval_seconds=5, feature_lookback_seconds=30,
+        horizons_seconds=(5,), order_latency_ms=250,
+        max_quote_age_seconds=2)
+    start = BASE + timedelta(seconds=610)
+    end = BASE + timedelta(seconds=611)
+
+    batch = build_sample_batch(
+        quotes, trades, spec, start=start, end=end,
+        execution_model="TAKER")
+    assert len(batch) == 1
+    assert batch.feature_cube.row_count == 1
+    for seconds in PRIMITIVE_WINDOWS_SECONDS:
+        single = build_samples(
+            quotes, trades,
+            replace(spec, feature_lookback_seconds=seconds),
+            start=start, end=end, execution_model="TAKER")
+        assert len(single) == 1
+        for field in WINDOWED_FIELDS:
+            actual = batch.feature_cube.value(field, seconds, 0)
+            expected = getattr(single[0], field)
+            if expected is None:
+                assert actual is None, (field, seconds)
+            else:
+                assert actual == pytest.approx(expected), (field, seconds)
+
+    expression = {
+        "op": "field", "field": "trade_flow_imbalance", "seconds": 60}
+    assert evaluate_ast(
+        batch, expression, feature_cube=batch.feature_cube,
+        feature_window_contract=EXPLICIT_FEATURE_WINDOW_CONTRACT) == [
+            batch.feature_cube.value("trade_flow_imbalance", 60, 0)]
+
+
+def test_multiscale_cube_is_invariant_to_future_event_changes() -> None:
+    quotes = [
+        quote(second, 100 + second * 0.001, 101 + second * 0.001,
+              10 + second % 7, 12 + second % 5)
+        for second in range(621)
+    ]
+    trades = [trade(second, 1 if second % 2 else -1)
+              for second in range(0, 621, 3)]
+    changed = list(quotes)
+    changed[612] = quote(612, 500, 501, 999, 1)
+    spec = IntradayLaneSpec(
+        sample_interval_seconds=5, feature_lookback_seconds=30,
+        horizons_seconds=(5,), order_latency_ms=250,
+        max_quote_age_seconds=2)
+    bounds = {
+        "start": BASE + timedelta(seconds=610),
+        "end": BASE + timedelta(seconds=611),
+        "execution_model": "TAKER",
+    }
+
+    before = build_sample_batch(quotes, trades, spec, **bounds)
+    after = build_sample_batch(changed, trades, spec, **bounds)
+
+    assert before.feature_cube.decision_index_fingerprint == \
+        after.feature_cube.decision_index_fingerprint
+    assert before.feature_cube.columns == after.feature_cube.columns
+
+
+def test_multiscale_batch_rejects_same_length_cube_from_another_index() -> None:
+    quotes = [
+        quote(second, 100 + second * 0.001, 101 + second * 0.001, 10, 12)
+        for second in range(621)
+    ]
+    spec = IntradayLaneSpec(
+        sample_interval_seconds=5, feature_lookback_seconds=30,
+        horizons_seconds=(5,), order_latency_ms=250,
+        max_quote_age_seconds=2)
+    batch = build_sample_batch(
+        quotes, [], spec, start=BASE + timedelta(seconds=610),
+        end=BASE + timedelta(seconds=611), execution_model="TAKER")
+    shifted_samples = tuple(
+        replace(sample, decision_time=sample.decision_time + timedelta(seconds=5))
+        for sample in batch.samples)
+
+    with pytest.raises(ValueError, match="decision indexes differ"):
+        IntradaySampleBatch(shifted_samples, batch.feature_cube)
+
+
+def test_external_replay_accepts_canonical_alphanumeric_symbols() -> None:
+    assert _instrument_key("005930", EXTERNAL_EVENT_SOURCE) == "005930"
+    assert _instrument_key("A00593", EXTERNAL_EVENT_SOURCE) == "A00593"
+    for invalid in ("a00593", "A-0593", "A0059", "Ａ00593"):
+        with pytest.raises(ValueError, match="uppercase alphanumeric"):
+            _instrument_key(invalid, EXTERNAL_EVENT_SOURCE)
 
 
 def test_external_replay_contract_is_explicit_and_schema_safe() -> None:
@@ -422,7 +531,7 @@ def test_external_batch_loader_rejects_ambiguous_or_unrequested_symbols() -> Non
         def cursor(self):
             raise AssertionError("invalid identity must fail before SQL")
 
-    with pytest.raises(ValueError, match="exact six-digit KRX trading symbol"):
+    with pytest.raises(ValueError, match="uppercase alphanumeric KRX trading symbol"):
         load_instrument_events_batch(
             NeverConn(), instrument_ids=["A005930"], start=BASE,
             end=BASE + timedelta(seconds=1),

@@ -26,7 +26,8 @@ ENV PYTHONUNBUFFERED=1 \
 # when a database/object-store feature service replaces that cache contract.
 RUN pip install --no-cache-dir \
     psycopg2-binary==2.9.10 pydantic==2.11.7 python-dotenv==1.1.1 \
-    fastapi==0.116.1 "uvicorn[standard]==0.35.0" pyarrow==25.0.0
+    fastapi==0.116.1 "uvicorn[standard]==0.35.0" \
+    numpy==2.3.2 pyarrow==25.0.0
 
 WORKDIR /app
 

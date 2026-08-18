@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from datetime import datetime, time as dtime, timedelta, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -250,57 +250,142 @@ def write_bars(conn, iid, bars: list[Bar], *, source_version: str,
 # 실행
 # ---------------------------------------------------------------------------
 
-def universe_symbols(limit: int = 0) -> tuple[str, ...]:
-    """전체 KRX 상장 종목 코드. 기본 바스켓(뉴스 워치리스트 350종목)의 대체다.
+def _period_bounds(
+        sdate: str, edate: str,
+) -> tuple[date, date, datetime, datetime]:
+    """Return an inclusive KRX date interval and its half-open time bounds."""
+    values: list[date] = []
+    for name, value in (("sdate", sdate), ("edate", edate)):
+        if len(value) != 8 or not value.isascii() or not value.isdigit():
+            raise ValueError(f"{name} must be YYYYMMDD: {value!r}")
+        try:
+            parsed = datetime.strptime(value, "%Y%m%d").date()
+        except ValueError as exc:
+            raise ValueError(f"{name} must be YYYYMMDD: {value!r}") from exc
+        if parsed.strftime("%Y%m%d") != value:
+            raise ValueError(f"{name} must be YYYYMMDD: {value!r}")
+        values.append(parsed)
+    start_day, end_day = values
+    if end_day < start_day:
+        raise ValueError(
+            f"backfill period is reversed: {sdate} > {edate}")
+    start_at = datetime.combine(start_day, dtime.min, tzinfo=KST)
+    end_at = datetime.combine(end_day + timedelta(days=1), dtime.min,
+                              tzinfo=KST)
+    return start_day, end_day, start_at, end_at
 
-    ▶ 왜 넓혀야 하나 (2026-08-10 실측)
-      호가·체결은 2,600종목인데 일봉은 350종목이라 **유니버스가 어긋난다.**
-      마이크로구조에서 찾은 것을 일봉으로 확인하려 해도 종목이 안 겹친다.
-      횡단면 전략은 표본 종목 수가 곧 검정력이기도 하다.
-    """
+
+def _unique_period_symbol_map(
+        rows, *, sdate: str, edate: str,
+) -> dict[str, object]:
+    """Collapse duplicate rows but reject symbol reuse inside one backfill."""
+    identities: dict[str, set[object]] = {}
+    for symbol, instrument_id in rows:
+        identities.setdefault(symbol, set()).add(instrument_id)
+    ambiguous = sorted(
+        symbol for symbol, ids in identities.items() if len(ids) != 1)
+    if ambiguous:
+        raise RuntimeError(
+            "LS/KRX stock symbol maps to multiple instrument identities "
+            f"during {sdate}..{edate}: {ambiguous[:5]}")
+    return {symbol: next(iter(ids)) for symbol, ids in identities.items()}
+
+
+def universe_symbols(
+        limit: int = 0, *, sdate: str, edate: str,
+) -> tuple[str, ...]:
+    """KRX stocks whose PIT identity overlaps the requested backfill period."""
     import psycopg2
 
-    conn = psycopg2.connect(load_project_env()["DATABASE_URL"], connect_timeout=20)
-    cur = conn.cursor()
-    # 상장 폐지된 종목도 남긴다 - 살아남은 것만 받으면 생존 편향이 들어간다.
-    cur.execute("""
-        select sy.symbol from reference.instruments i
-        join reference.instrument_symbols sy using (instrument_id)
-        where sy.is_primary and sy.symbol ~ '^[0-9]{6}$'
-        group by sy.symbol order by sy.symbol
-    """)
-    out = tuple(r[0] for r in cur.fetchall())
-    conn.close()
+    start_day, end_day, start_at, end_at = _period_bounds(sdate, edate)
+    conn = psycopg2.connect(
+        load_project_env()["DATABASE_URL"], connect_timeout=20)
+    try:
+        with conn.cursor() as cur:
+            # A now()/ACTIVE filter here would introduce survivorship bias.
+            cur.execute("""
+                select sy.symbol, i.instrument_id
+                from reference.instruments i
+                join reference.instrument_symbols sy
+                  on sy.instrument_id = i.instrument_id
+                 and sy.provider = 'LS'
+                 and sy.market = 'KRX'
+                 and sy.symbol_type = 'TRADING'
+                 and sy.is_primary
+                 and sy.valid_from < %s
+                 and (sy.valid_to is null or sy.valid_to > %s)
+                where upper(i.market) = 'KRX'
+                  and upper(i.asset_class) = 'EQUITY'
+                  and upper(i.instrument_type) = 'STOCK'
+                  and upper(i.status) in ('ACTIVE', 'HALTED', 'DELISTED')
+                  and upper(i.venue) in ('KOSPI', 'KOSDAQ')
+                  and (i.listed_from is null or i.listed_from <= %s)
+                  and (i.listed_to is null or i.listed_to >= %s)
+                  and lower(coalesce(i.metadata->>'is_spac', 'false')) <> 'true'
+                  and sy.symbol ~ '^[0-9A-Z]{6}$'
+                order by sy.symbol, i.instrument_id
+            """, (end_at, start_at, end_day, start_day))
+            mapping = _unique_period_symbol_map(
+                cur.fetchall(), sdate=sdate, edate=edate)
+    finally:
+        conn.close()
+    out = tuple(sorted(mapping))
     return out[:limit] if limit else out
 
 
-def _symbols_and_ids(symbols: tuple[str, ...]):
+def _symbols_and_ids(
+        symbols: tuple[str, ...], *, sdate: str, edate: str,
+):
     import psycopg2
-    from symbol_universe import parse_symbol_file
 
     if not symbols:
-        wl = Path(__file__).resolve().parent.parent / "config" / "full_universe.txt"
-        symbols = parse_symbol_file(wl.read_text(encoding="utf-8"))
-    s = psycopg2.connect(load_project_env()["DATABASE_URL"], connect_timeout=20)
-    with s.cursor() as cur:
-        cur.execute("""
-            select sy.symbol, i.instrument_id from reference.instruments i
-            join reference.instrument_symbols sy using (instrument_id)
-            where sy.symbol = any(%s) and sy.is_primary
-        """, (list(symbols),))
-        m = dict(cur.fetchall())
-    s.close()
-    missing = [x for x in symbols if x not in m]
+        symbols = universe_symbols(sdate=sdate, edate=edate)
+    start_day, end_day, start_at, end_at = _period_bounds(sdate, edate)
+    conn = psycopg2.connect(
+        load_project_env()["DATABASE_URL"], connect_timeout=20)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                select sy.symbol, i.instrument_id
+                from reference.instruments i
+                join reference.instrument_symbols sy
+                  on sy.instrument_id = i.instrument_id
+                 and sy.provider = 'LS'
+                 and sy.market = 'KRX'
+                 and sy.symbol_type = 'TRADING'
+                 and sy.is_primary
+                 and sy.valid_from < %s
+                 and (sy.valid_to is null or sy.valid_to > %s)
+                where sy.symbol = any(%s)
+                  and upper(i.market) = 'KRX'
+                  and upper(i.asset_class) = 'EQUITY'
+                  and upper(i.instrument_type) = 'STOCK'
+                  and upper(i.status) in ('ACTIVE', 'HALTED', 'DELISTED')
+                  and upper(i.venue) in ('KOSPI', 'KOSDAQ')
+                  and (i.listed_from is null or i.listed_from <= %s)
+                  and (i.listed_to is null or i.listed_to >= %s)
+                  and lower(coalesce(i.metadata->>'is_spac', 'false')) <> 'true'
+                  and sy.symbol ~ '^[0-9A-Z]{6}$'
+                order by sy.symbol, i.instrument_id
+            """, (end_at, start_at, list(symbols), end_day, start_day))
+            mapping = _unique_period_symbol_map(
+                cur.fetchall(), sdate=sdate, edate=edate)
+    finally:
+        conn.close()
+    missing = [symbol for symbol in symbols if symbol not in mapping]
     if missing:
-        raise RuntimeError(f"Master 에 없는 종목: {missing[:5]}")
-    return [(x, m[x]) for x in symbols]
+        raise RuntimeError(
+            f"No PIT LS/KRX STOCK identity during {sdate}..{edate}: "
+            f"{missing[:5]}")
+    return [(symbol, mapping[symbol]) for symbol in symbols]
 
 
 def _collect(daily: bool, symbols, sdate: str, edate: str, ncnt: int, top: int | None) -> int:
     import psycopg2
     from ls_client import LsRestClient
 
-    pairs = _symbols_and_ids(symbols)
+    _period_bounds(sdate, edate)
+    pairs = _symbols_and_ids(symbols, sdate=sdate, edate=edate)
     if top:
         pairs = pairs[:top]
     t = psycopg2.connect(load_project_env()["TIMESCALE_DATABASE_URL"], connect_timeout=10)
@@ -493,33 +578,50 @@ if __name__ == "__main__":
     a = sys.argv
     def opt(n, d): return a[a.index(n) + 1] if n in a else d
     syms = tuple(s.strip() for s in opt("--symbols", "").split(",") if s.strip())
-    if "--universe" in a and not syms:
-        syms = universe_symbols(int(opt("--universe-limit", "0")))
-        print(f"  전체 유니버스 {len(syms)}종목")
 
     if "--daily" in a:
         # ▶ --recent-days: 스케줄러용 상대 창. 매일 도는 증분 수집은 시작일을
         #   고정할 수 없고, 그렇다고 2024-01-01 부터 다시 받으면 매일 몇 년치를
         #   재요청한다. PK 가 멱등이라 겹쳐 받아도 안전하므로 짧은 창을 돌린다
         #   (연휴·장애로 며칠 빠져도 다음 실행이 메운다).
+        end = opt("--to", datetime.now(KST).strftime("%Y%m%d"))
         recent = opt("--recent-days", "")
         if recent:
-            start = (datetime.now(KST)
-                     - timedelta(days=int(recent))).strftime("%Y%m%d")
+            _, end_day, _, _ = _period_bounds(end, end)
+            start = (end_day - timedelta(days=int(recent))).strftime(
+                "%Y%m%d")
             print(f"{COLLECTOR_VERSION} 일봉 증분 (최근 {recent}일)")
         else:
             start = opt("--from", "20240101")
             print(f"{COLLECTOR_VERSION} 일봉 백필")
+        _period_bounds(start, end)
+        if "--universe" in a and not syms:
+            syms = universe_symbols(
+                int(opt("--universe-limit", "0")),
+                sdate=start, edate=end)
+            print(f"  PIT 전체 유니버스 {len(syms)}종목")
         raise SystemExit(_collect(
-            True, syms, start,
-            opt("--to", datetime.now(KST).strftime("%Y%m%d")), 1,
+            True, syms, start, end, 1,
             int(opt("--top", "0")) or None))
     if "--minute" in a:
         days = int(opt("--days", "30"))
-        sd = (datetime.now(KST) - timedelta(days=days)).strftime("%Y%m%d")
-        print(f"{COLLECTOR_VERSION} 분봉 백필 (최근 {days}일)")
+        end = opt("--to", datetime.now(KST).strftime("%Y%m%d"))
+        if "--from" in a:
+            start = opt("--from", "")
+            label = f"{start}..{end}"
+        else:
+            _, end_day, _, _ = _period_bounds(end, end)
+            start = (end_day - timedelta(days=days)).strftime("%Y%m%d")
+            label = f"최근 {days}일"
+        _period_bounds(start, end)
+        if "--universe" in a and not syms:
+            syms = universe_symbols(
+                int(opt("--universe-limit", "0")),
+                sdate=start, edate=end)
+            print(f"  PIT 전체 유니버스 {len(syms)}종목")
+        print(f"{COLLECTOR_VERSION} 분봉 백필 ({label})")
         raise SystemExit(_collect(
-            False, syms, sd, datetime.now(KST).strftime("%Y%m%d"),
+            False, syms, start, end,
             int(opt("--ncnt", "1")), int(opt("--top", "0")) or None))
 
     print(f"{COLLECTOR_VERSION} 자체 점검 (호출 없음)")

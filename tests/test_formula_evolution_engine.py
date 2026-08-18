@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 import math
+import random
 import sys
 
 import pytest
@@ -15,6 +17,7 @@ for path in (FACTORY, CONTRACTS):
         sys.path.insert(0, str(path))
 
 import intraday_ast_contract as grammar  # noqa: E402
+import formula_evolution_engine as evolution  # noqa: E402
 from formula_evolution_engine import (  # noqa: E402
     EvolutionConfig,
     FailedSubtree,
@@ -98,6 +101,182 @@ def test_generation_is_deterministic_typed_and_population_sized() -> None:
         assert row.promotion_authority is False
         assert row.adaptive_selection is True
         assert row.requires_preregistered_evaluation is True
+
+
+def test_default_legacy_contract_preserves_candidate_identities() -> None:
+    """The opt-in V2 lane cannot rewrite existing V1 trial identities."""
+    batch = FormulaEvolutionEngine(EvolutionConfig(
+        deterministic_seed=71, population_size=5,
+        exploration_fraction=1.0,
+    )).generate_population(
+        seeds=[seed(BOOK, "book"), seed(TAPE, "tape")], generation=4)
+
+    assert [row.candidate_id for row in batch.candidates] == [
+        "be966fd333e3894f206d",
+        "9a44190c064f839d4a8f",
+        "d5796c81a03083a2ff5c",
+        "4475c361a2e4a97d1b82",
+        "11855ea93b3b477e7c19",
+    ]
+    assert batch.feature_window_contract_version == \
+        grammar.LEGACY_FEATURE_WINDOW_CONTRACT
+    assert batch.audit["feature_window_contract_version"] == \
+        grammar.LEGACY_FEATURE_WINDOW_CONTRACT
+    assert all(row.feature_window_contract_version ==
+               grammar.LEGACY_FEATURE_WINDOW_CONTRACT
+               for row in batch.candidates)
+
+
+def test_explicit_contract_upgrades_legacy_seed_across_primitive_windows(
+        ) -> None:
+    original = deepcopy(TAPE)
+    engine = FormulaEvolutionEngine(EvolutionConfig(
+        deterministic_seed=17, population_size=len(
+            grammar.PRIMITIVE_WINDOWS_SECONDS),
+        exploration_fraction=1.0,
+        feature_window_contract_version=(
+            grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT),
+    ))
+    batch = engine.generate_population(seeds=[seed(original, "legacy-tape")])
+    repeated = engine.generate_population(
+        seeds=[seed(original, "legacy-tape")])
+
+    assert original == TAPE
+    assert signatures(batch) == signatures(repeated)
+    assert batch.audit["legacy_parents_upgraded"] == 1
+    assert batch.audit["explicit_parent_variants"] == len(
+        grammar.PRIMITIVE_WINDOWS_SECONDS)
+    assert {next(iter(grammar.primitive_windows_of(row.expression)))
+            for row in batch.candidates} == set(
+                grammar.PRIMITIVE_WINDOWS_SECONDS)
+    assert all(row.operation.startswith("FEATURE_WINDOW_UPGRADE_")
+               for row in batch.candidates)
+    assert all(grammar.validate_feature_window_contract(
+        row.expression,
+        contract_version=grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT)
+        == row.expression for row in batch.candidates)
+    # Primitive-window bindings are semantic V2 coordinates, so neither exact
+    # nor search-shape identity may collapse them.
+    assert len({row.fingerprint for row in batch.candidates}) == len(
+        grammar.PRIMITIVE_WINDOWS_SECONDS)
+    assert len({row.shape_fingerprint for row in batch.candidates}) == len(
+        grammar.PRIMITIVE_WINDOWS_SECONDS)
+    payload = batch.to_dict()
+    assert payload["feature_window_contract_version"] == \
+        grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT
+    assert all(row["feature_window_contract_version"] ==
+               grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT
+               for row in payload["candidates"])
+
+
+def test_explicit_contract_upgrades_legacy_outcome_parent_pool() -> None:
+    outcome = FormulaOutcome(
+        expression=TAPE, outcome="SURVIVED", observation_id="legacy-screen",
+        search_score=1.0, candidate_identity_fingerprint=IDENTITY_A,
+    )
+    batch = FormulaEvolutionEngine(EvolutionConfig(
+        deterministic_seed=29, population_size=14,
+        exploration_fraction=0.0, enable_crossover=False,
+        feature_window_contract_version=(
+            grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT),
+    )).generate_population(seeds=[], outcomes=[outcome])
+
+    assert batch.audit["legacy_parents_upgraded"] == 1
+    assert batch.audit["explicit_parent_variants"] == len(
+        grammar.PRIMITIVE_WINDOWS_SECONDS)
+    assert batch.audit["exploit_parent_count"] == len(
+        grammar.PRIMITIVE_WINDOWS_SECONDS)
+    assert all(row.arm == "EXPLOITATION" for row in batch.candidates)
+    upgrades = [row for row in batch.candidates
+                if row.operation.startswith("FEATURE_WINDOW_UPGRADE_")]
+    assert len(upgrades) == len(grammar.PRIMITIVE_WINDOWS_SECONDS)
+    assert all(row.parent_fingerprints == (grammar.fingerprint(TAPE),)
+               for row in upgrades)
+    assert all(grammar.validate_feature_window_contract(
+        row.expression,
+        contract_version=grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT)
+        == row.expression for row in batch.candidates)
+
+
+def test_explicit_mutations_swap_primitive_windows_and_keep_leaf_contracts(
+        ) -> None:
+    config = EvolutionConfig(
+        deterministic_seed=31, population_size=8,
+        feature_window_contract_version=(
+            grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT),
+    )
+    expression = {"op": "add", "args": [
+        field("queue_imbalance_l1"),
+        {"op": "field", "field": "trade_flow_imbalance", "seconds": 10},
+    ]}
+    parent = evolution._parents_for_feature_window_contract(
+        FormulaEvolutionEngine._parse_seed(seed(expression, "native-v2")),
+        config,
+    )[0]
+    mutations = evolution._typed_mutations(
+        parent, config, random.Random(31))
+    window_swaps = [candidate for operation, candidate in mutations
+                    if operation == "PRIMITIVE_WINDOW_SWAP"]
+    assert {candidate["args"][1]["seconds"]
+            for candidate in window_swaps} == (
+                set(grammar.PRIMITIVE_WINDOWS_SECONDS) - {10})
+
+    same_unit_swaps = [candidate for operation, candidate in mutations
+                       if operation == "SAME_UNIT_FIELD_SWAP"]
+    # Windowed -> windowed preserves the raw-event clock.
+    assert all(candidate["args"][1].get("seconds") == 10
+               for candidate in same_unit_swaps
+               if candidate["args"][1].get("field") in
+               grammar.WINDOWED_FIELDS)
+    # Windowed -> snapshot state drops the raw-event clock.
+    assert all("seconds" not in candidate["args"][1]
+               for candidate in same_unit_swaps
+               if candidate["args"][1].get("field") in grammar.STATE_FIELDS)
+    # Snapshot state -> windowed emits legal explicit bindings.
+    assert {candidate["args"][0]["seconds"]
+            for candidate in same_unit_swaps
+            if candidate["args"][0].get("field") in
+            grammar.WINDOWED_FIELDS} == set(
+                grammar.PRIMITIVE_WINDOWS_SECONDS)
+
+    additions = [candidate for operation, candidate in mutations
+                 if operation.startswith(("STATE_GATE_", "INTERACT_"))]
+    assert additions
+    assert all(grammar.validate_feature_window_contract(
+        candidate, contract_version=grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT)
+        == candidate for candidate in additions)
+
+
+@pytest.mark.parametrize("invalid", [
+    {"op": "add", "args": [
+        {"op": "field", "field": "trade_flow_imbalance", "seconds": 10},
+        field("trade_side_known_ratio"),
+    ]},
+    {"op": "field", "field": "queue_imbalance_l1", "seconds": 10},
+])
+def test_explicit_contract_rejects_mixed_or_invalid_leaf_semantics(
+        invalid) -> None:
+    engine = FormulaEvolutionEngine(EvolutionConfig(
+        population_size=4,
+        feature_window_contract_version=(
+            grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT),
+    ))
+    with pytest.raises(ValueError, match="no contract-valid"):
+        engine.generate_population(seeds=[seed(invalid, "invalid-v2")])
+
+
+def test_explicit_upgrade_still_enforces_completed_second_capability() -> None:
+    unavailable = seed(field("normalized_quote_ofi"), "sequence-only", "LLM")
+    batch = FormulaEvolutionEngine(EvolutionConfig(
+        deterministic_seed=41, population_size=4,
+        completed_second_only=True,
+        feature_window_contract_version=(
+            grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT),
+    )).generate_population(seeds=[unavailable, seed(BOOK, "book")])
+
+    assert batch.kpi.rejection_counts["INVALID_SEED"] == 1
+    assert all("normalized_quote_ofi" not in grammar.fields_of(row.expression)
+               for row in batch.candidates)
 
 
 def test_llm_candidate_is_only_a_seed_and_receives_no_authority() -> None:

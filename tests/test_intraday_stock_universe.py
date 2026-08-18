@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,7 +11,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 PIPELINE = ROOT / "departments" / "04-quant-backtest" / "pipeline"
 CONTRACTS = ROOT / "departments" / "01-research" / "contracts"
-for path in (PIPELINE, CONTRACTS):
+COLLECTORS = ROOT / "departments" / "01-research" / "collectors"
+for path in (PIPELINE, CONTRACTS, COLLECTORS):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
@@ -22,6 +24,7 @@ from intraday_experiment_runner import (
     record_data_feasibility,
 )
 from intraday_microstructure import EXTERNAL_EVENT_SOURCE
+import chart_backfill_collector as chart_backfill
 
 
 class _Cursor:
@@ -53,9 +56,15 @@ class _Conn:
     def __init__(self, rows, symbol_rows=None):
         self.rows = rows
         self.symbol_rows = symbol_rows
+        self.last_cursor = None
+        self.closed = False
 
     def cursor(self):
-        return _Cursor(self.rows, self.symbol_rows)
+        self.last_cursor = _Cursor(self.rows, self.symbol_rows)
+        return self.last_cursor
+
+    def close(self):
+        self.closed = True
 
 
 def test_external_slice_excludes_nonstock_and_unknown_identity_fail_closed() -> None:
@@ -108,6 +117,145 @@ def test_external_slice_excludes_nonstock_and_unknown_identity_fail_closed() -> 
     }
     assert out["symbol_valid_time_required"] is True
     assert out["historical_listing_interval_verified"] is False
+
+
+def test_external_slice_keeps_canonical_alphanumeric_trading_symbols() -> None:
+    market = _Conn([
+        ("005930", "id-numeric"),
+        ("A00593", "id-alpha"),
+        ("a00593", "id-lowercase"),
+    ])
+    meta_rows = [
+        (instrument_id, "STOCK", "KRX", "KOSPI", "ACTIVE", None, None,
+         "EQUITY", False)
+        for instrument_id in ("id-numeric", "id-alpha", "id-lowercase")
+    ]
+    meta = _Conn(meta_rows, symbol_rows=[
+        ("id-numeric", "005930"),
+        ("id-alpha", "A00593"),
+        ("id-lowercase", "a00593"),
+    ])
+    selected = {
+        "status": "PASS",
+        "event_source": EXTERNAL_EVENT_SOURCE,
+        "sessions": ["2026-08-14"],
+        "instruments": ["005930", "A00593", "a00593"],
+    }
+
+    out = _stock_only_slice(meta, market, selected)
+
+    assert out["status"] == "PASS"
+    assert out["instruments"] == ["005930", "A00593"]
+    assert out["reference_instrument_ids"] == ["id-numeric", "id-alpha"]
+    assert out["product_filter_excluded"][
+        "INVALID_TRADING_SYMBOL_FORMAT"] == 1
+
+
+def test_chart_backfill_universe_uses_canonical_symbol_regex() -> None:
+    source = (ROOT / "departments" / "01-research" / "collectors" /
+              "chart_backfill_collector.py").read_text(encoding="utf-8")
+    assert "sy.symbol ~ '^[0-9A-Z]{6}$'" in source
+    assert "sy.symbol ~ '^[0-9]{6}$'" not in source
+    assert "sy.provider = 'LS'" in source
+    assert "sy.symbol_type = 'TRADING'" in source
+    assert "sy.valid_from < %s" in source
+    assert "sy.valid_to is null or sy.valid_to > %s" in source
+    assert "sy.valid_to is null or sy.valid_to > now()" not in source
+    assert "upper(i.instrument_type) = 'STOCK'" in source
+    assert "upper(i.status) in ('ACTIVE', 'HALTED', 'DELISTED')" in source
+    assert "upper(i.venue) in ('KOSPI', 'KOSDAQ')" in source
+    assert "i.listed_from is null or i.listed_from <= %s" in source
+    assert "i.listed_to is null or i.listed_to >= %s" in source
+
+
+def _chart_connection(monkeypatch, rows):
+    connection = _Conn([], symbol_rows=rows)
+    monkeypatch.setitem(
+        sys.modules, "psycopg2",
+        SimpleNamespace(connect=lambda *_args, **_kwargs: connection),
+    )
+    monkeypatch.setattr(
+        chart_backfill, "load_project_env",
+        lambda: {"DATABASE_URL": "postgresql://unused"},
+    )
+    return connection
+
+
+@pytest.mark.parametrize("sdate,edate", [
+    ("202601", "20260818"),
+    ("2026-01-01", "20260818"),
+    ("20260230", "20260818"),
+    ("２０２６０１０１", "20260818"),
+    ("20260819", "20260818"),
+])
+def test_chart_backfill_period_validation_fails_closed(
+        sdate: str, edate: str,
+) -> None:
+    with pytest.raises(ValueError):
+        chart_backfill._period_bounds(sdate, edate)
+
+
+def test_chart_backfill_universe_uses_requested_pit_overlap(
+        monkeypatch,
+) -> None:
+    connection = _chart_connection(monkeypatch, [
+        ("005930", "active-id"),
+        ("000660", "halted-id"),
+        ("123456", "delisted-id"),
+        ("005930", "active-id"),
+    ])
+
+    symbols = chart_backfill.universe_symbols(
+        sdate="20260518", edate="20260818")
+
+    assert symbols == ("000660", "005930", "123456")
+    assert connection.closed is True
+    assert connection.last_cursor is not None
+    sql = connection.last_cursor.sql
+    assert "now()" not in sql
+    assert "('ACTIVE', 'HALTED', 'DELISTED')" in sql
+    start_day, end_day, start_at, end_at = chart_backfill._period_bounds(
+        "20260518", "20260818")
+    assert connection.last_cursor.params == (
+        end_at, start_at, end_day, start_day)
+    assert start_at == datetime(2026, 5, 18, tzinfo=chart_backfill.KST)
+    assert end_at == datetime(2026, 8, 19, tzinfo=chart_backfill.KST)
+    assert end_at - start_at == timedelta(days=93)
+
+
+def test_chart_backfill_symbol_resolution_rejects_period_code_reuse(
+        monkeypatch,
+) -> None:
+    connection = _chart_connection(monkeypatch, [
+        ("005930", "old-company-id"),
+        ("005930", "new-company-id"),
+    ])
+
+    with pytest.raises(RuntimeError, match="multiple instrument identities"):
+        chart_backfill._symbols_and_ids(
+            ("005930",), sdate="20100101", edate="20260818")
+
+    assert connection.closed is True
+
+
+def test_chart_backfill_symbol_resolution_preserves_order_and_period(
+        monkeypatch,
+) -> None:
+    connection = _chart_connection(monkeypatch, [
+        ("00088K", "preferred-id"),
+        ("005930", "samsung-id"),
+        ("005930", "samsung-id"),
+    ])
+
+    pairs = chart_backfill._symbols_and_ids(
+        ("005930", "00088K"), sdate="20260518", edate="20260818")
+
+    assert pairs == [
+        ("005930", "samsung-id"),
+        ("00088K", "preferred-id"),
+    ]
+    assert connection.last_cursor.params[2] == ["005930", "00088K"]
+    assert connection.closed is True
 
 
 def test_local_slice_uses_governed_uuid_identity_without_symbol_comparison() -> None:

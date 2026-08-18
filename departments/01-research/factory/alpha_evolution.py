@@ -17,7 +17,7 @@ if str(_CONTRACTS) not in sys.path:
 from alpha_semantics import check_microstructure_mutations  # noqa: E402
 
 
-POLICY_VERSION = "alpha-evolution-v2"
+POLICY_VERSION = "alpha-evolution-v3"
 
 # Operators change an economic coordinate, not merely a threshold or lookback.
 EVOLUTION_OPERATORS = frozenset({
@@ -27,6 +27,7 @@ EVOLUTION_OPERATORS = frozenset({
     "CROSS_SCALE_DISAGREEMENT",
     "MECHANISM_INTERACTION",
     "CLOCK_CHANGE",
+    "PRIMITIVE_WINDOW_MIGRATION",
     "L1_L10_DIVERGENCE",
     "L1_L10_CONVERGENCE",
     "QUOTE_TAPE_CONFIRMATION",
@@ -36,6 +37,24 @@ EVOLUTION_OPERATORS = frozenset({
     "TARGET_CHANGE",
     "MARKET_STRUCTURE_TRANSFER",
 })
+
+
+def _without_primitive_windows(node):
+    """Return an AST view where raw-field clocks are contract coordinates.
+
+    Temporal operator clocks and constants remain untouched.  This makes a V1
+    leaf and its explicitly bound V2 translation comparable without confusing
+    a primitive-window migration with a new economic equation.
+    """
+    if isinstance(node, list):
+        return [_without_primitive_windows(value) for value in node]
+    if not isinstance(node, dict):
+        return node
+    return {
+        key: _without_primitive_windows(value)
+        for key, value in node.items()
+        if not (node.get("op") == "field" and key == "seconds")
+    }
 
 
 def _items(value) -> tuple[str, ...]:
@@ -98,16 +117,38 @@ def assess_lineage(*, candidate: dict, parent=None, operators=(),
     child_fp, parent_fp = grammar.fingerprint(child), grammar.fingerprint(base)
     child_shape = grammar.shape_fingerprint(child)
     parent_shape = grammar.shape_fingerprint(base)
+    child_bindings = (
+        grammar.field_window_bindings_of(child)
+        if hasattr(grammar, "field_window_bindings_of") else ())
+    parent_bindings = (
+        grammar.field_window_bindings_of(base)
+        if hasattr(grammar, "field_window_bindings_of") else ())
+    child_explicit = any(seconds is not None
+                         for _field, seconds in child_bindings)
+    parent_explicit = any(seconds is not None
+                          for _field, seconds in parent_bindings)
+    if (child_explicit != parent_explicit
+            and "PRIMITIVE_WINDOW_MIGRATION" not in ops):
+        raise ValueError(
+            "legacy-to-explicit feature-window evolution requires "
+            "PRIMITIVE_WINDOW_MIGRATION")
     if child_fp == parent_fp:
         raise ValueError("evolution child exactly reuses its parent formula")
+    window_coordinate = (
+        child_bindings != parent_bindings
+        and _without_primitive_windows(child) ==
+        _without_primitive_windows(base)
+        and "PRIMITIVE_WINDOW_MIGRATION" in ops)
     if child_shape == parent_shape:
-        raise ValueError(
-            "evolution child changed only tunable parameters; an economic child "
-            "must change the AST shape")
+        if not window_coordinate:
+            raise ValueError(
+                "evolution child changed only tunable parameters; an economic child "
+                "must change the AST shape")
 
     return {
         "evolution_policy_version": POLICY_VERSION,
-        "evolution_role": "CHILD",
+        "evolution_role": (
+            "WINDOW_SEARCH_CHILD" if window_coordinate else "CHILD"),
         "parent_signal_expr": base,
         "parent_ast_fingerprint": parent_fp,
         "parent_ast_shape_fingerprint": parent_shape,
@@ -115,6 +156,8 @@ def assess_lineage(*, candidate: dict, parent=None, operators=(),
         "evolution_operators": list(ops),
         "expected_increment": increment,
         "ablations": list(ablation_items),
+        "window_search_coordinate": window_coordinate,
+        "economic_novelty": not window_coordinate,
     }
 
 

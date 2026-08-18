@@ -19,6 +19,7 @@ for path in (PIPELINE, CONTRACTS, FACTORY):
 
 import alpha_semantics as semantics
 import data_resolution as data_resolution_module
+import factory_autopilot
 import formula_discovery
 import intraday_alpha_ast as intraday_grammar
 import intraday_candidate as candidate_module
@@ -26,9 +27,22 @@ import intraday_supervised as supervised_module
 import intraday_experience
 import intraday_ablation
 import lead_intake
+import proposal_intake
 from factory_contracts import MethodologyLeadV1
-from intraday_alpha_ast import (IntradayExprError, evaluate, fields_of, parse,
-                                shape_fingerprint, unit_of)
+from intraday_alpha_ast import (
+    EXPLICIT_FEATURE_WINDOW_CONTRACT,
+    LEGACY_FEATURE_WINDOW_CONTRACT,
+    IntradayExprError,
+    evaluate,
+    fields_of,
+    fingerprint,
+    parse,
+    primitive_windows_of,
+    shape_fingerprint,
+    temporal_windows_of,
+    unit_of,
+    validate_feature_window_contract,
+)
 from intraday_candidate import (_CapacityReservoir, CandidateAccumulator,
                                  CandidatePopulationAccumulator,
                                  _paired_increment, apply_family_pbo,
@@ -44,6 +58,7 @@ from intraday_experiment_runner import (StaleIntradayCohortError,
                                          _all_symbolic_candidates_cost_infeasible,
                                          _apply_population_dsr_gate,
                                          _assert_dataset_manifest_projection,
+                                         _candidate_specs,
                                          _candidate_accumulators,
                                          _external_content_end,
                                          _external_replay_manifest,
@@ -134,6 +149,103 @@ def test_intraday_ast_enforces_units_and_explicit_clocks() -> None:
             {"op": "field", "field": "spread_bps"},
             {"op": "field", "field": "book_depth_l1"},
         ]})
+
+
+def test_explicit_primitive_window_contract_preserves_legacy_identity() -> None:
+    legacy = {"op": "field", "field": "trade_flow_imbalance"}
+    assert validate_feature_window_contract(
+        legacy, contract_version=LEGACY_FEATURE_WINDOW_CONTRACT) == legacy
+    # Frozen before explicit leaf windows were introduced.
+    assert fingerprint(legacy) == "cdcb749815fd48ac"
+
+    at_two = {**legacy, "seconds": 2}
+    at_five = {**legacy, "seconds": 5}
+    assert validate_feature_window_contract(
+        at_two, contract_version=EXPLICIT_FEATURE_WINDOW_CONTRACT) == at_two
+    assert primitive_windows_of(at_two) == {2}
+
+    integral_float = {
+        "op": "field", "field": "trade_flow_imbalance", "seconds": 2.0}
+    assert fingerprint(integral_float) == fingerprint(at_two)
+    for invalid_seconds in (2.1, 5.9, "2.1", True):
+        invalid = {
+            "op": "field", "field": "trade_flow_imbalance",
+            "seconds": invalid_seconds}
+        with pytest.raises(IntradayExprError, match="must be an integer"):
+            validate_feature_window_contract(
+                invalid,
+                contract_version=EXPLICIT_FEATURE_WINDOW_CONTRACT)
+    assert temporal_windows_of(at_two) == set()
+    assert fingerprint(at_two) != fingerprint(at_five)
+    assert shape_fingerprint(at_two) == shape_fingerprint(at_five)
+
+    with pytest.raises(IntradayExprError, match="requires explicit seconds"):
+        validate_feature_window_contract(
+            legacy, contract_version=EXPLICIT_FEATURE_WINDOW_CONTRACT)
+    with pytest.raises(IntradayExprError, match="is not in"):
+        validate_feature_window_contract(
+            {**legacy, "seconds": 3},
+            contract_version=EXPLICIT_FEATURE_WINDOW_CONTRACT)
+    with pytest.raises(IntradayExprError, match="cannot declare seconds"):
+        validate_feature_window_contract(
+            {"op": "field", "field": "spread_bps", "seconds": 5},
+            contract_version=EXPLICIT_FEATURE_WINDOW_CONTRACT)
+    with pytest.raises(IntradayExprError, match="must not declare seconds"):
+        validate_feature_window_contract(
+            at_two, contract_version=LEGACY_FEATURE_WINDOW_CONTRACT)
+
+
+def test_every_explicit_v2_scout_prompt_ast_is_executable_and_rendered() -> None:
+    contract = factory_autopilot._ast_scout_contract()
+
+    for name, expr in factory_autopilot.INTRADAY_V2_PROMPT_AST_EXAMPLES.items():
+        assert validate_feature_window_contract(
+            expr, contract_version=EXPLICIT_FEATURE_WINDOW_CONTRACT) == expr, name
+        encoded = json.dumps(expr, ensure_ascii=False, separators=(",", ":"))
+        assert encoded in contract, name
+
+
+def test_primitive_and_temporal_windows_have_independent_metadata_and_novelty() -> None:
+    at_five = {
+        "op": "field", "field": "trade_flow_imbalance", "seconds": 5,
+    }
+    at_three_hundred = {
+        "op": "field", "field": "trade_flow_imbalance", "seconds": 300,
+    }
+    temporal = {
+        "op": "rolling_mean", "seconds": 300, "arg": at_five,
+    }
+    plan = {
+        "event": "ORDER_FLOW", "context": ["ALL"],
+        "qualities": ["PERSISTENCE"], "direction": "FOLLOW",
+        "output": "TAKER_NET_PNL", "execution": "TAKER",
+        "horizon_seconds": 5,
+    }
+    thesis = {
+        "target": "TAKER_NET_PNL", "functional_form": "MONOTONE",
+        "expected_sign": "POSITIVE", "coefficient_policy": "STRUCTURE_ONLY",
+        "decision_rule": "PREDICTED_MARKOUT_CLEARS_COST",
+        "terms": {"trade_flow_imbalance": "PRESSURE"},
+        "identification": "Persistent signed flow predicts executable markout.",
+    }
+
+    profile = formula_discovery.assess(
+        thesis, candidate=temporal, semantic_plan=plan,
+        grammar=intraday_grammar)["formula_math_profile"]
+    assert profile["primitive_windows_seconds"] == [5]
+    assert profile["temporal_windows_seconds"] == [300]
+    assert profile["clocks_seconds"] == [5, 300]
+
+    left = proposal_intake._intraday_novelty_signature(
+        {"intraday_signal_expr": at_five, "semantic_plan": plan},
+        intraday_grammar)
+    right = proposal_intake._intraday_novelty_signature(
+        {"intraday_signal_expr": at_three_hundred, "semantic_plan": plan},
+        intraday_grammar)
+    _, structural, semantic = proposal_intake._intraday_pairwise_novelty(
+        left, right)
+    assert structural == pytest.approx(0.10)
+    assert semantic == 0.0
 
 
 def test_structural_ablations_are_deterministic_simpler_bps_controls() -> None:
@@ -731,6 +843,61 @@ def test_screening_population_unifies_clocks_horizons_and_execution_labels() -> 
     assert config["source_baseline_expr"] == primary_baseline
     assert config["screening_population"][0][
         "source_baseline_expr"] == sidecar_expr
+
+
+def test_explicit_window_runner_identity_ignores_sidecar_clocks() -> None:
+    edge, _ = expected_edge_for(_intraday_proposal())
+    primary_expr = {"op": "mul", "args": [
+        {"op": "field", "field": "trade_flow_imbalance", "seconds": 30},
+        {"op": "field", "field": "realized_volatility_bps", "seconds": 30},
+    ]}
+    edge["intraday_signal_expr"] = primary_expr
+    edge["feature_window_contract_version"] = \
+        EXPLICIT_FEATURE_WINDOW_CONTRACT
+    base_config, base_spec = config_from_edge(edge)
+    primary_row = {
+        "intraday_signal_expr": base_config["intraday_signal_expr"],
+        "horizon_seconds": base_config["horizon_seconds"],
+        "execution": base_config["execution"],
+        "entry_policy": base_config["entry_policy"],
+        "coefficient_policy": base_config["coefficient_policy"],
+    }
+    base_features, _, _ = _candidate_specs(base_config, primary_row)
+
+    sidecar_expr = {"op": "mul", "args": [
+        {"op": "rolling_mean", "seconds": 300, "arg": {
+            "op": "field", "field": "trade_flow_imbalance",
+            "seconds": 600,
+        }},
+        {"op": "field", "field": "realized_volatility_bps",
+         "seconds": 600},
+    ]}
+    edge["screening_population"] = [{
+        "intraday_signal_expr": sidecar_expr,
+        "semantic_plan": edge["semantic_plan"],
+        "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
+    }]
+    edge["screening_cohort_version"] = "intraday-screening-cohort-v4"
+    cohort_config, cohort_spec = config_from_edge(edge)
+    cohort_primary = {**primary_row,
+                      "intraday_signal_expr":
+                          cohort_config["intraday_signal_expr"]}
+    cohort_features, _, _ = _candidate_specs(cohort_config, cohort_primary)
+
+    assert base_spec.feature_lookback_seconds == 30
+    assert cohort_spec.feature_lookback_seconds == 30
+    assert base_features == cohort_features
+    assert base_features["version"] == "intraday-causal-feature-spec-v4"
+    assert base_features["ast_primitive_windows_seconds"] == [30]
+    assert base_features["ast_temporal_windows_seconds"] == []
+    assert cohort_config["screening_population"][0][
+        "feature_window_contract_version"] == \
+        EXPLICIT_FEATURE_WINDOW_CONTRACT
+    accumulators = _candidate_accumulators(
+        cohort_config, cohort_spec, trials=2)
+    assert all(candidate.evaluator_version ==
+               candidate_module.EXPLICIT_WINDOW_EVALUATOR_VERSION
+               for candidate in accumulators.values())
 
 
 def test_runner_accepts_structure_only_score_but_not_unscaled_fixed_score() -> None:

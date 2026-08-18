@@ -18,6 +18,13 @@ from statistics import fmean, pstdev
 
 
 AST_VERSION = "intraday-alpha-ast-v2"
+LEGACY_FEATURE_WINDOW_CONTRACT = "legacy-cohort-lookback-v1"
+EXPLICIT_FEATURE_WINDOW_CONTRACT = "explicit-primitive-window-v2"
+FEATURE_WINDOW_CONTRACTS = frozenset({
+    LEGACY_FEATURE_WINDOW_CONTRACT,
+    EXPLICIT_FEATURE_WINDOW_CONTRACT,
+})
+PRIMITIVE_WINDOWS_SECONDS = (2, 5, 10, 30, 60, 300, 600)
 MAX_DEPTH = 8
 MAX_NODES = 48
 MIN_SECONDS = 1
@@ -59,6 +66,30 @@ FIELDS = {
     "realized_volatility_bps": BPS,
     "quote_age_ms": MILLISECONDS,
 }
+
+# A state field describes the book at the decision snapshot.  A windowed field
+# describes raw events in a completed-second interval ending at that snapshot.
+# Keeping those two namespaces explicit prevents a cohort sidecar's temporal
+# clock from silently changing the economic meaning of a primitive field.
+WINDOWED_FIELDS = frozenset({
+    "trade_flow_imbalance",
+    "quote_event_ofi",
+    "normalized_quote_ofi",
+    "multi_level_quote_ofi_l10",
+    "normalized_multi_level_quote_ofi_l10",
+    "quote_ofi_depth_divergence",
+    "quote_event_transition_count",
+    "normalized_quote_ofi_per_event",
+    "signed_trade_volume",
+    "trade_volume",
+    "trade_side_known_ratio",
+    "quote_ofi_per_trade_volume",
+    "trade_count",
+    "quote_count",
+    "trade_intensity",
+    "realized_volatility_bps",
+})
+STATE_FIELDS = frozenset(FIELDS) - WINDOWED_FIELDS
 
 # ``parse`` is the local strict grammar and deliberately remains a superset of
 # the currently replayable external history.  The 61-session historical lane is
@@ -140,10 +171,10 @@ def _unknown(node: dict, allowed: set[str], kind: str) -> None:
 
 def _seconds(node: dict) -> int:
     raw = node.get("seconds")
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
+    if (isinstance(raw, bool) or not isinstance(raw, (int, float))
+            or not math.isfinite(float(raw)) or not float(raw).is_integer()):
         raise IntradayExprError(f"seconds must be an integer: {raw!r}") from None
+    value = int(raw)
     if not MIN_SECONDS <= value <= MAX_SECONDS:
         raise IntradayExprError(
             f"seconds={value} outside [{MIN_SECONDS}, {MAX_SECONDS}]")
@@ -170,11 +201,14 @@ def _parse(node, depth: int) -> dict:
     if op not in ALL_OPS:
         raise IntradayExprError(f"unknown operator {op!r}")
     if op == FIELD_OP:
-        _unknown(node, {"op", "field"}, op)
+        _unknown(node, {"op", "field", "seconds"}, op)
         field = str(node.get("field") or "")
         if field not in FIELDS:
             raise IntradayExprError(f"unknown intraday field {field!r}")
-        return {"op": op, "field": field}
+        parsed = {"op": op, "field": field}
+        if "seconds" in node:
+            parsed["seconds"] = _seconds(node)
+        return parsed
     if op in TEMPORAL_OPS:
         _unknown(node, {"op", "arg", "seconds"}, op)
         if node.get("arg") is None:
@@ -286,7 +320,10 @@ def _canonical(node: dict, *, shape: bool = False) -> dict:
         return {"const": "#" if shape else node["const"],
                 "unit": node.get("unit", RATIO)}
     if node["op"] == FIELD_OP:
-        return node
+        out = {"op": FIELD_OP, "field": node["field"]}
+        if "seconds" in node:
+            out["seconds"] = "#" if shape else node["seconds"]
+        return out
     if "arg" in node:
         out = {"op": node["op"], "arg": _canonical(node["arg"], shape=shape)}
         if "seconds" in node:
@@ -349,6 +386,108 @@ def clocks_of(expr: dict) -> set[int]:
                 walk(current[key])
     walk(node)
     return out
+
+
+def primitive_windows_of(expr: dict) -> set[int]:
+    """Return raw-event primitive windows, excluding AST temporal clocks."""
+    node = parse(expr)
+    out: set[int] = set()
+
+    def walk(current: dict) -> None:
+        if current.get("op") == FIELD_OP and "seconds" in current:
+            out.add(int(current["seconds"]))
+        if "arg" in current:
+            walk(current["arg"])
+        for child in current.get("args", ()):
+            walk(child)
+        for key in ("condition", "then", "else"):
+            if key in current:
+                walk(current[key])
+    walk(node)
+    return out
+
+
+def temporal_windows_of(expr: dict) -> set[int]:
+    """Return evaluator windows, excluding raw-event primitive windows."""
+    node = parse(expr)
+    out: set[int] = set()
+
+    def walk(current: dict) -> None:
+        if current.get("op") in TEMPORAL_OPS:
+            out.add(int(current["seconds"]))
+        if "arg" in current:
+            walk(current["arg"])
+        for child in current.get("args", ()):
+            walk(child)
+        for key in ("condition", "then", "else"):
+            if key in current:
+                walk(current[key])
+    walk(node)
+    return out
+
+
+def field_window_bindings_of(expr: dict) -> tuple[tuple[str, int | None], ...]:
+    """Return deterministic primitive bindings used by identity/manifests."""
+    node = parse(expr)
+    bindings: set[tuple[str, int | None]] = set()
+
+    def walk(current: dict) -> None:
+        if current.get("op") == FIELD_OP:
+            bindings.add((current["field"], current.get("seconds")))
+        if "arg" in current:
+            walk(current["arg"])
+        for child in current.get("args", ()):
+            walk(child)
+        for key in ("condition", "then", "else"):
+            if key in current:
+                walk(current[key])
+    walk(node)
+    return tuple(sorted(bindings, key=lambda item: (item[0], item[1] or 0)))
+
+
+def validate_feature_window_contract(
+        expr: dict, *, contract_version: str) -> dict:
+    """Validate primitive leaf semantics without changing the legacy grammar.
+
+    ``parse`` intentionally remains backward compatible: historical V1/v11
+    candidates contain bare windowed fields whose window was supplied by the
+    cohort-wide lane spec.  V2 candidates must bind every windowed primitive to
+    one member of :data:`PRIMITIVE_WINDOWS_SECONDS`; decision-snapshot fields
+    must remain unwindowed.
+    """
+    parsed = parse(expr)
+    version = str(contract_version or "").strip()
+    if version not in FEATURE_WINDOW_CONTRACTS:
+        raise IntradayExprError(f"unknown feature-window contract {version!r}")
+
+    def walk(current: dict) -> None:
+        if current.get("op") == FIELD_OP:
+            field = current["field"]
+            seconds = current.get("seconds")
+            if version == LEGACY_FEATURE_WINDOW_CONTRACT:
+                if seconds is not None:
+                    raise IntradayExprError(
+                        "legacy feature-window leaves must not declare seconds")
+            elif field in WINDOWED_FIELDS:
+                if seconds is None:
+                    raise IntradayExprError(
+                        f"windowed field {field!r} requires explicit seconds")
+                if seconds not in PRIMITIVE_WINDOWS_SECONDS:
+                    allowed = ", ".join(map(str, PRIMITIVE_WINDOWS_SECONDS))
+                    raise IntradayExprError(
+                        f"field {field!r} seconds={seconds} is not in {{{allowed}}}")
+            elif seconds is not None:
+                raise IntradayExprError(
+                    f"decision-snapshot field {field!r} cannot declare seconds")
+        if "arg" in current:
+            walk(current["arg"])
+        for child in current.get("args", ()):
+            walk(child)
+        for key in ("condition", "then", "else"):
+            if key in current:
+                walk(current[key])
+    walk(parsed)
+    return parsed
 
 
 def validate_completed_second_candidate(
@@ -477,13 +616,16 @@ def structural_similarity(left: dict, right: dict) -> float:
     return 0.0 if not denominator else 2.0 * sum((a & b).values()) / denominator
 
 
-def evaluate(samples, expr: dict) -> list[float | None]:
+def evaluate(samples, expr: dict, *, feature_cube=None,
+             feature_window_contract: str | None = None) -> list[float | None]:
     """Return one causal value per sample in chronological order.
 
     Samples from different instruments must be evaluated separately.  This prevents
     a rolling window from leaking one instrument's event stream into another's.
     """
-    node = parse(expr)
+    node = (validate_feature_window_contract(
+        expr, contract_version=feature_window_contract)
+        if feature_window_contract is not None else parse(expr))
     rows = list(samples)
     if len({row.instrument_id for row in rows}) > 1:
         raise IntradayExprError("evaluate one instrument at a time")
@@ -511,7 +653,14 @@ def evaluate(samples, expr: dict) -> list[float | None]:
         else:
             op = current["op"]
             if op == FIELD_OP:
-                result = getattr(rows[index], current["field"])
+                if "seconds" not in current:
+                    result = getattr(rows[index], current["field"])
+                elif feature_cube is None:
+                    raise IntradayExprError(
+                        "explicit-window field evaluation requires a feature cube")
+                else:
+                    result = feature_cube.value(
+                        current["field"], int(current["seconds"]), index)
             elif op in TEMPORAL_OPS:
                 seconds = current["seconds"]
                 cutoff = times[index].timestamp() - seconds

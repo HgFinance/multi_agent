@@ -47,6 +47,7 @@ from formula_evolution_engine import (  # noqa: E402
     FormulaEvolutionEngine,
     FormulaOutcome,
     FormulaSeed,
+    subtree_shape_fingerprint,
 )
 from formula_search_memory import build_formula_search_memory  # noqa: E402
 import intraday_ast_contract as grammar  # noqa: E402
@@ -54,11 +55,24 @@ from stock_universe import (INTRADAY_REPORT_MANIFEST_VERSION,  # noqa: E402
                             governed_stock_evidence_sql)
 
 
-MODULE_VERSION = "outcome-conditioned-formula-breeder-v3"
+MODULE_VERSION = "outcome-conditioned-formula-breeder-v4"
 MIN_POPULATION = 8
 MAX_POPULATION = 128
-ACTIVE_EVALUATOR_VERSION = "intraday-candidate-evaluator-v11"
+LEGACY_EVALUATOR_VERSION = "intraday-candidate-evaluator-v11"
+EXPLICIT_EVALUATOR_VERSION = "intraday-candidate-evaluator-v12"
+# Backward-compatible public default for direct/unit callers.  The production
+# ``generate`` entry point explicitly targets V2 below.
+ACTIVE_EVALUATOR_VERSION = LEGACY_EVALUATOR_VERSION
 ACTIVE_COST_MODEL_VERSION = "krx-intraday-execution-v3"
+
+
+def _evaluator_for_window_contract(contract_version: object) -> str:
+    version = str(contract_version or grammar.LEGACY_FEATURE_WINDOW_CONTRACT)
+    if version == grammar.LEGACY_FEATURE_WINDOW_CONTRACT:
+        return LEGACY_EVALUATOR_VERSION
+    if version == grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT:
+        return EXPLICIT_EVALUATOR_VERSION
+    raise ValueError(f"unknown feature-window contract {version!r}")
 
 _GOVERNED_STOCK_EVIDENCE = governed_stock_evidence_sql(
     experiment_alias="e", dataset_alias="m", hypothesis_alias="h")
@@ -271,7 +285,11 @@ select e.experiment_id::text, e.config->'intraday_signal_expr',
          else null end
    and primary_lineage.hypothesis_id = e.hypothesis_id
  where e.config ? 'intraday_signal_expr'
-   and primary_lineage.evaluator_version = 'intraday-candidate-evaluator-v11'
+   and primary_lineage.evaluator_version = case
+         when e.config->>'feature_window_contract_version' =
+              'explicit-primitive-window-v2'
+         then 'intraday-candidate-evaluator-v12'
+         else 'intraday-candidate-evaluator-v11' end
    and primary_lineage.cost_model_version = 'krx-intraday-execution-v3'
    and """ + _GOVERNED_STOCK_EVIDENCE + """
  order by e.created_at desc
@@ -320,7 +338,11 @@ select e.experiment_id::text, e.config->'intraday_signal_expr',
     INTRADAY_REPORT_MANIFEST_VERSION + """'
    and manifest.report->'score_calibration'->>'status' in
        ('NO_COST_FEASIBLE_ENTRY','NON_POSITIVE_DIRECTIONAL_RELATION')
-   and primary_lineage.evaluator_version = 'intraday-candidate-evaluator-v11'
+   and primary_lineage.evaluator_version = case
+         when e.config->>'feature_window_contract_version' =
+              'explicit-primitive-window-v2'
+         then 'intraday-candidate-evaluator-v12'
+         else 'intraday-candidate-evaluator-v11' end
    and primary_lineage.cost_model_version = 'krx-intraday-execution-v3'
    and coalesce(manifest.report->'score_calibration'->>'observations','')
        ~ '^[1-9][0-9]*$'
@@ -713,7 +735,10 @@ def _source_contract_fingerprint(lead: Mapping[str, Any]) -> str:
     contract = _mapping(lead.get("contract"))
     plan = _mapping(contract.get("semantic_plan"))
     thesis = _mapping(contract.get("formula_thesis"))
-    computed = _stable_fingerprint({
+    window_contract = str(
+        contract.get("feature_window_contract_version") or
+        grammar.LEGACY_FEATURE_WINDOW_CONTRACT)
+    identity = {
         "candidate_ast": _stable_fingerprint(expression),
         "semantic_plan": _stable_fingerprint(plan),
         "baseline_ast": _source_baseline_ast_fingerprint(contract),
@@ -722,7 +747,13 @@ def _source_contract_fingerprint(lead: Mapping[str, Any]) -> str:
         "entry_policy": str(thesis.get("decision_rule") or "").upper(),
         "coefficient_policy": str(
             thesis.get("coefficient_policy") or "").upper(),
-    })
+    }
+    # Preserve every V1 parent identity byte-for-byte so historical measured
+    # outcomes keep retiring/feeding the same source contracts.  V2 is a new
+    # executable feature identity and therefore binds its explicit contract.
+    if window_contract != grammar.LEGACY_FEATURE_WINDOW_CONTRACT:
+        identity["feature_window_contract_version"] = window_contract
+    computed = _stable_fingerprint(identity)
     # A cached value is an assertion, never authority over executable content.
     claimed = str(lead.get("source_contract_fingerprint") or "").strip()
     if claimed and claimed != computed:
@@ -740,8 +771,13 @@ def _lead_records(rows: Iterable[tuple[Any, ...]]) -> list[dict[str, Any]]:
             continue
         plan = _mapping(contract.get("semantic_plan"))
         try:
+            window_contract = str(
+                contract.get("feature_window_contract_version") or
+                grammar.LEGACY_FEATURE_WINDOW_CONTRACT)
+            parsed = grammar.validate_feature_window_contract(
+                expression, contract_version=window_contract)
             parsed = grammar.validate_completed_second_candidate(
-                expression,
+                parsed,
                 execution=plan.get("execution") or "TAKER")
             baseline_identity = _source_baseline_ast_fingerprint(contract)
         except (TypeError, ValueError, grammar.IntradayExprError):
@@ -757,6 +793,7 @@ def _lead_records(rows: Iterable[tuple[Any, ...]]) -> list[dict[str, Any]]:
             "semantic_plan_fingerprint": semantic_identity,
             "baseline_ast_fingerprint": baseline_identity,
             "contract": contract,
+            "feature_window_contract_version": window_contract,
             "used": bool(used),
             "economic_mechanism": _mechanism(
                 contract, str(title or ""), str(stated or "")),
@@ -810,7 +847,12 @@ def _candidate_index(config: dict[str, Any], population: list[Any],
         if not isinstance(expression, dict):
             return
         try:
-            parsed = grammar.parse(expression)
+            window_contract = str(
+                payload.get("feature_window_contract_version") or
+                config.get("feature_window_contract_version") or
+                grammar.LEGACY_FEATURE_WINDOW_CONTRACT)
+            parsed = grammar.validate_feature_window_contract(
+                expression, contract_version=window_contract)
             configured_baseline = _source_baseline_ast_fingerprint(payload)
         except (TypeError, ValueError, grammar.IntradayExprError):
             return
@@ -831,6 +873,7 @@ def _candidate_index(config: dict[str, Any], population: list[Any],
                 or plan_execution != raw_execution):
             return
         lineage = _mapping(lineages.get(exact))
+        expected_evaluator = _evaluator_for_window_contract(window_contract)
         if (not lineage
                 or not lineage_identity_matches(lineage)
                 or lineage.get("candidate_ast_fingerprint") !=
@@ -839,8 +882,7 @@ def _candidate_index(config: dict[str, Any], population: list[Any],
                 _stable_fingerprint(plan)
                 or lineage.get("baseline_ast_fingerprint") !=
                 configured_baseline
-                or lineage.get("evaluator_version") !=
-                ACTIVE_EVALUATOR_VERSION
+                or lineage.get("evaluator_version") != expected_evaluator
                 or lineage.get("cost_model_version") !=
                 ACTIVE_COST_MODEL_VERSION
                 or not str(lineage.get("economic_family_id") or "").strip()):
@@ -851,6 +893,7 @@ def _candidate_index(config: dict[str, Any], population: list[Any],
             "semantic_plan": plan,
             "horizon_seconds": raw_horizon,
             "execution": raw_execution,
+            "feature_window_contract_version": window_contract,
             "lineage": lineage,
             "candidate_identity_fingerprint": str(
                 lineage["candidate_identity_fingerprint"]),
@@ -907,10 +950,15 @@ def _primary_lineage_memory(
     lineage = _mapping(raw_lineage)
     plan = _mapping(config.get("semantic_plan"))
     try:
-        parsed = grammar.parse(expression)
+        window_contract = str(
+            config.get("feature_window_contract_version") or
+            grammar.LEGACY_FEATURE_WINDOW_CONTRACT)
+        parsed = grammar.validate_feature_window_contract(
+            expression, contract_version=window_contract)
         configured_baseline = _source_baseline_ast_fingerprint(config)
     except (TypeError, ValueError, grammar.IntradayExprError):
         return {}
+    expected_evaluator = _evaluator_for_window_contract(window_contract)
     horizon = config.get("horizon_seconds")
     execution = str(config.get("execution") or "").strip().upper()
     if (not lineage_identity_matches(lineage)
@@ -919,7 +967,7 @@ def _primary_lineage_memory(
             or lineage.get("semantic_plan_fingerprint") !=
             _stable_fingerprint(plan)
             or lineage.get("baseline_ast_fingerprint") != configured_baseline
-            or lineage.get("evaluator_version") != ACTIVE_EVALUATOR_VERSION
+            or lineage.get("evaluator_version") != expected_evaluator
             or lineage.get("cost_model_version") != ACTIVE_COST_MODEL_VERSION
             or isinstance(horizon, bool) or not isinstance(horizon, int)
             or horizon <= 0 or plan.get("horizon_seconds") != horizon
@@ -949,6 +997,7 @@ def _primary_lineage_memory(
         "cost_model_version": str(lineage["cost_model_version"]),
         "horizon_seconds": horizon,
         "execution": execution,
+        "feature_window_contract_version": window_contract,
     }
 
 
@@ -975,7 +1024,14 @@ def _search_exposure_fingerprint(
     cost = _mapping(exposure.get("cost_contract"))
     evaluation = _mapping(exposure.get("evaluation"))
     measurement_scope = str(evaluation.get("measurement_scope") or "")
-    if (evaluator.get("evaluator_version") != ACTIVE_EVALUATOR_VERSION
+    expected_evaluators = {
+        _evaluator_for_window_contract(
+            candidate.get("feature_window_contract_version"))
+        for candidate in candidates.values()
+    }
+    if (len(expected_evaluators) != 1
+            or evaluator.get("evaluator_version") !=
+            next(iter(expected_evaluators))
             or cost.get("cost_model_version") != ACTIVE_COST_MODEL_VERSION
             or measurement_scope not in {
                 "ADAPTIVE_RUNG_MEASURED",
@@ -1485,6 +1541,8 @@ def _operator_contract(operation: str, fields: set[str]) -> list[str]:
         return ["STATE_CONDITION", "EXECUTION_AWARE"]
     if name.startswith("CROSS_SCALE"):
         return ["CLOCK_CHANGE", "CROSS_SCALE_DISAGREEMENT"]
+    if name.startswith(("PRIMITIVE_WINDOW", "FEATURE_WINDOW_UPGRADE")):
+        return ["PRIMITIVE_WINDOW_MIGRATION", "CLOCK_CHANGE"]
     if name.startswith(("ROLLING_", "EWMA_", "DELTA_", "TEMPORAL_")):
         return ["CLOCK_CHANGE"]
     if fields & L1_QUOTE_PRESSURE_FIELDS and fields & L10_QUOTE_PRESSURE_FIELDS:
@@ -1500,7 +1558,9 @@ def _semantic_hint(expression: dict, parent_contract: dict[str, Any],
                    operation: str) -> tuple[dict[str, Any], dict[str, Any]]:
     fields = set(grammar.fields_of(expression))
     operators = set(grammar.operators_of(expression))
-    clocks = sorted(grammar.clocks_of(expression))
+    temporal_clocks = sorted(grammar.temporal_windows_of(expression))
+    primitive_windows = sorted(grammar.primitive_windows_of(expression))
+    clocks = sorted(set(temporal_clocks) | set(primitive_windows))
     parent_plan = _mapping(parent_contract.get("semantic_plan"))
     contexts = ["ALL"]
     if "where" in operators and "spread_bps" in fields:
@@ -1525,8 +1585,11 @@ def _semantic_hint(expression: dict, parent_contract: dict[str, Any],
     if not qualities:
         qualities = ["LEVEL"]
     horizon = int(parent_plan.get("horizon_seconds") or 30)
-    if clocks:
-        horizon = max(horizon, min(max(clocks), 900))
+    # A raw-event primitive window is an input aggregation choice, not the
+    # future return horizon.  Only an explicit temporal AST transform may
+    # lengthen the parent's prediction/label horizon.
+    if temporal_clocks:
+        horizon = max(horizon, min(max(temporal_clocks), 900))
     direction = str(parent_plan.get("direction") or "FOLLOW").upper()
     if "DIRECTION_INVERSION" in str(operation).upper():
         direction = {"FOLLOW": "REVERT", "REVERT": "FOLLOW"}.get(
@@ -1657,13 +1720,18 @@ def _submission_blocker(operation: str,
 def generate_from_records(*, leads: list[dict[str, Any]],
                           outcome_rows: list[dict[str, Any]],
                           population_size: int = 64,
-                          generation: int = 1) -> dict[str, Any]:
+                          generation: int = 1,
+                          feature_window_contract_version: str = (
+                              grammar.LEGACY_FEATURE_WINDOW_CONTRACT),
+                          ) -> dict[str, Any]:
     size = int(population_size)
     if size < MIN_POPULATION or size > MAX_POPULATION:
         raise ValueError(
             f"population_size must be in [{MIN_POPULATION}, {MAX_POPULATION}]")
     if generation < 1:
         raise ValueError("generation must be positive")
+    window_contract = str(feature_window_contract_version or "").strip()
+    active_evaluator_version = _evaluator_for_window_contract(window_contract)
     if not leads:
         return {
             "ok": False, "module_version": MODULE_VERSION,
@@ -1711,7 +1779,7 @@ def generate_from_records(*, leads: list[dict[str, Any]],
                        if row.get("archive_history") is True]
     search_memory = build_formula_search_memory(
         archive_history,
-        active_evaluator_version=ACTIVE_EVALUATOR_VERSION,
+        active_evaluator_version=active_evaluator_version,
         active_cost_model_version=ACTIVE_COST_MODEL_VERSION)
     elite_candidates = search_memory.get("elite_candidates") or {}
     source_backed_elites: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -1737,11 +1805,25 @@ def generate_from_records(*, leads: list[dict[str, Any]],
         expression = row.get("expression")
         if not isinstance(expression, dict):
             continue
-        if ((row.get("evaluator_version") and
-             row.get("evaluator_version") != ACTIVE_EVALUATOR_VERSION)
-                or (row.get("cost_model_version") and
-                    row.get("cost_model_version") !=
-                    ACTIVE_COST_MODEL_VERSION)):
+        if window_contract == grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT:
+            # V2 has no pre-versioned compatibility mode: every memory row must
+            # prove that this exact AST was measured by v12 under the active
+            # cost model.  A legacy AST must enter as a seed migration and earn
+            # a new trial, never be relabelled as measured V2 memory.
+            if (row.get("evaluator_version") != active_evaluator_version
+                    or row.get("cost_model_version") !=
+                    ACTIVE_COST_MODEL_VERSION):
+                continue
+        elif ((row.get("evaluator_version") and
+               row.get("evaluator_version") != active_evaluator_version)
+              or (row.get("cost_model_version") and
+                  row.get("cost_model_version") !=
+                  ACTIVE_COST_MODEL_VERSION)):
+            continue
+        try:
+            expression = grammar.validate_feature_window_contract(
+                expression, contract_version=window_contract)
+        except (TypeError, ValueError, grammar.IntradayExprError):
             continue
         identity = str(row.get("candidate_identity_fingerprint") or "")
         verified_leads = sorted((
@@ -1797,7 +1879,8 @@ def generate_from_records(*, leads: list[dict[str, Any]],
 
     engine = FormulaEvolutionEngine(EvolutionConfig(
         population_size=size, exploration_fraction=0.6,
-        deterministic_seed=20260818, enable_crossover=False))
+        deterministic_seed=20260818, enable_crossover=False,
+        feature_window_contract_version=window_contract))
     batch = engine.generate_population(
         seeds=seeds, outcomes=outcomes, population_size=size,
         generation=int(generation),
@@ -1807,7 +1890,8 @@ def generate_from_records(*, leads: list[dict[str, Any]],
         known_exact_fingerprints={
             grammar.fingerprint(lead["expression"]) for lead in valid_leads},
         known_shape_fingerprints={
-            grammar.shape_fingerprint(lead["expression"])
+            subtree_shape_fingerprint(
+                lead["expression"], contract_version=window_contract)
             for lead in valid_leads},
     )
 
@@ -1846,12 +1930,14 @@ def generate_from_records(*, leads: list[dict[str, Any]],
         "ok": bool(submission_ready),
         "module_version": MODULE_VERSION,
         "engine_version": batch.engine_version,
+        "feature_window_contract_version": window_contract,
+        "evaluator_version": active_evaluator_version,
         "generation": int(generation),
         "source_leads": len(leads),
         "unique_source_formulas": len(canonical_lead_by_contract),
         "outcome_memory_rows": len(outcomes),
-        "failure_memory_rows": sum(bool(row.get("lesson_codes"))
-                                   for row in outcome_rows),
+        "failure_memory_rows": sum(bool(row.lesson_codes)
+                                   for row in outcomes),
         "requested_population": size,
         "emitted_population": len(drafts),
         "submission_ready_count": len(submission_ready),
@@ -1871,6 +1957,8 @@ def generate_from_records(*, leads: list[dict[str, Any]],
             "coefficients_fitted_by_breeder": False,
             "cost_hurdle_modified_by_breeder": False,
             "agent_output_contract": "FORMULAS_NOT_REPORT",
+            "feature_window_contract_version": window_contract,
+            "target_evaluator_version": active_evaluator_version,
         },
         "candidates": drafts,
         "batch_fingerprint": hashlib.sha256(json.dumps(
@@ -1884,7 +1972,9 @@ def generate(conn, *, population_size: int = 64,
     leads, outcomes = load_records(conn)
     return generate_from_records(
         leads=leads, outcome_rows=outcomes,
-        population_size=population_size, generation=generation)
+        population_size=population_size, generation=generation,
+        feature_window_contract_version=(
+            grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT))
 
 
 __all__ = [

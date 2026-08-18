@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import hashlib
+import json
 from pathlib import Path
 import re
 import sys
@@ -19,8 +20,12 @@ PIPELINE = ROOT / "departments" / "04-quant-backtest" / "pipeline"
 if str(PIPELINE) not in sys.path:
     sys.path.insert(0, str(PIPELINE))
 
-from intraday_microstructure import HorizonLabel, IntradaySample  # noqa: E402
-from intraday_sample_cache import CACHE_VERSION, SampleCache  # noqa: E402
+from intraday_microstructure import (EXTERNAL_EVENT_SOURCE, FeatureCubeSpec,
+                                      HorizonLabel, IntradayLaneSpec,
+                                      IntradaySample, IntradaySampleBatch,
+                                      MultiScaleFeatureCube)  # noqa: E402
+from intraday_sample_cache import (CACHE_VERSION, SampleCache,
+                                   identity)  # noqa: E402
 
 
 UTC = timezone.utc
@@ -73,6 +78,35 @@ def sample() -> IntradaySample:
     )
 
 
+def batch(samples: tuple[IntradaySample, ...] | None = None) -> \
+        IntradaySampleBatch:
+    rows = (sample(),) if samples is None else samples
+    spec = FeatureCubeSpec()
+    index_blob = json.dumps([
+        [row.instrument_id, row.decision_time.isoformat()] for row in rows
+    ], separators=(",", ":"))
+    decision_fingerprint = hashlib.sha256(
+        index_blob.encode()).hexdigest()[:16]
+    columns = tuple(
+        (field, seconds, tuple(
+            float(column_index + row_index)
+            for row_index, _ in enumerate(rows)))
+        for column_index, (field, seconds) in enumerate(
+            (field, seconds)
+            for field in spec.windowed_fields
+            for seconds in spec.windows_seconds)
+    )
+    return IntradaySampleBatch(
+        rows,
+        MultiScaleFeatureCube(
+            spec=spec,
+            row_count=len(rows),
+            decision_index_fingerprint=decision_fingerprint,
+            columns=columns,
+        ),
+    )
+
+
 def rewrite(
     path: Path,
     *,
@@ -90,7 +124,7 @@ def rewrite(
     pq.write_table(rewritten, path, compression="zstd")
 
 
-def test_v3_cache_persists_and_verifies_logical_payload_contract(
+def test_v4_cache_persists_and_verifies_legacy_logical_payload_contract(
     tmp_path: Path,
 ) -> None:
     cache = SampleCache("a" * 64, root=tmp_path)
@@ -100,7 +134,7 @@ def test_v3_cache_persists_and_verifies_logical_payload_contract(
     path = cache.path_for("2026-08-14", "005930")
     metadata = pq.read_table(path).schema.metadata or {}
 
-    assert CACHE_VERSION == "intraday-discovery-sample-cache-v3"
+    assert CACHE_VERSION == "intraday-discovery-sample-cache-v4"
     assert metadata[b"intraday_cache_version"] == CACHE_VERSION.encode()
     assert metadata[b"sample_count"] == b"1"
     fingerprint = metadata[b"intraday_logical_payload_fingerprint"].decode()
@@ -155,3 +189,104 @@ def test_stale_or_inconsistent_valid_parquet_is_a_cache_miss(
     rewrite(path, mutate_metadata=alter)
     assert pq.read_table(path).num_rows == 1
     assert cache.load("2026-08-14", "005930") is None
+
+
+def test_batch_cache_round_trips_nonempty_and_empty_complete_feature_cubes(
+    tmp_path: Path,
+) -> None:
+    cache = SampleCache("d" * 64, root=tmp_path)
+    populated = batch()
+
+    assert cache.store_batch("2026-08-14", "005930", populated) is True
+    loaded = cache.load_batch(
+        "2026-08-14", "005930", expected_spec=FeatureCubeSpec())
+    assert loaded == populated
+    table = pq.read_table(cache.path_for("2026-08-14", "005930"))
+    metadata = table.schema.metadata or {}
+    manifest = json.loads(metadata[b"intraday_feature_cube_columns"])
+    assert len(manifest) == (
+        len(FeatureCubeSpec().windowed_fields)
+        * len(FeatureCubeSpec().windows_seconds))
+    assert all(item["parquet_column"] in table.column_names
+               for item in manifest)
+    assert metadata[b"evidence_authority"] == b"NONE"
+
+    empty = batch(())
+    assert cache.store_batch("2026-08-14", "000020", empty) is True
+    empty_table = pq.read_table(cache.path_for("2026-08-14", "000020"))
+    empty_manifest = json.loads(
+        (empty_table.schema.metadata or {})[b"intraday_feature_cube_columns"])
+    assert empty_table.num_rows == 0
+    assert all(item["parquet_column"] in empty_table.column_names
+               for item in empty_manifest)
+    assert cache.load_batch(
+        "2026-08-14", "000020", expected_spec=FeatureCubeSpec()) == empty
+
+
+def test_batch_cache_identity_is_distinct_and_binds_feature_cube_contract() -> None:
+    kwargs = {
+        "spec": IntradayLaneSpec(horizons_seconds=(5,)),
+        "event_source": EXTERNAL_EVENT_SOURCE,
+        "execution_model": "TAKER",
+        "source_lineage": [{"source": "ext_src.quotes", "rows": 10}],
+    }
+    legacy = identity(**kwargs)
+    explicit = identity(**kwargs, feature_cube_spec=FeatureCubeSpec())
+    assert legacy != explicit
+    assert explicit == identity(
+        **kwargs, feature_cube_spec=FeatureCubeSpec())
+
+
+def test_batch_cache_rejects_tampered_cube_column(tmp_path: Path) -> None:
+    cache = SampleCache("e" * 64, root=tmp_path)
+    assert cache.store_batch("2026-08-14", "005930", batch()) is True
+    path = cache.path_for("2026-08-14", "005930")
+    metadata = pq.read_table(path).schema.metadata or {}
+    column_name = json.loads(
+        metadata[b"intraday_feature_cube_columns"])[0]["parquet_column"]
+
+    def tamper(rows: list[dict]) -> None:
+        rows[0][column_name] = 999.0
+
+    rewrite(path, mutate_rows=tamper)
+    assert cache.load_batch(
+        "2026-08-14", "005930", expected_spec=FeatureCubeSpec()) is None
+
+
+def test_batch_cache_rejects_tampered_spec(tmp_path: Path) -> None:
+    cache = SampleCache("f" * 64, root=tmp_path)
+    assert cache.store_batch("2026-08-14", "005930", batch()) is True
+    path = cache.path_for("2026-08-14", "005930")
+
+    def tamper(metadata: dict[bytes, bytes]) -> None:
+        raw = json.loads(metadata[b"intraday_feature_cube_spec"])
+        raw["boundary"] = "[decision-W,decision]"
+        metadata[b"intraday_feature_cube_spec"] = json.dumps(
+            raw, sort_keys=True, separators=(",", ":")).encode()
+
+    rewrite(path, mutate_metadata=tamper)
+    assert cache.load_batch(
+        "2026-08-14", "005930", expected_spec=FeatureCubeSpec()) is None
+
+
+@pytest.mark.parametrize(
+    ("metadata_key", "metadata_value"),
+    [
+        (b"intraday_decision_index_fingerprint", b"tampered"),
+        (b"intraday_logical_payload_fingerprint", b"0" * 64),
+        (b"intraday_cache_payload_kind", b"LEGACY_SAMPLE_LIST_V1"),
+    ],
+)
+def test_batch_cache_rejects_tampered_integrity_metadata(
+    tmp_path: Path, metadata_key: bytes, metadata_value: bytes,
+) -> None:
+    cache = SampleCache("1" * 64, root=tmp_path)
+    assert cache.store_batch("2026-08-14", "005930", batch()) is True
+    path = cache.path_for("2026-08-14", "005930")
+
+    def tamper(metadata: dict[bytes, bytes]) -> None:
+        metadata[metadata_key] = metadata_value
+
+    rewrite(path, mutate_metadata=tamper)
+    assert cache.load_batch(
+        "2026-08-14", "005930", expected_spec=FeatureCubeSpec()) is None
