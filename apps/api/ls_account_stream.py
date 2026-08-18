@@ -402,6 +402,55 @@ def normalize_executions(payload: dict[str, Any]) -> dict[tuple[str, str], dict[
     return index
 
 
+def normalize_accepted_orders(
+    payload: dict[str, Any], order_date: str | None = None
+) -> list[dict[str, Any]]:
+    """당일 주문·체결 조회에서 실제 주문번호가 있는 접수 사건을 복원한다.
+
+    체결 원장 행을 접수로 바꾸지 않는다. 주문번호·주문시각·주문수량이 따로 있는
+    주문 조회 행만 사용하므로, 프로세스가 주문 뒤에 시작돼 SC0을 놓친 경우에도
+    대시보드의 접수 사건을 다시 구성할 수 있다.
+    """
+    rows = payload.get("CSPAQ13700OutBlock3")
+    rows = rows if isinstance(rows, list) else []
+    day = order_date or date.today().isoformat()
+    events: list[dict[str, Any]] = []
+    seen_order_nos: set[str] = set()
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        order_no = _number(row.get("OrdNo"))
+        if not order_no or order_no in seen_order_nos:
+            continue
+        seen_order_nos.add(order_no)
+        order_time = _pick(row, "OrdTime")
+        events.append({
+            "seq": 0,  # 병합 뒤 전체 목록 기준으로 다시 부여한다.
+            "kind": "ACCEPTED",
+            "label": KIND_LABELS["ACCEPTED"],
+            "received_at": day + ("T" + order_time if order_time else ""),
+            "event_time": order_time,
+            "order_no": order_no,
+            "orig_order_no": _number(row.get("OrgOrdNo")),
+            "symbol": _symbol(_pick(row, "IsuNo")),
+            "symbol_name": _pick(row, "IsuNm"),
+            "side": _side(_pick(row, "BnsTpCode")),
+            "quantity": _number(row.get("OrdQty")),
+            "price": _number(row.get("OrdPrc")),
+            "unfilled_quantity": None,
+        })
+
+    events.sort(
+        key=lambda event: (
+            str(event.get("received_at") or ""),
+            str(event.get("order_no") or ""),
+        ),
+        reverse=True,
+    )
+    return events
+
+
 def attach_executions(
     rows: list[dict[str, Any]], index: dict[tuple[str, str], dict[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -684,8 +733,30 @@ def merge_order_events(
     CDPCQ04700에는 접수·정정·취소·거부가 없으므로 그 상태는 SC 실시간 피드에서
     가져온다. 체결은 계좌 거래내역을 기준으로 유지해 SC1과 중복 표시하지 않는다.
     """
-    events = list(ledger_events)
-    events.extend(event for event in realtime_events if event.get("kind") != "FILLED")
+    # 실시간/당일 주문 조회가 같은 접수를 함께 주는 경우 주문번호로 한 건만 남긴다.
+    # 주문번호가 없을 때도 화면 계약 필드 조합으로 중복을 막되 값을 지어내지 않는다.
+    events: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    candidates = [
+        event for event in realtime_events if event.get("kind") != "FILLED"
+    ] + list(ledger_events)
+    for event in candidates:
+        order_no = event.get("order_no")
+        key = (
+            event.get("kind"),
+            ("order", str(order_no)) if order_no else (
+                "event",
+                event.get("symbol"),
+                event.get("side"),
+                event.get("event_time"),
+                event.get("quantity"),
+                event.get("price"),
+            ),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        events.append(dict(event))
     events.sort(
         key=lambda event: (
             str(event.get("received_at") or ""),
@@ -694,7 +765,12 @@ def merge_order_events(
         ),
         reverse=True,
     )
-    return events[: max(1, min(limit, MAX_EVENTS))]
+    events = events[: max(1, min(limit, MAX_EVENTS))]
+    # 원장과 실시간 피드는 각자 1부터 seq를 매겨 그대로 합치면 React key가
+    # 충돌한다. 최종 화면 목록에서 유일한 순번으로 다시 부여한다.
+    for index, event in enumerate(events):
+        event["seq"] = len(events) - index
+    return events
 
 
 def apply_fill(local: dict[str, Decimal], event: dict[str, Any]) -> None:
@@ -978,8 +1054,10 @@ async def _fetch_today_activity(config: Any, token: str) -> dict[str, Any]:
     return normalize_today_activity(body)
 
 
-async def _fetch_today_executions(config: Any, token: str) -> dict[tuple[str, str], dict[str, Any]]:
-    """당일 체결내역. 매매일지에 없는 시각·종목명을 여기서 가져온다."""
+async def _fetch_today_executions(
+    config: Any, token: str
+) -> tuple[dict[tuple[str, str], dict[str, Any]], list[dict[str, Any]]]:
+    """당일 주문·체결내역에서 원장 색인과 접수 사건을 함께 만든다."""
     body = await _post_tr(
         config,
         token,
@@ -997,7 +1075,7 @@ async def _fetch_today_executions(config: Any, token: str) -> dict[tuple[str, st
             }
         },
     )
-    return normalize_executions(body)
+    return normalize_executions(body), normalize_accepted_orders(body)
 
 
 async def _fetch_today_trades(config: Any, token: str) -> list[dict[str, Any]]:
@@ -1162,15 +1240,18 @@ async def portfolio_live(limit: int = 50) -> dict[str, Any]:
     FEED.start()
     environment = os.getenv("LS_ENV", "PAPER").strip().upper()
     history_error: str | None = None
-    order_source = "CDPCQ04700+SC_REALTIME"
+    order_source = "CDPCQ04700+CSPAQ13700+SC_REALTIME"
     try:
         # 체결은 계좌 거래내역을 기준으로 삼고, 접수·정정·취소·거부는
         # 실시간 피드에서 보충한다. 3초 폴링과 TR 호출 제한을 함께 고려한
         # 짧은 캐시다.
         ledger, _, _ = await _load_ledger(cache_seconds=ORDER_HISTORY_CACHE_SECONDS)
+        cached_day, accepted_orders = _accepted_order_cache
+        if cached_day != date.today().isoformat():
+            accepted_orders = []
         recent_orders = merge_order_events(
             ledger_to_order_events(ledger, limit),
-            list(FEED.events),
+            list(FEED.events) + accepted_orders,
             limit,
         )
     except Exception as exc:  # noqa: BLE001 - 잔고/스트림 화면을 거래내역 장애로 막지 않는다
@@ -1231,6 +1312,7 @@ async def portfolio_live(limit: int = 50) -> dict[str, Any]:
 
 
 _ledger_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+_accepted_order_cache: tuple[str, list[dict[str, Any]]] = ("", [])
 # 계좌 조회 TR은 초당 1~2건이다. 대시보드와 회계 화면이 동시에 폴링하면 캐시
 # 키가 달라 두 호출이 같은 초에 나가고 그대로 거부당한다(오늘 90일 조회 502의
 # 원인). 실제 호출만 직렬화하고 최소 간격을 둔다.
@@ -1260,6 +1342,8 @@ async def _load_ledger(
     안 잡히는 **당일 매매**다. 확정분만 쓰면 오늘 거래한 날의 장부가 통째로
     비고(T+2), 매매일지만 쓰면 과거가 없다. 줄마다 `settlement`로 구분한다.
     """
+    global _accepted_order_cache
+
     span = max(1, min(days, 365))
     end = date.today()
     start = end - timedelta(days=span - 1)
@@ -1318,7 +1402,9 @@ async def _load_ledger(
             # 나가야 하므로 원장 전체를 막지 않는다.
             try:
                 await _tr_slot()
-                attach_executions(today_rows, await _fetch_today_executions(config, token))
+                execution_index, accepted_orders = await _fetch_today_executions(config, token)
+                attach_executions(today_rows, execution_index)
+                _accepted_order_cache = (date.today().isoformat(), accepted_orders)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -1456,6 +1542,7 @@ async def portfolio_ledger(days: int = LEDGER_DAYS) -> dict[str, Any]:
 
 __all__ = ["router", "ENABLE_LS_ORDER_EVENTS", "KIND_LABELS", "normalize_order_event",
            "normalize_holdings", "normalize_daily_returns", "normalize_today_activity", "normalize_ledger",
+           "normalize_accepted_orders",
            "normalize_market_ranking",
            "ledger_to_order_events", "merge_order_events", "build_pnl", "apply_fill",
            "compare_positions", "mask_account"]
@@ -1628,9 +1715,16 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
     assert ledger_events[0]["order_no"] == "12"
 
     # 확정 원장에 없는 접수는 실시간 피드에서 보충하되, 체결은 원장과 중복하지 않는다
-    merged_orders = merge_order_events(ledger_events, [accepted, filled], 50)
+    duplicate_accepted = {**accepted, "seq": 99}
+    merged_orders = merge_order_events(
+        ledger_events,
+        [accepted, duplicate_accepted, filled],
+        50,
+    )
     assert any(event["kind"] == "ACCEPTED" for event in merged_orders)
+    assert sum(event["kind"] == "ACCEPTED" for event in merged_orders) == 1
     assert sum(event["kind"] == "FILLED" for event in merged_orders) == len(ledger_events)
+    assert len({event["seq"] for event in merged_orders}) == len(merged_orders)
 
     # 합계 필드가 오면 그것을 쓰고 개별 세금과 이중 계상하지 않는가
     one = normalize_ledger({"CDPCQ04700OutBlock3": [
@@ -1680,16 +1774,35 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
         {"medosu": "종목소계", "fee": 100, "adjamt": 1}]}, "2026-08-18")["rows"] == []
 
     # 체결내역 색인 - 시각과 종목명이 매매일지 줄에 붙는가
-    execs = normalize_executions({"CSPAQ13700OutBlock3": [
-        {"IsuNo": "A000660", "IsuNm": "SK하이닉스", "BnsTpCode": "2", "LastExecTime": "09:05:11"},
+    execution_payload = {"CSPAQ13700OutBlock3": [
+        {"OrdNo": 101, "OrgOrdNo": 0, "OrdTime": "09:05:00", "OrdQty": 1,
+         "OrdPrc": 1650000, "IsuNo": "A000660", "IsuNm": "SK하이닉스",
+         "BnsTpCode": "2", "LastExecTime": "09:05:11"},
         # 같은 종목·같은 방향을 여러 번 체결하면 소계는 한 줄이다. 시각은 마지막 것.
-        {"IsuNo": "A000660", "IsuNm": "SK하이닉스", "BnsTpCode": "2", "LastExecTime": "14:31:02"},
-        {"IsuNo": "A000660", "IsuNm": "SK하이닉스", "BnsTpCode": "1", "LastExecTime": "10:00:00"},
-    ]})
+        {"OrdNo": 102, "OrdTime": "14:30:00", "OrdQty": 2, "OrdPrc": 1655000,
+         "IsuNo": "A000660", "IsuNm": "SK하이닉스", "BnsTpCode": "2",
+         "LastExecTime": "14:31:02"},
+        {"OrdNo": 103, "OrdTime": "09:59:00", "OrdQty": 1, "OrdPrc": 1670000,
+         "IsuNo": "A000660", "IsuNm": "SK하이닉스", "BnsTpCode": "1",
+         "LastExecTime": "10:00:00"},
+        # 같은 주문번호가 여러 체결 행에 반복돼도 접수는 한 건이다.
+        {"OrdNo": 102, "OrdTime": "14:30:00", "OrdQty": 2, "OrdPrc": 1655000,
+         "IsuNo": "A000660", "IsuNm": "SK하이닉스", "BnsTpCode": "2",
+         "LastExecTime": "14:30:30"},
+    ]}
+    execs = normalize_executions(execution_payload)
     assert execs[("000660", "매수")]["time"] == "14:31:02", execs
-    assert execs[("000660", "매수")]["count"] == 2
+    assert execs[("000660", "매수")]["count"] == 3
     # 매도는 별개 묶음이다 - 종목만으로 묶으면 매수 시각이 매도에 붙는다
     assert execs[("000660", "매도")]["time"] == "10:00:00"
+
+    accepted_history = normalize_accepted_orders(execution_payload, "2026-08-18")
+    assert len(accepted_history) == 3
+    assert accepted_history[0]["kind"] == "ACCEPTED"
+    assert accepted_history[0]["order_no"] == "102"
+    assert accepted_history[0]["side"] == "매수"
+    assert accepted_history[0]["quantity"] == "2"
+    assert accepted_history[0]["price"] == "1655000"
 
     attach_executions(today_trades, execs)
     assert sell["trade_time"] == "10:00:00" and sell["symbol_name"] == "SK하이닉스"

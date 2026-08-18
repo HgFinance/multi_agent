@@ -30,7 +30,7 @@ const POLL_MS = 3000;
 
 /** 주문 상태별 강조색. 체결·거부는 눈에 띄어야 하고 나머지는 중립이다. */
 const KIND_TONE: Record<string, string> = {
-  ACCEPTED: "border-outline-variant bg-surface-container text-on-surface-variant",
+  ACCEPTED: "border-green-300 bg-green-50 text-green-700",
   FILLED: "border-tertiary-fixed-dim bg-tertiary-fixed/30 text-on-tertiary-fixed-variant",
   AMENDED: "border-outline-variant bg-surface-container-high text-on-surface",
   CANCELLED: "border-outline-variant bg-surface-container-high text-on-surface-variant",
@@ -349,18 +349,34 @@ function HoldingRow({ holding }: { holding: Holding }) {
   );
 }
 
+type EventSide = "BUY" | "SELL";
+
+function getEventSide(value: string | null): EventSide | null {
+  const normalized = (value ?? "").toUpperCase();
+  if (/(매수|BUY)/.test(normalized)) return "BUY";
+  if (/(매도|SELL)/.test(normalized)) return "SELL";
+  return null;
+}
+
+function formatEventPrice(event: OrderEvent): string {
+  // SC0 접수는 체결가가 아니므로 브로커가 0을 보내도 화면에서는 가격을 단정하지 않는다.
+  return event.kind === "ACCEPTED" ? "—" : formatMoney(event.price);
+}
+
 function getEventTone(event: OrderEvent): string {
-  if (event.kind !== "ACCEPTED") return KIND_TONE[event.kind] ?? KIND_TONE.ACCEPTED;
-  if (event.side === "매수" || event.side === "BUY") {
+  if (event.kind !== "FILLED") return KIND_TONE[event.kind] ?? KIND_TONE.ACCEPTED;
+  const side = getEventSide(event.side);
+  if (side === "BUY") {
     return "border-red-300 bg-red-50 text-red-700";
   }
-  if (event.side === "매도" || event.side === "SELL") {
+  if (side === "SELL") {
     return "border-blue-300 bg-blue-50 text-blue-700";
   }
   return KIND_TONE.ACCEPTED;
 }
 
 function EventRow({ event }: { event: OrderEvent }) {
+  const side = getEventSide(event.side);
   return (
     <tr className="border-b border-outline-variant last:border-b-0">
       <td className="px-3 py-2.5 font-data-mono text-on-surface-variant">{formatEventTime(event.event_time)}</td>
@@ -374,9 +390,11 @@ function EventRow({ event }: { event: OrderEvent }) {
       <td className="truncate px-3 py-2.5 text-on-surface" title={event.symbol ?? undefined}>
         {event.symbol_name ?? event.symbol ?? "—"}
       </td>
-      <td className="px-3 py-2.5 text-on-surface-variant">{event.side ?? "—"}</td>
+      <td className="px-3 py-2.5 text-on-surface-variant">
+        {side === "BUY" ? "매수" : side === "SELL" ? "매도" : event.side ?? "—"}
+      </td>
       <td className="px-3 py-2.5 text-right font-data-mono text-on-surface">{formatNumber(event.quantity)}</td>
-      <td className="px-3 py-2.5 text-right font-data-mono text-on-surface-variant">{formatMoney(event.price)}</td>
+      <td className="px-3 py-2.5 text-right font-data-mono text-on-surface-variant">{formatEventPrice(event)}</td>
       <td
         className="truncate px-3 py-2.5 text-right font-data-mono text-outline"
         title={event.orig_order_no ? `원주문 ${event.orig_order_no}` : undefined}
@@ -548,6 +566,11 @@ export default function LivePortfolioPanel() {
               </h3>
               <span className="text-xs text-on-surface-variant">{data?.orders.recent.length ?? 0}건</span>
             </div>
+            {data?.orders.error ? (
+              <p role="alert" className="m-0 border-b border-error/40 bg-error-container px-4 py-2 text-xs text-on-error-container">
+                과거 주문 사건을 불러오지 못해 실시간 수신분만 표시합니다: {data.orders.error}
+              </p>
+            ) : null}
             <div className="max-h-[17rem] overflow-auto">
               <table className="w-full min-w-[620px] table-fixed text-left text-xs">
                 <thead className="sticky top-0 z-10 border-b border-outline-variant bg-surface-container-low text-label-md text-on-surface-variant">
@@ -563,7 +586,12 @@ export default function LivePortfolioPanel() {
                 </thead>
                 <tbody>
                   {data && data.orders.recent.length > 0 ? (
-                    data.orders.recent.map((event) => <EventRow key={event.seq} event={event} />)
+                    data.orders.recent.map((event) => (
+                      <EventRow
+                        key={`${event.kind}-${event.order_no ?? "none"}-${event.received_at}-${event.seq}`}
+                        event={event}
+                      />
+                    ))
                   ) : (
                     <tr>
                       <td colSpan={7} className="px-3 py-7 text-center text-sm text-on-surface-variant">

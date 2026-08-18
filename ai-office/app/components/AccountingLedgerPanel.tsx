@@ -10,9 +10,7 @@ import {
   signTone,
   AccountingLedgerError,
   type AccountingLedger,
-  type AccountSummary,
   type LedgerEntry,
-  type Pnl,
 } from "../lib/accountingLedgerClient";
 
 /**
@@ -23,7 +21,7 @@ import {
  * 실제로 쓰는 축이다. 그래서 도넛·실시간 배지 대신 차변/대변식 정렬, 잔액
  * 이월 칸, 합계 행(`tfoot`)을 둔다.
  *
- * 여기 나오는 값은 **브로커 정산 기준**이고 우리 공식 원장이 아니다. "비공식"
+ * 여기 나오는 값은 **브로커 거래 기준**이고 우리 공식 원장이 아니다. "비공식"
  * 배지를 박아 두는 이유이고, 마감으로 확정하는 것은 회계본부 원장이다.
  */
 
@@ -41,33 +39,33 @@ function Badge({ children, tone }: { children: React.ReactNode; tone?: string })
   );
 }
 
-/** 회계가 보는 축. 비용은 묶어서 보여야 의미가 생긴다. */
-function Metric({
-  label,
-  value,
-  hint,
-  tone,
-}: {
-  label: string;
-  value: string;
-  hint?: string;
-  tone?: string;
-}) {
-  return (
-    <div className="min-w-0 border-l border-outline-variant px-4 py-1 first:border-l-0 first:pl-0">
-      <span className="block text-label-md font-label-md uppercase text-on-surface-variant">{label}</span>
-      <p className={`m-0 mt-1 truncate font-data-mono text-title-md font-bold ${tone ?? "text-primary"}`} title={value}>
-        {value}
-      </p>
-      {hint ? <span className="mt-0.5 block text-[11px] text-outline">{hint}</span> : null}
-    </div>
-  );
+type LedgerSide = "BUY" | "SELL";
+
+/** 원천마다 category/summary 중 한 곳에만 방향이 들어올 수 있어 둘 다 확인한다. */
+function getLedgerSide(entry: LedgerEntry): LedgerSide | null {
+  const category = (entry.category ?? "").toUpperCase();
+  if (/(매수|BUY)/.test(category)) return "BUY";
+  if (/(매도|SELL)/.test(category)) return "SELL";
+
+  const summary = (entry.summary ?? "").toUpperCase();
+  if (/(매수|BUY)/.test(summary)) return "BUY";
+  if (/(매도|SELL)/.test(summary)) return "SELL";
+  return null;
+}
+
+function ledgerSideTone(side: LedgerSide | null): string {
+  if (side === "BUY") return "border-red-300 bg-red-50 text-red-700";
+  if (side === "SELL") return "border-blue-300 bg-blue-50 text-blue-700";
+  return "border-outline-variant bg-surface-container-lowest text-outline";
 }
 
 function LedgerRow({ entry, showDate }: { entry: LedgerEntry; showDate: boolean }) {
   const cancelled = Boolean(entry.cancelled && entry.cancelled.trim());
+  const side = getLedgerSide(entry);
+  const sideTextTone = side === "BUY" ? "text-red-700" : side === "SELL" ? "text-blue-700" : "text-on-surface";
+  const sideRowTone = side === "BUY" ? "border-l-2 border-l-red-400 bg-red-50/20" : side === "SELL" ? "border-l-2 border-l-blue-400 bg-blue-50/20" : "";
   return (
-    <tr className={`border-b border-outline-variant/70 last:border-b-0 ${cancelled ? "opacity-55" : ""}`}>
+    <tr className={`border-b border-outline-variant/70 last:border-b-0 ${sideRowTone} ${cancelled ? "opacity-55" : ""}`}>
       <td className="whitespace-nowrap px-3 py-2 align-top font-data-mono text-on-surface-variant">
         {/* 같은 날은 첫 줄에만 날짜를 적는다 - 종이 원장이 하는 방식이고, 하루 단위 묶음이 눈에 들어온다 */}
         <span className="block">{showDate ? formatLedgerDate(entry.trade_date) : ""}</span>
@@ -76,16 +74,16 @@ function LedgerRow({ entry, showDate }: { entry: LedgerEntry; showDate: boolean 
         </span>
       </td>
       <td className="px-3 py-2 align-top">
-        <span className="block truncate text-on-surface" title={entry.summary ?? undefined}>
+        <span className={`block truncate ${sideTextTone}`} title={entry.summary ?? undefined}>
           {entry.summary ?? entry.category ?? "—"}
         </span>
         <span className="mt-0.5 flex flex-wrap items-center gap-1">
-          {entry.category ? <span className="text-[10px] text-outline">{entry.category}</span> : null}
-          {/* 결제 전 줄을 확정 수치와 같은 모양으로 두면 회계가 마감에 그대로 쓴다 */}
-          {entry.settlement === "UNSETTLED" ? (
-            <span className="rounded-full border border-outline-variant bg-surface-container px-1.5 py-px text-[10px] font-semibold text-on-surface-variant">
-              미결제
+          {side ? (
+            <span className={`inline-flex whitespace-nowrap rounded-full border px-1.5 py-px text-[10px] font-semibold ${ledgerSideTone(side)}`}>
+              {side === "BUY" ? "매수" : "매도"}
             </span>
+          ) : entry.category ? (
+            <span className="text-[10px] text-outline">{entry.category}</span>
           ) : null}
         </span>
         {cancelled ? <span className="text-[10px] text-[color:var(--color-error)]">{entry.cancelled}</span> : null}
@@ -102,7 +100,7 @@ function LedgerRow({ entry, showDate }: { entry: LedgerEntry; showDate: boolean 
       <td className="px-3 py-2 text-right align-top font-data-mono text-on-surface-variant">
         {formatLedgerCell(entry.unit_price)}
       </td>
-      <td className="px-3 py-2 text-right align-top font-data-mono text-on-surface">
+      <td className={`px-3 py-2 text-right align-top font-data-mono font-semibold ${sideTextTone}`}>
         {formatLedgerCell(entry.amount)}
       </td>
       <td className="px-3 py-2 text-right align-top font-data-mono text-outline">
@@ -119,126 +117,159 @@ function LedgerRow({ entry, showDate }: { entry: LedgerEntry; showDate: boolean 
   );
 }
 
-/** 계좌 기본정보. 기간 원장이 아니라 **지금 이 계좌**가 어떤 상태인가를 본다. */
-function AccountCard({ summary }: { summary: AccountSummary | undefined }) {
-  const cells: { label: string; value: string; tone?: string }[] = [
-    { label: "추정순자산", value: formatMoney(summary?.net_asset ?? null) },
-    { label: "평가금액", value: formatMoney(summary?.valuation ?? null) },
-    { label: "매입금액", value: formatMoney(summary?.purchase_amount ?? null) },
-    {
-      label: "평가손익",
-      value: formatMoney(summary?.valuation_pnl ?? null),
-      tone: signTone(summary?.valuation_pnl ?? null),
-    },
-    {
-      label: "실현손익",
-      value: formatMoney(summary?.realized_pnl ?? null),
-      tone: signTone(summary?.realized_pnl ?? null),
-    },
-  ];
+type StatementRow = {
+  account: string;
+  value: string;
+  basis: string;
+  tone?: string;
+  strong?: boolean;
+};
 
-  return (
-    <section
-      className="rounded-md border border-outline-variant bg-surface-container-lowest p-4"
-      aria-labelledby="accounting-account-card"
-    >
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 id="accounting-account-card" className="m-0 text-title-md font-title-md text-primary">
-          계좌 기본정보
-        </h3>
-        <span className="text-[11px] text-outline">
-          {summary?.holding_count ? `보유 ${summary.holding_count}종목` : "보유 없음"}
-          {summary?.as_of ? ` · ${new Date(summary.as_of).toLocaleTimeString("ko-KR")} 기준` : ""}
-        </span>
-      </div>
-
-      {summary?.error ? (
-        <p role="alert" className="m-0 mt-2 rounded border border-error/40 bg-error-container px-3 py-2 text-xs text-on-error-container">
-          잔고 조회 실패: {summary.error}
-        </p>
-      ) : null}
-
-      <div className="mt-3 grid grid-cols-2 gap-y-4 md:grid-cols-3 xl:grid-cols-5">
-        {cells.map((cell) => (
-          <div key={cell.label} className="min-w-0 border-l border-outline-variant px-4 first:border-l-0 first:pl-0">
-            <span className="block text-label-md font-label-md uppercase text-on-surface-variant">{cell.label}</span>
-            <p
-              className={`m-0 mt-1 truncate font-data-mono text-title-md font-bold ${cell.tone ?? "text-primary"}`}
-              title={cell.value}
-            >
-              {cell.value}
-            </p>
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
+type StatementGroup = {
+  label: string;
+  rows: StatementRow[];
+};
 
 /**
- * 손익(PNL).
+ * 계좌·손익·비용·거래 현황을 하나의 표로 묶는다.
  *
- * 실현과 평가를 한 칸에 합치지 않는다 — 평가손익은 아직 팔지 않은 값이라
- * 확정된 돈처럼 보이면 안 된다. 거래비용은 **총손익에서 빼지 않고** 참고로만
- * 둔다: 브로커 실현손익이 이미 제비용 포함 기준이라 또 빼면 이중 차감이다.
+ * 실현손익은 제비용 반영 값이고 평가손익은 미확정 값이므로 같은 손익 구역에
+ * 놓되 산출 기준을 분명히 적는다. 비용은 총손익에서 다시 차감하지 않는다.
  */
-function PnlCard({ pnl }: { pnl: Pnl | undefined }) {
-  const lines = [
-    { label: "실현손익", value: pnl?.realized ?? null, hint: "매도로 확정된 손익" },
-    { label: "평가손익", value: pnl?.valuation ?? null, hint: "보유 중 · 미확정" },
+function FinancialStatement({ data }: { data: AccountingLedger | null }) {
+  const summary = data?.account_summary;
+  const pnl = data?.pnl;
+  const totals = data?.totals;
+  const asOf = summary?.as_of
+    ? `${new Date(summary.as_of).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })} 기준`
+    : "조회 시점 기준";
+
+  const groups: StatementGroup[] = [
+    {
+      label: "자산",
+      rows: [
+        {
+          account: "추정순자산",
+          value: formatMoney(summary?.net_asset ?? null),
+          basis: "보유자산 평가액과 예수금 등을 반영한 추정치",
+          strong: true,
+        },
+        {
+          account: "보유자산 평가금액",
+          value: formatMoney(summary?.valuation ?? null),
+          basis: summary ? `${summary.holding_count}종목 · ${asOf}` : "잔고 조회 후 표시",
+        },
+        {
+          account: "보유자산 매입원가",
+          value: formatMoney(summary?.purchase_amount ?? null),
+          basis: "현재 보유분의 취득원가",
+        },
+        {
+          account: "기말 예수금",
+          value: formatMoney(data?.cash_balance ?? null),
+          basis: data ? (data.cash_balance ? "기간 마지막 거래 직후 잔액" : "기간 내 거래 없음") : "조회 후 표시",
+        },
+      ],
+    },
+    {
+      label: "손익",
+      rows: [
+        {
+          account: "실현손익",
+          value: formatMoney(pnl?.realized ?? summary?.realized_pnl ?? null),
+          basis: "매도로 확정 · 제비용 반영",
+          tone: signTone(pnl?.realized ?? summary?.realized_pnl ?? null),
+        },
+        {
+          account: "평가손익",
+          value: formatMoney(pnl?.valuation ?? summary?.valuation_pnl ?? null),
+          basis: "보유 중 · 미확정",
+          tone: signTone(pnl?.valuation ?? summary?.valuation_pnl ?? null),
+        },
+        {
+          account: "총손익",
+          value: formatMoney(pnl?.total ?? null),
+          basis: "실현손익 + 평가손익",
+          tone: signTone(pnl?.total ?? null),
+          strong: true,
+        },
+      ],
+    },
+    {
+      label: "거래비용",
+      rows: [
+        { account: "수수료", value: formatMoney(totals?.commission ?? null), basis: "조회 기간 합계" },
+        { account: "세금", value: formatMoney(totals?.tax ?? null), basis: "거래세·소득세·주민세" },
+        {
+          account: "비용 합계",
+          value: formatMoney(totals?.cost ?? null),
+          basis: pnl?.cost_included_in_realized ? "실현손익에 이미 반영 · 중복 차감 안 함" : "수수료 + 세금",
+          strong: true,
+        },
+      ],
+    },
+    {
+      label: "거래 현황",
+      rows: [
+        { account: "거래 건수", value: totals ? `${totals.count}건` : "—", basis: "조회 기간 전체" },
+        { account: "배당 수입", value: formatMoney(totals?.dividend ?? null), basis: "조회 기간 합계" },
+      ],
+    },
   ];
 
   return (
-    <section
-      className="rounded-md border border-outline-variant bg-surface-container-lowest p-4"
-      aria-labelledby="accounting-pnl-card"
-    >
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 id="accounting-pnl-card" className="m-0 text-title-md font-title-md text-primary">
-          손익 (PNL)
-        </h3>
-        <span className="text-[11px] text-outline">실현 + 평가</span>
+    <section className="min-w-0 overflow-hidden rounded-lg border border-outline-variant" aria-label="계좌 원장">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-outline-variant bg-primary px-4 py-3 text-on-primary">
+        <div>
+          <h3 className="m-0 text-title-md font-title-md font-bold">계좌 원장</h3>
+        </div>
+        <span className="text-xs font-semibold opacity-90">자산 · 손익 · 비용 · 거래 현황</span>
       </div>
 
-      <dl className="m-0 mt-3 space-y-2">
-        {lines.map((line) => (
-          <div key={line.label} className="flex items-baseline justify-between gap-3">
-            <dt className="m-0 min-w-0 text-body-sm font-body-sm text-on-surface">
-              {line.label}
-              <span className="ml-2 text-[11px] text-outline">{line.hint}</span>
-            </dt>
-            <dd className={`m-0 shrink-0 font-data-mono text-body-sm font-semibold ${signTone(line.value)}`}>
-              {formatMoney(line.value)}
-            </dd>
-          </div>
-        ))}
-
-        <div className="flex items-baseline justify-between gap-3 border-t border-outline-variant pt-2">
-          <dt className="m-0 text-body-sm font-body-sm font-bold text-on-surface">총손익</dt>
-          <dd className={`m-0 shrink-0 font-data-mono text-title-md font-bold ${signTone(pnl?.total ?? null)}`}>
-            {formatMoney(pnl?.total ?? null)}
-          </dd>
-        </div>
-
-        <div className="flex items-baseline justify-between gap-3 border-t border-outline-variant pt-2">
-          <dt className="m-0 min-w-0 text-body-sm font-body-sm text-on-surface-variant">
-            기간 거래비용
-            <span className="ml-2 text-[11px] text-outline">
-              수수료 {formatMoney(pnl?.commission ?? null)} · 세금 {formatMoney(pnl?.tax ?? null)}
-            </span>
-          </dt>
-          <dd className="m-0 shrink-0 font-data-mono text-body-sm text-on-surface-variant">
-            {formatMoney(pnl?.cost ?? null)}
-          </dd>
-        </div>
-      </dl>
-
-      {pnl?.cost_included_in_realized ? (
-        <p className="m-0 mt-3 border-t border-outline-variant pt-2 text-[11px] leading-5 text-outline">
-          거래비용은 총손익에서 다시 빼지 않았습니다. 실현손익이 제비용 포함 기준이라 한 번 더 빼면 이중 차감입니다 — 위 금액은
-          비용 규모를 보기 위한 참고 수치입니다.
-        </p>
-      ) : null}
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[720px] border-collapse text-left text-body-sm">
+          <caption className="sr-only">계좌의 자산, 손익, 거래비용과 거래 현황을 합친 원장</caption>
+          <thead className="border-b border-outline-variant bg-surface-container text-label-md text-on-surface-variant">
+            <tr>
+              <th scope="col" className="w-[15%] px-4 py-2.5 font-semibold">구분</th>
+              <th scope="col" className="w-[25%] px-4 py-2.5 font-semibold">계정과목</th>
+              <th scope="col" className="w-[22%] px-4 py-2.5 text-right font-semibold">금액 · 건수</th>
+              <th scope="col" className="w-[38%] px-4 py-2.5 font-semibold">산출 기준</th>
+            </tr>
+          </thead>
+          {groups.map((group) => (
+            <tbody key={group.label} className="border-b border-outline-variant last:border-b-0">
+              {group.rows.map((row, index) => (
+                <tr key={row.account} className="border-b border-outline-variant/60 last:border-b-0 hover:bg-surface-container-low/60">
+                  {index === 0 ? (
+                    <th
+                      scope="rowgroup"
+                      rowSpan={group.rows.length}
+                      className="border-r border-outline-variant bg-surface-container-low px-4 py-3 align-top font-semibold text-primary"
+                    >
+                      {group.label}
+                    </th>
+                  ) : null}
+                  <th scope="row" className={`px-4 py-2.5 font-medium text-on-surface ${row.strong ? "font-bold" : ""}`}>
+                    {row.account}
+                  </th>
+                  <td
+                    className={`whitespace-nowrap px-4 py-2.5 text-right font-data-mono tabular-nums ${
+                      row.strong ? "font-bold" : "font-semibold"
+                    } ${row.tone ?? "text-on-surface"}`}
+                  >
+                    {row.value}
+                  </td>
+                  <td className="px-4 py-2.5 text-xs leading-5 text-on-surface-variant">{row.basis}</td>
+                </tr>
+              ))}
+            </tbody>
+          ))}
+        </table>
+      </div>
+      <p className="m-0 border-t border-outline-variant bg-surface-container-low px-4 py-2.5 text-[11px] leading-5 text-on-surface-variant">
+        거래 기준의 참고 표입니다. 공식 장부와 NAV는 회계본부 마감 후 확정됩니다.
+      </p>
     </section>
   );
 }
@@ -267,7 +298,7 @@ export default function AccountingLedgerPanel() {
           <span className="material-symbols-outlined text-[16px]" aria-hidden="true">
             receipt_long
           </span>
-          <span className="truncate">accounting_ledger.transactions</span>
+          <span className="truncate">accounting.financial_statement</span>
         </span>
         <div className="flex shrink-0 items-center gap-1.5">
           {data ? <Badge>{data.environment_label}</Badge> : null}
@@ -286,10 +317,10 @@ export default function AccountingLedgerPanel() {
               id="accounting-ledger-title"
               className="mt-2 text-headline-md font-headline-md font-bold text-primary"
             >
-              계좌 거래 원장
+              회계본부 관리 계좌 현황
             </h2>
             <p className="mt-2 max-w-3xl text-body-sm font-body-sm text-on-surface-variant">
-              확정된 거래만 기록합니다. 수수료·세금·손익은 정산 기준이며, 공식 장부는 회계본부 마감이 확정합니다.
+              계좌 자산, 손익, 거래비용과 거래 현황을 하나의 표로 정리했습니다. 공식 장부는 회계본부 마감이 확정합니다.
             </p>
           </div>
 
@@ -324,31 +355,9 @@ export default function AccountingLedgerPanel() {
           </p>
         ) : null}
 
-        <AccountCard summary={data?.account_summary} />
-
-        {/* 회계 요약 — 비용과 손익을 나란히 둔다 */}
-        <div className="grid grid-cols-2 gap-y-4 rounded-md border border-outline-variant bg-surface-container-lowest p-4 md:grid-cols-3 xl:grid-cols-6">
-          <Metric label="거래 건수" value={totals ? `${totals.count}건` : "—"} />
-          <Metric label="수수료" value={formatMoney(totals?.commission ?? null)} />
-          <Metric label="세금" value={formatMoney(totals?.tax ?? null)} hint="거래세·소득세·주민세" />
-          <Metric label="비용 합계" value={formatMoney(totals?.cost ?? null)} hint="수수료 + 세금" />
-          <Metric
-            label="실현손익"
-            value={formatMoney(totals?.realized_pnl ?? null)}
-            tone={signTone(totals?.realized_pnl ?? null)}
-            hint="비용 차감 후 정산 기준"
-          />
-          <Metric
-            label="기말 예수금"
-            value={formatMoney(data?.cash_balance ?? null)}
-            hint={data?.cash_balance ? "마지막 거래 직후" : "거래 없음"}
-          />
-        </div>
-
-        {data && data.totals.unsettled_count > 0 ? (
-          <p role="status" className="m-0 rounded border border-outline-variant bg-surface-container px-3 py-2 text-xs text-on-surface-variant">
-            <b className="font-semibold text-on-surface">미결제 {data.totals.unsettled_count}건</b>이 포함돼 있습니다. 당일 체결분은
-            결제(T+2)가 끝나기 전이라 확정 원장 대신 매매일지에서 옵니다 — 수수료·세금은 정산 기준이고, 실현손익은 결제 후에 확정됩니다.
+        {data?.account_summary?.error ? (
+          <p role="alert" className="m-0 rounded border border-error/40 bg-error-container px-3 py-2 text-xs text-on-error-container">
+            잔고 조회 실패: {data.account_summary.error}
           </p>
         ) : null}
 
@@ -360,31 +369,29 @@ export default function AccountingLedgerPanel() {
 
         {data?.today_error ? (
           <p role="alert" className="m-0 rounded border border-error/40 bg-error-container px-3 py-2 text-xs text-on-error-container">
-            당일 매매일지를 불러오지 못했습니다: {data.today_error}. 아래 표에는 결제가 끝난 거래만 나옵니다.
+            당일 매매일지를 불러오지 못했습니다: {data.today_error}. 아래 표에는 저장된 기록만 표시됩니다.
           </p>
         ) : null}
 
-        <PnlCard pnl={data?.pnl} />
+        <FinancialStatement data={data} />
 
-        <section
-          className="min-w-0 overflow-hidden rounded-lg border border-outline-variant"
-          aria-labelledby="accounting-ledger-table-title"
-        >
-          <div className="flex items-center justify-between gap-3 border-b border-outline-variant bg-surface-container-low px-4 py-3">
-            <h3 id="accounting-ledger-table-title" className="m-0 text-title-md font-title-md text-primary">
-              거래 내역
-            </h3>
-            <span className="flex items-center gap-2 text-xs text-on-surface-variant">
-              {data && data.totals.unsettled_count > 0 ? (
-                <span className="rounded-full border border-outline-variant bg-surface-container-lowest px-2 py-0.5 font-semibold">
-                  미결제 {data.totals.unsettled_count}건
-                </span>
-              ) : null}
+        <details className="group min-w-0 overflow-hidden rounded-lg border border-outline-variant bg-surface-container-lowest">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 bg-surface-container-low px-4 py-3 marker:content-none">
+            <span className="flex min-w-0 items-center gap-2">
+              <span className="material-symbols-outlined text-[18px] text-on-surface-variant transition-transform group-open:rotate-180" aria-hidden="true">
+                expand_more
+              </span>
+              <span className="min-w-0">
+                <span className="block text-title-md font-title-md font-semibold text-primary">거래 내역</span>
+                <span className="block text-[11px] text-outline">개별 거래가 필요할 때 펼쳐보세요</span>
+              </span>
+            </span>
+            <span className="flex shrink-0 items-center gap-2 text-xs text-on-surface-variant">
               {data ? `${data.rows.length}건 · 최근순` : "—"}
             </span>
-          </div>
+          </summary>
 
-          <div className="max-h-[26rem] overflow-auto">
+          <div className="max-h-[26rem] overflow-auto border-t border-outline-variant">
             <table className="w-full min-w-[900px] text-left text-xs">
               <thead className="sticky top-0 z-10 bg-surface-container text-label-md text-on-surface-variant shadow-[0_1px_0_var(--color-outline-variant)]">
                 <tr>
@@ -448,10 +455,10 @@ export default function AccountingLedgerPanel() {
               ) : null}
             </table>
           </div>
-        </section>
+        </details>
 
         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-t border-outline-variant pt-3 text-xs text-on-surface-variant">
-          <span>정산 기준 · 공식 장부는 회계본부 마감이 확정합니다</span>
+          <span>거래 기준 · 공식 장부는 회계본부 마감이 확정합니다</span>
           <span>
             {data?.totals.dividend && data.totals.dividend !== "0"
               ? `배당 수입 ${formatMoney(data.totals.dividend)} · `
