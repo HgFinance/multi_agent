@@ -49,26 +49,31 @@ def write_metadata(path: Path, metadata: Mapping[str, Any]) -> None:
 def build_training_metadata(
     *,
     repo_root: Path,
-    department: str,
+    department: str | None,
     adapter_name: str,
     adapter_version: str,
-    common_dataset_sha256: str,
-    department_dataset_sha256: str,
+    common_dataset_sha256: str | None,
+    department_dataset_sha256: str | None,
     mixture_metadata: Mapping[str, Any],
     qlora: QLoRAConfig,
     optimizer_args: Mapping[str, Any],
     training_args: Mapping[str, Any],
+    training_mode: str = "department",
+    common_train_sha256: str | None = None,
+    common_validation_sha256: str | None = None,
+    resolved_base_revision: str | None = None,
     final_metrics: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
-        "department": department,
+    metadata: dict[str, Any] = {
+        "training_mode": training_mode,
         "adapter_name": adapter_name,
         "adapter_version": adapter_version,
         "base_model": qlora.base_model,
         "base_revision": qlora.base_revision,
+        "requested_base_revision": qlora.base_revision,
+        "resolved_base_revision": resolved_base_revision,
         "git_commit": git_commit(repo_root),
         "common_dataset_sha256": common_dataset_sha256,
-        "department_dataset_sha256": department_dataset_sha256,
         "mixture_ratio": mixture_metadata.get("effective_ratios"),
         "train_size": mixture_metadata.get("actual_train_size"),
         "validation_size": training_args.get("validation_size"),
@@ -82,3 +87,12 @@ def build_training_metadata(
         "final_metrics": dict(final_metrics or {}),
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
     }
+    if department is not None:
+        metadata["department"] = department
+    if common_train_sha256 is not None:
+        metadata["common_train_sha256"] = common_train_sha256
+    if common_validation_sha256 is not None:
+        metadata["common_validation_sha256"] = common_validation_sha256
+    if department_dataset_sha256 is not None:
+        metadata["department_dataset_sha256"] = department_dataset_sha256
+    return metadata

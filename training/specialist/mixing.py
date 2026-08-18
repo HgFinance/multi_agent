@@ -68,6 +68,8 @@ def _assert_unique(examples: tuple[ValidatedExample, ...], label: str) -> dict[s
 def _assert_split_isolation(pools: Iterable[DatasetPool]) -> None:
     exact: dict[str, tuple[str, str]] = {}
     normalized: dict[str, tuple[str, str]] = {}
+    user_exact: dict[str, tuple[str, str]] = {}
+    user_normalized: dict[str, tuple[str, str]] = {}
     for pool in pools:
         for split, examples in (("train", pool.train), ("validation", pool.validation)):
             location = f"{pool.name}:{split}"
@@ -85,6 +87,25 @@ def _assert_split_isolation(pools: Iterable[DatasetPool]) -> None:
                         f"{previous} and {location}:{example.record['id']}"
                     )
                 normalized[example.normalized_sha256] = (location, str(example.record["id"]))
+
+                previous = user_exact.get(example.user_sha256)
+                if previous and previous[0].rsplit(":", 1)[-1] != split:
+                    raise DatasetValidationError(
+                        "exact user/question train/validation overlap: "
+                        f"{previous} and {location}:{example.record['id']}"
+                    )
+                user_exact[example.user_sha256] = (location, str(example.record["id"]))
+
+                previous = user_normalized.get(example.normalized_user_sha256)
+                if previous and previous[0].rsplit(":", 1)[-1] != split:
+                    raise DatasetValidationError(
+                        "normalized user/question train/validation overlap: "
+                        f"{previous} and {location}:{example.record['id']}"
+                    )
+                user_normalized[example.normalized_user_sha256] = (
+                    location,
+                    str(example.record["id"]),
+                )
 
 
 def load_pool(name: str, train_path: Path, validation_path: Path) -> DatasetPool:
@@ -166,11 +187,24 @@ def _with_provenance(example: ValidatedExample, pool_name: str) -> dict[str, Any
             "source_row": example.source_row,
             "record_sha256": example.record_sha256,
             "normalized_record_sha256": example.normalized_sha256,
+            "user_sha256": example.user_sha256,
+            "normalized_user_sha256": example.normalized_user_sha256,
         }
     )
     if "sample_sha256" in example.record:
         output["source_sample_sha256"] = example.record["sample_sha256"]
     return output
+
+
+def preserve_pool_split(pool: DatasetPool, split: str) -> list[dict[str, Any]]:
+    """Validate and preserve one split without sampling or replacement."""
+
+    if split not in {"train", "validation"}:
+        raise DatasetValidationError(f"unsupported pool split: {split}")
+    _assert_split_isolation((pool,))
+    examples = pool.train if split == "train" else pool.validation
+    _assert_unique(examples, f"{pool.name} {split}")
+    return [_with_provenance(example, pool.name) for example in examples]
 
 
 def mix_pools(
@@ -180,10 +214,12 @@ def mix_pools(
     target_size: int,
     seed: int = 66,
     allow_replacement: bool = False,
-    benchmark_root: Path | None = None,
+    benchmark_root: Path,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if not pools:
         raise DatasetValidationError("at least one dataset pool is required")
+    if benchmark_root is None:
+        raise DatasetValidationError("benchmark_root is required for training preparation")
     missing = [name for name, ratio in ratios.items() if float(ratio) > 0 and name not in pools]
     if missing:
         raise DatasetValidationError(f"active ratio has no pool: {missing}")
@@ -211,15 +247,19 @@ def mix_pools(
         selected.extend(_with_provenance(example, name) for example in chosen)
         selected_by_pool[name] = count
 
-    contamination = {"status": "NOT_RUN"}
-    if benchmark_root is not None:
-        # The selected records retain all provenance; validate them through the same contract.
-        selected_examples = [
-            ValidatedExample(record, record["messages"], str(record["source_dataset"]), str(record["source_file"]), int(record["source_row"]))
-            for record in selected
-        ]
-        contamination = check_contamination(selected_examples, benchmark_root)
-        require_clean(contamination)
+    # The selected records retain all provenance; validate them through the same contract.
+    selected_examples = [
+        ValidatedExample(
+            record,
+            record["messages"],
+            str(record["source_dataset"]),
+            str(record["source_file"]),
+            int(record["source_row"]),
+        )
+        for record in selected
+    ]
+    contamination = check_contamination(selected_examples, benchmark_root)
+    require_clean(contamination)
 
     metadata: dict[str, Any] = {
         "seed": seed,

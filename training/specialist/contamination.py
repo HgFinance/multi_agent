@@ -11,6 +11,13 @@ from typing import Any, Iterable
 from .schema import DatasetValidationError, ValidatedExample, normalize_text
 
 
+HELD_OUT_BENCHMARK_MANIFEST: dict[str, tuple[str, ...]] = {
+    "External-50": ("external50_v1.json",),
+    "Internal-v1": ("internal50_v1.json",),
+    "Internal-v2-EmployeeReasoning": ("internal50_v2_reasoning.json",),
+}
+
+
 def _records(path: Path) -> Iterable[dict[str, Any]]:
     try:
         if path.suffix == ".jsonl":
@@ -50,7 +57,37 @@ def _texts(record: dict[str, Any]) -> list[str]:
     return [normalize_text(value) for value in texts if normalize_text(value)]
 
 
-def _benchmark_texts(root: Path) -> list[tuple[str, str, str]]:
+def _benchmark_texts(
+    root: Path,
+    *,
+    manifest: dict[str, tuple[str, ...]] = HELD_OUT_BENCHMARK_MANIFEST,
+) -> list[tuple[str, str, str]]:
+    if not root.exists():
+        raise DatasetValidationError(f"benchmark root does not exist: {root}")
+    if not root.is_dir():
+        raise DatasetValidationError(f"benchmark root is not a directory: {root}")
+
+    missing_sets: list[str] = []
+    unreadable_sets: list[str] = []
+    for benchmark_name, relative_paths in manifest.items():
+        candidates = [root / relative_path for relative_path in relative_paths]
+        readable = False
+        for candidate in candidates:
+            if not candidate.is_file():
+                continue
+            if any(_texts(record) for record in _records(candidate)):
+                readable = True
+                break
+        if not any(candidate.is_file() for candidate in candidates):
+            missing_sets.append(benchmark_name)
+        elif not readable:
+            unreadable_sets.append(benchmark_name)
+    if missing_sets or unreadable_sets:
+        raise DatasetValidationError(
+            "held-out benchmark manifest incomplete: "
+            f"missing={missing_sets} unreadable={unreadable_sets}"
+        )
+
     output: list[tuple[str, str, str]] = []
     for path in sorted(root.rglob("*")):
         if not path.is_file() or path.suffix not in {".json", ".jsonl"}:
@@ -69,6 +106,10 @@ def check_contamination(
     minimum_length: int = 40,
 ) -> dict[str, Any]:
     benchmark = _benchmark_texts(benchmark_root)
+    if not benchmark:
+        raise DatasetValidationError(
+            f"benchmark root contains no readable benchmark texts: {benchmark_root}"
+        )
     by_hash: dict[str, list[tuple[str, str]]] = {}
     for path, identifier, text in benchmark:
         by_hash.setdefault(hashlib.sha256(text.encode("utf-8")).hexdigest(), []).append(
