@@ -95,7 +95,7 @@ def watch_events(
                 "kanban",
                 "watch",
                 "--kinds",
-                "completed,blocked,gave_up,crashed,timed_out,spawn_failed",
+                "claimed,spawned,completed,blocked,gave_up,crashed,timed_out,spawn_failed",
                 "--interval",
                 str(interval),
             ],
