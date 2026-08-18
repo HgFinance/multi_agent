@@ -304,5 +304,50 @@ class MirrorLabelTest(unittest.TestCase):
         self.assertTrue(content.startswith(f"{MIRROR_TAG} {self.USER3}"))
 
 
+class ThreadIsRequiredForDepartmentDetailTest(unittest.TestCase):
+    """스레드가 없으면 부서 진행 상세가 하나도 안 나간다.
+
+    2026-08-18 실측: 미러링된 요청에 부서 작업 내용이 전혀 보이지 않았다.
+    `discord_delivery.deliver_to_existing_thread()`가 `thread_id`를 요구하고
+    없으면 `status=missing_thread`로 조용히 반환하는데, 미러 게시는 스레드를
+    만들지 않았다. 최종 답변(`deliver()`)은 `message_reference` 답글이라
+    스레드 없이도 나가므로 "일부만 안 보이는" 상태였다.
+    """
+
+    def test_thread_id_round_trips_into_delivery(self) -> None:
+        body = build_root_body(
+            "q",
+            "req-1",
+            discord_channel_id="chan-1",
+            discord_message_id="msg-1",
+            discord_thread_id="thread-1",
+        )
+
+        self.assertEqual(correlation_from_task({"body": body}).thread_id, "thread-1")
+
+    def test_thread_is_optional(self) -> None:
+        """스레드 생성이 실패해도 좌표는 실린다 - 최종 답변은 나가야 한다."""
+
+        body = build_root_body(
+            "q", "req-1", discord_channel_id="chan-1", discord_message_id="msg-1"
+        )
+        correlation = correlation_from_task({"body": body})
+
+        self.assertIsNone(correlation.thread_id)
+        self.assertEqual(correlation.message_id, "msg-1")
+
+    def test_mirror_post_carries_thread_id(self) -> None:
+        """`MirrorPost`가 스레드 id를 들고 다녀야 root body까지 전달된다."""
+
+        post = discord_mirror.MirrorPost(
+            channel_id="c", message_id="m", guild_id="g", thread_id="t"
+        )
+
+        self.assertEqual(post.thread_id, "t")
+        self.assertIsNone(
+            discord_mirror.MirrorPost(channel_id="c", message_id="m").thread_id
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -434,6 +434,7 @@ def ceo_query(
     discord_channel_id: str | None = None,
     discord_message_id: str | None = None,
     discord_guild_id: str | None = None,
+    discord_thread_id: str | None = None,
 ) -> dict[str, object]:
     """Create the CEO root task; supervisor execution remains asynchronous.
 
@@ -498,6 +499,7 @@ def ceo_query(
             discord_channel_id=discord_channel_id,
             discord_message_id=discord_message_id,
             discord_guild_id=discord_guild_id,
+            discord_thread_id=discord_thread_id,
         ),
         idempotency_key=req.request_id,
     )

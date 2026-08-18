@@ -532,6 +532,7 @@ def build_root_body(
     discord_channel_id: str | None = None,
     discord_message_id: str | None = None,
     discord_guild_id: str | None = None,
+    discord_thread_id: str | None = None,
 ) -> str:
     """Build a root body that is unambiguous before the root ID exists.
 
@@ -571,6 +572,12 @@ def build_root_body(
         )
         if discord_guild_id:
             discord_lines += f"discord_guild_id={discord_guild_id}\n"
+        # 스레드가 있어야 부서 진행 **상세**가 나간다
+        # (`discord_delivery.deliver_to_existing_thread()`는 thread_id가 없으면
+        # `missing_thread`로 조용히 끝난다). 최종 답변은 스레드 없이도
+        # `message_reference` 답글로 나가므로 이 값은 선택이다.
+        if discord_thread_id:
+            discord_lines += f"discord_thread_id={discord_thread_id}" + chr(10)
     return (
         f"{CEO_WORKFLOW_SCOPE_MARKER}\n"
         f"workflow_scope={CEO_WORKFLOW_SCOPE_POLICY}\n"
