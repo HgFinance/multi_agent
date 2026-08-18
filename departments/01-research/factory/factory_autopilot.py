@@ -899,21 +899,63 @@ def _near_miss(conn, *, keep: int = 4) -> str:
     """
     try:
         with conn.cursor() as cur:
-            cur.execute("""
-                select o.trial_family_id, coalesce(o.notes, ''),
-                       o.lesson_codes
-                  from research.v_current_experiment_outcomes o
-                  join quant.experiments e
-                    on e.experiment_id::text = o.experiment_id
-                  join quant.hypotheses h
-                    on h.hypothesis_id = e.hypothesis_id
-                 join quant.dataset_manifests m
-                    on m.dataset_id = e.dataset_id
-                 where o.notes like '관문%%통과%%'
-                   and """ + _GOVERNED_HISTORICAL_EVIDENCE + """
-                 order by o.decided_at desc limit 40""")
-            rows = cur.fetchall() or []
+            # This block is advisory briefing, not a promotion gate.  The old
+            # single query made PostgreSQL evaluate the 25KB governed-evidence
+            # predicate across every experiment even when zero outcome notes
+            # matched; the live mean was 156s (max 185s).  Materialize the tiny
+            # note candidate set in Python first, then pay the governance proof
+            # only for those exact UUIDs.  Keep a hard budget so an optional
+            # paragraph cannot occupy the scheduler lock for minutes.
+            # Rolling back this read-only savepoint restores the caller's exact
+            # statement_timeout.  Setting it to zero would silently remove a
+            # stricter role/session budget from every later briefing query.
+            cur.execute("savepoint factory_near_miss_budget")
+            try:
+                cur.execute("set local statement_timeout = '5000ms'")
+                cur.execute("""
+                    select o.trial_family_id, coalesce(o.notes, ''),
+                           o.lesson_codes, o.experiment_id
+                      from research.v_current_experiment_outcomes o
+                     where o.notes like '관문%%통과%%'
+                     order by o.decided_at desc""")
+                candidates = cur.fetchall() or []
+                candidate_ids = sorted({
+                    str(row[3]).lower() for row in candidates
+                    if len(row) > 3 and re.fullmatch(
+                        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                        r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", str(row[3]))
+                })
+                governed_ids: set[str] = set()
+                if candidate_ids:
+                    cur.execute("""
+                        select e.experiment_id::text
+                          from quant.experiments e
+                          join quant.hypotheses h
+                            on h.hypothesis_id = e.hypothesis_id
+                          join quant.dataset_manifests m
+                            on m.dataset_id = e.dataset_id
+                         where e.experiment_id = any(%s::uuid[])
+                           and """ + _GOVERNED_HISTORICAL_EVIDENCE,
+                        (candidate_ids,))
+                    governed_ids = {
+                        str(row[0]).lower() for row in (cur.fetchall() or [])}
+                rows = [row[:3] for row in candidates
+                        if str(row[3]).lower() in governed_ids][:40]
+            except Exception:
+                # PostgreSQL permits ROLLBACK TO SAVEPOINT while the failed
+                # subtransaction is aborted; later briefing blocks remain usable.
+                cur.execute("rollback to savepoint factory_near_miss_budget")
+                cur.execute("release savepoint factory_near_miss_budget")
+                return ""
+            cur.execute("rollback to savepoint factory_near_miss_budget")
+            cur.execute("release savepoint factory_near_miss_budget")
     except Exception:      # noqa: BLE001 - 못 읽으면 적지 않는다(지어내지 않는다)
+        # Savepoint setup/restoration itself failed.  This connection is used
+        # only for briefing reads, so a full rollback is the safe last resort.
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
         return ""
 
     best: dict[str, tuple[int, str, list]] = {}
@@ -5138,14 +5180,37 @@ def _check_near_miss_surfaces_the_winner():
     """
     note = ("관문 4/8 통과. 남은 조항: max_drawdown -50.52% (기준 -35.0%, "
             "15.52% 모자람); pbo 미측정; fragility; bootstrap_ci 하한 -0.0029")
-    out = _near_miss(_RowsConn([
+    ids = [f"00000000-0000-0000-0000-{value:012d}" for value in range(1, 4)]
+
+    class _NearMissConn:
+        def __init__(self, batches):
+            self.batches = list(batches)
+
+        def cursor(self):
+            outer = self
+
+            class _C:
+                def __enter__(self_): return self_
+                def __exit__(self_, *args): return False
+                def execute(self_, *args, **kwargs): return None
+                def fetchall(self_):
+                    return outer.batches.pop(0) if outer.batches else []
+
+            return _C()
+
+        def rollback(self): return None
+
+    candidates = [
         ("momentum|krx_all|fwd_20d|equal_weight", note,
-         ["BEAR_FRAGILE", "SINGLE_REGIME_ONLY"]),
+         ["BEAR_FRAGILE", "SINGLE_REGIME_ONLY"], ids[0]),
         # 같은 계열의 나쁜 시도가 좋은 것을 가리면 안 된다
-        ("momentum|krx_all|fwd_20d|equal_weight", "관문 1/8 통과. 남은 조항: …", []),
+        ("momentum|krx_all|fwd_20d|equal_weight",
+         "관문 1/8 통과. 남은 조항: …", [], ids[1]),
         # 절반 미만은 근접이 아니다 - 올리지 않는다
-        ("breakout|krx_all|fwd_20d|equal_weight", "관문 2/8 통과. 남은 조항: …", []),
-    ]))
+        ("breakout|krx_all|fwd_20d|equal_weight",
+         "관문 2/8 통과. 남은 조항: …", [], ids[2]),
+    ]
+    out = _near_miss(_NearMissConn([candidates, [(value,) for value in ids]]))
     assert "momentum" in out, out
     assert "4/8" in out and "1/8" not in out, "계열 최고치가 아니라 최신을 골랐다"
     assert "breakout" not in out, "절반 미만인 계열을 근접으로 올렸다"
@@ -5153,8 +5218,9 @@ def _check_near_miss_surfaces_the_winner():
     assert "알파가" in out, "왜 이쪽이 먼저인지 설명이 없다"
 
     # 근접한 것이 없으면 **빈 문자열** - 없는 것을 지어내지 않는다
-    assert _near_miss(_RowsConn([])) == ""
-    assert _near_miss(_RowsConn([("f", "관문 2/8 통과.", [])])) == ""
+    assert _near_miss(_NearMissConn([[]])) == ""
+    assert _near_miss(_NearMissConn([[
+        ("f", "관문 2/8 통과.", [], ids[0])], [(ids[0],)]])) == ""
     # 못 읽으면 조용히 비운다(브리핑 전체를 죽이지 않는다)
     class _Boom:
         def cursor(self): raise RuntimeError("DB 없음")
