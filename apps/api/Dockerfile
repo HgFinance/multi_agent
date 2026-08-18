@@ -35,6 +35,13 @@ RUN apt-get update \
 
 COPY . .
 
+# The isolated AWS release checkout is intentionally created with umask 077.
+# BuildKit preserves those source modes, while the PAPER MCP is deliberately
+# run as uid 1000.  Normalize only the copied application tree so that the
+# non-root process can traverse packages and read code; runtime credentials
+# are mounted separately and are never part of this build context.
+RUN chmod -R a+rX /app
+
 # Keep this check after the application copy so it validates the final image
 # state, including the editable Hermes source retained at /opt/hermes-agent.
 RUN python -c 'import hermes_cli; print(hermes_cli, getattr(hermes_cli, "__file__", None), getattr(hermes_cli, "__path__", None))' \

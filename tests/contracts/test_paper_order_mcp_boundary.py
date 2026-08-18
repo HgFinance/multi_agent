@@ -348,6 +348,16 @@ def test_compose_keeps_authority_secrets_out_of_trading_hermes() -> None:
     ] == {"condition": "service_healthy"}
 
 
+def test_portfolio_image_is_readable_by_the_non_root_paper_mcp() -> None:
+    dockerfile = (ROOT / "apps/api/Dockerfile").read_text(encoding="utf-8")
+
+    copy_index = dockerfile.index("COPY . .")
+    permission_index = dockerfile.index("RUN chmod -R a+rX /app")
+    final_import_check = dockerfile.index("RUN python -c 'import hermes_cli;")
+
+    assert copy_index < permission_index < final_import_check
+
+
 def test_trading_profile_and_prompts_pin_the_one_shot_paper_lane() -> None:
     config = _yaml("departments/02-trading/hermes/config.yaml")
     assert config["mcp_servers"]["user-paper-order"] == {
