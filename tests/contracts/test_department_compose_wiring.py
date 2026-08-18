@@ -144,11 +144,27 @@ class DepartmentComposeWiringTests(unittest.TestCase):
         service = _service_block(compose, "kanban-dispatcher")
 
         self.assertIn("init: true", service)
-        self.assertIn('"kanban", "daemon", "--force"', service)
+        self.assertIn('command:\n      ["/bin/sh", "-c",', service)
+        self.assertIn(
+            "deploy/hermes-dispatch-guard/check_guard.py && exec hermes "
+            "kanban daemon --force",
+            service,
+        )
+        self.assertIn(
+            '--interval \\"$${KANBAN_DISPATCH_INTERVAL:-60}\\"', service
+        )
         self.assertNotIn('command: ["gateway", "run"]', service)
+        self.assertIn(
+            "PYTHONPATH: /app/repo/deploy/hermes-dispatch-guard", service
+        )
+        self.assertIn('HGFINANCE_DISPATCH_GUARD: "1"', service)
         self.assertIn("HERMES_HOME: /opt/data", service)
         self.assertIn("HERMES_KANBAN_HOME: /opt/data/shared-kanban", service)
         self.assertIn('HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"', service)
+        self.assertIn(
+            "KANBAN_DISPATCH_INTERVAL: ${KANBAN_DISPATCH_INTERVAL:-60}",
+            service,
+        )
         self.assertIn(
             "MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}", service
         )

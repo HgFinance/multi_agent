@@ -116,6 +116,56 @@ def test_preserves_four_distinct_valid_service_secrets_and_is_idempotent(
     )
 
 
+def test_explicit_rotation_replaces_only_selected_mcp_credentials(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    old_research = "r" * 40
+    old_order = "o" * 40
+    preserved = {
+        "TRADING_SERVICE_AUTH_SECRET": "s" * 40,
+        "TRADING_INTERNAL_SERVICE_AUTH_SECRET": "i" * 40,
+        "CEO_DISCORD_INGRESS_API_KEY": "d" * 40,
+    }
+    env_file.write_text(
+        f"MCP_RESEARCH_API_KEY={old_research}\n"
+        f"MCP_TRADING_ORDER_API_KEY={old_order}\n"
+        + "".join(f"{key}={value}\n" for key, value in preserved.items()),
+        encoding="utf-8",
+    )
+
+    result = cli.configure_environment(
+        runtime="local",
+        env_file=env_file,
+        generator=_generator("n" * 48, "q" * 48),
+        rotate_keys=("MCP_RESEARCH_API_KEY", "MCP_TRADING_ORDER_API_KEY"),
+    )
+    values = _values(env_file)
+
+    assert result.generated_secret_keys == (
+        "MCP_TRADING_ORDER_API_KEY", "MCP_RESEARCH_API_KEY")
+    assert values["MCP_TRADING_ORDER_API_KEY"] == "n" * 48
+    assert values["MCP_RESEARCH_API_KEY"] == "q" * 48
+    assert all(values[key] == value for key, value in preserved.items())
+    assert old_order not in env_file.read_text(encoding="utf-8")
+    assert old_research not in env_file.read_text(encoding="utf-8")
+
+
+def test_rotation_rejects_unknown_key_without_touching_file(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    original = "UNMANAGED=keep\n"
+    env_file.write_text(original, encoding="utf-8")
+
+    with pytest.raises(cli.ConfigurationError, match="unsupported credential"):
+        cli.configure_environment(
+            runtime="local",
+            env_file=env_file,
+            rotate_keys=("DATABASE_URL",),
+        )
+
+    assert env_file.read_text(encoding="utf-8") == original
+
+
 def test_rotates_short_placeholder_and_duplicate_secrets_and_deduplicates_keys(
     tmp_path: Path,
 ) -> None:
