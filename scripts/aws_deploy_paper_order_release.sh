@@ -28,7 +28,8 @@ ROLLBACK_IMAGES_CAPTURED=0
 declare -A ROLLBACK_IMAGE_REF_BY_CONTAINER=()
 declare -A ROLLBACK_IMAGE_TAG_BY_CONTAINER=()
 
-ORDER_PATH_SERVICE_SPECS=(
+MANAGED_RELEASE_SERVICE_SPECS=(
+  "hedgefund-ls-realtime:ls-realtime"
   "hedgefund-trading-api:trading-api"
   "hedgefund-paper-order-orchestrator-mcp:paper-order-orchestrator-mcp"
   "hedgefund-portfolio-bff:portfolio-bff"
@@ -518,26 +519,20 @@ compose_release() {
 }
 
 external_pull_service_plan() {
-  # Compose treats `latest` as remotely refreshable even under `--policy
-  # missing`.  Some runtime-only services intentionally reuse an image built
-  # by another service without declaring their own `build` stanza, so asking
-  # Compose to pull every non-buildable service would still try to pull those
-  # project-local names from Docker Hub.  Emit only services whose image is
-  # not produced anywhere in this Compose model.
+  # Emit only external images used by this bounded deployment. The caller
+  # independently checks Docker's local image store before pulling, because
+  # Compose treats mutable tags as refreshable even under `--policy missing`.
   python3 -c '
 import json
 import sys
 
 services = json.load(sys.stdin).get("services", {})
-locally_built_images = {
-    service.get("image")
-    for service in services.values()
-    if service.get("build") and service.get("image")
-}
-for name, service in sorted(services.items()):
+for name in ("redis", "timescaledb", "trading-hermes"):
+    service = services.get(name) or {}
     image = service.get("image")
-    if not service.get("build") and image and image not in locally_built_images:
-        print(name)
+    if service.get("build") or not image:
+        raise SystemExit(f"invalid external deployment service: {name}")
+    print(f"{name}\t{image}")
 '
 }
 
@@ -671,11 +666,12 @@ capture_rollback_images() {
   # may have overwritten. The external Trading Hermes image is instead taken
   # from its release-owned running container below.
   compose_release "$PREVIOUS_RELEASE" build \
-    trading-api paper-order-orchestrator-mcp portfolio-bff ceo-hermes || return 1
+    ls-realtime trading-api paper-order-orchestrator-mcp portfolio-bff ceo-hermes \
+    || return 1
   expected_images="$(compose_release "$PREVIOUS_RELEASE" config --images)" || return 1
   assert_release_owned_container \
     "$PREVIOUS_RELEASE" hedgefund-trading-hermes trading-hermes || return 1
-  for spec in "${ORDER_PATH_SERVICE_SPECS[@]}"; do
+  for spec in "${MANAGED_RELEASE_SERVICE_SPECS[@]}"; do
     container_name="${spec%%:*}"
     service_name="${spec#*:}"
     docker inspect "$container_name" >/dev/null 2>&1 || return 1
@@ -700,7 +696,7 @@ capture_rollback_images() {
 restore_rollback_images() {
   local spec container_name image_ref protected_tag
   ((ROLLBACK_IMAGES_CAPTURED == 1)) || return 0
-  for spec in "${ORDER_PATH_SERVICE_SPECS[@]}"; do
+  for spec in "${MANAGED_RELEASE_SERVICE_SPECS[@]}"; do
     container_name="${spec%%:*}"
     image_ref="${ROLLBACK_IMAGE_REF_BY_CONTAINER[$container_name]:-}"
     protected_tag="${ROLLBACK_IMAGE_TAG_BY_CONTAINER[$container_name]:-}"
@@ -713,7 +709,7 @@ restore_rollback_images() {
 remove_rollback_image_tags() {
   local spec container_name protected_tag
   ((ROLLBACK_IMAGES_CAPTURED == 1)) || return 0
-  for spec in "${ORDER_PATH_SERVICE_SPECS[@]}"; do
+  for spec in "${MANAGED_RELEASE_SERVICE_SPECS[@]}"; do
     container_name="${spec%%:*}"
     protected_tag="${ROLLBACK_IMAGE_TAG_BY_CONTAINER[$container_name]:-}"
     [[ -z "$protected_tag" ]] || docker image rm "$protected_tag" >/dev/null 2>&1 || true
@@ -731,24 +727,17 @@ stop_order_hermes() {
 }
 
 activate_release_services() {
-  local release_path="$1" service_plan
-  local -a non_order_services=()
+  local release_path="$1"
   stop_order_hermes || return 1
-  service_plan="$(compose_release "$release_path" config --services)" || return 1
-  mapfile -t non_order_services < <(
-    awk '$0 != "trading-api" &&
-         $0 != "paper-order-orchestrator-mcp" &&
-         $0 != "portfolio-bff" &&
-         $0 != "ceo-hermes" &&
-         $0 != "trading-hermes" && NF' <<<"$service_plan"
-  )
-  ((${#non_order_services[@]} > 0)) || return 1
-
-  # Reconcile everything else while both Hermes gateways are stopped, so a
-  # backend restart can never fall through to direct LLM handling.
-  compose_release "$release_path" up -d --remove-orphans "${non_order_services[@]}" || return 1
+  # Keep every unrelated team service and image untouched. Only shared Redis,
+  # the LS market-data reader and the five PAPER order-path services belong to
+  # this bounded release switch.
+  compose_release "$release_path" up -d --no-deps redis || return 1
   wait_container hedgefund-timescaledb 240 || return 1
   wait_container hedgefund-redis 180 || return 1
+  compose_release "$release_path" up -d --no-deps --force-recreate ls-realtime || return 1
+  wait_container hedgefund-ls-realtime 180 || return 1
+  assert_release_owned_container "$release_path" hedgefund-ls-realtime ls-realtime || return 1
 
   # Establish the deterministic backend chain before either gateway can read
   # a Discord message or dispatch an order card.
@@ -843,7 +832,7 @@ rollback_release() {
   elif [[ "$SWITCH_STARTED" == "1" ]]; then
     printf '%s\n' "ERROR: first deployment failed after service switch; no prior release exists" >&2
   fi
-  if ((profile_restored == 1 && release_services_restored == 0)); then
+  if ((profile_restored == 1 && release_services_restored == 0 && SWITCH_STARTED == 0)); then
     # A running Hermes process may retain its startup config even after the
     # host files are restored. Restart only the two profile owners so the
     # restored files, existing credentials and durable state are reloaded.
@@ -875,14 +864,25 @@ say "Protecting the currently running order-path images for rollback..."
 capture_rollback_images
 say "Validating and building release $RELEASE_COMMIT..."
 compose_release "$RELEASE" config --quiet
-compose_release "$RELEASE" --profile deployment build --pull
+compose_release "$RELEASE" --profile deployment build --pull \
+  ls-realtime trading-api paper-order-orchestrator-mcp portfolio-bff ceo-hermes \
+  database-bootstrap reference-bootstrap
 EXTERNAL_PULL_PLAN="$(
   compose_release "$RELEASE" --profile deployment config --format json \
     | external_pull_service_plan
 )" || die "could not determine external Compose image pull plan"
 if [[ -n "$EXTERNAL_PULL_PLAN" ]]; then
-  mapfile -t EXTERNAL_PULL_SERVICES <<<"$EXTERNAL_PULL_PLAN"
-  compose_release "$RELEASE" pull --policy missing "${EXTERNAL_PULL_SERVICES[@]}"
+  EXTERNAL_PULL_SERVICES=()
+  while IFS=$'\t' read -r external_service external_image; do
+    [[ -n "$external_service" && -n "$external_image" ]] \
+      || die "invalid external Compose image pull plan"
+    if ! docker image inspect "$external_image" >/dev/null 2>&1; then
+      EXTERNAL_PULL_SERVICES+=("$external_service")
+    fi
+  done <<<"$EXTERNAL_PULL_PLAN"
+  if ((${#EXTERNAL_PULL_SERVICES[@]} > 0)); then
+    compose_release "$RELEASE" pull --policy missing "${EXTERNAL_PULL_SERVICES[@]}"
+  fi
 fi
 
 DATABASE_CONTAINER_EXISTED=0
