@@ -56,6 +56,9 @@ from intraday_microstructure import (COMPLETED_SECOND_POLICY,
                                       effective_purge_gap,
                                       load_instrument_events_batch, manifest,
                                       source_quality_batch)
+from intraday_model_candidate import (ModelCandidateAccumulator,
+                                      discovery_resource_gate,
+                                      model_split_manifest)
 from microstructure_builder import (EXTERNAL_CONTENT_WINDOW_CONTRACT,
                                     external_content_fingerprints,
                                     external_session_content_window)
@@ -68,6 +71,7 @@ from intraday_multiple_testing import (MODULE_VERSION as MULTIPLE_TESTING_VERSIO
 from intraday_supervised import (EXPLICIT_WINDOW_TEACHER_VERSION,
                                  LABEL_VERSION as SUPERVISED_LABEL_VERSION,
                                  TEACHER_VERSION,
+                                 attach_calibration_attestation,
                                  explicit_feature_cube_spec_hash,
                                  explicit_feature_names,
                                  explicit_feature_spec_hash, feature_names,
@@ -93,14 +97,14 @@ from stock_universe import (INTRADAY_REPORT_MANIFEST_VERSION,
                             governed_stock_evidence_sql)
 
 
-RUNNER_VERSION = "intraday-experiment-runner-v17"
+RUNNER_VERSION = "intraday-experiment-runner-v18"
 FORWARD_RUNNER_VERSION = "intraday-forward-confirmation-v6"
 FORWARD_GATE_VERSION = "intraday-forward-fixed-horizon-gate-v1"
 FORWARD_RAW_DIGEST_VERSION = "ACTUAL_RAW_REPLAY_V1"
 EXTERNAL_SOURCE_CONTENT_HASH_CONTRACT = \
     "pg-composite-row-xor0-sum1-sha256-v1"
 LOCAL_SOURCE_CONTENT_HASH_CONTRACT = "pg-composite-row-xor0-sum1-v1"
-FAST_SCREEN_VERSION = "intraday-fast-discovery-screen-v3"
+FAST_SCREEN_VERSION = "intraday-fast-discovery-screen-v4"
 SEARCH_OBJECTIVES_VERSION = "intraday-search-objectives-v1"
 EXTERNAL_RAW_REPLAY_CONTENT_VERSION = "external-raw-replay-content-v3"
 EXTERNAL_REPLAY_MAX_HORIZON_SECONDS = 600
@@ -3469,6 +3473,25 @@ def _adaptive_rung_search_exposure(
         raise RuntimeError("adaptive rung lacks frozen source lineage")
     canonical_lineage = _canonical_report_value(source_lineage)
     candidate_contracts = _candidate_search_contracts(config)
+    model_candidate_contract = _canonical_report_value(
+        screen.get("model_candidate_contract") or {})
+    model_selection = model_candidate_contract.get(
+        "selection_commitment") or {}
+    model_count_components = model_selection.get("count_components") or {}
+    if model_candidate_contract and (
+            model_candidate_contract.get("result_namespace") !=
+            "MODEL_CANDIDATE"
+            or model_candidate_contract.get("ast_dependency") is not False
+            or model_candidate_contract.get("promotion_authority") is not False
+            or isinstance(model_selection.get("declared_model_trials"), bool)
+            or not isinstance(
+                model_selection.get("declared_model_trials"), int)
+            or int(model_selection["declared_model_trials"]) < 2
+            or model_selection.get("current_frozen_model_variants") != 1
+            or model_count_components.get("declared_total") !=
+            model_selection.get("declared_model_trials")):
+        raise RuntimeError(
+            "adaptive rung has an invalid model candidate contract")
     data_contract = _assert_resolved_data_contract(config)
     dataset_name, _, dataset_version = data_contract["dataset"].rpartition("/")
     panel_is_full_universe = (
@@ -3556,6 +3579,10 @@ def _adaptive_rung_search_exposure(
             "candidate_contracts": candidate_contracts,
             "candidate_set_fingerprint": stable_fingerprint(
                 candidate_contracts),
+            "model_candidate_contract": model_candidate_contract,
+            "model_candidate_contract_fingerprint": (
+                stable_fingerprint(model_candidate_contract)
+                if model_candidate_contract else None),
         },
         "cross_checks": {
             "ledger_session_set_fingerprint_verified": True,
@@ -3651,6 +3678,160 @@ def _candidate_accumulators(config: dict, spec: IntradayLaneSpec, *, trials: int
     for row in config["screening_population"]:
         out[row["ast_fingerprint"]] = build(row)
     return out
+
+
+def _model_candidate_accumulator(
+        config: dict, spec: IntradayLaneSpec, *, calibration: dict,
+        selected: dict, source_lineage: list[dict], evaluation_sessions,
+        instruments: list[str], rung: str,
+        knowledge_cutoff: datetime | str | None = None
+        ) -> ModelCandidateAccumulator:
+    """Freeze the independent model lane to one exact replay contract."""
+    primary = calibration.get("PRIMARY") or {}
+    teacher = primary.get("supervised_control") or {}
+    teacher_calibration_evidence = primary.get(
+        "supervised_control_calibration_evidence") or {}
+    event_source = str(selected.get("event_source") or
+                       config.get("data_source") or LOCAL_EVENT_SOURCE)
+    timestamp_policy = config["timestamp_policy"]
+    sample_contract = {
+        "version": "model-candidate-sampling-execution-manifest-v1",
+        # ``manifest`` includes every IntradayLaneSpec field (notably quote
+        # staleness, all horizons, latency, lookback, sampling and fees) plus
+        # the effective source/timestamp/label/execution eligibility rules.
+        "lane_manifest": manifest(
+            spec, source=event_source, timestamp_policy=timestamp_policy),
+        "runtime": {
+            "runner_version": RUNNER_VERSION,
+            "evaluator_version": config.get("evaluator_version") or
+                EVALUATOR_VERSION,
+            "cost_model_version": COST_MODEL_VERSION,
+        },
+        "feature_contract": {
+            "feature_window_contract_version": _feature_window_contract(config),
+            "feature_cube_spec": config.get("feature_cube_spec"),
+            "teacher_feature_spec_hash": teacher.get("feature_spec_hash"),
+            "teacher_feature_cube_spec_hash": teacher.get(
+                "feature_cube_spec_hash"),
+        },
+        "label_and_execution_contract": {
+            "label_version": teacher.get("label_version"),
+            "horizon_seconds": int(config["horizon_seconds"]),
+            "all_label_horizons_seconds": list(spec.horizons_seconds),
+            "execution": str(config["execution"]).upper(),
+            "population_execution_model": config[
+                "population_execution_model"],
+            "position_mode": "LONG_ONLY",
+            "minimum_predicted_edge_bps": float(
+                config["minimum_predicted_edge_bps"]),
+            "fee_bps_per_side": float(spec.fee_bps_per_side),
+            "maker_fee_bps_per_side": float(spec.maker_fee_bps_per_side),
+            "passive_nonfill_net_bps_per_opportunity": 0.0,
+            "entry_policy": "FROZEN_EXPECTED_NET_CLEARS_EDGE",
+            "oos_fit": False,
+            "oos_threshold_tuning": False,
+            "oos_feature_selection": False,
+        },
+        "eligibility_and_source_contract": {
+            "data_source": config.get("data_source") or event_source,
+            "event_source": event_source,
+            "timestamp_policy": timestamp_policy,
+            "resolved_data_contract": config.get(
+                "resolved_data_contract") or {},
+            "asset_scope": config.get("asset_scope") or
+                "REFERENCE_INSTRUMENT_TYPE_STOCK_ONLY",
+            "universe_mode": config.get("universe_mode") or
+                "ALL_CAUSALLY_COLLECTED",
+            "daily_aggregate_replay_allowed": False,
+        },
+        "teacher_model_fingerprint": teacher.get("model_fingerprint"),
+    }
+    configuration_hash = stable_fingerprint(sample_contract)
+    cutoff_value = knowledge_cutoff or config.get("cutoff") or selected.get(
+        "knowledge_cutoff")
+    if isinstance(cutoff_value, datetime):
+        if cutoff_value.tzinfo is None:
+            raise ValueError("model calibration cutoff must be timezone aware")
+        cutoff_text = cutoff_value.astimezone(timezone.utc).isoformat()
+    else:
+        cutoff_text = str(cutoff_value or "")
+    if not cutoff_text:
+        raise ValueError("model calibration source cutoff is required")
+    source_contract = {
+        "version": "model-calibration-source-contract-v1",
+        "event_source": event_source,
+        "knowledge_cutoff": cutoff_text,
+        "source_lineage_fingerprint": stable_fingerprint(source_lineage),
+        "source_content_fingerprint": selected.get(
+            "source_content_fingerprint") or next((
+                row.get("content_fingerprint") for row in source_lineage
+                if row.get("content_fingerprint")), None),
+        "consumed_replay_content_fingerprint": selected.get(
+            "consumed_replay_content_fingerprint") or next((
+                row.get("consumed_replay_content_fingerprint")
+                for row in source_lineage
+                if row.get("consumed_replay_content_fingerprint")), None),
+        "source_content_hash_contracts": sorted({
+            str(row.get("content_hash_contract")) for row in source_lineage
+            if row.get("content_hash_contract")}),
+    }
+    data_hash = stable_fingerprint(source_contract)
+    sessions = [str(_session_day(value)) for value in evaluation_sessions]
+    calibration_sessions = sorted(str(_session_day(value)) for value in
+                                  selected.get("calibration_sessions") or [])
+    calibration_instruments = sorted(str(value) for value in instruments)
+    if (str(teacher.get("status") or "").upper() == "PASS"
+            and teacher_calibration_evidence.get("calibration_row_digest")
+            and teacher_calibration_evidence.get("instrument_ids")):
+        teacher = attach_calibration_attestation(
+            teacher, planned_session_ids=calibration_sessions,
+            planned_instruments=calibration_instruments,
+            sample_contract=sample_contract,
+            source_contract=source_contract,
+            calibration_evidence=teacher_calibration_evidence)
+    split_manifest = model_split_manifest(
+        calibration_sessions=calibration_sessions,
+        contributing_calibration_sessions=teacher.get("session_ids") or [],
+        evaluation_sessions=sessions,
+        calibration_instruments=calibration_instruments,
+        contributing_calibration_instruments=teacher.get(
+            "instrument_ids") or teacher_calibration_evidence.get(
+                "instrument_ids") or [],
+        evaluation_instruments=[str(value) for value in instruments],
+        spec=spec, rung=str(rung))
+    split_hash = stable_fingerprint(split_manifest)
+    formula_exposures = max(
+        1, int(config.get("selection_adjusted_trials") or 1))
+    pressure = config.get("selection_pressure_breakdown") or {}
+    model_exposures = max(
+        1, int(pressure.get("primary_trials_including_current") or 1))
+    declared_total = formula_exposures + model_exposures
+    return ModelCandidateAccumulator(
+        teacher_report=teacher, spec=spec,
+        horizon_seconds=int(config["horizon_seconds"]),
+        execution=config["execution"],
+        minimum_predicted_edge_bps=float(
+            config["minimum_predicted_edge_bps"]),
+        feature_window_contract_version=_feature_window_contract(config),
+        expected_calibration_sessions=calibration_sessions,
+        expected_calibration_instruments=calibration_instruments,
+        expected_evaluation_sessions=sessions,
+        expected_instruments=[str(value) for value in instruments],
+        evidence_scope=str(rung),
+        configuration_hash=configuration_hash,
+        data_hash=data_hash,
+        split_hash=split_hash,
+        sampling_execution_manifest=sample_contract,
+        # The append-only AST trial reservation is a conservative upper bound
+        # on how many times this fixed model surface has been inspected.  Do
+        # not pretend missing historical model vectors reduce multiplicity.
+        declared_model_trials=declared_total,
+        selection_count_components={
+            "append_only_ast_and_sidecar_exposures": formula_exposures,
+            "append_only_model_candidate_exposures": model_exposures,
+            "declared_total": declared_total,
+        },
+    )
 
 
 def _pareto_ranks(rows: list[dict]) -> dict[str, int]:
@@ -4277,20 +4458,75 @@ def _completed_adaptive_rung_evidence(
         raise RuntimeError("completed adaptive evidence has an unknown rung")
     exposure_fp = search_exposure["search_exposure_fingerprint"]
     measurement_scope = search_exposure["evaluation"]["measurement_scope"]
+    model = report.get("model_candidate") or {}
+    model_evidence = ({
+        "result_namespace": model.get("result_namespace"),
+        "evidence_scope": model.get("evidence_scope"),
+        "lineage": model.get("lineage") or {},
+        "summary": model.get("summary") or {},
+        "chronological_oos_blocks": model.get(
+            "chronological_oos_blocks") or [],
+        "session_returns_bps": model.get("session_returns_bps") or {},
+        "failed_criteria": list(model.get("failed_criteria") or []),
+        "failure_memory": model.get("failure_memory") or {},
+        "decision": model.get("decision"),
+        "discovery_resource_gate": model.get(
+            "discovery_resource_gate") or {},
+        "search_exposure_fingerprint": exposure_fp,
+        "adaptive_search_only": True,
+        "promotion_authority": False,
+    } if model else {})
     return {
         **screen,
         "candidate_count": 1 + len(config.get("screening_population") or []),
+        "model_candidate_count": 1 if model else 0,
+        "total_measured_strategy_count": (
+            1 + len(config.get("screening_population") or [])
+            + (1 if model else 0)),
         "candidate_evidence": _rung_candidate_evidence(
             report, observed_at=completion,
             search_exposure_fingerprint=exposure_fp,
             evidence_scope=evidence_scope,
             measurement_scope=measurement_scope),
+        "model_candidate_evidence": model_evidence,
         "multiple_testing": report.get("multiple_testing"),
         "search_exposure": search_exposure,
         "search_exposure_fingerprint": exposure_fp,
         "completed_at": completion,
         "completion_clock": "UTC_WALL_CLOCK_AFTER_EVALUATOR_RETURN",
         "adaptive_search_only": True,
+        "promotion_authority": False,
+    }
+
+
+def _combined_discovery_gate(
+        ast_gate: dict, model_gate: dict, *,
+        ast_forward_eligible: bool = True) -> dict:
+    """Combine resource allocation only; never rewrite the AST outcome."""
+    measured_primary_pass = ast_gate.get("primary_pass") is True
+    primary_pass = measured_primary_pass and bool(ast_forward_eligible)
+    model_pass = model_gate.get("pass") is True
+    model_only = model_pass and not primary_pass
+    return {
+        **ast_gate,
+        "primary_measured_pass": measured_primary_pass,
+        "primary_pass": primary_pass,
+        "model_candidate_pass": model_pass,
+        "allocation_pass": primary_pass or model_pass,
+        "allocation_paths": [
+            name for name, passed in (
+                ("AST_PRIMARY", primary_pass),
+                ("MODEL_CANDIDATE", model_pass),
+            ) if passed
+        ],
+        "model_candidate_gate": model_gate,
+        "ast_forward_eligible": primary_pass,
+        "ast_diagnostic_only": model_only,
+        "ast_non_forward_eligibility_reason": (
+            "MODEL_ONLY_RESOURCE_CONTINUATION_AFTER_AST_GATE_FAILURE"
+            if model_only else
+            "PRIOR_MODEL_ONLY_CONTINUATION_CANNOT_RESCUE_AST"
+            if measured_primary_pass and not ast_forward_eligible else None),
         "promotion_authority": False,
     }
 
@@ -4383,9 +4619,17 @@ def _next_rung_config(config: dict, report: dict, gate: dict, *,
     linked_budget = max(0, applied_budget - 1)
     chosen_keys = [str(row["ast_fingerprint"])
                    for row in ranked[:linked_budget]]
+    model_only = bool(gate.get("ast_diagnostic_only"))
+    if model_only:
+        # The model may buy compute for its own next rung, but it cannot carry
+        # a failed primary or linked symbolic descendants across that boundary.
+        chosen_keys = []
     next_config = {
         **config,
         "screening_population": [source[key] for key in chosen_keys],
+        "ast_forward_eligible": bool(gate.get("ast_forward_eligible")),
+        "model_only_continuation": bool(
+            config.get("model_only_continuation") or model_only),
         # Keep the original exposure count; eliminated candidates still count.
         "screening_trial_exposure": max(
             int(config.get("screening_trial_exposure") or 0), len(source)),
@@ -4398,6 +4642,12 @@ def _next_rung_config(config: dict, report: dict, gate: dict, *,
         "candidate_budget_including_primary": applied_budget,
         "input_candidates_including_primary": input_count,
         "selected_candidates_including_primary": 1 + len(chosen_keys),
+        "ast_primary_resource_survivor": bool(gate.get("primary_pass")),
+        "model_candidate_resource_survivor": bool(
+            gate.get("model_candidate_pass")),
+        "ast_primary_retained_when_model_allocates": False,
+        "ast_primary_diagnostic_only": model_only,
+        "ast_forward_eligible": bool(gate.get("ast_forward_eligible")),
         "selected_linked_ast_fingerprints": chosen_keys,
         "eliminated_linked_ast_fingerprints": sorted(set(source) - set(chosen_keys)),
         "selection_inputs": [
@@ -4750,6 +5000,9 @@ def _load_completed_report(meta_conn, experiment_id: str) -> dict:
         "screening_population": screening_reports,
         "supervised_control": governance.get("supervised_control") or {},
         "hybrid_control": governance.get("hybrid_control") or {},
+        "model_candidate": governance.get("model_candidate") or {},
+        "model_candidate_forward_lockbox": governance.get(
+            "model_candidate_forward_lockbox") or {},
         "multiple_testing": governance.get("multiple_testing") or {},
         "trial_lockbox": governance.get("trial_lockbox") or {},
         "discovery_rungs": governance.get("discovery_rungs") or [],
@@ -4795,6 +5048,26 @@ def _store_report(meta_conn, experiment_id: str, report: dict) -> None:
                  and not isinstance(residual_value, bool) else 0.0,
                  _compact_residual_dimensions(
                      residual, primary_residual_qd)))
+    model_candidate = report.get("model_candidate") or {}
+    if model_candidate:
+        model_lineage = model_candidate.get("lineage") or {}
+        model_failures = list(model_candidate.get("failed_criteria") or [])
+        rows.append((
+            "intraday_model_candidate_result",
+            1.0 if model_candidate.get("decision") == "NOMINATE_FORWARD"
+            else 0.0,
+            {
+                "result_namespace": "MODEL_CANDIDATE",
+                "model_candidate_id": _compact_text(
+                    model_lineage.get("model_candidate_id"), limit=64),
+                "result_fingerprint": stable_fingerprint(model_candidate),
+                "evidence_scope": _compact_text(
+                    model_candidate.get("evidence_scope")),
+                "decision": _compact_text(model_candidate.get("decision")),
+                "failed_criteria_count": len(model_failures),
+                "ast_dependency": False,
+                "promotion_authority": False,
+            }))
     for fold in report.get("folds") or []:
         if isinstance(fold.get("mean_net_bps"), (int, float)):
             rows.append(("fold_mean_net_bps", fold["mean_net_bps"],
@@ -4909,6 +5182,9 @@ def _store_report(meta_conn, experiment_id: str, report: dict) -> None:
         "pre_pbo_gate": pre_pbo_gate,
         "supervised_control": report.get("supervised_control") or {},
         "hybrid_control": report.get("hybrid_control") or {},
+        "model_candidate": model_candidate,
+        "model_candidate_forward_lockbox": report.get(
+            "model_candidate_forward_lockbox") or {},
         "multiple_testing": report.get("multiple_testing") or {},
         "trial_lockbox": report.get("trial_lockbox") or {},
         "evaluation_identity": evaluation_identity,
@@ -7383,9 +7659,14 @@ def _run_fast_screen(config: dict, spec: IntradayLaneSpec, selected: dict, *,
     calibration = population.freeze_calibration()
     calibration_only_fail_fast = _all_symbolic_candidates_cost_infeasible(
         calibration)
+    model_candidate = _model_candidate_accumulator(
+        config, spec, calibration=calibration, selected=selected,
+        source_lineage=source_lineage, evaluation_sessions=sessions,
+        instruments=instruments, rung=str(rung), knowledge_cutoff=cutoff)
 
     screen_shards = []
-    if not calibration_only_fail_fast:
+    if (not calibration_only_fail_fast
+            or model_candidate.resource_preflight_passed):
         for shard_number, shard in enumerate(shards, 1):
             sample_count = 0
             for raw_day in sessions:
@@ -7393,7 +7674,18 @@ def _run_fast_screen(config: dict, spec: IntradayLaneSpec, selected: dict, *,
                 for instrument in shard:
                     samples = by_instrument[instrument]
                     sample_count += len(samples)
-                    population.add(instrument, samples)
+                    if calibration_only_fail_fast:
+                        # AST cost/direction failure still saves its measured
+                        # calibration memory.  Only the independent frozen
+                        # model consumes OOS here; no symbolic semantics change.
+                        model_candidate.add(
+                            instrument, samples,
+                            evaluation_session=str(_session_day(raw_day)))
+                    else:
+                        population.add(
+                            instrument, samples,
+                            model_candidate=model_candidate,
+                            model_session=str(_session_day(raw_day)))
             screen_shards.append({
                 "shard": shard_number, "instrument_count": len(shard),
                 "sample_count": sample_count,
@@ -7407,7 +7699,25 @@ def _run_fast_screen(config: dict, spec: IntradayLaneSpec, selected: dict, *,
     report = _annotate_population(config, finished_population)
     report["multiple_testing"] = _population_multiple_testing(report)
     _apply_population_dsr_gate(report, report["multiple_testing"])
-    gate = _fast_screen_gate(report, config)
+    model_report = model_candidate.finish()
+    model_gate = discovery_resource_gate(
+        model_report,
+        minimum_opportunities=config["fast_screen_min_opportunities"])
+    model_report["discovery_resource_gate"] = model_gate
+    ast_gate = _fast_screen_gate(report, config)
+    gate = _combined_discovery_gate(
+        ast_gate, model_gate,
+        ast_forward_eligible=bool(config.get(
+            "ast_forward_eligible", True)))
+    report["model_candidate"] = model_report
+    report["ast_forward_eligibility"] = {
+        "eligible": bool(gate["ast_forward_eligible"]),
+        "diagnostic_only": bool(gate["ast_diagnostic_only"]),
+        "reason": gate.get("ast_non_forward_eligibility_reason"),
+        "model_metrics_used_for_ast_selection": False,
+        "model_multiplicity_rewrites_ast_multiplicity": False,
+        "promotion_authority": False,
+    }
     measured_calibration_observations = max(
         (int((row or {}).get("observations") or 0)
          for row in calibration.values()), default=0)
@@ -7417,11 +7727,20 @@ def _run_fast_screen(config: dict, spec: IntradayLaneSpec, selected: dict, *,
     report["fast_discovery_screen"] = {
         **gate,
         "evaluation_status": (
-            "SKIPPED_COST_INFEASIBLE" if calibration_only_fail_fast
-            else "EVALUATED"),
+            "EVALUATED" if (
+                not calibration_only_fail_fast
+                or model_candidate.resource_preflight_passed)
+            else "SKIPPED_COST_INFEASIBLE"),
         "evaluation_skip_reason": (
             "ALL_SYMBOLIC_CANDIDATES_INFEASIBLE"
-            if calibration_only_fail_fast else None),
+            if calibration_only_fail_fast
+            and not model_candidate.resource_preflight_passed else None),
+        "ast_evaluation_status": (
+            "SKIPPED_COST_INFEASIBLE" if calibration_only_fail_fast
+            else "EVALUATED"),
+        "model_candidate_evaluation_status": (
+            "EVALUATED" if model_candidate.resource_preflight_passed
+            else "SKIPPED_CALIBRATION_PREFLIGHT"),
         "calibration_sample_count": sum(
             int(row.get("sample_count") or 0) for row in calibration_shards),
         "calibration_instrument_count": measured_calibration_instruments,
@@ -7436,11 +7755,14 @@ def _run_fast_screen(config: dict, spec: IntradayLaneSpec, selected: dict, *,
         "rung": str(rung),
         "sessions": [str(day) for day in sessions],
         "evaluated_sessions": (
-            [] if calibration_only_fail_fast else
-            [str(day) for day in sessions]),
+            [str(day) for day in sessions]
+            if (not calibration_only_fail_fast
+                or model_candidate.resource_preflight_passed) else []),
         "session_count": len(sessions),
         "evaluated_session_count": (
-            0 if calibration_only_fail_fast else len(sessions)),
+            len(sessions)
+            if (not calibration_only_fail_fast
+                or model_candidate.resource_preflight_passed) else 0),
         "instrument_count": len(instruments),
         "instrument_fingerprint": hashlib.sha256(
             "|".join(instruments).encode()).hexdigest(),
@@ -7465,6 +7787,22 @@ def _run_fast_screen(config: dict, spec: IntradayLaneSpec, selected: dict, *,
             "rule": (
                 "maximum calibrated predicted markout must exceed the "
                 "minimum observed executable entry hurdle"),
+            "promotion_authority": False,
+        },
+        "model_candidate_contract": {
+            "result_namespace": model_report["result_namespace"],
+            "lineage": model_report["lineage"],
+            "frozen_contract": model_report["frozen_contract"],
+            "selection_commitment": {
+                "version": model_report["selection_record"]["version"],
+                "declared_model_trials": model_report[
+                    "selection_record"]["declared_model_trials"],
+                "count_components": model_report[
+                    "selection_record"]["count_components"],
+                "current_frozen_model_variants": model_report[
+                    "selection_record"]["current_frozen_model_variants"],
+            },
+            "ast_dependency": False,
             "promotion_authority": False,
         },
     }
@@ -7666,7 +8004,7 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
             dataset_cutoff=trial_schedule["dataset_cutoff"],
             event_source=event_source, source_lineage=lineage,
             completed_at=datetime.now(timezone.utc)))
-        if not screen_gate["primary_pass"]:
+        if not screen_gate["allocation_pass"]:
             return stop_after_screen(
                 screen_report, failure_code="FAST_DISCOVERY_SCREEN_REJECTED",
                 screen_key="fast_discovery_screen")
@@ -7716,7 +8054,7 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
                 dataset_cutoff=trial_schedule["dataset_cutoff"],
                 event_source=event_source, source_lineage=lineage,
                 completed_at=datetime.now(timezone.utc)))
-            if not intermediate_gate["primary_pass"]:
+            if not intermediate_gate["allocation_pass"]:
                 return stop_after_screen(
                     intermediate_report,
                     failure_code="INTERMEDIATE_DISCOVERY_SCREEN_REJECTED",
@@ -7844,6 +8182,12 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
                     "sample_count": shard_samples,
                 })
         calibration_reports = population.freeze_calibration()
+        model_candidate = _model_candidate_accumulator(
+            full_config, spec, calibration=calibration_reports,
+            selected=selected, source_lineage=lineage,
+            evaluation_sessions=selected["sessions"],
+            instruments=[str(value) for value in selected["instruments"]],
+            rung=FULL_60, knowledge_cutoff=cutoff)
 
         for shard_number, instruments in enumerate(shards, 1):
             shard_samples = 0
@@ -7885,7 +8229,10 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
                     samples = _build_runtime_samples(
                         config, quotes, trades, spec, start=start, end=end)
                     shard_samples += len(samples)
-                    population.add(instrument, samples)
+                    population.add(
+                        instrument, samples,
+                        model_candidate=model_candidate,
+                        model_session=str(_session_day(day)))
             shard_reports.append({
                 "shard": shard_number,
                 "instrument_count": len(instruments),
@@ -7917,8 +8264,30 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
                     "per-session STOCK source manifest")
 
         report = _annotate_population(full_config, population.finish())
+        report["model_candidate"] = model_candidate.finish()
         report["multiple_testing"] = _population_multiple_testing(report)
         _apply_population_dsr_gate(report, report["multiple_testing"])
+        ast_forward_eligible = bool(full_config.get(
+            "ast_forward_eligible", True))
+        if not ast_forward_eligible:
+            measured_decision = report.get("decision")
+            failures = list(report.get("failed_criteria") or [])
+            failure = "AST_MODEL_ONLY_CONTINUATION_NOT_FORWARD_ELIGIBLE"
+            if failure not in failures:
+                failures.append(failure)
+            report["diagnostic_measurement_decision"] = measured_decision
+            report["decision"] = "NO_EVIDENCE"
+            report["failed_criteria"] = failures
+        report["ast_forward_eligibility"] = {
+            "eligible": ast_forward_eligible,
+            "diagnostic_only": not ast_forward_eligible,
+            "reason": (
+                "MODEL_ONLY_RESOURCE_CONTINUATION_AFTER_AST_GATE_FAILURE"
+                if not ast_forward_eligible else None),
+            "model_metrics_used_for_ast_selection": False,
+            "model_multiplicity_rewrites_ast_multiplicity": False,
+            "promotion_authority": False,
+        }
         report["source_quality"] = {
             "counts_by_status": quality_counts,
             "totals": quality_totals,
@@ -7940,7 +8309,8 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
         report["reproduction_runtime"] = _qa_reproduction_runtime_manifest(
             hypothesis_id=hypothesis_id, config=persisted)
         report["forward_lockbox"] = {
-            "status": "AWAITING_NEW_SESSIONS",
+            "status": ("AWAITING_NEW_SESSIONS" if ast_forward_eligible else
+                       "NOT_ELIGIBLE_MODEL_ONLY_CONTINUATION"),
             "candidate_frozen": True,
             "candidate_lineage_id": primary_lineage.candidate_lineage_id,
             "root_lineage_id": primary_lineage.root_lineage_id,
@@ -7978,17 +8348,37 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
             "independent_confirmation": False,
             "promotion_authority": False,
         }
+        report["model_candidate_forward_lockbox"] = {
+            "status": (
+                "AWAITING_SEPARATE_MODEL_FORWARD_CONFIRMATION"
+                if (report.get("model_candidate") or {}).get("decision") ==
+                "NOMINATE_FORWARD" else "NOT_NOMINATED"),
+            "model_candidate_id": ((report.get("model_candidate") or {}).get(
+                "lineage") or {}).get("model_candidate_id"),
+            "ast_forward_lane_reused": False,
+            "candidate_frozen": True,
+            "historical_sessions_search_exposed": True,
+            "independent_confirmation": False,
+            "promotion_authority": False,
+            "order_authority": False,
+        }
         if (event_source == EXTERNAL_EVENT_SOURCE
                 and config["fast_screen_enabled"]):
             report["fast_discovery_screen"] = {
                 **discovery_rungs[0],
-                "primary_pass": True,
+                "primary_pass": bool(
+                    discovery_rungs[0].get("primary_pass")),
+                "allocation_pass": bool(
+                    discovery_rungs[0].get("allocation_pass")),
                 "full_universe_confirmation_run": True,
             }
             if len(discovery_rungs) > 1:
                 report["intermediate_discovery_screen"] = {
                     **discovery_rungs[1],
-                    "primary_pass": True,
+                    "primary_pass": bool(
+                        discovery_rungs[1].get("primary_pass")),
+                    "allocation_pass": bool(
+                        discovery_rungs[1].get("allocation_pass")),
                     "full_universe_confirmation_run": True,
                 }
         assert_source_snapshot_unchanged()

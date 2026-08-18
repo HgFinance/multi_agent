@@ -30,7 +30,11 @@ from intraday_alpha_ast import (
 )
 from intraday_microstructure import (IntradayLaneSpec, IntradaySample,
                                      IntradaySampleBatch, audit_causality)
-from intraday_supervised import CostAwareTeacher, executable_target
+from intraday_supervised import (
+    CostAwareTeacher,
+    _decision_index_fingerprint,
+    executable_target,
+)
 from overfit_stats import (bootstrap_ci, deflated_sharpe,
                            stationary_bootstrap_indices)
 
@@ -816,12 +820,15 @@ class CandidateAccumulator:
     def freeze_calibration(self) -> dict:
         """Lock one scale coefficient before any evaluation sample is consumed."""
         teacher_report = self.teacher.freeze()
+        teacher_sidecar = self.teacher.calibration_evidence()
+        teacher_bundle = {
+            "supervised_control": teacher_report,
+            "supervised_control_calibration_evidence": teacher_sidecar,
+        }
         if self.coefficient_policy != "STRUCTURE_ONLY":
-            return {**self._calibration_report(),
-                    "supervised_control": teacher_report}
+            return {**self._calibration_report(), **teacher_bundle}
         if self.calibration_status != "PENDING":
-            return {**self._calibration_report(),
-                    "supervised_control": teacher_report}
+            return {**self._calibration_report(), **teacher_bundle}
         sufficient = (
             self.calibration_observations >= MIN_CALIBRATION_OBSERVATIONS
             and self.calibration_nonzero_scores >= MIN_CALIBRATION_NONZERO_SCORES
@@ -831,8 +838,7 @@ class CandidateAccumulator:
         if not sufficient:
             self.calibration_beta = 0.0
             self.calibration_status = "INSUFFICIENT_CALIBRATION"
-            return {**self._calibration_report(),
-                    "supervised_control": teacher_report}
+            return {**self._calibration_report(), **teacher_bundle}
         denominator = self.calibration_sum_score_sq * (
             1.0 + CALIBRATION_SHRINKAGE_FRACTION)
         raw_beta = self.calibration_sum_score_markout / denominator
@@ -852,8 +858,7 @@ class CandidateAccumulator:
                     or maximum_prediction <=
                     self.calibration_min_entry_hurdle_bps):
                 self.calibration_status = "NO_COST_FEASIBLE_ENTRY"
-        return {**self._calibration_report(),
-                "supervised_control": teacher_report}
+        return {**self._calibration_report(), **teacher_bundle}
 
     def _calibration_report(self) -> dict:
         if self._restored_calibration_report is not None:
@@ -1475,7 +1480,8 @@ class CandidatePopulationAccumulator:
                    or candidate.calibration_status == "PENDING"
                    for candidate in self.candidates.values())
 
-    def add(self, instrument_id: str, samples: list[IntradaySample]) -> None:
+    def add(self, instrument_id: str, samples: list[IntradaySample], *,
+            model_candidate=None, model_session: str | None = None) -> None:
         instrument_id = str(instrument_id)
         ordered, feature_cube = _prepare_sample_sequence(samples)
         if any(row.instrument_id != instrument_id for row in ordered):
@@ -1506,6 +1512,39 @@ class CandidatePopulationAccumulator:
                 shared_teacher_predictions=predictions[prediction_key],
                 shared_teacher_targets=targets[training_key],
                 feature_cube=feature_cube)
+        if model_candidate is not None:
+            # The MODEL_CANDIDATE lane owns its statistics, gates, lineage, and
+            # authority.  It may reuse only the PRIMARY teacher's immutable
+            # prediction/target pass; no AST score or AST entry decision crosses
+            # this boundary.  MODEL_CANDIDATE independently recomputes the
+            # frozen dot products and targets against this same aligned cube;
+            # the shared values are assertions, never trusted evidence.
+            primary = self.candidates.get("PRIMARY")
+            if primary is None:
+                raise ValueError(
+                    "shared model replay requires a PRIMARY candidate")
+            expected_model = (getattr(
+                model_candidate, "teacher_report", {}) or {}).get(
+                    "model_fingerprint")
+            prediction_key = primary.teacher.prediction_identity()
+            # The terminal prediction identity caches the verified frozen
+            # fingerprint.  Calling report() here would rebuild three 244-wide
+            # parameter payloads for every instrument/session slice.
+            observed_model = prediction_key[-1]
+            if expected_model != observed_model:
+                raise ValueError(
+                    "shared model replay teacher fingerprint changed")
+            training_key = primary.teacher.training_contract_key()
+            model_candidate.add_prepared(
+                instrument_id, ordered, audit,
+                predictions=predictions[prediction_key],
+                targets=targets[training_key],
+                evaluation_session=model_session,
+                feature_cube=feature_cube,
+                row_identity=(
+                    str(feature_cube.decision_index_fingerprint)
+                    if feature_cube is not None else
+                    _decision_index_fingerprint(ordered)))
 
     def calibrate(self, instrument_id: str,
                   samples: list[IntradaySample]) -> None:
@@ -1547,8 +1586,10 @@ class CandidatePopulationAccumulator:
                 raise ValueError(
                     "shared teacher follower changed before calibration freeze")
             artifact = members[0].teacher.freeze()
+            calibration_evidence = members[0].teacher.calibration_evidence()
             for candidate in members[1:]:
-                candidate.teacher.restore(artifact)
+                candidate.teacher.restore(
+                    artifact, calibration_evidence=calibration_evidence)
             self._teacher_artifacts[group_index] = copy.deepcopy(artifact)
         return {key: candidate.freeze_calibration()
                 for key, candidate in self.candidates.items()}
