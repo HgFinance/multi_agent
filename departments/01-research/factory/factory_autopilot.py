@@ -3020,6 +3020,43 @@ def _active_card_by_key_prefix(
     return f"{row[0]}({row[1] if len(row) > 1 else '?'})"
 
 
+def _card_status_by_idempotency_key(
+        key: str, *, fail_closed: bool = False) -> str | None:
+    """Return the exact bucket card status without reminting a terminal card."""
+    try:
+        rows = _board_rows(
+            "select status from tasks where idempotency_key = ? "
+            "order by created_at desc limit 1", (key,))
+    except Exception as exc:  # noqa: BLE001
+        disposition = "dependency failed closed" if fail_closed else "ignored"
+        print(f"  board exact-key lookup failed - {disposition} "
+              f"({type(exc).__name__})", flush=True)
+        if fail_closed:
+            return f"UNKNOWN_BOARD_STATE({type(exc).__name__})"
+        return None
+    return str(rows[0][0]).strip().lower() if rows else None
+
+
+_TERMINAL_BREEDER_CARD_STATUSES = frozenset({"done", "blocked", "archived"})
+
+
+def _breeder_blocks_planner(*, breeder_needed: bool,
+                            active_breeder: str | None,
+                            bucket_status: str | None) -> bool:
+    """Wait for a live/new breeder, but consume after this bucket terminated.
+
+    The low-watermark can remain true even after a successful batch (for
+    example six accepted candidates against a target of eight).  Treating that
+    condition alone as a dependency made every subsequent cycle rediscover the
+    same terminal idempotency key and defer Planner forever.
+    """
+    if active_breeder:
+        return True
+    if not breeder_needed:
+        return False
+    return bucket_status not in _TERMINAL_BREEDER_CARD_STATUSES
+
+
 def _should_schedule_planner(research_brief: str,
                              executable_unused: int | None,
                              intraday_formula_unused: int | None,
@@ -4044,17 +4081,36 @@ def cycle(*, dry_run: bool = False) -> int:
         # pre-breeder snapshot would still consume stale IDs.
         active_breeder = _active_card_by_key_prefix(
             "factory-formula-breeder-", fail_closed=True)
-        breeder_pending = bool(active_breeder or breeder_needed)
+        _bnow = datetime.now(timezone.utc)
+        _breeder_key = (
+            f"factory-formula-breeder-v1-{_bnow:%Y%m%d}T{_bnow.hour:02d}")
+        bucket_breeder_status = None
         if breeder_needed and not active_breeder:
-            _bnow = datetime.now(timezone.utc)
-            _bgeneration = _formula_breeder_generation(_bnow)
-            _create_card(
-                title=f"Formula breeder: outcome-conditioned AST population {stamp}",
-                body=_formula_breeder_card_body(
-                    generation=_bgeneration, starvation=starving),
-                assignee="research-department",
-                key=f"factory-formula-breeder-v1-{_bnow:%Y%m%d}T{_bnow.hour:02d}",
-                dry_run=dry_run, priority=2)
+            bucket_breeder_status = _card_status_by_idempotency_key(
+                _breeder_key, fail_closed=True)
+        breeder_pending = _breeder_blocks_planner(
+            breeder_needed=breeder_needed,
+            active_breeder=active_breeder,
+            bucket_status=bucket_breeder_status,
+        )
+        if breeder_needed and not active_breeder:
+            if bucket_breeder_status is None:
+                _bgeneration = _formula_breeder_generation(_bnow)
+                _create_card(
+                    title=("Formula breeder: outcome-conditioned AST "
+                           f"population {stamp}"),
+                    body=_formula_breeder_card_body(
+                        generation=_bgeneration, starvation=starving),
+                    assignee="research-department",
+                    key=_breeder_key,
+                    dry_run=dry_run, priority=2)
+            elif bucket_breeder_status in _TERMINAL_BREEDER_CARD_STATUSES:
+                print("  formula breeder bucket already terminal "
+                      f"({bucket_breeder_status}) - Planner may consume its "
+                      "persisted cohort", flush=True)
+            else:
+                print("  formula breeder deferred - exact bucket state is "
+                      f"{bucket_breeder_status}", flush=True)
         elif active_breeder:
             print(f"  formula breeder skipped - already active: {active_breeder}",
                   flush=True)
