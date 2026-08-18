@@ -18,6 +18,7 @@ ceo-agent           chat -q '...'
 python3 skills/agentic-rag/main.py --persona compliance-policy-agent --query "..." --as-of 2026-07-29  # OPENAI_API_KEY
 python3 departments/01-research/collectors/news.py 'AAPL Apple stock'                                  # TAVILY_API_KEY
 supabase db reset                                    # 운영 DB: supabase/migrations/, 시계열: timescaledb/migrations/
+python scripts/check_test_user_wiring.py             # 테스트 계정 3명: 프론트 하드코딩 ↔ 실 DB 대조(읽기 전용)
 python -m unittest discover -s tests/schema -p "test_*.py" -v
 ```
 
