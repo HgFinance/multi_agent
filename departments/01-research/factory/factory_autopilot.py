@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import json
 import os
@@ -2859,11 +2860,20 @@ _EXEC_SURFACE = """
 
 def _create_card(*, title: str, body: str, assignee: str, key: str,
                  dry_run: bool, priority: int = 0,
-                 max_runtime: str | None = None) -> str | None:
+                 max_runtime: str | None = None,
+                 active_family_prefix: str | None = None) -> str | None:
     """칸반 카드 하나. **같은 주기에 두 번 돌아도 카드는 하나다**(idempotency-key).
 
     중복 카드는 같은 실험을 두 번 사는 것과 같다 - 공장의 존재 이유에 반한다.
     """
+    if not dry_run and active_family_prefix:
+        active = _active_card_by_key_prefix(
+            active_family_prefix, fail_closed=True)
+        if active:
+            print(f"  {title} skipped - active family member: {active}",
+                  flush=True)
+            return None
+
     argv = ["docker", "exec", "-u", "1000", "-i", KANBAN_CLI_CONTAINER,
             "hermes", "kanban", "create", title,
             "--assignee", assignee,
@@ -2970,7 +2980,8 @@ def _unresolved_card(owner: str, scope: str) -> str | None:
     return None
 
 
-def _active_card_by_key_prefix(prefix: str) -> str | None:
+def _active_card_by_key_prefix(
+        prefix: str, *, fail_closed: bool = False) -> str | None:
     """Return one ready/running card whose idempotency key starts with *prefix*.
 
     Time-bucket idempotency prevents duplicates inside one bucket, but it does
@@ -2997,8 +3008,11 @@ def _active_card_by_key_prefix(prefix: str) -> str | None:
             (prefix + "%", ACTIVE_DISCOVERY_CARD_TTL_SECONDS),
         )
     except Exception as exc:  # noqa: BLE001
-        print(f"  board lookup failed - active-card guard skipped "
+        disposition = "dependency failed closed" if fail_closed else "guard skipped"
+        print(f"  board lookup failed - {disposition} "
               f"({type(exc).__name__})", flush=True)
+        if fail_closed:
+            return f"UNKNOWN_BOARD_STATE({type(exc).__name__})"
         return None
     if not rows:
         return None
@@ -3008,7 +3022,8 @@ def _active_card_by_key_prefix(prefix: str) -> str | None:
 
 def _should_schedule_planner(research_brief: str,
                              executable_unused: int | None,
-                             intraday_formula_unused: int | None) -> bool:
+                             intraday_formula_unused: int | None,
+                             breeder_pending: bool = False) -> bool:
     """Consume only after the primary intraday producer has material.
 
     The research profile executes one card at a time.  Scheduling a planner
@@ -3022,9 +3037,13 @@ def _should_schedule_planner(research_brief: str,
     current-contract formula is enough to let Planner consume while Scout
     replenishes the population.
 
-    ``None`` means the count could not be measured and is fail-closed.
+    ``None`` means the count could not be measured and is fail-closed.  An
+    active or newly scheduled breeder is also a dependency: Planner must read
+    the post-breeder ledger, not the snapshot captured before those revisions
+    existed.
     """
-    return (bool(str(research_brief or "").strip())
+    return (not breeder_pending
+            and bool(str(research_brief or "").strip())
             and executable_unused is not None
             and intraday_formula_unused is not None
             and int(executable_unused) > 0
@@ -3879,6 +3898,49 @@ def _dispatch_experiments(*, dry_run: bool = False, limit: int = 10) -> int:
     return 0
 
 
+_CYCLE_ADVISORY_LOCK_KEY = "factory-autopilot-scheduler-cycle-v1"
+
+
+def _serialized_factory_cycle(fn):
+    """Serialize mutating scheduler cycles across processes and containers.
+
+    Card idempotency prevents exact duplicates but cannot atomically preserve
+    the producer-before-consumer decision when two autopilot processes inspect
+    the board at the same time.  A transaction advisory lock makes that
+    decision a single-writer critical section and remains correct behind a
+    transaction-pooling proxy.  Dry-runs remain read-only and do not block the
+    live scheduler.
+    """
+    @functools.wraps(fn)
+    def wrapped(*, dry_run: bool = False):
+        if dry_run:
+            return fn(dry_run=True)
+        lock_conn = _conn()
+        try:
+            lock_cur = lock_conn.cursor()
+            lock_cur.execute(
+                "select pg_try_advisory_xact_lock(hashtextextended(%s, 0))",
+                (_CYCLE_ADVISORY_LOCK_KEY,),
+            )
+            row = lock_cur.fetchone()
+            if not bool(row and row[0]):
+                lock_conn.rollback()
+                print("  scheduler cycle skipped - another cycle owns the "
+                      "producer/consumer lock", flush=True)
+                return 0
+            result = fn(dry_run=False)
+            lock_conn.commit()
+            return result
+        except Exception:
+            lock_conn.rollback()
+            raise
+        finally:
+            lock_conn.close()
+
+    return wrapped
+
+
+@_serialized_factory_cycle
 def cycle(*, dry_run: bool = False) -> int:
     """공장 한 주기. 실패한 부서 수를 돌려준다(0이면 정상)."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H")
@@ -3950,6 +4012,10 @@ def cycle(*, dry_run: bool = False) -> int:
     executable_unused: int | None = None
     intraday_formula_unused: int | None = None
     intraday_evolution_parents: int | None = None
+    # Unknown producer state is a dependency failure, never permission for a
+    # consumer.  It becomes False only after all measurements and the active
+    # breeder board lookup complete successfully.
+    breeder_pending = True
     try:
         _sc = _conn()
         try:
@@ -3973,8 +4039,12 @@ def cycle(*, dry_run: bool = False) -> int:
             intraday_formula_unused,
             intraday_evolution_parents,
         )
-        active_breeder = (_active_card_by_key_prefix("factory-formula-breeder-")
-                          if breeder_needed else None)
+        # Query unconditionally.  A breeder may have crossed the low-watermark
+        # during its turn; scheduling a higher-priority Planner against the
+        # pre-breeder snapshot would still consume stale IDs.
+        active_breeder = _active_card_by_key_prefix(
+            "factory-formula-breeder-", fail_closed=True)
+        breeder_pending = bool(active_breeder or breeder_needed)
         if breeder_needed and not active_breeder:
             _bnow = datetime.now(timezone.utc)
             _bgeneration = _formula_breeder_generation(_bnow)
@@ -3984,7 +4054,7 @@ def cycle(*, dry_run: bool = False) -> int:
                     generation=_bgeneration, starvation=starving),
                 assignee="research-department",
                 key=f"factory-formula-breeder-v1-{_bnow:%Y%m%d}T{_bnow.hour:02d}",
-                dry_run=dry_run, priority=0)
+                dry_run=dry_run, priority=2)
         elif active_breeder:
             print(f"  formula breeder skipped - already active: {active_breeder}",
                   flush=True)
@@ -4050,7 +4120,8 @@ def cycle(*, dry_run: bool = False) -> int:
         rb = ""
         fails += 1
     if _should_schedule_planner(
-            rb, executable_unused, intraday_formula_unused):
+            rb, executable_unused, intraday_formula_unused,
+            breeder_pending=breeder_pending):
         # ▶ **기획자와 회의론자를 다른 카드로 낸다** (2026-08-11).
         #   `proposal_intake` 는 두 산출의 실행 id 가 같으면 거부한다 - 자기가
         #   낸 가설을 자기가 검토하면 서명이 무의미하기 때문이다. 한 카드에서
@@ -4127,7 +4198,8 @@ def cycle(*, dry_run: bool = False) -> int:
                   "않는다."),
             assignee=RESEARCH_ASSIGNEE,
             # v5 consumes a bounded typed cohort in one shared event replay.
-            key=f"factory-planner-v8-{pstamp}", dry_run=dry_run, priority=1)
+            key=f"factory-planner-v9-{pstamp}", dry_run=dry_run, priority=1,
+            active_family_prefix="factory-planner-v")
 
         # 회의론자 카드는 **여기서 만들지 않는다**. 기획자 산출이 아직 없는데
         # 걸면 검토할 대상이 없는 채로 돌아 빈 산출을 내거나, 없는 기획안을
@@ -5446,7 +5518,7 @@ def _check_design_gaps_and_scout_card():
         "재료가 말라도 스카우트 전용 카드가 안 나간다"
     # 공급 병목 파훼 두 짝 (2026-08-13): 기획 카드 30분 버킷 + 다중 블록 제출.
     # 실행 6분 vs 공급 1건/시간 실측 - 버킷이 시간으로 돌아가면 재발이다.
-    assert "factory-planner-v8-{pstamp}" in cyc, "기획 카드가 시간 버킷으로 돌아갔다"
+    assert "factory-planner-v9-{pstamp}" in cyc, "기획 카드가 시간 버킷으로 돌아갔다"
     assert "서로 다른 계열" in cyc and "블록 3개" in cyc, "다중 블록 제출 지시가 빠졌다"
     assert "정확히 한" in cyc and "INTRADAY_EVENT" in cyc, \
         "event-time 리드가 있어도 기획자가 일봉만 고를 수 있다"
@@ -5499,6 +5571,9 @@ def _check_research_queue_prefers_consumption():
     assert _should_schedule_planner("brief", 1, 1) is True
     assert _should_schedule_planner("brief", 3, 1) is True, \
         "low-watermark queue was mistaken for an empty queue"
+    assert _should_schedule_planner(
+        "brief", 3, 1, breeder_pending=True) is False, \
+        "planner consumed the pre-breeder snapshot while producer was active"
     assert _should_schedule_planner("brief", 9, 0) is False, \
         "daily leads can still steal the single worker slot from intraday Scout"
     assert _should_schedule_planner("brief", 0, 1) is False
@@ -5510,8 +5585,12 @@ def _check_research_queue_prefers_consumption():
     assert "intraday_formula_unused" in cyc
     assert "_should_schedule_planner(" in cyc, \
         "planner can still consume an empty primary-lane queue"
-    assert "factory-planner-v8-" in cyc, \
+    assert "factory-planner-v9-" in cyc, \
         "corrected scheduling can be absorbed by an old planner key"
+    assert 'active_family_prefix="factory-planner-v"' in cyc, \
+        "planner key version bump can bypass an older active family"
+    assert "dry_run=dry_run, priority=2" in cyc, \
+        "breeder no longer outranks a planner created by a scheduler race"
     assert "priority=1" in cyc, "planner priority was lost after replenishment"
     print("  research producer-before-consumer dependency OK")
 

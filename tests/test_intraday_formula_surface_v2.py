@@ -532,7 +532,9 @@ def test_proposal_intake_filters_unsafe_completed_second_sidecars() -> None:
     }
     passive_sidecar = {"op": "rolling_mean", "arg": raw, "seconds": 60}
 
-    def make_lead(label: str, expr: dict, plan: dict) -> MethodologyLeadV1:
+    def make_lead(label: str, expr: dict, plan: dict, *,
+                  primary_data_plane: str = "MICROSTRUCTURE") \
+            -> MethodologyLeadV1:
         ref = SourceRef(
             url=f"https://example.test/{label}",
             title=label,
@@ -557,6 +559,7 @@ def test_proposal_intake_filters_unsafe_completed_second_sidecars() -> None:
                 "formula_contract_complete": True,
                 "alpha_candidate_eligible": True,
                 "research_lane": "INTRADAY_EVENT",
+                "primary_data_plane": primary_data_plane,
                 "candidate_signal_expr": expr,
                 "source_baseline_expr": raw,
                 "semantic_plan": plan,
@@ -587,7 +590,13 @@ def test_proposal_intake_filters_unsafe_completed_second_sidecars() -> None:
     safe = make_lead("safe", safe_sidecar, taker_plan)
     blocked = make_lead("blocked", blocked_sidecar, taker_plan)
     passive = make_lead("passive", passive_sidecar, passive_plan)
-    leads = {lead.lead_id: lead for lead in (primary, safe, blocked, passive)}
+    wrong_plane = make_lead(
+        "wrong-plane", safe_sidecar, taker_plan,
+        primary_data_plane="DAILY_BARS")
+    leads = {
+        lead.lead_id: lead
+        for lead in (primary, safe, blocked, passive, wrong_plane)
+    }
     proposal = ExperimentProposalV1(
         proposal_id="before",
         case_id="completed-second-v4",
@@ -626,6 +635,7 @@ def test_proposal_intake_filters_unsafe_completed_second_sidecars() -> None:
     assert safe.lead_id in linked_ids
     assert blocked.lead_id not in linked_ids
     assert passive.lead_id not in linked_ids
+    assert wrong_plane.lead_id not in linked_ids
     assert all(
         not grammar.fields_of(row["intraday_signal_expr"])
         & grammar.COMPLETED_SECOND_SEQUENCE_DEPENDENT_FIELDS
@@ -745,6 +755,7 @@ def test_same_ast_conflicting_candidate_contracts_do_not_merge_provenance() -> N
                 "formula_contract_complete": True,
                 "alpha_candidate_eligible": True,
                 "research_lane": "INTRADAY_EVENT",
+                "primary_data_plane": "MICROSTRUCTURE",
                 "candidate_signal_expr": expr,
                 "semantic_plan": plan,
                 "formula_thesis": {
