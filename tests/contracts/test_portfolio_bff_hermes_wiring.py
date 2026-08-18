@@ -59,6 +59,22 @@ def test_ceo_gateway_exposes_only_authenticated_internal_api() -> None:
     assert "ports:" not in ceo
 
 
+def test_trading_gateway_uses_the_same_authenticated_paper_ingress() -> None:
+    compose = (ROOT / "departments/02-trading/compose.yaml").read_text(
+        encoding="utf-8"
+    )
+    trading = _service_block(compose, "trading-hermes")
+
+    assert (
+        "HGFINANCE_DISCORD_INGRESS_URL: "
+        "http://portfolio-bff:8000/ui/ceo/ingress"
+    ) in trading
+    assert (
+        "CEO_DISCORD_INGRESS_API_KEY: "
+        "${CEO_DISCORD_INGRESS_API_KEY:?CEO_DISCORD_INGRESS_API_KEY is required}"
+    ) in trading
+
+
 def test_example_environment_declares_private_discord_ingress_contract() -> None:
     example = (ROOT / ".env.example").read_text(encoding="utf-8")
 

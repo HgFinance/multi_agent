@@ -167,6 +167,11 @@ services:
       # internal MCP boundary. It never receives DATABASE_URL or either
       # Trading service-proof secret.
       MCP_TRADING_ORDER_API_KEY: ${MCP_TRADING_ORDER_API_KEY:?A generated 32-byte PAPER-order MCP key is required}
+      # Human messages in the Trading Discord channel enter the exact same
+      # authenticated CEO-root -> Trading-primary PAPER workflow as the CEO
+      # channel.  The gateway never submits an OMS directive directly.
+      HGFINANCE_DISCORD_INGRESS_URL: http://portfolio-bff:8000/ui/ceo/ingress
+      CEO_DISCORD_INGRESS_API_KEY: ${CEO_DISCORD_INGRESS_API_KEY:?CEO_DISCORD_INGRESS_API_KEY is required}
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0

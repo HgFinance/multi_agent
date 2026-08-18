@@ -270,6 +270,33 @@ class ForwardToIngressTests(unittest.TestCase):
             captured["authorization"], f"Bearer {self._INGRESS_SECRET}"
         )
 
+    def test_trading_profile_uses_the_same_governed_ingress(self) -> None:
+        """Trading-channel orders still create a CEO root and Trading child."""
+
+        class _Response:
+            status = 202
+
+            def __enter__(self):  # noqa: ANN204
+                return self
+
+            def __exit__(self, *args: object) -> bool:
+                return False
+
+        env = self._env(HERMES_PROFILE="trading-department")
+        with patch.dict("os.environ", env), patch(
+            "urllib.request.urlopen", return_value=_Response()
+        ) as opened:
+            self.assertTrue(gateway_patch._forward_to_ingress(self._message(), None))
+        self.assertEqual(opened.call_count, 1)
+
+    def test_unrelated_department_cannot_use_order_ingress(self) -> None:
+        env = self._env(HERMES_PROFILE="research-department")
+        with patch.dict("os.environ", env), patch(
+            "urllib.request.urlopen"
+        ) as opened:
+            self.assertFalse(gateway_patch._forward_to_ingress(self._message(), None))
+        opened.assert_not_called()
+
     def test_transport_failure_falls_back_to_hermes(self) -> None:
         """전달 실패는 조용히 버리지 않고 기존 경로로 되돌린다."""
 
