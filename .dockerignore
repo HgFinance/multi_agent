@@ -27,7 +27,12 @@ node_modules
 # build context only slows Windows/OneDrive builds and risks data leakage.
 market-archive/
 quant-data/
-timescaledb/
+# The AWS database-bootstrap image needs the canonical Timescale migration
+# chain, but no runtime archive or other Timescale payload belongs in a build
+# context.
+timescaledb/*
+!timescaledb/migrations/
+!timescaledb/migrations/**
 artifacts/
 audit-artifacts/
 test-results/
