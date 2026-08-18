@@ -122,3 +122,71 @@ supports it; retain a faithful raw or normalized copy for structured feeds.
   and the exact transparent calculations used as a reproducible pattern.
 - See `references/qa-audit-checklist.md` for the independent arithmetic,
   provenance, preliminary-filing, conditional-opinion, and no-side-effect QA gate.
+
+
+<!-- hgfinance-skill-fast-override-v1 -->
+## Fast advisory override
+
+When the delegated task contains `analysis_mode=fast_advisory`, this section
+takes precedence over the full Procedure, independent QA workflow, related
+guidance, and exhaustive data-gap checks below.
+
+Fast mode is a bounded current snapshot, not a backtest-lite experiment.
+
+### Execution contract
+
+- Do not invoke or rediscover this skill through `skill`, `skill_view`,
+  absolute-path skill loading, or equivalent skill-discovery calls.
+- Do not run formal backtests, scenarios, walk-forward, PBO, robustness,
+  optimization, experiment factories, notebooks, scripts, or artifacts.
+- Do not invoke `grounded-citations` solely to build a citation ledger.
+- Use at most 2 data-retrieval rounds total.
+- A missing critical current-price field may receive exactly 1 fallback attempt.
+- Missing non-critical metrics do not justify another retrieval loop.
+- Perform arithmetic verification inside the same calculation pass; do not
+  launch a separate independent QA/audit workflow.
+
+### Minimum sufficient snapshot
+
+Stop as soon as these are available:
+
+1. latest confirmed completed daily close and its trading date,
+2. one recent trend/return measure,
+3. one risk statistic: volatility OR beta,
+4. one valuation or fundamental signal.
+
+Maximum drawdown may be included only if calculable from an already-loaded
+series. At most 2 valuation/fundamental metrics may be shown.
+
+### Market-data freshness contract
+
+Keep these fields semantically separate:
+
+- `latest_completed_close`: close from the latest non-null completed daily bar,
+- `latest_completed_close_date`: trading date of that bar,
+- `regular_market_price`: current/intraday/provider observation,
+- `regular_market_time`: timestamp of that observation,
+- `previous_close`: previous completed session close.
+
+Never substitute `previousClose` for a missing latest completed close.
+Never describe `regularMarketPrice` as a completed close unless the provider
+explicitly represents it as the completed daily close.
+
+If the expected latest completed trading-day bar is missing:
+
+1. make one fallback lookup from a second usable source;
+2. if still unavailable, report the latest confirmed close and its true date;
+3. explicitly label any newer regular-market observation separately.
+
+Do not invent or infer a missing daily close.
+
+### Fast output
+
+Return a concise Korean `final_answer` with:
+- 가격/기준일
+- 추세
+- 위험지표
+- 밸류에이션 또는 펀더멘털
+- 조건부 정량 판단
+
+Target no more than 8-10 tool calls and stop when sufficient evidence exists.

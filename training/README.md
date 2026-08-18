@@ -37,9 +37,19 @@ and normalized duplicates are rejected within splits and across train/
 validation boundaries. Every output record contains source path/row and raw
 and normalized record SHA256 values.
 
-External-50, Internal-v1, and Internal-v2 are held out. Exact and conservative
-near-duplicate contamination checks are performed against the benchmark
-directory and block preparation on any match.
+External-50, Internal-v1, and Internal-v2 / EmployeeReasoning are held out.
+The benchmark directory must contain the explicit manifest files
+`external50_v1.json`, `internal50_v1.json`, and `internal50_v2_reasoning.json`;
+missing, empty, malformed-only, or unreadable roots fail closed. Exact and
+conservative near-duplicate contamination checks block preparation on any
+match.
+
+Legacy `instruct`/`input`/`output` records treat `instruct` as user content,
+not system content. `instruct` and `output` are required; `input` is optional.
+When present, input is appended to instruct with a stable separator. A single
+reusable HgFinance default system policy is used when legacy `system` is absent.
+Train/validation isolation checks canonical user-question hashes in addition
+to full-record hashes.
 
 ## CPU-safe validation
 
@@ -68,12 +78,19 @@ The prepared training entrypoint uses the original
 BF16/FP16 compute, LoRA rank 16, alpha 32, dropout 0.05, and the seven
 attention/MLP projection target modules. Rank is validated against the
 production `max-lora-rank=32` limit. The Qwen chat template is required and
-the collator masks all non-assistant tokens.
+the collator masks all non-assistant tokens. Full rendered sequences are
+audited for p50/p95/p99/max length before the base model is loaded; any
+over-limit sample fails closed instead of truncating an assistant answer.
+Gradient checkpointing is explicit, `model.config.use_cache=False` is applied,
+and `paged_adamw_8bit` is configured both in `TrainingArguments` and metadata.
+Real training requires `--base-revision`; omission remains allowed only for
+`--dry-run`. Metadata records requested and resolved revisions separately.
 
 Colab setup and run:
 
 ```bash
 pip install -r training/qlora/requirements-colab.txt
+export QWEN_BASE_REVISION="<resolved Hugging Face commit SHA>"
 python scripts/qlora/train_specialist_qlora.py \
   --department risk \
   --adapter-version v1 \
@@ -82,6 +99,7 @@ python scripts/qlora/train_specialist_qlora.py \
   --department-validation datasets/risk/validation.jsonl \
   --benchmark-root benchmarks/quantization \
   --target-train-size 4000 \
+  --base-revision "$QWEN_BASE_REVISION" \
   --output-dir training_runs/hgfinance-risk-v1
 ```
 
@@ -100,3 +118,25 @@ training_runs/hgfinance-risk-v1/
 Training is not executed by repository tests. The Common package has been
 mechanically cleaned and deduplicated, but its finance answers are not an
 independently expert-certified regulatory or accounting gold set.
+
+## Common-only smoke test
+
+The first experiment can validate one shared behavior adapter without a
+department dataset. This mode preserves the Common 2,545/223 train/validation
+splits exactly; it does not re-split, oversample, or require a target size.
+
+```bash
+python scripts/qlora/train_specialist_qlora.py \
+  --common-only \
+  --adapter-version v1 \
+  --common-dir hgfinance_common_training_v1 \
+  --benchmark-root benchmarks/quantization \
+  --output-dir training_runs/hgfinance-common-v1 \
+  --base-model Qwen/Qwen2.5-14B-Instruct \
+  --base-revision "$QWEN_BASE_REVISION" \
+  --dry-run
+```
+
+The resolved adapter name is `hgfinance-common-v1`. Department specialist
+training remains available by omitting `--common-only` and supplying the
+department train/validation files and target size.

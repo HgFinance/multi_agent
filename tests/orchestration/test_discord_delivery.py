@@ -282,5 +282,53 @@ class DiscordDeliveryTests(unittest.TestCase):
 
 
 
+
+    def test_department_detail_uses_starter_message_as_existing_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = DiscordIdempotencyStore(
+                Path(directory) / "discord.sqlite3"
+            )
+
+            sent: list[dict[str, object]] = []
+
+            def sender(channel: str, payload: str, _headers: dict[str, str]):
+                sent.append(
+                    {
+                        "channel": channel,
+                        "payload": json.loads(payload),
+                    }
+                )
+                return {"id": "detail-message"}
+
+            delivery = DiscordFinalDelivery(
+                environment={"DISCORD_BOT_TOKEN": "test-token"},
+                sender=sender,
+            )
+
+            result = delivery.deliver_to_existing_thread(
+                root_task_id="root",
+                source_task={
+                    "root_task": {
+                        "body": (
+                            "discord_message_id=1539153165784584263\n"
+                            "discord_channel_id=1536997434507657261\n"
+                            "discord_thread_id=\n"
+                        )
+                    }
+                },
+                content="department full analysis",
+                title="📊 Quant / Backtest 부서 상세 분석",
+                store=store,
+                profile="quant-backtest-department",
+                response_key_suffix="department-detail:test",
+            )
+
+            self.assertEqual(result, "sent")
+            self.assertEqual(
+                sent[0]["channel"],
+                "1539153165784584263",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

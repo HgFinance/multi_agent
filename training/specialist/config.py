@@ -6,6 +6,9 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
+DEFAULT_OPTIMIZER = "paged_adamw_8bit"
+
+
 @dataclass(frozen=True)
 class QLoRAConfig:
     base_model: str = "Qwen/Qwen2.5-14B-Instruct"
@@ -29,6 +32,9 @@ class QLoRAConfig:
         )
     )
     max_production_lora_rank: int = 32
+    gradient_checkpointing: bool = True
+    gradient_checkpointing_use_reentrant: bool = False
+    optimizer: str = DEFAULT_OPTIMIZER
 
     def __post_init__(self) -> None:
         if self.bnb_4bit_quant_type.lower() != "nf4":
@@ -49,6 +55,8 @@ class QLoRAConfig:
             "down_proj",
         ):
             raise ValueError("target_modules must cover the configured attention/MLP projections")
+        if self.optimizer != DEFAULT_OPTIMIZER:
+            raise ValueError(f"specialist training requires optimizer={DEFAULT_OPTIMIZER}")
 
     def as_dict(self) -> dict[str, Any]:
         result = asdict(self)

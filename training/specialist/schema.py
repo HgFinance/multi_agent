@@ -16,6 +16,11 @@ class DatasetValidationError(ValueError):
 
 
 _ALLOWED_ROLES = {"system", "user", "assistant"}
+LEGACY_USER_SEPARATOR = "\n\n"
+DEFAULT_HGFINANCE_SYSTEM_POLICY = (
+    "You are a HgFinance employee. Use supplied evidence, do not invent facts, "
+    "and respect deterministic authority boundaries."
+)
 
 
 def normalize_text(value: str) -> str:
@@ -43,6 +48,10 @@ def normalized_message_sha256(messages: list[dict[str, str]]) -> str:
     return _json_hash(normalized)
 
 
+def _text_sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -54,13 +63,23 @@ def file_sha256(path: Path) -> str:
 def _messages_from_record(raw: Mapping[str, Any]) -> list[dict[str, str]]:
     messages = raw.get("messages")
     if messages is None:
-        required = ("instruct", "input", "output")
-        if not all(isinstance(raw.get(key), str) and raw[key].strip() for key in required):
-            raise DatasetValidationError("expected non-empty instruct/input/output")
+        instruct = raw.get("instruct")
+        output = raw.get("output")
+        input_value = raw.get("input", "")
+        if not isinstance(instruct, str) or not instruct.strip():
+            raise DatasetValidationError("legacy instruct must be non-empty")
+        if not isinstance(output, str) or not output.strip():
+            raise DatasetValidationError("legacy output must be non-empty")
+        if not isinstance(input_value, str):
+            raise DatasetValidationError("legacy input must be text when supplied")
+        user = instruct if not input_value.strip() else instruct + LEGACY_USER_SEPARATOR + input_value
+        system = raw.get("system")
+        if not isinstance(system, str) or not system.strip():
+            system = DEFAULT_HGFINANCE_SYSTEM_POLICY
         messages = [
-            {"role": "system", "content": raw["instruct"]},
-            {"role": "user", "content": raw["input"]},
-            {"role": "assistant", "content": raw["output"]},
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+            {"role": "assistant", "content": output},
         ]
     if not isinstance(messages, list) or not messages:
         raise DatasetValidationError("messages must be a non-empty list")
@@ -100,6 +119,24 @@ class ValidatedExample:
     @property
     def normalized_sha256(self) -> str:
         return normalized_message_sha256(self.messages)
+
+    @property
+    def user_content(self) -> str:
+        return LEGACY_USER_SEPARATOR.join(
+            message["content"] for message in self.messages if message["role"] == "user"
+        )
+
+    @property
+    def normalized_user_content(self) -> str:
+        return normalize_text(self.user_content)
+
+    @property
+    def user_sha256(self) -> str:
+        return _text_sha256(self.user_content)
+
+    @property
+    def normalized_user_sha256(self) -> str:
+        return _text_sha256(self.normalized_user_content)
 
 
 def validate_record(

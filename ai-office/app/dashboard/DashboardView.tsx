@@ -6,7 +6,9 @@ import { Company } from "../game/sim";
 import { STAFF } from "../game/staff";
 import LivePortfolioPanel from "../components/LivePortfolioPanel";
 import { CeoControlRoomChat } from "./CeoControlRoomChat";
+import { MarketRankingCard } from "./MarketRankingCard";
 import { PanelBar } from "./PanelBar";
+import { TodayTradingSummaryCard } from "./TodayTradingSummaryCard";
 
 /**
  * 대표 Dashboard.
@@ -54,7 +56,11 @@ export default function DashboardView() {
 
         {/* ── CEO Control Room / 실시간 포트폴리오 ───────── */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-gutter items-start">
-          <CeoControlRoomChat />
+          <div className="flex min-w-0 flex-col gap-gutter">
+            <CeoControlRoomChat />
+            <TodayTradingSummaryCard />
+            <MarketRankingCard />
+          </div>
           <LivePortfolioPanel />
         </div>
 
