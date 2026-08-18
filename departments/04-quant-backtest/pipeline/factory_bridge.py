@@ -608,7 +608,16 @@ def gate0(proposal: dict, *, trials_used: int = 0,
             # Bind every controlled runtime knob at Gate 0 so a bad fee/latency
             # range cannot consume a trial and fail only inside the worker.
             edge_for_runtime, _ = expected_edge_for(proposal)
-            from intraday_experiment_runner import config_from_edge
+            from intraday_experiment_runner import (
+                config_from_edge,
+                current_intraday_execution_contract_rejection,
+            )
+            contract_rejection = \
+                current_intraday_execution_contract_rejection(edge_for_runtime)
+            if contract_rejection:
+                raise ValueError(
+                    f"{contract_rejection}; migrate legacy formulas into a "
+                    "new V2 child before Gate 0")
             config_from_edge(edge_for_runtime)
             alignment = check_observables(
                 plan, fields_of(iexpr), operators=operators_of(iexpr),

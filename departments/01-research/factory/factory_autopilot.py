@@ -62,6 +62,45 @@ from stock_universe import (  # noqa: E402
 
 MODULE_VERSION = "factory-autopilot-v1"
 
+# Planner and queue-health checks may consume only formulas that the deployed
+# intraday evaluator can replay without an implicit-window migration.  Legacy
+# formula-discovery-v5 rows remain valid *evolution parents* below, but they are
+# not ready-to-run queue inventory.
+CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT = "explicit-primitive-window-v2"
+CURRENT_INTRADAY_EVALUATOR_VERSION = "intraday-candidate-evaluator-v12"
+LEGACY_INTRADAY_FEATURE_WINDOW_CONTRACT = "legacy-cohort-lookback-v1"
+LEGACY_INTRADAY_EVALUATOR_VERSION = "intraday-candidate-evaluator-v11"
+
+# Scout/Planner memory is an execution input, not an archive.  Only evidence
+# produced by the exact currently deployed feature/evaluator pair may shape a
+# V2 proposal.  formula_breeder intentionally keeps its separate broad memory
+# so legacy formulas can still be migrated into new V2 children.
+_CURRENT_V2_INTRADAY_MEMORY_EVIDENCE = """
+  e.config->>'feature_window_contract_version' =
+      'explicit-primitive-window-v2'
+  and exists (
+      select 1
+        from quant.intraday_candidate_lineages current_lineage
+       where current_lineage.candidate_lineage_id = case
+               when coalesce(manifest.report#>>
+                    '{trial_lockbox,primary_candidate_lineage_id}', '') ~
+                    '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+               then (manifest.report#>>
+                    '{trial_lockbox,primary_candidate_lineage_id}')::uuid
+               else null end
+         and current_lineage.hypothesis_id = e.hypothesis_id
+         and current_lineage.evaluator_version =
+             'intraday-candidate-evaluator-v12'
+  )
+"""
+
+# A healthy heartbeat may keep a genuinely long-running card active, but a
+# ready card that was never claimed (or a running card whose heartbeat died)
+# must not suppress discovery forever.
+ACTIVE_DISCOVERY_CARD_TTL_SECONDS = 6 * 60 * 60
+SUPERSEDED_INTRADAY_CONTRACT_REASON = \
+    "SUPERSEDED_INTRADAY_FEATURE_WINDOW_CONTRACT"
+
 _GOVERNED_HISTORICAL_EVIDENCE = governed_stock_evidence_sql(
     experiment_alias="e", dataset_alias="m", hypothesis_alias="h")
 _GOVERNED_STOCK_DATASET = governed_stock_dataset_sql(dataset_alias="m")
@@ -69,6 +108,14 @@ _GOVERNED_CALIBRATION_FAILURE_EVIDENCE = """
   e.config->>'asset_scope' = 'REFERENCE_INSTRUMENT_TYPE_STOCK_ONLY'
   and manifest.manifest_version = '""" + \
     INTRADAY_REPORT_MANIFEST_VERSION + """'
+  and coalesce(e.config->>'feature_window_contract_version',
+               'legacy-cohort-lookback-v1') in
+      ('legacy-cohort-lookback-v1', 'explicit-primitive-window-v2')
+  and primary_lineage.evaluator_version = case
+        when e.config->>'feature_window_contract_version' =
+             'explicit-primitive-window-v2'
+        then 'intraday-candidate-evaluator-v12'
+        else 'intraday-candidate-evaluator-v11' end
   and """ + _GOVERNED_STOCK_DATASET + """
   and exists (
       select 1
@@ -424,6 +471,11 @@ select h.hypothesis_id::text, h.title, h.status, h.expected_edge,
   left join quant.experiments e on e.hypothesis_id = h.hypothesis_id
  where h.status in ('PROPOSED', 'PREREGISTERED', 'TESTING')
    and e.experiment_id is null
+   -- Legacy intraday hypotheses remain immutable provenance, but they are not
+   -- executable work for the current V12 queue.
+   and (coalesce(h.expected_edge->>'research_lane',
+                 'DAILY_CROSS_SECTIONAL') <> 'INTRADAY_EVENT'
+        or h.expected_edge->>'feature_window_contract_version' = %s)
  order by h.created_at
  limit %s
 """
@@ -481,8 +533,10 @@ select l.lead_id, l.scout_lens, l.claimed_edge, l.stated_mechanism,
    and coalesce((l.ast_contract->>'alpha_candidate_eligible')::boolean, false)
    and (coalesce(l.ast_contract->>'research_lane',
                  'DAILY_CROSS_SECTIONAL') <> 'INTRADAY_EVENT'
-        or l.ast_contract->>'formula_discovery_version' =
-           'formula-discovery-v5')
+        or (l.ast_contract->>'formula_discovery_version' =
+            'formula-discovery-v5'
+            and l.ast_contract->>'feature_window_contract_version' =
+                %s))
 order by used asc,
          case
            when coalesce(l.ast_contract->>'research_lane',
@@ -1369,7 +1423,10 @@ def research_brief() -> str:
     try:
         brief = cycle_brief.build(conn, market_conn=market_conn)
         with conn.cursor() as cur:
-            cur.execute(_SQL_LEADS, (12,))
+            cur.execute(
+                _SQL_LEADS,
+                (CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT, 12),
+            )
             leads = cur.fetchall()
         return _compose_research_brief(
             conn, brief, leads, market_conn=market_conn)
@@ -1398,8 +1455,13 @@ def _ast_experience_block(conn) -> str:
                       from research.v_current_experiment_outcomes x
                      where x.experiment_id = e.experiment_id::text
                      order by x.decided_at desc limit 1
-                  ) o on true
+                 ) o on true
                  where e.config ? 'signal_expr'
+                   and not (e.config ? 'intraday_signal_expr')
+                   and upper(coalesce(
+                         nullif(e.config->>'research_lane', ''),
+                         nullif(h.expected_edge->>'research_lane', ''),
+                         'DAILY_CROSS_SECTIONAL')) <> 'INTRADAY_EVENT'
                    and """ + _GOVERNED_HISTORICAL_EVIDENCE + """
                  order by e.created_at desc""")
             experiments = [{
@@ -1440,6 +1502,10 @@ def _ast_experience_block(conn) -> str:
                  where l.status = 'COMPLETE'
                    and l.ast_contract->>'ast_readiness' = 'AST_READY'
                    and l.ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
+                   and (coalesce(l.ast_contract->>'research_lane',
+                                 'DAILY_CROSS_SECTIONAL') <> 'INTRADAY_EVENT'
+                        or l.ast_contract->>'feature_window_contract_version' =
+                           'explicit-primitive-window-v2')
                  order by l.created_at desc""")
             leads = [{"lead_id": row[0], "title": row[1],
                       "signal_expr": row[2], "used": bool(row[3]),
@@ -1499,6 +1565,7 @@ def _ast_experience_block(conn) -> str:
                      order by m.experiment_metric_id limit 1
                   ) rb on true
                  where e.config ? 'intraday_signal_expr'
+                   and """ + _CURRENT_V2_INTRADAY_MEMORY_EVIDENCE + """
                    and """ + _GOVERNED_HISTORICAL_EVIDENCE + """
                  order by e.created_at desc""")
             intraday = [{
@@ -1530,6 +1597,18 @@ def _ast_experience_block(conn) -> str:
                   left join quant.intraday_report_manifests manifest
                     on manifest.experiment_id = e.experiment_id
                  where e.config ? 'screening_population'
+                   and """ + _CURRENT_V2_INTRADAY_MEMORY_EVIDENCE + """
+                   and not exists (
+                       select 1
+                         from jsonb_array_elements(
+                                case when jsonb_typeof(
+                                     e.config->'screening_population') = 'array'
+                                     then e.config->'screening_population'
+                                     else '[]'::jsonb end) current_candidate
+                        where current_candidate->>
+                              'feature_window_contract_version' is distinct from
+                              'explicit-primitive-window-v2'
+                   )
                    and """ + _GOVERNED_HISTORICAL_EVIDENCE + """
                  order by e.created_at desc, metric.metric""")
             screened: dict[tuple[str, str], dict] = {}
@@ -1611,10 +1690,20 @@ def _ast_experience_block(conn) -> str:
                         dimensions.get("residual_qd") or {})
             intraday.extend(screened.values())
             cur.execute("""
-                select lead_ids, title, verdict, competing_codes,
+                select r.lead_ids, r.title, r.verdict, r.competing_codes,
                        competing_explanation, falsification_test
-                  from research.proposal_review_outcomes
-                 order by created_at desc limit 12""")
+                  from research.proposal_review_outcomes r
+                 where not exists (
+                       select 1
+                         from research.methodology_leads reviewed_lead
+                        where reviewed_lead.lead_id = any(r.lead_ids)
+                          and reviewed_lead.ast_contract->>'research_lane' =
+                              'INTRADAY_EVENT'
+                          and reviewed_lead.ast_contract->>
+                              'feature_window_contract_version' is distinct from
+                              'explicit-primitive-window-v2'
+                 )
+                 order by r.created_at desc limit 12""")
             reviews = cur.fetchall()
         review_memory = ""
         if reviews:
@@ -1845,6 +1934,9 @@ INTRADAY_LEADS_LOW = 2
 # typed-formula buffer so deployment upgrades actually refill the new contract.
 INTRADAY_FORMULA_LEADS_LOW = 12
 FORMULA_BREEDER_POPULATION = 64
+# Deliberately do not add CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT here:
+# implicit-window formulas are migration/evolution material even though they
+# are not eligible for direct Planner consumption.
 _LIVE_INTRADAY_EVOLUTION_PARENTS_SQL = """
     select count(*)
       from research.methodology_leads l
@@ -1871,6 +1963,15 @@ _LIVE_INTRADAY_EVOLUTION_PARENTS_SQL = """
                  on m.dataset_id = e.dataset_id
                join quant.intraday_report_manifests manifest
                  on manifest.experiment_id = e.experiment_id
+               join quant.intraday_candidate_lineages primary_lineage
+                 on primary_lineage.candidate_lineage_id = case
+                      when coalesce(manifest.report#>>
+                           '{trial_lockbox,primary_candidate_lineage_id}', '') ~
+                           '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                      then (manifest.report#>>
+                           '{trial_lockbox,primary_candidate_lineage_id}')::uuid
+                      else null end
+                and primary_lineage.hypothesis_id = e.hypothesis_id
                cross join lateral (
                  -- Primary and screening formulas are both durable adaptive
                  -- observations. JSONB equality deliberately compares the
@@ -1891,8 +1992,17 @@ _LIVE_INTRADAY_EVOLUTION_PARENTS_SQL = """
                           end) screen_candidate
                   where screen_candidate->'intraday_signal_expr' =
                         l.ast_contract->'candidate_signal_expr'
-               ) measured
+              ) measured
               where """ + _GOVERNED_CALIBRATION_FAILURE_EVIDENCE + """
+                -- The same JSON AST can be replayed under materially different
+                -- window/evaluator semantics.  Only equal execution identities
+                -- may retire one another; missing historical versions map to
+                -- the explicit legacy contract, never to V2.
+                and coalesce(
+                      e.config->>'feature_window_contract_version',
+                      'legacy-cohort-lookback-v1') = coalesce(
+                      l.ast_contract->>'feature_window_contract_version',
+                      'legacy-cohort-lookback-v1')
                 and jsonb_typeof(measured.calibration) = 'object'
                 and measured.calibration->>'status' =
                     'NO_COST_FEASIBLE_ENTRY'
@@ -1974,8 +2084,10 @@ def _executable_unused_count(conn) -> int:
                      false)
                and (coalesce(l.ast_contract->>'research_lane',
                              'DAILY_CROSS_SECTIONAL') <> 'INTRADAY_EVENT'
-                    or l.ast_contract->>'formula_discovery_version' =
-                       'formula-discovery-v5')
+                    or (l.ast_contract->>'formula_discovery_version' =
+                        'formula-discovery-v5'
+                        and l.ast_contract->>'feature_window_contract_version' =
+                            %s))
                and not exists (
                      select 1 from research.experiment_proposals p
                       where l.lead_id = any(p.lead_ids)
@@ -1984,7 +2096,7 @@ def _executable_unused_count(conn) -> int:
                      select 1 from research.proposal_review_outcomes r
                       where r.verdict = 'STOP'
                         and l.lead_id = any(r.lead_ids))
-        """)
+        """, (CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT,))
         return int((cur.fetchone() or (0,))[0] or 0)
 
 
@@ -2007,6 +2119,8 @@ def _intraday_formula_unused_count(conn) -> int:
                and l.ast_contract->>'research_lane' = 'INTRADAY_EVENT'
                and l.ast_contract->>'formula_discovery_version' =
                    'formula-discovery-v5'
+               and l.ast_contract->>'feature_window_contract_version' =
+                   %s
                and coalesce(
                      (l.ast_contract->>'formula_contract_complete')::boolean,
                      false)
@@ -2021,7 +2135,7 @@ def _intraday_formula_unused_count(conn) -> int:
                      select 1 from research.proposal_review_outcomes r
                       where r.verdict = 'STOP'
                         and l.lead_id = any(r.lead_ids))
-        """)
+        """, (CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT,))
         return int((cur.fetchone() or (0,))[0] or 0)
 
 
@@ -2097,6 +2211,8 @@ def _lead_health(conn) -> str:
                            and ast_contract->>'research_lane' = 'INTRADAY_EVENT'
                            and ast_contract->>'formula_discovery_version' =
                                'formula-discovery-v5'
+                           and ast_contract->>'feature_window_contract_version' =
+                               %s
                            and coalesce((ast_contract->>'alpha_candidate_eligible')::boolean,
                                         false)
                            and not exists (
@@ -2116,6 +2232,8 @@ def _lead_health(conn) -> str:
                            and ast_contract->>'research_lane' = 'INTRADAY_EVENT'
                            and ast_contract->>'formula_discovery_version' =
                                'formula-discovery-v5'
+                           and ast_contract->>'feature_window_contract_version' =
+                               %s
                            and coalesce(
                                  (ast_contract->>'alpha_candidate_eligible')::boolean,
                                  false)
@@ -2141,11 +2259,24 @@ def _lead_health(conn) -> str:
                                            false)
                          )
                        ))/86400.0 as newest_usable_age_days
-                  from research.methodology_leads""")
+                  from research.methodology_leads""", (
+                      CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT,
+                      CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT,
+                  ))
             (total, raw_unused, unused, intraday_unused,
              intraday_formula_unused, age) = cur.fetchone()
     except Exception:  # noqa: BLE001 - 못 세면 안 적는다
-        return ""
+        # PostgreSQL leaves the transaction aborted after a statement error.
+        # Clear that read-only failure so independent counters can still
+        # recover a partial view and schedule replenishment.
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001 - preserve the health diagnosis
+            pass
+        return (
+            "\n[QUEUE HEALTH UNKNOWN - FAIL CLOSED] lead inventory query "
+            "failed; Planner is held and a Scout recovery card is required."
+        )
     total = int(total or 0)
     raw_unused, unused = int(raw_unused or 0), int(unused or 0)
     intraday_unused = int(intraday_unused or 0)
@@ -2609,7 +2740,10 @@ def quant_brief() -> tuple[str, int]:
     conn = _conn()
     try:
         with conn.cursor() as cur:
-            cur.execute(_SQL_PENDING, (10,))
+            cur.execute(
+                _SQL_PENDING,
+                (CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT, 10),
+            )
             pending = cur.fetchall()
             cur.execute(_SQL_FAMILY_PRESSURE)
             pressure = cur.fetchall()
@@ -2833,16 +2967,22 @@ def _active_card_by_key_prefix(prefix: str) -> str | None:
     card at a time, so a second active scout would only duplicate discovery
     without increasing the executable-lead production rate.
 
-    Board-read failures are fail-open: the hourly idempotency key still bounds
-    duplication, while a transient read failure must not stop discovery.
+    A ready card is live only for a bounded queue residence; a running card is
+    live while its heartbeat is fresh. Board-read failures are fail-open: the
+    hourly idempotency key still bounds duplication, while a transient read
+    failure must not stop discovery.
     """
     try:
         rows = _board_rows(
             "select id, status, idempotency_key from tasks "
             "where idempotency_key like ? "
             "  and status in ('ready','running') "
+            "  and (case when status = 'running' "
+            "            then coalesce(last_heartbeat_at, started_at, created_at) "
+            "            else created_at end) >= "
+            "      cast(strftime('%s','now') as integer) - ? "
             "order by created_at asc limit 1",
-            (prefix + "%",),
+            (prefix + "%", ACTIVE_DISCOVERY_CARD_TTL_SECONDS),
         )
     except Exception as exc:  # noqa: BLE001
         print(f"  board lookup failed - active-card guard skipped "
@@ -2866,8 +3006,9 @@ def _should_schedule_planner(research_brief: str,
     next 30-minute planner bucket.  The aggregate count can be positive solely
     because daily leads remain.  The Planner contract prioritizes event-time and
     refuses a daily fallback when that lane is empty, so both counts must be
-    non-empty.  A low watermark is still not an empty queue: one v3 formula is
-    enough to let Planner consume while Scout replenishes the population.
+    non-empty.  A low watermark is still not an empty queue: one
+    current-contract formula is enough to let Planner consume while Scout
+    replenishes the population.
 
     ``None`` means the count could not be measured and is fail-closed.
     """
@@ -2876,6 +3017,49 @@ def _should_schedule_planner(research_brief: str,
             and intraday_formula_unused is not None
             and int(executable_unused) > 0
             and int(intraday_formula_unused) > 0)
+
+
+def _should_schedule_formula_breeder(
+        starvation: str,
+        intraday_formula_unused: int | None,
+        intraday_evolution_parents: int | None) -> bool:
+    """Breed when current V2 stock is low and a migration parent exists."""
+    return (bool(str(starvation or "").strip())
+            and intraday_formula_unused is not None
+            and intraday_evolution_parents is not None
+            and int(intraday_evolution_parents) > 0
+            and int(intraday_formula_unused) < INTRADAY_FORMULA_LEADS_LOW)
+
+
+def _should_schedule_scout(
+        starvation: str,
+        breeder_needed: bool,
+        intraday_formula_unused: int | None) -> bool:
+    """Keep a bounded discovery fallback when migration cannot refill V2.
+
+    A broad legacy-parent count proves provenance, not that a parent can be
+    parsed into a submission-ready child.  When the current queue is empty (or
+    cannot be measured), schedule Scout alongside the breeder so one malformed
+    legacy parent cannot monopolize every hourly cycle.
+    """
+    return (bool(str(starvation or "").strip())
+            and (not breeder_needed
+                 or intraday_formula_unused is None
+                 or int(intraday_formula_unused) <= 0))
+
+
+def _safe_queue_measurement(conn, loader, *, label: str) -> int | None:
+    """Read one queue counter without letting a broken metric stop recovery."""
+    try:
+        return int(loader(conn))
+    except Exception as exc:  # noqa: BLE001 - measurement is not execution
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001 - preserve the original diagnosis
+            pass
+        print(f"  queue measurement failed ({label}): "
+              f"{type(exc).__name__}", flush=True)
+        return None
 
 
 def _board_rows(sql: str, params: tuple = ()) -> list[tuple]:
@@ -3243,6 +3427,11 @@ _SQL_NEEDS_EXPERIMENT = """
 select h.hypothesis_id::text, left(h.title, 60)
   from quant.hypotheses h
  where h.status = 'PROPOSED'
+   -- Never enqueue an implicit-window intraday hypothesis into the V12 worker.
+   -- It must first become a new, provenance-linked V2 child proposal.
+   and (coalesce(h.expected_edge->>'research_lane',
+                 'DAILY_CROSS_SECTIONAL') <> 'INTRADAY_EVENT'
+        or h.expected_edge->>'feature_window_contract_version' = %s)
    -- 이미 대기·실행 중인 주문이 있으면 다시 넣지 않는다. enqueue 도 막지만,
    -- 여기서 거르면 매 주기 "거부됨" 이 로그를 채우지 않는다.
    and not exists (select 1 from quant.experiment_jobs j
@@ -3557,6 +3746,63 @@ def _enact_top_move(conn, *, dry_run: bool = False) -> int:
     return 0
 
 
+def _retire_superseded_intraday_hypotheses(
+        conn, *, dry_run: bool = False) -> int:
+    """Retire immutable legacy PROPOSED rows with typed durable evidence.
+
+    Current queue selectors intentionally do not execute a legacy contract.
+    Without this transition those rows disappear from every selector while
+    remaining PROPOSED forever.  A CANCELLED audit job records why no evaluator
+    was launched; active jobs are left to the worker's own terminal boundary.
+    """
+    predicate = """
+        h.status = 'PROPOSED'
+        and h.expected_edge->>'research_lane' = 'INTRADAY_EVENT'
+        and h.expected_edge->>'feature_window_contract_version'
+            is distinct from %s
+        and not exists (
+              select 1 from quant.experiment_jobs active_job
+               where active_job.hypothesis_id = h.hypothesis_id
+                 and active_job.status in ('QUEUED','LEASED'))
+    """
+    with conn.cursor() as cur:
+        if dry_run:
+            cur.execute(
+                "select count(*) from quant.hypotheses h where " + predicate,
+                (CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT,),
+            )
+            return int((cur.fetchone() or (0,))[0] or 0)
+        cur.execute(
+            """
+            with retired as (
+                update quant.hypotheses h
+                   set status = 'REJECTED', status_changed_at = now()
+                 where """ + predicate + """
+                 returning h.hypothesis_id,
+                           coalesce(h.expected_edge->>
+                             'feature_window_contract_version', 'MISSING')
+                             as observed_contract
+            ), recorded as (
+                insert into quant.experiment_jobs (
+                    hypothesis_id, requested_by, status, failure_reason)
+                select hypothesis_id, 'factory-autopilot-contract-retirement',
+                       'CANCELLED',
+                       %s || ': observed=' || observed_contract ||
+                       '; required=' || %s
+                  from retired
+                returning job_id
+            )
+            select count(*) from recorded
+            """,
+            (CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT,
+             SUPERSEDED_INTRADAY_CONTRACT_REASON,
+             CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT),
+        )
+        retired = int((cur.fetchone() or (0,))[0] or 0)
+    conn.commit()
+    return retired
+
+
 def _dispatch_experiments(*, dry_run: bool = False, limit: int = 10) -> int:
     """PROPOSED 가설을 실험 큐에 넣는다. 반환: 실패 수(0=정상).
 
@@ -3571,9 +3817,18 @@ def _dispatch_experiments(*, dry_run: bool = False, limit: int = 10) -> int:
     conn = _conn()
     try:
         _feed_back_experiment_failures(conn)
+        retired = _retire_superseded_intraday_hypotheses(
+            conn, dry_run=dry_run)
+        if retired:
+            tag = "[dry-run] would retire" if dry_run else "retired"
+            print(f"  {tag} {retired} superseded intraday hypotheses",
+                  flush=True)
         _enact_top_move(conn, dry_run=dry_run)
         with conn.cursor() as cur:
-            cur.execute(_SQL_NEEDS_EXPERIMENT, (limit,))
+            cur.execute(
+                _SQL_NEEDS_EXPERIMENT,
+                (CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT, limit),
+            )
             rows = cur.fetchall()
         if not rows:
             return 0
@@ -3690,17 +3945,22 @@ def cycle(*, dry_run: bool = False) -> int:
             # The refill low-watermark and the consumer empty-queue gate are
             # deliberately separate.  One fresh lead is enough for Planner,
             # even though Scout should concurrently refill toward LEADS_LOW.
-            executable_unused = _executable_unused_count(_sc)
-            intraday_formula_unused = _intraday_formula_unused_count(_sc)
-            intraday_evolution_parents = _intraday_evolution_parent_count(_sc)
+            executable_unused = _safe_queue_measurement(
+                _sc, _executable_unused_count, label="executable-unused")
+            intraday_formula_unused = _safe_queue_measurement(
+                _sc, _intraday_formula_unused_count,
+                label="current-v2-formula-unused")
+            intraday_evolution_parents = _safe_queue_measurement(
+                _sc, _intraday_evolution_parent_count,
+                label="evolution-parent-count")
             ast_memory = _ast_experience_block(_sc)
         finally:
             _sc.close()
-        breeder_needed = bool(
-            starving
-            and intraday_evolution_parents
-            and intraday_formula_unused is not None
-            and intraday_formula_unused < INTRADAY_FORMULA_LEADS_LOW)
+        breeder_needed = _should_schedule_formula_breeder(
+            starving,
+            intraday_formula_unused,
+            intraday_evolution_parents,
+        )
         active_breeder = (_active_card_by_key_prefix("factory-formula-breeder-")
                           if breeder_needed else None)
         if breeder_needed and not active_breeder:
@@ -3717,8 +3977,11 @@ def cycle(*, dry_run: bool = False) -> int:
             print(f"  formula breeder skipped - already active: {active_breeder}",
                   flush=True)
 
-        active_scout = _active_card_by_key_prefix("factory-scout-") if starving else None
-        if starving and not breeder_needed and not active_scout:
+        scout_needed = _should_schedule_scout(
+            starving, breeder_needed, intraday_formula_unused)
+        active_scout = (_active_card_by_key_prefix("factory-scout-")
+                        if scout_needed else None)
+        if scout_needed and not active_scout:
             _now = datetime.now(timezone.utc)
             _create_card(
                 title=f"공장 스카우트 소집: 리드 수집 {stamp}",
@@ -3754,7 +4017,7 @@ def cycle(*, dry_run: bool = False) -> int:
                 # label these economic mutations explicitly.
                 key=f"factory-scout-v9-{_now:%Y%m%d}T{_now.hour:02d}",
                 dry_run=dry_run)
-        elif active_scout and not breeder_needed:
+        elif active_scout and scout_needed:
             print(f"  scout refill skipped - already active: {active_scout}", flush=True)
     except Exception as exc:  # noqa: BLE001
         print(f"  !! 스카우트 카드 실패: {type(exc).__name__}: {str(exc)[:150]}",
@@ -4599,6 +4862,11 @@ def _check_formula_breeder_live_routing() -> None:
             "l.ast_contract->'candidate_signal_expr'",
             "screen_candidate->'intraday_signal_expr' =",
             "quant.intraday_report_manifests manifest",
+            "quant.intraday_candidate_lineages primary_lineage",
+            "primary_lineage.evaluator_version",
+            "feature_window_contract_version",
+            "legacy-cohort-lookback-v1",
+            "intraday-candidate-evaluator-v12",
             "NO_COST_FEASIBLE_ENTRY",
             "cost_feasible_entry_possible",
             "minimum_observed_entry_hurdle_bps",
@@ -4642,9 +4910,17 @@ def _check_formula_breeder_live_routing() -> None:
     assert "submission_ready=true single-parent drafts" in body
 
     cyc = inspect.getsource(cycle)
-    assert "and intraday_evolution_parents" in cyc
-    assert "if starving and not breeder_needed and not active_scout" in cyc, \
-        "zero live parents must route a starving factory back to Scout"
+    assert "_should_schedule_formula_breeder(" in cyc
+    assert _should_schedule_formula_breeder("STARVING", 0, 1) is True
+    assert _should_schedule_formula_breeder("STARVING", 0, 0) is False
+    assert _should_schedule_formula_breeder(
+        "STARVING", INTRADAY_FORMULA_LEADS_LOW, 1) is False
+    assert _should_schedule_formula_breeder("", 0, 1) is False
+    assert _should_schedule_scout("STARVING", True, 0) is True
+    assert _should_schedule_scout("STARVING", True, 1) is False
+    assert _should_schedule_scout("STARVING", False, 1) is True
+    assert "scout_needed = _should_schedule_scout(" in cyc, \
+        "an unusable migration parent can still suppress Scout"
     print("  formula breeder live-parent/hour routing  OK")
 
 
@@ -4933,7 +5209,14 @@ def _check_unused_leads_come_first():
     assert "PREREGISTERED_NO_OOS_FIT" in contract and "CROSS_SCALE" in contract
     assert "DIRECTIONAL MARKOUT RULE" in contract
     assert "signed field on its numeric" in contract and "label it PRESSURE" in contract
-    from intraday_alpha_ast import parse as parse_intraday, unit_of as intraday_unit
+    from intraday_alpha_ast import (  # noqa: PLC0415
+        EXPLICIT_FEATURE_WINDOW_CONTRACT,
+        parse as parse_intraday,
+        unit_of as intraday_unit,
+    )
+    assert (CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT ==
+            EXPLICIT_FEATURE_WINDOW_CONTRACT), \
+        "autopilot current queue contract drifted from the deployed evaluator"
     bps_examples = [line.strip().split("=", 1)[1]
                     for line in contract.splitlines()
                     if line.strip().startswith("BPS_")]
@@ -4971,9 +5254,28 @@ def _check_unused_leads_come_first():
     import inspect as _inspect
     for _counter in (_executable_unused_count, _intraday_formula_unused_count,
                      _lead_health):
-        assert "p.status in ('PUBLISHED','ACCEPTED')" in \
-            _inspect.getsource(_counter), \
+        _counter_source = _inspect.getsource(_counter)
+        assert "p.status in ('PUBLISHED','ACCEPTED')" in _counter_source, \
             "REJECTED 리드가 producer/consumer queue에서 계속 사용됨으로 남는다"
+        assert "feature_window_contract_version" in _counter_source, \
+            "legacy implicit-window formula가 current V2 실행 큐를 채운다"
+    assert "feature_window_contract_version" in _SQL_LEADS, \
+        "Planner가 legacy implicit-window formula를 직접 소비한다"
+    for _dispatch_sql in (_SQL_PENDING, _SQL_NEEDS_EXPERIMENT):
+        assert "feature_window_contract_version" in _dispatch_sql, \
+            "legacy implicit-window hypothesis가 V12 대기/발주 큐로 우회한다"
+    assert "CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT" in \
+        _inspect.getsource(quant_brief), \
+        "V12 대기 브리핑 SQL에 current contract parameter를 바인딩하지 않는다"
+    assert "CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT" in \
+        _inspect.getsource(_dispatch_experiments), \
+        "V12 발주 SQL에 current contract parameter를 바인딩하지 않는다"
+    assert ("legacy-cohort-lookback-v1" in
+            _LIVE_INTRADAY_EVOLUTION_PARENTS_SQL), \
+        "legacy formula를 V2 migration/evolution 부모에서 잃었다"
+    assert "primary_lineage.evaluator_version" in \
+        _LIVE_INTRADAY_EVOLUTION_PARENTS_SQL, \
+        "cross-version evaluator evidence can retire the same JSON AST"
     assert "proposal_review_outcomes" in _SQL_LEADS and "STOP" in _SQL_LEADS, \
         "스켑틱 STOP 리드를 소비 완료로 보지 않는다"
 
@@ -5044,7 +5346,9 @@ def _check_lead_health_is_surfaced():
     # 못 세면 안 적는다
     class _Boom:
         def cursor(self): raise RuntimeError("표 없음")
-    assert _lead_health(_Boom()) == ""
+    failed_health = _lead_health(_Boom())
+    assert "QUEUE HEALTH UNKNOWN - FAIL CLOSED" in failed_health
+    assert "Scout recovery card" in failed_health
 
     # **브리핑 조립부가 실제로 부르는가** - 안 부르면 검사가 장식이다
     import ast

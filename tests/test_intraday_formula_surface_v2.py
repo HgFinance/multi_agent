@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
@@ -21,11 +22,14 @@ for path in (PIPELINE, CONTRACTS, FACTORY):
 import alpha_evolution
 import alpha_semantics as semantics
 import factory_autopilot
+import factory_bridge
+import formula_breeder
 import formula_discovery
 import intraday_ast_contract as grammar
 import lead_intake
 import literature_derivation
 import proposal_intake
+import publish_gate
 
 from factory_contracts import (  # noqa: E402
     CompetingExplanation,
@@ -428,6 +432,82 @@ def test_live_scout_and_planner_prompts_expose_only_executable_examples() -> Non
         assert not fields & grammar.COMPLETED_SECOND_SEQUENCE_DEPENDENT_FIELDS
 
 
+def test_autopilot_queue_consumes_only_current_window_contract() -> None:
+    """Legacy formulas breed V2 children; they cannot impersonate V2 stock."""
+    current = factory_autopilot.CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT
+    assert current == grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT
+
+    predicate = "ast_contract->>'feature_window_contract_version'"
+    assert predicate in factory_autopilot._SQL_LEADS
+    # One parameter is the current contract and one is the result limit.
+    assert factory_autopilot._SQL_LEADS.count("%s") == 2
+    for dispatch_sql in (
+            factory_autopilot._SQL_PENDING,
+            factory_autopilot._SQL_NEEDS_EXPERIMENT):
+        assert "expected_edge->>'feature_window_contract_version'" in dispatch_sql
+        assert dispatch_sql.count("%s") == 2
+
+    class Cursor:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def execute(self, sql, params=()):
+            self.conn.calls.append((sql, params))
+
+        def fetchone(self):
+            return self.conn.row
+
+    class Conn:
+        def __init__(self, row):
+            self.row = row
+            self.calls = []
+
+        def cursor(self):
+            return Cursor(self)
+
+    executable = Conn((0,))
+    assert factory_autopilot._executable_unused_count(executable) == 0
+    formula = Conn((0,))
+    assert factory_autopilot._intraday_formula_unused_count(formula) == 0
+    health = Conn((55, 9, 9, 0, 0, 0.1))
+    factory_autopilot._lead_health(health)
+
+    executable_sql, executable_params = executable.calls[0]
+    formula_sql, formula_params = formula.calls[0]
+    health_sql, health_params = health.calls[0]
+    assert executable_sql.count(predicate) == 1
+    assert formula_sql.count(predicate) == 1
+    assert health_sql.count(predicate) == 2
+    assert executable_params == (current,)
+    assert formula_params == (current,)
+    assert health_params == (current, current)
+    assert factory_autopilot._should_schedule_formula_breeder(
+        "starving", 0, 1) is True
+    assert factory_autopilot._should_schedule_formula_breeder(
+        "starving", 0, 0) is False
+    assert factory_autopilot._should_schedule_formula_breeder(
+        "starving", factory_autopilot.INTRADAY_FORMULA_LEADS_LOW, 1) is False
+
+    # Legacy formula-discovery-v5 rows are intentionally retained as migration
+    # and mutation parents, even though the Planner cannot execute them.
+    # Parent selection remains broad, but same-AST retirement is scoped to the
+    # matching feature/evaluator execution identity.
+    parent_sql = factory_autopilot._LIVE_INTRADAY_EVOLUTION_PARENTS_SQL
+    assert grammar.LEGACY_FEATURE_WINDOW_CONTRACT in parent_sql
+    assert "primary_lineage.evaluator_version" in parent_sql
+    assert predicate not in formula_breeder._LEADS_SQL
+
+    load_leads_source = inspect.getsource(proposal_intake.load_leads)
+    assert "feature_window_contract_version" in load_leads_source
+    assert "CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT" in load_leads_source
+
+
 def test_proposal_intake_filters_unsafe_completed_second_sidecars() -> None:
     now = datetime(2026, 8, 18, tzinfo=timezone.utc)
     taker_plan = {
@@ -447,7 +527,9 @@ def test_proposal_intake_filters_unsafe_completed_second_sidecars() -> None:
     raw = {"op": "field", "field": "microprice_offset_bps"}
     primary_expr = {"op": "rolling_mean", "arg": raw, "seconds": 10}
     safe_sidecar = {"op": "rolling_mean", "arg": raw, "seconds": 30}
-    blocked_sidecar = {"op": "field", "field": "normalized_quote_ofi"}
+    blocked_sidecar = {
+        "op": "field", "field": "normalized_quote_ofi", "seconds": 2,
+    }
     passive_sidecar = {"op": "rolling_mean", "arg": raw, "seconds": 60}
 
     def make_lead(label: str, expr: dict, plan: dict) -> MethodologyLeadV1:
@@ -470,6 +552,8 @@ def test_proposal_intake_filters_unsafe_completed_second_sidecars() -> None:
             stated_mechanism="signed stock microstructure pressure",
             ast_contract={
                 "formula_discovery_version": "formula-discovery-v5",
+                "feature_window_contract_version":
+                    grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT,
                 "formula_contract_complete": True,
                 "alpha_candidate_eligible": True,
                 "research_lane": "INTRADAY_EVENT",
@@ -491,6 +575,9 @@ def test_proposal_intake_filters_unsafe_completed_second_sidecars() -> None:
                 },
                 "evolution_role": "CHILD" if label == "primary" else "SEED",
                 "parent_signal_expr": raw if label == "primary" else None,
+                "parent_feature_window_contract_version": (
+                    grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT
+                    if label == "primary" else None),
                 "parent_ast_fingerprint": (
                     grammar.fingerprint(raw) if label == "primary" else ""),
             },
@@ -521,6 +608,8 @@ def test_proposal_intake_filters_unsafe_completed_second_sidecars() -> None:
             "horizon_seconds": 5,
             "execution": "TAKER",
             "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
+            "feature_window_contract_version":
+                grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT,
         },
         research_lane="INTRADAY_EVENT",
         semantic_plan=taker_plan,
@@ -555,6 +644,55 @@ def test_proposal_intake_filters_unsafe_completed_second_sidecars() -> None:
         row["ast_fingerprint"] == grammar.fingerprint(raw)
         and row["candidate_role"] == "LINEAGE_PARENT"
         for row in population)
+
+    legacy_params = dict(proposal.suggested_params)
+    legacy_params.pop("feature_window_contract_version")
+    legacy_primary = proposal.model_copy(update={
+        "suggested_params": legacy_params,
+    })
+    with pytest.raises(ValueError, match="legacy formulas must first be migrated"):
+        proposal_intake._attach_intraday_screening_cohort(
+            legacy_primary, leads)
+    assert any(
+        "feature_window_contract_version" in reason
+        for reason in publish_gate.check_microstructure_primary(legacy_primary))
+
+    legacy_contract = dict(primary.ast_contract)
+    legacy_contract.pop("feature_window_contract_version")
+    legacy_lead = primary.model_copy(update={"ast_contract": legacy_contract})
+    assert any(
+        "current directional V2" in reason
+        for reason in publish_gate.check_leads(
+            proposal, {legacy_lead.lead_id: legacy_lead}))
+
+    legacy_sidecar = dict(population[0])
+    legacy_sidecar.pop("feature_window_contract_version")
+    legacy_population = attached.model_copy(update={
+        "suggested_params": {
+            **attached.suggested_params,
+            "screening_population": [legacy_sidecar],
+        },
+    })
+    assert any(
+        "current explicit-window contract" in reason
+        for reason in publish_gate.check_intraday_screening_population(
+            legacy_population, leads))
+    legacy_sidecar_gate = factory_bridge.gate0(
+        legacy_population.model_dump(mode="json"))
+    assert "INTRADAY_CONTRACT_INVALID" in legacy_sidecar_gate.codes
+    assert any(
+        "screening_population[0] requires" in reason
+        and "SUPERSEDED_INTRADAY_FEATURE_WINDOW_CONTRACT" in reason
+        for reason in legacy_sidecar_gate.reasons)
+
+    current_gate = factory_bridge.gate0(proposal.model_dump(mode="json"))
+    assert "INTRADAY_CONTRACT_INVALID" not in current_gate.codes
+    legacy_gate = factory_bridge.gate0(
+        legacy_primary.model_dump(mode="json"))
+    assert "INTRADAY_CONTRACT_INVALID" in legacy_gate.codes
+    assert any(
+        "migrate legacy formulas into a new V2 child" in reason
+        for reason in legacy_gate.reasons)
 
     blocked_primary = proposal.model_copy(update={
         "suggested_params": {
@@ -602,6 +740,8 @@ def test_same_ast_conflicting_candidate_contracts_do_not_merge_provenance() -> N
             stated_mechanism="microprice displacement persistence",
             ast_contract={
                 "formula_discovery_version": "formula-discovery-v5",
+                "feature_window_contract_version":
+                    grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT,
                 "formula_contract_complete": True,
                 "alpha_candidate_eligible": True,
                 "research_lane": "INTRADAY_EVENT",
@@ -647,6 +787,8 @@ def test_same_ast_conflicting_candidate_contracts_do_not_merge_provenance() -> N
             "execution": "TAKER",
             "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
             "coefficient_policy": "PREREGISTERED_NO_OOS_FIT",
+            "feature_window_contract_version":
+                grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT,
         },
         research_lane="INTRADAY_EVENT", semantic_plan=follow_30)
 
