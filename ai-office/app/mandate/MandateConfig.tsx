@@ -645,7 +645,7 @@ function MandateConfigForm({ userId }: { userId: string }) {
 
           <div className="relative flex-1 min-h-0 bg-surface-container-lowest border border-outline-variant rounded-lg flex flex-col overflow-hidden shadow-sm">
           {hydrating ? (
-            <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-surface-container-lowest/85 backdrop-blur-sm" role="status" aria-live="polite">
+            <div className="absolute inset-0 z-20 flex flex-col items-center justify-start gap-3 pt-8 bg-surface-container-lowest/85 backdrop-blur-sm" role="status" aria-live="polite">
               <span className="material-symbols-outlined animate-spin text-3xl text-primary" aria-hidden="true">progress_activity</span>
               <p className="text-body-sm font-medium text-on-surface">저장된 지침을 불러오는 중입니다…</p>
             </div>
