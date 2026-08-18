@@ -174,6 +174,67 @@ def test_breeder_emits_submission_drafts_from_other_economic_seed():
             "REQUIRES_HERMES") for row in ready)
 
 
+def test_delivery_view_is_bounded_exact_and_niche_diverse():
+    batch = breeder.generate_from_records(
+        leads=[
+            lead("lead_book", FAILED_EXPR, "visible-book pressure"),
+            lead("lead_tape", FRESH_EXPR, "signed tape persistence"),
+        ],
+        outcome_rows=[], population_size=32, generation=11,
+        feature_window_contract_version=
+            grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT)
+    by_id = {row["candidate_id"]: row for row in batch["candidates"]}
+
+    delivered = breeder.delivery_view(batch)
+
+    assert "candidates" not in delivered
+    assert delivered["full_population_count"] == len(batch["candidates"])
+    assert 0 < delivered["delivery_candidate_count"] <= 12
+    assert delivered["candidate_payload_scope"] == \
+        "DIVERSE_SUBMISSION_READY_SLICE"
+    rows = delivered["delivery_candidates"]
+    assert delivered["delivery_fingerprint"] == hashlib.sha256(json.dumps(
+        rows, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":")).encode()).hexdigest()
+    distinct_available = batch["submission_ready_niches"]
+    assert len({row["niche"]["key"] for row in rows}) == \
+        min(len(rows), distinct_available)
+    for row in rows:
+        source = by_id[row["candidate_id"]]
+        assert row["parent_lead_ids"] == source["parent_lead_ids"]
+        template = row["submission_template"]
+        assert template["candidate_signal_expr"] == source["expression"]
+        assert template["semantic_plan"] == source["semantic_plan_hint"]
+        assert template["evolution_operators"] == \
+            source["suggested_evolution_operators"]
+        assert template["economic_mechanism"].startswith("REQUIRES_HERMES")
+        assert template["formula_thesis"]["identification"].startswith(
+            "REQUIRES_HERMES")
+        assert row["promotion_authority"] is False
+    # Hermes stores tool results above 100k out of band.  Keep enough margin for
+    # MCP framing and pretty serialization so every exact AST stays inline.
+    assert len(json.dumps(delivered, indent=2).encode()) < 80_000
+
+
+def test_delivery_view_is_deterministic_and_limit_is_fail_closed():
+    batch = breeder.generate_from_records(
+        leads=[lead("lead_tape", FRESH_EXPR, "signed tape persistence")],
+        outcome_rows=[], population_size=16, generation=12,
+        feature_window_contract_version=
+            grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT)
+
+    first = breeder.delivery_view(batch, limit=3)
+    second = breeder.delivery_view(batch, limit=3)
+    assert first == second
+    assert len(first["delivery_candidates"]) <= 3
+    try:
+        breeder.delivery_view(batch, limit=13)
+    except ValueError as exc:
+        assert "delivery limit" in str(exc)
+    else:
+        raise AssertionError("oversized delivery limit was accepted")
+
+
 def test_duplicate_source_formula_uses_one_canonical_unused_parent():
     old = lead("lead-old", FRESH_EXPR, "signed tape persistence")
     old["used"] = True

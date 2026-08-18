@@ -2054,14 +2054,14 @@ def _formula_breeder_card_body(*, generation: int, starvation: str) -> str:
         "the current UTC-hour identity; use it exactly so a later hourly card cannot "
         "replay the previous deterministic batch. The tool uses adaptive experiment "
         "results, cost failures, failed subtrees, exact/shape deduplication, and "
-        "economic niches.\n"
-        "2. ALREADY_PERSISTED_SEED, NO_SOURCE_PARENT_MAPPING, CROSSOVER_*, and every "
-        "draft whose parent_lead_ids length is not exactly 1 are generator diagnostics, "
-        "not candidates. Do not enrich, submit, or count them as valid throughput. "
-        "Spend Hermes tokens only on submission_ready=true single-parent drafts. Choose "
-        "up to 12 across different pressure/mechanism/regime/clock niches; do not "
-        "select parameter-only near-clones.\n"
-        "3. Replace every REQUIRES_HERMES placeholder. For each child write a concrete "
+        "economic niches. It generates the full population internally but returns a "
+        "bounded delivery_candidates slice so no AST is lost to tool-output truncation.\n"
+        "2. Use only delivery_candidates. They are already deterministic, single-parent, "
+        "submission-ready, and greedily diversified across pressure/mechanism/regime/clock "
+        "niches. Copy each submission_template exactly. Never reconstruct a candidate from "
+        "a preview, a shell artifact, its title, or memory; in particular do not rename or "
+        "invent candidate_signal_expr fields/operators.\n"
+        "3. Replace only string values beginning REQUIRES_HERMES. For each child write a concrete "
         "economic_mechanism, falsifiable formula_thesis.identification, expected_increment, "
         "novelty_rationale, and structural ablations. Preserve the full 23bp governed "
         "round-trip hurdle; never tune a coefficient or threshold to clear it. A family "
@@ -4918,9 +4918,9 @@ def _check_formula_breeder_live_routing() -> None:
         generation=generation,
         starvation="STARVING\nScout only: run agent-reach doctor and browse arXiv")
     assert f"generation={generation}" in body
-    assert "CROSSOVER_*" in body and "parent_lead_ids length is not exactly 1" in body
-    assert "Do not enrich, submit, or count them as valid throughput" in body
-    assert "submission_ready=true single-parent drafts" in body
+    assert "Use only delivery_candidates" in body
+    assert "Copy each submission_template exactly" in body
+    assert "do not rename or invent candidate_signal_expr" in body
     assert "Queue trigger" in body and "STARVING" in body
     assert "agent-reach doctor" not in body and "browse arXiv" not in body
 
