@@ -379,6 +379,14 @@ def test_generated_record_ids_do_not_break_idempotent_retries():
             **{**access_kwargs,
                "source_watermark": {"phase": "CHANGED_AFTER_RETRY"}},
         )
+    with pytest.raises(LedgerConflict, match="changed its frozen cutoff"):
+        record_session_access(
+            EchoConnection([None, durable_access_row.fetchone()]),
+            **{
+                **access_kwargs,
+                "knowledge_cutoff": "2026-07-01T00:00:01Z",
+            },
+        )
 
     exposure_kwargs = dict(
         access=first_access,
@@ -409,6 +417,14 @@ def test_generated_record_ids_do_not_break_idempotent_retries():
         record_session_exposure(
             EchoConnection([None, durable_exposure_row.fetchone()]),
             **{**exposure_kwargs, "session_content_fingerprint": "b" * 64},
+        )
+    with pytest.raises(LedgerConflict, match="changed immutable content"):
+        record_session_exposure(
+            EchoConnection([None, durable_exposure_row.fetchone()]),
+            **{
+                **exposure_kwargs,
+                "knowledge_cutoff": "2026-07-01T00:00:01Z",
+            },
         )
 
 
@@ -454,6 +470,88 @@ def test_nested_rung_reuse_requires_identical_content_evidence() -> None:
             EchoConnection([prior]),
             **{**common, "session_content_fingerprint": "b" * 64},
         )
+
+
+def test_nested_child_reuses_identical_content_across_horizon_cutoffs() -> None:
+    day = date(2026, 7, 1)
+    parent_rung = _rung(DISCOVERY_6)
+    child = replace(
+        parent_rung.candidate,
+        candidate_lineage_id=_id(12),
+        parent_lineage_id=parent_rung.candidate.candidate_lineage_id,
+        candidate_identity_fingerprint="c" * 64,
+        candidate_ast_fingerprint="d" * 64,
+    )
+    child_rung = ExperimentRung(
+        experiment_rung_id=_id(21), candidate=child,
+        experiment_id=_id(31), dataset_id=parent_rung.dataset_id,
+        rung=DISCOVERY_6,
+        planned_session_dates=parent_rung.planned_session_dates,
+        planned_instrument_count=parent_rung.planned_instrument_count,
+        planned_instrument_ids=parent_rung.planned_instrument_ids,
+        session_set_fingerprint=parent_rung.session_set_fingerprint,
+        instrument_set_fingerprint=parent_rung.instrument_set_fingerprint,
+        rung_plan_fingerprint="7" * 64,
+        lockbox_cutoff_session_date=None,
+    )
+    access = _access(parent_rung, session=day)
+    parent_300s_cutoff = datetime(
+        2026, 8, 14, 6, 25, 1, tzinfo=timezone.utc
+    )
+    child_30s_cutoff = datetime(
+        2026, 8, 14, 6, 20, 31, tzinfo=timezone.utc
+    )
+    watermark = {"source": "external-daily-manifest-v1"}
+    content = "a" * 64
+    prior = (
+        _id(50), parent_rung.experiment_rung_id,
+        parent_rung.candidate.candidate_lineage_id,
+        parent_rung.candidate.root_lineage_id, day, ADAPTIVE_SEARCH,
+        EVENT_TIME_HISTORICAL_ONLY, "9" * 64,
+        content, stable_fingerprint(list(parent_rung.planned_instrument_ids)),
+        10, 5, parent_300s_cutoff, watermark,
+    )
+    common = dict(
+        access=access, rung=child_rung, session_date=day,
+        instrument_ids=child_rung.planned_instrument_ids,
+        session_content_fingerprint=content,
+        quote_row_count=10, trade_row_count=5,
+        knowledge_cutoff=child_30s_cutoff, source_watermark=watermark,
+        exposed_by="unit-test",
+    )
+    reused = record_session_exposure(EchoConnection([prior]), **common)
+    assert reused.inserted is False
+
+    changed_observations = (
+        {"session_content_fingerprint": "b" * 64},
+        {"quote_row_count": 11},
+        {"trade_row_count": 6},
+        {"source_watermark": {"source": "changed-manifest"}},
+    )
+    for changed in changed_observations:
+        with pytest.raises(LedgerConflict, match="nested rung observed content"):
+            record_session_exposure(
+                EchoConnection([prior]), **{**common, **changed}
+            )
+
+    for changed_index, changed_value in ((8, None), (9, "e" * 64)):
+        changed_prior = list(prior)
+        changed_prior[changed_index] = changed_value
+        with pytest.raises(LedgerConflict, match="nested rung observed content"):
+            record_session_exposure(
+                EchoConnection([tuple(changed_prior)]), **common
+            )
+
+    for changed_index, changed_value in (
+        (5, FORWARD_CONFIRMATION),
+        (6, ARRIVAL_TIME_CAUSAL),
+    ):
+        non_historical_prior = list(prior)
+        non_historical_prior[changed_index] = changed_value
+        with pytest.raises(LedgerConflict, match="nested rung observed content"):
+            record_session_exposure(
+                EchoConnection([tuple(non_historical_prior)]), **common
+            )
 
 
 def test_rung_allocation_decodes_psycopg_uuid_array_text_without_conflict():

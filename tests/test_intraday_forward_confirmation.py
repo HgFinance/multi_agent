@@ -336,6 +336,14 @@ def test_external_session_manifest_requires_typed_full_row_source_hash() -> None
             legacy, day=day, keys=["005930"], cutoff=watermark,
             event_source=runner.EXTERNAL_EVENT_SOURCE)
 
+    unknown_contract = _RowsConnection([(
+        "005930", 100, 25, source_hash, "legacy-v1", source_hash, watermark,
+    )])
+    with pytest.raises(RuntimeError, match="unknown content hash contract"):
+        runner._session_exposure_evidence(
+            unknown_contract, day=day, keys=["005930"], cutoff=watermark,
+            event_source=runner.EXTERNAL_EVENT_SOURCE)
+
     mismatch = _RowsConnection([(
         "005930", 100, 25, source_hash,
         runner.EXTERNAL_SOURCE_CONTENT_HASH_CONTRACT,
