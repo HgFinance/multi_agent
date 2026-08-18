@@ -9,6 +9,12 @@ WORKFLOW_MIGRATION = (
     / "migrations"
     / "20260818001600_ceo_hermes_paper_order_workflow.sql"
 )
+TRADING_RISK_MIGRATION = (
+    ROOT
+    / "supabase"
+    / "migrations"
+    / "20260818001700_trading_runtime_risk_read.sql"
+)
 
 
 def test_user_directive_migration_has_paper_authority_guards():
@@ -73,6 +79,28 @@ def test_ceo_hermes_workflow_keeps_authority_paper_only_and_scope_bound():
         assert marker in sql
     assert "grant select, insert, update on execution.user_order_requests" not in sql
     assert " to service_role" not in sql
+
+
+def test_trading_runtime_can_only_read_canonical_risk_evidence():
+    sql = TRADING_RISK_MIGRATION.read_text(encoding="utf-8").lower()
+
+    assert sql.lstrip().startswith("begin;") and sql.rstrip().endswith("commit;")
+    assert "grant usage on schema risk to svc_trading_api" in sql
+    assert "risk.risk_decisions, risk.risk_requests" in sql
+    assert "risk.risk_request_items to svc_trading_api" in sql
+    for table in ("risk_decisions", "risk_requests", "risk_request_items"):
+        assert f"{table}_svc_trading_api_select" in sql
+    assert "for select to svc_trading_api using (true)" in sql
+    assert "exceeds the risk evidence boundary" in sql
+    for forbidden in (
+        "grant insert on risk.",
+        "grant update on risk.",
+        "grant delete on risk.",
+        "for insert to svc_trading_api",
+        "for update to svc_trading_api",
+        "for delete to svc_trading_api",
+    ):
+        assert forbidden not in sql
 
 
 def test_directive_repository_is_paper_only_and_unknown_never_auto_expires():

@@ -151,7 +151,18 @@ def test_fresh_aws_runtime_roles_support_bff_and_isolate_paper_mutations() -> No
                 "has_table_privilege(current_user,'execution.orders','INSERT')"
             )
             assert cursor.fetchone() == (True, False)
+            cursor.execute(
+                "select count(*) from risk.risk_decisions decision "
+                "left join risk.risk_requests request "
+                "on request.risk_request_id=decision.risk_request_id "
+                "left join risk.risk_request_items item "
+                "on item.risk_request_id=request.risk_request_id"
+            )
+            cursor.fetchone()
         connection.rollback()
+        _expect_insufficient_privilege(
+            connection, "update risk.risk_decisions set decision=decision where false"
+        )
         _expect_insufficient_privilege(connection, "set role svc_accounting_ledger")
 
     with psycopg2.connect(dsns["AWS_ROLE_TEST_ACCOUNTING_CONTROL_DSN"]) as connection:

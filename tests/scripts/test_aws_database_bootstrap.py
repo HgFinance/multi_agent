@@ -24,9 +24,9 @@ def test_discovers_complete_unique_canonical_chains() -> None:
         bootstrap.MARKET_MIGRATIONS, bootstrap.MARKET_PATTERN
     )
 
-    assert len(control) == 86
+    assert len(control) == 87
     assert len(market) == 8
-    assert control[-1].path.name == "20260818001600_ceo_hermes_paper_order_workflow.sql"
+    assert control[-1].path.name == "20260818001700_trading_runtime_risk_read.sql"
     assert market[-1].path.name == "008_microstructure_depth_capacity.sql"
     assert len({migration.version for migration in control}) == len(control)
     assert len({migration.version for migration in market}) == len(market)

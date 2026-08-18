@@ -480,6 +480,25 @@ def test_postgres_available_cash_uses_the_canonical_cash_account_code():
     assert "la.account_code='CASH'" not in cursor.statements[0]
 
 
+def test_postgres_directive_sql_respects_immutable_proofs_and_locks_only_orders():
+    source = (TRADING_ROOT / "directives" / "repository.py").read_text(
+        encoding="utf-8"
+    )
+    normalized = " ".join(source.split()).casefold()
+    postgres_source = normalized.split("class postgresdirectiverepository:", 1)[1]
+    release_barrier = postgres_source.split("def release_barrier", 1)[1].split(
+        "def resolve_instrument", 1
+    )[0]
+    cancel_open_orders = postgres_source.split("def cancel_open_orders", 1)[1]
+
+    assert "on conflict (proof_jti) do nothing returning directive_id" in normalized
+    assert "where proof_jti=%s for update" not in normalized
+    assert "limit 1 for update" in release_barrier
+    assert "for update of o" not in release_barrier
+    assert "left join lateral" in cancel_open_orders
+    assert "for update of o" in cancel_open_orders
+
+
 def test_partial_direct_cancel_is_partial_and_retains_unaccounted_fill_reservation():
     h = Harness()
     h.repository.set_position(h.fund, h.book, h.instrument.instrument_id, Decimal("3"))

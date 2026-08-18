@@ -976,24 +976,26 @@ class PostgresDirectiveRepository:
                         "same idempotency key has different canonical directive content",
                         409,
                     )
+            # The proof ledger is immutable.  A SELECT ... FOR UPDATE would
+            # require an UPDATE privilege the Trading role deliberately does
+            # not have, and still leaves a check-then-insert race.  Let the
+            # primary key arbitrate concurrent consumption atomically instead.
             cur.execute(
-                "select directive_id from execution.user_directive_proofs where proof_jti=%s for update",
-                (proof.jti,),
+                """
+                insert into execution.user_directive_proofs
+                  (proof_jti,directive_id,user_id,fund_id,book_id,action,instruction_ref,
+                   idempotency_key,payload_sha256,issued_at,expires_at)
+                values (%s,%s,%s,%s,%s,%s,%s,%s,%s,to_timestamp(%s),to_timestamp(%s))
+                on conflict (proof_jti) do nothing
+                returning directive_id
+                """,
+                (proof.jti, directive_id, proof.subject, request.fund_id, request.book_id,
+                 request.action.value, request.instruction_ref, request.idempotency_key,
+                 request.payload_sha256(), proof.issued_at, proof.expires_at),
             )
-            replay = cur.fetchone()
-            if replay is not None:
-                raise DirectiveRepositoryError("TRADING_PROOF_REPLAY", "proof jti was already consumed", 409)
-            if replay is None:
-                cur.execute(
-                    """
-                    insert into execution.user_directive_proofs
-                      (proof_jti,directive_id,user_id,fund_id,book_id,action,instruction_ref,
-                       idempotency_key,payload_sha256,issued_at,expires_at)
-                    values (%s,%s,%s,%s,%s,%s,%s,%s,%s,to_timestamp(%s),to_timestamp(%s))
-                    """,
-                    (proof.jti, directive_id, proof.subject, request.fund_id, request.book_id,
-                     request.action.value, request.instruction_ref, request.idempotency_key,
-                     request.payload_sha256(), proof.issued_at, proof.expires_at),
+            if cur.fetchone() is None:
+                raise DirectiveRepositoryError(
+                    "TRADING_PROOF_REPLAY", "proof jti was already consumed", 409
                 )
         record = self.get(directive_id)
         assert record is not None
@@ -1738,7 +1740,7 @@ class PostgresDirectiveRepository:
                  where i.fund_id=%s and i.book_id=%s
                    and o.broker_adapter='paper'
                    and o.state in ('CREATED','SUBMITTED','ACKNOWLEDGED','PARTIALLY_FILLED','CANCEL_PENDING','UNKNOWN')
-                 for update
+                 for update of o
                 """,
                 (record.fund_id, record.book_id),
             )
