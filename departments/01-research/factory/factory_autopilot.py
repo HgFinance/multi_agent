@@ -2034,6 +2034,17 @@ def _formula_breeder_generation(moment: datetime) -> int:
 
 def _formula_breeder_card_body(*, generation: int, starvation: str) -> str:
     """Build the operational breeder contract without asking for a report."""
+    # ``starvation`` is the shared Scout-facing health block and deliberately
+    # contains web-discovery instructions.  Passing that block verbatim after
+    # "Do not browse" gives Hermes two incompatible jobs and burns the scarce
+    # breeder turn on source collection.  The breeder only needs the measured
+    # queue trigger, so retain the first non-empty diagnostic line and discard
+    # every downstream Scout instruction.
+    queue_trigger = next(
+        (line.strip() for line in str(starvation or "").splitlines()
+         if line.strip()),
+        "current V2 formula inventory is below the refill watermark",
+    )[:500]
     return (
         "This is a FORMULA BREEDER task, not a literature-scout or report task.\n"
         "Do not browse the web, collect new sources, write a research memo, or call "
@@ -2063,7 +2074,8 @@ def _formula_breeder_card_body(*, generation: int, starvation: str) -> str:
         "unique niches, and exact rejection reasons. Never claim alpha: every child "
         "remains adaptive, promotion_authority=false, and requires preregistered "
         "evaluation.\n\n"
-        + starvation
+        "Queue trigger (diagnostic only; this is not a Scout instruction):\n"
+        + queue_trigger
     )
 # 이보다 오래된 리드만 있으면 시장이 바뀌었을 수 있다.
 LEADS_STALE_DAYS = 2
@@ -4903,11 +4915,14 @@ def _check_formula_breeder_live_routing() -> None:
     assert generation == _formula_breeder_generation(same_hour)
     assert _formula_breeder_generation(next_hour) == generation + 1
     body = _formula_breeder_card_body(
-        generation=generation, starvation="STARVING")
+        generation=generation,
+        starvation="STARVING\nScout only: run agent-reach doctor and browse arXiv")
     assert f"generation={generation}" in body
     assert "CROSSOVER_*" in body and "parent_lead_ids length is not exactly 1" in body
     assert "Do not enrich, submit, or count them as valid throughput" in body
     assert "submission_ready=true single-parent drafts" in body
+    assert "Queue trigger" in body and "STARVING" in body
+    assert "agent-reach doctor" not in body and "browse arXiv" not in body
 
     cyc = inspect.getsource(cycle)
     assert "_should_schedule_formula_breeder(" in cyc

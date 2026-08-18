@@ -96,6 +96,22 @@ def test_empty_v2_queue_schedules_scout_even_with_migration_parent() -> None:
     assert autopilot._should_schedule_scout("starving", False, 1)
 
 
+def test_breeder_card_does_not_inherit_scout_browsing_instructions() -> None:
+    health = (
+        "[QUEUE STARVING] current V2 formulas=0\n"
+        "Scout only: browse arXiv and run agent-reach doctor\n"
+        "Collect new sources with curl")
+    body = autopilot._formula_breeder_card_body(
+        generation=42, starvation=health)
+
+    assert "Do not browse the web" in body
+    assert "Queue trigger" in body
+    assert "current V2 formulas=0" in body
+    assert "browse arXiv" not in body
+    assert "agent-reach doctor" not in body
+    assert "Collect new sources" not in body
+
+
 def test_superseded_proposed_rows_get_typed_terminal_audit_job() -> None:
     class Cursor:
         def __init__(self, owner):
