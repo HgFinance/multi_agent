@@ -11,6 +11,9 @@ Examples::
 
     python scripts/configure_paper_order_env.py --runtime local
     python scripts/configure_paper_order_env.py --runtime aws --env-file .env.aws
+    python scripts/configure_paper_order_env.py --runtime local \
+        --rotate-key MCP_RESEARCH_API_KEY \
+        --rotate-key MCP_TRADING_ORDER_API_KEY
 """
 
 from __future__ import annotations
@@ -45,6 +48,10 @@ AWS_DATABASE_SECRET_KEYS = (
 # Backwards-compatible public name used by local tooling and tests.  AWS adds
 # the four database credentials through ``_secret_keys_for_runtime`` below.
 SECRET_KEYS = SERVICE_SECRET_KEYS
+ROTATABLE_MCP_KEYS = (
+    "MCP_RESEARCH_API_KEY",
+    "MCP_TRADING_ORDER_API_KEY",
+)
 AWS_REQUIRED_KEYS = (
     "SUPABASE_URL",
     "HEDGEFUND_TSDB_PASSWORD",
@@ -162,12 +169,15 @@ def _secret_settings(
     *,
     keys: Sequence[str],
     generator: Callable[[], str],
+    rotate_keys: frozenset[str] = frozenset(),
 ) -> tuple[dict[str, str], tuple[str, ...], tuple[str, ...]]:
     """Preserve safe distinct secrets and generate every remaining credential."""
 
     preserved_raw: dict[str, str] = {}
     preserved_values: set[str] = set()
     for key in keys:
+        if key in rotate_keys:
+            continue
         assignment = assignments.get(key)
         if assignment is None or not _valid_secret(
             assignment.value, url_safe=key in AWS_DATABASE_SECRET_KEYS
@@ -334,6 +344,7 @@ def configure_environment(
     runtime: str,
     env_file: Path,
     generator: Callable[[], str] | None = None,
+    rotate_keys: Sequence[str] = (),
 ) -> ConfigureResult:
     """Configure ``env_file`` and return metadata that contains no secret values."""
 
@@ -344,16 +355,28 @@ def configure_environment(
         raise ConfigurationError("could not read the environment file") from exc
 
     assignments = _parse_assignments(original)
+    requested_rotation = frozenset(str(key).strip() for key in rotate_keys)
+    invalid_rotation = requested_rotation.difference(ROTATABLE_MCP_KEYS)
+    if invalid_rotation:
+        raise ConfigurationError(
+            "unsupported credential rotation key(s): "
+            + ", ".join(sorted(invalid_rotation))
+        )
     settings = _runtime_settings(runtime)
     if runtime == "aws":
         # Validate before generating credentials or touching the file.  A
         # partially configured production file must never be written.
         settings.update(_aws_required_settings(assignments))
 
+    managed_secret_keys = list(_secret_keys_for_runtime(runtime))
+    for key in ROTATABLE_MCP_KEYS:
+        if key in requested_rotation and key not in managed_secret_keys:
+            managed_secret_keys.append(key)
     secret_settings, preserved, generated = _secret_settings(
         assignments,
-        keys=_secret_keys_for_runtime(runtime),
+        keys=managed_secret_keys,
         generator=generator or _new_secret,
+        rotate_keys=requested_rotation,
     )
     settings.update(secret_settings)
     rendered = _render_env(original, settings)
@@ -386,13 +409,27 @@ def _parser() -> argparse.ArgumentParser:
         default=REPO_ROOT / ".env",
         help="dotenv file to update atomically (default: repository .env)",
     )
+    parser.add_argument(
+        "--rotate-key",
+        action="append",
+        default=[],
+        choices=ROTATABLE_MCP_KEYS,
+        help=(
+            "replace this MCP credential even when it is currently valid; "
+            "repeat for both credentials"
+        ),
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        result = configure_environment(runtime=args.runtime, env_file=args.env_file)
+        result = configure_environment(
+            runtime=args.runtime,
+            env_file=args.env_file,
+            rotate_keys=args.rotate_key,
+        )
     except ConfigurationError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2

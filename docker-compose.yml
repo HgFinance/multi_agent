@@ -1232,7 +1232,7 @@ services:
     # DEPRECATED standalone escape hatch. 이 컨테이너는 gateway가 아니라
     # Kanban dispatcher만 실행하므로 per-profile gateway를 supervise하지 않는다.
     command:
-      ["kanban", "daemon", "--force", "--interval", "${KANBAN_DISPATCH_INTERVAL:-60}", "--pidfile", "/opt/data/shared-kanban/dispatcher.pid", "--verbose"]
+      ["/bin/sh", "-c", "python3 /app/repo/deploy/hermes-dispatch-guard/check_guard.py && exec hermes kanban daemon --force --interval \"$${KANBAN_DISPATCH_INTERVAL:-60}\" --pidfile /opt/data/shared-kanban/dispatcher.pid --verbose"]
     # Hermes 최신 s6 이미지에서는 Docker `user:` 고정을 사용하지 않는다.
     # 컨테이너는 root로 bootstrap한 뒤 HERMES_UID/HERMES_GID=1000으로
     # runtime user와 /opt/data 소유권을 host UID/GID에 맞춘다.
@@ -1264,6 +1264,7 @@ services:
       HERMES_KANBAN_HOME: /opt/data/shared-kanban
       HERMES_KANBAN_DB: /opt/data/shared-kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      KANBAN_DISPATCH_INTERVAL: ${KANBAN_DISPATCH_INTERVAL:-60}
       # The dispatcher spawns the department workers, so MCP profile headers are
       # expanded from this process environment rather than a gateway container.
       MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
