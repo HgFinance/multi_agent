@@ -529,6 +529,9 @@ def build_root_body(
     workflow_mode: str = "analysis",
     mandate: Mapping[str, Any] | None = None,
     requested_by: str | None = None,
+    discord_channel_id: str | None = None,
+    discord_message_id: str | None = None,
+    discord_guild_id: str | None = None,
 ) -> str:
     """Build a root body that is unambiguous before the root ID exists.
 
@@ -542,12 +545,32 @@ def build_root_body(
     이력을 서버에서 걸러낼 수 있다. 없으면 줄 자체를 넣지 않는다 - "요청자
     불명"을 임의 기본값으로 채우지 않는다(개발 원칙 9).
 
-    셋 다 선택 인자다 - 기존 호출부는 그대로 동작한다.
+    `discord_*`(2026-08-18 추가)는 이 질의를 Discord 채널에 미러 게시했을 때 그
+    메시지의 좌표다. 채워지면 `discord_channel_id=` / `discord_message_id=` 줄이
+    실리고, `orchestration/discord_delivery.py`의 `correlation_from_task()`가 그
+    줄을 읽어 부서 진행 상황과 CEO 최종 답변을 **그 메시지에 붙인다.**
+
+    이 줄이 없으면 `deliver()`가 `missing_context`로 조용히 반환한다 - 그게
+    2026-08-18 이전 웹 질의의 상태였다(Discord에 아무것도 안 떴다). 게시에
+    실패했을 때도 줄을 넣지 않는다: 없는 메시지를 가리키면 이후 발송이 엉뚱한
+    곳에 붙거나 dedup 키가 오염된다.
+
+    선택 인자는 전부 기본값이 있다 - 기존 호출부는 그대로 동작한다.
     """
 
     if workflow_mode not in WORKFLOW_MODES:
         raise ValueError("workflow_mode must be analysis or binding")
     requested_by_line = f"requested_by={requested_by}\n" if requested_by else ""
+    # channel과 message는 **둘 다** 있어야 의미가 있다(`deliver()`가 둘 다 요구).
+    # 하나만 싣으면 "좌표가 있는 것처럼 보이는데 발송은 안 되는" 카드가 된다.
+    discord_lines = ""
+    if discord_channel_id and discord_message_id:
+        discord_lines = (
+            f"discord_channel_id={discord_channel_id}\n"
+            f"discord_message_id={discord_message_id}\n"
+        )
+        if discord_guild_id:
+            discord_lines += f"discord_guild_id={discord_guild_id}\n"
     return (
         f"{CEO_WORKFLOW_SCOPE_MARKER}\n"
         f"workflow_scope={CEO_WORKFLOW_SCOPE_POLICY}\n"
@@ -555,6 +578,7 @@ def build_root_body(
         f"request_id={request_id}\n"
         f"workflow_mode={workflow_mode}\n"
         f"{requested_by_line}"
+        f"{discord_lines}"
         "response_plane=primary_results_ready\n"
         "governance_plane=async_qa\n"
         "qa_is_not_synthesis_prerequisite=true\n"
