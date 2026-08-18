@@ -76,6 +76,71 @@ class MandateSnapshotPresenceTest(unittest.TestCase):
         draft = {"mandate_id": "m-1", "current_version": 0, "policy": {}}
         self.assertFalse(mandate_snapshot_present(build_root_body("q", "r", mandate=draft)))
 
+    def test_ui_saved_mandate_without_version_is_still_pinned(self) -> None:
+        """화면에서 저장한 Mandate(`current_version=0`)도 스냅샷이 붙어야 한다.
+
+        회귀 방지 대상(2026-08-18): 프론트엔드의 저장 경로는
+        `POST /ui/mandates` + `PUT /ui/mandates/{id}`뿐이고 `POST .../versions`를
+        부르지 않는다(`ai-office/app/lib/mandateClient.ts`). 그래서 화면에서
+        만든 Mandate는 전부 `mandates.metadata` override가 되고,
+        `GET .../mandates/{id}/current`가 `current_version`을 0으로 박아 돌려준다.
+
+        `build_mandate_snapshot_block`이 그 0을 "Version 없음 = 한도 없음"으로
+        읽어 블록을 통째로 버렸고, **사용자가 화면에서 설정한 한도가 CEO 워크플로에
+        한 번도 전달되지 않았다.** 판정 기준은 Version이 아니라 실제 한도의 존재다.
+        """
+
+        ui_saved = {
+            "mandate_id": "m-ui",
+            "current_version": 0,  # metadata override 경로가 박는 값
+            "content_hash": "sha256:ui",
+            "fund_id": "fund-ui",
+            "policy": {"risk_bounds": {"max_gross_exposure": "3.00", "currency": "USD"}},
+        }
+        body = build_root_body("q", "r", mandate=ui_saved)
+
+        self.assertTrue(mandate_snapshot_present(body))
+        self.assertIn("max_gross_exposure=3.00", body)
+
+    def test_unversioned_snapshot_admits_it_cannot_be_resolved(self) -> None:
+        """버전 없는 스냅샷은 없는 번호를 지어내지 않고 한계를 명시한다.
+
+        metadata override는 다음 저장 때 덮어써지므로 `content_hash`가 가리키는
+        원본 행이 사라진다. 값은 Task body에 얼어 있어 워크플로 판단 기준은
+        유지되지만(PIT), 사후에 "그때 그 Mandate가 이것이었다"를 대조할 수는 없다.
+        그 차이를 부서와 감사 쪽이 구분할 수 있어야 한다.
+        """
+
+        unversioned = {
+            "mandate_id": "m-ui",
+            "current_version": 0,
+            "content_hash": "sha256:ui",
+            "policy": {"risk_bounds": {"currency": "USD"}},
+        }
+        body = build_root_body("q", "r", mandate=unversioned)
+
+        self.assertIn("mandate_version=unversioned", body)
+        self.assertIn("snapshot_resolvable=false", body)
+
+        versioned = build_root_body("q", "r", mandate=MANDATE)
+        self.assertIn("mandate_version=3", versioned)
+        self.assertIn("snapshot_resolvable=true", versioned)
+
+    def test_policy_without_any_identifier_is_not_pinned(self) -> None:
+        """버전도 해시도 없으면 싣지 않는다.
+
+        둘 다 없으면 이 스냅샷이 어느 Mandate에서 왔는지 나중에 무엇으로도 알 수
+        없다. 값만 실어 보내면 "출처를 모르는 숫자"가 판단 근거가 된다(개발 원칙 9).
+        """
+
+        anonymous = {
+            "mandate_id": "m-x",
+            "current_version": 0,
+            "content_hash": "",
+            "policy": {"risk_bounds": {"currency": "USD"}},
+        }
+        self.assertFalse(mandate_snapshot_present(build_root_body("q", "r", mandate=anonymous)))
+
 
 class ScopedTaskBodyMandateReferenceTest(unittest.TestCase):
     def test_reference_line_points_at_the_root_card(self) -> None:

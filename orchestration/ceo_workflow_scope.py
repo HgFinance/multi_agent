@@ -327,10 +327,37 @@ class WorkflowScopeReferences:
 def build_mandate_snapshot_block(mandate: Mapping[str, Any] | None) -> str:
     """`GET .../mandates/.../current` 응답을 root body용 스냅샷 블록으로 만든다.
 
-    `mandate`가 `None`이거나 아직 활성 Version이 없으면(`current_version=0`) 빈
-    문자열을 준다 - **없는 한도를 지어내지 않는다.** 그 경우 부서는 Mandate 블록을
-    못 찾고, 그건 "이 사용자는 아직 Mandate가 없다"는 정확한 사실이다. 기본값을
-    채워 넣으면 사용자가 정하지 않은 한도가 판단 근거로 쓰인다(개발 원칙 9).
+    `mandate`가 `None`이거나 실제 한도(`policy.risk_bounds`)가 없으면 빈 문자열을
+    준다 - **없는 한도를 지어내지 않는다.** 그 경우 부서는 Mandate 블록을 못 찾고,
+    그건 "이 사용자는 아직 Mandate가 없다"는 정확한 사실이다. 기본값을 채워 넣으면
+    사용자가 정하지 않은 한도가 판단 근거로 쓰인다(개발 원칙 9).
+
+    ## ⚠ 2026-08-18 수정: `current_version`으로 판정하지 않는다
+
+    이 함수는 원래 `if not version: return ""`으로 걸렀다. 그런데 프론트엔드의
+    Mandate 저장 경로는 `POST /ui/mandates` + `PUT /ui/mandates/{id}`뿐이고
+    (`ai-office/app/lib/mandateClient.ts`), `POST .../versions`를 부르지 않는다.
+    그래서 사용자가 화면에서 저장한 Mandate는 전부 `mandates.metadata` override로
+    들어가고, `GET .../mandates/{id}/current`의 metadata 경로는
+    **`current_version`을 0으로 박아서 돌려준다**
+    (`departments/00-ceo-office/api/app.py`의 metadata override 분기).
+
+    `0`은 falsy라 위 판정이 항상 참이 됐고, 그 결과 **화면에서 저장한 Mandate는
+    스냅샷이 한 번도 붙지 않았다.** CEO는 사용자 한도를 모른 채 답하고 있었다.
+
+    그래서 판정 기준을 "Version이 있는가"에서 **"실제 한도가 있는가"**로 바꾼다.
+    Version은 이 블록을 나중에 되짚기 위한 식별자이지, 한도의 존재 조건이 아니다.
+
+    ## 버전 없는 스냅샷을 어떻게 표시하나
+
+    metadata override에는 버전 번호가 없다(`content_hash`만 있다). 없는 번호를
+    지어내지 않고 `mandate_version=unversioned`로 적은 뒤,
+    `snapshot_resolvable=false`로 **"이 값은 불변 Version 행으로 되짚을 수 없다"**를
+    명시한다. override는 다음 저장 때 덮어써지므로 `content_hash`가 가리키는 원본이
+    사라지기 때문이다 - 값 자체는 이 Task body에 그대로 얼어 있으니 워크플로 판단
+    기준은 유지되지만(PIT, 개발 원칙 5), 사후 감사에서 원본 대조는 불가능하다.
+    이 한계를 지우려면 화면 저장 경로가 `mandate_versions`에 행을 쌓아야 한다 -
+    별도 안건이고 이 함수가 대신 해결할 수 없다.
 
     한 줄 `key=value` 형태로 쓰는 이유: 부서가 LLM으로 이 블록을 읽으므로 중첩
     JSON보다 평평한 줄이 오독될 여지가 적고, `grep`·정규식으로도 뽑을 수 있다.
@@ -338,18 +365,27 @@ def build_mandate_snapshot_block(mandate: Mapping[str, Any] | None) -> str:
 
     if not mandate:
         return ""
-    version = mandate.get("current_version")
     policy = mandate.get("policy")
-    if not version or not isinstance(policy, Mapping):
-        # Version이 없으면 정책도 없다. 껍데기만 있는 Mandate는 근거가 아니다.
+    if not isinstance(policy, Mapping) or not policy.get("risk_bounds"):
+        # 껍데기만 있는 Mandate는 근거가 아니다. `risk_bounds`가 이 블록의 알맹이라
+        # 그게 없으면 실을 것이 없다.
         return ""
 
+    version = mandate.get("current_version")
+    content_hash = str(mandate.get("content_hash") or "").strip()
+    if not version and not content_hash:
+        # 버전도 해시도 없으면 이 스냅샷을 나중에 무엇으로도 식별할 수 없다.
+        # 값만 실어 보내면 "어디서 온 한도인지 모르는 숫자"가 되므로 싣지 않는다.
+        return ""
+
+    resolvable = bool(version)
     lines = [
         CEO_MANDATE_SNAPSHOT_MARKER,
         "snapshot_policy=frozen_at_request_time",
         f"mandate_id={mandate.get('mandate_id', '')}",
-        f"mandate_version={version}",
-        f"content_hash={mandate.get('content_hash', '')}",
+        f"mandate_version={version if resolvable else 'unversioned'}",
+        f"snapshot_resolvable={'true' if resolvable else 'false'}",
+        f"content_hash={content_hash}",
     ]
     fund_id = mandate.get("fund_id")
     if fund_id:
