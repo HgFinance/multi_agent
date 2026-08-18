@@ -1022,13 +1022,24 @@ def record_session_exposure(
         existing_watermark = existing[13]
         if isinstance(existing_watermark, str):
             existing_watermark = json.loads(existing_watermark)
+        # ``knowledge_cutoff`` is the candidate/rung-specific purge boundary,
+        # not a property of the immutable raw session bytes.  Descendants can
+        # legitimately use a shorter horizon (for example 30s after a 300s
+        # parent) and therefore seal a different cutoff while reading the same
+        # frozen session.  The new cutoff remains durable on its experiment
+        # rung; reuse is allowed only when every raw-content identity field
+        # below is unchanged.  Exact same-rung retries and FORWARD evidence
+        # still include the cutoff in their fingerprints and fail closed.
+        reusable_historical_search = (
+            str(existing[5]) in (CALIBRATION, ADAPTIVE_SEARCH)
+            and str(existing[6]) == EVENT_TIME_HISTORICAL_ONLY
+        )
         same_content = (
-            str(existing[8]) == content_fp
+            reusable_historical_search
+            and str(existing[8]) == content_fp
             and str(existing[9]) == instrument_fp
             and int(existing[10]) == int(quote_row_count)
             and int(existing[11]) == int(trade_row_count)
-            and _as_timestamp(existing[12], "existing knowledge_cutoff")
-                == knowledge_cutoff_at
             and dict(existing_watermark or {}) == dict(watermark)
         )
         if not same_content:

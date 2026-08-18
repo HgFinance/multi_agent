@@ -1225,6 +1225,23 @@ def test_dataset_cutoff_is_retry_stable_and_covers_replay_floor() -> None:
         floor + timedelta(minutes=1)).isoformat()
 
 
+def test_completed_second_purge_cutoff_tracks_candidate_max_horizon() -> None:
+    decision_end = datetime(2026, 8, 14, 6, 20, tzinfo=timezone.utc)
+    parent = IntradayLaneSpec(
+        horizons_seconds=(30, 300), order_latency_ms=100
+    )
+    child = IntradayLaneSpec(
+        horizons_seconds=(5, 30), order_latency_ms=100
+    )
+
+    assert decision_end + effective_purge_gap(
+        parent, COMPLETED_SECOND_POLICY
+    ) == datetime(2026, 8, 14, 6, 25, 1, tzinfo=timezone.utc)
+    assert decision_end + effective_purge_gap(
+        child, COMPLETED_SECOND_POLICY
+    ) == datetime(2026, 8, 14, 6, 20, 31, tzinfo=timezone.utc)
+
+
 def test_primary_budget_and_formula_exposure_are_separate_ledgers() -> None:
     class Cursor:
         def __init__(self, conn): self.conn = conn
