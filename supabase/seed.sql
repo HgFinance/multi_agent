@@ -266,21 +266,22 @@ on conflict (user_id) do nothing;
 -- (approval.py / case_root.py / committee.py의 fund = "b13f5cd1-...")이 이미
 -- 하드코딩한 값이다. **여기서 바꾸면 그쪽이 전부 깨진다** — 함께 고쳐야 한다.
 --
--- 아래 값은 **추정이 아니라 실 DB 조회 결과**다(2026-08-18, 새 Supabase 프로젝트
--- 에서 `select fund_id, fund_code, name, base_currency, inception_date, status
--- from accounting.funds`로 확인). 이 파일이 실 DB와 어긋나 있던 것이 원래 문제였으므로,
--- 여기 값을 바꿀 때는 반드시 실 DB와 대조한다(scripts/check_test_user_wiring.py).
+-- 아래 값은 **추정이 아니라 새 Supabase 프로젝트 조회 결과**다(2026-08-18,
+-- `select fund_id, fund_code, name, base_currency, inception_date, status
+-- from accounting.funds`). 이 파일이 실 DB와 어긋나 있던 것이 원래 문제였으므로,
+-- 값을 바꿀 때는 반드시 실 DB와 대조한다(scripts/check_test_user_wiring.py).
 --
--- 같은 DB에 있는 `ACC01-PAPER`(KRW) Fund는 회계본부 소유라 이 섹션에 넣지 않는다 -
--- 테스트 계정 초기화 범위가 아니다.
+-- ⚠ 옛 프로젝트에는 같은 fund_id가 다른 name/inception_date로 들어 있었다
+-- ('CEO Mandate Contract Test Fund', 2026-01-01 등). 옛 DB를 근거로 이 값을
+-- 되돌리지 않는다 - 기준은 현재 프로젝트다.
 insert into accounting.funds (fund_id, fund_code, name, base_currency, inception_date, status)
 values
   ('b13f5cd1-5df0-4025-92cf-9be03b1a0296', 'TEST-CEO-MANDATE',
-   'CEO Mandate Contract Test Fund', 'USD', date '2026-01-01', 'ACTIVE'),
+   'Test CEO Mandate Fund', 'USD', date '2026-08-01', 'ACTIVE'),
   ('50a3c28c-6cee-4bcf-ab07-fa97093dca8e', 'TEST-USER2-MANDATE',
-   'User 2 Test Fund', 'USD', date '2026-08-13', 'ACTIVE'),
+   'Test User 2 Mandate Fund', 'USD', date '2026-08-01', 'ACTIVE'),
   ('3838f7d6-0c7c-4e54-85f3-316a451e7eeb', 'TEST-USER3-MANDATE',
-   'User 3 Test Fund', 'USD', date '2026-08-13', 'ACTIVE')
+   'Test User 3 Mandate Fund', 'USD', date '2026-08-01', 'ACTIVE')
 on conflict (fund_id) do nothing;
 
 -- 2) 소유 관계 3행 — 각 계정이 자기 Fund의 OWNER
