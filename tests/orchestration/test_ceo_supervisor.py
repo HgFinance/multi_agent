@@ -722,7 +722,10 @@ class SupervisorPolicyTest(unittest.TestCase):
 
         self.assertIsNotNone(decision)
         self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
-        self.assertEqual(decision.parent_task_ids, tuple(item.task_id for item in children))
+        self.assertEqual(
+            decision.parent_task_ids,
+            tuple(item.task_id for item in children if item.done),
+        )
         self.assertIn("financial statement unavailable", decision.body)
 
     def test_four_selected_primary_parents_exclude_unmarked_duplicates(self) -> None:
@@ -972,7 +975,6 @@ class SupervisorWakeupTest(unittest.TestCase):
                 "research-department-task",
                 "quant-backtest-department-task",
                 "risk-management-task",
-                "accounting-portfolio-department-task",
             },
         )
 

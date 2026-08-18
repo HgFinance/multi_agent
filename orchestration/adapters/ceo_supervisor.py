@@ -636,11 +636,12 @@ def _analysis_synthesis_decision(
     if _single_primary_passthrough_child(state) is not None:
         return None
 
+    # Execution dependencies must contain only successful primaries.
+    # Blocked/failed terminal primaries remain in the synthesis payload so the
+    # CEO can disclose missing evidence, but they must not gate dispatch.
     primary_ids = tuple(
-        child.task_id for child in state.analysis_children if child.terminal
+        child.task_id for child in state.analysis_children if child.done
     )
-    if not primary_ids:
-        return None
     return SupervisorDecision(
         SupervisorAction.SYNTHESIZE,
         state.parent_task_id,
@@ -763,7 +764,12 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
 
     if any(not child.terminal for child in state.analysis_children):
         return None
-    primary_ids = tuple(child.task_id for child in state.analysis_children if child.terminal)
+    # Async QA receives every primary in its payload, but only successful
+    # primaries are execution dependencies. A blocked advisory primary must
+    # not prevent QA or CEO synthesis from running.
+    primary_ids = tuple(
+        child.task_id for child in state.analysis_children if child.done
+    )
 
     if state.workflow_mode == "analysis":
         if state.qa_required and not state.qa_children:
@@ -1425,12 +1431,30 @@ class CeoSupervisorService:
                     if os.path.isdir(ceo_profile_home)
                     else hermes_home
                 )
-                self.discord_delivery.deliver(
+                delivery_store = DiscordIdempotencyStore(delivery_home)
+                ceo_profile = canonical_profile_for_department("ceo")
+
+                # Keep the normal CEO final response in the parent channel.
+                # Multi-primary CEO synthesis is delivered only inside the request thread.
+
+                # Also preserve the complete CEO synthesis in the SAME
+                # request thread as the department detailed outputs.
+                thread_status = self.discord_delivery.deliver_to_existing_thread(
                     root_task_id=root_task_id,
-                    synthesis_task=delivery_task,
+                    source_task=delivery_task,
+                    root_task=root_payload,
                     content=content,
-                    store=DiscordIdempotencyStore(delivery_home),
-                    profile=canonical_profile_for_department("ceo"),
+                    title="🧠 CEO 종합",
+                    store=delivery_store,
+                    profile=ceo_profile,
+                    response_key_suffix=f"synthesis-detail:{task_id}",
+                )
+
+                logger.info(
+                    "synthesis-discord-thread root=%s task=%s status=%s",
+                    root_task_id,
+                    task_id,
+                    thread_status,
                 )
 
     def _reconcile_department_start_progress(
@@ -1597,20 +1621,55 @@ class CeoSupervisorService:
             else hermes_home
         )
 
-        status = self.discord_delivery.deliver(
-            root_task_id=root_task_id,
-            synthesis_task=delivery_task,
-            root_task=root_payload,
-            content=content,
-            store=DiscordIdempotencyStore(delivery_home),
-            profile=child.profile,
-            response_key_suffix=(
-                f"department-progress:{child.task_id}:{logical_kind}"
-            ),
+        icon, detail_label = DEPARTMENT_DISCORD_LABELS.get(
+            child.profile,
+            ("🏢", child.profile),
         )
 
+        if logical_kind == "started":
+            card_content = (
+                f"{icon} **{detail_label}**\n"
+                "⏳ 분석 중입니다..."
+            )
+        elif kind in {"done", "completed"}:
+            result_text = str(department_result or "").strip()
+
+            card_content = (
+                f"{icon} **{detail_label}**\n"
+                "✅ 분석을 완료했습니다."
+            )
+
+            if result_text:
+                card_content += f"\n\n{result_text}"
+        else:
+            card_content = content
+
+        try:
+            status = self.discord_delivery.upsert_thread_card(
+                root_task_id=root_task_id,
+                source_task=delivery_task,
+                root_task=root_payload,
+                content=card_content,
+                store=DiscordIdempotencyStore(delivery_home),
+                profile=child.profile,
+                response_key_suffix=(
+                    f"department-card:{child.task_id}"
+                ),
+                update_existing=(logical_kind != "started"),
+            )
+        except Exception as exc:
+            logger.warning(
+                "department-thread-card-failed "
+                "root=%s task=%s profile=%s error=%s",
+                root_task_id,
+                child.task_id,
+                child.profile,
+                type(exc).__name__,
+            )
+            return "failed"
+
         logger.info(
-            "department-discord-progress root=%s task=%s "
+            "department-thread-card root=%s task=%s "
             "profile=%s kind=%s status=%s",
             root_task_id,
             child.task_id,
@@ -1618,50 +1677,6 @@ class CeoSupervisorService:
             kind,
             status,
         )
-
-        if (
-            kind in {"done", "completed"}
-            and department_result
-            and len(department_result.strip()) > 600
-        ):
-            _icon, detail_label = DEPARTMENT_DISCORD_LABELS.get(
-                child.profile,
-                ("🏢", child.profile),
-            )
-
-            try:
-                detail_status = self.discord_delivery.deliver_to_existing_thread(
-                    root_task_id=root_task_id,
-                    source_task=delivery_task,
-                    root_task=root_payload,
-                    content=department_result,
-                    title=f"{detail_label} 상세 분석",
-                    store=DiscordIdempotencyStore(delivery_home),
-                    profile=child.profile,
-                    response_key_suffix=(
-                        f"department-detail:{child.task_id}"
-                    ),
-                )
-
-                logger.info(
-                    "department-discord-detail root=%s task=%s "
-                    "profile=%s status=%s",
-                    root_task_id,
-                    child.task_id,
-                    child.profile,
-                    detail_status,
-                )
-
-            except Exception as exc:
-                # Detail projection is UX-only and must never block workflow.
-                logger.warning(
-                    "department-discord-detail-failed "
-                    "root=%s task=%s profile=%s error=%s",
-                    root_task_id,
-                    child.task_id,
-                    child.profile,
-                    type(exc).__name__,
-                )
 
         return status
 
@@ -2283,7 +2298,11 @@ class CeoSupervisorService:
             if not decision.assignee or not decision.title or not decision.body:
                 raise SupervisorValidationError(f"{decision.action.value} lacks create fields")
             if decision.action == SupervisorAction.RUN_QA:
-                expected = {child.task_id for child in state.analysis_children}
+                expected = {
+                    child.task_id
+                    for child in state.analysis_children
+                    if child.done
+                }
                 if requested_parent_ids != expected:
                     raise SupervisorValidationError(
                         "RUN_QA dependencies must be the current root's "
@@ -2295,7 +2314,7 @@ class CeoSupervisorService:
                     {
                         child.task_id
                         for child in state.analysis_children
-                        if child.terminal
+                        if child.done
                     }
                     if state.workflow_mode == "analysis"
                     else {child.task_id for child in state.qa_children if child.done}

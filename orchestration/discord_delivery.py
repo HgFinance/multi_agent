@@ -166,10 +166,12 @@ class DiscordFinalDelivery:
         *,
         environment: Mapping[str, str] | None = None,
         sender: Callable[[str, str, Mapping[str, str]], Mapping[str, Any]] | None = None,
+        editor: Callable[[str, str, str, Mapping[str, str]], Mapping[str, Any]] | None = None,
         timeout: float = 5.0,
     ) -> None:
         self.environment = dict(environment or os.environ)
         self.sender = sender or self._send_http
+        self.editor = editor or self._edit_http
         self.timeout = timeout
 
     def _send_http(
@@ -183,6 +185,24 @@ class DiscordFinalDelivery:
             data=payload.encode("utf-8"),
             headers=dict(headers),
             method="POST",
+        )
+        with urlopen(request, timeout=self.timeout) as response:
+            body = response.read().decode("utf-8")
+        decoded = json.loads(body) if body else {}
+        return decoded if isinstance(decoded, Mapping) else {}
+
+    def _edit_http(
+        self,
+        channel_id: str,
+        message_id: str,
+        payload: str,
+        headers: Mapping[str, str],
+    ) -> Mapping[str, Any]:
+        request = Request(
+            f"https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}",
+            data=payload.encode("utf-8"),
+            headers=dict(headers),
+            method="PATCH",
         )
         with urlopen(request, timeout=self.timeout) as response:
             body = response.read().decode("utf-8")
@@ -216,6 +236,242 @@ class DiscordFinalDelivery:
 
         return tuple(chunks)
 
+    def upsert_thread_card(
+        self,
+        *,
+        root_task_id: str,
+        source_task: Mapping[str, Any],
+        root_task: Mapping[str, Any] | None,
+        content: str,
+        store: DiscordIdempotencyStore,
+        profile: str,
+        response_key_suffix: str,
+        update_existing: bool = True,
+    ) -> str:
+        """Create one request-thread card, then optionally edit that same message."""
+
+        correlation = _correlation_from_synthesis(source_task, root_task)
+
+        source_message_id = (
+            correlation.message_id
+            or _message_id_from_request_id(correlation.request_id)
+        )
+
+        thread_id = correlation.thread_id
+
+        if not thread_id:
+            context: Mapping[str, str | None] = {}
+            inbound_key = None
+
+            if source_message_id:
+                inbound_key = store.inbound_key_for_message(
+                    str(source_message_id),
+                    "ceo-agent",
+                )
+
+            if not inbound_key and correlation.session_id:
+                inbound_key = store.inbound_key_for_session(
+                    str(correlation.session_id),
+                    "ceo-agent",
+                )
+
+            if inbound_key:
+                context = store.inbound_context(
+                    inbound_key,
+                    "ceo-agent",
+                )
+
+            thread_id = context.get("thread_id") or source_message_id
+
+        if not thread_id:
+            logger.info(
+                "discord-thread-card root=%s profile=%s status=missing_thread",
+                root_task_id,
+                profile,
+            )
+            return "missing_thread"
+
+        token = _token_from_env(self.environment, profile)
+        if not token:
+            logger.error(
+                "discord-thread-card root=%s profile=%s "
+                "status=failed error=credential_unavailable",
+                root_task_id,
+                profile,
+            )
+            return "failed"
+
+        # Keep one department card compact enough for a single Discord message.
+        rendered = str(content or "").strip()
+        if not rendered:
+            return "empty"
+
+        if len(rendered) > 1900:
+            rendered = rendered[:1897].rstrip() + "..."
+
+        guild_id = correlation.guild_id or "unknown"
+        correlation_message_id = (
+            source_message_id
+            or root_task_id
+        )
+
+        dedup_key = canonical_discord_dedup_key(
+            guild_id,
+            str(thread_id),
+            str(correlation_message_id),
+        )
+
+        safe_suffix = re.sub(
+            r"[^A-Za-z0-9_.:-]+",
+            "-",
+            str(response_key_suffix or "thread-card"),
+        )[:150]
+
+        response_key = f"{dedup_key}:{safe_suffix}"
+
+        headers = {
+            "Authorization": f"Bot {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "HgFinance-DiscordDelivery/2.6",
+        }
+
+        payload = json.dumps(
+            {"content": rendered},
+            ensure_ascii=False,
+        )
+
+        try:
+            existing_message_id = store.outbound_message_id(
+                response_key,
+                profile,
+            )
+        except IdempotencyStoreUnavailable:
+            logger.exception(
+                "discord-thread-card root=%s profile=%s "
+                "status=failed error=ledger_unavailable",
+                root_task_id,
+                profile,
+            )
+            return "failed"
+
+        if existing_message_id:
+            if not update_existing:
+                logger.info(
+                    "discord-thread-card root=%s profile=%s "
+                    "thread_id=%s message_id=%s status=unchanged",
+                    root_task_id,
+                    profile,
+                    thread_id,
+                    existing_message_id,
+                )
+                return "unchanged"
+
+            try:
+                self.editor(
+                    str(thread_id),
+                    str(existing_message_id),
+                    payload,
+                    headers,
+                )
+            except (HTTPError, URLError, OSError, TimeoutError, ValueError):
+                logger.exception(
+                    "discord-thread-card root=%s profile=%s "
+                    "status=failed operation=patch",
+                    root_task_id,
+                    profile,
+                )
+                return "failed"
+
+            logger.info(
+                "discord-thread-card root=%s profile=%s "
+                "thread_id=%s message_id=%s status=updated",
+                root_task_id,
+                profile,
+                thread_id,
+                existing_message_id,
+            )
+            return "updated"
+
+        try:
+            claim = store.claim_outbound(
+                response_key=response_key,
+                dedup_key=dedup_key,
+                profile=profile,
+            )
+        except IdempotencyStoreUnavailable:
+            logger.exception(
+                "discord-thread-card root=%s profile=%s "
+                "status=failed error=ledger_unavailable",
+                root_task_id,
+                profile,
+            )
+            return "failed"
+
+        if not claim.admitted:
+            existing_message_id = store.outbound_message_id(
+                response_key,
+                profile,
+            )
+
+            if existing_message_id:
+                try:
+                    self.editor(
+                        str(thread_id),
+                        str(existing_message_id),
+                        payload,
+                        headers,
+                    )
+                    return "updated"
+                except (HTTPError, URLError, OSError, TimeoutError, ValueError):
+                    logger.exception(
+                        "discord-thread-card root=%s profile=%s "
+                        "status=failed operation=patch-after-dedup",
+                        root_task_id,
+                        profile,
+                    )
+                    return "failed"
+
+            return "deduped"
+
+        try:
+            response = self.sender(
+                str(thread_id),
+                payload,
+                headers,
+            )
+        except (HTTPError, URLError, OSError, TimeoutError, ValueError):
+            store.mark_outbound(response_key, "FAILED", profile)
+            logger.exception(
+                "discord-thread-card root=%s profile=%s "
+                "status=failed operation=post",
+                root_task_id,
+                profile,
+            )
+            return "failed"
+
+        response_message_id = (
+            str(response.get("id") or "")
+            if isinstance(response, Mapping)
+            else ""
+        )
+
+        store.mark_outbound(
+            response_key,
+            "COMPLETED",
+            profile,
+            response_message_id or None,
+        )
+
+        logger.info(
+            "discord-thread-card root=%s profile=%s "
+            "thread_id=%s message_id=%s status=created",
+            root_task_id,
+            profile,
+            thread_id,
+            response_message_id,
+        )
+        return "created"
+
     def deliver_to_existing_thread(
         self,
         *,
@@ -231,13 +487,57 @@ class DiscordFinalDelivery:
         """Publish full department detail into the request's existing thread."""
 
         correlation = _correlation_from_synthesis(source_task, root_task)
+
+        message_id = (
+            correlation.message_id
+            or _message_id_from_request_id(correlation.request_id)
+        )
+
+        # Resolve the request's EXISTING Discord thread.
+        #
+        # Resolution precedence:
+        #   1. explicit task/root thread_id
+        #   2. CEO inbound ledger thread_id
+        #   3. Discord starter message id
+        #
+        # HgFinance's Discord request threads are public threads created from
+        # the originating message. Discord uses that starter message id as the
+        # resulting thread/channel id.
         thread_id = correlation.thread_id
 
         if not thread_id:
+            context = {}
+
+            inbound_key = None
+
+            if message_id:
+                inbound_key = store.inbound_key_for_message(
+                    str(message_id),
+                    "ceo-agent",
+                )
+
+            if not inbound_key and correlation.session_id:
+                inbound_key = store.inbound_key_for_session(
+                    str(correlation.session_id),
+                    "ceo-agent",
+                )
+
+            if inbound_key:
+                context = store.inbound_context(
+                    inbound_key,
+                    "ceo-agent",
+                )
+
+            thread_id = context.get("thread_id") or message_id
+
+        if not thread_id:
             logger.info(
-                "discord-detail-thread root=%s profile=%s status=missing_thread",
+                "discord-detail-thread root=%s profile=%s "
+                "status=missing_thread message_id=%s session_id=%s",
                 root_task_id,
                 profile,
+                message_id or "",
+                correlation.session_id or "",
             )
             return "missing_thread"
 

@@ -382,6 +382,29 @@ class DiscordIdempotencyStore:
 
         return self._run(operation)
 
+    def outbound_message_id(
+        self,
+        response_key: str,
+        profile: str,
+    ) -> str | None:
+        """Return the Discord message created for an outbound response."""
+
+        def operation(conn: sqlite3.Connection) -> str | None:
+            row = conn.execute(
+                "SELECT response_message_id "
+                "FROM discord_idempotency_outbound "
+                "WHERE profile=? AND response_key=? "
+                "LIMIT 1",
+                (profile, response_key),
+            ).fetchone()
+
+            if row is None or not row[0]:
+                return None
+
+            return str(row[0])
+
+        return self._run(operation)
+
     def claim_outbound(self, *, response_key: str, dedup_key: str, profile: str) -> ClaimResult:
         """Atomically reserve one final response publication."""
 
