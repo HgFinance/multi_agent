@@ -17,10 +17,13 @@ frozen future experiment may turn one of those comparisons into evidence.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import hashlib
 import json
 import math
-from typing import Iterable, Sequence
+import struct
+from types import MappingProxyType
+from typing import Iterable, Mapping, Sequence
 
 import numpy as np
 
@@ -50,6 +53,8 @@ MIN_INSTRUMENTS = 2
 # many instruments/rows; its report marks that temporal breadth explicitly and
 # it can never promote a candidate.
 MIN_SESSIONS = 1
+CALIBRATION_ATTESTATION_VERSION = "calibration-attestation-v1"
+CALIBRATION_ROW_DIGEST_VERSION = "calibration-row-multiset-sha256-v1"
 
 # Public, causally observable controls.  Optional v2 microstructure fields are
 # read with getattr so an older frozen sample-cache remains readable.  Missing
@@ -138,6 +143,229 @@ def _finite(value) -> float | None:
         return None
     value = float(value)
     return value if math.isfinite(value) else None
+
+
+def _canonical_hash(value) -> str:
+    payload = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _identity_list(values: Iterable[str], *, field: str) -> list[str]:
+    rows = [str(value) for value in values]
+    if not rows or rows != sorted(set(rows)):
+        raise ValueError(f"{field} must be a non-empty sorted unique list")
+    return rows
+
+
+def _identity_list_hash(values: Sequence[str]) -> str:
+    return hashlib.sha256(json.dumps(
+        list(values), separators=(",", ":"),
+        allow_nan=False).encode("utf-8")).hexdigest()
+
+
+def attach_calibration_attestation(
+        report: dict, *, planned_session_ids: Sequence[str],
+        planned_instruments: Sequence[str], sample_contract: dict,
+        source_contract: dict, calibration_evidence: dict) -> dict:
+    """Attach a MODEL_CANDIDATE-only proof without changing legacy hashes.
+
+    ``model_fingerprint`` deliberately remains the v3/v4 byte contract used by
+    historical AST and forward artifacts.  The sidecar binds all calibration
+    membership, statistics, row content and source clocks needed by the new
+    independent model lane.  Legacy readers may ignore it; MODEL_CANDIDATE
+    verifies it with :func:`verify_calibration_attestation`.
+    """
+    frozen = json.loads(json.dumps(
+        report or {}, sort_keys=True, separators=(",", ":"), allow_nan=False))
+    if str(frozen.get("status") or "").upper() != "PASS":
+        raise ValueError("only a usable frozen teacher can be attested")
+    planned_sessions = _identity_list(
+        planned_session_ids, field="planned calibration sessions")
+    planned = _identity_list(
+        planned_instruments, field="planned calibration instruments")
+    contributing_sessions = _identity_list(
+        frozen.get("session_ids") or [],
+        field="contributing calibration sessions")
+    if not isinstance(calibration_evidence, dict):
+        raise ValueError("teacher calibration sidecar evidence is required")
+    evidence = json.loads(json.dumps(
+        calibration_evidence, sort_keys=True, separators=(",", ":"),
+        allow_nan=False))
+    contributing = _identity_list(
+        evidence.get("instrument_ids") or [],
+        field="contributing calibration instruments")
+    if not set(contributing_sessions).issubset(planned_sessions):
+        raise ValueError("contributing sessions are outside the frozen plan")
+    if not set(contributing).issubset(planned):
+        raise ValueError("contributing instruments are outside the frozen plan")
+    observations = frozen.get("observations")
+    class_counts = frozen.get("class_counts") or {}
+    if (isinstance(observations, bool) or not isinstance(observations, int)
+            or observations < 1 or set(class_counts) != {
+                "ENTER_LONG", "DOWN_ABSTAIN", "UP_BUT_COSTLY_ABSTAIN"}
+            or any(isinstance(value, bool) or not isinstance(value, int)
+                   or value < 0 for value in class_counts.values())
+            or sum(class_counts.values()) != observations):
+        raise ValueError("teacher calibration statistics are inconsistent")
+    row_digest = evidence.get("calibration_row_digest") or {}
+    if (row_digest.get("version") != CALIBRATION_ROW_DIGEST_VERSION
+            or row_digest.get("rows") != observations):
+        raise ValueError("teacher lacks an exact streaming calibration digest")
+    for key in ("xor_sha256", "sum_sha256"):
+        value = str(row_digest.get(key) or "").lower()
+        if (len(value) != 64 or any(char not in "0123456789abcdef"
+                                   for char in value)):
+            raise ValueError("teacher calibration row digest is invalid")
+    if not isinstance(sample_contract, dict) or not sample_contract:
+        raise ValueError("calibration sample contract is required")
+    if not isinstance(source_contract, dict) or not source_contract:
+        raise ValueError("calibration source contract is required")
+    cutoff_text = str(source_contract.get("knowledge_cutoff") or "")
+    if not cutoff_text:
+        raise ValueError("calibration source knowledge cutoff is required")
+    try:
+        cutoff = datetime.fromisoformat(cutoff_text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(
+            "calibration source knowledge cutoff must be ISO-8601") from exc
+    if cutoff.tzinfo is None:
+        raise ValueError("calibration source knowledge cutoff must be aware")
+    if not any(source_contract.get(key) for key in (
+            "source_content_fingerprint", "source_lineage_fingerprint")):
+        raise ValueError("calibration source content fingerprint is required")
+    for key in ("source_content_fingerprint", "source_lineage_fingerprint"):
+        if source_contract.get(key) is None:
+            continue
+        value = str(source_contract[key]).lower()
+        if (len(value) != 64
+                or any(char not in "0123456789abcdef" for char in value)):
+            raise ValueError(
+                f"calibration source {key} must be one sha256 digest")
+    # A canonical JSON round trip both validates finiteness and detaches caller
+    # dictionaries from the attested evidence.
+    sample_contract = json.loads(json.dumps(
+        sample_contract, sort_keys=True, separators=(",", ":"),
+        allow_nan=False))
+    source_contract = json.loads(json.dumps(
+        source_contract, sort_keys=True, separators=(",", ":"),
+        allow_nan=False))
+    fingerprints = frozen.get("calibration_fingerprints") or {}
+    if (int(frozen.get("sessions") or -1) != len(contributing_sessions)
+            or int(frozen.get("instruments") or -1) != len(contributing)
+            or fingerprints.get("sessions") !=
+            _identity_list_hash(contributing_sessions)
+            or fingerprints.get("instruments") !=
+            _identity_list_hash(contributing)):
+        raise ValueError("teacher calibration membership hashes do not verify")
+    payload = {
+        "version": CALIBRATION_ATTESTATION_VERSION,
+        "teacher_model_fingerprint": frozen.get("model_fingerprint"),
+        "teacher_version": frozen.get("version"),
+        "session_identity": {
+            "planned_ids": planned_sessions,
+            "planned_count": len(planned_sessions),
+            "planned_hash": _identity_list_hash(planned_sessions),
+            "contributing_ids": contributing_sessions,
+            "contributing_count": len(contributing_sessions),
+            "contributing_hash": _identity_list_hash(contributing_sessions),
+        },
+        "instrument_identity": {
+            "planned_ids": planned,
+            "planned_count": len(planned),
+            "planned_hash": _identity_list_hash(planned),
+            "contributing_ids": contributing,
+            "contributing_count": len(contributing),
+            "contributing_hash": _identity_list_hash(contributing),
+        },
+        "statistics": {
+            "observations": observations,
+            "class_counts": dict(class_counts),
+        },
+        "contracts": {
+            "feature_spec_hash": frozen.get("feature_spec_hash"),
+            "feature_cube_spec_hash": frozen.get("feature_cube_spec_hash"),
+            "feature_window_contract_version": frozen.get(
+                "feature_window_contract_version"),
+            "label_version": frozen.get("label_version"),
+            "target": frozen.get("target"),
+            "horizon_seconds": frozen.get("horizon_seconds"),
+            "execution": frozen.get("execution"),
+            "cost_inputs": frozen.get("cost_inputs") or {},
+            "sample_contract": sample_contract,
+        },
+        "calibration_content": row_digest,
+        "source_contract": source_contract,
+    }
+    payload["attestation_hash"] = _canonical_hash(payload)
+    frozen["calibration_attestation"] = payload
+    return frozen
+
+
+def verify_calibration_attestation(report: dict) -> dict:
+    """Verify and return the sidecar required by MODEL_CANDIDATE."""
+    if not isinstance(report, dict):
+        raise ValueError("teacher report must be an object")
+    attestation = report.get("calibration_attestation")
+    if not isinstance(attestation, dict):
+        raise ValueError("MODEL_CANDIDATE requires calibration-attestation-v1")
+    detached = json.loads(json.dumps(
+        attestation, sort_keys=True, separators=(",", ":"), allow_nan=False))
+    supplied_hash = detached.pop("attestation_hash", None)
+    if (detached.get("version") != CALIBRATION_ATTESTATION_VERSION
+            or supplied_hash != _canonical_hash(detached)):
+        raise ValueError("calibration attestation hash does not verify")
+    if detached.get("teacher_model_fingerprint") != report.get(
+            "model_fingerprint"):
+        raise ValueError("calibration attestation belongs to another teacher")
+    sessions = detached.get("session_identity") or {}
+    instruments = detached.get("instrument_identity") or {}
+    for identity, name in ((sessions, "session"),
+                           (instruments, "instrument")):
+        for role in ("planned", "contributing"):
+            values = _identity_list(
+                identity.get(f"{role}_ids") or [],
+                field=f"attested {role} calibration {name}s")
+            if (identity.get(f"{role}_count") != len(values)
+                    or identity.get(f"{role}_hash") !=
+                    _identity_list_hash(values)):
+                raise ValueError(
+                    f"attested calibration {name} identity does not verify")
+    contributing_sessions = sessions["contributing_ids"]
+    contributing_instruments = instruments["contributing_ids"]
+    fingerprints = report.get("calibration_fingerprints") or {}
+    statistics = detached.get("statistics") or {}
+    if (report.get("session_ids") != contributing_sessions
+            or report.get("sessions") != len(contributing_sessions)
+            or report.get("instruments") != len(contributing_instruments)
+            or fingerprints.get("sessions") !=
+            _identity_list_hash(contributing_sessions)
+            or fingerprints.get("instruments") !=
+            _identity_list_hash(contributing_instruments)
+            or report.get("observations") != statistics.get("observations")
+            or report.get("class_counts") != statistics.get("class_counts")
+            ):
+        raise ValueError("teacher report differs from calibration attestation")
+    expected_contract = {
+        "feature_spec_hash": report.get("feature_spec_hash"),
+        "feature_cube_spec_hash": report.get("feature_cube_spec_hash"),
+        "feature_window_contract_version": report.get(
+            "feature_window_contract_version"),
+        "label_version": report.get("label_version"),
+        "target": report.get("target"),
+        "horizon_seconds": report.get("horizon_seconds"),
+        "execution": report.get("execution"),
+        "cost_inputs": report.get("cost_inputs") or {},
+        "sample_contract": (detached.get("contracts") or {}).get(
+            "sample_contract"),
+    }
+    if detached.get("contracts") != expected_contract:
+        raise ValueError("teacher contract differs from calibration attestation")
+    if (not set(contributing_sessions).issubset(sessions["planned_ids"])
+            or not set(contributing_instruments).issubset(
+                instruments["planned_ids"])):
+        raise ValueError("attested contributors are outside the frozen plan")
+    return {**detached, "attestation_hash": supplied_hash}
 
 
 def feature_vector(sample: IntradaySample) -> tuple[float, ...]:
@@ -531,10 +759,83 @@ class CostAwareTeacher:
             "DOWN_ABSTAIN": 0,
             "UP_BUT_COSTLY_ABSTAIN": 0,
         }
-        self.models: dict[str, FrozenRidge] = {}
+        self._models: dict[str, FrozenRidge] = {}
         self.status = "PENDING"
         self._restored_report: dict | None = None
+        self._restored_calibration_evidence: dict | None = None
         self._frozen_model_fingerprint: str | None = None
+        self._frozen_live_parameters_fingerprint: str | None = None
+        self._calibration_row_count = 0
+        self._calibration_row_xor = 0
+        self._calibration_row_sum = 0
+
+    @property
+    def models(self) -> Mapping[str, FrozenRidge]:
+        """Read-only view of live parameters; terminal models are immutable."""
+        return MappingProxyType(self._models)
+
+    def _calibration_row_digest_report(self) -> dict:
+        return {
+            "version": CALIBRATION_ROW_DIGEST_VERSION,
+            "rows": self._calibration_row_count,
+            "xor_sha256": f"{self._calibration_row_xor:064x}",
+            "sum_sha256": f"{self._calibration_row_sum:064x}",
+        }
+
+    def calibration_evidence(self) -> dict:
+        """Return the MODEL_CANDIDATE sidecar, outside legacy teacher JSON."""
+        if self._restored_calibration_evidence is not None:
+            return json.loads(json.dumps(self._restored_calibration_evidence))
+        return {
+            "version": "teacher-calibration-sidecar-v1",
+            "instrument_ids": sorted(self.instruments),
+            "session_ids": sorted(self.sessions),
+            "observations": self._moments.count,
+            "class_counts": dict(self.class_counts),
+            "calibration_row_digest": self._calibration_row_digest_report(),
+        }
+
+    def _record_calibration_row(
+            self, sample: IntradaySample, vector: Sequence[float],
+            target: tuple[float, float, float]) -> None:
+        digest = hashlib.sha256()
+        digest.update((CALIBRATION_ROW_DIGEST_VERSION + "\0").encode())
+        for value in (
+                str(sample.instrument_id), sample.decision_time.isoformat(),
+                sample.entry_time.isoformat(),
+                sample.source_quote_event_time.isoformat()):
+            digest.update(value.encode("utf-8"))
+            digest.update(b"\0")
+        digest.update(struct.pack(">ddd", *(float(value) for value in target)))
+        digest.update(np.asarray(
+            tuple(float(value) for value in vector),
+            dtype=">f8").tobytes(order="C"))
+        token = int.from_bytes(digest.digest(), "big")
+        self._calibration_row_count += 1
+        self._calibration_row_xor ^= token
+        self._calibration_row_sum = (
+            self._calibration_row_sum + token) % (1 << 256)
+
+    def _live_parameters_fingerprint(self) -> str:
+        digest = hashlib.sha256()
+        digest.update(b"frozen-ridge-live-parameters-v1\0")
+        digest.update(self.status.encode("utf-8"))
+        digest.update(b"\0")
+        for target in sorted(self._models):
+            model = self._models[target]
+            digest.update(target.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(struct.pack(">d", float(model.intercept)))
+            for values in (model.coefficients, model.means, model.scales):
+                digest.update(np.asarray(values, dtype=">f8").tobytes(order="C"))
+        return digest.hexdigest()
+
+    def _verify_live_parameters(self) -> None:
+        if self.status == "PENDING":
+            return
+        expected = self._frozen_live_parameters_fingerprint
+        if expected is None or self._live_parameters_fingerprint() != expected:
+            raise ValueError("frozen teacher live parameters changed")
 
     def training_contract_key(self) -> tuple:
         """Return the exact contract under which calibration rows are fungible.
@@ -577,7 +878,7 @@ class CostAwareTeacher:
             and self._moments.count == 0
             and not self.instruments
             and not self.sessions
-            and not self.models
+            and not self._models
             and self._restored_report is None
         )
 
@@ -593,13 +894,14 @@ class CostAwareTeacher:
         if self.status == "PENDING":
             model_identity = "PENDING_NO_PREDICTIONS"
         else:
+            self._verify_live_parameters()
             if self._frozen_model_fingerprint is None:
-                self._frozen_model_fingerprint = self.report()[
-                    "model_fingerprint"]
+                raise ValueError("terminal teacher lacks a frozen fingerprint")
             model_identity = self._frozen_model_fingerprint
         return (*self.training_contract_key(), self.status, model_identity)
 
-    def restore(self, report: dict) -> dict:
+    def restore(self, report: dict, *, calibration_evidence: dict | None = None
+                ) -> dict:
         """Restore an already frozen calibration artifact without fitting.
 
         Forward confirmation must use the exact model that was frozen before
@@ -692,13 +994,19 @@ class CostAwareTeacher:
             allow_nan=False).encode()).hexdigest()
         if calculated != report.get("model_fingerprint"):
             raise ValueError("frozen teacher model fingerprint does not verify")
-        self.models = models
+        self._models = dict(models)
         self.status = status
         self._frozen_model_fingerprint = str(report["model_fingerprint"])
+        self._frozen_live_parameters_fingerprint = \
+            self._live_parameters_fingerprint()
         # JSON round-trip prevents a caller from mutating the evidence object
         # after it has been admitted to the forward evaluator.
         self._restored_report = json.loads(json.dumps(
             report, sort_keys=True, separators=(",", ":"), allow_nan=False))
+        if calibration_evidence is not None:
+            self._restored_calibration_evidence = json.loads(json.dumps(
+                calibration_evidence, sort_keys=True, separators=(",", ":"),
+                allow_nan=False))
         return self.report()
 
     def calibrate(self, instrument_id: str,
@@ -723,11 +1031,13 @@ class CostAwareTeacher:
                 if target is None:
                     continue
                 markout, net, positive = target
-                vectors.append(explicit_feature_vector(
-                    sample, feature_cube, index))
+                vector = explicit_feature_vector(sample, feature_cube, index)
+                vectors.append(vector)
                 targets["markout_bps"].append(markout)
                 targets["net_bps"].append(net)
                 targets["positive_net"].append(positive)
+                self._record_calibration_row(
+                    sample, vector, (markout, net, positive))
                 label = direction_class(
                     sample, horizon_seconds=self.horizon_seconds,
                     execution=self.execution)
@@ -749,7 +1059,10 @@ class CostAwareTeacher:
             if target is None:
                 continue
             markout, net, positive = target
-            self._moments.add(feature_vector(sample), {
+            vector = feature_vector(sample)
+            self._record_calibration_row(
+                sample, vector, (markout, net, positive))
+            self._moments.add(vector, {
                 "markout_bps": markout,
                 "net_bps": net,
                 "positive_net": positive,
@@ -776,6 +1089,8 @@ class CostAwareTeacher:
             self.status = "INSUFFICIENT_CALIBRATION"
             report = self.report()
             self._frozen_model_fingerprint = report["model_fingerprint"]
+            self._frozen_live_parameters_fingerprint = \
+                self._live_parameters_fingerprint()
             return report
         targets = ("markout_bps", "net_bps", "positive_net")
         if self.feature_window_contract_version == \
@@ -783,28 +1098,35 @@ class CostAwareTeacher:
             models = self._moments.freeze_many(targets)
             if models is None:
                 self.status = "SINGULAR_CALIBRATION"
-                self.models = {}
+                self._models = {}
                 report = self.report()
                 self._frozen_model_fingerprint = report["model_fingerprint"]
+                self._frozen_live_parameters_fingerprint = \
+                    self._live_parameters_fingerprint()
                 return report
-            self.models.update(models)
+            self._models.update(models)
         else:
             for target in targets:
                 model = self._moments.freeze(target)
                 if model is None:
                     self.status = "SINGULAR_CALIBRATION"
-                    self.models = {}
+                    self._models = {}
                     report = self.report()
                     self._frozen_model_fingerprint = report["model_fingerprint"]
+                    self._frozen_live_parameters_fingerprint = \
+                        self._live_parameters_fingerprint()
                     return report
-                self.models[target] = model
+                self._models[target] = model
         self.status = "PASS"
         report = self.report()
         self._frozen_model_fingerprint = report["model_fingerprint"]
+        self._frozen_live_parameters_fingerprint = \
+            self._live_parameters_fingerprint()
         return report
 
     def predict(self, samples: Iterable[IntradaySample], *,
                 feature_cube=None) -> list[dict | None]:
+        self._verify_live_parameters()
         if self.feature_window_contract_version == \
                 EXPLICIT_FEATURE_WINDOW_CONTRACT:
             rows = list(samples)
@@ -814,11 +1136,11 @@ class CostAwareTeacher:
             predictions = []
             for index, sample in enumerate(rows):
                 vector = explicit_feature_vector(sample, feature_cube, index)
-                probability = self.models["positive_net"].predict(vector)
+                probability = self._models["positive_net"].predict(vector)
                 predictions.append({
                     "expected_markout_bps":
-                        self.models["markout_bps"].predict(vector),
-                    "expected_net_bps": self.models["net_bps"].predict(vector),
+                        self._models["markout_bps"].predict(vector),
+                    "expected_net_bps": self._models["net_bps"].predict(vector),
                     "positive_net_probability": max(
                         0.0, min(1.0, probability)),
                 })
@@ -830,10 +1152,10 @@ class CostAwareTeacher:
         rows = []
         for sample in samples:
             vector = feature_vector(sample)
-            probability = self.models["positive_net"].predict(vector)
+            probability = self._models["positive_net"].predict(vector)
             rows.append({
-                "expected_markout_bps": self.models["markout_bps"].predict(vector),
-                "expected_net_bps": self.models["net_bps"].predict(vector),
+                "expected_markout_bps": self._models["markout_bps"].predict(vector),
+                "expected_net_bps": self._models["net_bps"].predict(vector),
                 "positive_net_probability": max(0.0, min(1.0, probability)),
             })
         return rows
@@ -842,8 +1164,8 @@ class CostAwareTeacher:
         if self._restored_report is not None:
             return json.loads(json.dumps(self._restored_report))
         parameters = {
-            target: self.models[target].as_dict()
-            for target in sorted(self.models)
+            target: self._models[target].as_dict()
+            for target in sorted(self._models)
         }
         calibration_fingerprints = {
             "sessions": hashlib.sha256(json.dumps(
