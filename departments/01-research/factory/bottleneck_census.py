@@ -45,7 +45,15 @@ for _p in (_ROOT / "departments" / "01-research" / "collectors",
     if _p.is_dir():
         sys.path.insert(0, str(_p))
 
+from stock_universe import (  # noqa: E402
+    governed_stock_dataset_sql,
+    governed_stock_evidence_sql,
+)
+
 CENSUS_VERSION = "factory-bottleneck-census-v1"
+_GOVERNED_CENSUS_EVIDENCE = governed_stock_evidence_sql(
+    experiment_alias="e", dataset_alias="m", hypothesis_alias="h")
+_GOVERNED_CENSUS_DATASET = governed_stock_dataset_sql(dataset_alias="m")
 
 # 정체로 보는 나이. 이보다 오래 비종결 상태면 "돌고 있는" 게 아니다.
 STALE_DAYS = float(os.getenv("FACTORY_STALE_DAYS", "2"))
@@ -203,9 +211,14 @@ def _gate_blockers(cur) -> list[Bottleneck]:
     """관문에서 **반복해서** 걸리는 조항. 한 번은 결과, 반복은 병목이다."""
     try:
         cur.execute("""
-            select failed_criteria, trial_family_id
-              from research.experiment_outcomes
-             where decided_at > now() - interval '30 days'""")
+            select o.failed_criteria, o.trial_family_id
+              from research.v_current_experiment_outcomes o
+              join quant.experiments e
+                on e.experiment_id::text = o.experiment_id
+              join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+              join quant.dataset_manifests m on m.dataset_id = e.dataset_id
+             where o.decided_at > now() - interval '30 days'
+               and """ + _GOVERNED_CENSUS_EVIDENCE)
         rows = cur.fetchall()
     except Exception:  # noqa: BLE001
         return []
@@ -236,7 +249,8 @@ def _unused_datasets(cur) -> list[Bottleneck]:
                    extract(epoch from (now() - m.as_of))/86400.0,
                    (select count(*) from quant.experiments e
                      where e.dataset_id = m.dataset_id)
-              from quant.dataset_manifests m""")
+              from quant.dataset_manifests m
+             where """ + _GOVERNED_CENSUS_DATASET)
         rows = cur.fetchall()
     except Exception:  # noqa: BLE001
         return []
@@ -262,9 +276,12 @@ def _feedback_gap(cur) -> list[Bottleneck]:
         cur.execute("""
             select e.experiment_id::text
               from quant.experiments e
+              join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+              join quant.dataset_manifests m on m.dataset_id = e.dataset_id
               left join research.experiment_outcomes o
                      on o.experiment_id = e.experiment_id::text
-             where e.status = 'COMPLETED' and o.outcome_id is null""")
+             where e.status = 'COMPLETED' and o.outcome_id is null
+               and """ + _GOVERNED_CENSUS_DATASET)
         miss = [r[0] for r in cur.fetchall()]
     except Exception:  # noqa: BLE001
         return []
@@ -283,9 +300,14 @@ def _repeat_lessons(cur) -> list[Bottleneck]:
     """되풀이되는 교훈. **한 번은 배움이고 다섯 번은 안 고쳐진 것이다.**"""
     try:
         cur.execute("""
-            select lesson_codes, trial_family_id
-              from research.experiment_outcomes
-             where decided_at > now() - interval '30 days'""")
+            select o.lesson_codes, o.trial_family_id
+              from research.v_current_experiment_outcomes o
+              join quant.experiments e
+                on e.experiment_id::text = o.experiment_id
+              join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+              join quant.dataset_manifests m on m.dataset_id = e.dataset_id
+             where o.decided_at > now() - interval '30 days'
+               and """ + _GOVERNED_CENSUS_EVIDENCE)
         rows = cur.fetchall()
     except Exception:  # noqa: BLE001
         return []

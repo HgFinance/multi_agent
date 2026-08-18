@@ -26,7 +26,7 @@ FROM python:3.12-slim
 # xlrd: GPR 일별 지수(.xls) 파싱. 2026-08-02 실측 - 이게 없어 geopolitical Job 이
 # 매일 실패하고 있었다(pandas 를 쓰던 코드를 xlrd 직접 읽기로 바꿨다 - 열 4개를
 # 읽자고 pandas 를 넣는 것보다 가볍다).
-RUN pip install --no-cache-dir psycopg2-binary==2.9.10 pydantic==2.11.7 python-dotenv==1.1.1 websockets==15.0.1 fastapi==0.116.1 "uvicorn[standard]==0.35.0" pyarrow==25.0.0 mcp xlrd==2.0.2
+RUN pip install --no-cache-dir psycopg2-binary==2.9.10 pydantic==2.11.7 python-dotenv==1.1.1 websockets==15.0.1 fastapi==0.116.1 "uvicorn[standard]==0.35.0" pyarrow==25.0.0 mcp==1.26.0 xlrd==2.0.2
 
 # 저장소의 departments/01-research 경로 구조를 그대로 유지한다 - 수집기들이
 # Path(__file__) 상대로 contracts/repository 를 sys.path 에 넣기 때문이다.

@@ -44,11 +44,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "repository"))
-# ▶ `contracts.market_events` 로 임포트한다. ls_realtime_adapter 가 그렇게 하기
-#   때문이다. `market_events` 로 받으면 **같은 파일이 두 모듈로 로드되어 클래스가
-#   갈리고 isinstance 가 전부 False 가 된다.** 정규화 결과를 타입으로 분기하는
-#   이 파일에서는 조용히 모든 이벤트가 버려지는 형태로 터진다.
-from contracts.market_events import (
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "contracts"))
+# ▶ 어댑터·저장소와 똑같이 고유한 `market_events` 모듈 이름으로 임포트한다.
+#   패키지명이 일반적인 `contracts` 면 다른 부서 모듈과 충돌하고, 서로 다른 이름으로
+#   같은 파일을 두 번 로드하면 클래스가 갈려 isinstance 가 전부 False 가 된다.
+from market_events import (
     MarketQuote,
     MarketTick,
     QuarantinedEvent,

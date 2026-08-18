@@ -32,7 +32,8 @@ from uuid import UUID, uuid4
 # 같은 본부 안의 계약이라 상대 import 로 붙인다. 본부 경계를 넘는 import 는 하지 않는다
 # (REPOSITORY_DEPARTMENT_STRUCTURE 8절 의존성 방향).
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from contracts.market_events import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "contracts"))
+from market_events import (
     InstrumentRef,
     Market,
     MarketQuote,

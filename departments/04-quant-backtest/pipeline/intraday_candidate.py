@@ -10,6 +10,7 @@ uses those session-level observations.
 from __future__ import annotations
 
 from collections import defaultdict
+import copy
 from datetime import timezone
 import hashlib
 import heapq
@@ -21,10 +22,12 @@ from intraday_alpha_ast import evaluate as evaluate_ast
 from intraday_alpha_ast import (fields_of, fingerprint, shape_fingerprint,
                                 unit_of)
 from intraday_microstructure import IntradayLaneSpec, IntradaySample, audit_causality
-from overfit_stats import bootstrap_ci, deflated_sharpe
+from intraday_supervised import CostAwareTeacher, executable_target
+from overfit_stats import (bootstrap_ci, deflated_sharpe,
+                           stationary_bootstrap_indices)
 
 
-EVALUATOR_VERSION = "intraday-candidate-evaluator-v7"
+EVALUATOR_VERSION = "intraday-candidate-evaluator-v11"
 KST = ZoneInfo("Asia/Seoul")
 ENTRY_POLICIES = frozenset({
     "POSITIVE_SCORE",
@@ -66,22 +69,119 @@ def apply_family_pbo(report: dict, family_pbo: float | None,
     rules = {**DEFAULT_CRITERIA, **(criteria or {})}
     out = {**report, "summary": dict(report.get("summary") or {})}
     failed = [item for item in (report.get("failed_criteria") or [])
-              if item not in {"PBO_UNMEASURED", "OVERFIT_PBO"}]
+              if item not in {"PBO_UNMEASURED", "OVERFIT_PBO",
+                              "INDEPENDENT_FORWARD_CONFIRMATION_PENDING"}]
     out["summary"]["pbo"] = family_pbo
     if family_pbo is None:
         failed.append("PBO_UNMEASURED")
     elif not math.isfinite(float(family_pbo)) or float(family_pbo) > rules["max_pbo"]:
         failed.append("OVERFIT_PBO")
+    forward_lockbox = report.get("forward_lockbox") or {}
+    search_exposed = (
+        report.get("evidence_tier") == "SEARCH_EXPOSED_HISTORICAL_SUPPORT"
+        or (bool(forward_lockbox) and
+            forward_lockbox.get("independent_confirmation") is not True)
+    )
+    if search_exposed:
+        if "INDEPENDENT_FORWARD_CONFIRMATION_PENDING" not in failed:
+            failed.append("INDEPENDENT_FORWARD_CONFIRMATION_PENDING")
     out["failed_criteria"] = failed
     had_evidence = report.get("decision") != "NO_EVIDENCE"
     out["decision"] = ("NO_EVIDENCE" if not had_evidence else
                        "SUBMIT_TO_QA" if not failed else "HOLD")
+    if search_exposed and had_evidence:
+        out["forward_nomination"] = {
+            "decision": "NOMINATE_FORWARD",
+            "status": "AWAITING_INDEPENDENT_CONFIRMATION",
+            "independent_confirmation": False,
+            "promotion_authority": False,
+        }
+    elif not search_exposed:
+        out.pop("forward_nomination", None)
     return out
 
 
 def _label(sample: IntradaySample, horizon_seconds: int):
     return next((label for label in sample.labels
                  if label.horizon_seconds == horizon_seconds), None)
+
+
+def _safe_timestamp(value) -> float | None:
+    try:
+        timestamp = float(value.timestamp())
+    except (AttributeError, TypeError, ValueError, OverflowError, OSError):
+        return None
+    return timestamp if math.isfinite(timestamp) else None
+
+
+def _capital_window(sample: IntradaySample, label, *, execution: str,
+                    side: int) -> tuple[float, float, str]:
+    """Return a conservative decision-to-release capital reservation.
+
+    Taker capital is released at its executable exit.  A passive order reserves
+    capital while it rests and, when filled, throughout a full post-fill holding
+    horizon.  Old cache rows without the optional passive-exit field remain
+    readable because fill time plus the fixed horizon is sufficient to derive
+    the same clock.
+    """
+    start = _safe_timestamp(sample.decision_time)
+    if start is None:
+        raise ValueError("decision_time must have a finite timestamp")
+    horizon = float(label.horizon_seconds)
+    execution = str(execution).upper()
+    if execution == "TAKER":
+        end = _safe_timestamp(label.exit_time)
+        if end is None or end <= start:
+            entry = _safe_timestamp(sample.entry_time)
+            end = max(start + horizon, (entry or start) + horizon)
+        return start, end, "TAKER_DECISION_TO_EXECUTABLE_EXIT"
+
+    prefix = "long" if side > 0 else "short"
+    fill = _safe_timestamp(getattr(label, f"{prefix}_passive_fill_time", None))
+    passive_net = getattr(label, f"{prefix}_passive_net_bps", None)
+    filled = (bool(getattr(label, f"{prefix}_passive_filled", False))
+              or fill is not None or passive_net is not None)
+    passive_exit = _safe_timestamp(
+        getattr(label, f"{prefix}_passive_exit_time", None))
+    expiry = _safe_timestamp(label.exit_time)
+    if filled:
+        derived_exit = fill + horizon if fill is not None else None
+        usable = [value for value in (passive_exit, derived_exit)
+                  if value is not None and value > start]
+        if usable:
+            # audit_causality rejects disagreement for current labels.  max is
+            # fail-conservative for legacy/cache rows rather than understating
+            # reserved capital when one optional timestamp is malformed.
+            return start, max(usable), "PASSIVE_DECISION_TO_FILL_PLUS_HORIZON"
+        # A legacy row claiming a fill without its fill timestamp cannot support
+        # an exact clock.  Reserve the maximum possible rest+hold span.
+        return start, max(expiry or start, start + 2.0 * horizon), \
+            "PASSIVE_FILLED_TIMESTAMP_MISSING_CONSERVATIVE_MAX"
+
+    if expiry is None or expiry <= start:
+        entry = _safe_timestamp(sample.entry_time)
+        expiry = max(start + horizon, (entry or start) + horizon)
+    return start, expiry, "PASSIVE_DECISION_TO_ORDER_EXPIRY"
+
+
+def _predicted_entry_hurdle_bps(
+        sample: IntradaySample, *, execution: str,
+        fee_bps_per_side: float, maker_fee_bps_per_side: float,
+        minimum_predicted_edge_bps: float) -> float:
+    """Return the preregistered executable hurdle for one long entry."""
+
+    hurdle = float(minimum_predicted_edge_bps)
+    if str(execution).upper() == "TAKER":
+        execution_spread = (
+            sample.execution_spread_bps
+            if sample.execution_spread_bps is not None else
+            (float(sample.entry_ask) - float(sample.entry_bid)) /
+            ((float(sample.entry_ask) + float(sample.entry_bid)) / 2.0) *
+            10_000.0)
+        return hurdle + float(execution_spread) + 2.0 * float(
+            fee_bps_per_side)
+    return hurdle + float(maker_fee_bps_per_side) + float(
+        fee_bps_per_side)
 
 
 def _observations(samples: list[IntradaySample], values: list[float | None], *,
@@ -111,12 +211,11 @@ def _observations(samples: list[IntradaySample], values: list[float | None], *,
             # only if that predicted move clears the executable round trip and
             # the preregistered safety margin.  This prevents a directionally
             # useful pressure score from becoming a high-turnover loss machine.
-            hurdle = float(minimum_predicted_edge_bps)
-            if execution == "TAKER":
-                hurdle += float(sample.spread_bps) + 2.0 * float(fee_bps_per_side)
-            else:
-                hurdle += (float(maker_fee_bps_per_side)
-                           + float(fee_bps_per_side))
+            hurdle = _predicted_entry_hurdle_bps(
+                sample, execution=execution,
+                fee_bps_per_side=fee_bps_per_side,
+                maker_fee_bps_per_side=maker_fee_bps_per_side,
+                minimum_predicted_edge_bps=minimum_predicted_edge_bps)
         # Point-in-time borrow availability/fees are not in the governed source
         # plane.  Negative scores therefore mean abstain, never a free short.
         side = 1 if value > hurdle else 0
@@ -131,6 +230,8 @@ def _observations(samples: list[IntradaySample], values: list[float | None], *,
             mid = label.short_mid_markout_bps
             net = (label.short_taker_net_bps if execution == "TAKER"
                    else label.short_passive_net_bps)
+        capital_start, capital_end, capital_clock = _capital_window(
+            sample, label, execution=execution, side=side)
         rows.append({
             "instrument_id": sample.instrument_id,
             "decision_time": sample.decision_time,
@@ -144,8 +245,13 @@ def _observations(samples: list[IntradaySample], values: list[float | None], *,
             # only per-fill returns rewards strategies that almost never execute.
             "net_bps_per_opportunity": 0.0 if net is None else float(net),
             "net_bps_per_fill": None if net is None else float(net),
-            "capacity_shares_l1": (float(sample.entry_ask_depth_l1) if side > 0
-                                    else float(sample.entry_bid_depth_l1)),
+            "capacity_shares_l1": (
+                (float(sample.entry_ask_depth_l1) if side > 0
+                 else float(sample.entry_bid_depth_l1))
+                if sample.execution_capacity_supported else None),
+            "capital_start_timestamp": capital_start,
+            "capital_end_timestamp": capital_end,
+            "capital_clock": capital_clock,
         })
     return rows
 
@@ -213,6 +319,47 @@ def _bootstrap_mean(values: list[float], *, n_boot: int = 1000,
     return means[int(0.025 * len(means))], means[int(0.975 * len(means))]
 
 
+def _stationary_mean(values: list[float], *, n_boot: int = 1000,
+                     seed: int = 20260816,
+                     restart_probability: float = 0.25) -> dict:
+    """Dependence-aware percentile interval for a paired session mean."""
+    if len(values) < 2:
+        return {
+            "ci_low_bps": None,
+            "ci_high_bps": None,
+            "bootstrap_method": "stationary",
+            "restart_probability": restart_probability,
+            "reason": "need at least two common scheduled sessions",
+        }
+    means = []
+    for indices in stationary_bootstrap_indices(
+            len(values), n_boot=n_boot,
+            restart_probability=restart_probability, seed=seed):
+        means.append(fmean(values[index] for index in indices))
+    means.sort()
+    return {
+        "ci_low_bps": means[int(0.025 * len(means))],
+        "ci_high_bps": means[min(int(0.975 * len(means)), len(means) - 1)],
+        "bootstrap_method": "stationary",
+        "restart_probability": restart_probability,
+        "expected_block_length_sessions": 1.0 / restart_probability,
+        "n_boot": len(means),
+        "seed": seed,
+    }
+
+
+def _capital_peaks(
+        deltas_by_session: dict[str, dict[float, int]]) -> dict[str, int]:
+    peaks: dict[str, int] = {}
+    for session, deltas in deltas_by_session.items():
+        current = peak = 0
+        for when in sorted(deltas):
+            current += deltas[when]
+            peak = max(peak, current)
+        peaks[session] = peak
+    return peaks
+
+
 def _folds(session_returns: dict[str, float], n_splits: int = 4) -> list[dict]:
     ordered = sorted(session_returns)
     if not ordered:
@@ -231,6 +378,132 @@ def _folds(session_returns: dict[str, float], n_splits: int = 4) -> list[dict]:
             "positive": fmean(values) > 0,
         })
     return out
+
+
+class _ReplayStats:
+    """Small independent strategy ledger used by diagnostic controls."""
+
+    def __init__(self, horizon_seconds: int):
+        self.horizon_seconds = int(horizon_seconds)
+        self.opportunities = 0
+        self.fills = 0
+        self.net_sum = 0.0
+        self.fill_net_sum = 0.0
+        self.session_net_sum: dict[str, float] = defaultdict(float)
+        self.session_capital_deltas: dict[str, dict[float, int]] = defaultdict(
+            lambda: defaultdict(int))
+
+    def schedule(self, sessions) -> None:
+        """Pre-register sessions so abstention/no-trade outcomes remain zero."""
+        for raw in sessions:
+            session = str(raw)
+            self.session_net_sum.setdefault(session, 0.0)
+            self.session_capital_deltas[session]
+
+    def add(self, rows: list[dict]) -> None:
+        for row in rows:
+            self.opportunities += 1
+            self.net_sum += float(row["net_bps_per_opportunity"])
+            if row["net_bps_per_fill"] is not None:
+                self.fills += 1
+                self.fill_net_sum += float(row["net_bps_per_fill"])
+            session = row["session"]
+            self.session_net_sum[session] += float(
+                row["net_bps_per_opportunity"])
+            start = float(row["capital_start_timestamp"])
+            end = float(row["capital_end_timestamp"])
+            self.session_capital_deltas[session][start] += 1
+            self.session_capital_deltas[session][end] -= 1
+
+    def finish(self) -> dict:
+        peaks = _capital_peaks(self.session_capital_deltas)
+        returns = {
+            session: self.session_net_sum[session] / max(1, peak)
+            for session, peak in sorted(peaks.items())
+        }
+        values = list(returns.values())
+        ci = _bootstrap_mean(values)
+        return {
+            "session_returns_bps": returns,
+            "summary": {
+                "sessions": len(values),
+                "opportunities": self.opportunities,
+                "fills": self.fills,
+                "fill_rate": (self.fills / self.opportunities
+                              if self.opportunities else None),
+                "mean_net_bps_per_opportunity": (
+                    self.net_sum / self.opportunities
+                    if self.opportunities else None),
+                "mean_net_bps_per_fill": (
+                    self.fill_net_sum / self.fills if self.fills else None),
+                "session_mean_net_bps": fmean(values) if values else None,
+                "session_net_ci_low_bps": ci[0],
+                "session_net_ci_high_bps": ci[1],
+                "max_concurrent_opportunities": max(peaks.values(), default=0),
+            },
+        }
+
+
+def _paired_increment(left: dict[str, float], right: dict[str, float], *,
+                      sessions=None,
+                      common_denominators: dict[str, float] | None = None,
+                      valid: bool = True,
+                      invalid_reason: str | None = None) -> dict:
+    sessions = sorted(sessions if sessions is not None
+                      else set(left) | set(right))
+    if valid and not sessions:
+        valid = False
+        invalid_reason = "no common scheduled sessions"
+    denominators = common_denominators or {session: 1.0 for session in sessions}
+    basis = {
+        session: max(1.0, float(denominators.get(session, 1.0)))
+        for session in sessions
+    }
+    common_basis_fingerprint = hashlib.sha256(
+        repr(sorted(basis.items())).encode()).hexdigest()
+    shared = {
+        "sessions": len(sessions),
+        "scheduled_session_ids": sessions,
+        "common_denominator": "MAX_CONCURRENT_RESERVED_CAPITAL_ACROSS_AST_TEACHER_HYBRID",
+        "common_denominator_fingerprint": common_basis_fingerprint,
+        "same_replay_paired": True,
+        "selection_adjusted": False,
+        "independent_confirmation": False,
+        "promotion_authority": False,
+    }
+    if not valid:
+        return {
+            **shared,
+            "status": "INVALID",
+            "reason": invalid_reason or "paired comparison is invalid",
+            "mean_delta_bps": None,
+            "ci_low_bps": None,
+            "ci_high_bps": None,
+            "positive_session_ratio": None,
+            "bootstrap_method": "stationary",
+        }
+    deltas = [
+        (float(left.get(session, 0.0)) - float(right.get(session, 0.0))) /
+        basis[session]
+        for session in sessions
+    ]
+    ci = _stationary_mean(deltas)
+    return {
+        **shared,
+        "status": "PASS",
+        "mean_delta_bps": fmean(deltas) if deltas else None,
+        "ci_low_bps": ci["ci_low_bps"],
+        "ci_high_bps": ci["ci_high_bps"],
+        "positive_session_ratio": (
+            sum(value > 0.0 for value in deltas) / len(deltas)
+            if deltas else None),
+        "bootstrap_method": ci["bootstrap_method"],
+        "restart_probability": ci["restart_probability"],
+        "expected_block_length_sessions": ci.get(
+            "expected_block_length_sessions"),
+        "n_boot": ci.get("n_boot"),
+        "seed": ci.get("seed"),
+    }
 
 
 class _CapacityReservoir:
@@ -323,6 +596,7 @@ class CandidateAccumulator:
         self.opportunities = self.fills = 0
         self.mid_sum = self.net_sum = self.fill_net_sum = 0.0
         self.implementation_drag_sum = self.capacity_sum = 0.0
+        self.capacity_observations = 0
         self.capacity = _CapacityReservoir()
         self.calibration_observations = 0
         self.calibration_nonzero_scores = 0
@@ -330,11 +604,14 @@ class CandidateAccumulator:
         self.calibration_sessions: set[str] = set()
         self.calibration_sum_score_sq = 0.0
         self.calibration_sum_score_markout = 0.0
+        self.calibration_max_positive_raw_score: float | None = None
+        self.calibration_min_entry_hurdle_bps: float | None = None
         self.calibration_beta = (
             None if coefficient_policy == "STRUCTURE_ONLY" else 1.0)
         self.calibration_status = (
             "PENDING" if coefficient_policy == "STRUCTURE_ONLY"
             else "NOT_REQUIRED_FIXED_EQUATION")
+        self._restored_calibration_report: dict | None = None
         self.residual_prediction_unit = (
             "BPS" if coefficient_policy == "STRUCTURE_ONLY"
             or unit_of(expr) == "BPS" else None)
@@ -342,6 +619,80 @@ class CandidateAccumulator:
             lambda: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         self.session_residual_stats: dict[str, list[float]] = defaultdict(
             lambda: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        self.teacher = CostAwareTeacher(
+            horizon_seconds=self.horizon_seconds, execution=self.execution,
+            cost_inputs={
+                "fee_bps_per_side": float(self.spec.fee_bps_per_side),
+                "maker_fee_bps_per_side": float(
+                    self.spec.maker_fee_bps_per_side),
+                "passive_nonfill_net_bps_per_opportunity": 0.0,
+            })
+        self.teacher_stats = _ReplayStats(self.horizon_seconds)
+        self.hybrid_stats = _ReplayStats(self.horizon_seconds)
+        self.teacher_prediction_count = 0
+        self.teacher_markout_squared_error = 0.0
+        self.teacher_net_squared_error = 0.0
+        self.teacher_brier_sum = 0.0
+
+    def restore_frozen_calibration(
+            self, score_calibration: dict,
+            supervised_control: dict | None = None) -> dict:
+        """Admit preregistered calibration state for a future-only replay.
+
+        This is intentionally not a convenience fit path.  It accepts only a
+        terminal artifact from the historical experiment and may be called only
+        on a fresh accumulator before a forward sample is consumed.
+        """
+        if (self.requested_instruments or self.sampled_instruments
+                or self.calibration_observations
+                or self.calibration_sessions
+                or self._restored_calibration_report is not None):
+            raise ValueError("calibration restore requires a fresh accumulator")
+        if not isinstance(score_calibration, dict):
+            raise ValueError("score calibration report must be an object")
+        if score_calibration.get("version") != CALIBRATION_VERSION:
+            raise ValueError("score calibration version does not match runtime")
+        if (str(score_calibration.get("coefficient_policy") or "").upper()
+                != self.coefficient_policy):
+            raise ValueError("score calibration policy does not match candidate")
+        status = str(score_calibration.get("status") or "").upper()
+        try:
+            beta = float(score_calibration.get("beta_bps_per_score_unit"))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("score calibration beta is invalid") from exc
+        if not math.isfinite(beta) or beta < 0.0:
+            raise ValueError("score calibration beta must be finite and non-negative")
+        if self.coefficient_policy == "STRUCTURE_ONLY":
+            if status != "PASS" or beta <= 0.0:
+                raise ValueError(
+                    "STRUCTURE_ONLY forward replay requires a usable frozen beta")
+        elif status != "NOT_REQUIRED_FIXED_EQUATION" or beta != 1.0:
+            raise ValueError("fixed equation calibration artifact is inconsistent")
+        if score_calibration.get("oos_fit_forbidden") is not True:
+            raise ValueError("frozen score calibration must forbid OOS fitting")
+        self.calibration_beta = beta
+        self.calibration_status = status
+        self._restored_calibration_report = copy.deepcopy(score_calibration)
+        if supervised_control is None:
+            # A missing teacher is an explicit unusable diagnostic control; it
+            # does not alter the symbolic candidate or gain promotion authority.
+            self.teacher.freeze()
+        else:
+            self.teacher.restore(supervised_control)
+        return {
+            **self._calibration_report(),
+            "supervised_control": self.teacher.report(),
+            "restored_without_refit": True,
+        }
+
+    def schedule_sessions(self, session_dates) -> None:
+        """Register every preregistered session, including a no-sample day."""
+        for raw in session_dates:
+            session = str(raw)
+            self.session_net_sum.setdefault(session, 0.0)
+            self.session_capital_deltas[session]
+            self.teacher_stats.schedule({session})
+            self.hybrid_stats.schedule({session})
 
     def calibrate(self, instrument_id: str,
                   samples: list[IntradaySample]) -> None:
@@ -352,15 +703,32 @@ class CandidateAccumulator:
         admissible: a negative fitted relation falsifies the proposed direction
         instead of silently turning it into a different strategy.
         """
-        if self.coefficient_policy != "STRUCTURE_ONLY":
-            return
-        if self.calibration_status != "PENDING":
-            raise ValueError("score calibration is already frozen")
         instrument_id = str(instrument_id)
         ordered = sorted(samples, key=lambda row: row.decision_time)
         if any(row.instrument_id != instrument_id for row in ordered):
             raise ValueError("instrument key does not match calibration sample")
-        audit_causality(ordered, self.spec)
+        audit = audit_causality(ordered, self.spec)
+        if audit["status"] == "FAIL":
+            raise ValueError(
+                "calibration sample causality audit failed: " +
+                "; ".join(audit.get("findings") or []))
+        self.teacher.calibrate(instrument_id, ordered)
+        self._calibrate_score_prepared(instrument_id, ordered)
+
+    def _calibrate_score_prepared(
+            self, instrument_id: str,
+            ordered: list[IntradaySample]) -> None:
+        """Accumulate only candidate-specific AST scale statistics.
+
+        Population evaluation calls this after sorting, instrument validation,
+        and causality auditing once and fitting the common supervised teacher
+        once per exact training contract.  The score scale cannot be shared:
+        it depends on this candidate's expression and semantic context.
+        """
+        if self.coefficient_policy != "STRUCTURE_ONLY":
+            return
+        if self.calibration_status != "PENDING":
+            raise ValueError("score calibration is already frozen")
         values = evaluate_ast(ordered, self.expr)
         contributed = False
         for sample, raw in zip(ordered, values):
@@ -383,15 +751,34 @@ class CandidateAccumulator:
             self.calibration_nonzero_scores += 1
             self.calibration_sum_score_sq += score * score
             self.calibration_sum_score_markout += score * markout
+            if (self.entry_policy == "PREDICTED_MARKOUT_CLEARS_COST"
+                    and score > 0.0):
+                self.calibration_max_positive_raw_score = max(
+                    score, self.calibration_max_positive_raw_score
+                    if self.calibration_max_positive_raw_score is not None
+                    else score)
+                hurdle = _predicted_entry_hurdle_bps(
+                    sample, execution=self.execution,
+                    fee_bps_per_side=self.spec.fee_bps_per_side,
+                    maker_fee_bps_per_side=self.spec.maker_fee_bps_per_side,
+                    minimum_predicted_edge_bps=
+                    self.minimum_predicted_edge_bps)
+                self.calibration_min_entry_hurdle_bps = min(
+                    hurdle, self.calibration_min_entry_hurdle_bps
+                    if self.calibration_min_entry_hurdle_bps is not None
+                    else hurdle)
         if contributed:
             self.calibration_instruments.add(instrument_id)
 
     def freeze_calibration(self) -> dict:
         """Lock one scale coefficient before any evaluation sample is consumed."""
+        teacher_report = self.teacher.freeze()
         if self.coefficient_policy != "STRUCTURE_ONLY":
-            return self._calibration_report()
+            return {**self._calibration_report(),
+                    "supervised_control": teacher_report}
         if self.calibration_status != "PENDING":
-            return self._calibration_report()
+            return {**self._calibration_report(),
+                    "supervised_control": teacher_report}
         sufficient = (
             self.calibration_observations >= MIN_CALIBRATION_OBSERVATIONS
             and self.calibration_nonzero_scores >= MIN_CALIBRATION_NONZERO_SCORES
@@ -401,7 +788,8 @@ class CandidateAccumulator:
         if not sufficient:
             self.calibration_beta = 0.0
             self.calibration_status = "INSUFFICIENT_CALIBRATION"
-            return self._calibration_report()
+            return {**self._calibration_report(),
+                    "supervised_control": teacher_report}
         denominator = self.calibration_sum_score_sq * (
             1.0 + CALIBRATION_SHRINKAGE_FRACTION)
         raw_beta = self.calibration_sum_score_markout / denominator
@@ -409,9 +797,34 @@ class CandidateAccumulator:
         self.calibration_status = (
             "PASS" if self.calibration_beta > 0.0
             else "NON_POSITIVE_DIRECTIONAL_RELATION")
-        return self._calibration_report()
+        if (self.calibration_status == "PASS"
+                and self.entry_policy == "PREDICTED_MARKOUT_CLEARS_COST"):
+            maximum_prediction = (
+                float(self.calibration_beta) *
+                float(self.calibration_max_positive_raw_score)
+                if self.calibration_max_positive_raw_score is not None
+                else None)
+            if (maximum_prediction is None
+                    or self.calibration_min_entry_hurdle_bps is None
+                    or maximum_prediction <=
+                    self.calibration_min_entry_hurdle_bps):
+                self.calibration_status = "NO_COST_FEASIBLE_ENTRY"
+        return {**self._calibration_report(),
+                "supervised_control": teacher_report}
 
     def _calibration_report(self) -> dict:
+        if self._restored_calibration_report is not None:
+            return copy.deepcopy(self._restored_calibration_report)
+        maximum_prediction = (
+            float(self.calibration_beta) *
+            float(self.calibration_max_positive_raw_score)
+            if self.calibration_beta is not None
+            and self.calibration_max_positive_raw_score is not None
+            else None)
+        cost_feasible = (
+            maximum_prediction is not None
+            and self.calibration_min_entry_hurdle_bps is not None
+            and maximum_prediction > self.calibration_min_entry_hurdle_bps)
         return {
             "version": CALIBRATION_VERSION,
             "coefficient_policy": self.coefficient_policy,
@@ -426,6 +839,21 @@ class CandidateAccumulator:
             "sessions": len(self.calibration_sessions),
             "session_ids": sorted(self.calibration_sessions),
             "oos_fit_forbidden": True,
+            "maximum_positive_raw_score":
+                self.calibration_max_positive_raw_score,
+            "maximum_calibrated_predicted_markout_bps": maximum_prediction,
+            "minimum_observed_entry_hurdle_bps":
+                self.calibration_min_entry_hurdle_bps,
+            "cost_feasible_entry_possible": (
+                cost_feasible
+                if self.entry_policy == "PREDICTED_MARKOUT_CLEARS_COST"
+                else None),
+            "cost_feasibility_proof": (
+                "MAX_CALIBRATED_PREDICTION_EXCEEDS_MINIMUM_HURDLE"
+                if cost_feasible else
+                "MAX_CALIBRATED_PREDICTION_NOT_ABOVE_MINIMUM_HURDLE"
+                if self.entry_policy == "PREDICTED_MARKOUT_CLEARS_COST"
+                else "NOT_APPLICABLE"),
         }
 
     def add(self, instrument_id: str, samples: list[IntradaySample]) -> None:
@@ -437,8 +865,11 @@ class CandidateAccumulator:
         audit = audit_causality(ordered, self.spec)
         self._add_prepared(instrument_id, ordered, audit)
 
-    def _add_prepared(self, instrument_id: str,
-                      ordered: list[IntradaySample], audit: dict) -> None:
+    def _add_prepared(
+            self, instrument_id: str, ordered: list[IntradaySample], audit: dict,
+            *, shared_teacher_predictions: list[dict | None] | None = None,
+            shared_teacher_targets: list[tuple[float, float, float] | None]
+            | None = None) -> None:
         """Consume an already sorted/audited slice shared by a population.
 
         This is deliberately private: callers that have not established the
@@ -460,13 +891,27 @@ class CandidateAccumulator:
             values = [None if value is None else float(value) * beta
                       for value in values]
         if self.semantic_plan:
-            paired = [(sample, value) for sample, value in zip(ordered, values)
-                      if _time_context_allows(
-                          sample, self.semantic_plan.get("context") or ())]
-            eligible_samples = [item[0] for item in paired]
-            eligible_values = [item[1] for item in paired]
+            eligible_indices = [
+                index for index, sample in enumerate(ordered)
+                if _time_context_allows(
+                    sample, self.semantic_plan.get("context") or ())
+            ]
         else:
-            eligible_samples, eligible_values = ordered, values
+            eligible_indices = list(range(len(ordered)))
+        eligible_samples = [ordered[index] for index in eligible_indices]
+        eligible_values = [values[index] for index in eligible_indices]
+        # Register every evaluation session with available samples before signal
+        # selection.  A candidate that abstains for the whole day earns zero; it
+        # may not silently drop that day and report only its active sessions.
+        scheduled_sessions = {
+            sample.decision_time.astimezone(KST).date().isoformat()
+            for sample in ordered
+        }
+        for session in scheduled_sessions:
+            self.session_net_sum.setdefault(session, 0.0)
+            self.session_capital_deltas[session]
+        self.teacher_stats.schedule(scheduled_sessions)
+        self.hybrid_stats.schedule(scheduled_sessions)
         self._add_residuals(eligible_samples, eligible_values)
         observations = _observations(
             eligible_samples, eligible_values,
@@ -476,6 +921,73 @@ class CandidateAccumulator:
             fee_bps_per_side=self.spec.fee_bps_per_side,
             maker_fee_bps_per_side=self.spec.maker_fee_bps_per_side,
             minimum_predicted_edge_bps=self.minimum_predicted_edge_bps)
+        # The frozen supervised model is a public-feature control, not another
+        # promotion path.  It sees the exact same contextual slice and labels.
+        # The hybrid requires both the AST decision and positive expected net;
+        # its paired delta tells the next generation whether the symbolic term
+        # adds anything beyond a generic frozen linear microstructure control.
+        if shared_teacher_predictions is None:
+            teacher_predictions = self.teacher.predict(eligible_samples)
+        else:
+            if len(shared_teacher_predictions) != len(ordered):
+                raise ValueError(
+                    "shared teacher predictions do not align with sample slice")
+            teacher_predictions = [
+                shared_teacher_predictions[index]
+                for index in eligible_indices
+            ]
+        if (shared_teacher_targets is not None
+                and len(shared_teacher_targets) != len(ordered)):
+            raise ValueError(
+                "shared teacher targets do not align with sample slice")
+        teacher_values = [
+            None if row is None else row["expected_net_bps"]
+            for row in teacher_predictions]
+        teacher_observations = _observations(
+            eligible_samples, teacher_values,
+            horizon_seconds=self.horizon_seconds,
+            threshold=self.minimum_predicted_edge_bps,
+            execution=self.execution, position_mode=self.position_mode,
+            entry_policy="POSITIVE_SCORE",
+            fee_bps_per_side=self.spec.fee_bps_per_side,
+            maker_fee_bps_per_side=self.spec.maker_fee_bps_per_side,
+            minimum_predicted_edge_bps=0.0)
+        ast_entries = {row["decision_time"] for row in observations}
+        hybrid_values = [
+            value if sample.decision_time in ast_entries else None
+            for sample, value in zip(eligible_samples, teacher_values)]
+        hybrid_observations = _observations(
+            eligible_samples, hybrid_values,
+            horizon_seconds=self.horizon_seconds,
+            threshold=self.minimum_predicted_edge_bps,
+            execution=self.execution, position_mode=self.position_mode,
+            entry_policy="POSITIVE_SCORE",
+            fee_bps_per_side=self.spec.fee_bps_per_side,
+            maker_fee_bps_per_side=self.spec.maker_fee_bps_per_side,
+            minimum_predicted_edge_bps=0.0)
+        self.teacher_stats.add(teacher_observations)
+        self.hybrid_stats.add(hybrid_observations)
+        for eligible_index, sample, prediction in zip(
+                eligible_indices, eligible_samples, teacher_predictions):
+            if prediction is None:
+                continue
+            target = (
+                shared_teacher_targets[eligible_index]
+                if shared_teacher_targets is not None
+                else executable_target(
+                    sample, horizon_seconds=self.horizon_seconds,
+                    execution=self.execution)
+            )
+            if target is None:
+                continue
+            markout, net, positive = target
+            self.teacher_prediction_count += 1
+            self.teacher_markout_squared_error += (
+                float(prediction["expected_markout_bps"]) - markout) ** 2
+            self.teacher_net_squared_error += (
+                float(prediction["expected_net_bps"]) - net) ** 2
+            self.teacher_brier_sum += (
+                float(prediction["positive_net_probability"]) - positive) ** 2
         if observations:
             self.opportunity_instruments.add(instrument_id)
         by_session: dict[str, list[dict]] = defaultdict(list)
@@ -488,10 +1000,12 @@ class CandidateAccumulator:
             self.net_sum += net
             self.mid_sum += mid
             self.implementation_drag_sum += mid - net
-            self.capacity_sum += capacity
-            self.capacity.add(
-                capacity,
-                f"{instrument_id}|{row['decision_time'].isoformat()}")
+            if capacity is not None:
+                self.capacity_sum += capacity
+                self.capacity_observations += 1
+                self.capacity.add(
+                    capacity,
+                    f"{instrument_id}|{row['decision_time'].isoformat()}")
             if row["net_bps_per_fill"] is not None:
                 self.fills += 1
                 self.fill_net_sum += row["net_bps_per_fill"]
@@ -500,9 +1014,10 @@ class CandidateAccumulator:
                 row["net_bps_per_opportunity"] for row in rows)
             deltas = self.session_capital_deltas[session]
             for row in rows:
-                start = row["decision_time"].timestamp()
+                start = float(row["capital_start_timestamp"])
+                end = float(row["capital_end_timestamp"])
                 deltas[start] += 1
-                deltas[start + self.horizon_seconds] -= 1
+                deltas[end] -= 1
 
     def _add_residuals(self, samples: list[IntradaySample],
                        predictions: list[float | None]) -> None:
@@ -589,13 +1104,7 @@ class CandidateAccumulator:
 
     def finish(self) -> dict:
         residual_behavior = self._residual_behavior()
-        session_peak_capital = {}
-        for session, deltas in self.session_capital_deltas.items():
-            current = peak = 0
-            for when in sorted(deltas):
-                current += deltas[when]
-                peak = max(peak, current)
-            session_peak_capital[session] = peak
+        session_peak_capital = _capital_peaks(self.session_capital_deltas)
         session_returns = {
             session: self.session_net_sum[session] / max(1, peak)
             for session, peak in sorted(session_peak_capital.items())
@@ -604,7 +1113,13 @@ class CandidateAccumulator:
         folds = _folds(session_returns)
         positive_ratio = (sum(row["positive"] for row in folds) / len(folds)
                           if folds else None)
-        mean_ci = _bootstrap_mean(session_values)
+        # The promotion gate sees consecutive KRX sessions, whose returns may
+        # remain serially dependent even after overlapping intraday labels have
+        # been collapsed to one portfolio observation per day.  Reuse the same
+        # stationary bootstrap contract as the paired teacher comparisons;
+        # iid resampling here would make the primary alpha gate less
+        # conservative than its diagnostic controls.
+        mean_ci = _stationary_mean(session_values)
         dsr = deflated_sharpe(
             [value / 10_000.0 for value in session_values],
             trials=max(1, self.trials), periods=252)
@@ -633,20 +1148,38 @@ class CandidateAccumulator:
             "mean_net_bps_per_opportunity": (
                 self.net_sum / self.opportunities if self.opportunities else None),
             "session_mean_net_bps": fmean(session_values) if session_values else None,
-            "session_net_ci_low_bps": mean_ci[0],
-            "session_net_ci_high_bps": mean_ci[1],
+            "session_net_ci_low_bps": mean_ci["ci_low_bps"],
+            "session_net_ci_high_bps": mean_ci["ci_high_bps"],
+            "session_net_ci_method": mean_ci["bootstrap_method"],
+            "session_net_ci_restart_probability": mean_ci[
+                "restart_probability"],
+            "session_net_ci_expected_block_length_sessions": mean_ci.get(
+                "expected_block_length_sessions"),
+            "session_net_ci_n_boot": mean_ci.get("n_boot"),
+            "session_net_ci_seed": mean_ci.get("seed"),
             "positive_fold_ratio": positive_ratio,
             "deflated_sharpe": dsr.get("deflated_sharpe"),
             "sharpe": dsr.get("sharpe"),
+            "dsr_calibration_mode": dsr.get("calibration_mode"),
+            "dsr_expected_max_sharpe": dsr.get("expected_max_sharpe"),
+            "dsr_trial_sharpe_std": dsr.get("trial_sharpe_std"),
+            "dsr_effective_trials": dsr.get("effective_trials"),
+            # Canonical DSR evidence names are also kept without a prefix so a
+            # release-gate consumer need not reverse-map implementation fields.
+            "expected_max_sharpe": dsr.get("expected_max_sharpe"),
+            "trial_sharpe_std": dsr.get("trial_sharpe_std"),
+            "effective_trials": dsr.get("effective_trials"),
             "bootstrap_sharpe_ci_low": sharpe_ci.get("bootstrap_ci_low"),
             "bootstrap_sharpe_ci_high": sharpe_ci.get("bootstrap_ci_high"),
             "pbo": self.family_pbo,
             "trials": self.trials,
             "mean_capacity_shares_l1": (
-                self.capacity_sum / self.opportunities
-                if self.opportunities else None),
+                self.capacity_sum / self.capacity_observations
+                if self.capacity_observations else None),
             "p10_capacity_shares_l1": self.capacity.quantile(0.10),
             "capacity_quantile_sample_size": len(self.capacity.values),
+            "execution_capacity_supported": bool(
+                self.capacity_observations),
             "max_concurrent_opportunities": max(
                 session_peak_capital.values(), default=0),
             "residual_observations": residual_behavior["observations"],
@@ -684,6 +1217,12 @@ class CandidateAccumulator:
         if (summary["deflated_sharpe"] is None or
                 summary["deflated_sharpe"] < self.rules["min_deflated_sharpe"]):
             failed.append("OVERFIT_DSR")
+        if summary["dsr_calibration_mode"] == \
+                "legacy_unit_trial_sharpe_std":
+            # A raw number of searched formulas is not the cross-trial Sharpe
+            # dispersion required by DSR.  The legacy unit-dispersion path is
+            # retained for report compatibility, never as release evidence.
+            failed.append("DSR_TRIAL_DISPERSION_UNMEASURED")
         if self.execution.upper() == "PASSIVE_FIFO_LOWER_BOUND" and (
                 summary["fill_rate"] is None or
                 summary["fill_rate"] < self.rules["min_passive_fill_rate"]):
@@ -696,6 +1235,94 @@ class CandidateAccumulator:
             failed.append("SCORE_CALIBRATION_NOT_USABLE")
 
         evidence = bool(self.opportunities and session_values)
+        teacher_strategy = self.teacher_stats.finish()
+        hybrid_strategy = self.hybrid_stats.finish()
+        scheduled_sessions = sorted(session_returns)
+        teacher_peaks = _capital_peaks(
+            self.teacher_stats.session_capital_deltas)
+        hybrid_peaks = _capital_peaks(
+            self.hybrid_stats.session_capital_deltas)
+        common_denominators = {
+            session: max(
+                1,
+                session_peak_capital.get(session, 0),
+                teacher_peaks.get(session, 0),
+                hybrid_peaks.get(session, 0),
+            )
+            for session in scheduled_sessions
+        }
+        common_returns = {
+            "ast": {
+                session: self.session_net_sum.get(session, 0.0) /
+                common_denominators[session]
+                for session in scheduled_sessions
+            },
+            "teacher": {
+                session: self.teacher_stats.session_net_sum.get(session, 0.0) /
+                common_denominators[session]
+                for session in scheduled_sessions
+            },
+            "hybrid": {
+                session: self.hybrid_stats.session_net_sum.get(session, 0.0) /
+                common_denominators[session]
+                for session in scheduled_sessions
+            },
+        }
+        teacher_valid = self.teacher.status == "PASS"
+        invalid_teacher_reason = (
+            None if teacher_valid else
+            f"teacher calibration status is {self.teacher.status}")
+        n_predictions = self.teacher_prediction_count
+        supervised_control = {
+            "calibration": self.teacher.report(),
+            "prediction": {
+                "observations": n_predictions,
+                "markout_rmse_bps": math.sqrt(
+                    self.teacher_markout_squared_error / n_predictions)
+                if n_predictions else None,
+                "executable_net_rmse_bps": math.sqrt(
+                    self.teacher_net_squared_error / n_predictions)
+                if n_predictions else None,
+                "positive_net_brier": (
+                    self.teacher_brier_sum / n_predictions
+                    if n_predictions else None),
+            },
+            "strategy": teacher_strategy,
+            "paired_common_capital_session_returns_bps": common_returns[
+                "teacher"],
+            "increment_vs_ast": _paired_increment(
+                self.teacher_stats.session_net_sum, self.session_net_sum,
+                sessions=scheduled_sessions,
+                common_denominators=common_denominators,
+                valid=teacher_valid,
+                invalid_reason=invalid_teacher_reason),
+            "selection_boundary": "OOS_DIAGNOSTIC_CONTROL_ONLY",
+            "independent_confirmation": False,
+            "promotion_authority": False,
+        }
+        hybrid_control = {
+            "definition": "FROZEN_TEACHER_EXPECTED_NET_AND_AST_ENTRY_GATE",
+            "strategy": hybrid_strategy,
+            "paired_common_capital_session_returns_bps": common_returns[
+                "hybrid"],
+            "increment_vs_ast": _paired_increment(
+                self.hybrid_stats.session_net_sum, self.session_net_sum,
+                sessions=scheduled_sessions,
+                common_denominators=common_denominators,
+                valid=teacher_valid,
+                invalid_reason=invalid_teacher_reason),
+            "increment_vs_teacher": _paired_increment(
+                self.hybrid_stats.session_net_sum,
+                self.teacher_stats.session_net_sum,
+                sessions=scheduled_sessions,
+                common_denominators=common_denominators,
+                valid=teacher_valid,
+                invalid_reason=invalid_teacher_reason),
+            "selection_boundary": "OOS_DIAGNOSTIC_SCREENING_ONLY",
+            "independent_confirmation": False,
+            "forward_new_sessions_required": True,
+            "promotion_authority": False,
+        }
         return {
             "evaluator_version": EVALUATOR_VERSION,
             "ast_fingerprint": fingerprint(self.expr),
@@ -709,18 +1336,31 @@ class CandidateAccumulator:
                 "entry_policy": self.entry_policy,
                 "coefficient_policy": self.coefficient_policy,
                 "score_calibration": self._calibration_report(),
+                "supervised_control": self.teacher.report(),
                 "minimum_predicted_edge_bps": self.minimum_predicted_edge_bps,
                 "purge_gap_seconds": self.spec.purge_gap.total_seconds(),
                 "semantic_context": list(self.semantic_plan.get("context") or []),
                 "portfolio_capital_model": (
-                    "EXACT_PORTFOLIO_EVENT_SWEEP_FROM_STREAMED_DELTAS"),
+                    "EXACT_PORTFOLIO_DECISION_TO_EXECUTABLE_EXIT_OR_"
+                    "PASSIVE_EXPIRY_EVENT_SWEEP"),
                 "capacity_quantile_method": (
                     "ORDER_INDEPENDENT_SHA256_BOTTOM_K_10000"),
             },
             "causality": self.causality,
             "folds": folds,
             "session_returns_bps": session_returns,
+            "control_comparison": {
+                "scheduled_session_ids": scheduled_sessions,
+                "common_capital_denominator_by_session": common_denominators,
+                "ast_common_capital_session_returns_bps": common_returns["ast"],
+                "teacher_calibration_valid": teacher_valid,
+                "paired_ci_method": "STATIONARY_BOOTSTRAP",
+                "selection_boundary": "OOS_DIAGNOSTIC_CONTROL_ONLY",
+                "promotion_authority": False,
+            },
             "residual_behavior": residual_behavior,
+            "supervised_control": supervised_control,
+            "hybrid_control": hybrid_control,
             "summary": summary,
             "failed_criteria": failed,
             "decision": ("NO_EVIDENCE" if not evidence else
@@ -733,9 +1373,10 @@ class CandidateAccumulator:
 class CandidatePopulationAccumulator:
     """Evaluate several preregistered ASTs from one causal sample replay.
 
-    Every candidate retains independent observations, capital normalization,
-    costs and statistical gates.  Only the expensive raw-event-to-sample pass,
-    ordering and causality audit are shared.
+    Every candidate retains independent AST calibration, observations, capital
+    normalization, costs, residuals, and statistical gates.  The raw replay,
+    ordering/causality audit, and pure supervised-teacher fit/prediction pass
+    are shared only across exact feature/label/model contracts.
     """
 
     def __init__(self, candidates: dict[str, CandidateAccumulator]):
@@ -746,10 +1387,33 @@ class CandidatePopulationAccumulator:
         if len(specs) != 1:
             raise ValueError("candidate population must share one lane specification")
         self.spec = next(iter(specs))
+        if len({id(candidate.teacher)
+                for candidate in self.candidates.values()}) != len(self.candidates):
+            raise ValueError(
+                "population candidates must own independent teacher instances")
+
+        # Fresh teachers with the same contract would consume the exact same
+        # calibration stream.  Fit one representative, then restore its
+        # fingerprint-verified artifact into fresh followers at freeze.  A
+        # caller that supplied partially calibrated/restored teachers retains
+        # the previous independent behavior via singleton groups.
+        by_contract: dict[tuple, list[CandidateAccumulator]] = defaultdict(list)
+        for candidate in self.candidates.values():
+            by_contract[candidate.teacher.training_contract_key()].append(
+                candidate)
+        self._teacher_fit_groups: list[list[CandidateAccumulator]] = []
+        for members in by_contract.values():
+            if all(candidate.teacher.is_fresh() for candidate in members):
+                self._teacher_fit_groups.append(members)
+            else:
+                self._teacher_fit_groups.extend([[candidate]
+                                                 for candidate in members])
+        self._teacher_artifacts: dict[int, dict] = {}
 
     @property
     def requires_calibration(self) -> bool:
-        return any(candidate.coefficient_policy == "STRUCTURE_ONLY"
+        return any(candidate.teacher.status == "PENDING"
+                   or candidate.calibration_status == "PENDING"
                    for candidate in self.candidates.values())
 
     def add(self, instrument_id: str, samples: list[IntradaySample]) -> None:
@@ -758,15 +1422,61 @@ class CandidatePopulationAccumulator:
         if any(row.instrument_id != instrument_id for row in ordered):
             raise ValueError("instrument key does not match sample instrument")
         audit = audit_causality(ordered, self.spec)
+        predictions: dict[tuple, list[dict | None]] = {}
+        targets: dict[tuple, list[tuple[float, float, float] | None]] = {}
         for candidate in self.candidates.values():
-            candidate._add_prepared(instrument_id, ordered, audit)
+            training_key = candidate.teacher.training_contract_key()
+            prediction_key = candidate.teacher.prediction_identity()
+            if prediction_key not in predictions:
+                predictions[prediction_key] = candidate.teacher.predict(ordered)
+            if training_key not in targets:
+                targets[training_key] = [
+                    executable_target(
+                        sample, horizon_seconds=candidate.horizon_seconds,
+                        execution=candidate.execution)
+                    for sample in ordered
+                ]
+            candidate._add_prepared(
+                instrument_id, ordered, audit,
+                shared_teacher_predictions=predictions[prediction_key],
+                shared_teacher_targets=targets[training_key])
 
     def calibrate(self, instrument_id: str,
                   samples: list[IntradaySample]) -> None:
+        instrument_id = str(instrument_id)
+        ordered = sorted(samples, key=lambda row: row.decision_time)
+        if any(row.instrument_id != instrument_id for row in ordered):
+            raise ValueError("instrument key does not match calibration sample")
+        audit = audit_causality(ordered, self.spec)
+        if audit["status"] == "FAIL":
+            raise ValueError(
+                "calibration sample causality audit failed: " +
+                "; ".join(audit.get("findings") or []))
+        for group_index, members in enumerate(self._teacher_fit_groups):
+            if group_index in self._teacher_artifacts:
+                raise ValueError("teacher is already frozen")
+            if len(members) > 1 and any(
+                    not candidate.teacher.is_fresh()
+                    for candidate in members[1:]):
+                raise ValueError(
+                    "shared teacher follower changed before calibration freeze")
+            members[0].teacher.calibrate(instrument_id, ordered)
         for candidate in self.candidates.values():
-            candidate.calibrate(instrument_id, samples)
+            candidate._calibrate_score_prepared(instrument_id, ordered)
 
     def freeze_calibration(self) -> dict[str, dict]:
+        for group_index, members in enumerate(self._teacher_fit_groups):
+            if group_index in self._teacher_artifacts:
+                continue
+            if len(members) > 1 and any(
+                    not candidate.teacher.is_fresh()
+                    for candidate in members[1:]):
+                raise ValueError(
+                    "shared teacher follower changed before calibration freeze")
+            artifact = members[0].teacher.freeze()
+            for candidate in members[1:]:
+                candidate.teacher.restore(artifact)
+            self._teacher_artifacts[group_index] = copy.deepcopy(artifact)
         return {key: candidate.freeze_calibration()
                 for key, candidate in self.candidates.items()}
 

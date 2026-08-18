@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 from uuid import uuid4
 
@@ -72,14 +73,20 @@ def test_real_redis_duplicate_event_is_processed_once(redis_bus):
 
 def test_real_redis_pending_event_is_reclaimed_after_restart(redis_bus):
     client, stream, group = redis_bus
-    first = RedisEventBus(client, stream=stream, group=group, consumer="qa-1")
+    first = RedisEventBus(
+        client,
+        stream=stream,
+        group=group,
+        consumer="qa-1",
+        transient_retry_base_seconds=0.01,
+    )
     _publish(first, uuid4())
 
     def failed_handler(_event):
         raise RuntimeError("simulated QA worker restart")
 
-    with pytest.raises(RuntimeError):
-        first.consume_once(failed_handler, min_idle_ms=0)
+    assert first.consume_once(failed_handler, min_idle_ms=0) == 0
+    time.sleep(0.02)
 
     restarted = RedisEventBus(client, stream=stream, group=group, consumer="qa-2")
     received = []

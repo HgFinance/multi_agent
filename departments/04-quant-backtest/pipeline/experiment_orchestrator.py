@@ -29,6 +29,7 @@ from __future__ import annotations
 import gc
 import json
 import sys
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -44,7 +45,8 @@ for _research_collectors in (
     if _research_collectors.is_dir():
         sys.path.insert(0, str(_research_collectors))
 
-ORCH_VERSION = "quant-experiment-orchestrator-v1"
+ORCH_VERSION = "quant-experiment-orchestrator-v2"
+TRIAL_RESERVATION_KEY = "_trial_family_reservation_v1"
 
 from strategy_templates import (           # noqa: E402  (같은 디렉터리 모듈)
     NOT_IMPLEMENTED,
@@ -162,6 +164,45 @@ def signal_horizon(config: dict) -> int:
         if horizon >= 1:
             return horizon
     return 20
+
+
+def _verified_frozen_daily_windows(*, frozen_plan: dict,
+                                   dataset_content_hash: str,
+                                   dates: list,
+                                   warmup_days: int,
+                                   embargo_days: int,
+                                   cost_model: dict):
+    """Decode only a preregistered plan after an independent recalculation.
+
+    The second construction is a drift detector, not the plan used for metric
+    writes.  Exact equality means the immutable dataset/calendar, code, cost,
+    purge, and stock-scope facts still produce the plan inserted before the
+    backtest.  Metrics always iterate the separately decoded frozen windows.
+    """
+
+    from walk_forward import (  # noqa: PLC0415
+        freeze_daily_evaluation_plan,
+        windows_from_frozen_daily_plan,
+    )
+
+    if not isinstance(frozen_plan, dict):
+        raise RuntimeError("daily experiment lacks a frozen evaluation plan")
+    frozen_windows = windows_from_frozen_daily_plan(dict(frozen_plan))
+    recalculated = freeze_daily_evaluation_plan(
+        dataset_content_hash=dataset_content_hash,
+        dates=list(dates),
+        warmup_days=int(warmup_days),
+        embargo_days=int(embargo_days),
+        cost_model=dict(cost_model),
+    )
+    if (recalculated.get("evaluation_plan_fingerprint") !=
+            frozen_plan.get("evaluation_plan_fingerprint")):
+        raise RuntimeError(
+            "daily evaluation plan drift: independent fingerprint mismatch")
+    if recalculated != frozen_plan:
+        raise RuntimeError(
+            "daily evaluation plan drift: canonical plan mismatch")
+    return frozen_windows
 
 def dataset_of(hyp: dict) -> tuple[str, str]:
     """가설이 쓸 (데이터셋 이름, 버전). **상수가 아니라 사상 결과에서 나온다.**
@@ -360,6 +401,31 @@ def robustness_to_status(fragility_verdict: str,
 
 # 한 컨셉(edge type)에 허용하는 변형 시도 수. 넘으면 ROBUST 라도 SUPPORTED 로
 # 올리지 않는다 - 많이 돌려 고른 최고치는 실력과 운을 못 가린다.
+def release_to_status(provisional_status: str, decision: str | None, *,
+                      failed=(), unmeasured=()) -> str:
+    """Overlay the deterministic release gate on a robustness verdict.
+
+    Robustness is necessary but never sufficient for a durable QA submission.
+    A measured release failure rejects the hypothesis; missing measurements or
+    a gate execution failure keep it inconclusive.  Only a clean, explicit
+    ``SUBMIT_TO_QA`` may retain ``SUPPORTED``.
+    """
+
+    provisional = str(provisional_status or "").upper()
+    if provisional != "SUPPORTED":
+        return provisional
+
+    failed_set = {str(item) for item in (failed or ())}
+    unmeasured_set = {str(item) for item in (unmeasured or ())}
+    measured_failures = failed_set - unmeasured_set
+    if measured_failures:
+        return "REJECTED"
+    if (str(decision or "").upper() == "SUBMIT_TO_QA"
+            and not failed_set and not unmeasured_set):
+        return "SUPPORTED"
+    return "INCONCLUSIVE"
+
+
 TRIAL_BUDGET_DEFAULT = 5
 
 
@@ -516,7 +582,12 @@ def _finalize_with_feedback(conn, *, report, hid: str, new_status: str,
       실험을 다시 산다. 조용히 상태만 바꾸느니 실험을 미종결로 두고 사람이 보는
       편이 낫다 - 그래서 예외를 잡지 않는다(fail-closed).
     """
-    from factory_bridge import build_outcome, finalize, lessons_from
+    from factory_bridge import (
+        assert_governed_stock_experiment,
+        build_outcome,
+        finalize,
+        lessons_from,
+    )
 
     tp = report.trial_pressure or {}
     exp_id = str(experiment_id or "")
@@ -575,6 +646,13 @@ def _finalize_with_feedback(conn, *, report, hid: str, new_status: str,
         trial_number=int(tp.get("trial_number") or 1),
         decision=decision, failed_criteria=failed, lesson_codes=lessons,
         oos_summary=oos, notes=notes)
+    if ({str(new_status or "").upper(), str(decision or "").upper()}
+            & {"SUPPORTED", "SUBMIT_TO_QA", "PROMOTED"}):
+        # Do not trust an injected evaluator's experiment_id.  Re-read the
+        # durable evidence at this terminal boundary; factory_bridge.finalize
+        # repeats the check so direct bridge callers cannot bypass it either.
+        assert_governed_stock_experiment(
+            conn, experiment_id=exp_id, hypothesis_id=str(hid))
     oid = finalize(conn, hypothesis_id=str(hid), new_status=new_status,
                    outcome=outcome)
     report.feedback = {"outcome_id": oid, "decision": decision,
@@ -591,6 +669,163 @@ def _norm_data_products(v) -> list:
         # DataRequirement {tables:[...], min_history_days:N} - 이름만 꺼낸다
         return list(v.get("tables") or v.get("data_products") or [])
     return list(v)
+
+
+def _reservation_payload(value) -> dict:
+    """Return a validated durable reservation or fail the pressure gate."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid trial reservation JSON") from exc
+    if not isinstance(value, dict):
+        raise ValueError("trial reservation must be a JSON object")
+    family = str(value.get("trial_family_id") or "")
+    try:
+        number = int(value.get("trial_number"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("trial reservation number is invalid") from exc
+    if not family or number < 1:
+        raise ValueError("trial reservation family/number is invalid")
+    return dict(value)
+
+
+def _reserve_trial_family(conn, cur, *, hypothesis_id: str, hyp: dict,
+                          families: tuple[str, ...], budget: int,
+                          pressure_fn) -> dict:
+    """Atomically consume one family trial before an evaluator can run.
+
+    ``quant.experiments`` is registered inside the concrete runner, so it does
+    not exist when the orchestrator must authorize first evidence access.  The
+    hypothesis JSON therefore carries the durable reservation.  It is written
+    under a family advisory transaction lock, then copied to every experiment
+    row created for that hypothesis.  A retry reuses the same reservation; a
+    worker crash cannot make an exposed failed/cancelled experiment disappear
+    from future family pressure.
+
+    Query/decoding errors deliberately propagate.  Treating an unavailable
+    pressure ledger as zero would authorize an uncorrected first trial.
+    """
+    canonical = families[0] if families else ""
+    if not canonical:
+        # An unclassifiable family retains the existing conservative DSR
+        # contract, but there is no shared family counter to reserve.
+        return pressure_fn(families, [], budget=budget)
+
+    cur.execute(
+        "select pg_advisory_xact_lock(hashtextextended(%s, 0))",
+        (canonical,))
+    cur.execute(
+        f"""select hypothesis_id::text,
+                   expected_edge->'{TRIAL_RESERVATION_KEY}'
+              from quant.hypotheses
+             where expected_edge->'{TRIAL_RESERVATION_KEY}'
+                       ->>'trial_family_id' = any(%s)""",
+        (list(families),))
+    reservation_rows = cur.fetchall()
+
+    reservations: dict[str, dict] = {}
+    for row_hid, raw in reservation_rows:
+        payload = _reservation_payload(raw)
+        if payload and payload["trial_family_id"] in families:
+            reservations[str(row_hid)] = payload
+
+    cur.execute(
+        """select experiment_id::text, hypothesis_id::text,
+                  trial_family_id, trial_number
+             from quant.experiments
+            where trial_family_id = any(%s)""",
+        (list(families),))
+    experiment_rows = cur.fetchall()
+
+    # One hypothesis reservation represents one immutable evaluator input.
+    # Legacy rows without a reservation remain countable, while experiments
+    # already backed by a reservation are not double counted.
+    cards = [
+        {"trial_family_id": payload["trial_family_id"]}
+        for payload in reservations.values()
+    ]
+    for _experiment_id, row_hid, family_id, _trial_number in experiment_rows:
+        if str(row_hid) not in reservations:
+            cards.append({"trial_family_id": str(family_id or "")})
+
+    current = reservations.get(str(hypothesis_id))
+    if current is None:
+        # Backfill a legacy already-assigned experiment without burning a new
+        # number.  This is the idempotent upgrade path for in-flight retries.
+        legacy = next((row for row in experiment_rows
+                       if str(row[1]) == str(hypothesis_id)
+                       and str(row[2] or "") in families), None)
+        if legacy is not None:
+            current = {
+                "reservation_id": f"legacy-experiment:{legacy[0]}",
+                "trial_family_id": str(legacy[2]),
+                "trial_number": int(legacy[3]),
+                "trial_budget": int(budget),
+                "orchestrator_version": ORCH_VERSION,
+            }
+        else:
+            calculated = pressure_fn(families, cards, budget=budget)
+            current = {
+                "reservation_id": str(uuid.uuid4()),
+                "trial_family_id": canonical,
+                "trial_number": int(calculated["trial_number"]),
+                "trial_budget": int(budget),
+                "orchestrator_version": ORCH_VERSION,
+            }
+            if len(families) > 1:
+                current["counted_aliases"] = list(families[1:])
+
+        cur.execute(
+            f"""update quant.hypotheses
+                   set expected_edge=jsonb_set(
+                         coalesce(expected_edge, '{{}}'::jsonb),
+                         '{{{TRIAL_RESERVATION_KEY}}}', %s::jsonb, true)
+                 where hypothesis_id=%s""",
+            (json.dumps(current, sort_keys=True, separators=(",", ":")),
+             hypothesis_id))
+    # End the family transaction lock before expensive evaluation.  Both the
+    # newly written reservation and an idempotently reused one are now fixed.
+    conn.commit()
+
+    # The immutable assigned number, not today's possibly larger population,
+    # controls replay.  This prevents an idempotent retry from rewriting DSR.
+    number = int(current["trial_number"])
+    pressure = {
+        "trial_family_id": str(current["trial_family_id"]),
+        "trials_used": number - 1,
+        "trial_number": number,
+        "trial_budget": int(current.get("trial_budget") or budget),
+        "over_budget": number > int(current.get("trial_budget") or budget),
+        "reservation_id": str(current.get("reservation_id") or ""),
+        "reserved_before_evaluation": True,
+    }
+    if current.get("counted_aliases"):
+        pressure["counted_aliases"] = list(current["counted_aliases"])
+    edge = dict(hyp.get("expected_edge") or {})
+    edge[TRIAL_RESERVATION_KEY] = dict(current)
+    hyp["expected_edge"] = edge
+    return pressure
+
+
+def _attach_trial_reservation(cur, *, hypothesis_id: str,
+                              pressure: dict,
+                              experiment_id: str | None = None) -> None:
+    """Copy a prior reservation to completed, failed, or cancelled rows."""
+    family = str(pressure.get("trial_family_id") or "")
+    if not family:
+        return
+    params: list = [family, int(pressure["trial_number"]), hypothesis_id]
+    predicate = ""
+    if experiment_id:
+        predicate = " and experiment_id=%s"
+        params.append(experiment_id)
+    cur.execute(
+        """update quant.experiments
+              set trial_family_id=%s, trial_number=%s
+            where hypothesis_id=%s and trial_family_id is null"""
+        + predicate,
+        tuple(params))
 
 
 def orchestrate(hypothesis_id: str | None = None, *, conn=None,
@@ -672,8 +907,10 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         #   이제 사상은 source_versions 에서 유도하고 커버리지는 로컬에서 잰다.
         from data_resolution import resolve as resolve_data
 
-        res = resolve_data(execution_products, meta_conn=conn,
-                           market_conn=market_conn)
+        res = resolve_data(
+            execution_products, meta_conn=conn, market_conn=market_conn,
+            research_lane=str((hyp.get("expected_edge") or {}).get(
+                "research_lane") or ""))
         if not res.ok:
             return OrchestratorReport(
                 hypothesis_id=str(hid), title=title, verdict="NOT_RUNNABLE",
@@ -691,9 +928,9 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
 
         # Intraday source coverage is a pre-trial concern. Probe and persist it
         # before preregistration, experiment registration, or family pressure is
-        # calculated. Short-but-executable history proceeds to an explicitly
-        # underpowered diagnostic; a truly non-executable slice is retried later
-        # without polluting DSR/PBO trial accounting.
+        # calculated.  The governed 6/20/60 funnel requires 60 evaluation
+        # sessions plus at least one strictly prior calibration session; shorter
+        # history is retried later without polluting DSR/PBO trial accounting.
         edge = hyp.get("expected_edge") or {}
         intraday_lane = (
             str(edge.get("research_lane") or "").upper() == "INTRADAY_EVENT")
@@ -705,7 +942,8 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
             from intraday_experiment_runner import prepare as prepare_intraday
             from intraday_experiment_runner import record_data_feasibility
 
-            prepared = prepare_intraday(hyp, market_conn=market_conn)
+            prepared = prepare_intraday(
+                hyp, market_conn=market_conn, meta_conn=conn)
             report.data_feasibility = record_data_feasibility(
                 conn, str(hid), prepared)
             if report.data_feasibility["status"] != "PASS":
@@ -713,8 +951,8 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
                 report.verdict = "NEEDS_DATA"
                 report.missing.append(f"intraday_slice:{selected.get('status')}")
                 report.backlog.append(
-                    "Wait for at least two causal sessions and two liquid instruments; "
-                    "the factory will recheck this coverage without consuming a trial.")
+                    "Wait for at least 61 causal sessions and two STOCK instruments; "
+                    "the factory will recheck coverage without consuming a trial.")
                 return report
             hyp["_intraday_preflight"] = prepared
 
@@ -747,7 +985,7 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
                     "latency_ms": edge.get("order_latency_ms", 250),
                     "threshold": edge.get("threshold", 0.0),
                 },
-                "cost_model_version": "krx-intraday-execution-v1",
+                "cost_model_version": "krx-intraday-execution-v3",
                 "universe_version": "krx-intraday-events/v1",
             })
         else:
@@ -809,20 +1047,37 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         #   있는데 오늘 것이 시도1). 세는 쪽이 둘 다 인정하게 한다.
         fams = family_ids_for(hyp)
         fam = fams[0] if fams else ""
-        cards: list[dict] = []
+        budget = int(hyp.get("trial_budget") or TRIAL_BUDGET_DEFAULT)
         try:
             # ▶ **기록된 배정을 읽는다**(다시 계산하지 않는다). Family 는
             #   유니버스 서술을 통제 어휘로 사상해 만들므로, 어휘를 늘리면
             #   과거 실험의 배정이 소급 변경되어 "12번째 시도" 가 어제와 오늘
             #   다른 값이 된다. 시도 압력은 기록된 사실이어야 한다.
+            report.trial_pressure = _reserve_trial_family(
+                conn, cur, hypothesis_id=str(hid), hyp=hyp,
+                families=fams, budget=budget, pressure_fn=fam_pressure)
+        except Exception as exc:  # noqa: BLE001 - governance boundary
+            # An unavailable pressure ledger is not evidence of zero trials.
+            # Never enter the evaluator with an uncorrected trial count.
+            if hasattr(conn, "rollback"):
+                conn.rollback()
             cur.execute(
-                """select trial_family_id from quant.experiments
-                   where trial_family_id is not null""")
-            cards = [{"trial_family_id": r[0]} for r in cur.fetchall()]
-        except Exception:
-            cards = []                   # 못 세면 0 - 없는 압력을 지어내지 않는다
-        budget = int(hyp.get("trial_budget") or TRIAL_BUDGET_DEFAULT)
-        report.trial_pressure = fam_pressure(fams, cards, budget=budget)
+                "update quant.hypotheses set status='PROPOSED', "
+                "status_changed_at=now() where hypothesis_id=%s "
+                "and status='RUNNING'", (hid,))
+            conn.commit()
+            report.verdict = "TRIAL_PRESSURE_UNAVAILABLE"
+            report.trial_pressure = {
+                "status": "UNAVAILABLE",
+                "error": type(exc).__name__,
+                "fail_closed": True,
+            }
+            report.backlog.append(
+                "Trial-family pressure could not be loaded; evaluation was "
+                f"blocked fail-closed ({type(exc).__name__}).")
+            report.transitions.append(
+                "RUNNING->PROPOSED (trial pressure unavailable)")
+            return report
         # ▶ **백테스트에 시도 횟수를 넘긴다.** 안 넘기면 DSR 이 trials=1
         #   로 계산돼 전혀 감가되지 않는다 - 20번 시도해 고른 Sharpe 를
         #   첫 시도와 같은 값으로 읽게 된다(계약만 있고 실행부가 안 따라간
@@ -850,6 +1105,11 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
             #   하루 3회 스톨 회수됐다. 30분 스톨 대기는 회수가 아니라 낭비다:
             #   실패 즉시 PROPOSED 로 되돌리고 예외는 그대로 올린다(작업 큐
             #   경로에서는 호출부가 failure_reason 을 기록한다).
+            # The runner may already have registered/read evidence before it
+            # failed.  Bind every such row to the pre-evaluation reservation;
+            # FAILED/CANCELLED status never refunds multiple-testing pressure.
+            _attach_trial_reservation(
+                cur, hypothesis_id=str(hid), pressure=report.trial_pressure)
             cur.execute("update quant.hypotheses set status='PROPOSED', "
                         "status_changed_at=now() where hypothesis_id=%s "
                         "and status='RUNNING'", (hid,))
@@ -863,12 +1123,9 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         #   다음 실험의 계수가 틀어진다.
         family_pbo = None
         if fam and result.get("experiment_id"):
-            cur.execute(
-                """update quant.experiments
-                      set trial_family_id=%s, trial_number=%s
-                    where experiment_id=%s and trial_family_id is null""",
-                (fam, int(report.trial_pressure["trial_number"]),
-                 result["experiment_id"]))
+            _attach_trial_reservation(
+                cur, hypothesis_id=str(hid), pressure=report.trial_pressure,
+                experiment_id=str(result["experiment_id"]))
             conn.commit()
 
             # ▶ PBO - **고르는 행위 자체가 작동하는가.** trial_pressure 는
@@ -892,7 +1149,14 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
                         "idempotent_replay": True,
                     }
                 else:
-                    pres = pbo_compute(load_family_performance(conn, fam))
+                    performance = load_family_performance(
+                        conn, fam,
+                        reference_experiment_id=str(result["experiment_id"]),
+                        evaluation_scope=(
+                            "FULL_60" if intraday_lane
+                            else "DAILY_WALK_FORWARD"),
+                    )
+                    pres = pbo_compute(performance)
                 report.trial_pressure.update(pres)
                 # ▶ **지표로도 적재한다.** 릴리스 관문은 report 가 아니라
                 #   experiment_metrics 에서 pbo 를 읽는다 - 여기 안 넣으면
@@ -949,9 +1213,13 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
             persist_final_gate(conn, result["experiment_id"],
                                result["intraday_report"])
             decision = result["intraday_report"]["decision"]
-            result["fragility"] = ("ROBUST" if decision == "SUBMIT_TO_QA" else
-                                   "INSUFFICIENT" if decision == "NO_EVIDENCE" else
-                                   "FRAGILE")
+            pending_forward = (
+                "INDEPENDENT_FORWARD_CONFIRMATION_PENDING" in
+                (result["intraday_report"].get("failed_criteria") or []))
+            result["fragility"] = (
+                "ROBUST" if decision == "SUBMIT_TO_QA" else
+                "INSUFFICIENT" if decision == "NO_EVIDENCE" or pending_forward
+                else "FRAGILE")
             report.experiment_refs = {
                 "experiment_id": result["experiment_id"],
                 "fragility": result["fragility"],
@@ -985,7 +1253,7 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
             underpowered = any(item in {
                 "NO_EXECUTABLE_OBSERVATIONS", "SESSIONS_BELOW_MINIMUM",
                 "INSTRUMENTS_BELOW_MINIMUM", "OPPORTUNITIES_BELOW_MINIMUM",
-                "PBO_UNMEASURED",
+                "PBO_UNMEASURED", "INDEPENDENT_FORWARD_CONFIRMATION_PENDING",
             } for item in failed)
             new_status = ("SUPPORTED" if decision == "SUBMIT_TO_QA" else
                           "INCONCLUSIVE" if decision == "NO_EVIDENCE" or underpowered
@@ -1044,6 +1312,7 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         #   **거리를 알려주는 편이 옳다.** 제출은 여전히 SUPPORTED 만 한다.
         gate_failed: list[str] = []
         gate_note = ""
+        release_gate_error = False
         try:
             sys.path.insert(0, str(Path(__file__).resolve().parent))
             from release_gate import SQL_GATE_METRICS, metrics_from_rows
@@ -1078,8 +1347,25 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
                 pass
         except Exception as e:  # noqa: BLE001
             # 관문 실패를 통과로 위장하지 않는다 - HOLD 가 안전한 기본값이다
+            release_gate_error = True
             report.release = {"decision": "HOLD",
                               "reasons": [f"관문 실행 실패: {type(e).__name__}: {e}"]}
+
+        provisional_status = new_status
+        new_status = release_to_status(
+            new_status,
+            report.release.get("decision"),
+            failed=report.release.get("failed") or (),
+            unmeasured=report.release.get("unmeasured") or (),
+        )
+        if provisional_status == "SUPPORTED" and new_status == "INCONCLUSIVE":
+            hold_reason = (
+                "release_gate_unavailable" if release_gate_error else
+                "release_gate_unmeasured" if report.release.get("unmeasured") else
+                "release_gate_hold"
+            )
+            if hold_reason not in gate_failed:
+                gate_failed.append(hold_reason)
 
         # ▶ **환류 적재와 상태 전이를 한 트랜잭션으로.** 적재가 실패하면 상태도
         #   안 바뀐다 - 조용히 종결되고 교훈만 사라지는 경로를 없앤다.
@@ -1093,7 +1379,8 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
 
         # ▶ 관문 다음 칸. **승격이 아니라 요청이다** - 좋은 백테스트가 바로
         #   운영 전략이 되지 않게 Shadow 부터 밟는다. 여기만 SUPPORTED 전용이다.
-        if new_status == "SUPPORTED" and report.release.get("decision"):
+        if (new_status == "SUPPORTED"
+                and report.release.get("decision") == "SUBMIT_TO_QA"):
             try:
                 from strategy_lifecycle import evaluate_promotion
 
@@ -1124,6 +1411,7 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
     """
     import psycopg2
     from backtest_runner import (
+        COST_MODEL,
         DEFAULT_CONFIG,
         REV_CONFIG,
         Market,
@@ -1139,7 +1427,6 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
         SHORT_SAMPLE_MAX_DAYS,
         WARMUP_TRADING_DAYS,
         fragility_summary,
-        make_windows,
         run_window,
         slice_market,
     )
@@ -1183,9 +1470,15 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
     #   들어가므로 v2/v3 는 서로 다른 실험이 된다 - 과거 결과는 그대로 남는다.
     ds_name, ds_ver = dataset_of(hyp)
     print(f"  데이터셋 {ds_name}/{ds_ver} (가설 요구에서 사상)", flush=True)
+    warmup = required_warmup_days(
+        config, legacy_floor=WARMUP_TRADING_DAYS)
+    embargo = signal_horizon(config)
     bt = register_and_run(ds_name, ds_ver,
                           config=config, hypothesis_id=hypothesis_id,
-                          trials=int(hyp.get("_trials") or 1))
+                          trials=int(hyp.get("_trials") or 1),
+                          evaluation_mode="DAILY_WALK_FORWARD",
+                          evaluation_warmup_days=warmup,
+                          evaluation_embargo_days=embargo)
     if bt.get("duplicate"):
         # 같은 (가설, 데이터, 코드) 실험이 이미 있다 - 다시 돌리지 않고 기존
         # 실험의 강건성 판정을 찾아 쓴다. 여기 없으면 판정 불가로 끊는다.
@@ -1197,7 +1490,8 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
 
     conn = connect_writer(load_project_env()["DATABASE_URL"], connect_timeout=20)
     try:
-        _, _, _, rows = load_dataset(conn, ds_name, ds_ver)
+        dataset_id, universe_version_id, dataset_hash, rows = load_dataset(
+            conn, ds_name, ds_ver)
         market = Market.from_rows(rows)
         # ▶ **원본 행을 붙들지 않는다** (2026-08-14 실측)
         #   `load_dataset` 이 돌려준 dict 리스트(v3 = 725만 행)와 `Market`
@@ -1234,11 +1528,33 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
         #   템플릿뿐 아니라 AST와 켜진 위험관리 창도 실제 이력을 요구한다.
         #   이 계산은 러너의 단일 함수가 소유한다. 특히 짧은 미시구조 표본에는
         #   가격전략용 30일 관례를 강제로 붙이지 않고 수식의 실제 요구량을 쓴다.
-        warmup = required_warmup_days(
-            config, legacy_floor=WARMUP_TRADING_DAYS)
         print(f"  웜업 {warmup}일 (신호·AST·위험관리 선언 기준)", flush=True)
-        windows = make_windows(market.dates, warmup,
-                               embargo_days=signal_horizon(config))
+        windows = _verified_frozen_daily_windows(
+            frozen_plan=bt.get("evaluation_plan"),
+            dataset_content_hash=dataset_hash,
+            dates=market.dates,
+            warmup_days=warmup,
+            embargo_days=embargo,
+            cost_model=COST_MODEL,
+        )
+        from stock_universe import build_stock_evaluation_identity
+
+        window_boundaries = [{
+            "window": w.label,
+            "start_session": str(w.test_start),
+            "end_session": str(w.test_end),
+        } for w in windows]
+        evaluation_identity = build_stock_evaluation_identity(
+            dataset_id=dataset_id,
+            dataset_content_hash=dataset_hash,
+            universe_version_id=universe_version_id,
+            instrument_ids=market.symbols,
+            windows=window_boundaries,
+            cost_model_version=COST_MODEL["version"],
+            evaluation_scope="DAILY_WALK_FORWARD",
+            evaluation_plan_fingerprint=
+                bt["evaluation_plan"]["evaluation_plan_fingerprint"],
+        )
         # ▶ **창마다 바로 적재한다** (2026-08-14 실측)
         #   예전엔 창 21개를 전부 계산한 **뒤에** 한 번에 저장했다. 이 구간은
         #   백테스트가 끝난 뒤에도 13분을 더 도는데, 그 사이 워커가 재시작되면
@@ -1264,8 +1580,13 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
                             values (%s, 'WALK_FORWARD', %s, %s, %s::jsonb, %s)
                             on conflict do nothing
                         """, (bt["experiment_id"], k, metrics[k],
-                              json.dumps({"window": w.label, "chain": ORCH_VERSION}),
-                              "krx-cost-v1"))
+                              json.dumps({
+                                  **evaluation_identity,
+                                  "window": w.label,
+                                  "start_session": str(w.test_start),
+                                  "end_session": str(w.test_end),
+                                  "chain": ORCH_VERSION,
+                              }), COST_MODEL["version"]))
             conn.commit()
         # Short-sample windows are deliberately 10+ days.  Applying the legacy
         # 40-day half-year filter to them discards every window and makes the
@@ -1443,9 +1764,11 @@ def _print_report(r: OrchestratorReport) -> None:
 # ---------------------------------------------------------------------------
 
 class _FakeCursor:
-    def __init__(self, hypothesis_row, datasets):
+    def __init__(self, hypothesis_row, datasets, *,
+                 governed_stock_evidence=True):
         self._row = hypothesis_row
         self._datasets = datasets
+        self._governed_stock_evidence = governed_stock_evidence
         self.updates: list = []
         self.update_sqls: list = []   # 어떤 문장이었는지도 본다(복귀 검사용)
 
@@ -1461,6 +1784,10 @@ class _FakeCursor:
                 self._fingerprint = params[0]
 
     def fetchone(self):
+        if ("select exists" in getattr(self, "_last", ("", ()))[0].lower()
+                and "quant.current_krx_stock_instrument_identity"
+                in self._last[0]):
+            return (self._governed_stock_evidence,)
         if "material_fingerprint from quant.hypotheses" in getattr(
                 self, "_last", ("", ()))[0]:
             return (getattr(self, "_fingerprint", None),)
@@ -1476,6 +1803,10 @@ class _FakeCursor:
                 out.append((name or str(d), ver or "v1",
                             {"market_bars": "ls_chart/1D"}))
             return out
+        sql = getattr(self, "_last", ("", ()))[0]
+        if (TRIAL_RESERVATION_KEY in sql
+                or "from quant.experiments" in sql):
+            return []
         return [(d,) for d in self._datasets]
 
 
@@ -1505,6 +1836,9 @@ class _FakeConn:
 
     def commit(self):
         self.commits += 1
+
+    def rollback(self):
+        pass
 
 
 def _check_every_status_update_touches_timestamp():
@@ -1563,6 +1897,14 @@ def _check_status_mapping():
     assert robustness_to_status("FRAGILE", over) == "REJECTED"
     ok = {"trials_used": 2, "trial_budget": 5, "over_budget": False}
     assert robustness_to_status("ROBUST", ok) == "SUPPORTED"
+    assert release_to_status(
+        "SUPPORTED", "SUBMIT_TO_QA", failed=(), unmeasured=()) == "SUPPORTED"
+    assert release_to_status(
+        "SUPPORTED", "HOLD", failed=("pbo",),
+        unmeasured=("pbo",)) == "INCONCLUSIVE"
+    assert release_to_status(
+        "SUPPORTED", "HOLD", failed=("excess_return",),
+        unmeasured=()) == "REJECTED"
     for bad in ("", "MAYBE", None):
         try:
             robustness_to_status(bad)
@@ -1600,7 +1942,8 @@ def _check_orchestrate_paths():
     r3 = orchestrate("h-2", conn=_FakeConn(cur3), market_conn=_FakeMarket(),
                      run_chain=lambda h, hid: {"experiment_id": "e-2",
                                                "fragility": "ROBUST"})
-    assert r3.transitions[-1] == "RUNNING->SUPPORTED", r3.transitions
+    assert r3.transitions[-1] == "RUNNING->INCONCLUSIVE", r3.transitions
+    assert r3.release.get("decision") == "HOLD", r3.release
 
     cur4 = _FakeCursor(None, [])
     assert orchestrate("none", conn=_FakeConn(cur4), market_conn=_FakeMarket()).verdict == "NO_HYPOTHESIS"

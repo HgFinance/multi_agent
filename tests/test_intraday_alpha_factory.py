@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -20,6 +21,7 @@ import alpha_semantics as semantics
 import formula_discovery
 import intraday_alpha_ast as intraday_grammar
 import intraday_candidate as candidate_module
+import intraday_supervised as supervised_module
 import intraday_experience
 import intraday_ablation
 import lead_intake
@@ -27,17 +29,27 @@ from factory_contracts import MethodologyLeadV1
 from intraday_alpha_ast import (IntradayExprError, evaluate, fields_of, parse,
                                 shape_fingerprint, unit_of)
 from intraday_candidate import (_CapacityReservoir, CandidateAccumulator,
-                                CandidatePopulationAccumulator,
-                                evaluate_candidate)
-from factory_bridge import (_SQL_FAMILY_OR_EXACT_TRIALS, _normalized_formula,
-                            count_family_trials, expected_edge_for, gate0)
+                                 CandidatePopulationAccumulator,
+                                 _paired_increment, apply_family_pbo,
+                                 evaluate_candidate)
+from factory_bridge import (_SQL_EXACT_SCREENING_EXPOSURES,
+                            _SQL_FAMILY_OR_EXACT_TRIALS, _normalized_formula,
+                            count_family_trials, count_screening_exposures,
+                            expected_edge_for, gate0, to_hypothesis_row)
 from factory_bridge import lessons_from
 from intraday_experiment_runner import (StaleIntradayCohortError,
-                                        FAST_SCREEN_VERSION,
-                                        _annotate_population, _input_hash,
-                                        _fast_screen_gate, _stratified,
-                                        _load_completed_report, config_from_edge,
-                                        record_data_feasibility, select_slice)
+                                         FAST_SCREEN_VERSION,
+                                         _annotate_population,
+                                         _all_symbolic_candidates_cost_infeasible,
+                                         _apply_population_dsr_gate,
+                                         _candidate_accumulators,
+                                         _input_hash,
+                                         _population_multiple_testing,
+                                         _fast_screen_gate, _stratified,
+                                        _lineage, _load_completed_report,
+                                        _stable_dataset_cutoff, config_from_edge,
+                                        record_data_feasibility,
+                                        run as run_intraday, select_slice)
 from intraday_microstructure import (HorizonLabel, IntradayLaneSpec,
                                       IntradaySample, EXTERNAL_EVENT_SOURCE)
 from trial_family import family_id, hypothesis_view
@@ -152,7 +164,7 @@ def test_temporal_ast_never_reads_future_samples() -> None:
     assert before[-1] != after[-1]
 
 
-def test_candidate_requires_session_level_evidence_and_can_submit_only_to_qa() -> None:
+def test_candidate_requires_measured_trial_dispersion_before_qa_submission() -> None:
     base = datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc)
     by_instrument = {"A": [], "B": []}
     for day in range(70):
@@ -168,11 +180,20 @@ def test_candidate_requires_session_level_evidence_and_can_submit_only_to_qa() -
     report = evaluate_candidate(
         by_instrument, expr=expr, spec=spec, horizon_seconds=5,
         execution="TAKER", trials=4, family_pbo=0.2)
-    assert report["decision"] == "SUBMIT_TO_QA"
+    assert report["decision"] == "HOLD"
     assert report["summary"]["sessions"] == 70
     assert report["summary"]["opportunities"] == 280
     assert report["summary"]["mean_implementation_drag_bps"] == pytest.approx(1.0)
-    assert report["failed_criteria"] == []
+    assert report["failed_criteria"] == [
+        "DSR_TRIAL_DISPERSION_UNMEASURED"]
+    assert report["summary"]["dsr_calibration_mode"] == \
+        "legacy_unit_trial_sharpe_std"
+    assert report["summary"]["dsr_trial_sharpe_std"] == 1.0
+    assert report["summary"]["dsr_effective_trials"] == 4.0
+    assert report["summary"]["dsr_expected_max_sharpe"] is not None
+    assert report["summary"]["trial_sharpe_std"] == 1.0
+    assert report["summary"]["effective_trials"] == 4.0
+    assert report["summary"]["expected_max_sharpe"] is not None
     assert "not_a_promotion" in report
 
     short = evaluate_candidate(
@@ -181,6 +202,46 @@ def test_candidate_requires_session_level_evidence_and_can_submit_only_to_qa() -
     assert short["decision"] == "HOLD"
     assert "SESSIONS_BELOW_MINIMUM" in short["failed_criteria"]
     assert "PBO_UNMEASURED" in short["failed_criteria"]
+
+
+def test_primary_session_mean_gate_uses_stationary_bootstrap_contract() -> None:
+    base = datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc)
+    samples = {
+        instrument: [
+            _sample(
+                instrument,
+                base + timedelta(days=day),
+                signal=1.0,
+                net=0.5 + (day % 3) * 0.25,
+            )
+            for day in range(8)
+        ]
+        for instrument in ("A", "B")
+    }
+    report = evaluate_candidate(
+        samples,
+        expr={"op": "field", "field": "trade_flow_imbalance"},
+        spec=IntradayLaneSpec(horizons_seconds=(5,), order_latency_ms=0),
+        horizon_seconds=5,
+        execution="TAKER",
+        family_pbo=0.2,
+        criteria={
+            "min_sessions": 1,
+            "min_instruments": 1,
+            "min_opportunities": 1,
+            "min_deflated_sharpe": -100,
+            "min_positive_session_ratio": 0,
+        },
+    )
+
+    summary = report["summary"]
+    assert summary["session_net_ci_method"] == "stationary"
+    assert summary["session_net_ci_restart_probability"] == 0.25
+    assert summary["session_net_ci_expected_block_length_sessions"] == 4.0
+    assert summary["session_net_ci_n_boot"] == 1_000
+    assert summary["session_net_ci_seed"] == 20260816
+    assert summary["session_net_ci_low_bps"] is not None
+    assert summary["session_net_ci_high_bps"] is not None
 
 
 def test_structure_only_score_is_scaled_on_prior_sessions_then_frozen() -> None:
@@ -216,6 +277,104 @@ def test_structure_only_score_is_scaled_on_prior_sessions_then_frozen() -> None:
     assert calibration_report["oos_fit_forbidden"] is True
 
 
+def test_calibration_proves_bounded_formula_cannot_clear_stock_costs() -> None:
+    base = datetime(2026, 8, 12, 0, 0, tzinfo=timezone.utc)
+    accumulator = CandidateAccumulator(
+        expr={"op": "field", "field": "normalized_quote_ofi"},
+        spec=IntradayLaneSpec(
+            horizons_seconds=(5,), order_latency_ms=0,
+            fee_bps_per_side=11.5),
+        horizon_seconds=5, execution="TAKER",
+        entry_policy="PREDICTED_MARKOUT_CLEARS_COST",
+        coefficient_policy="STRUCTURE_ONLY")
+    for instrument in ("A", "B"):
+        accumulator.calibrate(instrument, [
+            _sample(instrument, base + timedelta(seconds=index),
+                    signal=1.0, net=1.0)
+            for index in range(500)
+        ])
+
+    frozen = accumulator.freeze_calibration()
+
+    assert frozen["status"] == "NO_COST_FEASIBLE_ENTRY"
+    assert frozen["maximum_positive_raw_score"] == 1.0
+    assert frozen["maximum_calibrated_predicted_markout_bps"] < 2.0
+    assert frozen["minimum_observed_entry_hurdle_bps"] == pytest.approx(25.0)
+    assert frozen["cost_feasible_entry_possible"] is False
+    assert frozen["cost_feasibility_proof"] == \
+        "MAX_CALIBRATED_PREDICTION_NOT_ABOVE_MINIMUM_HURDLE"
+    assert _all_symbolic_candidates_cost_infeasible({
+        "PRIMARY": frozen,
+        "LINKED": {
+            "status": "NON_POSITIVE_DIRECTIONAL_RELATION",
+            "coefficient_policy": "STRUCTURE_ONLY",
+            "cost_feasible_entry_possible": False,
+        },
+    }) is True
+    assert _all_symbolic_candidates_cost_infeasible({
+        "PRIMARY": frozen,
+        "LINKED": {
+            "status": "PASS",
+            "coefficient_policy": "STRUCTURE_ONLY",
+            "cost_feasible_entry_possible": True,
+        },
+    }) is False
+    assert _all_symbolic_candidates_cost_infeasible({
+        "PRIMARY": frozen,
+        "FIXED": {
+            "status": "NOT_REQUIRED_FIXED_EQUATION",
+            "coefficient_policy": "PREREGISTERED_NO_OOS_FIT",
+            "cost_feasible_entry_possible": False,
+        },
+    }) is False
+
+
+def test_forward_restore_reuses_structure_beta_and_schedules_empty_stock_days(
+        ) -> None:
+    base = datetime(2026, 8, 12, 0, 0, tzinfo=timezone.utc)
+    spec = IntradayLaneSpec(horizons_seconds=(5,), order_latency_ms=0,
+                            fee_bps_per_side=11.5)
+    source = CandidateAccumulator(
+        expr={"op": "field", "field": "normalized_quote_ofi"},
+        spec=spec, horizon_seconds=5, execution="TAKER",
+        entry_policy="PREDICTED_MARKOUT_CLEARS_COST",
+        coefficient_policy="STRUCTURE_ONLY")
+    for instrument in ("A", "B"):
+        source.calibrate(instrument, [
+            _sample(instrument, base + timedelta(seconds=index),
+                    signal=1.0, net=39.0)
+            for index in range(500)
+        ])
+    artifact = source.freeze_calibration()
+
+    forward = CandidateAccumulator(
+        expr={"op": "field", "field": "normalized_quote_ofi"},
+        spec=spec, horizon_seconds=5, execution="TAKER",
+        entry_policy="PREDICTED_MARKOUT_CLEARS_COST",
+        coefficient_policy="STRUCTURE_ONLY")
+    restored = forward.restore_frozen_calibration(
+        artifact, artifact["supervised_control"])
+    assert restored["restored_without_refit"] is True
+    assert restored["beta_bps_per_score_unit"] == artifact[
+        "beta_bps_per_score_unit"]
+    assert restored["supervised_control"]["model_fingerprint"] == artifact[
+        "supervised_control"]["model_fingerprint"]
+    with pytest.raises(ValueError, match="already frozen"):
+        forward.calibrate("A", [_sample("A", base, signal=1.0, net=1.0)])
+
+    sessions = [(base + timedelta(days=index)).date().isoformat()
+                for index in range(20)]
+    forward.schedule_sessions(sessions)
+    # Both exact-stock members remain requested even with no raw samples.
+    forward.add("A", [])
+    forward.add("B", [])
+    report = forward.finish()
+    assert report["summary"]["sessions"] == 20
+    assert report["summary"]["instruments_requested"] == 2
+    assert report["summary"]["instruments_with_samples"] == 0
+    assert set(report["session_returns_bps"]) == set(sessions)
+
+
 def test_structure_only_negative_relation_is_not_silently_flipped() -> None:
     base = datetime(2026, 8, 12, 0, 0, tzinfo=timezone.utc)
     accumulator = CandidateAccumulator(
@@ -233,6 +392,139 @@ def test_structure_only_negative_relation_is_not_silently_flipped() -> None:
     frozen = accumulator.freeze_calibration()
     assert frozen["status"] == "NON_POSITIVE_DIRECTIONAL_RELATION"
     assert frozen["beta_bps_per_score_unit"] == 0.0
+
+
+def test_population_calibration_requirement_clears_after_ast_and_teacher_freeze(
+        ) -> None:
+    base = datetime(2026, 8, 12, 0, 0, tzinfo=timezone.utc)
+    candidate = CandidateAccumulator(
+        expr={"op": "field", "field": "normalized_quote_ofi"},
+        spec=IntradayLaneSpec(horizons_seconds=(5,), order_latency_ms=0),
+        horizon_seconds=5, execution="TAKER",
+        entry_policy="PREDICTED_MARKOUT_CLEARS_COST",
+        coefficient_policy="STRUCTURE_ONLY")
+    population = CandidatePopulationAccumulator({"PRIMARY": candidate})
+    assert population.requires_calibration is True
+    for instrument in ("A", "B"):
+        population.calibrate(instrument, [
+            _sample(instrument, base + timedelta(seconds=index),
+                    signal=1.0, net=39.0)
+            for index in range(500)
+        ])
+    frozen = population.freeze_calibration()["PRIMARY"]
+    assert frozen["status"] == "PASS"
+    assert frozen["supervised_control"]["status"] == "PASS"
+    assert population.requires_calibration is False
+
+
+def test_no_trade_scheduled_session_is_zero_and_failed_teacher_pairs_are_invalid(
+        ) -> None:
+    base = datetime(2026, 8, 12, 0, 0, tzinfo=timezone.utc)
+    accumulator = CandidateAccumulator(
+        expr={"op": "field", "field": "microprice_offset_bps"},
+        spec=IntradayLaneSpec(horizons_seconds=(5,), order_latency_ms=0),
+        horizon_seconds=5, execution="TAKER", family_pbo=0.2,
+        criteria={"min_sessions": 1, "min_instruments": 1,
+                  "min_opportunities": 1, "min_deflated_sharpe": -100,
+                  "min_positive_session_ratio": 0})
+    frozen = accumulator.freeze_calibration()
+    assert frozen["supervised_control"]["status"] == \
+        "INSUFFICIENT_CALIBRATION"
+    accumulator.add("A", [
+        _sample("A", base, signal=1.0, net=2.0),
+        _sample("A", base + timedelta(days=1), signal=-1.0, net=99.0),
+    ])
+    report = accumulator.finish()
+    sessions = sorted(report["session_returns_bps"])
+    assert sessions == ["2026-08-12", "2026-08-13"]
+    assert report["session_returns_bps"]["2026-08-13"] == 0.0
+    assert report["summary"]["sessions"] == 2
+    assert report["summary"]["session_mean_net_bps"] == pytest.approx(1.0)
+    assert report["supervised_control"]["strategy"]["summary"]["sessions"] == 2
+    assert report["hybrid_control"]["strategy"]["summary"]["sessions"] == 2
+    assert report["supervised_control"]["increment_vs_ast"]["status"] == \
+        "INVALID"
+    assert report["hybrid_control"]["increment_vs_ast"]["status"] == \
+        "INVALID"
+    assert report["hybrid_control"]["increment_vs_ast"][
+        "promotion_authority"] is False
+
+
+def test_passive_capital_is_reserved_until_fill_plus_horizon() -> None:
+    base = datetime(2026, 8, 12, 0, 0, tzinfo=timezone.utc)
+    first = _sample("A", base, signal=1.0, net=2.0)
+    first_label = replace(
+        first.labels[0],
+        long_passive_fill_time=base + timedelta(seconds=4),
+        long_passive_exit_time=base + timedelta(seconds=9))
+    first = replace(first, labels=(first_label,))
+    second = _sample(
+        "A", base + timedelta(seconds=6), signal=1.0, net=2.0)
+    second_label = replace(
+        second.labels[0],
+        long_passive_fill_time=base + timedelta(seconds=7),
+        long_passive_exit_time=base + timedelta(seconds=12))
+    second = replace(second, labels=(second_label,))
+
+    accumulator = CandidateAccumulator(
+        expr={"op": "field", "field": "microprice_offset_bps"},
+        spec=IntradayLaneSpec(horizons_seconds=(5,), order_latency_ms=0),
+        horizon_seconds=5, execution="PASSIVE_FIFO_LOWER_BOUND",
+        criteria={"min_sessions": 1, "min_instruments": 1,
+                  "min_opportunities": 1})
+    accumulator.freeze_calibration()
+    accumulator.add("A", [first, second])
+    report = accumulator.finish()
+
+    # The first order is still holding at t=6 (fill t=4, exit t=9), so the
+    # second decision overlaps it.  decision+horizon would incorrectly say 1.
+    assert report["summary"]["max_concurrent_opportunities"] == 2
+    assert "PASSIVE_EXPIRY" in report["lane_manifest"][
+        "portfolio_capital_model"]
+
+
+def test_paired_comparison_uses_common_capital_and_stationary_sessions() -> None:
+    paired = _paired_increment(
+        {"s1": 4.0, "s2": 0.0, "s3": 2.0},
+        {"s1": 0.0, "s2": 2.0, "s3": 0.0},
+        sessions=["s1", "s2", "s3"],
+        common_denominators={"s1": 2, "s2": 2, "s3": 4})
+    assert paired["status"] == "PASS"
+    assert paired["sessions"] == 3
+    assert paired["mean_delta_bps"] == pytest.approx(0.5)
+    assert paired["bootstrap_method"] == "stationary"
+    assert paired["common_denominator"].startswith("MAX_CONCURRENT")
+    assert paired["promotion_authority"] is False
+
+
+def test_search_exposed_history_cannot_be_submitted_before_forward_confirmation(
+        ) -> None:
+    historical = {
+        "decision": "SUBMIT_TO_QA",
+        "summary": {},
+        "failed_criteria": [],
+        "evidence_tier": "SEARCH_EXPOSED_HISTORICAL_SUPPORT",
+        "forward_lockbox": {"independent_confirmation": False},
+    }
+    gated = apply_family_pbo(historical, 0.2)
+    assert gated["decision"] == "HOLD"
+    assert "INDEPENDENT_FORWARD_CONFIRMATION_PENDING" in gated[
+        "failed_criteria"]
+    assert gated["forward_nomination"]["decision"] == "NOMINATE_FORWARD"
+    assert gated["forward_nomination"]["promotion_authority"] is False
+    assert apply_family_pbo(gated, 0.2)["failed_criteria"].count(
+        "INDEPENDENT_FORWARD_CONFIRMATION_PENDING") == 1
+
+    independently_confirmed = {
+        **gated,
+        "evidence_tier": "INDEPENDENT_FORWARD_CONFIRMATION",
+        "forward_lockbox": {"independent_confirmation": True},
+    }
+    confirmed = apply_family_pbo(independently_confirmed, 0.2)
+    assert confirmed["decision"] == "SUBMIT_TO_QA"
+    assert "INDEPENDENT_FORWARD_CONFIRMATION_PENDING" not in confirmed[
+        "failed_criteria"]
+    assert "forward_nomination" not in confirmed
 
 
 def test_semantic_time_context_filters_observations_not_ast_history() -> None:
@@ -311,7 +603,7 @@ def test_gate0_routes_intraday_contract_without_daily_binding() -> None:
     assert config["fast_screen_instruments"] == 16
     assert config["fast_screen_hard_net_floor_enabled"] is False
     assert config["instrument_shard_size"] == 32
-    assert spec.purge_gap == timedelta(milliseconds=5250)
+    assert spec.purge_gap == timedelta(milliseconds=10250)
 
     explicit_screen = _intraday_proposal()
     explicit_screen["suggested_params"]["fast_screen_min_net_bps"] = 1.5
@@ -353,7 +645,7 @@ def test_screening_population_unifies_clocks_horizons_and_execution_labels() -> 
         "semantic_plan": passive_plan,
         "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
     }]
-    edge["screening_cohort_version"] = "intraday-screening-cohort-v3"
+    edge["screening_cohort_version"] = "intraday-screening-cohort-v4"
 
     config, spec = config_from_edge(edge)
     assert spec.horizons_seconds == (5, 30)
@@ -390,7 +682,7 @@ def test_stale_populated_screening_cohort_is_rejected_before_replay() -> None:
     }]
     edge["screening_cohort_version"] = "intraday-screening-cohort-v1"
     with pytest.raises(StaleIntradayCohortError,
-                       match="intraday-screening-cohort-v3"):
+                       match="intraday-screening-cohort-v4"):
         config_from_edge(edge)
 
 
@@ -698,26 +990,157 @@ def test_intraday_input_identity_ignores_wall_clock_but_tracks_lineage() -> None
     assert _input_hash("H1", base) != _input_hash("H1", late_data)
 
 
-def test_screening_exposure_counts_as_an_exact_formula_trial() -> None:
+def test_external_content_correction_invalidates_identity_with_same_shape() -> None:
+    at = datetime(2026, 8, 14, 6, 30, tzinfo=timezone.utc)
+    aggregate = [
+        ("ext_src.quotes", 100, at, at, at, None),
+        ("ext_src.ticks", 50, at, at, at, None),
+    ]
+
+    class Cursor:
+        def __init__(self, responses):
+            self.responses = iter(responses)
+            self.current = []
+
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+        def execute(self, *_): self.current = next(self.responses)
+        def fetchall(self): return self.current
+
+    class Conn:
+        def __init__(self, content_hash):
+            self.responses = [aggregate, [
+                (date(2026, 8, 14), "005930", 100, 50,
+                 content_hash,
+                 "pg-composite-row-xor0-sum1-sha256-v1",
+                 content_hash, at),
+            ]]
+
+        def cursor(self): return Cursor(self.responses)
+
+    selected = {
+        "status": "PASS", "event_source": EXTERNAL_EVENT_SOURCE,
+        "calibration_sessions": [], "sessions": [date(2026, 8, 14)],
+        "instruments": ["005930"],
+    }
+    first = _lineage(Conn("a" * 64), selected, at)
+    corrected = _lineage(Conn("b" * 64), selected, at)
+
+    assert [row["rows"] for row in first] == [row["rows"] for row in corrected]
+    assert first[0]["min_event_time"] == corrected[0]["min_event_time"]
+    assert first[0]["content_fingerprint"] != corrected[0][
+        "content_fingerprint"]
+    assert _input_hash("H1", {"source_lineage": first}) != _input_hash(
+        "H1", {"source_lineage": corrected})
+
+
+def test_dataset_cutoff_is_retry_stable_and_covers_replay_floor() -> None:
+    floor = datetime(2026, 8, 14, 6, 31, tzinfo=timezone.utc)
+    earlier = [{"max_source_watermark": "2026-08-14T06:30:00+00:00"}]
+    later = [{"max_source_watermark": "2026-08-14T06:32:00+00:00"}]
+    assert _stable_dataset_cutoff(earlier, floor) == floor.isoformat()
+    assert _stable_dataset_cutoff(later, floor) == (
+        floor + timedelta(minutes=1)).isoformat()
+
+
+def test_primary_budget_and_formula_exposure_are_separate_ledgers() -> None:
     class Cursor:
         def __init__(self, conn): self.conn = conn
         def __enter__(self): return self
         def __exit__(self, *_): return False
         def execute(self, sql, params): self.conn.executed = (sql, params)
-        def fetchone(self): return (4,)
+        def fetchone(self): return (self.conn.results.pop(0),)
 
     class Conn:
-        def __init__(self): self.executed = None
+        def __init__(self):
+            self.executed = None
+            # Live-like ledger: one PRIMARY attempt, nineteen total exact-formula
+            # appearances after adaptive screens.
+            self.results = [1, 19]
         def cursor(self): return Cursor(self)
 
     conn = Conn()
     expr = {"op": "field", "field": "microprice_offset_bps"}
-    assert count_family_trials(conn, "family", expr) == 4
+    assert count_family_trials(conn, "family", expr) == 1
     sql, params = conn.executed
     assert sql == _SQL_FAMILY_OR_EXACT_TRIALS
-    assert "jsonb_array_elements" in sql
-    assert "screening_population" in sql
-    assert len(params) == 4 and params[1] == params[2] == params[3]
+    assert "screening_population" not in sql
+    assert "e.status in ('QUEUED', 'RUNNING', 'COMPLETED')" in sql
+    assert "intraday_session_accesses" in sql
+    assert "quant.backtest_runs" in sql
+    assert "quant.experiment_metrics" in sql
+    assert "research.experiment_outcomes" in sql
+    assert len(params) == 3 and params[1] == params[2]
+
+    assert count_screening_exposures(conn, expr) == 19
+    exposure_sql, exposure_params = conn.executed
+    assert exposure_sql == _SQL_EXACT_SCREENING_EXPOSURES
+    assert "jsonb_array_elements" in exposure_sql
+    assert "screening_population" in exposure_sql
+    assert "intraday_session_accesses" in exposure_sql
+    assert "quant.backtest_runs" in exposure_sql
+    assert "quant.experiment_metrics" in exposure_sql
+    assert "research.experiment_outcomes" in exposure_sql
+    assert len(exposure_params) == 3
+    assert exposure_params[0] == exposure_params[1] == exposure_params[2]
+
+
+def test_historical_screening_exposure_reaches_dsr_without_spending_budget() -> None:
+    proposal = _intraday_proposal()
+    # An LLM cannot forge the system count through suggested params.
+    proposal["suggested_params"]["primary_attempts_before"] = 999_999
+    proposal["suggested_params"][
+        "historical_exact_screening_exposures"] = 999_999
+    gate = gate0(proposal, trials_used=1,
+                 historical_screening_exposures=19)
+    assert gate.ok, gate.as_dict()
+    assert gate.trials_used == 1
+    assert gate.trial_number == 2
+    assert gate.historical_screening_exposures == 19
+    assert gate.multiple_testing_exposures == 20
+    assert "OVER_BUDGET" not in gate.codes
+
+    row = to_hypothesis_row(proposal, gate)
+    edge = row["expected_edge"]
+    assert edge["primary_attempts_before"] == 1
+    assert edge["historical_exact_screening_exposures"] == 19
+    config, spec = config_from_edge(edge)
+    assert config["primary_attempts_before"] == 1
+    assert config["historical_exact_screening_exposures"] == 19
+    accumulators = _candidate_accumulators(config, spec, trials=2)
+    # Candidate vectors cover only the current synchronous cohort.  Historical
+    # pressure is a separate DSR extrapolation input, never a fabricated vector.
+    assert accumulators["PRIMARY"].trials == 1
+    assert config["selection_adjusted_trials"] == 21
+
+
+def test_selection_pressure_keeps_current_vectors_separate_from_history() -> None:
+    edge, _ = expected_edge_for(_intraday_proposal())
+    edge["primary_attempts_before"] = 1
+    edge["historical_exact_screening_exposures"] = 16
+    config, spec = config_from_edge(edge)
+    primary = config["intraday_signal_expr"]
+    config["screening_population"] = [{
+        "ast_fingerprint": f"side-{index}",
+        "intraday_signal_expr": primary,
+        "semantic_plan": config["semantic_plan"],
+        "horizon_seconds": config["horizon_seconds"],
+        "execution": config["execution"],
+        "entry_policy": config["entry_policy"],
+        "coefficient_policy": config["coefficient_policy"],
+    } for index in range(4)]
+    config["screening_trial_exposure"] = 4
+
+    accumulators = _candidate_accumulators(config, spec, trials=2)
+    assert len(accumulators) == 5
+    assert {candidate.trials for candidate in accumulators.values()} == {5}
+    assert config["selection_adjusted_trials"] == 22
+    assert config["selection_pressure_breakdown"] == {
+        "primary_trials_including_current": 2,
+        "historical_exact_screening_exposures": 16,
+        "current_screening_exposures": 4,
+        "current_synchronous_formula_vectors": 5,
+    }
 
 
 def test_idempotent_replay_keeps_screening_metrics_out_of_primary_summary() -> None:
@@ -762,7 +1185,11 @@ def test_idempotent_replay_keeps_screening_metrics_out_of_primary_summary() -> N
         def __enter__(self): return self
         def __exit__(self, *_): return False
         def execute(self, sql, _params): self.sql = sql
-        def fetchone(self): return (config,)
+        def fetchone(self):
+            normalized = " ".join(str(self.sql).lower().split())
+            if "select config from quant.experiments" in normalized:
+                return (config,)
+            return None
         def fetchall(self): return rows
 
     class Conn:
@@ -859,6 +1286,20 @@ def test_short_live_history_runs_one_calibration_and_two_oos_sessions() -> None:
     assert len(universe_params) == 6
     assert universe_params[2] == cutoff
     assert universe_params[5] == cutoff
+
+
+def test_short_diagnostic_cannot_allocate_a_governed_discovery_rung() -> None:
+    cutoff = datetime(2026, 8, 16, 3, 0, tzinfo=timezone.utc)
+    prepared = {
+        "config": {}, "spec": None, "cutoff": cutoff,
+        "selected": {
+            "status": "PASS", "statistical_readiness": "SHORT_DIAGNOSTIC",
+            "product_filter": "REFERENCE_INSTRUMENT_TYPE_STOCK_ONLY",
+        },
+    }
+    with pytest.raises(RuntimeError, match="diagnostic-only"):
+        run_intraday({"_intraday_preflight": prepared}, "H1",
+                     meta_conn=object(), market_conn=object())
 
 
 def test_external_61_session_ledger_selects_one_calibration_and_60_oos() -> None:
@@ -1081,6 +1522,345 @@ def test_population_sorts_and_audits_once_but_keeps_candidate_statistics(
         "PRIMARY_ONLY"
 
 
+def test_complete_synchronous_formula_population_calibrates_primary_dsr() -> None:
+    sessions = [f"2026-01-{index + 1:02d}" for index in range(30)] + [
+        f"2026-02-{index + 1:02d}" for index in range(30)]
+
+    def returns(offset: float) -> dict[str, float]:
+        return {session: 1.0 + offset + (index % 7) * 0.1
+                for index, session in enumerate(sessions)}
+
+    primary_returns = returns(0.0)
+    report = {
+        "decision": "HOLD",
+        "failed_criteria": ["OVERFIT_DSR", "DSR_TRIAL_DISPERSION_UNMEASURED"],
+        "summary": {
+            "sessions": 60,
+            "trials": 4,
+            "sharpe": 80.0,
+            "deflated_sharpe": 0.0,
+            "dsr_calibration_mode": "legacy_unit_trial_sharpe_std",
+        },
+        "session_returns_bps": primary_returns,
+        "ast_shape_fingerprint": "shape-primary",
+        "population_evaluation": {"selection_adjusted_trials": 22},
+        "screening_population": [{
+            "ast_fingerprint": "formula-a",
+            "ast_shape_fingerprint": "shape-a",
+            "summary": {"sharpe": 78.0},
+            "session_returns_bps": returns(-0.05),
+        }, {
+            # A distinct preregistered formula is still a trial even if its
+            # realized vector exactly matches another formula.
+            "ast_fingerprint": "formula-b",
+            "ast_shape_fingerprint": "shape-b",
+            "summary": {"sharpe": 78.0},
+            "session_returns_bps": returns(-0.05),
+        }, {
+            "ast_fingerprint": "formula-c",
+            "ast_shape_fingerprint": "shape-c",
+            "summary": {"sharpe": 79.0},
+            "session_returns_bps": returns(-0.1),
+        }],
+    }
+    multiple = _population_multiple_testing(report)
+
+    assert multiple["observed_formula_trials"] == 4
+    assert multiple["observed_unique_formula_outcomes"] == 3
+    assert multiple["complete_synchronous_formula_vectors_available"] is True
+    assert multiple["complete_historical_trial_vectors_available"] is False
+    assert multiple["dispersion_sample_count"] == 4
+    assert multiple["selection_adjusted_trials_declared"] == 22
+    assert multiple["dispersion_extrapolation"] is True
+    assert multiple["structurally_distinct_formula_trials"] == 4
+    assert multiple["historical_vectors_fabricated"] is False
+    assert multiple["raw_count_as_effective_upper_bound"] is True
+    assert multiple["historical_trial_vectors_missing"] == 18
+    calibrated = _apply_population_dsr_gate(report, multiple)
+    assert calibrated["summary"]["dsr_calibration_mode"] == \
+        "CONSERVATIVE_COHORT_FLOOR_EXTRAPOLATION"
+    assert calibrated["summary"]["dsr_effective_trials"] == 22
+    assert calibrated["summary"]["dsr_dispersion_sample_count"] == 4
+    assert calibrated["summary"]["dsr_dispersion_extrapolated"] is True
+    assert calibrated["summary"]["dsr_trial_sharpe_std"] >= 1.0
+    assert "DSR_TRIAL_DISPERSION_UNMEASURED" not in calibrated["failed_criteria"]
+    assert calibrated["decision"] == "SUBMIT_TO_QA"
+
+
+def test_incomplete_formula_population_keeps_dsr_fail_closed() -> None:
+    session_returns = {str(index): 1.0 + (index % 5) * 0.1
+                       for index in range(60)}
+    report = {
+        "decision": "HOLD",
+        "failed_criteria": ["OVERFIT_DSR", "DSR_TRIAL_DISPERSION_UNMEASURED"],
+        "summary": {"sessions": 60, "trials": 2, "sharpe": 70.0},
+        "session_returns_bps": session_returns,
+        "screening_population": [],
+    }
+    multiple = _population_multiple_testing(report)
+
+    assert multiple["complete_historical_trial_vectors_available"] is False
+    assert _apply_population_dsr_gate(report, multiple)["failed_criteria"] == [
+        "OVERFIT_DSR", "DSR_TRIAL_DISPERSION_UNMEASURED"]
+
+
+def test_historical_dsr_zero_dispersion_uses_conservative_floor() -> None:
+    sessions = [str(index) for index in range(60)]
+    session_returns = {
+        session: 1.0 + (index % 5) * 0.1
+        for index, session in enumerate(sessions)
+    }
+    report = {
+        "decision": "HOLD",
+        "failed_criteria": ["OVERFIT_DSR", "DSR_TRIAL_DISPERSION_UNMEASURED"],
+        "summary": {"sessions": 60, "trials": 4, "sharpe": 70.0},
+        "session_returns_bps": session_returns,
+        "ast_shape_fingerprint": "shape-primary",
+        "population_evaluation": {"selection_adjusted_trials": 21},
+        "screening_population": [{
+            "ast_fingerprint": f"formula-{index}",
+            "ast_shape_fingerprint": f"shape-{index}",
+            "summary": {"sharpe": 70.0},
+            "session_returns_bps": dict(session_returns),
+        } for index in range(3)],
+    }
+
+    multiple = _population_multiple_testing(report)
+    calibrated = multiple["observed_population_dsr"]
+
+    assert multiple["dsr_calibration_ready"] is True
+    assert multiple["observed_trial_sharpe_std"] == pytest.approx(0.0)
+    assert multiple["trial_sharpe_std_floor"] == 1.0
+    assert multiple["trial_sharpe_std_used"] == 1.0
+    assert calibrated["calibration_mode"] == \
+        "CONSERVATIVE_COHORT_FLOOR_EXTRAPOLATION"
+    assert calibrated["trials"] == 21
+    assert calibrated["effective_trials"] == 21
+    assert calibrated["trial_sharpe_std"] == 1.0
+
+
+def test_dsr_needs_four_current_structurally_distinct_formulas() -> None:
+    sessions = [str(index) for index in range(60)]
+
+    def returns(offset: float) -> dict[str, float]:
+        return {session: offset + 1.0 + (index % 5) * 0.1
+                for index, session in enumerate(sessions)}
+
+    report = {
+        "decision": "HOLD",
+        "failed_criteria": ["OVERFIT_DSR", "DSR_TRIAL_DISPERSION_UNMEASURED"],
+        "summary": {"sessions": 60, "trials": 3, "sharpe": 70.0},
+        "session_returns_bps": returns(0.0),
+        "ast_shape_fingerprint": "shape-primary",
+        "population_evaluation": {"selection_adjusted_trials": 21},
+        "screening_population": [{
+            "ast_fingerprint": f"formula-{index}",
+            "ast_shape_fingerprint": f"shape-{index}",
+            "summary": {"sharpe": 69.0 - index},
+            "session_returns_bps": returns(-0.1 * (index + 1)),
+        } for index in range(2)],
+    }
+
+    multiple = _population_multiple_testing(report)
+
+    assert multiple["complete_synchronous_formula_vectors_available"] is True
+    assert multiple["dispersion_sample_count"] == 3
+    assert multiple["minimum_dispersion_formulas"] == 4
+    assert multiple["dsr_calibration_ready"] is False
+    assert multiple["observed_population_dsr"] is None
+    assert _apply_population_dsr_gate(report, multiple)["failed_criteria"] == [
+        "OVERFIT_DSR", "DSR_TRIAL_DISPERSION_UNMEASURED"]
+
+
+def test_spa_rejects_equal_length_but_different_session_keys() -> None:
+    sessions = [f"s-{index:02d}" for index in range(60)]
+
+    def returns(offset: float) -> dict[str, float]:
+        return {session: offset + 1.0 + (index % 5) * 0.1
+                for index, session in enumerate(sessions)}
+
+    mismatched = returns(-0.3)
+    mismatched["replacement-session"] = mismatched.pop(sessions[-1])
+    report = {
+        "decision": "HOLD",
+        "failed_criteria": ["OVERFIT_DSR", "DSR_TRIAL_DISPERSION_UNMEASURED"],
+        "summary": {"sessions": 60, "trials": 4, "sharpe": 70.0},
+        "session_returns_bps": returns(0.0),
+        "ast_shape_fingerprint": "shape-primary",
+        "screening_population": [{
+            "ast_fingerprint": "formula-a",
+            "ast_shape_fingerprint": "shape-a",
+            "summary": {"sharpe": 69.0},
+            "session_returns_bps": returns(-0.1),
+        }, {
+            "ast_fingerprint": "formula-b",
+            "ast_shape_fingerprint": "shape-b",
+            "summary": {"sharpe": 68.0},
+            "session_returns_bps": returns(-0.2),
+        }, {
+            "ast_fingerprint": "formula-c",
+            "ast_shape_fingerprint": "shape-c",
+            "summary": {"sharpe": 67.0},
+            "session_returns_bps": mismatched,
+        }],
+    }
+
+    multiple = _population_multiple_testing(report)
+
+    assert multiple["spa_reality_check"]["valid"] is False
+    assert multiple["spa_reality_check"]["reason"] == \
+        "complete synchronous family session vectors unavailable"
+    assert multiple["spa_reality_check"]["non_synchronous_candidates"] == [
+        "AST:formula-c"]
+    assert multiple["complete_synchronous_formula_vectors_available"] is False
+
+
+def test_dsr_rejects_python_equal_but_differently_typed_session_keys() -> None:
+    """``True == 1`` must not make two different session identities equal."""
+
+    primary = {index: 1.0 + (index % 5) * 0.1 for index in range(60)}
+    typed_mismatch = dict(primary)
+    value = typed_mismatch.pop(1)
+    typed_mismatch[True] = value
+    report = {
+        "summary": {"sessions": 60, "trials": 4, "sharpe": 70.0},
+        "session_returns_bps": primary,
+        "ast_shape_fingerprint": "shape-primary",
+        "screening_population": [{
+            "ast_fingerprint": f"formula-{index}",
+            "ast_shape_fingerprint": f"shape-{index}",
+            "summary": {"sharpe": 69.0 - index},
+            "session_returns_bps": typed_mismatch if index == 2 else {
+                session: value - (index + 1) * 0.1
+                for session, value in primary.items()
+            },
+        } for index in range(3)],
+    }
+
+    multiple = _population_multiple_testing(report)
+
+    assert multiple["observed_formula_trials"] == 3
+    assert multiple["complete_synchronous_formula_vectors_available"] is False
+    assert multiple["dsr_calibration_ready"] is False
+
+
+def test_population_shares_exact_teacher_contract_without_changing_reports(
+        monkeypatch) -> None:
+    """Eight symbolic candidates fit/predict two teachers, byte-identically."""
+    monkeypatch.setattr(supervised_module, "MIN_OBSERVATIONS", 4)
+    spec = IntradayLaneSpec(
+        horizons_seconds=(5, 30), order_latency_ms=0,
+        fee_bps_per_side=1)
+    rules = {
+        "min_sessions": 1, "min_instruments": 1,
+        "min_opportunities": 1, "min_deflated_sharpe": -100,
+        "min_positive_session_ratio": 0,
+    }
+
+    def candidates() -> dict[str, CandidateAccumulator]:
+        fields = (
+            "microprice_offset_bps", "normalized_quote_ofi",
+            "trade_flow_imbalance", "queue_imbalance_l1",
+        )
+        out = {}
+        for index in range(8):
+            field = {"op": "field", "field": fields[index % 4]}
+            expression = (field if index % 2 == 0
+                          else {"op": "neg", "arg": field})
+            context = (() if index % 4 < 2 else
+                       ("OPEN",) if index % 4 == 2 else ("CLOSE",))
+            out[f"C{index}"] = CandidateAccumulator(
+                expr=expression, spec=spec,
+                horizon_seconds=5 if index < 4 else 30,
+                execution="TAKER", family_pbo=0.2, trials=8,
+                semantic_plan={"context": context} if context else None,
+                criteria=rules)
+        return out
+
+    def both_horizons(sample: IntradaySample) -> IntradaySample:
+        five = sample.labels[0]
+        thirty = replace(
+            five, horizon_seconds=30,
+            exit_time=sample.decision_time + timedelta(seconds=30))
+        return replace(sample, labels=(five, thirty))
+
+    base = datetime(2026, 5, 18, tzinfo=timezone.utc)
+    calibration = {
+        instrument: [
+            both_horizons(_sample(
+                instrument, base + timedelta(seconds=5 * index),
+                signal=(-0.75 + index * 0.5), net=(-1.0 + index)))
+            for index in range(3)
+        ]
+        for instrument in ("A", "B")
+    }
+    evaluation = {
+        instrument: [
+            both_horizons(_sample(
+                instrument, base + timedelta(days=1),
+                signal=0.8, net=2.0)),
+            both_horizons(_sample(
+                instrument, base + timedelta(days=1, hours=5, minutes=50),
+                signal=-0.6, net=-1.0)),
+        ]
+        for instrument in ("A", "B")
+    }
+
+    independent = candidates()
+    expected = {}
+    for key, candidate in independent.items():
+        for instrument, rows in calibration.items():
+            candidate.calibrate(instrument, rows)
+        candidate.freeze_calibration()
+        for instrument, rows in evaluation.items():
+            candidate.add(instrument, rows)
+        expected[key] = candidate.finish()
+
+    calibration_calls = []
+    prediction_calls = []
+    original_calibrate = supervised_module.CostAwareTeacher.calibrate
+    original_predict = supervised_module.CostAwareTeacher.predict
+
+    def counted_calibrate(self, instrument_id, samples):
+        calibration_calls.append((self.horizon_seconds, self.execution,
+                                  str(instrument_id)))
+        return original_calibrate(self, instrument_id, samples)
+
+    def counted_predict(self, samples):
+        prediction_calls.append((self.horizon_seconds, self.execution))
+        return original_predict(self, samples)
+
+    monkeypatch.setattr(
+        supervised_module.CostAwareTeacher, "calibrate", counted_calibrate)
+    monkeypatch.setattr(
+        supervised_module.CostAwareTeacher, "predict", counted_predict)
+
+    population = CandidatePopulationAccumulator(candidates())
+    for instrument, rows in calibration.items():
+        population.calibrate(instrument, rows)
+    frozen = population.freeze_calibration()
+    for instrument, rows in evaluation.items():
+        population.add(instrument, rows)
+    actual = population.finish()
+
+    # Two exact contracts per instrument/slice, rather than eight candidates.
+    assert len(calibration_calls) == 2 * len(calibration)
+    assert {row[:2] for row in calibration_calls} == {
+        (5, "TAKER"), (30, "TAKER")}
+    assert len(prediction_calls) == 2 * len(evaluation)
+    assert set(prediction_calls) == {(5, "TAKER"), (30, "TAKER")}
+
+    # Followers are restored through the normal fingerprint verifier.  Every
+    # candidate retains its own contextual teacher/hybrid/AST diagnostics.
+    assert len({frozen[f"C{index}"]["supervised_control"][
+        "model_fingerprint"] for index in range(4)}) == 1
+    assert len({frozen[f"C{index}"]["supervised_control"][
+        "model_fingerprint"] for index in range(4, 8)}) == 1
+    canonical = lambda value: json.dumps(
+        value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    assert canonical(actual) == canonical(expected)
+
+
 def test_structural_control_reports_primary_minus_ablation_influence() -> None:
     primary_expr = {"op": "rolling_mean", "seconds": 10,
                     "arg": {"op": "field",
@@ -1201,6 +1981,64 @@ def test_cost_hurdle_abstains_until_predicted_markout_clears_execution() -> None
     assert report["summary"]["opportunities"] == 1
     assert report["lane_manifest"]["entry_policy"] == \
         "PREDICTED_MARKOUT_CLEARS_COST"
+
+    # Legacy/in-memory samples may not carry the optional stored execution
+    # spread.  Derive it from the latency-time entry quote, never from the
+    # narrower decision-time feature spread.
+    widened_entry = replace(
+        _sample("A", base, signal=8.0, net=2.0),
+        spread_bps=2.0, entry_bid=99.95, entry_ask=100.05,
+        entry_mid=100.0, execution_spread_bps=None)
+    widened_report = evaluate_candidate(
+        {"A": [widened_entry]},
+        expr={"op": "field", "field": "microprice_offset_bps"},
+        spec=spec, horizon_seconds=5, execution="TAKER",
+        entry_policy="PREDICTED_MARKOUT_CLEARS_COST", family_pbo=0.2,
+        criteria={"min_sessions": 1, "min_instruments": 1,
+                  "min_opportunities": 1, "min_deflated_sharpe": -100,
+                  "min_positive_session_ratio": 0})
+    assert widened_report["summary"]["opportunities"] == 0
+
+
+def test_candidate_calibration_rejects_failed_causality_before_fitting() -> None:
+    base = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    invalid = replace(
+        _sample("A", base, signal=1.0, net=2.0),
+        source_quote_event_time=base + timedelta(seconds=1))
+    candidate = CandidateAccumulator(
+        expr={"op": "field", "field": "microprice_offset_bps"},
+        spec=IntradayLaneSpec(horizons_seconds=(5,), order_latency_ms=0),
+        horizon_seconds=5, execution="TAKER")
+
+    with pytest.raises(ValueError, match="calibration sample causality audit failed"):
+        candidate.calibrate("A", [invalid])
+    assert candidate.calibration_observations == 0
+    assert candidate.teacher.report()["observations"] == 0
+
+
+def test_population_calibration_rejects_failed_causality_before_fanout() -> None:
+    base = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    invalid = replace(
+        _sample("A", base, signal=1.0, net=2.0),
+        source_quote_event_time=base + timedelta(seconds=1))
+    spec = IntradayLaneSpec(horizons_seconds=(5,), order_latency_ms=0)
+    candidates = {
+        key: CandidateAccumulator(
+            expr={"op": "field", "field": field}, spec=spec,
+            horizon_seconds=5, execution="TAKER")
+        for key, field in {
+            "PRIMARY": "microprice_offset_bps",
+            "CONTROL": "queue_imbalance_l1",
+        }.items()
+    }
+    population = CandidatePopulationAccumulator(candidates)
+
+    with pytest.raises(ValueError, match="calibration sample causality audit failed"):
+        population.calibrate("A", [invalid])
+    assert all(candidate.calibration_observations == 0
+               for candidate in candidates.values())
+    assert all(candidate.teacher.report()["observations"] == 0
+               for candidate in candidates.values())
 
 
 def test_capacity_bottom_k_is_independent_of_shard_arrival_order() -> None:
@@ -1330,7 +2168,10 @@ def test_reusable_term_bank_keeps_evidence_tiers_and_executable_ast() -> None:
     memory = intraday_experience.build([
         {"intraday_signal_expr": positive, "semantic_plan": plan,
          "decision": "SUBMIT_TO_QA", "evidence_tier": "PRIMARY",
-         "oos_summary": {"mean_net_bps_per_opportunity": 0.4}},
+         "oos_summary": {
+             "mean_net_bps_per_opportunity": 0.4,
+             "qa_reproduction": {"status": "PASS"},
+         }},
         {"intraday_signal_expr": negative, "semantic_plan": plan,
          "decision": "GATE_HOLD", "evidence_tier": "PRIMARY",
          "oos_summary": {"mean_net_bps_per_opportunity": -0.8}},
@@ -1347,6 +2188,98 @@ def test_reusable_term_bank_keeps_evidence_tiers_and_executable_ast() -> None:
     rendered = intraday_experience.render(memory)
     assert "typed reusable term bank" in rendered
     assert "no causal credit" in rendered
+
+
+def test_qa_gated_outcomes_enter_memory_only_after_terminal_verdict() -> None:
+    from intraday_ast_contract import fingerprint as intraday_fingerprint
+
+    base_plan = {
+        "event": "ORDER_FLOW", "context": ["ALL"],
+        "qualities": ["PERSISTENCE"], "direction": "FOLLOW",
+        "output": "TAKER_NET_PNL", "execution": "TAKER",
+        "horizon_seconds": 5,
+    }
+
+    def row(field: str, decision: str, net: float, **extra) -> dict:
+        return {
+            "intraday_signal_expr": {
+                "op": "rolling_mean", "seconds": 10,
+                "arg": {"op": "field", "field": field},
+            },
+            "semantic_plan": extra.pop("semantic_plan", base_plan),
+            "decision": decision,
+            "oos_summary": {
+                "mean_net_bps_per_opportunity": net,
+                **extra.pop("summary", {}),
+            },
+            **extra,
+        }
+
+    pending = row(
+        "queue_imbalance_l10", "BLOCKED", 9.0,
+        summary={"qa_reproduction": {"status": "PENDING"}})
+    inconclusive = row(
+        "normalized_quote_ofi", "BLOCKED", -9.0,
+        summary={"qa_reproduction": {"status": "INCONCLUSIVE"}})
+    unverified_submission = row(
+        "realized_volatility_bps", "SUBMIT_TO_QA", 8.0)
+    legacy_boolean_pending = row(
+        "microprice_offset_bps", "PROMOTED", 7.0,
+        qa_verified=False)
+    verified_pass = row(
+        "microprice_offset_bps", "SUBMIT_TO_QA", 0.5,
+        summary={"qa_reproduction": {"status": "PASS"}})
+    verified_fail = row(
+        "queue_imbalance_l1", "REJECT", 6.0,
+        summary={"qa_reproduction": {"status": "FAIL"}},
+        semantic_plan={**base_plan, "context": ["CLOSE"]})
+    legacy_non_forward = row(
+        "trade_flow_imbalance", "GATE_HOLD", -0.3,
+        semantic_plan={**base_plan, "context": ["OPEN"]})
+
+    memory = intraday_experience.build([
+        pending, inconclusive, unverified_submission,
+        legacy_boolean_pending, verified_pass, verified_fail,
+        legacy_non_forward,
+    ], [{
+        "lead_id": "qa-failed-child",
+        "intraday_signal_expr": verified_fail["intraday_signal_expr"],
+        "semantic_plan": verified_fail["semantic_plan"],
+        "parent_ast_fingerprint": intraday_fingerprint(
+            verified_pass["intraday_signal_expr"]),
+        "used": True,
+    }])
+
+    # The forward candidates awaiting authority disappear from every
+    # prompt-facing evolutionary archive; legacy outcomes that never required
+    # QA remain valid memory.
+    assert memory.experiments == 3
+    assert {item[0] for item in memory.positive_components} == {
+        "field:microprice_offset_bps", "op:field", "op:rolling_mean"}
+    negative = dict(memory.negative_components)
+    assert negative["field:queue_imbalance_l1"] == 1
+    assert negative["field:trade_flow_imbalance"] == 1
+    assert "field:queue_imbalance_l10" not in negative
+    assert "field:normalized_quote_ofi" not in negative
+    assert {item["qa_memory_status"] for item in memory.history} == {
+        "NOT_REQUIRED", "PASS", "FAIL"}
+    failed = next(item for item in memory.history
+                  if item["qa_memory_status"] == "FAIL")
+    assert failed["best_net_bps"] is None
+    assert {item["breeding_role"] for item in memory.breeding_parents} == {
+        "NET_SURVIVOR", "FAILURE_INVERSION_PARENT"}
+    tournament = memory.lineage_tournaments[0]
+    assert tournament["parent_net_bps"] == pytest.approx(0.5)
+    assert tournament["child_net_bps"] is None
+    assert tournament["net_increment_bps"] is None
+    assert tournament["status"] == "NO_COMPARABLE_NET_METRIC"
+
+    assert intraday_experience._qa_memory_status({
+        "decision": "PROMOTED", "qa_verified": True}) == "PASS"
+    assert intraday_experience._qa_memory_status({
+        "decision": "BLOCKED"}) == "WITHHELD"
+    assert intraday_experience._qa_memory_status({
+        "decision": "GATE_HOLD"}) == "NOT_REQUIRED"
 
 
 def test_generation_arm_audit_is_balanced_but_never_promotes() -> None:
@@ -1682,11 +2615,13 @@ def test_parent_child_tournament_requires_net_increment_and_gate_survival() -> N
     rows = [
         {"intraday_signal_expr": parent, "semantic_plan": _evolution_plan(),
          "decision": "SUBMIT_TO_QA", "lesson_codes": [],
-         "oos_summary": {"mean_net_bps_per_opportunity": 0.2, "sessions": 30}},
+         "oos_summary": {"mean_net_bps_per_opportunity": 0.2, "sessions": 30,
+                         "qa_reproduction": {"status": "PASS"}}},
         {"intraday_signal_expr": child,
          "semantic_plan": _evolution_plan(context="WIDE_SPREAD"),
          "decision": "SUBMIT_TO_QA", "lesson_codes": [],
-         "oos_summary": {"mean_net_bps_per_opportunity": 0.5, "sessions": 30}},
+         "oos_summary": {"mean_net_bps_per_opportunity": 0.5, "sessions": 30,
+                         "qa_reproduction": {"status": "PASS"}}},
     ]
     memory = intraday_experience.build(rows, [{
         "lead_id": "child", "intraday_signal_expr": child,

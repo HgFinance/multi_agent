@@ -38,7 +38,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from stock_universe import governed_stock_evidence_sql  # noqa: E402
+
 FINALIZER_VERSION = "quant-orphan-finalizer-v1"
+
+_GOVERNED_ORPHAN_EVIDENCE = governed_stock_evidence_sql(
+    experiment_alias="e", dataset_alias="m", hypothesis_alias="h")
 
 # 이 상태의 가설만 전이한다. 나머지(REJECTED/ARCHIVED/SUPPORTED/...)는 종결
 # 역사이므로 환류만 적재하고 상태는 보존한다.
@@ -60,11 +65,12 @@ _SQL_ORPHANS = """
      order by e.ended_at
 """
 
-_SQL_EXPERIMENT = """
+_SQL_EXPERIMENT = f"""
     select e.hypothesis_id::text, e.trial_family_id, e.trial_number,
-           h.status
+           h.status, ({_GOVERNED_ORPHAN_EVIDENCE}) is true
       from quant.experiments e
-      left join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+      join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+      join quant.dataset_manifests m on m.dataset_id = e.dataset_id
      where e.experiment_id = %s
 """
 
@@ -236,7 +242,33 @@ def finalize_one(conn, exp_id: str) -> dict:
     row = cur.fetchone()
     if row is None:
         return {"experiment_id": exp_id, "skipped": "no_experiment_row"}
-    hypothesis_id, fam, trial_no, hyp_status = row
+    hypothesis_id, fam, trial_no, hyp_status, governed_evidence = row
+
+    if not governed_evidence:
+        # The run still exists in quant.experiments and therefore still pays
+        # trial/DSR pressure.  It may not, however, teach a direction or reach
+        # SUBMIT_TO_QA.  Close the orphan with a scope-only hold so it does not
+        # remain an endlessly retried anti-join row.
+        from factory_bridge import build_outcome
+
+        terminal = str(hyp_status or "") not in NON_TERMINAL
+        status_to_set = str(hyp_status or "") if terminal else "INCONCLUSIVE"
+        outcome = build_outcome(
+            experiment_id=exp_id, hypothesis_id=str(hypothesis_id),
+            trial_family_id=str(fam or ""), trial_number=int(trial_no or 1),
+            decision="GATE_HOLD",
+            failed_criteria=["ungoverned_stock_evidence"],
+            lesson_codes=["DATA_ARTIFACT"], oos_summary={},
+            notes=(f"사후 완주({FINALIZER_VERSION}): 성과 증거 제외 - "
+                   "KRX ACTIVE STOCK-only 현대 평가 계약 또는 intraday "
+                   "FULL_60 증거가 없음")[:900])
+        oid = finalize(conn, hypothesis_id=str(hypothesis_id),
+                       new_status=status_to_set, outcome=outcome)
+        return {
+            "experiment_id": exp_id, "outcome_id": oid,
+            "decision": "GATE_HOLD", "verdict": "INELIGIBLE_EVIDENCE",
+            "hypothesis": str(hypothesis_id), "status_set": status_to_set,
+        }
 
     cur.execute(_SQL_WINDOWS, (exp_id,))
     window_rows = cur.fetchall()

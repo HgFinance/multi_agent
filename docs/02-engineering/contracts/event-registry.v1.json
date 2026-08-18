@@ -23,6 +23,16 @@
       "notes": "내부 Risk bus contract. 외부 canonical Case event로 승격하지 않는다."
     },
     {
+      "event_type": "quant.intraday.forward.qa_requested.v1",
+      "status": "IMPLEMENTED_INTERNAL",
+      "layer": "internal",
+      "producer": "quant-backtest-department",
+      "consumers": ["qa-department"],
+      "source": "departments/06-ai-qa-audit/qa_events/redis_event_bus.py",
+      "case_binding": "optional",
+      "notes": "Independent forward PASS의 재현 요청이다. 결정론적 event_id로 재전달을 멱등 처리하며 Production 승격 권한은 없다."
+    },
+    {
       "event_type": "qa.decision.v1",
       "status": "IMPLEMENTED_INTERNAL",
       "layer": "internal",

@@ -24,6 +24,10 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: python -m pytest -q tests
+      - name: Run QA transport and reproduction suite
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m pytest -q departments/06-ai-qa-audit/tests
 
   elastic-beanstalk-bundle:
     runs-on: ubuntu-latest

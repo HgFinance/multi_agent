@@ -36,7 +36,8 @@ from typing import Protocol
 from uuid import UUID
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from contracts.market_events import (
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "contracts"))
+from market_events import (
     QUOTE_DEPTH_MAX,
     InstrumentRef,
     Market,

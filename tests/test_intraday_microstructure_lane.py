@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import random
 import sys
 from pathlib import Path
 
@@ -12,6 +13,7 @@ PIPELINE = ROOT / "departments" / "04-quant-backtest" / "pipeline"
 sys.path.insert(0, str(PIPELINE))
 
 from intraday_microstructure import (  # noqa: E402
+    COMPLETED_SECOND_POLICY,
     EXTERNAL_EVENT_SOURCE,
     IntradayLaneSpec,
     QuoteEvent,
@@ -20,6 +22,7 @@ from intraday_microstructure import (  # noqa: E402
     build_samples,
     manifest,
     score_signal,
+    STRICT_TIMESTAMP_POLICY,
     HorizonLabel,
     IntradaySample,
     walk_forward_linear_score,
@@ -109,7 +112,7 @@ def test_causal_lane_builds_features_and_executable_labels() -> None:
     assert labels[5].long_taker_net_bps < labels[5].long_mid_markout_bps
     assert audit_causality(samples, spec)["status"] == "PASS"
     assert manifest(spec)["execution_model"] == "TAKER_BOTH_SIDES"
-    assert manifest(spec)["purge_gap_seconds"] == pytest.approx(15.25)
+    assert manifest(spec)["purge_gap_seconds"] == pytest.approx(30.25)
 
 
 def test_external_replay_contract_is_explicit_and_schema_safe() -> None:
@@ -130,6 +133,141 @@ def test_external_replay_contract_is_explicit_and_schema_safe() -> None:
     assert "receipt clock unavailable" in replay["clock"]
     assert "forward receipt-clock confirmation required" in \
         replay["evidence_limit"]
+
+
+def _coarse_quote(second: int, bid: float, ask: float, bid_size: float,
+                  ask_size: float, source: str) -> QuoteEvent:
+    event = BASE + timedelta(seconds=second)
+    return QuoteEvent(
+        event_time=event, received_at=event, observed_at=event,
+        instrument_id=IID,
+        bid_prices=(bid, bid - 1), bid_sizes=(bid_size, bid_size),
+        ask_prices=(ask, ask + 1), ask_sizes=(ask_size, ask_size),
+        source_event_id=source)
+
+
+def test_completed_second_replay_is_permutation_invariant_and_causal() -> None:
+    quotes = [
+        _coarse_quote(0, 99, 100, 10, 30, "q0-a"),
+        _coarse_quote(0, 101, 102, 30, 10, "q0-b"),
+        _coarse_quote(1, 100, 103, 20, 20, "q1-a"),
+        _coarse_quote(1, 99, 104, 40, 5, "q1-b"),
+        _coarse_quote(2, 102, 105, 10, 10, "q2-a"),
+        _coarse_quote(2, 101, 106, 10, 10, "q2-b"),
+    ]
+    trades = [trade(0, 1, 7, delay_ms=0),
+              trade(0, -1, 3, delay_ms=0)]
+    spec = IntradayLaneSpec(
+        sample_interval_seconds=1, feature_lookback_seconds=2,
+        horizons_seconds=(1,), order_latency_ms=250,
+        max_quote_age_seconds=3)
+
+    def replay(qs, ts):
+        return build_samples(
+            qs, ts, spec, start=BASE + timedelta(seconds=1),
+            end=BASE + timedelta(seconds=2), execution_model="TAKER",
+            timestamp_policy=COMPLETED_SECOND_POLICY)
+
+    expected = replay(quotes, trades)
+    assert len(expected) == 1
+    sample = expected[0]
+    # Bucket [0,1) is first visible at t=1.  Bucket [1,2) may set the
+    # conservatively quantized entry, but cannot leak into the t=1 feature.
+    assert sample.source_quote_event_time == BASE
+    assert sample.decision_time == BASE + timedelta(seconds=1)
+    assert sample.entry_time == BASE + timedelta(seconds=2)
+    assert sample.queue_imbalance_l1 == pytest.approx(0.0)
+    assert sample.quote_count == 2
+    assert sample.trade_count == 2
+    assert sample.quote_event_ofi is None
+    assert sample.multi_level_quote_ofi_l10 is None
+    assert sample.quote_event_transition_count == 0
+    assert sample.execution_capacity_supported is False
+
+    rng = random.Random(20260818)
+    for _ in range(100):
+        shuffled_quotes = list(quotes)
+        shuffled_trades = list(trades)
+        rng.shuffle(shuffled_quotes)
+        rng.shuffle(shuffled_trades)
+        assert replay(shuffled_quotes, shuffled_trades) == expected
+
+
+def test_completed_second_taker_uses_worst_side_price_envelope() -> None:
+    # min(ask)=100 < max(bid)=101 across states. Combining those optimistic
+    # sides would create a crossed synthetic quote. The valid envelope is the
+    # opposite pair: sell=min(bid), buy=max(ask).
+    quotes = [
+        _coarse_quote(0, 99, 100, 10, 10, "feature-a"),
+        _coarse_quote(0, 101, 102, 10, 10, "feature-b"),
+        _coarse_quote(1, 100, 101, 10, 10, "entry-a"),
+        _coarse_quote(1, 98, 105, 10, 10, "entry-b"),
+        _coarse_quote(2, 104, 105, 10, 10, "exit-a"),
+        _coarse_quote(2, 102, 108, 10, 10, "exit-b"),
+    ]
+    spec = IntradayLaneSpec(
+        sample_interval_seconds=1, feature_lookback_seconds=2,
+        horizons_seconds=(1,), order_latency_ms=250,
+        max_quote_age_seconds=3, fee_bps_per_side=1)
+    sample = build_samples(
+        quotes, [], spec, start=BASE + timedelta(seconds=1),
+        end=BASE + timedelta(seconds=2), execution_model="TAKER",
+        timestamp_policy=COMPLETED_SECOND_POLICY)[0]
+    label = sample.labels[0]
+    assert sample.entry_bid == 98
+    assert sample.entry_ask == 105
+    assert sample.entry_bid <= sample.entry_ask
+    assert label.long_taker_net_bps == pytest.approx(
+        (102 / 105 - 1) * 10_000 - 2)
+    # No actual observed entry ask is worse than the bound, and no actual exit
+    # bid is worse than the bound, so this result cannot improve any raw-state
+    # boundary pairing.
+    raw_pair_returns = [
+        (exit_bid / entry_ask - 1) * 10_000 - 2
+        for entry_ask in (101, 105) for exit_bid in (104, 102)
+    ]
+    assert label.long_taker_net_bps <= min(raw_pair_returns)
+    assert sample.execution_spread_bps == pytest.approx(
+        (105 - 98) / ((105 + 98) / 2) * 10_000)
+
+
+def test_completed_second_passive_is_not_identifiable() -> None:
+    quotes = [
+        _coarse_quote(0, 99, 101, 10, 10, "a"),
+        _coarse_quote(1, 100, 102, 10, 10, "b"),
+        _coarse_quote(2, 101, 103, 10, 10, "c"),
+    ]
+    spec = IntradayLaneSpec(
+        sample_interval_seconds=1, horizons_seconds=(1,),
+        order_latency_ms=0, max_quote_age_seconds=3)
+    with pytest.raises(ValueError, match="supports TAKER only"):
+        build_samples(
+            quotes, [], spec, start=BASE + timedelta(seconds=1),
+            end=BASE + timedelta(seconds=2),
+            execution_model="PASSIVE_FIFO_LOWER_BOUND",
+            timestamp_policy=COMPLETED_SECOND_POLICY)
+
+    replay = manifest(
+        spec, source=EXTERNAL_EVENT_SOURCE,
+        timestamp_policy=COMPLETED_SECOND_POLICY)
+    assert replay["passive_execution_model"] == "UNSUPPORTED"
+    assert replay["execution_capacity_supported"] is False
+    assert replay["effective_order_latency"] == \
+        "ceil(decision_time+requested_latency) to the next whole-second boundary"
+
+
+def test_cache_identity_binds_timestamp_and_execution_contract() -> None:
+    kwargs = {
+        "spec": IntradayLaneSpec(horizons_seconds=(5,)),
+        "event_source": EXTERNAL_EVENT_SOURCE,
+        "execution_model": "TAKER",
+        "source_lineage": [{"rows": 10}],
+    }
+    coarse = cache_identity(
+        **kwargs, timestamp_policy=COMPLETED_SECOND_POLICY)
+    strict = cache_identity(
+        **kwargs, timestamp_policy=STRICT_TIMESTAMP_POLICY)
+    assert coarse != strict
 
 
 def test_discovery_cache_identity_is_spec_and_lineage_bound() -> None:
@@ -196,8 +334,9 @@ def test_late_event_never_enters_feature_window() -> None:
 def test_latency_quote_sets_execution_but_never_signal_feature() -> None:
     decision_quote = quote(4, 99, 101, 10, 10)
     # This quote is learned 500ms after the decision but before the 1s-latent
-    # order arrives.  It may set the fill price/capacity, never the AST feature.
-    latency_quote = quote(5, 100, 102, 1000, 1, delay_ms=500)
+    # order arrives.  It may set the wider fill spread/capacity, never the AST
+    # feature spread.
+    latency_quote = quote(5, 98, 102, 1000, 1, delay_ms=500)
     exit_quote = quote(10, 101, 103, 10, 10)
     spec = IntradayLaneSpec(
         sample_interval_seconds=5, feature_lookback_seconds=10,
@@ -211,8 +350,13 @@ def test_latency_quote_sets_execution_but_never_signal_feature() -> None:
     sample = samples[0]
     assert sample.source_quote_event_time == decision_quote.event_time
     assert sample.queue_imbalance_l1 == 0.0
+    assert sample.spread_bps == pytest.approx(
+        (101 - 99) / ((101 + 99) / 2) * 10_000)
     assert sample.entry_bid == latency_quote.best_bid
     assert sample.entry_ask_depth_l1 == 1.0
+    assert sample.execution_spread_bps == pytest.approx(
+        (102 - 98) / ((102 + 98) / 2) * 10_000)
+    assert sample.execution_spread_bps > sample.spread_bps
 
 
 def test_future_clock_skew_event_falls_back_to_eligible_quote() -> None:
@@ -299,7 +443,7 @@ def test_invalid_clocks_and_crossed_quotes_fail_closed() -> None:
         assert "greatest(received_at, observed_at) <= %s" in sql
     for sql in (_QUOTE_BATCH_SQL, _TRADE_BATCH_SQL,
                 _SOURCE_QUALITY_BATCH_SQL):
-        assert "instrument_id::text = any(%s)" in sql
+        assert "instrument_id = any(%s::uuid[])" in sql
         assert "greatest(received_at, observed_at) <= %s" in sql
 
 
@@ -365,7 +509,8 @@ def test_walk_forward_purges_labels_and_abstains_below_spread() -> None:
     assert result["trades"] == 0
     assert result["coverage"] == 0
     assert result["decision"] == "REJECT"
-    assert result["folds"][0]["train"] == 44  # 48 pre-test rows minus 4 overlaps
+    # Passive labels can extend through one-horizon wait plus one-horizon hold.
+    assert result["folds"][0]["train"] == 39  # 48 rows minus 9 overlaps
 
 
 def test_passive_fifo_requires_printed_volume_to_clear_queue() -> None:

@@ -31,7 +31,7 @@ import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-WORKER_VERSION = "quant-experiment-worker-v3"
+WORKER_VERSION = "quant-experiment-worker-v4"
 
 # 가설이 RUNNING 에 갇혀 있다고 보는 시간. lease 만료(30분)보다 짧으면 아직
 # 큐에서 도는 작업을 뺏게 되므로 같은 값을 쓴다.
@@ -620,6 +620,60 @@ def sweep_orphans(conn) -> dict | None:
         return {"error": f"{type(e).__name__}: {str(e)[:200]}"}
 
 
+# Forward cohorts receive a fair sweep even while the ordinary queue is busy.
+# The internal throttle avoids opening a Timescale connection every 15-second
+# worker tick while a candidate waits weeks for twenty genuinely new KRX
+# sessions; tying this to queue idleness would starve confirmation in the
+# intended continuously-producing factory.
+FORWARD_SWEEP_SEC = 900
+FORWARD_SWEEP_BATCH = 4
+_last_forward_sweep: float | None = None
+
+
+def sweep_forward_confirmations(conn, *, monotonic_fn=None,
+                                market_connect=None, runner=None) -> dict | None:
+    """Try a fair due batch with one short-lived market connection."""
+    global _last_forward_sweep
+    clock = monotonic_fn or time.monotonic
+    now = float(clock())
+    if (_last_forward_sweep is not None
+            and now - _last_forward_sweep < FORWARD_SWEEP_SEC):
+        return None
+    _last_forward_sweep = now
+    market_conn = None
+    try:
+        if runner is None:
+            from intraday_experiment_runner import (  # noqa: PLC0415
+                run_forward_confirmations)
+            runner = run_forward_confirmations
+        if market_connect is None:
+            import psycopg2  # noqa: PLC0415
+            from source_registry import load_project_env  # noqa: PLC0415
+
+            def market_connect():
+                url = load_project_env().get("TIMESCALE_DATABASE_URL")
+                if not url:
+                    raise RuntimeError("TIMESCALE_DATABASE_URL is missing")
+                return psycopg2.connect(url, connect_timeout=20)
+
+        market_conn = market_connect()
+        return runner(
+            conn, market_conn, limit=FORWARD_SWEEP_BATCH,
+            worker=worker_name())
+    except Exception as exc:  # forward waiting/failure never stops normal jobs
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001, S110
+            pass
+        return {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+    finally:
+        if market_conn is not None:
+            try:
+                market_conn.close()
+            except Exception:  # noqa: BLE001, S110
+                pass
+
+
 # ── 정상 종료 시 집은 주문 반납 ──────────────────────────────────────────────
 #
 # ▶ 왜 필요한가 (2026-08-14 실측)
@@ -689,6 +743,10 @@ def tick(conn, *, worker: str) -> dict:
     terminal_zombies = cancel_terminal_zombies(conn)
     rec = reclaim(conn)
     orph = sweep_orphans(conn)
+    # Never hold an ordinary job lease while a potentially long forward replay
+    # runs. The forward sweep owns and heartbeats its own work items; only after
+    # it returns do we lease the normal queue batch.
+    forward = sweep_forward_confirmations(conn)
     jobs = lease(conn, worker=worker)
     # 집는 순간부터 반납 대상이다 - 실행 중에 신호가 와도 놓아줄 수 있어야 한다
     _HELD["jobs"] = [str(j["job_id"]) for j in jobs]
@@ -699,6 +757,7 @@ def tick(conn, *, worker: str) -> dict:
         _HELD["jobs"] = []
     return {"hypotheses": hyp, "terminal_zombies": terminal_zombies,
             "reclaimed": rec, "orphans": orph,
+            "forward_confirmations": forward,
             "picked": len(jobs), "results": results}
 
 
@@ -765,6 +824,16 @@ def serve() -> None:
                           f"완주 {len(o.get('finalized') or [])}건 "
                           f"실패 {len(o.get('failed') or [])}건 "
                           f"{o.get('error') or ''}".rstrip(), flush=True)
+                forward = r.get("forward_confirmations") or {}
+                if forward.get("error"):
+                    print(f"  forward confirmation error: {forward['error']}",
+                          file=sys.stderr, flush=True)
+                for item in forward.get("results") or []:
+                    if item.get("status") != "WAITING_FOR_NEW_LOCAL_SESSIONS":
+                        print("  forward confirmation "
+                              f"{item.get('experiment_id', '')[:8]} "
+                              f"{item.get('status')} {item.get('decision', '')}",
+                              flush=True)
                 if r["picked"]:
                     for x in r["results"]:
                         print(f"  {x['result']:6} {x['job_id'][:8]} "

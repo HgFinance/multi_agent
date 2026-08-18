@@ -25,7 +25,8 @@ TARGETS = frozenset({
 })
 FUNCTIONAL_FORMS = frozenset({
     "MONOTONE", "REVERSAL", "INTERACTION", "STATE_CONDITIONAL",
-    "CROSS_SCALE", "DEPTH_DIVERGENCE",
+    "CROSS_SCALE", "DEPTH_DIVERGENCE", "L1_L10_CONFIRMATION",
+    "QUOTE_TAPE_CONFIRMATION", "CLOCK_NORMALIZED",
 })
 COEFFICIENT_POLICIES = frozenset({
     "FIXED_FROM_SOURCE", "PREREGISTERED_NO_OOS_FIT", "STRUCTURE_ONLY",
@@ -37,7 +38,8 @@ DECISION_RULES = frozenset({
 })
 TERM_ROLES = frozenset({
     "PRESSURE", "LIQUIDITY", "STATE", "SCALE", "VOLATILITY",
-    "FRESHNESS", "ACTIVITY", "CAPACITY",
+    "FRESHNESS", "ACTIVITY", "CAPACITY", "CONFIRMATION",
+    "NORMALIZER", "DEPTH_SHAPE",
 })
 
 # These observables cannot be negative by construction.  Applying ``sign`` to
@@ -49,7 +51,8 @@ TERM_ROLES = frozenset({
 _NONNEGATIVE_FIELDS = frozenset({
     "spread_bps", "bid_depth_l1", "ask_depth_l1", "book_depth_l1",
     "book_depth_l10", "trade_count", "quote_count", "trade_intensity",
-    "realized_volatility_bps", "quote_age_ms",
+    "realized_volatility_bps", "quote_age_ms", "quote_event_transition_count",
+    "trade_volume", "trade_side_known_ratio",
 })
 _ALWAYS_NONNEGATIVE_OPS = frozenset({"abs", "rolling_std"})
 _NONNEGATIVE_PRESERVING_OPS = frozenset({
@@ -66,6 +69,31 @@ _NONNEGATIVE_PRESERVING_OPS = frozenset({
 _DIRECTIONAL_PRESSURE_FIELDS = frozenset({
     "queue_imbalance_l1", "queue_imbalance_l10", "microprice_offset_bps",
     "trade_flow_imbalance", "quote_event_ofi", "normalized_quote_ofi",
+    "multi_level_quote_ofi_l10", "normalized_multi_level_quote_ofi_l10",
+    "depth_imbalance_slope", "quote_ofi_depth_divergence",
+    "normalized_quote_ofi_per_event", "signed_trade_volume",
+    "quote_ofi_per_trade_volume",
+})
+DIRECTIONAL_PRESSURE_FIELDS = _DIRECTIONAL_PRESSURE_FIELDS
+
+_L1_QUOTE_FIELDS = frozenset({
+    "queue_imbalance_l1", "quote_event_ofi", "normalized_quote_ofi",
+    "normalized_quote_ofi_per_event", "quote_ofi_per_trade_volume",
+})
+_L10_QUOTE_FIELDS = frozenset({
+    "queue_imbalance_l10", "multi_level_quote_ofi_l10",
+    "normalized_multi_level_quote_ofi_l10",
+})
+_EXPLICIT_DEPTH_RELATION_FIELDS = frozenset({
+    "depth_imbalance_slope", "quote_ofi_depth_divergence",
+})
+_QUOTE_PRESSURE_FIELDS = frozenset(
+    _L1_QUOTE_FIELDS | _L10_QUOTE_FIELDS | _EXPLICIT_DEPTH_RELATION_FIELDS)
+_TAPE_PRESSURE_FIELDS = frozenset({
+    "trade_flow_imbalance", "signed_trade_volume",
+})
+_CLOCK_NORMALIZED_FIELDS = frozenset({
+    "normalized_quote_ofi_per_event", "quote_ofi_per_trade_volume",
 })
 
 
@@ -187,10 +215,14 @@ def _term_influence(candidate: dict, fields: list[str]) -> dict[str, list[str]]:
 
 def assess(thesis, *, candidate: dict, semantic_plan: dict, grammar) -> dict:
     """Validate an LLM equation thesis against the executable AST."""
+    clock_domains = (sorted(grammar.clock_domains_of(candidate))
+                     if hasattr(grammar, "clock_domains_of") else [])
     profile = {
+        "grammar_version": str(getattr(grammar, "AST_VERSION", "")),
         "fields": sorted(grammar.fields_of(candidate)),
         "operators": sorted(grammar.operators_of(candidate)),
         "clocks_seconds": sorted(grammar.clocks_of(candidate)),
+        "clock_domains": clock_domains,
         "complexity_nodes": grammar.count_nodes(candidate),
         "output_unit": grammar.unit_of(candidate),
     }
@@ -303,6 +335,8 @@ def assess(thesis, *, candidate: dict, semantic_plan: dict, grammar) -> dict:
             "and volatility fields only as explicit gates/scales, then ablate them")
     profile["term_influence"] = influence
     profile["directional_pressure_fields"] = directional_value
+    profile["normalization_fields"] = sorted(
+        set(profile["fields"]) & _CLOCK_NORMALIZED_FIELDS)
     profile["score_calibration"] = (
         CALIBRATION_CONTRACT if structure_only else "NONE_FIXED_EQUATION")
 
@@ -313,10 +347,36 @@ def assess(thesis, *, candidate: dict, semantic_plan: dict, grammar) -> dict:
         raise ValueError("STATE_CONDITIONAL thesis requires a where AST node")
     if form == "CROSS_SCALE" and len(clocks) < 2:
         raise ValueError("CROSS_SCALE thesis requires at least two distinct clocks")
+    has_l1_l10_pair = bool(fields & _L1_QUOTE_FIELDS) and bool(
+        fields & _L10_QUOTE_FIELDS)
+    has_explicit_depth_relation = bool(fields & _EXPLICIT_DEPTH_RELATION_FIELDS)
     if form == "DEPTH_DIVERGENCE" and not (
-            any("_l1" in field for field in fields)
-            and any("_l10" in field for field in fields)):
-        raise ValueError("DEPTH_DIVERGENCE thesis requires both L1 and L10 fields")
+            has_l1_l10_pair or has_explicit_depth_relation):
+        raise ValueError(
+            "DEPTH_DIVERGENCE thesis requires an explicit depth-relation field "
+            "or both L1 and L10 quote fields")
+    if form == "L1_L10_CONFIRMATION":
+        if not (has_l1_l10_pair or has_explicit_depth_relation):
+            raise ValueError(
+                "L1_L10_CONFIRMATION thesis requires an explicit depth-relation "
+                "field or both L1 and L10 quote fields")
+        if not operators & {"abs", "add", "mul", "min", "max", "where"}:
+            raise ValueError(
+                "L1_L10_CONFIRMATION thesis requires a visible agreement/"
+                "distance operator")
+    if form == "QUOTE_TAPE_CONFIRMATION":
+        if not fields & _QUOTE_PRESSURE_FIELDS or not fields & _TAPE_PRESSURE_FIELDS:
+            raise ValueError(
+                "QUOTE_TAPE_CONFIRMATION thesis requires signed quote and tape "
+                "pressure fields")
+        if not operators & {"mul", "min", "max", "where"}:
+            raise ValueError(
+                "QUOTE_TAPE_CONFIRMATION thesis requires a visible confirmation "
+                "gate or interaction")
+    if form == "CLOCK_NORMALIZED" and not fields & _CLOCK_NORMALIZED_FIELDS:
+        raise ValueError(
+            "CLOCK_NORMALIZED thesis requires normalized_quote_ofi_per_event "
+            "or quote_ofi_per_trade_volume")
     if form == "INTERACTION" and not (operators & {"mul", "div", "where"}):
         raise ValueError("INTERACTION thesis requires mul, div, or where")
     if form == "REVERSAL" and not (
