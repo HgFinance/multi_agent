@@ -19,15 +19,24 @@ from statistics import fmean, median, pstdev
 from zoneinfo import ZoneInfo
 
 from intraday_alpha_ast import evaluate as evaluate_ast
-from intraday_alpha_ast import (fields_of, fingerprint, shape_fingerprint,
-                                unit_of)
-from intraday_microstructure import IntradayLaneSpec, IntradaySample, audit_causality
+from intraday_alpha_ast import (
+    EXPLICIT_FEATURE_WINDOW_CONTRACT,
+    LEGACY_FEATURE_WINDOW_CONTRACT,
+    fields_of,
+    fingerprint,
+    shape_fingerprint,
+    unit_of,
+    validate_feature_window_contract,
+)
+from intraday_microstructure import (IntradayLaneSpec, IntradaySample,
+                                     IntradaySampleBatch, audit_causality)
 from intraday_supervised import CostAwareTeacher, executable_target
 from overfit_stats import (bootstrap_ci, deflated_sharpe,
                            stationary_bootstrap_indices)
 
 
 EVALUATOR_VERSION = "intraday-candidate-evaluator-v11"
+EXPLICIT_WINDOW_EVALUATOR_VERSION = "intraday-candidate-evaluator-v12"
 KST = ZoneInfo("Asia/Seoul")
 ENTRY_POLICIES = frozenset({
     "POSITIVE_SCORE",
@@ -104,6 +113,20 @@ def apply_family_pbo(report: dict, family_pbo: float | None,
 def _label(sample: IntradaySample, horizon_seconds: int):
     return next((label for label in sample.labels
                  if label.horizon_seconds == horizon_seconds), None)
+
+
+def _prepare_sample_sequence(samples):
+    """Preserve cube alignment while retaining legacy list sorting behavior."""
+    rows = list(samples)
+    feature_cube = getattr(samples, "feature_cube", None)
+    if feature_cube is not None:
+        if any(rows[index].decision_time > rows[index + 1].decision_time
+               for index in range(len(rows) - 1)):
+            raise ValueError("feature-cube sample batches must be chronological")
+        if feature_cube.row_count != len(rows):
+            raise ValueError("feature cube does not align with sample rows")
+        return rows, feature_cube
+    return sorted(rows, key=lambda row: row.decision_time), None
 
 
 def _safe_timestamp(value) -> float | None:
@@ -557,7 +580,9 @@ class CandidateAccumulator:
                  minimum_predicted_edge_bps: float = 0.0,
                  trials: int = 1, family_pbo: float | None = None,
                  semantic_plan: dict | None = None,
-                 criteria: dict | None = None):
+                 criteria: dict | None = None,
+                 feature_window_contract_version: str =
+                 LEGACY_FEATURE_WINDOW_CONTRACT):
         if horizon_seconds not in spec.horizons_seconds:
             raise ValueError("horizon_seconds is absent from the lane specification")
         if threshold < 0 or not math.isfinite(float(threshold)):
@@ -573,7 +598,15 @@ class CandidateAccumulator:
         if coefficient_policy not in COEFFICIENT_POLICIES:
             raise ValueError(
                 f"unsupported coefficient_policy: {coefficient_policy}")
+        validate_feature_window_contract(
+            expr, contract_version=feature_window_contract_version)
         self.expr = expr
+        self.feature_window_contract_version = (
+            feature_window_contract_version)
+        self.evaluator_version = (
+            EXPLICIT_WINDOW_EVALUATOR_VERSION
+            if feature_window_contract_version ==
+            EXPLICIT_FEATURE_WINDOW_CONTRACT else EVALUATOR_VERSION)
         self.spec = spec
         self.horizon_seconds = horizon_seconds
         self.execution = execution
@@ -626,7 +659,9 @@ class CandidateAccumulator:
                 "maker_fee_bps_per_side": float(
                     self.spec.maker_fee_bps_per_side),
                 "passive_nonfill_net_bps_per_opportunity": 0.0,
-            })
+            },
+            feature_window_contract_version=
+            self.feature_window_contract_version)
         self.teacher_stats = _ReplayStats(self.horizon_seconds)
         self.hybrid_stats = _ReplayStats(self.horizon_seconds)
         self.teacher_prediction_count = 0
@@ -704,7 +739,7 @@ class CandidateAccumulator:
         instead of silently turning it into a different strategy.
         """
         instrument_id = str(instrument_id)
-        ordered = sorted(samples, key=lambda row: row.decision_time)
+        ordered, feature_cube = _prepare_sample_sequence(samples)
         if any(row.instrument_id != instrument_id for row in ordered):
             raise ValueError("instrument key does not match calibration sample")
         audit = audit_causality(ordered, self.spec)
@@ -712,12 +747,18 @@ class CandidateAccumulator:
             raise ValueError(
                 "calibration sample causality audit failed: " +
                 "; ".join(audit.get("findings") or []))
-        self.teacher.calibrate(instrument_id, ordered)
-        self._calibrate_score_prepared(instrument_id, ordered)
+        if self.feature_window_contract_version == \
+                EXPLICIT_FEATURE_WINDOW_CONTRACT:
+            self.teacher.calibrate(
+                instrument_id, ordered, feature_cube=feature_cube)
+        else:
+            self.teacher.calibrate(instrument_id, ordered)
+        self._calibrate_score_prepared(
+            instrument_id, ordered, feature_cube=feature_cube)
 
     def _calibrate_score_prepared(
             self, instrument_id: str,
-            ordered: list[IntradaySample]) -> None:
+            ordered: list[IntradaySample], *, feature_cube=None) -> None:
         """Accumulate only candidate-specific AST scale statistics.
 
         Population evaluation calls this after sorting, instrument validation,
@@ -729,7 +770,9 @@ class CandidateAccumulator:
             return
         if self.calibration_status != "PENDING":
             raise ValueError("score calibration is already frozen")
-        values = evaluate_ast(ordered, self.expr)
+        values = evaluate_ast(
+            ordered, self.expr, feature_cube=feature_cube,
+            feature_window_contract=self.feature_window_contract_version)
         contributed = False
         for sample, raw in zip(ordered, values):
             if (self.semantic_plan and not _time_context_allows(
@@ -859,17 +902,18 @@ class CandidateAccumulator:
     def add(self, instrument_id: str, samples: list[IntradaySample]) -> None:
         """Consume one instrument/session slice and immediately release its rows."""
         instrument_id = str(instrument_id)
-        ordered = sorted(samples, key=lambda row: row.decision_time)
+        ordered, feature_cube = _prepare_sample_sequence(samples)
         if any(row.instrument_id != instrument_id for row in ordered):
             raise ValueError("instrument key does not match sample instrument")
         audit = audit_causality(ordered, self.spec)
-        self._add_prepared(instrument_id, ordered, audit)
+        self._add_prepared(
+            instrument_id, ordered, audit, feature_cube=feature_cube)
 
     def _add_prepared(
             self, instrument_id: str, ordered: list[IntradaySample], audit: dict,
             *, shared_teacher_predictions: list[dict | None] | None = None,
             shared_teacher_targets: list[tuple[float, float, float] | None]
-            | None = None) -> None:
+            | None = None, feature_cube=None) -> None:
         """Consume an already sorted/audited slice shared by a population.
 
         This is deliberately private: callers that have not established the
@@ -885,7 +929,9 @@ class CandidateAccumulator:
         self.causality.append({"instrument_id": instrument_id, **audit})
         if ordered:
             self.sampled_instruments.add(instrument_id)
-        values = evaluate_ast(ordered, self.expr)
+        values = evaluate_ast(
+            ordered, self.expr, feature_cube=feature_cube,
+            feature_window_contract=self.feature_window_contract_version)
         if self.coefficient_policy == "STRUCTURE_ONLY":
             beta = float(self.calibration_beta or 0.0)
             values = [None if value is None else float(value) * beta
@@ -927,7 +973,16 @@ class CandidateAccumulator:
         # its paired delta tells the next generation whether the symbolic term
         # adds anything beyond a generic frozen linear microstructure control.
         if shared_teacher_predictions is None:
-            teacher_predictions = self.teacher.predict(eligible_samples)
+            if self.feature_window_contract_version == \
+                    EXPLICIT_FEATURE_WINDOW_CONTRACT:
+                all_teacher_predictions = self.teacher.predict(
+                    ordered, feature_cube=feature_cube)
+                teacher_predictions = [
+                    all_teacher_predictions[index]
+                    for index in eligible_indices
+                ]
+            else:
+                teacher_predictions = self.teacher.predict(eligible_samples)
         else:
             if len(shared_teacher_predictions) != len(ordered):
                 raise ValueError(
@@ -1324,7 +1379,11 @@ class CandidateAccumulator:
             "promotion_authority": False,
         }
         return {
-            "evaluator_version": EVALUATOR_VERSION,
+            "evaluator_version": self.evaluator_version,
+            **({"feature_window_contract_version":
+                self.feature_window_contract_version}
+               if self.feature_window_contract_version ==
+               EXPLICIT_FEATURE_WINDOW_CONTRACT else {}),
             "ast_fingerprint": fingerprint(self.expr),
             "ast_shape_fingerprint": shape_fingerprint(self.expr),
             "fields": sorted(fields_of(self.expr)),
@@ -1418,7 +1477,7 @@ class CandidatePopulationAccumulator:
 
     def add(self, instrument_id: str, samples: list[IntradaySample]) -> None:
         instrument_id = str(instrument_id)
-        ordered = sorted(samples, key=lambda row: row.decision_time)
+        ordered, feature_cube = _prepare_sample_sequence(samples)
         if any(row.instrument_id != instrument_id for row in ordered):
             raise ValueError("instrument key does not match sample instrument")
         audit = audit_causality(ordered, self.spec)
@@ -1428,7 +1487,13 @@ class CandidatePopulationAccumulator:
             training_key = candidate.teacher.training_contract_key()
             prediction_key = candidate.teacher.prediction_identity()
             if prediction_key not in predictions:
-                predictions[prediction_key] = candidate.teacher.predict(ordered)
+                if candidate.feature_window_contract_version == \
+                        EXPLICIT_FEATURE_WINDOW_CONTRACT:
+                    predictions[prediction_key] = candidate.teacher.predict(
+                        ordered, feature_cube=feature_cube)
+                else:
+                    predictions[prediction_key] = candidate.teacher.predict(
+                        ordered)
             if training_key not in targets:
                 targets[training_key] = [
                     executable_target(
@@ -1439,12 +1504,13 @@ class CandidatePopulationAccumulator:
             candidate._add_prepared(
                 instrument_id, ordered, audit,
                 shared_teacher_predictions=predictions[prediction_key],
-                shared_teacher_targets=targets[training_key])
+                shared_teacher_targets=targets[training_key],
+                feature_cube=feature_cube)
 
     def calibrate(self, instrument_id: str,
                   samples: list[IntradaySample]) -> None:
         instrument_id = str(instrument_id)
-        ordered = sorted(samples, key=lambda row: row.decision_time)
+        ordered, feature_cube = _prepare_sample_sequence(samples)
         if any(row.instrument_id != instrument_id for row in ordered):
             raise ValueError("instrument key does not match calibration sample")
         audit = audit_causality(ordered, self.spec)
@@ -1460,9 +1526,16 @@ class CandidatePopulationAccumulator:
                     for candidate in members[1:]):
                 raise ValueError(
                     "shared teacher follower changed before calibration freeze")
-            members[0].teacher.calibrate(instrument_id, ordered)
+            representative = members[0]
+            if representative.feature_window_contract_version == \
+                    EXPLICIT_FEATURE_WINDOW_CONTRACT:
+                representative.teacher.calibrate(
+                    instrument_id, ordered, feature_cube=feature_cube)
+            else:
+                representative.teacher.calibrate(instrument_id, ordered)
         for candidate in self.candidates.values():
-            candidate._calibrate_score_prepared(instrument_id, ordered)
+            candidate._calibrate_score_prepared(
+                instrument_id, ordered, feature_cube=feature_cube)
 
     def freeze_calibration(self) -> dict[str, dict]:
         for group_index, members in enumerate(self._teacher_fit_groups):
@@ -1495,7 +1568,11 @@ def evaluate_candidate_stream(instrument_samples, *, expr: dict,
                               minimum_predicted_edge_bps: float = 0.0,
                               family_pbo: float | None = None,
                               semantic_plan: dict | None = None,
-                              criteria: dict | None = None) -> dict:
+                              criteria: dict | None = None,
+                              feature_window_contract_version: str =
+                              LEGACY_FEATURE_WINDOW_CONTRACT,
+                              feature_cubes_by_instrument: dict | None = None
+                              ) -> dict:
     accumulator = CandidateAccumulator(
         expr=expr, spec=spec, horizon_seconds=horizon_seconds,
         execution=execution, position_mode=position_mode, threshold=threshold,
@@ -1503,8 +1580,22 @@ def evaluate_candidate_stream(instrument_samples, *, expr: dict,
         coefficient_policy=coefficient_policy,
         minimum_predicted_edge_bps=minimum_predicted_edge_bps,
         trials=trials, family_pbo=family_pbo, semantic_plan=semantic_plan,
-        criteria=criteria)
+        criteria=criteria,
+        feature_window_contract_version=feature_window_contract_version)
     for instrument_id, samples in instrument_samples:
+        cube = ((feature_cubes_by_instrument or {}).get(str(instrument_id))
+                if feature_cubes_by_instrument is not None else None)
+        if cube is not None:
+            if feature_window_contract_version != \
+                    EXPLICIT_FEATURE_WINDOW_CONTRACT:
+                raise ValueError(
+                    "feature cubes require the explicit-window contract")
+            existing = getattr(samples, "feature_cube", None)
+            if existing is not None and existing is not cube:
+                raise ValueError(
+                    "sample batch and separately supplied feature cube differ")
+            if existing is None:
+                samples = IntradaySampleBatch(tuple(samples), cube)
         accumulator.add(instrument_id, samples)
     return accumulator.finish()
 
@@ -1519,7 +1610,10 @@ def evaluate_candidate(samples_by_instrument: dict[str, list[IntradaySample]], *
                        minimum_predicted_edge_bps: float = 0.0,
                        family_pbo: float | None = None,
                        semantic_plan: dict | None = None,
-                       criteria: dict | None = None) -> dict:
+                       criteria: dict | None = None,
+                       feature_window_contract_version: str =
+                       LEGACY_FEATURE_WINDOW_CONTRACT,
+                       feature_cubes_by_instrument: dict | None = None) -> dict:
     """Evaluate one preregistered expression without tuning it on test results."""
     return evaluate_candidate_stream(
         ((instrument_id, samples_by_instrument[instrument_id])
@@ -1530,4 +1624,6 @@ def evaluate_candidate(samples_by_instrument: dict[str, list[IntradaySample]], *
         coefficient_policy=coefficient_policy,
         minimum_predicted_edge_bps=minimum_predicted_edge_bps,
         trials=trials, family_pbo=family_pbo, semantic_plan=semantic_plan,
-        criteria=criteria)
+        criteria=criteria,
+        feature_window_contract_version=feature_window_contract_version,
+        feature_cubes_by_instrument=feature_cubes_by_instrument)

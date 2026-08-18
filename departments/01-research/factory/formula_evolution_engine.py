@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections import Counter
 from copy import deepcopy
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import hashlib
 import json
 import math
@@ -181,21 +181,89 @@ def _masked_shape(node):
     }
 
 
-def subtree_shape_fingerprint(node: dict) -> str:
-    payload = json.dumps(
-        _masked_shape(node), sort_keys=True, separators=(",", ":"))
+def _feature_contract_shape(node, *, explicit_primitive_windows: bool):
+    """Mask tunable coordinates while retaining explicit primitive clocks.
+
+    A V1 primitive clock lived outside the AST, so every ``seconds`` value was
+    correctly parameter-insensitive.  In V2 a field leaf's clock selects a
+    different raw-event aggregate and is part of the feature's economic
+    semantics.  Temporal-operator clocks and constants remain masked.
+    """
+    if "const" in node:
+        return {"const": "#", "unit": node.get("unit", grammar.RATIO)}
+    if node["op"] == grammar.FIELD_OP:
+        shaped = {"op": grammar.FIELD_OP, "field": node["field"]}
+        if "seconds" in node:
+            shaped["seconds"] = (node["seconds"]
+                                 if explicit_primitive_windows else "#")
+        return shaped
+    if "arg" in node:
+        shaped = {
+            "op": node["op"],
+            "arg": _feature_contract_shape(
+                node["arg"],
+                explicit_primitive_windows=explicit_primitive_windows),
+        }
+        if "seconds" in node:
+            shaped["seconds"] = "#"
+        return shaped
+    if "args" in node:
+        args = [_feature_contract_shape(
+            value, explicit_primitive_windows=explicit_primitive_windows)
+                for value in node["args"]]
+        if node["op"] in {"add", "mul", "min", "max", "and", "or"}:
+            args.sort(key=lambda value: json.dumps(value, sort_keys=True))
+        return {"op": node["op"], "args": args}
+    return {
+        "op": "where",
+        "condition": _feature_contract_shape(
+            node["condition"],
+            explicit_primitive_windows=explicit_primitive_windows),
+        "then": _feature_contract_shape(
+            node["then"],
+            explicit_primitive_windows=explicit_primitive_windows),
+        "else": _feature_contract_shape(
+            node["else"],
+            explicit_primitive_windows=explicit_primitive_windows),
+    }
+
+
+def _shape_fingerprint(expr: dict, *, contract_version: str) -> str:
+    if contract_version not in grammar.FEATURE_WINDOW_CONTRACTS:
+        raise ValueError(f"unknown feature-window contract {contract_version!r}")
+    if contract_version == grammar.LEGACY_FEATURE_WINDOW_CONTRACT:
+        return grammar.shape_fingerprint(expr)
+    payload = json.dumps(_feature_contract_shape(
+        grammar.parse(expr), explicit_primitive_windows=True),
+        sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
-def subtree_shape_fingerprints(expr: dict, *, min_nodes: int = 2
-                               ) -> frozenset[str]:
+def subtree_shape_fingerprint(
+        node: dict, *, contract_version: str = (
+            grammar.LEGACY_FEATURE_WINDOW_CONTRACT)) -> str:
+    if contract_version not in grammar.FEATURE_WINDOW_CONTRACTS:
+        raise ValueError(f"unknown feature-window contract {contract_version!r}")
+    shaped = (_masked_shape(node)
+              if contract_version == grammar.LEGACY_FEATURE_WINDOW_CONTRACT
+              else _feature_contract_shape(
+                  node, explicit_primitive_windows=True))
+    payload = json.dumps(shaped, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def subtree_shape_fingerprints(
+        expr: dict, *, min_nodes: int = 2,
+        contract_version: str = grammar.LEGACY_FEATURE_WINDOW_CONTRACT,
+        ) -> frozenset[str]:
     """Return every non-trivial subtree shape, including boolean predicates."""
     root = grammar.parse(expr)
     found: set[str] = set()
 
     def walk(node: dict) -> None:
         if grammar.count_nodes(node) >= min_nodes:
-            found.add(subtree_shape_fingerprint(node))
+            found.add(subtree_shape_fingerprint(
+                node, contract_version=contract_version))
         for key in ("arg", "condition", "then", "else"):
             child = node.get(key)
             if isinstance(child, dict):
@@ -382,6 +450,8 @@ class EvolutionCandidate:
     parent_source_contract_fingerprints: tuple[str, ...]
     generation: int
     economic_mechanism: str
+    feature_window_contract_version: str = (
+        grammar.LEGACY_FEATURE_WINDOW_CONTRACT)
     adaptive_selection: bool = True
     promotion_authority: bool = False
     requires_preregistered_evaluation: bool = True
@@ -414,12 +484,16 @@ class EvolutionBatch:
     candidates: tuple[EvolutionCandidate, ...]
     kpi: ThroughputKPI
     audit: dict = field(default_factory=dict)
+    feature_window_contract_version: str = (
+        grammar.LEGACY_FEATURE_WINDOW_CONTRACT)
 
     def to_dict(self) -> dict:
         return {
             "engine_version": self.engine_version,
             "deterministic_seed": self.deterministic_seed,
             "generation": self.generation,
+            "feature_window_contract_version": (
+                self.feature_window_contract_version),
             "candidates": [candidate.to_dict()
                            for candidate in self.candidates],
             "kpi": asdict(self.kpi),
@@ -438,6 +512,8 @@ class EvolutionConfig:
     execution: str = "TAKER"
     min_failed_subtree_support: int = 2
     enable_crossover: bool = True
+    feature_window_contract_version: str = (
+        grammar.LEGACY_FEATURE_WINDOW_CONTRACT)
 
     def __post_init__(self) -> None:
         if self.population_size < 1:
@@ -446,6 +522,13 @@ class EvolutionConfig:
             raise ValueError("exploration_fraction must be in [0, 1]")
         if self.max_attempt_multiplier < 1:
             raise ValueError("max_attempt_multiplier must be positive")
+        contract_version = str(
+            self.feature_window_contract_version or "").strip()
+        if contract_version not in grammar.FEATURE_WINDOW_CONTRACTS:
+            raise ValueError(
+                f"unknown feature_window_contract_version {contract_version!r}")
+        object.__setattr__(
+            self, "feature_window_contract_version", contract_version)
         cleaned = tuple(sorted({int(value) for value in self.timeframes_seconds}))
         if not cleaned or any(value < grammar.MIN_SECONDS or
                               value > grammar.MAX_SECONDS for value in cleaned):
@@ -470,6 +553,8 @@ class _Parent:
     mechanism: str
     generation: int
     score: float | None = None
+    feature_window_upgraded: bool = False
+    upgrade_source_fingerprint: str = ""
 
 
 def _clock_bucket(clocks: set[int]) -> str:
@@ -550,8 +635,112 @@ def _zero(unit: str) -> dict:
     return {"const": 0.0, "unit": unit}
 
 
-def _field(name: str) -> dict:
-    return {"op": "field", "field": name}
+def _field(name: str, *, seconds: int | None = None) -> dict:
+    result = {"op": "field", "field": name}
+    if seconds is not None:
+        result["seconds"] = int(seconds)
+    return result
+
+
+def _explicit_field_variants(
+        name: str, *, preferred_seconds: int | None = None) -> tuple[dict, ...]:
+    """Return contract-valid V2 leaves in deterministic preference order."""
+    if name not in grammar.WINDOWED_FIELDS:
+        return (_field(name),)
+    windows = list(grammar.PRIMITIVE_WINDOWS_SECONDS)
+    if preferred_seconds in windows:
+        windows.remove(preferred_seconds)
+        windows.insert(0, int(preferred_seconds))
+    return tuple(_field(name, seconds=seconds) for seconds in windows)
+
+
+def _field_variants(name: str, config: EvolutionConfig, *,
+                    preferred_seconds: int | None = None) -> tuple[dict, ...]:
+    if (config.feature_window_contract_version ==
+            grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT):
+        return _explicit_field_variants(
+            name, preferred_seconds=preferred_seconds)
+    return (_field(name),)
+
+
+def _bind_legacy_primitive_window(expr: dict, *, seconds: int) -> dict:
+    """Copy a V1 AST and bind every raw-window primitive to one V2 clock.
+
+    Historical V1 feature vectors used one cohort-wide primitive lookback, so
+    binding all windowed leaves to the same clock is the economically identical
+    upgrade.  The caller-owned expression is never modified.
+    """
+    node = deepcopy(expr)
+
+    def walk(current: dict) -> None:
+        if (current.get("op") == grammar.FIELD_OP
+                and current["field"] in grammar.WINDOWED_FIELDS):
+            current["seconds"] = int(seconds)
+        if "arg" in current:
+            walk(current["arg"])
+        for child in current.get("args", ()):
+            walk(child)
+        for key in ("condition", "then", "else"):
+            if key in current:
+                walk(current[key])
+
+    walk(node)
+    return grammar.validate_feature_window_contract(
+        node, contract_version=grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT)
+
+
+def _parents_for_feature_window_contract(
+        parent: _Parent, config: EvolutionConfig) -> tuple[_Parent, ...]:
+    """Validate a parent or expand a wholly legacy parent into V2 variants.
+
+    A partially annotated expression is neither valid V1 nor valid V2 and is
+    rejected.  This prevents a silent hybrid where some primitive fields use a
+    cohort sidecar while others use leaf-bound windows.
+    """
+    contract = config.feature_window_contract_version
+    if contract == grammar.LEGACY_FEATURE_WINDOW_CONTRACT:
+        parsed = grammar.validate_feature_window_contract(
+            parent.expression, contract_version=contract)
+        return (replace(
+            parent, expression=parsed,
+            fingerprint=grammar.fingerprint(parsed),
+            shape_fingerprint=_shape_fingerprint(
+                parsed, contract_version=contract)),)
+
+    try:
+        parsed = grammar.validate_feature_window_contract(
+            parent.expression, contract_version=contract)
+    except grammar.IntradayExprError as explicit_error:
+        try:
+            legacy = grammar.validate_feature_window_contract(
+                parent.expression,
+                contract_version=grammar.LEGACY_FEATURE_WINDOW_CONTRACT)
+        except grammar.IntradayExprError:
+            raise explicit_error
+        variants = []
+        for seconds in grammar.PRIMITIVE_WINDOWS_SECONDS:
+            upgraded = _bind_legacy_primitive_window(
+                legacy, seconds=seconds)
+            variants.append(replace(
+                parent, expression=upgraded,
+                fingerprint=grammar.fingerprint(upgraded),
+                shape_fingerprint=_shape_fingerprint(
+                    upgraded, contract_version=contract),
+                feature_window_upgraded=True,
+                upgrade_source_fingerprint=parent.fingerprint,
+            ))
+        return tuple(variants)
+    return (replace(
+        parent, expression=parsed,
+        fingerprint=grammar.fingerprint(parsed),
+        shape_fingerprint=_shape_fingerprint(
+            parsed, contract_version=contract)),)
+
+
+def _feature_window_upgrade_operation(parent: _Parent) -> str:
+    primitive_windows = sorted(grammar.primitive_windows_of(parent.expression))
+    suffix = "_".join(f"{seconds}S" for seconds in primitive_windows)
+    return f"FEATURE_WINDOW_UPGRADE_{suffix}"
 
 
 def _walk_replacements(node: dict, predicate, replacements) -> list[dict]:
@@ -620,14 +809,17 @@ def _typed_mutations(parent: _Parent, config: EvolutionConfig,
                 grammar.COMPLETED_SECOND_REPLAYABLE_FIELDS):
             continue
         condition_unit = grammar.FIELDS[condition_field]
-        variants.append((
-            f"STATE_GATE_{condition_field.upper()}",
-            {"op": "where", "condition": {
-                "op": comparison, "args": [
-                    _field(condition_field),
-                    {"const": threshold, "unit": condition_unit},
-                ]}, "then": deepcopy(expr), "else": _zero(unit)},
-        ))
+        for condition_leaf in _field_variants(condition_field, config):
+            window = condition_leaf.get("seconds")
+            suffix = f"_{window}S" if window is not None else ""
+            variants.append((
+                f"STATE_GATE_{condition_field.upper()}{suffix}",
+                {"op": "where", "condition": {
+                    "op": comparison, "args": [
+                        condition_leaf,
+                        {"const": threshold, "unit": condition_unit},
+                    ]}, "then": deepcopy(expr), "else": _zero(unit)},
+            ))
 
     allowed_fields = (grammar.COMPLETED_SECOND_REPLAYABLE_FIELDS
                       if config.completed_second_only else frozenset(grammar.FIELDS))
@@ -636,32 +828,73 @@ def _typed_mutations(parent: _Parent, config: EvolutionConfig,
     for other in same_unit_fields:
         if other in grammar.fields_of(expr):
             continue
-        for op in ("add", "sub", "min", "max"):
-            variants.append((
-                f"{op.upper()}_{other.upper()}",
-                {"op": op, "args": [deepcopy(expr), _field(other)]},
-            ))
+        for other_leaf in _field_variants(other, config):
+            window = other_leaf.get("seconds")
+            suffix = f"_{window}S" if window is not None else ""
+            for op in ("add", "sub", "min", "max"):
+                variants.append((
+                    f"{op.upper()}_{other.upper()}{suffix}",
+                    {"op": op, "args": [deepcopy(expr), other_leaf]},
+                ))
 
     ratio_interactions = sorted(
         name for name in allowed_fields
         if grammar.FIELDS[name] == grammar.RATIO and name not in grammar.fields_of(expr))
     for other in ratio_interactions:
-        variants.append((
-            f"INTERACT_{other.upper()}",
-            {"op": "mul", "args": [deepcopy(expr), _field(other)]},
-        ))
+        for other_leaf in _field_variants(other, config):
+            window = other_leaf.get("seconds")
+            suffix = f"_{window}S" if window is not None else ""
+            variants.append((
+                f"INTERACT_{other.upper()}{suffix}",
+                {"op": "mul", "args": [deepcopy(expr), other_leaf]},
+            ))
 
     # Same-unit field replacement explores a new observable without violating a
     # parent operator's dimensional contract.
     def field_replacements(node: dict) -> list[dict]:
         old = node["field"]
         old_unit = grammar.FIELDS[old]
-        return [_field(name) for name in sorted(allowed_fields)
-                if grammar.FIELDS[name] == old_unit and name != old]
+        old_seconds = node.get("seconds")
+        replacements: list[dict] = []
+        for name in sorted(allowed_fields):
+            if grammar.FIELDS[name] != old_unit or name == old:
+                continue
+            # Preserve a primitive window when both leaves are raw-window
+            # fields.  A swap to snapshot state drops it; a swap from snapshot
+            # state to a raw-window field emits every legal explicit binding.
+            preferred = (old_seconds if old in grammar.WINDOWED_FIELDS
+                         and name in grammar.WINDOWED_FIELDS else None)
+            replacements.extend(_field_variants(
+                name, config, preferred_seconds=preferred))
+            if preferred is not None:
+                # A same-unit field swap changes the observable, not its clock.
+                replacements = [replacement for replacement in replacements
+                                if (replacement.get("seconds") == preferred
+                                    or "seconds" not in replacement)]
+        return replacements
 
     for candidate in _walk_replacements(
             expr, lambda node: node.get("op") == "field", field_replacements):
         variants.append(("SAME_UNIT_FIELD_SWAP", candidate))
+
+    if (config.feature_window_contract_version ==
+            grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT):
+        # A primitive clock is a feature coordinate in V2, not an evaluator
+        # parameter.  Emit one-leaf-at-a-time swaps so lineage and attribution
+        # remain auditable when an expression has several raw-window fields.
+        def primitive_window_replacements(node: dict) -> list[dict]:
+            current = int(node["seconds"])
+            return [_field(node["field"], seconds=seconds)
+                    for seconds in grammar.PRIMITIVE_WINDOWS_SECONDS
+                    if seconds != current]
+
+        for candidate in _walk_replacements(
+                expr,
+                lambda node: (node.get("op") == grammar.FIELD_OP
+                              and node.get("field") in grammar.WINDOWED_FIELDS
+                              and "seconds" in node),
+                primitive_window_replacements):
+            variants.append(("PRIMITIVE_WINDOW_SWAP", candidate))
 
     # Change one existing temporal operator while preserving its explicit clock.
     def temporal_replacements(node: dict) -> list[dict]:
@@ -824,11 +1057,13 @@ class FormulaEvolutionEngine:
         parsed_seeds: list[_Parent] = []
         for seed in seeds:
             try:
-                parent = self._parse_seed(seed)
-                if self.config.completed_second_only:
-                    grammar.validate_completed_second_candidate(
-                        parent.expression, execution=self.config.execution)
-                parsed_seeds.append(parent)
+                parents = _parents_for_feature_window_contract(
+                    self._parse_seed(seed), self.config)
+                for parent in parents:
+                    if self.config.completed_second_only:
+                        grammar.validate_completed_second_candidate(
+                            parent.expression, execution=self.config.execution)
+                    parsed_seeds.append(parent)
             except (TypeError, ValueError, grammar.IntradayExprError):
                 rejection["INVALID_SEED"] += 1
         parsed_seeds.sort(key=lambda parent: (
@@ -840,11 +1075,13 @@ class FormulaEvolutionEngine:
         parsed_outcomes: list[tuple[FormulaOutcome, _Parent]] = []
         for outcome in outcomes:
             try:
-                parent = self._parse_outcome(outcome)
-                if self.config.completed_second_only:
-                    grammar.validate_completed_second_candidate(
-                        parent.expression, execution=self.config.execution)
-                parsed_outcomes.append((outcome, parent))
+                parents = _parents_for_feature_window_contract(
+                    self._parse_outcome(outcome), self.config)
+                for parent in parents:
+                    if self.config.completed_second_only:
+                        grammar.validate_completed_second_candidate(
+                            parent.expression, execution=self.config.execution)
+                    parsed_outcomes.append((outcome, parent))
             except (TypeError, ValueError, grammar.IntradayExprError):
                 rejection["INVALID_OUTCOME"] += 1
 
@@ -854,14 +1091,27 @@ class FormulaEvolutionEngine:
         known_exact = {str(value) for value in known_exact_fingerprints}
         known_shapes = {str(value) for value in known_shape_fingerprints}
         for expression in known_expressions:
-            parsed = grammar.parse(expression)
-            known_exact.add(grammar.fingerprint(parsed))
-            known_shapes.add(grammar.shape_fingerprint(parsed))
+            known_parent = _Parent(
+                expression=grammar.parse(expression), fingerprint="",
+                shape_fingerprint="", seed_id="known-expression",
+                candidate_identity_fingerprint="",
+                semantic_plan_fingerprint="", economic_family_id="",
+                source_lead_ids=(), source_contract_fingerprints=(),
+                root_lineage_id="", exposure_fingerprint="", source="KNOWN",
+                mechanism="KNOWN", generation=0,
+            )
+            for variant in _parents_for_feature_window_contract(
+                    known_parent, self.config):
+                known_exact.add(variant.fingerprint)
+                known_shapes.add(variant.shape_fingerprint)
         # Every measured formula is already spent trial material.  It may parent
-        # a child, but cannot re-enter the batch under a new label or clock.
+        # a child, but cannot re-enter the batch under a new label or clock.  A
+        # legacy observation's V2 translations have not themselves been
+        # measured, so those opt-in upgrade candidates remain eligible.
         for _, parent in parsed_outcomes:
-            known_exact.add(parent.fingerprint)
-            known_shapes.add(parent.shape_fingerprint)
+            if not parent.feature_window_upgraded:
+                known_exact.add(parent.fingerprint)
+                known_shapes.add(parent.shape_fingerprint)
 
         blocked_subtrees: set[str] = set()
         for item in failed_subtrees:
@@ -877,7 +1127,8 @@ class FormulaEvolutionEngine:
         # ISO-8601 timestamps sort chronologically; legacy rows without a stamp
         # use caller order as the explicit deterministic tie-break (later wins).
         latest_by_identity: dict[
-            tuple[str, str], tuple[tuple[int, str, int], FormulaOutcome, _Parent]
+            tuple[str, str, str],
+            tuple[tuple[int, str, int], FormulaOutcome, _Parent]
         ] = {}
         for index, (outcome, parent) in enumerate(parsed_outcomes):
             status = str(outcome.outcome).upper()
@@ -890,22 +1141,83 @@ class FormulaEvolutionEngine:
             identity_key = (
                 parent.candidate_identity_fingerprint,
                 parent.root_lineage_id,
+                # One V1 observation expands into several unmeasured V2
+                # primitive-clock parents. Keep those variants distinct for
+                # candidate selection; measured evidence is collapsed back to
+                # its source observation immediately below.
+                parent.fingerprint if parent.feature_window_upgraded else "",
             )
             previous = latest_by_identity.get(identity_key)
             if previous is None or key > previous[0]:
                 latest_by_identity[identity_key] = (
                     key, outcome, parent)
-        terminal_rows = [(outcome, parent)
-                         for _, outcome, parent in latest_by_identity.values()]
+        variant_terminal_records = list(latest_by_identity.values())
+
+        # A single measured V1 outcome expands into one unmeasured V2 parent
+        # candidate per primitive window.  Those translations are useful
+        # selection priors, but they remain one terminal observation.  Collapse
+        # them by durable candidate/root/observation before counting evidence;
+        # otherwise an invariant subtree receives support=7 from one failure
+        # and crosses the hard-veto threshold without independent replication.
+        by_observation: dict[
+            tuple[str, str, str],
+            tuple[tuple[int, str, int], list[
+                tuple[FormulaOutcome, _Parent]]]
+        ] = {}
+        for key, outcome, parent in variant_terminal_records:
+            observation_key = (
+                parent.candidate_identity_fingerprint,
+                parent.root_lineage_id,
+                str(outcome.observation_id),
+            )
+            existing = by_observation.get(observation_key)
+            if existing is None:
+                by_observation[observation_key] = (
+                    key, [(outcome, parent)])
+            else:
+                by_observation[observation_key] = (
+                    max(key, existing[0]),
+                    [*existing[1], (outcome, parent)],
+                )
+        latest_observation_by_identity: dict[
+            tuple[str, str],
+            tuple[tuple[int, str, int], list[
+                tuple[FormulaOutcome, _Parent]]]
+        ] = {}
+        for observation_key, record in by_observation.items():
+            identity_key = observation_key[:2]
+            previous = latest_observation_by_identity.get(identity_key)
+            if previous is None or record[0] > previous[0]:
+                latest_observation_by_identity[identity_key] = record
+        terminal_evidence_groups = [
+            rows for _, rows in latest_observation_by_identity.values()]
+        # Keep every V2 translation of the selected source observation in the
+        # parent pool.  Each emitted child still has no promotion authority and
+        # requires its own preregistered measurement.
+        terminal_rows = [
+            row for group in terminal_evidence_groups for row in group]
 
         # Repeated-subtree support and survivor exemptions are based only on the
         # active terminal state of each identity/root pair.  Superseded F1 rows
         # cannot keep vetoing an F2 survivor (or exempting a later failure).
         losing_shape_support = Counter()
         surviving_shapes: set[str] = set()
-        for outcome, parent in terminal_rows:
+        for group in terminal_evidence_groups:
+            outcome = group[0][0]
             status = str(outcome.outcome).upper()
-            shapes = subtree_shape_fingerprints(parent.expression)
+            shape_sets = [set(subtree_shape_fingerprints(
+                parent.expression, contract_version=(
+                    self.config.feature_window_contract_version)))
+                for _group_outcome, parent in group]
+            if any(parent.feature_window_upgraded
+                   for _group_outcome, parent in group):
+                # Only a subtree invariant across every unmeasured window
+                # translation existed in the measured V1 equation.  A 2s- or
+                # 600s-specific shape has never been tested and cannot acquire
+                # failure/survivor authority by translation.
+                shapes = set.intersection(*shape_sets)
+            else:
+                shapes = set().union(*shape_sets)
             if status in SURVIVOR_OUTCOMES:
                 surviving_shapes.update(shapes)
             elif status in FAILED_OUTCOMES:
@@ -939,7 +1251,10 @@ class FormulaEvolutionEngine:
                 rejection["FAILED_FORMULA_RESEED"] += 1
             elif parent.seed_id in failed_source_lead_ids:
                 rejection["FAILED_FORMULA_RESEED"] += 1
-            elif subtree_shape_fingerprints(parent.expression) & blocked_subtrees:
+            elif subtree_shape_fingerprints(
+                    parent.expression, contract_version=(
+                        self.config.feature_window_contract_version)
+                    ) & blocked_subtrees:
                 rejection["FAILED_SUBTREE"] += 1
             else:
                 exploratory.append(parent)
@@ -973,10 +1288,15 @@ class FormulaEvolutionEngine:
             and _direction_inversion_eligible(outcome)
         ]
         cost_infeasible_failures = sum(
-            str(outcome.outcome).upper() in FAILED_OUTCOMES
-            and _cost_infeasible_failure(outcome)
-            for outcome, _ in terminal_rows
-        )
+            str(group[0][0].outcome).upper() in FAILED_OUTCOMES
+            and _cost_infeasible_failure(group[0][0])
+            for group in terminal_evidence_groups)
+        direction_inversion_eligible_evidence = sum(
+            str(group[0][0].outcome).upper() in FAILED_OUTCOMES
+            and str(group[0][0].evidence_scope).upper() in
+            ADAPTIVE_EVIDENCE_SCOPES
+            and _direction_inversion_eligible(group[0][0])
+            for group in terminal_evidence_groups)
         emitted: list[EvolutionCandidate] = []
         batch_exact: set[str] = set()
         batch_shapes: set[str] = set()
@@ -988,11 +1308,16 @@ class FormulaEvolutionEngine:
 
         def accept(expression: dict, *, arm: str, origin: str, operation: str,
                    parents: tuple[_Parent, ...], mechanism: str,
-                   lineage_parents: tuple[_Parent, ...] | None = None) -> bool:
+                   lineage_parents: tuple[_Parent, ...] | None = None,
+                   parent_fingerprints_override: tuple[str, ...] | None = None,
+                   ) -> bool:
             nonlocal attempts, contract_valid
             attempts += 1
             try:
                 parsed = grammar.parse(expression)
+                grammar.validate_feature_window_contract(
+                    parsed, contract_version=(
+                        self.config.feature_window_contract_version))
                 if self.config.completed_second_only:
                     grammar.validate_completed_second_candidate(
                         parsed, execution=self.config.execution)
@@ -1004,18 +1329,25 @@ class FormulaEvolutionEngine:
                 rejection["NON_DIRECTIONAL"] += 1
                 return False
             fingerprint = grammar.fingerprint(parsed)
-            shape = grammar.shape_fingerprint(parsed)
+            shape = _shape_fingerprint(
+                parsed, contract_version=(
+                    self.config.feature_window_contract_version))
             if fingerprint in known_exact or fingerprint in batch_exact:
                 rejection["EXACT_DUPLICATE"] += 1
                 return False
             if shape in known_shapes or shape in batch_shapes:
                 rejection["SHAPE_DUPLICATE"] += 1
                 return False
-            overlap = subtree_shape_fingerprints(parsed) & blocked_subtrees
+            overlap = subtree_shape_fingerprints(
+                parsed, contract_version=(
+                    self.config.feature_window_contract_version)
+            ) & blocked_subtrees
             if overlap:
                 rejection["FAILED_SUBTREE"] += 1
                 return False
-            parent_fps = tuple(parent.fingerprint for parent in parents)
+            parent_fps = (tuple(parent.fingerprint for parent in parents)
+                          if parent_fingerprints_override is None
+                          else parent_fingerprints_override)
             if any(shape == parent.shape_fingerprint for parent in parents):
                 rejection["PARAMETER_ONLY_CHILD"] += 1
                 return False
@@ -1035,13 +1367,22 @@ class FormulaEvolutionEngine:
                 for parent in provenance_parents
                 if not parent.source_contract_fingerprints
             }))
-            candidate_id = hashlib.sha256(json.dumps({
+            identity_payload = {
                 "generation": generation, "fingerprint": fingerprint,
                 "parents": parent_fps, "operation": operation,
                 "parent_source_contracts": parent_source_contracts,
                 "parent_semantic_plans": parent_semantics,
                 "parent_candidate_identities": parent_candidate_identities,
-            }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:20]
+            }
+            # Preserve all V1 candidate IDs byte-for-byte.  V2 makes its
+            # primitive-window contract an explicit scientific identity input.
+            if (self.config.feature_window_contract_version !=
+                    grammar.LEGACY_FEATURE_WINDOW_CONTRACT):
+                identity_payload["feature_window_contract_version"] = (
+                    self.config.feature_window_contract_version)
+            candidate_id = hashlib.sha256(json.dumps(
+                identity_payload, sort_keys=True,
+                separators=(",", ":")).encode()).hexdigest()[:20]
             emitted.append(EvolutionCandidate(
                 candidate_id=candidate_id, expression=parsed,
                 fingerprint=fingerprint, shape_fingerprint=shape,
@@ -1052,6 +1393,8 @@ class FormulaEvolutionEngine:
                     for lead_id in parent.source_lead_ids)),
                 parent_source_contract_fingerprints=parent_source_contracts,
                 generation=generation, economic_mechanism=mechanism,
+                feature_window_contract_version=(
+                    self.config.feature_window_contract_version),
             ))
             batch_exact.add(fingerprint)
             batch_shapes.add(shape)
@@ -1079,9 +1422,32 @@ class FormulaEvolutionEngine:
         for parent in seed_order:
             if len(emitted) >= size or arm_counts["EXPLORATION"] >= exploration_target:
                 break
+            operation = "SEED"
+            if parent.feature_window_upgraded:
+                operation = _feature_window_upgrade_operation(parent)
             accept(parent.expression, arm="EXPLORATION", origin=parent.source,
-                   operation="SEED", parents=(), mechanism=parent.mechanism,
+                   operation=operation, parents=(), mechanism=parent.mechanism,
                    lineage_parents=(parent,))
+
+        # A measured V1 survivor is a useful selection prior, but each explicit
+        # primitive-clock translation is a new trial.  Emit those translations
+        # before breeding structural children and retain the persisted V1
+        # fingerprint as their auditable parent without changing stored memory.
+        for parent in exploitative:
+            if (len(emitted) >= size
+                    or arm_counts["EXPLOITATION"] >= exploitation_target):
+                break
+            if not parent.feature_window_upgraded:
+                continue
+            accept(
+                parent.expression, arm="EXPLOITATION",
+                origin="OUTCOME_EVOLUTION",
+                operation=_feature_window_upgrade_operation(parent),
+                parents=(), mechanism=parent.mechanism,
+                lineage_parents=(parent,),
+                parent_fingerprints_override=(
+                    parent.upgrade_source_fingerprint,),
+            )
 
         proposal_cache: dict[tuple[str, str], list[tuple[str, dict]]] = {}
         crossover_cache: dict[tuple[str, str], list[tuple[str, dict]]] = {}
@@ -1180,20 +1546,45 @@ class FormulaEvolutionEngine:
             and str(outcome.outcome).upper() in SURVIVOR_OUTCOMES
             for outcome, _ in parsed_outcomes
         )
+        upgraded_parent_sources = {
+            ("SEED", parent.seed_id, parent.source_contract_fingerprints)
+            for parent in parsed_seeds if parent.feature_window_upgraded
+        } | {
+            ("OUTCOME", parent.candidate_identity_fingerprint,
+             parent.root_lineage_id, parent.seed_id)
+            for _, parent in parsed_outcomes if parent.feature_window_upgraded
+        }
+        upgraded_parent_variants = (
+            sum(parent.feature_window_upgraded for parent in parsed_seeds)
+            + sum(parent.feature_window_upgraded
+                  for _, parent in parsed_outcomes))
         audit = {
             "selection_policy": "FIXED_EXPLORATION_EXPLOITATION_SPLIT",
             "exploration_fraction": self.config.exploration_fraction,
+            "feature_window_contract_version": (
+                self.config.feature_window_contract_version),
+            "primitive_windows_seconds": list(
+                grammar.PRIMITIVE_WINDOWS_SECONDS),
+            "legacy_parents_upgraded": len(upgraded_parent_sources),
+            "explicit_parent_variants": upgraded_parent_variants,
             "fixed_timeframes_seconds": list(self.config.timeframes_seconds),
             "exact_dedup": True,
             "shape_dedup": True,
             "failed_subtree_veto_support": self.config.min_failed_subtree_support,
             "blocked_subtree_shapes": len(blocked_subtrees),
+            "terminal_evidence_count": len(terminal_evidence_groups),
+            "upgrade_translation_evidence_collapsed": sum(
+                max(0, len(group) - 1)
+                for group in terminal_evidence_groups),
+            "max_observed_failed_subtree_support": max(
+                losing_shape_support.values(), default=0),
             "exploration_parent_count": len(exploratory),
             "exploit_parent_count": len(exploitative),
             "cost_infeasible_families_abandoned": cost_infeasible_failures,
             "failed_source_contracts": len(
                 failed_source_contract_fingerprints),
-            "direction_inversion_eligible_failures": len(inversion_rows),
+            "direction_inversion_eligible_failures":
+                direction_inversion_eligible_evidence,
             "lockbox_survivors_ignored_for_selection": lockbox_ignored,
             "promotion_authority": False,
             "adaptive_selection": True,
@@ -1209,6 +1600,8 @@ class FormulaEvolutionEngine:
             deterministic_seed=self.config.deterministic_seed,
             generation=generation, candidates=tuple(emitted), kpi=kpi,
             audit=audit,
+            feature_window_contract_version=(
+                self.config.feature_window_contract_version),
         )
 
 

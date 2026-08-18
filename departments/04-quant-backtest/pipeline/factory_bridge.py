@@ -96,6 +96,9 @@ INTRADAY_EDGE_KEYS = frozenset({
     "fast_screen_enabled", "fast_screen_sessions", "fast_screen_instruments",
     "fast_screen_min_opportunities", "fast_screen_min_net_bps",
     "screening_population", "screening_cohort_version",
+    "feature_window_contract_version",
+    "migration_parent_ast_fingerprint",
+    "migration_parent_feature_window_contract_version",
 })
 
 

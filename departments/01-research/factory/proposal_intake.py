@@ -116,7 +116,12 @@ def _intraday_novelty_signature(row: dict, grammar) -> dict:
         "shape": grammar.shape_fingerprint(expr),
         "fields": frozenset(grammar.fields_of(expr)),
         "operators": frozenset(grammar.operators_of(expr)),
-        "clocks": frozenset(str(value) for value in grammar.clocks_of(expr)),
+        "clocks": frozenset(
+            str(value) for value in
+            getattr(grammar, "temporal_windows_of", grammar.clocks_of)(expr)),
+        "primitive_windows": frozenset(
+            str(value) for value in
+            getattr(grammar, "primitive_windows_of", lambda _expr: set())(expr)),
         "semantic": _semantic_tokens(row.get("semantic_plan") or {}),
     }
 
@@ -130,10 +135,12 @@ def _intraday_pairwise_novelty(left: dict, right: dict) -> tuple[float, float,
     encode different events, states, or directions.
     """
     structural = (
-        0.50 * float(left["shape"] != right["shape"])
-        + 0.25 * _set_distance(left["fields"], right["fields"])
-        + 0.15 * _set_distance(left["operators"], right["operators"])
+        0.45 * float(left["shape"] != right["shape"])
+        + 0.22 * _set_distance(left["fields"], right["fields"])
+        + 0.13 * _set_distance(left["operators"], right["operators"])
         + 0.10 * _set_distance(left["clocks"], right["clocks"])
+        + 0.10 * _set_distance(
+            left["primitive_windows"], right["primitive_windows"])
     )
     semantic = _set_distance(left["semantic"], right["semantic"])
     return 0.75 * structural + 0.25 * semantic, structural, semantic
@@ -548,10 +555,14 @@ def _attach_intraday_screening_cohort(
     import intraday_ast_contract as intraday_grammar  # noqa: PLC0415
     from intraday_ast_contract import (  # noqa: PLC0415
         COMPLETED_SECOND_SCREENING_COHORT_VERSION,
+        EXPLICIT_FEATURE_WINDOW_CONTRACT,
+        LEGACY_FEATURE_WINDOW_CONTRACT,
+        field_window_bindings_of,
         fingerprint,
         parse,
         unit_of,
         validate_completed_second_candidate,
+        validate_feature_window_contract,
     )
     from intraday_ablation import (  # noqa: PLC0415
         generate as generate_ablations,
@@ -590,10 +601,31 @@ def _attach_intraday_screening_cohort(
     configured_entry = str(params.get("entry_policy") or "").strip().upper()
     configured_coefficient = str(
         params.get("coefficient_policy") or "").strip().upper()
+    def feature_window_contract_for(expression: dict,
+                                    declared: object = None) -> str:
+        version = str(declared or "").strip()
+        if not version:
+            version = (
+                EXPLICIT_FEATURE_WINDOW_CONTRACT
+                if any(seconds is not None for _field, seconds in
+                       field_window_bindings_of(expression))
+                else LEGACY_FEATURE_WINDOW_CONTRACT)
+        validate_feature_window_contract(
+            expression, contract_version=version)
+        return version
+
+    primary_window_contract = feature_window_contract_for(
+        params.get("intraday_signal_expr"),
+        params.get("feature_window_contract_version"))
+    primary = validate_feature_window_contract(
+        params.get("intraday_signal_expr"),
+        contract_version=primary_window_contract)
     primary = validate_completed_second_candidate(
-        params.get("intraday_signal_expr"), execution=proposal_execution)
+        primary, execution=proposal_execution)
+    params["feature_window_contract_version"] = primary_window_contract
     primary_fp = fingerprint(primary)
-    contract_groups: dict[tuple[str, str, str, str, str], list[dict]] = {}
+    contract_groups: dict[
+        tuple[str, str, str, str, str, str], list[dict]] = {}
     rejected_primary: list[str] = []
 
     # The planner chooses the preregistered primary, but it is not a reliable
@@ -617,6 +649,8 @@ def _attach_intraday_screening_cohort(
             continue
         try:
             expr = parse(contract.get("candidate_signal_expr"))
+            candidate_window_contract = feature_window_contract_for(
+                expr, contract.get("feature_window_contract_version"))
         except (TypeError, ValueError):
             continue
         fp = fingerprint(expr)
@@ -659,6 +693,7 @@ def _attach_intraday_screening_cohort(
             entry_policy,
             coefficient_policy,
             source_baseline_fp,
+            candidate_window_contract,
         )
         contract_groups.setdefault(contract_key, []).append({
             "candidate_role": "LINKED_CANDIDATE",
@@ -670,13 +705,18 @@ def _attach_intraday_screening_cohort(
             "entry_policy": entry_policy,
             "coefficient_policy": coefficient_policy,
             "source_baseline_expr": source_baseline,
+            "feature_window_contract_version": candidate_window_contract,
             "evolution_role": str(contract.get("evolution_role") or "SEED"),
+            "evolution_operators": list(
+                contract.get("evolution_operators") or ()),
             "parent_ast_fingerprint": str(
                 contract.get("parent_ast_fingerprint") or ""),
             "parent_candidate_identity_fingerprint": str(
                 contract.get("parent_candidate_identity_fingerprint") or ""),
             "screening_cohort_version": INTRADAY_SCREENING_COHORT_VERSION,
             "_parent_signal_expr": contract.get("parent_signal_expr"),
+            "_parent_feature_window_contract_version": contract.get(
+                "parent_feature_window_contract_version"),
         })
 
     # One AST16 can occupy only one cohort slot.  First merge provenance only
@@ -684,7 +724,8 @@ def _attach_intraday_screening_cohort(
     # and coefficient policy), then select one contract per AST deterministically.
     # Conflicting contracts remain unused so they can receive independent
     # experiments instead of being falsely cited by this proposal.
-    grouped_rows: list[tuple[tuple[str, str, str, str, str], dict]] = []
+    grouped_rows: list[
+        tuple[tuple[str, str, str, str, str, str], dict]] = []
     for contract_key, rows in contract_groups.items():
         canonical = min(
             rows,
@@ -693,6 +734,8 @@ def _attach_intraday_screening_cohort(
                 str(row.get("evolution_role") or ""),
                 json.dumps(row.get("_parent_signal_expr"), sort_keys=True,
                            separators=(",", ":"), default=str),
+                str(row.get(
+                    "_parent_feature_window_contract_version") or ""),
                 row["source_lead_ids"][0],
             ),
         ).copy()
@@ -709,6 +752,7 @@ def _attach_intraday_screening_cohort(
         and key[1] == _exact_semantic_plan_fingerprint(proposal_plan)
         and (not configured_entry or key[2] == configured_entry)
         and (not configured_coefficient or key[3] == configured_coefficient)
+        and key[5] == primary_window_contract
         and linked_lead_ids.intersection(row["source_lead_ids"])
     ]
     if not primary_contracts:
@@ -725,9 +769,10 @@ def _attach_intraday_screening_cohort(
         key=lambda item: (item[0], _intraday_novelty_key(item[1])))
 
     candidates: dict[str, dict] = {primary_fp: primary_row}
-    by_ast: dict[str, list[tuple[tuple[str, str, str, str, str], dict]]] = {}
+    by_ast: dict[
+        str, list[tuple[tuple[str, str, str, str, str, str], dict]]] = {}
     for key, row in grouped_rows:
-        if key[0] != primary_fp:
+        if key[0] != primary_fp and key[5] == primary_window_contract:
             by_ast.setdefault(key[0], []).append((key, row))
     for fp, choices in by_ast.items():
         _, candidates[fp] = min(
@@ -749,10 +794,16 @@ def _attach_intraday_screening_cohort(
     lineage_parents = []
     for child in list(candidates.values()):
         parent_raw = child.pop("_parent_signal_expr", None)
+        declared_parent_window_contract = child.pop(
+            "_parent_feature_window_contract_version", None)
         if parent_raw in (None, ""):
             continue
         try:
             parent = parse(parent_raw)
+            parent_window_contract = feature_window_contract_for(
+                parent, declared_parent_window_contract)
+            child["parent_feature_window_contract_version"] = \
+                parent_window_contract
             validate_completed_second_candidate(
                 parent,
                 execution=dict(child["semantic_plan"]).get("execution"),
@@ -762,6 +813,12 @@ def _attach_intraday_screening_cohort(
             if ((not child_structure_only and unit_of(parent) != "BPS")
                     or (child_structure_only and unit_of(parent) == "BOOL")
                     or parent_fp in known_fps):
+                continue
+            if parent_window_contract != child[
+                    "feature_window_contract_version"]:
+                # A legacy formula upgraded to explicit primitive windows is
+                # preserved as lineage provenance, but cannot share one frozen
+                # evaluator contract with its V2 child.
                 continue
         except (TypeError, ValueError):
             continue
@@ -776,6 +833,7 @@ def _attach_intraday_screening_cohort(
             "entry_policy": child["entry_policy"],
             "coefficient_policy": child["coefficient_policy"],
             "source_baseline_expr": child.get("source_baseline_expr"),
+            "feature_window_contract_version": parent_window_contract,
             "evolution_role": "PARENT_ABLATION",
             "parent_of_ast_fingerprint": child["ast_fingerprint"],
             "screening_cohort_version": INTRADAY_SCREENING_COHORT_VERSION,
@@ -797,6 +855,7 @@ def _attach_intraday_screening_cohort(
             "coefficient_policy": primary_source["coefficient_policy"],
             "source_baseline_expr": primary_source.get(
                 "source_baseline_expr"),
+            "feature_window_contract_version": primary_window_contract,
             "evolution_role": "EMPIRICAL_TERM_INFLUENCE",
             "screening_cohort_version": INTRADAY_SCREENING_COHORT_VERSION,
         })
@@ -854,13 +913,23 @@ def _attach_intraday_screening_cohort(
 
     primary_parent_fp = str(
         primary_source.get("parent_ast_fingerprint") or "")
+    cross_contract_migration = False
     if primary_parent_fp:
         primary_parent = pool.get(primary_parent_fp)
         if primary_parent is None:
-            raise ValueError(
-                "evolved primary declares a parent formula that is absent "
-                "from its exact source-backed cohort")
-        select_with_parents(primary_parent, required=True)
+            cross_contract_migration = (
+                primary_source.get(
+                    "parent_feature_window_contract_version") not in
+                (None, "", primary_window_contract)
+                and "PRIMITIVE_WINDOW_MIGRATION" in {
+                    str(value).upper() for value in
+                    primary_source.get("evolution_operators") or ()})
+            if not cross_contract_migration:
+                raise ValueError(
+                    "evolved primary declares a parent formula that is absent "
+                    "from its exact source-backed cohort")
+        else:
+            select_with_parents(primary_parent, required=True)
     for row in preferred:
         if len(sidecars) >= capacity:
             break
@@ -869,13 +938,26 @@ def _attach_intraday_screening_cohort(
         row.pop("_parent_signal_expr", None)
     params["screening_population"] = sidecars[:MAX_INTRADAY_COHORT - 1]
     params["screening_cohort_version"] = INTRADAY_SCREENING_COHORT_VERSION
+    params["feature_window_contract_version"] = primary_window_contract
     params["entry_policy"] = primary_source["entry_policy"]
     params["coefficient_policy"] = primary_source["coefficient_policy"]
     params["source_baseline_expr"] = primary_source.get(
         "source_baseline_expr")
     params["parent_candidate_identity_fingerprint"] = primary_source.get(
         "parent_candidate_identity_fingerprint") or None
-    params["parent_ast_fingerprint"] = primary_parent_fp or None
+    if cross_contract_migration:
+        params["migration_parent_ast_fingerprint"] = primary_parent_fp
+        params["migration_parent_feature_window_contract_version"] = str(
+            primary_source.get("parent_feature_window_contract_version") or
+            LEGACY_FEATURE_WINDOW_CONTRACT)
+    # A V1 parent cannot be replayed inside a frozen V2 feature cube.  Its exact
+    # AST remains durable research provenance on the evolved methodology lead
+    # (and normally as source_baseline_expr), but it must not masquerade as an
+    # in-cohort runtime lineage edge: the runner correctly requires every such
+    # parent to share the primary evaluator contract and be present in the
+    # frozen screening population.
+    params["parent_ast_fingerprint"] = (
+        None if cross_contract_migration else primary_parent_fp or None)
     material = {
         "label": proposal.label,
         "baseline": proposal.baseline,

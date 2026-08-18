@@ -40,7 +40,7 @@ from literature_derivation import (  # noqa: E402
 )
 
 
-MODULE_VERSION = "outcome-conditioned-evolution-intake-v1"
+MODULE_VERSION = "outcome-conditioned-evolution-intake-v2"
 MAX_EVOLUTION_BATCH = 64
 
 _PARENT_SQL = """
@@ -138,6 +138,11 @@ def build_evolved_lead(parent: dict[str, Any], candidate: dict[str, Any], *,
             "parent must be an eligible formula-discovery-v5 INTRADAY_EVENT lead")
 
     parent_expr = grammar.parse(parent_contract.get("candidate_signal_expr"))
+    parent_window_contract = str(
+        parent_contract.get("feature_window_contract_version") or
+        grammar.LEGACY_FEATURE_WINDOW_CONTRACT)
+    grammar.validate_feature_window_contract(
+        parent_expr, contract_version=parent_window_contract)
     child_expr = grammar.parse(_json(
         _nonblank(candidate, "candidate_signal_expr"),
         field="candidate_signal_expr"))
@@ -148,6 +153,14 @@ def build_evolved_lead(parent: dict[str, Any], candidate: dict[str, Any], *,
                           field="semantic_plan")
     if not isinstance(semantic_plan, dict):
         raise ValueError("semantic_plan must be a JSON object")
+    child_window_contract = str(
+        candidate.get("feature_window_contract_version") or
+        (grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT
+         if any(seconds is not None for _field, seconds in
+                grammar.field_window_bindings_of(child_expr))
+         else grammar.LEGACY_FEATURE_WINDOW_CONTRACT))
+    child_expr = grammar.validate_feature_window_contract(
+        child_expr, contract_version=child_window_contract)
     child_expr = grammar.validate_completed_second_candidate(
         child_expr, execution=semantic_plan.get("execution"))
     thesis = _json(_nonblank(candidate, "formula_thesis"),
@@ -172,11 +185,34 @@ def build_evolved_lead(parent: dict[str, Any], candidate: dict[str, Any], *,
     mode, source_baseline, derivation_transforms = _derivation_contract(
         parent_contract, parent_expr, candidate)
 
+    normalized_evolution_operators = {
+        str(value).strip().upper()
+        for value in evolution_operators
+        if str(value).strip()
+    }
+    if parent_window_contract != child_window_contract:
+        if not (
+                parent_window_contract ==
+                grammar.LEGACY_FEATURE_WINDOW_CONTRACT
+                and child_window_contract ==
+                grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT):
+            raise ValueError(
+                "feature-window evolution only supports an auditable "
+                "legacy-to-explicit migration")
+        if ("PRIMITIVE_WINDOW_MIGRATION" not in
+                normalized_evolution_operators
+                or "PRIMITIVE_WINDOW_MIGRATION" not in
+                derivation_transforms):
+            raise ValueError(
+                "legacy-to-explicit feature-window evolution requires "
+                "PRIMITIVE_WINDOW_MIGRATION provenance")
+
     block = {
         "READINESS": "AST_READY",
         "RESEARCH_LANE": "INTRADAY_EVENT",
         "OBSERVABLES": sorted(grammar.fields_of(child_expr)),
         "CANDIDATE_SIGNAL_EXPR": child_expr,
+        "FEATURE_WINDOW_CONTRACT_VERSION": child_window_contract,
         "SEMANTIC_PLAN": semantic_plan,
         "DERIVATION_MODE": mode,
         "SOURCE_BASELINE_EXPR": source_baseline,
@@ -191,6 +227,8 @@ def build_evolved_lead(parent: dict[str, Any], candidate: dict[str, Any], *,
         "LESSONS_ADDRESSED": candidate.get("lessons_addressed") or "",
     }
     ast_contract = lead_intake._readiness_metadata(block, mechanism)  # noqa: SLF001
+    ast_contract["parent_feature_window_contract_version"] = \
+        parent_window_contract
 
     refs = _json(parent.get("refs") or [], field="parent refs")
     if not isinstance(refs, list) or not refs:

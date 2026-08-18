@@ -16,10 +16,22 @@ from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
-from intraday_alpha_ast import (clocks_of, count_nodes,
-                                effective_clock_domains_of, fields_of,
-                                fingerprint, parse as parse_expr,
-                                structural_similarity, unit_of)
+from intraday_alpha_ast import (
+    EXPLICIT_FEATURE_WINDOW_CONTRACT,
+    LEGACY_FEATURE_WINDOW_CONTRACT,
+    clocks_of,
+    count_nodes,
+    effective_clock_domains_of,
+    field_window_bindings_of,
+    fields_of,
+    fingerprint,
+    parse as parse_expr,
+    primitive_windows_of,
+    structural_similarity,
+    temporal_windows_of,
+    unit_of,
+    validate_feature_window_contract,
+)
 from intraday_search_exposure_contract import (
     ADAPTIVE_SEARCH_EXPOSURE_VERSION,
     FINGERPRINT_CONTRACT as SEARCH_EXPOSURE_FINGERPRINT_CONTRACT,
@@ -32,11 +44,14 @@ from intraday_candidate import (CandidateAccumulator,
                                  CandidatePopulationAccumulator,
                                  COEFFICIENT_POLICIES,
                                  DEFAULT_CRITERIA,
-                                 EVALUATOR_VERSION)
+                                 EVALUATOR_VERSION,
+                                 EXPLICIT_WINDOW_EVALUATOR_VERSION)
 from intraday_microstructure import (COMPLETED_SECOND_POLICY,
                                       EXTERNAL_EVENT_SOURCE,
+                                      FeatureCubeSpec,
                                       LOCAL_EVENT_SOURCE, IntradayLaneSpec,
-                                      STRICT_TIMESTAMP_POLICY, build_samples,
+                                      STRICT_TIMESTAMP_POLICY,
+                                      build_sample_batch, build_samples,
                                       effective_purge_gap,
                                       load_instrument_events_batch, manifest,
                                       source_quality_batch)
@@ -49,8 +64,12 @@ from intraday_sample_cache import (SampleCache, identity as cache_identity,
 from intraday_multiple_testing import (MODULE_VERSION as MULTIPLE_TESTING_VERSION,
                                        paired_session_deltas,
                                        spa_reality_check)
-from intraday_supervised import (LABEL_VERSION as SUPERVISED_LABEL_VERSION,
-                                 TEACHER_VERSION, feature_names,
+from intraday_supervised import (EXPLICIT_WINDOW_TEACHER_VERSION,
+                                 LABEL_VERSION as SUPERVISED_LABEL_VERSION,
+                                 TEACHER_VERSION,
+                                 explicit_feature_cube_spec_hash,
+                                 explicit_feature_names,
+                                 explicit_feature_spec_hash, feature_names,
                                  feature_spec_hash)
 from intraday_trial_ledger import (ADAPTIVE_SEARCH, ARRIVAL_TIME_CAUSAL,
                                    CALIBRATION, DISCOVERY_6,
@@ -117,6 +136,84 @@ DATASET_BY_EVENT_SOURCE = {
 }
 KST = ZoneInfo("Asia/Seoul")
 
+
+def _feature_window_contract(config: dict) -> str:
+    raw = config.get("feature_window_contract_version")
+    version = (LEGACY_FEATURE_WINDOW_CONTRACT
+               if raw is None else str(raw))
+    if version not in {
+            LEGACY_FEATURE_WINDOW_CONTRACT,
+            EXPLICIT_FEATURE_WINDOW_CONTRACT}:
+        raise ValueError(
+            f"unsupported feature-window contract {version!r}")
+    return version
+
+
+def _evaluator_version(config: dict) -> str:
+    return (EXPLICIT_WINDOW_EVALUATOR_VERSION
+            if _feature_window_contract(config) ==
+            EXPLICIT_FEATURE_WINDOW_CONTRACT else EVALUATOR_VERSION)
+
+
+def _feature_cube_spec(config: dict) -> FeatureCubeSpec | None:
+    """Restore the exact frozen cube contract used by an explicit replay."""
+    explicit = (_feature_window_contract(config) ==
+                EXPLICIT_FEATURE_WINDOW_CONTRACT)
+    raw = config.get("feature_cube_spec")
+    if not explicit:
+        if raw is not None:
+            raise ValueError(
+                "feature_cube_spec requires the explicit-window contract")
+        return None
+    if raw is None:
+        raise ValueError(
+            "explicit-window replay requires a frozen feature_cube_spec")
+    try:
+        return FeatureCubeSpec.from_dict(raw)
+    except ValueError as exc:
+        raise ValueError("frozen feature_cube_spec is invalid") from exc
+
+
+def _teacher_runtime_identity(config: dict) -> dict:
+    """Return model identity for the config's exact feature contract.
+
+    The legacy object is intentionally byte-for-byte identical to the v3
+    identity.  Explicit-window candidates bind the v4 teacher to the canonical
+    cube spec that is also used for replay and cache identity.
+    """
+    if (_feature_window_contract(config) !=
+            EXPLICIT_FEATURE_WINDOW_CONTRACT):
+        return {
+            "version": TEACHER_VERSION,
+            "feature_spec_hash": feature_spec_hash(),
+            "features": feature_names(),
+            "feature_cube_spec": None,
+            "feature_cube_spec_hash": None,
+        }
+    cube_spec = _feature_cube_spec(config)
+    cube_payload = {
+        "version": cube_spec.version,
+        "feature_window_contract_version":
+            cube_spec.feature_window_contract_version,
+        "windows_seconds": cube_spec.windows_seconds,
+        "windowed_fields": cube_spec.windowed_fields,
+        "boundary": cube_spec.boundary,
+    }
+    encoded = json.dumps(
+        cube_payload, sort_keys=True, separators=(",", ":"))
+    cube_hash = hashlib.sha256(encoded.encode()).hexdigest()
+    # The v4 teacher is frozen against this exact public cube.  A new cube is a
+    # new teacher contract, never an in-place config tweak.
+    if cube_hash != explicit_feature_cube_spec_hash():
+        raise ValueError("feature cube and teacher v4 contracts differ")
+    return {
+        "version": EXPLICIT_WINDOW_TEACHER_VERSION,
+        "feature_spec_hash": explicit_feature_spec_hash(),
+        "features": explicit_feature_names(),
+        "feature_cube_spec": cube_spec.as_dict(),
+        "feature_cube_spec_hash": cube_hash,
+    }
+
 # Keep every forward boundary on the same fail-closed evidence definition used
 # by allocation, PBO, and terminal factory promotion.  Forward confirmation is
 # a new sample, not permission to rehabilitate an incomplete or legacy FULL_60
@@ -177,15 +274,16 @@ def _qa_reproduction_source_manifest() -> dict:
     return {**identity, "source_fingerprint": stable_fingerprint(identity)}
 
 
-def _qa_current_runtime_versions() -> dict[str, str]:
+def _qa_current_runtime_versions(config: dict | None = None) -> dict[str, str]:
+    teacher = _teacher_runtime_identity(config or {})
     return {
         "code_version": RUNNER_VERSION,
         "forward_runner_version": FORWARD_RUNNER_VERSION,
         "forward_gate_version": FORWARD_GATE_VERSION,
         "raw_digest_version": FORWARD_RAW_DIGEST_VERSION,
-        "evaluator_version": EVALUATOR_VERSION,
+        "evaluator_version": _evaluator_version(config or {}),
         "cost_model_version": COST_MODEL_VERSION,
-        "teacher_version": TEACHER_VERSION,
+        "teacher_version": teacher["version"],
         "supervised_label_version": SUPERVISED_LABEL_VERSION,
         "multiple_testing_version": MULTIPLE_TESTING_VERSION,
         "stock_universe_version": STOCK_UNIVERSE_VERSION,
@@ -239,7 +337,7 @@ def _forward_runtime_artifact_attestation(governance_report: dict) -> dict:
                 "source_fingerprint"):
             mismatches.append("source_manifest_fingerprint")
 
-    for key, current in _qa_current_runtime_versions().items():
+    for key, current in _qa_current_runtime_versions(frozen_config).items():
         if current != runtime.get(key):
             mismatches.append(f"runtime_{key}")
     try:
@@ -797,11 +895,46 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
     if resolved_data_contract not in (None, {}) and not isinstance(
             resolved_data_contract, dict):
         raise ValueError("resolved_data_contract must be an object")
-    expression = parse_expr(edge.get("intraday_signal_expr"))
+    raw_feature_window_contract = edge.get(
+        "feature_window_contract_version")
+    feature_window_contract = (
+        LEGACY_FEATURE_WINDOW_CONTRACT
+        if raw_feature_window_contract is None else
+        str(raw_feature_window_contract))
+    if feature_window_contract not in {
+            LEGACY_FEATURE_WINDOW_CONTRACT,
+            EXPLICIT_FEATURE_WINDOW_CONTRACT}:
+        raise ValueError(
+            "unsupported feature-window contract "
+            f"{feature_window_contract!r}")
+    expression = validate_feature_window_contract(
+        edge.get("intraday_signal_expr"),
+        contract_version=feature_window_contract)
     raw_source_baseline = edge.get("source_baseline_expr")
     source_baseline = (
         parse_expr(raw_source_baseline)
         if raw_source_baseline not in (None, "") else None)
+    migration_parent_fp = str(
+        edge.get("migration_parent_ast_fingerprint") or "")
+    migration_parent_contract = str(
+        edge.get("migration_parent_feature_window_contract_version") or "")
+    if bool(migration_parent_fp) != bool(migration_parent_contract):
+        raise ValueError(
+            "migration parent fingerprint and feature-window contract "
+            "must be declared together")
+    if migration_parent_fp:
+        if (feature_window_contract != EXPLICIT_FEATURE_WINDOW_CONTRACT
+                or migration_parent_contract !=
+                LEGACY_FEATURE_WINDOW_CONTRACT):
+            raise ValueError(
+                "migration parent must be a legacy-to-explicit audit edge")
+        if edge.get("parent_ast_fingerprint") not in (None, ""):
+            raise ValueError(
+                "cross-contract migration parent cannot be an in-cohort parent")
+        if (len(migration_parent_fp) != 16
+                or any(char not in "0123456789abcdef"
+                       for char in migration_parent_fp)):
+            raise ValueError("migration parent AST fingerprint is invalid")
     semantic_plan = validate_semantic_plan(edge.get("semantic_plan") or {})
     output = str(semantic_plan.get("output") or "").upper()
     entry_policy = str(edge.get("entry_policy") or "").upper()
@@ -858,7 +991,19 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
     for index, raw in enumerate(screening):
         if not isinstance(raw, dict):
             raise ValueError(f"screening_population[{index}] must be an object")
-        candidate_expr = parse_expr(raw.get("intraday_signal_expr"))
+        raw_candidate_contract = raw.get(
+            "feature_window_contract_version")
+        candidate_contract = (
+            feature_window_contract
+            if raw_candidate_contract is None else
+            str(raw_candidate_contract))
+        if candidate_contract != feature_window_contract:
+            raise ValueError(
+                f"screening_population[{index}] feature-window contract "
+                "differs from the primary")
+        candidate_expr = validate_feature_window_contract(
+            raw.get("intraday_signal_expr"),
+            contract_version=candidate_contract)
         candidate_fp = fingerprint(candidate_expr)
         if candidate_fp in known:
             raise ValueError(
@@ -898,6 +1043,9 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
         all_clocks.update(clocks_of(candidate_expr))
         parsed_screening.append({
             **raw,
+            **({"feature_window_contract_version": candidate_contract}
+               if feature_window_contract ==
+               EXPLICIT_FEATURE_WINDOW_CONTRACT else {}),
             "ast_fingerprint": candidate_fp,
             "intraday_signal_expr": candidate_expr,
             "semantic_plan": plan,
@@ -911,12 +1059,26 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
                 else None),
             "screening_only": True,
         })
-    feature_lookback = max([requested_lookback, *all_clocks])
+    feature_lookback = (
+        requested_lookback
+        if feature_window_contract == EXPLICIT_FEATURE_WINDOW_CONTRACT else
+        max([requested_lookback, *all_clocks]))
     if feature_lookback > 3600:
         raise ValueError("population feature lookback exceeds 3600 seconds")
     population_execution = (
         "PASSIVE_FIFO_LOWER_BOUND"
         if "PASSIVE_FIFO_LOWER_BOUND" in executions else "TAKER")
+    raw_cube_spec = edge.get("feature_cube_spec")
+    if feature_window_contract == EXPLICIT_FEATURE_WINDOW_CONTRACT:
+        frozen_cube_spec = (
+            FeatureCubeSpec()
+            if raw_cube_spec is None else
+            FeatureCubeSpec.from_dict(raw_cube_spec))
+    else:
+        if raw_cube_spec is not None:
+            raise ValueError(
+                "feature_cube_spec requires the explicit-window contract")
+        frozen_cube_spec = None
     config = {
         "research_lane": "INTRADAY_EVENT",
         "data_source": data_source,
@@ -999,6 +1161,18 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
             edge, "historical_exact_screening_exposures", 0, 0, 1_000_000),
         "population_execution_model": population_execution,
     }
+    if feature_window_contract == EXPLICIT_FEATURE_WINDOW_CONTRACT:
+        config.update({
+            "feature_window_contract_version": feature_window_contract,
+            "feature_cube_spec": frozen_cube_spec.as_dict(),
+            "evaluator_version": EXPLICIT_WINDOW_EVALUATOR_VERSION,
+        })
+    if migration_parent_fp:
+        config.update({
+            "migration_parent_ast_fingerprint": migration_parent_fp,
+            "migration_parent_feature_window_contract_version":
+                migration_parent_contract,
+        })
     if edge.get("instrument_count") is not None:
         config["legacy_instrument_count_ignored"] = int(edge["instrument_count"])
     if config["fast_screen_sessions"] != 6:
@@ -1034,6 +1208,24 @@ def config_from_edge(edge: dict) -> tuple[dict, IntradayLaneSpec]:
 def _session_bounds(day) -> tuple[datetime, datetime]:
     return (datetime.combine(day, time(9, 0), KST).astimezone(timezone.utc),
             datetime.combine(day, time(15, 20), KST).astimezone(timezone.utc))
+
+
+def _build_runtime_samples(config: dict, quotes, trades,
+                           spec: IntradayLaneSpec, *, start: datetime,
+                           end: datetime):
+    """Select the versioned sample contract without changing legacy replay."""
+    kwargs = {
+        "start": start,
+        "end": end,
+        "execution_model": config["population_execution_model"],
+        "timestamp_policy": config["timestamp_policy"],
+    }
+    if (_feature_window_contract(config) ==
+            EXPLICIT_FEATURE_WINDOW_CONTRACT):
+        return build_sample_batch(
+            quotes, trades, spec, cube_spec=_feature_cube_spec(config),
+            **kwargs)
+    return build_samples(quotes, trades, spec, **kwargs)
 
 
 def _session_day(value) -> date:
@@ -1184,7 +1376,9 @@ def _stock_only_slice(meta_conn, market_conn, selected: dict) -> dict:
             excluded["OUTSIDE_LISTING_INTERVAL"] += 1
             continue
         if external:
-            if len(instrument) != 6 or not instrument.isdigit():
+            if (len(instrument) != 6 or not instrument.isascii() or
+                    not all("0" <= char <= "9" or "A" <= char <= "Z"
+                            for char in instrument)):
                 excluded["INVALID_TRADING_SYMBOL_FORMAT"] += 1
                 continue
             if instrument not in row["valid_symbols"]:
@@ -1904,7 +2098,7 @@ def _input_hash_for_versions(
 def _input_hash(hypothesis_id: str, config: dict) -> str:
     return _input_hash_for_versions(
         hypothesis_id, config, runner_version=RUNNER_VERSION,
-        evaluator_version=EVALUATOR_VERSION,
+        evaluator_version=_evaluator_version(config),
         cost_model_version=COST_MODEL_VERSION)
 
 
@@ -1923,6 +2117,7 @@ def _qa_reproduction_runtime_manifest(*, hypothesis_id: str,
     frozen_config = json.loads(json.dumps(
         config, sort_keys=True, separators=(",", ":"), default=str))
     source_manifest = _qa_reproduction_source_manifest()
+    teacher = _teacher_runtime_identity(frozen_config)
     identity = {
         "version": QA_REPRODUCTION_RUNTIME_VERSION,
         "frozen_config": frozen_config,
@@ -1932,9 +2127,9 @@ def _qa_reproduction_runtime_manifest(*, hypothesis_id: str,
         "forward_runner_version": FORWARD_RUNNER_VERSION,
         "forward_gate_version": FORWARD_GATE_VERSION,
         "raw_digest_version": FORWARD_RAW_DIGEST_VERSION,
-        "evaluator_version": EVALUATOR_VERSION,
+        "evaluator_version": _evaluator_version(config),
         "cost_model_version": COST_MODEL_VERSION,
-        "teacher_version": TEACHER_VERSION,
+        "teacher_version": teacher["version"],
         "supervised_label_version": SUPERVISED_LABEL_VERSION,
         "multiple_testing_version": MULTIPLE_TESTING_VERSION,
         "stock_universe_version": STOCK_UNIVERSE_VERSION,
@@ -2237,13 +2432,14 @@ def _candidate_specs(config: dict, row: dict) -> tuple[dict, dict, dict]:
     timestamp_policy = config.get(
         "timestamp_policy", STRICT_TIMESTAMP_POLICY)
     completed_second = timestamp_policy == COMPLETED_SECOND_POLICY
+    teacher = _teacher_runtime_identity(config)
     feature_spec = {
         "version": "intraday-causal-feature-spec-v3",
         "ast_fields": sorted(fields_of(expression)),
         "ast_clock_windows_seconds": sorted(clocks_of(expression)),
-        "teacher_version": TEACHER_VERSION,
-        "teacher_feature_spec_hash": feature_spec_hash(),
-        "teacher_features": list(feature_names()),
+        "teacher_version": teacher["version"],
+        "teacher_feature_spec_hash": teacher["feature_spec_hash"],
+        "teacher_features": list(teacher["features"]),
         "timestamp_policy": timestamp_policy,
         "clock_aggregation_version": (
             "completed-second-state-median-taker-envelope-v1"
@@ -2255,6 +2451,40 @@ def _candidate_specs(config: dict, row: dict) -> tuple[dict, dict, dict]:
             "UNAVAILABLE_WITHOUT_SEQUENCE"
             if completed_second else "FAIL_CLOSED_MISSING_ON_AMBIGUITY"),
     }
+    if (_feature_window_contract(config) ==
+            EXPLICIT_FEATURE_WINDOW_CONTRACT):
+        feature_spec = {
+            "version": "intraday-causal-feature-spec-v4",
+            "feature_window_contract_version":
+                EXPLICIT_FEATURE_WINDOW_CONTRACT,
+            "ast_fields": sorted(fields_of(expression)),
+            "ast_field_window_bindings": [
+                {"field": field, "seconds": seconds}
+                for field, seconds in field_window_bindings_of(expression)
+            ],
+            "ast_primitive_windows_seconds": sorted(
+                primitive_windows_of(expression)),
+            "ast_temporal_windows_seconds": sorted(
+                temporal_windows_of(expression)),
+            "feature_cube": teacher["feature_cube_spec"],
+            "feature_cube_spec_hash": teacher["feature_cube_spec_hash"],
+            "sample_interval_seconds": config["sample_interval_seconds"],
+            "teacher_base_feature_lookback_seconds":
+                config["feature_lookback_seconds"],
+            "teacher_version": teacher["version"],
+            "teacher_feature_spec_hash": teacher["feature_spec_hash"],
+            "teacher_features": list(teacher["features"]),
+            "timestamp_policy": timestamp_policy,
+            "clock_aggregation_version": (
+                "completed-second-state-median-taker-envelope-v1"
+                if completed_second else None),
+            "state_feature_aggregation": (
+                "PER_RAW_STATE_SCALAR_THEN_WITHIN_SECOND_MEDIAN"
+                if completed_second else "LATEST_UNAMBIGUOUS_VISIBLE_STATE"),
+            "ordered_quote_flow_policy": (
+                "UNAVAILABLE_WITHOUT_SEQUENCE"
+                if completed_second else "FAIL_CLOSED_MISSING_ON_AMBIGUITY"),
+        }
     label_spec = {
         "version": SUPERVISED_LABEL_VERSION,
         "horizon_seconds": horizon,
@@ -2278,14 +2508,23 @@ def _candidate_specs(config: dict, row: dict) -> tuple[dict, dict, dict]:
         "coefficient_policy": row["coefficient_policy"],
         "entry_policy": row["entry_policy"],
         "minimum_predicted_edge_bps": config["minimum_predicted_edge_bps"],
-        "teacher_version": TEACHER_VERSION,
+        "teacher_version": teacher["version"],
         "oos_fit_forbidden": True,
         "teacher_promotion_authority": False,
     }
+    if (_feature_window_contract(config) ==
+            EXPLICIT_FEATURE_WINDOW_CONTRACT):
+        model_spec.update({
+            "feature_window_contract_version":
+                EXPLICIT_FEATURE_WINDOW_CONTRACT,
+            "teacher_feature_spec_hash": teacher["feature_spec_hash"],
+            "feature_cube_spec_hash": teacher["feature_cube_spec_hash"],
+        })
     return feature_spec, label_spec, model_spec
 
 
-def _assert_same_hypothesis_retry_identity(existing, *, primary_row: dict,
+def _assert_same_hypothesis_retry_identity(existing, *, config: dict,
+                                           primary_row: dict,
                                            feature_spec: dict,
                                            label_spec: dict,
                                            model_spec: dict) -> None:
@@ -2302,7 +2541,7 @@ def _assert_same_hypothesis_retry_identity(existing, *, primary_row: dict,
         "model spec": stable_fingerprint(model_spec),
         "economic family": _economic_family_id(
             primary_row["semantic_plan"]),
-        "evaluator version": EVALUATOR_VERSION,
+        "evaluator version": _evaluator_version(config),
         "cost model version": COST_MODEL_VERSION,
     }
     actual = {
@@ -2323,7 +2562,8 @@ def _assert_same_hypothesis_retry_identity(existing, *, primary_row: dict,
             + ", ".join(changed))
 
 
-def _candidate_source_contract(row: dict, *, feature_spec: dict,
+def _candidate_source_contract(row: dict, *, config: dict,
+                               feature_spec: dict,
                                label_spec: dict, model_spec: dict) -> dict:
     """Return every component that defines one durable evaluation identity."""
     return {
@@ -2333,7 +2573,7 @@ def _candidate_source_contract(row: dict, *, feature_spec: dict,
         "feature_spec": feature_spec,
         "label_spec": label_spec,
         "model_spec": model_spec,
-        "evaluator_version": EVALUATOR_VERSION,
+        "evaluator_version": _evaluator_version(config),
         "cost_model_version": COST_MODEL_VERSION,
     }
 
@@ -2425,7 +2665,8 @@ def _register_trial_lineages(meta_conn, *, hypothesis_id: str,
         if parent is None:
             parent = find_latest_candidate_lineage(
                 meta_conn, source_contract=_candidate_source_contract(
-                    row, feature_spec=row_feature, label_spec=row_label,
+                    row, config=config, feature_spec=row_feature,
+                    label_spec=row_label,
                     model_spec=row_model))
         lineage = register_candidate_lineage(
             meta_conn, hypothesis_id=hypothesis_id,
@@ -2435,7 +2676,7 @@ def _register_trial_lineages(meta_conn, *, hypothesis_id: str,
             feature_spec=row_feature, label_spec=row_label,
             model_spec=row_model,
             economic_family_id=_economic_family_id(row["semantic_plan"]),
-            evaluator_version=EVALUATOR_VERSION,
+            evaluator_version=_evaluator_version(config),
             cost_model_version=COST_MODEL_VERSION,
             created_by="svc_quant/intraday-experiment-runner",
             parent=parent,
@@ -2459,7 +2700,7 @@ def _register_trial_lineages(meta_conn, *, hypothesis_id: str,
         candidate_ast=primary_row["intraday_signal_expr"])
     if retry_primary is not None:
         _assert_same_hypothesis_retry_identity(
-            retry_primary, primary_row=primary_row,
+            retry_primary, config=config, primary_row=primary_row,
             feature_spec=feature_spec, label_spec=label_spec,
             model_spec=model_spec)
     inherited_parent = None
@@ -2499,7 +2740,7 @@ def _register_trial_lineages(meta_conn, *, hypothesis_id: str,
         else:
             inherited_parent = find_latest_candidate_lineage(
                 meta_conn, source_contract=_candidate_source_contract(
-                    primary_row, feature_spec=feature_spec,
+                    primary_row, config=config, feature_spec=feature_spec,
                     label_spec=label_spec, model_spec=model_spec))
         if (inheritance_reason == "EXACT_CANDIDATE_IDENTITY_REUSE"
                 and inherited_parent is not None and
@@ -2507,7 +2748,7 @@ def _register_trial_lineages(meta_conn, *, hypothesis_id: str,
             # A concurrent insert between the dedicated lookup and this global
             # fallback is still a same-hypothesis retry, never a new parent.
             _assert_same_hypothesis_retry_identity(
-                inherited_parent, primary_row=primary_row,
+                inherited_parent, config=config, primary_row=primary_row,
                 feature_spec=feature_spec, label_spec=label_spec,
                 model_spec=model_spec)
             retry_primary = inherited_parent
@@ -2522,7 +2763,7 @@ def _register_trial_lineages(meta_conn, *, hypothesis_id: str,
         label_spec=label_spec,
         model_spec=model_spec,
         economic_family_id=_economic_family_id(primary_row["semantic_plan"]),
-        evaluator_version=EVALUATOR_VERSION,
+        evaluator_version=_evaluator_version(config),
         cost_model_version=COST_MODEL_VERSION,
         created_by="svc_quant/intraday-experiment-runner",
         parent=inherited_parent,
@@ -2575,7 +2816,7 @@ def _register_trial_lineages(meta_conn, *, hypothesis_id: str,
                 label_spec=label_spec,
                 model_spec=model_spec,
                 economic_family_id=_economic_family_id(row["semantic_plan"]),
-                evaluator_version=EVALUATOR_VERSION,
+                evaluator_version=_evaluator_version(config),
                 cost_model_version=COST_MODEL_VERSION,
                 created_by="svc_quant/intraday-experiment-runner",
                 parent=parent,
@@ -3143,7 +3384,7 @@ def _adaptive_rung_search_exposure(
         },
         "evaluator_contract": {
             "runner_version": RUNNER_VERSION,
-            "evaluator_version": EVALUATOR_VERSION,
+            "evaluator_version": _evaluator_version(config),
             "fast_screen_version": FAST_SCREEN_VERSION,
             "candidate_contracts": candidate_contracts,
             "candidate_set_fingerprint": stable_fingerprint(
@@ -3227,7 +3468,9 @@ def _candidate_accumulators(config: dict, spec: IntradayLaneSpec, *, trials: int
             coefficient_policy=row["coefficient_policy"],
             minimum_predicted_edge_bps=config["minimum_predicted_edge_bps"],
             trials=current_formula_trials, family_pbo=None,
-            semantic_plan=row["semantic_plan"])
+            semantic_plan=row["semantic_plan"],
+            feature_window_contract_version=
+                _feature_window_contract(config))
 
     primary = {
         "intraday_signal_expr": config["intraday_signal_expr"],
@@ -4283,7 +4526,7 @@ def _load_completed_report(meta_conn, experiment_id: str) -> dict:
         # remain a backward-compatible index/query projection only.
         meta = {**screening_meta.get(key, {}), **durable_meta}
         screening_reports.append({
-            "evaluator_version": EVALUATOR_VERSION,
+            "evaluator_version": _evaluator_version(config),
             "ast_fingerprint": key,
             "summary": screening_summaries.get(key, {}),
             "lane_manifest": {
@@ -4319,7 +4562,7 @@ def _load_completed_report(meta_conn, experiment_id: str) -> dict:
             "idempotent_replay": True,
         })
     report = {
-        "evaluator_version": EVALUATOR_VERSION,
+        "evaluator_version": _evaluator_version(config),
         "ast_fingerprint": fingerprint(parsed),
         "ast_shape_fingerprint": shape_fingerprint(parsed),
         "fields": sorted(fields_of(parsed)),
@@ -5655,7 +5898,7 @@ def _validate_frozen_candidate(config: dict, candidate) -> None:
                   candidate.model_spec_fingerprint),
     }
     mismatches = [name for name, pair in checks.items() if pair[0] != pair[1]]
-    if candidate.evaluator_version != EVALUATOR_VERSION:
+    if candidate.evaluator_version != _evaluator_version(config):
         mismatches.append("evaluator version")
     if candidate.cost_model_version != COST_MODEL_VERSION:
         mismatches.append("cost model version")
@@ -5831,6 +6074,7 @@ def _forward_accumulator(config: dict, spec: IntradayLaneSpec, *,
         minimum_predicted_edge_bps=float(
             config["minimum_predicted_edge_bps"]),
         trials=1, family_pbo=None, semantic_plan=config["semantic_plan"],
+        feature_window_contract_version=_feature_window_contract(config),
     )
     teacher = ((governance_report.get("supervised_control") or {}).get(
         "calibration"))
@@ -5875,10 +6119,8 @@ def _evaluate_forward_replay(
                 _append_forward_raw_events(
                     digest_states[day.isoformat()], instrument_id=instrument,
                     quotes=quotes, trades=trades)
-                samples = build_samples(
-                    quotes, trades, spec, start=start, end=end,
-                    execution_model=config["population_execution_model"],
-                    timestamp_policy=timestamp_policy)
+                samples = _build_runtime_samples(
+                    config, quotes, trades, spec, start=start, end=end)
                 sample_count += len(samples)
                 # Empty slices still count in requested coverage and cannot be
                 # omitted from the exact FULL_60 stock universe.
@@ -6896,13 +7138,19 @@ def _run_fast_screen(config: dict, spec: IntradayLaneSpec, selected: dict, *,
                   min(config["instrument_shard_size"], 8))
     shards = [instruments[index:index + shard_size]
               for index in range(0, len(instruments), shard_size)]
+    explicit_cube = (_feature_window_contract(config) ==
+                     EXPLICIT_FEATURE_WINDOW_CONTRACT)
+    cube_spec = _feature_cube_spec(config) if explicit_cube else None
     cache = SampleCache(cache_identity(
         spec=spec, event_source=event_source,
         execution_model=config["population_execution_model"],
         source_lineage=source_lineage,
-        timestamp_policy=config["timestamp_policy"]))
+        timestamp_policy=config["timestamp_policy"],
+        feature_cube_spec=cube_spec))
     cache_stats = {"hits": 0, "misses": 0, "writes": 0,
                    "write_disabled": 0}
+    if explicit_cube:
+        cache_stats["feature_cube_cache"] = "ENABLED_VERSIONED_BATCH_V2"
     try:
         cache_stats["prune"] = prune_sample_cache()
     except OSError as exc:
@@ -6920,16 +7168,16 @@ def _run_fast_screen(config: dict, spec: IntradayLaneSpec, selected: dict, *,
                 market_conn, instrument_ids=shard, start=start,
                 end=load_end, as_known_at=cutoff,
                 source=event_source)
-            return {instrument: build_samples(
-                *events[instrument], spec, start=start, end=end,
-                execution_model=config["population_execution_model"],
-                timestamp_policy=config["timestamp_policy"])
+            return {instrument: _build_runtime_samples(
+                config, *events[instrument], spec, start=start, end=end)
                 for instrument in shard}
 
         # External shards are deliberately one symbol wide. This also makes a
         # cache file the exact bounded unit rebuilt after a miss or corruption.
         instrument = shard[0]
-        cached = cache.load(session, instrument)
+        cached = (
+            cache.load_batch(session, instrument, expected_spec=cube_spec)
+            if explicit_cube else cache.load(session, instrument))
         if cached is not None:
             cache_stats["hits"] += 1
             return {instrument: cached}
@@ -6938,11 +7186,12 @@ def _run_fast_screen(config: dict, spec: IntradayLaneSpec, selected: dict, *,
             market_conn, instrument_ids=shard, start=start,
             end=load_end, as_known_at=cutoff,
             source=event_source)
-        samples = build_samples(
-            *events[instrument], spec, start=start, end=end,
-            execution_model=config["population_execution_model"],
-            timestamp_policy=config["timestamp_policy"])
-        if cache.store(session, instrument, samples):
+        samples = _build_runtime_samples(
+            config, *events[instrument], spec, start=start, end=end)
+        stored = (cache.store_batch(session, instrument, samples)
+                  if explicit_cube else
+                  cache.store(session, instrument, samples))
+        if stored:
             cache_stats["writes"] += 1
         else:
             cache_stats["write_disabled"] += 1
@@ -7035,7 +7284,9 @@ def _run_fast_screen(config: dict, spec: IntradayLaneSpec, selected: dict, *,
         "full_universe_instrument_count": len(selected["instruments"]),
         "full_evaluation_session_count": len(selected["sessions"]),
         "sample_cache": {**cache_stats, "identity": cache.identity,
-                         "scope": "DISCOVERY_PANEL_ONLY"},
+                         "scope": "DISCOVERY_PANEL_ONLY",
+                         "evidence_authority": "NONE",
+                         "promotion_authority": False},
         "cost_feasibility_preflight": {
             "status": ("ALL_SYMBOLIC_CANDIDATES_INFEASIBLE"
                        if calibration_only_fail_fast else "CONTINUE"),
@@ -7415,11 +7666,9 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
                     if population.requires_calibration:
                         for instrument in instruments:
                             quotes, trades = events[instrument]
-                            samples = build_samples(
-                                quotes, trades, spec, start=start, end=end,
-                                execution_model=config[
-                                    "population_execution_model"],
-                                timestamp_policy=config["timestamp_policy"])
+                            samples = _build_runtime_samples(
+                                config, quotes, trades, spec,
+                                start=start, end=end)
                             shard_samples += len(samples)
                             population.calibrate(instrument, samples)
                 calibration_shard_reports.append({
@@ -7466,10 +7715,8 @@ def run(hyp: dict, hypothesis_id: str, *, meta_conn, market_conn) -> dict:
                         quality_examples.append({
                             "instrument_id": instrument, "session": str(day), **q})
                     quotes, trades = events[instrument]
-                    samples = build_samples(
-                        quotes, trades, spec, start=start, end=end,
-                        execution_model=config["population_execution_model"],
-                        timestamp_policy=config["timestamp_policy"])
+                    samples = _build_runtime_samples(
+                        config, quotes, trades, spec, start=start, end=end)
                     shard_samples += len(samples)
                     population.add(instrument, samples)
             shard_reports.append({

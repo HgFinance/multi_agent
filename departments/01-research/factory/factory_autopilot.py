@@ -129,6 +129,130 @@ _GOVERNED_CALIBRATION_FAILURE_EVIDENCE = """
   )
 """
 
+# These are executable contract fixtures, not decorative prose.  The scout sees
+# the same objects that the V2 grammar regression tests validate, so a copied
+# example cannot be rejected merely because a raw-event leaf omitted its
+# primitive aggregation window.
+INTRADAY_V2_PROMPT_AST_EXAMPLES = {
+    "SCORE_TRADE_FLOW": {
+        "op": "field", "field": "trade_flow_imbalance", "seconds": 30,
+    },
+    "SCORE_DEPTH_DIVERGENCE": {
+        "op": "sub", "args": [
+            {"op": "field", "field": "queue_imbalance_l1"},
+            {"op": "field", "field": "queue_imbalance_l10"},
+        ],
+    },
+    "SCORE_DEPTH_SLOPE": {
+        "op": "field", "field": "depth_imbalance_slope",
+    },
+    "SCORE_L1_L10_CONVERGENCE": {
+        "op": "where",
+        "condition": {"op": "lt", "args": [
+            {"op": "abs", "arg": {"op": "sub", "args": [
+                {"op": "field", "field": "queue_imbalance_l1"},
+                {"op": "field", "field": "queue_imbalance_l10"},
+            ]}},
+            {"const": 0.25, "unit": "RATIO"},
+        ]},
+        "then": {"op": "mul", "args": [
+            {"op": "add", "args": [
+                {"op": "field", "field": "queue_imbalance_l1"},
+                {"op": "field", "field": "queue_imbalance_l10"},
+            ]},
+            {"const": 0.5, "unit": "RATIO"},
+        ]},
+        "else": {"const": 0, "unit": "RATIO"},
+    },
+    "SCORE_QUOTE_TAPE_CONFIRMATION": {
+        "op": "where",
+        "condition": {"op": "gt", "args": [
+            {"op": "mul", "args": [
+                {"op": "field", "field": "queue_imbalance_l1"},
+                {"op": "field", "field": "trade_flow_imbalance",
+                 "seconds": 30},
+            ]},
+            {"const": 0, "unit": "RATIO"},
+        ]},
+        "then": {"op": "mul", "args": [
+            {"op": "add", "args": [
+                {"op": "field", "field": "queue_imbalance_l1"},
+                {"op": "field", "field": "trade_flow_imbalance",
+                 "seconds": 30},
+            ]},
+            {"const": 0.5, "unit": "RATIO"},
+        ]},
+        "else": {"const": 0, "unit": "RATIO"},
+    },
+    "SCORE_TAPE_QUALITY_GATE": {
+        "op": "where",
+        "condition": {"op": "gt", "args": [
+            {"op": "field", "field": "trade_side_known_ratio",
+             "seconds": 30},
+            {"const": 0.8, "unit": "RATIO"},
+        ]},
+        "then": {"op": "field", "field": "trade_flow_imbalance",
+                 "seconds": 30},
+        "else": {"const": 0, "unit": "RATIO"},
+    },
+    "BPS_DIRECT": {
+        "op": "field", "field": "microprice_offset_bps",
+    },
+    "BPS_SCALED": {
+        "op": "mul", "args": [
+            {"op": "field", "field": "queue_imbalance_l1"},
+            {"op": "field", "field": "realized_volatility_bps",
+             "seconds": 60},
+        ],
+    },
+    "BPS_STATE": {
+        "op": "where",
+        "condition": {"op": "lt", "args": [
+            {"op": "field", "field": "spread_bps"},
+            {"const": 5, "unit": "BPS"},
+        ]},
+        "then": {"op": "mul", "args": [
+            {"op": "field", "field": "trade_flow_imbalance",
+             "seconds": 30},
+            {"op": "field", "field": "realized_volatility_bps",
+             "seconds": 60},
+        ]},
+        "else": {"const": 0, "unit": "BPS"},
+    },
+    "BPS_CROSS_SCALE": {
+        "op": "mul", "args": [
+            {"op": "sub", "args": [
+                {"op": "field", "field": "trade_flow_imbalance",
+                 "seconds": 5},
+                {"op": "field", "field": "trade_flow_imbalance",
+                 "seconds": 300},
+            ]},
+            {"op": "field", "field": "realized_volatility_bps",
+             "seconds": 60},
+        ],
+    },
+    "TEMPORAL_TRADE_FLOW": {
+        "op": "rolling_mean",
+        "arg": {"op": "field", "field": "trade_flow_imbalance",
+                "seconds": 30},
+        "seconds": 300,
+    },
+    "TIGHT_SPREAD_TRADE_FLOW": {
+        "op": "where",
+        "condition": {"op": "lt", "args": [
+            {"op": "field", "field": "spread_bps"},
+            {"const": 5, "unit": "BPS"},
+        ]},
+        "then": {
+            "op": "rolling_mean",
+            "arg": {"op": "field", "field": "trade_flow_imbalance",
+                    "seconds": 30},
+            "seconds": 300,
+        },
+        "else": {"const": 0, "unit": "RATIO"},
+    },
+}
+
 # 카드를 만들 때 쓰는 CLI 컨테이너. 어느 프로필이든 같은 보드를 본다
 # (/opt/kanban 이 8개 컨테이너에 공유 마운트다).
 KANBAN_CLI_CONTAINER = os.getenv("KANBAN_CLI_CONTAINER", "hedgefund-kanban-dispatcher")
@@ -218,7 +342,12 @@ MIN_HISTORY_DAYS: 10 이상 (짧아도 실행은 한다. 단, 60 KRX 세션 미�
 SUGGESTED_PARAMS JSON 필수 키:
   intraday_signal_expr, horizon_seconds, sample_interval_seconds,
   feature_lookback_seconds, order_latency_ms, execution, entry_policy,
-  coefficient_policy
+  coefficient_policy, feature_window_contract_version
+feature_window_contract_version must be exactly explicit-primitive-window-v2.
+Every raw-event windowed field leaf must declare seconds as one of
+2,5,10,30,60,300,600. Decision-snapshot state fields must not declare seconds.
+Primitive leaf seconds define the raw aggregation interval; temporal-operator
+seconds define a later rolling transform and are a separate clock choice.
 Current 61-session external-history execution/output is exactly:
   TAKER_NET_PNL -> TAKER
 TAKER only. PASSIVE_FILL_ADJUSTED_PNL/PASSIVE_FIFO_LOWER_BOUND remains a local
@@ -263,7 +392,7 @@ intraday_signal_expr local strict 연산자:
 따라서 last quote, add/cancel chronology, MBO queue position, event OFI 또는
 passive fill을 복원하지 않는다. 대신 완료된 초의 L1/L10 queue imbalance,
 microprice, depth slope, signed trade flow/volume, spread/depth/activity/RV를
-1/5/30/300초 WALL_TIME_SECONDS 창으로 조합한다. quote_count는 exchange event
+2/5/10/30/60/300/600초 WALL_TIME_SECONDS 창으로 조합한다. quote_count는 exchange event
 count가 아니라 수집된 snapshot-row activity로만 해석한다.
 권장 경제 변형(공개식을 그대로 복사하지 말고 source baseline과 분리):
   L1_L10_CONVERGENCE, L1_L10_DIVERGENCE, QUOTE_TAPE_CONFIRMATION,
@@ -384,6 +513,8 @@ def _ast_scout_contract() -> str:
         AST_VERSION as INTRADAY_AST_VERSION,
         QUOTE_EVENT_CLOCK_FIELDS, TRADE_VOLUME_CLOCK_FIELDS,
         QUOTE_EVENT_CLOCK, TRADE_VOLUME_CLOCK, WALL_TIME_CLOCK,
+        EXPLICIT_FEATURE_WINDOW_CONTRACT, PRIMITIVE_WINDOWS_SECONDS,
+        WINDOWED_FIELDS,
         COMPLETED_SECOND_RECOMMENDED_FIELDS,
         COMPLETED_SECOND_REPLAYABLE_FIELDS,
         COMPLETED_SECOND_SCREENING_COHORT_VERSION,
@@ -425,6 +556,10 @@ def _ast_scout_contract() -> str:
     current_directional_fields = (
         set(DIRECTIONAL_PRESSURE_FIELDS) & completed_second_fields
     )
+    prompt_ast_examples = {
+        name: json.dumps(expr, ensure_ascii=False, separators=(",", ":"))
+        for name, expr in INTRADAY_V2_PROMPT_AST_EXAMPLES.items()
+    }
     return "\n".join([
         "[AST-ready literature contract]",
         "  Every submitted lead must declare READINESS as exactly one of:",
@@ -482,45 +617,15 @@ def _ast_scout_contract() -> str:
         "  Do not fit constants on OOS data. Prefer compact skeletons with explicit ablations;",
         "  the evaluator, not the prose or LLM confidence, decides empirical survival.",
         "  STRUCTURE-FIRST SKELETONS (adapt the mechanism; do not copy mechanically):",
-        '  SCORE_TRADE_FLOW={"op":"rolling_mean","seconds":30,"arg":{"op":"field",'
-        '"field":"trade_flow_imbalance"}}',
-        '  SCORE_DEPTH_DIVERGENCE={"op":"sub","args":[{"op":"field",'
-        '"field":"queue_imbalance_l1"},{"op":"field","field":'
-        '"queue_imbalance_l10"}]}',
-        '  SCORE_DEPTH_SLOPE={"op":"field","field":"depth_imbalance_slope"}',
-        '  SCORE_L1_L10_CONVERGENCE={"op":"where","condition":{"op":"lt",'
-        '"args":[{"op":"abs","arg":{"op":"sub","args":[{"op":"field",'
-        '"field":"queue_imbalance_l1"},{"op":"field","field":'
-        '"queue_imbalance_l10"}]}},{"const":0.25,"unit":'
-        '"RATIO"}]},"then":{"op":"mul","args":[{"op":"add","args":['
-        '{"op":"field","field":"queue_imbalance_l1"},{"op":"field",'
-        '"field":"queue_imbalance_l10"}]},{"const":0.5,'
-        '"unit":"RATIO"}]},"else":{"const":0,"unit":"RATIO"}}',
-        '  SCORE_QUOTE_TAPE_CONFIRMATION={"op":"where","condition":{"op":"gt",'
-        '"args":[{"op":"mul","args":[{"op":"field","field":'
-        '"queue_imbalance_l1"},{"op":"field","field":'
-        '"trade_flow_imbalance"}]},{"const":0,"unit":"RATIO"}]},"then":'
-        '{"op":"mul","args":[{"op":"add","args":[{"op":"field",'
-        '"field":"queue_imbalance_l1"},{"op":"field","field":'
-        '"trade_flow_imbalance"}]},{"const":0.5,"unit":"RATIO"}]},"else":'
-        '{"const":0,"unit":"RATIO"}}',
-        '  SCORE_TAPE_QUALITY_GATE={"op":"where","condition":{"op":"gt",'
-        '"args":[{"op":"field","field":"trade_side_known_ratio"},{"const":0.8,'
-        '"unit":"RATIO"}]},"then":{"op":"field","field":'
-        '"trade_flow_imbalance"},"else":{"const":0,"unit":"RATIO"}}',
-        '  BPS_DIRECT={"op":"field","field":"microprice_offset_bps"}',
-        '  BPS_SCALED={"op":"mul","args":[{"op":"field","field":'
-        '"queue_imbalance_l1"},{"op":"field","field":"realized_volatility_bps"}]}',
-        '  BPS_STATE={"op":"where","condition":{"op":"lt","args":['
-        '{"op":"field","field":"spread_bps"},{"const":5,"unit":"BPS"}]},'
-        '"then":{"op":"mul","args":[{"op":"rolling_mean","arg":{"op":'
-        '"field","field":"trade_flow_imbalance"},"seconds":30},{"op":"field",'
-        '"field":"realized_volatility_bps"}]},"else":{"const":0,"unit":"BPS"}}',
-        '  BPS_CROSS_SCALE={"op":"mul","args":[{"op":"sub","args":['
-        '{"op":"rolling_mean","arg":{"op":"field","field":'
-        '"trade_flow_imbalance"},"seconds":5},{"op":"rolling_mean","arg":'
-        '{"op":"field","field":"trade_flow_imbalance"},"seconds":300}]},'
-        '{"op":"field","field":"realized_volatility_bps"}]}',
+        *[
+            f"  {name}={prompt_ast_examples[name]}"
+            for name in (
+                "SCORE_TRADE_FLOW", "SCORE_DEPTH_DIVERGENCE",
+                "SCORE_DEPTH_SLOPE", "SCORE_L1_L10_CONVERGENCE",
+                "SCORE_QUOTE_TAPE_CONFIRMATION", "SCORE_TAPE_QUALITY_GATE",
+                "BPS_DIRECT", "BPS_SCALED", "BPS_STATE", "BPS_CROSS_SCALE",
+            )
+        ],
         "  A BPS scale must have an economic role and its no-scale/base-only ablation; do",
         "  not attach spread or volatility merely to pass units. Every FORMULA_THESIS term",
         "  must actually influence the AST. sign(non-negative count/depth/spread) usually",
@@ -588,6 +693,13 @@ def _ast_scout_contract() -> str:
             INTRADAY_FIELDS, ensure_ascii=False, sort_keys=True),
         f"  CURRENT EXTERNAL CONTRACT: {COMPLETED_SECOND_SCREENING_COHORT_VERSION}; "
         "61-session KRX STOCK history; TAKER only; unordered completed-second snapshots.",
+        f"  Every new INTRADAY_EVENT AST_READY lead declares "
+        f"FEATURE_WINDOW_CONTRACT_VERSION: {EXPLICIT_FEATURE_WINDOW_CONTRACT}.",
+        "  Raw-event windowed field leaves require seconds in exactly "
+        + ", ".join(map(str, PRIMITIVE_WINDOWS_SECONDS)) + ".",
+        "  Windowed fields: " + ", ".join(sorted(WINDOWED_FIELDS)) + ".",
+        "  All other decision-snapshot field leaves omit seconds. Primitive leaf windows",
+        "  and temporal-operator windows are independent semantics and must both be explicit.",
         "  Current replayable/recommended fields: "
         + ", ".join(sorted(COMPLETED_SECOND_RECOMMENDED_FIELDS)) + ".",
         "  Deterministically blocked sequence-dependent fields: "
@@ -620,17 +732,15 @@ def _ast_scout_contract() -> str:
             quality_observable_groups, ensure_ascii=False, sort_keys=True),
         "  EVENT_NORMALIZED/VOLUME_NORMALIZED and EVENT_NORMALIZATION/"
         "VOLUME_NORMALIZATION are local-strict-only and unavailable in current v4 history.",
-        '  Event-time JSON is exact: a field is {"op":"field","field":',
-        '  "trade_flow_imbalance"}--the key is "field", never "name". A temporal',
-        '  node is {"op":"rolling_mean","arg":{"op":"field","field":',
-        '  "trade_flow_imbalance"},"seconds":300}. OBSERVABLES must equal every',
+        "  Event-time JSON is exact: a field is "
+        + prompt_ast_examples["SCORE_TRADE_FLOW"]
+        + '--the key is "field", never "name". A temporal',
+        "  node is " + prompt_ast_examples["TEMPORAL_TRADE_FLOW"]
+        + ". OBSERVABLES must equal every",
         "  field actually present in the AST. Use comma-separated transforms or a valid",
         "  JSON array with quoted strings; [BARE_WORDS] is not JSON.",
-        '  A declared spread state must be executable, e.g. {"op":"where",',
-        '  "condition":{"op":"lt","args":[{"op":"field","field":',
-        '  "spread_bps"},{"const":5,"unit":"BPS"}]},"then":{"op":',
-        '  "rolling_mean","arg":{"op":"field","field":"trade_flow_imbalance"},',
-        '  "seconds":300},"else":{"const":0,"unit":"RATIO"}}.',
+        "  A declared spread state must be executable, e.g. "
+        + prompt_ast_examples["TIGHT_SPREAD_TRADE_FLOW"] + ".",
         "  SEMANTIC_PLAN uses Event/Context/Qualities/Direction/Output, for example:",
         '  {"event":"ORDER_FLOW","context":["TIGHT_SPREAD"],',
         '   "qualities":["PERSISTENCE","STATE_CONDITIONAL"],"direction":"FOLLOW",',

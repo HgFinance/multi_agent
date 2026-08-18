@@ -82,6 +82,37 @@ def cost_failure() -> dict:
     }
 
 
+def test_primitive_window_does_not_rewrite_prediction_horizon() -> None:
+    parent_contract = {
+        "semantic_plan": {
+            "event": "ORDER_FLOW", "context": ["ALL"],
+            "qualities": ["LEVEL"], "direction": "FOLLOW",
+            "output": "TAKER_NET_PNL", "execution": "TAKER",
+            "horizon_seconds": 5,
+        },
+        "formula_thesis": {
+            "coefficient_policy": "STRUCTURE_ONLY",
+            "expected_sign": "POSITIVE",
+        },
+    }
+    primitive_only = {
+        "op": "field", "field": "trade_flow_imbalance", "seconds": 600,
+    }
+    temporal = {
+        "op": "rolling_mean", "seconds": 300,
+        "arg": {"op": "field", "field": "trade_flow_imbalance",
+                "seconds": 5},
+    }
+
+    primitive_plan, _ = breeder._semantic_hint(
+        primitive_only, parent_contract, "PRIMITIVE_WINDOW_SWAP")
+    temporal_plan, _ = breeder._semantic_hint(
+        temporal, parent_contract, "ROLLING_MEAN")
+
+    assert primitive_plan["horizon_seconds"] == 5
+    assert temporal_plan["horizon_seconds"] == 300
+
+
 def test_cost_infeasible_family_is_not_reseeded_or_inverted():
     result = breeder.generate_from_records(
         leads=[lead("lead_failed", FAILED_EXPR, "depth divergence")],

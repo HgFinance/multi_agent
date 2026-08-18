@@ -21,16 +21,27 @@ from __future__ import annotations
 
 from array import array
 from bisect import bisect_left, bisect_right
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field as dataclass_field
 from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 import math
 from statistics import fmean, median, pstdev
-from typing import Callable, Iterable, Sequence
+from types import MappingProxyType
+from typing import Callable, Iterable, Iterator, Sequence
+
+from intraday_alpha_ast import (
+    EXPLICIT_FEATURE_WINDOW_CONTRACT,
+    PRIMITIVE_WINDOWS_SECONDS,
+    WINDOWED_FIELDS,
+)
 
 
 UTC = timezone.utc
 KST = timezone(timedelta(hours=9))
 LANE_VERSION = "krx-intraday-causal-v6"
+FEATURE_CUBE_VERSION = "intraday-feature-cube-v1"
+FEATURE_CUBE_BOUNDARY = "(decision-W,decision]"
 LOCAL_EVENT_SOURCE = "LOCAL_RECEIPT_CLOCK"
 EXTERNAL_EVENT_SOURCE = "EXTERNAL_FDW_EVENT_TIME"
 EVENT_SOURCES = frozenset({LOCAL_EVENT_SOURCE, EXTERNAL_EVENT_SOURCE})
@@ -303,6 +314,177 @@ class IntradaySample:
             "realized_volatility_bps": self.realized_volatility_bps,
             "quote_age_ms": self.quote_age_ms,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class FeatureCubeSpec:
+    """Immutable semantic contract for one multi-window raw-feature replay."""
+
+    version: str = FEATURE_CUBE_VERSION
+    feature_window_contract_version: str = EXPLICIT_FEATURE_WINDOW_CONTRACT
+    windows_seconds: tuple[int, ...] = PRIMITIVE_WINDOWS_SECONDS
+    windowed_fields: tuple[str, ...] = tuple(sorted(WINDOWED_FIELDS))
+    boundary: str = FEATURE_CUBE_BOUNDARY
+
+    def __post_init__(self) -> None:
+        if (not isinstance(self.windows_seconds, (list, tuple))
+                or not isinstance(self.windowed_fields, (list, tuple))):
+            raise ValueError("feature cube coordinates must be sequences")
+        windows = tuple(self.windows_seconds)
+        fields = tuple(self.windowed_fields)
+        if (any(isinstance(item, bool) or not isinstance(item, int)
+                for item in windows)
+                or any(not isinstance(item, str) for item in fields)):
+            raise ValueError("feature cube coordinate types are invalid")
+        # A frozen dataclass containing caller-owned lists is not immutable.
+        # Canonicalize JSON-style sequences before retaining them.
+        object.__setattr__(self, "windows_seconds", windows)
+        object.__setattr__(self, "windowed_fields", fields)
+        if self.version != FEATURE_CUBE_VERSION:
+            raise ValueError(f"unsupported feature cube version {self.version!r}")
+        if self.feature_window_contract_version != EXPLICIT_FEATURE_WINDOW_CONTRACT:
+            raise ValueError("feature cube requires the explicit-window contract")
+        if self.windows_seconds != PRIMITIVE_WINDOWS_SECONDS:
+            raise ValueError(
+                f"feature cube windows must equal {PRIMITIVE_WINDOWS_SECONDS!r}")
+        if self.windowed_fields != tuple(sorted(WINDOWED_FIELDS)):
+            raise ValueError("feature cube windowed fields do not match AST contract")
+        if self.boundary != FEATURE_CUBE_BOUNDARY:
+            raise ValueError(f"unsupported feature cube boundary {self.boundary!r}")
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: dict) -> "FeatureCubeSpec":
+        """Deserialize one frozen cube contract without permissive coercion.
+
+        Experiment configs are JSON round-tripped before replay, so tuples may
+        arrive as lists.  Everything else is exact: missing/extra keys,
+        booleans masquerading as integers, and reordered or changed
+        coordinates fail before raw events are read.
+        """
+        if not isinstance(value, dict):
+            raise ValueError("feature cube spec must be an object")
+        expected_keys = {
+            "version", "feature_window_contract_version", "windows_seconds",
+            "windowed_fields", "boundary",
+        }
+        actual_keys = set(value)
+        if actual_keys != expected_keys:
+            missing = sorted(expected_keys - actual_keys)
+            extra = sorted(actual_keys - expected_keys)
+            details = []
+            if missing:
+                details.append("missing=" + ",".join(missing))
+            if extra:
+                details.append("extra=" + ",".join(extra))
+            raise ValueError(
+                "feature cube spec keys changed" +
+                (": " + "; ".join(details) if details else ""))
+        windows = value["windows_seconds"]
+        fields = value["windowed_fields"]
+        if (not isinstance(windows, (list, tuple))
+                or any(isinstance(item, bool) or not isinstance(item, int)
+                       for item in windows)):
+            raise ValueError("feature cube windows must be an integer sequence")
+        if (not isinstance(fields, (list, tuple))
+                or any(not isinstance(item, str) for item in fields)):
+            raise ValueError("feature cube fields must be a string sequence")
+        for key in ("version", "feature_window_contract_version", "boundary"):
+            if not isinstance(value[key], str):
+                raise ValueError(f"feature cube {key} must be a string")
+        return cls(
+            version=value["version"],
+            feature_window_contract_version=
+                value["feature_window_contract_version"],
+            windows_seconds=tuple(windows),
+            windowed_fields=tuple(fields),
+            boundary=value["boundary"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class MultiScaleFeatureCube:
+    """Columnar primitive values aligned one-to-one with sample rows.
+
+    Columns are immutable tuples in this correctness slice.  They intentionally
+    exclude state fields: those remain on :class:`IntradaySample` and therefore
+    cannot acquire a window through a cohort configuration accident.
+    """
+
+    spec: FeatureCubeSpec
+    row_count: int
+    decision_index_fingerprint: str
+    columns: tuple[tuple[str, int, tuple[float | int | None, ...]], ...]
+    _lookup: object = dataclass_field(
+        init=False, repr=False, compare=False, hash=False)
+
+    def __post_init__(self) -> None:
+        expected_order = tuple(
+            (field, seconds)
+            for field in self.spec.windowed_fields
+            for seconds in self.spec.windows_seconds
+        )
+        actual_order = tuple(
+            (field, seconds) for field, seconds, _ in self.columns)
+        if actual_order != expected_order:
+            raise ValueError("feature cube columns are incomplete or unordered")
+        if any(len(values) != self.row_count for _, _, values in self.columns):
+            raise ValueError("feature cube columns are not sample aligned")
+        object.__setattr__(self, "_lookup", MappingProxyType({
+            (field, seconds): values
+            for field, seconds, values in self.columns
+        }))
+
+    def value(self, field: str, seconds: int, index: int):
+        key = (str(field), int(seconds))
+        try:
+            return self._lookup[key][index]
+        except KeyError:
+            raise KeyError(
+                f"feature cube has no column {field}@{seconds}s") from None
+
+    def column(self, field: str, seconds: int) -> tuple[float | int | None, ...]:
+        key = (str(field), int(seconds))
+        try:
+            return self._lookup[key]
+        except KeyError:
+            raise KeyError(
+                f"feature cube has no column {field}@{seconds}s") from None
+
+
+@dataclass(frozen=True, slots=True)
+class IntradaySampleBatch(Sequence[IntradaySample]):
+    """Legacy sample rows plus explicit-window primitives from one raw replay."""
+
+    samples: tuple[IntradaySample, ...]
+    feature_cube: MultiScaleFeatureCube
+
+    def __post_init__(self) -> None:
+        if len(self.samples) != self.feature_cube.row_count:
+            raise ValueError("sample batch and feature cube lengths differ")
+        expected_fingerprint = _decision_index_fingerprint(self.samples)
+        if expected_fingerprint != self.feature_cube.decision_index_fingerprint:
+            raise ValueError(
+                "sample batch and feature cube decision indexes differ")
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, index):
+        return self.samples[index]
+
+    def __iter__(self) -> Iterator[IntradaySample]:
+        return iter(self.samples)
+
+
+def _decision_index_fingerprint(samples: Sequence[IntradaySample]) -> str:
+    payload = json.dumps([
+        [sample.instrument_id, sample.decision_time.isoformat()]
+        for sample in samples
+    ], separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 def _imbalance(bid_sizes: Sequence[float], ask_sizes: Sequence[float],
@@ -725,8 +907,25 @@ def build_samples(quotes: Sequence[QuoteEvent], trades: Sequence[TradeEvent],
                   end: datetime,
                   execution_model: str | None = None,
                   timestamp_policy: str = STRICT_TIMESTAMP_POLICY,
+                  _cube_windows_seconds: tuple[int, ...] = (),
+                  _cube_rows: dict[tuple[str, int], list] | None = None,
                   ) -> list[IntradaySample]:
     """Build point-in-time features and multi-horizon executable labels."""
+    cube_windows = tuple(sorted(set(int(v) for v in _cube_windows_seconds)))
+    if cube_windows:
+        if cube_windows != PRIMITIVE_WINDOWS_SECONDS:
+            raise ValueError(
+                f"feature cube windows must equal {PRIMITIVE_WINDOWS_SECONDS!r}")
+        if _cube_rows is None:
+            raise ValueError("feature cube rows sink is required")
+        expected_cube_keys = {
+            (field, seconds)
+            for field in WINDOWED_FIELDS for seconds in cube_windows
+        }
+        if set(_cube_rows) != expected_cube_keys:
+            raise ValueError("feature cube rows sink has the wrong columns")
+    elif _cube_rows is not None:
+        raise ValueError("feature cube rows sink requires cube windows")
     if not quotes:
         return []
     policy = _timestamp_policy(timestamp_policy)
@@ -841,7 +1040,6 @@ def build_samples(quotes: Sequence[QuoteEvent], trades: Sequence[TradeEvent],
     need_passive = (execution_model is None or
                     str(execution_model).upper().startswith("PASSIVE"))
     latency = timedelta(milliseconds=spec.order_latency_ms)
-    lookback = timedelta(seconds=spec.feature_lookback_seconds)
     samples: list[IntradaySample] = []
 
     for decision in _fixed_grid(start, end, spec.sample_interval_seconds):
@@ -864,92 +1062,6 @@ def build_samples(quotes: Sequence[QuoteEvent], trades: Sequence[TradeEvent],
                 entry_age < 0 or entry_age > spec.max_quote_age_seconds):
             continue
 
-        window_start = decision - lookback
-        qlo = bisect_right(qa, window_start)
-        qhi = bisect_right(qa, decision)
-        tlo = bisect_right(ta, window_start)
-        thi = bisect_right(ta, decision)
-
-        qx_lo = bisect_left(quote_clock_exceptions, qlo)
-        qx_hi = bisect_left(quote_clock_exceptions, qhi)
-        hidden_quotes = [index for index in quote_clock_exceptions[qx_lo:qx_hi]
-                         if qs[index].event_time > decision]
-        if hidden_quotes:
-            visible_quotes = [q for q in qs[qlo:qhi]
-                              if q.event_time <= decision]
-            quote_count = sum(q.source_row_count for q in visible_quotes)
-            mlofi_levels, quote_transitions, ambiguous_quotes = \
-                _ordered_quote_stats(visible_quotes, levels=10)
-            if ambiguous_quotes:
-                realized_volatility = None
-            else:
-                quote_mids = [quote.mid for quote in visible_quotes]
-                quote_returns = [math.log(right / left) * 10_000.0
-                                 for left, right in
-                                 zip(quote_mids, quote_mids[1:])]
-                realized_volatility = (
-                    math.sqrt(sum(value * value for value in quote_returns))
-                    if quote_returns else None)
-        else:
-            state_count = qhi - qlo
-            quote_count = quote_count_prefix[qhi] - quote_count_prefix[qlo]
-            ambiguous_quotes = (
-                quote_ambiguity_prefix[qhi] - quote_ambiguity_prefix[qlo] > 0)
-            if coarse_second:
-                # A completed bucket is an unordered state multiset.  Between-
-                # bucket median-mid volatility is valid, but Cont OFI/MLOFI and
-                # event transition counts require an event sequence we do not
-                # possess.
-                mlofi_levels = (None,) * 10
-                quote_transitions = 0
-                variance = (quote_variance_prefix[qhi] -
-                            quote_variance_prefix[qlo + 1]
-                            if state_count >= 2 else 0.0)
-                realized_volatility = (
-                    math.sqrt(max(0.0, variance))
-                    if state_count >= 2 else None)
-            elif state_count < 2 or ambiguous_quotes:
-                mlofi_levels = (None,) * 10
-                quote_transitions = 0
-                realized_volatility = None
-            else:
-                quote_transitions = (
-                    mlofi_count_prefix[0][qhi] -
-                    mlofi_count_prefix[0][qlo + 1])
-                level_values: list[float | None] = []
-                for level in range(10):
-                    count = (mlofi_count_prefix[level][qhi] -
-                             mlofi_count_prefix[level][qlo + 1])
-                    value = (mlofi_prefix[level][qhi] -
-                             mlofi_prefix[level][qlo + 1])
-                    level_values.append(
-                        value if count == quote_transitions else None)
-                mlofi_levels = tuple(level_values)
-                variance = (quote_variance_prefix[qhi] -
-                            quote_variance_prefix[qlo + 1])
-                realized_volatility = math.sqrt(max(0.0, variance))
-        quote_ofi = mlofi_levels[0]
-        multi_level_ofi = (
-            sum(value for value in mlofi_levels if value is not None)
-            if quote_ofi is not None else None)
-
-        tx_lo = bisect_left(trade_clock_exceptions, tlo)
-        tx_hi = bisect_left(trade_clock_exceptions, thi)
-        hidden_trades = [index for index in trade_clock_exceptions[tx_lo:tx_hi]
-                         if ts[index].event_time > decision]
-        signed = trade_signed_prefix[thi] - trade_signed_prefix[tlo]
-        known_volume = (trade_known_volume_prefix[thi] -
-                        trade_known_volume_prefix[tlo])
-        total_volume = (trade_total_volume_prefix[thi] -
-                        trade_total_volume_prefix[tlo])
-        for index in hidden_trades:
-            trade = ts[index]
-            signed -= float(trade.side) * float(trade.quantity)
-            if trade.side != 0:
-                known_volume -= float(trade.quantity)
-            total_volume -= float(trade.quantity)
-        trade_count = thi - tlo - len(hidden_trades)
-        trade_flow = signed / known_volume if known_volume > 0 else None
         decision_summary = (coarse_summaries[
                                 (decision_quote.event_time,
                                  decision_quote.available_at)]
@@ -970,19 +1082,6 @@ def build_samples(quotes: Sequence[QuoteEvent], trades: Sequence[TradeEvent],
             depth_l10 = (
                 sum(float(v) for v in decision_quote.bid_sizes[:10]) +
                 sum(float(v) for v in decision_quote.ask_sizes[:10]))
-        normalized_ofi = (quote_ofi / depth_l1
-                          if quote_ofi is not None and depth_l1 > 0 else None)
-        multi_level_ofi_depth = sum(
-            float(decision_quote.bid_sizes[level]) +
-            float(decision_quote.ask_sizes[level])
-            for level, value in enumerate(mlofi_levels)
-            if value is not None and
-            level < len(decision_quote.bid_sizes) and
-            level < len(decision_quote.ask_sizes))
-        normalized_multi_level_ofi = (
-            multi_level_ofi / multi_level_ofi_depth
-            if multi_level_ofi is not None and multi_level_ofi_depth > 0
-            else None)
         queue_imbalance_l1 = (
             decision_summary.queue_imbalance_l1
             if decision_summary is not None else
@@ -992,10 +1091,177 @@ def build_samples(quotes: Sequence[QuoteEvent], trades: Sequence[TradeEvent],
             if decision_summary is not None else
             _imbalance(decision_quote.bid_sizes, decision_quote.ask_sizes, 10))
         depth_imbalance_slope = queue_imbalance_l1 - queue_imbalance_l10
-        ofi_depth_divergence = (
-            normalized_ofi - normalized_multi_level_ofi
-            if normalized_ofi is not None and
-            normalized_multi_level_ofi is not None else None)
+
+        def summarize_window(seconds: int) -> dict[str, float | int | None]:
+            """Read one causal window from prefixes built by this raw replay."""
+            window_start = decision - timedelta(seconds=seconds)
+            qlo = bisect_right(qa, window_start)
+            qhi = bisect_right(qa, decision)
+            tlo = bisect_right(ta, window_start)
+            thi = bisect_right(ta, decision)
+
+            qx_lo = bisect_left(quote_clock_exceptions, qlo)
+            qx_hi = bisect_left(quote_clock_exceptions, qhi)
+            hidden_quotes = [
+                index for index in quote_clock_exceptions[qx_lo:qx_hi]
+                if qs[index].event_time > decision
+            ]
+            if hidden_quotes:
+                visible_quotes = [
+                    quote for quote in qs[qlo:qhi]
+                    if quote.event_time <= decision
+                ]
+                quote_count_value = sum(
+                    quote.source_row_count for quote in visible_quotes)
+                mlofi_levels, quote_transitions_value, ambiguous_quotes = \
+                    _ordered_quote_stats(visible_quotes, levels=10)
+                if ambiguous_quotes:
+                    realized_volatility_value = None
+                else:
+                    quote_mids = [quote.mid for quote in visible_quotes]
+                    quote_returns = [
+                        math.log(right / left) * 10_000.0
+                        for left, right in zip(quote_mids, quote_mids[1:])
+                    ]
+                    realized_volatility_value = (
+                        math.sqrt(sum(value * value for value in quote_returns))
+                        if quote_returns else None)
+            else:
+                state_count = qhi - qlo
+                quote_count_value = (
+                    quote_count_prefix[qhi] - quote_count_prefix[qlo])
+                ambiguous_quotes = (
+                    quote_ambiguity_prefix[qhi] -
+                    quote_ambiguity_prefix[qlo] > 0)
+                if coarse_second:
+                    # A completed bucket is an unordered state multiset.
+                    mlofi_levels = (None,) * 10
+                    quote_transitions_value = 0
+                    variance = (quote_variance_prefix[qhi] -
+                                quote_variance_prefix[qlo + 1]
+                                if state_count >= 2 else 0.0)
+                    realized_volatility_value = (
+                        math.sqrt(max(0.0, variance))
+                        if state_count >= 2 else None)
+                elif state_count < 2 or ambiguous_quotes:
+                    mlofi_levels = (None,) * 10
+                    quote_transitions_value = 0
+                    realized_volatility_value = None
+                else:
+                    quote_transitions_value = (
+                        mlofi_count_prefix[0][qhi] -
+                        mlofi_count_prefix[0][qlo + 1])
+                    level_values: list[float | None] = []
+                    for level in range(10):
+                        count = (mlofi_count_prefix[level][qhi] -
+                                 mlofi_count_prefix[level][qlo + 1])
+                        value = (mlofi_prefix[level][qhi] -
+                                 mlofi_prefix[level][qlo + 1])
+                        level_values.append(
+                            value if count == quote_transitions_value else None)
+                    mlofi_levels = tuple(level_values)
+                    variance = (quote_variance_prefix[qhi] -
+                                quote_variance_prefix[qlo + 1])
+                    realized_volatility_value = math.sqrt(max(0.0, variance))
+
+            quote_ofi_value = mlofi_levels[0]
+            multi_level_ofi_value = (
+                sum(value for value in mlofi_levels if value is not None)
+                if quote_ofi_value is not None else None)
+
+            tx_lo = bisect_left(trade_clock_exceptions, tlo)
+            tx_hi = bisect_left(trade_clock_exceptions, thi)
+            hidden_trades = [
+                index for index in trade_clock_exceptions[tx_lo:tx_hi]
+                if ts[index].event_time > decision
+            ]
+            signed_value = trade_signed_prefix[thi] - trade_signed_prefix[tlo]
+            known_volume = (trade_known_volume_prefix[thi] -
+                            trade_known_volume_prefix[tlo])
+            total_volume_value = (
+                trade_total_volume_prefix[thi] - trade_total_volume_prefix[tlo])
+            for index in hidden_trades:
+                trade = ts[index]
+                signed_value -= float(trade.side) * float(trade.quantity)
+                if trade.side != 0:
+                    known_volume -= float(trade.quantity)
+                total_volume_value -= float(trade.quantity)
+            trade_count_value = thi - tlo - len(hidden_trades)
+            trade_flow_value = (
+                signed_value / known_volume if known_volume > 0 else None)
+            normalized_ofi_value = (
+                quote_ofi_value / depth_l1
+                if quote_ofi_value is not None and depth_l1 > 0 else None)
+            multi_level_ofi_depth = sum(
+                float(decision_quote.bid_sizes[level]) +
+                float(decision_quote.ask_sizes[level])
+                for level, value in enumerate(mlofi_levels)
+                if value is not None and
+                level < len(decision_quote.bid_sizes) and
+                level < len(decision_quote.ask_sizes))
+            normalized_multi_level_ofi_value = (
+                multi_level_ofi_value / multi_level_ofi_depth
+                if multi_level_ofi_value is not None and
+                multi_level_ofi_depth > 0 else None)
+            ofi_depth_divergence_value = (
+                normalized_ofi_value - normalized_multi_level_ofi_value
+                if normalized_ofi_value is not None and
+                normalized_multi_level_ofi_value is not None else None)
+            return {
+                "trade_flow_imbalance": trade_flow_value,
+                "quote_event_ofi": quote_ofi_value,
+                "normalized_quote_ofi": normalized_ofi_value,
+                "multi_level_quote_ofi_l10": multi_level_ofi_value,
+                "normalized_multi_level_quote_ofi_l10": (
+                    normalized_multi_level_ofi_value),
+                "quote_ofi_depth_divergence": ofi_depth_divergence_value,
+                "quote_event_transition_count": quote_transitions_value,
+                "normalized_quote_ofi_per_event": (
+                    normalized_ofi_value / quote_transitions_value
+                    if normalized_ofi_value is not None and
+                    quote_transitions_value > 0 else None),
+                "signed_trade_volume": signed_value,
+                "trade_volume": total_volume_value,
+                "trade_side_known_ratio": (
+                    known_volume / total_volume_value
+                    if total_volume_value > 0 else None),
+                "quote_ofi_per_trade_volume": (
+                    quote_ofi_value / total_volume_value
+                    if quote_ofi_value is not None and
+                    total_volume_value > 0 else None),
+                "trade_count": trade_count_value,
+                "quote_count": quote_count_value,
+                "trade_intensity": trade_count_value / max(1.0, seconds),
+                "realized_volatility_bps": realized_volatility_value,
+            }
+
+        needed_windows = set(cube_windows)
+        needed_windows.add(spec.feature_lookback_seconds)
+        window_summaries = {
+            seconds: summarize_window(seconds)
+            for seconds in sorted(needed_windows)
+        }
+        base_features = window_summaries[spec.feature_lookback_seconds]
+        trade_flow = base_features["trade_flow_imbalance"]
+        quote_ofi = base_features["quote_event_ofi"]
+        normalized_ofi = base_features["normalized_quote_ofi"]
+        multi_level_ofi = base_features["multi_level_quote_ofi_l10"]
+        normalized_multi_level_ofi = base_features[
+            "normalized_multi_level_quote_ofi_l10"]
+        ofi_depth_divergence = base_features[
+            "quote_ofi_depth_divergence"]
+        quote_transitions = base_features["quote_event_transition_count"]
+        normalized_ofi_per_event = base_features[
+            "normalized_quote_ofi_per_event"]
+        signed = base_features["signed_trade_volume"]
+        total_volume = base_features["trade_volume"]
+        trade_side_known_ratio = base_features["trade_side_known_ratio"]
+        quote_ofi_per_trade_volume = base_features[
+            "quote_ofi_per_trade_volume"]
+        trade_count = base_features["trade_count"]
+        quote_count = base_features["quote_count"]
+        trade_intensity = base_features["trade_intensity"]
+        realized_volatility = base_features["realized_volatility_bps"]
         feature_mid = (decision_summary.mid if decision_summary is not None
                        else decision_quote.mid)
         entry_mid = (entry_summary.mid if entry_summary is not None
@@ -1153,8 +1419,7 @@ def build_samples(quotes: Sequence[QuoteEvent], trades: Sequence[TradeEvent],
             book_depth_l10=depth_l10,
             trade_count=trade_count,
             quote_count=quote_count,
-            trade_intensity=(trade_count /
-                             max(1.0, spec.feature_lookback_seconds)),
+            trade_intensity=trade_intensity,
             realized_volatility_bps=realized_volatility,
             entry_bid_depth_l1=float(entry_quote.bid_sizes[0]),
             entry_ask_depth_l1=float(entry_quote.ask_sizes[0]),
@@ -1168,17 +1433,11 @@ def build_samples(quotes: Sequence[QuoteEvent], trades: Sequence[TradeEvent],
             depth_imbalance_slope=depth_imbalance_slope,
             quote_ofi_depth_divergence=ofi_depth_divergence,
             quote_event_transition_count=quote_transitions,
-            normalized_quote_ofi_per_event=(
-                normalized_ofi / quote_transitions
-                if normalized_ofi is not None and quote_transitions > 0
-                else None),
+            normalized_quote_ofi_per_event=normalized_ofi_per_event,
             signed_trade_volume=signed,
             trade_volume=total_volume,
-            trade_side_known_ratio=(known_volume / total_volume
-                                    if total_volume > 0 else None),
-            quote_ofi_per_trade_volume=(
-                quote_ofi / total_volume
-                if quote_ofi is not None and total_volume > 0 else None),
+            trade_side_known_ratio=trade_side_known_ratio,
+            quote_ofi_per_trade_volume=quote_ofi_per_trade_volume,
             execution_capacity_supported=not coarse_second,
             # Keep the executable entry spread separate from the decision-time
             # feature spread.  A quote learned during order latency may widen
@@ -1188,7 +1447,45 @@ def build_samples(quotes: Sequence[QuoteEvent], trades: Sequence[TradeEvent],
                 ((entry_quote.best_ask + entry_quote.best_bid) / 2.0) *
                 10_000.0),
         ))
+        if cube_windows:
+            for seconds in cube_windows:
+                summary = window_summaries[seconds]
+                for field in WINDOWED_FIELDS:
+                    _cube_rows[(field, seconds)].append(summary[field])
     return samples
+
+
+def build_sample_batch(
+        quotes: Sequence[QuoteEvent], trades: Sequence[TradeEvent],
+        spec: IntradayLaneSpec, *, start: datetime, end: datetime,
+        execution_model: str | None = None,
+        timestamp_policy: str = STRICT_TIMESTAMP_POLICY,
+        cube_spec: FeatureCubeSpec | None = None) -> IntradaySampleBatch:
+    """Build every explicit primitive window during one raw-event replay."""
+    resolved_spec = cube_spec or FeatureCubeSpec()
+    rows: dict[tuple[str, int], list] = {
+        (field, seconds): []
+        for field in resolved_spec.windowed_fields
+        for seconds in resolved_spec.windows_seconds
+    }
+    samples = build_samples(
+        quotes, trades, spec, start=start, end=end,
+        execution_model=execution_model, timestamp_policy=timestamp_policy,
+        _cube_windows_seconds=resolved_spec.windows_seconds,
+        _cube_rows=rows,
+    )
+    columns = tuple(
+        (field, seconds, tuple(rows[(field, seconds)]))
+        for field in resolved_spec.windowed_fields
+        for seconds in resolved_spec.windows_seconds
+    )
+    cube = MultiScaleFeatureCube(
+        spec=resolved_spec,
+        row_count=len(samples),
+        decision_index_fingerprint=_decision_index_fingerprint(samples),
+        columns=columns,
+    )
+    return IntradaySampleBatch(tuple(samples), cube)
 
 
 def audit_causality(samples: Sequence[IntradaySample],
@@ -1620,10 +1917,14 @@ def _instrument_key(value, source: str) -> str:
     key = str(value).strip() if value is not None else ""
     if not key:
         raise ValueError("intraday replay instrument identifier is required")
-    if (event_source == EXTERNAL_EVENT_SOURCE
-            and (len(key) != 6 or not key.isascii() or not key.isdigit())):
+    canonical_symbol = (
+        len(key) == 6 and key.isascii() and
+        all("0" <= char <= "9" or "A" <= char <= "Z" for char in key)
+    )
+    if event_source == EXTERNAL_EVENT_SOURCE and not canonical_symbol:
         raise ValueError(
-            "external replay requires an exact six-digit KRX trading symbol; "
+            "external replay requires an exact six-character uppercase "
+            "alphanumeric KRX trading symbol; "
             f"received {value!r}")
     return key
 

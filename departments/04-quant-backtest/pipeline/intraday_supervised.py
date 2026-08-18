@@ -22,10 +22,24 @@ import json
 import math
 from typing import Iterable, Sequence
 
-from intraday_microstructure import IntradaySample
+import numpy as np
+
+from intraday_alpha_ast import (
+    EXPLICIT_FEATURE_WINDOW_CONTRACT,
+    LEGACY_FEATURE_WINDOW_CONTRACT,
+    PRIMITIVE_WINDOWS_SECONDS,
+    STATE_FIELDS,
+    WINDOWED_FIELDS,
+)
+from intraday_microstructure import (
+    FEATURE_CUBE_BOUNDARY,
+    FEATURE_CUBE_VERSION,
+    IntradaySample,
+)
 
 
 TEACHER_VERSION = "krx-cost-aware-linear-teacher-v3"
+EXPLICIT_WINDOW_TEACHER_VERSION = "krx-cost-aware-linear-teacher-v4"
 LABEL_VERSION = "krx-executable-opportunity-label-v2"
 RIDGE_FRACTION = 0.05
 MIN_OBSERVATIONS = 1_000
@@ -71,6 +85,53 @@ LOG1P_FEATURES = frozenset({
     "signed_trade_volume", "trade_volume",
 })
 
+# The explicit-window teacher is deliberately a different frozen model
+# contract.  State fields occur once at the decision snapshot; event-derived
+# fields occur at every primitive window.  Every raw value has its own missing
+# indicator, so a missing short window cannot masquerade as an observed zero.
+EXPLICIT_LOG1P_FIELDS = LOG1P_FEATURES | frozenset({
+    "bid_depth_l1", "ask_depth_l1", "quote_event_ofi",
+    "multi_level_quote_ofi_l10",
+})
+
+
+def explicit_raw_feature_names() -> tuple[str, ...]:
+    state = tuple(f"state:{field}" for field in sorted(STATE_FIELDS))
+    windowed = tuple(
+        f"window:{field}@{seconds}s"
+        for field in sorted(WINDOWED_FIELDS)
+        for seconds in PRIMITIVE_WINDOWS_SECONDS
+    )
+    return (*state, *windowed)
+
+
+def explicit_feature_names() -> tuple[str, ...]:
+    raw = explicit_raw_feature_names()
+    return (*raw, *(f"{name}__missing" for name in raw))
+
+
+def explicit_feature_cube_spec_hash() -> str:
+    payload = json.dumps({
+        "version": FEATURE_CUBE_VERSION,
+        "feature_window_contract_version": EXPLICIT_FEATURE_WINDOW_CONTRACT,
+        "windows_seconds": PRIMITIVE_WINDOWS_SECONDS,
+        "windowed_fields": sorted(WINDOWED_FIELDS),
+        "boundary": FEATURE_CUBE_BOUNDARY,
+    }, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def explicit_feature_spec_hash() -> str:
+    payload = json.dumps({
+        "version": EXPLICIT_WINDOW_TEACHER_VERSION,
+        "feature_window_contract_version": EXPLICIT_FEATURE_WINDOW_CONTRACT,
+        "feature_cube_spec_hash": explicit_feature_cube_spec_hash(),
+        "features": explicit_feature_names(),
+        "log1p": sorted(EXPLICIT_LOG1P_FIELDS),
+        "ridge_fraction": RIDGE_FRACTION,
+    }, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
+
 
 def _finite(value) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -107,6 +168,91 @@ def feature_spec_hash() -> str:
         "ridge_fraction": RIDGE_FRACTION,
     }, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _decision_index_fingerprint(samples: Sequence[IntradaySample]) -> str:
+    payload = json.dumps([
+        [sample.instrument_id, sample.decision_time.isoformat()]
+        for sample in samples
+    ], separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def _validate_explicit_feature_cube(
+        samples: Sequence[IntradaySample], feature_cube) -> None:
+    if feature_cube is None:
+        raise ValueError("explicit-window teacher requires a feature cube")
+    try:
+        spec = feature_cube.spec
+        row_count = int(feature_cube.row_count)
+        fingerprint = str(feature_cube.decision_index_fingerprint)
+    except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("explicit-window teacher feature cube is invalid") from exc
+    if row_count != len(samples):
+        raise ValueError("explicit-window teacher feature cube is misaligned")
+    if fingerprint != _decision_index_fingerprint(samples):
+        raise ValueError(
+            "explicit-window teacher feature cube decision index is misaligned")
+    expected = {
+        "version": FEATURE_CUBE_VERSION,
+        "feature_window_contract_version": EXPLICIT_FEATURE_WINDOW_CONTRACT,
+        "windows_seconds": tuple(PRIMITIVE_WINDOWS_SECONDS),
+        "windowed_fields": tuple(sorted(WINDOWED_FIELDS)),
+        "boundary": FEATURE_CUBE_BOUNDARY,
+    }
+    try:
+        actual = {
+            "version": getattr(spec, "version", None),
+            "feature_window_contract_version": getattr(
+                spec, "feature_window_contract_version", None),
+            "windows_seconds": tuple(getattr(spec, "windows_seconds", ())),
+            "windowed_fields": tuple(getattr(spec, "windowed_fields", ())),
+            "boundary": getattr(spec, "boundary", None),
+        }
+    except TypeError as exc:
+        raise ValueError(
+            "explicit-window teacher feature cube spec changed") from exc
+    if actual != expected:
+        raise ValueError("explicit-window teacher feature cube spec changed")
+    try:
+        for field in sorted(WINDOWED_FIELDS):
+            for seconds in PRIMITIVE_WINDOWS_SECONDS:
+                if len(feature_cube.column(field, seconds)) != len(samples):
+                    raise ValueError(
+                        "explicit-window teacher feature cube is misaligned")
+    except (AttributeError, KeyError, TypeError) as exc:
+        raise ValueError(
+            "explicit-window teacher feature cube is incomplete") from exc
+
+
+def _bounded_feature_value(name: str, raw, *, log1p_fields) -> tuple[float, float]:
+    value = _finite(raw)
+    missing = 1.0 if value is None else 0.0
+    value = 0.0 if value is None else value
+    if name in log1p_fields:
+        value = math.copysign(math.log1p(abs(value)), value)
+    return max(-1_000_000.0, min(1_000_000.0, value)), missing
+
+
+def explicit_feature_vector(
+        sample: IntradaySample, feature_cube, row_index: int) -> tuple[float, ...]:
+    """Return the v4 state-plus-all-windows vector for one aligned row."""
+    values: list[float] = []
+    missing: list[float] = []
+    for field in sorted(STATE_FIELDS):
+        value, absent = _bounded_feature_value(
+            field, getattr(sample, field, None),
+            log1p_fields=EXPLICIT_LOG1P_FIELDS)
+        values.append(value)
+        missing.append(absent)
+    for field in sorted(WINDOWED_FIELDS):
+        for seconds in PRIMITIVE_WINDOWS_SECONDS:
+            value, absent = _bounded_feature_value(
+                field, feature_cube.value(field, seconds, row_index),
+                log1p_fields=EXPLICIT_LOG1P_FIELDS)
+            values.append(value)
+            missing.append(absent)
+    return tuple([*values, *missing])
 
 
 def _label(sample: IntradaySample, horizon_seconds: int):
@@ -259,15 +405,109 @@ class _Moments:
             means=tuple(means), scales=tuple(scales))
 
 
+class _NumpyMoments:
+    """Vectorized sufficient statistics for the 244-dimensional v4 teacher."""
+
+    def __init__(self, dimension: int):
+        self.dimension = dimension
+        self.count = 0
+        self.sum_x = np.zeros(dimension, dtype=np.float64)
+        self.sum_xx = np.zeros((dimension, dimension), dtype=np.float64)
+        self.sum_y: dict[str, float] = {}
+        self.sum_xy: dict[str, np.ndarray] = {}
+
+    def add_batch(self, vectors: Sequence[Sequence[float]],
+                  targets: dict[str, Sequence[float]]) -> None:
+        if not vectors:
+            return
+        matrix = np.asarray(vectors, dtype=np.float64)
+        if matrix.ndim != 2 or matrix.shape[1] != self.dimension:
+            raise ValueError("teacher feature dimension mismatch")
+        if not np.isfinite(matrix).all():
+            raise ValueError("teacher features must be finite after normalization")
+        rows = int(matrix.shape[0])
+        self.count += rows
+        self.sum_x += np.sum(matrix, axis=0, dtype=np.float64)
+        self.sum_xx += matrix.T @ matrix
+        for target, raw_values in targets.items():
+            values = np.asarray(raw_values, dtype=np.float64)
+            if values.shape != (rows,) or not np.isfinite(values).all():
+                raise ValueError("teacher target batch is invalid")
+            self.sum_y[target] = self.sum_y.get(target, 0.0) + float(
+                np.sum(values, dtype=np.float64))
+            row = self.sum_xy.setdefault(
+                target, np.zeros(self.dimension, dtype=np.float64))
+            row += matrix.T @ values
+
+    def freeze_many(self, targets: Sequence[str]) -> dict[str, FrozenRidge] | None:
+        if self.count <= 0 or any(target not in self.sum_y for target in targets):
+            return None
+        n = float(self.count)
+        means = self.sum_x / n
+        variances = np.maximum(1e-12, np.diag(self.sum_xx) / n - means * means)
+        scales = np.sqrt(variances)
+        centred = self.sum_xx - n * np.outer(means, means)
+        matrix = centred / np.outer(scales, scales)
+        matrix[np.diag_indices(self.dimension)] += RIDGE_FRACTION * n
+        right_hand_sides = []
+        mean_targets = []
+        for target in targets:
+            mean_y = self.sum_y[target] / n
+            rhs = (self.sum_xy[target] - means * self.sum_y[target]) / scales
+            right_hand_sides.append(rhs)
+            mean_targets.append(mean_y)
+        try:
+            coefficients = np.linalg.solve(
+                matrix, np.column_stack(right_hand_sides))
+        except np.linalg.LinAlgError:
+            return None
+        if not np.isfinite(coefficients).all():
+            return None
+        frozen: dict[str, FrozenRidge] = {}
+        for index, target in enumerate(targets):
+            frozen[target] = FrozenRidge(
+                target=target,
+                intercept=float(mean_targets[index]),
+                coefficients=tuple(float(value)
+                                   for value in coefficients[:, index]),
+                means=tuple(float(value) for value in means),
+                scales=tuple(float(value) for value in scales),
+            )
+        return frozen
+
+
 class CostAwareTeacher:
     """Streaming calibration and immutable OOS prediction control."""
 
     def __init__(self, *, horizon_seconds: int, execution: str,
-                 cost_inputs: dict | None = None):
+                 cost_inputs: dict | None = None,
+                 feature_window_contract_version: str =
+                 LEGACY_FEATURE_WINDOW_CONTRACT):
         self.horizon_seconds = int(horizon_seconds)
         self.execution = str(execution).upper()
         if self.execution not in {"TAKER", "PASSIVE_FIFO_LOWER_BOUND"}:
             raise ValueError(f"unsupported execution={self.execution!r}")
+        if feature_window_contract_version not in {
+                LEGACY_FEATURE_WINDOW_CONTRACT,
+                EXPLICIT_FEATURE_WINDOW_CONTRACT}:
+            raise ValueError("unsupported teacher feature-window contract")
+        self.feature_window_contract_version = feature_window_contract_version
+        self.teacher_version = (
+            EXPLICIT_WINDOW_TEACHER_VERSION
+            if feature_window_contract_version ==
+            EXPLICIT_FEATURE_WINDOW_CONTRACT else TEACHER_VERSION)
+        self._feature_names = (
+            explicit_feature_names()
+            if feature_window_contract_version ==
+            EXPLICIT_FEATURE_WINDOW_CONTRACT else feature_names())
+        self._feature_spec_hash = (
+            explicit_feature_spec_hash()
+            if feature_window_contract_version ==
+            EXPLICIT_FEATURE_WINDOW_CONTRACT else feature_spec_hash())
+        self._feature_cube_spec_hash = (
+            explicit_feature_cube_spec_hash()
+            if feature_window_contract_version ==
+            EXPLICIT_FEATURE_WINDOW_CONTRACT else None)
         # Keep the exact preregistered cost inputs beside the fitted model.  The
         # labels already contain executable net returns, but without these
         # inputs a stored coefficient vector cannot be tied back to the cost
@@ -279,7 +519,11 @@ class CostAwareTeacher:
         except (TypeError, ValueError) as exc:
             raise ValueError("cost_inputs must be finite JSON data") from exc
         self.cost_inputs = json.loads(encoded_costs)
-        self._moments = _Moments(len(feature_names()))
+        self._moments = (
+            _NumpyMoments(len(self._feature_names))
+            if feature_window_contract_version ==
+            EXPLICIT_FEATURE_WINDOW_CONTRACT
+            else _Moments(len(self._feature_names)))
         self.instruments: set[str] = set()
         self.sessions: set[str] = set()
         self.class_counts = {
@@ -292,7 +536,7 @@ class CostAwareTeacher:
         self._restored_report: dict | None = None
         self._frozen_model_fingerprint: str | None = None
 
-    def training_contract_key(self) -> tuple[str, str, str, int, str, str]:
+    def training_contract_key(self) -> tuple:
         """Return the exact contract under which calibration rows are fungible.
 
         A population may fit one teacher for several symbolic candidates only
@@ -301,14 +545,29 @@ class CostAwareTeacher:
         contain costs: it is part of the frozen evidence identity and prevents
         a model from crossing cost regimes by accident.
         """
+        cost_identity = json.dumps(
+            self.cost_inputs, sort_keys=True, separators=(",", ":"),
+            allow_nan=False)
+        if self.feature_window_contract_version == \
+                LEGACY_FEATURE_WINDOW_CONTRACT:
+            # Preserve the v3 grouping identity exactly.
+            return (
+                TEACHER_VERSION,
+                LABEL_VERSION,
+                feature_spec_hash(),
+                self.horizon_seconds,
+                self.execution,
+                cost_identity,
+            )
         return (
-            TEACHER_VERSION,
+            self.teacher_version,
             LABEL_VERSION,
-            feature_spec_hash(),
+            self._feature_spec_hash,
+            self.feature_window_contract_version,
+            self._feature_cube_spec_hash,
             self.horizon_seconds,
             self.execution,
-            json.dumps(self.cost_inputs, sort_keys=True, separators=(",", ":"),
-                       allow_nan=False),
+            cost_identity,
         )
 
     def is_fresh(self) -> bool:
@@ -354,16 +613,23 @@ class CostAwareTeacher:
         if not isinstance(report, dict):
             raise ValueError("frozen teacher report must be an object")
         required = {
-            "version": TEACHER_VERSION,
+            "version": self.teacher_version,
             "label_version": LABEL_VERSION,
-            "feature_spec_hash": feature_spec_hash(),
+            "feature_spec_hash": self._feature_spec_hash,
             "horizon_seconds": self.horizon_seconds,
             "execution": self.execution,
         }
+        if self.feature_window_contract_version == \
+                EXPLICIT_FEATURE_WINDOW_CONTRACT:
+            required.update({
+                "feature_window_contract_version":
+                    EXPLICIT_FEATURE_WINDOW_CONTRACT,
+                "feature_cube_spec_hash": self._feature_cube_spec_hash,
+            })
         for key, expected in required.items():
             if report.get(key) != expected:
                 raise ValueError(f"frozen teacher {key} does not match runtime")
-        if report.get("features") != list(feature_names()):
+        if report.get("features") != list(self._feature_names):
             raise ValueError("frozen teacher feature order does not match runtime")
         if report.get("cost_inputs") != self.cost_inputs:
             raise ValueError("frozen teacher cost inputs do not match runtime")
@@ -376,7 +642,7 @@ class CostAwareTeacher:
         if status == "PASS":
             if set(parameters) != {"markout_bps", "net_bps", "positive_net"}:
                 raise ValueError("frozen teacher is missing a required target")
-            dimension = len(feature_names())
+            dimension = len(self._feature_names)
             for target in sorted(parameters):
                 raw = parameters[target]
                 if not isinstance(raw, dict) or raw.get("target") != target:
@@ -413,6 +679,14 @@ class CostAwareTeacher:
                 "calibration_fingerprints") or {},
             "models": parameters,
         }
+        if self.feature_window_contract_version == \
+                EXPLICIT_FEATURE_WINDOW_CONTRACT:
+            model_payload.update({
+                "feature_window_contract_version": report.get(
+                    "feature_window_contract_version"),
+                "feature_cube_spec_hash": report.get(
+                    "feature_cube_spec_hash"),
+            })
         calculated = hashlib.sha256(json.dumps(
             model_payload, sort_keys=True, separators=(",", ":"),
             allow_nan=False).encode()).hexdigest()
@@ -428,9 +702,45 @@ class CostAwareTeacher:
         return self.report()
 
     def calibrate(self, instrument_id: str,
-                  samples: Iterable[IntradaySample]) -> None:
+                  samples: Iterable[IntradaySample], *, feature_cube=None) -> None:
         if self.status != "PENDING":
             raise ValueError("teacher is already frozen")
+        if self.feature_window_contract_version == \
+                EXPLICIT_FEATURE_WINDOW_CONTRACT:
+            rows = list(samples)
+            _validate_explicit_feature_cube(rows, feature_cube)
+            vectors: list[tuple[float, ...]] = []
+            targets = {
+                "markout_bps": [],
+                "net_bps": [],
+                "positive_net": [],
+            }
+            contributed = False
+            for index, sample in enumerate(rows):
+                target = executable_target(
+                    sample, horizon_seconds=self.horizon_seconds,
+                    execution=self.execution)
+                if target is None:
+                    continue
+                markout, net, positive = target
+                vectors.append(explicit_feature_vector(
+                    sample, feature_cube, index))
+                targets["markout_bps"].append(markout)
+                targets["net_bps"].append(net)
+                targets["positive_net"].append(positive)
+                label = direction_class(
+                    sample, horizon_seconds=self.horizon_seconds,
+                    execution=self.execution)
+                if label is not None:
+                    self.class_counts[label] += 1
+                self.sessions.add(sample.decision_time.date().isoformat())
+                contributed = True
+            self._moments.add_batch(vectors, targets)
+            if contributed:
+                self.instruments.add(str(instrument_id))
+            return
+
+        # This v3 path intentionally remains byte/behavior compatible.
         contributed = False
         for sample in samples:
             target = executable_target(
@@ -467,21 +777,54 @@ class CostAwareTeacher:
             report = self.report()
             self._frozen_model_fingerprint = report["model_fingerprint"]
             return report
-        for target in ("markout_bps", "net_bps", "positive_net"):
-            model = self._moments.freeze(target)
-            if model is None:
+        targets = ("markout_bps", "net_bps", "positive_net")
+        if self.feature_window_contract_version == \
+                EXPLICIT_FEATURE_WINDOW_CONTRACT:
+            models = self._moments.freeze_many(targets)
+            if models is None:
                 self.status = "SINGULAR_CALIBRATION"
                 self.models = {}
                 report = self.report()
                 self._frozen_model_fingerprint = report["model_fingerprint"]
                 return report
-            self.models[target] = model
+            self.models.update(models)
+        else:
+            for target in targets:
+                model = self._moments.freeze(target)
+                if model is None:
+                    self.status = "SINGULAR_CALIBRATION"
+                    self.models = {}
+                    report = self.report()
+                    self._frozen_model_fingerprint = report["model_fingerprint"]
+                    return report
+                self.models[target] = model
         self.status = "PASS"
         report = self.report()
         self._frozen_model_fingerprint = report["model_fingerprint"]
         return report
 
-    def predict(self, samples: Iterable[IntradaySample]) -> list[dict | None]:
+    def predict(self, samples: Iterable[IntradaySample], *,
+                feature_cube=None) -> list[dict | None]:
+        if self.feature_window_contract_version == \
+                EXPLICIT_FEATURE_WINDOW_CONTRACT:
+            rows = list(samples)
+            _validate_explicit_feature_cube(rows, feature_cube)
+            if self.status != "PASS":
+                return [None for _ in rows]
+            predictions = []
+            for index, sample in enumerate(rows):
+                vector = explicit_feature_vector(sample, feature_cube, index)
+                probability = self.models["positive_net"].predict(vector)
+                predictions.append({
+                    "expected_markout_bps":
+                        self.models["markout_bps"].predict(vector),
+                    "expected_net_bps": self.models["net_bps"].predict(vector),
+                    "positive_net_probability": max(
+                        0.0, min(1.0, probability)),
+                })
+            return predictions
+
+        # Keep v3's iterable consumption and values exactly as before.
         if self.status != "PASS":
             return [None for _ in samples]
         rows = []
@@ -509,9 +852,9 @@ class CostAwareTeacher:
                 sorted(self.instruments), separators=(",", ":")).encode()).hexdigest(),
         }
         model_payload = {
-            "version": TEACHER_VERSION,
+            "version": self.teacher_version,
             "label_version": LABEL_VERSION,
-            "feature_spec_hash": feature_spec_hash(),
+            "feature_spec_hash": self._feature_spec_hash,
             "status": self.status,
             "horizon_seconds": self.horizon_seconds,
             "execution": self.execution,
@@ -520,15 +863,22 @@ class CostAwareTeacher:
             "calibration_fingerprints": calibration_fingerprints,
             "models": parameters,
         }
+        if self.feature_window_contract_version == \
+                EXPLICIT_FEATURE_WINDOW_CONTRACT:
+            model_payload.update({
+                "feature_window_contract_version":
+                    self.feature_window_contract_version,
+                "feature_cube_spec_hash": self._feature_cube_spec_hash,
+            })
         model_fingerprint = hashlib.sha256(json.dumps(
             model_payload, sort_keys=True, separators=(",", ":"),
             allow_nan=False).encode()).hexdigest()
-        return {
-            "version": TEACHER_VERSION,
+        report = {
+            "version": self.teacher_version,
             "label_version": LABEL_VERSION,
             "status": self.status,
-            "feature_spec_hash": feature_spec_hash(),
-            "features": list(feature_names()),
+            "feature_spec_hash": self._feature_spec_hash,
+            "features": list(self._feature_names),
             "target": "EXECUTABLE_NET_BPS_PER_OPPORTUNITY",
             "secondary_targets": ["MID_MARKOUT_BPS", "POSITIVE_NET_CLASS"],
             "horizon_seconds": self.horizon_seconds,
@@ -550,3 +900,11 @@ class CostAwareTeacher:
             "control_only": True,
             "promotion_authority": False,
         }
+        if self.feature_window_contract_version == \
+                EXPLICIT_FEATURE_WINDOW_CONTRACT:
+            report.update({
+                "feature_window_contract_version":
+                    self.feature_window_contract_version,
+                "feature_cube_spec_hash": self._feature_cube_spec_hash,
+            })
+        return report

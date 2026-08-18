@@ -71,7 +71,7 @@ def clip_excerpt(text: str, *, limit: int = MAX_EXCERPT_CHARS) -> str:
         return t
     return t[: max(0, limit - len(_TRUNC_MARK))].rstrip() + _TRUNC_MARK
 
-MODULE_VERSION = "research-lead-intake-v5"
+MODULE_VERSION = "research-lead-intake-v6"
 
 # 스카우트가 내는 블록의 필드. 앞의 셋이 없으면 리드가 아니다.
 REQUIRED = ("TITLE", "URL", "MECHANISM", "READINESS")
@@ -79,6 +79,7 @@ OPTIONAL = ("COUNTERPARTY", "TESTABLE_WITH", "REPORTED_EFFECT", "EXCERPT",
             "MARKET_CONTEXT", "FAILURE_MODE", "OBSERVABLES",
             "CANDIDATE_SIGNAL_EXPR", "MISSING_DATA", "MAPPING_LOSS",
             "RESEARCH_LANE", "SEMANTIC_PLAN",
+            "FEATURE_WINDOW_CONTRACT_VERSION",
             "DERIVATION_MODE", "SOURCE_BASELINE_EXPR",
             "DERIVATION_TRANSFORMS", "NOVELTY_RATIONALE",
             "PARENT_SIGNAL_EXPR", "EVOLUTION_OPERATORS",
@@ -194,6 +195,7 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
         except (TypeError, ValueError) as exc:
             raise ValueError(f"invalid SEMANTIC_PLAN: {exc}") from exc
     candidate = None
+    feature_window_contract_version = ""
 
     if readiness == AST_READY:
         if not observables or not _as_text(raw_expr):
@@ -209,6 +211,17 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
         if observables != fields:
             raise ValueError(f"OBSERVABLES {observables} do not match AST fields {fields}")
         if lane == "INTRADAY_EVENT":
+            declared_window_contract = _as_text(
+                block.get("FEATURE_WINDOW_CONTRACT_VERSION"))
+            if not declared_window_contract:
+                declared_window_contract = (
+                    ast.EXPLICIT_FEATURE_WINDOW_CONTRACT
+                    if any(seconds is not None for _field, seconds in
+                           ast.field_window_bindings_of(candidate))
+                    else ast.LEGACY_FEATURE_WINDOW_CONTRACT)
+            candidate = ast.validate_feature_window_contract(
+                candidate, contract_version=declared_window_contract)
+            feature_window_contract_version = declared_window_contract
             if not semantic_plan:
                 raise ValueError("INTRADAY_EVENT AST_READY requires SEMANTIC_PLAN")
             from alpha_semantics import check_observables, validate  # noqa: PLC0415
@@ -342,6 +355,8 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
             "mapping_loss": mapping_loss,
             "lessons_addressed": _as_text(block.get("LESSONS_ADDRESSED")),
             "research_lane": lane, "semantic_plan": semantic_plan,
+            "feature_window_contract_version":
+                feature_window_contract_version,
             "ast_fingerprint": ast_fingerprint,
             "ast_shape_fingerprint": ast_shape_fingerprint,
             "primary_data_plane": ("MICROSTRUCTURE" if readiness == AST_READY

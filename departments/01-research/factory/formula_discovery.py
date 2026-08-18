@@ -217,11 +217,25 @@ def assess(thesis, *, candidate: dict, semantic_plan: dict, grammar) -> dict:
     """Validate an LLM equation thesis against the executable AST."""
     clock_domains = (sorted(grammar.clock_domains_of(candidate))
                      if hasattr(grammar, "clock_domains_of") else [])
+    temporal_clocks = sorted(
+        grammar.temporal_windows_of(candidate)
+        if hasattr(grammar, "temporal_windows_of")
+        else grammar.clocks_of(candidate))
+    primitive_windows = (
+        sorted(grammar.primitive_windows_of(candidate))
+        if hasattr(grammar, "primitive_windows_of") else [])
     profile = {
         "grammar_version": str(getattr(grammar, "AST_VERSION", "")),
         "fields": sorted(grammar.fields_of(candidate)),
         "operators": sorted(grammar.operators_of(candidate)),
-        "clocks_seconds": sorted(grammar.clocks_of(candidate)),
+        # ``clocks_seconds`` remains the combined compatibility view used by
+        # the CROSS_SCALE thesis validator.  The split fields preserve the
+        # economic distinction between raw aggregation and a later temporal
+        # transform.
+        "clocks_seconds": sorted(set(temporal_clocks) |
+                                 set(primitive_windows)),
+        "primitive_windows_seconds": primitive_windows,
+        "temporal_windows_seconds": temporal_clocks,
         "clock_domains": clock_domains,
         "complexity_nodes": grammar.count_nodes(candidate),
         "output_unit": grammar.unit_of(candidate),
