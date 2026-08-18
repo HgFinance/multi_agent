@@ -166,6 +166,37 @@ def test_breeder_board_read_failure_defers_planner(monkeypatch) -> None:
         "fresh brief", 3, 2, breeder_pending=bool(state))
 
 
+def test_terminal_breeder_bucket_releases_planner_low_watermark() -> None:
+    assert factory_autopilot._breeder_blocks_planner(
+        breeder_needed=True, active_breeder=None, bucket_status="done") is False
+    assert factory_autopilot._breeder_blocks_planner(
+        breeder_needed=True, active_breeder=None,
+        bucket_status="blocked") is False
+    assert factory_autopilot._breeder_blocks_planner(
+        breeder_needed=True, active_breeder="t_live(running)",
+        bucket_status="done") is True
+    assert factory_autopilot._breeder_blocks_planner(
+        breeder_needed=True, active_breeder=None, bucket_status=None) is True
+    assert factory_autopilot._breeder_blocks_planner(
+        breeder_needed=True, active_breeder=None,
+        bucket_status="UNKNOWN_BOARD_STATE(RuntimeError)") is True
+
+
+def test_exact_breeder_bucket_status_is_fail_closed(monkeypatch) -> None:
+    monkeypatch.setattr(
+        factory_autopilot, "_board_rows",
+        lambda _sql, params=(): [("done",)] if params == ("bucket",) else [])
+    assert factory_autopilot._card_status_by_idempotency_key(
+        "bucket", fail_closed=True) == "done"
+
+    def broken_board(*_args, **_kwargs):
+        raise RuntimeError("board unavailable")
+
+    monkeypatch.setattr(factory_autopilot, "_board_rows", broken_board)
+    assert factory_autopilot._card_status_by_idempotency_key(
+        "bucket", fail_closed=True) == "UNKNOWN_BOARD_STATE(RuntimeError)"
+
+
 def test_planner_version_bump_does_not_bypass_active_family(
         monkeypatch) -> None:
     monkeypatch.setattr(
