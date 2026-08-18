@@ -453,12 +453,16 @@ def test_release_script_is_worktree_only_and_fail_closed() -> None:
     build_command = (
         'compose_release "$RELEASE" --profile deployment build --pull'
     )
-    pull_command = (
-        'compose_release "$RELEASE" pull --ignore-buildable --policy missing'
-    )
+    pull_command = 'compose_release "$RELEASE" pull --policy missing'
     assert build_command in script
     assert pull_command in script
     assert script.index(build_command) < script.index(pull_command)
+    assert "external_pull_service_plan" in script
+    assert "locally_built_images" in script
+    assert 'image not in locally_built_images' in script
+    assert 'config --format json' in script
+    assert '"${EXTERNAL_PULL_SERVICES[@]}"' in script
+    assert "--ignore-pull-failures" not in script
 
     installer = PROFILE_INSTALLER.read_text(encoding="utf-8")
     assert "departments/00-ceo-office/hermes" in installer

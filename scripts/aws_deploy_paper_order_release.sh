@@ -486,6 +486,30 @@ compose_release() {
     "$@"
 }
 
+external_pull_service_plan() {
+  # Compose treats `latest` as remotely refreshable even under `--policy
+  # missing`.  Some runtime-only services intentionally reuse an image built
+  # by another service without declaring their own `build` stanza, so asking
+  # Compose to pull every non-buildable service would still try to pull those
+  # project-local names from Docker Hub.  Emit only services whose image is
+  # not produced anywhere in this Compose model.
+  python3 -c '
+import json
+import sys
+
+services = json.load(sys.stdin).get("services", {})
+locally_built_images = {
+    service.get("image")
+    for service in services.values()
+    if service.get("build") and service.get("image")
+}
+for name, service in sorted(services.items()):
+    image = service.get("image")
+    if not service.get("build") and image and image not in locally_built_images:
+        print(name)
+'
+}
+
 container_state() {
   docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$1" 2>/dev/null || true
 }
@@ -617,14 +641,14 @@ trap 'rollback_release 143' TERM
 say "Validating and building release $RELEASE_COMMIT..."
 compose_release "$RELEASE" config --quiet
 compose_release "$RELEASE" --profile deployment build --pull
-# Build first because several runtime-only services intentionally reuse a
-# locally produced image (for example hedgefund-factory:latest) without their
-# own `build` stanza.  Pulling those services before the producer is built
-# incorrectly treats the local image name as a registry image and aborts the
-# deployment.  Once local images exist, `--policy missing` downloads only
-# genuinely absent external images while `--ignore-buildable` leaves locally
-# reproducible images to the build step above.
-compose_release "$RELEASE" pull --ignore-buildable --policy missing
+EXTERNAL_PULL_PLAN="$(
+  compose_release "$RELEASE" --profile deployment config --format json \
+    | external_pull_service_plan
+)" || die "could not determine external Compose image pull plan"
+if [[ -n "$EXTERNAL_PULL_PLAN" ]]; then
+  mapfile -t EXTERNAL_PULL_SERVICES <<<"$EXTERNAL_PULL_PLAN"
+  compose_release "$RELEASE" pull --policy missing "${EXTERNAL_PULL_SERVICES[@]}"
+fi
 
 DATABASE_CONTAINER_EXISTED=0
 if docker inspect hedgefund-timescaledb >/dev/null 2>&1; then
