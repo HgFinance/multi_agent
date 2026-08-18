@@ -16,24 +16,43 @@ import os
 from pathlib import Path
 import tempfile
 
-from intraday_microstructure import (HorizonLabel, IntradayLaneSpec,
-                                      IntradaySample, LANE_VERSION)
+from intraday_microstructure import (COMPLETED_SECOND_POLICY,
+                                      EXTERNAL_EVENT_SOURCE, HorizonLabel,
+                                      IntradayLaneSpec, IntradaySample,
+                                      LANE_VERSION, STRICT_TIMESTAMP_POLICY)
 
 
-CACHE_VERSION = "intraday-discovery-sample-cache-v1"
+CACHE_VERSION = "intraday-discovery-sample-cache-v2"
 DEFAULT_MAX_BYTES = 20 * 1024 ** 3
 _SAMPLE_FIELDS = tuple(field.name for field in fields(IntradaySample)
                        if field.name != "labels")
+_LABEL_DATETIME_FIELDS = (
+    "exit_time", "long_passive_fill_time", "short_passive_fill_time",
+    "long_passive_exit_time", "short_passive_exit_time",
+)
 
 
 def identity(*, spec: IntradayLaneSpec, event_source: str,
-             execution_model: str, source_lineage) -> str:
+             execution_model: str, source_lineage,
+             timestamp_policy: str | None = None) -> str:
+    policy = str(timestamp_policy or (
+        COMPLETED_SECOND_POLICY
+        if str(event_source).upper() == EXTERNAL_EVENT_SOURCE else
+        STRICT_TIMESTAMP_POLICY)).upper()
     payload = {
         "cache_version": CACHE_VERSION,
         "lane_version": LANE_VERSION,
         "spec": asdict(spec),
         "event_source": str(event_source),
         "execution_model": str(execution_model),
+        "timestamp_policy": policy,
+        "clock_aggregation_version": (
+            "completed-second-state-median-taker-envelope-v1"
+            if policy == COMPLETED_SECOND_POLICY else None),
+        "execution_contract": (
+            "conditional-one-share-max-ask-min-bid-v1"
+            if policy == COMPLETED_SECOND_POLICY else
+            "visible-snapshot-depth-v1"),
         "source_lineage": source_lineage,
     }
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"),
@@ -98,8 +117,7 @@ class SampleCache:
             for row in table.to_pylist():
                 labels = []
                 for raw in json.loads(row.pop("labels_json")):
-                    for key in ("exit_time", "long_passive_fill_time",
-                                "short_passive_fill_time"):
+                    for key in _LABEL_DATETIME_FIELDS:
                         if raw.get(key) is not None:
                             raw[key] = datetime.fromisoformat(raw[key])
                     labels.append(HorizonLabel(**raw))
@@ -125,9 +143,8 @@ class SampleCache:
             labels = []
             for label in sample.labels:
                 raw = asdict(label)
-                for key in ("exit_time", "long_passive_fill_time",
-                            "short_passive_fill_time"):
-                    if raw[key] is not None:
+                for key in _LABEL_DATETIME_FIELDS:
+                    if raw.get(key) is not None:
                         raw[key] = raw[key].isoformat()
                 labels.append(raw)
             row["labels_json"] = json.dumps(

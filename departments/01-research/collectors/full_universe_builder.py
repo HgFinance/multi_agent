@@ -85,11 +85,32 @@ def build() -> int:
                 select isym.symbol
                 from reference.instruments i
                 join reference.instrument_symbols isym
-                  on isym.instrument_id = i.instrument_id and isym.is_primary
-                where i.instrument_type = 'STOCK' and i.status = 'ACTIVE'
+                  on isym.instrument_id = i.instrument_id
+                 and isym.provider = 'LS'
+                 and isym.market = 'KRX'
+                 and isym.symbol_type = 'TRADING'
+                 and isym.is_primary
+                 and isym.valid_from <= now()
+                 and (isym.valid_to is null or isym.valid_to > now())
+                where upper(i.market) = 'KRX'
+                  and upper(i.asset_class) = 'EQUITY'
+                  and upper(i.instrument_type) = 'STOCK'
+                  and upper(i.status) = 'ACTIVE'
+                  and upper(i.venue) in ('KOSPI', 'KOSDAQ')
+                  and lower(coalesce(i.metadata->>'is_spac', 'false')) <> 'true'
                 order by isym.symbol
             """)
             all_syms = [r[0] for r in cur.fetchall()]
+            duplicate_symbols = sorted(
+                symbol for symbol in set(all_syms) if all_syms.count(symbol) > 1
+            )
+            if duplicate_symbols:
+                print(
+                    "현재 LS/KRX 대표 심볼 매핑이 중복되어 universe를 만들 수 없다: "
+                    f"{duplicate_symbols}",
+                    flush=True,
+                )
+                return 1
 
             cur.execute("""
                 select reason, symbol from research.symbol_restrictions

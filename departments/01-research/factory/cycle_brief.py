@@ -34,8 +34,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]
+                       / "04-quant-backtest" / "pipeline"))
+
+from stock_universe import governed_stock_evidence_sql  # noqa: E402
 
 MODULE_VERSION = "research-cycle-brief-v1"
+_GOVERNED_LESSON_EVIDENCE = governed_stock_evidence_sql(
+    experiment_alias="e", dataset_alias="m", hypothesis_alias="h")
 
 # 교훈 코드 -> 스카우트가 다음에 무엇을 피해야 하는지. **사실의 번역이지
 # 지시가 아니다** - "이 계열을 하지 마라" 가 아니라 "이 계열은 이 데이터로
@@ -84,10 +90,20 @@ class Brief:
                        "(Gate 0 가 DUPLICATE_UNADDRESSED 로 막는다).")
 
         if self.budget:
-            out.append("\n계열별 시도 예산:")
+            out.append("\n계열별 PRIMARY 시도 예산:")
             for fam, b in sorted(self.budget.items()):
                 out.append(f"  - [{fam[:12]}] {b['used']}/{b['budget']} 사용"
+                           + (f" · {b['identity']}" if b.get("identity") else "")
                            + ("  **소진**" if b["used"] >= b["budget"] else ""))
+            out.append(
+                "  PRIMARY 예산은 top-level 가설 실행만 센다. sidecar 스크리닝은 "
+                "이 예산을 쓰거나 승격 권한을 얻지 않지만 DSR·실패 기억의 "
+                "다중검정 노출에는 남는다.")
+            out.append(
+                "  인트라데이 계열은 경제 좌표(event/context/direction/execution)와 "
+                "AST 구조 모양으로 구분한다. 창·상수·threshold만 바꾸거나 이름만 "
+                "바꾸는 것은 새 경제 계열이 아니다. 소진 계열을 피하려면 다른 "
+                "미시구조 사건/상대방/실행 메커니즘과 구조적으로 다른 AST를 제안하라.")
 
         if self.exhausted:
             out.append("\n최근 돌린 질의(쿨다운 중 - 같은 것을 또 돌리면 낭비다):")
@@ -105,9 +121,15 @@ def load_lessons(conn, *, limit: int = 12) -> list:
     """기각 교훈. **성공도 함께 읽는다** - 무엇이 통했는지도 배워야 한다."""
     cur = conn.cursor()
     cur.execute("""
-        select trial_family_id, lesson_codes, coalesce(notes, ''), decision
-          from research.experiment_outcomes
-         order by created_at desc limit %s
+        select o.trial_family_id, o.lesson_codes, coalesce(o.notes, ''),
+               o.decision
+          from research.v_current_experiment_outcomes o
+          join quant.experiments e
+            on e.experiment_id::text = o.experiment_id
+          join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+          join quant.dataset_manifests m on m.dataset_id = e.dataset_id
+         where """ + _GOVERNED_LESSON_EVIDENCE + """
+         order by o.created_at desc limit %s
     """, (limit,))
     out = []
     for fam, codes, notes, decision in cur.fetchall():
@@ -122,12 +144,38 @@ def load_budget(conn) -> dict:
     """계열별 실행 횟수. **실행 기록에서 센다** - 종결 기록으로 세면 적게 센다."""
     cur = conn.cursor()
     cur.execute("""
-        select e.trial_family_id, count(*)
+        select e.trial_family_id, count(*),
+               max(coalesce(h.expected_edge->>'type', '')),
+               max(coalesce(h.expected_edge->'semantic_plan'->>'event', '')),
+               max(coalesce(h.expected_edge->'semantic_plan'->>'direction', '')),
+               max(coalesce(h.expected_edge->'semantic_plan'->>'execution', '')),
+               max(coalesce(h.expected_edge->'semantic_plan'->>'horizon_seconds', ''))
           from quant.experiments e
+          join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
          where e.trial_family_id is not null
+           and (
+               e.status in ('QUEUED', 'RUNNING', 'COMPLETED')
+               or exists (select 1 from quant.backtest_runs run
+                           where run.experiment_id = e.experiment_id)
+               or exists (select 1 from quant.experiment_metrics metric
+                           where metric.experiment_id = e.experiment_id)
+               or exists (select 1 from research.experiment_outcomes outcome
+                           where outcome.experiment_id = e.experiment_id::text)
+               or exists (
+                    select 1
+                      from quant.intraday_experiment_rungs rung
+                      join quant.intraday_session_accesses access
+                        on access.experiment_rung_id = rung.experiment_rung_id
+                     where rung.experiment_id = e.experiment_id)
+           )
          group by 1 order by 2 desc limit 12
     """)
-    return {str(f): {"used": int(n), "budget": 5} for f, n in cur.fetchall()}
+    out = {}
+    for row in cur.fetchall():
+        f, n, *coords = row
+        identity = "/".join(str(value) for value in coords if value)
+        out[str(f)] = {"used": int(n), "budget": 5, "identity": identity}
+    return out
 
 
 def load_recent_queries(conn, *, hours: int = 72) -> list:
@@ -214,7 +262,8 @@ def _selfcheck() -> int:
 
     conn = _Conn([
         [("fam_abc123", ["UNDERPOWERED_DATA"], "창 0개", "GATE_HOLD")],  # lessons
-        [("fam_abc123", 3)],                                             # budget
+        [("fam_abc123", 3, "order_flow_imbalance", "QUEUE_IMBALANCE",
+          "FOLLOW", "TAKER", "30")],                                  # budget
         [("모멘텀 붕괴는 변동성으로 예측된다",)],                          # queries
         [(5,)],                                                          # leads
     ])
@@ -224,6 +273,10 @@ def _selfcheck() -> int:
     check("교훈이 뜻으로 번역됨", "표본이 그 설계를 못 받쳤다" in p)
     check("Gate 0 대응 요구 명시", "DUPLICATE_UNADDRESSED" in p)
     check("예산 노출", "3/5 사용" in p)
+    check("계열 의미 좌표 노출", "QUEUE_IMBALANCE/FOLLOW/TAKER/30" in p)
+    check("PRIMARY와 screening 압력 분리", "sidecar 스크리닝" in p
+          and "다중검정 노출" in p)
+    check("숫자 retune은 새 계열 아님", "창·상수·threshold" in p)
     check("쿨다운 노출", "모멘텀 붕괴" in p)
     check("기존 리드 수", "리드 5건" in p)
     check("판단은 에이전트 몫이라 명시", "판단은 네가 한다" in p)
@@ -259,7 +312,7 @@ def _selfcheck() -> int:
 
     for f in fails:
         print(f"  FAIL {f}")
-    print(f"cycle_brief 자체 점검: {12 - len(fails)}/12 통과")
+    print(f"cycle_brief 자체 점검: {15 - len(fails)}/15 통과")
     return 1 if fails else 0
 
 

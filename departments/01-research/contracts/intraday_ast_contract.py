@@ -17,7 +17,7 @@ import math
 from statistics import fmean, pstdev
 
 
-AST_VERSION = "intraday-alpha-ast-v1"
+AST_VERSION = "intraday-alpha-ast-v2"
 MAX_DEPTH = 8
 MAX_NODES = 48
 MIN_SECONDS = 1
@@ -38,6 +38,16 @@ FIELDS = {
     "trade_flow_imbalance": RATIO,
     "quote_event_ofi": SHARES,
     "normalized_quote_ofi": RATIO,
+    "multi_level_quote_ofi_l10": SHARES,
+    "normalized_multi_level_quote_ofi_l10": RATIO,
+    "depth_imbalance_slope": RATIO,
+    "quote_ofi_depth_divergence": RATIO,
+    "quote_event_transition_count": COUNT,
+    "normalized_quote_ofi_per_event": RATIO,
+    "signed_trade_volume": SHARES,
+    "trade_volume": SHARES,
+    "trade_side_known_ratio": RATIO,
+    "quote_ofi_per_trade_volume": RATIO,
     "spread_bps": BPS,
     "bid_depth_l1": SHARES,
     "ask_depth_l1": SHARES,
@@ -50,6 +60,49 @@ FIELDS = {
     "quote_age_ms": MILLISECONDS,
 }
 
+# ``parse`` is the local strict grammar and deliberately remains a superset of
+# the currently replayable external history.  The 61-session historical lane is
+# reconstructed from completed-second, order-ambiguous snapshots: it can
+# observe book state and printed trades, but it cannot recover the within-second
+# quote transition sequence required by event OFI.  Keep those fields available
+# for a future sequenced feed while rejecting them deterministically at the
+# current screening-cohort boundary.
+COMPLETED_SECOND_SCREENING_COHORT_VERSION = "intraday-screening-cohort-v4"
+COMPLETED_SECOND_ALLOWED_EXECUTIONS = frozenset({"TAKER"})
+COMPLETED_SECOND_SEQUENCE_DEPENDENT_FIELDS = frozenset({
+    "quote_event_ofi",
+    "normalized_quote_ofi",
+    "multi_level_quote_ofi_l10",
+    "normalized_multi_level_quote_ofi_l10",
+    "quote_ofi_depth_divergence",
+    "quote_event_transition_count",
+    "normalized_quote_ofi_per_event",
+    "quote_ofi_per_trade_volume",
+})
+COMPLETED_SECOND_RECOMMENDED_FIELDS = frozenset({
+    "queue_imbalance_l1",
+    "queue_imbalance_l10",
+    "microprice_offset_bps",
+    "depth_imbalance_slope",
+    "trade_flow_imbalance",
+    "signed_trade_volume",
+    "trade_volume",
+    "trade_side_known_ratio",
+    "spread_bps",
+    "bid_depth_l1",
+    "ask_depth_l1",
+    "book_depth_l1",
+    "book_depth_l10",
+    "trade_count",
+    "quote_count",
+    "trade_intensity",
+    "realized_volatility_bps",
+    "quote_age_ms",
+})
+COMPLETED_SECOND_REPLAYABLE_FIELDS = (
+    frozenset(FIELDS) - COMPLETED_SECOND_SEQUENCE_DEPENDENT_FIELDS
+)
+
 FIELD_OP = "field"
 TEMPORAL_OPS = frozenset({"lag", "rolling_mean", "rolling_std", "rolling_sum",
                           "delta", "ewma", "rolling_zscore"})
@@ -58,6 +111,20 @@ BINARY_OPS = frozenset({"add", "sub", "mul", "div", "min", "max", "gt", "lt",
                         "and", "or"})
 TERNARY_OPS = frozenset({"where"})
 ALL_OPS = frozenset({FIELD_OP}) | TEMPORAL_OPS | UNARY_OPS | BINARY_OPS | TERNARY_OPS
+
+WALL_TIME_CLOCK = "WALL_TIME_SECONDS"
+QUOTE_EVENT_CLOCK = "QUOTE_SNAPSHOT_EVENT"
+TRADE_VOLUME_CLOCK = "PRINTED_TRADE_VOLUME"
+QUOTE_EVENT_CLOCK_FIELDS = frozenset({
+    "quote_event_ofi", "normalized_quote_ofi",
+    "multi_level_quote_ofi_l10", "normalized_multi_level_quote_ofi_l10",
+    "quote_ofi_depth_divergence", "quote_event_transition_count",
+    "normalized_quote_ofi_per_event", "quote_count",
+})
+TRADE_VOLUME_CLOCK_FIELDS = frozenset({
+    "trade_flow_imbalance", "signed_trade_volume", "trade_volume",
+    "trade_side_known_ratio", "quote_ofi_per_trade_volume", "trade_count",
+})
 
 
 class IntradayExprError(ValueError):
@@ -281,6 +348,54 @@ def clocks_of(expr: dict) -> set[int]:
                 walk(current[key])
     walk(node)
     return out
+
+
+def validate_completed_second_candidate(
+        expr: dict, *, execution: str) -> dict:
+    """Validate a candidate against the current external-history capability.
+
+    This is intentionally *not* part of :func:`parse`: local or future feeds
+    with exchange sequence can still use the complete strict grammar.  Intake
+    calls this narrower gate only for ``intraday-screening-cohort-v4`` shared
+    replay, whose within-second quote snapshots are an unordered multiset and
+    whose historical fill model is taker-only.
+    """
+    parsed = parse(expr)
+    execution_name = str(execution or "").strip().upper()
+    if execution_name not in COMPLETED_SECOND_ALLOWED_EXECUTIONS:
+        allowed = ", ".join(sorted(COMPLETED_SECOND_ALLOWED_EXECUTIONS))
+        raise IntradayExprError(
+            f"{COMPLETED_SECOND_SCREENING_COHORT_VERSION} completed-second "
+            f"external history is {allowed} only; got execution="
+            f"{execution_name or '<missing>'!r}")
+    blocked = sorted(fields_of(parsed) & COMPLETED_SECOND_SEQUENCE_DEPENDENT_FIELDS)
+    if blocked:
+        raise IntradayExprError(
+            f"{COMPLETED_SECOND_SCREENING_COHORT_VERSION} completed-second "
+            "external history has no deterministic within-second quote "
+            f"sequence; blocked fields: {', '.join(blocked)}")
+    return parsed
+
+
+def clock_domains_of(expr: dict) -> set[str]:
+    """Return the physical clocks represented by an expression.
+
+    The evaluator has exact wall-time windows over decision samples.  Event and
+    volume clocks are deliberately exposed as causal raw-window summaries, not
+    as fake ``N sample rows == N exchange events`` temporal operators.  This
+    distinction is material for the external feed whose timestamp is only
+    second-resolution and has no MBO sequence.
+    """
+    node = parse(expr)
+    domains: set[str] = set()
+    used_fields = fields_of(node)
+    if used_fields & QUOTE_EVENT_CLOCK_FIELDS:
+        domains.add(QUOTE_EVENT_CLOCK)
+    if used_fields & TRADE_VOLUME_CLOCK_FIELDS:
+        domains.add(TRADE_VOLUME_CLOCK)
+    if any(operator in TEMPORAL_OPS for operator in operators_of(node)):
+        domains.add(WALL_TIME_CLOCK)
+    return domains
 
 
 def operators_of(expr: dict) -> set[str]:

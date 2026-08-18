@@ -1,5 +1,10 @@
 # Hermes 기반 전 종목 실시간 멀티 에이전트 RAG 헤지펀드 마스터 플랜
 
+> **TARGET STATE / LONG-TERM PLAN:** 이 문서는 장기 목표와 설계 원칙을
+> 담는다. 현재 구현·worker registry·serving 상태는
+> [CURRENT_PROJECT_ARCHITECTURE.md](CURRENT_PROJECT_ARCHITECTURE.md)를
+> 기준으로 확인한다.
+
 > **Current snapshot pointer:** 이 문서의 날짜가 붙은 runtime count와 목표
 > architecture는 historical/plan 문맥이다. 현재 구현 상태·worker registry·model
 > serving은 [CURRENT_PROJECT_ARCHITECTURE.md](CURRENT_PROJECT_ARCHITECTURE.md)를

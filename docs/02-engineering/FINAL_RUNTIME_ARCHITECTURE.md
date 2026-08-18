@@ -24,7 +24,7 @@
 - Runner는 상태 전이·Tool 호출·Retry·Timeout·Schema 검증을 담당한다. `risk-runner`, `qa-runner`, `desk-runner`, `back-office-runner`처럼 LLM이 없는 결정론 Runner도 존재한다.
 - Risk·QA·PIT·권한·상태 전이·OMS·Ledger의 강제 판정은 결정론 코드가 소유한다.
 - Supabase는 Canonical Operational DB다. Redis는 Queue/Cache/Event 전달 계층이며 원장이 아니다. EBS는 EC2 로컬 디스크이며 Canonical DB가 아니다. S3는 Model·LoRA·Dataset·Artifact·Backup 저장소다.
-- TEST의 Worker는 Ollama `qwen3:1.7b`를 사용할 수 있다. Production Worker는 Worker Model Gateway의 `Qwen2.5-14B-Instruct FP8`와 버전이 고정된 Department LoRA를 사용한다. 두 모델은 같은 Contract를 사용하지만 별도 Golden/Adversarial Eval을 통과해야 한다.
+- TEST의 Worker는 Ollama `qwen3:1.7b`를 사용할 수 있다. `origin/main`의 Production Worker는 Worker Model Gateway의 `Qwen2.5-14B-Instruct-AWQ`와 버전이 고정된 Department LoRA를 사용한다. 두 모델은 같은 Contract를 사용하지만 별도 Golden/Adversarial Eval을 통과해야 한다. 이 checkout의 FP8 값은 branch drift 또는 historical benchmark baseline이다.
 - Claude/Codex Head는 Provider Adapter 뒤에 둔다. Claude 구독을 일반 API Credential처럼 자동화 Container에서 사용한다고 가정하지 않는다. Production Provider는 사용 계약·인증·비용·자동화 허용 범위가 확인된 Adapter만 사용한다.
 - Self-Evolution은 자동 Candidate 생성까지 자동화할 수 있지만, Profile·Skill·Tool Allowlist의 Production 변경은 HR → QA → CEO 승인 → Shadow → Rollback/Promotion 절차를 통과해야 한다.
 
@@ -63,7 +63,7 @@ flowchart LR
 |---|---|---|---|---|
 | `DEV` | 개발자별 부서 구현·단위 Contract | Mock 또는 Ollama `qwen3:1.7b` | 개발자별 Local Supabase/Postgres | 금지 |
 | `INTEGRATION` | CEO부터 8개 Profile까지 전체 Handoff 연결 | Deterministic Stub 또는 TEST Ollama | 별도 Integration Supabase | 금지 |
-| `PRODUCTION_ADVISORY` | AWS에서 실제 데이터 기반 추천·분석 | Qwen2.5-14B FP8 + LoRA, 승인된 Head Provider | 별도 Production Supabase | 주문·Ledger·Broker 쓰기 금지 |
+| `PRODUCTION_ADVISORY` | AWS에서 실제 데이터 기반 추천·분석 | `origin/main` 기준 Qwen2.5-14B AWQ + LoRA, 승인된 Head Provider | 별도 Production Supabase | 주문·Ledger·Broker 쓰기 금지 |
 | `PRODUCTION_LIVE` | 실제 Broker·운영 Posting | 별도 승인 필요 | 운영 DB | 현재 기본 OFF |
 
 `PRODUCTION_ADVISORY`는 운영 인프라를 사용하는 Read-only/Paper 단계다. `PRODUCTION_LIVE`로 자동 승격하지 않는다.
@@ -151,7 +151,7 @@ Department Head Hermes
 Head Provider Gateway      LangGraph Runner / Worker Runtime
   ├─ Claude Adapter           ↓
   └─ Codex Adapter          Worker Model Gateway
-                              ├─ Qwen2.5-14B-Instruct FP8
+├─ Qwen2.5-14B-Instruct-AWQ (origin/main)
                               └─ Department LoRA Adapter
 ```
 
@@ -168,7 +168,7 @@ CEO/Department Head Hermes와 LangGraph Worker는 서로 다른 모델 서버 �
 | `head-provider-gateway` | CEO/Department Head의 Claude/Codex Provider Adapter 호출 | 내부 |
 | `runner` | LangGraph 상태·Tool·Retry·검증 | 내부 |
 | `worker-runtime` | Worker Graph 실행 | 내부 |
-| `worker-model-gateway` | Worker의 Qwen2.5-14B FP8 호출과 Department LoRA Adapter 선택 | 내부 |
+| `worker-model-gateway` | Worker의 Qwen2.5-14B AWQ 호출과 Department LoRA Adapter 선택 | 내부 |
 | `redis` | Queue, Event, Cache | 내부 |
 | `migration-runner` | Migration/Seed One-shot | 상주 금지 |
 
@@ -203,7 +203,7 @@ flowchart TB
         end
 
         HPG["Head Provider Gateway<br/>Claude Adapter / Codex Adapter"]
-        MODEL["Worker Model Gateway<br/>Qwen2.5-14B FP8<br/>Multi-LoRA"]
+MODEL["Worker Model Gateway<br/>Qwen2.5-14B AWQ<br/>Multi-LoRA"]
         REDIS["Redis<br/>Queue / Cache / Event"]
     end
 
@@ -381,7 +381,7 @@ STEP 4(Risk) Task의 `agent-task-result.v1` 예시:
     {"type": "portfolio-snapshot", "id": "artifact-pf-0142", "content_hash": "sha256:cccc..."},
     {"type": "risk-calc", "id": "artifact-risk-0142", "content_hash": "sha256:dddd..."}
   ],
-  "model_version": "qwen2.5-14b-instruct-fp8",
+"model_version": "qwen2.5-14b-instruct-awq",
   "adapter_version": "risk-lora:v1",
   "trace_id": "trace-2026-0142"
 }
@@ -504,7 +504,7 @@ Result 예시:
   "decision": "RECOMMEND",
   "confidence": 0.82,
   "escalate": false,
-  "model_version": "qwen2.5-14b-instruct-fp8",
+  "model_version": "qwen2.5-14b-instruct-awq",
   "adapter_version": "research-lora:v1",
   "trace_id": "trace-2026-0081",
   "status": "COMPLETED",
@@ -716,7 +716,7 @@ Model Layer
 │     └─ 승인된 Provider만 (§1 참고 — 구독 Credential 자동화 사용 금지)
 │
 └── Worker Model Gateway    (LangGraph Worker 전용)
-      └─ Qwen2.5-14B-Instruct FP8
+└─ Qwen2.5-14B-Instruct-AWQ
             ├─ research-lora
             ├─ quant-lora
             ├─ risk-lora
@@ -736,7 +736,7 @@ Worker마다 모델을 하나씩 실행하지 않는다.
 research-worker ─┐
 risk-worker ─────┼→ worker-model-gateway
 qa-worker ───────┘       ↓
-                 Qwen2.5-14B-Instruct FP8
+Qwen2.5-14B-Instruct-AWQ
                  + adapter_id/version
 ```
 
@@ -757,7 +757,7 @@ qa-worker ───────┘       ↓
 
 LoRA에는 부서 도메인 표현 방식, 출력 형식, 반복 Reasoning Pattern, Worker Role별 응답 스타일만 넣는다. 최신 시장 데이터, Portfolio·Cash·Position, Mandate 원장, Production Credential, 변경되는 정책 원문, 개인정보는 넣지 않는다. 최신 사실·정책·Portfolio는 DB/RAG에서 `input_refs`와 `evidence_refs`로 공급한다.
 
-`qwen3:1.7b` TEST에서 `qwen2.5-14b-instruct-fp8` Production으로 바꾸는 것은 Model Migration이다. Base Model Digest, Adapter Version, Prompt/Skill Version, Golden/Adversarial 결과, Tool Call 성공률, Schema 실패율, Timeout/VRAM/Latency, Regression 결과를 기록한다.
+`qwen3:1.7b` TEST에서 `qwen2.5-14b-instruct-awq` Production으로 바꾸는 것은 Model Migration이다. Base Model Digest, Adapter Version, Prompt/Skill Version, Golden/Adversarial 결과, Tool Call 성공률, Schema 실패율, Timeout/VRAM/Latency, Regression 결과를 기록한다.
 
 ## 8. Supabase·Redis·S3·EBS 계약
 
@@ -907,7 +907,7 @@ Agent Run / QA / Incident / SLA / Cost Signal
 3. Redis Queue와 Recovery 검증
 4. Local Ollama `qwen3:1.7b` 연결
 5. Worker Model Gateway Adapter Contract 연결
-6. Production Qwen2.5-14B FP8 단일 요청 Benchmark
+6. Production Qwen2.5-14B AWQ 단일 요청 Benchmark
 7. LoRA Registry·Version·Rollback 연결
 
 ### Phase 5: Self-Evolution

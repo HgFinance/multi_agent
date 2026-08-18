@@ -38,7 +38,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from stock_universe import governed_stock_evidence_sql  # noqa: E402
+
 ALLOCATOR_VERSION = "quant-allocator-v1"
+
+_GOVERNED_PERFORMANCE_EVIDENCE = governed_stock_evidence_sql(
+    experiment_alias="e", dataset_alias="m", hypothesis_alias="h")
 
 # 시도 예산. `trial_family.pressure` 가 쓰는 것과 같은 뜻이다 - 이 수를 넘겨
 # 고른 최고치는 실력과 운을 못 가린다.
@@ -221,17 +226,18 @@ def plan(conn, *, budget: int = DEFAULT_TRIAL_BUDGET,
         for st in states:
             if st.reached:
                 continue                 # 이미 도달한 계열은 더 안 돌린다
-            cur.execute("""select experiment_id::text from quant.experiments
-                            where trial_family_id = %s and status='COMPLETED'
-                            order by trial_number desc limit 1""", (st.family_id,))
-            got = cur.fetchone()
-            if not got:
+            # survey chose this exact experiment through the common stock
+            # evidence predicate.  The latest completed row may instead be a
+            # legacy mixed ETF/ETN trial and cannot replace it.
+            if not st.evidence_experiment_id:
                 continue
-            cur.execute(SQL_GATE_METRICS, (got[0],))
+            evidence_experiment_id = st.evidence_experiment_id
+            cur.execute(SQL_GATE_METRICS, (evidence_experiment_id,))
             metrics = metrics_from_rows(cur.fetchall())
             cur.execute("""select min(value) from quant.experiment_metrics
                             where experiment_id = %s and metric='max_drawdown'
-                              and dimensions->>'window' is not null""", (got[0],))
+                              and dimensions->>'window' is not null""",
+                        (evidence_experiment_id,))
             w = cur.fetchone()
             if w and w[0] is not None:
                 metrics["worst_window_mdd"] = float(w[0])
@@ -245,9 +251,8 @@ def plan(conn, *, budget: int = DEFAULT_TRIAL_BUDGET,
                                on h.hypothesis_id = e.hypothesis_id
                              join quant.dataset_manifests m
                                on m.dataset_id = e.dataset_id
-                            where e.trial_family_id = %s
-                            order by e.trial_number desc limit 1""",
-                        (st.family_id,))
+                            where e.experiment_id = %s::uuid""",
+                        (evidence_experiment_id,))
             _ds = cur.fetchone()
             current_ds = str(_ds[0]) if _ds and _ds[0] else ""
             lane = str(_ds[1]) if _ds and len(_ds) > 1 else ""
@@ -264,7 +269,7 @@ def plan(conn, *, budget: int = DEFAULT_TRIAL_BUDGET,
     return sorted(moves, key=lambda m: (-m.score, m.family_id))
 
 
-_SQL_PARENT = """
+_SQL_PARENT = f"""
 select h.hypothesis_id::text, h.title, h.rationale, h.expected_edge,
        h.falsification_criteria, h.required_data_products,
        h.proposal_id, h.lead_ids, h.research_packet_ids, h.claim_ids,
@@ -273,7 +278,10 @@ select h.hypothesis_id::text, h.title, h.rationale, h.expected_edge,
        h.material_fingerprint
   from quant.experiments e
   join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+  join quant.dataset_manifests m on m.dataset_id = e.dataset_id
  where e.trial_family_id = %s
+   and e.status = 'COMPLETED'
+   and {_GOVERNED_PERFORMANCE_EVIDENCE}
  order by e.trial_number desc limit 1
 """
 
@@ -301,13 +309,16 @@ select h.hypothesis_id::text, h.title, h.rationale, h.expected_edge,
 #     이고 지표 0행, `e2379857` 도 실험 1건 CANCELLED·지표 0행이다 - 둘 다
 #     인프라 장애로 죽은 것이지 답을 산 것이 아니다. 그래서 **지표나 판정이
 #     하나라도 붙은** 실험만 센다.
-_SQL_VARIANT_EXISTS = """
+_SQL_VARIANT_EXISTS = f"""
 select h.hypothesis_id::text, h.status,
-       (select count(*) from quant.experiments e
+       (select count(*)
+          from quant.experiments e
+          join quant.dataset_manifests m on m.dataset_id = e.dataset_id
          where e.hypothesis_id = h.hypothesis_id
+           and {_GOVERNED_PERFORMANCE_EVIDENCE}
            and (exists (select 1 from quant.experiment_metrics x
                          where x.experiment_id = e.experiment_id)
-             or exists (select 1 from research.experiment_outcomes o
+             or exists (select 1 from research.v_current_experiment_outcomes o
                          where o.experiment_id = e.experiment_id::text))) n_measured
   from quant.hypotheses h
  where h.created_by = %s and h.title = %s
@@ -336,7 +347,7 @@ SETTLING_DECISIONS = ("REJECT", "GATE_HOLD", "KILLED", "DEMOTED")
 #     세 개의 trial_family_id 에 흩어져 있었고, `trial_family_id is null` 인 실험이
 #     39건이다. 계열로 물으면 그 39건은 아예 안 보인다.
 #
-#   ▶ **판정 조인은 텍스트 캐스트가 필요하다.** `research.experiment_outcomes.
+#   ▶ **판정 조인은 텍스트 캐스트가 필요하다.** `research.v_current_experiment_outcomes.
 #     experiment_id` 는 TEXT, `quant.experiments.experiment_id` 는 UUID 다. 캐스트를
 #     빼면 등호 조인이 **조용히 0행**을 돌려준다 - 가드가 있는데 아무것도 안 막는,
 #     가장 나쁜 실패다.
@@ -372,17 +383,18 @@ SETTLING_DECISIONS = ("REJECT", "GATE_HOLD", "KILLED", "DEMOTED")
 #     `332fdec9` 가 정확히 그 자리에 있었다 - 미시구조 61거래일짜리 신호를
 #     2,599거래일 표본에 태워 초과 -102%p 가 나왔고, 그 판정이 남으면 같은
 #     지문은 다시 발주되지 않는다.
-_SQL_SETTLED_BY_FINGERPRINT = """
+_SQL_SETTLED_BY_FINGERPRINT = f"""
 select o.decision, o.lesson_codes, left(h.hypothesis_id::text, 8)
   from quant.hypotheses h
   join quant.experiments e on e.hypothesis_id = h.hypothesis_id
-  join research.experiment_outcomes o
+  join research.v_current_experiment_outcomes o
     on o.experiment_id = e.experiment_id::text
-  left join quant.dataset_manifests m on m.dataset_id = e.dataset_id
+  join quant.dataset_manifests m on m.dataset_id = e.dataset_id
  where h.material_fingerprint = %s
    and o.decision = any(%s)
    and coalesce(o.verification_state, '') not like 'VOID%%'
    and coalesce(m.name || '/' || m.version, '') = %s
+   and {_GOVERNED_PERFORMANCE_EVIDENCE}
  order by o.decided_at desc
 """
 
