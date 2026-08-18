@@ -47,8 +47,9 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass, field
+from datetime import timedelta
 
-MODULE_VERSION = "quant-feature-catalog-v1"
+MODULE_VERSION = "quant-feature-catalog-v2"
 
 # 검정에 필요한 최소 표본. 이보다 적으면 **판정하지 않는다**(통과도 탈락도 아님).
 MIN_PERIODS = 8
@@ -156,6 +157,7 @@ class Catalog:
     features: list = field(default_factory=list)
     horizon: int = 5
     feature_set_version: str = ""
+    stock_scope: dict = field(default_factory=dict)
 
     def passing(self) -> list:
         return [f for f in self.features if f.verdict in ("통과", "역방향")]
@@ -246,6 +248,7 @@ select event_time::date d, instrument_id, {col}
  where {col} is not null
    and feature_set_version = %s
    and event_time::date = any(%s)
+   and instrument_id = any(%s::uuid[])
 """
 
 _SQL_FWD = """
@@ -262,24 +265,29 @@ select a.d, a.instrument_id, b.close / a.close - 1.0
 """
 
 
-def _dates(cur, horizon: int, feature_set_version: str) -> list:
+def _dates(cur, horizon: int, feature_set_version: str,
+           stock_instrument_ids: list[str]) -> list:
     cur.execute("""select distinct event_time::date
                      from market.microstructure_features
-                    where feature_set_version = %s order by 1""",
-                (feature_set_version,))
+                    where feature_set_version = %s
+                      and instrument_id = any(%s::uuid[])
+                    order by 1""",
+                (feature_set_version, stock_instrument_ids))
     all_days = [r[0] for r in cur.fetchall()]
     # 겹치지 않게 h 간격으로 자른다. 마지막 h 일은 미래수익이 없으므로 뺀다.
     return all_days[:-horizon:horizon] if len(all_days) > horizon else []
 
 
-def _forward_returns(cur, days: list, horizon: int) -> dict:
+def _forward_returns(cur, days: list, horizon: int,
+                     stock_instrument_ids: list[str]) -> dict:
     """기준일 -> {종목: h거래일 후 수익률}. **거래일 기준**으로 센다."""
     cur.execute("""
         select instrument_id, bucket_time::date d, close
           from market.market_bars
          where interval_code = '1D' and close > 0
+           and instrument_id = any(%s::uuid[])
            and bucket_time::date between %s and %s
-         order by instrument_id, d""", (min(days), max(days) + __import__(
+         order by instrument_id, d""", (stock_instrument_ids, min(days), max(days) + __import__(
             "datetime").timedelta(days=horizon * 3)))
     series: dict = {}
     for iid, d, close in cur.fetchall():
@@ -340,20 +348,48 @@ def _pit_of(conn, cur, days) -> str:
     return str(kind) or "?"
 
 
-def measure(conn, *, horizon: int = 5, features=MICRO_FEATURES,
+def measure(conn, *, meta_conn=None, stock_instrument_ids=None,
+            horizon: int = 5, features=MICRO_FEATURES,
             feature_set_version: str = "ms-daily-v5") -> Catalog:
     """원장에 대고 피처를 하나씩 검정한다."""
-    cat = Catalog(horizon=horizon, feature_set_version=feature_set_version)
+    if meta_conn is None:
+        raise RuntimeError(
+            "feature measurement requires reference-plane stock validation")
+    stock_ids = sorted({str(value) for value in
+                        (stock_instrument_ids or ()) if value is not None})
+    if not stock_ids:
+        raise RuntimeError("feature measurement requires a stock UUID allowlist")
+    from stock_universe import assert_stock_instrument_ids  # noqa: PLC0415
+
+    stock_scope = assert_stock_instrument_ids(meta_conn, stock_ids)
+    cat = Catalog(horizon=horizon, feature_set_version=feature_set_version,
+                  stock_scope=stock_scope)
     cur = conn.cursor()
-    days = _dates(cur, horizon, feature_set_version)
+    days = _dates(cur, horizon, feature_set_version, stock_ids)
     if not days:
         return cat
-    fwd = _forward_returns(cur, days, horizon)
+    # `_forward_returns` may read through three calendar days per requested
+    # trading-day horizon.  Product/listing validation must cover the label
+    # exit as well as the feature timestamp; otherwise a feature observed on a
+    # valid date could be paired with a post-delisting return.
+    label_read_through = max(days) + timedelta(days=horizon * 3)
+    stock_scope = assert_stock_instrument_ids(
+        meta_conn, stock_ids, first_session=min(days),
+        last_session=label_read_through)
+    cat.stock_scope = {
+        **stock_scope,
+        "feature_first_session": min(days).isoformat(),
+        "feature_last_session": max(days).isoformat(),
+        "label_read_through": label_read_through.isoformat(),
+        "label_listing_interval_policy": "COVERS_MAXIMUM_LABEL_READ_WINDOW",
+    }
+    fwd = _forward_returns(cur, days, horizon, stock_ids)
     pit = _pit_of(conn, cur, days)
 
     for col, direction, mech in features:
         try:
-            cur.execute(_SQL_FEATURE.format(col=col), (feature_set_version, days))
+            cur.execute(_SQL_FEATURE.format(col=col),
+                        (feature_set_version, days, stock_ids))
             by_date: dict = {}
             for d, iid, v in cur.fetchall():
                 by_date.setdefault(d, {})[iid] = v
@@ -505,12 +541,28 @@ def _cli(argv) -> int:
     h = int(argv[argv.index("--horizon") + 1]) if "--horizon" in argv else 5
     fsv = (argv[argv.index("--feature-set-version") + 1]
            if "--feature-set-version" in argv else "ms-daily-v5")
-    conn = psycopg2.connect(load_project_env()["TIMESCALE_DATABASE_URL"],
+    env = load_project_env()
+    conn = psycopg2.connect(env["TIMESCALE_DATABASE_URL"],
                             connect_timeout=30)
+    meta_conn = psycopg2.connect(env["DATABASE_URL"], connect_timeout=30)
     try:
-        print(measure(conn, horizon=h, feature_set_version=fsv).summary())
+        with meta_conn.cursor() as cur:
+            cur.execute("""
+                select instrument_id::text
+                  from reference.instruments
+                 where upper(instrument_type) = 'STOCK'
+                   and upper(asset_class) = 'EQUITY'
+                   and upper(market) = 'KRX'
+                   and upper(status) = 'ACTIVE'
+                 order by instrument_id
+            """)
+            stock_ids = [str(row[0]) for row in cur.fetchall()]
+        print(measure(
+            conn, meta_conn=meta_conn, stock_instrument_ids=stock_ids,
+            horizon=h, feature_set_version=fsv).summary())
     finally:
         conn.close()
+        meta_conn.close()
     return 0
 
 

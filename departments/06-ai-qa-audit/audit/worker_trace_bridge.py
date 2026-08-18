@@ -29,7 +29,7 @@ class WorkerTraceBridge:
         self._repository = repository
 
     def _resolve_profile(self, worker_id: str) -> tuple[UUID, UUID, UUID]:
-        connection = self._repository._pool.getconn()
+        connection = self._repository._get_connection()
         try:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -48,6 +48,7 @@ class WorkerTraceBridge:
                 )
                 row = cursor.fetchone()
         finally:
+            connection.rollback()
             self._repository._pool.putconn(connection)
         if not row:
             raise WorkerTraceBridgeError(

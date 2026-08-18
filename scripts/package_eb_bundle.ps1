@@ -8,9 +8,10 @@
   그 이름은 이미 재일님 소유 로컬 개발 스택이 쓰고 있어 같은 자리에 둘 수 없다.
   그래서 `deploy/eb/docker-compose.yml`을 번들 루트로 옮겨 담는 조립 단계가 필요하다.
 
-  build context가 `.`(번들 루트)와 `./departments/02-trading`이라 저장소 내용이 그대로
-  번들에 들어가야 한다 - 이미지를 미리 만들어 ECR에 올리는 방식이 아니다(레지스트리·
-  인증·태깅이 늘어난다. Paper 단계에서는 인스턴스에서 빌드하는 쪽이 움직이는 부품이 적다).
+  build context가 `.`(번들 루트)와 `./departments/02-trading`이라 Git이 추적하는 저장소
+  내용이 번들에 들어가야 한다. 작업 디렉터리의 `.env`, 시장 데이터, 캐시는 절대 포함하지
+  않는다. 이미지를 미리 만들어 ECR에 올리는 방식이 아니다(레지스트리·인증·태깅이
+  늘어난다. Paper 단계에서는 인스턴스에서 빌드하는 쪽이 움직이는 부품이 적다).
 
 .EXAMPLE
   pwsh scripts/package_eb_bundle.ps1
@@ -30,8 +31,10 @@ if (-not (Test-Path (Join-Path $ebDir "docker-compose.yml"))) {
     throw "deploy/eb/docker-compose.yml 이 없습니다"
 }
 
-# 번들에서 뺄 것. ai-office(프론트)는 BFF가 서빙하지 않고, apps/api/Dockerfile이
-# `COPY . .` 라 그대로 두면 이미지에 통째로 들어간다.
+# Git 추적 파일만 후보로 삼은 뒤 번들에서 더 뺄 것. 이 allowlist 경계가 로컬
+# `.env`와 quant-data를 AWS 소스 번들로 유출하지 않는 핵심 통제다. ai-office(프론트)는
+# BFF가 서빙하지 않고, apps/api/Dockerfile이 `COPY . .` 라 그대로 두면 이미지에
+# 통째로 들어간다.
 #
 # ▶ 임시 디렉터리에 복사한 뒤 압축하지 않고 zip을 직접 조립한다. robocopy가 PATH에
 #   없는 셸이 있고(System32 미포함), 저장소 전체를 한 번 더 복사할 이유도 없다.
@@ -58,14 +61,23 @@ Add-Type -AssemblyName System.IO.Compression
 $archive = [System.IO.Compression.ZipFile]::Open($out, [System.IO.Compression.ZipArchiveMode]::Create)
 try {
     $added = 0
-    foreach ($file in Get-ChildItem -LiteralPath $repo -Recurse -File -Force) {
-        $rel = $file.FullName.Substring($repo.Length + 1).Replace('\', '/')
+    $trackedFiles = @(& git -C $repo -c core.quotepath=false ls-files --cached)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Git 추적 파일 목록을 읽지 못했습니다"
+    }
+    foreach ($trackedPath in $trackedFiles) {
+        if ([string]::IsNullOrWhiteSpace($trackedPath)) { continue }
+        $rel = $trackedPath.Replace('\', '/')
         if (Test-Excluded $rel) { continue }
         # 로컬 스택 파일은 번들에 넣지 않는다. 남겨두면 어느 쪽이 배포된 것인지
         # 번들만 보고는 알 수 없다 - 아래에서 EB용을 그 이름으로 넣는다.
         if ($rel -eq "docker-compose.yml") { continue }
+        $fullPath = Join-Path $repo $trackedPath
+        if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+            throw "Git 추적 파일이 작업 트리에 없습니다: $rel"
+        }
         [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
-            $archive, $file.FullName, $rel) | Out-Null
+            $archive, $fullPath, $rel) | Out-Null
         $added++
     }
 
@@ -85,6 +97,10 @@ finally { $archive.Dispose() }
 $zip = [System.IO.Compression.ZipFile]::OpenRead($out)
 try {
     $names = $zip.Entries | ForEach-Object { $_.FullName }
+    if ($names -contains ".env" -or
+        ($names | Where-Object { $_ -like "quant-data/*" }).Count -gt 0) {
+        throw "로컬 비밀 또는 런타임 시장 데이터가 번들에 들어갔습니다"
+    }
     foreach ($required in @("docker-compose.yml", ".ebextensions/01_health.config",
                             "departments/02-trading/Dockerfile",
                             "departments/05-accounting-portfolio/Dockerfile",

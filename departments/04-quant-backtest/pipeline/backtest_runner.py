@@ -44,9 +44,37 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from pit_dataset import DATA_ROOT, content_hash, load_partition, resolve_object_path
+from stock_universe import assert_stock_only_universe
 
 RUNNER_VERSION = "quant-backtest-runner-v1"
 KST = timezone(timedelta(hours=9))
+
+
+# ``Market`` is intentionally easy to construct for pure algorithm tests, but
+# that must not also make an arbitrary in-memory ETF/ETN panel executable by
+# the production entry point.  Only ``load_dataset`` can attach this opaque
+# receipt, and it does so *after* the authoritative universe and every loaded
+# row/listing interval have been checked against ``reference.instruments``.
+_STOCK_SCOPE_RECEIPT_TOKEN = object()
+
+
+@dataclass(frozen=True)
+class _StockScopeReceipt:
+    token: object
+    universe_version_id: str
+    instrument_ids: frozenset[str]
+    row_bounds: tuple[tuple[str, date, date], ...]
+    row_count: int
+
+
+class _GovernedStockRows(list):
+    """Loaded rows that carry a non-serializable, internally issued receipt."""
+
+    __slots__ = ("_stock_scope_receipt",)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._stock_scope_receipt: _StockScopeReceipt | None = None
 
 # v1 비용 가정 - 근거를 값 옆에 남긴다. 바꾸면 cost_model_version 을 올린다.
 from strategy_templates import (          # noqa: E402  (같은 디렉터리 모듈)
@@ -153,7 +181,7 @@ REV_CONFIG = {
 #   pit_dataset        - 파티션 적재 경로
 #   overfit_stats      - 부트스트랩·DSR (run_backtest 안에서 부른다)
 _CODE_FILES = ("backtest_runner.py", "strategy_templates.py",
-               "pit_dataset.py", "overfit_stats.py")
+               "pit_dataset.py", "stock_universe.py", "overfit_stats.py")
 
 
 def _code_digest(parts) -> str:
@@ -197,10 +225,16 @@ def code_version() -> str:
     return f"{RUNNER_VERSION}+{_code_digest(parts)}"
 
 
-def input_hash(dataset_hash: str, config: dict, code_ver: str, seed: int) -> str:
-    payload = json.dumps({"dataset": dataset_hash, "config": config,
-                          "code": code_ver, "seed": seed,
-                          "cost": COST_MODEL}, sort_keys=True)
+def input_hash(dataset_hash: str, config: dict, code_ver: str, seed: int, *,
+               evaluation_plan: dict | None = None) -> str:
+    facts = {"dataset": dataset_hash, "config": config,
+             "code": code_ver, "seed": seed, "cost": COST_MODEL}
+    if evaluation_plan is not None:
+        # Opt-in daily validation freezes its full plan before experiment
+        # registration.  Omitting this key preserves every legacy caller's
+        # historical single-window input hash byte for byte.
+        facts["evaluation_plan"] = evaluation_plan
+    payload = json.dumps(facts, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
@@ -226,21 +260,69 @@ class Market:
     #     (실험은 COMPLETED 인데 강건성 근거만 백지). 그쪽 자체점검이 이
     #     필드도 함께 검사한다.
     micro: dict[tuple[date, str], dict] = field(default_factory=dict)
+    _stock_scope_receipt: _StockScopeReceipt | None = field(
+        default=None, init=False, repr=False, compare=False)
 
     @classmethod
     def from_rows(cls, rows: list[dict]) -> Market:
         dates = sorted({r["trade_date"] for r in rows})
         opens, closes, notionals, symbols = {}, {}, {}, set()
+        bounds: dict[str, tuple[date, date]] = {}
         for r in rows:
             iid = str(r["instrument_id"])
             symbols.add(iid)
+            session = r["trade_date"]
+            current = bounds.get(iid)
+            bounds[iid] = (
+                session if current is None else min(current[0], session),
+                session if current is None else max(current[1], session),
+            )
             opens[(r["trade_date"], iid)] = float(r["open"])
             closes[(r["trade_date"], iid)] = float(r["close"])
             nv = r.get("notional")
             if nv is not None:
                 notionals[(r["trade_date"], iid)] = float(nv)
-        return cls(dates=dates, opens=opens, closes=closes,
-                   symbols=sorted(symbols), notionals=notionals)
+        market = cls(dates=dates, opens=opens, closes=closes,
+                     symbols=sorted(symbols), notionals=notionals)
+        receipt = getattr(rows, "_stock_scope_receipt", None)
+        if receipt is not None:
+            observed_bounds = tuple(sorted(
+                (instrument_id, first, last)
+                for instrument_id, (first, last) in bounds.items()))
+            if (not isinstance(receipt, _StockScopeReceipt)
+                    or receipt.token is not _STOCK_SCOPE_RECEIPT_TOKEN
+                    or receipt.row_count != len(rows)
+                    or receipt.instrument_ids != frozenset(symbols)
+                    or receipt.row_bounds != observed_bounds):
+                raise RuntimeError(
+                    "governed stock rows changed after reference validation")
+            market._stock_scope_receipt = receipt
+        return market
+
+    def _require_stock_scope(self) -> _StockScopeReceipt:
+        """Return the opaque loader receipt or fail before any simulation."""
+
+        receipt = self._stock_scope_receipt
+        if (not isinstance(receipt, _StockScopeReceipt)
+                or receipt.token is not _STOCK_SCOPE_RECEIPT_TOKEN
+                or not set(self.symbols).issubset(receipt.instrument_ids)):
+            raise RuntimeError(
+                "run_backtest requires a reference-validated KRX ACTIVE "
+                "EQUITY/STOCK Market loaded through load_dataset")
+        return receipt
+
+    def _inherit_stock_scope_from(self, source: Market) -> Market:
+        """Carry an existing receipt only into a true date/instrument subset."""
+
+        if source._stock_scope_receipt is None:
+            return self
+        receipt = source._require_stock_scope()
+        if (not set(self.symbols).issubset(source.symbols)
+                or not set(self.dates).issubset(source.dates)):
+            raise RuntimeError(
+                "a derived Market may not widen an attested stock universe")
+        self._stock_scope_receipt = receipt
+        return self
 
     def micro_until(self, until: date, feature: str,
                     window: int = 1) -> dict[str, float]:
@@ -768,6 +850,16 @@ def risk_exposure(config: dict, equity: list,
 
 def run_backtest(market: Market, config: dict, *,
                  trials: int = 1) -> BacktestResult:
+    """Run only a market carrying the loader's opaque all-stock receipt."""
+
+    market._require_stock_scope()
+    return _run_backtest_core(market, config, trials=trials)
+
+
+def _run_backtest_core(market: Market, config: dict, *,
+                       trials: int = 1) -> BacktestResult:
+    """Pure simulator core; production callers must enter via ``run_backtest``."""
+
     _lookback = int(config["lookback_days"])
     _top_n = int(config["top_n"])
     capital = float(config["initial_capital"])
@@ -1320,6 +1412,50 @@ def assert_declared_units(name: str, version: str,
     return key
 
 
+def _stock_row_evidence(rows) -> tuple[set[str], dict[str, tuple[date, date]]]:
+    instruments: set[str] = set()
+    bounds: dict[str, tuple[date, date]] = {}
+    for row in rows:
+        instrument_id = str(row["instrument_id"])
+        raw_day = row["trade_date"]
+        session = (raw_day if isinstance(raw_day, date)
+                   else date.fromisoformat(str(raw_day)[:10]))
+        instruments.add(instrument_id)
+        current = bounds.get(instrument_id)
+        bounds[instrument_id] = (
+            session if current is None else min(current[0], session),
+            session if current is None else max(current[1], session),
+        )
+    return instruments, bounds
+
+
+def _assert_loaded_stock_rows(conn, universe_id: str, rows
+                              ) -> tuple[set[str],
+                                         dict[str, tuple[date, date]]]:
+    instruments, bounds = _stock_row_evidence(rows)
+    assert_stock_only_universe(
+        conn, universe_id, row_instrument_ids=instruments, row_dates=bounds)
+    return instruments, bounds
+
+
+def _seal_loaded_stock_rows(rows: _GovernedStockRows, universe_id: str,
+                            instruments: set[str],
+                            bounds: dict[str, tuple[date, date]]) -> None:
+    """Issue the only receipt accepted by ``run_backtest`` after DB validation."""
+
+    if not isinstance(rows, _GovernedStockRows):
+        raise TypeError("only governed loader rows can receive stock attestation")
+    rows._stock_scope_receipt = _StockScopeReceipt(
+        token=_STOCK_SCOPE_RECEIPT_TOKEN,
+        universe_version_id=str(universe_id),
+        instrument_ids=frozenset(instruments),
+        row_bounds=tuple(sorted(
+            (instrument_id, first, last)
+            for instrument_id, (first, last) in bounds.items())),
+        row_count=len(rows),
+    )
+
+
 def load_dataset(conn, name: str, version: str):
     with conn.cursor() as cur:
         cur.execute(
@@ -1342,6 +1478,9 @@ def load_dataset(conn, name: str, version: str):
             order by partition_key
             """, (dataset_id,))
         parts = cur.fetchall()
+
+    # Reject mixed-product or stale universes before opening large partitions.
+    assert_stock_only_universe(conn, str(universe_id))
 
     # ▶ 명세가 있는 데이터셋은 **그 명세의 리더·해시**를 쓴다 (2026-08-12)
     #   `load_partition`/`content_hash` 는 일봉 스키마(open/high/low/close)에
@@ -1373,7 +1512,7 @@ def load_dataset(conn, name: str, version: str):
                 f"dataset_spec.SPECS 에 등재하거나 버전을 확인하라 "
                 f"(일봉 gzip 리더로 읽으면 BadGzipFile 로 죽는다)")
     if spec is not None:
-        rows_s: list[dict] = []
+        rows_s = _GovernedStockRows()
         for key, path, phash in parts:
             chunk = read_partition(spec, resolve_object_path(path))
             got = spec_hash(spec, chunk)
@@ -1384,9 +1523,13 @@ def load_dataset(conn, name: str, version: str):
             rows_s.extend(chunk)
         if spec_hash(spec, rows_s) != chash or len(rows_s) != row_count:
             raise RuntimeError("Dataset 전체 해시/행수 불일치 - 재생성할 것")
+        instruments, bounds = _assert_loaded_stock_rows(
+            conn, str(universe_id), rows_s)
+        _seal_loaded_stock_rows(
+            rows_s, str(universe_id), instruments, bounds)
         return str(dataset_id), str(universe_id), chash, rows_s
 
-    rows: list[dict] = []
+    rows = _GovernedStockRows()
     for key, path, phash in parts:
         # 원장의 object_path 는 빌드한 OS 의 구분자를 그대로 갖고 있다 - 정규화한다.
         chunk = load_partition(resolve_object_path(path))
@@ -1398,6 +1541,9 @@ def load_dataset(conn, name: str, version: str):
         rows.extend(chunk)
     if content_hash(rows) != chash or len(rows) != row_count:
         raise RuntimeError("Dataset 전체 해시/행수 불일치 - --build 로 재생성할 것")
+    instruments, bounds = _assert_loaded_stock_rows(
+        conn, str(universe_id), rows)
+    _seal_loaded_stock_rows(rows, str(universe_id), instruments, bounds)
     return str(dataset_id), str(universe_id), chash, rows
 
 
@@ -1438,7 +1584,10 @@ def zombie_experiment(status: str, ended: bool, n_runs: int,
 def register_and_run(name: str, version: str, *, seed: int = 0,
                      config: dict | None = None,
                      hypothesis_id: str | None = None,
-                     trials: int = 1) -> dict:
+                     trials: int = 1,
+                     evaluation_mode: str | None = None,
+                     evaluation_warmup_days: int | None = None,
+                     evaluation_embargo_days: int | None = None) -> dict:
     """백테스트 등록·실행. hypothesis_id 를 주면 그 가설에 실험을 묶는다
     (오케스트레이터 경로) - 없으면 SMOKE 가설을 만든다(단독 실행 경로).
 
@@ -1453,17 +1602,46 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
     env = load_project_env()
     from db_writer import connect as connect_writer
 
-    conn = connect_writer(env["DATABASE_URL"], connect_timeout=20)
     config = dict(config or DEFAULT_CONFIG)
     code_ver = code_version()
     trace = str(uuid.uuid4())
+    mode = str(evaluation_mode or "").upper()
+    if mode not in ("", "DAILY_WALK_FORWARD"):
+        raise ValueError(f"unsupported evaluation mode: {evaluation_mode!r}")
+    conn = connect_writer(env["DATABASE_URL"], connect_timeout=20)
+    evaluation_plan: dict | None = None
+    market: Market | None = None
     try:
         dataset_id, universe_id, dhash, rows = load_dataset(conn, name, version)
         # 본체 일봉뿐 아니라 실제로 붙이는 미시구조 매니페스트도 실험 정체성에
         # 포함한다. `config`에 봉인하므로 DB의 실험 기록에서도 출처를 복원한다.
         seal_micro_lineage(config, conn)
+        split_policy = {
+            "policy": "single-window",
+            "note": "v1 스모크 - walk-forward 는 QNT-04 몫으로 후속",
+        }
+        if mode == "DAILY_WALK_FORWARD":
+            if (evaluation_warmup_days is None
+                    or evaluation_embargo_days is None):
+                raise RuntimeError(
+                    "daily evaluation requires frozen warmup and embargo")
+            # This conversion happens before INSERT by design: window
+            # boundaries are an input, never a result-time annotation.
+            market = Market.from_rows(rows)
+            from walk_forward import freeze_daily_evaluation_plan
+
+            evaluation_plan = freeze_daily_evaluation_plan(
+                dataset_content_hash=dhash,
+                dates=market.dates,
+                warmup_days=int(evaluation_warmup_days),
+                embargo_days=int(evaluation_embargo_days),
+                cost_model=COST_MODEL,
+            )
+            split_policy = evaluation_plan
         # ▶ trials 는 해시에 **안 들어간다**(중복 가드 보존).
-        ihash = input_hash(dhash, config, code_ver, seed)
+        ihash = input_hash(
+            dhash, config, code_ver, seed,
+            evaluation_plan=evaluation_plan)
 
         with conn.cursor() as cur:
             if hypothesis_id is None:
@@ -1497,8 +1675,7 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
                 returning experiment_id
                 """,
                 (hyp_id, dataset_id, code_ver, json.dumps(config), seed,
-                 json.dumps({"policy": "single-window", "note": "v1 스모크 - "
-                             "walk-forward 는 QNT-04 몫으로 후속"}),
+                 json.dumps(split_policy, sort_keys=True),
                  COST_MODEL["version"], ihash, trace))
             got = cur.fetchone()
             if got is None:
@@ -1531,9 +1708,15 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
                               where r.experiment_id=e.experiment_id
                                 and r.status='COMPLETED'
                               order by r.created_at desc limit 1)
+                           ,e.split_policy
                       from quant.experiments e where e.input_hash=%s""",
                              (ihash,))
                 prev = cur2.fetchone()
+                if prev and mode == "DAILY_WALK_FORWARD":
+                    stored = prev[8] if isinstance(prev[8], dict) else None
+                    if stored != evaluation_plan:
+                        raise RuntimeError(
+                            "existing daily experiment frozen plan mismatch")
                 if prev and zombie_experiment(prev[1], not prev[2],
                                               int(prev[4]), int(prev[5]),
                                               float(prev[3] or 0)):
@@ -1558,6 +1741,11 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
                     # this same hypothesis and only while no outcome exists.
                     # A judged experiment remains an immutable duplicate.
                     summary = prev[7]
+                    stored_plan = (dict(prev[8])
+                                   if isinstance(prev[8], dict) else None)
+                    if mode == "DAILY_WALK_FORWARD" and stored_plan is None:
+                        raise RuntimeError(
+                            "resumed daily experiment lacks frozen plan")
                     print(f"완료 백테스트 후속 검증 재개({prev[0][:8]}…)",
                           flush=True)
                     return {
@@ -1568,6 +1756,7 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
                         "experiment_id": str(prev[0]),
                         "backtest_run_id": None,
                         "metrics": dict(summary.get("metrics") or {}),
+                        "evaluation_plan": stored_plan,
                     }
                 else:
                     print(f"같은 input_hash 의 실험이 이미 있다({ihash[:16]}…) - "
@@ -1580,7 +1769,8 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
         conn.commit()
 
         try:
-            market = Market.from_rows(rows)
+            if market is None:
+                market = Market.from_rows(rows)
             # ▶ **원본 행을 붙들지 않는다** (2026-08-14 실측)
             #   `load_dataset` 이 돌려준 dict 리스트(v3 = 725만 행)와
             #   `Market` 이 동시에 살아 있으면 같은 데이터를 두 벌 든다.
@@ -1715,7 +1905,8 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
               flush=True)
         return {"status": 0, "duplicate": False, "experiment_id": exp_id,
                 "backtest_run_id": run_row_id, "metrics": m, "input_hash": ihash,
-                "dataset_id": dataset_id, "dataset_hash": dhash}
+                "dataset_id": dataset_id, "dataset_hash": dhash,
+                "evaluation_plan": evaluation_plan}
     finally:
         conn.close()
 
@@ -1828,8 +2019,10 @@ def _check_metrics_and_determinism():
     up = {"A": [100 * 1.001 ** i for i in range(300)],
           "B": [100.0] * 300}
     m = _mk_market(up)
-    r1 = run_backtest(m, dict(DEFAULT_CONFIG, top_n=1, initial_capital=1e8))
-    r2 = run_backtest(m, dict(DEFAULT_CONFIG, top_n=1, initial_capital=1e8))
+    r1 = _run_backtest_core(m, dict(
+        DEFAULT_CONFIG, top_n=1, initial_capital=1e8))
+    r2 = _run_backtest_core(m, dict(
+        DEFAULT_CONFIG, top_n=1, initial_capital=1e8))
     assert r1.metrics == r2.metrics, "같은 입력이 다른 결과를 냈다 - 비결정성"
     assert r1.metrics["total_return"] > 0    # 상승 종목 하나를 고르는 구성
     assert r1.metrics["max_drawdown"] <= 0
@@ -1859,13 +2052,16 @@ def _check_strategy_catalog():
         pass
     assert rebalance_days(m.dates[:8], {"rebalance": "EVERY_5_TRADING_DAYS"}) \
         == {m.dates[0], m.dates[5]}
-    r1 = run_backtest(m, dict(REV_CONFIG, top_n=1, initial_capital=1e6))
-    r2 = run_backtest(m, dict(REV_CONFIG, top_n=1, initial_capital=1e6))
+    r1 = _run_backtest_core(m, dict(
+        REV_CONFIG, top_n=1, initial_capital=1e6))
+    r2 = _run_backtest_core(m, dict(
+        REV_CONFIG, top_n=1, initial_capital=1e6))
     assert r1.metrics == r2.metrics, "REV-5 가 비결정적이다"
     # no_trade_before(웜업 무거래 계약): 그 전 체결 0 - WF 실측 137건 재발 방지
     cut = m.dates[20]
-    r3 = run_backtest(m, dict(REV_CONFIG, top_n=1, initial_capital=1e6,
-                              no_trade_before=cut.isoformat()))
+    r3 = _run_backtest_core(
+        m, dict(REV_CONFIG, top_n=1, initial_capital=1e6,
+                no_trade_before=cut.isoformat()))
     assert r1.fills and r1.fills[0].trade_date < cut      # 기본은 cut 전에 체결 시작
     assert r3.fills and all(f.trade_date >= cut for f in r3.fills), \
         "no_trade_before 위반 - WF 웜업 체결 137건 실측의 재발 방지"
@@ -1875,7 +2071,8 @@ def _check_strategy_catalog():
 def _check_cash_never_negative():
     prices = {s: [100.0 + (i % 7) for i in range(60)] for s in ("A", "B", "C")}
     m = _mk_market(prices)
-    r = run_backtest(m, dict(DEFAULT_CONFIG, top_n=3, initial_capital=1_000_000))
+    r = _run_backtest_core(
+        m, dict(DEFAULT_CONFIG, top_n=3, initial_capital=1_000_000))
     # 현금 부족 시 축소 매수 경로가 작동해 자본이 음수로 안 간다
     assert all(v > 0 for _, v in r.equity)
     print("  현금 제약(축소 매수)     OK")
@@ -1938,10 +2135,10 @@ def _check_risk_knobs_off_change_nothing():
     사전등록이 무너진다. 안 켠 경우는 예전 경로 그대로여야 한다.
     """
     m = _crash_market()
-    base = run_backtest(m, dict(DEFAULT_CONFIG, top_n=2))
-    same = run_backtest(m, dict(DEFAULT_CONFIG, top_n=2,
-                                vol_target_annual=None, max_drawdown_stop=None,
-                                max_exposure=None))
+    base = _run_backtest_core(m, dict(DEFAULT_CONFIG, top_n=2))
+    same = _run_backtest_core(
+        m, dict(DEFAULT_CONFIG, top_n=2, vol_target_annual=None,
+                max_drawdown_stop=None, max_exposure=None))
     assert base.metrics == same.metrics, "손잡이를 껐는데 결과가 달라졌다"
     # 안 켰으면 위험관리 지표를 **적지 않는다** - 1.0 을 적으면 한 것처럼 읽힌다
     assert "avg_exposure" not in base.metrics, base.metrics.keys()
@@ -1956,8 +2153,9 @@ def _check_drawdown_stop_actually_cuts_drawdown():
     """**켜면 실제로 낙폭이 준다.** 손잡이가 이름만 있으면 없는 것과 같다."""
     m = _crash_market()
     cfg = dict(DEFAULT_CONFIG, top_n=2)
-    base = run_backtest(m, cfg)
-    stopped = run_backtest(m, dict(cfg, max_drawdown_stop=-0.15))
+    base = _run_backtest_core(m, cfg)
+    stopped = _run_backtest_core(
+        m, dict(cfg, max_drawdown_stop=-0.15))
 
     b_mdd = base.metrics["max_drawdown"]
     s_mdd = stopped.metrics["max_drawdown"]
@@ -1981,8 +2179,8 @@ def _check_risk_is_pit():
 
     cfg = dict(DEFAULT_CONFIG, top_n=2, max_drawdown_stop=-0.15,
                vol_target_annual=0.15)
-    a = run_backtest(full, cfg)
-    b = run_backtest(cut, cfg)
+    a = _run_backtest_core(full, cfg)
+    b = _run_backtest_core(cut, cfg)
     # 겹치는 구간의 자산곡선이 같아야 한다
     n = len(b.equity)
     assert n > 60, n
@@ -2327,7 +2525,8 @@ if __name__ == "__main__":
         src = pathlib.Path(__file__).read_text(encoding="utf-8")
         body = ast.get_source_segment(src, next(
             n for n in ast.walk(ast.parse(src))
-            if isinstance(n, ast.FunctionDef) and n.name == "run_backtest")) or ""
+            if isinstance(n, ast.FunctionDef)
+            and n.name == "_run_backtest_core")) or ""
         assert "market_trend_up(market, market.dates[i - 1]" in body, \
             "추세 판정이 t-1 이 아니다 - 오늘 수익률로 오늘 노출을 정하면 누출이다"
         print("  추세 필터(세 번째 수단)  OK")

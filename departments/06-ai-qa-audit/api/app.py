@@ -97,9 +97,15 @@ from ops_health_monitor import (
 from qa_events.redis_event_bus import (
     DEFAULT_GROUP,
     DEFAULT_STREAM,
+    FORWARD_QA_DLQ_STREAM,
+    FORWARD_QA_GROUP,
+    FORWARD_QA_STREAM,
+    INTRADAY_FORWARD_QA_REQUESTED_EVENT,
     QA_DECISION_EVENT,
     RISK_DECISION_EVENT,
+    RISK_QA_DLQ_STREAM,
     QaEventBusError,
+    QaEventPoisonError,
     RedisEventBus,
 )
 from qa_mandate_workers import QaVerificationRequest, assess_qa_verification
@@ -127,6 +133,8 @@ _DATABASE_URL = (
 )
 _QA_RUNTIME = os.environ.get("RISK_QA_RUNTIME", "").strip().lower()
 from repository import (
+    DomainEventConflict,
+    ForwardQaRequestConflict,
     PostgresAuditRepository,
     QaDecisionPersistenceError,
 )
@@ -136,6 +144,7 @@ if _QA_RUNTIME == "test" or not _DATABASE_URL:
 else:
     _audit_repository = PostgresAuditRepository.connect(_DATABASE_URL)
 _event_bus: RedisEventBus | None = None
+_forward_event_bus: RedisEventBus | None = None
 
 
 def _qa_event_bus() -> RedisEventBus | None:
@@ -152,9 +161,12 @@ def _qa_event_bus() -> RedisEventBus | None:
             dedupe_ttl_seconds = int(
                 os.environ.get("RISK_QA_EVENT_DEDUPE_TTL_SECONDS", "604800")
             )
+            max_delivery_attempts = int(
+                os.environ.get("RISK_QA_EVENT_MAX_DELIVERIES", "5")
+            )
         except ValueError as exc:
             raise QaEventBusError(
-                "RISK_QA_EVENT_DEDUPE_TTL_SECONDS must be an integer"
+                "risk QA Redis numeric settings must be integers"
             ) from exc
 
         _event_bus = RedisEventBus(
@@ -163,8 +175,58 @@ def _qa_event_bus() -> RedisEventBus | None:
             group=os.environ.get("QA_EVENT_GROUP", DEFAULT_GROUP),
             consumer=os.environ.get("QA_EVENT_CONSUMER", "qa-api"),
             dedupe_ttl_seconds=dedupe_ttl_seconds,
+            dead_letter_stream=(
+                os.environ.get("RISK_QA_EVENT_DLQ_STREAM") or RISK_QA_DLQ_STREAM
+            ),
+            max_delivery_attempts=max_delivery_attempts,
+            failure_prefix="risk-qa:event-failures:",
         )
     return _event_bus
+
+
+def _forward_qa_event_bus() -> RedisEventBus | None:
+    """Return the isolated quant-to-QA stream with poison-message DLQ."""
+
+    global _forward_event_bus
+    redis_url = os.environ.get("RISK_QA_EVENT_REDIS_URL") or os.environ.get(
+        "REDIS_URL"
+    )
+    if not redis_url:
+        return None
+    if _forward_event_bus is None:
+        import redis
+
+        try:
+            dedupe_ttl_seconds = int(
+                os.environ.get("RISK_QA_EVENT_DEDUPE_TTL_SECONDS", "604800")
+            )
+            max_delivery_attempts = int(
+                os.environ.get("QA_FORWARD_EVENT_MAX_DELIVERIES", "5")
+            )
+        except ValueError as exc:
+            raise QaEventBusError(
+                "forward QA Redis numeric settings must be integers"
+            ) from exc
+        _forward_event_bus = RedisEventBus(
+            redis.Redis.from_url(redis_url),
+            stream=os.environ.get("QUANT_QA_EVENT_STREAM", FORWARD_QA_STREAM),
+            group=os.environ.get("QUANT_QA_EVENT_GROUP", FORWARD_QA_GROUP),
+            consumer=os.environ.get(
+                "QUANT_QA_EVENT_CONSUMER", "qa-forward-worker"
+            ),
+            dedupe_prefix="quant-qa:event-processed:",
+            dedupe_ttl_seconds=dedupe_ttl_seconds,
+            dead_letter_stream=os.environ.get(
+                "QUANT_QA_EVENT_DLQ_STREAM", FORWARD_QA_DLQ_STREAM
+            ),
+            max_delivery_attempts=max_delivery_attempts,
+            failure_prefix="quant-qa:event-failures:",
+            # Forward requests are rare, durable governance records.  Never
+            # evict an unconsumed request merely because an unrelated burst
+            # reached an approximate stream length.
+            stream_maxlen=None,
+        )
+    return _forward_event_bus
 
 
 def _persist_qa_decision(assessment) -> None:
@@ -194,27 +256,50 @@ def _persist_qa_decision(assessment) -> None:
     )
 
 
-def _record_risk_event(event: dict) -> None:
-    """Risk Decision Event를 QA Audit 수신 이력으로 남긴다."""
+_QA_CONSUMED_EVENT_SOURCES = {
+    RISK_DECISION_EVENT: "risk-management",
+    INTRADAY_FORWARD_QA_REQUESTED_EVENT: "quant-backtest-department",
+}
 
-    if event.get("event_type") != RISK_DECISION_EVENT:
-        raise QaEventBusError(
-            f"QA Consumer가 알 수 없는 Event를 받았습니다: {event.get('event_type')}"
+
+def _record_risk_event(event: dict) -> None:
+    """Accepted QA-bound events를 canonical audit ledger에 멱등 기록한다.
+
+    The historical function name remains because the HTTP endpoint and worker
+    import it. Routing is explicit by event type so a quant forward QA request
+    cannot be mislabeled as a Risk event.
+    """
+
+    event_type = event.get("event_type")
+    source_department = _QA_CONSUMED_EVENT_SOURCES.get(event_type)
+    if source_department is None:
+        raise QaEventPoisonError(
+            f"QA consumer received an unsupported event: {event_type}"
         )
     if _audit_repository is None:
-        raise QaEventBusError("Risk Event를 기록할 DATABASE_URL이 없습니다")
+        raise QaEventBusError("QA-bound event를 기록할 DATABASE_URL이 없습니다")
     try:
-        _audit_repository.record_domain_event(
-            event_id=UUID(event["event_id"]),
-            event_type=event["event_type"],
-            source_department="risk-management",
-            trace_id=UUID(event["trace_id"]),
-            payload=event["payload"],
-            occurred_at=datetime.fromisoformat(event["occurred_at"]),
-        )
-    except (KeyError, ValueError) as exc:
-        raise QaEventBusError(
-            f"Risk Event Envelope이 유효하지 않습니다: {exc}"
+        payload = event["payload"]
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be a JSON object")
+        if event_type == INTRADAY_FORWARD_QA_REQUESTED_EVENT:
+            _audit_repository.accept_intraday_forward_qa_request(event)
+        else:
+            _audit_repository.record_domain_event(
+                event_id=UUID(event["event_id"]),
+                event_type=event_type,
+                source_department=source_department,
+                trace_id=UUID(event["trace_id"]),
+                payload=payload,
+                occurred_at=datetime.fromisoformat(event["occurred_at"]),
+            )
+    except (DomainEventConflict, ForwardQaRequestConflict) as exc:
+        raise QaEventPoisonError(
+            f"QA immutable event conflicts with canonical state: {exc}"
+        ) from exc
+    except (KeyError, TypeError, ValueError) as exc:
+        raise QaEventPoisonError(
+            f"QA event envelope is invalid: {exc}"
         ) from exc
 
 
@@ -1106,16 +1191,38 @@ def health() -> dict:
 def health_ready() -> dict:
     """Readiness. audit 저장소가 붙어 있어야 ready 다."""
     if not _DATABASE_URL:
-        return {"status": "degraded", "service": "qa-api", "canonical_db": "NOT_CONFIGURED"}
+        raise HTTPException(
+            status_code=503,
+            detail={"status": "degraded", "canonical_db": "NOT_CONFIGURED"},
+        )
     if _audit_repository is None:
         # DSN 은 있는데 저장소가 없다 = TEST 런타임으로 뜬 것이다. 숨기지 않는다.
-        return {
-            "status": "degraded",
-            "service": "qa-api",
-            "canonical_db": "DISABLED_BY_RUNTIME",
-            "runtime": _QA_RUNTIME or "default",
-        }
-    return {"status": "ready", "service": "qa-api", "canonical_db": "READY"}
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "degraded",
+                "canonical_db": "DISABLED_BY_RUNTIME",
+                "runtime": _QA_RUNTIME or "default",
+            },
+        )
+    try:
+        database = _audit_repository.runtime_database_status()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "degraded",
+                "canonical_db": "ROLE_OR_WRITE_CHECK_FAILED",
+                "error_type": type(exc).__name__,
+            },
+        ) from exc
+    return {
+        "status": "ready",
+        "service": "qa-api",
+        "canonical_db": "READY",
+        "database_role": database["current_user"],
+        "transaction_read_only": database["transaction_read_only"],
+    }
 
 
 @app.get("/qa/v1/observability/runtime")

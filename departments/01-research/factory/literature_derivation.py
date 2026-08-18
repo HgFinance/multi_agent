@@ -17,8 +17,9 @@ if str(_CONTRACTS) not in sys.path:
     sys.path.insert(0, str(_CONTRACTS))
 
 import alpha_ast_surface as ast  # noqa: E402
+from alpha_semantics import check_microstructure_mutations  # noqa: E402
 
-POLICY_VERSION = "literature-derivation-v1"
+POLICY_VERSION = "literature-derivation-v2"
 
 DIRECT_REPLICATION = "DIRECT_REPLICATION"
 MECHANISM_MUTATION = "MECHANISM_MUTATION"
@@ -41,6 +42,10 @@ DERIVATION_TRANSFORMS = frozenset({
     "TARGET_CHANGE",
     "CROSS_SCALE_DISAGREEMENT",
     "L1_L10_DIVERGENCE",
+    "L1_L10_CONVERGENCE",
+    "QUOTE_TAPE_CONFIRMATION",
+    "EVENT_NORMALIZATION",
+    "VOLUME_NORMALIZATION",
     "EXECUTION_AWARE",
 })
 
@@ -65,6 +70,14 @@ def assess(*, candidate: dict, mode: str, source_baseline=None,
     unknown = sorted(set(transform_items) - DERIVATION_TRANSFORMS)
     if unknown:
         raise ValueError(f"unknown DERIVATION_TRANSFORMS: {unknown}")
+    mutation_alignment = check_microstructure_mutations(
+        transform_items, grammar.fields_of(candidate),
+        operators=(grammar.operators_of(candidate)
+                   if hasattr(grammar, "operators_of") else ()))
+    if not mutation_alignment["ok"]:
+        raise ValueError(
+            "DERIVATION_TRANSFORMS do not match the candidate AST: "
+            + "; ".join(mutation_alignment["missing"]))
 
     baseline = None
     if source_baseline not in (None, ""):

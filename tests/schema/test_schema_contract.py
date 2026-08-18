@@ -152,7 +152,47 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                 # quant-api's scoped role may read only the packet claims used
                 # by its research seed endpoint; no research write is granted.
                 "20260817000100_quant_api_seed_read.sql",
-        ]
+                # Append-only intraday candidate ancestry, adaptive rungs,
+                # first-session exposure lockbox, and independent forward gate.
+                "20260817000200_intraday_trial_lockbox.sql",
+                # Authoritative forward outcome/report revisions, PASS-only QA
+                # request, and a fair leased/backoff scheduler.
+                "20260818000100_intraday_forward_publication_queue.sql",
+                # Cross-table forward decision guards and empty-lesson-safe
+                # current trial-family aggregation.
+                "20260818000200_intraday_forward_semantic_guards.sql",
+                # Restart-safe QA event dispatch receipts and the terminal
+                # forward-work schedule nullability correction.
+                "20260818000300_intraday_forward_qa_dispatch.sql",
+                # Remove broad default-schema write grants so quant can only
+                # append transport state through the validated handoff trigger.
+                "20260818000400_intraday_forward_qa_least_privilege.sql",
+                # Runtime processes explicitly reduce the shared pool login to
+                # their least-privileged quant or QA service role.
+                "20260818000500_runtime_service_role_selection.sql",
+                # Split the QA HTTP and relay processes into distinct
+                # NOLOGIN/NOBYPASSRLS roles with exact RLS surfaces.
+                "20260818000600_qa_runtime_role_separation.sql",
+                # Independently reproduce frozen forward reports through a
+                # fenced lease API and retain one immutable verdict per request.
+                "20260818000700_intraday_forward_qa_reproducer.sql",
+                # Restore only the RLS operations exercised by the scoped
+                # quant runtime; immutable dataset/universe catalogs stay
+                # read-only and the QA transport split remains unchanged.
+                "20260818000800_quant_runtime_rls_repair.sql",
+                # Classify LS-flagged SPACs separately so STOCK-only evidence
+                # and runtime RLS boundaries exclude acquisition vehicles.
+                "20260818000900_reference_spac_instrument_type.sql",
+                 # Independent QA reproduction is the final hypothesis-status
+                 # authority; pending/inconclusive outcomes stay fail closed.
+                 "20260818001000_intraday_qa_verdict_authority.sql",
+                 # Final stock-only SUPPORTED guard: current FORWARD reference
+                 # revalidation, governed daily evidence, and durable SPAC type.
+                 "20260818001100_stock_supported_transition_guard.sql",
+                 # Narrow owner-evaluated stock identity projection for the
+                 # scoped quant runtime; raw instrument metadata stays private.
+                 "20260818001200_quant_stock_identity_projection.sql",
+         ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 
     def test_migrations_are_transactional(self) -> None:
@@ -250,10 +290,633 @@ class SupabaseSchemaContractTest(unittest.TestCase):
         self.assertIn("on delete restrict", migration)
         self.assertIn("eval_results_append_only", migration)
         self.assertIn("eval_comparisons_append_only", migration)
+
+    def test_intraday_trial_lockbox_contract(self) -> None:
+        migration = next(
+            sql
+            for path, sql in self.files
+            if path.name == "20260817000200_intraday_trial_lockbox.sql"
+        ).lower()
+
+        tables = (
+            "intraday_candidate_lineages",
+            "intraday_experiment_rungs",
+            "intraday_session_accesses",
+            "intraday_session_exposures",
+            "intraday_forward_confirmations",
+            "intraday_report_manifests",
+        )
+        for table in tables:
+            with self.subTest(table=table):
+                self.assertIn(f"create table quant.{table}", migration)
+                self.assertIn(
+                    f"alter table quant.{table} enable row level security",
+                    migration,
+                )
+                self.assertIn(f"{table}_append_only", migration)
+
+        self.assertIn("uq_intraday_root_session_exposure", migration)
+        self.assertIn("unique\n    (root_lineage_id, session_date)", migration)
+        self.assertIn("fk_intraday_candidate_parent_root", migration)
+        self.assertIn("deferrable initially deferred", migration)
+        self.assertIn("validate_intraday_rung_allocation", migration)
+        self.assertIn("validate_intraday_session_access", migration)
+        self.assertIn("validate_intraday_session_exposure", migration)
+        self.assertIn("validate_intraday_forward_confirmation", migration)
+        self.assertGreaterEqual(migration.count("pg_advisory_xact_lock"), 3)
+        self.assertIn("'calibration', 'discovery_6'", migration)
+        self.assertIn("when 'discovery_6' then 'calibration'", migration)
+        self.assertIn("calibration rung requires calibration exposure purpose", migration)
+        self.assertIn("forward exposure requires new arrival-time-causal evidence", migration)
+        self.assertIn("actual_raw_replay_v1", migration)
+        self.assertIn("event_time_historical_only", migration)
+        self.assertIn("arrival_time_causal", migration)
+        self.assertIn("rung = 'discovery_6' and planned_session_count = 6", migration)
+        self.assertIn("rung = 'validation_20' and planned_session_count = 20", migration)
+        self.assertIn("rung = 'full_60' and planned_session_count = 60", migration)
+        self.assertIn("rung = 'forward' and planned_session_count >= 20", migration)
+        self.assertIn("forward_session_count >= 20", migration)
+        self.assertIn("intraday_forward_test_index_seq", migration)
+        self.assertIn("uq_intraday_forward_test_index", migration)
+        self.assertIn("forward test index is database assigned", migration)
+        self.assertIn("planned_instrument_ids", migration)
+        self.assertIn("planned intraday instruments must be sorted, unique, and exact", migration)
+        self.assertIn("session exposure differs from the exact frozen instrument universe", migration)
+        self.assertIn("prior rung of the same experiment and candidate lineage", migration)
+        self.assertIn("validation and full rungs must contain every prior search session", migration)
+        self.assertIn("forward allocation requires complete full_60 exposure evidence", migration)
+        self.assertNotIn("uq_intraday_forward_candidate unique", migration)
+        self.assertIn("revoke update, delete, truncate on", migration)
+
+        # Full governance JSON is append-only but deliberately absent from the
+        # indexed experiment_metrics.dimensions value.
+        self.assertIn("create table quant.intraday_report_manifests", migration)
+        self.assertRegex(migration, r"\breport\s+jsonb\s+not\s+null\b")
+        self.assertIn("experiment_metrics stores only its compact sha-256 reference", migration)
+
+        # There is intentionally no migration-time claim that the historical
+        # 61 sessions were unused. Runtime must append first exposure facts.
+        self.assertNotIn("insert into quant.intraday_session_exposures", migration)
+        self.assertNotIn("insert into quant.intraday_session_accesses", migration)
+        self.assertIn("matching durable pre-read access marker", migration)
+        self.assertIn("new.knowledge_cutoff <> declared_rung.dataset_cutoff", migration)
+
+        # Stock-only universe metadata is a column-scoped, RLS-filtered read;
+        # missing metadata and non-STOCK products fail closed.
+        self.assertIn("grant usage on schema reference to svc_quant", migration)
+        self.assertIn("grant usage on schema reference, quant to service_role", migration)
+        self.assertIn("grant select (", migration)
+        self.assertIn("instrument_id, instrument_type, asset_class, market", migration)
+        self.assertIn("market, venue", migration)
+        self.assertIn("reference_instruments_svc_quant_stock_only_select", migration)
+        self.assertIn("upper(instrument_type) = 'stock'", migration)
+        self.assertIn("market_calendar_versions_svc_quant_krx_select", migration)
+        self.assertIn("market_sessions_svc_quant_krx_select", migration)
+        self.assertIn("on reference.market_calendar_versions to svc_quant", migration)
+        self.assertIn("on reference.market_sessions to svc_quant", migration)
+
+    def test_intraday_forward_publication_and_queue_contract(self) -> None:
+        migration = next(
+            sql
+            for path, sql in self.files
+            if path.name ==
+            "20260818000100_intraday_forward_publication_queue.sql"
+        ).lower()
+
+        immutable = (
+            "research.experiment_outcome_revisions",
+            "quant.intraday_forward_report_revisions",
+            "quant.intraday_forward_qa_handoffs",
+        )
+        for table in immutable:
+            schema, name = table.split(".")
+            self.assertIn(f"create table {table}", migration)
+            self.assertIn(f"alter table {table} enable row level security",
+                          migration)
+            self.assertIn(f"{name}_append_only", migration)
+        self.assertIn("create view research.v_current_experiment_outcomes",
+                      migration)
+        self.assertIn("fk_intraday_forward_report_outcome", migration)
+        self.assertIn("fk_intraday_forward_qa_report", migration)
+        self.assertIn("uq_intraday_forward_qa_confirmation", migration)
+
+        self.assertIn("create table quant.intraday_forward_work_items",
+                      migration)
+        self.assertIn("lease_token", migration)
+        self.assertIn("next_attempt_at", migration)
+        self.assertIn("error_count", migration)
+        self.assertIn("max_error_count", migration)
+        self.assertIn("'failed'", migration)
+        self.assertIn("idx_intraday_forward_work_due", migration)
+        self.assertIn("idx_intraday_forward_work_expired_lease", migration)
+        self.assertNotIn("intraday_forward_work_items_append_only", migration)
+
+        self.assertIn("experiment_outcome_revisions_svc_quant_insert",
+                      migration)
+        self.assertIn("intraday_forward_work_items_svc_quant_update",
+                      migration)
+        self.assertIn("hypotheses_svc_quant_update", migration)
+        self.assertIn("revoke update, delete, truncate", migration)
+
+    def test_intraday_forward_semantic_guards_contract(self) -> None:
+        migration = next(
+            sql
+            for path, sql in self.files
+            if path.name ==
+            "20260818000200_intraday_forward_semantic_guards.sql"
+        ).lower()
+
+        self.assertIn(
+            "create or replace function "
+            "quant.validate_intraday_outcome_revision()", migration)
+        self.assertIn(
+            "create or replace function "
+            "quant.validate_intraday_forward_report_revision()", migration)
+        self.assertIn(
+            "intraday_forward_report_revision_semantic_guard", migration)
+        self.assertIn("new.decision is distinct from confirmation_decision",
+                      migration)
+        self.assertIn(
+            "outcome_decision is distinct from expected_outcome_decision",
+            migration)
+        self.assertIn(
+            "new.hypothesis_status is distinct from "
+            "expected_hypothesis_status", migration)
+        for expected in ("'pass' then 'submit_to_qa'",
+                         "'fail' then 'reject'",
+                         "'inconclusive' then 'gate_hold'",
+                         "'pass' then 'supported'",
+                         "'fail' then 'rejected'"):
+            self.assertIn(expected, migration)
+
+        self.assertIn(
+            "create or replace function "
+            "quant.validate_intraday_forward_qa_handoff()", migration)
+        self.assertIn("intraday_forward_qa_handoff_pass_guard", migration)
+        self.assertIn("report.decision = 'pass'", migration)
+        self.assertIn("report.hypothesis_status = 'supported'", migration)
+        self.assertIn("do $semantic_audit$", migration)
+        self.assertIn(
+            "existing forward outcome revision lacks complete semantic "
+            "identity", migration)
+        self.assertIn(
+            "left join quant.intraday_forward_confirmations confirmation",
+            migration)
+        self.assertIn(
+            "left join research.experiment_outcome_revisions outcome",
+            migration)
+        self.assertIn(
+            "existing forward publication violates semantic decision mapping",
+            migration)
+        self.assertIn(
+            "existing qa handoff is not backed by a pass forward report",
+            migration)
+
+        self.assertIn(
+            "create or replace view research.v_trial_family_status",
+            migration)
+        self.assertIn("left join lateral unnest", migration)
+        self.assertIn("coalesce(outcome.lesson_codes, '{}'::text[])",
+                      migration)
+        self.assertIn("count(distinct outcome.outcome_id) as outcomes",
+                      migration)
+
+    def test_intraday_forward_qa_dispatch_contract(self) -> None:
+        migration = next(
+            sql
+            for path, sql in self.files
+            if path.name ==
+            "20260818000300_intraday_forward_qa_dispatch.sql"
+        ).lower()
+
+        self.assertIn(
+            "alter column next_attempt_at drop not null", migration)
+        self.assertIn(
+            "create table quant.intraday_forward_qa_outbox", migration)
+        self.assertIn(
+            "create table quant.intraday_forward_qa_delivery_state", migration)
+        self.assertIn(
+            "create table quant.intraday_forward_qa_dispatches", migration)
+        self.assertRegex(
+            migration,
+            r"uq_intraday_forward_qa_dispatch_handoff\s+unique\s*"
+            r"\(qa_handoff_id\)")
+        self.assertIn(
+            "create table audit.intraday_forward_reproduction_requests",
+            migration)
+        self.assertIn(
+            "create table audit.intraday_forward_reproduction_work_items",
+            migration)
+        self.assertIn(
+            "quant.intraday.forward.qa_requested.v1", migration)
+        self.assertIn(
+            "create or replace function "
+            "quant.intraday_forward_qa_event_id(", migration)
+        self.assertIn(
+            "event_id = quant.intraday_forward_qa_event_id(qa_handoff_id)",
+            migration)
+        self.assertIn(
+            "message_id = event_type || ':' || qa_handoff_id::text",
+            migration)
+        self.assertIn("payload_fingerprint", migration)
+        self.assertIn("event_payload", migration)
+        self.assertNotIn("jsonb_object_length", migration)
+        self.assertIn("payload_fingerprint = encode(", migration)
+        self.assertIn(
+            "new.payload is distinct from expected.event_payload", migration)
+        self.assertIn(
+            "intraday_forward_qa_handoff_transactional_outbox", migration)
+        self.assertIn("do $forward_qa_backfill$", migration)
+        self.assertIn(
+            "intraday_forward_qa_dispatch_semantic_guard", migration)
+        self.assertIn(
+            "reproduction_contract->'promotion_authority' = "
+            "'false'::jsonb", migration)
+        self.assertIn(
+            "intraday_forward_reproduction_request_semantic_guard",
+            migration)
+        self.assertIn(
+            "intraday_forward_qa_delivery_sent_guard", migration)
+        self.assertIn(
+            "intraday_forward_qa_domain_event_append_only", migration)
+        self.assertIn(
+            "expected.domain_status is distinct from 'processed'", migration)
+        self.assertIn(
+            "reproduction_contract->>'asset_scope' =", migration)
+        self.assertIn("'krx_active_stock_only'", migration)
+        self.assertIn(
+            "reproduction_contract - array[", migration)
+        self.assertIn(
+            "intraday_forward_qa_dispatches_append_only", migration)
+        self.assertIn(
+            "alter table quant.intraday_forward_qa_dispatches enable row "
+            "level security", migration)
+        self.assertRegex(
+            migration,
+            r"grant select, insert on "
+            r"quant\.intraday_forward_qa_dispatches\s+to service_role")
+        self.assertRegex(
+            migration,
+            r"grant select, insert on audit\.domain_events\s+to service_role")
+        self.assertIn("grant usage on schema audit to service_role", migration)
+        self.assertIn(
+            "create policy "
+            "reference_instrument_symbols_svc_quant_stock_only_select",
+            migration)
+        self.assertIn(
+            "drop policy if exists "
+            "reference_instruments_svc_quant_stock_only_select", migration)
+        self.assertIn(
+            "create policy reference_instruments_svc_quant_stock_only_select",
+            migration)
+        self.assertIn("intraday_rung_stock_scope_guard", migration)
+        self.assertIn(
+            "instrument_id, provider, market, symbol, symbol_type, is_primary",
+            migration)
+        for stock_boundary in (
+            "upper(instrument_type) = 'stock'",
+            "upper(asset_class) = 'equity'",
+            "upper(market) = 'krx'",
+            "upper(status) = 'active'",
+            "upper(instrument.instrument_type) = 'stock'",
+            "upper(instrument.asset_class) = 'equity'",
+            "upper(instrument.market) = 'krx'",
+            "upper(instrument.status) = 'active'",
+            "instrument.listed_from <= session.session_date",
+            "instrument.listed_to >= session.session_date",
+        ):
+            self.assertIn(stock_boundary, migration)
+
+    def test_intraday_forward_qa_least_privilege_contract(self) -> None:
+        migration = next(
+            sql
+            for path, sql in self.files
+            if path.name ==
+            "20260818000400_intraday_forward_qa_least_privilege.sql"
+        ).lower()
+
+        self.assertIn("revoke insert, update, delete, truncate on", migration)
+        self.assertIn("quant.intraday_forward_qa_outbox", migration)
+        self.assertIn("quant.intraday_forward_qa_delivery_state", migration)
+        self.assertIn("quant.intraday_forward_qa_dispatches", migration)
+        self.assertIn("revoke all on", migration)
+        self.assertIn("audit.intraday_forward_reproduction_requests", migration)
+        self.assertIn("audit.intraday_forward_reproduction_work_items", migration)
+        self.assertIn("do $forward_qa_least_privilege_audit$", migration)
+        self.assertIn(
+            "svc_quant retains a direct forward qa transport or audit write "
+            "path", migration)
+        self.assertIn(
+            "forward qa relay or acceptance role lacks its required privilege",
+            migration)
+
+    def test_runtime_service_role_selection_contract(self) -> None:
+        migration = next(
+            sql
+            for path, sql in self.files
+            if path.name ==
+            "20260818000500_runtime_service_role_selection.sql"
+        ).lower()
+
+        self.assertIn(
+            "grant svc_quant to postgres with set true, inherit false",
+            migration)
+        self.assertIn("membership.set_option", migration)
+        self.assertIn("not membership.inherit_option", migration)
+        self.assertIn(
+            "postgres cannot explicitly reduce to service_role", migration)
+        self.assertIn(
+            "svc_quant retains a direct qa transport write path", migration)
+        self.assertIn(
+            "service_role lacks the qa relay privileges", migration)
+
+    def test_qa_runtime_role_separation_contract(self) -> None:
+        migration = next(
+            sql
+            for path, sql in self.files
+            if path.name == "20260818000600_qa_runtime_role_separation.sql"
+        ).lower()
+
+        self.assertIn("create role svc_audit_api", migration)
+        self.assertIn("create role svc_qa_worker", migration)
+        self.assertIn("nologin nosuperuser nocreatedb nocreaterole", migration)
+        self.assertIn("noinherit", migration)
+        self.assertIn("nobypassrls", migration)
+        self.assertIn(
+            "grant svc_audit_api to postgres with set true, inherit false",
+            migration,
+        )
+        self.assertIn(
+            "grant svc_qa_worker to postgres with set true, inherit false",
+            migration,
+        )
+        self.assertIn("alter table audit.domain_events enable row level security", migration)
+        self.assertIn("svc_audit_api has a non-audit direct table grant", migration)
+        self.assertIn("svc_qa_worker exceeds its append/relay boundary", migration)
+        self.assertIn("a qa runtime role has destructive table privilege", migration)
+
+    def test_intraday_forward_qa_reproducer_contract(self) -> None:
+        migration = next(
+            sql
+            for path, sql in self.files
+            if path.name ==
+            "20260818000700_intraday_forward_qa_reproducer.sql"
+        ).lower()
+
+        self.assertIn("create role svc_qa_reproducer", migration)
+        self.assertIn("nologin nosuperuser nocreatedb nocreaterole", migration)
+        self.assertIn("noinherit", migration)
+        self.assertIn("nobypassrls", migration)
+        self.assertIn(
+            "grant svc_qa_reproducer to postgres with set true, inherit false",
+            migration,
+        )
+        self.assertIn(
+            "create table audit.intraday_forward_reproduction_results",
+            migration,
+        )
+        self.assertRegex(
+            migration,
+            r"reproduction_request_id\s+uuid\s+not\s+null\s+unique",
+        )
+        self.assertIn(
+            "uq_intraday_forward_reproduction_work_identity", migration)
+        self.assertIn(
+            "fk_intraday_forward_reproduction_result_work_request", migration)
+        self.assertIn("verdict in ('pass', 'fail', 'inconclusive')", migration)
+        self.assertIn("promotion_authority = false", migration)
+        self.assertIn("result_fingerprint = encode(", migration)
+        self.assertIn(
+            "intraday_forward_reproduction_results_append_only", migration)
+        self.assertIn(
+            "alter table audit.intraday_forward_reproduction_results\n"
+            "  force row level security",
+            migration,
+        )
+
+        for function in (
+            "claim_intraday_forward_reproduction_work",
+            "heartbeat_intraday_forward_reproduction_work",
+            "complete_intraday_forward_reproduction_work",
+            "fail_intraday_forward_reproduction_work",
+        ):
+            self.assertIn(f"create or replace function audit.{function}(", migration)
+        self.assertRegex(
+            migration,
+            r"claim_intraday_forward_reproduction_work\(\s*"
+            r"p_worker text,\s*p_lease_seconds integer default 900\s*\)\s*"
+            r"returns jsonb",
+        )
+        self.assertRegex(
+            migration,
+            r"heartbeat_intraday_forward_reproduction_work\([\s\S]*?\)\s*"
+            r"returns boolean",
+        )
+        self.assertRegex(
+            migration,
+            r"complete_intraday_forward_reproduction_work\([\s\S]*?\)\s*"
+            r"returns uuid",
+        )
+        self.assertRegex(
+            migration,
+            r"fail_intraday_forward_reproduction_work\([\s\S]*?\)\s*"
+            r"returns text",
+        )
+        self.assertGreaterEqual(migration.count("security definer"), 4)
+        self.assertGreaterEqual(
+            migration.count(
+                "set search_path = pg_catalog, audit"
+            ),
+            4,
+        )
+        self.assertIn("for update of work skip locked", migration)
+        self.assertIn("work.status in ('ready', 'retry')", migration)
+        self.assertIn("work.status = 'leased'", migration)
+        self.assertIn("work.lease_token = p_lease_token", migration)
+        self.assertIn("work.lease_expires_at > v_now", migration)
+        self.assertIn("3600", migration)
+        self.assertIn("1 << least(greatest(work.attempt_count - 1, 0), 7)", migration)
+        self.assertIn("set status = 'completed'", migration)
+        self.assertIn("v_verdict not in ('pass', 'fail', 'inconclusive')", migration)
+        self.assertIn(
+            "qa reproduction completion conflicts with immutable result",
+            migration,
+        )
+
+        self.assertIn(
+            "intraday-forward-qa-reproduction-input-v1", migration)
+        for bundle_key in (
+            "'work_item'", "'request'", "'experiment'", "'candidate'",
+            "'forward_rung'", "'report_revision'", "'confirmation'",
+            "'session_exposures'",
+        ):
+            self.assertIn(bundle_key, migration)
+        for frozen_field in (
+            "candidate_identity_fingerprint", "candidate_ast_fingerprint",
+            "semantic_plan_fingerprint", "feature_spec_fingerprint",
+            "label_spec_fingerprint", "model_spec_fingerprint",
+            "planned_session_dates", "planned_instrument_ids",
+            "session_set_fingerprint", "instrument_set_fingerprint",
+            "rung_plan_fingerprint", "dataset_cutoff", "forward_test_index",
+            "session_content_fingerprint", "quote_row_count",
+            "trade_row_count", "confirmation_evidence_fingerprint",
+            "intraday-forward-reproduction-runtime-v1",
+            "intraday-forward-reproduction-source-set-v1",
+            "frozen_config_fingerprint", "experiment_input_hash",
+            "runtime_manifest_fingerprint", "source_fingerprint",
+            "code_version", "cost_model_version", "evaluator_version",
+        ):
+            self.assertIn(frozen_field, migration)
+        self.assertIn("'frozen_config' <> '{}'::jsonb", migration)
+        self.assertIn(
+            "coalesce(experiment.input_hash ~ '^[0-9a-f]{64}$', false)",
+            migration,
+        )
+        self.assertIn("coalesce(btrim(experiment.code_version) <> '', false)", migration)
+        self.assertIn("'source_manifest' <> '{}'::jsonb", migration)
+        self.assertIn("'source_manifest'->'files' <> '{}'::jsonb", migration)
+        self.assertIn("order by exposure.session_date", migration)
+        self.assertIn("coalesce(upper(instrument.instrument_type), '') <> 'stock'", migration)
+        self.assertIn("coalesce(upper(instrument.asset_class), '') <> 'equity'", migration)
+        self.assertIn("coalesce(upper(instrument.market), '') <> 'krx'", migration)
+        self.assertIn("coalesce(upper(instrument.status), '') <> 'active'", migration)
+
+        self.assertIn(
+            "grant select on audit.intraday_forward_reproduction_results",
+            migration,
+        )
+        self.assertIn("grant execute on function", migration)
+        self.assertIn("to svc_qa_reproducer", migration)
+        self.assertIn("do $qa_reproducer_privilege_audit$", migration)
+        self.assertIn(
+            "svc_qa_reproducer has an unexpected direct table grant",
+            migration,
+        )
+        self.assertIn(
+            "qa reproducer or transport worker crosses its boundary",
+            migration,
+        )
+
+    def test_intraday_qa_verdict_authority_contract(self) -> None:
+        migration = next(
+            sql
+            for path, sql in self.files
+            if path.name ==
+            "20260818001000_intraday_qa_verdict_authority.sql"
+        ).lower()
+
+        # Authority is aggregated per hypothesis.  No single experiment may
+        # win merely because its QA result was inserted last.
+        self.assertRegex(
+            migration,
+            r"audit\.intraday_forward_qa_hypothesis_authority"
+            r"\(p_hypothesis_id uuid\)\s*returns table \("
+            r"[\s\S]*?language sql\s*security definer\s*"
+            r"set search_path = pg_catalog, audit, quant",
+        )
+        self.assertIn("when count(*) filter (where verdict = 'fail') > 0",
+                      migration)
+        self.assertIn("where verdict is null or verdict = 'inconclusive'",
+                      migration)
+        self.assertIn(
+            "when count(*) filter (where verdict = 'pass') = count(*)",
+            migration,
+        )
+
+        # A PASS report immediately creates an INCONCLUSIVE obligation; the
+        # immutable result later re-evaluates the same aggregate.  Both paths
+        # serialize on the mutable hypothesis row and preserve ARCHIVED.
+        self.assertIn(
+            "create or replace function "
+            "audit.apply_intraday_forward_qa_authority()",
+            migration,
+        )
+        self.assertIn("for update", migration)
+        self.assertIn("if v_current_status = 'archived'", migration)
+        for trigger_table in (
+            "after insert on audit.intraday_forward_reproduction_results",
+            "after insert on quant.intraday_forward_report_revisions",
+        ):
+            self.assertIn(trigger_table, migration)
+        self.assertGreaterEqual(
+            migration.count(
+                "execute function audit.apply_intraday_forward_qa_authority()"
+            ),
+            2,
+        )
+
+        # Old publishers cannot write optimistic support after creating the
+        # pending obligation.  Runtime roles cannot call the definer helpers.
+        self.assertIn(
+            "create or replace function "
+            "audit.guard_intraday_forward_qa_support()",
+            migration,
+        )
+        self.assertIn("before update of status on quant.hypotheses", migration)
+        self.assertIn(
+            "hypothesis support is blocked by aggregate forward qa status",
+            migration,
+        )
+        for role in ("public", "anon", "authenticated", "service_role",
+                     "svc_quant", "svc_qa_worker", "svc_audit_api",
+                     "svc_qa_reproducer"):
+            self.assertIn(role, migration)
+
+        # One deterministic backfill repairs both pending legacy publications
+        # and pre-trigger results without last-row-wins UPDATE FROM behavior.
+        self.assertIn("with governed_hypotheses as", migration)
+        self.assertIn("cross join lateral", migration)
+        self.assertIn("and hypothesis.status <> 'archived'", migration)
+        self.assertIn(
+            "and hypothesis.status is distinct from authority.status",
+            migration,
+        )
+
+        # The current-outcome projection exposes a positive decision only for
+        # QA PASS. FAIL is negative; both PENDING and INCONCLUSIVE are BLOCKED.
+        self.assertIn(
+            "create or replace view research.v_current_experiment_outcomes",
+            migration,
+        )
+        self.assertRegex(
+            migration,
+            r"when revision\.decision = 'submit_to_qa' then\s*"
+            r"case qa_result\.verdict\s*"
+            r"when 'pass' then 'submit_to_qa'\s*"
+            r"when 'fail' then 'reject'\s*"
+            r"else 'blocked'\s*end",
+        )
+        self.assertIn("'qa_reproduction_inconclusive'", migration)
+        self.assertIn("'qa_reproduction_pending'", migration)
+
+        # Only a reproduced PASS exposes alpha-like metrics. FAIL remains a
+        # negative structural verdict, while its unreproduced point estimates
+        # stay available only in the immutable source report.
+        self.assertRegex(
+            migration,
+            r"when qa_result\.verdict = 'pass'\s*"
+            r"then base\.oos_summary \|\| coalesce\(\s*"
+            r"revision\.oos_summary, '\{\}'::jsonb\)\s*"
+            r"else \(base\.oos_summary \|\| coalesce\(\s*"
+            r"revision\.oos_summary, '\{\}'::jsonb\)\)\s*"
+            r"- 'mean_net_bps_per_opportunity'\s*"
+            r"- 'mean_mid_markout_bps'\s*"
+            r"- 'sharpe'\s*"
+            r"- 'deflated_sharpe'",
+        )
+        self.assertIn("'status', coalesce(qa_result.verdict, 'pending')", migration)
+        self.assertIn(
+            "'qa_verified', coalesce(qa_result.verdict = 'pass', false)",
+            migration,
+        )
+        self.assertIn("'promotion_authority', false", migration)
+
     def test_domain_schemas_and_table_counts(self) -> None:
         expected_counts = {
             "accounting": 19,
-            "audit": 22,
+            # +1 (2026-08-18): immutable independent intraday forward
+            # reproduction verdicts, one per accepted QA request.
+            "audit": 25,
             # +1 (QA, 2026-08-09): eval_comparisons stores immutable Champion
             # comparison evidence across API/process restarts.
             # +2 (도현, 2026-08-06): outbox(Transactional Outbox — OMS 상태 변경과 같은
@@ -262,13 +925,20 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             "governance": 20,
             # +1 (재일, 2026-08-10): 공장 재편으로 실험 사전등록/결과 원장 확장
             # +1 (재일, 2026-08-16): 사전 데이터 타당성 점검을 trial에서 분리
-            "quant": 14,
+            # +6 (2026-08-17): intraday candidate ancestry, immutable resource
+            # rungs, durable pre-read access, post-read evidence, forward
+            # confirmations, and full report manifests outside indexed JSONB.
+            # +4 (2026-08-18): immutable forward report/QA request/dispatch
+            # receipt plus the separate mutable fair scheduler.
+            "quant": 26,
             "reference": 9,
             # +2 (재일, 2026-08-03): claim_evidence(주장↔근거 인용 링크),
             # document_revisions(뉴스 정정 이력 - 저장본은 PIT 상 최초 관측
             # 문장을 유지하므로 정정 사실은 이 테이블이 유일한 흔적이다)
             # +1 (재일, 2026-08-16): durable independent proposal review outcomes.
-            "research": 27,
+            # +1 (2026-08-18): append-only authoritative outcome revisions;
+            # legacy outcomes remain one row per experiment.
+            "research": 28,
             "risk": 19,
             "strategy": 9,
             "workforce": 25,

@@ -15,7 +15,7 @@ instrument_symbols 가 (provider, market, symbol) -> instrument_id 매핑을 시
                                     Application 계층 Join 이 성립한다(가이드 2.2)
     venue   = 'KOSPI' | 'KOSDAQ'    세부 시장(Board). LS 실시간 TR 선택 축이다
     asset_class = 'EQUITY'
-    instrument_type = 'STOCK' | 'ETF' | 'ETN'
+    instrument_type = 'STOCK' | 'ETF' | 'ETN' | 'SPAC'
     currency = 'KRW'
 
 ▶ 멱등성
@@ -165,6 +165,8 @@ def master_row_to_record(row: StockMasterRow, *, as_of: datetime) -> InstrumentR
         itype = "ETF"
     elif row.is_etn:
         itype = "ETN"
+    elif row.is_spac:
+        itype = "SPAC"
     else:
         itype = "STOCK"
 
@@ -1368,7 +1370,10 @@ def _check_mapping():
 
     assert master_row_to_record(_row("069500", "KR7069500007", Venue.KOSPI, etf=True), as_of=now).instrument_type == "ETF"
     assert master_row_to_record(_row("500001", "KR7500001000", Venue.KOSPI, etn=True), as_of=now).instrument_type == "ETN"
-    assert master_row_to_record(_row("123456", "KR7123456789", Venue.KOSDAQ, spac=True), as_of=now).metadata["is_spac"] is True
+    spac = master_row_to_record(
+        _row("123456", "KR7123456789", Venue.KOSDAQ, spac=True), as_of=now)
+    assert spac.instrument_type == "SPAC"
+    assert spac.metadata["is_spac"] is True
 
     # 주문 단위가 10 인 종목
     assert master_row_to_record(_row("000010", "KR7000010000", Venue.KOSPI, unit="10"), as_of=now).lot_size == Decimal(10)

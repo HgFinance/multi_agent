@@ -28,10 +28,11 @@
 from __future__ import annotations
 
 import math
+import random
 import sys
-from typing import Sequence
+from typing import Iterator, Sequence
 
-MODULE_VERSION = "quant-overfit-stats-v1"
+MODULE_VERSION = "quant-overfit-stats-v3"
 
 # 이보다 짧으면 어떤 통계도 신뢰할 수 없다. 60 거래일은 약 3개월이고,
 # 그보다 짧은 표본으로 Sharpe 를 논하는 것은 잡음을 논하는 것이다.
@@ -116,8 +117,8 @@ def _norm_ppf(p: float) -> float:
            (((((b[0]*r+b[1])*r+b[2])*r+b[3])*r+b[4])*r+1)
 
 
-def deflated_sharpe(returns: Sequence[float], *, trials: int,
-                    periods: int = TRADING_DAYS) -> dict:
+def _legacy_deflated_sharpe(returns: Sequence[float], *, trials: int,
+                            periods: int = TRADING_DAYS) -> dict:
     """Deflated Sharpe Ratio (Bailey & Lopez de Prado 2014).
 
     ▶ 이 함수가 답하는 질문
@@ -162,9 +163,9 @@ def deflated_sharpe(returns: Sequence[float], *, trials: int,
     }
 
 
-def bootstrap_ci(returns: Sequence[float], *, n_boot: int = BOOTSTRAP_N,
-                 alpha: float = 0.05, seed: int = 20260804,
-                 periods: int = TRADING_DAYS) -> dict:
+def _legacy_bootstrap_ci(returns: Sequence[float], *, n_boot: int = BOOTSTRAP_N,
+                         alpha: float = 0.05, seed: int = 20260804,
+                         periods: int = TRADING_DAYS) -> dict:
     """Sharpe 의 부트스트랩 신뢰구간. **구간이 0을 걸치면 알파가 아니다.**
 
     난수 seed 를 고정한다 - 재현되지 않는 검증은 검증이 아니다.
@@ -203,7 +204,7 @@ def bootstrap_ci(returns: Sequence[float], *, n_boot: int = BOOTSTRAP_N,
     }
 
 
-def pbo(is_ranks: Sequence[int], n_strategies: int) -> dict:
+def _legacy_pbo(is_ranks: Sequence[int], n_strategies: int) -> dict:
     """Probability of Backtest Overfitting (Bailey et al. 2016) 축약형.
 
     ▶ 무엇을 재는가
@@ -224,6 +225,265 @@ def pbo(is_ranks: Sequence[int], n_strategies: int) -> dict:
 
 
 # ── 자체 점검 ────────────────────────────────────────────────────────────────
+
+def expected_max_sharpe(*, trial_sharpe_std: float,
+                        effective_trials: float) -> float:
+    """Return the DSR expected-maximum Sharpe threshold.
+
+    ``trial_sharpe_std`` must use the same annualisation convention as
+    :func:`sharpe`.  ``effective_trials`` may be fractional because a family
+    of correlated searches can contain fewer independent trials than its raw
+    append-only ledger count.
+    """
+    sigma = float(trial_sharpe_std)
+    n_eff = float(effective_trials)
+    if not math.isfinite(sigma) or sigma < 0.0:
+        raise ValueError("trial_sharpe_std must be finite and non-negative")
+    if not math.isfinite(n_eff) or n_eff < 1.0:
+        raise ValueError("effective_trials must be finite and at least one")
+    if n_eff == 1.0 or sigma == 0.0:
+        return 0.0
+
+    gamma = 0.5772156649015329
+
+    def _threshold(trial_count: float) -> float:
+        p1 = min(math.nextafter(1.0, 0.0),
+                 1.0 - 1.0 / trial_count)
+        p2 = min(math.nextafter(1.0, 0.0),
+                 1.0 - 1.0 / (trial_count * math.e))
+        return sigma * ((1.0 - gamma) * _norm_ppf(p1) +
+                        gamma * _norm_ppf(p2))
+
+    # The approximation becomes negative for effective counts just above one,
+    # making a fractional search less strict than the exact one-trial null.
+    # Anchor [1, 2] at zero and interpolate to the unchanged two-trial value.
+    # From two onward both quantiles, and therefore the original formula, are
+    # monotone and non-negative.
+    if n_eff < 2.0:
+        return (n_eff - 1.0) * _threshold(2.0)
+    return max(0.0, _threshold(n_eff))
+
+
+def deflated_sharpe(returns: Sequence[float], *, trials: int | None = None,
+                    periods: int = TRADING_DAYS,
+                    trial_sharpes: Sequence[float] | None = None,
+                    trial_sharpe_std: float | None = None,
+                    effective_trials: float | None = None) -> dict:
+    """Compute the Bailey-Lopez de Prado Deflated Sharpe Ratio.
+
+    The v1 API (``returns``, ``trials``, ``periods``) remains valid.  That old
+    path assumes a unit cross-trial Sharpe standard deviation and is labelled
+    as legacy in the result.  A calibrated call supplies either every observed
+    trial Sharpe or its observed standard deviation, plus an optional effective
+    independent-trial count.  Trial Sharpes must be annualised exactly as the
+    selected strategy's Sharpe is annualised here.
+    """
+    sr = sharpe(returns, periods=periods)
+    n = len(returns)
+    observed = list(trial_sharpes) if trial_sharpes is not None else None
+    raw_value = trials if trials is not None else (len(observed)
+                                                   if observed is not None
+                                                   else None)
+    if sr is None or raw_value is None:
+        return {"deflated_sharpe": None, "sharpe": sr,
+                "reason": "표본 부족 또는 trial count 누락"}
+    try:
+        raw_trials = int(raw_value)
+    except (TypeError, ValueError, OverflowError):
+        raw_trials = 0
+    if raw_trials < 1 or float(raw_trials) != float(raw_value):
+        return {"deflated_sharpe": None, "sharpe": sr,
+                "reason": "trials must be a positive integer"}
+    if observed is not None and trial_sharpe_std is not None:
+        return {"deflated_sharpe": None, "sharpe": sr,
+                "reason": "provide trial_sharpes or trial_sharpe_std, not both"}
+
+    if observed is not None:
+        try:
+            observed = [float(value) for value in observed]
+        except (TypeError, ValueError, OverflowError):
+            observed = []
+        if (len(observed) != raw_trials or
+                any(not math.isfinite(value) for value in observed)):
+            return {"deflated_sharpe": None, "sharpe": sr,
+                    "reason": "trial_sharpes must be finite and cover every trial"}
+        sigma_trials = _std(observed) if len(observed) > 1 else 0.0
+        calibration_mode = "observed_trial_sharpes"
+    elif trial_sharpe_std is not None:
+        try:
+            sigma_trials = float(trial_sharpe_std)
+        except (TypeError, ValueError, OverflowError):
+            sigma_trials = math.nan
+        calibration_mode = "observed_trial_sharpe_std"
+    else:
+        # Preserve v1 numerical behaviour for existing callers while making
+        # the unobserved dispersion explicit in the returned evidence.
+        sigma_trials = 1.0
+        calibration_mode = "legacy_unit_trial_sharpe_std"
+
+    try:
+        n_eff = float(raw_trials if effective_trials is None
+                      else effective_trials)
+    except (TypeError, ValueError, OverflowError):
+        n_eff = math.nan
+    if (not math.isfinite(sigma_trials) or sigma_trials < 0.0 or
+            not math.isfinite(n_eff) or n_eff < 1.0 or
+            n_eff > raw_trials + 1e-12):
+        return {"deflated_sharpe": None, "sharpe": sr,
+                "reason": "invalid trial dispersion or effective trial count"}
+
+    sr0 = expected_max_sharpe(
+        trial_sharpe_std=sigma_trials, effective_trials=n_eff)
+    skew, kurt = _skew_kurt(returns)
+    sr_period = sr / math.sqrt(periods)
+    sr0_period = sr0 / math.sqrt(periods)
+    variance_adjustment = (1.0 - skew * sr_period +
+                           (kurt - 1.0) / 4.0 * sr_period ** 2)
+    if not math.isfinite(variance_adjustment) or variance_adjustment <= 0.0:
+        return {"deflated_sharpe": None, "sharpe": sr,
+                "reason": "non-normality adjustment is not positive"}
+    z_score = ((sr_period - sr0_period) * math.sqrt(n - 1) /
+               math.sqrt(variance_adjustment))
+    return {
+        "deflated_sharpe": round(_norm_cdf(z_score), 4),
+        "sharpe": round(sr, 4),
+        "expected_max_sharpe": round(sr0, 4),
+        "trials": raw_trials,
+        "effective_trials": round(n_eff, 6),
+        "trial_sharpe_std": round(sigma_trials, 6),
+        "calibration_mode": calibration_mode,
+        "skew": round(skew, 4),
+        "kurtosis": round(kurt, 4),
+    }
+
+
+def stationary_bootstrap_indices(
+        n: int, *, n_boot: int,
+        restart_probability: float = 0.25,
+        seed: int = 20260804) -> Iterator[tuple[int, ...]]:
+    """Yield deterministic Politis-Romano stationary-bootstrap paths.
+
+    At each step a new uniform index is drawn with probability ``q``;
+    otherwise the current circular block continues.  Thus the expected block
+    length is ``1/q``.  Consumers doing multiple-model tests must reuse each
+    yielded path across every candidate column.
+    """
+    if n < 1 or n_boot < 1:
+        raise ValueError("n and n_boot must be positive")
+    q = float(restart_probability)
+    if not math.isfinite(q) or not 0.0 < q <= 1.0:
+        raise ValueError("restart_probability must be in (0, 1]")
+    if type(seed) is not int:
+        raise ValueError("seed must be an explicit integer")
+    rng = random.Random(seed)
+
+    for _ in range(n_boot):
+        current = rng.randrange(n)
+        path = [current]
+        for _position in range(1, n):
+            if rng.random() < q:
+                current = rng.randrange(n)
+            else:
+                current = (current + 1) % n
+            path.append(current)
+        yield tuple(path)
+
+
+def bootstrap_ci(returns: Sequence[float], *, n_boot: int = BOOTSTRAP_N,
+                 alpha: float = 0.05, seed: int = 20260804,
+                 periods: int = TRADING_DAYS,
+                 method: str = "stationary",
+                 restart_probability: float = 0.25) -> dict:
+    """Percentile Sharpe interval using dependence-preserving resampling.
+
+    Stationary bootstrap is the default because session returns can be
+    serially dependent.  ``method='iid'`` remains available as an explicit
+    diagnostic and is exactly the stationary sampler with restart probability
+    one.
+    """
+    n = len(returns)
+    try:
+        finite = all(math.isfinite(float(value)) for value in returns)
+    except (TypeError, ValueError, OverflowError):
+        finite = False
+    if n < MIN_RETURNS or not finite:
+        return {"bootstrap_ci_low": None, "bootstrap_ci_high": None,
+                "reason": f"need at least {MIN_RETURNS} finite returns"}
+    if n_boot < 1 or not 0.0 < alpha < 1.0:
+        return {"bootstrap_ci_low": None, "bootstrap_ci_high": None,
+                "reason": "n_boot must be positive and alpha must be in (0, 1)"}
+    if method not in {"stationary", "iid"}:
+        return {"bootstrap_ci_low": None, "bootstrap_ci_high": None,
+                "reason": "method must be 'stationary' or 'iid'"}
+    q = 1.0 if method == "iid" else restart_probability
+    try:
+        paths = stationary_bootstrap_indices(
+            n, n_boot=n_boot, restart_probability=q, seed=seed)
+    except (TypeError, ValueError, OverflowError) as exc:
+        return {"bootstrap_ci_low": None, "bootstrap_ci_high": None,
+                "reason": str(exc)}
+
+    statistics = []
+    try:
+        for indices in paths:
+            sample = [returns[index] for index in indices]
+            value = sharpe(sample, periods=periods)
+            if value is not None:
+                statistics.append(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        return {"bootstrap_ci_low": None, "bootstrap_ci_high": None,
+                "reason": str(exc)}
+    if len(statistics) < max(1, n_boot // 2):
+        return {"bootstrap_ci_low": None, "bootstrap_ci_high": None,
+                "reason": "Sharpe was undefined in too many resamples"}
+    statistics.sort()
+    low = statistics[int(len(statistics) * alpha / 2.0)]
+    high = statistics[min(int(len(statistics) * (1.0 - alpha / 2.0)),
+                          len(statistics) - 1)]
+    q_value = float(q)
+    return {
+        "bootstrap_ci_low": round(low, 4),
+        "bootstrap_ci_high": round(high, 4),
+        "ci_excludes_zero": low > 0.0,
+        "n_boot": len(statistics),
+        "seed": seed,
+        "bootstrap_method": method,
+        "restart_probability": round(q_value, 8),
+        "expected_block_length": round(1.0 / q_value, 8),
+    }
+
+
+def pbo(is_ranks: Sequence[float], n_strategies: int) -> dict:
+    """Compute CSCV PBO from OOS ranks of each IS-selected strategy.
+
+    This follows the paper's rank orientation: rank 1 is worst and rank N is
+    best.  PBO is the fraction of ``log(rank/(N+1-rank)) <= 0`` outcomes.
+    Midrank ties at the OOS median are therefore counted conservatively.
+    """
+    if not is_ranks or n_strategies < 2:
+        return {"pbo": None, "reason": "missing splits or too few strategies"}
+    try:
+        ranks = [float(rank) for rank in is_ranks]
+    except (TypeError, ValueError, OverflowError):
+        ranks = []
+    if (not ranks or
+            any(not math.isfinite(rank) or rank < 1.0 or rank > n_strategies
+                for rank in ranks)):
+        return {"pbo": None,
+                "reason": "OOS ranks must lie in [1, n_strategies]"}
+    logits = []
+    for rank in ranks:
+        omega = rank / (n_strategies + 1.0)
+        logits.append(math.log(omega / (1.0 - omega)))
+    overfit = sum(value <= 0.0 for value in logits)
+    return {
+        "pbo": round(overfit / len(ranks), 4),
+        "splits": len(ranks),
+        "n_strategies": n_strategies,
+        "mean_logit": round(_mean(logits), 6),
+        "rank_convention": "1=worst,N=best; overfit iff logit<=0",
+    }
+
 
 def _series(mu: float, sd: float, n: int = 300, seed: int = 7) -> list[float]:
     """결정론 의사난수 수익률. 검증이 재현돼야 한다."""
@@ -291,10 +551,10 @@ def _check_ci_zero_crossing_flagged():
 
 def _check_pbo():
     # IS 1등이 OOS 에서도 상위 -> 과적합 낮음
-    good = pbo([1, 2, 1, 3, 2], n_strategies=20)
+    good = pbo([20, 19, 20, 18, 19], n_strategies=20)
     assert good["pbo"] == 0.0, good
     # IS 1등이 OOS 하위권 -> 과적합 높음
-    bad = pbo([18, 19, 20, 17, 16], n_strategies=20)
+    bad = pbo([1, 2, 1, 3, 4], n_strategies=20)
     assert bad["pbo"] == 1.0, bad
     assert pbo([], 20)["pbo"] is None
     assert pbo([1], 1)["pbo"] is None

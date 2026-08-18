@@ -32,11 +32,11 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 _RESEARCH = _HERE.parents[1] / "01-research"
-for p in (str(_HERE), str(_RESEARCH)):
+for p in (str(_HERE), str(_RESEARCH), str(_RESEARCH / "contracts")):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from contracts.factory_contracts import (  # noqa: E402
+from factory_contracts import (  # noqa: E402
     CompetingExplanation,
     DataRequirement,
     ExperimentProposalV1,

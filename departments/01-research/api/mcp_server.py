@@ -44,6 +44,9 @@ from pathlib import Path
 _BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_BASE))
 sys.path.insert(0, str(_BASE / "collectors"))
+sys.path.insert(0, str(_BASE.parent / "04-quant-backtest" / "pipeline"))
+
+from stock_universe import governed_stock_evidence_sql  # noqa: E402
 
 MCP_VERSION = "research-mcp-v1"
 KST = timezone(timedelta(hours=9))
@@ -54,6 +57,107 @@ DEFAULT_PORT = int(os.environ.get("RESEARCH_MCP_PORT", "8037"))
 _JOBS: dict[str, dict] = {}
 _JOBS_LOCK = threading.Lock()
 MAX_JOBS_KEPT = 50
+_GOVERNED_MCP_EVIDENCE = governed_stock_evidence_sql(
+    experiment_alias="e", dataset_alias="m", hypothesis_alias="h")
+
+_SQL_FACTORY_OUTCOMES = """
+    select o.experiment_id::text, o.trial_family_id, o.decision,
+           o.lesson_codes, o.oos_summary, coalesce(o.notes, '') as notes,
+           o.created_at
+      from research.v_current_experiment_outcomes o
+      join quant.experiments e on e.experiment_id::text = o.experiment_id
+      join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+      join quant.dataset_manifests m on m.dataset_id = e.dataset_id
+     where """ + _GOVERNED_MCP_EVIDENCE + """
+     order by o.created_at desc limit %s"""
+
+_SQL_LIBRARY_SIGNAL_SHELF = """
+    select s.edge_type,
+           count(*) as experiments,
+           count(*) filter (where s.decision like 'REJECT%') as rejects,
+           max(s.information_ratio) filter (
+             where coalesce(s.turnover_total, 1) <> 0) as best_ir,
+           max(s.signal_ic_t) as best_ic_t,
+           max(s.deflated_sharpe) filter (
+             where coalesce(s.turnover_total, 1) <> 0) as best_dsr,
+           min(s.max_drawdown_pct) filter (
+             where coalesce(s.turnover_total, 1) <> 0) as worst_mdd,
+           max(s.decided_at) as last_decided,
+           array_agg(distinct s.top_n) filter (
+             where s.top_n is not null) as top_n_tried
+      from research.v_experiment_scorecard s
+      join quant.experiments e on e.experiment_id::text = s.experiment_id
+      join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+      join quant.dataset_manifests m on m.dataset_id = e.dataset_id
+     where s.edge_type <> ''
+       and """ + _GOVERNED_MCP_EVIDENCE + """
+     group by s.edge_type
+     order by coalesce(max(s.signal_ic_t), -99) desc,
+              coalesce(max(s.information_ratio), -99) desc"""
+
+_SQL_LIBRARY_FAMILIES = """
+    with governed as (
+      select o.*
+        from research.v_current_experiment_outcomes o
+        join quant.experiments e on e.experiment_id::text = o.experiment_id
+        join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+        join quant.dataset_manifests m on m.dataset_id = e.dataset_id
+       where o.trial_family_id is not null
+         and """ + _GOVERNED_MCP_EVIDENCE + """
+    ), last_out as (
+      select distinct on (trial_family_id)
+             outcome_id, trial_family_id, decision, decided_at, lesson_codes,
+             root_cause, notes, oos_summary, experiment_id
+        from governed
+       order by trial_family_id, decided_at desc, outcome_id desc
+    ), aggregate as (
+      select outcome.trial_family_id,
+             count(distinct outcome.outcome_id) as outcomes,
+             count(distinct outcome.outcome_id) filter (
+               where outcome.decision like 'REJECT%') as rejects,
+             count(distinct outcome.outcome_id) filter (
+               where outcome.decision = 'GATE_HOLD') as holds,
+             count(distinct outcome.outcome_id) filter (
+               where outcome.decision in
+                 ('PROMOTED', 'SUPPORTED', 'SUBMIT_TO_QA')) as advanced,
+             min(outcome.decided_at) as first_decided,
+             max(outcome.decided_at) as last_decided,
+             array_agg(distinct lesson.code) filter (
+               where lesson.code is not null) as all_lessons
+        from governed outcome
+        left join lateral unnest(
+          coalesce(outcome.lesson_codes, '{}'::text[])
+        ) as lesson(code) on true
+       group by outcome.trial_family_id
+    )
+    select aggregate.trial_family_id, aggregate.outcomes,
+           aggregate.rejects, aggregate.holds, aggregate.advanced,
+           latest.decision as last_decision,
+           latest.root_cause as last_root_cause,
+           latest.lesson_codes as last_lessons,
+           coalesce(latest.notes, '') as last_note,
+           aggregate.all_lessons, aggregate.first_decided,
+           aggregate.last_decided
+      from aggregate
+      left join last_out latest
+        on latest.trial_family_id = aggregate.trial_family_id
+     where aggregate.trial_family_id <> ''
+     order by aggregate.last_decided desc nulls last limit %s"""
+
+_SQL_LIBRARY_SCORECARD = """
+    select s.experiment_id, s.edge_type, s.top_n, s.decision, s.decided_at,
+           s.excess_return_pct, s.information_ratio, s.max_drawdown_pct,
+           s.deflated_sharpe, s.pbo, s.m2_excess_ann_pct, s.alpha_ann_pct,
+           s.appraisal_ratio, s.strategy_ann_vol_pct,
+           s.benchmark_ann_vol_pct, s.signal_ic, s.signal_ic_t,
+           s.turnover_total, s.lesson_codes, s.root_cause,
+           coalesce(s.notes, '') as notes, s.mapping_loss,
+           coalesce(s.llm_model_id, '') as llm_model_id
+      from research.v_experiment_scorecard s
+      join quant.experiments e on e.experiment_id::text = s.experiment_id
+      join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+      join quant.dataset_manifests m on m.dataset_id = e.dataset_id
+     where """ + _GOVERNED_MCP_EVIDENCE
 
 # 직원 Worker(LangGraph) 실행 작업 - Packet 작업과 저장소를 분리한다.
 # 모양이 다르다(Packet 은 subprocess tail 파싱, Worker 는 registry 결과 dict).
@@ -1210,11 +1314,7 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
                     "DUPLICATE_UNADDRESSED 로 막는다.")
     def factory_outcomes(limit: int = 10) -> list[dict]:
         n = max(1, min(int(limit), 50))
-        return _rows("""
-            select experiment_id::text, trial_family_id, decision, lesson_codes,
-                   oos_summary, coalesce(notes, '') as notes, created_at
-            from research.experiment_outcomes
-            order by created_at desc limit %s""", (n,))
+        return _rows(_SQL_FACTORY_OUTCOMES, (n,))
 
     # ── Library 조회 면 (2026-08-14) ────────────────────────────────────────
     # ▶ 왜 필요했나 (코드 실측)
@@ -1234,11 +1334,7 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
                     "IC t 의 부호를 반드시 함께 읽어라: 음수인데 절대값이 크면 "
                     "신호가 없는 게 아니라 방향이 반대라는 뜻이다.")
     def library_signal_shelf() -> list[dict]:
-        return _rows("""
-            select edge_type, experiments, rejects, best_ir, best_ic_t,
-                   best_dsr, worst_mdd, last_decided, top_n_tried
-              from research.v_signal_shelf
-             order by coalesce(best_ic_t, -99) desc, coalesce(best_ir, -99) desc""")
+        return _rows(_SQL_LIBRARY_SIGNAL_SHELF)
 
     @server.tool(
         name="library_families",
@@ -1247,14 +1343,7 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
                     "실험을 다시 사지 않는다.")
     def library_families(limit: int = 15) -> list[dict]:
         n = max(1, min(int(limit), 60))
-        return _rows("""
-            select trial_family_id, outcomes, rejects, holds, advanced,
-                   last_decision, last_root_cause, last_lessons,
-                   coalesce(last_note,'') as last_note, all_lessons,
-                   first_decided, last_decided
-              from research.v_trial_family_status
-             where trial_family_id <> ''
-             order by last_decided desc nulls last limit %s""", (n,))
+        return _rows(_SQL_LIBRARY_FAMILIES, (n,))
 
     @server.tool(
         name="library_scorecard",
@@ -1266,20 +1355,13 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
     def library_scorecard(edge_type: str = "", limit: int = 20) -> list[dict]:
         n = max(1, min(int(limit), 60))
         et = str(edge_type or "").strip().lower()
-        cond = "and edge_type = %s" if et else ""
+        cond = " and s.edge_type = %s" if et else ""
         params = ((et, n) if et else (n,))
-        return _rows(f"""
-            select experiment_id, edge_type, top_n, decision, decided_at,
-                   excess_return_pct, information_ratio, max_drawdown_pct,
-                   deflated_sharpe, pbo,
-                   m2_excess_ann_pct, alpha_ann_pct, appraisal_ratio,
-                   strategy_ann_vol_pct, benchmark_ann_vol_pct,
-                   signal_ic, signal_ic_t, turnover_total,
-                   lesson_codes, root_cause, coalesce(notes,'') as notes,
-                   mapping_loss, coalesce(llm_model_id,'') as llm_model_id
-              from research.v_experiment_scorecard
-             where 1=1 {cond}
-             order by decided_at desc limit %s""", params)
+        sql = (
+            _SQL_LIBRARY_SCORECARD + cond
+            + " order by s.decided_at desc limit %s"
+        )
+        return _rows(sql, params)
 
     # 외부 정보원(DART·네이버·ECOS·FRED) 질의 도구 - 정성 데이터의 MCP 검색 통합
     # (재일 결정 2026-08-13, docs/02-engineering/MCP_ONDEMAND_ARCHITECTURE.md).
