@@ -579,8 +579,9 @@ def test_all_directional_outcome_and_allocator_reads_use_common_boundary() -> No
 
 
 class _CaptureCursor:
-    def __init__(self) -> None:
+    def __init__(self, batches=None) -> None:
         self.sql: list[str] = []
+        self.batches = list(batches or [])
 
     def __enter__(self):
         return self
@@ -592,21 +593,59 @@ class _CaptureCursor:
         self.sql.append(str(sql))
 
     def fetchall(self):
-        return []
+        return self.batches.pop(0) if self.batches else []
 
 
 class _CaptureConnection:
-    def __init__(self) -> None:
-        self.cursor_instance = _CaptureCursor()
+    def __init__(self, batches=None) -> None:
+        self.cursor_instance = _CaptureCursor(batches)
+        self.rollbacks = 0
 
     def cursor(self):
         return self.cursor_instance
 
+    def rollback(self):
+        self.rollbacks += 1
+
 
 def test_autopilot_memory_queries_exclude_legacy_mixed_evidence() -> None:
-    near = _CaptureConnection()
+    experiment_id = "00000000-0000-0000-0000-000000000001"
+    near = _CaptureConnection(batches=[
+        [("family", "관문 2/8 통과", [], experiment_id)],
+        [(experiment_id,)],
+    ])
     assert factory_autopilot._near_miss(near) == ""
-    assert "evaluation_identity_complete" in near.cursor_instance.sql[0]
+    near_evidence = [sql for sql in near.cursor_instance.sql
+                     if "from quant.experiments e" in sql]
+    assert len(near_evidence) == 1
+    assert "evaluation_identity_complete" in near_evidence[0]
+    assert any("statement_timeout" in sql for sql in near.cursor_instance.sql)
+    assert any("rollback to savepoint factory_near_miss_budget" in sql
+               for sql in near.cursor_instance.sql)
+    assert not any("statement_timeout = 0" in sql
+                   for sql in near.cursor_instance.sql)
+
+    empty = _CaptureConnection()
+    assert factory_autopilot._near_miss(empty) == ""
+    assert not any("from quant.experiments e" in sql
+                   for sql in empty.cursor_instance.sql)
+
+    class _TimeoutCursor(_CaptureCursor):
+        def execute(self, sql, params=()) -> None:
+            super().execute(sql, params)
+            if "from quant.experiments e" in str(sql):
+                raise RuntimeError("statement timeout")
+
+    timed_out = _CaptureConnection()
+    timed_out.cursor_instance = _TimeoutCursor(batches=[
+        [("family", "관문 4/8 통과", [], experiment_id)],
+    ])
+    assert factory_autopilot._near_miss(timed_out) == ""
+    assert any("rollback to savepoint factory_near_miss_budget" in sql
+               for sql in timed_out.cursor_instance.sql)
+    assert any("release savepoint factory_near_miss_budget" in sql
+               for sql in timed_out.cursor_instance.sql)
+    assert timed_out.rollbacks == 0
 
     pareto = _CaptureConnection()
     assert factory_autopilot._pareto_line(pareto) == ""
