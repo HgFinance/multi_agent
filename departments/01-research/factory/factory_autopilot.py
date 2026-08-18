@@ -2786,6 +2786,26 @@ def _allocator_block(conn) -> tuple[str, int]:
     return "\n".join(lines), len(live)
 
 
+def _partition_pending_by_execution(
+        pending: list, blocked: dict) -> tuple[list, list]:
+    """Keep only hypotheses that the same-cycle dispatcher can actually run.
+
+    The scheduler already computes deterministic execution-surface rejections
+    before enqueueing. Reusing that verdict in the Hermes brief prevents a
+    blocked hypothesis from consuming an agent slot merely to report
+    ``NOT_RUNNABLE`` through a second execution path.
+    """
+
+    runnable, withheld = [], []
+    for row in pending:
+        hypothesis_id = str(row[0])
+        if hypothesis_id in blocked:
+            withheld.append((row, str(blocked[hypothesis_id])))
+        else:
+            runnable.append(row)
+    return runnable, withheld
+
+
 def quant_brief() -> tuple[str, int]:
     """퀀트본부가 볼 사실: 실험을 기다리는 가설과 계열별 압력.
 
@@ -2802,6 +2822,8 @@ def quant_brief() -> tuple[str, int]:
             pending = cur.fetchall()
             cur.execute(_SQL_FAMILY_PRESSURE)
             pressure = cur.fetchall()
+        blocked = _structurally_blocked(conn, [row[0] for row in pending])
+        pending, withheld = _partition_pending_by_execution(pending, blocked)
         # **연결이 살아 있는 동안** 배분자를 부른다 - 닫고 부르면 조용히
         # 빈 값이 된다(오늘 브리핑 블록 네 개가 그렇게 죽어 있었다).
         moves_block, n_moves = _allocator_block(conn)
@@ -2825,6 +2847,15 @@ def quant_brief() -> tuple[str, int]:
         edge_type = (edge or {}).get("type") if isinstance(edge, dict) else None
         out.append(f"  - {hid[:8]} [{status}] {str(title)[:60]}")
         out.append(f"      edge={edge_type} 제안={proposal} 등록={created:%Y-%m-%d}")
+
+    if withheld:
+        out.append("")
+        out.append(
+            f"[execution-withheld hypotheses {len(withheld)} - "
+            "diagnostic only; do not run]"
+        )
+        for row, why in withheld[:5]:
+            out.append(f"  - {str(row[0])[:8]}: {why[:150]}")
 
     if pressure:
         out.append("")
@@ -5146,6 +5177,7 @@ def _selfcheck() -> int:
     _check_brief_blocks_run_before_close()
     _check_bottleneck_cards_are_issued_every_cycle()
     _check_quant_card_survives_empty_queue()
+    _check_quant_brief_excludes_blocked_hypotheses()
     _check_lead_health_is_surfaced()
     _check_unused_leads_come_first()
     _check_factory_enacts_its_own_top_move()
@@ -5373,6 +5405,28 @@ def _check_quant_card_survives_empty_queue():
     assert body.index("_allocator_block(conn)") < closes, \
         "닫힌 연결로 배분자를 부른다 - 조용히 빈 값이 된다"
     print("  빈 큐에도 다음 수 카드   OK")
+
+
+def _check_quant_brief_excludes_blocked_hypotheses():
+    pending = [
+        ("blocked-id", "bad", "PROPOSED", {}, None, None),
+        ("runnable-id", "good", "PROPOSED", {}, None, None),
+    ]
+    runnable, withheld = _partition_pending_by_execution(
+        pending, {"blocked-id": "execution contract rejected"})
+    assert [row[0] for row in runnable] == ["runnable-id"], runnable
+    assert [(row[0], why) for row, why in withheld] == [
+        ("blocked-id", "execution contract rejected")
+    ], withheld
+
+    import ast  # noqa: PLC0415
+    source = Path(__file__).read_text(encoding="utf-8")
+    fn = next(n for n in ast.walk(ast.parse(source))
+              if isinstance(n, ast.FunctionDef) and n.name == "quant_brief")
+    body = ast.get_source_segment(source, fn) or ""
+    assert "_structurally_blocked" in body
+    assert "_partition_pending_by_execution" in body
+    print("  blocked hypothesis excluded from Hermes card OK")
 
 
 def _check_factory_enacts_its_own_top_move():
