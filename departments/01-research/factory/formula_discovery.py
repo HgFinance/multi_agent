@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 CONTRACT_VERSION = "formula-discovery-v5"
 CALIBRATION_CONTRACT = "ORIGIN_ANCHORED_POSITIVE_SHRINKAGE_V1"
+ROLE_PATH_CONTRACT_VERSION = "nonnegative-confirmation-path-v1"
 
 # These names are the canonical ``alpha_semantics.OUTPUTS`` values.  Keeping a
 # second set of near-synonyms here used to make gross-markout and passive
@@ -213,6 +214,86 @@ def _term_influence(candidate: dict, fields: list[str]) -> dict[str, list[str]]:
     return {field: sorted(value) for field, value in sorted(modes.items())}
 
 
+def _nonnegative_confirmation_path_violations(
+        candidate: dict, terms: dict[str, str]) -> list[str]:
+    """Return confirmation fields that manufacture a directional intercept.
+
+    A quality ratio such as ``trade_side_known_ratio`` has no up/down sign.  It
+    can condition a signed score or attenuate that score through multiplication,
+    but adding it to order-flow pressure turns zero pressure into a positive
+    long signal.  The prose can still call that expression "confirmation", so
+    this invariant must be checked on the executable path rather than inferred
+    from the thesis label.
+
+    Every numeric occurrence of a non-negative CONFIRMATION term therefore has
+    to meet a distinct signed PRESSURE subtree at a multiplication node.  An
+    occurrence in a ``where`` condition is already an explicit gate.  Requiring
+    every occurrence also rejects formulas that contain one legitimate gate
+    plus a second decorative/additive confirmation term.
+    """
+    confirmations = {
+        field for field, role in terms.items()
+        if role == "CONFIRMATION" and field in _NONNEGATIVE_FIELDS
+    }
+    pressures = {
+        field for field, role in terms.items()
+        if role == "PRESSURE" and field in _DIRECTIONAL_PRESSURE_FIELDS
+    }
+    if not confirmations:
+        return []
+
+    def fields_of(node: dict) -> set[str]:
+        if node.get("op") == "field":
+            return {str(node["field"])}
+        found: set[str] = set()
+        if isinstance(node.get("arg"), dict):
+            found.update(fields_of(node["arg"]))
+        for child in node.get("args") or ():
+            if isinstance(child, dict):
+                found.update(fields_of(child))
+        for key in ("condition", "then", "else"):
+            if isinstance(node.get(key), dict):
+                found.update(fields_of(node[key]))
+        return found
+
+    unsupported: set[str] = set()
+
+    def walk(node: dict, *, gate: bool,
+             multiplied: frozenset[str]) -> None:
+        op = node.get("op")
+        if op == "field":
+            field = str(node["field"])
+            if (field in confirmations and not gate
+                    and field not in multiplied):
+                unsupported.add(field)
+            return
+        if op == "where":
+            walk(node["condition"], gate=True, multiplied=multiplied)
+            walk(node["then"], gate=gate, multiplied=multiplied)
+            walk(node["else"], gate=gate, multiplied=multiplied)
+            return
+        if isinstance(node.get("arg"), dict):
+            walk(node["arg"], gate=gate, multiplied=multiplied)
+            return
+
+        children = [child for child in node.get("args") or ()
+                    if isinstance(child, dict)]
+        child_fields = [fields_of(child) for child in children]
+        for index, child in enumerate(children):
+            child_scaled = set(multiplied)
+            if op == "mul":
+                sibling_fields: set[str] = set()
+                for other in range(len(children)):
+                    if other != index:
+                        sibling_fields.update(child_fields[other])
+                if sibling_fields & pressures:
+                    child_scaled.update(child_fields[index] & confirmations)
+            walk(child, gate=gate, multiplied=frozenset(child_scaled))
+
+    walk(candidate, gate=False, multiplied=frozenset())
+    return sorted(unsupported)
+
+
 def assess(thesis, *, candidate: dict, semantic_plan: dict, grammar) -> dict:
     """Validate an LLM equation thesis against the executable AST."""
     clock_domains = (sorted(grammar.clock_domains_of(candidate))
@@ -347,12 +428,21 @@ def assess(thesis, *, candidate: dict, semantic_plan: dict, grammar) -> dict:
             "up versus down. REPAIR: carry queue imbalance, microprice offset, "
             "trade-flow imbalance, or signed quote OFI into the score; use state "
             "and volatility fields only as explicit gates/scales, then ablate them")
+    confirmation_path_violations = _nonnegative_confirmation_path_violations(
+        candidate, terms)
+    if confirmation_path_violations:
+        raise ValueError(
+            "non-negative CONFIRMATION terms must gate the score or multiply "
+            "a distinct signed PRESSURE path; an unconditioned numeric path "
+            "creates a directional intercept: "
+            f"{confirmation_path_violations}")
     profile["term_influence"] = influence
     profile["directional_pressure_fields"] = directional_value
     profile["normalization_fields"] = sorted(
         set(profile["fields"]) & _CLOCK_NORMALIZED_FIELDS)
     profile["score_calibration"] = (
         CALIBRATION_CONTRACT if structure_only else "NONE_FIXED_EQUATION")
+    profile["role_path_contract_version"] = ROLE_PATH_CONTRACT_VERSION
 
     operators = set(profile["operators"])
     clocks = profile["clocks_seconds"]

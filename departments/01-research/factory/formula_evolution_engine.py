@@ -86,6 +86,12 @@ _DIRECTIONAL_FIELDS = frozenset().union(
     _FIELD_FAMILIES["TRADE_FLOW"],
 ) - {"trade_side_known_ratio"}
 
+# Quality coverage is useful as a state gate or a non-negative attenuation of
+# signed pressure.  It is not itself directional and must never be inserted by
+# add/sub/min/max or substituted for a directional leaf: those shapes create a
+# long-only intercept while their prose still calls the term "confirmation".
+_NONNEGATIVE_CONFIRMATION_FIELDS = frozenset({"trade_side_known_ratio"})
+
 _REGIME_CONDITIONS = (
     ("spread_bps", "lt", 8.0),
     ("quote_age_ms", "lt", 1_500.0),
@@ -831,7 +837,12 @@ def _typed_mutations(parent: _Parent, config: EvolutionConfig,
         for other_leaf in _field_variants(other, config):
             window = other_leaf.get("seconds")
             suffix = f"_{window}S" if window is not None else ""
-            for op in ("add", "sub", "min", "max"):
+            value_combiners = (() if (
+                config.feature_window_contract_version ==
+                grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT
+                and other in _NONNEGATIVE_CONFIRMATION_FIELDS
+            ) else ("add", "sub", "min", "max"))
+            for op in value_combiners:
                 variants.append((
                     f"{op.upper()}_{other.upper()}{suffix}",
                     {"op": op, "args": [deepcopy(expr), other_leaf]},
@@ -858,6 +869,11 @@ def _typed_mutations(parent: _Parent, config: EvolutionConfig,
         replacements: list[dict] = []
         for name in sorted(allowed_fields):
             if grammar.FIELDS[name] != old_unit or name == old:
+                continue
+            if (config.feature_window_contract_version ==
+                    grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT
+                    and old in _DIRECTIONAL_FIELDS
+                    and name in _NONNEGATIVE_CONFIRMATION_FIELDS):
                 continue
             # Preserve a primitive window when both leaves are raw-window
             # fields.  A swap to snapshot state drops it; a swap from snapshot

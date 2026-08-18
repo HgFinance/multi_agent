@@ -242,6 +242,22 @@ def test_explicit_mutations_swap_primitive_windows_and_keep_leaf_contracts(
     additions = [candidate for operation, candidate in mutations
                  if operation.startswith(("STATE_GATE_", "INTERACT_"))]
     assert additions
+    operations = {operation for operation, _candidate in mutations}
+    assert not any(operation.startswith((
+        "ADD_TRADE_SIDE_KNOWN_RATIO",
+        "SUB_TRADE_SIDE_KNOWN_RATIO",
+        "MIN_TRADE_SIDE_KNOWN_RATIO",
+        "MAX_TRADE_SIDE_KNOWN_RATIO",
+    )) for operation in operations)
+    assert any(operation.startswith("INTERACT_TRADE_SIDE_KNOWN_RATIO")
+               for operation in operations)
+    assert any(operation.startswith("STATE_GATE_TRADE_SIDE_KNOWN_RATIO")
+               for operation in operations)
+    assert not any(
+        operation == "SAME_UNIT_FIELD_SWAP"
+        and "trade_side_known_ratio" in grammar.fields_of(candidate)
+        and "trade_flow_imbalance" not in grammar.fields_of(candidate)
+        for operation, candidate in mutations)
     assert all(grammar.validate_feature_window_contract(
         candidate, contract_version=grammar.EXPLICIT_FEATURE_WINDOW_CONTRACT)
         == candidate for candidate in additions)
