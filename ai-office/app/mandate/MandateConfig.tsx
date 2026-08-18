@@ -237,6 +237,8 @@ function MandateConfigForm({ userId }: { userId: string }) {
   const [step, setStep] = useState(0);
   const [notice, setNotice] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  /** 저장된 Mandate·적합성 프로필을 불러오는 동안 폼을 가린다. */
+  const [hydrating, setHydrating] = useState(true);
   /** 어시스턴트 응답 대기 중. 입력창을 잠가 같은 질문에 두 번 답하지 않게 한다. */
   const [busy, setBusy] = useState(false);
   /** 서버가 정한 실질 위험 등급. **화면이 재계산하지 않는다**(API_SPEC 2.3). */
@@ -311,6 +313,7 @@ function MandateConfigForm({ userId }: { userId: string }) {
     const account = accountFor(userId);
 
     async function hydrate() {
+      try {
       if (!account.fundId) {
         if (!cancelled) setNotice("이 계정에는 연결된 Fund가 없어 저장된 지침을 불러올 수 없습니다.");
         return;
@@ -399,6 +402,9 @@ function MandateConfigForm({ userId }: { userId: string }) {
               }]
             : []),
         ]);
+      }
+      } finally {
+        if (!cancelled) setHydrating(false);
       }
     }
 
@@ -627,13 +633,23 @@ function MandateConfigForm({ userId }: { userId: string }) {
                 거버넌스 버전은 제출 후 생성돼요.
               </p>
             </div>
-            <div className="flex items-center gap-2 bg-surface-container-high px-3 py-1 rounded-full text-xs font-medium text-secondary shrink-0">
-              <span className="w-2 h-2 rounded-full bg-tertiary-fixed-dim animate-pulse" aria-hidden="true" />
-              CONNECTING
+            <div
+              className="flex items-center gap-2 bg-surface-container-high px-3 py-1 rounded-full text-xs font-medium text-secondary shrink-0"
+              role="status"
+              aria-live="polite"
+            >
+              <span className={`w-2 h-2 rounded-full ${hydrating ? "bg-tertiary-fixed-dim animate-pulse" : "bg-secondary"}`} aria-hidden="true" />
+              {hydrating ? "CONNECTING" : "CONNECTED"}
             </div>
           </header>
 
-          <div className="flex-1 min-h-0 bg-surface-container-lowest border border-outline-variant rounded-lg flex flex-col overflow-hidden shadow-sm">
+          <div className="relative flex-1 min-h-0 bg-surface-container-lowest border border-outline-variant rounded-lg flex flex-col overflow-hidden shadow-sm">
+          {hydrating ? (
+            <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-surface-container-lowest/85 backdrop-blur-sm" role="status" aria-live="polite">
+              <span className="material-symbols-outlined animate-spin text-3xl text-primary" aria-hidden="true">progress_activity</span>
+              <p className="text-body-sm font-medium text-on-surface">저장된 지침을 불러오는 중입니다…</p>
+            </div>
+          ) : null}
           <div className="p-6 space-y-10 overflow-y-auto">
             {/* 1. 목표와 위험 성향 */}
             <section>
