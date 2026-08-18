@@ -105,11 +105,18 @@ _LOGGER = logging.getLogger("uvicorn.error")
 
 @dataclass(frozen=True)
 class MirrorPost:
-    """게시된 미러 메시지의 좌표. root body에 그대로 적힌다."""
+    """게시된 미러 메시지의 좌표. root body에 그대로 적힌다.
+
+    `thread_id`가 없으면 부서 진행 상세가 나가지 않는다 -
+    `discord_delivery.deliver_to_existing_thread()`가 thread_id를 요구하고,
+    없으면 `status=missing_thread`로 조용히 반환한다. 최종 답변(`deliver()`)은
+    `message_reference`로 원본에 답글을 달므로 스레드 없이도 나간다.
+    """
 
     channel_id: str
     message_id: str
     guild_id: str | None = None
+    thread_id: str | None = None
 
 
 def mirror_enabled() -> bool:
@@ -184,12 +191,47 @@ def _asked_by_label(asked_by: object) -> str | None:
     `Depends(...)` 객체 그대로다. 그걸 그대로 찍어서 채널에 `[web-mirror]
     Depends(dependency=<function optional_current_user ...>)`가 올라갔다
     (2026-08-18 실측). 표시용 값 하나 때문에 내부 객체가 새면 안 된다.
+
+    ## 왜 멘션(`<@id>`)으로 바꾸나
+
+    테스트 계정 uuid를 그대로 찍으면(`[web-mirror] 00000000-...cec2`) 채널을 보는
+    사람이 누가 물었는지 알 수 없다. `DISCORD_ACTOR_MAP`에 그 계정과 이어진
+    Discord 사용자가 **정확히 한 명**이면 멘션으로 렌더한다 - Discord가 그 사람의
+    표시 이름으로 보여준다.
+
+    **알림은 가지 않는다**: `post_question()`이 `allowed_mentions={"parse": []}`로
+    보내므로 멘션이 렌더만 되고 ping은 안 된다. 미러 게시물이 사람을 호출하면
+    질문 하나에 알림이 하나씩 쌓인다.
+
+    매핑이 없거나 여러 명이 같은 계정을 쓰면 uuid를 그대로 둔다 - 남의 이름으로
+    보이는 것보다 못 읽는 편이 낫다.
     """
 
     if not isinstance(asked_by, str):
         return None
     label = asked_by.strip()
-    return label or None
+    if not label:
+        return None
+    discord_user_id = _discord_id_for_user(label)
+    return f"<@{discord_user_id}>" if discord_user_id else label
+
+
+def _discord_id_for_user(user_id: str) -> str | None:
+    """`discord_actor_map`의 역방향 조회. 실패는 `None`(표시만 못 할 뿐이다).
+
+    지연 import: 이 모듈은 발송만 담당하고 매핑표를 소유하지 않는다. 표시 이름
+    하나 때문에 import 실패가 게시 자체를 막으면 안 된다.
+    """
+
+    try:
+        try:
+            from .discord_actor_map import discord_id_for_user
+        except ImportError:  # pragma: no cover - 직접 실행 경로
+            from discord_actor_map import discord_id_for_user  # type: ignore[no-redef]
+
+        return discord_id_for_user(user_id)
+    except Exception:  # noqa: BLE001 - 표시용 값 하나가 게시를 막지 않는다.
+        return None
 
 
 def build_content(query: str, *, asked_by: object = None) -> str:
@@ -280,17 +322,86 @@ def post_question(query: str, *, asked_by: object = None) -> MirrorPost | None:
         return None
 
     guild_id = str(payload.get("guild_id") or "").strip() or None
+    resolved_channel_id = str(payload.get("channel_id") or channel_id)
+    thread_id = _start_thread(token, resolved_channel_id, message_id, query)
     _LOGGER.info(
-        "discord-mirror status=posted channel=%s message=%s", channel_id, message_id
+        "discord-mirror status=posted channel=%s message=%s thread=%s",
+        channel_id,
+        message_id,
+        thread_id or "",
     )
     return MirrorPost(
-        channel_id=str(payload.get("channel_id") or channel_id),
+        channel_id=resolved_channel_id,
         message_id=message_id,
         guild_id=guild_id,
+        thread_id=thread_id,
     )
+
+
+# 스레드 이름 상한(Discord). 넘으면 400이라 자른다.
+_THREAD_NAME_LIMIT = 100
+# 자동 보관까지의 분. 1440 = 하루. 워크플로가 끝나기 전에 보관되면 그 뒤 발송이
+# 실패하므로 짧게 잡지 않는다.
+_THREAD_AUTO_ARCHIVE_MINUTES = 1440
+
+
+def _start_thread(
+    token: str, channel_id: str, message_id: str, query: str
+) -> str | None:
+    """미러 게시물에 스레드를 연다. 실패하면 `None`.
+
+    ## 왜 필요한가
+
+    봇을 태그했을 때 보이는 "스레드 안에서 부서별 진행이 쌓이는" 화면은
+    Hermes 게이트웨이 세션이 만든 스레드에서 일어난다. 미러링된 요청은 그
+    세션에 들어가지 않으므로 스레드가 없고, 그래서
+    `discord_delivery.deliver_to_existing_thread()`가 `missing_thread`로 끝나
+    **부서 진행이 하나도 안 보였다**(2026-08-18 실측).
+
+    여기서 스레드를 열고 그 id를 root body에 적으면 이후 발송이 그 스레드로
+    들어간다.
+
+    ## 실패해도 게시는 성공이다
+
+    스레드가 없어도 최종 답변은 원본에 답글로 나간다. 그래서 이 호출이 실패해도
+    `post_question()`은 좌표를 그대로 돌려준다 - 부서 상세만 빠진다.
+    """
+
+    name = " ".join(str(query or "").split())[:_THREAD_NAME_LIMIT] or "CEO 질의"
+    try:
+        response = httpx.post(
+            f"{DISCORD_API}/channels/{channel_id}/messages/{message_id}/threads",
+            headers={"Authorization": f"Bot {token}"},
+            json={"name": name, "auto_archive_duration": _THREAD_AUTO_ARCHIVE_MINUTES},
+            timeout=10.0,
+        )
+    except httpx.HTTPError as exc:
+        _LOGGER.warning(
+            "discord-mirror-thread status=failed reason=transport exception_type=%s",
+            type(exc).__name__,
+        )
+        return None
+    if response.status_code == 403:
+        _LOGGER.warning(
+            "discord-mirror-thread status=failed reason=missing_create_threads_403"
+        )
+        return None
+    if response.status_code >= 400:
+        _LOGGER.warning(
+            "discord-mirror-thread status=failed reason=http_%s", response.status_code
+        )
+        return None
+    try:
+        payload: Any = response.json()
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return str(payload.get("id") or "").strip() or None
 
 
 if __name__ == "__main__":
+    from unittest.mock import patch
     # 네트워크를 타지 않는 자체 점검. 저장소 관례(`__main__` assert)에 맞춘다.
     short = build_content("삼성전자 리스크 알려줘", asked_by="user-1")
     assert short.startswith(f"{MIRROR_TAG} user-1\n"), short
@@ -328,6 +439,19 @@ if __name__ == "__main__":
     with patch.dict(os.environ, {ENABLED_ENV: "true", TOKEN_ENV: "", CHANNEL_ENV: ""}):
         assert mirror_enabled() is True
         assert post_question("설정 없음") is None
+
+    # 표시 이름: 매핑된 계정은 멘션으로 렌더된다(알림은 allowed_mentions로 차단).
+    from discord_actor_map import ACTOR_MAP_ENV
+
+    user3 = "00000000-0000-4000-8000-00000000cec2"
+    with patch.dict(os.environ, {ACTOR_MAP_ENV: f"123456789012345678:{user3}"}):
+        named = build_content("q", asked_by=user3)
+        assert named.startswith(MIRROR_TAG + " <@123456789012345678>"), named
+
+    # 매핑이 없으면 uuid 그대로 - 남의 이름으로 보이는 것보다 낫다.
+    with patch.dict(os.environ, {ACTOR_MAP_ENV: ""}):
+        plain_uuid = build_content("q", asked_by=user3)
+        assert plain_uuid.startswith(MIRROR_TAG + " " + user3), plain_uuid
 
     # 러너 판정: pytest 환경변수만으로도 차단된다.
     with patch.dict(

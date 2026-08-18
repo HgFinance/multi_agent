@@ -66,6 +66,20 @@ class CanonicalIngress(BaseModel):
     # 아직 Fund 개념이 없어 안 보내므로 Optional이다 - 없으면 CEO Mandate
     # 스냅샷 없이 그대로 진행한다(개발 원칙 9, `ceo.ceo_query`와 동일한 정책).
     fund_id: str | None = None
+    # Discord 어댑터가 실어 보내는 원본 메시지 좌표(2026-08-18).
+    #
+    # 웹 요청에는 없다 - 그때는 BFF가 질의를 채널에 미러 게시하고 **그 게시물의**
+    # 좌표를 쓴다(`apps/api/discord_mirror.py`). Discord에서 온 요청은 사용자가
+    # 쓴 원본이 이미 채널에 있으므로 다시 게시하지 않고 이 값을 그대로 쓴다 -
+    # 그래야 부서 진행·최종 답변이 **사용자가 쓴 그 메시지**에 붙는다.
+    #
+    # `source_message_id`와 겹쳐 보이지만 역할이 다르다: 그쪽은 dedup 키
+    # (`source`+`source_message_id`)의 재료이고, 이쪽은 Discord 발송 좌표다.
+    # 같은 값을 쓰더라도 한 필드가 두 계약을 겸하면 한쪽 형식을 바꿀 때
+    # 다른 쪽이 조용히 깨진다.
+    discord_channel_id: str | None = None
+    discord_message_id: str | None = None
+    discord_guild_id: str | None = None
 
     @model_validator(mode="after")
     def default_source_message_id(self) -> CanonicalIngress:

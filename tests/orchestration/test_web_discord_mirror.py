@@ -239,5 +239,115 @@ class MirrorIsOffDuringTestsTest(unittest.TestCase):
             self.assertFalse(discord_mirror.mirror_enabled())
 
 
+class SourceDecidesWhetherWeRepostTest(unittest.TestCase):
+    """Discord에서 온 요청은 다시 게시하지 않는다.
+
+    사용자가 채널에 쓴 원본이 이미 있는데 봇이 같은 내용을 한 번 더 올리면
+    원본과 `[web-mirror]` 복사본이 나란히 뜬다. 출처를 아는 곳
+    (`ceo_mirror_api._ceo_query`)에서만 게시 여부를 판단한다.
+    """
+
+    def test_ceo_query_never_posts_by_itself(self) -> None:
+        """`ceo.ceo_query`는 좌표를 받기만 하고 스스로 게시하지 않는다.
+
+        한때 이 함수가 직접 게시해서, 이 함수를 부르는 단위 테스트가 전부 실제
+        채널로 나갔다(2026-08-18). 함수 시그니처로 그 구조를 고정한다.
+        """
+
+        import inspect
+
+        from apps.api import ceo
+
+        parameters = inspect.signature(ceo.ceo_query).parameters
+        for name in ("discord_channel_id", "discord_message_id", "discord_guild_id"):
+            self.assertIn(name, parameters)
+        # 발송 함수를 이 모듈이 들고 있지 않다는 사실을 본다. 소스 문자열을
+        # 훑으면 docstring의 설명까지 걸려서 "왜 그렇게 했는지"를 적을 수 없다.
+        self.assertFalse(hasattr(ceo, "post_question"))
+
+    def test_ingress_carries_discord_coordinates(self) -> None:
+        """Discord 어댑터가 보낸 좌표가 계약에 있다."""
+
+        from apps.api.ceo_mirror import CanonicalIngress
+
+        ingress = CanonicalIngress(
+            query="q",
+            source="discord",
+            source_message_id="991",
+            discord_channel_id="chan-1",
+            discord_message_id="991",
+            discord_guild_id="guild-1",
+        )
+
+        self.assertEqual(ingress.discord_channel_id, "chan-1")
+        self.assertEqual(ingress.discord_message_id, "991")
+
+
+class MirrorLabelTest(unittest.TestCase):
+    """요청자 표시. uuid를 그대로 찍으면 채널에서 누가 물었는지 알 수 없다."""
+
+    USER3 = "00000000-0000-4000-8000-00000000cec2"
+
+    def test_mapped_user_renders_as_a_mention(self) -> None:
+        with patch.dict(os.environ, {ACTOR_MAP_ENV: f"123456789012345678:{self.USER3}"}):
+            content = build_content("q", asked_by=self.USER3)
+
+        self.assertTrue(content.startswith(f"{MIRROR_TAG} <@123456789012345678>"))
+
+    def test_shared_account_falls_back_to_the_uuid(self) -> None:
+        """한 계정을 둘이 쓰면 아무나 고르지 않는다 - 남이 물은 것처럼 보인다."""
+
+        shared = f"123456789012345678:{self.USER3},234567890123456789:{self.USER3}"
+        with patch.dict(os.environ, {ACTOR_MAP_ENV: shared}):
+            content = build_content("q", asked_by=self.USER3)
+
+        self.assertTrue(content.startswith(f"{MIRROR_TAG} {self.USER3}"))
+
+
+class ThreadIsRequiredForDepartmentDetailTest(unittest.TestCase):
+    """스레드가 없으면 부서 진행 상세가 하나도 안 나간다.
+
+    2026-08-18 실측: 미러링된 요청에 부서 작업 내용이 전혀 보이지 않았다.
+    `discord_delivery.deliver_to_existing_thread()`가 `thread_id`를 요구하고
+    없으면 `status=missing_thread`로 조용히 반환하는데, 미러 게시는 스레드를
+    만들지 않았다. 최종 답변(`deliver()`)은 `message_reference` 답글이라
+    스레드 없이도 나가므로 "일부만 안 보이는" 상태였다.
+    """
+
+    def test_thread_id_round_trips_into_delivery(self) -> None:
+        body = build_root_body(
+            "q",
+            "req-1",
+            discord_channel_id="chan-1",
+            discord_message_id="msg-1",
+            discord_thread_id="thread-1",
+        )
+
+        self.assertEqual(correlation_from_task({"body": body}).thread_id, "thread-1")
+
+    def test_thread_is_optional(self) -> None:
+        """스레드 생성이 실패해도 좌표는 실린다 - 최종 답변은 나가야 한다."""
+
+        body = build_root_body(
+            "q", "req-1", discord_channel_id="chan-1", discord_message_id="msg-1"
+        )
+        correlation = correlation_from_task({"body": body})
+
+        self.assertIsNone(correlation.thread_id)
+        self.assertEqual(correlation.message_id, "msg-1")
+
+    def test_mirror_post_carries_thread_id(self) -> None:
+        """`MirrorPost`가 스레드 id를 들고 다녀야 root body까지 전달된다."""
+
+        post = discord_mirror.MirrorPost(
+            channel_id="c", message_id="m", guild_id="g", thread_id="t"
+        )
+
+        self.assertEqual(post.thread_id, "t")
+        self.assertIsNone(
+            discord_mirror.MirrorPost(channel_id="c", message_id="m").thread_id
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

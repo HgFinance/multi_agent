@@ -165,6 +165,29 @@ def resolve(discord_user_id: str | None) -> ActorBinding | None:
     return actor_table().get(key)
 
 
+def discord_id_for_user(user_id: str | None) -> str | None:
+    """역방향: 테스트 계정 uuid → Discord 작성자 id. 없으면 `None`.
+
+    미러 게시물의 요청자 표시에 쓴다(`apps/api/discord_mirror.py`). 채널에
+    `[web-mirror] 00000000-0000-4000-8000-00000000cec2`가 뜨면 사람은 누가
+    물었는지 알 수 없다.
+
+    **한 테스트 계정에 여러 Discord 사용자가 붙어 있으면 `None`을 준다.** 팀원
+    넷이 계정 셋을 나눠 쓰면 그런 상태가 생기는데, 그때 아무나 하나를 골라
+    표시하면 **다른 사람이 물은 것처럼 보인다.** 이름을 모르는 것보다 나쁘다.
+    """
+
+    key = str(user_id or "").strip()
+    if not key:
+        return None
+    matches = [
+        binding.discord_user_id
+        for binding in actor_table().values()
+        if binding.user_id == key
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
 if __name__ == "__main__":
     from unittest.mock import patch
 
@@ -202,6 +225,18 @@ if __name__ == "__main__":
     # fund 모양이 틀리면 그 항목을 버린다(조용히 역참조로 넘어가지 않는다).
     with patch.dict(os.environ, {ACTOR_MAP_ENV: f"123456789012345678:{user3}:not-a-uuid"}):
         assert resolve("123456789012345678") is None
+
+    # 역방향 조회 - 표시 이름용.
+    with patch.dict(os.environ, {ACTOR_MAP_ENV: f"123456789012345678:{user3}"}):
+        assert discord_id_for_user(user3) == "123456789012345678"
+        assert discord_id_for_user(user1) is None
+        assert discord_id_for_user(None) is None
+
+    # 한 계정에 두 사람이 붙어 있으면 고르지 않는다 - 남이 물은 것처럼 보인다.
+    shared = f"123456789012345678:{user3},234567890123456789:{user3}"
+    with patch.dict(os.environ, {ACTOR_MAP_ENV: shared}):
+        assert len(actor_table()) == 2
+        assert discord_id_for_user(user3) is None
 
     # 미설정이면 빈 표. 예외를 올리지 않는다.
     with patch.dict(os.environ, {ACTOR_MAP_ENV: ""}):

@@ -215,6 +215,136 @@ def _event_key(adapter: Any, event: Any) -> str | None:
     return _store(adapter).inbound_key_for_message(message_id, _profile_name())
 
 
+# BFF canonical ingress 전달(2026-08-18). 비어 있으면 **기능이 꺼진다** -
+# 그때 동작은 이 코드가 없던 때와 정확히 같다(Hermes가 직접 처리).
+#
+# ## 왜 BFF를 거치게 하나
+#
+# Hermes가 직접 처리하면 root Kanban 카드를 CEO Agent가 만든다. 그 경로는
+# `orchestration/ceo_workflow_scope.build_root_body()`를 지나지 않으므로
+# **Mandate 스냅샷도 `requested_by=`도 붙지 않는다** - 웹에서 물으면 붙고
+# Discord에서 물으면 안 붙는 상태였다. BFF를 거치면 두 경로가 같은 카드를 만든다.
+#
+# ## 전달에 성공하면 Hermes는 이 메시지를 처리하지 않는다
+#
+# 둘 다 처리하면 한 질문에 워크플로가 두 개 생긴다. 그래서 전달이 성공한
+# 경우에만 원래 핸들러를 건너뛴다. **실패하면 반드시 원래 경로로 흘린다** -
+# 조용히 버리면 사용자는 봇이 죽은 것으로 본다.
+INGRESS_URL_ENV = "HGFINANCE_DISCORD_INGRESS_URL"
+INGRESS_TIMEOUT_ENV = "HGFINANCE_DISCORD_INGRESS_TIMEOUT_SECONDS"
+
+
+def _ingress_url() -> str:
+    return os.getenv(INGRESS_URL_ENV, "").strip()
+
+
+def _author_id(message: Any) -> str:
+    author = getattr(message, "author", None)
+    return str(getattr(author, "id", "") or "")
+
+
+def _author_is_bot(message: Any) -> bool:
+    """봇이 쓴 글인가. 판단할 수 없으면 **봇으로 본다**.
+
+    미러 게시물(`[web-mirror]`)은 봇이 쓴다. 그걸 사람 발화로 오인해 BFF로
+    보내면 웹 질문 하나가 워크플로를 다시 만들고, 그 답변이 또 채널에 올라가
+    순환한다. 확신이 없을 때 사람으로 취급하는 쪽이 그 순환을 만든다.
+    """
+
+    author = getattr(message, "author", None)
+    if author is None:
+        return True
+    value = getattr(author, "bot", None)
+    return True if value is None else bool(value)
+
+
+def _forward_to_ingress(message: Any, adapter: Any) -> bool:
+    """사람 메시지를 `/ui/ceo/ingress`로 넘긴다. 넘겼으면 True.
+
+    False면 호출자가 원래 Hermes 경로로 흘린다 - 설정이 없을 때, 봇 메시지일 때,
+    전달이 실패했을 때 전부 False다.
+    """
+
+    url = _ingress_url()
+    if not url or _profile_name() != "ceo-agent":
+        return False
+    message_id = str(getattr(message, "id", "") or "")
+    if not message_id:
+        return False
+    if _author_is_bot(message):
+        logger.info(
+            "discord-ingress status=skipped reason=bot_author message_id=%s", message_id
+        )
+        return False
+
+    context = _message_context(message, adapter)
+    payload = {
+        "query": str(getattr(message, "content", "") or "").strip(),
+        # `discord:<message_id>` 형식을 지킨다 - `discord_delivery`의
+        # `_message_id_from_request_id()`가 이 접두어를 보고 뒤를 잘라 쓴다.
+        "request_id": f"discord:{message_id}",
+        "source": "discord",
+        "source_message_id": message_id,
+        "actor_id": _author_id(message),
+        "actor_type": "user",
+        "mirrored": False,
+        # 발송 좌표. 이 값이 root body에 적혀야 부서 진행·최종 답변이
+        # **사용자가 쓴 그 메시지**에 붙는다. BFF는 이 출처를 보고 미러 재게시를
+        # 건너뛴다(`apps/api/ceo_mirror_api._ceo_query`).
+        "discord_channel_id": str(context["channel_id"]),
+        "discord_message_id": message_id,
+        "discord_guild_id": str(context["guild_id"]),
+    }
+    if not payload["query"]:
+        return False
+
+    try:
+        import json as _json
+        import urllib.error
+        import urllib.request
+
+        request = urllib.request.Request(
+            url,
+            data=_json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        timeout = float(os.getenv(INGRESS_TIMEOUT_ENV, "10"))
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = int(getattr(response, "status", 0) or 0)
+    except urllib.error.HTTPError as exc:
+        # 409는 **같은 메시지를 이미 받았다**는 뜻이다(mirror dedup). 다시
+        # Hermes로 흘리면 중복 실행이 되므로 "넘겼다"로 친다.
+        if exc.code == 409:
+            logger.info(
+                "discord-ingress status=duplicate message_id=%s", message_id
+            )
+            return True
+        logger.warning(
+            "discord-ingress status=failed reason=http_%s message_id=%s",
+            exc.code,
+            message_id,
+        )
+        return False
+    except Exception as exc:  # noqa: BLE001 - 전달 실패는 기존 경로로 되돌린다.
+        logger.warning(
+            "discord-ingress status=failed reason=transport exception_type=%s message_id=%s",
+            type(exc).__name__,
+            message_id,
+        )
+        return False
+
+    if status not in (200, 202):
+        logger.warning(
+            "discord-ingress status=failed reason=http_%s message_id=%s",
+            status,
+            message_id,
+        )
+        return False
+    logger.info("discord-ingress status=forwarded message_id=%s", message_id)
+    return True
+
+
 def _wrap_handle_message(cls: type[Any]) -> None:
     if not hasattr(cls, "_handle_message"):
         return
@@ -260,6 +390,11 @@ def _wrap_handle_message(cls: type[Any]) -> None:
 
     @functools.wraps(original)
     async def wrapped(self: Any, message: Any, *args: Any, **kwargs: Any) -> bool:
+        # BFF ingress로 넘겼으면 Hermes는 이 메시지를 처리하지 않는다 - 둘 다
+        # 처리하면 한 질문에 워크플로가 두 개 생긴다. 넘기지 못했으면(설정 없음·
+        # 봇 메시지·전달 실패) 아래 기존 경로가 그대로 돈다.
+        if _forward_to_ingress(message, self):
+            return True
         try:
             result = await original(
                 self,

@@ -188,7 +188,12 @@ class CeoMirrorExecutionTest(unittest.TestCase):
 
         captured: list[CeoAsk] = []
 
-        def fake_ceo_query(req: CeoAsk, owner_id: str | None = None) -> dict[str, object]:
+        # `**_coordinates`: 2026-08-18에 `ceo_query`가 Discord 발송 좌표를 받게 되면서
+        # 이 대역이 그 kwargs로 TypeError를 냈다. 좌표 자체는 이 테스트의 관심사가
+        # 아니라(전용 테스트는 tests/orchestration/test_web_discord_mirror.py) 받아서 버린다.
+        def fake_ceo_query(
+            req: CeoAsk, owner_id: str | None = None, **_coordinates: object
+        ) -> dict[str, object]:
             captured.append(req)
             return {"task_id": "t_mandate", "status": "accepted"}
 
@@ -213,7 +218,12 @@ class CeoMirrorExecutionTest(unittest.TestCase):
 
         captured: list[CeoAsk] = []
 
-        def fake_ceo_query(req: CeoAsk, owner_id: str | None = None) -> dict[str, object]:
+        # `**_coordinates`: 2026-08-18에 `ceo_query`가 Discord 발송 좌표를 받게 되면서
+        # 이 대역이 그 kwargs로 TypeError를 냈다. 좌표 자체는 이 테스트의 관심사가
+        # 아니라(전용 테스트는 tests/orchestration/test_web_discord_mirror.py) 받아서 버린다.
+        def fake_ceo_query(
+            req: CeoAsk, owner_id: str | None = None, **_coordinates: object
+        ) -> dict[str, object]:
             captured.append(req)
             return {"task_id": "t_no_fund", "status": "accepted"}
 
@@ -240,7 +250,12 @@ class CeoMirrorExecutionTest(unittest.TestCase):
 
         captured: list[str | None] = []
 
-        def fake_ceo_query(req: CeoAsk, owner_id: str | None = None) -> dict[str, object]:
+        # `**_coordinates`: 2026-08-18에 `ceo_query`가 Discord 발송 좌표를 받게 되면서
+        # 이 대역이 그 kwargs로 TypeError를 냈다. 좌표 자체는 이 테스트의 관심사가
+        # 아니라(전용 테스트는 tests/orchestration/test_web_discord_mirror.py) 받아서 버린다.
+        def fake_ceo_query(
+            req: CeoAsk, owner_id: str | None = None, **_coordinates: object
+        ) -> dict[str, object]:
             captured.append(owner_id)
             return {"task_id": "t_owner", "status": "accepted"}
 
@@ -261,7 +276,12 @@ class CeoMirrorExecutionTest(unittest.TestCase):
 
         captured: list[str | None] = []
 
-        def fake_ceo_query(req: CeoAsk, owner_id: str | None = None) -> dict[str, object]:
+        # `**_coordinates`: 2026-08-18에 `ceo_query`가 Discord 발송 좌표를 받게 되면서
+        # 이 대역이 그 kwargs로 TypeError를 냈다. 좌표 자체는 이 테스트의 관심사가
+        # 아니라(전용 테스트는 tests/orchestration/test_web_discord_mirror.py) 받아서 버린다.
+        def fake_ceo_query(
+            req: CeoAsk, owner_id: str | None = None, **_coordinates: object
+        ) -> dict[str, object]:
             captured.append(owner_id)
             return {"task_id": "t_anon", "status": "accepted"}
 
