@@ -49,7 +49,9 @@ import sys
 from dataclasses import dataclass, field
 from datetime import timedelta
 
-MODULE_VERSION = "quant-feature-catalog-v2"
+from strategy_templates import path_crosses_unadjusted_adjustment_gap
+
+MODULE_VERSION = "quant-feature-catalog-v3"
 
 # 검정에 필요한 최소 표본. 이보다 적으면 **판정하지 않는다**(통과도 탈락도 아님).
 MIN_PERIODS = 8
@@ -300,6 +302,9 @@ def _forward_returns(cur, days: list, horizon: int,
             if i is None or i + horizon >= len(pts):
                 continue
             a, b = pts[i][1], pts[i + horizon][1]
+            path = [close for _session, close in pts[i:i + horizon + 1]]
+            if path_crosses_unadjusted_adjustment_gap(path):
+                continue
             if a > 0:
                 out[d][iid] = b / a - 1.0
     return out

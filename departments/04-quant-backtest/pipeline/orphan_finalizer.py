@@ -76,7 +76,7 @@ _SQL_EXPERIMENT = f"""
 
 # 창별 강건성 재료. SUMMARY/빈 차원은 전기간 요약이라 창이 아니다.
 _SQL_WINDOWS = """
-    select dimensions->>'window', metric, value
+    select dimensions->>'window', metric, value, dimensions
       from quant.experiment_metrics
      where experiment_id = %s and split = 'WALK_FORWARD'
        and coalesce(dimensions->>'window', '') not in ('', 'SUMMARY')
@@ -102,17 +102,30 @@ def windows_from_rows(rows) -> tuple[list[tuple[str, dict]], list[str]]:
     이름을 돌려줘서 호출부가 적게 한다(조용한 절단 금지).
     """
     by_win: dict[str, dict] = {}
-    for win, metric, value in rows or ():
+    for row in rows or ():
+        if not isinstance(row, (list, tuple)) or len(row) < 3:
+            continue
+        win, metric, value = row[:3]
+        dimensions = row[3] if len(row) > 3 else None
         if win is None:
             continue
         try:
-            by_win.setdefault(str(win), {})[str(metric)] = float(value)
+            window = by_win.setdefault(str(win), {})
+            metric_name = str(metric)
+            window[metric_name] = float(value)
+            if (metric_name == "measurement_not_measured"
+                    and float(value) > 0):
+                window["measurement_status"] = "NOT_MEASURED"
+                if isinstance(dimensions, dict):
+                    window["measurement_reason"] = str(
+                        dimensions.get("measurement_reason") or "")[:300]
         except (TypeError, ValueError):
             continue
     wm, dropped = [], []
     for label in sorted(by_win):
         m = by_win[label]
-        if all(k in m for k in _WINDOW_KEYS):
+        if (m.get("measurement_status") == "NOT_MEASURED"
+                or all(k in m for k in _WINDOW_KEYS)):
             wm.append((label, m))
         else:
             dropped.append(label)
@@ -162,6 +175,14 @@ def judge_from_stored(*, exp_id: str, hypothesis_id: str, hyp_status: str,
 
     wm, dropped = windows_from_rows(window_rows)
     _stats, _flags, verdict = fragility_summary(wm)
+    if dropped and verdict != "FRAGILE":
+        # A partially persisted preregistered window is UNKNOWN evidence, not a
+        # window that may be silently removed from the denominator.  Preserve
+        # measured failures, but never reconstruct ROBUST/SUPPORTED from an
+        # incomplete metric set after a crash.
+        verdict = "INSUFFICIENT"
+        if "PARTIAL_WINDOW_METRICS" not in _flags:
+            _flags.append("PARTIAL_WINDOW_METRICS")
 
     trial_no = int(trial_number or 1)
     pressure = {
