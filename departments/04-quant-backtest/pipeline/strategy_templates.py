@@ -30,6 +30,7 @@
 
 from __future__ import annotations
 
+import math
 import sys
 from dataclasses import dataclass, replace
 from datetime import date
@@ -74,8 +75,65 @@ NOTIONAL_UNIT_KRW = 1_000_000
 # ── 미조정 액면분할·병합 방어선 ─────────────────────────────────────────────
 # 정수배 판정 기준. ×2 미만은 진짜 급등과 구별할 수 없으므로 건드리지 않고,
 # 배수에서 벗어난 정도가 이 허용치를 넘으면 조정 이벤트로 보지 않는다.
-_ADJ_MIN_MULT = 2.0
-_ADJ_TOL = 0.002
+ADJUSTMENT_GAP_DETECTOR_VERSION = "integer-ratio-gap-v2"
+ADJUSTMENT_MIN_MULTIPLE = 2.0
+ADJUSTMENT_RELATIVE_TOLERANCE = 0.002
+
+# Backward-compatible private names.  The public constants above are the
+# single source of truth used by ingestion, PIT views, and execution guards.
+_ADJ_MIN_MULT = ADJUSTMENT_MIN_MULTIPLE
+_ADJ_TOL = ADJUSTMENT_RELATIVE_TOLERANCE
+
+
+def adjustment_gap_multiple(previous: float, current: float) -> int | None:
+    """Return the canonical integer-like unadjusted price multiple, if any."""
+
+    if not (math.isfinite(previous) and math.isfinite(current)):
+        return None
+    if previous <= 0 or current <= 0:
+        return None
+    ratio = max(previous, current) / min(previous, current)
+    nearest = int(round(ratio))
+    # Apply the tolerance around the integer candidate *before* imposing the
+    # minimum multiple.  The old ``ratio < 2`` pre-check silently discarded
+    # the lower half of the documented 2x tolerance band (for example 1.999x)
+    # while accepting the symmetric 2.001x observation.
+    tolerance = ADJUSTMENT_RELATIVE_TOLERANCE * nearest
+    rounding_slack = 1e-12 * max(1.0, float(nearest))
+    if (nearest >= int(ADJUSTMENT_MIN_MULTIPLE)
+            and abs(ratio - nearest) <= tolerance + rounding_slack):
+        return nearest
+    return None
+
+
+def looks_like_unadjusted_adjustment_gap(previous: float,
+                                         current: float) -> bool:
+    """Whether an adjacent positive-price pair matches the canonical guard."""
+
+    return adjustment_gap_multiple(previous, current) is not None
+
+
+def path_crosses_unadjusted_adjustment_gap(prices) -> bool:
+    """Whether adjacent observed prices contain an unmeasured unit change.
+
+    This is the shared label/execution guard.  Callers must pass only the
+    observations physically contained in their PIT or forward-return window;
+    looking outside that path would let a future corporate action rewrite an
+    earlier decision.
+    """
+
+    previous = None
+    for raw in prices:
+        try:
+            current = float(raw)
+        except (TypeError, ValueError):
+            previous = None
+            continue
+        if previous is not None and looks_like_unadjusted_adjustment_gap(
+                previous, current):
+            return True
+        previous = current
+    return False
 
 
 def _adjustment_break(px: list[float]) -> int:
@@ -87,14 +145,7 @@ def _adjustment_break(px: list[float]) -> int:
     """
     for i in range(len(px) - 1, 0, -1):
         a, b = px[i - 1], px[i]
-        if a <= 0 or b <= 0:
-            continue
-        r = b / a
-        mult = r if r >= 1.0 else 1.0 / r
-        if mult < _ADJ_MIN_MULT:
-            continue
-        near = round(mult)
-        if near >= 2 and abs(mult - near) <= _ADJ_TOL * near:
+        if looks_like_unadjusted_adjustment_gap(a, b):
             return i        # 이 지점 **이후**만 쓴다(점프 전 가격은 다른 단위다)
     return 0
 
@@ -828,6 +879,11 @@ NOT_IMPLEMENTED: dict[str, str] = {
     "cross_asset_carry": "금리·FX 캐리 시계열이 Market 에 없다",
     "earnings_drift": "공시 이벤트 시각이 Market 격자에 붙어 있지 않다",
     "pairs_trading": "러너가 종목 단위 균등비중만 지원한다(롱숏·페어 미지원)",
+    # Repeated raw labels are deliberately not aliases for the similarly
+    # named daily templates.  They require event-time quote/trade inputs and
+    # an execution-cost-locked runner, so substitution must fail closed.
+    "order_flow": "체결·호가 event-time 입력과 비용 잠금 러너가 필요하다(현재는 일봉 PITView만 실행)",
+    "liquidity_premium": "체결·호가 event-time 입력과 비용 잠금 러너가 필요하다(현재는 일봉 PITView만 실행)",
 }
 
 
@@ -1152,6 +1208,9 @@ def _check_unadjusted_split_does_not_become_a_return():
                        params={"lookback_days": 30})
     assert "SPLIT10" not in sc, sc
     assert _adjustment_break([100.0, 1000.0]) == 1
+    assert _adjustment_break([100.0, 199.9]) == 1, \
+        "2x 허용오차의 하단 절반도 잡아야 한다"
+    assert _adjustment_break([100.0, 199.59]) == 0
     assert _adjustment_break([100.0, 237.0]) == 0, "진짜 급등을 조정으로 오인했다"
     print("  미조정 분할 방어선        OK")
 

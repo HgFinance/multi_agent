@@ -46,7 +46,7 @@ import json
 import sys
 from dataclasses import asdict, dataclass, field
 
-MODULE_VERSION = "quant-dataset-contract-v1"
+MODULE_VERSION = "quant-dataset-contract-v2"
 
 # ── 통제 어휘 ────────────────────────────────────────────────────────────────
 #
@@ -58,7 +58,9 @@ CLEANING_RULES = frozenset({
     "SORT_BY_EVENT_TIME",   # 사건시각 오름차순 정렬
     "DROP_NON_TRADING",     # 시장 미개장일 제거
     "ADJUST_CORPORATE_ACTION",  # 수정주가 적용(분할·병합·배당)
-    "CUT_AT_UNADJUSTED_GAP",    # 미조정 갭 앞에서 시계열 절단(차선책)
+    # Kept only so persisted legacy contracts receive a precise validation
+    # error.  Execution is deprecated: a future gap must not delete past rows.
+    "CUT_AT_UNADJUSTED_GAP",
     "DROP_MISSING",         # 결측 행 제거 - **채우지 않는다**
     "WINSORIZE_EXTREME",    # 극단값 절단(분포 꼬리)
 })
@@ -277,16 +279,20 @@ def check_reusable_cleaning(c: DatasetContract) -> list[str]:
     """재사용 정제가 **선언돼 있는가.**
 
     빠뜨리면 조용히 안 된 채로 지나간다 - 무엇을 안 했는지가 원장에 안 남는
-    것이 문제이지, 안 하는 것 자체가 항상 틀린 것은 아니다. 그래서 수정주가는
-    **둘 중 하나를 반드시 고르게** 한다(적용하거나, 못 해서 자르거나).
+    것이 문제이지, 안 하는 것 자체가 항상 틀린 것은 아니다. 수정주가를 적용할
+    수 없으면 원본을 유지하고 실행·라벨 창의 경계 가드가 NOT_MEASURED 로 막는다.
+    미래 갭을 보고 과거를 지우는 전역 절단은 PIT 누출이라 허용하지 않는다.
     """
     bad = []
-    ca = {"ADJUST_CORPORATE_ACTION", "CUT_AT_UNADJUSTED_GAP"} & set(c.cleaning)
-    if not ca:
+    if "CUT_AT_UNADJUSTED_GAP" in c.cleaning:
         bad.append(
-            "수정주가 정책이 없다 - ADJUST_CORPORATE_ACTION(적용) 이나 "
-            "CUT_AT_UNADJUSTED_GAP(못 하니 자름) 중 하나를 선언해야 한다. "
-            "미조정 분할은 +900% 수익률로 읽혀 모멘텀이 그 종목을 1등으로 뽑는다")
+            "CUT_AT_UNADJUSTED_GAP 은 폐기됐다 - 미래 갭이 과거 행과 유니버스를 "
+            "삭제하는 PIT 누출이다. 원본을 유지하고 창 경계 가드로 미측정 처리하라")
+    if "ADJUST_CORPORATE_ACTION" not in c.cleaning:
+        bad.append(
+            "수정주가 정책이 없다 - 알려진 이벤트는 ADJUST_CORPORATE_ACTION 으로 "
+            "적용하고, 미상 이벤트는 실행·라벨 창 경계 가드가 NOT_MEASURED 로 "
+            "막아야 한다")
     if "DROP_MISSING" not in c.cleaning:
         bad.append("결측 정책이 없다 - 채우는 규칙은 어휘에 없으므로 "
                    "DROP_MISSING 을 선언하거나 계약을 다시 봐야 한다")
@@ -390,10 +396,12 @@ def _check_corporate_action_policy_is_mandatory():
     assert not r["ok"], r
     assert any("수정주가" in x for x in r["findings"]["재사용 정제"]), r
 
-    # 못 하니 자른다고 선언하면 통과한다 - 차선책도 선언이면 기록에 남는다
-    ok = validate(_base(cleaning=("DEDUP_KEY", "DROP_MISSING",
-                                  "CUT_AT_UNADJUSTED_GAP")))
-    assert ok["ok"], ok["findings"]
+    # 미래 갭으로 과거를 자르는 옛 차선책은 이제 계약 단계에서 막힌다.
+    cut = validate(_base(cleaning=("DEDUP_KEY", "DROP_MISSING",
+                                   "CUT_AT_UNADJUSTED_GAP")))
+    assert not cut["ok"], cut
+    assert any("PIT 누출" in value
+               for value in cut["findings"]["재사용 정제"]), cut
 
 
 def _check_unknown_cleaning_rule_is_rejected():

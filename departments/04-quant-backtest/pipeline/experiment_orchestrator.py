@@ -1699,15 +1699,15 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
         #   호가·체결은 일봉과 다른 데이터셋이라 따로 실어야 한다. 요구는
         #   가설이 아니라 **템플릿**이 선언하므로(`needs_micro`) 빠뜨릴 자리가
         #   없다. 요구가 없으면 아무것도 안 하고 예전 경로 그대로다.
-        try:
-            from backtest_runner import attach_micro_if_needed  # noqa: PLC0415
+        from backtest_runner import attach_micro_if_needed  # noqa: PLC0415
 
-            _mn = attach_micro_if_needed(market, config, conn)
-            if _mn:
-                print(f"  미시구조 적재 {_mn:,}건 (호가·체결 일별 집계)",
-                      flush=True)
-        except Exception as e:  # noqa: BLE001 - 못 붙여도 실험은 돈다(신호가 빈다)
-            print(f"  ⚠ 미시구조 적재 실패: {type(e).__name__}: {str(e)[:110]}",
+        # 가격 전용 전략이면 이 함수 자체가 no-op이다. 반대로 적재 경로에
+        # 들어왔다는 것은 동결된 전략 계약이 미시구조 입력을 요구한다는 뜻이다.
+        # 재적재 실패를 삼키면 전체기간과 walk-forward가 서로 다른 전략을
+        # 평가하므로, 실패를 전파해 같은 입력으로 재시도하게 한다.
+        _mn = attach_micro_if_needed(market, config, conn)
+        if _mn:
+            print(f"  미시구조 적재 {_mn:,}건 (호가·체결 일별 집계)",
                   flush=True)
         # ▶ **embargo = 보유 지평.** 웜업 마지막 시그널이 그만큼 미래로
         #   이어지므로 그 구간을 평가에서 뺀다 - 안 빼면 직전 구간 정보가
@@ -1765,8 +1765,25 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
             metrics = run_window(slice_market(market, w), w, dict(config))
             wm.append((w.label, metrics))
             with conn.cursor() as cur:
-                for k in ("total_return", "sharpe_rf0", "max_drawdown"):
+                for k in ("total_return", "sharpe_rf0", "max_drawdown",
+                          "measurement_not_measured"):
                     if isinstance(metrics.get(k), (int, float)):
+                        metric_dimensions = {
+                            **evaluation_identity,
+                            "window": w.label,
+                            "start_session": str(w.test_start),
+                            "end_session": str(w.test_end),
+                            "chain": ORCH_VERSION,
+                        }
+                        if metrics.get("measurement_status") == "NOT_MEASURED":
+                            gap_audit = metrics.get("adjustment_gap_audit") or {}
+                            metric_dimensions.update({
+                                "measurement_status": "NOT_MEASURED",
+                                "measurement_reason": str(metrics.get(
+                                    "measurement_reason") or "")[:300],
+                                "adjustment_audit_fingerprint": gap_audit.get(
+                                    "audit_fingerprint"),
+                            })
                         cur.execute("""
                             insert into quant.experiment_metrics
                               (experiment_id, split, metric, value,
@@ -1774,13 +1791,8 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
                             values (%s, 'WALK_FORWARD', %s, %s, %s::jsonb, %s)
                             on conflict do nothing
                         """, (bt["experiment_id"], k, metrics[k],
-                              json.dumps({
-                                  **evaluation_identity,
-                                  "window": w.label,
-                                  "start_session": str(w.test_start),
-                                  "end_session": str(w.test_end),
-                                  "chain": ORCH_VERSION,
-                              }), COST_MODEL["version"]))
+                              json.dumps(metric_dimensions),
+                              COST_MODEL["version"]))
             conn.commit()
         # Short-sample windows are deliberately 10+ days.  Applying the legacy
         # 40-day half-year filter to them discards every window and makes the

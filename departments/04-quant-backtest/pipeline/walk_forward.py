@@ -57,6 +57,7 @@ from backtest_runner import (
     COST_MODEL,
     DEFAULT_CONFIG,
     Market,
+    UnmeasuredAdjustmentGapError,
     _run_backtest_core,
     code_version as backtest_code_version,
     compute_metrics,
@@ -458,8 +459,11 @@ def slice_market(market: Market, w: WFWindow) -> Market:
     #   시작한다. 웜업까지 자르면 시그널이 아예 안 나온다.
     keep = [d for d in market.dates if w.warmup_start <= d <= w.test_end]
     kset = set(keep)
-    opens = {k: v for k, v in market.opens.items() if k[0] in kset}
     closes = {k: v for k, v in market.closes.items() if k[0] in kset}
+    symbols = sorted({s for (_, s) in closes})
+    sset = set(symbols)
+    opens = {k: v for k, v in market.opens.items()
+             if k[0] in kset and k[1] in sset}
     # ▶ **거래대금도 같이 자른다** (2026-08-14 실측)
     #   여기서 `notionals` 를 안 넘기고 있었다. `Market` 의 기본값이 빈 dict 라
     #   창 안에서는 거래대금이 **통째로 사라졌고**, 그 결과:
@@ -471,12 +475,12 @@ def slice_market(market: Market, w: WFWindow) -> Market:
     #       읽으므로, 필터를 켜기 전부터 창 안 성적이 조용히 오염돼 있었다
     #   전체 기간 백테스트(TEST)는 회전 223배로 멀쩡히 거래하는데 창 안만 0 인
     #   비대칭이 단서였다 - 창을 자를 때 열 하나를 빠뜨린 것이 원인이다.
-    notionals = {k: v for k, v in market.notionals.items() if k[0] in kset}
+    notionals = {k: v for k, v in market.notionals.items()
+                 if k[0] in kset and k[1] in sset}
     # 미시구조도 같은 규칙으로 자른다 - 위 사고가 이 열에서 반복되지 않게
     # 자체점검이 두 열을 함께 검사한다(2026-08-14).
     micro = {k: v for k, v in getattr(market, "micro", {}).items()
-             if k[0] in kset}
-    symbols = sorted({s for (_, s) in closes})
+             if k[0] in kset and k[1] in sset}
     sliced = Market(dates=keep, opens=opens, closes=closes, symbols=symbols,
                     notionals=notionals, micro=micro)
     return sliced._inherit_stock_scope_from(market)
@@ -519,8 +523,18 @@ def _run_window_core(sub: Market, w: WFWindow, config: dict, *,
     start_i = max(warmup_len - 1, warmup_len - 1 + emb)
     if start_i >= len(result.equity) - 1:
         # 잘라내고 나면 평가할 구간이 없다 - 0 으로 채우지 않고 알린다
-        return {"label": w.label, "usable": False,
-                "reason": f"embargo {emb}일 적용 후 평가 구간이 없다"}
+        reason = f"embargo {emb}일 적용 후 평가 구간이 없다"
+        return {
+            "label": w.label,
+            "usable": False,
+            "measurement_status": "NOT_MEASURED",
+            "measurement_not_measured": 1.0,
+            "measurement_reason": reason,
+            "reason": reason,
+            "test_days": w.n_test_days,
+            "partial_window": w.partial,
+            "adjustment_gap_audit": sub.adjustment_audit_manifest(),
+        }
     equity_test = result.equity[start_i:]
     traded = sum(abs(f.quantity * f.price) for f in result.fills)
     m = compute_metrics(equity_test, result.fills, capital, traded)
@@ -555,7 +569,23 @@ def run_window(sub: Market, w: WFWindow, config: dict) -> dict:
     """Run one governed stock window through the public simulator boundary."""
 
     sub._require_stock_scope()
-    return _run_window_core(sub, w, config, backtest_fn=run_backtest)
+    try:
+        return _run_window_core(sub, w, config, backtest_fn=run_backtest)
+    except UnmeasuredAdjustmentGapError as exc:
+        # A unit discontinuity invalidates only return paths in this physical
+        # window.  Record absence of a measurement (never a zero return) and
+        # let the caller continue to later independently audited windows.
+        return {
+            "label": w.label,
+            "usable": False,
+            "measurement_status": "NOT_MEASURED",
+            "measurement_not_measured": 1.0,
+            "measurement_reason": str(exc),
+            "test_days": w.n_test_days,
+            "partial_window": w.partial,
+            "adjustment_gap_audit": sub.adjustment_audit_manifest(
+                end=exc.gap.session),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -586,13 +616,28 @@ def fragility_summary(window_metrics: list[tuple[str, dict]],
     #   ROBUST 로 새지 않는 한 fail-closed 는 유지된다.
     if not window_metrics:
         return ({"n_windows": 0}, ["NO_WINDOWS"], "INSUFFICIENT")
-    judgeable = [(l, m) for l, m in window_metrics
+    measured = [(l, m) for l, m in window_metrics
+                if m.get("measurement_status") != "NOT_MEASURED"
+                and m.get("usable", True)]
+    not_measured = [l for l, m in window_metrics
+                    if (m.get("measurement_status") == "NOT_MEASURED"
+                        or not m.get("usable", True))]
+    judgeable = [(l, m) for l, m in measured
                  if m.get("test_days") is None or m["test_days"] >= min_test_days]
-    excluded = [l for l, m in window_metrics
+    excluded = [l for l, m in measured
                 if not (m.get("test_days") is None or m["test_days"] >= min_test_days)]
     if not judgeable:
-        return ({"n_windows": 0, "n_excluded_short": len(excluded)},
-                ["ALL_WINDOWS_TOO_SHORT"], "INSUFFICIENT")
+        flags = []
+        if not_measured:
+            flags.append("WINDOWS_NOT_MEASURED")
+        if excluded:
+            flags.append("ALL_WINDOWS_TOO_SHORT")
+        if not flags:
+            flags.append("NO_USABLE_WINDOWS")
+        return ({"n_windows": 0,
+                 "n_excluded_short": len(excluded),
+                 "n_not_measured": len(not_measured)},
+                flags, "INSUFFICIENT")
     rets = [m["total_return"] for _, m in judgeable]
     sharpes = [m["sharpe_rf0"] for _, m in judgeable]
     mdds = [m["max_drawdown"] for _, m in judgeable]
@@ -607,6 +652,7 @@ def fragility_summary(window_metrics: list[tuple[str, dict]],
     stats = {
         "n_windows": n,
         "n_excluded_short": len(excluded),   # 표본 미달로 판정 제외된 창 수
+        "n_not_measured": len(not_measured),
         "positive_window_ratio": round(pos_ratio, 4),
         "worst_window_return": round(min(rets), 6),
         "mean_window_return": round(sum(rets) / n, 6),
@@ -620,7 +666,15 @@ def fragility_summary(window_metrics: list[tuple[str, dict]],
         flags.append("DEEP_WINDOW_MDD")
     if sharpe_std > FRAGILITY_RULES["max_sharpe_std"]:
         flags.append("SHARPE_UNSTABLE")
-    return stats, flags, ("FRAGILE" if flags else "ROBUST")
+    if flags:
+        return stats, flags, "FRAGILE"
+    if not_measured:
+        # Safe windows remain useful evidence, but an incomplete preregistered
+        # evaluation must never become ROBUST/SUPPORTED by silently dropping
+        # the unavailable windows.  Preserve the measured statistics and make
+        # the promotion decision explicitly inconclusive.
+        return stats, ["WINDOWS_NOT_MEASURED"], "INSUFFICIENT"
+    return stats, [], "ROBUST"
 
 
 def wf_input_hash(dataset_hash: str, windows: list[WFWindow],
@@ -865,6 +919,15 @@ def register_and_validate(name: str, version: str, *,
                                 "start_session": str(metric_window.test_start),
                                 "end_session": str(metric_window.test_end),
                             })
+                            if m.get("measurement_status") == "NOT_MEASURED":
+                                gap_audit = m.get("adjustment_gap_audit") or {}
+                                metric_dimensions.update({
+                                    "measurement_status": "NOT_MEASURED",
+                                    "measurement_reason": str(m.get(
+                                        "measurement_reason") or "")[:300],
+                                    "adjustment_audit_fingerprint":
+                                        gap_audit.get("audit_fingerprint"),
+                                })
                         cur.execute(
                             """
                             insert into quant.experiment_metrics
@@ -888,13 +951,23 @@ def register_and_validate(name: str, version: str, *,
         for label, m in per_window:
             w = by_label[label]
             part = " (부분)" if w.partial else ""
+            if m.get("measurement_status") == "NOT_MEASURED":
+                print(f"  {label}{part} {w.test_start}~{w.test_end} | "
+                      f"NOT_MEASURED | {m.get('measurement_reason', '')}",
+                      flush=True)
+                continue
             print(f"  {label}{part} {w.test_start}~{w.test_end} | "
                   f"수익률 {m['total_return']:+.2%} | Sharpe {m['sharpe_rf0']} | "
                   f"MDD {m['max_drawdown']:.2%} | 체결 {m['n_fills']}", flush=True)
-        print(f"  Fragility: 양수 창 비율 {stats['positive_window_ratio']:.2f} | "
-              f"최악 창 수익률 {stats['worst_window_return']:+.2%} | "
-              f"최악 창 MDD {stats['worst_window_mdd']:.2%} | "
-              f"Sharpe 표준편차 {stats['sharpe_std']}", flush=True)
+        if stats.get("n_windows"):
+            print(f"  Fragility: 양수 창 비율 {stats['positive_window_ratio']:.2f} | "
+                  f"최악 창 수익률 {stats['worst_window_return']:+.2%} | "
+                  f"최악 창 MDD {stats['worst_window_mdd']:.2%} | "
+                  f"Sharpe 표준편차 {stats['sharpe_std']}", flush=True)
+        else:
+            print(f"  Fragility: usable windows 0 | "
+                  f"NOT_MEASURED {stats.get('n_not_measured', 0)}",
+                  flush=True)
         print(f"  판정 {verdict}{' ' + str(flags) if flags else ''} "
               f"(결정론 규칙 - 전략 승인 아님)", flush=True)
         print(f"  input_hash {ihash[:16]}… (같은 입력 = 같은 해시 = 중복 등록 차단)",
@@ -1007,6 +1080,9 @@ def _check_slice_no_future():
     #   잃어도 검사가 통과한다**(2026-08-14 실측: notional 이 없어서 못 잡았다).
     m.micro = {(d, s): {"spread_bps": 12.5, "order_flow_imbalance": 0.1}
                for d in m.dates for s in m.symbols}
+    # The fixture mutates a sealed Market directly; production does this via
+    # attach_micro_if_needed/clip_to_micro_coverage, which refreshes the seal.
+    m._restrict_adjustment_audit_to_current_scope()
     (w,) = make_windows(m.dates, WARMUP_TRADING_DAYS)
     sub = slice_market(m, w)
     assert all(w.warmup_start <= d <= w.test_end for d in sub.dates), "창 밖 날짜 유입"

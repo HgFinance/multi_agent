@@ -36,10 +36,12 @@ import json
 import math
 import sys
 import uuid
+from bisect import bisect_left
 from collections import deque
 import dataclasses
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from itertools import zip_longest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -76,13 +78,240 @@ class _GovernedStockRows(list):
         super().__init__()
         self._stock_scope_receipt: _StockScopeReceipt | None = None
 
+
 # v1 비용 가정 - 근거를 값 옆에 남긴다. 바꾸면 cost_model_version 을 올린다.
 from strategy_templates import (          # noqa: E402  (같은 디렉터리 모듈)
+    ADJUSTMENT_GAP_DETECTOR_VERSION,
+    ADJUSTMENT_MIN_MULTIPLE,
+    ADJUSTMENT_RELATIVE_TOLERANCE,
     TEMPLATES,
+    adjustment_gap_multiple,
+    looks_like_unadjusted_adjustment_gap,
     pit_view_for,
     resolve,
     signal_scores,
 )
+
+# Compatibility name retained as a direct alias, not a second detector.
+_looks_like_unadjusted_integer_split = looks_like_unadjusted_adjustment_gap
+
+ADJUSTMENT_GAP_AUDIT_VERSION = "corporate-action-gap-audit-v2"
+ADJUSTMENT_GAP_POLICY = "NOT_MEASURED_ON_CROSSED_UNADJUSTED_GAP"
+_ADJUSTMENT_AUDIT_VERIFIED = "VERIFIED_CHRONOLOGICAL_ONE_PASS"
+_ADJUSTMENT_AUDIT_UNVERIFIED = "UNVERIFIED_CONSTRUCTION"
+MARKET_DATA_FINGERPRINT_CONTRACT = \
+    "market-panel-row-multiset-xor0-sum1-sha256-v1"
+ADJUSTMENT_AUDIT_SEAL_CONTRACT = \
+    "market-adjustment-audit-evidence-seal-v1"
+SESSION_INDEX_FINGERPRINT_CONTRACT = "ordered-session-index-sha256-v1"
+
+
+@dataclass(frozen=True)
+class AdjustmentGap:
+    instrument_id: str
+    previous_session: date
+    session: date
+    previous_close: float
+    close: float
+    multiple: int
+
+    def as_audit_record(self) -> dict:
+        ratio = max(self.previous_close, self.close) / min(
+            self.previous_close, self.close)
+        return {
+            "instrument_id": self.instrument_id,
+            "previous_session": self.previous_session.isoformat(),
+            "session": self.session.isoformat(),
+            "multiple": self.multiple,
+            "observed_ratio": round(ratio, 12),
+        }
+
+
+class UnmeasuredAdjustmentGapError(RuntimeError):
+    """The requested return path crosses an unadjusted corporate-action gap."""
+
+    def __init__(self, gap: AdjustmentGap):
+        self.gap = gap
+        super().__init__(
+            "NOT_MEASURED: unadjusted corporate-action gap crossed "
+            f"({gap.instrument_id} {gap.previous_session}->{gap.session}, "
+            f"integer-like {gap.multiple}x)")
+
+
+class UnmeasuredAdjustmentOrderingError(RuntimeError):
+    """Reliable O(rows) gap auditing requires per-instrument event order."""
+
+
+class UnmeasuredMicroCoverageError(RuntimeError):
+    """A required microstructure dataset has no usable panel overlap."""
+
+
+def _adjustment_gap_sort_key(gap: AdjustmentGap) -> tuple:
+    """Stable first-error and evidence ordering, independent of row interleave."""
+
+    return (
+        gap.session,
+        gap.instrument_id,
+        gap.previous_session,
+        gap.multiple,
+        float(gap.previous_close).hex(),
+        float(gap.close).hex(),
+    )
+
+
+def _adjustment_gap_full_evidence(gap: AdjustmentGap) -> dict:
+    """Lossless evidence used by the private audit seal."""
+
+    return {
+        "instrument_id": gap.instrument_id,
+        "previous_session": gap.previous_session.isoformat(),
+        "session": gap.session.isoformat(),
+        "previous_close_hex": float(gap.previous_close).hex(),
+        "close_hex": float(gap.close).hex(),
+        "multiple": int(gap.multiple),
+    }
+
+
+def _ordering_failure_audit_manifest(
+        rows: list[dict], error: UnmeasuredAdjustmentOrderingError) -> dict:
+    """Build a deterministic NOT_MEASURED receipt when ordering blocks audit."""
+
+    first_session: date | None = None
+    last_session: date | None = None
+    instruments: set[str] = set()
+    for row in rows:
+        raw_session = row["trade_date"]
+        session = (raw_session if isinstance(raw_session, date)
+                   else date.fromisoformat(str(raw_session)[:10]))
+        first_session = session if first_session is None else min(
+            first_session, session)
+        last_session = session if last_session is None else max(
+            last_session, session)
+        instruments.add(str(row["instrument_id"]))
+    symbol_ids = sorted(instruments)
+    symbol_payload = json.dumps(symbol_ids, separators=(",", ":"))
+    facts = {
+        "audit_version": ADJUSTMENT_GAP_AUDIT_VERSION,
+        "detector_version": ADJUSTMENT_GAP_DETECTOR_VERSION,
+        "policy": ADJUSTMENT_GAP_POLICY,
+        "status": "REJECTED_NON_CHRONOLOGICAL_INPUT",
+        "measurement_status": "NOT_MEASURED",
+        "detector": {
+            "min_multiple": ADJUSTMENT_MIN_MULTIPLE,
+            "relative_tolerance": ADJUSTMENT_RELATIVE_TOLERANCE,
+        },
+        "scope": {
+            "start_session": (first_session.isoformat()
+                              if first_session is not None else None),
+            "end_session": (last_session.isoformat()
+                            if last_session is not None else None),
+            "instrument_count": len(symbol_ids),
+            "instrument_fingerprint": hashlib.sha256(
+                symbol_payload.encode()).hexdigest(),
+            "instrument_ids": symbol_ids,
+            "row_count": len(rows),
+        },
+        "ordering_error": str(error)[:400],
+    }
+    payload = json.dumps(facts, sort_keys=True, separators=(",", ":"))
+    return dict(facts, audit_fingerprint=hashlib.sha256(
+        payload.encode()).hexdigest())
+
+
+def _session_index_fingerprint(sessions) -> str:
+    """Bind an ordered session index without copying the full date vector."""
+
+    digest = hashlib.sha256()
+    digest.update(SESSION_INDEX_FINGERPRINT_CONTRACT.encode())
+    digest.update(b"\0")
+    count = 0
+    for session in sessions:
+        digest.update(session.isoformat().encode())
+        digest.update(b"\0")
+        count += 1
+    digest.update(str(count).encode())
+    return digest.hexdigest()
+
+
+def _market_data_fingerprint(*, dates: list[date], symbols: list[str],
+                             opens: dict, closes: dict,
+                             notionals: dict, micro: dict,
+                             allowed_dates: set[date] | None = None,
+                             allowed_symbols: set[str] | None = None) -> str:
+    """Canonical O(rows)-time/O(1)-memory identity of simulator inputs."""
+
+    missing = object()
+    mask = (1 << 256) - 1
+
+    def _canonical_value(value):
+        if value is missing:
+            return {"missing": True}
+        if isinstance(value, dict):
+            return [[str(key), _canonical_value(value[key])]
+                    for key in sorted(value, key=str)]
+        if isinstance(value, (list, tuple)):
+            return [_canonical_value(item) for item in value]
+        if isinstance(value, bool) or value is None or isinstance(value, str):
+            return value
+        if isinstance(value, (int, float)):
+            return {"number": float(value).hex()}
+        return {"type": type(value).__name__, "value": str(value)}
+
+    def _included(key: tuple) -> bool:
+        if not isinstance(key, tuple) or len(key) != 2:
+            raise RuntimeError("Market data identity requires (date, symbol) keys")
+        session, instrument_id = key
+        return ((allowed_dates is None or session in allowed_dates)
+                and (allowed_symbols is None
+                     or instrument_id in allowed_symbols))
+
+    count = 0
+    xor0 = 0
+    sum1 = 0
+
+    def _absorb(key: tuple) -> None:
+        nonlocal count, xor0, sum1
+        if not _included(key):
+            return
+        session, instrument_id = key
+        record = [
+            session.isoformat(), str(instrument_id),
+            _canonical_value(opens.get(key, missing)),
+            _canonical_value(closes.get(key, missing)),
+            _canonical_value(notionals.get(key, missing)),
+            _canonical_value(micro.get(key, missing)),
+        ]
+        raw = json.dumps(record, sort_keys=True, separators=(",", ":"))
+        value = int.from_bytes(hashlib.sha256(raw.encode()).digest(), "big")
+        count += 1
+        xor0 ^= value
+        sum1 = (sum1 + value) & mask
+
+    # Each (date, symbol) key is absorbed once.  XOR + modular sum + count make
+    # the result independent of dict/interleaving order without materializing
+    # and sorting millions of records in memory.
+    for key in closes:
+        _absorb(key)
+    for key in opens:
+        if key not in closes:
+            _absorb(key)
+    for key in notionals:
+        if key not in closes and key not in opens:
+            _absorb(key)
+    for key in micro:
+        if key not in closes and key not in opens and key not in notionals:
+            _absorb(key)
+
+    payload = {
+        "contract": MARKET_DATA_FINGERPRINT_CONTRACT,
+        "dates": [session.isoformat() for session in dates],
+        "symbols": [str(value) for value in symbols],
+        "row_count": count,
+        "row_xor0": f"{xor0:064x}",
+        "row_sum1": f"{sum1:064x}",
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 COST_MODEL = {
     "version": "krx-cost-v2",
@@ -262,29 +491,71 @@ class Market:
     micro: dict[tuple[date, str], dict] = field(default_factory=dict)
     _stock_scope_receipt: _StockScopeReceipt | None = field(
         default=None, init=False, repr=False, compare=False)
+    _adjustment_gaps: tuple[AdjustmentGap, ...] = field(
+        default_factory=tuple, init=False, repr=False, compare=False)
+    _adjustment_gap_sessions: frozenset[date] = field(
+        default_factory=frozenset, init=False, repr=False, compare=False)
+    _adjustment_audit_status: str = field(
+        default=_ADJUSTMENT_AUDIT_UNVERIFIED,
+        init=False, repr=False, compare=False)
+    _adjustment_data_fingerprint: str = field(
+        default="", init=False, repr=False, compare=False)
+    _adjustment_session_index_fingerprint: str = field(
+        default="", init=False, repr=False, compare=False)
+    _adjustment_session_count: int = field(
+        default=0, init=False, repr=False, compare=False)
+    _adjustment_audit_seal: str = field(
+        default="", init=False, repr=False, compare=False)
 
     @classmethod
     def from_rows(cls, rows: list[dict]) -> Market:
-        dates = sorted({r["trade_date"] for r in rows})
+        receipt = getattr(rows, "_stock_scope_receipt", None)
+        dates_seen: set[date] = set()
         opens, closes, notionals, symbols = {}, {}, {}, set()
         bounds: dict[str, tuple[date, date]] = {}
+        last_close: dict[str, tuple[date, float]] = {}
+        adjustment_gaps: list[AdjustmentGap] = []
         for r in rows:
             iid = str(r["instrument_id"])
             symbols.add(iid)
             session = r["trade_date"]
+            close = float(r["close"])
+            dates_seen.add(session)
             current = bounds.get(iid)
             bounds[iid] = (
                 session if current is None else min(current[0], session),
                 session if current is None else max(current[1], session),
             )
             opens[(r["trade_date"], iid)] = float(r["open"])
-            closes[(r["trade_date"], iid)] = float(r["close"])
+            closes[(r["trade_date"], iid)] = close
             nv = r.get("notional")
             if nv is not None:
                 notionals[(r["trade_date"], iid)] = float(nv)
-        market = cls(dates=dates, opens=opens, closes=closes,
-                     symbols=sorted(symbols), notionals=notionals)
-        receipt = getattr(rows, "_stock_scope_receipt", None)
+
+            previous = last_close.get(iid)
+            if previous is not None:
+                previous_session, previous_close = previous
+                if session <= previous_session:
+                    raise UnmeasuredAdjustmentOrderingError(
+                        "NOT_MEASURED: rows must be strictly chronological "
+                        "within each instrument for the O(rows) corporate-"
+                        f"action audit ({iid}: {previous_session} then "
+                        f"{session})")
+                multiple = adjustment_gap_multiple(previous_close, close)
+                if multiple is not None:
+                    adjustment_gaps.append(AdjustmentGap(
+                        instrument_id=iid,
+                        previous_session=previous_session,
+                        session=session,
+                        previous_close=previous_close,
+                        close=close,
+                        multiple=multiple,
+                    ))
+            last_close[iid] = (session, close)
+
+        # A governed receipt attests the loader's original rows.  Gap auditing
+        # never narrows that panel: a future corporate action must not rewrite
+        # the universe observed by earlier PIT decisions.
         if receipt is not None:
             observed_bounds = tuple(sorted(
                 (instrument_id, first, last)
@@ -296,6 +567,17 @@ class Market:
                     or receipt.row_bounds != observed_bounds):
                 raise RuntimeError(
                     "governed stock rows changed after reference validation")
+
+        market = cls(dates=sorted(dates_seen), opens=opens, closes=closes,
+                     symbols=sorted(symbols), notionals=notionals)
+        market._adjustment_gaps = tuple(sorted(
+            adjustment_gaps, key=_adjustment_gap_sort_key))
+        market._adjustment_gap_sessions = frozenset(
+            gap.session for gap in adjustment_gaps)
+        market._adjustment_audit_status = _ADJUSTMENT_AUDIT_VERIFIED
+        market._adjustment_data_fingerprint = market._data_fingerprint()
+        market._seal_adjustment_audit()
+        if receipt is not None:
             market._stock_scope_receipt = receipt
         return market
 
@@ -311,9 +593,93 @@ class Market:
                 "EQUITY/STOCK Market loaded through load_dataset")
         return receipt
 
+    def _data_fingerprint(self, *, start: date | None = None,
+                          end: date | None = None) -> str:
+        """Fingerprint the exact ordered panel, optionally within a date scope."""
+
+        dates = [session for session in self.dates
+                 if (start is None or session >= start)
+                 and (end is None or session <= end)]
+        scoped = start is not None or end is not None
+        scoped_dates = set(dates) if scoped else None
+        if scoped:
+            observed_symbols = self._scope_instruments(scoped_dates)
+            symbols = sorted(observed_symbols)
+            allowed_symbols = observed_symbols
+        else:
+            symbols = list(self.symbols)
+            allowed_symbols = None
+
+        return _market_data_fingerprint(
+            dates=dates,
+            symbols=symbols,
+            opens=self.opens,
+            closes=self.closes,
+            notionals=self.notionals,
+            micro=self.micro,
+            allowed_dates=scoped_dates,
+            allowed_symbols=allowed_symbols,
+        )
+
+    def _scope_instruments(self, scoped_dates: set[date]) -> set[str]:
+        """Return only instruments with panel evidence in the PIT date range."""
+
+        observed: set[str] = set()
+        for values in (self.closes, self.opens, self.notionals, self.micro):
+            for key in values:
+                if not isinstance(key, tuple) or len(key) != 2:
+                    raise RuntimeError(
+                        "Market data identity requires (date, symbol) keys")
+                session, instrument_id = key
+                if session in scoped_dates:
+                    observed.add(str(instrument_id))
+        return observed
+
+    def _assert_exact_data_subset_of(self, source: Market) -> str:
+        """Prove this is one ordered, value-identical slice of ``source``."""
+
+        date_set = set(self.dates)
+        symbol_set = set(self.symbols)
+        expected_dates = [session for session in source.dates
+                          if session in date_set]
+        expected_symbols = [instrument_id for instrument_id in source.symbols
+                            if instrument_id in symbol_set]
+        if self.dates != expected_dates or self.symbols != expected_symbols:
+            raise RuntimeError(
+                "a derived Market must preserve source date/symbol order")
+
+        # A production derived Market is a physical interval, not arbitrary
+        # resampling.  Removing an interior date changes every return path and
+        # must be built/audited as a new dataset rather than inherit a receipt.
+        if self.dates:
+            start_index = source.dates.index(self.dates[0])
+            if source.dates[start_index:start_index + len(self.dates)] != self.dates:
+                raise RuntimeError(
+                    "a derived Market must be a contiguous source date window")
+
+        missing_item = object()
+        for name in ("opens", "closes", "notionals", "micro"):
+            source_values = getattr(source, name)
+            observed_values = getattr(self, name)
+            expected_items = (
+                item for item in source_values.items()
+                if item[0][0] in date_set and item[0][1] in symbol_set
+            )
+            for expected, observed in zip_longest(
+                    expected_items, observed_values.items(),
+                    fillvalue=missing_item):
+                if expected != observed:
+                    raise RuntimeError(
+                        f"a derived Market changed source {name} "
+                        "keys, values, or order")
+
+        observed_fingerprint = self._data_fingerprint()
+        return observed_fingerprint
+
     def _inherit_stock_scope_from(self, source: Market) -> Market:
         """Carry an existing receipt only into a true date/instrument subset."""
 
+        self._inherit_adjustment_audit_from(source)
         if source._stock_scope_receipt is None:
             return self
         receipt = source._require_stock_scope()
@@ -323,6 +689,260 @@ class Market:
                 "a derived Market may not widen an attested stock universe")
         self._stock_scope_receipt = receipt
         return self
+
+    def _inherit_adjustment_audit_from(self, source: Market) -> Market:
+        """Verify and independently audit an exact derived data window."""
+
+        # Verify the source evidence before comparing or inheriting anything.
+        # Otherwise a caller could mutate the source, construct an identical
+        # child, and launder that mutation through the child's fresh rescan.
+        source._require_adjustment_audit()
+        identity_fingerprint = self._assert_exact_data_subset_of(source)
+        self._adjustment_audit_status = source._adjustment_audit_status
+        self._adjustment_data_fingerprint = identity_fingerprint
+        if source._adjustment_audit_status != _ADJUSTMENT_AUDIT_VERIFIED:
+            self._adjustment_gaps = ()
+            self._adjustment_gap_sessions = frozenset()
+            self._adjustment_session_index_fingerprint = ""
+            self._adjustment_session_count = 0
+            self._adjustment_audit_seal = ""
+            return self
+        # Re-audit the exact derived values instead of trusting copied source
+        # metadata.  This keeps each window self-contained and avoids rescanning
+        # a multi-million-row source panel for every walk-forward slice.
+        self._rescan_adjustment_audit()
+        return self
+
+    def _rescan_adjustment_audit(self) -> None:
+        """Rebuild transition evidence after an authorized in-place clip."""
+
+        if any(current <= previous
+               for previous, current in zip(self.dates, self.dates[1:])):
+            raise UnmeasuredAdjustmentOrderingError(
+                "NOT_MEASURED: Market dates must be unique and chronological")
+        symbol_set = set(self.symbols)
+        if len(symbol_set) != len(self.symbols):
+            raise UnmeasuredAdjustmentOrderingError(
+                "NOT_MEASURED: Market symbols must be unique")
+        last_close: dict[str, tuple[date, float]] = {}
+        gaps: list[AdjustmentGap] = []
+        for (session, instrument_id), close in self.closes.items():
+            date_index = bisect_left(self.dates, session)
+            if (date_index == len(self.dates)
+                    or self.dates[date_index] != session
+                    or instrument_id not in symbol_set):
+                raise RuntimeError(
+                    "NOT_MEASURED: Market close key lies outside date/symbol scope")
+            close = float(close)
+            previous = last_close.get(instrument_id)
+            if previous is not None:
+                previous_session, previous_close = previous
+                if session <= previous_session:
+                    raise UnmeasuredAdjustmentOrderingError(
+                        "NOT_MEASURED: Market closes must be strictly "
+                        "chronological within each instrument for the "
+                        f"streaming audit ({instrument_id}: "
+                        f"{previous_session} then {session})")
+                multiple = adjustment_gap_multiple(previous_close, close)
+                if multiple is not None:
+                    gaps.append(AdjustmentGap(
+                        instrument_id=instrument_id,
+                        previous_session=previous_session,
+                        session=session,
+                        previous_close=previous_close,
+                        close=close,
+                        multiple=multiple,
+                    ))
+            last_close[instrument_id] = (session, close)
+        self._adjustment_gaps = tuple(sorted(
+            gaps, key=_adjustment_gap_sort_key))
+        self._adjustment_gap_sessions = frozenset(gap.session for gap in gaps)
+        self._seal_adjustment_audit()
+
+    def _restrict_adjustment_audit_to_current_scope(self) -> Market:
+        """Refresh audit metadata after an in-place date-coverage clip."""
+
+        if self._adjustment_audit_status != _ADJUSTMENT_AUDIT_VERIFIED:
+            return self
+        self._rescan_adjustment_audit()
+        self._adjustment_data_fingerprint = self._data_fingerprint()
+        self._seal_adjustment_audit()
+        return self
+
+    def _adjustment_audit_seal_facts(self) -> dict:
+        evidence = [_adjustment_gap_full_evidence(gap) for gap in sorted(
+            self._adjustment_gaps, key=_adjustment_gap_sort_key)]
+        return {
+            "contract": ADJUSTMENT_AUDIT_SEAL_CONTRACT,
+            "audit_version": ADJUSTMENT_GAP_AUDIT_VERSION,
+            "detector_version": ADJUSTMENT_GAP_DETECTOR_VERSION,
+            "policy": ADJUSTMENT_GAP_POLICY,
+            "status": self._adjustment_audit_status,
+            "detector": {
+                "min_multiple": ADJUSTMENT_MIN_MULTIPLE,
+                "relative_tolerance": ADJUSTMENT_RELATIVE_TOLERANCE,
+            },
+            "data_identity_fingerprint": self._adjustment_data_fingerprint,
+            "session_index_contract": SESSION_INDEX_FINGERPRINT_CONTRACT,
+            "session_count": self._adjustment_session_count,
+            "session_index_fingerprint":
+                self._adjustment_session_index_fingerprint,
+            "gap_sessions": sorted(
+                session.isoformat()
+                for session in self._adjustment_gap_sessions),
+            "gap_count": len(evidence),
+            "full_gap_evidence": evidence,
+        }
+
+    def _seal_adjustment_audit(self) -> None:
+        """Bind the detector, complete evidence, and session index together."""
+
+        if self._adjustment_audit_status != _ADJUSTMENT_AUDIT_VERIFIED:
+            self._adjustment_session_index_fingerprint = ""
+            self._adjustment_session_count = 0
+            self._adjustment_audit_seal = ""
+            return
+        self._adjustment_gaps = tuple(sorted(
+            self._adjustment_gaps, key=_adjustment_gap_sort_key))
+        self._adjustment_gap_sessions = frozenset(
+            gap.session for gap in self._adjustment_gaps)
+        self._adjustment_session_count = len(self.dates)
+        self._adjustment_session_index_fingerprint = \
+            _session_index_fingerprint(self.dates)
+        payload = json.dumps(
+            self._adjustment_audit_seal_facts(),
+            sort_keys=True, separators=(",", ":"))
+        self._adjustment_audit_seal = hashlib.sha256(
+            payload.encode()).hexdigest()
+
+    def _require_adjustment_audit(self) -> None:
+        if self._adjustment_audit_status != _ADJUSTMENT_AUDIT_VERIFIED:
+            raise RuntimeError(
+                "NOT_MEASURED: governed backtest Market lacks a verified "
+                "chronological corporate-action gap audit")
+        if (not self._adjustment_data_fingerprint
+                or self._adjustment_data_fingerprint != self._data_fingerprint()):
+            raise RuntimeError(
+                "NOT_MEASURED: Market price-panel identity changed after the "
+                "corporate-action audit")
+        if (len(self.dates) != self._adjustment_session_count
+                or _session_index_fingerprint(self.dates)
+                != self._adjustment_session_index_fingerprint):
+            raise RuntimeError(
+                "NOT_MEASURED: Market session index changed after the "
+                "corporate-action audit")
+        expected_sessions = frozenset(
+            gap.session for gap in self._adjustment_gaps)
+        if expected_sessions != self._adjustment_gap_sessions:
+            raise RuntimeError(
+                "NOT_MEASURED: corporate-action gap metadata was changed "
+                "after the audit")
+        payload = json.dumps(
+            self._adjustment_audit_seal_facts(),
+            sort_keys=True, separators=(",", ":"))
+        expected_seal = hashlib.sha256(payload.encode()).hexdigest()
+        if (not self._adjustment_audit_seal
+                or self._adjustment_audit_seal != expected_seal):
+            raise RuntimeError(
+                "NOT_MEASURED: corporate-action audit evidence seal is "
+                "missing or invalid")
+
+    def _raise_if_unmeasured_adjustment_gap(self, session: date) -> None:
+        """Fail at the event session, before trading or mark-to-market."""
+
+        if session not in self._adjustment_gap_sessions:
+            return
+        matching = [gap for gap in self._adjustment_gaps
+                    if gap.session == session]
+        if matching:
+            raise UnmeasuredAdjustmentGapError(min(
+                matching, key=_adjustment_gap_sort_key))
+
+    def adjustment_audit_manifest(self, *, start: date | None = None,
+                                  end: date | None = None) -> dict:
+        """Return a bounded, fingerprinted audit for the requested PIT range."""
+
+        self._require_adjustment_audit()
+
+        if self.dates:
+            scope_start = start or self.dates[0]
+            scope_end = end or self.dates[-1]
+        else:
+            scope_start, scope_end = start, end
+        if (scope_start is not None and scope_end is not None
+                and scope_start > scope_end):
+            raise ValueError("adjustment audit start must not exceed end")
+        scoped = [
+            gap for gap in self._adjustment_gaps
+            if (scope_start is None or gap.previous_session >= scope_start)
+            and (scope_end is None or gap.session <= scope_end)
+        ]
+        records = sorted(
+            (gap.as_audit_record() for gap in scoped),
+            key=lambda record: (
+                record["instrument_id"], record["previous_session"],
+                record["session"], record["multiple"],
+                record["observed_ratio"],
+            ),
+        )
+        event_payload = json.dumps(
+            records, sort_keys=True, separators=(",", ":"))
+        event_fingerprint = hashlib.sha256(event_payload.encode()).hexdigest()
+        scope_dates = [session for session in self.dates
+                       if (scope_start is None or session >= scope_start)
+                       and (scope_end is None or session <= scope_end)]
+        scope_date_set = set(scope_dates)
+        scope_symbols = sorted(self._scope_instruments(scope_date_set))
+        symbol_payload = json.dumps(
+            scope_symbols, separators=(",", ":"))
+        scope = {
+            "start_session": (scope_start.isoformat()
+                              if scope_start is not None else None),
+            "end_session": (scope_end.isoformat()
+                            if scope_end is not None else None),
+            "instrument_count": len(scope_symbols),
+            "instrument_fingerprint": hashlib.sha256(
+                symbol_payload.encode()).hexdigest(),
+            "instrument_ids": scope_symbols,
+            "row_count": sum(
+                1 for session, _instrument_id in self.closes
+                if session in scope_date_set),
+            "data_identity_contract": MARKET_DATA_FINGERPRINT_CONTRACT,
+            "data_identity_fingerprint": self._data_fingerprint(
+                start=scope_start, end=scope_end),
+        }
+        detector = {
+            "min_multiple": ADJUSTMENT_MIN_MULTIPLE,
+            "relative_tolerance": ADJUSTMENT_RELATIVE_TOLERANCE,
+        }
+        audit_facts = {
+            "audit_version": ADJUSTMENT_GAP_AUDIT_VERSION,
+            "detector_version": ADJUSTMENT_GAP_DETECTOR_VERSION,
+            "policy": ADJUSTMENT_GAP_POLICY,
+            "status": self._adjustment_audit_status,
+            "detector": detector,
+            "scope": scope,
+            "event_count": len(records),
+            "events": records,
+            "event_fingerprint": event_fingerprint,
+        }
+        audit_payload = json.dumps(
+            audit_facts, sort_keys=True, separators=(",", ":"))
+        sample_limit = 100
+        return {
+            "audit_version": ADJUSTMENT_GAP_AUDIT_VERSION,
+            "detector_version": ADJUSTMENT_GAP_DETECTOR_VERSION,
+            "policy": ADJUSTMENT_GAP_POLICY,
+            "status": self._adjustment_audit_status,
+            "detector": detector,
+            "scope": scope,
+            "event_count": len(records),
+            "events": records[:sample_limit],
+            "events_truncated": len(records) > sample_limit,
+            "event_fingerprint": event_fingerprint,
+            "audit_fingerprint": hashlib.sha256(
+                audit_payload.encode()).hexdigest(),
+        }
 
     def micro_until(self, until: date, feature: str,
                     window: int = 1) -> dict[str, float]:
@@ -375,6 +995,74 @@ class Market:
             if a and b and a > 0:
                 out[s] = b / a - 1.0
         return out
+
+
+def _failure_adjustment_audit_manifest(
+        market: Market | None, error: Exception, *,
+        end: date | None = None) -> dict:
+    """Return audit evidence without letting evidence rendering mask failure.
+
+    The normal manifest is preferred.  If the invariant that caused the run to
+    fail also makes that manifest unavailable, emit a bounded deterministic
+    NOT_MEASURED receipt so the caller can still persist a terminal run.
+    """
+
+    if market is not None:
+        try:
+            return market.adjustment_audit_manifest(end=end)
+        except Exception as audit_error:  # noqa: BLE001 - terminal evidence boundary
+            audit_failure = audit_error
+    else:
+        audit_failure = RuntimeError("Market was not materialized")
+
+    def _session_text(value) -> str | None:
+        if value is None:
+            return None
+        try:
+            return value.isoformat()
+        except Exception:  # noqa: BLE001 - evidence must remain persistable
+            return str(value)[:40]
+
+    dates = list(getattr(market, "dates", ()) or ()) if market is not None else []
+    try:
+        instrument_ids = sorted(
+            str(value) for value in (getattr(market, "symbols", ()) or ()))
+    except Exception:  # noqa: BLE001 - evidence must remain persistable
+        instrument_ids = []
+    instrument_payload = json.dumps(instrument_ids, separators=(",", ":"))
+    empty_events_payload = "[]"
+    facts = {
+        "audit_version": ADJUSTMENT_GAP_AUDIT_VERSION,
+        "detector_version": ADJUSTMENT_GAP_DETECTOR_VERSION,
+        "policy": ADJUSTMENT_GAP_POLICY,
+        "status": "REJECTED_AUDIT_INVARIANT",
+        "measurement_status": "NOT_MEASURED",
+        "detector": {
+            "min_multiple": ADJUSTMENT_MIN_MULTIPLE,
+            "relative_tolerance": ADJUSTMENT_RELATIVE_TOLERANCE,
+        },
+        "scope": {
+            "start_session": _session_text(dates[0]) if dates else None,
+            "end_session": _session_text(end if end is not None else (
+                dates[-1] if dates else None)),
+            "instrument_count": len(instrument_ids),
+            "instrument_fingerprint": hashlib.sha256(
+                instrument_payload.encode()).hexdigest(),
+            "instrument_ids": instrument_ids,
+            "row_count": len(getattr(market, "closes", {}) or {})
+            if market is not None else 0,
+        },
+        "event_count": 0,
+        "events": [],
+        "events_truncated": False,
+        "event_fingerprint": hashlib.sha256(
+            empty_events_payload.encode()).hexdigest(),
+        "triggering_error": f"{type(error).__name__}: {error}"[:400],
+        "audit_error": f"{type(audit_failure).__name__}: {audit_failure}"[:400],
+    }
+    payload = json.dumps(facts, sort_keys=True, separators=(",", ":"))
+    return dict(facts, audit_fingerprint=hashlib.sha256(
+        payload.encode()).hexdigest())
 
 
 def month_first_trading_days(dates: list[date]) -> set[date]:
@@ -616,6 +1304,7 @@ def buy_and_hold_equity(market: Market, config: dict) -> list[tuple[date, float]
     out: list[tuple[date, float]] = []
     last: dict[str, float] = dict(day0)
     for d in market.dates:
+        market._raise_if_unmeasured_adjustment_gap(d)
         for k in shares:
             v = market.closes.get((d, k))
             if v and v > 0:
@@ -853,6 +1542,7 @@ def run_backtest(market: Market, config: dict, *,
     """Run only a market carrying the loader's opaque all-stock receipt."""
 
     market._require_stock_scope()
+    market._require_adjustment_audit()
     return _run_backtest_core(market, config, trials=trials)
 
 
@@ -884,6 +1574,11 @@ def _run_backtest_core(market: Market, config: dict, *,
     traded_notional = 0.0
 
     for i, d in enumerate(market.dates):
+        # The check happens at the event session, before selection, execution,
+        # or valuation.  Future events therefore cannot alter earlier PIT
+        # decisions, while any return path that actually crosses one is
+        # explicitly NOT_MEASURED instead of manufacturing split alpha.
+        market._raise_if_unmeasured_adjustment_gap(d)
         # ── 리밸런스: 시그널은 어제까지, 체결은 오늘 시가 ──
         if d in rebal_days and i > 0 and (ntb is None or d >= ntb):
             ranked = select_targets(market, i, config)
@@ -1278,6 +1973,11 @@ def attach_micro_if_needed(market: Market, config: dict, conn) -> int:
     #   붙이기와 자르기를 갈라 두면 한쪽만 부르는 자리가 생긴다(오늘 EDGE_KEYS
     #   를 넣고 `_take_risk` 목록을 빠뜨려 손잡이가 조용히 무시된 사고가 있었다).
     dropped, lo, hi = clip_to_micro_coverage(market)
+    if not market.micro:
+        raise UnmeasuredMicroCoverageError(
+            "NOT_MEASURED: required microstructure dataset has no usable "
+            f"overlap with the governed stock panel ({name}/{ver}, "
+            f"source coverage {lo}~{hi})")
     if dropped:
         print(f"  표본을 미시구조 커버리지로 잘랐다: {lo}~{hi} "
               f"({len(market.dates):,}일 유지 / {dropped:,}일 제외)", flush=True)
@@ -1318,14 +2018,33 @@ def clip_to_micro_coverage(market: Market) -> tuple[int, date | None, date | Non
     """
     if not market.micro:
         return 0, None, None
+    raw_days = {d for (d, _s) in market.micro}
+    raw_lo, raw_hi = min(raw_days), max(raw_days)
+    # Auxiliary rows outside the governed daily panel are not simulator
+    # inputs.  Drop them before deriving coverage; otherwise a same-date but
+    # different-universe dataset can look usable while every signal is absent.
+    market.micro = {
+        key: value for key, value in market.micro.items()
+        if key in market.closes
+    }
+    if not market.micro:
+        # ``attach_micro`` already changed the data identity.  Restore a
+        # coherent, sealed panel before the caller records NOT_MEASURED.
+        market._restrict_adjustment_audit_to_current_scope()
+        return 0, raw_lo, raw_hi
     days = {d for (d, _s) in market.micro}
     lo, hi = min(days), max(days)
     keep = [d for d in market.dates if lo <= d <= hi]
     dropped = len(market.dates) - len(keep)
     if not dropped:
+        # ``attach_micro`` changed signal inputs even though the date scope did
+        # not move.  Refresh the full data-identity seal before execution.
+        market._restrict_adjustment_audit_to_current_scope()
         return 0, lo, hi
     if not keep:                    # 겹치는 날이 없다 - 자르면 표본이 사라진다
-        return 0, lo, hi            # 그대로 두고 상위가 거래 0 으로 판정하게 한다
+        market.micro = {}
+        market._restrict_adjustment_audit_to_current_scope()
+        return 0, lo, hi
     ks = set(keep)
     market.dates = keep
     # ▶ 필드를 손으로 세지 않는다. `Market` 에 필드가 늘 때 여기를 같이 안
@@ -1335,6 +2054,7 @@ def clip_to_micro_coverage(market: Market) -> tuple[int, date | None, date | Non
         v = getattr(market, f.name)
         if isinstance(v, dict) and v and isinstance(next(iter(v)), tuple):
             setattr(market, f.name, {k: x for k, x in v.items() if k[0] in ks})
+    market._restrict_adjustment_audit_to_current_scope()
     return dropped, lo, hi
 
 
@@ -1625,14 +2345,19 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
                     or evaluation_embargo_days is None):
                 raise RuntimeError(
                     "daily evaluation requires frozen warmup and embargo")
-            # This conversion happens before INSERT by design: window
-            # boundaries are an input, never a result-time annotation.
-            market = Market.from_rows(rows)
+            # Window boundaries are frozen before INSERT, while the governed
+            # Market audit runs after registration so a rejected row order can
+            # be persisted as NOT_MEASURED instead of becoming a retry zombie.
+            plan_dates = sorted({
+                (row["trade_date"] if isinstance(row["trade_date"], date)
+                 else date.fromisoformat(str(row["trade_date"])[:10]))
+                for row in rows
+            })
             from walk_forward import freeze_daily_evaluation_plan
 
             evaluation_plan = freeze_daily_evaluation_plan(
                 dataset_content_hash=dhash,
-                dates=market.dates,
+                dates=plan_dates,
                 warmup_days=int(evaluation_warmup_days),
                 embargo_days=int(evaluation_embargo_days),
                 cost_model=COST_MODEL,
@@ -1781,13 +2506,54 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
             if _micro_n:
                 print(f"  미시구조 적재 {_micro_n:,}건 (호가·체결 일별 집계)",
                       flush=True)
-        except Exception:
+        except Exception as preparation_error:
             # Experiment registration precedes auxiliary data materialization.
             # If that preparation fails, leaving RUNNING makes the input-hash
             # duplicate guard permanently seal a trial that produced no run or
             # outcome. CANCELLED + zero runs is the explicit resumable-zombie
             # signature above; it preserves the same experiment_id on retry.
             conn.rollback()
+            if isinstance(preparation_error, (
+                    UnmeasuredAdjustmentOrderingError,
+                    UnmeasuredMicroCoverageError)):
+                if isinstance(
+                        preparation_error, UnmeasuredAdjustmentOrderingError):
+                    audit = _ordering_failure_audit_manifest(
+                        rows, preparation_error)
+                else:
+                    audit = _failure_adjustment_audit_manifest(
+                        market, preparation_error)
+                failure_summary = {
+                    "error": str(preparation_error)[:400],
+                    "measurement_status": "NOT_MEASURED",
+                    "adjustment_gap_audit": audit,
+                }
+                start_session = audit["scope"]["start_session"]
+                end_session = audit["scope"]["end_session"]
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "update quant.experiments set status='FAILED', "
+                        "ended_at=now() where experiment_id=%s",
+                        (exp_id,))
+                    cur.execute(
+                        """
+                        insert into quant.backtest_runs
+                          (experiment_id, dataset_id, universe_version_id,
+                           start_date, end_date, initial_capital, cost_model,
+                           risk_model, result_summary, code_version,
+                           input_hash, status)
+                        values (%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,
+                                %s::jsonb,%s,%s,'FAILED')
+                        """,
+                        (exp_id, dataset_id, universe_id,
+                         start_session, end_session,
+                         config["initial_capital"], json.dumps(COST_MODEL),
+                         json.dumps({
+                             "note": "NOT_MEASURED before simulation: "
+                                     f"{type(preparation_error).__name__}"}),
+                         json.dumps(failure_summary), code_ver, ihash))
+                conn.commit()
+                raise
             with conn.cursor() as cur:
                 cur.execute(
                     "update quant.experiments set status='CANCELLED', ended_at=now() "
@@ -1803,6 +2569,27 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
             status = "COMPLETED"
         except Exception as e:
             # 실패한 런도 등록한다 - 성공만 남기지 않는다
+            audit_end = (e.gap.session
+                         if isinstance(e, UnmeasuredAdjustmentGapError)
+                         else None)
+            failure_audit = _failure_adjustment_audit_manifest(
+                market, e, end=audit_end)
+            failure_summary = {
+                "error": str(e)[:400],
+                "measurement_status": (
+                    "NOT_MEASURED"
+                    if (isinstance(e, UnmeasuredAdjustmentGapError)
+                        or failure_audit.get("measurement_status")
+                        == "NOT_MEASURED")
+                    else "FAILED"),
+                "adjustment_gap_audit": failure_audit,
+            }
+            failure_start = (market.dates[0] if market.dates else
+                             failure_audit.get("scope", {}).get(
+                                 "start_session"))
+            failure_end = (market.dates[-1] if market.dates else
+                           failure_audit.get("scope", {}).get(
+                               "end_session"))
             with conn.cursor() as cur:
                 cur.execute("update quant.experiments set status='FAILED', ended_at=now() "
                             "where experiment_id=%s", (exp_id,))
@@ -1814,10 +2601,10 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
                        result_summary, code_version, input_hash, status)
                     values (%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s::jsonb,%s,%s,'FAILED')
                     """,
-                    (exp_id, dataset_id, universe_id, market.dates[0], market.dates[-1],
+                    (exp_id, dataset_id, universe_id, failure_start, failure_end,
                      config["initial_capital"], json.dumps(COST_MODEL),
                      json.dumps({"note": "v1 - 리스크 모델 없음(롱온리 균등)"}),
-                     json.dumps({"error": str(e)[:400]}), code_ver, ihash))
+                     json.dumps(failure_summary), code_ver, ihash))
             conn.commit()
             raise
 
@@ -1827,6 +2614,7 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
             "reproduce": f"python pipeline/backtest_runner.py --run --dataset {name} "
                          f"--dataset-version {version}",
             "dataset_content_hash": dhash,
+            "adjustment_gap_audit": market.adjustment_audit_manifest(),
         }
         with conn.cursor() as cur:
             cur.execute(
