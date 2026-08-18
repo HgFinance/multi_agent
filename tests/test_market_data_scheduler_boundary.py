@@ -267,11 +267,16 @@ def test_research_image_has_safe_market_only_default() -> None:
     assert {
         "market-archive/",
         "quant-data/",
-        "timescaledb/",
         "artifacts/",
         "audit-artifacts/",
         "test-results/",
     } <= set(root_dockerignore)
+    assert {
+        "timescaledb/*",
+        "!timescaledb/migrations/",
+        "!timescaledb/migrations/**",
+    } <= set(root_dockerignore)
+    assert "timescaledb/" not in root_dockerignore
 
 
 def test_liaison_surface_excludes_worker_runtime_capabilities() -> None:
