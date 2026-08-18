@@ -655,6 +655,7 @@ def _attach_intraday_screening_cohort(
             continue
         contract = dict(lead.ast_contract or {})
         if (contract.get("formula_discovery_version") != "formula-discovery-v5"
+                or contract.get("primary_data_plane") != "MICROSTRUCTURE"
                 or contract.get("feature_window_contract_version") !=
                 EXPLICIT_FEATURE_WINDOW_CONTRACT
                 or not contract.get("formula_contract_complete")
@@ -1116,6 +1117,8 @@ def load_leads(conn, lead_ids, *, _expand_current: bool = True) -> dict:
         == "formula-discovery-v5"
         and (lead.ast_contract or {}).get("research_lane")
         == "INTRADAY_EVENT"
+        and (lead.ast_contract or {}).get("primary_data_plane")
+        == "MICROSTRUCTURE"
         and (lead.ast_contract or {}).get("feature_window_contract_version")
         == CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT
         for lead in out.values()
@@ -1129,6 +1132,7 @@ def load_leads(conn, lead_ids, *, _expand_current: bool = True) -> dict:
                and l.ast_contract->>'formula_discovery_version' =
                    'formula-discovery-v5'
                and l.ast_contract->>'research_lane' = 'INTRADAY_EVENT'
+               and l.ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
                and l.ast_contract->>'feature_window_contract_version' = %s
                and l.ast_contract->>'ast_readiness' = 'AST_READY'
                and coalesce(
@@ -1911,6 +1915,7 @@ def _check_intraday_screening_cohort_is_sourced_and_non_promoting():
                 "formula_contract_complete": True,
                 "alpha_candidate_eligible": True,
                 "research_lane": "INTRADAY_EVENT",
+                "primary_data_plane": "MICROSTRUCTURE",
                 "candidate_signal_expr": expr, "semantic_plan": plan,
                 "formula_thesis": {
                     "target": "TAKER_NET_PNL",

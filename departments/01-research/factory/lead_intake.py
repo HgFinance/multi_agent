@@ -31,7 +31,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import sys
@@ -47,6 +46,7 @@ from factory_contracts import (  # noqa: E402
     ScoutLens,
     SourceType,
     lead_id_for,
+    lead_revision_id,
 )
 
 # 잘렸다는 사실을 발췌 안에 남긴다. 조용히 자르면 읽는 쪽이 원문 전체로 안다.
@@ -616,15 +616,14 @@ def _canonical_contract(contract: dict | str | None) -> str:
             contract = json.loads(contract)
         except ValueError:
             contract = {"_invalid_legacy_contract": contract}
-    return json.dumps(contract or {}, ensure_ascii=False, sort_keys=True,
-                      separators=(",", ":"))
+    return json.dumps(
+        contract or {}, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), allow_nan=False)
 
 
 def revision_lead_id(source_lead_id: str, ast_contract: dict) -> str:
     """같은 출처의 다른 해석을 불변 별도 리드로 식별한다."""
-    digest = hashlib.sha256(
-        _canonical_contract(ast_contract).encode("utf-8")).hexdigest()[:12]
-    return f"{source_lead_id}_r{digest}"
+    return lead_revision_id(source_lead_id, ast_contract)
 
 
 def routed_lead_id(source_lead_id: str, existing_contract: dict | str | None,
@@ -662,6 +661,19 @@ def persist(conn, leads: list[dict], *, return_ids: bool = False
         payload["lead_id"] = routed_lead_id(
             source_lead_id, existing[0] if existing else None,
             lead["ast_contract"])
+        if payload["lead_id"] != source_lead_id:
+            # The deployed revision suffix is intentionally kept compatible
+            # with existing 12-hex rows.  Make the (very unlikely) truncated
+            # digest collision detectable instead of silently treating a
+            # different contract as another mention of the first revision.
+            cur.execute(_SQL_EXISTING_CONTRACT, (payload["lead_id"],))
+            revision_existing = cur.fetchone()
+            if (revision_existing is not None
+                    and _canonical_contract(revision_existing[0]) !=
+                    _canonical_contract(lead["ast_contract"])):
+                raise RuntimeError(
+                    "lead revision digest collision: refusing to overwrite "
+                    f"{payload['lead_id']!r}")
         if payload["lead_id"] not in persisted_ids:
             persisted_ids.append(payload["lead_id"])
         payload["refs"] = json.dumps(lead["refs"], ensure_ascii=False)
