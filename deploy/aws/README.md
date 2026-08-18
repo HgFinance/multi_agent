@@ -130,6 +130,13 @@ bash /home/ubuntu/hgfinance-releases/current/scripts/aws_deploy_paper_order_rele
   --ref main
 ```
 
+On this host, never run `docker compose up`, `build`, `restart` or `pull` from
+`/home/ubuntu/hgfinance`.  That legacy checkout is not a deployment root: even
+one service-specific invocation can silently replace a release-owned container
+with a model that lacks the AWS overlay (including the private Discord ingress
+contract).  Operational Compose commands must use the release deployer above;
+inspect-only commands should also use both files and the private runtime env.
+
 The deployment sequence is fail-closed:
 
 1. fetch into the dedicated bare repository and create a detached worktree;
@@ -152,11 +159,16 @@ The deployment sequence is fail-closed:
    sections in CEO/Trading `SOUL.md` into `/home/ubuntu/.hermes/profiles`,
    preserving host-only integrations and rendering the Trading MCP Bearer from
    private `runtime.env` without logging it;
-8. start the release and require Timescale, Redis, Trading, MCP, both Hermes
-   profiles, BFF and Accounting readiness;
-9. inside the running Trading Hermes container, require an authenticated MCP
+8. start the release, force-recreate the five stateless user-order path
+   services from that exact worktree, and require Timescale, Redis, Trading,
+   MCP, both Hermes profiles, BFF and Accounting readiness;
+9. require those five containers' Compose project, working directory, config
+   files and config hash to match the detached release; also require the CEO
+   and BFF to have the private Discord ingress contract without printing its
+   bearer credential;
+10. inside the running Trading Hermes container, require an authenticated MCP
    tools/list exchange that discovers exactly `process_user_paper_order`;
-10. update the `current` symlink only after all gates pass.
+11. update the `current` symlink only after all gates pass.
 
 If a post-switch health gate fails, the previous worktree is brought back with
 the same project and runtime environment.  Database migrations are additive

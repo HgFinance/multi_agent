@@ -558,6 +558,39 @@ smoke_trading_paper_order_mcp() {
   ' >/dev/null 2>&1
 }
 
+assert_release_owned_container() {
+  local release_path="$1" container_name="$2" service_name="$3"
+  local expected_files metadata actual_project actual_working_dir actual_files
+  local actual_service actual_hash expected_hash
+  expected_files="$release_path/docker-compose.yml,$release_path/deploy/aws/docker-compose.paper-order.yml"
+  metadata="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.project.working_dir"}}|{{index .Config.Labels "com.docker.compose.project.config_files"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "com.docker.compose.config-hash"}}' "$container_name")" \
+    || return 1
+  IFS='|' read -r actual_project actual_working_dir actual_files actual_service actual_hash <<<"$metadata"
+  expected_hash="$(
+    compose_release "$release_path" config --hash "$service_name" \
+      | awk -v service="$service_name" '$1 == service { print $2 }'
+  )"
+  [[ -n "$expected_hash" ]] || return 1
+  [[ "$actual_project" == "$PROJECT_NAME" ]]
+  [[ "$actual_working_dir" == "$release_path" ]]
+  [[ "$actual_files" == "$expected_files" ]]
+  [[ "$actual_service" == "$service_name" ]]
+  [[ "$actual_hash" == "$expected_hash" ]]
+}
+
+smoke_ceo_discord_ingress() {
+  # Check only presence and the non-secret internal route. Never emit the
+  # bearer credential: deployment output must remain safe to retain.
+  docker exec hedgefund-ceo-hermes sh -eu -c '
+    test -n "${CEO_DISCORD_INGRESS_API_KEY:-}"
+    test "${HGFINANCE_DISCORD_INGRESS_URL:-}" = "http://portfolio-bff:8000/ui/ceo/ingress"
+  ' >/dev/null 2>&1
+  docker exec hedgefund-portfolio-bff sh -eu -c '
+    test -n "${CEO_DISCORD_INGRESS_API_KEY:-}"
+    test -n "${DISCORD_ACTOR_MAP:-}"
+  ' >/dev/null 2>&1
+}
+
 backup_private_databases() {
   local backup_root="$RELEASES_ROOT/backups/$RELEASE_COMMIT"
   local database_name temporary target market_backed_up=0
@@ -727,6 +760,12 @@ python3 "$RELEASE/scripts/aws_install_hermes_profiles.py" install \
 
 SWITCH_STARTED=1
 compose_release "$RELEASE" up -d --remove-orphans
+# These stateless order-path services must be recreated from the detached
+# release even when their image digest happens to be unchanged. Otherwise a
+# prior or manually-invoked legacy Compose model can keep ownership labels and
+# omit the release-only Discord ingress wiring while looking merely "running".
+compose_release "$RELEASE" up -d --no-deps --force-recreate \
+  trading-api paper-order-orchestrator-mcp portfolio-bff ceo-hermes trading-hermes
 wait_container hedgefund-timescaledb 240
 wait_container hedgefund-redis 180
 wait_container hedgefund-trading-api 240
@@ -735,6 +774,13 @@ wait_container hedgefund-ceo-hermes 180
 wait_container hedgefund-trading-hermes 180
 wait_http_ready hedgefund-portfolio-bff 8000 /health/ready 240
 wait_http_ready hedgefund-accounting-api 8000 /health/ready 180
+say "Verifying detached-release ownership and CEO Discord ingress..."
+assert_release_owned_container "$RELEASE" hedgefund-trading-api trading-api
+assert_release_owned_container "$RELEASE" hedgefund-paper-order-orchestrator-mcp paper-order-orchestrator-mcp
+assert_release_owned_container "$RELEASE" hedgefund-portfolio-bff portfolio-bff
+assert_release_owned_container "$RELEASE" hedgefund-ceo-hermes ceo-hermes
+assert_release_owned_container "$RELEASE" hedgefund-trading-hermes trading-hermes
+smoke_ceo_discord_ingress
 say "Verifying Trading Hermes authenticated MCP tool discovery..."
 smoke_trading_paper_order_mcp
 

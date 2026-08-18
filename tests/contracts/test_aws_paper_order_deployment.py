@@ -14,6 +14,7 @@ OVERLAY_PATH = ROOT / "deploy" / "aws" / "docker-compose.paper-order.yml"
 DEPLOY_SCRIPT = ROOT / "scripts" / "aws_deploy_paper_order_release.sh"
 PROFILE_INSTALLER = ROOT / "scripts" / "aws_install_hermes_profiles.py"
 DOCKERIGNORE = ROOT / ".dockerignore"
+AWS_RUNBOOK = ROOT / "deploy" / "aws" / "README.md"
 
 
 class _ComposeLoader(yaml.SafeLoader):
@@ -428,6 +429,27 @@ def test_release_script_is_worktree_only_and_fail_closed() -> None:
     assert 'grep -Fq "process_user_paper_order"' in script
     assert "Tools discovered:" in script
     assert "hedgefund-trading-hermes" in script
+    assert "assert_release_owned_container" in script
+    assert 'com.docker.compose.project.working_dir' in script
+    assert 'com.docker.compose.project.config_files' in script
+    assert 'com.docker.compose.config-hash' in script
+    assert 'config --hash "$service_name"' in script
+    assert 'compose_release "$RELEASE" up -d --no-deps --force-recreate' in script
+    assert "trading-api paper-order-orchestrator-mcp portfolio-bff" in script
+    assert (
+        script.index('compose_release "$RELEASE" up -d --no-deps --force-recreate')
+        < script.index('assert_release_owned_container "$RELEASE"')
+        < script.index('printf \'%s\\n\' "$RELEASE_COMMIT"')
+    )
+    assert "smoke_ceo_discord_ingress" in script
+    ceo_smoke = script.split("smoke_ceo_discord_ingress()", 1)[1].split("\n}", 1)[0]
+    assert 'test -n "${CEO_DISCORD_INGRESS_API_KEY:-}"' in ceo_smoke
+    assert 'test "${HGFINANCE_DISCORD_INGRESS_URL:-}" =' in ceo_smoke
+    assert "CEO_DISCORD_INGRESS_API_KEY:-}" not in script.split(
+        "smoke_ceo_discord_ingress()", 1
+    )[1].split("\n}", 1)[0].replace(
+        'test -n "${CEO_DISCORD_INGRESS_API_KEY:-}"', ""
+    )
     assert "MCP_TRADING_ORDER_API_KEY" not in script.split(
         "smoke_trading_paper_order_mcp()", 1
     )[1].split("}", 1)[0]
@@ -466,6 +488,11 @@ def test_release_script_is_worktree_only_and_fail_closed() -> None:
     assert "docker compose down" not in script
     assert "--volumes" not in script
     assert "set -x" not in script
+
+    runbook = AWS_RUNBOOK.read_text(encoding="utf-8")
+    assert "never run `docker compose up`" in runbook
+    assert "`/home/ubuntu/hgfinance`" in runbook
+    assert "config hash" in runbook
 
     build_command = (
         'compose_release "$RELEASE" --profile deployment build --pull'
