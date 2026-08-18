@@ -297,7 +297,7 @@ _ORDER_CONTEXT_RE = re.compile(
 )
 
 _INSTRUMENT_RE = re.compile(
-    r"(?:\d{6}|[가-힣A-Za-z][가-힣A-Za-z0-9&+._\- ]{0,79})"
+    r"(?:[0-9A-Za-z]{6}|[가-힣A-Za-z][가-힣A-Za-z0-9&+._\- ]{0,79})"
 )
 _ALLOWED_RESIDUAL_RE = re.compile(
     r"^(?:(?:을|를|은|는|이|가|에|에서|로|으로|좀|만|내|현재|계좌|"

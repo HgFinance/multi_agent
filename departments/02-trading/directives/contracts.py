@@ -13,7 +13,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class DirectiveAction(StrEnum):
@@ -55,14 +55,21 @@ class PlaceOrderPayload(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     # The BFF does not own the reference catalog.  A missing UUID is resolved
-    # fail-closed from the six-digit symbol by Trading.
+    # fail-closed from the six-character KRX symbol by Trading.
     instrument_id: UUID | None = None
-    symbol: str = Field(pattern=r"^\d{6}$")
+    symbol: str = Field(pattern=r"^[0-9A-Z]{6}$")
     side: str = Field(pattern=r"^(BUY|SELL)$")
     quantity: Decimal = Field(gt=0, max_digits=30, decimal_places=10)
     order_type: str = Field(pattern=r"^(MARKET|LIMIT)$")
     limit_price: Decimal | None = Field(default=None, gt=0, max_digits=30, decimal_places=10)
     time_in_force: str = Field(pattern=r"^DAY$")
+
+    @field_validator("symbol", mode="before")
+    @classmethod
+    def _canonical_symbol(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip().upper()
+        return value
 
     @model_validator(mode="after")
     def _price_matches_type(self) -> "PlaceOrderPayload":

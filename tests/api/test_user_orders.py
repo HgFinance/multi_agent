@@ -84,6 +84,27 @@ def test_deterministic_parser_classifies_supported_korean_orders(
         assert payload == {}
 
 
+def test_bff_canonicalizes_exact_alphanumeric_krx_codes_but_preserves_names() -> None:
+    action, payload = user_orders.parse_user_order_query(
+        "00088k 5주 시장가 매수"
+    )
+    assert action is user_orders.DirectiveAction.PLACE_ORDER
+    assert payload["symbol"] == "00088K"
+
+    structured = user_orders.PaperOrderInput(
+        symbol=" 00088k ", side="BUY", quantity="1", order_type="MARKET"
+    )
+    assert structured.symbol == "00088K"
+
+    named = user_orders.PaperOrderInput(
+        symbol="Samsung Electronics",
+        side="BUY",
+        quantity="1",
+        order_type="MARKET",
+    )
+    assert named.symbol == "Samsung Electronics"
+
+
 def test_parser_does_not_treat_korean_sa_substring_as_buy() -> None:
     with pytest.raises(user_orders.ClarificationRequired) as error:
         user_orders.parse_user_order_query("회사를 조사해줘")
@@ -386,6 +407,27 @@ def test_exact_name_resolves_to_one_canonical_active_stock(monkeypatch) -> None:
     assert "i.market = 'krx'" in sql
     assert "upper(i.instrument_type) = 'stock'" in sql
     assert "sy.valid_from <= now()" in sql
+    params = cursor.execute.call_args.args[1]
+    assert params[:3] == (None, None, "삼성 전자")
+
+
+def test_alphanumeric_code_resolution_is_strip_upper_and_format_bounded(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CONTROL_DATABASE_URL", "postgresql://control/test")
+    connection, cursor = _db_connection(None)
+    cursor.fetchall.return_value = [(str(INSTRUMENT_ID), "00088K")]
+    with patch.object(auth.psycopg2, "connect", return_value=connection):
+        resolved = auth.resolve_active_trading_instrument(" 00088k ")
+
+    assert resolved == {
+        "instrument_id": str(INSTRUMENT_ID),
+        "symbol": "00088K",
+    }
+    sql = " ".join(cursor.execute.call_args.args[0].split())
+    params = cursor.execute.call_args.args[1]
+    assert "sy.symbol ~ '^[0-9A-Z]{6}$'" in sql
+    assert params[:3] == ("00088K", "00088K", "00088k")
 
 
 @pytest.mark.parametrize("rows", [[], [(str(uuid4()), "005930"), (str(uuid4()), "005930")]])

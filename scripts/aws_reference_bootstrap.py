@@ -258,7 +258,7 @@ def audit_order_readiness(
                    and upper(i.asset_class)='EQUITY'
                    and upper(i.instrument_type)='STOCK'
                    and sy.provider='LS' and sy.market='KRX'
-                   and sy.symbol ~ '^[0-9]{6}$'
+                   and sy.symbol ~ '^[0-9A-Z]{6}$'
                    and sy.valid_from<=now()
                    and (sy.valid_to is null or sy.valid_to>now())
                 """

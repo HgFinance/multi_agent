@@ -73,7 +73,9 @@ _ADVICE_TERMS: tuple[str, ...] = (
     "분석", "전망", "봐줘", "봐 줘", "판단", "조언", "상담", "유지해", "팔까", "살까",
 )
 
-_SYMBOL = re.compile(r"\b(\d{6})\b")
+_SYMBOL = re.compile(
+    r"(?<![0-9A-Za-z])([0-9A-Za-z]{6})(?![0-9A-Za-z])"
+)
 
 
 def classify(query: str) -> str | None:
@@ -110,7 +112,7 @@ def _fetch_market_quote(query: str) -> Fact:
         raise FactUnavailable(
             "종목 코드(6자리)를 찾지 못했습니다. 종목명으로는 아직 조회하지 않습니다."
         )
-    symbol = match.group(1)
+    symbol = match.group(1).upper()
     try:
         import ls_openapi  # type: ignore[import-not-found]
 

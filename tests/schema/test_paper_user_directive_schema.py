@@ -15,6 +15,12 @@ TRADING_RISK_MIGRATION = (
     / "migrations"
     / "20260818001700_trading_runtime_risk_read.sql"
 )
+KRX_SYMBOL_MIGRATION = (
+    ROOT
+    / "supabase"
+    / "migrations"
+    / "20260819000100_krx_alphanumeric_trading_symbols.sql"
+)
 
 
 def test_user_directive_migration_has_paper_authority_guards():
@@ -50,6 +56,17 @@ def test_user_directive_migration_has_paper_authority_guards():
         assert marker in sql
     assert " to service_role" not in sql
     assert "where state in ('received', 'running', 'in_progress', 'partial', 'unknown')" not in sql
+
+
+def test_followup_migration_widens_only_canonical_krx_symbol_checks():
+    sql = KRX_SYMBOL_MIGRATION.read_text(encoding="utf-8")
+    lowered = sql.lower()
+    assert lowered.lstrip().startswith("begin;") and lowered.rstrip().endswith("commit;")
+    assert sql.count("^[0-9A-Z]{6}$") == 2
+    assert "expected exactly one numeric-only user_directives payload constraint" in sql
+    assert "expected exactly one numeric-only user_directive_legs symbol constraint" in sql
+    assert "drop constraint" in lowered
+    assert "drop table" not in lowered
 
 
 def test_ceo_hermes_workflow_keeps_authority_paper_only_and_scope_bound():

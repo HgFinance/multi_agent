@@ -150,6 +150,14 @@ def test_script_has_no_order_or_broker_execution_surface() -> None:
     assert "place_order(" not in source
 
 
+def test_readiness_counts_all_canonical_krx_stock_codes() -> None:
+    source = (bootstrap.ROOT / "scripts" / "aws_reference_bootstrap.py").read_text(
+        encoding="utf-8"
+    )
+    assert "sy.symbol ~ '^[0-9A-Z]{6}$'" in source
+    assert "sy.symbol ~ '^[0-9]{6}$'" not in source
+
+
 def test_main_sanitizes_driver_or_vendor_exception_details(
     monkeypatch, capsys
 ) -> None:

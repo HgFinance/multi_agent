@@ -77,6 +77,7 @@ USER_DIRECTIVES_PATH = "/trading/v1/user-directives"
 USER_DIRECTIVE_STATUS_PATH = "/trading/v1/user-directives/{directive_id}"
 USER_DIRECTIVE_PRIORITY_CLASS = "USER_DIRECTIVE_HIGHEST"
 USER_DIRECTIVE_MODE = "PAPER"
+_KRX_TRADING_SYMBOL = re.compile(r"^[0-9A-Z]{6}$")
 
 
 class DirectiveAction(str, Enum):
@@ -124,6 +125,9 @@ class PaperOrderInput(BaseModel):
         cleaned = " ".join(value.strip().split())
         if not cleaned or any(ord(character) < 32 for character in cleaned):
             raise ValueError("symbol is invalid")
+        canonical_code = cleaned.upper()
+        if _KRX_TRADING_SYMBOL.fullmatch(canonical_code):
+            return canonical_code
         return cleaned
 
     @model_validator(mode="after")
@@ -250,7 +254,9 @@ _GROUPED_INTEGER = r"(?:[1-9]\d{0,2}(?:,\d{3})+|[1-9]\d*)"
 _QUANTITY_PATTERN = re.compile(
     rf"(?<![\d,])({_GROUPED_INTEGER})\s*(?:주식|주)(?![\d,])"
 )
-_CODE_PATTERN = re.compile(r"(?<![\d,])(\d{6})(?![\d,])")
+_CODE_PATTERN = re.compile(
+    r"(?<![0-9A-Za-z,])([0-9A-Za-z]{6})(?![0-9A-Za-z,])"
+)
 _WON_PRICE_PATTERN = re.compile(
     rf"(?<![\d,])({_GROUPED_INTEGER})\s*원"
 )
@@ -363,7 +369,7 @@ def parse_user_order_query(query: str) -> tuple[DirectiveAction, dict[str, Any]]
             for occupied_start, occupied_end in occupied_spans
         )
     ]
-    codes = list(dict.fromkeys(match.group(1) for match in code_matches))
+    codes = list(dict.fromkeys(match.group(1).upper() for match in code_matches))
     if len(codes) > 1:
         raise ClarificationRequired("instrument")
     symbol = codes[0] if codes else _natural_name(normalized, quantities[0])
