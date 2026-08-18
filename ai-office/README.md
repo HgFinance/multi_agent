@@ -2,7 +2,9 @@
 
 `ai-office`는 HgFinance의 부서·직원 흐름을 보여주는 읽기 전용 DEMO Projection이다. 실제 Hermes 세션, LangGraph 실행, 시장 데이터, 주문, Risk Limit, 원장 상태의 Source of Truth가 아니다.
 
-## 현재 조직 기준
+## Demo organization snapshot (historical)
+
+> This read-only demo table is not the current worker registry. Current organization and counts are documented in [CURRENT_PROJECT_ARCHITECTURE.md](../docs/CURRENT_PROJECT_ARCHITECTURE.md).
 
 실제 조직은 CEO와 7개 Hermes 부서다.
 
