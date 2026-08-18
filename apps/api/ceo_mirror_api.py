@@ -25,6 +25,8 @@ try:
     )
     from .ceo import CeoAsk
     from .ceo_schemas import CeoQueryAcceptedResponse
+    from .discord_actor_map import resolve as resolve_discord_actor
+    from .governance_client import fetch_fund_id_by_user
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
     from ceo_mirror import (  # type: ignore[no-redef]
         CanonicalIngress,
@@ -41,6 +43,8 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
     )
     from ceo import CeoAsk  # type: ignore[no-redef]
     from ceo_schemas import CeoQueryAcceptedResponse  # type: ignore[no-redef]
+    from discord_actor_map import resolve as resolve_discord_actor  # type: ignore[no-redef]
+    from governance_client import fetch_fund_id_by_user  # type: ignore[no-redef]
 
 
 router = APIRouter(prefix="/ui/ceo", tags=["ceo-mirror"])
@@ -66,11 +70,37 @@ def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
         if request.actor_type == "user" and request.actor_id not in _ANONYMOUS_ACTOR_IDS
         else None
     )
+    fund_id = request.fund_id
+
+    # Discord로 들어온 요청의 `actor_id`는 **Discord 작성자 id**다 - 테스트 계정
+    # UUID가 아니다. 그대로 두면 `requested_by=`에 Discord 숫자 id가 박혀 계정별
+    # 이력 필터가 영영 비고, `fund_id`가 없어 Mandate 스냅샷도 안 붙는다
+    # (2026-08-18 이전 Discord 질의의 상태).
+    #
+    # 매핑이 없으면 **아무것도 바꾸지 않는다.** 임의의 기본 계정으로 채우면
+    # 사용자가 정하지 않은 한도가 판단 근거가 된다(개발 원칙 9).
+    if request.source == "discord" and request.actor_type == "user":
+        binding = resolve_discord_actor(request.actor_id)
+        if binding is not None:
+            owner_id = binding.user_id
+            # 요청이 이미 fund를 실어 보냈으면 그쪽이 우선한다 - 매핑은 fund를
+            # 모르는 경로를 위한 기본값이지, 명시된 값을 덮어쓰는 규칙이 아니다.
+            fund_id = fund_id or binding.fund_id
+
+    # `user_id -> fund_id` 역참조(2026-08-18). `governance.fund_memberships`가
+    # 채워지면서 서버가 직접 풀 수 있게 됐다 - 그 전까지는 프론트엔드가 계정과
+    # fund를 쌍으로 하드코딩해 보내는 것 말고 방법이 없었다.
+    #
+    # 명시된 `fund_id`가 있으면 조회하지 않는다: 호출자가 지정한 Fund를 서버
+    # 추론으로 덮으면, 화면이 보고 있는 Fund와 판단 근거가 달라진다.
+    if owner_id and not fund_id:
+        fund_id = fetch_fund_id_by_user(owner_id)
+
     return ceo.ceo_query(
         CeoAsk(
             query=request.query,
             request_id=request.request_id,
-            fund_id=request.fund_id,
+            fund_id=fund_id,
         ),
         owner_id=owner_id,
     )

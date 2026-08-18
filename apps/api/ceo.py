@@ -27,6 +27,7 @@ try:
         load_workflow,
     )
     from .current_user import optional_current_user
+    from .discord_mirror import post_question
     from .governance_client import fetch_current_mandate_by_fund
     from .ceo_schemas import (
         CeoPlanning,
@@ -53,6 +54,7 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
         load_workflow,
     )
     from current_user import optional_current_user  # type: ignore[no-redef]
+    from discord_mirror import post_question  # type: ignore[no-redef]
     from governance_client import fetch_current_mandate_by_fund  # type: ignore[no-redef]
     from ceo_schemas import (  # type: ignore[no-redef]
         CeoPlanning,
@@ -468,6 +470,15 @@ def ceo_query(
     fund_id = getattr(req, "fund_id", None)
     mandate = fetch_current_mandate_by_fund(fund_id) if fund_id else None
 
+    # Discord 미러 게시(2026-08-18). Kanban 카드보다 **먼저** 해야 한다 - 게시된
+    # 메시지의 id가 root body에 들어가야 이후 부서 진행·최종 답변이 그 메시지에
+    # 붙는다(`orchestration/discord_delivery.py`의 `deliver()`는 channel_id와
+    # message_id가 둘 다 있어야 동작한다).
+    #
+    # 실패하면 `None`이고 그때는 좌표 줄 없이 진행한다 - Discord 장애가 질의 접수
+    # 실패로 번지면 안 된다(Mandate 조회와 같은 정책).
+    mirror = post_question(req.query, asked_by=owner_id)
+
     task = hermes_boundary.create_kanban_task(
         assignee=canonical_profile_for_department("ceo"),
         title=f"사용자 질의: {req.query[:120]}",
@@ -477,6 +488,9 @@ def ceo_query(
             workflow_mode=infer_workflow_mode(req.query),
             mandate=mandate,
             requested_by=owner_id,
+            discord_channel_id=mirror.channel_id if mirror else None,
+            discord_message_id=mirror.message_id if mirror else None,
+            discord_guild_id=mirror.guild_id if mirror else None,
         ),
         idempotency_key=req.request_id,
     )
