@@ -26,6 +26,7 @@ try:
     from .ceo import CeoAsk
     from .ceo_schemas import CeoQueryAcceptedResponse
     from .discord_actor_map import resolve as resolve_discord_actor
+    from .discord_mirror import post_question
     from .governance_client import fetch_fund_id_by_user
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
     from ceo_mirror import (  # type: ignore[no-redef]
@@ -44,6 +45,7 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
     from ceo import CeoAsk  # type: ignore[no-redef]
     from ceo_schemas import CeoQueryAcceptedResponse  # type: ignore[no-redef]
     from discord_actor_map import resolve as resolve_discord_actor  # type: ignore[no-redef]
+    from discord_mirror import post_question  # type: ignore[no-redef]
     from governance_client import fetch_fund_id_by_user  # type: ignore[no-redef]
 
 
@@ -96,6 +98,27 @@ def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
     if owner_id and not fund_id:
         fund_id = fetch_fund_id_by_user(owner_id)
 
+    # Discord 발송 좌표. `deliver()`가 channel_id와 message_id를 **둘 다** 요구한다.
+    #
+    # 출처에 따라 좌표의 출처가 다르다:
+    #   - Discord: 사용자가 쓴 원본이 이미 채널에 있다. **다시 게시하지 않는다** -
+    #     그러면 원본 옆에 봇이 같은 내용을 한 번 더 올린다. 어댑터가 준 좌표를
+    #     그대로 쓰면 답변이 사용자가 쓴 그 메시지에 붙는다.
+    #   - Web: 채널에 아무것도 없다. 질의를 미러 게시하고 **그 게시물의** 좌표를 쓴다.
+    #
+    # 게시 판단이 여기 있는 이유는 `ceo.ceo_query`가 출처를 모르기 때문이다 -
+    # 거기서 무조건 게시하면 Discord 요청까지 중복 게시되고, 그 함수를 부르는
+    # 단위 테스트가 전부 실제 채널로 나간다(2026-08-18 실측).
+    if request.source == "discord":
+        discord_channel_id = request.discord_channel_id
+        discord_message_id = request.discord_message_id
+        discord_guild_id = request.discord_guild_id
+    else:
+        mirror = post_question(request.query, asked_by=owner_id)
+        discord_channel_id = mirror.channel_id if mirror else None
+        discord_message_id = mirror.message_id if mirror else None
+        discord_guild_id = mirror.guild_id if mirror else None
+
     return ceo.ceo_query(
         CeoAsk(
             query=request.query,
@@ -103,6 +126,9 @@ def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
             fund_id=fund_id,
         ),
         owner_id=owner_id,
+        discord_channel_id=discord_channel_id,
+        discord_message_id=discord_message_id,
+        discord_guild_id=discord_guild_id,
     )
 
 

@@ -239,5 +239,70 @@ class MirrorIsOffDuringTestsTest(unittest.TestCase):
             self.assertFalse(discord_mirror.mirror_enabled())
 
 
+class SourceDecidesWhetherWeRepostTest(unittest.TestCase):
+    """Discord에서 온 요청은 다시 게시하지 않는다.
+
+    사용자가 채널에 쓴 원본이 이미 있는데 봇이 같은 내용을 한 번 더 올리면
+    원본과 `[web-mirror]` 복사본이 나란히 뜬다. 출처를 아는 곳
+    (`ceo_mirror_api._ceo_query`)에서만 게시 여부를 판단한다.
+    """
+
+    def test_ceo_query_never_posts_by_itself(self) -> None:
+        """`ceo.ceo_query`는 좌표를 받기만 하고 스스로 게시하지 않는다.
+
+        한때 이 함수가 직접 게시해서, 이 함수를 부르는 단위 테스트가 전부 실제
+        채널로 나갔다(2026-08-18). 함수 시그니처로 그 구조를 고정한다.
+        """
+
+        import inspect
+
+        from apps.api import ceo
+
+        parameters = inspect.signature(ceo.ceo_query).parameters
+        for name in ("discord_channel_id", "discord_message_id", "discord_guild_id"):
+            self.assertIn(name, parameters)
+        # 발송 함수를 이 모듈이 들고 있지 않다는 사실을 본다. 소스 문자열을
+        # 훑으면 docstring의 설명까지 걸려서 "왜 그렇게 했는지"를 적을 수 없다.
+        self.assertFalse(hasattr(ceo, "post_question"))
+
+    def test_ingress_carries_discord_coordinates(self) -> None:
+        """Discord 어댑터가 보낸 좌표가 계약에 있다."""
+
+        from apps.api.ceo_mirror import CanonicalIngress
+
+        ingress = CanonicalIngress(
+            query="q",
+            source="discord",
+            source_message_id="991",
+            discord_channel_id="chan-1",
+            discord_message_id="991",
+            discord_guild_id="guild-1",
+        )
+
+        self.assertEqual(ingress.discord_channel_id, "chan-1")
+        self.assertEqual(ingress.discord_message_id, "991")
+
+
+class MirrorLabelTest(unittest.TestCase):
+    """요청자 표시. uuid를 그대로 찍으면 채널에서 누가 물었는지 알 수 없다."""
+
+    USER3 = "00000000-0000-4000-8000-00000000cec2"
+
+    def test_mapped_user_renders_as_a_mention(self) -> None:
+        with patch.dict(os.environ, {ACTOR_MAP_ENV: f"123456789012345678:{self.USER3}"}):
+            content = build_content("q", asked_by=self.USER3)
+
+        self.assertTrue(content.startswith(f"{MIRROR_TAG} <@123456789012345678>"))
+
+    def test_shared_account_falls_back_to_the_uuid(self) -> None:
+        """한 계정을 둘이 쓰면 아무나 고르지 않는다 - 남이 물은 것처럼 보인다."""
+
+        shared = f"123456789012345678:{self.USER3},234567890123456789:{self.USER3}"
+        with patch.dict(os.environ, {ACTOR_MAP_ENV: shared}):
+            content = build_content("q", asked_by=self.USER3)
+
+        self.assertTrue(content.startswith(f"{MIRROR_TAG} {self.USER3}"))
+
+
 if __name__ == "__main__":
     unittest.main()

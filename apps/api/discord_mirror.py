@@ -184,12 +184,47 @@ def _asked_by_label(asked_by: object) -> str | None:
     `Depends(...)` 객체 그대로다. 그걸 그대로 찍어서 채널에 `[web-mirror]
     Depends(dependency=<function optional_current_user ...>)`가 올라갔다
     (2026-08-18 실측). 표시용 값 하나 때문에 내부 객체가 새면 안 된다.
+
+    ## 왜 멘션(`<@id>`)으로 바꾸나
+
+    테스트 계정 uuid를 그대로 찍으면(`[web-mirror] 00000000-...cec2`) 채널을 보는
+    사람이 누가 물었는지 알 수 없다. `DISCORD_ACTOR_MAP`에 그 계정과 이어진
+    Discord 사용자가 **정확히 한 명**이면 멘션으로 렌더한다 - Discord가 그 사람의
+    표시 이름으로 보여준다.
+
+    **알림은 가지 않는다**: `post_question()`이 `allowed_mentions={"parse": []}`로
+    보내므로 멘션이 렌더만 되고 ping은 안 된다. 미러 게시물이 사람을 호출하면
+    질문 하나에 알림이 하나씩 쌓인다.
+
+    매핑이 없거나 여러 명이 같은 계정을 쓰면 uuid를 그대로 둔다 - 남의 이름으로
+    보이는 것보다 못 읽는 편이 낫다.
     """
 
     if not isinstance(asked_by, str):
         return None
     label = asked_by.strip()
-    return label or None
+    if not label:
+        return None
+    discord_user_id = _discord_id_for_user(label)
+    return f"<@{discord_user_id}>" if discord_user_id else label
+
+
+def _discord_id_for_user(user_id: str) -> str | None:
+    """`discord_actor_map`의 역방향 조회. 실패는 `None`(표시만 못 할 뿐이다).
+
+    지연 import: 이 모듈은 발송만 담당하고 매핑표를 소유하지 않는다. 표시 이름
+    하나 때문에 import 실패가 게시 자체를 막으면 안 된다.
+    """
+
+    try:
+        try:
+            from .discord_actor_map import discord_id_for_user
+        except ImportError:  # pragma: no cover - 직접 실행 경로
+            from discord_actor_map import discord_id_for_user  # type: ignore[no-redef]
+
+        return discord_id_for_user(user_id)
+    except Exception:  # noqa: BLE001 - 표시용 값 하나가 게시를 막지 않는다.
+        return None
 
 
 def build_content(query: str, *, asked_by: object = None) -> str:
@@ -291,6 +326,7 @@ def post_question(query: str, *, asked_by: object = None) -> MirrorPost | None:
 
 
 if __name__ == "__main__":
+    from unittest.mock import patch
     # 네트워크를 타지 않는 자체 점검. 저장소 관례(`__main__` assert)에 맞춘다.
     short = build_content("삼성전자 리스크 알려줘", asked_by="user-1")
     assert short.startswith(f"{MIRROR_TAG} user-1\n"), short
@@ -328,6 +364,19 @@ if __name__ == "__main__":
     with patch.dict(os.environ, {ENABLED_ENV: "true", TOKEN_ENV: "", CHANNEL_ENV: ""}):
         assert mirror_enabled() is True
         assert post_question("설정 없음") is None
+
+    # 표시 이름: 매핑된 계정은 멘션으로 렌더된다(알림은 allowed_mentions로 차단).
+    from discord_actor_map import ACTOR_MAP_ENV
+
+    user3 = "00000000-0000-4000-8000-00000000cec2"
+    with patch.dict(os.environ, {ACTOR_MAP_ENV: f"123456789012345678:{user3}"}):
+        named = build_content("q", asked_by=user3)
+        assert named.startswith(MIRROR_TAG + " <@123456789012345678>"), named
+
+    # 매핑이 없으면 uuid 그대로 - 남의 이름으로 보이는 것보다 낫다.
+    with patch.dict(os.environ, {ACTOR_MAP_ENV: ""}):
+        plain_uuid = build_content("q", asked_by=user3)
+        assert plain_uuid.startswith(MIRROR_TAG + " " + user3), plain_uuid
 
     # 러너 판정: pytest 환경변수만으로도 차단된다.
     with patch.dict(
