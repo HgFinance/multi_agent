@@ -96,6 +96,14 @@ services:
       QA_API_URL: ${QA_API_URL:-http://audit-api:8000}
       KANBAN_ATTACH_ROOT: /opt/kanban/kanban/attachments
       KANBAN_WORKSPACE_ROOT: /opt/kanban/kanban/workspaces
+      # Discord 연동(2026-08-18). 셋 다 비어 있으면 관련 기능만 조용히 꺼지고
+      # CEO 질의 자체는 그대로 동작한다 - Discord 장애/미설정이 질의 접수를
+      # 막지 않는다는 정책(apps/api/discord_mirror.py 머리말).
+      #   토큰: 읽기(apps/api/discord_read.py) + 미러 게시(discord_mirror.py) 공용.
+      #         값은 .env에만 두고 이 파일·프론트 번들·이벤트 payload에 넣지 않는다.
+      DISCORD_BOT_TOKEN_CEO: ${DISCORD_BOT_TOKEN_CEO:-}
+      DISCORD_CEO_CHANNEL_ID: ${DISCORD_CEO_CHANNEL_ID:-}
+      DISCORD_ACTOR_MAP: ${DISCORD_ACTOR_MAP:-}
     volumes:
       - portfolio_runtime_data:/var/lib/portfolio
       # BFF uses Hermes CLI only for the repository-owned Kanban create

@@ -12,8 +12,11 @@
 
 from __future__ import annotations
 
+import os
 import unittest
+from unittest.mock import patch
 
+from apps.api.discord_actor_map import ACTOR_MAP_ENV, resolve as resolve_actor
 from apps.api.discord_mirror import MIRROR_TAG, build_content
 from orchestration.ceo_workflow_scope import build_root_body
 from orchestration.discord_delivery import correlation_from_task
@@ -98,6 +101,50 @@ class MirrorContentTest(unittest.TestCase):
         self.assertLessEqual(len(content), 2000)
         self.assertTrue(content.endswith("…(잘림)"))
 
+
+
+class DiscordActorMappingTest(unittest.TestCase):
+    """Discord 작성자 id를 테스트 계정으로 바꾸는 표(`DISCORD_ACTOR_MAP`).
+
+    이 표가 없으면 Discord 질의의 `requested_by=`에 Discord 숫자 id가 박히고
+    `fund_id`가 비어 Mandate 스냅샷이 붙지 않는다 - 웹에서 물으면 붙고
+    Discord에서 물으면 안 붙는 상태가 된다.
+    """
+
+    USER3 = "00000000-0000-4000-8000-00000000cec2"
+    FUND3 = "3838f7d6-0c7c-4e54-85f3-316a451e7eeb"
+    DISCORD_ID = "123456789012345678"
+
+    def test_mapped_author_resolves_to_the_test_account(self) -> None:
+        entry = f"{self.DISCORD_ID}:{self.USER3}:{self.FUND3}"
+        with patch.dict(os.environ, {ACTOR_MAP_ENV: entry}):
+            binding = resolve_actor(self.DISCORD_ID)
+
+        self.assertIsNotNone(binding)
+        self.assertEqual(binding.user_id, self.USER3)
+        self.assertEqual(binding.fund_id, self.FUND3)
+
+    def test_unmapped_author_is_left_alone(self) -> None:
+        """매핑이 없으면 기본 계정으로 채우지 않는다(개발 원칙 9).
+
+        임의의 계정으로 채우면 그 사람이 정하지 않은 한도가 판단 근거가 된다.
+        `None`이면 Mandate 없이 진행하고, 그게 정확한 사실이다.
+        """
+
+        entry = f"{self.DISCORD_ID}:{self.USER3}:{self.FUND3}"
+        with patch.dict(os.environ, {ACTOR_MAP_ENV: entry}):
+            self.assertIsNone(resolve_actor("999999999999999999"))
+
+    def test_malformed_entry_does_not_kill_the_rest(self) -> None:
+        """오타 한 줄로 표 전체가 죽지 않는다 - BFF 기동을 막으면 안 된다."""
+
+        raw = f"@홍길동:{self.USER3}:{self.FUND3},{self.DISCORD_ID}:{self.USER3}:{self.FUND3}"
+        with patch.dict(os.environ, {ACTOR_MAP_ENV: raw}):
+            self.assertIsNotNone(resolve_actor(self.DISCORD_ID))
+
+    def test_unset_map_is_empty_not_an_error(self) -> None:
+        with patch.dict(os.environ, {ACTOR_MAP_ENV: ""}):
+            self.assertIsNone(resolve_actor(self.DISCORD_ID))
 
 if __name__ == "__main__":
     unittest.main()
