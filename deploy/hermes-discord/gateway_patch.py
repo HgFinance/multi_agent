@@ -233,6 +233,7 @@ def _event_key(adapter: Any, event: Any) -> str | None:
 INGRESS_URL_ENV = "HGFINANCE_DISCORD_INGRESS_URL"
 INGRESS_TIMEOUT_ENV = "HGFINANCE_DISCORD_INGRESS_TIMEOUT_SECONDS"
 INGRESS_SECRET_ENV = "CEO_DISCORD_INGRESS_API_KEY"
+INGRESS_PROFILES = frozenset({"ceo-agent", "trading-department"})
 
 
 def _ingress_url() -> str:
@@ -278,7 +279,11 @@ def _forward_to_ingress(message: Any, adapter: Any) -> bool:
     """
 
     url = _ingress_url()
-    if not url or _profile_name() != "ceo-agent":
+    # Both human-facing PAPER order channels terminate at the same canonical
+    # BFF boundary.  A message written to Trading still creates the governed
+    # CEO root + Trading child workflow; it must never bypass Kanban or call
+    # the OMS directly.  Every other department keeps its normal Hermes path.
+    if not url or _profile_name() not in INGRESS_PROFILES:
         return False
     ingress_secret = _ingress_secret()
     if ingress_secret is None:

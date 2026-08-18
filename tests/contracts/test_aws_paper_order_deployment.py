@@ -174,7 +174,7 @@ def test_production_bff_uses_supabase_jwt_but_private_operational_data() -> None
     assert "SUPABASE_SERVICE_ROLE_KEY" not in environment
 
 
-def test_discord_ingress_secret_is_scoped_to_bff_and_ceo_hermes() -> None:
+def test_discord_ingress_secret_is_scoped_to_bff_and_order_gateways() -> None:
     services = _yaml(OVERLAY_PATH)["services"]
     secret_key = "CEO_DISCORD_INGRESS_API_KEY"
     required_value = (
@@ -186,11 +186,16 @@ def test_discord_ingress_secret_is_scoped_to_bff_and_ceo_hermes() -> None:
         for service_name, service in services.items()
         if secret_key in (service.get("environment") or {})
     }
-    assert recipients == {"portfolio-bff", "ceo-hermes"}
+    assert recipients == {"portfolio-bff", "ceo-hermes", "trading-hermes"}
     assert services["portfolio-bff"]["environment"][secret_key] == required_value
     ceo_environment = services["ceo-hermes"]["environment"]
     assert ceo_environment[secret_key] == required_value
     assert ceo_environment["HGFINANCE_DISCORD_INGRESS_URL"] == (
+        "http://portfolio-bff:8000/ui/ceo/ingress"
+    )
+    trading_environment = services["trading-hermes"]["environment"]
+    assert trading_environment[secret_key] == required_value
+    assert trading_environment["HGFINANCE_DISCORD_INGRESS_URL"] == (
         "http://portfolio-bff:8000/ui/ceo/ingress"
     )
 

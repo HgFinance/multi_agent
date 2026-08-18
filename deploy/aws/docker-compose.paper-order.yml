@@ -133,6 +133,11 @@ services:
       CEO_DISCORD_INGRESS_API_KEY: ${CEO_DISCORD_INGRESS_API_KEY:?CEO_DISCORD_INGRESS_API_KEY is required}
       HGFINANCE_DISCORD_INGRESS_URL: http://portfolio-bff:8000/ui/ceo/ingress
 
+  trading-hermes:
+    environment:
+      CEO_DISCORD_INGRESS_API_KEY: ${CEO_DISCORD_INGRESS_API_KEY:?CEO_DISCORD_INGRESS_API_KEY is required}
+      HGFINANCE_DISCORD_INGRESS_URL: http://portfolio-bff:8000/ui/ceo/ingress
+
   paper-order-orchestrator-mcp:
     depends_on:
       timescaledb:
