@@ -24,16 +24,22 @@
    CEO 최종 답변이 같은 코드 경로로 그 메시지에 붙는다. 즉 미러 게시는 곁다리가
    아니라 웹 경로가 Discord와 이어지는 지점이다.
 
-## 에코 루프가 생기지 않는 이유
+## 에코 루프
 
-이 게시물의 작성자는 **봇**이다. Hermes gateway의 admission 판정은
-`deploy/hermes-discord/gateway_patch.py`가 원본 정책을 그대로 쓰고(주석: "Do not
-change permission/mention policy"), 봇 메시지를 사람 발화로 집지 않는다. 그래서
-미러 게시가 CEO를 다시 부르지 않는다.
+이 게시물의 작성자는 봇이다. Hermes gateway의 admission 판정은
+`deploy/hermes-discord/gateway_patch.py`가 원본 정책을 그대로 쓰므로
+(주석: "Do not change permission/mention policy"), 봇 메시지를 사람 발화로
+집지 않을 **것으로 보인다** - 그러나 그 정책은 이 저장소가 소유하지 않으며,
+확인되기 전까지 사실로 취급하지 않는다.
 
-**단, 이 모듈은 그 사실에 의존하지 않는다.** 게시물 앞에 `[web-mirror]` 표시를
-붙여, 나중에 admission 정책이 바뀌더라도 사람이든 코드든 "이건 미러다"를 구분할
-수 있게 한다(`ceo_mirror.py`의 `mirrored=true`와 같은 취지).
+방어선은 셋이다:
+  1. `DISCORD_MIRROR_ENABLED`(아래) - 켠다고 적지 않으면 아무 글도 안 쓴다.
+  2. `[web-mirror]` 접두어 - 사람이든 코드든 미러를 구분할 수 있다
+     (`ceo_mirror.py`의 `mirrored=true`와 같은 취지).
+  3. 게시는 **요청 하나당 한 번**이고 답변·진행 상황 발송은 별도 경로
+     (`discord_delivery.py`)가 dedup 키로 막는다.
+
+채널이 미러 글로 넘치면 1번을 끄는 것이 즉시 정지 스위치다.
 
 ## 실패하면 조용히 넘어간다
 
@@ -62,6 +68,19 @@ DISCORD_API = "https://discord.com/api/v10"
 CHANNEL_ENV = "DISCORD_CEO_CHANNEL_ID"
 TOKEN_ENV = "DISCORD_BOT_TOKEN_CEO"
 
+# **명시적 opt-in.** 토큰과 채널이 환경에 있다는 이유만으로 글을 쓰지 않는다.
+#
+# 왜 필요한가 (2026-08-18 실측 사고): 단위 테스트가 `ceo_query`를 부르면 이
+# 모듈이 그대로 실행된다. 테스트 프로세스에 토큰이 들어 있으면(다른 모듈의
+# `load_dotenv()` 한 번이면 충분하다) **테스트가 실제 팀 채널에 글을 쓴다.**
+# 실제로 그렇게 됐다 - 픽스처 질의 "q"가 채널에 올라갔다.
+#
+# 그래서 "설정이 있으니 켠다"가 아니라 "켠다고 적어야 켠다"로 뒤집는다. 배포는
+# docker-compose.yml에서 명시적으로 true를 준다(개발 원칙 9: 위험한 기능은
+# 실패 시 확대가 아니라 차단 방향으로).
+ENABLED_ENV = "DISCORD_MIRROR_ENABLED"
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
 # 미러 게시물임을 드러내는 접두어. 사람이 채널만 봐도 구분할 수 있어야 한다.
 MIRROR_TAG = "[web-mirror]"
 
@@ -81,13 +100,26 @@ class MirrorPost:
     guild_id: str | None = None
 
 
+def mirror_enabled() -> bool:
+    """미러 게시가 켜져 있는가. **기본값은 꺼짐이다.**
+
+    매 호출마다 환경변수를 읽는다 - 테스트가 켜고 끌 수 있어야 하고, 모듈 상수로
+    굳히면 import 순서에 따라 테스트가 서로를 오염시킨다(`current_user.auth_required()`
+    와 같은 이유).
+    """
+
+    return os.getenv(ENABLED_ENV, "").strip().casefold() in _TRUTHY
+
+
 def _config() -> tuple[str, str] | None:
-    """(토큰, 채널 id). 둘 중 하나라도 비어 있으면 `None`.
+    """(토큰, 채널 id). 꺼져 있거나 둘 중 하나라도 비어 있으면 `None`.
 
     **값을 로그에 남기지 않는다.** 설정 누락은 "무엇이 비었는지"만 알면 고칠 수
     있고, 토큰이 로그로 새면 그 로그를 보는 모든 사람이 발송 권한을 갖는다.
     """
 
+    if not mirror_enabled():
+        return None
     token = os.getenv(TOKEN_ENV, "").strip()
     channel_id = os.getenv(CHANNEL_ENV, "").strip()
     if not token or not channel_id:
@@ -104,7 +136,22 @@ def _config() -> tuple[str, str] | None:
     return token, channel_id
 
 
-def build_content(query: str, *, asked_by: str | None = None) -> str:
+def _asked_by_label(asked_by: object) -> str | None:
+    """요청자 표시 문자열. **문자열이 아니면 버린다.**
+
+    `ceo_query(req)`를 FastAPI 없이 직접 부르면 `owner_id`의 기본값이 FastAPI의
+    `Depends(...)` 객체 그대로다. 그걸 그대로 찍어서 채널에 `[web-mirror]
+    Depends(dependency=<function optional_current_user ...>)`가 올라갔다
+    (2026-08-18 실측). 표시용 값 하나 때문에 내부 객체가 새면 안 된다.
+    """
+
+    if not isinstance(asked_by, str):
+        return None
+    label = asked_by.strip()
+    return label or None
+
+
+def build_content(query: str, *, asked_by: object = None) -> str:
     """채널에 올릴 본문.
 
     질의 원문을 그대로 싣는다 - 요약하면 Discord 이력과 Kanban 카드의 질문이
@@ -114,9 +161,8 @@ def build_content(query: str, *, asked_by: str | None = None) -> str:
     채널은 팀원 모두가 보고, 스냅샷은 Kanban root body에 이미 있다.
     """
 
-    header = MIRROR_TAG
-    if asked_by:
-        header = f"{MIRROR_TAG} {asked_by}"
+    label = _asked_by_label(asked_by)
+    header = f"{MIRROR_TAG} {label}" if label else MIRROR_TAG
     body = f"{header}\n{query.strip()}"
     if len(body) <= _DISCORD_CONTENT_LIMIT:
         return body
@@ -127,7 +173,7 @@ def build_content(query: str, *, asked_by: str | None = None) -> str:
     return body[:keep] + suffix
 
 
-def post_question(query: str, *, asked_by: str | None = None) -> MirrorPost | None:
+def post_question(query: str, *, asked_by: object = None) -> MirrorPost | None:
     """질의를 채널에 게시하고 그 메시지의 좌표를 준다. 실패하면 `None`.
 
     예외를 올리지 않는다 - 이 게시가 실패했다고 사용자의 질문 접수까지 실패하면,
@@ -217,14 +263,29 @@ if __name__ == "__main__":
     assert len(clipped) <= _DISCORD_CONTENT_LIMIT, len(clipped)
     assert clipped.endswith("…(잘림)"), clipped[-20:]
 
-    # 설정이 없으면 게시를 시도하지 않고 None. 이 경로가 예외를 올리면 질의
-    # 접수 전체가 Discord 설정에 묶인다.
-    saved = {name: os.environ.pop(name, None) for name in (TOKEN_ENV, CHANNEL_ENV)}
-    try:
+    # Depends 객체 같은 비문자열은 표시하지 않는다(2026-08-18 실측 유출).
+    class _Sentinel:
+        def __repr__(self) -> str:
+            return "Depends(dependency=<function optional_current_user>)"
+
+    leaked = build_content("q", asked_by=_Sentinel())
+    assert leaked == MIRROR_TAG + chr(10) + "q", leaked
+    assert "Depends" not in leaked, leaked
+
+    # **꺼져 있으면 아무것도 하지 않는다.** 토큰·채널이 환경에 있어도 마찬가지 -
+    # 테스트가 실제 채널에 글을 쓰는 사고를 막는 기본 방어선이다.
+    from unittest.mock import patch
+
+    with patch.dict(
+        os.environ,
+        {ENABLED_ENV: "", TOKEN_ENV: "dummy-token", CHANNEL_ENV: "123"},
+    ):
+        assert mirror_enabled() is False
+        assert post_question("꺼져 있음") is None
+
+    # 켜져 있어도 설정이 없으면 None. 예외를 올리면 질의 접수 전체가 묶인다.
+    with patch.dict(os.environ, {ENABLED_ENV: "true", TOKEN_ENV: "", CHANNEL_ENV: ""}):
+        assert mirror_enabled() is True
         assert post_question("설정 없음") is None
-    finally:
-        for name, value in saved.items():
-            if value is not None:
-                os.environ[name] = value
 
     print("discord_mirror self-check ok")

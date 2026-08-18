@@ -146,5 +146,51 @@ class DiscordActorMappingTest(unittest.TestCase):
         with patch.dict(os.environ, {ACTOR_MAP_ENV: ""}):
             self.assertIsNone(resolve_actor(self.DISCORD_ID))
 
+
+class UserToFundReverseLookupTest(unittest.TestCase):
+    """`user_id -> fund_id` 역참조가 매핑표의 fund를 대신한다.
+
+    `governance.fund_memberships`가 0건이던 동안에는 이 조회가 불가능해서
+    프론트엔드가 fund를 계정과 쌍으로 하드코딩했다. 2026-08-18 seed로 소유
+    관계가 채워지며 서버가 직접 풀 수 있게 됐고, 매핑표의 fund 칸은 선택이 됐다.
+    """
+
+    USER3 = "00000000-0000-4000-8000-00000000cec2"
+
+    def test_two_field_entry_leaves_fund_to_the_lookup(self) -> None:
+        with patch.dict(os.environ, {ACTOR_MAP_ENV: f"123456789012345678:{self.USER3}"}):
+            binding = resolve_actor("123456789012345678")
+
+        self.assertIsNotNone(binding)
+        self.assertEqual(binding.user_id, self.USER3)
+        self.assertIsNone(binding.fund_id)
+
+    def test_declared_fund_still_wins(self) -> None:
+        """3칸으로 적으면 그 값이 역참조보다 우선한다.
+
+        governance-api가 없는 환경을 위한 명시적 우회다 - 적어 놓은 값을 서버
+        추론이 덮으면 무엇이 쓰였는지 알 수 없다.
+        """
+
+        fund = "3838f7d6-0c7c-4e54-85f3-316a451e7eeb"
+        with patch.dict(
+            os.environ, {ACTOR_MAP_ENV: f"123456789012345678:{self.USER3}:{fund}"}
+        ):
+            self.assertEqual(resolve_actor("123456789012345678").fund_id, fund)
+
+    def test_lookup_failure_is_not_an_exception(self) -> None:
+        """governance-api가 없으면 `None`이다 - 질의 접수를 막지 않는다.
+
+        `importlib.reload`로 모듈을 다시 읽지 않는다. reload는 그 모듈 객체를
+        **프로세스 전역으로** 갈아치워서, 같은 실행 안의 다른 테스트가 들고 있던
+        참조까지 함께 바뀐다(실측: tests/api 6건이 이 한 줄 때문에 깨졌다).
+        모듈 상수만 잠시 비운다.
+        """
+
+        from apps.api import governance_client
+
+        with patch.object(governance_client, "GOVERNANCE_API_URL", ""):
+            self.assertIsNone(governance_client.fetch_fund_id_by_user(self.USER3))
+
 if __name__ == "__main__":
     unittest.main()

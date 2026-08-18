@@ -19,22 +19,24 @@ Discord 계정으로 질문하면 배정된 테스트 유저의 Mandate로 판�
 갈라진다. 작성자 id는 표시 이름과 달리 **바뀌지 않는다**(`discord_read.py`가
 부서를 이름 대신 봇 user id로 가르는 것과 같은 이유).
 
-## 왜 fund_id까지 이 표에 적나
+## fund_id는 선택이다
 
-BFF에는 `DATABASE_URL`이 없고(docker-compose.yml의 portfolio-bff), governance-api
-에도 `user_id -> fund_id` 역참조 엔드포인트가 없다. `governance.fund_memberships`
-는 채워졌지만 그걸 읽을 경로가 이 프로세스에 없다. 프론트엔드가 같은 이유로
-`fund_id`를 짝으로 들고 다닌다(`ai-office/app/lib/currentAccount.ts`).
+**권장 형식은 2칸(`discord_id:user_uuid`)이다.** `fund_id`는
+`GET /governance/v1/users/{user_id}/fund`가 `governance.fund_memberships`에서
+풀어 준다(2026-08-18 추가). 표에 fund를 또 적으면 소유 관계가 바뀌었을 때
+두 곳을 고쳐야 하고, 한쪽만 고치면 조용히 어긋난다.
 
-역참조 경로가 생기면 이 표에서 fund를 빼고 user_id만 남긴다.
+3칸(`discord_id:user_uuid:fund_uuid`)도 받는다 - governance-api가 없거나
+역참조가 아직 안 되는 환경을 위한 명시적 우회다. 3칸으로 적으면 그 값이
+역참조보다 우선한다(`ceo_mirror_api._ceo_query`).
 
 ## 형식
 
-    DISCORD_ACTOR_MAP=<discord_user_id>:<test_user_uuid>:<fund_uuid>
+    DISCORD_ACTOR_MAP=<discord_user_id>:<test_user_uuid>
 
-여러 명은 쉼표로 잇는다. 공백·줄바꿈은 무시한다.
+여러 명은 쉼표로 잇는다. 공백·줄바꿈은 무시한다. 사람마다 uuid가 다르다.
 
-    DISCORD_ACTOR_MAP=111:0000...cec2:3838...beb,222:0000...cec0:b13f...296
+    DISCORD_ACTOR_MAP=111:0000...cec2,222:0000...cec0
 
 ## 매핑이 없으면
 
@@ -75,11 +77,14 @@ _LOGGER = logging.getLogger("uvicorn.error")
 
 @dataclass(frozen=True)
 class ActorBinding:
-    """Discord 작성자 한 명이 가리키는 테스트 계정."""
+    """Discord 작성자 한 명이 가리키는 테스트 계정.
+
+    `fund_id`가 `None`이면 호출부가 `user_id`로 역참조한다 - 그게 기본 경로다.
+    """
 
     discord_user_id: str
     user_id: str
-    fund_id: str
+    fund_id: str | None = None
 
 
 def _parse(raw: str) -> dict[str, ActorBinding]:
@@ -93,23 +98,33 @@ def _parse(raw: str) -> dict[str, ActorBinding]:
     for entry in re.split(r"[,\s]+", raw.strip()):
         if not entry:
             continue
-        parts = entry.split(":")
+        parts = [part.strip() for part in entry.split(":")]
+        if len(parts) == 2:
+            parts.append("")  # fund는 선택 - 없으면 역참조로 푼다.
         if len(parts) != 3:
             _LOGGER.warning(
-                "discord-actor-map status=skipped reason=expected_3_fields entry=%s",
+                "discord-actor-map status=skipped reason=expected_2_or_3_fields entry=%s",
                 entry,
             )
             continue
-        discord_user_id, user_id, fund_id = (part.strip() for part in parts)
+        discord_user_id, user_id, fund_id = parts
         if not _SNOWFLAKE_RE.match(discord_user_id):
             _LOGGER.warning(
                 "discord-actor-map status=skipped reason=not_a_discord_id value=%s",
                 discord_user_id,
             )
             continue
-        if not _UUID_RE.match(user_id) or not _UUID_RE.match(fund_id):
+        if not _UUID_RE.match(user_id):
             _LOGGER.warning(
                 "discord-actor-map status=skipped reason=not_a_uuid discord_id=%s",
+                discord_user_id,
+            )
+            continue
+        if fund_id and not _UUID_RE.match(fund_id):
+            # fund가 적혔는데 모양이 틀렸으면 그 항목을 버린다. 조용히 무시하고
+            # 역참조로 넘어가면, 사용자는 자기가 적은 fund가 쓰인 줄 안다.
+            _LOGGER.warning(
+                "discord-actor-map status=skipped reason=not_a_uuid_fund discord_id=%s",
                 discord_user_id,
             )
             continue
@@ -122,7 +137,9 @@ def _parse(raw: str) -> dict[str, ActorBinding]:
             )
             continue
         table[discord_user_id] = ActorBinding(
-            discord_user_id=discord_user_id, user_id=user_id, fund_id=fund_id
+            discord_user_id=discord_user_id,
+            user_id=user_id,
+            fund_id=fund_id or None,
         )
     return table
 
@@ -175,6 +192,16 @@ if __name__ == "__main__":
     with patch.dict(os.environ, {ACTOR_MAP_ENV: broken}):
         table = actor_table()
         assert list(table) == ["123456789012345678"], list(table)
+
+    # 2칸 형식(권장) - fund는 역참조로 푼다.
+    with patch.dict(os.environ, {ACTOR_MAP_ENV: f"123456789012345678:{user3}"}):
+        binding = resolve("123456789012345678")
+        assert binding is not None and binding.user_id == user3, binding
+        assert binding.fund_id is None, binding
+
+    # fund 모양이 틀리면 그 항목을 버린다(조용히 역참조로 넘어가지 않는다).
+    with patch.dict(os.environ, {ACTOR_MAP_ENV: f"123456789012345678:{user3}:not-a-uuid"}):
+        assert resolve("123456789012345678") is None
 
     # 미설정이면 빈 표. 예외를 올리지 않는다.
     with patch.dict(os.environ, {ACTOR_MAP_ENV: ""}):

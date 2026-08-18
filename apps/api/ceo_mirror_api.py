@@ -26,6 +26,7 @@ try:
     from .ceo import CeoAsk
     from .ceo_schemas import CeoQueryAcceptedResponse
     from .discord_actor_map import resolve as resolve_discord_actor
+    from .governance_client import fetch_fund_id_by_user
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
     from ceo_mirror import (  # type: ignore[no-redef]
         CanonicalIngress,
@@ -43,6 +44,7 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
     from ceo import CeoAsk  # type: ignore[no-redef]
     from ceo_schemas import CeoQueryAcceptedResponse  # type: ignore[no-redef]
     from discord_actor_map import resolve as resolve_discord_actor  # type: ignore[no-redef]
+    from governance_client import fetch_fund_id_by_user  # type: ignore[no-redef]
 
 
 router = APIRouter(prefix="/ui/ceo", tags=["ceo-mirror"])
@@ -84,6 +86,15 @@ def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
             # 요청이 이미 fund를 실어 보냈으면 그쪽이 우선한다 - 매핑은 fund를
             # 모르는 경로를 위한 기본값이지, 명시된 값을 덮어쓰는 규칙이 아니다.
             fund_id = fund_id or binding.fund_id
+
+    # `user_id -> fund_id` 역참조(2026-08-18). `governance.fund_memberships`가
+    # 채워지면서 서버가 직접 풀 수 있게 됐다 - 그 전까지는 프론트엔드가 계정과
+    # fund를 쌍으로 하드코딩해 보내는 것 말고 방법이 없었다.
+    #
+    # 명시된 `fund_id`가 있으면 조회하지 않는다: 호출자가 지정한 Fund를 서버
+    # 추론으로 덮으면, 화면이 보고 있는 Fund와 판단 근거가 달라진다.
+    if owner_id and not fund_id:
+        fund_id = fetch_fund_id_by_user(owner_id)
 
     return ceo.ceo_query(
         CeoAsk(
