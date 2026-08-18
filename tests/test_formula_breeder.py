@@ -472,14 +472,38 @@ def test_governed_stock_predicate_wraps_every_result_memory_query():
     assert "EVENT_TIME_HISTORICAL_ONLY" in breeder._CALIBRATION_FAILURES_SQL
 
 
-def test_adaptive_memory_uses_raw_manifest_plus_per_rung_stock_evidence():
+def test_adaptive_memory_accepts_only_exact_live_or_external_raw_authority():
     for query in (breeder._CALIBRATION_FAILURES_SQL,
                   breeder._SCREEN_OUTCOMES_SQL):
         assert "m.name = 'krx-intraday-events'" in query
+        assert "m.name = 'krx-intraday-completed-second'" in query
         assert "m.version = 'v1'" in query
         assert "m.universe_version_id is null" in query
         assert "LIVE_SLICE_REQUIRES_PER_EXPERIMENT_AUDIT" in query
         assert "timescaledb://market/{market_quotes,market_ticks}" in query
+        assert "postgresql+fdw://ext_src/{quotes,ticks}" in query
+        assert "trading-bot-completed-second-book-v1" in query
+        assert "trading-bot-completed-second-trade-v1" in query
+        assert "completed-second-state-median-taker-envelope-v1" in query
+        assert "HISTORICAL_COMPLETED_SECOND_REQUIRES_PER_EXPERIMENT_AUDIT" \
+            in query
+        assert "event_time_only_no_receipt_clock" in query
+        assert "completed_source_second<=decision_time" in query
+        assert "effective_entry_time+horizon" in query
+        assert "HISTORICAL_SEARCH_ONLY" in query
+        assert "[09:00:00,15:30:00) Asia/Seoul" in query
+        assert "ext_src.quotes" in query
+        assert "ext_src.ticks" in query
+        assert "external-daily-source-content-manifest-v3" in query
+        assert "external-daily-source-content-manifest-v2" not in query
+        assert "pg-composite-row-xor0-sum1-sha256-v1" in query
+        assert "KRX_REGULAR_SESSION_HALF_OPEN_0900_1530_KST_V1" in query
+        assert "external-raw-replay-content-v3" in query
+        assert "consumed_replay_content_fingerprint" in query
+        assert "consumed_replay_content_manifest_rows" in query
+        assert "content_manifest_rows" in query
+        assert "content_quote_rows" in query
+        assert "content_trade_rows" in query
         assert "m.content_hash ~ '^[0-9a-f]{64}$'" in query
         assert "source_lineage" in query
         assert "content_fingerprint" in query
