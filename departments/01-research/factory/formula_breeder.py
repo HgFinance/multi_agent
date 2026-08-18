@@ -78,47 +78,90 @@ def _evaluator_for_window_contract(contract_version: object) -> str:
 _GOVERNED_STOCK_EVIDENCE = governed_stock_evidence_sql(
     experiment_alias="e", dataset_alias="m", hypothesis_alias="h")
 
-# ``krx-intraday-events/v1`` is an authoritative live raw-event handle, not an
-# immutable materialized panel.  Its ``universe_version_id`` and ``row_count``
-# are therefore deliberately NULL; the exact stock/session/content slice is
-# frozen in the append-only rung and exposure ledgers below.  Do not reuse the
-# daily-manifest ``governed_stock_dataset_sql`` predicate here: it requires a
+# The live receipt-clock source and the governed historical completed-second
+# FDW source are raw authorities, not immutable materialized panels.  Their
+# ``universe_version_id`` and ``row_count`` are therefore deliberately NULL;
+# the exact stock/session/content slice is frozen in the append-only rung and
+# exposure ledgers below.  Do not reuse the daily-manifest
+# ``governed_stock_dataset_sql`` predicate here: it requires a
 # universe_version_id and permanently filters every valid intraday rung.
 #
 # Keep this exception as narrow as the resolver's raw-source contract.  A
 # different NULL-universe manifest cannot become outcome memory merely by
 # claiming to be an intraday dataset.
 _RAW_INTRADAY_DATASET = """
-      m.name = 'krx-intraday-events'
-      and m.version = 'v1'
+      m.version = 'v1'
       and m.universe_version_id is null
       and m.row_count is null
       and m.partitions = '[]'::jsonb
-      and m.object_path =
-          'timescaledb://market/{market_quotes,market_ticks}'
       and m.content_hash ~ '^[0-9a-f]{64}$'
-      and m.source_versions->>'market_quotes' = 'ls-realtime-book-v1'
-      and m.source_versions->>'market_ticks' = 'ls-realtime-trade-v1'
       and m.feature_spec_versions->>'intraday_microstructure' =
           'intraday-microstructure-v1'
       and m.feature_spec_versions->>'intraday_alpha_ast' =
           'intraday-alpha-ast-v1'
-      and m.quality_summary->>'status' =
-          'LIVE_SLICE_REQUIRES_PER_EXPERIMENT_AUDIT'
-      and m.quality_summary->>'missing_received_at' = 'reject'
-      and m.point_in_time_policy->>'knowledge_clock' =
-          'available_at=max(received_at,observed_at)'
-      and m.point_in_time_policy->>'feature_cutoff' =
-          'event_time<=decision_time and available_at<=decision_time'
-      and m.point_in_time_policy->>'label_cutoff' = 'entry_time+horizon'
       and m.point_in_time_policy->>'instrument_isolation' = 'true'
-      and m.schema_definition->'market_quotes'->'required' @>
-          '["event_time","received_at","observed_at","instrument_id",'
-          '"bid_prices","bid_sizes","ask_prices","ask_sizes",'
-          '"source_event_id"]'::jsonb
-      and m.schema_definition->'market_ticks'->'required' @>
-          '["event_time","received_at","observed_at","instrument_id",'
-          '"price","quantity","side","source_event_id"]'::jsonb
+      and (
+        (
+          m.name = 'krx-intraday-events'
+          and m.object_path =
+              'timescaledb://market/{market_quotes,market_ticks}'
+          and m.source_versions->>'market_quotes' =
+              'ls-realtime-book-v1'
+          and m.source_versions->>'market_ticks' =
+              'ls-realtime-trade-v1'
+          and m.quality_summary->>'status' =
+              'LIVE_SLICE_REQUIRES_PER_EXPERIMENT_AUDIT'
+          and m.quality_summary->>'missing_received_at' = 'reject'
+          and m.point_in_time_policy->>'knowledge_clock' =
+              'available_at=max(received_at,observed_at)'
+          and m.point_in_time_policy->>'feature_cutoff' =
+              'event_time<=decision_time and available_at<=decision_time'
+          and m.point_in_time_policy->>'label_cutoff' = 'entry_time+horizon'
+          and m.schema_definition->'market_quotes'->'required' @>
+              '["event_time","received_at","observed_at","instrument_id",'
+              '"bid_prices","bid_sizes","ask_prices","ask_sizes",'
+              '"source_event_id"]'::jsonb
+          and m.schema_definition->'market_ticks'->'required' @>
+              '["event_time","received_at","observed_at","instrument_id",'
+              '"price","quantity","side","source_event_id"]'::jsonb
+        ) or (
+          m.name = 'krx-intraday-completed-second'
+          and m.object_path =
+              'postgresql+fdw://ext_src/{quotes,ticks}'
+          and m.source_versions->>'market_quotes' =
+              'trading-bot-completed-second-book-v1'
+          and m.source_versions->>'market_ticks' =
+              'trading-bot-completed-second-trade-v1'
+          and m.feature_spec_versions->>'clock_aggregation' =
+              'completed-second-state-median-taker-envelope-v1'
+          and m.quality_summary->>'status' =
+              'HISTORICAL_COMPLETED_SECOND_REQUIRES_PER_EXPERIMENT_AUDIT'
+          and m.quality_summary->>'timestamp_resolution' = 'SECOND'
+          and m.quality_summary->>'intra_second_order' = 'UNAVAILABLE'
+          and m.quality_summary->>'receipt_clock' = 'UNAVAILABLE'
+          and m.quality_summary->>'execution' = 'TAKER_ONLY'
+          and m.point_in_time_policy->>'knowledge_clock' =
+              'event_time_only_no_receipt_clock'
+          and m.point_in_time_policy->>'feature_cutoff' =
+              'completed_source_second<=decision_time'
+          and m.point_in_time_policy->>'label_cutoff' =
+              'effective_entry_time+horizon'
+          and m.point_in_time_policy->>'evidence_scope' =
+              'HISTORICAL_SEARCH_ONLY'
+          and m.point_in_time_policy->>'content_window' =
+              '[09:00:00,15:30:00) Asia/Seoul'
+          and m.point_in_time_policy->>'maximum_horizon_seconds' = '600'
+          and m.schema_definition->'market_quotes'->'physical_table' =
+              '"ext_src.quotes"'::jsonb
+          and m.schema_definition->'market_quotes'->'required' @>
+              '["ts","symbol","bid1","ask1","bid_vol1","ask_vol1",'
+              '"bid10","ask10","bid_vol10","ask_vol10"]'::jsonb
+          and m.schema_definition->'market_ticks'->'physical_table' =
+              '"ext_src.ticks"'::jsonb
+          and m.schema_definition->'market_ticks'->'required' @>
+              '["ts","symbol","price","volume","ofi_contrib"]'::jsonb
+        )
+      )
 """
 
 
@@ -152,7 +195,34 @@ def _raw_rung_content_sql(rung_alias: str) -> str:
                        source_row->>'source' in
                            ('ext_src.quotes','ext_src.ticks')
                        and source_row->>'content_hash_contract' =
-                           'external-daily-source-content-manifest-v2'
+                           'external-daily-source-content-manifest-v3'
+                       and source_row->>'source_content_hash_contract' =
+                           'pg-composite-row-xor0-sum1-sha256-v1'
+                       and source_row->>'source_content_window_contract' =
+                           'KRX_REGULAR_SESSION_HALF_OPEN_0900_1530_KST_V1'
+                       and source_row->>'consumed_replay_content_contract' =
+                           'external-raw-replay-content-v3'
+                       and coalesce(source_row->>
+                           'consumed_replay_content_fingerprint','') ~
+                           '^[0-9a-f]{{64}}$'
+                       and coalesce(source_row->>
+                           'consumed_replay_content_manifest_rows','') ~
+                           '^[1-9][0-9]*$'
+                       and coalesce(source_row->>'content_manifest_rows','') ~
+                           '^[1-9][0-9]*$'
+                       and coalesce(source_row->>'content_quote_rows','') ~
+                           '^[1-9][0-9]*$'
+                       and coalesce(source_row->>'content_trade_rows','') ~
+                           '^[1-9][0-9]*$'
+                       and case source_row->>'source'
+                         when 'ext_src.quotes' then
+                           source_row->>'rows' =
+                               source_row->>'content_quote_rows'
+                         when 'ext_src.ticks' then
+                           source_row->>'rows' =
+                               source_row->>'content_trade_rows'
+                         else false
+                       end
                      when 'LOCAL_RECEIPT_CLOCK' then
                        source_row->>'source' in
                            ('market.market_quotes','market.market_ticks')
@@ -160,6 +230,22 @@ def _raw_rung_content_sql(rung_alias: str) -> str:
                            'postgres-jsonb-multiset-v1'
                      else false
                    end)
+                 and case {rung}.source_watermark->>'event_source'
+                   when 'EXTERNAL_FDW_EVENT_TIME' then
+                     count(distinct source_row->>'content_fingerprint') = 1
+                     and count(distinct source_row->>
+                         'consumed_replay_content_fingerprint') = 1
+                     and count(distinct source_row->>
+                         'content_manifest_rows') = 1
+                     and count(distinct source_row->>
+                         'consumed_replay_content_manifest_rows') = 1
+                     and count(distinct source_row->>
+                         'content_quote_rows') = 1
+                     and count(distinct source_row->>
+                         'content_trade_rows') = 1
+                   when 'LOCAL_RECEIPT_CLOCK' then true
+                   else false
+                 end
             from jsonb_array_elements(
                    {rung}.source_watermark->'source_lineage') source_row
       )
