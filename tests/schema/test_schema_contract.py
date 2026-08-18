@@ -209,6 +209,9 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  # interpretation and only the trusted PAPER orchestrator may
                  # attach the resulting directive.
                  "20260818001600_ceo_hermes_paper_order_workflow.sql",
+                 # Trading may verify canonical Risk evidence but remains
+                 # unable to author or mutate Risk-owned state.
+                 "20260818001700_trading_runtime_risk_read.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 
