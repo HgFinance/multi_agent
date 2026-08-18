@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 from collections import deque
@@ -248,14 +249,18 @@ def _side(code: str | None) -> str | None:
 
 
 def _symbol(value: str | None) -> str | None:
-    """실시간은 `A005930`, 잔고 조회는 `005930`으로 준다. 6자리 숫자로 맞춘다.
+    """실시간 `A` 접두사를 제거하고 6자리 영숫자 KRX 코드로 맞춘다.
 
     두 경로의 종목코드가 어긋나면 로컬 포지션과 브로커 잔고를 대조할 수 없다.
     """
     if not value:
         return None
-    digits = "".join(ch for ch in value if ch.isdigit())
-    return digits[-6:] if len(digits) >= 6 else (digits or value.strip() or None)
+    text = str(value).strip().upper()
+    if re.fullmatch(r"[0-9A-Z]{6}", text):
+        return text
+    if text.startswith("A") and re.fullmatch(r"[0-9A-Z]{6}", text[1:]):
+        return text[1:]
+    return None
 
 
 def _account(body: dict[str, Any]) -> str | None:

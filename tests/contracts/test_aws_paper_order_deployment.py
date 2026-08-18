@@ -14,6 +14,7 @@ OVERLAY_PATH = ROOT / "deploy" / "aws" / "docker-compose.paper-order.yml"
 DEPLOY_SCRIPT = ROOT / "scripts" / "aws_deploy_paper_order_release.sh"
 PROFILE_INSTALLER = ROOT / "scripts" / "aws_install_hermes_profiles.py"
 DOCKERIGNORE = ROOT / ".dockerignore"
+AWS_RUNBOOK = ROOT / "deploy" / "aws" / "README.md"
 
 
 class _ComposeLoader(yaml.SafeLoader):
@@ -398,6 +399,13 @@ def test_release_script_is_worktree_only_and_fail_closed() -> None:
     assert '-f "$release_path/docker-compose.yml"' in script
     assert '-f "$release_path/deploy/aws/docker-compose.paper-order.yml"' in script
     assert '--env-file "$RUNTIME_ENV"' in script
+    assert 'ORIGINAL_ARGS=("$@")' in script
+    assert 'TARGET_DEPLOY_SCRIPT="$RELEASE/scripts/aws_deploy_paper_order_release.sh"' in script
+    assert 'HGFINANCE_DEPLOY_HANDOFF_COMMIT' in script
+    assert 'exec bash "$TARGET_DEPLOY_SCRIPT" "${ORIGINAL_ARGS[@]}"' in script
+    assert script.index('exec bash "$TARGET_DEPLOY_SCRIPT"') < script.index(
+        'RUNTIME_ENV="$RELEASES_ROOT/state/runtime.env"'
+    )
     assert "--allow-first-deploy" in script
     assert "--skip-database-backup" in script
     assert "pg_dump" in script
@@ -428,6 +436,59 @@ def test_release_script_is_worktree_only_and_fail_closed() -> None:
     assert 'grep -Fq "process_user_paper_order"' in script
     assert "Tools discovered:" in script
     assert "hedgefund-trading-hermes" in script
+    assert "assert_release_owned_container" in script
+    assert 'com.docker.compose.project.working_dir' in script
+    assert 'com.docker.compose.project.config_files' in script
+    assert 'com.docker.compose.config-hash' in script
+    assert 'config --hash "$service_name"' in script
+    ownership_gate = script.split("assert_release_owned_container()", 1)[1].split(
+        "\n}", 1
+    )[0]
+    assert ownership_gate.count("|| return 1") >= 7
+    activation = script.split("activate_release_services()", 1)[1].split("\n}", 1)[0]
+    assert 'stop_order_hermes || return 1' in activation
+    assert 'up -d --no-deps redis || return 1' in activation
+    assert 'force-recreate ls-realtime || return 1' in activation
+    assert 'hedgefund-ls-realtime ls-realtime || return 1' in activation
+    assert "non_order_services" not in activation
+    assert "--remove-orphans" not in activation
+    assert 'force-recreate trading-api || return 1' in activation
+    assert 'paper-order-orchestrator-mcp portfolio-bff || return 1' in activation
+    assert 'ceo-hermes trading-hermes || return 1' in activation
+    assert (
+        activation.index('force-recreate trading-api')
+        < activation.index('wait_container hedgefund-trading-api')
+        < activation.index('paper-order-orchestrator-mcp portfolio-bff')
+        < activation.index('ceo-hermes trading-hermes')
+        < activation.index('wait_hermes_gateway hedgefund-ceo-hermes')
+        < activation.index('smoke_ceo_discord_ingress')
+    )
+    assert 'capture_rollback_images' in script
+    assert 'compose_release "$PREVIOUS_RELEASE" build' in script
+    assert 'hgfinance-rollback/${container_name#hedgefund-}' in script
+    assert 'restore_rollback_images' in script
+    rollback = script.split("rollback_release()", 1)[1].split("\n}", 1)[0]
+    assert (
+        rollback.index("restore_rollback_images")
+        < rollback.index('activate_release_services "$PREVIOUS_RELEASE"')
+    )
+    assert 'mv -Tf -- "$rollback_link" "$CURRENT_LINK"' in rollback
+    assert '"$previous_commit" >"$RELEASES_ROOT/state/current-commit"' in rollback
+    assert "SWITCH_STARTED == 0" in rollback
+    main_activation = script.rindex('activate_release_services "$RELEASE"')
+    assert main_activation < script.index('printf \'%s\\n\' "$RELEASE_COMMIT"')
+    assert "smoke_ceo_discord_ingress" in script
+    ceo_smoke = script.split("smoke_ceo_discord_ingress()", 1)[1].split("\n}", 1)[0]
+    assert 'test -n "${CEO_DISCORD_INGRESS_API_KEY:-}"' in ceo_smoke
+    assert 'test "${HGFINANCE_DISCORD_INGRESS_URL:-}" =' in ceo_smoke
+    assert 'data=b"{}"' in ceo_smoke
+    assert "exc.code == 422" in ceo_smoke
+    assert "urllib.request.urlopen" in ceo_smoke
+    assert "CEO_DISCORD_INGRESS_API_KEY:-}" not in script.split(
+        "smoke_ceo_discord_ingress()", 1
+    )[1].split("\n}", 1)[0].replace(
+        'test -n "${CEO_DISCORD_INGRESS_API_KEY:-}"', ""
+    )
     assert "MCP_TRADING_ORDER_API_KEY" not in script.split(
         "smoke_trading_paper_order_mcp()", 1
     )[1].split("}", 1)[0]
@@ -459,7 +520,6 @@ def test_release_script_is_worktree_only_and_fail_closed() -> None:
     assert '"/.well-known/jwks.json"' in script
     assert 'install -d -m 700 -- "$backup_root"' in script
     assert "rollback_release" in script
-    assert "--remove-orphans" in script
     assert "git pull" not in script
     assert "git reset" not in script
     assert "git clean" not in script
@@ -467,16 +527,38 @@ def test_release_script_is_worktree_only_and_fail_closed() -> None:
     assert "--volumes" not in script
     assert "set -x" not in script
 
+    runbook = AWS_RUNBOOK.read_text(encoding="utf-8")
+    assert "never run `docker compose up`" in runbook
+    assert "`/home/ubuntu/hgfinance`" in runbook
+    assert "config hash" in runbook
+
     build_command = (
         'compose_release "$RELEASE" --profile deployment build --pull'
     )
     pull_command = 'compose_release "$RELEASE" pull --policy missing'
     assert build_command in script
+    build_scope = script.split(build_command, 1)[1].split("\nEXTERNAL_PULL_PLAN", 1)[0]
+    for service in (
+        "ls-realtime",
+        "trading-api",
+        "paper-order-orchestrator-mcp",
+        "portfolio-bff",
+        "ceo-hermes",
+        "database-bootstrap",
+        "reference-bootstrap",
+    ):
+        assert service in build_scope
+    assert "factory-autopilot" not in build_scope
+    assert "accounting-api" not in build_scope
     assert pull_command in script
     assert script.index(build_command) < script.index(pull_command)
     assert "external_pull_service_plan" in script
-    assert "locally_built_images" in script
-    assert 'image not in locally_built_images' in script
+    external_plan = script.split("external_pull_service_plan()", 1)[1].split(
+        "\n}", 1
+    )[0]
+    assert '("redis", "timescaledb", "trading-hermes")' in external_plan
+    assert 'print(f"{name}\\t{image}")' in external_plan
+    assert 'docker image inspect "$external_image"' in script
     assert 'config --format json' in script
     assert '"${EXTERNAL_PULL_SERVICES[@]}"' in script
     assert "--ignore-pull-failures" not in script

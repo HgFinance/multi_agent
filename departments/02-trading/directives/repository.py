@@ -384,7 +384,7 @@ class InMemoryDirectiveRepository:
         if len(symbol_ids) > 1:
             raise DirectiveRepositoryError(
                 "TRADING_INSTRUMENT_AMBIGUOUS",
-                "multiple active instruments match the six-digit symbol",
+                "multiple active instruments match the KRX symbol",
                 409,
             )
         resolved_id = instrument_id or (next(iter(symbol_ids)) if symbol_ids else None)
@@ -1146,7 +1146,8 @@ class PostgresDirectiveRepository:
                   join reference.instrument_symbols sy on sy.instrument_id=i.instrument_id
                  where i.status='ACTIVE' and i.asset_class='EQUITY'
                    and i.instrument_type='STOCK' and i.market='KRX'
-                   and sy.symbol=%s and sy.valid_from<=now()
+                   and sy.symbol=%s and sy.symbol ~ '^[0-9A-Z]{6}$'
+                   and sy.valid_from<=now()
                    and (sy.valid_to is null or sy.valid_to>now())
                    and (%s::uuid is null or i.instrument_id=%s::uuid)
                 """,
@@ -1249,7 +1250,7 @@ class PostgresDirectiveRepository:
                        and i.status='ACTIVE' and i.asset_class='EQUITY'
                        and i.instrument_type='STOCK' and i.market='KRX'
                   left join reference.instrument_symbols sy on sy.instrument_id=i.instrument_id
-                       and sy.symbol ~ '^[0-9]{6}$'
+                       and sy.symbol ~ '^[0-9A-Z]{6}$'
                        and sy.valid_from<=now() and (sy.valid_to is null or sy.valid_to>now())
                  group by p.instrument_id,p.quantity,i.lot_size,i.tick_size,i.currency
                  order by min(sy.symbol)
@@ -1263,7 +1264,7 @@ class PostgresDirectiveRepository:
             if row[2] is None or row[4] is None or len(symbols) != 1:
                 raise DirectiveRepositoryError(
                     "TRADING_POSITION_INSTRUMENT_UNSUPPORTED",
-                    "positive position requires exactly one active six-digit KRX stock identity",
+                    "positive position requires exactly one active KRX stock identity",
                     409,
                 )
             result.append(
@@ -1735,7 +1736,7 @@ class PostgresDirectiveRepository:
                       from reference.instrument_symbols s
                      where s.instrument_id=i.instrument_id and s.valid_from<=now()
                        and (s.valid_to is null or s.valid_to>now())
-                       and s.symbol ~ '^[0-9]{6}$'
+                       and s.symbol ~ '^[0-9A-Z]{6}$'
                   ) sy on true
                  where i.fund_id=%s and i.book_id=%s
                    and o.broker_adapter='paper'

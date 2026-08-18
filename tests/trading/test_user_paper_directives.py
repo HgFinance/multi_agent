@@ -497,6 +497,64 @@ def test_postgres_directive_sql_respects_immutable_proofs_and_locks_only_orders(
     assert "for update of o" not in release_barrier
     assert "left join lateral" in cancel_open_orders
     assert "for update of o" in cancel_open_orders
+    assert postgres_source.count("symbol ~ '^[0-9a-z]{6}$'") >= 3
+    assert "symbol ~ '^[0-9]{6}$'" not in postgres_source
+
+
+def test_trading_contract_strip_uppers_exact_alphanumeric_krx_symbol() -> None:
+    h = Harness()
+    request = h.request(
+        DirectiveAction.PLACE_ORDER,
+        payload={
+            "instrument_id": None,
+            "symbol": " 00088k ",
+            "side": "BUY",
+            "quantity": "1",
+            "order_type": "MARKET",
+            "limit_price": None,
+            "time_in_force": "DAY",
+        },
+    )
+
+    assert request.place_order().symbol == "00088K"
+    assert request.canonical_payload()["symbol"] == "00088K"
+
+    for invalid in ("00088-", "00088KK", "Samsung Electronics"):
+        with pytest.raises(ValueError):
+            h.request(
+                DirectiveAction.PLACE_ORDER,
+                payload={**request.payload, "symbol": invalid},
+            )
+
+
+def test_postgres_resolution_filters_exact_alphanumeric_krx_symbol() -> None:
+    instrument_id = uuid4()
+
+    class Cursor:
+        statement = ""
+        params = ()
+
+        def execute(self, statement, params):
+            self.statement = " ".join(statement.split())
+            self.params = params
+
+        def fetchall(self):
+            return [(instrument_id, "00088K", Decimal(1), None, "KRW")]
+
+    cursor = Cursor()
+
+    @contextmanager
+    def fake_cursor():
+        yield cursor
+
+    repository = PostgresDirectiveRepository("postgresql://unused")
+    repository._cursor = fake_cursor  # type: ignore[method-assign]
+
+    resolved = repository.resolve_instrument(uuid4(), uuid4(), None, "00088K")
+
+    assert resolved.symbol == "00088K"
+    assert "sy.symbol ~ '^[0-9A-Z]{6}$'" in cursor.statement
+    assert cursor.params == ("00088K", None, None)
 
 
 def test_partial_direct_cancel_is_partial_and_retains_unaccounted_fill_reservation():

@@ -212,6 +212,9 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  # Trading may verify canonical Risk evidence but remains
                  # unable to author or mutate Risk-owned state.
                  "20260818001700_trading_runtime_risk_read.sql",
+                 # PAPER order payloads and legs accept canonical six-character
+                 # uppercase alphanumeric KRX stock codes.
+                 "20260819000100_krx_alphanumeric_trading_symbols.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 

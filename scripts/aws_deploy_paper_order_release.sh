@@ -4,6 +4,7 @@
 
 set -Eeuo pipefail
 umask 077
+ORIGINAL_ARGS=("$@")
 
 PROJECT_NAME="hedgefund"
 LEGACY_ROOT="/home/ubuntu/hgfinance"
@@ -23,6 +24,18 @@ RUNTIME_ENV=""
 PROFILE_RUNTIME_ROOT="/home/ubuntu/.hermes"
 PROFILE_BACKUP_DIR=""
 PROFILE_INSTALL_ACTIVE=0
+ROLLBACK_IMAGES_CAPTURED=0
+declare -A ROLLBACK_IMAGE_REF_BY_CONTAINER=()
+declare -A ROLLBACK_IMAGE_TAG_BY_CONTAINER=()
+
+MANAGED_RELEASE_SERVICE_SPECS=(
+  "hedgefund-ls-realtime:ls-realtime"
+  "hedgefund-trading-api:trading-api"
+  "hedgefund-paper-order-orchestrator-mcp:paper-order-orchestrator-mcp"
+  "hedgefund-portfolio-bff:portfolio-bff"
+  "hedgefund-ceo-hermes:ceo-hermes"
+  "hedgefund-trading-hermes:trading-hermes"
+)
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -132,6 +145,25 @@ fi
 [[ -f "$RELEASE/docker-compose.yml" ]] || die "release has no root compose file"
 [[ -f "$RELEASE/deploy/aws/docker-compose.paper-order.yml" ]] \
   || die "release has no AWS PAPER overlay"
+
+# A deploy invoked from `current` must use the target release's deployment
+# logic, not the previous release's copy. Hand off exactly once before any
+# runtime state, profiles, databases or containers can change. The short
+# unlock window is fail-closed: a concurrent deploy wins the lock and this
+# target process exits without mutating runtime state.
+TARGET_DEPLOY_SCRIPT="$RELEASE/scripts/aws_deploy_paper_order_release.sh"
+[[ -f "$TARGET_DEPLOY_SCRIPT" ]] || die "release has no PAPER deploy script"
+CURRENT_DEPLOY_SCRIPT="$(realpath -e -- "$0" 2>/dev/null || true)"
+TARGET_DEPLOY_SCRIPT="$(realpath -e -- "$TARGET_DEPLOY_SCRIPT")" \
+  || die "target deploy script is not readable"
+if [[ "$CURRENT_DEPLOY_SCRIPT" != "$TARGET_DEPLOY_SCRIPT" ]]; then
+  [[ "${HGFINANCE_DEPLOY_HANDOFF_COMMIT:-}" != "$RELEASE_COMMIT" ]] \
+    || die "deployment script handoff loop detected"
+  export HGFINANCE_DEPLOY_HANDOFF_COMMIT="$RELEASE_COMMIT"
+  flock -u 9
+  exec 9>&-
+  exec bash "$TARGET_DEPLOY_SCRIPT" "${ORIGINAL_ARGS[@]}"
+fi
 
 CURRENT_LINK="$RELEASES_ROOT/current"
 if [[ -L "$CURRENT_LINK" ]]; then
@@ -487,26 +519,20 @@ compose_release() {
 }
 
 external_pull_service_plan() {
-  # Compose treats `latest` as remotely refreshable even under `--policy
-  # missing`.  Some runtime-only services intentionally reuse an image built
-  # by another service without declaring their own `build` stanza, so asking
-  # Compose to pull every non-buildable service would still try to pull those
-  # project-local names from Docker Hub.  Emit only services whose image is
-  # not produced anywhere in this Compose model.
+  # Emit only external images used by this bounded deployment. The caller
+  # independently checks Docker's local image store before pulling, because
+  # Compose treats mutable tags as refreshable even under `--policy missing`.
   python3 -c '
 import json
 import sys
 
 services = json.load(sys.stdin).get("services", {})
-locally_built_images = {
-    service.get("image")
-    for service in services.values()
-    if service.get("build") and service.get("image")
-}
-for name, service in sorted(services.items()):
+for name in ("redis", "timescaledb", "trading-hermes"):
+    service = services.get(name) or {}
     image = service.get("image")
-    if not service.get("build") and image and image not in locally_built_images:
-        print(name)
+    if service.get("build") or not image:
+        raise SystemExit(f"invalid external deployment service: {name}")
+    print(f"{name}\t{image}")
 '
 }
 
@@ -558,6 +584,187 @@ smoke_trading_paper_order_mcp() {
   ' >/dev/null 2>&1
 }
 
+wait_hermes_gateway() {
+  local container_name="$1" timeout_seconds="$2" elapsed=0 state
+  while ((elapsed < timeout_seconds)); do
+    if docker exec "$container_name" pgrep -f 'hermes gateway run --replace' \
+      >/dev/null 2>&1; then
+      return 0
+    fi
+    state="$(container_state "$container_name")"
+    case "$state" in exited|dead|unhealthy) return 1 ;; esac
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+  return 1
+}
+
+assert_release_owned_container() {
+  local release_path="$1" container_name="$2" service_name="$3"
+  local expected_files metadata actual_project actual_working_dir actual_files
+  local actual_service actual_hash expected_hash
+  expected_files="$release_path/docker-compose.yml,$release_path/deploy/aws/docker-compose.paper-order.yml"
+  metadata="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.project.working_dir"}}|{{index .Config.Labels "com.docker.compose.project.config_files"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "com.docker.compose.config-hash"}}' "$container_name")" \
+    || return 1
+  IFS='|' read -r actual_project actual_working_dir actual_files actual_service actual_hash <<<"$metadata"
+  expected_hash="$(
+    compose_release "$release_path" config --hash "$service_name" \
+      | awk -v service="$service_name" '$1 == service { print $2 }'
+  )"
+  [[ -n "$expected_hash" ]] || return 1
+  [[ "$actual_project" == "$PROJECT_NAME" ]] || return 1
+  [[ "$actual_working_dir" == "$release_path" ]] || return 1
+  [[ "$actual_files" == "$expected_files" ]] || return 1
+  [[ "$actual_service" == "$service_name" ]] || return 1
+  [[ "$actual_hash" == "$expected_hash" ]] || return 1
+}
+
+smoke_ceo_discord_ingress() {
+  # Check only presence and the non-secret internal route. Never emit the
+  # bearer credential: deployment output must remain safe to retain.
+  docker exec hedgefund-ceo-hermes sh -eu -c '
+    test -n "${CEO_DISCORD_INGRESS_API_KEY:-}"
+    test "${HGFINANCE_DISCORD_INGRESS_URL:-}" = "http://portfolio-bff:8000/ui/ceo/ingress"
+  ' >/dev/null 2>&1 || return 1
+  docker exec hedgefund-portfolio-bff sh -eu -c '
+    test -n "${CEO_DISCORD_INGRESS_API_KEY:-}"
+    test -n "${DISCORD_ACTOR_MAP:-}"
+  ' >/dev/null 2>&1 || return 1
+  # Exercise the exact authenticated private hop without creating a directive:
+  # an empty object must reach BFF validation and be rejected as 422.
+  docker exec hedgefund-ceo-hermes python -c '
+import os
+import urllib.error
+import urllib.request
+
+request = urllib.request.Request(
+    os.environ["HGFINANCE_DISCORD_INGRESS_URL"],
+    data=b"{}",
+    headers={
+        "Authorization": "Bearer " + os.environ["CEO_DISCORD_INGRESS_API_KEY"],
+        "Content-Type": "application/json",
+    },
+    method="POST",
+)
+try:
+    urllib.request.urlopen(request, timeout=10)
+except urllib.error.HTTPError as exc:
+    raise SystemExit(0 if exc.code == 422 else 1) from None
+raise SystemExit(1)
+  ' >/dev/null 2>&1 || return 1
+}
+
+capture_rollback_images() {
+  local spec container_name service_name image_id image_ref protected_tag previous_commit
+  local expected_images
+  [[ -n "$PREVIOUS_RELEASE" ]] || return 0
+  previous_commit="${PREVIOUS_RELEASE##*/}"
+  [[ "$previous_commit" =~ ^[0-9a-f]{40,64}$ ]] || return 1
+  compose_release "$PREVIOUS_RELEASE" config --quiet || return 1
+  # Rebuild the four local order-path images from the exact previous worktree.
+  # This also repairs a mutable tag that an out-of-band legacy Compose command
+  # may have overwritten. The external Trading Hermes image is instead taken
+  # from its release-owned running container below.
+  compose_release "$PREVIOUS_RELEASE" build \
+    ls-realtime trading-api paper-order-orchestrator-mcp portfolio-bff ceo-hermes \
+    || return 1
+  expected_images="$(compose_release "$PREVIOUS_RELEASE" config --images)" || return 1
+  assert_release_owned_container \
+    "$PREVIOUS_RELEASE" hedgefund-trading-hermes trading-hermes || return 1
+  for spec in "${MANAGED_RELEASE_SERVICE_SPECS[@]}"; do
+    container_name="${spec%%:*}"
+    service_name="${spec#*:}"
+    docker inspect "$container_name" >/dev/null 2>&1 || return 1
+    image_ref="$(docker inspect --format '{{.Config.Image}}' "$container_name")" || return 1
+    grep -Fxq -- "$image_ref" <<<"$expected_images" || return 1
+    if [[ "$service_name" == "trading-hermes" ]]; then
+      image_id="$(docker inspect --format '{{.Image}}' "$container_name")" || return 1
+    else
+      image_id="$(docker image inspect --format '{{.Id}}' "$image_ref")" || return 1
+    fi
+    [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+    [[ -n "$image_ref" && "$image_ref" != *@sha256:* ]] || return 1
+    docker image inspect "$image_id" >/dev/null 2>&1 || return 1
+    protected_tag="hgfinance-rollback/${container_name#hedgefund-}:$previous_commit"
+    docker image tag "$image_id" "$protected_tag" || return 1
+    ROLLBACK_IMAGE_REF_BY_CONTAINER["$container_name"]="$image_ref"
+    ROLLBACK_IMAGE_TAG_BY_CONTAINER["$container_name"]="$protected_tag"
+  done
+  ROLLBACK_IMAGES_CAPTURED=1
+}
+
+restore_rollback_images() {
+  local spec container_name image_ref protected_tag
+  ((ROLLBACK_IMAGES_CAPTURED == 1)) || return 0
+  for spec in "${MANAGED_RELEASE_SERVICE_SPECS[@]}"; do
+    container_name="${spec%%:*}"
+    image_ref="${ROLLBACK_IMAGE_REF_BY_CONTAINER[$container_name]:-}"
+    protected_tag="${ROLLBACK_IMAGE_TAG_BY_CONTAINER[$container_name]:-}"
+    [[ -n "$image_ref" && -n "$protected_tag" ]] || return 1
+    docker image inspect "$protected_tag" >/dev/null 2>&1 || return 1
+    docker image tag "$protected_tag" "$image_ref" || return 1
+  done
+}
+
+remove_rollback_image_tags() {
+  local spec container_name protected_tag
+  ((ROLLBACK_IMAGES_CAPTURED == 1)) || return 0
+  for spec in "${MANAGED_RELEASE_SERVICE_SPECS[@]}"; do
+    container_name="${spec%%:*}"
+    protected_tag="${ROLLBACK_IMAGE_TAG_BY_CONTAINER[$container_name]:-}"
+    [[ -z "$protected_tag" ]] || docker image rm "$protected_tag" >/dev/null 2>&1 || true
+  done
+  ROLLBACK_IMAGES_CAPTURED=0
+}
+
+stop_order_hermes() {
+  local container_name
+  for container_name in hedgefund-ceo-hermes hedgefund-trading-hermes; do
+    if [[ "$(docker inspect --format '{{.State.Running}}' "$container_name" 2>/dev/null || true)" == "true" ]]; then
+      docker stop --time 20 "$container_name" >/dev/null || return 1
+    fi
+  done
+}
+
+activate_release_services() {
+  local release_path="$1"
+  stop_order_hermes || return 1
+  # Keep every unrelated team service and image untouched. Only shared Redis,
+  # the LS market-data reader and the five PAPER order-path services belong to
+  # this bounded release switch.
+  compose_release "$release_path" up -d --no-deps redis || return 1
+  wait_container hedgefund-timescaledb 240 || return 1
+  wait_container hedgefund-redis 180 || return 1
+  compose_release "$release_path" up -d --no-deps --force-recreate ls-realtime || return 1
+  wait_container hedgefund-ls-realtime 180 || return 1
+  assert_release_owned_container "$release_path" hedgefund-ls-realtime ls-realtime || return 1
+
+  # Establish the deterministic backend chain before either gateway can read
+  # a Discord message or dispatch an order card.
+  compose_release "$release_path" up -d --no-deps --force-recreate trading-api || return 1
+  wait_container hedgefund-trading-api 240 || return 1
+  compose_release "$release_path" up -d --no-deps --force-recreate \
+    paper-order-orchestrator-mcp portfolio-bff || return 1
+  wait_container hedgefund-paper-order-orchestrator-mcp 240 || return 1
+  wait_http_ready hedgefund-portfolio-bff 8000 /health/ready 240 || return 1
+  wait_http_ready hedgefund-accounting-api 8000 /health/ready 180 || return 1
+
+  assert_release_owned_container "$release_path" hedgefund-trading-api trading-api || return 1
+  assert_release_owned_container "$release_path" hedgefund-paper-order-orchestrator-mcp paper-order-orchestrator-mcp || return 1
+  assert_release_owned_container "$release_path" hedgefund-portfolio-bff portfolio-bff || return 1
+
+  compose_release "$release_path" up -d --no-deps --force-recreate \
+    ceo-hermes trading-hermes || return 1
+  wait_container hedgefund-ceo-hermes 180 || return 1
+  wait_container hedgefund-trading-hermes 180 || return 1
+  wait_hermes_gateway hedgefund-ceo-hermes 180 || return 1
+  wait_hermes_gateway hedgefund-trading-hermes 180 || return 1
+  assert_release_owned_container "$release_path" hedgefund-ceo-hermes ceo-hermes || return 1
+  assert_release_owned_container "$release_path" hedgefund-trading-hermes trading-hermes || return 1
+  smoke_ceo_discord_ingress || return 1
+  smoke_trading_paper_order_mcp || return 1
+}
+
 backup_private_databases() {
   local backup_root="$RELEASES_ROOT/backups/$RELEASE_COMMIT"
   local database_name temporary target market_backed_up=0
@@ -589,10 +796,12 @@ backup_private_databases() {
 
 rollback_release() {
   local original_code="$1"
+  local image_restore_failed=0
   local profile_restore_failed=0
   local profile_restored=0
   local profile_restart_failed=0
-  local profile_container
+  local release_services_restored=0
+  local profile_container rollback_link previous_commit
   trap - ERR INT TERM
   set +e
   if [[ "$PROFILE_INSTALL_ACTIVE" == "1" && -n "$PROFILE_BACKUP_DIR" \
@@ -603,17 +812,27 @@ rollback_release() {
       && profile_restored=1 \
       || profile_restore_failed=1
   fi
+  restore_rollback_images >/dev/null 2>&1 || image_restore_failed=1
   if [[ "$SWITCH_STARTED" == "1" && -n "$PREVIOUS_RELEASE" ]]; then
     say "Release health failed; restoring the previous release (database migrations stay additive)..."
-    compose_release "$PREVIOUS_RELEASE" config --quiet >/dev/null 2>&1 \
-      && compose_release "$PREVIOUS_RELEASE" up -d --remove-orphans >/dev/null 2>&1
-    wait_container hedgefund-timescaledb 180
-    wait_container hedgefund-trading-api 180
-    wait_container hedgefund-paper-order-orchestrator-mcp 180
+    if ((image_restore_failed == 0)); then
+      compose_release "$PREVIOUS_RELEASE" config --quiet >/dev/null 2>&1 \
+        && activate_release_services "$PREVIOUS_RELEASE" >/dev/null 2>&1 \
+        && release_services_restored=1 \
+        || image_restore_failed=1
+      if ((release_services_restored == 1)); then
+        rollback_link="$RELEASES_ROOT/current.rollback.$$"
+        previous_commit="${PREVIOUS_RELEASE##*/}"
+        ln -s "$PREVIOUS_RELEASE" "$rollback_link" \
+          && mv -Tf -- "$rollback_link" "$CURRENT_LINK" \
+          && printf '%s\n' "$previous_commit" >"$RELEASES_ROOT/state/current-commit" \
+          || image_restore_failed=1
+      fi
+    fi
   elif [[ "$SWITCH_STARTED" == "1" ]]; then
     printf '%s\n' "ERROR: first deployment failed after service switch; no prior release exists" >&2
   fi
-  if ((profile_restored == 1)); then
+  if ((profile_restored == 1 && release_services_restored == 0 && SWITCH_STARTED == 0)); then
     # A running Hermes process may retain its startup config even after the
     # host files are restored. Restart only the two profile owners so the
     # restored files, existing credentials and durable state are reloaded.
@@ -628,6 +847,9 @@ rollback_release() {
   if ((profile_restore_failed == 1)); then
     printf '%s\n' "ERROR: previous Hermes runtime profiles require manual restoration" >&2
   fi
+  if ((image_restore_failed == 1)); then
+    printf '%s\n' "ERROR: previous release images or services require manual restoration" >&2
+  fi
   if ((profile_restart_failed == 1)); then
     printf '%s\n' "ERROR: a Hermes container did not reload its restored profile" >&2
   fi
@@ -638,16 +860,29 @@ trap 'rollback_release "$?"' ERR
 trap 'rollback_release 130' INT
 trap 'rollback_release 143' TERM
 
+say "Protecting the currently running order-path images for rollback..."
+capture_rollback_images
 say "Validating and building release $RELEASE_COMMIT..."
 compose_release "$RELEASE" config --quiet
-compose_release "$RELEASE" --profile deployment build --pull
+compose_release "$RELEASE" --profile deployment build --pull \
+  ls-realtime trading-api paper-order-orchestrator-mcp portfolio-bff ceo-hermes \
+  database-bootstrap reference-bootstrap
 EXTERNAL_PULL_PLAN="$(
   compose_release "$RELEASE" --profile deployment config --format json \
     | external_pull_service_plan
 )" || die "could not determine external Compose image pull plan"
 if [[ -n "$EXTERNAL_PULL_PLAN" ]]; then
-  mapfile -t EXTERNAL_PULL_SERVICES <<<"$EXTERNAL_PULL_PLAN"
-  compose_release "$RELEASE" pull --policy missing "${EXTERNAL_PULL_SERVICES[@]}"
+  EXTERNAL_PULL_SERVICES=()
+  while IFS=$'\t' read -r external_service external_image; do
+    [[ -n "$external_service" && -n "$external_image" ]] \
+      || die "invalid external Compose image pull plan"
+    if ! docker image inspect "$external_image" >/dev/null 2>&1; then
+      EXTERNAL_PULL_SERVICES+=("$external_service")
+    fi
+  done <<<"$EXTERNAL_PULL_PLAN"
+  if ((${#EXTERNAL_PULL_SERVICES[@]} > 0)); then
+    compose_release "$RELEASE" pull --policy missing "${EXTERNAL_PULL_SERVICES[@]}"
+  fi
 fi
 
 DATABASE_CONTAINER_EXISTED=0
@@ -726,17 +961,8 @@ python3 "$RELEASE/scripts/aws_install_hermes_profiles.py" install \
   --backup-dir "$PROFILE_BACKUP_DIR" >/dev/null
 
 SWITCH_STARTED=1
-compose_release "$RELEASE" up -d --remove-orphans
-wait_container hedgefund-timescaledb 240
-wait_container hedgefund-redis 180
-wait_container hedgefund-trading-api 240
-wait_container hedgefund-paper-order-orchestrator-mcp 240
-wait_container hedgefund-ceo-hermes 180
-wait_container hedgefund-trading-hermes 180
-wait_http_ready hedgefund-portfolio-bff 8000 /health/ready 240
-wait_http_ready hedgefund-accounting-api 8000 /health/ready 180
-say "Verifying Trading Hermes authenticated MCP tool discovery..."
-smoke_trading_paper_order_mcp
+say "Activating deterministic backends before the two Hermes gateways..."
+activate_release_services "$RELEASE"
 
 link_temp="$RELEASES_ROOT/current.tmp.$$"
 ln -s "$RELEASE" "$link_temp"
@@ -744,5 +970,6 @@ mv -Tf -- "$link_temp" "$CURRENT_LINK"
 printf '%s\n' "$RELEASE_COMMIT" >"$RELEASES_ROOT/state/current-commit"
 SWITCH_STARTED=0
 PROFILE_INSTALL_ACTIVE=0
+remove_rollback_image_tags
 trap - ERR INT TERM
 say "PAPER release activated: $RELEASE_COMMIT"

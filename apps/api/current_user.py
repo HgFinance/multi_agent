@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from functools import lru_cache
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -647,16 +648,19 @@ def resolve_active_trading_instrument(
     identifier: str,
     instrument_id: str | None = None,
 ) -> dict[str, str]:
-    """Resolve an exact six-digit code or exact display name to one KRX stock.
+    """Resolve an exact six-character code or exact display name to one KRX stock.
 
     Names are conveniences at the BFF edge, not trading identifiers.  The
     result is accepted only when the active reference catalog yields exactly
-    one current six-digit symbol; Trading independently resolves it again.
+    one current KRX symbol; Trading independently resolves it again.
     """
 
     query = " ".join(str(identifier).strip().split())
     if not query:
         raise _http_error(422, "paper_order_instrument_clarification_required")
+    canonical_code = query.upper()
+    if re.fullmatch(r"[0-9A-Z]{6}", canonical_code) is None:
+        canonical_code = None
     canonical_instrument_id: str | None = None
     if instrument_id is not None:
         try:
@@ -680,16 +684,25 @@ def resolve_active_trading_instrument(
                    and upper(i.instrument_type) = 'STOCK'
                    and sy.valid_from <= now()
                    and (sy.valid_to is null or sy.valid_to > now())
-                   and sy.symbol ~ '^[0-9]{6}$'
+                   and sy.symbol ~ '^[0-9A-Z]{6}$'
                    and (
                          sy.symbol = %s
-                         or regexp_replace(lower(i.display_name), '\\s+', '', 'g')
-                            = regexp_replace(lower(%s), '\\s+', '', 'g')
+                         or (
+                           %s::text is null
+                           and regexp_replace(lower(i.display_name), '\\s+', '', 'g')
+                               = regexp_replace(lower(%s), '\\s+', '', 'g')
+                         )
                        )
                    and (%s::uuid is null or i.instrument_id = %s::uuid)
                  order by sy.symbol, i.instrument_id::text
                 """,
-                (query, query, canonical_instrument_id, canonical_instrument_id),
+                (
+                    canonical_code,
+                    canonical_code,
+                    query,
+                    canonical_instrument_id,
+                    canonical_instrument_id,
+                ),
             )
             rows = cursor.fetchall()
     except (psycopg2.Error, TypeError, ValueError) as exc:

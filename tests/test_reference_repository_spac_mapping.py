@@ -52,6 +52,26 @@ def test_spac_marker_is_preserved_for_audit() -> None:
     assert record.metadata["is_spac"] is True
 
 
+def test_reference_master_canonicalizes_alphanumeric_krx_trading_symbol() -> None:
+    row = reference_repository._row(
+        " 00088k ", "KR7000880001", reference_repository.Venue.KOSPI
+    )
+
+    record = reference_repository.master_row_to_record(row, as_of=AS_OF)
+
+    assert record.provider_symbol == "00088K"
+    assert record.metadata["shcode"] == "00088K"
+
+
+def test_reference_master_rejects_arbitrary_non_code_symbol() -> None:
+    row = reference_repository._row(
+        "not-a-code", "KR7000880001", reference_repository.Venue.KOSPI
+    )
+
+    with pytest.raises(ValueError, match=r"\^\[0-9A-Z\]\{6\}\$"):
+        reference_repository.master_row_to_record(row, as_of=AS_OF)
+
+
 def test_spac_backfill_is_narrow_and_fail_closed() -> None:
     migration = (
         ROOT

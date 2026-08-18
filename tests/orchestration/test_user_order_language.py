@@ -244,6 +244,25 @@ def test_explicit_won_price_compiles_as_limit_and_preserves_code_mention() -> No
     assert result.payload.limit_price == "70000"
 
 
+def test_alphanumeric_krx_code_is_valid_exact_instrument_evidence() -> None:
+    raw = "00088k 5주 시장가 매수"
+    result = _execute_place(
+        raw,
+        _place_candidate(
+            raw,
+            instrument="00088k",
+            side_text="매수",
+            side=OrderSide.BUY,
+            quantity_text="5주",
+            quantity=5,
+            order_type_text="시장가",
+            order_type=OrderType.MARKET,
+        ),
+    )
+    assert result.payload is not None
+    assert result.payload.instrument_mention == "00088k"
+
+
 @pytest.mark.parametrize(
     ("price_text", "price"),
     [("지정가 70000", 70_000), ("지정가 7만원", 70_000), ("지정가 칠만원", 70_000)],

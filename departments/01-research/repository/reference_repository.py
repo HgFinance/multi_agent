@@ -49,6 +49,7 @@ REPOSITORY_VERSION = "research-reference-repository-v1"
 
 MARKET_KRX = "KRX"
 PROVIDER_LS = "LS"
+_KRX_TRADING_SYMBOL_RE = re.compile(r"^[0-9A-Z]{6}$")
 
 # document_instruments.extraction_version 에 남길 값. 언급 관계 판정 규칙이 바뀌면
 # 올린다 - 어떤 규칙으로 붙인 관계인지 나중에 구분할 수 있어야 한다.
@@ -161,6 +162,10 @@ def master_row_to_record(row: StockMasterRow, *, as_of: datetime) -> InstrumentR
     tick_size 는 넣지 않는다 - KRX 호가단위는 가격대별로 달라 단일값이 아니고 t8436 에도
     없다. 추정값을 넣으면 주문 검증이 조용히 틀어진다.
     """
+    provider_symbol = str(row.shcode or "").strip().upper()
+    if _KRX_TRADING_SYMBOL_RE.fullmatch(provider_symbol) is None:
+        raise ValueError("LS KRX trading symbol must match ^[0-9A-Z]{6}$")
+
     if row.is_etf:
         itype = "ETF"
     elif row.is_etn:
@@ -172,7 +177,7 @@ def master_row_to_record(row: StockMasterRow, *, as_of: datetime) -> InstrumentR
 
     return InstrumentRecord(
         isin=row.expcode,
-        display_name=row.hname or row.shcode,
+        display_name=row.hname or provider_symbol,
         market=MARKET_KRX,
         venue=row.venue.value,
         asset_class=AssetClass.EQUITY.value,
@@ -185,7 +190,7 @@ def master_row_to_record(row: StockMasterRow, *, as_of: datetime) -> InstrumentR
         metadata={
             "source": "ls:t8436",
             "as_of": as_of.isoformat(),
-            "shcode": row.shcode,
+            "shcode": provider_symbol,
             "security_group": row.security_group,
             "is_spac": row.is_spac,
             # 상·하한가와 전일가는 스냅샷이다. 정본은 시계열이며 참고용으로만 남긴다.
@@ -195,7 +200,7 @@ def master_row_to_record(row: StockMasterRow, *, as_of: datetime) -> InstrumentR
                 "lower_limit": row.lower_limit,
             },
         },
-        provider_symbol=row.shcode,
+        provider_symbol=provider_symbol,
     )
 
 
