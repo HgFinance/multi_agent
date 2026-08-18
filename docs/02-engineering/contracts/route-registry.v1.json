@@ -587,6 +587,10 @@
         },
         {
           "method": "GET",
+          "path": "/workforce/v1/improvements"
+        },
+        {
+          "method": "GET",
           "path": "/workforce/v1/improvements/{candidate_id}"
         },
         {
@@ -737,6 +741,10 @@
         {
           "method": "POST",
           "path": "/governance/v1/notifications"
+        },
+        {
+          "method": "GET",
+          "path": "/governance/v1/users/{user_id}/fund"
         },
         {
           "method": "GET",
@@ -957,6 +965,10 @@
           "path": "/ui/mandate-approvals"
         },
         {
+          "method": "GET",
+          "path": "/ui/market/rankings"
+        },
+        {
           "method": "POST",
           "path": "/ui/mandate-approvals/{approval_id}/decide"
         },
@@ -1007,6 +1019,10 @@
         {
           "method": "GET",
           "path": "/ui/portfolio/live"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/portfolio/ledger"
         },
         {
           "method": "POST",

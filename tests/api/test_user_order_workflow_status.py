@@ -9,6 +9,7 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
+from apps.api import user_order_workflow as workflow
 from apps.api import user_orders
 from apps.api.user_order_workflow import (
     UserOrderRequestRecord,
@@ -22,6 +23,28 @@ FUND_ID = str(uuid4())
 BOOK_ID = str(uuid4())
 ORDER_REQUEST_ID = str(uuid4())
 DIRECTIVE_ID = str(uuid4())
+
+
+def test_production_order_repository_requires_isolated_database_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("CONTROL_DATABASE_URL", "postgresql://generic.invalid/control")
+    monkeypatch.delenv("ORDER_ORCHESTRATOR_DATABASE_URL", raising=False)
+
+    with pytest.raises(UserOrderWorkflowUnavailable, match="dedicated order"):
+        workflow._order_orchestrator_database_url()
+
+
+def test_order_repository_prefers_isolated_database_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    isolated = "postgresql://order.invalid/control"
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("CONTROL_DATABASE_URL", "postgresql://generic.invalid/control")
+    monkeypatch.setenv("ORDER_ORCHESTRATOR_DATABASE_URL", isolated)
+
+    assert workflow._order_orchestrator_database_url() == isolated
 
 
 def _client(*, subject: str = OWNER_ID) -> TestClient:

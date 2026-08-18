@@ -129,6 +129,9 @@ def test_exact_sample_is_durably_bound_before_either_card_is_released(
     assert "삼성전자 매수 10주 시장가" in root_body
     assert "삼성전자 매수 10주 시장가" in trading_body
     assert "selected_primary_profiles=trading-department" in root_body
+    assert "managed omission default: order_type=MARKET" in trading_body
+    assert "limit_price=null, and no ORDER_TYPE evidence" in trading_body
+    assert "conflicting market/limit language, must CLARIFY" in trading_body
 
     stored = repository.get(response["order_request_id"])
     assert stored is not None

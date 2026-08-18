@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 _COMPOSE_TEST_ENV = {
     "DATABASE_URL": "postgresql://test:test@localhost/test",
     "HEDGEFUND_TSDB_PASSWORD": "compose-contract-test",
+    "CEO_DISCORD_INGRESS_API_KEY": "compose-discord-ingress-key-0123456789abcdef",
     "NAVER_CLIENT_ID": "compose-contract-test",
     "NAVER_CLIENT_SECRET": "compose-contract-test",
     "SUPABASE_URL": "https://compose-contract-test.invalid",

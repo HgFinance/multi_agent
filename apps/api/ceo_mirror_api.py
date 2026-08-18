@@ -6,7 +6,7 @@ import os
 import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 try:
@@ -25,7 +25,12 @@ try:
     )
     from .ceo import CeoAsk
     from .ceo_schemas import CeoQueryAcceptedResponse
-    from .current_user import current_user, require_fund_membership
+    from .current_user import (
+        authorized_trading_books,
+        current_user,
+        require_fund_membership,
+    )
+    from .discord_ingress_auth import request_is_authorized as discord_ingress_authorized
     from .discord_actor_map import resolve as resolve_discord_actor
     from .discord_mirror import post_question
     from .governance_client import fetch_fund_id_by_user
@@ -45,7 +50,14 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
     )
     from ceo import CeoAsk  # type: ignore[no-redef]
     from ceo_schemas import CeoQueryAcceptedResponse  # type: ignore[no-redef]
-    from current_user import current_user, require_fund_membership  # type: ignore[no-redef]
+    from current_user import (  # type: ignore[no-redef]
+        authorized_trading_books,
+        current_user,
+        require_fund_membership,
+    )
+    from discord_ingress_auth import (  # type: ignore[no-redef]
+        request_is_authorized as discord_ingress_authorized,
+    )
     from discord_actor_map import resolve as resolve_discord_actor  # type: ignore[no-redef]
     from discord_mirror import post_question  # type: ignore[no-redef]
     from governance_client import fetch_fund_id_by_user  # type: ignore[no-redef]
@@ -99,6 +111,7 @@ def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
         else None
     )
     fund_id = request.fund_id
+    book_id = request.book_id
 
     # Discord로 들어온 요청의 `actor_id`는 **Discord 작성자 id**다 - 테스트 계정
     # UUID가 아니다. 그대로 두면 `requested_by=`에 Discord 숫자 id가 박혀 계정별
@@ -108,12 +121,18 @@ def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
     # 매핑이 없으면 **아무것도 바꾸지 않는다.** 임의의 기본 계정으로 채우면
     # 사용자가 정하지 않은 한도가 판단 근거가 된다(개발 원칙 9).
     if request.source == "discord" and request.actor_type == "user":
+        # The private gateway authenticates the transport, but fund/book
+        # fields remain caller-controlled JSON. Derive Discord account scope
+        # only from the server-owned actor binding and database grants.
+        owner_id = None
+        fund_id = None
+        book_id = None
         binding = resolve_discord_actor(request.actor_id)
         if binding is not None:
             owner_id = binding.user_id
             # 요청이 이미 fund를 실어 보냈으면 그쪽이 우선한다 - 매핑은 fund를
             # 모르는 경로를 위한 기본값이지, 명시된 값을 덮어쓰는 규칙이 아니다.
-            fund_id = fund_id or binding.fund_id
+            fund_id = binding.fund_id
 
     # `user_id -> fund_id` 역참조(2026-08-18). `governance.fund_memberships`가
     # 채워지면서 서버가 직접 풀 수 있게 됐다 - 그 전까지는 프론트엔드가 계정과
@@ -123,6 +142,19 @@ def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
     # 추론으로 덮으면, 화면이 보고 있는 Fund와 판단 근거가 달라진다.
     if owner_id and not fund_id:
         fund_id = fetch_fund_id_by_user(owner_id)
+
+    if request.source == "discord" and owner_id and fund_id and not book_id:
+        # Discord carries a stable author id, not a browser-selected Book.  A
+        # unique ACTIVE trading Book for the mapped Fund is deterministic; an
+        # absent or ambiguous choice remains unset so the order admission
+        # boundary returns clarification instead of guessing an account.
+        matching_books = [
+            row
+            for row in authorized_trading_books(owner_id)
+            if str(row.get("fund_id") or "") == str(fund_id)
+        ]
+        if len(matching_books) == 1:
+            book_id = str(matching_books[0]["book_id"])
 
     # Discord 발송 좌표. `deliver()`가 channel_id와 message_id를 **둘 다** 요구한다.
     #
@@ -154,7 +186,7 @@ def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
             query=request.query,
             request_id=request.request_id,
             fund_id=fund_id,
-            book_id=request.book_id,
+            book_id=book_id,
         ),
         owner_id=owner_id,
         discord_channel_id=discord_channel_id,
@@ -302,10 +334,16 @@ def mirror_ask(
 @router.post("/ingress", status_code=202, response_model=MirrorIngressResponse)
 def mirror_ingress(
     request: CanonicalIngress,
+    http_request: Request,
     owner_id: str | None = Depends(current_user),
 ) -> MirrorIngressResponse:
     """Canonical ingress for a human Web or Discord message."""
 
+    internal_discord = discord_ingress_authorized(http_request)
+    if request.source == "discord" and not internal_discord:
+        raise HTTPException(status_code=401, detail="discord_ingress_authentication_required")
+    if request.source != "discord" and internal_discord:
+        raise HTTPException(status_code=403, detail="discord_ingress_source_forbidden")
     owner = _resolved_owner(owner_id)
     canonical = request
     if owner is not None:

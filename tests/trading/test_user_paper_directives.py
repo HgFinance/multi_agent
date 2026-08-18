@@ -447,6 +447,39 @@ def test_postgres_accounting_pending_query_matches_repository_contract(pending):
     assert "trading-user-directive-fill-v1" in normalized_sql
 
 
+def test_postgres_available_cash_uses_the_canonical_cash_account_code():
+    """Production chart-of-accounts stores cash as 1000, never ``CASH``."""
+
+    class Cursor:
+        statements: list[str]
+
+        def __init__(self):
+            self.statements = []
+
+        def execute(self, statement, params):
+            self.statements.append(" ".join(statement.split()))
+
+        def fetchone(self):
+            if len(self.statements) == 1:
+                return (Decimal("125000"),)
+            return (Decimal("25000"),)
+
+    cursor = Cursor()
+
+    @contextmanager
+    def fake_cursor():
+        yield cursor
+
+    repository = PostgresDirectiveRepository("postgresql://unused")
+    repository._cursor = fake_cursor  # type: ignore[method-assign]
+
+    available = repository.available_cash(uuid4(), uuid4(), "KRW")
+
+    assert available == Decimal("100000")
+    assert "la.account_code='1000'" in cursor.statements[0]
+    assert "la.account_code='CASH'" not in cursor.statements[0]
+
+
 def test_partial_direct_cancel_is_partial_and_retains_unaccounted_fill_reservation():
     h = Harness()
     h.repository.set_position(h.fund, h.book, h.instrument.instrument_id, Decimal("3"))

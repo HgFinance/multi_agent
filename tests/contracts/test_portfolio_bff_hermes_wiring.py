@@ -29,6 +29,10 @@ def test_portfolio_bff_uses_cli_for_kanban_and_remote_ceo_api() -> None:
     assert "HERMES_KANBAN_HOME: /opt/kanban" in bff
     assert "HERMES_KANBAN_DB: /opt/kanban/kanban.db" in bff
     assert "HERMES_CEO_API_URL: http://ceo-hermes:8642/v1" in bff
+    assert (
+        "CEO_DISCORD_INGRESS_API_KEY: "
+        "${CEO_DISCORD_INGRESS_API_KEY:?CEO_DISCORD_INGRESS_API_KEY is required}"
+    ) in bff
     assert "/home/ubuntu/.hermes/shared-kanban:/opt/kanban" in bff
     assert "/home/ubuntu/.hermes:/opt/data" not in bff
     assert '"${PORTFOLIO_BFF_PORT:-8001}:8000"' in bff
@@ -44,7 +48,22 @@ def test_ceo_gateway_exposes_only_authenticated_internal_api() -> None:
     assert "API_SERVER_HOST: 0.0.0.0" in ceo
     assert 'API_SERVER_PORT: "8642"' in ceo
     assert "API_SERVER_KEY: ${CEO_HERMES_API_KEY:-}" in ceo
+    assert (
+        "HGFINANCE_DISCORD_INGRESS_URL: "
+        "http://portfolio-bff:8000/ui/ceo/ingress"
+    ) in ceo
+    assert (
+        "CEO_DISCORD_INGRESS_API_KEY: "
+        "${CEO_DISCORD_INGRESS_API_KEY:?CEO_DISCORD_INGRESS_API_KEY is required}"
+    ) in ceo
     assert "ports:" not in ceo
+
+
+def test_example_environment_declares_private_discord_ingress_contract() -> None:
+    example = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    assert "CEO_DISCORD_INGRESS_API_KEY=" in example
+    assert "DISCORD_ACTOR_MAP=" in example
 
 
 def test_bff_dockerfile_pins_official_cli_without_gateway_command() -> None:

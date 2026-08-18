@@ -8,6 +8,8 @@ Fund/Book access, and only then calls the existing payload-bound PAPER gate.
 
 from __future__ import annotations
 
+import math
+import os
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -72,6 +74,15 @@ except ImportError:  # pragma: no cover - direct module execution compatibility
 RESULT_SCHEMA_VERSION = "user-paper-order-orchestration.v1"
 _TASK_ID_RE = re.compile(r"^t_[A-Za-z0-9]{4,64}$")
 _NO_DIRECTIVE_TERMINAL_STATES = frozenset({"FAILED", "REJECTED"})
+_ROOT_EXECUTION_STATUSES = frozenset({"ready", "running", "done"})
+_TRADING_EXECUTION_STATUSES = frozenset({"running"})
+_TRADING_REPLAY_STATUSES = frozenset({"done"})
+_NO_DIRECTIVE_REPLAY_STATES = frozenset(
+    {"CLARIFICATION_REQUIRED", "NOT_ORDER", "REJECTED", "FAILED", "UNKNOWN"}
+)
+_DEFAULT_KANBAN_READ_TIMEOUT_SECONDS = 12.0
+_MIN_KANBAN_READ_TIMEOUT_SECONDS = 2.0
+_MAX_KANBAN_READ_TIMEOUT_SECONDS = 30.0
 
 
 class PaperOrderOrchestrationRejected(ValueError):
@@ -86,10 +97,32 @@ def _reject(code: str) -> None:
     raise PaperOrderOrchestrationRejected(code)
 
 
+def _paper_order_kanban_read_timeout_seconds() -> float:
+    """Return the bounded timeout for PAPER-order authority reads only."""
+
+    raw = os.getenv(
+        "PAPER_ORDER_KANBAN_READ_TIMEOUT_SECONDS",
+        str(_DEFAULT_KANBAN_READ_TIMEOUT_SECONDS),
+    )
+    try:
+        configured = float(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_KANBAN_READ_TIMEOUT_SECONDS
+    if not math.isfinite(configured):
+        return _DEFAULT_KANBAN_READ_TIMEOUT_SECONDS
+    return min(
+        _MAX_KANBAN_READ_TIMEOUT_SECONDS,
+        max(_MIN_KANBAN_READ_TIMEOUT_SECONDS, configured),
+    )
+
+
 def _required_task(task_id: str, *, expected_profile: str) -> dict[str, object]:
     if not _TASK_ID_RE.fullmatch(str(task_id or "")):
         _reject("KANBAN_TASK_ID_INVALID")
-    task = hermes_boundary.show_kanban_task(str(task_id))
+    task = hermes_boundary.show_kanban_task(
+        str(task_id),
+        timeout=_paper_order_kanban_read_timeout_seconds(),
+    )
     if not task:
         _reject("KANBAN_TASK_NOT_FOUND")
     observed_id = str(task.get("id") or task.get("task_id") or "")
@@ -98,6 +131,53 @@ def _required_task(task_id: str, *, expected_profile: str) -> dict[str, object]:
     if str(task.get("assignee") or "") != expected_profile:
         _reject("KANBAN_ASSIGNEE_MISMATCH")
     return task
+
+
+def _task_status(task: Mapping[str, object], *, rejection_code: str) -> str:
+    """Return one exact current Hermes task state or reject an incomplete read."""
+
+    raw = task.get("status")
+    if not isinstance(raw, str) or not raw.strip():
+        _reject(rejection_code)
+    return raw.strip().casefold()
+
+
+def _durable_non_submission_replay(record: UserOrderRequestRecord) -> bool:
+    """Whether a completed interpreter can only replay a durable safe result."""
+
+    return bool(record.directive_id or record.state in _NO_DIRECTIVE_REPLAY_STATES)
+
+
+def _validate_task_execution_states(
+    *,
+    root: Mapping[str, object],
+    trading: Mapping[str, object],
+    record: UserOrderRequestRecord,
+    new_submission: bool,
+) -> None:
+    """Fail closed unless both cards are in an observed executable state.
+
+    A CEO root may already be ``done`` because its only responsibility in this
+    lane is to confirm the pre-created Trading primary.  A new directive,
+    however, is accepted only while that Trading primary is actually
+    ``running``.  ``done`` is retained solely for an exact replay whose durable
+    request row proves that no first submission can occur.
+    """
+
+    root_status = _task_status(root, rejection_code="CEO_ROOT_STATUS_MISSING")
+    if root_status not in _ROOT_EXECUTION_STATUSES:
+        _reject("CEO_ROOT_STATE_NOT_EXECUTABLE")
+
+    trading_status = _task_status(trading, rejection_code="TRADING_TASK_STATUS_MISSING")
+    if trading_status in _TRADING_EXECUTION_STATUSES:
+        return
+    if (
+        not new_submission
+        and trading_status in _TRADING_REPLAY_STATUSES
+        and _durable_non_submission_replay(record)
+    ):
+        return
+    _reject("TRADING_TASK_STATE_NOT_EXECUTABLE")
 
 
 def _scope_from_task(task: Mapping[str, object]) -> UserPaperOrderScope:
@@ -275,6 +355,12 @@ def process_user_paper_order(
         root=root,
         trading=trading,
     )
+    _validate_task_execution_states(
+        root=root,
+        trading=trading,
+        record=record,
+        new_submission=False,
+    )
 
     try:
         interpretation_dict = dict(interpretation)
@@ -340,6 +426,30 @@ def process_user_paper_order(
     canonical_payload = verified.canonical_payload()
     canonical_digest = canonical_payload_sha256(canonical_payload)
     idempotency_key = f"ceo-paper:{record.order_request_id}"
+
+    # Re-read immediately before the only mutating boundary.  This narrows the
+    # Kanban/SQL cross-store race and, critically, prevents a completed replay
+    # from becoming a first submission after verifier behavior changes.
+    current_root = _required_task(
+        root_task_id, expected_profile=canonical_profile_for_department("ceo")
+    )
+    current_trading = _required_task(
+        trading_task_id,
+        expected_profile=canonical_profile_for_department("trading"),
+    )
+    _validate_workflow_authority(
+        root_task_id=root_task_id,
+        trading_task_id=trading_task_id,
+        record=record,
+        root=current_root,
+        trading=current_trading,
+    )
+    _validate_task_execution_states(
+        root=current_root,
+        trading=current_trading,
+        record=record,
+        new_submission=True,
+    )
     try:
         response = submit_verified_paper_directive(
             subject=record.user_id,

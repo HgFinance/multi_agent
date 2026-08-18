@@ -97,6 +97,7 @@ def _workflow(
     root = {
         "id": ROOT_TASK_ID,
         "assignee": "ceo-agent",
+        "status": "ready",
         "body": build_root_body(
             raw,
             "request-200",
@@ -109,6 +110,7 @@ def _workflow(
     trading = {
         "id": TRADING_TASK_ID,
         "assignee": "trading-department",
+        "status": "running",
         "body": ceo._paper_order_child_body(
             query=raw,
             scope=scope,
@@ -123,7 +125,7 @@ def _workflow(
     monkeypatch.setattr(
         orchestrator.hermes_boundary,
         "show_kanban_task",
-        lambda task_id: tasks.get(task_id),
+        lambda task_id, **_kwargs: tasks.get(task_id),
     )
     return SimpleNamespace(
         raw=raw,
@@ -166,6 +168,47 @@ def _process(context: SimpleNamespace, candidate: dict[str, Any]) -> dict[str, A
         trading_task_id=TRADING_TASK_ID,
         interpretation=candidate,
     )
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        (None, 12.0),
+        ("8", 8.0),
+        ("0", 2.0),
+        ("999", 30.0),
+        ("nan", 12.0),
+        ("not-a-number", 12.0),
+    ],
+)
+def test_paper_order_authority_read_uses_bounded_dedicated_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    configured: str | None,
+    expected: float,
+) -> None:
+    context = _workflow(monkeypatch)
+    observed: list[float | None] = []
+    if configured is None:
+        monkeypatch.delenv("PAPER_ORDER_KANBAN_READ_TIMEOUT_SECONDS", raising=False)
+    else:
+        monkeypatch.setenv("PAPER_ORDER_KANBAN_READ_TIMEOUT_SECONDS", configured)
+    # This generic presentation/planning setting must not affect the dedicated
+    # PAPER-order authority read.
+    monkeypatch.setenv("CEO_PLANNING_READ_TIMEOUT_SECONDS", "0.25")
+
+    def show(task_id: str, *, timeout: float | None = None):
+        observed.append(timeout)
+        return context.tasks.get(task_id)
+
+    monkeypatch.setattr(orchestrator.hermes_boundary, "show_kanban_task", show)
+
+    task = orchestrator._required_task(
+        ROOT_TASK_ID,
+        expected_profile="ceo-agent",
+    )
+
+    assert task["id"] == ROOT_TASK_ID
+    assert observed == [expected]
 
 
 @pytest.mark.parametrize(
@@ -226,6 +269,105 @@ def test_scope_task_user_hash_and_card_tampering_is_rejected_before_submit(
         _process(context, _execute_candidate(context.raw))
 
     assert raised.value.code == expected_code
+    submit.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        None,
+        "todo",
+        "scheduled",
+        "blocked",
+        "review",
+        "archived",
+        "failed",
+        "cancelled",
+    ],
+)
+def test_non_executable_root_state_is_rejected_before_submit(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str | None,
+) -> None:
+    context = _workflow(monkeypatch)
+    if status is None:
+        context.root.pop("status")
+        expected_code = "CEO_ROOT_STATUS_MISSING"
+    else:
+        context.root["status"] = status
+        expected_code = "CEO_ROOT_STATE_NOT_EXECUTABLE"
+    submit = Mock()
+    monkeypatch.setattr(orchestrator, "submit_verified_paper_directive", submit)
+
+    with pytest.raises(orchestrator.PaperOrderOrchestrationRejected) as raised:
+        _process(context, _execute_candidate(context.raw))
+
+    assert raised.value.code == expected_code
+    submit.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        None,
+        "todo",
+        "scheduled",
+        "ready",
+        "blocked",
+        "review",
+        "done",
+        "archived",
+        "failed",
+        "cancelled",
+    ],
+)
+def test_non_executable_trading_state_cannot_make_a_first_submission(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str | None,
+) -> None:
+    context = _workflow(monkeypatch)
+    if status is None:
+        context.trading.pop("status")
+        expected_code = "TRADING_TASK_STATUS_MISSING"
+    else:
+        context.trading["status"] = status
+        expected_code = "TRADING_TASK_STATE_NOT_EXECUTABLE"
+    submit = Mock()
+    monkeypatch.setattr(orchestrator, "submit_verified_paper_directive", submit)
+
+    with pytest.raises(orchestrator.PaperOrderOrchestrationRejected) as raised:
+        _process(context, _execute_candidate(context.raw))
+
+    assert raised.value.code == expected_code
+    submit.assert_not_called()
+
+
+def test_trading_state_is_rechecked_immediately_before_first_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _workflow(monkeypatch)
+    trading_reads = 0
+
+    def show(task_id: str, **_kwargs: Any):
+        nonlocal trading_reads
+        task = context.tasks.get(task_id)
+        if task_id != TRADING_TASK_ID or task is None:
+            return task
+        trading_reads += 1
+        return {
+            **task,
+            "status": "running" if trading_reads == 1 else "blocked",
+        }
+
+    monkeypatch.setattr(orchestrator.hermes_boundary, "show_kanban_task", show)
+    submit = Mock()
+    monkeypatch.setattr(orchestrator, "submit_verified_paper_directive", submit)
+
+    with pytest.raises(orchestrator.PaperOrderOrchestrationRejected) as raised:
+        _process(context, _execute_candidate(context.raw))
+
+    assert raised.value.code == "TRADING_TASK_STATE_NOT_EXECUTABLE"
+    assert trading_reads == 2
     submit.assert_not_called()
 
 
@@ -291,6 +433,11 @@ def test_valid_execution_submits_exactly_once_and_replay_only_reads_status(
     candidate = _execute_candidate(context.raw)
 
     first = _process(context, candidate)
+    # The worker completes its card only after receiving the first durable
+    # result. A later exact replay may reconcile that directive, but must never
+    # create another one.
+    context.root["status"] = "done"
+    context.trading["status"] = "done"
     replay = _process(context, candidate)
 
     submit.assert_called_once_with(
@@ -351,6 +498,8 @@ def test_transport_unknown_is_persisted_and_never_auto_retried(
     candidate = _execute_candidate(context.raw)
 
     first = _process(context, candidate)
+    context.root["status"] = "done"
+    context.trading["status"] = "done"
     replay = _process(context, candidate)
 
     assert first["decision"] == "UNKNOWN"

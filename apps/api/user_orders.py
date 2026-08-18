@@ -369,10 +369,15 @@ def parse_user_order_query(query: str) -> tuple[DirectiveAction, dict[str, Any]]
     symbol = codes[0] if codes else _natural_name(normalized, quantities[0])
 
     market_matches = list(_MARKET_PATTERN.finditer(normalized))
-    if len(market_matches) > 1:
+    limit_marker_matches = list(_LIMIT_MARKER_PATTERN.finditer(normalized))
+    if (
+        len(market_matches) > 1
+        or len(limit_marker_matches) > 1
+        or len(price_matches) > 1
+    ):
         raise ClarificationRequired("order_type")
     market = bool(market_matches)
-    if market and price_matches:
+    if market and (limit_marker_matches or price_matches):
         raise ClarificationRequired("order_type")
     if market:
         order_type = OrderType.MARKET
@@ -382,8 +387,15 @@ def parse_user_order_query(query: str) -> tuple[DirectiveAction, dict[str, Any]]
         order_type = OrderType.LIMIT
         limit_price = Decimal(price_matches[0].group(1).replace(",", ""))
         selected_price_match = price_matches[0]
+    elif limit_marker_matches:
+        raise ClarificationRequired("limit_price")
     else:
-        raise ClarificationRequired("limit_price" if "지정가" in normalized else "order_type")
+        # An otherwise complete PAPER phrase without price/type language uses
+        # the deterministic MARKET default. Structured order objects still
+        # require an explicit ``order_type`` in ``PaperOrderInput``.
+        order_type = OrderType.MARKET
+        limit_price = None
+        selected_price_match = None
 
     consumed_spans = [quantities[0].span(), side_matches[0].span()]
     if codes:

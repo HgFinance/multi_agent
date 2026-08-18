@@ -15,10 +15,18 @@ import sqlite3
 import sys
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from orchestration.contracts.user_paper_order import HermesOrderCandidate
+from pydantic import BaseModel, ConfigDict, Field, SkipValidation
 
+from orchestration.contracts.user_paper_order import (
+    CandidateDecision,
+    DirectiveAction,
+    OrderReasonCode,
+    OrderSide,
+    OrderType,
+    TextEvidence,
+)
 
 MCP_PORT = 8046
 MCP_PATH = "/mcp"
@@ -33,6 +41,35 @@ _PLACEHOLDER_MARKERS = (
     "secret_here",
     "your_api_key",
 )
+
+
+class UntrustedHermesOrderCandidate(BaseModel):
+    """Schema-guided MCP envelope whose values remain fully untrusted.
+
+    ``SkipValidation`` keeps the exact enum/constant hints visible to Hermes,
+    while deliberately allowing contradictory or malformed values through the
+    transport.  The trusted orchestrator applies ``HermesOrderCandidate`` and
+    the deterministic language verifier after it has loaded the durable user
+    request; that is where invalid output becomes a recorded clarification.
+    """
+
+    model_config = ConfigDict(extra="allow", frozen=True)
+
+    schema_version: SkipValidation[
+        Literal["user-paper-order-interpretation.v1"]
+    ] = None
+    mode: SkipValidation[Literal["PAPER"]] = None
+    binding: SkipValidation[Literal[False]] = None
+    raw_text_sha256: SkipValidation[str] = None
+    decision: SkipValidation[CandidateDecision] = None
+    action: SkipValidation[DirectiveAction] = None
+    instrument_mention: SkipValidation[str] = None
+    side: SkipValidation[OrderSide] = None
+    quantity: SkipValidation[str] = None
+    order_type: SkipValidation[OrderType] = None
+    limit_price: SkipValidation[str] = None
+    evidence: SkipValidation[list[TextEvidence]] = Field(default_factory=list)
+    reason_codes: SkipValidation[list[OrderReasonCode]] = Field(default_factory=list)
 
 
 def validate_api_key(value: str | None) -> str:
@@ -119,7 +156,7 @@ async def _delegate_to_orchestrator(
     *,
     root_task_id: str,
     trading_task_id: str,
-    interpretation: HermesOrderCandidate,
+    interpretation: UntrustedHermesOrderCandidate,
 ) -> dict[str, Any]:
     # Import at invocation time.  Hermes receives no database or Trading proof
     # secret; only this trusted server process imports the authority boundary.
@@ -130,7 +167,7 @@ async def _delegate_to_orchestrator(
     result = orchestrate(
         root_task_id=root_task_id,
         trading_task_id=trading_task_id,
-        interpretation=interpretation.model_dump(mode="json"),
+        interpretation=interpretation.model_dump(mode="json", warnings=False),
     )
     if inspect.isawaitable(result):
         result = await result
@@ -172,7 +209,11 @@ def build_server(*, host: str = "0.0.0.0", port: int = MCP_PORT):
     async def process_user_paper_order(
         root_task_id: str,
         trading_task_id: str,
-        interpretation: HermesOrderCandidate,
+        # Keep the transport envelope deliberately untrusted.  Applying the
+        # strict candidate model here would turn malformed Hermes output into
+        # a FastMCP error before the orchestrator can persist a fail-closed
+        # clarification outcome.
+        interpretation: UntrustedHermesOrderCandidate,
     ) -> dict[str, Any]:
         return await _delegate_to_orchestrator(
             root_task_id=root_task_id,
@@ -199,12 +240,20 @@ def check_readiness() -> None:
     """
 
     validate_api_key(os.environ.get("MCP_TRADING_ORDER_API_KEY"))
-    dsn = (
-        os.environ.get("CONTROL_DATABASE_URL", "").strip()
-        or os.environ.get("DATABASE_URL", "").strip()
+    dsn = os.environ.get("ORDER_ORCHESTRATOR_DATABASE_URL", "").strip()
+    production = (
+        os.environ.get("APP_ENV", "development").casefold()
+        in {"production", "staging"}
+        or os.environ.get("PORTFOLIO_DATA_MODE", "").casefold() == "production"
     )
+    if not dsn and not production:
+        # Local/test compatibility only.  AWS must supply the isolated login.
+        dsn = (
+            os.environ.get("CONTROL_DATABASE_URL", "").strip()
+            or os.environ.get("DATABASE_URL", "").strip()
+        )
     if not dsn:
-        raise RuntimeError("operational database URL is required")
+        raise RuntimeError("dedicated order orchestrator database URL is required")
 
     import psycopg2
     from psycopg2 import sql

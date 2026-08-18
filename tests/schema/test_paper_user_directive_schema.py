@@ -112,7 +112,11 @@ def test_accounting_fill_consumer_reduces_the_operational_pool_role():
     )
 
     assert 'ACCOUNTING_LEDGER_DATABASE_ROLE = "svc_accounting_ledger"' in repository
-    assert 'cur.execute("set local role svc_accounting_ledger")' in repository
+    read_write = 'cur.execute("set transaction read write")'
+    reduced_role = 'cur.execute("set local role svc_accounting_ledger")'
+    assert read_write in repository
+    assert reduced_role in repository
+    assert repository.index(read_write) < repository.index(reduced_role)
     assert "accounting ledger consumer requires" in consumer
     for compose in (local_compose, eb_compose):
         assert "ACCOUNTING_DATABASE_ROLE:" in compose

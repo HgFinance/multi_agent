@@ -108,6 +108,11 @@ from current_user import (
     require_owner,
     set_authenticated_request_user,
 )
+from discord_ingress_auth import (
+    DISCORD_INGRESS_PATH,
+    bearer_is_authorized as discord_ingress_bearer_is_authorized,
+    mark_request as mark_discord_ingress_request,
+)
 from department_agents import router as department_agent_router
 from discord_read import router as discord_read_router
 from ls_account_stream import router as portfolio_live_router
@@ -191,30 +196,46 @@ _LOCAL_CORS_ORIGINS = (
 
 
 def _portfolio_cors_origins() -> list[str]:
-    """Return an exact origin allowlist; production has no implicit origins."""
+    """Return an exact origin allowlist; an empty production list denies all."""
 
     runtime_environment = os.getenv("APP_ENV", "production").strip().casefold()
-    configured = [
-        item.strip().rstrip("/")
-        for item in os.getenv("PORTFOLIO_CORS_ALLOW_ORIGINS", "").split(",")
-        if item.strip()
-    ]
+    raw_allowlist = os.getenv("PORTFOLIO_CORS_ALLOW_ORIGINS", "")
+    raw_origins = raw_allowlist.split(",") if raw_allowlist.strip() else []
+    # The whole setting may be empty for a backend-only deployment.  Once any
+    # origin is supplied, however, empty comma-separated entries are malformed
+    # rather than silently broadening or weakening the operator's intent.
+    if any(not item.strip() for item in raw_origins):
+        raise RuntimeError("invalid PORTFOLIO_CORS_ALLOW_ORIGINS entry")
     allowed_schemes = {"https"}
     if runtime_environment in {"local", "test"}:
         allowed_schemes.add("http")
-    for origin in configured:
-        parsed = urlsplit(origin)
+    configured: list[str] = []
+    for item in raw_origins:
+        origin = item.strip()
+        try:
+            parsed = urlsplit(origin)
+            parsed.port
+        except ValueError as exc:
+            raise RuntimeError(
+                "invalid PORTFOLIO_CORS_ALLOW_ORIGINS entry"
+            ) from exc
         if (
-            origin == "*"
+            "*" in origin
+            or "\\" in origin
+            or any(ord(character) < 33 or ord(character) > 126 for character in origin)
             or parsed.scheme.casefold() not in allowed_schemes
             or not parsed.netloc
+            or not parsed.hostname
             or parsed.username is not None
             or parsed.password is not None
             or parsed.path not in {"", "/"}
             or parsed.query
             or parsed.fragment
+            or "%" in parsed.netloc
+            or parsed.netloc.endswith(":")
         ):
             raise RuntimeError("invalid PORTFOLIO_CORS_ALLOW_ORIGINS entry")
+        configured.append(origin.rstrip("/"))
     origins = (
         [*_LOCAL_CORS_ORIGINS, *configured]
         if runtime_environment in {"local", "test"}
@@ -241,6 +262,21 @@ async def _authenticate_portfolio_request(request: Request, call_next):
     """Authenticate every externally reachable BFF domain route centrally."""
 
     if _requires_portfolio_authentication(request):
+        # The CEO Discord gateway is an internal service, not a browser user,
+        # and cannot carry a Supabase JWT.  Its single-purpose credential is
+        # accepted on this exact POST path only.  The route subsequently maps
+        # the immutable Discord author id to an authorized PAPER principal.
+        internal_discord_ingress = (
+            request.method == "POST"
+            and request.url.path == DISCORD_INGRESS_PATH
+            and discord_ingress_bearer_is_authorized(
+                request.headers.get("authorization")
+            )
+        )
+        if internal_discord_ingress:
+            set_authenticated_request_user(request, None)
+            mark_discord_ingress_request(request)
+            return await call_next(request)
         try:
             owner_id = await run_in_threadpool(
                 authenticate_request_headers,

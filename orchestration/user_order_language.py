@@ -574,7 +574,13 @@ def _verify_place_order(
         limit_price = prices[0].value
         price_span = prices[0].span
     else:
-        return _clarify(digest, OrderReasonCode.MISSING_OR_CONFLICTING_ORDER_TYPE)
+        # A complete PAPER place-order command with no price/type language has
+        # one deterministic interpretation: MARKET.  This policy default is
+        # not source evidence, so Hermes must not fabricate an ORDER_TYPE span.
+        order_type = OrderType.MARKET
+        order_type_span = None
+        limit_price = None
+        price_span = None
 
     instrument = evidence.get(EvidenceField.INSTRUMENT)
     if instrument is None:
@@ -590,8 +596,9 @@ def _verify_place_order(
         EvidenceField.INSTRUMENT,
         EvidenceField.SIDE,
         EvidenceField.QUANTITY,
-        EvidenceField.ORDER_TYPE,
     }
+    if order_type_span is not None:
+        required_fields.add(EvidenceField.ORDER_TYPE)
     if order_type is OrderType.LIMIT:
         required_fields.add(EvidenceField.LIMIT_PRICE)
     if set(evidence) != required_fields:
@@ -616,11 +623,14 @@ def _verify_place_order(
         field=EvidenceField.QUANTITY,
         span=quantity_match.span(),
         normalized=str(quantity),
-    ) or not _expected_evidence(
-        evidence,
-        field=EvidenceField.ORDER_TYPE,
-        span=order_type_span,
-        normalized=order_type.value,
+    ) or (
+        order_type_span is not None
+        and not _expected_evidence(
+            evidence,
+            field=EvidenceField.ORDER_TYPE,
+            span=order_type_span,
+            normalized=order_type.value,
+        )
     ):
         return _clarify(digest, OrderReasonCode.EVIDENCE_FIELD_MISMATCH)
     if order_type is OrderType.LIMIT and (
@@ -637,9 +647,10 @@ def _verify_place_order(
     consumed = [
         side_match.span(),
         quantity_match.span(),
-        order_type_span,
         (instrument.start, instrument.end),
     ]
+    if order_type_span is not None:
+        consumed.append(order_type_span)
     if price_span is not None:
         consumed.append(price_span)
     if limit_markers:

@@ -76,7 +76,7 @@ def _place_candidate(
     side: OrderSide,
     quantity_text: str,
     quantity: int,
-    order_type_text: str,
+    order_type_text: str | None,
     order_type: OrderType,
     limit_price_text: str | None = None,
     limit_price: int | None = None,
@@ -85,13 +85,16 @@ def _place_candidate(
         _evidence(raw, EvidenceField.INSTRUMENT, instrument, instrument),
         _evidence(raw, EvidenceField.SIDE, side_text, side.value),
         _evidence(raw, EvidenceField.QUANTITY, quantity_text, str(quantity)),
-        _evidence(
-            raw,
-            EvidenceField.ORDER_TYPE,
-            order_type_text,
-            order_type.value,
-        ),
     ]
+    if order_type_text is not None:
+        evidence.append(
+            _evidence(
+                raw,
+                EvidenceField.ORDER_TYPE,
+                order_type_text,
+                order_type.value,
+            )
+        )
     if limit_price_text is not None:
         evidence.append(
             _evidence(
@@ -448,15 +451,72 @@ def test_market_plus_price_is_fail_closed() -> None:
     assert OrderReasonCode.CONFLICTING_MARKET_AND_PRICE in result.reason_codes
 
 
-def test_missing_order_type_stays_non_executable() -> None:
-    raw = "삼성전자 10주 매수"
-    candidate = HermesOrderCandidate(
-        raw_text_sha256=raw_text_sha256(raw),
-        decision=CandidateDecision.CLARIFY,
-        reason_codes=(OrderReasonCode.MISSING_OR_CONFLICTING_ORDER_TYPE,),
+def test_missing_order_type_defaults_to_market_without_fabricated_evidence() -> None:
+    raw = "삼성전자 2주 매수해"
+    result = _execute_place(
+        raw,
+        _place_candidate(
+            raw,
+            instrument="삼성전자",
+            side_text="매수해",
+            side=OrderSide.BUY,
+            quantity_text="2주",
+            quantity=2,
+            order_type_text=None,
+            order_type=OrderType.MARKET,
+        ),
+    )
+    assert result.canonical_payload() == {
+        "instrument_mention": "삼성전자",
+        "side": "BUY",
+        "quantity": "2",
+        "order_type": "MARKET",
+        "time_in_force": "DAY",
+        "limit_price": None,
+    }
+    assert {item.field for item in result.evidence} == {
+        EvidenceField.INSTRUMENT,
+        EvidenceField.SIDE,
+        EvidenceField.QUANTITY,
+    }
+
+
+def test_explicit_market_still_requires_exact_order_type_evidence() -> None:
+    raw = "삼성전자 2주 시장가 매수해"
+    candidate = _place_candidate(
+        raw,
+        instrument="삼성전자",
+        side_text="매수해",
+        side=OrderSide.BUY,
+        quantity_text="2주",
+        quantity=2,
+        order_type_text="시장가",
+        order_type=OrderType.MARKET,
+    )
+    payload = candidate.model_dump(mode="json")
+    payload["evidence"] = [
+        item for item in payload["evidence"] if item["field"] != "ORDER_TYPE"
+    ]
+    result = verify_order_candidate(raw, payload)
+    assert isinstance(result, OrderClarification)
+    assert result.reason_codes == (OrderReasonCode.EVIDENCE_FIELD_MISMATCH,)
+
+
+def test_limit_marker_without_price_still_requires_clarification() -> None:
+    raw = "삼성전자 2주 지정가로 매수해"
+    candidate = _place_candidate(
+        raw,
+        instrument="삼성전자",
+        side_text="매수해",
+        side=OrderSide.BUY,
+        quantity_text="2주",
+        quantity=2,
+        order_type_text=None,
+        order_type=OrderType.MARKET,
     )
     result = verify_order_candidate(raw, candidate)
     assert isinstance(result, OrderClarification)
+    assert result.reason_codes == (OrderReasonCode.MISSING_LIMIT_PRICE,)
 
 
 def test_candidate_value_must_match_deterministic_number() -> None:

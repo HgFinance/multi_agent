@@ -81,13 +81,22 @@ class DiscordIdempotencyStore:
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=5.0)
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.row_factory = sqlite3.Row
-        if not self._initialized:
-            self._initialize(conn)
-            self._initialized = True
-        return conn
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.row_factory = sqlite3.Row
+            if not self._initialized:
+                self._initialize(conn)
+                self._initialized = True
+            return conn
+        except Exception:
+            # Concurrent first-use can fail while switching WAL mode or
+            # applying the idempotent schema.  `_run` retries that operation,
+            # but it cannot close a connection that `_connect` never returned.
+            # Close here so Windows/OneDrive does not retain a leaked file
+            # handle and production retries do not accumulate descriptors.
+            conn.close()
+            raise
 
     def _initialize(self, conn: sqlite3.Connection) -> None:
         conn.execute(

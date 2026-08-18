@@ -49,6 +49,18 @@ For a marked task:
    speech, quoted examples/audit requests, LIVE/real-account language, and
    unsupported text must not execute. Missing/conflicting fields, approximate
    values, and multiple commands must clarify instead of being split or guessed.
+   For one otherwise complete `PLACE_ORDER` with no price and neither an
+   explicit market nor limit marker, apply the trusted PAPER default:
+   `order_type="MARKET"` and `limit_price=null`. This default is not text
+   evidence, so omit `ORDER_TYPE` evidence; never fabricate a span. Explicit
+   market language still requires exact `ORDER_TYPE` evidence. Any limit marker
+   without exactly one valid price must clarify, and every LIMIT field requires
+   exact source evidence.
+   For `CLARIFY` or `NOT_ORDER`, set `action`, `instrument_mention`, `side`,
+   `quantity`, `order_type`, and `limit_price` to `null`, set `evidence` to an
+   empty list, and include at least one exact `reason_codes` value. Partial facts
+   observed in the sentence are not execution fields until every required fact
+   is present and the decision is `EXECUTE`.
 4. Call only `process_user_paper_order` exactly once, with
    `root_task_id=<workflow root>`, `trading_task_id=<this task>`, and that
    `interpretation`. Never pass a user, fund, book, mode override, API token,

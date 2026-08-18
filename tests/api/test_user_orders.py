@@ -58,6 +58,7 @@ def _directive_response(
 @pytest.mark.parametrize(
     ("query", "action", "symbol", "side", "order_type"),
     [
+        ("삼성전자 2주 매수해", "PLACE_ORDER", "삼성전자", "BUY", "MARKET"),
         ("삼성전자 10주 시장가로 사줘", "PLACE_ORDER", "삼성전자", "BUY", "MARKET"),
         ("005930 5주 70,000원에 매수", "PLACE_ORDER", "005930", "BUY", "LIMIT"),
         ("현대자동차 3주 시장가 매도해", "PLACE_ORDER", "현대자동차", "SELL", "MARKET"),
@@ -104,7 +105,7 @@ def test_account_words_do_not_hide_an_individual_symbol_total_sell() -> None:
 @pytest.mark.parametrize(
     "query",
     [
-        "삼성전자 10주 매수",
+        "삼성전자 10주 지정가로 매수",
         "삼성전자 10주 시장가 70000원에 매수",
         "삼성전자 10주 시장가 매수 매도",
         "삼성전자 시장가 매수",
@@ -523,7 +524,7 @@ def test_place_order_resolves_canonical_symbol_and_never_calls_risk() -> None:
             json={
                 "fund_id": str(FUND_ID),
                 "book_id": str(BOOK_ID),
-                "query": "삼성전자 10주 시장가로 사줘",
+                "query": "삼성전자 2주 매수해",
             },
         )
     assert response.status_code == 202
@@ -532,7 +533,7 @@ def test_place_order_resolves_canonical_symbol_and_never_calls_risk() -> None:
         "instrument_id": str(INSTRUMENT_ID),
         "symbol": "005930",
         "side": "BUY",
-        "quantity": "10",
+        "quantity": "2",
         "order_type": "MARKET",
         "time_in_force": "DAY",
         "limit_price": None,

@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
+from uuid import uuid4
+
+from starlette.requests import Request
 
 from apps.api import ceo_mirror_api
 from apps.api.ceo_mirror import (
@@ -14,6 +18,21 @@ from apps.api.ceo_mirror import (
     RedisMirrorStore,
     execute_once,
 )
+from apps.api.discord_ingress_auth import mark_request as mark_discord_ingress_request
+
+
+def _http_request(*, internal_discord: bool = False) -> Request:
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/ui/ceo/ingress",
+            "headers": [],
+        }
+    )
+    if internal_discord:
+        mark_discord_ingress_request(request)
+    return request
 
 
 class _FakeRedis:
@@ -71,7 +90,8 @@ class CeoMirrorExecutionTest(unittest.TestCase):
                     source="web",
                     source_message_id="web:1",
                     actor_id="web-user",
-                )
+                ),
+                _http_request(),
             )
             second = ceo_mirror_api.mirror_ingress(
                 CanonicalIngress(
@@ -80,7 +100,8 @@ class CeoMirrorExecutionTest(unittest.TestCase):
                     source="web",
                     source_message_id="web:1",
                     actor_id="web-user",
-                )
+                ),
+                _http_request(),
             )
 
         self.assertEqual(calls, ["request-web-1"])
@@ -143,7 +164,8 @@ class CeoMirrorExecutionTest(unittest.TestCase):
                     source="discord",
                     source_message_id="discord:channel:1",
                     actor_id="discord-user",
-                )
+                ),
+                _http_request(internal_discord=True),
             )
             ignored = ceo_mirror_api.mirror_ingress(
                 CanonicalIngress(
@@ -154,7 +176,8 @@ class CeoMirrorExecutionTest(unittest.TestCase):
                     actor_id="ceo-agent",
                     actor_type="bot",
                     mirrored=True,
-                )
+                ),
+                _http_request(internal_discord=True),
             )
 
         self.assertEqual(calls, ["request-discord-1"])
@@ -285,6 +308,149 @@ class CeoMirrorExecutionTest(unittest.TestCase):
         self.assertEqual(len(captured), 1)
         self.assertEqual(captured[0].fund_id, "fund-abc")
         self.assertEqual(captured[0].book_id, "book-abc")
+
+    def test_discord_actor_mapping_resolves_one_active_trading_book(self) -> None:
+        """A Discord author can enter the same exact PAPER account boundary."""
+
+        from apps.api.ceo import CeoAsk
+
+        user_id = str(uuid4())
+        fund_id = str(uuid4())
+        book_id = str(uuid4())
+        captured: list[tuple[CeoAsk, str | None]] = []
+
+        def fake_ceo_query(
+            req: CeoAsk, owner_id: str | None = None, **_coordinates: object
+        ) -> dict[str, object]:
+            captured.append((req, owner_id))
+            return {"task_id": "t_discord_order", "status": "accepted"}
+
+        ingress = CanonicalIngress(
+            query="삼성전자 2주 시장가 매수해",
+            request_id="discord:123456789012345678",
+            source="discord",
+            source_message_id="123456789012345678",
+            actor_id="123456789012345678",
+            actor_type="user",
+        )
+        with (
+            patch.object(
+                ceo_mirror_api,
+                "resolve_discord_actor",
+                return_value=SimpleNamespace(user_id=user_id, fund_id=fund_id),
+            ),
+            patch.object(
+                ceo_mirror_api,
+                "authorized_trading_books",
+                return_value=[
+                    {"fund_id": fund_id, "book_id": book_id, "name": "MAIN"}
+                ],
+            ),
+            patch("apps.api.ceo.ceo_query", side_effect=fake_ceo_query),
+        ):
+            response = ceo_mirror_api._ceo_query(ingress)
+
+        self.assertEqual(response["task_id"], "t_discord_order")
+        self.assertEqual(len(captured), 1)
+        request, owner = captured[0]
+        self.assertEqual(owner, user_id)
+        self.assertEqual(request.fund_id, fund_id)
+        self.assertEqual(request.book_id, book_id)
+
+    def test_discord_order_does_not_guess_between_multiple_books(self) -> None:
+        from apps.api.ceo import CeoAsk
+
+        user_id = str(uuid4())
+        fund_id = str(uuid4())
+        captured: list[CeoAsk] = []
+
+        def fake_ceo_query(
+            req: CeoAsk, owner_id: str | None = None, **_coordinates: object
+        ) -> dict[str, object]:
+            del owner_id
+            captured.append(req)
+            return {"task_id": "t_ambiguous", "status": "accepted"}
+
+        ingress = CanonicalIngress(
+            query="삼성전자 2주 시장가 매수해",
+            request_id="discord:223456789012345678",
+            source="discord",
+            source_message_id="223456789012345678",
+            actor_id="223456789012345678",
+            actor_type="user",
+        )
+        with (
+            patch.object(
+                ceo_mirror_api,
+                "resolve_discord_actor",
+                return_value=SimpleNamespace(user_id=user_id, fund_id=fund_id),
+            ),
+            patch.object(
+                ceo_mirror_api,
+                "authorized_trading_books",
+                return_value=[
+                    {"fund_id": fund_id, "book_id": str(uuid4()), "name": "A"},
+                    {"fund_id": fund_id, "book_id": str(uuid4()), "name": "B"},
+                ],
+            ),
+            patch("apps.api.ceo.ceo_query", side_effect=fake_ceo_query),
+        ):
+            ceo_mirror_api._ceo_query(ingress)
+
+        self.assertIsNone(captured[0].book_id)
+
+    def test_discord_account_scope_ignores_caller_supplied_fund_and_book(self) -> None:
+        """Only the server-owned actor binding may choose Discord account scope."""
+
+        from apps.api.ceo import CeoAsk
+
+        user_id = str(uuid4())
+        mapped_fund_id = str(uuid4())
+        mapped_book_id = str(uuid4())
+        captured: list[CeoAsk] = []
+
+        def fake_ceo_query(
+            req: CeoAsk, owner_id: str | None = None, **_coordinates: object
+        ) -> dict[str, object]:
+            del owner_id
+            captured.append(req)
+            return {"task_id": "t_bound_scope", "status": "accepted"}
+
+        ingress = CanonicalIngress(
+            query="삼성전자 2주 시장가 매수해",
+            request_id="discord:323456789012345678",
+            source="discord",
+            source_message_id="323456789012345678",
+            actor_id="123456789012345678",
+            actor_type="user",
+            fund_id=str(uuid4()),
+            book_id=str(uuid4()),
+        )
+        with (
+            patch.object(
+                ceo_mirror_api,
+                "resolve_discord_actor",
+                return_value=SimpleNamespace(
+                    user_id=user_id, fund_id=mapped_fund_id
+                ),
+            ),
+            patch.object(
+                ceo_mirror_api,
+                "authorized_trading_books",
+                return_value=[
+                    {
+                        "fund_id": mapped_fund_id,
+                        "book_id": mapped_book_id,
+                        "name": "MAIN",
+                    }
+                ],
+            ),
+            patch("apps.api.ceo.ceo_query", side_effect=fake_ceo_query),
+        ):
+            ceo_mirror_api._ceo_query(ingress)
+
+        self.assertEqual(captured[0].fund_id, mapped_fund_id)
+        self.assertEqual(captured[0].book_id, mapped_book_id)
 
     def test_mirror_ask_without_fund_id_still_works(self) -> None:
         from apps.api.ceo import CeoAsk

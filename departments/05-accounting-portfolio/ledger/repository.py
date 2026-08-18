@@ -188,6 +188,13 @@ class LedgerRepository:
         try:
             with conn:  # 정상 종료면 commit, 예외면 rollback
                 with conn.cursor() as cur:
+                    # This repository owns Journal/projection mutations. A
+                    # transaction-pool backend may have been left with a
+                    # read-only session default by an unrelated read client;
+                    # override it before the first domain statement. A real
+                    # replica still rejects READ WRITE, so the writer fails
+                    # closed instead of pretending that projection succeeded.
+                    cur.execute("set transaction read write")
                     # Reduce the shared operational login before any domain
                     # query. The exact allowlist above keeps this from becoming
                     # a caller-controlled SQL identifier.

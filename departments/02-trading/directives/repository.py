@@ -1197,7 +1197,7 @@ class PostgresDirectiveRepository:
                   from accounting.cash_balances cb
                   join accounting.ledger_accounts la on la.account_id=cb.account_id
                  where cb.fund_id=%s and cb.book_id=%s and cb.currency=%s
-                   and la.account_code='CASH' and la.status='ACTIVE'
+                   and la.account_code='1000' and la.status='ACTIVE'
                 """,
                 (fund_id, book_id, currency),
             )

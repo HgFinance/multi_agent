@@ -5,7 +5,8 @@ from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
@@ -192,7 +193,66 @@ def test_cors_origin_configuration_is_exact_and_fail_closed() -> None:
 
     with patch.dict(
         os.environ,
-        {"APP_ENV": "production", "PORTFOLIO_CORS_ALLOW_ORIGINS": "*"},
+        {"APP_ENV": "production", "PORTFOLIO_CORS_ALLOW_ORIGINS": ""},
+        clear=False,
+    ):
+        origins = bff_main._portfolio_cors_origins()
+        backend_only = FastAPI()
+
+        @backend_only.get("/private")
+        def private() -> dict[str, bool]:
+            return {"ok": True}
+
+        backend_only.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_credentials=False,
+            allow_methods=["GET"],
+            allow_headers=["Authorization"],
+        )
+        client = TestClient(backend_only)
+        simple = client.get(
+            "/private", headers={"Origin": "https://untrusted.example"}
+        )
+        preflight = client.options(
+            "/private",
+            headers={
+                "Origin": "https://untrusted.example",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "authorization",
+            },
+        )
+
+    assert origins == []
+    assert simple.status_code == 200
+    assert "access-control-allow-origin" not in simple.headers
+    assert preflight.status_code == 400
+    assert "access-control-allow-origin" not in preflight.headers
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "*",
+        "https://*.example.com",
+        "http://app.example.com",
+        "https://user:password@app.example.com",
+        "https://app.example.com/path",
+        "https://app.example.com?query=1",
+        "https://app.example.com#fragment",
+        "https://app.example.com:99999",
+        "https://[::1",
+        "https://app.example.com,",
+        "https://app.example.com,,https://ops.example.com",
+        "not-an-origin",
+    ),
+)
+def test_production_cors_rejects_every_non_exact_or_malformed_origin(
+    value: str,
+) -> None:
+    with patch.dict(
+        os.environ,
+        {"APP_ENV": "production", "PORTFOLIO_CORS_ALLOW_ORIGINS": value},
         clear=False,
     ):
         with pytest.raises(RuntimeError, match="invalid PORTFOLIO_CORS"):
@@ -456,4 +516,71 @@ def test_ceo_mirror_ingress_binds_actor_to_verified_subject() -> None:
 
     assert response.status_code == 403
     assert response.json() == {"detail": "ceo_mirror_actor_mismatch"}
+    execute.assert_not_called()
+
+
+def test_discord_mirror_ingress_accepts_only_the_private_bridge_key() -> None:
+    bridge_key = "discord-ingress-boundary-key-0123456789abcdef"
+    with (
+        patch.dict(
+            os.environ,
+            _production_auth_environment()
+            | {"CEO_DISCORD_INGRESS_API_KEY": bridge_key},
+            clear=False,
+        ),
+        patch.object(ceo_mirror_api, "_execute") as execute,
+    ):
+        execute.return_value = type(
+            "Execution",
+            (),
+            {
+                "response": {"task_id": "t_discord"},
+                "accepted": True,
+                "duplicate": False,
+                "ignored": False,
+                "reason": None,
+            },
+        )()
+        accepted = TestClient(app).post(
+            "/ui/ceo/ingress",
+            headers={"Authorization": f"Bearer {bridge_key}"},
+            json={
+                "query": "삼성전자 2주 시장가 매수해",
+                "request_id": "discord:991122334455667788",
+                "source": "discord",
+                "source_message_id": "991122334455667788",
+                "actor_id": "123456789012345678",
+                "actor_type": "user",
+            },
+        )
+
+    assert accepted.status_code == 202
+    assert accepted.json()["task_id"] == "t_discord"
+    execute.assert_called_once()
+
+
+def test_discord_source_cannot_use_a_normal_user_ingress_identity() -> None:
+    owner_id = str(uuid4())
+    with (
+        patch.dict(os.environ, _production_auth_environment(), clear=False),
+        patch.object(bff_main, "authenticate_request_headers", return_value=owner_id),
+        patch.object(ceo_mirror_api, "_execute") as execute,
+    ):
+        response = TestClient(app).post(
+            "/ui/ceo/ingress",
+            headers={"Authorization": "Bearer user-jwt-placeholder"},
+            json={
+                "query": "spoof Discord",
+                "request_id": "discord:998877665544332211",
+                "source": "discord",
+                "source_message_id": "998877665544332211",
+                "actor_id": "123456789012345678",
+                "actor_type": "user",
+            },
+        )
+
+    assert response.status_code == 401
+    assert response.json() == {
+        "detail": "discord_ingress_authentication_required"
+    }
     execute.assert_not_called()

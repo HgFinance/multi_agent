@@ -110,6 +110,7 @@ services:
       TRADING_SERVICE_AUTH_AUDIENCE: ${TRADING_SERVICE_AUTH_AUDIENCE:-trading-api}
       # CEO Web/Discord mirror uses the existing Redis service. Keep the
       # durable request/event store on the canonical production BFF.
+      CEO_DISCORD_INGRESS_API_KEY: ${CEO_DISCORD_INGRESS_API_KEY:?CEO_DISCORD_INGRESS_API_KEY is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       UI_MIRROR_REDIS_URL: ${UI_MIRROR_REDIS_URL:-}
       UI_MIRROR_STREAM: ${UI_MIRROR_STREAM:-hf:ui-ceo-mirror:v1}

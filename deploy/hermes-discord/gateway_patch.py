@@ -232,10 +232,22 @@ def _event_key(adapter: Any, event: Any) -> str | None:
 # 조용히 버리면 사용자는 봇이 죽은 것으로 본다.
 INGRESS_URL_ENV = "HGFINANCE_DISCORD_INGRESS_URL"
 INGRESS_TIMEOUT_ENV = "HGFINANCE_DISCORD_INGRESS_TIMEOUT_SECONDS"
+INGRESS_SECRET_ENV = "CEO_DISCORD_INGRESS_API_KEY"
 
 
 def _ingress_url() -> str:
     return os.getenv(INGRESS_URL_ENV, "").strip()
+
+
+def _ingress_secret() -> str | None:
+    value = os.getenv(INGRESS_SECRET_ENV, "").strip()
+    if (
+        len(value.encode("utf-8")) < 32
+        or len(set(value)) <= 1
+        or any(ord(character) < 33 or ord(character) > 126 for character in value)
+    ):
+        return None
+    return value
 
 
 def _author_id(message: Any) -> str:
@@ -267,6 +279,10 @@ def _forward_to_ingress(message: Any, adapter: Any) -> bool:
 
     url = _ingress_url()
     if not url or _profile_name() != "ceo-agent":
+        return False
+    ingress_secret = _ingress_secret()
+    if ingress_secret is None:
+        logger.error("discord-ingress status=failed reason=credential_unavailable")
         return False
     message_id = str(getattr(message, "id", "") or "")
     if not message_id:
@@ -306,7 +322,10 @@ def _forward_to_ingress(message: Any, adapter: Any) -> bool:
         request = urllib.request.Request(
             url,
             data=_json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {ingress_secret}",
+            },
             method="POST",
         )
         timeout = float(os.getenv(INGRESS_TIMEOUT_ENV, "10"))

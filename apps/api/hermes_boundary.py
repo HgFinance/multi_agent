@@ -214,6 +214,7 @@ def unblock_kanban_task(*, task_id: str) -> bool:
     cli_environment.setdefault(
         "HERMES_KANBAN_HOME", str(Path.home() / ".hermes" / "shared-kanban")
     )
+    command_timeout = float(os.getenv("KANBAN_CLI_TIMEOUT_SECONDS", "8"))
     try:
         proc = subprocess.run(
             argv_for(None, ["kanban", "unblock", task_id]),
@@ -221,20 +222,25 @@ def unblock_kanban_task(*, task_id: str) -> bool:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=float(os.getenv("KANBAN_CLI_TIMEOUT_SECONDS", "8")),
+            timeout=command_timeout,
             cwd=ROOT,
             env=cli_environment,
             check=False,
         )
-    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, OSError):
         return False
-    if proc.returncode == 0:
+    except subprocess.TimeoutExpired:
+        # Hermes/SQLite can commit the promotion before the CLI finishes its
+        # cold-start/JSON teardown.  A timeout therefore has an unknown result,
+        # not a proven failure; verify the durable task state below.
+        proc = None
+    if proc is not None and proc.returncode == 0:
         return True
     # The create boundary is idempotent, so a replay may encounter a card
     # that a previous attempt already released (or even completed). Treat only
     # a positively observed non-blocked state as success; unreadable state
     # remains a failure.
-    current = show_kanban_task(task_id)
+    current = show_kanban_task(task_id, timeout=max(command_timeout, 2.0))
     return bool(
         current
         and str(current.get("status") or "").casefold()

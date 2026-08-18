@@ -1,0 +1,303 @@
+# AWS EC2 release overlay for the canonical PAPER-order stack.
+#
+# Apply after the repository root compose file:
+#   docker compose --project-name hedgefund --env-file <runtime.env> \
+#     -f docker-compose.yml -f deploy/aws/docker-compose.paper-order.yml ...
+#
+# Hosted Supabase is identity-only.  Both operational databases are private
+# databases in the same EC2 Timescale/PostgreSQL container; applications never
+# receive the hosted Supabase database URL.
+
+x-admin-control-database-url: &admin-control-database-url "postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?HEDGEFUND_TSDB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}"
+x-admin-market-database-url: &admin-market-database-url "postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?HEDGEFUND_TSDB_PASSWORD is required}@timescaledb:5432/market"
+x-control-database-url: &control-database-url "postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD:?HEDGEFUND_RUNTIME_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}"
+x-market-database-url: &market-database-url "postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD:?HEDGEFUND_RUNTIME_DB_PASSWORD is required}@timescaledb:5432/market"
+x-order-database-url: &order-database-url "postgresql://hgfinance_order_runtime:${HEDGEFUND_ORDER_DB_PASSWORD:?HEDGEFUND_ORDER_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}"
+x-trading-database-url: &trading-database-url "postgresql://hgfinance_trading_runtime:${HEDGEFUND_TRADING_DB_PASSWORD:?HEDGEFUND_TRADING_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_trading_api"
+x-accounting-database-url: &accounting-database-url "postgresql://hgfinance_accounting_runtime:${HEDGEFUND_ACCOUNTING_DB_PASSWORD:?HEDGEFUND_ACCOUNTING_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_accounting_ledger"
+x-control-environment: &control-environment
+  DATABASE_URL: *control-database-url
+x-control-session-environment: &control-session-environment
+  DATABASE_URL: *control-database-url
+  DATABASE_SESSION_URL: *control-database-url
+x-control-and-market-environment: &control-and-market-environment
+  DATABASE_URL: *control-database-url
+  TIMESCALE_DATABASE_URL: *market-database-url
+x-control-dependency: &control-dependency
+  timescaledb:
+    condition: service_healthy
+
+services:
+  # The root development compose pins cores 22/23.  EC2 instance shapes do not
+  # have that topology; an empty value explicitly removes the pin while keeping
+  # the root CPU quota.
+  timescaledb:
+    image: ${HEDGEFUND_TIMESCALE_IMAGE:-timescale/timescaledb-ha@sha256:eaaab826932c579d5d4e3a3479446da931cabb8703cf7caf1038eb14d40754fa}
+    cpuset: ""
+    # The development file publishes 0.0.0.0:5434.  AWS keeps both databases
+    # private on the Compose network; administration uses docker exec/SSM.
+    ports: !override []
+
+  # Explicit deployment job.  It is never part of normal `up`; the release
+  # script runs it after the DB is healthy and before replacing applications.
+  database-bootstrap:
+    profiles: ["deployment"]
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: "no"
+    depends_on: *control-dependency
+    command:
+      - python
+      - scripts/aws_database_bootstrap.py
+      - --seed-paper-principal
+    environment:
+      CONTROL_DATABASE_URL: *admin-control-database-url
+      MARKET_DATABASE_URL: *admin-market-database-url
+      HEDGEFUND_RUNTIME_DB_PASSWORD: ${HEDGEFUND_RUNTIME_DB_PASSWORD:?HEDGEFUND_RUNTIME_DB_PASSWORD is required}
+      HEDGEFUND_ORDER_DB_PASSWORD: ${HEDGEFUND_ORDER_DB_PASSWORD:?HEDGEFUND_ORDER_DB_PASSWORD is required}
+      HEDGEFUND_TRADING_DB_PASSWORD: ${HEDGEFUND_TRADING_DB_PASSWORD:?HEDGEFUND_TRADING_DB_PASSWORD is required}
+      HEDGEFUND_ACCOUNTING_DB_PASSWORD: ${HEDGEFUND_ACCOUNTING_DB_PASSWORD:?HEDGEFUND_ACCOUNTING_DB_PASSWORD is required}
+      HEDGEFUND_CONTROL_DB_NAME: ${HEDGEFUND_CONTROL_DB_NAME:-control}
+      HGFINANCE_MIGRATION_TIMEOUT_SECONDS: ${HGFINANCE_MIGRATION_TIMEOUT_SECONDS:-1800}
+      HGFINANCE_MIGRATION_LOCK_TIMEOUT_SECONDS: ${HGFINANCE_MIGRATION_LOCK_TIMEOUT_SECONDS:-120}
+      PAPER_SEED_USER_ID: ${PAPER_SEED_USER_ID:-00000000-0000-4000-8000-00000000cec0}
+      PAPER_SEED_FUND_ID: ${PAPER_SEED_FUND_ID:-5c26db42-ce83-4daf-b1dc-c81680c13a6c}
+      PAPER_SEED_BOOK_ID: ${PAPER_SEED_BOOK_ID:-07d913de-9a5b-4cf5-b893-31a625445761}
+      PAPER_SEED_CASH_KRW: ${PAPER_SEED_CASH_KRW:-1000000000}
+    mem_limit: 1g
+    cpus: 1.0
+    pids_limit: 256
+
+  # Read-only LS REST calls provision the KRX instrument master and verify the
+  # reviewed calendar against observed daily bars.  This job has no broker
+  # credentials, adapter or order endpoint and runs only during deployment.
+  reference-bootstrap:
+    profiles: ["deployment"]
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: "no"
+    depends_on: *control-dependency
+    command: ["python", "scripts/aws_reference_bootstrap.py"]
+    environment:
+      DATABASE_URL: *admin-control-database-url
+      CONTROL_DATABASE_URL: *admin-control-database-url
+      MARKET_DATABASE_URL: *admin-market-database-url
+      HEDGEFUND_CONTROL_DB_NAME: ${HEDGEFUND_CONTROL_DB_NAME:-control}
+      PAPER_SEED_USER_ID: ${PAPER_SEED_USER_ID:-00000000-0000-4000-8000-00000000cec0}
+      PAPER_SEED_FUND_ID: ${PAPER_SEED_FUND_ID:-5c26db42-ce83-4daf-b1dc-c81680c13a6c}
+      PAPER_SEED_BOOK_ID: ${PAPER_SEED_BOOK_ID:-07d913de-9a5b-4cf5-b893-31a625445761}
+      AWS_REFERENCE_MIN_ACTIVE_KRX_STOCKS: ${AWS_REFERENCE_MIN_ACTIVE_KRX_STOCKS:-1000}
+      # Instrument master/calendar lookup is market-data-only.  LIVE here does
+      # not authorize or select a live broker adapter; Trading stays hard PAPER.
+      LS_ENV: ${LS_REFERENCE_ENV:-LIVE}
+      LS_APP_KEY: ${LS_APP_KEY:-}
+      LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
+      LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:-}
+      LS_APP_SECRET_KEY_PAPER: ${LS_APP_SECRET_KEY_PAPER:-}
+      LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}
+      LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
+    mem_limit: 1g
+    cpus: 1.0
+    pids_limit: 256
+
+  portfolio-bff:
+    depends_on: *control-dependency
+    environment:
+      <<: *control-environment
+      CONTROL_DATABASE_URL: *control-database-url
+      ORDER_ORCHESTRATOR_DATABASE_URL: *order-database-url
+      APP_ENV: production
+      PORTFOLIO_DATA_MODE: production
+      PORTFOLIO_AUTH_MODE: supabase_jwt
+      PORTFOLIO_AUTH_REQUIRED: "true"
+      USER_PAPER_ORDER_WORKFLOW_ENABLED: "true"
+      PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: "[]"
+      CEO_DISCORD_INGRESS_API_KEY: ${CEO_DISCORD_INGRESS_API_KEY:?CEO_DISCORD_INGRESS_API_KEY is required}
+      DISCORD_ACTOR_MAP: ${DISCORD_ACTOR_MAP:?DISCORD_ACTOR_MAP is required}
+      SUPABASE_URL: ${SUPABASE_URL:?Hosted Supabase Auth URL is required}
+      # ES256/RS256 access tokens are verified directly against Auth JWKS, so
+      # browser API keys are optional.  Legacy HS256 tokens still require one
+      # of these public keys at request time; privileged service keys are never
+      # accepted or passed under a service-role setting.
+      SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY:-}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
+      # Empty is deliberate for this backend-only deployment: Starlette emits
+      # no allow-origin header and rejects browser preflights.  If a UI is
+      # deployed later, only its exact HTTPS origin(s) may be supplied.
+      PORTFOLIO_CORS_ALLOW_ORIGINS: ${PORTFOLIO_CORS_ALLOW_ORIGINS:-}
+
+  ceo-hermes:
+    environment:
+      CEO_DISCORD_INGRESS_API_KEY: ${CEO_DISCORD_INGRESS_API_KEY:?CEO_DISCORD_INGRESS_API_KEY is required}
+      HGFINANCE_DISCORD_INGRESS_URL: http://portfolio-bff:8000/ui/ceo/ingress
+
+  paper-order-orchestrator-mcp:
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      trading-api:
+        condition: service_healthy
+    environment:
+      <<: *control-environment
+      CONTROL_DATABASE_URL: *control-database-url
+      ORDER_ORCHESTRATOR_DATABASE_URL: *order-database-url
+      ORDER_ORCHESTRATOR_DATABASE_ROLE: svc_order_orchestrator
+      APP_ENV: production
+      PORTFOLIO_DATA_MODE: production
+      PORTFOLIO_AUTH_MODE: supabase_jwt
+
+  portfolio-worker:
+    depends_on: *control-dependency
+    environment: *control-environment
+
+  ls-realtime:
+    environment: *control-and-market-environment
+
+  batch-collectors:
+    environment: *control-and-market-environment
+
+  qa-reproduction-worker:
+    environment:
+      <<: *control-session-environment
+      RISK_QA_DATABASE_URL: *control-database-url
+      QA_REPRODUCTION_TIMESCALE_DATABASE_URL: *market-database-url
+
+  quant-api:
+    depends_on: *control-dependency
+    environment:
+      <<: *control-session-environment
+      QUANT_DATABASE_URL: *control-database-url
+
+  market-api:
+    environment: *control-and-market-environment
+
+  research-api:
+    depends_on: *control-dependency
+    environment: *control-environment
+
+  research-mcp:
+    depends_on: *control-dependency
+    environment: *control-environment
+
+  research-liaison-mcp:
+    depends_on: *control-dependency
+    environment: *control-environment
+
+  risk-api:
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      <<: *control-environment
+      RISK_QA_DATABASE_URL: *control-database-url
+
+  audit-api:
+    environment:
+      <<: *control-session-environment
+      RISK_QA_DATABASE_URL: *control-database-url
+
+  qa-worker:
+    environment:
+      <<: *control-session-environment
+      RISK_QA_DATABASE_URL: *control-database-url
+
+  ceo-kanban-supervisor:
+    depends_on: *control-dependency
+    environment:
+      <<: *control-environment
+      RISK_QA_DATABASE_URL: *control-database-url
+
+  factory-autopilot:
+    environment:
+      <<: *control-and-market-environment
+      QUANT_DATABASE_URL: *control-database-url
+
+  factory-experiment-worker:
+    environment:
+      <<: *control-session-environment
+      QUANT_DATABASE_URL: *control-database-url
+      TIMESCALE_DATABASE_URL: *market-database-url
+
+  governance-api:
+    depends_on: *control-dependency
+    environment:
+      <<: *control-environment
+      GOVERNANCE_WORKFORCE_DATABASE_URL: *control-database-url
+
+  notification-worker:
+    environment:
+      <<: *control-environment
+      GOVERNANCE_WORKFORCE_DATABASE_URL: *control-database-url
+
+  workforce-api:
+    depends_on: *control-dependency
+    environment:
+      <<: *control-environment
+      GOVERNANCE_WORKFORCE_DATABASE_URL: *control-database-url
+
+  improvement-worker:
+    environment:
+      <<: *control-environment
+      GOVERNANCE_WORKFORCE_DATABASE_URL: *control-database-url
+
+  trading-api:
+    depends_on: *control-dependency
+    environment:
+      DATABASE_URL: *trading-database-url
+      PAPER_DB: "true"
+      APP_ENV: production
+      TRADING_EXECUTION_MODE: PAPER
+      TRADING_BROKER_ADAPTER: paper
+      TRADING_DIRECTIVE_REPOSITORY: postgres
+      TRADING_DATABASE_ROLE: svc_trading_api
+      TRADING_AUTH_MODE: service
+      MARKET_API_URL: http://market-api:8036
+
+  trading-directive-worker:
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      trading-api:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: *trading-database-url
+      APP_ENV: production
+      TRADING_EXECUTION_MODE: PAPER
+      TRADING_BROKER_ADAPTER: paper
+      TRADING_DIRECTIVE_REPOSITORY: postgres
+      TRADING_DATABASE_ROLE: svc_trading_api
+      MARKET_API_URL: http://market-api:8036
+
+  trading-outbox-relay:
+    environment:
+      DATABASE_URL: *trading-database-url
+
+  accounting-api:
+    depends_on: *control-dependency
+    environment:
+      DATABASE_URL: *accounting-database-url
+      ACCOUNTING_MODE: PAPER_DB
+      PAPER_DB: "true"
+      ACCOUNTING_DATABASE_ROLE: svc_accounting_ledger
+      ACCOUNTING_DEFAULT_BOOK_ID: ${PAPER_SEED_BOOK_ID:-07d913de-9a5b-4cf5-b893-31a625445761}
+
+  accounting-ledger-consumer:
+    environment:
+      DATABASE_URL: *accounting-database-url
+      ACCOUNTING_MODE: PAPER_DB
+      PAPER_DB: "true"
+      ACCOUNTING_DATABASE_ROLE: svc_accounting_ledger
+      MARKET_API_URL: http://market-api:8036
+
+  accounting-close-scheduler:
+    environment:
+      DATABASE_URL: *accounting-database-url
+      ACCOUNTING_MODE: PAPER_DB
+      PAPER_DB: "true"
+      ACCOUNTING_DATABASE_ROLE: svc_accounting_ledger
+      ACCOUNTING_DEFAULT_BOOK_ID: ${PAPER_SEED_BOOK_ID:-07d913de-9a5b-4cf5-b893-31a625445761}
+      MARKET_API_URL: http://market-api:8036

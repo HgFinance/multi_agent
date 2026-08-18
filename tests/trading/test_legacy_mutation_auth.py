@@ -67,7 +67,10 @@ def _headers(
         jti=f"test-{uuid4()}",
         iat=now,
         nbf=now,
-        exp=expires_at if expires_at is not None else now + 60,
+        # Parametrized headers are materialized during collection.  Keep the
+        # default comfortably inside the configured 300-second maximum while
+        # allowing the full Windows suite to run for more than one minute.
+        exp=expires_at if expires_at is not None else now + 240,
     )
     return {"Authorization": f"Bearer {token}"}
 

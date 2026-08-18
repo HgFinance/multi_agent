@@ -725,20 +725,39 @@ def set_user_order_repository_for_tests(
     _repository_cache = None
 
 
+def _production_order_runtime() -> bool:
+    return (
+        os.getenv("APP_ENV", "development").casefold() in {"production", "staging"}
+        or os.getenv("PORTFOLIO_DATA_MODE", "").casefold() == "production"
+    )
+
+
+def _order_orchestrator_database_url() -> str:
+    """Select the isolated order login, failing closed in production."""
+
+    dedicated = os.getenv("ORDER_ORCHESTRATOR_DATABASE_URL", "").strip()
+    if dedicated:
+        return dedicated
+    if _production_order_runtime():
+        raise UserOrderWorkflowUnavailable(
+            "dedicated order orchestrator database is required"
+        )
+    # Local/test compatibility only.  Production must never let the generic
+    # application login acquire the critical order role.
+    return (
+        os.getenv("CONTROL_DATABASE_URL", "").strip()
+        or os.getenv("DATABASE_URL", "").strip()
+    )
+
+
 def user_order_repository() -> UserOrderRequestRepository:
     global _repository_cache
     if _repository_override is not None:
         return _repository_override
     if _repository_cache is not None:
         return _repository_cache
-    dsn = (
-        os.getenv("CONTROL_DATABASE_URL", "").strip()
-        or os.getenv("DATABASE_URL", "").strip()
-    )
-    production = (
-        os.getenv("APP_ENV", "development").casefold() in {"production", "staging"}
-        or os.getenv("PORTFOLIO_DATA_MODE", "").casefold() == "production"
-    )
+    dsn = _order_orchestrator_database_url()
+    production = _production_order_runtime()
     if not dsn:
         if production:
             raise UserOrderWorkflowUnavailable(

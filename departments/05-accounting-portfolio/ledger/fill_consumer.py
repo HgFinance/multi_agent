@@ -409,6 +409,16 @@ def consume_fill(ledger: Ledger, fill: FillRow) -> Journal:
     )
 
 
+def _save_snapshot(repo: LedgerRepository, ledger: PostgresLedger,
+                   marks: dict[UUID, MarkPrice], as_of: datetime,
+                   max_staleness: timedelta | None = None) -> PortfolioSnapshot:
+    """Value and persist NAV after the accounting projection is durable."""
+    snapshot = (value_portfolio(ledger, marks, as_of, max_staleness) if max_staleness
+                else value_portfolio(ledger, marks, as_of))
+    repo.save_snapshot(snapshot)
+    return snapshot
+
+
 def project(repo: LedgerRepository, ledger: PostgresLedger,
             marks: dict[UUID, MarkPrice], as_of: datetime,
             max_staleness: timedelta | None = None) -> PortfolioSnapshot:
@@ -419,10 +429,7 @@ def project(repo: LedgerRepository, ledger: PostgresLedger,
     체결에서 나온 사실이라 시세와 무관하게 참이고, NAV는 시세 없이는 틀린 수치다.
     """
     repo.save_projection(ledger)
-    snapshot = (value_portfolio(ledger, marks, as_of, max_staleness) if max_staleness
-                else value_portfolio(ledger, marks, as_of))
-    repo.save_snapshot(snapshot)
-    return snapshot
+    return _save_snapshot(repo, ledger, marks, as_of, max_staleness)
 
 
 def run_once(
@@ -459,11 +466,13 @@ def run_once(
     # 분개만 쌓이고 현금은 영원히 안 움직인다 - 매수 대금이 안 나간 것처럼 보여
     # 가용 현금이 실제보다 많아진다. Projection 앞에 둬야 그 주기 스냅샷에 반영된다.
     journals.extend(settle_due(ledger, as_of.date(), now=as_of))
-    snapshot = project(repo, ledger, marks, as_of)
-    # Journal and accounting projections are durable before the reservation is
-    # decremented.  If projection fails, the reservation remains conservative;
-    # a restart replays the idempotent Journal and finishes this acknowledgement.
+    # Journal plus position/cash are the canonical accounting projection and
+    # therefore the Fill acknowledgement boundary. NAV is a downstream
+    # valuation: a missing/stale mark must not leave an already-projected Fill
+    # and its reservation permanently unacknowledged.
+    repo.save_projection(ledger)
     ack_fill_events(repo, event_ids=event_ids)
+    snapshot = _save_snapshot(repo, ledger, marks, as_of)
     return journals, snapshot
 
 

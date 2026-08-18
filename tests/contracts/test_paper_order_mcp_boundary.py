@@ -113,13 +113,23 @@ def test_server_exposes_exactly_one_lazy_delegating_tool(monkeypatch) -> None:
     tools = asyncio.run(server.list_tools())
     assert [tool.name for tool in tools] == ["process_user_paper_order"]
     schema = tools[0].inputSchema
-    candidate_schema = schema["$defs"]["HermesOrderCandidate"]
-    assert schema["properties"]["interpretation"] == {
-        "$ref": "#/$defs/HermesOrderCandidate"
-    }
-    assert candidate_schema["additionalProperties"] is False
+    candidate_ref = schema["properties"]["interpretation"]["$ref"]
+    candidate_schema = schema["$defs"][candidate_ref.rsplit("/", 1)[-1]]
+    assert candidate_schema["type"] == "object"
+    # The MCP transport must accept an untrusted object so malformed Hermes
+    # output reaches the deterministic verifier and receives a durable outcome.
+    # It does not confer authority: the strict candidate contract is applied by
+    # the orchestrator before any PAPER OMS submission.
+    assert candidate_schema["additionalProperties"] is True
     assert candidate_schema["properties"]["mode"]["const"] == "PAPER"
     assert candidate_schema["properties"]["binding"]["const"] is False
+    assert candidate_schema["properties"]["decision"]["enum"] == [
+        "EXECUTE",
+        "CLARIFY",
+        "NOT_ORDER",
+    ]
+    reason_items = candidate_schema["properties"]["reason_codes"]["items"]
+    assert reason_items["$ref"].endswith("/OrderReasonCode")
 
     interpretation = {
         "schema_version": "user-paper-order-interpretation.v1",
@@ -152,6 +162,60 @@ def test_server_exposes_exactly_one_lazy_delegating_tool(monkeypatch) -> None:
             "root_task_id": "root-1",
             "trading_task_id": "trade-1",
             "interpretation": interpretation,
+        }
+    ]
+
+
+def test_transport_accepts_contradictory_candidate_for_durable_verifier(
+    monkeypatch,
+) -> None:
+    calls: list[dict] = []
+    fake = ModuleType("apps.api.user_order_orchestrator")
+
+    async def orchestrate(**kwargs):
+        calls.append(kwargs)
+        return {
+            "decision": "CLARIFY",
+            "request_state": "CLARIFICATION_REQUIRED",
+            "reason_codes": ["INVALID_CANDIDATE_SCHEMA"],
+        }
+
+    fake.process_user_paper_order = orchestrate  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "apps.api.user_order_orchestrator", fake)
+    server = build_server()
+    contradictory = {
+        "schema_version": "user-paper-order-interpretation.v1",
+        "mode": "PAPER",
+        "binding": False,
+        "raw_text_sha256": "0" * 64,
+        "decision": "CLARIFY",
+        "action": "PLACE_ORDER",
+        "instrument_mention": "삼성전자",
+        "side": "BUY",
+        "quantity": "2",
+        "order_type": None,
+        "limit_price": None,
+        "evidence": [],
+        "reason_codes": ["MISSING_OR_CONFLICTING_ORDER_TYPE"],
+    }
+
+    result = asyncio.run(
+        server.call_tool(
+            "process_user_paper_order",
+            {
+                "root_task_id": "t_root1",
+                "trading_task_id": "t_trade1",
+                "interpretation": contradictory,
+            },
+        )
+    )
+
+    assert result[1]["request_state"] == "CLARIFICATION_REQUIRED"
+    assert calls == [
+        {
+            "root_task_id": "t_root1",
+            "trading_task_id": "t_trade1",
+            "interpretation": contradictory,
         }
     ]
 
@@ -201,7 +265,10 @@ def test_readiness_checks_role_schema_kanban_and_trading(
             return False
 
     monkeypatch.setenv("MCP_TRADING_ORDER_API_KEY", VALID_KEY)
-    monkeypatch.setenv("DATABASE_URL", "postgresql://redacted.invalid/control")
+    monkeypatch.setenv(
+        "ORDER_ORCHESTRATOR_DATABASE_URL",
+        "postgresql://redacted.invalid/control",
+    )
     monkeypatch.setenv("HERMES_KANBAN_DB", str(kanban_path))
     monkeypatch.setenv("TRADING_API_URL", "http://trading-api:8000")
     monkeypatch.setattr(psycopg2, "connect", lambda *_args, **_kwargs: Connection())
@@ -214,6 +281,18 @@ def test_readiness_checks_role_schema_kanban_and_trading(
     check_readiness()
 
     assert observed[-1] == ("http://trading-api:8000/health/ready", 3)
+
+
+def test_production_readiness_rejects_generic_database_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MCP_TRADING_ORDER_API_KEY", VALID_KEY)
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://generic.invalid/control")
+    monkeypatch.delenv("ORDER_ORCHESTRATOR_DATABASE_URL", raising=False)
+
+    with pytest.raises(RuntimeError, match="dedicated order orchestrator"):
+        check_readiness()
 
 
 def test_compose_keeps_authority_secrets_out_of_trading_hermes() -> None:
