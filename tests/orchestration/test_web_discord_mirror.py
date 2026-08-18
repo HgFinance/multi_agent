@@ -17,6 +17,7 @@ import unittest
 from unittest.mock import patch
 
 from apps.api.discord_actor_map import ACTOR_MAP_ENV, resolve as resolve_actor
+from apps.api import discord_mirror
 from apps.api.discord_mirror import MIRROR_TAG, build_content
 from orchestration.ceo_workflow_scope import build_root_body
 from orchestration.discord_delivery import correlation_from_task
@@ -191,6 +192,52 @@ class UserToFundReverseLookupTest(unittest.TestCase):
 
         with patch.object(governance_client, "GOVERNANCE_API_URL", ""):
             self.assertIsNone(governance_client.fetch_fund_id_by_user(self.USER3))
+
+class MirrorIsOffDuringTestsTest(unittest.TestCase):
+    """테스트 실행 중에는 절대 Discord에 글이 나가지 않는다.
+
+    2026-08-18 사고: 단위 테스트가 `ceo_query`를 부르면 미러 게시가 그대로
+    실행됐고, 개발 머신의 환경에 토큰이 있어서 **픽스처 질의 "q"가 실제 팀
+    채널에 올라갔다.** 방어선을 둘로 나눈다 - 설정(`DISCORD_MIRROR_ENABLED`)은
+    "어느 환경인가"를, 러너 판정은 "지금 테스트 중인가"를 가른다.
+    """
+
+    def test_runner_is_detected_in_this_very_process(self) -> None:
+        """이 테스트가 도는 프로세스는 러너로 판정돼야 한다.
+
+        판정이 틀리면 이 테스트만 통과하는 게 아니라 **다음 사고가 그대로 다시
+        난다.** 그래서 모의값이 아니라 실제 실행 환경을 본다.
+        """
+
+        self.assertTrue(discord_mirror.test_runner_active())
+
+    def test_posting_is_blocked_even_when_fully_configured(self) -> None:
+        """플래그가 켜지고 토큰·채널이 다 있어도 러너 안에서는 나가지 않는다."""
+
+        with patch.dict(
+            os.environ,
+            {
+                discord_mirror.ENABLED_ENV: "true",
+                discord_mirror.TOKEN_ENV: "dummy-token",
+                discord_mirror.CHANNEL_ENV: "123456789012345678",
+            },
+        ):
+            self.assertTrue(discord_mirror.mirror_enabled())
+            self.assertIsNone(discord_mirror.post_question("이 글은 나가면 안 된다"))
+
+    def test_disabled_by_default(self) -> None:
+        """플래그를 안 적으면 꺼짐 - 토큰이 있어도 게시하지 않는다."""
+
+        with patch.dict(
+            os.environ,
+            {
+                discord_mirror.ENABLED_ENV: "",
+                discord_mirror.TOKEN_ENV: "dummy-token",
+                discord_mirror.CHANNEL_ENV: "123456789012345678",
+            },
+        ):
+            self.assertFalse(discord_mirror.mirror_enabled())
+
 
 if __name__ == "__main__":
     unittest.main()

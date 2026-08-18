@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -80,6 +81,17 @@ TOKEN_ENV = "DISCORD_BOT_TOKEN_CEO"
 # 실패 시 확대가 아니라 차단 방향으로).
 ENABLED_ENV = "DISCORD_MIRROR_ENABLED"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+# 실행기가 테스트 러너면 켜져 있어도 게시하지 않는다.
+#
+# `ENABLED_ENV` 하나만으로는 부족하다: 배포와 같은 `.env`를 쓰는 개발 머신에서
+# 테스트를 돌리면 플래그가 켜진 채 실행되고, 그대로 팀 채널에 글이 나간다.
+# 설정은 "어느 환경인가"를 나누지만 "지금 테스트 중인가"는 나누지 못한다.
+#
+# **러너 자체만 본다** - `"unittest" in sys.modules` 같은 판정은 쓰지 않는다.
+# 그건 어떤 의존성이 unittest를 import하기만 해도 참이 되어, 운영 프로세스에서
+# 미러가 조용히 꺼진다. 조용한 비활성화는 조용한 발송만큼 나쁘다.
+_TEST_RUNNER_TOKENS = ("unittest", "pytest", "py.test")
 
 # 미러 게시물임을 드러내는 접두어. 사람이 채널만 봐도 구분할 수 있어야 한다.
 MIRROR_TAG = "[web-mirror]"
@@ -111,6 +123,30 @@ def mirror_enabled() -> bool:
     return os.getenv(ENABLED_ENV, "").strip().casefold() in _TRUTHY
 
 
+def test_runner_active() -> bool:
+    """이 프로세스가 테스트 러너로 떠 있는가.
+
+    pytest는 실행 중인 테스트 이름을 `PYTEST_CURRENT_TEST`에 넣는다. `python -m
+    unittest`/`python -m pytest`는 `__main__` 모듈 경로와 `sys.argv[0]`에 러너
+    이름이 남는다. 둘 다 **러너로 실행됐다**는 신호이지, 단순 import가 아니다.
+    """
+
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return True
+    candidates = [str(sys.argv[0] or "")]
+    main_module = sys.modules.get("__main__")
+    candidates.append(str(getattr(main_module, "__file__", "") or ""))
+    for candidate in candidates:
+        normalized = candidate.replace("\\", "/").casefold()
+        if any(f"/{token}/" in normalized or normalized.endswith(token)
+               for token in _TEST_RUNNER_TOKENS):
+            return True
+        # `python -m unittest`는 argv[0]이 .../unittest/__main__.py 다.
+        if any(f"/{token}/__main__.py" in normalized for token in _TEST_RUNNER_TOKENS):
+            return True
+    return False
+
+
 def _config() -> tuple[str, str] | None:
     """(토큰, 채널 id). 꺼져 있거나 둘 중 하나라도 비어 있으면 `None`.
 
@@ -119,6 +155,11 @@ def _config() -> tuple[str, str] | None:
     """
 
     if not mirror_enabled():
+        return None
+    if test_runner_active():
+        # 조용히 넘어가지 않고 남긴다 - 운영에서 이 줄이 보이면 판정이 잘못된
+        # 것이므로 즉시 드러나야 한다.
+        _LOGGER.warning("discord-mirror status=blocked reason=test_runner_detected")
         return None
     token = os.getenv(TOKEN_ENV, "").strip()
     channel_id = os.getenv(CHANNEL_ENV, "").strip()
@@ -287,5 +328,22 @@ if __name__ == "__main__":
     with patch.dict(os.environ, {ENABLED_ENV: "true", TOKEN_ENV: "", CHANNEL_ENV: ""}):
         assert mirror_enabled() is True
         assert post_question("설정 없음") is None
+
+    # 러너 판정: pytest 환경변수만으로도 차단된다.
+    with patch.dict(
+        os.environ,
+        {
+            ENABLED_ENV: "true",
+            TOKEN_ENV: "dummy-token",
+            CHANNEL_ENV: "123",
+            "PYTEST_CURRENT_TEST": "tests/x.py::test_y (call)",
+        },
+    ):
+        assert test_runner_active() is True
+        assert post_question("테스트 중") is None
+
+    # 이 파일을 직접 실행한 지금은 러너가 아니다 - 판정이 과하게 넓으면
+    # 운영에서도 미러가 꺼진다.
+    assert test_runner_active() is False
 
     print("discord_mirror self-check ok")
