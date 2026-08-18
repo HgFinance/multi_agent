@@ -148,8 +148,22 @@ def _event_message(
     return _one_line(summary or f"{department_name} 실행 이벤트")
 
 
+def portfolio_data_mode() -> str:
+    """Return the explicit data-plane mode, refusing production fixtures."""
+
+    mode = os.getenv("PORTFOLIO_DATA_MODE", "production").strip().lower()
+    if mode not in {"production", "test"}:
+        raise RuntimeError("unsupported_portfolio_data_mode")
+    if mode == "test" and os.getenv("APP_ENV", "production").strip().lower() not in {
+        "local",
+        "test",
+    }:
+        raise RuntimeError("portfolio_test_data_forbidden")
+    return mode
+
+
 def load_test_catalog() -> list[dict[str, Any]]:
-    """Load the replaceable local catalog used when Supabase is unavailable."""
+    """Load the deterministic catalog used only in explicit local/test mode."""
 
     try:
         value = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
@@ -758,13 +772,13 @@ class PortfolioRuntime:
                 os.environ["LANGCHAIN_TRACING_V2"] = os.getenv("LANGSMITH_TRACING", "false")
             if os.getenv("LANGSMITH_PROJECT") and not os.getenv("LANGCHAIN_PROJECT"):
                 os.environ["LANGCHAIN_PROJECT"] = os.environ["LANGSMITH_PROJECT"]
-            database_url = os.getenv("DATABASE_URL", "").strip()
+            data_mode = portfolio_data_mode()
             # CEO task planner input: best-effort, never blocks the run (see
             # governance_client.fetch_mandate_policy_content docstring).
             mandate_id = str(profile.get("mandate_id") or "").strip()
             if mandate_id:
                 profile["mandate_policy"] = await fetch_mandate_policy_content(mandate_id)
-            if database_url:
+            if data_mode == "production":
                 result = await run_portfolio_recommendation_pipeline_async(profile, event_callback=lambda event: self._event(job_id, event))
             else:
                 result = await run_portfolio_recommendation_pipeline_async(
@@ -773,13 +787,13 @@ class PortfolioRuntime:
                     event_callback=lambda event: self._event(job_id, event),
                 )
             data_context = result.get("data_context", {})
-            live_source = data_context.get("source") == "SUPABASE"
+            live_source = data_context.get("source") == "CONTROL_DB"
             live_instruments = None
             live_universe_status = None
-            if database_url:
+            if data_mode == "production":
                 # A configured live DB must never fall back to the browser TEST
-                # catalog.  An unavailable live source therefore yields an empty
-                # live universe and a HOLD result.
+                # catalog. An absent or unavailable control DB therefore yields
+                # an empty live universe and a HOLD result.
                 live_instruments = (
                     data_context.get("market", {})
                     .get("instrument_universe", {})

@@ -499,6 +499,207 @@ def test_h1_h2_h1_retry_rejects_changed_h1_identity_before_global_latest(
     assert global_calls == []
 
 
+def test_same_ast_different_semantics_starts_new_root_and_preserves_baselines(
+        monkeypatch) -> None:
+    expression = {"op": "field", "field": "microprice_offset_bps"}
+    sidecar_expr = {"op": "field", "field": "spread_bps"}
+    primary_baseline = {"op": "field", "field": "queue_imbalance_l1"}
+    sidecar_baseline = {"op": "field", "field": "queue_imbalance_l10"}
+    follow_30 = {
+        "event": "MICROPRICE_DISLOCATION", "context": ["ALL"],
+        "qualities": ["PERSISTENCE"], "direction": "FOLLOW",
+        "output": "TAKER_NET_PNL", "execution": "TAKER",
+        "horizon_seconds": 30,
+    }
+    revert_600 = {
+        **follow_30, "direction": "REVERT", "horizon_seconds": 600,
+    }
+    old_follow = SimpleNamespace(
+        candidate_lineage_id="old-follow", root_lineage_id="old-follow-root",
+        candidate_identity_fingerprint="1" * 64,
+        hypothesis_id="00000000-0000-0000-0000-000000000111")
+    lookup_contracts = []
+    registered = []
+
+    monkeypatch.setattr(
+        runner, "_find_same_hypothesis_ast_lineage",
+        lambda *_args, **_kwargs: None)
+
+    def exact_lookup(_conn, *, source_contract=None,
+                     candidate_identity=None):
+        assert candidate_identity is None
+        lookup_contracts.append(source_contract)
+        # This represents an older row with the same AST.  It is a parent only
+        # for the exact FOLLOW/30s contract, never for REVERT/600s.
+        return old_follow if source_contract["semantic_plan"] == follow_30 \
+            else None
+
+    monkeypatch.setattr(runner, "find_latest_candidate_lineage", exact_lookup)
+
+    def fake_register(_conn, **kwargs):
+        registered.append(kwargs)
+        parent = kwargs.get("parent")
+        index = len(registered)
+        return SimpleNamespace(
+            candidate_lineage_id=f"new-{index}",
+            root_lineage_id=(parent.root_lineage_id if parent else f"root-{index}"),
+            parent_lineage_id=(parent.candidate_lineage_id if parent else None),
+            candidate_identity_fingerprint=f"{index + 1}" * 64,
+            hypothesis_id=kwargs["hypothesis_id"])
+
+    monkeypatch.setattr(runner, "register_candidate_lineage", fake_register)
+    monkeypatch.setattr(
+        runner, "_candidate_specs",
+        lambda _config, row: (
+            {"feature": "frozen"},
+            {"horizon_seconds": row["horizon_seconds"]},
+            {"coefficient_policy": row["coefficient_policy"]},
+        ))
+
+    primary, lineages = runner._register_trial_lineages(
+        object(), hypothesis_id=
+        "00000000-0000-0000-0000-000000000222", config={
+            "intraday_signal_expr": expression,
+            "source_baseline_expr": primary_baseline,
+            "semantic_plan": revert_600,
+            "horizon_seconds": 600, "execution": "TAKER",
+            "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
+            "coefficient_policy": "PREREGISTERED_NO_OOS_FIT",
+            "screening_population": [{
+                "intraday_signal_expr": sidecar_expr,
+                "ast_fingerprint": runner.fingerprint(sidecar_expr),
+                "source_baseline_expr": sidecar_baseline,
+                "semantic_plan": follow_30,
+                "horizon_seconds": 30, "execution": "TAKER",
+                "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
+                "coefficient_policy": "PREREGISTERED_NO_OOS_FIT",
+                "candidate_role": "LINKED_CANDIDATE",
+            }],
+        })
+
+    assert lookup_contracts[0]["candidate_ast"] == expression
+    assert lookup_contracts[0]["semantic_plan"] == revert_600
+    assert lookup_contracts[0]["baseline_ast"] == primary_baseline
+    assert primary.root_lineage_id != old_follow.root_lineage_id
+    assert registered[0]["parent"] is None
+    assert registered[0]["baseline_ast"] == primary_baseline
+    assert registered[1]["baseline_ast"] == sidecar_baseline
+    assert registered[1]["parent"] is primary
+    assert len(lineages) == 2
+
+
+def test_missing_explicit_screening_parent_fails_closed(monkeypatch) -> None:
+    expression = {"op": "field", "field": "microprice_offset_bps"}
+    child = {"op": "field", "field": "spread_bps"}
+    plan = {
+        "event": "MICROPRICE_DISLOCATION", "context": ["ALL"],
+        "qualities": ["PERSISTENCE"], "direction": "FOLLOW",
+        "output": "TAKER_NET_PNL", "execution": "TAKER",
+        "horizon_seconds": 30,
+    }
+    primary = SimpleNamespace(
+        candidate_lineage_id="primary", root_lineage_id="primary-root",
+        candidate_identity_fingerprint="1" * 64,
+        hypothesis_id="00000000-0000-0000-0000-000000000333")
+    monkeypatch.setattr(
+        runner, "_find_same_hypothesis_ast_lineage",
+        lambda *_args, **_kwargs: primary)
+    monkeypatch.setattr(
+        runner, "_assert_same_hypothesis_retry_identity",
+        lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        runner, "_candidate_specs",
+        lambda *_args, **_kwargs: ({"f": 1}, {"l": 1}, {"m": 1}))
+
+    with pytest.raises(RuntimeError, match="missing or cyclic explicit parent"):
+        runner._register_trial_lineages(
+            object(), hypothesis_id=primary.hypothesis_id, config={
+                "intraday_signal_expr": expression,
+                "semantic_plan": plan,
+                "horizon_seconds": 30, "execution": "TAKER",
+                "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
+                "coefficient_policy": "PREREGISTERED_NO_OOS_FIT",
+                "screening_population": [{
+                    "intraday_signal_expr": child,
+                    "ast_fingerprint": runner.fingerprint(child),
+                    "semantic_plan": plan,
+                    "horizon_seconds": 30, "execution": "TAKER",
+                    "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
+                    "coefficient_policy": "PREREGISTERED_NO_OOS_FIT",
+                    "parent_ast_fingerprint": "missing-parent",
+                }],
+            })
+
+
+def test_explicit_population_parent_is_registered_before_evolved_primary(
+        monkeypatch) -> None:
+    parent_expr = {"op": "field", "field": "microprice_offset_bps"}
+    child_expr = {"op": "neg", "arg": parent_expr}
+    parent_fp = runner.fingerprint(parent_expr)
+    plan = {
+        "event": "MICROPRICE_DISLOCATION", "context": ["ALL"],
+        "qualities": ["PERSISTENCE"], "direction": "REVERT",
+        "output": "TAKER_NET_PNL", "execution": "TAKER",
+        "horizon_seconds": 30,
+    }
+    registered = []
+    lookups = []
+    monkeypatch.setattr(
+        runner, "_find_same_hypothesis_ast_lineage",
+        lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        runner, "_candidate_specs",
+        lambda *_args, **_kwargs: ({"f": 1}, {"l": 1}, {"m": 1}))
+
+    def lookup(_conn, **kwargs):
+        lookups.append(kwargs)
+        return None
+
+    def register(_conn, **kwargs):
+        registered.append(kwargs)
+        parent = kwargs.get("parent")
+        index = len(registered)
+        return SimpleNamespace(
+            candidate_lineage_id=f"lineage-{index}",
+            root_lineage_id=(parent.root_lineage_id if parent else "root-parent"),
+            parent_lineage_id=(parent.candidate_lineage_id if parent else None),
+            candidate_identity_fingerprint=f"{index}" * 64,
+            hypothesis_id=kwargs["hypothesis_id"])
+
+    monkeypatch.setattr(runner, "find_latest_candidate_lineage", lookup)
+    monkeypatch.setattr(runner, "register_candidate_lineage", register)
+    primary, lineages = runner._register_trial_lineages(
+        object(), hypothesis_id=
+        "00000000-0000-0000-0000-000000000444", config={
+            "intraday_signal_expr": child_expr,
+            "source_baseline_expr": parent_expr,
+            "parent_ast_fingerprint": parent_fp,
+            "semantic_plan": plan,
+            "horizon_seconds": 30, "execution": "TAKER",
+            "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
+            "coefficient_policy": "PREREGISTERED_NO_OOS_FIT",
+            "screening_population": [{
+                "intraday_signal_expr": parent_expr,
+                "ast_fingerprint": parent_fp,
+                "source_baseline_expr": parent_expr,
+                "semantic_plan": plan,
+                "horizon_seconds": 30, "execution": "TAKER",
+                "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
+                "coefficient_policy": "PREREGISTERED_NO_OOS_FIT",
+                "candidate_role": "LINEAGE_PARENT",
+            }],
+        })
+
+    assert registered[0]["candidate_ast"] == parent_expr
+    assert registered[0]["parent"] is None
+    assert registered[1]["candidate_ast"] == child_expr
+    assert registered[1]["parent"].candidate_lineage_id == "lineage-1"
+    assert primary.root_lineage_id == "root-parent"
+    assert set(lineages) == {parent_fp, runner.fingerprint(child_expr)}
+    assert len(lookups) == 1
+    assert lookups[0]["source_contract"]["candidate_ast"] == parent_expr
+
+
 def test_forward_pass_becomes_explicit_qa_handoff_without_auto_promotion() -> None:
     historical = {
         "decision": "HOLD",

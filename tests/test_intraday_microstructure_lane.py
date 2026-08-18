@@ -35,6 +35,7 @@ from intraday_microstructure import (  # noqa: E402
     _EXTERNAL_QUOTE_SQL,
     _EXTERNAL_SOURCE_QUALITY_SQL,
     _EXTERNAL_TRADE_SQL,
+    load_instrument_events_batch,
 )
 from intraday_sample_cache import (SampleCache, identity as cache_identity)  # noqa: E402
 
@@ -121,8 +122,13 @@ def test_external_replay_contract_is_explicit_and_schema_safe() -> None:
     assert "coalesce(bid10,0)" in _EXTERNAL_QUOTE_SQL
     assert "coalesce(ask_vol10,0)" in _EXTERNAL_QUOTE_SQL
     assert "symbol = %s" in _EXTERNAL_QUOTE_SQL
+    assert "ts >= %s and ts < %s and ts <= %s" in _EXTERNAL_QUOTE_SQL
+    assert "hash_record_extended(quotes, 0)" in _EXTERNAL_QUOTE_SQL
     assert "case when ofi_contrib > 0 then 1" in _EXTERNAL_TRADE_SQL
     assert "when ofi_contrib < 0 then -1" in _EXTERNAL_TRADE_SQL
+    assert "symbol = %s" in _EXTERNAL_TRADE_SQL
+    assert "ts >= %s and ts < %s and ts <= %s" in _EXTERNAL_TRADE_SQL
+    assert "hash_record_extended(ticks, 0)" in _EXTERNAL_TRADE_SQL
     assert "count(*) as quotes_without_received_at" in \
         _EXTERNAL_SOURCE_QUALITY_SQL
 
@@ -130,6 +136,8 @@ def test_external_replay_contract_is_explicit_and_schema_safe() -> None:
     assert replay["event_source"] == EXTERNAL_EVENT_SOURCE
     assert replay["arrival_clock_pit"] is False
     assert replay["historical_replay_only"] is True
+    assert replay["source_granularity"] == "RAW_QUOTE_TRADE_EVENTS"
+    assert replay["daily_aggregate_replay_allowed"] is False
     assert "receipt clock unavailable" in replay["clock"]
     assert "forward receipt-clock confirmation required" in \
         replay["evidence_limit"]
@@ -287,6 +295,10 @@ def test_discovery_cache_identity_is_spec_and_lineage_bound() -> None:
         spec=IntradayLaneSpec(horizons_seconds=(5, 30)),
         event_source=EXTERNAL_EVENT_SOURCE, execution_model="TAKER",
         source_lineage=[{"source": "ext_src.quotes", "rows": 11}])
+    with pytest.raises(ValueError, match="raw quote/trade event sources only"):
+        cache_identity(
+            spec=IntradayLaneSpec(), event_source="microstructure_features",
+            execution_model="TAKER", source_lineage=[])
 
 
 def test_discovery_parquet_cache_round_trip(tmp_path) -> None:
@@ -306,6 +318,140 @@ def test_discovery_parquet_cache_round_trip(tmp_path) -> None:
     assert cache.load("2026-08-14", "005930") == samples
     assert cache.store("2026-08-14", "000020", [])
     assert cache.load("2026-08-14", "000020") == []
+    import pyarrow.parquet as pq
+    metadata = pq.read_table(
+        cache.path_for("2026-08-14", "000020")).schema.metadata
+    assert metadata[b"intraday_source_granularity"] == \
+        b"RAW_QUOTE_TRADE_EVENTS"
+    assert metadata[b"evidence_authority"] == b"NONE"
+    assert metadata[b"empty_semantics"] == \
+        b"DERIVATION_PRODUCED_NO_SAMPLES_NOT_SOURCE_EMPTY"
+
+
+def test_external_batch_loader_canonicalizes_exact_krx_symbol_keys() -> None:
+    event = BASE
+    quote_row = (
+        event, event, event, "005930  ", [99.0], [10.0], [101.0], [11.0],
+        "q1", 1, 2,
+    )
+    trade_row = (
+        event, event, event, "005930  ", 100.0, 3.0, 1, "t1", 3, 4,
+    )
+
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+
+        def execute(self, sql, params):
+            self.rows = [quote_row] if "ext_src.quotes" in sql else [trade_row]
+            self.params = params
+
+        def fetchall(self): return self.rows
+
+    class Conn:
+        def cursor(self): return Cursor()
+
+    loaded = load_instrument_events_batch(
+        Conn(), instrument_ids=[" 005930 "], start=event,
+        end=event + timedelta(seconds=1),
+        as_known_at=event + timedelta(seconds=1),
+        source=EXTERNAL_EVENT_SOURCE,
+    )
+    assert list(loaded) == ["005930"]
+    quotes, trades = loaded["005930"]
+    assert [row.instrument_id for row in quotes] == ["005930"]
+    assert [row.instrument_id for row in trades] == ["005930"]
+
+
+def test_external_raw_evidence_hashes_late_session_rows_in_fixed_window() -> None:
+    start = datetime(2026, 8, 14, 0, 0, tzinfo=UTC)
+    content_end = datetime(2026, 8, 14, 6, 30, tzinfo=UTC)
+    late = content_end - timedelta(seconds=1)
+    quote_row = (
+        late, late, late, "005930", [99.0], [10.0], [101.0], [11.0],
+        "q-late", 11, 13,
+    )
+    trade_row = (
+        late, late, late, "005930", 100.0, 3.0, 1, "t-late", 17, 19,
+    )
+
+    class Cursor:
+        def __init__(self, conn): self.conn = conn
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+        def execute(self, sql, params):
+            self.conn.params.append(params)
+            self.rows = [quote_row] if "ext_src.quotes" in sql else [trade_row]
+        def fetchall(self): return self.rows
+
+    class Conn:
+        def __init__(self): self.params = []
+        def cursor(self): return Cursor(self)
+
+    conn = Conn()
+    raw = {}
+    loaded = load_instrument_events_batch(
+        conn, instrument_ids=["005930"], start=start, end=content_end,
+        as_known_at=content_end + timedelta(days=1),
+        source=EXTERNAL_EVENT_SOURCE, raw_content_evidence=raw,
+        content_end=content_end)
+
+    assert len(loaded["005930"][0]) == 1
+    assert len(loaded["005930"][1]) == 1
+    assert raw["005930"]["quotes"] == {
+        "row_count": 1, "xor_seed_0": 11, "sum_seed_1": 13}
+    assert raw["005930"]["ticks"] == {
+        "row_count": 1, "xor_seed_0": 17, "sum_seed_1": 19}
+    assert all(params[2] == content_end for params in conn.params)
+
+    class NeverConn:
+        def cursor(self):
+            raise AssertionError("invalid raw window must fail before SQL")
+
+    with pytest.raises(ValueError, match="fixed half-open"):
+        load_instrument_events_batch(
+            NeverConn(), instrument_ids=["005930"], start=start,
+            end=content_end - timedelta(minutes=5),
+            as_known_at=content_end + timedelta(days=1),
+            source=EXTERNAL_EVENT_SOURCE, raw_content_evidence={},
+            content_end=content_end - timedelta(minutes=5))
+
+
+def test_external_batch_loader_rejects_ambiguous_or_unrequested_symbols() -> None:
+    class NeverConn:
+        def cursor(self):
+            raise AssertionError("invalid identity must fail before SQL")
+
+    with pytest.raises(ValueError, match="exact six-digit KRX trading symbol"):
+        load_instrument_events_batch(
+            NeverConn(), instrument_ids=["A005930"], start=BASE,
+            end=BASE + timedelta(seconds=1),
+            as_known_at=BASE + timedelta(seconds=1),
+            source=EXTERNAL_EVENT_SOURCE,
+        )
+
+    unexpected = (
+        BASE, BASE, BASE, "000660", [99.0], [10.0], [101.0], [11.0],
+        "q1", 1, 2,
+    )
+
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+        def execute(self, sql, params):
+            self.rows = [unexpected] if "ext_src.quotes" in sql else []
+        def fetchall(self): return self.rows
+
+    class Conn:
+        def cursor(self): return Cursor()
+
+    with pytest.raises(ValueError, match="unrequested instrument"):
+        load_instrument_events_batch(
+            Conn(), instrument_ids=["005930"], start=BASE,
+            end=BASE + timedelta(seconds=1),
+            as_known_at=BASE + timedelta(seconds=1),
+            source=EXTERNAL_EVENT_SOURCE,
+        )
 
 
 def test_late_event_never_enters_feature_window() -> None:

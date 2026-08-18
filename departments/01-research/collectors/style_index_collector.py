@@ -41,7 +41,7 @@ from pathlib import Path
 _BASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_BASE))
 
-from macro_collector import FREQ_DAILY, Observation, SeriesSpec
+from market_observations import FREQ_DAILY, Observation, SeriesSpec
 from volatility_index_collector import (
     parse_block,
     position_in_52w,
@@ -148,7 +148,9 @@ def collect() -> int:
     from source_registry import SourceRegistry, UseScope, load_project_env
 
     env = load_project_env()
-    SourceRegistry(env=env).check_use(SOURCE_ID, UseScope.FULLTEXT_STORE)
+    registry = SourceRegistry(env=env)
+    registry.check_use(SOURCE_ID, UseScope.FULLTEXT_STORE)
+    market_source = registry.require(SOURCE_ID)
 
     rows = parse_config(CONFIG.read_text(encoding="utf-8"))
     now = datetime.now(timezone.utc)
@@ -182,7 +184,7 @@ def collect() -> int:
                 parsed, series_code=series_code, upcode=upcode,
                 trade_date=trade_date, observed_at=now))
 
-        _, _, src = repo.sync_data_sources()
+        _, _, src = repo.sync_data_sources(specs=[market_source])
         _, _, sid = repo.upsert_macro_series(list(load_specs(rows)),
                                              source_ids=src)
         n, u = repo.upsert_macro_observations(observations, series_ids=sid)

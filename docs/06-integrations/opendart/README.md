@@ -2,6 +2,10 @@
 
 > [금융감독원 OpenDART 공식 개발가이드](https://opendart.fss.or.kr/guide/main.do?apiGrpCd=DS001)를 2026-07-30 12:02:21 +09:00 에 수집한 HgFinance 개발용 참조입니다. 최신 API 계약은 항상 공식 문서를 우선합니다.
 
+> **현재 Runtime 정책 (2026-08-18):** 아래 수집·저장 모델은 API 계약을 검토하기
+> 위한 historical design reference다. 운영에서는 OpenDART를 상주 수집하거나 DB에
+> 장기 적재하지 않고 `research-mcp`가 요청 시 조회한다.
+
 ## 수집 결과
 
 | 항목 | 결과 |
@@ -116,10 +120,8 @@ OpenDART의 운영 원장은 Supabase PostgreSQL과 Object Storage에 둔다. Ti
 - 수집 지연, 오류 코드, 마지막 성공 커서, 파싱 실패율과 정정공시 처리 지연을 모니터링한다.
 - API 스키마 변경은 이 수집기를 다시 실행한 뒤 Git diff로 검토한다.
 
-## 재수집
+## 참조 갱신
 
-저장소 루트에서 다음 명령을 실행한다.
-
-```powershell
-.\scripts\collect_opendart_docs.ps1
-```
+자동 문서 수집 스크립트는 2026-08-18 시장 데이터 전용 수집 정책에 따라 제거했다.
+계약을 갱신할 때는 OpenDART 공식 개발가이드를 직접 확인하고, 변경된 API 계약만
+검토 가능한 문서 변경으로 반영한다.

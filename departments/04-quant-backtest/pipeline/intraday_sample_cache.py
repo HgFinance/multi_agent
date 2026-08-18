@@ -9,21 +9,25 @@ continues to replay raw events and never treats this cache as evidence.
 from __future__ import annotations
 
 from dataclasses import asdict, fields
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import tempfile
 
-from intraday_microstructure import (COMPLETED_SECOND_POLICY,
+from intraday_microstructure import (COMPLETED_SECOND_POLICY, EVENT_SOURCES,
                                       EXTERNAL_EVENT_SOURCE, HorizonLabel,
                                       IntradayLaneSpec, IntradaySample,
-                                      LANE_VERSION, STRICT_TIMESTAMP_POLICY)
+                                      LANE_VERSION, RAW_EVENT_GRANULARITY,
+                                      STRICT_TIMESTAMP_POLICY)
 
 
-CACHE_VERSION = "intraday-discovery-sample-cache-v2"
+CACHE_VERSION = "intraday-discovery-sample-cache-v3"
 DEFAULT_MAX_BYTES = 20 * 1024 ** 3
+_LOGICAL_PAYLOAD_FINGERPRINT_KEY = \
+    b"intraday_logical_payload_fingerprint"
 _SAMPLE_FIELDS = tuple(field.name for field in fields(IntradaySample)
                        if field.name != "labels")
 _LABEL_DATETIME_FIELDS = (
@@ -32,18 +36,54 @@ _LABEL_DATETIME_FIELDS = (
 )
 
 
+def _canonical_logical_value(value):
+    """Return the storage-independent JSON form used by cache integrity."""
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("intraday cache datetimes must be timezone-aware")
+        return value.astimezone(timezone.utc).isoformat(
+            timespec="microseconds").replace("+00:00", "Z")
+    if isinstance(value, dict):
+        return {str(key): _canonical_logical_value(item)
+                for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_canonical_logical_value(item) for item in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("intraday cache values must be finite")
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    raise TypeError(
+        f"unsupported intraday cache value: {type(value).__name__}")
+
+
+def _logical_payload_fingerprint(samples: list[IntradaySample]) -> str:
+    """Hash reconstructed samples, independent of Parquet byte encoding."""
+    payload = [_canonical_logical_value(asdict(sample)) for sample in samples]
+    blob = json.dumps(
+        payload, allow_nan=False, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
 def identity(*, spec: IntradayLaneSpec, event_source: str,
              execution_model: str, source_lineage,
              timestamp_policy: str | None = None) -> str:
+    normalized_source = str(event_source).upper()
+    if normalized_source not in EVENT_SOURCES:
+        raise ValueError(
+            "intraday sample cache accepts raw quote/trade event sources only; "
+            f"received {event_source!r}")
     policy = str(timestamp_policy or (
         COMPLETED_SECOND_POLICY
-        if str(event_source).upper() == EXTERNAL_EVENT_SOURCE else
+        if normalized_source == EXTERNAL_EVENT_SOURCE else
         STRICT_TIMESTAMP_POLICY)).upper()
     payload = {
         "cache_version": CACHE_VERSION,
         "lane_version": LANE_VERSION,
         "spec": asdict(spec),
-        "event_source": str(event_source),
+        "event_source": normalized_source,
+        "source_granularity": RAW_EVENT_GRANULARITY,
         "execution_model": str(execution_model),
         "timestamp_policy": policy,
         "clock_aggregation_version": (
@@ -111,8 +151,25 @@ class SampleCache:
             if metadata.get(b"intraday_cache_identity", b"").decode() != \
                     self.identity:
                 return None
-            if metadata.get(b"empty", b"0") == b"1":
-                return []
+            if metadata.get(b"intraday_cache_version", b"").decode() != \
+                    CACHE_VERSION:
+                return None
+            if metadata.get(b"intraday_source_granularity", b"").decode() != \
+                    RAW_EVENT_GRANULARITY:
+                return None
+            if metadata.get(b"evidence_authority", b"").decode() != "NONE":
+                return None
+            raw_count = metadata.get(b"sample_count", b"")
+            if not raw_count.isdigit():
+                return None
+            sample_count = int(raw_count)
+            if raw_count != str(sample_count).encode() or \
+                    table.num_rows != sample_count:
+                return None
+            empty = metadata.get(b"empty", b"")
+            if empty not in {b"0", b"1"} or \
+                    (empty == b"1") != (sample_count == 0):
+                return None
             out = []
             for row in table.to_pylist():
                 labels = []
@@ -124,8 +181,13 @@ class SampleCache:
                 out.append(IntradaySample(
                     **{key: row[key] for key in _SAMPLE_FIELDS},
                     labels=tuple(labels)))
+            expected_fingerprint = metadata.get(
+                _LOGICAL_PAYLOAD_FINGERPRINT_KEY, b"").decode()
+            if expected_fingerprint != _logical_payload_fingerprint(out):
+                return None
             return out
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        except (KeyError, OSError, UnicodeDecodeError, ValueError, TypeError,
+                json.JSONDecodeError):
             # A partial/corrupt optimization artifact is a cache miss, never a
             # scientific failure. It will be atomically replaced on the miss.
             return None
@@ -152,10 +214,18 @@ class SampleCache:
             rows.append(row)
         table = (pa.Table.from_pylist(rows) if rows else
                  pa.table({"_empty": pa.array([], type=pa.bool_())}))
+        logical_payload_fingerprint = _logical_payload_fingerprint(samples)
         metadata = dict(table.schema.metadata or {})
         metadata.update({
             b"intraday_cache_identity": self.identity.encode(),
             b"intraday_cache_version": CACHE_VERSION.encode(),
+            b"intraday_source_granularity": RAW_EVENT_GRANULARITY.encode(),
+            b"evidence_authority": b"NONE",
+            b"empty_semantics": (
+                b"DERIVATION_PRODUCED_NO_SAMPLES_NOT_SOURCE_EMPTY"),
+            b"sample_count": str(len(rows)).encode(),
+            _LOGICAL_PAYLOAD_FINGERPRINT_KEY: (
+                logical_payload_fingerprint.encode()),
             b"empty": b"1" if not rows else b"0",
         })
         table = table.replace_schema_metadata(metadata)

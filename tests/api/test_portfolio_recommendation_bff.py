@@ -6,7 +6,7 @@ import os
 import tempfile
 import time
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 os.environ["DATABASE_URL"] = ""
 os.environ["PORTFOLIO_RUNTIME_STORE_PATH"] = os.path.join(tempfile.gettempdir(), f"hgfinance-portfolio-tests-{os.getpid()}.sqlite3")
@@ -59,10 +59,18 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["version"], 1)
-        request.assert_awaited_once_with(
-            "POST",
-            "/governance/v1/mandates/m1/versions",
-            body={"fund_id": "f1", "policy": {}, "objective_text": "보수적 운용"},
+        self.assertEqual(request.await_count, 2)
+        self.assertEqual(
+            request.await_args_list[0],
+            call("GET", "/governance/v1/mandates/m1/current"),
+        )
+        self.assertEqual(
+            request.await_args_list[1],
+            call(
+                "POST",
+                "/governance/v1/mandates/m1/versions",
+                body={"fund_id": "f1", "policy": {}, "objective_text": "보수적 운용"},
+            ),
         )
 
     def test_frontend_port_3003_is_allowed_by_bff_cors(self) -> None:

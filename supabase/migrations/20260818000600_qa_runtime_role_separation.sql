@@ -1,8 +1,8 @@
 begin;
 
--- The Supabase service_role bypasses RLS across unrelated domains.  QA HTTP
--- and QA relay processes instead select separate NOLOGIN roles whose direct
--- grants and row policies match their actual SQL surfaces.
+-- The transitional compatibility service_role has grants across unrelated
+-- domains. QA HTTP and relay processes instead select separate NOLOGIN roles
+-- whose direct grants and row policies match their actual SQL surfaces.
 
 do $qa_runtime_roles$
 begin
@@ -53,8 +53,18 @@ revoke all privileges on all sequences in schema audit from svc_qa_worker;
 revoke all privileges on all sequences in schema quant from svc_qa_worker;
 revoke all on schema audit, quant from svc_audit_api, svc_qa_worker;
 
-grant svc_audit_api to postgres with set true, inherit false;
-grant svc_qa_worker to postgres with set true, inherit false;
+do $qa_runtime_pool_memberships$
+declare
+  pool_login name := session_user;
+begin
+  execute format(
+    'grant svc_audit_api to %I with set true, inherit false', pool_login
+  );
+  execute format(
+    'grant svc_qa_worker to %I with set true, inherit false', pool_login
+  );
+end
+$qa_runtime_pool_memberships$;
 
 grant usage on schema audit to svc_audit_api;
 grant select, insert on audit.domain_events to svc_audit_api;
@@ -235,6 +245,7 @@ create policy intraday_forward_work_svc_qa_worker_insert
 do $qa_runtime_role_audit$
 declare
   unsafe_role text;
+  pool_login name := session_user;
 begin
   select rolname into unsafe_role
     from pg_roles
@@ -252,7 +263,7 @@ begin
       join pg_roles granted_role on granted_role.oid = membership.roleid
       join pg_roles member_role on member_role.oid = membership.member
      where granted_role.rolname in ('svc_audit_api', 'svc_qa_worker')
-       and member_role.rolname = 'postgres'
+       and member_role.rolname = pool_login
        and membership.inherit_option
   ) or (
     select count(distinct granted_role.rolname)
@@ -260,10 +271,10 @@ begin
       join pg_roles granted_role on granted_role.oid = membership.roleid
       join pg_roles member_role on member_role.oid = membership.member
      where granted_role.rolname in ('svc_audit_api', 'svc_qa_worker')
-       and member_role.rolname = 'postgres'
+       and member_role.rolname = pool_login
        and membership.set_option and not membership.inherit_option
   ) <> 2 then
-    raise exception 'postgres QA runtime role selection is not fail-closed';
+    raise exception '% QA runtime role selection is not fail-closed', pool_login;
   end if;
 
   if exists (

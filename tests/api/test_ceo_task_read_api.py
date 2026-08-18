@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 import unittest
 from typing import Any
 from unittest.mock import patch
@@ -589,6 +590,82 @@ def _client() -> TestClient:
 class CeoTaskApiTest(unittest.TestCase):
     def setUp(self) -> None:
         self.client = _client()
+
+    def _owned_workflow(self, owner_id: str):
+        board = _board()
+        board[ROOT_ID]["body"] = build_root_body(
+            "엔비디아 최신 사업 리스크만 분석해줘.",
+            "req-owned",
+            requested_by=owner_id,
+        )
+        return load_workflow(ROOT_ID, fetch=_fetch_from(board))
+
+    def test_list_query_owner_cannot_override_authenticated_subject(self) -> None:
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "APP_ENV": "test",
+                    "PORTFOLIO_AUTH_MODE": "fixture",
+                    "PORTFOLIO_AUTH_REQUIRED": "false",
+                },
+                clear=False,
+            ),
+            patch.object(ceo, "list_ceo_roots") as list_roots,
+        ):
+            response = self.client.get(
+                "/ui/ceo/tasks?owner_id=user-a",
+                headers={"X-User-Id": "user-b"},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["detail"], "ceo_task_owner_mismatch")
+        list_roots.assert_not_called()
+
+    def test_task_detail_rejects_another_authenticated_owner(self) -> None:
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "APP_ENV": "test",
+                    "PORTFOLIO_AUTH_MODE": "fixture",
+                    "PORTFOLIO_AUTH_REQUIRED": "false",
+                },
+                clear=False,
+            ),
+            patch.object(
+                ceo, "load_workflow", return_value=self._owned_workflow("user-a")
+            ),
+        ):
+            response = self.client.get(
+                f"/ui/ceo/tasks/{ROOT_ID}",
+                headers={"X-User-Id": "user-b"},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["detail"], "ceo_task_forbidden")
+
+    def test_task_detail_allows_its_authenticated_owner(self) -> None:
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "APP_ENV": "test",
+                    "PORTFOLIO_AUTH_MODE": "fixture",
+                    "PORTFOLIO_AUTH_REQUIRED": "false",
+                },
+                clear=False,
+            ),
+            patch.object(
+                ceo, "load_workflow", return_value=self._owned_workflow("user-a")
+            ),
+        ):
+            response = self.client.get(
+                f"/ui/ceo/tasks/{ROOT_ID}",
+                headers={"X-User-Id": "user-a"},
+            )
+
+        self.assertEqual(response.status_code, 200)
 
     def test_status_endpoint_reports_progress(self) -> None:
         with patch.object(ceo, "load_workflow", return_value=load_workflow(ROOT_ID, fetch=_fetch_from(_board()))):

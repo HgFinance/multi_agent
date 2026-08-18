@@ -53,7 +53,8 @@
 |---|---|---|
 | `departments/<n>/hermes/` | 8개 Hermes `config.yaml`과 `SOUL.md`의 Git 기준 사본 | 사용 중 |
 | `multi-agent-workflow.yaml` | 5개 전사 Workflow와 Event Routing 설정. `files:` 블록이 `departments/<n>/hermes/config.yaml`을 가리킨다 | Prototype |
-| `departments/01-research/collectors/news.py` | Tavily 기반 뉴스 조회 스크립트 | Baseline |
+| `departments/01-research/collectors/` | 시세·호가·체결·시장 파생 관측 전용 수집기 | 사용 중 |
+| `departments/01-research/api/external_*.py` | 뉴스·공시·거시 비영속 요청형 MCP | 사용 중 |
 | `skills/agentic-rag/` | `compliance-policy-agent`용 Agentic RAG baseline (공용 skills 경계 유지, Domain Owner는 리스크본부) | Baseline |
 | `departments/02-trading/{contracts,oms,broker}/` | 계약, Paper OMS와 Paper Broker | D0-D2 Prototype |
 | `departments/05-accounting-portfolio/{ledger,reconciliation}/` | Ledger와 Reconciliation | D2 Prototype |
@@ -222,7 +223,7 @@ multi_agent/
 |---|---|---|---|---|
 | `orchestration/hermes/ceo-agent/` | `departments/00-ceo-office/hermes/` | 영주님 | Workflow와 Sync Script 경로 동시 수정 | 완료, 구 경로는 삭제됨 |
 | `orchestration/hermes/research-department/` | `departments/01-research/hermes/` | 재일님 | Runtime Profile 동기화 검증 | 완료 (`sync_hermes_profiles.sh push`로 검증) |
-| `fetch_news.py` | `departments/01-research/collectors/news.py` | 재일님 | CLI 호환 Wrapper와 테스트 추가 | 완료, 구 경로는 삭제됨 |
+| `fetch_news.py` | `departments/01-research/api/external_sources.py` | 재일님 | 상주 수집 대신 요청형 `news_search` MCP로 전환 | 완료, 구 경로와 뉴스 Collector는 삭제됨 |
 | `references/` | `departments/01-research/references/` 또는 공용 `references/` | 재일님 | 저작권·출처 Registry 확인 후 결정 | 미결정 — 이동하지 않음 |
 | `orchestration/hermes/trading-department/` | `departments/02-trading/hermes/` | 도현님 | Workflow 참조 동시 수정 | 완료 |
 | `trading/`, `execution/` | `departments/02-trading/{contracts,oms,broker}/` | 도현님 | Import 호환층과 OMS Replay Test | 완료, 구 경로는 삭제됨. Replay Test는 여전히 자체 점검 스크립트뿐 |

@@ -148,6 +148,22 @@ def _intraday_novelty_key(row: dict) -> tuple[str, str]:
     )
 
 
+def _exact_semantic_plan_fingerprint(plan: dict) -> str:
+    """Hash the complete canonical plan, including execution and horizon.
+
+    ``alpha_semantics.fingerprint`` intentionally identifies an economic
+    family and therefore omits the numeric horizon.  Cohort provenance needs a
+    stricter identity: a 30-second FOLLOW contract must never cite a 600-second
+    REVERT lead merely because both leads happen to compile to the same AST16.
+    """
+    from alpha_semantics import validate as validate_plan  # noqa: PLC0415
+
+    canonical = validate_plan(plan)
+    payload = json.dumps(canonical, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _select_novel_intraday_sidecars(primary: dict, candidates: list[dict], *,
                                     limit: int, grammar) -> list[dict]:
     """Deterministic farthest-first max-min structural/semantic frontier.
@@ -541,6 +557,7 @@ def _attach_intraday_screening_cohort(
         generate as generate_ablations,
     )
     from formula_discovery import assess as assess_formula  # noqa: PLC0415
+    from alpha_semantics import validate as validate_plan  # noqa: PLC0415
 
     if (INTRADAY_SCREENING_COHORT_VERSION
             != COMPLETED_SECOND_SCREENING_COHORT_VERSION):
@@ -549,14 +566,34 @@ def _attach_intraday_screening_cohort(
             f"{INTRADAY_SCREENING_COHORT_VERSION!r} != "
             f"{COMPLETED_SECOND_SCREENING_COHORT_VERSION!r}")
     params = dict(proposal.suggested_params or {})
-    proposal_execution = (
-        params.get("execution")
-        or dict(proposal.semantic_plan or {}).get("execution")
-    )
+    proposal_plan = validate_plan(dict(proposal.semantic_plan or {}))
+    proposal_execution = str(
+        params.get("execution") or proposal_plan["execution"]
+    ).strip().upper()
+    if proposal_execution != proposal_plan["execution"]:
+        raise ValueError(
+            "INTRADAY_EVENT proposal execution does not match its exact "
+            "semantic_plan contract")
+    try:
+        proposal_horizon = int(
+            params.get("horizon_seconds", proposal_plan["horizon_seconds"]))
+    except (TypeError, ValueError):
+        raise ValueError(
+            "INTRADAY_EVENT proposal horizon_seconds must be an integer") \
+            from None
+    if proposal_horizon != proposal_plan["horizon_seconds"]:
+        raise ValueError(
+            "INTRADAY_EVENT proposal horizon_seconds does not match its exact "
+            "semantic_plan contract")
+    params["execution"] = proposal_execution
+    params["horizon_seconds"] = proposal_horizon
+    configured_entry = str(params.get("entry_policy") or "").strip().upper()
+    configured_coefficient = str(
+        params.get("coefficient_policy") or "").strip().upper()
     primary = validate_completed_second_candidate(
         params.get("intraday_signal_expr"), execution=proposal_execution)
     primary_fp = fingerprint(primary)
-    candidates: dict[str, dict] = {}
+    contract_groups: dict[tuple[str, str, str, str, str], list[dict]] = {}
     rejected_primary: list[str] = []
 
     # The planner chooses the preregistered primary, but it is not a reliable
@@ -567,9 +604,8 @@ def _attach_intraday_screening_cohort(
     # 2--8 ids correctly.  Only the exact primary remains in ``lead_ids``;
     # every other formula is SCREENING_ONLY and remains unused for a later
     # independent confirmation.
-    lead_order = list(proposal.lead_ids)
-    lead_order.extend(sorted(set(leads) - set(lead_order)))
-    for lead_id in lead_order:
+    linked_lead_ids = frozenset(str(value) for value in proposal.lead_ids)
+    for lead_id in sorted(str(value) for value in leads):
         lead = leads.get(str(lead_id))
         if lead is None:
             continue
@@ -587,6 +623,7 @@ def _attach_intraday_screening_cohort(
         thesis = dict(contract.get("formula_thesis") or {})
         semantic_plan = dict(contract.get("semantic_plan") or {})
         try:
+            semantic_plan = validate_plan(semantic_plan)
             validate_completed_second_candidate(
                 expr, execution=semantic_plan.get("execution"))
             assess_formula(
@@ -598,36 +635,111 @@ def _attach_intraday_screening_cohort(
             if fp == primary_fp:
                 rejected_primary.append(f"{lead_id}: {exc}")
             continue
-        row = candidates.setdefault(fp, {
+        entry_policy = str(thesis.get("decision_rule") or "").strip().upper()
+        coefficient_policy = str(
+            thesis.get("coefficient_policy") or "").strip().upper()
+        raw_baseline = contract.get("source_baseline_expr")
+        source_baseline = None
+        source_baseline_fp = ""
+        if raw_baseline not in (None, ""):
+            try:
+                source_baseline = parse(raw_baseline)
+                source_baseline_fp = hashlib.sha256(json.dumps(
+                    source_baseline, ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")).hexdigest()
+            except (TypeError, ValueError):
+                # The baseline participates in durable candidate identity.  A
+                # malformed value must not be silently discarded and merged
+                # with an otherwise identical executable lead.
+                continue
+        contract_key = (
+            fp,
+            _exact_semantic_plan_fingerprint(semantic_plan),
+            entry_policy,
+            coefficient_policy,
+            source_baseline_fp,
+        )
+        contract_groups.setdefault(contract_key, []).append({
             "candidate_role": "LINKED_CANDIDATE",
-            "source_lead_ids": [],
+            "source_lead_ids": [str(lead_id)],
             "title": str(lead.claimed_edge),
             "ast_fingerprint": fp,
             "intraday_signal_expr": expr,
             "semantic_plan": semantic_plan,
-            "entry_policy": str(thesis.get("decision_rule") or ""),
-            "coefficient_policy": str(thesis.get("coefficient_policy") or ""),
+            "entry_policy": entry_policy,
+            "coefficient_policy": coefficient_policy,
+            "source_baseline_expr": source_baseline,
             "evolution_role": str(contract.get("evolution_role") or "SEED"),
             "parent_ast_fingerprint": str(
                 contract.get("parent_ast_fingerprint") or ""),
+            "parent_candidate_identity_fingerprint": str(
+                contract.get("parent_candidate_identity_fingerprint") or ""),
             "screening_cohort_version": INTRADAY_SCREENING_COHORT_VERSION,
             "_parent_signal_expr": contract.get("parent_signal_expr"),
         })
-        row["source_lead_ids"].append(str(lead_id))
 
-    if primary_fp not in candidates:
+    # One AST16 can occupy only one cohort slot.  First merge provenance only
+    # inside the *exact* executable contract (full semantic plan, entry rule,
+    # and coefficient policy), then select one contract per AST deterministically.
+    # Conflicting contracts remain unused so they can receive independent
+    # experiments instead of being falsely cited by this proposal.
+    grouped_rows: list[tuple[tuple[str, str, str, str, str], dict]] = []
+    for contract_key, rows in contract_groups.items():
+        canonical = min(
+            rows,
+            key=lambda row: (
+                str(row.get("title") or ""),
+                str(row.get("evolution_role") or ""),
+                json.dumps(row.get("_parent_signal_expr"), sort_keys=True,
+                           separators=(",", ":"), default=str),
+                row["source_lead_ids"][0],
+            ),
+        ).copy()
+        canonical["source_lead_ids"] = sorted({
+            source_id
+            for row in rows
+            for source_id in row["source_lead_ids"]
+        })
+        grouped_rows.append((contract_key, canonical))
+
+    primary_contracts = [
+        (key, row) for key, row in grouped_rows
+        if key[0] == primary_fp
+        and key[1] == _exact_semantic_plan_fingerprint(proposal_plan)
+        and (not configured_entry or key[2] == configured_entry)
+        and (not configured_coefficient or key[3] == configured_coefficient)
+        and linked_lead_ids.intersection(row["source_lead_ids"])
+    ]
+    if not primary_contracts:
         if rejected_primary:
             raise ValueError(
                 "INTRADAY_EVENT primary formula no longer passes the current "
                 "formula influence audit: " + " | ".join(rejected_primary))
         raise ValueError(
             "INTRADAY_EVENT primary formula must exactly match one linked "
-            "formula-discovery-v5 lead")
+            "formula-discovery-v5 candidate contract (AST, semantic plan, "
+            "horizon, execution, entry, and coefficient policy)")
+    _, primary_row = min(
+        primary_contracts,
+        key=lambda item: (item[0], _intraday_novelty_key(item[1])))
 
-    # Duplicate formula leads may arrive in arbitrary DB/input order. Keep the
-    # provenance set canonical before it participates in a persisted cohort.
-    for row in candidates.values():
-        row["source_lead_ids"] = sorted(set(row["source_lead_ids"]))
+    candidates: dict[str, dict] = {primary_fp: primary_row}
+    by_ast: dict[str, list[tuple[tuple[str, str, str, str, str], dict]]] = {}
+    for key, row in grouped_rows:
+        if key[0] != primary_fp:
+            by_ast.setdefault(key[0], []).append((key, row))
+    for fp, choices in by_ast.items():
+        _, candidates[fp] = min(
+            choices,
+            key=lambda item: (
+                0 if linked_lead_ids.intersection(
+                    item[1]["source_lead_ids"]) else 1,
+                item[0],
+                _intraday_novelty_key(item[1]),
+            ),
+        )
+
     primary_lead_ids = tuple(candidates[primary_fp]["source_lead_ids"])
     linked_sidecars = [row for fp, row in candidates.items() if fp != primary_fp]
 
@@ -663,6 +775,7 @@ def _attach_intraday_screening_cohort(
             "semantic_plan": dict(child["semantic_plan"]),
             "entry_policy": child["entry_policy"],
             "coefficient_policy": child["coefficient_policy"],
+            "source_baseline_expr": child.get("source_baseline_expr"),
             "evolution_role": "PARENT_ABLATION",
             "parent_of_ast_fingerprint": child["ast_fingerprint"],
             "screening_cohort_version": INTRADAY_SCREENING_COHORT_VERSION,
@@ -682,33 +795,87 @@ def _attach_intraday_screening_cohort(
             "semantic_plan": dict(primary_source["semantic_plan"]),
             "entry_policy": primary_source["entry_policy"],
             "coefficient_policy": primary_source["coefficient_policy"],
+            "source_baseline_expr": primary_source.get(
+                "source_baseline_expr"),
             "evolution_role": "EMPIRICAL_TERM_INFLUENCE",
             "screening_cohort_version": INTRADAY_SCREENING_COHORT_VERSION,
         })
 
-    # Preserve broad exploration while reserving at most two of the seven
-    # sidecar slots for same-replay mechanism controls. The four independent
-    # formulas are a content-addressed max-min novelty frontier, not whichever
-    # lead UUIDs happened to sort first. Any unused control capacity is returned
-    # to the remaining novelty ranking and explicit parents.
+    # Preserve broad exploration while keeping explicit evolutionary ancestry
+    # executable. A selected child is never emitted without its declared parent
+    # row; most importantly, an evolved primary reserves its parent before
+    # novelty or ablation slots are filled.
     linked_ranked = _select_novel_intraday_sidecars(
         primary_source, linked_sidecars, limit=len(linked_sidecars),
         grammar=intraday_grammar)
-    sidecars = linked_ranked[:4] + controls
-    remaining = linked_ranked[4:] + sorted(
-        lineage_parents, key=_intraday_novelty_key)
-    for row in remaining:
-        if len(sidecars) >= MAX_INTRADAY_COHORT - 1:
+    preferred = (linked_ranked[:4] + controls + linked_ranked[4:] +
+                 sorted(lineage_parents, key=_intraday_novelty_key))
+    pool = {str(row["ast_fingerprint"]): row for row in preferred}
+    sidecars: list[dict] = []
+    selected_fps = {primary_fp}
+    capacity = MAX_INTRADAY_COHORT - 1
+
+    def dependency_chain(row: dict, trail: frozenset[str]) \
+            -> list[dict] | None:
+        row_fp = str(row["ast_fingerprint"])
+        if row_fp in selected_fps:
+            return []
+        if row_fp in trail:
+            return None
+        parent_fp = str(row.get("parent_ast_fingerprint") or "")
+        chain: list[dict] = []
+        if parent_fp and parent_fp not in selected_fps:
+            parent_row = pool.get(parent_fp)
+            if parent_row is None:
+                return None
+            inherited = dependency_chain(
+                parent_row, trail | frozenset({row_fp}))
+            if inherited is None:
+                return None
+            chain.extend(inherited)
+        if row_fp not in {str(item["ast_fingerprint"]) for item in chain}:
+            chain.append(row)
+        return chain
+
+    def select_with_parents(row: dict, *, required: bool = False) -> bool:
+        chain = dependency_chain(row, frozenset())
+        if chain is None or len(sidecars) + len(chain) > capacity:
+            if required:
+                raise ValueError(
+                    "evolved primary requires an explicit parent contract "
+                    "inside the frozen screening cohort")
+            return False
+        for item in chain:
+            item_fp = str(item["ast_fingerprint"])
+            if item_fp not in selected_fps:
+                sidecars.append(item)
+                selected_fps.add(item_fp)
+        return True
+
+    primary_parent_fp = str(
+        primary_source.get("parent_ast_fingerprint") or "")
+    if primary_parent_fp:
+        primary_parent = pool.get(primary_parent_fp)
+        if primary_parent is None:
+            raise ValueError(
+                "evolved primary declares a parent formula that is absent "
+                "from its exact source-backed cohort")
+        select_with_parents(primary_parent, required=True)
+    for row in preferred:
+        if len(sidecars) >= capacity:
             break
-        if row["ast_fingerprint"] not in {
-                item["ast_fingerprint"] for item in sidecars}:
-            sidecars.append(row)
+        select_with_parents(row)
     for row in sidecars:
         row.pop("_parent_signal_expr", None)
     params["screening_population"] = sidecars[:MAX_INTRADAY_COHORT - 1]
     params["screening_cohort_version"] = INTRADAY_SCREENING_COHORT_VERSION
     params["entry_policy"] = primary_source["entry_policy"]
     params["coefficient_policy"] = primary_source["coefficient_policy"]
+    params["source_baseline_expr"] = primary_source.get(
+        "source_baseline_expr")
+    params["parent_candidate_identity_fingerprint"] = primary_source.get(
+        "parent_candidate_identity_fingerprint") or None
+    params["parent_ast_fingerprint"] = primary_parent_fp or None
     material = {
         "label": proposal.label,
         "baseline": proposal.baseline,

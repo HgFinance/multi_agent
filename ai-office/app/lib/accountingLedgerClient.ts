@@ -10,8 +10,7 @@
  * JavaScript number는 double이라 Decimal이 깨진다.
  */
 
-import { BFF } from "./ceoClient";
-import { withAccountHeaders } from "./currentAccount";
+import { BFF, bffFetch } from "./bffClient";
 
 export type LedgerEntry = {
   /** `YYYY-MM-DD`. */
@@ -152,9 +151,9 @@ export async function fetchAccountingLedger(days?: number): Promise<AccountingLe
   const query = days ? `?days=${days}` : "";
   let response: Response;
   try {
-    response = await fetch(`${BFF}/ui/portfolio/ledger${query}`, {
+    response = await bffFetch(`/ui/portfolio/ledger${query}`, {
       cache: "no-store",
-      headers: withAccountHeaders({ Accept: "application/json" }),
+      headers: { Accept: "application/json" },
     });
   } catch {
     throw new AccountingLedgerError(

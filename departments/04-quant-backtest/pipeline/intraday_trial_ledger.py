@@ -20,7 +20,17 @@ import re
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from pathlib import Path
+import sys
 from typing import Any, Iterable, Mapping, Sequence
+
+_CONTRACTS = Path(__file__).resolve().parents[2] / "01-research" / "contracts"
+if str(_CONTRACTS) not in sys.path:
+    sys.path.insert(0, str(_CONTRACTS))
+
+from intraday_candidate_identity import (  # noqa: E402
+    candidate_identity_fingerprint,
+)
 
 
 MODULE_VERSION = "intraday-trial-ledger-v2"
@@ -323,17 +333,15 @@ def register_candidate_lineage(
     feature_fp = stable_fingerprint(feature_spec)
     label_fp = stable_fingerprint(label_spec)
     model_fp = stable_fingerprint(model_spec)
-    identity_fp = stable_fingerprint(
-        {
-            "candidate_ast": ast_fp,
-            "semantic_plan": semantic_fp,
-            "baseline_ast": baseline_fp,
-            "feature_spec": feature_fp,
-            "label_spec": label_fp,
-            "model_spec": model_fp,
-            "evaluator_version": evaluator,
-            "cost_model_version": cost_model,
-        }
+    identity_fp = candidate_identity_fingerprint(
+        candidate_ast_fingerprint=ast_fp,
+        semantic_plan_fingerprint=semantic_fp,
+        baseline_ast_fingerprint=baseline_fp,
+        feature_spec_fingerprint=feature_fp,
+        label_spec_fingerprint=label_fp,
+        model_spec_fingerprint=model_fp,
+        evaluator_version=evaluator,
+        cost_model_version=cost_model,
     )
 
     explicit_lineage_id = candidate_lineage_id is not None
@@ -425,21 +433,86 @@ def register_candidate_lineage(
         raise
 
 
-def find_latest_candidate_lineage(conn: Any, candidate_ast: Any
-                                  ) -> CandidateLineage | None:
-    """Find a previously evaluated exact AST across hypothesis generations."""
-    ast_fp = stable_fingerprint(candidate_ast)
+def candidate_identity_from_source_contract(
+        source_contract: Mapping[str, Any]) -> str:
+    """Compute identity only from a complete, explicit evaluation contract.
+
+    An AST is not a candidate: direction, horizon, baseline, features, label,
+    model, evaluator, and costs all change what was actually tested.  Requiring
+    this complete payload prevents a syntactically identical FOLLOW/30s and
+    REVERT/600s equation from silently sharing ancestry.
+    """
+    contract = _mapping(source_contract, "source_contract", nonempty=True)
+    required = {
+        "candidate_ast", "semantic_plan", "baseline_ast", "feature_spec",
+        "label_spec", "model_spec", "evaluator_version",
+        "cost_model_version",
+    }
+    missing = sorted(required - set(contract))
+    if missing:
+        raise ValueError(
+            "source_contract is incomplete: " + ", ".join(missing))
+    return candidate_identity_fingerprint(
+        candidate_ast_fingerprint=stable_fingerprint(
+            contract["candidate_ast"]),
+        semantic_plan_fingerprint=stable_fingerprint(
+            contract["semantic_plan"]),
+        baseline_ast_fingerprint=(
+            stable_fingerprint(contract["baseline_ast"])
+            if contract["baseline_ast"] is not None else None),
+        feature_spec_fingerprint=stable_fingerprint(contract["feature_spec"]),
+        label_spec_fingerprint=stable_fingerprint(contract["label_spec"]),
+        model_spec_fingerprint=stable_fingerprint(contract["model_spec"]),
+        evaluator_version=_text(
+            contract["evaluator_version"], "evaluator_version"),
+        cost_model_version=_text(
+            contract["cost_model_version"], "cost_model_version"),
+    )
+
+
+def find_latest_candidate_lineage(
+        conn: Any, *, source_contract: Mapping[str, Any] | None = None,
+        candidate_identity: str | None = None) -> CandidateLineage | None:
+    """Find prior ancestry by exact identity, never by AST resemblance.
+
+    ``source_contract`` is the normal runner path.  ``candidate_identity`` is
+    reserved for an explicitly declared, already-durable evolutionary parent.
+    Exactly one selector is required; AST-only lookup is intentionally absent.
+    """
+    if (source_contract is None) == (candidate_identity is None):
+        raise ValueError(
+            "exactly one of source_contract or candidate_identity is required")
+    identity_fp = (
+        candidate_identity_from_source_contract(source_contract)
+        if source_contract is not None
+        else _hash(str(candidate_identity), "candidate_identity"))
     with conn.cursor() as cur:
         cur.execute(
             f"""select {_LINEAGE_COLUMNS}
                   from quant.intraday_candidate_lineages
-                 where candidate_ast_fingerprint=%s
+                 where candidate_identity_fingerprint=%s
                  order by created_at desc, candidate_lineage_id desc
                  limit 1""",
-            (ast_fp,),
+            (identity_fp,),
         )
         row = cur.fetchone()
-    return _lineage_from_row(row) if row is not None else None
+    if row is None:
+        return None
+    lineage = _lineage_from_row(row)
+    recomputed = candidate_identity_fingerprint(
+        candidate_ast_fingerprint=lineage.candidate_ast_fingerprint,
+        semantic_plan_fingerprint=lineage.semantic_plan_fingerprint,
+        baseline_ast_fingerprint=lineage.baseline_ast_fingerprint,
+        feature_spec_fingerprint=lineage.feature_spec_fingerprint,
+        label_spec_fingerprint=lineage.label_spec_fingerprint,
+        model_spec_fingerprint=lineage.model_spec_fingerprint,
+        evaluator_version=lineage.evaluator_version,
+        cost_model_version=lineage.cost_model_version,
+    )
+    if recomputed != identity_fp or lineage.candidate_identity_fingerprint != identity_fp:
+        raise LedgerConflict(
+            "candidate lineage identity does not match its durable components")
+    return lineage
 
 
 def load_candidate_lineage(conn: Any, candidate_lineage_id: str

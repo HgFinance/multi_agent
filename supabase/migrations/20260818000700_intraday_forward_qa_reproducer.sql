@@ -32,7 +32,15 @@ begin
 end
 $qa_reproducer_role$;
 
-grant svc_qa_reproducer to postgres with set true, inherit false;
+do $qa_reproducer_pool_membership$
+declare
+  pool_login name := session_user;
+begin
+  execute format(
+    'grant svc_qa_reproducer to %I with set true, inherit false', pool_login
+  );
+end
+$qa_reproducer_pool_membership$;
 
 -- A composite key lets the immutable result prove that its request and work
 -- identifiers came from the same queue row, not merely from two valid rows.
@@ -175,11 +183,18 @@ create policy intraday_forward_reproduction_results_reproducer_select
   on audit.intraday_forward_reproduction_results
   for select to svc_qa_reproducer using (true);
 -- FORCE RLS also applies to the table owner.  The SECURITY DEFINER completion
--- path runs as postgres and therefore needs this policy; it does not grant any
+-- path runs as the migration owner and therefore needs this policy; it does not grant any
 -- table privilege to a runtime role.
-create policy intraday_forward_reproduction_results_definer_all
-  on audit.intraday_forward_reproduction_results
-  for all to postgres using (true) with check (true);
+do $qa_reproducer_definer_policy$
+begin
+  execute format(
+    'create policy intraday_forward_reproduction_results_definer_all '
+    'on audit.intraday_forward_reproduction_results '
+    'for all to %I using (true) with check (true)',
+    current_user
+  );
+end
+$qa_reproducer_definer_policy$;
 
 -- Claim at most one item and return every immutable input needed by the
 -- independent worker.  No follow-up metadata reads are required.  Invalid or
@@ -890,6 +905,7 @@ to svc_qa_reproducer;
 do $qa_reproducer_privilege_audit$
 declare
   unsafe_grantee oid;
+  pool_login name := session_user;
 begin
   if exists (
     select 1
@@ -907,11 +923,11 @@ begin
       join pg_roles granted_role on granted_role.oid = membership.roleid
       join pg_roles member_role on member_role.oid = membership.member
      where granted_role.rolname = 'svc_qa_reproducer'
-       and member_role.rolname = 'postgres'
+       and member_role.rolname = pool_login
        and membership.set_option
        and not membership.inherit_option
   ) then
-    raise exception 'postgres cannot explicitly reduce to svc_qa_reproducer';
+    raise exception '% cannot explicitly reduce to svc_qa_reproducer', pool_login;
   end if;
 
   if exists (

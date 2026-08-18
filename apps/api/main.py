@@ -33,6 +33,7 @@ from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from dotenv import load_dotenv
@@ -48,6 +49,7 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
+from starlette.concurrency import run_in_threadpool
 
 ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(ROOT / ".env", override=False)
@@ -93,7 +95,24 @@ from command_service import (
     TradingStateCommand,
 )
 from account_snapshot import router as account_snapshot_router
-from current_user import current_user, require_owner
+from current_user import (
+    active_user_profile,
+    authorized_fund_memberships,
+    authorized_trading_books,
+    auth_required,
+    auth_mode,
+    authenticate_request_headers,
+    current_user,
+    require_any_fund_membership,
+    require_fund_membership,
+    require_owner,
+    set_authenticated_request_user,
+)
+from discord_ingress_auth import (
+    DISCORD_INGRESS_PATH,
+    bearer_is_authorized as discord_ingress_bearer_is_authorized,
+    mark_request as mark_discord_ingress_request,
+)
 from department_agents import router as department_agent_router
 from discord_read import router as discord_read_router
 from ls_account_stream import router as portfolio_live_router
@@ -131,6 +150,10 @@ try:
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
     from risk import RISK_API_URL
     from risk import router as risk_router
+try:
+    from .user_orders import router as user_orders_router
+except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
+    from user_orders import router as user_orders_router
 from ui_read_model import build_ui_snapshot
 
 app = FastAPI(
@@ -158,23 +181,134 @@ app = FastAPI(
         },
     ],
 )
+_LOCAL_CORS_ORIGINS = (
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://localhost:3002",
+    "http://localhost:3003",
+    "http://localhost:5173",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
+    "http://127.0.0.1:3002",
+    "http://127.0.0.1:3003",
+    "http://127.0.0.1:5173",
+)
+
+
+def _portfolio_cors_origins() -> list[str]:
+    """Return an exact origin allowlist; an empty production list denies all."""
+
+    runtime_environment = os.getenv("APP_ENV", "production").strip().casefold()
+    raw_allowlist = os.getenv("PORTFOLIO_CORS_ALLOW_ORIGINS", "")
+    raw_origins = raw_allowlist.split(",") if raw_allowlist.strip() else []
+    # The whole setting may be empty for a backend-only deployment.  Once any
+    # origin is supplied, however, empty comma-separated entries are malformed
+    # rather than silently broadening or weakening the operator's intent.
+    if any(not item.strip() for item in raw_origins):
+        raise RuntimeError("invalid PORTFOLIO_CORS_ALLOW_ORIGINS entry")
+    allowed_schemes = {"https"}
+    if runtime_environment in {"local", "test"}:
+        allowed_schemes.add("http")
+    configured: list[str] = []
+    for item in raw_origins:
+        origin = item.strip()
+        try:
+            parsed = urlsplit(origin)
+            parsed.port
+        except ValueError as exc:
+            raise RuntimeError(
+                "invalid PORTFOLIO_CORS_ALLOW_ORIGINS entry"
+            ) from exc
+        if (
+            "*" in origin
+            or "\\" in origin
+            or any(ord(character) < 33 or ord(character) > 126 for character in origin)
+            or parsed.scheme.casefold() not in allowed_schemes
+            or not parsed.netloc
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+            or "%" in parsed.netloc
+            or parsed.netloc.endswith(":")
+        ):
+            raise RuntimeError("invalid PORTFOLIO_CORS_ALLOW_ORIGINS entry")
+        configured.append(origin.rstrip("/"))
+    origins = (
+        [*_LOCAL_CORS_ORIGINS, *configured]
+        if runtime_environment in {"local", "test"}
+        else configured
+    )
+    return list(dict.fromkeys(origins))
+
+
+# Only load-balancer probes are anonymous.  Every business/read-model path,
+# including routers mounted outside ``/ui``, crosses the same identity policy.
+# This also keeps newly added domain routers protected by default.
+_AUTH_EXEMPT_HTTP_PATHS = frozenset({"/health", "/health/ready"})
+
+
+def _requires_portfolio_authentication(request: Request) -> bool:
+    return (
+        request.method != "OPTIONS"
+        and request.url.path not in _AUTH_EXEMPT_HTTP_PATHS
+    )
+
+
+@app.middleware("http")
+async def _authenticate_portfolio_request(request: Request, call_next):
+    """Authenticate every externally reachable BFF domain route centrally."""
+
+    if _requires_portfolio_authentication(request):
+        # The CEO Discord gateway is an internal service, not a browser user,
+        # and cannot carry a Supabase JWT.  Its single-purpose credential is
+        # accepted on this exact POST path only.  The route subsequently maps
+        # the immutable Discord author id to an authorized PAPER principal.
+        internal_discord_ingress = (
+            request.method == "POST"
+            and request.url.path == DISCORD_INGRESS_PATH
+            and discord_ingress_bearer_is_authorized(
+                request.headers.get("authorization")
+            )
+        )
+        if internal_discord_ingress:
+            set_authenticated_request_user(request, None)
+            mark_discord_ingress_request(request)
+            return await call_next(request)
+        try:
+            owner_id = await run_in_threadpool(
+                authenticate_request_headers,
+                authorization=request.headers.get("authorization"),
+                x_user_id=request.headers.get("x-user-id"),
+                required=auth_required(),
+            )
+            set_authenticated_request_user(request, owner_id)
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    return await call_next(request)
+
+
+# Starlette inserts each newly registered middleware at the front. Register
+# CORS after the auth boundary so it remains outermost and decorates even
+# fail-closed 401/403/503 responses for an allowed frontend origin.
 app.add_middleware(
     CORSMiddleware,
-    # 로컬 개발 포트는 3000/3001/3002/3003처럼 바뀔 수 있다.
-    # 배포 시에는 이 정규식을 환경변수 기반 allowlist로 교체한다.
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:3001",
-        "http://localhost:3002",
-        "http://localhost:5173",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:3001",
-        "http://127.0.0.1:3002",
-        "http://127.0.0.1:5173",
-    ],
+    allow_origins=_portfolio_cors_origins(),
+    # Browser identity uses an explicit Bearer header, never ambient cookies.
+    # Credentials stay disabled, so wildcard+credentials cannot be introduced.
+    allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "OPTIONS"],
-    allow_headers=["*"],
+    allow_headers=[
+        "Accept",
+        "Authorization",
+        "Content-Type",
+        "Last-Event-ID",
+        "Idempotency-Key",
+        "X-Request-Id",
+        "X-User-Id",
+    ],
 )
 
 # 각 투자 본부의 Router는 해당 Hermes Profile을 명시적으로 소유한다. CEO·HR은
@@ -203,6 +337,7 @@ app.include_router(discord_read_router)
 app.include_router(portfolio_live_router)
 app.include_router(risk_router)
 app.include_router(qa_router)
+app.include_router(user_orders_router)
 
 
 # Browser는 Domain API를 직접 호출하지 않는다. Mandate 변경은 CEO Office가 소유하므로
@@ -314,23 +449,173 @@ def _require_portfolio_owner(owner_id: str | None, expected_user_id: str | None 
     require_owner(owner_id, expected_user_id, required=PORTFOLIO_AUTH_REQUIRED)
 
 
+_CALLER_IDENTITY_BODY_FIELDS = frozenset(
+    {
+        "actor_user_id",
+        "approved_by",
+        "created_by",
+        "owner_user_id",
+        "requested_by",
+        "updated_by",
+        "user_id",
+        "version_created_by",
+    }
+)
+
+
+def _identity_bound_body(
+    body: Mapping[str, object],
+    owner_id: str | None,
+    *,
+    inject: tuple[str, ...] = (),
+) -> dict[str, object]:
+    """Reject unsigned caller identities and pin required fields to JWT sub."""
+
+    bound = dict(body)
+    if owner_id is None:
+        return bound
+    for field in _CALLER_IDENTITY_BODY_FIELDS:
+        value = bound.get(field)
+        if value is not None and str(value).strip() and str(value).strip() != owner_id:
+            raise HTTPException(status_code=403, detail="portfolio_identity_body_mismatch")
+    for field in inject:
+        bound[field] = owner_id
+    return bound
+
+
+async def _require_fund_access(owner_id: str | None, fund_id: object) -> None:
+    await run_in_threadpool(
+        require_fund_membership,
+        owner_id,
+        str(fund_id).strip() if fund_id is not None else None,
+    )
+
+
+def _canonical_fund_ids(payload: object) -> set[str]:
+    """Collect explicit canonical fund bindings from a trusted service response."""
+
+    fund_ids: set[str] = set()
+    if isinstance(payload, Mapping):
+        for key, value in payload.items():
+            if key == "fund_id" and value is not None and str(value).strip():
+                fund_ids.add(str(value).strip())
+            elif isinstance(value, (Mapping, list, tuple)):
+                fund_ids.update(_canonical_fund_ids(value))
+    elif isinstance(payload, (list, tuple)):
+        for value in payload:
+            fund_ids.update(_canonical_fund_ids(value))
+    return fund_ids
+
+
+async def _require_canonical_fund_access(
+    owner_id: str | None,
+    payload: object,
+    *,
+    submitted_fund_id: object | None = None,
+) -> str | None:
+    """Authorize an opaque resource by its trusted canonical fund binding."""
+
+    if auth_mode() == "fixture":
+        return None
+    fund_ids = _canonical_fund_ids(payload)
+    if not fund_ids:
+        raise HTTPException(
+            status_code=503, detail="portfolio_canonical_fund_binding_unavailable"
+        )
+    if len(fund_ids) != 1:
+        raise HTTPException(
+            status_code=409, detail="portfolio_canonical_fund_binding_ambiguous"
+        )
+    canonical_fund_id = next(iter(fund_ids))
+    if (
+        submitted_fund_id is not None
+        and str(submitted_fund_id).strip() != canonical_fund_id
+    ):
+        raise HTTPException(
+            status_code=409, detail="portfolio_canonical_fund_binding_mismatch"
+        )
+    await _require_fund_access(owner_id, canonical_fund_id)
+    return canonical_fund_id
+
+
+async def _canonical_mandate(mandate_id: str) -> object:
+    return await _governance_request(
+        "GET", f"/governance/v1/mandates/{mandate_id}/current"
+    )
+
+
+async def _authorized_mandate(
+    mandate_id: str, owner_id: str | None
+) -> object:
+    payload = await _canonical_mandate(mandate_id)
+    await _require_canonical_fund_access(owner_id, payload)
+    return payload
+
+
+async def _canonical_case(case_id: str) -> object:
+    return await _governance_request(
+        "GET", f"/governance/v1/cases/{case_id}"
+    )
+
+
+async def _authorized_case(case_id: str, owner_id: str | None) -> object:
+    payload = await _canonical_case(case_id)
+    await _require_canonical_fund_access(owner_id, payload)
+    return payload
+
+
+async def _authorized_approval(
+    approval_id: str, owner_id: str | None
+) -> object:
+    payload = await _governance_request(
+        "GET", f"/governance/v1/approvals/{approval_id}"
+    )
+    await _require_canonical_fund_access(owner_id, payload)
+    return payload
+
+
 @app.post("/ui/mandates/{mandate_id}/change-requests")
-async def ui_submit_mandate_change(mandate_id: str, body: dict[str, object]) -> object:
-    return await _governance_request("POST", f"/governance/v1/mandates/{mandate_id}/change-requests", body=body)
+async def ui_submit_mandate_change(
+    mandate_id: str,
+    body: dict[str, object],
+    owner_id: str | None = Depends(current_user),
+) -> object:
+    bound = _identity_bound_body(body, owner_id, inject=("created_by",))
+    canonical = await _canonical_mandate(mandate_id)
+    await _require_canonical_fund_access(
+        owner_id, canonical, submitted_fund_id=bound.get("fund_id")
+    )
+    return await _governance_request("POST", f"/governance/v1/mandates/{mandate_id}/change-requests", body=bound)
 
 
 @app.get("/ui/mandates/{mandate_id}/current")
-async def ui_get_current_mandate(mandate_id: str) -> object:
-    return await _governance_request("GET", f"/governance/v1/mandates/{mandate_id}/current")
+async def ui_get_current_mandate(
+    mandate_id: str,
+    owner_id: str | None = Depends(current_user),
+) -> object:
+    return await _authorized_mandate(mandate_id, owner_id)
 
 
 @app.post("/ui/mandate-cases/{case_id}/advance")
-async def ui_advance_mandate_case(case_id: str, body: dict[str, object]) -> object:
-    return await _governance_request("POST", f"/governance/v1/cases/{case_id}/advance", body=body)
+async def ui_advance_mandate_case(
+    case_id: str,
+    body: dict[str, object],
+    owner_id: str | None = Depends(current_user),
+) -> object:
+    bound = _identity_bound_body(body, owner_id)
+    canonical = await _canonical_case(case_id)
+    await _require_canonical_fund_access(
+        owner_id, canonical, submitted_fund_id=bound.get("fund_id")
+    )
+    return await _governance_request("POST", f"/governance/v1/cases/{case_id}/advance", body=bound)
 
 
 @app.get("/ui/mandate-cases/{case_id}/timeline")
-async def ui_get_mandate_case_timeline(case_id: str) -> object:
+async def ui_get_mandate_case_timeline(
+    case_id: str,
+    owner_id: str | None = Depends(current_user),
+) -> object:
+    await _authorized_case(case_id, owner_id)
     return await _governance_request("GET", f"/governance/v1/cases/{case_id}/timeline")
 
 
@@ -342,22 +627,36 @@ async def ui_get_mandate_case_timeline(case_id: str) -> object:
 
 
 @app.post("/ui/mandates", status_code=201)
-async def ui_create_mandate(body: dict[str, object]) -> object:
+async def ui_create_mandate(
+    body: dict[str, object],
+    owner_id: str | None = Depends(current_user),
+) -> object:
     """Mandate 부모 행 생성. 온보딩의 시작점이다(2026-08-12 신설).
 
     그 전까지 `governance.mandates` INSERT 경로가 API로 없어서 첫 사용자는
     Mandate를 만들 수 없었다 - Version 제안 경로는 전부 `mandate_id`를 받는다.
     """
 
-    return await _governance_request("POST", "/governance/v1/mandates", body=body)
+    bound = _identity_bound_body(body, owner_id, inject=("owner_user_id",))
+    await _require_fund_access(owner_id, bound.get("fund_id"))
+    return await _governance_request("POST", "/governance/v1/mandates", body=bound)
 
 
 @app.put("/ui/mandates/{mandate_id}")
-async def ui_replace_mandate(mandate_id: str, body: dict[str, object]) -> object:
+async def ui_replace_mandate(
+    mandate_id: str,
+    body: dict[str, object],
+    owner_id: str | None = Depends(current_user),
+) -> object:
     """Replace the current Mandate metadata; no version row is created."""
 
+    bound = _identity_bound_body(body, owner_id, inject=("created_by",))
+    canonical = await _canonical_mandate(mandate_id)
+    await _require_canonical_fund_access(
+        owner_id, canonical, submitted_fund_id=bound.get("fund_id")
+    )
     return await _governance_request(
-        "PUT", f"/governance/v1/mandates/{mandate_id}", body=body
+        "PUT", f"/governance/v1/mandates/{mandate_id}", body=bound
     )
 
 
@@ -372,6 +671,7 @@ async def ui_get_current_mandate_by_fund(
     임의로 하나를 고르지 않는다(USER_INPUT_API_SPEC 2.1).
     """
 
+    await _require_fund_access(owner_id, fund_id)
     params = {"owner_user_id": owner_id} if owner_id else None
     return await _governance_request(
         "GET",
@@ -381,16 +681,28 @@ async def ui_get_current_mandate_by_fund(
 
 
 @app.post("/ui/mandates/{mandate_id}/versions")
-async def ui_propose_mandate_version(mandate_id: str, body: dict[str, object]) -> object:
+async def ui_propose_mandate_version(
+    mandate_id: str,
+    body: dict[str, object],
+    owner_id: str | None = Depends(current_user),
+) -> object:
     """정책 Version 제안. 저장은 여기가 아니라 활성화 단계에서 확정된다."""
 
+    bound = _identity_bound_body(body, owner_id, inject=("created_by",))
+    canonical = await _canonical_mandate(mandate_id)
+    await _require_canonical_fund_access(
+        owner_id, canonical, submitted_fund_id=bound.get("fund_id")
+    )
     return await _governance_request(
-        "POST", f"/governance/v1/mandates/{mandate_id}/versions", body=body
+        "POST", f"/governance/v1/mandates/{mandate_id}/versions", body=bound
     )
 
 
 @app.post("/ui/mandate-assistant/suggest")
-async def ui_mandate_assistant_suggest(body: dict[str, object]) -> object:
+async def ui_mandate_assistant_suggest(
+    body: dict[str, object],
+    owner_id: str | None = Depends(current_user),
+) -> object:
     """온보딩 챗봇 제안. **Stateless이며 아무것도 저장하지 않는다.**
 
     응답의 `requires_user_confirmation`은 항상 `true`다(USER_INPUT_API_SPEC 2.4
@@ -399,8 +711,10 @@ async def ui_mandate_assistant_suggest(body: dict[str, object]) -> object:
     `dropped_fields`에 남고 조용히 사라지지 않는다.
     """
 
+    bound = _identity_bound_body(body, owner_id)
+    await _require_fund_access(owner_id, bound.get("fund_id"))
     return await _governance_request(
-        "POST", "/governance/v1/mandate-assistant/suggest", body=body
+        "POST", "/governance/v1/mandate-assistant/suggest", body=bound
     )
 
 
@@ -414,8 +728,10 @@ async def ui_create_investor_profile(
     요청자와 바디의 `user_id`가 다르면 403이다 - 남의 프로필을 쓰지 못하게 한다.
     """
 
-    require_owner(owner_id, str(body.get("user_id") or ""), required=PORTFOLIO_AUTH_REQUIRED)
-    return await _portfolio_request("POST", "/portfolio/v1/investor-profiles", body=body)
+    bound = _identity_bound_body(body, owner_id, inject=("user_id",))
+    require_owner(owner_id, str(bound.get("user_id") or ""), required=PORTFOLIO_AUTH_REQUIRED)
+    await _require_fund_access(owner_id, bound.get("fund_id"))
+    return await _portfolio_request("POST", "/portfolio/v1/investor-profiles", body=bound)
 
 
 @app.get("/ui/investor-profiles/current")
@@ -427,6 +743,7 @@ async def ui_get_current_investor_profile(
     """현재 version 하나. 없으면 상류 404를 그대로 통과시킨다."""
 
     require_owner(owner_id, user_id, required=PORTFOLIO_AUTH_REQUIRED)
+    await _require_fund_access(owner_id, fund_id)
     return await _portfolio_request(
         "GET",
         "/portfolio/v1/investor-profiles/current",
@@ -435,17 +752,29 @@ async def ui_get_current_investor_profile(
 
 
 @app.get("/ui/mandate-approvals")
-async def ui_list_mandate_approvals(object_type: str, object_id: str) -> object:
-    return await _governance_request(
+async def ui_list_mandate_approvals(
+    object_type: str,
+    object_id: str,
+    owner_id: str | None = Depends(current_user),
+) -> object:
+    payload = await _governance_request(
         "GET",
         "/governance/v1/approvals",
         params={"object_type": object_type, "object_id": object_id},
     )
+    await _require_canonical_fund_access(owner_id, payload)
+    return payload
 
 
 @app.post("/ui/mandate-approvals/{approval_id}/decide")
-async def ui_decide_mandate_approval(approval_id: str, body: dict[str, object]) -> object:
-    return await _governance_request("POST", f"/governance/v1/approvals/{approval_id}/decide", body=body)
+async def ui_decide_mandate_approval(
+    approval_id: str,
+    body: dict[str, object],
+    owner_id: str | None = Depends(current_user),
+) -> object:
+    bound = _identity_bound_body(body, owner_id, inject=("approved_by",))
+    await _authorized_approval(approval_id, owner_id)
+    return await _governance_request("POST", f"/governance/v1/approvals/{approval_id}/decide", body=bound)
 
 
 def _integration_status() -> dict[str, dict[str, object]]:
@@ -497,6 +826,45 @@ def _integration_status() -> dict[str, dict[str, object]]:
             "label": "재무 파일",
             "need": "자료 업로드 대기",
         },
+    }
+
+
+@app.get("/ui/me")
+def ui_current_user(
+    owner_id: str | None = Depends(current_user),
+) -> dict[str, object]:
+    """Return the verified subject and currently effective fund grants only."""
+
+    if owner_id is None:
+        raise HTTPException(status_code=401, detail="portfolio_authentication_required")
+    profile = active_user_profile(owner_id)
+    memberships = authorized_fund_memberships(owner_id)
+    trading_books = authorized_trading_books(owner_id)
+    books_by_fund: dict[str, list[dict[str, str]]] = {}
+    for book in trading_books:
+        books_by_fund.setdefault(str(book["fund_id"]), []).append(
+            {"book_id": str(book["book_id"]), "name": str(book["name"])}
+        )
+    roles_by_fund: dict[str, set[str]] = {}
+    for membership in memberships:
+        roles_by_fund.setdefault(str(membership["fund_id"]), set()).add(
+            str(membership["role"])
+        )
+    funds = [
+        {
+            "fund_id": fund_id,
+            "roles": sorted(roles),
+            "books": books_by_fund.get(fund_id, []),
+        }
+        for fund_id, roles in sorted(roles_by_fund.items())
+    ]
+    return {
+        "schema_version": "portfolio.current-user.v1",
+        "user_id": owner_id,
+        "display_name": profile["display_name"],
+        "status": profile["status"],
+        "funds": funds,
+        "onboarding_required": not funds,
     }
 
 
@@ -576,10 +944,11 @@ class PortfolioRecommendationRequest(BaseModel):
 async def start_portfolio_recommendation(
     request: PortfolioRecommendationRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-    owner_id: str | None = Header(default=None, alias="X-User-Id"),
+    owner_id: str | None = Depends(current_user),
 ) -> dict[str, object]:
     """Start the advisory LangGraph and return a run reference."""
     _require_portfolio_owner(owner_id, request.user_id)
+    await _require_fund_access(owner_id, request.fund_id)
 
     if get_universe(request.universe_id) is None:
         raise HTTPException(status_code=422, detail="portfolio_universe_not_found")
@@ -646,7 +1015,7 @@ async def start_portfolio_recommendation(
 )
 def portfolio_recommendation_status(
     run_id: str,
-    owner_id: str | None = Header(default=None, alias="X-User-Id"),
+    owner_id: str | None = Depends(current_user),
 ) -> dict[str, object]:
     run = RUNTIME.get(run_id)
     if run is None:
@@ -667,7 +1036,7 @@ class PortfolioRecommendationApprovalRequest(BaseModel):
 def decide_portfolio_recommendation(
     run_id: str,
     request: PortfolioRecommendationApprovalRequest,
-    owner_id: str | None = Header(default=None, alias="X-User-Id"),
+    owner_id: str | None = Depends(current_user),
 ) -> dict[str, object]:
     """Approve or reject the advisory recommendation, never an order."""
 
@@ -749,7 +1118,14 @@ def health_ready() -> dict[str, object]:
         #   찌르면 readiness 가 남의 서비스 지연에 묶인다(그건 각 부서 /health/ready 몫).
         "risk": {"status": "READY" if RISK_API_URL else "NOT_CONFIGURED"},
         "qa": {"status": "READY" if QA_API_URL else "NOT_CONFIGURED"},
-        "supabase": {"status": "READY" if os.getenv("DATABASE_URL", "").strip() else "NOT_CONFIGURED"},
+        "control_database": {
+            "status": "READY"
+            if (
+                os.getenv("CONTROL_DATABASE_URL", "").strip()
+                or os.getenv("DATABASE_URL", "").strip()
+            )
+            else "NOT_CONFIGURED"
+        },
         "ollama": {
             "status": "READY"
             if os.getenv("PORTFOLIO_WORKER_RUNTIME", "deterministic_test") == "deterministic_test"
@@ -840,6 +1216,7 @@ def _accounting_sections(
 def ui_snapshot(
     book_id: UUID | None = None,
     fund_id: UUID | None = None,
+    owner_id: str | None = Depends(current_user),
 ) -> dict:
     """계획 5.2의 `GET /ui/snapshot`. 화면 State는 이 한 장에서 재구축된다.
 
@@ -858,6 +1235,13 @@ def ui_snapshot(
     아무것도 평가되지 않은 초기 상태일 수 있으므로 대시보드를 통째로 죽이지 않고
     Scripted Loop로 남되 `sources`가 그 사실을 밝힌다.
     """
+    if auth_mode() == "supabase_jwt" and book_id is not None:
+        raise HTTPException(
+            status_code=422, detail="portfolio_book_selection_forbidden"
+        )
+    require_fund_membership(
+        owner_id, str(fund_id) if fund_id is not None else None
+    )
     loop = _demo_state()
     overrides = None
     resolved = _accounting_sections(book_id, fund_id)
@@ -869,10 +1253,10 @@ def ui_snapshot(
         if sections is not None:
             # 출처는 **실제로 갈아끼운 구간에만** 붙인다. 목록을 손으로 적어두면
             # 뷰가 구간을 하나 더 내놓거나 덜 내놨을 때 화면이 Scripted Loop 값을
-            # supabase라고 읽는다.
+            # private control DB의 canonical accounting projection으로 읽는다.
             overrides = {**sections,
                          "book_id": str(chosen),
-                         "sources": {name: "supabase" for name in sections}}
+                         "sources": {name: "control-db" for name in sections}}
 
     snapshot = build_ui_snapshot(
         oms=loop.oms,
@@ -890,44 +1274,63 @@ def _domain_projection(domain: str) -> dict[str, object]:
 
 
 @app.get("/ui/research")
-def ui_research() -> dict[str, object]:
+def ui_research(
+    owner_id: str | None = Depends(current_user),
+) -> dict[str, object]:
     """Research Case read-only projection for the dashboard."""
 
+    require_any_fund_membership(owner_id)
     return _domain_projection("research")
 
 
 @app.get("/ui/strategy")
-def ui_strategy() -> dict[str, object]:
+def ui_strategy(
+    owner_id: str | None = Depends(current_user),
+) -> dict[str, object]:
     """Strategy Factory / quant read-only projection for the dashboard."""
 
+    require_any_fund_membership(owner_id)
     return _domain_projection("strategy")
 
 
 @app.get("/ui/risk")
-def ui_risk() -> dict[str, object]:
+def ui_risk(
+    owner_id: str | None = Depends(current_user),
+) -> dict[str, object]:
     """Risk Center read-only projection for the dashboard."""
 
+    require_any_fund_membership(owner_id)
     return _domain_projection("risk")
 
 
 @app.get("/ui/qa")
-def ui_qa() -> dict[str, object]:
+def ui_qa(
+    owner_id: str | None = Depends(current_user),
+) -> dict[str, object]:
     """AI QA·Audit read-only projection for the dashboard."""
 
+    require_any_fund_membership(owner_id)
     return _domain_projection("qa")
 
 
 @app.get("/ui/risk-qa")
-def ui_risk_qa() -> dict[str, object]:
+def ui_risk_qa(
+    owner_id: str | None = Depends(current_user),
+) -> dict[str, object]:
     """Combined Risk·QA projection consumed by the office panel."""
 
+    require_any_fund_membership(owner_id)
     return _domain_projection("risk-qa")
 
 
 @app.post("/ui/commands/trading-state", status_code=202)
-def request_trading_state_command(command: TradingStateCommand) -> dict[str, object]:
+def request_trading_state_command(
+    command: TradingStateCommand,
+    owner_id: str | None = Depends(current_user),
+) -> dict[str, object]:
     """Record a versioned approval request without changing binding state."""
 
+    require_fund_membership(owner_id, str(command.target.fund_id))
     try:
         return COMMAND_SERVICE.submit(command)
     except CommandVersionConflict as exc:
@@ -937,15 +1340,43 @@ def request_trading_state_command(command: TradingStateCommand) -> dict[str, obj
 
 
 @app.get("/ui/commands/audit")
-def ui_command_audit() -> dict[str, object]:
+def ui_command_audit(
+    owner_id: str | None = Depends(current_user),
+) -> dict[str, object]:
     """Return BFF-local audit events; no broker or ledger credentials are exposed."""
 
-    return {"schema_version": "operator-command-audit.v1", "events": COMMAND_SERVICE.audit_events()}
+    memberships = require_any_fund_membership(owner_id)
+    events = COMMAND_SERVICE.audit_events()
+    if auth_mode() != "fixture":
+        allowed_funds = {str(row["fund_id"]) for row in memberships}
+        events = [
+            event for event in events
+            if str(event.get("fund_id") or "") in allowed_funds
+        ]
+    return {"schema_version": "operator-command-audit.v1", "events": events}
 
 
 @app.websocket("/ws/operations")
 async def operations_websocket(websocket: WebSocket) -> None:
     """Read-only Agent Status Event stream with REST snapshot recovery."""
+
+    # A browser WebSocket cannot set an Authorization header with the native
+    # API.  Until the frontend implements a short-lived authenticated ticket or
+    # a reviewed subprotocol transport, production therefore fails closed here
+    # before accepting the handshake and before building any snapshot.
+    try:
+        owner_id = await run_in_threadpool(
+            authenticate_request_headers,
+            authorization=websocket.headers.get("authorization"),
+            x_user_id=websocket.headers.get("x-user-id"),
+            required=auth_required(),
+        )
+        await run_in_threadpool(require_any_fund_membership, owner_id)
+    except HTTPException as exc:
+        close_code = {401: 4401, 403: 4403}.get(exc.status_code, 1011)
+        await websocket.close(code=close_code, reason=str(exc.detail))
+        return
+
     await websocket.accept()
     last_sequence = 0
     initialized = False
@@ -1004,14 +1435,15 @@ if __name__ == "__main__":
     assert isinstance(snap["portfolio"]["nav"], str), "금액이 JSON number로 나갔다"
     assert snap["trading"]["orders"][0]["state"] == "FILLED"
     # 구간마다 출처가 반드시 있다. 트레이딩은 아직 Scripted Loop다(TRD-01 대기).
-    # 회계 구간은 DB와 Canonical 장부가 있으면 supabase, 없으면 scripted-loop -
+    # 회계 구간은 private control DB와 Canonical 장부가 있으면 control-db,
+    # 없으면 scripted-loop -
     # 어느 쪽이든 **화면이 출처를 모르는 상태로 나가지 않는다**는 게 계약이다.
     assert set(snap["sources"]) == {"portfolio", "trading", "ledger", "treasury"}, \
         snap["sources"]
     assert snap["sources"]["trading"] == "scripted-loop", snap["sources"]
     assert snap["sources"]["portfolio"] == snap["sources"]["ledger"], \
         f"회계 두 구간의 출처가 갈라졌다: {snap['sources']}"
-    assert snap["sources"]["portfolio"] in ("supabase", "scripted-loop"), snap["sources"]
+    assert snap["sources"]["portfolio"] in ("control-db", "scripted-loop"), snap["sources"]
     # 결제 사다리. **원장 현금과 가용 현금이 같은 값으로 나간다** - 화면이 현금을
     # 두 군데서 다르게 말하면 어느 쪽으로 주문을 잡을지 알 수 없다.
     assert snap["treasury"]["available_cash"] == snap["portfolio"]["cash"], snap["treasury"]
@@ -1047,9 +1479,9 @@ if __name__ == "__main__":
         wired = c.get("/ui/snapshot").json()
         assert wired["portfolio"]["nav"] == "12345", wired["portfolio"]
         assert wired["book_id"] == str(_BOOK), wired["book_id"]
-        assert wired["sources"]["portfolio"] == "supabase"
-        assert wired["sources"]["ledger"] == "supabase"
-        assert wired["sources"]["treasury"] == "supabase"
+        assert wired["sources"]["portfolio"] == "control-db"
+        assert wired["sources"]["ledger"] == "control-db"
+        assert wired["sources"]["treasury"] == "control-db"
         # 갈아끼우지 않은 구간의 출처는 그대로 남는다
         assert wired["sources"]["trading"] == "scripted-loop", wired["sources"]
         # mode는 여전히 DEMO다. 트레이딩이 Scripted Loop인 한 절반만 진짜다
@@ -1207,6 +1639,14 @@ if __name__ == "__main__":
         # 돌려주고 OMS·Risk Engine·Broker·Ledger를 바꾸지 않는다.
         "/ui/commands/trading-state",
         "/ui/commands/audit",
+        # Authenticated user directives are the highest-priority PAPER lane.
+        # The BFF authorizes fund/book ownership and the trading domain owns OMS.
+        "/ui/paper-orders",
+        "/ui/paper-orders/sell-all",
+        "/ui/paper-orders/cancel-all",
+        "/ui/paper-orders/{directive_id}",
+        "/ui/paper-orders/{directive_id}/status",
+        "/trading/agent/order",
         # Broker(LS) 조회 projection. authoritative=false이며 공식 NAV가 아니다.
         "/ui/account/snapshot",
         # QA 도메인 위임 조회. 판정은 qa-api가 소유한다.

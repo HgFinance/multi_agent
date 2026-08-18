@@ -167,6 +167,24 @@ class PostgresMandateVersionRepository(MandateVersionRepository):
         finally:
             self._pool.putconn(conn)
 
+    def get_mandate_access_context(self, mandate_id: str) -> dict | None:
+        """Return the immutable tenant/owner boundary for a Mandate."""
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select fund_id, owner_user_id from governance.mandates "
+                    "where mandate_id = %s",
+                    (mandate_id,),
+                )
+                row = cur.fetchone()
+            conn.commit()
+            if row is None:
+                return None
+            return {"fund_id": str(row[0]), "owner_user_id": str(row[1])}
+        finally:
+            self._pool.putconn(conn)
+
     def replace_mandate_metadata(self, mandate_id: str, metadata: dict) -> None:
         """Replace the current Mandate metadata in one parent row."""
         Json, _ = _load_postgres_driver()
@@ -288,7 +306,8 @@ class PostgresMandateVersionRepository(MandateVersionRepository):
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    select m.current_version, m.status,
+                    select m.fund_id, m.owner_user_id,
+                           m.current_version, m.status,
                            mv.mandate_version_id, mv.content_hash, mv.objective_text,
                            mv.objective, mv.allowed_assets, mv.forbidden_assets,
                            mv.universe_policy, mv.risk_bounds, mv.approval_rules,
@@ -315,7 +334,8 @@ class PostgresMandateVersionRepository(MandateVersionRepository):
             return {"mandate_id": mandate_id, "current_version": 0, "status": "DRAFT"}
 
         (
-            version, status, mandate_version_id, content_hash, objective_text,
+            fund_id, owner_user_id, version, status,
+            mandate_version_id, content_hash, objective_text,
             objective, allowed_assets, forbidden_assets, universe_policy,
             risk_bounds, approval_rules, execution_rules, effective_from, effective_to,
         ) = row
@@ -323,12 +343,20 @@ class PostgresMandateVersionRepository(MandateVersionRepository):
         if version <= 0:
             # 기존 경로의 조기 반환과 동일하게 이 세 필드만 준다(mandate_version_id/
             # policy_hash/case_id 키를 넣지 않는다 - 응답 모양이 달라지면 안 된다).
-            return {"mandate_id": mandate_id, "current_version": version, "status": status}
+            return {
+                "mandate_id": mandate_id,
+                "fund_id": str(fund_id),
+                "owner_user_id": str(owner_user_id),
+                "current_version": version,
+                "status": status,
+            }
 
         mandate_version_id = str(mandate_version_id) if mandate_version_id else None
         policy_hash = str(content_hash) if content_hash else None
         response: dict[str, Any] = {
             "mandate_id": mandate_id,
+            "fund_id": str(fund_id),
+            "owner_user_id": str(owner_user_id),
             "case_id": None,
             "current_version": version,
             "mandate_version_id": mandate_version_id,

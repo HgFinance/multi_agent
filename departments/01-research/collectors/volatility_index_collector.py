@@ -36,7 +36,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from macro_collector import FREQ_DAILY, Observation, SeriesSpec
+from market_observations import FREQ_DAILY, Observation, SeriesSpec
 
 COLLECTOR_VERSION = "research-volatility-index-v1"
 KST = timezone(timedelta(hours=9))
@@ -140,7 +140,9 @@ def collect() -> int:
     from source_registry import SourceRegistry, UseScope, load_project_env
 
     env = load_project_env()
-    SourceRegistry(env=env).check_use(SOURCE_ID, UseScope.FULLTEXT_STORE)
+    registry = SourceRegistry(env=env)
+    registry.check_use(SOURCE_ID, UseScope.FULLTEXT_STORE)
+    market_source = registry.require(SOURCE_ID)
 
     now = datetime.now(timezone.utc)
     trade_date = now.astimezone(KST).date()
@@ -165,7 +167,9 @@ def collect() -> int:
         parsed = parse_block(block)
         obs = build_observation(parsed, trade_date=trade_date, observed_at=now)
 
-        _, _, src = repo.sync_data_sources()
+        # Market-only runtime must not refresh the retired news/filing/macro
+        # source catalogue as a side effect of writing one exchange index.
+        _, _, src = repo.sync_data_sources(specs=[market_source])
         _, _, sid = repo.upsert_macro_series(list(SERIES), source_ids=src)
         n, u = repo.upsert_macro_observations([obs], series_ids=sid)
         pos = obs.metadata.get("position_in_52w_pct")

@@ -1,4 +1,4 @@
-# GDELT 지정학 테마 - geopolitical_collector.py 가 읽는다.
+# GDELT 지정학 테마 - 요청형 MCP/분석 도구의 질의 사전이다 (상주 수집 없음).
 # 형식: <시계열코드>|<GDELT 질의>   (# 뒤는 주석)
 # 코드는 macro_series.external_series_code 가 되므로 바꾸면 새 시계열이 된다.
 #

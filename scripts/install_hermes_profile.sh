@@ -52,7 +52,17 @@ install_one() {
   #   재설치 때마다 손으로 넣으면 언젠가 또 잊으므로 절차에 넣는다.
   local tmp; tmp="$(mktemp)"
   if [ -f "$ROOT/.env" ]; then
-    PYTHONIOENCODING=utf-8 python - "$src/config.yaml" "$ROOT/.env" "$tmp" <<'PYEOF'
+    # Git Bash resolves repository paths as /c/..., while the selected
+    # ``python`` executable is normally native Windows Python. Convert only
+    # the Python argv paths in that environment; Docker/GNU tools below still
+    # need the POSIX spellings.
+    local python_cfg="$src/config.yaml" python_env="$ROOT/.env" python_tmp="$tmp"
+    if command -v cygpath >/dev/null 2>&1; then
+      python_cfg="$(cygpath -w "$python_cfg")"
+      python_env="$(cygpath -w "$python_env")"
+      python_tmp="$(cygpath -w "$python_tmp")"
+    fi
+    PYTHONIOENCODING=utf-8 python - "$python_cfg" "$python_env" "$python_tmp" <<'PYEOF'
 import os, re, sys
 cfg, envf = sys.argv[1], sys.argv[2]
 env = {}
@@ -96,7 +106,7 @@ PYEOF
   MSYS_NO_PATHCONV=1 docker exec "$container" sh -c "chown hermes:hermes /opt/data/config.yaml /opt/data/SOUL.md 2>/dev/null; true"
 
   local got
-  got=$(docker exec "$container" head -2 /opt/data/config.yaml 2>&1 | tr -d '
+  got=$(MSYS_NO_PATHCONV=1 docker exec "$container" head -2 /opt/data/config.yaml 2>&1 | tr -d '
 ')
   if echo "$got" | grep -q "Hermes Agent CLI Configuration"; then
     echo "  ✗ $profile: 아직 Hermes 기본 설정이다 - 복사가 안 먹었다"

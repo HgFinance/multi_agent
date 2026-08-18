@@ -195,6 +195,20 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  # Fund 생성 시 보수 발생주의 계정(2100/5200/5300)을 같은
                  # 트랜잭션에서 만들고, 기존 Fund도 idempotent하게 보정한다.
                  "20260818001300_fund_fee_account_provisioning.sql",
+                 # Hosted Supabase owns Auth while the private control DB keeps
+                 # only a PII-minimal verified-subject projection.
+                 "20260818001350_external_auth_subject_projection.sql",
+                 # The imported 61-session completed-second archive is a
+                 # distinct historical-search authority, never the live
+                 # receipt-clock event manifest.
+                 "20260818001400_intraday_completed_second_dataset.sql",
+                 # Authenticated USER-priority PAPER directives use durable
+                 # roots/proofs/legs/reservations plus a per-book barrier.
+                 "20260818001500_paper_user_directive_execution.sql",
+                 # User authority is durably bound before CEO/Kanban/Hermes
+                 # interpretation and only the trusted PAPER orchestrator may
+                 # attach the resulting directive.
+                 "20260818001600_ceo_hermes_paper_order_workflow.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 
@@ -215,6 +229,77 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             with self.subTest(path=path.name):
                 self.assertRegex(sql.lstrip().lower(), r"^begin;")
                 self.assertRegex(sql.rstrip().lower(), r"commit;$")
+
+    def test_fee_account_seed_respects_fund_scoped_uniqueness(self) -> None:
+        """A clean database must replay the fee-account migration.
+
+        ``accounting.ledger_accounts`` has a required ``fund_id`` and its
+        unique key is ``(fund_id, account_code)``.  A global account-code
+        conflict target is neither valid PostgreSQL nor the ledger contract.
+        """
+        migration = (SUPABASE_MIGRATIONS /
+                     "20260811000100_accounting_fee_accounts.sql").read_text(
+                         encoding="utf-8").lower()
+        self.assertIn("(fund_id, account_code, name, account_type, currency)",
+                      migration)
+        self.assertIn("from accounting.funds", migration)
+        self.assertIn("on conflict (fund_id, account_code) do nothing",
+                      migration)
+        self.assertNotIn("on conflict (account_code)", migration)
+
+    def test_external_auth_subject_is_not_fk_bound_to_local_auth_users(self) -> None:
+        """New hosted-Auth users must not depend on a stale restored auth.users row."""
+
+        migration = (
+            SUPABASE_MIGRATIONS
+            / "20260818001350_external_auth_subject_projection.sql"
+        ).read_text(encoding="utf-8").lower()
+        self.assertIn(
+            "drop constraint if exists user_profiles_user_id_fkey",
+            migration,
+        )
+        self.assertIn("identity_provider", migration)
+        self.assertIn("verified supabase access-token sub", migration)
+        self.assertNotIn("references auth.users", migration)
+
+        foundation = (
+            SUPABASE_MIGRATIONS / "20260729000100_foundation_reference.sql"
+        ).read_text(encoding="utf-8").lower()
+        profile_start = foundation.index("create table governance.user_profiles")
+        profile_end = foundation.index(
+            "create table governance.user_preferences", profile_start
+        )
+        profile_ddl = foundation[profile_start:profile_end]
+        self.assertIn("user_id uuid primary key", profile_ddl)
+        self.assertNotIn("auth.users", profile_ddl)
+
+    def test_private_control_db_bootstraps_inert_postgrest_grant_targets(self) -> None:
+        foundation = (
+            SUPABASE_MIGRATIONS / "20260729000100_foundation_reference.sql"
+        ).read_text(encoding="utf-8").lower()
+        for role in ("anon", "authenticated", "service_role"):
+            self.assertIn(f"create role {role} nologin noinherit", foundation)
+        self.assertIn("nobypassrls", foundation)
+
+        risk_activation = (
+            SUPABASE_MIGRATIONS
+            / "20260804000400_risk_qa_runtime_activation.sql"
+        ).read_text(encoding="utf-8").lower()
+        self.assertNotIn("auth.role()", risk_activation)
+        self.assertNotIn("create policy risk_input_snapshots_service_role_all", risk_activation)
+
+    def test_runtime_pool_role_selection_is_login_name_neutral(self) -> None:
+        for filename in (
+            "20260818000500_runtime_service_role_selection.sql",
+            "20260818000600_qa_runtime_role_separation.sql",
+            "20260818000700_intraday_forward_qa_reproducer.sql",
+        ):
+            migration = (SUPABASE_MIGRATIONS / filename).read_text(
+                encoding="utf-8"
+            ).lower()
+            self.assertIn("session_user", migration)
+            self.assertNotIn("to postgres with set true", migration)
+            self.assertNotIn("member_role.rolname = 'postgres'", migration)
 
     def test_migration_versions_are_unique(self) -> None:
         """버전 접두사(타임스탬프)가 겹치면 Supabase 가 적용을 꼬아 Preview 가
@@ -621,13 +706,13 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             "20260818000500_runtime_service_role_selection.sql"
         ).lower()
 
+        self.assertIn("pool_login name := session_user", migration)
         self.assertIn(
-            "grant svc_quant to postgres with set true, inherit false",
-            migration)
+            "grant svc_quant to %i with set true, inherit false", migration)
         self.assertIn("membership.set_option", migration)
         self.assertIn("not membership.inherit_option", migration)
-        self.assertIn(
-            "postgres cannot explicitly reduce to service_role", migration)
+        self.assertIn("cannot explicitly reduce to service_role", migration)
+        self.assertNotIn("to postgres with set true", migration)
         self.assertIn(
             "svc_quant retains a direct qa transport write path", migration)
         self.assertIn(
@@ -645,14 +730,16 @@ class SupabaseSchemaContractTest(unittest.TestCase):
         self.assertIn("nologin nosuperuser nocreatedb nocreaterole", migration)
         self.assertIn("noinherit", migration)
         self.assertIn("nobypassrls", migration)
+        self.assertIn("pool_login name := session_user", migration)
         self.assertIn(
-            "grant svc_audit_api to postgres with set true, inherit false",
+            "grant svc_audit_api to %i with set true, inherit false",
             migration,
         )
         self.assertIn(
-            "grant svc_qa_worker to postgres with set true, inherit false",
+            "grant svc_qa_worker to %i with set true, inherit false",
             migration,
         )
+        self.assertNotIn("to postgres with set true", migration)
         self.assertIn("alter table audit.domain_events enable row level security", migration)
         self.assertIn("svc_audit_api has a non-audit direct table grant", migration)
         self.assertIn("svc_qa_worker exceeds its append/relay boundary", migration)
@@ -670,10 +757,12 @@ class SupabaseSchemaContractTest(unittest.TestCase):
         self.assertIn("nologin nosuperuser nocreatedb nocreaterole", migration)
         self.assertIn("noinherit", migration)
         self.assertIn("nobypassrls", migration)
+        self.assertIn("pool_login name := session_user", migration)
         self.assertIn(
-            "grant svc_qa_reproducer to postgres with set true, inherit false",
+            "grant svc_qa_reproducer to %i with set true, inherit false",
             migration,
         )
+        self.assertNotIn("to postgres with set true", migration)
         self.assertIn(
             "create table audit.intraday_forward_reproduction_results",
             migration,
@@ -924,7 +1013,12 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             # comparison evidence across API/process restarts.
             # +2 (도현, 2026-08-06): outbox(Transactional Outbox — OMS 상태 변경과 같은
             # 트랜잭션에서 기록), outbox_consumed(소비자별 중복 제거). P0-2 / PLAT-03
-            "execution": 14,
+            # +6 (2026-08-18): authenticated PAPER directive roots, consumed
+            # proofs, execution/cancel legs, resource reservations, the
+            # per-book priority barrier, and direct fill evidence.
+            # +3 (2026-08-18): durable CEO/Hermes PAPER-order requests,
+            # append-only interpretations, and transition audit events.
+            "execution": 23,
             "governance": 20,
             # +1 (재일, 2026-08-10): 공장 재편으로 실험 사전등록/결과 원장 확장
             # +1 (재일, 2026-08-16): 사전 데이터 타당성 점검을 trial에서 분리

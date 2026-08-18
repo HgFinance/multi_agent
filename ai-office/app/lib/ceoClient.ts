@@ -1,19 +1,18 @@
 /**
  * CEO Hermes 질의 클라이언트 — FastAPI BFF `/ui/ceo/ask`.
  *
- * CEO 응답은 advisory projection이다. `binding: false`를 유지하며,
- * 주문·원장·리스크 한도 같은 결정론적 경계를 프론트가 대신하지 않는다.
+ * 같은 ingress에서 자문과 사용자 PAPER 주문 명령을 받는다. 선택된 `book_id`는
+ * 주문 범위를 서버에 전달할 뿐이며, 권한 확인과 실행 판단은 BFF가 소유한다.
  *
  * PR #224의 v1 계약과 PR #226의 v2 planning projection을 함께 지원한다.
  * v2 필드는 모두 additive라서 BFF와 프론트의 배포 순서가 바뀌어도 v1
  * 응답을 읽을 수 있다.
  */
 
-import { currentFundId, withAccountHeaders } from "./currentAccount";
+import { BFF, bffFetch } from "./bffClient";
+import { currentFundId } from "./currentFund";
 
-/** FastAPI BFF 주소. 배포 Origin이 정해지면 환경변수로 주입한다. */
-const configuredBff = process.env.NEXT_PUBLIC_BFF_URL?.trim();
-export const BFF = (configuredBff || "http://127.0.0.1:8001").replace(/\/+$/, "");
+export { BFF } from "./bffClient";
 
 /** CEO 질의 응답에서 허용하는 하위 호환 스키마. */
 export const ACCEPTED_QUERY_VERSIONS = [
@@ -46,6 +45,31 @@ export type CeoQueryResult = {
     task_id: string | null;
     status: string;
     source: "hermes-kanban";
+  } | null;
+  /** Present only for the CEO -> Trading Hermes -> PAPER OMS lane. */
+  order_request_id?: string | null;
+  order_state?: string | null;
+  order_mode?: "PAPER" | null;
+  trading_task_id?: string | null;
+};
+
+export type PaperOrderWorkflowStatus = {
+  schema_version: "user-paper-order-status.v1";
+  order_request_id: string;
+  mode: "PAPER";
+  state: string;
+  action: "PLACE_ORDER" | "SELL_ALL" | "CANCEL_ALL" | null;
+  ceo_root_task_id: string | null;
+  trading_task_id: string | null;
+  clarification_code: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  directive: {
+    directive_id: string;
+    state: string;
+    mode: "PAPER";
+    error_code: string | null;
+    error_message: string | null;
   } | null;
 };
 
@@ -157,11 +181,10 @@ function explainError(body: unknown, status: number): string {
   return `CEO Hermes 연결 실패 (HTTP ${status})`;
 }
 async function getJson<T>(path: string): Promise<T> {
-  const response = await fetch(`${BFF}${path}`, {
+  const response = await bffFetch(path, {
     cache: "no-store",
-    // 헤더는 `withAccountHeaders`만 만든다 - 호출부마다 붙이면 한 곳을
-    // 빠뜨렸을 때 그 경로만 다른 사용자로 나간다.
-    headers: withAccountHeaders({ Accept: "application/json" }),
+    // Bearer/fixture identity는 중앙 bffFetch만 주입한다.
+    headers: { Accept: "application/json" },
   });
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) throw new Error(explainError(body, response.status));
@@ -171,17 +194,18 @@ async function getJson<T>(path: string): Promise<T> {
 export async function askCeo(
   query: string,
   requestId?: string,
+  bookId?: string,
 ): Promise<CeoQueryResult> {
   let response: Response;
   try {
-    response = await fetch(`${BFF}/ui/ceo/ask`, {
+    response = await bffFetch("/ui/ceo/ask", {
       method: "POST",
       cache: "no-store",
-      headers: withAccountHeaders({
+      headers: {
         "Content-Type": "application/json",
         Accept: "application/json",
         ...(requestId ? { "X-Request-Id": requestId } : {}),
-      }),
+      },
       body: JSON.stringify({
         query,
         request_id: requestId ?? crypto.randomUUID(),
@@ -189,6 +213,9 @@ export async function askCeo(
         // 비어 있다) 화면이 쌍으로 보낸다. 없으면 생략 - BFF가 Mandate
         // 스냅샷 없이 진행하고 없는 한도를 지어내지 않는다.
         ...(currentFundId() ? { fund_id: currentFundId() } : {}),
+        // 주문일 가능성이 있는 자연어를 위해 서버가 검증할 PAPER Book 범위를
+        // 전달한다. 선택하지 않았으면 생략해 일반 자문은 그대로 사용할 수 있다.
+        ...(bookId ? { book_id: bookId } : {}),
       }),
     });
   } catch {
@@ -239,11 +266,9 @@ function outcomeFor(
   return node.department ? "STALE" : "NO_ASSIGNEE";
 }
 
-/** `GET /ui/ceo/tasks?owner_id=`. 서버가 이미 그 계정 소유 Root만 걸러 준다. */
-export async function listCeoTasks(ownerId: string): Promise<CeoTaskListResponse> {
-  return getJson<CeoTaskListResponse>(
-    `/ui/ceo/tasks?owner_id=${encodeURIComponent(ownerId)}`,
-  );
+/** Verified JWT subject 범위의 CEO root task만 조회한다. */
+export async function listCeoTasks(): Promise<CeoTaskListResponse> {
+  return getJson<CeoTaskListResponse>("/ui/ceo/tasks");
 }
 
 export type CeoWorkflowStatusAndGraph = {
@@ -275,6 +300,14 @@ export async function ceoWorkflowResult(
 ): Promise<TaskResultResponse> {
   return getJson<TaskResultResponse>(
     `/ui/ceo/tasks/${encodeURIComponent(rootTaskId)}/result`,
+  );
+}
+
+export async function paperOrderWorkflowStatus(
+  orderRequestId: string,
+): Promise<PaperOrderWorkflowStatus> {
+  return getJson<PaperOrderWorkflowStatus>(
+    `/ui/paper-order-requests/${encodeURIComponent(orderRequestId)}`,
   );
 }
 

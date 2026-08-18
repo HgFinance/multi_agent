@@ -336,6 +336,10 @@ class MandateVersionRepository:
         """Return the single current UI metadata object, if one exists."""
         raise NotImplementedError
 
+    def get_mandate_access_context(self, mandate_id: str) -> dict | None:
+        """Return canonical ``fund_id`` and ``owner_user_id`` for authorization."""
+        raise NotImplementedError
+
     def replace_mandate_metadata(self, mandate_id: str, metadata: dict) -> None:
         """Replace the current UI metadata in place; do not create a version."""
         raise NotImplementedError
@@ -395,6 +399,15 @@ class InMemoryMandateVersionRepository(MandateVersionRepository):
     def get_mandate_metadata(self, mandate_id: str) -> dict | None:
         metadata = self._metadata.get(mandate_id)
         return dict(metadata) if metadata is not None else None
+
+    def get_mandate_access_context(self, mandate_id: str) -> dict | None:
+        fund_id = self._fund_of.get(mandate_id)
+        if fund_id is None:
+            return None
+        return {
+            "fund_id": fund_id,
+            "owner_user_id": self._owner_of.get(mandate_id),
+        }
 
     def replace_mandate_metadata(self, mandate_id: str, metadata: dict) -> None:
         if mandate_id not in self._fund_of and mandate_id not in self._mandate_state:

@@ -1,10 +1,14 @@
 import os
+import inspect
 
 if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
     try:
         import hermes_cli.kanban_db as kb
 
         _original_check_respawn_guard = kb.check_respawn_guard
+        _original_guard_accepts_lane = (
+            "lane" in inspect.signature(_original_check_respawn_guard).parameters
+        )
 
         def _hgfinance_check_respawn_guard(conn, task_id, *, lane="ready"):
             try:
@@ -32,11 +36,17 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
                 # cannot inspect the task. Never break the dispatcher.
                 pass
 
-            return _original_check_respawn_guard(
-                conn,
-                task_id,
-                lane=lane,
-            )
+            # Hermes removed the keyword-only ``lane`` argument in newer
+            # releases.  The local policy still uses its default to identify
+            # ready-lane calls, but must delegate using the installed
+            # signature so an upstream CLI upgrade cannot stop dispatch.
+            if _original_guard_accepts_lane:
+                return _original_check_respawn_guard(
+                    conn,
+                    task_id,
+                    lane=lane,
+                )
+            return _original_check_respawn_guard(conn, task_id)
 
         kb.check_respawn_guard = _hgfinance_check_respawn_guard
 

@@ -276,11 +276,11 @@ def universe_symbols(limit: int = 0) -> tuple[str, ...]:
 
 def _symbols_and_ids(symbols: tuple[str, ...]):
     import psycopg2
-    from news_watch_service import parse_watchlist_file
+    from symbol_universe import parse_symbol_file
 
     if not symbols:
-        wl = Path(__file__).resolve().parent.parent / "config" / "news_watchlist.txt"
-        symbols = parse_watchlist_file(wl.read_text(encoding="utf-8"))
+        wl = Path(__file__).resolve().parent.parent / "config" / "full_universe.txt"
+        symbols = parse_symbol_file(wl.read_text(encoding="utf-8"))
     s = psycopg2.connect(load_project_env()["DATABASE_URL"], connect_timeout=20)
     with s.cursor() as cur:
         cur.execute("""

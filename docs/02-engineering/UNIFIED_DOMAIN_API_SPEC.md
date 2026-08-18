@@ -37,7 +37,7 @@ Route 계약 테스트는 각 FastAPI의 app.openapi()를 별도 subprocess에�
 | 같은 부서 Head ↔ Worker | worker-context.v1 | 위임, 근거 수집, 비바인딩 결과 전달 |
 | 부서 간 동기 호출 | Domain API DTO | allow-list된 조회, 계산, Gate, 상태 확인 |
 | 부서 간 비동기 호출 | event-envelope-v1 | 상태 변경, 장시간 작업, 감사, 재처리 |
-| UI·Operator | Read-only BFF Projection | 원장·Risk·OMS·Credential을 소유하지 않음 |
+| UI·Operator | Read-only Projection + 인증 사용자 PAPER Command BFF | 원장·Risk·OMS·Credential을 소유하지 않으며, ADR-0007의 좁은 사용자 authority만 전달 |
 
 Worker를 별도 프로세스나 Queue로 분리해도 내부 계약은 worker-context.v1을 유지한다. Worker가 새로운 공개 Business API나 권한 우회 경로가 되어서는 안 된다.
 
@@ -48,7 +48,7 @@ Worker를 별도 프로세스나 Queue로 분리해도 내부 계약은 worker-c
 | 명세군 | 주요 실행 서비스 | Route Namespace |
 |---|---|---|
 | Research·Quant | Research Evidence, Market Read, Research Workflow, Quant | Legacy Read, /research/v1, /quant/v1 |
-| Trading | Paper OMS·Broker Adapter | /trading/v1, /investment-cases/{case_id}/paper-orders |
+| Trading | Paper OMS·Broker Adapter + 사용자 PAPER BFF | /trading/v1, /investment-cases/{case_id}/paper-orders, /ui/paper-orders, /trading/agent/order |
 | Risk·QA | Risk API, QA Gate·Audit API | /risk/v1, /qa/v1, Case Risk/QA Gate |
 | Governance·Workforce | CEO Governance, HR Workforce, Reporting | /governance/v1, /workforce/v1, /reporting/v1 |
 | Accounting·Portfolio | Ledger·Valuation·Reconciliation Domain API, BFF Projection | /accounting/v1, BFF /accounting/v1/portfolio-snapshot |
@@ -72,12 +72,12 @@ Worker를 별도 프로세스나 Queue로 분리해도 내부 계약은 worker-c
 | risk-api | ready | 13 | Production blocked |
 | qa-api | ready | 35 | Production blocked |
 | workforce-api | ready | 34 | Test implementation |
-| governance-api | ready | 31 | Test implementation |
+| governance-api | ready | 32 | Test implementation |
 | accounting-api | ready | 21 | Paper only |
-| operator-bff | ready | 47 | Projection/Test |
+| operator-bff | ready | 56 | Projection/Test |
 | Research Workflow, Quant, MSU Case | planned | 0 | Planned |
 
-현재 Registry에는 ready 앱의 218개 actual operation과 33개 planned operation이 분리되어 있다. Research Workflow·Quant·MSU Case의 FastAPI Route는 계획에 기록되어 있지만 현재 구현 Route로 세지 않는다. Accounting은 `accounting-api`가 ready로 전환되어 더 이상 planned가 아니다(2026-08-14 실측).
+현재 Registry에는 ready 앱의 228개 actual operation과 33개 planned operation이 분리되어 있다. Research Workflow·Quant·MSU Case의 FastAPI Route는 계획에 기록되어 있지만 현재 구현 Route로 세지 않는다. Accounting은 `accounting-api`가 ready로 전환되어 더 이상 planned가 아니다(2026-08-18 실측).
 
 이 표의 수치는 [Route Status Registry](contracts/route-registry.v1.json)의 `actual_routes`를 센 값이고, Registry는 각 앱의 `app.openapi()`와 exact comparison으로 검증된다. 표와 Registry가 어긋나면 **Registry가 기준**이다 - 표는 사람이 읽는 요약이라 갱신이 늦을 수 있다.
 
@@ -88,9 +88,32 @@ Worker를 별도 프로세스나 Queue로 분리해도 내부 계약은 worker-c
 - Production 목표는 Service Token과 mTLS다. Token Subject의 department, service, scopes를 검증한다.
 - 현재 구현은 Risk Trading State 명령과 QA Corrective Action 종결에 대해 짧은 수명의 HS256 Bearer Service Token(`sub`, `department`, `service`, `scopes`, `exp`)을 검증한다. 전역 Issuer/JWKS·mTLS·IAM 및 `sub`와 `agent_id/profile_version_id` 매핑은 배포 전 연결 대상이며, 이 명령 단위 검증만으로 Production 인증 완료로 간주하지 않는다.
 - Scope 형식은 department.resource.action.read 또는 department.resource.action이다. Fund·Book·Case 범위를 벗어나면 403이다.
-- Browser와 Agent는 Domain API를 직접 공개 호출하지 않는다. BFF 또는 승인된 내부 Service/MCP Gateway를 사용한다.
+- Browser와 Agent는 Domain API를 직접 공개 호출하지 않는다. BFF 또는 승인된 내부 Service/MCP Gateway를 사용한다. 인증 사용자의 PAPER mutation은 Operator BFF만 공개 경계로 사용한다.
 - CEO·Worker·LLM에게 Supabase Service Role, Broker Credential, LS Credential을 제공하지 않는다.
 - Agent Tool은 allow-list된 제안·조회·검증 도구만 노출한다. 주문 Submit, Risk 결정 적용, Ledger Posting, 권한 Provisioning은 Agent Tool이 직접 수행하지 않는다.
+
+#### 3.1.1 인증 사용자 PAPER authority
+
+[ADR-0007](adr/0007-authenticated-user-paper-directive-authority.md)은 자동 주문과
+사용자 직접 주문을 분리한다.
+
+- Agent·alpha·전략 Worker·rebalancer가 만든 자동 주문 후보는 기존 Risk Decision을
+  반드시 통과한다.
+- 검증된 JWT `sub`가 자기 ACTIVE Fund/Book에 명시한 `USER_DIRECTIVE`는 별도 사용자
+  authority다. alpha·rebalancer·Risk는 이 PAPER 결정을 경제적으로 veto/resize하지
+  않는다.
+- BFF는 body `user_id`를 권한으로 쓰지 않고 verified subject를 actor로 결합하며,
+  `OWNER | CIO | TRADER` membership과 canonical Fund/Book 관계를 확인한다.
+- Trading Hermes는 표시된 CEO 주문 원문을 strict schema/evidence span으로
+  비구속 구조화할 수 있지만 주문 권한은 없다. 원문 digest와 의미는 결정론 verifier가
+  독립적으로 다시 검사하고 모호한 문장은 실행하지 않는다. `/trading/agent/order`도
+  같은 인증 사용자 호환 ingress이며 Agent submit route가 아니다.
+- mutation은 `Idempotency-Key`가 필수이고 `mode`는 항상 `PAPER`다. BFF는 Supabase
+  token이나 LS credential을 downstream으로 전달하지 않고 짧은 수명의 최소 claim
+  service proof만 사용한다.
+- local durable PaperBroker 계정이 PAPER cash, position, open order, reservation과
+  execution 결과의 canonical source다. LS LIVE는 시세·호가·체결 read-only이며 LIVE
+  order route는 없다.
 
 ### 3.2 멱등성과 동시성
 
@@ -287,10 +310,31 @@ case_id는 Case 종속 Event에서 required이며, Mandate·Workforce·Reporting
 
 실시간 흐름에서 Risk 뒤 QA Gate를 거치며 QA PASS 없이 Broker Submit을 하지 않는다. 전략 연구 흐름에서 Quant의 SUPPORTED를 Production 주문 승인으로 취급하지 않는다. Research·Quant·QA는 서로의 원장을 직접 수정하지 않는다.
 
+위 흐름은 `AUTOMATED_STRATEGY` 주문에 대한 불변식이다. 인증 사용자의 명시적
+PAPER 명령은 다음의 별도 흐름이며 자동 전략과 권한 증거를 공유하지 않는다.
+
+    User natural-language command → JWT subject + exact Fund/Book admission
+      → CEO Kanban root → Trading Hermes non-binding candidate
+      → exact-text/digest/evidence deterministic verifier
+      → current Fund/Book membership + mechanical admission + idempotency
+      → durable USER_DIRECTIVE → local PaperBroker/OMS
+
+mechanical admission에는 canonical cash/position/open-order reservation, lot/tick/TTL과
+PAPER mode 검증이 포함된다. 이 단계는 alpha 점수·목표 비중·Risk budget을 근거로
+사용자의 결정을 다시 판단하는 경제적 Risk veto가 아니다.
+
+`SELL_ALL`은 canonical positive sellable position만 reduce-only SELL 자식으로 만들며
+현재 long-only PAPER 범위에서 short를 열거나 확대하거나 자동 cover하지 않는다.
+`CANCEL_ALL`은 canonical open PAPER order만 대상으로 한다. 두 명령은 자식 결과를
+합성해 `RECEIVED | RUNNING | IN_PROGRESS | PARTIAL | COMPLETED | FAILED | UNKNOWN`
+중 하나를 반환하며, 한 자식이라도 실패하면 `COMPLETED`가 아니다. `SELL_ALL`의
+zero-leg 완료는 같은 snapshot에서 positive accounting position과 open SELL
+reservation이 모두 0인 경우에만 허용한다.
+
 ### 7.2 실패 폐쇄
 
 - Research·Market PIT 실패, 근거 부족, stale DQ는 결과를 만들지 않고 422·503·BLOCKED 중 적절한 상태로 남긴다.
-- Risk Engine·P1/P2·Trading State 조회가 불가능하면 신규 진입을 차단하고 HOLD·ENTRY_BLOCKED·503을 반환한다.
+- 자동 주문에서 Risk Engine·P1/P2·Trading State 조회가 불가능하면 신규 진입을 차단하고 HOLD·ENTRY_BLOCKED·503을 반환한다. 사용자 PAPER 지시는 Risk verdict를 요구하지 않지만 auth·canonical account·durable store·mechanical admission 중 하나라도 불확실하면 동일하게 fail closed한다.
 - QA timeout·grounded=false·UNSUPPORTED·citation/PIT 실패는 PASS가 아니다.
 - Broker 무응답은 UNKNOWN이다. Accounting은 Fill 없이 Position·Cash·NAV를 변경하지 않는다.
 - Ledger·Position·NAV·Risk State·Profile Lifecycle의 실패는 자동 승인·자동 승격·권한 확대 방향으로 fallback하지 않는다.
@@ -300,6 +344,7 @@ case_id는 Case 종속 Event에서 required이며, Mandate·Workforce·Reporting
 | 대상 | 소유자 | 금지된 위임 |
 |---|---|---|
 | Risk 승인·Resize·Reject·Trading State | Risk Engine | Risk Agent·Trading·QA가 결정론 Gate를 대체 |
+| 명시적 사용자 PAPER directive | 검증된 사용자 JWT subject; BFF/parser는 전달·구조화, Trading Domain은 mechanical admission/실행 | Hermes·LLM·alpha·rebalancer가 지시를 만들거나 변경; Risk가 경제적 veto/resize; LIVE로 승격 |
 | QA PASS/WARN/FAIL·Finding 종결 | QA Service + 독립 Verifier | Trading·Risk·CEO가 자기 승인을 대체 |
 | OrderIntent·Broker Order | Trading OMS | trader-pm-agent가 Broker Submit 직접 수행 |
 | Fill 기반 Journal·Position·NAV | Accounting Service | OrderIntent·Signal·CEO가 Ledger Posting |
@@ -314,7 +359,7 @@ CEO는 주문 제출, Risk 승인, 원장 수정, NAV 확정, Audit Finding 종�
 |---|---|---|
 | Research Evidence·Market | Legacy Read API 실행 | PIT·production_authorized 매핑·ACL·재시작 복구 |
 | Research Workflow·Quant | Contract/Worker 중심, FastAPI Route planned | 영속 Job·Dataset·Artifact 저장과 상태 Migration |
-| Trading | 결정론 Paper OMS API 실행 | 영속 OrderStore·Broker Adapter·Service Auth·실계정 차단 검증 |
+| Trading | 결정론 Paper OMS API + 인증 사용자 PAPER directive 실행 | local durable PaperBroker account·Service Auth·PAPER-only·부분 실패/재시작 복구 검증; LIVE는 별도 승인 |
 | Risk | API·Test 실행, Production blocked | P1/P2 실데이터·Redis/DB Outbox·Risk Gate 장애 테스트 |
 | QA | API·Test 실행, Production blocked | 승인 corpus/profile·독립 Verifier·write-through·SoD |
 | Governance·Workforce | 일부 API 실행, 일부 Route planned | Transport·RLS·Committee/Plan 저장소·IAM 연계 |
@@ -343,6 +388,9 @@ CEO는 주문 제출, Risk 승인, 원장 수정, NAV 확정, Audit Finding 종�
 10. Worker DEGRADED/ESCALATE Context가 Head를 통과해도 APPROVE/PASS로 자동 승격되지 않는다.
 11. HR 개선 Candidate의 작성자와 승인자가 같으면 403이고 Access Request가 Credential을 직접 만들지 않는다.
 12. Event를 중복 소비해도 Ledger Posting·Profile Transition·QA Finding이 중복 생성되지 않는다.
+13. Agent/alpha 주문은 Risk 없이 submit되지 않지만, 인증 사용자의 명시적 PAPER directive는 Risk 경제적 veto 없이도 fund/book·account mechanics·idempotency를 통과하면 접수된다.
+14. `SELL_ALL`/`CANCEL_ALL` 자식 중 하나라도 실패하면 aggregate는 `COMPLETED`가 아니며, 같은 directive 상태 조회가 자식별 결과를 재현한다.
+15. LS LIVE 연결은 market read만 제공하고 사용자 PAPER route에서 LIVE order나 계좌 credential이 나타나지 않는다.
 
 ### 10.1 Operator BFF의 부서·통신 Projection
 
@@ -425,7 +473,12 @@ CEO 라우터는 `category`를 최소 부서 집합의 시작점으로 삼고 `q
 
 ### 10.7 BFF CEO Kanban 질의 Surface
 
-CEO 자연어 질의와 그 실행 추적은 `/ui/ceo/*` 10개 Route가 담당한다. 이 경로군은 **Hermes Kanban을 실행 Source of Truth로 삼는 읽기 전용 Projection + Task 생성 경계**이며, 주문·Risk 승인·원장 변경 권한이 없다(`binding: false` 유지).
+CEO 자연어 질의와 그 실행 추적은 `/ui/ceo/*` Route가 담당한다. 일반 자문 경로는
+**Hermes Kanban을 실행 Source of Truth로 삼는 읽기 전용 Projection + Task 생성
+경계**다. 다만 인증된 명시적 주문 문장은 별도 `user_paper_order` 표시 root와
+Trading primary를 durable DB에 먼저 결합한다. Trading Hermes 결과의
+`binding: false` 해석 자체에는 주문 권한이 없으며, 서버의 exact-text 검증과 현재
+Fund/Book 재인가를 모두 통과한 경우에만 PAPER OMS admission으로 이어진다.
 
 | Route | Method | 소유 모듈 | 역할 |
 |---|---|---|---|
@@ -438,6 +491,7 @@ CEO 자연어 질의와 그 실행 추적은 `/ui/ceo/*` 10개 Route가 담당�
 | `/ui/ceo/tasks/{task_id}/graph` | GET | `ceo.py` | 워크플로 그래프 node·edge |
 | `/ui/ceo/tasks/{task_id}/result` | GET | `ceo.py` | Synthesis 요약·decision·QA verdict |
 | `/ui/ceo/tasks/{task_id}/archive` | POST | `ceo.py` | Archive. **DELETE는 의도적으로 없다** - 기록을 지우지 않는다 |
+| `/ui/paper-order-requests/{order_request_id}` | GET | `user_orders.py` | CEO→Trading→PAPER OMS 상태와 Accounting ACK까지 추적 |
 
 - `POST /ui/ceo/ask`의 등록 지점은 `ceo_mirror_api.py` 하나다. `ceo.ceo_query`는 route를 스스로 등록하지 않는 순수 함수이며, 같은 (path, method)를 두 라우터가 나눠 갖고 등록 순서로 승부하는 구조를 금지한다(`tests/api/test_main_routes.py`가 중복 등록을 차단한다).
 - `X-User-Id`는 인증이 아니다. 그럼에도 `owner_id` 필터링을 **서버 측에서** 수행한다 - 클라이언트가 전체 목록을 받아 걸러내면 다른 계정의 질의·답변 텍스트가 네트워크 응답에 그대로 실린다.

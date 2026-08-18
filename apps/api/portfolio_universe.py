@@ -183,7 +183,7 @@ def enrich_suitability_result(
         "description": universe.get("description"),
         "status": instrument_status,
         "source": (
-            "supabase.reference.instruments"
+            "control-db.reference.instruments"
             if live_instruments is not None
             else universe.get("source")
         ),

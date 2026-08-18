@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from typing import Any
 
 CEO_WORKFLOW_SCOPE_MARKER = "hgfinance.ceo-workflow-scope.v1"
+USER_PAPER_ORDER_SCOPE_MARKER = "hgfinance.user-paper-order-request.v1"
+USER_PAPER_ORDER_MODE = "PAPER"
 CEO_WORKFLOW_SCOPE_POLICY = "fresh"
 CEO_WORKFLOW_REUSE_POLICY = "disabled"
 CONTINUOUS_RESEARCH_MARKER = "hgfinance.continuous-research.v1"
@@ -317,6 +319,75 @@ class WorkflowScopeViolation(ValueError):
 
 
 @dataclass(frozen=True)
+class UserPaperOrderScope:
+    """Non-secret authority reference carried by a CEO/Kanban workflow.
+
+    The operational database row identified by ``order_request_id`` remains
+    authoritative.  Kanban carries only identifiers and a digest; browser
+    tokens, service JWTs, and signing secrets never belong in this structure.
+    """
+
+    order_request_id: str
+    raw_instruction_sha256: str
+    fund_id: str
+    book_id: str
+    mode: str = USER_PAPER_ORDER_MODE
+
+
+def user_paper_order_scope_from_body(body: str) -> UserPaperOrderScope | None:
+    """Read and validate the PAPER-order reference from a root or child body."""
+
+    text = str(body or "")
+    if USER_PAPER_ORDER_SCOPE_MARKER not in text.splitlines():
+        return None
+    values = {
+        "order_request_id": read_marker(text, "order_request_id"),
+        "raw_instruction_sha256": read_marker(
+            text, "raw_instruction_sha256"
+        ).lower(),
+        "fund_id": read_marker(text, "fund_id"),
+        "book_id": read_marker(text, "book_id"),
+        "mode": read_marker(text, "order_mode"),
+    }
+    if not all(values.values()):
+        raise WorkflowScopeViolation("incomplete user PAPER order scope")
+    if values["mode"] != USER_PAPER_ORDER_MODE:
+        raise WorkflowScopeViolation("user order mode must be PAPER")
+    if not re.fullmatch(r"[0-9a-f]{64}", values["raw_instruction_sha256"]):
+        raise WorkflowScopeViolation("invalid user order instruction digest")
+    return UserPaperOrderScope(**values)
+
+
+def build_user_paper_order_scope(scope: UserPaperOrderScope) -> str:
+    """Serialize a non-secret PAPER-order reference as exact-line markers."""
+
+    if scope.mode != USER_PAPER_ORDER_MODE:
+        raise ValueError("user order mode must be PAPER")
+    digest = scope.raw_instruction_sha256.lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("raw_instruction_sha256 must be lowercase SHA-256 hex")
+    required = (scope.order_request_id, scope.fund_id, scope.book_id)
+    if any(
+        not str(value).strip() or any(character.isspace() for character in str(value))
+        for value in required
+    ):
+        raise ValueError("user PAPER order scope identifiers must be non-empty tokens")
+    return "\n".join(
+        (
+            USER_PAPER_ORDER_SCOPE_MARKER,
+            "request_kind=user_paper_order",
+            f"{PRIMARY_SELECTION_FIELD}=trading-department",
+            "qa_required=false",
+            f"order_request_id={scope.order_request_id}",
+            f"raw_instruction_sha256={digest}",
+            f"fund_id={scope.fund_id}",
+            f"book_id={scope.book_id}",
+            f"order_mode={USER_PAPER_ORDER_MODE}",
+        )
+    )
+
+
+@dataclass(frozen=True)
 class WorkflowScopeReferences:
     """Task IDs declared by machine-readable workflow metadata/comments."""
 
@@ -529,6 +600,7 @@ def build_root_body(
     workflow_mode: str = "analysis",
     mandate: Mapping[str, Any] | None = None,
     requested_by: str | None = None,
+    user_paper_order_scope: UserPaperOrderScope | None = None,
     discord_channel_id: str | None = None,
     discord_message_id: str | None = None,
     discord_guild_id: str | None = None,
@@ -546,6 +618,10 @@ def build_root_body(
     이력을 서버에서 걸러낼 수 있다. 없으면 줄 자체를 넣지 않는다 - "요청자
     불명"을 임의 기본값으로 채우지 않는다(개발 원칙 9).
 
+    `user_paper_order_scope`는 인증된 PAPER 주문의 request/Fund/Book 및 원문 해시를
+    root에 고정한다. Discord 상관관계와 독립된 권한 블록이므로 두 값이 함께 있을
+    때도 어느 한쪽이 다른 쪽을 덮어쓰지 않는다.
+
     `discord_*`(2026-08-18 추가)는 이 질의를 Discord 채널에 미러 게시했을 때 그
     메시지의 좌표다. 채워지면 `discord_channel_id=` / `discord_message_id=` 줄이
     실리고, `orchestration/discord_delivery.py`의 `correlation_from_task()`가 그
@@ -562,6 +638,11 @@ def build_root_body(
     if workflow_mode not in WORKFLOW_MODES:
         raise ValueError("workflow_mode must be analysis or binding")
     requested_by_line = f"requested_by={requested_by}\n" if requested_by else ""
+    paper_order_block = (
+        build_user_paper_order_scope(user_paper_order_scope) + "\n"
+        if user_paper_order_scope is not None
+        else ""
+    )
     # channel과 message는 **둘 다** 있어야 의미가 있다(`deliver()`가 둘 다 요구).
     # 하나만 싣으면 "좌표가 있는 것처럼 보이는데 발송은 안 되는" 카드가 된다.
     discord_lines = ""
@@ -585,6 +666,7 @@ def build_root_body(
         f"request_id={request_id}\n"
         f"workflow_mode={workflow_mode}\n"
         f"{requested_by_line}"
+        f"{paper_order_block}"
         f"{discord_lines}"
         "response_plane=primary_results_ready\n"
         "governance_plane=async_qa\n"
@@ -840,7 +922,10 @@ __all__ = [
     "CONTINUOUS_RESEARCH_MARKER",
     "CONTINUOUS_RESEARCH_PLANE",
     "PRIMARY_SELECTION_FIELD",
+    "USER_PAPER_ORDER_MODE",
+    "USER_PAPER_ORDER_SCOPE_MARKER",
     "WORKFLOW_MODES",
+    "UserPaperOrderScope",
     "workflow_root_from_body",
     "workflow_role_from_body",
     "is_user_query_body",
@@ -853,6 +938,7 @@ __all__ = [
     "build_root_body",
     "build_root_comment",
     "build_scoped_task_body",
+    "build_user_paper_order_scope",
     "extract_scope_references",
     "infer_workflow_mode",
     "mandate_snapshot_present",
@@ -860,6 +946,7 @@ __all__ = [
     "requested_by_from_body",
     "selected_primary_profiles_from_body",
     "selected_primary_profiles_from_task",
+    "user_paper_order_scope_from_body",
     "validate_workflow_scope",
     "workflow_mode_from_body",
 ]

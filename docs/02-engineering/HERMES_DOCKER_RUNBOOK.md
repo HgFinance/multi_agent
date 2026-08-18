@@ -32,7 +32,8 @@ compose 프로젝트 hedgefund
 │     적용되고, 여러 부서 데이터를 한 컨테이너에서 다루는 Dashboard는 예외다
 │     (**조회 전용이 아니다** — RW 콘솔이라 접근은 Tailscale 사설망으로만 연다)
 ├── research-api / market-api      ← 부서 읽기 전용 조회면
-├── batch-collectors / ls-realtime / news-watcher / ls-news
+├── batch-collectors / ls-realtime  ← 시장데이터 전용
+├── research-mcp / research-liaison-mcp  ← 비시장 정보 요청형·비영속 조회
 └── timescaledb
 
 각 컨테이너: /home/ubuntu/.hermes/profiles/<부서>  →  /opt/data
@@ -281,6 +282,40 @@ BFF command도 `gateway run`이 아니다. 따라서 BFF 재생성으로 CEO gat
 `CEO_HERMES_API_KEY`는 `.env` 또는 AWS secret injection으로만 주입한다. API
 Server가 이 키 없이 기동되지 않도록 Hermes의 최소 16자 인증 조건을 유지한다.
 root Kanban create가 실패하면 BFF는 CEO API를 호출하지 않고 503을 반환한다.
+
+## 4-1-c. 사용자 자연어 주문의 PAPER 전용 Hermes 경계
+
+명시적인 사용자 주문은 `portfolio-bff -> CEO root Kanban -> pre-created
+Trading primary -> Trading Hermes -> paper-order-orchestrator-mcp -> trading-api`
+순서로만 처리한다. `paper-order-orchestrator-mcp`는 호스트 포트를 공개하지 않고
+Compose 내부 `8046/mcp`에서 정확히 한 개의 도구
+`process_user_paper_order`만 제공한다. Trading Hermes의 출력은 비구속 해석이며,
+이 서비스가 원문 해시·Kanban scope·사용자/Fund/Book binding을 다시 검증한 뒤에만
+기존 PAPER directive admission을 호출한다. LIVE 전환 경로는 없다.
+
+`MCP_TRADING_ORDER_API_KEY`는 `.env` 또는 AWS secret injection으로 주입하는
+별도의 무작위 값이다. printable ASCII 32바이트 이상이어야 하며 placeholder,
+공백, 단일 문자 반복 값은 서버 기동 시 거부된다. 같은 값은 MCP 서버,
+`kanban-dispatcher`, `trading-hermes`에만 전달한다. `DATABASE_URL`과
+`TRADING_SERVICE_AUTH_SECRET`은 MCP 서버에만 남고 Hermes/dispatcher에는 전달하지
+않는다. 키를 만들 때는 예를 들어 `openssl rand -hex 32`를 사용한다.
+
+Profile 변경을 먼저 동기화한 뒤 Compose를 검증하고 기동한다.
+
+```bash
+./scripts/sync_hermes_profiles.sh push
+docker compose config --quiet
+docker compose up -d paper-order-orchestrator-mcp trading-api \
+  trading-directive-worker trading-outbox-relay accounting-ledger-consumer \
+  trading-hermes kanban-dispatcher portfolio-bff
+docker compose logs --tail=100 paper-order-orchestrator-mcp kanban-dispatcher
+```
+
+MCP readiness는 단순 TCP가 아니라 MCP key, `svc_order_orchestrator` DB role과 016
+테이블, shared Kanban DB, Trading `/health/ready`를 모두 확인한다. Trading API가
+healthy해진 뒤 MCP가 healthy가 되고, 그 전에는 dispatcher와 Trading Hermes가
+시작되지 않는 것이 정상적인 fail-closed 동작이다. 주문 완료는 broker fill만으로
+판단하지 않고 Accounting ACK가 기록될 때까지 `ACCOUNTING_PENDING`으로 남긴다.
 
 ## 4-2. 다른 본부를 추가하는 법 (9번째 본부가 생길 때만 — 현재 8개가 이미 있다)
 

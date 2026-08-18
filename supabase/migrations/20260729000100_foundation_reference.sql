@@ -1,5 +1,27 @@
 begin;
 
+-- Hosted Supabase Auth is an external identity provider in production.  The
+-- private control database therefore has no auth schema/bootstrap.  Keep the
+-- historical PostgREST grant targets as inert NOLOGIN compatibility roles so
+-- the same migration chain can be replayed on an empty ordinary PostgreSQL
+-- cluster; applications never receive credentials for these roles.
+do $external_auth_compatibility_roles$
+begin
+  if not exists (select 1 from pg_roles where rolname = 'anon') then
+    create role anon nologin noinherit nosuperuser nocreatedb nocreaterole
+      noreplication nobypassrls;
+  end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticated') then
+    create role authenticated nologin noinherit nosuperuser nocreatedb
+      nocreaterole noreplication nobypassrls;
+  end if;
+  if not exists (select 1 from pg_roles where rolname = 'service_role') then
+    create role service_role nologin noinherit nosuperuser nocreatedb
+      nocreaterole noreplication nobypassrls;
+  end if;
+end
+$external_auth_compatibility_roles$;
+
 create schema if not exists extensions;
 create extension if not exists pgcrypto with schema extensions;
 create extension if not exists vector with schema extensions;
@@ -78,7 +100,10 @@ create table accounting.books (
 );
 
 create table governance.user_profiles (
-  user_id uuid primary key references auth.users(id) on delete cascade,
+  -- Hosted Supabase Auth is external to the private control DB.  The verified
+  -- JWT sub is projected here by portfolio-bff, so a fresh ordinary Postgres
+  -- bootstrap must not require Supabase's private auth schema to exist.
+  user_id uuid primary key,
   display_name text not null,
   timezone text not null default 'Asia/Seoul',
   status text not null default 'ACTIVE'

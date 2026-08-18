@@ -114,25 +114,22 @@ PBO 성립 하한**이기도 하다(`pbo_cscv.MIN_VARIANTS = 4`) — 예산을 �
 | **`collectors/ls_unified_parser.py`** | LS 통합시세(US3/UH1) 파서. KRX+NXT 한 소켓, 수신 시각 3종 보존 | 이식 완료, **호출처 0건** |
 | **`collectors/import_external_microstructure.py`** | 외부 프로젝트 호가·체결 이관. PIT 없는 구간을 `market.pit_provenance` 에 `NONE` 으로 못박는다 | 72거래일 이관 진행 |
 | `contracts/market_events.py` | 정규 Market Event 계약 — `instrument_id`, 시각 규칙, `MarketTick`/`MarketQuote`, 멱등 `source_event_id`, Quarantine, Event Envelope | Sprint J0 완료 |
-| `collectors/source_registry.py` | 수집 Source 카탈로그와 API Key 확보 상태 판정, 라이선스 Scope 강제 | Sprint J1 기반 완료 |
+| `collectors/source_registry.py` | 시장 Source와 요청형 MCP Source 카탈로그, API Key 상태 판정과 라이선스 Scope 강제 | Sprint J1 기반 완료 |
 | `collectors/subscription_plan.py` | 종목별 실시간 구독 계획. 18개 TR 매트릭스(주식·선물·옵션 / 국내·해외), 범위 Gate, Universe 정의 | Sprint J1 기반 완료 |
 | `collectors/ls_client.py` | LS OAuth·REST 종목 Master와 영구 Instrument Mapping 주입 경계 | Sprint J1 완료 |
 | `collectors/ls_realtime_adapter.py` | 국내 주식 체결·호가 Payload를 공통 Market Event로 정규화 | Sprint J1 완료 |
-| `collectors/{opendart_collector,opendart_financial,corporate_action_collector}.py` | 공시·재무·Corporate Action 수집과 PIT 보존 | Sprint J2 Prototype |
-| `collectors/{macro_collector,calendar_collector,market_breadth_collector}.py` | 거시·관측 Calendar·시장 Breadth와 DQ | Sprint J2 Prototype |
-| `collectors/naver_news_collector.py`, `contracts/news_events.py` | 국내 뉴스 REST Polling을 공통 Push Stream 계약으로 제공 | P0 Prototype |
-| `collectors/alpaca_news_collector.py` | 해외 뉴스와 일부 KRX 상장사 연결 | P1 보조 Source |
-| X Filtered Stream Collector·승인 계정 Registry | 유명 투자자·정책 당국자·기업·산업 전문가의 공개 Post를 종목·주제에 연결 | P1 계획, 미구현 |
-| `collectors/news.py` | Tavily 뉴스 조회 Baseline. 탐색 전용이며 본문을 Storage·pgvector에 적재하지 않는다 | Baseline |
+| `api/external_sources.py`, `api/external_macro.py` | 공시·재무·뉴스·웹·거시를 Hermes가 필요할 때만 MCP로 조회. 상주 수집·DB 적재 없음 | 운영 경계 |
+| `collectors/{calendar_collector,market_breadth_collector}.py` | 거래일 관측 Calendar·시장 Breadth와 DQ | 시장 데이터 전용 |
 | `repository/market_repository.py` | `MarketDataRepository` 인터페이스 + `InMemory`/`Timescale` 두 구현 | Sprint J0 완료 |
-| `repository/reference_repository.py` | Supabase Instrument·Issuer·Document·재무·거시·CA Repository | Sprint J2 Prototype |
+| `repository/reference_repository.py` | 레거시 Reference·Document·재무·거시 Repository 메서드. 비시장 writer는 Runtime Collector가 호출하지 않음 | 감사·마이그레이션 호환 |
 | `collectors/ls_realtime_service.py` | 전 종목 LS WebSocket, 4 Socket 구독과 Timescale 적재 Runtime | Docker 실행 확인 |
-| `collectors/collector_scheduler.py` | 공시·거시·Reference·Archive Batch Schedule | Docker 실행 확인 |
+| `collectors/collector_scheduler.py` | 시세·가격·거래가능성·시장 DQ·Archive만 실행하는 Batch Schedule | Docker 실행 확인 |
 | `api/market_api.py`, `api/main.py` | Snapshot·Bar·Breadth·DQ·Regime·Microstructure와 Evidence 조회 | Docker 실행 확인 |
 | `api/mcp_server.py`, `api/tool_gateway.py` | Hermes Tool 호출면, 허용 경로 강제와 Bearer 인증 | `research-mcp` Docker 실행 확인 |
-| `agents/`, `evidence/`, `scripts.py` | 종목분석가 편제(유니버스·마이크로구조·기술·펀더멘털·뉴스·국면·지정학)와 Research Packet Pipeline v2 | **운영 은퇴.** 감사 계보로 코드만 남기고 어느 부서도 소비하지 않는다 |
+| `agents/`, `scripts.py` | 종목분석가 편제와 Research Packet Pipeline v2 | **운영 은퇴.** 감사 계보로만 보존하며 Runtime 이미지에 넣지 않는다 |
+| `evidence/` | 시장 가격 context와 결정론 Evidence helper. 문서·뉴스 DB 번들은 레거시 | 요청형 뉴스·공시는 `api/external_sources.py`가 담당 |
 | `collectors/derivatives_collector.py` | KOSPI200 선물·옵션·Greeks Snapshot 수집 | 실제 적재 3,910건 확인 |
-| `collectors/research_data_steward.py` | Research Source 전체의 실행·신선도·DQ Gate | `collector_runs` 367건, 실패 11건 분류 필요 |
+| `collectors/market_data_steward.py` | 시장 데이터 실행·신선도·DQ Gate | 시장 데이터 전용 |
 | `collectors/market_archive_exporter.py`, `replay_restore_drill.py` | 검증된 Parquet Archive와 복구 Drill | 자체 점검·팀 가이드 증거 존재 |
 
 남은 핵심 (2026-08-10 기준, 공장 관점에서 다시 매긴 순서):
@@ -211,7 +208,7 @@ LSE TugOfWar, Oxford ORA, arXiv 1312.0514 — 링크 전부 HTTP 200 확인).
 ## 실행법
 
 ```bash
-research-department chat -q 'Build a Research Packet for AAPL'
+research-department chat -q '시장 미시구조로 검증 가능한 경제적 가설과 typed AST 후보를 제안해줘'
 
 # 로컬 시장 시계열 DB (compose 프로젝트 hedgefund, 호스트 포트 5434)
 docker compose up -d
@@ -223,8 +220,9 @@ docker compose exec -T timescaledb psql -U postgres -d market -v ON_ERROR_STOP=1
 docker compose exec -T timescaledb psql -U postgres -d market -v ON_ERROR_STOP=1 \
   < timescaledb/migrations/001_initial_market_data.sql
 
-# 뉴스 조회 (TAVILY_API_KEY 필요)
-python departments/01-research/collectors/news.py '삼성전자 주가'
+# 요청형 외부 정보 MCP 도구 자체 점검 (외부 호출·DB 적재 없음)
+python departments/01-research/api/external_sources.py
+python departments/01-research/api/external_macro.py
 ```
 
 마이그레이션은 멱등하지 않다 — `create table`에 `if not exists`가 없어 비어 있지 않은 DB에
@@ -237,7 +235,7 @@ python departments/01-research/contracts/market_events.py       # 계약 6개 �
 python departments/01-research/collectors/source_registry.py    # Registry 6개 영역 + 현황 리포트
 python departments/01-research/collectors/subscription_plan.py   # 구독 계획 6개 영역 + Universe 가용성
 python departments/01-research/collectors/ls_realtime_adapter.py # 체결·호가 정규화
-python departments/01-research/contracts/news_events.py          # Polling/WebSocket 공통 Stream 계약
+python departments/01-research/collectors/collector_scheduler.py --check # 시장 데이터 전용 Job 경계
 python departments/01-research/collectors/market_breadth_collector.py # Breadth·DQ
 python departments/01-research/repository/market_repository.py   # Repository 계약 (DB 없이)
 python departments/01-research/repository/market_repository.py --integration  # 실제 TimescaleDB
@@ -249,18 +247,17 @@ Raw Table은 append-only(마이그레이션의 `market.reject_raw_mutation()` �
 데이터를 지울 수 없다. 그래서 실행마다 `instrument_id`와 `provider_symbol`을 새로 만들어
 격리하며, 그 덕에 반복 실행이 가능하다. 불변식이 살아 있는지도 점검 항목에 포함된다.
 
-`collectors/news.py`는 외부 API를 호출하므로 자체 점검 스크립트가 없다.
+뉴스·공시·재무·거시·소셜 정보는 상주 수집기가 아니라 Research MCP 요청 시점에만
+조회한다. 조회 결과를 운영 DB의 장기 수집 테이블로 적재하지 않는다.
 
 ## Handoff
 
 - 수집 Source의 API Key 확보 상태는 `source_registry.py`의 리포트가 기준이다. 키가 없는
   Source를 호출하면 예외가 나며, 빈 결과를 정상으로 취급하지 않는다
-- 2026-07-31 기준 국내 뉴스 P0는 NAVER로 열려 있다. BIGKinds는 비용 대비 필요성이 확인될
-  때까지 `DISABLED`이며 키가 생겨도 자동 활성화하지 않는다. P0 Blocked Domain은 미래 거래일을
-  제공할 승인된 Source가 없는 `CALENDAR`다
-- X의 "팔로우"는 자동 Follow가 아니라 내부 승인 Watchlist다. 공식 X API의 `from:` Filter Rule을
-  사용하고, Post는 `UNVERIFIED_SOCIAL`로 시작해 공시·독립 뉴스·시장 데이터로 교차 검증되기 전에는
-  Order Intent 또는 Strategy 승격의 단독 근거로 사용하지 않는다
+- NAVER·DART·ECOS·FRED·Tavily 등의 키는 Research MCP에만 주입한다. Collector Scheduler나
+  `ls-realtime`에는 주입하지 않으며, 정보 조회 결과는 주문·전략 승격의 단독 근거가 될 수 없다
+- 뉴스·소셜·공시·거시 정보는 MCP가 원출처와 조회 시각을 동봉해 요청형으로 반환한다.
+  시장 데이터 수집 경로로 되돌리려면 별도 계약·저장용량·PIT 검토와 명시적 승인이 필요하다
 - **해외주식·파생 수집은 ADR 승인 대기 중이다.** TR은 확인됐고 코드 구조도 준비됐지만
   [HEDGE_FUND_CORE_PLAN.md](../../docs/01-product/HEDGE_FUND_CORE_PLAN.md)가 "단일 주식시장"을
   전제하므로 `build_plan(approved_scopes=...)`에 명시하지 않으면 계획 생성이 거부된다

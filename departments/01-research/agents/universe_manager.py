@@ -184,11 +184,11 @@ def run(client=None, basket: tuple[str, ...] = (),
     """
     import os
 
-    from news_watch_service import parse_watchlist_file
+    from symbol_universe import parse_symbol_file
 
     if not basket:
-        wl = Path(__file__).resolve().parent.parent / "config" / "news_watchlist.txt"
-        basket = parse_watchlist_file(wl.read_text(encoding="utf-8"))
+        wl = Path(__file__).resolve().parent.parent / "config" / "full_universe.txt"
+        basket = parse_symbol_file(wl.read_text(encoding="utf-8"))
 
     if client is not None:      # 옛 경로 - LS 직접(자체 점검·긴급 수동용)
         restricted = {reason: fetch_restricted(client, tr, jong)

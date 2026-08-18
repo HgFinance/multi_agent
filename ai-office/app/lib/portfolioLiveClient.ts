@@ -11,8 +11,7 @@
  * 화면이 "비공식" 배지로 그대로 드러낸다.
  */
 
-import { BFF } from "./ceoClient";
-import { withAccountHeaders } from "./currentAccount";
+import { BFF, bffFetch } from "./bffClient";
 
 /** 주문 생명주기. 화면 순서도 이 순서다. */
 export const ORDER_KINDS = ["ACCEPTED", "FILLED", "AMENDED", "CANCELLED", "REJECTED"] as const;
@@ -158,9 +157,9 @@ function hasLiveShape(value: unknown): value is PortfolioLive {
 export async function fetchPortfolioLive(limit = 50): Promise<PortfolioLive> {
   let response: Response;
   try {
-    response = await fetch(`${BFF}/ui/portfolio/live?limit=${limit}`, {
+    response = await bffFetch(`/ui/portfolio/live?limit=${limit}`, {
       cache: "no-store",
-      headers: withAccountHeaders({ Accept: "application/json" }),
+      headers: { Accept: "application/json" },
     });
   } catch {
     throw new PortfolioLiveError(

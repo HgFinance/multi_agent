@@ -50,6 +50,7 @@ from orchestration.ceo_workflow_scope import (
     mandate_snapshot_present,
     primary_idempotency_key,
     selected_primary_profiles_from_task,
+    user_paper_order_scope_from_body,
     validate_workflow_scope,
     workflow_mode_from_body,
     workflow_role_from_body,
@@ -1842,6 +1843,9 @@ class CeoSupervisorService:
                         descendants=payloads,
                     )
                     workflow_mode = workflow_mode_from_body(root_body)
+                    user_paper_order_scope = user_paper_order_scope_from_body(
+                        root_body
+                    )
                 except WorkflowScopeViolation as exc:
                     reason = f"workflow_scope_validation: {exc}"
                     comment_task = getattr(self.client, "comment_task", None)
@@ -1986,7 +1990,14 @@ class CeoSupervisorService:
                     replan_count=max(self._replans.get(root_id, 0), durable_replans),
                     max_retries=self.max_retries,
                     max_wakeups=self.max_wakeups,
-                    qa_required=self._qa_required_from_event(event),
+                    # The precreated Trading primary owns strict PAPER-order
+                    # interpretation/tool execution; strategy QA is not an
+                    # execution gate for this direct-user lane.
+                    qa_required=(
+                        False
+                        if user_paper_order_scope is not None
+                        else self._qa_required_from_event(event)
+                    ),
                     workflow_mode=workflow_mode,
                     has_mandate=mandate_snapshot_present(root_body),
                     selected_primary_profiles=selected_profiles,

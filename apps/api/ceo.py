@@ -26,8 +26,18 @@ try:
         list_ceo_roots,
         load_workflow,
     )
-    from .current_user import optional_current_user
+    from .current_user import (
+        current_user,
+        optional_current_user,
+        require_trading_book_access,
+    )
     from .governance_client import fetch_current_mandate_by_fund
+    from .user_order_workflow import (
+        UserOrderRequestConflict,
+        UserOrderWorkflowUnavailable,
+        raw_instruction_sha256,
+        user_order_repository,
+    )
     from .ceo_schemas import (
         CeoPlanning,
         GraphNode,
@@ -52,8 +62,18 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
         list_ceo_roots,
         load_workflow,
     )
-    from current_user import optional_current_user  # type: ignore[no-redef]
+    from current_user import (  # type: ignore[no-redef]
+        current_user,
+        optional_current_user,
+        require_trading_book_access,
+    )
     from governance_client import fetch_current_mandate_by_fund  # type: ignore[no-redef]
+    from user_order_workflow import (  # type: ignore[no-redef]
+        UserOrderRequestConflict,
+        UserOrderWorkflowUnavailable,
+        raw_instruction_sha256,
+        user_order_repository,
+    )
     from ceo_schemas import (  # type: ignore[no-redef]
         CeoPlanning,
         GraphNode,
@@ -75,10 +95,18 @@ from orchestration.canonical_profiles import (
     canonical_profile_for_department,
 )
 from orchestration.ceo_workflow_scope import (
+    UserPaperOrderScope,
     build_root_body,
+    build_scoped_task_body,
+    build_user_paper_order_scope,
     infer_workflow_mode,
+    primary_idempotency_key,
     requested_by_from_body,
     selected_primary_profiles_from_task,
+)
+from orchestration.user_order_language import (
+    is_clearly_non_executable_order_language,
+    looks_like_user_order_request,
 )
 
 
@@ -101,6 +129,10 @@ class CeoAsk(hermes_boundary.AgentAsk):
     """
 
     fund_id: str | None = None
+    # Natural-language orders are always PAPER, but authority is still scoped
+    # to one exact Book.  The server never guesses a Book when more than one is
+    # available; the UI may preselect only a sole authorized Book.
+    book_id: str | None = None
 
 
 # Hermes Task ID 형식(`t_` + hex). 경로 파라미터가 CLI 인자로 들어가므로
@@ -114,6 +146,25 @@ _TASK_ID_PATH = Path(
 )
 _LIST_WORKERS = max(1, int(os.getenv("CEO_TASK_LIST_WORKERS", "4")))
 _LIST_GRAPH_WORKERS = max(1, int(os.getenv("CEO_TASK_LIST_GRAPH_WORKERS", "3")))
+
+
+def _user_paper_order_workflow_enabled() -> bool:
+    """Require an explicit opt-in on shared production deployments.
+
+    The legacy EB bundle intentionally has no dispatcher, Trading Hermes, or
+    shared Kanban volume.  Accepting an order there would create an orphaned
+    card that can never reach the verifier.  Local/test stays enabled for
+    focused development; every production-capable Compose must opt in.
+    """
+
+    configured = os.getenv("USER_PAPER_ORDER_WORKFLOW_ENABLED", "").strip().casefold()
+    if configured:
+        return configured in {"1", "true", "yes", "on"}
+    return os.getenv("APP_ENV", "development").strip().casefold() not in {
+        "prod",
+        "production",
+        "staging",
+    }
 
 _PLANNING_SCHEMA_VERSION = "ceo.query-accepted.v2"
 _PRIMARY_PROFILE_ORDER = (
@@ -165,6 +216,26 @@ def _load(task_id: str, *, max_workers: int | None = None) -> Workflow:
         raise HTTPException(status_code=404, detail=f"Task를 찾을 수 없습니다: {task_id}") from exc
     except KanbanUnavailable as exc:
         raise HTTPException(status_code=503, detail=f"Hermes Kanban을 읽지 못했습니다: {exc}") from exc
+
+
+def _require_ceo_task_owner(body: str, authenticated_owner_id: str | None) -> None:
+    """Prevent authenticated users from reading another user's task graph."""
+
+    # Explicit fixture mode may intentionally have no identity. Production JWT
+    # mode can never reach here without one because ``current_user`` is strict.
+    # Direct unit/domain calls see FastAPI's ``Depends`` sentinel rather than a
+    # resolved request identity.  Only a concrete string is an authenticated
+    # subject; HTTP requests always pass the dependency-resolved value.
+    if not isinstance(authenticated_owner_id, str):
+        return
+    if requested_by_from_body(body) != authenticated_owner_id:
+        raise HTTPException(status_code=403, detail="ceo_task_forbidden")
+
+
+def _require_ceo_workflow_owner(
+    workflow: Workflow, authenticated_owner_id: str | None
+) -> None:
+    _require_ceo_task_owner(workflow.root.body, authenticated_owner_id)
 
 
 def _child_records(value: object) -> list[Mapping[str, object]]:
@@ -427,6 +498,275 @@ def _accepted_response(task: Mapping[str, object], planning: Mapping[str, object
     }
 
 
+def _paper_order_accepted_response(
+    *,
+    root_task: Mapping[str, object],
+    trading_task: Mapping[str, object],
+    order_request_id: str,
+) -> dict[str, object]:
+    """Return an explicit asynchronous receipt without claiming an execution."""
+
+    return {
+        "schema_version": _PLANNING_SCHEMA_VERSION,
+        "department": "ceo-agent",
+        "binding": False,
+        "task_id": str(root_task.get("task_id") or root_task.get("id") or ""),
+        "task": dict(root_task),
+        "status": "planned",
+        "answer": (
+            "주문 요청을 Trading Hermes에 배정했습니다. Hermes가 원문을 구조화한 뒤 "
+            "서버 검증을 통과한 요청만 PAPER OMS로 제출합니다. 이 접수 응답 자체는 "
+            "체결 완료를 의미하지 않습니다."
+        ),
+        "planning": {
+            "schema_version": "ceo.planning.v1",
+            "selected_departments": ["trading-department"],
+            "steps": ["Trading Hermes interpretation", "PAPER OMS validation"],
+            "qa_required": False,
+            "summary": "Trading Hermes가 PAPER 주문 원문을 해석하고 있습니다.",
+        },
+        "session_id": None,
+        "order_request_id": order_request_id,
+        "order_state": "KANBAN_QUEUED",
+        "order_mode": "PAPER",
+        "trading_task_id": str(
+            trading_task.get("task_id") or trading_task.get("id") or ""
+        ),
+    }
+
+
+def _paper_order_child_body(
+    *,
+    query: str,
+    scope: UserPaperOrderScope,
+    root_task_id: str,
+    request_id: str,
+    has_mandate: bool,
+) -> str:
+    interpretation_prompt = "\n".join(
+        (
+            "hgfinance.user-paper-order-interpretation.v1",
+            build_user_paper_order_scope(scope),
+            "authority=interpretation_only",
+            "execution_mode=PAPER_ONLY",
+            "mcp_tool=process_user_paper_order",
+            "Interpret the exact user instruction below into the strict tool schema.",
+            "Call process_user_paper_order exactly once with this root/task scope.",
+            "Never invent a symbol, quantity, side, price, explicit order-type evidence, Fund, or Book.",
+            "For one otherwise complete PAPER PLACE_ORDER with no price and no explicit",
+            "market/limit marker, apply the managed omission default: order_type=MARKET,",
+            "limit_price=null, and no ORDER_TYPE evidence. A limit marker without exactly",
+            "one valid price, or conflicting market/limit language, must CLARIFY.",
+            "Questions, examples, negations, conditions, ambiguity, multiple commands,",
+            "and any LIVE/real-account request must not execute.",
+            "The tool result, not your interpretation, is the execution authority.",
+            "",
+            "## Exact user instruction",
+            query,
+        )
+    )
+    return build_scoped_task_body(
+        interpretation_prompt,
+        root_task_id,
+        role="primary",
+        request_id=request_id,
+        workflow_mode="binding",
+        has_mandate=has_mandate,
+    )
+
+
+def _mark_paper_order_failed(
+    repository: object,
+    order_request_id: str,
+    *,
+    error_code: str,
+    error_message: str,
+) -> None:
+    """Best-effort durable failure note; never hide the original boundary error."""
+
+    try:
+        repository.mark_outcome(  # type: ignore[attr-defined]
+            order_request_id,
+            state="FAILED",
+            error_code=error_code,
+            error_message=error_message[:1000],
+        )
+    except Exception:  # noqa: BLE001 - failure recording cannot grant authority.
+        logger.exception(
+            "paper-order failure record unavailable request=%s code=%s",
+            order_request_id,
+            error_code,
+        )
+
+
+def _route_user_paper_order(
+    req: CeoAsk,
+    *,
+    owner_id: str | None,
+    mandate: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """Durably route one possible order to Trading Hermes, always as PAPER."""
+
+    if not isinstance(owner_id, str) or not owner_id.strip():
+        raise HTTPException(status_code=401, detail="portfolio_authentication_required")
+    if not req.fund_id:
+        raise HTTPException(status_code=422, detail="portfolio_fund_id_required")
+    if not req.book_id:
+        raise HTTPException(status_code=422, detail="portfolio_book_id_required")
+    if not _user_paper_order_workflow_enabled():
+        raise HTTPException(
+            status_code=503, detail="paper_order_hermes_runtime_unavailable"
+        )
+
+    # This is admission, not execution. It canonicalizes the authenticated
+    # user/Fund/Book tuple before anything is exposed to Hermes.
+    access = require_trading_book_access(owner_id, req.fund_id, req.book_id)
+    try:
+        repository = user_order_repository()
+        record = repository.admit(
+            user_id=access["user_id"],
+            fund_id=access["fund_id"],
+            book_id=access["book_id"],
+            client_request_id=req.request_id,
+            raw_instruction=req.query,
+        )
+    except UserOrderRequestConflict as exc:
+        raise HTTPException(
+            status_code=409, detail="paper_order_request_id_conflict"
+        ) from exc
+    except UserOrderWorkflowUnavailable as exc:
+        raise HTTPException(
+            status_code=503, detail="paper_order_workflow_unavailable"
+        ) from exc
+
+    scope = UserPaperOrderScope(
+        order_request_id=record.order_request_id,
+        raw_instruction_sha256=record.raw_instruction_sha256,
+        fund_id=record.fund_id,
+        book_id=record.book_id,
+    )
+    root = hermes_boundary.create_kanban_task(
+        assignee=canonical_profile_for_department("ceo"),
+        title=f"사용자 PAPER 주문: {req.query[:100]}",
+        body=build_root_body(
+            req.query,
+            req.request_id,
+            workflow_mode="binding",
+            mandate=mandate,
+            requested_by=access["user_id"],
+            user_paper_order_scope=scope,
+        ),
+        idempotency_key=req.request_id,
+        initial_status="blocked",
+    )
+    if not root or not root.get("task_id"):
+        _mark_paper_order_failed(
+            repository,
+            record.order_request_id,
+            error_code="CEO_ROOT_CREATE_FAILED",
+            error_message="CEO root Kanban task could not be created",
+        )
+        raise HTTPException(status_code=503, detail="paper_order_kanban_unavailable")
+    root_task_id = str(root["task_id"])
+
+    if not hermes_boundary.comment_root_scope(
+        task_id=root_task_id, request_id=req.request_id
+    ):
+        _mark_paper_order_failed(
+            repository,
+            record.order_request_id,
+            error_code="CEO_ROOT_SCOPE_FAILED",
+            error_message="CEO root scope could not be persisted",
+        )
+        raise HTTPException(status_code=503, detail="paper_order_kanban_unavailable")
+
+    try:
+        repository.bind_root(record.order_request_id, root_task_id)
+    except (UserOrderRequestConflict, UserOrderWorkflowUnavailable) as exc:
+        _mark_paper_order_failed(
+            repository,
+            record.order_request_id,
+            error_code="CEO_ROOT_BIND_FAILED",
+            error_message=str(exc),
+        )
+        status = 409 if isinstance(exc, UserOrderRequestConflict) else 503
+        raise HTTPException(
+            status_code=status, detail="paper_order_workflow_unavailable"
+        ) from exc
+
+    trading = hermes_boundary.create_kanban_task(
+        assignee=canonical_profile_for_department("trading"),
+        title="사용자 PAPER 주문 원문 해석 및 검증 제출",
+        body=_paper_order_child_body(
+            query=req.query,
+            scope=scope,
+            root_task_id=root_task_id,
+            request_id=req.request_id,
+            has_mandate=bool(mandate),
+        ),
+        idempotency_key=primary_idempotency_key(
+            root_task_id, "trading-department"
+        ),
+        initial_status="blocked",
+    )
+    if not trading or not trading.get("task_id"):
+        _mark_paper_order_failed(
+            repository,
+            record.order_request_id,
+            error_code="TRADING_TASK_CREATE_FAILED",
+            error_message="Trading Hermes task could not be created",
+        )
+        raise HTTPException(status_code=503, detail="paper_order_kanban_unavailable")
+    trading_task_id = str(trading["task_id"])
+    try:
+        repository.bind_trading_task(record.order_request_id, trading_task_id)
+    except (UserOrderRequestConflict, UserOrderWorkflowUnavailable) as exc:
+        _mark_paper_order_failed(
+            repository,
+            record.order_request_id,
+            error_code="TRADING_TASK_BIND_FAILED",
+            error_message=str(exc),
+        )
+        status = 409 if isinstance(exc, UserOrderRequestConflict) else 503
+        raise HTTPException(
+            status_code=status, detail="paper_order_workflow_unavailable"
+        ) from exc
+
+    # Both cards were created blocked to close the dispatch-before-DB-bind
+    # race. Release the root first (its selected Trading child now exists),
+    # then the interpreter. A failed release cannot turn into an order.
+    if not hermes_boundary.unblock_kanban_task(task_id=root_task_id):
+        _mark_paper_order_failed(
+            repository,
+            record.order_request_id,
+            error_code="CEO_ROOT_RELEASE_FAILED",
+            error_message="CEO root remained blocked after durable binding",
+        )
+        raise HTTPException(status_code=503, detail="paper_order_kanban_unavailable")
+    if not hermes_boundary.unblock_kanban_task(task_id=trading_task_id):
+        _mark_paper_order_failed(
+            repository,
+            record.order_request_id,
+            error_code="TRADING_TASK_RELEASE_FAILED",
+            error_message="Trading task remained blocked after durable binding",
+        )
+        raise HTTPException(status_code=503, detail="paper_order_kanban_unavailable")
+
+    released_root = {**root, "status": "ready"}
+    released_trading = {**trading, "status": "ready"}
+    logger.info(
+        "paper-order-routed request=%s root=%s trading=%s mode=PAPER",
+        record.order_request_id,
+        root_task_id,
+        trading_task_id,
+    )
+    return _paper_order_accepted_response(
+        root_task=released_root,
+        trading_task=released_trading,
+        order_request_id=record.order_request_id,
+    )
+
+
 def ceo_query(
     req: CeoAsk,
     owner_id: str | None = Depends(optional_current_user),
@@ -486,6 +826,15 @@ def ceo_query(
     # `fund_id`가 없다. 속성 부재로 500을 내는 대신 "Mandate 없음"으로 떨어진다.
     fund_id = getattr(req, "fund_id", None)
     mandate = fetch_current_mandate_by_fund(fund_id) if fund_id else None
+
+    if looks_like_user_order_request(
+        req.query
+    ) and not is_clearly_non_executable_order_language(req.query):
+        return _route_user_paper_order(
+            req,
+            owner_id=owner_id if isinstance(owner_id, str) else None,
+            mandate=mandate,
+        )
 
     task = hermes_boundary.create_kanban_task(
         assignee=canonical_profile_for_department("ceo"),
@@ -570,6 +919,7 @@ def ceo_task_list(
     limit: int = Query(default=20, ge=1, le=100),
     include_archived: bool = Query(default=False),
     owner_id: str | None = Query(default=None),
+    authenticated_owner_id: str | None = Depends(current_user),
 ) -> TaskListResponse:
     """계정별 이력 조회. `owner_id`는 반드시 서버가 걸러서 내려준다.
 
@@ -580,6 +930,15 @@ def ceo_task_list(
     """
 
     normalized_owner_id = owner_id.strip() if owner_id and owner_id.strip() else None
+    if (
+        authenticated_owner_id is not None
+        and normalized_owner_id is not None
+        and normalized_owner_id != authenticated_owner_id
+    ):
+        raise HTTPException(status_code=403, detail="ceo_task_owner_mismatch")
+    # A verified identity always controls the server-side filter. The query
+    # value remains only for explicit identity-free local/test fixtures.
+    normalized_owner_id = authenticated_owner_id or normalized_owner_id
     try:
         rows = list_ceo_roots(
             limit=limit, include_archived=include_archived, owner_id=normalized_owner_id
@@ -616,7 +975,10 @@ def ceo_task_list(
 
 
 @router.get("/tasks/{task_id}", operation_id="ceo_task_status", response_model=TaskStatusResponse)
-def ceo_task_status(task_id: str = _TASK_ID_PATH) -> dict[str, object]:
+def ceo_task_status(
+    task_id: str = _TASK_ID_PATH,
+    authenticated_owner_id: str | None = Depends(current_user),
+) -> dict[str, object]:
     """Return the canonical PR #224 status with an additive planning field."""
 
     try:
@@ -629,6 +991,9 @@ def ceo_task_status(task_id: str = _TASK_ID_PATH) -> dict[str, object]:
         raw = hermes_boundary.show_kanban_task(task_id, timeout=_planning_read_timeout())
         if not raw:
             raise
+        _require_ceo_task_owner(
+            str(raw.get("body") or ""), authenticated_owner_id
+        )
         projection = _scoped_planning_projection(raw, timeout=_planning_read_timeout())
         acknowledgement = _planning_acknowledgement(projection)
         selected = acknowledgement["planning"]["selected_departments"]
@@ -657,6 +1022,7 @@ def ceo_task_status(task_id: str = _TASK_ID_PATH) -> dict[str, object]:
             },
             "planning": acknowledgement["planning"],
         }
+    _require_ceo_workflow_owner(workflow, authenticated_owner_id)
     payload = _status_payload(workflow)
     try:
         raw = hermes_boundary.show_kanban_task(task_id, timeout=_planning_read_timeout())
@@ -670,8 +1036,12 @@ def ceo_task_status(task_id: str = _TASK_ID_PATH) -> dict[str, object]:
 
 
 @router.get("/tasks/{task_id}/graph", operation_id="ceo_task_graph", response_model=TaskGraphResponse)
-def ceo_task_graph(task_id: str = _TASK_ID_PATH) -> TaskGraphResponse:
+def ceo_task_graph(
+    task_id: str = _TASK_ID_PATH,
+    authenticated_owner_id: str | None = Depends(current_user),
+) -> TaskGraphResponse:
     workflow = _load(task_id)
+    _require_ceo_workflow_owner(workflow, authenticated_owner_id)
     return TaskGraphResponse(
         root=workflow.root_task_id,
         nodes=[
@@ -689,8 +1059,12 @@ def ceo_task_graph(task_id: str = _TASK_ID_PATH) -> TaskGraphResponse:
 
 
 @router.get("/tasks/{task_id}/result", response_model=TaskResultResponse)
-def ceo_task_result(task_id: str = _TASK_ID_PATH) -> TaskResultResponse:
+def ceo_task_result(
+    task_id: str = _TASK_ID_PATH,
+    authenticated_owner_id: str | None = Depends(current_user),
+) -> TaskResultResponse:
     workflow = _load(task_id)
+    _require_ceo_workflow_owner(workflow, authenticated_owner_id)
     synthesis = workflow.synthesis_node
     terminal = workflow.status in {"completed", "blocked", "failed", "archived"}
     result = None
@@ -724,8 +1098,12 @@ def ceo_task_result(task_id: str = _TASK_ID_PATH) -> TaskResultResponse:
 
 
 @router.post("/tasks/{task_id}/archive", response_model=TaskArchiveResponse)
-def ceo_task_archive(task_id: str = _TASK_ID_PATH) -> TaskArchiveResponse:
+def ceo_task_archive(
+    task_id: str = _TASK_ID_PATH,
+    authenticated_owner_id: str | None = Depends(current_user),
+) -> TaskArchiveResponse:
     workflow = _load(task_id)
+    _require_ceo_workflow_owner(workflow, authenticated_owner_id)
     target_ids = [node.task_id for node in workflow.descendants]
     target_ids.append(workflow.root_task_id)
     try:

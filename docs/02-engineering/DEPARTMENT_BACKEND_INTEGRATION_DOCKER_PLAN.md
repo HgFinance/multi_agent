@@ -292,7 +292,7 @@ DB 권한:
 | `research-hermes` | 조사 계획, Evidence 요약, Research Packet 초안 |
 | `*-mcp` (조회면) | 공시원문·거시·지정학을 **요청 시 조회**. 선적재하지 않는다 |
 
-현재 `ls-realtime`, `news-watcher`, `batch-collectors`, `research-api`를 유지하며 목표 이름으로 단계적으로 이동한다.
+현재 상주 수집 Runtime은 `ls-realtime`과 시장 데이터 전용 `batch-collectors`로 제한한다. 뉴스·공시·재무·거시·소셜은 `research-mcp`가 요청 시 조회하며 장기 수집하지 않는다. `news-watcher`와 `ls-news`는 Compose에서 제거됐다.
 
 #### 6.2.1 선적재 → 요청시 조회 전환 (2026-08-12, 재일님 결정)
 
@@ -304,10 +304,10 @@ DB 권한:
 | 공시 원문·첨부 | `document-archive` Job이 매일 ZIP 적재 | **MCP 요청시 조회** | 원문이 안 들어오면 `evidence_chunks`(586MB, DB의 63%)도 안 늘어난다 |
 | 거시 (FRED·ECOS·KOSIS) | `macro` Job 매일 07:30 | **MCP 조회 → 점수 팩터** | 원계열 대신 점수만 적재 |
 | 지정학 (GPR·GDELT) | `geopolitical` Job 매일 07:20 | **MCP 조회 → 점수 팩터** | 120일 창을 매일 다시 쌓지 않는다 |
-| 공시 **목록** | `disclosure` Job 10분 주기 | **그대로 유지** | 장중 감지라 실시간성이 있다 |
-| 재무·현금흐름 | `financial`·`cashflow` Job | **그대로 유지** | F-Score 8/9·Altman Z(정량 축)가 그 위에 있다 |
+| 공시 **목록** | `disclosure` Job 10분 주기 | **MCP 요청시 조회** | 상주 수집과 운영 DB 증가는 중단한다 |
+| 재무·현금흐름 | `financial`·`cashflow` Job | **MCP 요청시 조회** | 원출처·조회 시각을 동봉하고 백테스트 입력과 격리한다 |
 
-전환 후 리서치본부가 **선적재하는 범위**는 시세·공시목록·재무·Reference·CA로 좁아진다.
+전환 후 리서치본부가 **선적재하는 범위**는 시세·가격·거래가능성·시장 Calendar·시장 DQ로 좁아진다.
 정성 재료는 적재하지 않고 **점수와 인용 좌표만** 남긴다 —
 상세 기준은 [정성 팩터 명세](QUALITATIVE_FACTOR_SPEC.md).
 

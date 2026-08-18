@@ -19,13 +19,33 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
+from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "contracts"))
 
-from contracts import LOT_SIZE as QTY_UNIT
-from contracts import OrderType, Side, is_valid_tick, tick_size
+try:  # package import from the directive worker/API
+    from contracts.contracts import LOT_SIZE as QTY_UNIT
+    from contracts.contracts import OrderType, Side, is_valid_tick, tick_size
+except ImportError:  # direct script execution
+    from contracts import LOT_SIZE as QTY_UNIT
+    from contracts import OrderType, Side, is_valid_tick, tick_size
+try:
+    from .paper_policy import (
+        DEFAULT_FEE_BPS,
+        DEFAULT_MAX_PARTICIPATION,
+        DEFAULT_SELL_TAX_BPS,
+        fill_costs,
+        participation_cap,
+    )
+except ImportError:  # direct script execution
+    from paper_policy import (
+        DEFAULT_FEE_BPS,
+        DEFAULT_MAX_PARTICIPATION,
+        DEFAULT_SELL_TAX_BPS,
+        fill_costs,
+        participation_cap,
+    )
 
 WON = Decimal(1)
 
@@ -61,8 +81,9 @@ class PaperBroker:
               쌓이면 그 분포로 교정한다. Paper 단계 검증에는 충분하다.
     """
 
-    def __init__(self, fee_bps: Decimal = Decimal("1.5"), sell_tax_bps: Decimal = Decimal(15),
-                 max_participation: Decimal = Decimal("0.05")) -> None:
+    def __init__(self, fee_bps: Decimal = DEFAULT_FEE_BPS,
+                 sell_tax_bps: Decimal = DEFAULT_SELL_TAX_BPS,
+                 max_participation: Decimal = DEFAULT_MAX_PARTICIPATION) -> None:
         # 기본값은 departments/02-trading/contracts/philosophies.yaml의 market 블록과 같은 값이다.
         self.fee_bps = fee_bps
         self.sell_tax_bps = sell_tax_bps
@@ -113,17 +134,19 @@ class PaperBroker:
         if not crossed:
             return None  # 가격 미도달. 미체결로 남는다 - 추정 체결 금지
 
-        cap = (available * self.max_participation).quantize(QTY_UNIT, rounding=ROUND_DOWN)
-        qty = min(leaves, max(cap, QTY_UNIT))
+        cap = participation_cap(
+            available, QTY_UNIT, max_participation=self.max_participation
+        )
+        qty = min(leaves, cap)
         if qty <= 0:
             return None
 
-        notional = qty * exec_price
-        fee = (notional * self.fee_bps / 10000).quantize(WON, rounding=ROUND_HALF_UP)
-        tax = (
-            (notional * self.sell_tax_bps / 10000).quantize(WON, rounding=ROUND_HALF_UP)
-            if order.side is Side.SELL
-            else Decimal(0)
+        fee, tax = fill_costs(
+            qty,
+            exec_price,
+            str(order.side),
+            fee_bps=self.fee_bps,
+            sell_tax_bps=self.sell_tax_bps,
         )
 
         return BrokerEvent(

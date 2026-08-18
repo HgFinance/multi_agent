@@ -17,7 +17,6 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_POLICY_CORPUS = ROOT / "skills" / "agentic-rag" / "corpus" / "compliance"
 DATABASE_ENV_NAMES: tuple[str, ...] = ("RISK_QA_DATABASE_URL", "DATABASE_URL")
 
 REQUIRED_TABLES: tuple[tuple[str, str], ...] = (
@@ -31,8 +30,6 @@ REQUIRED_TABLES: tuple[tuple[str, str], ...] = (
     ("risk", "limits"),
     ("risk", "trading_states"),
     ("risk", "risk_decisions"),
-    ("research", "documents"),
-    ("research", "evidence_chunks"),
     ("workforce", "agent_profiles"),
     ("workforce", "agent_profile_versions"),
     ("audit", "agent_runs"),
@@ -59,6 +56,7 @@ REQUIRED_FLAGS: tuple[str, ...] = (
     "QA_TRACE_PERSIST",
     "QA_INCIDENT_PERSIST",
     "QA_INGEST_MODE",
+    "QA_ENABLE_LEGACY_EVIDENCE_INGESTION",
     "RISK_REQUIRE_P1_ANALYTICS",
     "RISK_CONTEXT_SOURCE",
     "RISK_BROKER_ADAPTER",
@@ -98,50 +96,6 @@ def _check(
     return result
 
 
-def _policy_corpus(environ: Mapping[str, str]) -> Path:
-    configured = environ.get("QA_POLICY_CORPUS_DIR", "").strip()
-    return (
-        Path(configured).expanduser().resolve() if configured else DEFAULT_POLICY_CORPUS
-    )
-
-
-def _check_policy_corpus(environ: Mapping[str, str]) -> dict[str, Any]:
-    directory = _policy_corpus(environ)
-    paths = tuple(sorted(path for path in directory.glob("*.md") if path.is_file()))
-    placeholder_count = 0
-    for path in paths:
-        try:
-            if b"SAMPLE_PLACEHOLDER" in path.read_bytes():
-                placeholder_count += 1
-        except OSError:
-            return _check("qa_policy_corpus", "FAIL", reason="CORPUS_READ_FAILED")
-    if not paths:
-        return _check(
-            "qa_policy_corpus",
-            "FAIL",
-            reason="NO_POLICY_DOCUMENTS",
-            directory=str(directory),
-            document_count=0,
-            placeholder_count=0,
-        )
-    if placeholder_count:
-        return _check(
-            "qa_policy_corpus",
-            "FAIL",
-            reason="PLACEHOLDER_POLICY_DOCUMENTS",
-            directory=str(directory),
-            document_count=len(paths),
-            placeholder_count=placeholder_count,
-        )
-    return _check(
-        "qa_policy_corpus",
-        "PASS",
-        directory=str(directory),
-        document_count=len(paths),
-        placeholder_count=0,
-    )
-
-
 def _check_configuration(environ: Mapping[str, str]) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     database_env, _ = _database_dsn(environ)
@@ -154,7 +108,7 @@ def _check_configuration(environ: Mapping[str, str]) -> list[dict[str, Any]]:
             configured_env=database_env or None,
         )
     )
-    required_values = ("QA_POLICY_SOURCE_ID", "OPENAI_API_KEY", *SERVICE_AUTH_ENV_NAMES)
+    required_values = SERVICE_AUTH_ENV_NAMES
     for name in required_values:
         checks.append(
             _check(
@@ -219,7 +173,8 @@ def _check_configuration(environ: Mapping[str, str]) -> list[dict[str, Any]]:
         "QA_CHECK_CONTRACT_APPROVED": "true",
         "QA_TRACE_PERSIST": "true",
         "QA_INCIDENT_PERSIST": "true",
-        "QA_INGEST_MODE": "production",
+        "QA_INGEST_MODE": "disabled",
+        "QA_ENABLE_LEGACY_EVIDENCE_INGESTION": "false",
         "RISK_REQUIRE_P1_ANALYTICS": "true",
         "RISK_CONTEXT_SOURCE": "database",
     }
@@ -246,7 +201,6 @@ def _check_configuration(environ: Mapping[str, str]) -> list[dict[str, Any]]:
                 configured=bool(actual),
             )
         )
-    checks.append(_check_policy_corpus(environ))
     return checks
 
 
@@ -339,21 +293,7 @@ def _check_database(environ: Mapping[str, str], *, as_of: str) -> dict[str, Any]
                 """,
                 (as_of, as_of, as_of, as_of, as_of, as_of, as_of),
             )
-        counts = cur.fetchone()
-        qa_source_id = environ.get("QA_POLICY_SOURCE_ID", "").strip()
-        qa_policy_source_authorized = 0
-        if qa_source_id:
-            cur.execute(
-                """
-                SELECT count(*)
-                FROM reference.data_sources
-                WHERE source_id = %s::uuid
-                  AND status = 'ACTIVE'
-                  AND COALESCE(production_authorized, false) = true
-                """,
-                (qa_source_id,),
-            )
-            qa_policy_source_authorized = int(cur.fetchone()[0])
+            counts = cur.fetchone()
         conn.rollback()
         data_counts = {
             "active_funds": int(counts[0]),
@@ -362,7 +302,6 @@ def _check_database(environ: Mapping[str, str], *, as_of: str) -> dict[str, Any]
             "deployable_portfolio_versions_as_of": int(counts[3]),
             "usable_market_snapshots_as_of": int(counts[4]),
             "active_worker_profiles": int(counts[5]),
-            "qa_policy_source_authorized": qa_policy_source_authorized,
         }
         if missing:
             return _check(
@@ -389,7 +328,6 @@ def _check_database(environ: Mapping[str, str], *, as_of: str) -> dict[str, Any]
             "deployable_portfolio_versions_as_of": 1,
             "usable_market_snapshots_as_of": 1,
             "active_worker_profiles": 5,
-            "qa_policy_source_authorized": 1,
         }
         data_failures = [
             name

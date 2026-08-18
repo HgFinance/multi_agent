@@ -27,6 +27,8 @@ from intraday_trial_ledger import (  # noqa: E402
     ExperimentRung,
     LedgerConflict,
     allocate_experiment_rung,
+    candidate_identity_from_source_contract,
+    find_latest_candidate_lineage,
     record_forward_confirmation,
     record_session_access,
     record_session_exposure,
@@ -251,6 +253,58 @@ def test_child_inherits_root_and_material_conflict_fails_closed():
             candidate_lineage_id=_id(13),
         )
     assert conflict_conn.rollbacks == 1
+
+
+def test_latest_parent_identity_separates_same_ast_follow_30_and_revert_600():
+    expression = {"op": "feature", "name": "quote_event_ofi"}
+    common = {
+        "candidate_ast": expression,
+        "baseline_ast": None,
+        "feature_spec": {"version": "micro-v5"},
+        "label_spec": {"execution": "TAKER", "horizon_seconds": 30},
+        "model_spec": {"type": "identity_ast"},
+        "evaluator_version": "intraday-runner-v9",
+        "cost_model_version": "krx-intraday-execution-v1",
+    }
+    follow = {
+        **common,
+        "semantic_plan": {"direction": "FOLLOW", "horizon_seconds": 30},
+    }
+    revert = {
+        **common,
+        "semantic_plan": {"direction": "REVERT", "horizon_seconds": 600},
+        "label_spec": {"execution": "TAKER", "horizon_seconds": 600},
+    }
+    assert candidate_identity_from_source_contract(follow) != \
+        candidate_identity_from_source_contract(revert)
+
+    registered = EchoConnection()
+    parent = register_candidate_lineage(
+        registered,
+        hypothesis_id=_id(201), candidate_ast=expression,
+        semantic_plan=follow["semantic_plan"], baseline_ast=None,
+        feature_spec=follow["feature_spec"],
+        label_spec=follow["label_spec"], model_spec=follow["model_spec"],
+        economic_family_id="fam_follow_30",
+        evaluator_version=follow["evaluator_version"],
+        cost_model_version=follow["cost_model_version"],
+        created_by="unit-test", candidate_lineage_id=_id(202),
+    )
+    durable_row = tuple(registered.executed[0][1][:14])
+    lookup = EchoConnection([durable_row])
+    assert find_latest_candidate_lineage(
+        lookup, source_contract=follow) == parent
+    sql, params = lookup.executed[0]
+    assert "where candidate_identity_fingerprint=%s" in sql
+    assert "where candidate_ast_fingerprint=%s" not in sql
+    assert params == (parent.candidate_identity_fingerprint,)
+
+    # Even if a broken/mock database returned the FOLLOW row for a REVERT
+    # query, the reader rechecks all durable identity components and fails
+    # closed instead of merging the two roots.
+    with pytest.raises(LedgerConflict, match="durable components"):
+        find_latest_candidate_lineage(
+            EchoConnection([durable_row]), source_contract=revert)
 
 
 def test_generated_record_ids_do_not_break_idempotent_retries():

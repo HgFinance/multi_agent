@@ -33,16 +33,14 @@
 | 서비스 | 역할 |
 |---|---|
 | `timescaledb` | 로컬 시장 시계열 DB. 호스트 `0.0.0.0:5434` → 컨테이너 `5432` |
-| `news-watcher` | NAVER 뉴스 수집 및 Research DB 적재 |
 | `ls-realtime` | LS 실시간 호가·체결 수집 및 TimescaleDB 적재 |
-| `ls-news` | LS NWS 뉴스 메타데이터 수집 |
-| `batch-collectors` | 공시·Breadth·Calendar·거시·재무·Corporate Action 배치 |
+| `batch-collectors` | 가격·시장 Breadth·거래가능성·Calendar·시장 DQ·Archive 배치 |
 | `market-api` | TimescaleDB Snapshot·Bar·Breadth·DQ Read API. 호스트 `0.0.0.0:8036` |
 | `research-api` | Evidence·PIT Read API. 호스트 `127.0.0.1:8035` |
-| `research-mcp` | Research Tool Gateway. 호스트 포트 미공개 |
+| `research-mcp` | 뉴스·공시·재무·거시·웹을 요청 시 조회하는 Research Tool Gateway. 호스트 포트 미공개, 장기 수집 없음 |
 | `paper-search-mcp`, `youtube-transcript-mcp` | Research 방법론 스카우트 도구. `research-skills` Profile 전용 |
 
-Collector와 Research Data Plane만 TimescaleDB Credential을 가진다. 다른 부서는 `market-api`와 `research-api`를 사용한다.
+시장 데이터 Collector와 Research Data Plane만 TimescaleDB Credential을 가진다. 다른 부서는 `market-api`와 `research-api`를 사용한다. 정성 정보 API Key는 `research-mcp`에만 주입하고 `batch-collectors`와 `ls-realtime`에는 주입하지 않는다.
 
 ### Hermes·Kanban Plane
 
@@ -51,6 +49,7 @@ Collector와 Research Data Plane만 TimescaleDB Credential을 가진다. 다른 
 | `ceo-hermes`, `research-hermes`, `quant-hermes`, `trading-hermes` | CEO·Research·Quant·Trading Department Head |
 | `risk-hermes`, `qa-hermes`, `accounting-hermes`, `workforce-hermes` | Risk·QA·Accounting/Portfolio·Agent Workforce Department Head |
 | `kanban-dispatcher` | 공용 Hermes Kanban Dispatcher. 호스트 포트 미공개 |
+| `paper-order-orchestrator-mcp` | Trading Hermes의 비구속 자연어 해석을 검증된 PAPER directive로 연결하는 내부 단일-tool 경계. 호스트 포트 미공개 |
 | `hermes-dashboard` | Hermes 공식 Dashboard와 Kanban 운영 콘솔. `dashboard` Profile, 호스트 `127.0.0.1:9119` |
 
 8개 Hermes 실행 컨테이너는 각자 `/home/ubuntu/.hermes/profiles/<profile>:/opt/data`와 공용 `/home/ubuntu/.hermes/shared-kanban:/opt/kanban`을 마운트한다. Dashboard는 공용 `/home/ubuntu/.hermes:/opt/data`를 사용하고 `HERMES_KANBAN_HOME=/opt/data/shared-kanban`으로 같은 보드를 명시한다.
@@ -83,11 +82,12 @@ Hermes Dashboard 자체가 Kanban의 공식 UI다. AI Office는 보드를 복제
 
 - `GET /ui/snapshot`: 금융 Read Model과 운영 Projection
 - `GET /ws/operations`: `agent.status.v1`·sequence 기반 운영 Event
-- `POST /ui/ceo/ask`: BFF의 공식 Hermes CLI로 공유 Kanban root Task를 생성하고 `202 Accepted`와 `task_id`를 즉시 반환한다. CEO 실행은 standalone dispatcher가 한 번만 수행한다.
+- `POST /ui/ceo/ask`: 일반 질의는 기존 CEO workflow로 보낸다. 명시적인 사용자 주문은 인증된 user/Fund/Book에 결박된 PAPER 전용 CEO root와 pre-created Trading primary를 만들고 `202 Accepted`, `order_request_id`, `trading_task_id`를 반환한다.
+- `GET /ui/paper-order-requests/{order_request_id}`: Trading Hermes 해석, PAPER directive, fill 및 Accounting ACK까지의 상태를 조회한다.
 - `POST /ui/portfolio-recommendations`: 비구속 포트폴리오 추천 실행
 - `GET /health`, `GET /health/ready`: BFF와 의존성 상태
 
-`/ui/ceo/ask`는 주문·Risk 승인·Ledger Posting을 수행하지 않는다. Agent 응답은 금융 수치의 Source of Truth가 아니며, 수치는 `/ui/snapshot`과 각 Domain API가 소유한다.
+`/ui/ceo/ask`의 일반 상담 응답은 주문·Risk 승인·Ledger Posting을 수행하지 않는다. 다만 명시적인 사용자 주문 문장은 별도의 PAPER 전용 lane으로 라우팅한다. Hermes 자체는 주문 authority를 갖지 않으며, 원문 증거와 immutable scope를 결정론적으로 재검증한 MCP 경계만 기존 PAPER OMS admission을 호출한다. LIVE 주문은 지원하지 않고, 최종 완료는 Accounting ACK 뒤에만 기록한다. Agent 응답은 금융 수치의 Source of Truth가 아니며, 수치는 `/ui/snapshot`과 각 Domain API가 소유한다.
 
 요청에 `fund_id`가 실리면 BFF가 governance-api에서 현재 Mandate를 읽어 root Task body에 `hgfinance.mandate-snapshot.v1` 블록으로 **한 번만** 박는다. 자식 Task는 한도 값을 복사받지 않고 `mandate_snapshot=see_root_task_body root_task_id=<id>` 한 줄만 받아 `kanban show`로 root를 읽는다 — 부서 Hermes 컨테이너에는 `DATABASE_URL`도 governance MCP도 없어서 참조만으론 풀 수 없고, 값을 자식마다 복사하면 요약·누락으로 부서별 한도가 갈라지기 때문이다. 이 스냅샷은 생성 후 불변이다(PIT, 개발 원칙 5). 실행 중 사용자가 한도를 바꿔도 이 워크플로는 시작 시점 값으로 끝나며, 실제 집행은 주문 시점의 결정론적 Risk Engine이 **현재** Mandate로 한다(개발 원칙 4). Mandate가 없으면 블록도 지시문 줄도 아예 붙지 않는다 — 기본 한도를 지어내지 않는다(개발 원칙 9).
 

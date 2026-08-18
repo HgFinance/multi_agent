@@ -19,10 +19,12 @@
 
 HgFinance is an eight-department multi-agent financial/trading platform. The
 current execution model separates department-head Hermes agents, conditional
-LangGraph workers, and deterministic Python runners. The LLM interprets,
-compares evidence, writes explanations, and proposes structured non-binding
-outputs. Deterministic contracts and engines own exact calculations, risk
-enforcement, accounting authority, QA gates, and state transitions.
+LangGraph workers, deterministic Python runners, and authenticated user
+authority. The LLM interprets, compares evidence, writes explanations, and
+proposes structured non-binding outputs. Deterministic contracts and engines
+own exact calculations, automated-order risk enforcement, accounting
+authority, QA gates, and state transitions. An authenticated user's explicit
+PAPER directive is a separate authority, not an LLM decision.
 
 The repository currently verifies the following shape:
 
@@ -33,6 +35,9 @@ The repository currently verifies the following shape:
 - Trading, risk, accounting, quant, and QA contracts and deterministic modules
   exist, but the repository does not prove one continuously operated,
   end-to-end production order lifecycle.
+- The Operator BFF exposes a narrow authenticated `USER_DIRECTIVE` PAPER lane.
+  It does not create a LIVE lane or give Hermes/agents order authority; see
+  [ADR-0007](02-engineering/adr/0007-authenticated-user-paper-directive-authority.md).
 - Both this checkout and `origin/main` track the promoted
   **Qwen2.5-14B-Instruct-AWQ** worker model, served as
   `qwen2.5-14b-instruct-awq`, with 8192/0.85 serving defaults and FP8 KV
@@ -116,7 +121,8 @@ Important role clarifications:
   the current `workers` mapping enables them.
 - `02-trading/employee_workers.py` has no fixed LLM worker registry. Its
   temporary strategy helper is explicitly non-binding and cannot submit a
-  live order or bypass Risk.
+  live order or bypass Risk. This automated-strategy rule is distinct from an
+  authenticated user's explicit PAPER directive.
 - The Risk and QA supervisors can synthesize and escalate, but their config
   forbids protected write tools. The binding owners are the deterministic
   engines/runners.
@@ -129,6 +135,7 @@ Important role clarifications:
 | point-in-time and citation checks | deterministic research/QA code, including `EvidenceQaEngine` | IMPLEMENTED |
 | exact order and risk validation | `departments/03-risk/engine/risk_engine.py` and trading contracts/OMS | IMPLEMENTED |
 | final `APPROVE` / `RESIZE` / `REJECT` risk verdict | deterministic Risk Engine | IMPLEMENTED |
+| explicit user PAPER authority | verified JWT subject + durable CEO/Kanban scope; Trading Hermes proposes a non-binding parse, deterministic BFF verifier and Trading Domain own admission/execution | IMPLEMENTED/PARTIAL; PAPER only |
 | ledger posting, NAV/valuation, reconciliation | accounting ledger, fill consumer, valuation/reporting modules | IMPLEMENTED/PARTIAL |
 | strategy experiment state and release gate | quant pipeline, PIT dataset and lifecycle modules | IMPLEMENTED/PARTIAL |
 | QA PASS/WARN/FAIL, model-risk thresholds, permission checks | QA deterministic engines | IMPLEMENTED/PARTIAL |
@@ -138,6 +145,40 @@ The trading contract makes `StrategySignal`, `OrderIntent`, `RiskDecision`, and
 broker order states distinct. `OrderIntent` requires a valid snapshot and
 evidence hash; `RiskDecision` enforces quantity/reason invariants. An order
 cannot be treated as approved because an LLM produced a plausible narrative.
+
+### 5.1 Order authority split
+
+```mermaid
+flowchart LR
+    A[Agent / alpha / rebalancer] --> O[Automated OrderIntent]
+    O --> R[Deterministic Risk Decision]
+    R --> M[OMS / PAPER Broker]
+    U[Authenticated user] --> C[CEO ingress + durable PAPER scope]
+    C --> H[Trading Hermes non-binding interpretation]
+    H --> P[Exact-text deterministic verifier]
+    P --> G[Current Fund/Book + account mechanics + idempotency]
+    G --> M
+    M -. no route .-> L[LIVE order]
+```
+
+The automated lane still requires Risk and agents cannot submit orders. The
+`USER_DIRECTIVE` lane carries the user's own explicit PAPER decision with
+`USER_DIRECTIVE_HIGHEST` priority, so alpha, rebalancer, and Risk do not apply
+an economic veto or resize. It still fails closed on authentication, active
+Fund/Book membership, exact-text deterministic verification, canonical cash/position and
+reservation checks, lot/tick/TTL, idempotency, or durable-store readiness.
+Trading Hermes may propose a structure for varied natural language, but its
+candidate is explicitly non-binding: it cannot invent authority fields,
+resolve a symbol, submit directly, or mark an order complete.
+
+`SELL_ALL` and `CANCEL_ALL` expand from a canonical account snapshot and retain
+per-leg results. Their directive states are `RECEIVED`, `RUNNING`,
+`IN_PROGRESS`, `PARTIAL`, `COMPLETED`, `FAILED`, or `UNKNOWN`; any failed leg
+prevents `COMPLETED`. A zero-leg `SELL_ALL` is complete only when the same
+snapshot proves both zero positive accounting position and zero open SELL
+reservation. The current canonical account is the local durable PaperBroker
+store. LS LIVE supplies read-only market observations and has no LIVE-order
+path here.
 
 ## 6. Request Lifecycle
 
@@ -318,8 +359,8 @@ was found in tracked source; QLoRA training remains `PLANNED`.
 | LangSmith / Langfuse | optional observability/evaluation integrations | PARTIAL; tracing defaults and access boundaries require runtime verification |
 | Docker Compose | control-plane services plus separate GPU model-plane overlay | IMPLEMENTED as configuration; running state not verified here |
 | Hermes | department-head profiles; tracked profiles differ from external runtime under `~/.hermes/profiles/` | IMPLEMENTED configuration; external runtime not verified |
-| APIs / BFF | FastAPI department APIs and read-only AI Office/portfolio projections | PARTIAL; projection must not own broker, Risk, ledger, or NAV authority |
-| External financial data | LS Open API, OpenDART, KRX, SerpApi and related collectors/registries | PARTIAL; credentials, freshness, and live availability are environment-dependent |
+| APIs / BFF | FastAPI department APIs, read-only AI Office/portfolio projections, and the narrow authenticated-user PAPER command edge | PARTIAL; BFF transports ADR-0007 authority but must not own broker, Risk, ledger, NAV, or LIVE authority |
+| External financial data | LS/KRX market-data collectors; OpenDART·macro·news·web request-time Research MCP | PARTIAL; credentials, freshness, and live availability are environment-dependent; qualitative sources are not persistently collected |
 
 The repository distinguishes canonical PostgreSQL/TimescaleDB state from Redis
 cache/event state, local SQLite/demo state, reports, and artifacts. The root
@@ -346,7 +387,12 @@ tests:
   it does not create an order or approve a trade.
 - Quant enforces point-in-time dataset checks and lifecycle gates. A release
   candidate is submitted to QA; Quant does not directly promote production.
-- Trading accepts typed `OrderIntent` and cannot bypass a valid RiskDecision.
+- Trading's Agent/alpha/automated lane accepts typed `OrderIntent` and cannot
+  bypass a valid RiskDecision.
+- An authenticated user's explicit PAPER `USER_DIRECTIVE` is not an Agent
+  OrderIntent. The verified subject is the authority, while the deterministic
+  BFF/parser and Trading Domain enforce Fund/Book ownership, account mechanics,
+  idempotency, and PAPER-only execution without an economic Risk veto.
 - Risk Engine enforces mandate, tradability, freshness, concentration,
   buying-power, state, and other constraints. Its binding result is
   `APPROVE`, `RESIZE`, or `REJECT`; a policy LLM is advisory.
@@ -359,6 +405,9 @@ tests:
   are the relevant deterministic boundaries.
 - CEO coordinates and synthesizes. It cannot submit orders, approve Risk,
   modify the ledger, finalize NAV, or close an audit finding.
+- Trading Hermes may structure only the exact marked instruction, but never
+  owns `USER_DIRECTIVE` authority or derives a trade from memory, research, or
+  model judgment; the deterministic verifier remains authoritative.
 - Failure paths use `HOLD`, `REJECT`, `ESCALATE`, `ENTRY_BLOCKED`, or `HALTED`
   rather than silently widening authority.
 
@@ -458,6 +507,7 @@ runtime evidence.
 - `docs/02-engineering/UNIFIED_DOMAIN_API_SPEC.md`
 - `docs/02-engineering/FINAL_RUNTIME_ARCHITECTURE.md`
 - `docs/02-engineering/SYSTEM_WIRING_MAP.md`
+- `docs/02-engineering/adr/0007-authenticated-user-paper-directive-authority.md`
 - `departments/*/hermes/config.yaml`
 - `departments/*/employee_workers.py` and `departments/03-risk/risk_employee_workers.py`
 - `departments/06-ai-qa-audit/qa_employee_workers.py`

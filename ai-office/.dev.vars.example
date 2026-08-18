@@ -22,6 +22,14 @@ DISCORD_WEBHOOK_URL=
 NEXT_PUBLIC_BFF_URL=http://127.0.0.1:8001
 NEXT_PUBLIC_HERMES_DASHBOARD_URL=http://127.0.0.1:9119
 
+# Local/test demo only. Production ignores neither identity nor auth: omit this
+# value (or set `supabase`) and provide the two public Supabase values below.
+NEXT_PUBLIC_AUTH_MODE=fixture
+NEXT_PUBLIC_SUPABASE_URL=
+# `sb_publishable_*` or a legacy JWT whose role is exactly `anon`.
+# Never put a service-role or `sb_secret_*` key in this browser setting.
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=
+
 # Local-only natural-language CEO input. Keep disabled in deployments until
 # the authenticated Hermes Tool Allowlist is configured.
 ENABLE_AGENT_ASK=true

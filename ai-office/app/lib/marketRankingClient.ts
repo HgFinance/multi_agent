@@ -1,5 +1,4 @@
-import { BFF } from "./ceoClient";
-import { withAccountHeaders } from "./currentAccount";
+import { BFF, bffFetch } from "./bffClient";
 
 export const MARKET_RANKING_KINDS = ["volume", "change", "amount"] as const;
 export type MarketRankingKind = (typeof MARKET_RANKING_KINDS)[number];
@@ -58,9 +57,9 @@ function isMarketRanking(value: unknown): value is MarketRankingResponse {
 export async function fetchMarketRanking(kind: MarketRankingKind): Promise<MarketRankingResponse> {
   let response: Response;
   try {
-    response = await fetch(`${BFF}/ui/market/rankings?kind=${kind}`, {
+    response = await bffFetch(`/ui/market/rankings?kind=${kind}`, {
       cache: "no-store",
-      headers: withAccountHeaders({ Accept: "application/json" }),
+      headers: { Accept: "application/json" },
     });
   } catch {
     throw new MarketRankingError(`BFF(${BFF})에 연결하지 못했습니다.`, 0);

@@ -267,7 +267,7 @@ qa-department ← 06-ai-qa-audit     hr-department ← 07-agent-workforce
 
 의도: dispatcher의 유일한 라우팅 손잡이가 assignee→프로필이므로, **읽기전용 창구를 별도 프로필로 두는 것 = 큐·워커풀 분리**다 (`canonical_profiles.py:36-41`). CEO SOUL이 라우팅 규칙을 명시한다: 사용자 읽기 질의 → `research-liaison`/`quant-liaison`, 공장 사이클/격상 작업 → 본체 프로필 (`departments/00-ceo-office/hermes/SOUL.md:37-53`).
 
-**실제로 구현된 절반 — MCP surface**: 같은 이미지·같은 코드에서 `RESEARCH_MCP_SURFACE=liaison`이면 `run_research_packet`, `factory_submit_leads`, `factory_submit_proposal` 3개 도구를 서버 기동 시 제거하고, 제거 실패 시 **기동을 거부**한다 (`departments/01-research/api/mcp_server.py:423-461`). reports 볼륨도 읽기전용 마운트 (`docker-compose.yml:637-639`). 루프 차단: `origin=factory` 카드에는 `MISROUTED` 응답 규칙 (RFC 3834식, `hermes-liaison/SOUL.md:23-28` ↔ `ceo_workflow_scope.py:281-284`의 `origin=user-query` 도장).
+**실제로 구현된 절반 — MCP surface**: 같은 이미지·같은 코드에서 `RESEARCH_MCP_SURFACE=liaison`이면 공장 제출·수식 생성·Worker 실행/진단 도구를 서버 기동 시 제거하고, 제거 실패 시 **기동을 거부**한다. 퇴역한 `run_research_packet`은 full/liaison 양쪽 모두에 등록되지 않는다. 루프 차단: `origin=factory` 카드에는 `MISROUTED` 응답 규칙 (RFC 3834식, `hermes-liaison/SOUL.md:23-28` ↔ `ceo_workflow_scope.py:281-284`의 `origin=user-query` 도장).
 
 **미구현된 절반 — 프로필**: `hermes-liaison/`에는 SOUL.md만 있고 config.yaml이 없다. sync/install 스크립트 대상 목록(8개)에도, dispatcher 프로필 마운트(8개)에도 없다. 따라서 **로컬에서 `research-liaison`으로 배정된 카드는 non-spawnable로 영구 스킵**된다. 추가로 `hermes_boundary.py:498`의 self-check(`PROFILE_CONTAINERS == CANONICAL_PROFILES`)가 liaison 추가로 **현재 실패 상태**이고, `orchestration/skill_contract.py:13-24`는 8개 이름을 중복 하드코딩해 liaison을 "unknown profile"로 거부한다. → 진행 중(untracked) 작업.
 
@@ -733,7 +733,7 @@ risk-api가 `risk.decision.v1`을 Redis `risk-qa-events`에 발행(결정 이벤
 | 04-quant `api/` | 소스 삭제, `__pycache__`만 잔존 — 주석들은 여전히 "quant-api /jobs/stuck"을 살아있는 것처럼 언급 |
 | 02-trading `contracts/risk_gate.py`, `packet_gate.py`, `skills/`, `multileg/`(DB 영속 NotImplemented) | 생산 호출자 0 |
 | 03-risk `risk_events/projection_worker.py`, `harness/`, `experiments/llm_wiki/` | compose 서비스/호출자 없음 |
-| 01-research Line B (`scripts.py` 2,687줄 + analysts 10종) | **의도적 은퇴**(8/10 재편, 코드 보존 명시) — MCP `run_research_packet`으로 여전히 실행 가능, 최종 산출물 8/4 |
+| 01-research Line B (`scripts.py` 2,687줄 + analysts 10종) | **의도적 은퇴**(8/10 재편, 코드만 감사 계보로 보존) — Runtime 이미지·MCP 실행 표면에서 제거 |
 | orchestration `adapters/paper_*`, `workflows/runner.py`, YAML manifest 6종 | 테스트 전용 |
 | ai-office Worker `/api/report`·`/api/integrations`, `ceoMirrorClient.ts` | 호출자 삭제됨/부재 |
 
@@ -742,7 +742,7 @@ risk-api가 `risk.decision.v1`을 Redis `risk-qa-events`에 발행(결정 이벤
 - 릴리스 게이트를 통과해도 **승격 파이프라인이 없어** `strategy.versions`로 이어지지 않는다 (§8 D4의 상류).
 - vLLM Multi-LoRA 장치 — enabled 어댑터 0.
 - RAG 코퍼스 — 인덱서(`rag_librarian.py`)는 CLI 전용 + 원문 수집기 꺼짐 → `/evidence/search`는 동결 코퍼스 검색.
-- `geopolitical_state` MCP 도구 — 수집기 꺼진 테이블을 읽어 점점 낡은 값 반환.
+- ~~`geopolitical_state` MCP 도구~~ — 08-18 제거. 굳은 테이블을 "현재"로 서빙하는 경로를 닫았다.
 - `macro` 테이블 — 수집 중단, 소비자(`data_resolution`, `narrative_guard` 등) 다수 생존 → 조용한 노화.
 - `hermes-dashboard`, `paper-search-mcp`, `youtube-transcript-mcp`, `ui-bff` — profiles 게이트로 기본 미기동. 특히 `ui-bff`는 켜도 이미지에 `hermes` 바이너리가 없고 읽기 함수들이 `HERMES_EXEC_MODE`를 무시해 **켜자마자 고장**.
 - `kanban_tracker` — 플래그 기본 false + 어떤 compose도 안 켬 → 포트폴리오 런 부서 카드 생성 코드는 사실상 미작동.

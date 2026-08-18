@@ -1,27 +1,17 @@
 /**
- * 계정 전환 — 어느 테스트 유저로 BFF를 부를지 한 곳에서 정한다.
+ * 명시적 local/test fixture 모드에서만 쓰는 계정 전환 데이터.
  *
  * ## ⚠️ 이건 인증이 아니다
  *
  * `X-User-Id`는 서명도 만료도 없는 평범한 헤더다. 누구나 아무 UUID나 보낼 수
  * 있으므로 **신원을 증명하지 않는다.** 폐쇄망 팀 테스트 전제이며, 공개 배포
- * 전에 실제 인증으로 교체해야 한다(서버 쪽 근거: `apps/api/current_user.py`).
+ * production에서는 `AuthProvider`와 JWT Bearer 경계가 이 모듈을 사용하지 않는다.
  *
  * 그래서 화면에 "로그인"이라고 쓰지 않는다 — 로그인 기능이 없는데 있는 것처럼
  * 보이면 안 된다. 이 앱의 기존 원칙과 같다(`TopNav.tsx`: 연결 안 된 항목은
  * 링크가 아니라 disabled 버튼).
  *
- * ## 왜 fund_id를 화면이 들고 있나
- *
- * 서버에 `user_id -> fund_id` 역참조 경로가 없다
- * (`governance.fund_memberships`가 비어 있다). 그래서 CEO 질의처럼 Mandate가
- * 필요한 호출은 화면이 `fund_id`를 쌍으로 보낸다. 진짜 로그인이 붙으면 이
- * 매핑은 서버로 옮긴다.
- *
- * ## 헤더를 여기서만 만드는 이유
- *
- * 호출부마다 헤더를 붙이면 한 곳을 빠뜨렸을 때 그 경로만 다른 사용자로 나간다.
- * `withAccountHeaders()`를 거치게 두면 교체 지점이 하나다.
+ * 실제 사용자의 허가된 펀드는 `/ui/me`와 `PortfolioSessionProvider`가 관리한다.
  */
 
 export interface TestAccount {
@@ -147,19 +137,4 @@ export function subscribeToAccountChange(onChange: () => void): () => void {
  */
 export function readStoredAccountId(): string {
   return readStoredAccount().userId;
-}
-
-/**
- * BFF 호출에 붙일 헤더. **모든 호출이 이 함수를 거친다.**
- *
- * 서버는 `PORTFOLIO_AUTH_REQUIRED`가 켜져 있으면 헤더 없는 요청을 401로 막고,
- * 리소스 소유자와 다르면 403을 낸다(`apps/api/current_user.py`).
- */
-export function withAccountHeaders(headers: HeadersInit = {}): HeadersInit {
-  return { ...headers, "X-User-Id": readStoredAccount().userId };
-}
-
-/** Mandate가 필요한 요청 본문에 실을 `fund_id`. 없으면 `undefined`. */
-export function currentFundId(): string | undefined {
-  return readStoredAccount().fundId ?? undefined;
 }

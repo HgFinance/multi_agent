@@ -7,17 +7,17 @@
       계획서 3.3 "본부 간 호출은 HTTP", Hermes `mcp add --url` (HTTP/SSE 지원 실측)
 
 ▶ 이 다리가 없으면 헤르메스는 '대화만 되는 껍데기'다
-  분석 실체는 LangGraph(scripts.py 분석가 6인)이고 헤르메스는 부서 인터페이스·
-  기억·위임 계층이다(TECH_STACK_DECISIONS 2절). 둘을 잇는 것이 도구 호출이며,
-  그게 비어 있어서 지금까지 헤르메스가 헛도는 것처럼 보였다.
+  분석 실체는 가설 공장의 결정론 러너와 명시적으로 등록된 LangGraph 직원이며,
+  헤르메스는 부서 인터페이스·기억·위임 계층이다. 퇴역한 종목별 Research Packet
+  파이프라인은 이 MCP 표면과 Runtime 이미지에 포함하지 않는다.
 
 ▶ 노출 원칙 (권한 경계)
   - **읽기 도구가 기본이다.** 리서치본부는 주문·리스크 판정·원장에 관여하지
     않는다(config.yaml forbidden_tools). 여기 없는 것은 호출할 수 없다.
-  - 유일한 쓰기성 작업은 `run_research_packet` 인데 이것도 **Packet 생성**일
-    뿐 거래 결정이 아니다. Agent Decision != Order (CLAUDE.md).
-  - 파이프라인은 분석가 6인 x LLM 이라 수 분이 걸린다. MCP 호출이 그동안
-    묶이면 대화가 죽으므로 **비동기 시작 + 조회** 두 도구로 나눈다.
+  - 쓰기성 작업은 가설 공장 lead/proposal 제출뿐이며 거래 결정이 아니다.
+    Agent Decision != Order (CLAUDE.md).
+  - 직원 LLM 작업은 수 분이 걸릴 수 있다. MCP 호출이 그동안 묶이면 대화가
+    죽으므로 **비동기 시작 + 조회** 두 도구로 나눈다.
 
 ▶ 정직성
   - 도구는 결과를 요약하지 않는다. 결정론 산출물(판정·수치·근거)을 그대로
@@ -32,9 +32,10 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
+import importlib.util
 import os
 import re
-import subprocess
 import sys
 import threading
 import uuid
@@ -48,15 +49,60 @@ sys.path.insert(0, str(_BASE.parent / "04-quant-backtest" / "pipeline"))
 
 from stock_universe import governed_stock_evidence_sql  # noqa: E402
 
+_RESEARCH_EVIDENCE_PACKAGE = "_research_mcp_evidence"
+_RESEARCH_EVIDENCE_LOCK = threading.RLock()
+
+
+def _research_evidence_module(name: str):
+    """Load this department's evidence package without a global-name collision.
+
+    Several departments have an ``evidence`` directory.  Importing the bare
+    package therefore depends on test/import order and can silently bind the MCP
+    server to another department's namespace package.  A private package alias
+    keeps the research evidence modules and their relative imports deterministic.
+    """
+    qualified = f"{_RESEARCH_EVIDENCE_PACKAGE}.{name}"
+    with _RESEARCH_EVIDENCE_LOCK:
+        cached = sys.modules.get(qualified)
+        if cached is not None:
+            return cached
+        if _RESEARCH_EVIDENCE_PACKAGE not in sys.modules:
+            package_dir = _BASE / "evidence"
+            spec = importlib.util.spec_from_file_location(
+                _RESEARCH_EVIDENCE_PACKAGE,
+                package_dir / "__init__.py",
+                submodule_search_locations=[str(package_dir)],
+            )
+            if spec is None or spec.loader is None:
+                raise ImportError("research evidence package could not be loaded")
+            package = importlib.util.module_from_spec(spec)
+            sys.modules[_RESEARCH_EVIDENCE_PACKAGE] = package
+            try:
+                spec.loader.exec_module(package)
+            except Exception:
+                sys.modules.pop(_RESEARCH_EVIDENCE_PACKAGE, None)
+                raise
+        return importlib.import_module(qualified)
+
 MCP_VERSION = "research-mcp-v1"
 KST = timezone(timedelta(hours=9))
 DEFAULT_PORT = int(os.environ.get("RESEARCH_MCP_PORT", "8037"))
+ACTIVE_MARKET_COLLECTOR_JOB_NAMES = frozenset({
+    "market-archive",
+    "universe-restrictions",
+    "data-steward",
+    "breadth",
+    "derivatives",
+    "vkospi",
+    "style-index",
+    "calendar-observed",
+    "label-snapshot",
+    "chart-daily-universe",
+})
 
-# 진행 중·완료된 Packet 작업 (프로세스 메모리). 재시작하면 사라지지만 결과
-# 자체는 research.pipeline_runs 와 reports/*.md 에 남으므로 유실이 아니다.
-_JOBS: dict[str, dict] = {}
-_JOBS_LOCK = threading.Lock()
-MAX_JOBS_KEPT = 50
+# 진행 중·완료된 활성 직원 작업은 프로세스 메모리에서만 제한적으로 보존한다.
+# 종목별 Packet 작업·리포트 경로와는 연결하지 않는다.
+MAX_WORKER_JOBS_KEPT = 50
 _GOVERNED_MCP_EVIDENCE = governed_stock_evidence_sql(
     experiment_alias="e", dataset_alias="m", hypothesis_alias="h")
 
@@ -159,8 +205,7 @@ _SQL_LIBRARY_SCORECARD = """
       join quant.dataset_manifests m on m.dataset_id = e.dataset_id
      where """ + _GOVERNED_MCP_EVIDENCE
 
-# 직원 Worker(LangGraph) 실행 작업 - Packet 작업과 저장소를 분리한다.
-# 모양이 다르다(Packet 은 subprocess tail 파싱, Worker 는 registry 결과 dict).
+# 직원 Worker(LangGraph) 실행 작업. 퇴역한 종목 Packet 파이프라인과 연결하지 않는다.
 _WORKER_JOBS: dict[str, dict] = {}
 _WORKER_JOBS_LOCK = threading.Lock()
 _TASK_ID_RE = re.compile(r"^(t_[0-9A-Za-z]+)(?:$|[-:#/])")
@@ -259,34 +304,6 @@ def normalize_symbol(symbol: str) -> str:
     return s
 
 
-def register_job(symbol: str, *, now: datetime) -> str:
-    job_id = uuid.uuid4().hex[:12]
-    with _JOBS_LOCK:
-        _JOBS[job_id] = {"job_id": job_id, "symbol": symbol, "status": "RUNNING",
-                         "started_at": now.isoformat(), "ended_at": None,
-                         "exit_code": None, "report": None, "tail": None}
-        if len(_JOBS) > MAX_JOBS_KEPT:      # 오래된 것부터 버린다(결과는 DB 에 있다)
-            for k in list(_JOBS)[:-MAX_JOBS_KEPT]:
-                _JOBS.pop(k, None)
-    return job_id
-
-
-def finish_job(job_id: str, *, exit_code: int, tail: str, now: datetime) -> dict:
-    with _JOBS_LOCK:
-        j = _JOBS.get(job_id)
-        if j is None:
-            return {}
-        j["status"] = "COMPLETED" if exit_code == 0 else "FAILED"
-        j["exit_code"] = exit_code
-        j["ended_at"] = now.isoformat()
-        j["tail"] = (tail or "")[-1500:]
-        for line in reversed((tail or "").splitlines()):
-            if "리포트 저장:" in line:
-                j["report"] = line.split("리포트 저장:", 1)[1].strip()
-                break
-        return dict(j)
-
-
 def _text_digest(value: str) -> str:
     """Stable fingerprint for binding a review job to the submitted draft."""
     normalized = str(value or "").replace("\r\n", "\n").strip()
@@ -309,14 +326,14 @@ def register_worker_job(payload_fields: list[str], *, now: datetime,
             "started_at": now.isoformat(), "ended_at": None,
             "result": None, "model_plane": None, "evidence": None, "error": None,
         }
-        if len(_WORKER_JOBS) > MAX_JOBS_KEPT:
+        if len(_WORKER_JOBS) > MAX_WORKER_JOBS_KEPT:
             # RUNNING 은 퇴거하지 않는다 - 몇 분짜리 실행 도중에 자리가
             # 사라지면 GPU 를 태운 결과가 어디에도 안 남는다(2026-08-13 리뷰).
             # RUNNING 만으로 상한을 넘는 폭주는 그대로 남긴다 - 곧 끝나고,
             # 다음 등록 때 완료분부터 치워진다.
             evictable = [k for k, v in _WORKER_JOBS.items()
                          if v.get("status") != "RUNNING"]
-            for k in evictable[:len(_WORKER_JOBS) - MAX_JOBS_KEPT]:
+            for k in evictable[:len(_WORKER_JOBS) - MAX_WORKER_JOBS_KEPT]:
                 _WORKER_JOBS.pop(k, None)
     return job_id
 
@@ -553,21 +570,20 @@ def build_worker_payload(holding_question: str = "", proposal_draft: str = "",
 # ── Evidence First (FINAL_RUNTIME_ARCHITECTURE §11) ─────────────────────────
 # Runner 는 Worker 를 부르기 전에 Tool/Evidence 부터 모은다 - Worker 가 근거
 # 없이 추론하지 않게 하기 위해서다. 소스(뉴스·공시·가격)별로 **독립 시도**하고
-# 실패는 status 로 정직하게 남긴다. evidence/bundle.assemble_bundle 을 안 쓰는
-# 이유: 그건 첫 실패를 전체 실패로 전파하는 파이프라인 계약이라, market-api
-# (TSDB)가 비어 있는 환경에서 Supabase 뉴스·공시까지 같이 죽는다.
+# 실패는 status 로 정직하게 남긴다. 뉴스·공시는 저장 DB 를 읽지 않고 요청 시점
+# MCP 소스를 조회한다. 가격만 market-api/Timescale 읽기를 유지한다.
 
 HOLDINGS_EVIDENCE_PERSONA = "holdings-analyst-worker"
 
 
 def _evidence_getter():
-    """읽기면 호출자. X-Agent-Persona 를 워커 명의로 싣는다.
+    """시장 가격 읽기면 호출자. X-Agent-Persona 를 워커 명의로 싣는다.
 
     research-api 가 TOOL_GATEWAY_ENFORCE=true 로 돌면 persona 없는 요청은
-    403 이다 - holdings-analyst-worker 는 news/disclosures/snapshot/bars
-    스코프를 전부 가진 persona 다(hermes/config.yaml tool_allowlist).
+    403 이다 - holdings-analyst-worker 는 snapshot/bars 스코프를 가진 persona 다
+    (hermes/config.yaml tool_allowlist).
     """
-    from evidence.api_client import get_json
+    get_json = _research_evidence_module("api_client").get_json
 
     def get(url: str):
         return get_json(url, persona=HOLDINGS_EVIDENCE_PERSONA, timeout=10)
@@ -575,51 +591,98 @@ def _evidence_getter():
     return get
 
 
-def gather_holdings_evidence(symbol: str, *, get=None) -> dict:
-    """보유 질문용 근거를 부서 읽기면에서 모은다. 소스별 독립·정직 보고.
+def _on_demand_evidence_id(tool: str, citation: str, item: int,
+                           native_id: str = "") -> str:
+    """요청 시점 응답 해시와 항목 좌표를 인용 가능한 ID 로 묶는다."""
+    coordinate = native_id.strip() or f"item-{item}"
+    return f"mcp:{tool}:{citation}:{coordinate}"
 
-    뉴스는 48시간(주말을 넘겨도 최근 흐름이 잡히게), 공시는 7일. 값이 비면
-    빈 대로 싣는다 - "없다" 는 사실이고, 지어내는 것보다 낫다.
+
+def gather_holdings_evidence(symbol: str, *, get=None, search_news=None,
+                             search_disclosures=None) -> dict:
+    """보유 질문용 근거를 요청 시점 소스에서 모은다. 소스별 독립·정직 보고.
+
+    뉴스는 최신 10건, 공시는 최근 7일을 직접 조회한다. 각 응답의 비영속 citation
+    해시와 항목 번호/native ID 를 같은 응답에 묶어 짧은 ref(n1/d1)가 실제 조회
+    좌표로 해소되게 한다. 값이 비면 빈 대로 싣는다 - "없다" 는 사실이고,
+    지어내는 것보다 낫다. ``get`` 은 가격 market-api 에만 사용한다.
     """
-    research = (os.environ.get("RESEARCH_API_URL")
-                or "http://127.0.0.1:8035").rstrip("/")
-    if get is None:
-        get = _evidence_getter()
     sources: dict[str, dict] = {}
     out: dict = {"symbol": symbol, "sources": sources}
 
     try:
-        news = get(f"{research}/evidence/news?symbol={symbol}&hours=48&limit=10")
-        # ref('n1'..)는 짧아서 LLM 이 정확히 인용한다. evidence_id(document_id)
-        # 는 코드가 대조할 진짜 좌표다(evidence/bundle.py 의 계약과 동형).
+        if search_news is None:
+            from external_sources import news_search as search_news_call
+        else:
+            search_news_call = search_news
+        response = search_news_call(query=symbol, display=10, sort="date")
+        if not isinstance(response, dict) or not isinstance(response.get("items"), list):
+            raise TypeError("news_search response must contain an items list")
+        news = response["items"]
+        citation = str(response.get("citation") or "").strip()
+        if not citation:
+            raise ValueError("news_search response has no citation hash")
+        observed_at = str(
+            response.get("searched_at") or datetime.now(KST).isoformat())
+        # ref('n1'..)는 LLM 용 짧은 좌표, evidence_id/citation_item 은 코드가
+        # 같은 요청 응답에서 정확한 항목을 찾을 진짜 좌표다.
         out["news_headlines"] = [
-            {"ref": f"n{i + 1}", "evidence_id": n.get("document_id"),
-             "title": n.get("title"), "relation": n.get("relation_type"),
-             "url": n.get("url"), "published_at": str(n.get("published_at") or ""),
-             "observed_at": str(n.get("observed_at") or "")}
+            {"ref": f"n{i + 1}",
+             "evidence_id": _on_demand_evidence_id(
+                 "news_search", citation, i + 1),
+             "citation": citation, "citation_item": i + 1,
+             "title": n.get("title"), "relation": "on_demand_query",
+             "url": n.get("originallink") or n.get("link"),
+             "published_at": str(n.get("pubDate") or ""),
+             "observed_at": observed_at}
             for i, n in enumerate(news)]
-        sources["news"] = {"status": "OK", "count": len(news)}
+        sources["news"] = {"status": "OK", "count": len(news),
+                           "mode": "ON_DEMAND_MCP", "citation": citation}
     except Exception as e:  # noqa: BLE001 - 소스 하나의 실패가 전체를 못 죽인다
         sources["news"] = {"status": "FAILED",
+                           "mode": "ON_DEMAND_MCP",
                            "reason": f"{type(e).__name__}: {e}"}
 
     try:
-        disc = get(f"{research}/evidence/disclosures?symbol={symbol}&days=7&limit=5")
+        if search_disclosures is None:
+            from external_sources import (
+                dart_search_disclosures as search_disclosures_call)
+        else:
+            search_disclosures_call = search_disclosures
+        response = search_disclosures_call(corp=symbol, days=7, page=1)
+        if not isinstance(response, dict) or not isinstance(response.get("items"), list):
+            raise TypeError(
+                "dart_search_disclosures response must contain an items list")
+        disc = response["items"][:5]
+        citation = str(response.get("citation") or "").strip()
+        if not citation:
+            raise ValueError(
+                "dart_search_disclosures response has no citation hash")
+        observed_at = datetime.now(KST).isoformat()
         out["disclosures_7d"] = [
-            {"ref": f"d{i + 1}", "evidence_id": d.get("document_id"),
-             "title": d.get("title"), "url": d.get("url"),
-             "published_at": str(d.get("published_at") or ""),
-             "observed_at": str(d.get("observed_at") or "")}
+            {"ref": f"d{i + 1}",
+             "evidence_id": _on_demand_evidence_id(
+                 "dart_search_disclosures", citation, i + 1,
+                 str(d.get("rcept_no") or "")),
+             "citation": citation, "citation_item": i + 1,
+             "title": d.get("report_nm"), "url": d.get("viewer_url"),
+             "published_at": str(d.get("rcept_dt") or ""),
+             "observed_at": observed_at}
             for i, d in enumerate(disc)]
-        sources["disclosures"] = {"status": "OK", "count": len(disc)}
+        sources["disclosures"] = {
+            "status": "OK", "count": len(disc), "mode": "ON_DEMAND_MCP",
+            "citation": citation}
     except Exception as e:  # noqa: BLE001
         sources["disclosures"] = {"status": "FAILED",
+                                  "mode": "ON_DEMAND_MCP",
                                   "reason": f"{type(e).__name__}: {e}"}
 
     try:
-        from evidence import bundle as evidence_bundle
+        evidence_bundle = _research_evidence_module("bundle")
+        if get is None:
+            get = _evidence_getter()
         # fetch_price_context 는 실패를 스스로 UNAVAILABLE 로 기술한다 -
-        # TSDB 가 빈 환경에서도 뉴스·공시와 독립적으로 동작한다.
+        # TSDB 가 빈 환경에서도 요청 시점 뉴스·공시와 독립적으로 동작한다.
         ctx = evidence_bundle.fetch_price_context(symbol, get=get)
         out["price_context"] = ctx
         sources["price_context"] = {"status": ctx.get("status", "UNKNOWN")}
@@ -751,11 +814,13 @@ def _server_class():
 # Agency)의 도구 최소화, capability 원칙(건네지 않은 권한은 우회 불가).
 # 창구는 조회·설명 전용이고, 상태를 바꾸거나 파이프라인을 낳는 손은
 # 실험대(부서 본체) 프로필에만 있다.
-#   run_research_packet     - 30분짜리 분석 파이프라인 생성(쓰기·고비용)
 #   factory_submit_leads    - 공장 리드 적재(쓰기)
 #   factory_submit_proposal - 공장 기획안 발행(쓰기) = 질의→공장 순환의 입구
 LIAISON_EXCLUDED_TOOLS = frozenset({
-    "run_research_packet", "factory_submit_leads", "factory_submit_proposal"})
+    "factory_generate_formula_population",
+    "factory_submit_leads", "factory_submit_evolved_formulas",
+    "factory_submit_proposal", "run_research_workers",
+    "worker_model_health"})
 
 
 def _restrict_to_liaison(server) -> None:
@@ -805,8 +870,8 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
         "요청은 즉석 수행 대신 '연구소 격상 필요'를 명시해 접수 사실만 답한다. "
         "도구 결과는 결정론 산출물이므로 그대로 인용하고, 수치를 다시 계산하거나 "
         "지어내지 않는다.") if liaison else (
-        "리서치본부(RES)의 도구 면이다. 시세·Evidence 조회와 Research Packet "
-        "생성만 한다. 주문 제출·리스크 판정·원장 기록은 이 본부의 권한이 "
+        "리서치본부(RES)의 도구 면이다. 시세·요청형 Evidence 조회와 가설 공장 "
+        "작업만 한다. 주문 제출·리스크 판정·원장 기록은 이 본부의 권한이 "
         "아니며 여기에 도구도 없다. 도구 결과는 결정론 산출물이므로 그대로 "
         "인용하고, 수치를 다시 계산하거나 지어내지 않는다.")
     server = cls(
@@ -814,43 +879,6 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
         **{k: v for k, v in kwargs.items() if k != "instructions"},
         instructions=instructions,
     )
-
-    @server.tool(
-        name="run_research_packet",
-        description="종목 하나에 대해 리서치 파이프라인(분석가 6인)을 시작한다. "
-                    "수 분이 걸리므로 job_id 만 즉시 돌려준다 - 결과는 "
-                    "get_packet_job 으로 조회한다.")
-    def run_research_packet(symbol: str) -> dict:
-        sym = normalize_symbol(symbol)
-        job_id = register_job(sym, now=datetime.now(KST))
-
-        def _worker():
-            try:
-                proc = subprocess.run(
-                    [sys.executable, "scripts.py", "--run", sym],
-                    check=False, cwd=str(_BASE), capture_output=True, text=True,
-                    encoding="utf-8", errors="replace", timeout=60 * 30)
-                out = (proc.stdout or "") + "\n" + (proc.stderr or "")[-800:]
-                finish_job(job_id, exit_code=proc.returncode, tail=out,
-                           now=datetime.now(KST))
-            except Exception as e:  # noqa: BLE001 - 실패를 실패로 남긴다
-                finish_job(job_id, exit_code=-1,
-                           tail=f"{type(e).__name__}: {e}", now=datetime.now(KST))
-
-        threading.Thread(target=_worker, daemon=True).start()
-        return {"job_id": job_id, "symbol": sym, "status": "RUNNING",
-                "note": "get_packet_job(job_id) 으로 진행 상태를 확인한다"}
-
-    @server.tool(
-        name="get_packet_job",
-        description="run_research_packet 이 만든 작업의 상태·결과 경로를 조회한다.")
-    def get_packet_job(job_id: str) -> dict:
-        with _JOBS_LOCK:
-            j = _JOBS.get(str(job_id).strip())
-        if j is None:
-            return {"error": "그런 job_id 가 없다(서버 재시작 시 메모리가 비워진다). "
-                             "완료된 Packet 은 list_recent_packets 로 찾는다"}
-        return dict(j)
 
     # ── 직원 Worker 실행 (LangGraph runner) ──────────────────────────────
     # ▶ 지금까지 run_employee_workers 를 부르는 손은 파이썬 오케스트레이터
@@ -1031,44 +1059,16 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
         return await asyncio.to_thread(_probe)
 
     @server.tool(
-        name="list_recent_packets",
-        description="최근 생성된 Research Packet 실행 기록(종목·상태·근거품질·시각).")
-    def list_recent_packets(limit: int = 10) -> list[dict]:
-        n = max(1, min(int(limit), 50))
-        return _rows("""
-            select symbol, status, evidence_quality, numeric_check_ok,
-                   started_at, report_path, trace_id::text
-            from research.pipeline_runs
-            order by started_at desc limit %s""", (n,))
-
-    @server.tool(
         name="collector_health",
-        description="24시간 수집 Job 건강 상태. 지금 무엇이 고장나 있는지 알려준다 "
-                    "(SKIP=휴장 등 의도된 미수집은 고장이 아니다).")
+        description="24시간 시장 수집 Job 건강 상태. 지금 무엇이 고장나 있는지 "
+                    "알려준다(SKIP=휴장 등 의도된 미수집은 고장이 아니다).")
     def collector_health() -> dict:
         return summarize_health(_rows("""
             select job_name, runs_24h, ok_24h, skip_24h, bad_24h,
                    last_ok_at, last_status, last_error_tail
-            from research.collector_health"""))
-
-    @server.tool(
-        name="geopolitical_state",
-        description="현재 지정학 국면(GPR 위협/실제 분리, GDELT 테마 배율). "
-                    "지수는 게시가 늦으므로 관측일과 지연일을 함께 본다.")
-    def geopolitical_state() -> dict:
-        sys.path.insert(0, str(_BASE / "agents"))
-        from geopolitical_analyst import analyze as geo_analyze
-
-        r = geo_analyze()
-        ro = r.get("readout") or {}
-        return {"verdict": r.get("verdict"), "driver": r.get("driver"),
-                "label_reason": ro.get("label_reason"),
-                "gpr_latest": ro.get("gpr_latest"),
-                "gpr_percentile": ro.get("gpr_percentile"),
-                "gpr_observed_on": ro.get("latest_gpr_date"),
-                "gpr_lag_days": ro.get("gpr_lag_days"),
-                "hot_themes": ro.get("hot_themes"),
-                "summary": r.get("summary"), "cautions": r.get("cautions")}
+            from research.collector_health
+            where job_name = any(%s)""",
+            (sorted(ACTIVE_MARKET_COLLECTOR_JOB_NAMES),)))
 
     @server.tool(
         name="analyst_calibration",
@@ -1186,6 +1186,68 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
                 "lead_ids": lead_ids,
                 "rejected": [{"title": x.title, "why": x.reason} for x in r.rejected],
                 "link_checks": r.link_notes}
+
+    @server.tool(
+        name="factory_generate_formula_population",
+        description=(
+            "Generate 8-128 deterministic, typed intraday AST drafts from persisted "
+            "source-backed seeds plus governed experiment/failure memory. Use this instead "
+            "of writing a research report when a formula-breeder card is assigned. The "
+            "result contains lineage, economic niches, semantic/thesis hints, and throughput "
+            "KPIs. Hints containing REQUIRES_HERMES are deliberately non-persistable: enrich "
+            "economics, identification, expected increment and ablations, then submit "
+            "single-parent candidates with factory_submit_evolved_formulas. The generator "
+            "does not fit coefficients, weaken costs, read a forward lockbox, or promote alpha."
+        ))
+    def factory_generate_formula_population(
+            population_size: int = 64, generation: int = 1) -> dict:
+        _factory_path()
+        import formula_breeder
+
+        conn = _db()
+        try:
+            return formula_breeder.generate(
+                conn, population_size=population_size, generation=generation)
+        except (TypeError, ValueError) as exc:
+            conn.rollback()
+            return {"ok": False, "error": str(exc)}
+        finally:
+            conn.close()
+
+    @server.tool(
+        name="factory_submit_evolved_formulas",
+        description=(
+            "Submit a bounded JSON population of outcome-conditioned intraday AST "
+            "children for one existing source-backed parent lead. This is the formula "
+            "breeder path: do not write a literature report and do not invent a new URL. "
+            "Each child must provide candidate_signal_expr, semantic_plan, formula_thesis, "
+            "evolution_operators, expected_increment, ablations, and economic_mechanism. "
+            "Deterministic intake revalidates source derivation, parent/child structural "
+            "novelty, completed AST grammar, units, semantic direction, financial-math "
+            "roles, and OOS-safe coefficient policy before persisting revision leads."
+        ))
+    def factory_submit_evolved_formulas(
+            parent_lead_id: str, candidates_json: str,
+            model_version: str = "", prompt_version: str = "") -> dict:
+        _factory_path()
+        import evolution_candidate_intake
+
+        if not model_version.strip() or not prompt_version.strip():
+            return {
+                "ok": False,
+                "error": "model_version and prompt_version are required for lineage",
+            }
+        conn = _db()
+        try:
+            return evolution_candidate_intake.submit(
+                conn, parent_lead_id=parent_lead_id,
+                candidates=candidates_json, model_version=model_version,
+                prompt_version=prompt_version)
+        except (TypeError, ValueError) as exc:
+            conn.rollback()
+            return {"ok": False, "error": str(exc)}
+        finally:
+            conn.close()
 
     @server.tool(
         name="factory_submit_proposal",
@@ -1365,7 +1427,7 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
 
     # 외부 정보원(DART·네이버·ECOS·FRED) 질의 도구 - 정성 데이터의 MCP 검색 통합
     # (재일 결정 2026-08-13, docs/02-engineering/MCP_ONDEMAND_ARCHITECTURE.md).
-    # 별도 모듈인 이유: 예산·스냅샷·정직성 규약이 한 파일에 살아야 감사가 쉽다.
+    # 별도 모듈인 이유: 예산·비영속 인용 해시·정직성 규약을 한 파일에서 감사한다.
     from external_sources import register_external_tools
     from external_macro import register_macro_tools
     from external_global import register_global_tools
@@ -1392,23 +1454,6 @@ def _check_symbol_guard():
         except ValueError:
             pass
     print("  종목코드 가드            OK")
-
-
-def _check_job_lifecycle():
-    now = datetime(2026, 8, 2, 10, tzinfo=KST)
-    jid = register_job("000660", now=now)
-    with _JOBS_LOCK:
-        assert _JOBS[jid]["status"] == "RUNNING"
-    done = finish_job(jid, exit_code=0,
-                      tail="어쩌고\n리포트 저장: reports/research_packet_000660_x.md\n",
-                      now=now)
-    assert done["status"] == "COMPLETED"
-    assert done["report"] == "reports/research_packet_000660_x.md", done
-    jid2 = register_job("000660", now=now)
-    fail = finish_job(jid2, exit_code=1, tail="ValueError: Packet 초안 거부", now=now)
-    assert fail["status"] == "FAILED" and fail["report"] is None
-    assert finish_job("없는아이디", exit_code=0, tail="", now=now) == {}
-    print("  작업 수명주기            OK")
 
 
 def _check_worker_payload():
@@ -1578,23 +1623,39 @@ def _check_skeptic_review_persistence():
 
 def _check_holdings_evidence():
     """Evidence First - 소스별 독립 시도·정직 보고·payload 병합 계약."""
+    source_calls = []
+
+    def fake_news(**kwargs):
+        source_calls.append(("news", kwargs))
+        return {"citation": "news-cite-1", "searched_at": "2026-08-13T09:00:00+09:00",
+                "items": [{"title": "제목", "originallink": "http://u",
+                           "link": "http://proxy", "pubDate": "2026-08-13"}]}
+
+    def failed_disclosures(**kwargs):
+        source_calls.append(("disclosures", kwargs))
+        raise RuntimeError("dart down")
+
     def fake_get(url: str):
-        if "/evidence/news" in url:
-            return [{"document_id": "doc-1", "title": "제목",
-                     "relation_type": "direct", "url": "http://u",
-                     "published_at": "2026-08-13", "observed_at": "2026-08-13"}]
-        if "/evidence/disclosures" in url:
-            raise RuntimeError("research-api down")
+        assert "/evidence/" not in url, "뉴스·공시 레거시 DB 경로를 읽었다"
         raise ValueError("tsdb empty")          # /bars → price_context 경로
 
-    ev = gather_holdings_evidence("005930", get=fake_get)
+    ev = gather_holdings_evidence(
+        "005930", get=fake_get, search_news=fake_news,
+        search_disclosures=failed_disclosures)
     assert ev["symbol"] == "005930"
-    assert ev["sources"]["news"] == {"status": "OK", "count": 1}
+    assert ev["sources"]["news"] == {
+        "status": "OK", "count": 1, "mode": "ON_DEMAND_MCP",
+        "citation": "news-cite-1"}
+    assert source_calls == [
+        ("news", {"query": "005930", "display": 10, "sort": "date"}),
+        ("disclosures", {"corp": "005930", "days": 7, "page": 1})]
     assert ev["news_headlines"][0]["ref"] == "n1"
-    assert ev["news_headlines"][0]["evidence_id"] == "doc-1"
+    assert ev["news_headlines"][0]["evidence_id"] == \
+        "mcp:news_search:news-cite-1:item-1"
+    assert ev["news_headlines"][0]["citation_item"] == 1
     # 한 소스의 실패가 다른 소스를 못 죽인다 - 사유는 그대로 남는다
     assert ev["sources"]["disclosures"]["status"] == "FAILED"
-    assert "research-api down" in ev["sources"]["disclosures"]["reason"]
+    assert "dart down" in ev["sources"]["disclosures"]["reason"]
     # price_context 는 자기 기술 UNAVAILABLE (fetch_price_context 내장 규율)
     assert ev["sources"]["price_context"]["status"] == "UNAVAILABLE", ev["sources"]
 
@@ -1610,10 +1671,12 @@ def _check_holdings_evidence():
     assert merged["portfolio_state"]["price_context"]["status"] == "UNAVAILABLE"
 
     # 근거가 하나도 없으면 news 는 상태 보고만 남는다(빈 성공으로 위장 금지)
-    def all_down(url: str):
+    def all_down(*_args, **_kwargs):
         raise RuntimeError("down")
 
-    ev2 = gather_holdings_evidence("005930", get=all_down)
+    ev2 = gather_holdings_evidence(
+        "005930", get=all_down, search_news=all_down,
+        search_disclosures=all_down)
     merged2 = merge_holdings_evidence({"holding_question": "q"}, ev2)
     assert set(merged2["news"]) == {"source_status"}, merged2["news"]
 
@@ -1623,22 +1686,32 @@ def _check_holdings_evidence():
     # 절단이 예산을 지키는지 잰다.
     import json as _json
 
+    def big_news(**_kwargs):
+        return {"citation": "n" * 16,
+                "searched_at": "2026-08-13T09:00:00+09:00",
+                "items": [{"title": "제" * 80,
+                           "originallink": "http://u/" + "x" * 150,
+                           "pubDate": "2026-08-13T09:00:00+09:00"}
+                          for _i in range(10)]}
+
+    def big_disclosures(**_kwargs):
+        return {"citation": "d" * 16,
+                "items": [{"rcept_no": f"receipt-{i}", "report_nm": "공" * 80,
+                           "viewer_url": "http://d/" + "y" * 150,
+                           "rcept_dt": "20260813"}
+                          for i in range(10)]}
+
     def big_get(url: str):
-        if "/evidence/news" in url:
-            return [{"document_id": f"doc-{i}", "title": "제" * 80,
-                     "relation_type": "direct", "url": "http://u/" + "x" * 150,
-                     "published_at": "2026-08-13T09:00:00+09:00",
-                     "observed_at": "2026-08-13T09:00:00+09:00"}
-                    for i in range(10)]
-        if "/evidence/disclosures" in url:
-            return [{"document_id": f"d-{i}", "title": "공" * 80,
-                     "url": "http://d/" + "y" * 150,
-                     "published_at": "2026-08-13", "observed_at": "2026-08-13"}
-                    for i in range(5)]
+        assert "/evidence/" not in url, "뉴스·공시 레거시 DB 경로를 읽었다"
         return [{"bucket_time": f"2026-08-{i:02d}T00:00:00", "close": 70000.0 + i}
                 for i in range(1, 22)]          # /bars → closes 21개
 
-    ev3 = gather_holdings_evidence("005930", get=big_get)
+    ev3 = gather_holdings_evidence(
+        "005930", get=big_get, search_news=big_news,
+        search_disclosures=big_disclosures)
+    assert len(ev3["disclosures_7d"]) == 5, "요청 시점 DART 결과도 프롬프트 상한을 지킨다"
+    assert ev3["disclosures_7d"][0]["evidence_id"] == \
+        f"mcp:dart_search_disclosures:{'d' * 16}:receipt-0"
     merged3 = merge_holdings_evidence(
         {"holding_question": "질문" * 100, "news": "뉴스요약" * 800,
          "portfolio_state": "상태" * 800}, ev3)
@@ -1737,7 +1810,9 @@ def _check_tool_surface():
     import asyncio
 
     names = {t.name for t in asyncio.run(server.list_tools())}
-    assert "run_research_packet" in names and "collector_health" in names, names
+    assert "collector_health" in names, names
+    assert not {"run_research_packet", "get_packet_job", "list_recent_packets",
+                "geopolitical_state"} & names, names
     # 직원 Worker 실행 간선(2026-08-13) - 이 셋이 빠지면 본부장은 다시
     # '워커를 못 부르는 껍데기'다
     for required in ("run_research_workers", "get_worker_job",
@@ -1762,11 +1837,9 @@ def _check_liaison_surface():
     names = {t.name for t in asyncio.run(srv.list_tools())}
     leaked = names & LIAISON_EXCLUDED_TOOLS
     assert not leaked, f"창구 면에 쓰기 도구가 남았다: {sorted(leaked)}"
-    # 창구의 존재 이유인 조회 도구는 살아 있어야 한다 - 다 지우면 그건
-    # 분리가 아니라 불구다. 보유 질의 응답 간선(run_research_workers)도 창구
-    # 몫이다(비구속 worker-context, 원장에 닿지 않는다).
-    for required in ("factory_brief", "factory_outcomes", "list_recent_packets",
-                     "collector_health", "run_research_workers",
+    # Worker 실행과 모델 plane 진단은 본부(full) 면의 capability다. 창구는
+    # durable library/결과 조회만 가지며 worker runtime 파일도 배포받지 않는다.
+    for required in ("factory_brief", "factory_outcomes", "collector_health",
                      "get_worker_job",
                      # Library 조회 면 (2026-08-14) - 질의가 공장에 일을 시키지
                      # 않고 **먼저 읽는** 대상이다. 창구에 없으면 그 구조가
@@ -1774,6 +1847,9 @@ def _check_liaison_surface():
                      "library_signal_shelf", "library_families",
                      "library_scorecard"):
         assert required in names, f"창구 면에서 {required} 가 사라졌다: {names}"
+    for full_only in ("run_research_workers", "worker_model_health"):
+        assert full_only not in names, \
+            f"창구 면에 본부 worker capability가 노출됐다: {full_only}"
     print(f"  창구 면 capability 절단  OK ({len(names)}개, 쓰기 0개)")
 
 
@@ -1810,7 +1886,6 @@ if __name__ == "__main__":
     _check_symbol_guard()
     _check_bearer_auth()
     _check_writer_connection_mode()
-    _check_job_lifecycle()
     _check_worker_payload()
     _check_worker_job_lifecycle()
     _check_skeptic_review_persistence()
@@ -1818,4 +1893,4 @@ if __name__ == "__main__":
     _check_health_summary()
     _check_tool_surface()
     _check_liaison_surface()
-    print("리서치 MCP 11개 영역 통과. 서버는 --serve")
+    print("리서치 MCP 자체 점검 통과. 서버는 --serve")

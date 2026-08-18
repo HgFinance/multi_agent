@@ -5,6 +5,10 @@
 > This dated worker roster is a historical team snapshot. Current worker IDs, counts, and authority boundaries are defined by the department registries and [CURRENT_PROJECT_ARCHITECTURE.md](../CURRENT_PROJECT_ARCHITECTURE.md).
 > 이 문서는 이전 Trading/Accounting 팀 가이드의 운영 기준을 덮어쓴다. Trading의 Paper 구현과 Accounting의 API 주입 Fill 검증을 Production E2E로 해석하지 않는다. 최상위 기준은 [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md), [PROJECT_IMPLEMENTATION_STATUS.md](../PROJECT_IMPLEMENTATION_STATUS.md), [UNIFIED_DOMAIN_API_SPEC.md](../02-engineering/UNIFIED_DOMAIN_API_SPEC.md)다.
 
+> **2026-08-18 권한 보정:** 아래의 “Risk 승인 없는 Submit 차단”과 “BFF
+> read-only” 문장은 Agent·alpha·자동 전략 레인에 적용된다. 인증된 사용자가 자기
+> Fund/Book에 명시한 PAPER 주문은 [ADR-0007](../02-engineering/adr/0007-authenticated-user-paper-directive-authority.md)의 별도 `USER_DIRECTIVE` authority다. Hermes는 대화 transport일 뿐이며, 결정론 parser/BFF와 local durable PaperBroker만 mechanical admission·실행을 담당한다. LS LIVE는 market read-only이고 LIVE 주문은 없다.
+
 ## 0. 상태 판정 규칙
 
 | 상태 | 의미 | 이 팀에서의 대표 예 |
@@ -122,7 +126,7 @@ Paper Fixture나 Frontend Demo는 실제 Broker·공식 원장·운영 NAV를 �
 
 ### P1-2. UI와 Kanban Projection
 
-- `ai-office`와 `apps/api`는 Read-only Projection만 제공한다.
+- `ai-office`는 Read-only Projection만 제공한다. `apps/api`도 기본은 Projection이며, 유일한 쓰기 예외는 ADR-0007의 인증 사용자 PAPER Command BFF다. 이 예외는 OMS·Broker·원장 권한을 BFF로 옮기지 않는다.
 - `DEMO/PAPER/LIVE`, 연결 상태, 마지막 갱신 시각을 명확히 표시하고 Scripted Data를 실시간 금융 상태처럼 표시하지 않는다.
 - ADR-0001의 `agent.status.v1` Bridge·Projector·BFF/WebSocket을 구현하되, Kanban 상태가 Risk·OMS·Ledger를 변경하지 못하게 한다.
 - Frontend dependency High 취약점, clean install/build/test, secret leakage를 별도 Gate로 처리한다.

@@ -173,7 +173,7 @@ class WorkerStats:
 class MarketSink:
     """정규화된 Tick/Quote 를 모아 TimescaleDB 로 넣는다.
 
-    news_pipeline.NewsSink 와 같은 원칙이다 - 크기 또는 시간 중 먼저 오는 쪽으로
+    배치 Sink의 공통 원칙이다 - 크기 또는 시간 중 먼저 오는 쪽으로
     Flush 하고, 남은 것을 절대 버리지 않으며, 실패를 삼키지 않는다.
     """
 
