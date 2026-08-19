@@ -31,13 +31,13 @@ try:
     )
     from .ceo_schemas import (
         GraphNode,
+        KanbanBoardCard,
+        KanbanBoardColumns,
+        KanbanBoardResponse,
         TaskArchiveResponse,
         TaskGraphResponse,
         TaskListItem,
         TaskListResponse,
-        KanbanBoardCard,
-        KanbanBoardColumns,
-        KanbanBoardResponse,
         TaskProgress,
         TaskResult,
         TaskResultResponse,
@@ -70,13 +70,13 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
     )
     from ceo_schemas import (  # type: ignore[no-redef]
         GraphNode,
+        KanbanBoardCard,
+        KanbanBoardColumns,
+        KanbanBoardResponse,
         TaskArchiveResponse,
         TaskGraphResponse,
         TaskListItem,
         TaskListResponse,
-        KanbanBoardCard,
-        KanbanBoardColumns,
-        KanbanBoardResponse,
         TaskProgress,
         TaskResult,
         TaskResultResponse,
