@@ -588,8 +588,13 @@ def gate0(proposal: dict, *, trials_used: int = 0,
         try:
             from alpha_semantics import (check_observables, fingerprint,
                                          lane_of, validate)
-            from intraday_alpha_ast import (conditional_fields_of, fields_of,
-                                            operators_of, parse)
+            from intraday_alpha_ast import (
+                conditional_fields_of,
+                fields_of,
+                operators_of,
+                parse,
+                signal_support_predicate_paths_of,
+            )
 
             plan = validate(proposal.get("semantic_plan") or {})
             if lane_of(plan) != INTRADAY_LANE:
@@ -611,7 +616,9 @@ def gate0(proposal: dict, *, trials_used: int = 0,
             validate_current_explicit_v2_execution_edge(edge_for_runtime)
             alignment = check_observables(
                 plan, fields_of(iexpr), operators=operators_of(iexpr),
-                conditional_fields=conditional_fields_of(iexpr))
+                conditional_fields=conditional_fields_of(iexpr),
+                signal_predicate_paths=
+                    signal_support_predicate_paths_of(iexpr))
             if not alignment["ok"]:
                 r.reject("SEMANTIC_FORMULA_MISMATCH", "; ".join(alignment["missing"]))
             if int(sp.get("horizon_seconds", plan["horizon_seconds"])) != plan["horizon_seconds"]:

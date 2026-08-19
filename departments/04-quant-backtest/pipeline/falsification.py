@@ -51,7 +51,15 @@ _PATTERNS = (
     ("cost_stress", re.compile(
         r"(거래\s*비용|비용|스프레드|슬리피지|bp).{0,30}"
         r"(차감|반영|스트레스|가정).{0,30}(소멸|사라|없|0\s*이하|이하)"
-        r"|(비용).{0,20}(소멸|사라)")),
+        r"|(비용).{0,20}(소멸|사라)"
+        r"|(?i:(predicted|locked).{0,30}(bps|pnl).{0,60}(exceed|spread|round[- ]?trip|charges))"
+        # Microstructure cost criterion used by the queue: the net taker PnL
+        # must exceed observed spread plus governed round-trip charges. Keep
+        # this explicit because the sentence says "does not exceed" and
+        # therefore does not match the legacy "exceed ... charges" branch.
+        r"|(?i:(net\s+predicted\s+taker\s+pnl).{0,80}"
+        r"(does\s+not\s+exceed|not\s+exceed|fails?\s+to\s+exceed).{0,100}"
+        r"(observed\s+spread|spread).{0,80}(governed\s+round[- ]?trip|round[- ]?trip\s+charges))")),
     ("window_signs", re.compile(
         r"(롤링|rolling|walk[- ]?forward|창).{0,30}"
         r"(절반|다수|부호|불안정|반전|재현\s*실패|한\s*구간|한\s*국면)"
@@ -286,6 +294,8 @@ _REAL = [                       # 2026-08-12 에이전트가 실제로 쓴 문�
     "롤링 walk-forward 창의 절반 미만에서만 양의 결과",
     "손실 직후가 아닌 placebo 형성일에서도 동일한 효과",
     "호가불균형 분위수별 20일 선도수익률의 단조성이 사라짐",
+    "locked predicted BPS exceeds the current spread, governed round-trip charges, and minimum_predicted_edge_bps",
+    "net predicted taker PnL does not exceed observed spread plus governed round-trip charges",
 ]
 
 
@@ -301,6 +311,8 @@ def _check_real_sentences_are_classified():
     assert kinds[_REAL[6]] == ("window_signs", True), kinds[_REAL[6]]
     assert kinds[_REAL[7]] == ("placebo", True)
     assert kinds[_REAL[8]] == ("monotonic", True)
+    assert kinds[_REAL[9]] == ("cost_stress", True), kinds[_REAL[9]]
+    assert kinds[_REAL[10]] == ("cost_stress", True), kinds[_REAL[10]]
     runnable = sum(1 for k, r in kinds.values() if r)
     print(f"  실제 문장 분류           OK ({runnable}/{len(_REAL)} 실행 가능)")
 

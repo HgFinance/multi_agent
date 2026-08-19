@@ -471,6 +471,7 @@ def input_hash(dataset_hash: str, config: dict, code_ver: str, seed: int, *,
 # 시장 데이터 뷰 (Dataset 행 -> 날짜/종목 격자)
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class Market:
     dates: list[date]                       # 오름차순 거래일
@@ -512,20 +513,37 @@ class Market:
         receipt = getattr(rows, "_stock_scope_receipt", None)
         dates_seen: set[date] = set()
         opens, closes, notionals, symbols = {}, {}, {}, set()
-        bounds: dict[str, tuple[date, date]] = {}
+        attested_symbols: set[str] = set()
+        attested_bounds: dict[str, tuple[date, date]] = {}
         last_close: dict[str, tuple[date, float]] = {}
         adjustment_gaps: list[AdjustmentGap] = []
         for r in rows:
             iid = str(r["instrument_id"])
-            symbols.add(iid)
             session = r["trade_date"]
+
+            # The stock-scope receipt covers every loaded source row, including
+            # zero-volume rows. Keep that evidence separate from the tradable
+            # observations used to construct returns.
+            attested_symbols.add(iid)
+            current_bound = attested_bounds.get(iid)
+            attested_bounds[iid] = (
+                session if current_bound is None else min(current_bound[0], session),
+                session if current_bound is None else max(current_bound[1], session),
+            )
+
+            # Zero/missing volume means no trade was observed. Treating its
+            # carried price as a zero return suppresses volatility and biases
+            # low-volatility ranks. Keep this in the same O(rows) audit pass.
+            try:
+                volume = float(r.get("volume"))
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(volume) or volume <= 0:
+                continue
+
+            symbols.add(iid)
             close = float(r["close"])
             dates_seen.add(session)
-            current = bounds.get(iid)
-            bounds[iid] = (
-                session if current is None else min(current[0], session),
-                session if current is None else max(current[1], session),
-            )
             opens[(r["trade_date"], iid)] = float(r["open"])
             closes[(r["trade_date"], iid)] = close
             nv = r.get("notional")
@@ -559,11 +577,11 @@ class Market:
         if receipt is not None:
             observed_bounds = tuple(sorted(
                 (instrument_id, first, last)
-                for instrument_id, (first, last) in bounds.items()))
+                for instrument_id, (first, last) in attested_bounds.items()))
             if (not isinstance(receipt, _StockScopeReceipt)
                     or receipt.token is not _STOCK_SCOPE_RECEIPT_TOKEN
                     or receipt.row_count != len(rows)
-                    or receipt.instrument_ids != frozenset(symbols)
+                    or receipt.instrument_ids != frozenset(attested_symbols)
                     or receipt.row_bounds != observed_bounds):
                 raise RuntimeError(
                     "governed stock rows changed after reference validation")
@@ -3457,6 +3475,24 @@ if __name__ == "__main__":
         print("  구성 방식(빼기 포함)     OK")
 
     print(f"{RUNNER_VERSION} 자체 점검 (DB 없음)")
+    def _check_zero_volume_is_not_zero_return():
+        """거래량 0은 관측 부재이지 0수익률이 아니다 (2026-08-17)."""
+        d0, d1, d2 = date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3)
+        rows = [
+            {"instrument_id": "A", "trade_date": d0, "open": 100.0,
+             "close": 100.0, "volume": 1000},
+            # 사고 원문: 거래량 0 행이 이월 종가로 0수익률이 됐다.
+            {"instrument_id": "A", "trade_date": d1, "open": 100.0,
+             "close": 100.0, "volume": 0},
+            {"instrument_id": "A", "trade_date": d2, "open": 100.0,
+             "close": 110.0, "volume": 1000},
+        ]
+        market = Market.from_rows(rows)
+        assert market.dates == [d0, d2], market.dates
+        got = market.momentum(d2, 1)
+        assert set(got) == {"A"} and abs(got["A"] - 0.10) < 1e-12, got
+        print("  거래량 0은 결측으로 제외  OK")
+
     def _check_trade_persistence_is_batched():
         """Remote result storage must not issue one SQL round-trip per fill."""
         import ast
@@ -3471,6 +3507,7 @@ if __name__ == "__main__":
         print("  trade result batch storage    OK")
 
     _check_zombie_reclaim_never_touches_verdicts()
+    _check_zero_volume_is_not_zero_return()
     _check_no_lookahead()
     _check_fifo_and_costs()
     _check_risk_adjusted_metrics_are_numeric_and_honest()
@@ -3491,4 +3528,4 @@ if __name__ == "__main__":
     _check_micro_attach()
     _check_combo_short_sample_is_inconclusive()
     _check_sample_is_clipped_to_micro_coverage()
-    print("Backtest Runner 21개 영역 통과. 실행은 --run")
+    print("Backtest Runner 22개 영역 통과. 실행은 --run")

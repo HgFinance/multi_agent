@@ -135,6 +135,13 @@ COMPLETED_SECOND_REPLAYABLE_FIELDS = (
 )
 
 FIELD_OP = "field"
+LOWER_PREDICATE_POLARITY = "LOWER"
+UPPER_PREDICATE_POLARITY = "UPPER"
+PREDICATE_POLARITIES = frozenset({
+    LOWER_PREDICATE_POLARITY,
+    UPPER_PREDICATE_POLARITY,
+})
+MAX_SIGNAL_SUPPORT_PATHS = 256
 TEMPORAL_OPS = frozenset({"lag", "rolling_mean", "rolling_std", "rolling_sum",
                           "delta", "ewma", "rolling_zscore"})
 UNARY_OPS = frozenset({"neg", "abs", "sign", "log1p_abs", "sqrt_abs"})
@@ -695,6 +702,149 @@ def conditional_fields_of(expr: dict) -> set[str]:
                 walk(current[key])
     walk(node)
     return out
+
+
+def signal_support_predicate_paths_of(
+        expr: dict) -> tuple[frozenset[tuple[str, str]], ...]:
+    """Return predicate paths under which the numeric signal may be non-zero.
+
+    Each item is one conjunction of normalized ``(field, polarity)`` literals;
+    the items together are alternatives.  A directional context is therefore
+    valid only when every possible non-zero output path guarantees it.  This
+    makes output-path dominance explicit instead of collecting fields mentioned
+    by an arbitrary nested selector.
+
+    Direct field/constant ``gt`` and ``lt`` comparisons are normalized from the
+    field's point of view, including reversed operands.  False branches invert
+    the polarity.  Boolean ``and``/``or`` and boolean-valued nested ``where``
+    nodes are expanded into truth paths, so alternative activity fields remain
+    separate valid paths while unrelated or inverted branches cannot borrow a
+    predicate from one another.
+
+    Arithmetic support is conservative.  Additive alternatives are unioned,
+    multiplicative requirements are intersected, and a temporal operator over
+    an internally gated value loses the current-snapshot predicate because its
+    history may stay non-zero after that predicate turns false.  Unsupported or
+    over-complex analysis becomes an unconstrained path and therefore fails
+    closed unless an analyzable outer gate dominates it.
+    """
+    node = parse(expr)
+    empty_path: frozenset[tuple[str, str]] = frozenset()
+
+    def path_key(path: frozenset[tuple[str, str]]) -> tuple:
+        return len(path), tuple(sorted(path))
+
+    def normalize(paths) -> tuple[frozenset[tuple[str, str]], ...]:
+        kept: list[frozenset[tuple[str, str]]] = []
+        for path in sorted(set(paths), key=path_key):
+            # In a union, a less constrained path subsumes a stricter one for
+            # proving a context that must dominate every alternative.
+            if any(existing.issubset(path) for existing in kept):
+                continue
+            kept.append(path)
+            if len(kept) > MAX_SIGNAL_SUPPORT_PATHS:
+                return (empty_path,)
+        return tuple(kept)
+
+    def union(left, right) -> tuple[frozenset[tuple[str, str]], ...]:
+        return normalize((*left, *right))
+
+    def combine(left, right) -> tuple[frozenset[tuple[str, str]], ...]:
+        if not left or not right:
+            return ()
+        combined = []
+        for left_path in left:
+            for right_path in right:
+                combined.append(frozenset(left_path | right_path))
+                if len(combined) > MAX_SIGNAL_SUPPORT_PATHS * 4:
+                    return (empty_path,)
+        return normalize(combined)
+
+    def comparison_literal(current: dict) -> tuple[str, str] | None:
+        op = current.get("op")
+        if op not in {"gt", "lt"}:
+            return None
+        left, right = current["args"]
+        if left.get("op") == FIELD_OP and "const" in right:
+            polarity = (LOWER_PREDICATE_POLARITY if op == "lt"
+                        else UPPER_PREDICATE_POLARITY)
+            return left["field"], polarity
+        if "const" in left and right.get("op") == FIELD_OP:
+            polarity = (UPPER_PREDICATE_POLARITY if op == "lt"
+                        else LOWER_PREDICATE_POLARITY)
+            return right["field"], polarity
+        return None
+
+    def inverted(literal: tuple[str, str]) -> tuple[str, str]:
+        field, polarity = literal
+        inverse = (UPPER_PREDICATE_POLARITY
+                   if polarity == LOWER_PREDICATE_POLARITY
+                   else LOWER_PREDICATE_POLARITY)
+        return field, inverse
+
+    def boolean_paths(current: dict):
+        literal = comparison_literal(current)
+        if literal is not None:
+            return ((frozenset({literal}),),
+                    (frozenset({inverted(literal)}),))
+
+        op = current.get("op")
+        if op in {"and", "or"}:
+            left_true, left_false = boolean_paths(current["args"][0])
+            right_true, right_false = boolean_paths(current["args"][1])
+            if op == "and":
+                return (combine(left_true, right_true),
+                        union(left_false, right_false))
+            return (union(left_true, right_true),
+                    combine(left_false, right_false))
+        if op == "where":
+            selector_true, selector_false = boolean_paths(current["condition"])
+            then_true, then_false = boolean_paths(current["then"])
+            else_true, else_false = boolean_paths(current["else"])
+            true_paths = union(
+                combine(selector_true, then_true),
+                combine(selector_false, else_true),
+            )
+            false_paths = union(
+                combine(selector_true, then_false),
+                combine(selector_false, else_false),
+            )
+            return true_paths, false_paths
+
+        # The grammar guarantees BOOL here, but a transformed comparison has no
+        # controlled direct-field polarity.  Either truth value remains possible.
+        return (empty_path,), (empty_path,)
+
+    def support_paths(current: dict):
+        if "const" in current:
+            return () if float(current["const"]) == 0.0 else (empty_path,)
+
+        op = current.get("op")
+        if op == FIELD_OP:
+            return (empty_path,)
+        if op in TEMPORAL_OPS:
+            # A prior gated observation can keep a temporal value non-zero after
+            # the current context turns false.  Preserve only exact zero-ness.
+            return () if not support_paths(current["arg"]) else (empty_path,)
+        if op in UNARY_OPS:
+            return support_paths(current["arg"])
+        if op == "where":
+            true_paths, false_paths = boolean_paths(current["condition"])
+            return union(
+                combine(true_paths, support_paths(current["then"])),
+                combine(false_paths, support_paths(current["else"])),
+            )
+        if op in {"add", "sub", "min", "max"}:
+            return union(support_paths(current["args"][0]),
+                         support_paths(current["args"][1]))
+        if op in {"mul", "div"}:
+            return combine(support_paths(current["args"][0]),
+                           support_paths(current["args"][1]))
+
+        # A future numeric operator is not proof of context dominance.
+        return (empty_path,)
+
+    return normalize(support_paths(node))
 
 
 def structural_similarity(left: dict, right: dict) -> float:
