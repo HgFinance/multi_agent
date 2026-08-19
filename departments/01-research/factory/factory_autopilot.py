@@ -307,6 +307,12 @@ KANBAN_CLI_CONTAINER = os.getenv("KANBAN_CLI_CONTAINER", "hedgefund-kanban-dispa
 
 RESEARCH_ASSIGNEE = "research-department"
 QUANT_ASSIGNEE = "quant-backtest-department"
+FACTORY_ASSIGNEES = frozenset({RESEARCH_ASSIGNEE, QUANT_ASSIGNEE})
+FACTORY_ORIGIN_HEADER = (
+    "origin=factory\n"
+    "workflow_plane=alpha-factory\n"
+    "user_query_routing=forbidden"
+)
 
 # 컨테이너의 /opt/kanban 이 호스트의 이 경로다. 에이전트 산출물(첨부)을
 # **호스트가 직접 읽는다** - 컨테이너에서 꺼내오는 왕복이 필요 없다.
@@ -2943,6 +2949,14 @@ def _create_card(*, title: str, body: str, assignee: str, key: str,
 
     중복 카드는 같은 실험을 두 번 사는 것과 같다 - 공장의 존재 이유에 반한다.
     """
+    if assignee not in FACTORY_ASSIGNEES:
+        raise ValueError(
+            f"factory cards require a lab profile, got {assignee!r}"
+        )
+    body = (
+        f"{FACTORY_ORIGIN_HEADER}\nfactory_assignee={assignee}\n\n"
+        f"{str(body or '').lstrip()}"
+    )
     if not dry_run and active_family_prefix:
         active = _active_card_by_key_prefix(
             active_family_prefix, fail_closed=True)

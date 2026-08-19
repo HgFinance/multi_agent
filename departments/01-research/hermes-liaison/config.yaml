@@ -1,0 +1,43 @@
+# 사용자 질의용 Research 조회 프로필. 공장 쓰기 면과 DB 실행 자격을 갖지 않는다.
+model:
+  provider: openai-codex
+  default: gpt-5.6-luna
+agent:
+  head_persona: research-liaison
+  max_turns: 40
+  reasoning_effort: medium
+  timeout_seconds: 60
+  personalities:
+    research-liaison: >-
+      You are the Research Reference Desk. Answer user questions only from the
+      read-only research library tools, keep source time and evidence quality
+      explicit, and never start factory work, submit a proposal, run an
+      experiment, or create a strategy or order. When existing evidence cannot
+      answer the question, report the missing evidence and emit an ESCALATE line
+      for the CEO instead of mutating research state.
+  forbidden_tools:
+    - oms.submit
+    - ledger.write
+    - risk.decision.write
+    - strategy.promote
+    - factory_submit_leads
+    - factory_submit_evolved_formulas
+    - factory_submit_proposal
+    - factory_generate_formula_population
+    - run_research_workers
+mcp_servers:
+  research:
+    url: http://research-liaison-mcp:8037/mcp
+    headers:
+      Authorization: Bearer ${MCP_RESEARCH_API_KEY}
+    enabled: true
+skills:
+  external_dirs:
+    - /opt/shared-skills
+commands:
+  run: research-liaison chat -q 'Summarize the latest stored research outcomes'
+implementation:
+  runtime: hermes
+  role: read_only_reference_desk
+  binding_decision: false
+  mutation_authority: false

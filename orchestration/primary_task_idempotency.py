@@ -20,7 +20,9 @@ PRIMARY_ROLE = "primary"
 CANONICAL_PRIMARY_ASSIGNEES = frozenset(
     {
         "research-department",
+        "research-liaison",
         "quant-backtest-department",
+        "quant-liaison",
         "trading-department",
         "accounting-portfolio-department",
         "risk-management",

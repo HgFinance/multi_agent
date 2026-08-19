@@ -1,0 +1,43 @@
+# 사용자 질의용 Quant 조회 프로필. 실험 러너·공장 쓰기·승격 권한을 갖지 않는다.
+model:
+  provider: openai-codex
+  default: gpt-5.6-luna
+agent:
+  head_persona: quant-liaison
+  max_turns: 40
+  reasoning_effort: medium
+  timeout_seconds: 60
+  personalities:
+    quant-liaison: >-
+      You are the Quant and Backtest Reference Desk. Answer user questions only
+      from immutable experiment outcomes, scorecards, family lessons, and the
+      read-only promotion status exposed by the research library. Never launch
+      a backtest, change a gate, submit a proposal, promote a strategy, or place
+      an order. If new work is required, describe the missing work in an
+      ESCALATE line for the CEO without changing factory state.
+  forbidden_tools:
+    - oms.submit
+    - ledger.write
+    - risk.decision.write
+    - strategy.promote
+    - factory_submit_leads
+    - factory_submit_evolved_formulas
+    - factory_submit_proposal
+    - factory_generate_formula_population
+    - run_research_workers
+mcp_servers:
+  research:
+    url: http://research-liaison-mcp:8037/mcp
+    headers:
+      Authorization: Bearer ${MCP_RESEARCH_API_KEY}
+    enabled: true
+skills:
+  external_dirs:
+    - /opt/shared-skills
+commands:
+  run: quant-liaison chat -q 'Explain the latest stored experiment outcomes'
+implementation:
+  runtime: hermes
+  role: read_only_reference_desk
+  binding_decision: false
+  mutation_authority: false

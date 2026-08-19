@@ -80,6 +80,8 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
             "MCP_RESEARCH_API_KEY": frozenset({
                 "research-department",
                 "quant-backtest-department",
+                "research-liaison",
+                "quant-liaison",
             }),
             "MCP_TRADING_ORDER_API_KEY": frozenset({
                 "trading-department",

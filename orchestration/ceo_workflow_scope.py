@@ -77,10 +77,14 @@ def workflow_root_from_body(body: str) -> str:
 # These aliases make the CEO planner's durable selection machine-readable.
 # They do not choose departments; the planner remains the source of truth.
 _PRIMARY_PROFILE_ALIASES = {
+    "research-liaison": (
+        "research-liaison", "research reference desk", "리서치 조회"
+    ),
     "research-department": ("research-department", "research", "리서치", "연구"),
     "quant-backtest-department": (
         "quant-backtest-department", "quant", "backtest", "퀀트"
     ),
+    "quant-liaison": ("quant-liaison", "quant reference desk", "퀀트 조회"),
     "trading-department": ("trading-department", "trading", "트레이딩"),
     "accounting-portfolio-department": (
         "accounting-portfolio-department",

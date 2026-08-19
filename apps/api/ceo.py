@@ -176,6 +176,8 @@ def _user_paper_order_workflow_enabled() -> bool:
 
 _PLANNING_SCHEMA_VERSION = "ceo.query-accepted.v2"
 _PRIMARY_PROFILE_ORDER = (
+    "research-liaison",
+    "quant-liaison",
     "research-department",
     "quant-backtest-department",
     "trading-department",
@@ -184,6 +186,8 @@ _PRIMARY_PROFILE_ORDER = (
     "hr-department",
 )
 _PROFILE_COPY = {
+    "research-liaison": "저장된 연구 결과와 수집 상태를 조회",
+    "quant-liaison": "저장된 실험 결과와 승격 게이트 상태를 조회",
     "research-department": "최신 공시·뉴스·산업 근거를 수집",
     "quant-backtest-department": "정량 검증과 전략 후보를 평가",
     "trading-department": "실행 가능성과 주문 경로를 검토",
@@ -192,6 +196,8 @@ _PROFILE_COPY = {
     "hr-department": "인력·역할·역량을 검토",
 }
 _PROFILE_LABEL = {
+    "research-liaison": "Research 조회",
+    "quant-liaison": "Quant 조회",
     "research-department": "Research",
     "quant-backtest-department": "Quant",
     "trading-department": "Trading",
@@ -200,6 +206,8 @@ _PROFILE_LABEL = {
     "hr-department": "HR",
 }
 _PROFILE_ALIASES = {
+    "research-liaison": ("research-liaison", "리서치 조회", "research reference desk"),
+    "quant-liaison": ("quant-liaison", "퀀트 조회", "quant reference desk"),
     "research-department": ("research-department", "research", "리서치"),
     "quant-backtest-department": ("quant-backtest-department", "quant", "퀀트"),
     "trading-department": ("trading-department", "trading", "트레이딩"),

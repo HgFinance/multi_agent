@@ -167,6 +167,8 @@ _WORKFLOW_METADATA_KEYS = (
     "synthesis_task_ids",
 )
 _PRIMARY_PROFILE_ORDER = (
+    "research-liaison",
+    "quant-liaison",
     "research-department",
     "quant-backtest-department",
     "trading-department",

@@ -44,6 +44,11 @@ DEPARTMENTS=(
   "qa-department:06-ai-qa-audit"
 )
 
+LIAISONS=(
+  "research-liaison:01-research"
+  "quant-liaison:04-quant-backtest"
+)
+
 MODE="${1:-push}"   # push (repo -> ~/.hermes, default) | pull (~/.hermes -> repo)
 
 sync_one() {
@@ -111,6 +116,10 @@ case "$MODE" in
       dept="${entry%%:*}"; folder="${entry##*:}"
       sync_one "$dept" "$SRC_ROOT/$folder/hermes" "$(dest_for "$dept")"
     done
+    for entry in "${LIAISONS[@]}"; do
+      dept="${entry%%:*}"; folder="${entry##*:}"
+      sync_one "$dept" "$SRC_ROOT/$folder/hermes-liaison" "$(dest_for "$dept")"
+    done
     sync_local_skill "ceo-agent" "ceo/hermes-multi-agent-pipelines" "orchestration/hermes-multi-agent-pipelines"
     sync_local_skill "research-department" "methodology-scout" "research/methodology-scout"
     sync_local_skill "research-department" "research/financial-equity-research" "research/financial-equity-research"
@@ -123,6 +132,10 @@ case "$MODE" in
     for entry in "${DEPARTMENTS[@]}"; do
       dept="${entry%%:*}"; folder="${entry##*:}"
       sync_one "$dept" "$(dest_for "$dept")" "$SRC_ROOT/$folder/hermes"
+    done
+    for entry in "${LIAISONS[@]}"; do
+      dept="${entry%%:*}"; folder="${entry##*:}"
+      sync_one "$dept" "$(dest_for "$dept")" "$SRC_ROOT/$folder/hermes-liaison"
     done
     echo "Review with 'git diff' before committing."
     ;;

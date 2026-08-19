@@ -215,6 +215,12 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  # PAPER order payloads and legs accept canonical six-character
                  # uppercase alphanumeric KRX stock codes.
                  "20260819000100_krx_alphanumeric_trading_symbols.sql",
+                 # Factory planning sessions may read only their governed
+                 # Research inputs through svc_quant.
+                 "20260819000200_factory_autopilot_research_read.sql",
+                 # Dataset publication uses a dedicated NOINHERIT role rather
+                 # than broadening the quant planning session.
+                 "20260819000300_dataset_builder_runtime_role.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 

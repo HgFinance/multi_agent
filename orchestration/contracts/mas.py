@@ -23,9 +23,11 @@ TASK_DEPARTMENTS = frozenset(
     {
         "ceo-agent",
         "research-department",
+        "research-liaison",
         "trading-department",
         "risk-management",
         "quant-backtest-department",
+        "quant-liaison",
         "accounting-portfolio-department",
         "qa-department",
         "hr-department",
