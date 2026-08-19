@@ -79,6 +79,25 @@ def test_factory_kanban_has_a_separate_database_dispatcher_and_volume() -> None:
     assert "file:/opt/kanban/kanban.db" not in autopilot
 
 
+def test_local_factory_overlay_preserves_the_isolated_board_boundary() -> None:
+    local_compose = (
+        ROOT / "deploy/local/docker-compose.factory.yml"
+    ).read_text(encoding="utf-8")
+    factory_init = _service_block(local_compose, "factory-kanban-init")
+    factory_dispatcher = _service_block(
+        local_compose, "factory-kanban-dispatcher"
+    )
+
+    assert "factory_dispatcher_home:/opt/data" in factory_init
+    assert "factory_kanban_data:/opt/factory-kanban" in factory_init
+    assert 'user: "1000:1000"' in factory_dispatcher
+    assert "factory_profiles_root:/opt/data/profiles" in factory_dispatcher
+    assert ".hermes-research-department" in factory_dispatcher
+    assert ".hermes-quant-backtest-department" in factory_dispatcher
+    assert "HERMES_KANBAN_BOARD" not in factory_dispatcher
+    assert "/opt/data/shared-kanban" not in factory_dispatcher
+
+
 def test_supervisor_inherits_pinned_environment_for_hermes_client() -> None:
     runner = (ROOT / "scripts/run_ceo_supervisor.py").read_text(encoding="utf-8")
     assert "environment = dict(os.environ)" in runner
