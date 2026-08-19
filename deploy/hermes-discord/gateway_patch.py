@@ -271,6 +271,32 @@ def _author_is_bot(message: Any) -> bool:
     return True if value is None else bool(value)
 
 
+def _mark_ingress_forwarded(adapter: Any, message_id: str) -> None:
+    """Close the gateway-side inbound lease after BFF accepted ownership.
+
+    The canonical BFF path is asynchronous: the gateway is finished as soon
+    as `/ui/ceo/ingress` accepts (or deduplicates) the message, while Kanban
+    and final Discord delivery continue in separate services. Leaving the
+    gateway row in PROCESSING makes a healthy handoff look permanently stuck
+    and eventually re-admits the same Discord message after the active lease.
+    """
+
+    if adapter is None:
+        return
+    try:
+        store = _store(adapter)
+        dedup_key = store.inbound_key_for_message(message_id, _profile_name())
+        if dedup_key:
+            store.mark_inbound(dedup_key, "COMPLETED", _profile_name())
+    except IdempotencyStoreUnavailable:
+        # The BFF may already have committed the request. Never replay through
+        # direct Hermes merely because the local acknowledgement could not be
+        # written; mirror dedup remains the authoritative execution boundary.
+        logger.error(
+            "discord-ingress ledger_ack=failed message_id=%s", message_id
+        )
+
+
 def _forward_to_ingress(message: Any, adapter: Any) -> bool:
     """사람 메시지를 `/ui/ceo/ingress`로 넘긴다. 넘겼으면 True.
 
@@ -362,6 +388,7 @@ def _forward_to_ingress(message: Any, adapter: Any) -> bool:
             logger.info(
                 "discord-ingress status=duplicate message_id=%s", message_id
             )
+            _mark_ingress_forwarded(adapter, message_id)
             return True
         logger.warning(
             "discord-ingress status=failed_closed reason=http_%s message_id=%s",
@@ -385,6 +412,7 @@ def _forward_to_ingress(message: Any, adapter: Any) -> bool:
             message_id,
         )
         return True
+    _mark_ingress_forwarded(adapter, message_id)
     logger.info("discord-ingress status=forwarded message_id=%s", message_id)
     return True
 

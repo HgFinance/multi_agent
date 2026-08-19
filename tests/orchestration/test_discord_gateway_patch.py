@@ -270,6 +270,56 @@ class ForwardToIngressTests(unittest.TestCase):
             captured["authorization"], f"Bearer {self._INGRESS_SECRET}"
         )
 
+    def test_successful_forward_completes_gateway_inbound_lease(self) -> None:
+        """BFF가 소유권을 받으면 gateway PROCESSING lease를 끝낸다."""
+
+        class _Response:
+            status = 202
+
+            def __enter__(self):  # noqa: ANN204 - 컨텍스트 매니저 대역
+                return self
+
+            def __exit__(self, *args: object) -> bool:
+                return False
+
+        class _Adapter:
+            pass
+
+        message = self._message(message_id="handoff-1")
+        env = self._env()
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            "os.environ",
+            {**env, "HERMES_HOME": directory},
+        ), patch("urllib.request.urlopen", return_value=_Response()):
+            adapter = _Adapter()
+            store = gateway_patch._store(adapter)
+            dedup_key = gateway_patch.canonical_discord_dedup_key(
+                "guild-1", "chan-1", "handoff-1"
+            )
+            store.claim_inbound(
+                dedup_key=dedup_key,
+                message_id="handoff-1",
+                guild_id="guild-1",
+                channel_id="chan-1",
+                thread_id=None,
+                profile="ceo-agent",
+                handler="live",
+            )
+            store.mark_inbound(dedup_key, "PROCESSING", "ceo-agent")
+
+            self.assertTrue(gateway_patch._forward_to_ingress(message, adapter))
+            duplicate = store.claim_inbound(
+                dedup_key=dedup_key,
+                message_id="handoff-1",
+                guild_id="guild-1",
+                channel_id="chan-1",
+                thread_id=None,
+                profile="ceo-agent",
+                handler="live",
+            )
+            self.assertFalse(duplicate.admitted)
+            self.assertEqual(duplicate.state, "COMPLETED")
+
     def test_trading_profile_uses_the_same_governed_ingress(self) -> None:
         """Trading-channel orders still create a CEO root and Trading child."""
 
