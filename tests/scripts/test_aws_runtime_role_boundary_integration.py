@@ -203,6 +203,7 @@ def test_fresh_aws_runtime_roles_support_bff_and_isolate_paper_mutations() -> No
         "hgfinance_runtime": {
             "service_role",
             "svc_quant",
+            "svc_dataset_builder",
             "svc_audit_api",
             "svc_qa_worker",
             "svc_qa_reproducer",

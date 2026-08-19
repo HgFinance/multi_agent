@@ -182,7 +182,7 @@ def test_writer_rejects_broad_runtime_role(
     spec.loader.exec_module(writer)
     monkeypatch.setenv("DATABASE_RUNTIME_ROLE", "postgres")
 
-    with pytest.raises(RuntimeError, match="must be svc_quant"):
+    with pytest.raises(RuntimeError, match="must be one of"):
         writer.connect("postgresql://example")
 
 
@@ -201,6 +201,7 @@ def test_writer_accepts_an_explicit_scoped_role_without_global_leakage(
     monkeypatch.delenv("DATABASE_SESSION_URL", raising=False)
 
     assert writer._runtime_role("svc_quant") == "svc_quant"
+    assert writer._runtime_role("svc_dataset_builder") == "svc_dataset_builder"
     assert writer.runtime_session_dsn(
         (
             "postgresql://user:secret@aws-1-ap-northeast-2.pooler."

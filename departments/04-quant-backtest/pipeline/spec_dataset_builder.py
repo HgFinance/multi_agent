@@ -293,7 +293,11 @@ def build(key: str, *, start: date, end: date, dry_run: bool = False,
     # Supabase transaction pooler가 이전 세션의 read-only 기본값을 재사용할 수
     # 있다. 메타 원장은 쓰기 경로이므로 매 트랜잭션을 READ WRITE로 봉인하는
     # 공용 연결을 쓴다(raw psycopg2.connect로 v4 등재가 실제 실패했다).
-    meta = connect_writer(env["DATABASE_URL"], connect_timeout=20)
+    meta = connect_writer(
+        env["DATABASE_URL"],
+        connect_timeout=20,
+        runtime_role="svc_dataset_builder",
+    )
     try:
         rows = fetch(spec, src, start, end)
         print(f"{BUILDER_VERSION}: {key} 원천 {len(rows):,}행 ({start}~{end})",

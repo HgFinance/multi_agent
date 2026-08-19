@@ -472,11 +472,16 @@ def build(name: str, version: str, start: date, end: date) -> int:
     import psycopg2
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "01-research" / "collectors"))
+    from db_writer import connect as connect_writer
     from source_registry import load_project_env
 
     env = load_project_env()
     as_of = datetime.now(timezone.utc)
-    conn = psycopg2.connect(env["DATABASE_URL"], connect_timeout=20)
+    conn = connect_writer(
+        env["DATABASE_URL"],
+        connect_timeout=20,
+        runtime_role="svc_dataset_builder",
+    )
     tconn = psycopg2.connect(env["TIMESCALE_DATABASE_URL"], connect_timeout=20)
     try:
         rows = fetch_bars(tconn, start, end)

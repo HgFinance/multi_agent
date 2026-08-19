@@ -15,6 +15,10 @@ from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 
 _ROLE_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_ALLOWED_RUNTIME_ROLES = frozenset({
+    "svc_dataset_builder",
+    "svc_quant",
+})
 
 
 def _runtime_role(explicit_role: str | None = None) -> str:
@@ -26,8 +30,9 @@ def _runtime_role(explicit_role: str | None = None) -> str:
     role = raw_role.strip()
     if role and _ROLE_PATTERN.fullmatch(role) is None:
         raise RuntimeError("DATABASE_RUNTIME_ROLE is not a safe SQL role name")
-    if role and role != "svc_quant":
-        raise RuntimeError("quant runtime role must be svc_quant")
+    if role and role not in _ALLOWED_RUNTIME_ROLES:
+        allowed = ", ".join(sorted(_ALLOWED_RUNTIME_ROLES))
+        raise RuntimeError(f"quant runtime role must be one of: {allowed}")
     return role
 
 

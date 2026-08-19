@@ -63,6 +63,7 @@ RUNTIME_LOGIN_MEMBERSHIPS = {
 }
 GENERIC_RUNTIME_SET_ROLES = (
     "svc_quant",
+    "svc_dataset_builder",
     "svc_audit_api",
     "svc_qa_worker",
     "svc_qa_reproducer",

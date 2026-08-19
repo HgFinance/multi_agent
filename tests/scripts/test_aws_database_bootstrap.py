@@ -24,10 +24,10 @@ def test_discovers_complete_unique_canonical_chains() -> None:
         bootstrap.MARKET_MIGRATIONS, bootstrap.MARKET_PATTERN
     )
 
-    assert len(control) == 88
+    assert len(control) == 90
     assert len(market) == 8
     assert control[-1].path.name == (
-        "20260819000100_krx_alphanumeric_trading_symbols.sql"
+        "20260819000300_dataset_builder_runtime_role.sql"
     )
     assert market[-1].path.name == "008_microstructure_depth_capacity.sql"
     assert len({migration.version for migration in control}) == len(control)
@@ -112,6 +112,7 @@ def test_runtime_login_contract_has_one_exact_settable_role_per_login() -> None:
     }
     assert bootstrap.GENERIC_RUNTIME_SET_ROLES == (
         "svc_quant",
+        "svc_dataset_builder",
         "svc_audit_api",
         "svc_qa_worker",
         "svc_qa_reproducer",

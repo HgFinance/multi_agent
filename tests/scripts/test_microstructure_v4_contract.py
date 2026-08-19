@@ -172,7 +172,9 @@ def test_feature_catalog_never_mixes_feature_set_versions() -> None:
 
 def test_dataset_manifest_registration_uses_write_safe_connection() -> None:
     source = inspect.getsource(spec_dataset_builder.build)
-    assert "connect_writer(env[\"DATABASE_URL\"]" in source
+    assert "connect_writer(" in source
+    assert 'env["DATABASE_URL"]' in source
+    assert 'runtime_role="svc_dataset_builder"' in source
     assert "meta = psycopg2.connect" not in source
 
 
