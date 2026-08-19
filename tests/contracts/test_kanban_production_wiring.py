@@ -87,6 +87,10 @@ def test_local_factory_overlay_preserves_the_isolated_board_boundary() -> None:
     factory_dispatcher = _service_block(
         local_compose, "factory-kanban-dispatcher"
     )
+    factory_autopilot = _service_block(local_compose, "factory-autopilot")
+    factory_worker = _service_block(
+        local_compose, "factory-experiment-worker"
+    )
 
     assert "factory_dispatcher_home:/opt/data" in factory_init
     assert "factory_kanban_data:/opt/factory-kanban" in factory_init
@@ -96,6 +100,18 @@ def test_local_factory_overlay_preserves_the_isolated_board_boundary() -> None:
     assert ".hermes-quant-backtest-department" in factory_dispatcher
     assert "HERMES_KANBAN_BOARD" not in factory_dispatcher
     assert "/opt/data/shared-kanban" not in factory_dispatcher
+    assert "FACTORY_QUANT_DATA_PATH" in factory_dispatcher
+    assert "/app/quant-data:ro" in factory_dispatcher
+    assert (
+        "factory_quant_runtime_data:/app/quant-data" in factory_autopilot
+    )
+    assert "FACTORY_INTRADAY_DATASET_PATH" in factory_autopilot
+    assert "krx-microstructure-daily-v5:ro" in factory_autopilot
+    assert "factory_quant_runtime_data:/app/quant-data" in factory_worker
+    assert (
+        "intraday_sample_cache:/app/quant-data/intraday-discovery-cache"
+        in factory_worker
+    )
 
 
 def test_supervisor_inherits_pinned_environment_for_hermes_client() -> None:

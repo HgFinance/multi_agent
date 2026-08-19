@@ -34,8 +34,22 @@ services:
       - ./skills:/opt/shared-skills:ro
       - .:/app/repo:ro
       - ${FACTORY_QUANT_CODE_PATH:-./departments/04-quant-backtest}:/app/departments/04-quant-backtest
-      - ${FACTORY_QUANT_DATA_PATH:-./quant-data}:/app/quant-data
+      # Raw/governed datasets are inputs.  Rebuildable caches belong on their
+      # own named volume and must not leak back into the host data directory.
+      - ${FACTORY_QUANT_DATA_PATH:-./quant-data}:/app/quant-data:ro
+
+  factory-autopilot:
+    volumes:
+      - factory_quant_runtime_data:/app/quant-data
+      - ${FACTORY_INTRADAY_DATASET_PATH:-./quant-data/krx-microstructure-daily-v5}:/app/quant-data/krx-microstructure-daily-v5:ro
+
+  factory-experiment-worker:
+    volumes:
+      - factory_quant_runtime_data:/app/quant-data
+      - ${FACTORY_INTRADAY_DATASET_PATH:-./quant-data/krx-microstructure-daily-v5}:/app/quant-data/krx-microstructure-daily-v5:ro
+      - intraday_sample_cache:/app/quant-data/intraday-discovery-cache
 
 volumes:
   factory_dispatcher_home:
   factory_profiles_root:
+  factory_quant_runtime_data:
