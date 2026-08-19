@@ -284,7 +284,8 @@ def test_fixture_identity_never_creates_or_requires_a_fund_grant() -> None:
     memberships.assert_not_called()
 
 
-def test_active_user_profile_rejects_unprovisioned_subject() -> None:
+def test_active_user_profile_falls_back_to_selected_subject_when_unprovisioned() -> None:
+    subject = str(uuid4())
     connection, cursor = _projection_connection()
     cursor.fetchone.return_value = None
     with (
@@ -294,12 +295,10 @@ def test_active_user_profile_rejects_unprovisioned_subject() -> None:
             clear=False,
         ),
         patch.object(auth.psycopg2, "connect", return_value=connection),
-        pytest.raises(HTTPException) as error,
     ):
-        auth.active_user_profile(str(uuid4()))
+        profile = auth.active_user_profile(subject)
 
-    assert error.value.status_code == 403
-    assert error.value.detail == "portfolio_user_not_provisioned"
+    assert profile == {"display_name": subject, "status": "ACTIVE"}
 
 
 @pytest.mark.parametrize(

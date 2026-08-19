@@ -204,9 +204,10 @@ def _portfolio_cors_origins() -> list[str]:
     # rather than silently broadening or weakening the operator's intent.
     if any(not item.strip() for item in raw_origins):
         raise RuntimeError("invalid PORTFOLIO_CORS_ALLOW_ORIGINS entry")
-    allowed_schemes = {"https"}
-    if runtime_environment in {"local", "test"}:
-        allowed_schemes.add("http")
+    # CORS remains an exact origin allowlist in every environment.  Operators
+    # may explicitly allow an HTTP frontend while production is being run on a
+    # private or local network; no implicit HTTP origins are added.
+    allowed_schemes = {"http", "https"}
     configured: list[str] = []
     for item in raw_origins:
         origin = item.strip()

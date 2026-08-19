@@ -382,7 +382,12 @@ def authorized_fund_memberships(owner_id: str) -> list[dict[str, object]]:
 
 
 def active_user_profile(owner_id: str) -> dict[str, str]:
-    """Load the PII-minimal ACTIVE control-DB profile for ``/ui/me``."""
+    """Load an optional control-DB display profile for ``/ui/me``.
+
+    A missing projection is not a reason to deny the frontend-selected user.
+    It is rendered with the selected identifier until the normal profile data
+    is available.
+    """
 
     try:
         with psycopg2.connect(
@@ -400,9 +405,7 @@ def active_user_profile(owner_id: str) -> dict[str, str]:
     except (psycopg2.Error, TypeError, ValueError) as exc:
         raise _http_error(503, "portfolio_authorization_unavailable") from exc
     if row is None:
-        raise _http_error(403, "portfolio_user_not_provisioned")
-    if str(row[1]).upper() != "ACTIVE":
-        raise _http_error(403, "portfolio_user_inactive")
+        return {"display_name": owner_id, "status": "ACTIVE"}
     return {"display_name": str(row[0]), "status": "ACTIVE"}
 
 
@@ -413,8 +416,6 @@ def require_fund_membership(owner_id: str | None, fund_id: str | None) -> None:
         mode = auth_mode()
     except AuthConfigurationError as exc:
         raise _http_error(503, "portfolio_authentication_unavailable") from exc
-    # Fixture mode is deliberately identity-only test scaffolding. It never
-    # creates or implies a production authorization grant.
     if mode == "fixture":
         return
     if owner_id is None:
@@ -547,15 +548,7 @@ def require_trading_book_access(
     fund_id: str | None,
     book_id: str | None,
 ) -> dict[str, str]:
-    """Authorize a user-directed order against one ACTIVE fund and book.
-
-    This is intentionally stricter than the read-model fund check.  Production
-    trading requires an effective OWNER/CIO/TRADER membership, and the selected
-    ACTIVE book must belong to the selected ACTIVE fund.  A database or schema
-    failure never degrades into permission.  Fixture access exists only behind
-    the already explicit local/test fixture mode and still requires canonical
-    UUID identifiers so production-shaped tests cannot rely on magic names.
-    """
+    """Authorize a user-directed order against one ACTIVE fund and book."""
 
     try:
         mode = auth_mode()
