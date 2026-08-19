@@ -159,6 +159,7 @@ def child_handoff_payload(child: ChildTaskState, **extra: Any) -> dict[str, Any]
         "task_id": child.task_id,
         "summary": child.summary,
         "result": child.result,
+        "final_answer": child.final_answer,
         "error": child.error,
         "block_reason": child.block_reason,
     }
@@ -1041,17 +1042,17 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
         body=(
             f"{SUPERVISOR_MARKER} action=SYNTHESIZE\n"
             "workflow_plane=response\nworkflow_mode=binding\n"
-            "Synthesize only after existing QA/Risk/approval gate.\n"
+            "Synthesize only after existing QA/Risk/approval gate. For a marked "
+            "user PAPER-order result, preserve the primary final_answer verbatim; "
+            "a non-binding or rejected result must explicitly say no order was "
+            "submitted and must never be described as pending review.\n"
             + json.dumps(
                 [
-                    {
-                        "task_id": child.task_id,
-                        "profile": child.profile,
-                        "status": child.status,
-                        "summary": child.summary,
-                        "error": child.error,
-                        "block_reason": child.block_reason,
-                    }
+                    child_handoff_payload(
+                        child,
+                        profile=child.profile,
+                        status=child.status,
+                    )
                     for child in state.analysis_children + state.qa_children
                 ],
                 ensure_ascii=False,

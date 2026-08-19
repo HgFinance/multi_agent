@@ -1405,7 +1405,11 @@ class SupervisorWakeupTest(unittest.TestCase):
                 "id": "trading",
                 "assignee": "trading-department",
                 "status": "done",
-                "summary": "PAPER order tool completed",
+                "summary": "PAPER order rejected",
+                "result": (
+                    '{"order_submitted": false, "user_message": "market closed"}'
+                ),
+                "final_answer": "market closed",
                 "body": "workflow_root_task_id=root\nworkflow_role=primary",
             }
         ]
@@ -1430,6 +1434,10 @@ class SupervisorWakeupTest(unittest.TestCase):
         self.assertEqual(
             [item["assignee"] for item in client.created], ["ceo-agent"]
         )
+        synthesis_body = client.created[0]["body"]
+        self.assertIn('\\"order_submitted\\": false', synthesis_body)
+        self.assertIn('"final_answer": "market closed"', synthesis_body)
+        self.assertIn("must never be described as pending review", synthesis_body)
 
     def test_root_body_declares_scope_only_planning_contract(self) -> None:
         body = build_root_body("Samsung", "req-1")
