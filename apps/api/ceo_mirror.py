@@ -270,6 +270,24 @@ class InMemoryMirrorStore:
         return events
 
 
+def _positive_float_env(name: str, default: float) -> float:
+    """유한한 양수만 통과시킨다 - 0/음수/오타는 무한 대기로 되돌아가지 않는다."""
+
+    try:
+        value = float(os.getenv(name, "") or default)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _redis_connect_timeout() -> float:
+    return _positive_float_env("UI_MIRROR_REDIS_CONNECT_TIMEOUT_SECONDS", 2.0)
+
+
+def _redis_socket_timeout() -> float:
+    return _positive_float_env("UI_MIRROR_REDIS_SOCKET_TIMEOUT_SECONDS", 3.0)
+
+
 class RedisMirrorStore:
     """Redis-backed request/event store using the existing compose Redis."""
 
@@ -282,7 +300,27 @@ class RedisMirrorStore:
     ) -> None:
         import redis
 
-        self.client = redis.Redis.from_url(url, decode_responses=True)
+        # **소켓 타임아웃 없이 Redis를 잡으면 요청이 영구히 pending 된다.**
+        # redis-py 기본값은 `socket_timeout=None`(무한 대기)이다. AWS에서
+        # `redis` 컨테이너가 재시작·OOM kill 되거나 conntrack 항목이 만료되면
+        # 풀에 남아 있던 소켓은 닫히지 않고 blackhole 이 되고, 다음 명령은
+        # `recv()`에서 영원히 멈춘다. 이 store 를 쓰는 `POST /ui/ceo/ask` 는
+        # 동기 `def` 핸들러라 그 스레드가 anyio 스레드풀(기본 40개)에서 그대로
+        # 사라지고, 40번 반복되면 BFF의 **모든** 엔드포인트가 응답도 타임아웃도
+        # 없이 대기한다. 예외가 아니라 hang 이므로 아래 `ResilientMirrorStore`
+        # 의 fallback 도 발동하지 못한다 - 반드시 유한한 타임아웃이 필요하다.
+        self.client = redis.Redis.from_url(
+            url,
+            decode_responses=True,
+            socket_connect_timeout=_redis_connect_timeout(),
+            socket_timeout=_redis_socket_timeout(),
+            # 죽은 소켓을 명령 전에 걸러내고, 끊긴 연결 하나로 요청이 실패하지
+            # 않게 한다. 이 store 에는 blocking 명령(BLPOP/XREAD BLOCK)이 없어
+            # socket_timeout 이 정상 대기를 끊을 위험이 없다.
+            socket_keepalive=True,
+            health_check_interval=30,
+            retry_on_timeout=True,
+        )
         self.stream = stream
         self.ttl_seconds = ttl_seconds
         self.request_prefix = "hf:ui-ceo-mirror:request:"

@@ -36,6 +36,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
+import anyio
 from dotenv import load_dotenv
 from fastapi import (
     Depends,
@@ -243,6 +244,97 @@ def _portfolio_cors_origins() -> list[str]:
     return list(dict.fromkeys(origins))
 
 
+@app.middleware("http")
+async def _mark_private_discord_ingress(request: Request, call_next):
+    """Mark only the authenticated Discord service hop for its route."""
+
+    if (
+        request.method == "POST"
+        and request.url.path == DISCORD_INGRESS_PATH
+        and discord_ingress_bearer_is_authorized(
+            request.headers.get("authorization")
+        )
+    ):
+        mark_discord_ingress_request(request)
+    return await call_next(request)
+
+
+# 브라우저와 uvicorn 어느 쪽에도 요청 타임아웃이 없다. uvicorn 은 핸들러에
+# 데드라인을 걸지 않고, 이 EC2 배포에는 앞단 리버스 프록시가 없다(compose 가
+# 8001->8000 을 그대로 노출한다). 그래서 핸들러가 한 번 멈추면 그 요청은 응답도
+# 오류도 없이 영원히 pending 된다 - AWS 에서 관측된 증상이 정확히 이것이다.
+# 예전 Elastic Beanstalk 배포(deploy/eb)에서는 앞단 nginx/ALB 가 60초에 504 를
+# 냈기 때문에 같은 hang 이 "타임아웃"으로 보였다.
+#
+# 이건 근본 원인 수정이 아니라 안전망이다 - 멈춘 것이 스레드풀에서 도는 동기
+# 핸들러면 취소해도 그 스레드는 회수되지 않는다. 504 가 보이기 시작하면 무엇이
+# 멈췄는지 반드시 확인해야 한다.
+#
+# BaseHTTPMiddleware(`@app.middleware("http")`)가 아니라 순수 ASGI middleware 인
+# 이유: BaseHTTPMiddleware 는 `call_next` 를 자체 task group 에서 돌리기 때문에
+# 거기에 `asyncio.wait_for` 를 씌우면 취소가 그 task group 과 얽혀 정상 예외까지
+# ExceptionGroup 으로 뭉개진다(실제로 tests/api 가 그렇게 깨졌다).
+def _request_timeout_seconds() -> float:
+    try:
+        value = float(os.getenv("BFF_REQUEST_TIMEOUT_SECONDS", "30"))
+    except ValueError:
+        return 30.0
+    return value if value > 0 else 30.0
+
+
+# SSE 는 설계상 응답을 열어 둔 채 오래 산다. 데드라인을 걸면 정상 스트림을 끊게
+# 되므로 스트리밍 경로는 제외한다(스트림 수명은 핸들러 안의
+# `UI_MIRROR_SSE_SECONDS` 가 이미 유한하게 제한한다).
+_STREAMING_PATH_SUFFIXES = ("/events/stream",)
+
+
+class RequestDeadlineMiddleware:
+    """Turn an indefinitely stalled handler into an explicit 504."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http" or str(scope.get("path", "")).endswith(
+            _STREAMING_PATH_SUFFIXES
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        started = False
+
+        async def send_wrapper(message) -> None:
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            with anyio.fail_after(_request_timeout_seconds()):
+                await self.app(scope, receive, send_wrapper)
+        except TimeoutError:
+            # 이미 응답 헤더가 나갔으면 두 번째 응답을 보낼 수 없다. 그때는
+            # 연결을 그대로 끊어 클라이언트가 불완전한 본문을 완성본으로
+            # 오해하지 않게 한다.
+            if started:
+                raise
+            response = JSONResponse(
+                status_code=504,
+                content={
+                    "error_code": "BFF_REQUEST_TIMEOUT",
+                    "detail": "portfolio_bff_request_timeout",
+                },
+            )
+            await response(scope, receive, send)
+
+
+app.add_middleware(RequestDeadlineMiddleware)
+
+
+# CORS 는 **가장 바깥** middleware 여야 한다. Starlette 는 나중에 등록한
+# middleware 를 바깥에 놓으므로, 이 호출이 위의 두 middleware 보다 뒤에 있어야
+# 그 middleware 들이 만든 응답(위의 504 포함)에도 CORS 헤더가 붙는다. 안쪽에
+# 두면 브라우저는 504 대신 정체불명의 CORS 오류를 보게 된다.
 # CORS is independent from caller identity. Individual routes retain their
 # domain-level Fund/Book checks without a global JWT/Bearer gate.
 app.add_middleware(
@@ -260,20 +352,6 @@ app.add_middleware(
         "X-User-Id",
     ],
 )
-
-@app.middleware("http")
-async def _mark_private_discord_ingress(request: Request, call_next):
-    """Mark only the authenticated Discord service hop for its route."""
-
-    if (
-        request.method == "POST"
-        and request.url.path == DISCORD_INGRESS_PATH
-        and discord_ingress_bearer_is_authorized(
-            request.headers.get("authorization")
-        )
-    ):
-        mark_discord_ingress_request(request)
-    return await call_next(request)
 
 
 # 각 투자 본부의 Router는 해당 Hermes Profile을 명시적으로 소유한다. CEO·HR은

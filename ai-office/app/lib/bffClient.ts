@@ -10,7 +10,21 @@ export const AUTHENTICATION_REQUIRED_EVENT = "hgfinance:authentication-required"
 export interface BffRequestInit extends RequestInit {
   /** Mutations are never replayed unless the caller explicitly proves idempotency. */
   retryMutationAfterRefresh?: boolean;
+  /** 이 요청만 다른 데드라인을 쓸 때. 0 이하면 데드라인을 걸지 않는다. */
+  timeoutMs?: number;
 }
+
+/**
+ * 요청 데드라인.
+ *
+ * `fetch`에는 기본 타임아웃이 없다. AWS에서 BFF가 응답을 멈추면(스레드풀
+ * 고갈, 죽은 upstream 소켓 등) 브라우저는 오류도 없이 무한히 pending 상태로
+ * 남고, react-query는 응답을 기다리느라 재시도조차 하지 않는다 - "요청이
+ * 영원히 pending인데 타임아웃도 안 난다"의 클라이언트 쪽 절반이 이것이다.
+ * 서버(apps/api/main.py의 `_fail_on_request_deadline`)보다 넉넉하게 잡아,
+ * 서버가 살아 있으면 이쪽이 아니라 서버의 504를 보게 한다.
+ */
+const DEFAULT_TIMEOUT_MS = 45_000;
 
 function requestUrl(path: string): string {
   if (!path.startsWith("/")) throw new Error("bff_path_must_be_absolute");
@@ -70,13 +84,19 @@ function notifyAuthenticationRequired(): void {
  * 요청**이 된다 - 같은 401을 두 번 받고 서버 부하만 두 배가 된다.
  */
 export async function bffFetch(path: string, init: BffRequestInit = {}): Promise<Response> {
-  const { retryMutationAfterRefresh, ...requestInit } = init;
+  const { retryMutationAfterRefresh, timeoutMs, ...requestInit } = init;
   void retryMutationAfterRefresh;
+  // 호출자가 signal을 직접 넘겼으면(SSE 구독처럼 수명을 스스로 관리하는 경우)
+  // 그 수명을 그대로 존중한다. 데드라인이 스트림을 끊으면 안 된다.
+  const deadlineMs = timeoutMs ?? (requestInit.signal ? 0 : DEFAULT_TIMEOUT_MS);
+  const signal =
+    deadlineMs > 0 ? AbortSignal.timeout(deadlineMs) : requestInit.signal;
   let response: Response;
   try {
     response = await fetch(requestUrl(path), {
       ...requestInit,
       cache: init.cache ?? "no-store",
+      signal,
       headers: await authenticatedHeaders(init),
     });
   } catch (cause) {
