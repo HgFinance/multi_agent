@@ -905,6 +905,10 @@
           "path": "/ui/ceo/ask"
         },
         {
+          "method": "GET",
+          "path": "/ui/ceo/kanban"
+        },
+        {
           "method": "POST",
           "path": "/ui/ceo/ingress"
         },

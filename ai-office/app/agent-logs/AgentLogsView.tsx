@@ -10,6 +10,8 @@ import {
 import DepartmentInspector from "./DepartmentInspector";
 import { KANBAN_BASE_URL, resolveKanbanUrl } from "../lib/kanbanUrl";
 import { readDiscordMessages, type DiscordMessage } from "../lib/discordClient";
+import HermesKanbanBoard from "./HermesKanbanBoard";
+import { fetchHermesKanban, type HermesKanbanBoard as HermesKanbanBoardData } from "../lib/kanbanClient";
 
 /**
  * Agent Logs — 페이지 상단(전체 부서 실행 현황).
@@ -180,11 +182,14 @@ export default function AgentLogsView() {
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
   const [streamState, setStreamState] = useState<"connecting" | "connected" | "degraded">("connecting");
   const [lastKeepalive, setLastKeepalive] = useState<string | null>(null);
-  const [kanbanState, setKanbanState] = useState<"loading" | "ready" | "error">("loading");
-
+  const [kanban, setKanban] = useState<HermesKanbanBoardData | null>(null);
+  const [kanbanError, setKanbanError] = useState("");
+  const [kanbanLoading, setKanbanLoading] = useState(true);
   const pageHost = usePageHost();
-  const kanbanUrl = useMemo(() => resolveKanbanUrl(KANBAN_BASE_URL, pageHost || undefined), [pageHost]);
-  const kanbanFailed = !kanbanUrl || kanbanState === "error";
+  const kanbanUrl = useMemo(
+    () => resolveKanbanUrl(KANBAN_BASE_URL, pageHost || undefined),
+    [pageHost],
+  );
 
   useEffect(() => {
     let alive = true;
@@ -193,6 +198,17 @@ export default function AgentLogsView() {
         .then((next) => alive && setData(next))
         .catch((cause) => alive && setError(cause instanceof Error ? cause.message : String(cause)))
         .finally(() => alive && setLoading(false));
+      fetchHermesKanban()
+        .then((next) => {
+          if (!alive) return;
+          setKanban(next);
+          setKanbanError("");
+        })
+        .catch((cause: unknown) => {
+          if (!alive) return;
+          setKanbanError(cause instanceof Error ? cause.message : String(cause));
+        })
+        .finally(() => alive && setKanbanLoading(false));
     };
 
     refresh();
@@ -212,12 +228,6 @@ export default function AgentLogsView() {
       unsubscribe();
     };
   }, []);
-
-  useEffect(() => {
-    if (!kanbanUrl || kanbanState !== "loading") return undefined;
-    const timer = window.setTimeout(() => setKanbanState("error"), 8000);
-    return () => window.clearTimeout(timer);
-  }, [kanbanState, kanbanUrl]);
 
   const departments = data?.departments ?? EMPTY_DEPARTMENTS;
   const registeredWorkers = departments.reduce((total, item) => total + item.worker_count, 0);
@@ -274,79 +284,7 @@ export default function AgentLogsView() {
         </div>
       </section>
 
-      <section className="bg-surface-container-lowest border border-outline-variant rounded-lg overflow-hidden shadow-sm flex flex-col">
-        <div className="bg-surface-container-low border-b border-outline-variant px-4 py-2.5 flex items-center justify-between gap-2">
-          <span className="flex items-center gap-2 text-label-md font-label-md text-on-surface-variant">
-            <span className="material-symbols-outlined text-[16px]" aria-hidden="true">dashboard</span>
-            Hermes Kanban Dashboard
-          </span>
-          <span className="flex gap-1.5" aria-hidden="true">
-            <span className="w-2.5 h-2.5 rounded-full bg-outline-variant" />
-            <span className="w-2.5 h-2.5 rounded-full bg-outline-variant" />
-            <span className="w-2.5 h-2.5 rounded-full bg-outline-variant" />
-          </span>
-        </div>
-
-        <div className="p-6 pb-4 flex justify-between items-start gap-4 flex-wrap">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 mb-2 flex-wrap">
-              <span className="bg-primary text-on-primary px-2 py-1 rounded text-label-md font-label-md">SOURCE OF TRUTH</span>
-              <span className="flex items-center gap-1.5 text-xs text-on-surface-variant">
-                <span className="w-2 h-2 rounded-full bg-tertiary-fixed-dim" aria-hidden="true" />
-                Hermes
-              </span>
-            </div>
-            <h2 className="text-headline-md font-headline-md text-primary">공용 Task Graph / Kanban</h2>
-            <p className="text-body-sm font-body-sm text-on-surface-variant mt-1">
-              Agent Logs에서 확인할 업무 배정과 부서별 Task 상태를 이 보드에서 확인합니다.
-            </p>
-          </div>
-          {kanbanUrl ? (
-            <a
-              href={kanbanUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="px-4 py-2 border border-outline-variant bg-surface-container-lowest rounded font-bold text-label-md font-label-md text-primary hover:bg-surface-container transition-colors inline-flex items-center gap-1 shrink-0"
-            >
-              보드 새 창으로 열기
-              <span className="material-symbols-outlined text-[16px]" aria-hidden="true">open_in_new</span>
-            </a>
-          ) : null}
-        </div>
-
-        <div className="mx-6 mb-6 flex-1 min-h-80 bg-surface-container-low border border-outline-variant rounded relative overflow-auto">
-          {kanbanUrl ? (
-            <iframe
-              title="Hermes Kanban 화면"
-              src={kanbanUrl}
-              onLoad={() => setKanbanState("ready")}
-              onError={() => setKanbanState("error")}
-              className="w-full h-[560px] border-0 bg-white"
-            />
-          ) : null}
-          <div className="absolute top-3 right-3 rounded border border-outline-variant bg-surface-container-lowest/95 px-2 py-1 text-xs text-on-surface-variant">
-            {kanbanFailed ? "보드를 불러오지 못함" : kanbanState === "loading" ? "보드 불러오는 중…" : "Hermes 화면 표시됨"}
-          </div>
-          {kanbanFailed ? (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-surface-container-low p-6 text-center">
-              <span className="material-symbols-outlined text-[40px] text-outline-variant" aria-hidden="true">account_tree</span>
-              <p className="text-body-sm font-body-sm text-on-surface-variant m-0 max-w-lg">
-                {kanbanUrl
-                  ? "Hermes 보드를 불러오지 못했습니다. 새 창으로 열어 인증 상태와 Hermes 실행 여부를 확인하세요."
-                  : "Hermes Kanban 주소 설정이 올바르지 않습니다. 관리자 설정을 확인하세요."}
-              </p>
-              {kanbanUrl ? <code className="text-xs text-outline bg-surface-container px-2 py-1 rounded">{kanbanUrl}</code> : null}
-            </div>
-          ) : null}
-        </div>
-        {kanbanUrl && pageHost && new URL(kanbanUrl).hostname !== pageHost ? (
-          <p role="status" className="mx-6 mb-6 -mt-4 text-xs text-error">
-            이 페이지({pageHost})와 보드({new URL(kanbanUrl).hostname})의 호스트가 달라 iframe 안에서 로그인 세션이 유지되지 않습니다.
-            주소창을 <code className="bg-surface-container px-1 rounded">{new URL(kanbanUrl).hostname}</code>으로 맞춰 접속하거나,
-            보드를 새 창으로 여세요.
-          </p>
-        ) : null}
-      </section>
+      <HermesKanbanBoard board={kanban} error={kanbanError} loading={kanbanLoading} kanbanUrl={kanbanUrl} />
 
       <section className="flex flex-wrap gap-2" aria-label="전체 부서 요약">
         {metrics.map((metric) => (

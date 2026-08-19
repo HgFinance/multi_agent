@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 WorkflowStatus = Literal["queued", "running", "blocked", "failed", "completed", "archived"]
 StageStatus = Literal["todo", "running", "done", "blocked", "failed"]
 NodeRole = Literal["root", "primary", "qa", "synthesis", "user_input"]
+KanbanColumn = Literal["todo", "ready", "inprogress", "done"]
 
 
 class TaskWorkflow(BaseModel):
@@ -157,6 +158,35 @@ class TaskListResponse(BaseModel):
     items: list[TaskListItem]
 
 
+class KanbanBoardCard(BaseModel):
+    """Hermes Kanban row reduced to the fields Agent Logs needs to display."""
+
+    task_id: str
+    title: str
+    assignee: str
+    status: str = Field(description="Hermes 원본 Kanban 상태")
+    created_at: int | float | str | None = None
+
+
+class KanbanBoardColumns(BaseModel):
+    """Stable four-column projection used by the AI Office Agent Logs page."""
+
+    todo: list[KanbanBoardCard] = Field(default_factory=list)
+    ready: list[KanbanBoardCard] = Field(default_factory=list)
+    inprogress: list[KanbanBoardCard] = Field(default_factory=list)
+    done: list[KanbanBoardCard] = Field(default_factory=list)
+
+
+class KanbanBoardResponse(BaseModel):
+    """Read-only Hermes Kanban projection for the operator UI."""
+
+    schema_version: Literal["hermes.agent-kanban.v1"] = "hermes.agent-kanban.v1"
+    source: Literal["hermes-kanban"] = "hermes-kanban"
+    read_only: Literal[True] = True
+    observed_at: str
+    columns: KanbanBoardColumns
+
+
 class TaskArchiveResponse(BaseModel):
     """POST /ui/ceo/tasks/{task_id}/archive"""
 
@@ -204,6 +234,10 @@ __all__ = [
     "CeoQueryAcceptedResponse",
     "CeoQueryAcceptedTask",
     "GraphNode",
+    "KanbanBoardCard",
+    "KanbanBoardColumns",
+    "KanbanBoardResponse",
+    "KanbanColumn",
     "NodeRole",
     "StageStatus",
     "TaskArchiveResponse",

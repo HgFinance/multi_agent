@@ -14,6 +14,7 @@ import re
 import time
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 
 try:
     from . import hermes_boundary
@@ -23,7 +24,9 @@ try:
         Workflow,
         archive_tasks,
         extract_user_query,
+        kanban_column_for_status,
         list_ceo_roots,
+        list_tasks,
         load_workflow,
     )
     from .ceo_schemas import (
@@ -32,6 +35,9 @@ try:
         TaskGraphResponse,
         TaskListItem,
         TaskListResponse,
+        KanbanBoardCard,
+        KanbanBoardColumns,
+        KanbanBoardResponse,
         TaskProgress,
         TaskResult,
         TaskResultResponse,
@@ -57,7 +63,9 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
         Workflow,
         archive_tasks,
         extract_user_query,
+        kanban_column_for_status,
         list_ceo_roots,
+        list_tasks,
         load_workflow,
     )
     from ceo_schemas import (  # type: ignore[no-redef]
@@ -66,6 +74,9 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
         TaskGraphResponse,
         TaskListItem,
         TaskListResponse,
+        KanbanBoardCard,
+        KanbanBoardColumns,
+        KanbanBoardResponse,
         TaskProgress,
         TaskResult,
         TaskResultResponse,
@@ -970,6 +981,51 @@ def ceo_task_list(
                 identified, workflows, strict=True
             )
         ]
+    )
+
+
+@router.get("/kanban", operation_id="ceo_kanban_board", response_model=KanbanBoardResponse)
+def ceo_kanban_board(
+    _authenticated_owner_id: str | None = Depends(current_user),
+) -> KanbanBoardResponse:
+    """Return a read-only four-column projection of the shared Hermes board.
+
+    The BFF owns the Hermes CLI boundary. The browser receives only the small
+    card projection needed by Agent Logs, never the Hermes dashboard, session
+    cookie, database, or mutation commands.
+    """
+
+    try:
+        rows = list_tasks(include_archived=False)
+    except KanbanUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Hermes Kanban을 읽지 못했습니다: {exc}",
+        ) from exc
+
+    columns: dict[str, list[KanbanBoardCard]] = {
+        "todo": [],
+        "ready": [],
+        "inprogress": [],
+        "done": [],
+    }
+    for row in rows:
+        task_id = str(row.get("id") or row.get("task_id") or "").strip()
+        if not task_id:
+            continue
+        status = str(row.get("status") or "unknown").strip().casefold() or "unknown"
+        card = KanbanBoardCard(
+            task_id=task_id,
+            title=str(row.get("title") or task_id).strip() or task_id,
+            assignee=str(row.get("assignee") or "unassigned").strip() or "unassigned",
+            status=status,
+            created_at=row.get("created_at"),
+        )
+        columns[kanban_column_for_status(status)].append(card)
+
+    return KanbanBoardResponse(
+        observed_at=datetime.now(timezone.utc).isoformat(),
+        columns=KanbanBoardColumns(**columns),
     )
 
 

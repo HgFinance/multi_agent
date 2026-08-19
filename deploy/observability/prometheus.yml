@@ -1,0 +1,34 @@
+# Prometheus 스크레이프 설정 - 로컬/EC2 공용 한 파일.
+#
+# 환경별로 파일을 쪼개지 않는다. 없는 타겟은 up=0 으로 뜨고, 그 up 값 자체가
+# "이 환경에 뭐가 떠 있나"를 보여주는 지표다. 파일이 갈리면 로컬에서 고친 설정이
+# EC2 에 안 올라가는 사고가 난다.
+#
+# Prometheus 는 pull 이다 - 각 서비스가 보내는 게 아니라 여기서 긁어간다.
+# 전부 같은 compose 네트워크(hedgefund_default) 안이라 서비스 이름으로 닿는다.
+
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  # 배선 확인용. 앱도 GPU 도 없이 즉시 그래프가 그려지는 유일한 타겟이라
+  # "Grafana 가 붙었나"를 이걸로 판정한다.
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # GPU 하드웨어(util/VRAM/온도/전력). EC2 + docker-compose.model.yml 일 때만 존재.
+  - job_name: gpu
+    static_configs:
+      - targets: ["dcgm-exporter:9400"]
+
+  # vLLM 네이티브 노출 - KV cache 점유율, TTFT, 대기열. 별도 exporter 불필요.
+  - job_name: vllm
+    static_configs:
+      - targets: ["vllm:8000"]
+
+  # 이미 /metrics 를 내고 있는 우리 앱(apps/observability/risk_qa.py).
+  # 값은 파이프라인이 실제로 돌아야 생긴다 - 안 돌면 up=1 이지만 시리즈는 비어 있다.
+  - job_name: apps
+    static_configs:
+      - targets: ["risk-api:8000", "audit-api:8000"]
