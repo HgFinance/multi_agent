@@ -28,6 +28,7 @@ try:
     from .current_user import (
         authorized_trading_books,
         current_user,
+        optional_current_user,
         require_fund_membership,
     )
     from .discord_actor_map import resolve as resolve_discord_actor
@@ -55,6 +56,7 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
     from current_user import (  # type: ignore[no-redef]
         authorized_trading_books,
         current_user,
+        optional_current_user,
         require_fund_membership,
     )
     from discord_actor_map import (
@@ -339,7 +341,7 @@ def mirror_ask(
 def mirror_ingress(
     request: CanonicalIngress,
     http_request: Request,
-    owner_id: str | None = Depends(current_user),
+    owner_id: str | None = Depends(optional_current_user),
 ) -> MirrorIngressResponse:
     """Canonical ingress for a human Web or Discord message."""
 
@@ -349,6 +351,8 @@ def mirror_ingress(
     if request.source != "discord" and internal_discord:
         raise HTTPException(status_code=403, detail="discord_ingress_source_forbidden")
     owner = _resolved_owner(owner_id)
+    if request.source != "discord" and owner_id is None:
+        raise HTTPException(status_code=401, detail="portfolio_authentication_required")
     canonical = request
     if owner is not None:
         if (

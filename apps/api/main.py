@@ -105,6 +105,11 @@ from current_user import (
     require_owner,
 )
 from department_agents import router as department_agent_router
+from discord_ingress_auth import (
+    DISCORD_INGRESS_PATH,
+    bearer_is_authorized as discord_ingress_bearer_is_authorized,
+    mark_request as mark_discord_ingress_request,
+)
 from discord_read import router as discord_read_router
 from domain_read_models import build_domain_read_model
 from governance_client import (
@@ -254,6 +259,21 @@ app.add_middleware(
         "X-User-Id",
     ],
 )
+
+@app.middleware("http")
+async def _mark_private_discord_ingress(request: Request, call_next):
+    """Mark only the authenticated Discord service hop for its route."""
+
+    if (
+        request.method == "POST"
+        and request.url.path == DISCORD_INGRESS_PATH
+        and discord_ingress_bearer_is_authorized(
+            request.headers.get("authorization")
+        )
+    ):
+        mark_discord_ingress_request(request)
+    return await call_next(request)
+
 
 # 각 투자 본부의 Router는 해당 Hermes Profile을 명시적으로 소유한다. CEO·HR은
 # 투자 본부 Agent ask 경로에 섞지 않는다(마스터플랜 5.6).

@@ -272,7 +272,6 @@ def test_opaque_mandate_id_is_authorized_by_canonical_fund() -> None:
     governance = AsyncMock(return_value={"mandate_id": "m-foreign", "fund_id": fund_id})
     with (
         patch.dict(os.environ, _production_auth_environment(), clear=False),
-        patch.object(bff_main, "authenticate_request_headers", return_value=owner_id),
         patch.object(bff_main, "_governance_request", governance),
         patch.object(
             bff_main,
@@ -280,7 +279,9 @@ def test_opaque_mandate_id_is_authorized_by_canonical_fund() -> None:
             side_effect=HTTPException(403, "portfolio_fund_forbidden"),
         ) as membership,
     ):
-        response = TestClient(app).get("/ui/mandates/m-foreign/current")
+        response = TestClient(app).get(
+            "/ui/mandates/m-foreign/current", headers={"X-User-Id": owner_id}
+        )
 
     assert response.status_code == 403
     assert response.json() == {"detail": "portfolio_fund_forbidden"}
@@ -299,12 +300,12 @@ def test_mandate_mutation_rejects_caller_fund_mismatch_before_put() -> None:
     )
     with (
         patch.dict(os.environ, _production_auth_environment(), clear=False),
-        patch.object(bff_main, "authenticate_request_headers", return_value=owner_id),
         patch.object(bff_main, "_governance_request", governance),
         patch.object(bff_main, "require_fund_membership"),
     ):
         response = TestClient(app).put(
             "/ui/mandates/m-1",
+            headers={"X-User-Id": owner_id},
             json={"fund_id": submitted_fund_id},
         )
 
@@ -323,7 +324,6 @@ def test_opaque_approval_id_is_checked_before_decision() -> None:
     )
     with (
         patch.dict(os.environ, _production_auth_environment(), clear=False),
-        patch.object(bff_main, "authenticate_request_headers", return_value=owner_id),
         patch.object(bff_main, "_governance_request", governance),
         patch.object(
             bff_main,
@@ -333,6 +333,7 @@ def test_opaque_approval_id_is_checked_before_decision() -> None:
     ):
         response = TestClient(app).post(
             "/ui/mandate-approvals/a-foreign/decide",
+            headers={"X-User-Id": owner_id},
             json={"decision": "APPROVED"},
         )
 
@@ -350,14 +351,13 @@ def test_global_operator_projection_requires_a_provisioned_fund(path: str) -> No
     owner_id = str(uuid4())
     with (
         patch.dict(os.environ, _production_auth_environment(), clear=False),
-        patch.object(bff_main, "authenticate_request_headers", return_value=owner_id),
         patch.object(
             bff_main,
             "require_any_fund_membership",
             side_effect=HTTPException(403, "portfolio_fund_membership_required"),
         ),
     ):
-        response = TestClient(app).get(path)
+        response = TestClient(app).get(path, headers={"X-User-Id": owner_id})
     assert response.status_code == 403
 
 
@@ -367,7 +367,6 @@ def test_command_audit_is_filtered_to_authorized_funds() -> None:
     foreign_fund = str(uuid4())
     with (
         patch.dict(os.environ, _production_auth_environment(), clear=False),
-        patch.object(bff_main, "authenticate_request_headers", return_value=owner_id),
         patch.object(
             bff_main,
             "require_any_fund_membership",
@@ -382,7 +381,9 @@ def test_command_audit_is_filtered_to_authorized_funds() -> None:
             ],
         ),
     ):
-        response = TestClient(app).get("/ui/commands/audit")
+        response = TestClient(app).get(
+            "/ui/commands/audit", headers={"X-User-Id": owner_id}
+        )
 
     assert response.status_code == 200
     assert response.json()["events"] == [
@@ -405,11 +406,12 @@ def test_ceo_mirror_journal_rejects_a_different_authenticated_owner() -> None:
 
     with (
         patch.dict(os.environ, _production_auth_environment(), clear=False),
-        patch.object(bff_main, "authenticate_request_headers", return_value=owner_id),
         patch.object(ceo_mirror_api, "MIRROR_STORE", store),
     ):
         response = TestClient(app).get(
-            "/ui/ceo/events", params={"request_id": ingress.request_id}
+            "/ui/ceo/events",
+            params={"request_id": ingress.request_id},
+            headers={"X-User-Id": owner_id},
         )
 
     assert response.status_code == 403
@@ -421,11 +423,11 @@ def test_ceo_mirror_ingress_binds_actor_to_verified_subject() -> None:
     foreign_owner = str(uuid4())
     with (
         patch.dict(os.environ, _production_auth_environment(), clear=False),
-        patch.object(bff_main, "authenticate_request_headers", return_value=owner_id),
         patch.object(ceo_mirror_api, "_execute") as execute,
     ):
         response = TestClient(app).post(
             "/ui/ceo/ingress",
+            headers={"X-User-Id": owner_id},
             json={
                 "query": "spoofed actor",
                 "request_id": "request-spoofed-actor",
@@ -484,12 +486,14 @@ def test_discord_source_cannot_use_a_normal_user_ingress_identity() -> None:
     owner_id = str(uuid4())
     with (
         patch.dict(os.environ, _production_auth_environment(), clear=False),
-        patch.object(bff_main, "authenticate_request_headers", return_value=owner_id),
         patch.object(ceo_mirror_api, "_execute") as execute,
     ):
         response = TestClient(app).post(
             "/ui/ceo/ingress",
-            headers={"Authorization": "Bearer user-jwt-placeholder"},
+            headers={
+                "Authorization": "Bearer user-jwt-placeholder",
+                "X-User-Id": owner_id,
+            },
             json={
                 "query": "spoof Discord",
                 "request_id": "discord:998877665544332211",
