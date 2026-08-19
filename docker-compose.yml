@@ -1316,6 +1316,54 @@ services:
     pids_limit: 256
     stop_grace_period: 20s
 
+  # Alpha factory queue is physically isolated from the user/CEO queue.
+  # It has its own persistent SQLite DB, workspace tree, dispatcher process,
+  # and cgroup.  The factory dispatcher mounts only profile state from the
+  # shared Hermes home, so it cannot open the user board DB even accidentally.
+  factory-kanban-dispatcher:
+    image: nousresearch/hermes-agent:latest
+    container_name: hedgefund-factory-kanban-dispatcher
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    init: true
+    command:
+      ["/bin/sh", "-c", "set -eu; python3 /app/repo/deploy/hermes-dispatch-guard/check_guard.py; if [ ! -f /opt/factory-kanban/kanban/boards/alpha-factory/board.json ]; then hermes kanban boards create alpha-factory --name 'Alpha Factory' --description 'Isolated continuous alpha discovery queue'; fi; hermes kanban --board alpha-factory init; exec hermes kanban --board alpha-factory daemon --force --interval \"$${FACTORY_KANBAN_DISPATCH_INTERVAL:-5}\" --max \"$${FACTORY_KANBAN_MAX_SPAWN_PER_TICK:-2}\" --pidfile /opt/factory-kanban/alpha-factory-dispatcher.pid --verbose"]
+    volumes:
+      - /home/ubuntu/.hermes/profiles:/opt/data/profiles
+      - factory_kanban_data:/opt/factory-kanban
+      - ./skills:/opt/shared-skills:ro
+      - .:/app/repo:ro
+      - ./departments/04-quant-backtest:/app/departments/04-quant-backtest
+      - ./quant-data:/app/quant-data
+    environment:
+      PYTHONPATH: /app/repo/deploy/hermes-dispatch-guard
+      HGFINANCE_DISPATCH_GUARD: "1"
+      HERMES_HOME: /opt/data
+      HERMES_UID: 1000
+      HERMES_GID: 1000
+      HERMES_KANBAN_HOME: /opt/factory-kanban
+      HERMES_KANBAN_BOARD: alpha-factory
+      HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      FACTORY_KANBAN_DISPATCH_INTERVAL: ${FACTORY_KANBAN_DISPATCH_INTERVAL:-5}
+      FACTORY_KANBAN_MAX_SPAWN_PER_TICK: ${FACTORY_KANBAN_MAX_SPAWN_PER_TICK:-2}
+      MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /opt/factory-kanban/kanban/boards/alpha-factory/kanban.db"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    mem_limit: 1g
+    mem_reservation: 192m
+    cpus: 1.0
+    pids_limit: 256
+    stop_grace_period: 20s
+
   ceo-kanban-supervisor:
     build:
       context: .
@@ -1420,12 +1468,18 @@ services:
     depends_on:
       timescaledb:
         condition: service_healthy
+      factory-kanban-dispatcher:
+        condition: service_healthy
     environment:
       DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
       TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
       # 카드 생성·보드 조회를 돌릴 컨테이너. 부서에 매이지 않는 kanban 명령용이다.
-      KANBAN_CLI_CONTAINER: ${KANBAN_CLI_CONTAINER:-hedgefund-qa-hermes}
-      KANBAN_READER_CONTAINER: ${KANBAN_READER_CONTAINER:-hedgefund-qa-hermes}
+      # Never route factory reads/writes through the user/CEO dispatcher.
+      KANBAN_CLI_CONTAINER: hedgefund-factory-kanban-dispatcher
+      KANBAN_READER_CONTAINER: hedgefund-factory-kanban-dispatcher
+      FACTORY_KANBAN_BOARD: alpha-factory
+      KANBAN_ATTACH_ROOT: /opt/factory-kanban/kanban/boards/alpha-factory/attachments
+      KANBAN_WORKSPACE_ROOT: /opt/factory-kanban/kanban/boards/alpha-factory/workspaces
       KANBAN_ACCESS_MODE: docker
       HERMES_EXEC_MODE: docker
     volumes:
@@ -1433,6 +1487,7 @@ services:
       # 수확 멱등 표식·반려 이력이 재시작을 넘어 남아야 한다. 컨테이너가
       # 지워지면 같은 카드를 다시 수확하고 같은 반려를 다시 싣는다.
       - factory_state:/root
+      - factory_kanban_data:/opt/factory-kanban:ro
       # ▶ 자동 조종이 하루 한 번 파티션을 다시 굳힌다(0.7단계). 이게 없으면
       #   컨테이너 안에만 쓰고 사라져, 워커가 읽을 때는 파일이 없다 -
       #   "게이트는 통과했는데 로드에서 죽는" 상태가 매일 재생산된다.
@@ -1581,4 +1636,5 @@ volumes:
   tsdb_data:
   portfolio_runtime_data:
   factory_state:
+  factory_kanban_data:
   intraday_sample_cache:

@@ -40,6 +40,38 @@ def test_production_services_pin_the_shared_kanban_database() -> None:
         )
 
 
+def test_factory_kanban_has_a_separate_database_dispatcher_and_volume() -> None:
+    root_compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    user_dispatcher = _service_block(root_compose, "kanban-dispatcher")
+    factory_dispatcher = _service_block(
+        root_compose, "factory-kanban-dispatcher"
+    )
+    factory = _service_block(root_compose, "factory-autopilot")
+
+    assert "HERMES_KANBAN_DB: /opt/data/shared-kanban/kanban.db" in user_dispatcher
+    assert "container_name: hedgefund-factory-kanban-dispatcher" in factory_dispatcher
+    assert "HERMES_KANBAN_HOME: /opt/factory-kanban" in factory_dispatcher
+    assert "HERMES_KANBAN_BOARD: alpha-factory" in factory_dispatcher
+    assert "factory_kanban_data:/opt/factory-kanban" in factory_dispatcher
+    assert "/home/ubuntu/.hermes:/opt/data" not in factory_dispatcher
+    assert "/home/ubuntu/.hermes/profiles:/opt/data/profiles" in factory_dispatcher
+    assert "/opt/data/shared-kanban/kanban.db" not in factory_dispatcher
+    assert "MCP_TRADING_ORDER_API_KEY" not in factory_dispatcher
+
+    assert "factory-kanban-dispatcher:" in factory
+    assert "condition: service_healthy" in factory
+    assert "KANBAN_CLI_CONTAINER: hedgefund-factory-kanban-dispatcher" in factory
+    assert "FACTORY_KANBAN_BOARD: alpha-factory" in factory
+    assert "factory_kanban_data:/opt/factory-kanban:ro" in factory
+
+    autopilot = (
+        ROOT / "departments/01-research/factory/factory_autopilot.py"
+    ).read_text(encoding="utf-8")
+    assert '"hermes", "kanban", "--board", FACTORY_KANBAN_BOARD' in autopilot
+    assert "suffix=f'/kanban/boards/{board}/kanban.db'" in autopilot
+    assert "file:/opt/kanban/kanban.db" not in autopilot
+
+
 def test_supervisor_inherits_pinned_environment_for_hermes_client() -> None:
     runner = (ROOT / "scripts/run_ceo_supervisor.py").read_text(encoding="utf-8")
     assert "environment = dict(os.environ)" in runner
