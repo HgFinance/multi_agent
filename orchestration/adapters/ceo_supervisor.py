@@ -1761,6 +1761,86 @@ class CeoSupervisorService:
                 )
 
 
+
+    def _reconcile_department_terminal_progress(
+        self,
+        *,
+        root_task_id: str,
+        root_payload: Mapping[str, Any],
+        task_payloads: Sequence[Mapping[str, Any]],
+    ) -> None:
+        """Recover terminal department cards from durable task state.
+
+        Hermes kanban watch can coalesce or miss sibling terminal transitions
+        in the same polling window. Re-read all selected primary tasks and
+        idempotently project every terminal state into the existing Discord
+        request thread.
+        """
+        if self.discord_delivery is None:
+            return
+
+        root_body = str(root_payload.get("body") or "")
+        if workflow_mode_from_body(root_body) != "analysis":
+            return
+        if not is_user_query_body(root_body):
+            return
+
+        selected = selected_primary_profiles_from_task(root_payload)
+        if len(selected) < 2:
+            return
+
+        show = getattr(self.client, "show", None)
+
+        for payload in task_payloads:
+            child = ChildTaskState.from_hermes(payload)
+
+            if (
+                child.workflow_role != "primary"
+                or child.profile not in selected
+                or not child.is_in_workflow(root_task_id)
+            ):
+                continue
+
+            candidate = payload
+            if callable(show):
+                try:
+                    candidate = show(child.task_id)
+                    child = ChildTaskState.from_hermes(candidate)
+                except HermesKanbanCommandError:
+                    candidate = payload
+
+            if not child.terminal:
+                continue
+
+            kind = (
+                "blocked"
+                if child.blocked
+                else "failed"
+                if child.failed
+                else "completed"
+            )
+
+            try:
+                self._deliver_department_progress(
+                    root_task_id=root_task_id,
+                    root_payload=root_payload,
+                    task_payload=candidate,
+                    event={
+                        "event_id": f"state-terminal:{child.task_id}:{kind}",
+                        "task_id": child.task_id,
+                        "kind": kind,
+                    },
+                )
+            except Exception as exc:
+                logger.warning(
+                    "department-terminal-reconcile-failed "
+                    "root=%s task=%s profile=%s error=%s",
+                    root_task_id,
+                    child.task_id,
+                    child.profile,
+                    type(exc).__name__,
+                )
+
     def _deliver_department_progress(
         self,
         *,
@@ -2454,6 +2534,14 @@ class CeoSupervisorService:
                             kind,
                             type(exc).__name__,
                         )
+
+                # Recover sibling terminal events that the Hermes watch may
+                # have coalesced or skipped in the same polling window.
+                self._reconcile_department_terminal_progress(
+                    root_task_id=root_id,
+                    root_payload=root_payload,
+                    task_payloads=payloads,
+                )
 
                 children = tuple(
                     ChildTaskState.from_hermes(payload)
