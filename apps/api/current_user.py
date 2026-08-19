@@ -755,37 +755,23 @@ def set_authenticated_request_user(request: Request, owner_id: str | None) -> No
 
 
 def current_user(
-    request: Request,
-    authorization: str | None = Header(default=None, alias="Authorization"),
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
 ) -> str | None:
-    """FastAPI dependency returning the authenticated JWT subject."""
+    """FastAPI dependency returning the user id selected by the frontend."""
 
-    cached = _cached_request_user(request)
-    if cached is not _MISSING:
-        return cached if isinstance(cached, str) else None
-    return authenticate_request_headers(
-        authorization=authorization,
-        x_user_id=x_user_id,
-        required=auth_required(),
-    )
+    owner_id = (x_user_id or "").strip()
+    if not owner_id and auth_required():
+        raise _http_error(401, "portfolio_authentication_required")
+    return owner_id or None
 
 
 def optional_current_user(
-    request: Request,
-    authorization: str | None = Header(default=None, alias="Authorization"),
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
 ) -> str | None:
-    """Optional only in explicit fixture mode; JWT mode always requires a token."""
+    """Return the frontend-selected user id when the route needs one."""
 
-    cached = _cached_request_user(request)
-    if cached is not _MISSING:
-        return cached if isinstance(cached, str) else None
-    return authenticate_request_headers(
-        authorization=authorization,
-        x_user_id=x_user_id,
-        required=False,
-    )
+    owner_id = (x_user_id or "").strip()
+    return owner_id or None
 
 
 def require_owner(
