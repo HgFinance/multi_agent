@@ -49,14 +49,21 @@ def test_factory_kanban_has_a_separate_database_dispatcher_and_volume() -> None:
     factory = _service_block(root_compose, "factory-autopilot")
 
     assert "HERMES_KANBAN_DB: /opt/data/shared-kanban/kanban.db" in user_dispatcher
+    factory_init = _service_block(root_compose, "factory-kanban-init")
+
     assert "container_name: hedgefund-factory-kanban-dispatcher" in factory_dispatcher
-    assert "HERMES_KANBAN_HOME: /opt/data/factory-kanban" in factory_dispatcher
+    assert "factory-kanban-init:" in factory_dispatcher
+    assert "condition: service_completed_successfully" in factory_dispatcher
+    assert "HERMES_KANBAN_HOME: /opt/factory-kanban" in factory_dispatcher
     assert "HERMES_KANBAN_BOARD: alpha-factory" in factory_dispatcher
-    assert "factory_kanban_data:/opt/data/factory-kanban" in factory_dispatcher
+    assert "factory_kanban_data:/opt/factory-kanban" in factory_dispatcher
     assert "/home/ubuntu/.hermes:/opt/data" not in factory_dispatcher
     assert "/home/ubuntu/.hermes/profiles:/opt/data/profiles" in factory_dispatcher
     assert "/opt/data/shared-kanban/kanban.db" not in factory_dispatcher
     assert "MCP_TRADING_ORDER_API_KEY" not in factory_dispatcher
+    assert 'user: "0:0"' in factory_init
+    assert "network_mode: none" in factory_init
+    assert "factory_kanban_data:/opt/factory-kanban" in factory_init
 
     assert "factory-kanban-dispatcher:" in factory
     assert "condition: service_healthy" in factory

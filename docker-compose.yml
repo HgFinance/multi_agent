@@ -1320,10 +1320,24 @@ services:
   # It has its own persistent SQLite DB, workspace tree, dispatcher process,
   # and cgroup.  The factory dispatcher mounts only profile state from the
   # shared Hermes home, so it cannot open the user board DB even accidentally.
+  factory-kanban-init:
+    image: nousresearch/hermes-agent:latest
+    container_name: hedgefund-factory-kanban-init
+    user: "0:0"
+    restart: "no"
+    network_mode: none
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["install -d -o 1000 -g 1000 -m 0750 /opt/factory-kanban && chown -R 1000:1000 /opt/factory-kanban"]
+    volumes:
+      - factory_kanban_data:/opt/factory-kanban
+
   factory-kanban-dispatcher:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-factory-kanban-dispatcher
     restart: unless-stopped
+    depends_on:
+      factory-kanban-init:
+        condition: service_completed_successfully
     logging:
       driver: "json-file"
       options:
@@ -1331,12 +1345,10 @@ services:
         max-file: "3"
     init: true
     command:
-      ["/bin/sh", "-c", "set -eu; python3 /app/repo/deploy/hermes-dispatch-guard/check_guard.py; if [ ! -f /opt/data/factory-kanban/kanban/boards/alpha-factory/board.json ]; then hermes kanban boards create alpha-factory --name 'Alpha Factory' --description 'Isolated continuous alpha discovery queue'; fi; hermes kanban --board alpha-factory init; exec hermes kanban --board alpha-factory daemon --force --interval \"$${FACTORY_KANBAN_DISPATCH_INTERVAL:-5}\" --max \"$${FACTORY_KANBAN_MAX_SPAWN_PER_TICK:-2}\" --pidfile /opt/data/factory-kanban/alpha-factory-dispatcher.pid --verbose"]
+      ["/bin/sh", "-c", "set -eu; python3 /app/repo/deploy/hermes-dispatch-guard/check_guard.py; if [ ! -f /opt/factory-kanban/kanban/boards/alpha-factory/board.json ]; then hermes kanban boards create alpha-factory --name 'Alpha Factory' --description 'Isolated continuous alpha discovery queue'; fi; hermes kanban --board alpha-factory init; exec hermes kanban --board alpha-factory daemon --force --interval \"$${FACTORY_KANBAN_DISPATCH_INTERVAL:-5}\" --max \"$${FACTORY_KANBAN_MAX_SPAWN_PER_TICK:-2}\" --pidfile /opt/factory-kanban/alpha-factory-dispatcher.pid --verbose"]
     volumes:
       - /home/ubuntu/.hermes/profiles:/opt/data/profiles
-      # Keep the writable board under HERMES_HOME so the image entrypoint
-      # applies the configured Hermes UID/GID to a newly-created volume.
-      - factory_kanban_data:/opt/data/factory-kanban
+      - factory_kanban_data:/opt/factory-kanban
       - ./skills:/opt/shared-skills:ro
       - .:/app/repo:ro
       - ./departments/04-quant-backtest:/app/departments/04-quant-backtest
@@ -1347,7 +1359,7 @@ services:
       HERMES_HOME: /opt/data
       HERMES_UID: 1000
       HERMES_GID: 1000
-      HERMES_KANBAN_HOME: /opt/data/factory-kanban
+      HERMES_KANBAN_HOME: /opt/factory-kanban
       HERMES_KANBAN_BOARD: alpha-factory
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
       FACTORY_KANBAN_DISPATCH_INTERVAL: ${FACTORY_KANBAN_DISPATCH_INTERVAL:-5}
@@ -1355,7 +1367,7 @@ services:
       MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     healthcheck:
-      test: ["CMD-SHELL", "test -s /opt/data/factory-kanban/kanban/boards/alpha-factory/kanban.db"]
+      test: ["CMD-SHELL", "test -s /opt/factory-kanban/kanban/boards/alpha-factory/kanban.db"]
       interval: 5s
       timeout: 3s
       retries: 12
