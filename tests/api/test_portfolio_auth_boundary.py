@@ -151,12 +151,23 @@ def test_cors_origin_configuration_is_exact_and_fail_closed() -> None:
     assert "access-control-allow-origin" not in preflight.headers
 
 
+def test_production_cors_allows_an_explicit_http_origin() -> None:
+    with patch.dict(
+        os.environ,
+        {
+            "APP_ENV": "production",
+            "PORTFOLIO_CORS_ALLOW_ORIGINS": "http://localhost:3002",
+        },
+        clear=False,
+    ):
+        assert bff_main._portfolio_cors_origins() == ["http://localhost:3002"]
+
+
 @pytest.mark.parametrize(
     "value",
     (
         "*",
         "https://*.example.com",
-        "http://app.example.com",
         "https://user:password@app.example.com",
         "https://app.example.com/path",
         "https://app.example.com?query=1",
