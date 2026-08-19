@@ -56,6 +56,11 @@ For a marked task:
    market language still requires exact `ORDER_TYPE` evidence. Any limit marker
    without exactly one valid price must clarify, and every LIMIT field requires
    exact source evidence.
+   For `PLACE_ORDER`, evidence contains exactly `INSTRUMENT`, `SIDE`,
+   `QUANTITY`, and explicit `ORDER_TYPE` (plus `LIMIT_PRICE` for a limit order).
+   Do not add `ACTION` evidence: the trusted verifier derives PLACE_ORDER from
+   the validated side/order fields. `ACTION` evidence is reserved for aggregate
+   actions such as sell-all or cancel-all.
    For `CLARIFY` or `NOT_ORDER`, set `action`, `instrument_mention`, `side`,
    `quantity`, `order_type`, and `limit_price` to `null`, set `evidence` to an
    empty list, and include at least one exact `reason_codes` value. Partial facts
@@ -69,8 +74,13 @@ For a marked task:
    and status reconciliation.
 5. Copy the tool result faithfully into the structured task result, then make
    exactly one terminal Kanban transition. A Trading task completion reports
-   interpretation/tool completion only; it does not claim a fill or accounting
-   acknowledgement unless the returned durable state explicitly says so.
+   interpretation/tool completion only. If the tool result includes
+   `user_message`, copy that text verbatim as the first sentence of
+   `final_answer`. When it reports `trading_market_session_closed`, clearly
+   state that the KRX regular market is closed and that no order was submitted,
+   filled, or posted to the ledger. Never describe that outcome as pending
+   review. Do not claim a fill or accounting acknowledgement unless the
+   returned durable state explicitly says so.
 
 This exception does not change the strategy-generated lane above. Every normal
 strategy OrderIntent still requires the existing Risk/Compliance Gate and all

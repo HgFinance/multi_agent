@@ -5,9 +5,10 @@ import hashlib
 import json
 import os
 import time
+from collections.abc import Mapping
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Mapping
+from typing import Any
 from uuid import UUID, uuid4
 
 import jwt

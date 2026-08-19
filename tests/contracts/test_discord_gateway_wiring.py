@@ -159,6 +159,20 @@ class DiscordGatewayWiringTests(unittest.TestCase):
         self.assertIn("gateway_patch.py", ceo_dockerfile)
         self.assertIn("install_hermes_discord_patch.py", ceo_dockerfile)
 
+    def test_gateway_images_make_repo_modules_runtime_readable(self) -> None:
+        copied_modules = (
+            "orchestration/__init__.py",
+            "orchestration/discord_idempotency.py",
+            "orchestration/primary_task_idempotency.py",
+        )
+        for name in ("Dockerfile.hermes-discord", "Dockerfile.ceo-hermes"):
+            dockerfile = (ROOT / name).read_text(encoding="utf-8")
+            for module in copied_modules:
+                self.assertIn(f"COPY --chmod=0644 {module}", dockerfile, name)
+            permission_index = dockerfile.index("RUN chmod -R a+rX /opt/hgfinance")
+            install_index = dockerfile.index("python3 /tmp/install_hermes_discord_patch.py")
+            self.assertLess(permission_index, install_index, name)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -33,6 +33,7 @@ import hashlib
 import json
 import re
 import sys
+from pathlib import Path
 
 from strategy_templates import EDGE_VOCAB   # noqa: E402  (같은 디렉터리 모듈)
 
@@ -170,6 +171,14 @@ def family_key(hyp: dict) -> dict:
             from intraday_alpha_ast import shape_fingerprint
             key["formula_shape_fingerprint"] = shape_fingerprint(expr)
     elif edge.get("signal_expr") is not None:
+        # Resolve the shared contract on split quant mounts.
+        _candidates = (
+            Path("/app/repo/departments/01-research/contracts"),
+            Path(__file__).resolve().parents[2] / "01-research" / "contracts",
+        )
+        _contracts = next((p for p in _candidates if p.is_dir()), _candidates[0])
+        if str(_contracts) not in sys.path:
+            sys.path.insert(0, str(_contracts))
         from alpha_ast_surface import shape_fingerprint
         key["formula_shape_fingerprint"] = shape_fingerprint(
             edge["signal_expr"])

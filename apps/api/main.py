@@ -97,26 +97,14 @@ from command_service import (
 from current_user import (
     active_user_profile,
     auth_mode,
-    auth_required,
-    authenticate_request_headers,
     authorized_fund_memberships,
     authorized_trading_books,
     current_user,
     require_any_fund_membership,
     require_fund_membership,
     require_owner,
-    set_authenticated_request_user,
 )
 from department_agents import router as department_agent_router
-from discord_ingress_auth import (
-    DISCORD_INGRESS_PATH,
-)
-from discord_ingress_auth import (
-    bearer_is_authorized as discord_ingress_bearer_is_authorized,
-)
-from discord_ingress_auth import (
-    mark_request as mark_discord_ingress_request,
-)
 from discord_read import router as discord_read_router
 from domain_read_models import build_domain_read_model
 from governance_client import (
@@ -249,65 +237,16 @@ def _portfolio_cors_origins() -> list[str]:
     return list(dict.fromkeys(origins))
 
 
-# Only load-balancer probes are anonymous.  Every business/read-model path,
-# including routers mounted outside ``/ui``, crosses the same identity policy.
-# This also keeps newly added domain routers protected by default.
-_AUTH_EXEMPT_HTTP_PATHS = frozenset({"/health", "/health/ready"})
-
-
-def _requires_portfolio_authentication(request: Request) -> bool:
-    return (
-        request.method != "OPTIONS"
-        and request.url.path not in _AUTH_EXEMPT_HTTP_PATHS
-    )
-
-
-@app.middleware("http")
-async def _authenticate_portfolio_request(request: Request, call_next):
-    """Authenticate every externally reachable BFF domain route centrally."""
-
-    if _requires_portfolio_authentication(request):
-        # The CEO Discord gateway is an internal service, not a browser user,
-        # and cannot carry a Supabase JWT.  Its single-purpose credential is
-        # accepted on this exact POST path only.  The route subsequently maps
-        # the immutable Discord author id to an authorized PAPER principal.
-        internal_discord_ingress = (
-            request.method == "POST"
-            and request.url.path == DISCORD_INGRESS_PATH
-            and discord_ingress_bearer_is_authorized(
-                request.headers.get("authorization")
-            )
-        )
-        if internal_discord_ingress:
-            set_authenticated_request_user(request, None)
-            mark_discord_ingress_request(request)
-            return await call_next(request)
-        try:
-            owner_id = await run_in_threadpool(
-                authenticate_request_headers,
-                authorization=request.headers.get("authorization"),
-                x_user_id=request.headers.get("x-user-id"),
-                required=auth_required(),
-            )
-            set_authenticated_request_user(request, owner_id)
-        except HTTPException as exc:
-            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
-    return await call_next(request)
-
-
-# Starlette inserts each newly registered middleware at the front. Register
-# CORS after the auth boundary so it remains outermost and decorates even
-# fail-closed 401/403/503 responses for an allowed frontend origin.
+# CORS is independent from caller identity. Individual routes retain their
+# domain-level Fund/Book checks without a global JWT/Bearer gate.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_portfolio_cors_origins(),
-    # Browser identity uses an explicit Bearer header, never ambient cookies.
     # Credentials stay disabled, so wildcard+credentials cannot be introduced.
     allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "OPTIONS"],
     allow_headers=[
         "Accept",
-        "Authorization",
         "Content-Type",
         "Last-Event-ID",
         "Idempotency-Key",
@@ -1364,23 +1303,6 @@ def ui_command_audit(
 @app.websocket("/ws/operations")
 async def operations_websocket(websocket: WebSocket) -> None:
     """Read-only Agent Status Event stream with REST snapshot recovery."""
-
-    # A browser WebSocket cannot set an Authorization header with the native
-    # API.  Until the frontend implements a short-lived authenticated ticket or
-    # a reviewed subprotocol transport, production therefore fails closed here
-    # before accepting the handshake and before building any snapshot.
-    try:
-        owner_id = await run_in_threadpool(
-            authenticate_request_headers,
-            authorization=websocket.headers.get("authorization"),
-            x_user_id=websocket.headers.get("x-user-id"),
-            required=auth_required(),
-        )
-        await run_in_threadpool(require_any_fund_membership, owner_id)
-    except HTTPException as exc:
-        close_code = {401: 4401, 403: 4403}.get(exc.status_code, 1011)
-        await websocket.close(code=close_code, reason=str(exc.detail))
-        return
 
     await websocket.accept()
     last_sequence = 0

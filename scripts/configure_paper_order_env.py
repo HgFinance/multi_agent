@@ -14,6 +14,9 @@ Examples::
     python scripts/configure_paper_order_env.py --runtime local \
         --rotate-key MCP_RESEARCH_API_KEY \
         --rotate-key MCP_TRADING_ORDER_API_KEY
+
+``.env.example`` is the only tracked template. Runtime-specific ``.env.*``
+files are private inputs, not additional templates or sources of truth.
 """
 
 from __future__ import annotations
@@ -45,9 +48,6 @@ AWS_DATABASE_SECRET_KEYS = (
     "HEDGEFUND_TRADING_DB_PASSWORD",
     "HEDGEFUND_ACCOUNTING_DB_PASSWORD",
 )
-# Backwards-compatible public name used by local tooling and tests.  AWS adds
-# the four database credentials through ``_secret_keys_for_runtime`` below.
-SECRET_KEYS = SERVICE_SECRET_KEYS
 ROTATABLE_MCP_KEYS = (
     "MCP_RESEARCH_API_KEY",
     "MCP_TRADING_ORDER_API_KEY",
@@ -111,6 +111,7 @@ class ConfigureResult:
     changed: bool
     preserved_secret_keys: tuple[str, ...]
     generated_secret_keys: tuple[str, ...]
+    deduplicated_keys: tuple[str, ...]
 
 
 def _logical_value(raw_value: str) -> str:
@@ -139,6 +140,18 @@ def _parse_assignments(text: str) -> dict[str, EnvAssignment]:
             key=key, raw_value=match.group("value").strip()
         )
     return assignments
+
+
+def _duplicate_assignment_keys(text: str) -> tuple[str, ...]:
+    """Return duplicate dotenv key names without exposing their values."""
+
+    counts: dict[str, int] = {}
+    for line in text.splitlines():
+        match = _ASSIGNMENT_RE.match(line)
+        if match is not None:
+            key = match.group("key")
+            counts[key] = counts.get(key, 0) + 1
+    return tuple(sorted(key for key, count in counts.items() if count > 1))
 
 
 def _safe_nonempty(value: str) -> bool:
@@ -281,20 +294,29 @@ def _newline_for(text: str) -> str:
 
 
 def _render_env(text: str, settings: Mapping[str, str]) -> str:
-    """Replace each managed key once and remove its duplicate assignments."""
+    """Render one effective assignment per key without changing its value."""
 
     newline = _newline_for(text)
+    assignments = _parse_assignments(text)
+    duplicate_keys = frozenset(_duplicate_assignment_keys(text))
     rendered: list[str] = []
     seen: set[str] = set()
     for line in text.splitlines():
         match = _ASSIGNMENT_RE.match(line)
         key = match.group("key") if match is not None else None
-        if key not in settings:
+        if key is None:
             rendered.append(line)
             continue
         if key in seen:
             continue
-        rendered.append(f"{key}={settings[key]}")
+        if key in settings:
+            rendered.append(f"{key}={settings[key]}")
+        elif key in duplicate_keys:
+            # dotenv uses last-assignment-wins. Keep that effective raw value at
+            # the first documented position and remove every shadow assignment.
+            rendered.append(f"{key}={assignments[key].raw_value}")
+        else:
+            rendered.append(line)
         seen.add(key)
 
     missing = [key for key in settings if key not in seen]
@@ -355,6 +377,7 @@ def configure_environment(
         raise ConfigurationError("could not read the environment file") from exc
 
     assignments = _parse_assignments(original)
+    duplicate_keys = _duplicate_assignment_keys(original)
     requested_rotation = frozenset(str(key).strip() for key in rotate_keys)
     invalid_rotation = requested_rotation.difference(ROTATABLE_MCP_KEYS)
     if invalid_rotation:
@@ -397,6 +420,7 @@ def configure_environment(
         changed=changed,
         preserved_secret_keys=preserved,
         generated_secret_keys=generated,
+        deduplicated_keys=duplicate_keys,
     )
 
 
@@ -438,7 +462,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(
         f"PAPER-order environment {action} for {result.runtime}; "
         f"preserved {len(result.preserved_secret_keys)} secret(s), "
-        f"generated {len(result.generated_secret_keys)} secret(s)."
+        f"generated {len(result.generated_secret_keys)} secret(s), "
+        f"deduplicated {len(result.deduplicated_keys)} key(s)."
     )
     print("Secret values were not printed.")
     return 0

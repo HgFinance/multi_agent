@@ -82,6 +82,14 @@ _DEFAULT_KANBAN_READ_TIMEOUT_SECONDS = 12.0
 _MIN_KANBAN_READ_TIMEOUT_SECONDS = 2.0
 _MAX_KANBAN_READ_TIMEOUT_SECONDS = 30.0
 
+_MARKET_SESSION_CLOSED_MESSAGE = (
+    "\ud604\uc7ac KRX \uc815\uaddc\uc7a5\uc774 \uc5f4\ub824 "
+    "\uc788\uc9c0 \uc54a\uc544 PAPER \uc8fc\ubb38\uc744 "
+    "\uc81c\ucd9c\ud558\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4. "
+    "\uc8fc\ubb38\u00b7\uccb4\uacb0\u00b7\uc6d0\uc7a5 "
+    "\ubc18\uc601\uc740 \uc5c6\uc2b5\ub2c8\ub2e4."
+)
+
 
 class PaperOrderOrchestrationRejected(ValueError):
     """The supplied Kanban/DB authority scope did not match exactly."""
@@ -272,10 +280,19 @@ def _directive_result(
         "decision": CandidateDecision.EXECUTE.value,
         "mode": "PAPER",
         "binding": True,
+        "order_submitted": True,
         "order_request_id": record.order_request_id,
         "request_state": record.state,
         "directive": response.model_dump(mode="json"),
     }
+
+
+def _non_execution_user_message(reason_codes: list[str]) -> str | None:
+    """Return a deterministic Discord-safe explanation for known rejections."""
+
+    if "trading_market_session_closed" in reason_codes:
+        return _MARKET_SESSION_CLOSED_MESSAGE
+    return None
 
 
 def _non_execution_result(
@@ -284,16 +301,21 @@ def _non_execution_result(
     decision: str,
     reason_codes: list[str],
 ) -> dict[str, Any]:
-    return {
+    result = {
         "schema_version": RESULT_SCHEMA_VERSION,
         "decision": decision,
         "mode": "PAPER",
         "binding": False,
+        "order_submitted": False,
         "order_request_id": record.order_request_id,
         "request_state": record.state,
         "reason_codes": reason_codes,
         "directive": None,
     }
+    user_message = _non_execution_user_message(reason_codes)
+    if user_message:
+        result["user_message"] = user_message
+    return result
 
 
 def _existing_directive_result(

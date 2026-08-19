@@ -108,6 +108,15 @@ CONTEXT_FIELDS = {
     "LOW_VOLATILITY": frozenset({"realized_volatility_bps"}),
 }
 
+CONTEXT_PREDICATE_POLARITY = {
+    "TIGHT_SPREAD": "LOWER",
+    "LOW_ACTIVITY": "LOWER",
+    "LOW_VOLATILITY": "LOWER",
+    "WIDE_SPREAD": "UPPER",
+    "HIGH_ACTIVITY": "UPPER",
+    "HIGH_VOLATILITY": "UPPER",
+}
+
 
 def _one(value, allowed: frozenset[str], field: str) -> str:
     item = str(value or "").strip().upper()
@@ -215,13 +224,26 @@ def fingerprint(plan: dict) -> str:
 
 
 def check_observables(plan: dict, fields, *, operators=None,
-                      conditional_fields=None) -> dict:
+                      conditional_fields=None,
+                      signal_predicate_paths=None) -> dict:
     """Deterministic semantic-to-formula alignment check."""
     parsed = validate(plan)
     actual = {str(field) for field in fields}
     ops = {str(op) for op in (operators or ())}
     conditioned = ({str(field) for field in conditional_fields}
                    if conditional_fields is not None else None)
+    support_paths = None
+    if signal_predicate_paths is not None:
+        try:
+            support_paths = tuple(
+                frozenset((str(field), str(polarity).strip().upper())
+                          for field, polarity in path)
+                for path in signal_predicate_paths
+            )
+        except (TypeError, ValueError):
+            # Malformed or unknown support evidence is an unconstrained path,
+            # never permission to infer a directional semantic context.
+            support_paths = (frozenset(),)
     event_expected = EVENT_FIELDS[parsed["event"]]
     missing = []
     if not actual & event_expected:
@@ -234,6 +256,31 @@ def check_observables(plan: dict, fields, *, operators=None,
         elif expected and conditioned is not None and not conditioned & expected:
             missing.append(
                 f"context {context} must gate the signal with one of {sorted(expected)}")
+        required_polarity = CONTEXT_PREDICATE_POLARITY.get(context)
+        if expected and required_polarity:
+            violations = []
+            if support_paths is None:
+                violations.append("signal-support analysis was not supplied")
+            elif not support_paths:
+                violations.append("no non-zero output support path was proven")
+            else:
+                for index, path in enumerate(support_paths, start=1):
+                    observed = {
+                        polarity for field, polarity in path
+                        if field in expected
+                    }
+                    if observed == {required_polarity}:
+                        continue
+                    detail = (f"observed polarities {sorted(observed)}"
+                              if observed else
+                              "has no matching controlled predicate")
+                    violations.append(f"path {index} {detail}")
+            if violations:
+                missing.append(
+                    f"context {context} requires a "
+                    f"{required_polarity.lower()}-polarity predicate on one of "
+                    f"{sorted(expected)} on every non-zero output path; "
+                    + "; ".join(violations))
     qualities = set(parsed["qualities"])
     if "PERSISTENCE" in qualities and not ops & {
             "lag", "rolling_mean", "rolling_sum", "ewma"}:

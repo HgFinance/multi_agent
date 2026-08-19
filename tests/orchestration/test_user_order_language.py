@@ -190,6 +190,37 @@ def _execute_place(raw: str, candidate: HermesOrderCandidate) -> VerifiedPaperDi
     return result
 
 
+def test_place_order_accepts_redundant_exact_action_side_evidence() -> None:
+    """Hermes may ground PLACE_ORDER and BUY in the same exact buy verb."""
+
+    raw = "<@1536991290842030130> 삼성전자 3주 시장가 매수"
+    candidate = _place_candidate(
+        raw,
+        instrument="삼성전자",
+        side_text="매수",
+        side=OrderSide.BUY,
+        quantity_text="3주",
+        quantity=3,
+        order_type_text="시장가",
+        order_type=OrderType.MARKET,
+    )
+    payload = candidate.model_dump(mode="json")
+    payload["evidence"].append(
+        _evidence(
+            raw,
+            EvidenceField.ACTION,
+            "매수",
+            DirectiveAction.PLACE_ORDER.value,
+        ).model_dump(mode="json")
+    )
+
+    result = verify_order_candidate(raw, payload)
+
+    assert isinstance(result, VerifiedPaperDirective)
+    assert result.payload is not None
+    assert result.payload.quantity == "3"
+
+
 def test_exact_user_example_compiles_to_unresolved_paper_payload() -> None:
     raw = "삼성전자 매수 10주 시장가"
     result = _execute_place(

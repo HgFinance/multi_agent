@@ -287,8 +287,10 @@ def _forward_to_ingress(message: Any, adapter: Any) -> bool:
         return False
     ingress_secret = _ingress_secret()
     if ingress_secret is None:
-        logger.error("discord-ingress status=failed reason=credential_unavailable")
-        return False
+        logger.error(
+            "discord-ingress status=failed_closed reason=credential_unavailable"
+        )
+        return True
     message_id = str(getattr(message, "id", "") or "")
     if not message_id:
         return False
@@ -350,7 +352,7 @@ def _forward_to_ingress(message: Any, adapter: Any) -> bool:
             },
             method="POST",
         )
-        timeout = float(os.getenv(INGRESS_TIMEOUT_ENV, "10"))
+        timeout = float(os.getenv(INGRESS_TIMEOUT_ENV, "30"))
         with urllib.request.urlopen(request, timeout=timeout) as response:
             status = int(getattr(response, "status", 0) or 0)
     except urllib.error.HTTPError as exc:
@@ -362,26 +364,27 @@ def _forward_to_ingress(message: Any, adapter: Any) -> bool:
             )
             return True
         logger.warning(
-            "discord-ingress status=failed reason=http_%s message_id=%s",
+            "discord-ingress status=failed_closed reason=http_%s message_id=%s",
             exc.code,
             message_id,
         )
-        return False
-    except Exception as exc:  # noqa: BLE001 - 전달 실패는 기존 경로로 되돌린다.
+        return True
+    except Exception as exc:  # noqa: BLE001 - ambiguous commit must not be replayed.
         logger.warning(
-            "discord-ingress status=failed reason=transport exception_type=%s message_id=%s",
+            "discord-ingress status=failed_closed reason=transport "
+            "exception_type=%s message_id=%s",
             type(exc).__name__,
             message_id,
         )
-        return False
+        return True
 
     if status not in (200, 202):
         logger.warning(
-            "discord-ingress status=failed reason=http_%s message_id=%s",
+            "discord-ingress status=failed_closed reason=http_%s message_id=%s",
             status,
             message_id,
         )
-        return False
+        return True
     logger.info("discord-ingress status=forwarded message_id=%s", message_id)
     return True
 
@@ -596,10 +599,11 @@ def _wrap_handle_message(cls: type[Any]) -> None:
         # Upstream Hermes auto-threading remains disabled.
         routed_message = await _ensure_request_thread(self, message)
 
-        # BFF ingress is the canonical path when configured.  Forward the
+        # BFF ingress is the canonical path when configured. Forward the
         # routed message so the BFF receives both the parent channel and the
-        # actual request-thread id.  If forwarding fails, the exact same
-        # routed message continues through the direct Hermes fallback.
+        # actual request-thread id. Once selected, this boundary owns the
+        # message even when the outcome is ambiguous; replaying through direct
+        # Hermes could create a second workflow after the BFF committed.
         if _forward_to_ingress(routed_message, self):
             return True
 

@@ -228,7 +228,9 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
             plan = validate(semantic_plan)
             alignment = check_observables(
                 plan, fields, operators=ast.operators_of(candidate),
-                conditional_fields=ast.conditional_fields_of(candidate))
+                conditional_fields=ast.conditional_fields_of(candidate),
+                signal_predicate_paths=
+                    ast.signal_support_predicate_paths_of(candidate))
             if not alignment["ok"]:
                 raise ValueError(
                     "SEMANTIC_MISMATCH: " + "; ".join(alignment["missing"]))

@@ -511,6 +511,35 @@ def test_transport_unknown_is_persisted_and_never_auto_retried(
     assert record.directive_id is None
 
 
+def test_closed_market_reports_explicit_non_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _workflow(monkeypatch)
+    submit = Mock(
+        side_effect=HTTPException(
+            status_code=409,
+            detail="trading_market_session_closed",
+        )
+    )
+    monkeypatch.setattr(orchestrator, "submit_verified_paper_directive", submit)
+
+    result = _process(context, _execute_candidate(context.raw))
+
+    assert result["decision"] == "REJECTED"
+    assert result["binding"] is False
+    assert result["order_submitted"] is False
+    assert result["directive"] is None
+    assert result["reason_codes"] == ["trading_market_session_closed"]
+    assert result["user_message"] == (
+        "\ud604\uc7ac KRX \uc815\uaddc\uc7a5\uc774 \uc5f4\ub824 "
+        "\uc788\uc9c0 \uc54a\uc544 PAPER \uc8fc\ubb38\uc744 "
+        "\uc81c\ucd9c\ud558\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4. "
+        "\uc8fc\ubb38\u00b7\uccb4\uacb0\u00b7\uc6d0\uc7a5 "
+        "\ubc18\uc601\uc740 \uc5c6\uc2b5\ub2c8\ub2e4."
+    )
+    submit.assert_called_once()
+
+
 def test_accounting_pending_is_not_reported_as_completed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
