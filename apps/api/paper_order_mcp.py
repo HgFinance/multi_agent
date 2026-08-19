@@ -204,7 +204,7 @@ def build_server(*, host: str = "0.0.0.0", port: int = MCP_PORT):
             "to PAPER, and callers must never add user, fund, book, mode-override, "
             "token, or service-proof arguments."
             " Every evidence item must include normalized; INSTRUMENT normalized"
-            " must exactly equal instrument_mention.",
+            " must exactly equal instrument_mention."
         ),
         structured_output=True,
     )
