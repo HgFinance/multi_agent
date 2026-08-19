@@ -96,6 +96,27 @@ def test_selection_fails_closed_on_unresolved_or_ambiguous_identity(
         ls_realtime_service.select_stock_capture_universe(symbols, rows)
 
 
+def test_large_snapshot_quarantines_a_tiny_stale_unmapped_tail_with_evidence():
+    symbols = tuple(f"{value:06d}" for value in range(1, 1_001))
+    rows = [_row(symbol, value) for value, symbol in enumerate(symbols[:-1], 1)]
+
+    selected = ls_realtime_service.select_stock_capture_universe(symbols, rows)
+
+    assert len(selected.included) == 999
+    assert selected.excluded_by_reason == {
+        ls_realtime_service.STALE_UNMAPPED_REASON: ("001000",),
+    }
+    assert len(selected.fingerprint) == 64
+
+
+def test_large_snapshot_still_fails_closed_on_broad_reference_loss():
+    symbols = tuple(f"{value:06d}" for value in range(1, 1_001))
+    rows = [_row(symbol, value) for value, symbol in enumerate(symbols[:-10], 1)]
+
+    with pytest.raises(ls_realtime_service.LsRealtimeError, match="coverage="):
+        ls_realtime_service.select_stock_capture_universe(symbols, rows)
+
+
 def test_selection_rejects_an_all_non_stock_capture():
     with pytest.raises(ls_realtime_service.LsRealtimeError, match="0개"):
         ls_realtime_service.select_stock_capture_universe(
