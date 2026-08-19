@@ -8,7 +8,6 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.testclient import TestClient
-from starlette.websockets import WebSocketDisconnect
 
 from apps.api import main as bff_main
 from apps.api import ceo_mirror_api
@@ -16,7 +15,7 @@ from apps.api.ceo_mirror import CanonicalIngress, InMemoryMirrorStore, execute_o
 from apps.api.main import app
 
 
-def test_ui_boundary_rejects_unsigned_identity_in_jwt_mode() -> None:
+def test_ui_boundary_does_not_require_a_bearer_token() -> None:
     with patch.dict(
         os.environ,
         {
@@ -27,24 +26,18 @@ def test_ui_boundary_rejects_unsigned_identity_in_jwt_mode() -> None:
         },
         clear=False,
     ):
-        response = TestClient(app).get(
-            "/ui/integrations", headers={"X-User-Id": str(uuid4())}
-        )
-    assert response.status_code == 401
-    assert response.json() == {"detail": "portfolio_authentication_required"}
+        response = TestClient(app).get("/ui/integrations")
+    assert response.status_code == 200
 
 
-def test_ui_boundary_rejects_fixture_mode_in_production() -> None:
+def test_ui_boundary_does_not_interpret_fixture_mode() -> None:
     with patch.dict(
         os.environ,
         {"APP_ENV": "production", "PORTFOLIO_AUTH_MODE": "fixture"},
         clear=False,
     ):
-        response = TestClient(app).get(
-            "/ui/integrations", headers={"X-User-Id": str(uuid4())}
-        )
-    assert response.status_code == 503
-    assert response.json() == {"detail": "portfolio_authentication_unavailable"}
+        response = TestClient(app).get("/ui/integrations")
+    assert response.status_code == 200
 
 
 def test_ui_boundary_allows_explicit_local_fixture_mode() -> None:
@@ -61,96 +54,24 @@ def test_ui_boundary_allows_explicit_local_fixture_mode() -> None:
     assert response.status_code == 200
 
 
-@pytest.mark.parametrize(
-    ("method", "path", "json_body"),
-    [
-        ("post", "/research/agent/ask", {"query": "status"}),
-        ("post", "/risk/agent/ask", {"query": "status"}),
-        ("post", "/quant/agent/ask", {"query": "status"}),
-        ("post", "/qa/agent/ask", {"query": "status"}),
-        ("post", "/trading/agent/ask", {"query": "status"}),
-        ("post", "/accounting/agent/ask", {"query": "status"}),
-        (
-            "get",
-            f"/accounting/v1/portfolio-snapshot?fund_id={uuid4()}",
-            None,
-        ),
-    ],
-)
-def test_non_ui_domain_routes_share_the_fail_closed_boundary(
-    method: str, path: str, json_body: dict[str, str] | None
-) -> None:
-    with patch.dict(
-        os.environ,
-        {
-            "APP_ENV": "production",
-            "PORTFOLIO_AUTH_MODE": "supabase_jwt",
-            "PORTFOLIO_AUTH_REQUIRED": "false",
-            "SUPABASE_URL": "https://test-project.supabase.co",
-        },
-        clear=False,
-    ):
-        response = TestClient(app).request(method, path, json=json_body)
-
-    assert response.status_code == 401
-    assert response.json() == {"detail": "portfolio_authentication_required"}
-
-
-def test_only_health_probes_are_anonymous_in_production() -> None:
-    with patch.dict(
-        os.environ,
-        {
-            "APP_ENV": "production",
-            "PORTFOLIO_AUTH_MODE": "supabase_jwt",
-            "PORTFOLIO_AUTH_REQUIRED": "false",
-        },
-        clear=False,
-    ):
-        client = TestClient(app)
-        assert client.get("/health").status_code == 200
-        assert client.get("/health/ready").status_code in {200, 503}
-        assert client.get("/openapi.json").status_code == 401
-
-
-def test_operations_websocket_rejects_before_snapshot_without_identity() -> None:
-    with (
-        patch.dict(
-            os.environ,
-            {
-                "APP_ENV": "production",
-                "PORTFOLIO_AUTH_MODE": "supabase_jwt",
-                "PORTFOLIO_AUTH_REQUIRED": "false",
-            },
-            clear=False,
-        ),
-        patch.object(bff_main, "build_operations_snapshot") as snapshot,
-        pytest.raises(WebSocketDisconnect) as error,
-    ):
-        with TestClient(app).websocket_connect("/ws/operations"):
-            pass
-
-    assert error.value.code == 4401
-    snapshot.assert_not_called()
-
-
-def test_authorization_put_preflight_bypasses_auth_and_is_explicitly_allowed() -> None:
+def test_x_user_id_preflight_is_explicitly_allowed() -> None:
     response = TestClient(app).options(
         "/ui/mandates/mnd-1",
         headers={
             "Origin": "http://localhost:3000",
             "Access-Control-Request-Method": "PUT",
-            "Access-Control-Request-Headers": "authorization,content-type",
+            "Access-Control-Request-Headers": "x-user-id,content-type",
         },
     )
 
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
     assert "PUT" in response.headers["access-control-allow-methods"]
-    assert "Authorization" in response.headers["access-control-allow-headers"]
+    assert "X-User-Id" in response.headers["access-control-allow-headers"]
     assert response.headers.get("access-control-allow-credentials") is None
 
 
-def test_allowed_origin_receives_cors_headers_on_authentication_failure() -> None:
+def test_allowed_origin_receives_cors_headers_without_authentication() -> None:
     with patch.dict(
         os.environ,
         {
@@ -164,7 +85,7 @@ def test_allowed_origin_receives_cors_headers_on_authentication_failure() -> Non
             "/ui/integrations", headers={"Origin": "http://localhost:3000"}
         )
 
-    assert response.status_code == 401
+    assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
 
 

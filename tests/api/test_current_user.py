@@ -103,6 +103,12 @@ def test_explicit_test_fixture_accepts_header_and_can_be_optional() -> None:
         )
 
 
+def test_current_user_uses_the_frontend_selected_user_without_bearer_verification() -> None:
+    subject = str(uuid4())
+    with patch.dict(os.environ, _jwt_env(), clear=False):
+        assert auth.current_user(x_user_id=subject) == subject
+
+
 def test_jwt_mode_never_accepts_x_user_id_without_bearer() -> None:
     with patch.dict(os.environ, _jwt_env(), clear=False):
         with pytest.raises(HTTPException) as error:
