@@ -53,7 +53,10 @@ from orchestration.ceo_workflow_scope import (
     workflow_mode_from_body,
     workflow_role_from_body,
 )
-from orchestration.discord_delivery import DiscordFinalDelivery
+from orchestration.discord_delivery import (
+    DiscordFinalDelivery,
+    correlation_from_task,
+)
 from orchestration.discord_idempotency import DiscordIdempotencyStore
 
 logger = logging.getLogger(__name__)
@@ -621,6 +624,50 @@ def _delegation_plan_from_root_body(body: str) -> dict[str, str]:
         plan[profile] = instruction
 
     return plan
+
+
+def _materialization_plan_body(
+    root_payload: Mapping[str, Any],
+) -> str:
+    """Return the durable CEO-authored delegation projection for materialization.
+
+    BFF-created roots keep immutable request/scope data in the task body. The
+    direct CEO planner may persist its semantic routing plan as a root-local
+    ceo-agent comment. Only a complete CEO-authored planning comment is allowed
+    to augment the root body; user or department comments are never consulted.
+    """
+
+    root_body = str(root_payload.get("body") or "")
+
+    body_has_complete_plan = (
+        "selected_primary_profiles=" in root_body
+        and "delegation_instruction." in root_body
+        and _analysis_execution_mode_from_root_body(root_body) is not None
+    )
+    if body_has_complete_plan:
+        return root_body
+
+    comments = root_payload.get("comments")
+    if not isinstance(comments, Sequence) or isinstance(comments, (str, bytes)):
+        return root_body
+
+    for comment in reversed(comments):
+        if not isinstance(comment, Mapping):
+            continue
+        if str(comment.get("author") or "").strip().casefold() != "ceo-agent":
+            continue
+
+        comment_body = str(comment.get("body") or "")
+        if (
+            "selected_primary_profiles=" not in comment_body
+            or "delegation_instruction." not in comment_body
+            or _analysis_execution_mode_from_root_body(comment_body) is None
+        ):
+            continue
+
+        return root_body + "\n" + comment_body
+
+    return root_body
 
 
 def _initial_primary_materialization_decisions(
@@ -1584,49 +1631,50 @@ class CeoSupervisorService:
                 delivery_store = DiscordIdempotencyStore(delivery_home)
                 ceo_profile = canonical_profile_for_department("ceo")
 
-                # hgfinance-synthesis-parent-delivery-v1
+                # hgfinance-synthesis-thread-only-v1
                 #
-                # Multi-primary synthesis has two projections:
-                #   1. the canonical CEO final answer in the parent channel
-                #   2. the complete synthesis in the existing request thread
+                # A Discord request that owns a request thread keeps its entire
+                # workflow output in that exact thread.  The originating parent
+                # channel contains only the user's root request.
                 #
-                # The thread is supplementary detail. It must never replace the
-                # user-facing final CEO response in the channel where the request
-                # originated.
-                parent_status = self.discord_delivery.deliver(
-                    root_task_id=root_task_id,
-                    synthesis_task=delivery_task,
-                    content=content,
-                    store=delivery_store,
-                    profile=ceo_profile,
-                )
+                # Legacy/web/no-thread flows retain the historical parent reply
+                # as a compatibility fallback.
+                correlation = correlation_from_task(delivery_task)
 
-                logger.info(
-                    "synthesis-discord-parent root=%s task=%s status=%s",
-                    root_task_id,
-                    task_id,
-                    parent_status,
-                )
+                if correlation.thread_id:
+                    thread_status = self.discord_delivery.deliver_to_existing_thread(
+                        root_task_id=root_task_id,
+                        source_task=delivery_task,
+                        root_task=root_payload,
+                        content=content,
+                        title="🧠 CEO 종합",
+                        store=delivery_store,
+                        profile=ceo_profile,
+                        response_key_suffix=f"synthesis-detail:{task_id}",
+                    )
 
-                # Also preserve the complete CEO synthesis in the SAME
-                # request thread as the department detailed outputs.
-                thread_status = self.discord_delivery.deliver_to_existing_thread(
-                    root_task_id=root_task_id,
-                    source_task=delivery_task,
-                    root_task=root_payload,
-                    content=content,
-                    title="🧠 CEO 종합",
-                    store=delivery_store,
-                    profile=ceo_profile,
-                    response_key_suffix=f"synthesis-detail:{task_id}",
-                )
+                    logger.info(
+                        "synthesis-discord-thread root=%s task=%s status=%s",
+                        root_task_id,
+                        task_id,
+                        thread_status,
+                    )
+                else:
+                    parent_status = self.discord_delivery.deliver(
+                        root_task_id=root_task_id,
+                        synthesis_task=delivery_task,
+                        content=content,
+                        store=delivery_store,
+                        profile=ceo_profile,
+                    )
 
-                logger.info(
-                    "synthesis-discord-thread root=%s task=%s status=%s",
-                    root_task_id,
-                    task_id,
-                    thread_status,
-                )
+                    logger.info(
+                        "synthesis-discord-parent-fallback "
+                        "root=%s task=%s status=%s",
+                        root_task_id,
+                        task_id,
+                        parent_status,
+                    )
 
     def _reconcile_department_start_progress(
         self,
@@ -1899,6 +1947,7 @@ class CeoSupervisorService:
             body = str(row.get("body") or "")
             status = str(row.get("status") or "").casefold()
             created_at = int(row.get("created_at") or 0)
+            completed_at = int(row.get("completed_at") or 0)
 
             if (
                 not task_id
@@ -1906,15 +1955,19 @@ class CeoSupervisorService:
                 or (
                     status == "done"
                     and (
-                        created_at <= 0
-                        or now - created_at > done_recovery_window_seconds
+                        completed_at <= 0
+                        or now - completed_at > done_recovery_window_seconds
                     )
                 )
-                or workflow_role_from_body(body) != "root"
+                or (
+                    workflow_role_from_body(body) != "root"
+                    and not (
+                        "root_task_role=scope_and_planning" in body
+                        and "planning_terminal_state=done_after_child_creation" in body
+                    )
+                )
                 or not is_user_query_body(body)
                 or workflow_mode_from_body(body) != "analysis"
-                or "selected_primary_profiles=" not in body
-                or "delegation_instruction." not in body
             ):
                 continue
 
@@ -1953,7 +2006,14 @@ class CeoSupervisorService:
                 root_body = str(root_payload.get("body") or "")
 
                 if (
-                    workflow_role_from_body(root_body) != "root"
+                    (
+                        workflow_role_from_body(root_body) != "root"
+                        and not (
+                            "root_task_role=scope_and_planning" in root_body
+                            and "planning_terminal_state=done_after_child_creation"
+                            in root_body
+                        )
+                    )
                     or not is_user_query_body(root_body)
                     or workflow_mode_from_body(root_body) != "analysis"
                 ):
@@ -1965,6 +2025,8 @@ class CeoSupervisorService:
 
                 if not selected_profiles:
                     continue
+
+                materialization_body = _materialization_plan_body(root_payload)
 
                 _, payloads = workflow(root_id)
 
@@ -1993,7 +2055,7 @@ class CeoSupervisorService:
 
                 decisions = _initial_primary_materialization_decisions(
                     state,
-                    root_body,
+                    materialization_body,
                 )
 
                 if not decisions:
@@ -2116,6 +2178,129 @@ class CeoSupervisorService:
             if decision is not None:
                 decisions.append(decision)
         return tuple(decisions)
+
+    def reconcile_completed_syntheses(self) -> tuple[str, ...]:
+        """Recover recent completed syntheses whose watch event was missed.
+
+        ``hermes kanban watch`` remains the low-latency path.  This reconciler
+        is only a narrow race-recovery lane for recently completed synthesis
+        tasks.  ``kanban list --json`` already contains body/status/timestamps,
+        so expensive ``kanban show`` calls are reserved for matching candidates.
+        """
+
+        list_tasks = getattr(self.client, "list_tasks", None)
+        show = getattr(self.client, "show", None)
+
+        if not callable(list_tasks) or not callable(show):
+            return ()
+
+        import time
+
+        now = int(time.time())
+        done_recovery_window_seconds = 120
+
+        candidates: list[tuple[int, str]] = []
+
+        for row in list_tasks():
+            task_id = str(row.get("id") or row.get("task_id") or "")
+            if not task_id:
+                continue
+
+            status = str(row.get("status") or "").casefold()
+            completed_at = int(row.get("completed_at") or 0)
+
+            if status not in {"done", "completed", "archived"}:
+                continue
+
+            if (
+                completed_at <= 0
+                or now - completed_at > done_recovery_window_seconds
+            ):
+                continue
+
+            body = str(row.get("body") or "")
+            role = terminal_workflow_role(row) or ""
+
+            if role != "synthesis":
+                continue
+
+            action = (
+                terminal_action(row)
+                or terminal_action({"body": body})
+                or ""
+            )
+
+            if (
+                action != "SYNTHESIZE"
+                and not _is_direct_ceo_response_synthesis(
+                    role=role,
+                    body=body,
+                )
+            ):
+                continue
+
+            if not extract_scope_references(row).root_ids:
+                continue
+
+            candidates.append((completed_at, task_id))
+
+        recovered: list[str] = []
+
+        # Newest first so a fresh user request is never starved by older work.
+        for _completed_at, task_id in sorted(candidates, reverse=True):
+            event_id = f"reconcile-synthesis:{task_id}:done"
+
+            # Avoid repeating the same reconciliation every polling cycle.
+            with self._seen_events_lock:
+                if event_id in self._seen_events:
+                    continue
+
+            try:
+                payload = show(task_id)
+            except Exception as exc:
+                logger.warning(
+                    "synthesis-reconcile-show-failed task=%s error=%s",
+                    task_id,
+                    type(exc).__name__,
+                )
+                continue
+
+            # Revalidate after the targeted show() in case state changed between
+            # list and show.
+            status = str(payload.get("status") or "").casefold()
+            body = str(payload.get("body") or "")
+            role = terminal_workflow_role(payload) or ""
+            action = (
+                terminal_action(payload)
+                or terminal_action({"body": body})
+                or ""
+            )
+            roots = extract_scope_references(payload).root_ids
+
+            if (
+                status not in {"done", "completed", "archived"}
+                or role != "synthesis"
+                or not roots
+                or (
+                    action != "SYNTHESIZE"
+                    and not _is_direct_ceo_response_synthesis(
+                        role=role,
+                        body=body,
+                    )
+                )
+            ):
+                continue
+
+            self.handle_terminal_event(
+                {
+                    "event_id": event_id,
+                    "task_id": task_id,
+                    "kind": "completed",
+                }
+            )
+            recovered.append(task_id)
+
+        return tuple(recovered)
 
     def handle_terminal_event(self, event: Mapping[str, Any]) -> SupervisorDecision | None:
         task_id = str(event.get("task_id") or event.get("id") or "")

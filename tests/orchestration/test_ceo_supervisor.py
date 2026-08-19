@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tempfile
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 
@@ -980,6 +982,258 @@ class SupervisorWakeupTest(unittest.TestCase):
             },
         )
 
+    def test_completed_synthesis_reconciliation_replays_missed_terminal_event(self) -> None:
+        class CompletedSynthesisClient(FakeClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.root_body = (
+                    "hgfinance.ceo-workflow-scope.v1\n"
+                    "workflow_role=planning\n"
+                    "root_task_role=scope_and_planning\n"
+                    "planning_terminal_state=done_after_child_creation\n"
+                    "workflow_mode=analysis"
+                )
+                self.payloads = [
+                    {
+                        "id": "synthesis-done",
+                        "assignee": "ceo-agent",
+                        "status": "done",
+                        "summary": "CEO final",
+                        "body": (
+                            "hgfinance.ceo-workflow-scope.v1\n"
+                            "workflow_root_task_id=t_12345678\n"
+                            "workflow_role=synthesis\n"
+                            "workflow_mode=analysis\n"
+                            "hgfinance.ceo-supervisor.v1 action=SYNTHESIZE"
+                        ),
+                    }
+                ]
+
+            def list_tasks(self):
+                return (
+                    {
+                        "id": "synthesis-done",
+                        "assignee": "ceo-agent",
+                        "status": "done",
+                        "completed_at": int(time.time()),
+                        "body": self.payloads[0]["body"],
+                    },
+                )
+
+            def show(self, task_id: str):
+                if task_id == "t_12345678":
+                    return {
+                        "id": "t_12345678",
+                        "assignee": "ceo-agent",
+                        "status": "done",
+                        "body": self.root_body,
+                    }
+                if task_id == "synthesis-done":
+                    payload = dict(self.payloads[0])
+                    payload["completed_at"] = int(time.time())
+                    return payload
+                return super().show(task_id)
+
+            def workflow(self, task_id: str):
+                return "t_12345678", tuple(self.payloads)
+
+        client = CompletedSynthesisClient()
+        service = CeoSupervisorService(client)
+
+        seen = []
+
+        original = service.handle_terminal_event
+
+        def recording_handle(event):
+            seen.append(dict(event))
+            return original(event)
+
+        service.handle_terminal_event = recording_handle
+
+        recovered = service.reconcile_completed_syntheses()
+
+        self.assertEqual(recovered, ("synthesis-done",))
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]["task_id"], "synthesis-done")
+        self.assertEqual(seen[0]["kind"], "completed")
+        self.assertEqual(
+            seen[0]["event_id"],
+            "reconcile-synthesis:synthesis-done:done",
+        )
+
+    def test_completed_synthesis_reconciliation_ignores_non_synthesis_tasks(self) -> None:
+        class NonSynthesisClient(FakeClient):
+            def list_tasks(self):
+                return (
+                    {
+                        "id": "risk",
+                        "assignee": "risk-management",
+                        "status": "done",
+                        "body": (
+                            "workflow_root_task_id=root\\n"
+                            "workflow_role=primary"
+                        ),
+                    },
+                )
+
+        client = NonSynthesisClient()
+        service = CeoSupervisorService(client)
+
+        self.assertEqual(service.reconcile_completed_syntheses(), ())
+
+    def test_thread_backed_synthesis_delivers_only_to_request_thread(self) -> None:
+        class DeliverySpy:
+            def __init__(self) -> None:
+                self.parent_calls = []
+                self.thread_calls = []
+
+            def deliver(self, **kwargs):
+                self.parent_calls.append(kwargs)
+                return "sent"
+
+            def deliver_to_existing_thread(self, **kwargs):
+                self.thread_calls.append(kwargs)
+                return "sent"
+
+        class DeliveryClient(FakeClient):
+            def __init__(self, home: str) -> None:
+                super().__init__()
+                self.environment = {"HERMES_HOME": home}
+
+        root_id = "t_11111111"
+        synth_id = "t_22222222"
+
+        root = {
+            "id": root_id,
+            "assignee": "ceo-agent",
+            "status": "done",
+            "body": (
+                "hgfinance.ceo-workflow-scope.v1\n"
+                "workflow_role=planning\n"
+                "workflow_mode=analysis\n"
+                "discord_request_id=discord:1539501364021825556\n"
+                "discord_channel_id=1536997434507657261\n"
+                "discord_message_id=1539501364021825556\n"
+                "discord_thread_id=1539501364021825556"
+            ),
+        }
+
+        synthesis = {
+            "id": synth_id,
+            "assignee": "ceo-agent",
+            "status": "done",
+            "summary": "CEO final answer",
+            "body": (
+                "hgfinance.ceo-workflow-scope.v1\n"
+                f"workflow_root_task_id={root_id}\n"
+                "workflow_role=synthesis\n"
+                "workflow_mode=analysis\n"
+                "hgfinance.ceo-supervisor.v1 action=SYNTHESIZE"
+            ),
+        }
+
+        with tempfile.TemporaryDirectory() as home:
+            delivery = DeliverySpy()
+            client = DeliveryClient(home)
+            service = CeoSupervisorService(
+                client,
+                discord_delivery=delivery,
+            )
+
+            service._project_terminal_task(
+                root_task_id=root_id,
+                task_id=synth_id,
+                task_payloads=(root, synthesis),
+                event={
+                    "event_id": "thread-final",
+                    "task_id": synth_id,
+                    "kind": "completed",
+                },
+            )
+
+        self.assertEqual(len(delivery.parent_calls), 0)
+        self.assertEqual(len(delivery.thread_calls), 1)
+        self.assertEqual(
+            delivery.thread_calls[0]["root_task"]["body"],
+            root["body"],
+        )
+        self.assertEqual(
+            delivery.thread_calls[0]["title"],
+            "🧠 CEO 종합",
+        )
+
+    def test_synthesis_without_thread_keeps_parent_fallback(self) -> None:
+        class DeliverySpy:
+            def __init__(self) -> None:
+                self.parent_calls = []
+                self.thread_calls = []
+
+            def deliver(self, **kwargs):
+                self.parent_calls.append(kwargs)
+                return "sent"
+
+            def deliver_to_existing_thread(self, **kwargs):
+                self.thread_calls.append(kwargs)
+                return "sent"
+
+        class DeliveryClient(FakeClient):
+            def __init__(self, home: str) -> None:
+                super().__init__()
+                self.environment = {"HERMES_HOME": home}
+
+        root_id = "t_33333333"
+        synth_id = "t_44444444"
+
+        root = {
+            "id": root_id,
+            "assignee": "ceo-agent",
+            "status": "done",
+            "body": (
+                "hgfinance.ceo-workflow-scope.v1\n"
+                "workflow_role=planning\n"
+                "workflow_mode=analysis\n"
+                "discord_request_id=discord:message-1\n"
+                "discord_channel_id=channel-1\n"
+                "discord_message_id=message-1"
+            ),
+        }
+
+        synthesis = {
+            "id": synth_id,
+            "assignee": "ceo-agent",
+            "status": "done",
+            "summary": "CEO final answer",
+            "body": (
+                "hgfinance.ceo-workflow-scope.v1\n"
+                f"workflow_root_task_id={root_id}\n"
+                "workflow_role=synthesis\n"
+                "workflow_mode=analysis\n"
+                "hgfinance.ceo-supervisor.v1 action=SYNTHESIZE"
+            ),
+        }
+
+        with tempfile.TemporaryDirectory() as home:
+            delivery = DeliverySpy()
+            client = DeliveryClient(home)
+            service = CeoSupervisorService(
+                client,
+                discord_delivery=delivery,
+            )
+
+            service._project_terminal_task(
+                root_task_id=root_id,
+                task_id=synth_id,
+                task_payloads=(root, synthesis),
+                event={
+                    "event_id": "parent-fallback",
+                    "task_id": synth_id,
+                    "kind": "completed",
+                },
+            )
+
+        self.assertEqual(len(delivery.parent_calls), 1)
+        self.assertEqual(len(delivery.thread_calls), 0)
+
     def test_terminal_child_creates_parallel_qa_and_synthesis(self) -> None:
         client = FakeClient()
         service = CeoSupervisorService(client)
@@ -1515,6 +1769,176 @@ class SupervisorWakeupTest(unittest.TestCase):
                 ],
             )
 
+
+
+
+class ReadyPrimaryPlanRecoveryTest(unittest.TestCase):
+    """Regression coverage for direct-CEO planning/root completion races."""
+
+    selected = (
+        "research-department",
+        "quant-backtest-department",
+        "risk-management",
+    )
+
+    @staticmethod
+    def _root_body() -> str:
+        return (
+            "hgfinance.ceo-workflow-scope.v1\n"
+            "origin=user-query\n"
+            "workflow_mode=analysis\n"
+            "root_task_role=scope_and_planning\n"
+            "planning_terminal_state=done_after_child_creation\n"
+        )
+
+    @staticmethod
+    def _ceo_plan_comment() -> str:
+        return (
+            "Delegation plan (request-scoped, non-binding analysis):\n"
+            "selected_primary_profiles="
+            "research-department,quant-backtest-department,risk-management\n"
+            "analysis_mode=fast_advisory\n"
+            "workflow_mode=analysis\n"
+            "producer=ceo-hermes-direct\n"
+            "qa_required=false\n"
+            "delegation_instruction.research-department="
+            "Assess Apple fundamentals and valuation.\n"
+            "delegation_instruction.quant-backtest-department="
+            "Assess Apple trend, volatility, valuation, and quantitative risk.\n"
+            "delegation_instruction.risk-management="
+            "Assess Apple downside, concentration, liquidity, and policy risks.\n"
+        )
+
+    def test_recently_completed_old_root_materializes_from_ceo_comment(self) -> None:
+        """A long-running planner remains recoverable immediately after completion."""
+
+        import time
+
+        now = int(time.time())
+
+        class Client(FakeClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.root_body = ReadyPrimaryPlanRecoveryTest._root_body()
+                self.payloads = []
+                self.ceo_comment = {
+                    "id": 1002,
+                    "task_id": "root",
+                    "author": "ceo-agent",
+                    "body": ReadyPrimaryPlanRecoveryTest._ceo_plan_comment(),
+                    "created_at": now - 15,
+                }
+
+            def list_tasks(self):
+                return (
+                    {
+                        "id": "root",
+                        "status": "done",
+                        # Production incident shape:
+                        # root is older than the recovery TTL...
+                        "created_at": now - 300,
+                        # ...but planning completed only moments ago.
+                        "completed_at": now - 10,
+                        "body": self.root_body,
+                    },
+                )
+
+            def show(self, task_id: str):
+                if task_id == "root":
+                    return {
+                        "id": "root",
+                        "status": "done",
+                        "created_at": now - 300,
+                        "completed_at": now - 10,
+                        "body": self.root_body,
+                        "comments": [self.ceo_comment, *self.comments],
+                    }
+
+                return super().show(task_id)
+
+        client = Client()
+        service = CeoSupervisorService(client)
+
+        first = service.materialize_ready_primary_plans()
+
+        self.assertEqual(
+            tuple(decision.assignee for decision in first),
+            self.selected,
+        )
+        self.assertEqual(
+            tuple(item["assignee"] for item in client.created),
+            self.selected,
+        )
+        self.assertTrue(
+            all(item["parent_task_ids"] == () for item in client.created)
+        )
+        self.assertTrue(
+            all(
+                "workflow_root_task_id=root" in item["body"]
+                for item in client.created
+            )
+        )
+
+        # Re-polling the same durable plan must be idempotent.
+        second = service.materialize_ready_primary_plans()
+
+        self.assertEqual(second, ())
+        self.assertEqual(len(client.created), 3)
+
+    def test_stale_completed_root_is_not_recovered(self) -> None:
+        """The recovery TTL is measured from completion, not root creation."""
+
+        import time
+
+        now = int(time.time())
+
+        class Client(FakeClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.root_body = ReadyPrimaryPlanRecoveryTest._root_body()
+                self.payloads = []
+                self.ceo_comment = {
+                    "id": 1002,
+                    "task_id": "root",
+                    "author": "ceo-agent",
+                    "body": ReadyPrimaryPlanRecoveryTest._ceo_plan_comment(),
+                    "created_at": now - 310,
+                }
+
+            def list_tasks(self):
+                return (
+                    {
+                        "id": "root",
+                        "status": "done",
+                        # Even a recently-created root must be excluded when
+                        # its completion itself is stale.
+                        "created_at": now - 10,
+                        "completed_at": now - 300,
+                        "body": self.root_body,
+                    },
+                )
+
+            def show(self, task_id: str):
+                if task_id == "root":
+                    return {
+                        "id": "root",
+                        "status": "done",
+                        "created_at": now - 10,
+                        "completed_at": now - 300,
+                        "body": self.root_body,
+                        "comments": [self.ceo_comment, *self.comments],
+                    }
+
+                return super().show(task_id)
+
+        client = Client()
+
+        decisions = CeoSupervisorService(
+            client
+        ).materialize_ready_primary_plans()
+
+        self.assertEqual(decisions, ())
+        self.assertEqual(client.created, [])
 
 
 class InitialPrimaryMaterializationTest(unittest.TestCase):
