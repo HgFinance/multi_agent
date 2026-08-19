@@ -17,8 +17,13 @@ from urllib.parse import SplitResult, urlsplit, urlunsplit
 _ROLE_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
-def _runtime_role() -> str:
-    role = os.environ.get("DATABASE_RUNTIME_ROLE", "").strip()
+def _runtime_role(explicit_role: str | None = None) -> str:
+    raw_role = (
+        os.environ.get("DATABASE_RUNTIME_ROLE", "")
+        if explicit_role is None
+        else explicit_role
+    )
+    role = raw_role.strip()
     if role and _ROLE_PATTERN.fullmatch(role) is None:
         raise RuntimeError("DATABASE_RUNTIME_ROLE is not a safe SQL role name")
     if role and role != "svc_quant":
@@ -41,7 +46,7 @@ def _replace_port(parts: SplitResult, port: int) -> str:
 def runtime_session_dsn(dsn: str, *, role: str | None = None) -> str:
     """Return a session-stable DSN whenever ``SET ROLE`` is requested."""
 
-    selected_role = _runtime_role() if role is None else role
+    selected_role = _runtime_role(role)
     if not selected_role:
         return dsn
     override = os.environ.get("DATABASE_SESSION_URL", "").strip()
@@ -62,10 +67,15 @@ def runtime_session_dsn(dsn: str, *, role: str | None = None) -> str:
     return candidate
 
 
-def connect(dsn: str, *, connect_timeout: int = 20):
+def connect(
+    dsn: str,
+    *,
+    connect_timeout: int = 20,
+    runtime_role: str | None = None,
+):
     import psycopg2
 
-    role = _runtime_role()
+    role = _runtime_role(runtime_role)
     selected_dsn = runtime_session_dsn(dsn, role=role)
     conn = psycopg2.connect(selected_dsn, connect_timeout=connect_timeout)
     try:

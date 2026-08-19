@@ -186,6 +186,32 @@ def test_writer_rejects_broad_runtime_role(
         writer.connect("postgresql://example")
 
 
+def test_writer_accepts_an_explicit_scoped_role_without_global_leakage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    writer_path = ROOT / "departments/04-quant-backtest/pipeline/db_writer.py"
+    spec = importlib.util.spec_from_file_location(
+        "explicit_factory_db_writer", writer_path
+    )
+    assert spec is not None and spec.loader is not None
+    writer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(writer)
+
+    monkeypatch.setenv("DATABASE_RUNTIME_ROLE", "postgres")
+    monkeypatch.delenv("DATABASE_SESSION_URL", raising=False)
+
+    assert writer._runtime_role("svc_quant") == "svc_quant"
+    assert writer.runtime_session_dsn(
+        (
+            "postgresql://user:secret@aws-1-ap-northeast-2.pooler."
+            "supabase.com:6543/postgres"
+        ),
+        role="svc_quant",
+    ).endswith(":5432/postgres")
+    with pytest.raises(RuntimeError, match="safe SQL role name"):
+        writer._runtime_role('svc_quant"; reset role; --')
+
+
 def test_writer_rejects_role_that_does_not_survive_commit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

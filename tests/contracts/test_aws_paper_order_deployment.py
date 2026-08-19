@@ -394,13 +394,15 @@ def test_market_consumers_receive_only_the_market_database_for_timeseries() -> N
         assert services[service_name]["environment"][key].endswith("/market")
 
 
-def test_factory_autopilot_uses_the_scoped_quant_session_role() -> None:
+def test_factory_autopilot_scopes_only_its_planning_connection() -> None:
     environment = _yaml(OVERLAY_PATH)["services"]["factory-autopilot"]["environment"]
+    source = (
+        ROOT / "departments/01-research/factory/factory_autopilot.py"
+    ).read_text(encoding="utf-8")
 
     assert environment["DATABASE_SESSION_URL"] == environment["DATABASE_URL"]
-    assert environment["DATABASE_RUNTIME_ROLE"] == (
-        "${QUANT_DATABASE_RUNTIME_ROLE:-svc_quant}"
-    )
+    assert "DATABASE_RUNTIME_ROLE" not in environment
+    assert 'runtime_role="svc_quant"' in source
 
 
 def test_release_script_is_worktree_only_and_fail_closed() -> None:

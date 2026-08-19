@@ -495,7 +495,11 @@ def _conn():
     from source_registry import load_project_env   # noqa: PLC0415
     from db_writer import connect                  # noqa: PLC0415
 
-    return connect(load_project_env()["DATABASE_URL"], connect_timeout=20)
+    return connect(
+        load_project_env()["DATABASE_URL"],
+        connect_timeout=20,
+        runtime_role="svc_quant",
+    )
 
 
 # ▶ **안 쓴 리드를 맨 앞에 둔다** (2026-08-12 실측)
