@@ -166,3 +166,155 @@ class DiscordGatewayPatchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ForwardToIngressTests(unittest.TestCase):
+    """Discord 메시지를 BFF canonical ingress로 넘기는 경로.
+
+    이 배선이 없으면 Discord 질의는 CEO Agent가 직접 root 카드를 만들고, 그
+    경로는 `build_root_body()`를 지나지 않아 **Mandate 스냅샷도 `requested_by=`도
+    붙지 않는다** - 웹에서 물으면 붙고 Discord에서 물으면 안 붙는 상태였다.
+    """
+
+    class _Author:
+        def __init__(self, author_id: str, bot: bool = False) -> None:
+            self.id = author_id
+            self.bot = bot
+
+    _INGRESS_SECRET = "discord-ingress-test-key-0123456789abcdef"
+
+    def _env(self, **updates: str) -> dict[str, str]:
+        values = {
+            gateway_patch.INGRESS_URL_ENV: "http://bff/ui/ceo/ingress",
+            gateway_patch.INGRESS_SECRET_ENV: self._INGRESS_SECRET,
+            "HERMES_PROFILE": "ceo-agent",
+        }
+        values.update(updates)
+        return values
+
+    class _Message:
+        def __init__(self, content: str, author: object | None, message_id: str = "991") -> None:
+            self.id = message_id
+            self.content = content
+            self.author = author
+            self.channel = type("C", (), {"id": "chan-1", "parent_id": None})()
+            self.guild = type("G", (), {"id": "guild-1"})()
+
+    def _message(self, content: str = "리서치 브리핑해줘", **kwargs: object):
+        author = kwargs.pop("author", self._Author("123456789012345678"))
+        return self._Message(content, author, **kwargs)  # type: ignore[arg-type]
+
+    def test_disabled_when_url_is_unset(self) -> None:
+        """URL이 없으면 기능이 꺼진다 - 이 코드가 없던 때와 같은 동작이다."""
+
+        with patch.dict("os.environ", self._env(**{gateway_patch.INGRESS_URL_ENV: ""})):
+            self.assertFalse(gateway_patch._forward_to_ingress(self._message(), None))
+
+    def test_enabled_url_without_private_credential_fails_closed(self) -> None:
+        with patch.dict(
+            "os.environ",
+            self._env(**{gateway_patch.INGRESS_SECRET_ENV: ""}),
+        ):
+            self.assertFalse(gateway_patch._forward_to_ingress(self._message(), None))
+
+    def test_bot_authored_message_is_not_forwarded(self) -> None:
+        """미러 게시물(`[web-mirror]`)은 봇이 쓴다. 그걸 사람 발화로 오인하면
+        웹 질문 하나가 워크플로를 다시 만들고 답변이 또 올라가 순환한다."""
+
+        env = self._env()
+        with patch.dict("os.environ", env):
+            message = self._message(author=self._Author("999", bot=True))
+            self.assertFalse(gateway_patch._forward_to_ingress(message, None))
+
+    def test_unknown_author_is_treated_as_a_bot(self) -> None:
+        """판단할 수 없으면 봇으로 본다 - 확신 없이 사람으로 치면 순환이 생긴다."""
+
+        env = self._env()
+        with patch.dict("os.environ", env):
+            self.assertFalse(gateway_patch._forward_to_ingress(self._message(author=None), None))
+
+    def test_payload_carries_author_and_delivery_coordinates(self) -> None:
+        """작성자 id와 발송 좌표가 실려야 Mandate와 답변 위치가 정해진다."""
+
+        captured: dict[str, object] = {}
+
+        class _Response:
+            status = 202
+
+            def __enter__(self):  # noqa: ANN204 - 컨텍스트 매니저 대역
+                return self
+
+            def __exit__(self, *args: object) -> bool:
+                return False
+
+        def fake_urlopen(request, timeout=None):  # noqa: ANN001
+            import json
+
+            captured.update(json.loads(request.data.decode("utf-8")))
+            captured["authorization"] = request.get_header("Authorization")
+            return _Response()
+
+        env = self._env()
+        with patch.dict("os.environ", env), patch("urllib.request.urlopen", fake_urlopen):
+            self.assertTrue(gateway_patch._forward_to_ingress(self._message(), None))
+
+        self.assertEqual(captured["source"], "discord")
+        self.assertEqual(captured["actor_id"], "123456789012345678")
+        self.assertEqual(captured["actor_type"], "user")
+        self.assertEqual(captured["discord_channel_id"], "chan-1")
+        self.assertEqual(captured["discord_message_id"], "991")
+        # `discord_delivery._message_id_from_request_id()`가 이 접두어를 보고
+        # 뒤를 잘라 쓴다 - 형식이 바뀌면 답변이 원본 메시지에 못 붙는다.
+        self.assertEqual(captured["request_id"], "discord:991")
+        self.assertEqual(
+            captured["authorization"], f"Bearer {self._INGRESS_SECRET}"
+        )
+
+    def test_trading_profile_uses_the_same_governed_ingress(self) -> None:
+        """Trading-channel orders still create a CEO root and Trading child."""
+
+        class _Response:
+            status = 202
+
+            def __enter__(self):  # noqa: ANN204
+                return self
+
+            def __exit__(self, *args: object) -> bool:
+                return False
+
+        env = self._env(HERMES_PROFILE="trading-department")
+        with patch.dict("os.environ", env), patch(
+            "urllib.request.urlopen", return_value=_Response()
+        ) as opened:
+            self.assertTrue(gateway_patch._forward_to_ingress(self._message(), None))
+        self.assertEqual(opened.call_count, 1)
+
+    def test_unrelated_department_cannot_use_order_ingress(self) -> None:
+        env = self._env(HERMES_PROFILE="research-department")
+        with patch.dict("os.environ", env), patch(
+            "urllib.request.urlopen"
+        ) as opened:
+            self.assertFalse(gateway_patch._forward_to_ingress(self._message(), None))
+        opened.assert_not_called()
+
+    def test_transport_failure_falls_back_to_hermes(self) -> None:
+        """전달 실패는 조용히 버리지 않고 기존 경로로 되돌린다."""
+
+        def boom(request, timeout=None):  # noqa: ANN001
+            raise OSError("connection refused")
+
+        env = self._env()
+        with patch.dict("os.environ", env), patch("urllib.request.urlopen", boom):
+            self.assertFalse(gateway_patch._forward_to_ingress(self._message(), None))
+
+    def test_duplicate_is_treated_as_forwarded(self) -> None:
+        """409(이미 받은 메시지)를 실패로 보면 Hermes가 중복 실행한다."""
+
+        import urllib.error
+
+        def conflict(request, timeout=None):  # noqa: ANN001
+            raise urllib.error.HTTPError("u", 409, "conflict", {}, None)  # type: ignore[arg-type]
+
+        env = self._env()
+        with patch.dict("os.environ", env), patch("urllib.request.urlopen", conflict):
+            self.assertTrue(gateway_patch._forward_to_ingress(self._message(), None))

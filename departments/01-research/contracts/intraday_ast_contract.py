@@ -17,7 +17,14 @@ import math
 from statistics import fmean, pstdev
 
 
-AST_VERSION = "intraday-alpha-ast-v1"
+AST_VERSION = "intraday-alpha-ast-v2"
+LEGACY_FEATURE_WINDOW_CONTRACT = "legacy-cohort-lookback-v1"
+EXPLICIT_FEATURE_WINDOW_CONTRACT = "explicit-primitive-window-v2"
+FEATURE_WINDOW_CONTRACTS = frozenset({
+    LEGACY_FEATURE_WINDOW_CONTRACT,
+    EXPLICIT_FEATURE_WINDOW_CONTRACT,
+})
+PRIMITIVE_WINDOWS_SECONDS = (2, 5, 10, 30, 60, 300, 600)
 MAX_DEPTH = 8
 MAX_NODES = 48
 MIN_SECONDS = 1
@@ -38,6 +45,16 @@ FIELDS = {
     "trade_flow_imbalance": RATIO,
     "quote_event_ofi": SHARES,
     "normalized_quote_ofi": RATIO,
+    "multi_level_quote_ofi_l10": SHARES,
+    "normalized_multi_level_quote_ofi_l10": RATIO,
+    "depth_imbalance_slope": RATIO,
+    "quote_ofi_depth_divergence": RATIO,
+    "quote_event_transition_count": COUNT,
+    "normalized_quote_ofi_per_event": RATIO,
+    "signed_trade_volume": SHARES,
+    "trade_volume": SHARES,
+    "trade_side_known_ratio": RATIO,
+    "quote_ofi_per_trade_volume": RATIO,
     "spread_bps": BPS,
     "bid_depth_l1": SHARES,
     "ask_depth_l1": SHARES,
@@ -50,6 +67,73 @@ FIELDS = {
     "quote_age_ms": MILLISECONDS,
 }
 
+# A state field describes the book at the decision snapshot.  A windowed field
+# describes raw events in a completed-second interval ending at that snapshot.
+# Keeping those two namespaces explicit prevents a cohort sidecar's temporal
+# clock from silently changing the economic meaning of a primitive field.
+WINDOWED_FIELDS = frozenset({
+    "trade_flow_imbalance",
+    "quote_event_ofi",
+    "normalized_quote_ofi",
+    "multi_level_quote_ofi_l10",
+    "normalized_multi_level_quote_ofi_l10",
+    "quote_ofi_depth_divergence",
+    "quote_event_transition_count",
+    "normalized_quote_ofi_per_event",
+    "signed_trade_volume",
+    "trade_volume",
+    "trade_side_known_ratio",
+    "quote_ofi_per_trade_volume",
+    "trade_count",
+    "quote_count",
+    "trade_intensity",
+    "realized_volatility_bps",
+})
+STATE_FIELDS = frozenset(FIELDS) - WINDOWED_FIELDS
+
+# ``parse`` is the local strict grammar and deliberately remains a superset of
+# the currently replayable external history.  The 61-session historical lane is
+# reconstructed from completed-second, order-ambiguous snapshots: it can
+# observe book state and printed trades, but it cannot recover the within-second
+# quote transition sequence required by event OFI.  Keep those fields available
+# for a future sequenced feed while rejecting them deterministically at the
+# current screening-cohort boundary.
+COMPLETED_SECOND_SCREENING_COHORT_VERSION = "intraday-screening-cohort-v4"
+COMPLETED_SECOND_ALLOWED_EXECUTIONS = frozenset({"TAKER"})
+COMPLETED_SECOND_SEQUENCE_DEPENDENT_FIELDS = frozenset({
+    "quote_event_ofi",
+    "normalized_quote_ofi",
+    "multi_level_quote_ofi_l10",
+    "normalized_multi_level_quote_ofi_l10",
+    "quote_ofi_depth_divergence",
+    "quote_event_transition_count",
+    "normalized_quote_ofi_per_event",
+    "quote_ofi_per_trade_volume",
+})
+COMPLETED_SECOND_RECOMMENDED_FIELDS = frozenset({
+    "queue_imbalance_l1",
+    "queue_imbalance_l10",
+    "microprice_offset_bps",
+    "depth_imbalance_slope",
+    "trade_flow_imbalance",
+    "signed_trade_volume",
+    "trade_volume",
+    "trade_side_known_ratio",
+    "spread_bps",
+    "bid_depth_l1",
+    "ask_depth_l1",
+    "book_depth_l1",
+    "book_depth_l10",
+    "trade_count",
+    "quote_count",
+    "trade_intensity",
+    "realized_volatility_bps",
+    "quote_age_ms",
+})
+COMPLETED_SECOND_REPLAYABLE_FIELDS = (
+    frozenset(FIELDS) - COMPLETED_SECOND_SEQUENCE_DEPENDENT_FIELDS
+)
+
 FIELD_OP = "field"
 TEMPORAL_OPS = frozenset({"lag", "rolling_mean", "rolling_std", "rolling_sum",
                           "delta", "ewma", "rolling_zscore"})
@@ -58,6 +142,39 @@ BINARY_OPS = frozenset({"add", "sub", "mul", "div", "min", "max", "gt", "lt",
                         "and", "or"})
 TERNARY_OPS = frozenset({"where"})
 ALL_OPS = frozenset({FIELD_OP}) | TEMPORAL_OPS | UNARY_OPS | BINARY_OPS | TERNARY_OPS
+
+WALL_TIME_CLOCK = "WALL_TIME_SECONDS"
+QUOTE_EVENT_CLOCK = "QUOTE_SNAPSHOT_EVENT"
+TRADE_VOLUME_CLOCK = "PRINTED_TRADE_VOLUME"
+DECISION_SNAPSHOT_CLOCK = "DECISION_SNAPSHOT"
+QUOTE_EVENT_CLOCK_FIELDS = frozenset({
+    "quote_event_ofi", "normalized_quote_ofi",
+    "multi_level_quote_ofi_l10", "normalized_multi_level_quote_ofi_l10",
+    "quote_ofi_depth_divergence", "quote_event_transition_count",
+    "normalized_quote_ofi_per_event", "quote_count",
+})
+TRADE_VOLUME_CLOCK_FIELDS = frozenset({
+    "trade_flow_imbalance", "signed_trade_volume", "trade_volume",
+    "trade_side_known_ratio", "quote_ofi_per_trade_volume", "trade_count",
+})
+
+# A non-negative data-quality ratio can attenuate or gate a signed pressure,
+# but it cannot identify the direction of a future markout by itself.  Keep
+# this executable invariant in the shared contract so a formula admitted by an
+# older research image is still checked immediately before current-V2 replay.
+NONNEGATIVE_DIRECTIONAL_QUALITY_FIELDS = frozenset({
+    "trade_side_known_ratio",
+})
+DIRECTIONAL_PRESSURE_FIELDS = frozenset({
+    "queue_imbalance_l1", "queue_imbalance_l10", "microprice_offset_bps",
+    "trade_flow_imbalance", "quote_event_ofi", "normalized_quote_ofi",
+    "multi_level_quote_ofi_l10", "normalized_multi_level_quote_ofi_l10",
+    "depth_imbalance_slope", "quote_ofi_depth_divergence",
+    "normalized_quote_ofi_per_event", "signed_trade_volume",
+    "quote_ofi_per_trade_volume",
+})
+DIRECTIONAL_QUALITY_PATH_CONTRACT_VERSION = \
+    "nonnegative-directional-quality-path-v1"
 
 
 class IntradayExprError(ValueError):
@@ -72,10 +189,10 @@ def _unknown(node: dict, allowed: set[str], kind: str) -> None:
 
 def _seconds(node: dict) -> int:
     raw = node.get("seconds")
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
+    if (isinstance(raw, bool) or not isinstance(raw, (int, float))
+            or not math.isfinite(float(raw)) or not float(raw).is_integer()):
         raise IntradayExprError(f"seconds must be an integer: {raw!r}") from None
+    value = int(raw)
     if not MIN_SECONDS <= value <= MAX_SECONDS:
         raise IntradayExprError(
             f"seconds={value} outside [{MIN_SECONDS}, {MAX_SECONDS}]")
@@ -102,11 +219,14 @@ def _parse(node, depth: int) -> dict:
     if op not in ALL_OPS:
         raise IntradayExprError(f"unknown operator {op!r}")
     if op == FIELD_OP:
-        _unknown(node, {"op", "field"}, op)
+        _unknown(node, {"op", "field", "seconds"}, op)
         field = str(node.get("field") or "")
         if field not in FIELDS:
             raise IntradayExprError(f"unknown intraday field {field!r}")
-        return {"op": op, "field": field}
+        parsed = {"op": op, "field": field}
+        if "seconds" in node:
+            parsed["seconds"] = _seconds(node)
+        return parsed
     if op in TEMPORAL_OPS:
         _unknown(node, {"op", "arg", "seconds"}, op)
         if node.get("arg") is None:
@@ -218,7 +338,10 @@ def _canonical(node: dict, *, shape: bool = False) -> dict:
         return {"const": "#" if shape else node["const"],
                 "unit": node.get("unit", RATIO)}
     if node["op"] == FIELD_OP:
-        return node
+        out = {"op": FIELD_OP, "field": node["field"]}
+        if "seconds" in node:
+            out["seconds"] = "#" if shape else node["seconds"]
+        return out
     if "arg" in node:
         out = {"op": node["op"], "arg": _canonical(node["arg"], shape=shape)}
         if "seconds" in node:
@@ -281,6 +404,249 @@ def clocks_of(expr: dict) -> set[int]:
                 walk(current[key])
     walk(node)
     return out
+
+
+def primitive_windows_of(expr: dict) -> set[int]:
+    """Return raw-event primitive windows, excluding AST temporal clocks."""
+    node = parse(expr)
+    out: set[int] = set()
+
+    def walk(current: dict) -> None:
+        if current.get("op") == FIELD_OP and "seconds" in current:
+            out.add(int(current["seconds"]))
+        if "arg" in current:
+            walk(current["arg"])
+        for child in current.get("args", ()):
+            walk(child)
+        for key in ("condition", "then", "else"):
+            if key in current:
+                walk(current[key])
+    walk(node)
+    return out
+
+
+def temporal_windows_of(expr: dict) -> set[int]:
+    """Return evaluator windows, excluding raw-event primitive windows."""
+    node = parse(expr)
+    out: set[int] = set()
+
+    def walk(current: dict) -> None:
+        if current.get("op") in TEMPORAL_OPS:
+            out.add(int(current["seconds"]))
+        if "arg" in current:
+            walk(current["arg"])
+        for child in current.get("args", ()):
+            walk(child)
+        for key in ("condition", "then", "else"):
+            if key in current:
+                walk(current[key])
+    walk(node)
+    return out
+
+
+def field_window_bindings_of(expr: dict) -> tuple[tuple[str, int | None], ...]:
+    """Return deterministic primitive bindings used by identity/manifests."""
+    node = parse(expr)
+    bindings: set[tuple[str, int | None]] = set()
+
+    def walk(current: dict) -> None:
+        if current.get("op") == FIELD_OP:
+            bindings.add((current["field"], current.get("seconds")))
+        if "arg" in current:
+            walk(current["arg"])
+        for child in current.get("args", ()):
+            walk(child)
+        for key in ("condition", "then", "else"):
+            if key in current:
+                walk(current[key])
+    walk(node)
+    return tuple(sorted(bindings, key=lambda item: (item[0], item[1] or 0)))
+
+
+def validate_feature_window_contract(
+        expr: dict, *, contract_version: str) -> dict:
+    """Validate primitive leaf semantics without changing the legacy grammar.
+
+    ``parse`` intentionally remains backward compatible: historical V1/v11
+    candidates contain bare windowed fields whose window was supplied by the
+    cohort-wide lane spec.  V2 candidates must bind every windowed primitive to
+    one member of :data:`PRIMITIVE_WINDOWS_SECONDS`; decision-snapshot fields
+    must remain unwindowed.
+    """
+    parsed = parse(expr)
+    version = str(contract_version or "").strip()
+    if version not in FEATURE_WINDOW_CONTRACTS:
+        raise IntradayExprError(f"unknown feature-window contract {version!r}")
+
+    def walk(current: dict) -> None:
+        if current.get("op") == FIELD_OP:
+            field = current["field"]
+            seconds = current.get("seconds")
+            if version == LEGACY_FEATURE_WINDOW_CONTRACT:
+                if seconds is not None:
+                    raise IntradayExprError(
+                        "legacy feature-window leaves must not declare seconds")
+            elif field in WINDOWED_FIELDS:
+                if seconds is None:
+                    raise IntradayExprError(
+                        f"windowed field {field!r} requires explicit seconds")
+                if seconds not in PRIMITIVE_WINDOWS_SECONDS:
+                    allowed = ", ".join(map(str, PRIMITIVE_WINDOWS_SECONDS))
+                    raise IntradayExprError(
+                        f"field {field!r} seconds={seconds} is not in {{{allowed}}}")
+            elif seconds is not None:
+                raise IntradayExprError(
+                    f"decision-snapshot field {field!r} cannot declare seconds")
+        if "arg" in current:
+            walk(current["arg"])
+        for child in current.get("args", ()):
+            walk(child)
+        for key in ("condition", "then", "else"):
+            if key in current:
+                walk(current[key])
+    walk(parsed)
+    return parsed
+
+
+def validate_completed_second_candidate(
+        expr: dict, *, execution: str) -> dict:
+    """Validate a candidate against the current external-history capability.
+
+    This is intentionally *not* part of :func:`parse`: local or future feeds
+    with exchange sequence can still use the complete strict grammar.  Intake
+    calls this narrower gate only for ``intraday-screening-cohort-v4`` shared
+    replay, whose within-second quote snapshots are an unordered multiset and
+    whose historical fill model is taker-only.
+    """
+    parsed = parse(expr)
+    execution_name = str(execution or "").strip().upper()
+    if execution_name not in COMPLETED_SECOND_ALLOWED_EXECUTIONS:
+        allowed = ", ".join(sorted(COMPLETED_SECOND_ALLOWED_EXECUTIONS))
+        raise IntradayExprError(
+            f"{COMPLETED_SECOND_SCREENING_COHORT_VERSION} completed-second "
+            f"external history is {allowed} only; got execution="
+            f"{execution_name or '<missing>'!r}")
+    blocked = sorted(fields_of(parsed) & COMPLETED_SECOND_SEQUENCE_DEPENDENT_FIELDS)
+    if blocked:
+        raise IntradayExprError(
+            f"{COMPLETED_SECOND_SCREENING_COHORT_VERSION} completed-second "
+            "external history has no deterministic within-second quote "
+            f"sequence; blocked fields: {', '.join(blocked)}")
+    return parsed
+
+
+def validate_directional_quality_paths(expr: dict) -> dict:
+    """Reject non-negative quality terms used as directional intercepts.
+
+    When an expression contains both a signed pressure and a non-negative
+    quality observable, every numeric quality occurrence must either be in a
+    ``where`` condition or be multiplied by a distinct pressure subtree.  This
+    permits economically meaningful gates and attenuation while rejecting, for
+    example, ``add(trade_flow_imbalance, trade_side_known_ratio)``.  A
+    quality-only structural ablation remains legal; its lack of promotion
+    authority is governed by the screening-cohort contract.
+    """
+    parsed = parse(expr)
+    present = fields_of(parsed)
+    quality_fields = present & NONNEGATIVE_DIRECTIONAL_QUALITY_FIELDS
+    pressure_fields = present & DIRECTIONAL_PRESSURE_FIELDS
+    if not quality_fields or not pressure_fields:
+        return parsed
+
+    def subtree_fields(node: dict) -> set[str]:
+        if node.get("op") == FIELD_OP:
+            return {str(node["field"])}
+        found: set[str] = set()
+        if isinstance(node.get("arg"), dict):
+            found.update(subtree_fields(node["arg"]))
+        for child in node.get("args") or ():
+            if isinstance(child, dict):
+                found.update(subtree_fields(child))
+        for key in ("condition", "then", "else"):
+            if isinstance(node.get(key), dict):
+                found.update(subtree_fields(node[key]))
+        return found
+
+    unsupported: set[str] = set()
+
+    def walk(node: dict, *, gate: bool, pressure_coupled: bool) -> None:
+        op = node.get("op")
+        if op == FIELD_OP:
+            field = str(node["field"])
+            if (field in quality_fields and not gate
+                    and not pressure_coupled):
+                unsupported.add(field)
+            return
+        if op == "where":
+            walk(node["condition"], gate=True,
+                 pressure_coupled=pressure_coupled)
+            walk(node["then"], gate=gate,
+                 pressure_coupled=pressure_coupled)
+            walk(node["else"], gate=gate,
+                 pressure_coupled=pressure_coupled)
+            return
+        if isinstance(node.get("arg"), dict):
+            walk(node["arg"], gate=gate,
+                 pressure_coupled=pressure_coupled)
+            return
+
+        children = [child for child in node.get("args") or ()
+                    if isinstance(child, dict)]
+        child_fields = [subtree_fields(child) for child in children]
+        for index, child in enumerate(children):
+            sibling_has_pressure = (
+                op == "mul" and any(
+                    child_fields[other] & pressure_fields
+                    for other in range(len(children)) if other != index
+                )
+            )
+            walk(
+                child,
+                gate=gate,
+                pressure_coupled=(pressure_coupled or sibling_has_pressure),
+            )
+
+    walk(parsed, gate=False, pressure_coupled=False)
+    if unsupported:
+        raise IntradayExprError(
+            f"{DIRECTIONAL_QUALITY_PATH_CONTRACT_VERSION}: non-negative "
+            "directional quality fields must gate or multiply a distinct "
+            "signed pressure subtree; additive/min/max numeric paths create "
+            f"a directional intercept: {sorted(unsupported)}")
+    return parsed
+
+
+def clock_domains_of(expr: dict) -> set[str]:
+    """Return the physical clocks represented by an expression.
+
+    The evaluator has exact wall-time windows over decision samples.  Event and
+    volume clocks are deliberately exposed as causal raw-window summaries, not
+    as fake ``N sample rows == N exchange events`` temporal operators.  This
+    distinction is material for the external feed whose timestamp is only
+    second-resolution and has no MBO sequence.
+    """
+    node = parse(expr)
+    domains: set[str] = set()
+    used_fields = fields_of(node)
+    if used_fields & QUOTE_EVENT_CLOCK_FIELDS:
+        domains.add(QUOTE_EVENT_CLOCK)
+    if used_fields & TRADE_VOLUME_CLOCK_FIELDS:
+        domains.add(TRADE_VOLUME_CLOCK)
+    if any(operator in TEMPORAL_OPS for operator in operators_of(node)):
+        domains.add(WALL_TIME_CLOCK)
+    return domains
+
+
+def effective_clock_domains_of(expr: dict) -> set[str]:
+    """Return a non-empty behavior clock for search/archive coordinates.
+
+    A level-only formula has no rolling, event-count, or volume window.  It is
+    nevertheless evaluated causally at the current decision snapshot.  Keeping
+    that coordinate explicit avoids conflating an instantaneous state with the
+    separate EVENT_TIME_HISTORICAL_ONLY knowledge-clock policy.
+    """
+    domains = clock_domains_of(expr)
+    return domains or {DECISION_SNAPSHOT_CLOCK}
 
 
 def operators_of(expr: dict) -> set[str]:
@@ -349,13 +715,16 @@ def structural_similarity(left: dict, right: dict) -> float:
     return 0.0 if not denominator else 2.0 * sum((a & b).values()) / denominator
 
 
-def evaluate(samples, expr: dict) -> list[float | None]:
+def evaluate(samples, expr: dict, *, feature_cube=None,
+             feature_window_contract: str | None = None) -> list[float | None]:
     """Return one causal value per sample in chronological order.
 
     Samples from different instruments must be evaluated separately.  This prevents
     a rolling window from leaking one instrument's event stream into another's.
     """
-    node = parse(expr)
+    node = (validate_feature_window_contract(
+        expr, contract_version=feature_window_contract)
+        if feature_window_contract is not None else parse(expr))
     rows = list(samples)
     if len({row.instrument_id for row in rows}) > 1:
         raise IntradayExprError("evaluate one instrument at a time")
@@ -383,7 +752,14 @@ def evaluate(samples, expr: dict) -> list[float | None]:
         else:
             op = current["op"]
             if op == FIELD_OP:
-                result = getattr(rows[index], current["field"])
+                if "seconds" not in current:
+                    result = getattr(rows[index], current["field"])
+                elif feature_cube is None:
+                    raise IntradayExprError(
+                        "explicit-window field evaluation requires a feature cube")
+                else:
+                    result = feature_cube.value(
+                        current["field"], int(current["seconds"]), index)
             elif op in TEMPORAL_OPS:
                 seconds = current["seconds"]
                 cutoff = times[index].timestamp() - seconds

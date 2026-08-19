@@ -8,14 +8,14 @@ the tables are separate so recovery/backfill semantics are unchanged.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 import json
 import logging
-from pathlib import Path
 import sqlite3
 import threading
 import time
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -81,13 +81,22 @@ class DiscordIdempotencyStore:
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=5.0)
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.row_factory = sqlite3.Row
-        if not self._initialized:
-            self._initialize(conn)
-            self._initialized = True
-        return conn
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.row_factory = sqlite3.Row
+            if not self._initialized:
+                self._initialize(conn)
+                self._initialized = True
+            return conn
+        except Exception:
+            # Concurrent first-use can fail while switching WAL mode or
+            # applying the idempotent schema.  `_run` retries that operation,
+            # but it cannot close a connection that `_connect` never returned.
+            # Close here so Windows/OneDrive does not retain a leaked file
+            # handle and production retries do not accumulate descriptors.
+            conn.close()
+            raise
 
     def _initialize(self, conn: sqlite3.Connection) -> None:
         conn.execute(
@@ -352,6 +361,27 @@ class DiscordIdempotencyStore:
 
         self._run(operation)
 
+    # hgfinance-bind-inbound-thread-v1
+    def bind_inbound_thread(
+        self, message_id: str, thread_id: str, profile: str
+    ) -> None:
+        """Attach the exact Discord request thread to an admitted inbound message."""
+
+        if not message_id or not thread_id:
+            return
+
+        now = self._now()
+
+        def operation(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "UPDATE discord_idempotency_inbound "
+                "SET thread_id=?, updated_at=? "
+                "WHERE profile=? AND message_id=?",
+                (str(thread_id), now, profile, str(message_id)),
+            )
+
+        self._run(operation)
+
     def inbound_context(self, dedup_key: str, profile: str) -> dict[str, str | None]:
         def operation(conn: sqlite3.Connection) -> dict[str, str | None]:
             row = conn.execute(
@@ -379,6 +409,29 @@ class DiscordIdempotencyStore:
                 (profile, dedup_key),
             ).fetchone()
             return str(row[0]) if row else None
+
+        return self._run(operation)
+
+    def outbound_message_id(
+        self,
+        response_key: str,
+        profile: str,
+    ) -> str | None:
+        """Return the Discord message created for an outbound response."""
+
+        def operation(conn: sqlite3.Connection) -> str | None:
+            row = conn.execute(
+                "SELECT response_message_id "
+                "FROM discord_idempotency_outbound "
+                "WHERE profile=? AND response_key=? "
+                "LIMIT 1",
+                (profile, response_key),
+            ).fetchone()
+
+            if row is None or not row[0]:
+                return None
+
+            return str(row[0])
 
         return self._run(operation)
 

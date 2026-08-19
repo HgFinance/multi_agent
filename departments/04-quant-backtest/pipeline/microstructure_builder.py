@@ -38,15 +38,17 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]
                        / "01-research" / "collectors"))
 
-BUILDER_VERSION = "quant-microstructure-builder-v3"
+BUILDER_VERSION = "quant-microstructure-builder-v7"
+SOURCE_CONTENT_HASH_CONTRACT = "pg-composite-row-xor0-sum1-sha256-v1"
 # ▶ 판본 (2026-08-14). **옛 판본 행은 안 건드린다** - 그 판본으로 돈 실험의
 #   재현이 살아야 한다.
 #     v1 = 스프레드·잔량불균형·OFI·체결강도·실현변동성 (하루 하나로 평균)
@@ -63,6 +65,8 @@ KST = timezone(timedelta(hours=9))
 # 정규장만 접는다. 시간외·프리마켓은 체결 규칙이 달라 같은 통계에 섞으면
 # 스프레드·체결강도가 왜곡된다(가이드 8.2 와 같은 이유).
 SESSION_START, SESSION_END = "09:00", "15:30"
+EXTERNAL_CONTENT_WINDOW_CONTRACT = \
+    "KRX_REGULAR_SESSION_HALF_OPEN_0900_1530_KST_V1"
 
 # 그날 이 미만이면 통계가 아니라 잡음이다. 버리지 않고 quality_status 로 표시해
 # 소비자가 거르게 한다 - 조용히 빼면 유니버스가 왜 줄었는지 알 수 없다.
@@ -286,11 +290,20 @@ with q as (
                + coalesce(ask10::numeric*ask_vol10,0))::float8 / 1e6 end)
              book_depth_notional_l10,
            count(*) n_quotes,
+           -- Hash the complete source composite directly.  JSON/text
+           -- serialization made one day 216.9s versus a 36.5s baseline;
+           -- PostgreSQL's typed record hash preserves the full-row identity
+           -- at ~5s extra/day. XOR plus an independent additive seed keeps
+           -- duplicate-row multiplicity from cancelling silently.
+           bit_xor(hash_record_extended(quotes, 0))::text
+             quote_content_xor_0,
+           sum(hash_record_extended(quotes, 1)::numeric)::text
+             quote_content_sum_1,
            avg(case when (ask1 + bid1) > 0 and ts >= %(t_close)s
                     then spread::float8 / ((ask1 + bid1) / 2.0) * 10000 end) spread_close,
            avg(case when (ask1 + bid1) > 0 and ts < %(t_open_end)s
                     then spread::float8 / ((ask1 + bid1) / 2.0) * 10000 end) spread_open
-      from public.quotes
+      from public.quotes quotes
      where ts >= %(lo)s and ts < %(hi)s
      group by symbol
 ), t as (
@@ -304,6 +317,10 @@ with q as (
                      / (extract(epoch from max(ts) - min(ts)) / 60.0) end trade_intensity,
            stddev_samp(ln(nullif(price, 0)::float8)) * sqrt(count(*)) realized_vol,
            count(*) n_ticks,
+           bit_xor(hash_record_extended(ticks, 0))::text
+             trade_content_xor_0,
+           sum(hash_record_extended(ticks, 1)::numeric)::text
+             trade_content_sum_1,
            -- 내부 경로와 **같은 정의·같은 단위**(백만원)여야 한다. 어긋나면
            -- 같은 종목의 같은 날 값이 출처마다 달라진다.
            sum(price::float8 * volume) / 1e6 traded_value,
@@ -334,7 +351,7 @@ with q as (
               sum(ofi_contrib) filter (where ts >= %(t_close)s)::float8
                 / nullif(sum(volume) filter (where ts >= %(t_close)s),0)
             ]) v) ofi_intraday_std
-      from public.ticks
+      from public.ticks ticks
      where ts >= %(lo)s and ts < %(hi)s and price > 0
      group by symbol
 )
@@ -348,7 +365,9 @@ select coalesce(q.symbol, t.symbol) symbol,
        q.depth_imbalance_l1, q.depth_imbalance_l10,
        q.depth_imbalance_l1 - q.depth_imbalance_l10 depth_imbalance_slope,
        t.size_weighted_ofi,
-       q.book_depth_notional_l1, q.book_depth_notional_l10
+       q.book_depth_notional_l1, q.book_depth_notional_l10,
+       q.quote_content_xor_0, q.quote_content_sum_1,
+       t.trade_content_xor_0, t.trade_content_sum_1
   from q full outer join t on t.symbol = q.symbol
 """
 
@@ -418,24 +437,30 @@ def day_origin_guard(conn, day: date, origin: str, *, replace: bool = False) -> 
     """그날 이미 있는 출처와 지금 넣으려는 출처를 대조한다.
 
     반환: 'insert'(넣어도 됨) | 'skip'(같은 출처가 이미 있음) | 'blocked'
-    `replace=True` 면 다른 출처가 있을 때 **그날을 통째로 지우고** 넣는다 -
+    `replace=True` 면 출처가 같든 다르든 **그날을 통째로 지우고** 다시 넣는다.
+    원천 정정이나 내용-지문 계약 변경도 기존 날짜를 재구축할 수 있어야 한다.
     부분 덮어쓰기는 하지 않는다. 섞인 상태를 만드는 것이 문제였으므로,
     교체는 날 단위로만 허용한다.
     """
     bucket = datetime.combine(day, datetime.min.time(), tzinfo=KST)
     nxt = bucket + timedelta(days=1)
     with conn.cursor() as cur:
+        # Serialize every writer for one feature-version/day. DELETE+INSERT is
+        # atomic only when overlapping workers cannot both pass this guard.
+        cur.execute(
+            "select pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (f"{FEATURE_SET_VERSION}|{day.isoformat()}",))
         cur.execute(_SQL_DAY_ORIGINS, (FEATURE_SET_VERSION, bucket, nxt))
         have = {r[0] for r in cur.fetchall()}
     if not have:
         return "insert"
-    if have == {origin}:
-        return "skip"
     if not replace:
-        return "blocked"
+        return "skip" if have == {origin} else "blocked"
     with conn.cursor() as cur:
         cur.execute(_SQL_DELETE_DAY, (FEATURE_SET_VERSION, bucket, nxt))
-    conn.commit()
+    # Caller inserts the rebuilt rows and commits both operations together.
+    # Committing here creates a crash window in which an entire trading day is
+    # absent after DELETE but before INSERT.
     return "insert"
 
 # 이미 접은 날은 다시 접지 않는다. 같은 날을 두 번 넣으면 데이터셋 해시가
@@ -542,10 +567,84 @@ def input_hash(day: date, n_ticks: int, n_quotes: int) -> str:
     return hashlib.sha256(blob.encode()).hexdigest()[:32]
 
 
+def external_content_fingerprints(
+        day: date, symbol: str, n_ticks: int, n_quotes: int,
+        quote_xor_0, quote_sum_1, trade_xor_0, trade_sum_1,
+) -> tuple[str, str, str]:
+    """Bind an external feature row to the raw quote/trade row multisets.
+
+    Counts alone do not identify data: a vendor correction can change price,
+    volume, timestamp, or L10 book values without changing either count.  SQL
+    therefore folds the complete typed rows with a seeded 64-bit XOR and an
+    independent seeded additive checksum.  Count and sum preserve multiplicity
+    when identical rows cancel in XOR.  This function gives each side and their
+    union a canonical SHA-256 identity suitable for the experiment lockbox.
+    """
+    counts = {"quotes": int(n_quotes), "ticks": int(n_ticks)}
+    if any(value < 0 for value in counts.values()):
+        raise ValueError(f"negative external source count: {counts}")
+
+    def one(source: str, count: int, components) -> str:
+        normalized = [None if value is None else str(value)
+                      for value in components]
+        if count > 0 and any(value is None for value in normalized):
+            raise ValueError(
+                f"{source} content digest missing for {symbol} {day}: "
+                f"count={count}")
+        body = {
+            "contract": SOURCE_CONTENT_HASH_CONTRACT,
+            "day": day.isoformat(),
+            "symbol": str(symbol).strip(),
+            "source": source,
+            "row_count": count,
+            "xor_seed_0": normalized[0],
+            "sum_seed_1": normalized[1],
+        }
+        canonical = json.dumps(
+            body, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    quote_fp = one(
+        "quotes", counts["quotes"],
+        (quote_xor_0, quote_sum_1))
+    trade_fp = one(
+        "ticks", counts["ticks"],
+        (trade_xor_0, trade_sum_1))
+    combined = json.dumps({
+        "contract": SOURCE_CONTENT_HASH_CONTRACT,
+        "day": day.isoformat(),
+        "symbol": str(symbol).strip(),
+        "quote_content_fingerprint": quote_fp,
+        "trade_content_fingerprint": trade_fp,
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return (
+        quote_fp,
+        trade_fp,
+        hashlib.sha256(combined.encode("utf-8")).hexdigest(),
+    )
+
+
 def session_bounds(day: date) -> tuple[str, str]:
     """그날 정규장 구간(KST). 시간외를 섞지 않는다."""
     return (f"{day.isoformat()} {SESSION_START}+09",
             f"{day.isoformat()} {SESSION_END}+09")
+
+
+def external_session_content_window(day: date) \
+        -> tuple[datetime, datetime]:
+    """Return the sole raw-content hash window used by builder and runner.
+
+    This is a fixed half-open regular-session interval.  Prediction horizon,
+    latency, purge gap, and whether a formula needs score calibration may limit
+    sample construction, but they must never change which raw rows identify a
+    session/instrument cell.
+    """
+
+    start = datetime.combine(day, time.fromisoformat(SESSION_START), KST)
+    end = datetime.combine(day, time.fromisoformat(SESSION_END), KST)
+    if not start < end:
+        raise RuntimeError("external source content window must be non-empty")
+    return start, end
 
 
 # ▶ 일중 구간 경계(KST). 개장 09:00-09:30 · 오전 -12:00 · 오후 -14:50 · 마감 -15:30.
@@ -722,7 +821,21 @@ def build_day_external(market_conn, src_conn, day: date, *,
         cur.execute(sql, session_params(day))
         rows = cur.fetchall()
     if not rows:
-        return {"day": day, "rows": 0, "note": "저쪽 원천에 그날 행이 없다"}
+        if dry_run or not replace:
+            return {"day": day, "rows": 0,
+                    "note": "external source has no rows for this session"}
+        # Explicit reconciliation must not leave stale target rows after the
+        # source deleted an entire session. Remove the materialization under the
+        # per-day transaction lock and leave an auditable gap tombstone.
+        gate = day_origin_guard(market_conn, day, "external", replace=True)
+        if gate != "insert":
+            market_conn.rollback()
+            return {"day": day, "rows": 0, "note": _GATE_NOTE[gate]}
+        record_feed_gap(market_conn, day, ["quotes", "ticks"], 0)
+        market_conn.commit()
+        return {"day": day, "rows": 0, "missing": ["quotes", "ticks"],
+                "tombstone": True,
+                "note": "source-empty reconciliation removed stale features"}
 
     with market_conn.cursor() as cur:
         cur.execute("select symbol, instrument_id from market.symbol_map")
@@ -736,7 +849,9 @@ def build_day_external(market_conn, src_conn, day: date, *,
     for (sym, spread, di, ofi, intensity, rvol, n_ticks, n_quotes,
          tvalue, tvolume, ofi_c, ofi_o, ofi_sd, cvwap, sp_ratio,
          depth_l1, depth_l10, depth_slope, size_ofi,
-         book_depth_l1, book_depth_l10) in rows:
+         book_depth_l1, book_depth_l10,
+         quote_xor_0, quote_sum_1,
+         trade_xor_0, trade_sum_1) in rows:
         assert_v4_bounds(
             order_flow_imbalance=ofi, ofi_close=ofi_c, ofi_open=ofi_o,
             depth_imbalance_l1=depth_l1, depth_imbalance_l10=depth_l10,
@@ -747,8 +862,22 @@ def build_day_external(market_conn, src_conn, day: date, *,
         if iid is None:
             unmapped += 1
             continue
+        quote_fp, trade_fp, source_fp = external_content_fingerprints(
+            day, str(sym), int(n_ticks), int(n_quotes),
+            quote_xor_0, quote_sum_1, trade_xor_0, trade_sum_1)
         g = quality_of(int(n_ticks), int(n_quotes))
         grades[g] += 1
+        evidence = {
+            "n_ticks": int(n_ticks),
+            "n_quotes": int(n_quotes),
+            "origin": "external",
+            "source_content_hash_contract": SOURCE_CONTENT_HASH_CONTRACT,
+            "quote_content_fingerprint": quote_fp,
+            "trade_content_fingerprint": trade_fp,
+            "source_content_fingerprint": source_fp,
+        }
+        if miss:
+            evidence["missing_source"] = "+".join(miss)
         payload.append((
             bucket,
             # 이관 구간과 같은 규칙: 관측 시각이 원본에 없으므로 자리 채움이고,
@@ -758,9 +887,9 @@ def build_day_external(market_conn, src_conn, day: date, *,
             ofi_c, ofi_o, ofi_sd, cvwap, sp_ratio,
             depth_l1, depth_l10, depth_slope, size_ofi,
             book_depth_l1, book_depth_l10,
-            f'{{"n_ticks": {int(n_ticks)}, "n_quotes": {int(n_quotes)},'
-            f' "origin": "external"{miss_tag}}}',
-            g, bucket, input_hash(day, int(n_ticks), int(n_quotes))))
+            json.dumps(evidence, ensure_ascii=False, sort_keys=True,
+                       separators=(",", ":")),
+            g, bucket, source_fp))
 
     if dry_run:
         return {"day": day, "rows": len(payload), "unmapped": unmapped,
@@ -834,6 +963,11 @@ def _check_session_bounds_exclude_after_hours():
     lo, hi = session_bounds(date(2026, 8, 11))
     assert lo.endswith("09:00+09") and hi.endswith("15:30+09"), (lo, hi)
     assert "2026-08-11" in lo and "2026-08-11" in hi
+    start, end = external_session_content_window(date(2026, 8, 11))
+    assert start.isoformat() == "2026-08-11T09:00:00+09:00"
+    assert end.isoformat() == "2026-08-11T15:30:00+09:00"
+    assert EXTERNAL_CONTENT_WINDOW_CONTRACT.endswith(
+        "HALF_OPEN_0900_1530_KST_V1")
     print("  정규장 구간 한정         OK")
 
 
@@ -846,6 +980,34 @@ def _check_input_hash_tracks_inputs():
     assert a != input_hash(d, 100, 201)
     assert a != input_hash(date(2026, 8, 10), 100, 200)
     print("  입력 해시 결정론         OK")
+
+
+def _check_external_content_hash_tracks_corrections():
+    """Same row counts with corrected raw values must change experiment input."""
+    d = date(2026, 8, 11)
+    base = external_content_fingerprints(
+        d, "005930", 100, 200, "11", "12", "21", "22")
+    assert base == external_content_fingerprints(
+        d, "005930", 100, 200, "11", "12", "21", "22")
+    corrected_quote = external_content_fingerprints(
+        d, "005930", 100, 200, "99", "12", "21", "22")
+    corrected_trade = external_content_fingerprints(
+        d, "005930", 100, 200, "11", "12", "21", "99")
+    assert base[0] != corrected_quote[0] and base[2] != corrected_quote[2]
+    assert base[1] != corrected_trade[1] and base[2] != corrected_trade[2]
+    try:
+        external_content_fingerprints(
+            d, "005930", 100, 200, None, "12", "21", "22")
+    except ValueError as exc:
+        assert "quotes content digest missing" in str(exc)
+    else:
+        raise AssertionError("non-empty external source accepted without digest")
+    # A genuinely empty side has a deterministic identity rather than a fake
+    # aggregate value; this keeps one-sided trading days auditable.
+    empty = external_content_fingerprints(
+        d, "005930", 100, 0, None, None, "21", "22")
+    assert len(empty[0]) == len(empty[1]) == len(empty[2]) == 64
+    print("  외부 원천 내용 지문      OK")
 
 
 def _check_sql_does_not_zero_fill():
@@ -978,6 +1140,10 @@ def _check_one_day_one_origin():
     conn = _GuardConn({"external"})
     assert day_origin_guard(conn, d, "local", replace=True) == "insert"
     assert conn.cur.deleted == 1, "교체인데 그날을 안 지웠다"
+    # 같은 출처의 원천 정정/지문 계약 변경도 명시적 재구축이 가능해야 한다.
+    conn = _GuardConn({"external"})
+    assert day_origin_guard(conn, d, "external", replace=True) == "insert"
+    assert conn.cur.deleted == 1, "같은 출처 --replace 가 재구축을 건너뛴다"
 
     # 막힌 이유가 사람이 읽는 문장으로 남아야 한다 - 조용한 0행은 원인을 숨긴다
     assert "섞지 않는다" in _GATE_NOTE["blocked"]
@@ -1145,6 +1311,7 @@ def _selfcheck() -> int:
     _check_quality_is_marked_not_dropped()
     _check_session_bounds_exclude_after_hours()
     _check_input_hash_tracks_inputs()
+    _check_external_content_hash_tracks_corrections()
     _check_sql_does_not_zero_fill()
     _check_full_outer_join_keeps_one_sided_days()
     _check_intensity_uses_observed_span()
@@ -1154,7 +1321,7 @@ def _selfcheck() -> int:
     _check_v5_depth_capacity_is_explicit()
     _check_whole_day_source_loss_is_not_a_row_grade()
     _check_partial_universe_loss_is_reported()
-    print("마이크로구조 빌더 15개 영역 통과. 실행은 --build")
+    print("마이크로구조 빌더 16개 영역 통과. 실행은 --build")
     return 0
 
 
@@ -1162,10 +1329,10 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="호가·체결 -> 일별 마이크로구조 피처")
     ap.add_argument("--build", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
-    # 다른 출처가 이미 있는 날을 **통째로 지우고** 다시 넣는다. 부분
-    # 덮어쓰기는 없다 - 섞인 상태를 만드는 것이 애초의 사고였다.
+    # 기존 날짜를 **통째로 지우고** 다시 넣는다. 같은 출처의 원천 정정과
+    # 내용-지문 계약 갱신도 포함한다. 부분 덮어쓰기는 없다.
     ap.add_argument("--replace", action="store_true",
-                    help="다른 출처가 있으면 그날을 지우고 교체한다")
+                    help="기존 날짜가 있으면 그날 전체를 지우고 재구축한다")
     ap.add_argument("--from", dest="since", default="")
     ap.add_argument("--through", dest="through", default="",
                     help="마지막 거래일(포함). 병렬 백필을 겹치지 않게 나눌 때 사용")
@@ -1221,15 +1388,29 @@ def main(argv: list[str] | None = None) -> int:
             #   쿼리를 만들고 시장 API 를 3시간 넘게 세웠다.
             #   저쪽이 가진 거래일은 **이미 접어 둔 피처의 날짜**로 안다 -
             #   우리 테이블 조회라 즉시 끝나고, 그 날들이 곧 저쪽 원천의 날이다.
-            if src is not None:
+            if since and through:
+                days = []
+                cursor_day = since
+                while cursor_day <= through:
+                    days.append(cursor_day)
+                    cursor_day += timedelta(days=1)
+            elif src is not None:
                 with src.cursor() as cur:
                     # ts는 timestamptz다. 연결의 기본 UTC에서 ts::date를 쓰면
                     # KST 다음 날 새벽의 시험/장외 이벤트가 전날로 분류된다
                     # (실측: 공식 거래일 2026-06-09가 목록에는 있었지만 KST
                     # 정규장 행은 0). 집계 session_bounds와 같은 KST 날짜로 센다.
                     cur.execute("""
-                        select distinct (ts at time zone 'Asia/Seoul')::date
-                          from public.ticks order by 1""")
+                        select session_date from (
+                          select distinct
+                                 (ts at time zone 'Asia/Seoul')::date session_date
+                            from public.ticks
+                          union
+                          select distinct
+                                 (ts at time zone 'Asia/Seoul')::date session_date
+                            from public.quotes
+                        ) source_days
+                        order by session_date""")
                     days = [r[0] for r in cur.fetchall()]
             else:
                 with conn.cursor() as cur:
@@ -1238,6 +1419,20 @@ def main(argv: list[str] | None = None) -> int:
                           from market.microstructure_features
                          order by 1""")
                     days = [r[0] for r in cur.fetchall()]
+            if a.replace:
+                # Reconcile source ∪ target so a source-side deletion cannot
+                # hide a stale target day. An explicit bounded range also adds
+                # absent dates; the official calendar below removes holidays.
+                with conn.cursor() as cur:
+                    cur.execute(_SQL_DONE_DAYS, (FEATURE_SET_VERSION,))
+                    target_days = {r[0] for r in cur.fetchall()}
+                days = sorted(set(days) | target_days)
+                if since and through:
+                    cursor_day = since
+                    while cursor_day <= through:
+                        days.append(cursor_day)
+                        cursor_day += timedelta(days=1)
+                    days = sorted(set(days))
             # 외부 수집 DB에는 일요일 연결 시험/잔존 이벤트가 실제로 있었다
             # (2026-05-31~08-09 11일). 거래소 세션이 아닌 날짜를 일별 피처로
             # 만들면 walk-forward 달력이 조용히 늘어나므로 평일만 허용한다.

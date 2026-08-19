@@ -236,6 +236,61 @@ def fetch_current_mandate_by_fund(fund_id: str) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def fetch_fund_id_by_user(user_id: str) -> str | None:
+    """`user_id -> fund_id` 역참조. **동기**이고, 실패는 `None`이다.
+
+    ## 왜 필요한가
+
+    이 경로가 없어서 프론트엔드가 `fund_id`를 계정과 쌍으로 하드코딩해 요청
+    body에 실어 보냈고(`ai-office/app/lib/currentAccount.ts`), Discord 작성자
+    매핑표도 fund를 함께 적어야 했다(`apps/api/discord_actor_map.py`).
+    `governance.fund_memberships`가 2026-08-18 seed로 채워지면서 서버가 직접
+    풀 수 있게 됐다.
+
+    동기인 이유는 `fetch_current_mandate_by_fund`와 같다 - 호출부(`/ui/ceo/ask`)가
+    블로킹 subprocess를 쓰는 동기 라우트다.
+
+    **예외를 올리지 않는다.** 못 풀면 `None`이고, 호출부는 `fund_id` 없이
+    진행한다(Mandate 스냅샷 없음). 404(소유 Fund 없음)와 409(2개 이상이라 모호)도
+    `None`이다 - 모호할 때 임의로 하나를 고르면 사용자가 정하지 않은 한도가
+    판단 근거가 된다(개발 원칙 9).
+    """
+
+    user_id = str(user_id or "").strip()
+    if not GOVERNANCE_API_URL or not user_id:
+        return None
+    headers = (
+        {"X-Governance-Internal-Token": GOVERNANCE_API_AUTH_TOKEN}
+        if GOVERNANCE_API_AUTH_TOKEN
+        else None
+    )
+    try:
+        with httpx.Client(
+            base_url=GOVERNANCE_API_URL,
+            timeout=GOVERNANCE_API_TIMEOUT_SECONDS,
+        ) as client:
+            response = client.get(
+                f"/governance/v1/users/{user_id}/fund", headers=headers
+            )
+    except httpx.HTTPError:
+        return None
+    if response.status_code >= 400:
+        # 503(역참조 미지원)·404(Fund 없음)·409(모호)를 구분해 로그만 남긴다.
+        # 호출부의 동작은 셋 다 같다 - fund 없이 진행한다.
+        _LOGGER.info(
+            "governance user-fund lookup miss status=%s", response.status_code
+        )
+        return None
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    fund_id = str(payload.get("fund_id") or "").strip()
+    return fund_id or None
+
+
 async def fetch_mandate_policy_content(mandate_id: str) -> dict[str, Any] | None:
     """Best-effort server-side Mandate content lookup for the CEO planner.
 

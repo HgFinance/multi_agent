@@ -1,6 +1,8 @@
 # 헤지펀드 디지털 직원 채용 및 Agent Profile 설계서
 
-> **Current runtime override (2026-08-07)**: 실제 실행 기준은 8개 Hermes Head, 25개 LLM Worker, 4개 결정론 runner다. 총 직원 수는 29명이며 Trading은 3명(LLM 2 + `desk-runner`), Accounting/Portfolio는 2명(LLM 1 + `back-office-runner`)이다. Head는 `openai-codex/gpt-5.6-luna` 기본·승인된 Claude Code 대체 런타임, LLM Worker는 Ollama `qwen3:1.7b`다. 아래의 논리적 역할·Specialist Agent·LangGraph Node 표현은 채용 후보·레거시 taxonomy로 보며 현재 Worker 수·실행 여부의 기준으로 사용하지 않는다. 현재 역할·trigger·tool은 [WORKER_ROLE_BOUNDARIES.md](../02-engineering/WORKER_ROLE_BOUNDARIES.md), Profile `workers`, `runtime_personalities`와 결정론 Worker Registry를 따른다.
+> The dated roster below is a historical profile snapshot. Current worker counts and execution status are owned by `departments/*/hermes/config.yaml`, worker registries, and [CURRENT_PROJECT_ARCHITECTURE.md](../CURRENT_PROJECT_ARCHITECTURE.md).
+
+> **Historical snapshot (2026-08-07; superseded by current worker registry)**: 실제 실행 기준은 8개 Hermes Head, 25개 LLM Worker, 4개 결정론 runner다. 총 직원 수는 29명이며 Trading은 3명(LLM 2 + `desk-runner`), Accounting/Portfolio는 2명(LLM 1 + `back-office-runner`)이다. Head는 `openai-codex/gpt-5.6-luna` 기본·승인된 Claude Code 대체 런타임, LLM Worker는 Ollama `qwen3:1.7b`다. 아래의 논리적 역할·Specialist Agent·LangGraph Node 표현은 채용 후보·레거시 taxonomy로 보며 현재 Worker 수·실행 여부의 기준으로 사용하지 않는다. 현재 역할·trigger·tool은 [WORKER_ROLE_BOUNDARIES.md](../02-engineering/WORKER_ROLE_BOUNDARIES.md), Profile `workers`, `runtime_personalities`와 결정론 Worker Registry를 따른다.
 
 > 2026-08-07 전사 실행 계층 확정: LLM Registry는 CEO 1·HR 5·Research 6·Trading 2·Risk 1·Quant/Backtest 7·Accounting/Portfolio 1·QA 2이고, 결정론 runner 4개를 포함한 총 직원 수는 29명이다. 기존 RSK/QAA Profile ID와 도현님 담당 부서의 구 역할 ID는 역할·권한·평가의 레거시 식별자로 보존하며, 실행 프로세스는 각 Profile의 `workers`, `runtime_personalities`와 결정론 Worker Registry를 따른다.
 

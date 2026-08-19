@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +20,7 @@ COLLECTORS = ROOT / "departments/01-research/collectors"
 sys.path[:0] = [str(PIPELINE), str(COLLECTORS)]
 
 from feature_catalog import _dates, _forward_returns, _pit_of, rank_ic, summarize
+from stock_universe import assert_stock_instrument_ids
 
 
 FIELDS = (
@@ -27,6 +28,22 @@ FIELDS = (
     "depth_imbalance_l10", "spread_bps",
 )
 FSV = "ms-daily-v4"
+
+
+def _begin_read_only_transaction(connection) -> None:
+    """Make one diagnostic transaction read-only without polluting its pool."""
+    with connection.cursor() as cursor:
+        # Supavisor transaction pooling reuses server sessions.  Setting the
+        # session default to read-only can therefore break a later writer that
+        # receives the same backend.  This guard vanishes with the rollback.
+        cursor.execute("SET TRANSACTION READ ONLY")
+
+
+def _rollback_and_close(connection) -> None:
+    try:
+        connection.rollback()
+    finally:
+        connection.close()
 
 
 def source(field: str) -> dict:
@@ -81,19 +98,33 @@ def evaluate(expr: dict, ranked_fields: dict[str, dict[str, float]]) -> dict[str
     raise ValueError(f"unsupported diagnostic op {op!r}")
 
 
-def measure(conn, *, horizon: int = 2, start: date | None = None) -> list[dict]:
+def measure(conn, *, meta_conn=None, stock_instrument_ids=None,
+            horizon: int = 2, start: date | None = None) -> list[dict]:
+    if meta_conn is None:
+        raise RuntimeError(
+            "micro-v4 diagnostic requires reference-plane stock validation")
+    stock_ids = sorted({str(value) for value in
+                        (stock_instrument_ids or ()) if value is not None})
+    if not stock_ids:
+        raise RuntimeError("micro-v4 diagnostic requires a stock UUID allowlist")
+    stock_scope = assert_stock_instrument_ids(meta_conn, stock_ids)
     cur = conn.cursor()
-    days = _dates(cur, horizon, FSV)
+    days = _dates(cur, horizon, FSV, stock_ids)
     if start is not None:
         days = [day for day in days if day >= start]
     if not days:
         return []
-    future = _forward_returns(cur, days, horizon)
+    label_read_through = max(days) + timedelta(days=horizon * 3)
+    stock_scope = assert_stock_instrument_ids(
+        meta_conn, stock_ids, first_session=min(days),
+        last_session=label_read_through)
+    future = _forward_returns(cur, days, horizon, stock_ids)
     pit = _pit_of(conn, cur, days)
     cur.execute(
         "select event_time::date,instrument_id," + ",".join(FIELDS) +
         " from market.microstructure_features where feature_set_version=%s "
-        "and event_time::date=any(%s)", (FSV, days))
+        "and event_time::date=any(%s) "
+        "and instrument_id=any(%s::uuid[])", (FSV, days, stock_ids))
     raw: dict = {}
     for day, instrument, *values in cur.fetchall():
         raw.setdefault(day, {})[str(instrument)] = dict(zip(FIELDS, values))
@@ -115,6 +146,10 @@ def measure(conn, *, horizon: int = 2, start: date | None = None) -> list[dict]:
             "name": name, "signal_expr": expr, "horizon": horizon,
             "ic": ic, "t_stat": t_stat, "periods": periods,
             "avg_names": avg_names, "pit": pit,
+            "asset_scope": stock_scope["asset_scope"],
+            "stock_universe_version": stock_scope["version"],
+            "instrument_count": stock_scope["instrument_count"],
+            "label_read_through": label_read_through.isoformat(),
             # AST 실행면은 큰 값을 산다. 역방향은 자동 합격이 아니라 별도 neg
             # 가설이어야 하므로 |t|가 아닌 사전 방향 t>=3만 화면 통과다.
             "screen_pass": bool(t_stat is not None and t_stat >= 3.0),
@@ -138,12 +173,32 @@ def main(argv: list[str]) -> int:
     horizon = int(argv[argv.index("--horizon") + 1]) if "--horizon" in argv else 2
     start = (date.fromisoformat(argv[argv.index("--from") + 1])
              if "--from" in argv else None)
-    conn = psycopg2.connect(load_project_env()["TIMESCALE_DATABASE_URL"], connect_timeout=30)
+    env = load_project_env()
+    conn = psycopg2.connect(env["TIMESCALE_DATABASE_URL"], connect_timeout=30)
+    meta_conn = psycopg2.connect(env["DATABASE_URL"], connect_timeout=30)
     try:
-        print(json.dumps(measure(conn, horizon=horizon, start=start), ensure_ascii=False,
-                         sort_keys=True, indent=2))
+        _begin_read_only_transaction(conn)
+        _begin_read_only_transaction(meta_conn)
+        with meta_conn.cursor() as cursor:
+            cursor.execute("""
+                select instrument_id::text
+                  from reference.instruments
+                 where upper(instrument_type) = 'STOCK'
+                   and upper(asset_class) = 'EQUITY'
+                   and upper(market) = 'KRX'
+                   and upper(status) = 'ACTIVE'
+                 order by instrument_id
+            """)
+            stock_ids = [str(row[0]) for row in cursor.fetchall()]
+        print(json.dumps(measure(
+            conn, meta_conn=meta_conn, stock_instrument_ids=stock_ids,
+            horizon=horizon, start=start), ensure_ascii=False,
+            sort_keys=True, indent=2))
     finally:
-        conn.close()
+        try:
+            _rollback_and_close(meta_conn)
+        finally:
+            _rollback_and_close(conn)
     return 0
 
 

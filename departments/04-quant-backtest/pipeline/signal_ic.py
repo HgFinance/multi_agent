@@ -42,7 +42,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-IC_VERSION = "quant-signal-ic-v2"
+IC_VERSION = "quant-signal-ic-v3"
 
 # ▶ 신규 팩터 유의 문턱. 관행 2.0 이 아니라 3.0 이다 - 같은 데이터를 업계
 #   전체가 파고 있어 2.0 은 다중검정을 감안하면 너무 느슨하다는 것이
@@ -143,7 +143,8 @@ def ic_series(market, config: dict, *, horizon: int,
       **줄어든 그 수가 진짜 수**다. 중첩을 쓰려면 HAC 보정이 필요한데,
       그건 없는 정밀도를 만드는 쪽이라 안 쓴다.
     """
-    from strategy_templates import pit_view_for, resolve
+    from strategy_templates import (path_crosses_unadjusted_adjustment_gap,
+                                    pit_view_for, resolve)
 
     # The portfolio backtester gives an explicit AST precedence over the legacy
     # template.  IC must measure the *same signal*, otherwise an AST experiment
@@ -196,6 +197,15 @@ def ic_series(market, config: dict, *, horizon: int,
             p1 = market.closes.get((fwd, sym))
             # **없는 값을 채우지 않는다.** 결측 종목은 그 기간에서 뺀다.
             if p0 is None or p1 is None or p0 <= 0 or sc is None:
+                continue
+            # The label owns the whole (d, fwd] return path, not only its two
+            # endpoints.  A 2x split followed by an ordinary price move need
+            # not leave an integer endpoint ratio, so inspect every observed
+            # close inside the label window and leave that label unmeasured.
+            price_path = [market.closes[(session, sym)]
+                          for session in dates[i:i + horizon + 1]
+                          if (session, sym) in market.closes]
+            if path_crosses_unadjusted_adjustment_gap(price_path):
                 continue
             xs.append(float(sc))
             ys.append(float(p1) / float(p0) - 1.0)

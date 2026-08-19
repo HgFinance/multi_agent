@@ -1240,13 +1240,30 @@ def get_mandate_current(mandate_id: str):
     between two incompatible shapes.  Older repository implementations may
     not expose ``get`` yet; in that case the canonical binding remains
     available and an ACTIVE mandate fails closed when its binding is absent.
+
+    성능(2026-08-14): Postgres 구현이 있으면 `get_mandate_current_snapshot()` 한 번의
+    JOIN 왕복으로 아래 4단계(각자 별도 커넥션 체크아웃)를 대신한다 - 없거나
+    `None`을 돌려주면(판단 유보) 기존 4단계 경로로 그대로 떨어진다. 응답 모양은
+    두 경로가 동일해야 하고, `postgres_repository.py`의 `get_mandate_current_snapshot`
+    docstring에 그 계약이 적혀 있다.
     """
+    # 2026-08-14 UI 저장 경로(PUT .../mandates/{id})가 만드는 override다. 이
+    # metadata 행이 있으면 그게 사용자가 마지막으로 저장한 최신 상태이므로
+    # version 기반 경로보다 always 우선한다 - version 시스템은 이 override가
+    # 없을 때만 쓰는 레거시 경로다.
+    get_access_context = getattr(
+        _mandate_repo, "get_mandate_access_context", None
+    )
+    access_context = (
+        get_access_context(mandate_id) if callable(get_access_context) else None
+    ) or {}
     get_metadata = getattr(_mandate_repo, "get_mandate_metadata", None)
     metadata = get_metadata(mandate_id) if callable(get_metadata) else None
     if metadata:
         policy = metadata.get("policy")
         return {
             "mandate_id": mandate_id,
+            **access_context,
             "case_id": None,
             "current_version": 0,
             "mandate_version_id": None,
@@ -1261,9 +1278,26 @@ def get_mandate_current(mandate_id: str):
             "metadata": metadata,
         }
 
+    # metadata override가 없을 때만 아래 legacy version 경로를 탄다 - 그 경로
+    # 안에서 fast path(성능 최적화, 2026-08-14)를 먼저 시도한다.
+    fast_snapshot = getattr(_mandate_repo, "get_mandate_current_snapshot", None)
+    if callable(fast_snapshot):
+        response = fast_snapshot(mandate_id)
+        if response is not None:
+            if response["status"] == "ACTIVE" and (
+                not response.get("mandate_version_id") or not response.get("policy_hash")
+            ):
+                raise HTTPException(status_code=503, detail="canonical_mandate_binding_unavailable")
+            return {**access_context, **response}
+
     version, status = _mandate_repo.get_mandate_current(mandate_id)
     if version <= 0:
-        return {"mandate_id": mandate_id, "current_version": version, "status": status}
+        return {
+            "mandate_id": mandate_id,
+            **access_context,
+            "current_version": version,
+            "status": status,
+        }
     mandate_version_id = (
         _mandate_repo.get_mandate_version_id(mandate_id, version)
         if version > 0 else None
@@ -1276,6 +1310,7 @@ def get_mandate_current(mandate_id: str):
         raise HTTPException(status_code=503, detail="canonical_mandate_binding_unavailable")
     response = {
         "mandate_id": mandate_id,
+        **access_context,
         "case_id": None,
         "current_version": version,
         "mandate_version_id": mandate_version_id,
@@ -1345,6 +1380,58 @@ def get_mandate_current_by_fund(
             ),
         )
     return get_mandate_current(mandate_ids[0])
+
+
+@app.get(
+    "/governance/v1/users/{user_id}/fund",
+    dependencies=[Depends(_require_internal_auth)],
+)
+def get_fund_for_user(user_id: str):
+    """`user_id -> fund_id` 역참조. 2026-08-18 추가.
+
+    ## 왜 필요한가
+
+    이 경로가 없어서 **프론트엔드가 `fund_id`를 계정과 쌍으로 하드코딩**해
+    요청 body에 실어 보내고 있었다(`ai-office/app/lib/currentAccount.ts`,
+    `apps/api/ceo.py`의 `CeoAsk.fund_id`). Discord 작성자 매핑표
+    (`apps/api/discord_actor_map.py`)도 같은 이유로 fund를 함께 적어야 했다.
+    `governance.fund_memberships`가 0건이라 서버가 알 방법이 없었기 때문이고,
+    2026-08-18 seed로 소유 관계가 채워지면서 조회가 가능해졌다.
+
+    ## 왜 단수(`/fund`)인가
+
+    호출자가 원하는 건 "이 사용자의 Fund 하나"다. 여러 개면 어느 것의 Mandate로
+    판단할지가 모호하므로 **임의로 고르지 않고 409로 닫는다** -
+    `GET .../mandates/by-fund/{fund_id}/current`와 같은 규약이다. 목록이 필요한
+    화면이 생기면 그때 별도 복수형 경로를 만든다.
+
+    ## 상태 코드
+
+    | 상황 | 응답 |
+    |---|---|
+    | 소유 Fund 1개 | 200 `{"user_id", "fund_id"}` |
+    | 0개 | 404 - "이 사용자는 아직 Fund가 없다"가 정확한 사실이다 |
+    | 2개 이상 | 409 - 모호. 임의 선택 금지 |
+    | Repository가 역참조 미지원(구형 Prototype) | 503 - fail-closed |
+    """
+    lookup = getattr(_mandate_repo, "fund_ids_for_user", None)
+    if not callable(lookup):
+        # 조용히 빈 값을 주면 호출자는 "Fund 없음"과 "조회 불가"를 구분할 수 없다.
+        raise HTTPException(status_code=503, detail="user_fund_lookup_unavailable")
+    fund_ids = lookup(user_id)
+    if not fund_ids:
+        raise HTTPException(
+            status_code=404, detail=f"user_id={user_id}에 연결된 Fund가 없습니다"
+        )
+    if len(fund_ids) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"user_id={user_id}가 소유한 Fund가 {len(fund_ids)}개라 단일 조회가 "
+                f"모호합니다: {fund_ids}"
+            ),
+        )
+    return {"user_id": user_id, "fund_id": fund_ids[0]}
 
 
 # --- 2.4 Mandate 온보딩 챗봇 제안 (mandate_assistant.py) ----------------------------
@@ -2063,6 +2150,14 @@ if __name__ == "__main__":
     _mandate_repo.set_fund_id("m1b", "f1")
     r5e = client.get("/governance/v1/mandates/by-fund/f1/current")
     assert r5e.status_code == 409, r5e.text
+
+    # 4b. user -> fund 역참조. In-Memory Repository는 `fund_ids_for_user`가 없으므로
+    # **503으로 닫힌다** - 조용히 404("Fund 없음")를 주면 호출자가 "이 사용자는
+    # Fund가 없다"와 "이 저장소는 역참조를 못 한다"를 구분할 수 없다. Postgres
+    # Repository를 쓰면 governance.fund_memberships를 실제로 읽는다.
+    r5f = client.get("/governance/v1/users/u1/fund")
+    assert r5f.status_code == 503, r5f.text
+    assert r5f.json()["detail"] == "user_fund_lookup_unavailable", r5f.text
 
     # 5. Report 조립 - 필수 Section 없으면 FAILED.
     r6 = client.post("/reporting/v1/reports", json={

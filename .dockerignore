@@ -21,3 +21,19 @@ node_modules
 **/auth.json
 **/*.sqlite3
 **/state.db*
+
+# Governed/runtime data is mounted after the image is built.  None of the
+# repository Dockerfiles COPY these paths; sending multi-gigabyte archives as
+# build context only slows Windows/OneDrive builds and risks data leakage.
+market-archive/
+quant-data/
+# The AWS database-bootstrap image needs the canonical Timescale migration
+# chain, but no runtime archive or other Timescale payload belongs in a build
+# context.
+timescaledb/*
+!timescaledb/migrations/
+!timescaledb/migrations/**
+artifacts/
+audit-artifacts/
+test-results/
+dist/

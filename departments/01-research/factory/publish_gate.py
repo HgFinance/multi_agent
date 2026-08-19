@@ -32,8 +32,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "contracts"))
 
-from contracts.factory_contracts import (  # noqa: E402
+from factory_contracts import (  # noqa: E402
     CompetingExplanation,
     ExperimentProposalV1,
     LessonCode,
@@ -41,13 +42,14 @@ from contracts.factory_contracts import (  # noqa: E402
     ResearchLane,
     Testability,
 )
-from contracts.alpha_ast_surface import (  # noqa: E402
+from alpha_ast_surface import (  # noqa: E402
     MICRO_FIELDS,
     fields_of as ast_fields_of,
     parse as parse_ast,
 )
 
 MODULE_VERSION = "research-publish-gate-v1"
+CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT = "explicit-primitive-window-v2"
 
 # 경제적 근거가 이 표현만으로 이뤄지면 그것은 근거가 아니라 관찰이다.
 # **의미 판정이 아니라 어휘 검사다** - "과거에 잘 됐다" 는 누가 잃어주는지 말하지 않는다.
@@ -121,16 +123,19 @@ def check_leads(proposal: ExperimentProposalV1,
         if (proposal.research_lane == ResearchLane.INTRADAY_EVENT
                 and ((lead.ast_contract or {}).get("formula_discovery_version")
                      != "formula-discovery-v5"
+                     or (lead.ast_contract or {}).get(
+                         "feature_window_contract_version")
+                     != CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT
                      or not (lead.ast_contract or {}).get(
                          "formula_contract_complete"))):
             out.append(
-                f"lead {lid} lacks the directional formula-discovery-v5 contract; "
+                f"lead {lid} lacks the current directional V2 formula contract; "
                 "resubmit a signed-pressure structure or identified BPS equation "
-                "with an executable cost hurdle")
+                "with explicit primitive windows and an executable cost hurdle")
         elif proposal.research_lane == ResearchLane.INTRADAY_EVENT:
             contract = lead.ast_contract or {}
             try:
-                from contracts import intraday_ast_contract as intraday_grammar
+                import intraday_ast_contract as intraday_grammar
                 import formula_discovery
                 formula_discovery.assess(
                     contract.get("formula_thesis"),
@@ -153,9 +158,16 @@ def check_microstructure_primary(proposal: ExperimentProposalV1) -> list[str]:
         # Intraday proposals intentionally use a different, seconds-based grammar.
         # Treating it as the daily ``signal_expr`` silently rejects the very raw-event
         # lane this gate is meant to protect.
-        from contracts.intraday_ast_contract import fields_of, parse, unit_of
+        from intraday_ast_contract import (
+            EXPLICIT_FEATURE_WINDOW_CONTRACT,
+            fields_of,
+            parse,
+            unit_of,
+            validate_feature_window_contract,
+        )
 
-        raw = (proposal.suggested_params or {}).get("intraday_signal_expr")
+        params = proposal.suggested_params or {}
+        raw = params.get("intraday_signal_expr")
         if not isinstance(raw, dict):
             return [
                 "SUGGESTED_PARAMS.intraday_signal_expr is missing - an "
@@ -163,6 +175,15 @@ def check_microstructure_primary(proposal: ExperimentProposalV1) -> list[str]:
             ]
         try:
             parsed = parse(raw)
+            declared_window_contract = str(
+                params.get("feature_window_contract_version") or "").strip()
+            if declared_window_contract != EXPLICIT_FEATURE_WINDOW_CONTRACT:
+                raise ValueError(
+                    "current INTRADAY_EVENT proposal requires "
+                    f"feature_window_contract_version="
+                    f"{EXPLICIT_FEATURE_WINDOW_CONTRACT!r}")
+            validate_feature_window_contract(
+                parsed, contract_version=declared_window_contract)
             fields = fields_of(parsed)
         except (TypeError, ValueError) as exc:
             return [f"intraday_signal_expr is not an executable AST: {exc}"]
@@ -228,10 +249,16 @@ def check_intraday_screening_population(
     if len(population) > 7:
         return ["screening_population exceeds the bounded seven-sidecar limit"]
 
-    from contracts.alpha_semantics import validate as validate_plan
-    from contracts import intraday_ast_contract as intraday_grammar
-    from contracts.intraday_ast_contract import fingerprint, parse, unit_of
-    from contracts.intraday_ablation import generate as generate_ablations
+    from alpha_semantics import validate as validate_plan
+    import intraday_ast_contract as intraday_grammar
+    from intraday_ast_contract import (
+        EXPLICIT_FEATURE_WINDOW_CONTRACT,
+        fingerprint,
+        parse,
+        unit_of,
+        validate_feature_window_contract,
+    )
+    from intraday_ablation import generate as generate_ablations
     import formula_discovery
 
     out: list[str] = []
@@ -248,6 +275,13 @@ def check_intraday_screening_population(
             continue
         try:
             expr = parse(row.get("intraday_signal_expr"))
+            row_window_contract = str(
+                row.get("feature_window_contract_version") or "").strip()
+            if row_window_contract != EXPLICIT_FEATURE_WINDOW_CONTRACT:
+                raise ValueError(
+                    "sidecar does not declare the current explicit-window contract")
+            validate_feature_window_contract(
+                expr, contract_version=row_window_contract)
             fp = fingerprint(expr)
             plan = validate_plan(row.get("semantic_plan") or {})
         except (TypeError, ValueError) as exc:
@@ -288,6 +322,11 @@ def check_intraday_screening_population(
             if (contract.get("formula_discovery_version") !=
                     "formula-discovery-v5"):
                 out.append(f"{prefix} source lead {lead_id} is not v5")
+                continue
+            if contract.get("feature_window_contract_version") != \
+                    EXPLICIT_FEATURE_WINDOW_CONTRACT:
+                out.append(
+                    f"{prefix} source lead {lead_id} is not current-window V2")
                 continue
             if (not contract.get("formula_contract_complete")
                     or contract.get("research_lane") != "INTRADAY_EVENT"):
@@ -375,7 +414,8 @@ def check_prior_art(proposal: ExperimentProposalV1,
     # Quant could assign its formula-shaped trial family.  Exact AST history stays
     # a hard blocker; broad-family history is surfaced as a warning in evaluate().
     hard_outcomes = ([o for o in past_outcomes
-                      if str(o.get("match_scope") or "") == "AST_EXACT"]
+                      if str(o.get("match_scope") or "") in
+                      {"AST_EXACT", "AST_EXACT_PRIMARY", "FAMILY_PRIMARY"}]
                      if has_formula else list(past_outcomes))
     rejected = [o for o in hard_outcomes
                 if str(o.get("decision")) in ("REJECT", "KILLED", "GATE_HOLD", "DEMOTED")]
@@ -465,7 +505,7 @@ def evaluate(proposal: ExperimentProposalV1, *,
 def _mk_lead(lead_id=None, testability=Testability.RULE_EXPRESSIBLE):
     from datetime import datetime, timezone
 
-    from contracts.factory_contracts import ScoutLens, SourceRef, SourceType, lead_id_for
+    from factory_contracts import ScoutLens, SourceRef, SourceType, lead_id_for
     refs = (SourceRef(url="https://arxiv.org/abs/1234.5678", title="Momentum crashes",
                       accessed_at=datetime(2026, 8, 10, tzinfo=timezone.utc),
                       excerpt="We document..."),)
@@ -484,7 +524,7 @@ def _mk_lead(lead_id=None, testability=Testability.RULE_EXPRESSIBLE):
 def _mk_proposal(**kw):
     from datetime import datetime, timezone
 
-    from contracts.factory_contracts import DataRequirement, PriorCheck
+    from factory_contracts import DataRequirement, PriorCheck
     lead = _mk_lead()
     base = dict(
         proposal_id="prop_1", case_id="rc_1",
@@ -510,7 +550,7 @@ def _mk_proposal(**kw):
 
 def _with_current_intraday_contract(proposal, leads):
     """Make self-check leads obey the same complete contract as production rows."""
-    from contracts import intraday_ast_contract as grammar
+    import intraday_ast_contract as grammar
 
     expr = proposal.suggested_params["intraday_signal_expr"]
     fields = sorted(grammar.fields_of(expr))
@@ -531,6 +571,8 @@ def _with_current_intraday_contract(proposal, leads):
     return {lid: lead.model_copy(update={"ast_contract": {
         **lead.ast_contract,
         "formula_discovery_version": "formula-discovery-v5",
+        "feature_window_contract_version":
+            CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT,
         "formula_contract_complete": True,
         "candidate_signal_expr": expr,
         "semantic_plan": proposal.semantic_plan,
@@ -592,7 +634,7 @@ def _check_daily_only_signal_is_blocked():
 
 def _check_intraday_ast_uses_intraday_contract():
     """The raw-event lane must not be parsed as a daily signal_expr."""
-    from contracts.factory_contracts import DataRequirement
+    from factory_contracts import DataRequirement
 
     p, leads = _mk_proposal(
         research_lane=ResearchLane.INTRADAY_EVENT,
@@ -609,8 +651,11 @@ def _check_intraday_ast_uses_intraday_contract():
                 {"op": "rolling_mean",
                  "arg": {"op": "field", "field": "queue_imbalance_l1"},
                  "seconds": 5},
-                {"op": "field", "field": "realized_volatility_bps"}],
-        }, "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST"},
+                {"op": "field", "field": "realized_volatility_bps",
+                 "seconds": 30}],
+        }, "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
+        "feature_window_contract_version":
+            CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT},
     )
     leads = _with_current_intraday_contract(p, leads)
     r = evaluate(p, leads=leads)
@@ -619,12 +664,14 @@ def _check_intraday_ast_uses_intraday_contract():
 
 def _check_passive_intraday_uses_canonical_target_and_cost_hurdle():
     """Passive formulas use the same output vocabulary at every boundary."""
-    from contracts.factory_contracts import DataRequirement
+    from factory_contracts import DataRequirement
 
     params = {"intraday_signal_expr": {
         "op": "rolling_mean", "seconds": 5,
         "arg": {"op": "field", "field": "microprice_offset_bps"}},
-        "execution": "PASSIVE_FIFO_LOWER_BOUND"}
+        "execution": "PASSIVE_FIFO_LOWER_BOUND",
+        "feature_window_contract_version":
+            CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT}
     p, leads = _mk_proposal(
         research_lane=ResearchLane.INTRADAY_EVENT,
         semantic_plan={
@@ -665,7 +712,7 @@ def _check_unaddressed_rejection_is_blocked():
 
 def _check_addressed_rejection_passes():
     """대응을 적으면 재도전은 정상이다 - 막는 것이 목적이 아니라 배우게 하는 것이다."""
-    from contracts.factory_contracts import PriorCheck
+    from factory_contracts import PriorCheck
     p, leads = _mk_proposal(prior_check=PriorCheck(
         trial_family_id="fam_1", trials_used=1, past_outcomes=("out_1",),
         lessons_addressed={"BEAR_FRAGILE": "하락장 표본을 2창에서 5창으로 늘린다",
@@ -678,7 +725,7 @@ def _check_addressed_rejection_passes():
 
 
 def _check_budget_exhaustion_is_blocked():
-    from contracts.factory_contracts import PriorCheck
+    from factory_contracts import PriorCheck
     p, leads = _mk_proposal(trial_budget=2, prior_check=PriorCheck(
         trial_family_id="fam_1", trials_used=2, past_outcomes=("o1", "o2"),
         lessons_addressed={"OVERFIT_PBO": "파라미터 고정"}))

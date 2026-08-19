@@ -204,6 +204,24 @@ def fields_of(expr: dict) -> set[str]:
     return fields
 
 
+def operators_of(expr: dict) -> set[str]:
+    """Return executable operators for deterministic mutation audits."""
+    node = parse(expr)
+    out: set[str] = set()
+
+    def walk(current: dict) -> None:
+        op = current.get("op")
+        if op:
+            out.add(str(op))
+        if "arg" in current:
+            walk(current["arg"])
+        for child in current.get("args", ()):
+            walk(child)
+
+    walk(node)
+    return out
+
+
 def check_alignment(expr: dict, rationale: str) -> dict:
     """Require every executable field to be named in the scout's test specification."""
     fields = sorted(fields_of(expr))

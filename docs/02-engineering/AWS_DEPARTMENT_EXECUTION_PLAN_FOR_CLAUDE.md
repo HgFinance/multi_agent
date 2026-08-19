@@ -52,7 +52,7 @@
 이번 이관은 `FINAL_RUNTIME_ARCHITECTURE.md`의 단일 EC2 Pilot을 따른다.
 
 - Compute: Ubuntu 24.04의 `g6.xlarge`, Docker Compose, NVIDIA L4 24GB
-- Model Plane: 공용 vLLM `Qwen2.5-14B-Instruct FP8`; 부서마다 vLLM을 복제하지 않음
+- Model Plane: 공용 vLLM `Qwen2.5-14B-Instruct-AWQ`; 부서마다 vLLM을 복제하지 않음
 - Model artifact: S3가 정본, EBS `/opt/hgfinance/models`는 검증된 cache
 - Operational SoR: 환경이 분리된 Supabase PostgreSQL
 - Market time series: 현재 TimescaleDB 계약을 유지하되 AWS 물리 형태는 별도 승인 전 임의 변경 금지
@@ -143,7 +143,8 @@ Factory loop 차단, Quant 복구·검증 변경이 섞여 있다. Claude는 이
 - `research-api`, `market-api`, `research-mcp`, `research-hermes`, Research Liaison을 AWS overlay에 연결한다.
 - `run_research_workers -> Worker Model Gateway -> vLLM`을 worker별 binding으로 실행한다.
 - Worker 호출 전에 뉴스·공시·가격을 독립 수집하고 실패 source를 숨기지 않는다.
-- Liaison에는 `run_research_packet`, `factory_submit_*` 같은 쓰기 도구가 등록되지 않음을 검증한다.
+- Liaison에는 공장 제출·수식 생성·Worker 실행/진단 도구가 등록되지 않고, 퇴역한
+  Research Packet 도구는 full 면에도 없음을 검증한다.
 - `origin=user-query`와 factory origin을 구분해 자동 메시지 순환을 차단한다.
 - S3 Parquet migration은 `TIMESTAMP(MICROS)`, `DECIMAL`, raw `select *`, content hash 재검증을 지킨다.
 - 필수 2.5GB 계층을 먼저 옮기고, 원시 5~30일 범위는 승인 전 하드코딩하지 않는다.

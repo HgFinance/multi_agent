@@ -221,6 +221,28 @@ def lead_id_for(refs: list[SourceRef] | list[dict]) -> str:
     return "lead_" + hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
+def lead_revision_id(source_lead_id: str, ast_contract: dict) -> str:
+    """Return the immutable identity of another interpretation of one source.
+
+    ``lead_id_for`` deliberately collapses repeated discovery of the same
+    source.  A materially different AST contract must not overwrite that
+    source row, so revisions retain the source identity and add a hash of the
+    complete canonical contract.  Keeping this helper in the shared contract
+    prevents persistence and strict handoff validation from defining two
+    incompatible ID rules.
+    """
+    # This byte representation is a persisted compatibility contract.  Do not
+    # change it without a migration: live revision rows already use its first
+    # 12 hex characters.  JSON NaN/Infinity are deliberately rejected because
+    # they are not portable JSON and could otherwise make identity depend on a
+    # permissive encoder/decoder pair.
+    canonical = json.dumps(
+        ast_contract or {}, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), allow_nan=False)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+    return f"{source_lead_id}_r{digest}"
+
+
 class MethodologyLeadV1(_Base):
     """스카우트가 가져온 방법론 하나."""
 
@@ -267,11 +289,16 @@ class MethodologyLeadV1(_Base):
         if not self.refs:
             raise ValueError(
                 "refs 가 비었다 - 출처 없는 리드는 리드다. 기억으로 재구성하지 않는다")
-        # ② ID 는 출처에서 계산된 값이어야 한다(중복 접기가 성립하려면)
+        # ② ID 는 출처 또는 ``출처 + 전체 AST 계약``에서 계산된
+        #    값이어야 한다. 후자는 같은 문헌의 다른 불변 해석을
+        #    원본에 덮어쓰지 않고 보존하는 revision 식별자다.
         expected = lead_id_for(list(self.refs))
-        if self.lead_id != expected:
+        expected_revision = lead_revision_id(expected, self.ast_contract)
+        if self.lead_id not in {expected, expected_revision}:
             raise ValueError(
-                f"lead_id 가 출처와 맞지 않는다: {self.lead_id!r} != {expected!r} - "
+                f"lead_id 가 출처와 맞지 않는다(계약 revision 포함): "
+                f"{self.lead_id!r} - "
+                f"허용: {expected!r} 또는 {expected_revision!r}. "
                 f"임의 ID 를 쓰면 같은 소스가 매번 새 리드가 된다")
         # ③ 추론을 인용처럼 쓰지 않는다
         if self.stated_mechanism and self.inferred is False:

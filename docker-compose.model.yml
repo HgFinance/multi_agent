@@ -48,20 +48,20 @@ services:
       - ${HGF_MODEL_DIR:-/opt/hgfinance/models}:/models
     command:
       - --model
-      - /models/${WORKER_BASE_MODEL_DIRNAME:-Qwen2.5-14B-Instruct-FP8-dynamic}
+      - /models/${WORKER_BASE_MODEL_DIRNAME:-Qwen2.5-14B-Instruct-AWQ}
       # 계약 문자열 - tests/contracts/test_unified_api_contract.py 와
       # departments/01-research/config/worker_model_registry.json 이 같은 이름을 쓴다
       - --served-model-name
-      - ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-fp8}
+      - ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-awq}
       - --host
       - 0.0.0.0
       - --port
       - "8000"
       # L4 24GB 기준 보수값. g6e(L40S 48GB)면 32768 로 올린다.
       - --max-model-len
-      - ${VLLM_MAX_MODEL_LEN:-16384}
+      - ${VLLM_MAX_MODEL_LEN:-8192}
       - --gpu-memory-utilization
-      - ${VLLM_GPU_MEMORY_UTILIZATION:-0.90}
+      - ${VLLM_GPU_MEMORY_UTILIZATION:-0.85}
       # KV 를 FP8 로 - 24GB 에서 동시성 여유가 이걸로 벌어진다
       - --kv-cache-dtype
       - ${VLLM_KV_CACHE_DTYPE:-fp8}
@@ -90,7 +90,7 @@ services:
   research-mcp:
     environment:
       WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-http://vllm:8000/v1}
-      WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-fp8}
+      WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-awq}
       WORKER_MODEL_API_KEY: ${WORKER_MODEL_API_KEY:-vllm}
       WORKER_MODEL_TIMEOUT_SECONDS: ${WORKER_MODEL_TIMEOUT_SECONDS:-120}
       WORKER_MODEL_REGISTRY_PATH: /app/departments/01-research/config/worker_model_registry.json

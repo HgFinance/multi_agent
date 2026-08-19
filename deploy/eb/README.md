@@ -24,6 +24,11 @@
 Hermes(부서 에이전트 질의)는 **의도적으로 뺐다.** 구독 한도를 쓰려면 호스트에서
 `scripts/claude_code_proxy.py`가 돌아야 하는데 EC2에는 없다. `ENABLE_AGENT_ASK`를
 켜지 않으므로 `/{부서}/agent/ask`는 503으로 남는다 — 조용히 종량 과금으로 새는 것보다 낫다.
+같은 이유로 `USER_PAPER_ORDER_WORKFLOW_ENABLED=false`다. CEO 채팅의 자연어 주문은
+고립된 Kanban 카드로 접수하지 않고 `paper_order_hermes_runtime_unavailable` 503으로
+즉시 실패한다. 인증된 deterministic PAPER API는 그대로 제공하지만,
+CEO→Trading Hermes→MCP 경로를 EB에 켜려면 shared Kanban·dispatcher·Trading
+profile·`paper-order-orchestrator-mcp`를 별도 배포한 뒤 명시적으로 opt-in해야 한다.
 
 ## 2. 번들 만들기
 
@@ -45,15 +50,59 @@ EB Docker 플랫폼은 **번들 루트의 `docker-compose.yml`** 을 실행한�
 eb init --platform "Docker running on 64bit Amazon Linux 2023" --region ap-northeast-2
 eb create hedgefund-paper --instance-types t3.large --single
 
-# 환경변수. DATABASE_URL 이 빠지면 trading-api/accounting-api 는 503으로 fail closed 되고
-# accounting-ledger-consumer 는 아예 뜨지 않는다 - 조용히 인메모리로 후퇴하지 않는다.
+# CONTROL_DATABASE_URL은 Supabase DB가 아니라 같은 AWS private network 안의
+# operational PostgreSQL을 가리킨다. 누락되면 Compose가 어떤 서비스도 시작하지 않는다.
+TRADING_PROOF_SECRET="$(openssl rand -hex 32)"
+TRADING_INTERNAL_AUTH_SECRET="$(openssl rand -hex 32)"
 eb setenv \
-  DATABASE_URL='postgresql://...supabase...' \
+  CONTROL_DATABASE_URL='postgresql://...private-operational-postgres...' \
+  APP_ENV=production \
+  PORTFOLIO_AUTH_MODE=supabase_jwt \
+  PORTFOLIO_AUTH_REQUIRED=true \
+  PORTFOLIO_CORS_ALLOW_ORIGINS='https://app.example.com' \
+  SUPABASE_URL='https://YOUR_PROJECT_REF.supabase.co' \
+  SUPABASE_PUBLISHABLE_KEY='sb_publishable_...' \
+  SUPABASE_AUTH_AUDIENCE=authenticated \
+  PORTFOLIO_DATA_MODE=production \
+  TRADING_SERVICE_AUTH_SECRET="$TRADING_PROOF_SECRET" \
+  TRADING_SERVICE_AUTH_ISSUER=portfolio-bff \
+  TRADING_SERVICE_AUTH_AUDIENCE=trading-api \
+  TRADING_INTERNAL_SERVICE_AUTH_SECRET="$TRADING_INTERNAL_AUTH_SECRET" \
+  TRADING_INTERNAL_SERVICE_AUTH_ISSUER=hedgefund-service-issuer \
+  TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE=trading-api \
+  MARKET_API_URL='http://private-market-api.internal:8036' \
   PAPER_DB=true \
   ACCOUNTING_MODE=PAPER_DB
+unset TRADING_PROOF_SECRET TRADING_INTERNAL_AUTH_SECRET
 
 eb deploy --staged
 ```
+
+`SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` are required Compose inputs, so
+an EB deployment stops during Compose interpolation when either is absent. The
+issuer and JWKS URL default to `<SUPABASE_URL>/auth/v1` and its well-known JWKS
+endpoint; set `SUPABASE_AUTH_ISSUER` / `SUPABASE_AUTH_JWKS_URL` only when the
+hosted Auth project publishes different endpoints. Never provide
+`SUPABASE_SERVICE_ROLE_KEY` or the Supabase JWT signing secret to
+`portfolio-bff`: user JWT verification needs only public identity settings.
+
+`PORTFOLIO_CORS_ALLOW_ORIGINS` is a comma-separated list of exact HTTPS
+frontend origins (scheme + host + optional port, no path and no wildcard).
+Production has no implicit localhost origin. Preflight permits only the BFF's
+GET/POST/PUT/OPTIONS methods and its explicit request-header allowlist,
+including `Authorization`; credentialed cookies remain disabled.
+
+`TRADING_SERVICE_AUTH_SECRET` is a private BFF-to-Trading proof secret and must
+be identical in both containers; it is never a Supabase key or browser value.
+The example generates a fresh 256-bit value; placeholder strings are rejected
+even when they are longer than 32 bytes.
+`TRADING_INTERNAL_SERVICE_AUTH_SECRET` is a distinct verifier secret for the
+legacy OMS service routes. It must never be injected into a Hermes container;
+the trusted internal issuer grants separate intent, risk-decision, submit,
+broker-event, and cancel scopes.
+This EB bundle does not run `market-api`, so `MARKET_API_URL` must resolve to a
+reachable read-only market service inside the AWS private network. Compose
+fails before deployment when either value is omitted.
 
 **인스턴스 크기**: 컨테이너 7개 + 인스턴스 빌드라 `t3.small`로는 빌드에서 죽는다.
 `t3.large` 이상을 쓴다.
@@ -74,7 +123,7 @@ LB 환경으로 갈 거면 **먼저 복제 안전성부터 정리해야 한다.*
 | `GET /health/ready` | 200 | **503** |
 | 도메인 엔드포인트 | 정상 | **503** |
 
-`/health`가 저장소를 조회하지 않는 것이 요점이다. 여기서 503을 내면 Supabase 순단
+`/health`가 저장소를 조회하지 않는 것이 요점이다. 여기서 503을 내면 operational Postgres 순단
 몇 초에 EB가 멀쩡한 인스턴스를 교체하기 시작하고, 그 사이 relay와 consumer까지 같이
 죽는다. **프로세스가 살아서 주문을 올바르게 거절하는 상태를 "죽었다"로 판정하면 안 된다.**
 트래픽 차단이 필요하면 ALB Target Group이 `/health/ready`를 보게 한다.

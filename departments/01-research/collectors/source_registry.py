@@ -207,7 +207,7 @@ class UseScope(StrEnum):
 
 
 class SourceSpec(BaseModel):
-    """수집 Source 한 개의 선언. Supabase reference.data_sources 의 Git 쪽 사본이다."""
+    """시장 수집 또는 요청형 MCP Source 한 개의 Git 쪽 계약이다."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -231,6 +231,11 @@ class SourceSpec(BaseModel):
     disabled_reason: str | None = None
 
     allowed_uses: tuple[UseScope, ...] = ()
+    # SEARCH_ONLY source가 실제로 노출하는 요청형 MCP 도구명. 계약·라이선스가
+    # 있어도 이 값과 구현이 없으면 AVAILABLE이라고 보고해서는 안 된다.
+    request_tool: str | None = Field(
+        default=None, pattern=r"^[a-z][a-z0-9_]*$", max_length=64
+    )
 
     # 한도는 Vendor 가이드에서 확인한 값만 넣는다. 확인 전에는 None 으로 남긴다 -
     # 추측값을 넣으면 그게 사실처럼 굳는다(가이드 7절 - 코드에 하드코딩하지 않는다).
@@ -297,20 +302,15 @@ SOURCES: tuple[SourceSpec, ...] = (
         ),
         tier=SourceTier.P0,
         required_env=("OPEN_DART_API_KEY",),
-        allowed_uses=(
-            UseScope.FULLTEXT_STORE,
-            UseScope.EMBEDDING,
-            UseScope.LONG_TERM_ARCHIVE,
-        ),
-        raw_bucket="research-documents-private",
-        normalized_target="research.documents / research.financial_facts",
-        doc_ref="docs/06-integrations/opendart/, TEAM_JAEIL 3.1",
+        allowed_uses=(UseScope.SEARCH_ONLY,),
+        request_tool="dart_search_disclosures",
+        raw_bucket=None,
+        normalized_target=None,
+        doc_ref="departments/01-research/api/external_sources.py, docs/06-integrations/opendart/",
         note=(
-            "요청 파라미터명은 crtfc_key. rcept_no Unique 와 정정 관계 누락 0 이 DQ 기준"
-            "(가이드 8.2). ▶ PIT 한계: list.json 의 rcept_dt 는 날짜뿐이고 접수 시각이 "
-            "없다(실측 2026-07-30). published_at 정밀도가 DAY 이므로 Backtest·Agent 는 "
-            "observed_at 을 기준으로 판단해야 한다(가이드 4.2). 정확한 시각이 필요하면 "
-            "공시원문 API 2019003 이나 별도 Source 가 필요하다"
+            "공시·재무·기업 정보는 MCP가 요청 시점에 조회하며 documents, financial_facts, "
+            "Storage 또는 pgvector에 지속 적재하지 않는다. 응답의 rcept_dt는 날짜 정밀도라 "
+            "PIT 실험 근거로 승격할 때 별도의 관측 시각 증명이 필요하다"
         ),
     ),
     SourceSpec(
@@ -339,19 +339,18 @@ SOURCES: tuple[SourceSpec, ...] = (
         domains=(SourceDomain.NEWS,),
         tier=SourceTier.P0,
         required_env=("LS_APP_KEY", "LS_APP_SECRET_KEY"),
-        # 실측 2026-07-31: NWS(실시간 제목 push, 종목코드 동봉) + t3102(본문).
-        # 제목·메타 저장은 계약 API 데이터라 NAVER 와 같은 기준(SNIPPET) 적용.
-        # **본문 저장은 LS 약관의 저장·재배포 조항 확인 전까지 부여하지 않는다**
-        # - 본문은 판단 시점 이용(t3102 on-demand)만. 확인되면 FULLTEXT 승격.
-        allowed_uses=(UseScope.SEARCH_ONLY, UseScope.SNIPPET_STORE),
-        raw_bucket="research-documents-private",
-        normalized_target="research.documents",
-        doc_ref="ls-openapi 07-misc(NWS)/03-stock(t3102), TEAM_JAEIL J3",
-        note="판정 2026-08-01(금요일 병행 실측): 속보성 주 소스 = LS. p50 19초"
-             "(NAVER 712초), 60초 내 관측 1,762건(NAVER 22건), 종목 태그 정밀"
-             "(전용 38% vs 20%), 전 상장사 커버(고유 427종목). 단 제목 교집합이"
-             " 8~12%뿐이라 대체가 아니라 상호 보완 - NAVER 는 웹 매체 폭 담당으로"
-             " 병행 유지한다",
+        disabled_reason=(
+            "NWS/t3102 상주 수집기는 폐기됐고 요청형 MCP 어댑터도 구현돼 있지 않다. "
+            "한국 뉴스 요청은 NAVER news_search만 사용한다"
+        ),
+        allowed_uses=(),
+        raw_bucket=None,
+        normalized_target=None,
+        doc_ref="retired ls_news_collector lineage, ls-openapi 07-misc/03-stock",
+        note=(
+            "NWS/t3102 상주 구독, snippet 저장, research.documents 적재 및 장기 "
+            "보관은 운영 경계 밖이다. 도구가 생기기 전 AVAILABLE로 판정하지 않는다"
+        ),
     ),
     SourceSpec(
         source_id="krx_public_notice",
@@ -391,9 +390,9 @@ SOURCES: tuple[SourceSpec, ...] = (
         ),
         # 저작권상 본문이 첫 200자로 제한될 수 있다(.env 주석, 가이드 3.1).
         # 전문 저장·Embedding 권한은 별도 확인 전까지 부여하지 않는다.
-        allowed_uses=(UseScope.SEARCH_ONLY, UseScope.SNIPPET_STORE),
-        raw_bucket="research-documents-private",
-        normalized_target="research.documents",
+        allowed_uses=(UseScope.SEARCH_ONLY,),
+        raw_bucket=None,
+        normalized_target=None,
         doc_ref="TEAM_JAEIL 3.1, .env 7절",
         note="검색/Snippet/전문/Embedding/Archive/재배포 권한을 각각 따로 확인할 것",
     ),
@@ -418,7 +417,7 @@ SOURCES: tuple[SourceSpec, ...] = (
             "무료 승인. 합법 무료 대안 후보: Bluesky AT Protocol(공개 API)"
         ),
         allowed_uses=(UseScope.SEARCH_ONLY,),
-        normalized_target="research.documents",
+        normalized_target=None,
         doc_ref="가이드 3.1 X Watchlist(P1), 조사 2026-08-01",
         note="X Watchlist 는 이 Source 활성화 전까지 미착수 유지 - 승인 계정 "
              "Registry·삭제 Compliance 요건은 가이드 DoD 뉴스 항목 참고",
@@ -452,31 +451,9 @@ SOURCES: tuple[SourceSpec, ...] = (
             "수집 중인 Bluesky 기관 미디어가 수 분 내 덮는다"
         ),
         allowed_uses=(UseScope.SEARCH_ONLY,),
-        normalized_target="research.documents",
+        normalized_target=None,
         doc_ref="ToS help.truthsocial.com/legal/terms-of-service, 실측 2026-08-01",
         note="판단 시점 열람(비저장)까지가 한계 - 가이드 3.3 무권리 적재 금지",
-    ),
-    SourceSpec(
-        source_id="bluesky",
-        # KR scope 를 빼는 이유(실측 2026-08-01): 파이어호스 90초 전수 표본에서
-        # 한국어 ~64,000건/일 중 금융 키워드 1건(오탐) - 한국 신호원이 아니다.
-        market_scopes=(MarketScope.FOREIGN_MARKET,),
-        display_name="Bluesky (AT Protocol) 미국 금융 표적 수집",
-        domains=(SourceDomain.NEWS,),
-        tier=SourceTier.P1,
-        required_env=(),
-        # ▶ 활성 전환 2026-08-01 (재일님 "미국 주식·유명 인물 시도"):
-        #   getAuthorFeed 가 **무인증**으로 열려 표적 계정 수집이 성립한다.
-        #   실측 - Bloomberg ~46/일·Reuters ~57/일·WSJ ~27/일·CNBC ~36/일 +
-        #   매크로 논객(Politano 11.2만 팔로워 등). 수집기:
-        #   bluesky_watch_collector.py, 대상: config/bluesky_watchlist.txt.
-        #   검색(searchPosts)은 무인증 403 - 필요 시 무료 계정은 재일님 몫.
-        allowed_uses=(UseScope.SEARCH_ONLY, UseScope.SNIPPET_STORE),
-        normalized_target="research.documents",
-        doc_ref="실측 프로브 2026-08-01, bluesky_watch_collector.py",
-        note="스니펫 300자까지만 저장(보수적 시작). **삭제 Compliance 미구현** - "
-             "원 포스트 삭제 시 사본 제거 절차가 생기기 전까지 내부 Evidence "
-             "전용, 재배포 금지(REDISTRIBUTE 미허용이 그 게이트다)",
     ),
     SourceSpec(
         source_id="naver_apihub",
@@ -485,11 +462,12 @@ SOURCES: tuple[SourceSpec, ...] = (
         domains=(SourceDomain.NEWS,),
         tier=SourceTier.P0,
         required_env=("NAVER_CLIENT_ID", "NAVER_CLIENT_SECRET"),
-        allowed_uses=(UseScope.SEARCH_ONLY, UseScope.SNIPPET_STORE),
-        raw_bucket="research-documents-private",
-        normalized_target="research.documents",
-        doc_ref="TEAM_JAEIL 3.1, .env 7절",
-        note="Search API 가 개발자센터에서 이관 중(2026-07). Endpoint 에 결합하지 말고 Adapter 로 분리",
+        allowed_uses=(UseScope.SEARCH_ONLY,),
+        request_tool="news_search",
+        raw_bucket=None,
+        normalized_target=None,
+        doc_ref="departments/01-research/api/external_sources.py",
+        note="MCP 요청 시점 검색 전용. snippet·본문·embedding을 운영 DB에 적재하지 않는다",
     ),
     SourceSpec(
         source_id="tavily",
@@ -503,39 +481,13 @@ SOURCES: tuple[SourceSpec, ...] = (
         tier=SourceTier.P1,
         required_env=("TAVILY_API_KEY",),
         allowed_uses=(UseScope.SEARCH_ONLY,),
+        request_tool="tavily_search",
         raw_bucket=None,
         normalized_target=None,
-        doc_ref="departments/01-research/collectors/news.py, CLAUDE.md",
+        doc_ref="departments/01-research/api/external_sources.py, CLAUDE.md",
         note=(
-            "탐색 전용 Baseline. 본문을 Storage·pgvector 에 적재하지 않는다(가이드 3.3). "
-            "research.documents 의 공식 Source 로 승격하려면 사용권 확인이 선행이다"
-        ),
-    ),
-    SourceSpec(
-        source_id="alpaca_news",
-        display_name="Alpaca Market News (Benzinga)",
-        domains=(SourceDomain.NEWS,),
-        # ▶ 왜 P1 / FOREIGN_MARKET 인가 (재일님 지시 2026-07-31로 도입, 범위는 정직하게)
-        #   2026-07-31 뉴스 API 5종 조사에서 '무료 + 뉴스 WebSocket' 을 동시에 만족하는
-        #   유일한 곳이었다(Finnhub 는 Premium, Polygon·AlphaVantage 는 WS 자체가 없음).
-        #   다만 Get Assets 의 exchange enum 이 AMEX/ARCA/BATS/NYSE/NASDAQ/NYSEARCA/OTC/
-        #   CRYPTO 뿐이라 KRX 종목은 조회되지 않는다. 그래서 국내 P0 NEWS 를 대체하지
-        #   못하며, P0 로 올리면 BIGKinds/NAVER 없이 NEWS Blocked 가 거짓으로 풀린다.
-        tier=SourceTier.P1,
-        market_scopes=(MarketScope.FOREIGN_MARKET,),
-        required_env=("ALPACA_API_KEY_ID", "ALPACA_API_SECRET_KEY"),
-        optional_env=("ALPACA_NEWS_WS_URL", "ALPACA_DATA_BASE_URL"),
-        # 약관이 "personal and noncommercial access and use" 이고 "encoded" 를 금지
-        # 행위로 열거한다. 본문 저장·Embedding·재배포는 상업 계약 없이는 부여하지
-        # 않는다(가이드 3.3). 승격은 Data Steward 판단이며 이 파일이 대신하지 않는다.
-        allowed_uses=(UseScope.SEARCH_ONLY,),
-        raw_bucket=None,
-        normalized_target="research.documents (제목·URL·시각만)",
-        doc_ref="docs/05-teams/TEAM_JAEIL_RESEARCH_QUANT_GUIDE.md 3.2, 5.4",
-        note=(
-            "미국 종목 전용. KRX 미커버라 국내 P0 를 대체하지 않는다. 심볼이 "
-            "reference.instruments 에 없으므로 document_instruments 연결이 불가하며 "
-            "미해결 심볼은 날조하지 않고 카운트만 한다. 본문 저장은 라이선스 확보 후"
+            "MCP 탐색 전용. 본문·snippet·embedding을 Storage, pgvector 또는 "
+            "research.documents에 적재하지 않는다"
         ),
     ),
     SourceSpec(
@@ -545,11 +497,12 @@ SOURCES: tuple[SourceSpec, ...] = (
         domains=(SourceDomain.MACRO,),
         tier=SourceTier.P0,
         required_env=("ECOS_API_KEY",),
-        allowed_uses=(UseScope.FULLTEXT_STORE, UseScope.LONG_TERM_ARCHIVE),
-        raw_bucket="research-raw-private",
-        normalized_target="research.macro_observations",
-        doc_ref="TEAM_JAEIL 3.1, RESEARCH_DATA_SOURCES 5.x",
-        note="Revision 은 덮어쓰지 않고 vintage_date 로 Append 한다(가이드 5.2)",
+        allowed_uses=(UseScope.SEARCH_ONLY,),
+        request_tool="ecos_search",
+        raw_bucket=None,
+        normalized_target=None,
+        doc_ref="departments/01-research/api/external_macro.py",
+        note="MCP 요청 시점 조회 전용. macro_observations에 상주 적재하지 않는다",
     ),
     SourceSpec(
         source_id="kosis",
@@ -558,10 +511,12 @@ SOURCES: tuple[SourceSpec, ...] = (
         domains=(SourceDomain.MACRO,),
         tier=SourceTier.P0,
         required_env=("KOSIS_API_KEY",),
-        allowed_uses=(UseScope.FULLTEXT_STORE, UseScope.LONG_TERM_ARCHIVE),
-        raw_bucket="research-raw-private",
-        normalized_target="research.macro_observations",
-        doc_ref="TEAM_JAEIL 3.1",
+        disabled_reason="요청형 KOSIS MCP 어댑터가 아직 구현되지 않아 운영 사용을 차단한다",
+        allowed_uses=(),
+        raw_bucket=None,
+        normalized_target=None,
+        doc_ref="request-time MCP source contract",
+        note="어댑터 구현 전에는 키가 있어도 AVAILABLE로 판정하지 않는다",
     ),
     SourceSpec(
         source_id="fred",
@@ -571,11 +526,12 @@ SOURCES: tuple[SourceSpec, ...] = (
         domains=(SourceDomain.MACRO,),
         tier=SourceTier.P0,
         required_env=("FRED_API_KEY",),
-        allowed_uses=(UseScope.FULLTEXT_STORE, UseScope.LONG_TERM_ARCHIVE),
-        raw_bucket="research-raw-private",
-        normalized_target="research.macro_observations",
-        doc_ref="TEAM_JAEIL 3.1",
-        note="ALFRED 의 vintage 가 PIT 재현에 필요하다",
+        allowed_uses=(UseScope.SEARCH_ONLY,),
+        request_tool="fred_search",
+        raw_bucket=None,
+        normalized_target=None,
+        doc_ref="departments/01-research/api/external_macro.py",
+        note="MCP 요청 시점 조회 전용. PIT 사용 시 ALFRED vintage를 응답 근거에 포함한다",
     ),
     SourceSpec(
         source_id="gpr",
@@ -585,17 +541,20 @@ SOURCES: tuple[SourceSpec, ...] = (
         domains=(SourceDomain.MACRO,),
         tier=SourceTier.P1,
         required_env=(),
+        disabled_reason="요청형 GPR MCP 어댑터가 아직 구현되지 않아 운영 사용을 차단한다",
         # ▶ 실측 2026-08-01 (재일님 "국제정치로 시장이 들썩인다" 요구):
         #   일별 파일 무인증 다운로드 3.2MB, 15,183행 = 1985-01-01 ~ 현재.
         #   GPRD(종합)·GPRD_ACT(실제 사건)·GPRD_THREAT(위협·언사) 3열 -
         #   "폭격한다니 만다니"(THREAT)와 실제 타격(ACT)이 **분리돼 있다**.
         #   40년 일별 히스토리라 백테스트 팩터로 바로 쓸 수 있다.
         #   출처 표기 조건 공개 데이터(논문 인용 요건) - 재배포는 하지 않는다.
-        allowed_uses=(UseScope.FULLTEXT_STORE, UseScope.LONG_TERM_ARCHIVE),
-        normalized_target="research.macro_observations",
+        allowed_uses=(),
+        normalized_target=None,
         doc_ref="matteoiacoviello.com/gpr.htm, 실측 2026-08-01",
-        note="게시 지연 실측 4~5일 - published_at 은 보수적으로 period+7일로 "
-             "둔다(미래 참조 방지). 실시간 경보용이 아니라 백테스트 팩터다",
+        note=(
+            "MCP 요청 시점 조회 전용이며 운영 DB에 상주 적재하지 않는다. 게시 지연을 "
+            "보수적으로 반영한 PIT 근거가 없는 값은 백테스트 입력으로 승격하지 않는다"
+        ),
     ),
     SourceSpec(
         source_id="gdelt",
@@ -604,17 +563,20 @@ SOURCES: tuple[SourceSpec, ...] = (
         domains=(SourceDomain.MACRO, SourceDomain.NEWS),
         tier=SourceTier.P1,
         required_env=(),
+        disabled_reason="요청형 GDELT MCP 어댑터가 아직 구현되지 않아 운영 사용을 차단한다",
         # ▶ 실측 2026-08-01: DOC 2.0 API 무인증 관통(timelinevol/timelinetone).
         #   테마별 보도 점유율 곡선이라 "충격 배율"(피크/중앙)로 이벤트를 잡는다.
         #   실측 - North Korea missile 최근/중앙 3.7배, Iran strike 피크 2.1배.
         #   라이선스: "unlimited and unrestricted use for any academic,
         #   commercial, or governmental use of any kind without fee" +
         #   출처 표기·링크 의무. 레이트리밋 5초/요청(429 실측) - 준수한다.
-        allowed_uses=(UseScope.FULLTEXT_STORE, UseScope.LONG_TERM_ARCHIVE),
-        normalized_target="research.macro_observations",
+        allowed_uses=(),
+        normalized_target=None,
         doc_ref="gdeltproject.org (출처 표기 의무), 실측 2026-08-01",
-        note="저장 대상은 집계 지표(보도 점유율·톤)뿐 - 기사 본문은 각 매체 "
-             "권리라 담지 않는다. 인용 시 GDELT Project 표기",
+        note=(
+            "MCP 요청 시점 조회 전용. 집계 지표와 기사 본문 모두 운영 DB에 상주 적재하지 "
+            "않으며 응답을 사용할 때 GDELT Project 출처를 남긴다"
+        ),
     ),
     SourceSpec(
         source_id="kind",
@@ -873,6 +835,17 @@ def _check_catalog():
     ):
         assert r.by_domain(d), f"{d.value} 를 담당하는 Source 가 없다"
 
+    # 계약·구현이 활성인 요청형 Source는 실제 MCP 도구명을 반드시 선언한다.
+    for source in SOURCES:
+        if (
+            source.contracted
+            and not source.disabled_reason
+            and UseScope.SEARCH_ONLY in source.allowed_uses
+        ):
+            assert source.request_tool, (
+                f"{source.source_id} is SEARCH_ONLY but has no request-time MCP tool"
+            )
+
     # source_id 중복은 생성 시점에 막는다
     try:
         SourceRegistry(specs=(SOURCES[0], SOURCES[0]), env=_FAKE_ENV)
@@ -889,6 +862,8 @@ def _check_status():
     assert r.status("tavily") is SourceStatus.AVAILABLE
     assert r.status("krx_openapi") is SourceStatus.KEY_MISSING
     assert r.status("naver_apihub") is SourceStatus.KEY_MISSING
+    for source_id in ("ls_news", "kosis", "gpr", "gdelt"):
+        assert r.status(source_id) is SourceStatus.DISABLED
     # 공백만 있는 값도 미확보로 본다
     assert r.status("ecos") is SourceStatus.KEY_MISSING
     # 계약 자체가 없는 Source 는 키와 무관하다
@@ -964,17 +939,32 @@ def _check_license_scope():
         except SourceUseNotAllowed:
             pass
 
-    # BIGKinds 는 Snippet 까지만
-    r.check_use("bigkinds", UseScope.SNIPPET_STORE)
+    # 비시장 정보원은 snippet조차 지속 적재하지 않는 요청형 조회 전용이다.
+    r.check_use("bigkinds", UseScope.SEARCH_ONLY)
     try:
         r.check_use("bigkinds", UseScope.FULLTEXT_STORE)
         raise AssertionError("bigkinds 전문 저장이 통과했다")
     except SourceUseNotAllowed:
         pass
 
-    # DART 는 전문·Embedding 허용
-    r.check_use("opendart", UseScope.FULLTEXT_STORE)
-    r.check_use("opendart", UseScope.EMBEDDING)
+    # 모든 요청형 정보원에 대해 저장·임베딩·재배포 권한이 닫혔는지 독립 검증한다.
+    r.check_use("opendart", UseScope.SEARCH_ONLY)
+    for source_id in (
+        "opendart", "ls_news", "bigkinds", "x_twitter", "truth_social",
+        "naver_apihub", "tavily", "ecos", "kosis", "fred", "gpr", "gdelt",
+    ):
+        for scope in (
+            UseScope.SNIPPET_STORE,
+            UseScope.FULLTEXT_STORE,
+            UseScope.EMBEDDING,
+            UseScope.LONG_TERM_ARCHIVE,
+            UseScope.REDISTRIBUTE,
+        ):
+            try:
+                r.check_use(source_id, scope)
+                raise AssertionError(f"{source_id} {scope.value} unexpectedly allowed")
+            except SourceUseNotAllowed:
+                pass
     print("  라이선스 Scope        OK")
 
 
@@ -988,19 +978,23 @@ def _check_blocked_domains():
     assert r.status("krx_public_notice") is SourceStatus.AVAILABLE
     # 키가 없어서 지금 막힌 Domain
     assert SourceDomain.MACRO in blocked
-    # NEWS 는 2026-07-31 부로 ls_news(LS 키) 가 P0 로 덮는다 - NAVER/BIGKinds 가
-    # 없어도 LS 키가 살아 있으면 Blocked 가 아니다. (이 자리에 있던 이전 단언은
-    # ls_news 등재 전의 세계를 박제한 것이라 갱신했다)
-    assert SourceDomain.NEWS not in blocked, "ls_news 가 살아 있는데 NEWS 가 막혔다"
+    # LS 뉴스 수집기는 폐기됐고 요청형 어댑터도 없다. NAVER 키가 없으면 NEWS는
+    # 정직하게 막혀야 하며, LS 시세 키가 그 상태를 풀어서는 안 된다.
+    assert SourceDomain.NEWS in blocked
     # LS 로 덮이는 Domain 은 막히지 않는다
     assert SourceDomain.REALTIME_PRICE not in blocked
     assert SourceDomain.REALTIME_QUOTE not in blocked
     assert SourceDomain.DERIVATIVE not in blocked, "파생은 ls_openapi_rest 가 덮는다"
-    # LS 키마저 사라지면 LS 단독 Domain 은 전부 막힌다 - NEWS 도 그때는 Blocked
+    # LS 키가 사라지면 LS 단독 시장 Domain은 막힌다. NEWS 상태는 NAVER가 소유한다.
     no_ls = SourceRegistry(env={**_FAKE_ENV, "LS_APP_KEY": "", "LS_APP_SECRET_KEY": ""})
     b2 = no_ls.blocked_p0_domains()
-    assert SourceDomain.NEWS in b2, "뉴스 경로가 하나도 없는데 NEWS 가 안 막혔다"
     assert SourceDomain.DERIVATIVE in b2 and SourceDomain.REALTIME_PRICE in b2
+    with_naver = SourceRegistry(env={
+        **_FAKE_ENV,
+        "NAVER_CLIENT_ID": "client",
+        "NAVER_CLIENT_SECRET": "secret",
+    })
+    assert SourceDomain.NEWS not in with_naver.blocked_p0_domains()
     # DART 로 덮이는 Domain
     assert SourceDomain.DISCLOSURE not in blocked
     assert SourceDomain.FINANCIAL not in blocked
@@ -1029,8 +1023,7 @@ def _check_scope_gate():
     Source 를 P0 NEWS 로 등록하면 한국 종목 뉴스가 0건인데 NEWS Blocked 가 풀린다.
     그러면 '데이터 장애 시 신규 진입 자동 차단' 이 조용히 무너진다.
     """
-    # LS 키를 비운다 - ls_news(2026-07-31 등재)가 NEWS 를 덮으면 "다른 경로가
-    # 없는데 해외 Source 가 풀어버리는가"라는 이 검사의 전제가 성립하지 않는다
+    # 실제 국내 뉴스 도구(NAVER)는 비운 채 범위 밖 Source가 NEWS를 풀지 못하게 한다.
     env_with_news = {**_FAKE_ENV, "LS_APP_KEY": "", "LS_APP_SECRET_KEY": "",
                      "FOREIGN_NEWS_API_KEY": "k"}
 

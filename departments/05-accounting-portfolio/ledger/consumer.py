@@ -44,7 +44,11 @@ for _p in (str(_HERE), str(_HERE.parent / "portfolio")):
 import fill_consumer  # noqa: E402
 import mark_provider  # noqa: E402
 from portfolio import MarkPrice, ValuationError  # noqa: E402
-from repository import LedgerRepository  # noqa: E402
+from repository import (  # noqa: E402
+    ACCOUNTING_LEDGER_DATABASE_ROLE,
+    LedgerPersistenceError,
+    LedgerRepository,
+)
 
 # 종가 평가로 돌리려면 `1D`. 기본은 장중 체결가라 봉을 기다리지 않는다.
 # 종가 봉은 valuation 시각과 몇 시간 벌어지므로 max_staleness도 같이 넓혀야 한다.
@@ -154,6 +158,12 @@ def poll(repo: LedgerRepository, as_of: datetime, *,
 def serve() -> None:
     # required=True. DATABASE_URL이 없으면 인메모리로 뜨지 않고 여기서 멈춘다 -
     # 조용한 인메모리 후퇴가 "기록됐다고 믿은 분개"를 만든다(repository.from_env).
+    configured_role = os.environ.get("ACCOUNTING_DATABASE_ROLE", "").strip()
+    if configured_role != ACCOUNTING_LEDGER_DATABASE_ROLE:
+        raise LedgerPersistenceError(
+            "accounting ledger consumer requires "
+            "ACCOUNTING_DATABASE_ROLE=svc_accounting_ledger"
+        )
     repo = LedgerRepository.from_env(required=True)
     idle = max(float(os.environ.get("LEDGER_CONSUMER_POLL_SECONDS", "1.0")), 0.1)
     _log(f"start poll={idle}s marks={mark_provider.MARKET_API} "

@@ -37,6 +37,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from stock_universe import governed_stock_evidence_sql  # noqa: E402
+
 OBJECTIVE_VERSION = "quant-objective-v1"
 
 # ▶ 조항을 **무엇으로 닫을 수 있는가.** 배분자가 "이 계열은 손잡이 하나 거리"
@@ -109,6 +111,7 @@ class FamilyState:
 
     family_id: str
     trials: int
+    evidence_experiment_id: str = ""
     passed: list = field(default_factory=list)
     gaps: list = field(default_factory=list)      # Gap
     best_sharpe: float | None = None
@@ -165,7 +168,8 @@ def _shortfall(clause: str, needed, actual) -> float | None:
 
 
 def evaluate_family(metrics: dict, *, fragility: str, trials: int,
-                    family_id: str = "") -> FamilyState:
+                    family_id: str = "",
+                    evidence_experiment_id: str = "") -> FamilyState:
     """지표 -> 목표까지의 거리. **판정은 관문이 하고 여기서는 재기만 한다.**"""
     from release_gate import CRITERIA
     from release_gate import evaluate as gate_evaluate
@@ -195,6 +199,7 @@ def evaluate_family(metrics: dict, *, fragility: str, trials: int,
 
     return FamilyState(
         family_id=family_id, trials=int(trials),
+        evidence_experiment_id=str(evidence_experiment_id or ""),
         passed=list(d.passed), gaps=gaps,
         best_sharpe=metrics.get("sharpe"),
         dsr=metrics.get("deflated_sharpe"),
@@ -203,17 +208,30 @@ def evaluate_family(metrics: dict, *, fragility: str, trials: int,
 
 # ── 원장에서 읽기 ────────────────────────────────────────────────────────────
 
-_SQL_FAMILY_BEST = """
-with per as (
+_GOVERNED_PERFORMANCE_EVIDENCE = governed_stock_evidence_sql(
+    experiment_alias="e", dataset_alias="manifest", hypothesis_alias="h")
+
+_SQL_FAMILY_BEST = f"""
+with pressure as (
+  -- Every exposed formula still pays the multiple-testing cost.  Eligibility
+  -- below chooses reusable performance evidence; it never erases a trial.
+  select trial_family_id fam, max(trial_number) n_trials
+    from quant.experiments
+   where trial_family_id is not null
+   group by trial_family_id
+), eligible as (
   select e.trial_family_id fam, e.experiment_id eid, e.trial_number tn,
          max(case when m.metric='deflated_sharpe' then m.value end) dsr
     from quant.experiments e
+    join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+    join quant.dataset_manifests manifest on manifest.dataset_id = e.dataset_id
     left join quant.experiment_metrics m
            on m.experiment_id = e.experiment_id
    where e.trial_family_id is not null and e.status = 'COMPLETED'
+     and {_GOVERNED_PERFORMANCE_EVIDENCE}
    group by e.trial_family_id, e.experiment_id, e.trial_number),
 best as (
-  select fam, eid, tn, dsr,
+  select eligible.fam, eligible.eid, eligible.tn, eligible.dsr,
          row_number() over (partition by fam order by dsr desc nulls last, tn desc) rk,
          -- ▶ **시도 수는 `trial_number` 의 최대값이다. 실험 행 수가 아니다.**
          --   (2026-08-12 실측) fam_42663e9f 는 실험이 2건인데 trial_number 가
@@ -221,8 +239,9 @@ best as (
          --   세기 때문이다. 행 수로 세면 배분자가 예산이 남은 줄 알고 계속
          --   배분하고, 그 사이 DSR 기준선은 9회 기준으로 깎인다.
          --   **관문이 보는 분모와 배분자가 보는 분모가 달라진다.**
-         max(tn) over (partition by fam) n_trials
-    from per)
+         pressure.n_trials
+    from eligible
+    join pressure using (fam))
 select fam, eid::text, n_trials from best where rk = 1
 """
 
@@ -246,7 +265,8 @@ def survey(conn) -> list[FamilyState]:
             worst = float(got[0]) if got and got[0] is not None else None
             frag = _fragility_from_worst(worst)
             st = evaluate_family(metrics, fragility=frag, trials=int(n_trials or 1),
-                                 family_id=str(fam))
+                                 family_id=str(fam),
+                                 evidence_experiment_id=str(eid))
             out.append(st)
     return sorted(out, key=lambda s: (-(s.dsr or 0.0), len(s.gaps)))
 
@@ -428,11 +448,13 @@ def _check_trials_come_from_trial_number():
     import re as _re
 
     sql = _SQL_FAMILY_BEST
-    assert "max(tn) over (partition by fam) n_trials" in sql, \
+    assert "max(trial_number) n_trials" in sql, \
         "시도 수를 trial_number 최대값으로 안 센다"
     assert not _re.search(r"count\(\*\)\s*over\s*\(partition by fam\)\s*n_trials", sql), \
         "실험 행 수로 세고 있다 - 예산이 샌다"
     print("  시도 수 = trial_number   OK")
+    assert "join pressure using (fam)" in sql
+    assert "evaluation_identity_complete" in sql and "FULL_60" in sql
 
 
 def _selfcheck() -> int:

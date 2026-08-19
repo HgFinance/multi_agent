@@ -15,7 +15,7 @@ instrument_symbols 가 (provider, market, symbol) -> instrument_id 매핑을 시
                                     Application 계층 Join 이 성립한다(가이드 2.2)
     venue   = 'KOSPI' | 'KOSDAQ'    세부 시장(Board). LS 실시간 TR 선택 축이다
     asset_class = 'EQUITY'
-    instrument_type = 'STOCK' | 'ETF' | 'ETN'
+    instrument_type = 'STOCK' | 'ETF' | 'ETN' | 'SPAC'
     currency = 'KRW'
 
 ▶ 멱등성
@@ -49,6 +49,7 @@ REPOSITORY_VERSION = "research-reference-repository-v1"
 
 MARKET_KRX = "KRX"
 PROVIDER_LS = "LS"
+_KRX_TRADING_SYMBOL_RE = re.compile(r"^[0-9A-Z]{6}$")
 
 # document_instruments.extraction_version 에 남길 값. 언급 관계 판정 규칙이 바뀌면
 # 올린다 - 어떤 규칙으로 붙인 관계인지 나중에 구분할 수 있어야 한다.
@@ -161,16 +162,22 @@ def master_row_to_record(row: StockMasterRow, *, as_of: datetime) -> InstrumentR
     tick_size 는 넣지 않는다 - KRX 호가단위는 가격대별로 달라 단일값이 아니고 t8436 에도
     없다. 추정값을 넣으면 주문 검증이 조용히 틀어진다.
     """
+    provider_symbol = str(row.shcode or "").strip().upper()
+    if _KRX_TRADING_SYMBOL_RE.fullmatch(provider_symbol) is None:
+        raise ValueError("LS KRX trading symbol must match ^[0-9A-Z]{6}$")
+
     if row.is_etf:
         itype = "ETF"
     elif row.is_etn:
         itype = "ETN"
+    elif row.is_spac:
+        itype = "SPAC"
     else:
         itype = "STOCK"
 
     return InstrumentRecord(
         isin=row.expcode,
-        display_name=row.hname or row.shcode,
+        display_name=row.hname or provider_symbol,
         market=MARKET_KRX,
         venue=row.venue.value,
         asset_class=AssetClass.EQUITY.value,
@@ -183,7 +190,7 @@ def master_row_to_record(row: StockMasterRow, *, as_of: datetime) -> InstrumentR
         metadata={
             "source": "ls:t8436",
             "as_of": as_of.isoformat(),
-            "shcode": row.shcode,
+            "shcode": provider_symbol,
             "security_group": row.security_group,
             "is_spac": row.is_spac,
             # 상·하한가와 전일가는 스냅샷이다. 정본은 시계열이며 참고용으로만 남긴다.
@@ -193,7 +200,7 @@ def master_row_to_record(row: StockMasterRow, *, as_of: datetime) -> InstrumentR
                 "lower_limit": row.lower_limit,
             },
         },
-        provider_symbol=row.shcode,
+        provider_symbol=provider_symbol,
     )
 
 
@@ -1368,7 +1375,10 @@ def _check_mapping():
 
     assert master_row_to_record(_row("069500", "KR7069500007", Venue.KOSPI, etf=True), as_of=now).instrument_type == "ETF"
     assert master_row_to_record(_row("500001", "KR7500001000", Venue.KOSPI, etn=True), as_of=now).instrument_type == "ETN"
-    assert master_row_to_record(_row("123456", "KR7123456789", Venue.KOSDAQ, spac=True), as_of=now).metadata["is_spac"] is True
+    spac = master_row_to_record(
+        _row("123456", "KR7123456789", Venue.KOSDAQ, spac=True), as_of=now)
+    assert spac.instrument_type == "SPAC"
+    assert spac.metadata["is_spac"] is True
 
     # 주문 단위가 10 인 종목
     assert master_row_to_record(_row("000010", "KR7000010000", Venue.KOSPI, unit="10"), as_of=now).lot_size == Decimal(10)

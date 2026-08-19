@@ -1,8 +1,9 @@
-"""Policy/Evidence ingestion boundary for the QA department.
+"""Legacy policy/evidence ingestion boundary for the QA department.
 
-The default is production-safe: placeholder documents are rejected, the
-source UUID and database DSN are mandatory, and all writes are transactional.
-No credential or document body is printed by this module.
+Non-market research is request-time MCP input and is not persisted by the
+normal runtime.  This module is retained only for an explicitly authorised
+one-off legacy migration.  Both legacy switches must be set before any DB or
+embedding operation can begin; the default is write-disabled.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ import argparse
 import hashlib
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from math import isfinite
@@ -21,10 +22,28 @@ from uuid import UUID
 
 PLACEHOLDER_MARKER = "SAMPLE_PLACEHOLDER"
 EMBEDDING_DIMENSIONS = int(os.environ.get("AGENTIC_RAG_EMBEDDING_DIMENSIONS", "1024"))
+LEGACY_ENABLE_ENV = "QA_ENABLE_LEGACY_EVIDENCE_INGESTION"
+LEGACY_MODE_ENV = "QA_INGEST_MODE"
+LEGACY_MODE = "legacy-manual"
 
 
 class IngestionError(RuntimeError):
-    """Raised when production ingestion cannot safely continue."""
+    """Raised when the legacy ingestion boundary cannot safely continue."""
+
+
+def require_legacy_ingestion_enabled(
+    environ: Mapping[str, str] | None = None,
+) -> None:
+    """Fail closed unless an operator explicitly enables a one-off migration."""
+
+    env = os.environ if environ is None else environ
+    enabled = env.get(LEGACY_ENABLE_ENV, "").strip().lower() == "true"
+    mode = env.get(LEGACY_MODE_ENV, "disabled").strip().lower()
+    if not enabled or mode != LEGACY_MODE:
+        raise IngestionError(
+            "legacy evidence ingestion is disabled; non-market evidence must be "
+            "retrieved through MCP at request time"
+        )
 
 
 class EmbeddingProvider(Protocol):
@@ -146,7 +165,7 @@ class OpenAIEmbeddingProvider:
 
 
 class PgvectorEvidenceRepository:
-    """Transactional writer for research.documents/document_versions/chunks."""
+    """Legacy transactional writer; normal runtime use is intentionally blocked."""
 
     def __init__(self, connection: Any) -> None:
         self.connection = connection
@@ -158,6 +177,7 @@ class PgvectorEvidenceRepository:
         chunks: Sequence[PolicyChunk],
         embedder: EmbeddingProvider,
     ) -> int:
+        require_legacy_ingestion_enabled()
         if not chunks:
             raise IngestionError("cannot ingest an empty policy set")
         if embedder.dimensions != EMBEDDING_DIMENSIONS:
@@ -361,12 +381,12 @@ def _json(value: dict[str, Any]) -> str:
 
 def _main() -> int:
     parser = argparse.ArgumentParser(
-        description="Ingest real QA policy documents into pgvector"
+        description="Run an explicitly enabled legacy QA evidence migration"
     )
     parser.add_argument("corpus_dir", type=Path)
     args = parser.parse_args()
-    mode = os.environ.get("QA_INGEST_MODE", "production").strip().lower()
-    chunks = build_policy_chunks(args.corpus_dir, allow_placeholders=mode == "test")
+    require_legacy_ingestion_enabled()
+    chunks = build_policy_chunks(args.corpus_dir)
     source_id = os.environ.get("QA_POLICY_SOURCE_ID", "").strip()
     database_url = (
         os.environ.get("RISK_QA_DATABASE_URL", "").strip()

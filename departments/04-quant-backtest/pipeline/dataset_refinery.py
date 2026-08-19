@@ -31,13 +31,17 @@ import sys
 from dataclasses import dataclass, field
 
 from dataset_contract import DatasetContract, validate  # noqa: E402
+from strategy_templates import (  # noqa: E402
+    ADJUSTMENT_MIN_MULTIPLE,
+    ADJUSTMENT_RELATIVE_TOLERANCE,
+)
 
-MODULE_VERSION = "quant-dataset-refinery-v1"
+MODULE_VERSION = "quant-dataset-refinery-v2"
 
-# 정수배 판정. `strategy_templates._adjustment_break` 와 같은 기준을 쓴다 -
-# 두 곳이 다른 기준을 쓰면 자르는 곳과 고치는 곳이 어긋난다.
-SPLIT_MIN_RATIO = 2.0
-SPLIT_TOLERANCE = 0.02
+# Legacy compatibility constants remain tied to the canonical execution guard.
+# The refinery no longer uses them to delete history.
+SPLIT_MIN_RATIO = ADJUSTMENT_MIN_MULTIPLE
+SPLIT_TOLERANCE = ADJUSTMENT_RELATIVE_TOLERANCE
 
 
 @dataclass
@@ -153,31 +157,19 @@ def adjust_corporate_action(rows: list[dict], actions: dict
 
 
 def cut_at_unadjusted_gap(rows: list[dict]) -> tuple[list[dict], str]:
-    """미조정 갭 앞을 버린다. **차선책이다 - 고치는 게 아니라 자른다.**
+    """Deprecated: a future gap must never delete an instrument's past.
 
-    종가가 정확히 정수배로 뛴 곳은 급등이 아니라 조정 미적용이다. 그 앞
-    구간은 지금 시계열과 이어지지 않으므로 쓰지 않는다.
+    Whole-panel prefix deletion changes the universe visible to decisions made
+    before the corporate action.  Known action factors must be applied through
+    ``ADJUST_CORPORATE_ACTION``; unknown transitions remain in the immutable
+    panel and are rejected only by the execution/label window that crosses
+    them.
     """
-    by_sym: dict[str, list[dict]] = {}
-    for r in rows:
-        by_sym.setdefault(str(r.get("instrument_id")), []).append(r)
-    out, cut_syms = [], 0
-    for sym, rs in by_sym.items():
-        rs = sorted(rs, key=lambda r: str(r.get("trade_date")))
-        cut = 0
-        for i in range(1, len(rs)):
-            prev, cur = _num(rs[i - 1].get("close")), _num(rs[i].get("close"))
-            if not prev or not cur:
-                continue
-            for ratio in (cur / prev, prev / cur):
-                if ratio >= SPLIT_MIN_RATIO:
-                    nearest = round(ratio)
-                    if nearest and abs(ratio - nearest) <= SPLIT_TOLERANCE:
-                        cut = i          # **마지막 갭 뒤부터 쓴다**
-        if cut:
-            cut_syms += 1
-        out.extend(rs[cut:])
-    return out, f"미조정 갭 뒤만 사용({cut_syms}종목 절단)"
+
+    raise NotImplementedError(
+        "CUT_AT_UNADJUSTED_GAP is PIT-unsafe and deprecated: a future gap "
+        "cannot delete earlier rows; use ADJUST_CORPORATE_ACTION or the "
+        "window-bounded adjustment guard")
 
 
 def winsorize_extreme(rows: list[dict], *, pct: float = 0.005
@@ -380,7 +372,7 @@ def _c(**kw):
         split=SplitPolicy("WALK_FORWARD", 5, 20),
         costs=CostModel(1.5, 5.0, 20.0),
         cleaning=("DEDUP_KEY", "SORT_BY_EVENT_TIME", "DROP_NON_TRADING",
-                  "CUT_AT_UNADJUSTED_GAP", "DROP_MISSING"),
+                  "ADJUST_CORPORATE_ACTION", "DROP_MISSING"),
         created_by="test")
     args.update(kw)
     return DatasetContract(**args)
@@ -426,9 +418,9 @@ def _check_only_declared_steps_run():
     out, rep = refine(_rows(("A", "2020-01-02", 100.0, 10),
                             ("A", "2020-01-02", 100.0, 10)),
                       _c(cleaning=("SORT_BY_EVENT_TIME", "DROP_MISSING",
-                                   "CUT_AT_UNADJUSTED_GAP")))
+                                   "ADJUST_CORPORATE_ACTION")))
     assert [s.name for s in rep.steps] == ["SORT_BY_EVENT_TIME",
-                                           "CUT_AT_UNADJUSTED_GAP",
+                                           "ADJUST_CORPORATE_ACTION",
                                            "DROP_MISSING"], \
         [s.name for s in rep.steps]
     assert len(out) == 2, "중복 제거를 선언 안 했는데 접혔다"
@@ -462,15 +454,22 @@ def _check_corporate_action_divides_the_past_only():
     assert not [s for s in rep.steps if s.name == "CUT_AT_UNADJUSTED_GAP"]
 
 
-def _check_cut_keeps_only_after_the_gap():
-    """미조정 갭이 있으면 그 앞을 버린다 - 자르는 것이지 고치는 것이 아니다."""
+def _check_future_gap_cannot_delete_past_rows():
+    """전역 절단은 계약과 직접 호출 양쪽에서 큰소리로 거부한다."""
     rows = _rows(("A", "2020-01-02", 1000.0, 10),
-                 ("A", "2020-01-03", 100.0, 10),   # ×0.1 미조정 갭
-                 ("A", "2020-01-06", 101.0, 10))
-    out, _ = refine(rows, _c(cleaning=("SORT_BY_EVENT_TIME",
-                                       "CUT_AT_UNADJUSTED_GAP", "DROP_MISSING")))
-    dates = sorted(r["trade_date"] for r in out)
-    assert dates == ["2020-01-03", "2020-01-06"], dates
+                  ("A", "2020-01-03", 100.0, 10),   # ×0.1 미조정 갭
+                  ("A", "2020-01-06", 101.0, 10))
+    out, report = refine(rows, _c(cleaning=("SORT_BY_EVENT_TIME",
+                                            "CUT_AT_UNADJUSTED_GAP",
+                                            "DROP_MISSING")))
+    assert out == [] and not report.approved
+    assert not report.steps, "deprecated cleaner must fail before mutating rows"
+    try:
+        cut_at_unadjusted_gap(rows)
+    except NotImplementedError as exc:
+        assert "future gap" in str(exc)
+    else:
+        raise AssertionError("PIT-unsafe global prefix deletion still ran")
 
 
 def _check_survivorship_is_detected():
@@ -536,7 +535,7 @@ def _check_unimplemented_step_fails_loudly():
     """
     try:
         refine(_rows(("A", "2020-01-02", 100.0, 10)),
-               _c(cleaning=("DROP_MISSING", "CUT_AT_UNADJUSTED_GAP",
+               _c(cleaning=("DROP_MISSING", "ADJUST_CORPORATE_ACTION",
                             "WINSORIZE_EXTREME")))
     except NotImplementedError as e:
         assert "판단" in str(e), e
@@ -564,8 +563,8 @@ if __name__ == "__main__":
     print("  순서는 고정             OK")
     _check_corporate_action_divides_the_past_only()
     print("  수정주가는 과거만 나눔   OK")
-    _check_cut_keeps_only_after_the_gap()
-    print("  미조정 갭 앞을 버림     OK")
+    _check_future_gap_cannot_delete_past_rows()
+    print("  미래 갭의 과거 삭제 금지 OK")
     _check_survivorship_is_detected();    print("  생존편향 탐지            OK")
     _check_survivorship_threshold_scales_with_span()
     print("  임계가 기간에 비례      OK")

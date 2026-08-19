@@ -17,8 +17,8 @@
 """
 from __future__ import annotations
 
-import os
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -120,6 +120,7 @@ def create_kanban_task(
     body: str,
     idempotency_key: str,
     priority: int = USER_QUERY_PRIORITY,
+    initial_status: str | None = None,
 ) -> dict[str, object] | None:
     """Create a shared-board card through Hermes CLI when available.
 
@@ -146,7 +147,9 @@ def create_kanban_task(
 
     # 부서에 매이지 않는 명령이라 department=None 이다. 로컬(docker) 모드에서는
     # 컨테이너 안에서 돌아 보드 경로·권한이 에이전트와 같아진다.
-    command = argv_for(None, [
+    if initial_status not in {None, "blocked", "running"}:
+        raise ValueError("initial_status must be blocked, running, or None")
+    command_tail = [
         "kanban",
         "create",
         request.title,
@@ -163,8 +166,11 @@ def create_kanban_task(
         # ready 23 장 뒤에서 사용자 질의가 6 분 대기).
         "--priority",
         str(request.priority),
-        "--json",
-    ])
+    ]
+    if initial_status is not None:
+        command_tail.extend(("--initial-status", initial_status))
+    command_tail.append("--json")
+    command = argv_for(None, command_tail)
     cli_environment = os.environ.copy()
     cli_environment.setdefault("HERMES_KANBAN_HOME", str(Path.home() / ".hermes" / "shared-kanban"))
     try:
@@ -198,6 +204,50 @@ def create_kanban_task(
     }
 
 
+def unblock_kanban_task(*, task_id: str) -> bool:
+    """Release a deliberately blocked card after its durable scope is bound."""
+
+    task_id = str(task_id or "").strip()
+    if not task_id:
+        return False
+    cli_environment = os.environ.copy()
+    cli_environment.setdefault(
+        "HERMES_KANBAN_HOME", str(Path.home() / ".hermes" / "shared-kanban")
+    )
+    command_timeout = float(os.getenv("KANBAN_CLI_TIMEOUT_SECONDS", "8"))
+    try:
+        proc = subprocess.run(
+            argv_for(None, ["kanban", "unblock", task_id]),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=command_timeout,
+            cwd=ROOT,
+            env=cli_environment,
+            check=False,
+        )
+    except (FileNotFoundError, OSError):
+        return False
+    except subprocess.TimeoutExpired:
+        # Hermes/SQLite can commit the promotion before the CLI finishes its
+        # cold-start/JSON teardown.  A timeout therefore has an unknown result,
+        # not a proven failure; verify the durable task state below.
+        proc = None
+    if proc is not None and proc.returncode == 0:
+        return True
+    # The create boundary is idempotent, so a replay may encounter a card
+    # that a previous attempt already released (or even completed). Treat only
+    # a positively observed non-blocked state as success; unreadable state
+    # remains a failure.
+    current = show_kanban_task(task_id, timeout=max(command_timeout, 2.0))
+    return bool(
+        current
+        and str(current.get("status") or "").casefold()
+        in {"ready", "running", "done", "completed"}
+    )
+
+
 def show_kanban_task(
     task_id: str,
     *,
@@ -217,13 +267,7 @@ def show_kanban_task(
     cli_environment.setdefault(
         "HERMES_KANBAN_HOME", str(Path.home() / ".hermes" / "shared-kanban")
     )
-    command = [
-        os.environ.get("HERMES_BIN", "hermes"),
-        "kanban",
-        "show",
-        task_id,
-        "--json",
-    ]
+    command = argv_for(None, ["kanban", "show", task_id, "--json"])
     read_timeout = timeout
     if read_timeout is None:
         try:
@@ -396,11 +440,13 @@ def ask(
         encoding="utf-8", errors="replace",
         timeout=timeout, cwd=ROOT,
         )
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
         # Hermes Runtime은 PyPI 패키지가 아니라 별도 설치다(CLAUDE.md).
-        raise HTTPException(503, f"Hermes CLI 없음: hermes -p {department}")
-    except subprocess.TimeoutExpired:
-        raise HTTPException(504, f"{timeout}s 초과")
+        raise HTTPException(
+            503, f"Hermes CLI 없음: hermes -p {department}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(504, f"{timeout}s 초과") from exc
 
     if proc.returncode != 0:
         raise HTTPException(502, (proc.stderr or "").strip()[:500] or "agent failed")

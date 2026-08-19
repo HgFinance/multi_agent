@@ -1,0 +1,102 @@
+{
+  "adapter_name": "hgfinance-common-v1",
+  "adapter_version": "v1",
+  "base_model": "Qwen/Qwen2.5-14B-Instruct",
+  "base_revision": null,
+  "common_dataset_sha256": "105a9ab6724b13ef45982a7a88262c948eacb87c82de0316062509a6cbb66520",
+  "common_train_sha256": "5e52c0f5488b25a201b245b4fb6cae37d57c638490b7fd50ff205e70d05c328e",
+  "common_validation_sha256": "371c77c3b569ac4d96d3e08148fba872daec134c088da81ea877c2c0e1ef104e",
+  "contamination_check": {
+    "status": "PASS",
+    "train": {
+      "benchmark_root": "benchmarks/quantization",
+      "benchmark_text_count": 500,
+      "exact": [],
+      "exact_count": 0,
+      "near": [],
+      "near_count": 0,
+      "status": "PASS"
+    },
+    "validation": {
+      "benchmark_root": "benchmarks/quantization",
+      "benchmark_text_count": 500,
+      "exact": [],
+      "exact_count": 0,
+      "near": [],
+      "near_count": 0,
+      "status": "PASS"
+    }
+  },
+  "created_at_utc": "2026-08-18T06:11:29.683937+00:00",
+  "dedup_statistics": {
+    "global": {
+      "exact_duplicates_removed": 0,
+      "normalized_duplicates_removed": 0
+    },
+    "per_pool": {
+      "common": {
+        "exact_duplicates_removed": 0,
+        "normalized_duplicates_removed": 0
+      }
+    }
+  },
+  "final_metrics": {},
+  "git_commit": "fcbfa2ea92888ce3ec28c915a8fcceb0bfea0e6c",
+  "lora": {
+    "base_model": "Qwen/Qwen2.5-14B-Instruct",
+    "base_revision": null,
+    "bnb_4bit_compute_dtype": "bfloat16",
+    "bnb_4bit_quant_type": "nf4",
+    "bnb_4bit_use_double_quant": true,
+    "gradient_checkpointing": true,
+    "gradient_checkpointing_use_reentrant": false,
+    "load_in_4bit": true,
+    "lora_alpha": 32,
+    "lora_dropout": 0.05,
+    "lora_r": 16,
+    "max_production_lora_rank": 32,
+    "optimizer": "paged_adamw_8bit",
+    "target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj",
+      "gate_proj",
+      "up_proj",
+      "down_proj"
+    ]
+  },
+  "mixture_ratio": {
+    "common": 1.0
+  },
+  "optimizer_args": {
+    "learning_rate": 0.0002,
+    "optimizer": "paged_adamw_8bit"
+  },
+  "requested_base_revision": null,
+  "resolved_base_revision": null,
+  "runtime": {
+    "cuda_available": false,
+    "machine": "arm64",
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "python": "3.13.13",
+    "torch": null
+  },
+  "seed": 66,
+  "train_size": 2545,
+  "training_args": {
+    "allow_replacement": false,
+    "gradient_accumulation_steps": 16,
+    "gradient_checkpointing": true,
+    "gradient_checkpointing_use_reentrant": false,
+    "max_seq_length": 2048,
+    "num_train_epochs": 3.0,
+    "optimizer": "paged_adamw_8bit",
+    "per_device_train_batch_size": 1,
+    "resplit": false,
+    "target_train_size": null,
+    "validation_size": 223
+  },
+  "training_mode": "common_only",
+  "validation_size": 223
+}

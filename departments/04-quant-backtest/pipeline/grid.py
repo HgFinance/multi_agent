@@ -42,7 +42,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from stock_universe import governed_stock_evidence_sql  # noqa: E402
+
 GRID_VERSION = "quant-grid-v1"
+_GOVERNED_GRID_EVIDENCE = governed_stock_evidence_sql(
+    experiment_alias="e", dataset_alias="manifest", hypothesis_alias="h")
 
 # ── 축 ───────────────────────────────────────────────────────────────────────
 # ▶ 축은 **행동 서술자**다 - "무엇을 다르게 하는가" 이지 "얼마나 잘하는가"
@@ -195,19 +199,35 @@ def empty_cells(grid: Grid, *, edges=None, universes=None) -> list:
 # ── 원장에서 만든다 ──────────────────────────────────────────────────────────
 
 _SQL = """
-select e.experiment_id::text, e.config,
-       coalesce(h.expected_edge->>'type', ''),
-       coalesce(h.expected_edge->>'universe_key', ''),
-       max(case when m.metric='deflated_sharpe' and m.split='TEST'
-                then m.value end)  dsr,
-       max(case when m.metric='excess_return_pct' and m.split='TEST'
-                then m.value end)  ex,
-       max(case when m.metric='signal_ic_t' then m.value end) ic_t
-  from quant.experiments e
-  join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
-  left join quant.experiment_metrics m on m.experiment_id = e.experiment_id
- where e.status = 'COMPLETED'
- group by e.experiment_id, e.config, h.expected_edge
+with trial_pressure as (
+  select e.experiment_id, e.config, h.expected_edge
+    from quant.experiments e
+    join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+   where e.status = 'COMPLETED'
+), eligible_performance as (
+  select e.experiment_id,
+         max(case when metric.metric='deflated_sharpe'
+                       and metric.split='TEST' then metric.value end) dsr,
+         max(case when metric.metric='excess_return_pct'
+                       and metric.split='TEST' then metric.value end) ex,
+         max(case when metric.metric='signal_ic_t' then metric.value end) ic_t
+    from quant.experiments e
+    join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+    join quant.dataset_manifests manifest on manifest.dataset_id = e.dataset_id
+    left join quant.experiment_metrics metric
+      on metric.experiment_id = e.experiment_id
+   where e.status = 'COMPLETED'
+     and """ + _GOVERNED_GRID_EVIDENCE + """
+   group by e.experiment_id
+)
+select trial.experiment_id::text, trial.config,
+       coalesce(trial.expected_edge->>'type', ''),
+       coalesce(trial.expected_edge->>'universe_key', ''),
+       performance.dsr, performance.ex, performance.ic_t,
+       performance.experiment_id is not null as eligible_evidence
+  from trial_pressure trial
+  left join eligible_performance performance
+    on performance.experiment_id = trial.experiment_id
 """
 
 
@@ -217,7 +237,7 @@ def build(conn) -> Grid:
     with conn.cursor() as cur:
         cur.execute(_SQL)
         rows = cur.fetchall()
-    for eid, cfg, edge, uni, dsr, ex, ic_t in rows:
+    for eid, cfg, edge, uni, dsr, ex, ic_t, eligible_evidence in rows:
         cfg = cfg or {}
         # 유니버스가 가설에 없으면 config 에서, 그것도 없으면 `?`
         key = cell_of(edge or cfg.get("edge_type"),
@@ -227,6 +247,8 @@ def build(conn) -> Grid:
             c = Cell(key=key)
             g.cells[key] = c
         c.trials += 1
+        if not eligible_evidence:
+            continue
         # **칸의 최고 하나만 남긴다.** 우선순위: IC t > DSR (IC 가 안 속는다)
         better = (
             (ic_t is not None and (c.best_ic_t is None or float(ic_t) > c.best_ic_t))

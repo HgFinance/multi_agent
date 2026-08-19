@@ -940,6 +940,16 @@ def create_improvement(body: dict[str, Any]):
     return candidate.model_dump(mode="json")
 
 
+@app.get("/workforce/v1/improvements")
+def list_improvements():
+    return {
+        "candidates": [
+            candidate.model_dump(mode="json")
+            for candidate in _improvement_repo.list_candidates()
+        ]
+    }
+
+
 @app.get("/workforce/v1/improvements/{candidate_id}")
 def get_improvement(candidate_id: str):
     candidate = _improvement_repo.get_candidate(candidate_id)

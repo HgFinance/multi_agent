@@ -67,6 +67,29 @@ services:
       HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_CEO_API_URL: http://ceo-hermes:8642/v1
       HERMES_CEO_API_KEY: ${CEO_HERMES_API_KEY:-}
+      # Canonical operational/control Postgres. Supabase is an identity
+      # provider only and must not be used as this runtime data plane.
+      DATABASE_URL: ${DATABASE_URL:?.env needs the private operational PostgreSQL DATABASE_URL}
+      PORTFOLIO_DATA_MODE: "production"
+      # Hosted Supabase is identity-only. Operational data remains on the
+      # private PostgreSQL DSN above; the BFF never receives service-role.
+      APP_ENV: ${APP_ENV:-production}
+      PORTFOLIO_AUTH_MODE: ${PORTFOLIO_AUTH_MODE:-supabase_jwt}
+      PORTFOLIO_AUTH_REQUIRED: ${PORTFOLIO_AUTH_REQUIRED:-true}
+      # Local/test fixture mode must still receive an explicit user/fund/book
+      # grant.  Production Supabase-JWT mode ignores this value.
+      PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: ${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:-[]}
+      # This stack includes shared Kanban, dispatcher, Trading Hermes and the
+      # authenticated MCP bridge, so the CEO natural-language PAPER lane may
+      # be admitted. Deployment bundles without that runtime must set false.
+      USER_PAPER_ORDER_WORKFLOW_ENABLED: "true"
+      PORTFOLIO_CORS_ALLOW_ORIGINS: ${PORTFOLIO_CORS_ALLOW_ORIGINS:-}
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_AUTH_ISSUER: ${SUPABASE_AUTH_ISSUER:-}
+      SUPABASE_AUTH_JWKS_URL: ${SUPABASE_AUTH_JWKS_URL:-}
+      SUPABASE_AUTH_AUDIENCE: ${SUPABASE_AUTH_AUDIENCE:-authenticated}
+      SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY:-}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
       PORTFOLIO_RUNTIME_STORE_PATH: /var/lib/portfolio/runtime.sqlite3
       PORTFOLIO_RUNTIME_EMBEDDED_WORKER: "false"
       PORTFOLIO_GOVERNANCE_BINDING_ENABLED: ${PORTFOLIO_GOVERNANCE_BINDING_ENABLED:-false}
@@ -79,8 +102,15 @@ services:
       # InvestorProfile 프록시(/ui/investor-profiles)가 부르는 accounting-api.
       # 비어 있으면 503 portfolio_api_unavailable 이다(인메모리 후퇴 없음).
       PORTFOLIO_API_URL: ${PORTFOLIO_API_URL:-http://accounting-api:8000}
+      # Browser user directives terminate here. Only a short payload-bound
+      # proof is sent to trading-api; the Supabase access token is never relayed.
+      TRADING_API_URL: ${TRADING_API_URL:-http://trading-api:8000}
+      TRADING_SERVICE_AUTH_SECRET: ${TRADING_SERVICE_AUTH_SECRET:?A 32-byte trading service proof secret is required}
+      TRADING_SERVICE_AUTH_ISSUER: ${TRADING_SERVICE_AUTH_ISSUER:-portfolio-bff}
+      TRADING_SERVICE_AUTH_AUDIENCE: ${TRADING_SERVICE_AUTH_AUDIENCE:-trading-api}
       # CEO Web/Discord mirror uses the existing Redis service. Keep the
       # durable request/event store on the canonical production BFF.
+      CEO_DISCORD_INGRESS_API_KEY: ${CEO_DISCORD_INGRESS_API_KEY:?CEO_DISCORD_INGRESS_API_KEY is required}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       UI_MIRROR_REDIS_URL: ${UI_MIRROR_REDIS_URL:-}
       UI_MIRROR_STREAM: ${UI_MIRROR_STREAM:-hf:ui-ceo-mirror:v1}
@@ -96,6 +126,45 @@ services:
       QA_API_URL: ${QA_API_URL:-http://audit-api:8000}
       KANBAN_ATTACH_ROOT: /opt/kanban/kanban/attachments
       KANBAN_WORKSPACE_ROOT: /opt/kanban/kanban/workspaces
+      # Discord 연동(2026-08-18). 셋 다 비어 있으면 관련 기능만 조용히 꺼지고
+      # CEO 질의 자체는 그대로 동작한다 - Discord 장애/미설정이 질의 접수를
+      # 막지 않는다는 정책(apps/api/discord_mirror.py 머리말).
+      #   토큰: 읽기(apps/api/discord_read.py) + 미러 게시(discord_mirror.py) 공용.
+      #         값은 .env에만 두고 이 파일·프론트 번들·이벤트 payload에 넣지 않는다.
+      # 미러 게시 opt-in. 기본 꺼짐 - 토큰이 환경에 있다는 이유만으로 팀 채널에
+      # 글을 쓰지 않는다(2026-08-18: 테스트가 실제 채널에 글을 쓴 사고).
+      DISCORD_MIRROR_ENABLED: ${DISCORD_MIRROR_ENABLED:-false}
+      DISCORD_BOT_TOKEN_CEO: ${DISCORD_BOT_TOKEN_CEO:-}
+      DISCORD_CEO_CHANNEL_ID: ${DISCORD_CEO_CHANNEL_ID:-}
+      DISCORD_ACTOR_MAP: ${DISCORD_ACTOR_MAP:-}
+      # LS 브로커 조회 배선(2026-08-19). `.env`는 `.dockerignore`에 걸려 이미지에
+      # 들어가지 않으므로 apps/api/main.py의 load_dotenv가 컨테이너 안에서는
+      # 아무것도 읽지 못한다 - 여기 나열한 키만 프로세스에 도달한다.
+      # 끄면 /ui/portfolio/live, /ui/portfolio/ledger, /ui/market/rankings가
+      # 전부 503이라 대시보드가 빈다. 읽기 전용이며 주문은 나가지 않는다.
+      ENABLE_LS_ORDER_EVENTS: ${ENABLE_LS_ORDER_EVENTS:-false}
+      # LS_ENV=PAPER면 조회 코드가 `_PAPER` 접미사 키를 먼저 찾고 없으면
+      # 접미사 없는 키로 떨어진다(departments/03-risk/integrations/ls_openapi.py).
+      # 어느 쪽을 쓸지는 배포 환경이 정하므로 양쪽을 다 통과시킨다.
+      LS_ENV: ${LS_ENV:-PAPER}
+      LS_APP_KEY: ${LS_APP_KEY:-}
+      LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
+      LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}
+      LS_WS_BASE_URL: ${LS_WS_BASE_URL:-}
+      LS_ACCOUNT_NO: ${LS_ACCOUNT_NO:-}
+      LS_ACCOUNT_PWD: ${LS_ACCOUNT_PWD:-}
+      LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:-}
+      LS_APP_SECRET_KEY_PAPER: ${LS_APP_SECRET_KEY_PAPER:-}
+      LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
+      LS_WS_BASE_URL_PAPER: ${LS_WS_BASE_URL_PAPER:-}
+      LS_ACCOUNT_NO_PAPER: ${LS_ACCOUNT_NO_PAPER:-}
+      LS_ACCOUNT_PWD_PAPER: ${LS_ACCOUNT_PWD_PAPER:-}
+      LS_MAC_ADDRESS: ${LS_MAC_ADDRESS:-}
+      LS_OAUTH_SCOPE: ${LS_OAUTH_SCOPE:-oob}
+      # 회계 원장 durable 저장소. 체결일과 결제일(T+2) 사이에는 어떤 브로커
+      # 조회로도 그 거래를 다시 못 가져오므로, 컨테이너와 함께 사라지지 않도록
+      # 아래 portfolio_runtime_data 볼륨 안에 둔다(상대경로 금지).
+      ACCOUNTING_LEDGER_DB: /var/lib/portfolio/accounting_ledger.sqlite3
     volumes:
       - portfolio_runtime_data:/var/lib/portfolio
       # BFF uses Hermes CLI only for the repository-owned Kanban create
@@ -104,6 +173,60 @@ services:
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
     ports:
       - "${PORTFOLIO_BFF_PORT:-8001}:8000"
+
+  # Trusted, internal-only bridge from the Trading Hermes interpretation to
+  # authenticated PAPER directive admission. Hermes receives only the MCP
+  # bearer key; database and payload-proof credentials stay in this process.
+  paper-order-orchestrator-mcp:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: hedgefund-paper-order-orchestrator-mcp
+    restart: unless-stopped
+    depends_on:
+      trading-api:
+        condition: service_healthy
+    # Match the shared Kanban owner's uid. Even `kanban show` initializes WAL;
+    # running it as root would strand root-owned sidecars for department agents.
+    user: "1000:1000"
+    command: ["python", "-m", "apps.api.paper_order_mcp"]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      PYTHONPATH: /app:/app/apps/api
+      APP_ENV: ${APP_ENV:-production}
+      PORTFOLIO_DATA_MODE: "production"
+      PORTFOLIO_AUTH_MODE: ${PORTFOLIO_AUTH_MODE:-supabase_jwt}
+      DATABASE_URL: ${DATABASE_URL:?.env needs the private operational PostgreSQL DATABASE_URL}
+      ORDER_ORCHESTRATOR_DATABASE_ROLE: ${ORDER_ORCHESTRATOR_DATABASE_ROLE:-svc_order_orchestrator}
+      TRADING_API_URL: ${TRADING_API_URL:-http://trading-api:8000}
+      TRADING_SERVICE_AUTH_SECRET: ${TRADING_SERVICE_AUTH_SECRET:?A 32-byte trading service proof secret is required}
+      TRADING_SERVICE_AUTH_ISSUER: ${TRADING_SERVICE_AUTH_ISSUER:-portfolio-bff}
+      TRADING_SERVICE_AUTH_AUDIENCE: ${TRADING_SERVICE_AUTH_AUDIENCE:-trading-api}
+      MCP_TRADING_ORDER_API_KEY: ${MCP_TRADING_ORDER_API_KEY:?A generated 32-byte PAPER-order MCP key is required}
+      HERMES_BIN: /usr/local/bin/hermes
+      HERMES_HOME: /tmp/hermes-cli
+      HERMES_KANBAN_HOME: /opt/kanban
+      HERMES_KANBAN_DB: /opt/kanban/kanban.db
+    volumes:
+      # Application code exposes only `kanban show` for scope validation. The
+      # pinned Hermes CLI nevertheless auto-runs init_db/WAL setup before every
+      # subcommand, so the filesystem mount itself cannot be read-only.
+      - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
+    expose:
+      - "8046"
+    healthcheck:
+      test: ["CMD", "python", "-m", "apps.api.paper_order_mcp", "--healthcheck"]
+      interval: 10s
+      timeout: 8s
+      retries: 5
+      start_period: 20s
+    mem_limit: 384m
+    cpus: 0.5
+    pids_limit: 96
 
   portfolio-worker:
     build:
@@ -119,6 +242,10 @@ services:
     command: ["python", "apps/api/portfolio_worker.py"]
     environment:
       PYTHONPATH: /app:/app/apps/api
+      # The worker loads the governed portfolio catalog itself. Omitting this
+      # DSN must not make the production worker fall back to test fixtures.
+      DATABASE_URL: ${DATABASE_URL:?.env needs the private operational PostgreSQL DATABASE_URL}
+      PORTFOLIO_DATA_MODE: "production"
       PORTFOLIO_RUNTIME_STORE_PATH: /var/lib/portfolio/runtime.sqlite3
       PORTFOLIO_RUNTIME_EMBEDDED_WORKER: "false"
       PORTFOLIO_WORKER_LEASE_SECONDS: ${PORTFOLIO_WORKER_LEASE_SECONDS:-60}
@@ -173,61 +300,6 @@ services:
       retries: 10
       start_period: 30s
 
-  # ── 상주형 뉴스 수집 (재일님 지시 2026-07-31: 수집기 컨테이너로 DB 즉시 적재) ──
-  # NAVER 폴링 -> NewsSink -> Supabase(research.documents). 적재 지연은
-  # research.news_ingest_latency(_hourly) View 로 확인한다.
-  # ▶ 2026-08-13 기본 기동 제외 (재일 결정: 정성 적재 전면 정리 - MCP 도입 의의).
-  #   NAVER 뉴스 적재는 news_search MCP 조회가 대체한다. 되돌리려면 profiles 줄만 지운다.
-  news-watcher:
-    profiles: ["legacy-collectors"]
-    build:
-      context: departments/01-research
-    container_name: hedgefund-news-watcher
-    restart: unless-stopped
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-    # ▶ env_file 로 .env 전체를 넣지 않는다 - LS·OpenAI 등 이 컨테이너가 쓸 일
-    #   없는 Credential 까지 흘러든다. 필요한 것만 명시 주입한다.
-    #   ${...} 값은 compose 가 저장소 루트 .env 에서 읽는다.
-    environment:
-      DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
-      NAVER_CLIENT_ID: ${NAVER_CLIENT_ID:?.env 에 NAVER_CLIENT_ID 가 필요하다}
-      NAVER_CLIENT_SECRET: ${NAVER_CLIENT_SECRET:?.env 에 NAVER_CLIENT_SECRET 이 필요하다}
-      # 감시 종목은 watchlist_builder.py --basket 이 만든 파일이 기준이다
-      # (코스피200 + 코스닥150 구성종목 - LS t1444 를 지수 업종코드 101/405 로 열거,
-      #  재일님 지시 2026-07-31). 갱신: 호스트에서 --basket 후 up -d. 임시로 몇
-      # 종목만 보려면 .env 의 NEWS_WATCH_SYMBOLS 가 파일보다 우선한다.
-      NEWS_WATCH_SYMBOLS: ${NEWS_WATCH_SYMBOLS:-}
-      NEWS_WATCH_SYMBOLS_FILE: config/news_watchlist.txt
-      # ▶ 2계층 (재일님 지시 2026-08-03 "2계층으로 가자")
-      #   Tier1 = 위 핵심 바스켓 350종목, 매 sweep. 속보는 여기서 잡는다.
-      #   Tier2 = 코스피+코스닥 개별주 전종목 2,595, 남는 한도로 순회.
-      #   전종목을 같은 빈도로 돌면 간격이 185분이 되어 속보성이 사라진다.
-      NEWS_TIER2_SYMBOLS_FILE: config/full_universe.txt
-      # 실측 2026-08-03 (한도 25,000, 상한 90% = 22,500):
-      #   1500초 -> Tier1 만으로 21,000회, Tier2 는 sweep 당 1종목 = 사실상 안 돈다
-      #   1800초 -> Tier1 16,800 + Tier2 sweep 당 118종목, 한 바퀴 10시간,
-      #             합계 22,193회/일 (여유 307)
-      # 5분을 양보하고 전종목을 하루 2.4회 훑는 쪽을 택했다.
-      NEWS_POLL_INTERVAL_SECONDS: ${NEWS_POLL_INTERVAL_SECONDS:-1800}
-
-    volumes:
-      - ./departments/01-research/config:/app/departments/01-research/config:ro
-
-    # 뉴스 폴링은 가볍다 - TimescaleDB 와 달리 상한을 좁게 잡는다
-    mem_limit: 384m
-    mem_reservation: 64m
-    cpus: 0.5
-    pids_limit: 64
-
-    # SIGTERM 후 Sink 꼬리 Flush 가 끝날 시간을 준다 (기본 10초로도 충분하지만
-    # DB 재시도 백오프와 겹칠 때를 위해 여유를 둔다)
-    stop_grace_period: 30s
-
   # ── 상주형 LS 실시간 시세 수집 (재일님 지시 2026-07-31: 호가·체결도 Docker 로) ──
   # 컨테이너는 24시간, 소켓은 세션 창(동시호가 35분 전~마감 +10분)에서만 연다.
   # 구독은 뉴스와 같은 바스켓(코스피200+코스닥150 = 700구독)을 소켓 4개로 샤딩
@@ -274,8 +346,8 @@ services:
       #   ETF·ETN 은 instrument_type 이 달라 애초에 안 들어온다(STOCK 만).
       #   거래정지·관리종목 등 제한 171 을 뺀 2,595종목 = 5,190구독 =
       #   소켓 26개(소켓당 200). 실계좌 웹소켓 세션 한도는 미확인이라
-      #   전환 후 소켓 수와 유입을 반드시 확인한다 - 거절되면 즉시
-      #   news_watchlist.txt(350종목)로 되돌린다.
+      #   전환 후 소켓 수와 유입을 반드시 확인한다. 거절되면 서비스가 실패하도록
+      #   두고, 검토된 시장 종목 파일을 LS_WATCH_SYMBOLS_FILE로 명시한다.
       LS_WATCH_SYMBOLS_FILE: config/full_universe.txt
 
     volumes:
@@ -289,11 +361,13 @@ services:
 
     stop_grace_period: 30s
 
-  # ── 배치 수집기 스케줄러 (재일님 지시 2026-07-31: 나머지 수집기도 컨테이너로) ──
-  # 공시(10분)·Breadth(10분, 세션은 수집기가 판정)·관측 Calendar·거시·재무·CA·
-  # 기업개황(각 일 1회)을 한 컨테이너가 순차 실행한다. 전부 멱등 적재라 재시작
-  # 후 재실행이 안전하다. 주기 근거는 TEAM_JAEIL 가이드 3.1 표.
+  # ── 시세 전용 배치 스케줄러 ──
+  # 가격·호가·체결과 직접 파생되는 시장 관측만 순차 실행한다. 뉴스·공시·재무·
+  # 거시·소셜 데이터는 저장하지 않고 research MCP가 필요할 때 조회한다.
   batch-collectors:
+    # Always-on market-data lane only. Literature, news, filings, financials,
+    # macro and social inputs are queried on demand through MCP and are never
+    # persisted by this service.
     build:
       context: departments/01-research
     container_name: hedgefund-batch-collectors
@@ -315,14 +389,6 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
       TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
-      OPEN_DART_API_KEY: ${OPEN_DART_API_KEY:-}
-      ECOS_API_KEY: ${ECOS_API_KEY:-}
-      FRED_API_KEY: ${FRED_API_KEY:-}
-      KOSIS_API_KEY: ${KOSIS_API_KEY:-}
-      # 20:00 document-archive 가 공시 원문 ZIP 을 Storage 에 올린다 - 이 두 개가
-      # 빠지면 upload() 가 KeyError 로 전건 실패한다 (2026-07-31 실측 597건)
-      SUPABASE_URL: ${SUPABASE_URL:?.env 에 SUPABASE_URL 이 필요하다}
-      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?.env 에 SUPABASE_SERVICE_ROLE_KEY 가 필요하다}
       # Breadth(t1511/t8424)와 관측 Calendar(t8410)가 LS REST 를 쓴다
       LS_ENV: ${LS_ENV:-PAPER}
       LS_APP_KEY: ${LS_APP_KEY:-}
@@ -331,20 +397,12 @@ services:
       LS_APP_SECRET_KEY_PAPER: ${LS_APP_SECRET_KEY_PAPER:-}
       LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}
       LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
-      # label-snapshot Job 이 레짐·지정학 라벨을 계산하려면 부서 조회면이 필요하다.
+      # label-snapshot Job 이 가격 기반 레짐 라벨을 계산하려면 시장 조회면이 필요하다.
       # 2026-08-02 실측: 기본값이 127.0.0.1 이라 컨테이너 안에서 Connection
       # refused 가 났다 - 같은 compose 네트워크의 서비스 이름으로 준다.
       MARKET_API_URL: http://market-api:8036
-      RESEARCH_API_URL: http://research-api:8035
 
-    # ▶ 2026-08-02 실측 사고: Dockerfile 이 config 를 COPY 하지 않아 이 컨테이너
-    #   에는 config 디렉터리 자체가 없었다. 그래서 새로 넣은 Job 두 개가 조용히
-    #   죽고 있었다 - geopolitical 은 FileNotFoundError(geopolitical_themes.txt),
-    #   bluesky-watch 도 같은 이유. 스케줄러는 exit≠0 을 로그에 남기지만 **아무도
-    #   안 보면 없는 것과 같다**(그래서 실패 알림이 백로그로 남는다).
-    #   news-watcher·ls-realtime 은 이미 같은 마운트를 쓰고 있었다 - 이 컨테이너만
-    #   빠져 있었다. COPY 대신 마운트로 맞추는 이유: 워치리스트·테마 파일은 코드
-    #   배포 없이 고치라고 만든 것이라 이미지에 굽으면 그 목적이 사라진다.
+    # 시장 유니버스·지수 정의는 코드 배포 없이 조정할 수 있게 읽기 전용으로 건다.
     volumes:
       - ./departments/01-research/config:/app/departments/01-research/config:ro
       # ▶ **Parquet 아카이브는 호스트에 남아야 한다** (2026-08-12 실측)
@@ -374,37 +432,84 @@ services:
     # 다음 주기가 이어받는다. 짧게 정리하고 내린다.
     stop_grace_period: 20s
 
-  # ── LS 실시간 뉴스 (NWS push - NAVER 와 병행 실측 중, 재일님 방침 2026-07-31) ──
-  # 진짜 push 라 폴링 주기·일 한도가 없고 종목코드가 패킷에 붙어 온다.
-  # 본문(t3102)은 약관 확인 전까지 저장하지 않는다 - 제목·메타만 적재.
-  # ▶ 2026-08-13 기본 기동 제외 (재일 결정: 정성 적재 전면 정리 - MCP 도입 의의).
-  #   LS 뉴스 push 적재는 news_search MCP 조회가 대체한다. 되돌리려면 profiles 줄만 지운다.
-  ls-news:
-    profiles: ["legacy-collectors"]
+  # Independent, lease-fenced re-execution of accepted forward PASS evidence.
+  # This process has neither svc_quant nor transport-worker privileges. Its
+  # market connection is forced read-only and every scientific mismatch is an
+  # immutable QA result with promotion_authority=false.
+  qa-reproduction-worker:
     build:
-      context: departments/01-research
-    container_name: hedgefund-ls-news
+      context: .
+      dockerfile: departments/06-ai-qa-audit/Dockerfile
+    container_name: hedgefund-qa-reproduction-worker
     restart: unless-stopped
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
-    command: ["python", "collectors/ls_news_collector.py", "--run"]
+    command: ["python", "qa_events/reproduction_worker.py"]
+    working_dir: /app/departments/06-ai-qa-audit
+    depends_on:
+      timescaledb:
+        condition: service_healthy
     environment:
-      DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
-      LS_ENV: ${LS_ENV:-PAPER}
-      LS_APP_KEY: ${LS_APP_KEY:-}
-      LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
-      LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:-}
-      LS_APP_SECRET_KEY_PAPER: ${LS_APP_SECRET_KEY_PAPER:-}
-      LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}
-      LS_WS_BASE_URL: ${LS_WS_BASE_URL:-}
-      LS_WS_BASE_URL_PAPER: ${LS_WS_BASE_URL_PAPER:-}
+      # Prefer a true session endpoint. The broad credential is only a login
+      # transport; SET ROLE must persist and the DB health probe fails closed
+      # when that login cannot assume svc_qa_reproducer.
+      DATABASE_URL: ${RISK_QA_DATABASE_URL:-${DATABASE_URL:-}}
+      DATABASE_SESSION_URL: ${RISK_QA_DATABASE_SESSION_URL:-}
+      DATABASE_RUNTIME_ROLE: ${QA_REPRODUCER_DATABASE_RUNTIME_ROLE:-svc_qa_reproducer}
+      QA_REPRODUCTION_TIMESCALE_DATABASE_URL: ${QA_REPRODUCTION_TIMESCALE_DATABASE_URL:-postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market}
+      QA_REPRODUCTION_LEASE_SECONDS: ${QA_REPRODUCTION_LEASE_SECONDS:-7200}
+      QA_REPRODUCTION_HEARTBEAT_SECONDS: ${QA_REPRODUCTION_HEARTBEAT_SECONDS:-60}
+      QA_REPRODUCTION_POLL_SECONDS: ${QA_REPRODUCTION_POLL_SECONDS:-15}
+      QA_REPRODUCTION_CONNECT_TIMEOUT_SECONDS: ${QA_REPRODUCTION_CONNECT_TIMEOUT_SECONDS:-10}
+      QA_REPRODUCTION_METADATA_STATEMENT_TIMEOUT_MS: ${QA_REPRODUCTION_METADATA_STATEMENT_TIMEOUT_MS:-30000}
+      QA_REPRODUCTION_METADATA_LOCK_TIMEOUT_MS: ${QA_REPRODUCTION_METADATA_LOCK_TIMEOUT_MS:-5000}
+      QA_REPRODUCTION_MARKET_STATEMENT_TIMEOUT_MS: ${QA_REPRODUCTION_MARKET_STATEMENT_TIMEOUT_MS:-300000}
+      QA_REPRODUCTION_MARKET_LOCK_TIMEOUT_MS: ${QA_REPRODUCTION_MARKET_LOCK_TIMEOUT_MS:-5000}
+    healthcheck:
+      # Executes the scoped claim API inside ROLLBACK and proves that the raw
+      # market connection is read-only. A missing session credential/SET ROLE
+      # grant therefore fails closed instead of reporting process-only health.
+      test: ["CMD", "python", "qa_events/reproduction_worker.py", "--healthcheck"]
+      interval: 30s
+      timeout: 30s
+      retries: 5
+      start_period: 30s
+    mem_limit: 2g
+    cpus: 1.0
+    pids_limit: 128
+    stop_grace_period: 30s
+
+  # ── quant-api: 실험 제출·조회면 (전략 공장의 주문 창구) ──────────────────
+  # Factory operations submit through this boundary; Hermes never receives a
+  # DB secret or a write-capable MCP surface.
+  # QUANT_DATABASE_URL may point at the least-privilege svc_quant role; the
+  # shared URL remains a migration fallback until that role is configured.
+  quant-api:
+    build:
+      context: .
+      dockerfile: departments/04-quant-backtest/Dockerfile
+    container_name: hedgefund-quant-api
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      # Inject exactly one selected DSN.  Supplying the scoped role must not
+      # leave the broader fallback credential readable in the API process.
+      DATABASE_URL: ${QUANT_DATABASE_URL:-${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}}
+      DATABASE_SESSION_URL: ${QUANT_DATABASE_SESSION_URL:-}
+      DATABASE_RUNTIME_ROLE: ${QUANT_DATABASE_RUNTIME_ROLE:-svc_quant}
+      MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
+    ports:
+      - "127.0.0.1:8037:8037"
     mem_limit: 256m
-    cpus: 0.3
+    cpus: 0.5
     pids_limit: 64
-    stop_grace_period: 20s
 
   # ── market-api: 시세 읽기 전용 조회면 (F03 "DB 없이 Snapshot API" + 통합계획 6.2) ──
   # 트레이딩·리스크·팀원은 TSDB Credential 없이 이 API 로 Snapshot/Bar/Breadth/DQ 조회.
@@ -497,7 +602,8 @@ services:
   # 에서 서비스 이름으로 부른다(research-mcp:8037). 밖에서 부를 이유가 없다.
   research-mcp:
     build:
-      context: departments/01-research
+      context: .
+      dockerfile: departments/01-research/Dockerfile.mcp
     container_name: hedgefund-research-mcp
     restart: unless-stopped
     logging:
@@ -520,10 +626,10 @@ services:
       MARKET_API_URL: http://market-api:8036
       RESEARCH_API_URL: http://research-api:8035
       OLLAMA_BASE_URL: http://host.docker.internal:11434
-      # ▶ 외부 정보원 질의 도구 (external_sources.py, 2026-08-13 재일 결정)
-      #   DART 는 수집기와 **같은 키**를 나눠 쓴다 - 에이전트 몫 일일 상한이
-      #   수집기 예산(공시 10분 폴링·저녁 재무 배치)을 지킨다.
-      #   스냅샷(cache-on-cite)은 reports 마운트에 남아 재빌드에도 산다.
+      # ▶ 외부 정보원 질의 도구 (external_sources.py, 요청형 MCP 전용)
+      #   정성 데이터 상주 수집기는 이 키를 받지 않는다. 소스별 일일 상한이
+      #   반복 에이전트 호출로 외부 계정 한도가 소진되는 것을 막는다.
+      #   응답은 저장하지 않고 요청별 인용 해시만 계산한다.
       OPEN_DART_API_KEY: ${OPEN_DART_API_KEY:-}
       NAVER_CLIENT_ID: ${NAVER_CLIENT_ID:-}
       NAVER_CLIENT_SECRET: ${NAVER_CLIENT_SECRET:-}
@@ -534,7 +640,6 @@ services:
       MCP_NAVER_DAILY_CAP: ${MCP_NAVER_DAILY_CAP:-5000}
       MCP_ECOS_DAILY_CAP: ${MCP_ECOS_DAILY_CAP:-2000}
       MCP_FRED_DAILY_CAP: ${MCP_FRED_DAILY_CAP:-2000}
-      MCP_CITE_LOG_DIR: /app/departments/01-research/reports/mcp_citations
       # ▶ LS 자격을 뺐다 (2026-08-02). 예전에는 파이프라인 첫 노드
       #   (universe_manager)가 거래가능 여부를 LS REST 로 직접 물어 이 컨테이너에
       #   LS 키가 필요했다. 이제 universe_restriction_collector(수집기)가 제한
@@ -558,8 +663,9 @@ services:
       - ./departments/01-research/employee_workers.py:/app/departments/01-research/employee_workers.py:ro
       # employee_worker_runtime의 LLM 호출 계측(record_llm_call)
       - ./orchestration:/app/orchestration:ro
-      # Packet MD 리포트를 호스트에서 바로 열어보기 위해 (읽기 전용 아님 - 쓴다)
-      - ./departments/01-research/reports:/app/departments/01-research/reports
+      # 과거 Packet 감사 자료는 읽을 수만 있다. 현재 MCP는 외부 응답이나 Packet을
+      # 이 경로에 쓰지 않는다.
+      - ./departments/01-research/reports:/app/departments/01-research/reports:ro
     # 파이프라인이 분석가 6인 x LLM 이라 오래 돈다 - 넉넉히 준다
     mem_limit: 1g
     cpus: 2.0
@@ -568,7 +674,7 @@ services:
 
   # ── research-liaison-mcp: 리서치 응대 창구(도서관) 도구 면 (2026-08-13) ──
   # 같은 이미지·같은 코드가 RESEARCH_MCP_SURFACE=liaison 으로 뜬다 - 파이프라인
-  # 생성·factory 쓰기 도구(run_research_packet·factory_submit_*)가 **등록에서
+  # Worker 실행·factory 쓰기 도구(run_research_workers·factory_submit_*)가 **등록에서
   # 빠진** 조회 전용 면이다(도서관/연구소 분리). 사용자 질의 파생 카드를 받는
   # research-liaison·quant-liaison 프로필만 이 서버를 물고, 부서 본체 프로필은
   # 위 research-mcp(full)를 그대로 쓴다. 창구가 쓰기 손을 못 갖는 것은 프롬프트
@@ -626,10 +732,8 @@ services:
       # 종목명 해석은 DART corp 색인 재사용(external_sources._resolve)
       OPEN_DART_API_KEY: ${OPEN_DART_API_KEY:-}
       MCP_LS_DAILY_CAP: ${MCP_LS_DAILY_CAP:-2000}
-      MCP_CITE_LOG_DIR: /app/departments/01-research/reports/mcp_citations
     volumes:
       - ./departments/01-research/config:/app/departments/01-research/config:ro
-      - ./departments/01-research/reports:/app/departments/01-research/reports
     mem_limit: 512m
     cpus: 0.5
     pids_limit: 128
@@ -637,7 +741,8 @@ services:
 
   research-liaison-mcp:
     build:
-      context: departments/01-research
+      context: .
+      dockerfile: departments/01-research/Dockerfile.mcp
     container_name: hedgefund-research-liaison-mcp
     restart: unless-stopped
     logging:
@@ -655,7 +760,6 @@ services:
       RESEARCH_API_URL: http://research-api:8035
       OLLAMA_BASE_URL: http://host.docker.internal:11434
       # 외부 정보원 도구는 읽기 전용이라 창구에도 남는다(external_sources.py).
-      # 창구의 reports 는 읽기 전용 마운트라 스냅샷은 컨테이너 로컬로 - v2 과제.
       OPEN_DART_API_KEY: ${OPEN_DART_API_KEY:-}
       NAVER_CLIENT_ID: ${NAVER_CLIENT_ID:-}
       NAVER_CLIENT_SECRET: ${NAVER_CLIENT_SECRET:-}
@@ -666,7 +770,6 @@ services:
       MCP_NAVER_DAILY_CAP: ${MCP_NAVER_DAILY_CAP:-5000}
       MCP_ECOS_DAILY_CAP: ${MCP_ECOS_DAILY_CAP:-2000}
       MCP_FRED_DAILY_CAP: ${MCP_FRED_DAILY_CAP:-2000}
-      MCP_CITE_LOG_DIR: /tmp/mcp_citations
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
@@ -791,6 +894,10 @@ services:
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      # Profile MCP headers expand this token for the read-only research
+      # liaison.  Job mutation stays on quant-api/factory workers; Hermes gets
+      # neither a database credential nor an implied write-capable MCP tool.
+      MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0
@@ -804,11 +911,14 @@ services:
   # ▶ redis: Risk↔QA Event Stream(risk_events/qa_events)이 쓰는 공통 Core 인프라다.
   #   특정 부서 소유가 아니다(계획서 5절 "공통 Platform Container") - 다른 부서도
   #   Redis Streams가 필요해지면 이 서비스를 재사용하면 된다. P0 로컬용 최소 구성이라
-  #   영속화(AOF)는 아직 안 켰다 - 재시작 시 Stream 유실 감수.
+  #   Redis Stream은 AOF(everysec)와 명명 volume으로 영속화한다.
   redis:
     image: redis:7-alpine
     container_name: hedgefund-redis
     restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis_data:/data
     logging:
       driver: "json-file"
       options:
@@ -880,7 +990,9 @@ services:
       redis:
         condition: service_healthy
     environment:
-      DATABASE_URL: ${DATABASE_URL:-}
+      DATABASE_URL: ${RISK_QA_DATABASE_URL:-${DATABASE_URL:-}}
+      DATABASE_SESSION_URL: ${RISK_QA_DATABASE_SESSION_URL:-}
+      DATABASE_RUNTIME_ROLE: ${AUDIT_API_DATABASE_RUNTIME_ROLE:-svc_audit_api}
       REDIS_URL: redis://redis:6379/0
       RISK_QA_EVENT_REDIS_URL: redis://redis:6379/0
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -895,7 +1007,7 @@ services:
     ports:
       - "127.0.0.1:8042:8000"   # 로컬 전용 - 외부 노출 금지
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/qa/v1/observability/runtime', timeout=2)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -924,13 +1036,17 @@ services:
       redis:
         condition: service_healthy
     environment:
-      DATABASE_URL: ${DATABASE_URL:-}
+      DATABASE_URL: ${RISK_QA_DATABASE_URL:-${DATABASE_URL:-}}
+      DATABASE_SESSION_URL: ${RISK_QA_DATABASE_SESSION_URL:-}
+      DATABASE_RUNTIME_ROLE: ${QA_WORKER_DATABASE_RUNTIME_ROLE:-svc_qa_worker}
+      QA_FORWARD_ACCEPTANCE_RETRY_SECONDS: ${QA_FORWARD_ACCEPTANCE_RETRY_SECONDS:-30}
       RISK_QA_EVENT_REDIS_URL: ${RISK_QA_EVENT_REDIS_URL:-redis://redis:6379/0}
       QA_EVENT_POLL_INTERVAL_SECONDS: ${QA_EVENT_POLL_INTERVAL_SECONDS:-1}
+      QA_WORKER_HEALTH_CONNECT_TIMEOUT_SECONDS: ${QA_WORKER_HEALTH_CONNECT_TIMEOUT_SECONDS:-3}
     healthcheck:
-      test: ["CMD", "python", "-c", "import os, redis; assert b'qa_events/worker.py' in open('/proc/1/cmdline', 'rb').read(); redis.Redis.from_url(os.environ['RISK_QA_EVENT_REDIS_URL'], socket_connect_timeout=2).ping()"]
+      test: ["CMD", "python", "qa_events/worker.py", "--healthcheck"]
       interval: 10s
-      timeout: 3s
+      timeout: 8s
       retries: 5
       start_period: 10s
     mem_limit: 256m
@@ -1129,6 +1245,9 @@ services:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-kanban-dispatcher
     restart: unless-stopped
+    depends_on:
+      paper-order-orchestrator-mcp:
+        condition: service_healthy
     logging:
       driver: "json-file"
       options:
@@ -1141,13 +1260,10 @@ services:
     # DEPRECATED standalone escape hatch. 이 컨테이너는 gateway가 아니라
     # Kanban dispatcher만 실행하므로 per-profile gateway를 supervise하지 않는다.
     command:
-      ["kanban", "daemon", "--force", "--interval", "${KANBAN_DISPATCH_INTERVAL:-60}", "--pidfile", "/opt/data/shared-kanban/dispatcher.pid", "--verbose"]
-    # ▶ uid 1000 고정 (2026-08-14 장애 실측). 이미지 기본 사용자(uid 10000)로
-    #   돌면 데몬이 기동 시 /opt/data 를 10000·700 으로 재소유해 버려서,
-    #   uid 1000 인 부서 게이트웨이·CLI 경유 카드 생성이 전부
-    #   PermissionError 로 죽었다(21:13Z 공장 전면 장애, chown 복구 후 21:53Z
-    #   재발로 자기-재소유 확인). 전 컨테이너의 HERMES_UID=1000 과 정합시킨다.
-    user: "1000:1000"
+      ["/bin/sh", "-c", "python3 /app/repo/deploy/hermes-dispatch-guard/check_guard.py && exec hermes kanban daemon --force --interval \"$${KANBAN_DISPATCH_INTERVAL:-60}\" --pidfile /opt/data/shared-kanban/dispatcher.pid --verbose"]
+    # Hermes 최신 s6 이미지에서는 Docker `user:` 고정을 사용하지 않는다.
+    # 컨테이너는 root로 bootstrap한 뒤 HERMES_UID/HERMES_GID=1000으로
+    # runtime user와 /opt/data 소유권을 host UID/GID에 맞춘다.
     volumes:
       - /home/ubuntu/.hermes:/opt/data
       # 저장소 skills/ **전체**를 건다. finance 만 걸면 다른 범주의 스킬을
@@ -1168,15 +1284,19 @@ services:
       - ./departments/04-quant-backtest:/app/departments/04-quant-backtest
       - ./quant-data:/app/quant-data
     environment:
+      PYTHONPATH: /app/repo/deploy/hermes-dispatch-guard
+      HGFINANCE_DISPATCH_GUARD: "1"
       HERMES_HOME: /opt/data
       HERMES_UID: 1000
       HERMES_GID: 1000
       HERMES_KANBAN_HOME: /opt/data/shared-kanban
       HERMES_KANBAN_DB: /opt/data/shared-kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      KANBAN_DISPATCH_INTERVAL: ${KANBAN_DISPATCH_INTERVAL:-60}
       # The dispatcher spawns the department workers, so MCP profile headers are
       # expanded from this process environment rather than a gateway container.
       MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
+      MCP_TRADING_ORDER_API_KEY: ${MCP_TRADING_ORDER_API_KEY:?A generated 32-byte PAPER-order MCP key is required}
       # ▶ 에이전트는 이 컨테이너 **안에서** 뜨므로 자격도 여기 있어야 한다
       #   (2026-08-14 실측). 프로필 config 의 `env:` 에 ANTHROPIC_API_KEY 가 적혀
       #   있어도 hermes 는 그것으로 자격을 만들지 않는다 - 프로세스 환경변수를 본다.
@@ -1333,7 +1453,11 @@ services:
       timescaledb:
         condition: service_healthy
     environment:
-      DATABASE_URL: ${DATABASE_URL:?}
+      DATABASE_URL: ${QUANT_DATABASE_URL:-${DATABASE_URL:?}}
+      # SET ROLE is session state, so db_writer uses this explicit session DSN
+      # or upgrades the standard Supavisor 6543 endpoint to session port 5432.
+      DATABASE_SESSION_URL: ${QUANT_DATABASE_SESSION_URL:-}
+      DATABASE_RUNTIME_ROLE: ${QUANT_DATABASE_RUNTIME_ROLE:-svc_quant}
       # 백테스트가 커버리지를 **실제로 재려면** 이게 있어야 한다. 없으면
       # NOT_RUNNABLE 로 막히는데, 로그만 보면 데이터가 모자란 것처럼 보인다.
       TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
@@ -1402,7 +1526,6 @@ services:
       UI_MIRROR_DEDUPE_TTL_SECONDS: ${UI_MIRROR_DEDUPE_TTL_SECONDS:-604800}
       TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
       SUPABASE_URL: ${SUPABASE_URL:-}
-      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
       # 부서 호출·카드 생성이 전부 docker exec 로 나간다.
       HERMES_EXEC_MODE: docker
       KANBAN_ACCESS_MODE: docker
@@ -1450,6 +1573,7 @@ services:
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban:ro
 
 volumes:
+  redis_data:
   tsdb_data:
   portfolio_runtime_data:
   factory_state:

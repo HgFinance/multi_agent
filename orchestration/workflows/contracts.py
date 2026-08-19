@@ -98,7 +98,9 @@ class WorkflowSpec:
                     f"{self.name}/{step.id}: 안전하지 않은 failure action {step.failure_action!r}"
                 )
 
-        for previous, current in zip(self.steps, self.steps[1:]):
+        for previous, current in zip(
+            self.steps, self.steps[1:], strict=False
+        ):
             if current.input_contract != previous.output_contract:
                 raise WorkflowContractError(
                     f"{self.name}: {previous.id} -> {current.id} handoff 불일치 "

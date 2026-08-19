@@ -31,7 +31,7 @@ import traceback
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-WORKER_VERSION = "quant-experiment-worker-v3"
+WORKER_VERSION = "quant-experiment-worker-v4"
 
 # 가설이 RUNNING 에 갇혀 있다고 보는 시간. lease 만료(30분)보다 짧으면 아직
 # 큐에서 도는 작업을 뺏게 되므로 같은 값을 쓴다.
@@ -100,13 +100,14 @@ def hypothesis_is_terminal(conn, hypothesis_id: str) -> bool:
     return hypothesis_status(conn, hypothesis_id) in TERMINAL_HYPOTHESIS_STATUSES
 
 
-def stale_intraday_cohort_reason(conn, hypothesis_id: str) -> str:
-    """Return the exact non-retryable cohort-version rejection, if any.
+def intraday_execution_retirement_reason(conn, hypothesis_id: str) -> str:
+    """Return a typed, non-retryable intraday input rejection, if any.
 
     The check is pure after one metadata read and deliberately runs before the
-    hypothesis-status gate. A legacy job can otherwise remain RUNNING, be
-    released forever, and only reach the runtime version fence after the
-    30-minute stale-hypothesis reclaimer resets it.
+    hypothesis-status gate. A queued legacy feature-window contract can
+    otherwise silently select evaluator V11, while an old immutable cohort can
+    remain RUNNING and bounce through release/stale reclaim. Neither input can
+    be repaired by retrying the same persisted hypothesis.
     """
     try:
         with conn.cursor() as cur:
@@ -117,13 +118,20 @@ def stale_intraday_cohort_reason(conn, hypothesis_id: str) -> str:
     except Exception:  # noqa: BLE001 - normal orchestration remains authoritative
         return ""
     edge = row[0] if row and isinstance(row[0], dict) else None
-    if not edge or str(edge.get("research_lane") or "").upper() != "INTRADAY_EVENT":
+    if not edge or str(edge.get("research_lane") or "").strip().upper() != \
+            "INTRADAY_EVENT":
         return ""
     try:
         from intraday_experiment_runner import (  # noqa: PLC0415
-            StaleIntradayCohortError, config_from_edge)
+            StaleIntradayCohortError,
+            current_intraday_execution_contract_rejection,
+            validate_current_explicit_v2_execution_edge,
+        )
 
-        config_from_edge(edge)
+        contract_reason = current_intraday_execution_contract_rejection(edge)
+        if contract_reason:
+            return contract_reason
+        validate_current_explicit_v2_execution_edge(edge)
     except StaleIntradayCohortError as exc:
         return f"STALE_INTRADAY_COHORT: {exc}"
     except Exception:  # noqa: BLE001 - other contract failures keep existing semantics
@@ -131,10 +139,21 @@ def stale_intraday_cohort_reason(conn, hypothesis_id: str) -> str:
     return ""
 
 
-def reject_stale_intraday_cohort(conn, hypothesis_id: str, reason: str) -> int:
-    """Terminally reject an immutable old input without claiming a backtest loss."""
-    if not reason.startswith("STALE_INTRADAY_COHORT:"):
-        raise ValueError("stale cohort rejection requires its controlled reason code")
+def stale_intraday_cohort_reason(conn, hypothesis_id: str) -> str:
+    """Compatibility view for callers interested only in cohort retirement."""
+    reason = intraday_execution_retirement_reason(conn, hypothesis_id)
+    return reason if reason.startswith("STALE_INTRADAY_COHORT:") else ""
+
+
+def reject_retired_intraday_input(conn, hypothesis_id: str, reason: str) -> int:
+    """Terminally reject an immutable old input without claiming alpha loss."""
+    controlled = (
+        "STALE_INTRADAY_COHORT:",
+        "SUPERSEDED_INTRADAY_FEATURE_WINDOW_CONTRACT:",
+    )
+    if not reason.startswith(controlled):
+        raise ValueError(
+            "intraday input retirement requires a controlled reason code")
     with conn.cursor() as cur:
         cur.execute(
             """update quant.hypotheses
@@ -144,6 +163,13 @@ def reject_stale_intraday_cohort(conn, hypothesis_id: str, reason: str) -> int:
                                  'TESTING','DATASET_CERTIFIED')""",
             (hypothesis_id,))
         return int(cur.rowcount or 0)
+
+
+def reject_stale_intraday_cohort(conn, hypothesis_id: str, reason: str) -> int:
+    """Compatibility wrapper for the original cohort-only retirement API."""
+    if not reason.startswith("STALE_INTRADAY_COHORT:"):
+        raise ValueError("stale cohort rejection requires its controlled reason code")
+    return reject_retired_intraday_input(conn, hypothesis_id, reason)
 
 
 def gate_for_status(status: str) -> dict:
@@ -263,18 +289,20 @@ def run_one(conn, job: dict) -> dict:
 
     jid, hid = job["job_id"], job["hypothesis_id"]
 
-    # A persisted cohort is immutable. If its version predates the runtime
-    # contract, retries cannot repair it: a fresh proposal must reassemble the
-    # population. Retire it before the RUNNING gate so it cannot bounce between
-    # release and stale reclaim, and classify the job as CANCELLED rather than a
-    # failed alpha experiment (no replay or result exists).
-    stale_reason = stale_intraday_cohort_reason(conn, hid)
-    if stale_reason:
+    # Persisted formula/cohort inputs are immutable. Missing/legacy feature
+    # contracts would silently select evaluator V11; stale cohorts cannot be
+    # repaired by retry. Retire both before the RUNNING gate and classify the
+    # job as CANCELLED rather than a failed alpha experiment (no replay or
+    # result exists). The queue lease remains broad so old rows are surfaced and
+    # closed instead of being stranded forever.
+    retirement_reason = intraday_execution_retirement_reason(conn, hid)
+    if retirement_reason:
         from job_queue import cancel  # noqa: PLC0415
 
-        reject_stale_intraday_cohort(conn, hid, stale_reason)
-        cancel(conn, jid, reason=stale_reason)
-        return {"job_id": jid, "result": "CANCELLED", "reason": stale_reason}
+        reject_retired_intraday_input(conn, hid, retirement_reason)
+        cancel(conn, jid, reason=retirement_reason)
+        return {"job_id": jid, "result": "CANCELLED",
+                "reason": retirement_reason}
 
     # ▶ **전진할 수 없는 가설에 오케스트레이터를 붙이지 않는다** (2026-08-14)
     #   관문이 `orchestrate` 안 맨 끝에 있어서, 못 갈 가설도 데이터 사상·
@@ -620,6 +648,60 @@ def sweep_orphans(conn) -> dict | None:
         return {"error": f"{type(e).__name__}: {str(e)[:200]}"}
 
 
+# Forward cohorts receive a fair sweep even while the ordinary queue is busy.
+# The internal throttle avoids opening a Timescale connection every 15-second
+# worker tick while a candidate waits weeks for twenty genuinely new KRX
+# sessions; tying this to queue idleness would starve confirmation in the
+# intended continuously-producing factory.
+FORWARD_SWEEP_SEC = 900
+FORWARD_SWEEP_BATCH = 4
+_last_forward_sweep: float | None = None
+
+
+def sweep_forward_confirmations(conn, *, monotonic_fn=None,
+                                market_connect=None, runner=None) -> dict | None:
+    """Try a fair due batch with one short-lived market connection."""
+    global _last_forward_sweep
+    clock = monotonic_fn or time.monotonic
+    now = float(clock())
+    if (_last_forward_sweep is not None
+            and now - _last_forward_sweep < FORWARD_SWEEP_SEC):
+        return None
+    _last_forward_sweep = now
+    market_conn = None
+    try:
+        if runner is None:
+            from intraday_experiment_runner import (  # noqa: PLC0415
+                run_forward_confirmations)
+            runner = run_forward_confirmations
+        if market_connect is None:
+            import psycopg2  # noqa: PLC0415
+            from source_registry import load_project_env  # noqa: PLC0415
+
+            def market_connect():
+                url = load_project_env().get("TIMESCALE_DATABASE_URL")
+                if not url:
+                    raise RuntimeError("TIMESCALE_DATABASE_URL is missing")
+                return psycopg2.connect(url, connect_timeout=20)
+
+        market_conn = market_connect()
+        return runner(
+            conn, market_conn, limit=FORWARD_SWEEP_BATCH,
+            worker=worker_name())
+    except Exception as exc:  # forward waiting/failure never stops normal jobs
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001, S110
+            pass
+        return {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+    finally:
+        if market_conn is not None:
+            try:
+                market_conn.close()
+            except Exception:  # noqa: BLE001, S110
+                pass
+
+
 # ── 정상 종료 시 집은 주문 반납 ──────────────────────────────────────────────
 #
 # ▶ 왜 필요한가 (2026-08-14 실측)
@@ -689,6 +771,10 @@ def tick(conn, *, worker: str) -> dict:
     terminal_zombies = cancel_terminal_zombies(conn)
     rec = reclaim(conn)
     orph = sweep_orphans(conn)
+    # Never hold an ordinary job lease while a potentially long forward replay
+    # runs. The forward sweep owns and heartbeats its own work items; only after
+    # it returns do we lease the normal queue batch.
+    forward = sweep_forward_confirmations(conn)
     jobs = lease(conn, worker=worker)
     # 집는 순간부터 반납 대상이다 - 실행 중에 신호가 와도 놓아줄 수 있어야 한다
     _HELD["jobs"] = [str(j["job_id"]) for j in jobs]
@@ -699,6 +785,7 @@ def tick(conn, *, worker: str) -> dict:
         _HELD["jobs"] = []
     return {"hypotheses": hyp, "terminal_zombies": terminal_zombies,
             "reclaimed": rec, "orphans": orph,
+            "forward_confirmations": forward,
             "picked": len(jobs), "results": results}
 
 
@@ -765,6 +852,16 @@ def serve() -> None:
                           f"완주 {len(o.get('finalized') or [])}건 "
                           f"실패 {len(o.get('failed') or [])}건 "
                           f"{o.get('error') or ''}".rstrip(), flush=True)
+                forward = r.get("forward_confirmations") or {}
+                if forward.get("error"):
+                    print(f"  forward confirmation error: {forward['error']}",
+                          file=sys.stderr, flush=True)
+                for item in forward.get("results") or []:
+                    if item.get("status") != "WAITING_FOR_NEW_LOCAL_SESSIONS":
+                        print("  forward confirmation "
+                              f"{item.get('experiment_id', '')[:8]} "
+                              f"{item.get('status')} {item.get('decision', '')}",
+                              flush=True)
                 if r["picked"]:
                     for x in r["results"]:
                         print(f"  {x['result']:6} {x['job_id'][:8]} "
@@ -1082,12 +1179,14 @@ def _check_gate_asks_the_contract_not_a_copy():
 
 
 def _check_stale_cohort_is_retired_without_replay():
-    """An immutable legacy population is cancelled once, not retried as alpha loss."""
+    """Legacy contracts/cohorts retire; an exact V2 input reaches replay."""
     import types
 
     import experiment_worker as W
+    from intraday_alpha_ast import EXPLICIT_FEATURE_WINDOW_CONTRACT
+    from intraday_ablation import INTRADAY_SCREENING_COHORT_VERSION
 
-    edge = {
+    current_edge = {
         "research_lane": "INTRADAY_EVENT", "universe_key": "krx_all",
         "intraday_signal_expr": {
             "op": "field", "field": "microprice_offset_bps"},
@@ -1098,13 +1197,16 @@ def _check_stale_cohort_is_retired_without_replay():
             "horizon_seconds": 5},
         "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
         "horizon_seconds": 5, "execution": "TAKER",
-        "screening_population": [{}],
-        "screening_cohort_version": "intraday-screening-cohort-v1",
+        "feature_window_contract_version": EXPLICIT_FEATURE_WINDOW_CONTRACT,
+        "screening_population": [],
+        "screening_cohort_version": INTRADAY_SCREENING_COHORT_VERSION,
     }
 
     class _Conn:
-        def __init__(self):
+        def __init__(self, edge):
+            self.edge = edge
             self.sql = []
+            self.last_sql = ""
 
         def cursor(self):
             outer = self
@@ -1119,30 +1221,83 @@ def _check_stale_cohort_is_retired_without_replay():
                     return False
 
                 def execute(self_, sql, params=None):
-                    outer.sql.append(" ".join(sql.split()))
+                    outer.last_sql = " ".join(sql.split())
+                    outer.sql.append(outer.last_sql)
 
                 def fetchone(self_):
-                    return (edge,)
+                    if "select expected_edge" in outer.last_sql:
+                        return (outer.edge,)
+                    if "select status" in outer.last_sql:
+                        return ("PROPOSED",)
+                    raise AssertionError(outer.last_sql)
 
             return _Cur()
 
-    calls = []
+    calls = {"cancel": [], "finish": [], "orchestrate": []}
     queue = types.ModuleType("job_queue")
-    queue.finish = lambda *a, **k: (_ for _ in ()).throw(
-        AssertionError("stale cohort must not be recorded as FAILED"))
+    queue.finish = lambda conn, jid, **kw: calls["finish"].append((jid, kw))
     queue.release = lambda *a, **k: (_ for _ in ()).throw(
-        AssertionError("stale cohort must not return to the queue"))
-    queue.cancel = lambda conn, jid, *, reason: calls.append((jid, reason))
+        AssertionError("retired/current test input must not return to the queue"))
+    queue.cancel = lambda conn, jid, *, reason: calls["cancel"].append(
+        (jid, reason))
+    orch = types.ModuleType("experiment_orchestrator")
+
+    def _orchestrate(hid, *, conn):
+        calls["orchestrate"].append(hid)
+        return types.SimpleNamespace(
+            verdict="RUNNABLE", experiment_refs={"experiment_id": "exp-v2"},
+            backlog=[])
+
+    orch.orchestrate = _orchestrate
     sys.modules["job_queue"] = queue
+    sys.modules["experiment_orchestrator"] = orch
     try:
-        conn = _Conn()
-        result = W.run_one(conn, {"job_id": "j-old", "hypothesis_id": "h-old"})
-        assert result["result"] == "CANCELLED", result
-        assert calls and calls[0][0] == "j-old", calls
-        assert calls[0][1].startswith("STALE_INTRADAY_COHORT:"), calls
-        assert any("set status='REJECTED'" in sql for sql in conn.sql), conn.sql
+        # Missing V2 metadata is a legacy execution contract even when no stale
+        # cohort exists. It must never fall through to config_from_edge's V11
+        # compatibility decoder.
+        legacy_edge = dict(current_edge)
+        legacy_edge.pop("feature_window_contract_version")
+        legacy_conn = _Conn(legacy_edge)
+        legacy = W.run_one(
+            legacy_conn, {"job_id": "j-legacy", "hypothesis_id": "h-legacy"})
+        assert legacy["result"] == "CANCELLED", legacy
+        assert legacy["reason"].startswith(
+            "SUPERSEDED_INTRADAY_FEATURE_WINDOW_CONTRACT:"), legacy
+        assert any("set status='REJECTED'" in sql
+                   for sql in legacy_conn.sql), legacy_conn.sql
+
+        # A V2 primary and V2 sidecar can still carry an immutable old cohort
+        # version; retain the original typed retirement path for that case.
+        stale_edge = {
+            **current_edge,
+            "screening_population": [{
+                "feature_window_contract_version":
+                    EXPLICIT_FEATURE_WINDOW_CONTRACT,
+            }],
+            "screening_cohort_version": "intraday-screening-cohort-v1",
+        }
+        stale_conn = _Conn(stale_edge)
+        stale = W.run_one(
+            stale_conn, {"job_id": "j-stale", "hypothesis_id": "h-stale"})
+        assert stale["result"] == "CANCELLED", stale
+        assert stale["reason"].startswith("STALE_INTRADAY_COHORT:"), stale
+        assert any("set status='REJECTED'" in sql
+                   for sql in stale_conn.sql), stale_conn.sql
+
+        # Exact current V2 is not retired and reaches the orchestrator.
+        current_conn = _Conn(current_edge)
+        current = W.run_one(
+            current_conn, {"job_id": "j-v2", "hypothesis_id": "h-v2"})
+        assert current == {
+            "job_id": "j-v2", "result": "DONE", "experiment_id": "exp-v2"}, \
+            current
+        assert calls["orchestrate"] == ["h-v2"], calls
+        assert calls["finish"] and calls["finish"][0][0] == "j-v2", calls
+        assert [jid for jid, _ in calls["cancel"]] == [
+            "j-legacy", "j-stale"], calls
     finally:
         sys.modules.pop("job_queue", None)
+        sys.modules.pop("experiment_orchestrator", None)
 
 
 def _check_infra_fault_is_not_an_experiment_failure():

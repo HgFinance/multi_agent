@@ -40,7 +40,7 @@
 
 1. **이 저장소에는 자체 에이전트 루프가 없다.** 에이전트 세션·칸반 보드·워커 스폰은 전부 외부 오픈소스 **NousResearch `hermes-agent` CLI**가 소유한다. 저장소가 기여하는 것은 그 주변의 (a) 루트 카드를 만드는 FastAPI BFF, (b) 카드 본문에 심는 workflow-scope 계약, (c) 종료 이벤트에 반응하는 결정론적 supervisor, (d) 죽은 부모 카드를 강제 종료하는 watchdog이다 (`orchestration/adapters/ceo_supervisor.py:1-7`).
 2. **부서 간 계약의 실체는 HTTP가 아니라 DB 행이다.** 리서치→퀀트 핸드오프는 `research.experiment_proposals` → `quant.hypotheses` → `research.experiment_outcomes`라는 세 테이블의 상태 전이이고 (§6.3), 체결→회계는 `execution.outbox` → Redis 스트림 → 원장 분개다 (§8.4). 칸반 카드는 계약이 아니라 **디스패치 수단**이다.
-3. **LLM은 3계층으로 분리돼 있다.** 부서장(Hermes head) = OpenAI Codex `gpt-5.6-luna`, 대안 경로 = 호스트 프록시 경유 Claude, 직원 워커(LangGraph) = Ollama `qwen3:1.7b`(개발) 또는 vLLM `qwen2.5-14b-instruct-fp8`(AWS GPU). 백테스트 판정·리스크 게이트·QA 판정은 **LLM이 아니라 결정론적 코드**다.
+3. **LLM은 3계층으로 분리돼 있다.** 부서장(Hermes head) = OpenAI Codex `gpt-5.6-luna`, 대안 경로 = 호스트 프록시 경유 Claude, 직원 워커(LangGraph) = Ollama `qwen3:1.7b`(개발) 또는 vLLM `qwen2.5-14b-instruct-awq`(AWS GPU). 백테스트 판정·리스크 게이트·QA 판정은 **LLM이 아니라 결정론적 코드**다.
 
 ---
 
@@ -236,12 +236,12 @@ Hermes는 이 저장소의 코드가 아니다. 업스트림 **NousResearch `her
 |---|---|---|---|
 | 부서장 (Hermes head) | `openai-codex` | `gpt-5.6-luna` (`https://chatgpt.com/backend-api/codex`) | 8개 프로필 전부, 예: `departments/00-ceo-office/hermes/config.yaml:8-11` |
 | 부서장 대안 | `anthropic-claude-code` | sonnet/opus/haiku 별칭 | `docker-compose.claude.yml:28-41` + 호스트 프록시 `scripts/claude_code_proxy.py` (`hermes → host.docker.internal:8787 → claude -p`). `ANTHROPIC_API_KEY`는 **의도적으로 미주입** — 종량 과금 방지 (`claude.yml:19-24`) |
-| 직원 워커 (LangGraph) | `ollama` (dev) / `vllm-openai` (AWS) | `qwen3:1.7b` / `qwen2.5-14b-instruct-fp8` | `departments/worker_model_gateway.py:163-201` — `WORKER_MODEL_BASE_URL` 유무로 분기 |
+| 직원 워커 (LangGraph) | `ollama` (dev) / `vllm-openai` (AWS) | `qwen3:1.7b` / `qwen2.5-14b-instruct-awq` | `departments/worker_model_gateway.py:163-201` — `WORKER_MODEL_BASE_URL` 유무로 분기 |
 
 프로바이더는 compose에 하드코딩하지 않고 `/opt/data/config.yaml`의 `provider:`와 `auth.json`이 결정한다 (`docker-compose.yml:708-711`).
 
 **모델 플레인 (GPU 오버레이)** — `docker-compose.model.yml`:
-- vLLM `vllm/vllm-openai:latest`, `127.0.0.1:8000` 루프백 전용, `--model /models/Qwen2.5-14B-Instruct-FP8-dynamic --served-model-name qwen2.5-14b-instruct-fp8 --max-model-len 16384 --gpu-memory-utilization 0.90 --kv-cache-dtype fp8 --enable-lora --max-loras 4` (`:49-76`), `HF_HUB_OFFLINE=1` (28GB 무단 다운로드 방지), healthcheck start_period 600s.
+- vLLM `vllm/vllm-openai:latest`, `127.0.0.1:8000` 루프백 전용, `--model /models/Qwen2.5-14B-Instruct-AWQ --served-model-name qwen2.5-14b-instruct-awq --max-model-len 8192 --gpu-memory-utilization 0.85 --kv-cache-dtype fp8 --enable-lora --max-loras 4` (`:49-76`), `HF_HUB_OFFLINE=1` (28GB 무단 다운로드 방지), healthcheck start_period 600s.
 - 모델 준비 스크립트: `scripts/model_plane/fetch_base_model.sh` (S3→EBS, RedHatAI FP8 사전 양자화 체크포인트), `quantize_fp8.py` (llm-compressor, 파이프라인 검증용 1.5B), `model_manifest.py` (파일별 sha256 + 복합 digest).
 - ⚠️ `WORKER_MODEL_*`/`VLLM_*`/`HGF_MODEL_DIR`는 `.env`/.env.example 어디에도 없다 — 오버레이를 잊으면 **조용히 Ollama 1.7b + 8초 타임아웃으로 강등**된다. LoRA 어댑터는 레지스트리(`departments/01-research/config/worker_model_registry.json`)에 `enabled`가 하나도 없어 Multi-LoRA 장치 전체가 현재 무의미.
 
@@ -267,7 +267,7 @@ qa-department ← 06-ai-qa-audit     hr-department ← 07-agent-workforce
 
 의도: dispatcher의 유일한 라우팅 손잡이가 assignee→프로필이므로, **읽기전용 창구를 별도 프로필로 두는 것 = 큐·워커풀 분리**다 (`canonical_profiles.py:36-41`). CEO SOUL이 라우팅 규칙을 명시한다: 사용자 읽기 질의 → `research-liaison`/`quant-liaison`, 공장 사이클/격상 작업 → 본체 프로필 (`departments/00-ceo-office/hermes/SOUL.md:37-53`).
 
-**실제로 구현된 절반 — MCP surface**: 같은 이미지·같은 코드에서 `RESEARCH_MCP_SURFACE=liaison`이면 `run_research_packet`, `factory_submit_leads`, `factory_submit_proposal` 3개 도구를 서버 기동 시 제거하고, 제거 실패 시 **기동을 거부**한다 (`departments/01-research/api/mcp_server.py:423-461`). reports 볼륨도 읽기전용 마운트 (`docker-compose.yml:637-639`). 루프 차단: `origin=factory` 카드에는 `MISROUTED` 응답 규칙 (RFC 3834식, `hermes-liaison/SOUL.md:23-28` ↔ `ceo_workflow_scope.py:281-284`의 `origin=user-query` 도장).
+**실제로 구현된 절반 — MCP surface**: 같은 이미지·같은 코드에서 `RESEARCH_MCP_SURFACE=liaison`이면 공장 제출·수식 생성·Worker 실행/진단 도구를 서버 기동 시 제거하고, 제거 실패 시 **기동을 거부**한다. 퇴역한 `run_research_packet`은 full/liaison 양쪽 모두에 등록되지 않는다. 루프 차단: `origin=factory` 카드에는 `MISROUTED` 응답 규칙 (RFC 3834식, `hermes-liaison/SOUL.md:23-28` ↔ `ceo_workflow_scope.py:281-284`의 `origin=user-query` 도장).
 
 **미구현된 절반 — 프로필**: `hermes-liaison/`에는 SOUL.md만 있고 config.yaml이 없다. sync/install 스크립트 대상 목록(8개)에도, dispatcher 프로필 마운트(8개)에도 없다. 따라서 **로컬에서 `research-liaison`으로 배정된 카드는 non-spawnable로 영구 스킵**된다. 추가로 `hermes_boundary.py:498`의 self-check(`PROFILE_CONTAINERS == CANONICAL_PROFILES`)가 liaison 추가로 **현재 실패 상태**이고, `orchestration/skill_contract.py:13-24`는 8개 이름을 중복 하드코딩해 liaison을 "unknown profile"로 거부한다. → 진행 중(untracked) 작업.
 
@@ -733,7 +733,7 @@ risk-api가 `risk.decision.v1`을 Redis `risk-qa-events`에 발행(결정 이벤
 | 04-quant `api/` | 소스 삭제, `__pycache__`만 잔존 — 주석들은 여전히 "quant-api /jobs/stuck"을 살아있는 것처럼 언급 |
 | 02-trading `contracts/risk_gate.py`, `packet_gate.py`, `skills/`, `multileg/`(DB 영속 NotImplemented) | 생산 호출자 0 |
 | 03-risk `risk_events/projection_worker.py`, `harness/`, `experiments/llm_wiki/` | compose 서비스/호출자 없음 |
-| 01-research Line B (`scripts.py` 2,687줄 + analysts 10종) | **의도적 은퇴**(8/10 재편, 코드 보존 명시) — MCP `run_research_packet`으로 여전히 실행 가능, 최종 산출물 8/4 |
+| 01-research Line B (`scripts.py` 2,687줄 + analysts 10종) | **의도적 은퇴**(8/10 재편, 코드만 감사 계보로 보존) — Runtime 이미지·MCP 실행 표면에서 제거 |
 | orchestration `adapters/paper_*`, `workflows/runner.py`, YAML manifest 6종 | 테스트 전용 |
 | ai-office Worker `/api/report`·`/api/integrations`, `ceoMirrorClient.ts` | 호출자 삭제됨/부재 |
 
@@ -742,7 +742,7 @@ risk-api가 `risk.decision.v1`을 Redis `risk-qa-events`에 발행(결정 이벤
 - 릴리스 게이트를 통과해도 **승격 파이프라인이 없어** `strategy.versions`로 이어지지 않는다 (§8 D4의 상류).
 - vLLM Multi-LoRA 장치 — enabled 어댑터 0.
 - RAG 코퍼스 — 인덱서(`rag_librarian.py`)는 CLI 전용 + 원문 수집기 꺼짐 → `/evidence/search`는 동결 코퍼스 검색.
-- `geopolitical_state` MCP 도구 — 수집기 꺼진 테이블을 읽어 점점 낡은 값 반환.
+- ~~`geopolitical_state` MCP 도구~~ — 08-18 제거. 굳은 테이블을 "현재"로 서빙하는 경로를 닫았다.
 - `macro` 테이블 — 수집 중단, 소비자(`data_resolution`, `narrative_guard` 등) 다수 생존 → 조용한 노화.
 - `hermes-dashboard`, `paper-search-mcp`, `youtube-transcript-mcp`, `ui-bff` — profiles 게이트로 기본 미기동. 특히 `ui-bff`는 켜도 이미지에 `hermes` 바이너리가 없고 읽기 함수들이 `HERMES_EXEC_MODE`를 무시해 **켜자마자 고장**.
 - `kanban_tracker` — 플래그 기본 false + 어떤 compose도 안 켬 → 포트폴리오 런 부서 카드 생성 코드는 사실상 미작동.

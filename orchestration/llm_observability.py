@@ -6,10 +6,11 @@ import contextlib
 import contextvars
 import os
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
-from typing import Any, Iterator
+from typing import Any
 
 
 @dataclass

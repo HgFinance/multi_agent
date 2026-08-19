@@ -37,19 +37,26 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "contracts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]
+                       / "04-quant-backtest" / "pipeline"))
 
-from contracts.factory_contracts import (  # noqa: E402
+from factory_contracts import (  # noqa: E402
     CompetingExplanation, DataRequirement, ExperimentProposalV1,
     MethodologyLeadV1, PriorCheck,
 )
-from contracts.intraday_ablation import (  # noqa: E402
+from intraday_ablation import (  # noqa: E402
     INTRADAY_SCREENING_COHORT_VERSION,
 )
 from lead_intake import clip_excerpt, parse_blocks  # noqa: E402
 from publish_gate import evaluate  # noqa: E402
+from stock_universe import governed_stock_evidence_sql  # noqa: E402
 
 MODULE_VERSION = "research-proposal-intake-v3"
 MAX_INTRADAY_COHORT = 8
+CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT = "explicit-primitive-window-v2"
+_GOVERNED_PAST_OUTCOME = governed_stock_evidence_sql(
+    experiment_alias="e", dataset_alias="m", hypothesis_alias="h")
 
 PLANNER_KEYS = ("TITLE", "LEAD_IDS", "ECONOMIC_RATIONALE", "COUNTERPARTY",
                 "EDGE_TYPE", "UNIVERSE_KEY", "LABEL", "BASELINE",
@@ -75,6 +82,140 @@ SKEPTIC_KEYS = ("TITLE", "COMPETING_EXPLANATION", "COMPETING_CODES", "VERDICT")
 PLANNER_REQUIRED = ("TITLE", "LEAD_IDS", "ECONOMIC_RATIONALE", "COUNTERPARTY",
                     "EDGE_TYPE", "UNIVERSE_KEY")
 SKEPTIC_PASS = "PROCEED"          # 회의론자가 본가설을 살려 둔 경우만
+
+
+def _set_distance(left, right) -> float:
+    """Jaccard distance with two empty descriptions treated as identical."""
+    lhs, rhs = frozenset(left), frozenset(right)
+    union = lhs | rhs
+    return 0.0 if not union else 1.0 - len(lhs & rhs) / len(union)
+
+
+def _semantic_tokens(value, prefix: str = "semantic") -> frozenset[str]:
+    """Flatten a semantic plan without depending on JSON/list input order."""
+    out: set[str] = set()
+
+    def walk(current, path: str) -> None:
+        if isinstance(current, dict):
+            for key in sorted(current):
+                walk(current[key], f"{path}.{key}")
+            return
+        if isinstance(current, (list, tuple, set, frozenset)):
+            for item in current:
+                walk(item, path)
+            return
+        out.add(f"{path}={json.dumps(current, ensure_ascii=False, sort_keys=True)}")
+
+    walk(value, prefix)
+    return frozenset(out)
+
+
+def _intraday_novelty_signature(row: dict, grammar) -> dict:
+    """Content-only structural and economic signature for cohort selection."""
+    expr = grammar.parse(row["intraday_signal_expr"])
+    return {
+        "shape": grammar.shape_fingerprint(expr),
+        "fields": frozenset(grammar.fields_of(expr)),
+        "operators": frozenset(grammar.operators_of(expr)),
+        "clocks": frozenset(
+            str(value) for value in
+            getattr(grammar, "temporal_windows_of", grammar.clocks_of)(expr)),
+        "primitive_windows": frozenset(
+            str(value) for value in
+            getattr(grammar, "primitive_windows_of", lambda _expr: set())(expr)),
+        "semantic": _semantic_tokens(row.get("semantic_plan") or {}),
+    }
+
+
+def _intraday_pairwise_novelty(left: dict, right: dict) -> tuple[float, float,
+                                                                  float]:
+    """Return combined, structural, and semantic distances in ``[0, 1]``.
+
+    Shape/field/operator differences dominate numeric-window tuning. Economic
+    semantics still separate formulas whose executable trees look alike but
+    encode different events, states, or directions.
+    """
+    structural = (
+        0.45 * float(left["shape"] != right["shape"])
+        + 0.22 * _set_distance(left["fields"], right["fields"])
+        + 0.13 * _set_distance(left["operators"], right["operators"])
+        + 0.10 * _set_distance(left["clocks"], right["clocks"])
+        + 0.10 * _set_distance(
+            left["primitive_windows"], right["primitive_windows"])
+    )
+    semantic = _set_distance(left["semantic"], right["semantic"])
+    return 0.75 * structural + 0.25 * semantic, structural, semantic
+
+
+def _intraday_novelty_key(row: dict) -> tuple[str, str]:
+    """Stable tie-breaker based on formula/semantics, never lead UUID or order."""
+    return (
+        str(row.get("ast_fingerprint") or ""),
+        json.dumps(row.get("semantic_plan") or {}, ensure_ascii=False,
+                   sort_keys=True, separators=(",", ":")),
+    )
+
+
+def _exact_semantic_plan_fingerprint(plan: dict) -> str:
+    """Hash the complete canonical plan, including execution and horizon.
+
+    ``alpha_semantics.fingerprint`` intentionally identifies an economic
+    family and therefore omits the numeric horizon.  Cohort provenance needs a
+    stricter identity: a 30-second FOLLOW contract must never cite a 600-second
+    REVERT lead merely because both leads happen to compile to the same AST16.
+    """
+    from alpha_semantics import validate as validate_plan  # noqa: PLC0415
+
+    canonical = validate_plan(plan)
+    payload = json.dumps(canonical, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _select_novel_intraday_sidecars(primary: dict, candidates: list[dict], *,
+                                    limit: int, grammar) -> list[dict]:
+    """Deterministic farthest-first max-min structural/semantic frontier.
+
+    The primary is the first anchor. Each next sidecar maximizes its minimum
+    pairwise novelty to every already selected formula. Stable content hashes
+    resolve exact ties, making the result invariant to database row order and
+    lead UUIDs while keeping numeric-window near-clones from crowding the four
+    independent-candidate slots.
+    """
+    if limit <= 0:
+        return []
+    unique: dict[str, dict] = {}
+    primary_fp = str(primary.get("ast_fingerprint") or "")
+    for row in candidates:
+        key = str(row.get("ast_fingerprint") or "")
+        if not key or key == primary_fp:
+            continue
+        current = unique.get(key)
+        if current is None or _intraday_novelty_key(row) < \
+                _intraday_novelty_key(current):
+            unique[key] = row
+    pool = sorted(unique.values(), key=_intraday_novelty_key)
+    anchors = [_intraday_novelty_signature(primary, grammar)]
+    selected: list[dict] = []
+    while pool and len(selected) < limit:
+        scored = []
+        for row in pool:
+            signature = _intraday_novelty_signature(row, grammar)
+            distances = [_intraday_pairwise_novelty(signature, anchor)
+                         for anchor in anchors]
+            minimums = tuple(min(values) for values in zip(*distances))
+            scored.append((row, signature, minimums))
+        row, signature, _ = min(
+            scored,
+            key=lambda item: (
+                -item[2][0], -item[2][1], -item[2][2],
+                _intraday_novelty_key(item[0]),
+            ),
+        )
+        selected.append(row)
+        anchors.append(signature)
+        pool.remove(row)
+    return selected
 
 
 @dataclass
@@ -205,11 +346,54 @@ def _competing_codes(raw: str) -> tuple[list, str]:
     return codes, " ".join(rest)[:120]
 
 
-def proposal_id_for(lead_ids, edge_type: str, universe_key: str) -> str:
-    """같은 리드로 같은 엣지·유니버스를 또 기획하면 같은 기획안이다."""
+def proposal_id_for(lead_ids, edge_type: str, universe_key: str, *,
+                    material: dict | None = None) -> str:
+    """Return the identity of one immutable material preregistration.
+
+    A lead/edge/universe-only id made a corrected parameter contract collide
+    with the already rejected row, so ``ON CONFLICT DO NOTHING`` silently ate
+    the repair.  Material execution/design fields now distinguish a genuinely
+    corrected proposal.  Prose rewrites and shared-replay sidecars do not: they
+    must not manufacture fresh trials.
+    """
+    if material is None:
+        # Preserve the legacy helper contract for callers that only need the
+        # coarse family-style identity.  Newly built proposals always pass a
+        # material specification below.
+        blob = json.dumps(
+            [sorted(str(x) for x in lead_ids), edge_type.strip().lower(),
+             universe_key.strip().lower()],
+            ensure_ascii=False, separators=(",", ":"))
+        return "prop_" + hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+    material = dict(material)
+    params = dict(material.get("suggested_params") or {})
+    # Screening sidecars are compute amortisation only and never hold promotion
+    # authority, so membership changes must not manufacture fresh trials.  The
+    # cohort version is different: it binds the execution/screening contract.
+    # A repaired proposal under a new contract must not collide with a rejected
+    # legacy row through ``ON CONFLICT DO NOTHING``.
+    params.pop("screening_population", None)
+    material["suggested_params"] = params
+    if isinstance(material.get("falsification_tests"), (list, tuple)):
+        material["falsification_tests"] = sorted(
+            str(value) for value in material["falsification_tests"])
+    requirements = dict(material.get("data_requirements") or {})
+    if isinstance(requirements.get("tables"), (list, tuple)):
+        requirements["tables"] = sorted(str(value)
+                                         for value in requirements["tables"])
+    if requirements:
+        material["data_requirements"] = requirements
+    plan = dict(material.get("semantic_plan") or {})
+    for key in ("context", "qualities"):
+        if isinstance(plan.get(key), (list, tuple)):
+            plan[key] = sorted(str(value) for value in plan[key])
+    if plan:
+        material["semantic_plan"] = plan
     blob = json.dumps([sorted(str(x) for x in lead_ids),
-                       edge_type.strip().lower(), universe_key.strip().lower()],
-                      ensure_ascii=False, separators=(",", ":"))
+                       edge_type.strip().lower(), universe_key.strip().lower(),
+                       material], ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"), default=str)
     return "prop_" + hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
@@ -220,6 +404,14 @@ def _prior_check(past_outcomes, lessons_text: str) -> PriorCheck:
     우리가 대응까지 지어내면 Gate 0 의 견제가 형식만 남는다.
     """
     rows = list(past_outcomes or [])
+    primary_scopes = {"AST_EXACT", "AST_EXACT_PRIMARY", "FAMILY_PRIMARY"}
+    # Broad edge/universe outcomes are useful failure memory, not evidence that
+    # this executable equation spent a PRIMARY budget slot.  Legacy callers
+    # without scope annotations retain their historical all-row behaviour.
+    scoped = any(str(r.get("match_scope") or "") for r in rows)
+    budget_rows = ([r for r in rows
+                    if str(r.get("match_scope") or "") in primary_scopes]
+                   if scoped else rows)
     rejecting = {"REJECT", "GATE_HOLD", "KILL"}
     codes: list[str] = []
     fam = ""
@@ -233,7 +425,11 @@ def _prior_check(past_outcomes, lessons_text: str) -> PriorCheck:
     #   금지)만 보고, "맞는 교훈에 대응했나" 는 Gate 0 이 본다. 여기서
     #   미리 걸러 내면 대응 맵이 비어 계약이 엉뚱한 사유로 죽는다(실측).
     #   층마다 볼 것을 정해 두고 겹치지 않는다.
-    return PriorCheck(trial_family_id=fam, trials_used=len(rows),
+    budget_family = next((str(r.get("trial_family_id") or "")
+                          for r in budget_rows
+                          if r.get("trial_family_id")), "")
+    return PriorCheck(trial_family_id=budget_family or fam,
+                      trials_used=len(budget_rows),
                       past_outcomes=tuple(codes),
                       lessons_addressed=_lessons_addressed(lessons_text))
 
@@ -241,7 +437,7 @@ def _prior_check(past_outcomes, lessons_text: str) -> PriorCheck:
 def _canonical_universe_key(raw: str, research_lane: str) -> str:
     """Normalize the one known intraday cohort/version identity mix-up.
 
-    ``intraday-screening-cohort-v3`` names the deterministic screening contract,
+    ``intraday-screening-cohort-v4`` names the deterministic screening contract,
     not an execution universe.  Preserve every other value so the downstream
     controlled-vocabulary gate can continue to reject unknown universes rather
     than silently changing the experiment.
@@ -286,8 +482,34 @@ def build(planner: dict, skeptic: dict, *, case_id: str,
     except ValueError:
         min_days = 0
 
+    data_requirements = DataRequirement(tables=list(tables),
+                                        min_history_days=min_days)
+    suggested_params = _maybe_json(planner.get("SUGGESTED_PARAMS", ""))
+    semantic_plan = _maybe_json(planner.get("SEMANTIC_PLAN", ""))
+    trial_budget = _trial_budget(planner.get("TRIAL_BUDGET", ""))
+    label = (planner.get("LABEL") or "forward_return").strip()
+    baseline = (planner.get("BASELINE") or "equal_weight_buy_and_hold").strip()
+    falsification_tests = _split(planner.get("FALSIFICATION_TESTS", ""))
+    prior_check = _prior_check(
+        past_outcomes, planner.get("LESSONS_ADDRESSED", ""))
+    material = {
+        "label": label,
+        "baseline": baseline,
+        "falsification_tests": list(falsification_tests),
+        "research_lane": research_lane,
+        "data_requirements": data_requirements.model_dump(mode="json"),
+        "suggested_params": suggested_params,
+        "semantic_plan": semantic_plan,
+        "trial_budget": trial_budget,
+        # Only the planner-authored repair belongs in identity.  Ledger-derived
+        # family/trial history changes over time and would make an unchanged
+        # proposal churn ids on every harvest.
+        "lessons_addressed": dict(prior_check.lessons_addressed),
+    }
+
     return ExperimentProposalV1(
-        proposal_id=proposal_id_for(lead_ids, edge, universe),
+        proposal_id=proposal_id_for(
+            lead_ids, edge, universe, material=material),
         case_id=case_id,
         as_known_at=as_known_at or datetime.now(timezone.utc),
         lead_ids=lead_ids,
@@ -298,22 +520,20 @@ def build(planner: dict, skeptic: dict, *, case_id: str,
         skeptic_sign=skeptic_run.strip(),
         edge_type=edge,
         universe_key=universe,
-        label=(planner.get("LABEL") or "forward_return").strip(),
-        baseline=(planner.get("BASELINE") or "equal_weight_buy_and_hold").strip(),
-        falsification_tests=_split(planner.get("FALSIFICATION_TESTS", "")),
-        data_requirements=DataRequirement(tables=list(tables),
-                                          min_history_days=min_days),
-        suggested_params=_maybe_json(planner.get("SUGGESTED_PARAMS", "")),
+        label=label,
+        baseline=baseline,
+        falsification_tests=falsification_tests,
+        data_requirements=data_requirements,
+        suggested_params=suggested_params,
         research_lane=research_lane,
-        semantic_plan=_maybe_json(planner.get("SEMANTIC_PLAN", "")),
-        trial_budget=_trial_budget(planner.get("TRIAL_BUDGET", "")),
+        semantic_plan=semantic_plan,
+        trial_budget=trial_budget,
         # ▶ **이력은 원장에서, 대응은 에이전트에게서** (2026-08-12)
         #   몇 번 돌았는지·무엇으로 기각됐는지는 사실이라 우리가 채운다.
         #   그것에 어떻게 대응할지는 판단이라 에이전트가 쓴다. 예전엔 둘 다
         #   비워 두어 Gate 0 의 "교훈에 대응이 없다" 검사가 **발동할 수도,
         #   통과할 수도 없는** 상태였다.
-        prior_check=_prior_check(past_outcomes,
-                                 planner.get("LESSONS_ADDRESSED", "")),
+        prior_check=prior_check,
         source_reported_effect=_maybe_json(
             planner.get("SOURCE_REPORTED_EFFECT", "")),
     )
@@ -334,16 +554,90 @@ def _attach_intraday_screening_cohort(
         return proposal
 
     import intraday_ast_contract as intraday_grammar  # noqa: PLC0415
-    from intraday_ast_contract import fingerprint, parse, unit_of  # noqa: PLC0415
-    from contracts.intraday_ablation import (  # noqa: PLC0415
+    from intraday_ast_contract import (  # noqa: PLC0415
+        COMPLETED_SECOND_SCREENING_COHORT_VERSION,
+        EXPLICIT_FEATURE_WINDOW_CONTRACT,
+        LEGACY_FEATURE_WINDOW_CONTRACT,
+        field_window_bindings_of,
+        fingerprint,
+        parse,
+        unit_of,
+        validate_completed_second_candidate,
+        validate_feature_window_contract,
+    )
+    from intraday_ablation import (  # noqa: PLC0415
         generate as generate_ablations,
     )
     from formula_discovery import assess as assess_formula  # noqa: PLC0415
+    from alpha_semantics import validate as validate_plan  # noqa: PLC0415
 
+    if (INTRADAY_SCREENING_COHORT_VERSION
+            != COMPLETED_SECOND_SCREENING_COHORT_VERSION):
+        raise RuntimeError(
+            "research intake and completed-second capability contracts disagree: "
+            f"{INTRADAY_SCREENING_COHORT_VERSION!r} != "
+            f"{COMPLETED_SECOND_SCREENING_COHORT_VERSION!r}")
+    if (CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT !=
+            EXPLICIT_FEATURE_WINDOW_CONTRACT):
+        raise RuntimeError(
+            "proposal intake current feature-window contract drifted from "
+            "the deployed evaluator")
     params = dict(proposal.suggested_params or {})
-    primary = parse(params.get("intraday_signal_expr"))
+    proposal_plan = validate_plan(dict(proposal.semantic_plan or {}))
+    proposal_execution = str(
+        params.get("execution") or proposal_plan["execution"]
+    ).strip().upper()
+    if proposal_execution != proposal_plan["execution"]:
+        raise ValueError(
+            "INTRADAY_EVENT proposal execution does not match its exact "
+            "semantic_plan contract")
+    try:
+        proposal_horizon = int(
+            params.get("horizon_seconds", proposal_plan["horizon_seconds"]))
+    except (TypeError, ValueError):
+        raise ValueError(
+            "INTRADAY_EVENT proposal horizon_seconds must be an integer") \
+            from None
+    if proposal_horizon != proposal_plan["horizon_seconds"]:
+        raise ValueError(
+            "INTRADAY_EVENT proposal horizon_seconds does not match its exact "
+            "semantic_plan contract")
+    params["execution"] = proposal_execution
+    params["horizon_seconds"] = proposal_horizon
+    configured_entry = str(params.get("entry_policy") or "").strip().upper()
+    configured_coefficient = str(
+        params.get("coefficient_policy") or "").strip().upper()
+    def feature_window_contract_for(expression: dict,
+                                    declared: object = None) -> str:
+        version = str(declared or "").strip()
+        if not version:
+            version = (
+                EXPLICIT_FEATURE_WINDOW_CONTRACT
+                if any(seconds is not None for _field, seconds in
+                       field_window_bindings_of(expression))
+                else LEGACY_FEATURE_WINDOW_CONTRACT)
+        validate_feature_window_contract(
+            expression, contract_version=version)
+        return version
+
+    primary_window_contract = feature_window_contract_for(
+        params.get("intraday_signal_expr"),
+        params.get("feature_window_contract_version"))
+    if primary_window_contract != EXPLICIT_FEATURE_WINDOW_CONTRACT:
+        raise ValueError(
+            "current INTRADAY_EVENT proposals require "
+            f"feature_window_contract_version="
+            f"{EXPLICIT_FEATURE_WINDOW_CONTRACT!r}; legacy formulas must first "
+            "be migrated into a new V2 child")
+    primary = validate_feature_window_contract(
+        params.get("intraday_signal_expr"),
+        contract_version=primary_window_contract)
+    primary = validate_completed_second_candidate(
+        primary, execution=proposal_execution)
+    params["feature_window_contract_version"] = primary_window_contract
     primary_fp = fingerprint(primary)
-    candidates: dict[str, dict] = {}
+    contract_groups: dict[
+        tuple[str, str, str, str, str, str], list[dict]] = {}
     rejected_primary: list[str] = []
 
     # The planner chooses the preregistered primary, but it is not a reliable
@@ -354,59 +648,157 @@ def _attach_intraday_screening_cohort(
     # 2--8 ids correctly.  Only the exact primary remains in ``lead_ids``;
     # every other formula is SCREENING_ONLY and remains unused for a later
     # independent confirmation.
-    lead_order = list(proposal.lead_ids)
-    lead_order.extend(sorted(set(leads) - set(lead_order)))
-    for lead_id in lead_order:
+    linked_lead_ids = frozenset(str(value) for value in proposal.lead_ids)
+    for lead_id in sorted(str(value) for value in leads):
         lead = leads.get(str(lead_id))
         if lead is None:
             continue
         contract = dict(lead.ast_contract or {})
         if (contract.get("formula_discovery_version") != "formula-discovery-v5"
+                or contract.get("primary_data_plane") != "MICROSTRUCTURE"
+                or contract.get("feature_window_contract_version") !=
+                EXPLICIT_FEATURE_WINDOW_CONTRACT
                 or not contract.get("formula_contract_complete")
                 or contract.get("alpha_candidate_eligible") is not True
                 or contract.get("research_lane") != "INTRADAY_EVENT"):
             continue
         try:
             expr = parse(contract.get("candidate_signal_expr"))
+            candidate_window_contract = feature_window_contract_for(
+                expr, contract.get("feature_window_contract_version"))
         except (TypeError, ValueError):
             continue
         fp = fingerprint(expr)
         thesis = dict(contract.get("formula_thesis") or {})
+        semantic_plan = dict(contract.get("semantic_plan") or {})
         try:
+            semantic_plan = validate_plan(semantic_plan)
+            validate_completed_second_candidate(
+                expr, execution=semantic_plan.get("execution"))
             assess_formula(
                 thesis, candidate=expr,
-                semantic_plan=dict(contract.get("semantic_plan") or {}),
+                semantic_plan=semantic_plan,
                 grammar=intraday_grammar,
             )
         except (TypeError, ValueError) as exc:
             if fp == primary_fp:
                 rejected_primary.append(f"{lead_id}: {exc}")
             continue
-        row = candidates.setdefault(fp, {
+        entry_policy = str(thesis.get("decision_rule") or "").strip().upper()
+        coefficient_policy = str(
+            thesis.get("coefficient_policy") or "").strip().upper()
+        raw_baseline = contract.get("source_baseline_expr")
+        source_baseline = None
+        source_baseline_fp = ""
+        if raw_baseline not in (None, ""):
+            try:
+                source_baseline = parse(raw_baseline)
+                source_baseline_fp = hashlib.sha256(json.dumps(
+                    source_baseline, ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")).hexdigest()
+            except (TypeError, ValueError):
+                # The baseline participates in durable candidate identity.  A
+                # malformed value must not be silently discarded and merged
+                # with an otherwise identical executable lead.
+                continue
+        contract_key = (
+            fp,
+            _exact_semantic_plan_fingerprint(semantic_plan),
+            entry_policy,
+            coefficient_policy,
+            source_baseline_fp,
+            candidate_window_contract,
+        )
+        contract_groups.setdefault(contract_key, []).append({
             "candidate_role": "LINKED_CANDIDATE",
-            "source_lead_ids": [],
+            "source_lead_ids": [str(lead_id)],
             "title": str(lead.claimed_edge),
             "ast_fingerprint": fp,
             "intraday_signal_expr": expr,
-            "semantic_plan": dict(contract.get("semantic_plan") or {}),
-            "entry_policy": str(thesis.get("decision_rule") or ""),
-            "coefficient_policy": str(thesis.get("coefficient_policy") or ""),
+            "semantic_plan": semantic_plan,
+            "entry_policy": entry_policy,
+            "coefficient_policy": coefficient_policy,
+            "source_baseline_expr": source_baseline,
+            "feature_window_contract_version": candidate_window_contract,
             "evolution_role": str(contract.get("evolution_role") or "SEED"),
+            "evolution_operators": list(
+                contract.get("evolution_operators") or ()),
             "parent_ast_fingerprint": str(
                 contract.get("parent_ast_fingerprint") or ""),
+            "parent_candidate_identity_fingerprint": str(
+                contract.get("parent_candidate_identity_fingerprint") or ""),
             "screening_cohort_version": INTRADAY_SCREENING_COHORT_VERSION,
             "_parent_signal_expr": contract.get("parent_signal_expr"),
+            "_parent_feature_window_contract_version": contract.get(
+                "parent_feature_window_contract_version"),
         })
-        row["source_lead_ids"].append(str(lead_id))
 
-    if primary_fp not in candidates:
+    # One AST16 can occupy only one cohort slot.  First merge provenance only
+    # inside the *exact* executable contract (full semantic plan, entry rule,
+    # and coefficient policy), then select one contract per AST deterministically.
+    # Conflicting contracts remain unused so they can receive independent
+    # experiments instead of being falsely cited by this proposal.
+    grouped_rows: list[
+        tuple[tuple[str, str, str, str, str, str], dict]] = []
+    for contract_key, rows in contract_groups.items():
+        canonical = min(
+            rows,
+            key=lambda row: (
+                str(row.get("title") or ""),
+                str(row.get("evolution_role") or ""),
+                json.dumps(row.get("_parent_signal_expr"), sort_keys=True,
+                           separators=(",", ":"), default=str),
+                str(row.get(
+                    "_parent_feature_window_contract_version") or ""),
+                row["source_lead_ids"][0],
+            ),
+        ).copy()
+        canonical["source_lead_ids"] = sorted({
+            source_id
+            for row in rows
+            for source_id in row["source_lead_ids"]
+        })
+        grouped_rows.append((contract_key, canonical))
+
+    primary_contracts = [
+        (key, row) for key, row in grouped_rows
+        if key[0] == primary_fp
+        and key[1] == _exact_semantic_plan_fingerprint(proposal_plan)
+        and (not configured_entry or key[2] == configured_entry)
+        and (not configured_coefficient or key[3] == configured_coefficient)
+        and key[5] == primary_window_contract
+        and linked_lead_ids.intersection(row["source_lead_ids"])
+    ]
+    if not primary_contracts:
         if rejected_primary:
             raise ValueError(
                 "INTRADAY_EVENT primary formula no longer passes the current "
                 "formula influence audit: " + " | ".join(rejected_primary))
         raise ValueError(
             "INTRADAY_EVENT primary formula must exactly match one linked "
-            "formula-discovery-v5 lead")
+            "formula-discovery-v5 candidate contract (AST, semantic plan, "
+            "horizon, execution, entry, and coefficient policy)")
+    _, primary_row = min(
+        primary_contracts,
+        key=lambda item: (item[0], _intraday_novelty_key(item[1])))
+
+    candidates: dict[str, dict] = {primary_fp: primary_row}
+    by_ast: dict[
+        str, list[tuple[tuple[str, str, str, str, str, str], dict]]] = {}
+    for key, row in grouped_rows:
+        if key[0] != primary_fp and key[5] == primary_window_contract:
+            by_ast.setdefault(key[0], []).append((key, row))
+    for fp, choices in by_ast.items():
+        _, candidates[fp] = min(
+            choices,
+            key=lambda item: (
+                0 if linked_lead_ids.intersection(
+                    item[1]["source_lead_ids"]) else 1,
+                item[0],
+                _intraday_novelty_key(item[1]),
+            ),
+        )
 
     primary_lead_ids = tuple(candidates[primary_fp]["source_lead_ids"])
     linked_sidecars = [row for fp, row in candidates.items() if fp != primary_fp]
@@ -417,15 +809,31 @@ def _attach_intraday_screening_cohort(
     lineage_parents = []
     for child in list(candidates.values()):
         parent_raw = child.pop("_parent_signal_expr", None)
+        declared_parent_window_contract = child.pop(
+            "_parent_feature_window_contract_version", None)
         if parent_raw in (None, ""):
             continue
         try:
             parent = parse(parent_raw)
+            parent_window_contract = feature_window_contract_for(
+                parent, declared_parent_window_contract)
+            child["parent_feature_window_contract_version"] = \
+                parent_window_contract
+            validate_completed_second_candidate(
+                parent,
+                execution=dict(child["semantic_plan"]).get("execution"),
+            )
             parent_fp = fingerprint(parent)
             child_structure_only = child["coefficient_policy"] == "STRUCTURE_ONLY"
             if ((not child_structure_only and unit_of(parent) != "BPS")
                     or (child_structure_only and unit_of(parent) == "BOOL")
                     or parent_fp in known_fps):
+                continue
+            if parent_window_contract != child[
+                    "feature_window_contract_version"]:
+                # A legacy formula upgraded to explicit primitive windows is
+                # preserved as lineage provenance, but cannot share one frozen
+                # evaluator contract with its V2 child.
                 continue
         except (TypeError, ValueError):
             continue
@@ -439,6 +847,8 @@ def _attach_intraday_screening_cohort(
             "semantic_plan": dict(child["semantic_plan"]),
             "entry_policy": child["entry_policy"],
             "coefficient_policy": child["coefficient_policy"],
+            "source_baseline_expr": child.get("source_baseline_expr"),
+            "feature_window_contract_version": parent_window_contract,
             "evolution_role": "PARENT_ABLATION",
             "parent_of_ast_fingerprint": child["ast_fingerprint"],
             "screening_cohort_version": INTRADAY_SCREENING_COHORT_VERSION,
@@ -458,29 +868,126 @@ def _attach_intraday_screening_cohort(
             "semantic_plan": dict(primary_source["semantic_plan"]),
             "entry_policy": primary_source["entry_policy"],
             "coefficient_policy": primary_source["coefficient_policy"],
+            "source_baseline_expr": primary_source.get(
+                "source_baseline_expr"),
+            "feature_window_contract_version": primary_window_contract,
             "evolution_role": "EMPIRICAL_TERM_INFLUENCE",
             "screening_cohort_version": INTRADAY_SCREENING_COHORT_VERSION,
         })
 
-    # Preserve broad exploration while reserving at most two of the seven
-    # sidecar slots for same-replay mechanism controls.  Any unused control
-    # capacity is returned to independent candidates and explicit parents.
-    sidecars = linked_sidecars[:4] + controls
-    for row in linked_sidecars[4:] + lineage_parents:
-        if len(sidecars) >= MAX_INTRADAY_COHORT - 1:
+    # Preserve broad exploration while keeping explicit evolutionary ancestry
+    # executable. A selected child is never emitted without its declared parent
+    # row; most importantly, an evolved primary reserves its parent before
+    # novelty or ablation slots are filled.
+    linked_ranked = _select_novel_intraday_sidecars(
+        primary_source, linked_sidecars, limit=len(linked_sidecars),
+        grammar=intraday_grammar)
+    preferred = (linked_ranked[:4] + controls + linked_ranked[4:] +
+                 sorted(lineage_parents, key=_intraday_novelty_key))
+    pool = {str(row["ast_fingerprint"]): row for row in preferred}
+    sidecars: list[dict] = []
+    selected_fps = {primary_fp}
+    capacity = MAX_INTRADAY_COHORT - 1
+
+    def dependency_chain(row: dict, trail: frozenset[str]) \
+            -> list[dict] | None:
+        row_fp = str(row["ast_fingerprint"])
+        if row_fp in selected_fps:
+            return []
+        if row_fp in trail:
+            return None
+        parent_fp = str(row.get("parent_ast_fingerprint") or "")
+        chain: list[dict] = []
+        if parent_fp and parent_fp not in selected_fps:
+            parent_row = pool.get(parent_fp)
+            if parent_row is None:
+                return None
+            inherited = dependency_chain(
+                parent_row, trail | frozenset({row_fp}))
+            if inherited is None:
+                return None
+            chain.extend(inherited)
+        if row_fp not in {str(item["ast_fingerprint"]) for item in chain}:
+            chain.append(row)
+        return chain
+
+    def select_with_parents(row: dict, *, required: bool = False) -> bool:
+        chain = dependency_chain(row, frozenset())
+        if chain is None or len(sidecars) + len(chain) > capacity:
+            if required:
+                raise ValueError(
+                    "evolved primary requires an explicit parent contract "
+                    "inside the frozen screening cohort")
+            return False
+        for item in chain:
+            item_fp = str(item["ast_fingerprint"])
+            if item_fp not in selected_fps:
+                sidecars.append(item)
+                selected_fps.add(item_fp)
+        return True
+
+    primary_parent_fp = str(
+        primary_source.get("parent_ast_fingerprint") or "")
+    cross_contract_migration = False
+    if primary_parent_fp:
+        primary_parent = pool.get(primary_parent_fp)
+        if primary_parent is None:
+            cross_contract_migration = (
+                primary_source.get(
+                    "parent_feature_window_contract_version") not in
+                (None, "", primary_window_contract)
+                and "PRIMITIVE_WINDOW_MIGRATION" in {
+                    str(value).upper() for value in
+                    primary_source.get("evolution_operators") or ()})
+            if not cross_contract_migration:
+                raise ValueError(
+                    "evolved primary declares a parent formula that is absent "
+                    "from its exact source-backed cohort")
+        else:
+            select_with_parents(primary_parent, required=True)
+    for row in preferred:
+        if len(sidecars) >= capacity:
             break
-        if row["ast_fingerprint"] not in {
-                item["ast_fingerprint"] for item in sidecars}:
-            sidecars.append(row)
+        select_with_parents(row)
     for row in sidecars:
         row.pop("_parent_signal_expr", None)
     params["screening_population"] = sidecars[:MAX_INTRADAY_COHORT - 1]
     params["screening_cohort_version"] = INTRADAY_SCREENING_COHORT_VERSION
+    params["feature_window_contract_version"] = primary_window_contract
     params["entry_policy"] = primary_source["entry_policy"]
     params["coefficient_policy"] = primary_source["coefficient_policy"]
+    params["source_baseline_expr"] = primary_source.get(
+        "source_baseline_expr")
+    params["parent_candidate_identity_fingerprint"] = primary_source.get(
+        "parent_candidate_identity_fingerprint") or None
+    if cross_contract_migration:
+        params["migration_parent_ast_fingerprint"] = primary_parent_fp
+        params["migration_parent_feature_window_contract_version"] = str(
+            primary_source.get("parent_feature_window_contract_version") or
+            LEGACY_FEATURE_WINDOW_CONTRACT)
+    # A V1 parent cannot be replayed inside a frozen V2 feature cube.  Its exact
+    # AST remains durable research provenance on the evolved methodology lead
+    # (and normally as source_baseline_expr), but it must not masquerade as an
+    # in-cohort runtime lineage edge: the runner correctly requires every such
+    # parent to share the primary evaluator contract and be present in the
+    # frozen screening population.
+    params["parent_ast_fingerprint"] = (
+        None if cross_contract_migration else primary_parent_fp or None)
+    material = {
+        "label": proposal.label,
+        "baseline": proposal.baseline,
+        "falsification_tests": list(proposal.falsification_tests),
+        "research_lane": proposal.research_lane.value,
+        "data_requirements": proposal.data_requirements.model_dump(mode="json"),
+        "suggested_params": params,
+        "semantic_plan": proposal.semantic_plan,
+        "trial_budget": proposal.trial_budget,
+        "lessons_addressed": dict(proposal.prior_check.lessons_addressed),
+    }
     return proposal.model_copy(update={
         "proposal_id": proposal_id_for(
-            primary_lead_ids, proposal.edge_type, proposal.universe_key),
+            primary_lead_ids, proposal.edge_type, proposal.universe_key,
+            material=material),
         "lead_ids": primary_lead_ids,
         "suggested_params": params,
     })
@@ -610,6 +1117,10 @@ def load_leads(conn, lead_ids, *, _expand_current: bool = True) -> dict:
         == "formula-discovery-v5"
         and (lead.ast_contract or {}).get("research_lane")
         == "INTRADAY_EVENT"
+        and (lead.ast_contract or {}).get("primary_data_plane")
+        == "MICROSTRUCTURE"
+        and (lead.ast_contract or {}).get("feature_window_contract_version")
+        == CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT
         for lead in out.values()
     )
     if _expand_current and wants_current_intraday:
@@ -621,6 +1132,8 @@ def load_leads(conn, lead_ids, *, _expand_current: bool = True) -> dict:
                and l.ast_contract->>'formula_discovery_version' =
                    'formula-discovery-v5'
                and l.ast_contract->>'research_lane' = 'INTRADAY_EVENT'
+               and l.ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
+               and l.ast_contract->>'feature_window_contract_version' = %s
                and l.ast_contract->>'ast_readiness' = 'AST_READY'
                and coalesce(
                      (l.ast_contract->>'formula_contract_complete')::boolean,
@@ -631,14 +1144,16 @@ def load_leads(conn, lead_ids, *, _expand_current: bool = True) -> dict:
                and not (l.lead_id = any(%s))
                and not exists (
                      select 1 from research.experiment_proposals p
-                      where l.lead_id = any(p.lead_ids))
+                      where l.lead_id = any(p.lead_ids)
+                        and p.status in ('PUBLISHED','ACCEPTED'))
                and not exists (
                      select 1 from research.proposal_review_outcomes r
                       where r.verdict = 'STOP'
                         and l.lead_id = any(r.lead_ids))
              order by l.created_at desc, l.lead_id
              limit %s
-        """, (list(out), MAX_INTRADAY_COHORT - 1))
+        """, (CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT,
+              list(out), MAX_INTRADAY_COHORT - 1))
         extra_ids = [row[0] for row in cur.fetchall()]
         if extra_ids:
             # Reuse the canonical row validator without recursively expanding
@@ -763,32 +1278,75 @@ def load_past_outcomes(conn, edge_type: str, universe_key: str,
                and {lane_predicate}
         """, (edge, uni))
         hyp_ids = [r[0] for r in cur.fetchall()]
-        experiment_ids: list[str] = []
+        exact_primary: dict[str, str] = {}
         if signal_expr is not None:
             # jsonb equality ignores object key order.  Invalid expressions are left
             # to the canonical AST gate; history lookup must not silently repair one.
             ast_key = ("intraday_signal_expr" if lane == "INTRADAY_EVENT"
                        else "signal_expr")
             cur.execute(f"""
-                select experiment_id::text from quant.experiments
-                 where config->'{ast_key}' = %s::jsonb
+                select e.experiment_id::text, e.trial_family_id
+                  from quant.experiments e
+                 where e.config->'{ast_key}' = %s::jsonb
+                   and (
+                       e.status in ('QUEUED', 'RUNNING', 'COMPLETED')
+                       or exists (
+                            select 1 from quant.backtest_runs run
+                             where run.experiment_id = e.experiment_id)
+                       or exists (
+                            select 1 from quant.experiment_metrics metric
+                             where metric.experiment_id = e.experiment_id)
+                       or exists (
+                            select 1 from research.experiment_outcomes outcome
+                             where outcome.experiment_id = e.experiment_id::text)
+                       or exists (
+                            select 1
+                              from quant.intraday_experiment_rungs rung
+                              join quant.intraday_session_accesses access
+                                on access.experiment_rung_id =
+                                   rung.experiment_rung_id
+                             where rung.experiment_id = e.experiment_id)
+                   )
             """, (json.dumps(signal_expr, sort_keys=True),))
-            experiment_ids = [r[0] for r in cur.fetchall()]
+            exact_primary = {str(r[0]): str(r[1] or "")
+                             for r in cur.fetchall()}
+        experiment_ids = list(exact_primary)
         if not hyp_ids and not experiment_ids:
             return []
-        cur.execute("""
-            select decision, lesson_codes, trial_family_id, experiment_id
-              from research.experiment_outcomes
-             where hypothesis_id = any(%s::text[])
-                or experiment_id = any(%s::text[])
-             order by decided_at desc
+        cur.execute(f"""
+            select o.decision, o.lesson_codes, o.trial_family_id,
+                   o.experiment_id
+              from research.v_current_experiment_outcomes o
+              join quant.experiments e
+                on e.experiment_id::text = o.experiment_id
+              join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+              join quant.dataset_manifests m on m.dataset_id = e.dataset_id
+             where (o.hypothesis_id = any(%s::text[])
+                or o.experiment_id = any(%s::text[]))
+               and {_GOVERNED_PAST_OUTCOME}
+             order by o.decided_at desc
         """, (hyp_ids, experiment_ids))
         exact = set(experiment_ids)
-        return [{"decision": r[0], "lesson_codes": list(r[1] or []),
-                 "trial_family_id": r[2],
-                 "match_scope": ("AST_EXACT" if r[3] in exact
+        rows = [{"decision": r[0], "lesson_codes": list(r[1] or []),
+                 "trial_family_id": r[2], "experiment_id": str(r[3]),
+                 "match_scope": ("AST_EXACT_PRIMARY" if str(r[3]) in exact
                                  else "EDGE_UNIVERSE")}
                 for r in cur.fetchall()]
+        settled = {r["experiment_id"] for r in rows if
+                   r["match_scope"] == "AST_EXACT_PRIMARY"}
+        # PRIMARY attempts remain in resource pressure even when their result
+        # is pending or ineligible for promotion evidence.  They carry no
+        # performance lesson or breeding authority.
+        rows.extend({
+            "decision": "PRIMARY_ATTEMPT",
+            "lesson_codes": [],
+            "trial_family_id": exact_primary[experiment_id],
+            "experiment_id": experiment_id,
+            "match_scope": "AST_EXACT_PRIMARY",
+            "promotion_authority": False,
+            "statistical_pressure_only": True,
+        } for experiment_id in experiment_ids if experiment_id not in settled)
+        return rows
 
 
 _SQL_INSERT = """
@@ -930,6 +1488,67 @@ def _selfcheck() -> int:
     check("기획안 id 결정론",
           proposal_id_for(["a", "b"], "MOMENTUM", "krx_all")
           == proposal_id_for(["b", "a"], "momentum", "krx_all"))
+    rejected_material = {
+        "suggested_params": {"max_drawdown_stop": 0.35, "top_n": 20},
+        "trial_budget": 5,
+    }
+    repaired_material = {
+        "suggested_params": {"max_drawdown_stop": -0.35, "top_n": 20},
+        "trial_budget": 5,
+    }
+    check("교정 사전등록은 새 id",
+          proposal_id_for(["a"], "momentum", "krx_all",
+                          material=rejected_material)
+          != proposal_id_for(["a"], "momentum", "krx_all",
+                             material=repaired_material))
+    lesson_material = {
+        **repaired_material,
+        "lessons_addressed": {"OVERFIT_PBO": "새 상태 조건을 사전등록한다"},
+    }
+    check("교훈 대응 교정은 새 id",
+          proposal_id_for(["a"], "momentum", "krx_all",
+                          material=repaired_material)
+          != proposal_id_for(["a"], "momentum", "krx_all",
+                             material=lesson_material))
+    sidecar_a = {**repaired_material,
+                 "suggested_params": {
+                     **repaired_material["suggested_params"],
+                     "screening_population": [{"ast_fingerprint": "a"}],
+                     "screening_cohort_version": "cohort-a"}}
+    same_contract_sidecar = {**repaired_material,
+                 "suggested_params": {
+                     **repaired_material["suggested_params"],
+                     "screening_population": [{"ast_fingerprint": "b"}],
+                     "screening_cohort_version": "cohort-a"}}
+    check("sidecar 변화는 id 불변",
+          proposal_id_for(["a"], "momentum", "krx_all", material=sidecar_a)
+          == proposal_id_for(["a"], "momentum", "krx_all",
+                             material=same_contract_sidecar))
+    upgraded_contract = {**same_contract_sidecar,
+                         "suggested_params": {
+                             **same_contract_sidecar["suggested_params"],
+                             "screening_cohort_version": "cohort-b"}}
+    check("execution cohort version changes proposal id",
+          proposal_id_for(["a"], "momentum", "krx_all", material=sidecar_a)
+          != proposal_id_for(["a"], "momentum", "krx_all",
+                             material=upgraded_contract))
+    unordered_a = {
+        **repaired_material,
+        "falsification_tests": ["cost", "regime"],
+        "data_requirements": {"tables": ["market_ticks", "market_quotes"]},
+        "semantic_plan": {"context": ["OPEN", "TIGHT_SPREAD"],
+                          "qualities": ["PERSISTENCE", "STATE_CONDITIONAL"]},
+    }
+    unordered_b = {
+        **repaired_material,
+        "falsification_tests": ["regime", "cost"],
+        "data_requirements": {"tables": ["market_quotes", "market_ticks"]},
+        "semantic_plan": {"context": ["TIGHT_SPREAD", "OPEN"],
+                          "qualities": ["STATE_CONDITIONAL", "PERSISTENCE"]},
+    }
+    check("집합 순서는 id 불변",
+          proposal_id_for(["a"], "momentum", "krx_all", material=unordered_a)
+          == proposal_id_for(["a"], "momentum", "krx_all", material=unordered_b))
     check("intraday cohort version is not a universe",
           _canonical_universe_key(INTRADAY_SCREENING_COHORT_VERSION,
                                   "INTRADAY_EVENT") == "krx_all"
@@ -1003,7 +1622,7 @@ def _selfcheck() -> int:
     for f in fails:
         if f:
             print(f"  FAIL {f}")
-    total = 22
+    total = 26
     print(f"proposal_intake 자체 점검: {total - len([x for x in fails if x])}/{total} 통과")
     return 1 if [x for x in fails if x] else 0
 
@@ -1105,7 +1724,7 @@ def _check_stored_long_excerpt_does_not_kill_harvest():
     터져 **그 배치 전체**가 버려졌다 - 같은 카드가 매 주기 같은 자리에서 죽었다.
     적재 쪽을 고쳐도 이미 들어간 행은 남으므로 읽는 경계에서도 맞춘다.
     """
-    from contracts.factory_contracts import (  # noqa: PLC0415
+    from factory_contracts import (  # noqa: PLC0415
         MAX_EXCERPT_CHARS, lead_id_for)
 
     ref = {"url": "https://example.org/p", "title": "t",
@@ -1256,8 +1875,18 @@ def _check_lane_isolated_history_lookup():
 
 def _check_intraday_screening_cohort_is_sourced_and_non_promoting():
     """Linked current-contract formulas become exact, non-consumed sidecars."""
-    from contracts.factory_contracts import SourceRef, lead_id_for
+    import inspect
+
+    from factory_contracts import SourceRef, lead_id_for
     from publish_gate import check_intraday_screening_population
+
+    assert "p.status in ('PUBLISHED','ACCEPTED')" in inspect.getsource(load_leads), \
+        "REJECTED primary lead를 sidecar pool에서도 영구 소비하면 교정 재제안이 막힌다"
+    assert ("proposal_review_outcomes" in inspect.getsource(load_leads)
+            and "r.verdict = 'STOP'" in inspect.getsource(load_leads)), \
+        "독립 스켑틱 STOP primary를 sidecar 후보로 다시 쓰면 안 된다"
+    assert "feature_window_contract_version" in inspect.getsource(load_leads), \
+        "legacy formula를 current V2 screening pool에 자동 부착한다"
 
     now = datetime(2026, 8, 16, tzinfo=timezone.utc)
     plan = {
@@ -1281,9 +1910,12 @@ def _check_intraday_screening_cohort_is_sourced_and_non_promoting():
             refs=(ref,), claimed_edge=label, stated_mechanism="mechanism",
             ast_contract={
                 "formula_discovery_version": "formula-discovery-v5",
+                "feature_window_contract_version":
+                    CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT,
                 "formula_contract_complete": True,
                 "alpha_candidate_eligible": True,
                 "research_lane": "INTRADAY_EVENT",
+                "primary_data_plane": "MICROSTRUCTURE",
                 "candidate_signal_expr": expr, "semantic_plan": plan,
                 "formula_thesis": {
                     "target": "TAKER_NET_PNL",
@@ -1318,7 +1950,9 @@ def _check_intraday_screening_cohort_is_sourced_and_non_promoting():
         suggested_params={
             "intraday_signal_expr": primary_expr, "horizon_seconds": 5,
             "execution": "TAKER",
-            "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST"},
+            "entry_policy": "PREDICTED_MARKOUT_CLEARS_COST",
+            "feature_window_contract_version":
+                CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT},
         research_lane="INTRADAY_EVENT", semantic_plan=plan)
     attached = _attach_intraday_screening_cohort(proposal, leads)
     assert attached.lead_ids == (primary_lead.lead_id,)

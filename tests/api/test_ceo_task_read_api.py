@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import os
 import unittest
 from typing import Any
 from unittest.mock import patch
@@ -19,6 +20,7 @@ from apps.api.ceo_kanban_read import (
     QA_BLOCKED_VERDICT,
     KanbanTaskNotFound,
     KanbanUnavailable,
+    kanban_column_for_status,
     load_workflow,
 )
 from orchestration.adapters.ceo_supervisor import SUPERVISOR_MARKER
@@ -590,6 +592,82 @@ class CeoTaskApiTest(unittest.TestCase):
     def setUp(self) -> None:
         self.client = _client()
 
+    def _owned_workflow(self, owner_id: str):
+        board = _board()
+        board[ROOT_ID]["body"] = build_root_body(
+            "엔비디아 최신 사업 리스크만 분석해줘.",
+            "req-owned",
+            requested_by=owner_id,
+        )
+        return load_workflow(ROOT_ID, fetch=_fetch_from(board))
+
+    def test_list_query_owner_cannot_override_authenticated_subject(self) -> None:
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "APP_ENV": "test",
+                    "PORTFOLIO_AUTH_MODE": "fixture",
+                    "PORTFOLIO_AUTH_REQUIRED": "false",
+                },
+                clear=False,
+            ),
+            patch.object(ceo, "list_ceo_roots") as list_roots,
+        ):
+            response = self.client.get(
+                "/ui/ceo/tasks?owner_id=user-a",
+                headers={"X-User-Id": "user-b"},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["detail"], "ceo_task_owner_mismatch")
+        list_roots.assert_not_called()
+
+    def test_task_detail_rejects_another_authenticated_owner(self) -> None:
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "APP_ENV": "test",
+                    "PORTFOLIO_AUTH_MODE": "fixture",
+                    "PORTFOLIO_AUTH_REQUIRED": "false",
+                },
+                clear=False,
+            ),
+            patch.object(
+                ceo, "load_workflow", return_value=self._owned_workflow("user-a")
+            ),
+        ):
+            response = self.client.get(
+                f"/ui/ceo/tasks/{ROOT_ID}",
+                headers={"X-User-Id": "user-b"},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["detail"], "ceo_task_forbidden")
+
+    def test_task_detail_allows_its_authenticated_owner(self) -> None:
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "APP_ENV": "test",
+                    "PORTFOLIO_AUTH_MODE": "fixture",
+                    "PORTFOLIO_AUTH_REQUIRED": "false",
+                },
+                clear=False,
+            ),
+            patch.object(
+                ceo, "load_workflow", return_value=self._owned_workflow("user-a")
+            ),
+        ):
+            response = self.client.get(
+                f"/ui/ceo/tasks/{ROOT_ID}",
+                headers={"X-User-Id": "user-a"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+
     def test_status_endpoint_reports_progress(self) -> None:
         with patch.object(ceo, "load_workflow", return_value=load_workflow(ROOT_ID, fetch=_fetch_from(_board()))):
             response = self.client.get(f"/ui/ceo/tasks/{ROOT_ID}")
@@ -834,6 +912,75 @@ class CeoTaskListApiTest(unittest.TestCase):
         self.assertEqual(client.get("/ui/ceo/tasks", params={"limit": 101}).status_code, 422)
 
 
+class HermesKanbanBoardApiTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.auth_environment = patch.dict(
+            os.environ,
+            {
+                "APP_ENV": "test",
+                "PORTFOLIO_AUTH_MODE": "fixture",
+                "PORTFOLIO_AUTH_REQUIRED": "false",
+            },
+            clear=False,
+        )
+        self.auth_environment.start()
+
+    def tearDown(self) -> None:
+        self.auth_environment.stop()
+
+    def test_statuses_are_projected_to_four_read_only_columns(self) -> None:
+        client = _client()
+        rows = [
+            {"id": "t_todo", "title": "대기 작업", "assignee": "research-department", "status": "todo"},
+            {"id": "t_ready", "title": "실행 준비", "assignee": "risk-management", "status": "ready"},
+            {"id": "t_running", "title": "실행 중", "assignee": "trading-department", "status": "running"},
+            {"id": "t_blocked", "title": "차단됨", "assignee": "qa-department", "status": "blocked"},
+            {"id": "t_done", "title": "완료 작업", "assignee": "ceo-agent", "status": "done"},
+        ]
+
+        with patch.object(ceo, "list_tasks", return_value=rows) as list_tasks:
+            response = client.get("/ui/ceo/kanban")
+
+        self.assertEqual(response.status_code, 200)
+        list_tasks.assert_called_once_with(include_archived=False)
+        body = response.json()
+        self.assertEqual(body["schema_version"], "hermes.agent-kanban.v1")
+        self.assertEqual(body["source"], "hermes-kanban")
+        self.assertTrue(body["read_only"])
+        self.assertEqual(
+            set(body["columns"]), {"todo", "ready", "inprogress", "done"}
+        )
+        self.assertEqual([item["task_id"] for item in body["columns"]["todo"]], ["t_todo"])
+        self.assertEqual([item["task_id"] for item in body["columns"]["ready"]], ["t_ready"])
+        self.assertEqual(
+            [item["task_id"] for item in body["columns"]["inprogress"]],
+            ["t_running", "t_blocked"],
+        )
+        self.assertEqual([item["task_id"] for item in body["columns"]["done"]], ["t_done"])
+
+    def test_kanban_route_is_read_only_and_fails_closed(self) -> None:
+        client = _client()
+        self.assertEqual(client.post("/ui/ceo/kanban").status_code, 405)
+
+        with patch.object(
+            ceo, "list_tasks", side_effect=KanbanUnavailable("board offline")
+        ):
+            response = client.get("/ui/ceo/kanban")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("board offline", response.json()["detail"])
+
+
+class HermesKanbanColumnMappingTest(unittest.TestCase):
+    def test_unknown_and_exceptional_statuses_remain_visible_in_progress(self) -> None:
+        self.assertEqual(kanban_column_for_status("triage"), "todo")
+        self.assertEqual(kanban_column_for_status("ready"), "ready")
+        self.assertEqual(kanban_column_for_status("blocked"), "inprogress")
+        self.assertEqual(kanban_column_for_status("failed"), "inprogress")
+        self.assertEqual(kanban_column_for_status("done"), "done")
+        self.assertEqual(kanban_column_for_status("new-hermes-state"), "inprogress")
+
+
 class KanbanCliErrorMappingTest(unittest.TestCase):
     def test_missing_task_message_becomes_not_found(self) -> None:
         completed = type("P", (), {"returncode": 1, "stdout": "no such task: t_x", "stderr": ""})()
@@ -851,6 +998,152 @@ class KanbanCliErrorMappingTest(unittest.TestCase):
         with patch.object(ceo_kanban_read.subprocess, "run", side_effect=FileNotFoundError):
             with self.assertRaises(KanbanUnavailable):
                 ceo_kanban_read.run_kanban(("list", "--json"))
+
+
+class KanbanReadCacheTest(unittest.TestCase):
+    """읽기 CLI TTL 캐시(2026-08-14). CLI 프로세스 수를 줄이되 안전 속성을 지킨다."""
+
+    def setUp(self) -> None:
+        ceo_kanban_read.clear_kanban_cache()
+        self.addCleanup(ceo_kanban_read.clear_kanban_cache)
+
+    @staticmethod
+    def _ok(stdout: str = "[]"):
+        return type("P", (), {"returncode": 0, "stdout": stdout, "stderr": ""})()
+
+    def test_repeated_reads_run_the_cli_once(self) -> None:
+        """`/ui/ceo/tasks`가 root마다 같은 보드를 다시 읽던 중복을 걷어낸다."""
+
+        calls: list[tuple[str, ...]] = []
+
+        def run(command, **_kwargs):
+            calls.append(tuple(command))
+            return self._ok()
+
+        with patch.object(ceo_kanban_read.subprocess, "run", side_effect=run):
+            for _ in range(20):
+                ceo_kanban_read.run_kanban(("list", "--json"))
+            for _ in range(5):
+                ceo_kanban_read.run_kanban(("show", "t_a", "--json"))
+
+        self.assertEqual(len(calls), 2, f"고유 명령 2개만 실행돼야 한다: {calls}")
+
+    def test_failures_are_not_cached(self) -> None:
+        """실패를 캐시하면 일시 장애가 TTL 동안 고정된다(fail-closed가 아니라 fail-stuck)."""
+
+        attempts = []
+
+        def run(command, **_kwargs):
+            attempts.append(command)
+            return type("P", (), {"returncode": 2, "stdout": "", "stderr": "database is locked"})()
+
+        with patch.object(ceo_kanban_read.subprocess, "run", side_effect=run):
+            for _ in range(3):
+                with self.assertRaises(KanbanUnavailable):
+                    ceo_kanban_read.run_kanban(("list", "--json"))
+
+        self.assertEqual(len(attempts), 3, "예외는 캐시하지 않는다")
+
+    def test_archive_invalidates_the_cache(self) -> None:
+        """archive 직후 목록에 방금 치운 카드가 남아 있으면 안 된다."""
+
+        subcommands: list[str] = []
+
+        def run(command, **_kwargs):
+            subcommands.append(tuple(command)[2])
+            return self._ok()
+
+        with patch.object(ceo_kanban_read.subprocess, "run", side_effect=run):
+            ceo_kanban_read.run_kanban(("list", "--json"))
+            ceo_kanban_read.run_kanban(("list", "--json"))  # 캐시 히트
+            ceo_kanban_read.archive_tasks(["t_x"])
+            ceo_kanban_read.run_kanban(("list", "--json"))  # 무효화 후 재실행
+
+        self.assertEqual(subcommands, ["list", "archive", "list"])
+
+    def _show_stdout(self, status: str) -> str:
+        import json as _json
+
+        return _json.dumps({"task": {"id": "t_a", "status": status, "body": "b"}})
+
+    def _count_calls_across_base_ttl(self, status: str) -> int:
+        """기본 TTL을 실제로 넘긴 뒤 CLI가 다시 불리는지 센다."""
+
+        import time as _time
+
+        calls = []
+
+        def run(command, **_kwargs):
+            calls.append(command)
+            return type(
+                "P", (), {"returncode": 0, "stdout": self._show_stdout(status), "stderr": ""}
+            )()
+
+        env = {
+            "KANBAN_READ_CACHE_TTL_SECONDS": "0.3",
+            "KANBAN_DONE_CACHE_TTL_SECONDS": "60",
+        }
+        ceo_kanban_read.clear_kanban_cache()
+        with patch.dict(ceo_kanban_read.os.environ, env):
+            with patch.object(ceo_kanban_read.subprocess, "run", side_effect=run):
+                ceo_kanban_read.run_kanban(("show", "t_a", "--json"))
+                _time.sleep(0.45)
+                ceo_kanban_read.run_kanban(("show", "t_a", "--json"))
+        return len(calls)
+
+    def test_finished_tasks_are_cached_longer(self) -> None:
+        """끝난 Task의 `show` 결과는 더 이상 바뀌지 않으므로 오래 들고 있는다.
+
+        과거 대화 이력을 다시 그릴 때(계정 전환 등) CLI를 아예 안 부르게 하는 것이
+        목적이다. 목록 조회의 실제 비용은 서로 다른 Task를 노드 수만큼 `show`하는
+        것이라, 한 요청 안의 중복 제거만으로는 남는다.
+        """
+
+        self.assertEqual(self._count_calls_across_base_ttl("done"), 1)
+
+    def test_unfinished_tasks_keep_the_short_ttl(self) -> None:
+        """진행 중이거나 막힌 Task는 Retry/Replan으로 다시 바뀔 수 있다."""
+
+        self.assertEqual(self._count_calls_across_base_ttl("running"), 2)
+        self.assertEqual(self._count_calls_across_base_ttl("blocked"), 2)
+        self.assertEqual(self._count_calls_across_base_ttl("failed"), 2)
+
+    def test_unparsable_show_output_does_not_get_the_long_ttl(self) -> None:
+        """형태를 못 읽으면 조용히 오래 들고 있지 않는다 - 확신 없을 때가 더 위험하다."""
+
+        import time as _time
+
+        calls = []
+
+        def run(command, **_kwargs):
+            calls.append(command)
+            return type("P", (), {"returncode": 0, "stdout": "not json", "stderr": ""})()
+
+        env = {
+            "KANBAN_READ_CACHE_TTL_SECONDS": "0.3",
+            "KANBAN_DONE_CACHE_TTL_SECONDS": "60",
+        }
+        with patch.dict(ceo_kanban_read.os.environ, env):
+            with patch.object(ceo_kanban_read.subprocess, "run", side_effect=run):
+                ceo_kanban_read.run_kanban(("show", "t_a", "--json"))
+                _time.sleep(0.45)
+                ceo_kanban_read.run_kanban(("show", "t_a", "--json"))
+
+        self.assertEqual(len(calls), 2)
+
+    def test_ttl_zero_disables_the_cache(self) -> None:
+        calls = []
+
+        def run(command, **_kwargs):
+            calls.append(command)
+            return self._ok()
+
+        with patch.dict(ceo_kanban_read.os.environ, {"KANBAN_READ_CACHE_TTL_SECONDS": "0"}):
+            with patch.object(ceo_kanban_read.subprocess, "run", side_effect=run):
+                for _ in range(4):
+                    ceo_kanban_read.run_kanban(("list", "--json"))
+
+        self.assertEqual(len(calls), 4, "TTL=0이면 매번 실행한다")
 
 
 if __name__ == "__main__":

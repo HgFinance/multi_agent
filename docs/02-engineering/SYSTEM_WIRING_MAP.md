@@ -1,5 +1,9 @@
 # 시스템 배선 지도 (System Wiring Map)
 
+> **Snapshot status:** 이 문서는 `origin/main`과 당시 컨테이너 상태를 대조한
+> 배선 snapshot이다. 현재 아키텍처·worker registry·serving 상태는
+> [CURRENT_PROJECT_ARCHITECTURE.md](../CURRENT_PROJECT_ARCHITECTURE.md)를 우선한다.
+
 > **코드 기준: `origin/main@5054d2d` (2026-08-13 14:02, PR #237까지).** 컨테이너 36개 Up 상태의 실측 + origin/main 60커밋 대조로 그렸다.
 > 교차 검증 통과: 워커 10명 = CLAUDE.md 편제표와 1:1 일치, 러너 5개 = `RUNNER_ID` 상수 5곳 실측, 컨테이너 전수 일치.
 > 각 절의 근거는 `파일:행`으로 남겼다. 이 문서는 **스냅샷**이며 정본은 코드다.
@@ -11,18 +15,18 @@
 ## 0. 한눈에 보기 — 다섯 층과 두 개의 엔진
 
 ```
- ①수집(4)          ②저장(3+1)         ③조회면(11)        ④에이전트           ⑤사용자
+ ①시장수집(2)      ②저장(3+1)         ③조회면(11)        ④에이전트           ⑤사용자
 ┌──────────┐    ┌─────────────┐    ┌────────────┐    ┌─────────────┐    ┌──────────┐
 │ls-realtime│──▶│ TimescaleDB │──▶│ market-api │──▶│ hermes 8부서장│    │ ai-office│
-│news-watcher│─▶│  (market.*) │    │research-api│    │ LLM 워커 10명 │◀──│  프런트   │
-│ls-news    │─▶│  Supabase   │──▶│ 부서API 7종 │──▶│ 결정론 러너 5개│    │          │
-│batch(20종)│──▶│  (업무원장)  │    │research-mcp│    └──────┬──────┘    └────┬─────┘
+│batch(10종)│──▶│  (market.*) │    │research-api│    │ LLM 워커 10명 │◀──│  프런트   │
+│요청형 MCP │───┼─ 비영속 조회 │──▶│research-mcp│──▶│ 결정론 러너 5개│    │          │
+│(뉴스·공시 등)│ │ Control DB  │──▶│ 부서API 7종 │    └──────┬──────┘    └────┬─────┘
 └──────────┘    │  Redis      │    └────────────┘           │               │
                 │  Parquet아카이브│                            ▼               ▼
                 └─────────────┘                      ┏━━━━━━━━━━━━━┓   ┌──────────┐
                                                      ┃엔진1: kanban- ┃◀──│ BFF :8001│
    ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓        ┃  dispatcher  ┃   │(main: portfolio-bff│
-   ┃엔진2: factory-autopilot (15분 주기)        ┃───────▶┃(카드 실행 엔진)┃   │ 로컬: ui-bff)└────┘
+   ┃엔진2: factory-autopilot (15분 주기)        ┃───────▶┃(카드 실행 엔진)┃   │ portfolio-bff)└────┘
    ┃ 브리핑→기획→Gate0→가설→발주→실험→판정→환류 ┃        ┗━━━━━━━━━━━━━┛
    ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 ```
@@ -42,14 +46,15 @@
 | `timescaledb` | 시장 시계열 본체. 호가·체결·일봉·파생·Breadth 전부 여기(`market.*`). 호가는 나흘·체결은 6주만 hot 보관, 장기는 Parquet | `0.0.0.0:5434` |
 | `redis` | Risk↔QA·governance·workforce·체결 이벤트 Stream 버스. AOF 없음 — 재시작하면 Stream 유실 감수 | 내부 6379 |
 
-### 📡 수집기 (4)
+### 📡 시장데이터 수집기 (2)
 
 | 서비스 | 하는 일 | 어디에 쓰나 |
 |---|---|---|
 | `ls-realtime` | LS 웹소켓 호가·체결 실시간. 전종목 2,595 = 구독 5,190 = 소켓 26개. 장 세션 창만 연결 | `market.market_ticks/quotes` |
-| `news-watcher` | NAVER 뉴스 폴링(30분). Tier1 350종목 매 sweep + Tier2 전종목 순회 | `research.documents` |
-| `ls-news` | LS NWS 실시간 뉴스 push. 제목·메타만(본문은 약관 확인 전 금지) | `research.documents` |
-| `batch-collectors` | **배치 Job 20여 종을 한 컨테이너가 순차 실행**(DART 키 공유라 동시 금지). 공시·재무·현금흐름·파생 체인·일봉(350 + 전 유니버스)·Breadth·VKOSPI·스타일지수·캘린더·거래제한·라벨·아카이브·보존집행·DQ 감사·Packet 채점·Bluesky | 아래 §5 |
+| `batch-collectors` | **시장 배치 Job 10종만 순차 실행.** Archive·거래제한·DQ·Breadth·파생·VKOSPI·스타일지수·캘린더·라벨·전종목 일봉 | 아래 §5 |
+
+뉴스·공시·재무·거시·문헌은 수집 서비스가 아니다. `research-mcp`가 요청 시점에
+조회하고 응답 해시만 반환하며 파일·업무 DB·Storage·pgvector에 적재하지 않는다.
 
 ### 🔌 조회면 API (11)
 
@@ -59,8 +64,8 @@
 | `portfolio-worker` | [main] portfolio-bff 의 백그라운드 워커 (`portfolio_worker.py`). LangSmith 트레이싱 옵션 | — | — |
 | `ui-bff` | 기존 관문. CEO 질의 접수(`/ui/ceo/ask`), 공식 수치(`/ui/snapshot`), 부서 API 프록시. 에이전트 텍스트는 전부 `binding:false`. **[main] 호스트 게시 제거 — 내부 전용으로 강등** (로컬 실행 스택은 아직 8001 게시 중) | [main] 내부 8001 | (내부) |
 | `market-api` | 시세 읽기 전용. 타 부서는 TSDB 자격 없이 이것만 본다. `/snapshot` `/bars` `/breadth` `/dq` `/microstructure` | **8036** (0.0.0.0, 팀원 공유) | 회계 Mark·퀀트·리서치 애널리스트·BFF |
-| `research-api` | 뉴스·공시·재무 Evidence 읽기 전용, **PIT 강제**(`observed_at <= as_of`). LangGraph 직원 tool 의 배선 시작점 | 8035 | 리서치 워커·MCP·BFF |
-| `research-mcp` | Hermes 부서장 ↔ LangGraph 다리(MCP 도구 면). 유일한 쓰기성 작업은 `run_research_packet` | 내부 8037 | research-hermes |
+| `research-api` | 기존 `research.*` Evidence의 **레거시 읽기 전용 호환면**. 신규 뉴스·공시·재무를 적재하지 않으며 현재 정보 조회는 `research-mcp`가 맡는다 | 8035 | 레거시 감사·시장 보조 조회 |
+| `research-mcp` | Hermes ↔ 요청형 외부정보·가설 공장·등록된 직원 Worker의 도구 면. 외부 응답은 비영속이며 쓰기는 lead/proposal/검토 같은 공장 원장에 한정 | 내부 8037 | research-hermes |
 | `risk-api` | 결정론 Risk Engine 래퍼 — 주문 판정은 전부 `risk_engine.check_order`. trading-state·compliance RAG·mandate assess | 8041 | BFF 프록시·트레이딩 흐름 |
 | `audit-api` | Evidence QA Gate + 감사면. 실행 추적(runs/tool-calls)·시정조치·모델리스크 | 8042 | BFF 프록시·qa-worker |
 | `governance-api` | Mandate 버전/활성화·승인·위원회·에스컬레이션·보고서. 이벤트를 `hf:governance` Stream 에 발행 | 8043 | BFF·notification-worker |
@@ -251,26 +256,28 @@
 | `derivative_snapshots` | derivatives(10분) | ⚠ **읽는 코드 0건** — 옵션 NAV 보류의 원인 (§7) |
 | `microstructure_features` | 퀀트 빌더 | 백테스트 (quotes/ticks 의 유도 대체) |
 | `ingestion_watermarks` / `data_quality_windows` | data-steward(07:10) | market-api `/dq` |
-| `archive_exports` | market-archive(06:50, Parquet+sha256) | retention_enforcer(07:10, verified 덮인 청크만 drop) |
+| `archive_exports` | market-archive(06:50, Parquet+sha256) | 수동 retention/복구 검증 도구. 상주 Scheduler에는 없음 |
 
-### Supabase — 업무 원장
+### Control DB — 업무 원장 (Supabase는 사용자 인증 전용)
 
 | 영역 | 주요 테이블 | 쓰는 자 → 읽는 자 |
 |---|---|---|
-| 문서 | `research.documents` | news-watcher·ls-news·disclosure·bluesky → research-api, 리서치 워커 |
-| 재무 | `research.financial_facts` | financial(18:10)·cashflow(18:50) → F-Score·Altman Z 재료 |
-| 거시 | `research.macro_observations` | vkospi·style-index (⚠ macro/geopolitical 수집기는 내림) |
+| 문서 | `research.documents` | 레거시 보존 데이터. 신규 writer 없음; `research-api` 호환 조회만 유지 |
+| 재무 | `research.financial_facts` | 레거시 보존 데이터. 신규 writer 없음; 요청형 DART 응답은 쓰지 않음 |
+| 거시 | `research.macro_observations` | 시장 가격인 vkospi·style-index만 갱신. ECOS·FRED·GPR·GDELT 응답은 쓰지 않음 |
 | 공장 | `research.methodology_leads` / `experiment_proposals` / `experiment_outcomes` | §4 생애주기 그대로 |
 | 퀀트 | `quant.hypotheses` / `experiments` / `experiment_jobs` / `experiment_metrics` / `dataset_manifests` | §4 |
-| 기준정보 | `reference.instruments` / `instrument_symbols` / `corporate_actions` / `market_sessions` | derivatives·CA·calendar 수집기 → 전 부서 |
+| 기준정보 | `reference.instruments` / `instrument_symbols` / `market_sessions` | 시장 유니버스·거래제한·calendar 수집기 → 전 부서 |
 | 원장 | `accounting.*` / `execution.*` | trading-api → outbox-relay → ledger-consumer |
 | 사용자 | `accounting.investor_profiles` **[main 신설]** | portfolio-bff `/ui/investor-profiles` → accounting-api. seed 에 placeholder 회원 3명 |
 
-### 내려간 수집기 (2026-08-12 결정 — 정성 팩터/MCP 조회로 대체)
+### 제거된 비시장 수집기 (2026-08-18 확정 — 요청형 MCP 조회로 대체)
 
-- `macro` (FRED·ECOS·KOSIS), `geopolitical` (GPR·GDELT) — 소비처는 살아 있으므로 "최신"으로 읽으면 안 됨
-- `document-archive` (공시 원문 ZIP) — 용량(임베딩 586MB) 때문. DART MCP 요청시 조회로 대체
-- Registry 차원 차단: bigkinds·x_twitter·truth_social
+- 뉴스(NAVER·LS·Alpaca·Bluesky), DART 공시·재무·현금흐름·기업개황,
+  macro/geopolitical, corporate-action, watchlist/capability crawler는 삭제됐다.
+- DART·NAVER·ECOS·FRED·Tavily는 등록된 요청형 MCP 도구만 사용한다.
+- KOSIS·GPR·GDELT·LS 뉴스는 요청형 어댑터가 없으므로 Registry가 `DISABLED`로
+  fail-closed 한다. 구현되지 않은 소스를 `AVAILABLE`로 보고하지 않는다.
 
 ---
 
@@ -300,7 +307,7 @@
 |---|---|---|
 | 1 | `quant-api` 고아 컨테이너 — compose 정의 없음, 소스는 `codex-research-wip-20260811` 브랜치 | 정의 복원 or 폐기 결정 필요 |
 | 2 | `market.derivative_snapshots` 읽기 코드 0건 → 옵션 보유 book 2개 NAV 보류 무한 루프 | market-api `/snapshot` 파생 분기 필요 |
-| 3 | `ls-news` `InFailedSqlTransaction` 재접속 루프 (백오프 카운터 항상 1) | 롤백+백오프 수리 필요 |
+| 3 | ~~`ls-news` 재접속 루프~~ | ✅ 서비스·수집기 제거. 요청형 어댑터도 없으므로 Registry `DISABLED` |
 | 4 | 런타임 프로필 8개 전부 저장소 `hermes/config.yaml` 과 크기 불일치 (트레이딩은 47%) | 동기화 + 대조 검사 필요 |
 | 5 | CEO 페르소나의 부서 목록에 `workforce-management` — 유효명은 `hr-department` | 아직 안 터진 지뢰 |
 | 6 | 퀀트 공장 워커 3명(접수·설계·교훈) `pending_hr` 미구현 — 결정론 코드가 대행 중 | 편제 결정 필요 |

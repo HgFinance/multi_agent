@@ -20,6 +20,82 @@ def _service_block(compose_text: str, service_name: str) -> str:
 
 
 class DepartmentComposeWiringTests(unittest.TestCase):
+    def test_redis_stream_transport_is_aof_persistent(self) -> None:
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        service = _service_block(compose, "redis")
+
+        self.assertIn('"--appendonly", "yes"', service)
+        self.assertIn('"--appendfsync", "everysec"', service)
+        self.assertIn("- redis_data:/data", service)
+        self.assertIn("\n  redis_data:\n", compose)
+
+    def test_research_liaison_packages_stock_evidence_contract(self) -> None:
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        services = (
+            _service_block(compose, "research-mcp"),
+            _service_block(compose, "research-liaison-mcp"),
+        )
+        dockerfile = (
+            ROOT / "departments/01-research/Dockerfile.mcp"
+        ).read_text(encoding="utf-8")
+
+        for service in services:
+            self.assertIn("context: .", service)
+            self.assertIn(
+                "dockerfile: departments/01-research/Dockerfile.mcp", service
+            )
+        self.assertIn(
+            "departments/04-quant-backtest/pipeline/stock_universe.py",
+            dockerfile,
+        )
+        self.assertIn(
+            "/app/departments/04-quant-backtest/pipeline/stock_universe.py",
+            dockerfile,
+        )
+        self.assertIn("mcp==1.26.0", dockerfile)
+        self.assertNotRegex(dockerfile, r"(?m)^\s+mcp\s*\\$")
+
+    def test_quant_api_owns_database_access_and_supports_scoped_role(self) -> None:
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        service = _service_block(compose, "quant-api")
+
+        self.assertIn(
+            "dockerfile: departments/04-quant-backtest/Dockerfile", service
+        )
+        self.assertIn(
+            "DATABASE_URL: ${QUANT_DATABASE_URL:-${DATABASE_URL:", service
+        )
+        self.assertNotIn("\n      QUANT_DATABASE_URL:", service)
+        self.assertIn(
+            "MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}", service
+        )
+        self.assertIn('"127.0.0.1:8037:8037"', service)
+        self.assertIn(
+            "QUANT_DATABASE_URL=",
+            (ROOT / ".env.example").read_text(encoding="utf-8"),
+        )
+
+        migration = (
+            ROOT
+            / "supabase/migrations/20260817000100_quant_api_seed_read.sql"
+        ).read_text(encoding="utf-8")
+        self.assertIn("grant usage on schema research to svc_quant", migration)
+        self.assertIn(
+            "grant select on table research.packet_claims to svc_quant", migration
+        )
+        self.assertNotIn("insert", migration.lower())
+        self.assertNotIn("update", migration.lower())
+
+    def test_quant_hermes_gets_mcp_auth_but_no_database_secret(self) -> None:
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        service = _service_block(compose, "quant-hermes")
+
+        self.assertIn(
+            "MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}", service
+        )
+        self.assertNotIn("DATABASE_URL:", service)
+        self.assertNotIn("QUANT_DATABASE_URL:", service)
+
     def test_trading_api_receives_paper_db_and_shared_database_url(self) -> None:
         compose = (ROOT / "departments/02-trading/compose.yaml").read_text(
             encoding="utf-8"
@@ -68,11 +144,27 @@ class DepartmentComposeWiringTests(unittest.TestCase):
         service = _service_block(compose, "kanban-dispatcher")
 
         self.assertIn("init: true", service)
-        self.assertIn('"kanban", "daemon", "--force"', service)
+        self.assertIn('command:\n      ["/bin/sh", "-c",', service)
+        self.assertIn(
+            "deploy/hermes-dispatch-guard/check_guard.py && exec hermes "
+            "kanban daemon --force",
+            service,
+        )
+        self.assertIn(
+            '--interval \\"$${KANBAN_DISPATCH_INTERVAL:-60}\\"', service
+        )
         self.assertNotIn('command: ["gateway", "run"]', service)
+        self.assertIn(
+            "PYTHONPATH: /app/repo/deploy/hermes-dispatch-guard", service
+        )
+        self.assertIn('HGFINANCE_DISPATCH_GUARD: "1"', service)
         self.assertIn("HERMES_HOME: /opt/data", service)
         self.assertIn("HERMES_KANBAN_HOME: /opt/data/shared-kanban", service)
         self.assertIn('HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"', service)
+        self.assertIn(
+            "KANBAN_DISPATCH_INTERVAL: ${KANBAN_DISPATCH_INTERVAL:-60}",
+            service,
+        )
         self.assertIn(
             "MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}", service
         )

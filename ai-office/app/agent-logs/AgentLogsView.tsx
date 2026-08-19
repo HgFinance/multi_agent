@@ -3,20 +3,22 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import {
   fetchOperations,
-  readableRuntimeMessage,
   subscribeOperationsStream,
   type OperationsDepartment,
   type OperationsView,
 } from "../lib/operationsClient";
 import DepartmentInspector from "./DepartmentInspector";
 import { KANBAN_BASE_URL, resolveKanbanUrl } from "../lib/kanbanUrl";
+import { readDiscordMessages, type DiscordMessage } from "../lib/discordClient";
+import HermesKanbanBoard from "./HermesKanbanBoard";
+import { fetchHermesKanban, type HermesKanbanBoard as HermesKanbanBoardData } from "../lib/kanbanClient";
 
 /**
  * Agent Logs — 페이지 상단(전체 부서 실행 현황).
  *
  * 데이터·판정은 main의 `ops/RiskQaPanel.tsx` 로직 그대로이고, 겉모습만
  * 우리 디자인 토큰으로 옮겼다. 부서 수·Worker 수의 출처는 각 Hermes Profile의
- * Worker Registry이고 실행 상태는 BFF `/ui/snapshot`과 `/ws/operations`에서 받는다.
+ * Worker Registry와 실행 상태는 인증된 BFF `/ui/snapshot` polling으로 받는다.
  */
 
 const STATUS_VIEW: Record<string, { label: string; tone: string }> = {
@@ -52,7 +54,6 @@ function DepartmentCard({
 }) {
   const status = String(department.status).toUpperCase();
   const view = STATUS_VIEW[status] ?? { label: status, tone: "border-outline-variant bg-surface-container text-on-surface-variant" };
-  const message = readableRuntimeMessage(department.status_reason);
 
   return (
     <button
@@ -70,7 +71,9 @@ function DepartmentCard({
           <h3 className="text-body-lg font-body-lg font-bold text-primary mt-1">{department.name}</h3>
           <code className="text-xs text-outline">{department.department_code}</code>
         </div>
-        <span className={`shrink-0 px-2 py-0.5 rounded-full border text-xs font-medium ${view.tone}`}>{view.label}</span>
+        {status !== "OFFLINE" ? (
+          <span className={`shrink-0 px-2 py-0.5 rounded-full border text-xs font-medium ${view.tone}`}>{view.label}</span>
+        ) : null}
       </div>
 
       <div className="flex flex-wrap gap-1.5 text-xs">
@@ -87,10 +90,88 @@ function DepartmentCard({
         </span>
       </div>
 
-      <p className="text-body-sm font-body-sm text-on-surface-variant m-0">{message.summary}</p>
-      {message.action ? <p className="text-xs text-outline m-0">{message.action}</p> : null}
       {/* executor·model·contract 줄은 카드에서 빼고 선택 상세(DepartmentInspector)로 옮겼다. */}
     </button>
+  );
+}
+
+function formatMessageTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("ko-KR", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function summarizeMessage(value: string, limit = 240): string {
+  const compact = value.replace(/<@!?\d+>/g, "@멘션").replace(/\s+/g, " ").trim();
+  if (!compact) return "첨부 또는 임베드만 있는 메시지";
+  return compact.length > limit ? `${compact.slice(0, limit).trimEnd()}…` : compact;
+}
+
+function formatMessageKind(value: string): string {
+  return value.replace(/[_-]+/g, " ").trim() || "runtime event";
+}
+
+function DiscordChat({ department }: { department: string }) {
+  const [messages, setMessages] = useState<DiscordMessage[] | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    readDiscordMessages(department, 50, controller.signal)
+      .then((body) => setMessages(body.messages))
+      .catch((cause: unknown) => {
+        if (controller.signal.aborted) return;
+        setError(cause instanceof Error ? cause.message : "Discord 대화를 불러오지 못했습니다.");
+      });
+    return () => controller.abort();
+  }, [department]);
+
+  if (error) {
+    return (
+      <p
+        role="alert"
+        className="text-body-sm font-body-sm text-on-error-container bg-error-container border border-error/40 rounded px-3 py-2 m-0"
+      >
+        {error}
+      </p>
+    );
+  }
+  if (messages === null) return <p className="text-body-sm font-body-sm text-on-surface-variant m-0">Discord 대화를 불러오는 중입니다…</p>;
+  if (messages.length === 0) return <p className="text-body-sm font-body-sm text-on-surface-variant m-0">아직 표시할 Discord 대화가 없습니다.</p>;
+
+  return (
+    // 카드 한 장이 한 줄을 차지한다. 2열로 쪼개면 좌우 두 카드의 시각이 뒤섞여
+    // 읽는 순서가 사라진다 - 대화는 위에서 아래로 흐르는 것이 읽기 쉽다.
+    <div className="flex flex-col gap-3 max-h-96 overflow-y-auto pr-1">
+      {messages.map((message) => (
+        <article
+          key={message.id}
+          className={`rounded-lg border p-3 ${
+            message.is_department_bot
+              ? "border-primary/30 bg-secondary-container/40"
+              : "border-outline-variant bg-surface-container-low"
+          }`}
+        >
+          {/* 봇·사용자 배지는 두지 않는다. 카드 배경색이 이미 그 구분을 하고 있어
+              같은 사실을 두 번 말하면 정작 읽어야 할 작성자·시각이 묻힌다. */}
+          <div className="min-w-0">
+            <strong className="block truncate text-body-sm font-body-sm text-on-surface">{message.author}</strong>
+            <time className="block text-xs text-outline" dateTime={message.created_at}>
+              {formatMessageTime(message.created_at)}
+            </time>
+          </div>
+          <p className="m-0 mt-3 text-body-sm font-body-sm leading-6 text-on-surface">
+            {summarizeMessage(message.text)}
+          </p>
+        </article>
+      ))}
+    </div>
   );
 }
 
@@ -101,11 +182,14 @@ export default function AgentLogsView() {
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
   const [streamState, setStreamState] = useState<"connecting" | "connected" | "degraded">("connecting");
   const [lastKeepalive, setLastKeepalive] = useState<string | null>(null);
-  const [kanbanState, setKanbanState] = useState<"loading" | "ready" | "error">("loading");
-
+  const [kanban, setKanban] = useState<HermesKanbanBoardData | null>(null);
+  const [kanbanError, setKanbanError] = useState("");
+  const [kanbanLoading, setKanbanLoading] = useState(true);
   const pageHost = usePageHost();
-  const kanbanUrl = useMemo(() => resolveKanbanUrl(KANBAN_BASE_URL, pageHost || undefined), [pageHost]);
-  const kanbanFailed = !kanbanUrl || kanbanState === "error";
+  const kanbanUrl = useMemo(
+    () => resolveKanbanUrl(KANBAN_BASE_URL, pageHost || undefined),
+    [pageHost],
+  );
 
   useEffect(() => {
     let alive = true;
@@ -114,6 +198,17 @@ export default function AgentLogsView() {
         .then((next) => alive && setData(next))
         .catch((cause) => alive && setError(cause instanceof Error ? cause.message : String(cause)))
         .finally(() => alive && setLoading(false));
+      fetchHermesKanban()
+        .then((next) => {
+          if (!alive) return;
+          setKanban(next);
+          setKanbanError("");
+        })
+        .catch((cause: unknown) => {
+          if (!alive) return;
+          setKanbanError(cause instanceof Error ? cause.message : String(cause));
+        })
+        .finally(() => alive && setKanbanLoading(false));
     };
 
     refresh();
@@ -134,12 +229,6 @@ export default function AgentLogsView() {
     };
   }, []);
 
-  useEffect(() => {
-    if (!kanbanUrl || kanbanState !== "loading") return undefined;
-    const timer = window.setTimeout(() => setKanbanState("error"), 8000);
-    return () => window.clearTimeout(timer);
-  }, [kanbanState, kanbanUrl]);
-
   const departments = data?.departments ?? EMPTY_DEPARTMENTS;
   const registeredWorkers = departments.reduce((total, item) => total + item.worker_count, 0);
   const activeWorkers = departments.reduce((total, item) => total + item.active_worker_count, 0);
@@ -150,6 +239,7 @@ export default function AgentLogsView() {
     () => departments.find((item) => item.department_code === selectedCode) ?? null,
     [departments, selectedCode],
   );
+  const discordDepartment = selected ?? departments[0] ?? null;
 
   const metrics = [
     { label: "부서", value: departments.length || 8 },
@@ -189,84 +279,12 @@ export default function AgentLogsView() {
                 : "border-outline text-on-surface-variant"
             }`}
           >
-            {streamState === "connected" ? "BFF EVENT STREAM CONNECTED" : streamState === "connecting" ? "BFF STREAM CONNECTING" : "BFF STREAM DEGRADED"}
+            {streamState === "connected" ? "BFF AUTH POLLING CONNECTED" : streamState === "connecting" ? "BFF POLLING STARTING" : "BFF POLLING DEGRADED"}
           </span>
         </div>
       </section>
 
-      <section className="bg-surface-container-lowest border border-outline-variant rounded-lg overflow-hidden shadow-sm flex flex-col">
-        <div className="bg-surface-container-low border-b border-outline-variant px-4 py-2.5 flex items-center justify-between gap-2">
-          <span className="flex items-center gap-2 text-label-md font-label-md text-on-surface-variant">
-            <span className="material-symbols-outlined text-[16px]" aria-hidden="true">dashboard</span>
-            Hermes Kanban Dashboard
-          </span>
-          <span className="flex gap-1.5" aria-hidden="true">
-            <span className="w-2.5 h-2.5 rounded-full bg-outline-variant" />
-            <span className="w-2.5 h-2.5 rounded-full bg-outline-variant" />
-            <span className="w-2.5 h-2.5 rounded-full bg-outline-variant" />
-          </span>
-        </div>
-
-        <div className="p-6 pb-4 flex justify-between items-start gap-4 flex-wrap">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 mb-2 flex-wrap">
-              <span className="bg-primary text-on-primary px-2 py-1 rounded text-label-md font-label-md">SOURCE OF TRUTH</span>
-              <span className="flex items-center gap-1.5 text-xs text-on-surface-variant">
-                <span className="w-2 h-2 rounded-full bg-tertiary-fixed-dim" aria-hidden="true" />
-                Hermes
-              </span>
-            </div>
-            <h2 className="text-headline-md font-headline-md text-primary">공용 Task Graph / Kanban</h2>
-            <p className="text-body-sm font-body-sm text-on-surface-variant mt-1">
-              Agent Logs에서 확인할 업무 배정과 부서별 Task 상태를 이 보드에서 확인합니다.
-            </p>
-          </div>
-          {kanbanUrl ? (
-            <a
-              href={kanbanUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="px-4 py-2 border border-outline-variant bg-surface-container-lowest rounded font-bold text-label-md font-label-md text-primary hover:bg-surface-container transition-colors inline-flex items-center gap-1 shrink-0"
-            >
-              보드 새 창으로 열기
-              <span className="material-symbols-outlined text-[16px]" aria-hidden="true">open_in_new</span>
-            </a>
-          ) : null}
-        </div>
-
-        <div className="mx-6 mb-6 flex-1 min-h-80 bg-surface-container-low border border-outline-variant rounded relative overflow-auto">
-          {kanbanUrl ? (
-            <iframe
-              title="Hermes Kanban 화면"
-              src={kanbanUrl}
-              onLoad={() => setKanbanState("ready")}
-              onError={() => setKanbanState("error")}
-              className="w-full h-[560px] border-0 bg-white"
-            />
-          ) : null}
-          <div className="absolute top-3 right-3 rounded border border-outline-variant bg-surface-container-lowest/95 px-2 py-1 text-xs text-on-surface-variant">
-            {kanbanFailed ? "보드를 불러오지 못함" : kanbanState === "loading" ? "보드 불러오는 중…" : "Hermes 화면 표시됨"}
-          </div>
-          {kanbanFailed ? (
-            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-surface-container-low p-6 text-center">
-              <span className="material-symbols-outlined text-[40px] text-outline-variant" aria-hidden="true">account_tree</span>
-              <p className="text-body-sm font-body-sm text-on-surface-variant m-0 max-w-lg">
-                {kanbanUrl
-                  ? "Hermes 보드를 불러오지 못했습니다. 새 창으로 열어 인증 상태와 Hermes 실행 여부를 확인하세요."
-                  : "Hermes Kanban 주소 설정이 올바르지 않습니다. 관리자 설정을 확인하세요."}
-              </p>
-              {kanbanUrl ? <code className="text-xs text-outline bg-surface-container px-2 py-1 rounded">{kanbanUrl}</code> : null}
-            </div>
-          ) : null}
-        </div>
-        {kanbanUrl && pageHost && new URL(kanbanUrl).hostname !== pageHost ? (
-          <p role="status" className="mx-6 mb-6 -mt-4 text-xs text-error">
-            이 페이지({pageHost})와 보드({new URL(kanbanUrl).hostname})의 호스트가 달라 iframe 안에서 로그인 세션이 유지되지 않습니다.
-            주소창을 <code className="bg-surface-container px-1 rounded">{new URL(kanbanUrl).hostname}</code>으로 맞춰 접속하거나,
-            보드를 새 창으로 여세요.
-          </p>
-        ) : null}
-      </section>
+      <HermesKanbanBoard board={kanban} error={kanbanError} loading={kanbanLoading} kanbanUrl={kanbanUrl} />
 
       <section className="flex flex-wrap gap-2" aria-label="전체 부서 요약">
         {metrics.map((metric) => (
@@ -280,7 +298,7 @@ export default function AgentLogsView() {
       </section>
       <section className="flex flex-wrap gap-2" aria-label="Runtime event status">
         <span className="px-4 py-2 rounded border border-outline-variant bg-surface-container-lowest text-body-sm font-body-sm text-on-surface-variant">
-          BFF event stream <b className="font-data-mono text-on-surface">{streamState === "connected" ? "connected" : "waiting"}</b>
+          BFF auth polling <b className="font-data-mono text-on-surface">{streamState === "connected" ? "connected" : "waiting"}</b>
         </span>
         <span className="px-4 py-2 rounded border border-outline-variant bg-surface-container-lowest text-body-sm font-body-sm text-on-surface-variant">
           BFF keepalive <b className="font-data-mono text-on-surface">{lastKeepalive ? new Date(lastKeepalive).toLocaleTimeString("ko-KR") : "waiting"}</b>
@@ -290,29 +308,55 @@ export default function AgentLogsView() {
         </span>
       </section>
 
-      <section className="bg-surface-container-lowest border border-outline-variant rounded-lg p-4 flex flex-col gap-3" aria-label="Recent agent logs">
-        <div className="flex justify-between items-center gap-3 flex-wrap">
-          <h2 className="text-title-md font-title-md text-primary m-0">Recent agent logs</h2>
-          <span className="text-xs text-on-surface-variant">{data?.messages.length ?? 0} runtime events</span>
-        </div>
+      {/* 접기는 native `<details>`가 한다 - 열림 상태·키보드·스크린리더가 전부 딸려
+          온다. `<details>`에 flex를 주면 닫혀도 내용이 보이므로 레이아웃은 안쪽
+          div가 맡는다. `<section aria-label>`은 landmark라 남겨 둔다. */}
+      <section className="bg-surface-container-lowest border border-outline-variant rounded-lg p-4" aria-label="부서 내부 메시지">
+       <details className="group">
+        <summary className="flex justify-between items-center gap-3 flex-wrap cursor-pointer list-none [&::-webkit-details-marker]:hidden">
+          <h2 className="text-title-md font-title-md text-primary m-0 flex items-center gap-1.5">
+            <span
+              className="material-symbols-outlined text-[18px] text-on-surface-variant transition-transform group-open:rotate-180"
+              aria-hidden="true"
+            >
+              expand_more
+            </span>
+            부서 내부 메시지
+          </h2>
+          <span className="text-xs text-on-surface-variant">전체 {data?.messages.length ?? 0}개 메시지</span>
+        </summary>
+        <div className="flex flex-col gap-3 mt-3">
         {data?.messages.length ? (
           <ol className="flex flex-col gap-2 m-0 p-0 list-none">
             {[...data.messages].slice(-8).reverse().map((message) => (
-              <li key={message.id} className="border border-outline-variant rounded-md px-3 py-2">
-                <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-on-surface-variant">
-                  <span className="font-data-mono">{new Date(message.occurred_at).toLocaleTimeString("ko-KR")}</span>
-                  <span>{message.kind}</span>
-                  <span>{message.department_code ?? "system"}</span>
+              <li key={message.id} className="rounded-lg border border-outline-variant bg-surface-container-low p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-on-surface-variant">
+                    <span className="rounded-full border border-outline-variant bg-surface-container-lowest px-2 py-0.5 font-semibold">
+                      {formatMessageKind(message.kind)}
+                    </span>
+                    <span>{message.department_code ?? "공용"}</span>
+                  </div>
+                  <time className="text-xs text-outline" dateTime={message.occurred_at}>
+                    {formatMessageTime(message.occurred_at)}
+                  </time>
                 </div>
-                <p className="text-body-sm font-body-sm text-on-surface m-0 mt-1">{message.text}</p>
+                <p className="text-body-sm font-body-sm text-on-surface m-0 mt-2">{summarizeMessage(message.text)}</p>
               </li>
             ))}
           </ol>
-        ) : (
-          <p className="text-body-sm font-body-sm text-on-surface-variant m-0">
-            현재 수신된 runtime message가 없습니다. Registry snapshot만 표시 중입니다.
-          </p>
-        )}
+        ) : null}
+        {discordDepartment ? (
+          <div className="border-t border-outline-variant pt-3">
+            <div className="flex justify-between items-center gap-3 flex-wrap mb-2">
+              <h3 className="text-body-md font-body-md font-bold text-on-surface m-0">Discord 대화</h3>
+              <span className="text-xs text-on-surface-variant">{discordDepartment.name}</span>
+            </div>
+            <DiscordChat key={discordDepartment.department_code} department={discordDepartment.department_code} />
+          </div>
+        ) : null}
+        </div>
+       </details>
       </section>
 
       {departments.length > 0 ? (
@@ -349,12 +393,12 @@ export default function AgentLogsView() {
         <DepartmentInspector department={selected} data={data} />
       ) : departments.length > 0 ? (
         <p className="text-body-sm font-body-sm text-on-surface-variant">
-          부서 카드를 누르면 직원 Registry와 실시간 상태가 아래에 펼쳐집니다.
+          부서 카드를 누르면 부서 상태와 연결된 결과물이 아래에 펼쳐집니다.
         </p>
       ) : null}
 
       <p className="text-xs text-outline">
-        BFF event stream + keepalive Source: <code>/ui/snapshot</code> + <code>/ws/operations</code> · 부서 수와 Worker 수 Source: 각 Hermes Profile의 Worker Registry
+        BFF authenticated polling + keepalive Source: <code>/ui/snapshot</code> · WebSocket은 one-use ticket 도입 전 비활성 · 부서 수와 Worker 수 Source: 각 Hermes Profile의 Worker Registry
       </p>
     </main>
   );

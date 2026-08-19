@@ -11,7 +11,7 @@
 Hermes Department Head (Codex 기본 / 승인된 Claude Code 대체)
   └─ 독립 LangGraph Worker Graph × Worker Registry
        ├─ allow-listed read/calculation tools
-       ├─ Ollama qwen3:1.7b (임시 테스트용 현재 모든 Worker 고정값)
+       ├─ environment-specific model selected by the runtime contract
        ├─ schema validation + 최대 2회 재시도(총 3회 시도)
        └─ non-binding worker-context.v1 → Hermes context
 ```
@@ -141,8 +141,17 @@ CEO는 **기준 1을 HR과 같은 방식으로는 통과하지 못한다.** 부�
 
 ## 모델과 연동 상태
 
-- **현재 고정**: 모든 Worker는 임시 테스트용 Ollama `qwen3:1.7b`; `qwen3:8b`, `qwen2.5`, `qwen2.5-coder`, `qwen3:14b`는 과거 기준·Modelfile/실험 표기이며 현재 Worker 기본값이 아니다.
-- **향후 모델 변경**: `ollama list` 확인 → Worker별 Golden/Adversarial benchmark → HR 제안 → QA 검증 → CEO 승인 후 Profile과 `OLLAMA_*_MODEL`을 함께 변경한다.
+모델 serving, gateway, adapter resolution, 환경별 모델 값은
+[FINAL_RUNTIME_ARCHITECTURE.md](FINAL_RUNTIME_ARCHITECTURE.md)와
+[CURRENT_PROJECT_ARCHITECTURE.md](../CURRENT_PROJECT_ARCHITECTURE.md)가 소유한다.
+이 문서는 모델 선택 자체가 아니라 Worker 권한, trigger, tool allowlist,
+결정론 경계만 정의한다.
+
+- **모델 변경 절차의 권한 경계:** 후보 모델·adapter 변경은 Worker Model
+  Matrix의 compatibility index, runtime 문서의 serving contract, QA 회귀,
+  CEO/승인 절차를 함께 통과해야 한다. 이 문서는 모델 이름이나 serving
+  default를 다시 정의하지 않는다.
+- **향후 모델 변경**: 후보 모델·adapter의 Golden/Adversarial 회귀와 QA·승인·rollback 절차는 [FINAL_RUNTIME_ARCHITECTURE.md](FINAL_RUNTIME_ARCHITECTURE.md)의 runtime contract와 [WORKER_MODEL_MATRIX.md](WORKER_MODEL_MATRIX.md)의 compatibility index를 따른다. 이 문서는 변경 절차를 반복해서 정의하지 않는다.
 - **Notion**: 부서별 Reporter와 Markdown-to-Notion block 변환기는 어댑터다. 실제 업로드는 `NOTION_TOKEN`과 부서별 DB ID가 설정되고 API 호출이 성공한 경우에만 `upload_succeeded=true`로 본다. Notion은 Projection이며 원본 판정을 소유하지 않는다.
 - **LangSmith**: 일부 부서의 handoff 필드는 존재하지만 기본 tracing은 꺼져 있다. 환경변수·자격증명·DNS·네트워크가 모두 확인되고 민감 필드 마스킹을 통과한 실제 run만 trace 성공으로 본다. 코드나 API Key의 존재만으로 연결 완료로 표시하지 않는다.
 - **Langfuse (2026-08-10 신규)**: HR(07-agent-workforce)이 6개 투자본부 Worker의 유휴 여부를 관측하는 전용 경로다. LangSmith와 이중 계측이며 부서 코드는 겹치지 않는다 — `orchestration/workflows/portfolio_recommendation.py`의 Worker 실행 지점 한 곳(`publish_langfuse_metric`)이 6개 부서 전부를 자동으로 계측하고, HR은 `departments/07-agent-workforce/scorecard/observability.py`(결정론, LLM 없음)로 timestamp만 조회한다. 자격증명이 없거나 조회가 실패하면 `IDLE`이 아니라 `UNAVAILABLE`로 판정한다 — "쉬고 있다"와 "우리가 모른다"를 구분한다. 근거·제거 기준은 [TECH_STACK_DECISIONS.md](TECH_STACK_DECISIONS.md) 11절.

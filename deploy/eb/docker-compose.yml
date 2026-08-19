@@ -21,8 +21,12 @@
 #   프록시가 돌아야 하는데 EC2에는 그게 없다. `ENABLE_AGENT_ASK`를 켜지 않으므로
 #   `/{부서}/agent/ask`는 503으로 남는다 - 조용히 종량 과금으로 새는 것보다 낫다.
 #
-# 환경변수는 `eb setenv`로 준다(README.md 3절). DATABASE_URL이 비면 trading-api와
-# accounting-api가 fail closed 되고 ledger-consumer는 아예 뜨지 않는다 - 의도한 방향이다.
+# 환경변수는 `eb setenv`로 준다(README.md 3절). CONTROL_DATABASE_URL은 같은 AWS
+# private operational PostgreSQL을 가리켜야 하며, 누락되면 Compose 해석 단계에서 중단한다.
+
+# CONTROL_DATABASE_URL is the deployment-only name. Applications keep the
+# internal DATABASE_URL contract through the shared anchor below.
+x-operational-database-url: &operational-database-url "${CONTROL_DATABASE_URL:?AWS private operational PostgreSQL CONTROL_DATABASE_URL is required}"
 
 services:
   # ── 외부에 열리는 유일한 서비스 ────────────────────────────────────────────
@@ -38,12 +42,64 @@ services:
         max-file: "3"
     environment:
       PYTHONPATH: /app:/app/apps/api
+      DATABASE_URL: *operational-database-url
+      PORTFOLIO_DATA_MODE: "production"
+      APP_ENV: ${APP_ENV:-production}
+      PORTFOLIO_AUTH_MODE: ${PORTFOLIO_AUTH_MODE:-supabase_jwt}
+      PORTFOLIO_AUTH_REQUIRED: ${PORTFOLIO_AUTH_REQUIRED:-true}
+      # This legacy bundle intentionally excludes shared Kanban, dispatcher,
+      # Trading Hermes and its MCP bridge. Fail before creating an orphan card;
+      # deterministic authenticated PAPER API endpoints remain available.
+      USER_PAPER_ORDER_WORKFLOW_ENABLED: "false"
+      PORTFOLIO_CORS_ALLOW_ORIGINS: ${PORTFOLIO_CORS_ALLOW_ORIGINS:?Exact HTTPS frontend origin allowlist is required}
+      # Supabase is identity-only in AWS. Never pass service-role to the BFF.
+      SUPABASE_URL: ${SUPABASE_URL:?Hosted Supabase project URL is required for portfolio authentication}
+      SUPABASE_AUTH_ISSUER: ${SUPABASE_AUTH_ISSUER:-}
+      SUPABASE_AUTH_JWKS_URL: ${SUPABASE_AUTH_JWKS_URL:-}
+      SUPABASE_AUTH_AUDIENCE: ${SUPABASE_AUTH_AUDIENCE:-authenticated}
+      SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY:?Supabase publishable key is required for portfolio authentication}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
+      PORTFOLIO_API_URL: http://accounting-api:8000
+      TRADING_API_URL: http://trading-api:8000
+      TRADING_SERVICE_AUTH_SECRET: ${TRADING_SERVICE_AUTH_SECRET:?A 32-byte trading service proof secret is required}
+      TRADING_SERVICE_AUTH_ISSUER: ${TRADING_SERVICE_AUTH_ISSUER:-portfolio-bff}
+      TRADING_SERVICE_AUTH_AUDIENCE: ${TRADING_SERVICE_AUTH_AUDIENCE:-trading-api}
       PORTFOLIO_RUNTIME_STORE_PATH: /var/lib/portfolio/runtime.sqlite3
       PORTFOLIO_RUNTIME_EMBEDDED_WORKER: "false"
       PORTFOLIO_GOVERNANCE_BINDING_ENABLED: ${PORTFOLIO_GOVERNANCE_BINDING_ENABLED:-false}
       GOVERNANCE_API_URL: ${GOVERNANCE_API_URL:-}
       GOVERNANCE_API_AUTH_TOKEN: ${GOVERNANCE_API_AUTH_TOKEN:-}
-      DATABASE_URL: ${DATABASE_URL:-}
+      # LS 브로커 조회 배선(2026-08-19). 값은 `eb setenv`로 준다(README.md 3절) -
+      # `.env`는 `.dockerignore`에 걸려 이미지에 들어가지 않으므로 여기 나열한
+      # 키만 프로세스에 도달한다.
+      # 끄면 /ui/portfolio/live, /ui/portfolio/ledger, /ui/market/rankings가
+      # 전부 503이라 대시보드가 빈다. 읽기 전용이며 주문은 나가지 않는다.
+      # 기본값을 false로 두는 이유: LS 크리덴셜을 아직 setenv 하지 않은 배포가
+      # 조용히 브로커에 붙는 것보다, 켜는 쪽을 명시적으로 만드는 게 낫다.
+      ENABLE_LS_ORDER_EVENTS: ${ENABLE_LS_ORDER_EVENTS:-false}
+      # LS_ENV=PAPER면 조회 코드가 `_PAPER` 접미사 키를 먼저 찾고 없으면
+      # 접미사 없는 키로 떨어진다. 어느 쪽을 쓸지는 배포가 정하므로 양쪽을 다
+      # 통과시킨다. AWS는 PAPER 고정이다 - LIVE 주문 API는 아직 미결정이고
+      # 이 경로는 시장데이터·조회 read-only다(ADR-0007).
+      LS_ENV: ${LS_ENV:-PAPER}
+      LS_APP_KEY: ${LS_APP_KEY:-}
+      LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
+      LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}
+      LS_WS_BASE_URL: ${LS_WS_BASE_URL:-}
+      LS_ACCOUNT_NO: ${LS_ACCOUNT_NO:-}
+      LS_ACCOUNT_PWD: ${LS_ACCOUNT_PWD:-}
+      LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:-}
+      LS_APP_SECRET_KEY_PAPER: ${LS_APP_SECRET_KEY_PAPER:-}
+      LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
+      LS_WS_BASE_URL_PAPER: ${LS_WS_BASE_URL_PAPER:-}
+      LS_ACCOUNT_NO_PAPER: ${LS_ACCOUNT_NO_PAPER:-}
+      LS_ACCOUNT_PWD_PAPER: ${LS_ACCOUNT_PWD_PAPER:-}
+      LS_MAC_ADDRESS: ${LS_MAC_ADDRESS:-}
+      LS_OAUTH_SCOPE: ${LS_OAUTH_SCOPE:-oob}
+      # 회계 원장 durable 저장소. 체결일과 결제일(T+2) 사이에는 어떤 브로커
+      # 조회로도 그 거래를 다시 못 가져오므로, 컨테이너 교체로 사라지지 않도록
+      # 아래 portfolio_runtime_data 볼륨 안에 둔다(상대경로 금지).
+      ACCOUNTING_LEDGER_DB: /var/lib/portfolio/accounting_ledger.sqlite3
     volumes:
       - portfolio_runtime_data:/var/lib/portfolio
     ports:
@@ -63,6 +119,8 @@ services:
     command: ["python", "apps/api/portfolio_worker.py"]
     environment:
       PYTHONPATH: /app:/app/apps/api
+      DATABASE_URL: *operational-database-url
+      PORTFOLIO_DATA_MODE: "production"
       PORTFOLIO_RUNTIME_STORE_PATH: /var/lib/portfolio/runtime.sqlite3
       PORTFOLIO_RUNTIME_EMBEDDED_WORKER: "false"
       PORTFOLIO_WORKER_LEASE_SECONDS: ${PORTFOLIO_WORKER_LEASE_SECONDS:-60}
@@ -84,7 +142,40 @@ services:
         max-file: "3"
     environment:
       PAPER_DB: ${PAPER_DB:-true}
-      DATABASE_URL: ${DATABASE_URL:-}
+      DATABASE_URL: *operational-database-url
+      APP_ENV: production
+      TRADING_EXECUTION_MODE: PAPER
+      TRADING_BROKER_ADAPTER: paper
+      TRADING_DIRECTIVE_REPOSITORY: postgres
+      TRADING_DATABASE_ROLE: ${TRADING_DATABASE_ROLE:-svc_trading_api}
+      TRADING_AUTH_MODE: service
+      TRADING_SERVICE_AUTH_SECRET: ${TRADING_SERVICE_AUTH_SECRET:?A 32-byte trading service proof secret is required}
+      TRADING_SERVICE_AUTH_ISSUER: ${TRADING_SERVICE_AUTH_ISSUER:-portfolio-bff}
+      TRADING_SERVICE_AUTH_AUDIENCE: ${TRADING_SERVICE_AUTH_AUDIENCE:-trading-api}
+      TRADING_INTERNAL_SERVICE_AUTH_SECRET: ${TRADING_INTERNAL_SERVICE_AUTH_SECRET:?A separate 32-byte internal Trading auth secret is required}
+      TRADING_INTERNAL_SERVICE_AUTH_ISSUER: ${TRADING_INTERNAL_SERVICE_AUTH_ISSUER:-hedgefund-service-issuer}
+      TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE: ${TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE:-trading-api}
+      # This EB bundle intentionally does not run market-api. Deployment must
+      # provide a reachable private read-only market API; a dead service-name
+      # default would make every PLACE/SELL_ALL fail at runtime.
+      MARKET_API_URL: ${MARKET_API_URL:?A private read-only MARKET_API_URL is required}
+    mem_limit: 256m
+
+  trading-directive-worker:
+    build:
+      context: ./departments/02-trading
+    restart: unless-stopped
+    command: ["python", "-m", "directives.worker"]
+    environment:
+      DATABASE_URL: *operational-database-url
+      APP_ENV: production
+      TRADING_EXECUTION_MODE: PAPER
+      TRADING_BROKER_ADAPTER: paper
+      TRADING_DIRECTIVE_REPOSITORY: postgres
+      TRADING_DATABASE_ROLE: ${TRADING_DATABASE_ROLE:-svc_trading_api}
+      MARKET_API_URL: ${MARKET_API_URL:?A private read-only MARKET_API_URL is required}
+      TRADING_DIRECTIVE_WORKER_POLL_SECONDS: ${TRADING_DIRECTIVE_WORKER_POLL_SECONDS:-1.0}
+      TRADING_DIRECTIVE_WORKER_BATCH_SIZE: ${TRADING_DIRECTIVE_WORKER_BATCH_SIZE:-100}
     mem_limit: 256m
 
   # 이 컨테이너가 없으면 회계 원장이 영원히 비어 있다(oms/relay.py 상단 주석).
@@ -102,7 +193,7 @@ services:
       redis:
         condition: service_healthy
     environment:
-      DATABASE_URL: ${DATABASE_URL:-}
+      DATABASE_URL: *operational-database-url
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       RELAY_POLL_SECONDS: ${RELAY_POLL_SECONDS:-1.0}
       RELAY_MAX_ATTEMPTS: ${RELAY_MAX_ATTEMPTS:-12}
@@ -121,7 +212,7 @@ services:
         max-file: "3"
     environment:
       ACCOUNTING_MODE: ${ACCOUNTING_MODE:-PAPER_DB}
-      DATABASE_URL: ${DATABASE_URL:-}
+      DATABASE_URL: *operational-database-url
     mem_limit: 256m
 
   accounting-ledger-consumer:
@@ -136,14 +227,16 @@ services:
         max-file: "3"
     command: ["python", "departments/05-accounting-portfolio/ledger/consumer.py", "--serve"]
     environment:
-      DATABASE_URL: ${DATABASE_URL:-}
+      DATABASE_URL: *operational-database-url
+      ACCOUNTING_DATABASE_ROLE: ${ACCOUNTING_DATABASE_ROLE:-svc_accounting_ledger}
       LEDGER_CONSUMER_POLL_SECONDS: ${LEDGER_CONSUMER_POLL_SECONDS:-1.0}
     mem_limit: 256m
 
   # ── 공통 인프라 ────────────────────────────────────────────────────────────
   # ▶ 루트 compose의 redis를 참조할 수 없어(그 파일을 안 올린다) 여기 다시 선언한다.
   #   **이 Redis는 이 EB 환경 전용이다.** 로컬 스택이나 다른 부서와 데이터를 공유하지
-  #   않는다. Outbox Relay의 발행 대상일 뿐이고 상태의 원천은 Supabase다 - 이 컨테이너를
+  #   않는다. Outbox Relay의 발행 대상일 뿐이고 상태의 원천은 private operational
+  #   Postgres다 - 이 컨테이너를
   #   날려도 재발행되지 않은 봉투는 outbox에 PENDING으로 남아 있다.
   redis:
     image: redis:7-alpine

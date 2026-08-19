@@ -25,6 +25,112 @@ import intraday_ast_contract as formula  # noqa: E402
 
 
 NEGATIVE = frozenset({"REJECT", "GATE_HOLD", "KILLED", "DEMOTED"})
+SCREEN_SURVIVOR_RENDER_LIMIT = 3
+SCREEN_SURVIVOR_JSON_MAX_CHARS = 8192
+
+_QA_NOT_REQUIRED = "NOT_REQUIRED"
+_QA_PASS = "PASS"
+_QA_FAIL = "FAIL"
+_QA_WITHHELD = "WITHHELD"
+
+
+def _normalized_qa_verdict(value: object) -> str | None:
+    """Normalize explicit QA markers without guessing from performance.
+
+    ``qa_verified`` predates the structured reproduction result in a few
+    producers, so a true boolean is the legacy PASS marker.  False, null, and
+    incomplete structured markers remain withheld.  An explicit reproduction
+    verdict always takes precedence over that compatibility field.
+    """
+    if isinstance(value, bool):
+        return _QA_PASS if value else _QA_WITHHELD
+    if value is None:
+        return _QA_WITHHELD
+    if isinstance(value, dict):
+        for key in ("status", "verdict", "result"):
+            if key in value:
+                return _normalized_qa_verdict(value.get(key))
+        return _QA_WITHHELD
+    normalized = str(value).strip().upper().replace("-", "_")
+    if normalized in {"PASS", "PASSED", "VERIFIED", "SUCCESS"}:
+        return _QA_PASS
+    if normalized in {"FAIL", "FAILED", "REJECT", "REJECTED"}:
+        return _QA_FAIL
+    return _QA_WITHHELD
+
+
+def _qa_memory_status(row: dict) -> str:
+    """Return the independent-QA authority for evolutionary memory.
+
+    Marker absence is intentionally *not* a blanket failure: historical
+    calibration, screening, and gate-hold outcomes never required independent
+    forward reproduction and remain usable.  Conversely, ``SUBMIT_TO_QA`` is
+    itself a requirement marker, so an old row cannot become a positive parent
+    merely because its reproduction fields were never populated.
+    """
+    summary = row.get("oos_summary")
+    containers = (row, summary if isinstance(summary, dict) else {})
+    explicit: list[str] = []
+    for container in containers:
+        for key in ("qa_reproduction", "qa_reproduction_status", "qa_verdict"):
+            if key not in container:
+                continue
+            explicit.append(_normalized_qa_verdict(container.get(key)) or
+                            _QA_WITHHELD)
+    if explicit:
+        verdicts = set(explicit)
+        return explicit[0] if len(verdicts) == 1 else _QA_WITHHELD
+
+    # Compatibility marker used by older outcome projections.  It is consulted
+    # only when no richer reproduction verdict exists.
+    for container in containers:
+        if "qa_verified" in container:
+            return _normalized_qa_verdict(container.get("qa_verified")) or \
+                _QA_WITHHELD
+
+    lesson_markers = {
+        str(code).strip().upper()
+        for key in ("lesson_codes", "failed_criteria")
+        for code in (row.get(key) or ())
+    }
+    if "QA_REPRODUCTION_FAILED" in lesson_markers:
+        return _QA_FAIL
+    if lesson_markers & {
+            "QA_REPRODUCTION_PENDING", "QA_REPRODUCTION_INCONCLUSIVE"}:
+        return _QA_WITHHELD
+    if "QA_REPRODUCTION_PASSED" in lesson_markers:
+        return _QA_PASS
+
+    if str(row.get("decision") or "").upper() in {
+            "SUBMIT_TO_QA", "BLOCKED", "INCONCLUSIVE"}:
+        return _QA_WITHHELD
+    return _QA_NOT_REQUIRED
+
+
+def _positive_memory_outcome(row: dict) -> bool:
+    """Whether a row may supply positive evolutionary evidence."""
+    qa_status = str(row.get("qa_memory_status") or _qa_memory_status(row))
+    if qa_status in {_QA_FAIL, _QA_WITHHELD}:
+        return False
+    summary = row.get("oos_summary") or {}
+    decision = str(row.get("decision") or "").upper()
+    return decision in {"SUBMIT_TO_QA", "PROMOTED"} or (
+        (_number(summary, "mean_net_bps_per_opportunity") or 0.0) > 0.0)
+
+
+def _measured_memory_outcome(row: dict) -> bool:
+    """Whether a row may supply signed (positive or negative) evidence."""
+    qa_status = str(row.get("qa_memory_status") or _qa_memory_status(row))
+    if qa_status == _QA_WITHHELD:
+        return False
+    if qa_status == _QA_FAIL:
+        return True
+    return (
+        _number(row.get("oos_summary") or {},
+                "mean_net_bps_per_opportunity") is not None
+        or str(row.get("decision") or "").upper() in
+        NEGATIVE | {"SUBMIT_TO_QA", "PROMOTED"}
+    )
 
 
 @dataclass(frozen=True)
@@ -129,20 +235,10 @@ def _frequent_losing_subtrees(rows: list[dict], *, min_support: int = 2
 
     stats: dict[str, dict] = {}
     for ast_fp, trials in by_formula.items():
-        measured = any(
-            _number(row.get("oos_summary") or {},
-                    "mean_net_bps_per_opportunity") is not None
-            or str(row.get("decision") or "").upper() in NEGATIVE | {
-                "SUBMIT_TO_QA", "PROMOTED"}
-            for row in trials)
+        measured = any(_measured_memory_outcome(row) for row in trials)
         if not measured:
             continue
-        positive = any(
-            str(row.get("decision") or "").upper() in {
-                "SUBMIT_TO_QA", "PROMOTED"}
-            or (_number(row.get("oos_summary") or {},
-                        "mean_net_bps_per_opportunity") or 0.0) > 0.0
-            for row in trials)
+        positive = any(_positive_memory_outcome(row) for row in trials)
         shapes = _subtree_shapes(trials[0]["expr"])
         for key, shape in shapes.items():
             item = stats.setdefault(key, {
@@ -234,14 +330,9 @@ def _reusable_term_bank(rows: list[dict], leads: list[dict]) -> tuple[dict, ...]
                 item["events"].add(event)
 
     for row in rows:
-        summary = row.get("oos_summary") or {}
-        net = _number(summary, "mean_net_bps_per_opportunity")
-        decision = str(row.get("decision") or "").upper()
         screening = row.get("evidence_tier") == "SCREENING_ONLY"
-        positive = decision in {"SUBMIT_TO_QA", "PROMOTED"} or (
-            net is not None and net > 0.0)
-        measured = net is not None or decision in NEGATIVE | {
-            "SUBMIT_TO_QA", "PROMOTED"}
+        positive = _positive_memory_outcome(row)
+        measured = _measured_memory_outcome(row)
         if screening:
             evidence = "screening_positive" if positive else "screening_negative"
         elif positive:
@@ -456,14 +547,20 @@ def _lineage_tournaments(leads: list[dict], tested: list[dict]) -> tuple[dict, .
     for row in tested:
         tested_by_fp[row["ast_fingerprint"]].append(row)
 
+    def comparable_net(row: dict) -> float | None:
+        # A failed independent reproduction is valid negative structural
+        # evidence, not authority for the original performance point estimate.
+        if row.get("qa_memory_status") == _QA_FAIL:
+            return None
+        return _number(
+            row.get("oos_summary") or {}, "mean_net_bps_per_opportunity")
+
     def best(rows: list[dict]) -> dict | None:
         if not rows:
             return None
         return max(rows, key=lambda row: (
-            _number(row.get("oos_summary") or {}, "mean_net_bps_per_opportunity")
-            if _number(row.get("oos_summary") or {},
-                       "mean_net_bps_per_opportunity") is not None
-            else float("-inf")))
+            comparable_net(row)
+            if comparable_net(row) is not None else float("-inf")))
 
     tournaments = []
     seen = set()
@@ -480,10 +577,8 @@ def _lineage_tournaments(leads: list[dict], tested: list[dict]) -> tuple[dict, .
             continue
         seen.add(key)
         parent, child = best(tested_by_fp[parent_fp]), best(tested_by_fp[child_fp])
-        parent_net = (_number(parent.get("oos_summary") or {},
-                              "mean_net_bps_per_opportunity") if parent else None)
-        child_net = (_number(child.get("oos_summary") or {},
-                             "mean_net_bps_per_opportunity") if child else None)
+        parent_net = comparable_net(parent) if parent else None
+        child_net = comparable_net(child) if child else None
         child_decision = str(child.get("decision") or "") if child else ""
         if child is None:
             status = "PENDING_CHILD_EVALUATION"
@@ -547,17 +642,19 @@ def _generation_arm_audit(leads: list[dict], tested: list[dict]) -> dict:
         for formula_fp in proposed:
             trials = trials_by_formula.get(formula_fp, [])
             nets = [value for row in trials
+                    if row.get("qa_memory_status") != _QA_FAIL
                     if (value := _number(
                         row.get("oos_summary") or {},
                         "mean_net_bps_per_opportunity")) is not None]
-            decisions = {str(row.get("decision") or "").upper()
-                         for row in trials}
             if trials:
                 observations.append({
                     "ast_fingerprint": formula_fp,
                     "net_bps": median(nets) if nets else None,
-                    "gate_survivor": bool(
-                        decisions & {"SUBMIT_TO_QA", "PROMOTED"}),
+                    "gate_survivor": any(
+                        _positive_memory_outcome(row)
+                        and str(row.get("decision") or "").upper() in {
+                            "SUBMIT_TO_QA", "PROMOTED"}
+                        for row in trials),
                 })
         measured = [row for row in observations if row["net_bps"] is not None]
         summaries[arm] = {
@@ -607,6 +704,13 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
                 continue
         except (TypeError, ValueError):
             continue
+        qa_memory_status = _qa_memory_status(row)
+        if qa_memory_status == _QA_WITHHELD:
+            # The entire object below is prompt-facing evolutionary memory.
+            # Pending, inconclusive, or unverified forward outcomes therefore
+            # stay out of history, novelty, term, tournament, and breeding
+            # archives until an independent verdict exists.
+            continue
         fields, operators, clocks = set(), set(), set()
         _walk(expr, fields, operators, clocks)
         evidence_tier = str(row.get("evidence_tier") or "PRIMARY").upper()
@@ -615,15 +719,13 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
                 "semantic_fingerprint": fingerprint(plan),
                 "shape_fingerprint": _shape_fp(expr), "fields": sorted(fields),
                 "operators": sorted(operators), "clocks": sorted(clocks),
-                "evidence_tier": evidence_tier}
+                "evidence_tier": evidence_tier,
+                "qa_memory_status": qa_memory_status}
         parsed.append(item)
         used_events.add(plan["event"])
         used_contexts.update(plan["context"])
         used_qualities.update(plan["qualities"])
-        summary = row.get("oos_summary") or {}
-        decision = str(row.get("decision") or "").upper()
-        positive = (decision == "SUBMIT_TO_QA" or
-                    (_number(summary, "mean_net_bps_per_opportunity") or 0) > 0)
+        positive = _positive_memory_outcome(item)
         target = positive_components if positive else negative_components
         target.update(f"field:{value}" for value in fields)
         target.update(f"op:{value}" for value in operators)
@@ -640,12 +742,23 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
         # selected sidecar happened to print a larger number.
         best_pool = independent or group
         best = max(best_pool, key=lambda row: (
+            row.get("qa_memory_status") != _QA_FAIL,
             _number(row.get("oos_summary") or {}, "mean_net_bps_per_opportunity")
-            if _number(row.get("oos_summary") or {}, "mean_net_bps_per_opportunity")
-            is not None else float("-inf")))
-        summary = best.get("oos_summary") or {}
+            if (row.get("qa_memory_status") != _QA_FAIL
+                and _number(row.get("oos_summary") or {},
+                            "mean_net_bps_per_opportunity") is not None)
+            else float("-inf")))
+        # A failed reproduction is negative structural evidence, but its
+        # original performance point estimates have lost memory authority.
+        summary = (best.get("oos_summary") or {}) \
+            if best.get("qa_memory_status") != _QA_FAIL else {}
         history.append({
             "ast_fingerprint": best["ast_fingerprint"],
+            # A fingerprint is not executable material.  Preserve the exact,
+            # validated expression and semantic contract selected as `best` so
+            # the next scout/planner can reproduce a measured screening parent.
+            "intraday_signal_expr": best["expr"],
+            "semantic_plan": best["plan"],
             "semantic_fingerprint": semantic_fp, "shape_fingerprint": shape_fp,
             "event": best["plan"]["event"], "context": best["plan"]["context"],
             "qualities": best["plan"]["qualities"], "direction": best["plan"]["direction"],
@@ -656,6 +769,7 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
             "trials": len(group),
             "evidence_tiers": sorted({row["evidence_tier"] for row in group}),
             "best_evidence_tier": best["evidence_tier"],
+            "qa_memory_status": best["qa_memory_status"],
             "decisions": sorted({str(row.get("decision") or "UNDECIDED") for row in group}),
             "lesson_codes": sorted({str(code) for row in group
                                     for code in (row.get("lesson_codes") or [])}),
@@ -665,6 +779,10 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
             "best_net_bps": _number(summary, "mean_net_bps_per_opportunity"),
             "best_fill_rate": _number(summary, "fill_rate"),
             "best_sessions": _number(summary, "sessions"),
+            "best_opportunities": _number(summary, "opportunities"),
+            "candidate_role": str(best.get("candidate_role") or ""),
+            "entry_policy": str(best.get("entry_policy") or ""),
+            "coefficient_policy": str(best.get("coefficient_policy") or ""),
             "score_calibration_status": str(
                 (best.get("score_calibration") or {}).get("status") or
                 "NOT_RECORDED"),
@@ -747,7 +865,8 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
     for row in parsed:
         measured = row.get("empirical_influence")
         if (row.get("candidate_role") != "STRUCTURAL_ABLATION"
-                or not isinstance(measured, dict)):
+                or not isinstance(measured, dict)
+                or row.get("qa_memory_status") == _QA_FAIL):
             continue
         influence.append({
             "ablation_of_ast_fingerprint": str(
@@ -775,6 +894,7 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
         qd = row.get("residual_qd") or {}
         key = (row["ast_fingerprint"], str(qd.get("cell") or ""))
         if (behavior.get("status") != "PASS" or not qd.get("elite")
+                or row.get("qa_memory_status") == _QA_FAIL
                 or key in seen_residual_elites):
             continue
         seen_residual_elites.add(key)
@@ -827,6 +947,63 @@ def build(rows: list[dict], leads: list[dict] | None = None) -> IntradayMemory:
     )
 
 
+def _screen_survivor_json(row: dict) -> str:
+    """Bounded, executable memory for one measured screening-only parent.
+
+    The AST and semantic plan have already passed the governed parsers in
+    ``build``.  Keep the payload deliberately narrow: it is search material,
+    never an outcome that can carry promotion authority.
+    """
+    plan = row["semantic_plan"]
+    payload = {
+        "schema": "intraday-screen-survivor-parent-v1",
+        "ast_fingerprint": row["ast_fingerprint"],
+        "candidate_role": (
+            row["candidate_role"]
+            if row["candidate_role"] in {"LINKED_CANDIDATE", "STRUCTURAL_ABLATION"}
+            else "SCREENING_CANDIDATE"),
+        "intraday_signal_expr": row["intraday_signal_expr"],
+        "semantic_plan": plan,
+        "execution_contract": {
+            "output": plan["output"],
+            "execution": plan["execution"],
+            "horizon_seconds": plan["horizon_seconds"],
+            "entry_policy": row["entry_policy"],
+            "coefficient_policy": row["coefficient_policy"],
+        },
+        "evidence": {
+            "tier": "SCREENING_ONLY",
+            "mean_gross_bps_per_opportunity": row["best_gross_bps"],
+            "mean_implementation_drag_bps": row[
+                "best_implementation_drag_bps"],
+            "mean_net_bps_per_opportunity": row["best_net_bps"],
+            "opportunities": row["best_opportunities"],
+            "sessions": row["best_sessions"],
+            "caveat": (
+                "adaptive same-replay screen; sample size is descriptive only; "
+                "requires an independently preregistered primary experiment on "
+                "forward sessions unseen by this lineage"),
+        },
+        "authority": {
+            "promotion_authority": False,
+            "independent_primary_required": True,
+            "forward_new_sessions_required": True,
+        },
+        "allowed_child_operators": row["allowed_child_operators"],
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"))
+    # Governed ASTs are capped at formula.MAX_NODES (48), while every other
+    # value above comes from controlled vocabularies or numeric evidence.  Keep
+    # an explicit prompt-budget assertion so future payload growth cannot become
+    # silent context flooding.
+    if len(encoded) > SCREEN_SURVIVOR_JSON_MAX_CHARS:
+        raise ValueError(
+            "screen-survivor executable payload exceeds prompt budget: "
+            f"{len(encoded)} > {SCREEN_SURVIVOR_JSON_MAX_CHARS}")
+    return encoded
+
+
 def render(memory: IntradayMemory, *, limit: int = 6) -> str:
     lines = [
         "", "[INTRADAY AST 경험 메모리 - 원장에서 매 주기 재계산]",
@@ -844,7 +1021,7 @@ def render(memory: IntradayMemory, *, limit: int = 6) -> str:
             f"{row['event']} {row['direction']} context={row['context']} "
             f"quality={row['qualities']} fields={row['fields']} clocks={row['clocks_seconds']} "
             f"trials={row['trials']} decisions={row['decisions']} "
-            f"evidence={row['evidence_tiers']} "
+            f"evidence={row['evidence_tiers']} qa={row['qa_memory_status']} "
             f"gross={row['best_gross_bps']}bps "
             f"implementation_drag={row['best_implementation_drag_bps']}bps "
             f"net={row['best_net_bps']}bps fill={row['best_fill_rate']} "
@@ -902,6 +1079,18 @@ def render(memory: IntradayMemory, *, limit: int = 6) -> str:
         f"  [breeding parents] measured niche elites={len(memory.breeding_parents)}; "
         "only NET_SURVIVOR is alpha-like; SCREEN_SURVIVOR still needs an "
         "independent primary run, and other roles are controlled stepping stones")
+    screen_survivors = [row for row in memory.breeding_parents
+                        if row["breeding_role"] == "SCREEN_SURVIVOR"]
+    if screen_survivors:
+        lines.append(
+            "  [SCREEN_SURVIVOR executable JSON - screening only, no promotion; "
+            f"capped at {SCREEN_SURVIVOR_RENDER_LIMIT}]")
+        for row in screen_survivors[:SCREEN_SURVIVOR_RENDER_LIMIT]:
+            lines.append(f"    SCREEN_SURVIVOR_JSON={_screen_survivor_json(row)}")
+        if len(screen_survivors) > SCREEN_SURVIVOR_RENDER_LIMIT:
+            lines.append(
+                f"    ... {len(screen_survivors) - SCREEN_SURVIVOR_RENDER_LIMIT} "
+                "additional screening survivors omitted by prompt budget")
     for row in memory.breeding_parents[:5]:
         lines.append(
             f"    parent={row['ast_fingerprint']} role={row['breeding_role']} "

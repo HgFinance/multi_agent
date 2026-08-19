@@ -3,6 +3,8 @@ import "./globals.css";
 import "./office.css";
 import { COMPANY } from "../company.config";
 import { QueryProvider } from "./lib/QueryProvider";
+import { AuthGate, AuthProvider } from "./lib/AuthProvider";
+import { PortfolioSessionProvider } from "./lib/PortfolioSessionProvider";
 
 export const metadata: Metadata = {
   title: COMPANY.pageTitle,
@@ -28,7 +30,13 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
       </head>
       <body>
-        <QueryProvider>{children}</QueryProvider>
+        <QueryProvider>
+          <AuthProvider>
+            <AuthGate>
+              <PortfolioSessionProvider>{children}</PortfolioSessionProvider>
+            </AuthGate>
+          </AuthProvider>
+        </QueryProvider>
       </body>
     </html>
   );

@@ -63,7 +63,10 @@ WORKDIR /app
 
 # 저장소 경로 구조를 그대로 유지한다 - 모듈들이 Path(__file__) 상대로
 # sys.path 를 넣는다(_ROOT = parents[1] 등). 평평하게 복사하면 임포트가 깨진다.
-COPY departments/01-research/collectors ./departments/01-research/collectors
+# Factory/quant modules only need the shared env loader.  Copying the entire
+# collector directory would make retired or destructive entrypoints executable
+# inside an always-on factory image.
+COPY departments/01-research/collectors/source_registry.py ./departments/01-research/collectors/source_registry.py
 COPY departments/01-research/contracts  ./departments/01-research/contracts
 COPY departments/01-research/repository ./departments/01-research/repository
 COPY departments/01-research/factory    ./departments/01-research/factory

@@ -1,28 +1,69 @@
 # HgFinance 최종 Runtime 아키텍처
 
-상태: **구현 기준선(DESIGN BASELINE)**  
+상태: **상세 구현 기준선(DESIGN BASELINE)**
 범위: Natural Language Query + Mandate를 받아 부서 Task를 동적으로 라우팅하고, Hermes·LangGraph Worker·결정론 Engine·QA를 거쳐 비구속적 결과를 반환하는 TEST/INTEGRATION/PRODUCTION_ADVISORY 경로
 
-이 문서는 구현자가 별도 구두 설명 없이 기본 Pipeline을 구현할 수 있도록 작성한 실행 계약이다. Master Plan과 Domain API·DB Contract를 대체하지 않으며, 충돌 시 다음 우선순위를 따른다.
+> **Current snapshot link:** 현재 worker registry·실제 구현 상태·serving 설정은
+> [CURRENT_PROJECT_ARCHITECTURE.md](../CURRENT_PROJECT_ARCHITECTURE.md)를 우선한다.
+> 이 문서는 상세 실행 계약과 historical/design baseline이다.
 
-1. `docs/HEDGE_FUND_MASTER_PLAN.md`
-2. 이 문서
-3. `docs/02-engineering/contracts/*.json`
-4. 부서별 `hermes/config.yaml`, `SOUL.md`, `employee_workers.py`
-5. 구현 코드와 Prototype
+이 문서는 구현자가 별도 구두 설명 없이 runtime Pipeline을 구현할 수 있도록 작성한 실행 계약이다. Master Plan과 Domain API·DB Contract를 대체하지 않는다. 현재-state 충돌 시 최신 `origin/main` executable code/config와 [CURRENT_PROJECT_ARCHITECTURE.md](../CURRENT_PROJECT_ARCHITECTURE.md)를 우선하고, 이 문서는 runtime 세부를 보완한다. `HEDGE_FUND_MASTER_PLAN.md`는 target-state 문서다.
 
-## 1. 핵심 결정
+1. 최신 `origin/main` executable code/config 및 tracked runtime evidence
+2. `CURRENT_PROJECT_ARCHITECTURE.md`
+3. 이 문서의 runtime contract
+4. `docs/02-engineering/contracts/*.json`
+5. 부서별 `hermes/config.yaml`, `SOUL.md`, `employee_workers.py`
 
-- 개발자 4명(동규·재일·도현·영주)은 각각 두 부서의 Local Docker 개발 환경을 소유한다. 개발자 수는 Production Container 수나 사용자 Tenant 수가 아니다.
-- 전체 Runtime은 `API → CEO Hermes → Task/Kanban → Department Head Hermes → Runner → Tool/Evidence → Worker LLM → Worker Model Gateway → Worker Result → deterministic validation → Department Synthesis → Risk/QA Gate → CEO Synthesis` 순서다. Runner는 Worker를 부르기 전에 Tool/Evidence부터 모은다 — Worker가 근거 없이 추론하지 않도록 하기 위해서다. 이 순서는 문서 전체(§4.1, §6.3)에서 동일하게 유지한다.
-- CEO와 부서 Head Hermes는 Head Provider Gateway(Claude/Codex)를 통해 Planning, Delegation, Synthesis, Escalation을 담당한다. 주문 제출, Risk 승인, Ledger 수정, NAV 확정, Audit Finding 종결 권한은 없다. Head Provider Gateway와 Worker Model Gateway는 서로 다른 백엔드다(§7 참고).
-- Worker는 LLM을 사용해 근거를 해석하고 구조화된 비구속 결과를 만든다. LLM의 존재는 추론 기능을 뜻하지만 권한이나 binding decision을 뜻하지 않는다.
-- Runner는 상태 전이·Tool 호출·Retry·Timeout·Schema 검증을 담당한다. `risk-runner`, `qa-runner`, `desk-runner`, `back-office-runner`처럼 LLM이 없는 결정론 Runner도 존재한다.
-- Risk·QA·PIT·권한·상태 전이·OMS·Ledger의 강제 판정은 결정론 코드가 소유한다.
-- Supabase는 Canonical Operational DB다. Redis는 Queue/Cache/Event 전달 계층이며 원장이 아니다. EBS는 EC2 로컬 디스크이며 Canonical DB가 아니다. S3는 Model·LoRA·Dataset·Artifact·Backup 저장소다.
-- TEST의 Worker는 Ollama `qwen3:1.7b`를 사용할 수 있다. Production Worker는 Worker Model Gateway의 `Qwen2.5-14B-Instruct FP8`와 버전이 고정된 Department LoRA를 사용한다. 두 모델은 같은 Contract를 사용하지만 별도 Golden/Adversarial Eval을 통과해야 한다.
-- Claude/Codex Head는 Provider Adapter 뒤에 둔다. Claude 구독을 일반 API Credential처럼 자동화 Container에서 사용한다고 가정하지 않는다. Production Provider는 사용 계약·인증·비용·자동화 허용 범위가 확인된 Adapter만 사용한다.
-- Self-Evolution은 자동 Candidate 생성까지 자동화할 수 있지만, Profile·Skill·Tool Allowlist의 Production 변경은 HR → QA → CEO 승인 → Shadow → Rollback/Promotion 절차를 통과해야 한다.
+## 1. Runtime scope and ownership
+
+This document owns execution contracts, environment differences, runtime services,
+state/provenance, retries, fail-closed behavior, adapter resolution, Kanban
+boundaries, and blocking versus asynchronous gates. The current system overview,
+organization, serving summary, AWQ history, LoRA architecture, and bottlenecks
+belong to [CURRENT_PROJECT_ARCHITECTURE.md](../CURRENT_PROJECT_ARCHITECTURE.md).
+Readiness belongs to [PROJECT_IMPLEMENTATION_STATUS.md](../PROJECT_IMPLEMENTATION_STATUS.md),
+and worker authority detail belongs to [WORKER_ROLE_BOUNDARIES.md](WORKER_ROLE_BOUNDARIES.md).
+
+The runtime chain is:
+
+`API → CEO Hermes → Task/Kanban → Department Head Hermes → Runner →
+Tool/Evidence → Worker LLM when applicable → Worker Model Gateway → Worker
+Result → deterministic validation → Department Synthesis → Risk/QA Gate → CEO
+Synthesis`.
+
+The chain is a contract, not an assertion that every environment or department
+has a complete production implementation. Department heads, employee Workers,
+and deterministic runners are separate layers. Binding Risk, OMS, ledger/NAV,
+reconciliation, permission, and QA verdicts remain deterministic even when an
+LLM supplies interpretation or explanation.
+
+### QA execution topology clarification
+
+QA has two different paths and must not be described as either always blocking or
+always asynchronous:
+
+1. In the general response workflow, the supervisor can synthesize terminal
+   primary department results while QA runs independently in an asynchronous
+   governance lane. `orchestration/adapters/ceo_supervisor.py` records
+   `governance_plane=async_qa` and explicitly states that QA is not a synthesis
+   prerequisite.
+2. Inside the QA department, eligible conditional LangGraph workers are
+   concurrently fanned out and gathered by
+   `qa_employee_workers.py::run_employee_workers_async`; the deterministic
+   `qa-runner` result is then combined with the worker reports.
+3. The blocking `portfolio_recommendation` graph is different: its explicit
+   barriers preserve `research → quant → trading → risk → qa → accounting → ceo`.
+   For that graph, QA remains a gate after Risk precheck and is not converted to
+   async merely because the general response lane is async.
+
+```mermaid
+flowchart LR
+    P[Primary department results] --> C[CEO synthesis]
+    P --> Q[QA async governance lane]
+    Q --> F[Post-hoc feedback / audit finding]
+    C -. high-risk or decision request .-> B[Blocking Risk/QA gate]
+```
 
 ## 2. 환경 분리
 
@@ -32,7 +73,7 @@
 |---|---|---|---|---|
 | `DEV` | 개발자별 부서 구현·단위 Contract | Mock 또는 Ollama `qwen3:1.7b` | 개발자별 Local Supabase/Postgres | 금지 |
 | `INTEGRATION` | CEO부터 8개 Profile까지 전체 Handoff 연결 | Deterministic Stub 또는 TEST Ollama | 별도 Integration Supabase | 금지 |
-| `PRODUCTION_ADVISORY` | AWS에서 실제 데이터 기반 추천·분석 | Qwen2.5-14B FP8 + LoRA, 승인된 Head Provider | 별도 Production Supabase | 주문·Ledger·Broker 쓰기 금지 |
+| `PRODUCTION_ADVISORY` | AWS에서 실제 데이터 기반 추천·분석 | `origin/main` 기준 Qwen2.5-14B AWQ + LoRA, 승인된 Head Provider | 별도 Production Supabase | 주문·Ledger·Broker 쓰기 금지 |
 | `PRODUCTION_LIVE` | 실제 Broker·운영 Posting | 별도 승인 필요 | 운영 DB | 현재 기본 OFF |
 
 `PRODUCTION_ADVISORY`는 운영 인프라를 사용하는 Read-only/Paper 단계다. `PRODUCTION_LIVE`로 자동 승격하지 않는다.
@@ -120,7 +161,7 @@ Department Head Hermes
 Head Provider Gateway      LangGraph Runner / Worker Runtime
   ├─ Claude Adapter           ↓
   └─ Codex Adapter          Worker Model Gateway
-                              ├─ Qwen2.5-14B-Instruct FP8
+├─ Qwen2.5-14B-Instruct-AWQ (origin/main)
                               └─ Department LoRA Adapter
 ```
 
@@ -137,8 +178,9 @@ CEO/Department Head Hermes와 LangGraph Worker는 서로 다른 모델 서버 �
 | `head-provider-gateway` | CEO/Department Head의 Claude/Codex Provider Adapter 호출 | 내부 |
 | `runner` | LangGraph 상태·Tool·Retry·검증 | 내부 |
 | `worker-runtime` | Worker Graph 실행 | 내부 |
-| `worker-model-gateway` | Worker의 Qwen2.5-14B FP8 호출과 Department LoRA Adapter 선택 | 내부 |
+| `worker-model-gateway` | Worker의 Qwen2.5-14B AWQ 호출과 Department LoRA Adapter 선택 | 내부 |
 | `redis` | Queue, Event, Cache | 내부 |
+| `qa-reproduction-worker` | `origin/main`의 accepted forward evidence를 lease-fenced read-only market transaction으로 재현하고 PASS/FAIL/INCONCLUSIVE를 기록 | 내부; runtime health 미검증 |
 | `migration-runner` | Migration/Seed One-shot | 상주 금지 |
 
 8개 Hermes Profile은 논리적 Runtime 8개다. 비용 절감을 위해 같은 EC2에 배치할 수 있지만, Profile·Memory·Credential·Tool Allowlist는 각각 격리한다. Trading과 Risk의 권한을 같은 Process/Token으로 합치지 않는다.
@@ -172,7 +214,7 @@ flowchart TB
         end
 
         HPG["Head Provider Gateway<br/>Claude Adapter / Codex Adapter"]
-        MODEL["Worker Model Gateway<br/>Qwen2.5-14B FP8<br/>Multi-LoRA"]
+MODEL["Worker Model Gateway<br/>Qwen2.5-14B AWQ<br/>Multi-LoRA"]
         REDIS["Redis<br/>Queue / Cache / Event"]
     end
 
@@ -350,7 +392,7 @@ STEP 4(Risk) Task의 `agent-task-result.v1` 예시:
     {"type": "portfolio-snapshot", "id": "artifact-pf-0142", "content_hash": "sha256:cccc..."},
     {"type": "risk-calc", "id": "artifact-risk-0142", "content_hash": "sha256:dddd..."}
   ],
-  "model_version": "qwen2.5-14b-instruct-fp8",
+"model_version": "qwen2.5-14b-instruct-awq",
   "adapter_version": "risk-lora:v1",
   "trace_id": "trace-2026-0142"
 }
@@ -473,7 +515,7 @@ Result 예시:
   "decision": "RECOMMEND",
   "confidence": 0.82,
   "escalate": false,
-  "model_version": "qwen2.5-14b-instruct-fp8",
+  "model_version": "qwen2.5-14b-instruct-awq",
   "adapter_version": "research-lora:v1",
   "trace_id": "trace-2026-0081",
   "status": "COMPLETED",
@@ -507,7 +549,7 @@ Runner가 Worker를 호출할 때 Task에서 `worker-context.v1` 레코드를 �
 | `model_version`, `adapter_version` | — (`worker-context.v1`엔 없음, `profile_version`만 존재) | Model Gateway 응답에서 채워 Task에 기록 |
 | `evidence_refs` | `output_refs` 중 Evidence 유형 | `evidence_refs`는 `output_refs`의 명시적 별칭이지 별도 저장소가 아님 |
 
-즉 `worker-context.v1`은 수정하지 않고, Runner/Head 구현체가 이 표의 매핑으로 두 계약 사이를 변환한다. Phase 0 Pydantic Contract 작업은 `agent-task-context.v1`을 신규로 정의하는 작업이며, `worker-context.v1`은 기존 그대로 재사용한다.
+즉 `worker-context.v1`은 수정하지 않고, Runner/Head 구현체가 이 표의 매핑으로 두 계약 사이를 변환한다. Contract 정의 작업은 `agent-task-context.v1`을 신규로 정의하는 작업이며, `worker-context.v1`은 기존 그대로 재사용한다.
 
 `task_id` 하나가 `context_id` 여러 개를 가질 수 있다는 것은, Department Head가 Task 하나를 처리하려고 Worker 여러 명을 순차·병렬로 호출하고 그 결과를 Fan-in해서 Task 결과 하나로 합친다는 뜻이다.
 
@@ -685,7 +727,7 @@ Model Layer
 │     └─ 승인된 Provider만 (§1 참고 — 구독 Credential 자동화 사용 금지)
 │
 └── Worker Model Gateway    (LangGraph Worker 전용)
-      └─ Qwen2.5-14B-Instruct FP8
+└─ Qwen2.5-14B-Instruct-AWQ
             ├─ research-lora
             ├─ quant-lora
             ├─ risk-lora
@@ -705,7 +747,7 @@ Worker마다 모델을 하나씩 실행하지 않는다.
 research-worker ─┐
 risk-worker ─────┼→ worker-model-gateway
 qa-worker ───────┘       ↓
-                 Qwen2.5-14B-Instruct FP8
+Qwen2.5-14B-Instruct-AWQ
                  + adapter_id/version
 ```
 
@@ -726,7 +768,7 @@ qa-worker ───────┘       ↓
 
 LoRA에는 부서 도메인 표현 방식, 출력 형식, 반복 Reasoning Pattern, Worker Role별 응답 스타일만 넣는다. 최신 시장 데이터, Portfolio·Cash·Position, Mandate 원장, Production Credential, 변경되는 정책 원문, 개인정보는 넣지 않는다. 최신 사실·정책·Portfolio는 DB/RAG에서 `input_refs`와 `evidence_refs`로 공급한다.
 
-`qwen3:1.7b` TEST에서 `qwen2.5-14b-instruct-fp8` Production으로 바꾸는 것은 Model Migration이다. Base Model Digest, Adapter Version, Prompt/Skill Version, Golden/Adversarial 결과, Tool Call 성공률, Schema 실패율, Timeout/VRAM/Latency, Regression 결과를 기록한다.
+`qwen3:1.7b` TEST에서 `qwen2.5-14b-instruct-awq` Production으로 바꾸는 것은 Model Migration이다. Base Model Digest, Adapter Version, Prompt/Skill Version, Golden/Adversarial 결과, Tool Call 성공률, Schema 실패율, Timeout/VRAM/Latency, Regression 결과를 기록한다.
 
 ## 8. Supabase·Redis·S3·EBS 계약
 
@@ -835,69 +877,20 @@ Agent Run / QA / Incident / SLA / Cost Signal
 - Prompt·Secret·원문 개인정보를 Trace와 Handoff에 그대로 저장하지 않는다.
 - Log·Error·Health Response에서 Secret을 Redact한다.
 
-## 12. 구현 순서
+## 12. Runtime dependency ordering
 
-### Phase 0: Contract
+This document does not maintain a second project roadmap. Current readiness and milestones are owned by [PROJECT_IMPLEMENTATION_STATUS.md](../PROJECT_IMPLEMENTATION_STATUS.md), the [Next Milestones](../CURRENT_PROJECT_ARCHITECTURE.md#15-next-milestones) section of the current architecture, and [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md).
 
-1. `agent-task-context.v1`/`agent-task-result.v1` Pydantic Contract 작성
-2. 12개 기본 필드와 시스템 필드 검증
-3. `input_refs`/`evidence_refs` Artifact Contract 고정
-4. Schema Contract Test 작성
+The runtime-specific boot and execution dependency order remains:
 
-### Phase 1: Deterministic Routing
+1. Contract schemas and envelope validation must exist before routing.
+2. Deterministic intent/mandate validation and the allow-listed route registry must run before delegation.
+3. Case, task, dependency, and idempotent event state must exist before Kanban execution.
+4. Department Head, runner, tool/evidence, and Worker Gateway/adapter resolution must be initialized before a Worker result is accepted.
+5. Result schema validation, timeout/retry/replay recording, and deterministic gates must complete before synthesis or any state mutation.
+6. Risk, QA, accounting, OMS, and read-only production-advisory boundaries must remain enforced before a response is released.
 
-1. Intent와 Mandate 입력 생성
-2. Allow-listed Route Registry 작성
-3. CEO LLM Planner는 Route 제안만 수행
-4. 결정론 Validator가 부서·Dependency·금지 권한 검증
-5. Planner 실패 시 안전한 Fallback/`ESCALATE`
-
-### Phase 2: Case/Task/Kanban
-
-1. Case 생성
-2. Task와 Parent/Child Dependency 생성
-3. Supabase Task Event 저장
-4. Redis에 Idempotent Event 발행
-5. Read-only Kanban Projection 구현
-
-### Phase 3: Head/Runner/Worker
-
-1. Department Head Registry 로드
-2. Runner StateGraph 구현
-3. Tool Allowlist와 Tool Gateway 연결
-4. Worker LLM 호출
-5. Result Schema 검증
-6. Timeout/Retry/Replay 기록
-
-### Phase 4: Data/Model
-
-1. Local Supabase/Integration Supabase/Production Supabase 분리
-2. Supabase RLS와 Service Role 분리
-3. Redis Queue와 Recovery 검증
-4. Local Ollama `qwen3:1.7b` 연결
-5. Worker Model Gateway Adapter Contract 연결
-6. Production Qwen2.5-14B FP8 단일 요청 Benchmark
-7. LoRA Registry·Version·Rollback 연결
-
-### Phase 5: Self-Evolution
-
-1. Run/QA/Incident Scorecard 수집
-2. Improvement Candidate 생성
-3. Skill/Profile Draft 저장
-4. QA/CEO Approval Gate
-5. Shadow/Canary/Rollback
-
-### Phase 6: Production Advisory
-
-1. AWS EC2·EBS·Docker·GPU Runtime
-2. Reverse Proxy/TLS/Secret 주입
-3. API·CEO·Heads·Runner·Worker 배포
-4. Supabase/S3/Redis 연결
-5. Read-only Query Acceptance
-6. 운영 Log/Metric/Backup/Recovery Drill
-
-`PRODUCTION_LIVE`의 Broker·Order·Ledger Posting은 별도 승인과 Acceptance가 끝나기 전까지 구현·활성화하지 않는다.
-
+These are runtime contracts and dependency constraints, not implementation phases. Acceptance Scenarios below remain the validation examples for these contracts.
 ## 13. Acceptance Scenarios
 
 ### 13.1 주식 추천

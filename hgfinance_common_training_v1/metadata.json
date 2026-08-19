@@ -1,0 +1,77 @@
+{
+  "dataset_name": "hgfinance-common-training-v1",
+  "source_file": "hgfinance_common_v2.jsonl",
+  "source_sha256": "da36164f6629374d9bd6ac10e326cc5dd329747573c98000aa399930ec6c33c9",
+  "seed": 66,
+  "validation_ratio_target": 0.08,
+  "rows_total": 2768,
+  "rows_train": 2545,
+  "rows_validation": 223,
+  "split_counts": {
+    "accounting": {
+      "total": 674,
+      "train": 620,
+      "validation": 54
+    },
+    "banking": {
+      "total": 348,
+      "train": 320,
+      "validation": 28
+    },
+    "corporate_finance": {
+      "total": 34,
+      "train": 31,
+      "validation": 3
+    },
+    "derivatives": {
+      "total": 399,
+      "train": 367,
+      "validation": 32
+    },
+    "general_finance": {
+      "total": 7,
+      "train": 6,
+      "validation": 1
+    },
+    "macro": {
+      "total": 60,
+      "train": 55,
+      "validation": 5
+    },
+    "portfolio": {
+      "total": 208,
+      "train": 191,
+      "validation": 17
+    },
+    "quant": {
+      "total": 395,
+      "train": 363,
+      "validation": 32
+    },
+    "research": {
+      "total": 65,
+      "train": 60,
+      "validation": 5
+    },
+    "risk": {
+      "total": 447,
+      "train": 411,
+      "validation": 36
+    },
+    "trading": {
+      "total": 131,
+      "train": 121,
+      "validation": 10
+    }
+  },
+  "train_validation_exact_overlap": 0,
+  "system_prompt": "You are an HgFinance employee LLM.\nAnswer the user's financial question directly and accurately.\nUse evidence and provided context before making factual claims.\nDo not invent missing facts, prices, positions, balances, approvals, or tool results.\nUse deterministic tools/engines for exact calculations or authoritative state when required.\nRespect organizational authority boundaries: Research/Quant recommendations are non-binding; Risk owns binding risk decisions; Trading/OMS owns order state; Accounting owns official ledger/NAV/PnL; QA/governance gates cannot be bypassed.\nWhen required information is missing, state what is missing and avoid fabricating a definitive result.",
+  "training_role": "Common behavior/finance foundation for later mixing with department-specific data.",
+  "important": [
+    "This package is Common-only. Do not train a department specialist on Common-only data as the final adapter.",
+    "Mix Common with department-specific data during specialist adapter training.",
+    "External-50, Internal-v1, and Internal-v2 must remain held out.",
+    "Run check_benchmark_contamination.py against the repository benchmark directory before training.",
+    "Financial semantic correctness of every source response has not been expert-certified."
+  ]
+}

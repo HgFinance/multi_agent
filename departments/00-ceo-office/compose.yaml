@@ -87,6 +87,11 @@ services:
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      # Discord 메시지는 반드시 BFF canonical ingress를 거쳐 웹 질의와 같은
+      # root 카드/권한 경계를 사용한다. 전용 bearer 값이 없으면 Compose가
+      # fail-closed 하며, 값 자체는 이미지나 프로필에 저장하지 않는다.
+      HGFINANCE_DISCORD_INGRESS_URL: http://portfolio-bff:8000/ui/ceo/ingress
+      CEO_DISCORD_INGRESS_API_KEY: ${CEO_DISCORD_INGRESS_API_KEY:?CEO_DISCORD_INGRESS_API_KEY is required}
       # Reuse this existing CEO gateway as the authenticated internal API
       # runtime. No second CEO gateway is started in portfolio-bff.
       API_SERVER_ENABLED: "true"

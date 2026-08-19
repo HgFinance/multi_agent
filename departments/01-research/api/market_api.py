@@ -70,15 +70,21 @@ _iid2sym: dict = {}
 
 
 def get_ts():
+    """Return a reusable client connection without mutating server session GUCs.
+
+    ``TIMESCALE_DATABASE_URL`` is normally the direct Timescale service, but
+    deployments may supply a Supavisor transaction-pool endpoint.  A session
+    ``SET default_transaction_read_only`` followed by ``commit`` would then be
+    left on a server connection that can be handed to an unrelated writer.
+    Read-only mode is therefore established inside each query transaction.
+    """
+
     global _ts
     import psycopg2
 
     if _ts is not None and not _ts.closed:
         return _ts
     _ts = psycopg2.connect(load_project_env()["TIMESCALE_DATABASE_URL"], connect_timeout=10)
-    with _ts.cursor() as cur:
-        cur.execute("set default_transaction_read_only = on")
-    _ts.commit()
     return _ts
 
 
@@ -115,6 +121,10 @@ def _query(sql: str, params: tuple):
     conn = get_ts()
     try:
         with conn.cursor() as cur:
+            # Must be the first statement in this transaction.  Unlike a
+            # session/default GUC, this mode disappears at rollback and cannot
+            # contaminate another client behind a transaction pooler.
+            cur.execute("set transaction read only")
             cur.execute(sql, params)
             cols = [d[0] for d in cur.description]
             rows = cur.fetchall()

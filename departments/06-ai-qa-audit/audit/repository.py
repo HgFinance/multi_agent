@@ -38,6 +38,8 @@ import uuid
 from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
+
+from audit.db_session import configure_writer_connection, runtime_session_dsn
 from uuid import UUID
 
 try:
@@ -62,6 +64,14 @@ class QaDecisionPersistenceError(RuntimeError):
 
 class EvalPersistenceConflict(QaDecisionPersistenceError):
     """A replay changed an immutable EvalRun/EvalResult payload."""
+
+
+class DomainEventConflict(QaDecisionPersistenceError):
+    """An existing event ID was replayed with different canonical content."""
+
+
+class ForwardQaRequestConflict(QaDecisionPersistenceError):
+    """A forward-QA event conflicts with its immutable outbox/request."""
 
 
 @lru_cache(maxsize=1)
@@ -92,18 +102,72 @@ class PostgresAuditRepository:
     def __init__(self, pool: Any) -> None:
         self._pool = pool
 
+    def _get_connection(self):
+        """Borrow a connection with an explicit READ WRITE transaction mode.
+
+        Supabase's database default is deliberately read-only.  This
+        repository is the canonical QA writer, so relying on a pooled
+        backend's inherited default makes writes fail nondeterministically.
+        psycopg2's ``set_session(readonly=False)`` records the transaction
+        characteristic without changing the server-wide default.  Injected
+        unit-test connections may omit that driver method.
+        """
+        conn = self._pool.getconn()
+        try:
+            configure_writer_connection(conn)
+            return conn
+        except Exception:
+            rollback = getattr(conn, "rollback", None)
+            if rollback is not None:
+                try:
+                    rollback()
+                except Exception:
+                    pass
+            try:
+                self._pool.putconn(conn, close=True)
+            except TypeError:
+                self._pool.putconn(conn)
+            raise
+
     @classmethod
     def connect(
         cls, dsn: str, *, minconn: int = 1, maxconn: int = 4
     ) -> PostgresAuditRepository:
         _, ThreadedConnectionPool = _load_postgres_driver()
-        return cls(ThreadedConnectionPool(minconn, maxconn, dsn))
+        return cls(ThreadedConnectionPool(
+            minconn, maxconn, runtime_session_dsn(dsn)
+        ))
 
     @staticmethod
     def _test_mode() -> bool:
         return os.environ.get("RISK_QA_RUNTIME", "").lower() == "test"
     def close(self) -> None:
         self._pool.closeall()
+
+    def runtime_database_status(self) -> dict[str, str]:
+        """Prove that a writable scoped role is active on a real transaction."""
+
+        conn = self._get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select session_user, current_user, "
+                    "current_setting('transaction_read_only')"
+                )
+                session_user, current_user, read_only = cur.fetchone()
+            conn.commit()
+            if str(read_only).lower() not in {"off", "false"}:
+                raise RuntimeError("canonical QA connection is read-only")
+            return {
+                "session_user": str(session_user),
+                "current_user": str(current_user),
+                "transaction_read_only": str(read_only),
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._pool.putconn(conn)
 
     def record_domain_event(
         self,
@@ -117,13 +181,70 @@ class PostgresAuditRepository:
     ) -> None:
         """Redis Event 수신을 Canonical Audit Event로 멱등 기록한다."""
 
-        self._execute(
+        conn = self._get_connection()
+        try:
+            with conn.cursor() as cur:
+                self._record_domain_event_exact(
+                    cur,
+                    event_id=event_id,
+                    event_type=event_type,
+                    source_department=source_department,
+                    trace_id=trace_id,
+                    payload=payload,
+                    occurred_at=occurred_at,
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            self._pool.putconn(conn)
+
+    @staticmethod
+    def _json_object(value: Any, *, field: str) -> dict[str, Any]:
+        if isinstance(value, str):
+            value = json.loads(value)
+        if not isinstance(value, dict):
+            raise ForwardQaRequestConflict(f"{field} must be a JSON object")
+        return value
+
+    @staticmethod
+    def _as_datetime(value: Any) -> datetime:
+        if isinstance(value, datetime):
+            return value
+        if not isinstance(value, str) or not value.strip():
+            raise ForwardQaRequestConflict("occurred_at is missing")
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+    @staticmethod
+    def _same_datetime(left: Any, right: Any) -> bool:
+        left_dt = PostgresAuditRepository._as_datetime(left)
+        right_dt = PostgresAuditRepository._as_datetime(right)
+        if left_dt.tzinfo is not None and right_dt.tzinfo is not None:
+            return left_dt.astimezone(timezone.utc) == right_dt.astimezone(
+                timezone.utc
+            )
+        return left_dt == right_dt
+
+    def _record_domain_event_exact(
+        self,
+        cur: Any,
+        *,
+        event_id: UUID,
+        event_type: str,
+        source_department: str,
+        trace_id: UUID,
+        payload: dict[str, Any],
+        occurred_at: datetime,
+    ) -> None:
+        cur.execute(
             """
             insert into audit.domain_events (
                 event_id, event_type, source_department, trace_id,
                 payload, occurred_at, status
             ) values (%s, %s, %s, %s, %s, %s, 'PROCESSED')
             on conflict (event_id) do nothing
+            returning event_id
             """,
             (
                 event_id,
@@ -134,9 +255,212 @@ class PostgresAuditRepository:
                 occurred_at,
             ),
         )
+        if cur.fetchone() is not None:
+            return
+        cur.execute(
+            """
+            select event_type, source_department, trace_id::text,
+                   payload, occurred_at, status
+              from audit.domain_events
+             where event_id = %s
+            """,
+            (event_id,),
+        )
+        existing = cur.fetchone()
+        if existing is None:
+            raise DomainEventConflict("domain event conflict row disappeared")
+        existing_payload = self._json_object(
+            existing[3], field="existing domain payload"
+        )
+        if (
+            str(existing[0]) != event_type
+            or str(existing[1]) != source_department
+            or UUID(str(existing[2])) != UUID(str(trace_id))
+            or existing_payload != payload
+            or not self._same_datetime(existing[4], occurred_at)
+            or str(existing[5]) != "PROCESSED"
+        ):
+            raise DomainEventConflict(
+                "event_id was replayed with different canonical content"
+            )
+
+    def accept_intraday_forward_qa_request(self, event: dict[str, Any]) -> None:
+        """Atomically accept one canonical stock-only forward reproduction.
+
+        This transaction records the domain event, immutable reproduction
+        request, and durable work item.  It deliberately does not execute the
+        long-running reproduction and grants no promotion authority.
+        """
+
+        event_id = UUID(str(event.get("event_id", "")))
+        event_type = str(event.get("event_type", ""))
+        trace_id = UUID(str(event.get("trace_id", "")))
+        occurred_at = self._as_datetime(event.get("occurred_at"))
+        payload = self._json_object(event.get("payload"), field="event payload")
+        conn = self._get_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    select outbox_id, qa_handoff_id::text, event_id::text,
+                           event_type, producer, trace_id::text, occurred_at,
+                           event_payload, payload_ref, reproduction_contract,
+                           payload_fingerprint
+                      from quant.intraday_forward_qa_outbox
+                     where event_id = %s
+                       for share
+                    """,
+                    (event_id,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    raise ForwardQaRequestConflict(
+                        "forward QA event has no authoritative outbox row"
+                    )
+                canonical_payload = self._json_object(
+                    row[7], field="outbox event_payload"
+                )
+                payload_ref = self._json_object(row[8], field="payload_ref")
+                contract = self._json_object(
+                    row[9], field="reproduction_contract"
+                )
+                if (
+                    UUID(str(row[2])) != event_id
+                    or str(row[3]) != event_type
+                    or str(row[4]) != "quant-backtest-department"
+                    or UUID(str(row[5])) != trace_id
+                    or not self._same_datetime(row[6], occurred_at)
+                    or canonical_payload != payload
+                ):
+                    raise ForwardQaRequestConflict(
+                        "forward QA delivery changed immutable outbox content"
+                    )
+                if (
+                    event_type != "quant.intraday.forward.qa_requested.v1"
+                    or contract.get("decision") != "PASS"
+                    or contract.get("hypothesis_status") != "SUPPORTED"
+                    or contract.get("asset_class") != "EQUITY"
+                    or contract.get("instrument_type") != "STOCK"
+                    or contract.get("asset_scope")
+                    != "KRX_ACTIVE_STOCK_ONLY"
+                    or contract.get("product_filter")
+                    != "REFERENCE_INSTRUMENT_TYPE_STOCK_ONLY"
+                    or contract.get("requested_action")
+                    != "INDEPENDENT_QA_REPRODUCTION"
+                    or contract.get("promotion_authority") is not False
+                    or int(contract.get("instrument_count", 0)) < 1
+                    or int(contract.get("session_count", 0)) < 20
+                ):
+                    raise ForwardQaRequestConflict(
+                        "forward QA request is not a stock-only PASS contract"
+                    )
+
+                self._record_domain_event_exact(
+                    cur,
+                    event_id=event_id,
+                    event_type=event_type,
+                    source_department="quant-backtest-department",
+                    trace_id=trace_id,
+                    payload=payload,
+                    occurred_at=occurred_at,
+                )
+                request_values = (
+                    event_id,
+                    event_id,
+                    int(row[0]),
+                    UUID(str(row[1])),
+                    UUID(str(contract["forward_confirmation_id"])),
+                    UUID(str(contract["report_revision_id"])),
+                    UUID(str(contract["experiment_id"])),
+                    UUID(str(contract["hypothesis_id"])),
+                    "PASS",
+                    "SUPPORTED",
+                    "EQUITY",
+                    "STOCK",
+                    int(contract["instrument_count"]),
+                    str(contract["instrument_set_fingerprint"]),
+                    int(contract["session_count"]),
+                    str(contract["session_set_fingerprint"]),
+                    _json_param(payload_ref),
+                    _json_param(contract),
+                    _json_param(payload),
+                    str(row[10]),
+                    occurred_at,
+                    "qa-forward-consumer/v1",
+                )
+                cur.execute(
+                    """
+                    insert into audit.intraday_forward_reproduction_requests (
+                      reproduction_request_id, event_id, outbox_id,
+                      qa_handoff_id, forward_confirmation_id,
+                      report_revision_id, experiment_id, hypothesis_id,
+                      decision, hypothesis_status, asset_class,
+                      instrument_type, instrument_count,
+                      instrument_set_fingerprint, session_count,
+                      session_set_fingerprint, payload_ref,
+                      reproduction_contract, event_payload,
+                      payload_fingerprint, requested_at, accepted_by
+                    ) values (
+                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    )
+                    on conflict (event_id) do nothing
+                    returning reproduction_request_id
+                    """,
+                    request_values,
+                )
+                if cur.fetchone() is None:
+                    cur.execute(
+                        """
+                        select outbox_id, qa_handoff_id::text,
+                               reproduction_contract, event_payload,
+                               payload_fingerprint
+                          from audit.intraday_forward_reproduction_requests
+                         where event_id = %s
+                        """,
+                        (event_id,),
+                    )
+                    existing = cur.fetchone()
+                    if (
+                        existing is None
+                        or int(existing[0]) != int(row[0])
+                        or UUID(str(existing[1])) != UUID(str(row[1]))
+                        or self._json_object(
+                            existing[2], field="existing reproduction contract"
+                        )
+                        != contract
+                        or self._json_object(
+                            existing[3], field="existing event payload"
+                        )
+                        != payload
+                        or str(existing[4]) != str(row[10])
+                    ):
+                        raise ForwardQaRequestConflict(
+                            "event replay conflicts with reproduction request"
+                        )
+                cur.execute(
+                    """
+                    insert into audit.intraday_forward_reproduction_work_items (
+                      reproduction_request_id, status, next_attempt_at
+                    ) values (%s, 'READY', now())
+                    on conflict (reproduction_request_id) do nothing
+                    """,
+                    (event_id,),
+                )
+            conn.commit()
+        except (DomainEventConflict, ForwardQaRequestConflict):
+            conn.rollback()
+            raise
+        except Exception as exc:
+            conn.rollback()
+            raise QaDecisionPersistenceError(
+                f"forward QA request acceptance failed: {exc}"
+            ) from exc
+        finally:
+            self._pool.putconn(conn)
 
     def _execute(self, query: str, params: tuple) -> None:
-        conn = self._pool.getconn()
+        conn = self._get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute(query, params)
@@ -150,7 +474,7 @@ class PostgresAuditRepository:
     def save_qa_assessment(self, assessment: QaAssessment) -> None:
         """QA Decision과 Claim Check/Finding을 하나의 DB 트랜잭션으로 기록한다."""
 
-        conn = self._pool.getconn()
+        conn = self._get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -213,8 +537,8 @@ class PostgresAuditRepository:
                             insert into audit.findings (
                                 finding_id, fund_id, finding_type, severity,
                                 artifact_version_id, description, owner,
-                                trace_id, created_at
-                            ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                opened_by, trace_id, created_at
+                            ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                             on conflict (finding_id) do nothing
                             """,
                             (
@@ -224,6 +548,7 @@ class PostgresAuditRepository:
                                 finding.severity.value,
                                 finding.artifact_version_id,
                                 finding.description,
+                                finding.opened_by,
                                 finding.opened_by,
                                 finding.trace_id,
                                 finding.created_at,
@@ -412,7 +737,7 @@ class PostgresAuditRepository:
 
     def insert_incident_event(self, event: IncidentEventRecord) -> None:  # noqa: F811
         """Insert Incident parent and event atomically."""
-        conn = self._pool.getconn()
+        conn = self._get_connection()
         try:
             with conn.cursor() as cur:
                 self._ensure_incident_parent(
@@ -451,7 +776,7 @@ class PostgresAuditRepository:
 
     def insert_corrective_action(self, action: CorrectiveActionRecord) -> None:  # noqa: F811
         """Insert an Incident parent and Corrective Action atomically."""
-        conn = self._pool.getconn()
+        conn = self._get_connection()
         try:
             with conn.cursor() as cur:
                 if action.incident_id is not None:
@@ -520,7 +845,7 @@ class PostgresAuditRepository:
         version = int(self._eval_value(eval_set, "version"))
         content_hash = self._eval_value(eval_set, "content_hash")
         manifest_path = f"qa/eval-sets/{eval_set_id}.json"
-        conn = self._pool.getconn()
+        conn = self._get_connection()
         try:
             with conn.cursor() as cur:
                 select_sql = (
@@ -599,7 +924,7 @@ class PostgresAuditRepository:
             self._eval_value(run, "ended_at"),
             self._eval_value(run, "created_at"),
         )
-        conn = self._pool.getconn()
+        conn = self._get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -657,7 +982,7 @@ class PostgresAuditRepository:
             self._eval_value(result, "error_code"),
             self._eval_value(result, "created_at"),
         )
-        conn = self._pool.getconn()
+        conn = self._get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -715,7 +1040,7 @@ class PostgresAuditRepository:
             return
         trace_id = self._eval_uuid(self._eval_value(record, "trace_id"), "trace_id")
         projection_key = str(self._eval_value(record, "projection_key"))
-        conn = self._pool.getconn()
+        conn = self._get_connection()
         try:
             with conn.cursor() as cur:
                 for index, finding in enumerate(findings):
@@ -773,7 +1098,7 @@ class PostgresAuditRepository:
             champion_id,
             _json_param(comparison.metrics),
         )
-        conn = self._pool.getconn()
+        conn = self._get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -809,7 +1134,7 @@ class PostgresAuditRepository:
 
     def comparison_for_run(self, run_id: Any) -> Any | None:
         run_uuid = self._eval_uuid(run_id, "eval_run_id")
-        conn = self._pool.getconn()
+        conn = self._get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -847,7 +1172,7 @@ class PostgresAuditRepository:
         if status not in {"QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED"}:
             raise ValueError(f"invalid eval run status: {status}")
         run_id = self._eval_uuid(eval_run_id, "eval_run_id")
-        conn = self._pool.getconn()
+        conn = self._get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute("select status from audit.eval_runs where eval_run_id = %s", (run_id,))
@@ -873,7 +1198,7 @@ class PostgresAuditRepository:
     def run_for_id(self, run_id: Any) -> Any | None:
         """Read one EvalRun without exposing database rows to API callers."""
         run_uuid = self._eval_uuid(run_id, "eval_run_id")
-        conn = self._pool.getconn()
+        conn = self._get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -919,7 +1244,7 @@ class PostgresAuditRepository:
 
     def results_for_run(self, run_id: Any) -> list[Any]:
         run_uuid = self._eval_uuid(run_id, "eval_run_id")
-        conn = self._pool.getconn()
+        conn = self._get_connection()
         try:
             with conn.cursor() as cur:
                 cur.execute(

@@ -55,7 +55,14 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]
+                       / "04-quant-backtest" / "pipeline"))
+
+from stock_universe import governed_stock_evidence_sql  # noqa: E402
+
 MODULE_VERSION = "factory-progress-v1"
+_GOVERNED_PROGRESS_EVIDENCE = governed_stock_evidence_sql(
+    experiment_alias="e", dataset_alias="m", hypothesis_alias="h")
 
 # ── 판정자 버전 ──────────────────────────────────────────────────────────────
 # ▶ **측정기를 고쳐서 성적을 올리는 길을 막는다** (2026-08-13, DGM 실측)
@@ -202,7 +209,8 @@ STATION_SQL = (
         select count(*) from research.methodology_leads""", """
         select count(*) from research.methodology_leads l
          where exists (select 1 from research.experiment_proposals p
-                        where l.lead_id = any(p.lead_ids))"""),
+                        where l.lead_id = any(p.lead_ids)
+                          and p.status in ('PUBLISHED','ACCEPTED'))"""),
     ("기획", "기획안", """
         select count(*) from research.experiment_proposals""", """
         select count(*) from research.experiment_proposals p
@@ -296,9 +304,16 @@ def measure(conn, *, fresh_days: int = FRESH_DAYS,
     cur = conn.cursor()
 
     try:
-        cur.execute("""select distinct trial_family_id
-                         from research.experiment_outcomes
-                        where trial_family_id is not null""")
+        cur.execute("""select distinct o.trial_family_id
+                         from research.v_current_experiment_outcomes o
+                         join quant.experiments e
+                           on e.experiment_id::text = o.experiment_id
+                         join quant.hypotheses h
+                           on h.hypothesis_id = e.hypothesis_id
+                         join quant.dataset_manifests m
+                           on m.dataset_id = e.dataset_id
+                        where o.trial_family_id is not null
+                          and """ + _GOVERNED_PROGRESS_EVIDENCE)
         solved = [r[0] for r in cur.fetchall()]
         cur.execute("""
             select distinct h.hypothesis_id::text
@@ -313,10 +328,15 @@ def measure(conn, *, fresh_days: int = FRESH_DAYS,
 
     try:
         cur.execute("""
-            select count(distinct trial_family_id)
-              from research.experiment_outcomes
-             where trial_family_id is not null
-               and decided_at > now() - make_interval(days => %s)""",
+            select count(distinct o.trial_family_id)
+              from research.v_current_experiment_outcomes o
+              join quant.experiments e
+                on e.experiment_id::text = o.experiment_id
+              join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+              join quant.dataset_manifests m on m.dataset_id = e.dataset_id
+             where o.trial_family_id is not null
+               and o.decided_at > now() - make_interval(days => %s)
+               and """ + _GOVERNED_PROGRESS_EVIDENCE,
                     (int(window_days),))
         p.recent_pioneered = int(cur.fetchone()[0] or 0)
         p.measured.append("recent_pioneered")
@@ -341,8 +361,15 @@ def measure(conn, *, fresh_days: int = FRESH_DAYS,
         conn.rollback()
 
     try:
-        cur.execute("""select unnest(lesson_codes), count(*)
-                         from research.experiment_outcomes
+        cur.execute("""select unnest(o.lesson_codes), count(*)
+                         from research.v_current_experiment_outcomes o
+                         join quant.experiments e
+                           on e.experiment_id::text = o.experiment_id
+                         join quant.hypotheses h
+                           on h.hypothesis_id = e.hypothesis_id
+                         join quant.dataset_manifests m
+                           on m.dataset_id = e.dataset_id
+                        where """ + _GOVERNED_PROGRESS_EVIDENCE + """
                         group by 1 order by 2 desc""")
         rows = cur.fetchall()
         if rows:
@@ -554,6 +581,10 @@ def _check_weakest_station_is_the_dead_one():
     assert st3[0].yield_pct is None and not st3[0].dead
     assert weakest(st3) is None
     assert funnel({}) == [] and weakest([]) is None
+
+    collection_out = STATION_SQL[0][3]
+    assert "p.status in ('PUBLISHED','ACCEPTED')" in collection_out, \
+        "Gate 0 REJECTED 리드를 수집→기획 전환으로 세면 재제안과 수율이 모두 틀린다"
     assert weakest(None) is None
 
 
