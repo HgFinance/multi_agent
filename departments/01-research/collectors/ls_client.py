@@ -69,15 +69,15 @@ class LsEnvironment:
     def from_env(cls, env: dict[str, str] | None = None) -> LsEnvironment:
         e = env or load_project_env()
         # 사용 가능 여부는 Registry 가 판정한다. 키가 없으면 여기서 예외다.
-        SourceRegistry(env=e).require("ls_openapi_rest")
-
         mode = (e.get("LS_ENV") or "PAPER").strip().upper()
+        if mode not in {"PAPER", "LIVE"}:
+            raise LsApiError(f"LS_ENV must be PAPER or LIVE: {mode!r}")
+
+        SourceRegistry(env=e).require("ls_openapi_rest")
         if mode == "PAPER":
             key, secret = e.get("LS_APP_KEY_PAPER", ""), e.get("LS_APP_SECRET_KEY_PAPER", "")
         elif mode == "LIVE":
             key, secret = e.get("LS_APP_KEY", ""), e.get("LS_APP_SECRET_KEY", "")
-        else:
-            raise LsApiError(f"LS_ENV 는 PAPER 또는 LIVE 여야 한다: {mode!r}")
 
         if not key or not secret:
             raise LsApiError(f"LS_ENV={mode} 인데 해당 App Key/Secret 이 비어 있다")
@@ -445,18 +445,30 @@ def _check_universe_mapping():
 
 def _check_env_and_rate_limit():
     # LS_ENV 가 이상하면 조용히 실전으로 떨어지지 않는다
-    base = {"LS_APP_KEY": "k", "LS_APP_SECRET_KEY": "s", "LS_REST_BASE_URL": "https://x"}
+    base = {
+        "LS_APP_KEY": "k",
+        "LS_APP_SECRET_KEY": "s",
+        "LS_APP_KEY_PAPER": "paper-k",
+        "LS_APP_SECRET_KEY_PAPER": "paper-s",
+        "LS_REST_BASE_URL": "https://x",
+    }
     try:
         LsEnvironment.from_env({**base, "LS_ENV": "REAL"})
         raise AssertionError("잘못된 LS_ENV 가 통과했다")
     except LsApiError:
         pass
 
+    paper_env = LsEnvironment.from_env({**base, "LS_ENV": "PAPER"})
+    assert paper_env.name == "PAPER" and paper_env.app_key == "paper-k"
+
     # PAPER 인데 모의 키가 없으면 실전 키로 대체하지 않는다
     try:
-        LsEnvironment.from_env({**base, "LS_ENV": "PAPER"})
+        LsEnvironment.from_env(
+            {k: v for k, v in {**base, "LS_ENV": "PAPER"}.items()
+             if k not in {"LS_APP_KEY_PAPER", "LS_APP_SECRET_KEY_PAPER"}}
+        )
         raise AssertionError("모의 키 없이 PAPER 가 통과했다")
-    except LsApiError as e:
+    except Exception as e:  # noqa: BLE001 - registry fail-closed boundary
         assert "PAPER" in str(e)
 
     # 키가 아예 없으면 Registry 가 막는다

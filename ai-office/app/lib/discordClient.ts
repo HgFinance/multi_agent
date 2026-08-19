@@ -20,6 +20,11 @@ export type DiscordMessage = {
   is_department_bot: boolean;
   text: string;
   created_at: string;
+  avatar_url: string | null;
+  /** 이 메시지에서 시작된 스레드. `null`이면 스레드 버튼을 그리지 않는다. */
+  thread_id: string | null;
+  thread_name: string | null;
+  thread_message_count: number | null;
 };
 
 export type DiscordMessagesResponse = {
@@ -32,16 +37,18 @@ export type DiscordMessagesResponse = {
   messages: DiscordMessage[];
 };
 
-export async function readDiscordMessages(
-  department: string,
-  limit = 50,
-  signal?: AbortSignal,
-): Promise<DiscordMessagesResponse> {
-  const params = new URLSearchParams({ department, limit: String(limit) });
-  const response = await bffFetch(`/ui/discord/messages?${params}`, {
-    cache: "no-store",
-    signal,
-  });
+export type DiscordThreadResponse = {
+  schema_version: "ui.discord-thread.v1";
+  source: "discord";
+  authoritative: false;
+  department: string;
+  thread_id: string;
+  thread_name: string | null;
+  messages: DiscordMessage[];
+};
+
+async function readDiscord<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const response = await bffFetch(path, { cache: "no-store", signal });
   if (!response.ok) {
     // BFF가 detail에 원인을 적어 보낸다(토큰 미설정 503, 권한 없음 502 …).
     // 그대로 화면에 올린다 - "메시지 없음"으로 뭉개면 못 읽은 것과 대화가
@@ -52,5 +59,25 @@ export async function readDiscordMessages(
       .catch(() => null);
     throw new Error(detail || `Discord 대화를 불러오지 못했습니다 (HTTP ${response.status})`);
   }
-  return (await response.json()) as DiscordMessagesResponse;
+  return (await response.json()) as T;
+}
+
+/** 채널 대화. 한 번에 받을 수 있는 상한(100)이 Discord API의 상한이다. */
+export async function readDiscordMessages(
+  department: string,
+  limit = 100,
+  signal?: AbortSignal,
+): Promise<DiscordMessagesResponse> {
+  const params = new URLSearchParams({ department, limit: String(limit) });
+  return readDiscord<DiscordMessagesResponse>(`/ui/discord/messages?${params}`, signal);
+}
+
+/** 스레드 안의 대화. `thread_id`는 채널 메시지가 알려준 값만 통한다(BFF가 검사). */
+export async function readDiscordThread(
+  department: string,
+  threadId: string,
+  signal?: AbortSignal,
+): Promise<DiscordThreadResponse> {
+  const params = new URLSearchParams({ department, thread_id: threadId, limit: "100" });
+  return readDiscord<DiscordThreadResponse>(`/ui/discord/thread?${params}`, signal);
 }

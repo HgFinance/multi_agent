@@ -103,16 +103,25 @@ def credential_status(environ: Mapping[str, str] | None = None) -> dict[str, Any
     env = os.environ if environ is None else environ
     requested = env.get("LS_ENV", "PAPER").strip().upper()
     suffix = "_PAPER" if requested == "PAPER" else ""
-    names = (
-        f"LS_APP_KEY{suffix}",
-        f"LS_APP_SECRET_KEY{suffix}",
-        f"LS_REST_BASE_URL{suffix}",
-    )
-    present = {name: bool(env.get(name, "").strip()) for name in names}
+    app_key_name = f"LS_APP_KEY{suffix}"
+    app_secret_name = f"LS_APP_SECRET_KEY{suffix}"
+    rest_name = f"LS_REST_BASE_URL{suffix}"
+    rest_present = bool(env.get(rest_name, "").strip())
+    # LS issues PAPER app-key tokens on the shared :8080 REST domain.
+    generic_rest_present = bool(env.get("LS_REST_BASE_URL", "").strip())
+    present = {
+        app_key_name: bool(env.get(app_key_name, "").strip()),
+        app_secret_name: bool(env.get(app_secret_name, "").strip()),
+        rest_name: rest_present,
+    }
+    if suffix and not rest_present:
+        present["LS_REST_BASE_URL"] = generic_rest_present
     return {
         "provider": "ls-openapi",
         "environment": requested,
-        "configured": all(present.values()),
+        "configured": present[app_key_name]
+        and present[app_secret_name]
+        and (rest_present or generic_rest_present),
         "present": present,
         "secret_values_exposed": False,
     }
