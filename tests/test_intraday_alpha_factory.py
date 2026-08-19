@@ -123,7 +123,10 @@ def test_semantic_plan_is_typed_and_excludes_tuning_from_family() -> None:
     assert semantics.check_observables(
         plan, {"trade_flow_imbalance", "spread_bps"},
         operators={"rolling_mean", "where"},
-        conditional_fields={"spread_bps"})["ok"]
+        conditional_fields={"spread_bps"},
+        signal_predicate_paths=(
+            frozenset({("spread_bps", "LOWER")}),
+        ))["ok"]
     assert not semantics.check_observables(plan, {"microprice_offset_bps"})["ok"]
 
     with pytest.raises(ValueError, match="no executable intraday observable"):
@@ -1289,6 +1292,218 @@ def test_intraday_gate_rejects_story_formula_mismatch() -> None:
     gate = gate0(proposal)
     assert not gate.ok
     assert any("must gate the signal" in reason for reason in gate.reasons)
+
+
+def test_signal_support_paths_normalize_reversed_nested_boolean_conditions() -> None:
+    spread = {"op": "field", "field": "spread_bps"}
+    count = {"op": "field", "field": "trade_count", "seconds": 5}
+    condition = {"op": "and", "args": [
+        {"op": "gt", "args": [
+            {"const": 8, "unit": "BPS"}, spread,
+        ]},
+        {"op": "or", "args": [
+            {"op": "gt", "args": [
+                count, {"const": 10, "unit": "COUNT"},
+            ]},
+            {"op": "lt", "args": [
+                {"const": 10, "unit": "COUNT"}, count,
+            ]},
+        ]},
+    ]}
+    expr = {"op": "where", "condition": condition,
+            "then": {"op": "field", "field": "trade_flow_imbalance",
+                     "seconds": 5},
+            "else": {"const": 0, "unit": "RATIO"}}
+
+    assert intraday_grammar.signal_support_predicate_paths_of(expr) == (
+        frozenset({
+            ("spread_bps", "LOWER"),
+            ("trade_count", "UPPER"),
+        }),
+    )
+
+    ambiguous = {**expr, "condition": {"op": "or", "args": [
+        {"op": "lt", "args": [spread, {"const": 5, "unit": "BPS"}]},
+        {"op": "gt", "args": [spread, {"const": 8, "unit": "BPS"}]},
+    ]}}
+    assert intraday_grammar.conditional_fields_of(ambiguous) == {"spread_bps"}
+    assert set(intraday_grammar.signal_support_predicate_paths_of(ambiguous)) == {
+        frozenset({("spread_bps", "LOWER")}),
+        frozenset({("spread_bps", "UPPER")}),
+    }
+
+
+def test_gate0_enforces_declared_context_predicate_polarity() -> None:
+    contradiction = _intraday_proposal()
+    contradiction["proposal_id"] = "prop_9fb580f530cc264d"
+    contradiction["suggested_params"]["intraday_signal_expr"][
+        "condition"]["op"] = "gt"
+    rejected = gate0(contradiction)
+    assert not rejected.ok
+    assert "SEMANTIC_FORMULA_MISMATCH" in rejected.codes
+    assert any("tight_spread" in reason.lower() and
+               "lower-polarity" in reason.lower() and
+               "upper" in reason.lower()
+               for reason in rejected.reasons)
+
+    wide = _intraday_proposal()
+    wide["semantic_plan"]["context"] = ["WIDE_SPREAD"]
+    wide["suggested_params"]["intraday_signal_expr"]["condition"]["op"] = "gt"
+    accepted = gate0(wide)
+    assert accepted.ok, accepted.as_dict()
+
+    reversed_tight = _intraday_proposal()
+    reversed_tight["suggested_params"]["intraday_signal_expr"]["condition"] = {
+        "op": "gt", "args": [
+            {"const": 5, "unit": "BPS"},
+            {"op": "field", "field": "spread_bps"},
+        ],
+    }
+    accepted = gate0(reversed_tight)
+    assert accepted.ok, accepted.as_dict()
+
+
+def test_gate0_rejects_unrelated_or_ambiguous_context_inequalities() -> None:
+    unrelated = _intraday_proposal()
+    expr = unrelated["suggested_params"]["intraday_signal_expr"]
+    expr["condition"] = {"op": "lt", "args": [
+        {"op": "field", "field": "trade_count", "seconds": 5},
+        {"const": 10, "unit": "COUNT"},
+    ]}
+    expr["then"] = {"op": "add", "args": [
+        expr["then"], {"op": "field", "field": "spread_bps"},
+    ]}
+    rejected = gate0(unrelated)
+    assert not rejected.ok
+    assert "SEMANTIC_FORMULA_MISMATCH" in rejected.codes
+    assert any("must gate the signal" in reason for reason in rejected.reasons)
+
+    ambiguous = _intraday_proposal()
+    spread = {"op": "field", "field": "spread_bps"}
+    ambiguous["suggested_params"]["intraday_signal_expr"]["condition"] = {
+        "op": "or", "args": [
+            {"op": "lt", "args": [
+                spread, {"const": 5, "unit": "BPS"},
+            ]},
+            {"op": "gt", "args": [
+                spread, {"const": 8, "unit": "BPS"},
+            ]},
+        ],
+    }
+    rejected = gate0(ambiguous)
+    assert not rejected.ok
+    assert "SEMANTIC_FORMULA_MISMATCH" in rejected.codes
+    assert any("every non-zero output path" in reason and
+               "UPPER" in reason
+               for reason in rejected.reasons)
+
+
+def test_nested_boolean_selector_cannot_lend_context_to_active_paths() -> None:
+    proposal = _intraday_proposal()
+    expr = proposal["suggested_params"]["intraday_signal_expr"]
+    spread_is_tight = expr["condition"]
+    activity_is_high = {"op": "gt", "args": [
+        {"op": "field", "field": "trade_count", "seconds": 5},
+        {"const": 10, "unit": "COUNT"},
+    ]}
+    selector = {
+        "op": "where", "condition": spread_is_tight,
+        "then": activity_is_high, "else": activity_is_high,
+    }
+    expr["condition"] = selector
+
+    support = intraday_grammar.signal_support_predicate_paths_of(expr)
+    assert all(("trade_count", "UPPER") in path for path in support)
+    assert {polarity for path in support for field, polarity in path
+            if field == "spread_bps"} == {"LOWER", "UPPER"}
+
+    rejected = gate0(proposal)
+    assert not rejected.ok
+    assert "SEMANTIC_FORMULA_MISMATCH" in rejected.codes
+
+    high_activity = _intraday_proposal()
+    high_activity["semantic_plan"]["context"] = ["HIGH_ACTIVITY"]
+    high_activity["suggested_params"]["intraday_signal_expr"][
+        "condition"] = selector
+    accepted = gate0(high_activity)
+    assert accepted.ok, accepted.as_dict()
+
+
+def test_inactive_true_branch_inverts_context_polarity() -> None:
+    tight = _intraday_proposal()
+    expr = tight["suggested_params"]["intraday_signal_expr"]
+    signal = expr["then"]
+    expr["then"] = {"const": 0, "unit": "BPS"}
+    expr["else"] = signal
+
+    assert intraday_grammar.signal_support_predicate_paths_of(expr) == (
+        frozenset({("spread_bps", "UPPER")}),
+    )
+    rejected = gate0(tight)
+    assert not rejected.ok
+    assert "SEMANTIC_FORMULA_MISMATCH" in rejected.codes
+
+    wide = _intraday_proposal()
+    wide["semantic_plan"]["context"] = ["WIDE_SPREAD"]
+    expr = wide["suggested_params"]["intraday_signal_expr"]
+    signal = expr["then"]
+    expr["then"] = {"const": 0, "unit": "BPS"}
+    expr["else"] = signal
+    accepted = gate0(wide)
+    assert accepted.ok, accepted.as_dict()
+
+
+def test_additive_ungated_signal_breaks_context_dominance() -> None:
+    proposal = _intraday_proposal()
+    gated = proposal["suggested_params"]["intraday_signal_expr"]
+    proposal["suggested_params"]["intraday_signal_expr"] = {
+        "op": "add", "args": [gated, gated["then"]],
+    }
+
+    assert intraday_grammar.signal_support_predicate_paths_of(
+        proposal["suggested_params"]["intraday_signal_expr"]) == (frozenset(),)
+    rejected = gate0(proposal)
+    assert not rejected.ok
+    assert "SEMANTIC_FORMULA_MISMATCH" in rejected.codes
+    assert any("has no matching controlled predicate" in reason
+               for reason in rejected.reasons)
+
+
+def test_temporal_wrapper_over_internal_gate_fails_closed() -> None:
+    proposal = _intraday_proposal()
+    gated = proposal["suggested_params"]["intraday_signal_expr"]
+    proposal["suggested_params"]["intraday_signal_expr"] = {
+        "op": "rolling_mean", "seconds": 30, "arg": gated,
+    }
+
+    assert intraday_grammar.signal_support_predicate_paths_of(
+        proposal["suggested_params"]["intraday_signal_expr"]) == (frozenset(),)
+    rejected = gate0(proposal)
+    assert not rejected.ok
+    assert "SEMANTIC_FORMULA_MISMATCH" in rejected.codes
+
+
+def test_context_family_guarantee_accepts_or_across_activity_fields() -> None:
+    proposal = _intraday_proposal()
+    proposal["semantic_plan"]["context"] = ["HIGH_ACTIVITY"]
+    expr = proposal["suggested_params"]["intraday_signal_expr"]
+    expr["condition"] = {"op": "or", "args": [
+        {"op": "gt", "args": [
+            {"op": "field", "field": "trade_count", "seconds": 5},
+            {"const": 10, "unit": "COUNT"},
+        ]},
+        {"op": "gt", "args": [
+            {"op": "field", "field": "quote_count", "seconds": 5},
+            {"const": 10, "unit": "COUNT"},
+        ]},
+    ]}
+
+    assert set(intraday_grammar.signal_support_predicate_paths_of(expr)) == {
+        frozenset({("trade_count", "UPPER")}),
+        frozenset({("quote_count", "UPPER")}),
+    }
+    accepted = gate0(proposal)
+    assert accepted.ok, accepted.as_dict()
 
 
 def test_schema_migration_persists_lane_and_live_manifest() -> None:
