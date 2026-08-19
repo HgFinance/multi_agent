@@ -1,5 +1,5 @@
 /**
- * 명시적 local/test fixture 모드에서만 쓰는 계정 전환 데이터.
+ * 명시적 local/test fixture 모드에서만 쓰는 고정 계정.
  *
  * ## ⚠️ 이건 인증이 아니다
  *
@@ -12,17 +12,29 @@
  * 링크가 아니라 disabled 버튼).
  *
  * 실제 사용자의 허가된 펀드는 `/ui/me`와 `PortfolioSessionProvider`가 관리한다.
+ *
+ * ## 왜 계정이 하나로 고정됐나 (2026-08-19)
+ *
+ * 계정 전환 UI가 있던 시절에는 선택값을 `localStorage`에 저장하고
+ * `useSyncExternalStore`로 읽었다. 서버 렌더는 항상 기본 계정을 그리고
+ * 브라우저는 저장된 값을 그려서, 사용자가 계정을 한 번이라도 바꾼 브라우저에서는
+ * 매번 hydration mismatch가 났다(서버가 모르는 값을 클라이언트가 즉시 아는
+ * 전형적인 패턴 - React 공식 문서가 hydration mismatch 사례로 꼽는 것과 같다).
+ *
+ * 계정 전환 계획이 없어졌으므로 그 저장·구독 배선을 통째로 없앤다. 이제
+ * `readStoredAccount()`는 브라우저 상태와 무관하게 항상 같은 값을 준다 - 서버와
+ * 클라이언트가 다를 수 있는 값 자체가 없으니 mismatch가 구조적으로 생기지 않는다.
  */
 
 export interface TestAccount {
   /** `governance.user_profiles.user_id`. 실 DB에 이미 있는 값이다. */
   userId: string;
-  /** 드롭다운에 보이는 이름. DB의 `display_name`을 짧게 줄인 것이다. */
+  /** 표시 이름. DB의 `display_name`을 짧게 줄인 것이다. */
   label: string;
   /**
-   * 이 사용자의 Fund. 세 계정 모두 `accounting.funds`에 실제 행이 있다(2026-08-13
-   * 추가) - `null`을 남겨두는 계정은 이제 없다. 서버에 `user_id -> fund_id`
-   * 역참조가 없다는 사실은 그대로라 여전히 화면이 짝을 들고 다닌다.
+   * 이 사용자의 Fund. `accounting.funds`에 실제 행이 있다(2026-08-13 추가).
+   * 서버에 `user_id -> fund_id` 역참조가 없다는 사실은 그대로라 여전히 화면이
+   * 짝을 들고 다닌다.
    */
   fundId: string | null;
   /**
@@ -33,108 +45,41 @@ export interface TestAccount {
 }
 
 /**
- * 하드코딩 테스트 유저 3명.
+ * 고정 계정 - Fund Owner(user1) 하나뿐이다.
  *
  * `supabase/seed.sql`이 심은 플레이스홀더 회원과 같은 UUID다 — 여기서 값을
  * 바꾸면 서버가 모르는 사용자가 되어 `POST /ui/investor-profiles`가 FK 위반으로
  * 실패한다. seed와 함께 고쳐야 한다.
  */
-export const TEST_ACCOUNTS: readonly TestAccount[] = [
-  {
-    userId: "00000000-0000-4000-8000-00000000cec0",
-    label: "Fund Owner",
-    // TEST-CEO-MANDATE (USD). Aggressive Alpha Hunter 현재 metadata를 가진 계정.
-    fundId: "b13f5cd1-5df0-4025-92cf-9be03b1a0296",
-    colorClass: "bg-primary",
-  },
-  {
-    userId: "00000000-0000-4000-8000-00000000cec1",
-    label: "User 2",
-    // TEST-USER2-MANDATE (USD). Balanced Growth & Macro 현재 metadata를 가진 계정.
-    fundId: "50a3c28c-6cee-4bcf-ab07-fa97093dca8e",
-    colorClass: "bg-tertiary-container",
-  },
-  {
-    userId: "00000000-0000-4000-8000-00000000cec2",
-    label: "User 3",
-    // TEST-USER3-MANDATE (USD). Capital Preservation Neutral 현재 metadata를 가진 계정.
-    fundId: "3838f7d6-0c7c-4e54-85f3-316a451e7eeb",
-    colorClass: "bg-secondary",
-  },
-] as const;
-
-const STORAGE_KEY = "hgfinance.currentAccount.v1";
-
-/** 기본값은 목록 첫 계정이다. 세 계정 모두 현재 Mandate를 가진다. */
-export const DEFAULT_ACCOUNT = TEST_ACCOUNTS[0];
-
-export function accountFor(userId: string | null | undefined): TestAccount {
-  return TEST_ACCOUNTS.find((account) => account.userId === userId) ?? DEFAULT_ACCOUNT;
-}
+export const DEFAULT_ACCOUNT: TestAccount = {
+  userId: "00000000-0000-4000-8000-00000000cec0",
+  label: "Fund Owner",
+  // TEST-CEO-MANDATE (USD). Aggressive Alpha Hunter 현재 metadata를 가진 계정.
+  fundId: "b13f5cd1-5df0-4025-92cf-9be03b1a0296",
+  colorClass: "bg-primary",
+};
 
 /**
- * 저장된 선택을 읽는다. 서버 렌더링 중이거나 저장값이 목록에 없으면 기본값.
- *
- * 목록에 없는 값을 그대로 쓰지 않는 이유: 계정 목록을 줄였을 때 사라진 UUID가
- * 계속 헤더로 나가면 서버는 그 사용자를 모르고, 화면은 아무 계정도 선택되지
- * 않은 상태로 보인다.
+ * 계정을 항상 고정값으로 준다. 인자는 시그니처 호환용으로만 남아 있다
+ * (`PortfolioSessionProvider.tsx`가 여전히 값을 넘겨 부른다) - 계정이 하나뿐이므로
+ * "찾는다"는 개념 자체가 없다. Supabase 세션이 이 uuid와 다른 값을 들고 있어도
+ * (비-fixture 경로에서는 애초에 호출되지 않는다) 조용히 고정 계정으로 떨어진다.
  */
+export function accountFor(userId?: string | null): TestAccount {
+  void userId;
+  return DEFAULT_ACCOUNT;
+}
+
+/** 고정 계정을 그대로 준다. 서버·클라이언트 어디서 불러도 같은 값이다. */
 export function readStoredAccount(): TestAccount {
-  if (typeof window === "undefined") return DEFAULT_ACCOUNT;
-  try {
-    return accountFor(window.localStorage.getItem(STORAGE_KEY));
-  } catch {
-    // Safari 사생활 보호 모드 등에서 localStorage 접근이 던진다. 저장을 못 하는
-    // 것이 화면을 멈출 이유는 아니다.
-    return DEFAULT_ACCOUNT;
-  }
-}
-
-export function storeAccount(userId: string): void {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(STORAGE_KEY, userId);
-  } catch {
-    /* 저장 실패는 무시한다 - 이번 세션에만 선택이 유지된다. */
-  }
+  return DEFAULT_ACCOUNT;
 }
 
 /**
- * 같은 탭 안에서 계정 변경을 알린다.
- *
- * `storage` 이벤트는 **다른** 탭에서만 발생하므로 같은 탭의 다른 컴포넌트는 못
- * 받는다. 전역 상태 라이브러리를 새로 들이지 않고 이 한 가지만 해결한다.
- */
-export const ACCOUNT_CHANGED_EVENT = "hgfinance:account-changed";
-
-export function announceAccountChange(userId: string): void {
-  if (typeof window === "undefined") return;
-  window.dispatchEvent(new CustomEvent(ACCOUNT_CHANGED_EVENT, { detail: userId }));
-}
-
-/**
- * `useSyncExternalStore`용 구독.
- *
- * 두 이벤트를 함께 듣는다 — `ACCOUNT_CHANGED_EVENT`는 **같은 탭**의 다른
- * 컴포넌트에, `storage`는 **다른 탭**의 변경에 반응한다. 둘 중 하나만 듣으면
- * 한쪽에서 바꾼 계정이 다른 쪽에 반영되지 않는다.
- */
-export function subscribeToAccountChange(onChange: () => void): () => void {
-  if (typeof window === "undefined") return () => {};
-  window.addEventListener(ACCOUNT_CHANGED_EVENT, onChange);
-  window.addEventListener("storage", onChange);
-  return () => {
-    window.removeEventListener(ACCOUNT_CHANGED_EVENT, onChange);
-    window.removeEventListener("storage", onChange);
-  };
-}
-
-/**
- * `useSyncExternalStore`의 `getSnapshot`. **문자열을 돌려준다.**
- *
- * 객체를 돌려주면 매 호출이 새 참조가 되어 React가 무한 렌더로 판단한다.
- * 호출부는 이 id를 `accountFor()`에 넣어 객체를 얻는다.
+ * `readStoredAccount().userId`. 문자열을 돌려주는 이유는 과거
+ * `useSyncExternalStore`용 스냅샷 계약을 그대로 유지해 호출부를 안 건드리기
+ * 위해서다 - 지금은 상수라 구독이 필요 없다.
  */
 export function readStoredAccountId(): string {
-  return readStoredAccount().userId;
+  return DEFAULT_ACCOUNT.userId;
 }
