@@ -75,37 +75,8 @@ eb setenv \
   ACCOUNTING_MODE=PAPER_DB
 unset TRADING_PROOF_SECRET TRADING_INTERNAL_AUTH_SECRET
 
-# LS 브로커 조회(대시보드 계좌·체결·원장·시장 상위). 이걸 주지 않으면
-# /ui/portfolio/live, /ui/portfolio/ledger, /ui/market/rankings가 전부 503이라
-# 대시보드가 빈 화면으로 뜬다 - 배포 자체는 성공하므로 증상이 늦게 드러난다.
-# 읽기 전용이며 이 스위치로 주문이 나가지는 않는다.
-eb setenv \
-  ENABLE_LS_ORDER_EVENTS=true \
-  LS_ENV=PAPER \
-  LS_APP_KEY_PAPER='...' \
-  LS_APP_SECRET_KEY_PAPER='...' \
-  LS_REST_BASE_URL='https://openapi.ls-sec.co.kr:8080' \
-  LS_WS_BASE_URL_PAPER='wss://openapi.ls-sec.co.kr:29443' \
-  LS_ACCOUNT_PWD_PAPER='...' \
-  LS_OAUTH_SCOPE=oob
-
 eb deploy --staged
 ```
-
-LS 크리덴셜은 `LS_ENV`에 따라 키 이름이 갈린다 — `PAPER`면 `_PAPER` 접미사
-키를 먼저 찾고, **없을 때만** 접미사 없는 키로 떨어진다. 위 예시가 REST만
-접미사 없이 주는 이유가 이것이다: 모의투자도 REST 호스트는 실전과 같아
-`LS_REST_BASE_URL_PAPER`를 비워 두고 공용 값을 쓰지만, WebSocket은 포트가
-달라(29443) `_PAPER` 키를 반드시 준다. 실전 `LS_APP_KEY` /
-`LS_APP_SECRET_KEY`는 PAPER 배포에 넣지 않는다.
-
-`LS_ACCOUNT_NO_PAPER`는 비워 두는 것이 정상이다 — appkey에 묶인 계좌를
-`CSPAQ12200`이 되돌려 주므로 BFF가 알아서 채운다. 계좌가 여럿일 때만
-명시로 덮어쓴다.
-
-회계 원장 SQLite 경로(`ACCOUNTING_LEDGER_DB`)는 Compose가
-`portfolio_runtime_data` 볼륨 안으로 고정하므로 setenv 대상이 아니다 —
-컨테이너가 교체돼도 남아야 한다.
 
 `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` are required Compose inputs, so
 an EB deployment stops during Compose interpolation when either is absent. The
