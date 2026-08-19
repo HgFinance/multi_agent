@@ -221,6 +221,8 @@ services:
     environment:
       <<: *control-and-market-environment
       QUANT_DATABASE_URL: *control-database-url
+      DATABASE_SESSION_URL: *control-database-url
+      DATABASE_RUNTIME_ROLE: ${QUANT_DATABASE_RUNTIME_ROLE:-svc_quant}
 
   factory-experiment-worker:
     environment:
