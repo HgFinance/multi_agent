@@ -977,6 +977,18 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         from source_registry import load_project_env
 
         env = load_project_env()
+        if own_conn and not env.get("DATABASE_URL"):
+            # A runner container may have market access but no metadata-writer DSN.
+            # Report this as an honest execution-surface block instead of raising
+            # KeyError; no hypothesis status or outcome can be changed without the
+            # metadata connection.
+            return OrchestratorReport(
+                hypothesis_id=str(hypothesis_id or "-"),
+                title="-",
+                verdict="NOT_RUNNABLE",
+                missing=["DATABASE_URL"],
+                backlog=["metadata database connection (DATABASE_URL)"],
+            )
         if own_conn:
             from db_writer import connect as connect_writer
 

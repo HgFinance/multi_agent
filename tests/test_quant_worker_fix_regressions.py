@@ -58,6 +58,30 @@ def _governed_market(rows: list[dict]) -> backtest_runner.Market:
     return backtest_runner.Market.from_rows(governed)
 
 
+def test_zero_volume_rows_remain_attested_but_do_not_become_zero_returns() -> None:
+    first = date(2026, 1, 5)
+    halted = date(2026, 1, 6)
+    resumed = date(2026, 1, 7)
+    rows = backtest_runner._GovernedStockRows()
+    rows.extend([
+        _daily_row("A", first, 100.0),
+        dict(_daily_row("A", halted, 100.0), volume=0),
+        _daily_row("A", resumed, 110.0),
+    ])
+    instruments, bounds = backtest_runner._stock_row_evidence(rows)
+    backtest_runner._seal_loaded_stock_rows(
+        rows, "stock-universe-v1", instruments, bounds)
+    receipt = rows._stock_scope_receipt
+
+    market = backtest_runner.Market.from_rows(rows)
+
+    assert receipt is not None and receipt.row_count == 3
+    assert market._require_stock_scope() is receipt
+    assert market.dates == [first, resumed]
+    assert (halted, "A") not in market.closes
+    assert market.momentum(resumed, 1) == pytest.approx({"A": 0.10})
+
+
 def test_future_adjustment_gap_does_not_rewrite_past_pit_universe() -> None:
     first = date(2026, 1, 5)
     second = date(2026, 1, 6)
