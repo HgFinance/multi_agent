@@ -29,6 +29,20 @@ def test_credentials_report_presence_only() -> None:
     assert "TOPSECRET123" not in str(status)
 
 
+def test_paper_credentials_fallback_to_shared_rest_base() -> None:
+    status = credential_status(
+        {
+            "LS_ENV": "PAPER",
+            "LS_APP_KEY_PAPER": "key",
+            "LS_APP_SECRET_KEY_PAPER": "secret",
+            "LS_REST_BASE_URL": "https://example.test",
+        }
+    )
+    assert status["configured"] is True
+    assert status["present"]["LS_REST_BASE_URL_PAPER"] is False
+    assert status["present"]["LS_REST_BASE_URL"] is True
+
+
 def test_ls_read_only_quote_and_portfolio_calls() -> None:
     calls: list[str] = []
 

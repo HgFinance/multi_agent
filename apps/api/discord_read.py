@@ -81,6 +81,11 @@ class DiscordMessage(BaseModel):
     is_department_bot: bool
     text: str
     created_at: str
+    avatar_url: str | None = None
+    """이 메시지에서 시작된 스레드. `thread_id`가 없으면 화면의 스레드 버튼도 없다."""
+    thread_id: str | None = None
+    thread_name: str | None = None
+    thread_message_count: int | None = None
 
 
 class DiscordMessagesResponse(BaseModel):
@@ -90,6 +95,16 @@ class DiscordMessagesResponse(BaseModel):
     department: str
     channel_id: str
     bot_id: str
+    messages: list[DiscordMessage]
+
+
+class DiscordThreadResponse(BaseModel):
+    schema_version: Literal["ui.discord-thread.v1"] = "ui.discord-thread.v1"
+    source: Literal["discord"] = "discord"
+    authoritative: bool = False
+    department: str
+    thread_id: str
+    thread_name: str | None = None
     messages: list[DiscordMessage]
 
 
@@ -155,12 +170,35 @@ def fetch_messages(token: str, channel_id: str, limit: int) -> list[dict[str, An
     return payload
 
 
+def avatar_url(author: dict[str, Any]) -> str | None:
+    """Discord CDN 아바타 주소. 해시가 없으면 `None`(화면이 이니셜 원으로 떨어진다).
+
+    기본 아바타(해시 없음)는 만들지 않는다 - index 계산 규칙이 계정 종류마다
+    달라서, 틀리면 남의 색 아바타가 뜬다. 모르면 안 그리는 편이 낫다.
+    """
+    avatar = str(author.get("avatar") or "")
+    user_id = str(author.get("id") or "")
+    if not avatar or not user_id:
+        return None
+    extension = "gif" if avatar.startswith("a_") else "png"
+    return f"https://cdn.discordapp.com/avatars/{user_id}/{avatar}.{extension}?size=64"
+
+
+# 스레드를 연 원본 메시지 자리에 Discord가 끼워 넣는 **빈 자리표시자**(2026-08-19
+# 실측: 본문·임베드 전부 비어 있다). 진짜 내용은 부모 채널의 메시지에 있고 화면도
+# 그것을 스레드 첫 줄로 그리므로, 이걸 남기면 빈 말풍선 하나가 더 생긴다.
+THREAD_STARTER_MESSAGE_TYPE = 21
+
+
 def normalize(raw: list[dict[str, Any]], bot_id: str) -> list[DiscordMessage]:
     """Discord 원본을 화면 계약으로 줄인다. 오래된 것이 위로 가게 뒤집는다.
 
-    **다른 부서 봇의 글은 뺀다.** 8개 봇이 같은 채널에 보고를 쏟아서, 안 거르면
-    어느 카드를 열어도 똑같은 목록이 나온다. 남기는 것은 이 부서 봇과 사람이고,
-    그 둘이 실제로 주고받은 대화다.
+    **채널에 있는 것을 다 준다.** 한때 다른 부서 봇의 글을 뺐는데, 8개 봇이 같은
+    채널 하나(`DISCORD_CEO_CHANNEL_ID`)를 쓰기 때문에 그 필터는 "부서별로 다른
+    목록"을 만드는 게 아니라 **채널 대화에서 남의 발언만 지운 반쪽 이력**을
+    만들었다 - CEO가 물으면 QA·HR이 답하는 이 채널에서는 답변 쪽이 통째로
+    사라진다. 부서 구분은 `is_department_bot`으로 화면이 하고, 여기서는 거르지
+    않는다.
 
     본문이 빈 메시지(첨부·임베드만 있는 것)는 버리지 않고 표시만 비워 둔다 -
     지우면 대화에 구멍이 생겨 맥락이 끊긴다.
@@ -169,11 +207,14 @@ def normalize(raw: list[dict[str, Any]], bot_id: str) -> list[DiscordMessage]:
     for item in raw:
         if not item.get("id"):
             continue
+        if item.get("type") == THREAD_STARTER_MESSAGE_TYPE:
+            continue
         author = item.get("author") or {}
         author_id = str(author.get("id", ""))
         is_bot = bool(author.get("bot", False))
-        if is_bot and author_id != bot_id:
-            continue
+        # 이 메시지에서 시작된 스레드. Discord가 메시지 payload에 채널 객체를
+        # 그대로 실어 준다 - 스레드 목록을 따로 조회하지 않아도 된다.
+        thread = item.get("thread") or {}
         messages.append(
             DiscordMessage(
                 id=str(item["id"]),
@@ -191,26 +232,37 @@ def normalize(raw: list[dict[str, Any]], bot_id: str) -> list[DiscordMessage]:
                 is_department_bot=author_id == bot_id,
                 text=str(item.get("content") or ""),
                 created_at=str(item.get("timestamp") or ""),
+                avatar_url=avatar_url(author),
+                thread_id=str(thread.get("id") or "") or None,
+                thread_name=str(thread.get("name") or "") or None,
+                thread_message_count=thread.get("message_count"),
             )
         )
     return list(reversed(messages))
 
 
-@router.get("/messages", response_model=DiscordMessagesResponse)
-def read_messages(
-    department: str = Query(description="부서 키. ceo, trading, risk …"),
-    limit: int = Query(default=50, ge=1, le=100),
-) -> DiscordMessagesResponse:
-    key = resolve_department(department)
+def credentials(key: str) -> tuple[str, str]:
+    """(토큰, 채널 id). 하나라도 비면 503.
+
+    자격증명이 없으면 빈 목록을 주지 않는다. 빈 목록은 "대화가 없다"로 읽히는데
+    실제로는 "못 읽었다"이고, 둘은 화면에서 구분돼야 한다.
+    """
     token = os.getenv(DEPARTMENT_TOKEN_ENV[key], "").strip()
     channel_id = os.getenv("DISCORD_CEO_CHANNEL_ID", "").strip()
     if not token or not channel_id:
-        # 자격증명이 없으면 빈 목록을 주지 않는다. 빈 목록은 "대화가 없다"로
-        # 읽히는데 실제로는 "못 읽었다"이고, 둘은 화면에서 구분돼야 한다.
         raise HTTPException(
             503,
             f"{DEPARTMENT_TOKEN_ENV[key]} / DISCORD_CEO_CHANNEL_ID가 설정되지 않았습니다.",
         )
+    return token, channel_id
+
+
+@router.get("/messages", response_model=DiscordMessagesResponse)
+def read_messages(
+    department: str = Query(description="부서 키. ceo, trading, risk …"),
+    limit: int = Query(default=100, ge=1, le=100),
+) -> DiscordMessagesResponse:
+    token, channel_id = credentials(key := resolve_department(department))
     bot_id = bot_user_id(token)
     return DiscordMessagesResponse(
         department=key,
@@ -220,20 +272,62 @@ def read_messages(
     )
 
 
+@router.get("/thread", response_model=DiscordThreadResponse)
+def read_thread(
+    department: str = Query(description="부서 키. ceo, trading, risk …"),
+    thread_id: str = Query(description="채널 메시지가 알려준 스레드 id"),
+    limit: int = Query(default=100, ge=1, le=100),
+) -> DiscordThreadResponse:
+    """스레드 안의 대화. 스레드도 채널이라 같은 엔드포인트로 읽는다.
+
+    **아무 id나 읽어 주지 않는다.** `thread_id`는 브라우저가 보내는 값이고,
+    검사 없이 넘기면 이 봇이 볼 수 있는 **모든 채널**을 이 API로 읽을 수 있다.
+    그래서 부모 채널의 최근 메시지가 실제로 가리키는 스레드만 허용한다 - 화면의
+    스레드 버튼도 같은 목록에서 나오므로 정상 사용은 항상 통과한다.
+    """
+    token, channel_id = credentials(key := resolve_department(department))
+    bot_id = bot_user_id(token)
+    parent = next(
+        (
+            message
+            for message in normalize(fetch_messages(token, channel_id, 100), bot_id)
+            if message.thread_id == thread_id
+        ),
+        None,
+    )
+    if parent is None:
+        raise HTTPException(404, "이 채널의 최근 대화에 없는 스레드입니다.")
+    return DiscordThreadResponse(
+        department=key,
+        thread_id=thread_id,
+        thread_name=parent.thread_name,
+        messages=normalize(fetch_messages(token, thread_id, limit), bot_id),
+    )
+
+
 if __name__ == "__main__":
     # 네트워크 없이 도는 자체 점검. 정규화 규칙만 본다.
     sample = [
-        {"id": "4", "author": {"id": "other-bot", "username": "HERMES-QA", "bot": True}, "content": "남의 부서 보고", "timestamp": "2026-08-14T08:00:00+00:00"},
-        {"id": "3", "author": {"id": "our-bot", "username": "홍진표", "bot": True}, "content": "보고", "timestamp": "2026-08-14T07:00:00+00:00"},
+        {"id": "4", "author": {"id": "other-bot", "username": "HERMES-QA", "bot": True}, "content": "다른 부서 보고", "timestamp": "2026-08-14T08:00:00+00:00"},
+        {"id": "3", "author": {"id": "our-bot", "username": "홍진표", "bot": True, "avatar": "abc"}, "content": "보고", "timestamp": "2026-08-14T07:00:00+00:00",
+         "thread": {"id": "t-9", "name": "지금 막혀 있는 업무", "message_count": 2}},
         {"id": "2", "author": {"id": "a", "username": "doyyn_", "global_name": "도현"}, "content": "", "timestamp": "2026-08-14T06:00:00+00:00"},
         {"id": "1", "author": {"id": "a", "username": "doyyn_", "global_name": "도현"}, "content": "안녕", "timestamp": "2026-08-14T05:00:00+00:00"},
         {"author": {"id": "a"}, "content": "id 없는 것은 버린다"},
     ]
     out = normalize(sample, "our-bot")
-    assert [m.id for m in out] == ["1", "2", "3"], "오래된 것이 위로, 남의 부서 봇은 제외"
+    assert [m.id for m in out] == ["1", "2", "3", "4"], "오래된 것이 위로, 채널에 있는 것은 다 준다"
+    assert out[3].is_bot and not out[3].is_department_bot, "다른 부서 봇도 남기되 우리 봇으로 치지 않는다"
     assert out[0].author == "도현" and not out[0].is_department_bot, "global_name 우선, 사람은 부서봇 아님"
     assert out[2].is_bot and out[2].is_department_bot, "이 부서 봇은 이름이 아니라 id로 판정한다"
     assert out[1].text == "", "본문 빈 메시지도 남긴다"
+
+    # 스레드는 메시지 payload에서 그대로 나온다. 없는 메시지는 전부 None.
+    assert (out[2].thread_id, out[2].thread_name, out[2].thread_message_count) == ("t-9", "지금 막혀 있는 업무", 2)
+    assert out[0].thread_id is None and out[0].thread_name is None, "스레드 없는 메시지엔 버튼이 안 생긴다"
+    assert out[2].avatar_url == "https://cdn.discordapp.com/avatars/our-bot/abc.png?size=64"
+    assert out[0].avatar_url is None, "해시 없으면 기본 아바타를 추측하지 않는다"
+    assert avatar_url({"id": "u", "avatar": "a_1"}).endswith(".gif?size=64"), "애니메이션 아바타"
 
     # 이름이 통째로 바뀌어도 id가 같으면 그대로 잡힌다.
     renamed = normalize([{"id": "9", "author": {"id": "our-bot", "username": "완전다른이름", "bot": True}, "content": "x", "timestamp": "t"}], "our-bot")
@@ -245,5 +339,26 @@ if __name__ == "__main__":
 
     _CACHE["c:1"] = (time.monotonic(), [{"id": "cached"}])
     assert fetch_messages("t", "c", 1) == [{"id": "cached"}], "TTL 안이면 네트워크를 안 탄다"
+
+    # 스레드 조회는 부모 채널이 실제로 가리키는 id만 연다. 캐시를 심어 네트워크를
+    # 타지 않게 하고, 남의 채널 id를 넣으면 404가 나는지만 본다.
+    from unittest.mock import patch
+
+    _CACHE["chan:100"] = (time.monotonic(), sample)
+    _CACHE["t-9:100"] = (time.monotonic(), [
+        {"id": "s1", "author": {"id": "qa-bot", "username": "김동규 QA부장", "bot": True}, "content": "분석 완료", "timestamp": "2026-08-19T05:56:00+00:00"},
+        {"id": "s0", "type": 21, "author": {"id": "our-bot", "username": "홍진표", "bot": True}, "content": "", "timestamp": "2026-08-19T05:52:00+00:00"},
+    ])
+    env = {"DISCORD_BOT_TOKEN_CEO": "tok", "DISCORD_CEO_CHANNEL_ID": "chan"}
+    with patch.dict(os.environ, env), patch(f"{__name__}.bot_user_id", lambda _: "our-bot"):
+        opened = read_thread(department="ceo", thread_id="t-9", limit=100)
+        assert [m.id for m in opened.messages] == ["s1"], "빈 자리표시자(type 21)는 빼고 준다"
+        assert opened.thread_name == "지금 막혀 있는 업무", "이름은 부모 메시지에서 가져온다"
+        try:
+            read_thread(department="ceo", thread_id="남의-채널", limit=100)
+        except HTTPException as exc:
+            assert exc.status_code == 404, exc.status_code
+        else:
+            raise AssertionError("부모가 가리키지 않는 채널을 열어 줬다")
 
     print("discord_read 자체 점검 통과")

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   fetchOperations,
   subscribeOperationsStream,
@@ -9,7 +9,7 @@ import {
 } from "../lib/operationsClient";
 import DepartmentInspector from "./DepartmentInspector";
 import { KANBAN_BASE_URL, resolveKanbanUrl } from "../lib/kanbanUrl";
-import { readDiscordMessages, type DiscordMessage } from "../lib/discordClient";
+import { readDiscordMessages, readDiscordThread, type DiscordMessage } from "../lib/discordClient";
 import HermesKanbanBoard from "./HermesKanbanBoard";
 import { fetchHermesKanban, type HermesKanbanBoard as HermesKanbanBoardData } from "../lib/kanbanClient";
 
@@ -117,13 +117,218 @@ function formatMessageKind(value: string): string {
   return value.replace(/[_-]+/g, " ").trim() || "runtime event";
 }
 
-function DiscordChat({ department }: { department: string }) {
+/** 멘션만 사람이 읽는 말로 바꾼다. **줄바꿈은 살린다** - Discord 원문 그대로 읽혀야 한다. */
+function messageText(value: string): string {
+  return value.replace(/<@!?\d+>/g, "@멘션").trim();
+}
+
+function formatClock(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" });
+}
+
+function formatDay(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleDateString("ko-KR", { year: "numeric", month: "long", day: "numeric" });
+}
+
+function Avatar({ message }: { message: DiscordMessage }) {
+  const className = "w-10 h-10 rounded-full shrink-0 object-cover bg-surface-container-high";
+  if (message.avatar_url) {
+    // next/image를 쓰지 않는다 - 외부 CDN 한 장에 remotePatterns 설정과 최적화
+    // 서버 왕복이 붙는데, 40px 아바타에는 둘 다 필요 없다.
+    // eslint-disable-next-line @next/next/no-img-element
+    return <img src={message.avatar_url} alt="" width={40} height={40} className={className} />;
+  }
+  return (
+    <span aria-hidden="true" className={`${className} grid place-items-center text-body-sm font-bold text-on-surface-variant`}>
+      {message.author.slice(0, 1)}
+    </span>
+  );
+}
+
+/** Discord 한 줄. 채널 목록과 스레드 모달이 같은 것을 쓴다. */
+function MessageRow({
+  message,
+  onOpenThread,
+}: {
+  message: DiscordMessage;
+  onOpenThread?: (message: DiscordMessage) => void;
+}) {
+  const text = messageText(message.text);
+  return (
+    <article
+      className={`flex gap-3 px-2 py-2 rounded-lg ${
+        message.is_department_bot ? "bg-secondary-container/30" : "hover:bg-surface-container"
+      }`}
+    >
+      <Avatar message={message} />
+      <div className="min-w-0 flex-1">
+        <p className="m-0 flex items-baseline gap-2 flex-wrap">
+          <strong className="text-body-sm font-body-sm text-on-surface">{message.author}</strong>
+          {message.is_bot ? (
+            <span className="px-1.5 py-px rounded bg-primary text-on-primary text-[10px] font-bold leading-4">앱</span>
+          ) : null}
+          <time className="text-xs text-outline" dateTime={message.created_at}>
+            {formatClock(message.created_at)}
+          </time>
+        </p>
+        <p className="m-0 mt-1 text-body-sm font-body-sm leading-6 text-on-surface whitespace-pre-wrap break-words">
+          {text || <span className="text-outline italic">첨부 또는 임베드만 있는 메시지</span>}
+        </p>
+        {message.thread_id && onOpenThread ? (
+          // Discord의 스레드 미리보기 줄과 같은 자리. 클릭하면 모달이 열린다.
+          <button
+            type="button"
+            onClick={() => onOpenThread(message)}
+            className="mt-2 flex items-center gap-2 max-w-full rounded-lg border border-outline-variant bg-surface-container-low px-3 py-2 text-left hover:bg-surface-container transition-colors"
+          >
+            <span className="material-symbols-outlined text-[16px] text-on-surface-variant" aria-hidden="true">
+              forum
+            </span>
+            <span className="truncate text-body-sm font-body-sm font-bold text-on-surface">
+              {message.thread_name ?? "스레드"}
+            </span>
+            <span className="shrink-0 text-xs text-primary font-bold">
+              메시지 {message.thread_message_count ?? 0}개 ›
+            </span>
+          </button>
+        ) : null}
+      </div>
+    </article>
+  );
+}
+
+/** 날짜가 바뀌는 자리에 구분선을 넣는다. Discord와 같은 규칙이다. */
+function MessageList({
+  messages,
+  onOpenThread,
+}: {
+  messages: DiscordMessage[];
+  onOpenThread?: (message: DiscordMessage) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      {messages.map((message, index) => {
+        const day = formatDay(message.created_at);
+        const previousDay = index > 0 ? formatDay(messages[index - 1].created_at) : "";
+        const divider = day && day !== previousDay ? day : "";
+        return (
+          <div key={message.id}>
+            {divider ? (
+              <div className="flex items-center gap-3 my-3">
+                <hr className="flex-1 border-0 border-t border-outline-variant" />
+                <span className="text-xs text-on-surface-variant">{divider}</span>
+                <hr className="flex-1 border-0 border-t border-outline-variant" />
+              </div>
+            ) : null}
+            <MessageRow message={message} onOpenThread={onOpenThread} />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * 스레드 모달. `<dialog>`의 `showModal()`이 backdrop·Escape 닫기·포커스 트랩을
+ * 브라우저에서 주므로 오버레이나 키 핸들러를 직접 만들지 않는다.
+ * `m-auto`는 필수 - Tailwind preflight가 `<dialog>`의 기본 중앙 정렬을 지운다.
+ */
+function ThreadDialog({
+  department,
+  parent,
+  onClose,
+}: {
+  department: string;
+  parent: DiscordMessage;
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDialogElement>(null);
   const [messages, setMessages] = useState<DiscordMessage[] | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
+    ref.current?.showModal();
+  }, []);
+
+  useEffect(() => {
+    if (!parent.thread_id) return;
     const controller = new AbortController();
-    readDiscordMessages(department, 50, controller.signal)
+    readDiscordThread(department, parent.thread_id, controller.signal)
+      .then((body) => setMessages(body.messages))
+      .catch((cause: unknown) => {
+        if (controller.signal.aborted) return;
+        setError(cause instanceof Error ? cause.message : "스레드를 불러오지 못했습니다.");
+      });
+    return () => controller.abort();
+  }, [department, parent.thread_id]);
+
+  return (
+    <dialog
+      ref={ref}
+      onClose={onClose}
+      aria-labelledby="discord-thread-title"
+      className="m-auto w-[min(46rem,92vw)] max-h-[85vh] p-0 rounded-xl bg-surface-container-lowest text-on-surface border border-outline-variant shadow-sm backdrop:bg-black/60"
+    >
+      <header className="flex items-start justify-between gap-3 bg-surface-container-lowest border-b border-outline-variant px-5 py-4">
+        <div className="min-w-0">
+          <h2
+            id="discord-thread-title"
+            title={parent.thread_name ?? undefined}
+            className="m-0 text-title-md font-title-md font-bold text-on-surface break-words line-clamp-2"
+          >
+            {parent.thread_name ?? "스레드"}
+          </h2>
+          <p className="m-0 mt-1 text-body-sm font-body-sm text-on-surface-variant">
+            시작한 사람: <b className="text-on-surface">{parent.author}</b>
+          </p>
+        </div>
+        <form method="dialog" className="shrink-0">
+          <button
+            aria-label="스레드 닫기"
+            className="grid place-items-center w-8 h-8 rounded-full text-on-surface-variant hover:bg-surface-container-high transition-colors"
+          >
+            <span className="material-symbols-outlined text-[20px]" aria-hidden="true">
+              close
+            </span>
+          </button>
+        </form>
+      </header>
+      <div className="px-3 py-3 overflow-y-auto max-h-[calc(85vh-6rem)]">
+        {error ? (
+          <p
+            role="alert"
+            className="text-body-sm font-body-sm text-on-error-container bg-error-container border border-error/40 rounded px-3 py-2 m-0"
+          >
+            {error}
+          </p>
+        ) : messages === null ? (
+          <p className="text-body-sm font-body-sm text-on-surface-variant m-0 px-2">스레드를 불러오는 중입니다…</p>
+        ) : (
+          // 스레드 첫 줄은 스레드를 연 메시지다 - Discord도 그렇게 보여준다.
+          // 스레드 종류에 따라 Discord가 시작 메시지를 스레드 안에 같이 주기도
+          // 해서, 무조건 붙이지 않고 없을 때만 붙인다(두 번 보이면 안 된다).
+          <MessageList
+            messages={messages.some((item) => item.id === parent.id) ? messages : [parent, ...messages]}
+          />
+        )}
+      </div>
+    </dialog>
+  );
+}
+
+function DiscordChat({ department }: { department: string }) {
+  const [messages, setMessages] = useState<DiscordMessage[] | null>(null);
+  const [error, setError] = useState("");
+  const [openThread, setOpenThread] = useState<DiscordMessage | null>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    readDiscordMessages(department, 100, controller.signal)
       .then((body) => setMessages(body.messages))
       .catch((cause: unknown) => {
         if (controller.signal.aborted) return;
@@ -131,6 +336,12 @@ function DiscordChat({ department }: { department: string }) {
       });
     return () => controller.abort();
   }, [department]);
+
+  // 최신 글이 아래에 있다. 스크롤을 안 내리면 제일 오래된 대화만 보여서
+  // "새 메시지가 안 들어온다"로 읽힌다.
+  useEffect(() => {
+    if (messages?.length) bottomRef.current?.scrollIntoView({ block: "end" });
+  }, [messages]);
 
   if (error) {
     return (
@@ -142,35 +353,25 @@ function DiscordChat({ department }: { department: string }) {
       </p>
     );
   }
-  if (messages === null) return <p className="text-body-sm font-body-sm text-on-surface-variant m-0">Discord 대화를 불러오는 중입니다…</p>;
-  if (messages.length === 0) return <p className="text-body-sm font-body-sm text-on-surface-variant m-0">아직 표시할 Discord 대화가 없습니다.</p>;
+  if (messages === null)
+    return <p className="text-body-sm font-body-sm text-on-surface-variant m-0">Discord 대화를 불러오는 중입니다…</p>;
+  if (messages.length === 0)
+    return <p className="text-body-sm font-body-sm text-on-surface-variant m-0">아직 표시할 Discord 대화가 없습니다.</p>;
 
   return (
-    // 카드 한 장이 한 줄을 차지한다. 2열로 쪼개면 좌우 두 카드의 시각이 뒤섞여
-    // 읽는 순서가 사라진다 - 대화는 위에서 아래로 흐르는 것이 읽기 쉽다.
-    <div className="flex flex-col gap-3 max-h-96 overflow-y-auto pr-1">
-      {messages.map((message) => (
-        <article
-          key={message.id}
-          className={`rounded-lg border p-3 ${
-            message.is_department_bot
-              ? "border-primary/30 bg-secondary-container/40"
-              : "border-outline-variant bg-surface-container-low"
-          }`}
-        >
-          {/* 봇·사용자 배지는 두지 않는다. 카드 배경색이 이미 그 구분을 하고 있어
-              같은 사실을 두 번 말하면 정작 읽어야 할 작성자·시각이 묻힌다. */}
-          <div className="min-w-0">
-            <strong className="block truncate text-body-sm font-body-sm text-on-surface">{message.author}</strong>
-            <time className="block text-xs text-outline" dateTime={message.created_at}>
-              {formatMessageTime(message.created_at)}
-            </time>
-          </div>
-          <p className="m-0 mt-3 text-body-sm font-body-sm leading-6 text-on-surface">
-            {summarizeMessage(message.text)}
-          </p>
-        </article>
-      ))}
+    // 위에서 아래로 흐르는 한 줄짜리 목록. 2열로 쪼개면 좌우 두 카드의 시각이
+    // 뒤섞여 읽는 순서가 사라진다.
+    <div className="max-h-96 overflow-y-auto pr-1">
+      <MessageList messages={messages} onOpenThread={setOpenThread} />
+      <div ref={bottomRef} />
+      {openThread ? (
+        <ThreadDialog
+          key={openThread.id}
+          department={department}
+          parent={openThread}
+          onClose={() => setOpenThread(null)}
+        />
+      ) : null}
     </div>
   );
 }
