@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 try:
     from .ceo import CeoAsk
@@ -405,20 +407,30 @@ def mirror_event_stream(
 
     _require_mirror_request_owner(request_id, owner_id)
 
-    def generate():
+    # **비동기 generator 여야 한다.** 동기 generator 를 StreamingResponse 에 주면
+    # Starlette 가 `iterate_in_threadpool` 로 감싸고, 여기서 `time.sleep(0.5)` 를
+    # 하면 그 0.5초 동안 anyio 스레드풀(기본 40개) 토큰 하나를 쥔 채로 있는다.
+    # 스트림 하나가 25초 내내 스레드 하나를 사실상 독점하고, 프론트는 끊기면
+    # 1초 뒤 곧바로 재연결한다(app/lib/sseClient.ts) - 열려 있는 대화 창 수가
+    # 40을 넘는 순간 나머지 동기 `def` 엔드포인트 전부가 스레드풀 대기열에서
+    # 무기한 대기한다. 대기열에는 상한도 타임아웃도 없어서 요청이 영원히
+    # pending 된다. 블로킹 읽기는 스레드로 넘기고 대기는 이벤트 루프에서 한다.
+    async def generate():
         cursor = after
         deadline = time.monotonic() + max(
             1.0, float(os.getenv("UI_MIRROR_SSE_SECONDS", "25"))
         )
         while time.monotonic() < deadline:
-            _publish_workflow_projection(request_id)
-            events = MIRROR_STORE.read_events(request_id, cursor)
+            await run_in_threadpool(_publish_workflow_projection, request_id)
+            events = await run_in_threadpool(
+                MIRROR_STORE.read_events, request_id, cursor
+            )
             for event in events:
                 cursor = event.event_id
                 yield f"id: {event.event_id}\nevent: {event.event_type}\ndata: {event.model_dump_json()}\n\n"
             if not events:
                 yield ": heartbeat\n\n"
-                time.sleep(0.5)
+                await asyncio.sleep(0.5)
 
     return StreamingResponse(
         generate(),
