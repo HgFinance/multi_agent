@@ -93,24 +93,6 @@ services:
       PORTFOLIO_RUNTIME_STORE_PATH: /var/lib/portfolio/runtime.sqlite3
       PORTFOLIO_RUNTIME_EMBEDDED_WORKER: "false"
       PORTFOLIO_GOVERNANCE_BINDING_ENABLED: ${PORTFOLIO_GOVERNANCE_BINDING_ENABLED:-false}
-      # Read-only LS market/account projection. Credentials stay in the BFF;
-      # the browser receives only normalized response data.
-      ENABLE_LS_ORDER_EVENTS: ${ENABLE_LS_ORDER_EVENTS:-false}
-      LS_ENV: ${LS_ENV:-PAPER}
-      LS_APP_KEY: ${LS_APP_KEY:-}
-      LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
-      LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:-}
-      LS_APP_SECRET_KEY_PAPER: ${LS_APP_SECRET_KEY_PAPER:-}
-      LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}
-      LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
-      LS_WS_BASE_URL: ${LS_WS_BASE_URL:-}
-      LS_WS_BASE_URL_PAPER: ${LS_WS_BASE_URL_PAPER:-}
-      LS_ACCOUNT_NO: ${LS_ACCOUNT_NO:-}
-      LS_ACCOUNT_NO_PAPER: ${LS_ACCOUNT_NO_PAPER:-}
-      LS_ACCOUNT_PWD: ${LS_ACCOUNT_PWD:-}
-      LS_ACCOUNT_PWD_PAPER: ${LS_ACCOUNT_PWD_PAPER:-}
-      LS_MAC_ADDRESS: ${LS_MAC_ADDRESS:-}
-      LS_OAUTH_SCOPE: ${LS_OAUTH_SCOPE:-oob}
       # 기본값이 비어 있으면 온보딩 프록시(/ui/mandates, /ui/mandate-assistant/suggest
       # 등)가 전부 503 governance_api_unavailable 이 된다. governance-api 는 같은
       # compose 에 있으므로 서비스 이름을 기본값으로 준다.
