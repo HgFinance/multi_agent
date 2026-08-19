@@ -130,6 +130,7 @@ services:
 
   ceo-hermes:
     environment:
+      HERMES_KANBAN_DISPATCH_IN_GATEWAY: "true"
       CEO_DISCORD_INGRESS_API_KEY: ${CEO_DISCORD_INGRESS_API_KEY:?CEO_DISCORD_INGRESS_API_KEY is required}
       HGFINANCE_DISCORD_INGRESS_URL: http://portfolio-bff:8000/ui/ceo/ingress
 
