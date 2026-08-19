@@ -1449,6 +1449,17 @@ class SupervisorWakeupTest(unittest.TestCase):
         self.assertEqual(infer_workflow_mode("삼성전자 분석"), "analysis")
         self.assertEqual(infer_workflow_mode("삼성전자 주문을 집행해"), "binding")
         self.assertEqual(
+            infer_workflow_mode(
+                "애플을 지금 투자 관점에서 분석해줘. "
+                "리스크 관리와 회계·포트폴리오 관점만 사용하고 "
+                "Research와 Quant는 사용하지 마. "
+                "주문이나 매매 실행은 하지 마."
+            ),
+            "analysis",
+        )
+        self.assertEqual(infer_workflow_mode("매매 실행은 하지 마"), "analysis")
+        self.assertEqual(infer_workflow_mode("주문은 하지 말고 분석만 해줘"), "analysis")
+        self.assertEqual(
             infer_workflow_mode("삼성전자 주문이나 집행은 하지 말고 분석만 해줘"),
             "analysis",
         )

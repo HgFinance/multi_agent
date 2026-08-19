@@ -539,7 +539,12 @@ def infer_workflow_mode(query: str) -> str:
         "실제 주문이나 집행은 하지", "주문이나 집행은 하지",
         "주문하지 말", "집행하지 말", "실행하지 말",
     )
-    if any(phrase in text for phrase in non_binding_phrases):
+    explicit_non_execution = re.search(
+        r"(?:주문|매매|집행|실행)(?:\s*실행)?\s*(?:은|는|도)?\s*"
+        r"하지\s*(?:마|말|않)",
+        text,
+    )
+    if any(phrase in text for phrase in non_binding_phrases) or explicit_non_execution:
         return "analysis"
     binding_terms = (
         "place order", "send order", "execute order", "broker", "buy ",
