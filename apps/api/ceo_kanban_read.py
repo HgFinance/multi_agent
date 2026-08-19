@@ -898,7 +898,7 @@ def load_workflow(
                 break
             fetched = list(pool.map(fetch, pending))
             frontier = []
-            for child_id, payload in zip(pending, fetched):
+            for child_id, payload in zip(pending, fetched, strict=True):
                 payloads[child_id] = payload
                 frontier.extend(_ids(payload.get("children")))
 

@@ -18,7 +18,6 @@ CANONICAL_SHARED_SKILL_ROOT = Path(__file__).resolve().parents[1] / "skills"
 # 정본은 canonical_profiles.py 하나다.
 from orchestration.canonical_profiles import (  # noqa: E402
     CANONICAL_PROFILES,
-    LEGACY_PROFILE_ALIASES,
 )
 
 # Repository-owned skill names.

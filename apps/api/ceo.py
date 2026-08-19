@@ -35,11 +35,9 @@ try:
     from .user_order_workflow import (
         UserOrderRequestConflict,
         UserOrderWorkflowUnavailable,
-        raw_instruction_sha256,
         user_order_repository,
     )
     from .ceo_schemas import (
-        CeoPlanning,
         GraphNode,
         TaskArchiveResponse,
         TaskGraphResponse,
@@ -71,11 +69,9 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
     from user_order_workflow import (  # type: ignore[no-redef]
         UserOrderRequestConflict,
         UserOrderWorkflowUnavailable,
-        raw_instruction_sha256,
         user_order_repository,
     )
     from ceo_schemas import (  # type: ignore[no-redef]
-        CeoPlanning,
         GraphNode,
         TaskArchiveResponse,
         TaskGraphResponse,
@@ -969,7 +965,9 @@ def ceo_task_list(
                 selected_departments=list(workflow.selected_departments),
                 owner_id=requested_by_from_body(body),
             )
-            for (task_id, body), workflow in zip(identified, workflows)
+            for (task_id, body), workflow in zip(
+                identified, workflows, strict=True
+            )
         ]
     )
 

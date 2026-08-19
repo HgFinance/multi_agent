@@ -171,9 +171,9 @@ def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
         discord_channel_id = request.discord_channel_id
         discord_message_id = request.discord_message_id
         discord_guild_id = request.discord_guild_id
-        # Discord 원본에는 아직 스레드가 없다 - Hermes 세션이 나중에 만든다.
-        # 없는 값을 지어내지 않는다.
-        discord_thread_id = None
+        # HgFinance gateway owns request-thread creation before BFF ingress.
+        # Preserve the exact thread correlation supplied by that gateway.
+        discord_thread_id = request.discord_thread_id
     else:
         mirror = post_question(request.query, asked_by=owner_id)
         discord_channel_id = mirror.channel_id if mirror else None

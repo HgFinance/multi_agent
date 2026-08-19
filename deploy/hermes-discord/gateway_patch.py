@@ -299,6 +299,22 @@ def _forward_to_ingress(message: Any, adapter: Any) -> bool:
         return False
 
     context = _message_context(message, adapter)
+
+    # hgfinance-bff-parent-thread-correlation-v1
+    #
+    # Request-thread routing changes message.channel to the newly created
+    # Discord thread.  BFF still needs both coordinates separately:
+    #   channel_id -> original parent channel
+    #   thread_id  -> request thread
+    channel = getattr(message, "channel", None)
+    parent_id = getattr(channel, "parent_id", None)
+    if parent_id:
+        context = dict(context)
+        context["channel_id"] = str(parent_id)
+        context["thread_id"] = str(
+            getattr(channel, "id", "") or context.get("thread_id") or ""
+        )
+
     payload = {
         "query": str(getattr(message, "content", "") or "").strip(),
         # `discord:<message_id>` 형식을 지킨다 - `discord_delivery`의
@@ -315,6 +331,7 @@ def _forward_to_ingress(message: Any, adapter: Any) -> bool:
         "discord_channel_id": str(context["channel_id"]),
         "discord_message_id": message_id,
         "discord_guild_id": str(context["guild_id"]),
+        "discord_thread_id": str(context.get("thread_id") or "") or None,
     }
     if not payload["query"]:
         return False
@@ -369,15 +386,153 @@ def _forward_to_ingress(message: Any, adapter: Any) -> bool:
     return True
 
 
+async def _ensure_request_thread(adapter: Any, message: Any) -> Any:
+    """Create exactly one HgFinance request thread for a CEO Discord request.
+
+    hgfinance-direct-request-thread-v1
+
+    Hermes upstream auto-threading is disabled for HgFinance.  This replacement
+    performs one direct Discord thread-create request only: no seed-message
+    fallback and no retry storm.  Failure is fail-open and the request continues
+    in the parent channel.
+    """
+
+    if _profile_name() != "ceo-agent":
+        return message
+
+    message_id = str(getattr(message, "id", "") or "")
+    if not message_id:
+        return message
+
+    if _author_is_bot(message):
+        return message
+
+    context = _message_context(message, adapter)
+
+    # Already inside a Discord thread.
+    if context.get("thread_id"):
+        return message
+
+    # DMs cannot host Discord threads.
+    if not context.get("guild_id"):
+        return message
+
+    message_type = getattr(message, "type", None)
+    message_type_name = str(getattr(message_type, "name", "") or "").casefold()
+
+    # Preserve Hermes' existing rule: parent-channel replies are not
+    # auto-threaded into a second conversation.
+    if message_type_name == "reply":
+        return message
+
+    create_thread = getattr(message, "create_thread", None)
+    derive_name = getattr(adapter, "_derive_auto_thread_name", None)
+
+    if not callable(create_thread) or not callable(derive_name):
+        logger.warning(
+            "hgfinance-request-thread status=skipped "
+            "reason=thread_api_unavailable message_id=%s",
+            message_id,
+        )
+        return message
+
+    thread_name = derive_name(str(getattr(message, "content", "") or ""))
+
+    try:
+        thread = await create_thread(
+            name=thread_name,
+            auto_archive_duration=1440,
+        )
+    except Exception as exc:
+        # Thread UX is supplementary.  A Discord 429 or other thread failure
+        # must never cancel the CEO request.
+        logger.warning(
+            "hgfinance-request-thread status=failed "
+            "message_id=%s error_type=%s",
+            message_id,
+            type(exc).__name__,
+        )
+        return message
+
+    thread_id = str(getattr(thread, "id", "") or "")
+    if not thread_id:
+        logger.warning(
+            "hgfinance-request-thread status=failed "
+            "reason=missing_thread_id message_id=%s",
+            message_id,
+        )
+        return message
+
+    # Persist the exact request -> thread correlation used later by the
+    # supervisor's department cards and detached CEO synthesis.
+    try:
+        _store(adapter).bind_inbound_thread(
+            message_id,
+            thread_id,
+            _profile_name(),
+        )
+    except Exception as exc:
+        logger.warning(
+            "hgfinance-request-thread-ledger status=failed "
+            "message_id=%s thread_id=%s error_type=%s",
+            message_id,
+            thread_id,
+            type(exc).__name__,
+        )
+
+    # Match Hermes' own successful auto-thread bookkeeping so the starter
+    # MESSAGE_CREATE event cannot trigger another agent execution.
+    try:
+        threads = getattr(adapter, "_threads", None)
+        if threads is not None:
+            threads.mark(thread_id)
+    except Exception:
+        logger.debug(
+            "hgfinance-request-thread thread-cache mark failed",
+            exc_info=True,
+        )
+
+    try:
+        dedup = getattr(adapter, "_dedup", None)
+        if dedup is not None:
+            dedup.is_duplicate(thread_id)
+    except Exception:
+        logger.debug(
+            "hgfinance-request-thread starter dedup mark failed",
+            exc_info=True,
+        )
+
+    try:
+        routed = copy.copy(message)
+        routed.channel = thread
+    except (AttributeError, TypeError, ValueError):
+        logger.warning(
+            "hgfinance-request-thread status=route_copy_failed "
+            "message_id=%s thread_id=%s",
+            message_id,
+            thread_id,
+        )
+        return message
+
+    logger.info(
+        "hgfinance-request-thread status=created "
+        "message_id=%s thread_id=%s",
+        message_id,
+        thread_id,
+    )
+
+    return routed
+
+
 def _wrap_handle_message(cls: type[Any]) -> None:
     if not hasattr(cls, "_handle_message"):
         return
     original = cls._handle_message
 
     def with_routing_context(message: Any, adapter: Any) -> Any:
-        """Expose explicit correlation to the direct CEO planner.
+        """Expose explicit Discord correlation to the CEO planner.
 
-        The direct Discord session does not call the BFF.  A private-looking
+        The fallback Hermes path needs the same routing identifiers as BFF ingress.  A private-looking
         routing block gives the CEO tool flow the same stable identifiers the
         BFF path already carries, without changing mention/permission policy.
         Non-CEO profiles and history/context messages are left untouched.
@@ -389,6 +544,26 @@ def _wrap_handle_message(cls: type[Any]) -> None:
         if not message_id:
             return message
         context = _message_context(message, adapter)
+
+        # hgfinance-parent-thread-correlation-v1
+        #
+        # The CEO runs inside the request thread, but detached supervisor
+        # responses need two separate coordinates:
+        #   discord_channel_id -> original parent channel
+        #   discord_thread_id  -> request thread
+        #
+        # `_message_context()` intentionally reports the current channel, so
+        # normalize only the routing block here when the current channel is a
+        # Discord thread.
+        channel = getattr(message, "channel", None)
+        parent_id = getattr(channel, "parent_id", None)
+        if parent_id:
+            context = dict(context)
+            context["channel_id"] = str(parent_id)
+            context["thread_id"] = str(
+                getattr(channel, "id", "") or context.get("thread_id") or ""
+            )
+
         content = str(getattr(message, "content", "") or "")
         marker = "[hgfinance discord routing context]"
         if marker in content:
@@ -414,15 +589,24 @@ def _wrap_handle_message(cls: type[Any]) -> None:
 
     @functools.wraps(original)
     async def wrapped(self: Any, message: Any, *args: Any, **kwargs: Any) -> bool:
-        # BFF ingress로 넘겼으면 Hermes는 이 메시지를 처리하지 않는다 - 둘 다
-        # 처리하면 한 질문에 워크플로가 두 개 생긴다. 넘기지 못했으면(설정 없음·
-        # 봇 메시지·전달 실패) 아래 기존 경로가 그대로 돈다.
-        if _forward_to_ingress(message, self):
+        # hgfinance-bff-request-thread-v1
+        #
+        # HgFinance owns the request thread before choosing BFF ingress versus
+        # direct Hermes fallback.  Both paths therefore share one correlation.
+        # Upstream Hermes auto-threading remains disabled.
+        routed_message = await _ensure_request_thread(self, message)
+
+        # BFF ingress is the canonical path when configured.  Forward the
+        # routed message so the BFF receives both the parent channel and the
+        # actual request-thread id.  If forwarding fails, the exact same
+        # routed message continues through the direct Hermes fallback.
+        if _forward_to_ingress(routed_message, self):
             return True
+
         try:
             result = await original(
                 self,
-                with_routing_context(message, self),
+                with_routing_context(routed_message, self),
                 *args,
                 **kwargs,
             )

@@ -134,7 +134,9 @@ def _query_latest_snapshot(fund_id: UUID, as_of: datetime) -> tuple[str, datetim
             )
             row = cur.fetchone()
     except psycopg2.Error as exc:
-        raise HTTPException(503, f"회계 DB 조회 실패: {type(exc).__name__}")
+        raise HTTPException(
+            503, f"회계 DB 조회 실패: {type(exc).__name__}"
+        ) from exc
 
     return (str(row[0]), row[1]) if row else None
 

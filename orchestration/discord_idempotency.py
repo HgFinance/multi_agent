@@ -361,6 +361,27 @@ class DiscordIdempotencyStore:
 
         self._run(operation)
 
+    # hgfinance-bind-inbound-thread-v1
+    def bind_inbound_thread(
+        self, message_id: str, thread_id: str, profile: str
+    ) -> None:
+        """Attach the exact Discord request thread to an admitted inbound message."""
+
+        if not message_id or not thread_id:
+            return
+
+        now = self._now()
+
+        def operation(conn: sqlite3.Connection) -> None:
+            conn.execute(
+                "UPDATE discord_idempotency_inbound "
+                "SET thread_id=?, updated_at=? "
+                "WHERE profile=? AND message_id=?",
+                (str(thread_id), now, profile, str(message_id)),
+            )
+
+        self._run(operation)
+
     def inbound_context(self, dedup_key: str, profile: str) -> dict[str, str | None]:
         def operation(conn: sqlite3.Connection) -> dict[str, str | None]:
             row = conn.execute(

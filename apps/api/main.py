@@ -94,7 +94,6 @@ from command_service import (
     IdempotencyConflict,
     TradingStateCommand,
 )
-from account_snapshot import router as account_snapshot_router
 from current_user import (
     active_user_profile,
     authorized_fund_memberships,
@@ -214,7 +213,7 @@ def _portfolio_cors_origins() -> list[str]:
         origin = item.strip()
         try:
             parsed = urlsplit(origin)
-            parsed.port
+            _ = parsed.port
         except ValueError as exc:
             raise RuntimeError(
                 "invalid PORTFOLIO_CORS_ALLOW_ORIGINS entry"

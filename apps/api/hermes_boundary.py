@@ -440,11 +440,13 @@ def ask(
         encoding="utf-8", errors="replace",
         timeout=timeout, cwd=ROOT,
         )
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
         # Hermes Runtime은 PyPI 패키지가 아니라 별도 설치다(CLAUDE.md).
-        raise HTTPException(503, f"Hermes CLI 없음: hermes -p {department}")
-    except subprocess.TimeoutExpired:
-        raise HTTPException(504, f"{timeout}s 초과")
+        raise HTTPException(
+            503, f"Hermes CLI 없음: hermes -p {department}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(504, f"{timeout}s 초과") from exc
 
     if proc.returncode != 0:
         raise HTTPException(502, (proc.stderr or "").strip()[:500] or "agent failed")

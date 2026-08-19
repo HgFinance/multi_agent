@@ -94,7 +94,8 @@ def execute_workflow(
         detail = ""
         attempts = 0
         last_error: Exception | None = None
-        for attempts in range(1, step.max_attempts + 1):
+        for attempt in range(1, step.max_attempts + 1):
+            attempts = attempt
             try:
                 detail = handler(step.input_contract, step.output_contract, context) or ""
                 last_error = None

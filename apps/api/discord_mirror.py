@@ -426,7 +426,6 @@ if __name__ == "__main__":
 
     # **꺼져 있으면 아무것도 하지 않는다.** 토큰·채널이 환경에 있어도 마찬가지 -
     # 테스트가 실제 채널에 글을 쓰는 사고를 막는 기본 방어선이다.
-    from unittest.mock import patch
 
     with patch.dict(
         os.environ,

@@ -391,7 +391,7 @@ def _validate_evidence(
         ordered.append(evidence)
 
     ordered.sort(key=lambda item: (item.start, item.end, item.field.value))
-    for left, right in zip(ordered, ordered[1:]):
+    for left, right in zip(ordered, ordered[1:], strict=False):
         if left.end <= right.start:
             continue
         # A price written with an explicit won unit (``70,000원에``) is itself
