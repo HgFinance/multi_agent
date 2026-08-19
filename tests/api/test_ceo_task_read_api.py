@@ -20,6 +20,7 @@ from apps.api.ceo_kanban_read import (
     QA_BLOCKED_VERDICT,
     KanbanTaskNotFound,
     KanbanUnavailable,
+    kanban_column_for_status,
     load_workflow,
 )
 from orchestration.adapters.ceo_supervisor import SUPERVISOR_MARKER
@@ -909,6 +910,75 @@ class CeoTaskListApiTest(unittest.TestCase):
         client = _client()
         self.assertEqual(client.get("/ui/ceo/tasks", params={"limit": 0}).status_code, 422)
         self.assertEqual(client.get("/ui/ceo/tasks", params={"limit": 101}).status_code, 422)
+
+
+class HermesKanbanBoardApiTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.auth_environment = patch.dict(
+            os.environ,
+            {
+                "APP_ENV": "test",
+                "PORTFOLIO_AUTH_MODE": "fixture",
+                "PORTFOLIO_AUTH_REQUIRED": "false",
+            },
+            clear=False,
+        )
+        self.auth_environment.start()
+
+    def tearDown(self) -> None:
+        self.auth_environment.stop()
+
+    def test_statuses_are_projected_to_four_read_only_columns(self) -> None:
+        client = _client()
+        rows = [
+            {"id": "t_todo", "title": "대기 작업", "assignee": "research-department", "status": "todo"},
+            {"id": "t_ready", "title": "실행 준비", "assignee": "risk-management", "status": "ready"},
+            {"id": "t_running", "title": "실행 중", "assignee": "trading-department", "status": "running"},
+            {"id": "t_blocked", "title": "차단됨", "assignee": "qa-department", "status": "blocked"},
+            {"id": "t_done", "title": "완료 작업", "assignee": "ceo-agent", "status": "done"},
+        ]
+
+        with patch.object(ceo, "list_tasks", return_value=rows) as list_tasks:
+            response = client.get("/ui/ceo/kanban")
+
+        self.assertEqual(response.status_code, 200)
+        list_tasks.assert_called_once_with(include_archived=False)
+        body = response.json()
+        self.assertEqual(body["schema_version"], "hermes.agent-kanban.v1")
+        self.assertEqual(body["source"], "hermes-kanban")
+        self.assertTrue(body["read_only"])
+        self.assertEqual(
+            set(body["columns"]), {"todo", "ready", "inprogress", "done"}
+        )
+        self.assertEqual([item["task_id"] for item in body["columns"]["todo"]], ["t_todo"])
+        self.assertEqual([item["task_id"] for item in body["columns"]["ready"]], ["t_ready"])
+        self.assertEqual(
+            [item["task_id"] for item in body["columns"]["inprogress"]],
+            ["t_running", "t_blocked"],
+        )
+        self.assertEqual([item["task_id"] for item in body["columns"]["done"]], ["t_done"])
+
+    def test_kanban_route_is_read_only_and_fails_closed(self) -> None:
+        client = _client()
+        self.assertEqual(client.post("/ui/ceo/kanban").status_code, 405)
+
+        with patch.object(
+            ceo, "list_tasks", side_effect=KanbanUnavailable("board offline")
+        ):
+            response = client.get("/ui/ceo/kanban")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("board offline", response.json()["detail"])
+
+
+class HermesKanbanColumnMappingTest(unittest.TestCase):
+    def test_unknown_and_exceptional_statuses_remain_visible_in_progress(self) -> None:
+        self.assertEqual(kanban_column_for_status("triage"), "todo")
+        self.assertEqual(kanban_column_for_status("ready"), "ready")
+        self.assertEqual(kanban_column_for_status("blocked"), "inprogress")
+        self.assertEqual(kanban_column_for_status("failed"), "inprogress")
+        self.assertEqual(kanban_column_for_status("done"), "done")
+        self.assertEqual(kanban_column_for_status("new-hermes-state"), "inprogress")
 
 
 class KanbanCliErrorMappingTest(unittest.TestCase):

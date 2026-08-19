@@ -9,8 +9,9 @@ contract.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from threading import RLock
-from typing import Any, Mapping
+from typing import Any
 
 try:  # script execution path
     from agent_status import (

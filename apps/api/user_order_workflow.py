@@ -13,9 +13,10 @@ import json
 import os
 import threading
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Any, Mapping, Protocol
+from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 import psycopg2

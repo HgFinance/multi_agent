@@ -518,6 +518,38 @@ Fund/Book 재인가를 모두 통과한 경우에만 PAPER OMS admission으로 �
 - Domain API 미설정·연결 실패는 인메모리 후퇴 없이 503(`governance_api_unavailable`/`portfolio_api_unavailable`)이다.
 - `/ui/account/snapshot`은 Broker 조회 Projection이며 공식 NAV·원장 잔고가 아니다.
 
+### 10.9 BFF Broker(LS) Read-only Projection Surface
+
+대시보드의 계좌·주문·체결·원장·시장 상위는 이 세 경로에서 온다. **프론트엔드는 브로커를 알지 못한다** — LS OpenAPI를 직접 호출하지 않으며 `ai-office/` 어디에도 LS Credential이나 TR 코드가 없다. 화면은 접수·체결·정정·취소·거부라는 도메인 어휘만 받는다.
+
+| Route | Method | 원천 | Cache |
+|---|---|---|---|
+| `/ui/portfolio/live` | GET | `CDPCQ04700`(거래내역) + `CSPAQ13700`(주문조회) + `SC0`(실시간 체결) 병합 | `LS_ORDER_HISTORY_CACHE_SECONDS` 기본 3초 |
+| `/ui/portfolio/ledger` | GET | 계좌 거래내역 원장 + durable 저장분 | `ACCOUNTING_LEDGER_CACHE_SECONDS` 기본 60초 |
+| `/ui/market/rankings` | GET | LS `/stock/high-item` (`kind`=volume·change·amount) | `LS_MARKET_RANKING_CACHE_SECONDS` 기본 15초 |
+
+- 셋 다 `authoritative: false`다. 브로커 장부이지 우리 원장이 아니며 공식 NAV·원장 잔고를 대체하지 않는다(`/ui/account/snapshot`과 같은 규칙).
+- **읽기 전용이다.** 이 Surface에는 주문 제출 경로가 없다. 사용자 PAPER 주문은 §3.1.1의 `USER_DIRECTIVE` authority를 따르는 별도 경로이며 여기에 섞지 않는다.
+- `/ui/portfolio/live`(주문·보유)와 `/ui/portfolio/ledger`(확정 거래와 비용·세금)는 **원천이 다르므로 한 응답에 합치지 않는다.** 트레이딩과 회계가 각자 축으로 본다.
+- 조회 실패는 502이며 "거래 없음"으로 위장하지 않는다. 빈 배열은 실제로 거래가 없다는 뜻이다.
+- 금액·수량은 문자열로 내려간다. JavaScript number는 double이라 Decimal이 깨진다.
+
+#### 10.9.1 활성화 Gate와 Credential 경계
+
+`ENABLE_LS_ORDER_EVENTS`가 false면 세 경로 모두 **503**이다(기본값 false). 값은 프로세스 기동 시 한 번만 읽으므로 변경 후 재시작이 필요하다. 배포가 성공해도 이 값이 없으면 대시보드만 조용히 비므로, 화면이 빈 채로 뜨면 이 스위치를 먼저 확인한다.
+
+Credential은 BFF 프로세스에만 존재한다. 주입 경로에 함정이 하나 있다:
+
+- 저장소 루트 `.dockerignore`가 `.env*`를 제외하므로 **`.env`는 이미지에 들어가지 않는다.** 컨테이너 안에서 `apps/api/main.py`의 `load_dotenv`는 아무것도 읽지 못한다.
+- 따라서 컨테이너 배포에서는 Compose `environment:`에 **명시적으로 나열한 키만** 프로세스에 도달한다. `.env`에만 값을 넣으면 로컬 host uvicorn에서는 동작하고 Docker/EB에서는 503이 되는 비대칭이 생긴다.
+- `LS_ENV=PAPER`면 `_PAPER` 접미사 키를 먼저 찾고 없을 때만 접미사 없는 키로 떨어진다. 모의투자와 실전 값을 섞지 않는다.
+
+#### 10.9.2 원장 durable 저장
+
+체결일과 결제일(T+2) 사이에는 **어떤 브로커 조회로도 그 거래를 다시 가져올 수 없다.** 본 것을 적어 두지 않으면 날짜가 바뀔 때 장부가 빈다. `ACCOUNTING_LEDGER_DB`가 그 저장소이고, 컨테이너 교체로 사라지지 않도록 Compose가 `portfolio_runtime_data` 볼륨 안 경로로 고정한다(상대경로 금지).
+
+이 SQLite는 회계본부의 공식 원장이 아니라 브로커가 말해 준 것을 잃지 않기 위한 보관분이다. `settlement` 필드가 `SETTLED`/`UNSETTLED`로 둘을 구분하며, 회계는 이 둘을 같은 줄로 취급하지 않는다.
+
 ## 11. 연계 문서
 
 - [Route Status Registry](contracts/route-registry.v1.json)

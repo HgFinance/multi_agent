@@ -1622,6 +1622,7 @@ if __name__ == "__main__":
         # 2026-08-12 CEO Kanban 워크플로 경로. ask/archive를 뺀 나머지는 읽기 전용이고,
         # archive는 기록을 지우지 않는다(감사 추적 유지). DELETE는 만들지 않는다.
         "/ui/ceo/ask",
+        "/ui/ceo/kanban",
         "/ui/ceo/tasks",
         "/ui/ceo/tasks/{task_id}",
         "/ui/ceo/tasks/{task_id}/graph",

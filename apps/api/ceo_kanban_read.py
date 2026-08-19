@@ -29,12 +29,12 @@ import re
 import subprocess
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 try:
     from . import hermes_boundary
@@ -107,6 +107,26 @@ _STAGE_BY_STATUS: dict[str, str] = {
     "archived": "done",
     "blocked": "blocked",
 }
+# UI-only projection. Keep this separate from `_STAGE_BY_STATUS`: that older
+# map is also used by the CEO workflow status calculation above the API route.
+_KANBAN_COLUMN_BY_STATUS: dict[str, str] = {
+    "triage": "todo",
+    "todo": "todo",
+    "scheduled": "todo",
+    "created": "todo",
+    "queued": "todo",
+    "ready": "ready",
+    "claimed": "inprogress",
+    "running": "inprogress",
+    "retrying": "inprogress",
+    "review": "inprogress",
+    "blocked": "inprogress",
+    "failed": "inprogress",
+    "error": "inprogress",
+    "done": "done",
+    "completed": "done",
+    "archived": "done",
+}
 # 앞에 있을수록 우선. 문제를 진행 중 표시 뒤에 숨기지 않는다.
 _STAGE_PRIORITY = ("blocked", "failed", "running", "todo", "done")
 
@@ -154,6 +174,19 @@ _PRIMARY_PROFILE_ORDER = (
     "risk-management",
     "hr-department",
 )
+
+
+def kanban_column_for_status(status: Any) -> str:
+    """Map Hermes' raw status to the four columns exposed by AI Office.
+
+    The board remains recognizable as Hermes Kanban through the raw status on
+    each card, while the projection keeps the product UI to four stable
+    columns. Unknown or exceptional states stay visible in ``inprogress``
+    rather than disappearing or being presented as completed.
+    """
+
+    normalized = str(status or "unknown").strip().casefold()
+    return _KANBAN_COLUMN_BY_STATUS.get(normalized, "inprogress")
 
 
 class KanbanUnavailable(RuntimeError):
@@ -964,6 +997,7 @@ __all__ = [
     "clear_kanban_cache",
     "extract_user_query",
     "is_ceo_root_body",
+    "kanban_column_for_status",
     "list_ceo_roots",
     "list_tasks",
     "load_workflow",
