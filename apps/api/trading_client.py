@@ -7,7 +7,6 @@ from urllib.parse import urlsplit
 
 import httpx
 
-
 TRADING_DIRECTIVES_PATH = "/trading/v1/user-directives"
 TRADING_DIRECTIVE_STATUS_PATH = "/trading/v1/user-directives/{directive_id}"
 

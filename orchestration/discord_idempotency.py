@@ -8,14 +8,14 @@ the tables are separate so recovery/backfill semantics are unchanged.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 import json
 import logging
-from pathlib import Path
 import sqlite3
 import threading
 import time
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)

@@ -35,7 +35,6 @@ from orchestration.contracts.user_paper_order import (
     VerifiedPaperDirective,
 )
 
-
 MAX_TEXT_LENGTH = 500
 MAX_QUANTITY = 10**18 - 1
 MAX_PRICE = 10**24 - 1

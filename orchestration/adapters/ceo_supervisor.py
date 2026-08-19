@@ -18,7 +18,6 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
-from orchestration.answer_contract import grade_answer
 from orchestration.adapters.terminal_projection_utils import (
     action as terminal_action,
 )
@@ -31,6 +30,7 @@ from orchestration.adapters.terminal_projection_utils import (
 from orchestration.adapters.terminal_projection_utils import (
     workflow_root as terminal_workflow_root,
 )
+from orchestration.answer_contract import grade_answer
 from orchestration.canonical_profiles import (
     USER_QUERY_PRIORITY,
     CanonicalKanbanTaskRequest,
@@ -39,14 +39,12 @@ from orchestration.canonical_profiles import (
     department_for_canonical_profile,
     validate_canonical_profile,
 )
-from orchestration.discord_delivery import DiscordFinalDelivery
-from orchestration.discord_idempotency import DiscordIdempotencyStore
 from orchestration.ceo_workflow_scope import (
     CEO_WORKFLOW_SCOPE_MARKER,
     WorkflowScopeViolation,
-    is_user_query_body,
     build_scoped_task_body,
     extract_scope_references,
+    is_user_query_body,
     mandate_snapshot_present,
     primary_idempotency_key,
     selected_primary_profiles_from_task,
@@ -55,6 +53,8 @@ from orchestration.ceo_workflow_scope import (
     workflow_mode_from_body,
     workflow_role_from_body,
 )
+from orchestration.discord_delivery import DiscordFinalDelivery
+from orchestration.discord_idempotency import DiscordIdempotencyStore
 
 logger = logging.getLogger(__name__)
 

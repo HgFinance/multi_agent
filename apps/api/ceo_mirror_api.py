@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 try:
+    from .ceo import CeoAsk
     from .ceo_mirror import (
         CanonicalIngress,
         MirrorEvent,
@@ -23,18 +24,20 @@ try:
         publish_mirror_event,
         stable_event_id,
     )
-    from .ceo import CeoAsk
     from .ceo_schemas import CeoQueryAcceptedResponse
     from .current_user import (
         authorized_trading_books,
         current_user,
         require_fund_membership,
     )
-    from .discord_ingress_auth import request_is_authorized as discord_ingress_authorized
     from .discord_actor_map import resolve as resolve_discord_actor
+    from .discord_ingress_auth import (
+        request_is_authorized as discord_ingress_authorized,
+    )
     from .discord_mirror import post_question
     from .governance_client import fetch_fund_id_by_user
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
+    from ceo import CeoAsk  # type: ignore[no-redef]
     from ceo_mirror import (  # type: ignore[no-redef]
         CanonicalIngress,
         MirrorEvent,
@@ -48,17 +51,18 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
         publish_mirror_event,
         stable_event_id,
     )
-    from ceo import CeoAsk  # type: ignore[no-redef]
     from ceo_schemas import CeoQueryAcceptedResponse  # type: ignore[no-redef]
     from current_user import (  # type: ignore[no-redef]
         authorized_trading_books,
         current_user,
         require_fund_membership,
     )
+    from discord_actor_map import (
+        resolve as resolve_discord_actor,  # type: ignore[no-redef]
+    )
     from discord_ingress_auth import (  # type: ignore[no-redef]
         request_is_authorized as discord_ingress_authorized,
     )
-    from discord_actor_map import resolve as resolve_discord_actor  # type: ignore[no-redef]
     from discord_mirror import post_question  # type: ignore[no-redef]
     from governance_client import fetch_fund_id_by_user  # type: ignore[no-redef]
 

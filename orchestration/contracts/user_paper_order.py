@@ -24,7 +24,6 @@ from pydantic import (
     model_validator,
 )
 
-
 INTERPRETATION_SCHEMA_VERSION = "user-paper-order-interpretation.v1"
 PAPER_MODE = "PAPER"
 

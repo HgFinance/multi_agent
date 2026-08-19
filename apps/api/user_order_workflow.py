@@ -22,7 +22,6 @@ import psycopg2
 from psycopg2 import sql
 from psycopg2.extras import Json, register_uuid
 
-
 # The workflow repository deliberately uses ``uuid.UUID`` values for every
 # authority identifier.  psycopg2 does not adapt UUID objects unless its UUID
 # adapter is registered; without this, the production Postgres path fails on

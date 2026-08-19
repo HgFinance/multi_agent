@@ -8,7 +8,6 @@ from collections.abc import Iterable
 from pathlib import Path
 from types import MappingProxyType
 
-
 CANONICAL_SHARED_SKILL_ROOT = Path(__file__).resolve().parents[1] / "skills"
 
 # 프로필 목록은 **여기서 다시 적지 않는다.** 2026-08-14 실측: 이 모듈이 자기

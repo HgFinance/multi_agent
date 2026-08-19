@@ -13,9 +13,17 @@ from threading import RLock
 from typing import Any, Mapping
 
 try:  # script execution path
-    from agent_status import AGENT_STATUS_PROJECTOR, AgentStatusEvent, AgentRuntimeStatus
+    from agent_status import (
+        AGENT_STATUS_PROJECTOR,
+        AgentRuntimeStatus,
+        AgentStatusEvent,
+    )
 except ModuleNotFoundError:  # pragma: no cover - package import path
-    from apps.api.agent_status import AGENT_STATUS_PROJECTOR, AgentStatusEvent, AgentRuntimeStatus
+    from apps.api.agent_status import (
+        AGENT_STATUS_PROJECTOR,
+        AgentRuntimeStatus,
+        AgentStatusEvent,
+    )
 
 
 KANBAN_TO_AGENT_STATUS: dict[str, AgentRuntimeStatus] = {
