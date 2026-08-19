@@ -1,8 +1,13 @@
 # Engineering 문서 안내
 
-> 기준일: 2026-08-10
+> 기준일: 2026-08-17
 
 이 폴더는 모든 설계 초안을 모아두는 곳이 아니라, 현재 구현·계약·운영 계획을 찾는 진입점이다. 제품의 최상위 기준은 [`HEDGE_FUND_MASTER_PLAN.md`](../HEDGE_FUND_MASTER_PLAN.md)이며, 현재 로컬 Compose 서비스의 기준은 [`docker-compose.yml`](../../docker-compose.yml)과 [LOCAL_COMPOSE_RUNTIME_BASELINE.md](LOCAL_COMPOSE_RUNTIME_BASELINE.md)다.
+
+## 현재 구현 스냅샷
+
+- [AS-IS Runtime Blueprint](AS_IS_RUNTIME_BLUEPRINT_2026-08-17.md) — `5c85168b` 기준 코드·Compose·DB migration 역추적 감사
+- [쉬운 해설판](AS_IS_RUNTIME_BLUEPRINT_EASY_2026-08-17.md) — 비개발자·운영자용 요약
 
 ## 먼저 읽을 문서
 

@@ -74,6 +74,18 @@ dist/
 #   루트에 빈 디렉터리가 생기고, 부서 프로필이 하나도 안 올라간 껍데기가 된다.
 #   2026-08-12 병합에서 `git add -A` 로 한 번 딸려 들어갔다가 되돌렸다.
 docker-compose.override.yml
+
+# 로컬 에이전트 실행 산출물 (정식 artifacts 리포트는 계속 추적)
+/artifacts/claude_proxy.log
+/artifacts/claude_proxy.err.log
+/artifacts/bad_transition_gate.patch
+/artifacts/pw_supabase_readonly.py
+/artifacts/t_03687bd5/
+/artifacts/t_0759eb9f/
+/artifacts/t_1c873601_verify/
+/artifacts/t_2bbfa8d3/
+/artifacts/t_ad5f27e1/
+/artifacts/t_b39bd6d0_review/
 *.bak
 *.bak-*
 *.bak.*
