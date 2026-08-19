@@ -16,10 +16,18 @@ from apps.api.paper_order_mcp import (
     check_readiness,
     validate_api_key,
 )
+from orchestration.contracts.user_paper_order import TextEvidence
 
 
 ROOT = Path(__file__).resolve().parents[2]
 VALID_KEY = "paper-order-mcp-9f4e61d807a248e8a2b17f"
+
+def test_text_evidence_schema_explains_instrument_normalization() -> None:
+    description = TextEvidence.model_json_schema()["properties"]["normalized"][
+        "description"
+    ]
+    assert "INSTRUMENT must exactly equal instrument_mention" in description
+
 
 
 def _yaml(path: str) -> dict:

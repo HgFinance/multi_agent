@@ -132,6 +132,7 @@ def test_exact_sample_is_durably_bound_before_either_card_is_released(
     assert "managed omission default: order_type=MARKET" in trading_body
     assert "limit_price=null, and no ORDER_TYPE evidence" in trading_body
     assert "conflicting market/limit language, must CLARIFY" in trading_body
+    assert "Every evidence item must include normalized" in trading_body
 
     stored = repository.get(response["order_request_id"])
     assert stored is not None

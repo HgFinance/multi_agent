@@ -561,6 +561,8 @@ def _paper_order_child_body(
             "Interpret the exact user instruction below into the strict tool schema.",
             "Call process_user_paper_order exactly once with this root/task scope.",
             "Never invent a symbol, quantity, side, price, explicit order-type evidence, Fund, or Book.",
+            "Every evidence item must include normalized. For INSTRUMENT evidence,",
+            "normalized must exactly equal instrument_mention without guessing a symbol.",
             "If the tool result includes user_message, copy it verbatim into the",
             "user-facing final_answer. Never describe a rejected or non-binding",
             "result as pending review, submitted, filled, or ledger-posted.",
