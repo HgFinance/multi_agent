@@ -94,33 +94,31 @@ from command_service import (
     IdempotencyConflict,
     TradingStateCommand,
 )
-from account_snapshot import router as account_snapshot_router
 from current_user import (
     active_user_profile,
+    auth_mode,
+    auth_required,
+    authenticate_request_headers,
     authorized_fund_memberships,
     authorized_trading_books,
-    auth_required,
-    auth_mode,
-    authenticate_request_headers,
     current_user,
     require_any_fund_membership,
     require_fund_membership,
     require_owner,
     set_authenticated_request_user,
 )
+from department_agents import router as department_agent_router
 from discord_ingress_auth import (
     DISCORD_INGRESS_PATH,
+)
+from discord_ingress_auth import (
     bearer_is_authorized as discord_ingress_bearer_is_authorized,
+)
+from discord_ingress_auth import (
     mark_request as mark_discord_ingress_request,
 )
-from department_agents import router as department_agent_router
 from discord_read import router as discord_read_router
-from ls_account_stream import router as portfolio_live_router
 from domain_read_models import build_domain_read_model
-from portfolio_profile_client import (
-    PortfolioProxyError,
-    portfolio_request as _portfolio_request,
-)
 from governance_client import (
     GOVERNANCE_API_URL,
     GovernanceProxyError,
@@ -129,7 +127,14 @@ from governance_client import (
 from governance_client import (
     governance_request as _governance_request,
 )
+from ls_account_stream import router as portfolio_live_router
 from operations_read_model import build_operations_snapshot
+from portfolio_profile_client import (
+    PortfolioProxyError,
+)
+from portfolio_profile_client import (
+    portfolio_request as _portfolio_request,
+)
 from portfolio_runtime import RUNTIME
 from portfolio_schemas import (
     PortfolioRecommendationStartResponse,
@@ -214,7 +219,7 @@ def _portfolio_cors_origins() -> list[str]:
         origin = item.strip()
         try:
             parsed = urlsplit(origin)
-            parsed.port
+            _ = parsed.port
         except ValueError as exc:
             raise RuntimeError(
                 "invalid PORTFOLIO_CORS_ALLOW_ORIGINS entry"
@@ -1617,6 +1622,7 @@ if __name__ == "__main__":
         # 2026-08-12 CEO Kanban 워크플로 경로. ask/archive를 뺀 나머지는 읽기 전용이고,
         # archive는 기록을 지우지 않는다(감사 추적 유지). DELETE는 만들지 않는다.
         "/ui/ceo/ask",
+        "/ui/ceo/kanban",
         "/ui/ceo/tasks",
         "/ui/ceo/tasks/{task_id}",
         "/ui/ceo/tasks/{task_id}/graph",

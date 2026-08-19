@@ -1,9 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
 import { COMPANY } from "../../company.config";
-import { Company } from "../game/sim";
-import { STAFF } from "../game/staff";
 import LivePortfolioPanel from "../components/LivePortfolioPanel";
 import { CeoControlRoomChat } from "./CeoControlRoomChat";
 import { MarketRankingCard } from "./MarketRankingCard";
@@ -22,19 +19,6 @@ const RECENT_OUTPUTS = [
 ];
 
 export default function DashboardView() {
-  // ponytail: 라우트가 달라 AI Office의 엔진과 상태를 공유하지 않는다. 지금은
-  // 엔진의 초기 스냅샷(전부 0)을 보여준다. 실행 중 수치를 띄우려면 라우트를
-  // 가로지르는 store가 먼저 필요하다.
-  const stats = useMemo(() => new Company().snapshot().stats, []);
-
-  const metrics = [
-    { label: "LangGraph Worker", value: STAFF.length, cap: "WORKERS", lead: true },
-    { label: "완료", value: stats.done, cap: "DONE", lead: false },
-    { label: "진행 중", value: stats.working, cap: "WORKING", lead: false },
-    { label: "대표 확인", value: stats.approval, cap: "APPROVAL", lead: false },
-    { label: "연동 대기", value: stats.blocked, cap: "WAITING", lead: false },
-  ];
-
   return (
     <>
       <main className="flex-1 w-full max-w-app mx-auto p-margin-mobile md:p-margin-desktop flex flex-col gap-gutter">
@@ -63,36 +47,6 @@ export default function DashboardView() {
           </div>
           <LivePortfolioPanel />
         </div>
-
-        {/* ── 오늘 업무 요약 ────────────────────────────── */}
-        <section className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4" aria-label="오늘 업무 요약">
-          {metrics.map((metric) => (
-            <article
-              key={metric.label}
-              className={`rounded-lg border border-outline-variant p-4 h-24 flex flex-col justify-between ${
-                metric.lead ? "bg-secondary-container" : "bg-surface-container-lowest"
-              }`}
-            >
-              <span className={`text-label-md font-label-md ${metric.lead ? "text-on-secondary-container" : "text-secondary"}`}>
-                {metric.label}
-              </span>
-              <span className="flex justify-between items-end gap-2">
-                <b
-                  className={`text-headline-lg font-headline-lg font-data-mono ${metric.lead ? "text-primary" : "text-secondary"}`}
-                >
-                  {metric.value}
-                </b>
-                <small
-                  className={`text-[10px] font-bold uppercase tracking-widest ${
-                    metric.lead ? "text-on-secondary-container" : "text-secondary"
-                  }`}
-                >
-                  {metric.cap}
-                </small>
-              </span>
-            </article>
-          ))}
-        </section>
 
         {/* ── 결과물 창고 ───────────────────────────────── */}
         <section className="bg-surface-container-lowest border border-outline-variant rounded-lg overflow-hidden shadow-sm">

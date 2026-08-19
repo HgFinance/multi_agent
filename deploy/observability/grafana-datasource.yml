@@ -1,0 +1,9 @@
+# Grafana Datasource 자동 등록. 이 파일이 없으면 부팅할 때마다 UI 에서
+# 손으로 Prometheus 주소를 넣어야 한다(볼륨을 지우면 또).
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true

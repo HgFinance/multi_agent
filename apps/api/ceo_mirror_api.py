@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 try:
+    from .ceo import CeoAsk
     from .ceo_mirror import (
         CanonicalIngress,
         MirrorEvent,
@@ -23,18 +24,20 @@ try:
         publish_mirror_event,
         stable_event_id,
     )
-    from .ceo import CeoAsk
     from .ceo_schemas import CeoQueryAcceptedResponse
     from .current_user import (
         authorized_trading_books,
         current_user,
         require_fund_membership,
     )
-    from .discord_ingress_auth import request_is_authorized as discord_ingress_authorized
     from .discord_actor_map import resolve as resolve_discord_actor
+    from .discord_ingress_auth import (
+        request_is_authorized as discord_ingress_authorized,
+    )
     from .discord_mirror import post_question
     from .governance_client import fetch_fund_id_by_user
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
+    from ceo import CeoAsk  # type: ignore[no-redef]
     from ceo_mirror import (  # type: ignore[no-redef]
         CanonicalIngress,
         MirrorEvent,
@@ -48,17 +51,18 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
         publish_mirror_event,
         stable_event_id,
     )
-    from ceo import CeoAsk  # type: ignore[no-redef]
     from ceo_schemas import CeoQueryAcceptedResponse  # type: ignore[no-redef]
     from current_user import (  # type: ignore[no-redef]
         authorized_trading_books,
         current_user,
         require_fund_membership,
     )
+    from discord_actor_map import (
+        resolve as resolve_discord_actor,  # type: ignore[no-redef]
+    )
     from discord_ingress_auth import (  # type: ignore[no-redef]
         request_is_authorized as discord_ingress_authorized,
     )
-    from discord_actor_map import resolve as resolve_discord_actor  # type: ignore[no-redef]
     from discord_mirror import post_question  # type: ignore[no-redef]
     from governance_client import fetch_fund_id_by_user  # type: ignore[no-redef]
 
@@ -171,9 +175,9 @@ def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
         discord_channel_id = request.discord_channel_id
         discord_message_id = request.discord_message_id
         discord_guild_id = request.discord_guild_id
-        # Discord 원본에는 아직 스레드가 없다 - Hermes 세션이 나중에 만든다.
-        # 없는 값을 지어내지 않는다.
-        discord_thread_id = None
+        # HgFinance gateway owns request-thread creation before BFF ingress.
+        # Preserve the exact thread correlation supplied by that gateway.
+        discord_thread_id = request.discord_thread_id
     else:
         mirror = post_question(request.query, asked_by=owner_id)
         discord_channel_id = mirror.channel_id if mirror else None

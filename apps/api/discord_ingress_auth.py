@@ -12,7 +12,6 @@ import hmac
 import os
 from typing import Any
 
-
 DISCORD_INGRESS_SECRET_ENV = "CEO_DISCORD_INGRESS_API_KEY"
 DISCORD_INGRESS_PATH = "/ui/ceo/ingress"
 REQUEST_STATE_ATTRIBUTE = "hgfinance_internal_discord_ingress"

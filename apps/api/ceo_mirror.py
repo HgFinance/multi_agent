@@ -84,6 +84,7 @@ class CanonicalIngress(BaseModel):
     discord_channel_id: str | None = None
     discord_message_id: str | None = None
     discord_guild_id: str | None = None
+    discord_thread_id: str | None = None
 
     @model_validator(mode="after")
     def default_source_message_id(self) -> CanonicalIngress:

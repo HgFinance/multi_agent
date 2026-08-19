@@ -1,0 +1,81 @@
+# 관측 오버레이 - Control Plane compose 위에 얹는다.
+#
+# 근거: docker-compose.model.yml 과 같은 오버레이 패턴. Prometheus 는 pull 이고
+#       Control Plane 과 Model Plane(GPU)이 같은 EC2 g6.xlarge 한 대에 있으므로
+#       (FINAL_RUNTIME_ARCHITECTURE.md 3.1) remote_write · Pushgateway ·
+#       보안그룹 개방이 전부 불필요하다. 서비스 이름으로 긁는다.
+#
+# ▶ 로컬에서 배선만 확인 (GPU 없이, 앱 빌드 없이)
+#     docker compose -p hedgefund -f docker-compose.observability.yml up -d
+#     http://localhost:3000  (admin / GRAFANA_PASSWORD)
+#   Explore 에서 prometheus_tsdb_head_samples_appended_total 을 보면 선이 올라간다.
+#
+#   base compose 를 -f 로 같이 얹지 않는 이유: 병합하면 base 의 필수 변수까지
+#   전부 있어야 해서(현재 .env 에 TRADING_SERVICE_AUTH_SECRET 이 없다) 관측만
+#   띄우려는데 무관한 이유로 막힌다. `-p hedgefund` 가 네트워크 이름을
+#   hedgefund_default 로 맞춰 주므로, base 스택이 떠 있으면 스크레이프는 그대로 된다.
+#
+# ▶ EC2 에서 GPU 까지
+#     docker compose -f docker-compose.yml -f docker-compose.model.yml \
+#                    -f docker-compose.observability.yml up -d
+#   dcgm-exporter 는 nvidia 런타임이 필요하다 - vllm 이 이미 쓰고 있는 그 런타임이다.
+#
+# ▶ 외부 노출 없음
+#   deploy/aws/README.md 기조대로 공개 EC2 포트를 만들지 않는다. Grafana 는
+#   127.0.0.1 바인딩이고 EC2 에서는 SSH 터널로 본다:
+#     ssh -L 3000:localhost:3000 ubuntu@<ec2>
+
+services:
+  # GPU 하드웨어 지표. 코드 0줄 - NVIDIA 공식 exporter 컨테이너다.
+  dcgm-exporter:
+    image: nvidia/dcgm-exporter:3.3.9-3.6.1-ubuntu22.04
+    container_name: hedgefund-dcgm-exporter
+    restart: unless-stopped
+    # 일부 프로파일링 지표가 이걸 요구한다
+    cap_add:
+      - SYS_ADMIN
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # GPU 없는 로컬에서 이 서비스만 빠지도록. up 은 안 뜨지만 나머지는 그대로 뜬다.
+    profiles: ["gpu"]
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: hedgefund-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      # 15일. g6.xlarge EBS 250GB 기준 이 정도가 부담 없다.
+      - --storage.tsdb.retention.time=15d
+    # ports 없음 - Grafana 가 compose 네트워크 안에서 부른다. 쿼리를 직접
+    # 확인할 때만 임시로 127.0.0.1:9090:9090 을 연다.
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    container_name: hedgefund-grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      # 외부 계정이 아니다. 이 값이 곧 admin 비밀번호다.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?.env 에 GRAFANA_PASSWORD 를 넣어라}
+      # 대시보드 import 는 grafana.com 계정이 필요 없지만 아웃바운드는 필요하다.
+      # 막힌 망이면 여기서 JSON 을 붙여넣는 방식으로 바꾼다.
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./deploy/observability/grafana-datasource.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro
+      - grafana_data:/var/lib/grafana
+
+volumes:
+  prom_data:
+  grafana_data:

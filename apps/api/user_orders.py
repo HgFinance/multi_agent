@@ -13,7 +13,7 @@ from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Annotated, Any, Literal
-from uuid import UUID, NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import (
