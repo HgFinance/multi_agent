@@ -71,7 +71,17 @@ from subscription_plan import (
 )
 
 SERVICE_VERSION = "research-ls-realtime-service-v1"
-STOCK_CAPTURE_SCOPE_VERSION = "krx-active-stock-capture-v1"
+STOCK_CAPTURE_SCOPE_VERSION = "krx-active-stock-capture-v2"
+
+# The committed full-universe file is a point-in-time basket.  A listing
+# change between that snapshot and today's Reference view must not stop quote
+# and trade capture for every still-resolvable stock.  Quarantine is allowed
+# only for a large basket and a very small, bounded tail; manual/small baskets,
+# broad Reference loss, and ambiguous identities remain fail-closed.
+STALE_BASKET_MIN_REQUESTED = 1_000
+STALE_BASKET_MIN_MAPPING_COVERAGE = 0.995
+STALE_BASKET_MAX_UNMAPPED = 25
+STALE_UNMAPPED_REASON = "STALE_CONFIG_NO_CURRENT_TRADING_MAPPING"
 
 DEFAULT_OPEN = time(9, 0)
 DEFAULT_CLOSE = time(15, 30)
@@ -124,8 +134,9 @@ def select_stock_capture_universe(
 
     구성 파일은 DB 스냅샷보다 오래될 수 있다. 제품 분류가 STOCK에서 SPAC으로
     정정된 경우 전체 수집을 죽이지는 않지만, 해당 심볼을 조용히 건너뛰지도
-    않는다. 반면 현재 LS 대표 심볼로 해석할 수 없거나 매핑이 둘 이상이면 어느
-    instrument를 구독해야 하는지 결정할 수 없으므로 fail-closed 한다.
+    않는다. 대형 바스켓의 극소수 현재 매핑 누락도 같은 방식으로 격리하고 감사
+    증거에 넣는다. 수동/소형 바스켓의 누락, 광범위한 Reference 유실, 중복 매핑은
+    어느 instrument를 구독해야 하는지 결정할 수 없으므로 계속 fail-closed 한다.
     """
 
     requested = tuple(str(symbol).strip() for symbol in symbols)
@@ -149,10 +160,17 @@ def select_stock_capture_universe(
         by_symbol.setdefault(row.symbol, []).append(row)
 
     missing = sorted(requested_set - set(by_symbol))
-    if missing:
+    mapping_coverage = len(by_symbol) / len(requested)
+    quarantine_stale_tail = bool(missing) and (
+        len(requested) >= STALE_BASKET_MIN_REQUESTED
+        and len(missing) <= STALE_BASKET_MAX_UNMAPPED
+        and mapping_coverage >= STALE_BASKET_MIN_MAPPING_COVERAGE
+    )
+    if missing and not quarantine_stale_tail:
         raise LsRealtimeError(
             "현재 유효한 LS/KRX 대표 TRADING 매핑이 없는 심볼이다: "
-            f"{missing}"
+            f"{missing} (requested={len(requested)}, mapped={len(by_symbol)}, "
+            f"coverage={mapping_coverage:.6f})"
         )
     ambiguous = sorted(symbol for symbol, mapped in by_symbol.items() if len(mapped) != 1)
     if ambiguous:
@@ -164,6 +182,23 @@ def select_stock_capture_universe(
     excluded: list[tuple[str, str]] = []
     decisions: list[dict[str, str]] = []
     for symbol in sorted(requested):
+        if symbol in missing:
+            excluded.append((symbol, STALE_UNMAPPED_REASON))
+            decisions.append(
+                {
+                    "symbol": symbol,
+                    "instrument_id": "",
+                    "decision": "EXCLUDE",
+                    "reason": STALE_UNMAPPED_REASON,
+                    "market": "",
+                    "asset_class": "",
+                    "instrument_type": "",
+                    "status": "",
+                    "venue": "",
+                    "is_spac": "",
+                }
+            )
+            continue
         row = by_symbol[symbol][0]
         market = _scope_text(row.market)
         asset_class = _scope_text(row.asset_class)
