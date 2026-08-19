@@ -21,8 +21,7 @@ import {
   validateDraft,
 } from "../lib/mandateClient";
 import { provisionalRiskScore, type Experience } from "../lib/mandatePresets";
-import { useAuth } from "../lib/AuthProvider";
-import { usePortfolioSession } from "../lib/PortfolioSessionProvider";
+import { DEFAULT_ACCOUNT } from "../lib/currentAccount";
 
 /**
  * 운용 지침 설정 화면.
@@ -206,29 +205,27 @@ function FieldLabel({ children, hint }: { children: React.ReactNode; hint?: stri
 }
 
 /**
- * 인증된 사용자와 서버가 허용한 활성 Fund를 함께 폼 scope로 사용한다.
+ * 계정이 Fund Owner 하나로 고정돼(`currentAccount.ts`, 2026-08-19) 폼 scope도
+ * 그 고정 계정을 그대로 쓴다.
  *
- * 어느 한쪽이 바뀌면 `key`가 달라져 React가 이전 사용자의 초안·인터뷰 상태를
- * 통째로 폐기한다. 로그인만 있고 Fund membership이 없으면 임의 Fund를 추측하지
- * 않고 안내 화면에서 멈춘다.
+ * ## 왜 "펀드 권한 설정이 필요합니다" 안내 화면을 없앴나
+ *
+ * 예전에는 `useAuth()`의 Supabase 세션과 `usePortfolioSession()`의 서버 승인
+ * Fund가 둘 다 있어야 폼을 열었다. 실제 Supabase 인증을 붙이지 않기로
+ * 했으므로(2026-08-19) `auth.userId`가 채워질 경로 자체가 없어, 이 화면이
+ * **항상** 떴다 - "권한이 없다"가 아니라 "권한을 확인하는 기능을 쓰지 않는다"는
+ * 상태를 오인하게 만들었다.
+ *
+ * `DEFAULT_ACCOUNT.fundId`가 없는 경우를 방어적으로 다루는 이유: 인터페이스
+ * `TestAccount.fundId`가 여전히 `string | null`이기 때문이다(서버에
+ * `user_id -> fund_id` 역참조가 없다는 사실은 그대로다) - 실제로는 이 고정
+ * 계정에 항상 값이 있어 아래 분기를 타지 않는다.
  */
 export default function MandateConfig() {
-  const auth = useAuth();
-  const portfolio = usePortfolioSession();
-  const userId = auth.userId;
-  const fundId = portfolio.activeFundId;
-  if (!userId || !fundId) {
-    return (
-      <section className="m-auto max-w-xl rounded-lg border border-outline-variant bg-surface-container-lowest p-6">
-        <h1 className="text-headline-md font-bold text-primary">펀드 권한 설정이 필요합니다</h1>
-        <p className="mt-3 text-body-md text-on-surface-variant">
-          로그인은 확인됐지만 활성 Fund membership이 없습니다. 운영 관리자에게 접근 권한을 요청하세요.
-        </p>
-      </section>
-    );
-  }
-  const scopeKey = `${userId}:${fundId}`;
-  return <MandateConfigForm key={scopeKey} userId={userId} fundId={fundId} />;
+  const userId = DEFAULT_ACCOUNT.userId;
+  const fundId = DEFAULT_ACCOUNT.fundId;
+  if (!fundId) return null;
+  return <MandateConfigForm key={userId} userId={userId} fundId={fundId} />;
 }
 
 function MandateConfigForm({ userId, fundId }: { userId: string; fundId: string }) {

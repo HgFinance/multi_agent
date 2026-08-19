@@ -1,10 +1,6 @@
-import { AUTH_MODE, fixtureAuthEnabled, type FrontendAuthMode } from "./authMode";
+import { type FrontendAuthMode } from "./authMode";
 import { readStoredAccount } from "./currentAccount";
-import {
-  AuthenticationRequiredError,
-  getSupabaseAccessToken,
-  getSupabaseUserId,
-} from "./supabaseBrowser";
+import { AuthenticationRequiredError } from "./supabaseBrowser";
 
 const configuredBff = process.env.NEXT_PUBLIC_BFF_URL?.trim();
 export const BFF = (configuredBff || "http://127.0.0.1:8001").replace(/\/+$/, "");
@@ -38,17 +34,25 @@ export function buildBffAuthHeaders(
   return headers;
 }
 
+/**
+ * 이 요청에 실을 신원 헤더.
+ *
+ * `AUTH_MODE`/`fixtureAuthEnabled`로 분기하지 않는다(2026-08-19) - 실제
+ * Supabase 인증을 붙이지 않기로 했는데, 그 두 값은 `NEXT_PUBLIC_AUTH_MODE`
+ * 환경변수에서 나오고 이 값이 SSR·클라이언트 번들에서 다르게 읽히는 문제가
+ * 반복됐다(vite.config.ts: Cloudflare Worker와 Vite 클라이언트 빌드가 env를
+ * 따로 받는다). `AUTH_MODE`가 잘못 "supabase"로 평가되면 `X-User-Id` 대신
+ * `Authorization: Bearer <uuid>`를 보내버려 서버가 그걸 서명된 JWT로 검증하려다
+ * 실패한다. 고정 계정 하나뿐이니 무조건 `fixture` 헤더를 만든다.
+ */
 async function authenticatedHeaders(init: BffRequestInit, forceRefresh = false): Promise<Headers> {
-  if (fixtureAuthEnabled) {
-    return buildBffAuthHeaders(AUTH_MODE, init.headers, readStoredAccount().userId);
-  }
-  return buildBffAuthHeaders(AUTH_MODE, init.headers, await getSupabaseAccessToken(forceRefresh));
+  void forceRefresh; // Supabase 재발급 경로가 없어져 더 이상 쓰이지 않는다.
+  return buildBffAuthHeaders("fixture", init.headers, readStoredAccount().userId);
 }
 
 /** Verified browser identity for legacy request bodies that still require an actor field. */
 export async function getAuthenticatedSubject(): Promise<string> {
-  if (fixtureAuthEnabled) return readStoredAccount().userId;
-  return getSupabaseUserId();
+  return readStoredAccount().userId;
 }
 
 function notifyAuthenticationRequired(): void {
@@ -57,9 +61,15 @@ function notifyAuthenticationRequired(): void {
   }
 }
 
-/** The only HTTP transport allowed to call the production portfolio BFF. */
+/**
+ * The only HTTP transport allowed to call the production portfolio BFF.
+ *
+ * 401 재시도 경로를 없앴다(2026-08-19). 그 경로의 목적은 만료된 Supabase
+ * access token을 재발급받아 한 번 더 보내는 것이었는데, 고정 계정 헤더
+ * (`X-User-Id`)는 만료되지 않으므로 두 번째 시도가 첫 번째와 **완전히 같은
+ * 요청**이 된다 - 같은 401을 두 번 받고 서버 부하만 두 배가 된다.
+ */
 export async function bffFetch(path: string, init: BffRequestInit = {}): Promise<Response> {
-  const method = (init.method ?? "GET").toUpperCase();
   const { retryMutationAfterRefresh, ...requestInit } = init;
   void retryMutationAfterRefresh;
   let response: Response;
@@ -71,26 +81,6 @@ export async function bffFetch(path: string, init: BffRequestInit = {}): Promise
     });
   } catch (cause) {
     if (cause instanceof AuthenticationRequiredError) notifyAuthenticationRequired();
-    throw cause;
-  }
-
-  if (
-    response.status !== 401 ||
-    fixtureAuthEnabled ||
-    !shouldRetryAfterAuthenticationFailure(method, init.retryMutationAfterRefresh === true)
-  ) {
-    if (response.status === 401) notifyAuthenticationRequired();
-    return response;
-  }
-
-  try {
-    response = await fetch(requestUrl(path), {
-      ...requestInit,
-      cache: init.cache ?? "no-store",
-      headers: await authenticatedHeaders(init, true),
-    });
-  } catch (cause) {
-    notifyAuthenticationRequired();
     throw cause;
   }
   if (response.status === 401) notifyAuthenticationRequired();

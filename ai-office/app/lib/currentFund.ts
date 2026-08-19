@@ -1,4 +1,3 @@
-import { fixtureAuthEnabled } from "./authMode";
 import { readStoredAccount } from "./currentAccount";
 
 export const PORTFOLIO_SCOPE_CHANGED_EVENT = "hgfinance:portfolio-scope-changed";
@@ -71,12 +70,18 @@ export function clearAuthorizedFunds(): void {
 
 export function currentFundId(): string | undefined {
   // Once `/ui/me` has projected the authorized funds, that server-backed
-  // selection is canonical even in local fixture mode.  The hard-coded test
-  // account fund is only an offline bootstrap fallback; preferring it here
-  // could route a PAPER command to a fund that has no authorized trading book.
+  // selection is canonical. The hard-coded fixed account fund is only an
+  // offline bootstrap fallback; preferring it here could route a PAPER
+  // command to a fund that has no authorized trading book.
   if (activeFundId) return activeFundId;
-  if (fixtureAuthEnabled) return readStoredAccount().fundId ?? undefined;
-  return undefined;
+  // `fixtureAuthEnabled` 분기를 없앴다(2026-08-19) - 실제 Supabase 인증을
+  // 붙이지 않기로 했으므로, 이 값이 `undefined`일 이유가 없다. 예전에는 이
+  // 판정이 `NEXT_PUBLIC_AUTH_MODE` 환경변수(`authMode.ts`)에 걸려 있었는데,
+  // 그 값이 SSR과 클라이언트 번들에서 다르게 읽혀(vite.config.ts의 Cloudflare
+  // Worker/Vite 클라이언트 분리 구조 때문) 계정을 계속 못 찾는 상태가 됐다
+  // ("계정에 연결된 Fund가 없습니다"가 반복해서 뜬 원인). 고정 계정 하나뿐이니
+  // 조건 없이 그 계정의 fundId를 쓴다.
+  return readStoredAccount().fundId ?? undefined;
 }
 
 export function readCurrentFundId(): string {

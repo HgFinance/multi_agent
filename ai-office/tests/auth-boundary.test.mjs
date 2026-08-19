@@ -25,10 +25,14 @@ function legacySupabaseJwt(role) {
   return `${base64url({ alg: "HS256", typ: "JWT" })}.${base64url({ role })}.signature`;
 }
 
-test("fixture identity is explicit and impossible in production", () => {
-  assert.equal(resolveAuthMode("fixture", "test"), "fixture");
-  assert.equal(resolveAuthMode(undefined, "production"), "supabase");
-  assert.throws(() => resolveAuthMode("fixture", "production"), /fixture_auth_is_disabled/);
+test("identity is a fixed account and never depends on an environment variable", () => {
+  // 2026-08-19: `NEXT_PUBLIC_AUTH_MODE` 기반 분기를 없앴다. 이 앱은 Cloudflare
+  // Worker(SSR)와 Vite 클라이언트가 env를 서로 다른 경로로 받아, 같은 코드가
+  // 서버에서는 fixture로 클라이언트에서는 supabase로 평가되는 일이 반복됐다.
+  // 인자를 무엇으로 주든 결과가 같아야 그 갈림이 구조적으로 불가능하다.
+  assert.equal(resolveAuthMode(), "fixture");
+  assert.equal(resolveAuthMode("supabase", "production"), "fixture");
+  assert.equal(resolveAuthMode(undefined, undefined), "fixture");
 });
 
 test("login next accepts only same-origin absolute paths", () => {
@@ -162,13 +166,15 @@ test("production clients have no raw EventSource, WebSocket, or direct BFF fetch
     assert.doesNotMatch(source, /\bfetch\s*\(/, file);
     assert.doesNotMatch(source, /withAccountHeaders/, file);
   }
+  // authMode는 이제 상수다 - 런타임 검사(`assertSafeAuthMode`)가 지키던 것을
+  // 타입/상수 자체가 지킨다. 대신 env를 다시 읽지 않는지를 고정한다.
   const authModeSource = await readFile(new URL("../app/lib/authMode.ts", import.meta.url), "utf8");
-  assert.match(authModeSource, /assertSafeAuthMode\(\);/);
+  assert.doesNotMatch(authModeSource, /process\.env/, "authMode must not read an environment variable");
 
   const currentFundSource = await readFile(new URL("../app/lib/currentFund.ts", import.meta.url), "utf8");
   const activeFundGuard = currentFundSource.indexOf("if (activeFundId) return activeFundId;");
-  const fixtureFallback = currentFundSource.indexOf("if (fixtureAuthEnabled) return readStoredAccount().fundId ?? undefined;");
+  const fixedFallback = currentFundSource.indexOf("return readStoredAccount().fundId ?? undefined;");
   assert.notEqual(activeFundGuard, -1, "currentFund must return the authorized active fund");
-  assert.notEqual(fixtureFallback, -1, "currentFund must retain the offline fixture fallback");
-  assert.ok(activeFundGuard < fixtureFallback, "the server-authorized active fund must win over the fixture fallback");
+  assert.notEqual(fixedFallback, -1, "currentFund must retain the offline fixed-account fallback");
+  assert.ok(activeFundGuard < fixedFallback, "the server-authorized active fund must win over the fallback");
 });

@@ -3,9 +3,6 @@
 import Link from "next/link";
 import { COMPANY } from "../../company.config";
 import { DEFAULT_ACCOUNT, type TestAccount } from "../lib/currentAccount";
-import { fixtureAuthEnabled } from "../lib/authMode";
-import { useAuth } from "../lib/AuthProvider";
-import { usePortfolioSession } from "../lib/PortfolioSessionProvider";
 
 /**
  * 상단 네비게이션. DESIGN.md 토큰만 쓰고 색·간격을 직접 박지 않는다.
@@ -13,12 +10,16 @@ import { usePortfolioSession } from "../lib/PortfolioSessionProvider";
  * 아직 화면이 없는 항목은 링크가 아니라 disabled 버튼으로 둔다.
  * 연결 안 된 걸 연결된 것처럼 보이지 않게 하는 게 이 앱의 원칙이다.
  *
- * `"use client"`인 이유: fixture 모드에서 `useAuth`/`usePortfolioSession` 훅과
- * 오른쪽 세션 메뉴(`ProductionSessionMenu`)가 브라우저 상태를 쓴다.
+ * `"use client"`인 이유: `AccountDot`의 색 토큰 계산과 훗날의 상호작용을 위해
+ * 클라이언트 컴포넌트로 둔다.
  *
  * **계정 표시는 로그인이 아니다.** 근거는 `app/lib/currentAccount.ts` 머리말에
  * 적어뒀다 - 요약하면 `X-User-Id`는 서명이 없어 신원을 증명하지 않는다.
- * 계정이 Fund Owner 하나로 고정돼(2026-08-19) 전환 UI는 없다.
+ * 계정이 Fund Owner 하나로 고정돼(2026-08-19) 전환 UI가 없고, 실제 Supabase
+ * 인증도 붙이지 않으므로(2026-08-19) 세션 메뉴도 없다 - env 값으로 둘 중
+ * 하나를 고르던 분기 자체를 없앴다. 그 분기가 SSR/클라이언트 사이에서
+ * `NEXT_PUBLIC_AUTH_MODE` 주입 경로 차이로 어긋나 화면에 "Authenticated user
+ * / Supabase session / 로그아웃"이 잘못 뜬 적이 있었다(2026-08-19 실측).
  */
 
 export type NavKey = "dashboard" | "ai-office" | "mandate" | "agent-logs";
@@ -65,53 +66,6 @@ function FixedAccountBadge() {
   );
 }
 
-function ProductionSessionMenu() {
-  const auth = useAuth();
-  const portfolio = usePortfolioSession();
-  const funds = portfolio.profile?.funds ?? [];
-  const label = portfolio.profile?.displayName || auth.email || "Authenticated user";
-
-  return (
-    <div className="flex min-w-0 items-center gap-2">
-      <div className="hidden min-w-0 text-right lg:block">
-        <p className="truncate text-label-md font-bold text-on-surface">{label}</p>
-        <p className="truncate text-[10px] text-on-surface-variant">
-          {portfolio.loading
-            ? "권한 확인 중"
-            : portfolio.profile?.onboardingRequired
-              ? "펀드 권한 설정 필요"
-              : "Supabase session"}
-        </p>
-      </div>
-      {funds.length > 0 ? (
-        <select
-          aria-label="허가된 펀드 선택"
-          value={portfolio.activeFundId ?? funds[0].fundId}
-          onChange={(event) => portfolio.selectFund(event.target.value)}
-          className="max-w-44 rounded-md border border-outline-variant bg-surface-container-lowest px-2 py-1.5 text-label-md text-on-surface"
-        >
-          {funds.map((fund) => (
-            <option key={fund.fundId} value={fund.fundId}>
-              {fund.fundId.slice(0, 8)} · {fund.roles.join(", ") || "MEMBER"}
-            </option>
-          ))}
-        </select>
-      ) : null}
-      <button
-        type="button"
-        onClick={() => void auth.signOut()}
-        className="rounded-md border border-outline-variant px-2.5 py-1.5 text-label-md font-semibold text-secondary hover:bg-surface-container"
-      >
-        로그아웃
-      </button>
-    </div>
-  );
-}
-
-function IdentityControls() {
-  return fixtureAuthEnabled ? <FixedAccountBadge /> : <ProductionSessionMenu />;
-}
-
 export default function TopNav({ current }: { current: NavKey }) {
   return (
     <nav className="bg-surface-container-lowest border-b border-outline-variant flex items-center justify-between w-full px-margin-mobile md:px-margin-desktop h-16 shrink-0 z-50 font-sans">
@@ -150,7 +104,7 @@ export default function TopNav({ current }: { current: NavKey }) {
           })}
         </div>
       </div>
-      <IdentityControls />
+      <FixedAccountBadge />
     </nav>
   );
 }
