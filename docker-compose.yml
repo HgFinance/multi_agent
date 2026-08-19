@@ -137,6 +137,34 @@ services:
       DISCORD_BOT_TOKEN_CEO: ${DISCORD_BOT_TOKEN_CEO:-}
       DISCORD_CEO_CHANNEL_ID: ${DISCORD_CEO_CHANNEL_ID:-}
       DISCORD_ACTOR_MAP: ${DISCORD_ACTOR_MAP:-}
+      # LS 브로커 조회 배선(2026-08-19). `.env`는 `.dockerignore`에 걸려 이미지에
+      # 들어가지 않으므로 apps/api/main.py의 load_dotenv가 컨테이너 안에서는
+      # 아무것도 읽지 못한다 - 여기 나열한 키만 프로세스에 도달한다.
+      # 끄면 /ui/portfolio/live, /ui/portfolio/ledger, /ui/market/rankings가
+      # 전부 503이라 대시보드가 빈다. 읽기 전용이며 주문은 나가지 않는다.
+      ENABLE_LS_ORDER_EVENTS: ${ENABLE_LS_ORDER_EVENTS:-false}
+      # LS_ENV=PAPER면 조회 코드가 `_PAPER` 접미사 키를 먼저 찾고 없으면
+      # 접미사 없는 키로 떨어진다(departments/03-risk/integrations/ls_openapi.py).
+      # 어느 쪽을 쓸지는 배포 환경이 정하므로 양쪽을 다 통과시킨다.
+      LS_ENV: ${LS_ENV:-PAPER}
+      LS_APP_KEY: ${LS_APP_KEY:-}
+      LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
+      LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}
+      LS_WS_BASE_URL: ${LS_WS_BASE_URL:-}
+      LS_ACCOUNT_NO: ${LS_ACCOUNT_NO:-}
+      LS_ACCOUNT_PWD: ${LS_ACCOUNT_PWD:-}
+      LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:-}
+      LS_APP_SECRET_KEY_PAPER: ${LS_APP_SECRET_KEY_PAPER:-}
+      LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
+      LS_WS_BASE_URL_PAPER: ${LS_WS_BASE_URL_PAPER:-}
+      LS_ACCOUNT_NO_PAPER: ${LS_ACCOUNT_NO_PAPER:-}
+      LS_ACCOUNT_PWD_PAPER: ${LS_ACCOUNT_PWD_PAPER:-}
+      LS_MAC_ADDRESS: ${LS_MAC_ADDRESS:-}
+      LS_OAUTH_SCOPE: ${LS_OAUTH_SCOPE:-oob}
+      # 회계 원장 durable 저장소. 체결일과 결제일(T+2) 사이에는 어떤 브로커
+      # 조회로도 그 거래를 다시 못 가져오므로, 컨테이너와 함께 사라지지 않도록
+      # 아래 portfolio_runtime_data 볼륨 안에 둔다(상대경로 금지).
+      ACCOUNTING_LEDGER_DB: /var/lib/portfolio/accounting_ledger.sqlite3
     volumes:
       - portfolio_runtime_data:/var/lib/portfolio
       # BFF uses Hermes CLI only for the repository-owned Kanban create
