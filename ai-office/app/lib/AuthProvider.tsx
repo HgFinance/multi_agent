@@ -11,15 +11,10 @@ import {
   useMemo,
   useRef,
   useState,
-  useSyncExternalStore,
 } from "react";
 import { AUTH_MODE, fixtureAuthEnabled } from "./authMode";
 import { AUTHENTICATION_REQUIRED_EVENT } from "./bffClient";
-import {
-  DEFAULT_ACCOUNT,
-  readStoredAccountId,
-  subscribeToAccountChange,
-} from "./currentAccount";
+import { readStoredAccountId } from "./currentAccount";
 import { clearAuthorizedFunds } from "./currentFund";
 import { clearLocalSupabaseSession, getSupabaseBrowserClient } from "./supabaseBrowser";
 
@@ -41,11 +36,11 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const queryClient = useQueryClient();
-  const fixtureUserId = useSyncExternalStore(
-    subscribeToAccountChange,
-    readStoredAccountId,
-    () => DEFAULT_ACCOUNT.userId,
-  );
+  // 계정이 하나로 고정돼(currentAccount.ts) 상수를 반환한다 - 구독이 필요
+  // 없다. 예전엔 useSyncExternalStore로 localStorage를 구독했는데, 그 저장값이
+  // 서버 렌더와 달라 계정 전환을 한 번이라도 한 브라우저에서 hydration
+  // mismatch가 났다(2026-08-19). 상수가 되면서 그 불일치 자체가 없어졌다.
+  const fixtureUserId = readStoredAccountId();
   const [session, setSession] = useState<Session | null>(null);
   const [status, setStatus] = useState<AuthStatus>(fixtureAuthEnabled ? "authenticated" : "loading");
   const [error, setError] = useState<string | null>(null);

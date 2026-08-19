@@ -1,18 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { COMPANY } from "../../company.config";
-import {
-  DEFAULT_ACCOUNT,
-  TEST_ACCOUNTS,
-  type TestAccount,
-  accountFor,
-  announceAccountChange,
-  readStoredAccountId,
-  storeAccount,
-  subscribeToAccountChange,
-} from "../lib/currentAccount";
+import { DEFAULT_ACCOUNT, type TestAccount } from "../lib/currentAccount";
 import { fixtureAuthEnabled } from "../lib/authMode";
 import { useAuth } from "../lib/AuthProvider";
 import { usePortfolioSession } from "../lib/PortfolioSessionProvider";
@@ -23,11 +13,12 @@ import { usePortfolioSession } from "../lib/PortfolioSessionProvider";
  * 아직 화면이 없는 항목은 링크가 아니라 disabled 버튼으로 둔다.
  * 연결 안 된 걸 연결된 것처럼 보이지 않게 하는 게 이 앱의 원칙이다.
  *
- * `"use client"`인 이유: 오른쪽 계정 전환 드롭다운이 클릭·키보드·localStorage를
- * 쓴다. 이 컴포넌트는 Link와 정적 라벨뿐이라 클라이언트로 내려도 비용이 없다.
+ * `"use client"`인 이유: fixture 모드에서 `useAuth`/`usePortfolioSession` 훅과
+ * 오른쪽 세션 메뉴(`ProductionSessionMenu`)가 브라우저 상태를 쓴다.
  *
- * **계정 전환은 로그인이 아니다.** 근거는 `app/lib/currentAccount.ts` 머리말에
+ * **계정 표시는 로그인이 아니다.** 근거는 `app/lib/currentAccount.ts` 머리말에
  * 적어뒀다 - 요약하면 `X-User-Id`는 서명이 없어 신원을 증명하지 않는다.
+ * 계정이 Fund Owner 하나로 고정돼(2026-08-19) 전환 UI는 없다.
  */
 
 export type NavKey = "dashboard" | "ai-office" | "mandate" | "agent-logs";
@@ -54,86 +45,22 @@ function AccountDot({ account, size }: { account: TestAccount; size: "sm" | "md"
   );
 }
 
-function AccountSwitcher() {
-  // 저장된 계정은 `useSyncExternalStore`로 읽는다. 첫 렌더에서 localStorage를
-  // 바로 읽으면 서버가 모르는 값이 나와 hydration 불일치가 되는데, 이 훅은
-  // 서버 스냅샷(getServerSnapshot)을 따로 받아 그 문제를 없앤다. useEffect +
-  // setState로 맞추면 마운트마다 렌더가 한 번 더 돌고 lint가 막는다
-  // (react-hooks/set-state-in-effect).
-  const storedUserId = useSyncExternalStore(
-    subscribeToAccountChange,
-    readStoredAccountId,
-    () => DEFAULT_ACCOUNT.userId,
-  );
-  const account = accountFor(storedUserId);
-  const [open, setOpen] = useState(false);
-  const boxRef = useRef<HTMLDivElement | null>(null);
-
-  const select = useCallback((next: TestAccount) => {
-    // setState가 없다 - storeAccount + announce가 외부 스토어를 갱신하고
-    // useSyncExternalStore가 그 알림으로 리렌더한다(단일 진실 원본).
-    storeAccount(next.userId);
-    announceAccountChange(next.userId);
-    setOpen(false);
-  }, []);
-
-  // 바깥 클릭·Esc로 닫는다. 열린 드롭다운이 다른 조작을 가리지 않게.
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (event: MouseEvent) => {
-      if (!boxRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [open]);
-
+/**
+ * 고정 계정 표시. 전환 UI가 아니다 - 계정이 Fund Owner 하나뿐이라 "전환"할
+ * 대상이 없다(2026-08-19). 클릭 가능한 드롭다운을 남겨두면 눌러도 아무 일도
+ * 안 일어나는 죽은 UI가 되므로, 정적 표시로 바꿨다.
+ */
+function FixedAccountBadge() {
   return (
-    <div ref={boxRef} className="relative shrink-0">
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        // 색만으로 구별하므로 스크린리더·마우스오버에는 이름을 준다.
-        aria-label={`계정 전환 (현재: ${account.label})`}
-        title={`계정 전환 (현재: ${account.label})`}
-        className="flex items-center rounded-full p-1 transition-colors duration-200 hover:bg-surface-container focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
-      >
-        <AccountDot account={account} size="md" />
-      </button>
-
-      {open && (
-        <div
-          role="menu"
-          className="absolute right-0 mt-2 min-w-44 bg-surface-container-lowest border border-outline-variant rounded-lg overflow-hidden"
-        >
-          {TEST_ACCOUNTS.map((item) => {
-            const selected = item.userId === account.userId;
-            return (
-              <button
-                key={item.userId}
-                type="button"
-                role="menuitemradio"
-                aria-checked={selected}
-                onClick={() => select(item)}
-                className={`w-full flex items-center gap-3 px-3 py-2 text-left text-body-md transition-colors duration-200 hover:bg-surface-container ${
-                  selected ? "text-primary font-bold" : "text-secondary"
-                }`}
-              >
-                <AccountDot account={item} size="sm" />
-                <span className="whitespace-nowrap">{item.label}</span>
-              </button>
-            );
-          })}
-        </div>
-      )}
+    <div
+      className="flex items-center gap-2 rounded-full p-1 pr-3"
+      aria-label={`현재 계정: ${DEFAULT_ACCOUNT.label}`}
+      title={DEFAULT_ACCOUNT.label}
+    >
+      <AccountDot account={DEFAULT_ACCOUNT} size="md" />
+      <span className="hidden text-label-md font-medium text-on-surface-variant lg:inline">
+        {DEFAULT_ACCOUNT.label}
+      </span>
     </div>
   );
 }
@@ -182,7 +109,7 @@ function ProductionSessionMenu() {
 }
 
 function IdentityControls() {
-  return fixtureAuthEnabled ? <AccountSwitcher /> : <ProductionSessionMenu />;
+  return fixtureAuthEnabled ? <FixedAccountBadge /> : <ProductionSessionMenu />;
 }
 
 export default function TopNav({ current }: { current: NavKey }) {

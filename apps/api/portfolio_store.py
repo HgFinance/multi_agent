@@ -17,7 +17,6 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-
 # Windows: os.kill(dead_pid, 0) raises ERROR_INVALID_PARAMETER, not ProcessLookupError.
 _WIN_ERROR_INVALID_PARAMETER = 87
 

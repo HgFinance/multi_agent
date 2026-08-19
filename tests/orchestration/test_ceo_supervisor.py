@@ -13,6 +13,7 @@ from orchestration.adapters.ceo_supervisor import (
     SupervisorAction,
     SupervisorState,
     SupervisorValidationError,
+    _initial_primary_materialization_decisions,
     decide_supervisor,
     parse_supervisor_output,
 )
@@ -1513,6 +1514,169 @@ class SupervisorWakeupTest(unittest.TestCase):
                     }
                 ],
             )
+
+
+
+class InitialPrimaryMaterializationTest(unittest.TestCase):
+    """CEO one-pass delegation plan -> deterministic primary materialization."""
+
+    selected = (
+        "research-department",
+        "quant-backtest-department",
+        "risk-management",
+    )
+
+    @staticmethod
+    def root_body() -> str:
+        return (
+            "origin=user-query\n"
+            "workflow_role=root\n"
+            "workflow_mode=analysis\n"
+            "analysis_mode=fast_advisory\n"
+            "selected_primary_profiles="
+            "research-department,quant-backtest-department,risk-management\n"
+            "delegation_instruction.research-department="
+            "Assess AMZN fundamentals and valuation.\n"
+            "delegation_instruction.quant-backtest-department="
+            "Assess AMZN trend, valuation, and quantitative risk.\n"
+            "delegation_instruction.risk-management="
+            "Assess AMZN downside and company-specific risks.\n"
+        )
+
+    def test_materializes_all_three_missing_selected_primaries(self) -> None:
+        state = SupervisorState(
+            parent_task_id="root",
+            children=(),
+            workflow_mode="analysis",
+            selected_primary_profiles=self.selected,
+            root_is_user_query=True,
+        )
+
+        decisions = _initial_primary_materialization_decisions(
+            state,
+            self.root_body(),
+        )
+
+        self.assertEqual(
+            tuple(decision.assignee for decision in decisions),
+            self.selected,
+        )
+        self.assertTrue(
+            all(decision.parent_task_ids == () for decision in decisions)
+        )
+        self.assertTrue(
+            all(
+                "analysis_mode=fast_advisory" in decision.body
+                for decision in decisions
+            )
+        )
+
+    def test_existing_primary_materializes_only_missing_profiles(self) -> None:
+        research = child(
+            "research",
+            "research-department",
+            "running",
+            body=(
+                "workflow_root_task_id=root\n"
+                "workflow_role=primary\n"
+                "workflow_mode=analysis"
+            ),
+        )
+        state = SupervisorState(
+            parent_task_id="root",
+            children=(research,),
+            workflow_mode="analysis",
+            selected_primary_profiles=self.selected,
+            root_is_user_query=True,
+        )
+
+        decisions = _initial_primary_materialization_decisions(
+            state,
+            self.root_body(),
+        )
+
+        self.assertEqual(
+            tuple(decision.assignee for decision in decisions),
+            ("quant-backtest-department", "risk-management"),
+        )
+
+    def test_incomplete_delegation_plan_fails_closed(self) -> None:
+        body = self.root_body().replace(
+            "delegation_instruction.risk-management="
+            "Assess AMZN downside and company-specific risks.\n",
+            "",
+        )
+        state = SupervisorState(
+            parent_task_id="root",
+            children=(),
+            workflow_mode="analysis",
+            selected_primary_profiles=self.selected,
+            root_is_user_query=True,
+        )
+
+        self.assertEqual(
+            _initial_primary_materialization_decisions(state, body),
+            (),
+        )
+
+    def test_binding_workflow_never_uses_fast_materializer(self) -> None:
+        state = SupervisorState(
+            parent_task_id="root",
+            children=(),
+            workflow_mode="binding",
+            selected_primary_profiles=self.selected,
+            root_is_user_query=True,
+        )
+
+        self.assertEqual(
+            _initial_primary_materialization_decisions(
+                state,
+                self.root_body(),
+            ),
+            (),
+        )
+
+    def test_duplicate_primary_suppresses_materialization(self) -> None:
+        first = child(
+            "research-1",
+            "research-department",
+            "running",
+            body=(
+                "workflow_root_task_id=root\n"
+                "workflow_role=primary\n"
+                "workflow_mode=analysis"
+            ),
+        )
+        second = child(
+            "research-2",
+            "research-department",
+            "ready",
+            body=(
+                "workflow_root_task_id=root\n"
+                "workflow_role=primary\n"
+                "workflow_mode=analysis"
+            ),
+        )
+        state = SupervisorState(
+            parent_task_id="root",
+            children=(first, second),
+            workflow_mode="analysis",
+            selected_primary_profiles=self.selected,
+            root_is_user_query=True,
+        )
+
+        self.assertIn(
+            "research-department",
+            state.duplicate_primary_profiles,
+        )
+        self.assertEqual(
+            _initial_primary_materialization_decisions(
+                state,
+                self.root_body(),
+            ),
+            (),
+        )
+
 
 
 if __name__ == "__main__":

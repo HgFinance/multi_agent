@@ -29,20 +29,7 @@ try:
         list_tasks,
         load_workflow,
     )
-    from .current_user import (
-        current_user,
-        optional_current_user,
-        require_trading_book_access,
-    )
-    from .governance_client import fetch_current_mandate_by_fund
-    from .user_order_workflow import (
-        UserOrderRequestConflict,
-        UserOrderWorkflowUnavailable,
-        raw_instruction_sha256,
-        user_order_repository,
-    )
     from .ceo_schemas import (
-        CeoPlanning,
         GraphNode,
         TaskArchiveResponse,
         TaskGraphResponse,
@@ -56,6 +43,17 @@ try:
         TaskResultResponse,
         TaskStatusResponse,
         TaskWorkflow,
+    )
+    from .current_user import (
+        current_user,
+        optional_current_user,
+        require_trading_book_access,
+    )
+    from .governance_client import fetch_current_mandate_by_fund
+    from .user_order_workflow import (
+        UserOrderRequestConflict,
+        UserOrderWorkflowUnavailable,
+        user_order_repository,
     )
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
     import hermes_boundary  # type: ignore[no-redef]
@@ -70,20 +68,7 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
         list_tasks,
         load_workflow,
     )
-    from current_user import (  # type: ignore[no-redef]
-        current_user,
-        optional_current_user,
-        require_trading_book_access,
-    )
-    from governance_client import fetch_current_mandate_by_fund  # type: ignore[no-redef]
-    from user_order_workflow import (  # type: ignore[no-redef]
-        UserOrderRequestConflict,
-        UserOrderWorkflowUnavailable,
-        raw_instruction_sha256,
-        user_order_repository,
-    )
     from ceo_schemas import (  # type: ignore[no-redef]
-        CeoPlanning,
         GraphNode,
         TaskArchiveResponse,
         TaskGraphResponse,
@@ -97,6 +82,19 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
         TaskResultResponse,
         TaskStatusResponse,
         TaskWorkflow,
+    )
+    from current_user import (  # type: ignore[no-redef]
+        current_user,
+        optional_current_user,
+        require_trading_book_access,
+    )
+    from governance_client import (
+        fetch_current_mandate_by_fund,  # type: ignore[no-redef]
+    )
+    from user_order_workflow import (  # type: ignore[no-redef]
+        UserOrderRequestConflict,
+        UserOrderWorkflowUnavailable,
+        user_order_repository,
     )
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
@@ -119,7 +117,6 @@ from orchestration.user_order_language import (
     is_clearly_non_executable_order_language,
     looks_like_user_order_request,
 )
-
 
 router = APIRouter(prefix="/ui/ceo", tags=["ceo-office"])
 logger = logging.getLogger(__name__)
@@ -980,7 +977,9 @@ def ceo_task_list(
                 selected_departments=list(workflow.selected_departments),
                 owner_id=requested_by_from_body(body),
             )
-            for (task_id, body), workflow in zip(identified, workflows)
+            for (task_id, body), workflow in zip(
+                identified, workflows, strict=True
+            )
         ]
     )
 

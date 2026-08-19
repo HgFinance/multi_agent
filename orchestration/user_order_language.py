@@ -35,7 +35,6 @@ from orchestration.contracts.user_paper_order import (
     VerifiedPaperDirective,
 )
 
-
 MAX_TEXT_LENGTH = 500
 MAX_QUANTITY = 10**18 - 1
 MAX_PRICE = 10**24 - 1
@@ -391,7 +390,7 @@ def _validate_evidence(
         ordered.append(evidence)
 
     ordered.sort(key=lambda item: (item.start, item.end, item.field.value))
-    for left, right in zip(ordered, ordered[1:]):
+    for left, right in zip(ordered, ordered[1:], strict=False):
         if left.end <= right.start:
             continue
         # A price written with an explicit won unit (``70,000원에``) is itself

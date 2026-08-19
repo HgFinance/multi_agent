@@ -41,10 +41,10 @@ import re
 import sys
 import time
 from collections import deque
+from collections.abc import Mapping
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from collections.abc import Mapping
 from typing import Any
 
 from fastapi import APIRouter, HTTPException

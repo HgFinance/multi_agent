@@ -12,15 +12,14 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any
 
+# 패턴은 ceo_workflow_scope.read_marker 가 소유한다 - 여기서 다시 적지 않는다
+# (2026-08-14: 같은 마커를 5곳에서 4가지 패턴으로 읽고 있었다).
 from orchestration.ceo_workflow_scope import (
     BACKGROUND_RESEARCH_ROLE,
     CONTINUOUS_RESEARCH_MARKER,
     CONTINUOUS_RESEARCH_PLANE,
+    read_marker,
 )
-
-# 패턴은 ceo_workflow_scope.read_marker 가 소유한다 - 여기서 다시 적지 않는다
-# (2026-08-14: 같은 마커를 5곳에서 4가지 패턴으로 읽고 있었다).
-from orchestration.ceo_workflow_scope import read_marker
 
 
 class _Match:

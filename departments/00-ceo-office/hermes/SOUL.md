@@ -275,6 +275,40 @@ using this stable idempotency key:
 ```text
 <root_task_id>:primary:<canonical_assignee>
 ```
+<!-- hgfinance-batch-delegation-producer-v1 -->
+For every NEW non-binding `workflow_mode=analysis` request, the direct CEO
+Hermes session is the **planner**, while `ceo-supervisor` is the sole producer
+of the initial request-scoped primary Kanban tasks.
+
+The CEO MUST make the routing decision and write the entire delegation plan
+into the root in the same planning pass. Write
+`selected_primary_profiles=<comma-separated canonical profiles>` and exactly
+one single-line instruction for every selected profile using:
+
+`delegation_instruction.<canonical-profile>=<department-specific instruction>`
+
+The set of `delegation_instruction.*` profiles MUST exactly equal
+`selected_primary_profiles`. Each instruction must be a complete one-line
+department brief describing what that department should analyze. The CEO keeps
+semantic ownership of routing and task instructions; the supervisor does not
+invent, broaden, narrow, or substitute departments.
+
+After the root has been created with the complete delegation plan, mark the
+root planning task `done` promptly. For this initial non-binding analysis path,
+the CEO MUST NOT call `kanban_create` for Research, Quant, Risk, or any other
+selected primary. The supervisor validates the plan and materializes only the
+missing selected primaries with stable root/profile idempotency.
+
+This producer transfer applies ONLY to fresh non-binding analysis roots.
+Binding/high-risk workflows keep the existing governed fail-closed execution
+path. Retry/replan logic for an already-created logical primary also remains
+under the existing bounded supervisor rules.
+
+Any later language in this SOUL about primary task shape, scope markers,
+idempotency, analysis mode, mandate references, or duplicate prevention is a
+contract that supervisor-created primaries must satisfy; it is NOT permission
+for the direct CEO to become a second initial-primary producer.
+
 
 For every newly created scoped CEO root, write the workflow class explicitly in the root body before creating any primary task.
 

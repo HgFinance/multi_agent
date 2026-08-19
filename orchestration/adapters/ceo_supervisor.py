@@ -18,7 +18,6 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
-from orchestration.answer_contract import grade_answer
 from orchestration.adapters.terminal_projection_utils import (
     action as terminal_action,
 )
@@ -31,6 +30,7 @@ from orchestration.adapters.terminal_projection_utils import (
 from orchestration.adapters.terminal_projection_utils import (
     workflow_root as terminal_workflow_root,
 )
+from orchestration.answer_contract import grade_answer
 from orchestration.canonical_profiles import (
     USER_QUERY_PRIORITY,
     CanonicalKanbanTaskRequest,
@@ -39,14 +39,12 @@ from orchestration.canonical_profiles import (
     department_for_canonical_profile,
     validate_canonical_profile,
 )
-from orchestration.discord_delivery import DiscordFinalDelivery
-from orchestration.discord_idempotency import DiscordIdempotencyStore
 from orchestration.ceo_workflow_scope import (
     CEO_WORKFLOW_SCOPE_MARKER,
     WorkflowScopeViolation,
-    is_user_query_body,
     build_scoped_task_body,
     extract_scope_references,
+    is_user_query_body,
     mandate_snapshot_present,
     primary_idempotency_key,
     selected_primary_profiles_from_task,
@@ -55,6 +53,8 @@ from orchestration.ceo_workflow_scope import (
     workflow_mode_from_body,
     workflow_role_from_body,
 )
+from orchestration.discord_delivery import DiscordFinalDelivery
+from orchestration.discord_idempotency import DiscordIdempotencyStore
 
 logger = logging.getLogger(__name__)
 
@@ -564,6 +564,132 @@ def _blocked_decision(
         target_task_id=child.task_id,
         reason="blocked_replan_limit_reached",
     )
+
+
+# hgfinance-batch-delegation-materializer-v1
+_DELEGATION_INSTRUCTION_PREFIX = "delegation_instruction."
+_ANALYSIS_EXECUTION_MODES = frozenset(
+    {"fast_advisory", "standard_analysis", "full_experiment"}
+)
+
+
+def _analysis_execution_mode_from_root_body(body: str) -> str | None:
+    """Read the CEO-selected non-binding analysis execution mode."""
+
+    for raw_line in str(body or "").splitlines():
+        key, separator, value = raw_line.partition("=")
+        if separator and key.strip().casefold() == "analysis_mode":
+            mode = value.strip().casefold()
+            return mode if mode in _ANALYSIS_EXECUTION_MODES else None
+    return None
+
+
+def _delegation_plan_from_root_body(body: str) -> dict[str, str]:
+    """Read the CEO-authored one-pass department delegation plan.
+
+    The CEO remains the planner.  This parser only validates and exposes the
+    already-selected department instructions to the deterministic supervisor.
+    """
+
+    plan: dict[str, str] = {}
+
+    for raw_line in str(body or "").splitlines():
+        key, separator, value = raw_line.partition("=")
+        if not separator:
+            continue
+
+        normalized_key = key.strip()
+        if not normalized_key.startswith(_DELEGATION_INSTRUCTION_PREFIX):
+            continue
+
+        raw_profile = normalized_key[len(_DELEGATION_INSTRUCTION_PREFIX):].strip()
+        instruction = value.strip()
+
+        if not raw_profile or not instruction:
+            return {}
+
+        try:
+            profile = validate_canonical_profile(raw_profile)
+        except CanonicalProfileError:
+            return {}
+
+        if profile in plan:
+            # Duplicate plan entries are ambiguous. Fail closed rather than
+            # silently choosing one instruction.
+            return {}
+
+        plan[profile] = instruction
+
+    return plan
+
+
+def _initial_primary_materialization_decisions(
+    state: SupervisorState,
+    root_body: str,
+) -> tuple[SupervisorDecision, ...]:
+    """Materialize only the CEO's already-authored initial analysis plan.
+
+    This is deliberately not a planner:
+    - non-binding analysis only
+    - human-originated workflow only
+    - exact selected-profile/plan equality required
+    - duplicates suppress creation
+    - only missing primaries are emitted
+    """
+
+    if state.workflow_mode != "analysis" or not state.root_is_user_query:
+        return ()
+
+    if (
+        not state.selected_primary_profiles
+        or not state.missing_primary_profiles
+        or state.duplicate_primary_profiles
+    ):
+        return ()
+
+    plan = _delegation_plan_from_root_body(root_body)
+    selected = tuple(state.selected_primary_profiles)
+
+    if set(plan) != set(selected):
+        logger.warning(
+            "initial-primary-plan-invalid root=%s selected=%s plan=%s",
+            state.parent_task_id,
+            ",".join(selected),
+            ",".join(plan),
+        )
+        return ()
+
+    analysis_mode = _analysis_execution_mode_from_root_body(root_body)
+    if analysis_mode is None:
+        logger.warning(
+            "initial-primary-plan-invalid root=%s reason=missing_analysis_mode",
+            state.parent_task_id,
+        )
+        return ()
+
+    decisions: list[SupervisorDecision] = []
+
+    for profile in state.missing_primary_profiles:
+        department = department_for_canonical_profile(profile)
+
+        decisions.append(
+            SupervisorDecision(
+                SupervisorAction.CREATE_TASK,
+                state.parent_task_id,
+                assignee=profile,
+                title=f"CEO delegated {department} analysis",
+                body=(
+                    f"producer=ceo-supervisor-materializer\n"
+                    f"analysis_mode={analysis_mode}\n\n"
+                    f"{plan[profile]}"
+                ),
+                parent_task_ids=(),
+                reason=f"initial_primary_materialize:{profile}",
+            )
+        )
+
+    return tuple(decisions)
+
 
 
 def _single_primary_passthrough_child(
@@ -1099,10 +1225,24 @@ class HermesKanbanClient:
         # workflow scope without turning the root into an execution dependency.
         starting_body = str(starting_payload.get("body") or "")
         starting_role = workflow_role_from_body(starting_body)
-        is_scoped_root = (
-            CEO_WORKFLOW_SCOPE_MARKER in starting_body
-            and starting_role == "root"
+        # hgfinance-canonical-root-scope-v1
+        #
+        # Current direct CEO ingress roots are canonical user-query roots but
+        # may not carry the legacy hgfinance.ceo-workflow-scope.v1 marker.
+        # Parentless primaries still declare workflow_root_task_id, so these
+        # roots must enter marker-based scope discovery rather than ancestry
+        # fallback.
+        canonical_user_root = (
+            starting_role == "root"
+            and is_user_query_body(starting_body)
+            and workflow_mode_from_body(starting_body)
+            in {"analysis", "binding"}
         )
+        legacy_scoped_root = (
+            starting_role == "root"
+            and CEO_WORKFLOW_SCOPE_MARKER in starting_body
+        )
+        is_scoped_root = canonical_user_root or legacy_scoped_root
 
         if scoped_root_ids or is_scoped_root:
             root_id = scoped_root_ids[0] if scoped_root_ids else task_id
@@ -1246,6 +1386,15 @@ class CeoSupervisorService:
         self._replans: dict[str, int] = {}
         self._executed_actions: set[str] = set()
         self._seen_events_lock = threading.Lock()
+
+        # hgfinance-department-progress-dedupe-v1
+        # Active lifecycle events (claimed/spawned/started/running) are
+        # semantically one Discord state.  Remember successful projections so
+        # duplicate Hermes watch chatter can be rejected before expensive
+        # workflow()/show() calls.
+        self._department_started_progress: set[str] = set()
+        self._department_started_progress_lock = threading.Lock()
+
         self._parent_locks: dict[str, threading.Lock] = {}
         self._parent_locks_lock = threading.Lock()
 
@@ -1435,8 +1584,29 @@ class CeoSupervisorService:
                 delivery_store = DiscordIdempotencyStore(delivery_home)
                 ceo_profile = canonical_profile_for_department("ceo")
 
-                # Keep the normal CEO final response in the parent channel.
-                # Multi-primary CEO synthesis is delivered only inside the request thread.
+                # hgfinance-synthesis-parent-delivery-v1
+                #
+                # Multi-primary synthesis has two projections:
+                #   1. the canonical CEO final answer in the parent channel
+                #   2. the complete synthesis in the existing request thread
+                #
+                # The thread is supplementary detail. It must never replace the
+                # user-facing final CEO response in the channel where the request
+                # originated.
+                parent_status = self.discord_delivery.deliver(
+                    root_task_id=root_task_id,
+                    synthesis_task=delivery_task,
+                    content=content,
+                    store=delivery_store,
+                    profile=ceo_profile,
+                )
+
+                logger.info(
+                    "synthesis-discord-parent root=%s task=%s status=%s",
+                    root_task_id,
+                    task_id,
+                    parent_status,
+                )
 
                 # Also preserve the complete CEO synthesis in the SAME
                 # request thread as the department detailed outputs.
@@ -1669,6 +1839,12 @@ class CeoSupervisorService:
             )
             return "failed"
 
+        if logical_kind == "started" and status not in {None, "failed"}:
+            # Mark only after the Discord projection succeeds.  A failed
+            # delivery remains retryable on the next Hermes lifecycle event.
+            with self._department_started_progress_lock:
+                self._department_started_progress.add(child.task_id)
+
         logger.info(
             "department-thread-card root=%s task=%s "
             "profile=%s kind=%s status=%s",
@@ -1680,6 +1856,191 @@ class CeoSupervisorService:
         )
 
         return status
+
+    # hgfinance-ready-plan-materializer-v2
+    def materialize_ready_primary_plans(
+        self,
+    ) -> tuple[SupervisorDecision, ...]:
+        """Materialize complete CEO-authored analysis plans before root completion.
+
+        This method does not perform semantic routing. The CEO has already
+        selected profiles and written one delegation_instruction per profile.
+        The supervisor only validates and materializes that complete plan.
+
+        The root lock serializes this fast path with terminal-event processing.
+        Workflow state is rebuilt under the lock before any creation decision.
+        """
+
+        list_tasks = getattr(self.client, "list_tasks", None)
+        show = getattr(self.client, "show", None)
+        workflow = getattr(self.client, "workflow", None)
+
+        if (
+            not callable(list_tasks)
+            or not callable(show)
+            or not callable(workflow)
+        ):
+            return ()
+
+        # hgfinance-recent-done-root-recovery-v1
+        #
+        # ready/running planning roots are always eligible.  done roots are a
+        # narrow race-recovery path only: scanning historical done roots causes
+        # repeated show/workflow/full-list CLI calls and can starve the newest
+        # user request.
+        import time
+
+        now = int(time.time())
+        done_recovery_window_seconds = 120
+        candidates: list[tuple[int, str]] = []
+
+        for row in list_tasks():
+            task_id = str(row.get("id") or row.get("task_id") or "")
+            body = str(row.get("body") or "")
+            status = str(row.get("status") or "").casefold()
+            created_at = int(row.get("created_at") or 0)
+
+            if (
+                not task_id
+                or status not in {"ready", "running", "done"}
+                or (
+                    status == "done"
+                    and (
+                        created_at <= 0
+                        or now - created_at > done_recovery_window_seconds
+                    )
+                )
+                or workflow_role_from_body(body) != "root"
+                or not is_user_query_body(body)
+                or workflow_mode_from_body(body) != "analysis"
+                or "selected_primary_profiles=" not in body
+                or "delegation_instruction." not in body
+            ):
+                continue
+
+            candidates.append((created_at, task_id))
+
+        materialized: list[SupervisorDecision] = []
+
+        # Newest planning roots first.  A fresh user query must never queue
+        # behind historical recovery work.
+        ordered_root_ids = [
+            task_id
+            for _, task_id in sorted(
+                set(candidates),
+                key=lambda item: (item[0], item[1]),
+                reverse=True,
+            )
+        ]
+
+        for root_id in ordered_root_ids:
+            with self._parent_lock(root_id):
+                root_payload = show(root_id)
+                root_status = str(
+                    root_payload.get("status") or ""
+                ).casefold()
+
+                # hgfinance-ready-plan-done-recovery-v1
+                #
+                # A direct CEO planning root can move from ready/running to done
+                # faster than one full `kanban list --json` scan. Treat done as
+                # recoverable here as long as the root still has a complete,
+                # validated analysis delegation plan. Existing primaries are
+                # rediscovered under the root lock, so this remains idempotent.
+                if root_status not in {"ready", "running", "done"}:
+                    continue
+
+                root_body = str(root_payload.get("body") or "")
+
+                if (
+                    workflow_role_from_body(root_body) != "root"
+                    or not is_user_query_body(root_body)
+                    or workflow_mode_from_body(root_body) != "analysis"
+                ):
+                    continue
+
+                selected_profiles = (
+                    selected_primary_profiles_from_task(root_payload)
+                )
+
+                if not selected_profiles:
+                    continue
+
+                _, payloads = workflow(root_id)
+
+                children = tuple(
+                    ChildTaskState.from_hermes(payload)
+                    for payload in payloads
+                    if payload.get("assignee") is not None
+                )
+
+                state = SupervisorState(
+                    parent_task_id=root_id,
+                    children=children,
+                    wakeups=0,
+                    replan_count=0,
+                    max_retries=self.max_retries,
+                    max_wakeups=self.max_wakeups,
+                    qa_required=False,
+                    workflow_mode="analysis",
+                    has_mandate=mandate_snapshot_present(root_body),
+                    selected_primary_profiles=selected_profiles,
+                    root_is_user_query=True,
+                    allow_primary_passthrough=(
+                        self.discord_delivery is not None
+                    ),
+                )
+
+                decisions = _initial_primary_materialization_decisions(
+                    state,
+                    root_body,
+                )
+
+                if not decisions:
+                    continue
+
+                # hgfinance-parallel-primary-fanout-v1
+                #
+                # Initial analysis primaries are independent: they deliberately
+                # have no execution-parent edges and each has a distinct
+                # canonical profile/idempotency key. Run only this initial
+                # ready-plan fan-out concurrently. QA, synthesis, binding, and
+                # terminal fallback remain sequential.
+                if len(decisions) == 1:
+                    self._execute(decisions[0], state)
+                else:
+                    from concurrent.futures import ThreadPoolExecutor
+
+                    with ThreadPoolExecutor(
+                        max_workers=min(3, len(decisions)),
+                        thread_name_prefix="ceo-primary-create",
+                    ) as pool:
+                        futures = [
+                            pool.submit(self._execute, decision, state)
+                            for decision in decisions
+                        ]
+
+                        # Surface command failures to the outer ready-plan loop.
+                        # Successful siblings remain idempotent; a later poll
+                        # rebuilds workflow state and retries only missing
+                        # profiles.
+                        for future in futures:
+                            future.result()
+
+                logger.info(
+                    "ready-primary-materialized "
+                    "root=%s count=%d profiles=%s",
+                    root_id,
+                    len(decisions),
+                    ",".join(
+                        decision.assignee or ""
+                        for decision in decisions
+                    ),
+                )
+
+                materialized.extend(decisions)
+
+        return tuple(materialized)
 
     def reconcile_existing_workflows(self) -> tuple[SupervisorDecision, ...]:
         """Reconcile terminal roots whose watch event was missed.
@@ -1763,6 +2124,13 @@ class CeoSupervisorService:
             return None
 
         if kind in {"claimed", "spawned", "started", "running"}:
+            # Fast rejection before workflow()/show().  A successful initial
+            # Discord "started" projection is enough for every equivalent
+            # active lifecycle event for this task.
+            with self._department_started_progress_lock:
+                if task_id in self._department_started_progress:
+                    return None
+
             try:
                 root_id, payloads = self.client.workflow(task_id)
                 show = getattr(self.client, "show", None)
@@ -2004,6 +2372,27 @@ class CeoSupervisorService:
                     root_is_user_query=is_user_query_body(root_body),
                     allow_primary_passthrough=self.discord_delivery is not None,
                 )
+
+                initial_primary_decisions = (
+                    _initial_primary_materialization_decisions(
+                        state,
+                        root_body,
+                    )
+                )
+                if initial_primary_decisions:
+                    for initial_primary_decision in initial_primary_decisions:
+                        self._execute(initial_primary_decision, state)
+
+                    logger.info(
+                        "initial-primary-materialized root=%s count=%d profiles=%s",
+                        root_id,
+                        len(initial_primary_decisions),
+                        ",".join(
+                            decision.assignee or ""
+                            for decision in initial_primary_decisions
+                        ),
+                    )
+
 
                 passthrough = _single_primary_passthrough_child(state)
                 if (

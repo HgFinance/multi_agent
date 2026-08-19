@@ -90,7 +90,9 @@ def _instrument_rows(
         amount = Decimal(str(amounts.get(asset_class, "0")))
         weights = _split_amount(weight, len(matches))
         amounts_by_instrument = _split_amount(amount, len(matches))
-        for item, instrument_weight, instrument_amount in zip(matches, weights, amounts_by_instrument):
+        for item, instrument_weight, instrument_amount in zip(
+            matches, weights, amounts_by_instrument, strict=True
+        ):
             rows.append(
                 {
                     "symbol": str(item.get("symbol", "")),
