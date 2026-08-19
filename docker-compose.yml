@@ -165,6 +165,15 @@ services:
       # 조회로도 그 거래를 다시 못 가져오므로, 컨테이너와 함께 사라지지 않도록
       # 아래 portfolio_runtime_data 볼륨 안에 둔다(상대경로 금지).
       ACCOUNTING_LEDGER_DB: /var/lib/portfolio/accounting_ledger.sqlite3
+      # Langfuse(2026-08-10 도입, 993682f). 이 컨테이너가 llm.performance.metric
+      # 이벤트를 **쓰는** 쪽이다 - HR(workforce-api)이 같은 자격증명으로 읽는다.
+      # `.env`는 .dockerignore에 걸려 이미지에 안 들어가므로 여기 나열한 키만
+      # 프로세스에 도달한다. LANGFUSE_TRACING=false면 계측만 조용히 꺼지고
+      # 파이프라인은 그대로 돈다(orchestration/llm_observability.py lazy import).
+      LANGFUSE_TRACING: ${LANGFUSE_TRACING:-false}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
     volumes:
       - portfolio_runtime_data:/var/lib/portfolio
       # BFF uses Hermes CLI only for the repository-owned Kanban create
@@ -250,6 +259,15 @@ services:
       PORTFOLIO_RUNTIME_EMBEDDED_WORKER: "false"
       PORTFOLIO_WORKER_LEASE_SECONDS: ${PORTFOLIO_WORKER_LEASE_SECONDS:-60}
       PORTFOLIO_WORKER_POLL_SECONDS: ${PORTFOLIO_WORKER_POLL_SECONDS:-0.5}
+      # Langfuse(2026-08-10 도입, 993682f). 이 컨테이너가 llm.performance.metric
+      # 이벤트를 **쓰는** 쪽이다 - HR(workforce-api)이 같은 자격증명으로 읽는다.
+      # `.env`는 .dockerignore에 걸려 이미지에 안 들어가므로 여기 나열한 키만
+      # 프로세스에 도달한다. LANGFUSE_TRACING=false면 계측만 조용히 꺼지고
+      # 파이프라인은 그대로 돈다(orchestration/llm_observability.py lazy import).
+      LANGFUSE_TRACING: ${LANGFUSE_TRACING:-false}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
     volumes:
       - portfolio_runtime_data:/var/lib/portfolio
 

@@ -24,9 +24,12 @@
 FROM python:3.12-slim
 
 # 버전은 이 저장소에서 이미 검증된 값(risk/audit Dockerfile과 동일 pin)으로 고정한다.
+# langfuse: GET /workforce/v1/departments/idle-agents 의 read 측 SDK(2026-08-10, 993682f).
+# 미설치도 LangfuseQueryError -> 전원 UNAVAILABLE 로 접히므로 크래시는 안 나지만,
+# 그러면 이 이미지에서 관측이 영원히 UNAVAILABLE 이다 - 그래서 명시적으로 넣는다.
 RUN pip install --no-cache-dir \
     fastapi==0.128.8 "uvicorn[standard]==0.39.0" pydantic==2.13.3 \
-    psycopg2-binary==2.9.12 redis==7.0.1
+    psycopg2-binary==2.9.12 redis==7.0.1 langfuse==4.14.3
 
 WORKDIR /app/departments/07-agent-workforce
 COPY api ./api
