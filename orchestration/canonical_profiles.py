@@ -9,9 +9,10 @@ unknown aliases: a typo or legacy name must fail before a task reaches Hermes.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Final, Mapping
+from typing import Final
 
 
 class CanonicalProfileError(ValueError):
