@@ -215,7 +215,7 @@ class ForwardToIngressTests(unittest.TestCase):
             "os.environ",
             self._env(**{gateway_patch.INGRESS_SECRET_ENV: ""}),
         ):
-            self.assertFalse(gateway_patch._forward_to_ingress(self._message(), None))
+            self.assertTrue(gateway_patch._forward_to_ingress(self._message(), None))
 
     def test_bot_authored_message_is_not_forwarded(self) -> None:
         """미러 게시물(`[web-mirror]`)은 봇이 쓴다. 그걸 사람 발화로 오인하면
@@ -297,7 +297,7 @@ class ForwardToIngressTests(unittest.TestCase):
             self.assertFalse(gateway_patch._forward_to_ingress(self._message(), None))
         opened.assert_not_called()
 
-    def test_transport_failure_falls_back_to_hermes(self) -> None:
+    def test_transport_failure_is_consumed_to_prevent_ambiguous_replay(self) -> None:
         """전달 실패는 조용히 버리지 않고 기존 경로로 되돌린다."""
 
         def boom(request, timeout=None):  # noqa: ANN001
@@ -305,7 +305,21 @@ class ForwardToIngressTests(unittest.TestCase):
 
         env = self._env()
         with patch.dict("os.environ", env), patch("urllib.request.urlopen", boom):
-            self.assertFalse(gateway_patch._forward_to_ingress(self._message(), None))
+            self.assertTrue(gateway_patch._forward_to_ingress(self._message(), None))
+
+    def test_auth_rejection_is_consumed_instead_of_bypassing_bff(self) -> None:
+        import urllib.error
+
+        def unauthorized(request, timeout=None):  # noqa: ANN001
+            raise urllib.error.HTTPError(  # type: ignore[arg-type]
+                "u", 401, "unauthorized", {}, None
+            )
+
+        env = self._env()
+        with patch.dict("os.environ", env), patch(
+            "urllib.request.urlopen", unauthorized
+        ):
+            self.assertTrue(gateway_patch._forward_to_ingress(self._message(), None))
 
     def test_duplicate_is_treated_as_forwarded(self) -> None:
         """409(이미 받은 메시지)를 실패로 보면 Hermes가 중복 실행한다."""

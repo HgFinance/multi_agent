@@ -56,6 +56,11 @@ For a marked task:
    market language still requires exact `ORDER_TYPE` evidence. Any limit marker
    without exactly one valid price must clarify, and every LIMIT field requires
    exact source evidence.
+   For `PLACE_ORDER`, evidence contains exactly `INSTRUMENT`, `SIDE`,
+   `QUANTITY`, and explicit `ORDER_TYPE` (plus `LIMIT_PRICE` for a limit order).
+   Do not add `ACTION` evidence: the trusted verifier derives PLACE_ORDER from
+   the validated side/order fields. `ACTION` evidence is reserved for aggregate
+   actions such as sell-all or cancel-all.
    For `CLARIFY` or `NOT_ORDER`, set `action`, `instrument_mention`, `side`,
    `quantity`, `order_type`, and `limit_price` to `null`, set `evidence` to an
    empty list, and include at least one exact `reason_codes` value. Partial facts

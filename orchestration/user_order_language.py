@@ -302,6 +302,7 @@ _ALLOWED_RESIDUAL_RE = re.compile(
     r"^(?:(?:을|를|은|는|이|가|에|에서|로|으로|좀|만|내|현재|계좌|"
     r"보유|종목|주식|주문|주세요|줘)\s*)*$"
 )
+_LEADING_DISCORD_MENTION_RE = re.compile(r"^\s*<@!?\d{15,25}>\s*")
 
 
 @dataclass(frozen=True)
@@ -396,12 +397,15 @@ def _validate_evidence(
         # A price written with an explicit won unit (``70,000원에``) is itself
         # the deterministic evidence that the order is LIMIT.  In that one
         # case the same exact substring legitimately supports both fields.
-        same_limit_amount = (
+        same_supported_span = (
             (left.start, left.end) == (right.start, right.end)
             and {left.field, right.field}
-            == {EvidenceField.ORDER_TYPE, EvidenceField.LIMIT_PRICE}
+            in (
+                {EvidenceField.ORDER_TYPE, EvidenceField.LIMIT_PRICE},
+                {EvidenceField.ACTION, EvidenceField.SIDE},
+            )
         )
-        if not same_limit_amount:
+        if not same_supported_span:
             return None, OrderReasonCode.EVIDENCE_SPAN_INVALID
     return by_field, None
 
@@ -510,6 +514,15 @@ def _residual_supported(raw_text: str, spans: list[tuple[int, int]]) -> bool:
     remaining = list(raw_text)
     for start, end in spans:
         remaining[start:end] = " " * (end - start)
+    # Discord preserves the bot mention in the exact authenticated source
+    # text. It is delivery metadata, not unsupported trading language. Only a
+    # single leading snowflake mention is ignored; mentions elsewhere remain
+    # visible to the strict residual check.
+    leading_mention = _LEADING_DISCORD_MENTION_RE.match(raw_text)
+    if leading_mention:
+        remaining[leading_mention.start() : leading_mention.end()] = " " * (
+            leading_mention.end() - leading_mention.start()
+        )
     residual = " ".join("".join(remaining).strip(" \t,.!").split())
     return "?" not in residual and bool(_ALLOWED_RESIDUAL_RE.fullmatch(residual))
 
@@ -600,11 +613,22 @@ def _verify_place_order(
         required_fields.add(EvidenceField.ORDER_TYPE)
     if order_type is OrderType.LIMIT:
         required_fields.add(EvidenceField.LIMIT_PRICE)
-    if set(evidence) != required_fields:
+    allowed_fields = required_fields | {EvidenceField.ACTION}
+    if not required_fields.issubset(evidence) or not set(evidence).issubset(
+        allowed_fields
+    ):
         return _clarify(digest, OrderReasonCode.EVIDENCE_FIELD_MISMATCH)
 
     if candidate.action is not DirectiveAction.PLACE_ORDER:
         return _clarify(digest, OrderReasonCode.CANDIDATE_MISMATCH)
+    action_evidence = evidence.get(EvidenceField.ACTION)
+    if action_evidence is not None and not _expected_evidence(
+        evidence,
+        field=EvidenceField.ACTION,
+        span=side_match.span(),
+        normalized=DirectiveAction.PLACE_ORDER.value,
+    ):
+        return _clarify(digest, OrderReasonCode.EVIDENCE_FIELD_MISMATCH)
     if candidate.side is not side or candidate.quantity != str(quantity):
         return _clarify(digest, OrderReasonCode.CANDIDATE_MISMATCH)
     if candidate.order_type is not order_type or candidate.limit_price != (
