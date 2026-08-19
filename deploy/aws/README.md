@@ -106,6 +106,11 @@ the existing `.env` once into the mode-0600 file
 there, so the dirty source checkout is not changed.  To deliberately import
 later source `.env` edits, use `--refresh-runtime-env`.
 
+`.env.example` is the repository's only tracked environment template. Do not
+maintain a second `.env.aws.template`: it drifts from Compose and creates
+duplicate assignments. AWS-specific values belong only in the private
+mode-0600 `runtime.env` described above.
+
 The Timescale password is both PostgreSQL's literal password and a component of
 an internal PostgreSQL URL.  It must therefore use only URL-safe
 letters/digits/`._~-`; rotate a password containing reserved characters before

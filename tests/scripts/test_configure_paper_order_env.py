@@ -34,6 +34,14 @@ def _generator(*values: str):
     return lambda: next(iterator)
 
 
+def test_repository_uses_one_duplicate_free_environment_template() -> None:
+    template = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    assert cli._duplicate_assignment_keys(template) == ()
+    assert "저장소의 유일한 환경 변수 템플릿" in template
+    assert ".env.aws.template" in template
+
+
 def test_local_configures_exact_authenticated_fixture_grant(tmp_path: Path) -> None:
     env_file = tmp_path / ".env"
     preserved = "m" * 48
@@ -189,15 +197,40 @@ def test_rotates_short_placeholder_and_duplicate_secrets_and_deduplicates_keys(
     )
     text = env_file.read_text(encoding="utf-8")
     values = _values(env_file)
-    secret_values = [values[key] for key in cli.SECRET_KEYS]
+    secret_values = [values[key] for key in cli.SERVICE_SECRET_KEYS]
 
     assert text.count("APP_ENV=") == 1
-    assert all(text.count(f"{key}=") == 1 for key in cli.SECRET_KEYS)
+    assert all(text.count(f"{key}=") == 1 for key in cli.SERVICE_SECRET_KEYS)
     assert values["TRADING_SERVICE_AUTH_SECRET"] == duplicate
     assert values["CEO_DISCORD_INGRESS_API_KEY"] == "z" * 48
     assert len(set(secret_values)) == 4
     assert all(len(value) >= 32 for value in secret_values)
     assert not any("change_me" in value.casefold() for value in secret_values)
+
+
+def test_collapses_unmanaged_duplicates_without_changing_effective_value(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "# Keep the documented location.\n"
+        "UNMANAGED=first\n"
+        "MIDDLE=value\n"
+        "export UNMANAGED='last value'\n",
+        encoding="utf-8",
+    )
+
+    result = cli.configure_environment(
+        runtime="local",
+        env_file=env_file,
+        generator=_generator("a" * 48, "b" * 48, "c" * 48, "d" * 48),
+    )
+    text = env_file.read_text(encoding="utf-8")
+
+    assert result.deduplicated_keys == ("UNMANAGED",)
+    assert text.count("UNMANAGED=") == 1
+    assert _values(env_file)["UNMANAGED"] == "last value"
+    assert text.index("UNMANAGED=") < text.index("MIDDLE=")
 
 
 def test_aws_missing_required_values_does_not_touch_file(tmp_path: Path) -> None:
