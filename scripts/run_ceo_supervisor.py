@@ -12,6 +12,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Callable
@@ -20,16 +21,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from orchestration.adapters.ceo_notion_projection import CeoNotionProjection
 from orchestration.adapters.ceo_supervisor import (
     CeoSupervisorService,
     HermesKanbanClient,
     HermesKanbanCommandError,
     SupervisorWorkflowError,
 )
-from orchestration.adapters.ceo_notion_projection import CeoNotionProjection
 from orchestration.adapters.qa_audit_projection import QaAuditProjection
 from orchestration.discord_delivery import DiscordFinalDelivery
-
 
 WATCH_LINE = re.compile(
     r"^\[(?P<timestamp>[^]]+)\]\s+(?P<task_id>\S+)\s+"
@@ -95,7 +95,7 @@ def watch_events(
                 "kanban",
                 "watch",
                 "--kinds",
-                "completed,blocked,gave_up,crashed,timed_out,spawn_failed",
+                "claimed,spawned,completed,blocked,gave_up,crashed,timed_out,spawn_failed",
                 "--interval",
                 str(interval),
             ],
@@ -132,6 +132,62 @@ def watch_events(
                 process.wait(timeout=5)
 
 
+
+# hgfinance-ready-plan-poll-v2
+def run_ready_plan_reconciler(
+    service: CeoSupervisorService,
+    *,
+    interval: float,
+    stop_event: threading.Event,
+) -> None:
+    """Poll for complete CEO-authored ready/running delegation plans."""
+
+    poll_interval = max(float(interval), 0.25)
+
+    while not stop_event.is_set():
+        try:
+            service.materialize_ready_primary_plans()
+        except (SupervisorWorkflowError, HermesKanbanCommandError) as exc:
+            print(
+                "ceo-supervisor ready-plan-reconcile-error="
+                f"{type(exc).__name__}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        stop_event.wait(poll_interval)
+
+
+# hgfinance-completed-synthesis-reconcile-v1
+def run_completed_synthesis_reconciler(
+    service: CeoSupervisorService,
+    *,
+    interval: float,
+    stop_event: threading.Event,
+) -> None:
+    """Poll for completed synthesis tasks whose watch event was missed."""
+
+    poll_interval = max(float(interval), 0.25)
+
+    while not stop_event.is_set():
+        try:
+            recovered = service.reconcile_completed_syntheses()
+            for task_id in recovered:
+                print(
+                    f"ceo-supervisor completed-synthesis-reconciled task={task_id}",
+                    flush=True,
+                )
+        except (SupervisorWorkflowError, HermesKanbanCommandError) as exc:
+            print(
+                "ceo-supervisor synthesis-reconcile-error="
+                f"{type(exc).__name__}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        stop_event.wait(poll_interval)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--interval", type=float, default=0.5)
@@ -155,6 +211,33 @@ def main() -> int:
         qa_projection=QaAuditProjection(kanban_client=client),
         discord_delivery=DiscordFinalDelivery(environment=environment),
     )
+
+    ready_plan_stop = threading.Event()
+    ready_plan_thread = threading.Thread(
+        target=run_ready_plan_reconciler,
+        kwargs={
+            "service": service,
+            "interval": args.interval,
+            "stop_event": ready_plan_stop,
+        },
+        name="ceo-ready-plan-reconciler",
+        daemon=True,
+    )
+    ready_plan_thread.start()
+
+    synthesis_reconcile_stop = threading.Event()
+    synthesis_reconcile_thread = threading.Thread(
+        target=run_completed_synthesis_reconciler,
+        kwargs={
+            "service": service,
+            "interval": args.interval,
+            "stop_event": synthesis_reconcile_stop,
+        },
+        name="ceo-completed-synthesis-reconciler",
+        daemon=True,
+    )
+    synthesis_reconcile_thread.start()
+
     try:
         try:
             for decision in service.reconcile_existing_workflows():
@@ -184,6 +267,8 @@ def main() -> int:
                 # A single workflow must not take down the event consumer.
                 print(f"ceo-supervisor workflow-error={exc}", file=sys.stderr, flush=True)
     except GracefulShutdown as exc:
+        ready_plan_stop.set()
+        synthesis_reconcile_stop.set()
         print(f"ceo-supervisor normal-shutdown={exc}", flush=True)
         return 0
     except (WatchOutputError, WatchProcessError) as exc:

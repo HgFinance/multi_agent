@@ -3,15 +3,67 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
+from uuid import uuid4
+
+from starlette.requests import Request
 
 from apps.api import ceo_mirror_api
 from apps.api.ceo_mirror import (
     CanonicalIngress,
     InMemoryMirrorStore,
     MirrorEvent,
+    MirrorRequestConflict,
+    RedisMirrorStore,
     execute_once,
 )
+from apps.api.discord_ingress_auth import mark_request as mark_discord_ingress_request
+
+
+def _http_request(*, internal_discord: bool = False) -> Request:
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/ui/ceo/ingress",
+            "headers": [],
+        }
+    )
+    if internal_discord:
+        mark_discord_ingress_request(request)
+    return request
+
+
+class _FakeRedis:
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+
+    def get(self, key: str) -> str | None:
+        return self.values.get(key)
+
+    def set(
+        self,
+        key: str,
+        value: str,
+        *,
+        nx: bool = False,
+        ex: int | None = None,
+    ) -> bool:
+        del ex
+        if nx and key in self.values:
+            return False
+        self.values[key] = value
+        return True
+
+
+def _fake_redis_mirror_store() -> RedisMirrorStore:
+    store = object.__new__(RedisMirrorStore)
+    store.client = _FakeRedis()
+    store.ttl_seconds = 60
+    store.request_prefix = "test:request:"
+    store.source_prefix = "test:source:"
+    return store
 
 
 class CeoMirrorExecutionTest(unittest.TestCase):
@@ -38,7 +90,8 @@ class CeoMirrorExecutionTest(unittest.TestCase):
                     source="web",
                     source_message_id="web:1",
                     actor_id="web-user",
-                )
+                ),
+                _http_request(),
             )
             second = ceo_mirror_api.mirror_ingress(
                 CanonicalIngress(
@@ -47,13 +100,52 @@ class CeoMirrorExecutionTest(unittest.TestCase):
                     source="web",
                     source_message_id="web:1",
                     actor_id="web-user",
-                )
+                ),
+                _http_request(),
             )
 
         self.assertEqual(calls, ["request-web-1"])
         self.assertEqual(first.task_id, "t_web")
         self.assertFalse(first.duplicate)
         self.assertTrue(second.duplicate)
+
+    def test_request_id_cannot_be_rebound_across_any_authority_field(self) -> None:
+        original_values = {
+            "query": "삼성전자 10주 시장가 매수",
+            "request_id": "request-authority-1",
+            "source": "web",
+            "source_message_id": "web:authority:1",
+            "actor_id": "user-a",
+            "actor_type": "user",
+            "fund_id": "fund-a",
+            "book_id": "book-a",
+            "mirrored": False,
+        }
+        variants = {
+            "query": "삼성전자 11주 시장가 매수",
+            "source": "discord",
+            "source_message_id": "web:authority:2",
+            "actor_id": "user-b",
+            "actor_type": "system",
+            "fund_id": "fund-b",
+            "book_id": "book-b",
+            "mirrored": True,
+        }
+
+        for store_name, factory in (
+            ("memory", InMemoryMirrorStore),
+            ("redis", _fake_redis_mirror_store),
+        ):
+            for field, changed_value in variants.items():
+                with self.subTest(store=store_name, field=field):
+                    store = factory()
+                    original = CanonicalIngress(**original_values)
+                    store.claim_request(original)
+                    rebound = CanonicalIngress(
+                        **(original_values | {field: changed_value})
+                    )
+                    with self.assertRaises(MirrorRequestConflict):
+                        store.claim_request(rebound)
 
     def test_discord_runs_ceo_once_and_bot_echo_is_ignored(self) -> None:
         calls: list[str] = []
@@ -72,7 +164,8 @@ class CeoMirrorExecutionTest(unittest.TestCase):
                     source="discord",
                     source_message_id="discord:channel:1",
                     actor_id="discord-user",
-                )
+                ),
+                _http_request(internal_discord=True),
             )
             ignored = ceo_mirror_api.mirror_ingress(
                 CanonicalIngress(
@@ -83,7 +176,8 @@ class CeoMirrorExecutionTest(unittest.TestCase):
                     actor_id="ceo-agent",
                     actor_type="bot",
                     mirrored=True,
-                )
+                ),
+                _http_request(internal_discord=True),
             )
 
         self.assertEqual(calls, ["request-discord-1"])
@@ -175,7 +269,7 @@ class CeoMirrorExecutionTest(unittest.TestCase):
         self.assertEqual(events[3].event_type, "CEO_FINAL")
         self.assertEqual(events[4].event_type, "QA_RESULT")
 
-    def test_mirror_ask_forwards_fund_id_to_ceo_query(self) -> None:
+    def test_mirror_ask_forwards_fund_and_book_to_ceo_query(self) -> None:
         """`/ui/ceo/ask`가 실제로 처리되는 곳은 여기다 - `ceo_router`가 아니라
         `ceo_mirror_router`가 `main.py`에서 먼저 등록돼 같은 경로를 가로챈다.
 
@@ -188,7 +282,12 @@ class CeoMirrorExecutionTest(unittest.TestCase):
 
         captured: list[CeoAsk] = []
 
-        def fake_ceo_query(req: CeoAsk, owner_id: str | None = None) -> dict[str, object]:
+        # `**_coordinates`: 2026-08-18에 `ceo_query`가 Discord 발송 좌표를 받게 되면서
+        # 이 대역이 그 kwargs로 TypeError를 냈다. 좌표 자체는 이 테스트의 관심사가
+        # 아니라(전용 테스트는 tests/orchestration/test_web_discord_mirror.py) 받아서 버린다.
+        def fake_ceo_query(
+            req: CeoAsk, owner_id: str | None = None, **_coordinates: object
+        ) -> dict[str, object]:
             captured.append(req)
             return {"task_id": "t_mandate", "status": "accepted"}
 
@@ -198,22 +297,172 @@ class CeoMirrorExecutionTest(unittest.TestCase):
                     query="mandate 인식 확인",
                     request_id="request-fund-1",
                     fund_id="fund-abc",
+                    book_id="book-abc",
                 ),
                 x_source_message_id=None,
                 x_actor_id=None,
-                x_user_id=None,
+                owner_id=None,
             )
 
         self.assertEqual(response["task_id"], "t_mandate")
         self.assertEqual(len(captured), 1)
         self.assertEqual(captured[0].fund_id, "fund-abc")
+        self.assertEqual(captured[0].book_id, "book-abc")
+
+    def test_discord_actor_mapping_resolves_one_active_trading_book(self) -> None:
+        """A Discord author can enter the same exact PAPER account boundary."""
+
+        from apps.api.ceo import CeoAsk
+
+        user_id = str(uuid4())
+        fund_id = str(uuid4())
+        book_id = str(uuid4())
+        captured: list[tuple[CeoAsk, str | None]] = []
+
+        def fake_ceo_query(
+            req: CeoAsk, owner_id: str | None = None, **_coordinates: object
+        ) -> dict[str, object]:
+            captured.append((req, owner_id))
+            return {"task_id": "t_discord_order", "status": "accepted"}
+
+        ingress = CanonicalIngress(
+            query="삼성전자 2주 시장가 매수해",
+            request_id="discord:123456789012345678",
+            source="discord",
+            source_message_id="123456789012345678",
+            actor_id="123456789012345678",
+            actor_type="user",
+        )
+        with (
+            patch.object(
+                ceo_mirror_api,
+                "resolve_discord_actor",
+                return_value=SimpleNamespace(user_id=user_id, fund_id=fund_id),
+            ),
+            patch.object(
+                ceo_mirror_api,
+                "authorized_trading_books",
+                return_value=[
+                    {"fund_id": fund_id, "book_id": book_id, "name": "MAIN"}
+                ],
+            ),
+            patch("apps.api.ceo.ceo_query", side_effect=fake_ceo_query),
+        ):
+            response = ceo_mirror_api._ceo_query(ingress)
+
+        self.assertEqual(response["task_id"], "t_discord_order")
+        self.assertEqual(len(captured), 1)
+        request, owner = captured[0]
+        self.assertEqual(owner, user_id)
+        self.assertEqual(request.fund_id, fund_id)
+        self.assertEqual(request.book_id, book_id)
+
+    def test_discord_order_does_not_guess_between_multiple_books(self) -> None:
+        from apps.api.ceo import CeoAsk
+
+        user_id = str(uuid4())
+        fund_id = str(uuid4())
+        captured: list[CeoAsk] = []
+
+        def fake_ceo_query(
+            req: CeoAsk, owner_id: str | None = None, **_coordinates: object
+        ) -> dict[str, object]:
+            del owner_id
+            captured.append(req)
+            return {"task_id": "t_ambiguous", "status": "accepted"}
+
+        ingress = CanonicalIngress(
+            query="삼성전자 2주 시장가 매수해",
+            request_id="discord:223456789012345678",
+            source="discord",
+            source_message_id="223456789012345678",
+            actor_id="223456789012345678",
+            actor_type="user",
+        )
+        with (
+            patch.object(
+                ceo_mirror_api,
+                "resolve_discord_actor",
+                return_value=SimpleNamespace(user_id=user_id, fund_id=fund_id),
+            ),
+            patch.object(
+                ceo_mirror_api,
+                "authorized_trading_books",
+                return_value=[
+                    {"fund_id": fund_id, "book_id": str(uuid4()), "name": "A"},
+                    {"fund_id": fund_id, "book_id": str(uuid4()), "name": "B"},
+                ],
+            ),
+            patch("apps.api.ceo.ceo_query", side_effect=fake_ceo_query),
+        ):
+            ceo_mirror_api._ceo_query(ingress)
+
+        self.assertIsNone(captured[0].book_id)
+
+    def test_discord_account_scope_ignores_caller_supplied_fund_and_book(self) -> None:
+        """Only the server-owned actor binding may choose Discord account scope."""
+
+        from apps.api.ceo import CeoAsk
+
+        user_id = str(uuid4())
+        mapped_fund_id = str(uuid4())
+        mapped_book_id = str(uuid4())
+        captured: list[CeoAsk] = []
+
+        def fake_ceo_query(
+            req: CeoAsk, owner_id: str | None = None, **_coordinates: object
+        ) -> dict[str, object]:
+            del owner_id
+            captured.append(req)
+            return {"task_id": "t_bound_scope", "status": "accepted"}
+
+        ingress = CanonicalIngress(
+            query="삼성전자 2주 시장가 매수해",
+            request_id="discord:323456789012345678",
+            source="discord",
+            source_message_id="323456789012345678",
+            actor_id="123456789012345678",
+            actor_type="user",
+            fund_id=str(uuid4()),
+            book_id=str(uuid4()),
+        )
+        with (
+            patch.object(
+                ceo_mirror_api,
+                "resolve_discord_actor",
+                return_value=SimpleNamespace(
+                    user_id=user_id, fund_id=mapped_fund_id
+                ),
+            ),
+            patch.object(
+                ceo_mirror_api,
+                "authorized_trading_books",
+                return_value=[
+                    {
+                        "fund_id": mapped_fund_id,
+                        "book_id": mapped_book_id,
+                        "name": "MAIN",
+                    }
+                ],
+            ),
+            patch("apps.api.ceo.ceo_query", side_effect=fake_ceo_query),
+        ):
+            ceo_mirror_api._ceo_query(ingress)
+
+        self.assertEqual(captured[0].fund_id, mapped_fund_id)
+        self.assertEqual(captured[0].book_id, mapped_book_id)
 
     def test_mirror_ask_without_fund_id_still_works(self) -> None:
         from apps.api.ceo import CeoAsk
 
         captured: list[CeoAsk] = []
 
-        def fake_ceo_query(req: CeoAsk, owner_id: str | None = None) -> dict[str, object]:
+        # `**_coordinates`: 2026-08-18에 `ceo_query`가 Discord 발송 좌표를 받게 되면서
+        # 이 대역이 그 kwargs로 TypeError를 냈다. 좌표 자체는 이 테스트의 관심사가
+        # 아니라(전용 테스트는 tests/orchestration/test_web_discord_mirror.py) 받아서 버린다.
+        def fake_ceo_query(
+            req: CeoAsk, owner_id: str | None = None, **_coordinates: object
+        ) -> dict[str, object]:
             captured.append(req)
             return {"task_id": "t_no_fund", "status": "accepted"}
 
@@ -222,7 +471,7 @@ class CeoMirrorExecutionTest(unittest.TestCase):
                 CeoAsk(query="fund 없는 질의", request_id="request-no-fund-1"),
                 x_source_message_id=None,
                 x_actor_id=None,
-                x_user_id=None,
+                owner_id=None,
             )
 
         self.assertEqual(response["task_id"], "t_no_fund")
@@ -240,7 +489,12 @@ class CeoMirrorExecutionTest(unittest.TestCase):
 
         captured: list[str | None] = []
 
-        def fake_ceo_query(req: CeoAsk, owner_id: str | None = None) -> dict[str, object]:
+        # `**_coordinates`: 2026-08-18에 `ceo_query`가 Discord 발송 좌표를 받게 되면서
+        # 이 대역이 그 kwargs로 TypeError를 냈다. 좌표 자체는 이 테스트의 관심사가
+        # 아니라(전용 테스트는 tests/orchestration/test_web_discord_mirror.py) 받아서 버린다.
+        def fake_ceo_query(
+            req: CeoAsk, owner_id: str | None = None, **_coordinates: object
+        ) -> dict[str, object]:
             captured.append(owner_id)
             return {"task_id": "t_owner", "status": "accepted"}
 
@@ -249,7 +503,7 @@ class CeoMirrorExecutionTest(unittest.TestCase):
                 CeoAsk(query="계정 이력 확인", request_id="request-owner-1"),
                 x_source_message_id=None,
                 x_actor_id=None,
-                x_user_id="user-a",
+                owner_id="user-a",
             )
 
         self.assertEqual(captured, ["user-a"])
@@ -261,7 +515,12 @@ class CeoMirrorExecutionTest(unittest.TestCase):
 
         captured: list[str | None] = []
 
-        def fake_ceo_query(req: CeoAsk, owner_id: str | None = None) -> dict[str, object]:
+        # `**_coordinates`: 2026-08-18에 `ceo_query`가 Discord 발송 좌표를 받게 되면서
+        # 이 대역이 그 kwargs로 TypeError를 냈다. 좌표 자체는 이 테스트의 관심사가
+        # 아니라(전용 테스트는 tests/orchestration/test_web_discord_mirror.py) 받아서 버린다.
+        def fake_ceo_query(
+            req: CeoAsk, owner_id: str | None = None, **_coordinates: object
+        ) -> dict[str, object]:
             captured.append(owner_id)
             return {"task_id": "t_anon", "status": "accepted"}
 
@@ -270,7 +529,7 @@ class CeoMirrorExecutionTest(unittest.TestCase):
                 CeoAsk(query="익명 질의", request_id="request-anon-1"),
                 x_source_message_id=None,
                 x_actor_id=None,
-                x_user_id=None,
+                owner_id=None,
             )
 
         self.assertEqual(captured, [None])

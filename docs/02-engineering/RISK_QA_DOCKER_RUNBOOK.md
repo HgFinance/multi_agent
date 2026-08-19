@@ -17,6 +17,7 @@ Hermes 로그인·프로필 동기화·모델/과금 같은 8부서 공통 절�
 | `risk-api` | `departments/03-risk/Dockerfile` 빌드 | Pre-trade Risk Check, Trading State, Compliance 조회면 | Risk |
 | `audit-api` | `departments/06-ai-qa-audit/Dockerfile` 빌드 | Evidence QA, Trace, Tool Permission, Finding, Incident 조회면 | QA |
 | `qa-worker` | `audit-api`와 동일 이미지, command만 다름 | Risk Decision Stream → QA 감사 이력 적재 (`qa_events/worker.py`) | QA |
+| `qa-reproduction-worker` | `audit-api`와 동일 이미지, command만 다름 | 승인된 주식 포워드 PASS를 별도 권한·별도 프로세스에서 재실행 | QA |
 | `risk-hermes` | `nousresearch/hermes-agent:latest` | Risk 부서 Supervisor | Risk |
 | `qa-hermes` | `nousresearch/hermes-agent:latest` | QA 부서 Supervisor | QA |
 
@@ -26,7 +27,7 @@ Hermes 로그인·프로필 동기화·모델/과금 같은 8부서 공통 절�
 상단 주석에 상세 근거가 있다. 저장소 루트 `.dockerignore`가 없으면 `ai-office/node_modules`(~760MB)까지 빌드마다
 Docker Daemon에 올라가므로, 두 부서 Dockerfile을 쓸 때는 반드시 `.dockerignore`가 함께 있어야 한다.
 
-## 2. Backend Image 상세 (risk-api / audit-api / qa-worker)
+## 2. Backend Image 상세 (risk-api / audit-api / qa-worker / qa-reproduction-worker)
 
 ### 2.1 risk-api
 
@@ -47,7 +48,7 @@ Docker Daemon에 올라가므로, 두 부서 Dockerfile을 쓸 때는 반드시 
 |---|---|
 | Dockerfile | `departments/06-ai-qa-audit/Dockerfile` |
 | Build Context | 저장소 루트 |
-| COPY 대상 | `departments/06-ai-qa-audit`, `skills/agentic-rag`, `apps/observability` |
+| COPY 대상 | `departments/06-ai-qa-audit`, 동결 evaluator용 `departments/04-quant-backtest/pipeline`·`departments/01-research/contracts`, `skills/agentic-rag`, `apps/observability`, `apps/security`, `orchestration` |
 | Command | `uvicorn app:app --app-dir departments/06-ai-qa-audit/api --host 0.0.0.0 --port 8000` |
 | 내부 포트 | 8000 |
 | 호스트 매핑 | `127.0.0.1:8042:8000` (로컬 전용, 외부 노출 금지) |
@@ -64,9 +65,30 @@ Docker Daemon에 올라가므로, 두 부서 Dockerfile을 쓸 때는 반드시 
 | Command | `python qa_events/worker.py` |
 | working_dir | `/app/departments/06-ai-qa-audit` |
 | 포트 | 없음 (백그라운드 Consumer, HTTP 서버 아님) |
-| 필수 환경변수 | `RISK_QA_EVENT_REDIS_URL` 또는 `REDIS_URL` 중 하나 — 없으면 `worker.py`가 즉시 `SystemExit`로 종료됨. compose에서는 `RISK_QA_EVENT_REDIS_URL: ${RISK_QA_EVENT_REDIS_URL:-redis://redis:6379/0}`로 기본값을 줘서 사실상 항상 채워지게 했다 |
-| 동작 | `bus.consume_once(_record_risk_event, count=50, min_idle_ms=1000)`을 `QA_EVENT_POLL_INTERVAL_SECONDS`(기본 1초) 간격으로 반복 |
-| 의존 | `redis` |
+| 필수 환경변수 | DB는 `RISK_QA_DATABASE_URL` 또는 `DATABASE_URL`, 이벤트 버스는 `RISK_QA_EVENT_REDIS_URL` 또는 `REDIS_URL`이 필요하다. 하나라도 없으면 `worker.py`가 즉시 `SystemExit`로 종료된다. compose는 `DATABASE_URL`과 내부 Redis 기본값을 전달한다 |
+| 동작 | Risk 이벤트와 `quant.intraday.forward.qa_requested.v1`을 각각의 Redis Stream consumer group에서 읽는다. Quant PASS는 DB의 정본 outbox와 대조한 뒤 재현 요청·별도 작업 큐만 원자적으로 기록하며, 인라인 백테스트나 자동 승격은 하지 않는다 |
+| 의존 | `redis`, Supabase PostgreSQL(`20260818000300_intraday_forward_qa_dispatch.sql` 적용 필수) |
+
+### 2.4 qa-reproduction-worker
+
+Quant 프로세스가 만든 결과를 그대로 승인하지 않는다. `qa-worker`가 정본 outbox를
+검증해 작업 큐에 넣은 뒤, 이 프로세스가 동결된 보고서·수식·비용모형·소스 지문과
+정확한 KRX ACTIVE STOCK 세션을 다시 읽어 독립적으로 계산한다.
+
+| 항목 | 값 |
+|---|---|
+| Dockerfile | `departments/06-ai-qa-audit/Dockerfile` (audit-api와 공유) |
+| Command | `python qa_events/reproduction_worker.py` |
+| working_dir | `/app/departments/06-ai-qa-audit` |
+| DB 권한 | metadata DB는 `svc_qa_reproducer`; 시장 DB는 강제 read-only |
+| 필수 마이그레이션 | `20260818000300`부터 `20260818000700`까지 순서대로 적용 |
+| 임대 | 30~7,200초, heartbeat/complete/fail 모두 lease token으로 fencing |
+| 결과 권한 | `promotion_authority=false`; 불일치는 감사 결과일 뿐 자동 승격하지 않음 |
+| 준비성 | claim API를 트랜잭션 안에서 실행 후 rollback하고 시장 DB read-only를 확인 |
+
+`DATABASE_SESSION_URL`을 우선 사용한다. Supavisor transaction pool 주소만 있으면
+`SET ROLE`이 요청 사이에 유지되지 않을 수 있으므로 준비성 검사가 fail-closed된다.
+운영에서는 `RISK_QA_DATABASE_SESSION_URL`과 전용 LOGIN/role grant를 제공한다.
 
 ## 3. Hermes 컨테이너 (risk-hermes / qa-hermes)
 
@@ -89,10 +111,11 @@ Provider는 컨테이너 env가 아니라 각 Profile의 `/opt/data/config.yaml`
 
 | 서비스 | mem_limit | cpus | 비고 |
 |---|---|---|---|
-| `redis` | 256m | 0.5 | 영속화(AOF) 미적용 — 재시작 시 Stream 유실 감수 |
+| `redis` | 256m | 0.5 | AOF `everysec` + 명명 volume `redis_data`로 Stream 영속화 |
 | `risk-api` | 256m | 0.5 | |
 | `audit-api` | 256m | 0.5 | |
 | `qa-worker` | 256m | 0.3 | `stop_grace_period: 20s` — 소비 중인 이벤트가 있으면 강제 종료 전에 끝내도록 |
+| `qa-reproduction-worker` | 2g | 1.0 | 장시간 포워드 재실행; lease와 statement timeout으로 상한 제한 |
 | `risk-hermes` | 1g (reservation 192m) | 1.0 | |
 | `qa-hermes` | 1g (reservation 192m) | 1.0 | |
 
@@ -104,11 +127,17 @@ docker compose config --quiet
 docker compose config --services
 
 # 리스크·QA 컨테이너만 올리기
-docker compose up -d redis risk-api audit-api qa-worker risk-hermes qa-hermes
+docker compose up -d redis risk-api audit-api qa-worker qa-reproduction-worker risk-hermes qa-hermes
 
 # risk-api / audit-api 헬스 확인
 curl -s http://127.0.0.1:8041/ | head -1
 curl -s http://127.0.0.1:8042/ | head -1
+
+# 세 QA 프로세스가 실제 준비성 검사를 통과했는지 확인
+# qa-worker는 Redis뿐 아니라 scoped DB role과 transaction-local read-only
+# outbox SELECT도 검사하므로 metadata DB 장애 시 unhealthy로 전환된다.
+docker compose ps audit-api qa-worker qa-reproduction-worker
+docker exec hedgefund-redis redis-cli CONFIG GET appendonly appendfsync
 
 # qa-worker가 Risk 이벤트를 잘 받는지는 QA 자체 통합 테스트로 확인한다
 python -m pytest departments/06-ai-qa-audit/tests/test_redis_event_bus_integration.py -q
@@ -119,6 +148,13 @@ python -m pytest departments/06-ai-qa-audit/tests/test_redis_event_bus_integrati
 Risk API와 QA API의 LangGraph Worker는 호스트 Ollama를 사용한다. 호스트 프로세스는 OLLAMA_BASE_URL을 사용하고, Docker 컨테이너는 OLLAMA_DOCKER_BASE_URL 또는 기본값 host.docker.internal을 사용한다. 기본 모델은 qwen3:1.7b이며 OLLAMA_CHAT_MODEL, OLLAMA_TIMEOUT_SECONDS로 변경할 수 있다.
 
 Redis는 healthcheck가 통과한 뒤 Risk API, QA API, QA Worker가 시작한다. 실제 모델 존재 여부는 다음 읽기 전용 preflight로 확인한다.
+
+기본 Redis는 `appendonly yes`, `appendfsync everysec`, 명명 volume `redis_data`를
+사용한다. 포워드 QA stream은 미소비 감사 요청을 길이 제한으로 제거하지 않는다.
+DB·Redis 같은 의존성 장애는 횟수와 무관하게 pending에서 지수 백오프로 재시도하고,
+형식 오류·지원하지 않는 event type·정본 충돌만 제한된 횟수 뒤 DLQ로 보낸다.
+Outbox 재조정 발행은 event ID별 원자적 `XADD + marker`라 장기 장애 중에도 같은
+메시지와 AOF가 무한 증가하지 않는다.
 
     source ~/claude/bin/activate
     python scripts/run_risk_qa_production_preflight.py --as-of 2026-08-10

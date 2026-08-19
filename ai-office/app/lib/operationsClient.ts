@@ -6,8 +6,7 @@
  * 가져왔고, 필드 이름과 의미는 main 계약(`operator-operations.v1`) 그대로다.
  */
 
-import { BFF } from "./ceoClient";
-import { withAccountHeaders } from "./currentAccount";
+import { BFF, bffFetch } from "./bffClient";
 
 export type RuntimeStatus =
   | "OFFLINE"
@@ -149,9 +148,9 @@ export function readableRuntimeMessage(text: string): { summary: string; action?
 export async function fetchOperations(): Promise<OperationsView> {
   let response: Response;
   try {
-    response = await fetch(`${BFF}/ui/snapshot`, {
+    response = await bffFetch("/ui/snapshot", {
       cache: "no-store",
-      headers: withAccountHeaders({ Accept: "application/json" }),
+      headers: { Accept: "application/json" },
     });
   } catch {
     throw new Error(`BFF(${BFF})에 연결하지 못했습니다. 저장소 루트에서 FastAPI BFF를 8001 포트로 실행하세요.`);
@@ -205,71 +204,23 @@ export type OperationsStreamHandlers = {
 };
 
 /**
- * Subscribe to the BFF operations event stream. The REST snapshot remains the
- * source for the complete Registry; the stream only signals fresh status and
- * BFF keepalive data. It is not a direct Hermes Kanban watcher.
+ * Poll the authenticated BFF snapshot until browser-compatible one-use
+ * WebSocket tickets are available. A native browser WebSocket cannot attach
+ * the production Authorization header.
  */
 export function subscribeOperationsStream(handlers: OperationsStreamHandlers): () => void {
-  if (typeof window === "undefined" || typeof WebSocket === "undefined") return () => {};
-
-  const endpoint = new URL(BFF);
-  endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
-  endpoint.pathname = "/ws/operations";
-  endpoint.search = "";
+  if (typeof window === "undefined") return () => {};
 
   let closed = false;
-  let socket: WebSocket | null = null;
-  let reconnectTimer: number | null = null;
-
-  const connect = () => {
+  const poll = () => {
     if (closed) return;
-    socket = new WebSocket(endpoint.toString());
-    socket.onopen = () => handlers.onOpen?.();
-    socket.onmessage = (message) => {
-      try {
-        const event = JSON.parse(String(message.data)) as {
-          event_type?: string;
-          observed_at?: string;
-          agent_id?: string;
-          department_code?: string;
-          worker_id?: string | null;
-          status?: RuntimeStatus;
-          role?: string | null;
-          reason?: string | null;
-        };
-        if (event.event_type === "operations.snapshot_required.v1") {
-          handlers.onSnapshotRequired?.();
-        } else if (event.event_type === "operations.heartbeat.v1") {
-          handlers.onKeepalive?.(String(event.observed_at ?? ""));
-        } else if (event.event_type === "agent.status.v1" && event.agent_id && event.department_code) {
-          handlers.onStatus?.({
-            agent_id: event.agent_id,
-            department_code: event.department_code,
-            worker_id: event.worker_id ?? null,
-            status: event.status ?? "OFFLINE",
-            role: event.role ?? null,
-            reason: event.reason ?? null,
-          });
-        }
-      } catch {
-        handlers.onError?.();
-      }
-    };
-    socket.onerror = () => handlers.onError?.();
-    socket.onclose = () => {
-      socket = null;
-      if (!closed) {
-        handlers.onError?.();
-        reconnectTimer = window.setTimeout(connect, 2000);
-      }
-    };
+    handlers.onSnapshotRequired?.();
+    handlers.onKeepalive?.(new Date().toISOString());
   };
-
-  connect();
+  handlers.onOpen?.();
+  const timer = window.setInterval(poll, 5_000);
   return () => {
     closed = true;
-    if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
-    socket?.close();
-    socket = null;
+    window.clearInterval(timer);
   };
 }

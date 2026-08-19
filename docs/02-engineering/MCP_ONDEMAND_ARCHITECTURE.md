@@ -1,6 +1,6 @@
 # MCP 조회형 정보 계층 — 결정 문서
 
-> 상태: **초안 v1** (2026-08-13, 팀 검토 전) · 근거: 문헌 12편 + MCP 생태계 실사 + 수집기 26종 전수 대조 (5-agent 조사, 교차 검증 완료)
+> 상태: **채택 v2** (2026-08-18) · 근거: 문헌 12편 + MCP 생태계 실사 + 수집기 전수 대조
 > 결정 취지: **"데이터를 들고 있지 않으면서 정보의 질을 살린다"** — 시세 외 외부 정보는 호출로 얻는다. 단, 용도에 따라 경계가 갈린다.
 
 ---
@@ -9,11 +9,12 @@
 
 | 용도 | 방식 | 이유 (근거) |
 |---|---|---|
-| **① 사용자 질의 응대** (CEO ask) | **MCP 직조회** + 검증 게이트 + 인용분만 스냅샷 | 신선도 질의는 query-time이 압도적: fast-changing 정확도 12%→77% ([FreshLLMs](https://arxiv.org/abs/2310.03214)). 질의당 지식이 작아 인덱스 불필요 ([CAG](https://arxiv.org/abs/2412.15605), [Amazon AAAI 2026](https://arxiv.org/abs/2602.23368): 벡터 DB 없이 RAG 성능 90%+) |
-| **② 정성 팩터** (QF-*) | **조회는 MCP, 저장은 점수** — 배치 채점 + 경량 적재 | 백분위는 같은 `as_known_at`의 **전 종목 횡단면**이 동시에 있어야 계산된다(QUALITATIVE_FACTOR_SPEC §6.4.2) — 즉석 채점이 구조적으로 불가. DART 20k/일로 전 종목×다도구 질의식 채점도 불가 |
-| **③ 백테스트·감사·사후 채점** | **정식 적재 유지** — MCP 직답 재사용 금지 | 라이브 조회는 "오늘의 웹"이지 "그날의 웹"이 아니다 — 사후에 쓰는 순간 look-ahead bias. 웹 RAG는 재현 자체가 불가([Parallel.ai](https://parallel.ai/articles/how-to-build-a-rag-pipeline-with-web-search-instead-of-vector-databases)). 자본시장법 §60 기록 10년 의무 |
+| **① 사용자 질의 응대** (CEO ask) | **MCP 직조회** + 검증 게이트 + 비영속 인용 해시 | 신선도 질의는 query-time이 압도적: fast-changing 정확도 12%→77% ([FreshLLMs](https://arxiv.org/abs/2310.03214)). 질의당 지식이 작아 인덱스 불필요 ([CAG](https://arxiv.org/abs/2412.15605), [Amazon AAAI 2026](https://arxiv.org/abs/2602.23368): 벡터 DB 없이 RAG 성능 90%+) |
+| **② 가설·수식 발굴** | **MCP 조사 → 경제적 메커니즘·AST 후보** | 조사 결과는 후보 생성에 쓰되 수치 백테스트 입력으로 직접 재사용하지 않는다. 원출처·조회 시각·인용을 후보 계보에 남긴다 |
+| **③ 백테스트·감사·사후 채점** | **보유 시장 데이터만 사용** — MCP 직답 재사용 금지 | 라이브 조회는 "오늘의 웹"이지 "그날의 웹"이 아니다. 사후에 수치 입력으로 쓰면 look-ahead bias가 생긴다 |
 
-핵심 원칙 (합의됨): **"다시 조회해서 복원할 수 있는가?"** — 복원 가능한 외부 정보는 적재 금지, 복원 불가능한 것(우리의 판단·시점 기록)은 원장이다.
+핵심 원칙 (합의됨): 외부 응답은 적재하지 않는다. 그 응답에서 파생한 경제적 가설·AST
+계보·실험 결과·실패 기억만 공장 원장에 남긴다.
 
 ## 2. 문헌 평결 — 지지 4 + 한계 4
 
@@ -57,14 +58,16 @@
 >
 > | 처분 | 대상 |
 > |---|---|
-> | ✂ **내림 (08-13 집행)** | disclosure · financial · cashflow · company-profile · packet-outcome · bluesky-watch (스케줄러 주석) + **news-watcher · ls-news 컨테이너** (profiles 게이트) |
-> | 유지 (시세·가격축) | ls-realtime · breadth · derivatives · chart-daily ×2 · vkospi · style-index(지수 가격) · market-archive · retention |
-> | 유지 (운영·판단흔적) | universe-restrictions(거래 안전) · label-snapshot(소급 불가) · calendar-observed · steward ×2 · capability-audit |
-> | 유지 (타부서 협의 전) | **corporate-action** — 회계 원장 CA 처리(도현 소유)가 소비자라 일방 정리 불가. 협의 후 결정 |
+> | ✂ **삭제/비활성 (08-18 집행)** | 뉴스·공시·재무·기업정보·거시·지정학·소셜·Corporate Action·capability·Research Source steward 수집기와 **news-watcher · ls-news** 서비스 |
+> | 유지 (시세·가격축) | ls-realtime · breadth · derivatives · chart-daily-universe · vkospi · style-index · market-archive |
+> | 유지 (시장 운영축) | universe-restrictions · label-snapshot · calendar-observed · market-data-steward |
+> | 수동 복구 도구 | retention · replay/restore drill은 Runtime 이미지와 상주 Scheduler에서 제외 |
 >
-> 같이 수용된 결과: QF-R/QF-F 팩터 설계의 적재 전제는 팩터 구현 시 재검토 · 공시/재무의 observed_at PIT 신규 생성 중단 · Packet 채점 축 동면 · `/evidence/*` 신규 유입 중단(기존 데이터는 유지, 삭제는 별도 결정). 되돌리기: 전부 주석/profiles 게이트라 한 줄 복구다.
+> 같이 수용된 결과: 정성 정보의 신규 DB 유입은 중단한다. 기존 데이터의 삭제는 별도
+> 보존 결정이며 이번 변경에 포함하지 않는다. Runtime 이미지는 시장 수집 파일만 명시적으로
+> 복사해 삭제된 수집기가 예전 Image Layer에서 다시 실행되지 않게 한다.
 
-**(원안 기록 — 폐기 0 권고의 근거)** 남은 수집기는 전부 다음 중 하나가 적재 위에서만 성립하기 때문:
+**(원안 기록 — 2026-08-13 폐기 0 권고의 근거, 현재 Runtime 정책 아님)** 당시 검토는 다음 이유로 적재 유지를 권고했다:
 
 - **observed_at PIT**: DART `rcept_dt`는 날짜뿐(시각 없음) — "09:00 판단이 15:00 공시를 미리 봤는지"는 적재 시점 기록으로만 구분된다. 직조회는 소급 생성 불가
 - **정정 revision PIT**: "그 시점에 알 수 있었던 최신 개정본" 재현 — 직조회는 항상 최신본만 본다
@@ -79,7 +82,7 @@
 | 유지 (수리 3) | disclosure(중복 dedupe+페이지), ls-news(롤백), packet-outcome(주소) — 전부 수리 사안이지 폐기 근거 아님 |
 | 유지 (그대로 20) | 뉴스 2·bluesky·재무 2·CA·기업정보·제한·라벨·VKOSPI·스타일·달력·시세축 5·감사 3·retention |
 
-## 5. 최소 저장 4층 (팩터가 요구하는 것)
+## 5. 과거 제안: 최소 저장 4층 (현재 Runtime 정책 아님)
 
 1. `research.qualitative_scores` 신설 — 원값+분모+백분위+**인용 좌표**(rcept_no+span+quote_hash), `unique(instrument_id, factor_key, as_known_at, peer_group)`, 행당 수백 바이트
 2. 횡단면 동시 저장 — 백분위 계산의 구조적 전제 (질의식 즉석 채점 불가의 이유)
@@ -88,10 +91,10 @@
 
 용량: peer_group 3벌을 감안해도 **수 MB/년** — 버리는 것(문서 15만 건 + 임베딩 586MB) 대비 3~4자리 작다.
 
-## 6. 도입 순서
+## 6. 과거 도입안 (08-18 정책으로 대체됨)
 
 **1단계 (이번 주, 장 마감 후 · 전부 독립 배포 가능):**
-1. `mcp_server.geopolitical_state`에 staleness 차단 — **굳은 국면을 '현재'로 서빙 중** (GEO 라벨 이틀 결측의 원인 축)
+1. ~~`mcp_server.geopolitical_state`에 staleness 차단~~ → 08-18 도구 자체를 제거했다.
 2. packet-outcome 주소 하드코딩 수리 (`MARKET_API_URL` env)
 3. evidence_chunks **read-through 인덱싱** 스케줄 신설 (조회한 문서만)
 4. MCP 게이트웨이에 **cache-on-cite 훅** — 응답에 실제 사용된 근거만 append-only 스냅샷(URL+본문 해시+조회시각+질의)
@@ -105,5 +108,5 @@
 
 | 위험 | 완화 |
 |---|---|
-| **PIT 오염** — query-time 결과가 팩터·채점에 흘러들면 look-ahead가 조용히 생긴다. 실사례 이미 존재: geopolitical_state가 굳은 산출을 '현재'로 서빙 | 용도 경계를 **코드로** 강제: 팩터·채점 경로는 적재 평면만 읽게, MCP 직답은 질의응대 전용 격리. 사용분 자동 스냅샷(1-④). staleness 감시는 research-data-steward 몫 |
-| **외부 단일점** — 개인 npm 2종 + DART 20k/일이 질의 트래픽과 경합 + 네이버 구 키 2027-06 종료 | 버전 고정+포크(1-⑤), 게이트웨이 소스별 호출 예산·rate limiter, 한도 접근 시 캐시 우선 강등, CRAG 폴백 계층, 신규 키 선제 이관 |
+| **PIT 오염** — query-time 결과가 팩터·채점에 흘러들면 look-ahead가 조용히 생긴다 | 용도 경계를 **코드로** 강제: 굳은 값을 서빙하던 `geopolitical_state`를 제거했고, MCP 직답은 질의응대와 후보 아이디어 생성에만 쓴다. 백테스트 수치 입력은 보유 시장 데이터로 제한한다 |
+| **외부 단일점** — DART·NAVER 등 공급자 장애·호출 한도 | 소스별 호출 예산·rate limiter와 독립 실패 상태를 둔다. 한도 소진 시 캐시로 위장하지 않고 fail-closed 하며, 구현된 요청형 폴백만 사용한다 |

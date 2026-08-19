@@ -31,7 +31,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import sys
@@ -47,6 +46,7 @@ from factory_contracts import (  # noqa: E402
     ScoutLens,
     SourceType,
     lead_id_for,
+    lead_revision_id,
 )
 
 # 잘렸다는 사실을 발췌 안에 남긴다. 조용히 자르면 읽는 쪽이 원문 전체로 안다.
@@ -71,7 +71,7 @@ def clip_excerpt(text: str, *, limit: int = MAX_EXCERPT_CHARS) -> str:
         return t
     return t[: max(0, limit - len(_TRUNC_MARK))].rstrip() + _TRUNC_MARK
 
-MODULE_VERSION = "research-lead-intake-v5"
+MODULE_VERSION = "research-lead-intake-v6"
 
 # 스카우트가 내는 블록의 필드. 앞의 셋이 없으면 리드가 아니다.
 REQUIRED = ("TITLE", "URL", "MECHANISM", "READINESS")
@@ -79,6 +79,7 @@ OPTIONAL = ("COUNTERPARTY", "TESTABLE_WITH", "REPORTED_EFFECT", "EXCERPT",
             "MARKET_CONTEXT", "FAILURE_MODE", "OBSERVABLES",
             "CANDIDATE_SIGNAL_EXPR", "MISSING_DATA", "MAPPING_LOSS",
             "RESEARCH_LANE", "SEMANTIC_PLAN",
+            "FEATURE_WINDOW_CONTRACT_VERSION",
             "DERIVATION_MODE", "SOURCE_BASELINE_EXPR",
             "DERIVATION_TRANSFORMS", "NOVELTY_RATIONALE",
             "PARENT_SIGNAL_EXPR", "EVOLUTION_OPERATORS",
@@ -194,6 +195,7 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
         except (TypeError, ValueError) as exc:
             raise ValueError(f"invalid SEMANTIC_PLAN: {exc}") from exc
     candidate = None
+    feature_window_contract_version = ""
 
     if readiness == AST_READY:
         if not observables or not _as_text(raw_expr):
@@ -209,13 +211,26 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
         if observables != fields:
             raise ValueError(f"OBSERVABLES {observables} do not match AST fields {fields}")
         if lane == "INTRADAY_EVENT":
+            declared_window_contract = _as_text(
+                block.get("FEATURE_WINDOW_CONTRACT_VERSION"))
+            if not declared_window_contract:
+                declared_window_contract = (
+                    ast.EXPLICIT_FEATURE_WINDOW_CONTRACT
+                    if any(seconds is not None for _field, seconds in
+                           ast.field_window_bindings_of(candidate))
+                    else ast.LEGACY_FEATURE_WINDOW_CONTRACT)
+            candidate = ast.validate_feature_window_contract(
+                candidate, contract_version=declared_window_contract)
+            feature_window_contract_version = declared_window_contract
             if not semantic_plan:
                 raise ValueError("INTRADAY_EVENT AST_READY requires SEMANTIC_PLAN")
             from alpha_semantics import check_observables, validate  # noqa: PLC0415
             plan = validate(semantic_plan)
             alignment = check_observables(
                 plan, fields, operators=ast.operators_of(candidate),
-                conditional_fields=ast.conditional_fields_of(candidate))
+                conditional_fields=ast.conditional_fields_of(candidate),
+                signal_predicate_paths=
+                    ast.signal_support_predicate_paths_of(candidate))
             if not alignment["ok"]:
                 raise ValueError(
                     "SEMANTIC_MISMATCH: " + "; ".join(alignment["missing"]))
@@ -342,6 +357,8 @@ def _readiness_metadata(block: dict, mechanism: str) -> dict:
             "mapping_loss": mapping_loss,
             "lessons_addressed": _as_text(block.get("LESSONS_ADDRESSED")),
             "research_lane": lane, "semantic_plan": semantic_plan,
+            "feature_window_contract_version":
+                feature_window_contract_version,
             "ast_fingerprint": ast_fingerprint,
             "ast_shape_fingerprint": ast_shape_fingerprint,
             "primary_data_plane": ("MICROSTRUCTURE" if readiness == AST_READY
@@ -601,15 +618,14 @@ def _canonical_contract(contract: dict | str | None) -> str:
             contract = json.loads(contract)
         except ValueError:
             contract = {"_invalid_legacy_contract": contract}
-    return json.dumps(contract or {}, ensure_ascii=False, sort_keys=True,
-                      separators=(",", ":"))
+    return json.dumps(
+        contract or {}, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), allow_nan=False)
 
 
 def revision_lead_id(source_lead_id: str, ast_contract: dict) -> str:
     """같은 출처의 다른 해석을 불변 별도 리드로 식별한다."""
-    digest = hashlib.sha256(
-        _canonical_contract(ast_contract).encode("utf-8")).hexdigest()[:12]
-    return f"{source_lead_id}_r{digest}"
+    return lead_revision_id(source_lead_id, ast_contract)
 
 
 def routed_lead_id(source_lead_id: str, existing_contract: dict | str | None,
@@ -647,6 +663,19 @@ def persist(conn, leads: list[dict], *, return_ids: bool = False
         payload["lead_id"] = routed_lead_id(
             source_lead_id, existing[0] if existing else None,
             lead["ast_contract"])
+        if payload["lead_id"] != source_lead_id:
+            # The deployed revision suffix is intentionally kept compatible
+            # with existing 12-hex rows.  Make the (very unlikely) truncated
+            # digest collision detectable instead of silently treating a
+            # different contract as another mention of the first revision.
+            cur.execute(_SQL_EXISTING_CONTRACT, (payload["lead_id"],))
+            revision_existing = cur.fetchone()
+            if (revision_existing is not None
+                    and _canonical_contract(revision_existing[0]) !=
+                    _canonical_contract(lead["ast_contract"])):
+                raise RuntimeError(
+                    "lead revision digest collision: refusing to overwrite "
+                    f"{payload['lead_id']!r}")
         if payload["lead_id"] not in persisted_ids:
             persisted_ids.append(payload["lead_id"])
         payload["refs"] = json.dumps(lead["refs"], ensure_ascii=False)

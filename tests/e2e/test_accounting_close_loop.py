@@ -33,6 +33,7 @@ import unittest
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal as D
 from pathlib import Path
+from unittest.mock import patch
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -69,6 +70,7 @@ from corporate_actions import (  # noqa: E402
     apply_corporate_action,
 )
 from daily_report import build_daily_report  # noqa: E402
+import fill_consumer as fill_consumer_module  # noqa: E402
 from fill_consumer import FillRow, consume_fill  # noqa: E402
 from ledger import PAYABLE, SECURITIES, Ledger, LedgerError  # noqa: E402
 from portfolio import MarkPrice, ValuationError, value_portfolio  # noqa: E402
@@ -141,6 +143,51 @@ class AccountingCloseLoopTest(unittest.TestCase):
         self.assertEqual(len(self.ledger.journals), before, "같은 체결이 두 번 분개됐다")
 
     # -- 2. Mark 없으면 NAV를 만들지 않는다 (fail-closed) ---------------------
+
+    def test_fill_ack_is_not_blocked_by_missing_nav_mark(self) -> None:
+        """Durable Journal/projection, not NAV availability, is the Fill ACK boundary."""
+        event_id = uuid4()
+        fill = FillRow(
+            fill_id=uuid4(), instrument_id=self.instrument, side=Side.BUY,
+            quantity=D("1"), price=BUY_PRICE, fee=FEE, tax=D("0"),
+            event_time=self.now, broker_fill_id="bf-ack-boundary",
+            event_id=event_id, trace_id="acc-ack-boundary",
+        )
+
+        class FakeRepository:
+            def __init__(self, ledger):
+                self.ledger = ledger
+                self.projection_saves = 0
+                self.snapshot_saves = 0
+
+            def load(self, _fund_id, _book_id):
+                return self.ledger
+
+            def save_projection(self, _ledger):
+                self.projection_saves += 1
+
+            def save_snapshot(self, _snapshot):
+                self.snapshot_saves += 1
+
+        repo = FakeRepository(self.ledger)
+        acknowledged = []
+
+        def record_ack(_repo, fill_ids=None, *, event_ids=None):
+            acknowledged.extend(event_ids or fill_ids or [])
+            return len(event_ids or fill_ids or [])
+
+        with (
+            patch.object(fill_consumer_module, "pending_fill_events", return_value=[fill]),
+            patch.object(fill_consumer_module, "ack_fill_events", side_effect=record_ack),
+        ):
+            with self.assertRaises(ValuationError):
+                fill_consumer_module.run_once(
+                    repo, self.fund, self.book, {}, self.now,
+                )
+
+        self.assertEqual(repo.projection_saves, 1)
+        self.assertEqual(acknowledged, [event_id])
+        self.assertEqual(repo.snapshot_saves, 0)
 
     def test_nav_is_refused_without_mark(self) -> None:
         consume_fill(self.ledger, self.fill(Side.BUY))

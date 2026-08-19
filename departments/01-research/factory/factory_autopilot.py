@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import json
 import os
@@ -49,11 +50,256 @@ _HERE = Path(__file__).resolve().parent
 _RESEARCH = _HERE.parent
 _ROOT = _RESEARCH.parents[1]
 for p in (str(_HERE), str(_RESEARCH), str(_RESEARCH / "collectors"),
+          str(_RESEARCH / "contracts"),
           str(_ROOT / "departments" / "04-quant-backtest" / "pipeline")):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+from stock_universe import (  # noqa: E402
+    INTRADAY_REPORT_MANIFEST_VERSION,
+    governed_stock_dataset_sql,
+    governed_stock_evidence_sql,
+)
+
 MODULE_VERSION = "factory-autopilot-v1"
+
+# Planner and queue-health checks may consume only formulas that the deployed
+# intraday evaluator can replay without an implicit-window migration.  Legacy
+# formula-discovery-v5 rows remain valid *evolution parents* below, but they are
+# not ready-to-run queue inventory.
+CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT = "explicit-primitive-window-v2"
+CURRENT_INTRADAY_EVALUATOR_VERSION = "intraday-candidate-evaluator-v12"
+LEGACY_INTRADAY_FEATURE_WINDOW_CONTRACT = "legacy-cohort-lookback-v1"
+LEGACY_INTRADAY_EVALUATOR_VERSION = "intraday-candidate-evaluator-v11"
+
+# Scout/Planner memory is an execution input, not an archive.  Only evidence
+# produced by the exact currently deployed feature/evaluator pair may shape a
+# V2 proposal.  formula_breeder intentionally keeps its separate broad memory
+# so legacy formulas can still be migrated into new V2 children.
+_CURRENT_V2_INTRADAY_MEMORY_EVIDENCE = """
+  e.config->>'feature_window_contract_version' =
+      'explicit-primitive-window-v2'
+  and exists (
+      select 1
+        from quant.intraday_candidate_lineages current_lineage
+       where current_lineage.candidate_lineage_id = case
+               when coalesce(manifest.report#>>
+                    '{trial_lockbox,primary_candidate_lineage_id}', '') ~
+                    '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+               then (manifest.report#>>
+                    '{trial_lockbox,primary_candidate_lineage_id}')::uuid
+               else null end
+         and current_lineage.hypothesis_id = e.hypothesis_id
+         and current_lineage.evaluator_version =
+             'intraday-candidate-evaluator-v12'
+  )
+"""
+
+# A healthy heartbeat may keep a genuinely long-running card active, but a
+# ready card that was never claimed (or a running card whose heartbeat died)
+# must not suppress discovery forever.
+ACTIVE_DISCOVERY_CARD_TTL_SECONDS = 6 * 60 * 60
+SUPERSEDED_INTRADAY_CONTRACT_REASON = \
+    "SUPERSEDED_INTRADAY_FEATURE_WINDOW_CONTRACT"
+
+_GOVERNED_HISTORICAL_EVIDENCE = governed_stock_evidence_sql(
+    experiment_alias="e", dataset_alias="m", hypothesis_alias="h")
+_GOVERNED_STOCK_DATASET = governed_stock_dataset_sql(dataset_alias="m")
+_GOVERNED_CALIBRATION_FAILURE_EVIDENCE = """
+  e.config->>'asset_scope' = 'REFERENCE_INSTRUMENT_TYPE_STOCK_ONLY'
+  and manifest.manifest_version = '""" + \
+    INTRADAY_REPORT_MANIFEST_VERSION + """'
+  and coalesce(e.config->>'feature_window_contract_version',
+               'legacy-cohort-lookback-v1') in
+      ('legacy-cohort-lookback-v1', 'explicit-primitive-window-v2')
+  and primary_lineage.evaluator_version = case
+        when e.config->>'feature_window_contract_version' =
+             'explicit-primitive-window-v2'
+        then 'intraday-candidate-evaluator-v12'
+        else 'intraday-candidate-evaluator-v11' end
+  and """ + _GOVERNED_STOCK_DATASET + """
+  and exists (
+      select 1
+        from quant.intraday_experiment_rungs calibration_rung
+       where calibration_rung.experiment_id = e.experiment_id
+         and calibration_rung.dataset_id = e.dataset_id
+         and calibration_rung.rung = 'CALIBRATION'
+         and calibration_rung.evidence_purpose = 'ADAPTIVE_SEARCH'
+         and calibration_rung.planned_session_count between 1 and 5
+         and calibration_rung.planned_instrument_count >= 1
+         and cardinality(calibration_rung.planned_session_dates) =
+             calibration_rung.planned_session_count
+         and cardinality(calibration_rung.planned_instrument_ids) =
+             calibration_rung.planned_instrument_count
+         and not exists (
+             select 1
+               from unnest(calibration_rung.planned_instrument_ids)
+                    planned_instrument(instrument_id)
+               cross join unnest(calibration_rung.planned_session_dates)
+                    planned_session(session_date)
+               left join quant.current_krx_stock_instrument_identity identity
+                 on identity.instrument_id = planned_instrument.instrument_id
+              where identity.instrument_id is null
+                 or coalesce(upper(identity.instrument_type), '') <> 'STOCK'
+                 or coalesce(upper(identity.asset_class), '') <> 'EQUITY'
+                 or coalesce(upper(identity.market), '') <> 'KRX'
+                 or coalesce(upper(identity.status), '') <> 'ACTIVE'
+                 or coalesce(identity.is_spac, true)
+                 or (identity.listed_from is not null and
+                     identity.listed_from > planned_session.session_date)
+                 or (identity.listed_to is not null and
+                     identity.listed_to < planned_session.session_date)
+         )
+         and (
+             select count(distinct exposure.session_date)
+               from quant.intraday_session_exposures exposure
+              where exposure.experiment_rung_id =
+                    calibration_rung.experiment_rung_id
+                and exposure.root_lineage_id =
+                    calibration_rung.root_lineage_id
+                and exposure.dataset_id = calibration_rung.dataset_id
+                and exposure.exposure_purpose = 'CALIBRATION'
+                and exposure.knowledge_clock_mode =
+                    'EVENT_TIME_HISTORICAL_ONLY'
+                and exposure.session_date = any(
+                    calibration_rung.planned_session_dates)
+                and exposure.instrument_count =
+                    calibration_rung.planned_instrument_count
+                and exposure.instrument_set_fingerprint =
+                    calibration_rung.instrument_set_fingerprint
+                and exposure.instrument_ids <@
+                    calibration_rung.planned_instrument_ids
+                and calibration_rung.planned_instrument_ids <@
+                    exposure.instrument_ids
+                and exposure.quote_row_count > 0
+                and exposure.trade_row_count > 0
+         ) = calibration_rung.planned_session_count
+  )
+"""
+
+# These are executable contract fixtures, not decorative prose.  The scout sees
+# the same objects that the V2 grammar regression tests validate, so a copied
+# example cannot be rejected merely because a raw-event leaf omitted its
+# primitive aggregation window.
+INTRADAY_V2_PROMPT_AST_EXAMPLES = {
+    "SCORE_TRADE_FLOW": {
+        "op": "field", "field": "trade_flow_imbalance", "seconds": 30,
+    },
+    "SCORE_DEPTH_DIVERGENCE": {
+        "op": "sub", "args": [
+            {"op": "field", "field": "queue_imbalance_l1"},
+            {"op": "field", "field": "queue_imbalance_l10"},
+        ],
+    },
+    "SCORE_DEPTH_SLOPE": {
+        "op": "field", "field": "depth_imbalance_slope",
+    },
+    "SCORE_L1_L10_CONVERGENCE": {
+        "op": "where",
+        "condition": {"op": "lt", "args": [
+            {"op": "abs", "arg": {"op": "sub", "args": [
+                {"op": "field", "field": "queue_imbalance_l1"},
+                {"op": "field", "field": "queue_imbalance_l10"},
+            ]}},
+            {"const": 0.25, "unit": "RATIO"},
+        ]},
+        "then": {"op": "mul", "args": [
+            {"op": "add", "args": [
+                {"op": "field", "field": "queue_imbalance_l1"},
+                {"op": "field", "field": "queue_imbalance_l10"},
+            ]},
+            {"const": 0.5, "unit": "RATIO"},
+        ]},
+        "else": {"const": 0, "unit": "RATIO"},
+    },
+    "SCORE_QUOTE_TAPE_CONFIRMATION": {
+        "op": "where",
+        "condition": {"op": "gt", "args": [
+            {"op": "mul", "args": [
+                {"op": "field", "field": "queue_imbalance_l1"},
+                {"op": "field", "field": "trade_flow_imbalance",
+                 "seconds": 30},
+            ]},
+            {"const": 0, "unit": "RATIO"},
+        ]},
+        "then": {"op": "mul", "args": [
+            {"op": "add", "args": [
+                {"op": "field", "field": "queue_imbalance_l1"},
+                {"op": "field", "field": "trade_flow_imbalance",
+                 "seconds": 30},
+            ]},
+            {"const": 0.5, "unit": "RATIO"},
+        ]},
+        "else": {"const": 0, "unit": "RATIO"},
+    },
+    "SCORE_TAPE_QUALITY_GATE": {
+        "op": "where",
+        "condition": {"op": "gt", "args": [
+            {"op": "field", "field": "trade_side_known_ratio",
+             "seconds": 30},
+            {"const": 0.8, "unit": "RATIO"},
+        ]},
+        "then": {"op": "field", "field": "trade_flow_imbalance",
+                 "seconds": 30},
+        "else": {"const": 0, "unit": "RATIO"},
+    },
+    "BPS_DIRECT": {
+        "op": "field", "field": "microprice_offset_bps",
+    },
+    "BPS_SCALED": {
+        "op": "mul", "args": [
+            {"op": "field", "field": "queue_imbalance_l1"},
+            {"op": "field", "field": "realized_volatility_bps",
+             "seconds": 60},
+        ],
+    },
+    "BPS_STATE": {
+        "op": "where",
+        "condition": {"op": "lt", "args": [
+            {"op": "field", "field": "spread_bps"},
+            {"const": 5, "unit": "BPS"},
+        ]},
+        "then": {"op": "mul", "args": [
+            {"op": "field", "field": "trade_flow_imbalance",
+             "seconds": 30},
+            {"op": "field", "field": "realized_volatility_bps",
+             "seconds": 60},
+        ]},
+        "else": {"const": 0, "unit": "BPS"},
+    },
+    "BPS_CROSS_SCALE": {
+        "op": "mul", "args": [
+            {"op": "sub", "args": [
+                {"op": "field", "field": "trade_flow_imbalance",
+                 "seconds": 5},
+                {"op": "field", "field": "trade_flow_imbalance",
+                 "seconds": 300},
+            ]},
+            {"op": "field", "field": "realized_volatility_bps",
+             "seconds": 60},
+        ],
+    },
+    "TEMPORAL_TRADE_FLOW": {
+        "op": "rolling_mean",
+        "arg": {"op": "field", "field": "trade_flow_imbalance",
+                "seconds": 30},
+        "seconds": 300,
+    },
+    "TIGHT_SPREAD_TRADE_FLOW": {
+        "op": "where",
+        "condition": {"op": "lt", "args": [
+            {"op": "field", "field": "spread_bps"},
+            {"const": 5, "unit": "BPS"},
+        ]},
+        "then": {
+            "op": "rolling_mean",
+            "arg": {"op": "field", "field": "trade_flow_imbalance",
+                    "seconds": 30},
+            "seconds": 300,
+        },
+        "else": {"const": 0, "unit": "RATIO"},
+    },
+}
 
 # 카드를 만들 때 쓰는 CLI 컨테이너. 어느 프로필이든 같은 보드를 본다
 # (/opt/kanban 이 8개 컨테이너에 공유 마운트다).
@@ -98,9 +344,8 @@ RESEARCH_LANE: DAILY_CROSS_SECTIONAL 또는 INTRADAY_EVENT
 SEMANTIC_PLAN: (Event/Context/Qualities/Direction/Output JSON. intraday는 필수.
     예: {"event":"ORDER_FLOW","context":["TIGHT_SPREAD"],
     "qualities":["PERSISTENCE","STATE_CONDITIONAL"],"direction":"FOLLOW",
-    "output":"TAKER_NET_PNL","execution":"TAKER","horizon_seconds":30}
-    passive 정확한 쌍은 output="PASSIVE_FILL_ADJUSTED_PNL",
-    execution="PASSIVE_FIFO_LOWER_BOUND"다. PASSIVE/PASSIVE_FIFO 별칭은 금지.)
+    "output":"TAKER_NET_PNL","execution":"TAKER","horizon_seconds":30}.
+    현재 61-session completed-second external-history cohort는 TAKER만 허용한다.)
 LABEL: forward_return
 BASELINE: equal_weight_buy_and_hold
 FALSIFICATION_TESTS: (무엇이 나오면 기각인가. 쉼표로 나열)
@@ -136,24 +381,26 @@ COMPETING_EXPLANATION 은 **결과를 보기 전에** 적는 것이다. 이걸 �
 # windows into the daily ``signal_expr`` field.
 INTRADAY_PLANNER_NOTE = """
 UNIVERSE_KEY must be exactly krx_all for every INTRADAY_EVENT proposal.
-intraday-screening-cohort-v3 is a screening_cohort_version attached by intake;
+intraday-screening-cohort-v4 is a screening_cohort_version attached by intake;
 it is not a universe and must never be written in UNIVERSE_KEY.
-[INTRADAY_EVENT 추가 계약]
+[INTRADAY_EVENT completed-second 추가 계약]
 DATA_TABLES: market_quotes, market_ticks
 MIN_HISTORY_DAYS: 10 이상 (짧아도 실행은 한다. 단, 60 KRX 세션 미만은
   UNDERPOWERED/HOLD이며 검증 알파로 승격하지 않는다)
 SUGGESTED_PARAMS JSON 필수 키:
   intraday_signal_expr, horizon_seconds, sample_interval_seconds,
   feature_lookback_seconds, order_latency_ms, execution, entry_policy,
-  coefficient_policy
-Execution/output is an exact controlled pair:
+  coefficient_policy, feature_window_contract_version
+feature_window_contract_version must be exactly explicit-primitive-window-v2.
+Every raw-event windowed field leaf must declare seconds as one of
+2,5,10,30,60,300,600. Decision-snapshot state fields must not declare seconds.
+Primitive leaf seconds define the raw aggregation interval; temporal-operator
+seconds define a later rolling transform and are a separate clock choice.
+Current 61-session external-history execution/output is exactly:
   TAKER_NET_PNL -> TAKER
-  PASSIVE_FILL_ADJUSTED_PNL -> PASSIVE_FIFO_LOWER_BOUND
-For the passive pair set execution=PASSIVE_FIFO_LOWER_BOUND and
-entry_policy=PREDICTED_MARKOUT_CLEARS_COST. PASSIVE and PASSIVE_FIFO are invalid
-aliases. A passive revision must also change the economic AST (for example a
-spread/depth/adverse-selection state gate); relabeling the identical formula
-does not create a new candidate.
+TAKER only. PASSIVE_FILL_ADJUSTED_PNL/PASSIVE_FIFO_LOWER_BOUND remains a local
+strict-grammar capability for a future sequenced/MBO feed, but is not admissible
+in intraday-screening-cohort-v4 and receives no population quota.
 Net-PnL proposals must set entry_policy=PREDICTED_MARKOUT_CLEARS_COST. Prefer
 coefficient_policy=STRUCTURE_ONLY: the AST expresses a signed economic score and
 the runtime fits exactly one positive, origin-anchored, shrunken score-to-BPS
@@ -167,21 +414,39 @@ and minimum_predicted_edge_bps.
 position_mode은 현재 LONG_ONLY만 허용한다. 대차 가능 여부·차입료·공매도 체결 제약의
 point-in-time 원천이 생기기 전에는 음수 신호를 숏으로 가장하지 않고 abstain한다.
 비용 기본값은 2026 상장주식 거래세와 온라인 위탁수수료를 보수적으로 합친
-fee_bps_per_side=11.5, maker_fee_bps_per_side=11.5다. 10bp 미만은 Gate 0에서
-거부한다. 더 높은 실제 계좌 비용을 알면 반드시 그 값으로 올려 적는다.
-유니버스는 `krx_all` 보정 세션에 인과적으로 quote와 trade가 함께 수집된
-전 종목이다. `instrument_count`로 유동성 상위 일부만 자르지 않는다. 실행기는
-메모리를 제한하기 위해 내부적으로 instrument shard를 순회하지만, 모든 shard는
-동일한 실험ㆍtrialㆍ다중검정 장부에 합쳐진다.
-intraday_signal_expr 연산자:
+fee_bps_per_side=11.5다. 10bp 미만은 Gate 0에서 거부한다. 더 높은 실제 계좌
+비용을 알면 반드시 그 값으로 올려 적는다.
+유니버스는 `krx_all` 보정 세션에 인과적으로 quote와 trade가 함께 수집된 KRX
+상장주식(instrument_type=STOCK) 전 종목이다. ETF·ETN·파생상품·암호화폐는 이
+백테스트에서 제외한다. `instrument_count`로 유동성 상위 일부만 자르지 않는다.
+실행기는 메모리를 제한하기 위해 내부적으로 instrument shard를 순회하지만,
+모든 shard는 동일한 실험ㆍtrialㆍ다중검정 장부에 합쳐진다.
+intraday_signal_expr local strict 연산자:
   field; lag/rolling_mean/rolling_std/rolling_sum/delta/ewma/rolling_zscore
   (모두 seconds 명시); neg/abs/sign/log1p_abs/sqrt_abs;
   add/sub/mul/div/min/max/gt/lt/and/or/where
-필드:
+현재 v4 권장 coarse-state/tape 필드:
   queue_imbalance_l1, queue_imbalance_l10, microprice_offset_bps,
-  trade_flow_imbalance, quote_event_ofi, normalized_quote_ofi, spread_bps,
-  bid_depth_l1, ask_depth_l1, book_depth_l1, book_depth_l10,
-  trade_count, quote_count, trade_intensity, realized_volatility_bps, quote_age_ms
+  depth_imbalance_slope, trade_flow_imbalance, signed_trade_volume,
+  trade_volume, trade_side_known_ratio, spread_bps, bid_depth_l1,
+  ask_depth_l1, book_depth_l1, book_depth_l10, trade_count, quote_count,
+  trade_intensity, realized_volatility_bps, quote_age_ms
+현재 v4 결정론적 금지 필드(동일 초 내부 quote 순서 필요):
+  quote_event_ofi, normalized_quote_ofi, multi_level_quote_ofi_l10,
+  normalized_multi_level_quote_ofi_l10, quote_ofi_depth_divergence,
+  quote_event_transition_count, normalized_quote_ofi_per_event,
+  quote_ofi_per_trade_volume
+현재 외부 기록의 동일 초 snapshot은 unordered completed-second multiset이다.
+따라서 last quote, add/cancel chronology, MBO queue position, event OFI 또는
+passive fill을 복원하지 않는다. 대신 완료된 초의 L1/L10 queue imbalance,
+microprice, depth slope, signed trade flow/volume, spread/depth/activity/RV를
+2/5/10/30/60/300/600초 WALL_TIME_SECONDS 창으로 조합한다. quote_count는 exchange event
+count가 아니라 수집된 snapshot-row activity로만 해석한다.
+권장 경제 변형(공개식을 그대로 복사하지 말고 source baseline과 분리):
+  L1_L10_CONVERGENCE, L1_L10_DIVERGENCE, QUOTE_TAPE_CONFIRMATION,
+  STATE_CONDITION, CROSS_SCALE. EVENT_NORMALIZATION/VOLUME_NORMALIZATION과
+  EVENT_NORMALIZED/VOLUME_NORMALIZED는 sequence가 있는 local strict feed용이며
+  현재 v4 후보에는 쓰지 않는다. 모든 선언은 실제 AST observable path와 일치해야 한다.
 상수는 {"const":2,"unit":"BPS"}처럼 단위를 쓴다. 서로 다른 단위의 add/sub,
 미래시각, 3600초 초과 창은 접수에서 거부된다. 공개 논문 수식을 그대로 복제하지
 말고 상태조건·L1/L10 차이·다중시간창·실패모드 역전 중 메커니즘에 맞는 변형을 낸다.
@@ -207,6 +472,11 @@ select h.hypothesis_id::text, h.title, h.status, h.expected_edge,
   left join quant.experiments e on e.hypothesis_id = h.hypothesis_id
  where h.status in ('PROPOSED', 'PREREGISTERED', 'TESTING')
    and e.experiment_id is null
+   -- Legacy intraday hypotheses remain immutable provenance, but they are not
+   -- executable work for the current V12 queue.
+   and (coalesce(h.expected_edge->>'research_lane',
+                 'DAILY_CROSS_SECTIONAL') <> 'INTRADAY_EVENT'
+        or h.expected_edge->>'feature_window_contract_version' = %s)
  order by h.created_at
  limit %s
 """
@@ -264,8 +534,10 @@ select l.lead_id, l.scout_lens, l.claimed_edge, l.stated_mechanism,
    and coalesce((l.ast_contract->>'alpha_candidate_eligible')::boolean, false)
    and (coalesce(l.ast_contract->>'research_lane',
                  'DAILY_CROSS_SECTIONAL') <> 'INTRADAY_EVENT'
-        or l.ast_contract->>'formula_discovery_version' =
-           'formula-discovery-v5')
+        or (l.ast_contract->>'formula_discovery_version' =
+            'formula-discovery-v5'
+            and l.ast_contract->>'feature_window_contract_version' =
+                %s))
 order by used asc,
          case
            when coalesce(l.ast_contract->>'research_lane',
@@ -293,11 +565,56 @@ def _ast_scout_contract() -> str:
     from intraday_alpha_ast import (  # noqa: PLC0415
         ALL_OPS as INTRADAY_OPS, FIELDS as INTRADAY_FIELDS,
         MAX_DEPTH as INTRADAY_MAX_DEPTH, MAX_NODES as INTRADAY_MAX_NODES,
+        AST_VERSION as INTRADAY_AST_VERSION,
+        QUOTE_EVENT_CLOCK_FIELDS, TRADE_VOLUME_CLOCK_FIELDS,
+        QUOTE_EVENT_CLOCK, TRADE_VOLUME_CLOCK, WALL_TIME_CLOCK,
+        EXPLICIT_FEATURE_WINDOW_CONTRACT, PRIMITIVE_WINDOWS_SECONDS,
+        WINDOWED_FIELDS,
+        COMPLETED_SECOND_RECOMMENDED_FIELDS,
+        COMPLETED_SECOND_REPLAYABLE_FIELDS,
+        COMPLETED_SECOND_SCREENING_COHORT_VERSION,
+        COMPLETED_SECOND_SEQUENCE_DEPENDENT_FIELDS,
     )
-    from alpha_semantics import CONTEXT_FIELDS, EVENT_FIELDS  # noqa: PLC0415
+    from alpha_semantics import (  # noqa: PLC0415
+        CONTEXT_FIELDS, EVENT_FIELDS, QUALITIES,
+        EVENT_NORMALIZED_FIELDS, VOLUME_NORMALIZED_FIELDS,
+        L1_QUOTE_PRESSURE_FIELDS, L10_QUOTE_PRESSURE_FIELDS,
+        EXPLICIT_L1_L10_FIELDS, QUOTE_PRESSURE_FIELDS,
+        TAPE_PRESSURE_FIELDS,
+    )
+    from alpha_evolution import EVOLUTION_OPERATORS  # noqa: PLC0415
+    from literature_derivation import DERIVATION_TRANSFORMS  # noqa: PLC0415
+    from formula_discovery import (  # noqa: PLC0415
+        DIRECTIONAL_PRESSURE_FIELDS, FUNCTIONAL_FORMS, TERM_ROLES,
+    )
     event_fields = {key: sorted(value) for key, value in sorted(EVENT_FIELDS.items())}
     context_fields = {key: sorted(value)
                       for key, value in sorted(CONTEXT_FIELDS.items())}
+    completed_second_fields = set(COMPLETED_SECOND_REPLAYABLE_FIELDS)
+    quality_observable_groups = {
+        "L1_L10_DIVERGENCE_OR_CONVERGENCE": sorted(
+            (L1_QUOTE_PRESSURE_FIELDS | L10_QUOTE_PRESSURE_FIELDS |
+             EXPLICIT_L1_L10_FIELDS) & completed_second_fields),
+        "QUOTE_TAPE_CONFIRMATION": {
+            "quote": sorted(QUOTE_PRESSURE_FIELDS & completed_second_fields),
+            "tape": sorted(TAPE_PRESSURE_FIELDS & completed_second_fields),
+        },
+        "EVENT_NORMALIZED": [],
+        "VOLUME_NORMALIZED": [],
+    }
+    current_derivation_transforms = set(DERIVATION_TRANSFORMS) - {
+        "EVENT_NORMALIZATION", "VOLUME_NORMALIZATION",
+    }
+    current_evolution_operators = set(EVOLUTION_OPERATORS) - {
+        "EVENT_NORMALIZATION", "VOLUME_NORMALIZATION",
+    }
+    current_directional_fields = (
+        set(DIRECTIONAL_PRESSURE_FIELDS) & completed_second_fields
+    )
+    prompt_ast_examples = {
+        name: json.dumps(expr, ensure_ascii=False, separators=(",", ":"))
+        for name, expr in INTRADAY_V2_PROMPT_AST_EXAMPLES.items()
+    }
     return "\n".join([
         "[AST-ready literature contract]",
         "  Every submitted lead must declare READINESS as exactly one of:",
@@ -318,19 +635,16 @@ def _ast_scout_contract() -> str:
         "    an observable directly to subsequent midprice/markout over a purely theoretical",
         "    model; retain theory as a control or blocked lead when it cannot support the",
         "    claimed executable return target.",
-        "  Allowed transforms: STATE_CONDITION, CLOCK_CHANGE, BOOK_DEPTH_CHANGE,",
-        "  MECHANISM_INTERACTION, RESIDUALIZE_PUBLIC_SIGNAL, FAILURE_MODE_INVERSION,",
-        "  MARKET_STRUCTURE_TRANSFER, TARGET_CHANGE, CROSS_SCALE_DISAGREEMENT,",
-        "  L1_L10_DIVERGENCE, EXECUTION_AWARE.",
+        "  Current completed-second transforms: "
+        + ", ".join(sorted(current_derivation_transforms)) + ".",
         "  EVOLUTIONARY SEARCH CONTRACT: do not return one favorite formula. Produce a",
         "  population of economically different ASTs, then let the deterministic archive",
         "  retain one elite per Event/Context/Direction/Execution/Horizon niche. A child",
         "  of a tested or queued formula must include PARENT_SIGNAL_EXPR, controlled",
         "  EVOLUTION_OPERATORS, a falsifiable EXPECTED_INCREMENT, and ABLATIONS separated",
-        "  by | (or a JSON list). Allowed evolution operators are STATE_CONDITION,",
-        "  FAILURE_MODE_INVERSION, RESIDUALIZE_PUBLIC_SIGNAL, CROSS_SCALE_DISAGREEMENT,",
-        "  MECHANISM_INTERACTION, CLOCK_CHANGE, L1_L10_DIVERGENCE, EXECUTION_AWARE,",
-        "  TARGET_CHANGE, MARKET_STRUCTURE_TRANSFER. Exact and parameter-only children",
+        "  by | (or a JSON list). Current completed-second evolution operators are "
+        + ", ".join(sorted(current_evolution_operators))
+        + ". Exact and parameter-only children",
         "  are rejected. An unrelated new mechanism is a seed and omits all parent fields.",
         "  FINANCIAL-MATHEMATICS CONTRACT: the LLM proposes a short equation skeleton and",
         "  its economic prior; deterministic code validates grammar, dimensions, semantic",
@@ -339,8 +653,8 @@ def _ast_scout_contract() -> str:
         "  keys target, functional_form, expected_sign, coefficient_policy, decision_rule,",
         "  terms, and",
         "  identification. target must equal SEMANTIC_PLAN.output. functional_form is one",
-        "  of MONOTONE, REVERSAL, INTERACTION, STATE_CONDITIONAL, CROSS_SCALE,",
-        "  DEPTH_DIVERGENCE; expected_sign is POSITIVE, NEGATIVE, or STATE_DEPENDENT;",
+        "  of " + ", ".join(sorted(FUNCTIONAL_FORMS))
+        + "; expected_sign is POSITIVE, NEGATIVE, or STATE_DEPENDENT;",
         "  coefficient_policy is FIXED_FROM_SOURCE, PREREGISTERED_NO_OOS_FIT, or",
         "  STRUCTURE_ONLY. Net-PnL decision_rule must be",
         "  PREDICTED_MARKOUT_CLEARS_COST. STRUCTURE_ONLY is preferred and may emit a",
@@ -349,34 +663,24 @@ def _ast_scout_contract() -> str:
         "  calibration sessions preceding OOS. Fixed/preregistered policies must emit",
         "  BPS directly. Never attach spread/volatility only to satisfy units. The runtime",
         "  abstains unless locked predicted markout clears live spread, statutory round-trip",
-        "  charges, and the preregistered safety margin. A dimensionless OFI sign is a",
+        "  charges, and the preregistered safety margin. A dimensionless pressure score is a",
         "  feature, not an executable PnL equation. terms maps every AST field exactly once",
-        "  to PRESSURE, LIQUIDITY,",
-        "  STATE, SCALE, VOLATILITY, FRESHNESS, ACTIVITY, or CAPACITY. identification states",
+        "  to one controlled role: " + ", ".join(sorted(TERM_ROLES))
+        + ". identification states",
         "  a falsifiable conditional prediction. The AST must visibly implement the claimed",
         "  form (for example where for STATE_CONDITIONAL and two clocks for CROSS_SCALE).",
         "  Do not fit constants on OOS data. Prefer compact skeletons with explicit ablations;",
         "  the evaluator, not the prose or LLM confidence, decides empirical survival.",
         "  STRUCTURE-FIRST SKELETONS (adapt the mechanism; do not copy mechanically):",
-        '  SCORE_OFI={"op":"rolling_mean","seconds":30,"arg":{"op":"field",'
-        '"field":"normalized_quote_ofi"}}',
-        '  SCORE_DEPTH_DIVERGENCE={"op":"sub","args":[{"op":"field",'
-        '"field":"queue_imbalance_l1"},{"op":"field","field":'
-        '"queue_imbalance_l10"}]}',
-        '  BPS_DIRECT={"op":"field","field":"microprice_offset_bps"}',
-        '  BPS_SCALED={"op":"mul","args":[{"op":"div","args":['
-        '{"op":"field","field":"quote_event_ofi"},{"op":"field","field":'
-        '"book_depth_l1"}]},{"op":"field","field":"realized_volatility_bps"}]}',
-        '  BPS_STATE={"op":"where","condition":{"op":"lt","args":['
-        '{"op":"field","field":"spread_bps"},{"const":5,"unit":"BPS"}]},'
-        '"then":{"op":"mul","args":[{"op":"rolling_mean","arg":{"op":'
-        '"field","field":"trade_flow_imbalance"},"seconds":30},{"op":"field",'
-        '"field":"realized_volatility_bps"}]},"else":{"const":0,"unit":"BPS"}}',
-        '  BPS_CROSS_SCALE={"op":"mul","args":[{"op":"sub","args":['
-        '{"op":"rolling_mean","arg":{"op":"field","field":'
-        '"normalized_quote_ofi"},"seconds":5},{"op":"rolling_mean","arg":'
-        '{"op":"field","field":"normalized_quote_ofi"},"seconds":300}]},'
-        '{"op":"field","field":"realized_volatility_bps"}]}',
+        *[
+            f"  {name}={prompt_ast_examples[name]}"
+            for name in (
+                "SCORE_TRADE_FLOW", "SCORE_DEPTH_DIVERGENCE",
+                "SCORE_DEPTH_SLOPE", "SCORE_L1_L10_CONVERGENCE",
+                "SCORE_QUOTE_TAPE_CONFIRMATION", "SCORE_TAPE_QUALITY_GATE",
+                "BPS_DIRECT", "BPS_SCALED", "BPS_STATE", "BPS_CROSS_SCALE",
+            )
+        ],
         "  A BPS scale must have an economic role and its no-scale/base-only ablation; do",
         "  not attach spread or volatility merely to pass units. Every FORMULA_THESIS term",
         "  must actually influence the AST. sign(non-negative count/depth/spread) usually",
@@ -385,9 +689,9 @@ def _ast_scout_contract() -> str:
         "  DIRECTIONAL MARKOUT RULE: activity, spread, depth, and realized-volatility",
         "  levels describe state or magnitude, not whether price moves up or down. Every",
         "  executable markout equation must carry at least one signed field on its numeric",
-        "  VALUE path and label it PRESSURE: queue_imbalance_l1/l10,",
-        "  microprice_offset_bps, trade_flow_imbalance, quote_event_ofi, or",
-        "  normalized_quote_ofi. A directional field used only as a where gate is not",
+        "  VALUE path and label it PRESSURE: "
+        + ", ".join(sorted(current_directional_fields)) + ".",
+        "  A directional field used only as a where gate is not",
         "  enough. Use unsigned fields only to gate or scale that signed pressure.",
         "  POPULATION COMPLETION RULE: source count is not candidate count. One directly",
         "  relevant source may support several auditable revision leads with different AST",
@@ -395,7 +699,8 @@ def _ast_scout_contract() -> str:
         "  contract-valid members through factory_submit_leads (multiple calls are allowed).",
         "  Do not mark the card complete with zero AST_READY merely because blocked/control",
         "  literature was stored. Either (a) persist all 12 AST_READY candidates from",
-        "  distinct economic niches, including <=30s/>=300s and TAKER/PASSIVE quadrants,",
+        "  distinct economic niches, including <=30s/>=300s, book-state/tape mechanisms,",
+        "  and TAKER-only execution states (there is no passive quota in this cohort),",
         "  or (b) report all 12 attempted candidate ASTs and the",
         "  exact deterministic intake error for each. Never weaken a contract to meet quota.",
         "  SOURCE_BASELINE_EXPR is the closest faithful expression of the public method on",
@@ -407,15 +712,16 @@ def _ast_scout_contract() -> str:
         '  The window key is exactly "n"--never "window" or "lookback". ts_corr uses',
         '  {"op":"ts_corr","field_a":"...","field_b":"...","n":5}; unary nodes',
         '  use "arg" and binary nodes use exactly two "args". Unknown keys are rejected.',
-        "  DATA REALITY: every supported quote/trade field above is already available as a",
-        "  point-in-time Korean-equity DAILY AGGREGATE. AST windows therefore mean trading",
-        "  days, not seconds or order-book events. The current microstructure history is short.",
+        "  DAILY_CROSS_SECTIONAL LANE ONLY: every supported field in the daily grammar above",
+        "  is a point-in-time Korean-equity daily aggregate, and its AST windows mean trading",
+        "  days. This paragraph does not describe or restrict the INTRADAY_EVENT lane below.",
         "  AST_READY needs a cited mechanism that maps to those local fields; the source does",
         "  NOT need to ship a reusable dataset, Korean observations, or its own OOS backtest.",
         "  A foreign venue is an external-validity risk to record, not MISSING_DATA, when the",
         "  mechanism and observable map exactly to a supported local field.",
-        "  Use DATA_BLOCKED only when the test truly needs unavailable granularity/fields",
-        "  (for example queue position, cancellations, order lifetime, or event-time seconds).",
+        "  In the daily lane, route second/tick mechanisms to INTRADAY_EVENT instead of",
+        "  marking them blocked. Use DATA_BLOCKED only for truly unavailable fields such as",
+        "  MBO queue position, attributed cancellations, or individual-order lifetime.",
         "  For AST_READY, OBSERVABLES must exactly equal the fields used by the AST, and",
         "  mechanism/TESTABLE_WITH must explain those fields economically.",
         "  AST_READY targets subsequent RETURN alpha. A volatility forecast, execution-cost",
@@ -428,16 +734,43 @@ def _ast_scout_contract() -> str:
         "  or regime auxiliaries. Short microstructure history is accepted and must not be",
         "  replaced with a price-only daily proxy; report the uncertainty honestly.",
         "  Search for mechanisms around these observables; do not retrofit an unrelated paper.",
-        "  RAW EVENT-TIME LANE IS NOW EXECUTABLE. Set RESEARCH_LANE: INTRADAY_EVENT",
+        "  COMPLETED-SECOND EVENT LANE IS EXECUTABLE. Set RESEARCH_LANE: INTRADAY_EVENT",
         "  and include a typed SEMANTIC_PLAN whenever the mechanism lives at seconds/ticks.",
         "  THIS REFILL IS LANE-AWARE: search event-time microstructure first. Daily leads",
         "  do not satisfy an empty INTRADAY_EVENT buffer. Submit at least one executable",
         "  INTRADAY_EVENT AST_READY lead when a cited mechanism maps to the grammar; if",
         "  none survives the contract, report the searched sources and exact blockers",
         "  instead of fabricating a lead, then continue the other lenses.",
-        "  Event-time fields: " + ", ".join(sorted(INTRADAY_FIELDS)),
+        f"  Event-time local strict grammar version: {INTRADAY_AST_VERSION}.",
+        "  Local strict event-time fields (not all current-history replayable): "
+        + ", ".join(sorted(INTRADAY_FIELDS)),
         "  Event-time field units: " + json.dumps(
             INTRADAY_FIELDS, ensure_ascii=False, sort_keys=True),
+        f"  CURRENT EXTERNAL CONTRACT: {COMPLETED_SECOND_SCREENING_COHORT_VERSION}; "
+        "61-session KRX STOCK history; TAKER only; unordered completed-second snapshots.",
+        f"  Every new INTRADAY_EVENT AST_READY lead declares "
+        f"FEATURE_WINDOW_CONTRACT_VERSION: {EXPLICIT_FEATURE_WINDOW_CONTRACT}.",
+        "  Raw-event windowed field leaves require seconds in exactly "
+        + ", ".join(map(str, PRIMITIVE_WINDOWS_SECONDS)) + ".",
+        "  Windowed fields: " + ", ".join(sorted(WINDOWED_FIELDS)) + ".",
+        "  All other decision-snapshot field leaves omit seconds. Primitive leaf windows",
+        "  and temporal-operator windows are independent semantics and must both be explicit.",
+        "  Current replayable/recommended fields: "
+        + ", ".join(sorted(COMPLETED_SECOND_RECOMMENDED_FIELDS)) + ".",
+        "  Deterministically blocked sequence-dependent fields: "
+        + ", ".join(sorted(COMPLETED_SECOND_SEQUENCE_DEPENDENT_FIELDS)) + ".",
+        f"  Physical clock domains: {WALL_TIME_CLOCK}, {QUOTE_EVENT_CLOCK}, "
+        f"{TRADE_VOLUME_CLOCK}.",
+        f"  {WALL_TIME_CLOCK} is the only temporal-operator clock: every lag/rolling/"
+        "delta/ewma/zscore seconds window uses decision wall time. Never rewrite seconds",
+        "  as 'N quote events' or 'N shares'. The local strict quote-event clock fields are "
+        + ", ".join(sorted(QUOTE_EVENT_CLOCK_FIELDS)) + "; fields in the blocked list above",
+        "  require a future sequenced feed. Printed-trade fields are "
+        + ", ".join(sorted(TRADE_VOLUME_CLOCK_FIELDS)) + ".",
+        "  Same-source-timestamp snapshots form an unordered completed-second multiset:",
+        "  do not choose a synthetic last quote or infer transitions. The current feed has",
+        "  no MBO queue ids or add/cancel attribution. Build on L1/L10 queue imbalance,",
+        "  microprice, depth slope, signed tape, spread/depth/activity/RV instead.",
         "  Event-time operators: " + ", ".join(sorted(INTRADAY_OPS)),
         f"  Event-time limits: depth<={INTRADAY_MAX_DEPTH}, nodes<={INTRADAY_MAX_NODES},",
         "  every lag/rolling/delta/ewma/zscore node has seconds=1..3600.",
@@ -449,35 +782,43 @@ def _ast_scout_contract() -> str:
             event_fields, ensure_ascii=False, sort_keys=True),
         "  Semantic context->gating-field requirements: " + json.dumps(
             context_fields, ensure_ascii=False, sort_keys=True),
-        '  Event-time JSON is exact: a field is {"op":"field","field":',
-        '  "trade_flow_imbalance"}--the key is "field", never "name". A temporal',
-        '  node is {"op":"rolling_mean","arg":{"op":"field","field":',
-        '  "trade_flow_imbalance"},"seconds":300}. OBSERVABLES must equal every',
+        "  Controlled semantic qualities: " + ", ".join(sorted(QUALITIES)),
+        "  Microstructure quality->observable groups: " + json.dumps(
+            quality_observable_groups, ensure_ascii=False, sort_keys=True),
+        "  EVENT_NORMALIZED/VOLUME_NORMALIZED and EVENT_NORMALIZATION/"
+        "VOLUME_NORMALIZATION are local-strict-only and unavailable in current v4 history.",
+        "  Event-time JSON is exact: a field is "
+        + prompt_ast_examples["SCORE_TRADE_FLOW"]
+        + '--the key is "field", never "name". A temporal',
+        "  node is " + prompt_ast_examples["TEMPORAL_TRADE_FLOW"]
+        + ". OBSERVABLES must equal every",
         "  field actually present in the AST. Use comma-separated transforms or a valid",
         "  JSON array with quoted strings; [BARE_WORDS] is not JSON.",
-        '  A declared spread state must be executable, e.g. {"op":"where",',
-        '  "condition":{"op":"lt","args":[{"op":"field","field":',
-        '  "spread_bps"},{"const":5,"unit":"BPS"}]},"then":{"op":',
-        '  "rolling_mean","arg":{"op":"field","field":"trade_flow_imbalance"},',
-        '  "seconds":300},"else":{"const":0,"unit":"RATIO"}}.',
+        "  A declared spread state must be executable, e.g. "
+        + prompt_ast_examples["TIGHT_SPREAD_TRADE_FLOW"] + ".",
         "  SEMANTIC_PLAN uses Event/Context/Qualities/Direction/Output, for example:",
         '  {"event":"ORDER_FLOW","context":["TIGHT_SPREAD"],',
         '   "qualities":["PERSISTENCE","STATE_CONDITIONAL"],"direction":"FOLLOW",',
         '   "output":"TAKER_NET_PNL","execution":"TAKER","horizon_seconds":5}.',
-        "  Passive execution uses this exact output/execution pair (no aliases):",
-        '  {"event":"ORDER_FLOW","context":["TIGHT_SPREAD"],',
-        '   "qualities":["STATE_CONDITIONAL"],"direction":"FOLLOW",',
-        '   "output":"PASSIVE_FILL_ADJUSTED_PNL",',
-        '   "execution":"PASSIVE_FIFO_LOWER_BOUND","horizon_seconds":30}.',
-        "  PASSIVE and PASSIVE_FIFO are invalid aliases. A passive child also needs an",
-        "  economic AST mutation (spread/depth/adverse-selection state, clock, or scale);",
-        "  changing only the execution label is an exact-formula duplicate, not novelty.",
-        "  Treat public OFI/queue formulas as controls. Prefer residual, state-conditional",
-        "  or execution-timing mutations that reduce crossing/adverse selection; do not",
+        "  Current external history accepts only output=TAKER_NET_PNL and execution=TAKER.",
+        "  Passive output/execution remains in local strict contracts for a future sequenced/",
+        "  MBO feed, but current v4 intake rejects it and assigns it no candidate quota.",
+        "  Treat public OFI/queue formulas as controls. Prefer state-conditional or",
+        "  cross-scale mutations that reduce crossing/adverse selection; do not",
         "  create extra turnover merely because a short-horizon direction is predictable.",
+        "  Public OFI and MLOFI are mechanism seeds, not current replayable measurements or",
+        "  presumed surviving alpha. Preserve them as DATA_BLOCKED local-strict controls;",
+        "  never rename unordered book-state changes as OFI. Current executable mutations",
+        "  use L1/L10 queue-imbalance convergence/divergence, depth slope, quote-state vs",
+        "  signed-tape confirmation, and wall-time cross-scale persistence. Each must name",
+        "  the counterparty and an expected incremental net-cost prediction. Pre-register",
+        "  paired ablations (L1-only vs L10-only, book-only vs tape-only, short vs long).",
+        "  Adding every new field without a matching quality, transform and ablation is not",
+        "  novelty and is rejected by deterministic intake.",
         "  State contexts must be implemented in a where-condition; declared qualities",
-        "  must be visible in the AST. Queue position, cancellations and order lifetime",
-        "  remain DATA_BLOCKED; raw quote/trade event time itself is no longer blocked.",
+        "  must be visible in the AST. Queue position, cancellations, order lifetime, same-",
+        "  second quote chronology and sequence-derived OFI remain DATA_BLOCKED. Completed-",
+        "  second book-state and printed-trade summaries are executable.",
     ])
 
 
@@ -558,13 +899,63 @@ def _near_miss(conn, *, keep: int = 4) -> str:
     """
     try:
         with conn.cursor() as cur:
-            cur.execute("""
-                select trial_family_id, coalesce(notes, ''), lesson_codes
-                  from research.experiment_outcomes
-                 where notes like '관문%%통과%%'
-                 order by decided_at desc limit 40""")
-            rows = cur.fetchall() or []
+            # This block is advisory briefing, not a promotion gate.  The old
+            # single query made PostgreSQL evaluate the 25KB governed-evidence
+            # predicate across every experiment even when zero outcome notes
+            # matched; the live mean was 156s (max 185s).  Materialize the tiny
+            # note candidate set in Python first, then pay the governance proof
+            # only for those exact UUIDs.  Keep a hard budget so an optional
+            # paragraph cannot occupy the scheduler lock for minutes.
+            # Rolling back this read-only savepoint restores the caller's exact
+            # statement_timeout.  Setting it to zero would silently remove a
+            # stricter role/session budget from every later briefing query.
+            cur.execute("savepoint factory_near_miss_budget")
+            try:
+                cur.execute("set local statement_timeout = '5000ms'")
+                cur.execute("""
+                    select o.trial_family_id, coalesce(o.notes, ''),
+                           o.lesson_codes, o.experiment_id
+                      from research.v_current_experiment_outcomes o
+                     where o.notes like '관문%%통과%%'
+                     order by o.decided_at desc""")
+                candidates = cur.fetchall() or []
+                candidate_ids = sorted({
+                    str(row[3]).lower() for row in candidates
+                    if len(row) > 3 and re.fullmatch(
+                        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                        r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", str(row[3]))
+                })
+                governed_ids: set[str] = set()
+                if candidate_ids:
+                    cur.execute("""
+                        select e.experiment_id::text
+                          from quant.experiments e
+                          join quant.hypotheses h
+                            on h.hypothesis_id = e.hypothesis_id
+                          join quant.dataset_manifests m
+                            on m.dataset_id = e.dataset_id
+                         where e.experiment_id = any(%s::uuid[])
+                           and """ + _GOVERNED_HISTORICAL_EVIDENCE,
+                        (candidate_ids,))
+                    governed_ids = {
+                        str(row[0]).lower() for row in (cur.fetchall() or [])}
+                rows = [row[:3] for row in candidates
+                        if str(row[3]).lower() in governed_ids][:40]
+            except Exception:
+                # PostgreSQL permits ROLLBACK TO SAVEPOINT while the failed
+                # subtransaction is aborted; later briefing blocks remain usable.
+                cur.execute("rollback to savepoint factory_near_miss_budget")
+                cur.execute("release savepoint factory_near_miss_budget")
+                return ""
+            cur.execute("rollback to savepoint factory_near_miss_budget")
+            cur.execute("release savepoint factory_near_miss_budget")
     except Exception:      # noqa: BLE001 - 못 읽으면 적지 않는다(지어내지 않는다)
+        # Savepoint setup/restoration itself failed.  This connection is used
+        # only for briefing reads, so a full rollback is the safe last resort.
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
         return ""
 
     best: dict[str, tuple[int, str, list]] = {}
@@ -708,7 +1099,7 @@ def _vocab_block(conn=None) -> str:
     from strategy_templates import EDGE_VOCAB      # noqa: PLC0415
     from trial_family import UNIVERSE_VOCAB        # noqa: PLC0415
 
-    from contracts.factory_contracts import (      # noqa: PLC0415
+    from factory_contracts import (                # noqa: PLC0415
         CompetingExplanation, SourceType)
 
     # ▶ **목록에 있다고 데이터셋이 있는 것은 아니다** (2026-08-12 실측)
@@ -726,7 +1117,8 @@ def _vocab_block(conn=None) -> str:
         if conn is not None:
             from data_resolution import manifest_index  # noqa: PLC0415
 
-            for _n, _v, srcs in manifest_index(conn):
+            for _n, _v, srcs in manifest_index(
+                    conn, research_lane="INTRADAY_EVENT"):
                 covered |= set(srcs or {})
         rest = sorted(set(SOURCE_TABLES) - covered)
         if covered:
@@ -869,9 +1261,16 @@ def _pareto_line(conn) -> str:
 
         out = []
         with conn.cursor() as cur:
-            cur.execute("""select root_cause, count(*)
-                             from research.experiment_outcomes
-                            where root_cause is not null
+            cur.execute(f"""select o.root_cause, count(*)
+                             from research.v_current_experiment_outcomes o
+                             join quant.experiments e
+                               on e.experiment_id::text = o.experiment_id
+                             join quant.hypotheses h
+                               on h.hypothesis_id = e.hypothesis_id
+                             join quant.dataset_manifests m
+                               on m.dataset_id = e.dataset_id
+                            where o.root_cause is not null
+                              and {_GOVERNED_HISTORICAL_EVIDENCE}
                             group by 1 order by 2 desc""")
             pareto = cur.fetchall()
             if pareto:
@@ -881,11 +1280,16 @@ def _pareto_line(conn) -> str:
                     out.append(f"  {rc:<10} {n}건 ({100*n//total}%)")
                 out.append("  ▶ 1위 결함을 없애는 개선이 같은 노력의 다른 어떤 "
                            "개선보다 크다 - 카드를 고를 때 이 표를 먼저 봐라.")
-            cur.execute("""
+            cur.execute(f"""
                 select coalesce(h.expected_edge->>'type',''), o.decision
-                  from research.experiment_outcomes o
+                  from research.v_current_experiment_outcomes o
+                  join quant.experiments e
+                    on e.experiment_id::text = o.experiment_id
                   join quant.hypotheses h
-                    on h.hypothesis_id::text = o.hypothesis_id""")
+                    on h.hypothesis_id = e.hypothesis_id
+                  join quant.dataset_manifests m
+                    on m.dataset_id = e.dataset_id
+                 where {_GOVERNED_HISTORICAL_EVIDENCE}""")
             agg: dict = {}
             for edge, dec in cur.fetchall():
                 t = theme_of(edge)
@@ -1062,7 +1466,10 @@ def research_brief() -> str:
     try:
         brief = cycle_brief.build(conn, market_conn=market_conn)
         with conn.cursor() as cur:
-            cur.execute(_SQL_LEADS, (12,))
+            cur.execute(
+                _SQL_LEADS,
+                (CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT, 12),
+            )
             leads = cur.fetchall()
         return _compose_research_brief(
             conn, brief, leads, market_conn=market_conn)
@@ -1085,13 +1492,20 @@ def _ast_experience_block(conn) -> str:
                        coalesce(o.oos_summary, '{}'::jsonb), h.title
                   from quant.experiments e
                   join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+                  join quant.dataset_manifests m on m.dataset_id = e.dataset_id
                   left join lateral (
                     select decision, lesson_codes, oos_summary
-                      from research.experiment_outcomes x
+                      from research.v_current_experiment_outcomes x
                      where x.experiment_id = e.experiment_id::text
                      order by x.decided_at desc limit 1
-                  ) o on true
+                 ) o on true
                  where e.config ? 'signal_expr'
+                   and not (e.config ? 'intraday_signal_expr')
+                   and upper(coalesce(
+                         nullif(e.config->>'research_lane', ''),
+                         nullif(h.expected_edge->>'research_lane', ''),
+                         'DAILY_CROSS_SECTIONAL')) <> 'INTRADAY_EVENT'
+                   and """ + _GOVERNED_HISTORICAL_EVIDENCE + """
                  order by e.created_at desc""")
             experiments = [{
                 "signal_expr": row[0], "decision": row[1],
@@ -1131,6 +1545,10 @@ def _ast_experience_block(conn) -> str:
                  where l.status = 'COMPLETE'
                    and l.ast_contract->>'ast_readiness' = 'AST_READY'
                    and l.ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
+                   and (coalesce(l.ast_contract->>'research_lane',
+                                 'DAILY_CROSS_SECTIONAL') <> 'INTRADAY_EVENT'
+                        or l.ast_contract->>'feature_window_contract_version' =
+                           'explicit-primitive-window-v2')
                  order by l.created_at desc""")
             leads = [{"lead_id": row[0], "title": row[1],
                       "signal_expr": row[2], "used": bool(row[3]),
@@ -1156,16 +1574,23 @@ def _ast_experience_block(conn) -> str:
                        coalesce(o.decision, ''),
                        coalesce(o.lesson_codes, '{}'::text[]),
                        coalesce(o.oos_summary, '{}'::jsonb), h.title,
-                       coalesce(c.dimensions, '{}'::jsonb),
-                       coalesce(rb.dimensions, '{}'::jsonb)
+                       coalesce(manifest.report->'score_calibration',
+                                c.dimensions, '{}'::jsonb),
+                       coalesce(manifest.report->'residual_behavior',
+                                rb.dimensions, '{}'::jsonb),
+                       coalesce(manifest.report->'residual_qd',
+                                rb.dimensions->'residual_qd', '{}'::jsonb)
                   from quant.experiments e
                   join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+                  join quant.dataset_manifests m on m.dataset_id = e.dataset_id
                   left join lateral (
                     select decision, lesson_codes, oos_summary
-                      from research.experiment_outcomes x
+                      from research.v_current_experiment_outcomes x
                      where x.experiment_id = e.experiment_id::text
                      order by x.decided_at desc limit 1
                   ) o on true
+                  left join quant.intraday_report_manifests manifest
+                    on manifest.experiment_id = e.experiment_id
                   left join lateral (
                     select dimensions
                       from quant.experiment_metrics m
@@ -1183,6 +1608,8 @@ def _ast_experience_block(conn) -> str:
                      order by m.experiment_metric_id limit 1
                   ) rb on true
                  where e.config ? 'intraday_signal_expr'
+                   and """ + _CURRENT_V2_INTRADAY_MEMORY_EVIDENCE + """
+                   and """ + _GOVERNED_HISTORICAL_EVIDENCE + """
                  order by e.created_at desc""")
             intraday = [{
                 "intraday_signal_expr": row[0], "semantic_plan": row[1] or {},
@@ -1192,7 +1619,7 @@ def _ast_experience_block(conn) -> str:
                 "residual_behavior": {
                     key: value for key, value in (row[7] or {}).items()
                     if key != "residual_qd"},
-                "residual_qd": (row[7] or {}).get("residual_qd") or {},
+                "residual_qd": row[8] or {},
             } for row in cur.fetchall()]
             # Shared-replay candidates are useful measured memory, but they are
             # not independent confirmations.  Read their candidate-scoped
@@ -1200,23 +1627,45 @@ def _ast_experience_block(conn) -> str:
             cur.execute("""
                 select e.experiment_id::text,
                        coalesce(e.config->'screening_population', '[]'::jsonb),
-                       h.title, m.metric, m.value, m.dimensions
+                       h.title, metric.metric, metric.value,
+                       metric.dimensions,
+                       coalesce(manifest.report->'screening_candidates',
+                                '{}'::jsonb)
                   from quant.experiments e
                   join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
-                  left join quant.experiment_metrics m
-                    on m.experiment_id = e.experiment_id
-                   and m.dimensions->>'screening_candidate' is not null
+                  join quant.dataset_manifests m on m.dataset_id = e.dataset_id
+                  left join quant.experiment_metrics metric
+                    on metric.experiment_id = e.experiment_id
+                   and metric.dimensions->>'screening_candidate' is not null
+                  left join quant.intraday_report_manifests manifest
+                    on manifest.experiment_id = e.experiment_id
                  where e.config ? 'screening_population'
-                 order by e.created_at desc, m.metric""")
+                   and """ + _CURRENT_V2_INTRADAY_MEMORY_EVIDENCE + """
+                   and not exists (
+                       select 1
+                         from jsonb_array_elements(
+                                case when jsonb_typeof(
+                                     e.config->'screening_population') = 'array'
+                                     then e.config->'screening_population'
+                                     else '[]'::jsonb end) current_candidate
+                        where current_candidate->>
+                              'feature_window_contract_version' is distinct from
+                              'explicit-primitive-window-v2'
+                   )
+                   and """ + _GOVERNED_HISTORICAL_EVIDENCE + """
+                 order by e.created_at desc, metric.metric""")
             screened: dict[tuple[str, str], dict] = {}
-            for experiment_id, population, title, metric, value, dimensions in \
+            for (experiment_id, population, title, metric, value, dimensions,
+                 manifest_candidates) in \
                     cur.fetchall():
                 dimensions = dimensions or {}
+                manifest_candidates = manifest_candidates or {}
                 by_fp = {str(candidate.get("ast_fingerprint") or ""): candidate
                          for candidate in (population or [])
                          if isinstance(candidate, dict)}
                 for candidate_fp, candidate in by_fp.items():
                     key = (experiment_id, candidate_fp)
+                    artifact = manifest_candidates.get(candidate_fp) or {}
                     screened.setdefault(key, {
                         "intraday_signal_expr": candidate.get(
                             "intraday_signal_expr"),
@@ -1225,7 +1674,7 @@ def _ast_experience_block(conn) -> str:
                         "coefficient_policy": candidate.get(
                             "coefficient_policy"),
                         "decision": "SCREENING_ONLY",
-                        "lesson_codes": [], "oos_summary": {},
+                        "oos_summary": {},
                         "title": f"{title} [screen {candidate_fp[:8]}]",
                         "evidence_tier": "SCREENING_ONLY",
                         "source_lead_ids": list(
@@ -1236,6 +1685,18 @@ def _ast_experience_block(conn) -> str:
                         "ablation_path": candidate.get("ablation_path"),
                         "ablation_of_ast_fingerprint": candidate.get(
                             "ablation_of_ast_fingerprint"),
+                        "score_calibration": artifact.get(
+                            "score_calibration") or {},
+                        "residual_behavior": artifact.get(
+                            "residual_behavior") or {},
+                        "residual_qd": artifact.get("residual_qd") or {},
+                        "lesson_codes": list(
+                            artifact.get("failed_criteria") or []),
+                        "screening_gate_decision": artifact.get(
+                            "screening_gate_decision"),
+                        "pareto_rank": artifact.get("pareto_rank"),
+                        "empirical_influence": artifact.get(
+                            "empirical_influence"),
                     })
                 metric_fp = str(dimensions.get("screening_candidate") or "")
                 target = screened.get((experiment_id, metric_fp))
@@ -1244,27 +1705,48 @@ def _ast_experience_block(conn) -> str:
                 if dimensions.get("summary") is True:
                     target["oos_summary"][metric] = float(value)
                 elif metric == "intraday_screening_result":
+                    artifact = manifest_candidates.get(metric_fp) or {}
+                    source = artifact or dimensions
                     target["lesson_codes"] = list(
-                        dimensions.get("failed_criteria") or [])
-                    target["screening_gate_decision"] = dimensions.get(
+                        source.get("failed_criteria") or [])
+                    target["screening_gate_decision"] = source.get(
                         "screening_gate_decision")
-                    target["pareto_rank"] = dimensions.get("pareto_rank")
-                    target["empirical_influence"] = dimensions.get(
+                    target["pareto_rank"] = source.get("pareto_rank")
+                    target["empirical_influence"] = source.get(
                         "empirical_influence")
-                    target["residual_qd"] = dimensions.get("residual_qd") or {}
+                    target["residual_qd"] = (
+                        artifact.get("residual_qd") or
+                        dimensions.get("residual_qd") or {})
                 elif metric == "intraday_score_calibration":
-                    target["score_calibration"] = dimensions
+                    artifact = manifest_candidates.get(metric_fp) or {}
+                    target["score_calibration"] = (
+                        artifact.get("score_calibration") or dimensions)
                 elif metric == "intraday_residual_behavior":
-                    target["residual_behavior"] = {
-                        key: value for key, value in dimensions.items()
-                        if key not in {"screening_candidate", "residual_qd"}}
-                    target["residual_qd"] = dimensions.get("residual_qd") or {}
+                    artifact = manifest_candidates.get(metric_fp) or {}
+                    target["residual_behavior"] = (
+                        artifact.get("residual_behavior") or {
+                            key: value for key, value in dimensions.items()
+                            if key not in {
+                                "screening_candidate", "residual_qd"}})
+                    target["residual_qd"] = (
+                        artifact.get("residual_qd") or
+                        dimensions.get("residual_qd") or {})
             intraday.extend(screened.values())
             cur.execute("""
-                select lead_ids, title, verdict, competing_codes,
+                select r.lead_ids, r.title, r.verdict, r.competing_codes,
                        competing_explanation, falsification_test
-                  from research.proposal_review_outcomes
-                 order by created_at desc limit 12""")
+                  from research.proposal_review_outcomes r
+                 where not exists (
+                       select 1
+                         from research.methodology_leads reviewed_lead
+                        where reviewed_lead.lead_id = any(r.lead_ids)
+                          and reviewed_lead.ast_contract->>'research_lane' =
+                              'INTRADAY_EVENT'
+                          and reviewed_lead.ast_contract->>
+                              'feature_window_contract_version' is distinct from
+                              'explicit-primitive-window-v2'
+                 )
+                 order by r.created_at desc limit 12""")
             reviews = cur.fetchall()
         review_memory = ""
         if reviews:
@@ -1463,14 +1945,15 @@ def _widest_price_dataset(conn) -> tuple[str, int | None]:
     """
     try:
         with conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(f"""
                 select m.name, m.version,
                        (select count(*) from quant.dataset_partitions p
                          where p.dataset_id = m.dataset_id) parts,
                        m.row_count
-                  from quant.dataset_manifests m
+                 from quant.dataset_manifests m
                  where m.source_versions ? 'market_bars'
-                 order by m.row_count desc limit 1""")
+                   and {_GOVERNED_STOCK_DATASET}
+                 order by m.row_count desc, m.version desc limit 1""")
             got = cur.fetchone()
     except Exception:  # noqa: BLE001
         return "", None
@@ -1493,6 +1976,150 @@ INTRADAY_LEADS_LOW = 2
 # economic equation thesis needed by the symbolic search. Maintain a separate
 # typed-formula buffer so deployment upgrades actually refill the new contract.
 INTRADAY_FORMULA_LEADS_LOW = 12
+FORMULA_BREEDER_POPULATION = 64
+# Deliberately do not add CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT here:
+# implicit-window formulas are migration/evolution material even though they
+# are not eligible for direct Planner consumption.
+_LIVE_INTRADAY_EVOLUTION_PARENTS_SQL = """
+    select count(*)
+      from research.methodology_leads l
+     where l.status = 'COMPLETE'
+       and l.testability = 'RULE_EXPRESSIBLE'
+       and l.ast_contract->>'ast_readiness' = 'AST_READY'
+       and l.ast_contract->>'primary_data_plane' = 'MICROSTRUCTURE'
+       and l.ast_contract->>'research_lane' = 'INTRADAY_EVENT'
+       and l.ast_contract->>'formula_discovery_version' =
+           'formula-discovery-v5'
+       and coalesce(
+             (l.ast_contract->>'formula_contract_complete')::boolean,
+             false)
+       and coalesce(
+             (l.ast_contract->>'alpha_candidate_eligible')::boolean,
+             false)
+       and jsonb_typeof(l.ast_contract->'candidate_signal_expr') = 'object'
+       and not exists (
+             select 1
+               from quant.experiments e
+               join quant.hypotheses h
+                 on h.hypothesis_id = e.hypothesis_id
+               join quant.dataset_manifests m
+                 on m.dataset_id = e.dataset_id
+               join quant.intraday_report_manifests manifest
+                 on manifest.experiment_id = e.experiment_id
+               join quant.intraday_candidate_lineages primary_lineage
+                 on primary_lineage.candidate_lineage_id = case
+                      when coalesce(manifest.report#>>
+                           '{trial_lockbox,primary_candidate_lineage_id}', '') ~
+                           '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                      then (manifest.report#>>
+                           '{trial_lockbox,primary_candidate_lineage_id}')::uuid
+                      else null end
+                and primary_lineage.hypothesis_id = e.hypothesis_id
+               cross join lateral (
+                 -- Primary and screening formulas are both durable adaptive
+                 -- observations. JSONB equality deliberately compares the
+                 -- complete typed AST, not a title or lossy printed formula.
+                 select manifest.report->'score_calibration' as calibration
+                  where e.config->'intraday_signal_expr' =
+                        l.ast_contract->'candidate_signal_expr'
+                 union all
+                 select manifest.report->'screening_candidates'
+                                      ->(screen_candidate->>'ast_fingerprint')
+                                      ->'score_calibration' as calibration
+                   from jsonb_array_elements(
+                          case
+                            when jsonb_typeof(
+                                   e.config->'screening_population') = 'array'
+                            then e.config->'screening_population'
+                            else '[]'::jsonb
+                          end) screen_candidate
+                  where screen_candidate->'intraday_signal_expr' =
+                        l.ast_contract->'candidate_signal_expr'
+              ) measured
+              where """ + _GOVERNED_CALIBRATION_FAILURE_EVIDENCE + """
+                -- The same JSON AST can be replayed under materially different
+                -- window/evaluator semantics.  Only equal execution identities
+                -- may retire one another; missing historical versions map to
+                -- the explicit legacy contract, never to V2.
+                and coalesce(
+                      e.config->>'feature_window_contract_version',
+                      'legacy-cohort-lookback-v1') = coalesce(
+                      l.ast_contract->>'feature_window_contract_version',
+                      'legacy-cohort-lookback-v1')
+                and jsonb_typeof(measured.calibration) = 'object'
+                and measured.calibration->>'status' =
+                    'NO_COST_FEASIBLE_ENTRY'
+                and measured.calibration->>'cost_feasible_entry_possible' =
+                    'false'
+                and jsonb_typeof(
+                      measured.calibration->'observations') = 'number'
+                and (measured.calibration->>'observations')::numeric > 0
+                and jsonb_typeof(
+                      measured.calibration->
+                        'minimum_observed_entry_hurdle_bps') = 'number'
+                and jsonb_typeof(
+                      measured.calibration->
+                        'maximum_calibrated_predicted_markout_bps') = 'number'
+                and (measured.calibration->>
+                       'maximum_calibrated_predicted_markout_bps')::numeric <=
+                    (measured.calibration->>
+                       'minimum_observed_entry_hurdle_bps')::numeric
+       )
+"""
+
+
+def _formula_breeder_generation(moment: datetime) -> int:
+    """Return one deterministic, monotonically changing generation per UTC hour."""
+    if moment.tzinfo is None:
+        raise ValueError("formula breeder generation requires a timezone")
+    return int(moment.astimezone(timezone.utc).timestamp() // 3600)
+
+
+def _formula_breeder_card_body(*, generation: int, starvation: str) -> str:
+    """Build the operational breeder contract without asking for a report."""
+    # ``starvation`` is the shared Scout-facing health block and deliberately
+    # contains web-discovery instructions.  Passing that block verbatim after
+    # "Do not browse" gives Hermes two incompatible jobs and burns the scarce
+    # breeder turn on source collection.  The breeder only needs the measured
+    # queue trigger, so retain the first non-empty diagnostic line and discard
+    # every downstream Scout instruction.
+    queue_trigger = next(
+        (line.strip() for line in str(starvation or "").splitlines()
+         if line.strip()),
+        "current V2 formula inventory is below the refill watermark",
+    )[:500]
+    return (
+        "This is a FORMULA BREEDER task, not a literature-scout or report task.\n"
+        "Do not browse the web, collect new sources, write a research memo, or call "
+        "factory_submit_leads. The persisted parents already carry source provenance.\n\n"
+        "1. Call factory_generate_formula_population once with population_size="
+        f"{FORMULA_BREEDER_POPULATION} and generation={generation}. Generation is "
+        "the current UTC-hour identity; use it exactly so a later hourly card cannot "
+        "replay the previous deterministic batch. The tool uses adaptive experiment "
+        "results, cost failures, failed subtrees, exact/shape deduplication, and "
+        "economic niches. It generates the full population internally but returns a "
+        "bounded delivery_candidates slice so no AST is lost to tool-output truncation.\n"
+        "2. Use only delivery_candidates. They are already deterministic, single-parent, "
+        "submission-ready, and greedily diversified across pressure/mechanism/regime/clock "
+        "niches. Copy each submission_template exactly. Never reconstruct a candidate from "
+        "a preview, a shell artifact, its title, or memory; in particular do not rename or "
+        "invent candidate_signal_expr fields/operators.\n"
+        "3. Replace only string values beginning REQUIRES_HERMES. For each child write a concrete "
+        "economic_mechanism, falsifiable formula_thesis.identification, expected_increment, "
+        "novelty_rationale, and structural ablations. Preserve the full 23bp governed "
+        "round-trip hurdle; never tune a coefficient or threshold to clear it. A family "
+        "with NO_COST_FEASIBLE_ENTRY and max calibrated markout below its hurdle is spent, "
+        "not a direction-flip parent.\n"
+        "4. Group selected children by their single parent_lead_id and call "
+        "factory_submit_evolved_formulas. Deterministic intake must accept the actual "
+        "formula revisions; a narrative in the card is not delivery.\n"
+        "5. Complete only after reporting generated/single-parent-ready/accepted counts, "
+        "unique niches, and exact rejection reasons. Never claim alpha: every child "
+        "remains adaptive, promotion_authority=false, and requires preregistered "
+        "evaluation.\n\n"
+        "Queue trigger (diagnostic only; this is not a Scout instruction):\n"
+        + queue_trigger
+    )
 # 이보다 오래된 리드만 있으면 시장이 바뀌었을 수 있다.
 LEADS_STALE_DAYS = 2
 
@@ -1512,8 +2139,10 @@ def _executable_unused_count(conn) -> int:
                      false)
                and (coalesce(l.ast_contract->>'research_lane',
                              'DAILY_CROSS_SECTIONAL') <> 'INTRADAY_EVENT'
-                    or l.ast_contract->>'formula_discovery_version' =
-                       'formula-discovery-v5')
+                    or (l.ast_contract->>'formula_discovery_version' =
+                        'formula-discovery-v5'
+                        and l.ast_contract->>'feature_window_contract_version' =
+                            %s))
                and not exists (
                      select 1 from research.experiment_proposals p
                       where l.lead_id = any(p.lead_ids)
@@ -1522,7 +2151,7 @@ def _executable_unused_count(conn) -> int:
                      select 1 from research.proposal_review_outcomes r
                       where r.verdict = 'STOP'
                         and l.lead_id = any(r.lead_ids))
-        """)
+        """, (CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT,))
         return int((cur.fetchone() or (0,))[0] or 0)
 
 
@@ -1545,6 +2174,8 @@ def _intraday_formula_unused_count(conn) -> int:
                and l.ast_contract->>'research_lane' = 'INTRADAY_EVENT'
                and l.ast_contract->>'formula_discovery_version' =
                    'formula-discovery-v5'
+               and l.ast_contract->>'feature_window_contract_version' =
+                   %s
                and coalesce(
                      (l.ast_contract->>'formula_contract_complete')::boolean,
                      false)
@@ -1559,7 +2190,20 @@ def _intraday_formula_unused_count(conn) -> int:
                      select 1 from research.proposal_review_outcomes r
                       where r.verdict = 'STOP'
                         and l.lead_id = any(r.lead_ids))
-        """)
+        """, (CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT,))
+        return int((cur.fetchone() or (0,))[0] or 0)
+
+
+def _intraday_evolution_parent_count(conn) -> int:
+    """Count source-backed formulas that still have adaptive breeding value.
+
+    Used formulas remain lineage parents, but a formula is no longer live once
+    the exact JSONB AST has durable, governed stock-only calibration evidence
+    proving that its calibrated markout cannot clear the observed execution-cost
+    hurdle. This prevents spent adaptive parents from suppressing Scout forever.
+    """
+    with conn.cursor() as cur:
+        cur.execute(_LIVE_INTRADAY_EVOLUTION_PARENTS_SQL)
         return int((cur.fetchone() or (0,))[0] or 0)
 
 
@@ -1622,6 +2266,8 @@ def _lead_health(conn) -> str:
                            and ast_contract->>'research_lane' = 'INTRADAY_EVENT'
                            and ast_contract->>'formula_discovery_version' =
                                'formula-discovery-v5'
+                           and ast_contract->>'feature_window_contract_version' =
+                               %s
                            and coalesce((ast_contract->>'alpha_candidate_eligible')::boolean,
                                         false)
                            and not exists (
@@ -1641,6 +2287,8 @@ def _lead_health(conn) -> str:
                            and ast_contract->>'research_lane' = 'INTRADAY_EVENT'
                            and ast_contract->>'formula_discovery_version' =
                                'formula-discovery-v5'
+                           and ast_contract->>'feature_window_contract_version' =
+                               %s
                            and coalesce(
                                  (ast_contract->>'alpha_candidate_eligible')::boolean,
                                  false)
@@ -1666,11 +2314,24 @@ def _lead_health(conn) -> str:
                                            false)
                          )
                        ))/86400.0 as newest_usable_age_days
-                  from research.methodology_leads""")
+                  from research.methodology_leads""", (
+                      CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT,
+                      CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT,
+                  ))
             (total, raw_unused, unused, intraday_unused,
              intraday_formula_unused, age) = cur.fetchone()
     except Exception:  # noqa: BLE001 - 못 세면 안 적는다
-        return ""
+        # PostgreSQL leaves the transaction aborted after a statement error.
+        # Clear that read-only failure so independent counters can still
+        # recover a partial view and schedule replenishment.
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001 - preserve the health diagnosis
+            pass
+        return (
+            "\n[QUEUE HEALTH UNKNOWN - FAIL CLOSED] lead inventory query "
+            "failed; Planner is held and a Scout recovery card is required."
+        )
     total = int(total or 0)
     raw_unused, unused = int(raw_unused or 0), int(unused or 0)
     intraday_unused = int(intraday_unused or 0)
@@ -2125,6 +2786,26 @@ def _allocator_block(conn) -> tuple[str, int]:
     return "\n".join(lines), len(live)
 
 
+def _partition_pending_by_execution(
+        pending: list, blocked: dict) -> tuple[list, list]:
+    """Keep only hypotheses that the same-cycle dispatcher can actually run.
+
+    The scheduler already computes deterministic execution-surface rejections
+    before enqueueing. Reusing that verdict in the Hermes brief prevents a
+    blocked hypothesis from consuming an agent slot merely to report
+    ``NOT_RUNNABLE`` through a second execution path.
+    """
+
+    runnable, withheld = [], []
+    for row in pending:
+        hypothesis_id = str(row[0])
+        if hypothesis_id in blocked:
+            withheld.append((row, str(blocked[hypothesis_id])))
+        else:
+            runnable.append(row)
+    return runnable, withheld
+
+
 def quant_brief() -> tuple[str, int]:
     """퀀트본부가 볼 사실: 실험을 기다리는 가설과 계열별 압력.
 
@@ -2134,10 +2815,15 @@ def quant_brief() -> tuple[str, int]:
     conn = _conn()
     try:
         with conn.cursor() as cur:
-            cur.execute(_SQL_PENDING, (10,))
+            cur.execute(
+                _SQL_PENDING,
+                (CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT, 10),
+            )
             pending = cur.fetchall()
             cur.execute(_SQL_FAMILY_PRESSURE)
             pressure = cur.fetchall()
+        blocked = _structurally_blocked(conn, [row[0] for row in pending])
+        pending, withheld = _partition_pending_by_execution(pending, blocked)
         # **연결이 살아 있는 동안** 배분자를 부른다 - 닫고 부르면 조용히
         # 빈 값이 된다(오늘 브리핑 블록 네 개가 그렇게 죽어 있었다).
         moves_block, n_moves = _allocator_block(conn)
@@ -2161,6 +2847,15 @@ def quant_brief() -> tuple[str, int]:
         edge_type = (edge or {}).get("type") if isinstance(edge, dict) else None
         out.append(f"  - {hid[:8]} [{status}] {str(title)[:60]}")
         out.append(f"      edge={edge_type} 제안={proposal} 등록={created:%Y-%m-%d}")
+
+    if withheld:
+        out.append("")
+        out.append(
+            f"[execution-withheld hypotheses {len(withheld)} - "
+            "diagnostic only; do not run]"
+        )
+        for row, why in withheld[:5]:
+            out.append(f"  - {str(row[0])[:8]}: {why[:150]}")
 
     if pressure:
         out.append("")
@@ -2238,11 +2933,20 @@ _EXEC_SURFACE = """
 
 def _create_card(*, title: str, body: str, assignee: str, key: str,
                  dry_run: bool, priority: int = 0,
-                 max_runtime: str | None = None) -> str | None:
+                 max_runtime: str | None = None,
+                 active_family_prefix: str | None = None) -> str | None:
     """칸반 카드 하나. **같은 주기에 두 번 돌아도 카드는 하나다**(idempotency-key).
 
     중복 카드는 같은 실험을 두 번 사는 것과 같다 - 공장의 존재 이유에 반한다.
     """
+    if not dry_run and active_family_prefix:
+        active = _active_card_by_key_prefix(
+            active_family_prefix, fail_closed=True)
+        if active:
+            print(f"  {title} skipped - active family member: {active}",
+                  flush=True)
+            return None
+
     argv = ["docker", "exec", "-u", "1000", "-i", KANBAN_CLI_CONTAINER,
             "hermes", "kanban", "create", title,
             "--assignee", assignee,
@@ -2349,7 +3053,8 @@ def _unresolved_card(owner: str, scope: str) -> str | None:
     return None
 
 
-def _active_card_by_key_prefix(prefix: str) -> str | None:
+def _active_card_by_key_prefix(
+        prefix: str, *, fail_closed: bool = False) -> str | None:
     """Return one ready/running card whose idempotency key starts with *prefix*.
 
     Time-bucket idempotency prevents duplicates inside one bucket, but it does
@@ -2358,20 +3063,29 @@ def _active_card_by_key_prefix(prefix: str) -> str | None:
     card at a time, so a second active scout would only duplicate discovery
     without increasing the executable-lead production rate.
 
-    Board-read failures are fail-open: the hourly idempotency key still bounds
-    duplication, while a transient read failure must not stop discovery.
+    A ready card is live only for a bounded queue residence; a running card is
+    live while its heartbeat is fresh. Board-read failures are fail-open: the
+    hourly idempotency key still bounds duplication, while a transient read
+    failure must not stop discovery.
     """
     try:
         rows = _board_rows(
             "select id, status, idempotency_key from tasks "
             "where idempotency_key like ? "
             "  and status in ('ready','running') "
+            "  and (case when status = 'running' "
+            "            then coalesce(last_heartbeat_at, started_at, created_at) "
+            "            else created_at end) >= "
+            "      cast(strftime('%s','now') as integer) - ? "
             "order by created_at asc limit 1",
-            (prefix + "%",),
+            (prefix + "%", ACTIVE_DISCOVERY_CARD_TTL_SECONDS),
         )
     except Exception as exc:  # noqa: BLE001
-        print(f"  board lookup failed - active-card guard skipped "
+        disposition = "dependency failed closed" if fail_closed else "guard skipped"
+        print(f"  board lookup failed - {disposition} "
               f"({type(exc).__name__})", flush=True)
+        if fail_closed:
+            return f"UNKNOWN_BOARD_STATE({type(exc).__name__})"
         return None
     if not rows:
         return None
@@ -2379,9 +3093,47 @@ def _active_card_by_key_prefix(prefix: str) -> str | None:
     return f"{row[0]}({row[1] if len(row) > 1 else '?'})"
 
 
+def _card_status_by_idempotency_key(
+        key: str, *, fail_closed: bool = False) -> str | None:
+    """Return the exact bucket card status without reminting a terminal card."""
+    try:
+        rows = _board_rows(
+            "select status from tasks where idempotency_key = ? "
+            "order by created_at desc limit 1", (key,))
+    except Exception as exc:  # noqa: BLE001
+        disposition = "dependency failed closed" if fail_closed else "ignored"
+        print(f"  board exact-key lookup failed - {disposition} "
+              f"({type(exc).__name__})", flush=True)
+        if fail_closed:
+            return f"UNKNOWN_BOARD_STATE({type(exc).__name__})"
+        return None
+    return str(rows[0][0]).strip().lower() if rows else None
+
+
+_TERMINAL_BREEDER_CARD_STATUSES = frozenset({"done", "blocked", "archived"})
+
+
+def _breeder_blocks_planner(*, breeder_needed: bool,
+                            active_breeder: str | None,
+                            bucket_status: str | None) -> bool:
+    """Wait for a live/new breeder, but consume after this bucket terminated.
+
+    The low-watermark can remain true even after a successful batch (for
+    example six accepted candidates against a target of eight).  Treating that
+    condition alone as a dependency made every subsequent cycle rediscover the
+    same terminal idempotency key and defer Planner forever.
+    """
+    if active_breeder:
+        return True
+    if not breeder_needed:
+        return False
+    return bucket_status not in _TERMINAL_BREEDER_CARD_STATUSES
+
+
 def _should_schedule_planner(research_brief: str,
                              executable_unused: int | None,
-                             intraday_formula_unused: int | None) -> bool:
+                             intraday_formula_unused: int | None,
+                             breeder_pending: bool = False) -> bool:
     """Consume only after the primary intraday producer has material.
 
     The research profile executes one card at a time.  Scheduling a planner
@@ -2391,16 +3143,64 @@ def _should_schedule_planner(research_brief: str,
     next 30-minute planner bucket.  The aggregate count can be positive solely
     because daily leads remain.  The Planner contract prioritizes event-time and
     refuses a daily fallback when that lane is empty, so both counts must be
-    non-empty.  A low watermark is still not an empty queue: one v3 formula is
-    enough to let Planner consume while Scout replenishes the population.
+    non-empty.  A low watermark is still not an empty queue: one
+    current-contract formula is enough to let Planner consume while Scout
+    replenishes the population.
 
-    ``None`` means the count could not be measured and is fail-closed.
+    ``None`` means the count could not be measured and is fail-closed.  An
+    active or newly scheduled breeder is also a dependency: Planner must read
+    the post-breeder ledger, not the snapshot captured before those revisions
+    existed.
     """
-    return (bool(str(research_brief or "").strip())
+    return (not breeder_pending
+            and bool(str(research_brief or "").strip())
             and executable_unused is not None
             and intraday_formula_unused is not None
             and int(executable_unused) > 0
             and int(intraday_formula_unused) > 0)
+
+
+def _should_schedule_formula_breeder(
+        starvation: str,
+        intraday_formula_unused: int | None,
+        intraday_evolution_parents: int | None) -> bool:
+    """Breed when current V2 stock is low and a migration parent exists."""
+    return (bool(str(starvation or "").strip())
+            and intraday_formula_unused is not None
+            and intraday_evolution_parents is not None
+            and int(intraday_evolution_parents) > 0
+            and int(intraday_formula_unused) < INTRADAY_FORMULA_LEADS_LOW)
+
+
+def _should_schedule_scout(
+        starvation: str,
+        breeder_needed: bool,
+        intraday_formula_unused: int | None) -> bool:
+    """Keep a bounded discovery fallback when migration cannot refill V2.
+
+    A broad legacy-parent count proves provenance, not that a parent can be
+    parsed into a submission-ready child.  When the current queue is empty (or
+    cannot be measured), schedule Scout alongside the breeder so one malformed
+    legacy parent cannot monopolize every hourly cycle.
+    """
+    return (bool(str(starvation or "").strip())
+            and (not breeder_needed
+                 or intraday_formula_unused is None
+                 or int(intraday_formula_unused) <= 0))
+
+
+def _safe_queue_measurement(conn, loader, *, label: str) -> int | None:
+    """Read one queue counter without letting a broken metric stop recovery."""
+    try:
+        return int(loader(conn))
+    except Exception as exc:  # noqa: BLE001 - measurement is not execution
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001 - preserve the original diagnosis
+            pass
+        print(f"  queue measurement failed ({label}): "
+              f"{type(exc).__name__}", flush=True)
+        return None
 
 
 def _board_rows(sql: str, params: tuple = ()) -> list[tuple]:
@@ -2768,6 +3568,11 @@ _SQL_NEEDS_EXPERIMENT = """
 select h.hypothesis_id::text, left(h.title, 60)
   from quant.hypotheses h
  where h.status = 'PROPOSED'
+   -- Never enqueue an implicit-window intraday hypothesis into the V12 worker.
+   -- It must first become a new, provenance-linked V2 child proposal.
+   and (coalesce(h.expected_edge->>'research_lane',
+                 'DAILY_CROSS_SECTIONAL') <> 'INTRADAY_EVENT'
+        or h.expected_edge->>'feature_window_contract_version' = %s)
    -- 이미 대기·실행 중인 주문이 있으면 다시 넣지 않는다. enqueue 도 막지만,
    -- 여기서 거르면 매 주기 "거부됨" 이 로그를 채우지 않는다.
    and not exists (select 1 from quant.experiment_jobs j
@@ -2802,27 +3607,31 @@ def _structurally_blocked(conn, hypothesis_ids: list) -> dict:
     try:
         sys.path.insert(0, str(_ROOT / "departments" / "04-quant-backtest" / "pipeline"))
         pass  # feasibility 는 아래에서 모양별로 직접 대조한다
-        from data_resolution import manifest_index          # noqa: PLC0415
+        from data_resolution import (DERIVED_FROM,          # noqa: PLC0415
+                                     manifest_index)
     except Exception:  # noqa: BLE001
         return {}
 
     out: dict = {}
     try:
-        datasets = {f"{n}/{v}" for n, v, _ in manifest_index(conn)}
-        covered: set = set()
-        for _n, _v, srcs in manifest_index(conn):
-            covered |= set(srcs or {})
-        # ▶ 유도본으로 대체 가능한 원시도 **덮인 것으로 본다** (2026-08-12)
-        #   `resolve` 는 `market_quotes` 요구를 `microstructure_features` 로
-        #   잇는다(DERIVED_FROM). 여기서 그걸 모르면 발주 게이트가 실제로는
-        #   돌 수 있는 가설을 보류한다 - 같은 표를 봐야 판정이 일치한다.
-        try:
-            from data_resolution import DERIVED_FROM   # noqa: PLC0415
+        strict_index = manifest_index(conn)
+        intraday_index = manifest_index(
+            conn, research_lane="INTRADAY_EVENT")
+
+        def execution_surface(index):
+            datasets = {f"{n}/{v}" for n, v, _ in index}
+            covered: set = set()
+            for _n, _v, srcs in index:
+                covered |= set(srcs or {})
+            # ▶ 유도본으로 대체 가능한 원시도 **덮인 것으로 본다**
+            #   `resolve` 와 발주 게이트가 같은 표를 봐야 판정이 일치한다.
             for derived, raws in DERIVED_FROM.items():
                 if derived in covered:
                     covered |= set(raws)
-        except Exception:  # noqa: BLE001 - 못 읽으면 좁게 본다(막는 쪽이 안전)
-            pass
+            return datasets, covered
+
+        strict_surface = execution_surface(strict_index)
+        intraday_surface = execution_surface(intraday_index)
         with conn.cursor() as cur:
             cur.execute(
                 "select hypothesis_id::text, expected_edge, required_data_products "
@@ -2832,6 +3641,10 @@ def _structurally_blocked(conn, hypothesis_ids: list) -> dict:
         from experiment_orchestrator import STRATEGY_CATALOG  # noqa: PLC0415
 
         for hid, edge, req in rows:
+            lane = str((edge or {}).get("research_lane") or "").upper()
+            datasets, covered = (intraday_surface
+                                 if lane == "INTRADAY_EVENT"
+                                 else strict_surface)
             # ▶ `required_data_products` 는 **두 모양**이다 - 옛 가설은
             #   `["krx-basket-daily/v1"]`(데이터셋 이름 목록), 새 가설은
             #   `{"tables": [...], "min_history_days": N}`(원천 요구). 한 모양만
@@ -2876,11 +3689,19 @@ def _structurally_blocked(conn, hypothesis_ids: list) -> dict:
 
 def _edge_execution_rejections(edge: dict, strategy_catalog) -> list[str]:
     """Validate an expected edge against the runner selected by its lane."""
-    lane = str((edge or {}).get("research_lane") or "").upper()
+    lane = str((edge or {}).get("research_lane") or "").strip().upper()
+    allowed_lanes = {"", "DAILY_CROSS_SECTIONAL", "INTRADAY_EVENT"}
+    if lane not in allowed_lanes:
+        return [
+            f"unsupported research_lane={edge.get('research_lane')!r}; "
+            f"expected one of {sorted(allowed_lanes)}"
+        ]
     if lane == "INTRADAY_EVENT":
         try:
-            from intraday_experiment_runner import config_from_edge  # noqa: PLC0415
-            config_from_edge(edge)
+            from intraday_experiment_runner import (  # noqa: PLC0415
+                validate_current_explicit_v2_execution_edge,
+            )
+            validate_current_explicit_v2_execution_edge(edge)
             return []
         except (ImportError, TypeError, ValueError) as exc:
             return [f"인트라데이 실행 계약이 거부한다: {exc}"]
@@ -2893,7 +3714,9 @@ def _edge_execution_rejections(edge: dict, strategy_catalog) -> list[str]:
                 f"사용 가능: {', '.join(sorted(strategy_catalog))}"]
     try:
         from config_binding import rejection_reasons  # noqa: PLC0415
-        return rejection_reasons({"expected_edge": edge})
+        daily_edge = dict(edge or {})
+        daily_edge.pop("research_lane", None)
+        return rejection_reasons({"expected_edge": daily_edge})
     except Exception:  # noqa: BLE001 - 진단을 못 읽었다고 실행을 막지는 않는다
         return []
 
@@ -3046,6 +3869,14 @@ def _enact_top_move(conn, *, dry_run: bool = False) -> int:
             return 0
         moves = allocator.plan(conn, wider_dataset=wider, wider_days=days)
     except Exception as exc:  # noqa: BLE001 - 못 세면 아무것도 안 둔다
+        # A database parse/execution error leaves psycopg2's transaction in
+        # INERROR.  This helper deliberately fails open, so it must also clear
+        # that state before _dispatch_experiments performs its ordering query
+        # on the same connection.  Everything before this point is read-only.
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001 - preserve the original diagnosis
+            pass
         print(f"  배분자 실행 실패 - 자동 등록 생략: {type(exc).__name__}",
               flush=True)
         return 0
@@ -3066,6 +3897,63 @@ def _enact_top_move(conn, *, dry_run: bool = False) -> int:
     return 0
 
 
+def _retire_superseded_intraday_hypotheses(
+        conn, *, dry_run: bool = False) -> int:
+    """Retire immutable legacy PROPOSED rows with typed durable evidence.
+
+    Current queue selectors intentionally do not execute a legacy contract.
+    Without this transition those rows disappear from every selector while
+    remaining PROPOSED forever.  A CANCELLED audit job records why no evaluator
+    was launched; active jobs are left to the worker's own terminal boundary.
+    """
+    predicate = """
+        h.status = 'PROPOSED'
+        and h.expected_edge->>'research_lane' = 'INTRADAY_EVENT'
+        and h.expected_edge->>'feature_window_contract_version'
+            is distinct from %s
+        and not exists (
+              select 1 from quant.experiment_jobs active_job
+               where active_job.hypothesis_id = h.hypothesis_id
+                 and active_job.status in ('QUEUED','LEASED'))
+    """
+    with conn.cursor() as cur:
+        if dry_run:
+            cur.execute(
+                "select count(*) from quant.hypotheses h where " + predicate,
+                (CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT,),
+            )
+            return int((cur.fetchone() or (0,))[0] or 0)
+        cur.execute(
+            """
+            with retired as (
+                update quant.hypotheses h
+                   set status = 'REJECTED', status_changed_at = now()
+                 where """ + predicate + """
+                 returning h.hypothesis_id,
+                           coalesce(h.expected_edge->>
+                             'feature_window_contract_version', 'MISSING')
+                             as observed_contract
+            ), recorded as (
+                insert into quant.experiment_jobs (
+                    hypothesis_id, requested_by, status, failure_reason)
+                select hypothesis_id, 'factory-autopilot-contract-retirement',
+                       'CANCELLED',
+                       %s || ': observed=' || observed_contract ||
+                       '; required=' || %s
+                  from retired
+                returning job_id
+            )
+            select count(*) from recorded
+            """,
+            (CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT,
+             SUPERSEDED_INTRADAY_CONTRACT_REASON,
+             CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT),
+        )
+        retired = int((cur.fetchone() or (0,))[0] or 0)
+    conn.commit()
+    return retired
+
+
 def _dispatch_experiments(*, dry_run: bool = False, limit: int = 10) -> int:
     """PROPOSED 가설을 실험 큐에 넣는다. 반환: 실패 수(0=정상).
 
@@ -3080,9 +3968,18 @@ def _dispatch_experiments(*, dry_run: bool = False, limit: int = 10) -> int:
     conn = _conn()
     try:
         _feed_back_experiment_failures(conn)
+        retired = _retire_superseded_intraday_hypotheses(
+            conn, dry_run=dry_run)
+        if retired:
+            tag = "[dry-run] would retire" if dry_run else "retired"
+            print(f"  {tag} {retired} superseded intraday hypotheses",
+                  flush=True)
         _enact_top_move(conn, dry_run=dry_run)
         with conn.cursor() as cur:
-            cur.execute(_SQL_NEEDS_EXPERIMENT, (limit,))
+            cur.execute(
+                _SQL_NEEDS_EXPERIMENT,
+                (CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT, limit),
+            )
             rows = cur.fetchall()
         if not rows:
             return 0
@@ -3121,6 +4018,49 @@ def _dispatch_experiments(*, dry_run: bool = False, limit: int = 10) -> int:
     return 0
 
 
+_CYCLE_ADVISORY_LOCK_KEY = "factory-autopilot-scheduler-cycle-v1"
+
+
+def _serialized_factory_cycle(fn):
+    """Serialize mutating scheduler cycles across processes and containers.
+
+    Card idempotency prevents exact duplicates but cannot atomically preserve
+    the producer-before-consumer decision when two autopilot processes inspect
+    the board at the same time.  A transaction advisory lock makes that
+    decision a single-writer critical section and remains correct behind a
+    transaction-pooling proxy.  Dry-runs remain read-only and do not block the
+    live scheduler.
+    """
+    @functools.wraps(fn)
+    def wrapped(*, dry_run: bool = False):
+        if dry_run:
+            return fn(dry_run=True)
+        lock_conn = _conn()
+        try:
+            lock_cur = lock_conn.cursor()
+            lock_cur.execute(
+                "select pg_try_advisory_xact_lock(hashtextextended(%s, 0))",
+                (_CYCLE_ADVISORY_LOCK_KEY,),
+            )
+            row = lock_cur.fetchone()
+            if not bool(row and row[0]):
+                lock_conn.rollback()
+                print("  scheduler cycle skipped - another cycle owns the "
+                      "producer/consumer lock", flush=True)
+                return 0
+            result = fn(dry_run=False)
+            lock_conn.commit()
+            return result
+        except Exception:
+            lock_conn.rollback()
+            raise
+        finally:
+            lock_conn.close()
+
+    return wrapped
+
+
+@_serialized_factory_cycle
 def cycle(*, dry_run: bool = False) -> int:
     """공장 한 주기. 실패한 부서 수를 돌려준다(0이면 정상)."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H")
@@ -3191,6 +4131,11 @@ def cycle(*, dry_run: bool = False) -> int:
     starving = ""
     executable_unused: int | None = None
     intraday_formula_unused: int | None = None
+    intraday_evolution_parents: int | None = None
+    # Unknown producer state is a dependency failure, never permission for a
+    # consumer.  It becomes False only after all measurements and the active
+    # breeder board lookup complete successfully.
+    breeder_pending = True
     try:
         _sc = _conn()
         try:
@@ -3198,13 +4143,66 @@ def cycle(*, dry_run: bool = False) -> int:
             # The refill low-watermark and the consumer empty-queue gate are
             # deliberately separate.  One fresh lead is enough for Planner,
             # even though Scout should concurrently refill toward LEADS_LOW.
-            executable_unused = _executable_unused_count(_sc)
-            intraday_formula_unused = _intraday_formula_unused_count(_sc)
+            executable_unused = _safe_queue_measurement(
+                _sc, _executable_unused_count, label="executable-unused")
+            intraday_formula_unused = _safe_queue_measurement(
+                _sc, _intraday_formula_unused_count,
+                label="current-v2-formula-unused")
+            intraday_evolution_parents = _safe_queue_measurement(
+                _sc, _intraday_evolution_parent_count,
+                label="evolution-parent-count")
             ast_memory = _ast_experience_block(_sc)
         finally:
             _sc.close()
-        active_scout = _active_card_by_key_prefix("factory-scout-") if starving else None
-        if starving and not active_scout:
+        breeder_needed = _should_schedule_formula_breeder(
+            starving,
+            intraday_formula_unused,
+            intraday_evolution_parents,
+        )
+        # Query unconditionally.  A breeder may have crossed the low-watermark
+        # during its turn; scheduling a higher-priority Planner against the
+        # pre-breeder snapshot would still consume stale IDs.
+        active_breeder = _active_card_by_key_prefix(
+            "factory-formula-breeder-", fail_closed=True)
+        _bnow = datetime.now(timezone.utc)
+        _breeder_key = (
+            f"factory-formula-breeder-v1-{_bnow:%Y%m%d}T{_bnow.hour:02d}")
+        bucket_breeder_status = None
+        if breeder_needed and not active_breeder:
+            bucket_breeder_status = _card_status_by_idempotency_key(
+                _breeder_key, fail_closed=True)
+        breeder_pending = _breeder_blocks_planner(
+            breeder_needed=breeder_needed,
+            active_breeder=active_breeder,
+            bucket_status=bucket_breeder_status,
+        )
+        if breeder_needed and not active_breeder:
+            if bucket_breeder_status is None:
+                _bgeneration = _formula_breeder_generation(_bnow)
+                _create_card(
+                    title=("Formula breeder: outcome-conditioned AST "
+                           f"population {stamp}"),
+                    body=_formula_breeder_card_body(
+                        generation=_bgeneration, starvation=starving),
+                    assignee="research-department",
+                    key=_breeder_key,
+                    dry_run=dry_run, priority=2)
+            elif bucket_breeder_status in _TERMINAL_BREEDER_CARD_STATUSES:
+                print("  formula breeder bucket already terminal "
+                      f"({bucket_breeder_status}) - Planner may consume its "
+                      "persisted cohort", flush=True)
+            else:
+                print("  formula breeder deferred - exact bucket state is "
+                      f"{bucket_breeder_status}", flush=True)
+        elif active_breeder:
+            print(f"  formula breeder skipped - already active: {active_breeder}",
+                  flush=True)
+
+        scout_needed = _should_schedule_scout(
+            starving, breeder_needed, intraday_formula_unused)
+        active_scout = (_active_card_by_key_prefix("factory-scout-")
+                        if scout_needed else None)
+        if scout_needed and not active_scout:
             _now = datetime.now(timezone.utc)
             _create_card(
                 title=f"공장 스카우트 소집: 리드 수집 {stamp}",
@@ -3235,11 +4233,12 @@ def cycle(*, dry_run: bool = False) -> int:
                 # Refill at most once per UTC hour while the executable queue is
                 # dry.  The former six-hour bucket let several planner cycles
                 # consume the same exhausted leads before scouting could run.
-                # v7 requires a cost-aware BPS population; v6 still admitted
-                # dimensionless direction scores as executable net-PnL formulas.
-                key=f"factory-scout-v7-{_now:%Y%m%d}T{_now.hour:02d}",
+                # v8 exposes the v2 event/volume/depth observable surface; v7
+                # had the cost-aware formula contract but could not ask for or
+                # label these economic mutations explicitly.
+                key=f"factory-scout-v9-{_now:%Y%m%d}T{_now.hour:02d}",
                 dry_run=dry_run)
-        elif active_scout:
+        elif active_scout and scout_needed:
             print(f"  scout refill skipped - already active: {active_scout}", flush=True)
     except Exception as exc:  # noqa: BLE001
         print(f"  !! 스카우트 카드 실패: {type(exc).__name__}: {str(exc)[:150]}",
@@ -3260,7 +4259,8 @@ def cycle(*, dry_run: bool = False) -> int:
         rb = ""
         fails += 1
     if _should_schedule_planner(
-            rb, executable_unused, intraday_formula_unused):
+            rb, executable_unused, intraday_formula_unused,
+            breeder_pending=breeder_pending):
         # ▶ **기획자와 회의론자를 다른 카드로 낸다** (2026-08-11).
         #   `proposal_intake` 는 두 산출의 실행 id 가 같으면 거부한다 - 자기가
         #   낸 가설을 자기가 검토하면 서명이 무의미하기 때문이다. 한 카드에서
@@ -3337,7 +4337,8 @@ def cycle(*, dry_run: bool = False) -> int:
                   "않는다."),
             assignee=RESEARCH_ASSIGNEE,
             # v5 consumes a bounded typed cohort in one shared event replay.
-            key=f"factory-planner-v6-{pstamp}", dry_run=dry_run, priority=1)
+            key=f"factory-planner-v9-{pstamp}", dry_run=dry_run, priority=1,
+            active_family_prefix="factory-planner-v")
 
         # 회의론자 카드는 **여기서 만들지 않는다**. 기획자 산출이 아직 없는데
         # 걸면 검토할 대상이 없는 채로 돌아 빈 산출을 내거나, 없는 기획안을
@@ -3759,9 +4760,12 @@ def _check_execution_rejections_are_attributable():
                     "arg": {"op": "field", "field": "queue_imbalance_l1"},
                     "seconds": 5,
                 },
-                {"op": "field", "field": "realized_volatility_bps"},
+                {"op": "field", "field": "realized_volatility_bps",
+                 "seconds": 5},
             ],
         },
+        "feature_window_contract_version":
+            CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT,
         "semantic_plan": {
             "event": "QUOTE_IMBALANCE", "output": "TAKER_NET_PNL",
             "context": ["ALL"], "direction": "FOLLOW",
@@ -4074,6 +5078,81 @@ def _check_kind_scope_survives_instance_churn():
     print("  종류 지문이 개체 churn 견딤 OK")
 
 
+def _check_formula_breeder_live_routing() -> None:
+    """Spent parents must release Scout and hourly breeder calls must advance."""
+    import inspect
+
+    sql = _LIVE_INTRADAY_EVOLUTION_PARENTS_SQL
+    for token in (
+            "e.config->'intraday_signal_expr' =",
+            "l.ast_contract->'candidate_signal_expr'",
+            "screen_candidate->'intraday_signal_expr' =",
+            "quant.intraday_report_manifests manifest",
+            "quant.intraday_candidate_lineages primary_lineage",
+            "primary_lineage.evaluator_version",
+            "feature_window_contract_version",
+            "legacy-cohort-lookback-v1",
+            "intraday-candidate-evaluator-v12",
+            "NO_COST_FEASIBLE_ENTRY",
+            "cost_feasible_entry_possible",
+            "minimum_observed_entry_hurdle_bps",
+            "maximum_calibrated_predicted_markout_bps",
+            "ADAPTIVE_SEARCH",
+            "EVENT_TIME_HISTORICAL_ONLY",
+            "intraday-governance-report-v7",
+            "REFERENCE_INSTRUMENT_TYPE_STOCK_ONLY"):
+        assert token in sql, f"live-parent evidence boundary missing: {token}"
+    assert "v_current_experiment_outcomes" not in sql, \
+        "QA/forward-revised outcome views must not retire adaptive parents"
+
+    class _Cursor:
+        def __init__(self):
+            self.executed = ""
+
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def execute(self, query): self.executed = query
+        def fetchone(self): return (7,)
+
+    class _Conn:
+        def __init__(self): self.cur = _Cursor()
+        def cursor(self): return self.cur
+
+    conn = _Conn()
+    assert _intraday_evolution_parent_count(conn) == 7
+    assert conn.cur.executed == _LIVE_INTRADAY_EVOLUTION_PARENTS_SQL
+
+    hour = datetime(2026, 8, 18, 3, 1, tzinfo=timezone.utc)
+    same_hour = datetime(2026, 8, 18, 3, 59, tzinfo=timezone.utc)
+    next_hour = datetime(2026, 8, 18, 4, 0, tzinfo=timezone.utc)
+    generation = _formula_breeder_generation(hour)
+    assert generation == _formula_breeder_generation(same_hour)
+    assert _formula_breeder_generation(next_hour) == generation + 1
+    body = _formula_breeder_card_body(
+        generation=generation,
+        starvation="STARVING\nScout only: run agent-reach doctor and browse arXiv")
+    assert f"generation={generation}" in body
+    assert "Use only delivery_candidates" in body
+    assert "Copy each submission_template exactly" in body
+    assert "do not rename or invent candidate_signal_expr" in body
+    assert "Queue trigger" in body and "STARVING" in body
+    assert "agent-reach doctor" not in body and "browse arXiv" not in body
+
+    cyc = inspect.getsource(cycle)
+    assert "_should_schedule_formula_breeder(" in cyc
+    assert _should_schedule_formula_breeder("STARVING", 0, 1) is True
+    assert _should_schedule_formula_breeder("STARVING", 0, 0) is False
+    assert _should_schedule_formula_breeder(
+        "STARVING", INTRADAY_FORMULA_LEADS_LOW, 1) is False
+    assert _should_schedule_formula_breeder("", 0, 1) is False
+    assert _should_schedule_scout("STARVING", True, 0) is True
+    assert _should_schedule_scout("STARVING", True, 1) is False
+    assert _should_schedule_scout("STARVING", False, 1) is True
+    assert "scout_needed = _should_schedule_scout(" in cyc, \
+        "an unusable migration parent can still suppress Scout"
+    print("  formula breeder live-parent/hour routing  OK")
+
+
 def _selfcheck() -> int:
     import tempfile
 
@@ -4091,12 +5170,14 @@ def _selfcheck() -> int:
     assert "TC 0.114" in v and "top_n" in v, "IR 구조 진단이 브리핑에서 빠졌다"
     print("  통제 어휘 출처            OK")
     _check_design_gaps_and_scout_card()
+    _check_formula_breeder_live_routing()
     _check_ast_memory_reaches_scout_and_planner()
     _check_dataset_refresh_is_daily_and_ordered()
     _check_near_miss_surfaces_the_winner()
     _check_brief_blocks_run_before_close()
     _check_bottleneck_cards_are_issued_every_cycle()
     _check_quant_card_survives_empty_queue()
+    _check_quant_brief_excludes_blocked_hypotheses()
     _check_lead_health_is_surfaced()
     _check_unused_leads_come_first()
     _check_factory_enacts_its_own_top_move()
@@ -4111,7 +5192,7 @@ def _selfcheck() -> int:
     _check_research_queue_prefers_consumption()
     _check_kind_scope_survives_instance_churn()
     _check_briefed_example_actually_passes_intake()
-    print("자동 조종 21개 영역 통과. 실행은 --once / --loop")
+    print("자동 조종 22개 영역 통과. 실행은 --once / --loop")
     return 0
 
 
@@ -4144,14 +5225,37 @@ def _check_near_miss_surfaces_the_winner():
     """
     note = ("관문 4/8 통과. 남은 조항: max_drawdown -50.52% (기준 -35.0%, "
             "15.52% 모자람); pbo 미측정; fragility; bootstrap_ci 하한 -0.0029")
-    out = _near_miss(_RowsConn([
+    ids = [f"00000000-0000-0000-0000-{value:012d}" for value in range(1, 4)]
+
+    class _NearMissConn:
+        def __init__(self, batches):
+            self.batches = list(batches)
+
+        def cursor(self):
+            outer = self
+
+            class _C:
+                def __enter__(self_): return self_
+                def __exit__(self_, *args): return False
+                def execute(self_, *args, **kwargs): return None
+                def fetchall(self_):
+                    return outer.batches.pop(0) if outer.batches else []
+
+            return _C()
+
+        def rollback(self): return None
+
+    candidates = [
         ("momentum|krx_all|fwd_20d|equal_weight", note,
-         ["BEAR_FRAGILE", "SINGLE_REGIME_ONLY"]),
+         ["BEAR_FRAGILE", "SINGLE_REGIME_ONLY"], ids[0]),
         # 같은 계열의 나쁜 시도가 좋은 것을 가리면 안 된다
-        ("momentum|krx_all|fwd_20d|equal_weight", "관문 1/8 통과. 남은 조항: …", []),
+        ("momentum|krx_all|fwd_20d|equal_weight",
+         "관문 1/8 통과. 남은 조항: …", [], ids[1]),
         # 절반 미만은 근접이 아니다 - 올리지 않는다
-        ("breakout|krx_all|fwd_20d|equal_weight", "관문 2/8 통과. 남은 조항: …", []),
-    ]))
+        ("breakout|krx_all|fwd_20d|equal_weight",
+         "관문 2/8 통과. 남은 조항: …", [], ids[2]),
+    ]
+    out = _near_miss(_NearMissConn([candidates, [(value,) for value in ids]]))
     assert "momentum" in out, out
     assert "4/8" in out and "1/8" not in out, "계열 최고치가 아니라 최신을 골랐다"
     assert "breakout" not in out, "절반 미만인 계열을 근접으로 올렸다"
@@ -4159,8 +5263,9 @@ def _check_near_miss_surfaces_the_winner():
     assert "알파가" in out, "왜 이쪽이 먼저인지 설명이 없다"
 
     # 근접한 것이 없으면 **빈 문자열** - 없는 것을 지어내지 않는다
-    assert _near_miss(_RowsConn([])) == ""
-    assert _near_miss(_RowsConn([("f", "관문 2/8 통과.", [])])) == ""
+    assert _near_miss(_NearMissConn([[]])) == ""
+    assert _near_miss(_NearMissConn([[
+        ("f", "관문 2/8 통과.", [], ids[0])], [(ids[0],)]])) == ""
     # 못 읽으면 조용히 비운다(브리핑 전체를 죽이지 않는다)
     class _Boom:
         def cursor(self): raise RuntimeError("DB 없음")
@@ -4302,6 +5407,28 @@ def _check_quant_card_survives_empty_queue():
     print("  빈 큐에도 다음 수 카드   OK")
 
 
+def _check_quant_brief_excludes_blocked_hypotheses():
+    pending = [
+        ("blocked-id", "bad", "PROPOSED", {}, None, None),
+        ("runnable-id", "good", "PROPOSED", {}, None, None),
+    ]
+    runnable, withheld = _partition_pending_by_execution(
+        pending, {"blocked-id": "execution contract rejected"})
+    assert [row[0] for row in runnable] == ["runnable-id"], runnable
+    assert [(row[0], why) for row, why in withheld] == [
+        ("blocked-id", "execution contract rejected")
+    ], withheld
+
+    import ast  # noqa: PLC0415
+    source = Path(__file__).read_text(encoding="utf-8")
+    fn = next(n for n in ast.walk(ast.parse(source))
+              if isinstance(n, ast.FunctionDef) and n.name == "quant_brief")
+    body = ast.get_source_segment(source, fn) or ""
+    assert "_structurally_blocked" in body
+    assert "_partition_pending_by_execution" in body
+    print("  blocked hypothesis excluded from Hermes card OK")
+
+
 def _check_factory_enacts_its_own_top_move():
     """**공장이 1순위 수를 직접 둔다.** 에이전트를 기다리지 않는다. (2026-08-12)
 
@@ -4358,7 +5485,14 @@ def _check_unused_leads_come_first():
     assert "PREREGISTERED_NO_OOS_FIT" in contract and "CROSS_SCALE" in contract
     assert "DIRECTIONAL MARKOUT RULE" in contract
     assert "signed field on its numeric" in contract and "label it PRESSURE" in contract
-    from intraday_alpha_ast import parse as parse_intraday, unit_of as intraday_unit
+    from intraday_alpha_ast import (  # noqa: PLC0415
+        EXPLICIT_FEATURE_WINDOW_CONTRACT,
+        parse as parse_intraday,
+        unit_of as intraday_unit,
+    )
+    assert (CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT ==
+            EXPLICIT_FEATURE_WINDOW_CONTRACT), \
+        "autopilot current queue contract drifted from the deployed evaluator"
     bps_examples = [line.strip().split("=", 1)[1]
                     for line in contract.splitlines()
                     if line.strip().startswith("BPS_")]
@@ -4369,7 +5503,7 @@ def _check_unused_leads_come_first():
     assert "alpha_candidate_eligible" in _SQL_LEADS, \
         "공개 기준선이 신규 알파 후보 목록에 다시 노출된다"
     assert "MICROSTRUCTURE IS PRIMARY" in contract
-    assert "DAILY AGGREGATE" in contract and "source does" in contract
+    assert "DAILY_CROSS_SECTIONAL LANE ONLY" in contract and "source does" in contract
     assert "NOT need to ship a reusable dataset" in contract
     assert "external-validity risk" in contract and "queue position" in contract
     assert "must not be" in contract and "daily proxy" in contract
@@ -4378,12 +5512,14 @@ def _check_unused_leads_come_first():
     assert 'never "name"' in contract and '"op":"where"' in contract
     assert "[BARE_WORDS] is not JSON" in contract
     assert "genuinely non-finance" in contract and "empirical event-time" in contract
-    assert "PASSIVE_FILL_ADJUSTED_PNL" in contract
-    assert "PASSIVE_FIFO_LOWER_BOUND" in contract
-    assert "PASSIVE and PASSIVE_FIFO are invalid aliases" in contract
-    assert "execution-timing mutations" in contract and "extra turnover" in contract
-    assert "PASSIVE_FILL_ADJUSTED_PNL" in PLANNER_FORMAT
-    assert "PASSIVE_FIFO_LOWER_BOUND" in INTRADAY_PLANNER_NOTE
+    assert "TAKER only" in contract and "no candidate quota" in contract
+    assert "unordered completed-second" in contract
+    assert "normalized_quote_ofi_per_event" in contract
+    assert "Deterministically blocked sequence-dependent fields" in contract
+    assert "cross-scale mutations" in contract and "extra turnover" in contract
+    assert "TAKER만 허용" in PLANNER_FORMAT
+    assert "TAKER only" in INTRADAY_PLANNER_NOTE
+    assert "instrument_type=STOCK" in INTRADAY_PLANNER_NOTE
     assert "instrument_count" in INTRADAY_PLANNER_NOTE
     assert "UNIVERSE_KEY must be exactly krx_all" in INTRADAY_PLANNER_NOTE
     assert "not a universe" in INTRADAY_PLANNER_NOTE
@@ -4394,9 +5530,28 @@ def _check_unused_leads_come_first():
     import inspect as _inspect
     for _counter in (_executable_unused_count, _intraday_formula_unused_count,
                      _lead_health):
-        assert "p.status in ('PUBLISHED','ACCEPTED')" in \
-            _inspect.getsource(_counter), \
+        _counter_source = _inspect.getsource(_counter)
+        assert "p.status in ('PUBLISHED','ACCEPTED')" in _counter_source, \
             "REJECTED 리드가 producer/consumer queue에서 계속 사용됨으로 남는다"
+        assert "feature_window_contract_version" in _counter_source, \
+            "legacy implicit-window formula가 current V2 실행 큐를 채운다"
+    assert "feature_window_contract_version" in _SQL_LEADS, \
+        "Planner가 legacy implicit-window formula를 직접 소비한다"
+    for _dispatch_sql in (_SQL_PENDING, _SQL_NEEDS_EXPERIMENT):
+        assert "feature_window_contract_version" in _dispatch_sql, \
+            "legacy implicit-window hypothesis가 V12 대기/발주 큐로 우회한다"
+    assert "CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT" in \
+        _inspect.getsource(quant_brief), \
+        "V12 대기 브리핑 SQL에 current contract parameter를 바인딩하지 않는다"
+    assert "CURRENT_INTRADAY_FEATURE_WINDOW_CONTRACT" in \
+        _inspect.getsource(_dispatch_experiments), \
+        "V12 발주 SQL에 current contract parameter를 바인딩하지 않는다"
+    assert ("legacy-cohort-lookback-v1" in
+            _LIVE_INTRADAY_EVOLUTION_PARENTS_SQL), \
+        "legacy formula를 V2 migration/evolution 부모에서 잃었다"
+    assert "primary_lineage.evaluator_version" in \
+        _LIVE_INTRADAY_EVOLUTION_PARENTS_SQL, \
+        "cross-version evaluator evidence can retire the same JSON AST"
     assert "proposal_review_outcomes" in _SQL_LEADS and "STOP" in _SQL_LEADS, \
         "스켑틱 STOP 리드를 소비 완료로 보지 않는다"
 
@@ -4467,7 +5622,9 @@ def _check_lead_health_is_surfaced():
     # 못 세면 안 적는다
     class _Boom:
         def cursor(self): raise RuntimeError("표 없음")
-    assert _lead_health(_Boom()) == ""
+    failed_health = _lead_health(_Boom())
+    assert "QUEUE HEALTH UNKNOWN - FAIL CLOSED" in failed_health
+    assert "Scout recovery card" in failed_health
 
     # **브리핑 조립부가 실제로 부르는가** - 안 부르면 검사가 장식이다
     import ast
@@ -4550,7 +5707,7 @@ def _check_design_gaps_and_scout_card():
         "재료가 말라도 스카우트 전용 카드가 안 나간다"
     # 공급 병목 파훼 두 짝 (2026-08-13): 기획 카드 30분 버킷 + 다중 블록 제출.
     # 실행 6분 vs 공급 1건/시간 실측 - 버킷이 시간으로 돌아가면 재발이다.
-    assert "factory-planner-v6-{pstamp}" in cyc, "기획 카드가 시간 버킷으로 돌아갔다"
+    assert "factory-planner-v9-{pstamp}" in cyc, "기획 카드가 시간 버킷으로 돌아갔다"
     assert "서로 다른 계열" in cyc and "블록 3개" in cyc, "다중 블록 제출 지시가 빠졌다"
     assert "정확히 한" in cyc and "INTRADAY_EVENT" in cyc, \
         "event-time 리드가 있어도 기획자가 일봉만 고를 수 있다"
@@ -4603,6 +5760,9 @@ def _check_research_queue_prefers_consumption():
     assert _should_schedule_planner("brief", 1, 1) is True
     assert _should_schedule_planner("brief", 3, 1) is True, \
         "low-watermark queue was mistaken for an empty queue"
+    assert _should_schedule_planner(
+        "brief", 3, 1, breeder_pending=True) is False, \
+        "planner consumed the pre-breeder snapshot while producer was active"
     assert _should_schedule_planner("brief", 9, 0) is False, \
         "daily leads can still steal the single worker slot from intraday Scout"
     assert _should_schedule_planner("brief", 0, 1) is False
@@ -4614,8 +5774,12 @@ def _check_research_queue_prefers_consumption():
     assert "intraday_formula_unused" in cyc
     assert "_should_schedule_planner(" in cyc, \
         "planner can still consume an empty primary-lane queue"
-    assert "factory-planner-v6-" in cyc, \
+    assert "factory-planner-v9-" in cyc, \
         "corrected scheduling can be absorbed by an old planner key"
+    assert 'active_family_prefix="factory-planner-v"' in cyc, \
+        "planner key version bump can bypass an older active family"
+    assert "dry_run=dry_run, priority=2" in cyc, \
+        "breeder no longer outranks a planner created by a scheduler race"
     assert "priority=1" in cyc, "planner priority was lost after replenishment"
     print("  research producer-before-consumer dependency OK")
 
@@ -4643,7 +5807,7 @@ def _check_ast_memory_reaches_scout_and_planner():
         "Event와 observable의 결정론 매핑이 스카우트에게 안 보인다"
     assert "all 12 attempted candidate ASTs" in contract, \
         "blocked 문헌 몇 건만 적재하고 population 작업을 끝낼 수 있다"
-    assert "factory-scout-v7-" in cyc, \
+    assert "factory-scout-v9-" in cyc, \
         "새 population 계약이 완료된 구버전 카드에 흡수된다"
     print("  AST 경험 기억→검색·기획   OK")
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import sqlite3
@@ -91,7 +92,10 @@ class DiscordIdempotencyTests(unittest.TestCase):
             gateway = home / "gateway"
             gateway.mkdir()
             path = gateway / "discord_message_recovery.db"
-            with sqlite3.connect(path) as conn:
+            # sqlite3.Connection's context manager commits/rolls back but does
+            # not close the handle.  Keep Windows/OneDrive test cleanup from
+            # racing an open database file by owning the close explicitly.
+            with closing(sqlite3.connect(path)) as conn:
                 conn.execute(
                     """
                     CREATE TABLE discord_idempotency_inbound (

@@ -5,14 +5,10 @@
 근거: 재일님 지시 2026-08-02 "종목수 늘려버리자 전종목으로" +
       "거래정지 관리종목 제외".
 
-▶ 감시 바스켓(news_watchlist)과 다른 파일인 이유
-  층마다 감당할 수 있는 규모가 다르다(실측 2026-08-02):
-    NAVER 뉴스   전종목이면 종목당 하루 8회(간격 3시간) - 지연이 분에서
-                 시간 단위로 악화된다. 감시 바스켓 350 을 유지한다.
-    LS 실시간    전종목 5,532구독 = 소켓 28개. 계정 동시접속 한도 미확인.
-    DART 계열    회사당 1호출, 일 한도의 6% - **여유. 여기를 전종목으로.**
-  하나의 파일로 전 층을 몰면 가장 약한 층이 전체를 끌어내린다. 그래서
-  파일을 나누고 각 층이 감당 가능한 것을 쓴다.
+▶ 범위
+  LS 실시간 호가·체결과 일봉 백필이 같은 국내 주식 전종목 파일을 사용한다.
+  뉴스·공시·재무 수집 범위에는 재사용하지 않는다. 비시장 정보는 필요할 때
+  MCP로 조회한다.
 
 ▶ 제외 규칙
   research.symbol_restrictions 의 **모든 사유**를 뺀다. 재일님이 지목한
@@ -85,11 +81,32 @@ def build() -> int:
                 select isym.symbol
                 from reference.instruments i
                 join reference.instrument_symbols isym
-                  on isym.instrument_id = i.instrument_id and isym.is_primary
-                where i.instrument_type = 'STOCK' and i.status = 'ACTIVE'
+                  on isym.instrument_id = i.instrument_id
+                 and isym.provider = 'LS'
+                 and isym.market = 'KRX'
+                 and isym.symbol_type = 'TRADING'
+                 and isym.is_primary
+                 and isym.valid_from <= now()
+                 and (isym.valid_to is null or isym.valid_to > now())
+                where upper(i.market) = 'KRX'
+                  and upper(i.asset_class) = 'EQUITY'
+                  and upper(i.instrument_type) = 'STOCK'
+                  and upper(i.status) = 'ACTIVE'
+                  and upper(i.venue) in ('KOSPI', 'KOSDAQ')
+                  and lower(coalesce(i.metadata->>'is_spac', 'false')) <> 'true'
                 order by isym.symbol
             """)
             all_syms = [r[0] for r in cur.fetchall()]
+            duplicate_symbols = sorted(
+                symbol for symbol in set(all_syms) if all_syms.count(symbol) > 1
+            )
+            if duplicate_symbols:
+                print(
+                    "현재 LS/KRX 대표 심볼 매핑이 중복되어 universe를 만들 수 없다: "
+                    f"{duplicate_symbols}",
+                    flush=True,
+                )
+                return 1
 
             cur.execute("""
                 select reason, symbol from research.symbol_restrictions
@@ -125,7 +142,7 @@ def _check_render():
     assert "HALTED" in body and "120" in body, "제외 내역이 안 보인다"
     assert "최종 2종목" in body
     assert body.rstrip().endswith("005930"), "종목이 마지막에 와야 파서가 읽는다"
-    # 주석 줄은 전부 # 로 시작해야 파서(parse_watchlist_file)가 건너뛴다
+    # 주석 줄은 전부 # 로 시작해야 parse_symbol_file 이 건너뛴다
     for line in body.splitlines():
         if line and not line[0].isdigit():
             assert line.startswith("#"), f"주석이 아닌 비종목 줄: {line!r}"
@@ -134,11 +151,11 @@ def _check_render():
 
 def _check_parser_roundtrip():
     """생성한 파일을 기존 파서가 그대로 읽어야 한다 - 형식이 갈리면 조용히 0종목."""
-    from news_watch_service import parse_watchlist_file
+    from symbol_universe import parse_symbol_file
 
     body = render(["000660", "005930", "035720"], as_of="2026-08-02",
                   excluded={"HALTED": 1})
-    got = list(parse_watchlist_file(body))
+    got = list(parse_symbol_file(body))
     assert got == ["000660", "005930", "035720"], got
     print("  기존 파서 왕복           OK")
 

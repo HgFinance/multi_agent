@@ -109,4 +109,4 @@ files:
   quant_backtest_department: departments/04-quant-backtest/hermes/config.yaml
   accounting_portfolio_department: departments/05-accounting-portfolio/hermes/config.yaml
   qa_department: departments/06-ai-qa-audit/hermes/config.yaml
-  news_script: departments/01-research/collectors/news.py
+  research_mcp: departments/01-research/api/mcp_server.py

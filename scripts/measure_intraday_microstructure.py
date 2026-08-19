@@ -31,6 +31,7 @@ from intraday_microstructure import (  # noqa: E402
     source_quality,
     walk_forward_linear_score,
 )
+from stock_universe import assert_stock_instrument_ids  # noqa: E402
 
 
 def _timestamp(value: str) -> datetime:
@@ -55,6 +56,42 @@ def _connection():
     if not dsn:
         raise RuntimeError("TIMESCALE_DATABASE_URL is not configured")
     return psycopg2.connect(dsn, connect_timeout=20)
+
+
+def _reference_connection():
+    """Open the reference plane used to prove product identity."""
+    import psycopg2
+
+    dsn = os.getenv("DATABASE_URL")
+    if not dsn:
+        try:
+            collectors = ROOT / "departments" / "01-research" / "collectors"
+            sys.path.insert(0, str(collectors))
+            from source_registry import load_project_env
+            dsn = load_project_env(ROOT).get("DATABASE_URL")
+        except (FileNotFoundError, KeyError, ImportError):
+            dsn = None
+    if not dsn:
+        raise RuntimeError(
+            "DATABASE_URL is required for reference-plane stock validation")
+    return psycopg2.connect(dsn, connect_timeout=20)
+
+
+def _begin_read_only_transaction(connection) -> None:
+    """Scope the safety guard to this transaction, never the pooled session."""
+    with connection.cursor() as cursor:
+        # DATABASE_URL can be Supavisor transaction mode (6543).  A session-
+        # level read-only default survives on the server backend and can poison
+        # an unrelated writer after the backend returns to the pool.  SET
+        # TRANSACTION disappears at rollback.
+        cursor.execute("SET TRANSACTION READ ONLY")
+
+
+def _rollback_and_close(connection) -> None:
+    try:
+        connection.rollback()
+    finally:
+        connection.close()
 
 
 def _instrument_id(conn, symbol_or_id: str) -> str:
@@ -100,9 +137,18 @@ def run(args: argparse.Namespace) -> dict:
     cutoff = args.as_known_at or (read_end + timedelta(days=1))
 
     conn = _connection()
+    meta_conn = None
     try:
-        conn.set_session(readonly=True, autocommit=True)
+        _begin_read_only_transaction(conn)
         instrument_id = _instrument_id(conn, args.symbol)
+        # A UUID or market.symbol_map row is only a transport identity.  Prove
+        # the product is an ACTIVE KRX EQUITY/STOCK over the requested session
+        # before reading a single quote or computing a diagnostic score.
+        meta_conn = _reference_connection()
+        _begin_read_only_transaction(meta_conn)
+        stock_scope = assert_stock_instrument_ids(
+            meta_conn, [instrument_id],
+            first_session=local_start.date(), last_session=local_end.date())
         quality = source_quality(
             conn,
             instrument_id=instrument_id,
@@ -118,7 +164,11 @@ def run(args: argparse.Namespace) -> dict:
             as_known_at=cutoff,
         )
     finally:
-        conn.close()
+        try:
+            if meta_conn is not None:
+                _rollback_and_close(meta_conn)
+        finally:
+            _rollback_and_close(conn)
 
     samples = build_samples(quotes, trades, spec, start=start, end=end)
     signals = {
@@ -157,6 +207,7 @@ def run(args: argparse.Namespace) -> dict:
     return {
         "symbol": args.symbol,
         "instrument_id": instrument_id,
+        "stock_scope": stock_scope,
         "start": start.isoformat(),
         "end": end.isoformat(),
         "raw_quotes": len(quotes),

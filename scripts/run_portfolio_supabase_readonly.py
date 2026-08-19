@@ -1,4 +1,8 @@
-"""Run the portfolio pipeline from Supabase read-only data."""
+"""Run the portfolio pipeline from private control-database read-only data.
+
+The filename is retained for operator compatibility; it no longer reads
+``SUPABASE_DATABASE_URL`` or persistent ``research.documents`` rows.
+"""
 
 from __future__ import annotations
 
@@ -18,7 +22,7 @@ if str(ROOT) not in sys.path:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run portfolio recommendation with Supabase read-only PIT inputs"
+        description="Run portfolio recommendation with control-database read-only PIT inputs"
     )
     parser.add_argument(
         "--profile-json",
@@ -73,15 +77,15 @@ def _load_profile(profile_json: str | None, profile_file: Path | None) -> dict:
 
 
 def _load_readonly_adapter() -> Any:
-    module_name = "portfolio_supabase_readonly_cli"
+    module_name = "portfolio_control_db_readonly_cli"
     path = ROOT / "departments/05-accounting-portfolio/portfolio/supabase_readonly.py"
     spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
-        raise SystemExit("Supabase read-only adapter is unavailable")
+        raise SystemExit("control-database read-only adapter is unavailable")
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
-    return module.SupabaseReadOnlyAdapter()
+    return module.ControlDbReadOnlyAdapter()
 
 
 def _replay_digest(result: dict[str, Any]) -> str:
@@ -101,7 +105,7 @@ def _replay_digest(result: dict[str, Any]) -> str:
                 for item in context.get("candidates", [])
                 if isinstance(item, dict)
             ],
-            "research_refs": context.get("research", {}).get("evidence_refs", []),
+            "research_mode": context.get("research", {}).get("status"),
             "market_count": len(context.get("market", {}).get("snapshots", [])),
         },
     }
@@ -151,7 +155,7 @@ async def _main_async_runtime(argv: list[str] | None = None) -> int:
                     "as_of": context.get("as_of"),
                     "quality_status": context.get("quality_status"),
                     "candidate_count": len(context.get("candidates", [])),
-                    "research_count": len(context.get("research", {}).get("documents", [])),
+                    "research_mode": context.get("research", {}).get("status"),
                     "market_count": len(context.get("market", {}).get("snapshots", [])),
                     "reasons": context.get("reasons", []),
                     "data_diagnostics": context.get("data_diagnostics", {}),

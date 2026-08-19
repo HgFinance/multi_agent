@@ -20,7 +20,7 @@
  * 검증하지 못한다. 렌더링만 `.tsx`에 남긴다.
  */
 
-import { BFF } from "./ceoClient";
+import { BFF, bffFetch } from "./bffClient";
 import {
   presetFor,
   findConstraintViolations,
@@ -31,7 +31,7 @@ import {
   type MandatePreset,
   type PolicyConstraintViolation,
 } from "./mandatePresets";
-import { currentFundId, readStoredAccount, withAccountHeaders } from "./currentAccount";
+import { currentFundId } from "./currentFund";
 import type {
   AssetClassId,
   LiquidityNeed,
@@ -561,14 +561,14 @@ export class MandateSubmissionError extends Error {}
 async function bffJson<T>(path: string, init?: RequestInit): Promise<{ status: number; body: T | null }> {
   let response: Response;
   try {
-    response = await fetch(`${BFF}${path}`, {
+    response = await bffFetch(path, {
       ...init,
       cache: "no-store",
-      headers: withAccountHeaders({
+      headers: {
         Accept: "application/json",
         ...(init?.body ? { "Content-Type": "application/json" } : {}),
         ...init?.headers,
-      }),
+      },
     });
   } catch {
     throw new MandateSubmissionError(`BFF(${BFF})에 연결하지 못했습니다.`);
@@ -771,9 +771,8 @@ export interface MandateSubmitResult {
 }
 
 /**
- * 지침 저장 버튼의 진입점. `currentAccount`의 선택된 계정을 그대로 쓴다 -
- * 호출부가 user_id를 따로 넘기지 않는 이유는 `withAccountHeaders`와 같다:
- * 한 곳에서만 계정을 읽어야 다른 사용자로 잘못 나가는 경로가 안 생긴다.
+ * 지침 저장 버튼의 진입점. verifiedUserId는 AuthProvider의 Supabase session
+ * subject이고, BFF가 같은 subject와 Fund membership을 다시 검증한다.
  *
  * 쓰기가 둘이다 — 현재 Mandate metadata(거버넌스)와 적합성 프로필. 순서는 정책이 먼저다:
  * 정책이 주 산출물이고, 적합성 저장소 장애가 거버넌스 저장을 막는 것은 방향이
@@ -785,6 +784,7 @@ export interface MandateSubmitResult {
 export async function submitMandateDraft(
   draft: MandateDraft,
   objectiveText: string,
+  verifiedUserId: string,
 ): Promise<MandateSubmitResult> {
   // 네트워크를 타기 전에 먼저 막는다 - 서버가 어차피 같은 제약으로 거절하지만,
   // 여기서 잡으면 어느 슬라이더가 문제인지 구체적으로 말해줄 수 있다.
@@ -801,8 +801,7 @@ export async function submitMandateDraft(
       "현재 계정에 연결된 Fund가 없습니다. 계정을 전환하거나 관리자에게 문의하세요.",
     );
   }
-  const account = readStoredAccount();
-  const { mandateId, existing } = await lookupOrCreateMandate(fundId, account.userId);
+  const { mandateId, existing } = await lookupOrCreateMandate(fundId, verifiedUserId);
   const policy = mergePolicyForSave(draft, existing?.policy ?? null);
 
   const nowIso = new Date().toISOString();
@@ -819,14 +818,14 @@ export async function submitMandateDraft(
       // Governance API가 최종 metadata를 만들 때 top-level 값을 사용하므로 별도로
       // 전달한다. policy 안에만 두면 기본값 `{}`가 기존 실행 규칙을 덮는다.
       execution_rules: policy.execution_rules ?? {},
-      created_by: account.userId,
+      created_by: verifiedUserId,
     }),
   });
   if ((status !== 200 && status !== 201) || !body) {
     throw new MandateSubmissionError(errorMessage(body, status));
   }
 
-  return { saved: true, profileError: await saveInvestorProfile(draft, fundId, nowIso) };
+  return { saved: true, profileError: await saveInvestorProfile(draft, fundId, nowIso, verifiedUserId) };
 }
 
 /**
@@ -838,9 +837,9 @@ async function saveInvestorProfile(
   draft: MandateDraft,
   fundId: string,
   asOf: string,
+  verifiedUserId: string,
 ): Promise<string | undefined> {
-  const account = readStoredAccount();
-  const profile = draftToInvestorProfile(draft, account.userId, fundId, asOf);
+  const profile = draftToInvestorProfile(draft, verifiedUserId, fundId, asOf);
   if (!profile) return "투자 기간·유동성 응답이 없어 적합성 프로필은 저장하지 않았습니다.";
 
   try {

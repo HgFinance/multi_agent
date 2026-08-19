@@ -3,7 +3,8 @@
  * UI components can consume this without knowing Hermes or Kanban internals.
  */
 
-import { BFF } from "./ceoClient";
+import { bffFetch, getAuthenticatedSubject } from "./bffClient";
+import { subscribeAuthenticatedSse } from "./sseClient";
 
 export type MirrorSource = "web" | "discord";
 export type MirrorLane = "execution" | "evaluation";
@@ -58,17 +59,21 @@ export type CeoMirrorIngress = {
   request_id: string;
   source: MirrorSource;
   source_message_id: string;
-  actor_id: string;
-  actor_type?: "user" | "bot" | "agent" | "system";
   mirrored?: boolean;
 };
 
+export function withVerifiedCeoActor(input: CeoMirrorIngress, actorId: string) {
+  return { ...input, actor_id: actorId, actor_type: "user" as const };
+}
+
 export async function submitCeoMirror(input: CeoMirrorIngress) {
-  const response = await fetch(`${BFF}/ui/ceo/ingress`, {
+  const actorId = await getAuthenticatedSubject();
+  const response = await bffFetch("/ui/ceo/ingress", {
     method: "POST",
     cache: "no-store",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify(input),
+    // The authenticated subject wins even if an untyped caller tries to inject identity fields.
+    body: JSON.stringify(withVerifiedCeoActor(input, actorId)),
   });
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) throw new Error(`CEO mirror ingress failed (HTTP ${response.status})`);
@@ -84,7 +89,7 @@ export async function submitCeoMirror(input: CeoMirrorIngress) {
 export async function readCeoMirrorEvents(requestId: string, after?: string) {
   const params = new URLSearchParams({ request_id: requestId });
   if (after) params.set("after", after);
-  const response = await fetch(`${BFF}/ui/ceo/events?${params}`, { cache: "no-store" });
+  const response = await bffFetch(`/ui/ceo/events?${params}`, { cache: "no-store" });
   if (!response.ok) throw new Error(`CEO mirror events failed (HTTP ${response.status})`);
   return (await response.json()) as CeoMirrorEventsResponse;
 }
@@ -94,9 +99,6 @@ export function subscribeCeoMirror(
   onEvent: (event: CeoMirrorEvent) => void,
   after?: string,
 ) {
-  const params = new URLSearchParams({ request_id: requestId });
-  if (after) params.set("after", after);
-  const source = new EventSource(`${BFF}/ui/ceo/events/stream?${params}`);
   const seen = new Set<string>();
   const eventTypes: MirrorEventType[] = [
     "USER_MESSAGE", "CEO_PLAN_CREATED", "TASK_CREATED", "TASK_ASSIGNED",
@@ -105,13 +107,20 @@ export function subscribeCeoMirror(
     "CEO_FINAL", "QA_STARTED", "QA_RESULT", "HR_EVALUATION",
     "IMPROVEMENT_CANDIDATE", "REGRESSION_RESULT", "PROMOTION_RESULT",
   ];
-  for (const eventType of eventTypes) {
-    source.addEventListener(eventType, (message) => {
-      const event = JSON.parse((message as MessageEvent).data) as CeoMirrorEvent;
+  const acceptedTypes = new Set<MirrorEventType>(eventTypes);
+  return subscribeAuthenticatedSse({
+    initialCursor: after,
+    path(cursor) {
+      const params = new URLSearchParams({ request_id: requestId });
+      if (cursor) params.set("after", cursor);
+      return `/ui/ceo/events/stream?${params}`;
+    },
+    onEvent(message) {
+      if (!acceptedTypes.has(message.event as MirrorEventType)) return;
+      const event = JSON.parse(message.data) as CeoMirrorEvent;
       if (seen.has(event.event_id)) return;
       seen.add(event.event_id);
       onEvent(event);
-    });
-  }
-  return () => source.close();
+    },
+  });
 }

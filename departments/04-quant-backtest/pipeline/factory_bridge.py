@@ -44,6 +44,11 @@ for _research_contracts in (
         sys.path.insert(0, str(_research_contracts))
 
 from data_resolution import SOURCE_TABLES
+from intraday_experiment_runner import (
+    INTRADAY_LANE,
+    INTRADAY_PROPOSAL_PARAMETER_KEYS,
+)
+from stock_universe import governed_stock_evidence_sql
 from strategy_templates import EDGE_VOCAB, NOT_IMPLEMENTED
 from trial_family import UNIVERSE_VOCAB, family_id, hypothesis_view, pressure
 
@@ -82,17 +87,9 @@ SHORT_SAMPLE_MAX_DAYS = 120
 SHORT_MIN_TEST_DAYS = 10
 SHORT_TARGET_WINDOWS = 6
 
-INTRADAY_LANE = "INTRADAY_EVENT"
-INTRADAY_EDGE_KEYS = frozenset({
-    "intraday_signal_expr", "horizon_seconds", "sample_interval_seconds",
-    "feature_lookback_seconds", "order_latency_ms", "max_quote_age_seconds",
-    "fee_bps_per_side", "maker_fee_bps_per_side", "execution", "threshold",
-    "entry_policy", "coefficient_policy", "minimum_predicted_edge_bps",
-    "evaluation_days", "instrument_shard_size", "position_mode",
-    "fast_screen_enabled", "fast_screen_sessions", "fast_screen_instruments",
-    "fast_screen_min_opportunities", "fast_screen_min_net_bps",
-    "screening_population", "screening_cohort_version",
-})
+# Backward-compatible public name.  The runner is the single source of truth
+# for the proposal surface it can execute.
+INTRADAY_EDGE_KEYS = INTRADAY_PROPOSAL_PARAMETER_KEYS
 
 
 @dataclass
@@ -105,6 +102,13 @@ class Gate0Result:
     trial_family_id: str = ""
     trial_number: int = 1
     trials_used: int = 0
+    # Exact formulas exposed inside adaptive screening remain part of the
+    # multiple-testing denominator, but they are not PRIMARY experiment
+    # attempts and can never grant promotion authority.  Keep this pressure
+    # mechanically separate from ``trials_used`` so Gate 0 cannot confuse the
+    # two ledgers again.
+    multiple_testing_exposures: int = 0
+    historical_screening_exposures: int = 0
     # 막지는 않지만 사람이 봐야 하는 것. 경고를 거부로 올리면 게이트가
     # "의심스러우면 차단"이 되고, 그건 신규 가설을 영영 못 사게 만든다.
     warnings: list[str] = field(default_factory=list)
@@ -126,6 +130,9 @@ class Gate0Result:
                 "trial_family_id": self.trial_family_id,
                 "trial_number": self.trial_number,
                 "trials_used": self.trials_used,
+                "multiple_testing_exposures": self.multiple_testing_exposures,
+                "historical_screening_exposures":
+                    self.historical_screening_exposures,
                 "warnings": list(self.warnings),
                 "repairs": [dict(x) for x in self.repairs]}
 
@@ -329,13 +336,14 @@ def _repair_suggestions(proposal: dict, result: Gate0Result, *,
 
 
 def gate0(proposal: dict, *, trials_used: int = 0,
+          historical_screening_exposures: int = 0,
           past_outcomes: list[dict] | None = None,
           available_days: int = 0) -> Gate0Result:
     """접수 검사. **순수 함수** - DB 없이 자체 점검이 돈다.
 
     ▶ **시도 계수와 교훈 조회의 출처를 나눈다.**
       trials_used   = quant.experiments 의 실행 기록(호출부가 센다)
-      past_outcomes = research.experiment_outcomes 의 종결 기록(교훈 대조용)
+      past_outcomes = research.v_current_experiment_outcomes 의 현재 판정(교훈 대조용)
 
       한 곳에서 세면 안 된다. 실행됐지만 아직 종결되지 않은 실험이 있으면 환류
       기록만 세는 쪽이 적게 세고, 그러면 **예산을 넘겨서 접수된다.** DSR 감가도
@@ -580,8 +588,13 @@ def gate0(proposal: dict, *, trials_used: int = 0,
         try:
             from alpha_semantics import (check_observables, fingerprint,
                                          lane_of, validate)
-            from intraday_alpha_ast import (conditional_fields_of, fields_of,
-                                            operators_of, parse)
+            from intraday_alpha_ast import (
+                conditional_fields_of,
+                fields_of,
+                operators_of,
+                parse,
+                signal_support_predicate_paths_of,
+            )
 
             plan = validate(proposal.get("semantic_plan") or {})
             if lane_of(plan) != INTRADAY_LANE:
@@ -590,11 +603,22 @@ def gate0(proposal: dict, *, trials_used: int = 0,
             # Bind every controlled runtime knob at Gate 0 so a bad fee/latency
             # range cannot consume a trial and fail only inside the worker.
             edge_for_runtime, _ = expected_edge_for(proposal)
-            from intraday_experiment_runner import config_from_edge
-            config_from_edge(edge_for_runtime)
+            from intraday_experiment_runner import (
+                current_intraday_execution_contract_rejection,
+                validate_current_explicit_v2_execution_edge,
+            )
+            contract_rejection = \
+                current_intraday_execution_contract_rejection(edge_for_runtime)
+            if contract_rejection:
+                raise ValueError(
+                    f"{contract_rejection}; migrate legacy formulas into a "
+                    "new V2 child before Gate 0")
+            validate_current_explicit_v2_execution_edge(edge_for_runtime)
             alignment = check_observables(
                 plan, fields_of(iexpr), operators=operators_of(iexpr),
-                conditional_fields=conditional_fields_of(iexpr))
+                conditional_fields=conditional_fields_of(iexpr),
+                signal_predicate_paths=
+                    signal_support_predicate_paths_of(iexpr))
             if not alignment["ok"]:
                 r.reject("SEMANTIC_FORMULA_MISMATCH", "; ".join(alignment["missing"]))
             if int(sp.get("horizon_seconds", plan["horizon_seconds"])) != plan["horizon_seconds"]:
@@ -632,6 +656,17 @@ def gate0(proposal: dict, *, trials_used: int = 0,
     r.trial_family_id = p["trial_family_id"]
     r.trial_number = int(p["trial_number"])
     r.trials_used = int(p["trials_used"])
+    r.historical_screening_exposures = max(
+        0, int(historical_screening_exposures or 0))
+    r.multiple_testing_exposures = (
+        r.trials_used + r.historical_screening_exposures)
+    if r.historical_screening_exposures:
+        r.warn(
+            f"동일 수식은 PRIMARY 밖의 적응형 스크리닝에서 "
+            f"{r.historical_screening_exposures}회 추가 노출됐다. 이 값은 PRIMARY 시도 "
+            f"예산({r.trials_used}회)을 소비하거나 승격 권한을 주지 않지만, "
+            "DSR·실패 기억·forward 오염 방지의 다중검정 분모에는 영구 보존한다."
+        )
     if p.get("over_budget"):
         r.reject("OVER_BUDGET",
                  f"이 계열에서 이미 {r.trials_used}회 시도했다(예산 {budget}) - "
@@ -814,6 +849,14 @@ def to_hypothesis_row(proposal: dict, gate: Gate0Result, *,
     무엇을 등록했는지는 변하면 안 된다(사전등록의 의미가 그것이다).
     """
     edge, _dropped = expected_edge_for(proposal)
+    if str(edge.get("research_lane") or "").upper() == INTRADAY_LANE:
+        # System-derived metadata: never accept this count from the LLM's
+        # suggested_params.  Promotion computes it from the append-only
+        # experiment ledger and stamps the immutable hypothesis so the runner
+        # can carry historical search multiplicity into DSR.
+        edge["primary_attempts_before"] = int(gate.trials_used or 0)
+        edge["historical_exact_screening_exposures"] = int(
+            gate.historical_screening_exposures or 0)
     return {
         "title": f"[{proposal.get('edge_type')}] {proposal.get('universe_key')}",
         "rationale": proposal.get("economic_rationale") or "",
@@ -894,21 +937,75 @@ _SQL_PUBLISHED = """
 #   레거시 행이 앞을 채우면 신규가 fetch되지 않는다. 상태 전이와 not exists를
 #   함께 유지해야 신규 공급과 이전 데이터 호환을 둘 다 지킨다.
 
-_SQL_FAMILY_OUTCOMES = """
-    select decision, lesson_codes
-      from research.experiment_outcomes
-     where trial_family_id = %s
-     order by decided_at desc
+_GOVERNED_OUTCOME_EVIDENCE = governed_stock_evidence_sql(
+    experiment_alias="e", dataset_alias="m", hypothesis_alias="h")
+
+_PROMOTION_BOUNDARY_VALUES = frozenset({
+    "SUPPORTED", "SUBMIT_TO_QA", "PROMOTED",
+})
+
+_SQL_ASSERT_GOVERNED_STOCK_EXPERIMENT = f"""
+    select exists (
+      select 1
+        from quant.experiments e
+        join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+        join quant.dataset_manifests m on m.dataset_id = e.dataset_id
+       where e.experiment_id::text = %s
+         and h.hypothesis_id::text = %s
+         and ({_GOVERNED_OUTCOME_EVIDENCE})
+    )
 """
 
-_SQL_EXACT_AST_OUTCOMES = """
+
+def assert_governed_stock_experiment(conn, *, experiment_id: str,
+                                     hypothesis_id: str) -> None:
+    """Fail closed unless the exact experiment has governed STOCK evidence.
+
+    This is a terminal attestation, not a trust in the runner's returned
+    payload.  The shared evidence predicate rechecks the immutable dataset,
+    current reference-instrument membership, and complete evaluation identity
+    immediately before a result can cross a promotion/submission boundary.
+    """
+    experiment_id = str(experiment_id or "")
+    hypothesis_id = str(hypothesis_id or "")
+    if not experiment_id or not hypothesis_id:
+        raise RuntimeError(
+            "promotion requires an experiment and hypothesis with governed "
+            "KRX ACTIVE STOCK-only evidence")
+    cur = conn.cursor()
+    cur.execute(
+        _SQL_ASSERT_GOVERNED_STOCK_EXPERIMENT,
+        (experiment_id, hypothesis_id),
+    )
+    row = cur.fetchone()
+    if (not isinstance(row, (list, tuple)) or len(row) != 1
+            or row[0] is not True):
+        raise RuntimeError(
+            f"experiment {experiment_id} lacks governed KRX ACTIVE "
+            "STOCK-only evidence; promotion is blocked")
+
+_SQL_FAMILY_OUTCOMES = f"""
     select o.decision, o.lesson_codes
-      from research.experiment_outcomes o
-     where o.experiment_id = any(
-           select e.experiment_id::text
-             from quant.experiments e
-            where e.config->'signal_expr' = %s::jsonb
-               or e.config->'intraday_signal_expr' = %s::jsonb)
+      from research.v_current_experiment_outcomes o
+      join quant.experiments e
+        on e.experiment_id::text = o.experiment_id
+      join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+      join quant.dataset_manifests m on m.dataset_id = e.dataset_id
+     where o.trial_family_id = %s
+       and {_GOVERNED_OUTCOME_EVIDENCE}
+     order by o.decided_at desc
+"""
+
+_SQL_EXACT_AST_OUTCOMES = f"""
+    select o.decision, o.lesson_codes
+      from research.v_current_experiment_outcomes o
+      join quant.experiments e
+        on e.experiment_id::text = o.experiment_id
+      join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+      join quant.dataset_manifests m on m.dataset_id = e.dataset_id
+     where (e.config->'signal_expr' = %s::jsonb
+            or e.config->'intraday_signal_expr' = %s::jsonb)
+       and {_GOVERNED_OUTCOME_EVIDENCE}
      order by o.decided_at desc
 """
 
@@ -951,21 +1048,89 @@ def fetch_published_proposals(conn, limit: int = 20) -> list[dict]:
         return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
-_SQL_FAMILY_TRIALS = "select count(*) from quant.experiments where trial_family_id = %s"
-_SQL_FAMILY_OR_EXACT_TRIALS = """
-select count(*)
-  from quant.experiments
- where trial_family_id = %s
-    or config->'signal_expr' = %s::jsonb
-    or config->'intraday_signal_expr' = %s::jsonb
+_SQL_PRIMARY_ATTEMPT_EVIDENCE = """
+(
+    e.status in ('QUEUED', 'RUNNING', 'COMPLETED')
+    or exists (
+         select 1 from quant.backtest_runs run
+          where run.experiment_id = e.experiment_id
+       )
+    or exists (
+         select 1 from quant.experiment_metrics metric
+          where metric.experiment_id = e.experiment_id
+       )
+    or exists (
+         select 1 from research.experiment_outcomes outcome
+          where outcome.experiment_id = e.experiment_id::text
+       )
     or exists (
          select 1
+           from quant.intraday_experiment_rungs rung
+           join quant.intraday_session_accesses access
+             on access.experiment_rung_id = rung.experiment_rung_id
+          where rung.experiment_id = e.experiment_id
+       )
+)
+"""
+
+_SQL_FAMILY_TRIALS = f"""
+select count(*)
+  from quant.experiments e
+ where e.trial_family_id = %s
+   and {_SQL_PRIMARY_ATTEMPT_EVIDENCE}
+"""
+_SQL_FAMILY_OR_EXACT_TRIALS = f"""
+select count(*)
+  from quant.experiments e
+ where (
+       e.trial_family_id = %s
+    or e.config->'signal_expr' = %s::jsonb
+    or e.config->'intraday_signal_expr' = %s::jsonb
+ )
+   and {_SQL_PRIMARY_ATTEMPT_EVIDENCE}
+"""
+
+_SQL_EXACT_SCREENING_EXPOSURES = """
+select count(*)
+  from quant.experiments e
+ where exists (
+         select 1
            from jsonb_array_elements(
-                  case when jsonb_typeof(config->'screening_population') = 'array'
-                       then config->'screening_population'
+                  case when jsonb_typeof(e.config->'screening_population') = 'array'
+                       then e.config->'screening_population'
                        else '[]'::jsonb end) candidate
           where candidate->'intraday_signal_expr' = %s::jsonb
        )
+   -- If the same expression is also this experiment's PRIMARY, the primary
+   -- ledger already owns the attempt.  Do not double count malformed cohorts.
+   and e.config->'signal_expr' is distinct from %s::jsonb
+   and e.config->'intraday_signal_expr' is distinct from %s::jsonb
+   and (
+       -- Completed/failed legacy rows predate the lockbox but are durable
+       -- evidence that the registered screening cohort was evaluated.  For
+       -- in-flight/cancelled rows require an actual result or data-access
+       -- marker; merely QUEUED JSON is not a statistical exposure.
+       e.status = 'COMPLETED'
+       or exists (
+            select 1 from quant.backtest_runs run
+             where run.experiment_id = e.experiment_id
+          )
+       or exists (
+            select 1 from quant.experiment_metrics metric
+             where metric.experiment_id = e.experiment_id
+          )
+       or exists (
+            select 1 from research.experiment_outcomes outcome
+             where outcome.experiment_id = e.experiment_id::text
+          )
+       or exists (
+            select 1
+              from quant.intraday_experiment_rungs rung
+              join quant.intraday_session_accesses access
+                on access.experiment_rung_id = rung.experiment_rung_id
+             where rung.experiment_id = e.experiment_id
+          )
+   )
 """
 
 
@@ -983,11 +1148,13 @@ def _normalized_formula(signal_expr):
 
 
 def count_family_trials(conn, trial_family_id: str, signal_expr=None) -> int:
-    """Count executable trials by shape-family plus exact historical formula.
+    """Count PRIMARY attempts by shape-family plus exact historical formula.
 
     The exact-formula arm carries pre-upgrade intraday trials into the new
     formula-shaped family without importing unrelated formulas that happened to
-    share a broad edge label and semantic clock.
+    share a broad edge label and semantic clock.  Screening-population
+    appearances are deliberately absent.  A CANCELLED row counts only when the
+    lockbox proves that at least one session was read.
     """
     normalized = _normalized_formula(signal_expr)
     if not trial_family_id and normalized is None:
@@ -998,7 +1165,25 @@ def count_family_trials(conn, trial_family_id: str, signal_expr=None) -> int:
         else:
             encoded = json.dumps(normalized, sort_keys=True)
             cur.execute(_SQL_FAMILY_OR_EXACT_TRIALS,
-                        (trial_family_id, encoded, encoded, encoded))
+                        (trial_family_id, encoded, encoded))
+        return int(cur.fetchone()[0])
+
+
+def count_screening_exposures(conn, signal_expr=None) -> int:
+    """Count DB-proven exact sidecar exposures for statistical correction.
+
+    This counts only appearances in ``screening_population`` not already owned
+    by the same row's PRIMARY formula.  It never supplies PRIMARY budget or promotion
+    authority; it is carried separately into the runtime DSR denominator.
+    Pre-read cancellations are excluded by the same durable access rule.
+    """
+    normalized = _normalized_formula(signal_expr)
+    if normalized is None:
+        return 0
+    encoded = json.dumps(normalized, sort_keys=True)
+    with conn.cursor() as cur:
+        cur.execute(_SQL_EXACT_SCREENING_EXPOSURES,
+                    (encoded, encoded, encoded))
         return int(cur.fetchone()[0])
 
 
@@ -1452,6 +1637,8 @@ def promote_published(conn, *, limit: int = 20, created_by: str = "factory-bridg
         available_days = _available_days_for_proposal(conn, p)
         gate = gate0(p, trials_used=count_family_trials(
                           conn, fam, signal_expr),
+                      historical_screening_exposures=count_screening_exposures(
+                          conn, signal_expr),
                       past_outcomes=_merge_outcome_evidence(
                           family_history, exact_history),
                       available_days=available_days)
@@ -1746,6 +1933,22 @@ def finalize(conn, *, hypothesis_id: str, new_status: str, outcome: dict) -> str
     else:
         payload.setdefault("root_cause", None)
         payload.setdefault("corrective_action", None)
+    status_value = str(new_status or "").upper()
+    decision_value = str(payload.get("decision") or "").upper()
+    if decision_value == "SUBMIT_TO_QA" and status_value != "SUPPORTED":
+        raise RuntimeError(
+            "SUBMIT_TO_QA outcome requires SUPPORTED hypothesis status")
+    boundary_values = {status_value, decision_value}
+    if boundary_values & _PROMOTION_BOUNDARY_VALUES:
+        outcome_hypothesis_id = str(payload.get("hypothesis_id") or "")
+        if outcome_hypothesis_id != str(hypothesis_id or ""):
+            raise RuntimeError(
+                "promotion outcome hypothesis does not match the status target")
+        assert_governed_stock_experiment(
+            conn,
+            experiment_id=str(payload.get("experiment_id") or ""),
+            hypothesis_id=str(hypothesis_id or ""),
+        )
     # 컨텍스트 매니저를 쓰지 않는다 - 호출부(오케스트레이터)의 가짜 커서와 관례가 같다
     cur = conn.cursor()
     cur.execute(_SQL_INSERT_OUTCOME, payload)
@@ -2252,7 +2455,7 @@ def intake_published(conn, *, limit: int = 20, available_days: int = 0) -> list[
     """PUBLISHED 기획안을 Gate 0 에 태우고 통과분을 가설로 등록한다.
 
     ▶ 계수 출처를 섞지 않는다: 시도 횟수는 `quant.experiments`(실행 기록)에서,
-      기각 교훈은 `research.experiment_outcomes`(대조 대상)에서 온다. 한 곳에서
+      기각 교훈은 `research.v_current_experiment_outcomes`(대조 대상)에서 온다. 한 곳에서
       세면 미종결 실험을 놓쳐 예산을 넘긴 채 접수한다.
     """
     import json as _json
@@ -2267,6 +2470,8 @@ def intake_published(conn, *, limit: int = 20, available_days: int = 0) -> list[
         #   못 잰 경우 0 을 넘겨 검사를 건너뛰되, 잰 경우엔 반드시 쓴다.
         gate = gate0(prop,
                      trials_used=count_family_trials(conn, fam, signal_expr),
+                     historical_screening_exposures=count_screening_exposures(
+                         conn, signal_expr),
                      past_outcomes=_merge_outcome_evidence(
                          fetch_family_outcomes(conn, fam),
                          fetch_exact_ast_outcomes(conn, signal_expr)),

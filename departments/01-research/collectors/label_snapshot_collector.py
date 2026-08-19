@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""일별 라벨 스냅샷 - 레짐·지정학 판정을 그날의 사실로 남긴다.
+"""일별 시장 라벨 스냅샷 - 가격에서 계산한 레짐을 기록한다.
 
 소유: 재일 (리서치본부)
 근거: 재일님 지시 2026-08-02 "발생한 모든 문제들 해결해놔".
@@ -7,20 +7,15 @@
       채점 제외"를 남기고 있었다 - 선순환의 구멍을 메운다.
       마이그레이션 20260802001700 (research.daily_labels)
 
-▶ 왜 LLM 이 필요 없나
-  레짐 라벨(RISK_ON/BREADTH_THRUST/...)과 지정학 라벨(CALM/.../SHOCK)은
-  **전부 코드가 결정론으로 정한다** - compute_regime_readout,
-  compute_geo_readout. LLM 은 그 결과를 서술만 한다. 그래서 이 수집기는
-  분석가를 부르지 않고 계산 함수만 호출한다: 빠르고, 싸고, 재현된다.
+▶ 경계
+  레짐 라벨(RISK_ON/BREADTH_THRUST/...)은 시장 가격·breadth에서 결정론으로
+  계산한다. 지정학·뉴스·거시 라벨은 저장하지 않는다. 그런 맥락은 에이전트가
+  필요할 때 MCP로 조회하며 이 상주 수집 경로에 다시 들어오지 않는다.
 
 ▶ 사후 소급 금지
   as_of 는 **계산한 날**이다. 과거 날짜 행을 지금 만들어 채우지 않는다 -
   그건 그때의 판정이 아니라 지금의 재구성이고, 그걸 섞으면 사후 채점이
   거짓말을 하게 된다. 이력은 오늘부터 쌓인다.
-
-▶ 부분 실패 허용
-  레짐과 지정학은 서로 독립이다. 하나가 실패해도 다른 하나는 남긴다 -
-  둘 다 실패해야 exit 1.
 
 사용
   python collectors/label_snapshot_collector.py            # 자체 점검
@@ -37,12 +32,11 @@ _BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_BASE / "collectors"))
 sys.path.insert(0, str(_BASE / "agents"))
 
-COLLECTOR_VERSION = "research-label-snapshot-v1"
+COLLECTOR_VERSION = "market-label-snapshot-v2"
 KST = timezone(timedelta(hours=9))
 EXIT_SKIP = 2
 
 REGIME = "REGIME"
-GEOPOLITICAL = "GEOPOLITICAL"
 # 판정 불가는 라벨이 아니다 - 남기면 "그날 CALM 이었다"와 구분이 안 된다
 NOT_A_LABEL = ("INSUFFICIENT_DATA", None, "")
 
@@ -89,56 +83,22 @@ def snapshot_regime(market_api: str | None = None) -> dict | None:
             "producer": "sector_regime_analyst.compute_regime_readout"}
 
 
-def snapshot_geopolitical(research_api: str | None = None) -> dict | None:
-    """지정학 라벨 + driver(위협 주도 / 실제 사건 주도)."""
-    import urllib.parse
-
-    from geopolitical_analyst import (
-        GPR_CODES,
-        RESEARCH_API,
-        WINDOW_DAYS,
-        _http_get,
-        _theme_codes,
-        compute_geo_readout,
-    )
-
-    base = (research_api or RESEARCH_API).rstrip("/")
-    codes = list(GPR_CODES) + _theme_codes()
-    url = (f"{base}/macro/observations?codes={urllib.parse.quote(','.join(codes))}"
-           f"&days={WINDOW_DAYS}")
-    readout = compute_geo_readout(_http_get(url), as_of=datetime.now(KST).date())
-    label = readout.get("risk_label")
-    if not is_recordable(label):
-        return None
-    return {"label_kind": GEOPOLITICAL, "label_value": label,
-            "driver": readout.get("driver"),
-            "readout": numeric_readout(readout),
-            "producer": "geopolitical_analyst.compute_geo_readout"}
-
-
 def collect() -> int:
     import psycopg2
     from source_registry import load_project_env
 
     as_of = datetime.now(KST).date()
     env = load_project_env()
-    rows, failures = [], []
-    for name, fn in (("regime", snapshot_regime),
-                     ("geopolitical", snapshot_geopolitical)):
-        try:
-            r = fn()
-        except Exception as e:  # noqa: BLE001 - 하나가 죽어도 다른 하나는 남긴다
-            failures.append(f"{name}: {type(e).__name__} {str(e)[:110]}")
-            continue
-        if r is None:
-            failures.append(f"{name}: 판정 불가(INSUFFICIENT_DATA) - 기록하지 않는다")
-            continue
-        rows.append(r)
-
-    if not rows:
-        print(f"{COLLECTOR_VERSION}: 기록할 라벨 없음 - " + "; ".join(failures),
-              flush=True)
+    try:
+        row = snapshot_regime()
+    except Exception as e:  # noqa: BLE001 - 실행 경계에서 원인을 드러낸다
+        print(f"{COLLECTOR_VERSION}: regime 실패: {type(e).__name__} "
+              f"{str(e)[:110]}", flush=True)
         return 1
+    if row is None:
+        print(f"{COLLECTOR_VERSION}: regime 판정 불가 - 기록하지 않는다", flush=True)
+        return 1
+    rows = [row]
 
     conn = psycopg2.connect(env["DATABASE_URL"], connect_timeout=20)
     try:
@@ -163,9 +123,7 @@ def collect() -> int:
     desc = ", ".join(f"{r['label_kind']}={r['label_value']}"
                      + (f"/{r['driver']}" if r.get("driver") else "") for r in rows)
     print(f"{COLLECTOR_VERSION}: {as_of} {desc}", flush=True)
-    for f in failures:
-        print(f"  ⚠ {f}", flush=True)
-    return 1 if failures else 0
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +132,7 @@ def collect() -> int:
 
 def _check_recordable():
     """판정 불가를 라벨로 남기면 'CALM 이었다'와 구분이 안 된다."""
-    assert is_recordable("BREADTH_THRUST") and is_recordable("SHOCK")
+    assert is_recordable("BREADTH_THRUST")
     for bad in ("INSUFFICIENT_DATA", None, ""):
         assert not is_recordable(bad), bad
     print("  기록 가능 판정           OK")

@@ -137,10 +137,11 @@ python -m unittest discover -s tests/schema -p 'test_*.py' -v
 python -m pytest tests/contracts/test_unified_api_contract.py tests/orchestration/test_paper_case.py tests/orchestration/test_paper_pipeline.py -q -p no:warnings
 ```
 
-Collector 또는 외부 데이터 검증은 필요한 API key와 사용권이 준비된 경우에만 실행한다.
+시장 Collector 또는 요청형 MCP의 실제 외부 호출 검증은 필요한 API key와 사용권이 준비된 경우에만 실행한다.
 
 ```bash
-python departments/01-research/collectors/news.py 'AAPL Apple stock'
+python departments/01-research/collectors/collector_scheduler.py --check
+python departments/01-research/api/external_sources.py
 python departments/01-research/scripts/check_gateway_coverage.py
 ```
 

@@ -23,7 +23,9 @@ def test_microstructure_requirement_keeps_daily_bars_as_execution_base() -> None
 def test_orchestrator_resolves_the_augmented_execution_requirements() -> None:
     source = inspect.getsource(experiment_orchestrator.orchestrate)
 
-    assert "resolve_data(execution_products" in source
+    assert "res = resolve_data(" in source
+    assert "execution_products, meta_conn=conn, market_conn=market_conn" in source
+    assert "research_lane=" in source
 
 
 def test_dataset_selection_prefers_bars_over_feature_only_dataset() -> None:

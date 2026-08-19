@@ -8,8 +8,8 @@
 
 경계 셋을 코드로 강제한다.
 
-1. **읽기 전용이다.** 쓰기 Endpoint 가 없고, DB 세션 자체를
-   default_transaction_read_only=on 으로 연다 - 코드 실수로도 못 쓴다.
+1. **읽기 전용이다.** 쓰기 Endpoint 가 없고, 매 DB 트랜잭션을
+   `SET TRANSACTION READ ONLY` 로 연다 - 코드 실수로도 못 쓴다.
 2. **PIT 가 기본이다.** 모든 Evidence 질의는 as_of(기본=지금)를 받아
    **observed_at <= as_of** 만 돌려준다. 백테스트가 실시간과 같은 API 를 쓰면서
    미래 정보를 볼 수 없다. 가중치도 View 의 now() 가 아니라 as_of 기준으로
@@ -85,7 +85,7 @@ def get_conn():
     #   공장의 작업 큐를 멈춰 세운 것이다.** 조회층 안전장치가 실행층을 죽이면
     #   그건 안전장치가 아니다.
     #
-    #   그래서 보장을 **트랜잭션 한정(`set local`)** 으로 옮긴다. 아래 `_query`
+    #   그래서 보장을 **현재 트랜잭션 한정(`set transaction`)** 으로 옮긴다. 아래 `_query`
     #   가 매 요청마다 걸고 rollback 에서 자동 해제되므로 이 면의 읽기 전용성은
     #   그대로이고, 세션에는 아무것도 남지 않는다.
     return _conn
@@ -95,8 +95,8 @@ def _query(sql: str, params: tuple):
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            # 트랜잭션 한정 - 커밋/롤백과 함께 사라진다(세션 오염 없음).
-            cur.execute("set local default_transaction_read_only = on")
+            # 현재 트랜잭션만 잠근다. rollback 뒤 서버 세션에는 남지 않는다.
+            cur.execute("set transaction read only")
             cur.execute(sql, params)
             cols = [d[0] for d in cur.description]
             rows = cur.fetchall()
@@ -717,8 +717,8 @@ def _check_readonly_is_transaction_scoped_not_session():
 
     실측 피해: 실험 워커의 `lease()` 가 `select ... for update skip locked` 에서
     `ReadOnlySqlTransaction` 으로 반복 실패해 **작업 큐가 멈췄다.** 조회층
-    안전장치가 실행층을 죽이면 그건 안전장치가 아니다. 보장은 트랜잭션
-    한정(`set local`)으로만 건다 - 읽기 전용성은 같고 세션에는 안 남는다.
+    안전장치가 실행층을 죽이면 그건 안전장치가 아니다. 보장은 현재 트랜잭션
+    한정(`set transaction read only`)으로만 건다 - 세션에는 안 남는다.
     """
     import pathlib  # noqa: PLC0415
 
@@ -730,9 +730,9 @@ def _check_readonly_is_transaction_scoped_not_session():
     #   실행문(`cur.execute(...)`)만 보므로 주석·설명은 걸리지 않는다.
     call = 'cur.execute("' + "set "
     session_set = call + "default_transaction_read_only"
-    local_set = call + "local default_transaction_read_only"
-    assert local_set in code, "읽기 전용 보장이 사라졌다"
-    assert session_set not in code.replace(local_set, ""), \
+    transaction_set = call + "transaction read only"
+    assert transaction_set in code, "읽기 전용 보장이 사라졌다"
+    assert session_set not in code, \
         "세션 수준 읽기전용 SET 이 돌아왔다 - pooler 에서 남의 연결을 오염시킨다"
     print("  읽기전용=트랜잭션 한정   OK")
 

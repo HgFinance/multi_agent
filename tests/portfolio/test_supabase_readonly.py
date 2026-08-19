@@ -1,4 +1,4 @@
-"""Supabase read-only adapter and live-input bridge tests."""
+"""Private control-database read adapter and live-input bridge tests."""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ def _catalog_row() -> dict:
     }
 
 
-def test_supabase_adapter_reads_pit_context_without_writes() -> None:
+def test_control_db_adapter_reads_pit_context_without_writes() -> None:
     calls: list[tuple[str, tuple[object, ...]]] = []
 
     async def fetch(query: str, args: tuple[object, ...]):
@@ -76,17 +76,6 @@ def test_supabase_adapter_reads_pit_context_without_writes() -> None:
             ]
         if "strategy.versions" in query:
             return [_catalog_row()]
-        if "research.documents" in query:
-            return [
-                {
-                    "document_id": "doc-1",
-                    "title": "PIT research evidence",
-                    "observed_at": AS_OF,
-                    "published_at": AS_OF,
-                    "status": "ACTIVE",
-                    "source_code": "TEST_DB",
-                }
-            ]
         if "execution.market_snapshots" in query:
             return [
                 {
@@ -108,20 +97,29 @@ def test_supabase_adapter_reads_pit_context_without_writes() -> None:
             }
         ]
 
-    adapter = adapter_module.SupabaseReadOnlyAdapter(fetcher=fetch)
+    adapter = adapter_module.ControlDbReadOnlyAdapter(fetcher=fetch)
     snapshot = asyncio.run(adapter.load_snapshot(as_of=AS_OF, fund_id="fund-1"))
 
-    assert snapshot.source == "SUPABASE"
+    assert snapshot.source == "CONTROL_DB"
     assert snapshot.quality_status == "PASS"
     assert [item["portfolio_id"] for item in snapshot.candidates] == ["db-balanced"]
-    assert snapshot.research_context["status"] == "LIVE"
+    assert snapshot.research_context == {
+        "status": "REQUEST_TIME_MCP",
+        "source": "REQUEST_TIME_MCP",
+        "as_of": AS_OF.isoformat(),
+        "documents": [],
+        "evidence_refs": [],
+        "persistence": "DISABLED",
+        "read_only": True,
+    }
     assert snapshot.market_context["status"] == "LIVE"
     assert snapshot.market_context["instrument_universe"]["status"] == "LIVE"
     assert snapshot.market_context["instrument_universe"]["instruments"][0]["symbol"] == "005930"
     assert snapshot.accounting_context["status"] == "LIVE"
     assert snapshot.read_only is True
     assert snapshot.external_writes is False
-    assert len(calls) == 5
+    assert len(calls) == 4
+    assert all("research.documents" not in query for query, _ in calls)
     assert all(query.lstrip().startswith("SELECT") for query, _ in calls)
     assert all(args[-1] == AS_OF for _, args in calls)
 
@@ -132,7 +130,7 @@ def test_missing_suitability_metadata_fails_closed() -> None:
             return [{"strategy_code": "schema-only", "target_portfolio_schema": {"type": "array"}}]
         return []
 
-    adapter = adapter_module.SupabaseReadOnlyAdapter(fetcher=fetch)
+    adapter = adapter_module.ControlDbReadOnlyAdapter(fetcher=fetch)
     snapshot = asyncio.run(adapter.load_snapshot(as_of=AS_OF))
 
     assert snapshot.candidates == ()
@@ -141,18 +139,41 @@ def test_missing_suitability_metadata_fails_closed() -> None:
 
 
 def test_missing_database_configuration_is_safe(monkeypatch) -> None:
-    monkeypatch.delenv("SUPABASE_DATABASE_URL", raising=False)
+    monkeypatch.delenv("CONTROL_DATABASE_URL", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
-    adapter = adapter_module.SupabaseReadOnlyAdapter(dsn=None, fetcher=None)
+    adapter = adapter_module.ControlDbReadOnlyAdapter(dsn=None, fetcher=None)
     snapshot = asyncio.run(adapter.load_snapshot(as_of=AS_OF))
 
-    assert snapshot.source == "SUPABASE_UNAVAILABLE"
+    assert snapshot.source == "CONTROL_DB_UNAVAILABLE"
+    assert snapshot.research_context["status"] == "REQUEST_TIME_MCP"
     assert snapshot.quality_status == "UNAVAILABLE"
     assert snapshot.read_only is True
     assert snapshot.external_writes is False
 
 
-def test_pipeline_accepts_supabase_snapshot_and_keeps_gates_non_binding() -> None:
+def test_control_db_dsn_contract_ignores_hosted_supabase(monkeypatch) -> None:
+    hosted = "postgresql://hosted.invalid/postgres"
+    database = "postgresql://private-alias:5432/postgres"
+    control = "postgresql://control-db:5432/postgres"
+    monkeypatch.setenv("SUPABASE_DATABASE_URL", hosted)
+    monkeypatch.delenv("CONTROL_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    assert adapter_module.ControlDbReadOnlyAdapter().dsn is None
+
+    monkeypatch.setenv("DATABASE_URL", database)
+    assert adapter_module.ControlDbReadOnlyAdapter().dsn == database
+
+    monkeypatch.setenv("CONTROL_DATABASE_URL", control)
+    assert adapter_module.ControlDbReadOnlyAdapter().dsn == control
+
+
+def test_legacy_supabase_class_names_are_import_aliases_only() -> None:
+    assert adapter_module.SupabaseReadOnlyAdapter is adapter_module.ControlDbReadOnlyAdapter
+    assert adapter_module.SupabaseReadSnapshot is adapter_module.ControlDbReadSnapshot
+
+
+def test_pipeline_accepts_control_db_snapshot_and_keeps_gates_non_binding() -> None:
     async def fetch(query: str, args: tuple[object, ...]):
         if "reference.instruments" in query:
             return [
@@ -174,17 +195,15 @@ def test_pipeline_accepts_supabase_snapshot_and_keeps_gates_non_binding() -> Non
             ]
         if "strategy.versions" in query:
             return [_catalog_row()]
-        if "research.documents" in query:
-            return [{"document_id": "doc-1", "observed_at": AS_OF, "status": "ACTIVE"}]
         if "execution.market_snapshots" in query:
             return [{"market_snapshot_id": "market-1", "as_of": AS_OF, "quality_status": "PASS"}]
         return []
 
-    adapter = adapter_module.SupabaseReadOnlyAdapter(fetcher=fetch)
+    adapter = adapter_module.ControlDbReadOnlyAdapter(fetcher=fetch)
     result = asyncio.run(
         run_portfolio_recommendation_pipeline_async(
             {
-                "user_id": "supabase-user",
+                "user_id": "control-db-user",
                 "mindset": "BALANCED",
                 "experience": "INTERMEDIATE",
                 "investment_horizon_years": 5,
@@ -196,7 +215,8 @@ def test_pipeline_accepts_supabase_snapshot_and_keeps_gates_non_binding() -> Non
         )
     )
 
-    assert result["data_context"]["source"] == "SUPABASE"
+    assert result["data_context"]["source"] == "CONTROL_DB"
+    assert result["data_context"]["research"]["status"] == "REQUEST_TIME_MCP"
     assert result["pipeline_status"] == "COMPLETED"
     assert result["risk_gate"]["verdict"] == "approve"
     assert result["qa_gate"]["decision"] == "PASS"
@@ -206,11 +226,11 @@ def test_pipeline_accepts_supabase_snapshot_and_keeps_gates_non_binding() -> Non
 
 
 def test_preflight_reports_missing_dsn_without_connecting_legacy(monkeypatch) -> None:
-    monkeypatch.delenv("SUPABASE_DATABASE_URL", raising=False)
+    monkeypatch.delenv("CONTROL_DATABASE_URL", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
 
     diagnostics = asyncio.run(
-        adapter_module.SupabaseReadOnlyAdapter(dsn=None).diagnose_connection()
+        adapter_module.ControlDbReadOnlyAdapter(dsn=None).diagnose_connection()
     )
 
     assert diagnostics.status == "FAIL"
@@ -223,7 +243,7 @@ def test_preflight_classifies_dns_failure_without_exposing_dsn_legacy(monkeypatc
         raise OSError("simulated DNS failure")
 
     monkeypatch.setattr(adapter_module.socket, "getaddrinfo", fail_dns)
-    adapter = adapter_module.SupabaseReadOnlyAdapter(
+    adapter = adapter_module.ControlDbReadOnlyAdapter(
         dsn="postgresql://user:secret@example.invalid:5432/postgres",
         driver="psycopg2",
     )
@@ -236,14 +256,14 @@ def test_preflight_classifies_dns_failure_without_exposing_dsn_legacy(monkeypatc
     assert "secret" not in str(diagnostics.as_dict())
 
 
-def test_pipeline_blocks_when_supabase_is_unavailable(monkeypatch) -> None:
-    monkeypatch.delenv("SUPABASE_DATABASE_URL", raising=False)
+def test_pipeline_blocks_when_control_db_is_unavailable(monkeypatch) -> None:
+    monkeypatch.delenv("CONTROL_DATABASE_URL", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
-    adapter = adapter_module.SupabaseReadOnlyAdapter(dsn=None, fetcher=None)
+    adapter = adapter_module.ControlDbReadOnlyAdapter(dsn=None, fetcher=None)
     result = asyncio.run(
         run_portfolio_recommendation_pipeline_async(
             {
-                "user_id": "supabase-unavailable",
+                "user_id": "control-db-unavailable",
                 "mindset": "BALANCED",
                 "experience": "BEGINNER",
                 "investment_horizon_years": 3,
@@ -257,7 +277,7 @@ def test_pipeline_blocks_when_supabase_is_unavailable(monkeypatch) -> None:
 
     assert result["pipeline_status"] == "DEGRADED"
     assert result["safe_action"] == "HOLD"
-    assert result["data_context"]["source"] == "SUPABASE_UNAVAILABLE"
+    assert result["data_context"]["source"] == "CONTROL_DB_UNAVAILABLE"
     assert result["external_writes"] is False
     assert result["worker_reports"]
     assert {item["status"] for item in result["worker_reports"]} == {"SKIPPED_SAFE"}
@@ -290,11 +310,11 @@ def test_pipeline_blocks_when_supabase_is_unavailable(monkeypatch) -> None:
 def test_preflight_reports_missing_dsn_without_connecting_legacy_duplicate(
     monkeypatch,
 ) -> None:
-    monkeypatch.delenv("SUPABASE_DATABASE_URL", raising=False)
+    monkeypatch.delenv("CONTROL_DATABASE_URL", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
 
     diagnostics = asyncio.run(
-        adapter_module.SupabaseReadOnlyAdapter(dsn=None).diagnose_connection()
+        adapter_module.ControlDbReadOnlyAdapter(dsn=None).diagnose_connection()
     )
 
     assert diagnostics.status == "FAIL"
@@ -309,7 +329,7 @@ def test_preflight_classifies_dns_failure_without_exposing_dsn_legacy_duplicate(
         raise OSError("simulated DNS failure")
 
     monkeypatch.setattr(adapter_module.socket, "getaddrinfo", fail_dns)
-    adapter = adapter_module.SupabaseReadOnlyAdapter(
+    adapter = adapter_module.ControlDbReadOnlyAdapter(
         dsn="postgresql://user:secret@example.invalid:5432/postgres",
         driver="psycopg2",
     )

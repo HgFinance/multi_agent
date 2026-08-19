@@ -36,7 +36,64 @@ import sys
 from pathlib import Path
 from dataclasses import dataclass, field
 
-MODULE_VERSION = "quant-data-resolution-v1"
+MODULE_VERSION = "quant-data-resolution-v4"
+INTRADAY_EVENT = "INTRADAY_EVENT"
+LIVE_INTRADAY_DATASET = "krx-intraday-events/v1"
+EXTERNAL_INTRADAY_DATASET = "krx-intraday-completed-second/v1"
+LOCAL_EVENT_SOURCE = "LOCAL_RECEIPT_CLOCK"
+EXTERNAL_EVENT_SOURCE = "EXTERNAL_FDW_EVENT_TIME"
+STRICT_TIMESTAMP_POLICY = "STRICT_RECEIPT_ORDER_V1"
+COMPLETED_SECOND_POLICY = "COMPLETED_SECOND_MEDIAN_ENVELOPE_V1"
+RAW_EVENT_TABLES = frozenset({"market_quotes", "market_ticks"})
+RAW_EVENT_AUTHORITY_CONTRACTS = {
+    LIVE_INTRADAY_DATASET: {
+        "event_source": LOCAL_EVENT_SOURCE,
+        "timestamp_policy": STRICT_TIMESTAMP_POLICY,
+        "physical_sources": {
+            "market_quotes": "market.market_quotes",
+            "market_ticks": "market.market_ticks",
+        },
+        "source_versions": {
+            "market_quotes": "ls-realtime-book-v1",
+            "market_ticks": "ls-realtime-trade-v1",
+        },
+        "knowledge_clock": "AVAILABLE_AT_RECEIPT_CLOCK",
+        "evidence_scope": "ARRIVAL_TIME_CAUSAL",
+    },
+    EXTERNAL_INTRADAY_DATASET: {
+        "event_source": EXTERNAL_EVENT_SOURCE,
+        "timestamp_policy": COMPLETED_SECOND_POLICY,
+        "physical_sources": {
+            "market_quotes": "ext_src.quotes",
+            "market_ticks": "ext_src.ticks",
+        },
+        "source_versions": {
+            "market_quotes": "trading-bot-completed-second-book-v1",
+            "market_ticks": "trading-bot-completed-second-trade-v1",
+        },
+        "knowledge_clock": "EVENT_TIME_ONLY_NO_RECEIPT_CLOCK",
+        "evidence_scope": "HISTORICAL_SEARCH_ONLY",
+        "content_window": {
+            "timezone": "Asia/Seoul",
+            "start": "09:00:00",
+            "end_exclusive": "15:30:00",
+        },
+        "maximum_horizon_seconds": 600,
+        "execution": "TAKER_ONLY",
+    },
+}
+# A dataset must be present here *and* come from the contract-validating SQL
+# branch below before its raw source names are exposed to INTRADAY_EVENT
+# callers.  Adding a future raw archive therefore requires an explicit code
+# review as well as equivalent schema/clock/granularity predicates in SQL.
+RAW_EVENT_AUTHORITY_DATASETS = frozenset(RAW_EVENT_AUTHORITY_CONTRACTS)
+SOURCE_GRANULARITY = {
+    "market_quotes": "RAW_EVENT",
+    "market_ticks": "RAW_EVENT",
+    "microstructure_features": "DAILY_AGGREGATE",
+    "market_bars": "BAR_AGGREGATE",
+    "bars_1m": "BAR_AGGREGATE",
+}
 
 # ── 원천 테이블 화이트리스트 ────────────────────────────────────────────────
 # 표는 **우리 것**이다. 기획안이 준 문자열을 테이블명으로 쓰면 주입이 되고, 모르는
@@ -123,6 +180,7 @@ UNMAPPED_SOURCE = "UNMAPPED_SOURCE"          # 사상할 매니페스트가 없�
 SOURCE_EMPTY = "SOURCE_EMPTY"                # 매니페스트는 있는데 원천이 비었다
 INSUFFICIENT_HISTORY = "INSUFFICIENT_HISTORY"  # 요구 기간에 못 미친다
 NOT_VERIFIED = "NOT_VERIFIED"                # 시장 DB 를 못 봤다 - 통과 아님
+SOURCE_AUTHORITY_MISMATCH = "SOURCE_AUTHORITY_MISMATCH"
 
 
 @dataclass(frozen=True)
@@ -140,6 +198,7 @@ class SourceCoverage:
     symbols: int
     measurement: str = "EXACT"
     chunks: int = 0
+    granularity: str = "OTHER"
 
     @property
     def empty(self) -> bool:
@@ -155,6 +214,7 @@ class Resolution:
     unmapped: tuple[str, ...] = ()
     coverage: dict[str, SourceCoverage] = field(default_factory=dict)
     notes: tuple[str, ...] = ()
+    execution_contract: dict = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -190,21 +250,196 @@ def normalize_requirement(value) -> tuple[tuple[str, ...], int, tuple[str, ...]]
 
 # ── 매니페스트 색인 ────────────────────────────────────────────────────────
 _SQL_MANIFESTS = """
-select name, version, coalesce(source_versions, '{}'::jsonb)
-  from quant.dataset_manifests
+select name, version, coalesce(source_versions, '{}'::jsonb),
+       false as raw_event_authority
+  from quant.dataset_manifests manifest
+ where not ((manifest.name = 'krx-intraday-events'
+             and manifest.version = 'v1')
+         or (manifest.name = 'krx-intraday-completed-second'
+             and manifest.version = 'v1'))
+   and exists (
+       select 1
+         from quant.universe_members member
+        where member.universe_version_id = manifest.universe_version_id
+       )
+   and not exists (
+       select 1
+         from quant.universe_members member
+         left join reference.instruments instrument
+           on instrument.instrument_id = member.instrument_id
+        where member.universe_version_id = manifest.universe_version_id
+          and (
+            instrument.instrument_id is null
+            or coalesce(upper(instrument.instrument_type), '') <> 'STOCK'
+            or coalesce(upper(instrument.asset_class), '') <> 'EQUITY'
+            or coalesce(upper(instrument.market), '') <> 'KRX'
+            or coalesce(upper(instrument.status), '') <> 'ACTIVE'
+          )
+       )
 """
 
+# The raw event manifest is deliberately not an immutable materialized panel:
+# its exact cutoff, sessions and observed stock subset are frozen by the
+# intraday runner for every experiment.  It may therefore participate only in
+# INTRADAY_EVENT source-availability resolution, never in the generic/daily
+# manifest index or reusable performance evidence.  Exact identity, clocks and
+# audit markers are all required so a different NULL-universe manifest cannot
+# enter through this exception.
+_SQL_LIVE_INTRADAY_MANIFEST = """
+select manifest.name, manifest.version,
+       coalesce(manifest.source_versions, '{}'::jsonb),
+       true as raw_event_authority
+  from quant.dataset_manifests manifest
+ where manifest.name = 'krx-intraday-events'
+   and manifest.version = 'v1'
+   and manifest.universe_version_id is null
+   and manifest.row_count is null
+   and manifest.partitions = '[]'::jsonb
+   and manifest.object_path =
+       'timescaledb://market/{market_quotes,market_ticks}'
+   and manifest.source_versions->>'market_quotes' =
+       'ls-realtime-book-v1'
+   and manifest.source_versions->>'market_ticks' =
+       'ls-realtime-trade-v1'
+   and manifest.quality_summary->>'status' =
+       'LIVE_SLICE_REQUIRES_PER_EXPERIMENT_AUDIT'
+   and manifest.quality_summary->>'missing_received_at' = 'reject'
+   and manifest.point_in_time_policy->>'knowledge_clock' =
+       'available_at=max(received_at,observed_at)'
+   and manifest.point_in_time_policy->>'feature_cutoff' =
+       'event_time<=decision_time and available_at<=decision_time'
+   and manifest.point_in_time_policy->>'label_cutoff' =
+       'entry_time+horizon'
+   and manifest.point_in_time_policy->>'instrument_isolation' = 'true'
+   and manifest.schema_definition->'market_quotes'->'required' @>
+       '["event_time","received_at","observed_at","instrument_id",'
+       '"bid_prices","bid_sizes","ask_prices","ask_sizes",'
+       '"source_event_id"]'::jsonb
+   and manifest.schema_definition->'market_ticks'->'required' @>
+       '["event_time","received_at","observed_at","instrument_id",'
+       '"price","quantity","side","source_event_id"]'::jsonb
+"""
 
-def manifest_index(meta_conn) -> list[tuple[str, str, dict]]:
-    """(이름, 버전, source_versions) 목록. 사상의 근거는 전부 여기서 나온다."""
+_SQL_EXTERNAL_INTRADAY_MANIFEST = """
+select manifest.name, manifest.version,
+       coalesce(manifest.source_versions, '{}'::jsonb),
+       true as raw_event_authority
+  from quant.dataset_manifests manifest
+ where manifest.name = 'krx-intraday-completed-second'
+   and manifest.version = 'v1'
+   and manifest.universe_version_id is null
+   and manifest.row_count is null
+   and manifest.partitions = '[]'::jsonb
+   and manifest.object_path =
+       'postgresql+fdw://ext_src/{quotes,ticks}'
+   and manifest.source_versions->>'market_quotes' =
+       'trading-bot-completed-second-book-v1'
+   and manifest.source_versions->>'market_ticks' =
+       'trading-bot-completed-second-trade-v1'
+   and manifest.quality_summary->>'status' =
+       'HISTORICAL_COMPLETED_SECOND_REQUIRES_PER_EXPERIMENT_AUDIT'
+   and manifest.quality_summary->>'timestamp_resolution' = 'SECOND'
+   and manifest.quality_summary->>'intra_second_order' = 'UNAVAILABLE'
+   and manifest.quality_summary->>'execution' = 'TAKER_ONLY'
+   and manifest.point_in_time_policy->>'knowledge_clock' =
+       'event_time_only_no_receipt_clock'
+   and manifest.point_in_time_policy->>'feature_cutoff' =
+       'completed_source_second<=decision_time'
+   and manifest.point_in_time_policy->>'label_cutoff' =
+       'effective_entry_time+horizon'
+   and manifest.point_in_time_policy->>'instrument_isolation' = 'true'
+   and manifest.point_in_time_policy->>'evidence_scope' =
+       'HISTORICAL_SEARCH_ONLY'
+   and manifest.point_in_time_policy->>'content_window' =
+       '[09:00:00,15:30:00) Asia/Seoul'
+   and manifest.point_in_time_policy->>'maximum_horizon_seconds' = '600'
+   and manifest.schema_definition->'market_quotes'->'physical_table' =
+       '"ext_src.quotes"'::jsonb
+   and manifest.schema_definition->'market_quotes'->'required' @>
+       '["ts","symbol","bid1","ask1","bid_vol1","ask_vol1",'
+       '"bid10","ask10","bid_vol10","ask_vol10"]'::jsonb
+   and manifest.schema_definition->'market_ticks'->'physical_table' =
+       '"ext_src.ticks"'::jsonb
+   and manifest.schema_definition->'market_ticks'->'required' @>
+       '["ts","symbol","price","volume","ofi_contrib"]'::jsonb
+"""
+
+_SQL_INTRADAY_MANIFESTS = (
+    _SQL_MANIFESTS.rstrip() + "\nunion\n" +
+    _SQL_LIVE_INTRADAY_MANIFEST.strip() + "\nunion\n" +
+    _SQL_EXTERNAL_INTRADAY_MANIFEST.strip() + "\n")
+
+
+def manifest_index(meta_conn, *, research_lane: str = "") \
+        -> list[tuple[str, str, dict]]:
+    """Return manifests eligible for this execution lane.
+
+    Generic and daily callers receive only immutable governed stock panels.
+    ``INTRADAY_EVENT`` additionally receives the single typed live Timescale
+    source manifest.  That extra row grants source availability only; the
+    runner must still freeze and attest the exact stock slice before a trial is
+    registered.
+    """
     cur = meta_conn.cursor()
-    cur.execute(_SQL_MANIFESTS)
+    sql = (_SQL_INTRADAY_MANIFESTS
+           if str(research_lane or "").upper() == INTRADAY_EVENT
+           else _SQL_MANIFESTS)
+    cur.execute(sql)
+    lane = str(research_lane or "").upper()
     out = []
-    for name, version, sources in cur.fetchall():
+    for row in cur.fetchall():
+        # Older test doubles and generic callers may still return the historic
+        # three-column projection.  Missing authority is deliberately false.
+        if len(row) == 4:
+            name, version, sources, raw_event_authority = row
+        elif len(row) == 3:
+            name, version, sources = row
+            raw_event_authority = False
+        else:
+            raise ValueError("unexpected dataset manifest projection")
         if isinstance(sources, str):
             sources = json.loads(sources or "{}")
-        out.append((str(name), str(version), dict(sources or {})))
+        name, version = str(name), str(version)
+        dataset = f"{name}/{version}"
+        sources = dict(sources or {})
+        if lane == INTRADAY_EVENT:
+            authority_contract = RAW_EVENT_AUTHORITY_CONTRACTS.get(dataset) or {}
+            expected_versions = authority_contract.get("source_versions") or {}
+            expected_raw_contract = all(
+                str(sources.get(table) or "") == source_version
+                for table, source_version in expected_versions.items())
+            authorized = (
+                bool(raw_event_authority)
+                and dataset in RAW_EVENT_AUTHORITY_DATASETS
+                and set(expected_versions) == RAW_EVENT_TABLES
+                and expected_raw_contract
+            )
+            if not authorized:
+                # Ordinary governed manifests remain usable for their bars or
+                # aggregates, but raw key names alone grant no replay authority.
+                sources = {
+                    table: source_version
+                    for table, source_version in sources.items()
+                    if table not in RAW_EVENT_TABLES
+                }
+                if not sources:
+                    continue
+        out.append((name, version, sources))
     return out
+
+
+def _is_raw_event_authority(dataset: str, sources: dict) -> bool:
+    """Defense in depth for monkeypatched/cached manifest indexes."""
+    contract = RAW_EVENT_AUTHORITY_CONTRACTS.get(dataset) or {}
+    expected_versions = contract.get("source_versions") or {}
+    return (
+        dataset in RAW_EVENT_AUTHORITY_DATASETS
+        and set(expected_versions) == RAW_EVENT_TABLES
+        and all(
+            str((sources or {}).get(table) or "") == source_version
+            for table, source_version in expected_versions.items()
+        )
+    )
 
 
 def _interval_of(source_version: str) -> str | None:
@@ -213,15 +448,77 @@ def _interval_of(source_version: str) -> str | None:
     return s.rsplit("/", 1)[1] if "/" in s else None
 
 
+_EXTERNAL_LEDGER_COVERAGE_SQL = {
+    "market_quotes": """
+select coalesce(sum((values->>'n_quotes')::bigint), 0),
+       min((event_time at time zone 'Asia/Seoul')::date),
+       max((event_time at time zone 'Asia/Seoul')::date),
+       count(distinct (event_time at time zone 'Asia/Seoul')::date),
+       count(distinct instrument_id)
+  from market.microstructure_features
+ where feature_set_version = 'ms-daily-v5'
+   and values->>'origin' = 'external'
+   and coalesce((values->>'n_quotes')::bigint, 0) > 0
+""",
+    "market_ticks": """
+select coalesce(sum((values->>'n_ticks')::bigint), 0),
+       min((event_time at time zone 'Asia/Seoul')::date),
+       max((event_time at time zone 'Asia/Seoul')::date),
+       count(distinct (event_time at time zone 'Asia/Seoul')::date),
+       count(distinct instrument_id)
+  from market.microstructure_features
+ where feature_set_version = 'ms-daily-v5'
+   and values->>'origin' = 'external'
+   and coalesce((values->>'n_ticks')::bigint, 0) > 0
+""",
+}
+
+
+def _measure_external_source(market_conn, table: str,
+                             interval: str | None) -> SourceCoverage | None:
+    """Measure the governed ledger, never scan the 61-session FDW archive."""
+
+    sql = _EXTERNAL_LEDGER_COVERAGE_SQL.get(table)
+    if sql is None:
+        return None
+    physical = RAW_EVENT_AUTHORITY_CONTRACTS[EXTERNAL_INTRADAY_DATASET][
+        "physical_sources"][table]
+    cur = market_conn.cursor()
+    cur.execute("select to_regclass(%s) is not null", (physical,))
+    ready = bool(cur.fetchone()[0])
+    if not ready:
+        return SourceCoverage(
+            table=table, interval=interval, rows=0, first_day=None,
+            last_day=None, history_days=0, symbols=0,
+            measurement="EXTERNAL_FEATURE_LEDGER", chunks=0,
+            granularity="COMPLETED_SECOND_RAW_EVENT")
+    cur.execute(sql)
+    rows, first, last, days, syms = cur.fetchone()
+    return SourceCoverage(
+        table=table, interval=interval, rows=int(rows or 0),
+        first_day=str(first) if first else None,
+        last_day=str(last) if last else None,
+        history_days=int(days or 0), symbols=int(syms or 0),
+        measurement="EXTERNAL_FEATURE_LEDGER", chunks=0,
+        granularity="COMPLETED_SECOND_RAW_EVENT")
+
+
 # ── 실측 ───────────────────────────────────────────────────────────────────
 def measure_source(market_conn, table: str, interval: str | None,
-                   *, meta_conn=None) -> SourceCoverage | None:
+                   *, meta_conn=None,
+                   event_source: str = LOCAL_EVENT_SOURCE) \
+        -> SourceCoverage | None:
     """그 원천이 사는 DB 에서 커버리지를 잰다. 모르는 테이블이면 None.
 
     `meta_conn` 은 리서치 평면(공시·재무) 원천에만 필요하다. 안 주면 그 원천은
     **못 잰 것으로 남는다**(None) - 시장 연결로 대신 재면 없는 테이블을 조회해
     예외가 나거나, 더 나쁘게는 이름이 같은 다른 테이블을 잰다.
     """
+    if str(event_source or "").upper() == EXTERNAL_EVENT_SOURCE:
+        return _measure_external_source(market_conn, table, interval)
+    if str(event_source or "").upper() != LOCAL_EVENT_SOURCE:
+        return None
+
     spec = SOURCE_TABLES.get(table)
     if spec is None:
         return None
@@ -252,6 +549,7 @@ def measure_source(market_conn, table: str, interval: str | None,
             last_day=str(last) if last else None,
             history_days=calendar_days, symbols=0,
             measurement="CHUNK_RANGE", chunks=int(chunks or 0),
+            granularity=SOURCE_GRANULARITY.get(table, "OTHER"),
         )
 
     # 식별자는 우리 화이트리스트에서만 오고, 값(interval)만 파라미터로 넘긴다.
@@ -272,11 +570,89 @@ def measure_source(market_conn, table: str, interval: str | None,
         first_day=str(first) if first else None,
         last_day=str(last) if last else None,
         history_days=int(days or 0), symbols=int(syms or 0),
+        granularity=SOURCE_GRANULARITY.get(table, "OTHER"),
     )
 
 
+def _copy_authority_contract(dataset: str) -> dict:
+    contract = RAW_EVENT_AUTHORITY_CONTRACTS[dataset]
+    return {
+        "dataset": dataset,
+        "event_source": contract["event_source"],
+        "timestamp_policy": contract["timestamp_policy"],
+        "physical_sources": dict(contract["physical_sources"]),
+        "source_versions": dict(contract["source_versions"]),
+        "knowledge_clock": contract["knowledge_clock"],
+        "evidence_scope": contract["evidence_scope"],
+        **({"content_window": dict(contract["content_window"])}
+           if contract.get("content_window") else {}),
+        **({"maximum_horizon_seconds": contract["maximum_horizon_seconds"]}
+           if contract.get("maximum_horizon_seconds") is not None else {}),
+        **({"execution": contract["execution"]}
+           if contract.get("execution") else {}),
+    }
+
+
+def _select_intraday_authority(
+        chosen: list[tuple[str, dict]], direct: tuple[str, ...],
+        requested_event_source: str | None,
+) -> tuple[list[tuple[str, dict]], dict, str | None]:
+    """Select one manifest authority before any raw table is measured.
+
+    ``AUTO`` is a resolver policy only.  The runner receives one immutable
+    contract and is never permitted to inspect table existence to change it.
+    """
+
+    unique = []
+    seen = set()
+    for row in chosen:
+        key = (row[0], json.dumps(row[1], sort_keys=True))
+        if key not in seen:
+            seen.add(key)
+            unique.append(row)
+    authorities = {
+        key: sources for key, sources in unique
+        if _is_raw_event_authority(key, sources)
+    }
+    direct_authorities = [value for value in direct
+                          if value in RAW_EVENT_AUTHORITY_DATASETS]
+    if len(set(direct_authorities)) > 1:
+        return unique, {}, "multiple direct intraday authorities were requested"
+
+    requested = str(requested_event_source or "AUTO").upper()
+    by_source = {
+        contract["event_source"]: dataset
+        for dataset, contract in RAW_EVENT_AUTHORITY_CONTRACTS.items()
+    }
+    if requested not in {"AUTO", *by_source}:
+        return unique, {}, f"unsupported intraday event source: {requested}"
+    if direct_authorities:
+        desired = direct_authorities[0]
+        if requested != "AUTO" and by_source[requested] != desired:
+            return unique, {}, (
+                "requested event source conflicts with the direct dataset "
+                f"authority: {requested} != {desired}")
+    elif requested == "AUTO":
+        # Prefer the imported 61-session completed-second archive when its
+        # exact manifest contract is registered.  Missing/empty physical data
+        # then fails closed in coverage; it never silently switches datasets.
+        desired = (EXTERNAL_INTRADAY_DATASET
+                   if EXTERNAL_INTRADAY_DATASET in authorities
+                   else LIVE_INTRADAY_DATASET)
+    else:
+        desired = by_source[requested]
+    if desired not in authorities:
+        return unique, {}, f"required intraday authority is unavailable: {desired}"
+
+    selected = [(key, sources) for key, sources in unique
+                if key not in RAW_EVENT_AUTHORITY_DATASETS or key == desired]
+    return selected, _copy_authority_contract(desired), None
+
+
 # ── 사상 ───────────────────────────────────────────────────────────────────
-def resolve(requirement, *, meta_conn, market_conn) -> Resolution:
+def resolve(requirement, *, meta_conn, market_conn,
+            research_lane: str = "",
+            requested_event_source: str | None = None) -> Resolution:
     """원천 요구를 실행 가능한 데이터셋 이름으로 옮긴다.
 
     통과 조건은 셋을 **모두** 만족해야 한다:
@@ -285,13 +661,14 @@ def resolve(requirement, *, meta_conn, market_conn) -> Resolution:
       ③ 관측된 이력이 요구 기간 이상이다
     """
     tables, min_days, direct = normalize_requirement(requirement)
+    lane = str(research_lane or "").upper()
     notes: list[str] = []
 
     if market_conn is None:
         # 재지 못한 것을 통과로 세면 이 관문 전체가 장식이 된다.
         return Resolution(NOT_VERIFIED, notes=("시장 DB 연결이 없어 커버리지를 재지 못했다",))
 
-    index = manifest_index(meta_conn)
+    index = manifest_index(meta_conn, research_lane=lane)
     known = {f"{n}/{v}": (n, v, s) for n, v, s in index}
 
     # 이미 실행면 이름으로 온 것: 사상은 건너뛰되 검증은 한다.
@@ -333,23 +710,26 @@ def resolve(requirement, *, meta_conn, market_conn) -> Resolution:
                     best[n] = (f"{n}/{v}", s)
         covered = {t for _, s in best.values() for t in s}
         # 유도본으로 대체 가능한 원시 요구를 건져낸다. **대체 사실을 남긴다.**
+        # INTRADAY_EVENT에서는 이 우회를 금지한다. 종목·일자당 한 행인
+        # microstructure_features는 L10/체결 이벤트를 재생할 수 없다.
         still = want - covered
-        for raw in sorted(still):
-            for derived, sources in DERIVED_FROM.items():
-                if raw not in sources:
-                    continue
-                for n, v, srcs in index:
-                    if derived not in srcs:
+        if lane != INTRADAY_EVENT:
+            for raw in sorted(still):
+                for derived, sources in DERIVED_FROM.items():
+                    if raw not in sources:
                         continue
-                    if n not in best or v > best[n][0].rsplit("/", 1)[1]:
-                        best[n] = (f"{n}/{v}", srcs)
-                    # **원시 이름**을 덮인 것으로 표시한다. 유도본 이름을
-                    # 넣으면 `want` 에 없는 값이라 미사상이 그대로 남는다.
-                    covered = covered | {raw}
-                    substituted.append(
-                        f"{raw} -> {derived} (유도본으로 대체. 원시가 아니라 "
-                        f"종목·일자로 접은 값이다 - 결론을 원시 틱 검정으로 읽지 마라)")
-                    break
+                    for n, v, srcs in index:
+                        if derived not in srcs:
+                            continue
+                        if n not in best or v > best[n][0].rsplit("/", 1)[1]:
+                            best[n] = (f"{n}/{v}", srcs)
+                        # **원시 이름**을 덮인 것으로 표시한다. 유도본 이름을
+                        # 넣으면 `want` 에 없는 값이라 미사상이 그대로 남는다.
+                        covered = covered | {raw}
+                        substituted.append(
+                            f"{raw} -> {derived} (DAILY_AGGREGATE_SUBSTITUTE; "
+                            "원시 이벤트 증거가 아님)")
+                        break
         unmapped.extend(sorted(want - covered))
         if not unmapped:
             # 고른 것 중 **이 요구가 실제로 쓰는 원천을 가진 것**만 남긴다.
@@ -358,7 +738,37 @@ def resolve(requirement, *, meta_conn, market_conn) -> Resolution:
             keep = set(want) | {d for d in DERIVED_FROM}
             chosen.extend(v for v in best.values() if set(v[1]) & keep)
 
+    execution_contract = {}
+    if lane == INTRADAY_EVENT:
+        chosen, execution_contract, authority_error = \
+            _select_intraday_authority(
+                chosen, direct, requested_event_source)
+        if authority_error:
+            if str(requested_event_source or "AUTO").upper() != "AUTO":
+                return Resolution(
+                    SOURCE_AUTHORITY_MISMATCH,
+                    unmapped=tuple(sorted(RAW_EVENT_TABLES)),
+                    notes=(authority_error,),
+                )
+            execution_contract = {}
+
+    if lane == INTRADAY_EVENT and not any(
+            _is_raw_event_authority(key, sources)
+            for key, sources in chosen):
+        unmapped.extend(sorted(RAW_EVENT_TABLES))
+
     if unmapped:
+        if lane == INTRADAY_EVENT and RAW_EVENT_TABLES & set(unmapped):
+            return Resolution(
+                UNMAPPED_SOURCE,
+                unmapped=tuple(sorted(set(unmapped) | RAW_EVENT_TABLES)),
+                notes=(
+                    "INTRADAY_EVENT requires both raw market_quotes and "
+                    "market_ticks from a typed RAW_EVENT authority; source "
+                    "key names or daily microstructure aggregates cannot "
+                    "authorize event replay",
+                ),
+            )
         return Resolution(UNMAPPED_SOURCE, unmapped=tuple(sorted(set(unmapped))),
                           notes=("사상할 데이터셋이 없다 - 리서치에 반려한다",))
     if not chosen:
@@ -369,11 +779,16 @@ def resolve(requirement, *, meta_conn, market_conn) -> Resolution:
     empty: list[str] = []
     short: list[str] = []
     for _key, sources in chosen:
+        event_source = (
+            execution_contract.get("event_source", LOCAL_EVENT_SOURCE)
+            if _is_raw_event_authority(_key, sources)
+            else LOCAL_EVENT_SOURCE)
         for tbl, sv in sources.items():
             if tables and tbl not in tables:
                 continue          # 이 요구가 안 쓴 재료까지 볼 필요는 없다
             cov = measure_source(market_conn, tbl, _interval_of(sv),
-                                 meta_conn=meta_conn)
+                                 meta_conn=meta_conn,
+                                 event_source=event_source)
             if cov is None:
                 unmapped.append(tbl)
                 continue
@@ -400,17 +815,31 @@ def resolve(requirement, *, meta_conn, market_conn) -> Resolution:
     # **대체를 맨 앞에 싣는다.** 읽는 쪽이 커버리지 숫자만 보고 원시로 검정한
     # 줄 알면 결론의 강도를 잘못 읽는다.
     notes.extend(substituted)
+    if execution_contract.get("dataset") == LIVE_INTRADAY_DATASET:
+        notes.append(
+            "krx-intraday-events/v1: LIVE_RUNTIME_SOURCE_ONLY; exact cutoff, "
+            "sessions and KRX ACTIVE EQUITY/STOCK identities are frozen and "
+            "fail-closed by the bounded intraday runner; this manifest alone "
+            "is not reusable performance evidence")
+    if execution_contract.get("dataset") == EXTERNAL_INTRADAY_DATASET:
+        notes.append(
+            "krx-intraday-completed-second/v1: HISTORICAL_SEARCH_ONLY; "
+            "fixed [09:00,15:30) Asia/Seoul raw-content window, second-clock "
+            "TAKER replay, and no receipt-clock PIT claim")
     for tbl, cov in sorted(coverage.items()):
         if cov.measurement == "CHUNK_RANGE":
             notes.append(
-                f"{tbl}: LIVE CHUNK_RANGE {cov.first_day}~{cov.last_day} "
+                f"{tbl}: {cov.granularity} LIVE CHUNK_RANGE "
+                f"{cov.first_day}~{cov.last_day} "
                 f"({cov.chunks} chunks); 정확한 세션·종목·행 수는 실험별 "
                 "bounded slice에서 계측")
         else:
-            notes.append(f"{tbl}: {cov.rows:,}행 {cov.first_day}~{cov.last_day} "
+            notes.append(f"{tbl}: {cov.granularity} {cov.rows:,}행 "
+                         f"{cov.first_day}~{cov.last_day} "
                          f"{cov.history_days}일 {cov.symbols}종목")
     return Resolution(RESOLVED, datasets=tuple(sorted(k for k, _ in chosen)),
-                      coverage=coverage, notes=tuple(notes))
+                      coverage=coverage, notes=tuple(notes),
+                      execution_contract=execution_contract)
 
 
 # ── 자체 점검 ──────────────────────────────────────────────────────────────

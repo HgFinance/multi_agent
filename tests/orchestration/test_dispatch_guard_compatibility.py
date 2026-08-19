@@ -1,0 +1,248 @@
+from __future__ import annotations
+
+import os
+import runpy
+import sqlite3
+import sys
+import types
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[2]
+PATCH = ROOT / "deploy" / "hermes-dispatch-guard" / "sitecustomize.py"
+PREFLIGHT = ROOT / "deploy" / "hermes-dispatch-guard" / "check_guard.py"
+SENSITIVE_ENV = (
+    "MCP_RESEARCH_API_KEY",
+    "MCP_TRADING_ORDER_API_KEY",
+    "TIMESCALE_DATABASE_URL",
+)
+
+
+def _database() -> sqlite3.Connection:
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.execute("create table tasks (id text, assignee text, body text)")
+    return connection
+
+
+def _load_module(monkeypatch, original, spawn=None):
+    package = types.ModuleType("hermes_cli")
+    kanban_db = types.ModuleType("hermes_cli.kanban_db")
+    kanban_db.check_respawn_guard = original
+    if spawn is not None:
+        kanban_db._default_spawn = spawn
+    package.kanban_db = kanban_db
+    monkeypatch.setitem(sys.modules, "hermes_cli", package)
+    monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db", kanban_db)
+    monkeypatch.setenv("HGFINANCE_DISPATCH_GUARD", "1")
+    runpy.run_path(str(PATCH), run_name="hgfinance_dispatch_guard_test")
+    return kanban_db
+
+
+def _load_patch(monkeypatch, original):
+    return _load_module(monkeypatch, original).check_respawn_guard
+
+
+def test_dispatch_guard_delegates_to_current_two_argument_hermes(monkeypatch):
+    observed: list[tuple[sqlite3.Connection, str]] = []
+
+    def original(connection, task_id):
+        observed.append((connection, task_id))
+        return "native"
+
+    patched = _load_patch(monkeypatch, original)
+    connection = _database()
+
+    assert patched(connection, "t_plain") == "native"
+    assert observed == [(connection, "t_plain")]
+
+
+def test_dispatch_guard_keeps_legacy_lane_signature_compatible(monkeypatch):
+    observed: list[tuple[str, str]] = []
+
+    def original(connection, task_id, *, lane="ready"):
+        del connection
+        observed.append((task_id, lane))
+        return "legacy"
+
+    patched = _load_patch(monkeypatch, original)
+    connection = _database()
+
+    assert patched(connection, "t_plain", lane="blocked") == "legacy"
+    assert observed == [("t_plain", "blocked")]
+
+
+@pytest.mark.parametrize(("assignee", "expected"), [
+    ("research-department", {"MCP_RESEARCH_API_KEY"}),
+    ("quant-backtest-department", {
+        "MCP_RESEARCH_API_KEY", "TIMESCALE_DATABASE_URL"}),
+    ("trading-department", {"MCP_TRADING_ORDER_API_KEY"}),
+    ("ceo-agent", set()),
+    ("unknown-profile", set()),
+])
+def test_dispatch_spawn_scopes_mcp_secrets_by_assignee(
+        monkeypatch, assignee, expected):
+    observed: list[set[str]] = []
+
+    def original_guard(connection, task_id):
+        del connection, task_id
+        return "native"
+
+    def original_spawn(task, workspace, *, board=None):
+        del task, workspace, board
+        observed.append({
+            name for name in (
+                "MCP_RESEARCH_API_KEY", "MCP_TRADING_ORDER_API_KEY",
+                "TIMESCALE_DATABASE_URL")
+            if name in os.environ
+        })
+        return 123
+
+    monkeypatch.setenv("MCP_RESEARCH_API_KEY", "research-test-secret")
+    monkeypatch.setenv("MCP_TRADING_ORDER_API_KEY", "order-test-secret")
+    monkeypatch.setenv("TIMESCALE_DATABASE_URL", "postgresql://test/market")
+    module = _load_module(
+        monkeypatch, original_guard, spawn=original_spawn)
+
+    assert module._default_spawn(
+        SimpleNamespace(assignee=assignee), "/tmp/work", board="default") == 123
+    assert observed == [expected]
+    # The long-lived dispatcher retains both credentials for the next profile;
+    # only the spawned child receives the scoped view.
+    assert os.environ["MCP_RESEARCH_API_KEY"] == "research-test-secret"
+    assert os.environ["MCP_TRADING_ORDER_API_KEY"] == "order-test-secret"
+    assert os.environ["TIMESCALE_DATABASE_URL"] == "postgresql://test/market"
+
+
+def test_dispatch_spawn_restores_environment_after_failure(monkeypatch):
+    def original_guard(connection, task_id):
+        del connection, task_id
+        return "native"
+
+    def failing_spawn(task, workspace):
+        del task, workspace
+        assert "MCP_TRADING_ORDER_API_KEY" not in os.environ
+        raise RuntimeError("spawn failed")
+
+    monkeypatch.setenv("MCP_RESEARCH_API_KEY", "research-test-secret")
+    monkeypatch.setenv("MCP_TRADING_ORDER_API_KEY", "order-test-secret")
+    module = _load_module(monkeypatch, original_guard, spawn=failing_spawn)
+
+    with pytest.raises(RuntimeError, match="spawn failed"):
+        module._default_spawn(
+            SimpleNamespace(assignee="research-department"), "/tmp/work")
+    assert os.environ["MCP_RESEARCH_API_KEY"] == "research-test-secret"
+    assert os.environ["MCP_TRADING_ORDER_API_KEY"] == "order-test-secret"
+
+
+def test_dispatch_spawn_hook_marks_secret_scope_active(monkeypatch):
+    def original_guard(connection, task_id):
+        del connection, task_id
+        return "native"
+
+    def original_spawn(task, workspace):
+        del task, workspace
+        return 123
+
+    module = _load_module(monkeypatch, original_guard, spawn=original_spawn)
+
+    assert getattr(
+        module._default_spawn, "_hgfinance_secret_scope_active", False
+    ) is True
+    assert os.environ["HGFINANCE_DISPATCH_SECRET_SCOPE_STATUS"] == "ACTIVE_V1"
+
+
+def test_dispatch_guard_fails_closed_when_spawn_hook_is_missing(monkeypatch):
+    def original_guard(connection, task_id):
+        del connection, task_id
+        return "native"
+
+    for name in SENSITIVE_ENV:
+        monkeypatch.setenv(name, f"{name.casefold()}-test-secret")
+
+    module = _load_module(monkeypatch, original_guard)
+
+    assert not hasattr(module, "_default_spawn")
+    assert all(name not in os.environ for name in SENSITIVE_ENV)
+    assert os.environ["HGFINANCE_DISPATCH_SECRET_SCOPE_STATUS"] == (
+        "FAIL_CLOSED:NO_DEFAULT_SPAWN_HOOK"
+    )
+
+
+def test_dispatch_guard_fails_closed_when_patch_installation_raises(monkeypatch):
+    package = types.ModuleType("hermes_cli")
+    kanban_db = types.ModuleType("hermes_cli.kanban_db")
+    package.kanban_db = kanban_db
+    monkeypatch.setitem(sys.modules, "hermes_cli", package)
+    monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db", kanban_db)
+    monkeypatch.setenv("HGFINANCE_DISPATCH_GUARD", "1")
+    for name in SENSITIVE_ENV:
+        monkeypatch.setenv(name, f"{name.casefold()}-test-secret")
+
+    runpy.run_path(str(PATCH), run_name="hgfinance_dispatch_guard_test")
+
+    assert all(name not in os.environ for name in SENSITIVE_ENV)
+    assert os.environ["HGFINANCE_DISPATCH_SECRET_SCOPE_STATUS"] == (
+        "FAIL_CLOSED:PATCH_INSTALL_FAILED"
+    )
+
+
+def test_dispatch_preflight_accepts_the_installed_scope_hook(
+        monkeypatch, capsys):
+    def original_guard(connection, task_id):
+        del connection, task_id
+        return "native"
+
+    def original_spawn(task, workspace):
+        del task, workspace
+        return 123
+
+    _load_module(monkeypatch, original_guard, spawn=original_spawn)
+    preflight = runpy.run_path(
+        str(PREFLIGHT), run_name="hgfinance_dispatch_guard_preflight_test"
+    )
+
+    assert preflight["main"]() == 0
+    captured = capsys.readouterr()
+    assert captured.out.strip() == (
+        "dispatcher credential-scope preflight: ACTIVE_V1"
+    )
+    assert captured.err == ""
+
+
+def test_dispatch_preflight_rejects_an_unmarked_spawn_hook(monkeypatch, capsys):
+    package = types.ModuleType("hermes_cli")
+    kanban_db = types.ModuleType("hermes_cli.kanban_db")
+    kanban_db._default_spawn = lambda task, workspace: None
+    package.kanban_db = kanban_db
+    monkeypatch.setitem(sys.modules, "hermes_cli", package)
+    monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db", kanban_db)
+    monkeypatch.setenv("HGFINANCE_DISPATCH_SECRET_SCOPE_STATUS", "ACTIVE_V1")
+    preflight = runpy.run_path(
+        str(PREFLIGHT), run_name="hgfinance_dispatch_guard_preflight_test"
+    )
+
+    assert preflight["main"]() == 78
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip() == (
+        "dispatcher credential-scope preflight: inactive (fail closed)"
+    )
+
+
+def test_dispatch_preflight_rejects_hermes_import_failure(monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, "hermes_cli", None)
+    monkeypatch.setitem(sys.modules, "hermes_cli.kanban_db", None)
+    preflight = runpy.run_path(
+        str(PREFLIGHT), run_name="hgfinance_dispatch_guard_preflight_test"
+    )
+
+    assert preflight["main"]() == 78
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip() == (
+        "dispatcher credential-scope preflight: Hermes import failed"
+    )

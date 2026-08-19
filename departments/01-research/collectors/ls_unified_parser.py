@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -106,19 +107,17 @@ def to_int(v: Any, default: int = 0) -> int:
 
 
 def normalize_symbol(raw: Any) -> str | None:
-    """수신 shcode 는 6자리(005930) 또는 9자리(' U005930  ') 등으로 온다.
-
-    숫자만 추출해 마지막 6자리를 단축코드로 본다 - 시장 prefix('U')를 떼는 것이다.
-    """
+    """대문자 6자리 KRX 코드와 알려진 LS ``A``/``U`` 접두사만 받는다."""
     if raw is None:
         return None
-    s = str(raw).strip()
+    s = str(raw).strip().upper()
     if not s:
         return None
-    digits = "".join(ch for ch in s if ch.isdigit())
-    if len(digits) < 6:
-        return None
-    return digits[-6:]
+    if re.fullmatch(r"[0-9A-Z]{6}", s):
+        return s
+    if s[:1] in {"A", "U"} and re.fullmatch(r"[0-9A-Z]{6}", s[1:]):
+        return s[1:]
+    return None
 
 
 def exchname_to_market(raw: Any) -> str:

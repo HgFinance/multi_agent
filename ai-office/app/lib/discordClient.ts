@@ -9,7 +9,7 @@
  * 소유한다. 여기에 매핑표를 복제하면 부서를 늘릴 때 한쪽만 고쳐진다.
  */
 
-import { BFF } from "./ceoClient";
+import { bffFetch } from "./bffClient";
 
 export type DiscordMessage = {
   id: string;
@@ -38,7 +38,7 @@ export async function readDiscordMessages(
   signal?: AbortSignal,
 ): Promise<DiscordMessagesResponse> {
   const params = new URLSearchParams({ department, limit: String(limit) });
-  const response = await fetch(`${BFF}/ui/discord/messages?${params}`, {
+  const response = await bffFetch(`/ui/discord/messages?${params}`, {
     cache: "no-store",
     signal,
   });

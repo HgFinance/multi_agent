@@ -12,7 +12,7 @@ import hashlib
 import json
 
 
-SEMANTIC_VERSION = "alpha-semantic-plan-v1"
+SEMANTIC_VERSION = "alpha-semantic-plan-v2"
 
 LANES = frozenset({"DAILY_CROSS_SECTIONAL", "INTRADAY_EVENT"})
 EVENTS = frozenset({
@@ -32,7 +32,9 @@ CONTEXTS = frozenset({
 })
 QUALITIES = frozenset({
     "LEVEL", "PERSISTENCE", "ACCELERATION", "REVERSAL",
-    "L1_L10_DIVERGENCE", "CROSS_SIGNAL_INTERACTION", "STATE_CONDITIONAL",
+    "L1_L10_DIVERGENCE", "L1_L10_CONVERGENCE",
+    "QUOTE_TAPE_CONFIRMATION", "EVENT_NORMALIZED", "VOLUME_NORMALIZED",
+    "CROSS_SIGNAL_INTERACTION", "STATE_CONDITIONAL",
 })
 DIRECTIONS = frozenset({"FOLLOW", "REVERT", "CONDITIONAL"})
 OUTPUTS = frozenset({
@@ -43,21 +45,50 @@ EXECUTIONS = frozenset({
     "DAILY_CLOSE_TO_OPEN", "TAKER", "PASSIVE_FIFO_LOWER_BOUND",
 })
 
+# Observable groups are public contract data, not prompt prose.  The Scout and
+# Planner render these exact groups, while intake uses them to reject a story
+# whose executable AST does not contain the claimed clock/confirmation path.
+# L1/L10 here means visible quote-book levels.  It does not claim MBO queue ids,
+# add/cancel attribution, or an ordering between snapshots sharing one source
+# timestamp.
+L1_QUOTE_PRESSURE_FIELDS = frozenset({
+    "queue_imbalance_l1", "quote_event_ofi", "normalized_quote_ofi",
+    "normalized_quote_ofi_per_event", "quote_ofi_per_trade_volume",
+})
+L10_QUOTE_PRESSURE_FIELDS = frozenset({
+    "queue_imbalance_l10", "multi_level_quote_ofi_l10",
+    "normalized_multi_level_quote_ofi_l10",
+})
+EXPLICIT_L1_L10_FIELDS = frozenset({
+    "depth_imbalance_slope", "quote_ofi_depth_divergence",
+})
+QUOTE_PRESSURE_FIELDS = frozenset(
+    L1_QUOTE_PRESSURE_FIELDS | L10_QUOTE_PRESSURE_FIELDS |
+    EXPLICIT_L1_L10_FIELDS)
+TAPE_PRESSURE_FIELDS = frozenset({
+    "trade_flow_imbalance", "signed_trade_volume",
+})
+EVENT_NORMALIZED_FIELDS = frozenset({"normalized_quote_ofi_per_event"})
+VOLUME_NORMALIZED_FIELDS = frozenset({"quote_ofi_per_trade_volume"})
+
 # A semantic plan need not use every related feature, but it must touch at least
 # one observable that can actually represent the event.  This catches the common
 # failure where an ORDER_FLOW story is implemented as a price-only formula.
 EVENT_FIELDS = {
     "PRICE_TREND": frozenset({"close", "returns"}),
     "PRICE_REVERSAL": frozenset({"close", "returns"}),
-    "LIQUIDITY_SHOCK": frozenset({"spread_bps", "book_depth_l1",
-                                   "book_depth_l10", "trade_count"}),
-    "QUOTE_IMBALANCE": frozenset({"queue_imbalance_l1", "queue_imbalance_l10",
-                                   "quote_event_ofi", "normalized_quote_ofi"}),
-    "ORDER_FLOW": frozenset({"trade_flow_imbalance", "quote_event_ofi",
-                              "normalized_quote_ofi"}),
+    "LIQUIDITY_SHOCK": frozenset({
+        "spread_bps", "book_depth_l1", "book_depth_l10", "trade_count",
+        "trade_volume", "depth_imbalance_slope",
+    }),
+    "QUOTE_IMBALANCE": QUOTE_PRESSURE_FIELDS,
+    "ORDER_FLOW": frozenset(
+        QUOTE_PRESSURE_FIELDS | TAPE_PRESSURE_FIELDS | {
+            "trade_side_known_ratio",
+        }),
     "MICROPRICE_DISLOCATION": frozenset({"microprice_offset_bps"}),
     "SPREAD_CHANGE": frozenset({"spread_bps"}),
-    "TRADE_BURST": frozenset({"trade_count", "trade_intensity"}),
+    "TRADE_BURST": frozenset({"trade_count", "trade_intensity", "trade_volume"}),
     "VOLATILITY_BURST": frozenset({"realized_volatility_bps"}),
     "CROSS_ASSET_FLOW": frozenset({"cross_asset_flow"}),
 }
@@ -65,10 +96,25 @@ EVENT_FIELDS = {
 CONTEXT_FIELDS = {
     "TIGHT_SPREAD": frozenset({"spread_bps"}),
     "WIDE_SPREAD": frozenset({"spread_bps"}),
-    "HIGH_ACTIVITY": frozenset({"trade_count", "quote_count", "trade_intensity"}),
-    "LOW_ACTIVITY": frozenset({"trade_count", "quote_count", "trade_intensity"}),
+    "HIGH_ACTIVITY": frozenset({
+        "trade_count", "quote_count", "trade_intensity", "trade_volume",
+        "quote_event_transition_count",
+    }),
+    "LOW_ACTIVITY": frozenset({
+        "trade_count", "quote_count", "trade_intensity", "trade_volume",
+        "quote_event_transition_count",
+    }),
     "HIGH_VOLATILITY": frozenset({"realized_volatility_bps"}),
     "LOW_VOLATILITY": frozenset({"realized_volatility_bps"}),
+}
+
+CONTEXT_PREDICATE_POLARITY = {
+    "TIGHT_SPREAD": "LOWER",
+    "LOW_ACTIVITY": "LOWER",
+    "LOW_VOLATILITY": "LOWER",
+    "WIDE_SPREAD": "UPPER",
+    "HIGH_ACTIVITY": "UPPER",
+    "HIGH_VOLATILITY": "UPPER",
 }
 
 
@@ -178,13 +224,26 @@ def fingerprint(plan: dict) -> str:
 
 
 def check_observables(plan: dict, fields, *, operators=None,
-                      conditional_fields=None) -> dict:
+                      conditional_fields=None,
+                      signal_predicate_paths=None) -> dict:
     """Deterministic semantic-to-formula alignment check."""
     parsed = validate(plan)
     actual = {str(field) for field in fields}
     ops = {str(op) for op in (operators or ())}
     conditioned = ({str(field) for field in conditional_fields}
                    if conditional_fields is not None else None)
+    support_paths = None
+    if signal_predicate_paths is not None:
+        try:
+            support_paths = tuple(
+                frozenset((str(field), str(polarity).strip().upper())
+                          for field, polarity in path)
+                for path in signal_predicate_paths
+            )
+        except (TypeError, ValueError):
+            # Malformed or unknown support evidence is an unconstrained path,
+            # never permission to infer a directional semantic context.
+            support_paths = (frozenset(),)
     event_expected = EVENT_FIELDS[parsed["event"]]
     missing = []
     if not actual & event_expected:
@@ -197,6 +256,31 @@ def check_observables(plan: dict, fields, *, operators=None,
         elif expected and conditioned is not None and not conditioned & expected:
             missing.append(
                 f"context {context} must gate the signal with one of {sorted(expected)}")
+        required_polarity = CONTEXT_PREDICATE_POLARITY.get(context)
+        if expected and required_polarity:
+            violations = []
+            if support_paths is None:
+                violations.append("signal-support analysis was not supplied")
+            elif not support_paths:
+                violations.append("no non-zero output support path was proven")
+            else:
+                for index, path in enumerate(support_paths, start=1):
+                    observed = {
+                        polarity for field, polarity in path
+                        if field in expected
+                    }
+                    if observed == {required_polarity}:
+                        continue
+                    detail = (f"observed polarities {sorted(observed)}"
+                              if observed else
+                              "has no matching controlled predicate")
+                    violations.append(f"path {index} {detail}")
+            if violations:
+                missing.append(
+                    f"context {context} requires a "
+                    f"{required_polarity.lower()}-polarity predicate on one of "
+                    f"{sorted(expected)} on every non-zero output path; "
+                    + "; ".join(violations))
     qualities = set(parsed["qualities"])
     if "PERSISTENCE" in qualities and not ops & {
             "lag", "rolling_mean", "rolling_sum", "ewma"}:
@@ -205,13 +289,97 @@ def check_observables(plan: dict, fields, *, operators=None,
         missing.append("quality ACCELERATION needs delta")
     if "STATE_CONDITIONAL" in qualities and "where" not in ops:
         missing.append("quality STATE_CONDITIONAL needs where")
-    if "L1_L10_DIVERGENCE" in qualities:
-        has_l1 = bool(actual & {"queue_imbalance_l1", "book_depth_l1"})
-        has_l10 = bool(actual & {"queue_imbalance_l10", "book_depth_l10"})
-        if not (has_l1 and has_l10):
-            missing.append("quality L1_L10_DIVERGENCE needs both L1 and L10 fields")
+    has_l1 = bool(actual & (L1_QUOTE_PRESSURE_FIELDS | {
+        "book_depth_l1", "depth_imbalance_l1",
+    }))
+    has_l10 = bool(actual & (L10_QUOTE_PRESSURE_FIELDS | {
+        "book_depth_l10", "depth_imbalance_l10",
+    }))
+    has_explicit_depth_relation = bool(actual & EXPLICIT_L1_L10_FIELDS)
+    if "L1_L10_DIVERGENCE" in qualities and not (
+            has_explicit_depth_relation or (has_l1 and has_l10)):
+        missing.append(
+            "quality L1_L10_DIVERGENCE needs quote_ofi_depth_divergence/"
+            "depth_imbalance_slope or both L1 and L10 quote fields")
+    if "L1_L10_CONVERGENCE" in qualities:
+        if not (has_explicit_depth_relation or (has_l1 and has_l10)):
+            missing.append(
+                "quality L1_L10_CONVERGENCE needs an explicit L1/L10 relation "
+                "or both L1 and L10 quote fields")
+        elif not ops & {"abs", "add", "mul", "min", "max", "where"}:
+            missing.append(
+                "quality L1_L10_CONVERGENCE needs an explicit agreement/"
+                "distance operator")
+    if "QUOTE_TAPE_CONFIRMATION" in qualities:
+        if not actual & QUOTE_PRESSURE_FIELDS:
+            missing.append(
+                "quality QUOTE_TAPE_CONFIRMATION needs a signed quote-pressure field")
+        if not actual & TAPE_PRESSURE_FIELDS:
+            missing.append(
+                "quality QUOTE_TAPE_CONFIRMATION needs a signed tape-pressure field")
+        if not ops & {"mul", "min", "max", "where"}:
+            missing.append(
+                "quality QUOTE_TAPE_CONFIRMATION needs an explicit confirmation gate/"
+                "interaction")
+    if ("EVENT_NORMALIZED" in qualities and
+            not actual & EVENT_NORMALIZED_FIELDS):
+        missing.append(
+            "quality EVENT_NORMALIZED needs normalized_quote_ofi_per_event")
+    if ("VOLUME_NORMALIZED" in qualities and
+            not actual & VOLUME_NORMALIZED_FIELDS):
+        missing.append(
+            "quality VOLUME_NORMALIZED needs quote_ofi_per_trade_volume")
     if "CROSS_SIGNAL_INTERACTION" in qualities and (
             len(actual) < 2 or not ops & {"mul", "div", "where"}):
         missing.append(
             "quality CROSS_SIGNAL_INTERACTION needs multiple fields and an interaction operator")
+    return {"ok": not missing, "fields": sorted(actual), "missing": missing}
+
+
+def check_microstructure_mutations(declarations, fields, *, operators=None) -> dict:
+    """Verify that clock/depth mutation labels are visible in the child AST.
+
+    The labels guide evolutionary search but are not evidence by themselves.  A
+    declaration without its required observable path would let the LLM rename a
+    child while leaving the economic equation unchanged, so intake rejects it.
+    Unknown declaration names remain the owning policy module's responsibility.
+    """
+    declared = {str(value).strip().upper() for value in (declarations or ())}
+    actual = {str(field) for field in fields}
+    ops = {str(op) for op in (operators or ())}
+    missing: list[str] = []
+    has_l1 = bool(actual & (L1_QUOTE_PRESSURE_FIELDS | {
+        "book_depth_l1", "depth_imbalance_l1",
+    }))
+    has_l10 = bool(actual & (L10_QUOTE_PRESSURE_FIELDS | {
+        "book_depth_l10", "depth_imbalance_l10",
+    }))
+    has_relation = bool(actual & EXPLICIT_L1_L10_FIELDS)
+    for name in sorted(declared):
+        if name == "L1_L10_DIVERGENCE" and not (
+                has_relation or (has_l1 and has_l10)):
+            missing.append(
+                "L1_L10_DIVERGENCE is not visible in the candidate AST")
+        elif name == "L1_L10_CONVERGENCE":
+            if not (has_relation or (has_l1 and has_l10)):
+                missing.append(
+                    "L1_L10_CONVERGENCE is missing its L1/L10 observable path")
+            elif not ops & {"abs", "add", "mul", "min", "max", "where"}:
+                missing.append(
+                    "L1_L10_CONVERGENCE is missing an agreement/distance operator")
+        elif name == "QUOTE_TAPE_CONFIRMATION":
+            if not actual & QUOTE_PRESSURE_FIELDS or not actual & TAPE_PRESSURE_FIELDS:
+                missing.append(
+                    "QUOTE_TAPE_CONFIRMATION needs signed quote and tape pressure")
+            elif not ops & {"mul", "min", "max", "where"}:
+                missing.append(
+                    "QUOTE_TAPE_CONFIRMATION needs a confirmation gate/interaction")
+        elif name == "EVENT_NORMALIZATION" and not (
+                actual & EVENT_NORMALIZED_FIELDS):
+            missing.append(
+                "EVENT_NORMALIZATION needs normalized_quote_ofi_per_event")
+        elif name == "VOLUME_NORMALIZATION" and not (
+                actual & VOLUME_NORMALIZED_FIELDS):
+            missing.append(
+                "VOLUME_NORMALIZATION needs quote_ofi_per_trade_volume")
     return {"ok": not missing, "fields": sorted(actual), "missing": missing}

@@ -43,6 +43,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import sys
 import uuid
 from dataclasses import dataclass
@@ -56,14 +57,20 @@ from backtest_runner import (
     COST_MODEL,
     DEFAULT_CONFIG,
     Market,
+    UnmeasuredAdjustmentGapError,
+    _run_backtest_core,
+    code_version as backtest_code_version,
     compute_metrics,
     load_dataset,
     run_backtest,
 )
 
-WF_VERSION = "quant-walk-forward-v1"
+WF_VERSION = "quant-walk-forward-v2"
 SEED = 0
 WARMUP_TRADING_DAYS = 30          # lookback 20 + 여유 10 (위 docstring 의 보장 조건)
+DAILY_EVALUATION_SCOPE = "DAILY_WALK_FORWARD"
+DAILY_PLAN_VERSION = "daily-walk-forward-plan-v1"
+DAILY_PLAN_POLICY = "walk-forward-rolling-6m"
 
 # 판정 규칙 - 결정론. 값을 바꾸면 판정 기준이 바뀌는 것이므로 근거를 함께 고친다.
 FRAGILITY_RULES = {
@@ -123,8 +130,7 @@ def wf_code_version() -> str:
     """이 파일 + backtest_runner 해시 - 창 결과는 시뮬레이터 코드에도 의존한다."""
     here = Path(__file__).resolve()
     me = hashlib.sha256(here.read_bytes()).hexdigest()[:12]
-    runner = hashlib.sha256((here.parent / "backtest_runner.py").read_bytes()).hexdigest()[:12]
-    return f"{WF_VERSION}+{me}+runner:{runner}"
+    return f"{WF_VERSION}+{me}+runner:{backtest_code_version()}"
 
 
 # ---------------------------------------------------------------------------
@@ -266,14 +272,198 @@ def make_windows(dates: list[date], warmup_days: int,
     return out
 
 
+_DAILY_PLAN_KEYS = frozenset({
+    "policy", "plan_version", "evaluation_scope",
+    "evaluation_plan_fingerprint", "session_boundary_fingerprint",
+    "dataset_content_hash", "warmup_trading_days", "embargo_days",
+    "cost_model_version", "cost_model", "asset_scope",
+    "stock_universe_contract_version", "walk_forward_code_version",
+    "windows",
+})
+_DAILY_WINDOW_KEYS = frozenset({
+    "window", "warmup_start", "test_start", "test_end",
+    "n_warmup_days", "n_test_days", "embargo_days",
+    "embargoed_start", "partial",
+})
+
+
+def _daily_plan_fingerprint(plan: dict) -> str:
+    payload = {key: value for key, value in plan.items()
+               if key != "evaluation_plan_fingerprint"}
+    blob = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _window_plan_row(window: WFWindow) -> dict:
+    if window.embargoed_start is None:
+        raise RuntimeError("daily evaluation window lacks embargoed boundary")
+    return {
+        "window": window.label,
+        "warmup_start": window.warmup_start.isoformat(),
+        "test_start": window.test_start.isoformat(),
+        "test_end": window.test_end.isoformat(),
+        "n_warmup_days": int(window.n_warmup_days),
+        "n_test_days": int(window.n_test_days),
+        "embargo_days": int(window.embargo_days),
+        "embargoed_start": window.embargoed_start.isoformat(),
+        "partial": bool(window.partial),
+    }
+
+
+def freeze_daily_evaluation_plan(*, dataset_content_hash: str,
+                                 dates: list[date], warmup_days: int,
+                                 embargo_days: int,
+                                 cost_model: dict) -> dict:
+    """Build the immutable daily evaluation plan before experiment insert.
+
+    The plan is both the stored ``split_policy`` and an input-hash component.
+    It includes every fact that can move a walk-forward result, so a change in
+    boundaries, purging, cost, code, or stock scope creates a new experiment
+    rather than silently reinterpreting an old row.
+    """
+
+    from stock_universe import (  # noqa: PLC0415
+        STOCK_ASSET_SCOPE,
+        STOCK_UNIVERSE_VERSION,
+        stock_session_boundary_fingerprint,
+    )
+
+    dataset_hash = str(dataset_content_hash or "")
+    if re.fullmatch(r"[0-9a-f]{64}", dataset_hash) is None:
+        raise RuntimeError(
+            "daily evaluation dataset content hash must be lowercase SHA-256")
+    warmup = int(warmup_days)
+    embargo = int(embargo_days)
+    if warmup < 1 or embargo < 0:
+        raise RuntimeError("daily evaluation warmup/embargo is invalid")
+    model = dict(cost_model or {})
+    cost_version = str(model.get("version") or "")
+    if not cost_version:
+        raise RuntimeError("daily evaluation cost model version is required")
+
+    windows = make_windows(list(dates), warmup, embargo_days=embargo)
+    if not windows:
+        raise RuntimeError("daily evaluation plan has no walk-forward windows")
+    window_rows = [_window_plan_row(window) for window in windows]
+    plan = {
+        "policy": DAILY_PLAN_POLICY,
+        "plan_version": DAILY_PLAN_VERSION,
+        "evaluation_scope": DAILY_EVALUATION_SCOPE,
+        "session_boundary_fingerprint":
+            stock_session_boundary_fingerprint(window_rows),
+        "dataset_content_hash": dataset_hash,
+        "warmup_trading_days": warmup,
+        "embargo_days": embargo,
+        "cost_model_version": cost_version,
+        "cost_model": model,
+        "asset_scope": STOCK_ASSET_SCOPE,
+        "stock_universe_contract_version": STOCK_UNIVERSE_VERSION,
+        "walk_forward_code_version": wf_code_version(),
+        "windows": window_rows,
+    }
+    plan["evaluation_plan_fingerprint"] = _daily_plan_fingerprint(plan)
+    # Keep the serializer and parser as independent checks.  If this function
+    # ever emits a shape the replay side cannot consume, fail before INSERT.
+    windows_from_frozen_daily_plan(plan)
+    return plan
+
+
+def windows_from_frozen_daily_plan(plan: dict) -> list[WFWindow]:
+    """Validate and decode a frozen plan without constructing new windows."""
+
+    from stock_universe import (  # noqa: PLC0415
+        STOCK_ASSET_SCOPE,
+        STOCK_UNIVERSE_VERSION,
+        stock_session_boundary_fingerprint,
+    )
+
+    if not isinstance(plan, dict) or set(plan) != _DAILY_PLAN_KEYS:
+        raise RuntimeError("daily evaluation plan shape is not canonical")
+    if (plan.get("policy") != DAILY_PLAN_POLICY
+            or plan.get("plan_version") != DAILY_PLAN_VERSION
+            or plan.get("evaluation_scope") != DAILY_EVALUATION_SCOPE
+            or plan.get("asset_scope") != STOCK_ASSET_SCOPE
+            or plan.get("stock_universe_contract_version") !=
+            STOCK_UNIVERSE_VERSION):
+        raise RuntimeError("daily evaluation plan contract mismatch")
+    for key in ("evaluation_plan_fingerprint",
+                "session_boundary_fingerprint", "dataset_content_hash"):
+        if re.fullmatch(r"[0-9a-f]{64}", str(plan.get(key) or "")) is None:
+            raise RuntimeError(f"daily evaluation plan invalid {key}")
+    if plan["evaluation_plan_fingerprint"] != _daily_plan_fingerprint(plan):
+        raise RuntimeError("daily evaluation plan fingerprint mismatch")
+    if not isinstance(plan.get("cost_model"), dict):
+        raise RuntimeError("daily evaluation cost model is not an object")
+    if str(plan["cost_model"].get("version") or "") != str(
+            plan.get("cost_model_version") or ""):
+        raise RuntimeError("daily evaluation cost model version mismatch")
+    if not str(plan.get("walk_forward_code_version") or ""):
+        raise RuntimeError("daily evaluation code version is required")
+
+    try:
+        warmup = int(plan["warmup_trading_days"])
+        embargo = int(plan["embargo_days"])
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("daily evaluation warmup/embargo is invalid") from exc
+    if warmup < 1 or embargo < 0:
+        raise RuntimeError("daily evaluation warmup/embargo is invalid")
+    rows = plan.get("windows")
+    if not isinstance(rows, list) or not rows:
+        raise RuntimeError("daily evaluation windows are required")
+
+    decoded: list[WFWindow] = []
+    labels: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != _DAILY_WINDOW_KEYS:
+            raise RuntimeError("daily evaluation window shape is not canonical")
+        label = str(row.get("window") or "")
+        if not label or label == "SUMMARY" or label in labels:
+            raise RuntimeError("daily evaluation window labels must be unique")
+        labels.add(label)
+        try:
+            warmup_start = date.fromisoformat(str(row["warmup_start"]))
+            test_start = date.fromisoformat(str(row["test_start"]))
+            test_end = date.fromisoformat(str(row["test_end"]))
+            embargoed_start = date.fromisoformat(
+                str(row["embargoed_start"]))
+            row_warmup = int(row["n_warmup_days"])
+            row_test = int(row["n_test_days"])
+            row_embargo = int(row["embargo_days"])
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "daily evaluation window values are invalid") from exc
+        if (isinstance(row["partial"], bool) is False
+                or row_warmup != warmup or row_embargo != embargo
+                or row_test < 1
+                or not (warmup_start < test_start <= embargoed_start <=
+                        test_end)):
+            raise RuntimeError("daily evaluation window contract mismatch")
+        decoded.append(WFWindow(
+            label=label, warmup_start=warmup_start,
+            test_start=test_start, test_end=test_end,
+            n_warmup_days=row_warmup, n_test_days=row_test,
+            embargo_days=row_embargo, embargoed_start=embargoed_start,
+            partial=row["partial"],
+        ))
+
+    boundary = stock_session_boundary_fingerprint(rows)
+    if boundary != plan["session_boundary_fingerprint"]:
+        raise RuntimeError("daily evaluation session fingerprint mismatch")
+    return decoded
+
+
 def slice_market(market: Market, w: WFWindow) -> Market:
     """[warmup_start, test_end] 밖을 물리적으로 제거 - 창 밖 미래가 못 들어온다."""
     # ▶ 웜업은 그대로 두고(시그널 계산에 필요하다) 평가만 embargo 뒤부터
     #   시작한다. 웜업까지 자르면 시그널이 아예 안 나온다.
     keep = [d for d in market.dates if w.warmup_start <= d <= w.test_end]
     kset = set(keep)
-    opens = {k: v for k, v in market.opens.items() if k[0] in kset}
     closes = {k: v for k, v in market.closes.items() if k[0] in kset}
+    symbols = sorted({s for (_, s) in closes})
+    sset = set(symbols)
+    opens = {k: v for k, v in market.opens.items()
+             if k[0] in kset and k[1] in sset}
     # ▶ **거래대금도 같이 자른다** (2026-08-14 실측)
     #   여기서 `notionals` 를 안 넘기고 있었다. `Market` 의 기본값이 빈 dict 라
     #   창 안에서는 거래대금이 **통째로 사라졌고**, 그 결과:
@@ -285,17 +475,19 @@ def slice_market(market: Market, w: WFWindow) -> Market:
     #       읽으므로, 필터를 켜기 전부터 창 안 성적이 조용히 오염돼 있었다
     #   전체 기간 백테스트(TEST)는 회전 223배로 멀쩡히 거래하는데 창 안만 0 인
     #   비대칭이 단서였다 - 창을 자를 때 열 하나를 빠뜨린 것이 원인이다.
-    notionals = {k: v for k, v in market.notionals.items() if k[0] in kset}
+    notionals = {k: v for k, v in market.notionals.items()
+                 if k[0] in kset and k[1] in sset}
     # 미시구조도 같은 규칙으로 자른다 - 위 사고가 이 열에서 반복되지 않게
     # 자체점검이 두 열을 함께 검사한다(2026-08-14).
     micro = {k: v for k, v in getattr(market, "micro", {}).items()
-             if k[0] in kset}
-    symbols = sorted({s for (_, s) in closes})
-    return Market(dates=keep, opens=opens, closes=closes, symbols=symbols,
-                  notionals=notionals, micro=micro)
+             if k[0] in kset and k[1] in sset}
+    sliced = Market(dates=keep, opens=opens, closes=closes, symbols=symbols,
+                    notionals=notionals, micro=micro)
+    return sliced._inherit_stock_scope_from(market)
 
 
-def run_window(sub: Market, w: WFWindow, config: dict) -> dict:
+def _run_window_core(sub: Market, w: WFWindow, config: dict, *,
+                     backtest_fn) -> dict:
     """창 하나 실행 + 창 독립성 단언 + 시험창만의 지표 계산.
 
     단언이 자체점검 전용이 아니라 실전(--run)에서도 돈다 - 웜업 상수를 잘못
@@ -314,8 +506,8 @@ def run_window(sub: Market, w: WFWindow, config: dict) -> dict:
     # ▶ **거래는 test_start 부터, 평가는 embargo 뒤부터.** 둘을 같게 두면
     #   웜업 마지막 시그널의 보유 지평이 성적에 그대로 섞인다 - 직전 구간
     #   정보가 새는 자리다.
-    result = run_backtest(sub, dict(config,
-                                    no_trade_before=w.test_start.isoformat()))
+    result = backtest_fn(sub, dict(
+        config, no_trade_before=w.test_start.isoformat()))
 
     early = [f for f in result.fills if f.trade_date < w.test_start]
     assert not early, f"{w.label}: 웜업 중 체결 {len(early)}건 - 창 독립성 위반"
@@ -331,8 +523,18 @@ def run_window(sub: Market, w: WFWindow, config: dict) -> dict:
     start_i = max(warmup_len - 1, warmup_len - 1 + emb)
     if start_i >= len(result.equity) - 1:
         # 잘라내고 나면 평가할 구간이 없다 - 0 으로 채우지 않고 알린다
-        return {"label": w.label, "usable": False,
-                "reason": f"embargo {emb}일 적용 후 평가 구간이 없다"}
+        reason = f"embargo {emb}일 적용 후 평가 구간이 없다"
+        return {
+            "label": w.label,
+            "usable": False,
+            "measurement_status": "NOT_MEASURED",
+            "measurement_not_measured": 1.0,
+            "measurement_reason": reason,
+            "reason": reason,
+            "test_days": w.n_test_days,
+            "partial_window": w.partial,
+            "adjustment_gap_audit": sub.adjustment_audit_manifest(),
+        }
     equity_test = result.equity[start_i:]
     traded = sum(abs(f.quantity * f.price) for f in result.fills)
     m = compute_metrics(equity_test, result.fills, capital, traded)
@@ -363,6 +565,29 @@ def run_window(sub: Market, w: WFWindow, config: dict) -> dict:
     return m
 
 
+def run_window(sub: Market, w: WFWindow, config: dict) -> dict:
+    """Run one governed stock window through the public simulator boundary."""
+
+    sub._require_stock_scope()
+    try:
+        return _run_window_core(sub, w, config, backtest_fn=run_backtest)
+    except UnmeasuredAdjustmentGapError as exc:
+        # A unit discontinuity invalidates only return paths in this physical
+        # window.  Record absence of a measurement (never a zero return) and
+        # let the caller continue to later independently audited windows.
+        return {
+            "label": w.label,
+            "usable": False,
+            "measurement_status": "NOT_MEASURED",
+            "measurement_not_measured": 1.0,
+            "measurement_reason": str(exc),
+            "test_days": w.n_test_days,
+            "partial_window": w.partial,
+            "adjustment_gap_audit": sub.adjustment_audit_manifest(
+                end=exc.gap.session),
+        }
+
+
 # ---------------------------------------------------------------------------
 # Fragility 판정 - 결정론 (LLM 없음)
 # ---------------------------------------------------------------------------
@@ -391,13 +616,28 @@ def fragility_summary(window_metrics: list[tuple[str, dict]],
     #   ROBUST 로 새지 않는 한 fail-closed 는 유지된다.
     if not window_metrics:
         return ({"n_windows": 0}, ["NO_WINDOWS"], "INSUFFICIENT")
-    judgeable = [(l, m) for l, m in window_metrics
+    measured = [(l, m) for l, m in window_metrics
+                if m.get("measurement_status") != "NOT_MEASURED"
+                and m.get("usable", True)]
+    not_measured = [l for l, m in window_metrics
+                    if (m.get("measurement_status") == "NOT_MEASURED"
+                        or not m.get("usable", True))]
+    judgeable = [(l, m) for l, m in measured
                  if m.get("test_days") is None or m["test_days"] >= min_test_days]
-    excluded = [l for l, m in window_metrics
+    excluded = [l for l, m in measured
                 if not (m.get("test_days") is None or m["test_days"] >= min_test_days)]
     if not judgeable:
-        return ({"n_windows": 0, "n_excluded_short": len(excluded)},
-                ["ALL_WINDOWS_TOO_SHORT"], "INSUFFICIENT")
+        flags = []
+        if not_measured:
+            flags.append("WINDOWS_NOT_MEASURED")
+        if excluded:
+            flags.append("ALL_WINDOWS_TOO_SHORT")
+        if not flags:
+            flags.append("NO_USABLE_WINDOWS")
+        return ({"n_windows": 0,
+                 "n_excluded_short": len(excluded),
+                 "n_not_measured": len(not_measured)},
+                flags, "INSUFFICIENT")
     rets = [m["total_return"] for _, m in judgeable]
     sharpes = [m["sharpe_rf0"] for _, m in judgeable]
     mdds = [m["max_drawdown"] for _, m in judgeable]
@@ -412,6 +652,7 @@ def fragility_summary(window_metrics: list[tuple[str, dict]],
     stats = {
         "n_windows": n,
         "n_excluded_short": len(excluded),   # 표본 미달로 판정 제외된 창 수
+        "n_not_measured": len(not_measured),
         "positive_window_ratio": round(pos_ratio, 4),
         "worst_window_return": round(min(rets), 6),
         "mean_window_return": round(sum(rets) / n, 6),
@@ -425,19 +666,33 @@ def fragility_summary(window_metrics: list[tuple[str, dict]],
         flags.append("DEEP_WINDOW_MDD")
     if sharpe_std > FRAGILITY_RULES["max_sharpe_std"]:
         flags.append("SHARPE_UNSTABLE")
-    return stats, flags, ("FRAGILE" if flags else "ROBUST")
+    if flags:
+        return stats, flags, "FRAGILE"
+    if not_measured:
+        # Safe windows remain useful evidence, but an incomplete preregistered
+        # evaluation must never become ROBUST/SUPPORTED by silently dropping
+        # the unavailable windows.  Preserve the measured statistics and make
+        # the promotion decision explicitly inconclusive.
+        return stats, ["WINDOWS_NOT_MEASURED"], "INSUFFICIENT"
+    return stats, [], "ROBUST"
 
 
 def wf_input_hash(dataset_hash: str, windows: list[WFWindow],
-                  config: dict, code_ver: str, seed: int) -> str:
+                  config: dict, code_ver: str, seed: int, *,
+                  evaluation_plan: dict | None = None) -> str:
     """창 구성이 해시에 들어간다 - 웜업/창 규칙이 바뀌면 다른 검증이다."""
-    payload = json.dumps({
+    facts = {
         "dataset": dataset_hash,
         "windows": [{"window": w.label, "warmup_start": str(w.warmup_start),
                      "test_start": str(w.test_start), "test_end": str(w.test_end),
                      "warmup_days": w.n_warmup_days} for w in windows],
         "config": config, "code": code_ver, "seed": seed, "cost": COST_MODEL,
-    }, sort_keys=True)
+    }
+    if evaluation_plan is not None:
+        # The full canonical plan, not only its digest, is an input fact.  This
+        # makes code/cost/purge/scope coverage inspectable at the hash boundary.
+        facts["evaluation_plan"] = evaluation_plan
+    payload = json.dumps(facts, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
@@ -464,21 +719,37 @@ def register_and_validate(name: str, version: str, *,
     code_ver = wf_code_version()
     trace = str(uuid.uuid4())
     try:
-        dataset_id, _universe_id, dhash, rows = load_dataset(conn, name, version)
+        dataset_id, universe_version_id, dhash, rows = load_dataset(
+            conn, name, version)
         market = Market.from_rows(rows)
-        windows = make_windows(market.dates, WARMUP_TRADING_DAYS)
-        assert windows, "walk-forward 창이 0개다 - 데이터 구간 확인"
-        ihash = wf_input_hash(dhash, windows, config, code_ver, SEED)
+        split_policy = freeze_daily_evaluation_plan(
+            dataset_content_hash=dhash,
+            dates=market.dates,
+            warmup_days=WARMUP_TRADING_DAYS,
+            embargo_days=0,
+            cost_model=COST_MODEL,
+        )
+        windows = windows_from_frozen_daily_plan(split_policy)
+        from stock_universe import build_stock_evaluation_identity
 
-        split_policy = {
-            "policy": "walk-forward-rolling-6m",
-            "warmup_trading_days": WARMUP_TRADING_DAYS,
-            "windows": [{"window": w.label, "warmup_start": str(w.warmup_start),
-                         "test_start": str(w.test_start), "test_end": str(w.test_end),
-                         "n_test_days": w.n_test_days, "partial": w.partial}
-                        for w in windows],
-            "note": "시험창 무겹침 - 웜업은 시그널 전용(체결 0건 단언)",
-        }
+        evaluation_identity = build_stock_evaluation_identity(
+            dataset_id=dataset_id,
+            dataset_content_hash=dhash,
+            universe_version_id=universe_version_id,
+            instrument_ids=market.symbols,
+            windows=[{
+                "window": window.label,
+                "start_session": str(window.test_start),
+                "end_session": str(window.test_end),
+            } for window in windows],
+            cost_model_version=COST_MODEL["version"],
+            evaluation_scope=DAILY_EVALUATION_SCOPE,
+            evaluation_plan_fingerprint=
+                split_policy["evaluation_plan_fingerprint"],
+        )
+        ihash = wf_input_hash(
+            dhash, windows, config, code_ver, SEED,
+            evaluation_plan=split_policy)
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -631,11 +902,32 @@ def register_and_validate(name: str, version: str, *,
                         on conflict (experiment_id, split, metric, dimensions)
                         do update set value = excluded.value
                         """,
-                        (exp_id, k, v, json.dumps({"regime": rname}),
+                        (exp_id, k, v, json.dumps({
+                            **evaluation_identity, "regime": rname}),
                          COST_MODEL["version"]))
+            windows_by_label = {window.label: window for window in windows}
             for label, m in per_window + [("SUMMARY", stats)]:
                 for k, v in m.items():
                     if isinstance(v, (int, float)) and not isinstance(v, bool) and v is not None:  # bool 은 int 서브클래스 - DB numeric 에 못 들어간다 (실측)
+                        metric_dimensions = {
+                            **evaluation_identity,
+                            "window": label,
+                        }
+                        if label != "SUMMARY":
+                            metric_window = windows_by_label[label]
+                            metric_dimensions.update({
+                                "start_session": str(metric_window.test_start),
+                                "end_session": str(metric_window.test_end),
+                            })
+                            if m.get("measurement_status") == "NOT_MEASURED":
+                                gap_audit = m.get("adjustment_gap_audit") or {}
+                                metric_dimensions.update({
+                                    "measurement_status": "NOT_MEASURED",
+                                    "measurement_reason": str(m.get(
+                                        "measurement_reason") or "")[:300],
+                                    "adjustment_audit_fingerprint":
+                                        gap_audit.get("audit_fingerprint"),
+                                })
                         cur.execute(
                             """
                             insert into quant.experiment_metrics
@@ -644,7 +936,7 @@ def register_and_validate(name: str, version: str, *,
                             values (%s, 'WALK_FORWARD', %s, %s, %s::jsonb, %s)
                             on conflict (experiment_id, split, metric, dimensions) do nothing
                             """,
-                            (exp_id, k, v, json.dumps({"window": label}),
+                            (exp_id, k, v, json.dumps(metric_dimensions),
                              COST_MODEL["version"]))
             cur.execute("update quant.experiments set status='COMPLETED', ended_at=now() "
                         "where experiment_id=%s", (exp_id,))
@@ -659,13 +951,23 @@ def register_and_validate(name: str, version: str, *,
         for label, m in per_window:
             w = by_label[label]
             part = " (부분)" if w.partial else ""
+            if m.get("measurement_status") == "NOT_MEASURED":
+                print(f"  {label}{part} {w.test_start}~{w.test_end} | "
+                      f"NOT_MEASURED | {m.get('measurement_reason', '')}",
+                      flush=True)
+                continue
             print(f"  {label}{part} {w.test_start}~{w.test_end} | "
                   f"수익률 {m['total_return']:+.2%} | Sharpe {m['sharpe_rf0']} | "
                   f"MDD {m['max_drawdown']:.2%} | 체결 {m['n_fills']}", flush=True)
-        print(f"  Fragility: 양수 창 비율 {stats['positive_window_ratio']:.2f} | "
-              f"최악 창 수익률 {stats['worst_window_return']:+.2%} | "
-              f"최악 창 MDD {stats['worst_window_mdd']:.2%} | "
-              f"Sharpe 표준편차 {stats['sharpe_std']}", flush=True)
+        if stats.get("n_windows"):
+            print(f"  Fragility: 양수 창 비율 {stats['positive_window_ratio']:.2f} | "
+                  f"최악 창 수익률 {stats['worst_window_return']:+.2%} | "
+                  f"최악 창 MDD {stats['worst_window_mdd']:.2%} | "
+                  f"Sharpe 표준편차 {stats['sharpe_std']}", flush=True)
+        else:
+            print(f"  Fragility: usable windows 0 | "
+                  f"NOT_MEASURED {stats.get('n_not_measured', 0)}",
+                  flush=True)
         print(f"  판정 {verdict}{' ' + str(flags) if flags else ''} "
               f"(결정론 규칙 - 전략 승인 아님)", flush=True)
         print(f"  input_hash {ihash[:16]}… (같은 입력 = 같은 해시 = 중복 등록 차단)",
@@ -778,6 +1080,9 @@ def _check_slice_no_future():
     #   잃어도 검사가 통과한다**(2026-08-14 실측: notional 이 없어서 못 잡았다).
     m.micro = {(d, s): {"spread_bps": 12.5, "order_flow_imbalance": 0.1}
                for d in m.dates for s in m.symbols}
+    # The fixture mutates a sealed Market directly; production does this via
+    # attach_micro_if_needed/clip_to_micro_coverage, which refreshes the seal.
+    m._restrict_adjustment_audit_to_current_scope()
     (w,) = make_windows(m.dates, WARMUP_TRADING_DAYS)
     sub = slice_market(m, w)
     assert all(w.warmup_start <= d <= w.test_end for d in sub.dates), "창 밖 날짜 유입"
@@ -837,7 +1142,7 @@ def _check_no_lookahead_through_window():
     }
     sub = slice_market(_synth_market(start, end, series), w)
     cfg = dict(DEFAULT_CONFIG, top_n=1)
-    result = run_backtest(sub, cfg)
+    result = _run_backtest_core(sub, cfg)
     buys = [f for f in result.fills if f.side == "BUY"]
     assert buys and buys[0].trade_date == w.test_start
     assert buys[0].instrument_id == "UP", \
@@ -850,7 +1155,7 @@ def _check_no_lookahead_through_window():
     cap = float(cfg["initial_capital"])
     assert all(abs(v - cap) < 1e-9 for _, v in result.equity[:warmup_len]), \
         "웜업 구간 equity 가 초기자본이 아니다 - 체결 유입 의심"
-    run_window(sub, w, cfg)     # 실전 경로의 단언들도 같은 입력으로 통과해야 한다
+    _run_window_core(sub, w, cfg, backtest_fn=_run_backtest_core)
     print("  선견 차단(창 경유 t-1)  OK")
 
 
@@ -888,8 +1193,10 @@ def _check_window_metrics_determinism():
     ws = make_windows(m.dates, WARMUP_TRADING_DAYS)
     (w,) = [x for x in ws if x.label == "2025H2"]
     cfg = dict(DEFAULT_CONFIG, top_n=1)
-    m1 = run_window(slice_market(m, w), w, cfg)
-    m2 = run_window(slice_market(m, w), w, cfg)
+    m1 = _run_window_core(
+        slice_market(m, w), w, cfg, backtest_fn=_run_backtest_core)
+    m2 = _run_window_core(
+        slice_market(m, w), w, cfg, backtest_fn=_run_backtest_core)
     assert m1 == m2, "같은 창이 다른 지표를 냈다 - 비결정성"
     assert m1["total_return"] > 0 and m1["max_drawdown"] <= 0
     # 기준선 = 초기자본: 시험창만의 수익이지 웜업 포함 수익이 아니다

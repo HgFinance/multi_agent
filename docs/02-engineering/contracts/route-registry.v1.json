@@ -269,6 +269,14 @@
         {
           "method": "POST",
           "path": "/trading/v1/orders/{order_id}/unknown"
+        },
+        {
+          "method": "POST",
+          "path": "/trading/v1/user-directives"
+        },
+        {
+          "method": "GET",
+          "path": "/trading/v1/user-directives/{directive_id}"
         }
       ]
     },
@@ -579,6 +587,10 @@
         },
         {
           "method": "GET",
+          "path": "/workforce/v1/improvements"
+        },
+        {
+          "method": "GET",
           "path": "/workforce/v1/improvements/{candidate_id}"
         },
         {
@@ -732,6 +744,10 @@
         },
         {
           "method": "GET",
+          "path": "/governance/v1/users/{user_id}/fund"
+        },
+        {
+          "method": "GET",
           "path": "/health"
         },
         {
@@ -877,12 +893,20 @@
           "path": "/trading/agent/ask"
         },
         {
+          "method": "POST",
+          "path": "/trading/agent/order"
+        },
+        {
           "method": "GET",
           "path": "/ui/account/snapshot"
         },
         {
           "method": "POST",
           "path": "/ui/ceo/ask"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/ceo/kanban"
         },
         {
           "method": "POST",
@@ -938,7 +962,15 @@
         },
         {
           "method": "GET",
+          "path": "/ui/me"
+        },
+        {
+          "method": "GET",
           "path": "/ui/mandate-approvals"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/market/rankings"
         },
         {
           "method": "POST",
@@ -989,6 +1021,14 @@
           "path": "/ui/investor-profiles/current"
         },
         {
+          "method": "GET",
+          "path": "/ui/portfolio/live"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/portfolio/ledger"
+        },
+        {
           "method": "POST",
           "path": "/ui/portfolio-recommendations"
         },
@@ -1003,6 +1043,30 @@
         {
           "method": "GET",
           "path": "/ui/portfolio-universes"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/paper-order-requests/{order_request_id}"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/paper-orders"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/paper-orders/cancel-all"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/paper-orders/sell-all"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/paper-orders/{directive_id}"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/paper-orders/{directive_id}/status"
         },
         {
           "method": "GET",

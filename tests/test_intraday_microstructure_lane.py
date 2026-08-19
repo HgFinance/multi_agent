@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import random
 import sys
 from pathlib import Path
 
@@ -12,14 +14,18 @@ PIPELINE = ROOT / "departments" / "04-quant-backtest" / "pipeline"
 sys.path.insert(0, str(PIPELINE))
 
 from intraday_microstructure import (  # noqa: E402
+    COMPLETED_SECOND_POLICY,
     EXTERNAL_EVENT_SOURCE,
     IntradayLaneSpec,
+    IntradaySampleBatch,
     QuoteEvent,
     TradeEvent,
     audit_causality,
+    build_sample_batch,
     build_samples,
     manifest,
     score_signal,
+    STRICT_TIMESTAMP_POLICY,
     HorizonLabel,
     IntradaySample,
     walk_forward_linear_score,
@@ -32,8 +38,16 @@ from intraday_microstructure import (  # noqa: E402
     _EXTERNAL_QUOTE_SQL,
     _EXTERNAL_SOURCE_QUALITY_SQL,
     _EXTERNAL_TRADE_SQL,
+    load_instrument_events_batch,
+    _instrument_key,
 )
 from intraday_sample_cache import (SampleCache, identity as cache_identity)  # noqa: E402
+from intraday_alpha_ast import (  # noqa: E402
+    EXPLICIT_FEATURE_WINDOW_CONTRACT,
+    PRIMITIVE_WINDOWS_SECONDS,
+    WINDOWED_FIELDS,
+    evaluate as evaluate_ast,
+)
 
 
 UTC = timezone.utc
@@ -109,7 +123,106 @@ def test_causal_lane_builds_features_and_executable_labels() -> None:
     assert labels[5].long_taker_net_bps < labels[5].long_mid_markout_bps
     assert audit_causality(samples, spec)["status"] == "PASS"
     assert manifest(spec)["execution_model"] == "TAKER_BOTH_SIDES"
-    assert manifest(spec)["purge_gap_seconds"] == pytest.approx(15.25)
+    assert manifest(spec)["purge_gap_seconds"] == pytest.approx(30.25)
+
+
+def test_multiscale_cube_matches_every_single_lookback_builder() -> None:
+    quotes = [
+        quote(second, 100 + second * 0.001, 101 + second * 0.001,
+              10 + second % 7, 12 + second % 5)
+        for second in range(621)
+    ]
+    trades = [trade(second, 1 if second % 2 else -1,
+                    quantity=5 + second % 11)
+              for second in range(0, 621, 3)]
+    spec = IntradayLaneSpec(
+        sample_interval_seconds=5, feature_lookback_seconds=30,
+        horizons_seconds=(5,), order_latency_ms=250,
+        max_quote_age_seconds=2)
+    start = BASE + timedelta(seconds=610)
+    end = BASE + timedelta(seconds=611)
+
+    batch = build_sample_batch(
+        quotes, trades, spec, start=start, end=end,
+        execution_model="TAKER")
+    assert len(batch) == 1
+    assert batch.feature_cube.row_count == 1
+    for seconds in PRIMITIVE_WINDOWS_SECONDS:
+        single = build_samples(
+            quotes, trades,
+            replace(spec, feature_lookback_seconds=seconds),
+            start=start, end=end, execution_model="TAKER")
+        assert len(single) == 1
+        for field in WINDOWED_FIELDS:
+            actual = batch.feature_cube.value(field, seconds, 0)
+            expected = getattr(single[0], field)
+            if expected is None:
+                assert actual is None, (field, seconds)
+            else:
+                assert actual == pytest.approx(expected), (field, seconds)
+
+    expression = {
+        "op": "field", "field": "trade_flow_imbalance", "seconds": 60}
+    assert evaluate_ast(
+        batch, expression, feature_cube=batch.feature_cube,
+        feature_window_contract=EXPLICIT_FEATURE_WINDOW_CONTRACT) == [
+            batch.feature_cube.value("trade_flow_imbalance", 60, 0)]
+
+
+def test_multiscale_cube_is_invariant_to_future_event_changes() -> None:
+    quotes = [
+        quote(second, 100 + second * 0.001, 101 + second * 0.001,
+              10 + second % 7, 12 + second % 5)
+        for second in range(621)
+    ]
+    trades = [trade(second, 1 if second % 2 else -1)
+              for second in range(0, 621, 3)]
+    changed = list(quotes)
+    changed[612] = quote(612, 500, 501, 999, 1)
+    spec = IntradayLaneSpec(
+        sample_interval_seconds=5, feature_lookback_seconds=30,
+        horizons_seconds=(5,), order_latency_ms=250,
+        max_quote_age_seconds=2)
+    bounds = {
+        "start": BASE + timedelta(seconds=610),
+        "end": BASE + timedelta(seconds=611),
+        "execution_model": "TAKER",
+    }
+
+    before = build_sample_batch(quotes, trades, spec, **bounds)
+    after = build_sample_batch(changed, trades, spec, **bounds)
+
+    assert before.feature_cube.decision_index_fingerprint == \
+        after.feature_cube.decision_index_fingerprint
+    assert before.feature_cube.columns == after.feature_cube.columns
+
+
+def test_multiscale_batch_rejects_same_length_cube_from_another_index() -> None:
+    quotes = [
+        quote(second, 100 + second * 0.001, 101 + second * 0.001, 10, 12)
+        for second in range(621)
+    ]
+    spec = IntradayLaneSpec(
+        sample_interval_seconds=5, feature_lookback_seconds=30,
+        horizons_seconds=(5,), order_latency_ms=250,
+        max_quote_age_seconds=2)
+    batch = build_sample_batch(
+        quotes, [], spec, start=BASE + timedelta(seconds=610),
+        end=BASE + timedelta(seconds=611), execution_model="TAKER")
+    shifted_samples = tuple(
+        replace(sample, decision_time=sample.decision_time + timedelta(seconds=5))
+        for sample in batch.samples)
+
+    with pytest.raises(ValueError, match="decision indexes differ"):
+        IntradaySampleBatch(shifted_samples, batch.feature_cube)
+
+
+def test_external_replay_accepts_canonical_alphanumeric_symbols() -> None:
+    assert _instrument_key("005930", EXTERNAL_EVENT_SOURCE) == "005930"
+    assert _instrument_key("A00593", EXTERNAL_EVENT_SOURCE) == "A00593"
+    for invalid in ("a00593", "A-0593", "A0059", "Ａ00593"):
+        with pytest.raises(ValueError, match="uppercase alphanumeric"):
+            _instrument_key(invalid, EXTERNAL_EVENT_SOURCE)
 
 
 def test_external_replay_contract_is_explicit_and_schema_safe() -> None:
@@ -118,8 +231,13 @@ def test_external_replay_contract_is_explicit_and_schema_safe() -> None:
     assert "coalesce(bid10,0)" in _EXTERNAL_QUOTE_SQL
     assert "coalesce(ask_vol10,0)" in _EXTERNAL_QUOTE_SQL
     assert "symbol = %s" in _EXTERNAL_QUOTE_SQL
+    assert "ts >= %s and ts < %s and ts <= %s" in _EXTERNAL_QUOTE_SQL
+    assert "hash_record_extended(quotes, 0)" in _EXTERNAL_QUOTE_SQL
     assert "case when ofi_contrib > 0 then 1" in _EXTERNAL_TRADE_SQL
     assert "when ofi_contrib < 0 then -1" in _EXTERNAL_TRADE_SQL
+    assert "symbol = %s" in _EXTERNAL_TRADE_SQL
+    assert "ts >= %s and ts < %s and ts <= %s" in _EXTERNAL_TRADE_SQL
+    assert "hash_record_extended(ticks, 0)" in _EXTERNAL_TRADE_SQL
     assert "count(*) as quotes_without_received_at" in \
         _EXTERNAL_SOURCE_QUALITY_SQL
 
@@ -127,9 +245,146 @@ def test_external_replay_contract_is_explicit_and_schema_safe() -> None:
     assert replay["event_source"] == EXTERNAL_EVENT_SOURCE
     assert replay["arrival_clock_pit"] is False
     assert replay["historical_replay_only"] is True
+    assert replay["source_granularity"] == "RAW_QUOTE_TRADE_EVENTS"
+    assert replay["daily_aggregate_replay_allowed"] is False
     assert "receipt clock unavailable" in replay["clock"]
     assert "forward receipt-clock confirmation required" in \
         replay["evidence_limit"]
+
+
+def _coarse_quote(second: int, bid: float, ask: float, bid_size: float,
+                  ask_size: float, source: str) -> QuoteEvent:
+    event = BASE + timedelta(seconds=second)
+    return QuoteEvent(
+        event_time=event, received_at=event, observed_at=event,
+        instrument_id=IID,
+        bid_prices=(bid, bid - 1), bid_sizes=(bid_size, bid_size),
+        ask_prices=(ask, ask + 1), ask_sizes=(ask_size, ask_size),
+        source_event_id=source)
+
+
+def test_completed_second_replay_is_permutation_invariant_and_causal() -> None:
+    quotes = [
+        _coarse_quote(0, 99, 100, 10, 30, "q0-a"),
+        _coarse_quote(0, 101, 102, 30, 10, "q0-b"),
+        _coarse_quote(1, 100, 103, 20, 20, "q1-a"),
+        _coarse_quote(1, 99, 104, 40, 5, "q1-b"),
+        _coarse_quote(2, 102, 105, 10, 10, "q2-a"),
+        _coarse_quote(2, 101, 106, 10, 10, "q2-b"),
+    ]
+    trades = [trade(0, 1, 7, delay_ms=0),
+              trade(0, -1, 3, delay_ms=0)]
+    spec = IntradayLaneSpec(
+        sample_interval_seconds=1, feature_lookback_seconds=2,
+        horizons_seconds=(1,), order_latency_ms=250,
+        max_quote_age_seconds=3)
+
+    def replay(qs, ts):
+        return build_samples(
+            qs, ts, spec, start=BASE + timedelta(seconds=1),
+            end=BASE + timedelta(seconds=2), execution_model="TAKER",
+            timestamp_policy=COMPLETED_SECOND_POLICY)
+
+    expected = replay(quotes, trades)
+    assert len(expected) == 1
+    sample = expected[0]
+    # Bucket [0,1) is first visible at t=1.  Bucket [1,2) may set the
+    # conservatively quantized entry, but cannot leak into the t=1 feature.
+    assert sample.source_quote_event_time == BASE
+    assert sample.decision_time == BASE + timedelta(seconds=1)
+    assert sample.entry_time == BASE + timedelta(seconds=2)
+    assert sample.queue_imbalance_l1 == pytest.approx(0.0)
+    assert sample.quote_count == 2
+    assert sample.trade_count == 2
+    assert sample.quote_event_ofi is None
+    assert sample.multi_level_quote_ofi_l10 is None
+    assert sample.quote_event_transition_count == 0
+    assert sample.execution_capacity_supported is False
+
+    rng = random.Random(20260818)
+    for _ in range(100):
+        shuffled_quotes = list(quotes)
+        shuffled_trades = list(trades)
+        rng.shuffle(shuffled_quotes)
+        rng.shuffle(shuffled_trades)
+        assert replay(shuffled_quotes, shuffled_trades) == expected
+
+
+def test_completed_second_taker_uses_worst_side_price_envelope() -> None:
+    # min(ask)=100 < max(bid)=101 across states. Combining those optimistic
+    # sides would create a crossed synthetic quote. The valid envelope is the
+    # opposite pair: sell=min(bid), buy=max(ask).
+    quotes = [
+        _coarse_quote(0, 99, 100, 10, 10, "feature-a"),
+        _coarse_quote(0, 101, 102, 10, 10, "feature-b"),
+        _coarse_quote(1, 100, 101, 10, 10, "entry-a"),
+        _coarse_quote(1, 98, 105, 10, 10, "entry-b"),
+        _coarse_quote(2, 104, 105, 10, 10, "exit-a"),
+        _coarse_quote(2, 102, 108, 10, 10, "exit-b"),
+    ]
+    spec = IntradayLaneSpec(
+        sample_interval_seconds=1, feature_lookback_seconds=2,
+        horizons_seconds=(1,), order_latency_ms=250,
+        max_quote_age_seconds=3, fee_bps_per_side=1)
+    sample = build_samples(
+        quotes, [], spec, start=BASE + timedelta(seconds=1),
+        end=BASE + timedelta(seconds=2), execution_model="TAKER",
+        timestamp_policy=COMPLETED_SECOND_POLICY)[0]
+    label = sample.labels[0]
+    assert sample.entry_bid == 98
+    assert sample.entry_ask == 105
+    assert sample.entry_bid <= sample.entry_ask
+    assert label.long_taker_net_bps == pytest.approx(
+        (102 / 105 - 1) * 10_000 - 2)
+    # No actual observed entry ask is worse than the bound, and no actual exit
+    # bid is worse than the bound, so this result cannot improve any raw-state
+    # boundary pairing.
+    raw_pair_returns = [
+        (exit_bid / entry_ask - 1) * 10_000 - 2
+        for entry_ask in (101, 105) for exit_bid in (104, 102)
+    ]
+    assert label.long_taker_net_bps <= min(raw_pair_returns)
+    assert sample.execution_spread_bps == pytest.approx(
+        (105 - 98) / ((105 + 98) / 2) * 10_000)
+
+
+def test_completed_second_passive_is_not_identifiable() -> None:
+    quotes = [
+        _coarse_quote(0, 99, 101, 10, 10, "a"),
+        _coarse_quote(1, 100, 102, 10, 10, "b"),
+        _coarse_quote(2, 101, 103, 10, 10, "c"),
+    ]
+    spec = IntradayLaneSpec(
+        sample_interval_seconds=1, horizons_seconds=(1,),
+        order_latency_ms=0, max_quote_age_seconds=3)
+    with pytest.raises(ValueError, match="supports TAKER only"):
+        build_samples(
+            quotes, [], spec, start=BASE + timedelta(seconds=1),
+            end=BASE + timedelta(seconds=2),
+            execution_model="PASSIVE_FIFO_LOWER_BOUND",
+            timestamp_policy=COMPLETED_SECOND_POLICY)
+
+    replay = manifest(
+        spec, source=EXTERNAL_EVENT_SOURCE,
+        timestamp_policy=COMPLETED_SECOND_POLICY)
+    assert replay["passive_execution_model"] == "UNSUPPORTED"
+    assert replay["execution_capacity_supported"] is False
+    assert replay["effective_order_latency"] == \
+        "ceil(decision_time+requested_latency) to the next whole-second boundary"
+
+
+def test_cache_identity_binds_timestamp_and_execution_contract() -> None:
+    kwargs = {
+        "spec": IntradayLaneSpec(horizons_seconds=(5,)),
+        "event_source": EXTERNAL_EVENT_SOURCE,
+        "execution_model": "TAKER",
+        "source_lineage": [{"rows": 10}],
+    }
+    coarse = cache_identity(
+        **kwargs, timestamp_policy=COMPLETED_SECOND_POLICY)
+    strict = cache_identity(
+        **kwargs, timestamp_policy=STRICT_TIMESTAMP_POLICY)
+    assert coarse != strict
 
 
 def test_discovery_cache_identity_is_spec_and_lineage_bound() -> None:
@@ -149,6 +404,10 @@ def test_discovery_cache_identity_is_spec_and_lineage_bound() -> None:
         spec=IntradayLaneSpec(horizons_seconds=(5, 30)),
         event_source=EXTERNAL_EVENT_SOURCE, execution_model="TAKER",
         source_lineage=[{"source": "ext_src.quotes", "rows": 11}])
+    with pytest.raises(ValueError, match="raw quote/trade event sources only"):
+        cache_identity(
+            spec=IntradayLaneSpec(), event_source="microstructure_features",
+            execution_model="TAKER", source_lineage=[])
 
 
 def test_discovery_parquet_cache_round_trip(tmp_path) -> None:
@@ -168,6 +427,140 @@ def test_discovery_parquet_cache_round_trip(tmp_path) -> None:
     assert cache.load("2026-08-14", "005930") == samples
     assert cache.store("2026-08-14", "000020", [])
     assert cache.load("2026-08-14", "000020") == []
+    import pyarrow.parquet as pq
+    metadata = pq.read_table(
+        cache.path_for("2026-08-14", "000020")).schema.metadata
+    assert metadata[b"intraday_source_granularity"] == \
+        b"RAW_QUOTE_TRADE_EVENTS"
+    assert metadata[b"evidence_authority"] == b"NONE"
+    assert metadata[b"empty_semantics"] == \
+        b"DERIVATION_PRODUCED_NO_SAMPLES_NOT_SOURCE_EMPTY"
+
+
+def test_external_batch_loader_canonicalizes_exact_krx_symbol_keys() -> None:
+    event = BASE
+    quote_row = (
+        event, event, event, "005930  ", [99.0], [10.0], [101.0], [11.0],
+        "q1", 1, 2,
+    )
+    trade_row = (
+        event, event, event, "005930  ", 100.0, 3.0, 1, "t1", 3, 4,
+    )
+
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+
+        def execute(self, sql, params):
+            self.rows = [quote_row] if "ext_src.quotes" in sql else [trade_row]
+            self.params = params
+
+        def fetchall(self): return self.rows
+
+    class Conn:
+        def cursor(self): return Cursor()
+
+    loaded = load_instrument_events_batch(
+        Conn(), instrument_ids=[" 005930 "], start=event,
+        end=event + timedelta(seconds=1),
+        as_known_at=event + timedelta(seconds=1),
+        source=EXTERNAL_EVENT_SOURCE,
+    )
+    assert list(loaded) == ["005930"]
+    quotes, trades = loaded["005930"]
+    assert [row.instrument_id for row in quotes] == ["005930"]
+    assert [row.instrument_id for row in trades] == ["005930"]
+
+
+def test_external_raw_evidence_hashes_late_session_rows_in_fixed_window() -> None:
+    start = datetime(2026, 8, 14, 0, 0, tzinfo=UTC)
+    content_end = datetime(2026, 8, 14, 6, 30, tzinfo=UTC)
+    late = content_end - timedelta(seconds=1)
+    quote_row = (
+        late, late, late, "005930", [99.0], [10.0], [101.0], [11.0],
+        "q-late", 11, 13,
+    )
+    trade_row = (
+        late, late, late, "005930", 100.0, 3.0, 1, "t-late", 17, 19,
+    )
+
+    class Cursor:
+        def __init__(self, conn): self.conn = conn
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+        def execute(self, sql, params):
+            self.conn.params.append(params)
+            self.rows = [quote_row] if "ext_src.quotes" in sql else [trade_row]
+        def fetchall(self): return self.rows
+
+    class Conn:
+        def __init__(self): self.params = []
+        def cursor(self): return Cursor(self)
+
+    conn = Conn()
+    raw = {}
+    loaded = load_instrument_events_batch(
+        conn, instrument_ids=["005930"], start=start, end=content_end,
+        as_known_at=content_end + timedelta(days=1),
+        source=EXTERNAL_EVENT_SOURCE, raw_content_evidence=raw,
+        content_end=content_end)
+
+    assert len(loaded["005930"][0]) == 1
+    assert len(loaded["005930"][1]) == 1
+    assert raw["005930"]["quotes"] == {
+        "row_count": 1, "xor_seed_0": 11, "sum_seed_1": 13}
+    assert raw["005930"]["ticks"] == {
+        "row_count": 1, "xor_seed_0": 17, "sum_seed_1": 19}
+    assert all(params[2] == content_end for params in conn.params)
+
+    class NeverConn:
+        def cursor(self):
+            raise AssertionError("invalid raw window must fail before SQL")
+
+    with pytest.raises(ValueError, match="fixed half-open"):
+        load_instrument_events_batch(
+            NeverConn(), instrument_ids=["005930"], start=start,
+            end=content_end - timedelta(minutes=5),
+            as_known_at=content_end + timedelta(days=1),
+            source=EXTERNAL_EVENT_SOURCE, raw_content_evidence={},
+            content_end=content_end - timedelta(minutes=5))
+
+
+def test_external_batch_loader_rejects_ambiguous_or_unrequested_symbols() -> None:
+    class NeverConn:
+        def cursor(self):
+            raise AssertionError("invalid identity must fail before SQL")
+
+    with pytest.raises(ValueError, match="uppercase alphanumeric KRX trading symbol"):
+        load_instrument_events_batch(
+            NeverConn(), instrument_ids=["A005930"], start=BASE,
+            end=BASE + timedelta(seconds=1),
+            as_known_at=BASE + timedelta(seconds=1),
+            source=EXTERNAL_EVENT_SOURCE,
+        )
+
+    unexpected = (
+        BASE, BASE, BASE, "000660", [99.0], [10.0], [101.0], [11.0],
+        "q1", 1, 2,
+    )
+
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+        def execute(self, sql, params):
+            self.rows = [unexpected] if "ext_src.quotes" in sql else []
+        def fetchall(self): return self.rows
+
+    class Conn:
+        def cursor(self): return Cursor()
+
+    with pytest.raises(ValueError, match="unrequested instrument"):
+        load_instrument_events_batch(
+            Conn(), instrument_ids=["005930"], start=BASE,
+            end=BASE + timedelta(seconds=1),
+            as_known_at=BASE + timedelta(seconds=1),
+            source=EXTERNAL_EVENT_SOURCE,
+        )
 
 
 def test_late_event_never_enters_feature_window() -> None:
@@ -196,8 +589,9 @@ def test_late_event_never_enters_feature_window() -> None:
 def test_latency_quote_sets_execution_but_never_signal_feature() -> None:
     decision_quote = quote(4, 99, 101, 10, 10)
     # This quote is learned 500ms after the decision but before the 1s-latent
-    # order arrives.  It may set the fill price/capacity, never the AST feature.
-    latency_quote = quote(5, 100, 102, 1000, 1, delay_ms=500)
+    # order arrives.  It may set the wider fill spread/capacity, never the AST
+    # feature spread.
+    latency_quote = quote(5, 98, 102, 1000, 1, delay_ms=500)
     exit_quote = quote(10, 101, 103, 10, 10)
     spec = IntradayLaneSpec(
         sample_interval_seconds=5, feature_lookback_seconds=10,
@@ -211,8 +605,13 @@ def test_latency_quote_sets_execution_but_never_signal_feature() -> None:
     sample = samples[0]
     assert sample.source_quote_event_time == decision_quote.event_time
     assert sample.queue_imbalance_l1 == 0.0
+    assert sample.spread_bps == pytest.approx(
+        (101 - 99) / ((101 + 99) / 2) * 10_000)
     assert sample.entry_bid == latency_quote.best_bid
     assert sample.entry_ask_depth_l1 == 1.0
+    assert sample.execution_spread_bps == pytest.approx(
+        (102 - 98) / ((102 + 98) / 2) * 10_000)
+    assert sample.execution_spread_bps > sample.spread_bps
 
 
 def test_future_clock_skew_event_falls_back_to_eligible_quote() -> None:
@@ -299,7 +698,7 @@ def test_invalid_clocks_and_crossed_quotes_fail_closed() -> None:
         assert "greatest(received_at, observed_at) <= %s" in sql
     for sql in (_QUOTE_BATCH_SQL, _TRADE_BATCH_SQL,
                 _SOURCE_QUALITY_BATCH_SQL):
-        assert "instrument_id::text = any(%s)" in sql
+        assert "instrument_id = any(%s::uuid[])" in sql
         assert "greatest(received_at, observed_at) <= %s" in sql
 
 
@@ -365,7 +764,8 @@ def test_walk_forward_purges_labels_and_abstains_below_spread() -> None:
     assert result["trades"] == 0
     assert result["coverage"] == 0
     assert result["decision"] == "REJECT"
-    assert result["folds"][0]["train"] == 44  # 48 pre-test rows minus 4 overlaps
+    # Passive labels can extend through one-horizon wait plus one-horizon hold.
+    assert result["folds"][0]["train"] == 39  # 48 rows minus 9 overlaps
 
 
 def test_passive_fifo_requires_printed_volume_to_clear_queue() -> None:

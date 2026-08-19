@@ -8,7 +8,6 @@ from collections.abc import Iterable
 from pathlib import Path
 from types import MappingProxyType
 
-
 CANONICAL_SHARED_SKILL_ROOT = Path(__file__).resolve().parents[1] / "skills"
 
 # 프로필 목록은 **여기서 다시 적지 않는다.** 2026-08-14 실측: 이 모듈이 자기
@@ -18,7 +17,6 @@ CANONICAL_SHARED_SKILL_ROOT = Path(__file__).resolve().parents[1] / "skills"
 # 정본은 canonical_profiles.py 하나다.
 from orchestration.canonical_profiles import (  # noqa: E402
     CANONICAL_PROFILES,
-    LEGACY_PROFILE_ALIASES,
 )
 
 # Repository-owned skill names.

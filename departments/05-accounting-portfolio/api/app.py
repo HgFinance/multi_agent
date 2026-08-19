@@ -973,7 +973,7 @@ def health() -> dict:
     return {
         "status": "degraded" if _store_error is not None else "ok",
         "api_version": API_VERSION,
-        "store": ("supabase accounting.*" if _repo is not None
+        "store": ("control-db accounting.*" if _repo is not None
                   else "in-memory (accounting.* 미연결)"),
         "store_available": _store_error is None,
         "store_error": str(_store_error) if _store_error is not None else None,
@@ -996,7 +996,7 @@ def health_ready() -> dict:
         "api_version": API_VERSION,
         "ledgers": ledgers,
         "journals": journals,
-        "store": ("supabase accounting.*" if _repo is not None
+        "store": ("control-db accounting.*" if _repo is not None
                   else "in-memory (accounting.* 미연결)"),
     }
 

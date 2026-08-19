@@ -44,12 +44,18 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
-BUILDER_VERSION = "quant-pit-dataset-v1"
+BUILDER_VERSION = "quant-pit-dataset-v2"
 KST = timezone(timedelta(hours=9))
 SCHEMA_VERSION = 1
 BAR_SOURCE = "ls_chart"
 INTERVAL = "1D"
 DATA_ROOT = Path(__file__).resolve().parents[3] / "quant-data"
+
+from stock_universe import (  # noqa: E402
+    STOCK_ASSET_SCOPE,
+    STOCK_UNIVERSE_VERSION,
+    filter_stock_rows,
+)
 
 
 def resolve_object_path(object_path: str, *, root: Path | None = None) -> Path:
@@ -237,13 +243,21 @@ def fetch_trading_days(conn, start: date, end: date) -> set[date] | None:
     return days or None
 
 
-def register_universe(conn, instrument_ids: list[str], *, as_of: datetime) -> str:
+def register_universe(conn, instrument_ids: list[str], *, as_of: datetime,
+                      stock_audit: dict | None = None) -> str:
     """v1 유니버스 = 이 Dataset 에 봉이 존재하는 종목 전체 (편향 선언 포함)."""
     ids = sorted(set(instrument_ids))
     uhash = hashlib.sha256("\n".join(ids).encode()).hexdigest()
     rules = {
         "builder": BUILDER_VERSION,
-        "definition": "market_bars(1D, ls_chart) 존재 종목 = 백필 바스켓(K200+Q150)",
+        "definition": "market_bars(1D, ls_chart) intersect governed KRX stocks",
+        "asset_scope": STOCK_ASSET_SCOPE,
+        "product_filter_version": STOCK_UNIVERSE_VERSION,
+        "instrument_type": "STOCK",
+        "asset_class": "EQUITY",
+        "market": "KRX",
+        "status": "ACTIVE",
+        "stock_filter_audit": dict(stock_audit or {}),
         "known_bias": "SURVIVORSHIP_BIAS_DECLARED",
         "bias_note": "2026-07-31 바스켓의 과거 투영 - 과거 구성 이력 미확보",
     }
@@ -469,6 +483,10 @@ def build(name: str, version: str, start: date, end: date) -> int:
         if not rows:
             print("봉이 0행이다 - 기간·소스 확인", flush=True)
             return 1
+        rows, stock_audit = filter_stock_rows(conn, rows)
+        if not rows:
+            print("KRX ACTIVE STOCK filter left zero daily bars", flush=True)
+            return 1
         days = fetch_trading_days(conn, start, end)
         report = run_leakage_checks(rows, as_of=as_of, trading_days=days,
                                     survivorship_declared=True)
@@ -478,7 +496,9 @@ def build(name: str, version: str, start: date, end: date) -> int:
                   flush=True)
             return 1
 
-        uid = register_universe(conn, [str(r["instrument_id"]) for r in rows], as_of=as_of)
+        uid = register_universe(
+            conn, [str(r["instrument_id"]) for r in rows], as_of=as_of,
+            stock_audit=stock_audit)
         out_dir = DATA_ROOT / f"{name}-{version}"
         parts = export_partitions(rows, out_dir)
         chash = content_hash(rows)
@@ -492,9 +512,12 @@ def build(name: str, version: str, start: date, end: date) -> int:
             "reproduce": f"python pipeline/pit_dataset.py --build --name {name} "
                          f"--version {version} --from {start} --to {end}",
         }
-        quality = {"leakage_overall": report.overall, "checks": report.checks}
+        quality = {"leakage_overall": report.overall, "checks": report.checks,
+                   "stock_universe": stock_audit}
         schema_def = {"columns": list(COLUMNS), "interval": INTERVAL,
-                      "bar_source": BAR_SOURCE, "hash": "sha256(sorted rows)"}
+                      "bar_source": BAR_SOURCE, "hash": "sha256(sorted rows)",
+                      "asset_scope": STOCK_ASSET_SCOPE,
+                      "product_filter_version": STOCK_UNIVERSE_VERSION}
 
         with conn.cursor() as cur:
             cur.execute(

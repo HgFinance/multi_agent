@@ -351,3 +351,66 @@ evaluator·island·짧은 skeleton을 결합한
 [SPA](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=264569),
 [PBO](https://escholarship.org/uc/item/4w1110bb)의 “탐색 횟수를 증거에 포함한다”는 원칙을
 따른다.
+
+### 독립 MODEL_CANDIDATE 레인
+
+244개 고정 멀티타임프레임 피처의 ridge teacher-v4는 계속 AST의 진단 대조군이지만,
+`MODEL_CANDIDATE` 결과 namespace에서는 AST 보정 결과와 무관하게 동일 표본의 OOS를
+측정한다. 특히 모든 AST가 calibration에서 방향·비용 가능성을 잃어 fast-fail하더라도,
+teacher calibration이 `PASS`이면 같은 sample cache와 frozen teacher를 사용해
+DISCOVERY_6/VALIDATION_20/FULL_60을 별도 누산한다. 이 연결은 raw replay를 다시 읽지 않고
+PRIMARY와 동일한 sample sequence와 v4 feature cube를 재사용하되, 모델 신뢰 경계에서
+attested frozen teacher prediction과 executable label target을 독립 재계산해 호출자가 넘긴
+값과 정확히 일치할 때만 누산한다. 따라서 cube를 재구축하지 않으면서도 공유 예측값 주입을
+증거로 신뢰하지 않는다. AST score,
+AST gate, AST decision은 모델 레인으로 전달하지 않으며 기존 AST 판정도 바꾸지 않는다.
+
+teacher calibration `PASS`는 계산 자원을 배정할 수 있다는 preflight일 뿐 알파 증거가
+아니다. 모델은 calibration보다 엄격히 뒤인 고정 세션에서만 평가하고, feature/label/cost/
+threshold/split과 model/config/data hash를 함께 봉인한다. 예측 정확도나 Brier score는
+진단치일 뿐 판정 조건이 아니다. 진입은 `예측 executable net bps > 고정 safety margin`,
+성과는 실제 spread·fee가 포함된 executable label의 opportunity당 net으로 계산한다.
+보정 클래스 수와 `ENTER_LONG` 비율, 보정 관측치·세션 수, 희귀 진입 클래스 경고도 결과에
+그대로 기록한다. 보정 세션이 하나뿐이면 `SINGLE_SESSION_CALIBRATION_CANNOT_ESTABLISH_`
+`REGIME_ROBUSTNESS`를 명시한다. 이 경우 FULL_60 결과는 그 단일 레짐에서 고정한 모델의
+비용 후 일반화 시험이지, 60세션으로 다시 학습했거나 다중 레짐 학습을 입증한 결과가 아니다.
+class ridge와 피처 정규화는 calibration 데이터로만 고정하며, edge threshold는 OOS 시작 전
+설정값으로 봉인한다. OOS에서는 fit·threshold 조정·feature selection을 모두 금지한다.
+모든 OOS `session × instrument` cell과 v4 feature-cube decision-row identity도 봉인하며,
+calibration과 OOS session 사이에는 최대 label horizon을 포함한 기존 purge 계약을 그대로
+적용한다. 최소 세션·종목·coverage·기회 수, 종목별 양의 net 비율, 시간순 OOS를
+재학습 없이 나눈 contiguous block 안정성, 비용 후 평균, 그리고 AST·sidecar·모델
+노출을 합친 append-only trial 수에
+Bonferroni 배분한 stationary-bootstrap 하단이 모두 양수여야
+FULL_60에서 `NOMINATE_FORWARD`가 된다. 과거 trial vector나 cross-model dispersion은
+만들어 내지 않으며 실패 이유는 AST 기억과 분리된 model failure memory에 남긴다.
+
+이 설계는 cross-instrument LOB 표현을 OOS에서 시험한
+[DeepLOB](https://arxiv.org/abs/1808.03668)의 공통 피처 관점은 취하되, 높은 예측력이
+actionable trading 성과와 같지 않음을 보인
+[Deep Limit Order Book Forecasting](https://arxiv.org/abs/2403.09267)에 따라 반드시
+complete-transaction 비용 후 평가를 요구한다. large/small-tick 종목 이질성은
+[Queue Imbalance](https://arxiv.org/abs/1512.03492)의 경고대로 최소 종목·coverage와
+종목별 계보를 보존해 감춘 평균 하나로 대체하지 않는다. FULL_60 통과도 기존 AST forward
+lockbox를 재사용하거나 QA/주문 권한을 얻지 않는다. 별도 model forward confirmation이
+새 세션에서 완료되기 전까지 promotion/order authority는 항상 `false`다.
+
+MODEL_CANDIDATE에 들어가는 teacher에는 기존 v3/v4 `model_fingerprint`를 변경하지 않는
+별도 `calibration-attestation-v1` sidecar가 필수다. sidecar는 계획·기여 세션과 종목의
+정확한 ID/개수/해시, 관측치와 클래스 수, feature/label/horizon/execution/cost 계약,
+전체 sampling/execution manifest, streaming calibration-row multiset digest, 원천 content
+fingerprint와 knowledge cutoff를 함께 봉인한다. 따라서 과거 AST·forward reader는 기존
+teacher JSON을 그대로 읽을 수 있다. 반대로 오래된 PASS artifact에 sidecar가 없으면 전체
+실험을 중단하지 않고 모델 레인만 `MODEL_TEACHER_ATTESTATION_MISSING` `NO_EVIDENCE`로
+닫는다. sidecar가 존재하지만 세션·통계·source가 달라진 경우에는 변조로 간주해 신뢰
+경계에서 즉시 거부한다. freeze/restore 이후 모델 매핑은 read-only이며, 공유 prediction
+경계마다 실제 live 파라미터 seal을 다시 계산하므로 캐시된 fingerprint로 교체를 숨길 수
+없다.
+
+Bonferroni tail 확률이 고정 bootstrap draw의 유한 Monte Carlo 해상도보다 작으면 최소
+draw를 confidence bound로 오인하지 않는다. 이 경우 하단·상단 CI를 모두 비활성화하고
+`MODEL_BONFERRONI_BOOTSTRAP_RESOLUTION_INSUFFICIENT`로 fail-closed한다. 또한 모델만
+discovery 자원 게이트를 통과해 다음 rung이 실행되면 모든 AST 결과는 diagnostic-only,
+non-forward-eligible로 고정된다. 이후 AST 점추정이 좋아져도 모델이 산 자원으로 AST
+forward 자격을 되살릴 수 없고, 모델 실패 기억·다중검정·promotion authority는 AST
+namespace와 분리된다.

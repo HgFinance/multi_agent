@@ -5,15 +5,15 @@
 근거: MCP_ONDEMAND_ARCHITECTURE.md §3 "ECOS 는 MCP 부재 - 자작 필요" 집행.
       macro 수집기는 2026-08-12 내렸고(적재 중단), 이 모듈이 그 자리의
       **질의 응대** 몫이다. 팩터·백테스트가 이 결과를 쓰면 안 되는 이유는
-      macro_collector.py 머리말과 같다 - ECOS 는 vintage 를 주지 않아
-      "지금 조회한 최신값" 만 온다(개정 전 값 복원 불가).
+      ECOS 는 vintage 를 주지 않아 "지금 조회한 최신값" 만 온다(개정 전 값
+      복원 불가). 따라서 이 응답은 운영 질의용이며 백테스트 입력이 아니다.
 
 ▶ 카탈로그 우선 (LS TR 카탈로그와 같은 패턴)
   ECOS 통계표는 수천 개다. ecos_search 로 통계표를 찾고 ecos_series 로
   값을 받는 2단계 - FinAgentBench 의 "어느 문서 -> 어느 조항" 그대로다.
   FRED 도 fred_search -> fred_series 같은 짝이다.
 
-예산·스냅샷·정직성 규약은 external_sources 의 것을 그대로 쓴다.
+예산·비영속 인용 해시·정직성 규약은 external_sources 의 것을 그대로 쓴다.
 자체 점검: python api/external_macro.py   (네트워크 없는 검사만)
 """
 
@@ -143,7 +143,8 @@ def fred_series(series_id: str, start: str = "", end: str = "",
     """FRED 관측값. start/end 는 YYYY-MM-DD (비우면 최근부터).
 
     FRED 는 vintage(realtime)를 주는 드문 원천이지만, 이 도구는 질의 응대용
-    최신값만 준다 - PIT 연구가 필요하면 적재 평면(ALFRED)을 써야 한다.
+    최신값만 준다. 현재 Runtime에서는 PIT 연구 입력으로 쓰지 않으며, 필요하면
+    별도 데이터 계약과 승인된 역사 원천을 먼저 마련해야 한다.
     """
     spend("fred", FRED_DAILY_CAP)
     n = max(1, min(int(limit), 1000))

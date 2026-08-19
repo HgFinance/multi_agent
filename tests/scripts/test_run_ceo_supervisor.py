@@ -127,7 +127,7 @@ class SupervisorRunnerTest(unittest.TestCase):
         )
         self.assertNotIn("--json", command)
         self.assertIn(
-            "completed,blocked,gave_up,crashed,timed_out,spawn_failed",
+            "claimed,spawned,completed,blocked,gave_up,crashed,timed_out,spawn_failed",
             command,
         )
         self.assertNotIn("reclaimed", command)

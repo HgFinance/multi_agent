@@ -38,7 +38,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from stock_universe import governed_stock_evidence_sql  # noqa: E402
+
 FINALIZER_VERSION = "quant-orphan-finalizer-v1"
+
+_GOVERNED_ORPHAN_EVIDENCE = governed_stock_evidence_sql(
+    experiment_alias="e", dataset_alias="m", hypothesis_alias="h")
 
 # 이 상태의 가설만 전이한다. 나머지(REJECTED/ARCHIVED/SUPPORTED/...)는 종결
 # 역사이므로 환류만 적재하고 상태는 보존한다.
@@ -60,17 +65,18 @@ _SQL_ORPHANS = """
      order by e.ended_at
 """
 
-_SQL_EXPERIMENT = """
+_SQL_EXPERIMENT = f"""
     select e.hypothesis_id::text, e.trial_family_id, e.trial_number,
-           h.status
+           h.status, ({_GOVERNED_ORPHAN_EVIDENCE}) is true
       from quant.experiments e
-      left join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+      join quant.hypotheses h on h.hypothesis_id = e.hypothesis_id
+      join quant.dataset_manifests m on m.dataset_id = e.dataset_id
      where e.experiment_id = %s
 """
 
 # 창별 강건성 재료. SUMMARY/빈 차원은 전기간 요약이라 창이 아니다.
 _SQL_WINDOWS = """
-    select dimensions->>'window', metric, value
+    select dimensions->>'window', metric, value, dimensions
       from quant.experiment_metrics
      where experiment_id = %s and split = 'WALK_FORWARD'
        and coalesce(dimensions->>'window', '') not in ('', 'SUMMARY')
@@ -96,17 +102,30 @@ def windows_from_rows(rows) -> tuple[list[tuple[str, dict]], list[str]]:
     이름을 돌려줘서 호출부가 적게 한다(조용한 절단 금지).
     """
     by_win: dict[str, dict] = {}
-    for win, metric, value in rows or ():
+    for row in rows or ():
+        if not isinstance(row, (list, tuple)) or len(row) < 3:
+            continue
+        win, metric, value = row[:3]
+        dimensions = row[3] if len(row) > 3 else None
         if win is None:
             continue
         try:
-            by_win.setdefault(str(win), {})[str(metric)] = float(value)
+            window = by_win.setdefault(str(win), {})
+            metric_name = str(metric)
+            window[metric_name] = float(value)
+            if (metric_name == "measurement_not_measured"
+                    and float(value) > 0):
+                window["measurement_status"] = "NOT_MEASURED"
+                if isinstance(dimensions, dict):
+                    window["measurement_reason"] = str(
+                        dimensions.get("measurement_reason") or "")[:300]
         except (TypeError, ValueError):
             continue
     wm, dropped = [], []
     for label in sorted(by_win):
         m = by_win[label]
-        if all(k in m for k in _WINDOW_KEYS):
+        if (m.get("measurement_status") == "NOT_MEASURED"
+                or all(k in m for k in _WINDOW_KEYS)):
             wm.append((label, m))
         else:
             dropped.append(label)
@@ -156,6 +175,14 @@ def judge_from_stored(*, exp_id: str, hypothesis_id: str, hyp_status: str,
 
     wm, dropped = windows_from_rows(window_rows)
     _stats, _flags, verdict = fragility_summary(wm)
+    if dropped and verdict != "FRAGILE":
+        # A partially persisted preregistered window is UNKNOWN evidence, not a
+        # window that may be silently removed from the denominator.  Preserve
+        # measured failures, but never reconstruct ROBUST/SUPPORTED from an
+        # incomplete metric set after a crash.
+        verdict = "INSUFFICIENT"
+        if "PARTIAL_WINDOW_METRICS" not in _flags:
+            _flags.append("PARTIAL_WINDOW_METRICS")
 
     trial_no = int(trial_number or 1)
     pressure = {
@@ -236,7 +263,33 @@ def finalize_one(conn, exp_id: str) -> dict:
     row = cur.fetchone()
     if row is None:
         return {"experiment_id": exp_id, "skipped": "no_experiment_row"}
-    hypothesis_id, fam, trial_no, hyp_status = row
+    hypothesis_id, fam, trial_no, hyp_status, governed_evidence = row
+
+    if not governed_evidence:
+        # The run still exists in quant.experiments and therefore still pays
+        # trial/DSR pressure.  It may not, however, teach a direction or reach
+        # SUBMIT_TO_QA.  Close the orphan with a scope-only hold so it does not
+        # remain an endlessly retried anti-join row.
+        from factory_bridge import build_outcome
+
+        terminal = str(hyp_status or "") not in NON_TERMINAL
+        status_to_set = str(hyp_status or "") if terminal else "INCONCLUSIVE"
+        outcome = build_outcome(
+            experiment_id=exp_id, hypothesis_id=str(hypothesis_id),
+            trial_family_id=str(fam or ""), trial_number=int(trial_no or 1),
+            decision="GATE_HOLD",
+            failed_criteria=["ungoverned_stock_evidence"],
+            lesson_codes=["DATA_ARTIFACT"], oos_summary={},
+            notes=(f"사후 완주({FINALIZER_VERSION}): 성과 증거 제외 - "
+                   "KRX ACTIVE STOCK-only 현대 평가 계약 또는 intraday "
+                   "FULL_60 증거가 없음")[:900])
+        oid = finalize(conn, hypothesis_id=str(hypothesis_id),
+                       new_status=status_to_set, outcome=outcome)
+        return {
+            "experiment_id": exp_id, "outcome_id": oid,
+            "decision": "GATE_HOLD", "verdict": "INELIGIBLE_EVIDENCE",
+            "hypothesis": str(hypothesis_id), "status_set": status_to_set,
+        }
 
     cur.execute(_SQL_WINDOWS, (exp_id,))
     window_rows = cur.fetchall()

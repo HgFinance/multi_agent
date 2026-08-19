@@ -66,6 +66,25 @@ class CanonicalIngress(BaseModel):
     # 아직 Fund 개념이 없어 안 보내므로 Optional이다 - 없으면 CEO Mandate
     # 스냅샷 없이 그대로 진행한다(개발 원칙 9, `ceo.ceo_query`와 동일한 정책).
     fund_id: str | None = None
+    # Direct natural-language PAPER orders are authorized against one exact
+    # Book. Keeping it in the canonical envelope prevents a replayed request
+    # id from being rebound to a different account boundary.
+    book_id: str | None = None
+    # Discord 어댑터가 실어 보내는 원본 메시지 좌표(2026-08-18).
+    #
+    # 웹 요청에는 없다 - 그때는 BFF가 질의를 채널에 미러 게시하고 **그 게시물의**
+    # 좌표를 쓴다(`apps/api/discord_mirror.py`). Discord에서 온 요청은 사용자가
+    # 쓴 원본이 이미 채널에 있으므로 다시 게시하지 않고 이 값을 그대로 쓴다 -
+    # 그래야 부서 진행·최종 답변이 **사용자가 쓴 그 메시지**에 붙는다.
+    #
+    # `source_message_id`와 겹쳐 보이지만 역할이 다르다: 그쪽은 dedup 키
+    # (`source`+`source_message_id`)의 재료이고, 이쪽은 Discord 발송 좌표다.
+    # 같은 값을 쓰더라도 한 필드가 두 계약을 겸하면 한쪽 형식을 바꿀 때
+    # 다른 쪽이 조용히 깨진다.
+    discord_channel_id: str | None = None
+    discord_message_id: str | None = None
+    discord_guild_id: str | None = None
+    discord_thread_id: str | None = None
 
     @model_validator(mode="after")
     def default_source_message_id(self) -> CanonicalIngress:
@@ -154,6 +173,30 @@ class MirrorStoreUnavailable(RuntimeError):
     """The durable deduplication store cannot safely claim a request."""
 
 
+def _canonical_request_identity(request: CanonicalIngress) -> tuple[object, ...]:
+    """Return every field that fixes one ingress's content and authority."""
+
+    return (
+        request.query,
+        request.source,
+        request.source_message_id,
+        request.actor_id,
+        request.actor_type,
+        request.fund_id,
+        request.book_id,
+        request.discord_channel_id,
+        request.discord_message_id,
+        request.discord_guild_id,
+        request.mirrored,
+    )
+
+
+def _same_canonical_request(
+    left: CanonicalIngress, right: CanonicalIngress
+) -> bool:
+    return _canonical_request_identity(left) == _canonical_request_identity(right)
+
+
 class InMemoryMirrorStore:
     """Deterministic store used by tests and as a safe local fallback."""
 
@@ -180,10 +223,7 @@ class InMemoryMirrorStore:
                 )
             existing = self._requests.get(request.request_id)
             if existing is not None:
-                if (
-                    existing.request.query != request.query
-                    or existing.request.source != request.source
-                ):
+                if not _same_canonical_request(existing.request, request):
                     raise MirrorRequestConflict(
                         "request_id is already bound to a different canonical request"
                     )
@@ -266,8 +306,13 @@ class RedisMirrorStore:
         existing = self.client.get(request_key)
         if existing:
             payload = json.loads(existing)
+            stored_request = CanonicalIngress.model_validate(payload["request"])
+            if not _same_canonical_request(stored_request, request):
+                raise MirrorRequestConflict(
+                    "request_id is already bound to a different canonical request"
+                )
             return MirrorRequestRecord(
-                request=CanonicalIngress.model_validate(payload["request"]),
+                request=stored_request,
                 response=payload.get("response"),
             ), False
         payload = {"request": request.model_dump(mode="json"), "response": None}
@@ -282,10 +327,7 @@ class RedisMirrorStore:
                 raise RuntimeError("request deduplication record disappeared")
             stored = json.loads(existing)
             stored_request = CanonicalIngress.model_validate(stored["request"])
-            if (
-                stored_request.query != request.query
-                or stored_request.source != request.source
-            ):
+            if not _same_canonical_request(stored_request, request):
                 raise MirrorRequestConflict(
                     "request_id is already bound to a different canonical request"
                 )

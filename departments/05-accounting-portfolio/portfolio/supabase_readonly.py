@@ -1,9 +1,10 @@
-"""Async, read-only Supabase/PostgreSQL adapter for portfolio recommendations.
+"""Async, read-only control PostgreSQL adapter for portfolio recommendations.
 
-The adapter reads only canonical tables from ``supabase/migrations``. It never
-uses a service-role key, mutates database state, or invents a portfolio when a
-strategy version does not contain the suitability metadata required by the
-portfolio contract.
+The adapter reads operational canonical tables from the private control
+database populated by ``supabase/migrations``.  Hosted Supabase remains an
+authentication/user-data boundary and is deliberately not a DSN fallback here.
+The legacy module and ``Supabase*`` class names are kept as explicit import
+aliases while runtime provenance is always reported as ``CONTROL_DB``.
 """
 
 from __future__ import annotations
@@ -22,8 +23,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-READ_ONLY_DRIVER_ENV = "SUPABASE_READONLY_DRIVER"
-DEFAULT_DSN_ENVIRONMENTS = ("SUPABASE_DATABASE_URL", "DATABASE_URL")
+READ_ONLY_DRIVER_ENV = "CONTROL_DB_READONLY_DRIVER"
+DEFAULT_DSN_ENVIRONMENTS = ("CONTROL_DATABASE_URL", "DATABASE_URL")
 DEFAULT_CONNECT_RETRIES = 2
 DEFAULT_CONNECT_BACKOFF_SECONDS = 0.5
 
@@ -31,7 +32,6 @@ CONNECTION_PROBE_SQL = "SELECT current_setting('transaction_read_only') AS trans
 SCHEMA_PROBE_SQL = """
 SELECT
     to_regclass('strategy.versions')::text AS strategy_versions,
-    to_regclass('research.documents')::text AS research_documents,
     to_regclass('execution.market_snapshots')::text AS market_snapshots,
     to_regclass('accounting.portfolio_snapshots')::text AS accounting_snapshots
 """
@@ -93,25 +93,6 @@ ORDER BY v.effective_from DESC, s.strategy_code, v.version DESC
 LIMIT 200
 """
 
-RESEARCH_DOCUMENTS_SQL = """
-SELECT
-    d.document_id::text AS document_id,
-    d.document_type,
-    d.title,
-    d.canonical_url,
-    d.published_at,
-    d.observed_at,
-    d.status,
-    s.source_code
-FROM research.documents AS d
-JOIN reference.data_sources AS s ON s.source_id = d.source_id
-WHERE d.observed_at <= %s
-  AND (d.published_at IS NULL OR d.published_at <= %s)
-  AND d.status IN ('ACTIVE', 'CORRECTED')
-ORDER BY d.observed_at DESC
-LIMIT 100
-"""
-
 MARKET_SNAPSHOTS_SQL = """
 SELECT
     market_snapshot_id::text AS market_snapshot_id,
@@ -134,7 +115,7 @@ LIMIT 200
 """
 
 # The portfolio UI must not derive symbols from a static browser catalog when
-# Supabase is the live source.  Resolve the canonical instrument identity,
+# The control database is the live operational source. Resolve canonical identity,
 # primary symbol, domestic asset class and the latest PIT market value in one
 # read-only query.  The join is intentionally restricted to Korean equities;
 # bonds, global assets and derivatives cannot enter the current product scope.
@@ -206,13 +187,13 @@ LIMIT 1
 """
 
 
-class SupabaseReadOnlyError(RuntimeError):
-    """Raised when a read-only adapter cannot be configured or queried."""
+class ControlDbReadOnlyError(RuntimeError):
+    """Raised when the control-database adapter cannot be configured or queried."""
 
 
 @dataclass(frozen=True)
-class SupabasePreflight:
-    """Safe, credential-free connectivity and schema diagnostics."""
+class ControlDbPreflight:
+    """Safe, credential-free control-database connectivity diagnostics."""
 
     status: str
     driver: str
@@ -244,8 +225,8 @@ RowFetcher = Callable[[str, tuple[Any, ...]], Awaitable[Sequence[Mapping[str, An
 
 
 @dataclass(frozen=True)
-class SupabaseReadSnapshot:
-    """Canonical read model passed into the async recommendation graph."""
+class ControlDbReadSnapshot:
+    """Canonical control-database read model passed into the recommendation graph."""
 
     as_of: datetime
     source: str
@@ -343,9 +324,9 @@ def _allocations(value: Any) -> dict[str, Any] | None:
 
 def _load_portfolio_candidate_model() -> Any:
     path = Path(__file__).with_name("suitability.py")
-    spec = importlib.util.spec_from_file_location("supabase_portfolio_suitability", path)
+    spec = importlib.util.spec_from_file_location("control_db_portfolio_suitability", path)
     if spec is None or spec.loader is None:
-        raise SupabaseReadOnlyError("portfolio suitability contract unavailable")
+        raise ControlDbReadOnlyError("portfolio suitability contract unavailable")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -388,7 +369,7 @@ def _normalize_candidates(
                 continue
             candidate.setdefault("as_of", _json_value(version_as_of))
             candidate.setdefault(
-                "evidence_refs", [f"supabase:strategy.versions:{version_id}"]
+                "evidence_refs", [f"control_db:strategy.versions:{version_id}"]
             )
             try:
                 validated = model.model_validate(candidate)
@@ -404,18 +385,16 @@ def _normalize_candidates(
     return tuple(deduplicated[key] for key in sorted(deduplicated)), reasons
 
 
-def _documents_context(rows: Sequence[Mapping[str, Any]], as_of: datetime) -> dict[str, Any]:
-    documents = [_json_value(dict(row)) for row in rows]
+def _request_time_research_context(as_of: datetime) -> dict[str, Any]:
+    """Describe the non-persistent research boundary used by the portfolio graph."""
+
     return {
-        "status": "LIVE" if documents else "EMPTY",
-        "source": "supabase.research.documents",
+        "status": "REQUEST_TIME_MCP",
+        "source": "REQUEST_TIME_MCP",
         "as_of": as_of.isoformat(),
-        "documents": documents,
-        "evidence_refs": [
-            f"supabase:research.documents:{row.get('document_id')}"
-            for row in rows
-            if row.get("document_id")
-        ],
+        "documents": [],
+        "evidence_refs": [],
+        "persistence": "DISABLED",
         "read_only": True,
     }
 
@@ -424,7 +403,7 @@ def _market_context(rows: Sequence[Mapping[str, Any]], as_of: datetime) -> dict[
     snapshots = [_json_value(dict(row)) for row in rows]
     return {
         "status": "LIVE" if snapshots else "EMPTY",
-        "source": "supabase.execution.market_snapshots",
+        "source": "control_db.execution.market_snapshots",
         "as_of": as_of.isoformat(),
         "snapshots": snapshots,
         "read_only": True,
@@ -459,8 +438,8 @@ def _instrument_context(rows: Sequence[Mapping[str, Any]], as_of: datetime) -> d
                 "evidence_refs": [
                     ref
                     for ref in (
-                        f"supabase:reference.instruments:{row.get('instrument_id')}",
-                        f"supabase:execution.market_snapshots:{row.get('market_snapshot_id')}",
+                        f"control_db:reference.instruments:{row.get('instrument_id')}",
+                        f"control_db:execution.market_snapshots:{row.get('market_snapshot_id')}",
                     )
                     if not ref.endswith(":None") and not ref.endswith(":")
                 ],
@@ -468,7 +447,7 @@ def _instrument_context(rows: Sequence[Mapping[str, Any]], as_of: datetime) -> d
         )
     return {
         "status": "LIVE" if instruments else "EMPTY",
-        "source": "supabase.reference.instruments",
+        "source": "control_db.reference.instruments",
         "as_of": as_of.isoformat(),
         "instruments": instruments,
         "read_only": True,
@@ -480,7 +459,7 @@ def _accounting_context(
 ) -> dict[str, Any]:
     return {
         "status": "LIVE" if rows else ("NOT_REQUESTED" if not fund_id else "EMPTY"),
-        "source": "supabase.accounting.portfolio_snapshots",
+        "source": "control_db.accounting.portfolio_snapshots",
         "as_of": as_of.isoformat(),
         "snapshot": _json_value(dict(rows[0])) if rows else None,
         "read_only": True,
@@ -501,7 +480,7 @@ class _Psycopg2Fetcher:
             import psycopg2
             from psycopg2.extras import RealDictCursor
         except ModuleNotFoundError as exc:
-            raise SupabaseReadOnlyError("psycopg2-binary is required for DB reads") from exc
+            raise ControlDbReadOnlyError("psycopg2-binary is required for DB reads") from exc
         connection = psycopg2.connect(self.dsn, connect_timeout=8)
         try:
             # ▶ **`set_session(readonly=True)` 를 쓰지 않는다** (2026-08-14 실측)
@@ -538,7 +517,7 @@ class _AsyncpgFetcher:
         try:
             import asyncpg
         except ModuleNotFoundError as exc:
-            raise SupabaseReadOnlyError("asyncpg is required for the async DB driver") from exc
+            raise ControlDbReadOnlyError("asyncpg is required for the async DB driver") from exc
         # statement_cache_size=0 - Supabase 풀러의 transaction mode(6543) 에서는
         # 커넥션이 트랜잭션마다 다른 서버 세션에 붙는다. asyncpg 는 기본으로
         # prepared statement 를 캐시하는데, 그 캐시는 앞선 세션에만 존재하므로
@@ -558,8 +537,8 @@ class _AsyncpgFetcher:
             await connection.close()
 
 
-class SupabaseReadOnlyAdapter:
-    """Read canonical Supabase data without exposing any write operation."""
+class ControlDbReadOnlyAdapter:
+    """Read canonical control-database data without exposing write operations."""
 
     def __init__(
         self,
@@ -575,13 +554,13 @@ class SupabaseReadOnlyAdapter:
         self._fetcher = fetcher
         self.driver = (driver or os.getenv(READ_ONLY_DRIVER_ENV, "auto")).lower()
         try:
-            retries = int(os.getenv("SUPABASE_CONNECT_RETRIES", str(DEFAULT_CONNECT_RETRIES)))
+            retries = int(os.getenv("CONTROL_DB_CONNECT_RETRIES", str(DEFAULT_CONNECT_RETRIES)))
         except ValueError:
             retries = DEFAULT_CONNECT_RETRIES
         try:
             backoff = float(
                 os.getenv(
-                    "SUPABASE_CONNECT_BACKOFF_SECONDS",
+                    "CONTROL_DB_CONNECT_BACKOFF_SECONDS",
                     str(DEFAULT_CONNECT_BACKOFF_SECONDS),
                 )
             )
@@ -603,24 +582,24 @@ class SupabaseReadOnlyAdapter:
 
     def _dsn_endpoint(self) -> tuple[str, int]:
         if not self.dsn:
-            raise SupabaseReadOnlyError("DSN_NOT_CONFIGURED")
+            raise ControlDbReadOnlyError("DSN_NOT_CONFIGURED")
         parsed = urlsplit(self.dsn)
         if parsed.scheme not in {"postgres", "postgresql"} or not parsed.hostname:
-            raise SupabaseReadOnlyError("INVALID_POSTGRES_DSN")
+            raise ControlDbReadOnlyError("INVALID_POSTGRES_DSN")
         try:
             port = parsed.port or 5432
         except ValueError as exc:
-            raise SupabaseReadOnlyError("INVALID_POSTGRES_PORT") from exc
+            raise ControlDbReadOnlyError("INVALID_POSTGRES_PORT") from exc
         return parsed.hostname, port
 
-    async def diagnose_connection(self) -> SupabasePreflight:
+    async def diagnose_connection(self) -> ControlDbPreflight:
         """Check DNS, read-only connectivity, and canonical table visibility.
 
         The result intentionally contains no host, user, password, or driver error
         text. It is safe to return in CLI output and operational logs.
         """
         if self._fetcher is not None:
-            return SupabasePreflight(
+            return ControlDbPreflight(
                 "BYPASSED",
                 "injected",
                 False,
@@ -630,7 +609,7 @@ class SupabaseReadOnlyAdapter:
                 reasons=("INJECTED_FETCHER",),
             )
         if not self.dsn:
-            return SupabasePreflight(
+            return ControlDbPreflight(
                 "FAIL",
                 self.driver,
                 False,
@@ -642,8 +621,8 @@ class SupabaseReadOnlyAdapter:
 
         try:
             host, port = self._dsn_endpoint()
-        except SupabaseReadOnlyError as exc:
-            return SupabasePreflight(
+        except ControlDbReadOnlyError as exc:
+            return ControlDbPreflight(
                 "FAIL",
                 self.driver,
                 True,
@@ -661,7 +640,7 @@ class SupabaseReadOnlyAdapter:
                 type=socket.SOCK_STREAM,
             )
         except Exception as exc:  # noqa: BLE001 - return a sanitized diagnostic code.
-            return SupabasePreflight(
+            return ControlDbPreflight(
                 "FAIL",
                 self._driver_name(),
                 True,
@@ -680,7 +659,7 @@ class SupabaseReadOnlyAdapter:
                 else ""
             ).lower()
             if transaction_read_only not in {"on", "true", "1"}:
-                return SupabasePreflight(
+                return ControlDbPreflight(
                     "FAIL",
                     self._driver_name(),
                     True,
@@ -690,7 +669,7 @@ class SupabaseReadOnlyAdapter:
                     reasons=("READ_ONLY_TRANSACTION_NOT_CONFIRMED",),
                 )
         except Exception as exc:  # noqa: BLE001 - do not expose DSN-bearing text.
-            return SupabasePreflight(
+            return ControlDbPreflight(
                 "FAIL",
                 self._driver_name(),
                 True,
@@ -705,14 +684,13 @@ class SupabaseReadOnlyAdapter:
             row = dict(rows[0]) if rows else {}
             expected = (
                 "strategy_versions",
-                "research_documents",
                 "market_snapshots",
                 "accounting_snapshots",
             )
             objects = tuple(name for name in expected if row.get(name))
             missing = tuple(name for name in expected if not row.get(name))
             if missing:
-                return SupabasePreflight(
+                return ControlDbPreflight(
                     "FAIL",
                     self._driver_name(),
                     True,
@@ -723,7 +701,7 @@ class SupabaseReadOnlyAdapter:
                     tuple(f"SCHEMA_OBJECT_MISSING:{name}" for name in missing),
                 )
         except Exception as exc:  # noqa: BLE001 - do not expose DSN-bearing text.
-            return SupabasePreflight(
+            return ControlDbPreflight(
                 "FAIL",
                 self._driver_name(),
                 True,
@@ -733,7 +711,7 @@ class SupabaseReadOnlyAdapter:
                 reasons=(f"SCHEMA_PROBE_FAILED:{type(exc).__name__}",),
             )
 
-        return SupabasePreflight(
+        return ControlDbPreflight(
             "PASS",
             self._driver_name(),
             True,
@@ -747,14 +725,14 @@ class SupabaseReadOnlyAdapter:
         if self._fetcher is not None:
             return self._fetcher
         if not self.dsn:
-            raise SupabaseReadOnlyError(
-                "SUPABASE_DATABASE_URL or DATABASE_URL is required for read-only access"
+            raise ControlDbReadOnlyError(
+                "CONTROL_DATABASE_URL or DATABASE_URL is required for read-only access"
             )
         if self._driver_name() == "psycopg2":
             return _Psycopg2Fetcher(self.dsn)
         if self._driver_name() == "asyncpg":
             return _AsyncpgFetcher(self.dsn)
-        raise SupabaseReadOnlyError("READ_ONLY_DRIVER_UNAVAILABLE")
+        raise ControlDbReadOnlyError("READ_ONLY_DRIVER_UNAVAILABLE")
 
     async def _fetch(
         self, fetcher: RowFetcher, query: str, args: tuple[Any, ...]
@@ -767,11 +745,11 @@ class SupabaseReadOnlyAdapter:
         *,
         as_of: datetime | str,
         fund_id: str | None = None,
-    ) -> SupabaseReadSnapshot:
+    ) -> ControlDbReadSnapshot:
         """Load PIT data; any query failure produces a safe degraded snapshot."""
 
         cutoff = _as_utc(as_of)
-        preflight = SupabasePreflight(
+        preflight = ControlDbPreflight(
             "BYPASSED",
             "injected",
             False,
@@ -790,12 +768,12 @@ class SupabaseReadOnlyAdapter:
                     for reason in preflight.reasons
                 )
                 if not retryable or attempt >= self.connect_retries:
-                    return SupabaseReadSnapshot(
+                    return ControlDbReadSnapshot(
                         cutoff,
-                        "SUPABASE_UNAVAILABLE",
+                        "CONTROL_DB_UNAVAILABLE",
                         "UNAVAILABLE",
                         (),
-                        {"status": "UNAVAILABLE", "read_only": True},
+                        _request_time_research_context(cutoff),
                         {"status": "UNAVAILABLE", "read_only": True},
                         {"status": "NOT_REQUESTED" if not fund_id else "UNAVAILABLE", "read_only": True},
                         preflight.reasons,
@@ -805,13 +783,13 @@ class SupabaseReadOnlyAdapter:
                 await asyncio.sleep(self.connect_backoff_seconds * (attempt + 1))
         try:
             fetcher = self._get_fetcher()
-        except SupabaseReadOnlyError as exc:
-            return SupabaseReadSnapshot(
+        except ControlDbReadOnlyError as exc:
+            return ControlDbReadSnapshot(
                 cutoff,
-                "SUPABASE_UNAVAILABLE",
+                "CONTROL_DB_UNAVAILABLE",
                 "UNAVAILABLE",
                 (),
-                {"status": "UNAVAILABLE", "read_only": True},
+                _request_time_research_context(cutoff),
                 {"status": "UNAVAILABLE", "read_only": True},
                 {"status": "NOT_REQUESTED" if not fund_id else "UNAVAILABLE", "read_only": True},
                 (type(exc).__name__,),
@@ -821,7 +799,6 @@ class SupabaseReadOnlyAdapter:
 
         jobs: list[tuple[str, str, tuple[Any, ...]]] = [
             ("portfolio_catalog", PORTFOLIO_CATALOG_SQL, (cutoff, cutoff)),
-            ("research_documents", RESEARCH_DOCUMENTS_SQL, (cutoff, cutoff)),
             ("market_snapshots", MARKET_SNAPSHOTS_SQL, (cutoff,)),
             (
                 "domestic_equity_universe",
@@ -876,7 +853,7 @@ class SupabaseReadOnlyAdapter:
             by_name.get("portfolio_catalog", ()), as_of=cutoff
         )
         reasons.extend(candidate_reasons)
-        research_context = _documents_context(by_name.get("research_documents", ()), cutoff)
+        research_context = _request_time_research_context(cutoff)
         market_context = _market_context(by_name.get("market_snapshots", ()), cutoff)
         market_context["instrument_universe"] = _instrument_context(
             by_name.get("domestic_equity_universe", ()), cutoff
@@ -899,14 +876,11 @@ class SupabaseReadOnlyAdapter:
             reasons.append("NO_PIT_DOMESTIC_EQUITY_INSTRUMENTS")
         elif (
             failed_queries
-            or research_context["status"] == "EMPTY"
             or market_context["status"] == "EMPTY"
         ):
             quality = "WARN"
         else:
             quality = "PASS"
-        if research_context["status"] == "EMPTY":
-            reasons.append("NO_PIT_RESEARCH_DOCUMENTS")
         if market_context["status"] == "EMPTY":
             reasons.append("NO_PIT_MARKET_SNAPSHOTS")
         pit_diagnostics = {
@@ -914,15 +888,15 @@ class SupabaseReadOnlyAdapter:
             "quality_status": quality,
             "reasons": list(dict.fromkeys(reasons)),
             "candidate_count": len(candidates),
-            "research_document_count": len(research_context.get("documents", [])),
+            "research_mode": "REQUEST_TIME_MCP",
             "market_snapshot_count": len(market_context.get("snapshots", [])),
             "domestic_instrument_count": len(market_context.get("instrument_universe", {}).get("instruments", [])),
             "as_of": cutoff.isoformat(),
         }
         data_diagnostics["pit_readiness"] = pit_diagnostics
-        return SupabaseReadSnapshot(
+        return ControlDbReadSnapshot(
             cutoff,
-            "SUPABASE",
+            "CONTROL_DB",
             quality,
             candidates,
             research_context,
@@ -935,14 +909,25 @@ class SupabaseReadOnlyAdapter:
         )
 
 
+# Explicit compatibility aliases for legacy imports.  They do not restore the
+# removed hosted-Supabase DSN fallback or the retired research-document query.
+SupabaseReadOnlyError = ControlDbReadOnlyError
+SupabasePreflight = ControlDbPreflight
+SupabaseReadSnapshot = ControlDbReadSnapshot
+SupabaseReadOnlyAdapter = ControlDbReadOnlyAdapter
+
+
 __all__ = [
     "ACCOUNTING_SNAPSHOT_SQL",
+    "ControlDbPreflight",
+    "ControlDbReadOnlyAdapter",
+    "ControlDbReadOnlyError",
+    "ControlDbReadSnapshot",
     "DOMESTIC_EQUITY_UNIVERSE_SQL",
     "MARKET_DATA_DIAGNOSTIC_SQL",
     "MARKET_SNAPSHOTS_SQL",
     "PORTFOLIO_CATALOG_SQL",
     "PORTFOLIO_DATA_DIAGNOSTIC_SQL",
-    "RESEARCH_DOCUMENTS_SQL",
     "SupabasePreflight",
     "SupabaseReadOnlyAdapter",
     "SupabaseReadOnlyError",

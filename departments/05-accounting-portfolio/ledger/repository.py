@@ -46,6 +46,8 @@ sys.path.insert(0, str(_HERE.parent / "portfolio"))
 from ledger import (
     ACCOUNT_TYPES,
     CASH,
+    PAYABLE,
+    RECEIVABLE,
     REALIZED_PNL,
     ZERO,
     Journal,
@@ -60,6 +62,7 @@ SNAPSHOT_SCHEMA_VERSION = 1
 # absence of DATABASE_URL is an operational error rather than permission to
 # discard accounting state into process memory.
 _DURABLE_MODES = {"PAPER_DB", "DURABLE", "PRODUCTION", "LIVE_DB"}
+ACCOUNTING_LEDGER_DATABASE_ROLE = "svc_accounting_ledger"
 
 def durable_required_from_env() -> bool:
     mode = os.environ.get("ACCOUNTING_MODE", "").strip().upper()
@@ -131,16 +134,28 @@ class LedgerRepository:
     """`accounting.journals` / `journal_lines` / `positions` / `cash_balances` /
     `portfolio_snapshots` 전용 저장소."""
 
-    def __init__(self, pool: Any) -> None:
+    def __init__(self, pool: Any, *, database_role: str | None = None) -> None:
         self._pool = pool
+        self._database_role = (database_role or "").strip() or None
+        if (
+            self._database_role is not None
+            and self._database_role != ACCOUNTING_LEDGER_DATABASE_ROLE
+        ):
+            raise LedgerPersistenceError(
+                "ACCOUNTING_DATABASE_ROLE must be svc_accounting_ledger"
+            )
         self._accounts: dict[UUID, dict[str, UUID]] = {}
         self._currency: dict[UUID, str] = {}
 
     @classmethod
-    def connect(cls, dsn: str) -> LedgerRepository:
+    def connect(
+        cls, dsn: str, *, database_role: str | None = None
+    ) -> LedgerRepository:
         _, _, ThreadedConnectionPool = _load_driver()
         # minconn=0 - 유휴 커넥션을 잡지 않는다
-        return cls(ThreadedConnectionPool(0, 4, dsn))
+        return cls(
+            ThreadedConnectionPool(0, 4, dsn), database_role=database_role
+        )
 
     @classmethod
     def from_env(cls, *, required: bool | None = None) -> LedgerRepository | None:
@@ -157,7 +172,10 @@ class LedgerRepository:
                     "offline memory mode was not selected"
                 )
             return None
-        return cls.connect(dsn)
+        return cls.connect(
+            dsn,
+            database_role=os.environ.get("ACCOUNTING_DATABASE_ROLE"),
+        )
 
     def close(self) -> None:
         self._pool.closeall()
@@ -170,6 +188,18 @@ class LedgerRepository:
         try:
             with conn:  # 정상 종료면 commit, 예외면 rollback
                 with conn.cursor() as cur:
+                    # This repository owns Journal/projection mutations. A
+                    # transaction-pool backend may have been left with a
+                    # read-only session default by an unrelated read client;
+                    # override it before the first domain statement. A real
+                    # replica still rejects READ WRITE, so the writer fails
+                    # closed instead of pretending that projection succeeded.
+                    cur.execute("set transaction read write")
+                    # Reduce the shared operational login before any domain
+                    # query. The exact allowlist above keeps this from becoming
+                    # a caller-controlled SQL identifier.
+                    if self._database_role == ACCOUNTING_LEDGER_DATABASE_ROLE:
+                        cur.execute("set local role svc_accounting_ledger")
                     yield cur
         except psycopg2.Error as exc:
             raise LedgerPersistenceError(f"원장 DB 작업 실패: {exc}") from exc
@@ -522,6 +552,11 @@ class LedgerRepository:
         안 그러면 DB에 판 종목이 계속 남는다.
         """
         positions, cash = ledger.rebuild()
+        balances = ledger.trial_balance()
+        # Receivables increase economically available cash; payables reduce
+        # it.  This projection must be durable before Trading releases a fill
+        # reservation, otherwise a T+2 BUY can be spent twice before settlement.
+        unsettled_cash = balances.get(RECEIVABLE, ZERO) + balances.get(PAYABLE, ZERO)
         realized = _realized_by_instrument(ledger)
         as_of = datetime.now(timezone.utc)
         cash_account = self.account_ids(ledger.fund_id)[CASH]
@@ -561,16 +596,17 @@ class LedgerRepository:
                 """
                 insert into accounting.cash_balances (
                     fund_id, book_id, account_id, currency, settled_amount,
-                    last_journal_id, as_of
-                ) values (%s, %s, %s, %s, %s, %s, %s)
+                    unsettled_amount,last_journal_id, as_of
+                ) values (%s, %s, %s, %s, %s, %s, %s, %s)
                 on conflict (fund_id, book_id, account_id, currency)
                 do update set settled_amount = excluded.settled_amount,
+                              unsettled_amount = excluded.unsettled_amount,
                               last_journal_id = excluded.last_journal_id,
                               as_of = excluded.as_of,
                               version = accounting.cash_balances.version + 1
                 """,
                 (ledger.fund_id, ledger.book_id, cash_account, currency, cash,
-                 last_journal, as_of),
+                 unsettled_cash, last_journal, as_of),
             )
 
     def save_snapshot(self, snapshot: PortfolioSnapshot) -> UUID:

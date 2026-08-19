@@ -5,7 +5,7 @@ Claude Code가 이 저장소에서 작업할 때 지켜야 할 규칙. 설계 �
 ## 경로
 
 - `docs/` — 설계 Source of Truth ([REPOSITORY_DEPARTMENT_STRUCTURE.md](docs/02-engineering/REPOSITORY_DEPARTMENT_STRUCTURE.md)). `departments/<n>/hermes/`가 부서 Profile(git), 실제 Runtime은 `~/.hermes/profiles/<department>/`(`scripts/sync_hermes_profiles.sh`로 동기화).
-- 실행 가능 코드: `departments/01-research/collectors/news.py`, `skills/agentic-rag/`, 트레이딩·회계 거래 생명주기(`departments/02-trading/{contracts,oms,broker}/`, `departments/05-accounting-portfolio/{ledger,reconciliation}/`, `db/`). 나머지 부서는 대부분 Profile·설계 문서 단계.
+- 실행 가능 코드: `departments/01-research/collectors/`의 시장데이터 전용 수집기, `departments/01-research/api/external_*.py`의 비영속 요청형 MCP, `skills/agentic-rag/`, 트레이딩·회계 거래 생명주기(`departments/02-trading/{contracts,oms,broker}/`, `departments/05-accounting-portfolio/{ledger,reconciliation}/`, `db/`). 비시장 상주 수집기는 운영 경로가 아니다.
 - Frontend 현재 `ai-office/` → 목표 `apps/operator-web/` ([AI Office Frontend Plan](docs/02-engineering/AI_OFFICE_FRONTEND_PLAN.md)). 구 경로(`orchestration/hermes/`, 루트 `trading/`,`execution/`,`accounting/`, `fetch_news.py`)는 삭제됨.
 
 ## 명령어
@@ -16,8 +16,10 @@ research-department chat -q '...'
 risk-management     chat -q '...'
 ceo-agent           chat -q '...'
 python3 skills/agentic-rag/main.py --persona compliance-policy-agent --query "..." --as-of 2026-07-29  # OPENAI_API_KEY
-python3 departments/01-research/collectors/news.py 'AAPL Apple stock'                                  # TAVILY_API_KEY
+python3 departments/01-research/collectors/collector_scheduler.py --check                              # 네트워크 없음
+python3 departments/01-research/api/external_sources.py                                                # 네트워크 없음
 supabase db reset                                    # 운영 DB: supabase/migrations/, 시계열: timescaledb/migrations/
+python scripts/check_test_user_wiring.py             # 테스트 계정 3명: 프론트 하드코딩 ↔ 실 DB 대조(읽기 전용)
 python -m unittest discover -s tests/schema -p "test_*.py" -v
 ```
 
@@ -59,8 +61,9 @@ python -m unittest discover -s tests/schema -p "test_*.py" -v
 ⚠ 2026-08-12 정정: 이 문단은 오래 **19명 / 결정론 4개 / "HR은 Worker 0"** 이라고 적고 있었다. 셋 다 코드와 달랐다 — 실제로는 러너 흡수(risk 2026-08-06, qa 2026-08-06, 회계 2026-08-07)로 10명이 됐고, `ceo-runner`가 추가됐으며, HR에는 `profile-architecture-worker`(조건부) 1명이 있다. 편제를 바꿀 때 이 표와 위 테스트를 같이 고친다. 역할 경계의 근거는 [WORKER_ROLE_BOUNDARIES.md](docs/02-engineering/WORKER_ROLE_BOUNDARIES.md).
 
 **절대 깨면 안 되는 권한 분리** — 담당자가 같아도, 급해도 이전되지 않는다:
-- Agent Decision ≠ Strategy Signal ≠ OrderIntent ≠ Order. 모든 주문은 결정론적 Risk Engine을 통과하며, `risk-management`는 근거·권고만 만든다.
+- Agent Decision ≠ Strategy Signal ≠ OrderIntent ≠ Order. Agent·alpha·전략 Worker·rebalancer의 자동 주문 후보는 결정론적 Risk Engine을 통과하며, `risk-management`는 근거·권고만 만든다.
 - `trader-pm-agent`는 Risk/Compliance Gate 통과 전 주문을 보내지 않는다. CEO는 주문 제출·리스크 승인·원장 수정·NAV 확정·Audit 종결 권한이 없다.
+- [ADR-0007](docs/02-engineering/adr/0007-authenticated-user-paper-directive-authority.md)의 `USER_DIRECTIVE`는 별도 권한이다. 인증된 사용자가 자기 ACTIVE Fund/Book에 명시한 PAPER 주문은 Risk·alpha·rebalancer가 경제적으로 veto하지 않지만, auth·membership·결정론 parser·cash/position/reservation·lot/tick/TTL·멱등·durable PAPER admission은 필수다. Hermes/LLM은 이 권한을 소유하거나 주문을 보충하지 않는다.
 - `hr-department`는 자기 후보를 스스로 최종 승인할 수 없다(검증=QA, 승인=CEO, 권한 생성=IAM). `quant-backtest-department`는 Production 승격을 직접 하지 않는다.
 - LLM은 관련성 판단·서술에만 쓴다. PIT 필터·인용 검증·한도 검사는 결정론적 Python(`skills/agentic-rag/src/nodes.py`).
 
@@ -72,7 +75,7 @@ python -m unittest discover -s tests/schema -p "test_*.py" -v
 
 `docs/HEDGE_FUND_MASTER_PLAN.md`가 최상위 기준. 충돌 시 우선순위: MASTER_PLAN → `MINIMUM_SERVICE_UNIT_SPEC.md`/`DATA_GOVERNANCE_GUIDE.md` → `TECH_STACK_DECISIONS.md`/`AI_OFFICE_FRONTEND_PLAN.md` → `REPOSITORY_DEPARTMENT_STRUCTURE.md` → `HEDGE_FUND_CORE_PLAN.md`/`..._BACKLOG.md` → `AGENT_EMPLOYEE_PROFILES.md`/팀 가이드 → `README.md`. 하위 문서는 마스터 플랜을 변경할 수 없다(변경하려면 ADR 승인 후 관련 문서를 함께 갱신).
 
-**아직 미결정, 임의로 정하지 않는다:** Paper/Live Broker, 전체 Cloud Provider·Frontend Hosting, 첫 Strategy Portfolio, TimescaleDB Retention, Production Data Vendor, 자동 Paper 승인.
+**아직 미결정, 임의로 정하지 않는다:** Live Broker·Live 주문 API, 전체 Cloud Provider·Frontend Hosting, 첫 Strategy Portfolio, TimescaleDB Retention, Production Data Vendor, 자동 전략 Paper 승인. 사용자 직접 PAPER 레인의 canonical 계정은 local durable PaperBroker로 확정됐으며 LS LIVE 연결은 시장데이터 read-only다(ADR-0007).
 
 ## 담당자
 
@@ -90,7 +93,7 @@ python -m unittest discover -s tests/schema -p "test_*.py" -v
 1. Agent보다 데이터 계약과 Risk/OMS를 먼저 안정화한다.
 2. LLM 출력은 항상 Pydantic Schema로 검증한다.
 3. Agent Decision과 Order를 같은 객체로 취급하지 않는다.
-4. 모든 주문은 결정론적 Risk Engine을 통과한다.
+4. 모든 Agent·자동 전략 주문 후보는 결정론적 Risk Engine을 통과한다. 인증 사용자의 명시적 PAPER `USER_DIRECTIVE`만 ADR-0007의 별도 authority/admission 계약을 따른다.
 5. 미래 데이터가 Backtest와 과거 Replay에 들어가지 않게 한다.
 6. Position은 Fill 또는 승인된 Adjustment로만 변경한다.
 7. Replay 환경은 실제 Broker Credential을 가질 수 없다.

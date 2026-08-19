@@ -17,8 +17,9 @@ if str(_CONTRACTS) not in sys.path:
     sys.path.insert(0, str(_CONTRACTS))
 
 import alpha_ast_surface as ast  # noqa: E402
+from alpha_semantics import check_microstructure_mutations  # noqa: E402
 
-POLICY_VERSION = "literature-derivation-v1"
+POLICY_VERSION = "literature-derivation-v3"
 
 DIRECT_REPLICATION = "DIRECT_REPLICATION"
 MECHANISM_MUTATION = "MECHANISM_MUTATION"
@@ -33,6 +34,7 @@ DERIVATION_MODES = frozenset({
 DERIVATION_TRANSFORMS = frozenset({
     "STATE_CONDITION",
     "CLOCK_CHANGE",
+    "PRIMITIVE_WINDOW_MIGRATION",
     "BOOK_DEPTH_CHANGE",
     "MECHANISM_INTERACTION",
     "RESIDUALIZE_PUBLIC_SIGNAL",
@@ -41,8 +43,25 @@ DERIVATION_TRANSFORMS = frozenset({
     "TARGET_CHANGE",
     "CROSS_SCALE_DISAGREEMENT",
     "L1_L10_DIVERGENCE",
+    "L1_L10_CONVERGENCE",
+    "QUOTE_TAPE_CONFIRMATION",
+    "EVENT_NORMALIZATION",
+    "VOLUME_NORMALIZATION",
     "EXECUTION_AWARE",
 })
+
+
+def _without_primitive_windows(node):
+    """Compare V1/V2 raw-field clocks without erasing other AST changes."""
+    if isinstance(node, list):
+        return [_without_primitive_windows(value) for value in node]
+    if not isinstance(node, dict):
+        return node
+    return {
+        key: _without_primitive_windows(value)
+        for key, value in node.items()
+        if not (node.get("op") == "field" and key == "seconds")
+    }
 
 
 def _items(value) -> tuple[str, ...]:
@@ -65,6 +84,14 @@ def assess(*, candidate: dict, mode: str, source_baseline=None,
     unknown = sorted(set(transform_items) - DERIVATION_TRANSFORMS)
     if unknown:
         raise ValueError(f"unknown DERIVATION_TRANSFORMS: {unknown}")
+    mutation_alignment = check_microstructure_mutations(
+        transform_items, grammar.fields_of(candidate),
+        operators=(grammar.operators_of(candidate)
+                   if hasattr(grammar, "operators_of") else ()))
+    if not mutation_alignment["ok"]:
+        raise ValueError(
+            "DERIVATION_TRANSFORMS do not match the candidate AST: "
+            + "; ".join(mutation_alignment["missing"]))
 
     baseline = None
     if source_baseline not in (None, ""):
@@ -97,12 +124,35 @@ def assess(*, candidate: dict, mode: str, source_baseline=None,
             raise ValueError("MECHANISM_MUTATION requires NOVELTY_RATIONALE")
         if candidate_fp == baseline_fp:
             raise ValueError("MECHANISM_MUTATION cannot reuse the exact public formula")
-        if candidate_shape == baseline_shape:
+        candidate_bindings = (
+            grammar.field_window_bindings_of(candidate)
+            if hasattr(grammar, "field_window_bindings_of") else ())
+        baseline_bindings = (
+            grammar.field_window_bindings_of(baseline)
+            if hasattr(grammar, "field_window_bindings_of") else ())
+        candidate_explicit = any(
+            seconds is not None for _field, seconds in candidate_bindings)
+        baseline_explicit = any(
+            seconds is not None for _field, seconds in baseline_bindings)
+        if (candidate_explicit != baseline_explicit
+                and "PRIMITIVE_WINDOW_MIGRATION" not in transform_items):
             raise ValueError(
-                "MECHANISM_MUTATION changed only tunable parameters; the AST shape "
-                "must differ from the public baseline")
+                "legacy-to-explicit feature-window derivation requires "
+                "PRIMITIVE_WINDOW_MIGRATION")
+        window_coordinate = (
+            candidate_bindings != baseline_bindings
+            and _without_primitive_windows(candidate) ==
+            _without_primitive_windows(baseline)
+            and "PRIMITIVE_WINDOW_MIGRATION" in transform_items)
+        if candidate_shape == baseline_shape:
+            if not window_coordinate:
+                raise ValueError(
+                    "MECHANISM_MUTATION changed only tunable parameters; the AST shape "
+                    "must differ from the public baseline")
         eligible = True
-        classification = "DERIVED_ALPHA_CANDIDATE"
+        classification = (
+            "DERIVED_WINDOW_SEARCH_COORDINATE" if window_coordinate
+            else "DERIVED_ALPHA_CANDIDATE")
     else:
         if "MARKET_STRUCTURE_TRANSFER" not in transform_items:
             raise ValueError(

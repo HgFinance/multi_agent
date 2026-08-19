@@ -10,13 +10,13 @@
       ^                       |  WebSocket -> normalize -> MarketSink -> TimescaleDB
       +-----------------------+  세션 끝/오류 -> 통계 출력 -> 다음 세션 대기
 
-  ▶ 뉴스(news_watch_service)와 달리 **세션 창 개념이 있다.** 뉴스는 24시간
+  ▶ 실시간 시세에는 **거래 세션 창 개념이 있다.**
     폴링이지만 시세는 장 밖에서 소켓을 열어 봐야 조용한 연결만 유지된다.
     세션 판정은 Calendar 를 따르되, Calendar 가 오늘을 모르면
     make_trading_day_check 와 같은 원칙으로 **평일은 거래일로 간주**하고
     calendar_unverified 로 기록한다 (주말은 KRX 개장 전례가 없어 비거래로 본다).
 
-  ▶ 구독은 news 와 같은 watchlist 파일을 쓴다 (시가총액 상위 70종목 = 140구독,
+  ▶ 구독은 명시적 시장 Universe 파일을 쓴다 (시가총액 상위 70종목 = 140구독,
     소켓당 한도 200 이내). venue 별 tr_cd 는 subscription_plan.TR_MATRIX 가
     권위다 - 코스피 S3_/H1_, 코스닥 K3_/HA_ 를 섞어 한 소켓으로 받는다.
 
@@ -25,7 +25,7 @@
 
 환경변수 (전부 선택)
   LS_WATCH_SYMBOLS            쉼표 구분 KRX 종목코드 (최우선)
-  LS_WATCH_SYMBOLS_FILE       기본 config/news_watchlist.txt (뉴스와 같은 70종목)
+  LS_WATCH_SYMBOLS_FILE       기본 config/full_universe.txt (국내 주식 전종목)
   LS_PRE_OPEN_MINUTES         개장 전 수집 시작 여유, 기본 35 (동시호가 08:30 포함)
   LS_POST_CLOSE_MINUTES       마감 후 잔여 수신 여유, 기본 10
 
@@ -36,10 +36,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import signal
 import sys
+from collections import Counter
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -56,7 +59,7 @@ from ls_realtime_worker import (
     market_env,
     market_rest_client,
 )
-from news_watch_service import parse_watchlist_file
+from symbol_universe import parse_symbol_file
 from source_registry import SourceRegistry, load_project_env
 from subscription_plan import (
     SUBSCRIPTIONS_PER_SOCKET,
@@ -68,11 +71,196 @@ from subscription_plan import (
 )
 
 SERVICE_VERSION = "research-ls-realtime-service-v1"
+STOCK_CAPTURE_SCOPE_VERSION = "krx-active-stock-capture-v2"
+
+# The committed full-universe file is a point-in-time basket.  A listing
+# change between that snapshot and today's Reference view must not stop quote
+# and trade capture for every still-resolvable stock.  Quarantine is allowed
+# only for a large basket and a very small, bounded tail; manual/small baskets,
+# broad Reference loss, and ambiguous identities remain fail-closed.
+STALE_BASKET_MIN_REQUESTED = 1_000
+STALE_BASKET_MIN_MAPPING_COVERAGE = 0.995
+STALE_BASKET_MAX_UNMAPPED = 25
+STALE_UNMAPPED_REASON = "STALE_CONFIG_NO_CURRENT_TRADING_MAPPING"
 
 DEFAULT_OPEN = time(9, 0)
 DEFAULT_CLOSE = time(15, 30)
 SESSION_RETRY_BACKOFF = 30.0
 IDLE_RECHECK_SECONDS = 4 * 3600.0  # 휴장일에 세션 판정을 다시 하는 주기
+
+
+@dataclass(frozen=True)
+class ReferenceInstrumentRow:
+    """현재 유효한 LS 대표 심볼에 연결된 Instrument Master 한 행."""
+
+    symbol: str
+    instrument_id: object
+    market: str
+    asset_class: str
+    instrument_type: str
+    status: str
+    venue: str | None
+    is_spac: bool
+
+
+@dataclass(frozen=True)
+class StockCaptureSelection:
+    """입력 바스켓을 현재 Reference 기준으로 분류한 감사 가능한 결과."""
+
+    included: tuple[ReferenceInstrumentRow, ...]
+    excluded: tuple[tuple[str, str], ...]
+    fingerprint: str
+
+    @property
+    def excluded_by_reason(self) -> dict[str, tuple[str, ...]]:
+        grouped: dict[str, list[str]] = {}
+        for symbol, reason in self.excluded:
+            grouped.setdefault(reason, []).append(symbol)
+        return {
+            reason: tuple(sorted(symbols))
+            for reason, symbols in sorted(grouped.items())
+        }
+
+
+def _scope_text(value: object) -> str:
+    return str(value or "").strip().upper()
+
+
+def select_stock_capture_universe(
+    symbols: tuple[str, ...],
+    rows: list[ReferenceInstrumentRow],
+) -> StockCaptureSelection:
+    """KRX ACTIVE EQUITY/STOCK만 남기되 모든 제외 결정을 증거로 묶는다.
+
+    구성 파일은 DB 스냅샷보다 오래될 수 있다. 제품 분류가 STOCK에서 SPAC으로
+    정정된 경우 전체 수집을 죽이지는 않지만, 해당 심볼을 조용히 건너뛰지도
+    않는다. 대형 바스켓의 극소수 현재 매핑 누락도 같은 방식으로 격리하고 감사
+    증거에 넣는다. 수동/소형 바스켓의 누락, 광범위한 Reference 유실, 중복 매핑은
+    어느 instrument를 구독해야 하는지 결정할 수 없으므로 계속 fail-closed 한다.
+    """
+
+    requested = tuple(str(symbol).strip() for symbol in symbols)
+    if not requested or any(not symbol for symbol in requested):
+        raise LsRealtimeError("stock capture universe가 비어 있거나 빈 심볼을 포함한다")
+    duplicate_requests = sorted(
+        symbol for symbol, count in Counter(requested).items() if count > 1
+    )
+    if duplicate_requests:
+        raise LsRealtimeError(
+            f"stock capture universe에 중복 심볼이 있다: {duplicate_requests}"
+        )
+
+    requested_set = set(requested)
+    by_symbol: dict[str, list[ReferenceInstrumentRow]] = {}
+    for row in rows:
+        if row.symbol not in requested_set:
+            raise LsRealtimeError(
+                f"Reference 조회가 요청하지 않은 심볼을 반환했다: {row.symbol}"
+            )
+        by_symbol.setdefault(row.symbol, []).append(row)
+
+    missing = sorted(requested_set - set(by_symbol))
+    mapping_coverage = len(by_symbol) / len(requested)
+    quarantine_stale_tail = bool(missing) and (
+        len(requested) >= STALE_BASKET_MIN_REQUESTED
+        and len(missing) <= STALE_BASKET_MAX_UNMAPPED
+        and mapping_coverage >= STALE_BASKET_MIN_MAPPING_COVERAGE
+    )
+    if missing and not quarantine_stale_tail:
+        raise LsRealtimeError(
+            "현재 유효한 LS/KRX 대표 TRADING 매핑이 없는 심볼이다: "
+            f"{missing} (requested={len(requested)}, mapped={len(by_symbol)}, "
+            f"coverage={mapping_coverage:.6f})"
+        )
+    ambiguous = sorted(symbol for symbol, mapped in by_symbol.items() if len(mapped) != 1)
+    if ambiguous:
+        raise LsRealtimeError(
+            f"현재 LS/KRX 대표 심볼 매핑이 중복되어 있다: {ambiguous}"
+        )
+
+    included: list[ReferenceInstrumentRow] = []
+    excluded: list[tuple[str, str]] = []
+    decisions: list[dict[str, str]] = []
+    for symbol in sorted(requested):
+        if symbol in missing:
+            excluded.append((symbol, STALE_UNMAPPED_REASON))
+            decisions.append(
+                {
+                    "symbol": symbol,
+                    "instrument_id": "",
+                    "decision": "EXCLUDE",
+                    "reason": STALE_UNMAPPED_REASON,
+                    "market": "",
+                    "asset_class": "",
+                    "instrument_type": "",
+                    "status": "",
+                    "venue": "",
+                    "is_spac": "",
+                }
+            )
+            continue
+        row = by_symbol[symbol][0]
+        market = _scope_text(row.market)
+        asset_class = _scope_text(row.asset_class)
+        instrument_type = _scope_text(row.instrument_type)
+        status = _scope_text(row.status)
+        venue = _scope_text(row.venue)
+
+        reason = ""
+        if market != "KRX":
+            reason = f"NON_KRX:{market or 'BLANK'}"
+        elif asset_class != "EQUITY":
+            reason = f"NON_EQUITY:{asset_class or 'BLANK'}"
+        elif instrument_type != "STOCK":
+            reason = f"NON_STOCK:{instrument_type or 'BLANK'}"
+        elif status != "ACTIVE":
+            reason = f"NOT_ACTIVE:{status or 'BLANK'}"
+        elif row.is_spac:
+            # Migration 이전/부분 적용 상태에서도 SPAC을 보통주로 들이지 않는다.
+            reason = "SPAC_METADATA_CONFLICT"
+        elif venue not in {"KOSPI", "KOSDAQ"}:
+            reason = f"UNSUPPORTED_VENUE:{venue or 'BLANK'}"
+
+        decision = "INCLUDE" if not reason else "EXCLUDE"
+        decisions.append(
+            {
+                "symbol": symbol,
+                "instrument_id": str(row.instrument_id),
+                "decision": decision,
+                "reason": reason,
+                "market": market,
+                "asset_class": asset_class,
+                "instrument_type": instrument_type,
+                "status": status,
+                "venue": venue,
+                "is_spac": str(bool(row.is_spac)).lower(),
+            }
+        )
+        if reason:
+            excluded.append((symbol, reason))
+        else:
+            included.append(row)
+
+    if not included:
+        raise LsRealtimeError(
+            "Reference 분류 뒤 구독 가능한 KRX ACTIVE EQUITY/STOCK이 0개다"
+        )
+
+    evidence = {
+        "scope_version": STOCK_CAPTURE_SCOPE_VERSION,
+        "requested_count": len(requested),
+        "decisions": decisions,
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            evidence, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+    return StockCaptureSelection(
+        included=tuple(included),
+        excluded=tuple(sorted(excluded)),
+        fingerprint=fingerprint,
+    )
 
 
 @dataclass(frozen=True)
@@ -178,10 +366,10 @@ def load_symbols(env: dict) -> tuple[str, ...]:
     )
     if explicit:
         return explicit
-    path = Path((env.get("LS_WATCH_SYMBOLS_FILE") or "config/news_watchlist.txt").strip())
+    path = Path((env.get("LS_WATCH_SYMBOLS_FILE") or "config/full_universe.txt").strip())
     if not path.exists():
         raise LsRealtimeError(f"LS_WATCH_SYMBOLS_FILE 이 없다: {path}")
-    symbols = parse_watchlist_file(path.read_text(encoding="utf-8"))
+    symbols = parse_symbol_file(path.read_text(encoding="utf-8"))
     if not symbols:
         raise LsRealtimeError(f"LS_WATCH_SYMBOLS_FILE 이 비어 있다: {path}")
     return symbols
@@ -223,29 +411,65 @@ def _fetch_reference(symbols: tuple[str, ...]):
 
     ref = SupabaseReferenceRepository()
     try:
+        as_of = datetime.now(timezone.utc)
         with ref._conn.cursor() as cur:
             cur.execute(
                 """
-                select s.symbol, i.instrument_id, i.venue
+                select s.symbol, i.instrument_id, i.market, i.asset_class,
+                       i.instrument_type, i.status, i.venue,
+                       lower(coalesce(i.metadata->>'is_spac', 'false')) = 'true'
                 from reference.instruments i
                 join reference.instrument_symbols s using (instrument_id)
-                where i.market = 'KRX' and i.instrument_type = 'STOCK'
+                where s.provider = 'LS' and s.market = 'KRX'
+                  and s.symbol_type = 'TRADING'
                   and s.symbol = any(%s) and s.is_primary
+                  and s.valid_from <= %s
+                  and (s.valid_to is null or s.valid_to > %s)
+                order by s.symbol, s.valid_from desc
                 """,
-                (list(symbols),),
+                (list(symbols), as_of, as_of),
             )
-            rows = cur.fetchall()
-        missing = set(symbols) - {r[0] for r in rows}
-        if missing:
-            raise LsRealtimeError(f"Instrument Master 에 없는 종목이다: {sorted(missing)}")
-        iid_by_symbol = {sym: iid for sym, iid, _v in rows}
-        venue_rows = [(sym, venue) for sym, _iid, venue in rows]
+            rows = [ReferenceInstrumentRow(*row) for row in cur.fetchall()]
+        selection = select_stock_capture_universe(symbols, rows)
+        iid_by_symbol = {
+            row.symbol: row.instrument_id for row in selection.included
+        }
+        venue_rows = [(row.symbol, str(row.venue)) for row in selection.included]
+
+        print(
+            "  stock-universe-audit "
+            f"scope={STOCK_CAPTURE_SCOPE_VERSION} requested={len(symbols)} "
+            f"included={len(selection.included)} excluded={len(selection.excluded)} "
+            f"sha256={selection.fingerprint}",
+            flush=True,
+        )
+        for reason, excluded_symbols in selection.excluded_by_reason.items():
+            print(
+                f"    exclude reason={reason} count={len(excluded_symbols)} "
+                f"symbols={list(excluded_symbols)}",
+                flush=True,
+            )
         trading_days = {d for d, _o, _c in ref.recent_trading_sessions(limit=40)}
         today = datetime.now(KST).date()
         session = ref.market_session(today)
     finally:
         ref.close()
     return iid_by_symbol, venue_rows, trading_days, session
+
+
+def _fetch_market_session(trade_date: date):
+    """종목 선택과 분리해 Calendar만 읽는다.
+
+    세션 판정을 위해 바스켓 첫 심볼을 임의로 고르면 그 심볼이 SPAC 등으로
+    재분류된 순간 서비스가 수집 전부터 멈출 수 있다.
+    """
+    from reference_repository import SupabaseReferenceRepository
+
+    ref = SupabaseReferenceRepository()
+    try:
+        return ref.market_session(trade_date)
+    finally:
+        ref.close()
 
 
 async def run_capture(window: SessionWindow, symbols: tuple[str, ...], stop: asyncio.Event) -> None:
@@ -383,7 +607,7 @@ async def main_async() -> int:
     while not stop.is_set():
         now = datetime.now(KST)
         try:
-            _, _, _, session = _fetch_reference(symbols[:1])
+            session = _fetch_market_session(now.date())
         except LsRealtimeError:
             raise
         except Exception as e:  # noqa: BLE001 - intentional fallback boundary

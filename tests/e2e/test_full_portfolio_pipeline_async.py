@@ -147,7 +147,7 @@ def test_live_stage_payload_does_not_invent_conditional_worker_signals():
             "trace_id": "trace-live",
             "case_id": "case-live",
             "as_of": "2026-08-04T00:00:00+00:00",
-            "data_context": {"source": "SUPABASE", "quality_status": "WARN"},
+            "data_context": {"source": "CONTROL_DB", "quality_status": "WARN"},
         },
         "qa",
     )

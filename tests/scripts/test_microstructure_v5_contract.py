@@ -1,5 +1,6 @@
 from pathlib import Path
 import sys
+from datetime import date
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -71,6 +72,26 @@ def test_both_origins_compute_notional_depth_in_one_quote_scan() -> None:
         assert "/ 1e6" in sql
     assert "bid_prices[1] * bid_sizes[1]" in local
     assert "bid_vol10" in external and "ask_vol10" in external
+
+
+def test_external_manifest_hashes_complete_typed_rows_not_only_counts() -> None:
+    sql = microstructure_builder._SQL_BUILD_EXTERNAL
+    assert "hash_record_extended(quotes, 0)" in sql
+    assert "hash_record_extended(quotes, 1)" in sql
+    assert "hash_record_extended(ticks, 0)" in sql
+    assert "hash_record_extended(ticks, 1)" in sql
+    assert "jsonb_build_array" not in sql
+
+    d = date(2026, 8, 14)
+    original = microstructure_builder.external_content_fingerprints(
+        d, "005930", 100, 200, "quote-xor", "quote-sum",
+        "trade-xor", "trade-sum")
+    corrected = microstructure_builder.external_content_fingerprints(
+        d, "005930", 100, 200, "quote-xor-corrected", "quote-sum",
+        "trade-xor", "trade-sum")
+    assert original[0] != corrected[0]
+    assert original[2] != corrected[2]
+    assert all(len(value) == 64 for value in original)
 
 
 def test_external_source_days_use_the_same_kst_calendar_as_aggregation() -> None:

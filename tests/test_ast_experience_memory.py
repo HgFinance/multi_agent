@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 RESEARCH = ROOT / "departments" / "01-research"
@@ -50,30 +52,32 @@ def test_same_source_new_ast_gets_deterministic_revision_lineage():
 
 
 class _PersistCursor:
-    def __init__(self, existing_contract=None):
-        self.existing_contract = existing_contract
+    def __init__(self, contracts=None):
+        self.contracts = dict(contracts or {})
+        self.lookup_id = ""
         self.phase = ""
 
-    def execute(self, sql, _params):
+    def execute(self, sql, params):
         if sql == lead_intake._SQL_LOCK_SOURCE:
             self.phase = "lock"
         elif sql == lead_intake._SQL_EXISTING_CONTRACT:
             self.phase = "existing"
+            self.lookup_id = str(params[0])
         else:
             self.phase = "upsert"
 
     def fetchone(self):
         if self.phase == "existing":
-            return ((self.existing_contract,) if self.existing_contract is not None
-                    else None)
+            contract = self.contracts.get(self.lookup_id)
+            return ((contract,) if contract is not None else None)
         if self.phase == "upsert":
             return (True,)
         return None
 
 
 class _PersistConn:
-    def __init__(self, existing_contract=None):
-        self.cur = _PersistCursor(existing_contract)
+    def __init__(self, contracts=None):
+        self.cur = _PersistCursor(contracts)
         self.commits = 0
 
     def cursor(self):
@@ -94,7 +98,7 @@ def test_persist_can_return_actual_routed_ids_without_breaking_old_callers():
     assert lead_intake.persist(old_conn, [lead]) == (1, 0)
     assert old_conn.commits == 1
 
-    api_conn = _PersistConn(existing_contract=original)
+    api_conn = _PersistConn(contracts={source_id: original})
     new, dup, lead_ids = lead_intake.persist(
         api_conn, [lead], return_ids=True)
     assert (new, dup) == (1, 0)
@@ -105,6 +109,25 @@ def test_persist_can_return_actual_routed_ids_without_breaking_old_callers():
                   "mcp_server.py").read_text(encoding="utf-8")
     assert '"lead_ids": lead_ids' in mcp_source
     assert "return_ids=True" in mcp_source
+
+
+def test_persist_rejects_a_truncated_revision_digest_collision(monkeypatch):
+    source_id = "lead_0123456789abcdef"
+    original = {"ast_readiness": "DATA_BLOCKED", "missing_data": "depth"}
+    candidate = {"ast_readiness": "AST_READY", "candidate_signal_expr": OFI_1}
+    colliding = {"ast_readiness": "AST_READY", "candidate_signal_expr": OFI_5}
+    lead = {"lead_id": source_id, "refs": [{"url": "https://example.org/p"}],
+            "ast_contract": candidate}
+    monkeypatch.setattr(
+        lead_intake, "revision_lead_id",
+        lambda source, _contract: f"{source}_r000000000000")
+    conn = _PersistConn(contracts={
+        source_id: original,
+        f"{source_id}_r000000000000": colliding,
+    })
+
+    with pytest.raises(RuntimeError, match="revision digest collision"):
+        lead_intake.persist(conn, [lead])
 
 
 def test_memory_distinguishes_exact_reuse_from_same_tuning_shape():
