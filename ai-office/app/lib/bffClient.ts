@@ -26,8 +26,26 @@ export interface BffRequestInit extends RequestInit {
  */
 const DEFAULT_TIMEOUT_MS = 45_000;
 
+/**
+ * 브라우저가 쓰는 동일 출처 프록시 prefix (`worker/bffProxy.ts`가 받는다).
+ *
+ * 이 값을 바꾸면 Worker의 `BFF_PROXY_PREFIX`도 같이 바꿔야 한다.
+ */
+export const BFF_PROXY_PREFIX = "/bff";
+
+/**
+ * 브라우저에서는 절대 cross-origin으로 나가지 않는다.
+ *
+ * `X-User-Id`/`Idempotency-Key`는 비표준 헤더라 cross-origin이면 매 요청이
+ * preflight를 동반하고, 그 성패가 BFF의 `APP_ENV`·`PORTFOLIO_CORS_ALLOW_ORIGINS`와
+ * dev 서버가 그날 잡은 포트(3000 점유 시 3001…), `localhost`/`127.0.0.1`
+ * 표기에 따라 갈렸다 — 랜덤하게 보이던 CORS 오류의 원인이다. 동일 출처
+ * `/bff/*`로 보내면 CORS 규칙 자체가 적용되지 않는다. SSR/Worker 실행 시에는
+ * 브라우저가 아니므로 설정된 절대 주소를 그대로 쓴다.
+ */
 function requestUrl(path: string): string {
   if (!path.startsWith("/")) throw new Error("bff_path_must_be_absolute");
+  if (typeof window !== "undefined") return `${BFF_PROXY_PREFIX}${path}`;
   return `${BFF}${path}`;
 }
 
