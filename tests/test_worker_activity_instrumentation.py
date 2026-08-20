@@ -261,3 +261,25 @@ def test_activity_event_never_carries_payload_text(captured: _FakeLangfuseClient
         "attempts", "llm_calls", "retries", "prompt_tokens", "completion_tokens",
         "latency_ms", "eval_score", "error_count", "raw_payloads_sent", "trace_id",
     }
+
+
+def test_activity_event_omits_fields_it_cannot_measure(captured: _FakeLangfuseClient) -> None:
+    """모르는 값을 0/"" 으로 채우면 관측 사실로 읽힌다(2026-08-20).
+
+    이 경로에는 begin_worker_metric() 컨텍스트가 없어 llm_calls·model_name·토큰수를
+    셀 방법이 없다. `llm_calls: 0` 은 "모델을 안 불렀다"로 읽히므로 아예 빼야 한다.
+    """
+
+    observability.publish_worker_activity(
+        stage="qa", worker_id="hallucination-critic-worker", status="DEGRADED",
+        attempts=3, latency_ms=5311, error_count=1,
+    )
+    metadata = captured.events[-1]["metadata"]
+    assert "llm_calls" not in metadata
+    assert "model_name" not in metadata
+    assert "prompt_tokens" not in metadata
+    # 실제로 잰 값은 그대로 나가야 한다.
+    assert metadata["status"] == "DEGRADED"
+    assert metadata["attempts"] == 3
+    assert metadata["latency_ms"] == 5311
+    assert captured.events[-1]["level"] == "ERROR"

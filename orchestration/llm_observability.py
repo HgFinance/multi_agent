@@ -282,16 +282,21 @@ def publish_worker_activity(
       유휴 리포트에서 가장 위험한 종류의 오차다(정리 대상으로 오판된다).
     """
 
+    # ▶ 모르는 값을 0/"" 으로 채우지 않는다(2026-08-20 수정). 이 경로에는
+    #   begin_worker_metric() 컨텍스트가 없어 llm_calls·model_name·토큰수를 셀
+    #   방법이 자체가 없다 - 그런데 llm_calls: 0 을 보내면 "모델을 한 번도 안
+    #   불렀다"는 **관측 사실**로 읽힌다. 실측(2026-08-20): 모델 엔드포인트가 없는
+    #   컨테이너에서 DEGRADED 로 끝난 Worker 가 llm_calls 0 을 달고 나갔는데,
+    #   그 0 은 실패의 증거가 아니라 우리가 안 센 결과였다. quality.py
+    #   aggregate_quality() 의 None/0 구분과 같은 원칙 - 필드를 아예 뺀다.
     return publish_langfuse_metric(
         {
             "schema_version": "llm.performance.v1",
             "worker_id": worker_id,
             "role": role,
             "stage": stage,
-            "model_name": "",
             "status": status,
             "attempts": int(attempts),
-            "llm_calls": 0,
             "latency_ms": int(latency_ms),
             "error_count": int(error_count),
             "raw_payloads_sent": False,
