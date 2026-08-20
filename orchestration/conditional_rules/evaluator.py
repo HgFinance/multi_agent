@@ -17,7 +17,8 @@ from .contracts import (
     ExpressionType,
     Timeframe,
 )
-from .semantic import normalized_indicator_parameters
+from .indicators import DEFAULT_REGISTRY, IndicatorCalculationError
+from .semantic import indicator_source, normalized_indicator_parameters
 
 
 ZERO = Decimal("0")
@@ -69,7 +70,7 @@ class Candle(BaseModel):
 class EvaluationFrame:
     market: Mapping[str, Decimal]
     portfolio: Mapping[str, Decimal]
-    indicators: Mapping[str, Decimal]
+    indicators: Mapping[str, Decimal | bool]
     observed_at: datetime
 
 
@@ -81,7 +82,7 @@ class EvaluationContext:
 
 def indicator_key(node: ExpressionNode) -> str:
     payload = {
-        "name": node.name,
+        "name": DEFAULT_REGISTRY.canonical_name(node.name),
         "output": node.output or "VALUE",
         "timeframe": node.timeframe.value if node.timeframe else None,
         "parameters": {
@@ -89,6 +90,12 @@ def indicator_key(node: ExpressionNode) -> str:
             for key, value in sorted(normalized_indicator_parameters(node).items())
         },
     }
+    # Keep legacy LOCAL node keys stable. Explicit source/provider fields are
+    # included so two otherwise identical broker capabilities cannot collide.
+    if node.source is not None:
+        payload["source"] = node.source.value
+    if node.provider is not None:
+        payload["provider"] = node.provider
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(raw).hexdigest()
 
@@ -248,49 +255,22 @@ def _final_candles(candles: list[Candle]) -> list[Candle]:
 
 
 class IndicatorEngine:
-    def compute(self, node: ExpressionNode, candles: list[Candle]) -> Decimal:
+    def compute(self, node: ExpressionNode, candles: list[Candle]) -> Decimal | bool:
         if node.type is not ExpressionType.INDICATOR:
             raise EvaluationError("NOT_AN_INDICATOR", "indicator node required")
-        values = _final_candles(candles)
-        closes = [item.close for item in values]
+        definition = DEFAULT_REGISTRY.get(node.name)
+        if definition is None:
+            raise EvaluationError("UNSUPPORTED_INDICATOR", f"unsupported indicator {node.name}")
+        if indicator_source(node) != "LOCAL" or definition.calculator is None:
+            raise EvaluationError(
+                "INDICATOR_PROVIDER_UNAVAILABLE",
+                f"{definition.name} requires provider data",
+            )
         parameters = normalized_indicator_parameters(node)
-        name = node.name or ""
-        output = node.output or "VALUE"
-        if name == "SMA":
-            period = int(parameters["PERIOD"])
-            if len(closes) < period:
-                raise EvaluationError("INSUFFICIENT_HISTORY", f"SMA({period}) requires {period} bars")
-            return _mean(closes[-period:])
-        if name == "EMA":
-            return _ema_series(closes, int(parameters["PERIOD"]))[-1]
-        if name == "RSI":
-            return _rsi(closes, int(parameters["PERIOD"]))
-        if name == "MACD":
-            return _macd(
-                closes,
-                fast=int(parameters["FAST"]),
-                slow=int(parameters["SLOW"]),
-                signal=int(parameters["SIGNAL"]),
-            )[output]
-        if name == "BOLLINGER":
-            return _bollinger(
-                closes,
-                period=int(parameters["PERIOD"]),
-                standard_deviations=Decimal(str(parameters["STDDEV"])),
-            )[output]
-        if name == "VOLUME_AVERAGE":
-            period = int(parameters["PERIOD"])
-            if len(values) < period:
-                raise EvaluationError(
-                    "INSUFFICIENT_HISTORY",
-                    f"VOLUME_AVERAGE({period}) requires {period} bars",
-                )
-            return _mean([item.volume for item in values[-period:]])
-        if name == "ATR":
-            return _atr(values, int(parameters["PERIOD"]))
-        if name == "ADX":
-            return _adx(values, int(parameters["PERIOD"]))
-        raise EvaluationError("UNSUPPORTED_INDICATOR", f"unsupported indicator {name}")
+        try:
+            return definition.calculator(candles, parameters, node.output or "VALUE")
+        except IndicatorCalculationError as exc:
+            raise EvaluationError(exc.code, str(exc)) from exc
 
     def build_context(
         self,
@@ -299,16 +279,41 @@ class IndicatorEngine:
         bars: Mapping[Timeframe, list[Candle]],
         portfolio: Mapping[str, Decimal],
         current_market: Mapping[str, Decimal] | None = None,
+        external_indicators: Mapping[str, Decimal | bool] | None = None,
+        previous_external_indicators: Mapping[str, Decimal | bool] | None = None,
+        market_data_source_id: str | None = None,
     ) -> EvaluationContext:
         indicator_nodes = _collect_indicators(rule.condition)
         needs_previous = _contains_cross(rule.condition)
-        current_indicators: dict[str, Decimal] = {}
-        previous_indicators: dict[str, Decimal] = {}
+        current_indicators: dict[str, Decimal | bool] = {}
+        previous_indicators: dict[str, Decimal | bool] = {}
+        external_indicators = external_indicators or {}
+        previous_external_indicators = previous_external_indicators or {}
         for node in indicator_nodes:
             series = list(bars.get(node.timeframe, []))
-            current_indicators[indicator_key(node)] = self.compute(node, series)
+            definition = DEFAULT_REGISTRY.get(node.name)
+            if definition is None:
+                raise EvaluationError("UNSUPPORTED_INDICATOR", f"unsupported indicator {node.name}")
+            key = indicator_key(node)
+            if indicator_source(node) == "LOCAL":
+                current_indicators[key] = self.compute(node, series)
+            elif key in external_indicators:
+                current_indicators[key] = external_indicators[key]
+            else:
+                raise EvaluationError(
+                    "INDICATOR_PROVIDER_UNAVAILABLE",
+                    f"no normalized value supplied for {definition.name}",
+                )
             if needs_previous:
-                previous_indicators[indicator_key(node)] = self.compute(node, series[:-1])
+                if indicator_source(node) == "LOCAL":
+                    previous_indicators[key] = self.compute(node, series[:-1])
+                elif key in previous_external_indicators:
+                    previous_indicators[key] = previous_external_indicators[key]
+                else:
+                    raise EvaluationError(
+                        "INDICATOR_PROVIDER_UNAVAILABLE",
+                        f"no previous normalized value supplied for {definition.name}",
+                    )
 
         primary = rule.evaluation.primary_timeframe
         primary_bars = _final_candles(list(bars.get(primary, []))) if primary else []

@@ -1576,6 +1576,46 @@ class SupervisorWakeupTest(unittest.TestCase):
             1,
         )
 
+    def test_cold_terminal_event_uses_root_lookup_then_one_fresh_workflow(self) -> None:
+        class RootLookupClient(FakeClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.root_lookup_calls = 0
+                self.workflow_calls = 0
+
+            def workflow_root(self, task_id: str) -> str:
+                self.root_lookup_calls += 1
+                return "root"
+
+            def workflow(self, task_id: str):
+                self.workflow_calls += 1
+                return super().workflow(task_id)
+
+            def list_tasks(self):
+                return tuple(self.payloads)
+
+        client = RootLookupClient()
+        decision = CeoSupervisorService(client).handle_terminal_event(
+            {
+                "event_id": "cold-terminal-r",
+                "task_id": "r",
+                "kind": "completed",
+            }
+        )
+
+        self.assertEqual(decision.action, SupervisorAction.RUN_QA)
+        self.assertEqual(client.root_lookup_calls, 1)
+        self.assertEqual(
+            client.workflow_calls,
+            1,
+            "only the lock-protected workflow read may hydrate siblings",
+        )
+        self.assertEqual(
+            [item["assignee"] for item in client.created],
+            ["qa-department", "ceo-agent"],
+            "the optimization must not change synthesis fan-out",
+        )
+
     def test_restart_preserves_wakeup_guard(self) -> None:
         client = FakeClient()
         client.comments = [
@@ -1772,6 +1812,41 @@ class SupervisorWakeupTest(unittest.TestCase):
         self.assertEqual(payloads[risk]["parents"], [])
         self.assertEqual(payloads[qa]["parents"], [research, risk])
         self.assertEqual(payloads[synthesis]["parents"], [qa])
+
+    def test_scoped_workflow_root_lookup_does_not_scan_board_or_siblings(self) -> None:
+        import json
+        import subprocess
+
+        root = "t_aaaaaaaa"
+        primary = "t_bbbbbbbb"
+        calls: list[tuple[str, ...]] = []
+        payload = {
+            "id": primary,
+            "assignee": "research-department",
+            "status": "done",
+            "body": build_scoped_task_body(
+                "research", root, role="primary"
+            ),
+            "parents": [],
+        }
+
+        def runner(args, **kwargs):
+            command = tuple(args)
+            calls.append(command)
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                json.dumps({"task": payload}),
+                "",
+            )
+
+        discovered_root = HermesKanbanClient(runner=runner).workflow_root(
+            primary
+        )
+
+        self.assertEqual(discovered_root, root)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1:3], ("kanban", "show"))
 
     def test_primary_scope_task_cannot_depend_on_scope_root(self) -> None:
         root = "t_aaaaaaaa"
