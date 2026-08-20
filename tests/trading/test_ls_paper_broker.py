@@ -23,6 +23,7 @@ def _broker(handler) -> LSPaperBroker:
         base_url="https://ls.example.test",
         app_key="paper-key",
         app_secret_key="paper-secret",
+        mac_address="001122AABBCC",
     )
     return LSPaperBroker(
         config,
@@ -50,6 +51,19 @@ def test_config_rejects_live_environment(monkeypatch) -> None:
     assert caught.value.code == "LS_PAPER_ENV_REQUIRED"
 
 
+def test_config_requires_and_normalizes_paper_mac(monkeypatch) -> None:
+    monkeypatch.setenv("LS_ENV", "PAPER")
+    monkeypatch.setenv("LS_APP_KEY_PAPER", "paper-key")
+    monkeypatch.setenv("LS_APP_SECRET_KEY_PAPER", "paper-secret")
+    monkeypatch.delenv("LS_MAC_ADDRESS", raising=False)
+    with pytest.raises(LSPaperBrokerError) as caught:
+        LSPaperBrokerConfig.from_env()
+    assert caught.value.code == "LS_PAPER_MAC_REQUIRED"
+
+    monkeypatch.setenv("LS_MAC_ADDRESS", "00:11:22:aa:bb:cc")
+    assert LSPaperBrokerConfig.from_env().mac_address == "001122AABBCC"
+
+
 def test_place_market_buy_uses_paper_cash_order_contract() -> None:
     requests: list[httpx.Request] = []
 
@@ -58,6 +72,7 @@ def test_place_market_buy_uses_paper_cash_order_contract() -> None:
         if request.url.path == "/oauth2/token":
             return httpx.Response(200, json={"access_token": "token", "expires_in": 3600})
         assert request.headers["tr_cd"] == "CSPAT00601"
+        assert request.headers["mac_address"] == "001122AABBCC"
         body = __import__("json").loads(request.content)
         block = body["CSPAT00601InBlock1"]
         assert block == {
@@ -141,6 +156,66 @@ def test_order_status_reads_cumulative_fill() -> None:
     assert status.state == "FILLED"
     assert status.filled_quantity == 2
     assert status.fill_price == 269000
+
+
+def test_order_status_accepts_ls_account_query_success_code_and_caches_snapshot() -> None:
+    history_requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal history_requests
+        if request.url.path == "/oauth2/token":
+            return httpx.Response(200, json={"access_token": "token", "expires_in": 3600})
+        history_requests += 1
+        return httpx.Response(
+            200,
+            json={
+                "rsp_cd": "00136",
+                "CSPAQ13700OutBlock1": {},
+                "CSPAQ13700OutBlock2": {},
+                "CSPAQ13700OutBlock3": [
+                    {
+                        "OrdNo": 6439,
+                        "OrdQty": 2,
+                        "AllExecQty": 2,
+                        "ExecPrc": 269000,
+                        "OrdTrxPtnNm": "정상주문",
+                    },
+                    {
+                        "OrdNo": 6440,
+                        "OrdQty": 1,
+                        "AllExecQty": 0,
+                        "ExecPrc": 0,
+                        "OrdTrxPtnNm": "정상주문",
+                    },
+                ],
+            },
+        )
+
+    broker = _broker(handler)
+    first = broker.order_status("6439", order_date=date(2026, 8, 20))
+    second = broker.order_status("6440", order_date=date(2026, 8, 20))
+    assert first is not None and first.state == "FILLED"
+    assert second is not None and second.state == "ACKNOWLEDGED"
+    assert history_requests == 1
+
+
+def test_success_response_without_order_confirmation_is_ambiguous() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return httpx.Response(200, json={"access_token": "token", "expires_in": 3600})
+        return httpx.Response(200, json={"rsp_cd": "00000"})
+
+    broker = _broker(handler)
+    with pytest.raises(LSPaperBrokerError) as caught:
+        broker.place_order(
+            symbol="005930",
+            side="BUY",
+            order_type="MARKET",
+            quantity=Decimal(1),
+            limit_price=None,
+        )
+    assert caught.value.code == "LS_PAPER_ORDER_AMBIGUOUS"
+    assert caught.value.ambiguous is True
 
 
 def test_cancel_order_uses_original_order_number_and_leaves_quantity() -> None:

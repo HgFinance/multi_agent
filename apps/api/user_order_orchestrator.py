@@ -77,6 +77,14 @@ _NO_DIRECTIVE_TERMINAL_STATES = frozenset({"FAILED", "REJECTED"})
 _ROOT_EXECUTION_STATUSES = frozenset({"ready", "running", "done"})
 _TRADING_EXECUTION_STATUSES = frozenset({"running"})
 _TRADING_REPLAY_STATUSES = frozenset({"done"})
+_EXECUTION_STATE_REJECTION_CODES = frozenset(
+    {
+        "CEO_ROOT_STATUS_MISSING",
+        "CEO_ROOT_STATE_NOT_EXECUTABLE",
+        "TRADING_TASK_STATUS_MISSING",
+        "TRADING_TASK_STATE_NOT_EXECUTABLE",
+    }
+)
 _NO_DIRECTIVE_REPLAY_STATES = frozenset(
     {"CLARIFICATION_REQUIRED", "NOT_ORDER", "REJECTED", "FAILED", "UNKNOWN"}
 )
@@ -186,6 +194,37 @@ def _validate_task_execution_states(
     ):
         return
     _reject("TRADING_TASK_STATE_NOT_EXECUTABLE")
+
+
+def _record_execution_state_rejection(
+    repository: Any,
+    record: UserOrderRequestRecord,
+    exc: PaperOrderOrchestrationRejected,
+) -> None:
+    """Close an authenticated, never-submitted request instead of stranding it.
+
+    This helper is called only after the immutable Kanban/DB authority scope
+    matched. It must never overwrite an existing directive or a durable
+    terminal non-submission replay.
+    """
+
+    if (
+        exc.code not in _EXECUTION_STATE_REJECTION_CODES
+        or record.directive_id
+        or record.state in _NO_DIRECTIVE_REPLAY_STATES
+    ):
+        return
+    try:
+        repository.mark_outcome(
+            record.order_request_id,
+            state="FAILED",
+            error_code=exc.code,
+            error_message="Kanban execution state rejected before PAPER submission",
+        )
+    except (UserOrderRequestConflict, UserOrderRequestStateError):
+        # Preserve the original fail-closed rejection if a concurrent terminal
+        # transition won the durable state race.
+        return
 
 
 def _scope_from_task(task: Mapping[str, object]) -> UserPaperOrderScope:
@@ -377,12 +416,16 @@ def process_user_paper_order(
         root=root,
         trading=trading,
     )
-    _validate_task_execution_states(
-        root=root,
-        trading=trading,
-        record=record,
-        new_submission=False,
-    )
+    try:
+        _validate_task_execution_states(
+            root=root,
+            trading=trading,
+            record=record,
+            new_submission=False,
+        )
+    except PaperOrderOrchestrationRejected as exc:
+        _record_execution_state_rejection(repository, record, exc)
+        raise
 
     try:
         interpretation_dict = dict(interpretation)
@@ -468,12 +511,16 @@ def process_user_paper_order(
         root=current_root,
         trading=current_trading,
     )
-    _validate_task_execution_states(
-        root=current_root,
-        trading=current_trading,
-        record=record,
-        new_submission=True,
-    )
+    try:
+        _validate_task_execution_states(
+            root=current_root,
+            trading=current_trading,
+            record=record,
+            new_submission=True,
+        )
+    except PaperOrderOrchestrationRejected as exc:
+        _record_execution_state_rejection(repository, record, exc)
+        raise
     try:
         response = submit_verified_paper_directive(
             subject=record.user_id,

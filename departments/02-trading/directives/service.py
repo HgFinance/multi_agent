@@ -484,7 +484,7 @@ class UserDirectiveService:
                     leg,
                     error_code=exc.code,
                     error_message=(
-                        "LS PAPER submission outcome is ambiguous; automatic retry is forbidden"
+                        f"{exc}; automatic retry is forbidden"
                     ),
                 )
             return self.repository.terminate_broker_leg(

@@ -121,6 +121,11 @@ directive는 고정된 대상 snapshot과 자식별 결과를 보존하며 다�
   취소 transport 결과가 모호하면 `UNKNOWN`으로 남기고 자동 재전송하지 않는다.
   BFF server는 명시적으로 활성화된 read-only account snapshot만 만들 수 있지만
   credential을 Browser·Hermes·downstream payload로 노출하지 않는다.
+- 주문 scope root는 SQL binding 후 worker에 release하지 않고 `done`으로 닫으며,
+  Trading primary만 `running` 상태에서 trusted tool을 호출한다. LS 주문 adapter는
+  PAPER credential과 12자리 MAC header를 모두 요구하고, 초당 1회인 계좌 주문조회
+  snapshot을 짧게 재사용한다. broker 주문번호 없는 `UNKNOWN`은 hot polling 대상에서
+  제외하되 감사·수동 대사 기록으로 보존한다.
 - LS LIVE 연결은 계속 **시세·호가·체결 시장 관측 read-only**다. PAPER adapter는
   LIVE AppKey로 fallback하지 않으며, 이 결정에는 LIVE order route나 LIVE Broker
   adapter가 없다.

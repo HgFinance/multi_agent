@@ -293,12 +293,26 @@ Compose 내부 `8046/mcp`에서 정확히 한 개의 도구
 이 서비스가 원문 해시·Kanban scope·사용자/Fund/Book binding을 다시 검증한 뒤에만
 기존 PAPER directive admission을 호출한다. LIVE 전환 경로는 없다.
 
+이 전용 lane의 CEO root는 실행 프롬프트가 아니라 immutable scope container다.
+root는 unclaimed `running`, Trading 카드는 `blocked`로 만든 뒤 SQL binding을
+완료하고, root는 worker에 release하지 않은 채 `done`으로 닫은 다음 Trading
+카드만 release한다. 따라서 CEO dispatcher가 Trading tool call보다 먼저 root를
+`blocked`로 바꾸는 경합이 없어야 한다. trusted tool은 root `done`과 Trading
+`running` 조합만 신규 제출로 인정한다.
+
 `MCP_TRADING_ORDER_API_KEY`는 `.env` 또는 AWS secret injection으로 주입하는
 별도의 무작위 값이다. printable ASCII 32바이트 이상이어야 하며 placeholder,
 공백, 단일 문자 반복 값은 서버 기동 시 거부된다. 같은 값은 MCP 서버,
 `kanban-dispatcher`, `trading-hermes`에만 전달한다. `DATABASE_URL`과
 `TRADING_SERVICE_AUTH_SECRET`은 MCP 서버에만 남고 Hermes/dispatcher에는 전달하지
 않는다. 키를 만들 때는 예를 들어 `openssl rand -hex 32`를 사용한다.
+
+LS PAPER 주문 서비스에는 PAPER AppKey/Secret과 함께 `LS_MAC_ADDRESS`(구분자
+제거 후 12자리 hex)가 필수다. `CSPAQ13700`은 LS 계좌조회 정상 응답에서
+`rsp_cd=00136`을 반환할 수 있으므로 해당 TR에 한해서 정상으로 처리한다. 이 TR은
+초당 1회 제한이 있어 worker adapter가 짧은 account-wide snapshot cache를 공유하며,
+broker 주문번호가 없는 ambiguous `UNKNOWN` leg는 자동 재제출도 hot polling도 하지
+않고 수동 broker reconciliation 대상으로 남긴다.
 
 Profile 변경을 먼저 동기화한 뒤 Compose를 검증하고 기동한다.
 

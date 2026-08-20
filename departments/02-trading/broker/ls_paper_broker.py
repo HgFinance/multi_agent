@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -20,6 +22,13 @@ import httpx
 
 
 KST = ZoneInfo("Asia/Seoul")
+_DEFAULT_SUCCESS_CODES = frozenset({"0000", "00000"})
+# LS's own CSPAQ12300 example and the production CSPAQ13700 response use
+# 00136 with complete OutBlocks and the success message "조회가 완료되었습니다."
+# Keep this exception scoped to the observed account-query TR; accepting it
+# globally could turn an order rejection into a false acknowledgement.
+_TR_SUCCESS_CODES = {"CSPAQ13700": frozenset({"00136"})}
+_ORDER_HISTORY_CACHE_SECONDS = 1.1
 
 
 class LSPaperBrokerError(RuntimeError):
@@ -71,11 +80,20 @@ class LSPaperBrokerConfig:
             raise LSPaperBrokerError(
                 "LS_PAPER_CONFIG_INVALID", "LS PAPER order timeout is outside bounds"
             )
+        raw_mac = os.environ.get("LS_MAC_ADDRESS", "").strip()
+        mac_address = raw_mac.replace(":", "").replace("-", "").upper()
+        if len(mac_address) != 12 or any(
+            character not in "0123456789ABCDEF" for character in mac_address
+        ):
+            raise LSPaperBrokerError(
+                "LS_PAPER_MAC_REQUIRED",
+                "LS PAPER order adapter requires a 12-digit MAC address",
+            )
         return cls(
             base_url=base_url.rstrip("/"),
             app_key=app_key,
             app_secret_key=app_secret,
-            mac_address=os.environ.get("LS_MAC_ADDRESS", "").strip() or None,
+            mac_address=mac_address,
             scope=os.environ.get("LS_OAUTH_SCOPE", "oob").strip() or "oob",
             timeout_seconds=timeout,
         )
@@ -137,6 +155,10 @@ class LSPaperBroker:
         self._client = client or httpx.Client(timeout=config.timeout_seconds)
         self._token: str | None = None
         self._token_expires_at = datetime.min.replace(tzinfo=timezone.utc)
+        self._history_cache_lock = threading.Lock()
+        self._history_cache_date: date | None = None
+        self._history_cache_at = 0.0
+        self._history_cache_rows: tuple[dict[str, Any], ...] = ()
 
     @classmethod
     def from_env(cls) -> "LSPaperBroker":
@@ -219,7 +241,9 @@ class LSPaperBroker:
         except httpx.HTTPStatusError as exc:
             # A response status proves the broker answered.  4xx is a
             # deterministic rejection; 5xx can occur after submission.
-            ambiguous = placement and exc.response.status_code >= 500
+            ambiguous = placement and (
+                exc.response.status_code >= 500 or exc.response.status_code == 408
+            )
             code = "LS_PAPER_ORDER_AMBIGUOUS" if ambiguous else "LS_PAPER_ORDER_REJECTED"
             raise LSPaperBrokerError(
                 code,
@@ -247,7 +271,10 @@ class LSPaperBroker:
                 ambiguous=placement,
             )
         rsp_cd = str(body.get("rsp_cd") or "").strip()
-        if rsp_cd and rsp_cd not in {"00000", "0000"}:
+        success_codes = _DEFAULT_SUCCESS_CODES | _TR_SUCCESS_CODES.get(
+            tr_code, frozenset()
+        )
+        if rsp_cd and rsp_cd not in success_codes:
             # Do not include rsp_msg: broker messages may echo account data.
             raise LSPaperBrokerError(
                 "LS_PAPER_ORDER_REJECTED" if placement else "LS_PAPER_QUERY_REJECTED",
@@ -306,7 +333,14 @@ class LSPaperBroker:
             path="/stock/order",
             placement=True,
         )
-        result = _object(body.get("CSPAT00601OutBlock2"), "CSPAT00601OutBlock2")
+        raw_result = body.get("CSPAT00601OutBlock2")
+        if not isinstance(raw_result, dict):
+            raise LSPaperBrokerError(
+                "LS_PAPER_ORDER_AMBIGUOUS",
+                "LS PAPER success response has no order confirmation block",
+                ambiguous=True,
+            )
+        result = raw_result
         order_no = str(result.get("OrdNo") or "").strip()
         if not order_no or order_no == "0":
             raise LSPaperBrokerError(
@@ -327,29 +361,7 @@ class LSPaperBroker:
         order_date: date | None = None,
     ) -> LSPaperOrderStatus | None:
         target_date = order_date or datetime.now(KST).date()
-        body = self._post_tr(
-            "CSPAQ13700",
-            {
-                "CSPAQ13700InBlock1": {
-                    "OrdMktCode": "00",
-                    "BnsTpCode": "0",
-                    "IsuNo": "",
-                    "ExecYn": "0",
-                    "OrdDt": target_date.strftime("%Y%m%d"),
-                    "SrtOrdNo2": 0,
-                    "BkseqTpCode": "0",
-                    "OrdPtnCode": "00",
-                }
-            },
-            path="/stock/accno",
-        )
-        rows = body.get("CSPAQ13700OutBlock3")
-        if isinstance(rows, dict):
-            rows = [rows]
-        if not isinstance(rows, list):
-            raise LSPaperBrokerError(
-                "LS_PAPER_RESPONSE_INVALID", "LS order history rows are invalid"
-            )
+        rows = self._order_history_rows(target_date)
         wanted = str(broker_order_id).lstrip("0") or "0"
         for candidate in rows:
             if not isinstance(candidate, dict):
@@ -387,6 +399,53 @@ class LSPaperBroker:
                 order_date=target_date,
             )
         return None
+
+    def _order_history_rows(self, target_date: date) -> tuple[dict[str, Any], ...]:
+        """Read account order history at most once per LS rate-limit window.
+
+        CSPAQ13700 returns the account-wide order list and is limited to one
+        request per second.  Caching the one snapshot lets a worker reconcile
+        every active directive without starving all but the first order in a
+        batch or hammering the broker.
+        """
+
+        now = time.monotonic()
+        with self._history_cache_lock:
+            if (
+                self._history_cache_date == target_date
+                and now - self._history_cache_at < _ORDER_HISTORY_CACHE_SECONDS
+            ):
+                return self._history_cache_rows
+            body = self._post_tr(
+                "CSPAQ13700",
+                {
+                    "CSPAQ13700InBlock1": {
+                        "OrdMktCode": "00",
+                        "BnsTpCode": "0",
+                        "IsuNo": "",
+                        "ExecYn": "0",
+                        "OrdDt": target_date.strftime("%Y%m%d"),
+                        "SrtOrdNo2": 0,
+                        "BkseqTpCode": "0",
+                        "OrdPtnCode": "00",
+                    }
+                },
+                path="/stock/accno",
+            )
+            raw_rows = body.get("CSPAQ13700OutBlock3")
+            if isinstance(raw_rows, dict):
+                raw_rows = [raw_rows]
+            if not isinstance(raw_rows, list) or any(
+                not isinstance(row, dict) for row in raw_rows
+            ):
+                raise LSPaperBrokerError(
+                    "LS_PAPER_RESPONSE_INVALID", "LS order history rows are invalid"
+                )
+            rows = tuple(dict(row) for row in raw_rows)
+            self._history_cache_date = target_date
+            self._history_cache_at = time.monotonic()
+            self._history_cache_rows = rows
+            return rows
 
     def cancel_order(
         self,

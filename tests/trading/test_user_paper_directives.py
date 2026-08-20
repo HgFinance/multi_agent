@@ -319,6 +319,7 @@ def test_ls_paper_ambiguous_submission_stays_unknown_without_retry() -> None:
     assert record.state is DirectiveState.UNKNOWN
     assert record.legs[0].state is DirectiveLegState.UNKNOWN
     assert broker.placements == 1
+    assert h.repository.active_directives(limit=100) == []
 
     run_directive_worker_once(h.service, batch=100, now=NOW)
     assert broker.placements == 1

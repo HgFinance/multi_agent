@@ -754,7 +754,10 @@ def _route_user_paper_order(
             user_paper_order_scope=scope,
         ),
         idempotency_key=req.request_id,
-        initial_status="blocked",
+        # A running scope container cannot be claimed by the CEO dispatcher,
+        # and Hermes supports completing it without a worker run. Trading
+        # remains blocked until every SQL/Kanban binding is durable.
+        initial_status="running",
     )
     if not root or not root.get("task_id"):
         _mark_paper_order_failed(
@@ -843,15 +846,21 @@ def _route_user_paper_order(
             status_code=status, detail="paper_order_workflow_unavailable"
         ) from exc
 
-    # Both cards were created blocked to close the dispatch-before-DB-bind
-    # race. Release the root first (its selected Trading child now exists),
-    # then the interpreter. A failed release cannot turn into an order.
-    if not hermes_boundary.unblock_kanban_task(task_id=root_task_id):
+    # The root was created running (and therefore unclaimable) while the
+    # Trading card was created blocked. The root is only an immutable
+    # authority/scope container in this lane, so complete it in place instead
+    # of releasing it to a CEO worker.
+    # Releasing both cards allowed the CEO worker to block the root while the
+    # Trading interpreter was still preparing its trusted tool call.
+    if not hermes_boundary.complete_kanban_task(
+        task_id=root_task_id,
+        result="PAPER order scope bound; Trading primary owns interpretation and execution",
+    ):
         _mark_paper_order_failed(
             repository,
             record.order_request_id,
-            error_code="CEO_ROOT_RELEASE_FAILED",
-            error_message="CEO root remained blocked after durable binding",
+            error_code="CEO_ROOT_FINALIZE_FAILED",
+            error_message="CEO root scope could not be finalized after durable binding",
         )
         raise HTTPException(status_code=503, detail="paper_order_kanban_unavailable")
     if not hermes_boundary.unblock_kanban_task(task_id=trading_task_id):
@@ -863,7 +872,7 @@ def _route_user_paper_order(
         )
         raise HTTPException(status_code=503, detail="paper_order_kanban_unavailable")
 
-    released_root = {**root, "status": "ready"}
+    released_root = {**root, "status": "done"}
     released_trading = {**trading, "status": "ready"}
     logger.info(
         "paper-order-routed request=%s root=%s trading=%s mode=PAPER conditional=%s",

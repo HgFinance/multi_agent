@@ -977,7 +977,20 @@ class InMemoryDirectiveRepository:
         values = [
             record
             for record in self.state.directives.values()
-            if record.state in ACTIVE_DIRECTIVE_STATES
+            if (
+                record.state in ACTIVE_DIRECTIVE_STATES
+                and not (
+                    record.state is DirectiveState.UNKNOWN
+                    and record.action is DirectiveAction.PLACE_ORDER
+                    and any(leg.side is not None for leg in record.legs)
+                    and all(
+                        leg.state is DirectiveLegState.UNKNOWN
+                        and not leg.broker_order_id
+                        for leg in record.legs
+                        if leg.side is not None
+                    )
+                )
+            )
             or (
                 record.state is DirectiveState.PARTIAL
                 and record.action is DirectiveAction.PLACE_ORDER
@@ -2379,7 +2392,28 @@ class PostgresDirectiveRepository:
                 """
                 select directive_id
                   from execution.user_directives
-                 where state in ('RECEIVED','RUNNING','IN_PROGRESS','UNKNOWN')
+                 where (
+                       state in ('RECEIVED','RUNNING','IN_PROGRESS','UNKNOWN')
+                   and not (
+                           state='UNKNOWN'
+                       and action='PLACE_ORDER'
+                       and exists (
+                             select 1
+                               from execution.user_directive_legs unknown_order_leg
+                              where unknown_order_leg.directive_id=
+                                    execution.user_directives.directive_id
+                                and unknown_order_leg.side is not null
+                       )
+                       and not exists (
+                             select 1
+                               from execution.user_directive_legs identified_order_leg
+                              where identified_order_leg.directive_id=
+                                    execution.user_directives.directive_id
+                                and identified_order_leg.side is not null
+                                and identified_order_leg.broker_order_id is not null
+                       )
+                   )
+                 )
                     or (
                          state='PARTIAL'
                      and action='PLACE_ORDER'

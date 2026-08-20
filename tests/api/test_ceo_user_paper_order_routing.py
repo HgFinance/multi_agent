@@ -62,8 +62,8 @@ def _install_successful_route(
         index = create.call_count
         create(**kwargs)
         if index == 0:
-            events.append("create-root-blocked")
-            return {"task_id": "t_root1", "status": "blocked"}
+            events.append("create-root-running")
+            return {"task_id": "t_root1", "status": "running"}
         events.append("create-trading-blocked")
         return {"task_id": "t_trade1", "status": "blocked"}
 
@@ -75,10 +75,16 @@ def _install_successful_route(
 
     monkeypatch.setattr(ceo.hermes_boundary, "comment_root_scope", comment_scope)
 
+    def complete(*, task_id: str, result: str) -> bool:
+        assert result
+        events.append(f"complete-{task_id}")
+        return True
+
     def unblock(*, task_id: str) -> bool:
         events.append(f"release-{task_id}")
         return True
 
+    monkeypatch.setattr(ceo.hermes_boundary, "complete_kanban_task", complete)
     monkeypatch.setattr(ceo.hermes_boundary, "unblock_kanban_task", unblock)
     return create
 
@@ -105,17 +111,17 @@ def test_exact_sample_is_durably_bound_before_either_card_is_released(
     assert events == [
         "authorize",
         "admit",
-        "create-root-blocked",
+        "create-root-running",
         "comment-root-scope",
         "bind-root",
         "create-trading-blocked",
         "bind-trading",
-        "release-t_root1",
+        "complete-t_root1",
         "release-t_trade1",
     ]
     assert create.call_count == 2
     root_call, trading_call = create.call_args_list
-    assert root_call.kwargs["initial_status"] == "blocked"
+    assert root_call.kwargs["initial_status"] == "running"
     assert trading_call.kwargs["initial_status"] == "blocked"
 
     root_body = root_call.kwargs["body"]
@@ -141,6 +147,7 @@ def test_exact_sample_is_durably_bound_before_either_card_is_released(
     assert stored.mode == "PAPER"
     assert response["order_mode"] == "PAPER"
     assert response["binding"] is False
+    assert response["task"]["status"] == "done"
 
 
 def test_conditional_command_uses_only_the_precreated_trading_primary(
@@ -167,7 +174,7 @@ def test_conditional_command_uses_only_the_precreated_trading_primary(
     root_call, trading_call = create.call_args_list
     assert root_call.kwargs["assignee"] == "ceo-agent"
     assert trading_call.kwargs["assignee"] == "trading-department"
-    assert root_call.kwargs["initial_status"] == "blocked"
+    assert root_call.kwargs["initial_status"] == "running"
     assert trading_call.kwargs["initial_status"] == "blocked"
     trading_body = trading_call.kwargs["body"]
     assert "hgfinance.user-conditional-paper-rule.v1" in trading_body

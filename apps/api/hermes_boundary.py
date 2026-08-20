@@ -278,6 +278,66 @@ def unblock_kanban_task(*, task_id: str) -> bool:
     )
 
 
+def complete_kanban_task(*, task_id: str, result: str) -> bool:
+    """Close a non-executing scope card without exposing it to a worker.
+
+    Direct PAPER-order roots are durable workflow containers, not executable
+    CEO prompts.  They are created running but unclaimed while the SQL bindings
+    and blocked Trading primary are assembled, then completed in place.  This
+    avoids the otherwise unavoidable race where the CEO dispatcher claims the
+    root before Trading invokes the trusted order tool.
+
+    A CLI timeout has unknown commit status, so verify the supported read model
+    before reporting failure.  Replays are idempotent when the card is already
+    terminal.
+    """
+
+    task_id = str(task_id or "").strip()
+    result = str(result or "").strip()
+    if not task_id or not result:
+        return False
+    cli_environment = os.environ.copy()
+    cli_environment.setdefault(
+        "HERMES_KANBAN_HOME", str(Path.home() / ".hermes" / "shared-kanban")
+    )
+    command_timeout = float(os.getenv("KANBAN_CLI_TIMEOUT_SECONDS", "8"))
+    try:
+        proc = subprocess.run(
+            argv_for(
+                None,
+                [
+                    "kanban",
+                    "complete",
+                    task_id,
+                    "--result",
+                    result,
+                    "--summary",
+                    result,
+                ],
+            ),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=command_timeout,
+            cwd=ROOT,
+            env=cli_environment,
+            check=False,
+        )
+    except (FileNotFoundError, OSError):
+        return False
+    except subprocess.TimeoutExpired:
+        proc = None
+    if proc is not None and proc.returncode == 0:
+        return True
+    current = show_kanban_task(task_id, timeout=max(command_timeout, 2.0))
+    return bool(
+        current
+        and str(current.get("status") or "").casefold()
+        in {"done", "completed", "archived"}
+    )
+
+
 def show_kanban_task(
     task_id: str,
     *,

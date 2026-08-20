@@ -67,7 +67,7 @@ def _install_workflow(
 
     def create_task(**kwargs: Any) -> dict[str, str]:
         task_id = "t_root1" if not tasks else "t_trade1"
-        status = "ready" if task_id == "t_root1" else "running"
+        status = "running"
         tasks[task_id] = {
             **kwargs,
             "id": task_id,
@@ -75,11 +75,20 @@ def _install_workflow(
             "status": status,
             "parents": [],
         }
-        return {"task_id": task_id, "status": "blocked"}
+        return {"task_id": task_id, "status": status}
 
     monkeypatch.setattr(ceo.hermes_boundary, "create_kanban_task", create_task)
     monkeypatch.setattr(
         ceo.hermes_boundary, "comment_root_scope", lambda **_kwargs: True
+    )
+
+    def complete_root(*, task_id: str, result: str) -> bool:
+        assert result
+        tasks[task_id]["status"] = "done"
+        return True
+
+    monkeypatch.setattr(
+        ceo.hermes_boundary, "complete_kanban_task", complete_root
     )
     monkeypatch.setattr(
         ceo.hermes_boundary, "unblock_kanban_task", lambda **_kwargs: True

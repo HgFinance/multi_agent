@@ -304,6 +304,10 @@ def test_non_executable_root_state_is_rejected_before_submit(
 
     assert raised.value.code == expected_code
     submit.assert_not_called()
+    failed = context.repository.get(context.record.order_request_id)
+    assert failed is not None
+    assert failed.state == "FAILED"
+    assert failed.error_code == expected_code
 
 
 @pytest.mark.parametrize(
@@ -340,6 +344,10 @@ def test_non_executable_trading_state_cannot_make_a_first_submission(
 
     assert raised.value.code == expected_code
     submit.assert_not_called()
+    failed = context.repository.get(context.record.order_request_id)
+    assert failed is not None
+    assert failed.state == "FAILED"
+    assert failed.error_code == expected_code
 
 
 def test_trading_state_is_rechecked_immediately_before_first_submission(
@@ -369,6 +377,10 @@ def test_trading_state_is_rechecked_immediately_before_first_submission(
     assert raised.value.code == "TRADING_TASK_STATE_NOT_EXECUTABLE"
     assert trading_reads == 2
     submit.assert_not_called()
+    failed = context.repository.get(context.record.order_request_id)
+    assert failed is not None
+    assert failed.state == "FAILED"
+    assert failed.error_code == "TRADING_TASK_STATE_NOT_EXECUTABLE"
 
 
 @pytest.mark.parametrize(
