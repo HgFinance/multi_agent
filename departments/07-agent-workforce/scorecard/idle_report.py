@@ -42,6 +42,7 @@ from typing import Any, Sequence
 try:
     from observability import (
         INVESTMENT_DEPARTMENT_STAGE,
+        HeadProfilesUnavailable,
         IdleStatus,
         WorkerIdleReport,
         WorkerRegistryUnavailable,
@@ -53,6 +54,7 @@ except ModuleNotFoundError:  # 저장소 루트에서 직접 실행
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from observability import (  # type: ignore[no-redef]
         INVESTMENT_DEPARTMENT_STAGE,
+        HeadProfilesUnavailable,
         IdleStatus,
         WorkerIdleReport,
         WorkerRegistryUnavailable,
@@ -200,13 +202,32 @@ def main(argv: Sequence[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+    departments = (tuple(args.departments) if args.departments
+                   else tuple(INVESTMENT_DEPARTMENT_STAGE))
+    head_warning = ""
     try:
-        payload, reports = build_report(
-            lookback_hours=args.lookback_hours,
-            idle_threshold_hours=args.idle_threshold_hours,
-            departments=tuple(args.departments) if args.departments else tuple(INVESTMENT_DEPARTMENT_STAGE),
-            include_heads=args.include_heads,
-        )
+        try:
+            payload, reports = build_report(
+                lookback_hours=args.lookback_hours,
+                idle_threshold_hours=args.idle_threshold_hours,
+                departments=departments,
+                include_heads=args.include_heads,
+            )
+        except HeadProfilesUnavailable as exc:
+            # ▶ 부서장 신원만 못 읽은 것으로 Worker 리포트까지 죽이지 않는다
+            #   (2026-08-20 실측). 부서장 신원은 매니페스트가 담지 않는 유일한
+            #   값이고, HR 컨테이너는 매니페스트만 본다 - 즉 이 실패는 배포 결함이
+            #   아니라 **현재 경계에서 정상적인 상태**다.
+            #
+            #   그렇다고 조용히 Worker 만 보여주면 "부서장은 전부 정상"으로
+            #   오독되므로 왜 빠졌는지를 남기고, --strict 는 실패로 취급한다.
+            head_warning = str(exc)
+            payload, reports = build_report(
+                lookback_hours=args.lookback_hours,
+                idle_threshold_hours=args.idle_threshold_hours,
+                departments=departments,
+                include_heads=False,
+            )
     except WorkerRegistryUnavailable as exc:
         # 빈 리포트(=유휴 없음)로 위장하지 않는다. app.py 가 503 으로 알리는 것과 같은 이유.
         print(f"worker registry 를 읽지 못했다: {exc}", file=sys.stderr)
@@ -215,10 +236,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"잘못된 인자: {exc}", file=sys.stderr)
         return 2
 
+    if head_warning:
+        payload["head_profiles_unavailable"] = head_warning
+        print(
+            f"  ⚠ 부서장을 빼고 Worker 만 표시한다: {head_warning}. "
+            "부서장 신원(agent.head_persona)은 Worker Registry 매니페스트가 담지 않는다 - "
+            "이 컨테이너에서 읽을 경로가 아직 없다.",
+            file=sys.stderr,
+        )
     print(json.dumps(payload, ensure_ascii=False, indent=2) if args.json
           else render_text(payload, reports))
 
-    if args.strict and payload["summary"][IdleStatus.UNAVAILABLE.value]:
+    if args.strict and (payload["summary"][IdleStatus.UNAVAILABLE.value] or head_warning):
+        # 부서장을 못 읽은 것도 "관측이 불완전하다"에 해당한다 - 크론이 알아야 한다.
         return 2
     return 0
 

@@ -100,6 +100,7 @@ from hiring_request import (
 from hiring_request import transition as hiring_transition
 from observability import (
     INVESTMENT_DEPARTMENT_STAGE,
+    HeadProfilesUnavailable,
     WorkerRegistryUnavailable,
     check_idle_agents,
 )
@@ -1145,15 +1146,31 @@ def list_idle_agents(
 
     if idle_threshold_hours <= 0:
         raise HTTPException(status_code=422, detail="idle_threshold_hours must be positive")
+    head_profiles_unavailable: str | None = None
     try:
-        reports = check_idle_agents(
-            departments=tuple(INVESTMENT_DEPARTMENT_STAGE),
-            lookback_hours=lookback_hours,
-            idle_threshold_hours=idle_threshold_hours,
-            # 2026-08-20: 부서장 포함은 opt-in 이다. 기본 응답 인원이 말없이 8 -> 14 로
-            # 늘면 이 리포트를 인용한 과거 문장들의 뜻이 바뀐다.
-            include_heads=include_heads,
-        )
+        try:
+            reports = check_idle_agents(
+                departments=tuple(INVESTMENT_DEPARTMENT_STAGE),
+                lookback_hours=lookback_hours,
+                idle_threshold_hours=idle_threshold_hours,
+                # 2026-08-20: 부서장 포함은 opt-in 이다. 기본 응답 인원이 말없이 8 -> 14 로
+                # 늘면 이 리포트를 인용한 과거 문장들의 뜻이 바뀐다.
+                include_heads=include_heads,
+            )
+        except HeadProfilesUnavailable as exc:
+            # 부서장 신원(agent.head_persona)은 Worker Registry 매니페스트가 담지
+            # 않는 유일한 값이고 이 컨테이너는 매니페스트만 본다 - 즉 현재 경계에서
+            # **정상적인 상태**다. 그 하나 때문에 Worker 판정까지 503 으로 막지
+            # 않는다. 대신 부서장이 빠졌다는 사실을 응답에 실어 보낸다 - 조용히
+            # 빼면 부서장이 "전부 정상"으로 읽힌다(SOUL.md 해석 규칙: 관측하지
+            # 못한 것을 관측 결과로 바꾸지 않는다).
+            head_profiles_unavailable = str(exc)
+            reports = check_idle_agents(
+                departments=tuple(INVESTMENT_DEPARTMENT_STAGE),
+                lookback_hours=lookback_hours,
+                idle_threshold_hours=idle_threshold_hours,
+                include_heads=False,
+            )
     except WorkerRegistryUnavailable as exc:
         # 배포 이미지에 다른 본부 Worker registry 가 없다. 빈 목록(=유휴 없음)으로
         # 위장하지 않고 503 으로 알린다 - "관측했더니 깨끗하다"와 "관측을 못 했다"는
@@ -1162,7 +1179,10 @@ def list_idle_agents(
             status_code=503,
             detail={"error": "worker_registry_unavailable", "message": str(exc)},
         ) from exc
-    return {"idle_agents": [r.as_dict() for r in reports]}
+    response: dict = {"idle_agents": [r.as_dict() for r in reports]}
+    if head_profiles_unavailable:
+        response["head_profiles_unavailable"] = head_profiles_unavailable
+    return response
 
 
 # --- 3.6 Workforce Plan (HR-01 Capacity Report/Staffing Scenario 저장소) --------------

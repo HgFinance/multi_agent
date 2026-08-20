@@ -302,3 +302,59 @@ def test_json_output_matches_api_element_shape() -> None:
     assert set(element) == {
         "department", "worker_id", "trigger", "status", "last_seen_at", "idle_hours"
     }
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-20: 부서장 신원을 못 읽는 것은 현재 경계에서 **정상 상태**다
+#
+# 부서장 신원(agent.head_persona)은 Worker Registry 매니페스트가 담지 않는 유일한
+# 값이고, HR 컨테이너는 매니페스트만 본다(4c0385d 가 정한 경계). 그러니 부서장을
+# 못 읽었다고 Worker 판정까지 실패하면 안 된다 - 다만 조용히 빼도 안 된다.
+# ---------------------------------------------------------------------------
+
+
+def test_head_failure_is_a_distinct_exception_type() -> None:
+    """문자열 매칭으로 구분하지 않는다 - 타입으로 갈린다."""
+
+    from observability import HeadProfilesUnavailable, WorkerRegistryUnavailable
+
+    assert issubclass(HeadProfilesUnavailable, WorkerRegistryUnavailable)
+
+
+def test_cli_reports_workers_and_says_why_heads_are_missing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    idle_report = _report_module()
+    from observability import HeadProfilesUnavailable
+
+    original = idle_report.build_report
+
+    def _fail_heads(*args, **kwargs):
+        if kwargs.get("include_heads"):
+            raise HeadProfilesUnavailable("head_profile_not_found:qa")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(idle_report, "build_report", _fail_heads)
+
+    assert idle_report.main(["--department", "qa", "--include-heads"]) == 0
+    out = capsys.readouterr()
+    # Worker 는 그대로 나온다.
+    assert "hallucination-critic-worker" in out.out
+    # 왜 부서장이 빠졌는지가 남는다 - 조용히 빼면 "부서장은 전부 정상"으로 읽힌다.
+    assert "부서장을 빼고" in out.err
+    assert "head_profile_not_found:qa" in out.err
+    # 관측이 불완전한 상태이므로 --strict 는 실패다.
+    assert idle_report.main(["--department", "qa", "--include-heads", "--strict"]) == 2
+
+
+def test_worker_registry_failure_still_fails_hard(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Worker 목록 자체를 못 읽는 것은 여전히 치명적이어야 한다 - 빈 리포트 금지."""
+
+    idle_report = _report_module()
+    from observability import WorkerRegistryUnavailable
+
+    def _fail_all(*args, **kwargs):
+        raise WorkerRegistryUnavailable("worker_registry_file_missing")
+
+    monkeypatch.setattr(idle_report, "build_report", _fail_all)
+    assert idle_report.main(["--department", "qa", "--include-heads"]) == 3
