@@ -23,6 +23,8 @@ import re
 import shutil
 import subprocess
 import sys
+import time
+from functools import lru_cache
 from pathlib import Path
 from uuid import uuid4
 
@@ -88,6 +90,21 @@ PROFILE_CONTAINERS = {
 }
 # 카드 생성처럼 부서를 특정하지 않는 kanban 명령을 돌릴 컨테이너.
 KANBAN_CLI_CONTAINER = os.getenv("KANBAN_CLI_CONTAINER", "hedgefund-qa-hermes")
+
+# ▶ 부서장 계측용 stage 표 (2026-08-20). 컨테이너 표와 같은 이유로 **규칙이 아니라
+#   표**다 - 프로필 이름(risk-management)과 event stage(risk)는 이름 공간이 다르고,
+#   하나라도 어긋나면 그 부서만 조용히 계측에서 빠진다.
+#   값의 정본은 orchestration/workflows/portfolio_recommendation.py 의 DEPARTMENTS.
+PROFILE_STAGES = {
+    "ceo-agent": "ceo",
+    "research-department": "research",
+    "trading-department": "trading",
+    "risk-management": "risk",
+    "quant-backtest-department": "quant",
+    "accounting-portfolio-department": "accounting",
+    "qa-department": "qa",
+    "hr-department": "hr",
+}
 
 
 def local_binary() -> str:
@@ -527,6 +544,9 @@ def ask(
     #   CEO 라우팅은 90~180초가 걸렸고 30초에서 통째로 끊겼다(그러고도 카드는 이미
     #   만들어져 부서들이 실행됐다). 그래서 그런 호출은 자기 timeout 을 명시한다.
     timeout = timeout_of(config) if timeout is None else timeout
+    # 부서장 턴의 소요시간·성공 여부를 여기서 잰다(2026-08-20). 모든 부서 라우터가
+    # 이 함수 하나를 지나므로 일반 질문 경로가 전부 계측된다.
+    _started = time.perf_counter()
     tail = ["chat", "-Q"]
     if resume:
         tail += ["--resume", resume]
@@ -547,14 +567,24 @@ def ask(
         )
     except FileNotFoundError as exc:
         # Hermes Runtime은 PyPI 패키지가 아니라 별도 설치다(CLAUDE.md).
+        # 런타임 부재는 부서장이 못 돈 것이지 안 돈 것이 아니다 - DEGRADED 로 남긴다.
+        _publish_head_turn(department=department, config=config, started=_started,
+                           status="DEGRADED")
         raise HTTPException(
             503, f"Hermes CLI 없음: hermes -p {department}"
         ) from exc
     except subprocess.TimeoutExpired as exc:
+        _publish_head_turn(department=department, config=config, started=_started,
+                           status="TIMEOUT")
         raise HTTPException(504, f"{timeout}s 초과") from exc
 
     if proc.returncode != 0:
+        _publish_head_turn(department=department, config=config, started=_started,
+                           status="DEGRADED")
         raise HTTPException(502, (proc.stderr or "").strip()[:500] or "agent failed")
+
+    _publish_head_turn(department=department, config=config, started=_started,
+                       status="COMPLETED")
 
     return {
         "department": department,
@@ -622,6 +652,50 @@ def timeout_of(config: str) -> int:
     """저장소 Profile의 agent.timeout_seconds를 그대로 쓴다. 부서마다 다르다."""
     cfg = yaml.safe_load((ROOT / config).read_text(encoding="utf-8"))
     return int(cfg["agent"]["timeout_seconds"])
+
+
+@lru_cache(maxsize=16)
+def head_persona_of(config: str) -> str:
+    """부서장 신원. Profile 의 `agent.head_persona` 가 정본이다(2026-08-20).
+
+    여기서 프로필 이름을 대신 쓰지 않는다 - HR 이 이 값을 같은 파일에서 읽어
+    대조하기 때문에(scorecard/observability.py) 양쪽이 같은 출처를 봐야 한다.
+    읽지 못하면 계측을 포기한다 - 관측 때문에 질의가 실패하면 안 된다.
+    """
+
+    try:
+        cfg = yaml.safe_load((ROOT / config).read_text(encoding="utf-8"))
+        return str(cfg["agent"]["head_persona"]).strip()
+    except Exception:  # noqa: BLE001 - 계측 부재가 질의를 죽이지 않는다
+        return ""
+
+
+def _publish_head_turn(*, department: str, config: str, started: float, status: str) -> None:
+    """부서장 턴 1건을 HR 관측으로 내보낸다. 실패는 삼킨다.
+
+    일반 질문 트래픽은 여기서 끝난다 - Worker 를 부를지는 부서장의 판단이라,
+    이 지점을 재지 않으면 Worker 실행 0 회가 "일이 없었다"인지 "위임하지 않았다"인지
+    구분되지 않는다(Department Scorecard 의 arrivals).
+    """
+
+    stage = PROFILE_STAGES.get(department)
+    if not stage:
+        return
+    persona = head_persona_of(config)
+    if not persona:
+        return
+    try:
+        from orchestration.llm_observability import publish_head_activity
+
+        publish_head_activity(
+            stage=stage,
+            head_persona=persona,
+            status=status,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            error_count=0 if status == "COMPLETED" else 1,
+        )
+    except Exception:  # noqa: BLE001 - 계측은 질의 경로를 바꾸지 못한다
+        return
 
 
 if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)

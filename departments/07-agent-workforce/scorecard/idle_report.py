@@ -153,6 +153,7 @@ def build_report(
     departments: tuple[str, ...] = tuple(INVESTMENT_DEPARTMENT_STAGE),
     now: datetime | None = None,
     reader: Any = None,
+    include_heads: bool = False,
 ) -> tuple[dict[str, Any], list[WorkerIdleReport]]:
     now = now or datetime.now(timezone.utc)
     reports = check_idle_agents(
@@ -161,6 +162,7 @@ def build_report(
         lookback_hours=lookback_hours,
         idle_threshold_hours=idle_threshold_hours,
         now=now,
+        include_heads=include_heads,
     )
     payload = as_payload(
         reports,
@@ -179,6 +181,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         choices=sorted(INVESTMENT_DEPARTMENT_STAGE),
                         help="반복 지정 가능. 생략하면 6개 본부 전부")
     parser.add_argument("--json", action="store_true", help="workforce.idle_report.v1 JSON 출력")
+    parser.add_argument("--include-heads", action="store_true",
+                        help="부서장(Hermes Profile head_persona)도 함께 본다. 기본은 Worker 만 - "
+                             "관측 대상 인원이 조용히 늘면 '8명 중 3명 유휴' 같은 문장의 뜻이 바뀐다")
     parser.add_argument("--strict", action="store_true",
                         help="UNAVAILABLE 이 하나라도 있으면 exit 2 (관측 경로 감시용)")
     args = parser.parse_args(argv)
@@ -193,6 +198,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             lookback_hours=args.lookback_hours,
             idle_threshold_hours=args.idle_threshold_hours,
             departments=tuple(args.departments) if args.departments else tuple(INVESTMENT_DEPARTMENT_STAGE),
+            include_heads=args.include_heads,
         )
     except WorkerRegistryUnavailable as exc:
         # 빈 리포트(=유휴 없음)로 위장하지 않는다. app.py 가 503 으로 알리는 것과 같은 이유.

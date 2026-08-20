@@ -66,7 +66,11 @@ from orchestration.contracts.mas import (
     build_worker_context_result,
     stable_hash,
 )
-from orchestration.llm_observability import publish_worker_activity, record_llm_call
+from orchestration.llm_observability import (
+    publish_worker_activity,
+    publish_worker_opportunity,
+    record_llm_call,
+)
 
 
 def _load_skill_package() -> None:
@@ -971,6 +975,16 @@ async def run_employee_workers_async(
             trace_id=str(trace_id or ""),
         )
         return report
+
+    # 미발화도 관측 사실이다 - 점유율의 분모(2026-08-20, 공용 런타임과 같은 계약).
+    for spec in WORKER_SPECS:
+        if spec.worker_id in not_executed:
+            publish_worker_opportunity(
+                stage="risk",
+                worker_id=spec.worker_id,
+                role=spec.role,
+                trace_id=str(trace_id or ""),
+            )
 
     reports = list(await asyncio.gather(*(run_one(spec) for spec in eligible)))
     failed = [item["worker_id"] for item in reports if item["status"] != "COMPLETED"]

@@ -127,6 +127,41 @@ def _profile_candidates(department: str, repo_root: Path) -> tuple[Path, ...]:
     )
 
 
+def load_head_profile_spec(repo_root: Path, department: str) -> WorkerProfileSpec | None:
+    """부서장(Hermes Profile) 1명. Profile 의 `agent.head_persona` 가 정본이다.
+
+    2026-08-20 신규. 부서장은 `workers:` 에 없다 - 직원이 아니라 본부장이라서다.
+    그래서 편제표(LLM Worker 10명)와도 별개이고, 기본 리포트에는 포함하지 않는다
+    (include_heads=True 로 명시할 때만 나온다). 관측 대상 인원이 조용히 늘면
+    "8명 중 3명 유휴" 같은 문장이 말없이 다른 뜻이 된다.
+
+    write 측은 apps/api/hermes_boundary.py 가 **같은 파일의 같은 키**를 읽어
+    이벤트 이름을 만든다 - 두 쪽이 다른 출처를 보면 조용히 어긋난다.
+    """
+
+    try:
+        import yaml
+    except ModuleNotFoundError as exc:  # pragma: no cover - 이미지 빌드 결함
+        raise WorkerRegistryUnavailable(f"pyyaml_not_installed:{exc}") from exc
+
+    for path in _profile_candidates(department, repo_root):
+        if not path.is_file():
+            continue
+        try:
+            config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception as exc:  # noqa: BLE001
+            raise WorkerRegistryUnavailable(
+                f"profile_unreadable:{department}:{type(exc).__name__}"
+            ) from exc
+        persona = ((config.get("agent") or {}).get("head_persona") or "").strip()
+        if not persona:
+            return None
+        # 부서장은 "요청이 올 때" 돈다 - conditional Worker 의 trigger 와 같은 자리에
+        # 그 사실을 적어 리포트가 그대로 읽히게 한다.
+        return WorkerProfileSpec(str(persona), "on_request")
+    raise WorkerRegistryUnavailable(f"profile_not_found:{department}")
+
+
 def load_worker_profile_specs(repo_root: Path, department: str) -> tuple[WorkerProfileSpec, ...]:
     """부서 Profile 의 `workers:` 를 읽어 (worker_id, trigger) 목록을 만든다.
 
@@ -280,6 +315,7 @@ def check_idle_agents(
     idle_threshold_hours: float = 4.0,
     now: datetime | None = None,
     repo_root: Path = ROOT,
+    include_heads: bool = False,
 ) -> list[WorkerIdleReport]:
     """6개 투자본부(기본값)의 등록된 Worker 전원에 대해 유휴 여부를 판정한다.
 
@@ -309,6 +345,12 @@ def check_idle_agents(
         # WorkerRegistryUnavailable 가 app.py 에서 503 이 된다. 빈 목록으로 돌려주면
         # "유휴 워커 없음" 으로 오독되기 때문이다.
         specs = load_worker_profile_specs(repo_root, department)
+        if include_heads:
+            # 부서장은 편제표 밖이라 기본값에서 빠져 있다 - 명시적으로 요청할 때만
+            # 합친다(load_head_profile_spec docstring 참고).
+            head = load_head_profile_spec(repo_root, department)
+            if head is not None:
+                specs = (head, *specs)
         for spec in specs:
             if reader is None:
                 reports.append(

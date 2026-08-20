@@ -24,6 +24,7 @@ langfuse_enabled() 와 클라이언트를 가짜로 바꿔 create_event 호출�
 from __future__ import annotations
 
 import ast
+import contextlib
 import sys
 from pathlib import Path
 from typing import Any
@@ -32,7 +33,29 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "departments"))
+
+
+@contextlib.contextmanager
+def department_path(*relative: str):
+    """부서 디렉터리를 **이 블록 동안만** sys.path 에 올린다.
+
+    ▶ 모듈 최상단에서 sys.path 에 심으면 안 된다(2026-08-20 실측). 부서들은
+      `from repository import ...` 처럼 **평범한 이름**으로 형제 모듈을 부르는데,
+      경로가 스위트 전체에 남으면 다른 테스트의 같은 이름이 엉뚱한 부서 파일로
+      해석된다 - tests/api/test_qa_domain_mandate_api.py 가 QA 의 repository 대신
+      회계의 repository 를 집어 ImportError 로 죽었다. 계측 테스트가 남의 테스트를
+      깨는 형태라 원인을 찾기도 어렵다.
+    """
+
+    added = [str(ROOT / part) for part in relative]
+    sys.path[:0] = added
+    try:
+        yield
+    finally:
+        for entry in added:
+            if entry in sys.path:
+                sys.path.remove(entry)
+
 
 import orchestration.llm_observability as observability  # noqa: E402
 from departments.employee_worker_runtime import (  # noqa: E402
@@ -129,8 +152,8 @@ def test_publish_failure_does_not_break_worker_execution(monkeypatch: pytest.Mon
 
 
 def test_risk_executor_publishes_activity(captured: _FakeLangfuseClient) -> None:
-    sys.path.insert(0, str(ROOT / "departments" / "03-risk"))
-    from risk_employee_workers import run_employee_workers as run_risk
+    with department_path("departments/03-risk"):
+        from risk_employee_workers import run_employee_workers as run_risk
 
     report = run_risk(
         {
@@ -146,8 +169,8 @@ def test_risk_executor_publishes_activity(captured: _FakeLangfuseClient) -> None
 
 
 def test_qa_executor_publishes_activity(captured: _FakeLangfuseClient) -> None:
-    sys.path.insert(0, str(ROOT / "departments" / "06-ai-qa-audit"))
-    from qa_employee_workers import run_employee_workers as run_qa
+    with department_path("departments/06-ai-qa-audit"):
+        from qa_employee_workers import run_employee_workers as run_qa
 
     run_qa(
         {
@@ -168,8 +191,8 @@ def test_deterministic_runners_are_not_reported_as_llm_workers(captured: _FakeLa
     이벤트로 나가면 HR 편제(LLM Worker 10명)와 리포트 인원이 어긋난다.
     """
 
-    sys.path.insert(0, str(ROOT / "departments" / "03-risk"))
-    from risk_employee_workers import run_employee_workers as run_risk
+    with department_path("departments/03-risk"):
+        from risk_employee_workers import run_employee_workers as run_risk
 
     run_risk({"trading_state": "ENABLED", "assessment": {"verdict": "approve"}}, llm=_llm)
     assert not any("runner" in name for name in _names(captured))
@@ -283,3 +306,121 @@ def test_activity_event_omits_fields_it_cannot_measure(captured: _FakeLangfuseCl
     assert metadata["attempts"] == 3
     assert metadata["latency_ms"] == 5311
     assert captured.events[-1]["level"] == "ERROR"
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-20: 점유율 분모(not_executed) + 부서장 턴
+# ---------------------------------------------------------------------------
+
+
+def test_not_executed_workers_publish_opportunity_not_execution(
+    captured: _FakeLangfuseClient,
+) -> None:
+    """미발화는 **다른 이름 공간**으로 나가야 한다.
+
+    실행 이벤트와 같은 이름으로 보내면 HR 유휴 판정이 "돌았다"로 읽어, 한 번도
+    실행된 적 없는 Worker 가 ACTIVE 로 뜬다 - 관측을 고치려다 관측을 망가뜨린다.
+    """
+
+    conditional = WorkerSpec("gated-worker", "Gated", ("demo.tool",), "when_signal_exists")
+    run_worker_registry(
+        (conditional,),
+        {"unrelated": 1},  # trigger 미충족
+        tools={"gated-worker": lambda value: {"tool": "demo", "value": value}},
+        llm=_llm,
+        stage="research",
+    )
+    names = _names(captured)
+    assert "llm.performance.opportunity:research:gated-worker" in names
+    assert "llm.performance.metric:research:gated-worker" not in names
+
+
+def test_opportunity_and_execution_together_make_a_fire_rate(
+    captured: _FakeLangfuseClient,
+) -> None:
+    """같은 Worker 의 실행 1건 + 미발화 1건이 각각 세어져야 발화율이 나온다."""
+
+    spec = WorkerSpec("gated-worker", "Gated", ("demo.tool",), "when_signal_exists")
+    tools = {"gated-worker": lambda value: {"tool": "demo", "value": value}}
+    run_worker_registry((spec,), {"when_signal_exists": True}, tools=tools, llm=_llm, stage="qa")
+    run_worker_registry((spec,), {"unrelated": 1}, tools=tools, llm=_llm, stage="qa")
+
+    executions = [e for e in captured.events if e["name"].startswith("llm.performance.metric:")]
+    opportunities = [e for e in captured.events if e["name"].startswith("llm.performance.opportunity:")]
+    assert len(executions) == 1
+    assert len(opportunities) == 1
+    assert opportunities[0]["metadata"]["reason"] == "trigger_not_fired"
+    assert opportunities[0]["input"] is None and opportunities[0]["output"] is None
+
+
+def test_head_turn_publishes_with_profile_persona(captured: _FakeLangfuseClient) -> None:
+    """부서장 턴이 Profile 의 head_persona 이름으로 기록돼야 한다.
+
+    write(hermes_boundary) 와 read(scorecard/observability) 가 **같은 파일의 같은
+    키**를 읽는지 고정한다 - 다른 출처를 보면 조용히 어긋나 부서장이 영원히
+    UNOBSERVED 로 남는다.
+    """
+
+    with department_path("apps/api", "departments/07-agent-workforce/scorecard"):
+        import hermes_boundary
+        from observability import load_head_profile_spec
+
+    config = "departments/01-research/hermes/config.yaml"
+    hermes_boundary._publish_head_turn(
+        department="research-department", config=config, started=0.0, status="COMPLETED"
+    )
+    persona = hermes_boundary.head_persona_of(config)
+    assert persona, "Profile 에서 head_persona 를 못 읽으면 계측이 통째로 빠진다"
+    assert f"llm.performance.metric:research:{persona}" in _names(captured)
+
+    read_side = load_head_profile_spec(ROOT, "research")
+    assert read_side is not None and read_side.worker_id == persona
+
+
+def test_unknown_profile_is_not_published_under_a_guessed_stage(
+    captured: _FakeLangfuseClient,
+) -> None:
+    """표에 없는 프로필은 이름으로 stage 를 지어내지 않고 계측을 포기한다."""
+
+    with department_path("apps/api"):
+        import hermes_boundary
+
+    hermes_boundary._publish_head_turn(
+        department="not-a-real-department",
+        config="departments/01-research/hermes/config.yaml",
+        started=0.0,
+        status="COMPLETED",
+    )
+    assert captured.events == []
+
+
+def test_profile_stage_table_covers_every_known_profile() -> None:
+    """컨테이너 표에 있는 프로필은 stage 표에도 있어야 한다 - 하나만 빠져도 그 부서만 침묵한다."""
+
+    with department_path("apps/api"):
+        import hermes_boundary
+
+    assert set(hermes_boundary.PROFILE_CONTAINERS) == set(hermes_boundary.PROFILE_STAGES)
+
+
+def test_heads_are_excluded_from_the_default_report() -> None:
+    """기본 응답 인원이 말없이 늘면 과거 문장의 뜻이 바뀐다 - opt-in 이어야 한다."""
+
+    from datetime import datetime, timezone
+
+    with department_path("departments/07-agent-workforce/scorecard"):
+        from observability import check_idle_agents
+
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+
+    class _None:
+        def latest_event_timestamp(self, *, event_name: str, since: Any) -> None:
+            return None
+
+    default = check_idle_agents(reader=_None(), departments=("research",), now=now)
+    with_heads = check_idle_agents(
+        reader=_None(), departments=("research",), now=now, include_heads=True
+    )
+    assert len(with_heads) == len(default) + 1
+    assert "research-supervisor" in {r.worker_id for r in with_heads}
+    assert "research-supervisor" not in {r.worker_id for r in default}
