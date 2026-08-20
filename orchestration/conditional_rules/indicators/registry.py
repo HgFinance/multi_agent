@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from datetime import datetime
 from decimal import Decimal
+from inspect import Parameter, signature
 from typing import Any
 
 from ..contracts import ValueUnit
-from .base import IndicatorDefinition, IndicatorProvider, IndicatorProviderError
+from .base import (
+    IndicatorDefinition,
+    IndicatorProvider,
+    IndicatorProviderError,
+    IndicatorValue,
+)
 from .local import calculate_local_indicator
+from .providers import LSBrokerIndicatorProvider, LocalIndicatorProvider
 
 
 _ALL_TIMEFRAMES = frozenset({"1M", "5M", "15M", "1H", "1D"})
@@ -27,6 +35,28 @@ class IndicatorRegistry:
         name = definition.name.strip().upper()
         if not name or name != definition.name:
             raise ValueError("indicator names must be canonical uppercase tokens")
+        if definition.source == "LOCAL":
+            if definition.calculator is None:
+                raise ValueError(f"local indicator requires a calculator: {name}")
+            try:
+                parameters = tuple(signature(definition.calculator).parameters.values())
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"calculator signature is unavailable: {name}") from exc
+            positional = tuple(
+                item
+                for item in parameters
+                if item.kind
+                in (Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD)
+            )
+            if len(positional) != 4 or any(
+                item.kind is Parameter.VAR_POSITIONAL for item in parameters
+            ):
+                raise ValueError(
+                    f"local calculator must have signature "
+                    f"(name, candles, parameters, output): {name}"
+                )
+        elif definition.calculator is not None:
+            raise ValueError(f"provider-backed indicator cannot have a calculator: {name}")
         if name in self._definitions:
             raise ValueError(f"indicator already registered: {name}")
         self._definitions[name] = definition
@@ -42,6 +72,20 @@ class IndicatorRegistry:
             raise ValueError("provider name is required")
         if name in self._providers:
             raise ValueError(f"provider already registered: {name}")
+        self._providers[name] = provider
+
+    def bind_provider(self, provider: IndicatorProvider) -> None:
+        """Bind an adapter at application startup without changing rule ASTs.
+
+        This is the explicit LS connection point.  The default registry keeps
+        an unconfigured provider, and an application may replace that seam
+        with ``LSBrokerIndicatorProvider(resolver=...)`` once the real market
+        data adapter is ready.
+        """
+
+        name = str(provider.name).strip().upper()
+        if not name:
+            raise ValueError("provider name is required")
         self._providers[name] = provider
 
     def canonical_name(self, name: str | None) -> str:
@@ -65,18 +109,158 @@ class IndicatorRegistry:
     def provider_for(
         self, definition: IndicatorDefinition, requested: str | None = None
     ) -> IndicatorProvider | None:
-        provider_name = (requested or definition.provider or "").strip().upper()
+        provider_name = (
+            requested or definition.provider or definition.source or ""
+        ).strip().upper()
         return self._providers.get(provider_name) if provider_name else None
+
+    @staticmethod
+    def _context_value(context: Any, key: str) -> Any:
+        if isinstance(context, dict):
+            return context.get(key)
+        return getattr(context, key, None)
+
+    @staticmethod
+    def _parameter_signature(parameters: Any) -> dict[str, str]:
+        if not isinstance(parameters, dict) and not hasattr(parameters, "items"):
+            return {}
+        return {
+            str(key).upper(): str(value)
+            for key, value in sorted(parameters.items(), key=lambda item: str(item[0]))
+        }
+
+    def normalize_value(
+        self,
+        definition: IndicatorDefinition,
+        indicator_spec: Any,
+        value: Any,
+        evaluation_context: Any,
+    ) -> IndicatorValue:
+        if not isinstance(value, IndicatorValue):
+            raise IndicatorProviderError(
+                "INDICATOR_PROVIDER_INVALID_PAYLOAD",
+                f"{definition.name} provider must return IndicatorValue",
+                retryable=False,
+            )
+        if value.value is None:
+            raise IndicatorProviderError(
+                "INDICATOR_PROVIDER_PARTIAL_DATA",
+                f"{definition.name} provider returned no value",
+                retryable=False,
+            )
+        if isinstance(value.value, bool):
+            pass
+        elif isinstance(value.value, Decimal) and value.value.is_finite():
+            pass
+        else:
+            raise IndicatorProviderError(
+                "INDICATOR_PROVIDER_INVALID_PAYLOAD",
+                f"{definition.name} provider returned a non-normalized scalar",
+                retryable=False,
+            )
+        if not isinstance(value.observed_at, datetime) or value.observed_at.tzinfo is None:
+            raise IndicatorProviderError(
+                "INDICATOR_PROVIDER_INVALID_PAYLOAD",
+                f"{definition.name} provider timestamp is not timezone-aware",
+                retryable=False,
+            )
+        if value.data_timestamp is not None and (
+            not isinstance(value.data_timestamp, datetime)
+            or value.data_timestamp.tzinfo is None
+        ):
+            raise IndicatorProviderError(
+                "INDICATOR_PROVIDER_INVALID_PAYLOAD",
+                f"{definition.name} provider data timestamp is invalid",
+                retryable=False,
+            )
+        if not isinstance(value.parameters, Mapping):
+            raise IndicatorProviderError(
+                "INDICATOR_PROVIDER_INVALID_PAYLOAD",
+                f"{definition.name} provider parameters are invalid",
+                retryable=False,
+            )
+
+        expected_output = str(getattr(indicator_spec, "output", None) or "VALUE").upper()
+        expected_timeframe = getattr(
+            getattr(indicator_spec, "timeframe", None), "value", None
+        ) or getattr(indicator_spec, "timeframe", None)
+        from ..semantic import normalized_indicator_parameters
+
+        expected_parameters = normalized_indicator_parameters(indicator_spec)
+        expected_provider = (definition.provider or definition.source).upper()
+        expected_market_data_source = self._context_value(
+            evaluation_context, "market_data_source_id"
+        )
+        actual_provider = str(value.provider or "").strip().upper()
+        actual_source = str(value.source or "").strip().upper()
+        mismatches = (
+            actual_source != definition.source,
+            str(value.indicator or "").strip().upper() != definition.name,
+            actual_provider != expected_provider,
+            value.output not in (None, "")
+            and str(value.output).upper() != expected_output,
+            value.timeframe not in (None, "")
+            and str(value.timeframe).upper() != str(expected_timeframe).upper(),
+            bool(value.parameters)
+            and self._parameter_signature(value.parameters)
+            != self._parameter_signature(expected_parameters),
+            value.calculation_version not in (None, "")
+            and value.calculation_version != definition.calculation_version,
+            value.market_data_source_id not in (None, "")
+            and expected_market_data_source not in (None, "")
+            and value.market_data_source_id != expected_market_data_source,
+        )
+        if any(mismatches):
+            raise IndicatorProviderError(
+                "INDICATOR_VALUE_PROVENANCE_MISMATCH",
+                f"{definition.name} provider value provenance does not match the registry",
+                retryable=False,
+            )
+        if value.observed_at is None:
+            raise IndicatorProviderError(
+                "INDICATOR_PROVIDER_PARTIAL_DATA",
+                f"{definition.name} provider value has no observed timestamp",
+                retryable=False,
+            )
+        return value.with_identity(
+            indicator=definition.name,
+            source=definition.source,
+            provider=expected_provider,
+            output=expected_output,
+            timeframe=expected_timeframe,
+            parameters=expected_parameters,
+            calculation_version=definition.calculation_version,
+            market_data_source_id=expected_market_data_source,
+        )
 
     async def resolve(
         self, instrument: Any, indicator_spec: Any, evaluation_context: Any
-    ) -> Any:
+    ) -> IndicatorValue:
         definition = self.get(getattr(indicator_spec, "name", None))
         if definition is None:
             raise IndicatorProviderError(
-                "UNSUPPORTED_INDICATOR", f"unsupported indicator {getattr(indicator_spec, 'name', None)!r}", retryable=False
+                "UNSUPPORTED_INDICATOR",
+                f"unsupported indicator {getattr(indicator_spec, 'name', None)!r}",
+                retryable=False,
             )
-        provider = self.provider_for(definition, getattr(indicator_spec, "provider", None))
+        requested_source = getattr(indicator_spec, "source", None)
+        requested_source = getattr(requested_source, "value", requested_source)
+        if requested_source is not None and str(requested_source).upper() != definition.source:
+            raise IndicatorProviderError(
+                "INDICATOR_SOURCE_MISMATCH",
+                f"{definition.name} belongs to source {definition.source}",
+                retryable=False,
+            )
+        requested_provider = getattr(indicator_spec, "provider", None)
+        if requested_provider is not None:
+            expected_provider = (definition.provider or definition.source).upper()
+            if str(requested_provider).upper() != expected_provider:
+                raise IndicatorProviderError(
+                    "INDICATOR_PROVIDER_MISMATCH",
+                    f"{definition.name} belongs to provider {expected_provider}",
+                    retryable=False,
+                )
+        provider = self.provider_for(definition, requested_provider)
         if provider is None:
             raise IndicatorProviderError(
                 "INDICATOR_PROVIDER_UNAVAILABLE",
@@ -88,7 +272,23 @@ class IndicatorRegistry:
                 f"provider does not support {definition.name}",
                 retryable=False,
             )
-        return await provider.resolve(instrument, indicator_spec, evaluation_context)
+        try:
+            value = await provider.resolve(instrument, indicator_spec, evaluation_context)
+        except IndicatorProviderError:
+            raise
+        except TimeoutError as exc:
+            raise IndicatorProviderError(
+                "INDICATOR_PROVIDER_TIMEOUT",
+                f"provider timed out while resolving {definition.name}",
+            ) from exc
+        except Exception as exc:
+            raise IndicatorProviderError(
+                "INDICATOR_PROVIDER_RESOLUTION_FAILED",
+                f"provider failed while resolving {definition.name}",
+            ) from exc
+        return self.normalize_value(
+            definition, indicator_spec, value, evaluation_context
+        )
 
 
 def _local(
@@ -137,6 +337,7 @@ def _broker(
         string_parameters=string_parameters,
         required_parameters=required_parameters,
         supported_timeframes=_ALL_TIMEFRAMES,
+        warmup_bars=0,
         update_mode="REALTIME" if realtime else "POLLING",
         cache_policy="OBSERVED_TIMESTAMP",
         historical_supported=historical,
@@ -177,7 +378,12 @@ def build_default_registry() -> IndicatorRegistry:
         _broker("MARKET_WARNING_STATUS", category="BROKER_SIGNAL", unit=ValueUnit.BOOL, realtime=False),
         _broker("BROKER_SEARCH_MATCH", aliases=("LS_SIGNAL", "LS_ITEM_SEARCH_MATCH"), category="BROKER_SIGNAL", unit=ValueUnit.BOOL, required_parameters=frozenset({"SEARCH_ID"}), string_parameters=frozenset({"SEARCH_ID"})),
     ]
-    return IndicatorRegistry(definitions)
+    registry = IndicatorRegistry(definitions)
+    # These are capability seams.  The LS provider has no resolver until the
+    # broker market-data adapter is explicitly wired, so it fails closed.
+    registry.register_provider(LocalIndicatorProvider())
+    registry.register_provider(LSBrokerIndicatorProvider())
+    return registry
 
 
 DEFAULT_REGISTRY = build_default_registry()

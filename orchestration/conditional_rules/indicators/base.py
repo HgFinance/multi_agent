@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, Awaitable, Callable, Mapping, Protocol
 
@@ -12,9 +13,10 @@ from ..contracts import ValueUnit
 IndicatorScalar = Decimal | bool
 IndicatorParameters = Mapping[str, Decimal | int | str]
 IndicatorCalculator = Callable[
-    [list[Any], IndicatorParameters, str], IndicatorScalar
+    [str, list[Any], IndicatorParameters, str], IndicatorScalar
 ]
 WarmupCalculator = Callable[[IndicatorParameters], int]
+IndicatorResolver = Callable[[Any, Any, Any], Awaitable["IndicatorValue"]]
 
 
 class IndicatorCalculationError(RuntimeError):
@@ -42,9 +44,43 @@ class IndicatorValue:
     indicator: str
     source: str
     provider: str | None
-    observed_at: Any
-    data_timestamp: Any | None = None
+    observed_at: datetime
+    data_timestamp: datetime | None = None
     calculation_version: str | None = None
+    output: str = "VALUE"
+    timeframe: str | None = None
+    parameters: IndicatorParameters = field(default_factory=dict)
+    market_data_source_id: str | None = None
+
+    def with_identity(
+        self,
+        *,
+        indicator: str,
+        source: str,
+        provider: str | None,
+        output: str,
+        timeframe: str | None,
+        parameters: IndicatorParameters,
+        calculation_version: str,
+        market_data_source_id: str | None = None,
+    ) -> "IndicatorValue":
+        """Fill omitted identity fields after the provider contract is checked."""
+
+        return replace(
+            self,
+            indicator=indicator,
+            source=source,
+            provider=provider,
+            output=output,
+            timeframe=timeframe,
+            parameters=dict(parameters),
+            calculation_version=calculation_version,
+            market_data_source_id=(
+                self.market_data_source_id
+                if self.market_data_source_id is not None
+                else market_data_source_id
+            ),
+        )
 
 
 class IndicatorProvider(Protocol):
@@ -90,6 +126,10 @@ class IndicatorDefinition:
     calculator: IndicatorCalculator | None = field(default=None, repr=False)
 
     def required_history(self, parameters: IndicatorParameters) -> int:
+        # Provider-backed values arrive through their provider contract.  They
+        # must never cause the worker to manufacture an OHLCV warm-up request.
+        if self.source != "LOCAL":
+            return 0
         value = (
             self.warmup_bars(parameters)
             if callable(self.warmup_bars)

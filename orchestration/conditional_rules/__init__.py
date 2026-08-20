@@ -8,6 +8,7 @@ from .contracts import (
     ExecutionMode,
     ExpressionNode,
     ExpressionType,
+    IndicatorSource,
     MarketClosedPolicy,
     RuleAction,
     RuleState,
@@ -32,6 +33,16 @@ from .execution import (
 )
 from .identities import evaluation_id, execution_idempotency_key, trigger_id
 from .semantic import RuleSemanticError, validate_rule_spec
+from .indicators import (
+    DEFAULT_REGISTRY,
+    IndicatorCalculator,
+    IndicatorProviderError,
+    IndicatorResolver,
+    IndicatorValue,
+    IndicatorRegistry,
+    get_indicator_definition,
+    list_supported_indicators,
+)
 from .worker_store import (
     ActiveRule,
     PostgresRuleWorkerStore,
@@ -54,8 +65,17 @@ __all__ = [
     "ExecutionMode",
     "ExpressionNode",
     "ExpressionType",
+    "IndicatorSource",
     "GuardDecision",
     "IndicatorEngine",
+    "IndicatorCalculator",
+    "IndicatorRegistry",
+    "IndicatorProviderError",
+    "IndicatorResolver",
+    "IndicatorValue",
+    "DEFAULT_REGISTRY",
+    "get_indicator_definition",
+    "list_supported_indicators",
     "MarketClosedPolicy",
     "PostgresRuleWorkerStore",
     "RuleAction",

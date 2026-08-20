@@ -36,6 +36,7 @@ from orchestration.conditional_rules import (
     ExpressionType,
     GuardDecision,
     IndicatorEngine,
+    IndicatorValue,
     PostgresRuleWorkerStore,
     RuleState,
     SubmitReadyExecution,
@@ -45,6 +46,7 @@ from orchestration.conditional_rules import (
     guard_rule_execution,
 )
 from orchestration.conditional_rules.semantic import normalized_indicator_parameters
+from orchestration.conditional_rules.indicators import DEFAULT_REGISTRY
 
 
 LOG = logging.getLogger("conditional-rule-worker")
@@ -185,26 +187,30 @@ def _required_history(rule: ActiveRule) -> dict[Timeframe, int]:
     )
     result: dict[Timeframe, int] = {}
     primary = rule.spec.evaluation.primary_timeframe
-    if primary is not None:
+    needs_bars = any(
+        (
+            node.type is ExpressionType.MARKET
+            and node.field != "LAST_PRICE"
+        )
+        or (
+            node.type is ExpressionType.INDICATOR
+            and (DEFAULT_REGISTRY.get(node.name) is not None)
+            and DEFAULT_REGISTRY.get(node.name).source == "LOCAL"
+        )
+        for node in _walk(rule.spec.condition)
+    )
+    if primary is not None and needs_bars:
         result[primary] = 2 if requires_cross else 1
     for node in _walk(rule.spec.condition):
         if node.type is not ExpressionType.INDICATOR or node.timeframe is None:
             continue
+        definition = DEFAULT_REGISTRY.get(node.name)
+        if definition is None:
+            raise RuntimeDataError("UNSUPPORTED_INDICATOR", f"unsupported indicator {node.name}", retryable=False)
+        if definition.source != "LOCAL":
+            continue
         params = normalized_indicator_parameters(node)
-        if node.name in {"SMA", "EMA", "BOLLINGER", "VOLUME_AVERAGE"}:
-            required = int(params["PERIOD"])
-        elif node.name in {"RSI", "ATR"}:
-            required = int(params["PERIOD"]) + 1
-        elif node.name == "ADX":
-            required = int(params["PERIOD"]) * 2 + 1
-        elif node.name == "MACD":
-            required = int(params["SLOW"]) + int(params["SIGNAL"]) - 1
-        else:
-            raise RuntimeDataError(
-                "UNSUPPORTED_INDICATOR",
-                f"unsupported indicator {node.name}",
-                retryable=False,
-            )
+        required = definition.required_history(params)
         if requires_cross:
             required += 1
         result[node.timeframe] = max(result.get(node.timeframe, 0), required)
@@ -240,6 +246,101 @@ def _decimal(value: Any, *, field: str, minimum: Decimal | None = None) -> Decim
         raise RuntimeDataError("MARKET_VALUE_INVALID", f"{field} is outside bounds")
     return parsed
 
+
+def _normalized_indicator_values(
+    raw: Any, *, field: str
+) -> dict[str, IndicatorValue]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise RuntimeDataError(
+            "INDICATOR_VALUES_INVALID",
+            f"{field} must be an object of normalized IndicatorValue envelopes",
+            retryable=False,
+        )
+    result: dict[str, IndicatorValue] = {}
+    for key, envelope in raw.items():
+        if not isinstance(key, str) or not key.strip():
+            raise RuntimeDataError(
+                "INDICATOR_VALUES_INVALID",
+                f"{field} contains an invalid key",
+                retryable=False,
+            )
+        if not isinstance(envelope, dict):
+            raise RuntimeDataError(
+                "INDICATOR_VALUES_INVALID",
+                f"{field}.{key} must be a normalized IndicatorValue envelope",
+                retryable=False,
+            )
+        raw_value = envelope.get("value")
+        if raw_value is None:
+            raise RuntimeDataError(
+                "INDICATOR_PROVIDER_PARTIAL_DATA",
+                f"{field}.{key} has no value",
+                retryable=False,
+            )
+        scalar = raw_value if isinstance(raw_value, bool) else _decimal(
+            raw_value, field=f"{field}.{key}.value"
+        )
+        indicator = envelope.get("indicator")
+        source = envelope.get("source")
+        provider = envelope.get("provider")
+        observed_at = envelope.get("observed_at")
+        if not all(isinstance(item, str) and item.strip() for item in (indicator, source, provider)):
+            raise RuntimeDataError(
+                "INDICATOR_VALUES_INVALID",
+                f"{field}.{key} is missing indicator/source/provider provenance",
+                retryable=False,
+            )
+        if observed_at is None:
+            raise RuntimeDataError(
+                "INDICATOR_PROVIDER_PARTIAL_DATA",
+                f"{field}.{key} is missing observed_at",
+                retryable=False,
+            )
+        data_timestamp = envelope.get("data_timestamp")
+        try:
+            parsed_observed_at = _parse_time(observed_at, field=f"{field}.{key}.observed_at")
+            parsed_data_timestamp = (
+                _parse_time(data_timestamp, field=f"{field}.{key}.data_timestamp")
+                if data_timestamp is not None
+                else None
+            )
+        except RuntimeDataError as exc:
+            raise RuntimeDataError(
+                "INDICATOR_VALUES_INVALID",
+                str(exc),
+                retryable=False,
+            ) from exc
+        parameters = envelope.get("parameters") or {}
+        if not isinstance(parameters, dict):
+            raise RuntimeDataError(
+                "INDICATOR_VALUES_INVALID",
+                f"{field}.{key}.parameters must be an object",
+                retryable=False,
+            )
+        result[key] = IndicatorValue(
+            value=scalar,
+            indicator=indicator.strip().upper(),
+            source=source.strip().upper(),
+            provider=provider.strip().upper(),
+            observed_at=parsed_observed_at,
+            data_timestamp=parsed_data_timestamp,
+            calculation_version=envelope.get("calculation_version"),
+            output=str(envelope.get("output") or "VALUE").strip().upper(),
+            timeframe=(
+                str(envelope["timeframe"]).strip().upper()
+                if envelope.get("timeframe") is not None
+                else None
+            ),
+            parameters=parameters,
+            market_data_source_id=(
+                str(envelope["market_data_source_id"])
+                if envelope.get("market_data_source_id") is not None
+                else None
+            ),
+        )
+    return result
 
 def _canonical_hash(value: Mapping[str, Any]) -> str:
     raw = json.dumps(
@@ -509,6 +610,10 @@ class HttpRuntimeClient:
             bars=bars,
             portfolio={key: value for key, value in values.items() if key in requested_fields},
             current_market={"LAST_PRICE": current_price},
+            external_indicators=_normalized_indicator_values(context.get("indicator_values"), field="indicator_values"),
+            previous_external_indicators=_normalized_indicator_values(context.get("previous_indicator_values"), field="previous_indicator_values"),
+            market_data_source_id=str(context["market_data_source_id"]) if context.get("market_data_source_id") is not None else None,
+            calculation_profile=str(context.get("calculation_profile", "DEFAULT")),
         )
         watermark = (
             evaluation_context.current.observed_at
@@ -524,6 +629,8 @@ class HttpRuntimeClient:
             "rule_id": str(rule.rule_id),
             "rule_version": rule.rule_version,
             "evaluation_key": key,
+            "market_data_source_id": evaluation_context.market_data_source_id,
+            "calculation_profile": evaluation_context.calculation_profile,
             "market": {
                 key: str(value)
                 for key, value in sorted(evaluation_context.current.market.items())
