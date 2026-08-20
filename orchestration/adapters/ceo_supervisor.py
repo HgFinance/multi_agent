@@ -2877,6 +2877,49 @@ class CeoSupervisorService:
                 if child_id:
                     self._task_root_cache[child_id] = root_task_id
 
+    def _publish_head_card_activity(
+        self, *, task_id: str, kind: str, event: Mapping[str, Any]
+    ) -> None:
+        """카드를 끝낸 부서장 1턴을 HR 관측으로 내보낸다. 실패는 삼킨다.
+
+        신원(head_persona)과 stage 는 orchestration/llm_observability 의 공용
+        해석기를 쓴다 - BFF 의 직접 호출 경로와 **같은 이름**이어야 같은 부서장의
+        활동으로 합쳐진다.
+        """
+
+        try:
+            from orchestration.llm_observability import (
+                head_persona_for_profile,
+                publish_head_activity,
+                stage_for_profile,
+            )
+
+            profile = str(event.get("assignee") or "").strip()
+            if not profile:
+                return
+            stage = stage_for_profile(profile)
+            persona = head_persona_for_profile(profile)
+            if not stage or not persona:
+                # 모르는 프로필은 stage 를 지어내지 않는다 - 틀린 stage 로 나간
+                # 이벤트는 조회되지 않으면서 있는 것처럼 보인다.
+                return
+            if kind in {"done", "completed", "archived"}:
+                status, errors = "COMPLETED", 0
+            elif kind in {"blocked"}:
+                status, errors = "BLOCKED", 0
+            else:
+                status, errors = "DEGRADED", 1
+            publish_head_activity(
+                stage=stage,
+                head_persona=persona,
+                status=status,
+                error_count=errors,
+                trace_id=task_id,
+                source="kanban_card",
+            )
+        except Exception:  # noqa: BLE001 - 계측이 워크플로를 멈추지 못한다
+            logger.debug("head-card-activity-publish-skipped task=%s", task_id)
+
     def handle_terminal_event(self, event: Mapping[str, Any]) -> SupervisorDecision | None:
         handler_started_ms = time.time_ns() // 1_000_000
         event_consumed_ms = int(
@@ -2973,6 +3016,22 @@ class CeoSupervisorService:
             self._seen_events.add(event_key)
             if transition_key:
                 self._seen_terminal_transitions.add(transition_key)
+
+        # ── HR 관측: 이 카드를 끝낸 부서장 1턴 (2026-08-20) ──────────────────
+        #
+        # Discord/웹에서 들어온 사용자 질의는 BFF 가 부서장을 직접 부르지 않는다 -
+        # 카드를 만들고 Hermes 게이트웨이가 자기 컨테이너 안에서 실행한다. 그래서
+        # apps/api/hermes_boundary.ask() 에 붙인 계측이 이 경로를 못 본다. 이
+        # 지점이 우리 코드가 "그 부서장이 실제로 일을 끝냈다"를 아는 유일한 자리다.
+        #
+        # 여기 두는 이유: 바로 위 중복 억제(_seen_events/_seen_terminal_transitions)를
+        # 통과한 뒤라 **전이 1건당 정확히 한 번** 실행된다. 아래 워크플로 재구성은
+        # 예외·재시도가 있어 같은 카드가 여러 번 지날 수 있다.
+        #
+        # 지속시간은 보내지 않는다 - 이 이벤트가 아는 것은 "끝났다"는 사실뿐이고,
+        # 카드 생성 시각은 여기서 신뢰할 수 있게 얻지 못한다(안 잰 값을 0 으로
+        # 채우지 않는다).
+        self._publish_head_card_activity(task_id=task_id, kind=kind, event=event)
 
         # Root fast-path is relevant only to CEO-authored terminal tasks.
         # Department primary events must not pay an extra show() call merely to

@@ -10,6 +10,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 
@@ -96,6 +97,11 @@ def _metric_metadata(metric: dict[str, Any], *, trace_id: str | None = None) -> 
     allowed = {
         "schema_version", "worker_id", "role", "stage", "model_name", "status",
         "attempts", "llm_calls", "retries", "prompt_tokens", "completion_tokens",
+        # source: 같은 Agent 의 활동이라도 **어느 경로로 관측됐는지**가 다르다
+        # (2026-08-20). bff_ask=BFF 가 직접 CLI 를 띄운 턴, kanban_card=CEO
+        # 워크플로 카드가 끝난 것. 원인 추적이 안 되면 "왜 이 이벤트가 났지"에
+        # 답할 수 없다. 값은 우리가 정한 고정 문자열이라 payload 유출이 아니다.
+        "source",
         "latency_ms", "eval_score", "error_count", "raw_payloads_sent",
     }
     result = {key: metric[key] for key in allowed if key in metric}
@@ -322,6 +328,68 @@ def publish_worker_activity(
     )
 
 
+# 부서 Hermes Profile 디렉터리. 이름 규칙으로 짓지 않고 표로 적는다 - 하나라도
+# 어긋나면 그 부서장만 조용히 계측에서 빠진다(hermes_boundary PROFILE_CONTAINERS 와
+# 같은 이유). 키는 canonical profile 이름이다(orchestration/canonical_profiles.py).
+PROFILE_DIRECTORY: dict[str, str] = {
+    "ceo-agent": "00-ceo-office",
+    "research-department": "01-research",
+    "research-liaison": "01-research",
+    "trading-department": "02-trading",
+    "risk-management": "03-risk",
+    "quant-backtest-department": "04-quant-backtest",
+    "quant-liaison": "04-quant-backtest",
+    "accounting-portfolio-department": "05-accounting-portfolio",
+    "qa-department": "06-ai-qa-audit",
+    "hr-department": "07-agent-workforce",
+}
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+@lru_cache(maxsize=32)
+def head_persona_for_profile(profile: str, repo_root: str | None = None) -> str:
+    """canonical profile -> 그 부서장의 `agent.head_persona`.
+
+    write 측이 둘이다(BFF 의 hermes_boundary.ask 와 ceo-supervisor 의 카드 종료
+    관측). 둘이 각자 신원을 만들면 같은 부서장이 두 이름으로 쪼개져 유휴 판정이
+    양쪽 다 놓친다 - 그래서 여기 하나로 모으고, read 측(HR observability)도 같은
+    키를 읽는다.
+
+    못 읽으면 빈 문자열이다. 계측 때문에 질의·워크플로가 실패하면 안 된다.
+    """
+
+    directory = PROFILE_DIRECTORY.get(profile)
+    if not directory:
+        return ""
+    root = Path(repo_root) if repo_root else _REPO_ROOT
+    try:
+        import yaml
+
+        config = yaml.safe_load(
+            (root / "departments" / directory / "hermes" / "config.yaml").read_text(encoding="utf-8")
+        ) or {}
+        return str((config.get("agent") or {}).get("head_persona") or "").strip()
+    except Exception:  # noqa: BLE001 - 계측 부재가 실행을 죽이지 않는다
+        return ""
+
+
+def stage_for_profile(profile: str) -> str:
+    """canonical profile -> event stage. 모르는 프로필이면 빈 문자열(계측 포기).
+
+    stage 이름 공간은 orchestration/canonical_profiles.py 의 부서 코드와 같다 -
+    research/quant/trading/accounting/risk/qa/ceo/hr. 여기서 새 표를 만들지 않는
+    이유는 그 표가 이미 정본이고, 복제하면 어긋나도 아무도 모르기 때문이다.
+    """
+
+    try:
+        from orchestration.canonical_profiles import department_for_canonical_profile
+
+        return department_for_canonical_profile(profile)
+    except Exception:  # noqa: BLE001 - 규칙으로 지어내지 않는다
+        return ""
+
+
 def publish_worker_opportunity(
     *,
     stage: str,
@@ -368,6 +436,7 @@ def publish_head_activity(
     latency_ms: int = 0,
     error_count: int = 0,
     trace_id: str | None = None,
+    source: str = "bff_ask",
 ) -> bool:
     """부서장(Hermes Profile) 턴 1건을 기록한다(2026-08-20).
 
@@ -388,9 +457,11 @@ def publish_head_activity(
             "role": "department_head",
             "stage": stage,
             "status": status,
-            "latency_ms": int(latency_ms),
+            "source": source,
             "error_count": int(error_count),
             "raw_payloads_sent": False,
+            # 안 잰 값은 넣지 않는다 - 카드 종료 관측에는 지속시간이 없다.
+            **({"latency_ms": int(latency_ms)} if latency_ms else {}),
         },
         trace_id=trace_id,
     )
