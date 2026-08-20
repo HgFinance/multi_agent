@@ -1438,6 +1438,14 @@ class CeoSupervisorService:
         self._executed_actions: set[str] = set()
         self._seen_events_lock = threading.Lock()
 
+        # Hot-path cache for Discord/supervisor lifecycle events.
+        # workflow(task_id) is comparatively expensive because the Hermes
+        # adapter reconstructs workflow state. The root relation is immutable
+        # for the lifetime of a task, so cache only that relation; authoritative
+        # workflow payloads are still re-read after acquiring the parent lock.
+        self._task_root_cache: dict[str, str] = {}
+        self._task_root_cache_lock = threading.Lock()
+
         # hgfinance-department-progress-dedupe-v1
         # Active lifecycle events (claimed/spawned/started/running) are
         # semantically one Discord state.  Remember successful projections so
@@ -2698,6 +2706,32 @@ class CeoSupervisorService:
         )
         return True, decisions[0]
 
+    def _cached_workflow_root(self, task_id: str) -> str | None:
+        with self._task_root_cache_lock:
+            return self._task_root_cache.get(task_id)
+
+    def _remember_workflow_root(
+        self,
+        task_id: str,
+        root_task_id: str,
+        payloads: Sequence[Mapping[str, Any]] = (),
+    ) -> None:
+        if not task_id or not root_task_id:
+            return
+
+        with self._task_root_cache_lock:
+            self._task_root_cache[task_id] = root_task_id
+            self._task_root_cache[root_task_id] = root_task_id
+
+            for payload in payloads:
+                child_id = str(
+                    payload.get("id")
+                    or payload.get("task_id")
+                    or ""
+                )
+                if child_id:
+                    self._task_root_cache[child_id] = root_task_id
+
     def handle_terminal_event(self, event: Mapping[str, Any]) -> SupervisorDecision | None:
         task_id = str(event.get("task_id") or event.get("id") or "")
         kind = str(event.get("kind") or event.get("event_type") or event.get("status") or "").casefold()
@@ -2713,7 +2747,21 @@ class CeoSupervisorService:
                     return None
 
             try:
-                root_id, payloads = self.client.workflow(task_id)
+                root_id = self._cached_workflow_root(task_id)
+
+                if root_id is None:
+                    root_id, payloads = self.client.workflow(task_id)
+                    self._remember_workflow_root(
+                        task_id,
+                        root_id,
+                        payloads,
+                    )
+                else:
+                    # Active progress is supplementary Discord UX. Once the
+                    # immutable task->root relation is known, avoid rebuilding
+                    # the whole workflow merely to rediscover the root.
+                    payloads = ()
+
                 show = getattr(self.client, "show", None)
 
                 if callable(show):
@@ -2729,11 +2777,12 @@ class CeoSupervisorService:
 
                     # Recover sibling starts that the CLI watch may have
                     # coalesced or missed in the same polling interval.
-                    self._reconcile_department_start_progress(
-                        root_task_id=root_id,
-                        root_payload=root_payload,
-                        task_payloads=payloads,
-                    )
+                    if payloads:
+                        self._reconcile_department_start_progress(
+                            root_task_id=root_id,
+                            root_payload=root_payload,
+                            task_payloads=payloads,
+                        )
             except Exception as exc:
                 # Progress projection must never interfere with execution.
                 logger.warning(
@@ -2783,11 +2832,26 @@ class CeoSupervisorService:
                 )
 
         try:
-            root_id, _ = self.client.workflow(task_id)
+            root_id = self._cached_workflow_root(task_id)
+
+            if root_id is None:
+                root_id, initial_payloads = self.client.workflow(task_id)
+                self._remember_workflow_root(
+                    task_id,
+                    root_id,
+                    initial_payloads,
+                )
+
             with self._parent_lock(root_id):
-                # Re-read after acquiring the workflow lock. A sibling event may
-                # have completed while this event was waiting for the lock.
+                # Keep one authoritative read after acquiring the workflow lock.
+                # The cache removes only redundant root discovery; it never
+                # replaces freshness-sensitive workflow reconstruction.
                 root_id, payloads = self.client.workflow(task_id)
+                self._remember_workflow_root(
+                    task_id,
+                    root_id,
+                    payloads,
+                )
                 # The production Hermes client exposes ``show`` for durable
                 # wakeup comments. Keep the policy service compatible with small
                 # workflow-only fakes and adapters used by the supervisor tests.
