@@ -1249,6 +1249,54 @@ class HermesKanbanClient:
             )
         return tuple(dict(item) for item in payload)
 
+    def workflow_root(self, task_id: str) -> str:
+        """Resolve only the immutable workflow root for one task.
+
+        Terminal wakeups need the root id before taking the per-root lock, but
+        they do not need a complete workflow snapshot until after that lock is
+        held.  Calling :meth:`workflow` for root discovery scans the board and
+        hydrates every sibling, only to discard that snapshot and repeat the
+        same work authoritatively under the lock.
+
+        Current scoped tasks carry ``workflow_root_task_id`` directly.  The
+        ancestry walk remains as a compatibility path for legacy parent-linked
+        workflows; neither path scans descendants or the whole board.
+        """
+
+        cache: dict[str, dict[str, Any]] = {}
+
+        def fetch(current_id: str) -> dict[str, Any]:
+            if current_id not in cache:
+                cache[current_id] = self.show(current_id)
+            return cache[current_id]
+
+        starting_payload = fetch(task_id)
+        scoped_root_ids = extract_scope_references(starting_payload).root_ids
+        if scoped_root_ids:
+            return scoped_root_ids[0]
+
+        starting_body = str(starting_payload.get("body") or "")
+        starting_role = workflow_role_from_body(starting_body)
+        if starting_role == "root" and (
+            (
+                is_user_query_body(starting_body)
+                and workflow_mode_from_body(starting_body)
+                in {"analysis", "binding"}
+            )
+            or CEO_WORKFLOW_SCOPE_MARKER in starting_body
+        ):
+            return task_id
+
+        root_id = task_id
+        visited: set[str] = set()
+        while root_id not in visited:
+            visited.add(root_id)
+            parents = _ids(fetch(root_id).get("parents"))
+            if not parents:
+                break
+            root_id = parents[0]
+        return root_id
+
     def workflow(self, task_id: str) -> tuple[str, tuple[dict[str, Any], ...]]:
         """Collect one workflow using execution edges or the durable scope marker.
 
@@ -2840,12 +2888,22 @@ class CeoSupervisorService:
             root_id = self._cached_workflow_root(task_id)
 
             if root_id is None:
-                root_id, initial_payloads = self.client.workflow(task_id)
-                self._remember_workflow_root(
-                    task_id,
-                    root_id,
-                    initial_payloads,
-                )
+                # Root discovery is immutable and does not require the full
+                # workflow snapshot.  Production clients use one targeted
+                # show() here; small/legacy adapters retain the old workflow()
+                # fallback.  Fresh workflow state is still read exactly once
+                # after taking the root lock below.
+                workflow_root = getattr(self.client, "workflow_root", None)
+                if callable(workflow_root):
+                    root_id = workflow_root(task_id)
+                    self._remember_workflow_root(task_id, root_id)
+                else:
+                    root_id, initial_payloads = self.client.workflow(task_id)
+                    self._remember_workflow_root(
+                        task_id,
+                        root_id,
+                        initial_payloads,
+                    )
 
             with self._parent_lock(root_id):
                 # Keep one authoritative read after acquiring the workflow lock.
