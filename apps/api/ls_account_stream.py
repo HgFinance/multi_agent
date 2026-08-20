@@ -488,12 +488,21 @@ def normalize_accepted_orders(
         symbol = _symbol(_pick(row, "IsuNo"))
         side = _side(_pick(row, "BnsTpCode"))
         quantity = _number(row.get("OrdQty"))
-        price = _number(row.get("OrdPrc"))
+        requested_price = _number(row.get("OrdPrc"))
+        filled_quantity = _number(
+            row.get("AllExecQty") or row.get("ExecQty") or 0
+        )
+        execution_price = _number(row.get("ExecPrc"))
+        has_fill = _dec(filled_quantity) > 0
+        kind = "FILLED" if has_fill else "ACCEPTED"
+        event_time = _pick(row, "LastExecTime", "ExecTrxTime") if has_fill else order_time
+        price = execution_price if has_fill and _dec(execution_price) > 0 else requested_price
+        unfilled_quantity = max(Decimal(0), _dec(quantity) - _dec(filled_quantity))
         events.append({
             "seq": 0,  # 병합 뒤 전체 목록 기준으로 다시 부여한다.
             "event_id": _event_id(
                 "LS_ORDER_HISTORY",
-                "ACCEPTED",
+                kind,
                 order_no,
                 symbol,
                 side,
@@ -501,10 +510,14 @@ def normalize_accepted_orders(
                 quantity,
                 price,
             ),
-            "kind": "ACCEPTED",
-            "label": KIND_LABELS["ACCEPTED"],
-            "received_at": day + ("T" + order_time if order_time else ""),
-            "event_time": order_time,
+            "kind": kind,
+            "label": (
+                "부분체결"
+                if has_fill and unfilled_quantity > 0
+                else KIND_LABELS[kind]
+            ),
+            "received_at": day + ("T" + event_time if event_time else ""),
+            "event_time": event_time,
             "order_no": order_no,
             "broker_order_id": order_no,
             "broker_order_ids": [order_no],
@@ -515,7 +528,16 @@ def normalize_accepted_orders(
             "side": side,
             "quantity": quantity,
             "price": price,
-            "unfilled_quantity": None,
+            "requested_price": (
+                requested_price if _dec(requested_price) > 0 else None
+            ),
+            "filled_quantity": filled_quantity,
+            "average_fill_price": (
+                execution_price
+                if has_fill and _dec(execution_price) > 0
+                else None
+            ),
+            "unfilled_quantity": str(unfilled_quantity),
             "source": "LS_ORDER_HISTORY",
             "execution_channel": None,
             "execution_channels": [],
@@ -891,9 +913,45 @@ def merge_order_events(
     # 주문번호가 없을 때도 화면 계약 필드 조합으로 중복을 막되 값을 지어내지 않는다.
     events: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
-    candidates = [
-        event for event in realtime_events if event.get("kind") != "FILLED"
-    ] + list(ledger_events)
+    projected_ledger = [dict(event) for event in ledger_events]
+    supplemental: list[dict[str, Any]] = []
+    for event in realtime_events:
+        if event.get("kind") != "FILLED":
+            supplemental.append(event)
+            continue
+        # Raw SC1 pushes are already represented by the account ledger.  The
+        # CSPAQ13700 projection is different: it carries the actual LS order
+        # number plus requested and execution prices.  Enrich one exact ledger
+        # match, or keep it as independent broker evidence when t0150 omitted
+        # that fill (the observed API-order case).
+        if event.get("source") != "LS_ORDER_HISTORY":
+            continue
+        order_no = str(event.get("order_no") or "").strip()
+        matches = [
+            candidate
+            for candidate in projected_ledger
+            if order_no
+            and order_no
+            in {
+                str(value)
+                for value in candidate.get("broker_order_ids") or []
+            }
+        ]
+        if len(matches) == 1:
+            match = matches[0]
+            match["order_no"] = order_no
+            match["broker_order_id"] = order_no
+            for field in (
+                "requested_price",
+                "filled_quantity",
+                "average_fill_price",
+                "unfilled_quantity",
+            ):
+                if event.get(field) is not None:
+                    match[field] = event[field]
+        else:
+            supplemental.append(event)
+    candidates = supplemental + projected_ledger
     for event in candidates:
         order_no = event.get("order_no")
         key = (
@@ -1996,7 +2054,7 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
          "LastExecTime": "14:31:02"},
         {"OrdNo": 103, "OrdTime": "09:59:00", "OrdQty": 1, "OrdPrc": 1670000,
          "IsuNo": "A000660", "IsuNm": "SK하이닉스", "BnsTpCode": "1",
-         "LastExecTime": "10:00:00"},
+         "LastExecTime": "10:00:00", "AllExecQty": 1, "ExecPrc": 1681500},
         # 같은 주문번호가 여러 체결 행에 반복돼도 접수는 한 건이다.
         {"OrdNo": 102, "OrdTime": "14:30:00", "OrdQty": 2, "OrdPrc": 1655000,
          "IsuNo": "A000660", "IsuNm": "SK하이닉스", "BnsTpCode": "2",
@@ -2017,6 +2075,21 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
     assert accepted_history[0]["price"] == "1655000"
     assert accepted_history[0]["broker_order_id"] == "102"
     assert accepted_history[0]["source"] == "LS_ORDER_HISTORY"
+    filled_history = next(
+        event for event in accepted_history if event["order_no"] == "103"
+    )
+    assert filled_history["kind"] == "FILLED"
+    assert filled_history["requested_price"] == "1670000"
+    assert filled_history["average_fill_price"] == "1681500"
+    assert filled_history["price"] == "1681500"
+    assert filled_history["event_time"] == "10:00:00"
+    history_merged = merge_order_events(ledger_events, accepted_history, 50)
+    projected_broker_fill = next(
+        event for event in history_merged if event.get("order_no") == "103"
+    )
+    assert projected_broker_fill["kind"] == "FILLED"
+    assert projected_broker_fill["requested_price"] == "1670000"
+    assert projected_broker_fill["average_fill_price"] == "1681500"
 
     attach_executions(today_trades, execs)
     assert sell["trade_time"] == "10:00:00" and sell["symbol_name"] == "SK하이닉스"
