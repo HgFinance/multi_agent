@@ -19,6 +19,9 @@ NOTION_BRIEFING_DB=
 DISCORD_WEBHOOK_URL=
 
 # BFF and the official Hermes Kanban Dashboard used by the operator UI.
+# 브라우저는 동일 출처 `/bff/*`만 부르고 Worker가 여기로 전달한다(CORS 없음).
+# 서버 전용 값이 우선이고, 없으면 아래 공개 값을 그대로 쓴다.
+BFF_ORIGIN=http://127.0.0.1:8001
 NEXT_PUBLIC_BFF_URL=http://127.0.0.1:8001
 NEXT_PUBLIC_HERMES_DASHBOARD_URL=http://127.0.0.1:9119
 
