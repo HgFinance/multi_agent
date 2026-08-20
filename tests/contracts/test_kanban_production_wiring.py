@@ -24,10 +24,23 @@ def test_production_services_pin_the_shared_kanban_database() -> None:
         assert "HERMES_KANBAN_DB: /opt/kanban/kanban.db" in _service_block(
             root_compose, service
         )
-    for service in ("kanban-dispatcher", "ceo-kanban-supervisor"):
+    for service in (
+        "kanban-dispatcher",
+        "ceo-kanban-supervisor",
+        "kanban-retention-worker",
+    ):
         assert "HERMES_KANBAN_DB: /opt/data/shared-kanban/kanban.db" in _service_block(
             root_compose, service
         )
+
+
+def test_retention_worker_is_separate_and_uses_shared_lock_and_audit_lane() -> None:
+    source = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    worker = _service_block(source, "kanban-retention-worker")
+    assert "orchestration/kanban_retention.py" in worker
+    assert "HERMES_KANBAN_RETENTION_LOCK: /opt/data/shared-kanban/retention.lock" in worker
+    assert "HERMES_KANBAN_RETENTION_AUDIT_DB: /opt/data/shared-kanban/retention-audit.db" in worker
+    assert "ceo-kanban-supervisor" not in worker
 
     for path, service in (
         (ROOT / "departments/00-ceo-office/compose.yaml", "ceo-hermes"),

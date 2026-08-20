@@ -88,6 +88,7 @@ def as_payload(
     lookback_hours: float,
     idle_threshold_hours: float,
     now: datetime,
+    include_heads: bool = False,
 ) -> dict[str, Any]:
     """기계용 JSON. API 응답(idle_agents)과 같은 원소 모양에 집계만 덧붙인다."""
 
@@ -97,6 +98,9 @@ def as_payload(
         "lookback_hours": lookback_hours,
         "idle_threshold_hours": idle_threshold_hours,
         "total_workers": len(reports),
+        # 표지 문구가 인원 구성과 어긋나면 안 된다 - 부서장이 섞인 14명을
+        # "Worker 14명"으로 읽으면 편제표(LLM Worker 10명)와 대조가 깨진다.
+        "includes_heads": include_heads,
         "summary": summarize(reports),
         "idle_agents": [report.as_dict() for report in reports],
     }
@@ -115,7 +119,9 @@ def render_text(payload: dict[str, Any], reports: Sequence[WorkerIdleReport]) ->
     lines = [
         f"유휴 Agent 리포트 — {payload['generated_at']} 기준",
         f"창 {payload['lookback_hours']:g}h · 유휴 임계 {payload['idle_threshold_hours']:g}h · "
-        f"대상 {payload['total_workers']}명 (6개 투자본부 LLM Worker)",
+        f"대상 {payload['total_workers']}명 "
+        + ("(6개 투자본부 LLM Worker + 부서장)" if payload.get("includes_heads")
+           else "(6개 투자본부 LLM Worker)"),
         "  " + " · ".join(f"{status.value} {summary[status.value]}" for status in STATUS_ORDER),
         "",
     ]
@@ -169,6 +175,7 @@ def build_report(
         lookback_hours=lookback_hours,
         idle_threshold_hours=idle_threshold_hours,
         now=now,
+        include_heads=include_heads,
     )
     return payload, reports
 

@@ -578,6 +578,11 @@ class WorkflowNode:
     run_outcome: str
     created_at: str | None
     completed_at: str | None
+    # The retention lane needs a few authoritative execution fields (active
+    # run/claim and durable delivery metadata) that are deliberately not part
+    # of the public UI projection. Keep the raw Hermes row in memory only; it
+    # is never serialized by this module or copied into audit storage.
+    raw: Mapping[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @classmethod
     def from_hermes(cls, payload: Mapping[str, Any]) -> "WorkflowNode":
@@ -612,6 +617,7 @@ class WorkflowNode:
             run_outcome=run_outcome,
             created_at=_epoch_to_iso(payload.get("created_at")),
             completed_at=_epoch_to_iso(payload.get("completed_at")),
+            raw=payload,
         )
 
     @property
@@ -925,7 +931,12 @@ def resolve_root_id(task_id: str, *, fetch: Fetch = show_task) -> str:
 
 
 def load_workflow(
-    task_id: str, *, fetch: Fetch = show_task, max_workers: int | None = None
+    task_id: str,
+    *,
+    fetch: Fetch = show_task,
+    max_workers: int | None = None,
+    include_archived: bool | None = None,
+    listed_rows: Sequence[Mapping[str, Any]] | None = None,
 ) -> Workflow:
     """Root를 찾고 그 아래 그래프 전체를 폭 우선으로 읽는다.
 
@@ -936,17 +947,31 @@ def load_workflow(
     """
 
     root_id = resolve_root_id(task_id, fetch=fetch)
-    payloads: dict[str, dict[str, Any]] = {root_id: fetch(root_id)}
+    root_payload = fetch(root_id)
+    payloads: dict[str, dict[str, Any]] = {root_id: root_payload}
+    # Active reconstruction must not pay for the historical board. An
+    # explicitly archived root is the one exception: operator/debug reads of
+    # that workflow need archived marker-based descendants as well. ``None``
+    # keeps this behavior automatic for existing callers.
+    if include_archived is None:
+        include_archived = str(root_payload.get("status") or "").casefold() == "archived"
     root_metadata = _run_metadata(payloads[root_id])
     frontier = list(_ids(payloads[root_id].get("children")))
     frontier.extend(_metadata_task_ids(root_metadata))
 
     # Primary/QA/synthesis tasks may intentionally have no Hermes parent edge.
     # The durable workflow marker is the membership source for those tasks.
-    try:
-        listed = list_tasks(include_archived=True)
-    except (KanbanTaskNotFound, KanbanUnavailable):
-        listed = []
+    if listed_rows is not None:
+        # A maintenance caller may already have one authoritative board list
+        # for the scan. Reusing that snapshot prevents N roots from repeating
+        # the same expensive full-board discovery; each matching task is still
+        # hydrated through ``fetch`` below.
+        listed = [dict(row) for row in listed_rows if isinstance(row, Mapping)]
+    else:
+        try:
+            listed = list_tasks(include_archived=include_archived)
+        except (KanbanTaskNotFound, KanbanUnavailable):
+            listed = []
     for row in listed:
         if _workflow_root_id(row) != root_id:
             continue

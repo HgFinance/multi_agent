@@ -6,9 +6,9 @@
 #       3.1절(부서당 Image 1개, command만 바꿔 역할 분리), 6.8절(Agent Workforce Container 목록),
 #       11.1절(Image 기준), departments/03-risk/Dockerfile·departments/06-ai-qa-audit/Dockerfile 패턴
 #
-# ▶ Build Context가 저장소 루트가 아니라 **departments/07-agent-workforce** 다 (risk/audit
-#   Dockerfile과 다른 점, research/CEO Dockerfile과 같은 이유). api/app.py는 lifecycle/
-#   improvements/scorecard/roster만 import하고 다른 본부 코드를 참조하지 않는다(2026-08-03 확인).
+# Build context is the repository root so the image can receive the shared
+# metadata-only Worker Registry contract. Only Workforce code plus the
+# manifest/loader are copied; other department runtime modules are excluded.
 #
 # ▶ 하나의 Image, command만 바꿔 workforce-api와 improvement-worker를 둘 다 돌린다
 #   (research/risk와 동일 원칙). lifecycle-worker(계획서 6.8)는 아직 안 만들었다 -
@@ -27,27 +27,27 @@ FROM python:3.12-slim
 # langfuse: GET /workforce/v1/departments/idle-agents 의 read 측 SDK(2026-08-10, 993682f).
 # 미설치도 LangfuseQueryError -> 전원 UNAVAILABLE 로 접히므로 크래시는 안 나지만,
 # 그러면 이 이미지에서 관측이 영원히 UNAVAILABLE 이다 - 그래서 명시적으로 넣는다.
-# pyyaml: 같은 엔드포인트가 6개 본부 Hermes Profile(config.yaml)의 workers 를 읽는다
-# (2026-08-20). 없으면 WorkerRegistryUnavailable -> 503 이다.
 RUN pip install --no-cache-dir \
     fastapi==0.128.8 "uvicorn[standard]==0.39.0" pydantic==2.13.3 \
-    psycopg2-binary==2.9.12 redis==7.0.1 langfuse==4.14.3 pyyaml==6.0.2
+    psycopg2-binary==2.9.12 redis==7.0.1 langfuse==4.14.3
 
 WORKDIR /app/departments/07-agent-workforce
-COPY api ./api
-COPY lifecycle ./lifecycle
-COPY improvements ./improvements
-COPY scorecard ./scorecard
-COPY roster ./roster
-COPY workforce_events ./workforce_events
+COPY departments/07-agent-workforce/api ./api
+COPY departments/07-agent-workforce/lifecycle ./lifecycle
+COPY departments/07-agent-workforce/improvements ./improvements
+COPY departments/07-agent-workforce/scorecard ./scorecard
+COPY departments/07-agent-workforce/roster ./roster
+COPY departments/07-agent-workforce/workforce_events ./workforce_events
 # api/app.py 57~65행이 sys.path 에 넣는 디렉터리는 여섯 개다 - lifecycle/
 # improvements/scorecard/roster **+ planning + hiring**. 뒤의 둘이 빠져 있어서
 # `from hiring_request import ...` 가 죽고 workforce-api·improvement-worker 가
 # 둘 다 크래시 루프였다(2026-08-12 실측). sys.path 목록과 이 COPY 목록은
 # 같이 움직여야 한다.
-COPY planning ./planning
-COPY hiring ./hiring
+COPY departments/07-agent-workforce/planning ./planning
+COPY departments/07-agent-workforce/hiring ./hiring
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 
+COPY orchestration/contracts/worker_registry.py /app/orchestration/contracts/worker_registry.py
+COPY orchestration/contracts/worker_registry.v1.json /app/orchestration/contracts/worker_registry.v1.json
 CMD ["uvicorn", "app:app", "--app-dir", "api", "--host", "0.0.0.0", "--port", "8000"]

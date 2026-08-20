@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 
-from orchestration.conditional_rules import ConditionalRuleSpec, ExpressionType
+from orchestration.conditional_rules import ConditionalRuleSpec, ExpressionType, list_supported_indicators
 
 
 _EXPLICIT_POSITION_PERCENT = re.compile(
@@ -20,12 +20,24 @@ _RETURN_MOVE = re.compile(r"\d+(?:\.\d+)?\s*%.{0,8}(?:상승|하락|오르면|�
 _ENTRY_BASELINE = re.compile(r"(?:평균\s*)?(?:매입가|매수가|평단)")
 _TIMEFRAME = re.compile(r"(?:1|3|5|10|15|30|60)\s*분봉|(?:일봉|주봉|월봉)")
 
+_SUPPORTED_INDICATOR_TERMS = sorted(
+    {
+        str(term)
+        for item in list_supported_indicators()
+        for term in (item["name"], *item["aliases"])
+        if term
+    },
+    key=len,
+    reverse=True,
+)
+_SUPPORTED_INDICATOR_PATTERN = "|".join(re.escape(term) for term in _SUPPORTED_INDICATOR_TERMS)
+
 _ORDER_ACTION = re.compile(r"(?:매수|매도|buy|sell)", re.IGNORECASE)
 _CONDITIONAL_TRIGGER = re.compile(
     r"(?:조건\s*주문|이면|라면|할\s*때|경우|이상|이하|초과|미만|"
     r"상향\s*돌파|하향\s*이탈|골든\s*크로스|데드\s*크로스|"
-    r"RSI|MACD|이동\s*평균|이평|볼린저|거래량|평단|매입가|"
-    r"상승\s*시|하락\s*시)",
+    r"이동\s*평균|이평|볼린저|거래량|평단|매입가|"
+    r"상승\s*시|하락\s*시|" + _SUPPORTED_INDICATOR_PATTERN + r")",
     re.IGNORECASE,
 )
 _NON_BINDING_CONDITIONAL = re.compile(

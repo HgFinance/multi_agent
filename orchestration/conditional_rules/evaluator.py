@@ -17,8 +17,18 @@ from .contracts import (
     ExpressionType,
     Timeframe,
 )
-from .indicators import DEFAULT_REGISTRY, IndicatorCalculationError
-from .semantic import indicator_source, normalized_indicator_parameters
+from .indicators import (
+    DEFAULT_REGISTRY,
+    IndicatorCalculationError,
+    IndicatorProviderError,
+    IndicatorValue,
+)
+from .semantic import (
+    RuleSemanticError,
+    indicator_definition,
+    indicator_source,
+    normalized_indicator_parameters,
+)
 
 
 ZERO = Decimal("0")
@@ -72,15 +82,21 @@ class EvaluationFrame:
     portfolio: Mapping[str, Decimal]
     indicators: Mapping[str, Decimal | bool]
     observed_at: datetime
+    market_data_source_id: str | None = None
 
 
 @dataclass(frozen=True)
 class EvaluationContext:
     current: EvaluationFrame
     previous: EvaluationFrame | None = None
+    market_data_source_id: str | None = None
+    calculation_profile: str = "DEFAULT"
 
 
-def indicator_key(node: ExpressionNode) -> str:
+def indicator_key(
+    node: ExpressionNode, *, market_data_source_id: str | None = None
+) -> str:
+    definition = DEFAULT_REGISTRY.get(node.name)
     payload = {
         "name": DEFAULT_REGISTRY.canonical_name(node.name),
         "output": node.output or "VALUE",
@@ -89,13 +105,15 @@ def indicator_key(node: ExpressionNode) -> str:
             key: str(value)
             for key, value in sorted(normalized_indicator_parameters(node).items())
         },
+        "source": definition.source if definition is not None else None,
+        "provider": (
+            (definition.provider or definition.source) if definition is not None else None
+        ),
+        "calculation_version": (
+            definition.calculation_version if definition is not None else None
+        ),
+        "market_data_source_id": market_data_source_id,
     }
-    # Keep legacy LOCAL node keys stable. Explicit source/provider fields are
-    # included so two otherwise identical broker capabilities cannot collide.
-    if node.source is not None:
-        payload["source"] = node.source.value
-    if node.provider is not None:
-        payload["provider"] = node.provider
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(raw).hexdigest()
 
@@ -258,17 +276,18 @@ class IndicatorEngine:
     def compute(self, node: ExpressionNode, candles: list[Candle]) -> Decimal | bool:
         if node.type is not ExpressionType.INDICATOR:
             raise EvaluationError("NOT_AN_INDICATOR", "indicator node required")
-        definition = DEFAULT_REGISTRY.get(node.name)
-        if definition is None:
-            raise EvaluationError("UNSUPPORTED_INDICATOR", f"unsupported indicator {node.name}")
-        if indicator_source(node) != "LOCAL" or definition.calculator is None:
+        try:
+            definition = indicator_definition(node)
+        except RuleSemanticError as exc:
+            raise EvaluationError(exc.code, str(exc)) from exc
+        if definition.source != "LOCAL" or definition.calculator is None:
             raise EvaluationError(
                 "INDICATOR_PROVIDER_UNAVAILABLE",
                 f"{definition.name} requires provider data",
             )
         parameters = normalized_indicator_parameters(node)
         try:
-            return definition.calculator(candles, parameters, node.output or "VALUE")
+            return definition.calculator(definition.name, candles, parameters, node.output or "VALUE")
         except IndicatorCalculationError as exc:
             raise EvaluationError(exc.code, str(exc)) from exc
 
@@ -279,26 +298,41 @@ class IndicatorEngine:
         bars: Mapping[Timeframe, list[Candle]],
         portfolio: Mapping[str, Decimal],
         current_market: Mapping[str, Decimal] | None = None,
-        external_indicators: Mapping[str, Decimal | bool] | None = None,
-        previous_external_indicators: Mapping[str, Decimal | bool] | None = None,
+        external_indicators: Mapping[str, IndicatorValue] | None = None,
+        previous_external_indicators: Mapping[str, IndicatorValue] | None = None,
         market_data_source_id: str | None = None,
+        calculation_profile: str = "DEFAULT",
     ) -> EvaluationContext:
-        indicator_nodes = _collect_indicators(rule.condition)
+        indicator_nodes = _collect_indicators(
+            rule.condition, market_data_source_id=market_data_source_id
+        )
         needs_previous = _contains_cross(rule.condition)
         current_indicators: dict[str, Decimal | bool] = {}
         previous_indicators: dict[str, Decimal | bool] = {}
         external_indicators = external_indicators or {}
         previous_external_indicators = previous_external_indicators or {}
+        normalized_external: dict[str, IndicatorValue] = {}
+        normalized_previous_external: dict[str, IndicatorValue] = {}
         for node in indicator_nodes:
             series = list(bars.get(node.timeframe, []))
             definition = DEFAULT_REGISTRY.get(node.name)
             if definition is None:
                 raise EvaluationError("UNSUPPORTED_INDICATOR", f"unsupported indicator {node.name}")
-            key = indicator_key(node)
+            key = indicator_key(node, market_data_source_id=market_data_source_id)
             if indicator_source(node) == "LOCAL":
                 current_indicators[key] = self.compute(node, series)
             elif key in external_indicators:
-                current_indicators[key] = external_indicators[key]
+                try:
+                    normalized = DEFAULT_REGISTRY.normalize_value(
+                        definition,
+                        node,
+                        external_indicators[key],
+                        {"market_data_source_id": market_data_source_id},
+                    )
+                except IndicatorProviderError as exc:
+                    raise EvaluationError(exc.code, str(exc)) from exc
+                normalized_external[key] = normalized
+                current_indicators[key] = normalized.value
             else:
                 raise EvaluationError(
                     "INDICATOR_PROVIDER_UNAVAILABLE",
@@ -308,7 +342,17 @@ class IndicatorEngine:
                 if indicator_source(node) == "LOCAL":
                     previous_indicators[key] = self.compute(node, series[:-1])
                 elif key in previous_external_indicators:
-                    previous_indicators[key] = previous_external_indicators[key]
+                    try:
+                        previous_normalized = DEFAULT_REGISTRY.normalize_value(
+                            definition,
+                            node,
+                            previous_external_indicators[key],
+                            {"market_data_source_id": market_data_source_id},
+                        )
+                    except IndicatorProviderError as exc:
+                        raise EvaluationError(exc.code, str(exc)) from exc
+                    normalized_previous_external[key] = previous_normalized
+                    previous_indicators[key] = previous_normalized.value
                 else:
                     raise EvaluationError(
                         "INDICATOR_PROVIDER_UNAVAILABLE",
@@ -323,24 +367,38 @@ class IndicatorEngine:
             current_fields.update(_candle_fields(primary_bars[-1]))
         if len(primary_bars) >= 2:
             previous_fields.update(_candle_fields(primary_bars[-2]))
-        elif needs_previous:
+        elif needs_previous and _contains_bar_market_field(rule.condition):
             raise EvaluationError(
                 "PREVIOUS_FRAME_REQUIRED",
                 "bar-close indicator evaluation requires a previous completed bar",
             )
+        external_times = [
+            _indicator_timestamp(value)
+            for value in normalized_external.values()
+            if _indicator_timestamp(value) is not None
+        ]
+        previous_external_times = [
+            _indicator_timestamp(value)
+            for value in normalized_previous_external.values()
+            if _indicator_timestamp(value) is not None
+        ]
         observed_at = (
             primary_bars[-1].bucket_time
             if primary_bars
-            else datetime.fromtimestamp(0, tz=timezone.utc)
+            else max(external_times) if external_times else
+            datetime.fromtimestamp(0, tz=timezone.utc)
         )
         previous_at = (
-            primary_bars[-2].bucket_time if len(primary_bars) >= 2 else observed_at
+            primary_bars[-2].bucket_time
+            if len(primary_bars) >= 2
+            else max(previous_external_times) if previous_external_times else observed_at
         )
         current = EvaluationFrame(
             market=current_fields,
             portfolio=dict(portfolio),
             indicators=current_indicators,
             observed_at=observed_at,
+            market_data_source_id=market_data_source_id,
         )
         previous = (
             EvaluationFrame(
@@ -348,11 +406,17 @@ class IndicatorEngine:
                 portfolio={},
                 indicators=previous_indicators,
                 observed_at=previous_at,
+                market_data_source_id=market_data_source_id,
             )
             if needs_previous
             else None
         )
-        return EvaluationContext(current=current, previous=previous)
+        return EvaluationContext(
+            current=current,
+            previous=previous,
+            market_data_source_id=market_data_source_id,
+            calculation_profile=calculation_profile,
+        )
 
 
 def _candle_fields(candle: Candle) -> dict[str, Decimal]:
@@ -366,14 +430,16 @@ def _candle_fields(candle: Candle) -> dict[str, Decimal]:
     }
 
 
-def _collect_indicators(node: ExpressionNode) -> tuple[ExpressionNode, ...]:
+def _collect_indicators(
+    node: ExpressionNode, *, market_data_source_id: str | None = None
+) -> tuple[ExpressionNode, ...]:
     found: dict[str, ExpressionNode] = {}
 
     def visit(value: ExpressionNode | None) -> None:
         if value is None:
             return
         if value.type is ExpressionType.INDICATOR:
-            found[indicator_key(value)] = value
+            found[indicator_key(value, market_data_source_id=market_data_source_id)] = value
         visit(value.left)
         visit(value.right)
         visit(value.operand)
@@ -393,6 +459,24 @@ def _contains_cross(node: ExpressionNode | None) -> bool:
         _contains_cross(child)
         for child in (node.left, node.right, node.operand, *(node.children or ()))
     )
+
+
+def _contains_bar_market_field(node: ExpressionNode | None) -> bool:
+    if node is None:
+        return False
+    if node.type is ExpressionType.MARKET and node.field != "LAST_PRICE":
+        return True
+    return any(
+        _contains_bar_market_field(child)
+        for child in (node.left, node.right, node.operand, *(node.children or ()))
+    )
+
+
+def _indicator_timestamp(value: IndicatorValue) -> datetime | None:
+    candidate = value.data_timestamp or value.observed_at
+    if not isinstance(candidate, datetime) or candidate.tzinfo is None:
+        return None
+    return candidate.astimezone(timezone.utc)
 
 
 def _numeric(value: Decimal | bool, *, code: str) -> Decimal:
@@ -416,7 +500,9 @@ def _evaluate(node: ExpressionNode, frame: EvaluationFrame) -> Decimal | bool:
             raise EvaluationError("PORTFOLIO_FIELD_MISSING", f"missing {node.field}") from exc
     if node.type is ExpressionType.INDICATOR:
         try:
-            return frame.indicators[indicator_key(node)]
+            return frame.indicators[
+                indicator_key(node, market_data_source_id=frame.market_data_source_id)
+            ]
         except KeyError as exc:
             raise EvaluationError("INDICATOR_VALUE_MISSING", f"missing {node.name}") from exc
     if node.type is ExpressionType.ARITHMETIC:
@@ -434,8 +520,14 @@ def _evaluate(node: ExpressionNode, frame: EvaluationFrame) -> Decimal | bool:
         except (DivisionByZero, InvalidOperation, ZeroDivisionError) as exc:
             raise EvaluationError("DIVISION_BY_ZERO", "runtime divisor is zero") from exc
     if node.type is ExpressionType.COMPARISON:
-        left = _numeric(_evaluate(node.left, frame), code="COMPARISON_TYPE_ERROR")  # type: ignore[arg-type]
-        right = _numeric(_evaluate(node.right, frame), code="COMPARISON_TYPE_ERROR")  # type: ignore[arg-type]
+        left_value = _evaluate(node.left, frame)  # type: ignore[arg-type]
+        right_value = _evaluate(node.right, frame)  # type: ignore[arg-type]
+        if isinstance(left_value, bool) or isinstance(right_value, bool):
+            if not (isinstance(left_value, bool) and isinstance(right_value, bool) and node.operator == "EQ"):
+                raise EvaluationError("COMPARISON_TYPE_ERROR", "boolean comparison requires EQ")
+            return left_value == right_value
+        left = _numeric(left_value, code="COMPARISON_TYPE_ERROR")
+        right = _numeric(right_value, code="COMPARISON_TYPE_ERROR")
         operations = {
             "GT": left > right,
             "GTE": left >= right,

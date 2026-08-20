@@ -152,18 +152,20 @@ def test_publish_failure_does_not_break_worker_execution(monkeypatch: pytest.Mon
 
 
 def test_risk_executor_publishes_activity(captured: _FakeLangfuseClient) -> None:
+    # 실행까지 블록 **안**에서 한다 - 부서 모듈은 함수 안에서 형제 모듈을 늦게
+    # import 하므로(qa_runtime 등) 경로를 먼저 걷으면 호출 시점에 죽는다.
     with department_path("departments/03-risk"):
         from risk_employee_workers import run_employee_workers as run_risk
 
-    report = run_risk(
-        {
-            "trading_state": "ENABLED",
-            "assessment": {"verdict": "approve"},
-            "compliance": {"grounded": True},
-            "counterparty": {"status": "DEGRADED"},
-        },
-        llm=_llm,
-    )
+        report = run_risk(
+            {
+                "trading_state": "ENABLED",
+                "assessment": {"verdict": "approve"},
+                "compliance": {"grounded": True},
+                "counterparty": {"status": "DEGRADED"},
+            },
+            llm=_llm,
+        )
     assert "compliance-policy-worker" in {w["worker_id"] for w in report["workers"]}
     assert "llm.performance.metric:risk:compliance-policy-worker" in _names(captured)
 
@@ -172,15 +174,15 @@ def test_qa_executor_publishes_activity(captured: _FakeLangfuseClient) -> None:
     with department_path("departments/06-ai-qa-audit"):
         from qa_employee_workers import run_employee_workers as run_qa
 
-    run_qa(
-        {
-            "assessment": {"decision": "FAIL", "claim_checks": [{"result": "UNSUPPORTED"}]},
-            "model_risk": {"decision": "WARN"},
-            "ops_assessment": {"status": "DEGRADED"},
-            "incident": {"incident_id": "i1"},
-        },
-        llm=_llm,
-    )
+        run_qa(
+            {
+                "assessment": {"decision": "FAIL", "claim_checks": [{"result": "UNSUPPORTED"}]},
+                "model_risk": {"decision": "WARN"},
+                "ops_assessment": {"status": "DEGRADED"},
+                "incident": {"incident_id": "i1"},
+            },
+            llm=_llm,
+        )
     assert "llm.performance.metric:qa:hallucination-critic-worker" in _names(captured)
     assert "llm.performance.metric:qa:incident-postmortem-worker" in _names(captured)
 
@@ -194,7 +196,7 @@ def test_deterministic_runners_are_not_reported_as_llm_workers(captured: _FakeLa
     with department_path("departments/03-risk"):
         from risk_employee_workers import run_employee_workers as run_risk
 
-    run_risk({"trading_state": "ENABLED", "assessment": {"verdict": "approve"}}, llm=_llm)
+        run_risk({"trading_state": "ENABLED", "assessment": {"verdict": "approve"}}, llm=_llm)
     assert not any("runner" in name for name in _names(captured))
 
 

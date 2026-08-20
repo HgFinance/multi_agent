@@ -33,6 +33,7 @@ class ExpressionType(StrEnum):
 class IndicatorSource(StrEnum):
     LOCAL = "LOCAL"
     BROKER = "BROKER"
+    MICROSTRUCTURE = "MICROSTRUCTURE"
     DERIVED_REALTIME = "DERIVED_REALTIME"
     PORTFOLIO = "PORTFOLIO"
 

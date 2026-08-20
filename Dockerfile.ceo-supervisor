@@ -15,4 +15,6 @@ RUN test -x /opt/hermes/.venv/bin/python3 \
         --python /opt/hermes/.venv/bin/python3 \
         --no-cache \
         psycopg2-binary==2.9.12 \
+        fastapi \
+        pydantic \
     && /opt/hermes/.venv/bin/python3 -c "import psycopg2"

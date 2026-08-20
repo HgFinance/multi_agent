@@ -111,11 +111,12 @@ def indicator_definition(node: ExpressionNode) -> IndicatorDefinition:
             "INDICATOR_SOURCE_MISMATCH",
             f"{definition.name} belongs to source {definition.source}, not {requested_source}",
         )
-    if node.provider is not None and definition.provider is not None:
-        if node.provider != definition.provider:
+    if node.provider is not None:
+        expected_provider = (definition.provider or definition.source).upper()
+        if node.provider != expected_provider:
             raise _error(
                 "INDICATOR_PROVIDER_MISMATCH",
-                f"{definition.name} belongs to provider {definition.provider}, not {node.provider}",
+                f"{definition.name} belongs to provider {expected_provider}, not {node.provider}",
             )
     return definition
 
@@ -201,9 +202,15 @@ def _infer(
     if node.type is ExpressionType.INDICATOR:
         definition = indicator_definition(node)
         if clock is EvaluationClock.QUOTE and not definition.realtime_supported:
-            raise _error("INDICATOR_REQUIRES_BAR_CLOSE", "indicator is not available on quote clock")
+            raise _error("INDICATOR_REQUIRES_BAR_CLOSE", "indicator requires completed bars and is not available on quote clock")
         if clock is EvaluationClock.BAR_CLOSE and not definition.historical_supported:
             raise _error("INDICATOR_REQUIRES_REALTIME", "indicator is not available on completed bars")
+        timeframe = node.timeframe.value if node.timeframe is not None else None
+        if timeframe not in definition.supported_timeframes:
+            raise _error(
+                "UNSUPPORTED_INDICATOR_TIMEFRAME",
+                f"{definition.name} does not support timeframe {timeframe}",
+            )
         _indicator_parameters(node)
         output = (node.output or "VALUE").upper()
         if output not in definition.outputs:
@@ -228,10 +235,22 @@ def _infer(
     if node.type in {ExpressionType.COMPARISON, ExpressionType.CROSS}:
         left = _infer(node.left, clock=clock, depth=depth + 1, counter=counter)  # type: ignore[arg-type]
         right = _infer(node.right, clock=clock, depth=depth + 1, counter=counter)  # type: ignore[arg-type]
+        boolean_atoms = {ExpressionType.LITERAL, ExpressionType.INDICATOR}
+        if (
+            node.type is ExpressionType.COMPARISON
+            and left is right is ValueUnit.BOOL
+            and node.left is not None
+            and node.right is not None
+            and node.left.type in boolean_atoms
+            and node.right.type in boolean_atoms
+        ):
+            if node.operator != "EQ":
+                raise _error("BOOLEAN_COMPARISON_UNSUPPORTED", "boolean comparison supports EQ only")
+            return ValueUnit.BOOL
         if ValueUnit.BOOL in {left, right}:
             raise _error(
                 "BOOLEAN_COMPARISON_UNSUPPORTED",
-                "comparison and cross operands must be numeric",
+                "comparison and cross operands must be numeric unless both are BOOL EQ",
             )
         if left is not right and {left, right} != {ValueUnit.NUMBER, ValueUnit.RATIO}:
             raise _error("UNIT_MISMATCH", f"cannot compare {left} with {right}")

@@ -16,6 +16,15 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
+from orchestration.kanban_retention import (
+    AuditStore,
+    DiscordLedgerReader,
+    SQLiteKanbanMaintenance,
+    build_audit_metadata,
+    default_audit_path,
+    evaluate_workflow,
+)
+
 try:
     from . import hermes_boundary
     from .conditional_rule_language import looks_like_conditional_paper_rule
@@ -726,6 +735,14 @@ def _deterministic_order_child_body(
     )
 
 
+def _conditional_rule_indicator_catalog_prompt() -> str:
+    """Build the prompt vocabulary from the registry, never from a static list."""
+
+    from orchestration.conditional_rules import list_supported_indicators
+
+    return ", ".join(item["name"] for item in list_supported_indicators())
+
+
 def _conditional_rule_child_body(
     *,
     query: str,
@@ -749,8 +766,8 @@ def _conditional_rule_child_body(
             "Questions, advice, negation, examples, ambiguity, multiple actions, and LIVE",
             "requests must use candidate=null with a concise clarification_reason.",
             "Supported expression node types are LITERAL, MARKET, PORTFOLIO, INDICATOR,",
-            "ARITHMETIC, COMPARISON, LOGICAL, NOT, and CROSS. Supported indicators are",
-            "SMA, EMA, RSI, MACD, BOLLINGER, VOLUME_AVERAGE, ATR, and ADX.",
+            "ARITHMETIC, COMPARISON, LOGICAL, NOT, and CROSS.",
+            f"Supported indicators are {_conditional_rule_indicator_catalog_prompt()}.",
             "Use comparison operators GT/GTE/LT/LTE/EQ, cross ABOVE/BELOW, logical",
             "AND/OR, and only 1M/5M/15M/1H/1D timeframes. If an indicator timeframe",
             "is omitted, use 1D completed bars and BAR_CLOSE; never default an explicit",
@@ -1507,10 +1524,32 @@ def ceo_task_archive(
 ) -> TaskArchiveResponse:
     workflow = _load(task_id)
     _require_ceo_workflow_owner(workflow, authenticated_owner_id)
+    # Keep the legacy operator endpoint, but route it through the same
+    # root-scoped retention policy. Direct per-task Hermes archive is unsafe:
+    # it can archive a running child and it has no synthesis/recovery/Discord
+    # guard. The periodic worker remains the normal path; this endpoint is a
+    # safe explicit maintenance request only.
+    try:
+        delivery = DiscordLedgerReader().state(workflow)
+        decision = evaluate_workflow(workflow, delivery=delivery)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail="Retention 상태를 확인하지 못했습니다.") from exc
+    if not decision.eligible:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Workflow archive 조건을 충족하지 않습니다: {decision.reason}",
+        )
     target_ids = [node.task_id for node in workflow.descendants]
     target_ids.append(workflow.root_task_id)
     try:
-        archive_tasks(target_ids)
+        metadata = build_audit_metadata(workflow, delivery)
+        audit = AuditStore(default_audit_path())
+        audit.save_archive(metadata, archived_at=int(time.time()))
+        if not SQLiteKanbanMaintenance().archive_workflow(
+            workflow.root_task_id,
+            [node.task_id for node in workflow.descendants],
+        ):
+            raise KanbanUnavailable("root workflow archive CAS failed")
     except KanbanTaskNotFound as exc:
         raise HTTPException(status_code=404, detail=f"Task를 찾을 수 없습니다: {task_id}") from exc
     except KanbanUnavailable as exc:

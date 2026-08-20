@@ -76,7 +76,6 @@ ENABLE_LS_MARKET_DATA = _env_flag("ENABLE_LS_MARKET_DATA")
 # 거래내역·잔고 조회도 REST만 사용한다. 실시간 주문 이벤트와 분리한다.
 ENABLE_LS_ACCOUNT_DATA = _env_flag("ENABLE_LS_ACCOUNT_DATA")
 MAX_EVENTS = int(os.getenv("LS_ORDER_EVENTS_MAX", "200"))
-DAILY_RETURNS_DAYS = 30
 # 거래내역 TR은 초당 1건이다. 화면이 3초마다 폴링해도 브로커를 때리지 않도록
 # 응답을 캐시한다 - 확정된 과거 거래라 자주 바뀌지 않는다.
 LEDGER_DAYS = int(os.getenv("ACCOUNTING_LEDGER_DAYS", "30"))
@@ -386,21 +385,6 @@ def normalize_holdings(payload: dict[str, Any]) -> dict[str, Any]:
             if isinstance(row, dict)
         ],
     }
-
-
-def normalize_daily_returns(payload: dict[str, Any]) -> list[dict[str, str]]:
-    """FOCCQ33600 응답 → 일별 수익률 화면 계약."""
-    rows = payload.get("FOCCQ33600OutBlock3")
-    rows = rows if isinstance(rows, list) else []
-    normalized: list[dict[str, str]] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        base_date = _pick(row, "BaseDt")
-        return_rate = _number(row.get("TermErnrat"))
-        if base_date and return_rate is not None:
-            normalized.append({"date": base_date, "return_rate": return_rate})
-    return normalized
 
 
 def normalize_today_activity(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1051,9 +1035,6 @@ class _Feed:
         self.holdings: dict[str, Any] | None = None
         self.holdings_as_of: str | None = None
         self.holdings_error: str | None = None
-        self.daily_returns: list[dict[str, str]] = []
-        self.daily_returns_as_of: str | None = None
-        self.daily_returns_error: str | None = None
         self.today_activity: dict[str, Any] | None = None
         self.today_activity_as_of: str | None = None
         self.today_activity_error: str | None = None
@@ -1095,10 +1076,6 @@ class _Feed:
             if row.get("symbol")
         }
         self.positions_initialized = True
-
-    def sync_daily_returns(self, daily_returns: list[dict[str, str]]) -> None:
-        self.daily_returns = daily_returns
-        self.daily_returns_as_of = datetime.now(timezone.utc).isoformat()
 
     def sync_today_activity(self, activity: dict[str, Any]) -> None:
         self.today_activity = activity
@@ -1278,25 +1255,6 @@ async def _fetch_holdings(config: Any, token: str) -> dict[str, Any]:
     return normalize_holdings(body)
 
 
-async def _fetch_daily_returns(config: Any, token: str) -> list[dict[str, str]]:
-    """FOCCQ33600으로 최근 영업일별 계좌 수익률을 조회한다 (TermTp=1: 일별)."""
-    end_date = datetime.now(timezone.utc).date()
-    start_date = end_date - timedelta(days=DAILY_RETURNS_DAYS)
-    body = await _post_tr(
-        config,
-        token,
-        "FOCCQ33600",
-        {
-            "FOCCQ33600InBlock1": {
-                "QrySrtDt": start_date.strftime("%Y%m%d"),
-                "QryEndDt": end_date.strftime("%Y%m%d"),
-                "TermTp": "1",
-            }
-        },
-    )
-    return normalize_daily_returns(body)
-
-
 async def _fetch_today_activity(config: Any, token: str) -> dict[str, Any]:
     """t0150으로 당일 매매 금액·수수료·세금 요약을 조회한다."""
     body = await _post_tr(
@@ -1400,15 +1358,6 @@ async def _resync(config: Any, token: str) -> None:
         FEED.holdings_error = None
 
 
-async def _resync_daily_returns(config: Any, token: str) -> None:
-    """일별 수익률 조회 실패가 계좌 잔고 스트림을 막지 않게 별도로 기록한다."""
-    try:
-        FEED.sync_daily_returns(await _fetch_daily_returns(config, token))
-    except Exception as exc:  # noqa: BLE001 - 그래프만 비활성화하고 계좌 스트림은 유지한다
-        FEED.daily_returns_error = _ls_error_detail(exc)[:300]
-    else:
-        FEED.daily_returns_error = None
-
 
 async def _resync_today_activity(config: Any, token: str) -> None:
     """당일 매매 요약 실패가 계좌 잔고 스트림을 막지 않게 별도로 기록한다."""
@@ -1454,7 +1403,6 @@ async def _run_feed() -> None:
                 backoff = 1.0
                 # 체결이 없어도 잔고는 보여야 한다. 붙자마자 한 번 맞춘다.
                 await _resync(config, token)
-                await _resync_daily_returns(config, token)
                 await _resync_today_activity(config, token)
 
                 async for raw in socket:
@@ -1559,11 +1507,6 @@ async def portfolio_live(limit: int = 50) -> dict[str, Any]:
             **(FEED.holdings or {"net_asset": None, "realized_pnl": None,
                                  "purchase_amount": None, "valuation": None,
                                  "valuation_pnl": None, "rows": []}),
-        },
-        "performance": {
-            "daily_returns": FEED.daily_returns,
-            "as_of": FEED.daily_returns_as_of,
-            "error": FEED.daily_returns_error,
         },
         "today_activity": {
             "as_of": FEED.today_activity_as_of,
@@ -1807,7 +1750,7 @@ async def portfolio_ledger(days: int = LEDGER_DAYS) -> dict[str, Any]:
 
 
 __all__ = ["router", "ENABLE_LS_ORDER_EVENTS", "ENABLE_LS_MARKET_DATA", "ENABLE_LS_ACCOUNT_DATA", "KIND_LABELS", "normalize_order_event",
-           "normalize_holdings", "normalize_daily_returns", "normalize_today_activity", "normalize_ledger",
+           "normalize_holdings", "normalize_today_activity", "normalize_ledger",
            "normalize_accepted_orders",
            "normalize_market_ranking",
            "ledger_to_order_events", "merge_order_events", "build_pnl", "apply_fill",
@@ -1902,14 +1845,6 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
     assert row["symbol"] == "005930" and row["quantity"] == "10"
     assert row["average_cost"] == "70000" and row["return_rate"] == "1.42"
     assert not any(k.startswith("t0424") for k in holdings)
-
-    # 일별 수익률도 브로커 필드명을 화면 계약으로만 내보낸다
-    daily_returns = normalize_daily_returns({
-        "FOCCQ33600OutBlock3": [
-            {"BaseDt": "20260818", "TermErnrat": Decimal("1.25"), "Idx": Decimal("101.25")},
-        ],
-    })
-    assert daily_returns == [{"date": "20260818", "return_rate": "1.25"}]
 
     today_activity = normalize_today_activity({
         "t0150OutBlock": {
