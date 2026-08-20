@@ -18,6 +18,11 @@ COPY apps/api/conditional_rule_worker.py /app/apps/api/conditional_rule_worker.p
 COPY orchestration/__init__.py /app/orchestration/__init__.py
 COPY orchestration/conditional_rules /app/orchestration/conditional_rules
 
+# Git worktrees can inherit restrictive directory modes from the deployment
+# host.  The worker deliberately runs as an unprivileged UID, so normalize the
+# copied source tree before dropping privileges.
+RUN chmod -R a+rX /app
+
 USER 65532:65532
 
 CMD ["python", "-m", "apps.api.conditional_rule_worker"]
