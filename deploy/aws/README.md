@@ -71,11 +71,14 @@ The source `.env` must contain valid values for:
   `MCP_TRADING_ORDER_API_KEY`, `TRADING_SERVICE_AUTH_SECRET`,
   `TRADING_INTERNAL_SERVICE_AUTH_SECRET`, and
   `CEO_DISCORD_INGRESS_API_KEY`;
-- four distinct, URL-safe, at-least-32-character private database credentials
+- six distinct, URL-safe, at-least-32-character private database credentials
   `HEDGEFUND_RUNTIME_DB_PASSWORD`, `HEDGEFUND_ORDER_DB_PASSWORD`,
   `HEDGEFUND_TRADING_DB_PASSWORD`, and
-  `HEDGEFUND_ACCOUNTING_DB_PASSWORD`.  These four and the four service
-  credentials must be eight different values.
+  `HEDGEFUND_ACCOUNTING_DB_PASSWORD`,
+  `HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD`, and
+  `HEDGEFUND_CONDITIONAL_WORKER_DB_PASSWORD`. These six and the four service
+  credentials must be ten different values. The two conditional-rule logins
+  cannot assume each other's role and neither can write USER_DIRECTIVE rows.
 
 `PORTFOLIO_CORS_ALLOW_ORIGINS` is optional while no browser UI is deployed.
 Leave it absent or empty to deny every browser cross-origin read.  After a UI
@@ -98,7 +101,7 @@ verified through Supabase Auth `/user`; never put an `sb_secret_` or service
 role key in either browser-key setting.
 
 `scripts/configure_paper_order_env.py --runtime aws` can atomically
-create/preserve all eight service/database credentials without printing their
+create/preserve all ten service/database credentials without printing their
 values.  Invalid, short, duplicate, placeholder or non-URL-safe database
 credentials are independently rotated.  The deployer imports
 the existing `.env` once into the mode-0600 file
@@ -151,10 +154,10 @@ The deployment sequence is fail-closed:
 
 1. fetch into the dedicated bare repository and create a detached worktree;
 2. validate the secret contract and merged Compose model without printing it;
-3. build only the LS realtime reader, five PAPER order-path services and two
+3. build only the LS realtime reader, bounded PAPER order-path services and two
    one-shot database jobs before touching running services; when a previous
-   release exists, first rebuild its five local managed images from that exact
-   worktree and protect all six prior image IDs (including external Trading
+   release exists, first rebuild its local managed images from that exact
+   worktree and protect all prior image IDs (including external Trading
    Hermes) under private rollback tags, so mutable Compose tags cannot defeat
    rollback. Existing external images are never refreshed merely because a
    mutable tag exists;
@@ -164,7 +167,7 @@ The deployment sequence is fail-closed:
    a first deployment with no container skips this empty/initial backup;
 5. start/reuse only `timescaledb`, create `control`, replay all 88 Supabase
    migrations there, replay all 8 Timescale migrations in `market` with
-   per-file atomic history, and idempotently provision/audit the four
+   per-file atomic history, and idempotently provision/audit the six
    non-superuser runtime logins;
 6. read the LS KRX instrument master, cross-check the repository-reviewed 2026
    exchange calendar against observed daily bars, and fail unless the full

@@ -108,3 +108,49 @@ def test_research_read_apis_never_execute_session_default_read_only_sql():
     assert executed_literals.count("set transaction read only") == 2
     assert not any("default_transaction_read_only" in statement
                    for statement in executed_literals)
+
+
+def test_higher_intraday_bars_are_canonically_derived_from_final_one_minute_rows(
+    monkeypatch,
+):
+    captured = {}
+    monkeypatch.setattr(market_api, "_iid_or_404", lambda _symbol: "instrument-1")
+    monkeypatch.setattr(
+        market_api,
+        "_query",
+        lambda statement, params: captured.update(
+            {"statement": " ".join(statement.split()), "params": params}
+        )
+        or [],
+    )
+    monkeypatch.setenv("MARKET_BAR_BASE_SOURCE", "ls_chart")
+
+    assert market_api.bars(
+        "005930", interval="5M", limit=30, source=None, to=None
+    ) == []
+
+    assert "time_bucket(interval '5 minutes'" in captured["statement"]
+    assert "interval_code = '1M'" in captured["statement"]
+    assert "bool_and(is_final)" in captured["statement"]
+    assert "count(*) = count(distinct bucket_time)" in captured["statement"]
+    assert "max(bucket_time) - min(bucket_time)" in captured["statement"]
+    assert "'derived_1m'::text as source" in captured["statement"]
+    assert captured["params"] == ("instrument-1", "ls_chart", 30)
+
+
+def test_one_minute_bar_reads_remain_direct(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(market_api, "_iid_or_404", lambda _symbol: "instrument-1")
+    monkeypatch.setattr(
+        market_api,
+        "_query",
+        lambda statement, params: captured.update(
+            {"statement": " ".join(statement.split()), "params": params}
+        )
+        or [],
+    )
+
+    market_api.bars("005930", interval="1M", limit=10, source=None, to=None)
+
+    assert "time_bucket" not in captured["statement"]
+    assert captured["params"] == ("instrument-1", "1M", 10)

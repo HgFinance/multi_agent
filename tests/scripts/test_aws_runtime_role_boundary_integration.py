@@ -194,7 +194,7 @@ def test_fresh_aws_runtime_roles_support_bff_and_isolate_paper_mutations() -> No
                   from pg_auth_members membership
                   join pg_roles member on member.oid=membership.member
                   join pg_roles granted on granted.oid=membership.roleid
-                 where member.rolname like 'hgfinance%%runtime'
+                 where member.rolname like 'hgfinance%%'
                  order by member.rolname,granted.rolname
                 """
             )
@@ -211,6 +211,10 @@ def test_fresh_aws_runtime_roles_support_bff_and_isolate_paper_mutations() -> No
         "hgfinance_order_runtime": {"svc_order_orchestrator"},
         "hgfinance_trading_runtime": {"svc_trading_api"},
         "hgfinance_accounting_runtime": {"svc_accounting_ledger"},
+        "hgfinance_conditional_orchestrator": {
+            "svc_conditional_rule_orchestrator"
+        },
+        "hgfinance_conditional_worker": {"svc_conditional_rule_worker"},
     }
     for login, expected in exact.items():
         assert {row[1] for row in rows if row[0] == login} == expected

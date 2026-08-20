@@ -15,6 +15,8 @@ x-market-database-url: &market-database-url "postgresql://hgfinance_runtime:${HE
 x-order-database-url: &order-database-url "postgresql://hgfinance_order_runtime:${HEDGEFUND_ORDER_DB_PASSWORD:?HEDGEFUND_ORDER_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}"
 x-trading-database-url: &trading-database-url "postgresql://hgfinance_trading_runtime:${HEDGEFUND_TRADING_DB_PASSWORD:?HEDGEFUND_TRADING_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_trading_api"
 x-accounting-database-url: &accounting-database-url "postgresql://hgfinance_accounting_runtime:${HEDGEFUND_ACCOUNTING_DB_PASSWORD:?HEDGEFUND_ACCOUNTING_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_accounting_ledger"
+x-conditional-orchestrator-database-url: &conditional-orchestrator-database-url "postgresql://hgfinance_conditional_orchestrator:${HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD:?HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_conditional_rule_orchestrator"
+x-conditional-worker-database-url: &conditional-worker-database-url "postgresql://hgfinance_conditional_worker:${HEDGEFUND_CONDITIONAL_WORKER_DB_PASSWORD:?HEDGEFUND_CONDITIONAL_WORKER_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_conditional_rule_worker"
 x-control-environment: &control-environment
   DATABASE_URL: *control-database-url
 x-control-session-environment: &control-session-environment
@@ -58,6 +60,8 @@ services:
       HEDGEFUND_ORDER_DB_PASSWORD: ${HEDGEFUND_ORDER_DB_PASSWORD:?HEDGEFUND_ORDER_DB_PASSWORD is required}
       HEDGEFUND_TRADING_DB_PASSWORD: ${HEDGEFUND_TRADING_DB_PASSWORD:?HEDGEFUND_TRADING_DB_PASSWORD is required}
       HEDGEFUND_ACCOUNTING_DB_PASSWORD: ${HEDGEFUND_ACCOUNTING_DB_PASSWORD:?HEDGEFUND_ACCOUNTING_DB_PASSWORD is required}
+      HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD: ${HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD:?HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD is required}
+      HEDGEFUND_CONDITIONAL_WORKER_DB_PASSWORD: ${HEDGEFUND_CONDITIONAL_WORKER_DB_PASSWORD:?HEDGEFUND_CONDITIONAL_WORKER_DB_PASSWORD is required}
       HEDGEFUND_CONTROL_DB_NAME: ${HEDGEFUND_CONTROL_DB_NAME:-control}
       HGFINANCE_MIGRATION_TIMEOUT_SECONDS: ${HGFINANCE_MIGRATION_TIMEOUT_SECONDS:-1800}
       HGFINANCE_MIGRATION_LOCK_TIMEOUT_SECONDS: ${HGFINANCE_MIGRATION_LOCK_TIMEOUT_SECONDS:-120}
@@ -108,6 +112,8 @@ services:
       <<: *control-environment
       CONTROL_DATABASE_URL: *control-database-url
       ORDER_ORCHESTRATOR_DATABASE_URL: *order-database-url
+      CONDITIONAL_RULE_DATABASE_URL: *conditional-orchestrator-database-url
+      CONDITIONAL_RULE_DATABASE_ROLE: svc_conditional_rule_orchestrator
       APP_ENV: production
       PORTFOLIO_DATA_MODE: production
       PORTFOLIO_AUTH_MODE: supabase_jwt
@@ -153,6 +159,25 @@ services:
       APP_ENV: production
       PORTFOLIO_DATA_MODE: production
       PORTFOLIO_AUTH_MODE: supabase_jwt
+
+  conditional-rule-worker:
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      trading-api:
+        condition: service_healthy
+      market-api:
+        condition: service_started
+    environment:
+      APP_ENV: production
+      DATABASE_URL: *conditional-worker-database-url
+      CONDITIONAL_RULE_DATABASE_URL: *conditional-worker-database-url
+      CONDITIONAL_RULE_WORKER_DATABASE_ROLE: svc_conditional_rule_worker
+      TRADING_API_URL: http://trading-api:8000
+      MARKET_API_URL: http://market-api:8036
+      TRADING_INTERNAL_SERVICE_AUTH_SECRET: ${TRADING_INTERNAL_SERVICE_AUTH_SECRET:?A separate 32-byte internal Trading auth secret is required}
+      TRADING_INTERNAL_SERVICE_AUTH_ISSUER: ${TRADING_INTERNAL_SERVICE_AUTH_ISSUER:-hedgefund-service-issuer}
+      TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE: ${TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE:-trading-api}
 
   portfolio-worker:
     depends_on: *control-dependency

@@ -85,6 +85,12 @@ def _required_service() -> UserDirectiveService:
     return _service
 
 
+def required_directive_service() -> UserDirectiveService:
+    """Return the configured service for other authenticated internal routes."""
+
+    return _required_service()
+
+
 @router.post("", status_code=202)
 def submit_user_directive(
     body: UserDirectiveRequest,
@@ -116,6 +122,7 @@ def get_user_directive(
 
 __all__ = [
     "configure_directive_runtime",
+    "required_directive_service",
     "router",
     "set_directive_service_for_tests",
 ]

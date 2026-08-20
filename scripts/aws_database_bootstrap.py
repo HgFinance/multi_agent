@@ -49,17 +49,28 @@ GENERIC_RUNTIME_LOGIN = "hgfinance_runtime"
 ORDER_RUNTIME_LOGIN = "hgfinance_order_runtime"
 TRADING_RUNTIME_LOGIN = "hgfinance_trading_runtime"
 ACCOUNTING_RUNTIME_LOGIN = "hgfinance_accounting_runtime"
+CONDITIONAL_ORCHESTRATOR_RUNTIME_LOGIN = "hgfinance_conditional_orchestrator"
+CONDITIONAL_WORKER_RUNTIME_LOGIN = "hgfinance_conditional_worker"
 RUNTIME_LOGIN_PASSWORD_KEYS = {
     GENERIC_RUNTIME_LOGIN: "HEDGEFUND_RUNTIME_DB_PASSWORD",
     ORDER_RUNTIME_LOGIN: "HEDGEFUND_ORDER_DB_PASSWORD",
     TRADING_RUNTIME_LOGIN: "HEDGEFUND_TRADING_DB_PASSWORD",
     ACCOUNTING_RUNTIME_LOGIN: "HEDGEFUND_ACCOUNTING_DB_PASSWORD",
+    CONDITIONAL_ORCHESTRATOR_RUNTIME_LOGIN: (
+        "HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD"
+    ),
+    CONDITIONAL_WORKER_RUNTIME_LOGIN: "HEDGEFUND_CONDITIONAL_WORKER_DB_PASSWORD",
 }
 RUNTIME_LOGIN_MEMBERSHIPS = {
     GENERIC_RUNTIME_LOGIN: ("service_role", True),
     ORDER_RUNTIME_LOGIN: ("svc_order_orchestrator", False),
     TRADING_RUNTIME_LOGIN: ("svc_trading_api", False),
     ACCOUNTING_RUNTIME_LOGIN: ("svc_accounting_ledger", False),
+    CONDITIONAL_ORCHESTRATOR_RUNTIME_LOGIN: (
+        "svc_conditional_rule_orchestrator",
+        False,
+    ),
+    CONDITIONAL_WORKER_RUNTIME_LOGIN: ("svc_conditional_rule_worker", False),
 }
 GENERIC_RUNTIME_SET_ROLES = (
     "svc_quant",
@@ -623,7 +634,7 @@ def replay_market_migrations(
 
 
 def runtime_login_passwords() -> dict[str, str]:
-    """Load four non-disclosing, distinct URL-safe runtime passwords."""
+    """Load non-disclosing, distinct URL-safe runtime passwords."""
 
     passwords: dict[str, str] = {}
     invalid: list[str] = []

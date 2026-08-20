@@ -28,7 +28,8 @@ services:
   #   컨테이너별로 갈라진다. DB store가 들어오기 전까지 단일 인스턴스로 둔다.
   trading-api:
     build:
-      context: .
+      context: ../..
+      dockerfile: departments/02-trading/Dockerfile
     container_name: hedgefund-trading-api
     restart: unless-stopped
     logging:
@@ -71,7 +72,8 @@ services:
 
   trading-directive-worker:
     build:
-      context: .
+      context: ../..
+      dockerfile: departments/02-trading/Dockerfile
     container_name: hedgefund-trading-directive-worker
     restart: unless-stopped
     command: ["python", "-m", "directives.worker"]
@@ -108,7 +110,8 @@ services:
   #   outbox를 폴링하며 조용히 아무것도 안 한다.
   trading-outbox-relay:
     build:
-      context: .
+      context: ../..
+      dockerfile: departments/02-trading/Dockerfile
     container_name: hedgefund-trading-outbox-relay
     restart: unless-stopped
     logging:

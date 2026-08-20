@@ -33,6 +33,7 @@ MANAGED_RELEASE_SERVICE_SPECS=(
   "hedgefund-trading-api:trading-api"
   "hedgefund-paper-order-orchestrator-mcp:paper-order-orchestrator-mcp"
   "hedgefund-portfolio-bff:portfolio-bff"
+  "hedgefund-conditional-rule-worker:conditional-rule-worker"
   "hedgefund-ceo-hermes:ceo-hermes"
   "hedgefund-trading-hermes:trading-hermes"
 )
@@ -237,6 +238,8 @@ required = (
     "HEDGEFUND_ORDER_DB_PASSWORD",
     "HEDGEFUND_TRADING_DB_PASSWORD",
     "HEDGEFUND_ACCOUNTING_DB_PASSWORD",
+    "HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD",
+    "HEDGEFUND_CONDITIONAL_WORKER_DB_PASSWORD",
     "DISCORD_ACTOR_MAP",
     "LS_APP_KEY",
     "LS_APP_SECRET_KEY",
@@ -313,6 +316,8 @@ managed_secret_keys = (
     "HEDGEFUND_ORDER_DB_PASSWORD",
     "HEDGEFUND_TRADING_DB_PASSWORD",
     "HEDGEFUND_ACCOUNTING_DB_PASSWORD",
+    "HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD",
+    "HEDGEFUND_CONDITIONAL_WORKER_DB_PASSWORD",
 )
 managed_secrets = [values[key] for key in managed_secret_keys]
 if any(len(secret) < 32 for secret in managed_secrets) or len(
@@ -325,6 +330,8 @@ database_secret_keys = (
     "HEDGEFUND_ORDER_DB_PASSWORD",
     "HEDGEFUND_TRADING_DB_PASSWORD",
     "HEDGEFUND_ACCOUNTING_DB_PASSWORD",
+    "HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD",
+    "HEDGEFUND_CONDITIONAL_WORKER_DB_PASSWORD",
 )
 if any(
     not re.fullmatch(r"[A-Za-z0-9._~-]+", values[key])
@@ -661,12 +668,13 @@ capture_rollback_images() {
   previous_commit="${PREVIOUS_RELEASE##*/}"
   [[ "$previous_commit" =~ ^[0-9a-f]{40,64}$ ]] || return 1
   compose_release "$PREVIOUS_RELEASE" config --quiet || return 1
-  # Rebuild the four local order-path images from the exact previous worktree.
+  # Rebuild the local order-path images from the exact previous worktree.
   # This also repairs a mutable tag that an out-of-band legacy Compose command
   # may have overwritten. The external Trading Hermes image is instead taken
   # from its release-owned running container below.
   compose_release "$PREVIOUS_RELEASE" build \
-    ls-realtime trading-api paper-order-orchestrator-mcp portfolio-bff ceo-hermes \
+    ls-realtime trading-api paper-order-orchestrator-mcp portfolio-bff \
+    conditional-rule-worker ceo-hermes \
     || return 1
   expected_images="$(compose_release "$PREVIOUS_RELEASE" config --images)" || return 1
   assert_release_owned_container \
@@ -730,7 +738,7 @@ activate_release_services() {
   local release_path="$1"
   stop_order_hermes || return 1
   # Keep every unrelated team service and image untouched. Only shared Redis,
-  # the LS market-data reader and the five PAPER order-path services belong to
+  # the LS market-data reader and bounded PAPER order-path services belong to
   # this bounded release switch.
   compose_release "$release_path" up -d --no-deps redis || return 1
   wait_container hedgefund-timescaledb 240 || return 1
@@ -744,14 +752,16 @@ activate_release_services() {
   compose_release "$release_path" up -d --no-deps --force-recreate trading-api || return 1
   wait_container hedgefund-trading-api 240 || return 1
   compose_release "$release_path" up -d --no-deps --force-recreate \
-    paper-order-orchestrator-mcp portfolio-bff || return 1
+    paper-order-orchestrator-mcp portfolio-bff conditional-rule-worker || return 1
   wait_container hedgefund-paper-order-orchestrator-mcp 240 || return 1
   wait_http_ready hedgefund-portfolio-bff 8000 /health/ready 240 || return 1
+  wait_container hedgefund-conditional-rule-worker 240 || return 1
   wait_http_ready hedgefund-accounting-api 8000 /health/ready 180 || return 1
 
   assert_release_owned_container "$release_path" hedgefund-trading-api trading-api || return 1
   assert_release_owned_container "$release_path" hedgefund-paper-order-orchestrator-mcp paper-order-orchestrator-mcp || return 1
   assert_release_owned_container "$release_path" hedgefund-portfolio-bff portfolio-bff || return 1
+  assert_release_owned_container "$release_path" hedgefund-conditional-rule-worker conditional-rule-worker || return 1
 
   compose_release "$release_path" up -d --no-deps --force-recreate \
     ceo-hermes trading-hermes || return 1
@@ -865,7 +875,8 @@ capture_rollback_images
 say "Validating and building release $RELEASE_COMMIT..."
 compose_release "$RELEASE" config --quiet
 compose_release "$RELEASE" --profile deployment build --pull \
-  ls-realtime trading-api paper-order-orchestrator-mcp portfolio-bff ceo-hermes \
+  ls-realtime trading-api paper-order-orchestrator-mcp portfolio-bff \
+  conditional-rule-worker ceo-hermes \
   database-bootstrap reference-bootstrap
 EXTERNAL_PULL_PLAN="$(
   compose_release "$RELEASE" --profile deployment config --format json \

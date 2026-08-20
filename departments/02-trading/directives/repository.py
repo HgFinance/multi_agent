@@ -198,6 +198,7 @@ class DirectiveRepository(Protocol):
     def resolve_instrument(self, fund_id: UUID, book_id: UUID, instrument_id: UUID | None, symbol: str) -> InstrumentRef: ...
     def available_cash(self, fund_id: UUID, book_id: UUID, currency: str) -> Decimal: ...
     def sellable_quantity(self, fund_id: UUID, book_id: UUID, instrument_id: UUID) -> Decimal: ...
+    def average_cost(self, fund_id: UUID, book_id: UUID, instrument_id: UUID) -> Decimal: ...
     def positions(self, fund_id: UUID, book_id: UUID) -> list[tuple[InstrumentRef, Decimal]]: ...
     def market_session_close(self, *, now: datetime) -> datetime: ...
     def create_acknowledged_leg(self, record: DirectiveRecord, instrument: InstrumentRef, *, side: str, order_type: str, quantity: Decimal, limit_price: Decimal | None, reserve_cash: Decimal | None, reduce_only: bool, expires_at: datetime) -> DirectiveLeg: ...
@@ -224,6 +225,7 @@ class _MemoryState:
     session_opens_at: datetime | None = None
     session_closes_at: datetime | None = None
     positions: dict[tuple[UUID, UUID, UUID], Decimal] = field(default_factory=dict)
+    average_costs: dict[tuple[UUID, UUID, UUID], Decimal] = field(default_factory=dict)
     cash: dict[tuple[UUID, UUID, str], Decimal] = field(default_factory=dict)
     reservations: dict[UUID, tuple[str, UUID, UUID, UUID | None, Decimal, str | None, bool]] = field(default_factory=dict)
     barriers: dict[tuple[UUID, UUID], tuple[UUID, int, bool]] = field(default_factory=dict)
@@ -253,8 +255,18 @@ class InMemoryDirectiveRepository:
         self.state.session_opens_at = opens_at
         self.state.session_closes_at = closes_at
 
-    def set_position(self, fund_id: UUID, book_id: UUID, instrument_id: UUID, quantity: Decimal) -> None:
+    def set_position(
+        self,
+        fund_id: UUID,
+        book_id: UUID,
+        instrument_id: UUID,
+        quantity: Decimal,
+        *,
+        average_cost: Decimal | None = None,
+    ) -> None:
         self.state.positions[(fund_id, book_id, instrument_id)] = Decimal(quantity)
+        if average_cost is not None:
+            self.state.average_costs[(fund_id, book_id, instrument_id)] = Decimal(average_cost)
 
     def set_cash(self, fund_id: UUID, book_id: UUID, currency: str, amount: Decimal) -> None:
         self.state.cash[(fund_id, book_id, currency)] = Decimal(amount)
@@ -408,6 +420,11 @@ class InMemoryDirectiveRepository:
             if active and kind == "POSITION" and f == fund_id and b == book_id and inst == instrument_id
         )
         return max(gross - reserved, Decimal(0))
+
+    def average_cost(self, fund_id: UUID, book_id: UUID, instrument_id: UUID) -> Decimal:
+        return self.state.average_costs.get(
+            (fund_id, book_id, instrument_id), Decimal(0)
+        )
 
     def positions(self, fund_id: UUID, book_id: UUID) -> list[tuple[InstrumentRef, Decimal]]:
         result = []
@@ -1231,6 +1248,23 @@ class PostgresDirectiveRepository:
             )
             reserved = Decimal(cur.fetchone()[0])
         return max(gross - reserved, Decimal(0))
+
+    def average_cost(self, fund_id: UUID, book_id: UUID, instrument_id: UUID) -> Decimal:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                select coalesce(
+                         sum(quantity * average_cost)
+                           / nullif(sum(quantity), 0),
+                         0
+                       )
+                  from accounting.positions
+                 where fund_id=%s and book_id=%s and instrument_id=%s
+                   and quantity > 0 and average_cost is not null
+                """,
+                (fund_id, book_id, instrument_id),
+            )
+            return Decimal(cur.fetchone()[0] or 0)
 
     def positions(self, fund_id: UUID, book_id: UUID) -> list[tuple[InstrumentRef, Decimal]]:
         with self._cursor() as cur:

@@ -13,6 +13,7 @@ from broker.paper_policy import participation_cap
 
 from .auth import (
     DirectiveAuthError,
+    DirectiveProof,
     bind_proof,
     bind_read_proof,
     decode_directive_proof,
@@ -166,8 +167,42 @@ class UserDirectiveService:
         try:
             proof = decode_directive_proof(authorization, now=current_time.timestamp())
             bind_proof(proof, request)
-            record, created = self.repository.accept(request, proof)
         except Exception as exc:  # authentication/admission is fail-closed
+            raise _translate(exc) from exc
+
+        return self._submit_bound(request, proof, current_time=current_time)
+
+    def submit_trusted_rule(
+        self,
+        request: UserDirectiveRequest,
+        proof: DirectiveProof,
+        *,
+        now: datetime | None = None,
+    ) -> DirectiveRecord:
+        """Submit one DB-verified standing rule through the same mechanical gate.
+
+        Only the internal conditional-rule route constructs ``proof`` after it
+        verifies the durable rule/trigger/execution lineage.  No Hermes or
+        browser field can select the authority identifiers on this path.
+        """
+
+        current_time = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        try:
+            bind_proof(proof, request)
+        except Exception as exc:
+            raise _translate(exc) from exc
+        return self._submit_bound(request, proof, current_time=current_time)
+
+    def _submit_bound(
+        self,
+        request: UserDirectiveRequest,
+        proof: DirectiveProof,
+        *,
+        current_time: datetime,
+    ) -> DirectiveRecord:
+        try:
+            record, created = self.repository.accept(request, proof)
+        except Exception as exc:
             raise _translate(exc) from exc
 
         if not created and record.state not in {DirectiveState.RECEIVED, DirectiveState.RUNNING}:

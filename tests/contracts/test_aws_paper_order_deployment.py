@@ -105,6 +105,8 @@ def test_overlay_separates_private_control_and_market_databases() -> None:
         "HEDGEFUND_ORDER_DB_PASSWORD",
         "HEDGEFUND_TRADING_DB_PASSWORD",
         "HEDGEFUND_ACCOUNTING_DB_PASSWORD",
+        "HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD",
+        "HEDGEFUND_CONDITIONAL_WORKER_DB_PASSWORD",
     ):
         assert key in bootstrap["environment"]
     assert bootstrap["command"][-1] == "--seed-paper-principal"
@@ -172,6 +174,39 @@ def test_production_bff_uses_supabase_jwt_but_private_operational_data() -> None
         "${DISCORD_ACTOR_MAP:?DISCORD_ACTOR_MAP is required}"
     )
     assert "SUPABASE_SERVICE_ROLE_KEY" not in environment
+
+
+def test_conditional_rule_runtime_uses_two_dedicated_logins() -> None:
+    overlay = _yaml(OVERLAY_PATH)
+    services = overlay["services"]
+    bff = services["portfolio-bff"]["environment"]
+    worker = services["conditional-rule-worker"]["environment"]
+
+    assert "postgresql://hgfinance_conditional_orchestrator:" in bff[
+        "CONDITIONAL_RULE_DATABASE_URL"
+    ]
+    assert bff["CONDITIONAL_RULE_DATABASE_ROLE"] == (
+        "svc_conditional_rule_orchestrator"
+    )
+    assert "postgresql://hgfinance_conditional_worker:" in worker[
+        "CONDITIONAL_RULE_DATABASE_URL"
+    ]
+    assert worker["CONDITIONAL_RULE_WORKER_DATABASE_ROLE"] == (
+        "svc_conditional_rule_worker"
+    )
+    assert worker["TRADING_API_URL"] == "http://trading-api:8000"
+    assert worker["MARKET_API_URL"] == "http://market-api:8036"
+    assert "TRADING_SERVICE_AUTH_SECRET" not in worker
+    assert "MCP_TRADING_ORDER_API_KEY" not in worker
+    root = _yaml(ROOT / "docker-compose.yml")
+    assert root["services"]["conditional-rule-worker"]["build"]["dockerfile"] == (
+        "Dockerfile.conditional-rule-worker"
+    )
+    worker_image = (ROOT / "Dockerfile.conditional-rule-worker").read_text(
+        encoding="utf-8"
+    )
+    assert "hermes" not in worker_image.casefold()
+    assert "USER 65532:65532" in worker_image
 
 
 def test_discord_ingress_secret_is_scoped_to_bff_and_order_gateways() -> None:
@@ -469,7 +504,10 @@ def test_release_script_is_worktree_only_and_fail_closed() -> None:
     assert "non_order_services" not in activation
     assert "--remove-orphans" not in activation
     assert 'force-recreate trading-api || return 1' in activation
-    assert 'paper-order-orchestrator-mcp portfolio-bff || return 1' in activation
+    assert (
+        'paper-order-orchestrator-mcp portfolio-bff conditional-rule-worker '
+        '|| return 1'
+    ) in activation
     assert 'ceo-hermes trading-hermes || return 1' in activation
     assert (
         activation.index('force-recreate trading-api')
@@ -520,10 +558,12 @@ def test_release_script_is_worktree_only_and_fail_closed() -> None:
         "HEDGEFUND_ORDER_DB_PASSWORD",
         "HEDGEFUND_TRADING_DB_PASSWORD",
         "HEDGEFUND_ACCOUNTING_DB_PASSWORD",
+        "HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD",
+        "HEDGEFUND_CONDITIONAL_WORKER_DB_PASSWORD",
     ):
         assert f'"{key}"' in required
     managed = script.split("managed_secret_keys = (", 1)[1].split("\n)", 1)[0]
-    assert managed.count('"') == 16
+    assert managed.count('"') == 20
     assert "set(managed_secrets)" in script
     assert ") != len(managed_secret_keys):" in script
     assert "PAPER managed secrets must be distinct and at least 32 characters" in script

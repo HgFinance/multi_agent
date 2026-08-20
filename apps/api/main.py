@@ -83,9 +83,11 @@ from apps.api import hermes_boundary
 try:
     from .ceo import router as ceo_router
     from .ceo_mirror_api import router as ceo_mirror_router
+    from .conditional_rules import router as conditional_rules_router
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
     from ceo import router as ceo_router
     from ceo_mirror_api import router as ceo_mirror_router
+    from conditional_rules import router as conditional_rules_router
 import trading
 from account_snapshot import router as account_snapshot_router
 from agent_status import agent_status_snapshot
@@ -381,6 +383,7 @@ app.include_router(portfolio_live_router)
 app.include_router(risk_router)
 app.include_router(qa_router)
 app.include_router(user_orders_router)
+app.include_router(conditional_rules_router)
 
 
 # Browser는 Domain API를 직접 호출하지 않는다. Mandate 변경은 CEO Office가 소유하므로

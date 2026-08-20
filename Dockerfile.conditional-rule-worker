@@ -1,0 +1,23 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app
+
+RUN pip install --no-cache-dir \
+    pydantic==2.13.3 \
+    PyJWT==2.13.0 \
+    psycopg2-binary==2.9.12
+
+# Keep the evaluator image free of agent CLIs, browser/BFF code, broker adapters,
+# and department credentials. Only the loop entry point and deterministic
+# rule package are present.
+COPY apps/api/conditional_rule_worker.py /app/apps/api/conditional_rule_worker.py
+COPY orchestration/__init__.py /app/orchestration/__init__.py
+COPY orchestration/conditional_rules /app/orchestration/conditional_rules
+
+USER 65532:65532
+
+CMD ["python", "-m", "apps.api.conditional_rule_worker"]

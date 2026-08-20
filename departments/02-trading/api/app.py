@@ -73,6 +73,7 @@ from oms import OrderStore
 from store_postgres import OrderStorePersistenceError, PostgresOrderStore
 from paper_broker import PaperBroker, Quote
 from directive_routes import configure_directive_runtime, router as directive_router
+from conditional_rule_routes import router as conditional_rule_router
 from directives.service import DirectiveServiceError, require_paper_execution_mode
 from internal_service_auth import (
     BROKER_EVENT_POLICY,
@@ -92,6 +93,7 @@ API_VERSION = "v1"
 
 app = FastAPI(title="Trading Domain API", version=API_VERSION)
 app.include_router(directive_router)
+app.include_router(conditional_rule_router)
 
 
 @app.on_event("startup")

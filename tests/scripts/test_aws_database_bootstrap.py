@@ -24,10 +24,10 @@ def test_discovers_complete_unique_canonical_chains() -> None:
         bootstrap.MARKET_MIGRATIONS, bootstrap.MARKET_PATTERN
     )
 
-    assert len(control) == 90
+    assert len(control) == 93
     assert len(market) == 8
     assert control[-1].path.name == (
-        "20260819000300_dataset_builder_runtime_role.sql"
+        "20260820000300_conditional_paper_rules.sql"
     )
     assert market[-1].path.name == "008_microstructure_depth_capacity.sql"
     assert len({migration.version for migration in control}) == len(control)
@@ -103,12 +103,21 @@ def test_runtime_login_contract_has_one_exact_settable_role_per_login() -> None:
         "hgfinance_order_runtime": ("svc_order_orchestrator", False),
         "hgfinance_trading_runtime": ("svc_trading_api", False),
         "hgfinance_accounting_runtime": ("svc_accounting_ledger", False),
+        "hgfinance_conditional_orchestrator": (
+            "svc_conditional_rule_orchestrator",
+            False,
+        ),
+        "hgfinance_conditional_worker": ("svc_conditional_rule_worker", False),
     }
     assert bootstrap.RUNTIME_LOGIN_PASSWORD_KEYS == {
         "hgfinance_runtime": "HEDGEFUND_RUNTIME_DB_PASSWORD",
         "hgfinance_order_runtime": "HEDGEFUND_ORDER_DB_PASSWORD",
         "hgfinance_trading_runtime": "HEDGEFUND_TRADING_DB_PASSWORD",
         "hgfinance_accounting_runtime": "HEDGEFUND_ACCOUNTING_DB_PASSWORD",
+        "hgfinance_conditional_orchestrator": (
+            "HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD"
+        ),
+        "hgfinance_conditional_worker": "HEDGEFUND_CONDITIONAL_WORKER_DB_PASSWORD",
     }
     assert bootstrap.GENERIC_RUNTIME_SET_ROLES == (
         "svc_quant",
@@ -121,6 +130,8 @@ def test_runtime_login_contract_has_one_exact_settable_role_per_login() -> None:
         "hgfinance_order_runtime",
         "hgfinance_trading_runtime",
         "hgfinance_accounting_runtime",
+        "hgfinance_conditional_orchestrator",
+        "hgfinance_conditional_worker",
     ):
         assert len(bootstrap._memberships_for_login(login)) == 1
         assert "service_role" not in bootstrap._memberships_for_login(login)
