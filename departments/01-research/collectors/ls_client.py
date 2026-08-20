@@ -69,7 +69,7 @@ class LsEnvironment:
     def from_env(cls, env: dict[str, str] | None = None) -> LsEnvironment:
         e = env or load_project_env()
         # 사용 가능 여부는 Registry 가 판정한다. 키가 없으면 여기서 예외다.
-        mode = (e.get("LS_ENV") or "PAPER").strip().upper()
+        mode = (e.get("LS_ENV") or "LIVE").strip().upper()
         if mode not in {"PAPER", "LIVE"}:
             raise LsApiError(f"LS_ENV must be PAPER or LIVE: {mode!r}")
 
@@ -488,7 +488,7 @@ def _check_env_and_rate_limit():
         raise AssertionError("per_sec=0 이 통과했다")
     except ValueError:
         pass
-    print("  환경 분리/Rate Limit      OK")
+    print("  환경 선택/Rate Limit      OK")
 
 
 def _fetch_and_report() -> int:

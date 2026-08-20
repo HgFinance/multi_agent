@@ -66,9 +66,9 @@ def test_local_configures_exact_authenticated_fixture_grant(tmp_path: Path) -> N
     )
     assert values["APP_ENV"] == "local"
     assert values["PORTFOLIO_AUTH_MODE"] == "fixture"
-    assert values["PORTFOLIO_AUTH_REQUIRED"] == "true"
+    assert values["PORTFOLIO_AUTH_REQUIRED"] == "false"
     assert values["USER_PAPER_ORDER_WORKFLOW_ENABLED"] == "true"
-    assert values["LS_ENV"] == "PAPER"
+    assert values["LS_ENV"] == "LIVE"
     assert values["TRADING_EXECUTION_MODE"] == "PAPER"
     assert values["TRADING_BROKER_ADAPTER"] == "paper"
     assert values["MCP_TRADING_ORDER_API_KEY"] == preserved
@@ -282,7 +282,8 @@ def test_aws_sets_production_contract_without_fixture_grants(
     assert values["PORTFOLIO_AUTH_REQUIRED"] == "true"
     assert values["USER_PAPER_ORDER_WORKFLOW_ENABLED"] == "true"
     assert values["PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON"] == "[]"
-    assert values["LS_MARKET_ENV"] == "LIVE"
+    assert values["LS_ENV"] == "LIVE"
+    assert "LS_MARKET_ENV" not in values
     assert values["HEDGEFUND_CONTROL_DB_NAME"] == "control"
     assert values["SUPABASE_URL"] == supabase_url
     assert values["HEDGEFUND_TSDB_PASSWORD"] == timescale_password

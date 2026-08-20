@@ -20,7 +20,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 from uuid import uuid4
 
@@ -88,6 +90,35 @@ PROFILE_CONTAINERS = {
 KANBAN_CLI_CONTAINER = os.getenv("KANBAN_CLI_CONTAINER", "hedgefund-qa-hermes")
 
 
+def local_binary() -> str:
+    """local 모드에서 실제로 실행 가능한 `hermes` 경로.
+
+    ## 왜 `HERMES_BIN` 을 그대로 믿지 않나 (2026-08-20 실측)
+
+    `.env` 의 `# [컨테이너 내부 경로]` 블록에 `HERMES_BIN=/usr/local/bin/hermes`
+    가 있고 `main.py` 가 그 파일을 `load_dotenv` 로 읽는다. 그래서 **컨테이너
+    경로가 호스트 BFF 프로세스까지 새어 들어와** 윈도우에서 그 경로를 실행하려다
+    `FileNotFoundError` 가 났고, 화면에는 "Hermes CLI를 찾을 수 없습니다"(503)만
+    떴다 - 정작 `hermes` 는 PATH 에 멀쩡히 있었다. Agent Logs 의 Kanban 보드가
+    통째로 안 뜬 원인이 이것이다.
+
+    `docker-compose.yml` 은 같은 값을 서비스마다 자기가 직접 적어 주므로
+    (`HERMES_BIN: /usr/local/bin/hermes`) `.env` 쪽 값을 무시해도 컨테이너 동작은
+    바뀌지 않는다.
+
+    **설정을 버리는 게 아니라 실행 가능할 때만 쓴다.** 리눅스 호스트에서 BFF 를
+    컨테이너 밖으로 돌리면 `/usr/local/bin/hermes` 가 진짜로 있을 수 있고, 그때는
+    그 값이 맞다. 없을 때만 PATH 로 떨어진다.
+    """
+
+    configured = os.environ.get("HERMES_BIN", "").strip()
+    if configured and (Path(configured).exists() or shutil.which(configured)):
+        return configured
+    # PATH 에도 없으면 이름 그대로 둔다 - 여기서 예외를 올리면 "설치 안 됨"과
+    # "경로 설정 오류"가 같은 자리에서 터져 호출부가 구분하지 못한다.
+    return shutil.which("hermes") or "hermes"
+
+
 def argv_for(department: str | None, tail: list[str]) -> list[str]:
     """실행 argv 를 만든다. shell 을 거치지 않으므로 사용자 문자열이 안전하다.
 
@@ -98,9 +129,8 @@ def argv_for(department: str | None, tail: list[str]) -> list[str]:
       에이전트(uid 1000)가 자기 파일을 못 쓴다.** 2026-08-11 에 보드 WAL 이
       root:root 가 돼 부서 워커의 `kanban_complete` 가 전부 실패했다.
     """
-    binary = os.environ.get("HERMES_BIN", "hermes")
     if HERMES_EXEC_MODE != "docker":
-        return [binary, *(["-p", department] if department else []), *tail]
+        return [local_binary(), *(["-p", department] if department else []), *tail]
     if department is None:
         return ["docker", "exec", "-u", "hermes", "-i", KANBAN_CLI_CONTAINER, "hermes", *tail]
     container = PROFILE_CONTAINERS.get(department)
@@ -279,6 +309,11 @@ def show_kanban_task(
             command,
             capture_output=True,
             text=True,
+            # 이 CLI 출력은 UTF-8 이다. 윈도우 기본(cp949)으로 디코드하면 한글
+            # 제목에서 UnicodeDecodeError 가 나고 **리더 스레드가 죽어 stdout 이
+            # None 이 된다** - 그러면 "잘못된 JSON"으로 보여 원인이 가려진다.
+            encoding="utf-8",
+            errors="replace",
             timeout=max(0.1, read_timeout),
             cwd=ROOT,
             env=cli_environment,
@@ -320,12 +355,17 @@ def list_kanban_tasks(*, timeout: float | None = None) -> tuple[dict[str, object
             read_timeout = float(os.getenv("CEO_PLANNING_READ_TIMEOUT_SECONDS", "2"))
     except ValueError:
         read_timeout = 2.0
-    command = [os.environ.get("HERMES_BIN", "hermes"), "kanban", "list", "--json"]
+    command = [local_binary(), "kanban", "list", "--json"]
     try:
         proc = subprocess.run(
             command,
             capture_output=True,
             text=True,
+            # 이 CLI 출력은 UTF-8 이다. 윈도우 기본(cp949)으로 디코드하면 한글
+            # 제목에서 UnicodeDecodeError 가 나고 **리더 스레드가 죽어 stdout 이
+            # None 이 된다** - 그러면 "잘못된 JSON"으로 보여 원인이 가려진다.
+            encoding="utf-8",
+            errors="replace",
             timeout=max(0.1, read_timeout),
             cwd=ROOT,
             env=cli_environment,
@@ -370,6 +410,11 @@ def comment_kanban_task(*, task_id: str, text: str) -> bool:
             command,
             capture_output=True,
             text=True,
+            # 이 CLI 출력은 UTF-8 이다. 윈도우 기본(cp949)으로 디코드하면 한글
+            # 제목에서 UnicodeDecodeError 가 나고 **리더 스레드가 죽어 stdout 이
+            # None 이 된다** - 그러면 "잘못된 JSON"으로 보여 원인이 가려진다.
+            encoding="utf-8",
+            errors="replace",
             timeout=float(os.getenv("KANBAN_CLI_TIMEOUT_SECONDS", "8")),
             cwd=ROOT,
             env=cli_environment,
@@ -548,8 +593,28 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
             raise AssertionError("모르는 프로필인데 argv 를 만들었다")
     finally:
         globals()["HERMES_EXEC_MODE"] = saved
-    # local 모드는 예전 동작 그대로여야 한다(AWS 가 이 경로다)
-    assert argv_for("ceo-agent", ["chat"])[:3] == ["hermes", "-p", "ceo-agent"]
+    # local 모드는 예전 동작 그대로여야 한다(AWS 가 이 경로다). 다만 binary 는
+    # 이제 `local_binary()` 가 푼 실행 가능한 경로다 - 이름만 같으면 된다.
+    local_argv = argv_for("ceo-agent", ["chat"])
+    assert local_argv[1:3] == ["-p", "ceo-agent"], local_argv
+    assert "hermes" in Path(local_argv[0]).name.casefold(), local_argv[0]
+
+    # ▶ `.env` 의 컨테이너 경로가 호스트로 새는 것을 막는다(2026-08-20 실측).
+    #   이게 없으면 윈도우에서 `/usr/local/bin/hermes` 를 실행하려다 503 이 뜬다.
+    with_bogus = dict(os.environ)
+    try:
+        os.environ["HERMES_BIN"] = "/usr/local/bin/hermes"   # 컨테이너 전용 경로
+        resolved = local_binary()
+        assert resolved != "/usr/local/bin/hermes" or Path(resolved).exists(), (
+            "존재하지 않는 컨테이너 경로를 그대로 실행하려 한다: " + resolved
+        )
+        # 실제로 있는 경로는 존중한다 - 리눅스 호스트에서 BFF 를 컨테이너 밖으로
+        # 돌리는 배치가 그 경우다.
+        os.environ["HERMES_BIN"] = sys.executable
+        assert local_binary() == sys.executable, "실행 가능한 설정은 그대로 쓴다"
+    finally:
+        os.environ.clear()
+        os.environ.update(with_bogus)
 
     # 부서 이름표가 정본과 어긋나지 않는가
     from orchestration.canonical_profiles import CANONICAL_PROFILES
