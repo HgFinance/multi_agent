@@ -5,6 +5,8 @@ from __future__ import annotations
 import unittest
 import importlib.util
 import sys
+import threading
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -21,6 +23,7 @@ WatchProcessError = runner.WatchProcessError
 parse_watch_line = runner.parse_watch_line
 watch_events = runner.watch_events
 run_recovery_reconciler = runner.run_recovery_reconciler
+SupervisorEventQueue = runner.SupervisorEventQueue
 
 
 class FakeWatchProcess:
@@ -43,6 +46,70 @@ class FakeWatchProcess:
 
 
 class SupervisorRunnerTest(unittest.TestCase):
+    def test_event_queue_keeps_intake_non_blocking_and_runs_separate_roots(self) -> None:
+        both_started = threading.Event()
+        release = threading.Event()
+        calls: list[str] = []
+        calls_lock = threading.Lock()
+
+        class Service:
+            def handle_terminal_event(self, event):
+                with calls_lock:
+                    calls.append(str(event["task_id"]))
+                    if len(calls) == 2:
+                        both_started.set()
+                release.wait(1)
+                return None
+
+        event_queue = SupervisorEventQueue(Service(), workers=2)
+        started = time.perf_counter()
+        self.assertTrue(
+            event_queue.submit(
+                {"event_id": "root-a", "task_id": "task-a", "kind": "blocked"}
+            )
+        )
+        self.assertTrue(
+            event_queue.submit(
+                {"event_id": "root-b", "task_id": "task-b", "kind": "blocked"}
+            )
+        )
+        intake_elapsed = time.perf_counter() - started
+
+        self.assertLess(intake_elapsed, 0.1)
+        self.assertTrue(both_started.wait(1))
+        release.set()
+        event_queue.close()
+        self.assertCountEqual(calls, ["task-a", "task-b"])
+
+    def test_event_queue_coalesces_same_completed_transition(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        calls: list[str] = []
+
+        class Service:
+            def handle_terminal_event(self, event):
+                calls.append(str(event["event_id"]))
+                entered.set()
+                release.wait(1)
+                return None
+
+        event_queue = SupervisorEventQueue(Service(), workers=2)
+        self.assertTrue(
+            event_queue.submit(
+                {"event_id": "watch", "task_id": "same", "kind": "completed"}
+            )
+        )
+        self.assertTrue(entered.wait(1))
+        self.assertFalse(
+            event_queue.submit(
+                {"event_id": "recovery", "task_id": "same", "kind": "done"}
+            )
+        )
+        release.set()
+        event_queue.close()
+
+        self.assertEqual(calls, ["watch"])
+
     def test_recovery_lanes_share_one_serial_poll_loop(self) -> None:
         calls: list[str] = []
 
@@ -84,6 +151,7 @@ class SupervisorRunnerTest(unittest.TestCase):
         self.assertEqual(event["assignee"], "research-department")
         self.assertEqual(event["summary"], "ok")
         self.assertNotEqual(event["task_id"], "wrong")
+        self.assertEqual(event["_event_created_ms"], 1786449600000)
 
     def test_watch_preamble_and_stop_marker_are_not_events(self) -> None:
         self.assertIsNone(parse_watch_line("Watching kanban events. Ctrl-C to stop."))

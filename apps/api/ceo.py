@@ -726,6 +726,14 @@ def _deterministic_order_child_body(
     )
 
 
+def _conditional_rule_indicator_catalog_prompt() -> str:
+    """Build the prompt vocabulary from the registry, never from a static list."""
+
+    from orchestration.conditional_rules import list_supported_indicators
+
+    return ", ".join(item["name"] for item in list_supported_indicators())
+
+
 def _conditional_rule_child_body(
     *,
     query: str,
@@ -749,8 +757,8 @@ def _conditional_rule_child_body(
             "Questions, advice, negation, examples, ambiguity, multiple actions, and LIVE",
             "requests must use candidate=null with a concise clarification_reason.",
             "Supported expression node types are LITERAL, MARKET, PORTFOLIO, INDICATOR,",
-            "ARITHMETIC, COMPARISON, LOGICAL, NOT, and CROSS. Supported indicators are",
-            "SMA, EMA, RSI, MACD, BOLLINGER, VOLUME_AVERAGE, ATR, and ADX.",
+            "ARITHMETIC, COMPARISON, LOGICAL, NOT, and CROSS.",
+            f"Supported indicators are {_conditional_rule_indicator_catalog_prompt()}.",
             "Use comparison operators GT/GTE/LT/LTE/EQ, cross ABOVE/BELOW, logical",
             "AND/OR, and only 1M/5M/15M/1H/1D timeframes. If an indicator timeframe",
             "is omitted, use 1D completed bars and BAR_CLOSE; never default an explicit",

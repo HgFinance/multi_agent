@@ -13,6 +13,7 @@ import logging
 import os
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -1297,6 +1298,42 @@ class HermesKanbanClient:
             root_id = parents[0]
         return root_id
 
+    def authoritative_workflow_snapshot(
+        self,
+        root_id: str,
+        task_id: str,
+    ) -> tuple[str, tuple[dict[str, Any], ...], dict[str, Any]]:
+        """Hydrate one known-root workflow without serial CLI round trips.
+
+        The board list remains the authoritative sibling-discovery boundary.
+        Every discovered workflow task is still read with ``kanban show``;
+        only independent read-only subprocesses are run concurrently. This
+        preserves rich run metadata used by synthesis and QA policy.
+        """
+
+        rows = self.list_tasks()
+        scoped_ids: list[str] = []
+        for row in rows:
+            row_id = str(row.get("id") or row.get("task_id") or "")
+            if row_id and root_id in extract_scope_references(row).root_ids:
+                scoped_ids.append(row_id)
+
+        hydrate_ids = list(dict.fromkeys((root_id, task_id, *scoped_ids)))
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(
+            max_workers=min(4, len(hydrate_ids)),
+            thread_name_prefix="ceo-workflow-show",
+        ) as pool:
+            hydrated_payloads = tuple(pool.map(self.show, hydrate_ids))
+
+        hydrated = dict(zip(hydrate_ids, hydrated_payloads, strict=True))
+        return (
+            root_id,
+            tuple(hydrated[current_id] for current_id in hydrate_ids if current_id != root_id),
+            hydrated[root_id],
+        )
+
     def workflow(self, task_id: str) -> tuple[str, tuple[dict[str, Any], ...]]:
         """Collect one workflow using execution edges or the durable scope marker.
 
@@ -1400,6 +1437,20 @@ DEPARTMENT_DISCORD_LABELS: dict[str, tuple[str, str]] = {
 }
 
 
+def _task_timestamp_ms(task: Mapping[str, Any], field: str) -> int:
+    try:
+        value = int(task.get(field) or 0)
+    except (TypeError, ValueError):
+        return 0
+    return value * 1000 if value > 0 else 0
+
+
+def _elapsed_ms(started_at_ms: int, completed_at_ms: int) -> int:
+    if started_at_ms <= 0 or completed_at_ms < started_at_ms:
+        return -1
+    return completed_at_ms - started_at_ms
+
+
 def _department_progress_text(
     profile: str,
     kind: str,
@@ -1481,6 +1532,10 @@ class CeoSupervisorService:
         self.qa_projection = qa_projection
         self.discord_delivery = discord_delivery
         self._seen_events: set[str] = set()
+        # Hermes watch and recovery can describe the same terminal transition
+        # with different event ids. Coalesce those wakeups before they contend
+        # on the root lock or re-enter response delivery.
+        self._seen_terminal_transitions: set[str] = set()
         self._wakeups: dict[str, int] = {}
         self._replans: dict[str, int] = {}
         self._executed_actions: set[str] = set()
@@ -1604,8 +1659,10 @@ class CeoSupervisorService:
         task_id: str,
         task_payloads: Sequence[Mapping[str, Any]],
         event: Mapping[str, Any],
-    ) -> None:
+    ) -> str | None:
         """Run a terminal observer without changing the supervisor decision."""
+
+        delivery_status: str | None = None
 
         task = next(
             (
@@ -1622,7 +1679,7 @@ class CeoSupervisorService:
             # (especially Discord CEO-final delivery) is not silently skipped.
             show = getattr(self.client, "show", None)
             if not callable(show):
-                return
+                return None
             try:
                 task = show(task_id)
             except Exception as exc:
@@ -1633,7 +1690,7 @@ class CeoSupervisorService:
                     task_id,
                     type(exc).__name__,
                 )
-                return
+                return None
 
         body = str(task.get("body") or "")
         role = terminal_workflow_role(task) or ""
@@ -1646,57 +1703,6 @@ class CeoSupervisorService:
             body=body,
         )
         response_synthesis = supervisor_synthesis or direct_ceo_synthesis
-
-        projection = (
-            self.synthesis_projection
-            if supervisor_synthesis
-            else self.qa_projection
-            if role == "qa" and task_action == "RUN_QA"
-            else None
-        )
-        if projection is not None:
-            try:
-                projection.project(
-                    root_task_id=root_task_id,
-                    task=task,
-                    workflow_tasks=task_payloads,
-                    event=event,
-                )
-            except Exception as exc:
-                logger.exception(
-                    "terminal projection observer failed",
-                    extra={"root_task_id": root_task_id, "task_id": task_id, "error": str(exc)},
-        )
-        # Trading/Quant terminal results are projected to their existing
-        # Notion databases as a non-binding observer. Research/Risk/
-        # Accounting/QA/HR retain their native reporters, so this projector
-        # deliberately skips them.
-        try:
-            department_projection = DepartmentNotionProjection(
-                env=getattr(self.client, "environment", os.environ),
-            ).project(
-                root_task_id=root_task_id,
-                task=task,
-                workflow_tasks=task_payloads,
-                event=event,
-            )
-            if department_projection.status not in {"skipped", "duplicate"}:
-                logger.info(
-                    "department-notion-projection "
-                    "task=%s department=%s status=%s",
-                    task_id,
-                    department_projection.department,
-                    department_projection.status,
-                )
-        except Exception as exc:
-            logger.exception(
-                "department notion projection observer failed",
-                extra={
-                    "root_task_id": root_task_id,
-                    "task_id": task_id,
-                    "error": str(exc),
-                },
-            )
 
         if response_synthesis:
             logger.info(
@@ -1753,6 +1759,7 @@ class CeoSupervisorService:
                 # Always let DiscordFinalDelivery resolve the existing thread
                 # first. It can recover the thread from explicit correlation,
                 # the inbound ledger, or the Discord starter message id.
+                delivery_started_ms = time.time_ns() // 1_000_000
                 thread_status = self.discord_delivery.deliver_to_existing_thread(
                     root_task_id=root_task_id,
                     source_task=delivery_task,
@@ -1763,6 +1770,7 @@ class CeoSupervisorService:
                     profile=ceo_profile,
                     response_key_suffix=f"synthesis-detail:{task_id}",
                 )
+                delivery_status = thread_status
 
                 logger.info(
                     "synthesis-discord-thread root=%s task=%s status=%s",
@@ -1781,6 +1789,7 @@ class CeoSupervisorService:
                         store=delivery_store,
                         profile=ceo_profile,
                     )
+                    delivery_status = parent_status
 
                     logger.info(
                         "synthesis-discord-parent-fallback "
@@ -1789,6 +1798,79 @@ class CeoSupervisorService:
                         task_id,
                         parent_status,
                     )
+
+                delivery_completed_ms = time.time_ns() // 1_000_000
+                logger.info(
+                    "supervisor-action-timing root=%s task=%s event=%s "
+                    "action=DISCORD_DELIVERY action_started=%d "
+                    "action_completed=%d action_duration_ms=%d",
+                    root_task_id,
+                    task_id,
+                    event.get("event_id") or "",
+                    delivery_started_ms,
+                    delivery_completed_ms,
+                    _elapsed_ms(delivery_started_ms, delivery_completed_ms),
+                )
+
+        # Non-binding observers run after the user response lane. Their
+        # filesystem/HTTP work must not delay completed synthesis delivery.
+        projection = (
+            self.synthesis_projection
+            if supervisor_synthesis
+            else self.qa_projection
+            if role == "qa" and task_action == "RUN_QA"
+            else None
+        )
+        if projection is not None:
+            try:
+                projection.project(
+                    root_task_id=root_task_id,
+                    task=task,
+                    workflow_tasks=task_payloads,
+                    event=event,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "terminal projection observer failed",
+                    extra={
+                        "root_task_id": root_task_id,
+                        "task_id": task_id,
+                        "error": str(exc),
+                    },
+                )
+
+        # Trading/Quant terminal results are projected to their existing
+        # Notion databases as a non-binding observer. Research/Risk/
+        # Accounting/QA/HR retain their native reporters, so this projector
+        # deliberately skips them.
+        try:
+            department_projection = DepartmentNotionProjection(
+                env=getattr(self.client, "environment", os.environ),
+            ).project(
+                root_task_id=root_task_id,
+                task=task,
+                workflow_tasks=task_payloads,
+                event=event,
+            )
+            if department_projection.status not in {"skipped", "duplicate"}:
+                logger.info(
+                    "department-notion-projection "
+                    "task=%s department=%s status=%s",
+                    task_id,
+                    department_projection.department,
+                    department_projection.status,
+                )
+        except Exception as exc:
+            logger.exception(
+                "department notion projection observer failed",
+                extra={
+                    "root_task_id": root_task_id,
+                    "task_id": task_id,
+                    "error": str(exc),
+                },
+            )
+
+        return delivery_status
 
     def _bridge_root_completion_to_discord(
         self,
@@ -2786,6 +2868,11 @@ class CeoSupervisorService:
                     self._task_root_cache[child_id] = root_task_id
 
     def handle_terminal_event(self, event: Mapping[str, Any]) -> SupervisorDecision | None:
+        handler_started_ms = time.time_ns() // 1_000_000
+        event_consumed_ms = int(
+            event.get("_event_consumed_ms") or handler_started_ms
+        )
+        event_created_ms = int(event.get("_event_created_ms") or 0)
         task_id = str(event.get("task_id") or event.get("id") or "")
         kind = str(event.get("kind") or event.get("event_type") or event.get("status") or "").casefold()
         if not task_id:
@@ -2852,10 +2939,30 @@ class CeoSupervisorService:
             return None
 
         event_key = str(event.get("event_id") or f"{task_id}:{kind}")
+        transition_key = (
+            f"{task_id}:completed"
+            if kind in {"done", "completed", "archived"}
+            else ""
+        )
         with self._seen_events_lock:
-            if event_key in self._seen_events:
+            if (
+                event_key in self._seen_events
+                or (
+                    transition_key
+                    and transition_key in self._seen_terminal_transitions
+                )
+            ):
+                logger.info(
+                    "supervisor-terminal-duplicate-suppressed "
+                    "task=%s kind=%s event=%s",
+                    task_id,
+                    kind,
+                    event_key,
+                )
                 return None
             self._seen_events.add(event_key)
+            if transition_key:
+                self._seen_terminal_transitions.add(transition_key)
 
         # Root fast-path is relevant only to CEO-authored terminal tasks.
         # Department primary events must not pay an extra show() call merely to
@@ -2874,6 +2981,7 @@ class CeoSupervisorService:
             except (SupervisorValidationError, HermesKanbanCommandError):
                 with self._seen_events_lock:
                     self._seen_events.discard(event_key)
+                    self._seen_terminal_transitions.discard(transition_key)
                 raise
             except Exception as exc:
                 # Fast path is an optimization only. Any ambiguity falls through
@@ -2905,11 +3013,25 @@ class CeoSupervisorService:
                         initial_payloads,
                     )
 
+            root_resolved_ms = time.time_ns() // 1_000_000
             with self._parent_lock(root_id):
+                lock_acquired_ms = time.time_ns() // 1_000_000
                 # Keep one authoritative read after acquiring the workflow lock.
                 # The cache removes only redundant root discovery; it never
                 # replaces freshness-sensitive workflow reconstruction.
-                root_id, payloads = self.client.workflow(task_id)
+                authoritative_snapshot = getattr(
+                    self.client,
+                    "authoritative_workflow_snapshot",
+                    None,
+                )
+                if callable(authoritative_snapshot):
+                    root_id, payloads, root_payload = authoritative_snapshot(
+                        root_id,
+                        task_id,
+                    )
+                else:
+                    root_id, payloads = self.client.workflow(task_id)
+                    root_payload = {}
                 self._remember_workflow_root(
                     task_id,
                     root_id,
@@ -2919,7 +3041,76 @@ class CeoSupervisorService:
                 # wakeup comments. Keep the policy service compatible with small
                 # workflow-only fakes and adapters used by the supervisor tests.
                 show = getattr(self.client, "show", None)
-                root_payload = show(root_id) if callable(show) else {}
+                if not root_payload:
+                    root_payload = show(root_id) if callable(show) else {}
+                workflow_ready_ms = time.time_ns() // 1_000_000
+                timing_task = next(
+                    (
+                        payload
+                        for payload in payloads
+                        if str(
+                            payload.get("id")
+                            or payload.get("task_id")
+                            or ""
+                        ) == task_id
+                    ),
+                    {},
+                )
+                task_completed_ms = _task_timestamp_ms(
+                    timing_task, "completed_at"
+                )
+                logger.info(
+                    "supervisor-terminal-timing root=%s task=%s kind=%s "
+                    "task_completed=%d event_created=%d event_consumed=%d "
+                    "handler_started=%d root_resolved=%d "
+                    "lock_acquired=%d workflow_ready=%d "
+                    "created_to_consumed_ms=%d completion_to_consumed_ms=%d "
+                    "queue_wait_ms=%d consumed_to_lock_ms=%d "
+                    "root_resolution_ms=%d "
+                    "lock_wait_ms=%d locked_workflow_ms=%d",
+                    root_id,
+                    task_id,
+                    kind,
+                    task_completed_ms,
+                    event_created_ms,
+                    event_consumed_ms,
+                    handler_started_ms,
+                    root_resolved_ms,
+                    lock_acquired_ms,
+                    workflow_ready_ms,
+                    _elapsed_ms(event_created_ms, event_consumed_ms),
+                    _elapsed_ms(task_completed_ms, event_consumed_ms),
+                    _elapsed_ms(event_consumed_ms, handler_started_ms),
+                    _elapsed_ms(event_consumed_ms, lock_acquired_ms),
+                    _elapsed_ms(handler_started_ms, root_resolved_ms),
+                    _elapsed_ms(root_resolved_ms, lock_acquired_ms),
+                    _elapsed_ms(lock_acquired_ms, workflow_ready_ms),
+                )
+
+                def execute_timed(
+                    action_decision: SupervisorDecision,
+                    action_state: SupervisorState,
+                ) -> None:
+                    action_started_ms = time.time_ns() // 1_000_000
+                    try:
+                        self._execute(action_decision, action_state)
+                    finally:
+                        action_completed_ms = time.time_ns() // 1_000_000
+                        logger.info(
+                            "supervisor-action-timing root=%s task=%s event=%s "
+                            "action=%s workflow_ready=%d action_started=%d "
+                            "action_completed=%d workflow_to_action_ms=%d "
+                            "action_duration_ms=%d",
+                            root_id,
+                            task_id,
+                            event_key,
+                            action_decision.action.value,
+                            workflow_ready_ms,
+                            action_started_ms,
+                            action_completed_ms,
+                            _elapsed_ms(workflow_ready_ms, action_started_ms),
+                            _elapsed_ms(action_started_ms, action_completed_ms),
+                        )
                 # The root is a planning/scope task in the current contract. Its
                 # terminal transition means planning finished, not that the
                 # workflow is ready for synthesis. Primary child events are the
@@ -2984,13 +3175,6 @@ class CeoSupervisorService:
                         root_id,
                         reason="workflow_scope_validation",
                     )
-                self._project_terminal_task(
-                    root_task_id=root_id,
-                    task_id=task_id,
-                    task_payloads=(root_payload, *payloads),
-                    event=event,
-                )
-
                 terminal_task_payload = next(
                     (
                         payload
@@ -3003,34 +3187,68 @@ class CeoSupervisorService:
                     ),
                     None,
                 )
-                if terminal_task_payload is not None:
-                    try:
-                        show_task = getattr(self.client, "show", None)
-                        if callable(show_task):
-                            terminal_task_payload = show_task(task_id)
+                terminal_observers_projected = False
 
-                        self._deliver_department_progress(
-                            root_task_id=root_id,
-                            root_payload=root_payload,
-                            task_payload=terminal_task_payload,
-                            event=event,
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "department-discord-progress-failed "
-                            "task=%s kind=%s error=%s",
-                            task_id,
-                            kind,
-                            type(exc).__name__,
-                        )
+                def project_terminal_observers() -> None:
+                    nonlocal terminal_observers_projected, terminal_task_payload
+                    if terminal_observers_projected:
+                        return
+                    terminal_observers_projected = True
 
-                # Recover sibling terminal events that the Hermes watch may
-                # have coalesced or skipped in the same polling window.
-                self._reconcile_department_terminal_progress(
-                    root_task_id=root_id,
-                    root_payload=root_payload,
-                    task_payloads=payloads,
+                    terminal_projection_status = self._project_terminal_task(
+                        root_task_id=root_id,
+                        task_id=task_id,
+                        task_payloads=(root_payload, *payloads),
+                        event=event,
+                    )
+                    if (
+                        terminal_role == "synthesis"
+                        and terminal_projection_status not in {"sent", "deduped"}
+                    ):
+                        # A later recovery wakeup may retry a failed or
+                        # not-yet-correlatable delivery. Concurrent duplicates
+                        # remain coalesced because this runs after the response
+                        # attempt has completed.
+                        with self._seen_events_lock:
+                            self._seen_terminal_transitions.discard(
+                                transition_key
+                            )
+
+                    if terminal_task_payload is not None:
+                        try:
+                            show_task = getattr(self.client, "show", None)
+                            if callable(show_task):
+                                terminal_task_payload = show_task(task_id)
+
+                            self._deliver_department_progress(
+                                root_task_id=root_id,
+                                root_payload=root_payload,
+                                task_payload=terminal_task_payload,
+                                event=event,
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "department-discord-progress-failed "
+                                "task=%s kind=%s error=%s",
+                                task_id,
+                                kind,
+                                type(exc).__name__,
+                            )
+
+                    self._reconcile_department_terminal_progress(
+                        root_task_id=root_id,
+                        root_payload=root_payload,
+                        task_payloads=payloads,
+                    )
+
+                terminal_role = (
+                    terminal_workflow_role(terminal_task_payload)
+                    if terminal_task_payload is not None
+                    else ""
                 )
+                if terminal_role == "synthesis":
+                    # Discord delivery is the response action for this event.
+                    project_terminal_observers()
 
                 children = tuple(
                     ChildTaskState.from_hermes(payload)
@@ -3144,7 +3362,7 @@ class CeoSupervisorService:
                 )
                 if initial_primary_decisions:
                     for initial_primary_decision in initial_primary_decisions:
-                        self._execute(initial_primary_decision, state)
+                        execute_timed(initial_primary_decision, state)
 
                     logger.info(
                         "initial-primary-materialized root=%s count=%d profiles=%s",
@@ -3275,6 +3493,7 @@ class CeoSupervisorService:
                         budget_consumed=budget_consumed,
                     )
                 if decision is None:
+                    project_terminal_observers()
                     self._record_wakeup(
                         root_task_id=root_id,
                         event_id=event_key,
@@ -3305,10 +3524,13 @@ class CeoSupervisorService:
                     )
                 )
                 with self._seen_events_lock:
-                    if action_key in self._executed_actions:
-                        return None
-                    self._executed_actions.add(action_key)
-                self._execute(decision, state)
+                    action_already_executed = action_key in self._executed_actions
+                    if not action_already_executed:
+                        self._executed_actions.add(action_key)
+                if action_already_executed:
+                    project_terminal_observers()
+                    return None
+                execute_timed(decision, state)
                 if (
                     decision.action == SupervisorAction.RUN_QA
                     and state.workflow_mode == "analysis"
@@ -3379,10 +3601,11 @@ class CeoSupervisorService:
                             synthesis is not None
                             and synthesis.action == SupervisorAction.SYNTHESIZE
                         ):
-                            self._execute(synthesis, state)
+                            execute_timed(synthesis, state)
                             action = f"{action},SYNTHESIZE"
                 if decision.action == SupervisorAction.CREATE_TASK:
                     self._replans[root_id] = self._replans.get(root_id, 0) + 1
+                project_terminal_observers()
                 self._record_wakeup(
                     root_task_id=root_id,
                     event_id=event_key,
@@ -3414,6 +3637,7 @@ class CeoSupervisorService:
                 # delivery.  Canonical failures are handled and blocked
                 # above, so they intentionally remain acknowledged.
                 self._seen_events.discard(event_key)
+                self._seen_terminal_transitions.discard(transition_key)
             raise SupervisorWorkflowError(
                 f"workflow {task_id} evaluation failed: {exc}"
             ) from exc

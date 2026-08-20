@@ -24,6 +24,7 @@ from observability import (  # noqa: E402
     LangfuseQueryError,
     LangfuseTraceReader,
     WorkerIdleReport,
+    WorkerRegistryUnavailable,
     check_idle_agents,
 )
 from orchestration.llm_observability import langfuse_worker_event_name  # noqa: E402
@@ -174,31 +175,11 @@ def test_department_stage_mapping_disambiguates_dispatch_key_from_event_name() -
     assert by_id[worker_id].status is IdleStatus.ACTIVE
 
 
-# ---------------------------------------------------------------------------
-# 2026-08-20: Profile(데이터) 레지스트리 전환분 계약 테스트
-#
-# HR 은 더 이상 남의 본부 employee_workers.py 를 import 하지 않고 hermes/config.yaml
-# 의 workers 만 읽는다. 그 전환이 성립하려면 두 가지가 계속 참이어야 하고, 둘 다
-# 깨져도 **예외 없이 조용히** 틀린 답이 나오는 종류라 여기서 고정한다.
-# ---------------------------------------------------------------------------
-
-
-def test_profile_registry_matches_python_worker_specs() -> None:
-    """YAML(정본)과 실행 모듈 WORKER_SPECS 가 같은 편제를 말해야 한다.
-
-    어긋나면 HR 은 존재하지 않는 워커를 영원히 UNOBSERVED 로 보고하거나(YAML 에만
-    있음), 실제로 도는 워커를 아예 못 본다(모듈에만 있음). 어느 쪽도 조회 실패가
-    아니라서 UNAVAILABLE 로도 안 잡힌다.
-    """
-
-    from observability import DEPARTMENT_PROFILE_DIR, load_worker_profile_specs
-    from orchestration.employee_dispatch import load_worker_specs
-
-    for department in DEPARTMENT_PROFILE_DIR:
-        from_profile = {(s.worker_id, s.trigger) for s in load_worker_profile_specs(ROOT, department)}
-        from_module = {(s.worker_id, s.trigger) for s in load_worker_specs(ROOT, department)}
-        assert from_profile == from_module, f"{department} 편제가 Profile 과 코드에서 다르다"
-
+def test_manifest_registry_is_present_and_complete() -> None:
+    from orchestration.contracts.worker_registry import load_worker_registry
+    registry = load_worker_registry(ROOT)
+    assert len(registry) == 8
+    assert not any(item.department == "trading" for item in registry)
 
 def test_fallback_event_name_matches_canonical() -> None:
     """orchestration 이 없는 컨테이너용 복제 구현이 정본과 같은 문자열을 만들어야 한다.
@@ -236,39 +217,17 @@ def test_fallback_event_name_matches_canonical() -> None:
         ) == langfuse_worker_event_name(stage=stage, worker_id=worker_id)
 
 
-def test_mounted_profile_root_is_used_when_repo_tree_is_absent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """컨테이너 배선 검증 - 저장소 트리 없이 마운트 경로만으로 읽혀야 한다."""
-
-    from observability import PROFILE_MOUNT_ROOT_ENV, load_worker_profile_specs
-
-    mount = tmp_path / "profiles"
-    (mount / "risk").mkdir(parents=True)
-    (mount / "risk" / "config.yaml").write_text(
-        "workers:\n  compliance-policy-worker:\n    trigger: when_compliance_evidence_exists\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv(PROFILE_MOUNT_ROOT_ENV, str(mount))
-    specs = load_worker_profile_specs(tmp_path / "no-such-repo", "risk")
-    assert [(s.worker_id, s.trigger) for s in specs] == [
-        ("compliance-policy-worker", "when_compliance_evidence_exists")
-    ]
-
-
-def test_missing_profile_is_unavailable_not_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Profile 을 못 읽으면 빈 목록(=유휴 없음)이 아니라 명시적 실패여야 한다."""
-
-    from observability import PROFILE_MOUNT_ROOT_ENV, WorkerRegistryUnavailable, load_worker_profile_specs
-
-    monkeypatch.setenv(PROFILE_MOUNT_ROOT_ENV, str(tmp_path / "empty"))
+def test_invalid_manifest_is_unavailable_not_empty(tmp_path: Path) -> None:
+    from orchestration.contracts.worker_registry import WorkerRegistryError, load_worker_registry
+    manifest = tmp_path / "orchestration/contracts/worker_registry.v1.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{\"schema_version\": \"hgfinance.worker-registry.v2\", \"workers\": []}", encoding="utf-8")
+    with pytest.raises(WorkerRegistryError):
+        load_worker_registry(tmp_path)
     with pytest.raises(WorkerRegistryUnavailable):
-        load_worker_profile_specs(tmp_path / "no-such-repo", "research")
-
+        check_idle_agents(reader=_EmptyReader(), departments=("research",), now=_NOW, repo_root=tmp_path)
 
 def test_department_without_llm_workers_is_empty_not_broken() -> None:
-    """트레이딩은 LLM 직원 0명이 정상이다 - 결함(키 없음)과 구분돼야 한다."""
-
-    from observability import load_worker_profile_specs
-
-    assert load_worker_profile_specs(ROOT, "trading") == ()
+    from orchestration.contracts.worker_registry import load_worker_registry, workers_for_department
+    registry = load_worker_registry(ROOT)
+    assert workers_for_department(registry, "trading") == ()

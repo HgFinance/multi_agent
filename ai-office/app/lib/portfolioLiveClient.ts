@@ -49,11 +49,6 @@ export type Holding = {
   weight: string | null;
 };
 
-export type DailyReturnPoint = {
-  date: string;
-  return_rate: string;
-};
-
 export type TodayTradingActivityData = {
   trade_count: number;
   summary: {
@@ -102,11 +97,6 @@ export type PortfolioLive = {
     valuation: string | null;
     valuation_pnl: string | null;
     rows: Holding[];
-  };
-  performance?: {
-    daily_returns: DailyReturnPoint[];
-    as_of: string | null;
-    error: string | null;
   };
   today_activity?: {
     as_of: string | null;

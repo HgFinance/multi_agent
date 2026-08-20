@@ -8,12 +8,15 @@ import ast
 import hashlib
 import logging
 import os
+import queue
 import re
 import signal
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Iterator
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -74,9 +77,23 @@ def parse_watch_line(line: str) -> dict[str, object] | None:
         "assignee": match.group("assignee") or None,
         "event_id": event_id,
     }
+    try:
+        created_at = datetime.fromisoformat(match.group("timestamp"))
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        event["_event_created_ms"] = int(created_at.timestamp() * 1000)
+    except ValueError:
+        event["_event_created_ms"] = 0
     if isinstance(payload, dict):
         for key, value in payload.items():
-            if key not in {"task_id", "kind", "assignee", "event_id"}:
+            if key not in {
+                "task_id",
+                "kind",
+                "assignee",
+                "event_id",
+                "_event_created_ms",
+                "_event_consumed_ms",
+            }:
                 event[key] = value
     return event
 
@@ -130,6 +147,125 @@ def watch_events(
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
+
+
+class SupervisorEventQueue:
+    """Keep watch stdout draining while bounded workers run heavy reconcile."""
+
+    def __init__(self, service: CeoSupervisorService, *, workers: int = 2) -> None:
+        self.service = service
+        self.worker_count = max(1, int(workers))
+        self._queue: queue.Queue[tuple[str, dict[str, object]] | None] = queue.Queue()
+        self._pending: set[str] = set()
+        self._pending_lock = threading.Lock()
+        self._threads = tuple(
+            threading.Thread(
+                target=self._run_worker,
+                name=f"ceo-event-worker-{index + 1}",
+                daemon=True,
+            )
+            for index in range(self.worker_count)
+        )
+        for thread in self._threads:
+            thread.start()
+
+    @staticmethod
+    def _pending_key(event: dict[str, object]) -> str:
+        task_id = str(event.get("task_id") or "")
+        kind = str(event.get("kind") or "").casefold()
+        if kind in {"done", "completed", "archived"}:
+            return f"terminal:{task_id}:completed"
+        return f"event:{event.get('event_id') or task_id + ':' + kind}"
+
+    def submit(self, event: dict[str, object]) -> bool:
+        queued_event = dict(event)
+        queued_event["_event_consumed_ms"] = time.time_ns() // 1_000_000
+        pending_key = self._pending_key(queued_event)
+        with self._pending_lock:
+            if pending_key in self._pending:
+                logging.info(
+                    "supervisor-event-queue-coalesced task=%s kind=%s "
+                    "queue_depth=%d pending=%d",
+                    queued_event.get("task_id") or "",
+                    queued_event.get("kind") or "",
+                    self._queue.qsize(),
+                    len(self._pending),
+                )
+                return False
+            self._pending.add(pending_key)
+            pending_count = len(self._pending)
+
+        self._queue.put((pending_key, queued_event))
+        logging.info(
+            "supervisor-event-queued task=%s kind=%s queue_depth=%d pending=%d",
+            queued_event.get("task_id") or "",
+            queued_event.get("kind") or "",
+            self._queue.qsize(),
+            pending_count,
+        )
+        return True
+
+    def _run_worker(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                self._queue.task_done()
+                return
+
+            pending_key, event = item
+            handler_started_ms = time.time_ns() // 1_000_000
+            try:
+                decision = self.service.handle_terminal_event(event)
+                if decision is not None:
+                    print(
+                        f"ceo-supervisor action={decision.action.value} "
+                        f"parent={decision.parent_task_id} reason={decision.reason}",
+                        flush=True,
+                    )
+            except SupervisorWorkflowError as exc:
+                print(
+                    f"ceo-supervisor workflow-error={exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            finally:
+                handler_completed_ms = time.time_ns() // 1_000_000
+                with self._pending_lock:
+                    self._pending.discard(pending_key)
+                    pending_count = len(self._pending)
+                self._queue.task_done()
+                consumed_ms = int(event.get("_event_consumed_ms") or 0)
+                created_ms = int(event.get("_event_created_ms") or 0)
+                logging.info(
+                    "supervisor-event-loop-timing task=%s kind=%s "
+                    "event_created=%d event_consumed=%d handler_started=%d "
+                    "loop_return=%d created_to_consumed_ms=%d "
+                    "queue_wait_ms=%d handler_duration_ms=%d "
+                    "queue_depth=%d pending=%d",
+                    event.get("task_id") or "",
+                    event.get("kind") or "",
+                    created_ms,
+                    consumed_ms,
+                    handler_started_ms,
+                    handler_completed_ms,
+                    consumed_ms - created_ms
+                    if created_ms > 0 and consumed_ms >= created_ms
+                    else -1,
+                    handler_started_ms - consumed_ms
+                    if consumed_ms > 0 and handler_started_ms >= consumed_ms
+                    else -1,
+                    handler_completed_ms - handler_started_ms,
+                    self._queue.qsize(),
+                    pending_count,
+                )
+
+    def close(self, *, drain: bool = True) -> None:
+        if drain:
+            self._queue.join()
+        for _thread in self._threads:
+            self._queue.put(None)
+        for thread in self._threads:
+            thread.join(timeout=5)
 
 
 
@@ -203,6 +339,25 @@ def run_recovery_reconciler(
 
     poll_interval = max(float(interval), 5.0)
 
+    # Startup recovery is intentionally on this background lane. Running it
+    # before opening the watch stream leaves a blind window proportional to a
+    # full-board scan.
+    reconcile_existing = getattr(service, "reconcile_existing_workflows", None)
+    if callable(reconcile_existing) and not stop_event.is_set():
+        try:
+            for decision in reconcile_existing():
+                print(
+                    f"ceo-supervisor reconcile action={decision.action.value} "
+                    f"parent={decision.parent_task_id} reason={decision.reason}",
+                    flush=True,
+                )
+        except (SupervisorWorkflowError, HermesKanbanCommandError) as exc:
+            print(
+                f"ceo-supervisor reconcile-error={exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+
     while not stop_event.is_set():
         try:
             service.materialize_ready_primary_plans()
@@ -256,6 +411,10 @@ def main() -> int:
         qa_projection=QaAuditProjection(kanban_client=client),
         discord_delivery=DiscordFinalDelivery(environment=environment),
     )
+    event_queue = SupervisorEventQueue(
+        service,
+        workers=int(environment.get("CEO_SUPERVISOR_EVENT_WORKERS", "2")),
+    )
 
     recovery_stop = threading.Event()
     recovery_interval = (
@@ -276,40 +435,24 @@ def main() -> int:
     recovery_thread.start()
 
     try:
-        try:
-            for decision in service.reconcile_existing_workflows():
-                print(
-                    f"ceo-supervisor reconcile action={decision.action.value} "
-                    f"parent={decision.parent_task_id} reason={decision.reason}",
-                    flush=True,
-                )
-        except (SupervisorWorkflowError, HermesKanbanCommandError) as exc:
-            # Reconciliation is a recovery aid; a transient read/projection
-            # failure must not prevent the normal watch loop from starting.
-            print(f"ceo-supervisor reconcile-error={exc}", file=sys.stderr, flush=True)
         for event in watch_events(
             executable=client.executable,
             interval=args.interval,
             environment=environment,
         ):
-            try:
-                decision = service.handle_terminal_event(event)
-                if decision is not None:
-                    print(
-                        f"ceo-supervisor action={decision.action.value} "
-                        f"parent={decision.parent_task_id} reason={decision.reason}",
-                        flush=True,
-                    )
-            except SupervisorWorkflowError as exc:
-                # A single workflow must not take down the event consumer.
-                print(f"ceo-supervisor workflow-error={exc}", file=sys.stderr, flush=True)
+            event_queue.submit(event)
     except GracefulShutdown as exc:
         recovery_stop.set()
+        event_queue.close(drain=True)
         print(f"ceo-supervisor normal-shutdown={exc}", flush=True)
         return 0
     except (WatchOutputError, WatchProcessError) as exc:
+        recovery_stop.set()
+        event_queue.close(drain=True)
         print(f"ceo-supervisor fatal-watch-error={exc}", file=sys.stderr, flush=True)
         return 1
+    recovery_stop.set()
+    event_queue.close(drain=True)
     return 0
 
 

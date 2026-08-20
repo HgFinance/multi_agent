@@ -1082,6 +1082,8 @@ class SupervisorWakeupTest(unittest.TestCase):
         self.assertEqual(service.reconcile_completed_syntheses(), ())
 
     def test_thread_backed_synthesis_delivers_only_to_request_thread(self) -> None:
+        timeline = []
+
         class DeliverySpy:
             def __init__(self) -> None:
                 self.parent_calls = []
@@ -1093,7 +1095,12 @@ class SupervisorWakeupTest(unittest.TestCase):
 
             def deliver_to_existing_thread(self, **kwargs):
                 self.thread_calls.append(kwargs)
+                timeline.append("discord")
                 return "sent"
+
+        class ProjectionSpy:
+            def project(self, **kwargs):
+                timeline.append("notion")
 
         class DeliveryClient(FakeClient):
             def __init__(self, home: str) -> None:
@@ -1137,6 +1144,7 @@ class SupervisorWakeupTest(unittest.TestCase):
             client = DeliveryClient(home)
             service = CeoSupervisorService(
                 client,
+                synthesis_projection=ProjectionSpy(),
                 discord_delivery=delivery,
             )
 
@@ -1160,6 +1168,11 @@ class SupervisorWakeupTest(unittest.TestCase):
         self.assertEqual(
             delivery.thread_calls[0]["title"],
             "🧠 CEO 종합",
+        )
+        self.assertEqual(
+            timeline,
+            ["discord", "notion"],
+            "non-binding projection must not delay final Discord delivery",
         )
 
     def test_synthesis_without_thread_keeps_parent_fallback(self) -> None:
@@ -1253,6 +1266,40 @@ class SupervisorWakeupTest(unittest.TestCase):
         self.assertEqual(
             sum(item["assignee"] == "ceo-agent" for item in client.created),
             1,
+        )
+
+    def test_response_tasks_are_created_before_terminal_observers(self) -> None:
+        timeline = []
+
+        class OrderingClient(FakeClient):
+            def create_task(self, **kwargs):
+                timeline.append(f"create:{kwargs['assignee']}")
+                return super().create_task(**kwargs)
+
+        client = OrderingClient()
+        service = CeoSupervisorService(client)
+        service._project_terminal_task = (
+            lambda **kwargs: timeline.append("terminal-observer")
+        )
+        service._deliver_department_progress = lambda **kwargs: None
+        service._reconcile_department_terminal_progress = lambda **kwargs: None
+
+        decision = service.handle_terminal_event(
+            {
+                "event_id": "response-before-observer",
+                "task_id": "r",
+                "kind": "completed",
+            }
+        )
+
+        self.assertEqual(decision.action, SupervisorAction.RUN_QA)
+        self.assertEqual(
+            timeline,
+            [
+                "create:qa-department",
+                "create:ceo-agent",
+                "terminal-observer",
+            ],
         )
 
     def test_synthesis_does_not_wait_for_qa_visibility_after_qa_create(self) -> None:
@@ -1576,6 +1623,30 @@ class SupervisorWakeupTest(unittest.TestCase):
             1,
         )
 
+    def test_distinct_wakeups_for_same_terminal_transition_coalesce(self) -> None:
+        client = FakeClient()
+        service = CeoSupervisorService(client)
+        projected = []
+        service._project_terminal_task = (
+            lambda **kwargs: projected.append(kwargs["task_id"])
+        )
+        service._deliver_department_progress = lambda **kwargs: None
+        service._reconcile_department_terminal_progress = lambda **kwargs: None
+        events = (
+            {"event_id": "watch-r", "task_id": "r", "kind": "completed"},
+            {"event_id": "recovery-r", "task_id": "r", "kind": "done"},
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            decisions = list(executor.map(service.handle_terminal_event, events))
+
+        self.assertEqual(sum(decision is not None for decision in decisions), 1)
+        self.assertEqual(projected, ["r"])
+        self.assertEqual(
+            sum(item["assignee"] == "ceo-agent" for item in client.created),
+            1,
+        )
+
     def test_cold_terminal_event_uses_root_lookup_then_one_fresh_workflow(self) -> None:
         class RootLookupClient(FakeClient):
             def __init__(self) -> None:
@@ -1847,6 +1918,67 @@ class SupervisorWakeupTest(unittest.TestCase):
         self.assertEqual(discovered_root, root)
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][1:3], ("kanban", "show"))
+
+    def test_known_root_snapshot_lists_once_and_hydrates_each_task_once(self) -> None:
+        import json
+        import subprocess
+
+        root = "t_aaaaaaaa"
+        primary = "t_bbbbbbbb"
+        sibling = "t_cccccccc"
+        payloads = {
+            root: {
+                "id": root,
+                "assignee": "ceo-agent",
+                "status": "done",
+                "body": build_root_body("Samsung", "req-1"),
+            },
+            primary: {
+                "id": primary,
+                "assignee": "research-department",
+                "status": "done",
+                "body": build_scoped_task_body(
+                    "research", root, role="primary"
+                ),
+            },
+            sibling: {
+                "id": sibling,
+                "assignee": "risk-management",
+                "status": "done",
+                "body": build_scoped_task_body("risk", root, role="primary"),
+            },
+        }
+        calls: list[tuple[str, ...]] = []
+
+        def runner(args, **kwargs):
+            command = tuple(args)
+            calls.append(command)
+            if command[1:3] == ("kanban", "list"):
+                stdout = json.dumps(list(payloads.values()))
+            else:
+                stdout = json.dumps(
+                    {
+                        "task": payloads[command[3]],
+                        "latest_summary": f"summary:{command[3]}",
+                        "runs": [],
+                    }
+                )
+            return subprocess.CompletedProcess(args, 0, stdout, "")
+
+        discovered_root, children, root_payload = HermesKanbanClient(
+            runner=runner
+        ).authoritative_workflow_snapshot(root, primary)
+
+        self.assertEqual(discovered_root, root)
+        self.assertEqual(root_payload["id"], root)
+        self.assertEqual({child["id"] for child in children}, {primary, sibling})
+        self.assertTrue(all("latest_summary" in child for child in children))
+        self.assertEqual(
+            sum(command[1:3] == ("kanban", "list") for command in calls),
+            1,
+        )
+        shown = [command[3] for command in calls if command[1:3] == ("kanban", "show")]
+        self.assertCountEqual(shown, [root, primary, sibling])
 
     def test_primary_scope_task_cannot_depend_on_scope_root(self) -> None:
         root = "t_aaaaaaaa"

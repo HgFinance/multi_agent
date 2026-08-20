@@ -637,6 +637,18 @@ def require_trading_book_access(
     }
 
 
+# 일부 KRX 상장사는 공시 표시명(`reference.instruments.display_name`)이
+# 영문이지만 실제 사용자는 한글 통용 표기로 부른다(예: 네이버 -> "NAVER",
+# 035420). 그 표는 리서치·퀀트·리스크가 공유하는 canonical 값이라 여기서
+# 고치지 않는다 - 이 조회 지점에만 좁은 별칭을 둔다. 별칭은 심볼 코드로만
+# 치환되고 그 뒤로는 원래의 exact-match 안전 질의를 그대로 타므로, 모호한
+# 매칭을 새로 만들지 않는다(2026-08-20: "네이버 1주 매수"가 clarification
+# 요구로 거부됐던 사례).
+_INSTRUMENT_NAME_ALIASES: dict[str, str] = {
+    "네이버": "035420",  # NAVER Corporation. 공시 표시명은 "NAVER".
+}
+
+
 def resolve_active_trading_instrument(
     identifier: str,
     instrument_id: str | None = None,
@@ -653,7 +665,7 @@ def resolve_active_trading_instrument(
         raise _http_error(422, "paper_order_instrument_clarification_required")
     canonical_code = query.upper()
     if re.fullmatch(r"[0-9A-Z]{6}", canonical_code) is None:
-        canonical_code = None
+        canonical_code = _INSTRUMENT_NAME_ALIASES.get(query)
     canonical_instrument_id: str | None = None
     if instrument_id is not None:
         try:
