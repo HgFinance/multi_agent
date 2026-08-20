@@ -97,6 +97,51 @@ def test_paper_seed_defaults_are_the_approved_scope() -> None:
     }
 
 
+def test_paper_seed_adopts_exact_active_team_fund_without_rewriting_code() -> None:
+    bootstrap._assert_adoptable_paper_fund(
+        (bootstrap.DEFAULT_FUND_ID, "TEAM-MANDATE", "KRW", "ACTIVE"),
+        bootstrap.DEFAULT_FUND_ID,
+    )
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        (bootstrap.DEFAULT_FUND_ID, "TEAM-MANDATE", "USD", "ACTIVE"),
+        (bootstrap.DEFAULT_FUND_ID, "TEAM-MANDATE", "KRW", "SUSPENDED"),
+    ],
+)
+def test_paper_seed_never_reactivates_or_converts_existing_fund(row) -> None:
+    with pytest.raises(bootstrap.BootstrapError, match="active KRW fund"):
+        bootstrap._assert_adoptable_paper_fund(row, bootstrap.DEFAULT_FUND_ID)
+
+
+def test_paper_seed_adopts_only_exact_active_paper_book() -> None:
+    bootstrap._assert_adoptable_paper_book(
+        (
+            bootstrap.DEFAULT_BOOK_ID,
+            bootstrap.DEFAULT_FUND_ID,
+            "TEAM-PAPER",
+            "PAPER",
+            "ACTIVE",
+        ),
+        bootstrap.DEFAULT_FUND_ID,
+        bootstrap.DEFAULT_BOOK_ID,
+    )
+    with pytest.raises(bootstrap.BootstrapError, match="active PAPER book"):
+        bootstrap._assert_adoptable_paper_book(
+            (
+                bootstrap.DEFAULT_BOOK_ID,
+                bootstrap.DEFAULT_FUND_ID,
+                "TEAM-PAPER",
+                "LIVE",
+                "ACTIVE",
+            ),
+            bootstrap.DEFAULT_FUND_ID,
+            bootstrap.DEFAULT_BOOK_ID,
+        )
+
+
 def test_runtime_login_contract_has_one_exact_settable_role_per_login() -> None:
     assert bootstrap.RUNTIME_LOGIN_MEMBERSHIPS == {
         "hgfinance_runtime": ("service_role", True),
