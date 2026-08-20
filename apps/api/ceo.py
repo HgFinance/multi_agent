@@ -808,6 +808,8 @@ def _route_user_paper_order(
 ) -> dict[str, object]:
     """Durably route one direct user workflow to Trading Hermes, always PAPER."""
 
+    route_started_at = time.monotonic()
+
     if not isinstance(owner_id, str) or not owner_id.strip():
         raise HTTPException(status_code=401, detail="portfolio_authentication_required")
     if not req.fund_id:
@@ -843,6 +845,7 @@ def _route_user_paper_order(
         raise HTTPException(
             status_code=503, detail="paper_order_workflow_unavailable"
         ) from exc
+    admitted_at = time.monotonic()
 
     scope = UserPaperOrderScope(
         order_request_id=record.order_request_id,
@@ -994,6 +997,7 @@ def _route_user_paper_order(
         raise HTTPException(status_code=503, detail="paper_order_kanban_unavailable")
 
     if deterministic_candidate is not None:
+        execution_started_at = time.monotonic()
         try:
             execution = process_deterministic_user_paper_order(
                 root_task_id=root_task_id,
@@ -1058,12 +1062,17 @@ def _route_user_paper_order(
             )
         logger.info(
             "paper-order-deterministic-complete request=%s root=%s trading=%s "
-            "state=%s delivery=%s",
+            "state=%s delivery=%s admission_ms=%d kanban_ms=%d execution_ms=%d "
+            "total_ms=%d",
             record.order_request_id,
             root_task_id,
             trading_task_id,
             execution.get("request_state"),
             completed,
+            round((admitted_at - route_started_at) * 1000),
+            round((execution_started_at - admitted_at) * 1000),
+            round((time.monotonic() - execution_started_at) * 1000),
+            round((time.monotonic() - route_started_at) * 1000),
         )
         released_root = {**root, "status": "done"}
         released_trading = {
@@ -1088,11 +1097,15 @@ def _route_user_paper_order(
     released_root = {**root, "status": "done"}
     released_trading = {**trading, "status": "ready"}
     logger.info(
-        "paper-order-routed request=%s root=%s trading=%s mode=PAPER conditional=%s",
+        "paper-order-routed request=%s root=%s trading=%s mode=PAPER conditional=%s "
+        "admission_ms=%d kanban_ms=%d total_ms=%d",
         record.order_request_id,
         root_task_id,
         trading_task_id,
         conditional_rule,
+        round((admitted_at - route_started_at) * 1000),
+        round((time.monotonic() - admitted_at) * 1000),
+        round((time.monotonic() - route_started_at) * 1000),
     )
     return _paper_order_accepted_response(
         root_task=released_root,
