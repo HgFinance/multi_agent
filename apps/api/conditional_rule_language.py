@@ -20,6 +20,38 @@ _RETURN_MOVE = re.compile(r"\d+(?:\.\d+)?\s*%.{0,8}(?:상승|하락|오르면|�
 _ENTRY_BASELINE = re.compile(r"(?:평균\s*)?(?:매입가|매수가|평단)")
 _TIMEFRAME = re.compile(r"(?:1|3|5|10|15|30|60)\s*분봉|(?:일봉|주봉|월봉)")
 
+_ORDER_ACTION = re.compile(r"(?:매수|매도|buy|sell)", re.IGNORECASE)
+_CONDITIONAL_TRIGGER = re.compile(
+    r"(?:조건\s*주문|이면|라면|할\s*때|경우|이상|이하|초과|미만|"
+    r"상향\s*돌파|하향\s*이탈|골든\s*크로스|데드\s*크로스|"
+    r"RSI|MACD|이동\s*평균|이평|볼린저|거래량|평단|매입가|"
+    r"상승\s*시|하락\s*시)",
+    re.IGNORECASE,
+)
+_NON_BINDING_CONDITIONAL = re.compile(
+    r"(?:\?|해도\s*될|해야\s*할|할까|어때|알려\s*줘|설명|추천|"
+    r"예시|가정|백테스트|분석\s*해)",
+    re.IGNORECASE,
+)
+
+
+def looks_like_conditional_paper_rule(raw_instruction: str) -> bool:
+    """Recognize an explicit conditional buy/sell command, fail closed.
+
+    This classifier only selects the isolated Trading-Hermes interpretation
+    lane.  It never builds an AST or activates a rule; the MCP schema and the
+    deterministic validators remain authoritative.  Advice/questions stay on
+    the non-binding CEO path.
+    """
+
+    normalized = " ".join(str(raw_instruction or "").strip().split())
+    return bool(
+        normalized
+        and _ORDER_ACTION.search(normalized)
+        and _CONDITIONAL_TRIGGER.search(normalized)
+        and not _NON_BINDING_CONDITIONAL.search(normalized)
+    )
+
 
 def _walk(node):
     yield node
@@ -76,4 +108,8 @@ def preview_assumptions(raw_instruction: str, rule: ConditionalRuleSpec) -> tupl
     return tuple(assumptions)
 
 
-__all__ = ["clarification_codes", "preview_assumptions"]
+__all__ = [
+    "clarification_codes",
+    "looks_like_conditional_paper_rule",
+    "preview_assumptions",
+]

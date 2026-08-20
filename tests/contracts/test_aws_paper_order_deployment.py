@@ -180,12 +180,19 @@ def test_conditional_rule_runtime_uses_two_dedicated_logins() -> None:
     overlay = _yaml(OVERLAY_PATH)
     services = overlay["services"]
     bff = services["portfolio-bff"]["environment"]
+    mcp = services["paper-order-orchestrator-mcp"]["environment"]
     worker = services["conditional-rule-worker"]["environment"]
 
     assert "postgresql://hgfinance_conditional_orchestrator:" in bff[
         "CONDITIONAL_RULE_DATABASE_URL"
     ]
     assert bff["CONDITIONAL_RULE_DATABASE_ROLE"] == (
+        "svc_conditional_rule_orchestrator"
+    )
+    assert "postgresql://hgfinance_conditional_orchestrator:" in mcp[
+        "CONDITIONAL_RULE_DATABASE_URL"
+    ]
+    assert mcp["CONDITIONAL_RULE_DATABASE_ROLE"] == (
         "svc_conditional_rule_orchestrator"
     )
     assert "postgresql://hgfinance_conditional_worker:" in worker[
