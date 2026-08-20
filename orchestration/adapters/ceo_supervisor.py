@@ -1557,7 +1557,25 @@ class CeoSupervisorService:
             None,
         )
         if task is None:
-            return
+            # workflow() may return the root and workflow descendants without
+            # the terminal synthesis task that triggered reconciliation.
+            # Recover that durable task explicitly so terminal projection
+            # (especially Discord CEO-final delivery) is not silently skipped.
+            show = getattr(self.client, "show", None)
+            if not callable(show):
+                return
+            try:
+                task = show(task_id)
+            except Exception as exc:
+                logger.warning(
+                    "terminal-projection-show-failed "
+                    "root=%s task=%s error=%s",
+                    root_task_id,
+                    task_id,
+                    type(exc).__name__,
+                )
+                return
+
         body = str(task.get("body") or "")
         role = terminal_workflow_role(task) or ""
         task_action = terminal_action(task) or terminal_action({"body": body})
@@ -1676,6 +1694,137 @@ class CeoSupervisorService:
                         task_id,
                         parent_status,
                     )
+
+    def _bridge_root_completion_to_discord(
+        self,
+        *,
+        root_task_id: str,
+        root_payload: Mapping[str, Any],
+    ) -> str | None:
+        """Bridge a completed CEO planning root to existing Discord delivery.
+
+        No semantic routing happens here.
+
+        Existing CEO-authored durable state decides the UX:
+        - no selected primary + root final_answer -> direct CEO reply
+        - selected primaries -> one CEO delegation card
+
+        Existing Discord delivery methods own correlation, idempotency,
+        message creation/update, and thread targeting.
+        """
+
+        if self.discord_delivery is None:
+            return None
+
+        root_body = str(root_payload.get("body") or "")
+
+        if (
+            workflow_mode_from_body(root_body) != "analysis"
+            or not is_user_query_body(root_body)
+        ):
+            return None
+
+        environment = getattr(self.client, "environment", os.environ)
+        hermes_home = environment.get("HERMES_HOME", "/opt/data")
+
+        ceo_profile = canonical_profile_for_department("ceo")
+        ceo_profile_home = os.path.join(
+            hermes_home,
+            "profiles",
+            ceo_profile,
+        )
+        delivery_home = (
+            ceo_profile_home
+            if os.path.isdir(ceo_profile_home)
+            else hermes_home
+        )
+        store = DiscordIdempotencyStore(delivery_home)
+
+        selected = selected_primary_profiles_from_task(root_payload)
+
+        # Delegated workflow:
+        # reuse the CEO's existing durable selection + delegation instructions.
+        if selected:
+            plan_body = _materialization_plan_body(root_payload)
+            plan = _delegation_plan_from_root_body(plan_body)
+
+            lines = [
+                "🧠 **CEO 업무 분배**",
+                "",
+            ]
+
+            for profile in selected:
+                try:
+                    department = department_for_canonical_profile(profile)
+                except Exception:
+                    department = profile
+
+                instruction = str(plan.get(profile) or "").strip()
+
+                lines.append(f"**{department}**")
+                if instruction:
+                    lines.append(f"└ {instruction}")
+
+            content = "\n".join(lines).strip()
+
+            status = self.discord_delivery.upsert_thread_card(
+                root_task_id=root_task_id,
+                source_task=root_payload,
+                root_task=root_payload,
+                content=content,
+                store=store,
+                profile=ceo_profile,
+                response_key_suffix=f"ceo-delegation:{root_task_id}",
+                update_existing=True,
+            )
+
+            logger.info(
+                "ceo-root-discord-bridge root=%s mode=delegated "
+                "selected=%s status=%s",
+                root_task_id,
+                ",".join(selected),
+                status,
+            )
+            return status
+
+        # Direct CEO answer:
+        # reuse ChildTaskState's existing run-metadata final_answer fallback.
+        root_state = ChildTaskState.from_hermes(root_payload)
+
+        content = _text(
+            root_state.final_answer
+            or root_state.result
+            or root_state.summary
+            or root_payload.get("latest_summary")
+            or root_payload.get("summary")
+            or root_payload.get("result")
+        )
+
+        if not content:
+            logger.info(
+                "ceo-root-discord-bridge root=%s mode=direct status=empty",
+                root_task_id,
+            )
+            return "empty"
+
+        status = self.discord_delivery.deliver_to_existing_thread(
+            root_task_id=root_task_id,
+            source_task=root_payload,
+            root_task=root_payload,
+            content=content,
+            title="🧠 CEO 답변",
+            store=store,
+            profile=ceo_profile,
+            response_key_suffix=f"ceo-direct:{root_task_id}",
+        )
+
+        logger.info(
+            "ceo-root-discord-bridge root=%s mode=direct status=%s",
+            root_task_id,
+            status,
+        )
+        return status
+
 
     def _reconcile_department_start_progress(
         self,
@@ -2461,13 +2610,32 @@ class CeoSupervisorService:
                         and "planning_terminal_state=done_after_child_creation" in root_body
                     )
                     if legacy_planning_root:
-                        # Preserve compatibility for legacy planning roots whose
-                        # execution-parent linkage may not yet be durable when
-                        # the root completion event arrives.
+                        # Root completion remains a planning boundary, never a
+                        # synthesis-ready signal.  Project only the CEO-authored
+                        # durable outcome into the already-existing Discord thread.
+                        try:
+                            bridge_status = self._bridge_root_completion_to_discord(
+                                root_task_id=root_id,
+                                root_payload=root_payload,
+                            )
+                        except Exception as exc:
+                            # UI projection must never mutate or block workflow
+                            # execution. Existing primary events remain the
+                            # deterministic wake-up boundary.
+                            logger.warning(
+                                "ceo-root-discord-bridge-failed "
+                                "root=%s error=%s",
+                                root_id,
+                                type(exc).__name__,
+                            )
+                            bridge_status = "failed"
+
                         logger.info(
-                            "root-planning-complete-ignored root=%s event=%s",
+                            "root-planning-complete-projected "
+                            "root=%s event=%s status=%s",
                             root_id,
                             event_key,
+                            bridge_status,
                         )
                         return None
                 try:

@@ -1456,6 +1456,8 @@ class SupervisorWakeupTest(unittest.TestCase):
     def test_binding_mode_is_explicit_and_legacy_scoped_roots_remain_gated(self) -> None:
         self.assertEqual(infer_workflow_mode("삼성전자 분석"), "analysis")
         self.assertEqual(infer_workflow_mode("삼성전자 주문을 집행해"), "binding")
+        self.assertEqual(infer_workflow_mode("삼성전자 매수해도 될까?"), "analysis")
+        self.assertEqual(infer_workflow_mode("삼성전자 팔아도 안전해?"), "analysis")
         self.assertEqual(
             infer_workflow_mode(
                 "애플을 지금 투자 관점에서 분석해줘. "
