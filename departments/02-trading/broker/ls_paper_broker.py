@@ -315,13 +315,21 @@ class LSPaperBroker:
                 "LS_PAPER_ORDER_INVALID", "LS PAPER limit order requires a positive price"
             )
         price = Decimal(0) if normalized_type == "MARKET" else Decimal(limit_price)
+        # CSPAT00601 declares OrdPrc as a JSON Number (13.2).  Sending the
+        # textual form (for example ``"0"``) is tolerated by mocks but the LS
+        # PAPER order gateway can answer HTTP 500 before producing an order.
+        # Preserve integral prices as JSON integers and use a JSON float only
+        # for the contract's two-decimal fractional form.
+        wire_price: int | float = (
+            int(price) if price == price.to_integral_value() else float(price)
+        )
         body = self._post_tr(
             "CSPAT00601",
             {
                 "CSPAT00601InBlock1": {
                     "IsuNo": "A" + canonical_symbol,
                     "OrdQty": int(quantity),
-                    "OrdPrc": str(price),
+                    "OrdPrc": wire_price,
                     "BnsTpCode": "2" if normalized_side == "BUY" else "1",
                     "OrdprcPtnCode": "03" if normalized_type == "MARKET" else "00",
                     "MgntrnCode": "000",

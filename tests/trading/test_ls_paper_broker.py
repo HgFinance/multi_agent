@@ -78,7 +78,7 @@ def test_place_market_buy_uses_paper_cash_order_contract() -> None:
         assert block == {
             "IsuNo": "A005930",
             "OrdQty": 2,
-            "OrdPrc": "0",
+            "OrdPrc": 0,
             "BnsTpCode": "2",
             "OrdprcPtnCode": "03",
             "MgntrnCode": "000",
@@ -108,6 +108,33 @@ def test_place_market_buy_uses_paper_cash_order_contract() -> None:
     )
     assert ack.broker_order_id == "6439"
     assert [request.url.path for request in requests] == ["/oauth2/token", "/stock/order"]
+
+
+def test_place_limit_order_serializes_price_as_json_number() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return httpx.Response(200, json={"access_token": "token", "expires_in": 3600})
+        body = __import__("json").loads(request.content)
+        price = body["CSPAT00601InBlock1"]["OrdPrc"]
+        assert price == 269000.5
+        assert not isinstance(price, str)
+        return httpx.Response(
+            200,
+            json={
+                "rsp_cd": "00000",
+                "CSPAT00601OutBlock2": {"OrdNo": 6441, "ShtnIsuNo": "A005930"},
+            },
+        )
+
+    broker = _broker(handler)
+    ack = broker.place_order(
+        symbol="005930",
+        side="SELL",
+        order_type="LIMIT",
+        quantity=Decimal(2),
+        limit_price=Decimal("269000.50"),
+    )
+    assert ack.broker_order_id == "6441"
 
 
 def test_transport_failure_is_ambiguous_and_must_not_be_retried() -> None:
