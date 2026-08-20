@@ -85,6 +85,72 @@ def canonical_payload_sha256(value: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def directive_execution_event_payload(
+    record: "UserOrderRequestRecord", response: Any
+) -> dict[str, Any]:
+    """Project one Trading response into a correlation-safe audit payload.
+
+    The payload deliberately contains no account number, credential, proof, or
+    raw user text. It is sufficient to join a Discord/Web request to the
+    durable directive, its legs, and the broker identifiers actually returned
+    by Trading.
+    """
+
+    model_dump = getattr(response, "model_dump", None)
+    if callable(model_dump):
+        raw = model_dump(mode="json")
+    elif isinstance(response, Mapping):
+        raw = dict(response)
+    else:
+        raise UserOrderRequestStateError("directive response is not an object")
+
+    legs: list[dict[str, Any]] = []
+    for leg in raw.get("legs") or []:
+        if not isinstance(leg, Mapping):
+            continue
+        broker_order_id = str(leg.get("broker_order_id") or "").strip() or None
+        broker_order_no = broker_order_id
+        if broker_order_no and broker_order_no.startswith("ls-paper:"):
+            broker_order_no = broker_order_no.split(":", 1)[1] or None
+        legs.append(
+            {
+                "leg_id": str(leg.get("leg_id") or "") or None,
+                "leg_index": leg.get("leg_index"),
+                "symbol": leg.get("symbol"),
+                "side": leg.get("side"),
+                "order_type": leg.get("order_type"),
+                "limit_price": leg.get("limit_price"),
+                "state": leg.get("state"),
+                "requested_quantity": leg.get("requested_quantity"),
+                "filled_quantity": leg.get("filled_quantity"),
+                "average_fill_price": leg.get("average_fill_price"),
+                "broker_order_id": broker_order_id,
+                "broker_order_no": broker_order_no,
+                "broker_event_id": leg.get("broker_event_id"),
+                "error_code": leg.get("error_code"),
+            }
+        )
+
+    client_request_id = record.client_request_id
+    return {
+        "schema_version": "paper-order-correlation.v1",
+        "source": "NATURAL_LANGUAGE",
+        "request_source": (
+            "DISCORD" if client_request_id.startswith("discord:") else "WEB_OR_API"
+        ),
+        "mode": record.mode,
+        "client_request_id": client_request_id,
+        "order_request_id": record.order_request_id,
+        "ceo_root_task_id": record.ceo_root_task_id,
+        "trading_task_id": record.trading_task_id,
+        "directive_id": str(raw.get("directive_id") or "") or None,
+        "directive_state": raw.get("state"),
+        "action": raw.get("action"),
+        "error_code": raw.get("error_code"),
+        "legs": legs,
+    }
+
+
 @dataclass(frozen=True)
 class UserOrderRequestRecord:
     order_request_id: str
@@ -159,6 +225,8 @@ class UserOrderRequestRepository(Protocol):
         clarification_code: str | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
+        event_type: str | None = None,
+        event_payload: Mapping[str, Any] | None = None,
     ) -> UserOrderRequestRecord: ...
 
 
@@ -190,6 +258,7 @@ class InMemoryUserOrderRequestRepository:
         self._records: dict[str, UserOrderRequestRecord] = {}
         self._request_index: dict[tuple[str, str], str] = {}
         self._interpretations: dict[tuple[str, str], str] = {}
+        self._events: list[dict[str, Any]] = []
 
     def admit(
         self,
@@ -314,9 +383,13 @@ class InMemoryUserOrderRequestRepository:
         clarification_code: str | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
+        event_type: str | None = None,
+        event_payload: Mapping[str, Any] | None = None,
     ) -> UserOrderRequestRecord:
         if state not in ORDER_REQUEST_STATES:
             raise UserOrderRequestStateError(f"unsupported order request state: {state}")
+        if event_type is not None and not (1 <= len(event_type) <= 64):
+            raise UserOrderRequestStateError("invalid order request event type")
         payload = dict(canonical_payload) if canonical_payload is not None else None
         if (payload is None) != (payload_sha256 is None):
             raise UserOrderRequestStateError("canonical payload and digest must be stored together")
@@ -329,7 +402,7 @@ class InMemoryUserOrderRequestRepository:
                 if state in {"COMPLETED", "FAILED", "REJECTED", "NOT_ORDER"}
                 else record.completed_at
             )
-            return self._replace(
+            updated = self._replace(
                 record,
                 state=state,
                 action=action if action is not None else record.action,
@@ -341,6 +414,33 @@ class InMemoryUserOrderRequestRepository:
                 error_message=error_message,
                 completed_at=completed_at,
             )
+            payload = {
+                "schema_version": "user-order-request-event.v1",
+                "client_request_id": updated.client_request_id,
+                "order_request_id": updated.order_request_id,
+                "directive_id": updated.directive_id,
+                "action": updated.action,
+                "error_code": updated.error_code,
+            }
+            payload.update(dict(event_payload or {}))
+            self._events.append(
+                {
+                    "event_type": event_type or f"STATE_{state}",
+                    "to_state": state,
+                    "payload": payload,
+                }
+            )
+            return updated
+
+    def events_for(self, order_request_id: str) -> list[dict[str, Any]]:
+        """Test/local projection of the append-only production event journal."""
+
+        with self._lock:
+            return [
+                dict(event)
+                for event in self._events
+                if event["payload"].get("order_request_id") == str(order_request_id)
+            ]
 
     def _required(self, order_request_id: str) -> UserOrderRequestRecord:
         record = self._records.get(str(order_request_id))
@@ -678,9 +778,13 @@ class PostgresUserOrderRequestRepository:
         clarification_code: str | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
+        event_type: str | None = None,
+        event_payload: Mapping[str, Any] | None = None,
     ) -> UserOrderRequestRecord:
         if state not in ORDER_REQUEST_STATES:
             raise UserOrderRequestStateError(f"unsupported order request state: {state}")
+        if event_type is not None and not (1 <= len(event_type) <= 64):
+            raise UserOrderRequestStateError("invalid order request event type")
         payload = dict(canonical_payload) if canonical_payload is not None else None
         if (payload is None) != (payload_sha256 is None):
             raise UserOrderRequestStateError("canonical payload and digest must be stored together")
@@ -743,7 +847,22 @@ class PostgresUserOrderRequestRepository:
                     )
                     if cursor.rowcount != 1:
                         raise UserOrderRequestConflict("directive source request binding conflict")
-                self._event(cursor, updated, f"STATE_{state}", state, {})
+                audit_payload = {
+                    "schema_version": "user-order-request-event.v1",
+                    "client_request_id": updated.client_request_id,
+                    "order_request_id": updated.order_request_id,
+                    "directive_id": updated.directive_id,
+                    "action": updated.action,
+                    "error_code": updated.error_code,
+                }
+                audit_payload.update(dict(event_payload or {}))
+                self._event(
+                    cursor,
+                    updated,
+                    event_type or f"STATE_{state}",
+                    state,
+                    audit_payload,
+                )
                 return updated
         except UserOrderWorkflowError:
             raise

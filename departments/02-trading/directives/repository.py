@@ -83,6 +83,7 @@ class DirectiveLeg:
     requested_quantity: Decimal | None
     limit_price: Decimal | None
     filled_quantity: Decimal = Decimal(0)
+    average_fill_price: Decimal | None = None
     reduce_only: bool = False
     state: DirectiveLegState = DirectiveLegState.PENDING
     linked_order_id: UUID | None = None
@@ -107,6 +108,11 @@ class DirectiveLeg:
             "requested_quantity": str(self.requested_quantity) if self.requested_quantity is not None else None,
             "limit_price": str(self.limit_price) if self.limit_price is not None else None,
             "filled_quantity": str(self.filled_quantity),
+            "average_fill_price": (
+                str(self.average_fill_price)
+                if self.average_fill_price is not None
+                else None
+            ),
             "reduce_only": self.reduce_only,
             "state": self.state.value,
             "linked_order_id": str(self.linked_order_id) if self.linked_order_id else None,
@@ -647,7 +653,12 @@ class InMemoryDirectiveRepository:
                 source=source,
             )
             self.state.direct_fills[key] = fill
+            prior_filled = leg.filled_quantity
+            prior_notional = (leg.average_fill_price or Decimal(0)) * prior_filled
             leg.filled_quantity += quantity
+            leg.average_fill_price = (
+                prior_notional + quantity * price
+            ) / leg.filled_quantity
             leg.broker_event_id = f"paper:fill:{fill_id}"
             leg.state = (
                 DirectiveLegState.FILLED
@@ -1147,7 +1158,7 @@ class PostgresDirectiveRepository:
             state=DirectiveLegState(row[11]), linked_order_id=row[12],
             client_order_id=row[13], broker_order_id=row[14], broker_event_id=row[15],
             error_code=row[16], error_message=row[17], expires_at=row[18],
-            target_filled_quantity=row[19],
+            target_filled_quantity=row[19], average_fill_price=row[20],
         )
 
     def accept(self, request: UserDirectiveRequest, proof: DirectiveProof) -> tuple[DirectiveRecord, bool]:
@@ -1259,8 +1270,12 @@ class PostgresDirectiveRepository:
                 select leg_id,directive_id,leg_index,instrument_id,symbol,side,order_type,
                        requested_quantity,limit_price,filled_quantity,reduce_only,state,
                        linked_order_id,client_order_id,broker_order_id,broker_event_id,
-                       error_code,error_message,expires_at,target_filled_quantity
-                  from execution.user_directive_legs where directive_id=%s order by leg_index
+                       error_code,error_message,expires_at,target_filled_quantity,
+                       (select sum(fill.quantity*fill.price)/nullif(sum(fill.quantity),0)
+                          from execution.paper_user_directive_fills fill
+                         where fill.leg_id=leg.leg_id) as average_fill_price
+                  from execution.user_directive_legs leg
+                 where leg.directive_id=%s order by leg.leg_index
                 """,
                 (directive_id,),
             )

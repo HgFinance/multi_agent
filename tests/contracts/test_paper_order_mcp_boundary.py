@@ -13,6 +13,8 @@ import yaml
 from apps.api.conditional_rules import ConditionalRuleCandidate
 from apps.api.paper_order_mcp import (
     BearerAuthMiddleware,
+    UntrustedHermesOrderCandidate,
+    _delegate_to_orchestrator,
     build_server,
     check_readiness,
     validate_api_key,
@@ -279,6 +281,53 @@ def test_transport_accepts_contradictory_candidate_for_durable_verifier(
             "interpretation": contradictory,
         }
     ]
+
+
+def test_sync_order_orchestrator_runs_off_the_mcp_event_loop(monkeypatch) -> None:
+    calls: list[dict] = []
+    offloads: list[object] = []
+    fake = ModuleType("apps.api.user_order_orchestrator")
+
+    def orchestrate(**kwargs):
+        calls.append(kwargs)
+        return {"state": "COMPLETED", "mode": "PAPER"}
+
+    async def to_thread(function, /, *args, **kwargs):
+        offloads.append(function)
+        return function(*args, **kwargs)
+
+    fake.process_user_paper_order = orchestrate  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "apps.api.user_order_orchestrator", fake)
+    monkeypatch.setattr(asyncio, "to_thread", to_thread)
+    interpretation = UntrustedHermesOrderCandidate.model_validate(
+        {
+            "schema_version": "user-paper-order-interpretation.v1",
+            "mode": "PAPER",
+            "binding": False,
+            "raw_text_sha256": "0" * 64,
+            "decision": "NOT_ORDER",
+            "action": None,
+            "instrument_mention": None,
+            "side": None,
+            "quantity": None,
+            "order_type": None,
+            "limit_price": None,
+            "evidence": [],
+            "reason_codes": ["QUESTION_OR_ADVICE"],
+        }
+    )
+
+    result = asyncio.run(
+        _delegate_to_orchestrator(
+            root_task_id="t_root1",
+            trading_task_id="t_trade1",
+            interpretation=interpretation,
+        )
+    )
+
+    assert result == {"state": "COMPLETED", "mode": "PAPER"}
+    assert offloads == [orchestrate]
+    assert calls[0]["root_task_id"] == "t_root1"
 
 
 def test_readiness_checks_role_schema_kanban_and_trading(

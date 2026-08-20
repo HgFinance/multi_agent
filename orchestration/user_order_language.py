@@ -340,6 +340,9 @@ _ALLOWED_RESIDUAL_RE = re.compile(
     r"보유|종목|주식|주문|주세요|줘)\s*)*$"
 )
 _LEADING_DISCORD_MENTION_RE = re.compile(r"^\s*<@!?\d{15,25}>\s*")
+_LEADING_DISCORD_MENTION_PARTS_RE = re.compile(
+    r"^(?P<leading>\s*)<@!?\d{15,25}>(?P<trailing>\s*)"
+)
 
 
 @dataclass(frozen=True)
@@ -465,6 +468,34 @@ def _validate_evidence(
         if not same_supported_span:
             return None, OrderReasonCode.EVIDENCE_SPAN_INVALID
     return by_field, None
+
+
+def _align_discord_delivery_whitespace(
+    raw_text: str, candidate: HermesOrderCandidate
+) -> HermesOrderCandidate:
+    """Repair one narrow Discord-only evidence coordinate presentation drift.
+
+    Discord keeps the leading bot mention and following whitespace in the
+    authenticated source. Hermes occasionally counts the mention but omits
+    only that following whitespace in its offsets. Accept the uniform shift
+    only when every evidence substring then exactly matches the source.
+    """
+
+    mention = _LEADING_DISCORD_MENTION_PARTS_RE.match(raw_text)
+    if mention is None:
+        return candidate
+    shift = len(mention.group("trailing"))
+    if shift <= 0 or not candidate.evidence:
+        return candidate
+
+    shifted: list[TextEvidence] = []
+    for evidence in candidate.evidence:
+        start = evidence.start + shift
+        end = evidence.end + shift
+        if end > len(raw_text) or raw_text[start:end] != evidence.text:
+            return candidate
+        shifted.append(evidence.model_copy(update={"start": start, "end": end}))
+    return candidate.model_copy(update={"evidence": tuple(shifted)})
 
 
 def _expected_evidence(
@@ -790,6 +821,7 @@ def verify_order_candidate(
         return _clarify(digest, OrderReasonCode.INVALID_CANDIDATE_SCHEMA)
     if structured.raw_text_sha256 != digest:
         return _clarify(digest, OrderReasonCode.RAW_TEXT_HASH_MISMATCH)
+    structured = _align_discord_delivery_whitespace(raw_text, structured)
 
     unsafe = _unsafe_language(raw_text)
     if unsafe is not None:

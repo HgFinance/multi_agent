@@ -728,6 +728,56 @@ def test_evidence_must_be_exact_original_substring_at_exact_span() -> None:
     assert OrderReasonCode.EVIDENCE_TEXT_MISMATCH in result.reason_codes
 
 
+def test_discord_mention_trailing_spaces_are_one_uniform_delivery_offset() -> None:
+    raw = "<@1536991290842030130>  SK하이닉스 2주 시장가 매도"
+    candidate = _place_candidate(
+        raw,
+        instrument="SK하이닉스",
+        side_text="매도",
+        side=OrderSide.SELL,
+        quantity_text="2주",
+        quantity=2,
+        order_type_text="시장가",
+        order_type=OrderType.MARKET,
+    )
+    payload = candidate.model_dump(mode="json")
+    for evidence in payload["evidence"]:
+        evidence["start"] -= 2
+        evidence["end"] -= 2
+
+    result = verify_order_candidate(raw, payload)
+
+    assert isinstance(result, VerifiedPaperDirective)
+    assert result.payload is not None
+    assert result.payload.instrument_mention == "SK하이닉스"
+    assert result.payload.quantity == "2"
+
+
+def test_discord_offset_repair_rejects_non_uniform_evidence_drift() -> None:
+    raw = "<@1536991290842030130>  SK하이닉스 2주 시장가 매도"
+    candidate = _place_candidate(
+        raw,
+        instrument="SK하이닉스",
+        side_text="매도",
+        side=OrderSide.SELL,
+        quantity_text="2주",
+        quantity=2,
+        order_type_text="시장가",
+        order_type=OrderType.MARKET,
+    )
+    payload = candidate.model_dump(mode="json")
+    for evidence in payload["evidence"]:
+        evidence["start"] -= 2
+        evidence["end"] -= 2
+    payload["evidence"][0]["start"] -= 1
+    payload["evidence"][0]["end"] -= 1
+
+    result = verify_order_candidate(raw, payload)
+
+    assert isinstance(result, OrderClarification)
+    assert result.reason_codes == (OrderReasonCode.EVIDENCE_TEXT_MISMATCH,)
+
+
 def test_partial_instrument_substring_leaves_unsupported_residual() -> None:
     raw = "삼성전자 10주 시장가 매수"
     candidate = _place_candidate(

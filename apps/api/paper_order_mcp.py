@@ -8,6 +8,7 @@ initialize database, Kanban, or Trading API clients.
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import inspect
 import os
@@ -169,11 +170,18 @@ async def _delegate_to_orchestrator(
         process_user_paper_order as orchestrate,
     )
 
-    result = orchestrate(
-        root_task_id=root_task_id,
-        trading_task_id=trading_task_id,
-        interpretation=interpretation.model_dump(mode="json", warnings=False),
-    )
+    arguments = {
+        "root_task_id": root_task_id,
+        "trading_task_id": trading_task_id,
+        "interpretation": interpretation.model_dump(mode="json", warnings=False),
+    }
+    if inspect.iscoroutinefunction(orchestrate):
+        result = await orchestrate(**arguments)
+    else:
+        # Scope reads, Trading HTTP, and the bounded fill-status polling are
+        # synchronous. Keep them off FastMCP's event loop so one market order
+        # cannot starve keepalives or another independent status call.
+        result = await asyncio.to_thread(orchestrate, **arguments)
     if inspect.isawaitable(result):
         result = await result
     model_dump = getattr(result, "model_dump", None)

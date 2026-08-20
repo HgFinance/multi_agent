@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from apps.api import ceo, user_order_orchestrator as orchestrator
 from apps.api.user_order_workflow import InMemoryUserOrderRequestRepository
 from apps.api.user_orders import (
+    DirectiveLeg,
     DirectiveAction as ResponseAction,
     DirectiveState,
     UserDirectiveResponse,
@@ -479,6 +480,61 @@ def test_valid_execution_submits_exactly_once_and_replay_only_reads_status(
     assert replay["request_state"] == "COMPLETED"
     assert replay["directive"]["directive_id"] == DIRECTIVE_ID
     assert context.repository.get(context.record.order_request_id).state == "COMPLETED"
+
+
+def test_direct_order_waits_read_only_and_reports_broker_fill_correlation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _workflow(monkeypatch)
+    submitted = _directive_response(context.record)
+    completed = _directive_response(context.record, state=DirectiveState.COMPLETED)
+    completed = completed.model_copy(
+        update={
+            "legs": [
+                DirectiveLeg.model_validate(
+                    {
+                        "leg_id": "55555555-5555-4555-8555-555555555555",
+                        "leg_index": 0,
+                        "symbol": "000660",
+                        "side": "SELL",
+                        "order_type": "MARKET",
+                        "requested_quantity": "2",
+                        "filled_quantity": "2",
+                        "average_fill_price": "1681500.00",
+                        "state": "FILLED",
+                        "reduce_only": True,
+                        "broker_order_id": "ls-paper:12693",
+                        "broker_event_id": "ls-paper:ack:12693",
+                    }
+                )
+            ]
+        }
+    )
+    submit = Mock(return_value=submitted)
+    read = Mock(return_value=completed)
+    monkeypatch.setattr(orchestrator, "submit_verified_paper_directive", submit)
+    monkeypatch.setattr(orchestrator, "read_verified_paper_directive_status", read)
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("PAPER_ORDER_STATUS_WAIT_SECONDS", "0.1")
+    monkeypatch.setattr(orchestrator, "_STATUS_POLL_SECONDS", 0.001)
+
+    result = _process(context, _execute_candidate(context.raw))
+
+    submit.assert_called_once()
+    read.assert_called_once()
+    assert result["request_state"] == "COMPLETED"
+    assert result["correlation"]["client_request_id"] == "request-200"
+    assert result["correlation"]["legs"][0]["broker_order_no"] == "12693"
+    assert "000660 매도 시장가(가격 미지정) 요청 2주/체결 2주" in result["user_message"]
+    assert "평균 체결가 1,681,500원" in result["user_message"]
+    assert "LS 주문번호 12693" in result["user_message"]
+    events = context.repository.events_for(context.record.order_request_id)
+    snapshots = [
+        event for event in events
+        if event["event_type"] == "BROKER_EXECUTION_SNAPSHOT"
+    ]
+    assert len(snapshots) == 2
+    assert snapshots[-1]["payload"]["legs"][0]["filled_quantity"] == "2"
 
 
 def test_changed_interpretation_replay_conflicts_even_after_directive_exists(

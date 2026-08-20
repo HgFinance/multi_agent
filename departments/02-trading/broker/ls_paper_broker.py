@@ -275,12 +275,113 @@ class LSPaperBroker:
             tr_code, frozenset()
         )
         if rsp_cd and rsp_cd not in success_codes:
+            # LS PAPER has been observed returning rsp_cd=00039 after it had
+            # already accepted and filled CSPAT00601. A non-success body after
+            # the mutating request crossed the broker boundary is therefore
+            # not proof of rejection. If LS still supplied a non-zero order
+            # number it is authoritative; otherwise the outcome is ambiguous
+            # and must be reconciled read-only before any new placement.
+            confirmation = body.get(f"{tr_code}OutBlock2")
+            confirmed_order_no = (
+                str(confirmation.get("OrdNo") or "").strip()
+                if isinstance(confirmation, dict)
+                else ""
+            )
+            if placement and confirmed_order_no not in {"", "0"}:
+                return body
             # Do not include rsp_msg: broker messages may echo account data.
             raise LSPaperBrokerError(
-                "LS_PAPER_ORDER_REJECTED" if placement else "LS_PAPER_QUERY_REJECTED",
+                "LS_PAPER_ORDER_AMBIGUOUS" if placement else "LS_PAPER_QUERY_REJECTED",
                 f"LS PAPER request was rejected (code {rsp_cd})",
+                ambiguous=placement,
             )
         return body
+
+    @staticmethod
+    def _row_order_datetime(row: dict[str, Any], order_day: date) -> datetime | None:
+        digits = "".join(
+            character
+            for character in str(row.get("OrdTime") or "")
+            if character.isdigit()
+        )
+        if len(digits) < 6:
+            return None
+        try:
+            return datetime(
+                order_day.year,
+                order_day.month,
+                order_day.day,
+                int(digits[0:2]),
+                int(digits[2:4]),
+                int(digits[4:6]),
+                tzinfo=KST,
+            )
+        except ValueError:
+            return None
+
+    def _recover_recent_placement(
+        self,
+        *,
+        submitted_after: datetime,
+        symbol: str,
+        side: str,
+        quantity: Decimal,
+        price: Decimal,
+    ) -> LSPaperOrderAck | None:
+        """Match one exact recent order via CSPAQ13700 without resubmitting.
+
+        A match is accepted only when it is unique by symbol, side, quantity,
+        price, and a bounded broker timestamp. Simultaneous identical HTS/API
+        orders deliberately remain ambiguous rather than being misattributed.
+        """
+
+        observed_until = datetime.now(KST) + timedelta(seconds=3)
+        observed_after = submitted_after.astimezone(KST) - timedelta(seconds=3)
+        expected_side = "2" if side == "BUY" else "1"
+        order_day = submitted_after.astimezone(KST).date()
+        for attempt in range(2):
+            if attempt:
+                # CSPAQ13700 is rate-limited to one request per second. This
+                # second read handles broker-history propagation lag and is
+                # still reconciliation only; CSPAT00601 is never called again.
+                time.sleep(_ORDER_HISTORY_CACHE_SECONDS)
+            try:
+                rows = self._order_history_rows(order_day, refresh=True)
+            except LSPaperBrokerError:
+                return None
+
+            matches: list[tuple[str, str | None]] = []
+            for row in rows:
+                order_no = str(row.get("OrdNo") or "").strip()
+                row_symbol = str(row.get("IsuNo") or "").strip().removeprefix("A")
+                row_time = self._row_order_datetime(row, order_day)
+                try:
+                    row_quantity = _decimal(row.get("OrdQty") or 0, "OrdQty")
+                    row_price = _decimal(row.get("OrdPrc") or 0, "OrdPrc")
+                except LSPaperBrokerError:
+                    continue
+                if (
+                    order_no in {"", "0"}
+                    or row_symbol != symbol
+                    or str(row.get("BnsTpCode") or "").strip() != expected_side
+                    or row_quantity != quantity
+                    or row_price != price
+                    or row_time is None
+                    or not observed_after <= row_time <= observed_until
+                ):
+                    continue
+                matches.append(
+                    (order_no, str(row.get("OrdTime") or "").strip() or None)
+                )
+            if len(matches) == 1:
+                return LSPaperOrderAck(
+                    broker_order_id=matches[0][0],
+                    order_time=matches[0][1],
+                    symbol=symbol,
+                )
+            if len(matches) > 1:
+                return None
+        return None
 
     def place_order(
         self,
@@ -323,26 +424,50 @@ class LSPaperBroker:
         wire_price: int | float = (
             int(price) if price == price.to_integral_value() else float(price)
         )
-        body = self._post_tr(
-            "CSPAT00601",
-            {
-                "CSPAT00601InBlock1": {
-                    "IsuNo": "A" + canonical_symbol,
-                    "OrdQty": int(quantity),
-                    "OrdPrc": wire_price,
-                    "BnsTpCode": "2" if normalized_side == "BUY" else "1",
-                    "OrdprcPtnCode": "03" if normalized_type == "MARKET" else "00",
-                    "MgntrnCode": "000",
-                    "LoanDt": "",
-                    "OrdCndiTpCode": "0",
-                    "MbrNo": "",
-                }
-            },
-            path="/stock/order",
-            placement=True,
-        )
+        submitted_after = datetime.now(KST)
+        try:
+            body = self._post_tr(
+                "CSPAT00601",
+                {
+                    "CSPAT00601InBlock1": {
+                        "IsuNo": "A" + canonical_symbol,
+                        "OrdQty": int(quantity),
+                        "OrdPrc": wire_price,
+                        "BnsTpCode": "2" if normalized_side == "BUY" else "1",
+                        "OrdprcPtnCode": "03" if normalized_type == "MARKET" else "00",
+                        "MgntrnCode": "000",
+                        "LoanDt": "",
+                        "OrdCndiTpCode": "0",
+                        "MbrNo": "",
+                    }
+                },
+                path="/stock/order",
+                placement=True,
+            )
+        except LSPaperBrokerError as exc:
+            if not exc.ambiguous:
+                raise
+            recovered = self._recover_recent_placement(
+                submitted_after=submitted_after,
+                symbol=canonical_symbol,
+                side=normalized_side,
+                quantity=quantity,
+                price=price,
+            )
+            if recovered is not None:
+                return recovered
+            raise
         raw_result = body.get("CSPAT00601OutBlock2")
         if not isinstance(raw_result, dict):
+            recovered = self._recover_recent_placement(
+                submitted_after=submitted_after,
+                symbol=canonical_symbol,
+                side=normalized_side,
+                quantity=quantity,
+                price=price,
+            )
+            if recovered is not None:
+                return recovered
             raise LSPaperBrokerError(
                 "LS_PAPER_ORDER_AMBIGUOUS",
                 "LS PAPER success response has no order confirmation block",
@@ -351,6 +476,15 @@ class LSPaperBroker:
         result = raw_result
         order_no = str(result.get("OrdNo") or "").strip()
         if not order_no or order_no == "0":
+            recovered = self._recover_recent_placement(
+                submitted_after=submitted_after,
+                symbol=canonical_symbol,
+                side=normalized_side,
+                quantity=quantity,
+                price=price,
+            )
+            if recovered is not None:
+                return recovered
             raise LSPaperBrokerError(
                 "LS_PAPER_ORDER_AMBIGUOUS",
                 "LS PAPER order response has no broker order number",
@@ -408,7 +542,9 @@ class LSPaperBroker:
             )
         return None
 
-    def _order_history_rows(self, target_date: date) -> tuple[dict[str, Any], ...]:
+    def _order_history_rows(
+        self, target_date: date, *, refresh: bool = False
+    ) -> tuple[dict[str, Any], ...]:
         """Read account order history at most once per LS rate-limit window.
 
         CSPAQ13700 returns the account-wide order list and is limited to one
@@ -420,7 +556,8 @@ class LSPaperBroker:
         now = time.monotonic()
         with self._history_cache_lock:
             if (
-                self._history_cache_date == target_date
+                not refresh
+                and self._history_cache_date == target_date
                 and now - self._history_cache_at < _ORDER_HISTORY_CACHE_SECONDS
             ):
                 return self._history_cache_rows

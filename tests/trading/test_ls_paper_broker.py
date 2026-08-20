@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 import sys
@@ -12,6 +12,7 @@ TRADING_ROOT = Path(__file__).resolve().parents[2] / "departments" / "02-trading
 sys.path.insert(0, str(TRADING_ROOT))
 
 from broker.ls_paper_broker import (
+    KST,
     LSPaperBroker,
     LSPaperBrokerConfig,
     LSPaperBrokerError,
@@ -135,6 +136,111 @@ def test_place_limit_order_serializes_price_as_json_number() -> None:
         limit_price=Decimal("269000.50"),
     )
     assert ack.broker_order_id == "6441"
+
+
+def test_nonstandard_rsp_code_with_order_number_is_acknowledged() -> None:
+    """Production observed rsp_cd=00039 with an actual LS fill."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return httpx.Response(200, json={"access_token": "token", "expires_in": 3600})
+        return httpx.Response(
+            200,
+            json={
+                "rsp_cd": "00039",
+                "CSPAT00601OutBlock2": {
+                    "OrdNo": 12692,
+                    "OrdTime": "140927",
+                    "ShtnIsuNo": "A000660",
+                },
+            },
+        )
+
+    ack = _broker(handler).place_order(
+        symbol="000660",
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal(1),
+        limit_price=None,
+    )
+
+    assert ack.broker_order_id == "12692"
+
+
+def test_ambiguous_response_recovers_one_exact_recent_history_order() -> None:
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return httpx.Response(200, json={"access_token": "token", "expires_in": 3600})
+        tr_code = request.headers["tr_cd"]
+        requests.append(tr_code)
+        if tr_code == "CSPAT00601":
+            return httpx.Response(200, json={"rsp_cd": "00039"})
+        assert tr_code == "CSPAQ13700"
+        return httpx.Response(
+            200,
+            json={
+                "rsp_cd": "00136",
+                "CSPAQ13700OutBlock3": [
+                    {
+                        "OrdNo": 12692,
+                        "OrdTime": datetime.now(KST).strftime("%H%M%S"),
+                        "IsuNo": "A000660",
+                        "BnsTpCode": "1",
+                        "OrdQty": 1,
+                        "OrdPrc": 0,
+                    }
+                ],
+            },
+        )
+
+    ack = _broker(handler).place_order(
+        symbol="000660",
+        side="SELL",
+        order_type="MARKET",
+        quantity=Decimal(1),
+        limit_price=None,
+    )
+
+    assert ack.broker_order_id == "12692"
+    assert requests == ["CSPAT00601", "CSPAQ13700"]
+
+
+def test_ambiguous_response_does_not_guess_between_identical_recent_orders() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth2/token":
+            return httpx.Response(200, json={"access_token": "token", "expires_in": 3600})
+        if request.headers["tr_cd"] == "CSPAT00601":
+            return httpx.Response(200, json={"rsp_cd": "00039"})
+        order_time = datetime.now(KST).strftime("%H%M%S")
+        rows = [
+            {
+                "OrdNo": order_no,
+                "OrdTime": order_time,
+                "IsuNo": "A000660",
+                "BnsTpCode": "1",
+                "OrdQty": 1,
+                "OrdPrc": 0,
+            }
+            for order_no in (12692, 12693)
+        ]
+        return httpx.Response(
+            200,
+            json={"rsp_cd": "00136", "CSPAQ13700OutBlock3": rows},
+        )
+
+    with pytest.raises(LSPaperBrokerError) as caught:
+        _broker(handler).place_order(
+            symbol="000660",
+            side="SELL",
+            order_type="MARKET",
+            quantity=Decimal(1),
+            limit_price=None,
+        )
+
+    assert caught.value.code == "LS_PAPER_ORDER_AMBIGUOUS"
+    assert caught.value.ambiguous is True
 
 
 def test_transport_failure_is_ambiguous_and_must_not_be_retried() -> None:

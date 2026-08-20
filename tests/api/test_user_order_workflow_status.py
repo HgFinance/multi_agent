@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timezone
 import inspect
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -188,6 +188,8 @@ def test_owner_can_read_admitted_request_before_directive_exists() -> None:
     assert response.json() == {
         "schema_version": "user-paper-order-status.v1",
         "order_request_id": ORDER_REQUEST_ID,
+        "client_request_id": "browser-request-0001",
+        "request_source": "WEB_OR_API",
         "mode": "PAPER",
         "state": "KANBAN_QUEUED",
         "action": "PLACE_ORDER",
@@ -197,6 +199,7 @@ def test_owner_can_read_admitted_request_before_directive_exists() -> None:
         "error_code": None,
         "error_message": None,
         "directive": None,
+        "correlation": None,
     }
     repository.mark_outcome.assert_not_called()
     read_status.assert_not_called()
@@ -322,6 +325,8 @@ def test_accounting_pending_wins_over_inconsistent_completed_directive() -> None
         directive_id=DIRECTIVE_ID,
         error_code="TRADING_FILL_ACCOUNTING_PENDING",
         error_message="fill awaits accounting acknowledgment",
+        event_type="BROKER_EXECUTION_SNAPSHOT",
+        event_payload=ANY,
     )
 
 
@@ -379,6 +384,8 @@ def test_terminal_directive_state_is_persisted_and_returned(
         directive_id=DIRECTIVE_ID,
         error_code=error_code,
         error_message=error_message,
+        event_type="BROKER_EXECUTION_SNAPSHOT",
+        event_payload=ANY,
     )
 
 

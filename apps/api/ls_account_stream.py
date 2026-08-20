@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import re
@@ -289,27 +290,69 @@ def mask_account(account_no: str | None) -> str | None:
     return "****" + str(account_no)[-4:]
 
 
+def _event_id(source: str, *parts: Any) -> str:
+    """Return a stable, non-secret identity for one projected broker event."""
+
+    identity = json.dumps(
+        [source, *("" if part is None else str(part) for part in parts)],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+
+
+def _execution_origin(channel: str | None) -> str:
+    """Classify only what the broker explicitly says; never guess our caller."""
+
+    normalized = str(channel or "").strip().casefold()
+    if "hts" in normalized or "투혼" in normalized:
+        return "EXTERNAL_HTS"
+    if "api" in normalized:
+        return "BROKER_API_UNATTRIBUTED"
+    if normalized:
+        return "BROKER_CHANNEL_UNATTRIBUTED"
+    return "BROKER_ACCOUNT_UNATTRIBUTED"
+
+
 def normalize_order_event(tr_cd: str, body: dict[str, Any], seq: int) -> dict[str, Any]:
     """브로커 푸시 1건 → 화면 계약. LS 필드명은 여기서 끝난다."""
     kind = _TR_TO_KIND[tr_cd]
+    received_at = datetime.now(timezone.utc).isoformat()
+    event_time = _pick(body, "exectime", "ordtm")
+    order_no = _number(_pick(body, "ordno"))
+    symbol = _symbol(_pick(body, "shtcode", "shtnIsuno", "expcode", "Isuno"))
+    side = _side(_pick(body, "bnstp"))
+    quantity = _number(
+        _pick(body, "execqty", "mdfycnfqty", "canccnfqty", "rjtqty", "ordqty")
+    )
+    price = _number(_pick(body, "execprc", "mdfycnfprc", "ordprice", "ordprc"))
     return {
         "seq": seq,
+        "event_id": _event_id(
+            "LS_REALTIME", kind, order_no, symbol, side, event_time, quantity, price
+        ),
         "kind": kind,
         "label": KIND_LABELS[kind],
-        "received_at": datetime.now(timezone.utc).isoformat(),
+        "received_at": received_at,
         # 시각: 체결은 체결시각, 나머지는 주문시각
-        "event_time": _pick(body, "exectime", "ordtm"),
-        "order_no": _number(_pick(body, "ordno")),
+        "event_time": event_time,
+        "order_no": order_no,
+        "broker_order_id": order_no,
+        "broker_order_ids": [order_no] if order_no else [],
+        "trade_no": None,
         "orig_order_no": _number(_pick(body, "orgordno")),
-        "symbol": _symbol(_pick(body, "shtcode", "shtnIsuno", "expcode", "Isuno")),
+        "symbol": symbol,
         "symbol_name": _pick(body, "hname", "Isunm"),
-        "side": _side(_pick(body, "bnstp")),
+        "side": side,
         # 체결이면 체결수량·체결가, 아니면 주문수량·주문가
-        "quantity": _number(
-            _pick(body, "execqty", "mdfycnfqty", "canccnfqty", "rjtqty", "ordqty")
-        ),
-        "price": _number(_pick(body, "execprc", "mdfycnfprc", "ordprice", "ordprc")),
+        "quantity": quantity,
+        "price": price,
         "unfilled_quantity": _number(_pick(body, "unercqty", "orgordunercqty")),
+        "source": "LS_REALTIME",
+        "execution_channel": None,
+        "execution_channels": [],
+        "origin": "BROKER_EVENT_UNATTRIBUTED",
+        "correlation_status": "UNATTRIBUTED",
     }
 
 
@@ -404,17 +447,18 @@ def normalize_executions(payload: dict[str, Any]) -> dict[tuple[str, str], dict[
             continue
         time_text = _pick(row, "LastExecTime", "ExecTrxTime", "OrdTime")
         key = (symbol, side)
-        current = index.get(key)
-        if current is None or (time_text or "") > (current.get("time") or ""):
-            index[key] = {
-                "time": time_text,
-                "name": _pick(row, "IsuNm"),
-                "count": (current or {}).get("count", 0) + 1,
-            }
-        else:
-            current["count"] = current.get("count", 0) + 1
-            if not current.get("name"):
-                current["name"] = _pick(row, "IsuNm")
+        current = index.setdefault(
+            key,
+            {"time": None, "name": None, "count": 0, "broker_order_ids": []},
+        )
+        current["count"] = current.get("count", 0) + 1
+        if (time_text or "") > (current.get("time") or ""):
+            current["time"] = time_text
+        if not current.get("name"):
+            current["name"] = _pick(row, "IsuNm")
+        order_no = _number(row.get("OrdNo"))
+        if order_no and order_no not in current["broker_order_ids"]:
+            current["broker_order_ids"].append(order_no)
     return index
 
 
@@ -441,20 +485,42 @@ def normalize_accepted_orders(
             continue
         seen_order_nos.add(order_no)
         order_time = _pick(row, "OrdTime")
+        symbol = _symbol(_pick(row, "IsuNo"))
+        side = _side(_pick(row, "BnsTpCode"))
+        quantity = _number(row.get("OrdQty"))
+        price = _number(row.get("OrdPrc"))
         events.append({
             "seq": 0,  # 병합 뒤 전체 목록 기준으로 다시 부여한다.
+            "event_id": _event_id(
+                "LS_ORDER_HISTORY",
+                "ACCEPTED",
+                order_no,
+                symbol,
+                side,
+                order_time,
+                quantity,
+                price,
+            ),
             "kind": "ACCEPTED",
             "label": KIND_LABELS["ACCEPTED"],
             "received_at": day + ("T" + order_time if order_time else ""),
             "event_time": order_time,
             "order_no": order_no,
+            "broker_order_id": order_no,
+            "broker_order_ids": [order_no],
+            "trade_no": None,
             "orig_order_no": _number(row.get("OrgOrdNo")),
-            "symbol": _symbol(_pick(row, "IsuNo")),
+            "symbol": symbol,
             "symbol_name": _pick(row, "IsuNm"),
-            "side": _side(_pick(row, "BnsTpCode")),
-            "quantity": _number(row.get("OrdQty")),
-            "price": _number(row.get("OrdPrc")),
+            "side": side,
+            "quantity": quantity,
+            "price": price,
             "unfilled_quantity": None,
+            "source": "LS_ORDER_HISTORY",
+            "execution_channel": None,
+            "execution_channels": [],
+            "origin": "BROKER_ORDER_UNATTRIBUTED",
+            "correlation_status": "UNATTRIBUTED",
         })
 
     events.sort(
@@ -479,6 +545,12 @@ def attach_executions(
             row["trade_time"] = found.get("time")
         if not row.get("symbol_name"):
             row["symbol_name"] = found.get("name")
+        broker_order_ids = list(found.get("broker_order_ids") or [])
+        row["broker_order_ids"] = broker_order_ids
+        row["broker_order_id"] = (
+            broker_order_ids[0] if len(broker_order_ids) == 1 else None
+        )
+        row["execution_count"] = found.get("count")
     return rows
 
 
@@ -568,6 +640,13 @@ def normalize_today_trades(payload: dict[str, Any], today: str) -> dict[str, Any
             continue  # 짝이 없는 소계는 귀속시킬 곳이 없다
         head = group[0]
         side = _pick(head, "medosu") or ""
+        execution_channels = list(
+            dict.fromkeys(
+                channel
+                for item in group
+                if (channel := _pick(item, "middiv")) is not None
+            )
+        )
         # 비용은 소계, 종목·매매구분은 매매행. 둘 중 하나만 보면 반쪽이다.
         commission = _dec(row.get("fee"))
         tax = _dec(row.get("tax")) + _dec(row.get("argtax"))
@@ -597,6 +676,17 @@ def normalize_today_trades(payload: dict[str, Any], today: str) -> dict[str, Any
             "cash_before": None,
             "cash_after": None,
             "currency": "KRW",
+            # LS가 명시한 주문 채널(예: "투혼(HTS)")을 버리지 않는다. 이 값은
+            # 자연어 주문과 외부 HTS 주문을 구분하는 유일한 브로커 근거가 될 수 있다.
+            "execution_channel": (
+                execution_channels[0]
+                if len(execution_channels) == 1
+                else ("MIXED" if execution_channels else None)
+            ),
+            "execution_channels": execution_channels,
+            "broker_order_id": None,
+            "broker_order_ids": [],
+            "execution_count": len(group),
         })
         group = []
     return {"rows": merged}
@@ -677,6 +767,13 @@ def normalize_ledger(payload: dict[str, Any]) -> dict[str, Any]:
             "cash_before": _number(row.get("DpsBfbalAmt")),
             "cash_after": _number(row.get("DpsCrbalAmt")),
             "currency": _pick(row, "CrcyCode"),
+            # 결제 원장에는 주문 채널과 주문번호가 없다. 거래번호를 주문번호로
+            # 승격하지 않고 명시적으로 미상으로 둔다.
+            "execution_channel": None,
+            "execution_channels": [],
+            "broker_order_id": None,
+            "broker_order_ids": [],
+            "execution_count": None,
         })
     # 최신이 위로. 같은 날이면 거래번호 순이다.
     normalized.sort(key=lambda item: (item["trade_date"] or "", item["trade_no"] or ""), reverse=True)
@@ -712,6 +809,26 @@ def ledger_to_order_events(ledger: dict[str, Any], limit: int) -> list[dict[str,
         trade_date = str(row.get("trade_date") or "")
         trade_time = str(row.get("trade_time") or "") or None
         trade_no = str(row.get("trade_no") or "") or None
+        broker_order_ids = [
+            str(value)
+            for value in (row.get("broker_order_ids") or [])
+            if str(value or "").strip()
+        ]
+        explicit_broker_order_id = str(row.get("broker_order_id") or "").strip()
+        if explicit_broker_order_id and explicit_broker_order_id not in broker_order_ids:
+            broker_order_ids.append(explicit_broker_order_id)
+        broker_order_id = broker_order_ids[0] if len(broker_order_ids) == 1 else None
+        execution_channel = str(row.get("execution_channel") or "").strip() or None
+        execution_channels = [
+            str(value)
+            for value in (row.get("execution_channels") or [])
+            if str(value or "").strip()
+        ]
+        source = (
+            "LS_TODAY_TRADE_LEDGER"
+            if row.get("settlement") == "UNSETTLED"
+            else "LS_SETTLED_ACCOUNT_LEDGER"
+        )
         category = str(row.get("category") or "")
         if "매도" in category:
             side = "매도"
@@ -719,15 +836,31 @@ def ledger_to_order_events(ledger: dict[str, Any], limit: int) -> list[dict[str,
             side = "매수"
         else:
             side = category or None
+        event_id = _event_id(
+            source,
+            trade_date,
+            trade_no,
+            row.get("symbol"),
+            side,
+            trade_time,
+            row.get("quantity"),
+            row.get("unit_price"),
+            execution_channel,
+        )
         events.append({
             # 최신 거래가 먼저 오므로 seq도 화면에서 유일하게 역순으로 준다.
             "seq": len(rows) - index,
+            "event_id": event_id,
             "kind": "FILLED",
             "label": "체결",
             "received_at": trade_date + ("T" + trade_time if trade_time else ""),
             "event_time": trade_time,
-            # 기존 표의 마지막 열을 유지하기 위해 거래번호를 사용한다.
-            "order_no": trade_no,
+            # 거래번호와 주문번호는 서로 다른 식별자다. 주문번호가 LS 주문
+            # 조회로 한 개 확정된 경우에만 기존 order_no 칸에도 넣는다.
+            "order_no": broker_order_id,
+            "broker_order_id": broker_order_id,
+            "broker_order_ids": broker_order_ids,
+            "trade_no": trade_no,
             "orig_order_no": None,
             "symbol": row.get("symbol"),
             "symbol_name": row.get("symbol_name"),
@@ -735,6 +868,11 @@ def ledger_to_order_events(ledger: dict[str, Any], limit: int) -> list[dict[str,
             "quantity": row.get("quantity"),
             "price": row.get("unit_price"),
             "unfilled_quantity": None,
+            "source": source,
+            "execution_channel": execution_channel,
+            "execution_channels": execution_channels,
+            "origin": _execution_origin(execution_channel),
+            "correlation_status": "UNATTRIBUTED",
         })
     return events
 
@@ -1325,6 +1463,11 @@ async def portfolio_live(limit: int = 50) -> dict[str, Any]:
         recent_orders = list(FEED.events)[: max(1, min(limit, MAX_EVENTS))]
 
     account_no = _registered_account()
+    account_masked = mask_account(account_no)
+    for event in recent_orders:
+        # 주문 사건만 따로 떼어 로그로 남겨도 어느 PAPER 계좌를 읽은 것인지
+        # 확인할 수 있게 한다. 전체 계좌번호는 절대 싣지 않는다.
+        event["account_masked"] = account_masked
     counts = {kind: 0 for kind in KINDS}
     for event in recent_orders:
         counts[event["kind"]] = counts.get(event["kind"], 0) + 1
@@ -1334,7 +1477,7 @@ async def portfolio_live(limit: int = 50) -> dict[str, Any]:
         "environment_label": "모의투자" if environment == "PAPER" else "실전투자",
         "account": {
             "registered": account_no is not None,
-            "masked": mask_account(account_no),
+            "masked": account_masked,
             "error": FEED.account_error,
         },
         "stream": {
@@ -1777,7 +1920,10 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
     assert ledger_events[0]["label"] == "체결"
     assert ledger_events[0]["side"] == "매도"
     assert ledger_events[0]["event_time"] is None
-    assert ledger_events[0]["order_no"] == "12"
+    assert ledger_events[0]["order_no"] is None
+    assert ledger_events[0]["trade_no"] == "12"
+    assert ledger_events[0]["source"] == "LS_SETTLED_ACCOUNT_LEDGER"
+    assert ledger_events[0]["origin"] == "BROKER_ACCOUNT_UNATTRIBUTED"
 
     # 확정 원장에 없는 접수는 실시간 피드에서 보충하되, 체결은 원장과 중복하지 않는다
     duplicate_accepted = {**accepted, "seq": 99}
@@ -1822,6 +1968,7 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
     sell, buy = today_trades
     # 비용은 매매행이 아니라 종목소계에 실려 있다. 매매행만 읽으면 전부 0이 된다.
     assert sell["category"] == "매도" and sell["symbol"] == "000660"
+    assert sell["execution_channel"] == "투혼(HTS)"
     assert sell["commission"] == "250" and sell["tax"] == "3340"   # 거래세 835 + 농특세 2505
     assert sell["settled_amount"] == "1666410"
     # 매수는 예수금이 줄어든다. adjamt는 양수로 오므로 부호를 뒤집어야 한다.
@@ -1868,10 +2015,21 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
     assert accepted_history[0]["side"] == "매수"
     assert accepted_history[0]["quantity"] == "2"
     assert accepted_history[0]["price"] == "1655000"
+    assert accepted_history[0]["broker_order_id"] == "102"
+    assert accepted_history[0]["source"] == "LS_ORDER_HISTORY"
 
     attach_executions(today_trades, execs)
     assert sell["trade_time"] == "10:00:00" and sell["symbol_name"] == "SK하이닉스"
     assert buy["trade_time"] == "14:31:02"
+    assert sell["broker_order_id"] == "103"
+    assert set(buy["broker_order_ids"]) == {"101", "102"}
+    assert buy["broker_order_id"] is None
+    today_events = ledger_to_order_events({"rows": today_trades}, 50)
+    projected_sell = next(event for event in today_events if event["side"] == "매도")
+    assert projected_sell["order_no"] == "103"
+    assert projected_sell["trade_no"] is None
+    assert projected_sell["origin"] == "EXTERNAL_HTS"
+    assert projected_sell["correlation_status"] == "UNATTRIBUTED"
     # 색인에 없는 줄은 지어내지 않고 비워 둔다
     orphan = [{"symbol": "999999", "category": "매수", "trade_time": None, "symbol_name": None}]
     assert attach_executions(orphan, execs)[0]["trade_time"] is None
