@@ -55,7 +55,7 @@ from departments.risk_qa_worker_profiles import (
     WorkerTechProfile,
     tech_profile_for,
 )
-from orchestration.llm_observability import record_llm_call
+from orchestration.llm_observability import publish_worker_activity, record_llm_call
 
 # This module is loaded directly from its file path by the shared dispatcher.
 # The QA ``audit`` directory is intentionally a namespace package (no
@@ -1420,7 +1420,7 @@ async def run_employee_workers_async(
         except Exception as exc:  # noqa: BLE001 - persistence boundary escalates safely.
             trace_errors.append(f"incident_timeline:{type(exc).__name__}")
 
-    async def run_one(spec: WorkerSpec) -> dict[str, Any]:
+    async def _execute_one(spec: WorkerSpec) -> dict[str, Any]:
         worker_trace = SkillTrace()
         try:
             state = await build_worker_graph(
@@ -1501,6 +1501,32 @@ async def run_employee_workers_async(
             if persist_errors:
                 trace_errors.extend(persist_errors)
                 report["incident_persist_errors"] = persist_errors
+        return report
+
+    async def run_one(spec: WorkerSpec) -> dict[str, Any]:
+        """실행 결과에 손대지 않고 HR 유휴 관측 이벤트만 덧붙인다(2026-08-20).
+
+        이 부서는 공용 run_worker_registry 가 아니라 자체 실행기를 쓰므로 계측도
+        여기서 따로 한다 - 2026-08-10 배선이 orchestration/workflows/
+        portfolio_recommendation.py 한 곳에만 있어서, 그 파이프라인 밖에서 돈
+        Worker 가 HR 리포트에 IDLE 로 뜨고 있었다.
+
+        publish 는 로컬 큐잉이라 네트워크를 기다리지 않고(실측 0.117ms), 실패해도
+        예외를 올리지 않는다 - 계측이 Worker 판정을 바꾸지 못한다.
+        """
+
+        started = time.perf_counter()
+        report = await _execute_one(spec)
+        publish_worker_activity(
+            stage="qa",
+            worker_id=spec.worker_id,
+            role=spec.role,
+            status=str(report.get("status", "DEGRADED")),
+            attempts=int(report.get("attempts", 0) or 0),
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            error_count=0 if report.get("status") == "COMPLETED" else 1,
+            trace_id=str(trace_id or ""),
+        )
         return report
 
     reports = list(await asyncio.gather(*(run_one(spec) for spec in eligible)))

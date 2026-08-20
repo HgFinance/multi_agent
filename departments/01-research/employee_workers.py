@@ -225,6 +225,8 @@ def run_employee_workers(payload: Mapping[str, Any], *, llm: WorkerLLM | None = 
     단일 llm 은 워커 정체를 모른 채 공유되므로 Worker Model Gateway 의
     worker_id→adapter 해석이 전달되지 않는다 - MCP 경로는 factory 를 쓴다.
     """
+    # stage= 는 HR 유휴 관측 이벤트 이름에 들어간다(2026-08-20). 안 주면 본부장이
+    # MCP 로 직접 돌린 실행이 계측에서 빠져 HR 리포트에 IDLE 로 뜬다.
     return run_worker_registry(WORKER_SPECS, payload,
                                tools=tools_for_specs(WORKER_SPECS),
-                               llm=llm, llm_factory=llm_factory)
+                               llm=llm, llm_factory=llm_factory, stage="research")
