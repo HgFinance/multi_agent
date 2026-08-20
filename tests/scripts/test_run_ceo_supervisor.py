@@ -20,6 +20,7 @@ WatchOutputError = runner.WatchOutputError
 WatchProcessError = runner.WatchProcessError
 parse_watch_line = runner.parse_watch_line
 watch_events = runner.watch_events
+run_recovery_reconciler = runner.run_recovery_reconciler
 
 
 class FakeWatchProcess:
@@ -42,6 +43,34 @@ class FakeWatchProcess:
 
 
 class SupervisorRunnerTest(unittest.TestCase):
+    def test_recovery_lanes_share_one_serial_poll_loop(self) -> None:
+        calls: list[str] = []
+
+        class Service:
+            def materialize_ready_primary_plans(self):
+                calls.append("ready")
+
+            def reconcile_completed_syntheses(self):
+                calls.append("synthesis")
+                return ("t_synthesis",)
+
+        class OneCycleStop:
+            stopped = False
+
+            def is_set(self):
+                return self.stopped
+
+            def wait(self, timeout):
+                self.stopped = True
+
+        run_recovery_reconciler(
+            Service(),
+            interval=0.25,
+            stop_event=OneCycleStop(),
+        )
+
+        self.assertEqual(calls, ["ready", "synthesis"])
+
     def test_watch_text_contract_and_reserved_fields(self) -> None:
         line = (
             "[2026-08-11 12:00:00] t_123      completed          "

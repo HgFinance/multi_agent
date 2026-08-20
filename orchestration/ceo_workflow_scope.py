@@ -24,6 +24,12 @@ CONTINUOUS_RESEARCH_PLANE = "continuous_research"
 BACKGROUND_RESEARCH_ROLE = "background_research"
 PRIMARY_SELECTION_FIELD = "selected_primary_profiles"
 WORKFLOW_MODES = frozenset({"analysis", "binding"})
+
+_NON_EXECUTION_QUESTION_RE = re.compile(
+    r"\?|(?:할까|할까요|해도\s*돼|해도\s*될까|"
+    r"사도\s*돼|팔아도\s*돼|가능(?:해|할까|한가)|어때|될까)"
+    r"(?:요)?[.!]*\s*$"
+)
 # 역할 유효값. 이전에는 build_scoped_task_body 안의 인라인 집합으로만 있어서
 # 읽는 쪽은 무엇이 유효한지 알 수 없었다(2026-08-14: 없는 값을 쓴 카드가 CEO
 # 감독관에게 abort 당했는데, 유효값 목록이 어디에도 노출돼 있지 않았다).
@@ -538,6 +544,11 @@ def build_mandate_reference_line(root_task_id: str) -> str:
 def infer_workflow_mode(query: str) -> str:
     """Classify high-risk intent; this never grants execution authority."""
     text = str(query or "").casefold()
+
+    # Advice/questions never become binding solely because they contain
+    # order vocabulary such as 매수/매도/주문.
+    if _NON_EXECUTION_QUESTION_RE.search(text):
+        return "analysis"
     non_binding_phrases = (
         "do not place", "don't place", "do not execute", "don't execute",
         "실제 주문이나 집행은 하지", "주문이나 집행은 하지",

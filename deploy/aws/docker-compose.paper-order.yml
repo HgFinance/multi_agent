@@ -156,6 +156,8 @@ services:
       CONTROL_DATABASE_URL: *control-database-url
       ORDER_ORCHESTRATOR_DATABASE_URL: *order-database-url
       ORDER_ORCHESTRATOR_DATABASE_ROLE: svc_order_orchestrator
+      CONDITIONAL_RULE_DATABASE_URL: *conditional-orchestrator-database-url
+      CONDITIONAL_RULE_DATABASE_ROLE: svc_conditional_rule_orchestrator
       APP_ENV: production
       PORTFOLIO_DATA_MODE: production
       PORTFOLIO_AUTH_MODE: supabase_jwt

@@ -784,6 +784,21 @@ class InMemoryDirectiveRepository:
             record
             for record in self.state.directives.values()
             if record.state in ACTIVE_DIRECTIVE_STATES
+            or (
+                record.state is DirectiveState.PARTIAL
+                and record.action is DirectiveAction.PLACE_ORDER
+                and record.error_code == "TRADING_DIRECTIVE_INTERNAL_ERROR"
+                and any(leg.side is not None for leg in record.legs)
+                and all(
+                    leg.state is DirectiveLegState.FILLED
+                    for leg in record.legs
+                    if leg.side is not None
+                )
+                and not any(
+                    leg.side is None and leg.state is DirectiveLegState.UNKNOWN
+                    for leg in record.legs
+                )
+            )
         ]
         values.sort(
             key=lambda item: (
@@ -1820,13 +1835,16 @@ class PostgresDirectiveRepository:
             # event before the directive can claim success.
             cur.execute(
                 """
-                select distinct target.order_id,target.state,
+                select target.order_id,target.state,
                        target.requested_quantity,target.filled_quantity
-                  from execution.user_directive_legs leg
-                  join execution.orders target
-                    on target.order_id=leg.linked_order_id
-                 where leg.directive_id=%s and leg.side is null
-                   and leg.state='UNKNOWN'
+                  from execution.orders target
+                 where exists (
+                       select 1
+                         from execution.user_directive_legs leg
+                        where leg.directive_id=%s and leg.side is null
+                          and leg.state='UNKNOWN'
+                          and leg.linked_order_id=target.order_id
+                 )
                    and target.broker_adapter='paper'
                    and target.state='CANCEL_PENDING'
                  for update of target
@@ -1893,6 +1911,34 @@ class PostgresDirectiveRepository:
                 select directive_id
                   from execution.user_directives
                  where state in ('RECEIVED','RUNNING','IN_PROGRESS','UNKNOWN')
+                    or (
+                         state='PARTIAL'
+                     and action='PLACE_ORDER'
+                     and error_code='TRADING_DIRECTIVE_INTERNAL_ERROR'
+                     and exists (
+                           select 1
+                             from execution.user_directive_legs recoverable_leg
+                            where recoverable_leg.directive_id=
+                                  execution.user_directives.directive_id
+                              and recoverable_leg.side is not null
+                     )
+                     and not exists (
+                           select 1
+                             from execution.user_directive_legs unfinished_leg
+                            where unfinished_leg.directive_id=
+                                  execution.user_directives.directive_id
+                              and unfinished_leg.side is not null
+                              and unfinished_leg.state<>'FILLED'
+                     )
+                     and not exists (
+                           select 1
+                             from execution.user_directive_legs unknown_cancel
+                            where unknown_cancel.directive_id=
+                                  execution.user_directives.directive_id
+                              and unknown_cancel.side is null
+                              and unknown_cancel.state='UNKNOWN'
+                     )
+                    )
                  order by priority desc,updated_at,created_at,directive_id
                  limit %s
                 """,

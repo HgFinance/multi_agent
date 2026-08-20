@@ -143,6 +143,78 @@ def test_exact_sample_is_durably_bound_before_either_card_is_released(
     assert response["binding"] is False
 
 
+def test_conditional_command_uses_only_the_precreated_trading_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    repository = _OrderedRepository(events)
+    create = _install_successful_route(
+        monkeypatch, events=events, repository=repository
+    )
+    raw = "삼성전자 5분봉 RSI가 30을 상향 돌파하면 1주 매수"
+
+    response = ceo.ceo_query(
+        ceo.CeoAsk(
+            query=raw,
+            request_id="request-conditional-100",
+            fund_id=FUND_ID,
+            book_id=BOOK_ID,
+        ),
+        owner_id=USER_ID,
+    )
+
+    assert create.call_count == 2
+    root_call, trading_call = create.call_args_list
+    assert root_call.kwargs["assignee"] == "ceo-agent"
+    assert trading_call.kwargs["assignee"] == "trading-department"
+    assert root_call.kwargs["initial_status"] == "blocked"
+    assert trading_call.kwargs["initial_status"] == "blocked"
+    trading_body = trading_call.kwargs["body"]
+    assert "hgfinance.user-conditional-paper-rule.v1" in trading_body
+    assert "mcp_tool=process_user_conditional_paper_rule" in trading_body
+    assert "activation_policy=IMMEDIATE_AFTER_DETERMINISTIC_VALIDATION" in trading_body
+    assert "Do not create Risk, QA, Research, Accounting" in trading_body
+    assert raw in trading_body
+    assert response["conditional_rule"] is True
+    assert response["order_state"] == "RULE_INTERPRETATION_QUEUED"
+    assert response["planning"]["selected_departments"] == ["trading-department"]
+    assert response["planning"]["qa_required"] is False
+
+    stored = repository.get(response["order_request_id"])
+    assert stored is not None
+    assert stored.mode == "PAPER"
+    assert stored.ceo_root_task_id == "t_root1"
+    assert stored.trading_task_id == "t_trade1"
+
+
+def test_conditional_advice_question_does_not_enter_the_binding_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    create = Mock(return_value={"task_id": "t_root2", "status": "ready"})
+    repository = Mock(side_effect=AssertionError("advice must not admit a rule"))
+    monkeypatch.setattr(ceo, "fetch_current_mandate_by_fund", lambda _fund: None)
+    monkeypatch.setattr(ceo, "user_order_repository", repository)
+    monkeypatch.setattr(ceo.hermes_boundary, "create_kanban_task", create)
+    monkeypatch.setattr(ceo.hermes_boundary, "comment_root_scope", lambda **_kw: True)
+    monkeypatch.setattr(ceo, "_wait_for_planning", lambda _task_id: ceo._accepted_fallback())
+
+    response = ceo.ceo_query(
+        ceo.CeoAsk(
+            query="삼성전자 RSI 30 이하이면 1주 매수해도 될까?",
+            request_id="request-conditional-advice",
+            fund_id=FUND_ID,
+            book_id=BOOK_ID,
+        ),
+        owner_id=USER_ID,
+    )
+
+    create.assert_called_once()
+    assert "initial_status" not in create.call_args.kwargs
+    assert "user-conditional-paper-rule" not in create.call_args.kwargs["body"]
+    assert "order_request_id" not in response
+    repository.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("owner_id", "fund_id", "book_id", "status_code", "detail"),
     [

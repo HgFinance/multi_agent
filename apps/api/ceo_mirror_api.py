@@ -439,6 +439,120 @@ def mirror_event_stream(
     )
 
 
+
+@router.get("/conversation/stream")
+def conversation_stream(
+    after: str | None = Query(default=None, max_length=128),
+    owner_id: str | None = Depends(current_user),
+) -> StreamingResponse:
+    """Authenticated Web/Discord conversation projection.
+
+    Only user messages and final CEO answers are exposed.  Execution,
+    department, QA, tool, and hidden-reasoning events remain outside the
+    conversation surface.
+
+    Discord-origin requests do not currently carry a Supabase user identity.
+    They are therefore exposed only to the explicitly configured
+    DISCORD_UI_OWNER_ID.  Missing mapping is fail-closed.
+    """
+
+    if not owner_id:
+        raise HTTPException(status_code=401, detail="portfolio_authentication_required")
+
+    redis_url = os.getenv("UI_MIRROR_REDIS_URL") or os.getenv("REDIS_URL")
+    if not redis_url:
+        raise HTTPException(
+            status_code=503,
+            detail="conversation_stream_requires_redis",
+        )
+
+    discord_owner_id = os.getenv("DISCORD_UI_OWNER_ID", "").strip()
+    stream_name = os.getenv("UI_MIRROR_STREAM", "hf:ui-ceo-mirror:v1")
+    allowed_event_types = frozenset({"USER_MESSAGE", "CEO_FINAL"})
+
+    def event_visible(event: MirrorEvent) -> bool:
+        record = MIRROR_STORE.get_request(event.request_id)
+        if record is None:
+            return False
+
+        request = record.request
+
+        if request.source == "web":
+            return request.actor_id == owner_id
+
+        if request.source == "discord":
+            return bool(discord_owner_id) and owner_id == discord_owner_id
+
+        return False
+
+    def generate():
+        try:
+            import redis
+
+            client = redis.Redis.from_url(redis_url, decode_responses=True)
+            client.ping()
+        except Exception:
+            yield "event: error\ndata: {\"detail\":\"conversation_stream_unavailable\"}\n\n"
+            return
+
+        cursor = after or "$"
+        deadline = time.monotonic() + max(
+            1.0,
+            float(os.getenv("UI_MIRROR_SSE_SECONDS", "25")),
+        )
+
+        while time.monotonic() < deadline:
+            try:
+                rows = client.xread(
+                    {stream_name: cursor},
+                    count=100,
+                    block=1000,
+                )
+            except Exception:
+                yield "event: error\ndata: {\"detail\":\"conversation_stream_unavailable\"}\n\n"
+                return
+
+            emitted = False
+
+            for _stream, entries in rows:
+                for stream_id, fields in entries:
+                    cursor = stream_id
+
+                    payload = fields.get("payload")
+                    if not payload:
+                        continue
+
+                    try:
+                        event = MirrorEvent.model_validate_json(payload)
+                    except Exception:
+                        continue
+
+                    if event.event_type not in allowed_event_types:
+                        continue
+
+                    if not event_visible(event):
+                        continue
+
+                    emitted = True
+                    yield (
+                        f"id: {stream_id}\n"
+                        f"event: {event.event_type}\n"
+                        f"data: {event.model_dump_json()}\n\n"
+                    )
+
+            if not emitted:
+                yield ": heartbeat\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.post("/events", response_model=MirrorEvent, status_code=202)
 def publish_event(
     event: MirrorEvent,

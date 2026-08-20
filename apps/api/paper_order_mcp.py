@@ -1,9 +1,9 @@
-"""Authenticated MCP boundary for Trading Hermes PAPER-order interpretations.
+"""Authenticated MCP boundary for Trading Hermes PAPER workflows.
 
-This module intentionally exposes one tool and owns no order business logic.
-The tool delegates lazily to :mod:`apps.api.user_order_orchestrator` so merely
-importing or inspecting the MCP surface cannot initialize database, Kanban, or
-Trading API clients.
+This module exposes one immediate-order tool and one conditional-rule tool. It
+owns no order business logic. Both tools delegate lazily to trusted
+orchestrators so merely importing or inspecting the MCP surface cannot
+initialize database, Kanban, or Trading API clients.
 """
 
 from __future__ import annotations
@@ -27,6 +27,11 @@ from orchestration.contracts.user_paper_order import (
     OrderType,
     TextEvidence,
 )
+
+try:
+    from .conditional_rules import ConditionalRuleCandidate
+except ImportError:  # pragma: no cover - direct module execution compatibility
+    from conditional_rules import ConditionalRuleCandidate  # type: ignore[no-redef]
 
 MCP_PORT = 8046
 MCP_PATH = "/mcp"
@@ -179,8 +184,35 @@ async def _delegate_to_orchestrator(
     return result
 
 
+async def _delegate_conditional_rule(
+    *,
+    root_task_id: str,
+    trading_task_id: str,
+    candidate: ConditionalRuleCandidate | None,
+    clarification_reason: str | None,
+) -> dict[str, Any]:
+    from apps.api.conditional_rule_orchestrator import (  # noqa: PLC0415
+        process_user_conditional_paper_rule as orchestrate,
+    )
+
+    result = orchestrate(
+        root_task_id=root_task_id,
+        trading_task_id=trading_task_id,
+        candidate=candidate,
+        clarification_reason=clarification_reason,
+    )
+    if inspect.isawaitable(result):
+        result = await result
+    model_dump = getattr(result, "model_dump", None)
+    if callable(model_dump):
+        result = model_dump(mode="json")
+    if not isinstance(result, dict):
+        raise RuntimeError("conditional-rule orchestrator returned a non-object result")
+    return result
+
+
 def build_server(*, host: str = "0.0.0.0", port: int = MCP_PORT):
-    """Build the single-tool FastMCP server supported by the pinned image."""
+    """Build the two-tool FastMCP server supported by the pinned image."""
 
     from mcp.server.fastmcp import FastMCP
 
@@ -188,7 +220,7 @@ def build_server(*, host: str = "0.0.0.0", port: int = MCP_PORT):
         name="hgfinance-user-paper-order",
         instructions=(
             "Trading Hermes interpretation boundary. PAPER only. This server "
-            "exposes exactly one order workflow tool."
+            "exposes immediate-order and conditional-rule workflow tools."
         ),
         host=host,
         port=port,
@@ -221,6 +253,32 @@ def build_server(*, host: str = "0.0.0.0", port: int = MCP_PORT):
             root_task_id=root_task_id,
             trading_task_id=trading_task_id,
             interpretation=interpretation,
+        )
+
+    @server.tool(
+        name="process_user_conditional_paper_rule",
+        description=(
+            "Submit exactly one strict Trading-Hermes AST for a marked, "
+            "authenticated conditional PAPER-rule workflow. The trusted "
+            "boundary reloads the original user/Fund/Book scope, resolves the "
+            "instrument, validates units and semantics, and immediately "
+            "activates the exact fingerprint. Pass candidate=null only when "
+            "the instruction is ambiguous or unsupported; never pass user, "
+            "fund, book, execution mode, API tokens, or service proofs."
+        ),
+        structured_output=True,
+    )
+    async def process_user_conditional_paper_rule(
+        root_task_id: str,
+        trading_task_id: str,
+        candidate: ConditionalRuleCandidate | None = None,
+        clarification_reason: str | None = None,
+    ) -> dict[str, Any]:
+        return await _delegate_conditional_rule(
+            root_task_id=root_task_id,
+            trading_task_id=trading_task_id,
+            candidate=candidate,
+            clarification_reason=clarification_reason,
         )
 
     return server
@@ -275,6 +333,27 @@ def check_readiness() -> None:
             tables = cursor.fetchone()
             if not tables or any(table is None for table in tables):
                 raise RuntimeError("PAPER order workflow migration is not ready")
+
+    conditional_dsn = os.environ.get("CONDITIONAL_RULE_DATABASE_URL", "").strip()
+    if not conditional_dsn:
+        raise RuntimeError("dedicated conditional rule database URL is required")
+    conditional_role = os.environ.get(
+        "CONDITIONAL_RULE_DATABASE_ROLE", "svc_conditional_rule_orchestrator"
+    ).strip()
+    if not conditional_role:
+        raise RuntimeError("conditional rule database role is required")
+    with psycopg2.connect(conditional_dsn, connect_timeout=3) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                sql.SQL("set local role {}").format(sql.Identifier(conditional_role))
+            )
+            cursor.execute(
+                "select to_regclass('execution.conditional_trade_rules'), "
+                "to_regclass('execution.conditional_trade_rule_versions')"
+            )
+            tables = cursor.fetchone()
+            if not tables or any(table is None for table in tables):
+                raise RuntimeError("conditional PAPER rule migration is not ready")
 
     kanban_db = Path(
         os.environ.get("HERMES_KANBAN_DB", "/opt/kanban/kanban.db")

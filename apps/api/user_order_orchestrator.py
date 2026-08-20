@@ -42,6 +42,7 @@ try:
         UserOrderRequestStateError,
         canonical_payload_sha256,
         raw_instruction_sha256,
+        recover_committed_directive,
         user_order_repository,
     )
     from .user_orders import (
@@ -59,6 +60,7 @@ except ImportError:  # pragma: no cover - direct module execution compatibility
         UserOrderRequestStateError,
         canonical_payload_sha256,
         raw_instruction_sha256,
+        recover_committed_directive,
         user_order_repository,
     )
     from user_orders import (  # type: ignore[no-redef]
@@ -401,6 +403,8 @@ def process_user_paper_order(
     except (UserOrderRequestConflict, UserOrderRequestStateError) as exc:
         raise PaperOrderOrchestrationRejected("INTERPRETATION_REPLAY_CONFLICT") from exc
 
+    if record.state == "UNKNOWN" and not record.directive_id:
+        record = recover_committed_directive(repository, record)
     if record.directive_id:
         return _existing_directive_result(record)
     if record.state == "UNKNOWN":
