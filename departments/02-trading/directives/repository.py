@@ -1054,9 +1054,13 @@ class InMemoryDirectiveRepository:
 def _load_driver():
     try:
         import psycopg2  # type: ignore[import-not-found]
-        from psycopg2.extras import Json  # type: ignore[import-not-found]
+        from psycopg2.extras import Json, register_uuid  # type: ignore[import-not-found]
     except ImportError as exc:
         raise DirectiveRepositoryError("TRADING_DIRECTIVE_DB_UNAVAILABLE", "psycopg2 is required", 503) from exc
+    # PostgreSQL returns stdlib ``UUID`` instances for every durable directive
+    # identity.  Register their adapter before any INSERT/UPDATE reuses those
+    # values; otherwise broker fills fail after LS has already executed them.
+    register_uuid()
     return psycopg2, Json
 
 

@@ -557,7 +557,7 @@ class UserDirectiveService:
                 quote_event_key=quote_event_key,
                 price=status.fill_price,
                 executable_quantity=delta,
-                event_time=datetime.now(timezone.utc),
+                event_time=status.last_execution_at or datetime.now(timezone.utc),
                 source="ls-paper:CSPAQ13700",
             )
         if status.state in {"REJECTED", "CANCELLED"}:

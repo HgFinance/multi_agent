@@ -36,6 +36,7 @@ from directives.repository import (  # noqa: E402
     InstrumentRef,
     PostgresDirectiveRepository,
     _MemoryState,
+    _load_driver,
 )
 from broker.ls_paper_broker import (  # noqa: E402
     LSPaperBrokerError,
@@ -54,6 +55,14 @@ NOW = datetime(2026, 8, 18, 2, 0, tzinfo=timezone.utc)
 SECRET = "unit-test-trading-proof-secret-at-least-32-bytes"
 ISSUER = "portfolio-bff"
 AUDIENCE = "trading-api"
+
+
+def test_postgres_driver_adapts_durable_uuid_values() -> None:
+    _load_driver()
+
+    from psycopg2.extensions import adapt
+
+    assert adapt(uuid4()).getquoted().startswith(b"'")
 
 
 def _b64(value: dict) -> str:

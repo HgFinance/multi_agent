@@ -114,6 +114,7 @@ class LSPaperOrderStatus:
     filled_quantity: Decimal
     fill_price: Decimal | None
     order_date: date
+    last_execution_at: datetime | None = None
 
     @property
     def leaves_quantity(self) -> Decimal:
@@ -299,9 +300,13 @@ class LSPaperBroker:
 
     @staticmethod
     def _row_order_datetime(row: dict[str, Any], order_day: date) -> datetime | None:
+        return LSPaperBroker._row_datetime(row.get("OrdTime"), order_day)
+
+    @staticmethod
+    def _row_datetime(value: Any, order_day: date) -> datetime | None:
         digits = "".join(
             character
-            for character in str(row.get("OrdTime") or "")
+            for character in str(value or "")
             if character.isdigit()
         )
         if len(digits) < 6:
@@ -539,6 +544,16 @@ class LSPaperBroker:
                 filled_quantity=filled,
                 fill_price=fill_price,
                 order_date=target_date,
+                last_execution_at=(
+                    self._row_datetime(
+                        candidate.get("LastExecTime")
+                        or candidate.get("ExecTrxTime")
+                        or candidate.get("OrdTime"),
+                        target_date,
+                    )
+                    if filled > 0
+                    else None
+                ),
             )
         return None
 

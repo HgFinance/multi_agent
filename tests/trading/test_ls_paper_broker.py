@@ -277,6 +277,7 @@ def test_order_status_reads_cumulative_fill() -> None:
                         "OrdQty": 2,
                         "AllExecQty": 2,
                         "ExecPrc": 269000,
+                        "LastExecTime": "140927",
                         "OrdTrxPtnNm": "정상주문",
                     }
                 ],
@@ -289,6 +290,9 @@ def test_order_status_reads_cumulative_fill() -> None:
     assert status.state == "FILLED"
     assert status.filled_quantity == 2
     assert status.fill_price == 269000
+    assert status.last_execution_at == datetime(
+        2026, 8, 20, 14, 9, 27, tzinfo=KST
+    )
 
 
 def test_order_status_accepts_ls_account_query_success_code_and_caches_snapshot() -> None:
