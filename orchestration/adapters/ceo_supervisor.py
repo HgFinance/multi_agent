@@ -1702,25 +1702,30 @@ class CeoSupervisorService:
                 # as a compatibility fallback.
                 correlation = correlation_from_task(delivery_task)
 
-                if correlation.thread_id:
-                    thread_status = self.discord_delivery.deliver_to_existing_thread(
-                        root_task_id=root_task_id,
-                        source_task=delivery_task,
-                        root_task=root_payload,
-                        content=content,
-                        title="🧠 CEO 종합",
-                        store=delivery_store,
-                        profile=ceo_profile,
-                        response_key_suffix=f"synthesis-detail:{task_id}",
-                    )
+                # Always let DiscordFinalDelivery resolve the existing thread
+                # first. It can recover the thread from explicit correlation,
+                # the inbound ledger, or the Discord starter message id.
+                thread_status = self.discord_delivery.deliver_to_existing_thread(
+                    root_task_id=root_task_id,
+                    source_task=delivery_task,
+                    root_task=root_payload,
+                    content=content,
+                    title="🧠 CEO 종합",
+                    store=delivery_store,
+                    profile=ceo_profile,
+                    response_key_suffix=f"synthesis-detail:{task_id}",
+                )
 
-                    logger.info(
-                        "synthesis-discord-thread root=%s task=%s status=%s",
-                        root_task_id,
-                        task_id,
-                        thread_status,
-                    )
-                else:
+                logger.info(
+                    "synthesis-discord-thread root=%s task=%s status=%s",
+                    root_task_id,
+                    task_id,
+                    thread_status,
+                )
+
+                # Parent-channel delivery is compatibility fallback only when
+                # the request truly has no resolvable Discord thread.
+                if thread_status == "missing_thread":
                     parent_status = self.discord_delivery.deliver(
                         root_task_id=root_task_id,
                         synthesis_task=delivery_task,
@@ -3129,13 +3134,35 @@ class CeoSupervisorService:
                         else hermes_home
                     )
 
-                    delivery_status = self.discord_delivery.deliver(
-                        root_task_id=root_id,
-                        synthesis_task=delivery_task,
-                        content=passthrough.final_answer,
-                        store=DiscordIdempotencyStore(delivery_home),
-                        profile=canonical_profile_for_department("ceo"),
+                    delivery_store = DiscordIdempotencyStore(delivery_home)
+                    ceo_profile = canonical_profile_for_department("ceo")
+
+                    # Single-primary/PAPER fast paths must follow the same
+                    # thread-first policy as normal CEO synthesis.
+                    delivery_status = (
+                        self.discord_delivery.deliver_to_existing_thread(
+                            root_task_id=root_id,
+                            source_task=delivery_task,
+                            root_task=root_payload,
+                            content=passthrough.final_answer,
+                            title="🧠 CEO 답변",
+                            store=delivery_store,
+                            profile=ceo_profile,
+                            response_key_suffix=(
+                                f"single-primary-detail:{passthrough.task_id}"
+                            ),
+                        )
                     )
+
+                    if delivery_status == "missing_thread":
+                        delivery_status = self.discord_delivery.deliver(
+                            root_task_id=root_id,
+                            synthesis_task=delivery_task,
+                            content=passthrough.final_answer,
+                            store=delivery_store,
+                            profile=ceo_profile,
+                        )
+
                     logger.info(
                         "single-primary-passthrough root=%s task=%s "
                         "profile=%s status=%s",

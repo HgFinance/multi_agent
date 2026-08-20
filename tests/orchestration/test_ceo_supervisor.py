@@ -1174,7 +1174,7 @@ class SupervisorWakeupTest(unittest.TestCase):
 
             def deliver_to_existing_thread(self, **kwargs):
                 self.thread_calls.append(kwargs)
-                return "sent"
+                return "missing_thread"
 
         class DeliveryClient(FakeClient):
             def __init__(self, home: str) -> None:
@@ -1232,7 +1232,7 @@ class SupervisorWakeupTest(unittest.TestCase):
             )
 
         self.assertEqual(len(delivery.parent_calls), 1)
-        self.assertEqual(len(delivery.thread_calls), 0)
+        self.assertEqual(len(delivery.thread_calls), 1)
 
     def test_terminal_child_creates_parallel_qa_and_synthesis(self) -> None:
         client = FakeClient()
