@@ -110,6 +110,31 @@ class SupervisorRunnerTest(unittest.TestCase):
 
         self.assertEqual(calls, ["watch"])
 
+    def test_event_worker_survives_one_unexpected_failure(self) -> None:
+        calls: list[str] = []
+
+        class Service:
+            def handle_terminal_event(self, event):
+                calls.append(str(event["event_id"]))
+                if len(calls) == 1:
+                    raise RuntimeError("broken observer")
+                return None
+
+        event_queue = SupervisorEventQueue(Service(), workers=1)
+        with self.assertLogs(level="ERROR") as logs:
+            event_queue.submit(
+                {"event_id": "broken", "task_id": "a", "kind": "blocked"}
+            )
+            event_queue.submit(
+                {"event_id": "healthy", "task_id": "b", "kind": "blocked"}
+            )
+            event_queue.close()
+
+        self.assertEqual(calls, ["broken", "healthy"])
+        self.assertTrue(
+            any("supervisor-event-worker-failed" in message for message in logs.output)
+        )
+
     def test_recovery_lanes_share_one_serial_poll_loop(self) -> None:
         calls: list[str] = []
 

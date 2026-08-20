@@ -62,6 +62,7 @@ from orchestration.discord_idempotency import DiscordIdempotencyStore
 from orchestration.adapters.department_notion_projection import (
     DepartmentNotionProjection,
 )
+from orchestration.kanban_retention_lock import workflow_mutation_lock
 
 logger = logging.getLogger(__name__)
 
@@ -1214,24 +1215,33 @@ class HermesKanbanClient:
             if initial_status not in {"blocked", "running"}:
                 raise SupervisorValidationError("invalid initial status")
             args.extend(("--initial-status", initial_status))
-        try:
-            payload = json.loads(self._run(args))
-        except (json.JSONDecodeError, TypeError) as exc:
-            raise HermesKanbanCommandError(
-                "hermes kanban create returned invalid JSON"
-            ) from exc
+        # Retention runs in a separate process. Keep recovery/create mutations
+        # out of the short final archive transaction's critical section.
+        with workflow_mutation_lock(
+            parent_task_ids[0] if parent_task_ids else None,
+            environment=self.environment,
+        ):
+            try:
+                payload = json.loads(self._run(args))
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise HermesKanbanCommandError(
+                    "hermes kanban create returned invalid JSON"
+                ) from exc
         if not isinstance(payload, dict):
             raise HermesKanbanCommandError("hermes kanban create returned a non-object")
         return payload
 
     def unblock_task(self, task_id: str) -> None:
-        self._run(("kanban", "unblock", task_id))
+        with workflow_mutation_lock(environment=self.environment):
+            self._run(("kanban", "unblock", task_id))
 
     def comment_task(self, task_id: str, text: str) -> None:
-        self._run(("kanban", "comment", task_id, text, "--author", "ceo-supervisor"))
+        with workflow_mutation_lock(environment=self.environment):
+            self._run(("kanban", "comment", task_id, text, "--author", "ceo-supervisor"))
 
     def block_task(self, task_id: str, reason: str) -> None:
-        self._run(("kanban", "block", task_id, reason, "--kind", "needs_input"))
+        with workflow_mutation_lock(environment=self.environment):
+            self._run(("kanban", "block", task_id, reason, "--kind", "needs_input"))
 
     def list_tasks(self) -> tuple[dict[str, Any], ...]:
         """List current-board tasks through the supported Hermes JSON API."""

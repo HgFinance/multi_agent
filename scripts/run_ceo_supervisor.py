@@ -228,6 +228,15 @@ class SupervisorEventQueue:
                     file=sys.stderr,
                     flush=True,
                 )
+            except Exception:
+                # The durable Kanban state is replayed by recovery. Keep the
+                # worker pool alive so one malformed projection cannot stop
+                # event intake permanently.
+                logging.exception(
+                    "supervisor-event-worker-failed task=%s kind=%s",
+                    event.get("task_id") or "",
+                    event.get("kind") or "",
+                )
             finally:
                 handler_completed_ms = time.time_ns() // 1_000_000
                 with self._pending_lock:

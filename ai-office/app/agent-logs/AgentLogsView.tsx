@@ -573,7 +573,11 @@ export default function AgentLogsView() {
     () => departments.find((item) => item.department_code === selectedCode) ?? null,
     [departments, selectedCode],
   );
-  const discordDepartment = selected ?? departments[0] ?? null;
+  // 8개 부서 봇이 전부 같은 Discord 채널 하나를 쓴다(discordClient.ts) - 부서
+  // 카드를 눌러도 대화내용은 CEO Office 채널로 고정한다. 그래야 다른 부서를
+  // 고를 때마다 화면이 깜빡이며 다시 불러오지 않는다.
+  const discordDepartment =
+    departments.find((item) => item.department_code === "ceo-agent") ?? departments[0] ?? null;
 
   const metrics = [
     { label: "부서", value: departments.length || 8 },
