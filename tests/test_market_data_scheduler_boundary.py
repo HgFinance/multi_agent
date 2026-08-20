@@ -149,6 +149,40 @@ def test_non_market_sources_are_request_time_only() -> None:
         assert specs[source_id].allowed_uses == ()
 
 
+def test_ls_registry_uses_one_ls_env_for_rest_and_websocket_credentials() -> None:
+    registry = _load_module("single_ls_env_source_registry", SOURCE_REGISTRY_PATH)
+
+    live = registry.SourceRegistry(
+        env={
+            "LS_ENV": "LIVE",
+            "LS_APP_KEY": "live-key",
+            "LS_APP_SECRET_KEY": "live-secret",
+            "LS_REST_BASE_URL": "https://example.test",
+        }
+    )
+    paper = registry.SourceRegistry(
+        env={
+            "LS_ENV": "PAPER",
+            "LS_APP_KEY_PAPER": "paper-key",
+            "LS_APP_SECRET_KEY_PAPER": "paper-secret",
+            "LS_REST_BASE_URL": "https://example.test",
+        }
+    )
+    mismatched = registry.SourceRegistry(
+        env={
+            "LS_ENV": "LIVE",
+            "LS_APP_KEY_PAPER": "paper-key",
+            "LS_APP_SECRET_KEY_PAPER": "paper-secret",
+            "LS_REST_BASE_URL": "https://example.test",
+        }
+    )
+
+    for source_id in ("ls_openapi_rest", "ls_openapi_ws"):
+        assert live.status(source_id) is registry.SourceStatus.AVAILABLE
+        assert paper.status(source_id) is registry.SourceStatus.AVAILABLE
+        assert mismatched.status(source_id) is registry.SourceStatus.KEY_MISSING
+
+
 def test_every_enabled_search_source_maps_to_a_real_mcp_callable() -> None:
     registry = _load_module("mcp_coverage_source_registry", SOURCE_REGISTRY_PATH)
     external = _load_module("external_sources", EXTERNAL_SOURCES_PATH)

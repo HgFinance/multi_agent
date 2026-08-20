@@ -5,6 +5,7 @@ from datetime import timezone
 from pathlib import Path
 
 import httpx
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -41,6 +42,26 @@ def test_paper_credentials_fallback_to_shared_rest_base() -> None:
     assert status["configured"] is True
     assert status["present"]["LS_REST_BASE_URL_PAPER"] is False
     assert status["present"]["LS_REST_BASE_URL"] is True
+
+
+def test_ls_env_selects_one_credential_set_for_market_and_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LS_APP_KEY_PAPER", "paper-key")
+    monkeypatch.setenv("LS_APP_SECRET_KEY_PAPER", "paper-secret")
+    monkeypatch.setenv("LS_APP_KEY", "live-key")
+    monkeypatch.setenv("LS_APP_SECRET_KEY", "live-secret")
+    monkeypatch.setenv("LS_REST_BASE_URL", "https://example.test")
+
+    monkeypatch.setenv("LS_ENV", "LIVE")
+    live = LSOpenAPIConfig.from_env()
+    monkeypatch.setenv("LS_ENV", "PAPER")
+    paper = LSOpenAPIConfig.from_env()
+
+    assert live.environment == "LIVE"
+    assert live.app_key == "live-key"
+    assert paper.environment == "PAPER"
+    assert paper.app_key == "paper-key"
 
 
 def test_ls_read_only_quote_and_portfolio_calls() -> None:

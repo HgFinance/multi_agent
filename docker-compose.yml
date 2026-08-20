@@ -142,17 +142,19 @@ services:
       # LS 브로커 조회 배선(2026-08-19). `.env`는 `.dockerignore`에 걸려 이미지에
       # 들어가지 않으므로 apps/api/main.py의 load_dotenv가 컨테이너 안에서는
       # 아무것도 읽지 못한다 - 여기 나열한 키만 프로세스에 도달한다.
-      # 끄면 /ui/portfolio/live, /ui/portfolio/ledger, /ui/market/rankings가
-      # 전부 503이라 대시보드가 빈다. 읽기 전용이며 주문은 나가지 않는다.
+      # 계좌 스트림은 ENABLE_LS_ORDER_EVENTS, 원장 REST 조회는
+      # ENABLE_LS_ACCOUNT_DATA, 시장 순위 REST 조회는 ENABLE_LS_MARKET_DATA로
+      # 각각 켠다. 모두 읽기 전용이며 주문은 나가지 않는다.
       ENABLE_LS_ORDER_EVENTS: ${ENABLE_LS_ORDER_EVENTS:-false}
-      # Read-only broker account snapshot.  Keep this independent from order
+      # Read-only broker account snapshot. Keep this independent from order
       # event ingestion so enabling a balance view never enables execution.
       ENABLE_BROKER_SNAPSHOT: ${ENABLE_BROKER_SNAPSHOT:-false}
       BROKER_SNAPSHOT_CACHE_SECONDS: ${BROKER_SNAPSHOT_CACHE_SECONDS:-10}
-      # LS_ENV=PAPER면 조회 코드가 `_PAPER` 접미사 키를 먼저 찾고 없으면
-      # 접미사 없는 키로 떨어진다(departments/03-risk/integrations/ls_openapi.py).
-      # 어느 쪽을 쓸지는 배포 환경이 정하므로 양쪽을 다 통과시킨다.
-      LS_ENV: ${LS_ENV:-PAPER}
+      ENABLE_LS_MARKET_DATA: ${ENABLE_LS_MARKET_DATA:-false}
+      ENABLE_LS_ACCOUNT_DATA: ${ENABLE_LS_ACCOUNT_DATA:-false}
+      # portfolio-bff owns read-only market/account observations. PAPER order
+      # execution is isolated behind Trading's separately authenticated lane.
+      LS_ENV: ${LS_ENV:-LIVE}
       LS_APP_KEY: ${LS_APP_KEY:-}
       LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
       LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}
@@ -372,15 +374,8 @@ services:
       # 호스트의 127.0.0.1:5434 는 컨테이너 안에서 안 통한다 - 서비스 이름으로 간다.
       DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
       TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
-      LS_ENV: ${LS_ENV:-PAPER}
-      # ▶ **시세는 주문과 다른 스위치를 쓴다** (재일님 결정 2026-08-12)
-      #   하나로 묶여 있을 때, 주문을 PAPER 로 두자 수집기가 모의 소켓에 붙어
-      #   프리마켓 한 시간 동안 체결이 0건이었다. 시세 구독은 주문 권한과
-      #   무관하다 - LIVE 키로 받아도 주문이 나가지 않는다.
-      #   기본값이 LIVE 인 이유: 모의 시세는 **진짜처럼 생긴 가짜**라 조용히
-      #   흘러가면 백테스트가 사실로 읽는다. 못 받는 것은 티가 나고 잘못 받는
-      #   것은 티가 안 난다.
-      LS_MARKET_ENV: ${LS_MARKET_ENV:-LIVE}
+      # REST 토큰과 WebSocket 모두 같은 LS_ENV를 사용한다.
+      LS_ENV: ${LS_ENV:-LIVE}
       LS_APP_KEY: ${LS_APP_KEY:-}
       LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
       LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:-}
@@ -437,7 +432,7 @@ services:
       DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
       TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
       # Breadth(t1511/t8424)와 관측 Calendar(t8410)가 LS REST 를 쓴다
-      LS_ENV: ${LS_ENV:-PAPER}
+      LS_ENV: ${LS_ENV:-LIVE}
       LS_APP_KEY: ${LS_APP_KEY:-}
       LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
       LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:-}
@@ -766,10 +761,8 @@ services:
     command: ["python", "api/ls_mcp_server.py", "--serve"]
     environment:
       MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
-      # LS 자격 - 수집기(batch-collectors)와 같은 목록·같은 격리 지위.
-      # 조회는 LS_MARKET_ENV(기본 LIVE) - 모의 서버는 수급 TR 에 빈 값을 준다.
-      LS_MARKET_ENV: ${LS_MARKET_ENV:-LIVE}
-      LS_ENV: ${LS_ENV:-PAPER}
+      # LS 자격 - 수집기와 같은 단일 LS_ENV를 사용한다.
+      LS_ENV: ${LS_ENV:-LIVE}
       LS_APP_KEY: ${LS_APP_KEY:-}
       LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
       LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:-}

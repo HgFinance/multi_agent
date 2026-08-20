@@ -35,6 +35,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import re
@@ -60,9 +61,19 @@ from ledger_store import STORE as LEDGER_STORE
 
 router = APIRouter(tags=["portfolio-live"])
 
-ENABLE_LS_ORDER_EVENTS = os.getenv("ENABLE_LS_ORDER_EVENTS", "false").strip().lower() in {
-    "1", "true", "yes", "on",
-}
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    return os.getenv(name, "true" if default else "false").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+ENABLE_LS_ORDER_EVENTS = _env_flag("ENABLE_LS_ORDER_EVENTS")
+# 시장 순위는 REST만 사용한다. 계좌 WebSocket을 켜지 않고도 시장 데이터만
+# 복구할 수 있게 별도 opt-in으로 둔다.
+ENABLE_LS_MARKET_DATA = _env_flag("ENABLE_LS_MARKET_DATA")
+# 거래내역·잔고 조회도 REST만 사용한다. 실시간 주문 이벤트와 분리한다.
+ENABLE_LS_ACCOUNT_DATA = _env_flag("ENABLE_LS_ACCOUNT_DATA")
 MAX_EVENTS = int(os.getenv("LS_ORDER_EVENTS_MAX", "200"))
 DAILY_RETURNS_DAYS = 30
 # 거래내역 TR은 초당 1건이다. 화면이 3초마다 폴링해도 브로커를 때리지 않도록
@@ -907,14 +918,19 @@ class _Feed:
 FEED = _Feed()
 
 
-def _config() -> tuple[Any, str]:
+def _config(
+    *,
+    require_ws: bool = True,
+) -> tuple[Any, str]:
     """(REST 자격, WS URL). 자격이 없으면 여기서 fail-closed."""
     import ls_openapi  # type: ignore[import-not-found]
 
     config = ls_openapi.LSOpenAPIConfig.from_env()
     suffix = "_PAPER" if config.environment == "PAPER" else ""
+    if not require_ws:
+        return config, ""
     ws_url = (os.getenv("LS_WS_BASE_URL" + suffix, "") or os.getenv("LS_WS_BASE_URL", "")).strip()
-    if not ws_url:
+    if require_ws and not ws_url:
         raise RuntimeError("LS_WS_BASE_URL" + suffix + "가 설정되지 않았습니다.")
     # 수집 문서의 "접속 경로 `/websocket/stock`"은 실제 게이트웨이와 다르다.
     # `/websocket/stock`은 handshake에 응답조차 하지 않고, `/websocket`이 붙는다
@@ -922,8 +938,15 @@ def _config() -> tuple[Any, str]:
     return config, ws_url.rstrip("/") + "/websocket"
 
 
-async def _issue_token(config: Any) -> str:
-    """OAuth. 동기 클라이언트를 asyncio에 끌어들이지 않으려고 여기서만 비동기다."""
+async def _issue_token(config: Any) -> tuple[str, float]:
+    """OAuth. 동기 클라이언트를 asyncio에 끌어들이지 않으려고 여기서만 비동기다.
+
+    (토큰, 만료 epoch초). LS는 롤링 TTL이 아니라 **다음날 07:00 KST 고정 만료**이고,
+    그날 안에 다시 요청하면 **같은 토큰을 그대로 돌려준다**(2026-08-20 실측: 49분
+    뒤 재요청에도 iat이 11:25:01로 동일). 그래서 `expires_in`은 지금이 아니라
+    최초 발급 시각 기준이라 `now + expires_in`으로 계산하면 경과한 만큼 만료를
+    넘겨 잡는다 - 토큰이 싣고 온 `exp`를 그대로 쓴다.
+    """
     import httpx
 
     async with httpx.AsyncClient(timeout=config.timeout_seconds) as client:
@@ -938,27 +961,47 @@ async def _issue_token(config: Any) -> str:
             headers={"content-type": "application/x-www-form-urlencoded"},
         )
     response.raise_for_status()
-    token = response.json().get("access_token")
+    body = response.json()
+    token = body.get("access_token")
     if not isinstance(token, str) or not token:
         raise RuntimeError("LS OAuth 응답에 access_token이 없습니다")
-    return token
+    return token, _token_expiry(token)
 
 
-_token_cache: tuple[str, float] | None = None
+def _token_expiry(token: str) -> float:
+    """JWT payload의 `exp`(epoch초). 못 읽으면 4분 뒤로 본다.
+
+    서명은 검증하지 않는다 - 우리가 이 토큰을 인증하는 게 아니라 LS가 알려 준
+    만료 시각을 읽을 뿐이고, 못 읽으면 짧게 잡아 재발급으로 떨어진다.
+    """
+    try:
+        payload = token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        return float(claims["exp"])
+    except Exception:  # noqa: BLE001 - 만료를 못 읽는 것은 오류가 아니라 짧은 캐시다
+        return time.time() + 240.0
+
+
+_token_cache: dict[tuple[str, str], tuple[str, float]] = {}
 
 
 async def _access_token(config: Any) -> str:
-    """토큰 1장을 프로세스가 공유한다.
+    """같은 환경·App Key의 토큰만 프로세스가 공유한다.
 
     거래내역 조회마다 OAuth를 새로 치면 호출 한도를 그쪽에 쓰게 된다.
-    만료 여유는 짧게 잡는다 - 만료된 토큰으로 조회하면 조용히 401이다.
+    LS_ENV가 바뀐 뒤 이전 환경의 토큰을 재사용하지 않도록 환경·App Key별로
+    캐시를 분리한다.
+    만료는 토큰이 싣고 온 exp를 쓰되 1분 일찍 버린다 - 만료된 토큰으로 조회하면
+    조용히 401이다. 예전에는 실제 수명을 몰라 240초로 두었는데, 그러면 하루 한
+    장이면 될 것을 4분마다 새로 받는다(LS 권장은 하루 1회).
     """
-    global _token_cache
     now = time.time()
-    if _token_cache and _token_cache[1] > now:
-        return _token_cache[0]
-    token = await _issue_token(config)
-    _token_cache = (token, now + 240)
+    cache_key = (config.environment, config.app_key)
+    cached = _token_cache.get(cache_key)
+    if cached and cached[1] > now:
+        return cached[0]
+    token, expires_at = await _issue_token(config)
+    _token_cache[cache_key] = (token, max(now + 60.0, expires_at - 60.0))
     return token
 
 
@@ -987,6 +1030,23 @@ async def _post_tr(
     # JSON number는 double이라 Decimal이 깨진다. 금액·수량은 Decimal로 받는다.
     body = json.loads(response.text, parse_float=Decimal)
     return body if isinstance(body, dict) else {}
+
+
+def _ls_error_detail(exc: Exception) -> str:
+    """브로커 인증 거부의 원인을 화면에 전달하되 자격값은 노출하지 않는다."""
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if status in {401, 403} and response is not None:
+        try:
+            body = response.json()
+        except Exception:  # noqa: BLE001 - 원래 예외를 유지한다
+            body = None
+        if isinstance(body, dict):
+            description = body.get("error_description")
+            if isinstance(description, str) and description.strip():
+                return f"{description.strip()} (HTTP {status})"
+        return f"LS 인증이 거부되었습니다 (HTTP {status})"
+    return f"{type(exc).__name__}: {exc}"
 
 
 async def _fetch_account_no(config: Any, token: str) -> str | None:
@@ -1139,7 +1199,7 @@ async def _resync(config: Any, token: str) -> None:
     try:
         FEED.sync_holdings(await _fetch_holdings(config, token))
     except Exception as exc:  # noqa: BLE001 - 조회 실패를 '잔고 없음'으로 위장하지 않는다
-        FEED.holdings_error = (type(exc).__name__ + ": " + str(exc))[:200]
+        FEED.holdings_error = _ls_error_detail(exc)[:200]
     else:
         FEED.holdings_error = None
 
@@ -1149,7 +1209,7 @@ async def _resync_daily_returns(config: Any, token: str) -> None:
     try:
         FEED.sync_daily_returns(await _fetch_daily_returns(config, token))
     except Exception as exc:  # noqa: BLE001 - 그래프만 비활성화하고 계좌 스트림은 유지한다
-        FEED.daily_returns_error = (type(exc).__name__ + ": " + str(exc))[:300]
+        FEED.daily_returns_error = _ls_error_detail(exc)[:300]
     else:
         FEED.daily_returns_error = None
 
@@ -1159,7 +1219,7 @@ async def _resync_today_activity(config: Any, token: str) -> None:
     try:
         FEED.sync_today_activity(await _fetch_today_activity(config, token))
     except Exception as exc:  # noqa: BLE001 - 카드만 비활성화하고 계좌 스트림은 유지한다
-        FEED.today_activity_error = (type(exc).__name__ + ": " + str(exc))[:300]
+        FEED.today_activity_error = _ls_error_detail(exc)[:300]
     else:
         FEED.today_activity_error = None
 
@@ -1171,13 +1231,13 @@ async def _run_feed() -> None:
     while True:
         try:
             config, ws_url = _config()
-            token = await _issue_token(config)
+            token, _ = await _issue_token(config)
 
             if not FEED.account:
                 try:
                     FEED.account = await _fetch_account_no(config, token)
                 except Exception as exc:  # noqa: BLE001 - 계좌 조회 실패가 구독을 막지 않는다
-                    FEED.account_error = (type(exc).__name__ + ": " + str(exc))[:200]
+                    FEED.account_error = _ls_error_detail(exc)[:200]
                 else:
                     FEED.account_error = None
 
@@ -1217,7 +1277,7 @@ async def _run_feed() -> None:
             raise
         except Exception as exc:  # noqa: BLE001 - 끊김을 "사건 없음"으로 위장하지 않는다
             FEED.status = "DISCONNECTED"
-            FEED.error = (type(exc).__name__ + ": " + str(exc))[:300]
+            FEED.error = _ls_error_detail(exc)[:300]
         await asyncio.sleep(backoff)
         backoff = min(backoff * 2, 60.0)
 
@@ -1228,7 +1288,7 @@ async def _run_feed() -> None:
 
 def _registered_account() -> str | None:
     """정본은 브로커가 말해 준 값이다. `.env`는 계좌가 여럿일 때의 덮어쓰기용."""
-    environment = os.getenv("LS_ENV", "PAPER").strip().upper()
+    environment = os.getenv("LS_ENV", "LIVE").strip().upper()
     suffix = "_PAPER" if environment == "PAPER" else ""
     return (os.getenv("LS_ACCOUNT_NO" + suffix, "") or "").strip() or FEED.account
 
@@ -1243,7 +1303,7 @@ async def portfolio_live(limit: int = 50) -> dict[str, Any]:
             "(ENABLE_LS_ORDER_EVENTS=true 로 엽니다).",
         )
     FEED.start()
-    environment = os.getenv("LS_ENV", "PAPER").strip().upper()
+    environment = os.getenv("LS_ENV", "LIVE").strip().upper()
     history_error: str | None = None
     order_source = "CDPCQ04700+CSPAQ13700+SC_REALTIME"
     try:
@@ -1260,7 +1320,7 @@ async def portfolio_live(limit: int = 50) -> dict[str, Any]:
             limit,
         )
     except Exception as exc:  # noqa: BLE001 - 잔고/스트림 화면을 거래내역 장애로 막지 않는다
-        history_error = (type(exc).__name__ + ": " + str(exc))[:300]
+        history_error = _ls_error_detail(exc)[:300]
         order_source = "SC_REALTIME_FALLBACK"
         recent_orders = list(FEED.events)[: max(1, min(limit, MAX_EVENTS))]
 
@@ -1366,7 +1426,7 @@ async def _load_ledger(
             return cached[1], start, end
 
         try:
-            config, _ = _config()
+            config, _ = _config(require_ws=False)
             token = await _access_token(config)
             # 실시간 구독이 아직 계좌번호를 채우지 못해도 거래내역 화면은 독립적으로
             # 동작해야 한다. 같은 자격으로 계좌번호를 먼저 확인한다.
@@ -1388,7 +1448,7 @@ async def _load_ledger(
                 "cash_balance": kept[0].get("cash_after"),
                 "notice": None,
                 "persisted": True,
-                "source_error": (type(exc).__name__ + ": " + str(exc))[:200],
+                "source_error": _ls_error_detail(exc)[:200],
                 "today_error": None,
             }
             _ledger_cache[key] = (time.time(), merged)
@@ -1401,7 +1461,7 @@ async def _load_ledger(
             await _tr_slot()
             today_rows = await _fetch_today_trades(config, token)
         except Exception as exc:  # noqa: BLE001 - 오늘분 실패를 '거래 없음'으로 위장하지 않는다
-            today_error = (type(exc).__name__ + ": " + str(exc))[:200]
+            today_error = _ls_error_detail(exc)[:200]
         else:
             # 시각·종목명은 있으면 좋은 값이다. 여기서 실패해도 금액은 그대로
             # 나가야 하므로 원장 전체를 막지 않는다.
@@ -1446,7 +1506,7 @@ async def _load_market_ranking(ranking: str) -> dict[str, Any]:
         cached = _market_ranking_cache.get(ranking)
         if cached and time.time() - cached[0] < max(0, MARKET_RANKING_CACHE_SECONDS):
             return cached[1]
-        config, _ = _config()
+        config, _ = _config(require_ws=False)
         token = await _access_token(config)
         await _tr_slot()
         result = await _fetch_market_ranking(config, token, ranking)
@@ -1457,11 +1517,11 @@ async def _load_market_ranking(ranking: str) -> dict[str, Any]:
 @router.get("/ui/market/rankings", operation_id="market_rankings")
 async def market_rankings(kind: str = "volume") -> dict[str, Any]:
     """시장 상위 종목 한 종류만 조회한다. 화면의 버튼 전환용 얇은 BFF다."""
-    if not ENABLE_LS_ORDER_EVENTS:
+    if not ENABLE_LS_MARKET_DATA:
         raise HTTPException(
             503,
             "브로커 시장 데이터 연동은 기본 비활성화 상태입니다 "
-            "(ENABLE_LS_ORDER_EVENTS=true 로 엽니다).",
+            "(ENABLE_LS_MARKET_DATA=true 로 엽니다).",
         )
     if kind not in MARKET_RANKINGS:
         raise HTTPException(400, "kind는 volume, change, amount 중 하나여야 합니다.")
@@ -1469,7 +1529,7 @@ async def market_rankings(kind: str = "volume") -> dict[str, Any]:
         ranking = await _load_market_ranking(kind)
     except Exception as exc:  # noqa: BLE001 - 화면에서 조회 실패와 빈 결과를 구분한다
         raise HTTPException(
-            502, ("시장 상위 종목 조회 실패: " + type(exc).__name__ + ": " + str(exc))[:400]
+            502, ("시장 상위 종목 조회 실패: " + _ls_error_detail(exc))[:400]
         ) from exc
     return {
         "schema_version": "market.rankings.v1",
@@ -1486,17 +1546,17 @@ async def portfolio_ledger(days: int = LEDGER_DAYS) -> dict[str, Any]:
     트레이딩의 `/ui/portfolio/live`와 원천이 다르다 - 저쪽은 주문·보유이고
     이쪽은 확정된 거래와 비용·세금이다. 둘을 한 응답에 합치지 않는다.
     """
-    if not ENABLE_LS_ORDER_EVENTS:
+    if not ENABLE_LS_ACCOUNT_DATA:
         raise HTTPException(
             503,
-            "브로커 실시간 연동은 기본 비활성화 상태입니다 "
-            "(ENABLE_LS_ORDER_EVENTS=true 로 엽니다).",
+            "브로커 계좌 조회는 기본 비활성화 상태입니다 "
+            "(ENABLE_LS_ACCOUNT_DATA=true 로 엽니다).",
         )
     try:
         ledger, start, end = await _load_ledger(cache_seconds=LEDGER_CACHE_SECONDS)
     except Exception as exc:  # noqa: BLE001 - 조회 실패를 '거래 없음'으로 위장하지 않는다
         raise HTTPException(
-            502, ("거래내역 조회 실패: " + type(exc).__name__ + ": " + str(exc))[:400]
+            502, ("거래내역 조회 실패: " + _ls_error_detail(exc))[:400]
         ) from exc
     span = (end - start).days + 1
 
@@ -1507,15 +1567,15 @@ async def portfolio_ledger(days: int = LEDGER_DAYS) -> dict[str, Any]:
         try:
             async with _tr_gate:
                 if FEED.holdings is None:
-                    config, _ = _config()
+                    config, _ = _config(require_ws=False)
                     token = await _access_token(config)
                     await _tr_slot()
                     FEED.sync_holdings(await _fetch_holdings(config, token))
         except Exception as exc:  # noqa: BLE001 - 잔고 조회 실패로 원장을 막지 않는다
-            holdings_error = (type(exc).__name__ + ": " + str(exc))[:200]
+            holdings_error = _ls_error_detail(exc)[:200]
 
     account_no = _registered_account()
-    environment = os.getenv("LS_ENV", "PAPER").strip().upper()
+    environment = os.getenv("LS_ENV", "LIVE").strip().upper()
     return {
         "schema_version": "accounting.ledger-transactions.v1",
         "environment": environment,
@@ -1545,7 +1605,7 @@ async def portfolio_ledger(days: int = LEDGER_DAYS) -> dict[str, Any]:
     }
 
 
-__all__ = ["router", "ENABLE_LS_ORDER_EVENTS", "KIND_LABELS", "normalize_order_event",
+__all__ = ["router", "ENABLE_LS_ORDER_EVENTS", "ENABLE_LS_MARKET_DATA", "ENABLE_LS_ACCOUNT_DATA", "KIND_LABELS", "normalize_order_event",
            "normalize_holdings", "normalize_daily_returns", "normalize_today_activity", "normalize_ledger",
            "normalize_accepted_orders",
            "normalize_market_ranking",
@@ -1840,9 +1900,11 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
     assert empty_pnl["total"] == "0" and empty_pnl["cost"] == "0"
 
     # 스위치가 꺼져 있으면 붙지 않는다(비용·권한 경계)
-    saved = ENABLE_LS_ORDER_EVENTS
+    saved_events = ENABLE_LS_ORDER_EVENTS
+    saved_account = ENABLE_LS_ACCOUNT_DATA
     try:
         globals()["ENABLE_LS_ORDER_EVENTS"] = False
+        globals()["ENABLE_LS_ACCOUNT_DATA"] = False
         for guarded in (portfolio_live(), portfolio_ledger()):
             try:
                 asyncio.run(guarded)
@@ -1851,6 +1913,34 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
             else:
                 raise AssertionError("스위치가 꺼졌는데 조회했다")
     finally:
-        globals()["ENABLE_LS_ORDER_EVENTS"] = saved
+        globals()["ENABLE_LS_ORDER_EVENTS"] = saved_events
+        globals()["ENABLE_LS_ACCOUNT_DATA"] = saved_account
+
+    # 토큰 만료를 payload의 exp에서 읽는가. `now + expires_in`으로 계산하면 LS가
+    # 같은 토큰을 재사용해 줄 때 경과한 만큼 만료를 넘겨 잡는다(2026-08-20 실측).
+    def _jwt(exp: object) -> str:
+        payload = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode()).decode().rstrip("=")
+        return "h." + payload + ".s"
+
+    assert _token_expiry(_jwt(1787263204)) == 1787263204.0
+    # 못 읽으면 예외가 아니라 4분짜리 짧은 캐시로 떨어진다
+    for broken in (_jwt("없음"), "not.a.jwt", "", "a.b"):
+        assert abs(_token_expiry(broken) - (time.time() + 240.0)) < 5, broken
+
+    # 캐시가 그 exp를 1분 앞당겨 쓰되, 이미 지난 exp로 hot loop에 빠지지 않는가
+    _cfg = type("C", (), {"environment": "PAPER", "app_key": "k"})()
+    saved_issue = _issue_token
+    for offset, floor, ceil in ((70503.0, 70440, 70445), (10.0, 59, 61), (-9999.0, 59, 61)):
+        async def _fake(config, _at=time.time() + offset):  # noqa: ANN001 - 자체 점검용 대역
+            return "tok", _at
+        globals()["_issue_token"] = _fake
+        _token_cache.clear()
+        try:
+            assert asyncio.run(_access_token(_cfg)) == "tok"
+            remaining = _token_cache[("PAPER", "k")][1] - time.time()
+            assert floor <= remaining <= ceil, (offset, remaining)
+        finally:
+            globals()["_issue_token"] = saved_issue
+            _token_cache.clear()
 
     print("ls_account_stream 자체 점검 통과")

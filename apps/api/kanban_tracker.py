@@ -39,16 +39,28 @@ KANBAN_TRACKING_ENABLED = os.getenv("PORTFOLIO_KANBAN_TRACKING_ENABLED", "false"
     "yes",
     "on",
 }
-_HERMES_BIN = os.environ.get("HERMES_BIN", "hermes")
+# `HERMES_BIN` 을 그대로 쓰지 않는 이유는 `hermes_boundary.local_binary()` 참고
+# (.env 의 컨테이너 경로가 호스트 프로세스로 새어 들어온다). 모듈 상수로 굳히지
+# 않고 호출 때 푼다 - import 시점에는 아직 .env 가 안 읽혔을 수 있다.
 _TIMEOUT_SECONDS = float(os.environ.get("PORTFOLIO_KANBAN_CLI_TIMEOUT_SECONDS", "10"))
 
 
 def _run_cli(args: list[str]) -> subprocess.CompletedProcess[str] | None:
     try:
+        try:
+            from hermes_boundary import local_binary
+        except ImportError:  # pragma: no cover - 패키지 상대 import 경로
+            from .hermes_boundary import local_binary
+
         return subprocess.run(
-            [_HERMES_BIN, *args],
+            [local_binary(), *args],
             capture_output=True,
             text=True,
+            # 이 CLI 출력은 UTF-8 이다. 윈도우 기본(cp949)으로 디코드하면 한글
+            # 제목에서 UnicodeDecodeError 가 나고 **리더 스레드가 죽어 stdout 이
+            # None 이 된다** - 그러면 "잘못된 JSON"으로 보여 원인이 가려진다.
+            encoding="utf-8",
+            errors="replace",
             timeout=_TIMEOUT_SECONDS,
             check=False,
         )

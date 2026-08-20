@@ -45,28 +45,6 @@ const FALLBACK_KIND_LABELS: Record<string, string> = {
   REJECTED: "거부",
 };
 
-const STREAM_STATUS: Record<string, { label: string; tone: string }> = {
-  CONNECTED: {
-    label: "연결됨",
-    tone: "border-tertiary-fixed-dim bg-tertiary-fixed/30 text-on-tertiary-fixed-variant",
-  },
-  IDLE: { label: "연결 준비", tone: "border-outline-variant bg-surface-container text-on-surface-variant" },
-  DISCONNECTED: { label: "연결 끊김", tone: "border-error/40 bg-error-container text-on-error-container" },
-  STOPPED: { label: "중지됨", tone: "border-outline-variant bg-surface-container text-on-surface-variant" },
-};
-
-function Badge({ children, tone }: { children: React.ReactNode; tone?: string }) {
-  return (
-    <span
-      className={`inline-flex items-center whitespace-nowrap rounded-full border px-2.5 py-0.5 text-[10px] font-semibold ${
-        tone ?? "border-outline-variant bg-surface-container-lowest text-on-surface-variant"
-      }`}
-    >
-      {children}
-    </span>
-  );
-}
-
 function KindTile({ kind, label, count }: { kind: string; label: string; count: number }) {
   return (
     <div className={`min-w-0 rounded-md border px-3 py-2.5 ${KIND_TONE[kind] ?? KIND_TONE.ACCEPTED}`}>
@@ -420,9 +398,16 @@ export default function LivePortfolioPanel() {
   const error = query.error ?? null;
   const loading = query.isPending;
 
-  const status = data ? STREAM_STATUS[data.stream.status] ?? STREAM_STATUS.IDLE : null;
   const kinds =
     data?.orders.kinds ?? ORDER_KINDS.map((kind) => ({ kind, label: FALLBACK_KIND_LABELS[kind] }));
+
+  // 오늘 사건만 남긴다. 실시간분은 UTC 오프셋(`...+00:00`), 과거 조회분은 KST
+  // naive(`2026-08-18T15:19:47`)라 앞 10자를 자르면 새벽에 하루가 어긋난다 -
+  // Date로 파싱하면 둘 다 같은 로컬 시각으로 떨어진다.
+  const today = new Date().toDateString();
+  const recentOrders = (data?.orders.recent ?? []).filter(
+    (event) => new Date(event.received_at).toDateString() === today,
+  );
 
   return (
     <section
@@ -436,10 +421,6 @@ export default function LivePortfolioPanel() {
           </span>
           <span className="truncate">trading_portfolio.live</span>
         </span>
-        <div className="flex shrink-0 items-center gap-1.5">
-          {data ? <Badge>{data.environment_label}</Badge> : null}
-          {status ? <Badge tone={status.tone}>{status.label}</Badge> : null}
-        </div>
       </div>
 
       <div className="space-y-5 p-4 md:p-6">
@@ -564,7 +545,7 @@ export default function LivePortfolioPanel() {
               <h3 id="live-orders-title" className="m-0 text-title-md font-title-md text-primary">
                 주문 사건
               </h3>
-              <span className="text-xs text-on-surface-variant">{data?.orders.recent.length ?? 0}건</span>
+              <span className="text-xs text-on-surface-variant">{recentOrders.length}건</span>
             </div>
             {data?.orders.error ? (
               <p role="alert" className="m-0 border-b border-error/40 bg-error-container px-4 py-2 text-xs text-on-error-container">
@@ -585,8 +566,8 @@ export default function LivePortfolioPanel() {
                   </tr>
                 </thead>
                 <tbody>
-                  {data && data.orders.recent.length > 0 ? (
-                    data.orders.recent.map((event) => (
+                  {recentOrders.length > 0 ? (
+                    recentOrders.map((event) => (
                       <EventRow
                         key={`${event.kind}-${event.order_no ?? "none"}-${event.received_at}-${event.seq}`}
                         event={event}

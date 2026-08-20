@@ -264,8 +264,13 @@ SOURCES: tuple[SourceSpec, ...] = (
         display_name="LS증권 Open API WebSocket",
         domains=(SourceDomain.REALTIME_PRICE, SourceDomain.REALTIME_QUOTE, SourceDomain.MARKET_STATE),
         tier=SourceTier.P0,
-        required_env=("LS_APP_KEY", "LS_APP_SECRET_KEY"),
-        optional_env=("LS_APP_KEY_PAPER", "LS_APP_SECRET_KEY_PAPER", "LS_WS_BASE_URL_PAPER"),
+        required_env=(),
+        credential_mode_env="LS_ENV",
+        required_env_by_mode={
+            "PAPER": ("LS_APP_KEY_PAPER", "LS_APP_SECRET_KEY_PAPER"),
+            "LIVE": ("LS_APP_KEY", "LS_APP_SECRET_KEY"),
+        },
+        optional_env=("LS_WS_BASE_URL_PAPER",),
         allowed_uses=(UseScope.FULLTEXT_STORE, UseScope.LONG_TERM_ARCHIVE),
         raw_bucket="market-archive-private",
         normalized_target="market.market_ticks / market.market_quotes",
@@ -705,7 +710,7 @@ class SourceRegistry:
         s = self.spec(source_id)
         required = list(s.required_env)
         if s.required_env_by_mode:
-            mode = (self._env.get(s.credential_mode_env or "") or "PAPER").strip().upper()
+            mode = (self._env.get(s.credential_mode_env or "") or "LIVE").strip().upper()
             mode_required = s.required_env_by_mode.get(mode)
             if mode_required is None:
                 # 알 수 없는 모드는 사용 불가로 취급한다. 실제 모드 오류는

@@ -93,7 +93,9 @@ export function MarketRankingCard() {
             <p className="m-0 mt-3 text-sm font-semibold text-on-error-container">
               {isUnavailable ? "시장 데이터 연동이 꺼져 있습니다." : "시장 상위 종목을 불러오지 못했습니다."}
             </p>
-            <p className="m-0 mt-1 text-xs text-on-surface-variant">잠시 후 다시 시도해 주세요.</p>
+            <p className="m-0 mt-1 max-w-xl break-words text-xs text-on-surface-variant">
+              {query.error?.message ?? "잠시 후 다시 시도해 주세요."}
+            </p>
           </div>
         ) : data && data.rows.length > 0 ? (
           <ol className="m-0 divide-y divide-outline-variant rounded-md border border-outline-variant p-0">
