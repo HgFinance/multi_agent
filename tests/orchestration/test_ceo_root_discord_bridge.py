@@ -158,5 +158,146 @@ class CeoRootDiscordBridgeTest(unittest.TestCase):
             self.assertEqual(delivery.details, [])
 
 
+class CeoRootFastPathTest(unittest.TestCase):
+    class FastClient(FakeClient):
+        def __init__(self, home: str, root: dict):
+            super().__init__(home)
+            self.root = root
+            self.workflow_calls = 0
+            self.show_calls = []
+            self.created = []
+
+        def workflow(self, task_id: str):
+            self.workflow_calls += 1
+            raise AssertionError("workflow() must not run on completed CEO root fast-path")
+
+        def show(self, task_id: str):
+            self.show_calls.append(task_id)
+            return dict(self.root)
+
+        def create_task(self, **kwargs):
+            self.created.append(kwargs)
+            return {"id": f"created-{len(self.created)}"}
+
+    def _service(self, home: str, root: dict, delivery: DeliverySpy):
+        os.makedirs(
+            os.path.join(home, "profiles", "ceo-agent"),
+            exist_ok=True,
+        )
+        client = self.FastClient(home, root)
+        service = CeoSupervisorService(
+            client,
+            discord_delivery=delivery,
+        )
+        return client, service
+
+    def test_completed_direct_ceo_root_uses_zero_workflow_calls(self):
+        with tempfile.TemporaryDirectory() as home:
+            delivery = DeliverySpy()
+
+            root = {
+                "id": "root-direct-fast",
+                "assignee": "ceo-agent",
+                "status": "done",
+                "body": root_body(),
+                "runs": [
+                    {
+                        "status": "done",
+                        "metadata": {
+                            "final_answer": "현재 조직은 Research, Quant, Trading 등으로 구성됩니다."
+                        },
+                    }
+                ],
+            }
+
+            client, service = self._service(home, root, delivery)
+
+            service.handle_terminal_event(
+                {
+                    "task_id": "root-direct-fast",
+                    "kind": "completed",
+                    "assignee": "ceo-agent",
+                    "event_id": "direct-fast-event",
+                }
+            )
+
+            self.assertEqual(client.workflow_calls, 0)
+            self.assertEqual(client.show_calls, ["root-direct-fast"])
+            self.assertEqual(len(delivery.details), 1)
+            self.assertIn("현재 조직은 Research", delivery.details[0]["content"])
+
+    def test_completed_delegated_ceo_root_materializes_without_workflow(self):
+        with tempfile.TemporaryDirectory() as home:
+            delivery = DeliverySpy()
+
+            root = {
+                "id": "root-delegated-fast",
+                "assignee": "ceo-agent",
+                "status": "done",
+                "body": root_body(
+                    "selected_primary_profiles="
+                    "risk-management,accounting-portfolio-department\n"
+                    "analysis_mode=fast_advisory\n"
+                    "delegation_instruction.risk-management="
+                    "하방 위험을 검토하십시오.\n"
+                    "delegation_instruction.accounting-portfolio-department="
+                    "NAV와 편입 적합성을 검토하십시오.\n"
+                ),
+            }
+
+            client, service = self._service(home, root, delivery)
+
+            service.handle_terminal_event(
+                {
+                    "task_id": "root-delegated-fast",
+                    "kind": "completed",
+                    "assignee": "ceo-agent",
+                    "event_id": "delegated-fast-event",
+                }
+            )
+
+            self.assertEqual(client.workflow_calls, 0)
+            self.assertEqual(client.show_calls, ["root-delegated-fast"])
+            self.assertEqual(
+                [item["assignee"] for item in client.created],
+                ["risk-management", "accounting-portfolio-department"],
+            )
+            self.assertEqual(len(delivery.cards), 1)
+
+    def test_department_terminal_does_not_pay_root_fast_show(self):
+        with tempfile.TemporaryDirectory() as home:
+            delivery = DeliverySpy()
+
+            root = {
+                "id": "risk-task",
+                "assignee": "risk-management",
+                "status": "done",
+                "body": "workflow_root_task_id=root\\nworkflow_role=primary",
+            }
+
+            client, service = self._service(home, root, delivery)
+
+            # Normal department handling is allowed to enter workflow().
+            # We only prove the CEO-root optimization did not pre-call show().
+            def workflow(task_id: str):
+                self.assertEqual(client.show_calls, [])
+                raise RuntimeError("stop-after-fast-path-check")
+
+            client.workflow = workflow
+
+            with self.assertRaises(RuntimeError):
+                service.handle_terminal_event(
+                    {
+                        "task_id": "risk-task",
+                        "kind": "completed",
+                        "assignee": "risk-management",
+                        "event_id": "risk-terminal-event",
+                    }
+                )
+
+            self.assertEqual(client.show_calls, [])
+
+
+
 if __name__ == "__main__":
     unittest.main()

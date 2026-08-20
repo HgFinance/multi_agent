@@ -188,9 +188,54 @@ def run_completed_synthesis_reconciler(
         stop_event.wait(poll_interval)
 
 
+def run_recovery_reconciler(
+    service: CeoSupervisorService,
+    *,
+    interval: float,
+    stop_event: threading.Event,
+) -> None:
+    """Run both board-scan recovery lanes without concurrent CLI scans.
+
+    The watch stream remains the low-latency path. Recovery scans parse the
+    entire Kanban board, so running two of them every watch tick can saturate
+    the supervisor container as the board grows.
+    """
+
+    poll_interval = max(float(interval), 5.0)
+
+    while not stop_event.is_set():
+        try:
+            service.materialize_ready_primary_plans()
+        except (SupervisorWorkflowError, HermesKanbanCommandError) as exc:
+            print(
+                "ceo-supervisor ready-plan-reconcile-error="
+                f"{type(exc).__name__}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        try:
+            recovered = service.reconcile_completed_syntheses()
+            for task_id in recovered:
+                print(
+                    f"ceo-supervisor completed-synthesis-reconciled task={task_id}",
+                    flush=True,
+                )
+        except (SupervisorWorkflowError, HermesKanbanCommandError) as exc:
+            print(
+                "ceo-supervisor synthesis-reconcile-error="
+                f"{type(exc).__name__}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        stop_event.wait(poll_interval)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--interval", type=float, default=0.5)
+    parser.add_argument("--recovery-interval", type=float, default=None)
     parser.add_argument("--max-retries", type=int, default=2)
     parser.add_argument("--max-wakeups", type=int, default=8)
     args = parser.parse_args()
@@ -212,31 +257,23 @@ def main() -> int:
         discord_delivery=DiscordFinalDelivery(environment=environment),
     )
 
-    ready_plan_stop = threading.Event()
-    ready_plan_thread = threading.Thread(
-        target=run_ready_plan_reconciler,
+    recovery_stop = threading.Event()
+    recovery_interval = (
+        args.recovery_interval
+        if args.recovery_interval is not None
+        else float(environment.get("CEO_SUPERVISOR_RECOVERY_INTERVAL_SECONDS", "15"))
+    )
+    recovery_thread = threading.Thread(
+        target=run_recovery_reconciler,
         kwargs={
             "service": service,
-            "interval": args.interval,
-            "stop_event": ready_plan_stop,
+            "interval": recovery_interval,
+            "stop_event": recovery_stop,
         },
-        name="ceo-ready-plan-reconciler",
+        name="ceo-recovery-reconciler",
         daemon=True,
     )
-    ready_plan_thread.start()
-
-    synthesis_reconcile_stop = threading.Event()
-    synthesis_reconcile_thread = threading.Thread(
-        target=run_completed_synthesis_reconciler,
-        kwargs={
-            "service": service,
-            "interval": args.interval,
-            "stop_event": synthesis_reconcile_stop,
-        },
-        name="ceo-completed-synthesis-reconciler",
-        daemon=True,
-    )
-    synthesis_reconcile_thread.start()
+    recovery_thread.start()
 
     try:
         try:
@@ -267,8 +304,7 @@ def main() -> int:
                 # A single workflow must not take down the event consumer.
                 print(f"ceo-supervisor workflow-error={exc}", file=sys.stderr, flush=True)
     except GracefulShutdown as exc:
-        ready_plan_stop.set()
-        synthesis_reconcile_stop.set()
+        recovery_stop.set()
         print(f"ceo-supervisor normal-shutdown={exc}", flush=True)
         return 0
     except (WatchOutputError, WatchProcessError) as exc:

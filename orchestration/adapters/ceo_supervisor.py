@@ -2566,6 +2566,138 @@ class CeoSupervisorService:
 
         return tuple(recovered)
 
+    def _materialize_completed_analysis_root_fast(
+        self,
+        *,
+        task_id: str,
+        kind: str,
+    ) -> tuple[bool, SupervisorDecision | None]:
+        """Fast-path a completed CEO analysis root without workflow() reconstruction.
+
+        Returns ``(handled, decision)``.  The normal workflow path remains the
+        fallback for child tasks, incomplete plans, and legacy/ambiguous roots.
+        Durable create idempotency keeps this safe against the recovery poller.
+        """
+
+        if kind not in {"done", "completed"}:
+            return False, None
+
+        show = getattr(self.client, "show", None)
+        if not callable(show):
+            return False, None
+
+        root_payload = show(task_id)
+        root_body = str(root_payload.get("body") or "")
+
+        is_planning_root = (
+            workflow_role_from_body(root_body) == "root"
+            or (
+                "root_task_role=scope_and_planning" in root_body
+                and "planning_terminal_state=done_after_child_creation" in root_body
+            )
+        )
+
+        if (
+            not is_planning_root
+            or not is_user_query_body(root_body)
+            or workflow_mode_from_body(root_body) != "analysis"
+        ):
+            return False, None
+
+        selected_profiles = selected_primary_profiles_from_task(root_payload)
+        materialization_body = _materialization_plan_body(root_payload)
+
+        # A direct CEO answer has no selected primary plan.  It is still a root
+        # completion and can be projected immediately without workflow().
+        if not selected_profiles:
+            try:
+                bridge_status = self._bridge_root_completion_to_discord(
+                    root_task_id=task_id,
+                    root_payload=root_payload,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "ceo-root-discord-bridge-failed root=%s error=%s",
+                    task_id,
+                    type(exc).__name__,
+                )
+                bridge_status = "failed"
+
+            logger.info(
+                "root-planning-complete-fast-projected root=%s status=%s",
+                task_id,
+                bridge_status,
+            )
+            return True, None
+
+        state = SupervisorState(
+            parent_task_id=task_id,
+            children=(),
+            wakeups=0,
+            replan_count=0,
+            max_retries=self.max_retries,
+            max_wakeups=self.max_wakeups,
+            qa_required=False,
+            workflow_mode="analysis",
+            has_mandate=mandate_snapshot_present(root_body),
+            selected_primary_profiles=selected_profiles,
+            root_is_user_query=True,
+            allow_primary_passthrough=self.discord_delivery is not None,
+        )
+
+        decisions = _initial_primary_materialization_decisions(
+            state,
+            materialization_body,
+        )
+
+        if not decisions:
+            # A selected plan that cannot be validated should fall back to the
+            # authoritative recovery/workflow path rather than being swallowed.
+            return False, None
+
+        if len(decisions) == 1:
+            self._execute(decisions[0], state)
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(
+                max_workers=min(3, len(decisions)),
+                thread_name_prefix="ceo-primary-fast-create",
+            ) as pool:
+                futures = [
+                    pool.submit(self._execute, decision, state)
+                    for decision in decisions
+                ]
+                for future in futures:
+                    future.result()
+
+        logger.info(
+            "ready-primary-fast-materialized root=%s count=%d profiles=%s",
+            task_id,
+            len(decisions),
+            ",".join(decision.assignee or "" for decision in decisions),
+        )
+
+        try:
+            bridge_status = self._bridge_root_completion_to_discord(
+                root_task_id=task_id,
+                root_payload=root_payload,
+            )
+        except Exception as exc:
+            logger.warning(
+                "ceo-root-discord-bridge-failed root=%s error=%s",
+                task_id,
+                type(exc).__name__,
+            )
+            bridge_status = "failed"
+
+        logger.info(
+            "root-planning-complete-fast-projected root=%s status=%s",
+            task_id,
+            bridge_status,
+        )
+        return True, decisions[0]
+
     def handle_terminal_event(self, event: Mapping[str, Any]) -> SupervisorDecision | None:
         task_id = str(event.get("task_id") or event.get("id") or "")
         kind = str(event.get("kind") or event.get("event_type") or event.get("status") or "").casefold()
@@ -2622,6 +2754,34 @@ class CeoSupervisorService:
             if event_key in self._seen_events:
                 return None
             self._seen_events.add(event_key)
+
+        # Root fast-path is relevant only to CEO-authored terminal tasks.
+        # Department primary events must not pay an extra show() call merely to
+        # discover that they are not roots.
+        event_assignee = str(event.get("assignee") or "").strip().casefold()
+        ceo_assignee = canonical_profile_for_department("ceo").casefold()
+
+        if event_assignee == ceo_assignee:
+            try:
+                handled, fast_decision = self._materialize_completed_analysis_root_fast(
+                    task_id=task_id,
+                    kind=kind,
+                )
+                if handled:
+                    return fast_decision
+            except (SupervisorValidationError, HermesKanbanCommandError):
+                with self._seen_events_lock:
+                    self._seen_events.discard(event_key)
+                raise
+            except Exception as exc:
+                # Fast path is an optimization only. Any ambiguity falls through
+                # to the existing authoritative workflow reconstruction.
+                logger.warning(
+                    "root-fast-materialization-fallback task=%s error=%s",
+                    task_id,
+                    type(exc).__name__,
+                )
+
         try:
             root_id, _ = self.client.workflow(task_id)
             with self._parent_lock(root_id):
