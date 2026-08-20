@@ -170,6 +170,23 @@ def langfuse_worker_event_name(*, stage: str, worker_id: str) -> str:
     return f"llm.performance.metric:{stage}:{worker_id}"
 
 
+def langfuse_worker_opportunity_event_name(*, stage: str, worker_id: str) -> str:
+    """미발화(trigger 조건 불성립) 1건의 이벤트 이름 (2026-08-20 신규).
+
+    실행 이벤트(langfuse_worker_event_name)와 **반드시 다른 이름 공간**이어야 한다.
+    같은 이름으로 보내면 HR 의 유휴 판정이 "이 워커가 돌았다"로 읽어 한 번도 실행된
+    적 없는 워커가 ACTIVE 로 뜬다 - 관측을 고치려다 관측을 망가뜨리는 셈이다.
+
+    이 이벤트가 만드는 값은 점유율의 **분모**다:
+        발화율 = 실행 / (실행 + 미발화)
+    조건부 Worker 의 낮은 발화율은 결함이 아니다. 구분해야 하는 것은 "기회가
+    없었다"(분모 0)와 "기회가 있었는데 한 번도 안 켜졌다"(분모 N, 분자 0)이며,
+    지금까지 둘 다 똑같이 UNOBSERVED 로 보였다.
+    """
+
+    return f"llm.performance.opportunity:{stage}:{worker_id}"
+
+
 def langfuse_enabled() -> bool:
     """2026-08-10: HR(07-agent-workforce) 유휴 Agent 관측용으로 신규 도입.
 
@@ -282,16 +299,95 @@ def publish_worker_activity(
       유휴 리포트에서 가장 위험한 종류의 오차다(정리 대상으로 오판된다).
     """
 
+    # ▶ 모르는 값을 0/"" 으로 채우지 않는다(2026-08-20 수정). 이 경로에는
+    #   begin_worker_metric() 컨텍스트가 없어 llm_calls·model_name·토큰수를 셀
+    #   방법이 자체가 없다 - 그런데 llm_calls: 0 을 보내면 "모델을 한 번도 안
+    #   불렀다"는 **관측 사실**로 읽힌다. 실측(2026-08-20): 모델 엔드포인트가 없는
+    #   컨테이너에서 DEGRADED 로 끝난 Worker 가 llm_calls 0 을 달고 나갔는데,
+    #   그 0 은 실패의 증거가 아니라 우리가 안 센 결과였다. quality.py
+    #   aggregate_quality() 의 None/0 구분과 같은 원칙 - 필드를 아예 뺀다.
     return publish_langfuse_metric(
         {
             "schema_version": "llm.performance.v1",
             "worker_id": worker_id,
             "role": role,
             "stage": stage,
-            "model_name": "",
             "status": status,
             "attempts": int(attempts),
-            "llm_calls": 0,
+            "latency_ms": int(latency_ms),
+            "error_count": int(error_count),
+            "raw_payloads_sent": False,
+        },
+        trace_id=trace_id,
+    )
+
+
+def publish_worker_opportunity(
+    *,
+    stage: str,
+    worker_id: str,
+    role: str = "",
+    reason: str = "trigger_not_fired",
+    trace_id: str | None = None,
+) -> bool:
+    """Worker 가 후보였지만 trigger 가 안 켜진 1건을 기록한다(2026-08-20).
+
+    세 실행기가 이미 not_executed 를 계산하고 있었는데 발행만 안 하고 있었다 -
+    새로 재는 값이 아니라 버려지던 값이다.
+    """
+
+    if not langfuse_enabled():
+        return False
+    try:
+        client = _safe_langfuse_client()
+        client.create_event(
+            name=langfuse_worker_opportunity_event_name(stage=stage, worker_id=worker_id),
+            input=None,
+            output=None,
+            metadata={
+                "schema_version": "llm.opportunity.v1",
+                "worker_id": worker_id,
+                "role": role,
+                "stage": stage,
+                "reason": reason,
+                "trace_id": trace_id or "",
+                "raw_payloads_sent": False,
+            },
+            level="DEFAULT",
+        )
+        return True
+    except Exception:
+        return False
+
+
+def publish_head_activity(
+    *,
+    stage: str,
+    head_persona: str,
+    status: str = "COMPLETED",
+    latency_ms: int = 0,
+    error_count: int = 0,
+    trace_id: str | None = None,
+) -> bool:
+    """부서장(Hermes Profile) 턴 1건을 기록한다(2026-08-20).
+
+    ▶ 왜 부서장을 재는가: 일반 질문 트래픽은 부서장 턴에서 끝나고, Worker 를 부를지는
+      부서장의 판단이다. 부서장이 몇 번 불렸는지를 모르면 Worker 의 실행 0 회가
+      "일이 없었다"인지 "일이 있었는데 위임하지 않았다"인지 영원히 구분할 수 없다 -
+      Department Scorecard 의 arrivals(도착 건수)가 여기서 나온다.
+
+    신원은 부서 Profile 의 `agent.head_persona` 를 그대로 쓴다. Worker id 와 이름
+    공간이 겹치지 않으므로 실행 이벤트와 같은 name 규칙을 쓴다 - HR 의 유휴 조회는
+    등록된 id 만 묻기 때문에 이 이벤트가 기존 판정을 오염시키지 않는다.
+    """
+
+    return publish_langfuse_metric(
+        {
+            "schema_version": "llm.performance.v1",
+            "worker_id": head_persona,
+            "role": "department_head",
+            "stage": stage,
+            "status": status,
             "latency_ms": int(latency_ms),
             "error_count": int(error_count),
             "raw_payloads_sent": False,

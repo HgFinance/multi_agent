@@ -21,7 +21,11 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, StateGraph
 
-from orchestration.llm_observability import publish_worker_activity, record_llm_call
+from orchestration.llm_observability import (
+    publish_worker_activity,
+    publish_worker_opportunity,
+    record_llm_call,
+)
 
 WorkerLLM = Callable[..., str]
 # worker_id -> WorkerLLM. 부서별 LoRA adapter 처럼 **워커마다 모델 좌표가
@@ -692,6 +696,18 @@ async def run_worker_registry_async(
                 trace_id=str(payload.get("trace_id") or payload.get("case_id") or ""),
             )
         return report
+
+    # 미발화(trigger 조건 불성립)도 관측 사실이다 - 점유율의 분모(2026-08-20).
+    # 이 목록은 원래 계산돼 있었고 발행만 안 하고 있었다.
+    if stage:
+        for spec in specs:
+            if spec.worker_id in not_executed:
+                publish_worker_opportunity(
+                    stage=stage,
+                    worker_id=spec.worker_id,
+                    role=spec.role,
+                    trace_id=str(payload.get("trace_id") or payload.get("case_id") or ""),
+                )
 
     # asyncio.gather preserves input order, making fan-in reproducible.
     reports = list(await asyncio.gather(*(run_one(spec) for spec in eligible)))

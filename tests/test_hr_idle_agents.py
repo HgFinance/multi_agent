@@ -231,3 +231,74 @@ def test_department_without_llm_workers_is_empty_not_broken() -> None:
     from orchestration.contracts.worker_registry import load_worker_registry, workers_for_department
     registry = load_worker_registry(ROOT)
     assert workers_for_department(registry, "trading") == ()
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-20: HR 유휴 리포트 렌더러(scorecard/idle_report.py)
+#
+# 렌더러가 지켜야 할 것은 표 모양이 아니라 **상태를 합치지 않는 것**이다.
+# "유휴 N명"으로 뭉치면 HR 이 정리 대상 목록으로 읽고, 관측 실패(UNAVAILABLE)나
+# 미발화 trigger(UNOBSERVED) 때문에 실제로 일하는 Agent 가 잘린다.
+# ---------------------------------------------------------------------------
+
+
+def _report_module():
+    import idle_report
+
+    return idle_report
+
+
+def test_summary_counts_every_state_separately() -> None:
+    idle_report = _report_module()
+    worker_id = a_worker_of("qa")
+    name = langfuse_worker_event_name(stage="qa", worker_id=worker_id)
+    payload, reports = idle_report.build_report(
+        reader=_FixedReader({name: _NOW - timedelta(hours=48)}),
+        departments=("qa",),
+        now=_NOW,
+    )
+    assert payload["summary"]["IDLE"] == 1
+    assert payload["summary"]["UNOBSERVED"] == len(reports) - 1
+    # 없는 상태도 키가 있어야 한다 - 소비자가 KeyError 를 만나지 않도록.
+    assert set(payload["summary"]) == {"IDLE", "UNOBSERVED", "UNAVAILABLE", "ACTIVE"}
+    assert payload["total_workers"] == len(reports)
+    assert payload["schema_version"] == "workforce.idle_report.v1"
+
+
+def test_unavailable_is_never_rendered_as_idle() -> None:
+    """관측 실패가 유휴로 둔갑하면 안 된다 - 문구까지 못 박는다."""
+
+    idle_report = _report_module()
+    payload, reports = idle_report.build_report(
+        reader=_FailingReader(), departments=("research",), now=_NOW
+    )
+    assert payload["summary"]["UNAVAILABLE"] == len(reports)
+    assert payload["summary"]["IDLE"] == 0
+    text = idle_report.render_text(payload, reports)
+    assert "UNAVAILABLE" in text
+    assert "이 리포트로 인원 조치를 결정하지 않는다" in text
+
+
+def test_strict_mode_exits_nonzero_when_observation_path_is_broken(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """계측 경로가 죽은 것을 크론이 알아챌 수 있어야 한다(조용한 0 금지)."""
+
+    idle_report = _report_module()
+    for key in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    assert idle_report.main(["--department", "qa", "--strict"]) == 2
+    assert idle_report.main(["--department", "qa"]) == 0
+
+
+def test_json_output_matches_api_element_shape() -> None:
+    """CLI JSON 과 API 응답의 원소 모양이 같아야 한다 - 소비자가 갈리지 않게."""
+
+    idle_report = _report_module()
+    payload, _ = idle_report.build_report(
+        reader=_EmptyReader(), departments=("risk",), now=_NOW
+    )
+    element = payload["idle_agents"][0]
+    assert set(element) == {
+        "department", "worker_id", "trigger", "status", "last_seen_at", "idle_hours"
+    }

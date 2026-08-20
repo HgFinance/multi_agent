@@ -55,7 +55,11 @@ from departments.risk_qa_worker_profiles import (
     WorkerTechProfile,
     tech_profile_for,
 )
-from orchestration.llm_observability import publish_worker_activity, record_llm_call
+from orchestration.llm_observability import (
+    publish_worker_activity,
+    publish_worker_opportunity,
+    record_llm_call,
+)
 
 # This module is loaded directly from its file path by the shared dispatcher.
 # The QA ``audit`` directory is intentionally a namespace package (no
@@ -1528,6 +1532,16 @@ async def run_employee_workers_async(
             trace_id=str(trace_id or ""),
         )
         return report
+
+    # 미발화도 관측 사실이다 - 점유율의 분모(2026-08-20, 공용 런타임과 같은 계약).
+    for spec in WORKER_SPECS:
+        if spec.worker_id in not_executed:
+            publish_worker_opportunity(
+                stage="qa",
+                worker_id=spec.worker_id,
+                role=spec.role,
+                trace_id=str(trace_id or ""),
+            )
 
     reports = list(await asyncio.gather(*(run_one(spec) for spec in eligible)))
     try:

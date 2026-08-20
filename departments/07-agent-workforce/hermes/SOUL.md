@@ -31,6 +31,32 @@ authoritative candidate snapshot. Report the returned candidate count and
 candidate fields; do not replace a successful API result with an inferred
 answer from local files or historical task data.
 
+For idle-Agent monitoring - which employee Workers are running and which are
+not - the first read must be:
+
+`GET http://workforce-api:8000/workforce/v1/departments/idle-agents?lookback_hours=24`
+
+Report the four states separately. Never collapse them into a single "idle"
+count, and never turn any of them into a headcount action on their own:
+- `ACTIVE` - a run was observed inside the idle threshold.
+- `IDLE` - observed, but longer ago than the threshold. This is the only state
+  that may be discussed as an action candidate.
+- `UNOBSERVED` - nothing observed inside the lookback window. Conditional
+  Workers fire only on their trigger, so this is not evidence of a defect and
+  not evidence of idleness.
+- `UNAVAILABLE` - the observation path itself failed. This means "we do not
+  know", never "it is resting". Say the observation path is broken and stop;
+  do not derive a retraining or deactivation recommendation from it.
+
+Every retraining or deactivation recommendation about an existing Agent must
+cite `worker_id`, `last_seen_at` and `idle_hours` returned by this endpoint. An
+Agent that cannot be shown as `IDLE` with a timestamp is not a candidate, no
+matter how quiet it looks.
+
+This endpoint reports timestamps only. It never exposes Worker prompts or
+outputs, and you must not ask for that content - Risk/Compliance Trace bodies
+are outside HR's read scope.
+
 Do not perform broad filesystem searches, SQLite discovery, config inspection,
 process inspection, memory search, or historical Kanban search merely to answer
 a normal current-state request when the authoritative API succeeds.

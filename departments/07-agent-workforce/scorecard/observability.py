@@ -197,6 +197,75 @@ class LangfuseApiTraceReader(LangfuseTraceReader):
         return max(timestamps) if timestamps else None
 
 
+# ── 부서장(Hermes Profile) ────────────────────────────────────────────────────
+#
+# ▶ Worker Registry 매니페스트(orchestration/contracts/worker_registry.v1.json)는
+#   **Worker 만** 담는다(schema 가 department/worker_id/trigger 세 키로 고정).
+#   부서장은 직원이 아니라 본부장이라 그 목록에 없고, 편제표(LLM Worker 10명)와도
+#   별개다. 그래서 신원은 부서 Profile 의 `agent.head_persona` 에서 읽는다 -
+#   write 측(apps/api/hermes_boundary.py)이 이벤트 이름을 만들 때 읽는 **같은
+#   파일의 같은 키**다. 두 쪽이 다른 출처를 보면 조용히 어긋난다.
+#
+#   ⚠ 이것만 매니페스트 경계 밖이다. 부서장을 매니페스트 v2 에 넣을지는 미결이고
+#     (그 계약은 리서치 소유), 그때까지 include_heads 는 opt-in 으로 둔다.
+DEPARTMENT_PROFILE_DIR: dict[str, str] = {
+    "research": "01-research",
+    "trading": "02-trading",
+    "risk": "03-risk",
+    "quant-backtest": "04-quant-backtest",
+    "accounting-portfolio": "05-accounting-portfolio",
+    "qa": "06-ai-qa-audit",
+}
+
+# 컨테이너에는 저장소 트리가 없고 Profile 만 read-only 로 마운트된다
+# (departments/07-agent-workforce/compose.yaml).
+PROFILE_MOUNT_ROOT_ENV = "WORKFORCE_PROFILE_ROOT"
+DEFAULT_PROFILE_MOUNT_ROOT = Path("/app/profiles")
+
+
+@dataclass(frozen=True)
+class HeadProfileSpec:
+    """부서장 1명. WorkerMetadata 와 같은 속성 이름을 쓴다 - 판정 루프가 둘을
+    구분하지 않고 그대로 돌 수 있어야 한다."""
+
+    worker_id: str
+    # 부서장은 "요청이 올 때" 돈다. conditional Worker 의 trigger 자리에 그 사실을
+    # 적어 리포트가 그대로 읽히게 한다.
+    trigger: str = "on_request"
+
+
+def load_head_profile_spec(repo_root: Path, department: str) -> HeadProfileSpec | None:
+    """부서 Profile 의 `agent.head_persona`. 없으면 None, 못 읽으면 예외."""
+
+    directory = DEPARTMENT_PROFILE_DIR.get(department)
+    if directory is None:
+        raise ValueError(f"unknown_investment_department:{department}")
+    try:
+        import yaml
+    except ModuleNotFoundError as exc:  # pragma: no cover - 이미지 빌드 결함
+        raise WorkerRegistryUnavailable(f"pyyaml_not_installed:{exc}") from exc
+
+    mount_root = Path(os.environ.get(PROFILE_MOUNT_ROOT_ENV) or DEFAULT_PROFILE_MOUNT_ROOT)
+    candidates = (
+        repo_root / "departments" / directory / "hermes" / "config.yaml",
+        mount_root / department / "config.yaml",
+    )
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception as exc:  # noqa: BLE001 - 깨진 Profile 도 "모른다" 로 접힌다
+            raise WorkerRegistryUnavailable(
+                f"profile_unreadable:{department}:{type(exc).__name__}"
+            ) from exc
+        persona = str((config.get("agent") or {}).get("head_persona") or "").strip()
+        return HeadProfileSpec(persona) if persona else None
+    # Worker 목록은 매니페스트에서 이미 받았다 - 부서장만 못 읽은 것을 빈 목록으로
+    # 위장하지 않는다("유휴 없음"이 아니라 "모른다").
+    raise WorkerRegistryUnavailable(f"head_profile_not_found:{department}")
+
+
 def check_idle_agents(
     *,
     reader: LangfuseTraceReader | None = None,
@@ -205,6 +274,7 @@ def check_idle_agents(
     idle_threshold_hours: float = 4.0,
     now: datetime | None = None,
     repo_root: Path = ROOT,
+    include_heads: bool = False,
 ) -> list[WorkerIdleReport]:
     """6개 투자본부(기본값)의 등록된 Worker 전원에 대해 유휴 여부를 판정한다.
 
@@ -242,7 +312,13 @@ def check_idle_agents(
         stage = INVESTMENT_DEPARTMENT_STAGE.get(department)
         if stage is None:
             raise ValueError(f"unknown_investment_department:{department}")
-        specs = workers_for_department(registry, department)
+        specs: tuple[Any, ...] = tuple(workers_for_department(registry, department))
+        if include_heads:
+            # 기본값에서 빠져 있다 - 기본 응답 인원이 말없이 늘면 이 리포트를 인용한
+            # 과거 문장의 뜻이 바뀐다(load_head_profile_spec 머리말 참고).
+            head = load_head_profile_spec(repo_root, department)
+            if head is not None:
+                specs = (head, *specs)
         for spec in specs:
             if reader is None:
                 reports.append(
