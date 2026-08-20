@@ -44,7 +44,9 @@ try:
         submit_user_directive,
     )
     from .user_order_workflow import (
+        UserOrderWorkflowError,
         UserOrderWorkflowUnavailable,
+        recover_committed_directive,
         user_order_repository,
     )
 except ImportError:  # pragma: no cover - direct module execution compatibility
@@ -66,7 +68,9 @@ except ImportError:  # pragma: no cover - direct module execution compatibility
         submit_user_directive,
     )
     from user_order_workflow import (  # type: ignore[no-redef]
+        UserOrderWorkflowError,
         UserOrderWorkflowUnavailable,
+        recover_committed_directive,
         user_order_repository,
     )
 
@@ -836,6 +840,13 @@ def paper_order_workflow_status(
         raise HTTPException(status_code=404, detail="paper_order_request_not_found")
 
     directive: UserDirectiveResponse | None = None
+    if record.state == "UNKNOWN" and not record.directive_id:
+        try:
+            record = recover_committed_directive(repository, record)
+        except UserOrderWorkflowError as exc:
+            raise HTTPException(
+                status_code=503, detail="paper_order_workflow_unavailable"
+            ) from exc
     if record.directive_id:
         directive = read_verified_paper_directive_status(
             subject=record.user_id,

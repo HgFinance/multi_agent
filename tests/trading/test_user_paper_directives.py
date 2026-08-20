@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import inspect
 import json
 import sys
 from contextlib import contextmanager
@@ -233,6 +234,40 @@ def test_execute_binding_one_time_jti_idempotency_and_user_risk_bypass():
     assert record.error_code is None
     assert len(h.repository.state.direct_fills) == 1
     assert run_directive_worker_once(h.service, batch=100, now=NOW)["reconciled"] == 0
+
+
+def test_worker_recovers_filled_internal_error_without_duplicate_fill():
+    h = Harness()
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("100000"))
+    request = h.request(DirectiveAction.PLACE_ORDER, key="idem-filled-recovery")
+    original_reconcile = h.repository.reconcile_cancel_legs
+
+    def fail_after_fill(record):
+        if any(leg.state is DirectiveLegState.FILLED for leg in record.legs):
+            raise RuntimeError("simulated post-fill SQL failure")
+        return original_reconcile(record)
+
+    h.repository.reconcile_cancel_legs = fail_after_fill  # type: ignore[method-assign]
+
+    with pytest.raises(DirectiveServiceError) as failed:
+        h.service.submit(request, _execute_token(request, h.user), now=NOW)
+
+    assert failed.value.code == "TRADING_DIRECTIVE_INTERNAL_ERROR"
+    record = next(iter(h.repository.state.directives.values()))
+    assert record.state is DirectiveState.PARTIAL
+    assert record.legs[0].state is DirectiveLegState.FILLED
+    assert len(h.repository.state.direct_fills) == 1
+
+    h.repository.acknowledge_direct_fills(record.legs[0].leg_id)
+    h.repository.reconcile_cancel_legs = original_reconcile  # type: ignore[method-assign]
+
+    recovered = run_directive_worker_once(h.service, batch=100, now=NOW)
+
+    assert recovered["reconciled"] == 1
+    assert recovered["errors"] == []
+    assert record.state is DirectiveState.COMPLETED
+    assert record.error_code is None
+    assert len(h.repository.state.direct_fills) == 1
 
 
 def test_status_read_proof_binds_subject_fund_book_and_directive():
@@ -499,6 +534,17 @@ def test_postgres_directive_sql_respects_immutable_proofs_and_locks_only_orders(
     assert "for update of o" in cancel_open_orders
     assert postgres_source.count("symbol ~ '^[0-9a-z]{6}$'") >= 3
     assert "symbol ~ '^[0-9]{6}$'" not in postgres_source
+
+
+def test_postgres_cancel_reconciliation_does_not_mix_distinct_with_row_locking():
+    source = inspect.getsource(
+        PostgresDirectiveRepository.reconcile_cancel_legs
+    ).lower()
+
+    assert "select distinct" not in source
+    assert "where exists (" in source
+    assert "leg.linked_order_id=target.order_id" in source
+    assert "for update of target" in source
 
 
 def test_trading_contract_strip_uppers_exact_alphanumeric_krx_symbol() -> None:

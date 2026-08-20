@@ -671,8 +671,22 @@ class UserDirectiveService:
         if current.state in {DirectiveState.COMPLETED, DirectiveState.FAILED}:
             return current
         if current.state is DirectiveState.PARTIAL:
-            self.repository.release_barrier(current)
-            return current
+            order_legs = [leg for leg in current.legs if leg.side is not None]
+            recoverable_internal_failure = (
+                current.action is DirectiveAction.PLACE_ORDER
+                and current.error_code == "TRADING_DIRECTIVE_INTERNAL_ERROR"
+                and bool(order_legs)
+                and all(
+                    leg.state is DirectiveLegState.FILLED for leg in order_legs
+                )
+                and not any(
+                    leg.side is None and leg.state is DirectiveLegState.UNKNOWN
+                    for leg in current.legs
+                )
+            )
+            if not recoverable_internal_failure:
+                self.repository.release_barrier(current)
+                return current
         current = self.repository.reconcile_cancel_legs(current)
         if current.action in {DirectiveAction.PLACE_ORDER, DirectiveAction.SELL_ALL}:
             current = self._fill_active_direct_legs(current, now=now)

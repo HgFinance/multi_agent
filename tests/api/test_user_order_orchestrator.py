@@ -511,6 +511,42 @@ def test_transport_unknown_is_persisted_and_never_auto_retried(
     assert record.directive_id is None
 
 
+def test_transport_unknown_recovers_exact_committed_directive_without_resubmit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _workflow(monkeypatch)
+    submit = Mock(
+        side_effect=HTTPException(status_code=503, detail="trading_api_unavailable")
+    )
+    read = Mock(
+        return_value=_directive_response(
+            context.record,
+            state=DirectiveState.COMPLETED,
+        )
+    )
+    monkeypatch.setattr(orchestrator, "submit_verified_paper_directive", submit)
+    monkeypatch.setattr(orchestrator, "read_verified_paper_directive_status", read)
+    candidate = _execute_candidate(context.raw)
+
+    first = _process(context, candidate)
+    context.repository.find_committed_directive = Mock(  # type: ignore[method-assign]
+        return_value=DIRECTIVE_ID
+    )
+    context.root["status"] = "done"
+    context.trading["status"] = "done"
+
+    recovered = _process(context, candidate)
+
+    assert first["decision"] == "UNKNOWN"
+    assert recovered["request_state"] == "COMPLETED"
+    assert recovered["directive"]["directive_id"] == DIRECTIVE_ID
+    submit.assert_called_once()
+    read.assert_called_once()
+    record = context.repository.get(context.record.order_request_id)
+    assert record.state == "COMPLETED"
+    assert record.directive_id == DIRECTIVE_ID
+
+
 def test_closed_market_reports_explicit_non_submission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
