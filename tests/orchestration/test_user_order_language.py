@@ -42,6 +42,9 @@ def test_clearly_non_executable_language_stays_in_advisory_chat(raw: str) -> Non
 def test_actionable_and_live_language_still_reaches_strict_order_lane() -> None:
     assert not is_clearly_non_executable_order_language("삼성전자 매수 10주 시장가")
     assert not is_clearly_non_executable_order_language(
+        "SK하이닉스 보유수량 확인해서 시장가로 1주 매도"
+    )
+    assert not is_clearly_non_executable_order_language(
         "실계좌로 삼성전자 매수 10주 시장가"
     )
 
@@ -250,6 +253,125 @@ def test_exact_user_example_compiles_to_unresolved_paper_payload() -> None:
         "time_in_force": "DAY",
         "limit_price": None,
     }
+
+
+def test_holdings_preflight_followed_by_imperative_sell_executes() -> None:
+    raw = "<@1536991290842030130> SK하이닉스 보유수량 확인해서 시장가로 1주 매도"
+    result = _execute_place(
+        raw,
+        _place_candidate(
+            raw,
+            instrument="SK하이닉스",
+            side_text="매도",
+            side=OrderSide.SELL,
+            quantity_text="1주",
+            quantity=1,
+            order_type_text="시장가로",
+            order_type=OrderType.MARKET,
+        ),
+    )
+
+    assert result.canonical_payload() == {
+        "instrument_mention": "SK하이닉스",
+        "side": "SELL",
+        "quantity": "1",
+        "order_type": "MARKET",
+        "time_in_force": "DAY",
+        "limit_price": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("raw", "instrument", "side_text", "side", "quantity_text", "quantity", "order_type_text"),
+    [
+        (
+            "내 PAPER 계좌에서 보유 중인 삼성전자 2주 시장가 매도해줘",
+            "삼성전자",
+            "매도해줘",
+            OrderSide.SELL,
+            "2주",
+            2,
+            "시장가",
+        ),
+        (
+            "지금 삼성전자 한 주 시장가로 매수 주문 넣어주세요",
+            "삼성전자",
+            "매수",
+            OrderSide.BUY,
+            "한 주",
+            1,
+            "시장가로",
+        ),
+        (
+            "모의투자 계좌에서 SK하이닉스 1주 팔아줘",
+            "SK하이닉스",
+            "팔아줘",
+            OrderSide.SELL,
+            "1주",
+            1,
+            None,
+        ),
+        (
+            "현재 보유잔고 조회 후 SK하이닉스 1주 매도 요청",
+            "SK하이닉스",
+            "매도",
+            OrderSide.SELL,
+            "1주",
+            1,
+            None,
+        ),
+        (
+            "바로 삼성전자 1주 시장가 매수 주문 실행해줘",
+            "삼성전자",
+            "매수",
+            OrderSide.BUY,
+            "1주",
+            1,
+            "시장가",
+        ),
+    ],
+)
+def test_safe_natural_order_adornments_preserve_exact_execution_fields(
+    raw: str,
+    instrument: str,
+    side_text: str,
+    side: OrderSide,
+    quantity_text: str,
+    quantity: int,
+    order_type_text: str | None,
+) -> None:
+    result = _execute_place(
+        raw,
+        _place_candidate(
+            raw,
+            instrument=instrument,
+            side_text=side_text,
+            side=side,
+            quantity_text=quantity_text,
+            quantity=quantity,
+            order_type_text=order_type_text,
+            order_type=OrderType.MARKET,
+        ),
+    )
+
+    assert result.payload is not None
+    assert result.payload.instrument_mention == instrument
+    assert result.payload.side is side
+    assert result.payload.quantity == str(quantity)
+    assert result.payload.order_type is OrderType.MARKET
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "SK하이닉스 보유수량 확인해서 1주 매도해도 될까?",
+        "PAPER 계좌에서 SK하이닉스 1주 매도하지 마",
+        "SK하이닉스 현재가 확인해서 시장가 1주 매도",
+        "SK하이닉스 보유수량 확인해줘 그리고 1주 매도",
+    ],
+)
+def test_natural_order_language_never_weakens_speech_act_guards(raw: str) -> None:
+    assert is_clearly_non_executable_order_language(raw)
 
 
 def test_explicit_won_price_compiles_as_limit_and_preserves_code_mention() -> None:

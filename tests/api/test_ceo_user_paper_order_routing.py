@@ -150,6 +150,50 @@ def test_exact_sample_is_durably_bound_before_either_card_is_released(
     assert response["task"]["status"] == "done"
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "SK하이닉스 보유수량 확인해서 시장가로 1주 매도",
+        "내 PAPER 계좌에서 보유 중인 삼성전자 2주 시장가 매도해줘",
+        "지금 삼성전자 한 주 시장가로 매수 주문 넣어주세요",
+        "모의투자 계좌에서 SK하이닉스 1주 팔아줘",
+        "현재 보유잔고 조회 후 SK하이닉스 1주 매도 요청",
+    ],
+)
+def test_safe_natural_order_variants_enter_the_bound_paper_lane(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+) -> None:
+    events: list[str] = []
+    repository = _OrderedRepository(events)
+    create = _install_successful_route(
+        monkeypatch, events=events, repository=repository
+    )
+
+    response = ceo.ceo_query(
+        ceo.CeoAsk(
+            query=raw,
+            request_id="request-natural-variant",
+            fund_id=FUND_ID,
+            book_id=BOOK_ID,
+        ),
+        owner_id=USER_ID,
+    )
+
+    assert create.call_count == 2
+    root_call, trading_call = create.call_args_list
+    assert root_call.kwargs["initial_status"] == "running"
+    assert trading_call.kwargs["initial_status"] == "blocked"
+    assert raw in root_call.kwargs["body"]
+    assert raw in trading_call.kwargs["body"]
+    assert response["order_mode"] == "PAPER"
+    assert response["planning"]["selected_departments"] == ["trading-department"]
+
+    stored = repository.get(response["order_request_id"])
+    assert stored is not None
+    assert stored.raw_instruction == raw
+
+
 def test_conditional_command_uses_only_the_precreated_trading_primary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
