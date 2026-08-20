@@ -3751,7 +3751,7 @@ Production 이후에도 자동 전략 승격과 자본 확대는 Error Budget, I
 - 확정: 그 외 본부는 TimescaleDB Credential 없이 `market-api`의 Snapshot·Bar·Feature Endpoint로 조회
 - 확정: 초기 Core는 한국 상장주식·ETF의 Multi-Strategy Paper 연구를 지원하며 Long/Short, Market Neutral, Event Driven과 Quant 전략을 사전 배제하지 않음
 - 확정: 실제 공매도와 파생상품은 Borrow·Margin·OMS·Risk·Accounting Capability Gate 통과 후 환경별로 활성화
-- 확정: 사용자 직접 PAPER 주문은 local durable PaperBroker canonical 계정만 사용하고, LS LIVE는 시장데이터 read-only로 분리
+- 확정: 사용자 직접 PAPER 주문의 경제적 정본은 LS증권 모의투자(`LS PAPER`) 계좌다. Trading만 PAPER 전용 AppKey로 주문·취소·상태조회를 수행하고 durable directive/leg/reservation/fill ledger는 감사·재시작·회계 투영을 보존한다. LS LIVE 주문은 금지하며 LIVE 연결은 시장데이터 read-only로 분리한다.
 - 미정: Live Broker, LIVE 주문 API와 운영 계정
 - TimescaleDB의 Chunk, 압축, Retention과 장기 Archive 정책
 - ClickHouse는 TimescaleDB가 부하·비용 SLO를 충족하지 못할 때 Benchmark

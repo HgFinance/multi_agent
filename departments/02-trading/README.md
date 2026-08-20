@@ -52,8 +52,8 @@ Hermes는 사용자의 authority를 소유하지 않는다. 대화 원문을 자
 상태는 `RECEIVED | RUNNING | IN_PROGRESS | PARTIAL | COMPLETED | FAILED | UNKNOWN`만
 사용한다.
 
-- `SELL_ALL`은 client holdings를 신뢰하지 않는다. 로컬 durable PaperBroker 계정의
-  canonical accounting position과 open SELL reservation을 같은 snapshot에서 다시
+- `SELL_ALL`은 client holdings를 신뢰하지 않는다. LS PAPER에서 대사된 canonical
+  accounting position과 open SELL reservation을 같은 snapshot에서 다시
   읽고, 양수 sellable quantity만 `reduce_only` SELL 자식 주문으로 만든다. 현재 KRX
   주식 long-only PAPER 범위이므로 신규/확대 short와 자동 short cover는 하지 않는다.
 - `CANCEL_ALL`은 canonical open PAPER orders만 대상으로 한다. snapshot 이후 이미
@@ -61,17 +61,19 @@ Hermes는 사용자의 authority를 소유하지 않는다. 대화 원문을 자
 - 모든 자식이 성공해야 `COMPLETED`다. 성공과 실패가 섞이면 `PARTIAL`, 전부 실패하면
   `FAILED`, 확정할 수 없으면 `UNKNOWN`이다. 한 자식이라도 실패하면
   `COMPLETED`로 표시하지 않는다.
-- PaperBroker `ACKNOWLEDGED`는 active order 접수 사실이므로 parent는
+- PAPER broker `ACKNOWLEDGED`는 active order 접수 사실이므로 parent는
   `IN_PROGRESS`다. ACK만으로 체결·취소 완료를 만들지 않는다.
 - `SELL_ALL`의 빈 `legs`가 no-op `COMPLETED`인 경우는 canonical 양수 position과
   open SELL reservation이 모두 0일 때뿐이다. `CANCEL_ALL`도 canonical open PAPER
   order가 0건임을 확인해야 빈 `legs` 완료다.
 
-canonical PAPER 계정과 durable directive/leg/reservation ledger 및
-execution/accounting projection은 Trading Domain의 로컬 durable PaperBroker store가
-소유한다. 프로세스 메모리 fallback, 요청에 포함된 잔고, LS 계좌 잔고는 권위가 없다.
-LS LIVE 연결은 시세·호가·체결 시장 관측 read-only이며 BFF/Hermes에는 계좌번호·계좌
-비밀번호·LS Credential 또는 LIVE order route가 없다.
+배포된 canonical 경제 계정은 LS증권 모의투자(`LS PAPER`) 계좌다. Trading의
+`ls-paper` adapter만 PAPER 전용 credential로 주문·취소·상태조회를 수행하며 LIVE
+credential로 fallback하지 않는다. durable directive/leg/reservation/fill ledger와
+execution/accounting projection은 멱등성·예약·감사·재시작 복구를 소유하고 broker
+snapshot과 immutable reconciliation journal로 대사된다. 프로세스 메모리 fallback과
+요청에 포함된 잔고는 권위가 없다. LS LIVE 연결은 시세·호가·체결 시장 관측
+read-only이며 Browser/Hermes에는 LS Credential 또는 LIVE order route가 없다.
 
 ## Paper 결과 계약
 

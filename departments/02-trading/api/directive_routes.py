@@ -6,6 +6,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Header
 
+from broker.ls_paper_broker import LSPaperBroker
 from directives.contracts import UserDirectiveRequest
 from directives.market_data import FixtureMarketDataProvider, HttpMarketDataProvider
 from directives.repository import InMemoryDirectiveRepository, PostgresDirectiveRepository
@@ -25,10 +26,10 @@ def configure_directive_runtime() -> UserDirectiveService:
     global _service
     require_paper_execution_mode()
     adapter = os.environ.get("TRADING_BROKER_ADAPTER", "paper").strip().lower()
-    if adapter != "paper":
+    if adapter not in {"paper", "ls-paper"}:
         raise DirectiveServiceError(
             "TRADING_LIVE_ADAPTER_FORBIDDEN",
-            "authenticated user directives require the paper adapter",
+            "authenticated user directives require paper or ls-paper adapter",
             503,
         )
     repository_mode = os.environ.get("TRADING_DIRECTIVE_REPOSITORY", "postgres").strip().lower()
@@ -64,7 +65,12 @@ def configure_directive_runtime() -> UserDirectiveService:
             "TRADING_DIRECTIVE_REPOSITORY must be postgres or memory",
             503,
         )
-    _service = UserDirectiveService(repository, market_data)
+    external_broker = LSPaperBroker.from_env() if adapter == "ls-paper" else None
+    _service = UserDirectiveService(
+        repository,
+        market_data,
+        external_broker=external_broker,
+    )
     return _service
 
 

@@ -267,10 +267,18 @@ def test_all_order_and_accounting_mutation_services_are_hard_paper() -> None:
 
     assert trading["PAPER_DB"] == "true"
     assert trading["TRADING_EXECUTION_MODE"] == "PAPER"
-    assert trading["TRADING_BROKER_ADAPTER"] == "paper"
+    assert trading["TRADING_BROKER_ADAPTER"] == "${TRADING_BROKER_ADAPTER:-ls-paper}"
     assert trading["TRADING_DIRECTIVE_REPOSITORY"] == "postgres"
+    assert trading["LS_ENV"] == "PAPER"
+    assert "LS_APP_KEY_PAPER" in trading
+    assert "LS_APP_SECRET_KEY_PAPER" in trading
+    assert "LS_APP_KEY" not in trading
+    assert "LS_APP_SECRET_KEY" not in trading
     assert worker["TRADING_EXECUTION_MODE"] == "PAPER"
-    assert worker["TRADING_BROKER_ADAPTER"] == "paper"
+    assert worker["TRADING_BROKER_ADAPTER"] == "${TRADING_BROKER_ADAPTER:-ls-paper}"
+    assert worker["LS_ENV"] == "PAPER"
+    assert "LS_APP_KEY" not in worker
+    assert "LS_APP_SECRET_KEY" not in worker
     assert accounting["ACCOUNTING_MODE"] == "PAPER_DB"
     assert accounting["PAPER_DB"] == "true"
 

@@ -487,15 +487,17 @@ class PostgresUserOrderRequestRepository:
         """Find an exact directive after an ambiguous submission response.
 
         This is a read-only recovery lookup. It never resubmits an order and
-        requires the durable authority, idempotency, action, and payload digest
-        to match the admitted request exactly.
+        requires the durable authority, deterministic idempotency key, action,
+        and source request identity to match.  The request digest is not used:
+        the admitted payload contains an instrument mention while the durable
+        directive contains its resolved instrument UUID/symbol, so equal
+        orders intentionally have different pre/post-resolution digests.
         """
 
         if (
             record.state != "UNKNOWN"
             or record.directive_id is not None
             or not record.action
-            or not record.payload_sha256
         ):
             return None
         try:
@@ -507,7 +509,6 @@ class PostgresUserOrderRequestRepository:
                       from execution.user_directives
                      where user_id=%s and fund_id=%s and book_id=%s
                        and idempotency_key=%s and action=%s
-                       and payload_sha256=%s
                        and (source_order_request_id is null
                             or source_order_request_id=%s)
                      limit 2
@@ -518,7 +519,6 @@ class PostgresUserOrderRequestRepository:
                         UUID(record.book_id),
                         f"ceo-paper:{record.order_request_id}",
                         record.action,
-                        record.payload_sha256,
                         UUID(record.order_request_id),
                     ),
                 )

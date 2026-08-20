@@ -245,7 +245,7 @@ def test_unknown_status_recovers_committed_directive_without_resubmission() -> N
     assert repository.mark_outcome.call_count == 2
 
 
-def test_postgres_unknown_recovery_matches_full_durable_identity() -> None:
+def test_postgres_unknown_recovery_matches_durable_authority_and_idempotency() -> None:
     source = inspect.getsource(
         PostgresUserOrderRequestRepository.find_committed_directive
     )
@@ -256,10 +256,10 @@ def test_postgres_unknown_recovery_matches_full_durable_identity() -> None:
         "book_id=%s",
         "idempotency_key=%s",
         "action=%s",
-        "payload_sha256=%s",
         "source_order_request_id",
     ):
         assert field in source
+    assert "payload_sha256=%s" not in source
 
 
 def test_unknown_request_is_404_without_authority_or_trading_lookup() -> None:

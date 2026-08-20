@@ -285,11 +285,20 @@ services:
       PAPER_DB: "true"
       APP_ENV: production
       TRADING_EXECUTION_MODE: PAPER
-      TRADING_BROKER_ADAPTER: paper
+      TRADING_BROKER_ADAPTER: ${TRADING_BROKER_ADAPTER:-ls-paper}
       TRADING_DIRECTIVE_REPOSITORY: postgres
       TRADING_DATABASE_ROLE: svc_trading_api
       TRADING_AUTH_MODE: service
       MARKET_API_URL: http://market-api:8036
+      # Execution receives PAPER credentials only.  LIVE keys are deliberately
+      # absent so an adapter/configuration bug cannot cross the account boundary.
+      LS_ENV: PAPER
+      LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:?LS PAPER AppKey is required}
+      LS_APP_SECRET_KEY_PAPER: ${LS_APP_SECRET_KEY_PAPER:?LS PAPER SecretKey is required}
+      LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
+      LS_MAC_ADDRESS: ${LS_MAC_ADDRESS:-}
+      LS_OAUTH_SCOPE: ${LS_OAUTH_SCOPE:-oob}
+      LS_PAPER_ORDER_TIMEOUT_SECONDS: ${LS_PAPER_ORDER_TIMEOUT_SECONDS:-8}
 
   trading-directive-worker:
     depends_on:
@@ -301,10 +310,17 @@ services:
       DATABASE_URL: *trading-database-url
       APP_ENV: production
       TRADING_EXECUTION_MODE: PAPER
-      TRADING_BROKER_ADAPTER: paper
+      TRADING_BROKER_ADAPTER: ${TRADING_BROKER_ADAPTER:-ls-paper}
       TRADING_DIRECTIVE_REPOSITORY: postgres
       TRADING_DATABASE_ROLE: svc_trading_api
       MARKET_API_URL: http://market-api:8036
+      LS_ENV: PAPER
+      LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:?LS PAPER AppKey is required}
+      LS_APP_SECRET_KEY_PAPER: ${LS_APP_SECRET_KEY_PAPER:?LS PAPER SecretKey is required}
+      LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
+      LS_MAC_ADDRESS: ${LS_MAC_ADDRESS:-}
+      LS_OAUTH_SCOPE: ${LS_OAUTH_SCOPE:-oob}
+      LS_PAPER_ORDER_TIMEOUT_SECONDS: ${LS_PAPER_ORDER_TIMEOUT_SECONDS:-8}
 
   trading-outbox-relay:
     environment:
@@ -326,6 +342,22 @@ services:
       PAPER_DB: "true"
       ACCOUNTING_DATABASE_ROLE: svc_accounting_ledger
       MARKET_API_URL: http://market-api:8036
+
+  accounting-ls-paper-reconciler:
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      portfolio-bff:
+        condition: service_started
+    environment:
+      DATABASE_URL: *accounting-database-url
+      ACCOUNTING_MODE: PAPER_DB
+      PAPER_DB: "true"
+      ACCOUNTING_DATABASE_ROLE: svc_accounting_ledger
+      ACCOUNTING_DEFAULT_BOOK_ID: ${PAPER_SEED_BOOK_ID:-07d913de-9a5b-4cf5-b893-31a625445761}
+      PORTFOLIO_BFF_INTERNAL_URL: http://portfolio-bff:8000
+      LS_PAPER_RECONCILE_INTERVAL_SECONDS: ${LS_PAPER_RECONCILE_INTERVAL_SECONDS:-60}
+      LS_PAPER_RECONCILE_GRACE_SECONDS: ${LS_PAPER_RECONCILE_GRACE_SECONDS:-10}
 
   accounting-close-scheduler:
     environment:

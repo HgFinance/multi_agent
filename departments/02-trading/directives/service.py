@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 from uuid import UUID
 
+from broker.ls_paper_broker import LSPaperBroker, LSPaperBrokerError
 from broker.paper_policy import participation_cap
 
 from .auth import (
@@ -151,10 +152,17 @@ class UserDirectiveService:
     quote, tick/lot, cash/position, reservation, and PAPER-only gates.
     """
 
-    def __init__(self, repository: DirectiveRepository, market_data: MarketDataProvider) -> None:
+    def __init__(
+        self,
+        repository: DirectiveRepository,
+        market_data: MarketDataProvider,
+        *,
+        external_broker: LSPaperBroker | None = None,
+    ) -> None:
         require_paper_execution_mode()
         self.repository = repository
         self.market_data = market_data
+        self.external_broker = external_broker
 
     def submit(
         self,
@@ -420,10 +428,16 @@ class UserDirectiveService:
     ) -> DirectiveRecord:
         """Retry marketable direct legs from a fresh quote during status polling."""
         for leg in list(record.legs):
-            if leg.side is None or leg.state not in {
+            eligible_states = {
                 DirectiveLegState.ACKNOWLEDGED,
                 DirectiveLegState.PARTIALLY_FILLED,
-            }:
+            }
+            if self.external_broker is not None:
+                eligible_states |= {
+                    DirectiveLegState.PENDING,
+                    DirectiveLegState.UNKNOWN,
+                }
+            if leg.side is None or leg.state not in eligible_states:
                 continue
             if leg.instrument_id is None or leg.symbol is None:
                 raise DirectiveServiceError(
@@ -438,10 +452,346 @@ class UserDirectiveService:
                 leg.instrument_id,
                 leg.symbol,
             )
+            if self.external_broker is not None:
+                self._sync_external_leg(record, leg, instrument)
+                record = self.repository.get(record.directive_id) or record
+                continue
             quote = self.market_data.quote(instrument, now=now)
             self._fill_from_quote(record, leg, instrument, quote)
             record = self.repository.get(record.directive_id) or record
         return record
+
+    def _submit_external_leg(
+        self,
+        record: DirectiveRecord,
+        leg: Any,
+        instrument: InstrumentRef,
+    ) -> Any:
+        """Submit once.  Ambiguous transport outcomes are never retried."""
+        assert self.external_broker is not None
+        try:
+            ack = self.external_broker.place_order(
+                symbol=instrument.symbol,
+                side=str(leg.side),
+                order_type=str(leg.order_type),
+                quantity=Decimal(leg.requested_quantity),
+                limit_price=leg.limit_price,
+            )
+        except LSPaperBrokerError as exc:
+            if exc.ambiguous:
+                return self.repository.mark_broker_leg_unknown(
+                    record,
+                    leg,
+                    error_code=exc.code,
+                    error_message=(
+                        "LS PAPER submission outcome is ambiguous; automatic retry is forbidden"
+                    ),
+                )
+            return self.repository.terminate_broker_leg(
+                record,
+                leg,
+                state=DirectiveLegState.REJECTED,
+                error_code=exc.code,
+                error_message=str(exc),
+            )
+        return self.repository.acknowledge_broker_leg(
+            record,
+            leg,
+            broker_order_id="ls-paper:" + ack.broker_order_id,
+            broker_event_id="ls-paper:ack:" + ack.broker_order_id,
+        )
+
+    def _sync_external_leg(
+        self,
+        record: DirectiveRecord,
+        leg: Any,
+        instrument: InstrumentRef,
+    ) -> Any:
+        """Project the broker's cumulative order state without synthetic fills."""
+        assert self.external_broker is not None
+        broker_order_id = str(leg.broker_order_id or "")
+        if not broker_order_id.startswith("ls-paper:"):
+            if leg.state is DirectiveLegState.PENDING:
+                return self.repository.mark_broker_leg_unknown(
+                    record,
+                    leg,
+                    error_code="LS_PAPER_SUBMISSION_RECONCILIATION_REQUIRED",
+                    error_message=(
+                        "durable leg has no LS order number; automatic submission is forbidden"
+                    ),
+                )
+            return leg
+        raw_order_id = broker_order_id.split(":", 1)[1]
+        try:
+            status = self.external_broker.order_status(raw_order_id)
+        except LSPaperBrokerError:
+            # An acknowledged broker id remains authoritative.  A transient
+            # status-query failure must not turn into a second placement.
+            return leg
+        if status is None:
+            return leg
+        delta = status.filled_quantity - Decimal(leg.filled_quantity)
+        if delta > 0:
+            if status.fill_price is None or status.fill_price <= 0:
+                return self.repository.mark_broker_leg_unknown(
+                    record,
+                    leg,
+                    error_code="LS_PAPER_FILL_PRICE_MISSING",
+                    error_message="LS reports a fill quantity without a usable fill price",
+                )
+            event_identity = {
+                "broker_order_id": raw_order_id,
+                "filled_quantity": str(status.filled_quantity),
+                "fill_price": str(status.fill_price),
+                "order_date": status.order_date.isoformat(),
+            }
+            quote_event_key = hashlib.sha256(
+                json.dumps(
+                    event_identity, sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest()
+            leg = self.repository.record_paper_fill(
+                record,
+                leg,
+                instrument,
+                quote_event_key=quote_event_key,
+                price=status.fill_price,
+                executable_quantity=delta,
+                event_time=datetime.now(timezone.utc),
+                source="ls-paper:CSPAQ13700",
+            )
+        if status.state in {"REJECTED", "CANCELLED"}:
+            terminal = (
+                DirectiveLegState.REJECTED
+                if status.state == "REJECTED"
+                else DirectiveLegState.CANCELLED
+            )
+            return self.repository.terminate_broker_leg(
+                record,
+                leg,
+                state=terminal,
+                error_code="LS_PAPER_ORDER_" + status.state,
+                error_message="LS PAPER broker reported a terminal order state",
+            )
+        return leg
+
+    @staticmethod
+    def _external_cancel_event_id(record: DirectiveRecord, target_leg: Any) -> str:
+        return f"ls-paper:cancel:{record.directive_id}:{target_leg.leg_id}"
+
+    def _record_external_terminal_cancel(
+        self,
+        record: DirectiveRecord,
+        target_record: DirectiveRecord,
+        target_leg: Any,
+    ) -> Any:
+        if target_leg.state is DirectiveLegState.CANCELLED:
+            return self.repository.record_external_cancel(
+                record,
+                target_record,
+                target_leg,
+                target_state=None,
+                audit_state=DirectiveLegState.CANCELLED,
+            )
+        if target_leg.state is DirectiveLegState.FILLED:
+            return self.repository.record_external_cancel(
+                record,
+                target_record,
+                target_leg,
+                target_state=None,
+                audit_state=DirectiveLegState.SKIPPED,
+                error_code="TRADING_CANCEL_LOST_RACE",
+                error_message="order filled before LS PAPER cancellation completed",
+            )
+        return self.repository.record_external_cancel(
+            record,
+            target_record,
+            target_leg,
+            target_state=None,
+            audit_state=DirectiveLegState.SKIPPED,
+            error_message="order was already terminal before cancellation",
+        )
+
+    def _reconcile_external_cancel_targets(
+        self,
+        record: DirectiveRecord,
+    ) -> DirectiveRecord:
+        if self.external_broker is None:
+            return record
+        for audit, target_record, target_leg in self.repository.external_cancel_targets(record):
+            if audit.state is not DirectiveLegState.UNKNOWN:
+                continue
+            if (
+                target_leg.instrument_id is not None
+                and target_leg.symbol is not None
+                and str(target_leg.broker_order_id or "").startswith("ls-paper:")
+            ):
+                instrument = self.repository.resolve_instrument(
+                    target_record.fund_id,
+                    target_record.book_id,
+                    target_leg.instrument_id,
+                    target_leg.symbol,
+                )
+                self._sync_external_leg(target_record, target_leg, instrument)
+                refreshed_target = self.repository.get(target_record.directive_id)
+                if refreshed_target is not None:
+                    target_record = refreshed_target
+                    target_leg = next(
+                        leg
+                        for leg in target_record.legs
+                        if leg.leg_id == target_leg.leg_id
+                    )
+            if target_leg.state not in {
+                DirectiveLegState.PENDING,
+                DirectiveLegState.ACKNOWLEDGED,
+                DirectiveLegState.PARTIALLY_FILLED,
+                DirectiveLegState.UNKNOWN,
+            }:
+                self._record_external_terminal_cancel(record, target_record, target_leg)
+                record = self.repository.get(record.directive_id) or record
+        return record
+
+    def _cancel_external_direct_legs(
+        self,
+        record: DirectiveRecord,
+        *,
+        below_priority: int | None,
+    ) -> list[Any]:
+        assert self.external_broker is not None
+        record = self._reconcile_external_cancel_targets(record)
+        results: list[Any] = []
+        candidates = self.repository.external_open_legs(
+            record,
+            below_priority=below_priority,
+        )
+        for target_record, target_leg in candidates:
+            actor = self.repository.get(record.directive_id) or record
+            event_id = self._external_cancel_event_id(actor, target_leg)
+            existing_audit = next(
+                (
+                    leg
+                    for leg in actor.legs
+                    if leg.broker_event_id == event_id
+                ),
+                None,
+            )
+
+            if (
+                target_leg.instrument_id is not None
+                and target_leg.symbol is not None
+                and str(target_leg.broker_order_id or "").startswith("ls-paper:")
+            ):
+                instrument = self.repository.resolve_instrument(
+                    target_record.fund_id,
+                    target_record.book_id,
+                    target_leg.instrument_id,
+                    target_leg.symbol,
+                )
+                self._sync_external_leg(target_record, target_leg, instrument)
+                refreshed_target = self.repository.get(target_record.directive_id)
+                if refreshed_target is not None:
+                    target_record = refreshed_target
+                    target_leg = next(
+                        leg
+                        for leg in target_record.legs
+                        if leg.leg_id == target_leg.leg_id
+                    )
+
+            if target_leg.state not in {
+                DirectiveLegState.PENDING,
+                DirectiveLegState.ACKNOWLEDGED,
+                DirectiveLegState.PARTIALLY_FILLED,
+                DirectiveLegState.UNKNOWN,
+            }:
+                results.append(
+                    self._record_external_terminal_cancel(
+                        actor, target_record, target_leg
+                    )
+                )
+                continue
+            if existing_audit is not None:
+                # A prior cancellation outcome was ambiguous.  Querying broker
+                # state is safe; issuing a second cancellation is not.
+                results.append(existing_audit)
+                continue
+
+            broker_ref = str(target_leg.broker_order_id or "")
+            quantity = Decimal(target_leg.requested_quantity or 0) - Decimal(
+                target_leg.filled_quantity
+            )
+            if (
+                not broker_ref.startswith("ls-paper:")
+                or target_leg.symbol is None
+                or quantity <= 0
+            ):
+                results.append(
+                    self.repository.record_external_cancel(
+                        actor,
+                        target_record,
+                        target_leg,
+                        target_state=DirectiveLegState.UNKNOWN,
+                        audit_state=DirectiveLegState.UNKNOWN,
+                        error_code="TRADING_EXTERNAL_CANCEL_RECONCILIATION_REQUIRED",
+                        error_message=(
+                            "active order lacks a safe LS PAPER cancellation binding"
+                        ),
+                    )
+                )
+                continue
+
+            try:
+                ack = self.external_broker.cancel_order(
+                    broker_order_id=broker_ref.split(":", 1)[1],
+                    symbol=target_leg.symbol,
+                    quantity=quantity,
+                )
+            except LSPaperBrokerError:
+                # A cancel transport failure is just as ambiguous as a place
+                # failure.  Persist UNKNOWN and never issue it again.
+                results.append(
+                    self.repository.record_external_cancel(
+                        actor,
+                        target_record,
+                        target_leg,
+                        target_state=DirectiveLegState.UNKNOWN,
+                        audit_state=DirectiveLegState.UNKNOWN,
+                        error_code="LS_PAPER_CANCEL_AMBIGUOUS",
+                        error_message=(
+                            "LS PAPER cancellation outcome is ambiguous; automatic retry is forbidden"
+                        ),
+                    )
+                )
+                continue
+            results.append(
+                self.repository.record_external_cancel(
+                    actor,
+                    target_record,
+                    target_leg,
+                    target_state=DirectiveLegState.CANCELLED,
+                    audit_state=DirectiveLegState.CANCELLED,
+                    broker_cancel_order_id=ack.broker_order_id,
+                )
+            )
+        return results
+
+    def _cancel_open_orders(
+        self,
+        record: DirectiveRecord,
+        *,
+        below_priority: int | None,
+    ) -> list[Any]:
+        external_legs: list[Any] = []
+        if self.external_broker is not None:
+            external_legs = self._cancel_external_direct_legs(
+                record,
+                below_priority=below_priority,
+            )
+        local_legs = self.repository.cancel_open_orders(
+            record,
+            below_priority=below_priority,
+            include_direct_legs=self.external_broker is None,
+        )
+        return [*external_legs, *local_legs]
 
     def _place(
         self,
@@ -492,7 +842,7 @@ class UserDirectiveService:
                 )
 
         self.repository.activate_barrier(record, reduce_only=payload.side == "SELL")
-        preemption_legs = self.repository.cancel_open_orders(
+        preemption_legs = self._cancel_open_orders(
             record,
             below_priority=record.priority,
         )
@@ -536,28 +886,47 @@ class UserDirectiveService:
                     409,
                 )
 
-        leg = self.repository.create_acknowledged_leg(
-            record,
-            instrument,
-            side=payload.side,
-            order_type=payload.order_type,
-            quantity=payload.quantity,
-            limit_price=payload.limit_price,
-            reserve_cash=reserve_cash,
-            reduce_only=reduce_only,
-            expires_at=expires_at,
-        )
-        # The admission quote is itself executable evidence.  Filling against
-        # it immediately closes the MARKET price-gap while the quote-event
-        # fingerprint guarantees that status polling cannot consume it twice.
-        self._fill_from_quote(record, leg, instrument, trusted)
+        if self.external_broker is None:
+            leg = self.repository.create_acknowledged_leg(
+                record,
+                instrument,
+                side=payload.side,
+                order_type=payload.order_type,
+                quantity=payload.quantity,
+                limit_price=payload.limit_price,
+                reserve_cash=reserve_cash,
+                reduce_only=reduce_only,
+                expires_at=expires_at,
+            )
+            # The local simulator consumes the admission quote.  External LS
+            # mode never reaches this path; only a broker-reported execution
+            # may create its fill evidence.
+            self._fill_from_quote(record, leg, instrument, trusted)
+        else:
+            leg = self.repository.create_pending_leg(
+                record,
+                instrument,
+                side=payload.side,
+                order_type=payload.order_type,
+                quantity=payload.quantity,
+                limit_price=payload.limit_price,
+                reserve_cash=reserve_cash,
+                reduce_only=reduce_only,
+                expires_at=expires_at,
+            )
+            leg = self._submit_external_leg(record, leg, instrument)
+            if leg.state in {
+                DirectiveLegState.ACKNOWLEDGED,
+                DirectiveLegState.PARTIALLY_FILLED,
+            }:
+                self._sync_external_leg(record, leg, instrument)
         self.repository.set_state(record.directive_id, DirectiveState.IN_PROGRESS)
         refreshed = self.repository.get(record.directive_id) or record
         return self._status_locked(refreshed, now=now)
 
     def _cancel_all(self, record: DirectiveRecord) -> DirectiveRecord:
         self.repository.activate_barrier(record, reduce_only=True)
-        legs = self.repository.cancel_open_orders(record, below_priority=None)
+        legs = self._cancel_open_orders(record, below_priority=None)
         if any(leg.state is DirectiveLegState.UNKNOWN for leg in legs):
             return self.repository.set_state(
                 record.directive_id,
@@ -580,7 +949,7 @@ class UserDirectiveService:
 
     def _sell_all(self, record: DirectiveRecord, *, now: datetime) -> DirectiveRecord:
         self.repository.activate_barrier(record, reduce_only=True)
-        cancellation_legs = self.repository.cancel_open_orders(
+        cancellation_legs = self._cancel_open_orders(
             record,
             below_priority=record.priority,
         )
@@ -621,18 +990,37 @@ class UserDirectiveService:
                 unsellable = True
             _mechanical_order_rules(instrument, quantity=quantity, limit_price=None)
             trusted = self.market_data.quote(instrument, now=now)
-            leg = self.repository.create_acknowledged_leg(
-                record,
-                instrument,
-                side="SELL",
-                order_type="MARKET",
-                quantity=quantity,
-                limit_price=None,
-                reserve_cash=None,
-                reduce_only=True,
-                expires_at=expires_at,
-            )
-            self._fill_from_quote(record, leg, instrument, trusted)
+            if self.external_broker is None:
+                leg = self.repository.create_acknowledged_leg(
+                    record,
+                    instrument,
+                    side="SELL",
+                    order_type="MARKET",
+                    quantity=quantity,
+                    limit_price=None,
+                    reserve_cash=None,
+                    reduce_only=True,
+                    expires_at=expires_at,
+                )
+                self._fill_from_quote(record, leg, instrument, trusted)
+            else:
+                leg = self.repository.create_pending_leg(
+                    record,
+                    instrument,
+                    side="SELL",
+                    order_type="MARKET",
+                    quantity=quantity,
+                    limit_price=None,
+                    reserve_cash=None,
+                    reduce_only=True,
+                    expires_at=expires_at,
+                )
+                leg = self._submit_external_leg(record, leg, instrument)
+                if leg.state in {
+                    DirectiveLegState.ACKNOWLEDGED,
+                    DirectiveLegState.PARTIALLY_FILLED,
+                }:
+                    self._sync_external_leg(record, leg, instrument)
 
         if unsellable:
             refreshed = self.repository.get(record.directive_id) or record
@@ -688,6 +1076,7 @@ class UserDirectiveService:
                 self.repository.release_barrier(current)
                 return current
         current = self.repository.reconcile_cancel_legs(current)
+        current = self._reconcile_external_cancel_targets(current)
         if current.action in {DirectiveAction.PLACE_ORDER, DirectiveAction.SELL_ALL}:
             current = self._fill_active_direct_legs(current, now=now)
         if current.action is DirectiveAction.PLACE_ORDER:

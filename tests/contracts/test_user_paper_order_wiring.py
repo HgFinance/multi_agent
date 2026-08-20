@@ -25,6 +25,8 @@ def test_local_bff_separates_paper_orders_from_read_only_broker_projection() -> 
     assert bff["TRADING_SERVICE_AUTH_AUDIENCE"] == "${TRADING_SERVICE_AUTH_AUDIENCE:-trading-api}"
     assert bff["USER_PAPER_ORDER_WORKFLOW_ENABLED"] == "true"
     assert bff["ENABLE_LS_ORDER_EVENTS"] == "${ENABLE_LS_ORDER_EVENTS:-false}"
+    assert bff["ENABLE_BROKER_SNAPSHOT"] == "${ENABLE_BROKER_SNAPSHOT:-false}"
+    assert bff["BROKER_SNAPSHOT_CACHE_SECONDS"] == "${BROKER_SNAPSHOT_CACHE_SECONDS:-10}"
     assert bff["LS_ENV"] == "${LS_ENV:-PAPER}"
     assert "LS_ACCOUNT_NO_PAPER" in bff
     assert not any("LIVE" in key for key in bff)

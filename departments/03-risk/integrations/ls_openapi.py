@@ -243,9 +243,22 @@ class LSOpenAPIClient:
         balance = _object(
             balance_body.get("CSPAQ12200OutBlock2"), "CSPAQ12200OutBlock2"
         )
+        balance_request = _object(
+            balance_body.get("CSPAQ12200OutBlock1"), "CSPAQ12200OutBlock1"
+        )
+        response_account_no = balance_request.get("AcntNo")
+        if response_account_no is not None and not isinstance(response_account_no, str):
+            raise LSOpenAPIError("LS CSPAQ12200 AcntNo must be a string")
+        account_no = (
+            response_account_no.strip() if isinstance(response_account_no, str) else ""
+        ) or self.config.account_no
         observed_at = datetime.now(timezone.utc)
         return PortfolioSnapshot(
-            account_no=self.config.account_no,
+            # OAuth identifies the PAPER account and CSPAQ12200 echoes its
+            # account number.  Prefer that authoritative response over a
+            # manually duplicated env value, while retaining the env fallback
+            # for broker-compatible test doubles.
+            account_no=account_no,
             cash=_decimal(balance.get("Dps"), "Dps"),
             buying_power=_decimal(balance.get("MnyOrdAbleAmt"), "MnyOrdAbleAmt"),
             equity=_decimal(

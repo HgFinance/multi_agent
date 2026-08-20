@@ -70,7 +70,10 @@ def test_ls_read_only_quote_and_portfolio_calls() -> None:
         if request.headers.get("tr_cd") == "CSPAQ12200":
             return httpx.Response(
                 200,
-                json={"CSPAQ12200OutBlock2": {"Dps": "500", "MnyOrdAbleAmt": "400"}},
+                json={
+                    "CSPAQ12200OutBlock1": {"AcntNo": "12345678901"},
+                    "CSPAQ12200OutBlock2": {"Dps": "500", "MnyOrdAbleAmt": "400"},
+                },
             )
         return httpx.Response(404)
 
@@ -90,5 +93,6 @@ def test_ls_read_only_quote_and_portfolio_calls() -> None:
     assert quote.observed_at.tzinfo == timezone.utc
     assert portfolio.cash == 500
     assert portfolio.buying_power == 400
+    assert portfolio.account_no == "12345678901"
     assert calls.count("/oauth2/token") == 1
     assert "/stock/order" not in calls

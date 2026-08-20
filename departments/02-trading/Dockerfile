@@ -23,7 +23,7 @@ FROM python:3.12-slim
 # 버전은 이 저장소에서 이미 검증된 값(risk/audit/ceo Dockerfile과 동일 pin)으로 고정한다.
 RUN pip install --no-cache-dir \
     fastapi==0.128.8 "uvicorn[standard]==0.39.0" pydantic==2.13.3 \
-    psycopg2-binary==2.9.12 redis==7.0.1
+    psycopg2-binary==2.9.12 redis==7.0.1 httpx==0.28.1
 
 WORKDIR /app/departments/02-trading
 # app.py가 sys.path에 넣는 하위 폴더 이름과 같아야 한다(_DEPT / _sub).

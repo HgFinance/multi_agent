@@ -145,6 +145,10 @@ services:
       # 끄면 /ui/portfolio/live, /ui/portfolio/ledger, /ui/market/rankings가
       # 전부 503이라 대시보드가 빈다. 읽기 전용이며 주문은 나가지 않는다.
       ENABLE_LS_ORDER_EVENTS: ${ENABLE_LS_ORDER_EVENTS:-false}
+      # Read-only broker account snapshot.  Keep this independent from order
+      # event ingestion so enabling a balance view never enables execution.
+      ENABLE_BROKER_SNAPSHOT: ${ENABLE_BROKER_SNAPSHOT:-false}
+      BROKER_SNAPSHOT_CACHE_SECONDS: ${BROKER_SNAPSHOT_CACHE_SECONDS:-10}
       # LS_ENV=PAPER면 조회 코드가 `_PAPER` 접미사 키를 먼저 찾고 없으면
       # 접미사 없는 키로 떨어진다(departments/03-risk/integrations/ls_openapi.py).
       # 어느 쪽을 쓸지는 배포 환경이 정하므로 양쪽을 다 통과시킨다.

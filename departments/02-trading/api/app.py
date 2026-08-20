@@ -777,7 +777,13 @@ def health() -> dict:
     return {
         "status": "degraded" if _paper_db_error else "ok",
         "api_version": API_VERSION,
+        # Strategy OMS and authenticated direct-user directives intentionally
+        # have separate adapter selections.  Expose both so a healthy local
+        # strategy simulator cannot hide a miswired LS PAPER direct lane.
         "adapter": _oms.adapter,
+        "user_directive_adapter": os.environ.get(
+            "TRADING_BROKER_ADAPTER", "paper"
+        ).strip().lower(),
         "store": "supabase execution.*" if _paper_db_durable else "in-memory (offline/test)",
         "store_available": _paper_db_error is None,
         "store_error": _paper_db_error,
@@ -795,6 +801,9 @@ def health_ready() -> dict:
     return {
         "status": "ready",
         "api_version": API_VERSION,
+        "user_directive_adapter": os.environ.get(
+            "TRADING_BROKER_ADAPTER", "paper"
+        ).strip().lower(),
         "store": "supabase execution.*" if _paper_db_durable else "in-memory (offline/test)",
         "intents": len(_oms.store.list_intents()),
         "orders": len(_oms.store.list_orders()),

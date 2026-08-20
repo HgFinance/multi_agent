@@ -7,7 +7,7 @@
 
 > **2026-08-18 권한 보정:** 아래의 “Risk 승인 없는 Submit 차단”과 “BFF
 > read-only” 문장은 Agent·alpha·자동 전략 레인에 적용된다. 인증된 사용자가 자기
-> Fund/Book에 명시한 PAPER 주문은 [ADR-0007](../02-engineering/adr/0007-authenticated-user-paper-directive-authority.md)의 별도 `USER_DIRECTIVE` authority다. Hermes는 대화 transport일 뿐이며, 결정론 parser/BFF와 local durable PaperBroker만 mechanical admission·실행을 담당한다. LS LIVE는 market read-only이고 LIVE 주문은 없다.
+> Fund/Book에 명시한 PAPER 주문은 [ADR-0007](../02-engineering/adr/0007-authenticated-user-paper-directive-authority.md)의 별도 `USER_DIRECTIVE` authority다. Hermes는 대화 transport일 뿐이며, 결정론 parser/BFF와 Trading의 durable admission ledger + LS PAPER adapter만 mechanical admission·실행을 담당한다. LS LIVE는 market read-only이고 LIVE 주문은 없다.
 
 ## 0. 상태 판정 규칙
 
