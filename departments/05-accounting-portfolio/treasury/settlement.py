@@ -182,10 +182,16 @@ def ladder_from_pending(
         bucket["incoming"] += incoming
         bucket["outgoing"] += outgoing
 
+    # 사다리는 달력일로 세는데 결제일은 영업일로 센다. 그래서 목·금 체결은 T+2가
+    # `ladder_days` 밖으로 밀리고(2026-08-20 목요일 실측: 결제일이 +4일), 그 칸이
+    # `beyond_ladder` 합계로 빠져 화면에서 개별 결제일이 사라진다. 설정값은 최소
+    # 폭으로 쓰되 결제 지평까지는 반드시 덮는다.
+    last_day = max(as_of + timedelta(days=settings.ladder_days),
+                   settlement_date_for(as_of, settings))
     buckets: list[dict[str, Any]] = []
     running = cash
-    for offset in range(settings.ladder_days + 1):
-        day = as_of + timedelta(days=offset)
+    day = as_of
+    while day <= last_day:
         bucket = by_day.pop(day, {"incoming": ZERO, "outgoing": ZERO})
         running += bucket["incoming"] - bucket["outgoing"]
         buckets.append({
@@ -195,6 +201,7 @@ def ladder_from_pending(
             "net": bucket["incoming"] - bucket["outgoing"],
             "projected_cash": running,
         })
+        day += timedelta(days=1)
     # 사다리 밖(더 먼 결제일)은 버리지 않고 합계로 남긴다.
     beyond_in = sum((b["incoming"] for b in by_day.values()), ZERO)
     beyond_out = sum((b["outgoing"] for b in by_day.values()), ZERO)

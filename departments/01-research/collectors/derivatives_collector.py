@@ -7,8 +7,8 @@
       supabase/migrations/20260729000100 (reference.derivative_contracts)
 
 ▶ 실측으로 확인한 것 (2026-07-31, 실전 Domain)
-  - 파생 시세는 **운영 Domain 전용**(문서: 모의투자 Domain '-'), 실전 키는 별도
-    신청 없이 열려 있다. 이 수집기는 LS_ENV 와 무관하게 LIVE 키를 강제한다.
+  - 파생 시세는 **운영 Domain 전용**(문서: 모의투자 Domain '-')이므로
+    `LS_ENV=LIVE`에서 실행한다.
   - t9943(지수선물 마스터) gubun ''=KOSPI200 정규 13개월물 / 'V'=미니 / 'S'=섹터.
     hname "F 2609" 이 만기 연월이고 expcode 12자가 ISIN 이다(KR4101...).
   - t9944(지수옵션 마스터) 5,224종목 - "C 2608 625.0" 형태로 종류·연월·행사가.
@@ -590,8 +590,8 @@ def collect() -> int:
         if not ok:
             return EXIT_SKIP
 
-        # 파생 시세는 운영 Domain 전용 - LS_ENV 와 무관하게 LIVE 키를 쓴다
-        client = LsRestClient(LsEnvironment.from_env({**env, "LS_ENV": "LIVE"}))
+        # 파생 시세는 운영 Domain 전용이므로 LS_ENV=LIVE가 필요하다.
+        client = LsRestClient(LsEnvironment.from_env(env))
         today = now_kst.date()
         fut_master, fronts, opt_master, opt_front = load_universe(client, today)
 
@@ -675,7 +675,7 @@ def sync_contracts() -> int:
     env = load_project_env()
     SourceRegistry(env=env).require("ls_openapi_rest")
     today = datetime.now(KST).date()
-    client = LsRestClient(LsEnvironment.from_env({**env, "LS_ENV": "LIVE"}))
+    client = LsRestClient(LsEnvironment.from_env(env))
     fut_master, fronts, opt_master, opt_front = load_universe(client, today)
     yyyymm = f"{opt_front[0]:04d}{opt_front[1]:02d}"
     _header, calls, puts = fetch_option_board(client, yyyymm)

@@ -39,9 +39,9 @@ class LSOpenAPIConfig:
 
     @classmethod
     def from_env(cls) -> LSOpenAPIConfig:
-        environment = os.environ.get("LS_ENV", "PAPER").strip().upper()
+        environment = os.environ.get("LS_ENV", "LIVE").strip().upper()
         if environment not in {"PAPER", "LIVE"}:
-            raise LSOpenAPIConfigurationError("LS_ENV must be PAPER or LIVE")
+            raise LSOpenAPIConfigurationError("LS environment must be PAPER or LIVE")
         suffix = "_PAPER" if environment == "PAPER" else ""
         app_key = os.environ.get(f"LS_APP_KEY{suffix}", "").strip()
         app_secret_key = os.environ.get(f"LS_APP_SECRET_KEY{suffix}", "").strip()
@@ -101,7 +101,7 @@ def credential_status(environ: Mapping[str, str] | None = None) -> dict[str, Any
     """Return key names and presence only; never return secret values."""
 
     env = os.environ if environ is None else environ
-    requested = env.get("LS_ENV", "PAPER").strip().upper()
+    requested = env.get("LS_ENV", "LIVE").strip().upper()
     suffix = "_PAPER" if requested == "PAPER" else ""
     app_key_name = f"LS_APP_KEY{suffix}"
     app_secret_name = f"LS_APP_SECRET_KEY{suffix}"

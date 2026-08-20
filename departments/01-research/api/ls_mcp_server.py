@@ -81,15 +81,10 @@ def _shcode_of(query: str) -> dict:
 def _client():
     """LsRestClient 지연 생성 - 키가 없으면 그때 정직하게 실패한다.
 
-    ▶ 조회는 `LS_MARKET_ENV`, 주문은 `LS_ENV` (재일 결정 2026-08-12,
-      ls_realtime_service.py:257). 모의 서버는 수급 TR 에 rsp 00000 인데
-      빈 행을 준다(실측 2026-08-13 t1717) - "진짜처럼 생긴 가짜" 를 막으려면
-      조회면은 LIVE 로 붙어야 한다. 이 서버에 주문 도구는 없다.
+    시장·계좌 조회는 단일 `LS_ENV`를 사용한다. 이 서버에 주문 도구는 없다.
     """
     from ls_client import LsEnvironment, LsRestClient
-    e = dict(os.environ)
-    e["LS_ENV"] = (e.get("LS_MARKET_ENV") or "LIVE").strip().upper()
-    return LsRestClient(LsEnvironment.from_env(e))
+    return LsRestClient(LsEnvironment.from_env(dict(os.environ)))
 
 
 def ls_tr_catalog(query: str, protocol: str = "", limit: int = 10) -> dict:

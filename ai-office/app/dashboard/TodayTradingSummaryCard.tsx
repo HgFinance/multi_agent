@@ -27,7 +27,8 @@ export function TodayTradingSummaryCard() {
   const activity = data?.today_activity;
   const payload = activity?.data;
   const summary = payload?.summary;
-  const hasError = Boolean(activity?.error || query.error);
+  const detailError = activity?.error ?? data?.stream.error ?? data?.orders.error ?? query.error?.message ?? null;
+  const hasError = Boolean(detailError);
   const isUnavailable = query.error?.status === 503;
 
   return (
@@ -99,13 +100,19 @@ export function TodayTradingSummaryCard() {
         ) : (
           <div className="flex min-h-[15rem] flex-col items-center justify-center rounded-md border border-outline-variant bg-surface-container-lowest px-4 text-center">
             <span className="material-symbols-outlined text-3xl text-outline" aria-hidden="true">
-              {isUnavailable ? "cloud_off" : "hourglass_top"}
+              {isUnavailable ? "cloud_off" : detailError ? "error" : "hourglass_top"}
             </span>
             <p className="m-0 mt-3 text-sm font-semibold text-on-surface">
-              {isUnavailable ? "실시간 계좌 연동이 꺼져 있습니다." : "오늘 매매 요약을 확인하는 중입니다."}
+              {isUnavailable
+                ? "실시간 계좌 연동이 꺼져 있습니다."
+                : detailError
+                  ? "오늘 매매 요약을 불러오지 못했습니다."
+                  : "오늘 매매 요약을 확인하는 중입니다."}
             </p>
-            <p className="m-0 mt-1 text-xs text-on-surface-variant">
-              {isUnavailable ? "연동을 켜면 t0150 당일 매매 내역이 표시됩니다." : "브로커 응답을 기다리고 있습니다."}
+            <p className="m-0 mt-1 max-w-xl break-words text-xs text-on-surface-variant">
+              {isUnavailable
+                ? "연동을 켜면 t0150 당일 매매 내역이 표시됩니다."
+                : detailError ?? "브로커 응답을 기다리고 있습니다."}
             </p>
           </div>
         )}
