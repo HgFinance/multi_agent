@@ -49,17 +49,28 @@ GENERIC_RUNTIME_LOGIN = "hgfinance_runtime"
 ORDER_RUNTIME_LOGIN = "hgfinance_order_runtime"
 TRADING_RUNTIME_LOGIN = "hgfinance_trading_runtime"
 ACCOUNTING_RUNTIME_LOGIN = "hgfinance_accounting_runtime"
+CONDITIONAL_ORCHESTRATOR_RUNTIME_LOGIN = "hgfinance_conditional_orchestrator"
+CONDITIONAL_WORKER_RUNTIME_LOGIN = "hgfinance_conditional_worker"
 RUNTIME_LOGIN_PASSWORD_KEYS = {
     GENERIC_RUNTIME_LOGIN: "HEDGEFUND_RUNTIME_DB_PASSWORD",
     ORDER_RUNTIME_LOGIN: "HEDGEFUND_ORDER_DB_PASSWORD",
     TRADING_RUNTIME_LOGIN: "HEDGEFUND_TRADING_DB_PASSWORD",
     ACCOUNTING_RUNTIME_LOGIN: "HEDGEFUND_ACCOUNTING_DB_PASSWORD",
+    CONDITIONAL_ORCHESTRATOR_RUNTIME_LOGIN: (
+        "HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD"
+    ),
+    CONDITIONAL_WORKER_RUNTIME_LOGIN: "HEDGEFUND_CONDITIONAL_WORKER_DB_PASSWORD",
 }
 RUNTIME_LOGIN_MEMBERSHIPS = {
     GENERIC_RUNTIME_LOGIN: ("service_role", True),
     ORDER_RUNTIME_LOGIN: ("svc_order_orchestrator", False),
     TRADING_RUNTIME_LOGIN: ("svc_trading_api", False),
     ACCOUNTING_RUNTIME_LOGIN: ("svc_accounting_ledger", False),
+    CONDITIONAL_ORCHESTRATOR_RUNTIME_LOGIN: (
+        "svc_conditional_rule_orchestrator",
+        False,
+    ),
+    CONDITIONAL_WORKER_RUNTIME_LOGIN: ("svc_conditional_rule_worker", False),
 }
 GENERIC_RUNTIME_SET_ROLES = (
     "svc_quant",
@@ -623,7 +634,7 @@ def replay_market_migrations(
 
 
 def runtime_login_passwords() -> dict[str, str]:
-    """Load four non-disclosing, distinct URL-safe runtime passwords."""
+    """Load non-disclosing, distinct URL-safe runtime passwords."""
 
     passwords: dict[str, str] = {}
     invalid: list[str] = []
@@ -1321,6 +1332,35 @@ def _assert_single_scope_row(rows: Sequence[Sequence[object]], label: str) -> No
         raise BootstrapError(f"PAPER seed {label} identity collides with existing data")
 
 
+def _assert_adoptable_paper_fund(
+    row: Sequence[object], expected_fund_id: UUID
+) -> None:
+    """Accept an existing configured Fund without rewriting team-owned identity."""
+
+    if (
+        len(row) < 4
+        or UUID(str(row[0])) != expected_fund_id
+        or str(row[2]) != "KRW"
+        or str(row[3]) != "ACTIVE"
+    ):
+        raise BootstrapError("PAPER seed fund is not an active KRW fund")
+
+
+def _assert_adoptable_paper_book(
+    row: Sequence[object], expected_fund_id: UUID, expected_book_id: UUID
+) -> None:
+    """Accept only the configured Fund's already-active PAPER Book."""
+
+    if (
+        len(row) < 5
+        or UUID(str(row[0])) != expected_book_id
+        or UUID(str(row[1])) != expected_fund_id
+        or str(row[3]) != "PAPER"
+        or str(row[4]) != "ACTIVE"
+    ):
+        raise BootstrapError("PAPER seed book is not an active PAPER book")
+
+
 def _post_seed_journal(
     cursor,
     *,
@@ -1373,20 +1413,31 @@ def seed_paper_principal(control_dsn: str, *, top_up_cash: bool) -> None:
             _set_transaction_timeouts(cursor)
             cursor.execute(
                 """
-                select fund_id,fund_code,base_currency from accounting.funds
-                 where fund_id=%s or fund_code='ACC01-PAPER' for update
+                select fund_id,fund_code,base_currency,status
+                  from accounting.funds
+                 where fund_id=%s
+                 for update
                 """,
                 (fund_id,),
             )
-            fund_rows = cursor.fetchall()
-            _assert_single_scope_row(fund_rows, "fund")
-            if fund_rows and (
-                UUID(str(fund_rows[0][0])) != fund_id
-                or str(fund_rows[0][1]) != "ACC01-PAPER"
-                or str(fund_rows[0][2]) != "KRW"
-            ):
-                raise BootstrapError("PAPER seed fund conflicts with existing data")
-            if not fund_rows:
+            fund_row = cursor.fetchone()
+            if fund_row is not None:
+                _assert_adoptable_paper_fund(fund_row, fund_id)
+            else:
+                # A team-owned Fund may legitimately use another code. Only
+                # the exact configured UUID is adoptable; a separate Fund
+                # already owning the bootstrap code is still a hard conflict.
+                cursor.execute(
+                    """
+                    select fund_id from accounting.funds
+                     where fund_code='ACC01-PAPER'
+                     for update
+                    """
+                )
+                if cursor.fetchone() is not None:
+                    raise BootstrapError(
+                        "PAPER seed fund code conflicts with existing data"
+                    )
                 cursor.execute(
                     """
                     insert into accounting.funds
@@ -1395,28 +1446,32 @@ def seed_paper_principal(control_dsn: str, *, top_up_cash: bool) -> None:
                     """,
                     (fund_id,),
                 )
-            else:
-                cursor.execute(
-                    "update accounting.funds set status='ACTIVE',updated_at=now() where fund_id=%s",
-                    (fund_id,),
-                )
 
             cursor.execute(
                 """
-                select book_id,fund_id,book_code from accounting.books
-                 where book_id=%s or (fund_id=%s and book_code='MAIN') for update
+                select book_id,fund_id,book_code,book_type,status
+                  from accounting.books
+                 where book_id=%s
+                 for update
                 """,
-                (book_id, fund_id),
+                (book_id,),
             )
-            book_rows = cursor.fetchall()
-            _assert_single_scope_row(book_rows, "book")
-            if book_rows and (
-                UUID(str(book_rows[0][0])) != book_id
-                or UUID(str(book_rows[0][1])) != fund_id
-                or str(book_rows[0][2]) != "MAIN"
-            ):
-                raise BootstrapError("PAPER seed book conflicts with existing data")
-            if not book_rows:
+            book_row = cursor.fetchone()
+            if book_row is not None:
+                _assert_adoptable_paper_book(book_row, fund_id, book_id)
+            else:
+                cursor.execute(
+                    """
+                    select book_id from accounting.books
+                     where fund_id=%s and book_code='MAIN'
+                     for update
+                    """,
+                    (fund_id,),
+                )
+                if cursor.fetchone() is not None:
+                    raise BootstrapError(
+                        "PAPER seed book code conflicts with existing data"
+                    )
                 cursor.execute(
                     """
                     insert into accounting.books
@@ -1424,11 +1479,6 @@ def seed_paper_principal(control_dsn: str, *, top_up_cash: bool) -> None:
                     values (%s,%s,'MAIN','Main PAPER Book','PAPER','ACTIVE')
                     """,
                     (book_id, fund_id),
-                )
-            else:
-                cursor.execute(
-                    "update accounting.books set status='ACTIVE',updated_at=now() where book_id=%s",
-                    (book_id,),
                 )
 
             cursor.execute(

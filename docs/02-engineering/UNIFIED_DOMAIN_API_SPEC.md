@@ -111,9 +111,11 @@ Worker를 별도 프로세스나 Queue로 분리해도 내부 계약은 worker-c
 - mutation은 `Idempotency-Key`가 필수이고 `mode`는 항상 `PAPER`다. BFF는 Supabase
   token이나 LS credential을 downstream으로 전달하지 않고 짧은 수명의 최소 claim
   service proof만 사용한다.
-- local durable PaperBroker 계정이 PAPER cash, position, open order, reservation과
-  execution 결과의 canonical source다. LS LIVE는 시세·호가·체결 read-only이며 LIVE
-  order route는 없다.
+- 배포된 사용자 직접 주문 레인의 cash, position, broker order와 execution 결과의
+  경제적 정본은 LS증권 모의투자(`LS PAPER`) 계좌다. Trading의 PAPER 전용 adapter만
+  주문·취소·상태조회를 수행한다. durable directive/leg/reservation/fill ledger는
+  멱등성·재시작·감사·회계 투영을 보존하고 broker snapshot과 대사한다. LS LIVE는
+  시세·호가·체결 read-only이며 LIVE order route는 없다.
 
 ### 3.2 멱등성과 동시성
 
@@ -359,7 +361,7 @@ CEO는 주문 제출, Risk 승인, 원장 수정, NAV 확정, Audit Finding 종�
 |---|---|---|
 | Research Evidence·Market | Legacy Read API 실행 | PIT·production_authorized 매핑·ACL·재시작 복구 |
 | Research Workflow·Quant | Contract/Worker 중심, FastAPI Route planned | 영속 Job·Dataset·Artifact 저장과 상태 Migration |
-| Trading | 결정론 Paper OMS API + 인증 사용자 PAPER directive 실행 | local durable PaperBroker account·Service Auth·PAPER-only·부분 실패/재시작 복구 검증; LIVE는 별도 승인 |
+| Trading | 결정론 Paper OMS API + 인증 사용자 PAPER directive 실행 | LS PAPER 계좌·PAPER 전용 credential·durable admission ledger·주문/취소 UNKNOWN 복구·부분 실패/재시작 검증; LIVE는 별도 승인 |
 | Risk | API·Test 실행, Production blocked | P1/P2 실데이터·Redis/DB Outbox·Risk Gate 장애 테스트 |
 | QA | API·Test 실행, Production blocked | 승인 corpus/profile·독립 Verifier·write-through·SoD |
 | Governance·Workforce | 일부 API 실행, 일부 Route planned | Transport·RLS·Committee/Plan 저장소·IAM 연계 |
@@ -390,7 +392,7 @@ CEO는 주문 제출, Risk 승인, 원장 수정, NAV 확정, Audit Finding 종�
 12. Event를 중복 소비해도 Ledger Posting·Profile Transition·QA Finding이 중복 생성되지 않는다.
 13. Agent/alpha 주문은 Risk 없이 submit되지 않지만, 인증 사용자의 명시적 PAPER directive는 Risk 경제적 veto 없이도 fund/book·account mechanics·idempotency를 통과하면 접수된다.
 14. `SELL_ALL`/`CANCEL_ALL` 자식 중 하나라도 실패하면 aggregate는 `COMPLETED`가 아니며, 같은 directive 상태 조회가 자식별 결과를 재현한다.
-15. LS LIVE 연결은 market read만 제공하고 사용자 PAPER route에서 LIVE order나 계좌 credential이 나타나지 않는다.
+15. LS PAPER adapter만 사용자 PAPER 주문·취소·상태조회를 수행하고 broker snapshot이 durable 회계 투영과 대사된다. LS LIVE 연결은 market read만 제공하며 사용자 route에 LIVE order나 LIVE credential이 나타나지 않는다.
 
 ### 10.1 Operator BFF의 부서·통신 Projection
 
@@ -536,13 +538,14 @@ Fund/Book 재인가를 모두 통과한 경우에만 PAPER OMS admission으로 �
 
 #### 10.9.1 활성화 Gate와 Credential 경계
 
-`ENABLE_LS_ORDER_EVENTS`가 false면 세 경로 모두 **503**이다(기본값 false). 값은 프로세스 기동 시 한 번만 읽으므로 변경 후 재시작이 필요하다. 배포가 성공해도 이 값이 없으면 대시보드만 조용히 비므로, 화면이 빈 채로 뜨면 이 스위치를 먼저 확인한다.
+각 경로는 독립 Gate를 쓴다: `/ui/portfolio/live`는 `ENABLE_LS_ORDER_EVENTS`, `/ui/portfolio/ledger`는 `ENABLE_LS_ACCOUNT_DATA`, `/ui/market/rankings`는 `ENABLE_LS_MARKET_DATA`다(모두 기본값 false). 값은 프로세스 기동 시 한 번만 읽으므로 변경 후 재시작이 필요하다.
 
 Credential은 BFF 프로세스에만 존재한다. 주입 경로에 함정이 하나 있다:
 
 - 저장소 루트 `.dockerignore`가 `.env*`를 제외하므로 **`.env`는 이미지에 들어가지 않는다.** 컨테이너 안에서 `apps/api/main.py`의 `load_dotenv`는 아무것도 읽지 못한다.
 - 따라서 컨테이너 배포에서는 Compose `environment:`에 **명시적으로 나열한 키만** 프로세스에 도달한다. `.env`에만 값을 넣으면 로컬 host uvicorn에서는 동작하고 Docker/EB에서는 503이 되는 비대칭이 생긴다.
-- `LS_ENV=PAPER`면 `_PAPER` 접미사 키를 먼저 찾고 없을 때만 접미사 없는 키로 떨어진다. 모의투자와 실전 값을 섞지 않는다.
+- 시장 순위와 계좌 조회는 단일 `LS_ENV`를 쓴다. 기본값은 `LIVE`이며 같은 환경의 App Key/Secret, REST URL, WebSocket URL만 선택한다.
+- `LS_ENV=PAPER`면 `_PAPER` 접미사 자격만 사용하고, `LS_ENV=LIVE`면 접미사 없는 자격만 사용한다. 환경을 바꾼 뒤 이전 토큰이 재사용되지 않도록 토큰 캐시는 환경·App Key별로 분리한다.
 
 #### 10.9.2 원장 durable 저장
 

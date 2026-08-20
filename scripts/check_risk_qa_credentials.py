@@ -34,7 +34,7 @@ def _row_with_fallback(
 
 
 def collect_status() -> dict[str, object]:
-    ls_env = os.environ.get("LS_ENV", "PAPER").strip().upper()
+    ls_env = os.environ.get("LS_ENV", "LIVE").strip().upper()
     suffix = "_PAPER" if ls_env == "PAPER" else ""
     ingest_mode = os.environ.get("QA_INGEST_MODE", "disabled").strip().lower()
     legacy_ingestion = (

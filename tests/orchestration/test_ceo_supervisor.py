@@ -1174,7 +1174,7 @@ class SupervisorWakeupTest(unittest.TestCase):
 
             def deliver_to_existing_thread(self, **kwargs):
                 self.thread_calls.append(kwargs)
-                return "sent"
+                return "missing_thread"
 
         class DeliveryClient(FakeClient):
             def __init__(self, home: str) -> None:
@@ -1232,7 +1232,7 @@ class SupervisorWakeupTest(unittest.TestCase):
             )
 
         self.assertEqual(len(delivery.parent_calls), 1)
-        self.assertEqual(len(delivery.thread_calls), 0)
+        self.assertEqual(len(delivery.thread_calls), 1)
 
     def test_terminal_child_creates_parallel_qa_and_synthesis(self) -> None:
         client = FakeClient()
@@ -1456,6 +1456,8 @@ class SupervisorWakeupTest(unittest.TestCase):
     def test_binding_mode_is_explicit_and_legacy_scoped_roots_remain_gated(self) -> None:
         self.assertEqual(infer_workflow_mode("삼성전자 분석"), "analysis")
         self.assertEqual(infer_workflow_mode("삼성전자 주문을 집행해"), "binding")
+        self.assertEqual(infer_workflow_mode("삼성전자 매수해도 될까?"), "analysis")
+        self.assertEqual(infer_workflow_mode("삼성전자 팔아도 안전해?"), "analysis")
         self.assertEqual(
             infer_workflow_mode(
                 "애플을 지금 투자 관점에서 분석해줘. "
@@ -2119,6 +2121,161 @@ class InitialPrimaryMaterializationTest(unittest.TestCase):
             ),
             (),
         )
+
+
+
+
+class SupervisorWorkflowRootCacheTest(unittest.TestCase):
+    """Hot-path root cache removes redundant workflow reconstruction."""
+
+    class CacheClient:
+        def __init__(self):
+            self.environment = {}
+            self.workflow_calls = 0
+            self.show_calls = []
+
+        def workflow(self, task_id: str):
+            self.workflow_calls += 1
+            return (
+                "root-cache",
+                (
+                    {
+                        "id": "root-cache",
+                        "assignee": "ceo-agent",
+                        "status": "done",
+                        "body": (
+                            "workflow_root_task_id=root-cache\n"
+                            "workflow_role=root\n"
+                            "workflow_mode=analysis\n"
+                        ),
+                    },
+                    {
+                        "id": "child-cache",
+                        "assignee": "research-department",
+                        "status": "running",
+                        "body": (
+                            "workflow_root_task_id=root-cache\n"
+                            "workflow_role=primary\n"
+                            "workflow_mode=analysis\n"
+                        ),
+                    },
+                ),
+            )
+
+        def show(self, task_id: str):
+            self.show_calls.append(task_id)
+
+            if task_id == "root-cache":
+                return {
+                    "id": "root-cache",
+                    "assignee": "ceo-agent",
+                    "status": "done",
+                    "body": (
+                        "workflow_root_task_id=root-cache\n"
+                        "workflow_role=root\n"
+                        "workflow_mode=analysis\n"
+                    ),
+                }
+
+            return {
+                "id": task_id,
+                "assignee": "research-department",
+                "status": "running",
+                "body": (
+                    "workflow_root_task_id=root-cache\n"
+                    "workflow_role=primary\n"
+                    "workflow_mode=analysis\n"
+                ),
+            }
+
+    def test_remember_workflow_root_populates_known_tasks(self):
+        client = self.CacheClient()
+        service = CeoSupervisorService(client)
+
+        root_id, payloads = client.workflow("child-cache")
+
+        service._remember_workflow_root(
+            "child-cache",
+            root_id,
+            payloads,
+        )
+
+        self.assertEqual(
+            service._cached_workflow_root("child-cache"),
+            "root-cache",
+        )
+        self.assertEqual(
+            service._cached_workflow_root("root-cache"),
+            "root-cache",
+        )
+
+    def test_cached_active_event_skips_workflow_reconstruction(self):
+        client = self.CacheClient()
+        service = CeoSupervisorService(client)
+
+        service._remember_workflow_root(
+            "child-cache",
+            "root-cache",
+        )
+
+        delivered = []
+
+        service._deliver_department_progress = (
+            lambda **kwargs: delivered.append(kwargs)
+        )
+
+        service.handle_terminal_event(
+            {
+                "event_id": "started:child-cache",
+                "task_id": "child-cache",
+                "assignee": "research-department",
+                "kind": "started",
+            }
+        )
+
+        self.assertEqual(
+            client.workflow_calls,
+            0,
+            "cache hit must avoid workflow reconstruction",
+        )
+        self.assertEqual(
+            client.show_calls,
+            ["root-cache", "child-cache"],
+        )
+        self.assertEqual(len(delivered), 1)
+
+    def test_first_active_event_discovers_root_once_and_caches_it(self):
+        client = self.CacheClient()
+        service = CeoSupervisorService(client)
+
+        delivered = []
+
+        service._deliver_department_progress = (
+            lambda **kwargs: delivered.append(kwargs)
+        )
+        service._reconcile_department_start_progress = (
+            lambda **kwargs: None
+        )
+
+        service.handle_terminal_event(
+            {
+                "event_id": "started:first:child-cache",
+                "task_id": "child-cache",
+                "assignee": "research-department",
+                "kind": "started",
+            }
+        )
+
+        self.assertEqual(client.workflow_calls, 1)
+        self.assertEqual(
+            service._cached_workflow_root("child-cache"),
+            "root-cache",
+        )
+        self.assertEqual(
+            service._cached_workflow_root("root-cache"),
+            "root-cache",
+        )
+        self.assertEqual(len(delivered), 1)
 
 
 

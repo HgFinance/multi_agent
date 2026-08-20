@@ -39,9 +39,9 @@ class LSOpenAPIConfig:
 
     @classmethod
     def from_env(cls) -> LSOpenAPIConfig:
-        environment = os.environ.get("LS_ENV", "PAPER").strip().upper()
+        environment = os.environ.get("LS_ENV", "LIVE").strip().upper()
         if environment not in {"PAPER", "LIVE"}:
-            raise LSOpenAPIConfigurationError("LS_ENV must be PAPER or LIVE")
+            raise LSOpenAPIConfigurationError("LS environment must be PAPER or LIVE")
         suffix = "_PAPER" if environment == "PAPER" else ""
         app_key = os.environ.get(f"LS_APP_KEY{suffix}", "").strip()
         app_secret_key = os.environ.get(f"LS_APP_SECRET_KEY{suffix}", "").strip()
@@ -101,7 +101,7 @@ def credential_status(environ: Mapping[str, str] | None = None) -> dict[str, Any
     """Return key names and presence only; never return secret values."""
 
     env = os.environ if environ is None else environ
-    requested = env.get("LS_ENV", "PAPER").strip().upper()
+    requested = env.get("LS_ENV", "LIVE").strip().upper()
     suffix = "_PAPER" if requested == "PAPER" else ""
     app_key_name = f"LS_APP_KEY{suffix}"
     app_secret_name = f"LS_APP_SECRET_KEY{suffix}"
@@ -243,9 +243,22 @@ class LSOpenAPIClient:
         balance = _object(
             balance_body.get("CSPAQ12200OutBlock2"), "CSPAQ12200OutBlock2"
         )
+        balance_request = _object(
+            balance_body.get("CSPAQ12200OutBlock1"), "CSPAQ12200OutBlock1"
+        )
+        response_account_no = balance_request.get("AcntNo")
+        if response_account_no is not None and not isinstance(response_account_no, str):
+            raise LSOpenAPIError("LS CSPAQ12200 AcntNo must be a string")
+        account_no = (
+            response_account_no.strip() if isinstance(response_account_no, str) else ""
+        ) or self.config.account_no
         observed_at = datetime.now(timezone.utc)
         return PortfolioSnapshot(
-            account_no=self.config.account_no,
+            # OAuth identifies the PAPER account and CSPAQ12200 echoes its
+            # account number.  Prefer that authoritative response over a
+            # manually duplicated env value, while retaining the env fallback
+            # for broker-compatible test doubles.
+            account_no=account_no,
             cash=_decimal(balance.get("Dps"), "Dps"),
             buying_power=_decimal(balance.get("MnyOrdAbleAmt"), "MnyOrdAbleAmt"),
             equity=_decimal(

@@ -58,6 +58,9 @@ from orchestration.discord_delivery import (
     correlation_from_task,
 )
 from orchestration.discord_idempotency import DiscordIdempotencyStore
+from orchestration.adapters.department_notion_projection import (
+    DepartmentNotionProjection,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1435,6 +1438,14 @@ class CeoSupervisorService:
         self._executed_actions: set[str] = set()
         self._seen_events_lock = threading.Lock()
 
+        # Hot-path cache for Discord/supervisor lifecycle events.
+        # workflow(task_id) is comparatively expensive because the Hermes
+        # adapter reconstructs workflow state. The root relation is immutable
+        # for the lifetime of a task, so cache only that relation; authoritative
+        # workflow payloads are still re-read after acquiring the parent lock.
+        self._task_root_cache: dict[str, str] = {}
+        self._task_root_cache_lock = threading.Lock()
+
         # hgfinance-department-progress-dedupe-v1
         # Active lifecycle events (claimed/spawned/started/running) are
         # semantically one Discord state.  Remember successful projections so
@@ -1557,7 +1568,25 @@ class CeoSupervisorService:
             None,
         )
         if task is None:
-            return
+            # workflow() may return the root and workflow descendants without
+            # the terminal synthesis task that triggered reconciliation.
+            # Recover that durable task explicitly so terminal projection
+            # (especially Discord CEO-final delivery) is not silently skipped.
+            show = getattr(self.client, "show", None)
+            if not callable(show):
+                return
+            try:
+                task = show(task_id)
+            except Exception as exc:
+                logger.warning(
+                    "terminal-projection-show-failed "
+                    "root=%s task=%s error=%s",
+                    root_task_id,
+                    task_id,
+                    type(exc).__name__,
+                )
+                return
+
         body = str(task.get("body") or "")
         role = terminal_workflow_role(task) or ""
         task_action = terminal_action(task) or terminal_action({"body": body})
@@ -1590,6 +1619,37 @@ class CeoSupervisorService:
                     "terminal projection observer failed",
                     extra={"root_task_id": root_task_id, "task_id": task_id, "error": str(exc)},
         )
+        # Trading/Quant terminal results are projected to their existing
+        # Notion databases as a non-binding observer. Research/Risk/
+        # Accounting/QA/HR retain their native reporters, so this projector
+        # deliberately skips them.
+        try:
+            department_projection = DepartmentNotionProjection(
+                env=getattr(self.client, "environment", os.environ),
+            ).project(
+                root_task_id=root_task_id,
+                task=task,
+                workflow_tasks=task_payloads,
+                event=event,
+            )
+            if department_projection.status not in {"skipped", "duplicate"}:
+                logger.info(
+                    "department-notion-projection "
+                    "task=%s department=%s status=%s",
+                    task_id,
+                    department_projection.department,
+                    department_projection.status,
+                )
+        except Exception as exc:
+            logger.exception(
+                "department notion projection observer failed",
+                extra={
+                    "root_task_id": root_task_id,
+                    "task_id": task_id,
+                    "error": str(exc),
+                },
+            )
+
         if response_synthesis:
             logger.info(
                 "synthesis-complete root=%s task=%s producer=%s",
@@ -1642,25 +1702,30 @@ class CeoSupervisorService:
                 # as a compatibility fallback.
                 correlation = correlation_from_task(delivery_task)
 
-                if correlation.thread_id:
-                    thread_status = self.discord_delivery.deliver_to_existing_thread(
-                        root_task_id=root_task_id,
-                        source_task=delivery_task,
-                        root_task=root_payload,
-                        content=content,
-                        title="🧠 CEO 종합",
-                        store=delivery_store,
-                        profile=ceo_profile,
-                        response_key_suffix=f"synthesis-detail:{task_id}",
-                    )
+                # Always let DiscordFinalDelivery resolve the existing thread
+                # first. It can recover the thread from explicit correlation,
+                # the inbound ledger, or the Discord starter message id.
+                thread_status = self.discord_delivery.deliver_to_existing_thread(
+                    root_task_id=root_task_id,
+                    source_task=delivery_task,
+                    root_task=root_payload,
+                    content=content,
+                    title="🧠 CEO 종합",
+                    store=delivery_store,
+                    profile=ceo_profile,
+                    response_key_suffix=f"synthesis-detail:{task_id}",
+                )
 
-                    logger.info(
-                        "synthesis-discord-thread root=%s task=%s status=%s",
-                        root_task_id,
-                        task_id,
-                        thread_status,
-                    )
-                else:
+                logger.info(
+                    "synthesis-discord-thread root=%s task=%s status=%s",
+                    root_task_id,
+                    task_id,
+                    thread_status,
+                )
+
+                # Parent-channel delivery is compatibility fallback only when
+                # the request truly has no resolvable Discord thread.
+                if thread_status == "missing_thread":
                     parent_status = self.discord_delivery.deliver(
                         root_task_id=root_task_id,
                         synthesis_task=delivery_task,
@@ -1676,6 +1741,137 @@ class CeoSupervisorService:
                         task_id,
                         parent_status,
                     )
+
+    def _bridge_root_completion_to_discord(
+        self,
+        *,
+        root_task_id: str,
+        root_payload: Mapping[str, Any],
+    ) -> str | None:
+        """Bridge a completed CEO planning root to existing Discord delivery.
+
+        No semantic routing happens here.
+
+        Existing CEO-authored durable state decides the UX:
+        - no selected primary + root final_answer -> direct CEO reply
+        - selected primaries -> one CEO delegation card
+
+        Existing Discord delivery methods own correlation, idempotency,
+        message creation/update, and thread targeting.
+        """
+
+        if self.discord_delivery is None:
+            return None
+
+        root_body = str(root_payload.get("body") or "")
+
+        if (
+            workflow_mode_from_body(root_body) != "analysis"
+            or not is_user_query_body(root_body)
+        ):
+            return None
+
+        environment = getattr(self.client, "environment", os.environ)
+        hermes_home = environment.get("HERMES_HOME", "/opt/data")
+
+        ceo_profile = canonical_profile_for_department("ceo")
+        ceo_profile_home = os.path.join(
+            hermes_home,
+            "profiles",
+            ceo_profile,
+        )
+        delivery_home = (
+            ceo_profile_home
+            if os.path.isdir(ceo_profile_home)
+            else hermes_home
+        )
+        store = DiscordIdempotencyStore(delivery_home)
+
+        selected = selected_primary_profiles_from_task(root_payload)
+
+        # Delegated workflow:
+        # reuse the CEO's existing durable selection + delegation instructions.
+        if selected:
+            plan_body = _materialization_plan_body(root_payload)
+            plan = _delegation_plan_from_root_body(plan_body)
+
+            lines = [
+                "🧠 **CEO 업무 분배**",
+                "",
+            ]
+
+            for profile in selected:
+                try:
+                    department = department_for_canonical_profile(profile)
+                except Exception:
+                    department = profile
+
+                instruction = str(plan.get(profile) or "").strip()
+
+                lines.append(f"**{department}**")
+                if instruction:
+                    lines.append(f"└ {instruction}")
+
+            content = "\n".join(lines).strip()
+
+            status = self.discord_delivery.upsert_thread_card(
+                root_task_id=root_task_id,
+                source_task=root_payload,
+                root_task=root_payload,
+                content=content,
+                store=store,
+                profile=ceo_profile,
+                response_key_suffix=f"ceo-delegation:{root_task_id}",
+                update_existing=True,
+            )
+
+            logger.info(
+                "ceo-root-discord-bridge root=%s mode=delegated "
+                "selected=%s status=%s",
+                root_task_id,
+                ",".join(selected),
+                status,
+            )
+            return status
+
+        # Direct CEO answer:
+        # reuse ChildTaskState's existing run-metadata final_answer fallback.
+        root_state = ChildTaskState.from_hermes(root_payload)
+
+        content = _text(
+            root_state.final_answer
+            or root_state.result
+            or root_state.summary
+            or root_payload.get("latest_summary")
+            or root_payload.get("summary")
+            or root_payload.get("result")
+        )
+
+        if not content:
+            logger.info(
+                "ceo-root-discord-bridge root=%s mode=direct status=empty",
+                root_task_id,
+            )
+            return "empty"
+
+        status = self.discord_delivery.deliver_to_existing_thread(
+            root_task_id=root_task_id,
+            source_task=root_payload,
+            root_task=root_payload,
+            content=content,
+            title="🧠 CEO 답변",
+            store=store,
+            profile=ceo_profile,
+            response_key_suffix=f"ceo-direct:{root_task_id}",
+        )
+
+        logger.info(
+            "ceo-root-discord-bridge root=%s mode=direct status=%s",
+            root_task_id,
+            status,
+        )
+        return status
+
 
     def _reconcile_department_start_progress(
         self,
@@ -2383,6 +2579,164 @@ class CeoSupervisorService:
 
         return tuple(recovered)
 
+    def _materialize_completed_analysis_root_fast(
+        self,
+        *,
+        task_id: str,
+        kind: str,
+    ) -> tuple[bool, SupervisorDecision | None]:
+        """Fast-path a completed CEO analysis root without workflow() reconstruction.
+
+        Returns ``(handled, decision)``.  The normal workflow path remains the
+        fallback for child tasks, incomplete plans, and legacy/ambiguous roots.
+        Durable create idempotency keeps this safe against the recovery poller.
+        """
+
+        if kind not in {"done", "completed"}:
+            return False, None
+
+        show = getattr(self.client, "show", None)
+        if not callable(show):
+            return False, None
+
+        root_payload = show(task_id)
+        root_body = str(root_payload.get("body") or "")
+
+        is_planning_root = (
+            workflow_role_from_body(root_body) == "root"
+            or (
+                "root_task_role=scope_and_planning" in root_body
+                and "planning_terminal_state=done_after_child_creation" in root_body
+            )
+        )
+
+        if (
+            not is_planning_root
+            or not is_user_query_body(root_body)
+            or workflow_mode_from_body(root_body) != "analysis"
+        ):
+            return False, None
+
+        selected_profiles = selected_primary_profiles_from_task(root_payload)
+        materialization_body = _materialization_plan_body(root_payload)
+
+        # A direct CEO answer has no selected primary plan.  It is still a root
+        # completion and can be projected immediately without workflow().
+        if not selected_profiles:
+            try:
+                bridge_status = self._bridge_root_completion_to_discord(
+                    root_task_id=task_id,
+                    root_payload=root_payload,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "ceo-root-discord-bridge-failed root=%s error=%s",
+                    task_id,
+                    type(exc).__name__,
+                )
+                bridge_status = "failed"
+
+            logger.info(
+                "root-planning-complete-fast-projected root=%s status=%s",
+                task_id,
+                bridge_status,
+            )
+            return True, None
+
+        state = SupervisorState(
+            parent_task_id=task_id,
+            children=(),
+            wakeups=0,
+            replan_count=0,
+            max_retries=self.max_retries,
+            max_wakeups=self.max_wakeups,
+            qa_required=False,
+            workflow_mode="analysis",
+            has_mandate=mandate_snapshot_present(root_body),
+            selected_primary_profiles=selected_profiles,
+            root_is_user_query=True,
+            allow_primary_passthrough=self.discord_delivery is not None,
+        )
+
+        decisions = _initial_primary_materialization_decisions(
+            state,
+            materialization_body,
+        )
+
+        if not decisions:
+            # A selected plan that cannot be validated should fall back to the
+            # authoritative recovery/workflow path rather than being swallowed.
+            return False, None
+
+        if len(decisions) == 1:
+            self._execute(decisions[0], state)
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(
+                max_workers=min(3, len(decisions)),
+                thread_name_prefix="ceo-primary-fast-create",
+            ) as pool:
+                futures = [
+                    pool.submit(self._execute, decision, state)
+                    for decision in decisions
+                ]
+                for future in futures:
+                    future.result()
+
+        logger.info(
+            "ready-primary-fast-materialized root=%s count=%d profiles=%s",
+            task_id,
+            len(decisions),
+            ",".join(decision.assignee or "" for decision in decisions),
+        )
+
+        try:
+            bridge_status = self._bridge_root_completion_to_discord(
+                root_task_id=task_id,
+                root_payload=root_payload,
+            )
+        except Exception as exc:
+            logger.warning(
+                "ceo-root-discord-bridge-failed root=%s error=%s",
+                task_id,
+                type(exc).__name__,
+            )
+            bridge_status = "failed"
+
+        logger.info(
+            "root-planning-complete-fast-projected root=%s status=%s",
+            task_id,
+            bridge_status,
+        )
+        return True, decisions[0]
+
+    def _cached_workflow_root(self, task_id: str) -> str | None:
+        with self._task_root_cache_lock:
+            return self._task_root_cache.get(task_id)
+
+    def _remember_workflow_root(
+        self,
+        task_id: str,
+        root_task_id: str,
+        payloads: Sequence[Mapping[str, Any]] = (),
+    ) -> None:
+        if not task_id or not root_task_id:
+            return
+
+        with self._task_root_cache_lock:
+            self._task_root_cache[task_id] = root_task_id
+            self._task_root_cache[root_task_id] = root_task_id
+
+            for payload in payloads:
+                child_id = str(
+                    payload.get("id")
+                    or payload.get("task_id")
+                    or ""
+                )
+                if child_id:
+                    self._task_root_cache[child_id] = root_task_id
+
     def handle_terminal_event(self, event: Mapping[str, Any]) -> SupervisorDecision | None:
         task_id = str(event.get("task_id") or event.get("id") or "")
         kind = str(event.get("kind") or event.get("event_type") or event.get("status") or "").casefold()
@@ -2398,7 +2752,21 @@ class CeoSupervisorService:
                     return None
 
             try:
-                root_id, payloads = self.client.workflow(task_id)
+                root_id = self._cached_workflow_root(task_id)
+
+                if root_id is None:
+                    root_id, payloads = self.client.workflow(task_id)
+                    self._remember_workflow_root(
+                        task_id,
+                        root_id,
+                        payloads,
+                    )
+                else:
+                    # Active progress is supplementary Discord UX. Once the
+                    # immutable task->root relation is known, avoid rebuilding
+                    # the whole workflow merely to rediscover the root.
+                    payloads = ()
+
                 show = getattr(self.client, "show", None)
 
                 if callable(show):
@@ -2414,11 +2782,12 @@ class CeoSupervisorService:
 
                     # Recover sibling starts that the CLI watch may have
                     # coalesced or missed in the same polling interval.
-                    self._reconcile_department_start_progress(
-                        root_task_id=root_id,
-                        root_payload=root_payload,
-                        task_payloads=payloads,
-                    )
+                    if payloads:
+                        self._reconcile_department_start_progress(
+                            root_task_id=root_id,
+                            root_payload=root_payload,
+                            task_payloads=payloads,
+                        )
             except Exception as exc:
                 # Progress projection must never interfere with execution.
                 logger.warning(
@@ -2439,12 +2808,55 @@ class CeoSupervisorService:
             if event_key in self._seen_events:
                 return None
             self._seen_events.add(event_key)
+
+        # Root fast-path is relevant only to CEO-authored terminal tasks.
+        # Department primary events must not pay an extra show() call merely to
+        # discover that they are not roots.
+        event_assignee = str(event.get("assignee") or "").strip().casefold()
+        ceo_assignee = canonical_profile_for_department("ceo").casefold()
+
+        if event_assignee == ceo_assignee:
+            try:
+                handled, fast_decision = self._materialize_completed_analysis_root_fast(
+                    task_id=task_id,
+                    kind=kind,
+                )
+                if handled:
+                    return fast_decision
+            except (SupervisorValidationError, HermesKanbanCommandError):
+                with self._seen_events_lock:
+                    self._seen_events.discard(event_key)
+                raise
+            except Exception as exc:
+                # Fast path is an optimization only. Any ambiguity falls through
+                # to the existing authoritative workflow reconstruction.
+                logger.warning(
+                    "root-fast-materialization-fallback task=%s error=%s",
+                    task_id,
+                    type(exc).__name__,
+                )
+
         try:
-            root_id, _ = self.client.workflow(task_id)
+            root_id = self._cached_workflow_root(task_id)
+
+            if root_id is None:
+                root_id, initial_payloads = self.client.workflow(task_id)
+                self._remember_workflow_root(
+                    task_id,
+                    root_id,
+                    initial_payloads,
+                )
+
             with self._parent_lock(root_id):
-                # Re-read after acquiring the workflow lock. A sibling event may
-                # have completed while this event was waiting for the lock.
+                # Keep one authoritative read after acquiring the workflow lock.
+                # The cache removes only redundant root discovery; it never
+                # replaces freshness-sensitive workflow reconstruction.
                 root_id, payloads = self.client.workflow(task_id)
+                self._remember_workflow_root(
+                    task_id,
+                    root_id,
+                    payloads,
+                )
                 # The production Hermes client exposes ``show`` for durable
                 # wakeup comments. Keep the policy service compatible with small
                 # workflow-only fakes and adapters used by the supervisor tests.
@@ -2461,13 +2873,32 @@ class CeoSupervisorService:
                         and "planning_terminal_state=done_after_child_creation" in root_body
                     )
                     if legacy_planning_root:
-                        # Preserve compatibility for legacy planning roots whose
-                        # execution-parent linkage may not yet be durable when
-                        # the root completion event arrives.
+                        # Root completion remains a planning boundary, never a
+                        # synthesis-ready signal.  Project only the CEO-authored
+                        # durable outcome into the already-existing Discord thread.
+                        try:
+                            bridge_status = self._bridge_root_completion_to_discord(
+                                root_task_id=root_id,
+                                root_payload=root_payload,
+                            )
+                        except Exception as exc:
+                            # UI projection must never mutate or block workflow
+                            # execution. Existing primary events remain the
+                            # deterministic wake-up boundary.
+                            logger.warning(
+                                "ceo-root-discord-bridge-failed "
+                                "root=%s error=%s",
+                                root_id,
+                                type(exc).__name__,
+                            )
+                            bridge_status = "failed"
+
                         logger.info(
-                            "root-planning-complete-ignored root=%s event=%s",
+                            "root-planning-complete-projected "
+                            "root=%s event=%s status=%s",
                             root_id,
                             event_key,
+                            bridge_status,
                         )
                         return None
                 try:
@@ -2703,13 +3134,35 @@ class CeoSupervisorService:
                         else hermes_home
                     )
 
-                    delivery_status = self.discord_delivery.deliver(
-                        root_task_id=root_id,
-                        synthesis_task=delivery_task,
-                        content=passthrough.final_answer,
-                        store=DiscordIdempotencyStore(delivery_home),
-                        profile=canonical_profile_for_department("ceo"),
+                    delivery_store = DiscordIdempotencyStore(delivery_home)
+                    ceo_profile = canonical_profile_for_department("ceo")
+
+                    # Single-primary/PAPER fast paths must follow the same
+                    # thread-first policy as normal CEO synthesis.
+                    delivery_status = (
+                        self.discord_delivery.deliver_to_existing_thread(
+                            root_task_id=root_id,
+                            source_task=delivery_task,
+                            root_task=root_payload,
+                            content=passthrough.final_answer,
+                            title="🧠 CEO 답변",
+                            store=delivery_store,
+                            profile=ceo_profile,
+                            response_key_suffix=(
+                                f"single-primary-detail:{passthrough.task_id}"
+                            ),
+                        )
                     )
+
+                    if delivery_status == "missing_thread":
+                        delivery_status = self.discord_delivery.deliver(
+                            root_task_id=root_id,
+                            synthesis_task=delivery_task,
+                            content=passthrough.final_answer,
+                            store=delivery_store,
+                            profile=ceo_profile,
+                        )
+
                     logger.info(
                         "single-primary-passthrough root=%s task=%s "
                         "profile=%s status=%s",

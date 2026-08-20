@@ -304,6 +304,10 @@ def test_non_executable_root_state_is_rejected_before_submit(
 
     assert raised.value.code == expected_code
     submit.assert_not_called()
+    failed = context.repository.get(context.record.order_request_id)
+    assert failed is not None
+    assert failed.state == "FAILED"
+    assert failed.error_code == expected_code
 
 
 @pytest.mark.parametrize(
@@ -340,6 +344,10 @@ def test_non_executable_trading_state_cannot_make_a_first_submission(
 
     assert raised.value.code == expected_code
     submit.assert_not_called()
+    failed = context.repository.get(context.record.order_request_id)
+    assert failed is not None
+    assert failed.state == "FAILED"
+    assert failed.error_code == expected_code
 
 
 def test_trading_state_is_rechecked_immediately_before_first_submission(
@@ -369,6 +377,10 @@ def test_trading_state_is_rechecked_immediately_before_first_submission(
     assert raised.value.code == "TRADING_TASK_STATE_NOT_EXECUTABLE"
     assert trading_reads == 2
     submit.assert_not_called()
+    failed = context.repository.get(context.record.order_request_id)
+    assert failed is not None
+    assert failed.state == "FAILED"
+    assert failed.error_code == "TRADING_TASK_STATE_NOT_EXECUTABLE"
 
 
 @pytest.mark.parametrize(
@@ -509,6 +521,42 @@ def test_transport_unknown_is_persisted_and_never_auto_retried(
     record = context.repository.get(context.record.order_request_id)
     assert record.state == "UNKNOWN"
     assert record.directive_id is None
+
+
+def test_transport_unknown_recovers_exact_committed_directive_without_resubmit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _workflow(monkeypatch)
+    submit = Mock(
+        side_effect=HTTPException(status_code=503, detail="trading_api_unavailable")
+    )
+    read = Mock(
+        return_value=_directive_response(
+            context.record,
+            state=DirectiveState.COMPLETED,
+        )
+    )
+    monkeypatch.setattr(orchestrator, "submit_verified_paper_directive", submit)
+    monkeypatch.setattr(orchestrator, "read_verified_paper_directive_status", read)
+    candidate = _execute_candidate(context.raw)
+
+    first = _process(context, candidate)
+    context.repository.find_committed_directive = Mock(  # type: ignore[method-assign]
+        return_value=DIRECTIVE_ID
+    )
+    context.root["status"] = "done"
+    context.trading["status"] = "done"
+
+    recovered = _process(context, candidate)
+
+    assert first["decision"] == "UNKNOWN"
+    assert recovered["request_state"] == "COMPLETED"
+    assert recovered["directive"]["directive_id"] == DIRECTIVE_ID
+    submit.assert_called_once()
+    read.assert_called_once()
+    record = context.repository.get(context.record.order_request_id)
+    assert record.state == "COMPLETED"
+    assert record.directive_id == DIRECTIVE_ID
 
 
 def test_closed_market_reports_explicit_non_submission(

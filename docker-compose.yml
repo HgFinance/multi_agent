@@ -70,6 +70,8 @@ services:
       # Canonical operational/control Postgres. Supabase is an identity
       # provider only and must not be used as this runtime data plane.
       DATABASE_URL: ${DATABASE_URL:?.env needs the private operational PostgreSQL DATABASE_URL}
+      CONDITIONAL_RULE_DATABASE_URL: ${CONDITIONAL_RULE_DATABASE_URL:-${DATABASE_URL:-}}
+      CONDITIONAL_RULE_DATABASE_ROLE: ${CONDITIONAL_RULE_DATABASE_ROLE:-svc_conditional_rule_orchestrator}
       PORTFOLIO_DATA_MODE: "production"
       # Hosted Supabase is identity-only. Operational data remains on the
       # private PostgreSQL DSN above; the BFF never receives service-role.
@@ -140,13 +142,19 @@ services:
       # LS 브로커 조회 배선(2026-08-19). `.env`는 `.dockerignore`에 걸려 이미지에
       # 들어가지 않으므로 apps/api/main.py의 load_dotenv가 컨테이너 안에서는
       # 아무것도 읽지 못한다 - 여기 나열한 키만 프로세스에 도달한다.
-      # 끄면 /ui/portfolio/live, /ui/portfolio/ledger, /ui/market/rankings가
-      # 전부 503이라 대시보드가 빈다. 읽기 전용이며 주문은 나가지 않는다.
+      # 계좌 스트림은 ENABLE_LS_ORDER_EVENTS, 원장 REST 조회는
+      # ENABLE_LS_ACCOUNT_DATA, 시장 순위 REST 조회는 ENABLE_LS_MARKET_DATA로
+      # 각각 켠다. 모두 읽기 전용이며 주문은 나가지 않는다.
       ENABLE_LS_ORDER_EVENTS: ${ENABLE_LS_ORDER_EVENTS:-false}
-      # LS_ENV=PAPER면 조회 코드가 `_PAPER` 접미사 키를 먼저 찾고 없으면
-      # 접미사 없는 키로 떨어진다(departments/03-risk/integrations/ls_openapi.py).
-      # 어느 쪽을 쓸지는 배포 환경이 정하므로 양쪽을 다 통과시킨다.
-      LS_ENV: ${LS_ENV:-PAPER}
+      # Read-only broker account snapshot. Keep this independent from order
+      # event ingestion so enabling a balance view never enables execution.
+      ENABLE_BROKER_SNAPSHOT: ${ENABLE_BROKER_SNAPSHOT:-false}
+      BROKER_SNAPSHOT_CACHE_SECONDS: ${BROKER_SNAPSHOT_CACHE_SECONDS:-10}
+      ENABLE_LS_MARKET_DATA: ${ENABLE_LS_MARKET_DATA:-false}
+      ENABLE_LS_ACCOUNT_DATA: ${ENABLE_LS_ACCOUNT_DATA:-false}
+      # portfolio-bff owns read-only market/account observations. PAPER order
+      # execution is isolated behind Trading's separately authenticated lane.
+      LS_ENV: ${LS_ENV:-LIVE}
       LS_APP_KEY: ${LS_APP_KEY:-}
       LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
       LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}
@@ -211,6 +219,8 @@ services:
       PORTFOLIO_AUTH_MODE: ${PORTFOLIO_AUTH_MODE:-supabase_jwt}
       DATABASE_URL: ${DATABASE_URL:?.env needs the private operational PostgreSQL DATABASE_URL}
       ORDER_ORCHESTRATOR_DATABASE_ROLE: ${ORDER_ORCHESTRATOR_DATABASE_ROLE:-svc_order_orchestrator}
+      CONDITIONAL_RULE_DATABASE_URL: ${CONDITIONAL_RULE_DATABASE_URL:-${DATABASE_URL:-}}
+      CONDITIONAL_RULE_DATABASE_ROLE: ${CONDITIONAL_RULE_DATABASE_ROLE:-svc_conditional_rule_orchestrator}
       TRADING_API_URL: ${TRADING_API_URL:-http://trading-api:8000}
       TRADING_SERVICE_AUTH_SECRET: ${TRADING_SERVICE_AUTH_SECRET:?A 32-byte trading service proof secret is required}
       TRADING_SERVICE_AUTH_ISSUER: ${TRADING_SERVICE_AUTH_ISSUER:-portfolio-bff}
@@ -230,6 +240,45 @@ services:
     healthcheck:
       test: ["CMD", "python", "-m", "apps.api.paper_order_mcp", "--healthcheck"]
       interval: 10s
+      timeout: 8s
+      retries: 5
+      start_period: 20s
+    mem_limit: 384m
+    cpus: 0.5
+    pids_limit: 96
+
+  # Confirmed conditional rules are evaluated outside Hermes and outside the
+  # always-on research factory. The worker owns no browser token, broker key,
+  # or USER_DIRECTIVE database privilege; it can only claim rule rows and call
+  # Trading's separately authenticated conditional execution endpoint.
+  conditional-rule-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.conditional-rule-worker
+    container_name: hedgefund-conditional-rule-worker
+    restart: unless-stopped
+    depends_on:
+      trading-api:
+        condition: service_healthy
+      market-api:
+        condition: service_started
+    command: ["python", "-m", "apps.api.conditional_rule_worker"]
+    environment:
+      PYTHONPATH: /app:/app/apps/api
+      APP_ENV: ${APP_ENV:-production}
+      CONDITIONAL_RULE_DATABASE_URL: ${CONDITIONAL_RULE_DATABASE_URL:-${DATABASE_URL:-}}
+      CONDITIONAL_RULE_WORKER_DATABASE_ROLE: ${CONDITIONAL_RULE_WORKER_DATABASE_ROLE:-svc_conditional_rule_worker}
+      TRADING_API_URL: ${TRADING_API_URL:-http://trading-api:8000}
+      MARKET_API_URL: ${MARKET_API_URL:-http://market-api:8036}
+      TRADING_INTERNAL_SERVICE_AUTH_SECRET: ${TRADING_INTERNAL_SERVICE_AUTH_SECRET:?A separate 32-byte internal Trading auth secret is required}
+      TRADING_INTERNAL_SERVICE_AUTH_ISSUER: ${TRADING_INTERNAL_SERVICE_AUTH_ISSUER:-hedgefund-service-issuer}
+      TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE: ${TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE:-trading-api}
+      CONDITIONAL_RULE_WORKER_POLL_SECONDS: ${CONDITIONAL_RULE_WORKER_POLL_SECONDS:-1.0}
+      CONDITIONAL_RULE_WORKER_BATCH_SIZE: ${CONDITIONAL_RULE_WORKER_BATCH_SIZE:-100}
+      CONDITIONAL_RULE_HTTP_TIMEOUT_SECONDS: ${CONDITIONAL_RULE_HTTP_TIMEOUT_SECONDS:-8}
+    healthcheck:
+      test: ["CMD", "python", "-m", "apps.api.conditional_rule_worker", "--healthcheck"]
+      interval: 15s
       timeout: 8s
       retries: 5
       start_period: 20s
@@ -343,15 +392,8 @@ services:
       # 호스트의 127.0.0.1:5434 는 컨테이너 안에서 안 통한다 - 서비스 이름으로 간다.
       DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
       TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
-      LS_ENV: ${LS_ENV:-PAPER}
-      # ▶ **시세는 주문과 다른 스위치를 쓴다** (재일님 결정 2026-08-12)
-      #   하나로 묶여 있을 때, 주문을 PAPER 로 두자 수집기가 모의 소켓에 붙어
-      #   프리마켓 한 시간 동안 체결이 0건이었다. 시세 구독은 주문 권한과
-      #   무관하다 - LIVE 키로 받아도 주문이 나가지 않는다.
-      #   기본값이 LIVE 인 이유: 모의 시세는 **진짜처럼 생긴 가짜**라 조용히
-      #   흘러가면 백테스트가 사실로 읽는다. 못 받는 것은 티가 나고 잘못 받는
-      #   것은 티가 안 난다.
-      LS_MARKET_ENV: ${LS_MARKET_ENV:-LIVE}
+      # REST 토큰과 WebSocket 모두 같은 LS_ENV를 사용한다.
+      LS_ENV: ${LS_ENV:-LIVE}
       LS_APP_KEY: ${LS_APP_KEY:-}
       LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
       LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:-}
@@ -408,7 +450,7 @@ services:
       DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
       TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
       # Breadth(t1511/t8424)와 관측 Calendar(t8410)가 LS REST 를 쓴다
-      LS_ENV: ${LS_ENV:-PAPER}
+      LS_ENV: ${LS_ENV:-LIVE}
       LS_APP_KEY: ${LS_APP_KEY:-}
       LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
       LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:-}
@@ -737,10 +779,8 @@ services:
     command: ["python", "api/ls_mcp_server.py", "--serve"]
     environment:
       MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
-      # LS 자격 - 수집기(batch-collectors)와 같은 목록·같은 격리 지위.
-      # 조회는 LS_MARKET_ENV(기본 LIVE) - 모의 서버는 수급 TR 에 빈 값을 준다.
-      LS_MARKET_ENV: ${LS_MARKET_ENV:-LIVE}
-      LS_ENV: ${LS_ENV:-PAPER}
+      # LS 자격 - 수집기와 같은 단일 LS_ENV를 사용한다.
+      LS_ENV: ${LS_ENV:-LIVE}
       LS_APP_KEY: ${LS_APP_KEY:-}
       LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
       LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:-}
@@ -1334,6 +1374,68 @@ services:
     pids_limit: 256
     stop_grace_period: 20s
 
+  # Alpha factory queue is physically isolated from the user/CEO queue.
+  # It has its own persistent SQLite DB, workspace tree, dispatcher process,
+  # and cgroup.  The factory dispatcher mounts only profile state from the
+  # shared Hermes home, so it cannot open the user board DB even accidentally.
+  factory-kanban-init:
+    image: nousresearch/hermes-agent:latest
+    container_name: hedgefund-factory-kanban-init
+    user: "0:0"
+    restart: "no"
+    network_mode: none
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["install -d -o 1000 -g 1000 -m 0750 /opt/factory-kanban && chown -R 1000:1000 /opt/factory-kanban"]
+    volumes:
+      - factory_kanban_data:/opt/factory-kanban
+
+  factory-kanban-dispatcher:
+    image: nousresearch/hermes-agent:latest
+    container_name: hedgefund-factory-kanban-dispatcher
+    restart: unless-stopped
+    depends_on:
+      factory-kanban-init:
+        condition: service_completed_successfully
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    init: true
+    command:
+      ["/bin/sh", "-c", "set -eu; python3 /app/repo/deploy/hermes-dispatch-guard/check_guard.py; if [ ! -f /opt/factory-kanban/kanban/boards/alpha-factory/board.json ]; then hermes kanban boards create alpha-factory --name 'Alpha Factory' --description 'Isolated continuous alpha discovery queue'; fi; hermes kanban --board alpha-factory init; exec hermes kanban --board alpha-factory daemon --force --interval \"$${FACTORY_KANBAN_DISPATCH_INTERVAL:-5}\" --max \"$${FACTORY_KANBAN_MAX_SPAWN_PER_TICK:-2}\" --pidfile /opt/factory-kanban/alpha-factory-dispatcher.pid --verbose"]
+    volumes:
+      - /home/ubuntu/.hermes/profiles:/opt/data/profiles
+      - factory_kanban_data:/opt/factory-kanban
+      - ./skills:/opt/shared-skills:ro
+      - .:/app/repo:ro
+      - ./departments/04-quant-backtest:/app/departments/04-quant-backtest
+      - ./quant-data:/app/quant-data
+    environment:
+      PYTHONPATH: /app/repo/deploy/hermes-dispatch-guard
+      HGFINANCE_DISPATCH_GUARD: "1"
+      HERMES_HOME: /opt/data
+      HERMES_UID: 1000
+      HERMES_GID: 1000
+      HERMES_KANBAN_HOME: /opt/factory-kanban
+      HERMES_KANBAN_BOARD: alpha-factory
+      HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      FACTORY_KANBAN_DISPATCH_INTERVAL: ${FACTORY_KANBAN_DISPATCH_INTERVAL:-5}
+      FACTORY_KANBAN_MAX_SPAWN_PER_TICK: ${FACTORY_KANBAN_MAX_SPAWN_PER_TICK:-2}
+      MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /opt/factory-kanban/kanban/boards/alpha-factory/kanban.db"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    mem_limit: 1g
+    mem_reservation: 192m
+    cpus: 1.0
+    pids_limit: 256
+    stop_grace_period: 20s
+
   ceo-kanban-supervisor:
     build:
       context: .
@@ -1438,12 +1540,18 @@ services:
     depends_on:
       timescaledb:
         condition: service_healthy
+      factory-kanban-dispatcher:
+        condition: service_healthy
     environment:
       DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
       TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
       # 카드 생성·보드 조회를 돌릴 컨테이너. 부서에 매이지 않는 kanban 명령용이다.
-      KANBAN_CLI_CONTAINER: ${KANBAN_CLI_CONTAINER:-hedgefund-qa-hermes}
-      KANBAN_READER_CONTAINER: ${KANBAN_READER_CONTAINER:-hedgefund-qa-hermes}
+      # Never route factory reads/writes through the user/CEO dispatcher.
+      KANBAN_CLI_CONTAINER: hedgefund-factory-kanban-dispatcher
+      KANBAN_READER_CONTAINER: hedgefund-factory-kanban-dispatcher
+      FACTORY_KANBAN_BOARD: alpha-factory
+      KANBAN_ATTACH_ROOT: /opt/factory-kanban/kanban/boards/alpha-factory/attachments
+      KANBAN_WORKSPACE_ROOT: /opt/factory-kanban/kanban/boards/alpha-factory/workspaces
       KANBAN_ACCESS_MODE: docker
       HERMES_EXEC_MODE: docker
     volumes:
@@ -1451,6 +1559,7 @@ services:
       # 수확 멱등 표식·반려 이력이 재시작을 넘어 남아야 한다. 컨테이너가
       # 지워지면 같은 카드를 다시 수확하고 같은 반려를 다시 싣는다.
       - factory_state:/root
+      - factory_kanban_data:/opt/factory-kanban:ro
       # ▶ 자동 조종이 하루 한 번 파티션을 다시 굳힌다(0.7단계). 이게 없으면
       #   컨테이너 안에만 쓰고 사라져, 워커가 읽을 때는 파일이 없다 -
       #   "게이트는 통과했는데 로드에서 죽는" 상태가 매일 재생산된다.
@@ -1599,4 +1708,5 @@ volumes:
   tsdb_data:
   portfolio_runtime_data:
   factory_state:
+  factory_kanban_data:
   intraday_sample_cache:

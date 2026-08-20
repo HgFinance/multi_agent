@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import tempfile
+import threading
+import time
 import unittest
 import asyncio
 import importlib.util
@@ -382,3 +384,27 @@ class ForwardToIngressTests(unittest.TestCase):
         env = self._env()
         with patch.dict("os.environ", env), patch("urllib.request.urlopen", conflict):
             self.assertTrue(gateway_patch._forward_to_ingress(self._message(), None))
+
+
+class AsyncForwardToIngressTests(unittest.IsolatedAsyncioTestCase):
+    async def test_slow_ingress_does_not_block_discord_event_loop(self) -> None:
+        release = threading.Event()
+
+        def slow_forward(message, adapter):  # noqa: ANN001, ARG001
+            release.wait(timeout=1)
+            return True
+
+        timer = threading.Timer(0.5, release.set)
+        timer.start()
+        try:
+            with patch.object(gateway_patch, "_forward_to_ingress", slow_forward):
+                forward = asyncio.create_task(
+                    gateway_patch._forward_to_ingress_async(object(), object())
+                )
+                started = time.monotonic()
+                await asyncio.sleep(0.01)
+                self.assertLess(time.monotonic() - started, 0.2)
+                self.assertTrue(await forward)
+        finally:
+            release.set()
+            timer.cancel()

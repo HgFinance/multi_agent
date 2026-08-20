@@ -25,6 +25,12 @@ When, and only when, the root body contains the exact marker
 authenticated request and pre-created its one `trading-department` primary.
 This is not a strategy-generated OrderIntent workflow.
 
+The pre-created Trading primary may contain either
+`hgfinance.user-paper-order-interpretation.v1` for an immediate PAPER order or
+`hgfinance.user-conditional-paper-rule.v1` for an immediately active one-shot
+PAPER rule. Both use the same isolated lane below and neither permits the CEO
+to add approval departments.
+
 - Reuse that pre-created Trading primary. Do not call `kanban_create`, create a
   replacement, select another department, or add Risk/QA children. The
   supervisor may create one final CEO synthesis only after the Trading task is

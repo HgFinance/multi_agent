@@ -152,13 +152,16 @@ cannot be treated as approved because an LLM produced a plausible narrative.
 flowchart LR
     A[Agent / alpha / rebalancer] --> O[Automated OrderIntent]
     O --> R[Deterministic Risk Decision]
-    R --> M[OMS / PAPER Broker]
+    R --> AP[Automated PAPER OMS]
     U[Authenticated user] --> C[CEO ingress + durable PAPER scope]
     C --> H[Trading Hermes non-binding interpretation]
     H --> P[Exact-text deterministic verifier]
     P --> G[Current Fund/Book + account mechanics + idempotency]
-    G --> M
-    M -. no route .-> L[LIVE order]
+    G --> B[Durable directive / reservation ledger]
+    B --> PBR[LS PAPER broker adapter]
+    PBR --> PA[LS PAPER account]
+    AP -. no route .-> L[LIVE order]
+    PA -. no route .-> L
 ```
 
 The automated lane still requires Risk and agents cannot submit orders. The
@@ -176,9 +179,13 @@ per-leg results. Their directive states are `RECEIVED`, `RUNNING`,
 `IN_PROGRESS`, `PARTIAL`, `COMPLETED`, `FAILED`, or `UNKNOWN`; any failed leg
 prevents `COMPLETED`. A zero-leg `SELL_ALL` is complete only when the same
 snapshot proves both zero positive accounting position and zero open SELL
-reservation. The current canonical account is the local durable PaperBroker
-store. LS LIVE supplies read-only market observations and has no LIVE-order
-path here.
+reservation. The canonical economic account for the deployed direct-user lane
+is the LS Securities mock-investment (`LS PAPER`) account. The local durable
+directive/leg/reservation/fill store remains the restart-safe audit and
+accounting projection, and a content-addressed reconciliation journal aligns
+it to broker cash and positions. Only the Trading service receives PAPER order
+authority. LS LIVE supplies read-only market observations and has no
+LIVE-order path here.
 
 ## 6. Request Lifecycle
 

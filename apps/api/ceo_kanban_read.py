@@ -294,10 +294,34 @@ def clear_kanban_cache() -> None:
 
 
 def _cli_environment() -> dict[str, str]:
+    """로컬 CLI 실행에 쓸 환경. **보드 경로가 이 호스트에서 쓸 수 있어야 한다.**
+
+    `HERMES_BIN` 과 같은 누수가 여기에도 있었다(2026-08-20 실측): `.env` 의
+    `# [컨테이너 내부 경로]` 블록에 `HERMES_KANBAN_HOME=/opt/kanban` 이 있고,
+    `setdefault` 는 이미 값이 있으면 그대로 두므로 그 컨테이너 경로가 호스트
+    프로세스에 그대로 쓰였다. 윈도우에서는 `C:/opt/kanban` 으로 풀려 **아무도
+    쓰지 않는 빈 보드가 새로 생기고**, 화면에는 카드 0장이 정상처럼 보인다 -
+    읽기가 실패한 게 아니라 엉뚱한 보드를 성공적으로 읽은 것이라 더 나쁘다.
+
+    이 값은 **local 모드에서만** 의미가 있다. docker 모드에서는 `argv_for` 가
+    `docker exec` 를 부르고 컨테이너 안 환경은 compose 가 따로 주므로 여기서
+    무엇을 넣든 컨테이너에 닿지 않는다. 즉 이 값이 실제로 쓰이는 유일한 경우에
+    컨테이너 경로는 언제나 틀린 값이다.
+
+    그래서 **이 OS 의 문법으로 절대경로일 때만** 설정을 존중한다. 윈도우에서
+    `Path("/opt/kanban").is_absolute()` 는 드라이브가 없어 `False` 이고, 리눅스
+    에서는 `True` 다 - 컨테이너 경로를 호스트가 잘못 집는 경우만 정확히 걸러진다.
+    "디렉터리가 존재하는가"로 판정하지 않는 이유는, 한 번 잘못 실행돼 그 빈
+    보드가 만들어지고 나면 그다음부터 판정이 뒤집혀 계속 틀린 보드를 읽기
+    때문이다(실제로 `C:/opt/kanban` 이 그렇게 생겼다).
+    """
+
     environment = os.environ.copy()
-    environment.setdefault(
-        "HERMES_KANBAN_HOME", str(Path.home() / ".hermes" / "shared-kanban")
-    )
+    configured = environment.get("HERMES_KANBAN_HOME", "").strip()
+    if not configured or not Path(configured).is_absolute():
+        environment["HERMES_KANBAN_HOME"] = str(
+            Path.home() / ".hermes" / "shared-kanban"
+        )
     return environment
 
 
@@ -332,6 +356,11 @@ def run_kanban(args: Sequence[str]) -> str:
             command,
             capture_output=True,
             text=True,
+            # 이 CLI 출력은 UTF-8 이다. 윈도우 기본(cp949)으로 디코드하면 한글
+            # 제목에서 UnicodeDecodeError 가 나고 **리더 스레드가 죽어 stdout 이
+            # None 이 된다** - 그러면 "잘못된 JSON"으로 보여 원인이 가려진다.
+            encoding="utf-8",
+            errors="replace",
             timeout=_timeout(),
             cwd=ROOT,
             env=_cli_environment(),

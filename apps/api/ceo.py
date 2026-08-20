@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 
 try:
     from . import hermes_boundary
+    from .conditional_rule_language import looks_like_conditional_paper_rule
     from .ceo_kanban_read import (
         KanbanTaskNotFound,
         KanbanUnavailable,
@@ -57,6 +58,9 @@ try:
     )
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
     import hermes_boundary  # type: ignore[no-redef]
+    from conditional_rule_language import (  # type: ignore[no-redef]
+        looks_like_conditional_paper_rule,
+    )
     from ceo_kanban_read import (  # type: ignore[no-redef]
         KanbanTaskNotFound,
         KanbanUnavailable,
@@ -519,8 +523,21 @@ def _paper_order_accepted_response(
     root_task: Mapping[str, object],
     trading_task: Mapping[str, object],
     order_request_id: str,
+    conditional_rule: bool = False,
 ) -> dict[str, object]:
     """Return an explicit asynchronous receipt without claiming an execution."""
+
+    answer = (
+        "조건주문 요청을 Trading Hermes에 직접 배정했습니다. Hermes가 원문을 "
+        "AST로 구조화하고 deterministic 검증을 통과하면 PAPER 규칙이 즉시 "
+        "활성화됩니다. 별도 Risk/QA/Research 부서 승인은 거치지 않습니다."
+        if conditional_rule
+        else (
+            "주문 요청을 Trading Hermes에 배정했습니다. Hermes가 원문을 구조화한 뒤 "
+            "서버 검증을 통과한 요청만 PAPER OMS로 제출합니다. 이 접수 응답 자체는 "
+            "체결 완료를 의미하지 않습니다."
+        )
+    )
 
     return {
         "schema_version": _PLANNING_SCHEMA_VERSION,
@@ -529,22 +546,27 @@ def _paper_order_accepted_response(
         "task_id": str(root_task.get("task_id") or root_task.get("id") or ""),
         "task": dict(root_task),
         "status": "planned",
-        "answer": (
-            "주문 요청을 Trading Hermes에 배정했습니다. Hermes가 원문을 구조화한 뒤 "
-            "서버 검증을 통과한 요청만 PAPER OMS로 제출합니다. 이 접수 응답 자체는 "
-            "체결 완료를 의미하지 않습니다."
-        ),
+        "answer": answer,
         "planning": {
             "schema_version": "ceo.planning.v1",
             "selected_departments": ["trading-department"],
-            "steps": ["Trading Hermes interpretation", "PAPER OMS validation"],
+            "steps": (
+                ["Trading Hermes AST interpretation", "Immediate PAPER rule activation"]
+                if conditional_rule
+                else ["Trading Hermes interpretation", "PAPER OMS validation"]
+            ),
             "qa_required": False,
-            "summary": "Trading Hermes가 PAPER 주문 원문을 해석하고 있습니다.",
+            "summary": (
+                "Trading Hermes가 조건주문 AST를 해석하고 있습니다."
+                if conditional_rule
+                else "Trading Hermes가 PAPER 주문 원문을 해석하고 있습니다."
+            ),
         },
         "session_id": None,
         "order_request_id": order_request_id,
-        "order_state": "KANBAN_QUEUED",
+        "order_state": "RULE_INTERPRETATION_QUEUED" if conditional_rule else "KANBAN_QUEUED",
         "order_mode": "PAPER",
+        "conditional_rule": conditional_rule,
         "trading_task_id": str(
             trading_task.get("task_id") or trading_task.get("id") or ""
         ),
@@ -596,6 +618,55 @@ def _paper_order_child_body(
     )
 
 
+def _conditional_rule_child_body(
+    *,
+    query: str,
+    scope: UserPaperOrderScope,
+    root_task_id: str,
+    request_id: str,
+    has_mandate: bool,
+) -> str:
+    interpretation_prompt = "\n".join(
+        (
+            "hgfinance.user-conditional-paper-rule.v1",
+            build_user_paper_order_scope(scope),
+            "authority=interpretation_only",
+            "execution_mode=PAPER_ONLY",
+            "activation_policy=IMMEDIATE_AFTER_DETERMINISTIC_VALIDATION",
+            "mcp_tool=process_user_conditional_paper_rule",
+            "Interpret the exact user instruction below into one ConditionalRuleCandidate AST.",
+            "Call process_user_conditional_paper_rule exactly once with this root/task scope.",
+            "Do not create Risk, QA, Research, Accounting, or additional Trading tasks.",
+            "Never invent a symbol, condition, threshold, timeframe, side, or sizing value.",
+            "Questions, advice, negation, examples, ambiguity, multiple actions, and LIVE",
+            "requests must use candidate=null with a concise clarification_reason.",
+            "Supported expression node types are LITERAL, MARKET, PORTFOLIO, INDICATOR,",
+            "ARITHMETIC, COMPARISON, LOGICAL, NOT, and CROSS. Supported indicators are",
+            "SMA, EMA, RSI, MACD, BOLLINGER, VOLUME_AVERAGE, ATR, and ADX.",
+            "Use comparison operators GT/GTE/LT/LTE/EQ, cross ABOVE/BELOW, logical",
+            "AND/OR, and only 1M/5M/15M/1H/1D timeframes. If an indicator timeframe",
+            "is omitted, use 1D completed bars and BAR_CLOSE; never default an explicit",
+            "intraday phrase to another timeframe. Portfolio/last-price-only rules use",
+            "QUOTE. POSITION_PERCENT is a ratio in (0,1], FIXED_SHARES is an integer,",
+            "and ALL is sell-only. Omit expires_at to use the trusted 30-day default.",
+            "The trusted tool resolves the symbol, validates authority, units, semantics,",
+            "idempotency, and activates the exact rule. Do not claim ACTIVE unless the",
+            "tool result reports rule_active=true. Copy user_message verbatim.",
+            "",
+            "## Exact user instruction",
+            query,
+        )
+    )
+    return build_scoped_task_body(
+        interpretation_prompt,
+        root_task_id,
+        role="primary",
+        request_id=request_id,
+        workflow_mode="binding",
+        has_mandate=has_mandate,
+    )
+
+
 def _mark_paper_order_failed(
     repository: object,
     order_request_id: str,
@@ -625,8 +696,9 @@ def _route_user_paper_order(
     *,
     owner_id: str | None,
     mandate: Mapping[str, object] | None,
+    conditional_rule: bool = False,
 ) -> dict[str, object]:
-    """Durably route one possible order to Trading Hermes, always as PAPER."""
+    """Durably route one direct user workflow to Trading Hermes, always PAPER."""
 
     if not isinstance(owner_id, str) or not owner_id.strip():
         raise HTTPException(status_code=401, detail="portfolio_authentication_required")
@@ -668,7 +740,11 @@ def _route_user_paper_order(
     )
     root = hermes_boundary.create_kanban_task(
         assignee=canonical_profile_for_department("ceo"),
-        title=f"사용자 PAPER 주문: {req.query[:100]}",
+        title=(
+            f"사용자 PAPER 조건주문: {req.query[:100]}"
+            if conditional_rule
+            else f"사용자 PAPER 주문: {req.query[:100]}"
+        ),
         body=build_root_body(
             req.query,
             req.request_id,
@@ -678,7 +754,10 @@ def _route_user_paper_order(
             user_paper_order_scope=scope,
         ),
         idempotency_key=req.request_id,
-        initial_status="blocked",
+        # A running scope container cannot be claimed by the CEO dispatcher,
+        # and Hermes supports completing it without a worker run. Trading
+        # remains blocked until every SQL/Kanban binding is durable.
+        initial_status="running",
     )
     if not root or not root.get("task_id"):
         _mark_paper_order_failed(
@@ -717,13 +796,27 @@ def _route_user_paper_order(
 
     trading = hermes_boundary.create_kanban_task(
         assignee=canonical_profile_for_department("trading"),
-        title="사용자 PAPER 주문 원문 해석 및 검증 제출",
-        body=_paper_order_child_body(
-            query=req.query,
-            scope=scope,
-            root_task_id=root_task_id,
-            request_id=req.request_id,
-            has_mandate=bool(mandate),
+        title=(
+            "사용자 PAPER 조건주문 AST 해석 및 즉시 활성화"
+            if conditional_rule
+            else "사용자 PAPER 주문 원문 해석 및 검증 제출"
+        ),
+        body=(
+            _conditional_rule_child_body(
+                query=req.query,
+                scope=scope,
+                root_task_id=root_task_id,
+                request_id=req.request_id,
+                has_mandate=bool(mandate),
+            )
+            if conditional_rule
+            else _paper_order_child_body(
+                query=req.query,
+                scope=scope,
+                root_task_id=root_task_id,
+                request_id=req.request_id,
+                has_mandate=bool(mandate),
+            )
         ),
         idempotency_key=primary_idempotency_key(
             root_task_id, "trading-department"
@@ -753,15 +846,21 @@ def _route_user_paper_order(
             status_code=status, detail="paper_order_workflow_unavailable"
         ) from exc
 
-    # Both cards were created blocked to close the dispatch-before-DB-bind
-    # race. Release the root first (its selected Trading child now exists),
-    # then the interpreter. A failed release cannot turn into an order.
-    if not hermes_boundary.unblock_kanban_task(task_id=root_task_id):
+    # The root was created running (and therefore unclaimable) while the
+    # Trading card was created blocked. The root is only an immutable
+    # authority/scope container in this lane, so complete it in place instead
+    # of releasing it to a CEO worker.
+    # Releasing both cards allowed the CEO worker to block the root while the
+    # Trading interpreter was still preparing its trusted tool call.
+    if not hermes_boundary.complete_kanban_task(
+        task_id=root_task_id,
+        result="PAPER order scope bound; Trading primary owns interpretation and execution",
+    ):
         _mark_paper_order_failed(
             repository,
             record.order_request_id,
-            error_code="CEO_ROOT_RELEASE_FAILED",
-            error_message="CEO root remained blocked after durable binding",
+            error_code="CEO_ROOT_FINALIZE_FAILED",
+            error_message="CEO root scope could not be finalized after durable binding",
         )
         raise HTTPException(status_code=503, detail="paper_order_kanban_unavailable")
     if not hermes_boundary.unblock_kanban_task(task_id=trading_task_id):
@@ -773,18 +872,20 @@ def _route_user_paper_order(
         )
         raise HTTPException(status_code=503, detail="paper_order_kanban_unavailable")
 
-    released_root = {**root, "status": "ready"}
+    released_root = {**root, "status": "done"}
     released_trading = {**trading, "status": "ready"}
     logger.info(
-        "paper-order-routed request=%s root=%s trading=%s mode=PAPER",
+        "paper-order-routed request=%s root=%s trading=%s mode=PAPER conditional=%s",
         record.order_request_id,
         root_task_id,
         trading_task_id,
+        conditional_rule,
     )
     return _paper_order_accepted_response(
         root_task=released_root,
         trading_task=released_trading,
         order_request_id=record.order_request_id,
+        conditional_rule=conditional_rule,
     )
 
 
@@ -847,6 +948,14 @@ def ceo_query(
     # `fund_id`가 없다. 속성 부재로 500을 내는 대신 "Mandate 없음"으로 떨어진다.
     fund_id = getattr(req, "fund_id", None)
     mandate = fetch_current_mandate_by_fund(fund_id) if fund_id else None
+
+    if looks_like_conditional_paper_rule(req.query):
+        return _route_user_paper_order(
+            req,
+            owner_id=owner_id if isinstance(owner_id, str) else None,
+            mandate=mandate,
+            conditional_rule=True,
+        )
 
     if looks_like_user_order_request(
         req.query

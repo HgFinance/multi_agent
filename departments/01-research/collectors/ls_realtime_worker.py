@@ -66,43 +66,20 @@ SOURCE_ID = "ls_openapi_ws"
 # 여기 둔다. 한쪽만 늘리면 구독은 되고 정규화가 안 되거나 그 반대가 된다.
 UNIFIED_TR_KEYS = frozenset({"US3", "UH1"})
 
-# 시세 수집 환경. **주문 환경(LS_ENV)과 분리한다** (재일님 결정 2026-08-12).
-MARKET_ENV_VAR = "LS_MARKET_ENV"
-MARKET_ENV_DEFAULT = "LIVE"
-
-
+# 시장·계좌가 함께 사용하는 단일 LS 환경.
 def market_env(env: dict) -> str:
-    """시세를 어디서 받을지. `LS_ENV`(주문)와 **다른 스위치**다.
-
-    ▶ 왜 갈랐나 (2026-08-12 실측)
-      하나의 `LS_ENV` 가 주문과 시세를 같이 정하고 있었다. 주문을 PAPER 로
-      두려고 `LS_ENV=PAPER` 를 쓰면 **시세까지 모의 서버로 붙는다.** 실제로
-      그날 아침 수집기가 `:29443`(PAPER)에 붙어 프리마켓 한 시간 동안 체결이
-      0건이었다. 그 위에서 찾은 알파는 검증할 수 없는 알파다.
-
-      시세 구독은 주문 권한과 무관하다 - LIVE 키로 시세를 받아도 주문이
-      나가지 않는다. derivatives_collector 가 이미 같은 이유로 `LS_ENV` 를
-      무시하고 LIVE 를 강제하고 있었는데, 그 예외를 이름 있는 스위치로
-      일반화한 것이다.
-
-    ▶ 기본값이 LIVE 인 이유 (안전한 실패 방향)
-      주문은 PAPER 로 떨어지는 것이 안전하지만, 시세는 반대다. 모의 시세는
-      **진짜처럼 생긴 가짜**라 조용히 흘러가면 백테스트가 그걸 사실로 읽는다.
-      못 받는 것은 티가 나고, 잘못 받는 것은 티가 안 난다.
-    """
-    return (env.get(MARKET_ENV_VAR) or MARKET_ENV_DEFAULT).strip().upper()
+    """LS_ENV 하나로 REST 토큰과 WebSocket 환경을 선택한다."""
+    mode = (env.get("LS_ENV") or "LIVE").strip().upper()
+    if mode not in {"PAPER", "LIVE"}:
+        raise ValueError(f"LS_ENV must be PAPER or LIVE: {mode!r}")
+    return mode
 
 
 def market_rest_client(env: dict):
-    """시세용 REST 클라이언트(토큰 발급). **소켓과 같은 환경을 쓴다.**
-
-    토큰은 `LS_ENV`(주문)로 받고 소켓만 `LS_MARKET_ENV` 로 붙으면, 모의 토큰으로
-    실전 소켓에 접속하는 꼴이 된다 - 붙긴 붙고 데이터만 안 온다. 두 곳이 같은
-    스위치를 보게 여기서 한 번에 만든다.
-    """
+    """LS_ENV가 선택한 동일 환경에서 REST 토큰을 발급한다."""
     from ls_client import LsEnvironment, LsRestClient  # noqa: PLC0415
 
-    return LsRestClient(LsEnvironment.from_env({**env, "LS_ENV": market_env(env)}))
+    return LsRestClient(LsEnvironment.from_env(env))
 
 KST = timezone(timedelta(hours=9))
 
@@ -769,7 +746,7 @@ def _run(seconds: float, symbols: tuple[str, ...]) -> int:
     ws_url = ws_base.rstrip("/") + WEBSOCKET_PATH
 
     now_kst = datetime.now(KST)
-    print(f"  LS_MARKET_ENV={mode}  {ws_url}")
+    print(f"  LS_ENV={mode}  {ws_url}")
     print(f"  현재 KST {now_kst:%Y-%m-%d %H:%M:%S} (정규장 09:00~15:30)")
 
     ref = SupabaseReferenceRepository()

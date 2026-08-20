@@ -125,6 +125,10 @@ class UserOrderRequestRepository(Protocol):
 
     def get(self, order_request_id: str) -> UserOrderRequestRecord | None: ...
 
+    def find_committed_directive(
+        self, record: UserOrderRequestRecord
+    ) -> str | None: ...
+
     def bind_root(
         self, order_request_id: str, root_task_id: str
     ) -> UserOrderRequestRecord: ...
@@ -236,6 +240,12 @@ class InMemoryUserOrderRequestRepository:
     def get(self, order_request_id: str) -> UserOrderRequestRecord | None:
         with self._lock:
             return self._records.get(str(order_request_id))
+
+    def find_committed_directive(
+        self, record: UserOrderRequestRecord
+    ) -> str | None:
+        del record
+        return None
 
     def _replace(self, record: UserOrderRequestRecord, **changes: Any) -> UserOrderRequestRecord:
         updated = replace(
@@ -470,6 +480,60 @@ class PostgresUserOrderRequestRepository:
                 return self._row(cursor.fetchone())
         except (psycopg2.Error, TypeError, ValueError) as exc:
             raise UserOrderWorkflowUnavailable("could not read user PAPER order") from exc
+
+    def find_committed_directive(
+        self, record: UserOrderRequestRecord
+    ) -> str | None:
+        """Find an exact directive after an ambiguous submission response.
+
+        This is a read-only recovery lookup. It never resubmits an order and
+        requires the durable authority, deterministic idempotency key, action,
+        and source request identity to match.  The request digest is not used:
+        the admitted payload contains an instrument mention while the durable
+        directive contains its resolved instrument UUID/symbol, so equal
+        orders intentionally have different pre/post-resolution digests.
+        """
+
+        if (
+            record.state != "UNKNOWN"
+            or record.directive_id is not None
+            or not record.action
+        ):
+            return None
+        try:
+            with self._connect() as connection, connection.cursor() as cursor:
+                self._set_role(cursor)
+                cursor.execute(
+                    """
+                    select directive_id
+                      from execution.user_directives
+                     where user_id=%s and fund_id=%s and book_id=%s
+                       and idempotency_key=%s and action=%s
+                       and (source_order_request_id is null
+                            or source_order_request_id=%s)
+                     limit 2
+                    """,
+                    (
+                        UUID(record.user_id),
+                        UUID(record.fund_id),
+                        UUID(record.book_id),
+                        f"ceo-paper:{record.order_request_id}",
+                        record.action,
+                        UUID(record.order_request_id),
+                    ),
+                )
+                rows = cursor.fetchall()
+                if len(rows) > 1:
+                    raise UserOrderRequestConflict(
+                        "ambiguous PAPER directive recovery result"
+                    )
+                return str(rows[0][0]) if rows else None
+        except UserOrderWorkflowError:
+            raise
+        except (psycopg2.Error, TypeError, ValueError) as exc:
+            raise UserOrderWorkflowUnavailable(
+                "could not recover committed PAPER directive"
+            ) from exc
 
     def bind_root(self, order_request_id: str, root_task_id: str) -> UserOrderRequestRecord:
         return self._bind_task(order_request_id, "ceo_root_task_id", root_task_id, "KANBAN_QUEUED")
@@ -713,6 +777,26 @@ class PostgresUserOrderRequestRepository:
         )
 
 
+def recover_committed_directive(
+    repository: UserOrderRequestRepository,
+    record: UserOrderRequestRecord,
+) -> UserOrderRequestRecord:
+    """Bind an exact post-timeout directive without resubmitting the order."""
+
+    if record.state != "UNKNOWN" or record.directive_id is not None:
+        return record
+    directive_id = repository.find_committed_directive(record)
+    if directive_id is None:
+        return record
+    return repository.mark_outcome(
+        record.order_request_id,
+        state="UNKNOWN",
+        directive_id=directive_id,
+        error_code=record.error_code,
+        error_message=record.error_message,
+    )
+
+
 _repository_override: UserOrderRequestRepository | None = None
 _repository_cache: UserOrderRequestRepository | None = None
 
@@ -788,6 +872,7 @@ __all__ = [
     "canonical_payload_sha256",
     "normalize_user_instruction",
     "raw_instruction_sha256",
+    "recover_committed_directive",
     "set_user_order_repository_for_tests",
     "user_order_repository",
 ]

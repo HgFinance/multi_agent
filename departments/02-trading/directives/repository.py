@@ -198,11 +198,19 @@ class DirectiveRepository(Protocol):
     def resolve_instrument(self, fund_id: UUID, book_id: UUID, instrument_id: UUID | None, symbol: str) -> InstrumentRef: ...
     def available_cash(self, fund_id: UUID, book_id: UUID, currency: str) -> Decimal: ...
     def sellable_quantity(self, fund_id: UUID, book_id: UUID, instrument_id: UUID) -> Decimal: ...
+    def average_cost(self, fund_id: UUID, book_id: UUID, instrument_id: UUID) -> Decimal: ...
     def positions(self, fund_id: UUID, book_id: UUID) -> list[tuple[InstrumentRef, Decimal]]: ...
     def market_session_close(self, *, now: datetime) -> datetime: ...
+    def create_pending_leg(self, record: DirectiveRecord, instrument: InstrumentRef, *, side: str, order_type: str, quantity: Decimal, limit_price: Decimal | None, reserve_cash: Decimal | None, reduce_only: bool, expires_at: datetime) -> DirectiveLeg: ...
     def create_acknowledged_leg(self, record: DirectiveRecord, instrument: InstrumentRef, *, side: str, order_type: str, quantity: Decimal, limit_price: Decimal | None, reserve_cash: Decimal | None, reduce_only: bool, expires_at: datetime) -> DirectiveLeg: ...
+    def acknowledge_broker_leg(self, record: DirectiveRecord, leg: DirectiveLeg, *, broker_order_id: str, broker_event_id: str) -> DirectiveLeg: ...
+    def mark_broker_leg_unknown(self, record: DirectiveRecord, leg: DirectiveLeg, *, error_code: str, error_message: str) -> DirectiveLeg: ...
+    def terminate_broker_leg(self, record: DirectiveRecord, leg: DirectiveLeg, *, state: DirectiveLegState, error_code: str | None = None, error_message: str | None = None) -> DirectiveLeg: ...
     def record_paper_fill(self, record: DirectiveRecord, leg: DirectiveLeg, instrument: InstrumentRef, *, quote_event_key: str, price: Decimal, executable_quantity: Decimal, event_time: datetime, source: str) -> DirectiveLeg: ...
-    def cancel_open_orders(self, record: DirectiveRecord, *, below_priority: int | None) -> list[DirectiveLeg]: ...
+    def external_open_legs(self, record: DirectiveRecord, *, below_priority: int | None) -> list[tuple[DirectiveRecord, DirectiveLeg]]: ...
+    def record_external_cancel(self, record: DirectiveRecord, target_record: DirectiveRecord, target_leg: DirectiveLeg, *, target_state: DirectiveLegState | None, audit_state: DirectiveLegState, broker_cancel_order_id: str | None = None, error_code: str | None = None, error_message: str | None = None) -> DirectiveLeg: ...
+    def external_cancel_targets(self, record: DirectiveRecord) -> list[tuple[DirectiveLeg, DirectiveRecord, DirectiveLeg]]: ...
+    def cancel_open_orders(self, record: DirectiveRecord, *, below_priority: int | None, include_direct_legs: bool = True) -> list[DirectiveLeg]: ...
     def reconcile_cancel_legs(self, record: DirectiveRecord) -> DirectiveRecord: ...
     def expire_open_legs(self, record: DirectiveRecord, *, now: datetime) -> list[DirectiveLeg]: ...
     def expire_scope_legs(self, fund_id: UUID, book_id: UUID, *, now: datetime) -> list[DirectiveRecord]: ...
@@ -224,6 +232,7 @@ class _MemoryState:
     session_opens_at: datetime | None = None
     session_closes_at: datetime | None = None
     positions: dict[tuple[UUID, UUID, UUID], Decimal] = field(default_factory=dict)
+    average_costs: dict[tuple[UUID, UUID, UUID], Decimal] = field(default_factory=dict)
     cash: dict[tuple[UUID, UUID, str], Decimal] = field(default_factory=dict)
     reservations: dict[UUID, tuple[str, UUID, UUID, UUID | None, Decimal, str | None, bool]] = field(default_factory=dict)
     barriers: dict[tuple[UUID, UUID], tuple[UUID, int, bool]] = field(default_factory=dict)
@@ -253,8 +262,18 @@ class InMemoryDirectiveRepository:
         self.state.session_opens_at = opens_at
         self.state.session_closes_at = closes_at
 
-    def set_position(self, fund_id: UUID, book_id: UUID, instrument_id: UUID, quantity: Decimal) -> None:
+    def set_position(
+        self,
+        fund_id: UUID,
+        book_id: UUID,
+        instrument_id: UUID,
+        quantity: Decimal,
+        *,
+        average_cost: Decimal | None = None,
+    ) -> None:
         self.state.positions[(fund_id, book_id, instrument_id)] = Decimal(quantity)
+        if average_cost is not None:
+            self.state.average_costs[(fund_id, book_id, instrument_id)] = Decimal(average_cost)
 
     def set_cash(self, fund_id: UUID, book_id: UUID, currency: str, amount: Decimal) -> None:
         self.state.cash[(fund_id, book_id, currency)] = Decimal(amount)
@@ -409,6 +428,11 @@ class InMemoryDirectiveRepository:
         )
         return max(gross - reserved, Decimal(0))
 
+    def average_cost(self, fund_id: UUID, book_id: UUID, instrument_id: UUID) -> Decimal:
+        return self.state.average_costs.get(
+            (fund_id, book_id, instrument_id), Decimal(0)
+        )
+
     def positions(self, fund_id: UUID, book_id: UUID) -> list[tuple[InstrumentRef, Decimal]]:
         result = []
         for (fund, book, instrument_id), quantity in self.state.positions.items():
@@ -435,7 +459,7 @@ class InMemoryDirectiveRepository:
             )
         return closes_at
 
-    def create_acknowledged_leg(self, record: DirectiveRecord, instrument: InstrumentRef, *, side: str, order_type: str, quantity: Decimal, limit_price: Decimal | None, reserve_cash: Decimal | None, reduce_only: bool, expires_at: datetime) -> DirectiveLeg:
+    def create_pending_leg(self, record: DirectiveRecord, instrument: InstrumentRef, *, side: str, order_type: str, quantity: Decimal, limit_price: Decimal | None, reserve_cash: Decimal | None, reduce_only: bool, expires_at: datetime) -> DirectiveLeg:
         index = len(record.legs)
         leg_id = uuid5(NAMESPACE_URL, f"paper-directive:{record.directive_id}:leg:{index}:{instrument.instrument_id}")
         leg = DirectiveLeg(
@@ -449,10 +473,8 @@ class InMemoryDirectiveRepository:
             requested_quantity=quantity,
             limit_price=limit_price,
             reduce_only=reduce_only,
-            state=DirectiveLegState.ACKNOWLEDGED,
+            state=DirectiveLegState.PENDING,
             client_order_id=f"paper_user_{leg_id.hex}",
-            broker_order_id=f"paper:{leg_id}",
-            broker_event_id=f"paper:ack:{leg_id}",
             expires_at=expires_at,
         )
         record.legs.append(leg)
@@ -467,6 +489,74 @@ class InMemoryDirectiveRepository:
                 reserve_cash, instrument.currency, True,
             )
         return leg
+
+    def create_acknowledged_leg(self, record: DirectiveRecord, instrument: InstrumentRef, *, side: str, order_type: str, quantity: Decimal, limit_price: Decimal | None, reserve_cash: Decimal | None, reduce_only: bool, expires_at: datetime) -> DirectiveLeg:
+        leg = self.create_pending_leg(
+            record,
+            instrument,
+            side=side,
+            order_type=order_type,
+            quantity=quantity,
+            limit_price=limit_price,
+            reserve_cash=reserve_cash,
+            reduce_only=reduce_only,
+            expires_at=expires_at,
+        )
+        return self.acknowledge_broker_leg(
+            record,
+            leg,
+            broker_order_id=f"paper:{leg.leg_id}",
+            broker_event_id=f"paper:ack:{leg.leg_id}",
+        )
+
+    def acknowledge_broker_leg(self, record: DirectiveRecord, leg: DirectiveLeg, *, broker_order_id: str, broker_event_id: str) -> DirectiveLeg:
+        with self.state.lock:
+            if leg.state not in {DirectiveLegState.PENDING, DirectiveLegState.UNKNOWN}:
+                return leg
+            leg.state = DirectiveLegState.ACKNOWLEDGED
+            leg.broker_order_id = broker_order_id
+            leg.broker_event_id = broker_event_id
+            leg.error_code = None
+            leg.error_message = None
+            return leg
+
+    def mark_broker_leg_unknown(self, record: DirectiveRecord, leg: DirectiveLeg, *, error_code: str, error_message: str) -> DirectiveLeg:
+        with self.state.lock:
+            if leg.state in {
+                DirectiveLegState.FILLED,
+                DirectiveLegState.CANCELLED,
+                DirectiveLegState.REJECTED,
+                DirectiveLegState.EXPIRED,
+            }:
+                return leg
+            leg.state = DirectiveLegState.UNKNOWN
+            leg.error_code = error_code
+            leg.error_message = error_message
+            return leg
+
+    def terminate_broker_leg(self, record: DirectiveRecord, leg: DirectiveLeg, *, state: DirectiveLegState, error_code: str | None = None, error_message: str | None = None) -> DirectiveLeg:
+        if state not in {
+            DirectiveLegState.REJECTED,
+            DirectiveLegState.CANCELLED,
+            DirectiveLegState.EXPIRED,
+        }:
+            raise DirectiveRepositoryError(
+                "TRADING_BROKER_STATE_INVALID", "broker terminal state is invalid", 500
+            )
+        with self.state.lock:
+            leg.state = state
+            leg.error_code = error_code
+            leg.error_message = error_message
+            reservation = self.state.reservations.get(leg.leg_id)
+            if reservation is not None:
+                pending = [
+                    fill
+                    for fill in self.state.direct_fills.values()
+                    if fill.leg_id == leg.leg_id and not fill.accounting_acknowledged
+                ]
+                if not pending:
+                    self.state.reservations.pop(leg.leg_id, None)
+            return leg
 
     def record_paper_fill(
         self,
@@ -671,19 +761,140 @@ class InMemoryDirectiveRepository:
                 changed.append(record)
         return changed
 
-    def cancel_open_orders(self, record: DirectiveRecord, *, below_priority: int | None) -> list[DirectiveLeg]:
-        cancelled: list[DirectiveLeg] = []
-        candidates: list[DirectiveLeg] = []
+    def external_open_legs(
+        self,
+        record: DirectiveRecord,
+        *,
+        below_priority: int | None,
+    ) -> list[tuple[DirectiveRecord, DirectiveLeg]]:
+        candidates: list[tuple[DirectiveRecord, DirectiveLeg]] = []
         for other in self.state.directives.values():
-            if other.directive_id == record.directive_id or other.fund_id != record.fund_id or other.book_id != record.book_id:
+            if (
+                other.directive_id == record.directive_id
+                or other.fund_id != record.fund_id
+                or other.book_id != record.book_id
+            ):
                 continue
             if below_priority is not None and other.priority >= below_priority:
                 continue
             candidates.extend(
-                leg
+                (other, leg)
                 for leg in other.legs
                 if leg.side is not None and leg.state in ACTIVE_LEG_STATES
             )
+        return candidates
+
+    def record_external_cancel(
+        self,
+        record: DirectiveRecord,
+        target_record: DirectiveRecord,
+        target_leg: DirectiveLeg,
+        *,
+        target_state: DirectiveLegState | None,
+        audit_state: DirectiveLegState,
+        broker_cancel_order_id: str | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> DirectiveLeg:
+        if target_state is not None and target_leg.state in ACTIVE_LEG_STATES:
+            target_leg.state = target_state
+            target_leg.error_code = error_code
+            target_leg.error_message = error_message
+            if target_state is not DirectiveLegState.UNKNOWN:
+                self._retain_unaccounted_fill_reservation(target_leg)
+
+        event_id = f"ls-paper:cancel:{record.directive_id}:{target_leg.leg_id}"
+        existing = next(
+            (leg for leg in record.legs if leg.broker_event_id == event_id),
+            None,
+        )
+        if existing is None:
+            existing = DirectiveLeg(
+                leg_id=uuid5(
+                    NAMESPACE_URL,
+                    f"paper-directive:{record.directive_id}:cancel:{target_leg.leg_id}",
+                ),
+                directive_id=record.directive_id,
+                leg_index=len(record.legs),
+                instrument_id=target_leg.instrument_id,
+                symbol=target_leg.symbol,
+                side=None,
+                order_type=None,
+                requested_quantity=None,
+                limit_price=None,
+                state=audit_state,
+                broker_event_id=event_id,
+                target_filled_quantity=target_leg.filled_quantity,
+            )
+            record.legs.append(existing)
+        existing.state = audit_state
+        existing.broker_order_id = (
+            "ls-paper-cancel:" + broker_cancel_order_id
+            if broker_cancel_order_id
+            else existing.broker_order_id
+        )
+        existing.error_code = error_code
+        existing.error_message = error_message
+        existing.target_filled_quantity = target_leg.filled_quantity
+
+        order_legs = [leg for leg in target_record.legs if leg.side is not None]
+        if order_legs and not any(leg.state in ACTIVE_LEG_STATES for leg in order_legs):
+            target_record.state = (
+                DirectiveState.PARTIAL
+                if any(leg.filled_quantity > 0 for leg in order_legs)
+                else DirectiveState.FAILED
+            )
+            target_record.error_code = "TRADING_USER_CANCELLED"
+            target_record.error_message = (
+                "superseded by a higher-priority USER directive"
+            )
+            target_record.updated_at = datetime.now(timezone.utc)
+        return existing
+
+    def external_cancel_targets(
+        self,
+        record: DirectiveRecord,
+    ) -> list[tuple[DirectiveLeg, DirectiveRecord, DirectiveLeg]]:
+        result: list[tuple[DirectiveLeg, DirectiveRecord, DirectiveLeg]] = []
+        prefix = f"ls-paper:cancel:{record.directive_id}:"
+        for audit in record.legs:
+            if audit.side is not None or not str(audit.broker_event_id or "").startswith(prefix):
+                continue
+            raw_target = str(audit.broker_event_id).removeprefix(prefix)
+            try:
+                target_id = UUID(raw_target)
+            except ValueError:
+                continue
+            for target_record in self.state.directives.values():
+                target = next(
+                    (leg for leg in target_record.legs if leg.leg_id == target_id),
+                    None,
+                )
+                if target is not None:
+                    result.append((audit, target_record, target))
+                    break
+        return result
+
+    def cancel_open_orders(
+        self,
+        record: DirectiveRecord,
+        *,
+        below_priority: int | None,
+        include_direct_legs: bool = True,
+    ) -> list[DirectiveLeg]:
+        cancelled: list[DirectiveLeg] = []
+        candidates: list[DirectiveLeg] = []
+        if include_direct_legs:
+            for other in self.state.directives.values():
+                if other.directive_id == record.directive_id or other.fund_id != record.fund_id or other.book_id != record.book_id:
+                    continue
+                if below_priority is not None and other.priority >= below_priority:
+                    continue
+                candidates.extend(
+                    leg
+                    for leg in other.legs
+                    if leg.side is not None and leg.state in ACTIVE_LEG_STATES
+                )
         candidates.extend(
             leg
             for leg in self.state.lower_orders
@@ -766,7 +977,35 @@ class InMemoryDirectiveRepository:
         values = [
             record
             for record in self.state.directives.values()
-            if record.state in ACTIVE_DIRECTIVE_STATES
+            if (
+                record.state in ACTIVE_DIRECTIVE_STATES
+                and not (
+                    record.state is DirectiveState.UNKNOWN
+                    and record.action is DirectiveAction.PLACE_ORDER
+                    and any(leg.side is not None for leg in record.legs)
+                    and all(
+                        leg.state is DirectiveLegState.UNKNOWN
+                        and not leg.broker_order_id
+                        for leg in record.legs
+                        if leg.side is not None
+                    )
+                )
+            )
+            or (
+                record.state is DirectiveState.PARTIAL
+                and record.action is DirectiveAction.PLACE_ORDER
+                and record.error_code == "TRADING_DIRECTIVE_INTERNAL_ERROR"
+                and any(leg.side is not None for leg in record.legs)
+                and all(
+                    leg.state is DirectiveLegState.FILLED
+                    for leg in record.legs
+                    if leg.side is not None
+                )
+                and not any(
+                    leg.side is None and leg.state is DirectiveLegState.UNKNOWN
+                    for leg in record.legs
+                )
+            )
         ]
         values.sort(
             key=lambda item: (
@@ -1232,6 +1471,23 @@ class PostgresDirectiveRepository:
             reserved = Decimal(cur.fetchone()[0])
         return max(gross - reserved, Decimal(0))
 
+    def average_cost(self, fund_id: UUID, book_id: UUID, instrument_id: UUID) -> Decimal:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                select coalesce(
+                         sum(quantity * average_cost)
+                           / nullif(sum(quantity), 0),
+                         0
+                       )
+                  from accounting.positions
+                 where fund_id=%s and book_id=%s and instrument_id=%s
+                   and quantity > 0 and average_cost is not null
+                """,
+                (fund_id, book_id, instrument_id),
+            )
+            return Decimal(cur.fetchone()[0] or 0)
+
     def positions(self, fund_id: UUID, book_id: UUID) -> list[tuple[InstrumentRef, Decimal]]:
         with self._cursor() as cur:
             cur.execute(
@@ -1272,27 +1528,25 @@ class PostgresDirectiveRepository:
             )
         return result
 
-    def create_acknowledged_leg(self, record: DirectiveRecord, instrument: InstrumentRef, *, side: str, order_type: str, quantity: Decimal, limit_price: Decimal | None, reserve_cash: Decimal | None, reduce_only: bool, expires_at: datetime) -> DirectiveLeg:
+    def create_pending_leg(self, record: DirectiveRecord, instrument: InstrumentRef, *, side: str, order_type: str, quantity: Decimal, limit_price: Decimal | None, reserve_cash: Decimal | None, reduce_only: bool, expires_at: datetime) -> DirectiveLeg:
         _, Json = _load_driver()
         with self._cursor() as cur:
             cur.execute("select coalesce(max(leg_index),-1)+1 from execution.user_directive_legs where directive_id=%s", (record.directive_id,))
             index = int(cur.fetchone()[0])
             leg_id = uuid5(NAMESPACE_URL, f"paper-directive:{record.directive_id}:leg:{index}:{instrument.instrument_id}")
             client_id = f"paper_user_{leg_id.hex}"
-            broker_order_id = f"paper:{leg_id}"
-            broker_event_id = f"paper:ack:{leg_id}"
             cur.execute(
                 """
                 insert into execution.user_directive_legs
                   (leg_id,directive_id,leg_index,instrument_id,symbol,side,order_type,
                    time_in_force,requested_quantity,limit_price,reduce_only,state,client_order_id,
                    broker_order_id,broker_event_id,expires_at)
-                values (%s,%s,%s,%s,%s,%s,%s,'DAY',%s,%s,%s,'ACKNOWLEDGED',%s,%s,%s,%s)
+                values (%s,%s,%s,%s,%s,%s,%s,'DAY',%s,%s,%s,'PENDING',%s,%s,%s,%s)
                 on conflict (directive_id,leg_index) do nothing
                 """,
                 (leg_id, record.directive_id, index, instrument.instrument_id,
                  instrument.symbol, side, order_type, quantity, limit_price,
-                 reduce_only, client_id, broker_order_id, broker_event_id, expires_at),
+                 reduce_only, client_id, None, None, expires_at),
             )
             if side == "SELL":
                 cur.execute(
@@ -1315,6 +1569,86 @@ class PostgresDirectiveRepository:
         refreshed = self.get(record.directive_id)
         assert refreshed is not None
         return next(leg for leg in refreshed.legs if leg.leg_id == leg_id)
+
+    def create_acknowledged_leg(self, record: DirectiveRecord, instrument: InstrumentRef, *, side: str, order_type: str, quantity: Decimal, limit_price: Decimal | None, reserve_cash: Decimal | None, reduce_only: bool, expires_at: datetime) -> DirectiveLeg:
+        leg = self.create_pending_leg(
+            record,
+            instrument,
+            side=side,
+            order_type=order_type,
+            quantity=quantity,
+            limit_price=limit_price,
+            reserve_cash=reserve_cash,
+            reduce_only=reduce_only,
+            expires_at=expires_at,
+        )
+        return self.acknowledge_broker_leg(
+            record,
+            leg,
+            broker_order_id=f"paper:{leg.leg_id}",
+            broker_event_id=f"paper:ack:{leg.leg_id}",
+        )
+
+    def acknowledge_broker_leg(self, record: DirectiveRecord, leg: DirectiveLeg, *, broker_order_id: str, broker_event_id: str) -> DirectiveLeg:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                update execution.user_directive_legs
+                   set state='ACKNOWLEDGED',broker_order_id=%s,broker_event_id=%s,
+                       error_code=null,error_message=null,updated_at=now()
+                 where leg_id=%s and directive_id=%s
+                   and state in ('PENDING','UNKNOWN')
+                """,
+                (broker_order_id, broker_event_id, leg.leg_id, record.directive_id),
+            )
+        refreshed = self.get(record.directive_id)
+        assert refreshed is not None
+        return next(item for item in refreshed.legs if item.leg_id == leg.leg_id)
+
+    def mark_broker_leg_unknown(self, record: DirectiveRecord, leg: DirectiveLeg, *, error_code: str, error_message: str) -> DirectiveLeg:
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                update execution.user_directive_legs
+                   set state='UNKNOWN',error_code=%s,error_message=%s,updated_at=now()
+                 where leg_id=%s and directive_id=%s
+                   and state in ('PENDING','ACKNOWLEDGED','PARTIALLY_FILLED','UNKNOWN')
+                """,
+                (error_code, error_message[:300], leg.leg_id, record.directive_id),
+            )
+        refreshed = self.get(record.directive_id)
+        assert refreshed is not None
+        return next(item for item in refreshed.legs if item.leg_id == leg.leg_id)
+
+    def terminate_broker_leg(self, record: DirectiveRecord, leg: DirectiveLeg, *, state: DirectiveLegState, error_code: str | None = None, error_message: str | None = None) -> DirectiveLeg:
+        if state not in {
+            DirectiveLegState.REJECTED,
+            DirectiveLegState.CANCELLED,
+            DirectiveLegState.EXPIRED,
+        }:
+            raise DirectiveRepositoryError(
+                "TRADING_BROKER_STATE_INVALID", "broker terminal state is invalid", 500
+            )
+        with self._cursor() as cur:
+            cur.execute(
+                """
+                update execution.user_directive_legs
+                   set state=%s,error_code=%s,error_message=%s,updated_at=now()
+                 where leg_id=%s and directive_id=%s
+                   and state in ('PENDING','ACKNOWLEDGED','PARTIALLY_FILLED','UNKNOWN')
+                """,
+                (
+                    state.value,
+                    error_code,
+                    error_message[:300] if error_message else None,
+                    leg.leg_id,
+                    record.directive_id,
+                ),
+            )
+            self._retain_unaccounted_fill_reservation(cur, leg.leg_id)
+        refreshed = self.get(record.directive_id)
+        assert refreshed is not None
+        return next(item for item in refreshed.legs if item.leg_id == leg.leg_id)
 
     def record_paper_fill(
         self,
@@ -1657,7 +1991,198 @@ class PostgresDirectiveRepository:
         cur.execute("update execution.orders set state=%s,last_event_at=now(),version=version+1 where order_id=%s and state=%s", (target_state, order_id, state))
         return target_state
 
-    def cancel_open_orders(self, record: DirectiveRecord, *, below_priority: int | None) -> list[DirectiveLeg]:
+    def external_open_legs(
+        self,
+        record: DirectiveRecord,
+        *,
+        below_priority: int | None,
+    ) -> list[tuple[DirectiveRecord, DirectiveLeg]]:
+        query = """
+            select distinct d.directive_id
+              from execution.user_directive_legs l
+              join execution.user_directives d on d.directive_id=l.directive_id
+             where d.fund_id=%s and d.book_id=%s and d.directive_id<>%s
+               and l.side is not null
+               and l.state in ('PENDING','ACKNOWLEDGED','PARTIALLY_FILLED','UNKNOWN')
+        """
+        params: list[Any] = [record.fund_id, record.book_id, record.directive_id]
+        if below_priority is not None:
+            query += " and d.priority < %s"
+            params.append(below_priority)
+        query += " order by d.directive_id"
+        with self._cursor() as cur:
+            cur.execute(query, tuple(params))
+            directive_ids = [row[0] for row in cur.fetchall()]
+
+        candidates: list[tuple[DirectiveRecord, DirectiveLeg]] = []
+        for directive_id in directive_ids:
+            target_record = self.get(directive_id)
+            if target_record is None:
+                continue
+            candidates.extend(
+                (target_record, leg)
+                for leg in target_record.legs
+                if leg.side is not None and leg.state in ACTIVE_LEG_STATES
+            )
+        return candidates
+
+    def record_external_cancel(
+        self,
+        record: DirectiveRecord,
+        target_record: DirectiveRecord,
+        target_leg: DirectiveLeg,
+        *,
+        target_state: DirectiveLegState | None,
+        audit_state: DirectiveLegState,
+        broker_cancel_order_id: str | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> DirectiveLeg:
+        if target_state not in {
+            None,
+            DirectiveLegState.CANCELLED,
+            DirectiveLegState.UNKNOWN,
+        } or audit_state not in {
+            DirectiveLegState.CANCELLED,
+            DirectiveLegState.UNKNOWN,
+            DirectiveLegState.SKIPPED,
+        }:
+            raise DirectiveRepositoryError(
+                "TRADING_EXTERNAL_CANCEL_STATE_INVALID",
+                "external cancellation state is invalid",
+                500,
+            )
+        event_id = f"ls-paper:cancel:{record.directive_id}:{target_leg.leg_id}"
+        leg_id = uuid5(
+            NAMESPACE_URL,
+            f"paper-directive:{record.directive_id}:cancel:{target_leg.leg_id}",
+        )
+        broker_cancel_ref = (
+            "ls-paper-cancel:" + broker_cancel_order_id
+            if broker_cancel_order_id
+            else None
+        )
+        with self._cursor() as cur:
+            if target_state is not None:
+                cur.execute(
+                    """
+                    update execution.user_directive_legs
+                       set state=%s,error_code=%s,error_message=%s,updated_at=now()
+                     where leg_id=%s and directive_id=%s
+                       and state in ('PENDING','ACKNOWLEDGED','PARTIALLY_FILLED','UNKNOWN')
+                    """,
+                    (
+                        target_state.value,
+                        error_code,
+                        error_message[:300] if error_message else None,
+                        target_leg.leg_id,
+                        target_record.directive_id,
+                    ),
+                )
+                if target_state is DirectiveLegState.CANCELLED:
+                    self._retain_unaccounted_fill_reservation(cur, target_leg.leg_id)
+
+            cur.execute(
+                "select coalesce(max(leg_index),-1)+1 from execution.user_directive_legs where directive_id=%s",
+                (record.directive_id,),
+            )
+            index = int(cur.fetchone()[0])
+            cur.execute(
+                """
+                insert into execution.user_directive_legs
+                  (leg_id,directive_id,leg_index,instrument_id,symbol,state,
+                   broker_order_id,broker_event_id,error_code,error_message,
+                   target_filled_quantity)
+                values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                on conflict (leg_id) do update
+                   set state=excluded.state,
+                       broker_order_id=coalesce(excluded.broker_order_id,
+                                                execution.user_directive_legs.broker_order_id),
+                       error_code=excluded.error_code,
+                       error_message=excluded.error_message,
+                       target_filled_quantity=excluded.target_filled_quantity,
+                       updated_at=now()
+                """,
+                (
+                    leg_id,
+                    record.directive_id,
+                    index,
+                    target_leg.instrument_id,
+                    target_leg.symbol,
+                    audit_state.value,
+                    broker_cancel_ref,
+                    event_id,
+                    error_code,
+                    error_message[:300] if error_message else None,
+                    target_leg.filled_quantity,
+                ),
+            )
+            cur.execute(
+                """
+                update execution.user_directives target
+                   set state=case when exists (
+                         select 1 from execution.user_directive_legs leg
+                          where leg.directive_id=target.directive_id
+                            and leg.side is not null and leg.filled_quantity>0
+                       ) then 'PARTIAL' else 'FAILED' end,
+                       error_code='TRADING_USER_CANCELLED',
+                       error_message='superseded by a higher-priority USER directive',
+                       completed_at=null,updated_at=now(),version=version+1
+                 where target.directive_id=%s
+                   and not exists (
+                     select 1 from execution.user_directive_legs active_leg
+                      where active_leg.directive_id=target.directive_id
+                        and active_leg.side is not null
+                        and active_leg.state in
+                          ('PENDING','ACKNOWLEDGED','PARTIALLY_FILLED','UNKNOWN')
+                   )
+                """,
+                (target_record.directive_id,),
+            )
+        refreshed = self.get(record.directive_id)
+        assert refreshed is not None
+        return next(leg for leg in refreshed.legs if leg.leg_id == leg_id)
+
+    def external_cancel_targets(
+        self,
+        record: DirectiveRecord,
+    ) -> list[tuple[DirectiveLeg, DirectiveRecord, DirectiveLeg]]:
+        prefix = f"ls-paper:cancel:{record.directive_id}:"
+        result: list[tuple[DirectiveLeg, DirectiveRecord, DirectiveLeg]] = []
+        for audit in record.legs:
+            event_id = str(audit.broker_event_id or "")
+            if audit.side is not None or not event_id.startswith(prefix):
+                continue
+            try:
+                target_id = UUID(event_id.removeprefix(prefix))
+            except ValueError:
+                continue
+            with self._cursor() as cur:
+                cur.execute(
+                    "select directive_id from execution.user_directive_legs where leg_id=%s",
+                    (target_id,),
+                )
+                row = cur.fetchone()
+            if row is None:
+                continue
+            target_record = self.get(row[0])
+            if target_record is None:
+                continue
+            target = next(
+                (leg for leg in target_record.legs if leg.leg_id == target_id),
+                None,
+            )
+            if target is not None:
+                result.append((audit, target_record, target))
+        return result
+
+    def cancel_open_orders(
+        self,
+        record: DirectiveRecord,
+        *,
+        below_priority: int | None,
+        include_direct_legs: bool = True,
+    ) -> list[DirectiveLeg]:
         with self._cursor() as cur:
             # Direct-lane orders are durable legs. SELL_ALL cancels only lower
             # priority directives; CANCEL_ALL passes None and cancels all peers.
@@ -1667,10 +2192,16 @@ class PostgresDirectiveRepository:
                   from execution.user_directive_legs l
                   join execution.user_directives d on d.directive_id=l.directive_id
                  where d.fund_id=%s and d.book_id=%s and d.directive_id<>%s
+                   and %s
                    and l.side is not null
                    and l.state in ('PENDING','ACKNOWLEDGED','PARTIALLY_FILLED','UNKNOWN')
             """
-            params: list[Any] = [record.fund_id, record.book_id, record.directive_id]
+            params: list[Any] = [
+                record.fund_id,
+                record.book_id,
+                record.directive_id,
+                include_direct_legs,
+            ]
             if below_priority is not None:
                 query += " and d.priority < %s"
                 params.append(below_priority)
@@ -1786,13 +2317,16 @@ class PostgresDirectiveRepository:
             # event before the directive can claim success.
             cur.execute(
                 """
-                select distinct target.order_id,target.state,
+                select target.order_id,target.state,
                        target.requested_quantity,target.filled_quantity
-                  from execution.user_directive_legs leg
-                  join execution.orders target
-                    on target.order_id=leg.linked_order_id
-                 where leg.directive_id=%s and leg.side is null
-                   and leg.state='UNKNOWN'
+                  from execution.orders target
+                 where exists (
+                       select 1
+                         from execution.user_directive_legs leg
+                        where leg.directive_id=%s and leg.side is null
+                          and leg.state='UNKNOWN'
+                          and leg.linked_order_id=target.order_id
+                 )
                    and target.broker_adapter='paper'
                    and target.state='CANCEL_PENDING'
                  for update of target
@@ -1858,7 +2392,56 @@ class PostgresDirectiveRepository:
                 """
                 select directive_id
                   from execution.user_directives
-                 where state in ('RECEIVED','RUNNING','IN_PROGRESS','UNKNOWN')
+                 where (
+                       state in ('RECEIVED','RUNNING','IN_PROGRESS','UNKNOWN')
+                   and not (
+                           state='UNKNOWN'
+                       and action='PLACE_ORDER'
+                       and exists (
+                             select 1
+                               from execution.user_directive_legs unknown_order_leg
+                              where unknown_order_leg.directive_id=
+                                    execution.user_directives.directive_id
+                                and unknown_order_leg.side is not null
+                       )
+                       and not exists (
+                             select 1
+                               from execution.user_directive_legs identified_order_leg
+                              where identified_order_leg.directive_id=
+                                    execution.user_directives.directive_id
+                                and identified_order_leg.side is not null
+                                and identified_order_leg.broker_order_id is not null
+                       )
+                   )
+                 )
+                    or (
+                         state='PARTIAL'
+                     and action='PLACE_ORDER'
+                     and error_code='TRADING_DIRECTIVE_INTERNAL_ERROR'
+                     and exists (
+                           select 1
+                             from execution.user_directive_legs recoverable_leg
+                            where recoverable_leg.directive_id=
+                                  execution.user_directives.directive_id
+                              and recoverable_leg.side is not null
+                     )
+                     and not exists (
+                           select 1
+                             from execution.user_directive_legs unfinished_leg
+                            where unfinished_leg.directive_id=
+                                  execution.user_directives.directive_id
+                              and unfinished_leg.side is not null
+                              and unfinished_leg.state<>'FILLED'
+                     )
+                     and not exists (
+                           select 1
+                             from execution.user_directive_legs unknown_cancel
+                            where unknown_cancel.directive_id=
+                                  execution.user_directives.directive_id
+                              and unknown_cancel.side is null
+                              and unknown_cancel.state='UNKNOWN'
+                     )
+                    )
                  order by priority desc,updated_at,created_at,directive_id
                  limit %s
                 """,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timezone
+import inspect
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
@@ -12,6 +13,7 @@ from fastapi.testclient import TestClient
 from apps.api import user_order_workflow as workflow
 from apps.api import user_orders
 from apps.api.user_order_workflow import (
+    PostgresUserOrderRequestRepository,
     UserOrderRequestRecord,
     UserOrderWorkflowUnavailable,
 )
@@ -198,6 +200,66 @@ def test_owner_can_read_admitted_request_before_directive_exists() -> None:
     }
     repository.mark_outcome.assert_not_called()
     read_status.assert_not_called()
+
+
+def test_unknown_status_recovers_committed_directive_without_resubmission() -> None:
+    unknown = replace(
+        _record(state="UNKNOWN"),
+        canonical_payload={"symbol": "005930"},
+        payload_sha256="c" * 64,
+        error_code="trading_api_unavailable",
+        error_message="submission response was ambiguous",
+    )
+    bound = replace(unknown, directive_id=DIRECTIVE_ID)
+    completed = replace(
+        bound,
+        state="COMPLETED",
+        error_code=None,
+        error_message=None,
+    )
+    repository = MagicMock()
+    repository.get.return_value = unknown
+    repository.find_committed_directive.return_value = DIRECTIVE_ID
+    repository.mark_outcome.side_effect = [bound, completed]
+    directive = _directive(state="COMPLETED")
+
+    with (
+        patch.object(user_orders, "user_order_repository", return_value=repository),
+        patch.object(
+            user_orders, "require_trading_book_access", return_value=_access()
+        ),
+        patch.object(
+            user_orders,
+            "read_verified_paper_directive_status",
+            return_value=directive,
+        ),
+    ):
+        response = _client().get(
+            f"/ui/paper-order-requests/{ORDER_REQUEST_ID}"
+        )
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "COMPLETED"
+    assert response.json()["directive"]["directive_id"] == DIRECTIVE_ID
+    repository.find_committed_directive.assert_called_once_with(unknown)
+    assert repository.mark_outcome.call_count == 2
+
+
+def test_postgres_unknown_recovery_matches_durable_authority_and_idempotency() -> None:
+    source = inspect.getsource(
+        PostgresUserOrderRequestRepository.find_committed_directive
+    )
+
+    for field in (
+        "user_id=%s",
+        "fund_id=%s",
+        "book_id=%s",
+        "idempotency_key=%s",
+        "action=%s",
+        "source_order_request_id",
+    ):
+        assert field in source
+    assert "payload_sha256=%s" not in source
 
 
 def test_unknown_request_is_404_without_authority_or_trading_lookup() -> None:

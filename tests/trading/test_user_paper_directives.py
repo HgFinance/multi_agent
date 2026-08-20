@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import inspect
 import json
 import sys
 from contextlib import contextmanager
@@ -35,6 +36,11 @@ from directives.repository import (  # noqa: E402
     InstrumentRef,
     PostgresDirectiveRepository,
     _MemoryState,
+)
+from broker.ls_paper_broker import (  # noqa: E402
+    LSPaperBrokerError,
+    LSPaperOrderAck,
+    LSPaperOrderStatus,
 )
 from directives.service import DirectiveServiceError, UserDirectiveService  # noqa: E402
 from directives.worker import run_once as run_directive_worker_once  # noqa: E402
@@ -233,6 +239,254 @@ def test_execute_binding_one_time_jti_idempotency_and_user_risk_bypass():
     assert record.error_code is None
     assert len(h.repository.state.direct_fills) == 1
     assert run_directive_worker_once(h.service, batch=100, now=NOW)["reconciled"] == 0
+
+
+def test_ls_paper_adapter_uses_broker_fill_and_never_resubmits() -> None:
+    class Broker:
+        def __init__(self) -> None:
+            self.placements = 0
+
+        def place_order(self, **_kwargs):
+            self.placements += 1
+            return LSPaperOrderAck("6439", "111951000", "005930")
+
+        def order_status(self, broker_order_id):
+            assert broker_order_id == "6439"
+            return LSPaperOrderStatus(
+                broker_order_id="6439",
+                state="FILLED",
+                requested_quantity=Decimal(1),
+                filled_quantity=Decimal(1),
+                fill_price=Decimal(70000),
+                order_date=NOW.date(),
+            )
+
+    h = Harness()
+    broker = Broker()
+    h.service = UserDirectiveService(
+        h.repository,
+        h.market,
+        external_broker=broker,  # type: ignore[arg-type]
+    )
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("100000"))
+    request = h.request(DirectiveAction.PLACE_ORDER, key="idem-ls-paper-0001")
+
+    record = h.service.submit(request, _execute_token(request, h.user), now=NOW)
+
+    assert broker.placements == 1
+    assert record.legs[0].broker_order_id == "ls-paper:6439"
+    assert record.legs[0].state is DirectiveLegState.FILLED
+    fill = next(iter(h.repository.state.direct_fills.values()))
+    assert fill.source == "ls-paper:CSPAQ13700"
+
+    same = h.service.submit(
+        request,
+        _execute_token(request, h.user),
+        now=NOW,
+    )
+    assert same.directive_id == record.directive_id
+    assert broker.placements == 1
+    assert len(h.repository.state.direct_fills) == 1
+
+
+def test_ls_paper_ambiguous_submission_stays_unknown_without_retry() -> None:
+    class Broker:
+        def __init__(self) -> None:
+            self.placements = 0
+
+        def place_order(self, **_kwargs):
+            self.placements += 1
+            raise LSPaperBrokerError(
+                "LS_PAPER_ORDER_AMBIGUOUS",
+                "transport failed",
+                ambiguous=True,
+            )
+
+        def order_status(self, _broker_order_id):
+            raise AssertionError("an order without broker id cannot be queried")
+
+    h = Harness()
+    broker = Broker()
+    h.service = UserDirectiveService(
+        h.repository,
+        h.market,
+        external_broker=broker,  # type: ignore[arg-type]
+    )
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("100000"))
+    request = h.request(DirectiveAction.PLACE_ORDER, key="idem-ls-paper-unknown")
+
+    record = h.service.submit(request, _execute_token(request, h.user), now=NOW)
+    assert record.state is DirectiveState.UNKNOWN
+    assert record.legs[0].state is DirectiveLegState.UNKNOWN
+    assert broker.placements == 1
+    assert h.repository.active_directives(limit=100) == []
+
+    run_directive_worker_once(h.service, batch=100, now=NOW)
+    assert broker.placements == 1
+    assert len(h.repository.state.direct_fills) == 0
+
+
+def test_ls_paper_cancel_all_calls_broker_before_terminal_projection() -> None:
+    class Broker:
+        def __init__(self) -> None:
+            self.placements = 0
+            self.cancellations = 0
+
+        def place_order(self, **_kwargs):
+            self.placements += 1
+            return LSPaperOrderAck("6439", "111951000", "005930")
+
+        def order_status(self, broker_order_id):
+            assert broker_order_id == "6439"
+            return LSPaperOrderStatus(
+                broker_order_id="6439",
+                state="ACKNOWLEDGED",
+                requested_quantity=Decimal(1),
+                filled_quantity=Decimal(0),
+                fill_price=None,
+                order_date=NOW.date(),
+            )
+
+        def cancel_order(self, **kwargs):
+            assert kwargs == {
+                "broker_order_id": "6439",
+                "symbol": "005930",
+                "quantity": Decimal(1),
+            }
+            self.cancellations += 1
+            return LSPaperOrderAck("6440", "112001000", "005930")
+
+    h = Harness()
+    broker = Broker()
+    h.service = UserDirectiveService(
+        h.repository,
+        h.market,
+        external_broker=broker,  # type: ignore[arg-type]
+    )
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("100000"))
+    place = h.request(
+        DirectiveAction.PLACE_ORDER,
+        key="idem-ls-paper-cancel-target",
+        payload={
+            "instrument_id": str(h.instrument.instrument_id),
+            "symbol": "005930",
+            "side": "BUY",
+            "quantity": "1",
+            "order_type": "LIMIT",
+            "limit_price": "69000",
+            "time_in_force": "DAY",
+        },
+    )
+    placed = h.service.submit(place, _execute_token(place, h.user), now=NOW)
+    assert placed.legs[0].state is DirectiveLegState.ACKNOWLEDGED
+
+    cancel = h.request(DirectiveAction.CANCEL_ALL, key="idem-ls-paper-cancel-all")
+    cancelled = h.service.submit(cancel, _execute_token(cancel, h.user), now=NOW)
+
+    assert broker.placements == 1
+    assert broker.cancellations == 1
+    assert cancelled.state is DirectiveState.COMPLETED
+    assert cancelled.legs[0].state is DirectiveLegState.CANCELLED
+    assert cancelled.legs[0].broker_order_id == "ls-paper-cancel:6440"
+    assert placed.legs[0].state is DirectiveLegState.CANCELLED
+    assert placed.state is DirectiveState.FAILED
+
+
+def test_ls_paper_ambiguous_cancel_is_never_reissued() -> None:
+    class Broker:
+        def __init__(self) -> None:
+            self.cancellations = 0
+
+        def place_order(self, **_kwargs):
+            return LSPaperOrderAck("6439", "111951000", "005930")
+
+        def order_status(self, _broker_order_id):
+            return LSPaperOrderStatus(
+                broker_order_id="6439",
+                state="ACKNOWLEDGED",
+                requested_quantity=Decimal(1),
+                filled_quantity=Decimal(0),
+                fill_price=None,
+                order_date=NOW.date(),
+            )
+
+        def cancel_order(self, **_kwargs):
+            self.cancellations += 1
+            raise LSPaperBrokerError(
+                "LS_PAPER_ORDER_AMBIGUOUS",
+                "transport failed",
+                ambiguous=True,
+            )
+
+    h = Harness()
+    broker = Broker()
+    h.service = UserDirectiveService(
+        h.repository,
+        h.market,
+        external_broker=broker,  # type: ignore[arg-type]
+    )
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("100000"))
+    place = h.request(
+        DirectiveAction.PLACE_ORDER,
+        key="idem-ls-paper-ambiguous-cancel-target",
+        payload={
+            "instrument_id": str(h.instrument.instrument_id),
+            "symbol": "005930",
+            "side": "BUY",
+            "quantity": "1",
+            "order_type": "LIMIT",
+            "limit_price": "69000",
+            "time_in_force": "DAY",
+        },
+    )
+    h.service.submit(place, _execute_token(place, h.user), now=NOW)
+    cancel = h.request(
+        DirectiveAction.CANCEL_ALL,
+        key="idem-ls-paper-ambiguous-cancel-all",
+    )
+    waiting = h.service.submit(cancel, _execute_token(cancel, h.user), now=NOW)
+
+    assert waiting.state is DirectiveState.UNKNOWN
+    assert waiting.legs[0].state is DirectiveLegState.UNKNOWN
+    assert broker.cancellations == 1
+
+    run_directive_worker_once(h.service, batch=100, now=NOW)
+    run_directive_worker_once(h.service, batch=100, now=NOW)
+    assert broker.cancellations == 1
+
+
+def test_worker_recovers_filled_internal_error_without_duplicate_fill():
+    h = Harness()
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("100000"))
+    request = h.request(DirectiveAction.PLACE_ORDER, key="idem-filled-recovery")
+    original_reconcile = h.repository.reconcile_cancel_legs
+
+    def fail_after_fill(record):
+        if any(leg.state is DirectiveLegState.FILLED for leg in record.legs):
+            raise RuntimeError("simulated post-fill SQL failure")
+        return original_reconcile(record)
+
+    h.repository.reconcile_cancel_legs = fail_after_fill  # type: ignore[method-assign]
+
+    with pytest.raises(DirectiveServiceError) as failed:
+        h.service.submit(request, _execute_token(request, h.user), now=NOW)
+
+    assert failed.value.code == "TRADING_DIRECTIVE_INTERNAL_ERROR"
+    record = next(iter(h.repository.state.directives.values()))
+    assert record.state is DirectiveState.PARTIAL
+    assert record.legs[0].state is DirectiveLegState.FILLED
+    assert len(h.repository.state.direct_fills) == 1
+
+    h.repository.acknowledge_direct_fills(record.legs[0].leg_id)
+    h.repository.reconcile_cancel_legs = original_reconcile  # type: ignore[method-assign]
+
+    recovered = run_directive_worker_once(h.service, batch=100, now=NOW)
+
+    assert recovered["reconciled"] == 1
+    assert recovered["errors"] == []
+    assert record.state is DirectiveState.COMPLETED
+    assert record.error_code is None
+    assert len(h.repository.state.direct_fills) == 1
 
 
 def test_status_read_proof_binds_subject_fund_book_and_directive():
@@ -499,6 +753,17 @@ def test_postgres_directive_sql_respects_immutable_proofs_and_locks_only_orders(
     assert "for update of o" in cancel_open_orders
     assert postgres_source.count("symbol ~ '^[0-9a-z]{6}$'") >= 3
     assert "symbol ~ '^[0-9]{6}$'" not in postgres_source
+
+
+def test_postgres_cancel_reconciliation_does_not_mix_distinct_with_row_locking():
+    source = inspect.getsource(
+        PostgresDirectiveRepository.reconcile_cancel_legs
+    ).lower()
+
+    assert "select distinct" not in source
+    assert "where exists (" in source
+    assert "leg.linked_order_id=target.order_id" in source
+    assert "for update of target" in source
 
 
 def test_trading_contract_strip_uppers_exact_alphanumeric_krx_symbol() -> None:

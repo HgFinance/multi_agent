@@ -1,10 +1,15 @@
-# AWS EC2 PAPER-order release deployment
+# AWS EC2 PAPER-order runtime
 
-This deployment keeps the existing `/home/ubuntu/hgfinance` checkout entirely
-read-only.  A dedicated bare repository creates detached release worktrees
-under `/home/ubuntu/hgfinance-releases/worktrees`, and Compose always receives
-the explicit project name `hedgefund`, the repository root compose file and
-`deploy/aws/docker-compose.paper-order.yml`.
+AWS production uses one canonical checkout:
+
+`/home/ubuntu/hgfinance`
+
+Detached deployment worktrees are retired. Do not recreate
+`/home/ubuntu/hgfinance-releases` and do not restore the retired
+detached-release deployer.
+
+The AWS runtime Compose model is the canonical repository root compose file
+combined with `deploy/aws/docker-compose.paper-order.yml`.
 
 ## Runtime boundary
 
@@ -71,11 +76,14 @@ The source `.env` must contain valid values for:
   `MCP_TRADING_ORDER_API_KEY`, `TRADING_SERVICE_AUTH_SECRET`,
   `TRADING_INTERNAL_SERVICE_AUTH_SECRET`, and
   `CEO_DISCORD_INGRESS_API_KEY`;
-- four distinct, URL-safe, at-least-32-character private database credentials
+- six distinct, URL-safe, at-least-32-character private database credentials
   `HEDGEFUND_RUNTIME_DB_PASSWORD`, `HEDGEFUND_ORDER_DB_PASSWORD`,
   `HEDGEFUND_TRADING_DB_PASSWORD`, and
-  `HEDGEFUND_ACCOUNTING_DB_PASSWORD`.  These four and the four service
-  credentials must be eight different values.
+  `HEDGEFUND_ACCOUNTING_DB_PASSWORD`,
+  `HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD`, and
+  `HEDGEFUND_CONDITIONAL_WORKER_DB_PASSWORD`. These six and the four service
+  credentials must be ten different values. The two conditional-rule logins
+  cannot assume each other's role and neither can write USER_DIRECTIVE rows.
 
 `PORTFOLIO_CORS_ALLOW_ORIGINS` is optional while no browser UI is deployed.
 Leave it absent or empty to deny every browser cross-origin read.  After a UI
@@ -97,14 +105,9 @@ A public key remains necessary only if legacy HS256 access tokens must be
 verified through Supabase Auth `/user`; never put an `sb_secret_` or service
 role key in either browser-key setting.
 
-`scripts/configure_paper_order_env.py --runtime aws` can atomically
-create/preserve all eight service/database credentials without printing their
-values.  Invalid, short, duplicate, placeholder or non-URL-safe database
-credentials are independently rotated.  The deployer imports
-the existing `.env` once into the mode-0600 file
-`/home/ubuntu/hgfinance-releases/state/runtime.env` and runs the configurator
-there, so the dirty source checkout is not changed.  To deliberately import
-later source `.env` edits, use `--refresh-runtime-env`.
+`scripts/configure_paper_order_env.py --runtime aws` remains the
+credential configuration utility. Detached-release `runtime.env` state under
+`/home/ubuntu/hgfinance-releases` is retired and must not be recreated.
 
 `.env.example` is the repository's only tracked environment template. Do not
 maintain a second `.env.aws.template`: it drifts from Compose and creates
@@ -119,107 +122,24 @@ container would then store the encoded text as the literal server password.
 
 ## Deploy
 
-The first activation has no previous release to restore, so it requires an
-explicit acknowledgement:
+The detached-release deployment workflow has been retired.
 
-```bash
-bash scripts/aws_deploy_paper_order_release.sh \
-  --ref main \
-  --allow-first-deploy
-```
+Do not:
 
-Later releases need only:
+- recreate `/home/ubuntu/hgfinance-releases`;
+- create detached deployment worktrees;
+- restore `scripts/aws_deploy_paper_order_release.sh`;
+- operate production from a secondary checkout.
 
-```bash
-bash /home/ubuntu/hgfinance-releases/current/scripts/aws_deploy_paper_order_release.sh \
-  --ref main
-```
+The canonical repository is `/home/ubuntu/hgfinance`.
 
-The current deployer fetches the requested commit and, before changing runtime
-state, hands control to that target worktree's deploy script. This one-time
-self-handoff ensures a release can fix its own deployment gates instead of
-being deployed by stale logic from the previous release.
+Before any production-mutating Compose operation, verify the intended Compose
+files and confirm that existing containers use
+`/home/ubuntu/hgfinance` as `com.docker.compose.project.working_dir`.
 
-On this host, never run `docker compose up`, `build`, `restart` or `pull` from
-`/home/ubuntu/hgfinance`.  That legacy checkout is not a deployment root: even
-one service-specific invocation can silently replace a release-owned container
-with a model that lacks the AWS overlay (including the private Discord ingress
-contract).  Operational Compose commands must use the release deployer above;
-inspect-only commands should also use both files and the private runtime env.
-
-The deployment sequence is fail-closed:
-
-1. fetch into the dedicated bare repository and create a detached worktree;
-2. validate the secret contract and merged Compose model without printing it;
-3. build only the LS realtime reader, five PAPER order-path services and two
-   one-shot database jobs before touching running services; when a previous
-   release exists, first rebuild its five local managed images from that exact
-   worktree and protect all six prior image IDs (including external Trading
-   Hermes) under private rollback tags, so mutable Compose tags cannot defeat
-   rollback. Existing external images are never refreshed merely because a
-   mutable tag exists;
-4. when the Timescale container already exists, require it to be running and
-   write mode-0600 custom-format dumps to
-   `hgfinance-releases/backups/<commit>/` **before** any Compose reconciliation;
-   a first deployment with no container skips this empty/initial backup;
-5. start/reuse only `timescaledb`, create `control`, replay all 88 Supabase
-   migrations there, replay all 8 Timescale migrations in `market` with
-   per-file atomic history, and idempotently provision/audit the four
-   non-superuser runtime logins;
-6. read the LS KRX instrument master, cross-check the repository-reviewed 2026
-   exchange calendar against observed daily bars, and fail unless the full
-   active-stock catalog, unique `005930` mapping, applicable REGULAR session,
-   PAPER OWNER+TRADER scope and positive KRW cash are present;
-7. from the detached release, atomically merge only Trading's
-   `mcp_servers.user-paper-order` entry and the marked direct-user PAPER
-   sections in CEO/Trading `SOUL.md` into `/home/ubuntu/.hermes/profiles`,
-   preserving host-only integrations and rendering the Trading MCP Bearer from
-   private `runtime.env` without logging it;
-8. stop the CEO and Trading Hermes gateways, leave unrelated team services and
-   their image tags untouched, then recreate and verify LS realtime, Trading
-   API, and MCP+BFF in that order; only after those deterministic backends are
-   ready may both Hermes gateways be recreated;
-9. require those six managed containers' Compose project, working directory, config
-   files and config hash to match the detached release; also require the CEO
-   and BFF to have the private Discord ingress contract and require an
-   authenticated empty-object probe to reach BFF validation as HTTP 422,
-   without printing its bearer credential or creating a directive;
-10. inside the running Trading Hermes container, require an authenticated MCP
-   tools/list exchange that discovers exactly `process_user_paper_order`;
-11. update the `current` symlink only after all gates pass.
-
-If a post-switch health gate fails, the protected prior image IDs are restored
-to their original Compose tags and the same ordered backend-before-Hermes
-activation is force-recreated from the previous worktree. Ownership, ingress
-and MCP discovery are rechecked before rollback is considered usable. Database
-migrations are additive and are not automatically reversed; the protected
-pre-migration dumps remain available for an operator-controlled restore. The deployer never runs
-`git pull`, `git reset`, `git clean`, `docker compose down`, or volume removal
-against the legacy checkout or live data.
-
-Each deployment also keeps a mode-0700 profile backup below
-`hgfinance-releases/profile-backups/`.  It contains only Trading `config.yaml`
-and the two managed `SOUL.md` files.  A failure before or after the service
-switch restores those prior files before rollback.  CEO `config.yaml`,
-host-only Trading settings and MCP servers, profile credentials (`auth.json`),
-memories, sessions, logs, state and shared Kanban files are never replaced or
-backed up by this step.
-
-## Existing 61-day market database
-
-A market schema containing data but no `hgfinance_migrations` history stops the
-deployment.  Do not replay `001_initial_market_data.sql` blindly: it contains
-non-idempotent table creation.  For the known transferred 61-day database, use:
-
-```bash
-bash scripts/aws_deploy_paper_order_release.sh \
-  --ref main \
-  --adopt-existing-market
-```
-
-Adoption writes history only after all expected relations, feature columns,
-v4/v5 constraints and bounded Timescale compression jobs pass.  A partial or
-drifted schema remains blocked.  Subsequent migrations replay normally.
+Do not run `docker compose down`, remove production volumes, reset live
+databases, or restart the model/vLLM as part of ordinary application
+deployment.
 
 ## PAPER principal provisioned by default
 

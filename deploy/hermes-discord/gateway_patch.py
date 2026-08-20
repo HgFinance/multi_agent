@@ -7,6 +7,7 @@ history backfill policy, or the Hermes session/worker implementation.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import functools
 import logging
@@ -417,6 +418,12 @@ def _forward_to_ingress(message: Any, adapter: Any) -> bool:
     return True
 
 
+async def _forward_to_ingress_async(message: Any, adapter: Any) -> bool:
+    """Forward without blocking Discord's heartbeat/event-loop thread."""
+
+    return await asyncio.to_thread(_forward_to_ingress, message, adapter)
+
+
 async def _ensure_request_thread(adapter: Any, message: Any) -> Any:
     """Create exactly one HgFinance request thread for a CEO Discord request.
 
@@ -632,7 +639,7 @@ def _wrap_handle_message(cls: type[Any]) -> None:
         # actual request-thread id. Once selected, this boundary owns the
         # message even when the outcome is ambiguous; replaying through direct
         # Hermes could create a second workflow after the BFF committed.
-        if _forward_to_ingress(routed_message, self):
+        if await _forward_to_ingress_async(routed_message, self):
             return True
 
         try:

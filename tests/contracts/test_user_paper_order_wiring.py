@@ -25,7 +25,12 @@ def test_local_bff_separates_paper_orders_from_read_only_broker_projection() -> 
     assert bff["TRADING_SERVICE_AUTH_AUDIENCE"] == "${TRADING_SERVICE_AUTH_AUDIENCE:-trading-api}"
     assert bff["USER_PAPER_ORDER_WORKFLOW_ENABLED"] == "true"
     assert bff["ENABLE_LS_ORDER_EVENTS"] == "${ENABLE_LS_ORDER_EVENTS:-false}"
-    assert bff["LS_ENV"] == "${LS_ENV:-PAPER}"
+    assert bff["ENABLE_BROKER_SNAPSHOT"] == "${ENABLE_BROKER_SNAPSHOT:-false}"
+    assert bff["BROKER_SNAPSHOT_CACHE_SECONDS"] == "${BROKER_SNAPSHOT_CACHE_SECONDS:-10}"
+    assert bff["ENABLE_LS_MARKET_DATA"] == "${ENABLE_LS_MARKET_DATA:-false}"
+    assert bff["ENABLE_LS_ACCOUNT_DATA"] == "${ENABLE_LS_ACCOUNT_DATA:-false}"
+    assert bff["LS_ENV"] == "${LS_ENV:-LIVE}"
+    assert "LS_MARKET_ENV" not in bff
     assert "LS_ACCOUNT_NO_PAPER" in bff
     assert not any("LIVE" in key for key in bff)
 
@@ -43,7 +48,10 @@ def test_eb_keeps_broker_projection_out_of_strict_paper_trading_api() -> None:
     assert bff["TRADING_API_URL"] == "http://trading-api:8000"
     assert bff["USER_PAPER_ORDER_WORKFLOW_ENABLED"] == "false"
     assert bff["ENABLE_LS_ORDER_EVENTS"] == "${ENABLE_LS_ORDER_EVENTS:-false}"
-    assert bff["LS_ENV"] == "${LS_ENV:-PAPER}"
+    assert bff["ENABLE_LS_MARKET_DATA"] == "${ENABLE_LS_MARKET_DATA:-false}"
+    assert bff["ENABLE_LS_ACCOUNT_DATA"] == "${ENABLE_LS_ACCOUNT_DATA:-false}"
+    assert bff["LS_ENV"] == "${LS_ENV:-LIVE}"
+    assert "LS_MARKET_ENV" not in bff
     assert "LS_ACCOUNT_NO_PAPER" in bff
     assert trading["PAPER_DB"] == "${PAPER_DB:-true}"
     assert not any("LIVE" in key or key.startswith("LS_") for key in trading)

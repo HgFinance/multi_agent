@@ -262,6 +262,42 @@ _READ_ONLY_RE = re.compile(
     r"(?:알려\s*줘|알려줘|보여\s*줘|보여줘|조회|내역|상태|추천|분석|"
     r"조사|설명|확인|취소율|주문했|체결됐|얼마(?:야|인지)?)"
 )
+# A holdings check immediately followed by an imperative sell is a safety
+# preflight, not a read-only speech act. Keep the accepted grammar narrow so
+# an arbitrary sentence containing "확인" cannot cross the execution boundary.
+_HOLDINGS_PREFLIGHT_RE = re.compile(
+    r"(?<![가-힣A-Za-z0-9])(?:(?:내|현재)\s*)?(?:보유\s*)?"
+    r"(?:수량|잔고)(?:을|를)?\s*(?:확인|조회)"
+    r"(?:하고|해서|한\s*(?:뒤|후)|\s*후)(?![가-힣A-Za-z0-9])"
+)
+_PAPER_ACCOUNT_SCOPE_RE = re.compile(
+    r"(?<![가-힣A-Za-z0-9])(?:내\s*)?"
+    r"(?:paper|페이퍼|모의\s*투자|모의)\s*계좌(?:에서|에|로)?"
+    r"(?![가-힣A-Za-z0-9])",
+    re.IGNORECASE,
+)
+_POSITION_SCOPE_RE = re.compile(
+    r"(?<![가-힣A-Za-z0-9])(?:내\s*)?(?:계좌에\s*)?"
+    r"(?:보유\s*(?:중인|하고\s*있는|한)|가지고\s*있는|갖고\s*있는)"
+    r"(?![가-힣A-Za-z0-9])"
+)
+_IMMEDIATE_EXECUTION_RE = re.compile(
+    r"(?<![가-힣A-Za-z0-9])(?:지금|바로|당장)(?![가-힣A-Za-z0-9])"
+)
+_ORDER_SUBMISSION_RE = re.compile(
+    r"(?<![가-힣A-Za-z0-9])(?:주문(?:을)?\s*)?"
+    r"(?:넣어\s*(?:줘|주세요)|내\s*(?:줘|주세요)|"
+    r"실행(?:해\s*줘|해줘|해\s*주세요|해주세요)?|"
+    r"처리(?:해\s*줘|해줘|해\s*주세요|해주세요)|요청)"
+    r"(?![가-힣A-Za-z0-9])"
+)
+_PLACE_ORDER_ADORNMENT_PATTERNS = (
+    _HOLDINGS_PREFLIGHT_RE,
+    _PAPER_ACCOUNT_SCOPE_RE,
+    _POSITION_SCOPE_RE,
+    _IMMEDIATE_EXECUTION_RE,
+    _ORDER_SUBMISSION_RE,
+)
 _EXAMPLE_RE = re.compile(
     r"(?:예시|예를\s*들|라고\s*(?:입력|말|쓰|하면)|문구|무슨\s*뜻|"
     r"프롬프트|테스트|따옴표|[\"'“”‘’])"
@@ -355,11 +391,31 @@ def _unsafe_language(raw_text: str) -> OrderReasonCode | None:
         return OrderReasonCode.NEGATED_OR_PROHIBITED
     if _CONDITIONAL_RE.search(raw_text):
         return OrderReasonCode.CONDITIONAL_OR_HYPOTHETICAL
-    if _READ_ONLY_RE.search(raw_text):
+    # Remove only the explicit holdings-preflight clause before deciding
+    # whether the whole utterance is read-only. Question/advice and negation
+    # checks still run on the exact source text and remain fail-closed.
+    executable_text = _HOLDINGS_PREFLIGHT_RE.sub(" ", raw_text)
+    if _READ_ONLY_RE.search(executable_text):
         return OrderReasonCode.READ_ONLY_REQUEST
     if _QUESTION_RE.search(raw_text):
         return OrderReasonCode.QUESTION_OR_ADVICE
     return None
+
+
+def _place_order_adornment_spans(raw_text: str) -> list[tuple[int, int]]:
+    """Return narrow, non-authoritative language spans around one order.
+
+    These phrases may describe PAPER scope, a holdings preflight, timing, or a
+    polite submission wrapper. They never supply instrument, side, quantity,
+    price, or order type; those fields still require exact evidence.
+    """
+
+    spans = {
+        match.span()
+        for pattern in _PLACE_ORDER_ADORNMENT_PATTERNS
+        for match in pattern.finditer(raw_text)
+    }
+    return sorted(spans)
 
 
 def is_clearly_non_executable_order_language(raw_text: str) -> bool:
@@ -534,6 +590,11 @@ def _verify_place_order(
     candidate: HermesOrderCandidate,
     evidence: Mapping[EvidenceField, TextEvidence],
 ) -> OrderLanguageResult:
+    preflight_matches = list(_HOLDINGS_PREFLIGHT_RE.finditer(raw_text))
+    if len(preflight_matches) > 1:
+        return _clarify(digest, OrderReasonCode.UNSUPPORTED_TEXT)
+    adornment_spans = _place_order_adornment_spans(raw_text)
+
     buy_matches = list(_BUY_RE.finditer(raw_text))
     sell_matches = list(_SELL_RE.finditer(raw_text))
     if bool(buy_matches) == bool(sell_matches):
@@ -673,6 +734,7 @@ def _verify_place_order(
         quantity_match.span(),
         (instrument.start, instrument.end),
     ]
+    consumed.extend(adornment_spans)
     if order_type_span is not None:
         consumed.append(order_type_span)
     if price_span is not None:

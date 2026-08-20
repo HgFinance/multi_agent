@@ -7,6 +7,7 @@ import os
 import time
 from datetime import datetime, timezone
 
+from broker.ls_paper_broker import LSPaperBroker
 from .market_data import HttpMarketDataProvider
 from .repository import PostgresDirectiveRepository
 from .service import DirectiveServiceError, UserDirectiveService, require_paper_execution_mode
@@ -33,10 +34,11 @@ def _settings() -> tuple[float, int]:
 
 def build_service() -> UserDirectiveService:
     require_paper_execution_mode()
-    if os.environ.get("TRADING_BROKER_ADAPTER", "").strip().lower() != "paper":
+    adapter = os.environ.get("TRADING_BROKER_ADAPTER", "").strip().lower()
+    if adapter not in {"paper", "ls-paper"}:
         raise DirectiveServiceError(
             "TRADING_LIVE_ADAPTER_FORBIDDEN",
-            "directive worker only supports the paper adapter",
+            "directive worker only supports paper or ls-paper adapter",
             503,
         )
     if os.environ.get("TRADING_DIRECTIVE_REPOSITORY", "").strip().lower() != "postgres":
@@ -51,7 +53,9 @@ def build_service() -> UserDirectiveService:
             "TRADING_DIRECTIVE_DB_UNAVAILABLE", "DATABASE_URL is required", 503
         )
     return UserDirectiveService(
-        PostgresDirectiveRepository(dsn), HttpMarketDataProvider.from_env()
+        PostgresDirectiveRepository(dsn),
+        HttpMarketDataProvider.from_env(),
+        external_broker=LSPaperBroker.from_env() if adapter == "ls-paper" else None,
     )
 
 
