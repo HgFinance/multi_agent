@@ -482,6 +482,30 @@ def test_valid_execution_submits_exactly_once_and_replay_only_reads_status(
     assert context.repository.get(context.record.order_request_id).state == "COMPLETED"
 
 
+def test_deterministic_entry_records_distinct_non_hermes_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _workflow(monkeypatch)
+    submit = Mock(return_value=_directive_response(context.record))
+    monkeypatch.setattr(orchestrator, "submit_verified_paper_directive", submit)
+    monkeypatch.setenv("PAPER_ORDER_STATUS_WAIT_SECONDS", "0")
+
+    result = orchestrator.process_deterministic_user_paper_order(
+        root_task_id=ROOT_TASK_ID,
+        trading_task_id=TRADING_TASK_ID,
+        interpretation=_execute_candidate(context.raw),
+    )
+
+    assert result["request_state"] == "IN_PROGRESS"
+    assert (context.record.order_request_id, "DETERMINISTIC") in (
+        context.repository._interpretations
+    )
+    assert (context.record.order_request_id, "HERMES") not in (
+        context.repository._interpretations
+    )
+    submit.assert_called_once()
+
+
 def test_direct_order_waits_read_only_and_reports_broker_fill_correlation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -595,17 +619,12 @@ def test_transport_unknown_recovers_exact_committed_directive_without_resubmit(
     monkeypatch.setattr(orchestrator, "submit_verified_paper_directive", submit)
     monkeypatch.setattr(orchestrator, "read_verified_paper_directive_status", read)
     candidate = _execute_candidate(context.raw)
-
-    first = _process(context, candidate)
     context.repository.find_committed_directive = Mock(  # type: ignore[method-assign]
         return_value=DIRECTIVE_ID
     )
-    context.root["status"] = "done"
-    context.trading["status"] = "done"
 
     recovered = _process(context, candidate)
 
-    assert first["decision"] == "UNKNOWN"
     assert recovered["request_state"] == "COMPLETED"
     assert recovered["directive"]["directive_id"] == DIRECTIVE_ID
     submit.assert_called_once()

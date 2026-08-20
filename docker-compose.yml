@@ -85,6 +85,9 @@ services:
       # authenticated MCP bridge, so the CEO natural-language PAPER lane may
       # be admitted. Deployment bundles without that runtime must set false.
       USER_PAPER_ORDER_WORKFLOW_ENABLED: "true"
+      # Exact single-order commands use the code-built evidence interpreter;
+      # ambiguous/conditional language still goes through Trading Hermes.
+      USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED: "true"
       PORTFOLIO_CORS_ALLOW_ORIGINS: ${PORTFOLIO_CORS_ALLOW_ORIGINS:-}
       SUPABASE_URL: ${SUPABASE_URL:-}
       SUPABASE_AUTH_ISSUER: ${SUPABASE_AUTH_ISSUER:-}

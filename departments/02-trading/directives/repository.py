@@ -752,6 +752,7 @@ class InMemoryDirectiveRepository:
             if (
                 leg.state not in ACTIVE_LEG_STATES
                 or leg.state is DirectiveLegState.UNKNOWN
+                or str(leg.broker_order_id or "").startswith("ls-paper:")
                 or leg.expires_at is None
                 or leg.expires_at > now
             ):
@@ -1947,6 +1948,7 @@ class PostgresDirectiveRepository:
                        updated_at=now()
                  where directive_id=%s
                    and state in ('PENDING','ACKNOWLEDGED','PARTIALLY_FILLED')
+                   and coalesce(broker_order_id,'') not like 'ls-paper:%%'
                    and expires_at is not null and expires_at <= %s
                 returning leg_id
                 """,
@@ -1971,6 +1973,7 @@ class PostgresDirectiveRepository:
                  where d.directive_id=l.directive_id
                    and d.fund_id=%s and d.book_id=%s
                    and l.state in ('PENDING','ACKNOWLEDGED','PARTIALLY_FILLED')
+                   and coalesce(l.broker_order_id,'') not like 'ls-paper:%%'
                    and l.expires_at is not null and l.expires_at <= %s
                 returning l.leg_id,l.directive_id
                 """,

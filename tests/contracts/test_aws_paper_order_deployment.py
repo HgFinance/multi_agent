@@ -111,6 +111,7 @@ def test_production_bff_uses_supabase_jwt_but_private_operational_data() -> None
     assert environment["PORTFOLIO_AUTH_MODE"] == "supabase_jwt"
     assert environment["PORTFOLIO_AUTH_REQUIRED"] == "true"
     assert environment["USER_PAPER_ORDER_WORKFLOW_ENABLED"] == "true"
+    assert environment["USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED"] == "true"
     assert environment["PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON"] == "[]"
     assert environment["DATABASE_URL"].endswith(
         "/${HEDGEFUND_CONTROL_DB_NAME:-control}"

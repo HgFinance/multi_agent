@@ -17,12 +17,97 @@ from orchestration.contracts.user_paper_order import (
 )
 from orchestration.user_order_language import (
     MAX_PRICE,
+    deterministic_order_candidate,
     is_clearly_non_executable_order_language,
     looks_like_user_order_request,
     parse_strict_positive_integer,
     raw_text_sha256,
     verify_order_candidate,
 )
+
+
+@pytest.mark.parametrize(
+    ("raw", "instrument", "side", "quantity", "order_type", "limit_price"),
+    [
+        (
+            "<@1536991290842030130> 삼성전자 3주 매수",
+            "삼성전자",
+            OrderSide.BUY,
+            "3",
+            OrderType.MARKET,
+            None,
+        ),
+        (
+            "SK하이닉스 보유수량 확인해서 시장가로 1주 매도",
+            "SK하이닉스",
+            OrderSide.SELL,
+            "1",
+            OrderType.MARKET,
+            None,
+        ),
+        (
+            "내 PAPER 계좌에서 보유 중인 삼성전자 2주 시장가 매도해줘",
+            "삼성전자",
+            OrderSide.SELL,
+            "2",
+            OrderType.MARKET,
+            None,
+        ),
+        (
+            "지금 삼성전자 한 주 시장가로 매수 주문 넣어주세요",
+            "삼성전자",
+            OrderSide.BUY,
+            "1",
+            OrderType.MARKET,
+            None,
+        ),
+        (
+            "삼성전자 3주 27만원 지정가로 매수",
+            "삼성전자",
+            OrderSide.BUY,
+            "3",
+            OrderType.LIMIT,
+            "270000",
+        ),
+    ],
+)
+def test_deterministic_candidate_builds_exact_verified_order_evidence(
+    raw: str,
+    instrument: str,
+    side: OrderSide,
+    quantity: str,
+    order_type: OrderType,
+    limit_price: str | None,
+) -> None:
+    candidate = deterministic_order_candidate(raw)
+    assert candidate is not None
+    verified = verify_order_candidate(raw, candidate)
+    assert isinstance(verified, VerifiedPaperDirective)
+    assert verified.payload is not None
+    assert verified.payload.instrument_mention == instrument
+    assert verified.payload.side is side
+    assert verified.payload.quantity == quantity
+    assert verified.payload.order_type is order_type
+    assert verified.payload.limit_price == limit_price
+    for evidence in candidate.evidence:
+        assert raw[evidence.start : evidence.end] == evidence.text
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "삼성전자 3주 매수해도 될까?",
+        "삼성전자 3주 매수하지 마",
+        "삼성전자가 오르면 3주 매수",
+        "예시: 삼성전자 3주 매수",
+        "삼성전자와 SK하이닉스 각각 1주 매수",
+        "삼성전자 100만원어치 매수",
+        "LIVE 계좌로 삼성전자 3주 매수",
+        "삼성전자 3주 매수하고 1주 매도",
+    ],
+)
+def test_deterministic_candidate_rejects_unsafe_or_ambiguous_language(raw: str) -> None:
+    assert deterministic_order_candidate(raw) is None
 
 
 @pytest.mark.parametrize(

@@ -849,10 +849,243 @@ def verify_order_candidate(
     return _verify_place_order(raw_text, digest, structured, evidence)
 
 
+_DETERMINISTIC_RESIDUAL_WORDS = frozenset(
+    {
+        "을",
+        "를",
+        "은",
+        "는",
+        "이",
+        "가",
+        "에",
+        "에서",
+        "로",
+        "으로",
+        "좀",
+        "만",
+        "내",
+        "현재",
+        "계좌",
+        "보유",
+        "종목",
+        "주식",
+        "주문",
+        "주세요",
+        "줘",
+    }
+)
+_DETERMINISTIC_INSTRUMENT_SUFFIXES = (
+    "으로",
+    "에서",
+    "을",
+    "를",
+    "은",
+    "는",
+    "이",
+    "가",
+    "에",
+    "로",
+)
+
+
+def _deterministic_instrument_span(
+    raw_text: str,
+    consumed: list[tuple[int, int]],
+) -> tuple[int, int] | None:
+    """Extract the one residual instrument phrase without normalizing offsets."""
+
+    remaining = list(raw_text)
+    for start, end in consumed:
+        remaining[start:end] = " " * (end - start)
+    mention = _LEADING_DISCORD_MENTION_RE.match(raw_text)
+    if mention:
+        remaining[mention.start() : mention.end()] = " " * (
+            mention.end() - mention.start()
+        )
+
+    tokens: list[tuple[int, int, str]] = []
+    for match in re.finditer(r"\S+", "".join(remaining)):
+        start, end = match.span()
+        while start < end and raw_text[start] in "\t ,.!":
+            start += 1
+        while end > start and raw_text[end - 1] in "\t ,.!":
+            end -= 1
+        if start < end:
+            tokens.append((start, end, raw_text[start:end]))
+    while tokens and tokens[0][2] in _DETERMINISTIC_RESIDUAL_WORDS:
+        tokens.pop(0)
+    while tokens and tokens[-1][2] in _DETERMINISTIC_RESIDUAL_WORDS:
+        tokens.pop()
+    if not tokens:
+        return None
+
+    start, end = tokens[0][0], tokens[-1][1]
+    candidate = raw_text[start:end]
+    for suffix in _DETERMINISTIC_INSTRUMENT_SUFFIXES:
+        if candidate.endswith(suffix) and len(candidate) > len(suffix):
+            end -= len(suffix)
+            candidate = raw_text[start:end]
+            break
+    if not candidate or not _INSTRUMENT_RE.fullmatch(candidate):
+        return None
+    if not _residual_supported(raw_text, [*consumed, (start, end)]):
+        return None
+    return start, end
+
+
+def deterministic_order_candidate(raw_text: str) -> HermesOrderCandidate | None:
+    """Build exact evidence for one unambiguous place order without an LLM.
+
+    This helper grants no authority: callers must still pass its output through
+    :func:`verify_order_candidate` and the authenticated PAPER admission gate.
+    It intentionally returns ``None`` for aggregates, advice, unsafe language,
+    malformed numbers, and any residual text it cannot account for exactly.
+    """
+
+    if (
+        not isinstance(raw_text, str)
+        or not raw_text.strip()
+        or len(raw_text) > MAX_TEXT_LENGTH
+        or _unsafe_language(raw_text) is not None
+        or _LIVE_MODE_RE.search(raw_text)
+        or _NOTIONAL_RE.search(raw_text)
+        or _APPROXIMATE_RE.search(raw_text)
+        or _COMPOUND_RE.search(raw_text)
+        or re.search(r"(?<!\d)[.!]\s*\S", raw_text)
+        or _aggregate_match(raw_text) is not None
+    ):
+        return None
+
+    buy_matches = list(_BUY_RE.finditer(raw_text))
+    sell_matches = list(_SELL_RE.finditer(raw_text))
+    if bool(buy_matches) == bool(sell_matches):
+        return None
+    side_matches = buy_matches if buy_matches else sell_matches
+    quantities = list(_QUANTITY_RE.finditer(raw_text))
+    market_markers = list(_MARKET_RE.finditer(raw_text))
+    limit_markers = list(_LIMIT_MARKER_RE.finditer(raw_text))
+    if (
+        len(side_matches) != 1
+        or len(quantities) != 1
+        or len(market_markers) > 1
+        or len(limit_markers) > 1
+    ):
+        return None
+    try:
+        quantity = parse_strict_positive_integer(
+            quantities[0].group("token"), max_value=MAX_QUANTITY
+        )
+        prices = _price_matches(raw_text, limit_markers)
+    except ValueError:
+        return None
+    if len(prices) > 1 or (market_markers and (limit_markers or prices)):
+        return None
+
+    if market_markers:
+        order_type = OrderType.MARKET
+        order_type_span: tuple[int, int] | None = market_markers[0].span()
+        limit_price: int | None = None
+        price_span: tuple[int, int] | None = None
+    elif limit_markers or prices:
+        if not prices:
+            return None
+        order_type = OrderType.LIMIT
+        order_type_span = (
+            limit_markers[0].span() if limit_markers else prices[0].span
+        )
+        limit_price = prices[0].value
+        price_span = prices[0].span
+    else:
+        order_type = OrderType.MARKET
+        order_type_span = None
+        limit_price = None
+        price_span = None
+
+    side = OrderSide.BUY if buy_matches else OrderSide.SELL
+    side_match = side_matches[0]
+    quantity_match = quantities[0]
+    adornments = _place_order_adornment_spans(raw_text)
+    consumed = [side_match.span(), quantity_match.span(), *adornments]
+    if order_type_span is not None:
+        consumed.append(order_type_span)
+    if price_span is not None:
+        consumed.append(price_span)
+    if limit_markers:
+        consumed.append(limit_markers[0].span())
+    instrument_span = _deterministic_instrument_span(
+        raw_text, list(dict.fromkeys(consumed))
+    )
+    if instrument_span is None:
+        return None
+    instrument = raw_text[instrument_span[0] : instrument_span[1]]
+
+    evidence = [
+        TextEvidence(
+            field=EvidenceField.INSTRUMENT,
+            start=instrument_span[0],
+            end=instrument_span[1],
+            text=instrument,
+            normalized=instrument,
+        ),
+        TextEvidence(
+            field=EvidenceField.SIDE,
+            start=side_match.start(),
+            end=side_match.end(),
+            text=side_match.group(0),
+            normalized=side.value,
+        ),
+        TextEvidence(
+            field=EvidenceField.QUANTITY,
+            start=quantity_match.start(),
+            end=quantity_match.end(),
+            text=quantity_match.group(0),
+            normalized=str(quantity),
+        ),
+    ]
+    if order_type_span is not None:
+        evidence.append(
+            TextEvidence(
+                field=EvidenceField.ORDER_TYPE,
+                start=order_type_span[0],
+                end=order_type_span[1],
+                text=raw_text[order_type_span[0] : order_type_span[1]],
+                normalized=order_type.value,
+            )
+        )
+    if price_span is not None and limit_price is not None:
+        evidence.append(
+            TextEvidence(
+                field=EvidenceField.LIMIT_PRICE,
+                start=price_span[0],
+                end=price_span[1],
+                text=raw_text[price_span[0] : price_span[1]],
+                normalized=str(limit_price),
+            )
+        )
+
+    candidate = HermesOrderCandidate(
+        raw_text_sha256=raw_text_sha256(raw_text),
+        decision=CandidateDecision.EXECUTE,
+        action=DirectiveAction.PLACE_ORDER,
+        instrument_mention=instrument,
+        side=side,
+        quantity=str(quantity),
+        order_type=order_type,
+        limit_price=str(limit_price) if limit_price is not None else None,
+        evidence=tuple(evidence),
+    )
+    return (
+        candidate
+        if isinstance(verify_order_candidate(raw_text, candidate), VerifiedPaperDirective)
+        else None
+    )
+
+
 __all__ = [
     "MAX_PRICE",
     "MAX_QUANTITY",
     "MAX_TEXT_LENGTH",
+    "deterministic_order_candidate",
     "is_clearly_non_executable_order_language",
     "looks_like_user_order_request",
     "parse_strict_positive_integer",

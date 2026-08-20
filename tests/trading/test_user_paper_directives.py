@@ -335,6 +335,132 @@ def test_ls_paper_ambiguous_submission_stays_unknown_without_retry() -> None:
     assert len(h.repository.state.direct_fills) == 0
 
 
+def test_ls_paper_unexpected_placement_error_returns_durable_unknown() -> None:
+    class Broker:
+        def __init__(self) -> None:
+            self.placements = 0
+
+        def place_order(self, **_kwargs):
+            self.placements += 1
+            raise RuntimeError("unexpected adapter failure")
+
+        def order_status(self, _broker_order_id):
+            raise AssertionError("an order without broker id cannot be queried")
+
+    h = Harness()
+    broker = Broker()
+    h.service = UserDirectiveService(
+        h.repository,
+        h.market,
+        external_broker=broker,  # type: ignore[arg-type]
+    )
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("100000"))
+    request = h.request(
+        DirectiveAction.PLACE_ORDER,
+        key="idem-ls-paper-unexpected-placement",
+    )
+
+    record = h.service.submit(request, _execute_token(request, h.user), now=NOW)
+
+    assert broker.placements == 1
+    assert record.state is DirectiveState.UNKNOWN
+    assert record.legs[0].state is DirectiveLegState.UNKNOWN
+    assert record.legs[0].error_code == "LS_PAPER_ORDER_AMBIGUOUS_INTERNAL"
+    assert h.repository.active_directives(limit=100) == []
+
+
+def test_ls_paper_closing_auction_fill_is_reconciled_before_local_expiry() -> None:
+    class Broker:
+        filled = False
+
+        def place_order(self, **_kwargs):
+            return LSPaperOrderAck("17566", "152759000", "005930")
+
+        def order_status(self, _broker_order_id):
+            return LSPaperOrderStatus(
+                broker_order_id="17566",
+                state="FILLED" if self.filled else "ACKNOWLEDGED",
+                requested_quantity=Decimal(1),
+                filled_quantity=Decimal(1 if self.filled else 0),
+                fill_price=Decimal("271000") if self.filled else None,
+                order_date=NOW.date(),
+                last_execution_at=(NOW + timedelta(hours=5)) if self.filled else None,
+            )
+
+    h = Harness()
+    broker = Broker()
+    h.service = UserDirectiveService(
+        h.repository,
+        h.market,
+        external_broker=broker,  # type: ignore[arg-type]
+    )
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("500000"))
+    h.market.set_quote(
+        TrustedQuote(
+            str(h.instrument.instrument_id),
+            "005930",
+            NOW,
+            Decimal("270500"),
+            Decimal("271000"),
+            Decimal("1000"),
+            Decimal("1000"),
+            "fixture",
+        )
+    )
+    request = h.request(
+        DirectiveAction.PLACE_ORDER,
+        key="idem-ls-paper-closing-auction",
+    )
+    record = h.service.submit(request, _execute_token(request, h.user), now=NOW)
+    broker.filled = True
+
+    reconciled, errors = h.service.reconcile_active(now=NOW + timedelta(hours=5))
+
+    assert errors == []
+    observed = next(row for row in reconciled if row.directive_id == record.directive_id)
+    assert observed.legs[0].state is DirectiveLegState.FILLED
+    assert observed.legs[0].filled_quantity == Decimal(1)
+    assert observed.legs[0].average_fill_price == Decimal("271000")
+    assert observed.error_code == "TRADING_FILL_ACCOUNTING_PENDING"
+
+
+def test_ls_paper_unfilled_day_order_expires_after_broker_grace() -> None:
+    class Broker:
+        def place_order(self, **_kwargs):
+            return LSPaperOrderAck("17567", "152759000", "005930")
+
+        def order_status(self, _broker_order_id):
+            return LSPaperOrderStatus(
+                broker_order_id="17567",
+                state="ACKNOWLEDGED",
+                requested_quantity=Decimal(1),
+                filled_quantity=Decimal(0),
+                fill_price=None,
+                order_date=NOW.date(),
+            )
+
+    h = Harness()
+    h.service = UserDirectiveService(
+        h.repository,
+        h.market,
+        external_broker=Broker(),  # type: ignore[arg-type]
+    )
+    h.repository.set_cash(h.fund, h.book, "KRW", Decimal("500000"))
+    request = h.request(
+        DirectiveAction.PLACE_ORDER,
+        key="idem-ls-paper-close-grace-expiry",
+    )
+    record = h.service.submit(request, _execute_token(request, h.user), now=NOW)
+    expires_at = record.legs[0].expires_at
+    assert expires_at is not None
+
+    h.service.reconcile_active(now=expires_at + timedelta(seconds=121))
+
+    assert record.state is DirectiveState.FAILED
+    assert record.legs[0].state is DirectiveLegState.EXPIRED
+    assert record.legs[0].error_code == "TRADING_PAPER_ORDER_EXPIRED"
+
+
 def test_ls_paper_cancel_all_calls_broker_before_terminal_projection() -> None:
     class Broker:
         def __init__(self) -> None:
@@ -464,7 +590,7 @@ def test_ls_paper_ambiguous_cancel_is_never_reissued() -> None:
     assert broker.cancellations == 1
 
 
-def test_worker_recovers_filled_internal_error_without_duplicate_fill():
+def test_worker_recovers_returned_filled_internal_error_without_duplicate_fill():
     h = Harness()
     h.repository.set_cash(h.fund, h.book, "KRW", Decimal("100000"))
     request = h.request(DirectiveAction.PLACE_ORDER, key="idem-filled-recovery")
@@ -477,12 +603,10 @@ def test_worker_recovers_filled_internal_error_without_duplicate_fill():
 
     h.repository.reconcile_cancel_legs = fail_after_fill  # type: ignore[method-assign]
 
-    with pytest.raises(DirectiveServiceError) as failed:
-        h.service.submit(request, _execute_token(request, h.user), now=NOW)
+    record = h.service.submit(request, _execute_token(request, h.user), now=NOW)
 
-    assert failed.value.code == "TRADING_DIRECTIVE_INTERNAL_ERROR"
-    record = next(iter(h.repository.state.directives.values()))
     assert record.state is DirectiveState.PARTIAL
+    assert record.error_code == "TRADING_DIRECTIVE_INTERNAL_ERROR"
     assert record.legs[0].state is DirectiveLegState.FILLED
     assert len(h.repository.state.direct_fills) == 1
 

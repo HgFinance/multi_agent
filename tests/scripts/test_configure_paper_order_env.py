@@ -68,6 +68,7 @@ def test_local_configures_exact_authenticated_fixture_grant(tmp_path: Path) -> N
     assert values["PORTFOLIO_AUTH_MODE"] == "fixture"
     assert values["PORTFOLIO_AUTH_REQUIRED"] == "false"
     assert values["USER_PAPER_ORDER_WORKFLOW_ENABLED"] == "true"
+    assert values["USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED"] == "true"
     assert values["LS_ENV"] == "LIVE"
     assert values["TRADING_EXECUTION_MODE"] == "PAPER"
     assert values["TRADING_BROKER_ADAPTER"] == "paper"
@@ -281,6 +282,7 @@ def test_aws_sets_production_contract_without_fixture_grants(
     assert values["PORTFOLIO_AUTH_MODE"] == "supabase_jwt"
     assert values["PORTFOLIO_AUTH_REQUIRED"] == "true"
     assert values["USER_PAPER_ORDER_WORKFLOW_ENABLED"] == "true"
+    assert values["USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED"] == "true"
     assert values["PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON"] == "[]"
     assert values["LS_ENV"] == "LIVE"
     assert "LS_MARKET_ENV" not in values

@@ -56,6 +56,7 @@ try:
         UserOrderWorkflowUnavailable,
         user_order_repository,
     )
+    from .user_order_orchestrator import process_deterministic_user_paper_order
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
     import hermes_boundary  # type: ignore[no-redef]
     from conditional_rule_language import (  # type: ignore[no-redef]
@@ -100,6 +101,9 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
         UserOrderWorkflowUnavailable,
         user_order_repository,
     )
+    from user_order_orchestrator import (  # type: ignore[no-redef]
+        process_deterministic_user_paper_order,
+    )
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 
@@ -118,6 +122,7 @@ from orchestration.ceo_workflow_scope import (
     selected_primary_profiles_from_task,
 )
 from orchestration.user_order_language import (
+    deterministic_order_candidate,
     is_clearly_non_executable_order_language,
     looks_like_user_order_request,
 )
@@ -176,6 +181,25 @@ def _user_paper_order_workflow_enabled() -> bool:
         "prod",
         "production",
         "staging",
+    }
+
+
+def _deterministic_paper_order_fast_path_enabled() -> bool:
+    """Use the code-built interpreter for one exact, unambiguous order.
+
+    Production defaults on because the path still traverses the same durable
+    authority and OMS gates. Development and tests retain the Hermes lane
+    unless explicitly enabled, which keeps local workflows inspectable.
+    """
+
+    configured = os.getenv(
+        "USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED", ""
+    ).strip().casefold()
+    if configured:
+        return configured in {"1", "true", "yes", "on"}
+    return os.getenv("APP_ENV", "development").strip().casefold() in {
+        "prod",
+        "production",
     }
 
 _PLANNING_SCHEMA_VERSION = "ceo.query-accepted.v2"
@@ -573,6 +597,55 @@ def _paper_order_accepted_response(
     }
 
 
+def _paper_order_execution_response(
+    *,
+    root_task: Mapping[str, object],
+    trading_task: Mapping[str, object],
+    result: Mapping[str, object],
+) -> dict[str, object]:
+    """Return the exact result produced by the trusted PAPER boundary."""
+
+    answer = str(result.get("user_message") or "").strip()
+    if not answer:
+        reasons = result.get("reason_codes")
+        rendered_reasons = (
+            ", ".join(str(item) for item in reasons)
+            if isinstance(reasons, Sequence) and not isinstance(reasons, str)
+            else "PAPER_ORDER_NOT_SUBMITTED"
+        )
+        answer = (
+            "PAPER 주문을 제출하지 않았습니다. "
+            f"상태={result.get('request_state') or result.get('decision') or 'UNKNOWN'}, "
+            f"사유={rendered_reasons}. 자동 재시도하지 않습니다."
+        )
+    return {
+        "schema_version": _PLANNING_SCHEMA_VERSION,
+        "department": "ceo-agent",
+        # The CEO wrapper remains non-authoritative; the nested trusted
+        # execution result carries its own binding flag and durable IDs.
+        "binding": False,
+        "task_id": str(root_task.get("task_id") or root_task.get("id") or ""),
+        "task": dict(root_task),
+        "status": "planned",
+        "answer": answer,
+        "planning": {
+            "schema_version": "ceo.planning.v1",
+            "selected_departments": ["trading-department"],
+            "steps": ["Deterministic source verification", "PAPER OMS submission and tracking"],
+            "qa_required": False,
+            "summary": answer,
+        },
+        "session_id": None,
+        "order_request_id": str(result.get("order_request_id") or ""),
+        "order_state": str(result.get("request_state") or "UNKNOWN"),
+        "order_mode": "PAPER",
+        "trading_task_id": str(
+            trading_task.get("task_id") or trading_task.get("id") or ""
+        ),
+        "execution": dict(result),
+    }
+
+
 def _paper_order_child_body(
     *,
     query: str,
@@ -610,6 +683,41 @@ def _paper_order_child_body(
     )
     return build_scoped_task_body(
         interpretation_prompt,
+        root_task_id,
+        role="primary",
+        request_id=request_id,
+        workflow_mode="binding",
+        has_mandate=has_mandate,
+    )
+
+
+def _deterministic_order_child_body(
+    *,
+    query: str,
+    scope: UserPaperOrderScope,
+    root_task_id: str,
+    request_id: str,
+    has_mandate: bool,
+) -> str:
+    """Describe the non-LLM fast lane on the same durable Trading card."""
+
+    body = "\n".join(
+        (
+            "hgfinance.user-paper-order-deterministic.v1",
+            build_user_paper_order_scope(scope),
+            "authority=server_verified_paper_only",
+            "execution_mode=PAPER_ONLY",
+            "interpreter=DETERMINISTIC_EXACT_EVIDENCE",
+            "No Risk/QA/Research approval is required for this direct user order.",
+            "The trusted server still rechecks the exact text, authenticated Fund/Book,",
+            "instrument resolution, idempotency, OMS state, and broker execution evidence.",
+            "",
+            "## Exact user instruction",
+            query,
+        )
+    )
+    return build_scoped_task_body(
+        body,
         root_task_id,
         role="primary",
         request_id=request_id,
@@ -711,6 +819,10 @@ def _route_user_paper_order(
             status_code=503, detail="paper_order_hermes_runtime_unavailable"
         )
 
+    deterministic_candidate = None
+    if not conditional_rule and _deterministic_paper_order_fast_path_enabled():
+        deterministic_candidate = deterministic_order_candidate(req.query)
+
     # This is admission, not execution. It canonicalizes the authenticated
     # user/Fund/Book tuple before anything is exposed to Hermes.
     access = require_trading_book_access(owner_id, req.fund_id, req.book_id)
@@ -799,7 +911,11 @@ def _route_user_paper_order(
         title=(
             "사용자 PAPER 조건주문 AST 해석 및 즉시 활성화"
             if conditional_rule
-            else "사용자 PAPER 주문 원문 해석 및 검증 제출"
+            else (
+                "사용자 PAPER 주문 결정론적 검증·제출"
+                if deterministic_candidate is not None
+                else "사용자 PAPER 주문 원문 해석 및 검증 제출"
+            )
         ),
         body=(
             _conditional_rule_child_body(
@@ -810,18 +926,31 @@ def _route_user_paper_order(
                 has_mandate=bool(mandate),
             )
             if conditional_rule
-            else _paper_order_child_body(
-                query=req.query,
-                scope=scope,
-                root_task_id=root_task_id,
-                request_id=req.request_id,
-                has_mandate=bool(mandate),
+            else (
+                _deterministic_order_child_body(
+                    query=req.query,
+                    scope=scope,
+                    root_task_id=root_task_id,
+                    request_id=req.request_id,
+                    has_mandate=bool(mandate),
+                )
+                if deterministic_candidate is not None
+                else _paper_order_child_body(
+                    query=req.query,
+                    scope=scope,
+                    root_task_id=root_task_id,
+                    request_id=req.request_id,
+                    has_mandate=bool(mandate),
+                )
             )
         ),
         idempotency_key=primary_idempotency_key(
             root_task_id, "trading-department"
         ),
-        initial_status="blocked",
+        # A deterministic candidate is executed synchronously by this trusted
+        # BFF and must never be claimed by Hermes. Ambiguous language retains
+        # the durable blocked-then-release interpreter workflow.
+        initial_status="running" if deterministic_candidate is not None else "blocked",
     )
     if not trading or not trading.get("task_id"):
         _mark_paper_order_failed(
@@ -863,6 +992,90 @@ def _route_user_paper_order(
             error_message="CEO root scope could not be finalized after durable binding",
         )
         raise HTTPException(status_code=503, detail="paper_order_kanban_unavailable")
+
+    if deterministic_candidate is not None:
+        try:
+            execution = process_deterministic_user_paper_order(
+                root_task_id=root_task_id,
+                trading_task_id=trading_task_id,
+                interpretation=deterministic_candidate.model_dump(mode="json"),
+            )
+        except Exception as exc:  # noqa: BLE001 - unknown commit must not be retried.
+            logger.error(
+                "paper-order-deterministic-failed request=%s root=%s trading=%s "
+                "exception_type=%s",
+                record.order_request_id,
+                root_task_id,
+                trading_task_id,
+                type(exc).__name__,
+            )
+            try:
+                repository.mark_outcome(
+                    record.order_request_id,
+                    state="UNKNOWN",
+                    error_code="DETERMINISTIC_EXECUTION_UNAVAILABLE",
+                    error_message=(
+                        "Deterministic PAPER execution did not return a safe result"
+                    ),
+                )
+            except Exception as record_exc:  # noqa: BLE001 - preserve UNKNOWN wording.
+                logger.error(
+                    "paper-order-deterministic-unknown-record-failed request=%s "
+                    "exception_type=%s",
+                    record.order_request_id,
+                    type(record_exc).__name__,
+                )
+            execution = {
+                "decision": "UNKNOWN",
+                "mode": "PAPER",
+                "binding": False,
+                "order_submitted": False,
+                "order_request_id": record.order_request_id,
+                "request_state": "UNKNOWN",
+                "reason_codes": ["DETERMINISTIC_EXECUTION_UNAVAILABLE"],
+                "user_message": (
+                    "PAPER 주문 상태를 확정하지 못했습니다. 중복 주문 방지를 위해 "
+                    "자동 재시도하지 않습니다. 주문 요청 ID "
+                    f"{record.order_request_id}."
+                ),
+            }
+        execution_message = str(execution.get("user_message") or "").strip()
+        if not execution_message:
+            execution_message = (
+                "PAPER 주문을 제출하지 않았습니다. "
+                f"상태={execution.get('request_state') or 'UNKNOWN'}. "
+                "자동 재시도하지 않습니다."
+            )
+        completed = hermes_boundary.complete_kanban_task(
+            task_id=trading_task_id,
+            result=execution_message,
+        )
+        if not completed:
+            logger.error(
+                "paper-order-deterministic-delivery-failed request=%s trading=%s",
+                record.order_request_id,
+                trading_task_id,
+            )
+        logger.info(
+            "paper-order-deterministic-complete request=%s root=%s trading=%s "
+            "state=%s delivery=%s",
+            record.order_request_id,
+            root_task_id,
+            trading_task_id,
+            execution.get("request_state"),
+            completed,
+        )
+        released_root = {**root, "status": "done"}
+        released_trading = {
+            **trading,
+            "status": "done" if completed else "running",
+        }
+        return _paper_order_execution_response(
+            root_task=released_root,
+            trading_task=released_trading,
+            result=execution,
+        )
+
     if not hermes_boundary.unblock_kanban_task(task_id=trading_task_id):
         _mark_paper_order_failed(
             repository,

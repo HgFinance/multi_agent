@@ -150,6 +150,77 @@ def test_exact_sample_is_durably_bound_before_either_card_is_released(
     assert response["task"]["status"] == "done"
 
 
+def test_unambiguous_production_order_uses_deterministic_fast_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    repository = _OrderedRepository(events)
+    create = _install_successful_route(
+        monkeypatch, events=events, repository=repository
+    )
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("USER_PAPER_ORDER_WORKFLOW_ENABLED", "true")
+    monkeypatch.setenv(
+        "USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED", "true"
+    )
+
+    execution = {
+        "decision": "EXECUTE",
+        "mode": "PAPER",
+        "binding": True,
+        "order_submitted": True,
+        "order_request_id": "filled-by-mock",
+        "request_state": "COMPLETED",
+        "user_message": (
+            "PAPER 주문 완료: 005930 매수 시장가(가격 미지정) "
+            "요청 3주/체결 3주, 평균 체결가 271,000원 (FILLED, LS 주문번호 17566)."
+        ),
+    }
+
+    def process(**kwargs: Any) -> dict[str, Any]:
+        events.append("deterministic-process")
+        assert kwargs["root_task_id"] == "t_root1"
+        assert kwargs["trading_task_id"] == "t_trade1"
+        interpretation = kwargs["interpretation"]
+        assert interpretation["instrument_mention"] == "삼성전자"
+        assert interpretation["side"] == "BUY"
+        assert interpretation["quantity"] == "3"
+        return execution
+
+    monkeypatch.setattr(ceo, "process_deterministic_user_paper_order", process)
+    response = ceo.ceo_query(
+        ceo.CeoAsk(
+            query="<@1536991290842030130> 삼성전자 3주 매수",
+            request_id="request-fast-100",
+            fund_id=FUND_ID,
+            book_id=BOOK_ID,
+        ),
+        owner_id=USER_ID,
+    )
+
+    assert create.call_count == 2
+    _, trading_call = create.call_args_list
+    assert trading_call.kwargs["initial_status"] == "running"
+    assert "user-paper-order-deterministic.v1" in trading_call.kwargs["body"]
+    assert "mcp_tool=process_user_paper_order" not in trading_call.kwargs["body"]
+    assert events == [
+        "authorize",
+        "admit",
+        "create-root-running",
+        "comment-root-scope",
+        "bind-root",
+        "create-trading-blocked",
+        "bind-trading",
+        "complete-t_root1",
+        "deterministic-process",
+        "complete-t_trade1",
+    ]
+    assert response["order_state"] == "COMPLETED"
+    assert response["answer"] == execution["user_message"]
+    assert response["execution"] == execution
+    assert response["task"]["status"] == "done"
+
+
 @pytest.mark.parametrize(
     "raw",
     [

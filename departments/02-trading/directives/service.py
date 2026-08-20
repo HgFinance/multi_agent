@@ -1,10 +1,12 @@
 """Application service for authenticated user-priority PAPER directives."""
 from __future__ import annotations
 
-import os
 import hashlib
 import json
-from datetime import datetime, timezone
+import logging
+import math
+import os
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from uuid import UUID
@@ -28,6 +30,9 @@ from .contracts import (
 )
 from .market_data import MarketDataError, MarketDataProvider
 from .repository import DirectiveRecord, DirectiveRepository, DirectiveRepositoryError, InstrumentRef
+
+
+logger = logging.getLogger(__name__)
 
 
 class DirectiveServiceError(RuntimeError):
@@ -83,6 +88,20 @@ def _cost_buffer() -> Decimal:
             "TRADING_PAPER_COST_POLICY_INVALID", "buy cost buffer is outside bounds", 503
         )
     return Decimal(1) + bps / Decimal(10_000)
+
+
+def _external_close_reconciliation_grace_seconds() -> float:
+    """Allow LS closing-auction fills to reach CSPAQ13700 before local expiry."""
+
+    try:
+        configured = float(
+            os.environ.get("LS_PAPER_CLOSE_RECONCILIATION_GRACE_SECONDS", "120")
+        )
+    except ValueError:
+        return 120.0
+    if not math.isfinite(configured):
+        return 120.0
+    return min(300.0, max(30.0, configured))
 
 
 def _mechanical_order_rules(
@@ -269,6 +288,15 @@ class UserDirectiveService:
                 if terminal in {DirectiveState.PARTIAL, DirectiveState.FAILED}:
                     self.repository.release_barrier(record)
         if failure is not None:
+            # Once a durable leg exists the broker boundary may already have
+            # accepted the mutation.  Returning its persisted state and
+            # directive id lets the caller correlate/reconcile it; converting
+            # that committed identity back into HTTP 500 strands the request
+            # and tempts unsafe resubmission.  Admission failures before any
+            # leg still keep their original HTTP semantics.
+            current = self.repository.get(record.directive_id) or record
+            if current.legs:
+                return current
             raise failure
         assert result is not None
         return result
@@ -453,7 +481,7 @@ class UserDirectiveService:
                 leg.symbol,
             )
             if self.external_broker is not None:
-                self._sync_external_leg(record, leg, instrument)
+                self._sync_external_leg(record, leg, instrument, now=now)
                 record = self.repository.get(record.directive_id) or record
                 continue
             quote = self.market_data.quote(instrument, now=now)
@@ -494,6 +522,25 @@ class UserDirectiveService:
                 error_code=exc.code,
                 error_message=str(exc),
             )
+        except Exception as exc:  # noqa: BLE001 - broker commit may be ambiguous.
+            # Never leak exception text: an HTTP client error may contain raw
+            # request/response material.  The type and durable identities are
+            # sufficient for operations, while UNKNOWN prevents any retry.
+            logger.error(
+                "ls-paper-placement-unexpected directive=%s leg=%s exception_type=%s",
+                record.directive_id,
+                leg.leg_id,
+                type(exc).__name__,
+            )
+            return self.repository.mark_broker_leg_unknown(
+                record,
+                leg,
+                error_code="LS_PAPER_ORDER_AMBIGUOUS_INTERNAL",
+                error_message=(
+                    "LS PAPER placement ended unexpectedly after crossing the "
+                    "broker boundary; automatic retry is forbidden"
+                ),
+            )
         return self.repository.acknowledge_broker_leg(
             record,
             leg,
@@ -506,6 +553,8 @@ class UserDirectiveService:
         record: DirectiveRecord,
         leg: Any,
         instrument: InstrumentRef,
+        *,
+        now: datetime | None = None,
     ) -> Any:
         """Project the broker's cumulative order state without synthetic fills."""
         assert self.external_broker is not None
@@ -572,6 +621,25 @@ class UserDirectiveService:
                 state=terminal,
                 error_code="LS_PAPER_ORDER_" + status.state,
                 error_message="LS PAPER broker reported a terminal order state",
+            )
+        expires_at = leg.expires_at
+        if (
+            now is not None
+            and status.state == "ACKNOWLEDGED"
+            and expires_at is not None
+            and now.astimezone(timezone.utc)
+            >= expires_at.astimezone(timezone.utc)
+            + timedelta(seconds=_external_close_reconciliation_grace_seconds())
+        ):
+            return self.repository.terminate_broker_leg(
+                record,
+                leg,
+                state=DirectiveLegState.EXPIRED,
+                error_code="TRADING_PAPER_ORDER_EXPIRED",
+                error_message=(
+                    "LS PAPER DAY order remained unfilled after the closing "
+                    "reconciliation grace period"
+                ),
             )
         return leg
 
@@ -919,7 +987,7 @@ class UserDirectiveService:
                 DirectiveLegState.ACKNOWLEDGED,
                 DirectiveLegState.PARTIALLY_FILLED,
             }:
-                self._sync_external_leg(record, leg, instrument)
+                self._sync_external_leg(record, leg, instrument, now=now)
         self.repository.set_state(record.directive_id, DirectiveState.IN_PROGRESS)
         refreshed = self.repository.get(record.directive_id) or record
         return self._status_locked(refreshed, now=now)
@@ -1020,7 +1088,7 @@ class UserDirectiveService:
                     DirectiveLegState.ACKNOWLEDGED,
                     DirectiveLegState.PARTIALLY_FILLED,
                 }:
-                    self._sync_external_leg(record, leg, instrument)
+                    self._sync_external_leg(record, leg, instrument, now=now)
 
         if unsellable:
             refreshed = self.repository.get(record.directive_id) or record

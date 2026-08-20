@@ -51,6 +51,7 @@ services:
       # Trading Hermes and its MCP bridge. Fail before creating an orphan card;
       # deterministic authenticated PAPER API endpoints remain available.
       USER_PAPER_ORDER_WORKFLOW_ENABLED: "false"
+      USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED: "false"
       PORTFOLIO_CORS_ALLOW_ORIGINS: ${PORTFOLIO_CORS_ALLOW_ORIGINS:?Exact frontend origin allowlist is required}
       # Supabase is identity-only in AWS. Never pass service-role to the BFF.
       SUPABASE_URL: ${SUPABASE_URL:?Hosted Supabase project URL is required for portfolio authentication}

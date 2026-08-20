@@ -585,13 +585,14 @@ def _submission_failure_state(exc: HTTPException) -> tuple[str, str]:
     return "FAILED", detail
 
 
-def process_user_paper_order(
+def _process_user_paper_order(
     *,
     root_task_id: str,
     trading_task_id: str,
     interpretation: Mapping[str, Any],
+    interpretation_source: str,
 ) -> dict[str, Any]:
-    """Validate one Hermes interpretation and, if safe, submit one PAPER directive."""
+    """Validate one interpretation and, if safe, submit one PAPER directive."""
 
     root = _required_task(
         root_task_id, expected_profile=canonical_profile_for_department("ceo")
@@ -637,7 +638,7 @@ def process_user_paper_order(
             trading_task_id=trading_task_id,
             interpretation=interpretation_dict,
             interpretation_sha256=interpretation_sha256,
-            source="HERMES",
+            source=interpretation_source,
         )
     except (UserOrderRequestConflict, UserOrderRequestStateError) as exc:
         raise PaperOrderOrchestrationRejected("INTERPRETATION_REPLAY_CONFLICT") from exc
@@ -737,6 +738,23 @@ def process_user_paper_order(
             error_code=code,
             error_message="PAPER directive submission did not complete safely",
         )
+        if state == "UNKNOWN":
+            # The Trading API may have committed the idempotent directive and
+            # then lost its response (or failed while serializing a durable
+            # post-broker state). Recover by the exact user/fund/book/action/
+            # idempotency tuple before answering Discord. This is a read/bind
+            # operation only and can never submit a second broker order.
+            try:
+                recovered = recover_committed_directive(repository, record)
+                if recovered.directive_id:
+                    return _existing_directive_result(recovered)
+            except Exception as recovery_exc:  # noqa: BLE001 - remain UNKNOWN.
+                logger.warning(
+                    "paper-order-post-submit-recovery-failed order_request=%s "
+                    "exception_type=%s",
+                    record.order_request_id,
+                    type(recovery_exc).__name__,
+                )
         return _non_execution_result(
             record=record,
             decision=state,
@@ -772,8 +790,47 @@ def process_user_paper_order(
     return _directive_result(record=record, response=response)
 
 
+def process_user_paper_order(
+    *,
+    root_task_id: str,
+    trading_task_id: str,
+    interpretation: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one Hermes interpretation and, if safe, submit one PAPER directive."""
+
+    return _process_user_paper_order(
+        root_task_id=root_task_id,
+        trading_task_id=trading_task_id,
+        interpretation=interpretation,
+        interpretation_source="HERMES",
+    )
+
+
+def process_deterministic_user_paper_order(
+    *,
+    root_task_id: str,
+    trading_task_id: str,
+    interpretation: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Run one server-built interpretation through the same trusted boundary.
+
+    This entry point is intentionally not exposed by the Trading MCP server.
+    Its caller must construct the candidate from the exact admitted text; all
+    Kanban, SQL, verifier, Fund/Book, idempotency, and PAPER checks remain the
+    same as the Hermes path.
+    """
+
+    return _process_user_paper_order(
+        root_task_id=root_task_id,
+        trading_task_id=trading_task_id,
+        interpretation=interpretation,
+        interpretation_source="DETERMINISTIC",
+    )
+
+
 __all__ = [
     "PaperOrderOrchestrationRejected",
     "RESULT_SCHEMA_VERSION",
+    "process_deterministic_user_paper_order",
     "process_user_paper_order",
 ]

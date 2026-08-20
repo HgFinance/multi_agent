@@ -238,6 +238,7 @@ def _secret_keys_for_runtime(runtime: str) -> tuple[str, ...]:
 def _runtime_settings(runtime: str) -> dict[str, str]:
     common = {
         "USER_PAPER_ORDER_WORKFLOW_ENABLED": "true",
+        "USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED": "true",
         "LS_ENV": "LIVE",
         "TRADING_EXECUTION_MODE": "PAPER",
         "TRADING_BROKER_ADAPTER": "paper",
