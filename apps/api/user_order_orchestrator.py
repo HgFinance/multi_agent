@@ -398,8 +398,8 @@ def _directive_user_message(
         side = {"BUY": "매수", "SELL": "매도"}.get(
             leg.side.value if leg.side else "", "방향 미확인"
         )
-        requested = leg.requested_quantity or "?"
-        filled = leg.filled_quantity
+        requested = _format_krw(leg.requested_quantity) or "?"
+        filled = _format_krw(leg.filled_quantity) or "0"
         if leg.order_type and leg.order_type.value == "LIMIT":
             requested_price = _format_krw(leg.limit_price)
             order_price_text = f"지정가 {requested_price or '미확인'}원"

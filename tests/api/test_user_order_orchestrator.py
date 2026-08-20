@@ -561,6 +561,43 @@ def test_direct_order_waits_read_only_and_reports_broker_fill_correlation(
     assert snapshots[-1]["payload"]["legs"][0]["filled_quantity"] == "2"
 
 
+def test_discord_message_normalizes_database_decimal_quantities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _workflow(monkeypatch)
+    completed = _directive_response(context.record, state=DirectiveState.COMPLETED)
+    completed = completed.model_copy(
+        update={
+            "legs": [
+                DirectiveLeg.model_validate(
+                    {
+                        "leg_id": "55555555-5555-4555-8555-555555555555",
+                        "leg_index": 0,
+                        "symbol": "005930",
+                        "side": "BUY",
+                        "order_type": "MARKET",
+                        "requested_quantity": "3.0000000000",
+                        "filled_quantity": "3.0000000000",
+                        "average_fill_price": "271000.0000000000",
+                        "state": "FILLED",
+                        "reduce_only": False,
+                        "broker_order_id": "ls-paper:17566",
+                    }
+                )
+            ]
+        }
+    )
+    monkeypatch.setattr(
+        orchestrator, "submit_verified_paper_directive", Mock(return_value=completed)
+    )
+    monkeypatch.setenv("PAPER_ORDER_STATUS_WAIT_SECONDS", "0")
+
+    result = _process(context, _execute_candidate(context.raw))
+
+    assert "요청 3주/체결 3주" in result["user_message"]
+    assert "3.0000000000주" not in result["user_message"]
+
+
 def test_changed_interpretation_replay_conflicts_even_after_directive_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
