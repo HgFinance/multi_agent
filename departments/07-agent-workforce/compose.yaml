@@ -19,6 +19,29 @@ services:
         max-file: "3"
     environment:
       DATABASE_URL: ${GOVERNANCE_WORKFORCE_DATABASE_URL:-${DATABASE_URL:-}}
+      # Langfuse(2026-08-10 도입, 993682f). 이 컨테이너는 **읽는** 쪽이다 -
+      # GET /workforce/v1/departments/idle-agents 가 6개 투자본부 Worker의
+      # 마지막 관측 시각만 조회한다(scorecard/observability.py). Trace 원문
+      # (input/output)은 절대 읽지 않는다(.env.example 3-2절).
+      # 비어 있으면 501이 아니라 전원 UNAVAILABLE로 정직하게 응답한다.
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      # 아래 마운트 경로와 코드 기본값(observability.py DEFAULT_PROFILE_MOUNT_ROOT)이
+      # 따로 놀지 않도록 명시한다.
+      WORKFORCE_PROFILE_ROOT: /app/profiles
+    volumes:
+      # 6개 투자본부 Hermes Profile을 **read-only 데이터로만** 읽는다(2026-08-20 영주
+      # 결정, 계획서 3.2의 미결 해소). 유휴 판정에 필요한 값은 config.yaml `workers:`의
+      # worker_id·trigger 둘뿐이고 그 파일이 편제의 정본이다(CLAUDE.md) - 남의 본부
+      # 파이썬 모듈을 import해 HR 프로세스에서 실행하던 이전 방식을 대체한다.
+      # `:ro` 는 필수다. HR은 남의 본부 편제를 읽을 뿐 고칠 권한이 없다.
+      - ../01-research/hermes/config.yaml:/app/profiles/research/config.yaml:ro
+      - ../02-trading/hermes/config.yaml:/app/profiles/trading/config.yaml:ro
+      - ../03-risk/hermes/config.yaml:/app/profiles/risk/config.yaml:ro
+      - ../04-quant-backtest/hermes/config.yaml:/app/profiles/quant-backtest/config.yaml:ro
+      - ../05-accounting-portfolio/hermes/config.yaml:/app/profiles/accounting-portfolio/config.yaml:ro
+      - ../06-ai-qa-audit/hermes/config.yaml:/app/profiles/qa/config.yaml:ro
     ports:
       - "127.0.0.1:8044:8000"   # 로컬 전용 - 외부 노출 금지
     mem_limit: 256m

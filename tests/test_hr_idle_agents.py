@@ -7,6 +7,7 @@ departments/07-agent-workforce/scorecard/observability.py 의 __main__ 자체 �
 
 from __future__ import annotations
 
+import builtins
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -171,3 +172,103 @@ def test_department_stage_mapping_disambiguates_dispatch_key_from_event_name() -
     )
     by_id = {r.worker_id: r for r in reports}
     assert by_id[worker_id].status is IdleStatus.ACTIVE
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-20: Profile(데이터) 레지스트리 전환분 계약 테스트
+#
+# HR 은 더 이상 남의 본부 employee_workers.py 를 import 하지 않고 hermes/config.yaml
+# 의 workers 만 읽는다. 그 전환이 성립하려면 두 가지가 계속 참이어야 하고, 둘 다
+# 깨져도 **예외 없이 조용히** 틀린 답이 나오는 종류라 여기서 고정한다.
+# ---------------------------------------------------------------------------
+
+
+def test_profile_registry_matches_python_worker_specs() -> None:
+    """YAML(정본)과 실행 모듈 WORKER_SPECS 가 같은 편제를 말해야 한다.
+
+    어긋나면 HR 은 존재하지 않는 워커를 영원히 UNOBSERVED 로 보고하거나(YAML 에만
+    있음), 실제로 도는 워커를 아예 못 본다(모듈에만 있음). 어느 쪽도 조회 실패가
+    아니라서 UNAVAILABLE 로도 안 잡힌다.
+    """
+
+    from observability import DEPARTMENT_PROFILE_DIR, load_worker_profile_specs
+    from orchestration.employee_dispatch import load_worker_specs
+
+    for department in DEPARTMENT_PROFILE_DIR:
+        from_profile = {(s.worker_id, s.trigger) for s in load_worker_profile_specs(ROOT, department)}
+        from_module = {(s.worker_id, s.trigger) for s in load_worker_specs(ROOT, department)}
+        assert from_profile == from_module, f"{department} 편제가 Profile 과 코드에서 다르다"
+
+
+def test_fallback_event_name_matches_canonical() -> None:
+    """orchestration 이 없는 컨테이너용 복제 구현이 정본과 같은 문자열을 만들어야 한다.
+
+    이전 fallback 은 `worker.{stage}.{worker_id}` 라는 다른 포맷이었다 - 조회가
+    예외 없이 0건이 되므로 UNOBSERVED 로 위장된다(2026-08-20 수정).
+    """
+
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_hr_observability_isolated",
+        ROOT / "departments" / "07-agent-workforce" / "scorecard" / "observability.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    real_import = builtins.__import__
+
+    def _no_orchestration(name, *args, **kwargs):
+        if name.startswith("orchestration"):
+            raise ModuleNotFoundError(name)
+        return real_import(name, *args, **kwargs)
+
+    builtins.__import__ = _no_orchestration
+    # @dataclass 가 실행 중 sys.modules 에서 자기 모듈을 되찾으므로 먼저 등록한다.
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        builtins.__import__ = real_import
+        sys.modules.pop(spec.name, None)
+
+    for stage, worker_id in (("research", "holdings-analyst-worker"), ("quant", "x-worker")):
+        assert module.langfuse_worker_event_name(
+            stage=stage, worker_id=worker_id
+        ) == langfuse_worker_event_name(stage=stage, worker_id=worker_id)
+
+
+def test_mounted_profile_root_is_used_when_repo_tree_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """컨테이너 배선 검증 - 저장소 트리 없이 마운트 경로만으로 읽혀야 한다."""
+
+    from observability import PROFILE_MOUNT_ROOT_ENV, load_worker_profile_specs
+
+    mount = tmp_path / "profiles"
+    (mount / "risk").mkdir(parents=True)
+    (mount / "risk" / "config.yaml").write_text(
+        "workers:\n  compliance-policy-worker:\n    trigger: when_compliance_evidence_exists\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(PROFILE_MOUNT_ROOT_ENV, str(mount))
+    specs = load_worker_profile_specs(tmp_path / "no-such-repo", "risk")
+    assert [(s.worker_id, s.trigger) for s in specs] == [
+        ("compliance-policy-worker", "when_compliance_evidence_exists")
+    ]
+
+
+def test_missing_profile_is_unavailable_not_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Profile 을 못 읽으면 빈 목록(=유휴 없음)이 아니라 명시적 실패여야 한다."""
+
+    from observability import PROFILE_MOUNT_ROOT_ENV, WorkerRegistryUnavailable, load_worker_profile_specs
+
+    monkeypatch.setenv(PROFILE_MOUNT_ROOT_ENV, str(tmp_path / "empty"))
+    with pytest.raises(WorkerRegistryUnavailable):
+        load_worker_profile_specs(tmp_path / "no-such-repo", "research")
+
+
+def test_department_without_llm_workers_is_empty_not_broken() -> None:
+    """트레이딩은 LLM 직원 0명이 정상이다 - 결함(키 없음)과 구분돼야 한다."""
+
+    from observability import load_worker_profile_specs
+
+    assert load_worker_profile_specs(ROOT, "trading") == ()

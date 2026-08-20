@@ -21,7 +21,7 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, StateGraph
 
-from orchestration.llm_observability import record_llm_call
+from orchestration.llm_observability import publish_worker_activity, record_llm_call
 
 WorkerLLM = Callable[..., str]
 # worker_id -> WorkerLLM. 부서별 LoRA adapter 처럼 **워커마다 모델 좌표가
@@ -591,12 +591,13 @@ def run_worker_registry(
     tools: Mapping[str, WorkerTool],
     llm: WorkerLLM | None = None,
     llm_factory: WorkerLLMFactory | None = None,
+    stage: str | None = None,
 ) -> dict[str, Any]:
     """Synchronous compatibility boundary for async fan-out/fan-in execution."""
 
     return run_coroutine_sync(
         run_worker_registry_async(specs, payload, tools=tools, llm=llm,
-                                  llm_factory=llm_factory)
+                                  llm_factory=llm_factory, stage=stage)
     )
 
 
@@ -607,6 +608,10 @@ async def run_worker_registry_async(
     tools: Mapping[str, WorkerTool],
     llm: WorkerLLM | None = None,
     llm_factory: WorkerLLMFactory | None = None,
+    # HR 유휴 관측용 부서 stage(2026-08-20). 부서가 주지 않으면 계측만 조용히
+    # 빠진다 - 실행은 그대로다. 값은 portfolio_recommendation 의 DEPARTMENTS 와
+    # 같은 이름 공간이어야 한다(research/quant/trading/risk/qa/accounting).
+    stage: str | None = None,
 ) -> dict[str, Any]:
     """Run Worker graphs with LangGraph async fan-out/fan-in.
 
@@ -619,7 +624,7 @@ async def run_worker_registry_async(
     not_executed = [spec.worker_id for spec in specs if not should_run(spec, payload)]
     eligible = [spec for spec in specs if should_run(spec, payload)]
 
-    async def run_one(spec: WorkerSpec) -> dict[str, Any]:
+    async def _execute_one(spec: WorkerSpec) -> dict[str, Any]:
         tool = tools.get(spec.worker_id)
         if tool is None:
             return {
@@ -664,6 +669,29 @@ async def run_worker_registry_async(
                 "output_contract": spec.output_contract,
                 "input_hash": input_hash,
             }
+
+    async def run_one(spec: WorkerSpec) -> dict[str, Any]:
+        """실행 결과에 손대지 않고 HR 유휴 관측 이벤트만 덧붙인다(2026-08-20).
+
+        publish 는 로컬 큐잉이라 여기서 네트워크를 기다리지 않는다(실측 0.117ms,
+        전송은 SDK 의 배치 스레드가 한다). 실패해도 False 를 돌려줄 뿐 예외를
+        올리지 않으므로 계측이 Worker 실행 결과를 바꾸지 못한다.
+        """
+
+        started = time.perf_counter()
+        report = await _execute_one(spec)
+        if stage:
+            publish_worker_activity(
+                stage=stage,
+                worker_id=spec.worker_id,
+                role=spec.role,
+                status=str(report.get("status", "DEGRADED")),
+                attempts=int(report.get("attempts", 0) or 0),
+                latency_ms=int((time.perf_counter() - started) * 1000),
+                error_count=0 if report.get("status") == "COMPLETED" else 1,
+                trace_id=str(payload.get("trace_id") or payload.get("case_id") or ""),
+            )
+        return report
 
     # asyncio.gather preserves input order, making fan-in reproducible.
     reports = list(await asyncio.gather(*(run_one(spec) for spec in eligible)))

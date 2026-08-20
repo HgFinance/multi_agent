@@ -243,7 +243,10 @@ def ceo_runner(payload: Mapping[str, Any], *, at: datetime | None = None) -> dic
 
 
 def run_employee_workers(payload: Mapping[str, Any], *, llm: WorkerLLM | None = None) -> dict[str, Any]:
-    result = run_worker_registry(WORKER_SPECS, payload, tools=tools_for_specs(WORKER_SPECS), llm=llm)
+    # HR 유휴 리포트는 6개 투자본부만 조회하므로 ceo 이벤트를 지금 읽는 곳은 없다.
+    # 그래도 stage 를 준다 - 나중에 범위를 넓힐 때 과거 데이터가 비어 있지 않게.
+    result = run_worker_registry(WORKER_SPECS, payload, tools=tools_for_specs(WORKER_SPECS),
+                                 llm=llm, stage="ceo")
 
     # ceo-runner 는 레지스트리 밖이다. 공용 런타임은 그래프마다 LLM 을 부르므로
     # 거기 넣으면 "LLM 없음"이 프롬프트 문장이 되고 실행 경로로는 뚫린다.
