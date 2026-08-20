@@ -40,48 +40,136 @@ compliance-policy-agent Trace 에는 Mandate/제한종목 질의응답 같은 Ri
 from __future__ import annotations
 
 import os
-import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
-try:
-    from orchestration.employee_dispatch import load_worker_specs
-    from orchestration.llm_observability import langfuse_worker_event_name
-except ModuleNotFoundError:  # direct department-local execution
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-    try:
-        from orchestration.employee_dispatch import load_worker_specs
-        from orchestration.llm_observability import langfuse_worker_event_name
-    except ModuleNotFoundError as _exc:
-        # ▶ 배포된 workforce-api 이미지에는 다른 본부 코드가 없다 (계획서 11.1
-        #   "해당 본부와 공통 Contract만 Copy"). 이 유휴 판정만 전 본부의
-        #   WORKER_SPECS 를 **파이썬 모듈로** 읽어서 경계를 넘는다.
-        #
-        #   여기서 죽으면 app.py 101행 import 가 실패해 **HR API 전체가**
-        #   크래시 루프에 빠진다 - 2026-08-12 실측. 기능 하나 때문에 본부
-        #   백엔드를 통째로 못 뜨게 하지 않는다. 레지스트리를 못 읽는 것은
-        #   불변식 2 그대로 "쉬고 있다"가 아니라 **"우리가 모른다"**다.
-        #
-        #   ⚠ 근본 해결은 이 자리가 아니다. HR 이 남의 본부 registry 를
-        #     import 로 읽을지, Versioned API 로 읽을지가 미결이다(계획서 3.2).
-        load_worker_specs = None  # type: ignore[assignment]
-        _WORKER_REGISTRY_IMPORT_ERROR: str | None = f"{type(_exc).__name__}:{_exc}"
+# ▶ 2026-08-20: 남의 본부 **파이썬 모듈 import** 를 걷어냈다(영주 결정).
+#   이전에는 orchestration.employee_dispatch.load_worker_specs() 로 각 본부의
+#   employee_workers.py 를 실행해 WORKER_SPECS 를 읽었다. 유휴 판정에 필요한 값은
+#   worker_id 와 trigger 두 개뿐인데, 그걸 얻으려고 프롬프트·툴 정의까지 든 실행
+#   모듈을 HR 프로세스 안에서 돌린 셈이다. 배포 이미지에는 다른 본부 코드가 없어
+#   (계획서 11.1) 그 import 가 실패했고, 2026-08-12 에는 HR API 전체가 크래시
+#   루프에 빠졌다.
+#
+#   지금은 부서 Hermes Profile(`hermes/config.yaml`)의 `workers:` 만 읽는다 -
+#   CLAUDE.md 가 "정본은 각 부서 hermes/config.yaml 의 workers" 라고 못 박은 바로
+#   그 파일이고, tests/test_worker_architecture.py 도 이미 그 YAML 을 진실로 삼아
+#   편제를 검증한다. 코드가 아니라 **데이터**를 읽으므로 남의 본부 코드는 이
+#   프로세스에 들어오지 않는다.
+#
+#   ⚠ 이건 "선언된 편제"이지 "지금 배포된 런타임"이 아니다. 선언돼 있는데 실제로
+#     안 도는 워커는 UNOBSERVED 로 드러난다 - 이 리포트가 잡아야 할 종류의 불일치다.
+#     편제가 런타임에 동적으로 바뀌게 되면 그때 Versioned API 로 승격한다(계획서 3.2).
 
-        def langfuse_worker_event_name(stage: str, worker_id: str) -> str:  # type: ignore[misc]
-            return f"worker.{stage}.{worker_id}"
-    else:
-        _WORKER_REGISTRY_IMPORT_ERROR = None
-else:
-    _WORKER_REGISTRY_IMPORT_ERROR = None
+try:
+    from orchestration.llm_observability import langfuse_worker_event_name
+except ModuleNotFoundError:  # 배포된 workforce-api 이미지에는 orchestration 이 없다.
+
+    def langfuse_worker_event_name(*, stage: str, worker_id: str) -> str:
+        """write 측과 **같은** 문자열을 만들어야 한다.
+
+        이벤트 이름은 부서 코드가 아니라 write/read 사이의 wire contract 라서,
+        import 할 수 없는 런타임에서는 복제하고 계약 테스트로 묶는다
+        (tests/test_hr_idle_agents.py::test_fallback_event_name_matches_canonical).
+        포맷이 어긋나면 조회가 예외 없이 **조용히 0건**이 되므로 - 이전 fallback 이
+        `worker.{stage}.{worker_id}` 라는 다른 포맷을 만들고 있었다(2026-08-20 수정) -
+        이 대조를 테스트로 고정하는 것이 이 복제의 전제다.
+        """
+
+        return f"llm.performance.metric:{stage}:{worker_id}"
 
 
 class WorkerRegistryUnavailable(RuntimeError):
     """부서 Worker registry 를 이 런타임에서 읽을 수 없다(유휴 판정 불가)."""
 
 ROOT = Path(__file__).resolve().parents[3]
+
+# 부서 dispatch 키 -> Hermes Profile 디렉터리명. 이 매핑이 INVESTMENT_DEPARTMENT_STAGE
+# 와 별개인 이유는 모듈 docstring "부서 키가 두 개인 이유" 와 같다 - 폴더명(번호 접두어)
+# 은 또 다른 이름 공간이다.
+DEPARTMENT_PROFILE_DIR: dict[str, str] = {
+    "research": "01-research",
+    "trading": "02-trading",
+    "risk": "03-risk",
+    "quant-backtest": "04-quant-backtest",
+    "accounting-portfolio": "05-accounting-portfolio",
+    "qa": "06-ai-qa-audit",
+}
+
+# 컨테이너에서는 저장소 트리가 통째로 있지 않고 config.yaml 6 개만 read-only 로
+# 마운트된다(departments/07-agent-workforce/compose.yaml). 경로는 환경변수로 바꿀 수
+# 있게 두되 기본값을 박아둬 compose 와 코드가 따로 놀지 않게 한다.
+PROFILE_MOUNT_ROOT_ENV = "WORKFORCE_PROFILE_ROOT"
+DEFAULT_PROFILE_MOUNT_ROOT = Path("/app/profiles")
+
+
+@dataclass(frozen=True)
+class WorkerProfileSpec:
+    """Profile 에 선언된 Worker 한 명. 유휴 판정에 필요한 두 필드만 갖는다."""
+
+    worker_id: str
+    trigger: str
+
+
+def _profile_candidates(department: str, repo_root: Path) -> tuple[Path, ...]:
+    """저장소 직접 실행(개발)과 마운트(컨테이너) 두 경로를 다 본다."""
+
+    directory = DEPARTMENT_PROFILE_DIR.get(department)
+    if directory is None:
+        raise ValueError(f"unknown_investment_department:{department}")
+    mount_root = Path(os.environ.get(PROFILE_MOUNT_ROOT_ENV) or DEFAULT_PROFILE_MOUNT_ROOT)
+    return (
+        repo_root / "departments" / directory / "hermes" / "config.yaml",
+        mount_root / department / "config.yaml",
+    )
+
+
+def load_worker_profile_specs(repo_root: Path, department: str) -> tuple[WorkerProfileSpec, ...]:
+    """부서 Profile 의 `workers:` 를 읽어 (worker_id, trigger) 목록을 만든다.
+
+    실패 구분이 이 함수의 요점이다:
+      - 파일을 못 찾거나 못 읽음 / `workers:` 키가 없음  -> WorkerRegistryUnavailable
+        ("우리가 모른다". 빈 목록으로 돌려주면 "유휴 워커 없음" 으로 오독된다)
+      - `workers: {}` (트레이딩)                        -> 빈 tuple, 정상
+        LLM 직원을 두지 않는 부서가 실제로 있다(CLAUDE.md 편제표: trading 0 명).
+    """
+
+    try:
+        import yaml
+    except ModuleNotFoundError as exc:  # pragma: no cover - 이미지 빌드 결함
+        raise WorkerRegistryUnavailable(f"pyyaml_not_installed:{exc}") from exc
+
+    candidates = _profile_candidates(department, repo_root)
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception as exc:  # noqa: BLE001 - 깨진 Profile 도 "모른다" 로 접힌다
+            raise WorkerRegistryUnavailable(
+                f"profile_unreadable:{department}:{type(exc).__name__}"
+            ) from exc
+        workers = config.get("workers")
+        if workers is None:
+            # `workers: {}` 는 None 이 아니라 빈 dict 다 - 선언된 0 명과 키 자체가
+            # 없는 결함을 구분한다.
+            raise WorkerRegistryUnavailable(f"profile_workers_key_missing:{department}")
+        if not isinstance(workers, dict):
+            raise WorkerRegistryUnavailable(f"profile_workers_not_mapping:{department}")
+        specs: list[WorkerProfileSpec] = []
+        for worker_id, item in workers.items():
+            trigger = (item or {}).get("trigger") if isinstance(item, dict) else None
+            if not worker_id or not trigger:
+                raise WorkerRegistryUnavailable(f"profile_worker_invalid:{department}:{worker_id}")
+            specs.append(WorkerProfileSpec(str(worker_id), str(trigger)))
+        return tuple(specs)
+    raise WorkerRegistryUnavailable(
+        "profile_not_found:" + department + ":" + os.pathsep.join(str(c) for c in candidates)
+    )
+
 
 # employee_dispatch 의 로더 키 -> portfolio_recommendation 이 이벤트 name 에 쓰는 stage 값.
 # 위 모듈 docstring "부서 키가 두 개인 이유" 참고.
@@ -202,12 +290,6 @@ def check_idle_agents(
 
     if idle_threshold_hours <= 0:
         raise ValueError("idle_threshold_hours 는 양수여야 한다")
-    if load_worker_specs is None:
-        # 워커 목록 자체를 못 얻으므로 "전원 UNAVAILABLE" 조차 만들 수 없다.
-        # 빈 목록으로 돌려주면 "유휴 워커 없음"으로 **오독**되므로 명시적으로 알린다.
-        raise WorkerRegistryUnavailable(
-            f"worker_registry_unavailable:{_WORKER_REGISTRY_IMPORT_ERROR}"
-        )
 
     now = now or datetime.now(timezone.utc)
     since = now - timedelta(hours=lookback_hours)
@@ -223,7 +305,10 @@ def check_idle_agents(
         stage = INVESTMENT_DEPARTMENT_STAGE.get(department)
         if stage is None:
             raise ValueError(f"unknown_investment_department:{department}")
-        specs = load_worker_specs(repo_root, department)
+        # Profile(데이터)만 읽는다 - 워커 목록 자체를 못 얻으면 여기서 던지는
+        # WorkerRegistryUnavailable 가 app.py 에서 503 이 된다. 빈 목록으로 돌려주면
+        # "유휴 워커 없음" 으로 오독되기 때문이다.
+        specs = load_worker_profile_specs(repo_root, department)
         for spec in specs:
             if reader is None:
                 reports.append(

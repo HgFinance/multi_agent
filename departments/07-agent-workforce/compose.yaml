@@ -27,6 +27,21 @@ services:
       LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      # 아래 마운트 경로와 코드 기본값(observability.py DEFAULT_PROFILE_MOUNT_ROOT)이
+      # 따로 놀지 않도록 명시한다.
+      WORKFORCE_PROFILE_ROOT: /app/profiles
+    volumes:
+      # 6개 투자본부 Hermes Profile을 **read-only 데이터로만** 읽는다(2026-08-20 영주
+      # 결정, 계획서 3.2의 미결 해소). 유휴 판정에 필요한 값은 config.yaml `workers:`의
+      # worker_id·trigger 둘뿐이고 그 파일이 편제의 정본이다(CLAUDE.md) - 남의 본부
+      # 파이썬 모듈을 import해 HR 프로세스에서 실행하던 이전 방식을 대체한다.
+      # `:ro` 는 필수다. HR은 남의 본부 편제를 읽을 뿐 고칠 권한이 없다.
+      - ../01-research/hermes/config.yaml:/app/profiles/research/config.yaml:ro
+      - ../02-trading/hermes/config.yaml:/app/profiles/trading/config.yaml:ro
+      - ../03-risk/hermes/config.yaml:/app/profiles/risk/config.yaml:ro
+      - ../04-quant-backtest/hermes/config.yaml:/app/profiles/quant-backtest/config.yaml:ro
+      - ../05-accounting-portfolio/hermes/config.yaml:/app/profiles/accounting-portfolio/config.yaml:ro
+      - ../06-ai-qa-audit/hermes/config.yaml:/app/profiles/qa/config.yaml:ro
     ports:
       - "127.0.0.1:8044:8000"   # 로컬 전용 - 외부 노출 금지
     mem_limit: 256m
