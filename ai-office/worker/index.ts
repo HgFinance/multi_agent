@@ -2,8 +2,9 @@
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
 import { integrationStatus, publishReport, type DayReport, type PublishEnv } from "./report";
+import { isBffProxyPath, proxyBffRequest, type BffProxyEnv } from "./bffProxy";
 
-interface Env extends PublishEnv {
+interface Env extends PublishEnv, BffProxyEnv {
   ASSETS: Fetcher;
   DB: D1Database;
   IMAGES: {
@@ -29,6 +30,12 @@ interface ExecutionContext {
 const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+
+    // 브라우저는 BFF를 직접 부르지 않는다. 동일 출처 `/bff/*`로 받아서
+    // Worker가 서버 사이에서 전달한다(= CORS/preflight가 발생하지 않는다).
+    if (isBffProxyPath(url.pathname)) {
+      return proxyBffRequest(request, env);
+    }
 
     // 연동 설정 여부만 알려준다 (값은 절대 내보내지 않는다)
     if (url.pathname === "/api/integrations") {
