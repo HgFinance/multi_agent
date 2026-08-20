@@ -1464,6 +1464,13 @@ services:
       HERMES_KANBAN_DB: /opt/data/shared-kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
       PYTHONPATH: /opt/hgfinance
+      # Langfuse(2026-08-20). Discord/웹 사용자 질의는 BFF 가 부서장을 직접 부르지
+      # 않고 카드로 넘긴다 - 그 카드가 끝나는 것을 보는 유일한 프로세스가 여기다.
+      # 이 키가 없으면 사용자 요청에서 비롯된 부서장 활동이 하나도 관측되지 않는다.
+      LANGFUSE_TRACING: ${LANGFUSE_TRACING:-false}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
       NOTION_TOKEN: ${NOTION_TOKEN:-}
       NOTION_CEO_DB: ${NOTION_CEO_DB:-}
       DATABASE_URL: ${DATABASE_URL:-}

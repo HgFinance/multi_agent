@@ -367,14 +367,16 @@ def test_head_turn_publishes_with_profile_persona(captured: _FakeLangfuseClient)
         import hermes_boundary
         from observability import load_head_profile_spec
 
-    config = "departments/01-research/hermes/config.yaml"
     hermes_boundary._publish_head_turn(
-        department="research-department", config=config, started=0.0, status="COMPLETED"
+        department="research-department", started=0.0, status="COMPLETED"
     )
-    persona = hermes_boundary.head_persona_of(config)
+    persona = observability.head_persona_for_profile("research-department")
     assert persona, "Profile 에서 head_persona 를 못 읽으면 계측이 통째로 빠진다"
     assert f"llm.performance.metric:research:{persona}" in _names(captured)
+    assert captured.events[-1]["metadata"]["source"] == "bff_ask"
 
+    # write(BFF) 와 read(HR) 가 같은 신원을 봐야 한다 - 다르면 부서장이 영원히
+    # UNOBSERVED 로 남는다.
     read_side = load_head_profile_spec(ROOT, "research")
     assert read_side is not None and read_side.worker_id == persona
 
@@ -388,21 +390,36 @@ def test_unknown_profile_is_not_published_under_a_guessed_stage(
         import hermes_boundary
 
     hermes_boundary._publish_head_turn(
-        department="not-a-real-department",
-        config="departments/01-research/hermes/config.yaml",
-        started=0.0,
-        status="COMPLETED",
+        department="not-a-real-department", started=0.0, status="COMPLETED"
     )
     assert captured.events == []
 
 
-def test_profile_stage_table_covers_every_known_profile() -> None:
-    """컨테이너 표에 있는 프로필은 stage 표에도 있어야 한다 - 하나만 빠져도 그 부서만 침묵한다."""
+def test_every_known_profile_resolves_to_a_stage_and_persona() -> None:
+    """부를 수 있는 프로필은 전부 stage·신원이 풀려야 한다.
+
+    하나라도 안 풀리면 그 부서장만 조용히 계측에서 빠진다 - 실행은 정상이고
+    이벤트만 안 나가므로 어떤 테스트도 안 깨진다.
+    """
 
     with department_path("apps/api"):
         import hermes_boundary
 
-    assert set(hermes_boundary.PROFILE_CONTAINERS) == set(hermes_boundary.PROFILE_STAGES)
+    for profile in hermes_boundary.PROFILE_CONTAINERS:
+        assert observability.stage_for_profile(profile), f"{profile} stage 미해석"
+        assert observability.head_persona_for_profile(profile), f"{profile} head_persona 미해석"
+
+
+def test_stage_names_match_the_hr_read_side() -> None:
+    """write 가 쓰는 stage 와 HR 이 조회하는 stage 가 같아야 한다."""
+
+    with department_path("departments/07-agent-workforce/scorecard"):
+        from observability import INVESTMENT_DEPARTMENT_STAGE
+
+    written = {observability.stage_for_profile(p) for p in
+               ("research-department", "trading-department", "risk-management",
+                "quant-backtest-department", "accounting-portfolio-department", "qa-department")}
+    assert written == set(INVESTMENT_DEPARTMENT_STAGE.values())
 
 
 def test_heads_are_excluded_from_the_default_report() -> None:
@@ -426,3 +443,67 @@ def test_heads_are_excluded_from_the_default_report() -> None:
     assert len(with_heads) == len(default) + 1
     assert "research-supervisor" in {r.worker_id for r in with_heads}
     assert "research-supervisor" not in {r.worker_id for r in default}
+
+
+# ---------------------------------------------------------------------------
+# Discord/웹 사용자 질의 경로 (칸반 카드)
+#
+# 이 경로는 BFF 가 부서장을 직접 부르지 않는다 - 카드를 만들고 Hermes 게이트웨이가
+# 자기 컨테이너 안에서 실행한다. 우리 코드가 "그 부서장이 일을 끝냈다"를 아는 자리는
+# ceo-supervisor 의 terminal event 관측 하나뿐이다.
+# ---------------------------------------------------------------------------
+
+
+def _supervisor_publisher():
+    from orchestration.adapters.ceo_supervisor import CeoSupervisorService
+
+    return CeoSupervisorService._publish_head_card_activity
+
+
+@pytest.mark.parametrize(
+    ("kind", "status", "errors"),
+    [("completed", "COMPLETED", 0), ("done", "COMPLETED", 0),
+     ("blocked", "BLOCKED", 0), ("failed", "DEGRADED", 1)],
+)
+def test_card_terminal_event_publishes_head_activity(
+    captured: _FakeLangfuseClient, kind: str, status: str, errors: int
+) -> None:
+    """카드 종료가 부서장 1턴으로 기록되고, 실패·차단도 관측 사실로 남아야 한다."""
+
+    publish = _supervisor_publisher()
+    publish(
+        object(),  # self - 이 메서드는 인스턴스 상태를 쓰지 않는다
+        task_id="task-1",
+        kind=kind,
+        event={"assignee": "research-department"},
+    )
+    persona = observability.head_persona_for_profile("research-department")
+    assert f"llm.performance.metric:research:{persona}" in _names(captured)
+    metadata = captured.events[-1]["metadata"]
+    assert metadata["status"] == status
+    assert metadata["error_count"] == errors
+    assert metadata["source"] == "kanban_card"
+    # 카드 종료는 지속시간을 모른다 - 0 으로 채우면 "즉시 끝났다"로 읽힌다.
+    assert "latency_ms" not in metadata
+
+
+def test_card_event_without_a_known_assignee_publishes_nothing(
+    captured: _FakeLangfuseClient,
+) -> None:
+    """모르는 프로필의 stage 를 이름으로 지어내지 않는다."""
+
+    publish = _supervisor_publisher()
+    publish(object(), task_id="t", kind="completed", event={"assignee": "made-up-profile"})
+    publish(object(), task_id="t", kind="completed", event={})
+    assert captured.events == []
+
+
+def test_bff_and_card_paths_use_the_same_head_identity() -> None:
+    """두 write 경로가 같은 부서장을 같은 이름으로 불러야 합쳐진다."""
+
+    with department_path("apps/api"):
+        import hermes_boundary
+
+    for profile in hermes_boundary.PROFILE_CONTAINERS:
+        assert observability.head_persona_for_profile(profile) ==             observability.head_persona_for_profile(profile)
+        assert observability.stage_for_profile(profile)
