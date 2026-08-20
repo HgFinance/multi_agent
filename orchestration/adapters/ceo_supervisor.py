@@ -58,6 +58,9 @@ from orchestration.discord_delivery import (
     correlation_from_task,
 )
 from orchestration.discord_idempotency import DiscordIdempotencyStore
+from orchestration.adapters.department_notion_projection import (
+    DepartmentNotionProjection,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1608,6 +1611,37 @@ class CeoSupervisorService:
                     "terminal projection observer failed",
                     extra={"root_task_id": root_task_id, "task_id": task_id, "error": str(exc)},
         )
+        # Trading/Quant terminal results are projected to their existing
+        # Notion databases as a non-binding observer. Research/Risk/
+        # Accounting/QA/HR retain their native reporters, so this projector
+        # deliberately skips them.
+        try:
+            department_projection = DepartmentNotionProjection(
+                env=getattr(self.client, "environment", os.environ),
+            ).project(
+                root_task_id=root_task_id,
+                task=task,
+                workflow_tasks=task_payloads,
+                event=event,
+            )
+            if department_projection.status not in {"skipped", "duplicate"}:
+                logger.info(
+                    "department-notion-projection "
+                    "task=%s department=%s status=%s",
+                    task_id,
+                    department_projection.department,
+                    department_projection.status,
+                )
+        except Exception as exc:
+            logger.exception(
+                "department notion projection observer failed",
+                extra={
+                    "root_task_id": root_task_id,
+                    "task_id": task_id,
+                    "error": str(exc),
+                },
+            )
+
         if response_synthesis:
             logger.info(
                 "synthesis-complete root=%s task=%s producer=%s",
