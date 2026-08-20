@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from decimal import Decimal
 
 from .contracts import (
@@ -11,56 +10,18 @@ from .contracts import (
     EvaluationClock,
     ExpressionNode,
     ExpressionType,
+    IndicatorSource,
     SizingType,
     ValueUnit,
 )
 
 
-@dataclass(frozen=True)
-class IndicatorDefinition:
-    outputs: dict[str, ValueUnit]
-    defaults: dict[str, int | Decimal]
-    integer_parameters: frozenset[str]
+from .indicators import DEFAULT_REGISTRY, IndicatorDefinition
 
 
-INDICATORS: dict[str, IndicatorDefinition] = {
-    "SMA": IndicatorDefinition(
-        {"VALUE": ValueUnit.PRICE}, {"PERIOD": 20}, frozenset({"PERIOD"})
-    ),
-    "EMA": IndicatorDefinition(
-        {"VALUE": ValueUnit.PRICE}, {"PERIOD": 20}, frozenset({"PERIOD"})
-    ),
-    "RSI": IndicatorDefinition(
-        {"VALUE": ValueUnit.NUMBER}, {"PERIOD": 14}, frozenset({"PERIOD"})
-    ),
-    "MACD": IndicatorDefinition(
-        {
-            "MACD": ValueUnit.PRICE,
-            "SIGNAL": ValueUnit.PRICE,
-            "HISTOGRAM": ValueUnit.PRICE,
-        },
-        {"FAST": 12, "SLOW": 26, "SIGNAL": 9},
-        frozenset({"FAST", "SLOW", "SIGNAL"}),
-    ),
-    "BOLLINGER": IndicatorDefinition(
-        {
-            "UPPER": ValueUnit.PRICE,
-            "MIDDLE": ValueUnit.PRICE,
-            "LOWER": ValueUnit.PRICE,
-        },
-        {"PERIOD": 20, "STDDEV": Decimal("2")},
-        frozenset({"PERIOD"}),
-    ),
-    "VOLUME_AVERAGE": IndicatorDefinition(
-        {"VALUE": ValueUnit.VOLUME}, {"PERIOD": 20}, frozenset({"PERIOD"})
-    ),
-    "ATR": IndicatorDefinition(
-        {"VALUE": ValueUnit.PRICE}, {"PERIOD": 14}, frozenset({"PERIOD"})
-    ),
-    "ADX": IndicatorDefinition(
-        {"VALUE": ValueUnit.NUMBER}, {"PERIOD": 14}, frozenset({"PERIOD"})
-    ),
-}
+# Backward-compatible view for callers that imported the old constant.
+# The registry remains authoritative.
+INDICATORS: dict[str, IndicatorDefinition] = DEFAULT_REGISTRY.definitions
 
 MARKET_FIELDS: dict[str, ValueUnit] = {
     "LAST_PRICE": ValueUnit.PRICE,
@@ -94,22 +55,33 @@ def _error(code: str, message: str) -> RuleSemanticError:
     return RuleSemanticError(code, message)
 
 
-def _indicator_parameters(node: ExpressionNode) -> dict[str, Decimal | int]:
-    definition = INDICATORS.get(node.name or "")
+def _indicator_parameters(node: ExpressionNode) -> dict[str, Decimal | int | str]:
+    definition = DEFAULT_REGISTRY.get(node.name)
     if definition is None:
         raise _error("UNSUPPORTED_INDICATOR", f"unsupported indicator {node.name!r}")
     supplied = {str(key).upper(): value for key, value in (node.parameters or {}).items()}
-    unknown = set(supplied) - set(definition.defaults)
+    unknown = set(supplied) - set(definition.defaults) - set(definition.required_parameters)
+    missing = set(definition.required_parameters) - set(supplied)
     if unknown:
         raise _error(
             "UNSUPPORTED_INDICATOR_PARAMETER",
             f"{node.name} has unsupported parameters {sorted(unknown)}",
         )
-    result: dict[str, Decimal | int] = dict(definition.defaults)
+    if missing:
+        raise _error(
+            "MISSING_INDICATOR_PARAMETER",
+            f"{node.name} requires parameters {sorted(missing)}",
+        )
+    result: dict[str, Decimal | int | str] = dict(definition.defaults)
     for key, raw in supplied.items():
+        if key in definition.string_parameters:
+            if not isinstance(raw, str) or not raw.strip():
+                raise _error("INVALID_INDICATOR_PARAMETER", f"{key} must be a non-empty string")
+            result[key] = raw.strip()
+            continue
         try:
             parsed = Decimal(str(raw))
-        except Exception as exc:  # Pydantic handles most malformed values.
+        except Exception as exc:
             raise _error("INVALID_INDICATOR_PARAMETER", f"{key} is not numeric") from exc
         if not parsed.is_finite() or parsed <= 0:
             raise _error("INVALID_INDICATOR_PARAMETER", f"{key} must be positive")
@@ -124,9 +96,32 @@ def _indicator_parameters(node: ExpressionNode) -> dict[str, Decimal | int]:
             result[key] = int(parsed)
         else:
             result[key] = parsed
-    if node.name == "MACD" and int(result["FAST"]) >= int(result["SLOW"]):
+    if DEFAULT_REGISTRY.canonical_name(node.name) == "MACD" and int(result["FAST"]) >= int(result["SLOW"]):
         raise _error("INVALID_INDICATOR_PARAMETER", "MACD FAST must be below SLOW")
     return result
+
+
+def indicator_definition(node: ExpressionNode) -> IndicatorDefinition:
+    definition = DEFAULT_REGISTRY.get(node.name)
+    if definition is None:
+        raise _error("UNSUPPORTED_INDICATOR", f"unsupported indicator {node.name!r}")
+    requested_source = node.source.value if isinstance(node.source, IndicatorSource) else node.source
+    if requested_source is not None and requested_source != definition.source:
+        raise _error(
+            "INDICATOR_SOURCE_MISMATCH",
+            f"{definition.name} belongs to source {definition.source}, not {requested_source}",
+        )
+    if node.provider is not None and definition.provider is not None:
+        if node.provider != definition.provider:
+            raise _error(
+                "INDICATOR_PROVIDER_MISMATCH",
+                f"{definition.name} belongs to provider {definition.provider}, not {node.provider}",
+            )
+    return definition
+
+
+def indicator_source(node: ExpressionNode) -> str:
+    return indicator_definition(node).source
 
 
 def _contains_type(node: ExpressionNode | None, expression_type: ExpressionType) -> bool:
@@ -140,7 +135,7 @@ def _contains_type(node: ExpressionNode | None, expression_type: ExpressionType)
     )
 
 
-def normalized_indicator_parameters(node: ExpressionNode) -> dict[str, Decimal | int]:
+def normalized_indicator_parameters(node: ExpressionNode) -> dict[str, Decimal | int | str]:
     """Return defaults plus validated explicit parameters for evaluation."""
 
     return _indicator_parameters(node)
@@ -204,11 +199,11 @@ def _infer(
         return unit
 
     if node.type is ExpressionType.INDICATOR:
-        if clock is EvaluationClock.QUOTE:
-            raise _error("INDICATOR_REQUIRES_BAR_CLOSE", "indicators require completed bars")
-        definition = INDICATORS.get(node.name or "")
-        if definition is None:
-            raise _error("UNSUPPORTED_INDICATOR", f"unsupported indicator {node.name!r}")
+        definition = indicator_definition(node)
+        if clock is EvaluationClock.QUOTE and not definition.realtime_supported:
+            raise _error("INDICATOR_REQUIRES_BAR_CLOSE", "indicator is not available on quote clock")
+        if clock is EvaluationClock.BAR_CLOSE and not definition.historical_supported:
+            raise _error("INDICATOR_REQUIRES_REALTIME", "indicator is not available on completed bars")
         _indicator_parameters(node)
         output = (node.output or "VALUE").upper()
         if output not in definition.outputs:
@@ -295,6 +290,8 @@ def validate_rule_spec(rule: ConditionalRuleSpec) -> ConditionalRuleSpec:
 
 __all__ = [
     "INDICATORS",
+    "indicator_definition",
+    "indicator_source",
     "MARKET_FIELDS",
     "PORTFOLIO_FIELDS",
     "IndicatorDefinition",

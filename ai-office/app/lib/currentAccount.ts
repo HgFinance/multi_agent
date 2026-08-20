@@ -47,15 +47,22 @@ export interface TestAccount {
 /**
  * 고정 계정 - Fund Owner(user1) 하나뿐이다.
  *
- * `supabase/seed.sql`이 심은 플레이스홀더 회원과 같은 UUID다 — 여기서 값을
- * 바꾸면 서버가 모르는 사용자가 되어 `POST /ui/investor-profiles`가 FK 위반으로
- * 실패한다. seed와 함께 고쳐야 한다.
+ * **이 배포의 실제 control DB(`DATABASE_URL`, `apps/api/current_user.py`
+ * `_control_database_url()`)가 아는 계정이어야 한다.** `supabase/seed.sql`은
+ * Supabase 프로젝트용이고, 이 저장소가 실제로 붙는 운영 control DB(AWS 배포의
+ * `timescaledb`)는 별도로 `scripts/aws_database_bootstrap.py`의
+ * `seed_paper_principal()`이 심는다 - 값은 `.env`의 `PAPER_SEED_USER_ID`
+ * `/PAPER_SEED_FUND_ID`(현재 "AWS PAPER Operator"/"AWS PAPER Account")다.
+ * 여기 값을 바꾸면 서버가 모르는 사용자가 되어 `require_fund_membership`이
+ * 전부 403/422로 떨어진다(2026-08-20 Agent Logs 8개 부서 빈 화면의 원인) -
+ * 두 값은 항상 그 배포의 부트스트랩 결과와 짝이 맞아야 한다.
  */
 export const DEFAULT_ACCOUNT: TestAccount = {
-  userId: "00000000-0000-4000-8000-00000000cec0",
+  userId: "00000000-0000-4000-8000-00000000cec2",
+  // DB display_name은 "AWS PAPER Operator"다. 화면 라벨만 짧게 줄인다.
   label: "Fund Owner",
-  // TEST-CEO-MANDATE (USD). Aggressive Alpha Hunter 현재 metadata를 가진 계정.
-  fundId: "b13f5cd1-5df0-4025-92cf-9be03b1a0296",
+  // ACC01-PAPER (KRW). scripts/aws_database_bootstrap.py seed_paper_principal().
+  fundId: "3838f7d6-0c7c-4e54-85f3-316a451e7eeb",
   colorClass: "bg-primary",
 };
 

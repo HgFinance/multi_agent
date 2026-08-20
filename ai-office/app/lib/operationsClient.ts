@@ -7,6 +7,7 @@
  */
 
 import { BFF, bffFetch } from "./bffClient";
+import { currentFundId } from "./currentFund";
 
 export type RuntimeStatus =
   | "OFFLINE"
@@ -147,8 +148,15 @@ export function readableRuntimeMessage(text: string): { summary: string; action?
 
 export async function fetchOperations(): Promise<OperationsView> {
   let response: Response;
+  // `/ui/snapshot`은 supabase_jwt 모드에서 `fund_id` 없이는 422
+  // portfolio_fund_id_required로 떨어진다(apps/api/current_user.py
+  // require_fund_membership) - book_id는 절대 안 보낸다(같은 엔드포인트가
+  // 그건 supabase_jwt 모드에서 422 portfolio_book_selection_forbidden으로
+  // 막는다). ceoClient.ts의 `/ui/ceo/ask`와 같은 패턴이다.
+  const fundId = currentFundId();
+  const path = fundId ? `/ui/snapshot?fund_id=${encodeURIComponent(fundId)}` : "/ui/snapshot";
   try {
-    response = await bffFetch("/ui/snapshot", {
+    response = await bffFetch(path, {
       cache: "no-store",
       headers: { Accept: "application/json" },
     });

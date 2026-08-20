@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import {
   fetchOperations,
   subscribeOperationsStream,
@@ -95,31 +95,150 @@ function DepartmentCard({
   );
 }
 
-function formatMessageTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString("ko-KR", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function summarizeMessage(value: string, limit = 240): string {
-  const compact = value.replace(/<@!?\d+>/g, "@멘션").replace(/\s+/g, " ").trim();
-  if (!compact) return "첨부 또는 임베드만 있는 메시지";
-  return compact.length > limit ? `${compact.slice(0, limit).trimEnd()}…` : compact;
-}
-
-function formatMessageKind(value: string): string {
-  return value.replace(/[_-]+/g, " ").trim() || "runtime event";
-}
-
-/** 멘션만 사람이 읽는 말로 바꾼다. **줄바꿈은 살린다** - Discord 원문 그대로 읽혀야 한다. */
+/** Discord의 멘션·채널·역할·커스텀 이모지 토큰을 사람이 읽는 말로 바꾼다.
+ *  줄바꿈과 마크다운 기호는 그대로 남겨 `renderDiscordMarkup`이 렌더링한다. */
 function messageText(value: string): string {
-  return value.replace(/<@!?\d+>/g, "@멘션").trim();
+  return value
+    .replace(/<@&\d+>/g, "@역할")
+    .replace(/<#\d+>/g, "#채널")
+    .replace(/<a?:(\w+):\d+>/g, ":$1:")
+    .replace(/<@!?\d+>/g, "@멘션")
+    .trim();
+}
+
+/** `**bold**`/`*italic*`/`~~strike~~`/`` `code` ``/URL을 한 줄 안에서 React 노드로 바꾼다. */
+function renderInlineMarkup(text: string, keyPrefix: string): ReactNode[] {
+  const pattern = /\*\*(.+?)\*\*|__(.+?)__|~~(.+?)~~|`([^`]+?)`|\*(.+?)\*|_(.+?)_|(https?:\/\/[^\s<>]+)/g;
+  const nodes: ReactNode[] = [];
+  let lastIndex = 0;
+  let key = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text))) {
+    if (match.index > lastIndex) nodes.push(text.slice(lastIndex, match.index));
+    const [, bold, boldAlt, strike, code, italic, italicAlt, url] = match;
+    if (bold !== undefined || boldAlt !== undefined) {
+      nodes.push(<strong key={`${keyPrefix}-${key++}`}>{bold ?? boldAlt}</strong>);
+    } else if (strike !== undefined) {
+      nodes.push(<del key={`${keyPrefix}-${key++}`}>{strike}</del>);
+    } else if (code !== undefined) {
+      nodes.push(
+        <code key={`${keyPrefix}-${key++}`} className="rounded bg-surface-container-high px-1 py-0.5 font-data-mono text-[0.85em]">
+          {code}
+        </code>,
+      );
+    } else if (italic !== undefined || italicAlt !== undefined) {
+      nodes.push(<em key={`${keyPrefix}-${key++}`}>{italic ?? italicAlt}</em>);
+    } else if (url !== undefined) {
+      nodes.push(
+        <a key={`${keyPrefix}-${key++}`} href={url} target="_blank" rel="noreferrer" className="text-primary underline break-all">
+          {url}
+        </a>,
+      );
+    }
+    lastIndex = pattern.lastIndex;
+  }
+  if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
+  return nodes;
+}
+
+/** 코드 블록(```)과 인용(`>`)을 블록 단위로 가르고, 그 안쪽은 인라인 마크업을 적용한다. */
+function renderDiscordMarkup(text: string): ReactNode[] {
+  const blocks: ReactNode[] = [];
+  const fencePattern = /```(?:\w+\n)?([\s\S]*?)```/g;
+  let lastIndex = 0;
+  let blockIndex = 0;
+  let match: RegExpExecArray | null;
+
+  const renderPlainSegment = (segment: string) => {
+    const lines = segment.split("\n");
+    let quoteBuffer: string[] = [];
+    const flushQuote = () => {
+      if (!quoteBuffer.length) return;
+      blocks.push(
+        <blockquote key={`b-${blockIndex++}`} className="border-l-2 border-outline-variant pl-3 text-on-surface-variant">
+          {quoteBuffer.map((line, lineIndex) => (
+            <p key={lineIndex} className="m-0">
+              {renderInlineMarkup(line, `bq-${blockIndex}-${lineIndex}`)}
+            </p>
+          ))}
+        </blockquote>,
+      );
+      quoteBuffer = [];
+    };
+    let textBuffer: string[] = [];
+    const flushText = () => {
+      if (!textBuffer.length) return;
+      const joined = textBuffer.join("\n");
+      if (joined.trim()) {
+        blocks.push(
+          <p key={`b-${blockIndex++}`} className="m-0 whitespace-pre-wrap break-words">
+            {renderInlineMarkup(joined, `t-${blockIndex}`)}
+          </p>,
+        );
+      }
+      textBuffer = [];
+    };
+    let bulletBuffer: string[] = [];
+    const flushBullets = () => {
+      if (!bulletBuffer.length) return;
+      blocks.push(
+        <ul key={`b-${blockIndex++}`} className="m-0 list-disc space-y-0.5 pl-5">
+          {bulletBuffer.map((line, lineIndex) => (
+            <li key={lineIndex}>{renderInlineMarkup(line, `li-${blockIndex}-${lineIndex}`)}</li>
+          ))}
+        </ul>,
+      );
+      bulletBuffer = [];
+    };
+    for (const line of lines) {
+      const heading = /^(#{1,3})\s+(.+)$/.exec(line);
+      const quoted = /^>\s?(.*)$/.exec(line);
+      const bulleted = /^[-*]\s+(.+)$/.exec(line);
+      if (heading) {
+        flushText();
+        flushQuote();
+        flushBullets();
+        blocks.push(
+          <p
+            key={`b-${blockIndex++}`}
+            className={heading[1].length <= 2 ? "m-0 text-body-md font-body-md font-bold text-on-surface" : "m-0 font-bold text-on-surface"}
+          >
+            {renderInlineMarkup(heading[2], `h-${blockIndex}`)}
+          </p>,
+        );
+      } else if (quoted) {
+        flushText();
+        flushBullets();
+        quoteBuffer.push(quoted[1]);
+      } else if (bulleted) {
+        flushText();
+        flushQuote();
+        bulletBuffer.push(bulleted[1]);
+      } else {
+        flushQuote();
+        flushBullets();
+        textBuffer.push(line);
+      }
+    }
+    flushText();
+    flushQuote();
+    flushBullets();
+  };
+
+  while ((match = fencePattern.exec(text))) {
+    if (match.index > lastIndex) renderPlainSegment(text.slice(lastIndex, match.index));
+    blocks.push(
+      <pre
+        key={`b-${blockIndex++}`}
+        className="overflow-x-auto rounded-md bg-surface-container-high px-3 py-2 font-data-mono text-[0.85em] whitespace-pre-wrap break-words"
+      >
+        <code>{match[1].replace(/\n$/, "")}</code>
+      </pre>,
+    );
+    lastIndex = fencePattern.lastIndex;
+  }
+  if (lastIndex < text.length) renderPlainSegment(text.slice(lastIndex));
+  return blocks;
 }
 
 function formatClock(value: string): string {
@@ -175,9 +294,9 @@ function MessageRow({
             {formatClock(message.created_at)}
           </time>
         </p>
-        <p className="m-0 mt-1 text-body-sm font-body-sm leading-6 text-on-surface whitespace-pre-wrap break-words">
-          {text || <span className="text-outline italic">첨부 또는 임베드만 있는 메시지</span>}
-        </p>
+        <div className="mt-1 flex flex-col gap-1.5 text-body-sm font-body-sm leading-6 text-on-surface">
+          {text.trim() ? renderDiscordMarkup(text) : <span className="text-outline italic">첨부 또는 임베드만 있는 메시지</span>}
+        </div>
         {message.thread_id && onOpenThread ? (
           // Discord의 스레드 미리보기 줄과 같은 자리. 클릭하면 모달이 열린다.
           <button
@@ -325,6 +444,7 @@ function DiscordChat({ department }: { department: string }) {
   const [error, setError] = useState("");
   const [openThread, setOpenThread] = useState<DiscordMessage | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -338,9 +458,22 @@ function DiscordChat({ department }: { department: string }) {
   }, [department]);
 
   // 최신 글이 아래에 있다. 스크롤을 안 내리면 제일 오래된 대화만 보여서
-  // "새 메시지가 안 들어온다"로 읽힌다.
+  // "새 메시지가 안 들어온다"로 읽힌다(카카오톡처럼 최신이 먼저 보이고 위로
+  // 스크롤해 지난 대화를 본다).
+  //
+  // 이 패널은 접힌 `<details>` 안에 있다 - 접힌 동안은 숨은 상태라 scrollIntoView가
+  // 먹지 않는다. `scrollRef`는 messages가 채워진 뒤에야 DOM에 붙으므로 이 effect를
+  // `[messages]`에 걸어야 리스너가 실제로 붙는다(빈 배열이면 아직 없는 ref를 본다).
   useEffect(() => {
-    if (messages?.length) bottomRef.current?.scrollIntoView({ block: "end" });
+    if (!messages?.length) return;
+    bottomRef.current?.scrollIntoView({ block: "end" });
+    const details = scrollRef.current?.closest("details");
+    if (!details) return;
+    const handleToggle = () => {
+      if (details.open) bottomRef.current?.scrollIntoView({ block: "end" });
+    };
+    details.addEventListener("toggle", handleToggle);
+    return () => details.removeEventListener("toggle", handleToggle);
   }, [messages]);
 
   if (error) {
@@ -361,7 +494,7 @@ function DiscordChat({ department }: { department: string }) {
   return (
     // 위에서 아래로 흐르는 한 줄짜리 목록. 2열로 쪼개면 좌우 두 카드의 시각이
     // 뒤섞여 읽는 순서가 사라진다.
-    <div className="max-h-96 overflow-y-auto pr-1">
+    <div ref={scrollRef} className="max-h-96 overflow-y-auto pr-1">
       <MessageList messages={messages} onOpenThread={setOpenThread} />
       <div ref={bottomRef} />
       {openThread ? (
@@ -504,9 +637,6 @@ export default function AgentLogsView() {
         <span className="px-4 py-2 rounded border border-outline-variant bg-surface-container-lowest text-body-sm font-body-sm text-on-surface-variant">
           BFF keepalive <b className="font-data-mono text-on-surface">{lastKeepalive ? new Date(lastKeepalive).toLocaleTimeString("ko-KR") : "waiting"}</b>
         </span>
-        <span className="px-4 py-2 rounded border border-outline-variant bg-surface-container-lowest text-body-sm font-body-sm text-on-surface-variant">
-          agent.status.v1 <b className="font-data-mono text-on-surface">{data ? (data.eventBridgeConnected ? "events observed" : "no live events") : "checking"}</b>
-        </span>
       </section>
 
       {/* 접기는 native `<details>`가 한다 - 열림 상태·키보드·스크린리더가 전부 딸려
@@ -522,39 +652,15 @@ export default function AgentLogsView() {
             >
               expand_more
             </span>
-            부서 내부 메시지
+            부서 내부 대화내용
           </h2>
-          <span className="text-xs text-on-surface-variant">전체 {data?.messages.length ?? 0}개 메시지</span>
+          {discordDepartment ? (
+            <span className="text-xs text-on-surface-variant">{discordDepartment.name}</span>
+          ) : null}
         </summary>
-        <div className="flex flex-col gap-3 mt-3">
-        {data?.messages.length ? (
-          <ol className="flex flex-col gap-2 m-0 p-0 list-none">
-            {[...data.messages].slice(-8).reverse().map((message) => (
-              <li key={message.id} className="rounded-lg border border-outline-variant bg-surface-container-low p-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex flex-wrap items-center gap-2 text-xs text-on-surface-variant">
-                    <span className="rounded-full border border-outline-variant bg-surface-container-lowest px-2 py-0.5 font-semibold">
-                      {formatMessageKind(message.kind)}
-                    </span>
-                    <span>{message.department_code ?? "공용"}</span>
-                  </div>
-                  <time className="text-xs text-outline" dateTime={message.occurred_at}>
-                    {formatMessageTime(message.occurred_at)}
-                  </time>
-                </div>
-                <p className="text-body-sm font-body-sm text-on-surface m-0 mt-2">{summarizeMessage(message.text)}</p>
-              </li>
-            ))}
-          </ol>
-        ) : null}
+        <div className="mt-3">
         {discordDepartment ? (
-          <div className="border-t border-outline-variant pt-3">
-            <div className="flex justify-between items-center gap-3 flex-wrap mb-2">
-              <h3 className="text-body-md font-body-md font-bold text-on-surface m-0">Discord 대화</h3>
-              <span className="text-xs text-on-surface-variant">{discordDepartment.name}</span>
-            </div>
-            <DiscordChat key={discordDepartment.department_code} department={discordDepartment.department_code} />
-          </div>
+          <DiscordChat key={discordDepartment.department_code} department={discordDepartment.department_code} />
         ) : null}
         </div>
        </details>

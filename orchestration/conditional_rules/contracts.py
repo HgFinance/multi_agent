@@ -30,6 +30,13 @@ class ExpressionType(StrEnum):
     CROSS = "CROSS"
 
 
+class IndicatorSource(StrEnum):
+    LOCAL = "LOCAL"
+    BROKER = "BROKER"
+    DERIVED_REALTIME = "DERIVED_REALTIME"
+    PORTFOLIO = "PORTFOLIO"
+
+
 class ValueUnit(StrEnum):
     BOOL = "BOOL"
     NUMBER = "NUMBER"
@@ -107,6 +114,8 @@ class ExpressionNode(BaseModel):
     field: str | None = None
     name: str | None = None
     output: str | None = None
+    source: IndicatorSource | None = None
+    provider: str | None = None
     timeframe: Timeframe | None = None
     parameters: dict[str, Decimal | int | str] | None = None
     operator: str | None = None
@@ -120,7 +129,7 @@ class ExpressionNode(BaseModel):
         populated = {
             name
             for name in (
-                "value", "unit", "field", "name", "output", "timeframe",
+                "value", "unit", "field", "name", "output", "source", "provider", "timeframe",
                 "parameters", "operator", "left", "right", "operand",
                 "children",
             )
@@ -131,7 +140,7 @@ class ExpressionNode(BaseModel):
             ExpressionType.MARKET: {"field"},
             ExpressionType.PORTFOLIO: {"field"},
             ExpressionType.INDICATOR: {
-                "name", "output", "timeframe", "parameters",
+                "name", "output", "source", "provider", "timeframe", "parameters",
             },
             ExpressionType.ARITHMETIC: {"operator", "left", "right"},
             ExpressionType.COMPARISON: {"operator", "left", "right"},
@@ -162,6 +171,8 @@ class ExpressionNode(BaseModel):
             raise ValueError("LOGICAL node requires at least two children")
         if self.type is ExpressionType.INDICATOR:
             object.__setattr__(self, "output", (self.output or "value").upper())
+            if self.provider is not None:
+                object.__setattr__(self, "provider", self.provider.strip().upper())
             object.__setattr__(self, "parameters", self.parameters or {})
         return self
 
@@ -294,6 +305,7 @@ __all__ = [
     "ExecutionMode",
     "ExpressionNode",
     "ExpressionType",
+    "IndicatorSource",
     "MarketClosedPolicy",
     "RepeatPolicy",
     "RuleAction",
