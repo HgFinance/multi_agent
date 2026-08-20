@@ -103,6 +103,10 @@ skills:
 usage:
   run: "hr-department chat -q 'Build the weekly workforce plan from department Queue/SLA/cost signals'"
   collaborate: "hr-department chat -q 'Design a Job Profile for a new risk-management analyst, then route it to qa-department for permission verification and ceo-agent for budget approval'"
+  # 2026-08-20: 유휴 Agent 관측. SOUL.md "Current State Read Path" 가 이 엔드포인트를 권위 있는 읽기 경로로 못 박았다 - UNOBSERVED/UNAVAILABLE 을 IDLE 로 합치지 않는 것이 이 리포트의 계약이다.
+  monitor_idle_agents: "hr-department chat -q '6개 투자본부 Worker 중 유휴 상태인 Agent 를 보고하라'"
+  # 사람·크론용 결정론 렌더러(LLM 없음). --strict 는 관측 불가가 하나라도 있으면 exit 2 - 계측 경로 자체를 감시할 때 쓴다.
+  monitor_idle_agents_cli: "python departments/07-agent-workforce/scorecard/idle_report.py --lookback-hours 24 [--json] [--strict]"
 head_runtime:
   runtime: hermes
   role: department_head
