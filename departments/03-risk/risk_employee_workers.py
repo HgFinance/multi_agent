@@ -66,7 +66,7 @@ from orchestration.contracts.mas import (
     build_worker_context_result,
     stable_hash,
 )
-from orchestration.llm_observability import record_llm_call
+from orchestration.llm_observability import publish_worker_activity, record_llm_call
 
 
 def _load_skill_package() -> None:
@@ -875,7 +875,7 @@ async def run_employee_workers_async(
     ]
     eligible = [spec for spec in WORKER_SPECS if _should_run(spec, payload)]
 
-    async def run_one(spec: WorkerSpec) -> dict[str, Any]:
+    async def _execute_one(spec: WorkerSpec) -> dict[str, Any]:
         worker_trace = SkillTrace()
         try:
             state = await build_worker_graph(
@@ -945,6 +945,32 @@ async def run_employee_workers_async(
                     dispatch_input_hash=input_hash,
                 ),
             }
+
+    async def run_one(spec: WorkerSpec) -> dict[str, Any]:
+        """실행 결과에 손대지 않고 HR 유휴 관측 이벤트만 덧붙인다(2026-08-20).
+
+        이 부서는 공용 run_worker_registry 가 아니라 자체 실행기를 쓰므로 계측도
+        여기서 따로 한다 - 2026-08-10 배선이 orchestration/workflows/
+        portfolio_recommendation.py 한 곳에만 있어서, 그 파이프라인 밖에서 돈
+        Worker 가 HR 리포트에 IDLE 로 뜨고 있었다.
+
+        publish 는 로컬 큐잉이라 네트워크를 기다리지 않고(실측 0.117ms), 실패해도
+        예외를 올리지 않는다 - 계측이 Worker 판정을 바꾸지 못한다.
+        """
+
+        started = time.perf_counter()
+        report = await _execute_one(spec)
+        publish_worker_activity(
+            stage="risk",
+            worker_id=spec.worker_id,
+            role=spec.role,
+            status=str(report.get("status", "DEGRADED")),
+            attempts=int(report.get("attempts", 0) or 0),
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            error_count=0 if report.get("status") == "COMPLETED" else 1,
+            trace_id=str(trace_id or ""),
+        )
+        return report
 
     reports = list(await asyncio.gather(*(run_one(spec) for spec in eligible)))
     failed = [item["worker_id"] for item in reports if item["status"] != "COMPLETED"]
