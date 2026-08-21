@@ -81,6 +81,45 @@ def test_rsi_rule_is_semantically_valid() -> None:
     assert validate_rule_spec(spec) is spec
 
 
+def test_explicit_limit_action_preserves_exact_krw_price() -> None:
+    spec = rule(
+        {
+            "type": "COMPARISON",
+            "operator": "GTE",
+            "left": {"type": "MARKET", "field": "LAST_PRICE"},
+            "right": literal("299500", "PRICE"),
+        },
+        action={
+            "side": "SELL",
+            "sizing": {"type": "FIXED_SHARES", "value": "1"},
+            "order_type": "LIMIT",
+            "limit_price": "299500",
+        },
+        evaluation={"clock": "QUOTE"},
+    )
+
+    assert spec.action.order_type == "LIMIT"
+    assert spec.action.limit_price == Decimal("299500")
+    assert validate_rule_spec(spec) is spec
+
+    with pytest.raises(ValueError, match="MARKET must not include limit_price"):
+        rule(
+            {
+                "type": "COMPARISON",
+                "operator": "GTE",
+                "left": {"type": "MARKET", "field": "LAST_PRICE"},
+                "right": literal("299500", "PRICE"),
+            },
+            action={
+                "side": "SELL",
+                "sizing": {"type": "FIXED_SHARES", "value": "1"},
+                "order_type": "MARKET",
+                "limit_price": "299500",
+            },
+            evaluation={"clock": "QUOTE"},
+        )
+
+
 def test_quote_clock_rejects_indicator_and_non_last_price_fields() -> None:
     with pytest.raises(RuleSemanticError, match="completed bars"):
         validate_rule_spec(

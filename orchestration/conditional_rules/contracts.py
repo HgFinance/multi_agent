@@ -211,16 +211,23 @@ class RuleAction(BaseModel):
 
     side: ActionSide
     sizing: SizingPolicy
-    order_type: Literal["MARKET"] = "MARKET"
+    order_type: Literal["MARKET", "LIMIT"] = "MARKET"
+    limit_price: Decimal | None = Field(
+        default=None, gt=0, max_digits=30, decimal_places=10
+    )
     time_in_force: Literal["DAY"] = "DAY"
 
     @model_validator(mode="after")
-    def _side_supports_sizing(self) -> "RuleAction":
+    def _valid_order_and_sizing(self) -> "RuleAction":
         if (
             self.side is ActionSide.BUY
             and self.sizing.type in {SizingType.POSITION_PERCENT, SizingType.ALL}
         ):
             raise ValueError("BUY supports FIXED_SHARES only in v1")
+        if self.order_type == "LIMIT" and self.limit_price is None:
+            raise ValueError("LIMIT requires limit_price")
+        if self.order_type == "MARKET" and self.limit_price is not None:
+            raise ValueError("MARKET must not include limit_price")
         return self
 
 

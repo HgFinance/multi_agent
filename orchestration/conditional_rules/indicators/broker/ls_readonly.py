@@ -105,6 +105,40 @@ class LSOpenAPIReadOnlyTransport:
                 "LS read-only indicator transport is unavailable",
             ) from exc
 
+    def request_sync(
+        self,
+        *,
+        path: str,
+        tr_code: str,
+        payload: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Synchronous counterpart for the synchronous conditional worker.
+
+        This calls the same existing LS client and REST route as ``request``;
+        it is a transport seam, not a second broker client or order path.
+        """
+        try:
+            return self._client._post_tr(path, tr_code, payload)
+        except TimeoutError:
+            raise
+        except Exception as exc:
+            response = getattr(exc, "response", None)
+            status_code = getattr(response, "status_code", None)
+            if status_code == 429:
+                raise LSReadOnlyTransportError(
+                    "MARKET_PRICE_RATE_LIMITED",
+                    "LS read-only market-price request was rate limited",
+                ) from exc
+            if status_code in {408, 504}:
+                raise LSReadOnlyTransportError(
+                    "MARKET_PRICE_PROVIDER_TIMEOUT",
+                    "LS read-only market-price request timed out",
+                ) from exc
+            raise LSReadOnlyTransportError(
+                "MARKET_PRICE_PROVIDER_UNAVAILABLE",
+                "LS read-only market-price transport is unavailable",
+            ) from exc
+
     async def realtime_snapshot(
         self,
         *,

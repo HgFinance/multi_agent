@@ -13,7 +13,10 @@ TRADING_ROOT = Path(__file__).resolve().parents[2] / "departments" / "02-trading
 sys.path.insert(0, str(TRADING_ROOT))
 sys.path.insert(0, str(TRADING_ROOT / "api"))
 
-from conditional_rule_routes import _assert_confirmed_rule_quantity  # noqa: E402
+from conditional_rule_routes import (  # noqa: E402
+    _assert_confirmed_rule_quantity,
+)
+from rules.admission import _conditional_order_payload  # noqa: E402
 from directives.contracts import DirectiveAction, UserDirectiveRequest  # noqa: E402
 from directives.service import DirectiveServiceError  # noqa: E402
 from orchestration.conditional_rules import ConditionalRuleSpec  # noqa: E402
@@ -96,3 +99,23 @@ def test_position_percent_is_recomputed_from_canonical_sellable_quantity() -> No
     _assert_confirmed_rule_quantity(_admission(spec, "20"), _Repository())
     with pytest.raises(DirectiveServiceError):
         _assert_confirmed_rule_quantity(_admission(spec, "21"), _Repository())
+
+
+def test_confirmed_limit_price_is_passed_to_the_paper_directive() -> None:
+    base = _spec(sizing_type="FIXED_SHARES", sizing_value="1")
+    spec = ConditionalRuleSpec.model_validate(
+        {
+            **base.model_dump(mode="json"),
+            "action": {
+                "side": "SELL",
+                "sizing": {"type": "FIXED_SHARES", "value": "1"},
+                "order_type": "LIMIT",
+                "limit_price": "299500",
+            },
+        }
+    )
+
+    payload = _conditional_order_payload(spec, quantity=Decimal("1"))
+
+    assert payload["order_type"] == "LIMIT"
+    assert payload["limit_price"] == "299500"

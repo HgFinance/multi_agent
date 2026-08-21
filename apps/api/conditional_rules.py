@@ -191,6 +191,10 @@ def _summary(spec: ConditionalRuleSpec) -> dict[str, Any]:
         "condition": spec.condition.model_dump(mode="json", exclude_none=True),
         "side": spec.action.side.value,
         "sizing": spec.action.sizing.model_dump(mode="json", exclude_none=True),
+        "order_type": spec.action.order_type,
+        "limit_price": (
+            str(spec.action.limit_price) if spec.action.limit_price is not None else None
+        ),
         "evaluation_clock": spec.evaluation.clock.value,
         "primary_timeframe": (
             spec.evaluation.primary_timeframe.value

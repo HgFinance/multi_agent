@@ -47,6 +47,11 @@ from orchestration.conditional_rules import (
 )
 from orchestration.conditional_rules.semantic import normalized_indicator_parameters
 from orchestration.conditional_rules.indicators import DEFAULT_REGISTRY
+from orchestration.conditional_rules.market_data import (
+    LSPaperMarketPriceResolver,
+    MarketPriceResolver,
+    MarketPriceResolverError,
+)
 
 
 LOG = logging.getLogger("conditional-rule-worker")
@@ -361,6 +366,7 @@ class HttpRuntimeClient:
         trading_api_url: str,
         market_api_url: str,
         timeout_seconds: float = 8.0,
+        price_resolver: MarketPriceResolver | None = None,
     ) -> None:
         if not trading_api_url.strip() or not market_api_url.strip():
             raise RuntimeDataError(
@@ -371,6 +377,13 @@ class HttpRuntimeClient:
         self.trading_api_url = trading_api_url.rstrip("/")
         self.market_api_url = market_api_url.rstrip("/")
         self.timeout_seconds = max(1.0, min(float(timeout_seconds), 30.0))
+        self._price_resolver = price_resolver
+        self._cycle_prices: dict[str, tuple[Decimal, datetime, dict[str, Any]]] = {}
+
+    def begin_cycle(self) -> None:
+        """Drop the bounded per-cycle quote snapshot before polling again."""
+
+        self._cycle_prices.clear()
 
     @staticmethod
     def _service_token() -> str:
@@ -465,13 +478,32 @@ class HttpRuntimeClient:
         return value
 
     def _snapshot(self, symbol: str) -> tuple[Decimal, datetime, dict[str, Any]]:
-        value = self._json(f"{self.market_api_url}/snapshot/{symbol}")
-        if not isinstance(value, dict) or not isinstance(value.get("last_trade"), dict):
-            raise RuntimeDataError("MARKET_TRADE_MISSING", f"last trade is missing for {symbol}")
-        trade = value["last_trade"]
-        price = _decimal(trade.get("price"), field=f"{symbol}.last_trade.price", minimum=Decimal("0.0000000001"))
-        observed_at = _parse_time(trade.get("event_time"), field=f"{symbol}.last_trade")
-        return price, observed_at, value
+        normalized = symbol.strip().upper()
+        cached = self._cycle_prices.get(normalized)
+        if cached is not None:
+            return cached
+        resolver = self._price_resolver
+        if resolver is None:
+            try:
+                resolver = LSPaperMarketPriceResolver.from_env()
+            except MarketPriceResolverError as exc:
+                raise RuntimeDataError(exc.code, str(exc), retryable=exc.retryable) from exc
+            self._price_resolver = resolver
+        try:
+            snapshot = resolver.snapshot(normalized)
+        except MarketPriceResolverError as exc:
+            raise RuntimeDataError(exc.code, str(exc), retryable=exc.retryable) from exc
+        value = {
+            "last_trade": {
+                "price": str(snapshot.price),
+                "event_time": snapshot.observed_at.isoformat(),
+            },
+            "source": snapshot.source,
+            "observed_at": snapshot.observed_at.isoformat(),
+        }
+        result = (snapshot.price, snapshot.observed_at, value)
+        self._cycle_prices[normalized] = result
+        return result
 
     def _bars(self, symbol: str, timeframe: Timeframe, limit: int) -> list[Candle]:
         query = urllib.parse.urlencode({"interval": timeframe.value, "limit": limit})
@@ -777,6 +809,9 @@ class ConditionalRuleWorker:
         return execution is not None and self._submit(execution)
 
     def process_once(self) -> dict[str, int]:
+        begin_cycle = getattr(self.client, "begin_cycle", None)
+        if callable(begin_cycle):
+            begin_cycle()
         counts = {
             "expired": self.store.expire_due(),
             "retried": 0,

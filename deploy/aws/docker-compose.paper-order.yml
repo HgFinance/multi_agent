@@ -181,6 +181,11 @@ services:
       TRADING_INTERNAL_SERVICE_AUTH_SECRET: ${TRADING_INTERNAL_SERVICE_AUTH_SECRET:?A separate 32-byte internal Trading auth secret is required}
       TRADING_INTERNAL_SERVICE_AUTH_ISSUER: ${TRADING_INTERNAL_SERVICE_AUTH_ISSUER:-hedgefund-service-issuer}
       TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE: ${TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE:-trading-api}
+      LS_ENV: PAPER
+      LS_APP_KEY_PAPER: ${LS_APP_KEY_PAPER:?LS PAPER AppKey is required for conditional price reads}
+      LS_APP_SECRET_KEY_PAPER: ${LS_APP_SECRET_KEY_PAPER:?LS PAPER AppSecret is required for conditional price reads}
+      LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
+      LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}
 
   portfolio-worker:
     depends_on: *control-dependency

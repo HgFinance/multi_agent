@@ -14,6 +14,7 @@ from apps.api.conditional_rule_worker import (
     RuntimeDataError,
     RuntimeInputs,
 )
+from orchestration.conditional_rules.market_data import MarketPriceSnapshot
 from orchestration.conditional_rules import (
     ActiveRule,
     ConditionalRuleSpec,
@@ -165,6 +166,40 @@ class FakeClient:
     def submit(self, execution: SubmitReadyExecution) -> UUID:
         self.submit_calls += 1
         return UUID("70000000-0000-0000-0000-000000000001")
+
+
+class FakePriceResolver:
+    def __init__(self, price: str = "299500") -> None:
+        self.price = Decimal(price)
+        self.calls: list[str] = []
+
+    def snapshot(self, symbol: str) -> MarketPriceSnapshot:
+        self.calls.append(symbol)
+        return MarketPriceSnapshot(
+            symbol=symbol,
+            price=self.price,
+            observed_at=datetime.now(timezone.utc),
+            source="test-ls-t1102",
+        )
+
+
+def test_http_runtime_client_uses_ls_price_and_only_reuses_within_cycle() -> None:
+    resolver = FakePriceResolver()
+    client = HttpRuntimeClient(
+        trading_api_url="http://trading.test",
+        market_api_url="http://market.test",
+        price_resolver=resolver,
+    )
+
+    first = client._snapshot("005930")
+    second = client._snapshot("005930")
+    assert first[0] == Decimal("299500")
+    assert second == first
+    assert resolver.calls == ["005930"]
+
+    client.begin_cycle()
+    client._snapshot("005930")
+    assert resolver.calls == ["005930", "005930"]
 
 
 class ContextRevokedClient(FakeClient):

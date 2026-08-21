@@ -130,6 +130,12 @@ def _active_result(record: Any) -> dict[str, Any]:
             "side": spec.action.side.value,
             "sizing_type": sizing.type.value,
             "sizing_value": str(sizing.value) if sizing.value is not None else None,
+            "order_type": spec.action.order_type,
+            "limit_price": (
+                str(spec.action.limit_price)
+                if spec.action.limit_price is not None
+                else None
+            ),
             "evaluation_clock": spec.evaluation.clock.value,
             "primary_timeframe": (
                 spec.evaluation.primary_timeframe.value
@@ -142,6 +148,13 @@ def _active_result(record: Any) -> dict[str, Any]:
         "user_message": (
             "조건주문이 PAPER 모드로 즉시 활성화되었습니다. "
             f"종목 {spec.symbol}, {spec.action.side.value}, 수량 {sizing_text}, "
+            f"주문유형 {spec.action.order_type}"
+            + (
+                f" {spec.action.limit_price}원"
+                if spec.action.limit_price is not None
+                else ""
+            )
+            + ", "
             "1회 실행 규칙입니다. 조건 충족 시 deterministic guard를 통과한 "
             "경우에만 PAPER OMS로 제출됩니다."
         ),

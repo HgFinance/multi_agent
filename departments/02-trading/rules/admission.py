@@ -41,6 +41,26 @@ class ConditionalRuleAdmission:
     proof: DirectiveProof
 
 
+def _conditional_order_payload(
+    spec: ConditionalRuleSpec, *, quantity: Decimal
+) -> dict[str, Any]:
+    """Derive the trusted PAPER directive payload from the confirmed spec."""
+
+    return {
+        "instrument_id": str(spec.instrument_id),
+        "symbol": spec.symbol,
+        "side": spec.action.side.value,
+        "quantity": str(quantity),
+        "order_type": spec.action.order_type,
+        "limit_price": (
+            str(spec.action.limit_price)
+            if spec.action.limit_price is not None
+            else None
+        ),
+        "time_in_force": spec.action.time_in_force,
+    }
+
+
 class PostgresConditionalRuleAdmissionRepository:
     def __init__(self, dsn: str, *, role: str = "svc_trading_api") -> None:
         if not dsn.strip():
@@ -218,15 +238,7 @@ class PostgresConditionalRuleAdmissionRepository:
                 "action": DirectiveAction.PLACE_ORDER,
                 "instruction_ref": f"conditional:{rule_id}:v{current_version}",
                 "idempotency_key": idempotency_key,
-                "payload": {
-                    "instrument_id": str(spec.instrument_id),
-                    "symbol": spec.symbol,
-                    "side": spec.action.side.value,
-                    "quantity": str(quantity),
-                    "order_type": "MARKET",
-                    "limit_price": None,
-                    "time_in_force": "DAY",
-                },
+                "payload": _conditional_order_payload(spec, quantity=Decimal(quantity)),
             }
         )
         issued = current.timestamp()

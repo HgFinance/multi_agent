@@ -774,6 +774,7 @@ def _conditional_rule_child_body(
             "intraday phrase to another timeframe. Portfolio/last-price-only rules use",
             "QUOTE. POSITION_PERCENT is a ratio in (0,1], FIXED_SHARES is an integer,",
             "and ALL is sell-only. Omit expires_at to use the trusted 30-day default.",
+            "For an explicit 지정가/limit order, preserve order_type=LIMIT and the exact user-provided limit_price; never calculate or invent a price. Without explicit limit evidence, use the default MARKET action.",
             "The trusted tool resolves the symbol, validates authority, units, semantics,",
             "idempotency, and activates the exact rule. Do not claim ACTIVE unless the",
             "tool result reports rule_active=true. Copy user_message verbatim.",
