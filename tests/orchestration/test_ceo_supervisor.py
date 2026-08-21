@@ -2598,6 +2598,103 @@ class SupervisorWorkflowRootCacheTest(unittest.TestCase):
         self.assertEqual(len(delivered), 1)
 
 
+class AuthoritativePayloadReuseTest(unittest.TestCase):
+    """Terminal observers must reuse the locked authoritative snapshot."""
+
+    def test_terminal_reconciliation_does_not_reread_authoritative_tasks(self):
+        root_id = "root-authoritative"
+        synthesis_id = "synthesis-authoritative"
+        selected = "research-department,risk-management"
+        root_body = (
+            build_root_body("Samsung", "req-authoritative")
+            + f"\nselected_primary_profiles={selected}\n"
+        )
+        primary_body = lambda label: build_scoped_task_body(
+            label, root_id, role="primary"
+        )
+
+        root = {
+            "id": root_id,
+            "assignee": "ceo-agent",
+            "status": "done",
+            "body": root_body,
+        }
+        research = {
+            "id": "research-authoritative",
+            "assignee": "research-department",
+            "status": "done",
+            "result": "research result",
+            "final_answer": "research answer",
+            "body": primary_body("research"),
+        }
+        risk = {
+            "id": "risk-authoritative",
+            "assignee": "risk-management",
+            "status": "done",
+            "result": "risk result",
+            "final_answer": "risk answer",
+            "body": primary_body("risk"),
+        }
+        synthesis = {
+            "id": synthesis_id,
+            "assignee": "ceo-agent",
+            "status": "done",
+            "summary": "CEO synthesis",
+            "body": build_scoped_task_body(
+                "synthesis\nhgfinance.ceo-supervisor.v1 action=SYNTHESIZE",
+                root_id,
+                role="synthesis",
+            ),
+        }
+
+        class Client:
+            environment = {"HERMES_HOME": "/tmp/ceo-authoritative-test"}
+
+            def __init__(self):
+                self.show_calls = []
+
+            def workflow_root(self, task_id):
+                return root_id
+
+            def authoritative_workflow_snapshot(self, known_root, task_id):
+                return root_id, (research, risk, synthesis), root
+
+            def show(self, task_id):
+                self.show_calls.append(task_id)
+                return {"id": task_id}
+
+            def comment_task(self, task_id, text):
+                return None
+
+        class Delivery:
+            def __init__(self):
+                self.cards = []
+
+            def upsert_thread_card(self, **kwargs):
+                self.cards.append(kwargs)
+                return "sent"
+
+        client = Client()
+        delivery = Delivery()
+        service = CeoSupervisorService(client, discord_delivery=delivery)
+        service._project_terminal_task = lambda **kwargs: "sent"
+        service.decider = lambda state: None
+
+        service.handle_terminal_event(
+            {"event_id": "authoritative-synthesis", "task_id": synthesis_id, "kind": "completed"}
+        )
+
+        self.assertEqual(
+            client.show_calls,
+            [],
+            "authoritative snapshot payloads must satisfy terminal observers",
+        )
+        self.assertEqual(
+            {card["source_task"]["id"] for card in delivery.cards},
+            {research["id"], risk["id"]},
+        )
+
+
 
 if __name__ == "__main__":
     unittest.main()

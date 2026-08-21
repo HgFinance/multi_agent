@@ -2438,6 +2438,7 @@ class CeoSupervisorService:
         root_task_id: str,
         root_payload: Mapping[str, Any],
         task_payloads: Sequence[Mapping[str, Any]],
+        payloads_are_authoritative: bool = False,
     ) -> None:
         """Recover terminal department cards from durable task state.
 
@@ -2472,7 +2473,7 @@ class CeoSupervisorService:
                 continue
 
             candidate = payload
-            if callable(show):
+            if callable(show) and not payloads_are_authoritative:
                 try:
                     candidate = show(child.task_id)
                     child = ChildTaskState.from_hermes(candidate)
@@ -3509,6 +3510,7 @@ class CeoSupervisorService:
                     "authoritative_workflow_snapshot",
                     None,
                 )
+                payloads_are_authoritative = callable(authoritative_snapshot)
                 if callable(authoritative_snapshot):
                     root_id, payloads, root_payload = authoritative_snapshot(
                         root_id,
@@ -3701,10 +3703,6 @@ class CeoSupervisorService:
 
                     if terminal_task_payload is not None:
                         try:
-                            show_task = getattr(self.client, "show", None)
-                            if callable(show_task):
-                                terminal_task_payload = show_task(task_id)
-
                             self._deliver_department_progress(
                                 root_task_id=root_id,
                                 root_payload=root_payload,
@@ -3724,6 +3722,7 @@ class CeoSupervisorService:
                         root_task_id=root_id,
                         root_payload=root_payload,
                         task_payloads=payloads,
+                        payloads_are_authoritative=payloads_are_authoritative,
                     )
 
                 terminal_role = (
@@ -3769,9 +3768,11 @@ class CeoSupervisorService:
                     and "action=CREATE_TASK" in child.body
                 )
                 # Single-primary passthrough needs the terminal run metadata
-                # (especially final_answer). workflow() may carry only a shallow
-                # task projection, so hydrate exactly one selected primary with
-                # show() before building SupervisorState.
+                # (especially final_answer). Legacy workflow() may carry only a
+                # shallow task projection, so hydrate exactly one selected
+                # primary in that compatibility path. The authoritative client
+                # already returned the same show() payloads above; re-reading
+                # them only adds latency and API load.
                 selected_profiles = selected_primary_profiles_from_task(root_payload)
                 if (
                     workflow_mode == "analysis"
@@ -3786,6 +3787,7 @@ class CeoSupervisorService:
                             and child.is_in_workflow(root_id)
                             and child.workflow_role == "primary"
                             and (child.done or child.blocked or child.failed)
+                            and not payloads_are_authoritative
                         ):
                             try:
                                 hydrated_payload = self.client.show(child.task_id)

@@ -246,6 +246,12 @@ deterministic_workers:
     escalates_on: blockers_only
     authoritative: false
 platform_toolsets:
+  # CEO Kanban workers only need the durable workflow handoff surface.  Keep
+  # Discord's gateway tool surface below unchanged; this CLI pin prevents the
+  # worker subprocess from inheriting the all-tools default and shipping
+  # unrelated tool schemas on every model turn.
+  cli:
+  - kanban
   discord:
   - kanban
   - memory
