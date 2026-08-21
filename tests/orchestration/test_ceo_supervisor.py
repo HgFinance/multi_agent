@@ -19,6 +19,7 @@ from orchestration.adapters.ceo_supervisor import (
     _department_progress_text,
     _initial_primary_materialization_decisions,
     decide_supervisor,
+    cli_lane,
     parse_supervisor_output,
 )
 from orchestration.ceo_workflow_scope import (
@@ -1506,6 +1507,30 @@ class SupervisorWakeupTest(unittest.TestCase):
             ["qa-department"],
         )
 
+    def test_indexed_synthesis_duplicate_check_does_not_list_board(self) -> None:
+        class IndexedClient(FakeClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.list_calls = 0
+
+            def authoritative_synthesis_exists(self, root_id: str) -> bool:
+                self.asserted_root = root_id
+                return True
+
+            def list_tasks(self):
+                self.list_calls += 1
+                raise AssertionError("indexed terminal check must not list board")
+
+        client = IndexedClient()
+        decision = CeoSupervisorService(client).handle_terminal_event(
+            {"event_id": "indexed-duplicate-check", "task_id": "r", "kind": "completed"}
+        )
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(client.created[0]["assignee"], "qa-department")
+        self.assertEqual(client.list_calls, 0)
+        self.assertEqual(client.asserted_root, "root")
+
     def test_binding_synthesis_is_parented_by_completed_qa(self) -> None:
         client = FakeClient()
         client.root_body = build_root_body(
@@ -2693,6 +2718,173 @@ class AuthoritativePayloadReuseTest(unittest.TestCase):
             {card["source_task"]["id"] for card in delivery.cards},
             {research["id"], risk["id"]},
         )
+
+
+class HermesCliObservabilityTest(unittest.TestCase):
+    def test_success_logs_operation_lane_and_overlap_metrics(self) -> None:
+        import json
+        import subprocess
+
+        def runner(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, json.dumps([]), "")
+
+        client = HermesKanbanClient(runner=runner, timeout=2)
+        with self.assertLogs(
+            "orchestration.adapters.ceo_supervisor", level="INFO"
+        ) as logs:
+            with cli_lane("recovery"):
+                self.assertEqual(client.list_tasks(), ())
+
+        rendered = "\n".join(logs.output)
+        self.assertIn("operation=list", rendered)
+        self.assertIn("lane=recovery", rendered)
+        self.assertIn("success=true", rendered)
+        self.assertNotIn("[]", rendered)
+        metrics = client.cli_metrics_snapshot()
+        self.assertEqual(metrics["max_active_cli_calls"], 1)
+        self.assertEqual(metrics["by_operation"]["recovery:list"]["count"], 1)
+
+    def test_timeout_is_classified_without_command_or_prompt(self) -> None:
+        import subprocess
+
+        def runner(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd=args[0], timeout=2)
+
+        client = HermesKanbanClient(runner=runner, timeout=2)
+        with self.assertLogs(
+            "orchestration.adapters.ceo_supervisor", level="INFO"
+        ) as logs:
+            with self.assertRaises(HermesKanbanCommandError):
+                with cli_lane("event"):
+                    client.show("task-with-secret-prompt")
+
+        rendered = "\n".join(logs.output)
+        self.assertIn("operation=show", rendered)
+        self.assertIn("lane=event", rendered)
+        self.assertIn("stderr_category=TIMEOUT", rendered)
+        self.assertIn("success=false", rendered)
+        self.assertNotIn("task-with-secret-prompt", rendered)
+
+    def test_nonzero_sqlite_lock_is_classified_and_stderr_is_redacted(self) -> None:
+        import subprocess
+
+        def runner(args, **kwargs):
+            return subprocess.CompletedProcess(
+                args,
+                17,
+                "",
+                "database is locked; raw user prompt must not be logged",
+            )
+
+        client = HermesKanbanClient(runner=runner)
+        with self.assertLogs(
+            "orchestration.adapters.ceo_supervisor", level="INFO"
+        ) as logs:
+            with self.assertRaises(HermesKanbanCommandError):
+                with cli_lane("synthesis-recovery"):
+                    client.list_tasks()
+
+        rendered = "\n".join(logs.output)
+        self.assertIn("operation=list", rendered)
+        self.assertIn("lane=synthesis-recovery", rendered)
+        self.assertIn("return_code=17", rendered)
+        self.assertIn("stderr_category=SQLITE_LOCK", rendered)
+        self.assertNotIn("raw user prompt", rendered)
+
+    def test_json_error_gets_structured_category(self) -> None:
+        import subprocess
+
+        def runner(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, "not-json", "")
+
+        client = HermesKanbanClient(runner=runner)
+        with self.assertLogs(
+            "orchestration.adapters.ceo_supervisor", level="INFO"
+        ) as logs:
+            with self.assertRaises(HermesKanbanCommandError):
+                client.show("task")
+
+        self.assertIn("stderr_category=JSON_ERROR", "\n".join(logs.output))
+
+    def test_lane_and_max_active_calls_are_observed_across_threads(self) -> None:
+        import json
+        import subprocess
+
+        def runner(args, **kwargs):
+            time.sleep(0.03)
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                json.dumps({"task": {"id": "task", "parents": [], "children": []}}),
+                "",
+            )
+
+        client = HermesKanbanClient(runner=runner)
+
+        def call_show():
+            with cli_lane("event"):
+                return client.show("task")
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            tuple(pool.map(lambda _item: call_show(), range(2)))
+
+        metrics = client.cli_metrics_snapshot()
+        self.assertGreaterEqual(metrics["max_active_cli_calls"], 2)
+        self.assertEqual(metrics["by_operation"]["event:show"]["count"], 2)
+
+    def test_lane_propagates_into_parallel_hydration(self) -> None:
+        import json
+        import subprocess
+
+        def runner(args, **kwargs):
+            task_id = args[3]
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                json.dumps({"task": {"id": task_id, "parents": [], "children": []}}),
+                "",
+            )
+
+        client = HermesKanbanClient(runner=runner)
+        with cli_lane("recovery"):
+            client._hydrate_ids(("task-a", "task-b"))
+
+        metrics = client.cli_metrics_snapshot()
+        self.assertEqual(metrics["by_operation"]["recovery:show"]["count"], 2)
+
+    def test_workflow_reconstruction_span_has_explicit_operation(self) -> None:
+        import json
+        import subprocess
+
+        def runner(args, **kwargs):
+            if args[1:3] == ["kanban", "list"]:
+                return subprocess.CompletedProcess(args, 0, json.dumps([]), "")
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                json.dumps(
+                    {
+                        "task": {
+                            "id": "root",
+                            "body": build_root_body("request", "request-1"),
+                            "parents": [],
+                            "children": [],
+                        }
+                    }
+                ),
+                "",
+            )
+
+        client = HermesKanbanClient(runner=runner)
+        with self.assertLogs(
+            "orchestration.adapters.ceo_supervisor", level="INFO"
+        ) as logs:
+            with cli_lane("event"):
+                client.workflow("root")
+
+        rendered = "\n".join(logs.output)
+        self.assertIn("operation=workflow-reconstruction", rendered)
+        self.assertIn("lane=event", rendered)
 
 
 

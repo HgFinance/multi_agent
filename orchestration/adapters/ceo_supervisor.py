@@ -11,13 +11,17 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
+from collections.abc import Callable, Collection, Mapping, Sequence
+from contextvars import ContextVar, copy_context
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
+from pathlib import Path
 
 from orchestration.adapters.terminal_projection_utils import (
     action as terminal_action,
@@ -67,9 +71,39 @@ from orchestration.kanban_retention_lock import workflow_mutation_lock
 from orchestration.kanban_root_index import (
     RootScopedIndexUnavailable,
     SQLiteRootScopedIndex,
+    kanban_db_path,
 )
 
 logger = logging.getLogger(__name__)
+
+_CLI_LANE: ContextVar[str] = ContextVar("ceo_cli_lane", default="unknown")
+
+
+def _record_full_board_fallback(*, lane: str, reason: str, root_id: str = "") -> None:
+    """Record fallback ownership without logging task bodies or prompts."""
+
+    logger.warning(
+        "kanban-full-board-fallback lane=%s reason=%s root=%s",
+        lane or "unknown",
+        reason,
+        root_id or "unknown",
+    )
+
+
+@contextmanager
+def cli_lane(lane: str):
+    """Attach a bounded, non-secret lane label to Hermes CLI diagnostics."""
+
+    normalized = str(lane or "unknown").strip() or "unknown"
+    token = _CLI_LANE.set(normalized)
+    try:
+        yield
+    finally:
+        _CLI_LANE.reset(token)
+
+
+def current_cli_lane() -> str:
+    return _CLI_LANE.get()
 
 
 class SupervisorValidationError(ValueError):
@@ -1212,8 +1246,152 @@ def parse_supervisor_output(payload: str | Mapping[str, Any]) -> SupervisorDecis
     )
 
 
+class _DirectKanbanShowUnavailable(RuntimeError):
+    """The optional Hermes-native read path cannot safely answer a show."""
+
+
+class _HermesDirectKanbanReader:
+    """Read the exact Hermes ``show --json`` projection without a subprocess.
+
+    This is deliberately an adapter around Hermes' own ``kanban_db`` helpers,
+    not a second workflow reader.  The connection is SQLite read-only and the
+    response is assembled with Hermes' own ``_task_to_dict`` serializer and
+    the same helper calls used by ``hermes kanban show --json``.  Import,
+    schema, or read failures are surfaced to the caller so the CLI remains the
+    authoritative fallback.
+    """
+
+    def __init__(self, environment: Mapping[str, str]) -> None:
+        self.environment = dict(environment)
+        self._lock = threading.RLock()
+        self._connection: sqlite3.Connection | None = None
+        self._kanban_db: Any | None = None
+        self._task_to_dict: Callable[[Any], dict[str, Any]] | None = None
+        self._db_uri: str | None = None
+        self._unavailable_reason: str | None = None
+        try:
+            from hermes_cli import kanban_db
+            from hermes_cli.kanban import _task_to_dict
+
+            required = (
+                "get_task",
+                "list_comments",
+                "list_events",
+                "parent_ids",
+                "child_ids",
+                "list_runs",
+                "latest_summary",
+            )
+            if any(not callable(getattr(kanban_db, name, None)) for name in required):
+                raise ImportError("Hermes kanban_db read helper is incomplete")
+            db_path = Path(kanban_db_path(self.environment)).expanduser().resolve()
+            if not db_path.is_file():
+                raise FileNotFoundError(str(db_path))
+            self._kanban_db = kanban_db
+            self._task_to_dict = _task_to_dict
+            self._db_uri = db_path.as_uri() + "?mode=ro"
+        except Exception as exc:
+            self._unavailable_reason = type(exc).__name__
+
+    @property
+    def available(self) -> bool:
+        return self._db_uri is not None and self._kanban_db is not None
+
+    @property
+    def unavailable_reason(self) -> str | None:
+        return self._unavailable_reason
+
+    def _connection_for_read(self) -> sqlite3.Connection:
+        if self._connection is None:
+            if self._db_uri is None:
+                raise _DirectKanbanShowUnavailable(
+                    self._unavailable_reason or "direct Hermes API unavailable"
+                )
+            conn = sqlite3.connect(
+                self._db_uri,
+                uri=True,
+                timeout=1.0,
+                check_same_thread=False,
+            )
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout=1000")
+            self._connection = conn
+        return self._connection
+
+    def _drop_connection(self) -> None:
+        connection = self._connection
+        self._connection = None
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
+
+    def show(self, task_id: str) -> dict[str, Any]:
+        """Return the same structured projection as Hermes ``show --json``."""
+
+        with self._lock:
+            try:
+                assert self._kanban_db is not None
+                assert self._task_to_dict is not None
+                conn = self._connection_for_read()
+                task = self._kanban_db.get_task(conn, task_id)
+                if task is None:
+                    raise _DirectKanbanShowUnavailable("task not found")
+                comments = self._kanban_db.list_comments(conn, task_id)
+                events = self._kanban_db.list_events(conn, task_id)
+                parents = self._kanban_db.parent_ids(conn, task_id)
+                children = self._kanban_db.child_ids(conn, task_id)
+                runs = self._kanban_db.list_runs(conn, task_id)
+                latest_summary = self._kanban_db.latest_summary(conn, task_id)
+                return {
+                    "task": self._task_to_dict(task),
+                    "latest_summary": latest_summary,
+                    "parents": parents,
+                    "children": children,
+                    "comments": [
+                        {
+                            "author": comment.author,
+                            "body": comment.body,
+                            "created_at": comment.created_at,
+                        }
+                        for comment in comments
+                    ],
+                    "events": [
+                        {
+                            "kind": event.kind,
+                            "payload": event.payload,
+                            "created_at": event.created_at,
+                            "run_id": event.run_id,
+                        }
+                        for event in events
+                    ],
+                    "runs": [
+                        {
+                            "id": run.id,
+                            "profile": run.profile,
+                            "step_key": run.step_key,
+                            "status": run.status,
+                            "outcome": run.outcome,
+                            "summary": run.summary,
+                            "error": run.error,
+                            "metadata": run.metadata,
+                            "worker_pid": run.worker_pid,
+                            "started_at": run.started_at,
+                            "ended_at": run.ended_at,
+                        }
+                        for run in runs
+                    ],
+                }
+            except _DirectKanbanShowUnavailable:
+                raise
+            except Exception as exc:
+                self._drop_connection()
+                raise _DirectKanbanShowUnavailable(type(exc).__name__) from exc
+
+
 class HermesKanbanClient:
-    """Small CLI adapter; no direct shared Kanban DB access is allowed."""
+    """Hermes Kanban adapter with a fail-closed native read fast path."""
 
     def __init__(
         self,
@@ -1246,12 +1424,149 @@ class HermesKanbanClient:
         self._retrieval_metrics_lock = threading.Lock()
         self._retrieval_metrics: dict[str, list[int]] = {
             "full_board_list_latency_ms": [],
+            "root_lookup_latency_ms": [],
             "root_query_latency_ms": [],
+            "candidate_discovery_latency_ms": [],
         }
         self._full_board_list_count = 0
+        self._root_lookup_count = 0
         self._root_query_count = 0
+        self._candidate_discovery_count = 0
+        self._direct_show_reader = (
+            _HermesDirectKanbanReader(self.environment)
+            if using_default_runner
+            else None
+        )
+        self._show_transport_metrics_lock = threading.Lock()
+        self._direct_show_count = 0
+        self._direct_show_fallback_count = 0
+        self._direct_show_latency_ms: list[int] = []
+        if self._direct_show_reader is not None:
+            if self._direct_show_reader.available:
+                logger.info("hermes-kanban-show-transport mode=direct-read-only")
+            else:
+                logger.info(
+                    "hermes-kanban-show-transport mode=cli-fallback reason=%s",
+                    self._direct_show_reader.unavailable_reason or "unknown",
+                )
+        self._cli_metrics_lock = threading.Lock()
+        self._active_cli_calls = 0
+        self._max_active_cli_calls = 0
+        self._cli_operation_durations: dict[tuple[str, str], list[int]] = {}
 
-    def _run(self, args: Sequence[str]) -> str:
+    @staticmethod
+    def _operation_for_args(args: Sequence[str]) -> str:
+        if len(args) < 2 or args[0] != "kanban":
+            return "unknown"
+        command = str(args[1] or "").casefold()
+        if command in {"comment", "block", "unblock", "complete", "archive"}:
+            return "update"
+        if command in {"runs", "log", "context", "stats"}:
+            return "archive/debug"
+        if command in {"show", "list", "create"}:
+            return command
+        return command or "unknown"
+
+    @staticmethod
+    def _stderr_category(
+        stderr: object,
+        *,
+        timeout: bool = False,
+        process_error: bool = False,
+        return_code: int | None = None,
+    ) -> str:
+        if timeout:
+            return "TIMEOUT"
+        if process_error:
+            return "PROCESS_ERROR"
+        text = str(stderr or "").casefold()
+        if "database is locked" in text or "database is busy" in text:
+            return "SQLITE_LOCK"
+        if "sqlite" in text and ("lock" in text or "busy" in text):
+            return "SQLITE_LOCK"
+        if return_code is not None and return_code != 0:
+            return "PROCESS_ERROR"
+        return "NONE"
+
+    def _record_cli_diagnostic(
+        self,
+        *,
+        operation: str,
+        lane: str,
+        elapsed_ms: int,
+        timeout_ms: int,
+        return_code: int | None,
+        stderr_category: str,
+        success: bool,
+        active_cli_calls: int,
+        max_active_cli_calls: int,
+    ) -> None:
+        logger.info(
+            "hermes-cli operation=%s lane=%s elapsed_ms=%d timeout_ms=%d "
+            "return_code=%s stderr_category=%s success=%s active_cli_calls=%d "
+            "max_active_cli_calls=%d",
+            operation,
+            lane,
+            elapsed_ms,
+            timeout_ms,
+            return_code if return_code is not None else "none",
+            stderr_category,
+            str(bool(success)).lower(),
+            active_cli_calls,
+            max_active_cli_calls,
+        )
+
+    def _record_json_failure(self, operation: str) -> None:
+        with self._cli_metrics_lock:
+            active = self._active_cli_calls
+            maximum = self._max_active_cli_calls
+        self._record_cli_diagnostic(
+            operation=operation,
+            lane=current_cli_lane(),
+            elapsed_ms=0,
+            timeout_ms=max(0, int(self.timeout * 1000)),
+            return_code=0,
+            stderr_category="JSON_ERROR",
+            success=False,
+            active_cli_calls=active,
+            max_active_cli_calls=maximum,
+        )
+
+    def cli_metrics_snapshot(self) -> dict[str, Any]:
+        """Return bounded CLI overlap/duration metrics without command data."""
+
+        with self._cli_metrics_lock:
+            by_operation = {
+                f"{lane}:{operation}": {
+                    "count": len(values),
+                    "durations_ms": tuple(values),
+                }
+                for (lane, operation), values in sorted(
+                    self._cli_operation_durations.items()
+                )
+            }
+            return {
+                "active_cli_calls": self._active_cli_calls,
+                "max_active_cli_calls": self._max_active_cli_calls,
+                "by_operation": by_operation,
+            }
+
+    def _run(self, args: Sequence[str], *, operation: str | None = None) -> str:
+        operation_name = operation or self._operation_for_args(args)
+        lane = current_cli_lane()
+        timeout_ms = max(0, int(self.timeout * 1000))
+        started_ns = time.perf_counter_ns()
+        process: subprocess.CompletedProcess[str] | None = None
+        failure: HermesKanbanCommandError | None = None
+        stderr_category = "NONE"
+        return_code: int | None = None
+        stdout = ""
+        with self._cli_metrics_lock:
+            self._active_cli_calls += 1
+            self._max_active_cli_calls = max(
+                self._max_active_cli_calls,
+                self._active_cli_calls,
+            )
         try:
             process = self.runner(
                 [self.executable, *args],
@@ -1261,31 +1576,131 @@ class HermesKanbanClient:
                 check=False,
                 env=self.environment,
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise HermesKanbanCommandError(f"hermes kanban command failed: {type(exc).__name__}") from exc
-        if process.returncode != 0:
-            raise HermesKanbanCommandError(f"hermes kanban command exited {process.returncode}")
-        return process.stdout
+            return_code = process.returncode
+            stderr_category = self._stderr_category(
+                getattr(process, "stderr", ""),
+                return_code=return_code,
+            )
+            if return_code != 0:
+                failure = HermesKanbanCommandError(
+                    f"hermes kanban command exited {return_code}"
+                )
+            else:
+                stdout = process.stdout
+        except subprocess.TimeoutExpired as exc:
+            stderr_category = "TIMEOUT"
+            failure = HermesKanbanCommandError(
+                "hermes kanban command failed: TimeoutExpired"
+            )
+            failure.__cause__ = exc
+        except OSError as exc:
+            stderr_category = "PROCESS_ERROR"
+            failure = HermesKanbanCommandError(
+                f"hermes kanban command failed: {type(exc).__name__}"
+            )
+            failure.__cause__ = exc
+        finally:
+            elapsed_ms = max(0, (time.perf_counter_ns() - started_ns) // 1_000_000)
+            with self._cli_metrics_lock:
+                self._active_cli_calls = max(0, self._active_cli_calls - 1)
+                active = self._active_cli_calls
+                maximum = self._max_active_cli_calls
+                self._cli_operation_durations.setdefault(
+                    (lane, operation_name), []
+                ).append(elapsed_ms)
+            self._record_cli_diagnostic(
+                operation=operation_name,
+                lane=lane,
+                elapsed_ms=elapsed_ms,
+                timeout_ms=timeout_ms,
+                return_code=return_code,
+                stderr_category=stderr_category,
+                success=failure is None,
+                active_cli_calls=active,
+                max_active_cli_calls=maximum,
+            )
+        if failure is not None:
+            raise failure
+        return stdout
 
-    def show(self, task_id: str) -> dict[str, Any]:
-        try:
-            payload = json.loads(self._run(("kanban", "show", task_id, "--json")))
-        except (json.JSONDecodeError, TypeError) as exc:
-            raise HermesKanbanCommandError(
-                "hermes kanban show returned invalid JSON"
-            ) from exc
+    @staticmethod
+    def _normalize_show_payload(payload: Any) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise HermesKanbanCommandError("hermes kanban show returned a non-object")
         # Hermes exposes the task row under ``task`` and graph/run projections
-        # beside it. Flatten that supported JSON shape for the policy layer.
+        # beside it. Keep this normalization shared by the CLI and native read
+        # transports so the policy layer cannot observe two payload shapes.
         task = payload.get("task", payload)
         if not isinstance(task, dict):
-            raise HermesKanbanCommandError("hermes kanban show returned no task object")
+            raise HermesKanbanCommandError(
+                "hermes kanban show returned no task object"
+            )
         normalized = dict(task)
-        for key in ("latest_summary", "parents", "children", "comments", "events", "runs"):
+        for key in (
+            "latest_summary",
+            "parents",
+            "children",
+            "comments",
+            "events",
+            "runs",
+        ):
             if key in payload:
                 normalized[key] = payload[key]
         return normalized
+
+    def show(self, task_id: str) -> dict[str, Any]:
+        direct_reader = self._direct_show_reader
+        if direct_reader is not None and direct_reader.available:
+            started_ns = time.perf_counter_ns()
+            try:
+                payload = direct_reader.show(task_id)
+                normalized = self._normalize_show_payload(payload)
+            except (_DirectKanbanShowUnavailable, HermesKanbanCommandError) as exc:
+                with self._show_transport_metrics_lock:
+                    self._direct_show_fallback_count += 1
+                logger.warning(
+                    "hermes-kanban-show-direct-fallback task=%s reason=%s",
+                    task_id,
+                    type(exc).__name__,
+                )
+            else:
+                elapsed_ms = max(
+                    0,
+                    (time.perf_counter_ns() - started_ns) // 1_000_000,
+                )
+                with self._show_transport_metrics_lock:
+                    self._direct_show_count += 1
+                    self._direct_show_latency_ms.append(elapsed_ms)
+                return normalized
+
+        try:
+            payload = json.loads(
+                self._run(("kanban", "show", task_id, "--json"), operation="show")
+            )
+        except (json.JSONDecodeError, TypeError) as exc:
+            self._record_json_failure("show")
+            raise HermesKanbanCommandError(
+                "hermes kanban show returned invalid JSON"
+            ) from exc
+        try:
+            return self._normalize_show_payload(payload)
+        except HermesKanbanCommandError:
+            self._record_json_failure("show")
+            raise
+
+    def show_transport_metrics_snapshot(self) -> dict[str, Any]:
+        """Return native-show usage and fallback counts without payload data."""
+
+        with self._show_transport_metrics_lock:
+            return {
+                "direct_available": bool(
+                    self._direct_show_reader is not None
+                    and self._direct_show_reader.available
+                ),
+                "direct_show_count": self._direct_show_count,
+                "direct_show_fallback_count": self._direct_show_fallback_count,
+                "direct_show_latency_ms": tuple(self._direct_show_latency_ms),
+            }
 
     def create_task(
         self,
@@ -1330,40 +1745,52 @@ class HermesKanbanClient:
             environment=self.environment,
         ):
             try:
-                payload = json.loads(self._run(args))
+                payload = json.loads(self._run(args, operation="create"))
             except (json.JSONDecodeError, TypeError) as exc:
+                self._record_json_failure("create")
                 raise HermesKanbanCommandError(
                     "hermes kanban create returned invalid JSON"
                 ) from exc
         if not isinstance(payload, dict):
+            self._record_json_failure("create")
             raise HermesKanbanCommandError("hermes kanban create returned a non-object")
         return payload
 
     def unblock_task(self, task_id: str) -> None:
         with workflow_mutation_lock(environment=self.environment):
-            self._run(("kanban", "unblock", task_id))
+            self._run(("kanban", "unblock", task_id), operation="update")
 
     def comment_task(self, task_id: str, text: str) -> None:
         with workflow_mutation_lock(environment=self.environment):
-            self._run(("kanban", "comment", task_id, text, "--author", "ceo-supervisor"))
+            self._run(
+                ("kanban", "comment", task_id, text, "--author", "ceo-supervisor"),
+                operation="update",
+            )
 
     def block_task(self, task_id: str, reason: str) -> None:
         with workflow_mutation_lock(environment=self.environment):
-            self._run(("kanban", "block", task_id, reason, "--kind", "needs_input"))
+            self._run(
+                ("kanban", "block", task_id, reason, "--kind", "needs_input"),
+                operation="update",
+            )
 
     def list_tasks(self) -> tuple[dict[str, Any], ...]:
         """List current-board tasks through the supported Hermes JSON API."""
 
         started_ns = time.perf_counter_ns()
         try:
-            payload = json.loads(self._run(("kanban", "list", "--json")))
+            payload = json.loads(
+                self._run(("kanban", "list", "--json"), operation="list")
+            )
         except (json.JSONDecodeError, TypeError) as exc:
+            self._record_json_failure("list")
             raise HermesKanbanCommandError(
                 "hermes kanban list returned invalid JSON"
             ) from exc
         if not isinstance(payload, list) or not all(
             isinstance(item, dict) for item in payload
         ):
+            self._record_json_failure("list")
             raise HermesKanbanCommandError(
                 "hermes kanban list returned a non-task array"
             )
@@ -1373,7 +1800,43 @@ class HermesKanbanClient:
             self._retrieval_metrics["full_board_list_latency_ms"].append(elapsed_ms)
         return tuple(dict(item) for item in payload)
 
-    def root_scoped_task_ids(self, root_id: str) -> tuple[str, ...]:
+    def recovery_candidate_rows(self) -> tuple[dict[str, Any], ...]:
+        """Return SQLite discovery candidates, never authoritative task state."""
+
+        index = self.root_index
+        if index is None:
+            raise RootScopedIndexUnavailable("root index is not configured")
+        discovery = getattr(index, "recovery_candidate_rows", None)
+        if not callable(discovery):
+            raise RootScopedIndexUnavailable(
+                "root index does not support recovery candidate discovery"
+            )
+        started_ns = time.perf_counter_ns()
+        try:
+            rows = discovery()
+        finally:
+            elapsed_ms = max(
+                0,
+                (time.perf_counter_ns() - started_ns) // 1_000_000,
+            )
+            with self._retrieval_metrics_lock:
+                self._candidate_discovery_count += 1
+                self._retrieval_metrics["candidate_discovery_latency_ms"].append(
+                    elapsed_ms
+                )
+        logger.info(
+            "kanban-candidate-discovery source=sqlite candidates=%d elapsed_ms=%d",
+            len(rows),
+            elapsed_ms,
+        )
+        return tuple(dict(row) for row in rows)
+
+    def root_scoped_task_ids(
+        self,
+        root_id: str,
+        *,
+        include_archived: bool = False,
+    ) -> tuple[str, ...]:
         """Find candidate task IDs using the local SQLite root index only.
 
         The returned IDs are a discovery hint.  The caller must still call
@@ -1384,13 +1847,51 @@ class HermesKanbanClient:
             raise RootScopedIndexUnavailable("root index is not configured")
         started_ns = time.perf_counter_ns()
         try:
-            task_ids = self.root_index.task_ids(root_id)
+            if include_archived:
+                task_ids = self.root_index.task_ids(
+                    root_id,
+                    include_archived=True,
+                )
+            else:
+                task_ids = self.root_index.task_ids(root_id)
         finally:
             elapsed_ms = max(0, (time.perf_counter_ns() - started_ns) // 1_000_000)
             with self._retrieval_metrics_lock:
                 self._root_query_count += 1
                 self._retrieval_metrics["root_query_latency_ms"].append(elapsed_ms)
         return tuple(task_ids)
+
+    def authoritative_synthesis_exists(self, root_id: str) -> bool:
+        """Check synthesis existence from indexed IDs plus authoritative shows."""
+
+        root = str(root_id or "").strip()
+        if not root:
+            raise RootScopedIndexUnavailable("root_id is missing")
+        candidate_ids = self.root_scoped_task_ids(
+            root,
+            include_archived=True,
+        )
+        for candidate_id in candidate_ids:
+            payload = self.show(candidate_id)
+            payload_id = str(payload.get("id") or payload.get("task_id") or "")
+            if payload_id != candidate_id:
+                raise RootScopedIndexUnavailable(
+                    "indexed synthesis candidate returned another task"
+                )
+            refs = extract_scope_references(payload).root_ids
+            if refs != (root,):
+                raise RootScopedIndexUnavailable(
+                    "indexed synthesis candidate has inconsistent root correlation"
+                )
+            body = str(payload.get("body") or "")
+            role = terminal_workflow_role(payload) or ""
+            action = terminal_action(payload) or terminal_action({"body": body}) or ""
+            if role == "synthesis" and (
+                action == "SYNTHESIZE"
+                or _is_direct_ceo_response_synthesis(role=role, body=body)
+            ):
+                return True
+        return False
 
     @staticmethod
     def _scoped_ids_from_rows(
@@ -1451,7 +1952,11 @@ class HermesKanbanClient:
             max_workers=min(4, len(pending)),
             thread_name_prefix="ceo-workflow-show",
         ) as pool:
-            hydrated_payloads = tuple(pool.map(self.show, pending))
+            futures = [
+                pool.submit(copy_context().run, self.show, task_id)
+                for task_id in pending
+            ]
+            hydrated_payloads = tuple(future.result() for future in futures)
         hydrated.update(
             dict(zip(pending, hydrated_payloads, strict=True))
         )
@@ -1461,9 +1966,16 @@ class HermesKanbanClient:
         self,
         root_id: str,
         task_id: str,
+        *,
+        fallback_reason: str = "legacy-or-index-uncertain",
     ) -> tuple[str, tuple[dict[str, Any], ...], dict[str, Any]]:
         """Compatibility discovery for legacy and failed-index workflows."""
 
+        _record_full_board_fallback(
+            lane=current_cli_lane(),
+            reason=fallback_reason,
+            root_id=root_id,
+        )
         rows = self.list_tasks()
         listed_by_id = {
             str(row.get("id") or row.get("task_id") or ""): row for row in rows
@@ -1516,6 +2028,34 @@ class HermesKanbanClient:
         workflows; neither path scans descendants or the whole board.
         """
 
+        # The generated-column index can identify the root candidate for a
+        # canonical scoped child without hydrating that child before the root
+        # lock. This is discovery metadata only; the authoritative snapshot
+        # still shows the task, root, and every candidate after locking.
+        if self.root_index is not None:
+            lookup_started_ns = time.perf_counter_ns()
+            try:
+                root_for_task = getattr(self.root_index, "root_id_for_task", None)
+                indexed_root = (
+                    root_for_task(task_id)
+                    if callable(root_for_task)
+                    else None
+                )
+            except RootScopedIndexUnavailable:
+                indexed_root = None
+            finally:
+                elapsed_ms = max(
+                    0,
+                    (time.perf_counter_ns() - lookup_started_ns) // 1_000_000,
+                )
+                with self._retrieval_metrics_lock:
+                    self._root_lookup_count += 1
+                    self._retrieval_metrics["root_lookup_latency_ms"].append(
+                        elapsed_ms
+                    )
+            if indexed_root:
+                return indexed_root
+
         cache: dict[str, dict[str, Any]] = {}
 
         def fetch(current_id: str) -> dict[str, Any]:
@@ -1546,6 +2086,16 @@ class HermesKanbanClient:
         root_id: str,
         task_id: str,
     ) -> tuple[str, tuple[dict[str, Any], ...], dict[str, Any]]:
+        return self._with_cli_operation_span(
+            "workflow-reconstruction",
+            lambda: self._authoritative_workflow_snapshot_impl(root_id, task_id),
+        )
+
+    def _authoritative_workflow_snapshot_impl(
+        self,
+        root_id: str,
+        task_id: str,
+    ) -> tuple[str, tuple[dict[str, Any], ...], dict[str, Any]]:
         """Hydrate one known-root workflow using indexed discovery when safe.
 
         The SQLite result supplies IDs only.  Status, runs, summaries,
@@ -1558,7 +2108,11 @@ class HermesKanbanClient:
         # contract.  This also makes the fallback explicit for migrations where
         # the shared board cannot be altered safely.
         if self.root_index is None:
-            return self._full_board_authoritative_snapshot(root_id, task_id)
+            return self._full_board_authoritative_snapshot(
+                root_id,
+                task_id,
+                fallback_reason="missing-root-index",
+            )
 
         try:
             task_payload = self.show(task_id)
@@ -1576,7 +2130,11 @@ class HermesKanbanClient:
                     root_id,
                     task_id,
                 )
-                return self._full_board_authoritative_snapshot(root_id, task_id)
+                return self._full_board_authoritative_snapshot(
+                    root_id,
+                    task_id,
+                    fallback_reason="legacy-task",
+                )
 
             scoped_ids = list(self.root_scoped_task_ids(root_id))
             # A non-root terminal event must be discoverable in its own index
@@ -1605,9 +2163,10 @@ class HermesKanbanClient:
 
             logger.info(
                 "kanban-root-retrieval mode=indexed root=%s candidates=%d "
-                "root_query_count=%d full_board_list_count=%d",
+                "root_lookup_count=%d root_query_count=%d full_board_list_count=%d",
                 root_id,
                 len(scoped_ids),
+                self._root_lookup_count,
                 self._root_query_count,
                 self._full_board_list_count,
             )
@@ -1627,7 +2186,11 @@ class HermesKanbanClient:
                 task_id,
                 type(exc).__name__,
             )
-            return self._full_board_authoritative_snapshot(root_id, task_id)
+            return self._full_board_authoritative_snapshot(
+                root_id,
+                task_id,
+                fallback_reason=f"indexed-validation-{type(exc).__name__}",
+            )
 
     def retrieval_metrics_snapshot(self) -> dict[str, Any]:
         """Return retrieval counters used by before/after production probes."""
@@ -1635,16 +2198,67 @@ class HermesKanbanClient:
         with self._retrieval_metrics_lock:
             return {
                 "full_board_list_count": self._full_board_list_count,
+                "root_lookup_count": self._root_lookup_count,
                 "root_query_count": self._root_query_count,
+                "candidate_discovery_count": self._candidate_discovery_count,
                 "full_board_list_latency_ms": tuple(
                     self._retrieval_metrics["full_board_list_latency_ms"]
+                ),
+                "root_lookup_latency_ms": tuple(
+                    self._retrieval_metrics["root_lookup_latency_ms"]
                 ),
                 "root_query_latency_ms": tuple(
                     self._retrieval_metrics["root_query_latency_ms"]
                 ),
+                "candidate_discovery_latency_ms": tuple(
+                    self._retrieval_metrics["candidate_discovery_latency_ms"]
+                ),
             }
 
     def workflow(self, task_id: str) -> tuple[str, tuple[dict[str, Any], ...]]:
+        return self._with_cli_operation_span(
+            "workflow-reconstruction",
+            lambda: self._workflow_impl(task_id),
+        )
+
+    def _with_cli_operation_span(
+        self,
+        operation: str,
+        callback: Callable[[], Any],
+    ) -> Any:
+        started_ns = time.perf_counter_ns()
+        success = True
+        category = "NONE"
+        try:
+            return callback()
+        except Exception as exc:
+            success = False
+            message = str(exc).casefold()
+            if "timeout" in message:
+                category = "TIMEOUT"
+            elif "sqlite" in message and ("lock" in message or "busy" in message):
+                category = "SQLITE_LOCK"
+            else:
+                category = "UNKNOWN"
+            raise
+        finally:
+            elapsed_ms = max(0, (time.perf_counter_ns() - started_ns) // 1_000_000)
+            with self._cli_metrics_lock:
+                active = self._active_cli_calls
+                maximum = self._max_active_cli_calls
+            self._record_cli_diagnostic(
+                operation=operation,
+                lane=current_cli_lane(),
+                elapsed_ms=elapsed_ms,
+                timeout_ms=max(0, int(self.timeout * 1000)),
+                return_code=None,
+                stderr_category=category,
+                success=success,
+                active_cli_calls=active,
+                max_active_cli_calls=maximum,
+            )
+
+    def _workflow_impl(self, task_id: str) -> tuple[str, tuple[dict[str, Any], ...]]:
         """Collect one workflow using execution edges or the durable scope marker.
 
         Current CEO primary tasks deliberately have no parent edge to the
@@ -1692,6 +2306,11 @@ class HermesKanbanClient:
                 # Compatibility path for legacy Hermes versions, unavailable
                 # SQLite, and migration windows.  The subsequent show() calls
                 # remain authoritative exactly as before.
+                _record_full_board_fallback(
+                    lane=current_cli_lane(),
+                    reason="scoped-index-unavailable",
+                    root_id=root_id,
+                )
                 scoped_ids.update(
                     self._scoped_ids_from_rows(self.list_tasks(), root_id)
                 )
@@ -1860,6 +2479,7 @@ class CeoSupervisorService:
         synthesis_projection: Any | None = None,
         qa_projection: Any | None = None,
         discord_delivery: DiscordFinalDelivery | None = None,
+        department_notion_projection: Any | None = None,
     ) -> None:
         self.client = client
         self.max_retries = max_retries
@@ -1870,6 +2490,13 @@ class CeoSupervisorService:
         self.synthesis_projection = synthesis_projection
         self.qa_projection = qa_projection
         self.discord_delivery = discord_delivery
+        self._department_notion_projection = (
+            department_notion_projection
+            if department_notion_projection is not None
+            else DepartmentNotionProjection(
+                env=getattr(client, "environment", os.environ),
+            )
+        )
         self._seen_events: set[str] = set()
         # Hermes watch and recovery can describe the same terminal transition
         # with different event ids. Coalesce those wakeups before they contend
@@ -2188,9 +2815,7 @@ class CeoSupervisorService:
         # Accounting/QA/HR retain their native reporters, so this projector
         # deliberately skips them.
         try:
-            department_projection = DepartmentNotionProjection(
-                env=getattr(self.client, "environment", os.environ),
-            ).project(
+            department_projection = self._department_notion_projection.project(
                 root_task_id=root_task_id,
                 task=task,
                 workflow_tasks=task_payloads,
@@ -2439,6 +3064,7 @@ class CeoSupervisorService:
         root_payload: Mapping[str, Any],
         task_payloads: Sequence[Mapping[str, Any]],
         payloads_are_authoritative: bool = False,
+        skip_task_ids: Collection[str] = (),
     ) -> None:
         """Recover terminal department cards from durable task state.
 
@@ -2470,6 +3096,14 @@ class CeoSupervisorService:
                 or child.profile not in selected
                 or not child.is_in_workflow(root_task_id)
             ):
+                continue
+            # The terminal handler may have just projected this exact child
+            # successfully before entering reconciliation.  Recovery still
+            # checks every other terminal sibling, but must not issue a second
+            # Discord card update for the already completed projection.  A
+            # failed/missing delivery is intentionally not added to this set,
+            # so the existing same-handler retry and restart recovery remain.
+            if child.task_id in skip_task_ids:
                 continue
 
             candidate = payload
@@ -2662,6 +3296,8 @@ class CeoSupervisorService:
     # hgfinance-ready-plan-materializer-v2
     def materialize_ready_primary_plans(
         self,
+        *,
+        listed_rows: Sequence[Mapping[str, Any]] | None = None,
     ) -> tuple[SupervisorDecision, ...]:
         """Materialize complete CEO-authored analysis plans before root completion.
 
@@ -2696,7 +3332,20 @@ class CeoSupervisorService:
         done_recovery_window_seconds = 120
         candidates: list[tuple[int, str]] = []
 
-        for row in list_tasks():
+        # The recovery lane may provide one board snapshot shared with the
+        # synthesis reconciler.  The watch/terminal path remains authoritative;
+        # this optional snapshot only removes duplicate read-only list scans
+        # inside one recovery cycle.
+        if listed_rows is None:
+            _record_full_board_fallback(
+                lane=current_cli_lane(),
+                reason="ready-recovery-discovery-missing",
+                root_id="",
+            )
+            board_rows = list_tasks()
+        else:
+            board_rows = listed_rows
+        for row in board_rows:
             task_id = str(row.get("id") or row.get("task_id") or "")
             body = str(row.get("body") or "")
             status = str(row.get("status") or "").casefold()
@@ -2833,7 +3482,12 @@ class CeoSupervisorService:
                         thread_name_prefix="ceo-primary-create",
                     ) as pool:
                         futures = [
-                            pool.submit(self._execute, decision, state)
+                            pool.submit(
+                                copy_context().run,
+                                self._execute,
+                                decision,
+                                state,
+                            )
                             for decision in decisions
                         ]
 
@@ -2876,6 +3530,11 @@ class CeoSupervisorService:
             return ()
 
         roots: dict[str, Mapping[str, Any]] = {}
+        _record_full_board_fallback(
+            lane=current_cli_lane(),
+            reason="startup-reconciliation",
+            root_id="",
+        )
         for row in list_tasks():
             task_id = str(row.get("id") or row.get("task_id") or "")
             body = str(row.get("body") or "")
@@ -2935,7 +3594,11 @@ class CeoSupervisorService:
                 decisions.append(decision)
         return tuple(decisions)
 
-    def reconcile_completed_syntheses(self) -> tuple[str, ...]:
+    def reconcile_completed_syntheses(
+        self,
+        *,
+        listed_rows: Sequence[Mapping[str, Any]] | None = None,
+    ) -> tuple[str, ...]:
         """Recover recent completed syntheses whose watch event was missed.
 
         ``hermes kanban watch`` remains the low-latency path.  This reconciler
@@ -2957,7 +3620,19 @@ class CeoSupervisorService:
 
         candidates: list[tuple[int, str]] = []
 
-        for row in list_tasks():
+        # See materialize_ready_primary_plans(): both recovery checks can
+        # safely consume the same immutable-in-memory list projection. Each
+        # candidate is still revalidated through show() before acting.
+        if listed_rows is None:
+            _record_full_board_fallback(
+                lane=current_cli_lane(),
+                reason="synthesis-recovery-discovery-missing",
+                root_id="",
+            )
+            board_rows = list_tasks()
+        else:
+            board_rows = listed_rows
+        for row in board_rows:
             task_id = str(row.get("id") or row.get("task_id") or "")
             if not task_id:
                 continue
@@ -3158,7 +3833,12 @@ class CeoSupervisorService:
                 thread_name_prefix="ceo-primary-fast-create",
             ) as pool:
                 futures = [
-                    pool.submit(self._execute, decision, state)
+                    pool.submit(
+                        copy_context().run,
+                        self._execute,
+                        decision,
+                        state,
+                    )
                     for decision in decisions
                 ]
                 for future in futures:
@@ -3360,6 +4040,9 @@ class CeoSupervisorService:
             event.get("_event_consumed_ms") or handler_started_ms
         )
         event_created_ms = int(event.get("_event_created_ms") or 0)
+        event_persisted_ms = int(
+            event.get("_event_persisted_ms") or event_created_ms
+        )
         task_id = str(event.get("task_id") or event.get("id") or "")
         kind = str(event.get("kind") or event.get("event_type") or event.get("status") or "").casefold()
         if not task_id:
@@ -3548,7 +4231,8 @@ class CeoSupervisorService:
                 )
                 logger.info(
                     "supervisor-terminal-timing root=%s task=%s kind=%s "
-                    "task_completed=%d event_created=%d event_consumed=%d "
+                    "task_completed=%d event_created=%d event_persisted=%d "
+                    "event_consumed=%d "
                     "handler_started=%d root_resolved=%d "
                     "lock_acquired=%d workflow_ready=%d "
                     "created_to_consumed_ms=%d completion_to_consumed_ms=%d "
@@ -3560,6 +4244,7 @@ class CeoSupervisorService:
                     kind,
                     task_completed_ms,
                     event_created_ms,
+                    event_persisted_ms,
                     event_consumed_ms,
                     handler_started_ms,
                     root_resolved_ms,
@@ -3647,6 +4332,7 @@ class CeoSupervisorService:
                     user_paper_order_scope = user_paper_order_scope_from_body(
                         root_body
                     )
+                    validation_completed_ms = time.time_ns() // 1_000_000
                 except WorkflowScopeViolation as exc:
                     reason = f"workflow_scope_validation: {exc}"
                     comment_task = getattr(self.client, "comment_task", None)
@@ -3675,55 +4361,82 @@ class CeoSupervisorService:
                     None,
                 )
                 terminal_observers_projected = False
+                terminal_progress_status: str | None = None
+                observer_started_ms = 0
+                observer_completed_ms = 0
 
                 def project_terminal_observers() -> None:
                     nonlocal terminal_observers_projected, terminal_task_payload
+                    nonlocal terminal_progress_status
+                    nonlocal observer_started_ms, observer_completed_ms
                     if terminal_observers_projected:
                         return
                     terminal_observers_projected = True
+                    observer_started_ms = time.time_ns() // 1_000_000
+                    try:
+                        terminal_projection_status = self._project_terminal_task(
+                            root_task_id=root_id,
+                            task_id=task_id,
+                            task_payloads=(root_payload, *payloads),
+                            event=event,
+                        )
+                        if (
+                            terminal_role == "synthesis"
+                            and terminal_projection_status not in {"sent", "deduped"}
+                        ):
+                            # A later recovery wakeup may retry a failed or
+                            # not-yet-correlatable delivery. Concurrent duplicates
+                            # remain coalesced because this runs after the response
+                            # attempt has completed.
+                            with self._seen_events_lock:
+                                self._seen_terminal_transitions.discard(
+                                    transition_key
+                                )
 
-                    terminal_projection_status = self._project_terminal_task(
-                        root_task_id=root_id,
-                        task_id=task_id,
-                        task_payloads=(root_payload, *payloads),
-                        event=event,
-                    )
-                    if (
-                        terminal_role == "synthesis"
-                        and terminal_projection_status not in {"sent", "deduped"}
-                    ):
-                        # A later recovery wakeup may retry a failed or
-                        # not-yet-correlatable delivery. Concurrent duplicates
-                        # remain coalesced because this runs after the response
-                        # attempt has completed.
-                        with self._seen_events_lock:
-                            self._seen_terminal_transitions.discard(
-                                transition_key
-                            )
+                        if terminal_task_payload is not None:
+                            try:
+                                terminal_progress_status = (
+                                    self._deliver_department_progress(
+                                        root_task_id=root_id,
+                                        root_payload=root_payload,
+                                        task_payload=terminal_task_payload,
+                                        event=event,
+                                    )
+                                )
+                            except Exception as exc:
+                                logger.warning(
+                                    "department-discord-progress-failed "
+                                    "task=%s kind=%s error=%s",
+                                    task_id,
+                                    kind,
+                                    type(exc).__name__,
+                                )
 
-                    if terminal_task_payload is not None:
-                        try:
-                            self._deliver_department_progress(
-                                root_task_id=root_id,
-                                root_payload=root_payload,
-                                task_payload=terminal_task_payload,
-                                event=event,
-                            )
-                        except Exception as exc:
-                            logger.warning(
-                                "department-discord-progress-failed "
-                                "task=%s kind=%s error=%s",
-                                task_id,
-                                kind,
-                                type(exc).__name__,
-                            )
-
-                    self._reconcile_department_terminal_progress(
-                        root_task_id=root_id,
-                        root_payload=root_payload,
-                        task_payloads=payloads,
-                        payloads_are_authoritative=payloads_are_authoritative,
-                    )
+                        self._reconcile_department_terminal_progress(
+                            root_task_id=root_id,
+                            root_payload=root_payload,
+                            task_payloads=payloads,
+                            payloads_are_authoritative=payloads_are_authoritative,
+                            skip_task_ids=(
+                                (task_id,)
+                                if terminal_progress_status
+                                in {"created", "updated", "unchanged", "deduped", "sent"}
+                                else ()
+                            ),
+                        )
+                    finally:
+                        observer_completed_ms = time.time_ns() // 1_000_000
+                        logger.info(
+                            "supervisor-observer-timing root=%s task=%s event=%s "
+                            "observer_started=%d observer_completed=%d "
+                            "observer_duration_ms=%d",
+                            root_id,
+                            task_id,
+                            event_key,
+                            observer_started_ms,
+                            observer_completed_ms,
+                            _elapsed_ms(observer_started_ms, observer_completed_ms),
+                        )
 
                 terminal_role = (
                     terminal_workflow_role(terminal_task_payload)
@@ -3935,7 +4648,9 @@ class CeoSupervisorService:
                         delivery_status,
                     )
 
+                decision_started_ms = time.time_ns() // 1_000_000
                 decision = self.decider(state)
+                decision_completed_ms = time.time_ns() // 1_000_000
                 if (
                     wakeups >= self.max_wakeups
                     and self._consumes_wakeup_budget(
@@ -3981,6 +4696,22 @@ class CeoSupervisorService:
                     )
                 if decision is None:
                     project_terminal_observers()
+                    logger.info(
+                        "supervisor-handler-stage-timing root=%s task=%s event=%s "
+                        "workflow_ready=%d validation_completed=%d decision_started=%d "
+                        "decision_completed=%d observer_started=%d observer_completed=%d "
+                        "decision_duration_ms=%d",
+                        root_id,
+                        task_id,
+                        event_key,
+                        workflow_ready_ms,
+                        validation_completed_ms,
+                        decision_started_ms,
+                        decision_completed_ms,
+                        observer_started_ms,
+                        observer_completed_ms,
+                        _elapsed_ms(decision_started_ms, decision_completed_ms),
+                    )
                     self._record_wakeup(
                         root_task_id=root_id,
                         event_id=event_key,
@@ -4031,56 +4762,83 @@ class CeoSupervisorService:
                     # because it launches multiple Hermes CLI subprocesses.
                     #
                     # Prefer one board-list read and inspect only durable workflow
-                    # markers. Small test/fake clients without list_tasks retain
-                    # the previous full-workflow fallback.
+                    # markers. Production clients use indexed candidate IDs and
+                    # authoritative targeted show() calls. Small test/fake
+                    # clients and uncertain indexes retain the old fallback.
                     synthesis_exists = False
-                    list_tasks = getattr(self.client, "list_tasks", None)
+                    indexed_synthesis = getattr(
+                        self.client,
+                        "authoritative_synthesis_exists",
+                        None,
+                    )
 
-                    if callable(list_tasks):
-                        for row in list_tasks():
-                            body = str(row.get("body") or "")
-                            row_role = terminal_workflow_role(row) or ""
-                            row_action = (
-                                terminal_action(row)
-                                or terminal_action({"body": body})
-                                or ""
+                    if callable(indexed_synthesis):
+                        try:
+                            synthesis_exists = indexed_synthesis(root_id)
+                        except (
+                            RootScopedIndexUnavailable,
+                            HermesKanbanCommandError,
+                            KeyError,
+                        ) as exc:
+                            _record_full_board_fallback(
+                                lane=current_cli_lane(),
+                                reason=(
+                                    "synthesis-index-uncertain-"
+                                    f"{type(exc).__name__}"
+                                ),
+                                root_id=root_id,
                             )
-                            row_roots = extract_scope_references(row).root_ids
+                            indexed_synthesis = None
 
-                            if (
-                                root_id in row_roots
-                                and row_role == "synthesis"
+                    if indexed_synthesis is None:
+                        list_tasks = getattr(self.client, "list_tasks", None)
+                        if callable(list_tasks):
+                            for row in list_tasks():
+                                body = str(row.get("body") or "")
+                                row_role = terminal_workflow_role(row) or ""
+                                row_action = (
+                                    terminal_action(row)
+                                    or terminal_action({"body": body})
+                                    or ""
+                                )
+                                row_roots = extract_scope_references(row).root_ids
+
+                                if (
+                                    root_id in row_roots
+                                    and row_role == "synthesis"
+                                    and (
+                                        row_action == "SYNTHESIZE"
+                                        or _is_direct_ceo_response_synthesis(
+                                            role=row_role,
+                                            body=body,
+                                        )
+                                    )
+                                ):
+                                    synthesis_exists = True
+                                    break
+                        else:
+                            # Small/fake clients without list_tasks retain the
+                            # previous full-workflow fallback.
+                            _, refreshed_payloads = self.client.workflow(root_id)
+                            synthesis_exists = any(
+                                child.is_in_workflow(root_id)
+                                and child.workflow_role == "synthesis"
                                 and (
-                                    row_action == "SYNTHESIZE"
+                                    (
+                                        SUPERVISOR_MARKER in child.body
+                                        and "action=SYNTHESIZE" in child.body
+                                    )
                                     or _is_direct_ceo_response_synthesis(
-                                        role=row_role,
-                                        body=body,
+                                        role=child.workflow_role,
+                                        body=child.body,
                                     )
                                 )
-                            ):
-                                synthesis_exists = True
-                                break
-                    else:
-                        _, refreshed_payloads = self.client.workflow(root_id)
-                        synthesis_exists = any(
-                            child.is_in_workflow(root_id)
-                            and child.workflow_role == "synthesis"
-                            and (
-                                (
-                                    SUPERVISOR_MARKER in child.body
-                                    and "action=SYNTHESIZE" in child.body
-                                )
-                                or _is_direct_ceo_response_synthesis(
-                                    role=child.workflow_role,
-                                    body=child.body,
+                                for child in (
+                                    ChildTaskState.from_hermes(payload)
+                                    for payload in refreshed_payloads
+                                    if payload.get("assignee") is not None
                                 )
                             )
-                            for child in (
-                                ChildTaskState.from_hermes(payload)
-                                for payload in refreshed_payloads
-                                if payload.get("assignee") is not None
-                            )
-                        )
 
                     if not synthesis_exists:
                         synthesis = _analysis_synthesis_decision(state)
@@ -4093,6 +4851,22 @@ class CeoSupervisorService:
                 if decision.action == SupervisorAction.CREATE_TASK:
                     self._replans[root_id] = self._replans.get(root_id, 0) + 1
                 project_terminal_observers()
+                logger.info(
+                    "supervisor-handler-stage-timing root=%s task=%s event=%s "
+                    "workflow_ready=%d validation_completed=%d decision_started=%d "
+                    "decision_completed=%d observer_started=%d observer_completed=%d "
+                    "decision_duration_ms=%d",
+                    root_id,
+                    task_id,
+                    event_key,
+                    workflow_ready_ms,
+                    validation_completed_ms,
+                    decision_started_ms,
+                    decision_completed_ms,
+                    observer_started_ms,
+                    observer_completed_ms,
+                    _elapsed_ms(decision_started_ms, decision_completed_ms),
+                )
                 self._record_wakeup(
                     root_task_id=root_id,
                     event_id=event_key,

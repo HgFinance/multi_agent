@@ -1462,6 +1462,9 @@ services:
       HERMES_GID: 1000
       HERMES_KANBAN_HOME: /opt/data/shared-kanban
       HERMES_KANBAN_DB: /opt/data/shared-kanban/kanban.db
+      # Read the existing durable event cursor in-process. The Hermes CLI
+      # subprocess remains the code-level fallback when this is unset.
+      CEO_SUPERVISOR_WATCH_SOURCE: sqlite
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
       PYTHONPATH: /opt/hgfinance
       # Langfuse(2026-08-20). Discord/웹 사용자 질의는 BFF 가 부서장을 직접 부르지
@@ -1492,7 +1495,10 @@ services:
     container_name: hedgefund-kanban-retention-worker
     restart: unless-stopped
     init: true
-    command: ["python3", "/opt/hgfinance/orchestration/kanban_retention.py", "--interval", "${KANBAN_RETENTION_INTERVAL_SECONDS:-900}", "--archive-only", "--max-archive-roots", "${KANBAN_RETENTION_MAX_ARCHIVE_ROOTS:-5}"]
+    # Purge is enabled only through the worker's audit + 7-day age gate. The
+    # root mutation remains bounded so one maintenance pass cannot drain the
+    # historical board or compete with the supervisor for a long interval.
+    command: ["python3", "/opt/hgfinance/orchestration/kanban_retention.py", "--interval", "${KANBAN_RETENTION_INTERVAL_SECONDS:-900}", "--max-archive-roots", "${KANBAN_RETENTION_MAX_ARCHIVE_ROOTS:-5}"]
     volumes:
       - /home/ubuntu/.hermes:/opt/data
       - .:/opt/hgfinance:ro

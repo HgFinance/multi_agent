@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from departments.notion_markdown import markdown_to_notion_blocks
+from orchestration.adapters.notion_schema_cache import BoundedNotionSchemaCache
 from orchestration.adapters.terminal_projection_utils import (
     action,
     ids_from,
@@ -285,6 +286,7 @@ class CeoNotionProjection:
         self.env = env if env is not None else os.environ
         self.transport = transport
         self.kanban_client = kanban_client
+        self._schema_cache = BoundedNotionSchemaCache()
 
     def _comment_marker(self, projection_key: str) -> str:
         return f"{PROJECTION_MARKER} projection_key={projection_key} status=created"
@@ -444,11 +446,28 @@ class CeoNotionProjection:
         current_report_schema = False
         projection_schema = False
         try:
-            schema = self._schema(transport, database_id)
+            schema, schema_cache_hit = self._schema_cache.get(
+                database_id,
+                lambda: self._schema(transport, database_id),
+            )
             schema_properties = _schema_properties(schema)
             current_report_schema = _is_ceo_report_schema(schema_properties)
             projection_schema = _is_projection_key_schema(schema_properties)
-            if not current_report_schema and not projection_schema:
+            schema_mismatch = not current_report_schema and not projection_schema
+            if schema_mismatch and schema_cache_hit:
+                # Re-check a cached schema once after a property migration. A
+                # stale mapping must never decide which fields are written.
+                self._schema_cache.invalidate(database_id)
+                schema, _ = self._schema_cache.get(
+                    database_id,
+                    lambda: self._schema(transport, database_id),
+                )
+                schema_properties = _schema_properties(schema)
+                current_report_schema = _is_ceo_report_schema(schema_properties)
+                projection_schema = _is_projection_key_schema(schema_properties)
+                schema_mismatch = not current_report_schema and not projection_schema
+            if schema_mismatch:
+                self._schema_cache.invalidate(database_id)
                 return CeoSynthesisProjectionResult(
                     "failed",
                     projection_key=key,
@@ -471,6 +490,8 @@ class CeoNotionProjection:
             try:
                 existing = transport.query_projection(database_id, key)
             except NotionProjectionError as exc:
+                if exc.status == 400:
+                    self._schema_cache.invalidate(database_id)
                 retryable = exc.status is None or exc.status >= 500 or exc.status == 429
                 logger.warning("ceo_notion_projection_query_failed", extra={"error": str(exc)})
                 return CeoSynthesisProjectionResult(
@@ -526,6 +547,8 @@ class CeoNotionProjection:
         try:
             page = transport.create_page(database_id, properties, children)
         except NotionProjectionError as exc:
+            if exc.status == 400:
+                self._schema_cache.invalidate(database_id)
             retryable = exc.status is None or exc.status >= 500 or exc.status == 429
             logger.warning("ceo_notion_projection_create_failed", extra={"error": str(exc)})
             return CeoSynthesisProjectionResult(

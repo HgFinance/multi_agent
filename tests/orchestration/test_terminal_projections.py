@@ -77,8 +77,12 @@ class FakeNotionTransport:
     def __init__(self) -> None:
         self.pages: list[dict[str, Any]] = []
         self.fail = False
+        self.schema_calls = 0
+        self.query_calls = 0
+        self.create_calls = 0
 
     def database_schema(self, _database_id: str) -> dict[str, Any]:
+        self.schema_calls += 1
         return {
             "properties": {
                 "제목": {"type": "title", "title": {}},
@@ -87,11 +91,13 @@ class FakeNotionTransport:
         }
 
     def query_projection(self, database_id: str, projection_key: str) -> list[dict[str, Any]]:
+        self.query_calls += 1
         if self.fail:
             raise NotionProjectionError("notion unavailable", status=503)
         return [page for page in self.pages if page["projection_key"] == projection_key]
 
     def create_page(self, database_id: str, properties: dict[str, Any], children: list[dict[str, Any]]) -> dict[str, Any]:
+        self.create_calls += 1
         if self.fail:
             raise NotionProjectionError("notion unavailable", status=503)
         key = properties["projection_key"]["rich_text"][0]["text"]["content"]
@@ -250,16 +256,56 @@ class TerminalProjectionTests(unittest.TestCase):
         original_query = payload["properties"]["original_query"]["rich_text"][0]["text"]["content"]
         self.assertEqual(original_query, "Compare the selected companies")
 
+    def test_ceo_schema_is_reused_but_projection_query_remains_idempotent(self) -> None:
+        transport = FakeNotionTransport()
+        projection = CeoNotionProjection(
+            env={"NOTION_TOKEN": "token", "NOTION_CEO_DB": "ceo-db"},
+            transport=transport,
+        )
+
+        first = projection.project(
+            root_task_id=ROOT,
+            task=self.synthesis,
+            workflow_tasks=self.workflow,
+        )
+        second = projection.project(
+            root_task_id=ROOT,
+            task=self.synthesis,
+            workflow_tasks=self.workflow,
+        )
+
+        self.assertEqual(first["status"], "created")
+        self.assertEqual(second["status"], "duplicate")
+        self.assertEqual(transport.schema_calls, 1)
+        self.assertEqual(transport.query_calls, 2)
+        self.assertEqual(transport.create_calls, 1)
+
     def test_notion_failure_is_non_binding(self) -> None:
         transport = FakeNotionTransport()
         transport.fail = True
-        result = CeoNotionProjection(
+        projection = CeoNotionProjection(
             env={"NOTION_TOKEN": "token", "NOTION_CEO_DB": "ceo-db"},
             transport=transport,
-        ).project(root_task_id=ROOT, task=self.synthesis, workflow_tasks=self.workflow)
+        )
+        result = projection.project(
+            root_task_id=ROOT,
+            task=self.synthesis,
+            workflow_tasks=self.workflow,
+        )
         self.assertEqual(result["status"], "failed")
         self.assertTrue(result["retryable"])
         self.assertEqual(self.synthesis["status"], "done")
+
+        transport.fail = False
+        retry = projection.project(
+            root_task_id=ROOT,
+            task=self.synthesis,
+            workflow_tasks=self.workflow,
+        )
+        self.assertEqual(retry["status"], "created")
+        self.assertEqual(transport.schema_calls, 1)
+        self.assertEqual(transport.query_calls, 2)
+        self.assertEqual(transport.create_calls, 1)
 
     def test_production_ceo_report_schema_maps_properties_and_marker(self) -> None:
         transport = ProductionReportNotionTransport()
@@ -410,6 +456,67 @@ class TerminalProjectionTests(unittest.TestCase):
 
         self.assertIsNotNone(decision)
         self.assertEqual(decision.action.value, "SYNTHESIZE")
+
+    def test_terminal_reconciliation_does_not_repeat_successful_current_card(self) -> None:
+        class DeliverySpy:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def upsert_thread_card(self, **kwargs: Any) -> str:
+                self.calls.append(str(kwargs["source_task"]["id"]))
+                return "created"
+
+        root = dict(self.root)
+        root["body"] += "\nselected_primary_profiles=research-department,risk-management"
+        client = FakeSupervisorClient(root, [*self.primary])
+        delivery = DeliverySpy()
+        service = CeoSupervisorService(client, discord_delivery=delivery)
+
+        current = self.primary[0]
+        service._deliver_department_progress(
+            root_task_id=ROOT,
+            root_payload=root,
+            task_payload=current,
+            event={"event_id": "terminal-current", "task_id": RESEARCH, "kind": "completed"},
+        )
+        service._reconcile_department_terminal_progress(
+            root_task_id=ROOT,
+            root_payload=root,
+            task_payloads=(current, self.primary[1]),
+            payloads_are_authoritative=True,
+            skip_task_ids=(RESEARCH,),
+        )
+
+        self.assertEqual(delivery.calls, [RESEARCH, RISK])
+
+    def test_handler_keeps_failed_current_card_retryable(self) -> None:
+        class Client(FakeSupervisorClient):
+            def authoritative_workflow_snapshot(self, _root_id: str, _task_id: str):
+                return ROOT, tuple(self.tasks), self.root
+
+        class DeliverySpy:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def upsert_thread_card(self, **kwargs: Any) -> str:
+                self.calls.append(str(kwargs["source_task"]["id"]))
+                return "failed" if len(self.calls) == 1 else "created"
+
+        root = dict(self.root)
+        root["body"] += "\nselected_primary_profiles=research-department,risk-management"
+        client = Client(root, [*self.primary])
+        delivery = DeliverySpy()
+        service = CeoSupervisorService(
+            client,
+            discord_delivery=delivery,
+            qa_required=False,
+        )
+
+        service.handle_terminal_event(
+            {"event_id": "terminal-retryable-card", "task_id": RESEARCH, "kind": "completed"}
+        )
+
+        self.assertEqual(delivery.calls[:2], [RESEARCH, RESEARCH])
 
 
 if __name__ == "__main__":

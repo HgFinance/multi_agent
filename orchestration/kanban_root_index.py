@@ -19,6 +19,7 @@ import sqlite3
 import threading
 from pathlib import Path
 from typing import Mapping
+from urllib.parse import quote
 
 
 ROOT_COLUMN = "workflow_root_task_id"
@@ -149,7 +150,12 @@ class SQLiteRootScopedIndex:
                     pass
             self._prepared = True
 
-    def task_ids(self, root_task_id: str) -> tuple[str, ...]:
+    def task_ids(
+        self,
+        root_task_id: str,
+        *,
+        include_archived: bool = False,
+    ) -> tuple[str, ...]:
         """Return candidate IDs only; never return task state."""
 
         root = str(root_task_id or "").strip()
@@ -160,15 +166,112 @@ class SQLiteRootScopedIndex:
         try:
             conn = sqlite3.connect(str(self.db_path), timeout=1.0)
             conn.execute("PRAGMA busy_timeout=1000")
+            archived_filter = "" if include_archived else "AND status != 'archived' "
             rows = conn.execute(
                 f"SELECT id FROM tasks WHERE {ROOT_COLUMN} = ? "
-                "AND status != 'archived' ORDER BY created_at ASC, id ASC",
+                f"{archived_filter}ORDER BY created_at ASC, id ASC",
                 (root,),
             ).fetchall()
             return tuple(str(row[0]) for row in rows if row[0])
         except (OSError, sqlite3.Error) as exc:
             raise RootScopedIndexUnavailable(
                 f"root index query failed for {self.db_path}: "
+                f"{type(exc).__name__}"
+            ) from exc
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
+
+    def root_id_for_task(self, task_id: str) -> str | None:
+        """Return a scoped root candidate for one task, or ``None``.
+
+        This is discovery metadata only.  The returned root id is never used
+        as workflow state: callers must still hydrate the task, root, and all
+        indexed candidates through authoritative ``show`` calls after taking
+        the workflow lock.  Legacy parent-linked tasks intentionally return
+        ``None`` and retain the existing CLI ancestry fallback.
+        """
+
+        task = str(task_id or "").strip()
+        if not task or any(char.isspace() for char in task):
+            raise RootScopedIndexUnavailable("task_id is malformed")
+        self.prepare()
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = sqlite3.connect(str(self.db_path), timeout=1.0)
+            conn.execute("PRAGMA busy_timeout=1000")
+            row = conn.execute(
+                f"SELECT {ROOT_COLUMN} FROM tasks "
+                "WHERE id = ? AND status != 'archived'",
+                (task,),
+            ).fetchone()
+            root = str(row[0] or "").strip() if row else ""
+            if not root or any(char.isspace() for char in root):
+                return None
+            return root
+        except (OSError, sqlite3.Error) as exc:
+            raise RootScopedIndexUnavailable(
+                f"root candidate lookup failed for {self.db_path}: "
+                f"{type(exc).__name__}"
+            ) from exc
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
+
+    def recovery_candidate_rows(self) -> tuple[dict[str, object], ...]:
+        """Return discovery-only rows for active recovery candidates.
+
+        This query intentionally returns only the small set of rows whose
+        existing workflow markers can make them recovery candidates.  The
+        returned body/status/timestamps are hints for candidate selection;
+        callers must revalidate the selected task through authoritative
+        ``show`` before taking any action.
+        """
+
+        self.prepare()
+        conn: sqlite3.Connection | None = None
+        try:
+            db_uri = f"file:{quote(str(self.db_path.resolve()), safe='/')}?mode=ro"
+            conn = sqlite3.connect(db_uri, uri=True, timeout=1.0)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout=1000")
+            columns = {
+                str(row[1])
+                for row in conn.execute("PRAGMA table_xinfo(tasks)")
+            }
+            completed_at_expression = (
+                "completed_at" if "completed_at" in columns else "NULL"
+            )
+            rows = conn.execute(
+                "SELECT id, body, status, created_at, "
+                f"{completed_at_expression} AS completed_at "
+                "FROM tasks "
+                "WHERE body IS NOT NULL AND ("
+                "instr(body, 'workflow_role=root') > 0 OR "
+                "instr(body, 'root_task_role=scope_and_planning') > 0 OR "
+                "instr(body, 'workflow_role=synthesis') > 0"
+                ") ORDER BY created_at ASC, id ASC"
+            ).fetchall()
+            return tuple(
+                {
+                    "id": str(row["id"]),
+                    "body": row["body"],
+                    "status": row["status"],
+                    "created_at": row["created_at"],
+                    "completed_at": row["completed_at"],
+                }
+                for row in rows
+                if row["id"]
+            )
+        except (OSError, sqlite3.Error) as exc:
+            raise RootScopedIndexUnavailable(
+                f"recovery candidate query failed for {self.db_path}: "
                 f"{type(exc).__name__}"
             ) from exc
         finally:

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from departments.notion_markdown import markdown_to_notion_blocks
+from orchestration.adapters.notion_schema_cache import BoundedNotionSchemaCache
 from orchestration.adapters.terminal_projection_utils import (
     iso_timestamp,
     merged_run_metadata,
@@ -273,6 +274,27 @@ class DepartmentNotionProjection:
     ) -> None:
         self.env = env if env is not None else os.environ
         self.transport = transport
+        self._transport_token: str | None = None
+        self._schema_cache = BoundedNotionSchemaCache()
+
+    def _transport_for(self, token: str) -> Any:
+        if self.transport is None or (
+            self._transport_token is not None
+            and self._transport_token != token
+        ):
+            self.transport = _NotionTransport(token)
+            self._transport_token = token
+        return self.transport
+
+    def _schema_for(
+        self,
+        transport: Any,
+        database_id: str,
+    ) -> tuple[Mapping[str, Any], bool]:
+        return self._schema_cache.get(
+            database_id,
+            lambda: transport.database_schema(database_id),
+        )
 
     def project(
         self,
@@ -325,17 +347,32 @@ class DepartmentNotionProjection:
                 error="NOTION_TOKEN missing",
             )
 
-        transport = self.transport or _NotionTransport(token)
+        transport = self._transport_for(token)
 
-        schema = transport.database_schema(database_id)
+        schema, schema_cache_hit = self._schema_for(transport, database_id)
         properties_schema = schema.get("properties") or {}
         title_property = TITLE_PROPERTY[department]
-
-        if (
+        schema_mismatch = (
             title_property not in properties_schema
             or not isinstance(properties_schema[title_property], Mapping)
             or properties_schema[title_property].get("type") != "title"
-        ):
+        )
+
+        if schema_mismatch and schema_cache_hit:
+            # A cached schema may be stale after a Notion property migration.
+            # Invalidate and perform one authoritative fresh read before
+            # failing closed on the same projection.
+            self._schema_cache.invalidate(database_id)
+            schema, _ = self._schema_for(transport, database_id)
+            properties_schema = schema.get("properties") or {}
+            schema_mismatch = (
+                title_property not in properties_schema
+                or not isinstance(properties_schema[title_property], Mapping)
+                or properties_schema[title_property].get("type") != "title"
+            )
+
+        if schema_mismatch:
+            self._schema_cache.invalidate(database_id)
             return DepartmentProjectionResult(
                 "failed",
                 department=department,
@@ -345,11 +382,18 @@ class DepartmentNotionProjection:
 
         title = _task_title(task, department)
 
-        if transport.query_title(
-            database_id,
-            title_property,
-            title,
-        ):
+        try:
+            existing = transport.query_title(
+                database_id,
+                title_property,
+                title,
+            )
+        except DepartmentNotionProjectionError as exc:
+            if exc.status == 400:
+                self._schema_cache.invalidate(database_id)
+            raise
+
+        if existing:
             return DepartmentProjectionResult(
                 "duplicate",
                 department=department,
@@ -416,11 +460,16 @@ class DepartmentNotionProjection:
 
         children = markdown_to_notion_blocks(body)
 
-        page = transport.create_page(
-            database_id,
-            props,
-            children,
-        )
+        try:
+            page = transport.create_page(
+                database_id,
+                props,
+                children,
+            )
+        except DepartmentNotionProjectionError as exc:
+            if exc.status == 400:
+                self._schema_cache.invalidate(database_id)
+            raise
 
         return DepartmentProjectionResult(
             "created",

@@ -67,7 +67,12 @@ class FakeRootIndex:
         self.error = error
         self.calls: list[str] = []
 
-    def task_ids(self, root_id: str) -> tuple[str, ...]:
+    def task_ids(
+        self,
+        root_id: str,
+        *,
+        include_archived: bool = False,
+    ) -> tuple[str, ...]:
         self.calls.append(root_id)
         if self.error is not None:
             raise self.error
@@ -124,12 +129,29 @@ def test_sqlite_index_is_generated_and_uses_btree(tmp_path) -> None:
     index.prepare()
 
     assert index.task_ids(ROOT) == (RESEARCH, RISK)
+    assert index.task_ids(ROOT, include_archived=True) == (
+        RESEARCH,
+        RISK,
+        ARCHIVED,
+    )
     plan = sqlite3.connect(path).execute(
         "EXPLAIN QUERY PLAN SELECT id FROM tasks "
         "WHERE workflow_root_task_id = ?",
         (ROOT,),
     ).fetchall()
     assert any("USING INDEX idx_tasks_workflow_root_task_id" in row[-1] for row in plan)
+
+
+def test_sqlite_index_resolves_scoped_child_root_without_hydrating_state(tmp_path) -> None:
+    path = tmp_path / "kanban.db"
+    _make_board(path)
+
+    index = SQLiteRootScopedIndex({"HERMES_KANBAN_DB": str(path)})
+    index.prepare()
+
+    assert index.root_id_for_task(RESEARCH) == ROOT
+    assert index.root_id_for_task(ROOT) is None
+    assert index.root_id_for_task(ARCHIVED) is None
 
 
 def test_generated_index_tracks_hermes_task_insert_and_body_update(tmp_path) -> None:
@@ -152,10 +174,44 @@ def test_generated_index_tracks_hermes_task_insert_and_body_update(tmp_path) -> 
             6,
         ),
     )
+    conn.execute(
+        "INSERT INTO tasks(id, body, status, created_at) VALUES (?, ?, ?, ?)",
+        (
+            "t_qa_after_index",
+            build_scoped_task_body("qa", ROOT, role="qa"),
+            "ready",
+            7,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO tasks(id, body, status, created_at) VALUES (?, ?, ?, ?)",
+        (
+            "t_synthesis_after_index",
+            build_scoped_task_body("synthesis", ROOT, role="synthesis"),
+            "ready",
+            8,
+        ),
+    )
     conn.commit()
     conn.close()
 
-    assert index.task_ids(ROOT) == (RISK, "t_f0f0f0f0")
+    assert index.task_ids(ROOT) == (
+        RISK,
+        "t_f0f0f0f0",
+        "t_qa_after_index",
+        "t_synthesis_after_index",
+    )
+
+
+def test_recovery_candidate_rows_are_discovery_only(tmp_path) -> None:
+    path = tmp_path / "kanban.db"
+    _make_board(path)
+    index = SQLiteRootScopedIndex({"HERMES_KANBAN_DB": str(path)})
+
+    rows = index.recovery_candidate_rows()
+
+    assert [row["id"] for row in rows] == [ROOT]
+    assert rows[0]["status"] == "done"
 
 
 def test_indexed_snapshot_omits_full_board_list_and_shows_every_candidate() -> None:
@@ -182,6 +238,27 @@ def test_indexed_snapshot_omits_full_board_list_and_shows_every_candidate() -> N
     assert metrics["full_board_list_count"] == 0
 
 
+def test_scoped_root_lookup_uses_index_without_cli_show() -> None:
+    payloads = _payloads()
+    calls: list[tuple[str, ...]] = []
+
+    class ReverseFakeRootIndex(FakeRootIndex):
+        def root_id_for_task(self, task_id: str) -> str | None:
+            return ROOT if task_id == RESEARCH else None
+
+    index = ReverseFakeRootIndex((RESEARCH, RISK))
+    client = HermesKanbanClient(
+        runner=_runner(payloads, calls),
+        root_index=index,  # type: ignore[arg-type]
+    )
+
+    assert client.workflow_root(RESEARCH) == ROOT
+    assert calls == []
+    metrics = client.retrieval_metrics_snapshot()
+    assert metrics["root_lookup_count"] == 1
+    assert len(metrics["root_lookup_latency_ms"]) == 1
+
+
 def test_scoped_root_task_can_use_indexed_snapshot() -> None:
     payloads = _payloads()
     calls: list[tuple[str, ...]] = []
@@ -198,6 +275,31 @@ def test_scoped_root_task_can_use_indexed_snapshot() -> None:
     assert {child["id"] for child in children} == {RESEARCH, RISK}
     assert index.calls == [ROOT]
     assert not any(command[1:3] == ("kanban", "list") for command in calls)
+
+
+def test_indexed_synthesis_existence_uses_targeted_show_only() -> None:
+    payloads = _payloads()
+    synthesis_id = "t_synthesis"
+    payloads[synthesis_id] = {
+        "id": synthesis_id,
+        "status": "ready",
+        "body": build_scoped_task_body(
+            "synthesis\nhgfinance.ceo-supervisor.v1 action=SYNTHESIZE",
+            ROOT,
+            role="synthesis",
+        ),
+    }
+    calls: list[tuple[str, ...]] = []
+    index = FakeRootIndex((RESEARCH, RISK, synthesis_id))
+    client = HermesKanbanClient(
+        runner=_runner(payloads, calls),
+        root_index=index,  # type: ignore[arg-type]
+    )
+
+    assert client.authoritative_synthesis_exists(ROOT) is True
+    assert not any(command[1:3] == ("kanban", "list") for command in calls)
+    shown = [command[3] for command in calls if command[1:3] == ("kanban", "show")]
+    assert sorted(shown) == sorted([RESEARCH, RISK, synthesis_id])
 
 
 def test_index_failure_falls_back_to_full_board_and_keeps_authoritative_ids() -> None:
