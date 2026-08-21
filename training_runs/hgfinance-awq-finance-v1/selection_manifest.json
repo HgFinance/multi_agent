@@ -1,0 +1,152 @@
+{
+  "schema_version": "awq-finance-sft-selection.v1",
+  "status": "PREPARED",
+  "purpose": "Target the observed financial_arithmetic and structured_output weaknesses without benchmark leakage.",
+  "selection": {
+    "seed": "hgfinance-awq-finance-v1",
+    "total_examples": 1500,
+    "train_examples": 1350,
+    "validation_examples": 150,
+    "mix_ratio_total": {
+      "FinQA": 0.5333333333333333,
+      "Glaive Function Calling v2": 0.2833333333333333,
+      "HgFinance synthetic arithmetic/structured v1": 0.18333333333333332
+    }
+  },
+  "sources": [
+    {
+      "name": "FinQA",
+      "version": "1.0.0",
+      "source_url": "https://huggingface.co/datasets/ibm-research/finqa",
+      "upstream_url": "https://github.com/czyssrs/FinQA",
+      "license": "cc-by-4.0",
+      "license_evidence_url": "https://huggingface.co/datasets/ibm-research/finqa",
+      "local_files": {
+        "train": {
+          "path": "/tmp/hgfinance-awq-finetune-v1/source/finqa_train.json",
+          "sha256": "49f237eb9779b569473b26b08048867d04635a7cc39ad6a7a5664c55bb428db6"
+        },
+        "validation": {
+          "path": "/tmp/hgfinance-awq-finetune-v1/source/finqa_dev.json",
+          "sha256": "a847fb7e0d61a3125a1e2909852df6b89f1ee64d2c5ff1bf689e332214deee51"
+        }
+      },
+      "candidate_count": 7077,
+      "selected_train": 700,
+      "selected_validation": 100,
+      "category": "financial_arithmetic"
+    },
+    {
+      "name": "Glaive Function Calling v2",
+      "version": "e7f4b6456019f5d8bcb991ef0dd67d8ff23221ac",
+      "source_url": "https://huggingface.co/datasets/glaiveai/glaive-function-calling-v2",
+      "license": "apache-2.0",
+      "license_evidence_url": "https://huggingface.co/datasets/glaiveai/glaive-function-calling-v2",
+      "local_files": {
+        "path": "/tmp/hgfinance-awq-finetune-v1/source/glaive-function-calling-v2.json",
+        "sha256": "e9b5d671812b5ca2fbd7b625a37d5c99a19576c37252cdc806defe256aea6dad"
+      },
+      "candidate_count": 7760,
+      "selected_train": 400,
+      "selected_validation": 25,
+      "filter": "Finance-relevant function names only; one user request and first function call; no function response.",
+      "category": "structured_output"
+    },
+    {
+      "name": "HgFinance synthetic arithmetic/structured v1",
+      "version": "hgfinance-arithmetic-structured-v1",
+      "source_url": "local generator in scripts/qlora/prepare_awq_finance_sft.py",
+      "license": "internal-generated",
+      "license_evidence": "Generated locally; no third-party content is copied into this source.",
+      "generator_sha256": "92e52db6a6294506aa8026bb15916295cd1d2339be19465b3815deb8da9d06a6",
+      "candidate_count": 275,
+      "selected_train": 250,
+      "selected_validation": 25,
+      "category": "financial_arithmetic + structured_output"
+    }
+  ],
+  "candidate_validation": {
+    "finqa_train": {
+      "accepted": 6201,
+      "duplicate_rejected": 48
+    },
+    "finqa_validation": {
+      "accepted": 876,
+      "duplicate_rejected": 7
+    },
+    "glaive": {
+      "accepted": 7760,
+      "duplicate_rejected": 3309
+    },
+    "synthetic": {
+      "accepted": 275
+    },
+    "final_train": {
+      "accepted": 1350
+    },
+    "final_validation": {
+      "accepted": 150
+    }
+  },
+  "distribution": {
+    "train": {
+      "financial_arithmetic": 826,
+      "structured_output": 524
+    },
+    "validation": {
+      "financial_arithmetic": 112,
+      "structured_output": 38
+    },
+    "all": {
+      "financial_arithmetic": 938,
+      "structured_output": 562
+    },
+    "source_train": {
+      "FinQA": 700,
+      "Glaive Function Calling v2": 400,
+      "HgFinance synthetic arithmetic/structured v1": 250
+    },
+    "source_validation": {
+      "FinQA": 100,
+      "Glaive Function Calling v2": 25,
+      "HgFinance synthetic arithmetic/structured v1": 25
+    }
+  },
+  "contamination": {
+    "benchmark_root": "benchmarks/quantization",
+    "train": {
+      "records_checked": 1350,
+      "status": "PASS",
+      "benchmark_root": "benchmarks/quantization",
+      "benchmark_text_count": 500,
+      "exact": [],
+      "near": [],
+      "exact_count": 0,
+      "near_count": 0
+    },
+    "validation": {
+      "records_checked": 150,
+      "status": "PASS",
+      "benchmark_root": "benchmarks/quantization",
+      "benchmark_text_count": 500,
+      "exact": [],
+      "near": [],
+      "exact_count": 0,
+      "near_count": 0
+    },
+    "frozen_datasets_not_used_as_training_sources": [
+      "benchmarks/quantization/internal50_v2_reasoning.json",
+      "benchmarks/quantization/external50_v1.json"
+    ]
+  },
+  "artifacts": {
+    "train": {
+      "path": "training_runs/hgfinance-awq-finance-v1/prepared/train.jsonl",
+      "sha256": "dfb5cc4bd3a629f84d674bf12b90d06bdc09f84fa682953647175fbee5c8bcff"
+    },
+    "validation": {
+      "path": "training_runs/hgfinance-awq-finance-v1/prepared/validation.jsonl",
+      "sha256": "6a23ff169c0e211efd62c31b31f8e03a9196dd17c2fc20b009846f6d5923e4dd"
+    }
+  }
+}

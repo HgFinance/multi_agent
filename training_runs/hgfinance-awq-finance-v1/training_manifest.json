@@ -1,0 +1,88 @@
+{
+  "schema_version": "awq-finetune-training.v1",
+  "status": "PREPARED_NOT_TRAINED",
+  "runtime_profile": "L4-fp8KV-v1",
+  "training_scope": [
+    "financial_arithmetic",
+    "structured_output"
+  ],
+  "dataset": {
+    "selection_manifest": "training_runs/hgfinance-awq-finance-v1/selection_manifest.json",
+    "train": "training_runs/hgfinance-awq-finance-v1/prepared/train.jsonl",
+    "validation": "training_runs/hgfinance-awq-finance-v1/prepared/validation.jsonl",
+    "train_count": 1350,
+    "validation_count": 150
+  },
+  "tokenizer_audit": {
+    "status": "PASS",
+    "tokenizer": "Qwen2Tokenizer",
+    "model_max_length": 131072,
+    "records": 1500,
+    "tokenization": "Qwen2 chat template with add_generation_prompt=false",
+    "min_tokens": 73,
+    "p50_tokens": 595.5,
+    "p95_tokens": 1503,
+    "max_tokens": 3205,
+    "over_4096": 0,
+    "over_8192": 0,
+    "audited_in_container": "hgfinance-vllm-runtime-20260822"
+  },
+  "runtime_training_preflight": {
+    "status": "BLOCKED_FOR_TRAINING",
+    "python": "3.12.13",
+    "vllm": "0.27.1",
+    "transformers": "5.15.0",
+    "bitsandbytes_available": true,
+    "accelerate_available": true,
+    "peft_available": false,
+    "reason": "The serving image is not a training image; install and pin PEFT in an isolated training environment before training."
+  },
+  "served_awq_base": {
+    "model_name": "Qwen2.5-14B-Instruct-AWQ",
+    "quantization": "awq",
+    "revision": "must be resolved from the served model before adapter training",
+    "container_model_path": "/models/Qwen2.5-14B-Instruct-AWQ",
+    "config_sha256": "0c174aa8d52f5dec4c2e0d4b3ec4b1ff261d16bb80b58f03c1c06528e6ed6640",
+    "tokenizer_config_sha256": "5b5d4f65d0acd3b2d56a35b56d374a36cbc1c8fa5cf3b3febbbfabf22f359583",
+    "tokenizer_sha256": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539"
+  },
+  "staging_training_recipe": {
+    "purpose": "configuration scaffold only",
+    "base_model": "Qwen/Qwen2.5-14B-Instruct",
+    "base_revision": "must be pinned before training",
+    "quantization": "nf4 staging recipe; not an AWQ+Finetune result",
+    "lora_r": 16,
+    "lora_alpha": 32,
+    "lora_dropout": 0.05,
+    "target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj",
+      "gate_proj",
+      "up_proj",
+      "down_proj"
+    ],
+    "max_seq_length": 4096,
+    "gradient_checkpointing": true,
+    "optimizer": "paged_adamw_8bit"
+  },
+  "awq_adapter_gate": {
+    "status": "HOLD",
+    "reason": "The existing training recipe is NF4 QLoRA. No adapter is being labeled AWQ-compatible until exact base model, revision, AWQ quantization, target modules, metadata, and save/reload are verified.",
+    "required_before_valid_comparison": [
+      "resolve exact served AWQ model revision and tokenizer",
+      "use a training path that produces an adapter compatible with that exact AWQ base",
+      "verify target modules and adapter metadata",
+      "save and reload the adapter in the same serving stack",
+      "run tokenizer no-truncation audit"
+    ],
+    "prohibited_substitution": "existing NF4 Risk QLoRA adapter"
+  },
+  "next_training_outputs": [
+    "adapter_config.json",
+    "adapter_model.safetensors",
+    "adapter_save_reload_report.json",
+    "adapter_provenance.json"
+  ]
+}
