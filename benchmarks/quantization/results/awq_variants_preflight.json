@@ -1,0 +1,33 @@
+{
+  "benchmark": "HgFinance-Quantization-Variant-Preflight",
+  "status": "HOLD",
+  "primary_external_metric": "overall_accuracy",
+  "secondary_external_metric": "auto_mean_score",
+  "variants": {
+    "AWQ+Finetune": {
+      "status": "HOLD",
+      "reason": "No exact AWQ base adapter/checkpoint and no validated arithmetic/structured-output supplemental corpus were available.",
+      "scores": null
+    },
+    "AWQ+Reasoning": {
+      "status": "HOLD",
+      "reason": "No Qwen2.5-14B AWQ draft-serving endpoint was available for gpt-4o-mini critic/rewrite evaluation.",
+      "scores": null
+    },
+    "AWQ+RAG": {
+      "status": "HOLD",
+      "reason": "No approved arithmetic/structured-output glossary manifest and no Qwen2.5-14B AWQ serving endpoint were available.",
+      "scores": null
+    }
+  },
+  "frozen_baselines": {
+    "FP8": "benchmarks/quantization/results/fp8_internal50_v2_score.json",
+    "AWQ": "benchmarks/quantization/results/awq_internal50_v2_score.json"
+  },
+  "evidence": {
+    "internal50_v2_sha256": "ad2bdaf5ea381c2fc151fce1f1859f7f925b86fd03b830319cd97af17709e978",
+    "focused_tests": "10 passed",
+    "local_runtime": "no nvidia-smi/vllm; Ollama has no required Qwen2.5-14B AWQ asset"
+  },
+  "note": "No benchmark score is fabricated while required runtime or validated inputs are absent."
+}
