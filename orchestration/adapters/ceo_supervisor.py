@@ -64,6 +64,10 @@ from orchestration.adapters.department_notion_projection import (
     DepartmentNotionProjection,
 )
 from orchestration.kanban_retention_lock import workflow_mutation_lock
+from orchestration.kanban_root_index import (
+    RootScopedIndexUnavailable,
+    SQLiteRootScopedIndex,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1218,11 +1222,34 @@ class HermesKanbanClient:
         environment: Mapping[str, str] | None = None,
         runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
         timeout: float | None = None,
+        root_index: SQLiteRootScopedIndex | None = None,
     ) -> None:
         self.executable = executable or os.environ.get("HERMES_BIN", "hermes")
         self.environment = dict(environment or os.environ)
+        using_default_runner = runner is None
         self.runner = runner or subprocess.run
         self.timeout = timeout or float(os.environ.get("CEO_SUPERVISOR_CLI_TIMEOUT_SECONDS", "15"))
+        self.root_index = root_index
+        if self.root_index is None and using_default_runner:
+            self.root_index = SQLiteRootScopedIndex(self.environment)
+            # Index setup is a one-time board migration.  Do it before the
+            # watch loop starts so a normal terminal event does not pay the
+            # schema setup cost.  Any failure is deliberately non-fatal: the
+            # authoritative full-board path remains available.
+            try:
+                self.root_index.prepare()
+            except RootScopedIndexUnavailable as exc:
+                logger.warning(
+                    "kanban-root-index-unavailable error=%s",
+                    type(exc).__name__,
+                )
+        self._retrieval_metrics_lock = threading.Lock()
+        self._retrieval_metrics: dict[str, list[int]] = {
+            "full_board_list_latency_ms": [],
+            "root_query_latency_ms": [],
+        }
+        self._full_board_list_count = 0
+        self._root_query_count = 0
 
     def _run(self, args: Sequence[str]) -> str:
         try:
@@ -1327,6 +1354,7 @@ class HermesKanbanClient:
     def list_tasks(self) -> tuple[dict[str, Any], ...]:
         """List current-board tasks through the supported Hermes JSON API."""
 
+        started_ns = time.perf_counter_ns()
         try:
             payload = json.loads(self._run(("kanban", "list", "--json")))
         except (json.JSONDecodeError, TypeError) as exc:
@@ -1339,7 +1367,140 @@ class HermesKanbanClient:
             raise HermesKanbanCommandError(
                 "hermes kanban list returned a non-task array"
             )
+        elapsed_ms = max(0, (time.perf_counter_ns() - started_ns) // 1_000_000)
+        with self._retrieval_metrics_lock:
+            self._full_board_list_count += 1
+            self._retrieval_metrics["full_board_list_latency_ms"].append(elapsed_ms)
         return tuple(dict(item) for item in payload)
+
+    def root_scoped_task_ids(self, root_id: str) -> tuple[str, ...]:
+        """Find candidate task IDs using the local SQLite root index only.
+
+        The returned IDs are a discovery hint.  The caller must still call
+        :meth:`show` for every ID before making a workflow decision.
+        """
+
+        if self.root_index is None:
+            raise RootScopedIndexUnavailable("root index is not configured")
+        started_ns = time.perf_counter_ns()
+        try:
+            task_ids = self.root_index.task_ids(root_id)
+        finally:
+            elapsed_ms = max(0, (time.perf_counter_ns() - started_ns) // 1_000_000)
+            with self._retrieval_metrics_lock:
+                self._root_query_count += 1
+                self._retrieval_metrics["root_query_latency_ms"].append(elapsed_ms)
+        return tuple(task_ids)
+
+    @staticmethod
+    def _scoped_ids_from_rows(
+        rows: Sequence[Mapping[str, Any]], root_id: str
+    ) -> list[str]:
+        if not str(root_id or "").strip():
+            return []
+        scoped_ids: list[str] = []
+        for row in rows:
+            row_id = str(row.get("id") or row.get("task_id") or "")
+            if row_id and root_id in extract_scope_references(row).root_ids:
+                scoped_ids.append(row_id)
+        return list(dict.fromkeys(scoped_ids))
+
+    @staticmethod
+    def _is_canonical_scoped_root(
+        payload: Mapping[str, Any], task_id: str
+    ) -> bool:
+        body = str(payload.get("body") or "")
+        role = workflow_role_from_body(body)
+        return (
+            (
+                role == "root"
+                and is_user_query_body(body)
+                and workflow_mode_from_body(body) in {"analysis", "binding"}
+            )
+            or (
+                CEO_WORKFLOW_SCOPE_MARKER in body
+                and (
+                    role == "root"
+                    or "root_task_role=scope_and_planning" in body
+                )
+            )
+        )
+
+    def _hydrate_ids(
+        self,
+        hydrate_ids: Sequence[str],
+        *,
+        known_payloads: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Hydrate independent IDs through authoritative ``show`` calls."""
+
+        hydrated: dict[str, dict[str, Any]] = {
+            str(task_id): dict(payload)
+            for task_id, payload in (known_payloads or {}).items()
+        }
+        pending = [
+            task_id
+            for task_id in dict.fromkeys(str(item) for item in hydrate_ids)
+            if task_id not in hydrated
+        ]
+        if not pending:
+            return hydrated
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(
+            max_workers=min(4, len(pending)),
+            thread_name_prefix="ceo-workflow-show",
+        ) as pool:
+            hydrated_payloads = tuple(pool.map(self.show, pending))
+        hydrated.update(
+            dict(zip(pending, hydrated_payloads, strict=True))
+        )
+        return hydrated
+
+    def _full_board_authoritative_snapshot(
+        self,
+        root_id: str,
+        task_id: str,
+    ) -> tuple[str, tuple[dict[str, Any], ...], dict[str, Any]]:
+        """Compatibility discovery for legacy and failed-index workflows."""
+
+        rows = self.list_tasks()
+        listed_by_id = {
+            str(row.get("id") or row.get("task_id") or ""): row for row in rows
+        }
+        task_row = listed_by_id.get(task_id)
+        task_refs = (
+            extract_scope_references(task_row).root_ids
+            if task_row is not None
+            else ()
+        )
+        effective_root_id = str(root_id or "").strip() or (
+            task_refs[0] if task_refs else task_id
+        )
+        scoped_ids = self._scoped_ids_from_rows(rows, effective_root_id)
+        # A malformed direct marker must not be smuggled back into the
+        # fallback merely because it was the event task.  Legacy tasks with no
+        # marker are still retained for the parent/child compatibility path.
+        fallback_task_ids = (
+            ()
+            if task_id != effective_root_id
+            and task_refs
+            and effective_root_id not in task_refs
+            else (task_id,)
+        )
+        hydrate_ids = list(
+            dict.fromkeys((effective_root_id, *fallback_task_ids, *scoped_ids))
+        )
+        hydrated = self._hydrate_ids(hydrate_ids)
+        return (
+            effective_root_id,
+            tuple(
+                hydrated[current_id]
+                for current_id in hydrate_ids
+                if current_id != effective_root_id
+            ),
+            hydrated[effective_root_id],
+        )
 
     def workflow_root(self, task_id: str) -> str:
         """Resolve only the immutable workflow root for one task.
@@ -1367,16 +1528,7 @@ class HermesKanbanClient:
         if scoped_root_ids:
             return scoped_root_ids[0]
 
-        starting_body = str(starting_payload.get("body") or "")
-        starting_role = workflow_role_from_body(starting_body)
-        if starting_role == "root" and (
-            (
-                is_user_query_body(starting_body)
-                and workflow_mode_from_body(starting_body)
-                in {"analysis", "binding"}
-            )
-            or CEO_WORKFLOW_SCOPE_MARKER in starting_body
-        ):
+        if self._is_canonical_scoped_root(starting_payload, task_id):
             return task_id
 
         root_id = task_id
@@ -1394,36 +1546,103 @@ class HermesKanbanClient:
         root_id: str,
         task_id: str,
     ) -> tuple[str, tuple[dict[str, Any], ...], dict[str, Any]]:
-        """Hydrate one known-root workflow without serial CLI round trips.
+        """Hydrate one known-root workflow using indexed discovery when safe.
 
-        The board list remains the authoritative sibling-discovery boundary.
-        Every discovered workflow task is still read with ``kanban show``;
-        only independent read-only subprocesses are run concurrently. This
-        preserves rich run metadata used by synthesis and QA policy.
+        The SQLite result supplies IDs only.  Status, runs, summaries,
+        revisions, parents, and children still come from authoritative
+        ``kanban show`` responses.  Any inability to prove that the indexed
+        candidate set is safe falls back to the pre-existing full-board path.
         """
 
-        rows = self.list_tasks()
-        scoped_ids: list[str] = []
-        for row in rows:
-            row_id = str(row.get("id") or row.get("task_id") or "")
-            if row_id and root_id in extract_scope_references(row).root_ids:
-                scoped_ids.append(row_id)
+        # A fake/legacy adapter without the optional index keeps the exact old
+        # contract.  This also makes the fallback explicit for migrations where
+        # the shared board cannot be altered safely.
+        if self.root_index is None:
+            return self._full_board_authoritative_snapshot(root_id, task_id)
 
-        hydrate_ids = list(dict.fromkeys((root_id, task_id, *scoped_ids)))
-        from concurrent.futures import ThreadPoolExecutor
+        try:
+            task_payload = self.show(task_id)
+            task_scope = extract_scope_references(task_payload).root_ids
+            task_is_scoped = (
+                task_id != root_id
+                and task_scope == (root_id,)
+            )
+            task_is_root = task_id == root_id and self._is_canonical_scoped_root(
+                task_payload, task_id
+            )
+            if not (task_is_scoped or task_is_root):
+                logger.info(
+                    "kanban-root-retrieval-fallback root=%s task=%s reason=legacy-task",
+                    root_id,
+                    task_id,
+                )
+                return self._full_board_authoritative_snapshot(root_id, task_id)
 
-        with ThreadPoolExecutor(
-            max_workers=min(4, len(hydrate_ids)),
-            thread_name_prefix="ceo-workflow-show",
-        ) as pool:
-            hydrated_payloads = tuple(pool.map(self.show, hydrate_ids))
+            scoped_ids = list(self.root_scoped_task_ids(root_id))
+            # A non-root terminal event must be discoverable in its own index
+            # scope.  Missing it means the index is stale or the correlation is
+            # malformed; do not make a decision from an incomplete set.
+            if task_id != root_id and task_id not in scoped_ids:
+                raise RootScopedIndexUnavailable("indexed candidate set omitted event task")
 
-        hydrated = dict(zip(hydrate_ids, hydrated_payloads, strict=True))
-        return (
-            root_id,
-            tuple(hydrated[current_id] for current_id in hydrate_ids if current_id != root_id),
-            hydrated[root_id],
-        )
+            hydrate_ids = list(dict.fromkeys((root_id, task_id, *scoped_ids)))
+            hydrated = self._hydrate_ids(
+                hydrate_ids,
+                known_payloads={task_id: task_payload},
+            )
+
+            root_payload = hydrated[root_id]
+            if str(root_payload.get("id") or root_payload.get("task_id") or "") != root_id:
+                raise RootScopedIndexUnavailable("indexed root show returned another task")
+            for candidate_id in scoped_ids:
+                payload = hydrated[candidate_id]
+                payload_id = str(payload.get("id") or payload.get("task_id") or "")
+                if payload_id != candidate_id:
+                    raise RootScopedIndexUnavailable("indexed show returned another task")
+                refs = extract_scope_references(payload).root_ids
+                if refs != (root_id,):
+                    raise RootScopedIndexUnavailable("indexed candidate has inconsistent root correlation")
+
+            logger.info(
+                "kanban-root-retrieval mode=indexed root=%s candidates=%d "
+                "root_query_count=%d full_board_list_count=%d",
+                root_id,
+                len(scoped_ids),
+                self._root_query_count,
+                self._full_board_list_count,
+            )
+            return (
+                root_id,
+                tuple(
+                    hydrated[current_id]
+                    for current_id in hydrate_ids
+                    if current_id != root_id
+                ),
+                root_payload,
+            )
+        except (RootScopedIndexUnavailable, HermesKanbanCommandError, KeyError) as exc:
+            logger.warning(
+                "kanban-root-retrieval-fallback root=%s task=%s reason=%s",
+                root_id,
+                task_id,
+                type(exc).__name__,
+            )
+            return self._full_board_authoritative_snapshot(root_id, task_id)
+
+    def retrieval_metrics_snapshot(self) -> dict[str, Any]:
+        """Return retrieval counters used by before/after production probes."""
+
+        with self._retrieval_metrics_lock:
+            return {
+                "full_board_list_count": self._full_board_list_count,
+                "root_query_count": self._root_query_count,
+                "full_board_list_latency_ms": tuple(
+                    self._retrieval_metrics["full_board_list_latency_ms"]
+                ),
+                "root_query_latency_ms": tuple(
+                    self._retrieval_metrics["root_query_latency_ms"]
+                ),
+            }
 
     def workflow(self, task_id: str) -> tuple[str, tuple[dict[str, Any], ...]]:
         """Collect one workflow using execution edges or the durable scope marker.
@@ -1450,8 +1669,6 @@ class HermesKanbanClient:
         # the durable workflow marker + workflow_role=root and perform the same
         # marker-based discovery. This keeps parentless primaries inside the
         # workflow scope without turning the root into an execution dependency.
-        starting_body = str(starting_payload.get("body") or "")
-        starting_role = workflow_role_from_body(starting_body)
         # hgfinance-canonical-root-scope-v1
         #
         # Current direct CEO ingress roots are canonical user-query roots but
@@ -1459,29 +1676,25 @@ class HermesKanbanClient:
         # Parentless primaries still declare workflow_root_task_id, so these
         # roots must enter marker-based scope discovery rather than ancestry
         # fallback.
-        canonical_user_root = (
-            starting_role == "root"
-            and is_user_query_body(starting_body)
-            and workflow_mode_from_body(starting_body)
-            in {"analysis", "binding"}
+        canonical_user_root = self._is_canonical_scoped_root(
+            starting_payload, task_id
         )
-        legacy_scoped_root = (
-            starting_role == "root"
-            and CEO_WORKFLOW_SCOPE_MARKER in starting_body
-        )
-        is_scoped_root = canonical_user_root or legacy_scoped_root
+        is_scoped_root = canonical_user_root
 
         if scoped_root_ids or is_scoped_root:
             root_id = scoped_root_ids[0] if scoped_root_ids else task_id
             fetch(root_id)
 
             scoped_ids = {root_id}
-            for row in self.list_tasks():
-                row_id = str(row.get("id") or row.get("task_id") or "")
-                if not row_id:
-                    continue
-                if root_id in extract_scope_references(row).root_ids:
-                    scoped_ids.add(row_id)
+            try:
+                scoped_ids.update(self.root_scoped_task_ids(root_id))
+            except RootScopedIndexUnavailable:
+                # Compatibility path for legacy Hermes versions, unavailable
+                # SQLite, and migration windows.  The subsequent show() calls
+                # remain authoritative exactly as before.
+                scoped_ids.update(
+                    self._scoped_ids_from_rows(self.list_tasks(), root_id)
+                )
 
             for scoped_id in scoped_ids:
                 fetch(scoped_id)

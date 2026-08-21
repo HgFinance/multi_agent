@@ -1492,7 +1492,7 @@ services:
     container_name: hedgefund-kanban-retention-worker
     restart: unless-stopped
     init: true
-    command: ["python3", "/opt/hgfinance/orchestration/kanban_retention.py", "--interval", "${KANBAN_RETENTION_INTERVAL_SECONDS:-900}"]
+    command: ["python3", "/opt/hgfinance/orchestration/kanban_retention.py", "--interval", "${KANBAN_RETENTION_INTERVAL_SECONDS:-900}", "--archive-only", "--max-archive-roots", "${KANBAN_RETENTION_MAX_ARCHIVE_ROOTS:-5}"]
     volumes:
       - /home/ubuntu/.hermes:/opt/data
       - .:/opt/hgfinance:ro
@@ -1507,6 +1507,7 @@ services:
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
       PYTHONPATH: /opt/hgfinance
       KANBAN_RETENTION_INTERVAL_SECONDS: ${KANBAN_RETENTION_INTERVAL_SECONDS:-900}
+      KANBAN_CLI_TIMEOUT_SECONDS: ${KANBAN_CLI_TIMEOUT_SECONDS:-30}
     mem_limit: 256m
     mem_reservation: 64m
     cpus: 0.25
