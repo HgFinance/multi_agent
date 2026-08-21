@@ -1,0 +1,10 @@
+{
+  "status": "HOLD",
+  "scores": null,
+  "reason": "AWQ+Reasoning score withheld because the AWQ endpoint failed startup; no rewritten result or estimate used.",
+  "manifest": "benchmarks/quantization/results/aws_reasoning_provenance.json",
+  "runtime": "Prerequisite AWQ endpoint unavailable",
+  "errors": [
+    "Benchmark not run"
+  ]
+}

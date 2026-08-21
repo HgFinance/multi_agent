@@ -1,0 +1,10 @@
+{
+  "status": "HOLD",
+  "scores": null,
+  "reason": "AWQ+Reasoning is blocked because the AWQ first-draft endpoint failed startup; no GPT rewrite or scoring was run.",
+  "manifest": "benchmarks/quantization/results/aws_reasoning_provenance.json",
+  "runtime": "Prerequisite AWQ endpoint unavailable",
+  "errors": [
+    "No AWQ draft could be generated"
+  ]
+}

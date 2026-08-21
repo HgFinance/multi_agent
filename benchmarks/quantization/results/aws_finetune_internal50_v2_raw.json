@@ -1,0 +1,10 @@
+{
+  "status": "HOLD",
+  "scores": null,
+  "reason": "AWQ+Finetune is blocked because the exact AWQ serving endpoint failed startup; no adapter comparison was run.",
+  "manifest": "benchmarks/quantization/results/aws_finetune_provenance.json",
+  "runtime": "Prerequisite AWQ endpoint unavailable",
+  "errors": [
+    "No valid AWQ base inference output"
+  ]
+}
