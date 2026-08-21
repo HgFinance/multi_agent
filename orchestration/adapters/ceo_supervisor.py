@@ -59,6 +59,7 @@ from orchestration.discord_delivery import (
     correlation_from_task,
 )
 from orchestration.discord_idempotency import DiscordIdempotencyStore
+from orchestration.failure_taxonomy import FailureKind, classify_failure
 from orchestration.adapters.department_notion_projection import (
     DepartmentNotionProjection,
 )
@@ -167,11 +168,16 @@ def child_handoff_payload(child: ChildTaskState, **extra: Any) -> dict[str, Any]
         "final_answer": child.final_answer,
         "error": child.error,
         "block_reason": child.block_reason,
+        "missing_dependencies": list(child.missing_dependencies),
+        "failure_kind": child.failure_kind,
     }
     if child.terminal:
         # 답변 품질 등급을 함께 싣는다 - 차단이 아니라 신호다(answer_contract).
         # QA 는 "무엇을 의심해야 하는지" 를 알고 시작해야 검증이 성립한다.
-        grade = grade_answer(child.result, summary=child.summary)
+        grade = grade_answer(
+            child.result or child.final_answer,
+            summary=child.summary,
+        )
         payload.update(grade.as_payload())
         if not grade.has_body:
             payload["answer_body_missing"] = True
@@ -214,6 +220,8 @@ class ChildTaskState:
     block_reason: str = ""
     block_kind: str = ""
     outcome: str = ""
+    missing_dependencies: tuple[str, ...] = ()
+    failure_kind: str = ""
     retry_count: int = 0
     body: str = ""
     workflow_root_task_id: str = ""
@@ -228,16 +236,18 @@ class ChildTaskState:
         # Hermes stores structured terminal handoff fields in the latest run
         # metadata even when the task-level result remains null. Prefer explicit
         # task-level fields, then fall back to the newest run metadata.
+        run_payload: Mapping[str, Any] = {}
         run_metadata: Mapping[str, Any] = {}
         runs = payload.get("runs")
         if isinstance(runs, Sequence) and not isinstance(runs, (str, bytes)):
             for run in reversed(runs):
                 if not isinstance(run, Mapping):
                     continue
+                run_payload = run
                 metadata = run.get("metadata")
                 if isinstance(metadata, Mapping):
                     run_metadata = metadata
-                    break
+                break
 
         summary = _text(
             payload.get("summary")
@@ -258,6 +268,7 @@ class ChildTaskState:
             payload.get("error")
             or payload.get("last_error")
             or run_metadata.get("error")
+            or run_payload.get("error")
         )
         block_reason = _text(
             payload.get("block_reason")
@@ -266,7 +277,36 @@ class ChildTaskState:
             or run_metadata.get("block_reason")
         )
         block_kind = str(payload.get("block_kind") or payload.get("kind") or "").casefold()
-        outcome = str(payload.get("outcome") or "").casefold()
+        outcome = str(
+            payload.get("outcome")
+            or run_payload.get("outcome")
+            or ""
+        ).casefold()
+        raw_missing_dependencies = (
+            payload.get("missing_dependencies")
+            or run_metadata.get("missing_dependencies")
+            or ()
+        )
+        if isinstance(raw_missing_dependencies, str):
+            missing_dependencies = tuple(
+                item.strip()
+                for item in raw_missing_dependencies.split(",")
+                if item.strip()
+            )
+        elif isinstance(raw_missing_dependencies, Sequence):
+            missing_dependencies = tuple(
+                str(item).strip()
+                for item in raw_missing_dependencies
+                if str(item).strip()
+            )
+        else:
+            missing_dependencies = ()
+        failure_verdict = classify_failure(error, block_reason)
+        failure_kind = (
+            failure_verdict.kind.value
+            if failure_verdict.kind is not FailureKind.UNKNOWN
+            else ""
+        )
         body = _text(payload.get("body"))
         workflow_root_task_id = terminal_workflow_root(payload) or ""
         # Background research is outside the CEO task plane.  Its profile may
@@ -298,6 +338,8 @@ class ChildTaskState:
             block_reason=block_reason,
             block_kind=block_kind,
             outcome=outcome,
+            missing_dependencies=missing_dependencies,
+            failure_kind=failure_kind,
             retry_count=retry_count,
             body=body,
             workflow_root_task_id=workflow_root_task_id,
@@ -454,6 +496,19 @@ class SupervisorState:
         return bool(selected_count) and not self.missing_primary_profiles and not (
             self.duplicate_primary_profiles
         ) and self.ready_count == selected_count
+
+    @property
+    def usable_analysis_children(self) -> tuple[ChildTaskState, ...]:
+        """Terminal primary answers that contain a real user-facing body."""
+
+        return tuple(
+            child
+            for child in self.analysis_children
+            if grade_answer(
+                child.result or child.final_answer,
+                summary=child.summary,
+            ).usable
+        )
 
     @property
     def duplicate_primary_profiles(self) -> tuple[str, ...]:
@@ -822,6 +877,24 @@ def _analysis_synthesis_decision(
     primary_ids = tuple(
         child.task_id for child in state.analysis_children if child.done
     )
+    usable_children = state.usable_analysis_children
+    usable_count = len(usable_children)
+    selected_count = len(state.selected_primary_profiles) or len(
+        state.analysis_children
+    )
+    if usable_count == selected_count:
+        availability = "complete"
+    elif usable_count >= 2:
+        availability = "partial"
+    elif usable_count == 1:
+        availability = "limited_confidence"
+    else:
+        availability = "blocked"
+    unavailable_profiles = tuple(
+        child.profile
+        for child in state.analysis_children
+        if child not in usable_children
+    )
     return SupervisorDecision(
         SupervisorAction.SYNTHESIZE,
         state.parent_task_id,
@@ -831,8 +904,16 @@ def _analysis_synthesis_decision(
             f"{SUPERVISOR_MARKER} action=SYNTHESIZE\n"
             "workflow_plane=response\n"
             "governance_plane=async_qa\n"
+            f"synthesis_availability={availability}\n"
+            f"usable_primary_count={usable_count}\n"
+            f"selected_primary_count={selected_count}\n"
+            f"unavailable_primary_profiles={','.join(unavailable_profiles)}\n"
             "Synthesize available primary department work, including terminal "
-            "blocked results. QA runs independently "
+            "blocked results. Preserve every usable department answer. If the "
+            "availability is partial or limited_confidence, state which "
+            "departments are unavailable and lower confidence accordingly. If "
+            "availability is blocked, do not invent an investment conclusion; "
+            "report the failure or missing-dependency scope. QA runs independently "
             "in an async governance lane and is not a synthesis prerequisite.\n"
             + json.dumps(
                 [
@@ -1466,6 +1547,8 @@ def _department_progress_text(
     kind: str,
     *,
     summary: str = "",
+    missing_dependencies: Sequence[str] = (),
+    failure_kind: str = "",
 ) -> str | None:
     icon, label = DEPARTMENT_DISCORD_LABELS.get(
         profile,
@@ -1508,11 +1591,44 @@ def _department_progress_text(
 
         return f"{icon} **{label}**\n분석을 완료했습니다."
 
-    if normalized == "blocked":
-        return f"{icon} **{label}**\n현재 필요한 입력 또는 의존성이 부족해 작업이 지연되고 있습니다."
+    if (
+        normalized == "blocked"
+        and missing_dependencies
+        and failure_kind != FailureKind.PROTOCOL.value
+    ):
+        waiting_text = {
+            "research-department": "시장 데이터 확인 대기 중입니다.",
+            "research-liaison": "시장 데이터 확인 대기 중입니다.",
+            "quant-backtest-department": "가격·변동성 데이터 확인 대기 중입니다.",
+            "quant-liaison": "가격·변동성 데이터 확인 대기 중입니다.",
+            "risk-management": "현재 포트폴리오 노출 확인 대기 중입니다.",
+        }.get(profile, "필요한 데이터 확인 대기 중입니다.")
+        return f"{icon} **{label}**\n⏳ {waiting_text}"
 
-    if normalized in {"failed", "error"}:
-        return f"{icon} **{label}**\n작업 중 오류가 발생했습니다. CEO가 가능한 결과와 누락 범위를 확인합니다."
+    if normalized in {
+        "blocked",
+        "failed",
+        "error",
+        "gave_up",
+        "crashed",
+        "timed_out",
+        "spawn_failed",
+    }:
+        if failure_kind == FailureKind.PROTOCOL.value:
+            return (
+                f"{icon} **{label}**\n"
+                "❌ 실행 결과가 정상적으로 인계되지 않았습니다. "
+                "CEO가 가용 결과와 실패 범위를 확인합니다."
+            )
+        if str(summary or "").strip():
+            return (
+                f"{icon} **{label}**\n"
+                "⚠️ 제한된 결과만 확보됐습니다. CEO 종합에서 누락 범위를 밝힙니다."
+            )
+        return (
+            f"{icon} **{label}**\n"
+            "❌ 작업 중 오류가 발생했습니다. CEO가 가능한 결과와 누락 범위를 확인합니다."
+        )
 
     return None
 
@@ -1558,6 +1674,11 @@ class CeoSupervisorService:
         # workflow payloads are still re-read after acquiring the parent lock.
         self._task_root_cache: dict[str, str] = {}
         self._task_root_cache_lock = threading.Lock()
+        # Active Discord progress may reuse a root payload that was already
+        # hydrated by a terminal/recovery path.  It is deliberately a cache
+        # of metadata only; active events never rebuild a workflow snapshot.
+        self._task_root_payload_cache: dict[str, dict[str, Any]] = {}
+        self._active_task_payload_cache: dict[str, dict[str, Any]] = {}
 
         # hgfinance-department-progress-dedupe-v1
         # Active lifecycle events (claimed/spawned/started/running) are
@@ -2224,6 +2345,8 @@ class CeoSupervisorService:
             child.profile,
             kind,
             summary=department_result,
+            missing_dependencies=child.missing_dependencies,
+            failure_kind=child.failure_kind,
         )
         if not content:
             return None
@@ -2406,6 +2529,7 @@ class CeoSupervisorService:
         for root_id in ordered_root_ids:
             with self._parent_lock(root_id):
                 root_payload = show(root_id)
+                self._remember_workflow_root(root_id, root_id, (root_payload,))
                 root_status = str(
                     root_payload.get("status") or ""
                 ).casefold()
@@ -2558,6 +2682,7 @@ class CeoSupervisorService:
         decisions: list[SupervisorDecision] = []
         for root_id in sorted(roots):
             root_payload = show(root_id)
+            self._remember_workflow_root(root_id, root_id, (root_payload,))
             root_status = str(root_payload.get("status") or "").casefold()
             if root_status not in {"done", "completed", "archived"}:
                 continue
@@ -2740,6 +2865,7 @@ class CeoSupervisorService:
             return False, None
 
         root_payload = show(task_id)
+        self._remember_workflow_root(task_id, task_id, (root_payload,))
         root_body = str(root_payload.get("body") or "")
 
         is_planning_root = (
@@ -2876,6 +3002,100 @@ class CeoSupervisorService:
                 )
                 if child_id:
                     self._task_root_cache[child_id] = root_task_id
+                    if child_id == root_task_id:
+                        self._task_root_payload_cache[root_task_id] = dict(payload)
+
+    def _active_progress_payloads(
+        self,
+        *,
+        task_id: str,
+        event: Mapping[str, Any],
+    ) -> tuple[str | None, Mapping[str, Any], Mapping[str, Any]]:
+        """Return the smallest payload set needed for a progress card.
+
+        Active lifecycle events are UX hints, not reconciliation boundaries.
+        The only live read permitted here is ``show(task_id)`` once per task;
+        in particular this method must never call ``workflow()``, ``list()``,
+        or ``show(root_id)``.  A root payload is reused from a terminal path or
+        an event envelope when available.  Without it, the caller simply
+        skips the optional Discord projection and leaves terminal recovery as
+        the authoritative path.
+        """
+
+        task_payload: Mapping[str, Any] | None = None
+        for key in ("task_payload", "task", "payload"):
+            candidate = event.get(key)
+            if isinstance(candidate, Mapping):
+                task_payload = candidate
+                break
+        if task_payload is None and "body" in event:
+            task_payload = event
+
+        with self._task_root_cache_lock:
+            cached_task = self._active_task_payload_cache.get(task_id)
+            cached_root_id = self._task_root_cache.get(task_id)
+            cached_root_payload = self._task_root_payload_cache.get(
+                cached_root_id or "",
+                {},
+            )
+        if task_payload is None and cached_task:
+            task_payload = cached_task
+
+        if task_payload is None:
+            show = getattr(self.client, "show", None)
+            if not callable(show):
+                return cached_root_id, cached_root_payload, {}
+            # This is the one and only authoritative active-event read.  Do
+            # not replace it with workflow_root(): that method may walk
+            # ancestry and would reintroduce the expensive hot path.
+            task_payload = show(task_id)
+            if not isinstance(task_payload, Mapping):
+                return cached_root_id, cached_root_payload, {}
+            with self._task_root_cache_lock:
+                self._active_task_payload_cache[task_id] = dict(task_payload)
+
+        task_payload = dict(task_payload)
+        if not task_payload.get("id") and not task_payload.get("task_id"):
+            task_payload["id"] = task_id
+
+        root_payload: Mapping[str, Any] = {}
+        for key in ("root_payload", "root_task"):
+            candidate = event.get(key)
+            if isinstance(candidate, Mapping):
+                root_payload = candidate
+                break
+        if not root_payload:
+            for key in ("root_payload", "root_task"):
+                candidate = task_payload.get(key)
+                if isinstance(candidate, Mapping):
+                    root_payload = candidate
+                    break
+
+        root_id = cached_root_id
+        if not root_id:
+            explicit_root = event.get("root_task_id") or task_payload.get(
+                "workflow_root_task_id"
+            )
+            root_id = str(explicit_root or "").strip() or None
+        if not root_id:
+            root_id = terminal_workflow_root(task_payload) or None
+        if not root_id:
+            scope = extract_scope_references(task_payload)
+            root_id = scope.root_ids[0] if scope.root_ids else None
+        if not root_id:
+            root_id = str(
+                task_payload.get("id") or task_payload.get("task_id") or ""
+            ).strip() or None
+
+        if root_id and not root_payload:
+            with self._task_root_cache_lock:
+                root_payload = self._task_root_payload_cache.get(root_id, {})
+        if root_id and not root_payload and root_id == task_id:
+            root_payload = task_payload
+
+        if root_id:
+            self._remember_workflow_root(task_id, root_id)
+        return root_id, root_payload, task_payload
 
     def _publish_head_card_activity(
         self, *, task_id: str, kind: str, event: Mapping[str, Any]
@@ -2932,6 +3152,14 @@ class CeoSupervisorService:
             return None
 
         if kind in {"claimed", "spawned", "started", "running"}:
+            event_assignee = str(event.get("assignee") or "").strip().casefold()
+            progress_profiles = set(DEPARTMENT_DISCORD_LABELS) | {
+                "research-liaison",
+                "quant-liaison",
+            }
+            if event_assignee and event_assignee not in progress_profiles:
+                return None
+
             # Fast rejection before workflow()/show().  A successful initial
             # Discord "started" projection is enough for every equivalent
             # active lifecycle event for this task.
@@ -2940,42 +3168,17 @@ class CeoSupervisorService:
                     return None
 
             try:
-                root_id = self._cached_workflow_root(task_id)
-
-                if root_id is None:
-                    root_id, payloads = self.client.workflow(task_id)
-                    self._remember_workflow_root(
-                        task_id,
-                        root_id,
-                        payloads,
-                    )
-                else:
-                    # Active progress is supplementary Discord UX. Once the
-                    # immutable task->root relation is known, avoid rebuilding
-                    # the whole workflow merely to rediscover the root.
-                    payloads = ()
-
-                show = getattr(self.client, "show", None)
-
-                if callable(show):
-                    root_payload = show(root_id)
-
-                    task_payload = show(task_id)
+                root_id, root_payload, task_payload = self._active_progress_payloads(
+                    task_id=task_id,
+                    event=event,
+                )
+                if root_id and task_payload:
                     self._deliver_department_progress(
                         root_task_id=root_id,
                         root_payload=root_payload,
                         task_payload=task_payload,
                         event=event,
                     )
-
-                    # Recover sibling starts that the CLI watch may have
-                    # coalesced or missed in the same polling interval.
-                    if payloads:
-                        self._reconcile_department_start_progress(
-                            root_task_id=root_id,
-                            root_payload=root_payload,
-                            task_payloads=payloads,
-                        )
             except Exception as exc:
                 # Progress projection must never interfere with execution.
                 logger.warning(
@@ -3104,7 +3307,7 @@ class CeoSupervisorService:
                 self._remember_workflow_root(
                     task_id,
                     root_id,
-                    payloads,
+                    (root_payload, *payloads),
                 )
                 # The production Hermes client exposes ``show`` for durable
                 # wakeup comments. Keep the policy service compatible with small

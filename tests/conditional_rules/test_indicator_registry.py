@@ -225,6 +225,8 @@ def test_calculator_and_resolver_contracts_are_exact() -> None:
         "indicator_spec",
         "evaluation_context",
     )
+    with pytest.raises(ValueError, match="indicator resolver"):
+        LSBrokerIndicatorProvider(resolver=lambda instrument, indicator_spec: None)
 
 
 def test_ls_resolver_returns_only_normalized_indicator_value() -> None:
@@ -251,7 +253,7 @@ def test_ls_resolver_returns_only_normalized_indicator_value() -> None:
     assert value.market_data_source_id == "LS_REALTIME"
 
 
-def test_default_ls_resolver_is_unbound_and_fails_closed() -> None:
+def test_default_ls_resolver_is_bound_but_unconfigured_fails_closed() -> None:
     with pytest.raises(IndicatorProviderError) as raised:
         asyncio.run(
             DEFAULT_REGISTRY.resolve(

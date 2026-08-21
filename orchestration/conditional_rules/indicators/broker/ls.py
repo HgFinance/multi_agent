@@ -20,6 +20,12 @@ class LSIndicatorRoute:
     indicator: str
     documentation: str
     tr_codes: tuple[str, ...]
+    default_tr_code: str | None = None
+    path: str | None = None
+    response_block: str | None = None
+    value_field: str | None = None
+    realtime: bool = False
+    boolean_match: bool = False
 
     def supports_tr(self, tr_code: str) -> bool:
         token = tr_code.strip().upper()
@@ -29,34 +35,54 @@ class LSIndicatorRoute:
 LS_INDICATOR_ROUTES = MappingProxyType(
     {
         "FOREIGN_NET_BUY_VOLUME": LSIndicatorRoute(
-            "FOREIGN_NET_BUY_VOLUME", "03-stock/06-90378c39.md", ("t1702", "t1716", "t1717")
+            "FOREIGN_NET_BUY_VOLUME", "03-stock/06-90378c39.md", ("t1702", "t1716", "t1717"),
+            default_tr_code="t1717", path="/stock/frgr-itt", response_block="t1717OutBlock",
+            value_field="tjj0016_vol",
         ),
         "FOREIGN_NET_BUY_AMOUNT": LSIndicatorRoute(
-            "FOREIGN_NET_BUY_AMOUNT", "03-stock/06-90378c39.md", ("t1702", "t1716", "t1717")
+            "FOREIGN_NET_BUY_AMOUNT", "03-stock/06-90378c39.md", ("t1702", "t1716", "t1717"),
+            default_tr_code="t1702", path="/stock/frgr-itt", response_block="t1702OutBlock1",
+            value_field="tjj0016",
         ),
         "INSTITUTION_NET_BUY_VOLUME": LSIndicatorRoute(
-            "INSTITUTION_NET_BUY_VOLUME", "03-stock/06-90378c39.md", ("t1702", "t1716", "t1717")
+            "INSTITUTION_NET_BUY_VOLUME", "03-stock/06-90378c39.md", ("t1702", "t1716", "t1717"),
+            default_tr_code="t1717", path="/stock/frgr-itt", response_block="t1717OutBlock",
+            value_field="tjj0018_vol",
         ),
         "INSTITUTION_NET_BUY_AMOUNT": LSIndicatorRoute(
-            "INSTITUTION_NET_BUY_AMOUNT", "03-stock/06-90378c39.md", ("t1702", "t1716", "t1717")
+            "INSTITUTION_NET_BUY_AMOUNT", "03-stock/06-90378c39.md", ("t1702", "t1716", "t1717"),
+            default_tr_code="t1702", path="/stock/frgr-itt", response_block="t1702OutBlock1",
+            value_field="tjj0018",
         ),
         "PROGRAM_NET_BUY_VOLUME": LSIndicatorRoute(
-            "PROGRAM_NET_BUY_VOLUME", "03-stock/04-6b554636.md", ("t1631", "t1632", "t1633", "t1636", "t1637", "t1640", "t1662")
+            "PROGRAM_NET_BUY_VOLUME", "03-stock/04-6b554636.md", ("t1631", "t1632", "t1633", "t1636", "t1637", "t1640", "t1662"),
+            default_tr_code="t1637", path="/stock/program", response_block="t1637OutBlock1",
+            value_field="svolume",
         ),
         "PROGRAM_NET_BUY_AMOUNT": LSIndicatorRoute(
-            "PROGRAM_NET_BUY_AMOUNT", "03-stock/04-6b554636.md", ("t1631", "t1632", "t1633", "t1636", "t1637", "t1640", "t1662")
+            "PROGRAM_NET_BUY_AMOUNT", "03-stock/04-6b554636.md", ("t1631", "t1632", "t1633", "t1636", "t1640", "t1662", "t1637"),
+            default_tr_code="t1637", path="/stock/program", response_block="t1637OutBlock1",
+            value_field="svalue",
         ),
         "SHORT_SELL_VOLUME": LSIndicatorRoute(
-            "SHORT_SELL_VOLUME", "03-stock/13-316495d3.md", ("t1927", "t1941")
+            "SHORT_SELL_VOLUME", "03-stock/13-316495d3.md", ("t1927", "t1941"),
+            default_tr_code="t1927", path="/stock/etc", response_block="t1927OutBlock1",
+            value_field="gm_vo",
         ),
         "SHORT_SELL_RATIO": LSIndicatorRoute(
-            "SHORT_SELL_RATIO", "03-stock/13-316495d3.md", ("t1927",)
+            "SHORT_SELL_RATIO", "03-stock/13-316495d3.md", ("t1927",),
+            default_tr_code="t1927", path="/stock/etc", response_block="t1927OutBlock1",
+            value_field="gm_per",
         ),
         "VI_STATUS": LSIndicatorRoute(
-            "VI_STATUS", "03-stock/16-9a2800c3.md", ("VI_", "UVI")
+            "VI_STATUS", "03-stock/16-9a2800c3.md", ("VI_", "UVI"),
+            default_tr_code="VI_", path="/websocket", value_field="vi_gubun",
+            realtime=True,
         ),
         "MARKET_WARNING_STATUS": LSIndicatorRoute(
-            "MARKET_WARNING_STATUS", "03-stock/01-54a99b02.md", ("t1405",)
+            "MARKET_WARNING_STATUS", "03-stock/01-54a99b02.md", ("t1405",),
+            default_tr_code="t1405", path="/stock/market-data", response_block="t1405OutBlock1",
+            boolean_match=True,
         ),
         "BROKER_SEARCH_MATCH": LSIndicatorRoute(
             "BROKER_SEARCH_MATCH", "03-stock/10-6b67369a.md", ("t1809", "t1825", "t1826", "t1852", "t1856", "t1866", "t1859", "t1860")

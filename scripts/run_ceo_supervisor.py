@@ -112,7 +112,7 @@ def watch_events(
                 "kanban",
                 "watch",
                 "--kinds",
-                "claimed,spawned,completed,blocked,gave_up,crashed,timed_out,spawn_failed",
+                "claimed,spawned,started,running,completed,blocked,gave_up,crashed,timed_out,spawn_failed",
                 "--interval",
                 str(interval),
             ],
@@ -150,14 +150,43 @@ def watch_events(
 
 
 class SupervisorEventQueue:
-    """Keep watch stdout draining while bounded workers run heavy reconcile."""
+    """Keep watch stdout draining while prioritizing durable reconciliation.
+
+    Active lifecycle events are best-effort Discord progress hints. Terminal
+    events are durable reconciliation boundaries and receive queue priority.
+    A queued active event for a task that has since produced a terminal event
+    is discarded as obsolete; the terminal event itself is never discarded by
+    this queue.
+    """
+
+    _ACTIVE_KINDS = frozenset({"claimed", "spawned", "started", "running"})
+    _TERMINAL_KINDS = frozenset(
+        {
+            "done",
+            "completed",
+            "archived",
+            "blocked",
+            "gave_up",
+            "crashed",
+            "timed_out",
+            "spawn_failed",
+            "failed",
+        }
+    )
 
     def __init__(self, service: CeoSupervisorService, *, workers: int = 2) -> None:
         self.service = service
         self.worker_count = max(1, int(workers))
-        self._queue: queue.Queue[tuple[str, dict[str, object]] | None] = queue.Queue()
+        self._queue: queue.PriorityQueue[
+            tuple[int, int, str, dict[str, object] | None]
+        ] = queue.PriorityQueue()
+        self._sequence = 0
         self._pending: set[str] = set()
+        self._obsolete_active: set[str] = set()
+        self._terminalized_tasks: set[str] = set()
         self._pending_lock = threading.Lock()
+        self._metrics: dict[str, dict[str, list[int]]] = {}
+        self._max_queue_depth = 0
         self._threads = tuple(
             threading.Thread(
                 target=self._run_worker,
@@ -169,19 +198,86 @@ class SupervisorEventQueue:
         for thread in self._threads:
             thread.start()
 
-    @staticmethod
-    def _pending_key(event: dict[str, object]) -> str:
+    @classmethod
+    def _kind(cls, event: dict[str, object]) -> str:
+        return str(event.get("kind") or event.get("event_type") or "").casefold()
+
+    @classmethod
+    def _pending_key(cls, event: dict[str, object]) -> str:
         task_id = str(event.get("task_id") or "")
-        kind = str(event.get("kind") or "").casefold()
+        kind = cls._kind(event)
+        if kind in cls._ACTIVE_KINDS:
+            return f"active:{task_id}"
         if kind in {"done", "completed", "archived"}:
             return f"terminal:{task_id}:completed"
+        if kind in {
+            "blocked",
+            "gave_up",
+            "crashed",
+            "timed_out",
+            "spawn_failed",
+            "failed",
+        }:
+            return f"terminal:{task_id}:{kind}"
         return f"event:{event.get('event_id') or task_id + ':' + kind}"
+
+    @classmethod
+    def _priority(cls, event: dict[str, object]) -> int:
+        kind = cls._kind(event)
+        if kind in cls._TERMINAL_KINDS:
+            return 0
+        if kind in cls._ACTIVE_KINDS:
+            return 10
+        return 5
+
+    @staticmethod
+    def _percentile(values: list[int], fraction: float) -> int:
+        if not values:
+            return 0
+        ordered = sorted(values)
+        rank = max(1, int(len(ordered) * fraction + 0.999999))
+        return ordered[min(len(ordered) - 1, rank - 1)]
+
+    def metrics_snapshot(self) -> dict[str, object]:
+        """Return event-kind latency summaries for before/after comparisons."""
+
+        with self._pending_lock:
+            return {
+                "by_kind": {
+                    kind: {
+                        "count": len(values["queue_wait_ms"]),
+                        "queue_wait_p50_ms": self._percentile(
+                            values["queue_wait_ms"], 0.50
+                        ),
+                        "queue_wait_p95_ms": self._percentile(
+                            values["queue_wait_ms"], 0.95
+                        ),
+                        "handler_duration_p50_ms": self._percentile(
+                            values["handler_duration_ms"], 0.50
+                        ),
+                        "handler_duration_p95_ms": self._percentile(
+                            values["handler_duration_ms"], 0.95
+                        ),
+                    }
+                    for kind, values in sorted(self._metrics.items())
+                },
+                "max_queue_depth": self._max_queue_depth,
+            }
 
     def submit(self, event: dict[str, object]) -> bool:
         queued_event = dict(event)
         queued_event["_event_consumed_ms"] = time.time_ns() // 1_000_000
         pending_key = self._pending_key(queued_event)
+        kind = self._kind(queued_event)
+        task_id = str(queued_event.get("task_id") or "")
         with self._pending_lock:
+            if kind in self._ACTIVE_KINDS and task_id in self._terminalized_tasks:
+                logging.info(
+                    "supervisor-event-queue-obsolete task=%s kind=%s",
+                    task_id,
+                    kind,
+                )
+                return False
             if pending_key in self._pending:
                 logging.info(
                     "supervisor-event-queue-coalesced task=%s kind=%s "
@@ -192,10 +288,21 @@ class SupervisorEventQueue:
                     len(self._pending),
                 )
                 return False
+            if kind in self._TERMINAL_KINDS:
+                self._terminalized_tasks.add(task_id)
+                active_key = f"active:{task_id}"
+                if active_key in self._pending:
+                    self._obsolete_active.add(active_key)
             self._pending.add(pending_key)
+            self._sequence += 1
+            sequence = self._sequence
             pending_count = len(self._pending)
 
-        self._queue.put((pending_key, queued_event))
+        self._queue.put(
+            (self._priority(queued_event), sequence, pending_key, queued_event)
+        )
+        with self._pending_lock:
+            self._max_queue_depth = max(self._max_queue_depth, self._queue.qsize())
         logging.info(
             "supervisor-event-queued task=%s kind=%s queue_depth=%d pending=%d",
             queued_event.get("task_id") or "",
@@ -207,21 +314,27 @@ class SupervisorEventQueue:
 
     def _run_worker(self) -> None:
         while True:
-            item = self._queue.get()
-            if item is None:
+            _priority, _sequence, pending_key, event = self._queue.get()
+            if event is None:
                 self._queue.task_done()
                 return
 
-            pending_key, event = item
             handler_started_ms = time.time_ns() // 1_000_000
+            kind = self._kind(event)
+            task_id = str(event.get("task_id") or "")
+            with self._pending_lock:
+                obsolete = pending_key in self._obsolete_active or (
+                    kind in self._ACTIVE_KINDS and task_id in self._terminalized_tasks
+                )
             try:
-                decision = self.service.handle_terminal_event(event)
-                if decision is not None:
-                    print(
-                        f"ceo-supervisor action={decision.action.value} "
-                        f"parent={decision.parent_task_id} reason={decision.reason}",
-                        flush=True,
-                    )
+                if not obsolete:
+                    decision = self.service.handle_terminal_event(event)
+                    if decision is not None:
+                        print(
+                            f"ceo-supervisor action={decision.action.value} "
+                            f"parent={decision.parent_task_id} reason={decision.reason}",
+                            flush=True,
+                        )
             except SupervisorWorkflowError as exc:
                 print(
                     f"ceo-supervisor workflow-error={exc}",
@@ -239,20 +352,36 @@ class SupervisorEventQueue:
                 )
             finally:
                 handler_completed_ms = time.time_ns() // 1_000_000
+                consumed_ms = int(event.get("_event_consumed_ms") or 0)
                 with self._pending_lock:
                     self._pending.discard(pending_key)
+                    self._obsolete_active.discard(pending_key)
+                    if kind in self._TERMINAL_KINDS:
+                        self._terminalized_tasks.add(task_id)
                     pending_count = len(self._pending)
+                    values = self._metrics.setdefault(
+                        kind or "unknown",
+                        {"queue_wait_ms": [], "handler_duration_ms": []},
+                    )
+                    values["queue_wait_ms"].append(
+                        handler_started_ms - consumed_ms
+                        if consumed_ms > 0 and handler_started_ms >= consumed_ms
+                        else -1
+                    )
+                    values["handler_duration_ms"].append(
+                        handler_completed_ms - handler_started_ms
+                    )
                 self._queue.task_done()
-                consumed_ms = int(event.get("_event_consumed_ms") or 0)
                 created_ms = int(event.get("_event_created_ms") or 0)
                 logging.info(
-                    "supervisor-event-loop-timing task=%s kind=%s "
+                    "supervisor-event-loop-timing task=%s kind=%s obsolete=%s "
                     "event_created=%d event_consumed=%d handler_started=%d "
                     "loop_return=%d created_to_consumed_ms=%d "
                     "queue_wait_ms=%d handler_duration_ms=%d "
                     "queue_depth=%d pending=%d",
                     event.get("task_id") or "",
                     event.get("kind") or "",
+                    obsolete,
                     created_ms,
                     consumed_ms,
                     handler_started_ms,
@@ -272,7 +401,10 @@ class SupervisorEventQueue:
         if drain:
             self._queue.join()
         for _thread in self._threads:
-            self._queue.put(None)
+            with self._pending_lock:
+                self._sequence += 1
+                sequence = self._sequence
+            self._queue.put((100, sequence, "", None))
         for thread in self._threads:
             thread.join(timeout=5)
 

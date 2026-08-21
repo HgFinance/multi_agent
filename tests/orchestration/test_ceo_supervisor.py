@@ -15,6 +15,8 @@ from orchestration.adapters.ceo_supervisor import (
     SupervisorAction,
     SupervisorState,
     SupervisorValidationError,
+    _analysis_synthesis_decision,
+    _department_progress_text,
     _initial_primary_materialization_decisions,
     decide_supervisor,
     parse_supervisor_output,
@@ -175,6 +177,100 @@ class AnswerBodyHandoffTest(unittest.TestCase):
 
 
 class SupervisorPolicyTest(unittest.TestCase):
+    def test_latest_run_failure_and_missing_dependencies_are_preserved(self) -> None:
+        task = ChildTaskState.from_hermes(
+            {
+                "id": "r",
+                "assignee": "research-department",
+                "status": "blocked",
+                "body": (
+                    "workflow_root_task_id=root\n"
+                    "workflow_role=primary"
+                ),
+                "runs": [
+                    {
+                        "status": "crashed",
+                        "outcome": "crashed",
+                        "error": (
+                            "worker exited cleanly without calling "
+                            "kanban_complete — protocol violation"
+                        ),
+                        "metadata": {
+                            "missing_dependencies": ["current_price"],
+                        },
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(task.outcome, "crashed")
+        self.assertEqual(task.failure_kind, "protocol")
+        self.assertEqual(task.missing_dependencies, ("current_price",))
+        self.assertIn("kanban_complete", task.error)
+
+    def test_department_progress_distinguishes_dependency_and_protocol(self) -> None:
+        dependency = _department_progress_text(
+            "risk-management",
+            "blocked",
+            missing_dependencies=("current_position",),
+        )
+        protocol = _department_progress_text(
+            "research-department",
+            "gave_up",
+            failure_kind="protocol",
+        )
+
+        self.assertIn("포트폴리오 노출 확인 대기", dependency)
+        self.assertIn("정상적으로 인계되지 않았", protocol)
+        self.assertNotIn("의존성이 부족", protocol)
+
+    def test_analysis_synthesis_labels_partial_result_usability(self) -> None:
+        usable = (
+            "2026-08-20 기준 분석입니다. result body with citation=12345678 "
+            "and unavailable limits are stated."
+        )
+        selected = (
+            "research-department",
+            "quant-backtest-department",
+            "risk-management",
+        )
+        cases = (
+            (3, "complete"),
+            (2, "partial"),
+            (1, "limited_confidence"),
+            (0, "blocked"),
+        )
+
+        for usable_count, expected in cases:
+            children = tuple(
+                child(
+                    f"task-{index}",
+                    profile,
+                    "done" if index < usable_count else "blocked",
+                    result=usable if index < usable_count else "",
+                    summary="" if index >= usable_count else "usable",
+                )
+                for index, profile in enumerate(selected)
+            )
+            state = SupervisorState(
+                "root",
+                children,
+                selected_primary_profiles=selected,
+                workflow_mode="analysis",
+            )
+
+            decision = _analysis_synthesis_decision(state)
+
+            self.assertIsNotNone(decision)
+            self.assertIn(
+                f"synthesis_availability={expected}",
+                decision.body,
+            )
+            self.assertIn(
+                f"usable_primary_count={usable_count}",
+                decision.body,
+            )
+
     def test_dynamic_routing_runs_qa_for_selected_primary_children_only(self) -> None:
         state = SupervisorState(
             "root",
@@ -2447,11 +2543,27 @@ class SupervisorWorkflowRootCacheTest(unittest.TestCase):
         )
         self.assertEqual(
             client.show_calls,
-            ["root-cache", "child-cache"],
+            ["child-cache"],
         )
         self.assertEqual(len(delivered), 1)
 
-    def test_first_active_event_discovers_root_once_and_caches_it(self):
+    def test_non_department_active_event_skips_all_kanban_reads(self):
+        client = self.CacheClient()
+        service = CeoSupervisorService(client)
+
+        service.handle_terminal_event(
+            {
+                "event_id": "started:ceo-root",
+                "task_id": "ceo-root",
+                "assignee": "ceo-agent",
+                "kind": "claimed",
+            }
+        )
+
+        self.assertEqual(client.workflow_calls, 0)
+        self.assertEqual(client.show_calls, [])
+
+    def test_first_active_event_uses_at_most_one_task_show_and_no_workflow(self):
         client = self.CacheClient()
         service = CeoSupervisorService(client)
 
@@ -2473,7 +2585,8 @@ class SupervisorWorkflowRootCacheTest(unittest.TestCase):
             }
         )
 
-        self.assertEqual(client.workflow_calls, 1)
+        self.assertEqual(client.workflow_calls, 0)
+        self.assertEqual(client.show_calls, ["child-cache"])
         self.assertEqual(
             service._cached_workflow_root("child-cache"),
             "root-cache",

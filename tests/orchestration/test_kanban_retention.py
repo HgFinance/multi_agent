@@ -113,8 +113,24 @@ def test_unfinished_descendant_archive_zero() -> None:
     assert result.reason == f"unfinished:{PRIMARY}"
 
 
+def test_claimed_terminal_status_is_still_not_archivable() -> None:
+    workflow = _workflow()
+    claimed_raw = dict(workflow.nodes[1].raw, claim_lock="worker-lock")
+    claimed = ceo_kanban_read.Workflow(
+        root_task_id=ROOT,
+        nodes=(
+            workflow.nodes[0],
+            ceo_kanban_read.WorkflowNode.from_hermes(claimed_raw),
+            workflow.nodes[2],
+        ),
+        root_payload=workflow.root_payload,
+    )
+    result = _decision(claimed)
+    assert not result.eligible
+    assert result.reason == f"active_execution:{PRIMARY}"
+
+
 def test_recovery_pending_archive_zero() -> None:
-    result = _decision(_workflow(**{"children": []}))
     # Inject the marker on the authoritative child row, not on an LLM result.
     pending = _workflow()
     node = pending.nodes[1]
@@ -139,6 +155,33 @@ def test_terminal_under_24_hours_archive_zero() -> None:
 
 def test_terminal_over_24_hours_and_safe_archives() -> None:
     result = _decision(_workflow())
+    assert result.eligible
+    assert result.reason == "safe"
+
+
+def test_required_synthesis_missing_blocks_multi_stage_workflow() -> None:
+    workflow = _workflow()
+    second_primary = ceo_kanban_read.WorkflowNode.from_hermes(
+        _node("primary-retention-2")
+    )
+    without_synthesis = ceo_kanban_read.Workflow(
+        root_task_id=ROOT,
+        nodes=(workflow.nodes[0], workflow.nodes[1], second_primary),
+        root_payload=workflow.root_payload,
+    )
+    result = _decision(without_synthesis)
+    assert not result.eligible
+    assert result.reason == "required_synthesis_missing"
+
+
+def test_single_primary_final_processing_can_replace_synthesis() -> None:
+    workflow = _workflow()
+    single_primary = ceo_kanban_read.Workflow(
+        root_task_id=ROOT,
+        nodes=workflow.nodes[:2],
+        root_payload=workflow.root_payload,
+    )
+    result = _decision(single_primary)
     assert result.eligible
     assert result.reason == "safe"
 
@@ -211,8 +254,18 @@ def test_archive_then_purge_preserves_audit_and_forbids_under_7_days(tmp_path: P
     assert first.archived_count == 1
     assert maintenance.archived
     assert audit.get(ROOT) is not None
+    assert "body" not in audit.get(ROOT).keys()
 
     state["archived"] = True
+    under_7_days = RetentionWorker(
+        maintenance=maintenance,
+        audit=audit,
+        workflow_loader=loader,
+        row_lister=rows,
+        clock=lambda: NOW + 6 * 24 * 3600,
+    ).run_once()
+    assert under_7_days.purged_count == 0
+
     before_purge = RetentionWorker(
         maintenance=maintenance,
         audit=audit,
@@ -246,6 +299,67 @@ def test_purge_requires_audit_row(tmp_path: Path) -> None:
     result = worker.run_once()
     assert result.purged_count == 0
     assert maintenance.purged == []
+
+
+def test_legacy_archived_workflow_is_audited_before_old_purge(tmp_path: Path) -> None:
+    maintenance = FakeMaintenance()
+    audit = AuditStore(tmp_path / "retention-audit.db")
+    legacy = _workflow()
+    legacy = ceo_kanban_read.Workflow(
+        root_task_id=ROOT,
+        nodes=tuple(
+            ceo_kanban_read.WorkflowNode.from_hermes(
+                dict(
+                    node.raw,
+                    status="archived",
+                    events=[{"kind": "archived", "created_at": NOW - 8 * 24 * 3600}],
+                )
+            )
+            for node in legacy.nodes
+        ),
+        root_payload=dict(legacy.root_payload, status="archived"),
+    )
+
+    def rows(*, include_archived: bool = False):
+        return [{"id": ROOT, "body": legacy.root.body, "status": "archived"}] if include_archived else []
+
+    worker = RetentionWorker(
+        maintenance=maintenance,
+        audit=audit,
+        workflow_loader=lambda _root_id, **_: legacy,
+        row_lister=rows,
+        clock=lambda: NOW,
+    )
+    result = worker.run_once()
+    assert result.purged_count == 1
+    assert maintenance.purged == [(ROOT, (PRIMARY, SYNTHESIS))]
+    assert audit.get(ROOT)["archived_at"] == NOW - 8 * 24 * 3600
+    assert audit.get(ROOT)["purged_at"] == NOW
+
+
+def test_dry_run_reports_candidates_without_audit_or_board_mutation(tmp_path: Path) -> None:
+    maintenance = FakeMaintenance()
+    audit_path = tmp_path / "preview-audit.db"
+    active = [{"id": ROOT, "body": _workflow().root.body, "status": "done"}]
+
+    worker = RetentionWorker(
+        maintenance=maintenance,
+        audit=AuditStore(audit_path),
+        dry_run=True,
+        max_archive_roots=1,
+        workflow_loader=lambda _root_id, **_: _workflow(),
+        row_lister=lambda *, include_archived=False: active if not include_archived else [],
+        clock=lambda: NOW,
+    )
+    result = worker.run_once()
+    assert result.eligible_root_ids == (ROOT,)
+    assert result.would_archive_root_ids == (ROOT,)
+    assert result.would_archive_task_count == 3
+    assert result.archived_count == 0
+    assert result.purged_count == 0
+    assert maintenance.archived == []
+    assert maintenance.purged == []
+    assert not audit_path.exists()
 
 
 def test_supervisor_mutation_waits_for_retention_lock(tmp_path: Path) -> None:
@@ -310,6 +424,10 @@ def test_root_atomic_archive_and_purge(tmp_path: Path) -> None:
     with sqlite3.connect(db) as conn:
         assert conn.execute("SELECT status FROM tasks WHERE id='root'").fetchone()[0] == "archived"
         assert conn.execute("SELECT status FROM tasks WHERE id='child'").fetchone()[0] == "archived"
+        assert conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0] == 2
+    assert maintenance.archive_workflow("root", ["child"])
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0] == 2
     assert maintenance.purge_workflow("root", ["child"])
     with sqlite3.connect(db) as conn:
         assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0

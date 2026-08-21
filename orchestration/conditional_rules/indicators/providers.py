@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from inspect import Parameter, signature
 from typing import Any
 
 from .base import (
@@ -14,6 +15,29 @@ from .broker.ls import route_for_indicator
 
 
 Resolver = IndicatorResolver
+
+
+def _validate_resolver_signature(resolver: Resolver | None) -> None:
+    if resolver is None:
+        return
+    try:
+        parameters = tuple(signature(resolver).parameters.values())
+    except (TypeError, ValueError) as exc:
+        raise ValueError("indicator resolver signature is unavailable") from exc
+    if (
+        len(parameters) != 3
+        or any(
+            parameter.kind
+            not in (Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD)
+            for parameter in parameters
+        )
+        or tuple(parameter.name for parameter in parameters)
+        != ("instrument", "indicator_spec", "evaluation_context")
+    ):
+        raise ValueError(
+            "indicator resolver must have signature "
+            "(instrument, indicator_spec, evaluation_context)"
+        )
 
 
 def _context_value(context: Any, key: str) -> Any:
@@ -65,6 +89,7 @@ class LSBrokerIndicatorProvider:
     name = "LS"
 
     def __init__(self, resolver: Resolver | None = None) -> None:
+        _validate_resolver_signature(resolver)
         self._resolver = resolver
 
     def supports(self, indicator_spec: Any) -> bool:
@@ -166,6 +191,7 @@ class LocalIndicatorProvider:
 
 class _CallbackProvider:
     def __init__(self, name: str, resolver: Resolver | None = None) -> None:
+        _validate_resolver_signature(resolver)
         self.name = name
         self._resolver = resolver
 

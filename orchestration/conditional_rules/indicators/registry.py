@@ -17,6 +17,7 @@ from .base import (
 )
 from .local import calculate_local_indicator
 from .providers import LSBrokerIndicatorProvider, LocalIndicatorProvider
+from .broker.ls_readonly import LSReadOnlyIndicatorResolver
 
 
 _ALL_TIMEFRAMES = frozenset({"1M", "5M", "15M", "1H", "1D"})
@@ -48,8 +49,16 @@ class IndicatorRegistry:
                 if item.kind
                 in (Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD)
             )
-            if len(positional) != 4 or any(
-                item.kind is Parameter.VAR_POSITIONAL for item in parameters
+            if (
+                len(parameters) != 4
+                or len(positional) != 4
+                or any(
+                    item.kind
+                    not in (Parameter.POSITIONAL_ONLY, Parameter.POSITIONAL_OR_KEYWORD)
+                    for item in parameters
+                )
+                or tuple(item.name for item in parameters)
+                != ("name", "candles", "parameters", "output")
             ):
                 raise ValueError(
                     f"local calculator must have signature "
@@ -379,10 +388,14 @@ def build_default_registry() -> IndicatorRegistry:
         _broker("BROKER_SEARCH_MATCH", aliases=("LS_SIGNAL", "LS_ITEM_SEARCH_MATCH"), category="BROKER_SIGNAL", unit=ValueUnit.BOOL, required_parameters=frozenset({"SEARCH_ID"}), string_parameters=frozenset({"SEARCH_ID"})),
     ]
     registry = IndicatorRegistry(definitions)
-    # These are capability seams.  The LS provider has no resolver until the
-    # broker market-data adapter is explicitly wired, so it fails closed.
+    # Bind the read-only LS resolver at the provider boundary.  Construction is
+    # side-effect free; credentials/transport are acquired only on resolve.
+    # Therefore an unavailable adapter still fails closed and can never become
+    # a LOCAL/OHLCV fallback.
     registry.register_provider(LocalIndicatorProvider())
-    registry.register_provider(LSBrokerIndicatorProvider())
+    registry.register_provider(
+        LSBrokerIndicatorProvider(resolver=LSReadOnlyIndicatorResolver())
+    )
     return registry
 
 

@@ -19,6 +19,7 @@ import re
 import signal
 import sqlite3
 import time
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass
@@ -28,6 +29,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from apps.api.ceo_kanban_read import (
+    KanbanTaskNotFound,
     KanbanUnavailable,
     Workflow,
     WorkflowNode,
@@ -109,6 +111,11 @@ class RetentionRun:
     recovery_ms: float
     cleanup_ms: float
     skipped: tuple[tuple[str, str], ...] = ()
+    eligible_root_ids: tuple[str, ...] = ()
+    would_archive_root_ids: tuple[str, ...] = ()
+    eligible_task_count: int = 0
+    would_archive_task_count: int = 0
+    blocked_reason_histogram: tuple[tuple[str, int], ...] = ()
 
 
 class KanbanMaintenance(Protocol):
@@ -324,6 +331,8 @@ class DiscordLedgerReader:
             ).fetchall()
         if not rows:
             return DeliveryState("pending", thread_id=correlation.thread_id)
+        failed = False
+        processing = False
         for row in rows:
             response_key = str(row["response_key"] or "")
             suffix = response_key.rsplit(":", 1)[-1]
@@ -334,15 +343,25 @@ class DiscordLedgerReader:
                 suffix == "final"
                 or ":synthesis-detail:" in response_key
                 or ":single-primary-detail:" in response_key
+                or ":ceo-direct:" in response_key
             )
             if not is_final:
                 continue
-            if str(row["state"] or "").casefold() == "completed":
+            state = str(row["state"] or "").casefold()
+            if state == "completed":
                 return DeliveryState(
                     "completed",
                     message_id=str(row["response_message_id"] or "") or correlation.message_id,
                     thread_id=correlation.thread_id,
                 )
+            if state == "failed":
+                failed = True
+            elif state in {"processing", "claimed", "running"}:
+                processing = True
+        if failed:
+            return DeliveryState("failed", thread_id=correlation.thread_id)
+        if processing:
+            return DeliveryState("pending", thread_id=correlation.thread_id)
         return DeliveryState("pending", thread_id=correlation.thread_id)
 
 
@@ -374,13 +393,6 @@ def evaluate_workflow(
         if _has_recovery_pending(node):
             return RetentionDecision(workflow.root_task_id, False, f"recovery_pending:{node.task_id}", terminal_at)
 
-    # Any analysis/QA workflow must have a terminal final processor. A root-only
-    # direct answer has no separate synthesis task and is already final.
-    if (workflow.primary_nodes or workflow.qa_nodes) and workflow.synthesis_node is None:
-        return RetentionDecision(workflow.root_task_id, False, "required_synthesis_missing", terminal_at)
-    if workflow.synthesis_node is not None and workflow.synthesis_node.status not in TERMINAL_STATUSES:
-        return RetentionDecision(workflow.root_task_id, False, "synthesis_not_terminal", terminal_at)
-
     observed_delivery = delivery or DeliveryState("unknown")
     if observed_delivery.status not in {"completed", "not_required", "deduped"}:
         return RetentionDecision(
@@ -390,6 +402,30 @@ def evaluate_workflow(
             terminal_at,
             observed_delivery,
         )
+
+    # Any multi-primary/QA workflow must have a terminal synthesis task. The
+    # existing supervisor also has a narrow single-primary passthrough where
+    # that primary is the final processor; accept it only when its result is
+    # durable and delivery is already terminal. A root-only direct answer has
+    # no separate synthesis task and is already final.
+    synthesis = workflow.synthesis_node
+    if synthesis is not None and synthesis.status not in TERMINAL_STATUSES:
+        return RetentionDecision(workflow.root_task_id, False, "synthesis_not_terminal", terminal_at)
+    if (workflow.primary_nodes or workflow.qa_nodes) and synthesis is None:
+        single_primary_passthrough = (
+            len(workflow.primary_nodes) == 1
+            and not workflow.qa_nodes
+        )
+        if single_primary_passthrough and not _has_final_processing(workflow.primary_nodes[0]):
+            return RetentionDecision(
+                workflow.root_task_id,
+                False,
+                "final_processing_pending",
+                terminal_at,
+                observed_delivery,
+            )
+        if not single_primary_passthrough:
+            return RetentionDecision(workflow.root_task_id, False, "required_synthesis_missing", terminal_at)
     return RetentionDecision(
         workflow.root_task_id,
         True,
@@ -397,6 +433,31 @@ def evaluate_workflow(
         terminal_at,
         observed_delivery,
     )
+
+
+def retention_block_category(reason: str) -> str:
+    """Map internal fail-closed reasons to rollout-safe report buckets."""
+
+    normalized = str(reason or "")
+    if normalized == "terminal_under_24h":
+        return "TERMINAL_UNDER_24H"
+    if normalized == "root_not_terminal" or normalized.startswith("unfinished:"):
+        return "ACTIVE_DESCENDANT"
+    if normalized.startswith("active_execution:"):
+        return "CLAIM_OR_RUN_PRESENT"
+    if normalized.startswith("recovery_pending:"):
+        return "RECOVERY_PENDING"
+    if normalized in {"synthesis_not_terminal", "required_synthesis_missing"}:
+        return "SYNTHESIS_PENDING"
+    if normalized == "final_processing_pending":
+        return "FINAL_PROCESSING_PENDING"
+    if normalized == "discord_delivery_missing_thread":
+        return "DISCORD_MISSING_THREAD"
+    if normalized == "discord_delivery_failed":
+        return "DISCORD_DELIVERY_FAILED"
+    if normalized == "discord_delivery_pending":
+        return "DISCORD_DELIVERY_PENDING"
+    return "UNKNOWN/LEGACY"
 
 
 def _root_candidate(row: Mapping[str, Any]) -> bool:
@@ -428,6 +489,36 @@ def _metadata_value(workflow: Workflow, names: Iterable[str]) -> Any:
             if str(key).casefold() in lowered and value not in (None, ""):
                 return value
     return None
+
+
+def _has_final_processing(node: WorkflowNode) -> bool:
+    """Whether a terminal direct-response node has a durable final result."""
+
+    if node.summary.strip():
+        return True
+    for payload in _iter_nested(node.raw):
+        for key in ("final_answer", "final_result", "result", "summary", "latest_summary"):
+            if payload.get(key) not in (None, "", [], {}):
+                return True
+    return False
+
+
+def _archived_at(workflow: Workflow, *, fallback: int) -> int:
+    """Recover the original archive event time for legacy archived rows."""
+
+    timestamps: list[int] = []
+    for node in workflow.nodes:
+        events = node.raw.get("events")
+        if not isinstance(events, Sequence) or isinstance(events, (str, bytes, bytearray)):
+            continue
+        for event in events:
+            if not isinstance(event, Mapping):
+                continue
+            if str(event.get("kind") or "").casefold() == ARCHIVED_STATUS:
+                timestamp = _epoch(event.get("created_at"))
+                if timestamp is not None:
+                    timestamps.append(timestamp)
+    return max(timestamps, default=int(fallback))
 
 
 def build_audit_metadata(workflow: Workflow, delivery: DeliveryState) -> AuditMetadata:
@@ -592,7 +683,68 @@ class SQLiteKanbanMaintenance:
             "AND (ended_at IS NULL OR status IN ('running','claimed','spawned','processing')) LIMIT 1",
             ids,
         ).fetchone()
-        return active is None
+        if active is not None:
+            return False
+        # A terminal status is not enough if an older Hermes worker left a
+        # claim marker behind. Retention must fail closed for claimed work.
+        columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
+        }
+        claim_columns = columns & {"claim_lock", "claim_expires", "worker_pid"}
+        if claim_columns:
+            predicates = [f"{column} IS NOT NULL" for column in sorted(claim_columns)]
+            if "claim_expires" in claim_columns:
+                predicates.append("claim_expires != 0")
+            claimed = conn.execute(
+                f"SELECT 1 FROM tasks WHERE id IN ({self._placeholders(ids)}) "
+                f"AND ({' OR '.join(predicates)}) LIMIT 1",
+                ids,
+            ).fetchone()
+            if claimed is not None:
+                return False
+        return self._scope_matches(conn, root_id=str(ids[0]), task_ids=ids)
+
+    def _scope_matches(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        root_id: str,
+        task_ids: Sequence[str],
+    ) -> bool:
+        """Ensure the mutation set is the complete durable root scope.
+
+        The worker normally supplies the set from authoritative reconstruction.
+        Rechecking links/markers inside the same ``BEGIN IMMEDIATE`` closes the
+        gap where a newly spawned descendant could otherwise be omitted.
+        Tiny test/legacy schemas may not have ``body``; their link closure is
+        still checked.
+        """
+
+        expected = set(task_ids)
+        discovered = {root_id}
+        links = conn.execute(
+            "WITH RECURSIVE descendants(id) AS ("
+            "SELECT ? UNION SELECT task_links.child_id FROM task_links "
+            "JOIN descendants ON task_links.parent_id = descendants.id) "
+            "SELECT id FROM descendants",
+            (root_id,),
+        ).fetchall()
+        discovered.update(str(row[0]) for row in links)
+        columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
+        }
+        if "body" in columns:
+            escaped_root = (
+                root_id.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            marker = f"%workflow_root_task_id={escaped_root}%"
+            marked = conn.execute(
+                "SELECT id FROM tasks WHERE body LIKE ? ESCAPE '\\'", (marker,)
+            ).fetchall()
+            discovered.update(str(row[0]) for row in marked)
+        return discovered == expected
 
     def archive_workflow(self, root_id: str, task_ids: Sequence[str]) -> bool:
         ids = tuple(dict.fromkeys((root_id, *task_ids)))
@@ -603,6 +755,16 @@ class SQLiteKanbanMaintenance:
                     if not self._validate_ids(conn, ids):
                         conn.rollback()
                         return False
+                    current_rows = conn.execute(
+                        f"SELECT status FROM tasks WHERE id IN ({self._placeholders(ids)})",
+                        ids,
+                    ).fetchall()
+                    if all(str(row["status"]) == ARCHIVED_STATUS for row in current_rows):
+                        # A repeated worker pass (or an operator retry) is a
+                        # successful no-op. Do not append duplicate archive
+                        # events or mutate the original terminal timestamps.
+                        conn.commit()
+                        return True
                     now = int(time.time())
                     placeholders = self._placeholders(ids)
                     conn.execute(
@@ -648,10 +810,17 @@ class SQLiteKanbanMaintenance:
                         "task_runs",
                         "task_links",
                     ):
-                        conn.execute(f"DELETE FROM {table} WHERE task_id IN ({placeholders})", ids) if table != "task_links" else conn.execute(
-                            f"DELETE FROM task_links WHERE parent_id IN ({placeholders}) AND child_id IN ({placeholders})",
-                            (*ids, *ids),
-                        )
+                        if table == "task_links":
+                            conn.execute(
+                                f"DELETE FROM task_links WHERE parent_id IN ({placeholders}) "
+                                f"AND child_id IN ({placeholders})",
+                                (*ids, *ids),
+                            )
+                        else:
+                            conn.execute(
+                                f"DELETE FROM {table} WHERE task_id IN ({placeholders})",
+                                ids,
+                            )
                     deleted = conn.execute(
                         f"DELETE FROM tasks WHERE id IN ({placeholders})", ids
                     ).rowcount
@@ -676,6 +845,9 @@ class RetentionWorker:
         row_lister: Callable[..., list[dict[str, Any]]] = list_tasks,
         delivery_reader: DiscordLedgerReader | None = None,
         clock: Callable[[], float] = time.time,
+        dry_run: bool = False,
+        allow_purge: bool = True,
+        max_archive_roots: int | None = None,
     ) -> None:
         self.maintenance = maintenance
         self.audit = audit
@@ -684,6 +856,11 @@ class RetentionWorker:
         self.row_lister = row_lister
         self.delivery_reader = delivery_reader or DiscordLedgerReader(self.environment)
         self.clock = clock
+        self.dry_run = dry_run
+        self.allow_purge = allow_purge
+        if max_archive_roots is not None and max_archive_roots <= 0:
+            raise ValueError("max_archive_roots must be positive")
+        self.max_archive_roots = max_archive_roots
 
     def _load(
         self,
@@ -712,10 +889,20 @@ class RetentionWorker:
         rows_started = time.perf_counter()
         active_rows = self.row_lister(include_archived=False)
         list_ms = (time.perf_counter() - rows_started) * 1000
-        purge_rows = self.audit.purge_candidates(now=now)
-        archived_rows: Sequence[Mapping[str, Any]] | None = None
-        if purge_rows:
-            archived_rows = self.row_lister(include_archived=True)
+        recovery_started = time.perf_counter()
+        # Read the archived view once per maintenance pass. Besides avoiding a
+        # second list call for purge, this lets a deployment safely adopt rows
+        # archived by the legacy per-task CLI: they receive a minimal audit row
+        # before they can become purge candidates.
+        archived_rows = self.row_lister(include_archived=True)
+        archived_root_ids = tuple(
+            dict.fromkeys(
+                str(row.get("id") or row.get("task_id"))
+                for row in archived_rows
+                if _root_candidate(row)
+                and str(row.get("status") or "").casefold() == ARCHIVED_STATUS
+            )
+        )
         root_ids = tuple(
             dict.fromkeys(
                 str(row.get("id") or row.get("task_id"))
@@ -725,7 +912,44 @@ class RetentionWorker:
         )
         reconstruction_started = time.perf_counter()
         skipped: list[tuple[str, str]] = []
+        blocked_reasons: Counter[str] = Counter()
         archived_count = 0
+        eligible_records: list[tuple[str, Workflow, RetentionDecision]] = []
+        for root_id in archived_root_ids:
+            if self.dry_run:
+                continue
+            if self.audit.get(root_id) is not None:
+                continue
+            try:
+                workflow = self._load(
+                    root_id,
+                    include_archived=True,
+                    listed_rows=archived_rows,
+                )
+                if any(node.status != ARCHIVED_STATUS for node in workflow.nodes):
+                    skipped.append((root_id, "legacy_not_fully_archived"))
+                    continue
+                decision = evaluate_workflow(
+                    workflow,
+                    now=now,
+                    delivery=self.delivery_reader.state(workflow),
+                )
+                if not decision.eligible:
+                    skipped.append((root_id, f"legacy_{decision.reason}"))
+                    continue
+                metadata = build_audit_metadata(
+                    workflow,
+                    decision.delivery or DeliveryState("not_required"),
+                )
+                self.audit.save_archive(
+                    metadata,
+                    archived_at=_archived_at(workflow, fallback=now),
+                )
+            except (KanbanTaskNotFound, KanbanUnavailable, RetentionError, sqlite3.Error) as exc:
+                skipped.append((root_id, f"legacy_audit_error:{type(exc).__name__}"))
+
+        purge_rows = () if self.dry_run or not self.allow_purge else self.audit.purge_candidates(now=now)
+        recovery_ms = (time.perf_counter() - recovery_started) * 1000
         for root_id in root_ids:
             try:
                 workflow = self._load(
@@ -740,25 +964,42 @@ class RetentionWorker:
                 )
                 if not decision.eligible:
                     skipped.append((root_id, decision.reason))
+                    blocked_reasons[retention_block_category(decision.reason)] += 1
                     continue
-                metadata = build_audit_metadata(workflow, decision.delivery or DeliveryState("not_required"))
-                # The audit row is durable before the board mutation. If the
-                # process dies after this point, the next pass rechecks the
-                # authoritative board and can safely finish or leave it alone.
-                self.audit.save_archive(metadata, archived_at=now)
-                if self.maintenance.archive_workflow(root_id, [node.task_id for node in workflow.nodes if node.task_id != root_id]):
-                    archived_count += 1
-                else:
-                    skipped.append((root_id, "archive_cas_failed"))
-            except (KanbanUnavailable, RetentionError, sqlite3.Error) as exc:
+                eligible_records.append((root_id, workflow, decision))
+            except (KanbanTaskNotFound, KanbanUnavailable, RetentionError, sqlite3.Error) as exc:
                 skipped.append((root_id, f"maintenance_error:{type(exc).__name__}"))
+                blocked_reasons["UNKNOWN/LEGACY"] += 1
+
+        eligible_root_ids = tuple(root_id for root_id, _workflow, _decision in eligible_records)
+        if self.max_archive_roots is None:
+            archive_records = eligible_records
+        else:
+            archive_records = eligible_records[: self.max_archive_roots]
+        would_archive_root_ids = tuple(root_id for root_id, _workflow, _decision in archive_records)
+
+        if not self.dry_run:
+            for root_id, workflow, decision in archive_records:
+                try:
+                    metadata = build_audit_metadata(
+                        workflow,
+                        decision.delivery or DeliveryState("not_required"),
+                    )
+                    # The audit row is durable before the board mutation. If
+                    # the process dies after this point, the next pass
+                    # rechecks the authoritative board and can safely finish.
+                    self.audit.save_archive(metadata, archived_at=now)
+                    if self.maintenance.archive_workflow(
+                        root_id,
+                        [node.task_id for node in workflow.nodes if node.task_id != root_id],
+                    ):
+                        archived_count += 1
+                    else:
+                        skipped.append((root_id, "archive_cas_failed"))
+                except (KanbanTaskNotFound, KanbanUnavailable, RetentionError, sqlite3.Error) as exc:
+                    skipped.append((root_id, f"maintenance_error:{type(exc).__name__}"))
         reconstruction_ms = (time.perf_counter() - reconstruction_started) * 1000
 
-        recovery_started = time.perf_counter()
-        # ``purge_rows`` and the optional archived board list were collected
-        # before the active pass, so this metric covers only the recovery scan
-        # setup and does not hide a second full-board list call.
-        recovery_ms = (time.perf_counter() - recovery_started) * 1000
         cleanup_started = time.perf_counter()
         purged_count = 0
         for row in purge_rows:
@@ -784,6 +1025,15 @@ class RetentionWorker:
                     purged_count += 1
                 else:
                     skipped.append((root_id, "purge_cas_failed"))
+            except KanbanTaskNotFound:
+                # A previous purge may have committed the board deletion and
+                # died before marking the audit row. Treat that state as an
+                # idempotent completion; the audit row remains the proof.
+                if self.audit.get(root_id) is not None:
+                    self.audit.mark_purged(root_id, purged_at=now)
+                    purged_count += 1
+                else:
+                    skipped.append((root_id, "purge_root_missing_without_audit"))
             except (KanbanUnavailable, RetentionError, sqlite3.Error) as exc:
                 skipped.append((root_id, f"purge_error:{type(exc).__name__}"))
         cleanup_ms = (time.perf_counter() - cleanup_started) * 1000
@@ -798,6 +1048,11 @@ class RetentionWorker:
             recovery_ms=recovery_ms,
             cleanup_ms=cleanup_ms,
             skipped=tuple(skipped),
+            eligible_root_ids=eligible_root_ids,
+            would_archive_root_ids=would_archive_root_ids,
+            eligible_task_count=sum(len(workflow.nodes) for _, workflow, _ in eligible_records),
+            would_archive_task_count=sum(len(workflow.nodes) for _, workflow, _ in archive_records),
+            blocked_reason_histogram=tuple(sorted(blocked_reasons.items())),
         )
 
 
@@ -809,12 +1064,21 @@ def default_audit_path(environment: Mapping[str, str] | None = None) -> Path:
     return kanban_db_path(dict(env)).with_name("retention-audit.db")
 
 
-def _build_worker(environment: Mapping[str, str] | None = None) -> RetentionWorker:
+def _build_worker(
+    environment: Mapping[str, str] | None = None,
+    *,
+    dry_run: bool = False,
+    allow_purge: bool = True,
+    max_archive_roots: int | None = None,
+) -> RetentionWorker:
     env = dict(environment or os.environ)
     return RetentionWorker(
         maintenance=SQLiteKanbanMaintenance(env),
         audit=AuditStore(default_audit_path(env)),
         environment=env,
+        dry_run=dry_run,
+        allow_purge=allow_purge,
+        max_archive_roots=max_archive_roots,
     )
 
 
@@ -822,6 +1086,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Root-scoped Hermes Kanban retention worker")
     parser.add_argument("--interval", type=float, default=float(os.getenv("KANBAN_RETENTION_INTERVAL_SECONDS", "900")))
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--dry-run", action="store_true", help="evaluate only; perform no audit/archive/purge mutation")
+    parser.add_argument("--archive-only", action="store_true", help="disable production purge for this run")
+    parser.add_argument("--max-archive-roots", type=int, default=None, help="bound archive mutations to this many eligible roots")
     args = parser.parse_args(argv)
     logging.basicConfig(level=os.getenv("KANBAN_RETENTION_LOG_LEVEL", "INFO"), format="%(message)s")
     stop = False
@@ -832,16 +1099,23 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
-    worker = _build_worker()
+    worker = _build_worker(
+        dry_run=args.dry_run,
+        allow_purge=not args.archive_only,
+        max_archive_roots=args.max_archive_roots,
+    )
     while not stop:
         started = time.perf_counter()
         try:
             result = worker.run_once()
             LOG.info(
-                "kanban-retention active_tasks=%d active_roots=%d archived=%d purged=%d "
+                "kanban-retention active_tasks=%d active_roots=%d eligible_roots=%d "
+                "would_archive_roots=%d archived=%d purged=%d "
                 "list_ms=%.2f reconstruction_ms=%.2f recovery_ms=%.2f cleanup_ms=%.2f skipped=%d",
                 result.active_task_count,
                 result.active_root_count,
+                len(result.eligible_root_ids),
+                len(result.would_archive_root_ids),
                 result.archived_count,
                 result.purged_count,
                 result.list_ms,
@@ -850,6 +1124,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result.cleanup_ms,
                 len(result.skipped),
             )
+            if args.dry_run:
+                LOG.info(
+                    "kanban-retention-preview %s",
+                    json.dumps(
+                        {
+                            "eligible_root_count": len(result.eligible_root_ids),
+                            "eligible_task_count": result.eligible_task_count,
+                            "would_archive_root_ids": list(result.would_archive_root_ids),
+                            "would_archive_task_count": result.would_archive_task_count,
+                            "blocked_root_count": sum(count for _, count in result.blocked_reason_histogram),
+                            "block_reason_histogram": dict(result.blocked_reason_histogram),
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                )
         except Exception:
             LOG.exception("kanban-retention-run-failed")
         if args.once:
