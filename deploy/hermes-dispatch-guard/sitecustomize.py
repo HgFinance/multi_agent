@@ -134,3 +134,15 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
         # silently hand every credential to every profile.  The startup
         # preflight also rejects this state so work queues stop visibly.
         _fail_closed_secret_scope("PATCH_INSTALL_FAILED")
+
+    # Provider fail-fast is deliberately a separate hook.  It is loaded in
+    # the dispatcher and inherited by its worker subprocesses through the
+    # existing PYTHONPATH; it does not modify Kanban retrieval or queue policy.
+    try:
+        from provider_failfast import install as _install_provider_failfast
+
+        _install_provider_failfast()
+    except Exception:
+        # Provider policy is an optimization, never a reason to prevent the
+        # dispatcher from starting. Native Hermes retry remains the fallback.
+        pass

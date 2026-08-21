@@ -63,7 +63,7 @@ _RULES: tuple[tuple[FailureKind, re.Pattern[str], bool], ...] = (
     (FailureKind.NEEDS_HUMAN,
      re.compile(r"review-required|needs[_\s-]?input|사람.{0,6}(검토|판단|확인)", re.I), False),
     (FailureKind.CREDENTIALS,
-     re.compile(r"No Anthropic credentials|ANTHROPIC_(API_KEY|TOKEN)|credentials? not found"
+     re.compile(r"PROVIDER_AUTH|No Anthropic credentials|ANTHROPIC_(API_KEY|TOKEN)|credentials? not found"
                 r"|authenticat", re.I), True),
     (FailureKind.SKILL_MISSING,
      re.compile(r"Unknown skill\(s\)|canonical skill is not available", re.I), True),
@@ -84,7 +84,7 @@ _RULES: tuple[tuple[FailureKind, re.Pattern[str], bool], ...] = (
     (FailureKind.PERMISSION,
      re.compile(r"권한 부족|권한이 없|승인 차단|not authorized|permission denied", re.I), False),
     (FailureKind.CAPACITY,
-     re.compile(r"동시 실행 상한|rate_limit|HTTP 429|slot|per_profile_capped", re.I), True),
+     re.compile(r"PROVIDER_QUOTA|quota exhausted|insufficient_quota|동시 실행 상한|rate_limit|HTTP 429|slot|per_profile_capped", re.I), True),
     (FailureKind.TIMEOUT,
      re.compile(r"HTTP 504|초 초과|TimeoutExpired|timed?[_\s-]?out", re.I), True),
     (FailureKind.PROTOCOL,
