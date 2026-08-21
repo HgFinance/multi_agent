@@ -1,0 +1,14 @@
+{
+  "variant": "AWQ+Finetune",
+  "status": "HOLD",
+  "commit": "fa0fdc0",
+  "scope": ["financial_arithmetic", "structured_output"],
+  "base_model": "/opt/hgfinance/models/Qwen2.5-14B-Instruct-AWQ",
+  "hold_reason": "Prerequisite exact AWQ endpoint failed startup during FlashInfer JIT compilation. Adapter compatibility, contamination, training, save/reload, and benchmark gates were not asserted.",
+  "scores": null,
+  "errors": ["No valid AWQ base inference output"],
+  "artifacts": {
+    "internal_raw": "benchmarks/quantization/results/aws_finetune_internal50_v2_raw.json",
+    "internal_score": "benchmarks/quantization/results/aws_finetune_internal50_v2_score.json"
+  }
+}

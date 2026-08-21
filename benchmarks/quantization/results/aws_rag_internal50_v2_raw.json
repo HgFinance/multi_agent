@@ -1,0 +1,10 @@
+{
+  "status": "HOLD",
+  "scores": null,
+  "reason": "AWQ+RAG is blocked because the exact AWQ serving endpoint failed startup; no glossary-injected inference was run.",
+  "manifest": "benchmarks/quantization/results/aws_rag_provenance.json",
+  "runtime": "Prerequisite AWQ endpoint unavailable",
+  "errors": [
+    "No AWQ RAG inference output"
+  ]
+}

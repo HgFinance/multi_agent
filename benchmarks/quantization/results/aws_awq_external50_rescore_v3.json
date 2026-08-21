@@ -1,0 +1,10 @@
+{
+  "status": "HOLD",
+  "scores": null,
+  "reason": "No AWQ External-50 raw output exists because the serving endpoint failed startup.",
+  "manifest": "benchmarks/quantization/results/aws_awq_provenance.json",
+  "runtime": "Frozen External-50 v3 scorer not run",
+  "errors": [
+    "No raw input available"
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "status": "HOLD",
+  "scores": null,
+  "reason": "AWQ localhost endpoint did not start. FlashInfer JIT failed during startup with CUDA compiler/toolkit header incompatibility; no inference was run.",
+  "manifest": "benchmarks/quantization/results/aws_awq_provenance.json",
+  "runtime": "vLLM 0.27.1; Python 3.12.3; NVIDIA L4; FlashInfer 0.6.16.post3",
+  "errors": [
+    "RuntimeError: Ninja build failed",
+    "CUDA compiler and CUDA toolkit headers are incompatible"
+  ]
+}

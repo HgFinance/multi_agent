@@ -1,0 +1,14 @@
+{
+  "variant": "AWQ+Reasoning",
+  "status": "HOLD",
+  "commit": "fa0fdc0",
+  "base_model": "/opt/hgfinance/models/Qwen2.5-14B-Instruct-AWQ",
+  "critic_model": "gpt-4o-mini",
+  "hold_reason": "Prerequisite AWQ first-draft endpoint failed startup during FlashInfer JIT compilation. No draft, rewrite, API request, or score was produced.",
+  "scores": null,
+  "errors": ["No AWQ draft could be generated"],
+  "artifacts": {
+    "internal_raw": "benchmarks/quantization/results/aws_reasoning_internal50_v2_raw.json",
+    "internal_score": "benchmarks/quantization/results/aws_reasoning_internal50_v2_score.json"
+  }
+}
