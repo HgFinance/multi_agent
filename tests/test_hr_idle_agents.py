@@ -7,6 +7,7 @@ departments/07-agent-workforce/scorecard/observability.py 의 __main__ 자체 �
 
 from __future__ import annotations
 
+import builtins
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -23,6 +24,7 @@ from observability import (  # noqa: E402
     LangfuseQueryError,
     LangfuseTraceReader,
     WorkerIdleReport,
+    WorkerRegistryUnavailable,
     check_idle_agents,
 )
 from orchestration.llm_observability import langfuse_worker_event_name  # noqa: E402
@@ -171,3 +173,132 @@ def test_department_stage_mapping_disambiguates_dispatch_key_from_event_name() -
     )
     by_id = {r.worker_id: r for r in reports}
     assert by_id[worker_id].status is IdleStatus.ACTIVE
+
+
+def test_manifest_registry_is_present_and_complete() -> None:
+    from orchestration.contracts.worker_registry import load_worker_registry
+    registry = load_worker_registry(ROOT)
+    assert len(registry) == 8
+    assert not any(item.department == "trading" for item in registry)
+
+def test_fallback_event_name_matches_canonical() -> None:
+    """orchestration 이 없는 컨테이너용 복제 구현이 정본과 같은 문자열을 만들어야 한다.
+
+    이전 fallback 은 `worker.{stage}.{worker_id}` 라는 다른 포맷이었다 - 조회가
+    예외 없이 0건이 되므로 UNOBSERVED 로 위장된다(2026-08-20 수정).
+    """
+
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_hr_observability_isolated",
+        ROOT / "departments" / "07-agent-workforce" / "scorecard" / "observability.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    real_import = builtins.__import__
+
+    def _no_orchestration(name, *args, **kwargs):
+        if name.startswith("orchestration"):
+            raise ModuleNotFoundError(name)
+        return real_import(name, *args, **kwargs)
+
+    builtins.__import__ = _no_orchestration
+    # @dataclass 가 실행 중 sys.modules 에서 자기 모듈을 되찾으므로 먼저 등록한다.
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        builtins.__import__ = real_import
+        sys.modules.pop(spec.name, None)
+
+    for stage, worker_id in (("research", "holdings-analyst-worker"), ("quant", "x-worker")):
+        assert module.langfuse_worker_event_name(
+            stage=stage, worker_id=worker_id
+        ) == langfuse_worker_event_name(stage=stage, worker_id=worker_id)
+
+
+def test_invalid_manifest_is_unavailable_not_empty(tmp_path: Path) -> None:
+    from orchestration.contracts.worker_registry import WorkerRegistryError, load_worker_registry
+    manifest = tmp_path / "orchestration/contracts/worker_registry.v1.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{\"schema_version\": \"hgfinance.worker-registry.v2\", \"workers\": []}", encoding="utf-8")
+    with pytest.raises(WorkerRegistryError):
+        load_worker_registry(tmp_path)
+    with pytest.raises(WorkerRegistryUnavailable):
+        check_idle_agents(reader=_EmptyReader(), departments=("research",), now=_NOW, repo_root=tmp_path)
+
+def test_department_without_llm_workers_is_empty_not_broken() -> None:
+    from orchestration.contracts.worker_registry import load_worker_registry, workers_for_department
+    registry = load_worker_registry(ROOT)
+    assert workers_for_department(registry, "trading") == ()
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-20: HR 유휴 리포트 렌더러(scorecard/idle_report.py)
+#
+# 렌더러가 지켜야 할 것은 표 모양이 아니라 **상태를 합치지 않는 것**이다.
+# "유휴 N명"으로 뭉치면 HR 이 정리 대상 목록으로 읽고, 관측 실패(UNAVAILABLE)나
+# 미발화 trigger(UNOBSERVED) 때문에 실제로 일하는 Agent 가 잘린다.
+# ---------------------------------------------------------------------------
+
+
+def _report_module():
+    import idle_report
+
+    return idle_report
+
+
+def test_summary_counts_every_state_separately() -> None:
+    idle_report = _report_module()
+    worker_id = a_worker_of("qa")
+    name = langfuse_worker_event_name(stage="qa", worker_id=worker_id)
+    payload, reports = idle_report.build_report(
+        reader=_FixedReader({name: _NOW - timedelta(hours=48)}),
+        departments=("qa",),
+        now=_NOW,
+    )
+    assert payload["summary"]["IDLE"] == 1
+    assert payload["summary"]["UNOBSERVED"] == len(reports) - 1
+    # 없는 상태도 키가 있어야 한다 - 소비자가 KeyError 를 만나지 않도록.
+    assert set(payload["summary"]) == {"IDLE", "UNOBSERVED", "UNAVAILABLE", "ACTIVE"}
+    assert payload["total_workers"] == len(reports)
+    assert payload["schema_version"] == "workforce.idle_report.v1"
+
+
+def test_unavailable_is_never_rendered_as_idle() -> None:
+    """관측 실패가 유휴로 둔갑하면 안 된다 - 문구까지 못 박는다."""
+
+    idle_report = _report_module()
+    payload, reports = idle_report.build_report(
+        reader=_FailingReader(), departments=("research",), now=_NOW
+    )
+    assert payload["summary"]["UNAVAILABLE"] == len(reports)
+    assert payload["summary"]["IDLE"] == 0
+    text = idle_report.render_text(payload, reports)
+    assert "UNAVAILABLE" in text
+    assert "이 리포트로 인원 조치를 결정하지 않는다" in text
+
+
+def test_strict_mode_exits_nonzero_when_observation_path_is_broken(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """계측 경로가 죽은 것을 크론이 알아챌 수 있어야 한다(조용한 0 금지)."""
+
+    idle_report = _report_module()
+    for key in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    assert idle_report.main(["--department", "qa", "--strict"]) == 2
+    assert idle_report.main(["--department", "qa"]) == 0
+
+
+def test_json_output_matches_api_element_shape() -> None:
+    """CLI JSON 과 API 응답의 원소 모양이 같아야 한다 - 소비자가 갈리지 않게."""
+
+    idle_report = _report_module()
+    payload, _ = idle_report.build_report(
+        reader=_EmptyReader(), departments=("risk",), now=_NOW
+    )
+    element = payload["idle_agents"][0]
+    assert set(element) == {
+        "department", "worker_id", "trigger", "status", "last_seen_at", "idle_hours"
+    }

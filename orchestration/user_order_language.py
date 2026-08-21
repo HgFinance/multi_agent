@@ -262,6 +262,42 @@ _READ_ONLY_RE = re.compile(
     r"(?:알려\s*줘|알려줘|보여\s*줘|보여줘|조회|내역|상태|추천|분석|"
     r"조사|설명|확인|취소율|주문했|체결됐|얼마(?:야|인지)?)"
 )
+# A holdings check immediately followed by an imperative sell is a safety
+# preflight, not a read-only speech act. Keep the accepted grammar narrow so
+# an arbitrary sentence containing "확인" cannot cross the execution boundary.
+_HOLDINGS_PREFLIGHT_RE = re.compile(
+    r"(?<![가-힣A-Za-z0-9])(?:(?:내|현재)\s*)?(?:보유\s*)?"
+    r"(?:수량|잔고)(?:을|를)?\s*(?:확인|조회)"
+    r"(?:하고|해서|한\s*(?:뒤|후)|\s*후)(?![가-힣A-Za-z0-9])"
+)
+_PAPER_ACCOUNT_SCOPE_RE = re.compile(
+    r"(?<![가-힣A-Za-z0-9])(?:내\s*)?"
+    r"(?:paper|페이퍼|모의\s*투자|모의)\s*계좌(?:에서|에|로)?"
+    r"(?![가-힣A-Za-z0-9])",
+    re.IGNORECASE,
+)
+_POSITION_SCOPE_RE = re.compile(
+    r"(?<![가-힣A-Za-z0-9])(?:내\s*)?(?:계좌에\s*)?"
+    r"(?:보유\s*(?:중인|하고\s*있는|한)|가지고\s*있는|갖고\s*있는)"
+    r"(?![가-힣A-Za-z0-9])"
+)
+_IMMEDIATE_EXECUTION_RE = re.compile(
+    r"(?<![가-힣A-Za-z0-9])(?:지금|바로|당장)(?![가-힣A-Za-z0-9])"
+)
+_ORDER_SUBMISSION_RE = re.compile(
+    r"(?<![가-힣A-Za-z0-9])(?:주문(?:을)?\s*)?"
+    r"(?:넣어\s*(?:줘|주세요)|내\s*(?:줘|주세요)|"
+    r"실행(?:해\s*줘|해줘|해\s*주세요|해주세요)?|"
+    r"처리(?:해\s*줘|해줘|해\s*주세요|해주세요)|요청)"
+    r"(?![가-힣A-Za-z0-9])"
+)
+_PLACE_ORDER_ADORNMENT_PATTERNS = (
+    _HOLDINGS_PREFLIGHT_RE,
+    _PAPER_ACCOUNT_SCOPE_RE,
+    _POSITION_SCOPE_RE,
+    _IMMEDIATE_EXECUTION_RE,
+    _ORDER_SUBMISSION_RE,
+)
 _EXAMPLE_RE = re.compile(
     r"(?:예시|예를\s*들|라고\s*(?:입력|말|쓰|하면)|문구|무슨\s*뜻|"
     r"프롬프트|테스트|따옴표|[\"'“”‘’])"
@@ -304,6 +340,9 @@ _ALLOWED_RESIDUAL_RE = re.compile(
     r"보유|종목|주식|주문|주세요|줘)\s*)*$"
 )
 _LEADING_DISCORD_MENTION_RE = re.compile(r"^\s*<@!?\d{15,25}>\s*")
+_LEADING_DISCORD_MENTION_PARTS_RE = re.compile(
+    r"^(?P<leading>\s*)<@!?\d{15,25}>(?P<trailing>\s*)"
+)
 
 
 @dataclass(frozen=True)
@@ -355,11 +394,31 @@ def _unsafe_language(raw_text: str) -> OrderReasonCode | None:
         return OrderReasonCode.NEGATED_OR_PROHIBITED
     if _CONDITIONAL_RE.search(raw_text):
         return OrderReasonCode.CONDITIONAL_OR_HYPOTHETICAL
-    if _READ_ONLY_RE.search(raw_text):
+    # Remove only the explicit holdings-preflight clause before deciding
+    # whether the whole utterance is read-only. Question/advice and negation
+    # checks still run on the exact source text and remain fail-closed.
+    executable_text = _HOLDINGS_PREFLIGHT_RE.sub(" ", raw_text)
+    if _READ_ONLY_RE.search(executable_text):
         return OrderReasonCode.READ_ONLY_REQUEST
     if _QUESTION_RE.search(raw_text):
         return OrderReasonCode.QUESTION_OR_ADVICE
     return None
+
+
+def _place_order_adornment_spans(raw_text: str) -> list[tuple[int, int]]:
+    """Return narrow, non-authoritative language spans around one order.
+
+    These phrases may describe PAPER scope, a holdings preflight, timing, or a
+    polite submission wrapper. They never supply instrument, side, quantity,
+    price, or order type; those fields still require exact evidence.
+    """
+
+    spans = {
+        match.span()
+        for pattern in _PLACE_ORDER_ADORNMENT_PATTERNS
+        for match in pattern.finditer(raw_text)
+    }
+    return sorted(spans)
 
 
 def is_clearly_non_executable_order_language(raw_text: str) -> bool:
@@ -409,6 +468,34 @@ def _validate_evidence(
         if not same_supported_span:
             return None, OrderReasonCode.EVIDENCE_SPAN_INVALID
     return by_field, None
+
+
+def _align_discord_delivery_whitespace(
+    raw_text: str, candidate: HermesOrderCandidate
+) -> HermesOrderCandidate:
+    """Repair one narrow Discord-only evidence coordinate presentation drift.
+
+    Discord keeps the leading bot mention and following whitespace in the
+    authenticated source. Hermes occasionally counts the mention but omits
+    only that following whitespace in its offsets. Accept the uniform shift
+    only when every evidence substring then exactly matches the source.
+    """
+
+    mention = _LEADING_DISCORD_MENTION_PARTS_RE.match(raw_text)
+    if mention is None:
+        return candidate
+    shift = len(mention.group("trailing"))
+    if shift <= 0 or not candidate.evidence:
+        return candidate
+
+    shifted: list[TextEvidence] = []
+    for evidence in candidate.evidence:
+        start = evidence.start + shift
+        end = evidence.end + shift
+        if end > len(raw_text) or raw_text[start:end] != evidence.text:
+            return candidate
+        shifted.append(evidence.model_copy(update={"start": start, "end": end}))
+    return candidate.model_copy(update={"evidence": tuple(shifted)})
 
 
 def _expected_evidence(
@@ -534,6 +621,11 @@ def _verify_place_order(
     candidate: HermesOrderCandidate,
     evidence: Mapping[EvidenceField, TextEvidence],
 ) -> OrderLanguageResult:
+    preflight_matches = list(_HOLDINGS_PREFLIGHT_RE.finditer(raw_text))
+    if len(preflight_matches) > 1:
+        return _clarify(digest, OrderReasonCode.UNSUPPORTED_TEXT)
+    adornment_spans = _place_order_adornment_spans(raw_text)
+
     buy_matches = list(_BUY_RE.finditer(raw_text))
     sell_matches = list(_SELL_RE.finditer(raw_text))
     if bool(buy_matches) == bool(sell_matches):
@@ -673,6 +765,7 @@ def _verify_place_order(
         quantity_match.span(),
         (instrument.start, instrument.end),
     ]
+    consumed.extend(adornment_spans)
     if order_type_span is not None:
         consumed.append(order_type_span)
     if price_span is not None:
@@ -728,6 +821,7 @@ def verify_order_candidate(
         return _clarify(digest, OrderReasonCode.INVALID_CANDIDATE_SCHEMA)
     if structured.raw_text_sha256 != digest:
         return _clarify(digest, OrderReasonCode.RAW_TEXT_HASH_MISMATCH)
+    structured = _align_discord_delivery_whitespace(raw_text, structured)
 
     unsafe = _unsafe_language(raw_text)
     if unsafe is not None:
@@ -755,10 +849,243 @@ def verify_order_candidate(
     return _verify_place_order(raw_text, digest, structured, evidence)
 
 
+_DETERMINISTIC_RESIDUAL_WORDS = frozenset(
+    {
+        "을",
+        "를",
+        "은",
+        "는",
+        "이",
+        "가",
+        "에",
+        "에서",
+        "로",
+        "으로",
+        "좀",
+        "만",
+        "내",
+        "현재",
+        "계좌",
+        "보유",
+        "종목",
+        "주식",
+        "주문",
+        "주세요",
+        "줘",
+    }
+)
+_DETERMINISTIC_INSTRUMENT_SUFFIXES = (
+    "으로",
+    "에서",
+    "을",
+    "를",
+    "은",
+    "는",
+    "이",
+    "가",
+    "에",
+    "로",
+)
+
+
+def _deterministic_instrument_span(
+    raw_text: str,
+    consumed: list[tuple[int, int]],
+) -> tuple[int, int] | None:
+    """Extract the one residual instrument phrase without normalizing offsets."""
+
+    remaining = list(raw_text)
+    for start, end in consumed:
+        remaining[start:end] = " " * (end - start)
+    mention = _LEADING_DISCORD_MENTION_RE.match(raw_text)
+    if mention:
+        remaining[mention.start() : mention.end()] = " " * (
+            mention.end() - mention.start()
+        )
+
+    tokens: list[tuple[int, int, str]] = []
+    for match in re.finditer(r"\S+", "".join(remaining)):
+        start, end = match.span()
+        while start < end and raw_text[start] in "\t ,.!":
+            start += 1
+        while end > start and raw_text[end - 1] in "\t ,.!":
+            end -= 1
+        if start < end:
+            tokens.append((start, end, raw_text[start:end]))
+    while tokens and tokens[0][2] in _DETERMINISTIC_RESIDUAL_WORDS:
+        tokens.pop(0)
+    while tokens and tokens[-1][2] in _DETERMINISTIC_RESIDUAL_WORDS:
+        tokens.pop()
+    if not tokens:
+        return None
+
+    start, end = tokens[0][0], tokens[-1][1]
+    candidate = raw_text[start:end]
+    for suffix in _DETERMINISTIC_INSTRUMENT_SUFFIXES:
+        if candidate.endswith(suffix) and len(candidate) > len(suffix):
+            end -= len(suffix)
+            candidate = raw_text[start:end]
+            break
+    if not candidate or not _INSTRUMENT_RE.fullmatch(candidate):
+        return None
+    if not _residual_supported(raw_text, [*consumed, (start, end)]):
+        return None
+    return start, end
+
+
+def deterministic_order_candidate(raw_text: str) -> HermesOrderCandidate | None:
+    """Build exact evidence for one unambiguous place order without an LLM.
+
+    This helper grants no authority: callers must still pass its output through
+    :func:`verify_order_candidate` and the authenticated PAPER admission gate.
+    It intentionally returns ``None`` for aggregates, advice, unsafe language,
+    malformed numbers, and any residual text it cannot account for exactly.
+    """
+
+    if (
+        not isinstance(raw_text, str)
+        or not raw_text.strip()
+        or len(raw_text) > MAX_TEXT_LENGTH
+        or _unsafe_language(raw_text) is not None
+        or _LIVE_MODE_RE.search(raw_text)
+        or _NOTIONAL_RE.search(raw_text)
+        or _APPROXIMATE_RE.search(raw_text)
+        or _COMPOUND_RE.search(raw_text)
+        or re.search(r"(?<!\d)[.!]\s*\S", raw_text)
+        or _aggregate_match(raw_text) is not None
+    ):
+        return None
+
+    buy_matches = list(_BUY_RE.finditer(raw_text))
+    sell_matches = list(_SELL_RE.finditer(raw_text))
+    if bool(buy_matches) == bool(sell_matches):
+        return None
+    side_matches = buy_matches if buy_matches else sell_matches
+    quantities = list(_QUANTITY_RE.finditer(raw_text))
+    market_markers = list(_MARKET_RE.finditer(raw_text))
+    limit_markers = list(_LIMIT_MARKER_RE.finditer(raw_text))
+    if (
+        len(side_matches) != 1
+        or len(quantities) != 1
+        or len(market_markers) > 1
+        or len(limit_markers) > 1
+    ):
+        return None
+    try:
+        quantity = parse_strict_positive_integer(
+            quantities[0].group("token"), max_value=MAX_QUANTITY
+        )
+        prices = _price_matches(raw_text, limit_markers)
+    except ValueError:
+        return None
+    if len(prices) > 1 or (market_markers and (limit_markers or prices)):
+        return None
+
+    if market_markers:
+        order_type = OrderType.MARKET
+        order_type_span: tuple[int, int] | None = market_markers[0].span()
+        limit_price: int | None = None
+        price_span: tuple[int, int] | None = None
+    elif limit_markers or prices:
+        if not prices:
+            return None
+        order_type = OrderType.LIMIT
+        order_type_span = (
+            limit_markers[0].span() if limit_markers else prices[0].span
+        )
+        limit_price = prices[0].value
+        price_span = prices[0].span
+    else:
+        order_type = OrderType.MARKET
+        order_type_span = None
+        limit_price = None
+        price_span = None
+
+    side = OrderSide.BUY if buy_matches else OrderSide.SELL
+    side_match = side_matches[0]
+    quantity_match = quantities[0]
+    adornments = _place_order_adornment_spans(raw_text)
+    consumed = [side_match.span(), quantity_match.span(), *adornments]
+    if order_type_span is not None:
+        consumed.append(order_type_span)
+    if price_span is not None:
+        consumed.append(price_span)
+    if limit_markers:
+        consumed.append(limit_markers[0].span())
+    instrument_span = _deterministic_instrument_span(
+        raw_text, list(dict.fromkeys(consumed))
+    )
+    if instrument_span is None:
+        return None
+    instrument = raw_text[instrument_span[0] : instrument_span[1]]
+
+    evidence = [
+        TextEvidence(
+            field=EvidenceField.INSTRUMENT,
+            start=instrument_span[0],
+            end=instrument_span[1],
+            text=instrument,
+            normalized=instrument,
+        ),
+        TextEvidence(
+            field=EvidenceField.SIDE,
+            start=side_match.start(),
+            end=side_match.end(),
+            text=side_match.group(0),
+            normalized=side.value,
+        ),
+        TextEvidence(
+            field=EvidenceField.QUANTITY,
+            start=quantity_match.start(),
+            end=quantity_match.end(),
+            text=quantity_match.group(0),
+            normalized=str(quantity),
+        ),
+    ]
+    if order_type_span is not None:
+        evidence.append(
+            TextEvidence(
+                field=EvidenceField.ORDER_TYPE,
+                start=order_type_span[0],
+                end=order_type_span[1],
+                text=raw_text[order_type_span[0] : order_type_span[1]],
+                normalized=order_type.value,
+            )
+        )
+    if price_span is not None and limit_price is not None:
+        evidence.append(
+            TextEvidence(
+                field=EvidenceField.LIMIT_PRICE,
+                start=price_span[0],
+                end=price_span[1],
+                text=raw_text[price_span[0] : price_span[1]],
+                normalized=str(limit_price),
+            )
+        )
+
+    candidate = HermesOrderCandidate(
+        raw_text_sha256=raw_text_sha256(raw_text),
+        decision=CandidateDecision.EXECUTE,
+        action=DirectiveAction.PLACE_ORDER,
+        instrument_mention=instrument,
+        side=side,
+        quantity=str(quantity),
+        order_type=order_type,
+        limit_price=str(limit_price) if limit_price is not None else None,
+        evidence=tuple(evidence),
+    )
+    return (
+        candidate
+        if isinstance(verify_order_candidate(raw_text, candidate), VerifiedPaperDirective)
+        else None
+    )
+
+
 __all__ = [
     "MAX_PRICE",
     "MAX_QUANTITY",
     "MAX_TEXT_LENGTH",
+    "deterministic_order_candidate",
     "is_clearly_non_executable_order_language",
     "looks_like_user_order_request",
     "parse_strict_positive_integer",

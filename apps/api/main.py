@@ -36,6 +36,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
+import anyio
 from dotenv import load_dotenv
 from fastapi import (
     Depends,
@@ -82,9 +83,11 @@ from apps.api import hermes_boundary
 try:
     from .ceo import router as ceo_router
     from .ceo_mirror_api import router as ceo_mirror_router
+    from .conditional_rules import router as conditional_rules_router
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
     from ceo import router as ceo_router
     from ceo_mirror_api import router as ceo_mirror_router
+    from conditional_rules import router as conditional_rules_router
 import trading
 from account_snapshot import router as account_snapshot_router
 from agent_status import agent_status_snapshot
@@ -97,24 +100,17 @@ from command_service import (
 from current_user import (
     active_user_profile,
     auth_mode,
-    auth_required,
-    authenticate_request_headers,
     authorized_fund_memberships,
     authorized_trading_books,
     current_user,
     require_any_fund_membership,
     require_fund_membership,
     require_owner,
-    set_authenticated_request_user,
 )
 from department_agents import router as department_agent_router
 from discord_ingress_auth import (
     DISCORD_INGRESS_PATH,
-)
-from discord_ingress_auth import (
     bearer_is_authorized as discord_ingress_bearer_is_authorized,
-)
-from discord_ingress_auth import (
     mark_request as mark_discord_ingress_request,
 )
 from discord_read import router as discord_read_router
@@ -211,9 +207,10 @@ def _portfolio_cors_origins() -> list[str]:
     # rather than silently broadening or weakening the operator's intent.
     if any(not item.strip() for item in raw_origins):
         raise RuntimeError("invalid PORTFOLIO_CORS_ALLOW_ORIGINS entry")
-    allowed_schemes = {"https"}
-    if runtime_environment in {"local", "test"}:
-        allowed_schemes.add("http")
+    # CORS remains an exact origin allowlist in every environment.  Operators
+    # may explicitly allow an HTTP frontend while production is being run on a
+    # private or local network; no implicit HTTP origins are added.
+    allowed_schemes = {"http", "https"}
     configured: list[str] = []
     for item in raw_origins:
         origin = item.strip()
@@ -249,65 +246,107 @@ def _portfolio_cors_origins() -> list[str]:
     return list(dict.fromkeys(origins))
 
 
-# Only load-balancer probes are anonymous.  Every business/read-model path,
-# including routers mounted outside ``/ui``, crosses the same identity policy.
-# This also keeps newly added domain routers protected by default.
-_AUTH_EXEMPT_HTTP_PATHS = frozenset({"/health", "/health/ready"})
-
-
-def _requires_portfolio_authentication(request: Request) -> bool:
-    return (
-        request.method != "OPTIONS"
-        and request.url.path not in _AUTH_EXEMPT_HTTP_PATHS
-    )
-
-
 @app.middleware("http")
-async def _authenticate_portfolio_request(request: Request, call_next):
-    """Authenticate every externally reachable BFF domain route centrally."""
+async def _mark_private_discord_ingress(request: Request, call_next):
+    """Mark only the authenticated Discord service hop for its route."""
 
-    if _requires_portfolio_authentication(request):
-        # The CEO Discord gateway is an internal service, not a browser user,
-        # and cannot carry a Supabase JWT.  Its single-purpose credential is
-        # accepted on this exact POST path only.  The route subsequently maps
-        # the immutable Discord author id to an authorized PAPER principal.
-        internal_discord_ingress = (
-            request.method == "POST"
-            and request.url.path == DISCORD_INGRESS_PATH
-            and discord_ingress_bearer_is_authorized(
-                request.headers.get("authorization")
-            )
+    if (
+        request.method == "POST"
+        and request.url.path == DISCORD_INGRESS_PATH
+        and discord_ingress_bearer_is_authorized(
+            request.headers.get("authorization")
         )
-        if internal_discord_ingress:
-            set_authenticated_request_user(request, None)
-            mark_discord_ingress_request(request)
-            return await call_next(request)
-        try:
-            owner_id = await run_in_threadpool(
-                authenticate_request_headers,
-                authorization=request.headers.get("authorization"),
-                x_user_id=request.headers.get("x-user-id"),
-                required=auth_required(),
-            )
-            set_authenticated_request_user(request, owner_id)
-        except HTTPException as exc:
-            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+    ):
+        mark_discord_ingress_request(request)
     return await call_next(request)
 
 
-# Starlette inserts each newly registered middleware at the front. Register
-# CORS after the auth boundary so it remains outermost and decorates even
-# fail-closed 401/403/503 responses for an allowed frontend origin.
+# 브라우저와 uvicorn 어느 쪽에도 요청 타임아웃이 없다. uvicorn 은 핸들러에
+# 데드라인을 걸지 않고, 이 EC2 배포에는 앞단 리버스 프록시가 없다(compose 가
+# 8001->8000 을 그대로 노출한다). 그래서 핸들러가 한 번 멈추면 그 요청은 응답도
+# 오류도 없이 영원히 pending 된다 - AWS 에서 관측된 증상이 정확히 이것이다.
+# 예전 Elastic Beanstalk 배포(deploy/eb)에서는 앞단 nginx/ALB 가 60초에 504 를
+# 냈기 때문에 같은 hang 이 "타임아웃"으로 보였다.
+#
+# 이건 근본 원인 수정이 아니라 안전망이다 - 멈춘 것이 스레드풀에서 도는 동기
+# 핸들러면 취소해도 그 스레드는 회수되지 않는다. 504 가 보이기 시작하면 무엇이
+# 멈췄는지 반드시 확인해야 한다.
+#
+# BaseHTTPMiddleware(`@app.middleware("http")`)가 아니라 순수 ASGI middleware 인
+# 이유: BaseHTTPMiddleware 는 `call_next` 를 자체 task group 에서 돌리기 때문에
+# 거기에 `asyncio.wait_for` 를 씌우면 취소가 그 task group 과 얽혀 정상 예외까지
+# ExceptionGroup 으로 뭉개진다(실제로 tests/api 가 그렇게 깨졌다).
+def _request_timeout_seconds() -> float:
+    try:
+        value = float(os.getenv("BFF_REQUEST_TIMEOUT_SECONDS", "30"))
+    except ValueError:
+        return 30.0
+    return value if value > 0 else 30.0
+
+
+# SSE 는 설계상 응답을 열어 둔 채 오래 산다. 데드라인을 걸면 정상 스트림을 끊게
+# 되므로 스트리밍 경로는 제외한다(스트림 수명은 핸들러 안의
+# `UI_MIRROR_SSE_SECONDS` 가 이미 유한하게 제한한다).
+_STREAMING_PATH_SUFFIXES = ("/events/stream",)
+
+
+class RequestDeadlineMiddleware:
+    """Turn an indefinitely stalled handler into an explicit 504."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http" or str(scope.get("path", "")).endswith(
+            _STREAMING_PATH_SUFFIXES
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        started = False
+
+        async def send_wrapper(message) -> None:
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            with anyio.fail_after(_request_timeout_seconds()):
+                await self.app(scope, receive, send_wrapper)
+        except TimeoutError:
+            # 이미 응답 헤더가 나갔으면 두 번째 응답을 보낼 수 없다. 그때는
+            # 연결을 그대로 끊어 클라이언트가 불완전한 본문을 완성본으로
+            # 오해하지 않게 한다.
+            if started:
+                raise
+            response = JSONResponse(
+                status_code=504,
+                content={
+                    "error_code": "BFF_REQUEST_TIMEOUT",
+                    "detail": "portfolio_bff_request_timeout",
+                },
+            )
+            await response(scope, receive, send)
+
+
+app.add_middleware(RequestDeadlineMiddleware)
+
+
+# CORS 는 **가장 바깥** middleware 여야 한다. Starlette 는 나중에 등록한
+# middleware 를 바깥에 놓으므로, 이 호출이 위의 두 middleware 보다 뒤에 있어야
+# 그 middleware 들이 만든 응답(위의 504 포함)에도 CORS 헤더가 붙는다. 안쪽에
+# 두면 브라우저는 504 대신 정체불명의 CORS 오류를 보게 된다.
+# CORS is independent from caller identity. Individual routes retain their
+# domain-level Fund/Book checks without a global JWT/Bearer gate.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_portfolio_cors_origins(),
-    # Browser identity uses an explicit Bearer header, never ambient cookies.
     # Credentials stay disabled, so wildcard+credentials cannot be introduced.
     allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "OPTIONS"],
     allow_headers=[
         "Accept",
-        "Authorization",
         "Content-Type",
         "Last-Event-ID",
         "Idempotency-Key",
@@ -315,6 +354,7 @@ app.add_middleware(
         "X-User-Id",
     ],
 )
+
 
 # 각 투자 본부의 Router는 해당 Hermes Profile을 명시적으로 소유한다. CEO·HR은
 # 투자 본부 Agent ask 경로에 섞지 않는다(마스터플랜 5.6).
@@ -343,6 +383,7 @@ app.include_router(portfolio_live_router)
 app.include_router(risk_router)
 app.include_router(qa_router)
 app.include_router(user_orders_router)
+app.include_router(conditional_rules_router)
 
 
 # Browser는 Domain API를 직접 호출하지 않는다. Mandate 변경은 CEO Office가 소유하므로
@@ -1364,23 +1405,6 @@ def ui_command_audit(
 @app.websocket("/ws/operations")
 async def operations_websocket(websocket: WebSocket) -> None:
     """Read-only Agent Status Event stream with REST snapshot recovery."""
-
-    # A browser WebSocket cannot set an Authorization header with the native
-    # API.  Until the frontend implements a short-lived authenticated ticket or
-    # a reviewed subprotocol transport, production therefore fails closed here
-    # before accepting the handshake and before building any snapshot.
-    try:
-        owner_id = await run_in_threadpool(
-            authenticate_request_headers,
-            authorization=websocket.headers.get("authorization"),
-            x_user_id=websocket.headers.get("x-user-id"),
-            required=auth_required(),
-        )
-        await run_in_threadpool(require_any_fund_membership, owner_id)
-    except HTTPException as exc:
-        close_code = {401: 4401, 403: 4403}.get(exc.status_code, 1011)
-        await websocket.close(code=close_code, reason=str(exc.detail))
-        return
 
     await websocket.accept()
     last_sequence = 0

@@ -51,7 +51,8 @@ services:
       # Trading Hermes and its MCP bridge. Fail before creating an orphan card;
       # deterministic authenticated PAPER API endpoints remain available.
       USER_PAPER_ORDER_WORKFLOW_ENABLED: "false"
-      PORTFOLIO_CORS_ALLOW_ORIGINS: ${PORTFOLIO_CORS_ALLOW_ORIGINS:?Exact HTTPS frontend origin allowlist is required}
+      USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED: "false"
+      PORTFOLIO_CORS_ALLOW_ORIGINS: ${PORTFOLIO_CORS_ALLOW_ORIGINS:?Exact frontend origin allowlist is required}
       # Supabase is identity-only in AWS. Never pass service-role to the BFF.
       SUPABASE_URL: ${SUPABASE_URL:?Hosted Supabase project URL is required for portfolio authentication}
       SUPABASE_AUTH_ISSUER: ${SUPABASE_AUTH_ISSUER:-}
@@ -77,11 +78,10 @@ services:
       # 기본값을 false로 두는 이유: LS 크리덴셜을 아직 setenv 하지 않은 배포가
       # 조용히 브로커에 붙는 것보다, 켜는 쪽을 명시적으로 만드는 게 낫다.
       ENABLE_LS_ORDER_EVENTS: ${ENABLE_LS_ORDER_EVENTS:-false}
-      # LS_ENV=PAPER면 조회 코드가 `_PAPER` 접미사 키를 먼저 찾고 없으면
-      # 접미사 없는 키로 떨어진다. 어느 쪽을 쓸지는 배포가 정하므로 양쪽을 다
-      # 통과시킨다. AWS는 PAPER 고정이다 - LIVE 주문 API는 아직 미결정이고
-      # 이 경로는 시장데이터·조회 read-only다(ADR-0007).
-      LS_ENV: ${LS_ENV:-PAPER}
+      ENABLE_LS_MARKET_DATA: ${ENABLE_LS_MARKET_DATA:-false}
+      ENABLE_LS_ACCOUNT_DATA: ${ENABLE_LS_ACCOUNT_DATA:-false}
+      # 시장·계좌 조회는 단일 LS_ENV와 같은 자격을 쓴다.
+      LS_ENV: ${LS_ENV:-LIVE}
       LS_APP_KEY: ${LS_APP_KEY:-}
       LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
       LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}

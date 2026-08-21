@@ -62,8 +62,8 @@ def _install_successful_route(
         index = create.call_count
         create(**kwargs)
         if index == 0:
-            events.append("create-root-blocked")
-            return {"task_id": "t_root1", "status": "blocked"}
+            events.append("create-root-running")
+            return {"task_id": "t_root1", "status": "running"}
         events.append("create-trading-blocked")
         return {"task_id": "t_trade1", "status": "blocked"}
 
@@ -75,10 +75,16 @@ def _install_successful_route(
 
     monkeypatch.setattr(ceo.hermes_boundary, "comment_root_scope", comment_scope)
 
+    def complete(*, task_id: str, result: str) -> bool:
+        assert result
+        events.append(f"complete-{task_id}")
+        return True
+
     def unblock(*, task_id: str) -> bool:
         events.append(f"release-{task_id}")
         return True
 
+    monkeypatch.setattr(ceo.hermes_boundary, "complete_kanban_task", complete)
     monkeypatch.setattr(ceo.hermes_boundary, "unblock_kanban_task", unblock)
     return create
 
@@ -105,17 +111,17 @@ def test_exact_sample_is_durably_bound_before_either_card_is_released(
     assert events == [
         "authorize",
         "admit",
-        "create-root-blocked",
+        "create-root-running",
         "comment-root-scope",
         "bind-root",
         "create-trading-blocked",
         "bind-trading",
-        "release-t_root1",
+        "complete-t_root1",
         "release-t_trade1",
     ]
     assert create.call_count == 2
     root_call, trading_call = create.call_args_list
-    assert root_call.kwargs["initial_status"] == "blocked"
+    assert root_call.kwargs["initial_status"] == "running"
     assert trading_call.kwargs["initial_status"] == "blocked"
 
     root_body = root_call.kwargs["body"]
@@ -132,6 +138,7 @@ def test_exact_sample_is_durably_bound_before_either_card_is_released(
     assert "managed omission default: order_type=MARKET" in trading_body
     assert "limit_price=null, and no ORDER_TYPE evidence" in trading_body
     assert "conflicting market/limit language, must CLARIFY" in trading_body
+    assert "Every evidence item must include normalized" in trading_body
 
     stored = repository.get(response["order_request_id"])
     assert stored is not None
@@ -140,6 +147,194 @@ def test_exact_sample_is_durably_bound_before_either_card_is_released(
     assert stored.mode == "PAPER"
     assert response["order_mode"] == "PAPER"
     assert response["binding"] is False
+    assert response["task"]["status"] == "done"
+
+
+def test_unambiguous_production_order_uses_deterministic_fast_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    repository = _OrderedRepository(events)
+    create = _install_successful_route(
+        monkeypatch, events=events, repository=repository
+    )
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("USER_PAPER_ORDER_WORKFLOW_ENABLED", "true")
+    monkeypatch.setenv(
+        "USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED", "true"
+    )
+
+    execution = {
+        "decision": "EXECUTE",
+        "mode": "PAPER",
+        "binding": True,
+        "order_submitted": True,
+        "order_request_id": "filled-by-mock",
+        "request_state": "COMPLETED",
+        "user_message": (
+            "PAPER 주문 완료: 005930 매수 시장가(가격 미지정) "
+            "요청 3주/체결 3주, 평균 체결가 271,000원 (FILLED, LS 주문번호 17566)."
+        ),
+    }
+
+    def process(**kwargs: Any) -> dict[str, Any]:
+        events.append("deterministic-process")
+        assert kwargs["root_task_id"] == "t_root1"
+        assert kwargs["trading_task_id"] == "t_trade1"
+        interpretation = kwargs["interpretation"]
+        assert interpretation["instrument_mention"] == "삼성전자"
+        assert interpretation["side"] == "BUY"
+        assert interpretation["quantity"] == "3"
+        return execution
+
+    monkeypatch.setattr(ceo, "process_deterministic_user_paper_order", process)
+    response = ceo.ceo_query(
+        ceo.CeoAsk(
+            query="<@1536991290842030130> 삼성전자 3주 매수",
+            request_id="request-fast-100",
+            fund_id=FUND_ID,
+            book_id=BOOK_ID,
+        ),
+        owner_id=USER_ID,
+    )
+
+    assert create.call_count == 2
+    _, trading_call = create.call_args_list
+    assert trading_call.kwargs["initial_status"] == "running"
+    assert "user-paper-order-deterministic.v1" in trading_call.kwargs["body"]
+    assert "mcp_tool=process_user_paper_order" not in trading_call.kwargs["body"]
+    assert events == [
+        "authorize",
+        "admit",
+        "create-root-running",
+        "comment-root-scope",
+        "bind-root",
+        "create-trading-blocked",
+        "bind-trading",
+        "complete-t_root1",
+        "deterministic-process",
+        "complete-t_trade1",
+    ]
+    assert response["order_state"] == "COMPLETED"
+    assert response["answer"] == execution["user_message"]
+    assert response["execution"] == execution
+    assert response["task"]["status"] == "done"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "SK하이닉스 보유수량 확인해서 시장가로 1주 매도",
+        "내 PAPER 계좌에서 보유 중인 삼성전자 2주 시장가 매도해줘",
+        "지금 삼성전자 한 주 시장가로 매수 주문 넣어주세요",
+        "모의투자 계좌에서 SK하이닉스 1주 팔아줘",
+        "현재 보유잔고 조회 후 SK하이닉스 1주 매도 요청",
+    ],
+)
+def test_safe_natural_order_variants_enter_the_bound_paper_lane(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+) -> None:
+    events: list[str] = []
+    repository = _OrderedRepository(events)
+    create = _install_successful_route(
+        monkeypatch, events=events, repository=repository
+    )
+
+    response = ceo.ceo_query(
+        ceo.CeoAsk(
+            query=raw,
+            request_id="request-natural-variant",
+            fund_id=FUND_ID,
+            book_id=BOOK_ID,
+        ),
+        owner_id=USER_ID,
+    )
+
+    assert create.call_count == 2
+    root_call, trading_call = create.call_args_list
+    assert root_call.kwargs["initial_status"] == "running"
+    assert trading_call.kwargs["initial_status"] == "blocked"
+    assert raw in root_call.kwargs["body"]
+    assert raw in trading_call.kwargs["body"]
+    assert response["order_mode"] == "PAPER"
+    assert response["planning"]["selected_departments"] == ["trading-department"]
+
+    stored = repository.get(response["order_request_id"])
+    assert stored is not None
+    assert stored.raw_instruction == raw
+
+
+def test_conditional_command_uses_only_the_precreated_trading_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    repository = _OrderedRepository(events)
+    create = _install_successful_route(
+        monkeypatch, events=events, repository=repository
+    )
+    raw = "삼성전자 5분봉 RSI가 30을 상향 돌파하면 1주 매수"
+
+    response = ceo.ceo_query(
+        ceo.CeoAsk(
+            query=raw,
+            request_id="request-conditional-100",
+            fund_id=FUND_ID,
+            book_id=BOOK_ID,
+        ),
+        owner_id=USER_ID,
+    )
+
+    assert create.call_count == 2
+    root_call, trading_call = create.call_args_list
+    assert root_call.kwargs["assignee"] == "ceo-agent"
+    assert trading_call.kwargs["assignee"] == "trading-department"
+    assert root_call.kwargs["initial_status"] == "running"
+    assert trading_call.kwargs["initial_status"] == "blocked"
+    trading_body = trading_call.kwargs["body"]
+    assert "hgfinance.user-conditional-paper-rule.v1" in trading_body
+    assert "mcp_tool=process_user_conditional_paper_rule" in trading_body
+    assert "activation_policy=IMMEDIATE_AFTER_DETERMINISTIC_VALIDATION" in trading_body
+    assert "Do not create Risk, QA, Research, Accounting" in trading_body
+    assert raw in trading_body
+    assert response["conditional_rule"] is True
+    assert response["order_state"] == "RULE_INTERPRETATION_QUEUED"
+    assert response["planning"]["selected_departments"] == ["trading-department"]
+    assert response["planning"]["qa_required"] is False
+
+    stored = repository.get(response["order_request_id"])
+    assert stored is not None
+    assert stored.mode == "PAPER"
+    assert stored.ceo_root_task_id == "t_root1"
+    assert stored.trading_task_id == "t_trade1"
+
+
+def test_conditional_advice_question_does_not_enter_the_binding_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    create = Mock(return_value={"task_id": "t_root2", "status": "ready"})
+    repository = Mock(side_effect=AssertionError("advice must not admit a rule"))
+    monkeypatch.setattr(ceo, "fetch_current_mandate_by_fund", lambda _fund: None)
+    monkeypatch.setattr(ceo, "user_order_repository", repository)
+    monkeypatch.setattr(ceo.hermes_boundary, "create_kanban_task", create)
+    monkeypatch.setattr(ceo.hermes_boundary, "comment_root_scope", lambda **_kw: True)
+    monkeypatch.setattr(ceo, "_wait_for_planning", lambda _task_id: ceo._accepted_fallback())
+
+    response = ceo.ceo_query(
+        ceo.CeoAsk(
+            query="삼성전자 RSI 30 이하이면 1주 매수해도 될까?",
+            request_id="request-conditional-advice",
+            fund_id=FUND_ID,
+            book_id=BOOK_ID,
+        ),
+        owner_id=USER_ID,
+    )
+
+    create.assert_called_once()
+    assert "initial_status" not in create.call_args.kwargs
+    assert "user-conditional-paper-rule" not in create.call_args.kwargs["body"]
+    assert "order_request_id" not in response
+    repository.assert_not_called()
 
 
 @pytest.mark.parametrize(

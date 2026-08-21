@@ -210,7 +210,7 @@ export default function HermesKanbanBoard({
                 </span>
               </div>
 
-              <div className="mt-3 flex flex-col gap-2">
+              <div className="mt-3 flex max-h-[28rem] flex-col gap-2 overflow-y-auto pr-1">
                 {cards.length > 0 ? (
                   cards.map((card) => <HermesKanbanCardView key={card.task_id} card={card} />)
                 ) : (

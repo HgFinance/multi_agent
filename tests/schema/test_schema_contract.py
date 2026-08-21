@@ -215,6 +215,22 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  # PAPER order payloads and legs accept canonical six-character
                  # uppercase alphanumeric KRX stock codes.
                  "20260819000100_krx_alphanumeric_trading_symbols.sql",
+                 # Factory planning sessions may read only their governed
+                 # Research inputs through svc_quant.
+                 "20260819000200_factory_autopilot_research_read.sql",
+                 # Dataset publication uses a dedicated NOINHERIT role rather
+                 # than broadening the quant planning session.
+                 "20260819000300_dataset_builder_runtime_role.sql",
+                 # factory_autopilot reads the governed research queue it
+                 # measures through svc_quant and gains no research write path.
+                 "20260820000100_factory_quant_research_reads.sql",
+                 # Only the PUBLISHED -> ACCEPTED/REJECTED lifecycle status may
+                 # move; the immutable research payload stays read-only.
+                 "20260820000200_factory_proposal_lifecycle_status.sql",
+                 # Authenticated standing PAPER rules are a separate authority
+                 # from immediate USER_DIRECTIVE requests and automated
+                 # strategy OrderIntents.
+                 "20260820000300_conditional_paper_rules.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 
@@ -1024,7 +1040,8 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             # per-book priority barrier, and direct fill evidence.
             # +3 (2026-08-18): durable CEO/Hermes PAPER-order requests,
             # append-only interpretations, and transition audit events.
-            "execution": 23,
+            # +7: 20260820000300_conditional_paper_rules.sql
+            "execution": 30,
             "governance": 20,
             # +1 (재일, 2026-08-10): 공장 재편으로 실험 사전등록/결과 원장 확장
             # +1 (재일, 2026-08-16): 사전 데이터 타당성 점검을 trial에서 분리

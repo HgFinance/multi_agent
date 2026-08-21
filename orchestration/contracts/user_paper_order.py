@@ -101,7 +101,14 @@ class TextEvidence(BaseModel):
     start: int = Field(ge=0)
     end: int = Field(gt=0)
     text: str = Field(min_length=1, max_length=200)
-    normalized: str | None = Field(default=None, max_length=200)
+    normalized: str | None = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "Required for execution evidence. INSTRUMENT must exactly equal "
+            "instrument_mention; enum and numeric fields use canonical values."
+        ),
+    )
 
     @model_validator(mode="after")
     def _ordered_span(self) -> "TextEvidence":

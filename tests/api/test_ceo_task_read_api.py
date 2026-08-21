@@ -848,17 +848,13 @@ class CeoTaskApiTest(unittest.TestCase):
 
         self.assertIsNone(response.json()["result"])
 
-    def test_archive_covers_the_whole_graph_children_first(self) -> None:
+    def test_archive_endpoint_rejects_unsafe_active_workflow(self) -> None:
         workflow = load_workflow(ROOT_ID, fetch=_fetch_from(_board()))
         with patch.object(ceo, "load_workflow", return_value=workflow):
-            with patch.object(ceo, "archive_tasks") as archive:
-                response = self.client.post(f"/ui/ceo/tasks/{ROOT_ID}/archive")
+            response = self.client.post(f"/ui/ceo/tasks/{ROOT_ID}/archive")
 
-        self.assertEqual(response.status_code, 200)
-        archived = archive.call_args.args[0]
-        self.assertEqual(archived[-1], ROOT_ID, "Root는 마지막이어야 한다")
-        self.assertEqual(set(archived), {ROOT_ID, RESEARCH_ID, RISK_ID, QA_ID, SYNTHESIS_ID})
-        self.assertEqual(response.json()["status"], "archived")
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("archive", response.json()["detail"])
 
     def test_unknown_task_is_404(self) -> None:
         with patch.object(ceo, "load_workflow", side_effect=KanbanTaskNotFound("no such task")):

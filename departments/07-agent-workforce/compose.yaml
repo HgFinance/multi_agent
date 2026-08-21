@@ -9,7 +9,8 @@
 services:
   workforce-api:
     build:
-      context: .
+      context: ../..
+      dockerfile: departments/07-agent-workforce/Dockerfile
     container_name: hedgefund-workforce-api
     restart: unless-stopped
     logging:
@@ -19,6 +20,14 @@ services:
         max-file: "3"
     environment:
       DATABASE_URL: ${GOVERNANCE_WORKFORCE_DATABASE_URL:-${DATABASE_URL:-}}
+      # Langfuse(2026-08-10 도입, 993682f). 이 컨테이너는 **읽는** 쪽이다 -
+      # GET /workforce/v1/departments/idle-agents 가 6개 투자본부 Worker의
+      # 마지막 관측 시각만 조회한다(scorecard/observability.py). Trace 원문
+      # (input/output)은 절대 읽지 않는다(.env.example 3-2절).
+      # 비어 있으면 501이 아니라 전원 UNAVAILABLE로 정직하게 응답한다.
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
     ports:
       - "127.0.0.1:8044:8000"   # 로컬 전용 - 외부 노출 금지
     mem_limit: 256m
@@ -32,7 +41,8 @@ services:
   # Consumer Group용 Event(workforce.access_request.v1 등)는 조용히 넘긴다.
   improvement-worker:
     build:
-      context: .
+      context: ../..
+      dockerfile: departments/07-agent-workforce/Dockerfile
     container_name: hedgefund-improvement-worker
     restart: unless-stopped
     logging:

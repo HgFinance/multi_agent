@@ -35,6 +35,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import os
 import re
@@ -60,11 +62,20 @@ from ledger_store import STORE as LEDGER_STORE
 
 router = APIRouter(tags=["portfolio-live"])
 
-ENABLE_LS_ORDER_EVENTS = os.getenv("ENABLE_LS_ORDER_EVENTS", "false").strip().lower() in {
-    "1", "true", "yes", "on",
-}
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    return os.getenv(name, "true" if default else "false").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+ENABLE_LS_ORDER_EVENTS = _env_flag("ENABLE_LS_ORDER_EVENTS")
+# 시장 순위는 REST만 사용한다. 계좌 WebSocket을 켜지 않고도 시장 데이터만
+# 복구할 수 있게 별도 opt-in으로 둔다.
+ENABLE_LS_MARKET_DATA = _env_flag("ENABLE_LS_MARKET_DATA")
+# 거래내역·잔고 조회도 REST만 사용한다. 실시간 주문 이벤트와 분리한다.
+ENABLE_LS_ACCOUNT_DATA = _env_flag("ENABLE_LS_ACCOUNT_DATA")
 MAX_EVENTS = int(os.getenv("LS_ORDER_EVENTS_MAX", "200"))
-DAILY_RETURNS_DAYS = 30
 # 거래내역 TR은 초당 1건이다. 화면이 3초마다 폴링해도 브로커를 때리지 않도록
 # 응답을 캐시한다 - 확정된 과거 거래라 자주 바뀌지 않는다.
 LEDGER_DAYS = int(os.getenv("ACCOUNTING_LEDGER_DAYS", "30"))
@@ -278,27 +289,69 @@ def mask_account(account_no: str | None) -> str | None:
     return "****" + str(account_no)[-4:]
 
 
+def _event_id(source: str, *parts: Any) -> str:
+    """Return a stable, non-secret identity for one projected broker event."""
+
+    identity = json.dumps(
+        [source, *("" if part is None else str(part) for part in parts)],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+
+
+def _execution_origin(channel: str | None) -> str:
+    """Classify only what the broker explicitly says; never guess our caller."""
+
+    normalized = str(channel or "").strip().casefold()
+    if "hts" in normalized or "투혼" in normalized:
+        return "EXTERNAL_HTS"
+    if "api" in normalized:
+        return "BROKER_API_UNATTRIBUTED"
+    if normalized:
+        return "BROKER_CHANNEL_UNATTRIBUTED"
+    return "BROKER_ACCOUNT_UNATTRIBUTED"
+
+
 def normalize_order_event(tr_cd: str, body: dict[str, Any], seq: int) -> dict[str, Any]:
     """브로커 푸시 1건 → 화면 계약. LS 필드명은 여기서 끝난다."""
     kind = _TR_TO_KIND[tr_cd]
+    received_at = datetime.now(timezone.utc).isoformat()
+    event_time = _pick(body, "exectime", "ordtm")
+    order_no = _number(_pick(body, "ordno"))
+    symbol = _symbol(_pick(body, "shtcode", "shtnIsuno", "expcode", "Isuno"))
+    side = _side(_pick(body, "bnstp"))
+    quantity = _number(
+        _pick(body, "execqty", "mdfycnfqty", "canccnfqty", "rjtqty", "ordqty")
+    )
+    price = _number(_pick(body, "execprc", "mdfycnfprc", "ordprice", "ordprc"))
     return {
         "seq": seq,
+        "event_id": _event_id(
+            "LS_REALTIME", kind, order_no, symbol, side, event_time, quantity, price
+        ),
         "kind": kind,
         "label": KIND_LABELS[kind],
-        "received_at": datetime.now(timezone.utc).isoformat(),
+        "received_at": received_at,
         # 시각: 체결은 체결시각, 나머지는 주문시각
-        "event_time": _pick(body, "exectime", "ordtm"),
-        "order_no": _number(_pick(body, "ordno")),
+        "event_time": event_time,
+        "order_no": order_no,
+        "broker_order_id": order_no,
+        "broker_order_ids": [order_no] if order_no else [],
+        "trade_no": None,
         "orig_order_no": _number(_pick(body, "orgordno")),
-        "symbol": _symbol(_pick(body, "shtcode", "shtnIsuno", "expcode", "Isuno")),
+        "symbol": symbol,
         "symbol_name": _pick(body, "hname", "Isunm"),
-        "side": _side(_pick(body, "bnstp")),
+        "side": side,
         # 체결이면 체결수량·체결가, 아니면 주문수량·주문가
-        "quantity": _number(
-            _pick(body, "execqty", "mdfycnfqty", "canccnfqty", "rjtqty", "ordqty")
-        ),
-        "price": _number(_pick(body, "execprc", "mdfycnfprc", "ordprice", "ordprc")),
+        "quantity": quantity,
+        "price": price,
         "unfilled_quantity": _number(_pick(body, "unercqty", "orgordunercqty")),
+        "source": "LS_REALTIME",
+        "execution_channel": None,
+        "execution_channels": [],
+        "origin": "BROKER_EVENT_UNATTRIBUTED",
+        "correlation_status": "UNATTRIBUTED",
     }
 
 
@@ -332,21 +385,6 @@ def normalize_holdings(payload: dict[str, Any]) -> dict[str, Any]:
             if isinstance(row, dict)
         ],
     }
-
-
-def normalize_daily_returns(payload: dict[str, Any]) -> list[dict[str, str]]:
-    """FOCCQ33600 응답 → 일별 수익률 화면 계약."""
-    rows = payload.get("FOCCQ33600OutBlock3")
-    rows = rows if isinstance(rows, list) else []
-    normalized: list[dict[str, str]] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        base_date = _pick(row, "BaseDt")
-        return_rate = _number(row.get("TermErnrat"))
-        if base_date and return_rate is not None:
-            normalized.append({"date": base_date, "return_rate": return_rate})
-    return normalized
 
 
 def normalize_today_activity(payload: dict[str, Any]) -> dict[str, Any]:
@@ -393,17 +431,18 @@ def normalize_executions(payload: dict[str, Any]) -> dict[tuple[str, str], dict[
             continue
         time_text = _pick(row, "LastExecTime", "ExecTrxTime", "OrdTime")
         key = (symbol, side)
-        current = index.get(key)
-        if current is None or (time_text or "") > (current.get("time") or ""):
-            index[key] = {
-                "time": time_text,
-                "name": _pick(row, "IsuNm"),
-                "count": (current or {}).get("count", 0) + 1,
-            }
-        else:
-            current["count"] = current.get("count", 0) + 1
-            if not current.get("name"):
-                current["name"] = _pick(row, "IsuNm")
+        current = index.setdefault(
+            key,
+            {"time": None, "name": None, "count": 0, "broker_order_ids": []},
+        )
+        current["count"] = current.get("count", 0) + 1
+        if (time_text or "") > (current.get("time") or ""):
+            current["time"] = time_text
+        if not current.get("name"):
+            current["name"] = _pick(row, "IsuNm")
+        order_no = _number(row.get("OrdNo"))
+        if order_no and order_no not in current["broker_order_ids"]:
+            current["broker_order_ids"].append(order_no)
     return index
 
 
@@ -430,20 +469,64 @@ def normalize_accepted_orders(
             continue
         seen_order_nos.add(order_no)
         order_time = _pick(row, "OrdTime")
+        symbol = _symbol(_pick(row, "IsuNo"))
+        side = _side(_pick(row, "BnsTpCode"))
+        quantity = _number(row.get("OrdQty"))
+        requested_price = _number(row.get("OrdPrc"))
+        filled_quantity = _number(
+            row.get("AllExecQty") or row.get("ExecQty") or 0
+        )
+        execution_price = _number(row.get("ExecPrc"))
+        has_fill = _dec(filled_quantity) > 0
+        kind = "FILLED" if has_fill else "ACCEPTED"
+        event_time = _pick(row, "LastExecTime", "ExecTrxTime") if has_fill else order_time
+        price = execution_price if has_fill and _dec(execution_price) > 0 else requested_price
+        unfilled_quantity = max(Decimal(0), _dec(quantity) - _dec(filled_quantity))
         events.append({
             "seq": 0,  # 병합 뒤 전체 목록 기준으로 다시 부여한다.
-            "kind": "ACCEPTED",
-            "label": KIND_LABELS["ACCEPTED"],
-            "received_at": day + ("T" + order_time if order_time else ""),
-            "event_time": order_time,
+            "event_id": _event_id(
+                "LS_ORDER_HISTORY",
+                kind,
+                order_no,
+                symbol,
+                side,
+                order_time,
+                quantity,
+                price,
+            ),
+            "kind": kind,
+            "label": (
+                "부분체결"
+                if has_fill and unfilled_quantity > 0
+                else KIND_LABELS[kind]
+            ),
+            "received_at": day + ("T" + event_time if event_time else ""),
+            "event_time": event_time,
             "order_no": order_no,
+            "broker_order_id": order_no,
+            "broker_order_ids": [order_no],
+            "trade_no": None,
             "orig_order_no": _number(row.get("OrgOrdNo")),
-            "symbol": _symbol(_pick(row, "IsuNo")),
+            "symbol": symbol,
             "symbol_name": _pick(row, "IsuNm"),
-            "side": _side(_pick(row, "BnsTpCode")),
-            "quantity": _number(row.get("OrdQty")),
-            "price": _number(row.get("OrdPrc")),
-            "unfilled_quantity": None,
+            "side": side,
+            "quantity": quantity,
+            "price": price,
+            "requested_price": (
+                requested_price if _dec(requested_price) > 0 else None
+            ),
+            "filled_quantity": filled_quantity,
+            "average_fill_price": (
+                execution_price
+                if has_fill and _dec(execution_price) > 0
+                else None
+            ),
+            "unfilled_quantity": str(unfilled_quantity),
+            "source": "LS_ORDER_HISTORY",
+            "execution_channel": None,
+            "execution_channels": [],
+            "origin": "BROKER_ORDER_UNATTRIBUTED",
+            "correlation_status": "UNATTRIBUTED",
         })
 
     events.sort(
@@ -468,6 +551,12 @@ def attach_executions(
             row["trade_time"] = found.get("time")
         if not row.get("symbol_name"):
             row["symbol_name"] = found.get("name")
+        broker_order_ids = list(found.get("broker_order_ids") or [])
+        row["broker_order_ids"] = broker_order_ids
+        row["broker_order_id"] = (
+            broker_order_ids[0] if len(broker_order_ids) == 1 else None
+        )
+        row["execution_count"] = found.get("count")
     return rows
 
 
@@ -557,6 +646,13 @@ def normalize_today_trades(payload: dict[str, Any], today: str) -> dict[str, Any
             continue  # 짝이 없는 소계는 귀속시킬 곳이 없다
         head = group[0]
         side = _pick(head, "medosu") or ""
+        execution_channels = list(
+            dict.fromkeys(
+                channel
+                for item in group
+                if (channel := _pick(item, "middiv")) is not None
+            )
+        )
         # 비용은 소계, 종목·매매구분은 매매행. 둘 중 하나만 보면 반쪽이다.
         commission = _dec(row.get("fee"))
         tax = _dec(row.get("tax")) + _dec(row.get("argtax"))
@@ -586,6 +682,17 @@ def normalize_today_trades(payload: dict[str, Any], today: str) -> dict[str, Any
             "cash_before": None,
             "cash_after": None,
             "currency": "KRW",
+            # LS가 명시한 주문 채널(예: "투혼(HTS)")을 버리지 않는다. 이 값은
+            # 자연어 주문과 외부 HTS 주문을 구분하는 유일한 브로커 근거가 될 수 있다.
+            "execution_channel": (
+                execution_channels[0]
+                if len(execution_channels) == 1
+                else ("MIXED" if execution_channels else None)
+            ),
+            "execution_channels": execution_channels,
+            "broker_order_id": None,
+            "broker_order_ids": [],
+            "execution_count": len(group),
         })
         group = []
     return {"rows": merged}
@@ -666,6 +773,13 @@ def normalize_ledger(payload: dict[str, Any]) -> dict[str, Any]:
             "cash_before": _number(row.get("DpsBfbalAmt")),
             "cash_after": _number(row.get("DpsCrbalAmt")),
             "currency": _pick(row, "CrcyCode"),
+            # 결제 원장에는 주문 채널과 주문번호가 없다. 거래번호를 주문번호로
+            # 승격하지 않고 명시적으로 미상으로 둔다.
+            "execution_channel": None,
+            "execution_channels": [],
+            "broker_order_id": None,
+            "broker_order_ids": [],
+            "execution_count": None,
         })
     # 최신이 위로. 같은 날이면 거래번호 순이다.
     normalized.sort(key=lambda item: (item["trade_date"] or "", item["trade_no"] or ""), reverse=True)
@@ -701,6 +815,26 @@ def ledger_to_order_events(ledger: dict[str, Any], limit: int) -> list[dict[str,
         trade_date = str(row.get("trade_date") or "")
         trade_time = str(row.get("trade_time") or "") or None
         trade_no = str(row.get("trade_no") or "") or None
+        broker_order_ids = [
+            str(value)
+            for value in (row.get("broker_order_ids") or [])
+            if str(value or "").strip()
+        ]
+        explicit_broker_order_id = str(row.get("broker_order_id") or "").strip()
+        if explicit_broker_order_id and explicit_broker_order_id not in broker_order_ids:
+            broker_order_ids.append(explicit_broker_order_id)
+        broker_order_id = broker_order_ids[0] if len(broker_order_ids) == 1 else None
+        execution_channel = str(row.get("execution_channel") or "").strip() or None
+        execution_channels = [
+            str(value)
+            for value in (row.get("execution_channels") or [])
+            if str(value or "").strip()
+        ]
+        source = (
+            "LS_TODAY_TRADE_LEDGER"
+            if row.get("settlement") == "UNSETTLED"
+            else "LS_SETTLED_ACCOUNT_LEDGER"
+        )
         category = str(row.get("category") or "")
         if "매도" in category:
             side = "매도"
@@ -708,15 +842,31 @@ def ledger_to_order_events(ledger: dict[str, Any], limit: int) -> list[dict[str,
             side = "매수"
         else:
             side = category or None
+        event_id = _event_id(
+            source,
+            trade_date,
+            trade_no,
+            row.get("symbol"),
+            side,
+            trade_time,
+            row.get("quantity"),
+            row.get("unit_price"),
+            execution_channel,
+        )
         events.append({
             # 최신 거래가 먼저 오므로 seq도 화면에서 유일하게 역순으로 준다.
             "seq": len(rows) - index,
+            "event_id": event_id,
             "kind": "FILLED",
             "label": "체결",
             "received_at": trade_date + ("T" + trade_time if trade_time else ""),
             "event_time": trade_time,
-            # 기존 표의 마지막 열을 유지하기 위해 거래번호를 사용한다.
-            "order_no": trade_no,
+            # 거래번호와 주문번호는 서로 다른 식별자다. 주문번호가 LS 주문
+            # 조회로 한 개 확정된 경우에만 기존 order_no 칸에도 넣는다.
+            "order_no": broker_order_id,
+            "broker_order_id": broker_order_id,
+            "broker_order_ids": broker_order_ids,
+            "trade_no": trade_no,
             "orig_order_no": None,
             "symbol": row.get("symbol"),
             "symbol_name": row.get("symbol_name"),
@@ -724,6 +874,11 @@ def ledger_to_order_events(ledger: dict[str, Any], limit: int) -> list[dict[str,
             "quantity": row.get("quantity"),
             "price": row.get("unit_price"),
             "unfilled_quantity": None,
+            "source": source,
+            "execution_channel": execution_channel,
+            "execution_channels": execution_channels,
+            "origin": _execution_origin(execution_channel),
+            "correlation_status": "UNATTRIBUTED",
         })
     return events
 
@@ -742,9 +897,45 @@ def merge_order_events(
     # 주문번호가 없을 때도 화면 계약 필드 조합으로 중복을 막되 값을 지어내지 않는다.
     events: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
-    candidates = [
-        event for event in realtime_events if event.get("kind") != "FILLED"
-    ] + list(ledger_events)
+    projected_ledger = [dict(event) for event in ledger_events]
+    supplemental: list[dict[str, Any]] = []
+    for event in realtime_events:
+        if event.get("kind") != "FILLED":
+            supplemental.append(event)
+            continue
+        # Raw SC1 pushes are already represented by the account ledger.  The
+        # CSPAQ13700 projection is different: it carries the actual LS order
+        # number plus requested and execution prices.  Enrich one exact ledger
+        # match, or keep it as independent broker evidence when t0150 omitted
+        # that fill (the observed API-order case).
+        if event.get("source") != "LS_ORDER_HISTORY":
+            continue
+        order_no = str(event.get("order_no") or "").strip()
+        matches = [
+            candidate
+            for candidate in projected_ledger
+            if order_no
+            and order_no
+            in {
+                str(value)
+                for value in candidate.get("broker_order_ids") or []
+            }
+        ]
+        if len(matches) == 1:
+            match = matches[0]
+            match["order_no"] = order_no
+            match["broker_order_id"] = order_no
+            for field in (
+                "requested_price",
+                "filled_quantity",
+                "average_fill_price",
+                "unfilled_quantity",
+            ):
+                if event.get(field) is not None:
+                    match[field] = event[field]
+        else:
+            supplemental.append(event)
+    candidates = supplemental + projected_ledger
     for event in candidates:
         order_no = event.get("order_no")
         key = (
@@ -844,9 +1035,6 @@ class _Feed:
         self.holdings: dict[str, Any] | None = None
         self.holdings_as_of: str | None = None
         self.holdings_error: str | None = None
-        self.daily_returns: list[dict[str, str]] = []
-        self.daily_returns_as_of: str | None = None
-        self.daily_returns_error: str | None = None
         self.today_activity: dict[str, Any] | None = None
         self.today_activity_as_of: str | None = None
         self.today_activity_error: str | None = None
@@ -889,10 +1077,6 @@ class _Feed:
         }
         self.positions_initialized = True
 
-    def sync_daily_returns(self, daily_returns: list[dict[str, str]]) -> None:
-        self.daily_returns = daily_returns
-        self.daily_returns_as_of = datetime.now(timezone.utc).isoformat()
-
     def sync_today_activity(self, activity: dict[str, Any]) -> None:
         self.today_activity = activity
         self.today_activity_as_of = datetime.now(timezone.utc).isoformat()
@@ -907,14 +1091,19 @@ class _Feed:
 FEED = _Feed()
 
 
-def _config() -> tuple[Any, str]:
+def _config(
+    *,
+    require_ws: bool = True,
+) -> tuple[Any, str]:
     """(REST 자격, WS URL). 자격이 없으면 여기서 fail-closed."""
     import ls_openapi  # type: ignore[import-not-found]
 
     config = ls_openapi.LSOpenAPIConfig.from_env()
     suffix = "_PAPER" if config.environment == "PAPER" else ""
+    if not require_ws:
+        return config, ""
     ws_url = (os.getenv("LS_WS_BASE_URL" + suffix, "") or os.getenv("LS_WS_BASE_URL", "")).strip()
-    if not ws_url:
+    if require_ws and not ws_url:
         raise RuntimeError("LS_WS_BASE_URL" + suffix + "가 설정되지 않았습니다.")
     # 수집 문서의 "접속 경로 `/websocket/stock`"은 실제 게이트웨이와 다르다.
     # `/websocket/stock`은 handshake에 응답조차 하지 않고, `/websocket`이 붙는다
@@ -922,8 +1111,15 @@ def _config() -> tuple[Any, str]:
     return config, ws_url.rstrip("/") + "/websocket"
 
 
-async def _issue_token(config: Any) -> str:
-    """OAuth. 동기 클라이언트를 asyncio에 끌어들이지 않으려고 여기서만 비동기다."""
+async def _issue_token(config: Any) -> tuple[str, float]:
+    """OAuth. 동기 클라이언트를 asyncio에 끌어들이지 않으려고 여기서만 비동기다.
+
+    (토큰, 만료 epoch초). LS는 롤링 TTL이 아니라 **다음날 07:00 KST 고정 만료**이고,
+    그날 안에 다시 요청하면 **같은 토큰을 그대로 돌려준다**(2026-08-20 실측: 49분
+    뒤 재요청에도 iat이 11:25:01로 동일). 그래서 `expires_in`은 지금이 아니라
+    최초 발급 시각 기준이라 `now + expires_in`으로 계산하면 경과한 만큼 만료를
+    넘겨 잡는다 - 토큰이 싣고 온 `exp`를 그대로 쓴다.
+    """
     import httpx
 
     async with httpx.AsyncClient(timeout=config.timeout_seconds) as client:
@@ -938,27 +1134,47 @@ async def _issue_token(config: Any) -> str:
             headers={"content-type": "application/x-www-form-urlencoded"},
         )
     response.raise_for_status()
-    token = response.json().get("access_token")
+    body = response.json()
+    token = body.get("access_token")
     if not isinstance(token, str) or not token:
         raise RuntimeError("LS OAuth 응답에 access_token이 없습니다")
-    return token
+    return token, _token_expiry(token)
 
 
-_token_cache: tuple[str, float] | None = None
+def _token_expiry(token: str) -> float:
+    """JWT payload의 `exp`(epoch초). 못 읽으면 4분 뒤로 본다.
+
+    서명은 검증하지 않는다 - 우리가 이 토큰을 인증하는 게 아니라 LS가 알려 준
+    만료 시각을 읽을 뿐이고, 못 읽으면 짧게 잡아 재발급으로 떨어진다.
+    """
+    try:
+        payload = token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        return float(claims["exp"])
+    except Exception:  # noqa: BLE001 - 만료를 못 읽는 것은 오류가 아니라 짧은 캐시다
+        return time.time() + 240.0
+
+
+_token_cache: dict[tuple[str, str], tuple[str, float]] = {}
 
 
 async def _access_token(config: Any) -> str:
-    """토큰 1장을 프로세스가 공유한다.
+    """같은 환경·App Key의 토큰만 프로세스가 공유한다.
 
     거래내역 조회마다 OAuth를 새로 치면 호출 한도를 그쪽에 쓰게 된다.
-    만료 여유는 짧게 잡는다 - 만료된 토큰으로 조회하면 조용히 401이다.
+    LS_ENV가 바뀐 뒤 이전 환경의 토큰을 재사용하지 않도록 환경·App Key별로
+    캐시를 분리한다.
+    만료는 토큰이 싣고 온 exp를 쓰되 1분 일찍 버린다 - 만료된 토큰으로 조회하면
+    조용히 401이다. 예전에는 실제 수명을 몰라 240초로 두었는데, 그러면 하루 한
+    장이면 될 것을 4분마다 새로 받는다(LS 권장은 하루 1회).
     """
-    global _token_cache
     now = time.time()
-    if _token_cache and _token_cache[1] > now:
-        return _token_cache[0]
-    token = await _issue_token(config)
-    _token_cache = (token, now + 240)
+    cache_key = (config.environment, config.app_key)
+    cached = _token_cache.get(cache_key)
+    if cached and cached[1] > now:
+        return cached[0]
+    token, expires_at = await _issue_token(config)
+    _token_cache[cache_key] = (token, max(now + 60.0, expires_at - 60.0))
     return token
 
 
@@ -987,6 +1203,23 @@ async def _post_tr(
     # JSON number는 double이라 Decimal이 깨진다. 금액·수량은 Decimal로 받는다.
     body = json.loads(response.text, parse_float=Decimal)
     return body if isinstance(body, dict) else {}
+
+
+def _ls_error_detail(exc: Exception) -> str:
+    """브로커 인증 거부의 원인을 화면에 전달하되 자격값은 노출하지 않는다."""
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if status in {401, 403} and response is not None:
+        try:
+            body = response.json()
+        except Exception:  # noqa: BLE001 - 원래 예외를 유지한다
+            body = None
+        if isinstance(body, dict):
+            description = body.get("error_description")
+            if isinstance(description, str) and description.strip():
+                return f"{description.strip()} (HTTP {status})"
+        return f"LS 인증이 거부되었습니다 (HTTP {status})"
+    return f"{type(exc).__name__}: {exc}"
 
 
 async def _fetch_account_no(config: Any, token: str) -> str | None:
@@ -1020,25 +1253,6 @@ async def _fetch_holdings(config: Any, token: str) -> dict[str, Any]:
         },
     )
     return normalize_holdings(body)
-
-
-async def _fetch_daily_returns(config: Any, token: str) -> list[dict[str, str]]:
-    """FOCCQ33600으로 최근 영업일별 계좌 수익률을 조회한다 (TermTp=1: 일별)."""
-    end_date = datetime.now(timezone.utc).date()
-    start_date = end_date - timedelta(days=DAILY_RETURNS_DAYS)
-    body = await _post_tr(
-        config,
-        token,
-        "FOCCQ33600",
-        {
-            "FOCCQ33600InBlock1": {
-                "QrySrtDt": start_date.strftime("%Y%m%d"),
-                "QryEndDt": end_date.strftime("%Y%m%d"),
-                "TermTp": "1",
-            }
-        },
-    )
-    return normalize_daily_returns(body)
 
 
 async def _fetch_today_activity(config: Any, token: str) -> dict[str, Any]:
@@ -1139,19 +1353,10 @@ async def _resync(config: Any, token: str) -> None:
     try:
         FEED.sync_holdings(await _fetch_holdings(config, token))
     except Exception as exc:  # noqa: BLE001 - 조회 실패를 '잔고 없음'으로 위장하지 않는다
-        FEED.holdings_error = (type(exc).__name__ + ": " + str(exc))[:200]
+        FEED.holdings_error = _ls_error_detail(exc)[:200]
     else:
         FEED.holdings_error = None
 
-
-async def _resync_daily_returns(config: Any, token: str) -> None:
-    """일별 수익률 조회 실패가 계좌 잔고 스트림을 막지 않게 별도로 기록한다."""
-    try:
-        FEED.sync_daily_returns(await _fetch_daily_returns(config, token))
-    except Exception as exc:  # noqa: BLE001 - 그래프만 비활성화하고 계좌 스트림은 유지한다
-        FEED.daily_returns_error = (type(exc).__name__ + ": " + str(exc))[:300]
-    else:
-        FEED.daily_returns_error = None
 
 
 async def _resync_today_activity(config: Any, token: str) -> None:
@@ -1159,7 +1364,7 @@ async def _resync_today_activity(config: Any, token: str) -> None:
     try:
         FEED.sync_today_activity(await _fetch_today_activity(config, token))
     except Exception as exc:  # noqa: BLE001 - 카드만 비활성화하고 계좌 스트림은 유지한다
-        FEED.today_activity_error = (type(exc).__name__ + ": " + str(exc))[:300]
+        FEED.today_activity_error = _ls_error_detail(exc)[:300]
     else:
         FEED.today_activity_error = None
 
@@ -1171,13 +1376,13 @@ async def _run_feed() -> None:
     while True:
         try:
             config, ws_url = _config()
-            token = await _issue_token(config)
+            token, _ = await _issue_token(config)
 
             if not FEED.account:
                 try:
                     FEED.account = await _fetch_account_no(config, token)
                 except Exception as exc:  # noqa: BLE001 - 계좌 조회 실패가 구독을 막지 않는다
-                    FEED.account_error = (type(exc).__name__ + ": " + str(exc))[:200]
+                    FEED.account_error = _ls_error_detail(exc)[:200]
                 else:
                     FEED.account_error = None
 
@@ -1198,7 +1403,6 @@ async def _run_feed() -> None:
                 backoff = 1.0
                 # 체결이 없어도 잔고는 보여야 한다. 붙자마자 한 번 맞춘다.
                 await _resync(config, token)
-                await _resync_daily_returns(config, token)
                 await _resync_today_activity(config, token)
 
                 async for raw in socket:
@@ -1217,7 +1421,7 @@ async def _run_feed() -> None:
             raise
         except Exception as exc:  # noqa: BLE001 - 끊김을 "사건 없음"으로 위장하지 않는다
             FEED.status = "DISCONNECTED"
-            FEED.error = (type(exc).__name__ + ": " + str(exc))[:300]
+            FEED.error = _ls_error_detail(exc)[:300]
         await asyncio.sleep(backoff)
         backoff = min(backoff * 2, 60.0)
 
@@ -1228,7 +1432,7 @@ async def _run_feed() -> None:
 
 def _registered_account() -> str | None:
     """정본은 브로커가 말해 준 값이다. `.env`는 계좌가 여럿일 때의 덮어쓰기용."""
-    environment = os.getenv("LS_ENV", "PAPER").strip().upper()
+    environment = os.getenv("LS_ENV", "LIVE").strip().upper()
     suffix = "_PAPER" if environment == "PAPER" else ""
     return (os.getenv("LS_ACCOUNT_NO" + suffix, "") or "").strip() or FEED.account
 
@@ -1243,7 +1447,7 @@ async def portfolio_live(limit: int = 50) -> dict[str, Any]:
             "(ENABLE_LS_ORDER_EVENTS=true 로 엽니다).",
         )
     FEED.start()
-    environment = os.getenv("LS_ENV", "PAPER").strip().upper()
+    environment = os.getenv("LS_ENV", "LIVE").strip().upper()
     history_error: str | None = None
     order_source = "CDPCQ04700+CSPAQ13700+SC_REALTIME"
     try:
@@ -1260,11 +1464,16 @@ async def portfolio_live(limit: int = 50) -> dict[str, Any]:
             limit,
         )
     except Exception as exc:  # noqa: BLE001 - 잔고/스트림 화면을 거래내역 장애로 막지 않는다
-        history_error = (type(exc).__name__ + ": " + str(exc))[:300]
+        history_error = _ls_error_detail(exc)[:300]
         order_source = "SC_REALTIME_FALLBACK"
         recent_orders = list(FEED.events)[: max(1, min(limit, MAX_EVENTS))]
 
     account_no = _registered_account()
+    account_masked = mask_account(account_no)
+    for event in recent_orders:
+        # 주문 사건만 따로 떼어 로그로 남겨도 어느 PAPER 계좌를 읽은 것인지
+        # 확인할 수 있게 한다. 전체 계좌번호는 절대 싣지 않는다.
+        event["account_masked"] = account_masked
     counts = {kind: 0 for kind in KINDS}
     for event in recent_orders:
         counts[event["kind"]] = counts.get(event["kind"], 0) + 1
@@ -1274,7 +1483,7 @@ async def portfolio_live(limit: int = 50) -> dict[str, Any]:
         "environment_label": "모의투자" if environment == "PAPER" else "실전투자",
         "account": {
             "registered": account_no is not None,
-            "masked": mask_account(account_no),
+            "masked": account_masked,
             "error": FEED.account_error,
         },
         "stream": {
@@ -1298,11 +1507,6 @@ async def portfolio_live(limit: int = 50) -> dict[str, Any]:
             **(FEED.holdings or {"net_asset": None, "realized_pnl": None,
                                  "purchase_amount": None, "valuation": None,
                                  "valuation_pnl": None, "rows": []}),
-        },
-        "performance": {
-            "daily_returns": FEED.daily_returns,
-            "as_of": FEED.daily_returns_as_of,
-            "error": FEED.daily_returns_error,
         },
         "today_activity": {
             "as_of": FEED.today_activity_as_of,
@@ -1366,7 +1570,7 @@ async def _load_ledger(
             return cached[1], start, end
 
         try:
-            config, _ = _config()
+            config, _ = _config(require_ws=False)
             token = await _access_token(config)
             # 실시간 구독이 아직 계좌번호를 채우지 못해도 거래내역 화면은 독립적으로
             # 동작해야 한다. 같은 자격으로 계좌번호를 먼저 확인한다.
@@ -1388,7 +1592,7 @@ async def _load_ledger(
                 "cash_balance": kept[0].get("cash_after"),
                 "notice": None,
                 "persisted": True,
-                "source_error": (type(exc).__name__ + ": " + str(exc))[:200],
+                "source_error": _ls_error_detail(exc)[:200],
                 "today_error": None,
             }
             _ledger_cache[key] = (time.time(), merged)
@@ -1401,7 +1605,7 @@ async def _load_ledger(
             await _tr_slot()
             today_rows = await _fetch_today_trades(config, token)
         except Exception as exc:  # noqa: BLE001 - 오늘분 실패를 '거래 없음'으로 위장하지 않는다
-            today_error = (type(exc).__name__ + ": " + str(exc))[:200]
+            today_error = _ls_error_detail(exc)[:200]
         else:
             # 시각·종목명은 있으면 좋은 값이다. 여기서 실패해도 금액은 그대로
             # 나가야 하므로 원장 전체를 막지 않는다.
@@ -1446,7 +1650,7 @@ async def _load_market_ranking(ranking: str) -> dict[str, Any]:
         cached = _market_ranking_cache.get(ranking)
         if cached and time.time() - cached[0] < max(0, MARKET_RANKING_CACHE_SECONDS):
             return cached[1]
-        config, _ = _config()
+        config, _ = _config(require_ws=False)
         token = await _access_token(config)
         await _tr_slot()
         result = await _fetch_market_ranking(config, token, ranking)
@@ -1457,11 +1661,11 @@ async def _load_market_ranking(ranking: str) -> dict[str, Any]:
 @router.get("/ui/market/rankings", operation_id="market_rankings")
 async def market_rankings(kind: str = "volume") -> dict[str, Any]:
     """시장 상위 종목 한 종류만 조회한다. 화면의 버튼 전환용 얇은 BFF다."""
-    if not ENABLE_LS_ORDER_EVENTS:
+    if not ENABLE_LS_MARKET_DATA:
         raise HTTPException(
             503,
             "브로커 시장 데이터 연동은 기본 비활성화 상태입니다 "
-            "(ENABLE_LS_ORDER_EVENTS=true 로 엽니다).",
+            "(ENABLE_LS_MARKET_DATA=true 로 엽니다).",
         )
     if kind not in MARKET_RANKINGS:
         raise HTTPException(400, "kind는 volume, change, amount 중 하나여야 합니다.")
@@ -1469,7 +1673,7 @@ async def market_rankings(kind: str = "volume") -> dict[str, Any]:
         ranking = await _load_market_ranking(kind)
     except Exception as exc:  # noqa: BLE001 - 화면에서 조회 실패와 빈 결과를 구분한다
         raise HTTPException(
-            502, ("시장 상위 종목 조회 실패: " + type(exc).__name__ + ": " + str(exc))[:400]
+            502, ("시장 상위 종목 조회 실패: " + _ls_error_detail(exc))[:400]
         ) from exc
     return {
         "schema_version": "market.rankings.v1",
@@ -1486,17 +1690,17 @@ async def portfolio_ledger(days: int = LEDGER_DAYS) -> dict[str, Any]:
     트레이딩의 `/ui/portfolio/live`와 원천이 다르다 - 저쪽은 주문·보유이고
     이쪽은 확정된 거래와 비용·세금이다. 둘을 한 응답에 합치지 않는다.
     """
-    if not ENABLE_LS_ORDER_EVENTS:
+    if not ENABLE_LS_ACCOUNT_DATA:
         raise HTTPException(
             503,
-            "브로커 실시간 연동은 기본 비활성화 상태입니다 "
-            "(ENABLE_LS_ORDER_EVENTS=true 로 엽니다).",
+            "브로커 계좌 조회는 기본 비활성화 상태입니다 "
+            "(ENABLE_LS_ACCOUNT_DATA=true 로 엽니다).",
         )
     try:
         ledger, start, end = await _load_ledger(cache_seconds=LEDGER_CACHE_SECONDS)
     except Exception as exc:  # noqa: BLE001 - 조회 실패를 '거래 없음'으로 위장하지 않는다
         raise HTTPException(
-            502, ("거래내역 조회 실패: " + type(exc).__name__ + ": " + str(exc))[:400]
+            502, ("거래내역 조회 실패: " + _ls_error_detail(exc))[:400]
         ) from exc
     span = (end - start).days + 1
 
@@ -1507,15 +1711,15 @@ async def portfolio_ledger(days: int = LEDGER_DAYS) -> dict[str, Any]:
         try:
             async with _tr_gate:
                 if FEED.holdings is None:
-                    config, _ = _config()
+                    config, _ = _config(require_ws=False)
                     token = await _access_token(config)
                     await _tr_slot()
                     FEED.sync_holdings(await _fetch_holdings(config, token))
         except Exception as exc:  # noqa: BLE001 - 잔고 조회 실패로 원장을 막지 않는다
-            holdings_error = (type(exc).__name__ + ": " + str(exc))[:200]
+            holdings_error = _ls_error_detail(exc)[:200]
 
     account_no = _registered_account()
-    environment = os.getenv("LS_ENV", "PAPER").strip().upper()
+    environment = os.getenv("LS_ENV", "LIVE").strip().upper()
     return {
         "schema_version": "accounting.ledger-transactions.v1",
         "environment": environment,
@@ -1545,8 +1749,8 @@ async def portfolio_ledger(days: int = LEDGER_DAYS) -> dict[str, Any]:
     }
 
 
-__all__ = ["router", "ENABLE_LS_ORDER_EVENTS", "KIND_LABELS", "normalize_order_event",
-           "normalize_holdings", "normalize_daily_returns", "normalize_today_activity", "normalize_ledger",
+__all__ = ["router", "ENABLE_LS_ORDER_EVENTS", "ENABLE_LS_MARKET_DATA", "ENABLE_LS_ACCOUNT_DATA", "KIND_LABELS", "normalize_order_event",
+           "normalize_holdings", "normalize_today_activity", "normalize_ledger",
            "normalize_accepted_orders",
            "normalize_market_ranking",
            "ledger_to_order_events", "merge_order_events", "build_pnl", "apply_fill",
@@ -1642,14 +1846,6 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
     assert row["average_cost"] == "70000" and row["return_rate"] == "1.42"
     assert not any(k.startswith("t0424") for k in holdings)
 
-    # 일별 수익률도 브로커 필드명을 화면 계약으로만 내보낸다
-    daily_returns = normalize_daily_returns({
-        "FOCCQ33600OutBlock3": [
-            {"BaseDt": "20260818", "TermErnrat": Decimal("1.25"), "Idx": Decimal("101.25")},
-        ],
-    })
-    assert daily_returns == [{"date": "20260818", "return_rate": "1.25"}]
-
     today_activity = normalize_today_activity({
         "t0150OutBlock": {
             "msqty": 4, "mdqty": 2, "msamt": 400000, "mdamt": 210000,
@@ -1717,7 +1913,10 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
     assert ledger_events[0]["label"] == "체결"
     assert ledger_events[0]["side"] == "매도"
     assert ledger_events[0]["event_time"] is None
-    assert ledger_events[0]["order_no"] == "12"
+    assert ledger_events[0]["order_no"] is None
+    assert ledger_events[0]["trade_no"] == "12"
+    assert ledger_events[0]["source"] == "LS_SETTLED_ACCOUNT_LEDGER"
+    assert ledger_events[0]["origin"] == "BROKER_ACCOUNT_UNATTRIBUTED"
 
     # 확정 원장에 없는 접수는 실시간 피드에서 보충하되, 체결은 원장과 중복하지 않는다
     duplicate_accepted = {**accepted, "seq": 99}
@@ -1762,6 +1961,7 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
     sell, buy = today_trades
     # 비용은 매매행이 아니라 종목소계에 실려 있다. 매매행만 읽으면 전부 0이 된다.
     assert sell["category"] == "매도" and sell["symbol"] == "000660"
+    assert sell["execution_channel"] == "투혼(HTS)"
     assert sell["commission"] == "250" and sell["tax"] == "3340"   # 거래세 835 + 농특세 2505
     assert sell["settled_amount"] == "1666410"
     # 매수는 예수금이 줄어든다. adjamt는 양수로 오므로 부호를 뒤집어야 한다.
@@ -1789,7 +1989,7 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
          "LastExecTime": "14:31:02"},
         {"OrdNo": 103, "OrdTime": "09:59:00", "OrdQty": 1, "OrdPrc": 1670000,
          "IsuNo": "A000660", "IsuNm": "SK하이닉스", "BnsTpCode": "1",
-         "LastExecTime": "10:00:00"},
+         "LastExecTime": "10:00:00", "AllExecQty": 1, "ExecPrc": 1681500},
         # 같은 주문번호가 여러 체결 행에 반복돼도 접수는 한 건이다.
         {"OrdNo": 102, "OrdTime": "14:30:00", "OrdQty": 2, "OrdPrc": 1655000,
          "IsuNo": "A000660", "IsuNm": "SK하이닉스", "BnsTpCode": "2",
@@ -1808,10 +2008,36 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
     assert accepted_history[0]["side"] == "매수"
     assert accepted_history[0]["quantity"] == "2"
     assert accepted_history[0]["price"] == "1655000"
+    assert accepted_history[0]["broker_order_id"] == "102"
+    assert accepted_history[0]["source"] == "LS_ORDER_HISTORY"
+    filled_history = next(
+        event for event in accepted_history if event["order_no"] == "103"
+    )
+    assert filled_history["kind"] == "FILLED"
+    assert filled_history["requested_price"] == "1670000"
+    assert filled_history["average_fill_price"] == "1681500"
+    assert filled_history["price"] == "1681500"
+    assert filled_history["event_time"] == "10:00:00"
+    history_merged = merge_order_events(ledger_events, accepted_history, 50)
+    projected_broker_fill = next(
+        event for event in history_merged if event.get("order_no") == "103"
+    )
+    assert projected_broker_fill["kind"] == "FILLED"
+    assert projected_broker_fill["requested_price"] == "1670000"
+    assert projected_broker_fill["average_fill_price"] == "1681500"
 
     attach_executions(today_trades, execs)
     assert sell["trade_time"] == "10:00:00" and sell["symbol_name"] == "SK하이닉스"
     assert buy["trade_time"] == "14:31:02"
+    assert sell["broker_order_id"] == "103"
+    assert set(buy["broker_order_ids"]) == {"101", "102"}
+    assert buy["broker_order_id"] is None
+    today_events = ledger_to_order_events({"rows": today_trades}, 50)
+    projected_sell = next(event for event in today_events if event["side"] == "매도")
+    assert projected_sell["order_no"] == "103"
+    assert projected_sell["trade_no"] is None
+    assert projected_sell["origin"] == "EXTERNAL_HTS"
+    assert projected_sell["correlation_status"] == "UNATTRIBUTED"
     # 색인에 없는 줄은 지어내지 않고 비워 둔다
     orphan = [{"symbol": "999999", "category": "매수", "trade_time": None, "symbol_name": None}]
     assert attach_executions(orphan, execs)[0]["trade_time"] is None
@@ -1840,9 +2066,11 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
     assert empty_pnl["total"] == "0" and empty_pnl["cost"] == "0"
 
     # 스위치가 꺼져 있으면 붙지 않는다(비용·권한 경계)
-    saved = ENABLE_LS_ORDER_EVENTS
+    saved_events = ENABLE_LS_ORDER_EVENTS
+    saved_account = ENABLE_LS_ACCOUNT_DATA
     try:
         globals()["ENABLE_LS_ORDER_EVENTS"] = False
+        globals()["ENABLE_LS_ACCOUNT_DATA"] = False
         for guarded in (portfolio_live(), portfolio_ledger()):
             try:
                 asyncio.run(guarded)
@@ -1851,6 +2079,34 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
             else:
                 raise AssertionError("스위치가 꺼졌는데 조회했다")
     finally:
-        globals()["ENABLE_LS_ORDER_EVENTS"] = saved
+        globals()["ENABLE_LS_ORDER_EVENTS"] = saved_events
+        globals()["ENABLE_LS_ACCOUNT_DATA"] = saved_account
+
+    # 토큰 만료를 payload의 exp에서 읽는가. `now + expires_in`으로 계산하면 LS가
+    # 같은 토큰을 재사용해 줄 때 경과한 만큼 만료를 넘겨 잡는다(2026-08-20 실측).
+    def _jwt(exp: object) -> str:
+        payload = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode()).decode().rstrip("=")
+        return "h." + payload + ".s"
+
+    assert _token_expiry(_jwt(1787263204)) == 1787263204.0
+    # 못 읽으면 예외가 아니라 4분짜리 짧은 캐시로 떨어진다
+    for broken in (_jwt("없음"), "not.a.jwt", "", "a.b"):
+        assert abs(_token_expiry(broken) - (time.time() + 240.0)) < 5, broken
+
+    # 캐시가 그 exp를 1분 앞당겨 쓰되, 이미 지난 exp로 hot loop에 빠지지 않는가
+    _cfg = type("C", (), {"environment": "PAPER", "app_key": "k"})()
+    saved_issue = _issue_token
+    for offset, floor, ceil in ((70503.0, 70440, 70445), (10.0, 59, 61), (-9999.0, 59, 61)):
+        async def _fake(config, _at=time.time() + offset):  # noqa: ANN001 - 자체 점검용 대역
+            return "tok", _at
+        globals()["_issue_token"] = _fake
+        _token_cache.clear()
+        try:
+            assert asyncio.run(_access_token(_cfg)) == "tok"
+            remaining = _token_cache[("PAPER", "k")][1] - time.time()
+            assert floor <= remaining <= ceil, (offset, remaining)
+        finally:
+            globals()["_issue_token"] = saved_issue
+            _token_cache.clear()
 
     print("ls_account_stream 자체 점검 통과")

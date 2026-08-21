@@ -26,6 +26,7 @@ RISK_DECISION_WRITE_SCOPE = "trading.risk_decision.write"
 ORDER_SUBMIT_SCOPE = "trading.order.submit"
 BROKER_EVENT_WRITE_SCOPE = "trading.broker_event.write"
 ORDER_CANCEL_SCOPE = "trading.order.cancel"
+CONDITIONAL_RULE_EXECUTE_SCOPE = "trading.conditional_rule.execute"
 
 _PLACEHOLDER_SECRET_MARKERS = (
     "change_me",
@@ -97,6 +98,11 @@ CASE_PAPER_ORDER_POLICY = MutationAuthPolicy(
     frozenset({ORDER_SUBMIT_SCOPE, BROKER_EVENT_WRITE_SCOPE}),
     "trading-department",
     frozenset({"trading-oms"}),
+)
+CONDITIONAL_RULE_EXECUTOR_POLICY = MutationAuthPolicy(
+    frozenset({CONDITIONAL_RULE_EXECUTE_SCOPE}),
+    "trading-department",
+    frozenset({"conditional-rule-worker"}),
 )
 
 
@@ -250,6 +256,8 @@ __all__ = [
     "BROKER_EVENT_POLICY",
     "BROKER_EVENT_WRITE_SCOPE",
     "CASE_PAPER_ORDER_POLICY",
+    "CONDITIONAL_RULE_EXECUTOR_POLICY",
+    "CONDITIONAL_RULE_EXECUTE_SCOPE",
     "INTENT_WRITER_POLICY",
     "INTENT_WRITE_SCOPE",
     "InternalServiceAuthError",

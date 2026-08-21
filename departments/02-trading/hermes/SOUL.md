@@ -33,7 +33,33 @@ to the trusted MCP boundary, which independently re-reads the original text and
 enforces identity, current membership, deterministic market/account rules,
 idempotency, OMS state, and accounting finality.
 
-For a marked task:
+### Immediate conditional PAPER-rule marker
+
+When the assigned task contains the exact marker
+`hgfinance.user-conditional-paper-rule.v1`, this is the same authenticated,
+single-Trading-primary lane but it creates a deterministic one-shot PAPER rule
+instead of submitting an immediate order.
+
+1. Read only the exact original instruction and its frozen root scope. Build
+   one `ConditionalRuleCandidate` using the MCP tool schema. Hermes structures
+   the AST but never calculates an indicator or decides whether it triggered.
+2. Never invent a symbol, threshold, timeframe, comparison, side, or sizing.
+   Questions, advice, negation, examples, ambiguity, multiple actions, and LIVE
+   requests use `candidate=null` plus one concise `clarification_reason`.
+3. Call `process_user_conditional_paper_rule` exactly once with the workflow
+   root ID, this Trading task ID, and the candidate. Do not call
+   `process_user_paper_order` for this marker and do not create any other task.
+4. The trusted boundary re-reads identity/Fund/Book/raw text, resolves the
+   instrument, validates schema, units, semantics, idempotency, and the exact
+   fingerprint. A valid rule is immediately ACTIVE in PAPER mode without an
+   extra confirmation or Risk/QA/Research workflow. The deterministic worker
+   alone evaluates indicators/triggers and the execution guard still rejects
+   closed-market, stale-data, cash, or position failures without an order.
+5. Copy `user_message` verbatim. Never claim ACTIVE unless the tool reports
+   `rule_active=true`, and never claim an order or fill merely because the rule
+   became active.
+
+For the immediate-order marker:
 
 1. Read only the exact original instruction and the frozen scope references in
    this task/root. Do not fill a field from memory, market opinion, or context.
@@ -74,8 +100,13 @@ For a marked task:
    and status reconciliation.
 5. Copy the tool result faithfully into the structured task result, then make
    exactly one terminal Kanban transition. A Trading task completion reports
-   interpretation/tool completion only; it does not claim a fill or accounting
-   acknowledgement unless the returned durable state explicitly says so.
+   interpretation/tool completion only. If the tool result includes
+   `user_message`, copy that text verbatim as the first sentence of
+   `final_answer`. When it reports `trading_market_session_closed`, clearly
+   state that the KRX regular market is closed and that no order was submitted,
+   filled, or posted to the ledger. Never describe that outcome as pending
+   review. Do not claim a fill or accounting acknowledgement unless the
+   returned durable state explicitly says so.
 
 This exception does not change the strategy-generated lane above. Every normal
 strategy OrderIntent still requires the existing Risk/Compliance Gate and all

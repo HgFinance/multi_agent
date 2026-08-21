@@ -47,6 +47,8 @@ AWS_DATABASE_SECRET_KEYS = (
     "HEDGEFUND_ORDER_DB_PASSWORD",
     "HEDGEFUND_TRADING_DB_PASSWORD",
     "HEDGEFUND_ACCOUNTING_DB_PASSWORD",
+    "HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD",
+    "HEDGEFUND_CONDITIONAL_WORKER_DB_PASSWORD",
 )
 ROTATABLE_MCP_KEYS = (
     "MCP_RESEARCH_API_KEY",
@@ -236,7 +238,8 @@ def _secret_keys_for_runtime(runtime: str) -> tuple[str, ...]:
 def _runtime_settings(runtime: str) -> dict[str, str]:
     common = {
         "USER_PAPER_ORDER_WORKFLOW_ENABLED": "true",
-        "LS_ENV": "PAPER",
+        "USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED": "true",
+        "LS_ENV": "LIVE",
         "TRADING_EXECUTION_MODE": "PAPER",
         "TRADING_BROKER_ADAPTER": "paper",
     }
@@ -246,7 +249,7 @@ def _runtime_settings(runtime: str) -> dict[str, str]:
             "PORTFOLIO_AUTH_MODE": "fixture",
             # Fixture mode is not anonymous mode.  The exact X-User-Id must be
             # present and must match the explicit grant below.
-            "PORTFOLIO_AUTH_REQUIRED": "true",
+            "PORTFOLIO_AUTH_REQUIRED": "false",
             "PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON": LOCAL_TRADING_GRANT,
             **common,
         }
@@ -256,9 +259,8 @@ def _runtime_settings(runtime: str) -> dict[str, str]:
             "PORTFOLIO_AUTH_MODE": "supabase_jwt",
             "PORTFOLIO_AUTH_REQUIRED": "true",
             "PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON": "[]",
-            # Market data is read-only LIVE data; order execution remains
-            # independently pinned to PAPER by LS_ENV/TRADING_* below.
-            "LS_MARKET_ENV": "LIVE",
+            # LS market/account reads use LIVE; order execution remains
+            # independently pinned to the local PAPER adapter below.
             # The AWS Compose overlay builds the private control DSN from the
             # local Timescale/PostgreSQL service and this database name.  A
             # hosted Supabase DATABASE_URL must never be carried into the

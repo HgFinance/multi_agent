@@ -1,0 +1,45 @@
+{
+  "schema_version": "hgfinance.worker-registry.v1",
+  "workers": [
+    {
+      "department": "research",
+      "worker_id": "competing-explanation-worker",
+      "trigger": "proposal_draft"
+    },
+    {
+      "department": "research",
+      "worker_id": "holdings-analyst-worker",
+      "trigger": "holding_question"
+    },
+    {
+      "department": "risk",
+      "worker_id": "compliance-policy-worker",
+      "trigger": "when_compliance_evidence_exists"
+    },
+    {
+      "department": "quant-backtest",
+      "worker_id": "result-interpretation-worker",
+      "trigger": "experiment_card"
+    },
+    {
+      "department": "quant-backtest",
+      "worker_id": "strategy-author-worker",
+      "trigger": "strategy_authoring"
+    },
+    {
+      "department": "accounting-portfolio",
+      "worker_id": "exception-investigation-worker",
+      "trigger": "always"
+    },
+    {
+      "department": "qa",
+      "worker_id": "hallucination-critic-worker",
+      "trigger": "when_unsupported_claim_exists"
+    },
+    {
+      "department": "qa",
+      "worker_id": "incident-postmortem-worker",
+      "trigger": "when_incident_exists"
+    }
+  ]
+}

@@ -72,11 +72,12 @@ def test_batch_directives_preserve_partial_and_unknown_outcomes() -> None:
     assert "ACK만 있는" in corpus
 
 
-def test_paper_account_is_durable_and_ls_live_is_market_read_only() -> None:
+def test_ls_paper_is_canonical_and_ls_live_is_market_read_only() -> None:
     corpus = "\n".join(_read(path) for path in (ADR, CURRENT, UNIFIED, TRADING))
 
-    assert "local durable PaperBroker" in corpus
-    assert "directive/leg/reservation ledger" in corpus
+    assert "LS PAPER" in corpus
+    assert "directive/leg/reservation/fill ledger" in corpus
+    assert "자동 재전송하지 않는다" in corpus
     assert "LS LIVE" in corpus
     assert "read-only" in corpus
     assert "LIVE order route" in corpus

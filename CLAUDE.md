@@ -75,7 +75,7 @@ python -m unittest discover -s tests/schema -p "test_*.py" -v
 
 `docs/HEDGE_FUND_MASTER_PLAN.md`가 최상위 기준. 충돌 시 우선순위: MASTER_PLAN → `MINIMUM_SERVICE_UNIT_SPEC.md`/`DATA_GOVERNANCE_GUIDE.md` → `TECH_STACK_DECISIONS.md`/`AI_OFFICE_FRONTEND_PLAN.md` → `REPOSITORY_DEPARTMENT_STRUCTURE.md` → `HEDGE_FUND_CORE_PLAN.md`/`..._BACKLOG.md` → `AGENT_EMPLOYEE_PROFILES.md`/팀 가이드 → `README.md`. 하위 문서는 마스터 플랜을 변경할 수 없다(변경하려면 ADR 승인 후 관련 문서를 함께 갱신).
 
-**아직 미결정, 임의로 정하지 않는다:** Live Broker·Live 주문 API, 전체 Cloud Provider·Frontend Hosting, 첫 Strategy Portfolio, TimescaleDB Retention, Production Data Vendor, 자동 전략 Paper 승인. 사용자 직접 PAPER 레인의 canonical 계정은 local durable PaperBroker로 확정됐으며 LS LIVE 연결은 시장데이터 read-only다(ADR-0007).
+**아직 미결정, 임의로 정하지 않는다:** Live Broker·Live 주문 API, 전체 Cloud Provider·Frontend Hosting, 첫 Strategy Portfolio, TimescaleDB Retention, Production Data Vendor, 자동 전략 Paper 승인. 사용자 직접 PAPER 레인의 canonical 경제 계정은 LS증권 모의투자 계좌이고, Trading의 PAPER 전용 adapter와 durable admission/audit ledger를 사용한다. LS LIVE 연결은 시장데이터 read-only다(ADR-0007).
 
 ## 담당자
 

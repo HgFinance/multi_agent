@@ -86,11 +86,11 @@ hosted Auth project publishes different endpoints. Never provide
 `SUPABASE_SERVICE_ROLE_KEY` or the Supabase JWT signing secret to
 `portfolio-bff`: user JWT verification needs only public identity settings.
 
-`PORTFOLIO_CORS_ALLOW_ORIGINS` is a comma-separated list of exact HTTPS
+`PORTFOLIO_CORS_ALLOW_ORIGINS` is a comma-separated list of exact HTTP or HTTPS
 frontend origins (scheme + host + optional port, no path and no wildcard).
 Production has no implicit localhost origin. Preflight permits only the BFF's
 GET/POST/PUT/OPTIONS methods and its explicit request-header allowlist,
-including `Authorization`; credentialed cookies remain disabled.
+including `X-User-Id`; credentialed cookies remain disabled.
 
 `TRADING_SERVICE_AUTH_SECRET` is a private BFF-to-Trading proof secret and must
 be identical in both containers; it is never a Supabase key or browser value.

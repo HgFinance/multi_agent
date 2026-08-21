@@ -1138,6 +1138,7 @@ def list_quality_snapshots(department_code: str, window_start: datetime, window_
 def list_idle_agents(
     lookback_hours: float = 24.0,
     idle_threshold_hours: float = 4.0,
+    include_heads: bool = False,
 ):
     """6개 투자본부 Worker 전원의 유휴 판정. department_code 필터는 아직 없다 -
     이 리포트의 소비자(HR 부서장 주간 계획)가 항상 전체를 보기 때문이다."""
@@ -1149,6 +1150,9 @@ def list_idle_agents(
             departments=tuple(INVESTMENT_DEPARTMENT_STAGE),
             lookback_hours=lookback_hours,
             idle_threshold_hours=idle_threshold_hours,
+            # 2026-08-20: 부서장 포함은 opt-in 이다. 기본 응답 인원이 말없이 8 -> 14 로
+            # 늘면 이 리포트를 인용한 과거 문장들의 뜻이 바뀐다.
+            include_heads=include_heads,
         )
     except WorkerRegistryUnavailable as exc:
         # 배포 이미지에 다른 본부 Worker registry 가 없다. 빈 목록(=유휴 없음)으로

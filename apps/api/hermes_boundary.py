@@ -20,7 +20,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
+import time
+from functools import lru_cache
 from pathlib import Path
 from uuid import uuid4
 
@@ -87,6 +91,42 @@ PROFILE_CONTAINERS = {
 # 카드 생성처럼 부서를 특정하지 않는 kanban 명령을 돌릴 컨테이너.
 KANBAN_CLI_CONTAINER = os.getenv("KANBAN_CLI_CONTAINER", "hedgefund-qa-hermes")
 
+# ▶ 부서장 계측(2026-08-20). stage 와 신원(head_persona)은 여기서 만들지 않는다 -
+#   orchestration/llm_observability.stage_for_profile / head_persona_for_profile 가
+#   정본이고, ceo-supervisor 의 카드 종료 관측도 **같은 함수**를 쓴다. 두 write 측이
+#   각자 이름을 만들면 같은 부서장이 두 신원으로 쪼개져 유휴 판정이 양쪽 다 놓친다.
+#   (한때 여기 자체 표가 있었는데 orchestration/canonical_profiles.py 의 부서 코드
+#   표와 값이 겹치는 복제였다 - 어긋나도 아무도 모르는 종류의 중복이라 지웠다.)
+
+
+def local_binary() -> str:
+    """local 모드에서 실제로 실행 가능한 `hermes` 경로.
+
+    ## 왜 `HERMES_BIN` 을 그대로 믿지 않나 (2026-08-20 실측)
+
+    `.env` 의 `# [컨테이너 내부 경로]` 블록에 `HERMES_BIN=/usr/local/bin/hermes`
+    가 있고 `main.py` 가 그 파일을 `load_dotenv` 로 읽는다. 그래서 **컨테이너
+    경로가 호스트 BFF 프로세스까지 새어 들어와** 윈도우에서 그 경로를 실행하려다
+    `FileNotFoundError` 가 났고, 화면에는 "Hermes CLI를 찾을 수 없습니다"(503)만
+    떴다 - 정작 `hermes` 는 PATH 에 멀쩡히 있었다. Agent Logs 의 Kanban 보드가
+    통째로 안 뜬 원인이 이것이다.
+
+    `docker-compose.yml` 은 같은 값을 서비스마다 자기가 직접 적어 주므로
+    (`HERMES_BIN: /usr/local/bin/hermes`) `.env` 쪽 값을 무시해도 컨테이너 동작은
+    바뀌지 않는다.
+
+    **설정을 버리는 게 아니라 실행 가능할 때만 쓴다.** 리눅스 호스트에서 BFF 를
+    컨테이너 밖으로 돌리면 `/usr/local/bin/hermes` 가 진짜로 있을 수 있고, 그때는
+    그 값이 맞다. 없을 때만 PATH 로 떨어진다.
+    """
+
+    configured = os.environ.get("HERMES_BIN", "").strip()
+    if configured and (Path(configured).exists() or shutil.which(configured)):
+        return configured
+    # PATH 에도 없으면 이름 그대로 둔다 - 여기서 예외를 올리면 "설치 안 됨"과
+    # "경로 설정 오류"가 같은 자리에서 터져 호출부가 구분하지 못한다.
+    return shutil.which("hermes") or "hermes"
+
 
 def argv_for(department: str | None, tail: list[str]) -> list[str]:
     """실행 argv 를 만든다. shell 을 거치지 않으므로 사용자 문자열이 안전하다.
@@ -98,9 +138,8 @@ def argv_for(department: str | None, tail: list[str]) -> list[str]:
       에이전트(uid 1000)가 자기 파일을 못 쓴다.** 2026-08-11 에 보드 WAL 이
       root:root 가 돼 부서 워커의 `kanban_complete` 가 전부 실패했다.
     """
-    binary = os.environ.get("HERMES_BIN", "hermes")
     if HERMES_EXEC_MODE != "docker":
-        return [binary, *(["-p", department] if department else []), *tail]
+        return [local_binary(), *(["-p", department] if department else []), *tail]
     if department is None:
         return ["docker", "exec", "-u", "hermes", "-i", KANBAN_CLI_CONTAINER, "hermes", *tail]
     container = PROFILE_CONTAINERS.get(department)
@@ -248,6 +287,66 @@ def unblock_kanban_task(*, task_id: str) -> bool:
     )
 
 
+def complete_kanban_task(*, task_id: str, result: str) -> bool:
+    """Close a non-executing scope card without exposing it to a worker.
+
+    Direct PAPER-order roots are durable workflow containers, not executable
+    CEO prompts.  They are created running but unclaimed while the SQL bindings
+    and blocked Trading primary are assembled, then completed in place.  This
+    avoids the otherwise unavoidable race where the CEO dispatcher claims the
+    root before Trading invokes the trusted order tool.
+
+    A CLI timeout has unknown commit status, so verify the supported read model
+    before reporting failure.  Replays are idempotent when the card is already
+    terminal.
+    """
+
+    task_id = str(task_id or "").strip()
+    result = str(result or "").strip()
+    if not task_id or not result:
+        return False
+    cli_environment = os.environ.copy()
+    cli_environment.setdefault(
+        "HERMES_KANBAN_HOME", str(Path.home() / ".hermes" / "shared-kanban")
+    )
+    command_timeout = float(os.getenv("KANBAN_CLI_TIMEOUT_SECONDS", "8"))
+    try:
+        proc = subprocess.run(
+            argv_for(
+                None,
+                [
+                    "kanban",
+                    "complete",
+                    task_id,
+                    "--result",
+                    result,
+                    "--summary",
+                    result,
+                ],
+            ),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=command_timeout,
+            cwd=ROOT,
+            env=cli_environment,
+            check=False,
+        )
+    except (FileNotFoundError, OSError):
+        return False
+    except subprocess.TimeoutExpired:
+        proc = None
+    if proc is not None and proc.returncode == 0:
+        return True
+    current = show_kanban_task(task_id, timeout=max(command_timeout, 2.0))
+    return bool(
+        current
+        and str(current.get("status") or "").casefold()
+        in {"done", "completed", "archived"}
+    )
+
+
 def show_kanban_task(
     task_id: str,
     *,
@@ -279,6 +378,11 @@ def show_kanban_task(
             command,
             capture_output=True,
             text=True,
+            # 이 CLI 출력은 UTF-8 이다. 윈도우 기본(cp949)으로 디코드하면 한글
+            # 제목에서 UnicodeDecodeError 가 나고 **리더 스레드가 죽어 stdout 이
+            # None 이 된다** - 그러면 "잘못된 JSON"으로 보여 원인이 가려진다.
+            encoding="utf-8",
+            errors="replace",
             timeout=max(0.1, read_timeout),
             cwd=ROOT,
             env=cli_environment,
@@ -320,12 +424,17 @@ def list_kanban_tasks(*, timeout: float | None = None) -> tuple[dict[str, object
             read_timeout = float(os.getenv("CEO_PLANNING_READ_TIMEOUT_SECONDS", "2"))
     except ValueError:
         read_timeout = 2.0
-    command = [os.environ.get("HERMES_BIN", "hermes"), "kanban", "list", "--json"]
+    command = [local_binary(), "kanban", "list", "--json"]
     try:
         proc = subprocess.run(
             command,
             capture_output=True,
             text=True,
+            # 이 CLI 출력은 UTF-8 이다. 윈도우 기본(cp949)으로 디코드하면 한글
+            # 제목에서 UnicodeDecodeError 가 나고 **리더 스레드가 죽어 stdout 이
+            # None 이 된다** - 그러면 "잘못된 JSON"으로 보여 원인이 가려진다.
+            encoding="utf-8",
+            errors="replace",
             timeout=max(0.1, read_timeout),
             cwd=ROOT,
             env=cli_environment,
@@ -370,6 +479,11 @@ def comment_kanban_task(*, task_id: str, text: str) -> bool:
             command,
             capture_output=True,
             text=True,
+            # 이 CLI 출력은 UTF-8 이다. 윈도우 기본(cp949)으로 디코드하면 한글
+            # 제목에서 UnicodeDecodeError 가 나고 **리더 스레드가 죽어 stdout 이
+            # None 이 된다** - 그러면 "잘못된 JSON"으로 보여 원인이 가려진다.
+            encoding="utf-8",
+            errors="replace",
             timeout=float(os.getenv("KANBAN_CLI_TIMEOUT_SECONDS", "8")),
             cwd=ROOT,
             env=cli_environment,
@@ -422,6 +536,9 @@ def ask(
     #   CEO 라우팅은 90~180초가 걸렸고 30초에서 통째로 끊겼다(그러고도 카드는 이미
     #   만들어져 부서들이 실행됐다). 그래서 그런 호출은 자기 timeout 을 명시한다.
     timeout = timeout_of(config) if timeout is None else timeout
+    # 부서장 턴의 소요시간·성공 여부를 여기서 잰다(2026-08-20). 모든 부서 라우터가
+    # 이 함수 하나를 지나므로 일반 질문 경로가 전부 계측된다.
+    _started = time.perf_counter()
     tail = ["chat", "-Q"]
     if resume:
         tail += ["--resume", resume]
@@ -442,14 +559,20 @@ def ask(
         )
     except FileNotFoundError as exc:
         # Hermes Runtime은 PyPI 패키지가 아니라 별도 설치다(CLAUDE.md).
+        # 런타임 부재는 부서장이 못 돈 것이지 안 돈 것이 아니다 - DEGRADED 로 남긴다.
+        _publish_head_turn(department=department, started=_started, status="DEGRADED")
         raise HTTPException(
             503, f"Hermes CLI 없음: hermes -p {department}"
         ) from exc
     except subprocess.TimeoutExpired as exc:
+        _publish_head_turn(department=department, started=_started, status="TIMEOUT")
         raise HTTPException(504, f"{timeout}s 초과") from exc
 
     if proc.returncode != 0:
+        _publish_head_turn(department=department, started=_started, status="DEGRADED")
         raise HTTPException(502, (proc.stderr or "").strip()[:500] or "agent failed")
+
+    _publish_head_turn(department=department, started=_started, status="COMPLETED")
 
     return {
         "department": department,
@@ -519,6 +642,39 @@ def timeout_of(config: str) -> int:
     return int(cfg["agent"]["timeout_seconds"])
 
 
+def _publish_head_turn(*, department: str, started: float, status: str) -> None:
+    """부서장 턴 1건을 HR 관측으로 내보낸다. 실패는 삼킨다.
+
+    일반 질문 트래픽은 여기서 끝난다 - Worker 를 부를지는 부서장의 판단이라,
+    이 지점을 재지 않으면 Worker 실행 0 회가 "일이 없었다"인지 "위임하지 않았다"인지
+    구분되지 않는다(Department Scorecard 의 arrivals).
+    """
+
+    try:
+        from orchestration.llm_observability import (
+            head_persona_for_profile,
+            publish_head_activity,
+            stage_for_profile,
+        )
+
+        stage = stage_for_profile(department)
+        persona = head_persona_for_profile(department)
+        if not stage or not persona:
+            # 모르는 프로필의 stage 를 이름으로 지어내지 않는다 - 틀린 stage 로
+            # 나간 이벤트는 조회되지 않으면서 있는 것처럼 보인다.
+            return
+        publish_head_activity(
+            stage=stage,
+            head_persona=persona,
+            status=status,
+            latency_ms=int((time.perf_counter() - started) * 1000),
+            error_count=0 if status == "COMPLETED" else 1,
+            source="bff_ask",
+        )
+    except Exception:  # noqa: BLE001 - 계측은 질의 경로를 바꾸지 못한다
+        return
+
+
 if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
     # 실측 형태(2026-08-11): 추론 헤드라인 뒤에 답이 온다
     real = (
@@ -548,8 +704,28 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
             raise AssertionError("모르는 프로필인데 argv 를 만들었다")
     finally:
         globals()["HERMES_EXEC_MODE"] = saved
-    # local 모드는 예전 동작 그대로여야 한다(AWS 가 이 경로다)
-    assert argv_for("ceo-agent", ["chat"])[:3] == ["hermes", "-p", "ceo-agent"]
+    # local 모드는 예전 동작 그대로여야 한다(AWS 가 이 경로다). 다만 binary 는
+    # 이제 `local_binary()` 가 푼 실행 가능한 경로다 - 이름만 같으면 된다.
+    local_argv = argv_for("ceo-agent", ["chat"])
+    assert local_argv[1:3] == ["-p", "ceo-agent"], local_argv
+    assert "hermes" in Path(local_argv[0]).name.casefold(), local_argv[0]
+
+    # ▶ `.env` 의 컨테이너 경로가 호스트로 새는 것을 막는다(2026-08-20 실측).
+    #   이게 없으면 윈도우에서 `/usr/local/bin/hermes` 를 실행하려다 503 이 뜬다.
+    with_bogus = dict(os.environ)
+    try:
+        os.environ["HERMES_BIN"] = "/usr/local/bin/hermes"   # 컨테이너 전용 경로
+        resolved = local_binary()
+        assert resolved != "/usr/local/bin/hermes" or Path(resolved).exists(), (
+            "존재하지 않는 컨테이너 경로를 그대로 실행하려 한다: " + resolved
+        )
+        # 실제로 있는 경로는 존중한다 - 리눅스 호스트에서 BFF 를 컨테이너 밖으로
+        # 돌리는 배치가 그 경우다.
+        os.environ["HERMES_BIN"] = sys.executable
+        assert local_binary() == sys.executable, "실행 가능한 설정은 그대로 쓴다"
+    finally:
+        os.environ.clear()
+        os.environ.update(with_bogus)
 
     # 부서 이름표가 정본과 어긋나지 않는가
     from orchestration.canonical_profiles import CANONICAL_PROFILES

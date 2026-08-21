@@ -15,6 +15,8 @@ from orchestration.adapters.ceo_supervisor import (
     SupervisorAction,
     SupervisorState,
     SupervisorValidationError,
+    _analysis_synthesis_decision,
+    _department_progress_text,
     _initial_primary_materialization_decisions,
     decide_supervisor,
     parse_supervisor_output,
@@ -175,6 +177,100 @@ class AnswerBodyHandoffTest(unittest.TestCase):
 
 
 class SupervisorPolicyTest(unittest.TestCase):
+    def test_latest_run_failure_and_missing_dependencies_are_preserved(self) -> None:
+        task = ChildTaskState.from_hermes(
+            {
+                "id": "r",
+                "assignee": "research-department",
+                "status": "blocked",
+                "body": (
+                    "workflow_root_task_id=root\n"
+                    "workflow_role=primary"
+                ),
+                "runs": [
+                    {
+                        "status": "crashed",
+                        "outcome": "crashed",
+                        "error": (
+                            "worker exited cleanly without calling "
+                            "kanban_complete — protocol violation"
+                        ),
+                        "metadata": {
+                            "missing_dependencies": ["current_price"],
+                        },
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(task.outcome, "crashed")
+        self.assertEqual(task.failure_kind, "protocol")
+        self.assertEqual(task.missing_dependencies, ("current_price",))
+        self.assertIn("kanban_complete", task.error)
+
+    def test_department_progress_distinguishes_dependency_and_protocol(self) -> None:
+        dependency = _department_progress_text(
+            "risk-management",
+            "blocked",
+            missing_dependencies=("current_position",),
+        )
+        protocol = _department_progress_text(
+            "research-department",
+            "gave_up",
+            failure_kind="protocol",
+        )
+
+        self.assertIn("포트폴리오 노출 확인 대기", dependency)
+        self.assertIn("정상적으로 인계되지 않았", protocol)
+        self.assertNotIn("의존성이 부족", protocol)
+
+    def test_analysis_synthesis_labels_partial_result_usability(self) -> None:
+        usable = (
+            "2026-08-20 기준 분석입니다. result body with citation=12345678 "
+            "and unavailable limits are stated."
+        )
+        selected = (
+            "research-department",
+            "quant-backtest-department",
+            "risk-management",
+        )
+        cases = (
+            (3, "complete"),
+            (2, "partial"),
+            (1, "limited_confidence"),
+            (0, "blocked"),
+        )
+
+        for usable_count, expected in cases:
+            children = tuple(
+                child(
+                    f"task-{index}",
+                    profile,
+                    "done" if index < usable_count else "blocked",
+                    result=usable if index < usable_count else "",
+                    summary="" if index >= usable_count else "usable",
+                )
+                for index, profile in enumerate(selected)
+            )
+            state = SupervisorState(
+                "root",
+                children,
+                selected_primary_profiles=selected,
+                workflow_mode="analysis",
+            )
+
+            decision = _analysis_synthesis_decision(state)
+
+            self.assertIsNotNone(decision)
+            self.assertIn(
+                f"synthesis_availability={expected}",
+                decision.body,
+            )
+            self.assertIn(
+                f"usable_primary_count={usable_count}",
+                decision.body,
+            )
+
     def test_dynamic_routing_runs_qa_for_selected_primary_children_only(self) -> None:
         state = SupervisorState(
             "root",
@@ -1082,6 +1178,8 @@ class SupervisorWakeupTest(unittest.TestCase):
         self.assertEqual(service.reconcile_completed_syntheses(), ())
 
     def test_thread_backed_synthesis_delivers_only_to_request_thread(self) -> None:
+        timeline = []
+
         class DeliverySpy:
             def __init__(self) -> None:
                 self.parent_calls = []
@@ -1093,7 +1191,12 @@ class SupervisorWakeupTest(unittest.TestCase):
 
             def deliver_to_existing_thread(self, **kwargs):
                 self.thread_calls.append(kwargs)
+                timeline.append("discord")
                 return "sent"
+
+        class ProjectionSpy:
+            def project(self, **kwargs):
+                timeline.append("notion")
 
         class DeliveryClient(FakeClient):
             def __init__(self, home: str) -> None:
@@ -1137,6 +1240,7 @@ class SupervisorWakeupTest(unittest.TestCase):
             client = DeliveryClient(home)
             service = CeoSupervisorService(
                 client,
+                synthesis_projection=ProjectionSpy(),
                 discord_delivery=delivery,
             )
 
@@ -1161,6 +1265,11 @@ class SupervisorWakeupTest(unittest.TestCase):
             delivery.thread_calls[0]["title"],
             "🧠 CEO 종합",
         )
+        self.assertEqual(
+            timeline,
+            ["discord", "notion"],
+            "non-binding projection must not delay final Discord delivery",
+        )
 
     def test_synthesis_without_thread_keeps_parent_fallback(self) -> None:
         class DeliverySpy:
@@ -1174,7 +1283,7 @@ class SupervisorWakeupTest(unittest.TestCase):
 
             def deliver_to_existing_thread(self, **kwargs):
                 self.thread_calls.append(kwargs)
-                return "sent"
+                return "missing_thread"
 
         class DeliveryClient(FakeClient):
             def __init__(self, home: str) -> None:
@@ -1232,7 +1341,7 @@ class SupervisorWakeupTest(unittest.TestCase):
             )
 
         self.assertEqual(len(delivery.parent_calls), 1)
-        self.assertEqual(len(delivery.thread_calls), 0)
+        self.assertEqual(len(delivery.thread_calls), 1)
 
     def test_terminal_child_creates_parallel_qa_and_synthesis(self) -> None:
         client = FakeClient()
@@ -1253,6 +1362,40 @@ class SupervisorWakeupTest(unittest.TestCase):
         self.assertEqual(
             sum(item["assignee"] == "ceo-agent" for item in client.created),
             1,
+        )
+
+    def test_response_tasks_are_created_before_terminal_observers(self) -> None:
+        timeline = []
+
+        class OrderingClient(FakeClient):
+            def create_task(self, **kwargs):
+                timeline.append(f"create:{kwargs['assignee']}")
+                return super().create_task(**kwargs)
+
+        client = OrderingClient()
+        service = CeoSupervisorService(client)
+        service._project_terminal_task = (
+            lambda **kwargs: timeline.append("terminal-observer")
+        )
+        service._deliver_department_progress = lambda **kwargs: None
+        service._reconcile_department_terminal_progress = lambda **kwargs: None
+
+        decision = service.handle_terminal_event(
+            {
+                "event_id": "response-before-observer",
+                "task_id": "r",
+                "kind": "completed",
+            }
+        )
+
+        self.assertEqual(decision.action, SupervisorAction.RUN_QA)
+        self.assertEqual(
+            timeline,
+            [
+                "create:qa-department",
+                "create:ceo-agent",
+                "terminal-observer",
+            ],
         )
 
     def test_synthesis_does_not_wait_for_qa_visibility_after_qa_create(self) -> None:
@@ -1405,7 +1548,11 @@ class SupervisorWakeupTest(unittest.TestCase):
                 "id": "trading",
                 "assignee": "trading-department",
                 "status": "done",
-                "summary": "PAPER order tool completed",
+                "summary": "PAPER order rejected",
+                "result": (
+                    '{"order_submitted": false, "user_message": "market closed"}'
+                ),
+                "final_answer": "market closed",
                 "body": "workflow_root_task_id=root\nworkflow_role=primary",
             }
         ]
@@ -1430,6 +1577,10 @@ class SupervisorWakeupTest(unittest.TestCase):
         self.assertEqual(
             [item["assignee"] for item in client.created], ["ceo-agent"]
         )
+        synthesis_body = client.created[0]["body"]
+        self.assertIn('\\"order_submitted\\": false', synthesis_body)
+        self.assertIn('"final_answer": "market closed"', synthesis_body)
+        self.assertIn("must never be described as pending review", synthesis_body)
 
     def test_root_body_declares_scope_only_planning_contract(self) -> None:
         body = build_root_body("Samsung", "req-1")
@@ -1448,6 +1599,8 @@ class SupervisorWakeupTest(unittest.TestCase):
     def test_binding_mode_is_explicit_and_legacy_scoped_roots_remain_gated(self) -> None:
         self.assertEqual(infer_workflow_mode("삼성전자 분석"), "analysis")
         self.assertEqual(infer_workflow_mode("삼성전자 주문을 집행해"), "binding")
+        self.assertEqual(infer_workflow_mode("삼성전자 매수해도 될까?"), "analysis")
+        self.assertEqual(infer_workflow_mode("삼성전자 팔아도 안전해?"), "analysis")
         self.assertEqual(
             infer_workflow_mode(
                 "애플을 지금 투자 관점에서 분석해줘. "
@@ -1564,6 +1717,70 @@ class SupervisorWakeupTest(unittest.TestCase):
         self.assertEqual(
             sum("event=duplicate-1" in comment["body"] and "state=done" in comment["body"] for comment in client.comments),
             1,
+        )
+
+    def test_distinct_wakeups_for_same_terminal_transition_coalesce(self) -> None:
+        client = FakeClient()
+        service = CeoSupervisorService(client)
+        projected = []
+        service._project_terminal_task = (
+            lambda **kwargs: projected.append(kwargs["task_id"])
+        )
+        service._deliver_department_progress = lambda **kwargs: None
+        service._reconcile_department_terminal_progress = lambda **kwargs: None
+        events = (
+            {"event_id": "watch-r", "task_id": "r", "kind": "completed"},
+            {"event_id": "recovery-r", "task_id": "r", "kind": "done"},
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            decisions = list(executor.map(service.handle_terminal_event, events))
+
+        self.assertEqual(sum(decision is not None for decision in decisions), 1)
+        self.assertEqual(projected, ["r"])
+        self.assertEqual(
+            sum(item["assignee"] == "ceo-agent" for item in client.created),
+            1,
+        )
+
+    def test_cold_terminal_event_uses_root_lookup_then_one_fresh_workflow(self) -> None:
+        class RootLookupClient(FakeClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.root_lookup_calls = 0
+                self.workflow_calls = 0
+
+            def workflow_root(self, task_id: str) -> str:
+                self.root_lookup_calls += 1
+                return "root"
+
+            def workflow(self, task_id: str):
+                self.workflow_calls += 1
+                return super().workflow(task_id)
+
+            def list_tasks(self):
+                return tuple(self.payloads)
+
+        client = RootLookupClient()
+        decision = CeoSupervisorService(client).handle_terminal_event(
+            {
+                "event_id": "cold-terminal-r",
+                "task_id": "r",
+                "kind": "completed",
+            }
+        )
+
+        self.assertEqual(decision.action, SupervisorAction.RUN_QA)
+        self.assertEqual(client.root_lookup_calls, 1)
+        self.assertEqual(
+            client.workflow_calls,
+            1,
+            "only the lock-protected workflow read may hydrate siblings",
+        )
+        self.assertEqual(
+            [item["assignee"] for item in client.created],
+            ["qa-department", "ceo-agent"],
+            "the optimization must not change synthesis fan-out",
         )
 
     def test_restart_preserves_wakeup_guard(self) -> None:
@@ -1762,6 +1979,102 @@ class SupervisorWakeupTest(unittest.TestCase):
         self.assertEqual(payloads[risk]["parents"], [])
         self.assertEqual(payloads[qa]["parents"], [research, risk])
         self.assertEqual(payloads[synthesis]["parents"], [qa])
+
+    def test_scoped_workflow_root_lookup_does_not_scan_board_or_siblings(self) -> None:
+        import json
+        import subprocess
+
+        root = "t_aaaaaaaa"
+        primary = "t_bbbbbbbb"
+        calls: list[tuple[str, ...]] = []
+        payload = {
+            "id": primary,
+            "assignee": "research-department",
+            "status": "done",
+            "body": build_scoped_task_body(
+                "research", root, role="primary"
+            ),
+            "parents": [],
+        }
+
+        def runner(args, **kwargs):
+            command = tuple(args)
+            calls.append(command)
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                json.dumps({"task": payload}),
+                "",
+            )
+
+        discovered_root = HermesKanbanClient(runner=runner).workflow_root(
+            primary
+        )
+
+        self.assertEqual(discovered_root, root)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1:3], ("kanban", "show"))
+
+    def test_known_root_snapshot_lists_once_and_hydrates_each_task_once(self) -> None:
+        import json
+        import subprocess
+
+        root = "t_aaaaaaaa"
+        primary = "t_bbbbbbbb"
+        sibling = "t_cccccccc"
+        payloads = {
+            root: {
+                "id": root,
+                "assignee": "ceo-agent",
+                "status": "done",
+                "body": build_root_body("Samsung", "req-1"),
+            },
+            primary: {
+                "id": primary,
+                "assignee": "research-department",
+                "status": "done",
+                "body": build_scoped_task_body(
+                    "research", root, role="primary"
+                ),
+            },
+            sibling: {
+                "id": sibling,
+                "assignee": "risk-management",
+                "status": "done",
+                "body": build_scoped_task_body("risk", root, role="primary"),
+            },
+        }
+        calls: list[tuple[str, ...]] = []
+
+        def runner(args, **kwargs):
+            command = tuple(args)
+            calls.append(command)
+            if command[1:3] == ("kanban", "list"):
+                stdout = json.dumps(list(payloads.values()))
+            else:
+                stdout = json.dumps(
+                    {
+                        "task": payloads[command[3]],
+                        "latest_summary": f"summary:{command[3]}",
+                        "runs": [],
+                    }
+                )
+            return subprocess.CompletedProcess(args, 0, stdout, "")
+
+        discovered_root, children, root_payload = HermesKanbanClient(
+            runner=runner
+        ).authoritative_workflow_snapshot(root, primary)
+
+        self.assertEqual(discovered_root, root)
+        self.assertEqual(root_payload["id"], root)
+        self.assertEqual({child["id"] for child in children}, {primary, sibling})
+        self.assertTrue(all("latest_summary" in child for child in children))
+        self.assertEqual(
+            sum(command[1:3] == ("kanban", "list") for command in calls),
+            1,
+        )
+        shown = [command[3] for command in calls if command[1:3] == ("kanban", "show")]
+        self.assertCountEqual(shown, [root, primary, sibling])
 
     def test_primary_scope_task_cannot_depend_on_scope_root(self) -> None:
         root = "t_aaaaaaaa"
@@ -2111,6 +2424,178 @@ class InitialPrimaryMaterializationTest(unittest.TestCase):
             ),
             (),
         )
+
+
+
+
+class SupervisorWorkflowRootCacheTest(unittest.TestCase):
+    """Hot-path root cache removes redundant workflow reconstruction."""
+
+    class CacheClient:
+        def __init__(self):
+            self.environment = {}
+            self.workflow_calls = 0
+            self.show_calls = []
+
+        def workflow(self, task_id: str):
+            self.workflow_calls += 1
+            return (
+                "root-cache",
+                (
+                    {
+                        "id": "root-cache",
+                        "assignee": "ceo-agent",
+                        "status": "done",
+                        "body": (
+                            "workflow_root_task_id=root-cache\n"
+                            "workflow_role=root\n"
+                            "workflow_mode=analysis\n"
+                        ),
+                    },
+                    {
+                        "id": "child-cache",
+                        "assignee": "research-department",
+                        "status": "running",
+                        "body": (
+                            "workflow_root_task_id=root-cache\n"
+                            "workflow_role=primary\n"
+                            "workflow_mode=analysis\n"
+                        ),
+                    },
+                ),
+            )
+
+        def show(self, task_id: str):
+            self.show_calls.append(task_id)
+
+            if task_id == "root-cache":
+                return {
+                    "id": "root-cache",
+                    "assignee": "ceo-agent",
+                    "status": "done",
+                    "body": (
+                        "workflow_root_task_id=root-cache\n"
+                        "workflow_role=root\n"
+                        "workflow_mode=analysis\n"
+                    ),
+                }
+
+            return {
+                "id": task_id,
+                "assignee": "research-department",
+                "status": "running",
+                "body": (
+                    "workflow_root_task_id=root-cache\n"
+                    "workflow_role=primary\n"
+                    "workflow_mode=analysis\n"
+                ),
+            }
+
+    def test_remember_workflow_root_populates_known_tasks(self):
+        client = self.CacheClient()
+        service = CeoSupervisorService(client)
+
+        root_id, payloads = client.workflow("child-cache")
+
+        service._remember_workflow_root(
+            "child-cache",
+            root_id,
+            payloads,
+        )
+
+        self.assertEqual(
+            service._cached_workflow_root("child-cache"),
+            "root-cache",
+        )
+        self.assertEqual(
+            service._cached_workflow_root("root-cache"),
+            "root-cache",
+        )
+
+    def test_cached_active_event_skips_workflow_reconstruction(self):
+        client = self.CacheClient()
+        service = CeoSupervisorService(client)
+
+        service._remember_workflow_root(
+            "child-cache",
+            "root-cache",
+        )
+
+        delivered = []
+
+        service._deliver_department_progress = (
+            lambda **kwargs: delivered.append(kwargs)
+        )
+
+        service.handle_terminal_event(
+            {
+                "event_id": "started:child-cache",
+                "task_id": "child-cache",
+                "assignee": "research-department",
+                "kind": "started",
+            }
+        )
+
+        self.assertEqual(
+            client.workflow_calls,
+            0,
+            "cache hit must avoid workflow reconstruction",
+        )
+        self.assertEqual(
+            client.show_calls,
+            ["child-cache"],
+        )
+        self.assertEqual(len(delivered), 1)
+
+    def test_non_department_active_event_skips_all_kanban_reads(self):
+        client = self.CacheClient()
+        service = CeoSupervisorService(client)
+
+        service.handle_terminal_event(
+            {
+                "event_id": "started:ceo-root",
+                "task_id": "ceo-root",
+                "assignee": "ceo-agent",
+                "kind": "claimed",
+            }
+        )
+
+        self.assertEqual(client.workflow_calls, 0)
+        self.assertEqual(client.show_calls, [])
+
+    def test_first_active_event_uses_at_most_one_task_show_and_no_workflow(self):
+        client = self.CacheClient()
+        service = CeoSupervisorService(client)
+
+        delivered = []
+
+        service._deliver_department_progress = (
+            lambda **kwargs: delivered.append(kwargs)
+        )
+        service._reconcile_department_start_progress = (
+            lambda **kwargs: None
+        )
+
+        service.handle_terminal_event(
+            {
+                "event_id": "started:first:child-cache",
+                "task_id": "child-cache",
+                "assignee": "research-department",
+                "kind": "started",
+            }
+        )
+
+        self.assertEqual(client.workflow_calls, 0)
+        self.assertEqual(client.show_calls, ["child-cache"])
+        self.assertEqual(
+            service._cached_workflow_root("child-cache"),
+            "root-cache",
+        )
+        self.assertEqual(
+            service._cached_workflow_root("root-cache"),
+            "root-cache",
+        )
+        self.assertEqual(len(delivered), 1)
 
 
 

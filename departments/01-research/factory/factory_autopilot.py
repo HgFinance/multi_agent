@@ -9,7 +9,8 @@
     1. **결정론이 원장을 읽어** 브리핑을 만든다(지난 교훈·계열별 시도 압력·
        쿨다운·데이터 적용범위). 여기에 결론은 없다.
     2. 그 브리핑을 본문에 실어 **칸반 카드**를 만든다.
-    3. 이미 도는 `kanban-dispatcher` 가 카드를 부서 Hermes 에이전트에게 돌린다.
+    3. 전용 `factory-kanban-dispatcher` 가 별도 DB의 카드만 부서 Hermes
+       에이전트에게 돌린다. 사용자/CEO 보드 dispatcher는 이 큐를 보지 않는다.
     4. 에이전트가 판단(다음 가설은 무엇인가 / 이 결과를 어떻게 읽는가)을 한다.
 
 ▶ 왜 이 모양인가
@@ -301,12 +302,32 @@ INTRADAY_V2_PROMPT_AST_EXAMPLES = {
     },
 }
 
-# 카드를 만들 때 쓰는 CLI 컨테이너. 어느 프로필이든 같은 보드를 본다
-# (/opt/kanban 이 8개 컨테이너에 공유 마운트다).
-KANBAN_CLI_CONTAINER = os.getenv("KANBAN_CLI_CONTAINER", "hedgefund-kanban-dispatcher")
+# 공장은 사용자/CEO Kanban과 DB·dispatcher·workspace를 공유하지 않는다.
+# 모든 공장 CLI 호출은 전용 컨테이너와 명시적 board slug를 함께 가져야 한다.
+KANBAN_CLI_CONTAINER = os.getenv(
+    "KANBAN_CLI_CONTAINER", "hedgefund-factory-kanban-dispatcher")
+FACTORY_KANBAN_BOARD = os.getenv(
+    "FACTORY_KANBAN_BOARD", "alpha-factory").strip()
+if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", FACTORY_KANBAN_BOARD):
+    raise RuntimeError(
+        f"invalid FACTORY_KANBAN_BOARD: {FACTORY_KANBAN_BOARD!r}")
+
+
+def _kanban_cli(*args: str) -> list[str]:
+    """Build one fail-closed command for the isolated factory board."""
+    return [
+        "docker", "exec", "-u", "1000", "-i", KANBAN_CLI_CONTAINER,
+        "hermes", "kanban", "--board", FACTORY_KANBAN_BOARD, *args,
+    ]
 
 RESEARCH_ASSIGNEE = "research-department"
 QUANT_ASSIGNEE = "quant-backtest-department"
+FACTORY_ASSIGNEES = frozenset({RESEARCH_ASSIGNEE, QUANT_ASSIGNEE})
+FACTORY_ORIGIN_HEADER = (
+    "origin=factory\n"
+    "workflow_plane=alpha-factory\n"
+    "user_query_routing=forbidden"
+)
 
 # 컨테이너의 /opt/kanban 이 호스트의 이 경로다. 에이전트 산출물(첨부)을
 # **호스트가 직접 읽는다** - 컨테이너에서 꺼내오는 왕복이 필요 없다.
@@ -495,7 +516,11 @@ def _conn():
     from source_registry import load_project_env   # noqa: PLC0415
     from db_writer import connect                  # noqa: PLC0415
 
-    return connect(load_project_env()["DATABASE_URL"], connect_timeout=20)
+    return connect(
+        load_project_env()["DATABASE_URL"],
+        connect_timeout=20,
+        runtime_role="svc_quant",
+    )
 
 
 # ▶ **안 쓴 리드를 맨 앞에 둔다** (2026-08-12 실측)
@@ -2939,6 +2964,14 @@ def _create_card(*, title: str, body: str, assignee: str, key: str,
 
     중복 카드는 같은 실험을 두 번 사는 것과 같다 - 공장의 존재 이유에 반한다.
     """
+    if assignee not in FACTORY_ASSIGNEES:
+        raise ValueError(
+            f"factory cards require a lab profile, got {assignee!r}"
+        )
+    body = (
+        f"{FACTORY_ORIGIN_HEADER}\nfactory_assignee={assignee}\n\n"
+        f"{str(body or '').lstrip()}"
+    )
     if not dry_run and active_family_prefix:
         active = _active_card_by_key_prefix(
             active_family_prefix, fail_closed=True)
@@ -2947,13 +2980,13 @@ def _create_card(*, title: str, body: str, assignee: str, key: str,
                   flush=True)
             return None
 
-    argv = ["docker", "exec", "-u", "1000", "-i", KANBAN_CLI_CONTAINER,
-            "hermes", "kanban", "create", title,
+    argv = _kanban_cli(
+            "create", title,
             "--assignee", assignee,
             "--idempotency-key", key,
             "--created-by", MODULE_VERSION,
             "--priority", str(priority),
-            "--body", body]
+            "--body", body)
     if max_runtime:
         argv.extend(["--max-runtime", max_runtime])
     if dry_run:
@@ -3204,20 +3237,29 @@ def _safe_queue_measurement(conn, loader, *, label: str) -> int | None:
 
 
 def _board_rows(sql: str, params: tuple = ()) -> list[tuple]:
-    """칸반 보드를 **컨테이너를 통해** 읽는다.
+    """공장 전용 칸반 DB를 **전용 dispatcher 컨테이너를 통해** 읽는다.
 
     호스트에서 직접 열면 WAL/-shm 매핑이 생겨 컨테이너 쪽 쓰기가 전부
-    `disk I/O error` 로 죽는다(실측). 읽기 하나 때문에 부서가 멈춘다.
+    `disk I/O error` 로 죽는다(실측). 경로가 factory board가 아니어도
+    fail-closed 한다. 사용자/CEO DB를 공장 중복검사에 읽는 후퇴는 없다.
     """
     code = (
-        "import sqlite3,json,sys\n"
-        "c=sqlite3.connect('file:/opt/kanban/kanban.db?mode=ro',uri=True)\n"
+        "import json,os,sqlite3,sys\n"
+        "from hermes_cli import kanban_db as kb\n"
+        "board=sys.argv[3]\n"
+        "configured=os.environ.get('HERMES_KANBAN_BOARD','').strip()\n"
+        "assert configured == board, (configured,board)\n"
+        "db=kb.kanban_db_path(board=board).resolve()\n"
+        "suffix=f'/kanban/boards/{board}/kanban.db'\n"
+        "assert db.as_posix().endswith(suffix), db\n"
+        "c=sqlite3.connect(f'file:{db.as_posix()}?mode=ro',uri=True)\n"
         "try: print(json.dumps(c.execute(sys.argv[1], json.loads(sys.argv[2])).fetchall()))\n"
         "finally: c.close()\n")
     import json as _json
     r = subprocess.run(
         ["docker", "exec", "-u", "1000", "-i", KANBAN_CLI_CONTAINER,
-         "python3", "-c", code, sql, _json.dumps(list(params))],
+         "python3", "-c", code, sql, _json.dumps(list(params)),
+         FACTORY_KANBAN_BOARD],
         capture_output=True, text=True, encoding="utf-8", timeout=120)
     if r.returncode != 0:
         raise RuntimeError(f"보드 조회 실패: {(r.stderr or r.stdout).strip()[:200]}")

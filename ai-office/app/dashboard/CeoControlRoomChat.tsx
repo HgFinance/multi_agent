@@ -168,31 +168,24 @@ function CeoControlRoomChatSession() {
 
   return (
     <section className="lg:col-span-1 bg-surface-container-lowest border border-outline-variant rounded-lg overflow-hidden shadow-sm flex flex-col">
-      <PanelBar icon="terminal" title="CEO Control Room">
-        <span className="rounded-full border border-error/40 bg-error-container px-2 py-0.5 text-[10px] font-bold text-on-error-container">
-          PAPER ONLY · LIVE 아님
-        </span>
-      </PanelBar>
+      <PanelBar icon="terminal" title="CEO Control Room" />
 
       <div className="border-b border-outline-variant bg-surface-container-low px-4 py-3">
         <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <p className="m-0 text-xs font-bold text-error">모든 주문 명령은 PAPER로만 실행됩니다.</p>
-            <p className="mt-1 mb-0 text-[11px] text-on-surface-variant">
-              같은 입력창에서 일반 자문과 주문 명령을 전달할 수 있습니다.
-            </p>
-          </div>
+          <p className="m-0 text-[11px] text-on-surface-variant">
+            궁금한 점을 묻거나 매매를 지시하면 대표가 확인해 처리합니다. 입력창 하단의 예시 질문을 클릭해보세요.
+          </p>
 
           {authorizedBooks.length > 1 ? (
             <label className="min-w-[190px] text-[11px] font-bold text-on-surface-variant">
-              PAPER 주문 Book
+              매매 지시 계좌
               <select
                 value={selectedBookId}
                 onChange={(event) => setRequestedBookId(event.target.value)}
                 className="mt-1 block w-full rounded border border-outline-variant bg-surface px-2 py-1.5 text-xs font-normal text-on-surface focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
                 aria-describedby="ceo-paper-book-help"
               >
-                <option value="">주문할 Book 선택</option>
+                <option value="">계좌를 선택하세요</option>
                 {authorizedBooks.map((book) => (
                   <option key={book.bookId} value={book.bookId}>
                     {book.name}
@@ -203,21 +196,15 @@ function CeoControlRoomChatSession() {
           ) : null}
         </div>
 
-        <p
-          id="ceo-paper-book-help"
-          role={authorizedBooks.length === 0 ? "status" : undefined}
-          className={`mt-2 mb-0 text-[11px] ${
-            authorizedBooks.length === 0 ? "text-error" : "text-on-surface-variant"
-          }`}
-        >
-          {authorizedBooks.length === 0
-            ? "이 펀드에 승인된 PAPER Book이 없어 주문은 실행할 수 없습니다. 일반 조회와 자문은 계속 사용할 수 있습니다."
-            : authorizedBooks.length === 1
-              ? `주문 대상: ${authorizedBooks[0].name} (자동 선택)`
-              : selectedBook
-                ? `주문 대상: ${selectedBook.name}`
-                : "주문 명령을 보낼 때만 Book을 선택하세요. 일반 자문은 선택 없이 사용할 수 있습니다."}
-        </p>
+        {authorizedBooks.length === 0 ? (
+          <p id="ceo-paper-book-help" role="status" className="mt-2 mb-0 text-[11px] text-on-surface-variant">
+            이 펀드에 연결된 계좌가 없어 매매 지시는 처리할 수 없습니다. 질문과 안내는 계속 사용할 수 있습니다.
+          </p>
+        ) : authorizedBooks.length > 1 && !selectedBook ? (
+          <p id="ceo-paper-book-help" className="mt-2 mb-0 text-[11px] text-on-surface-variant">
+            매매 지시를 보낼 때만 계좌를 선택하세요. 질문은 선택 없이 사용할 수 있습니다.
+          </p>
+        ) : null}
       </div>
 
       {/* 최신 UI의 단발 결과 구조를 유지한다. 내용이 많으면 이 영역 안에서만 스크롤한다. */}
@@ -229,7 +216,7 @@ function CeoControlRoomChatSession() {
         {!submitted && !error ? (
           <div className="m-auto text-center px-2">
             <p className="text-body-sm font-body-sm text-on-surface-variant m-0">
-              자연어로 질문하거나 PAPER 주문을 지시하면 CEO Hermes가 업무를 만들고 Kanban에서 추적합니다.
+              자연어로 질문하거나 매매를 지시하면 CEO Hermes가 업무를 만들고 Kanban에서 추적합니다.
             </p>
             <p className="text-xs text-outline mt-2 m-0">지난 대화는 Discord 채널에서 확인합니다.</p>
           </div>
@@ -392,7 +379,7 @@ function CeoControlRoomChatSession() {
         </div>
 
         <div className="flex justify-between items-center gap-3 mt-2">
-          <span className="text-xs text-outline">{draft.length}/2000 · 자문 + PAPER 주문 · LIVE 아님</span>
+          <span className="text-xs text-outline">{draft.length}/2000</span>
           <button
             type="button"
             onClick={() => void send(draft)}

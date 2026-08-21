@@ -66,9 +66,10 @@ def test_local_configures_exact_authenticated_fixture_grant(tmp_path: Path) -> N
     )
     assert values["APP_ENV"] == "local"
     assert values["PORTFOLIO_AUTH_MODE"] == "fixture"
-    assert values["PORTFOLIO_AUTH_REQUIRED"] == "true"
+    assert values["PORTFOLIO_AUTH_REQUIRED"] == "false"
     assert values["USER_PAPER_ORDER_WORKFLOW_ENABLED"] == "true"
-    assert values["LS_ENV"] == "PAPER"
+    assert values["USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED"] == "true"
+    assert values["LS_ENV"] == "LIVE"
     assert values["TRADING_EXECUTION_MODE"] == "PAPER"
     assert values["TRADING_BROKER_ADAPTER"] == "paper"
     assert values["MCP_TRADING_ORDER_API_KEY"] == preserved
@@ -281,8 +282,10 @@ def test_aws_sets_production_contract_without_fixture_grants(
     assert values["PORTFOLIO_AUTH_MODE"] == "supabase_jwt"
     assert values["PORTFOLIO_AUTH_REQUIRED"] == "true"
     assert values["USER_PAPER_ORDER_WORKFLOW_ENABLED"] == "true"
+    assert values["USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED"] == "true"
     assert values["PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON"] == "[]"
-    assert values["LS_MARKET_ENV"] == "LIVE"
+    assert values["LS_ENV"] == "LIVE"
+    assert "LS_MARKET_ENV" not in values
     assert values["HEDGEFUND_CONTROL_DB_NAME"] == "control"
     assert values["SUPABASE_URL"] == supabase_url
     assert values["HEDGEFUND_TSDB_PASSWORD"] == timescale_password
@@ -290,7 +293,7 @@ def test_aws_sets_production_contract_without_fixture_grants(
         values[key]
         for key in (*cli.SERVICE_SECRET_KEYS, *cli.AWS_DATABASE_SECRET_KEYS)
     ]
-    assert len(set(managed_secrets)) == 8
+    assert len(set(managed_secrets)) == len(managed_secrets)
     assert all(len(value) >= 32 for value in managed_secrets)
     assert all(
         cli._URL_SAFE_SECRET_RE.fullmatch(values[key])
@@ -301,10 +304,10 @@ def test_aws_sets_production_contract_without_fixture_grants(
         assert hidden not in output
 
 
-def test_aws_preserves_eight_distinct_secrets_atomically(tmp_path: Path) -> None:
+def test_aws_preserves_all_distinct_secrets_atomically(tmp_path: Path) -> None:
     env_file = tmp_path / ".env.aws"
     keys = (*cli.SERVICE_SECRET_KEYS, *cli.AWS_DATABASE_SECRET_KEYS)
-    preserved = {key: character * 40 for key, character in zip(keys, "abcdefgh")}
+    preserved = {key: character * 40 for key, character in zip(keys, "abcdefghij")}
     env_file.write_text(
         "SUPABASE_URL=https://project.supabase.co\n"
         "HEDGEFUND_TSDB_PASSWORD=AdminPassword_1234567890\n"
@@ -313,7 +316,7 @@ def test_aws_preserves_eight_distinct_secrets_atomically(tmp_path: Path) -> None
     )
 
     def must_not_generate() -> str:
-        raise AssertionError("all eight valid credentials must be preserved")
+        raise AssertionError("all valid credentials must be preserved")
 
     first = cli.configure_environment(
         runtime="aws", env_file=env_file, generator=must_not_generate
@@ -344,7 +347,9 @@ def test_aws_rotates_duplicate_or_non_url_safe_database_passwords(
         f"HEDGEFUND_RUNTIME_DB_PASSWORD={duplicate}\n"
         "HEDGEFUND_ORDER_DB_PASSWORD=contains/a/reserved/slash/xxxxxxxxxx\n"
         f"HEDGEFUND_TRADING_DB_PASSWORD={'t' * 40}\n"
-        f"HEDGEFUND_ACCOUNTING_DB_PASSWORD={'a' * 40}\n",
+        f"HEDGEFUND_ACCOUNTING_DB_PASSWORD={'a' * 40}\n"
+        f"HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD={'q' * 40}\n"
+        f"HEDGEFUND_CONDITIONAL_WORKER_DB_PASSWORD={'w' * 40}\n",
         encoding="utf-8",
     )
 
@@ -360,7 +365,7 @@ def test_aws_rotates_duplicate_or_non_url_safe_database_passwords(
     assert values["CEO_DISCORD_INGRESS_API_KEY"] == "c" * 48
     assert values["HEDGEFUND_RUNTIME_DB_PASSWORD"] == "r" * 48
     assert values["HEDGEFUND_ORDER_DB_PASSWORD"] == "o" * 48
-    assert len(set(managed)) == 8
+    assert len(set(managed)) == len(managed)
     assert all(
         cli._URL_SAFE_SECRET_RE.fullmatch(values[key])
         for key in cli.AWS_DATABASE_SECRET_KEYS

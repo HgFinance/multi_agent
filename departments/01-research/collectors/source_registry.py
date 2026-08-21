@@ -222,6 +222,8 @@ class SourceSpec(BaseModel):
 
     # 이 Source 를 쓰기 위해 반드시 있어야 하는 환경변수. 하나라도 비면 KEY_MISSING 이다.
     required_env: tuple[str, ...] = ()
+    credential_mode_env: str | None = None
+    required_env_by_mode: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     # 없어도 동작하지만 있으면 기능이 늘어나는 것. 상태 판정에 넣지 않는다.
     optional_env: tuple[str, ...] = ()
 
@@ -262,8 +264,13 @@ SOURCES: tuple[SourceSpec, ...] = (
         display_name="LS증권 Open API WebSocket",
         domains=(SourceDomain.REALTIME_PRICE, SourceDomain.REALTIME_QUOTE, SourceDomain.MARKET_STATE),
         tier=SourceTier.P0,
-        required_env=("LS_APP_KEY", "LS_APP_SECRET_KEY"),
-        optional_env=("LS_APP_KEY_PAPER", "LS_APP_SECRET_KEY_PAPER", "LS_WS_BASE_URL_PAPER"),
+        required_env=(),
+        credential_mode_env="LS_ENV",
+        required_env_by_mode={
+            "PAPER": ("LS_APP_KEY_PAPER", "LS_APP_SECRET_KEY_PAPER"),
+            "LIVE": ("LS_APP_KEY", "LS_APP_SECRET_KEY"),
+        },
+        optional_env=("LS_WS_BASE_URL_PAPER",),
         allowed_uses=(UseScope.FULLTEXT_STORE, UseScope.LONG_TERM_ARCHIVE),
         raw_bucket="market-archive-private",
         normalized_target="market.market_ticks / market.market_quotes",
@@ -281,7 +288,13 @@ SOURCES: tuple[SourceSpec, ...] = (
         domains=(SourceDomain.INSTRUMENT_MASTER, SourceDomain.MARKET_STATE,
                  SourceDomain.DERIVATIVE),
         tier=SourceTier.P0,
-        required_env=("LS_APP_KEY", "LS_APP_SECRET_KEY"),
+        required_env=("LS_REST_BASE_URL",),
+        credential_mode_env="LS_ENV",
+        required_env_by_mode={
+            "PAPER": ("LS_APP_KEY_PAPER", "LS_APP_SECRET_KEY_PAPER"),
+            "LIVE": ("LS_APP_KEY", "LS_APP_SECRET_KEY"),
+        },
+        optional_env=("LS_REST_BASE_URL_PAPER",),
         allowed_uses=(UseScope.FULLTEXT_STORE, UseScope.LONG_TERM_ARCHIVE),
         raw_bucket="research-raw-private",
         normalized_target="reference.instruments",
@@ -649,9 +662,22 @@ class SourceRegistry:
             if s.source_id in seen:
                 raise ValueError(f"source_id 중복: {s.source_id}")
             seen.add(s.source_id)
-            for name in (*s.required_env, *s.optional_env):
+            mode_envs = (s.credential_mode_env,) if s.credential_mode_env else ()
+            mode_required = tuple(
+                name
+                for names in s.required_env_by_mode.values()
+                for name in names
+            )
+            for name in (*s.required_env, *s.optional_env, *mode_envs, *mode_required):
                 if not self._ENV_NAME.match(name):
                     raise ValueError(f"{s.source_id}: 환경변수명 형식 위반 {name!r}")
+            if s.required_env_by_mode and not s.credential_mode_env:
+                raise ValueError(
+                    f"{s.source_id}: required_env_by_mode에는 credential_mode_env가 필요합니다"
+                )
+            for mode in s.required_env_by_mode:
+                if not self._ENV_NAME.match(mode):
+                    raise ValueError(f"{s.source_id}: 모드명 형식 위반 {mode!r}")
         self._specs = {s.source_id: s for s in specs}
         # env 를 주입받는다. 테스트가 os.environ 을 오염시키지 않게 하려는 것이다.
         # 주입이 없으면 .env + 환경변수를 합쳐서 읽는다.
@@ -682,7 +708,20 @@ class SourceRegistry:
     def missing_env(self, source_id: str) -> tuple[str, ...]:
         """빈 문자열도 미확보로 본다. .env 에 이름만 있고 값이 없는 상태가 대부분이다."""
         s = self.spec(source_id)
-        return tuple(name for name in s.required_env if not self._env.get(name, "").strip())
+        required = list(s.required_env)
+        if s.required_env_by_mode:
+            mode = (self._env.get(s.credential_mode_env or "") or "LIVE").strip().upper()
+            mode_required = s.required_env_by_mode.get(mode)
+            if mode_required is None:
+                # 알 수 없는 모드는 사용 불가로 취급한다. 실제 모드 오류는
+                # 해당 adapter가 더 구체적인 메시지로 다시 검증한다.
+                mode_required = tuple(
+                    name
+                    for names in s.required_env_by_mode.values()
+                    for name in names
+                )
+            required.extend(mode_required)
+        return tuple(name for name in required if not self._env.get(name, "").strip())
 
     def is_available(self, source_id: str) -> bool:
         return self.status(source_id) is SourceStatus.AVAILABLE
@@ -805,8 +844,10 @@ class Collector(Protocol):
 # ---------------------------------------------------------------------------
 
 _FAKE_ENV = {
+    "LS_ENV": "LIVE",
     "LS_APP_KEY": "k" * 36,
     "LS_APP_SECRET_KEY": "s" * 32,
+    "LS_REST_BASE_URL": "https://example.test",
     "OPEN_DART_API_KEY": "d" * 40,
     "TAVILY_API_KEY": "tvly-x",
     # 미확보 Source 를 그대로 재현한다 - 이름은 있고 값이 빈 상태

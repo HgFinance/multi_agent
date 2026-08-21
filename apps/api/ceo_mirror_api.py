@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 try:
     from .ceo import CeoAsk
@@ -28,6 +30,7 @@ try:
     from .current_user import (
         authorized_trading_books,
         current_user,
+        optional_current_user,
         require_fund_membership,
     )
     from .discord_actor_map import resolve as resolve_discord_actor
@@ -55,6 +58,7 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
     from current_user import (  # type: ignore[no-redef]
         authorized_trading_books,
         current_user,
+        optional_current_user,
         require_fund_membership,
     )
     from discord_actor_map import (
@@ -339,7 +343,7 @@ def mirror_ask(
 def mirror_ingress(
     request: CanonicalIngress,
     http_request: Request,
-    owner_id: str | None = Depends(current_user),
+    owner_id: str | None = Depends(optional_current_user),
 ) -> MirrorIngressResponse:
     """Canonical ingress for a human Web or Discord message."""
 
@@ -349,6 +353,8 @@ def mirror_ingress(
     if request.source != "discord" and internal_discord:
         raise HTTPException(status_code=403, detail="discord_ingress_source_forbidden")
     owner = _resolved_owner(owner_id)
+    if request.source != "discord" and owner_id is None:
+        raise HTTPException(status_code=401, detail="portfolio_authentication_required")
     canonical = request
     if owner is not None:
         if (
@@ -401,25 +407,149 @@ def mirror_event_stream(
 
     _require_mirror_request_owner(request_id, owner_id)
 
-    def generate():
+    # **비동기 generator 여야 한다.** 동기 generator 를 StreamingResponse 에 주면
+    # Starlette 가 `iterate_in_threadpool` 로 감싸고, 여기서 `time.sleep(0.5)` 를
+    # 하면 그 0.5초 동안 anyio 스레드풀(기본 40개) 토큰 하나를 쥔 채로 있는다.
+    # 스트림 하나가 25초 내내 스레드 하나를 사실상 독점하고, 프론트는 끊기면
+    # 1초 뒤 곧바로 재연결한다(app/lib/sseClient.ts) - 열려 있는 대화 창 수가
+    # 40을 넘는 순간 나머지 동기 `def` 엔드포인트 전부가 스레드풀 대기열에서
+    # 무기한 대기한다. 대기열에는 상한도 타임아웃도 없어서 요청이 영원히
+    # pending 된다. 블로킹 읽기는 스레드로 넘기고 대기는 이벤트 루프에서 한다.
+    async def generate():
         cursor = after
         deadline = time.monotonic() + max(
             1.0, float(os.getenv("UI_MIRROR_SSE_SECONDS", "25"))
         )
         while time.monotonic() < deadline:
-            _publish_workflow_projection(request_id)
-            events = MIRROR_STORE.read_events(request_id, cursor)
+            await run_in_threadpool(_publish_workflow_projection, request_id)
+            events = await run_in_threadpool(
+                MIRROR_STORE.read_events, request_id, cursor
+            )
             for event in events:
                 cursor = event.event_id
                 yield f"id: {event.event_id}\nevent: {event.event_type}\ndata: {event.model_dump_json()}\n\n"
             if not events:
                 yield ": heartbeat\n\n"
-                time.sleep(0.5)
+                await asyncio.sleep(0.5)
 
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+
+@router.get("/conversation/stream")
+def conversation_stream(
+    after: str | None = Query(default=None, max_length=128),
+    owner_id: str | None = Depends(current_user),
+) -> StreamingResponse:
+    """Authenticated Web/Discord conversation projection.
+
+    Only user messages and final CEO answers are exposed.  Execution,
+    department, QA, tool, and hidden-reasoning events remain outside the
+    conversation surface.
+
+    Discord-origin requests do not currently carry a Supabase user identity.
+    They are therefore exposed only to the explicitly configured
+    DISCORD_UI_OWNER_ID.  Missing mapping is fail-closed.
+    """
+
+    if not owner_id:
+        raise HTTPException(status_code=401, detail="portfolio_authentication_required")
+
+    redis_url = os.getenv("UI_MIRROR_REDIS_URL") or os.getenv("REDIS_URL")
+    if not redis_url:
+        raise HTTPException(
+            status_code=503,
+            detail="conversation_stream_requires_redis",
+        )
+
+    discord_owner_id = os.getenv("DISCORD_UI_OWNER_ID", "").strip()
+    stream_name = os.getenv("UI_MIRROR_STREAM", "hf:ui-ceo-mirror:v1")
+    allowed_event_types = frozenset({"USER_MESSAGE", "CEO_FINAL"})
+
+    def event_visible(event: MirrorEvent) -> bool:
+        record = MIRROR_STORE.get_request(event.request_id)
+        if record is None:
+            return False
+
+        request = record.request
+
+        if request.source == "web":
+            return request.actor_id == owner_id
+
+        if request.source == "discord":
+            return bool(discord_owner_id) and owner_id == discord_owner_id
+
+        return False
+
+    def generate():
+        try:
+            import redis
+
+            client = redis.Redis.from_url(redis_url, decode_responses=True)
+            client.ping()
+        except Exception:
+            yield "event: error\ndata: {\"detail\":\"conversation_stream_unavailable\"}\n\n"
+            return
+
+        cursor = after or "$"
+        deadline = time.monotonic() + max(
+            1.0,
+            float(os.getenv("UI_MIRROR_SSE_SECONDS", "25")),
+        )
+
+        while time.monotonic() < deadline:
+            try:
+                rows = client.xread(
+                    {stream_name: cursor},
+                    count=100,
+                    block=1000,
+                )
+            except Exception:
+                yield "event: error\ndata: {\"detail\":\"conversation_stream_unavailable\"}\n\n"
+                return
+
+            emitted = False
+
+            for _stream, entries in rows:
+                for stream_id, fields in entries:
+                    cursor = stream_id
+
+                    payload = fields.get("payload")
+                    if not payload:
+                        continue
+
+                    try:
+                        event = MirrorEvent.model_validate_json(payload)
+                    except Exception:
+                        continue
+
+                    if event.event_type not in allowed_event_types:
+                        continue
+
+                    if not event_visible(event):
+                        continue
+
+                    emitted = True
+                    yield (
+                        f"id: {stream_id}\n"
+                        f"event: {event.event_type}\n"
+                        f"data: {event.model_dump_json()}\n\n"
+                    )
+
+            if not emitted:
+                yield ": heartbeat\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

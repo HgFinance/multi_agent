@@ -109,16 +109,26 @@ directive는 고정된 대상 snapshot과 자식별 결과를 보존하며 다�
 
 ### 5. PAPER 계정과 LS 경계를 고정한다
 
-- Trading Domain의 **로컬 durable PaperBroker 계정**이 PAPER의 canonical
-  account다. 구체적으로 durable directive/leg/reservation ledger와 canonical
-  execution/accounting projection이 주문·미종료 주문·체결·보유·현금·reservation의
-  source다. 프로세스 메모리 fallback이나 클라이언트가 보낸 holdings는 권위가 없다.
-- BFF와 Hermes는 계좌번호·계좌 비밀번호·LS Credential을 받거나 저장하거나
-  Trading Domain으로 전달하지 않는다. BFF→Trading 호출은 짧은 수명의 최소 claim
-  service proof만 사용한다.
-- LS LIVE 연결은 현재 **시세·호가·체결 시장 관측 read-only**다. LS 계좌 잔고를
-  PAPER 계정과 섞지 않으며, 이 결정에는 LIVE order route나 LIVE Broker adapter가
+- 배포된 사용자 직접 주문 레인의 **경제적 canonical account는 LS증권 모의투자
+  (`LS PAPER`) 계좌**다. 주문·미종료 주문·체결·보유·현금은 PAPER broker 응답과
+  snapshot을 기준으로 한다. 클라이언트가 보낸 holdings나 프로세스 메모리는 권위가
   없다.
+- Trading Domain의 durable directive/leg/reservation/fill ledger는 주문 전 멱등성,
+  예약, 재시작, UNKNOWN 상태와 감사 증거를 보존한다. Accounting의 immutable
+  content-addressed reconciliation journal은 LS PAPER cash·buying power·position과
+  내부 projection 차이를 조정한다. 이 원장은 broker와 독립된 가상 계좌가 아니다.
+- Trading API/worker만 PAPER 전용 AppKey로 주문·취소·상태조회를 수행한다. 주문 또는
+  취소 transport 결과가 모호하면 `UNKNOWN`으로 남기고 자동 재전송하지 않는다.
+  BFF server는 명시적으로 활성화된 read-only account snapshot만 만들 수 있지만
+  credential을 Browser·Hermes·downstream payload로 노출하지 않는다.
+- 주문 scope root는 SQL binding 후 worker에 release하지 않고 `done`으로 닫으며,
+  Trading primary만 `running` 상태에서 trusted tool을 호출한다. LS 주문 adapter는
+  PAPER credential과 12자리 MAC header를 모두 요구하고, 초당 1회인 계좌 주문조회
+  snapshot을 짧게 재사용한다. broker 주문번호 없는 `UNKNOWN`은 hot polling 대상에서
+  제외하되 감사·수동 대사 기록으로 보존한다.
+- LS LIVE 연결은 계속 **시세·호가·체결 시장 관측 read-only**다. PAPER adapter는
+  LIVE AppKey로 fallback하지 않으며, 이 결정에는 LIVE order route나 LIVE Broker
+  adapter가 없다.
 
 ## 결과
 
@@ -127,7 +137,7 @@ directive는 고정된 대상 snapshot과 자식별 결과를 보존하며 다�
 - 기존 자동 alpha/strategy/rebalancer 주문의 Risk·QA·OMS 경계는 약화되지 않는다.
 - 사용자 지시는 모델의 추천이나 보고서가 아니라 별도의 감사 가능한 authority로
   남는다.
-- durable PAPER store가 없거나 canonical account를 읽지 못하면 fail closed한다.
+- durable admission store가 없거나 LS PAPER account를 읽지 못하면 fail closed한다.
 - 이 ADR은 LIVE 실행을 승인하지 않으며, LIVE Broker와 주문 API는 계속 별도 결정
   대상이다.
 
@@ -139,5 +149,5 @@ directive는 고정된 대상 snapshot과 자식별 결과를 보존하며 다�
   소유하고 재현성·멱등성이 사라지므로 기각한다.
 - **BFF가 PAPER 잔고를 보관하거나 요청 holdings를 신뢰한다.** 중복 source of truth와
   oversell/cancel race를 만들므로 기각한다.
-- **LS LIVE 계좌를 PAPER 계정으로 사용한다.** PAPER/LIVE 격리와 credential 경계를
-  깨므로 기각한다.
+- **LS LIVE 계좌를 PAPER 계정으로 사용한다.** LS PAPER/LIVE 격리와 credential
+  경계를 깨므로 기각한다. 별도 발급된 LS PAPER 계좌 사용과는 다른 대안이다.

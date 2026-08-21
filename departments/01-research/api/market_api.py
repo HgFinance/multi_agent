@@ -230,6 +230,48 @@ def bars(
 ):
     """봉 조회 - 백필(ls_chart)과 자체 파생이 한 테이블에서 나온다(source 로 구분)."""
     iid = _iid_or_404(symbol)
+    derived_intervals = {
+        "5M": "5 minutes",
+        "15M": "15 minutes",
+        "1H": "1 hour",
+    }
+    if interval in derived_intervals and source in {None, "derived", "derived_1m"}:
+        # Higher intraday frames have one canonical implementation: aggregate
+        # final 1M candles in Timescale. Rule/agent callers must not invent
+        # their own candle alignment or partial-bar policy.
+        base_source = os.environ.get("MARKET_BAR_BASE_SOURCE", "ls_chart").strip()
+        if not base_source:
+            raise HTTPException(503, "MARKET_BAR_BASE_SOURCE is not configured")
+        interval_literal = derived_intervals[interval]
+        cond, params = "", [iid, base_source]
+        if to is not None:
+            if to.tzinfo is None:
+                raise HTTPException(422, "to must include a timezone")
+            cond = " and bucket_time <= %s"
+            params.append(to)
+        params.append(limit)
+        return _query(f"""
+            select time_bucket(interval '{interval_literal}', bucket_time)
+                     as bucket_time,
+                   first(open, bucket_time) as open,
+                   max(high) as high,
+                   min(low) as low,
+                   last(close, bucket_time) as close,
+                   sum(volume) as volume,
+                   sum(notional) as notional,
+                   'derived_1m'::text as source,
+                   bool_and(is_final)
+                     and count(*) = count(distinct bucket_time)
+                     and count(*) =
+                         floor(extract(epoch from (max(bucket_time) - min(bucket_time))) / 60)::bigint + 1
+                     and time_bucket(interval '{interval_literal}', bucket_time)
+                         + interval '{interval_literal}' <= now() as is_final
+              from market.market_bars
+             where instrument_id = %s and interval_code = '1M'
+               and source = %s{cond}
+             group by time_bucket(interval '{interval_literal}', bucket_time)
+             order by bucket_time desc limit %s
+        """, tuple(params))
     cond, params = "", [iid, interval]
     if source:
         cond += " and source = %s"

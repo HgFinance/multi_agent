@@ -44,7 +44,10 @@ try:
         submit_user_directive,
     )
     from .user_order_workflow import (
+        UserOrderWorkflowError,
         UserOrderWorkflowUnavailable,
+        directive_execution_event_payload,
+        recover_committed_directive,
         user_order_repository,
     )
 except ImportError:  # pragma: no cover - direct module execution compatibility
@@ -66,7 +69,10 @@ except ImportError:  # pragma: no cover - direct module execution compatibility
         submit_user_directive,
     )
     from user_order_workflow import (  # type: ignore[no-redef]
+        UserOrderWorkflowError,
         UserOrderWorkflowUnavailable,
+        directive_execution_event_payload,
+        recover_committed_directive,
         user_order_repository,
     )
 
@@ -184,6 +190,7 @@ class DirectiveLeg(BaseModel):
     requested_quantity: str | None = None
     limit_price: str | None = None
     filled_quantity: str
+    average_fill_price: str | None = None
     target_filled_quantity: str = "0"
     state: str = Field(min_length=1, max_length=64)
     reduce_only: bool
@@ -225,6 +232,8 @@ class PaperOrderWorkflowStatusResponse(BaseModel):
         "user-paper-order-status.v1"
     )
     order_request_id: UUID
+    client_request_id: str
+    request_source: Literal["DISCORD", "WEB_OR_API"]
     mode: Literal["PAPER"] = "PAPER"
     state: str
     action: DirectiveAction | None = None
@@ -234,6 +243,7 @@ class PaperOrderWorkflowStatusResponse(BaseModel):
     error_code: str | None = None
     error_message: str | None = None
     directive: UserDirectiveResponse | None = None
+    correlation: dict[str, Any] | None = None
 
 
 class ClarificationRequired(ValueError):
@@ -836,6 +846,14 @@ def paper_order_workflow_status(
         raise HTTPException(status_code=404, detail="paper_order_request_not_found")
 
     directive: UserDirectiveResponse | None = None
+    correlation: dict[str, Any] | None = None
+    if record.state == "UNKNOWN" and not record.directive_id:
+        try:
+            record = recover_committed_directive(repository, record)
+        except UserOrderWorkflowError as exc:
+            raise HTTPException(
+                status_code=503, detail="paper_order_workflow_unavailable"
+            ) from exc
     if record.directive_id:
         directive = read_verified_paper_directive_status(
             subject=record.user_id,
@@ -846,20 +864,31 @@ def paper_order_workflow_status(
         state = _workflow_state_from_directive(directive)
         if state != record.state:
             try:
+                correlation = directive_execution_event_payload(record, directive)
                 record = repository.mark_outcome(
                     record.order_request_id,
                     state=state,
                     directive_id=str(directive.directive_id),
                     error_code=directive.error_code,
                     error_message=directive.error_message,
+                    event_type="BROKER_EXECUTION_SNAPSHOT",
+                    event_payload=correlation,
                 )
             except UserOrderWorkflowUnavailable as exc:
                 raise HTTPException(
                     status_code=503, detail="paper_order_workflow_unavailable"
                 ) from exc
+        if correlation is None:
+            correlation = directive_execution_event_payload(record, directive)
 
     return PaperOrderWorkflowStatusResponse(
         order_request_id=UUID(record.order_request_id),
+        client_request_id=record.client_request_id,
+        request_source=(
+            "DISCORD"
+            if record.client_request_id.startswith("discord:")
+            else "WEB_OR_API"
+        ),
         state=record.state,
         action=DirectiveAction(record.action) if record.action else None,
         ceo_root_task_id=record.ceo_root_task_id,
@@ -868,6 +897,7 @@ def paper_order_workflow_status(
         error_code=record.error_code,
         error_message=record.error_message,
         directive=directive,
+        correlation=correlation,
     )
 
 

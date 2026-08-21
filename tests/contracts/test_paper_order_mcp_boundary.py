@@ -10,16 +10,27 @@ from types import ModuleType
 import pytest
 import yaml
 
+from apps.api.conditional_rules import ConditionalRuleCandidate
 from apps.api.paper_order_mcp import (
     BearerAuthMiddleware,
+    UntrustedHermesOrderCandidate,
+    _delegate_to_orchestrator,
     build_server,
     check_readiness,
     validate_api_key,
 )
+from orchestration.contracts.user_paper_order import TextEvidence
 
 
 ROOT = Path(__file__).resolve().parents[2]
 VALID_KEY = "paper-order-mcp-9f4e61d807a248e8a2b17f"
+
+def test_text_evidence_schema_explains_instrument_normalization() -> None:
+    description = TextEvidence.model_json_schema()["properties"]["normalized"][
+        "description"
+    ]
+    assert "INSTRUMENT must exactly equal instrument_mention" in description
+
 
 
 def _yaml(path: str) -> dict:
@@ -98,20 +109,35 @@ def test_http_boundary_rejects_missing_and_wrong_bearer() -> None:
     )[0] == 204
 
 
-def test_server_exposes_exactly_one_lazy_delegating_tool(monkeypatch) -> None:
-    calls: list[dict] = []
+def test_server_exposes_exactly_two_lazy_delegating_tools(monkeypatch) -> None:
+    order_calls: list[dict] = []
+    conditional_calls: list[dict] = []
     fake = ModuleType("apps.api.user_order_orchestrator")
+    conditional_fake = ModuleType("apps.api.conditional_rule_orchestrator")
 
     async def orchestrate(**kwargs):
-        calls.append(kwargs)
+        order_calls.append(kwargs)
         return {"state": "INTERPRETED", "mode": "PAPER"}
 
+    async def orchestrate_conditional(**kwargs):
+        conditional_calls.append(kwargs)
+        return {"state": "ACTIVE", "mode": "PAPER", "rule_active": True}
+
     fake.process_user_paper_order = orchestrate  # type: ignore[attr-defined]
+    conditional_fake.process_user_conditional_paper_rule = (  # type: ignore[attr-defined]
+        orchestrate_conditional
+    )
     monkeypatch.setitem(sys.modules, "apps.api.user_order_orchestrator", fake)
+    monkeypatch.setitem(
+        sys.modules, "apps.api.conditional_rule_orchestrator", conditional_fake
+    )
 
     server = build_server()
     tools = asyncio.run(server.list_tools())
-    assert [tool.name for tool in tools] == ["process_user_paper_order"]
+    assert [tool.name for tool in tools] == [
+        "process_user_paper_order",
+        "process_user_conditional_paper_rule",
+    ]
     schema = tools[0].inputSchema
     candidate_ref = schema["properties"]["interpretation"]["$ref"]
     candidate_schema = schema["$defs"][candidate_ref.rsplit("/", 1)[-1]]
@@ -157,11 +183,48 @@ def test_server_exposes_exactly_one_lazy_delegating_tool(monkeypatch) -> None:
         )
     )
     assert result[1] == {"state": "INTERPRETED", "mode": "PAPER"}
-    assert calls == [
+    assert order_calls == [
         {
             "root_task_id": "root-1",
             "trading_task_id": "trade-1",
             "interpretation": interpretation,
+        }
+    ]
+
+    conditional_candidate = {
+        "symbol": "삼성전자",
+        "condition": {
+            "type": "COMPARISON",
+            "operator": "GTE",
+            "left": {"type": "INDICATOR", "name": "RSI", "timeframe": "1D"},
+            "right": {"type": "LITERAL", "value": "70", "unit": "NUMBER"},
+        },
+        "action": {
+            "side": "SELL",
+            "sizing": {"type": "FIXED_SHARES", "value": "2"},
+        },
+        "evaluation": {"clock": "BAR_CLOSE", "primary_timeframe": "1D"},
+    }
+    conditional_result = asyncio.run(
+        server.call_tool(
+            "process_user_conditional_paper_rule",
+            {
+                "root_task_id": "root-1",
+                "trading_task_id": "trade-1",
+                "candidate": conditional_candidate,
+                "clarification_reason": None,
+            },
+        )
+    )
+    assert conditional_result[1]["rule_active"] is True
+    assert conditional_calls == [
+        {
+            "root_task_id": "root-1",
+            "trading_task_id": "trade-1",
+            "candidate": ConditionalRuleCandidate.model_validate(
+                conditional_candidate
+            ),
+            "clarification_reason": None,
         }
     ]
 
@@ -220,6 +283,53 @@ def test_transport_accepts_contradictory_candidate_for_durable_verifier(
     ]
 
 
+def test_sync_order_orchestrator_runs_off_the_mcp_event_loop(monkeypatch) -> None:
+    calls: list[dict] = []
+    offloads: list[object] = []
+    fake = ModuleType("apps.api.user_order_orchestrator")
+
+    def orchestrate(**kwargs):
+        calls.append(kwargs)
+        return {"state": "COMPLETED", "mode": "PAPER"}
+
+    async def to_thread(function, /, *args, **kwargs):
+        offloads.append(function)
+        return function(*args, **kwargs)
+
+    fake.process_user_paper_order = orchestrate  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "apps.api.user_order_orchestrator", fake)
+    monkeypatch.setattr(asyncio, "to_thread", to_thread)
+    interpretation = UntrustedHermesOrderCandidate.model_validate(
+        {
+            "schema_version": "user-paper-order-interpretation.v1",
+            "mode": "PAPER",
+            "binding": False,
+            "raw_text_sha256": "0" * 64,
+            "decision": "NOT_ORDER",
+            "action": None,
+            "instrument_mention": None,
+            "side": None,
+            "quantity": None,
+            "order_type": None,
+            "limit_price": None,
+            "evidence": [],
+            "reason_codes": ["QUESTION_OR_ADVICE"],
+        }
+    )
+
+    result = asyncio.run(
+        _delegate_to_orchestrator(
+            root_task_id="t_root1",
+            trading_task_id="t_trade1",
+            interpretation=interpretation,
+        )
+    )
+
+    assert result == {"state": "COMPLETED", "mode": "PAPER"}
+    assert offloads == [orchestrate]
+    assert calls[0]["root_task_id"] == "t_root1"
+
+
 def test_readiness_checks_role_schema_kanban_and_trading(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -268,6 +378,10 @@ def test_readiness_checks_role_schema_kanban_and_trading(
     monkeypatch.setenv(
         "ORDER_ORCHESTRATOR_DATABASE_URL",
         "postgresql://redacted.invalid/control",
+    )
+    monkeypatch.setenv(
+        "CONDITIONAL_RULE_DATABASE_URL",
+        "postgresql://conditional.invalid/control",
     )
     monkeypatch.setenv("HERMES_KANBAN_DB", str(kanban_path))
     monkeypatch.setenv("TRADING_API_URL", "http://trading-api:8000")
@@ -319,6 +433,8 @@ def test_compose_keeps_authority_secrets_out_of_trading_hermes() -> None:
     for key in (
         "DATABASE_URL",
         "ORDER_ORCHESTRATOR_DATABASE_ROLE",
+        "CONDITIONAL_RULE_DATABASE_URL",
+        "CONDITIONAL_RULE_DATABASE_ROLE",
         "TRADING_API_URL",
         "TRADING_SERVICE_AUTH_SECRET",
         "TRADING_SERVICE_AUTH_ISSUER",
@@ -373,6 +489,7 @@ def test_trading_profile_and_prompts_pin_the_one_shot_paper_lane() -> None:
         encoding="utf-8"
     )
     assert "hgfinance.user-paper-order-request.v1" in ceo
+    assert "hgfinance.user-conditional-paper-rule.v1" in ceo
     assert "pre-created Trading primary" in ceo
     assert "Do not call `kanban_create`" in ceo
     assert "qa_required=false" in ceo
@@ -380,6 +497,7 @@ def test_trading_profile_and_prompts_pin_the_one_shot_paper_lane() -> None:
 
     assert "hgfinance.user-paper-order-interpretation.v1" in trading
     assert "process_user_paper_order` exactly once" in trading
+    assert "process_user_conditional_paper_rule` exactly once" in trading
     for rejected in (
         "Questions/advice",
         "negation/prohibition",

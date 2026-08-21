@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from apps.api import ceo, user_order_orchestrator as orchestrator
 from apps.api.user_order_workflow import InMemoryUserOrderRequestRepository
 from apps.api.user_orders import (
+    DirectiveLeg,
     DirectiveAction as ResponseAction,
     DirectiveState,
     UserDirectiveResponse,
@@ -304,6 +305,10 @@ def test_non_executable_root_state_is_rejected_before_submit(
 
     assert raised.value.code == expected_code
     submit.assert_not_called()
+    failed = context.repository.get(context.record.order_request_id)
+    assert failed is not None
+    assert failed.state == "FAILED"
+    assert failed.error_code == expected_code
 
 
 @pytest.mark.parametrize(
@@ -340,6 +345,10 @@ def test_non_executable_trading_state_cannot_make_a_first_submission(
 
     assert raised.value.code == expected_code
     submit.assert_not_called()
+    failed = context.repository.get(context.record.order_request_id)
+    assert failed is not None
+    assert failed.state == "FAILED"
+    assert failed.error_code == expected_code
 
 
 def test_trading_state_is_rechecked_immediately_before_first_submission(
@@ -369,6 +378,10 @@ def test_trading_state_is_rechecked_immediately_before_first_submission(
     assert raised.value.code == "TRADING_TASK_STATE_NOT_EXECUTABLE"
     assert trading_reads == 2
     submit.assert_not_called()
+    failed = context.repository.get(context.record.order_request_id)
+    assert failed is not None
+    assert failed.state == "FAILED"
+    assert failed.error_code == "TRADING_TASK_STATE_NOT_EXECUTABLE"
 
 
 @pytest.mark.parametrize(
@@ -469,6 +482,122 @@ def test_valid_execution_submits_exactly_once_and_replay_only_reads_status(
     assert context.repository.get(context.record.order_request_id).state == "COMPLETED"
 
 
+def test_deterministic_entry_records_distinct_non_hermes_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _workflow(monkeypatch)
+    submit = Mock(return_value=_directive_response(context.record))
+    monkeypatch.setattr(orchestrator, "submit_verified_paper_directive", submit)
+    monkeypatch.setenv("PAPER_ORDER_STATUS_WAIT_SECONDS", "0")
+
+    result = orchestrator.process_deterministic_user_paper_order(
+        root_task_id=ROOT_TASK_ID,
+        trading_task_id=TRADING_TASK_ID,
+        interpretation=_execute_candidate(context.raw),
+    )
+
+    assert result["request_state"] == "IN_PROGRESS"
+    assert (context.record.order_request_id, "DETERMINISTIC") in (
+        context.repository._interpretations
+    )
+    assert (context.record.order_request_id, "HERMES") not in (
+        context.repository._interpretations
+    )
+    submit.assert_called_once()
+
+
+def test_direct_order_waits_read_only_and_reports_broker_fill_correlation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _workflow(monkeypatch)
+    submitted = _directive_response(context.record)
+    completed = _directive_response(context.record, state=DirectiveState.COMPLETED)
+    completed = completed.model_copy(
+        update={
+            "legs": [
+                DirectiveLeg.model_validate(
+                    {
+                        "leg_id": "55555555-5555-4555-8555-555555555555",
+                        "leg_index": 0,
+                        "symbol": "000660",
+                        "side": "SELL",
+                        "order_type": "MARKET",
+                        "requested_quantity": "2",
+                        "filled_quantity": "2",
+                        "average_fill_price": "1681500.00",
+                        "state": "FILLED",
+                        "reduce_only": True,
+                        "broker_order_id": "ls-paper:12693",
+                        "broker_event_id": "ls-paper:ack:12693",
+                    }
+                )
+            ]
+        }
+    )
+    submit = Mock(return_value=submitted)
+    read = Mock(return_value=completed)
+    monkeypatch.setattr(orchestrator, "submit_verified_paper_directive", submit)
+    monkeypatch.setattr(orchestrator, "read_verified_paper_directive_status", read)
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("PAPER_ORDER_STATUS_WAIT_SECONDS", "0.1")
+    monkeypatch.setattr(orchestrator, "_STATUS_POLL_SECONDS", 0.001)
+
+    result = _process(context, _execute_candidate(context.raw))
+
+    submit.assert_called_once()
+    read.assert_called_once()
+    assert result["request_state"] == "COMPLETED"
+    assert result["correlation"]["client_request_id"] == "request-200"
+    assert result["correlation"]["legs"][0]["broker_order_no"] == "12693"
+    assert "000660 매도 시장가(가격 미지정) 요청 2주/체결 2주" in result["user_message"]
+    assert "평균 체결가 1,681,500원" in result["user_message"]
+    assert "LS 주문번호 12693" in result["user_message"]
+    events = context.repository.events_for(context.record.order_request_id)
+    snapshots = [
+        event for event in events
+        if event["event_type"] == "BROKER_EXECUTION_SNAPSHOT"
+    ]
+    assert len(snapshots) == 2
+    assert snapshots[-1]["payload"]["legs"][0]["filled_quantity"] == "2"
+
+
+def test_discord_message_normalizes_database_decimal_quantities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _workflow(monkeypatch)
+    completed = _directive_response(context.record, state=DirectiveState.COMPLETED)
+    completed = completed.model_copy(
+        update={
+            "legs": [
+                DirectiveLeg.model_validate(
+                    {
+                        "leg_id": "55555555-5555-4555-8555-555555555555",
+                        "leg_index": 0,
+                        "symbol": "005930",
+                        "side": "BUY",
+                        "order_type": "MARKET",
+                        "requested_quantity": "3.0000000000",
+                        "filled_quantity": "3.0000000000",
+                        "average_fill_price": "271000.0000000000",
+                        "state": "FILLED",
+                        "reduce_only": False,
+                        "broker_order_id": "ls-paper:17566",
+                    }
+                )
+            ]
+        }
+    )
+    monkeypatch.setattr(
+        orchestrator, "submit_verified_paper_directive", Mock(return_value=completed)
+    )
+    monkeypatch.setenv("PAPER_ORDER_STATUS_WAIT_SECONDS", "0")
+
+    result = _process(context, _execute_candidate(context.raw))
+
+    assert "요청 3주/체결 3주" in result["user_message"]
+    assert "3.0000000000주" not in result["user_message"]
+
+
 def test_changed_interpretation_replay_conflicts_even_after_directive_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -509,6 +638,66 @@ def test_transport_unknown_is_persisted_and_never_auto_retried(
     record = context.repository.get(context.record.order_request_id)
     assert record.state == "UNKNOWN"
     assert record.directive_id is None
+
+
+def test_transport_unknown_recovers_exact_committed_directive_without_resubmit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _workflow(monkeypatch)
+    submit = Mock(
+        side_effect=HTTPException(status_code=503, detail="trading_api_unavailable")
+    )
+    read = Mock(
+        return_value=_directive_response(
+            context.record,
+            state=DirectiveState.COMPLETED,
+        )
+    )
+    monkeypatch.setattr(orchestrator, "submit_verified_paper_directive", submit)
+    monkeypatch.setattr(orchestrator, "read_verified_paper_directive_status", read)
+    candidate = _execute_candidate(context.raw)
+    context.repository.find_committed_directive = Mock(  # type: ignore[method-assign]
+        return_value=DIRECTIVE_ID
+    )
+
+    recovered = _process(context, candidate)
+
+    assert recovered["request_state"] == "COMPLETED"
+    assert recovered["directive"]["directive_id"] == DIRECTIVE_ID
+    submit.assert_called_once()
+    read.assert_called_once()
+    record = context.repository.get(context.record.order_request_id)
+    assert record.state == "COMPLETED"
+    assert record.directive_id == DIRECTIVE_ID
+
+
+def test_closed_market_reports_explicit_non_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _workflow(monkeypatch)
+    submit = Mock(
+        side_effect=HTTPException(
+            status_code=409,
+            detail="trading_market_session_closed",
+        )
+    )
+    monkeypatch.setattr(orchestrator, "submit_verified_paper_directive", submit)
+
+    result = _process(context, _execute_candidate(context.raw))
+
+    assert result["decision"] == "REJECTED"
+    assert result["binding"] is False
+    assert result["order_submitted"] is False
+    assert result["directive"] is None
+    assert result["reason_codes"] == ["trading_market_session_closed"]
+    assert result["user_message"] == (
+        "\ud604\uc7ac KRX \uc815\uaddc\uc7a5\uc774 \uc5f4\ub824 "
+        "\uc788\uc9c0 \uc54a\uc544 PAPER \uc8fc\ubb38\uc744 "
+        "\uc81c\ucd9c\ud558\uc9c0 \ubabb\ud588\uc2b5\ub2c8\ub2e4. "
+        "\uc8fc\ubb38\u00b7\uccb4\uacb0\u00b7\uc6d0\uc7a5 "
+        "\ubc18\uc601\uc740 \uc5c6\uc2b5\ub2c8\ub2e4."
+    )
+    submit.assert_called_once()
 
 
 def test_accounting_pending_is_not_reported_as_completed(

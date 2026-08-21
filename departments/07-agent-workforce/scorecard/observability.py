@@ -47,35 +47,29 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-try:
-    from orchestration.employee_dispatch import load_worker_specs
-    from orchestration.llm_observability import langfuse_worker_event_name
-except ModuleNotFoundError:  # direct department-local execution
-    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-    try:
-        from orchestration.employee_dispatch import load_worker_specs
-        from orchestration.llm_observability import langfuse_worker_event_name
-    except ModuleNotFoundError as _exc:
-        # ▶ 배포된 workforce-api 이미지에는 다른 본부 코드가 없다 (계획서 11.1
-        #   "해당 본부와 공통 Contract만 Copy"). 이 유휴 판정만 전 본부의
-        #   WORKER_SPECS 를 **파이썬 모듈로** 읽어서 경계를 넘는다.
-        #
-        #   여기서 죽으면 app.py 101행 import 가 실패해 **HR API 전체가**
-        #   크래시 루프에 빠진다 - 2026-08-12 실측. 기능 하나 때문에 본부
-        #   백엔드를 통째로 못 뜨게 하지 않는다. 레지스트리를 못 읽는 것은
-        #   불변식 2 그대로 "쉬고 있다"가 아니라 **"우리가 모른다"**다.
-        #
-        #   ⚠ 근본 해결은 이 자리가 아니다. HR 이 남의 본부 registry 를
-        #     import 로 읽을지, Versioned API 로 읽을지가 미결이다(계획서 3.2).
-        load_worker_specs = None  # type: ignore[assignment]
-        _WORKER_REGISTRY_IMPORT_ERROR: str | None = f"{type(_exc).__name__}:{_exc}"
+# The HR observer consumes only the versioned, metadata-only Worker Registry.
+# It never imports another department runtime Python module.
+# The manifest contains only department, worker_id, and trigger metadata.
+# A missing or invalid manifest raises WorkerRegistryUnavailable
+# rather than returning an empty list.
+# Langfuse payloads remain timestamp-only and never include trace contents.
 
-        def langfuse_worker_event_name(stage: str, worker_id: str) -> str:  # type: ignore[misc]
-            return f"worker.{stage}.{worker_id}"
-    else:
-        _WORKER_REGISTRY_IMPORT_ERROR = None
-else:
-    _WORKER_REGISTRY_IMPORT_ERROR = None
+try:
+    from orchestration.llm_observability import langfuse_worker_event_name
+except ModuleNotFoundError:  # 배포된 workforce-api 이미지에는 orchestration 이 없다.
+
+    def langfuse_worker_event_name(*, stage: str, worker_id: str) -> str:
+        """write 측과 **같은** 문자열을 만들어야 한다.
+
+        이벤트 이름은 부서 코드가 아니라 write/read 사이의 wire contract 라서,
+        import 할 수 없는 런타임에서는 복제하고 계약 테스트로 묶는다
+        (tests/test_hr_idle_agents.py::test_fallback_event_name_matches_canonical).
+        포맷이 어긋나면 조회가 예외 없이 **조용히 0건**이 되므로 - 이전 fallback 이
+        `worker.{stage}.{worker_id}` 라는 다른 포맷을 만들고 있었다(2026-08-20 수정) -
+        이 대조를 테스트로 고정하는 것이 이 복제의 전제다.
+        """
+
+        return f"llm.performance.metric:{stage}:{worker_id}"
 
 
 class WorkerRegistryUnavailable(RuntimeError):
@@ -83,7 +77,26 @@ class WorkerRegistryUnavailable(RuntimeError):
 
 ROOT = Path(__file__).resolve().parents[3]
 
-# employee_dispatch 의 로더 키 -> portfolio_recommendation 이 이벤트 name 에 쓰는 stage 값.
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+try:
+    from orchestration.contracts.worker_registry import (
+        WorkerRegistryError,
+        load_worker_registry,
+        workers_for_department,
+    )
+except ModuleNotFoundError as _exc:
+    load_worker_registry = None  # type: ignore[assignment]
+    workers_for_department = None  # type: ignore[assignment]
+    _WORKER_REGISTRY_IMPORT_ERROR: str | None = f"{type(_exc).__name__}:{_exc}"
+    class WorkerRegistryError(RuntimeError):
+        """Fallback type used when the common contract was not packaged."""
+else:
+    _WORKER_REGISTRY_IMPORT_ERROR = None
+
+
+
+# Worker Registry department key -> portfolio_recommendation event stage value.
 # 위 모듈 docstring "부서 키가 두 개인 이유" 참고.
 INVESTMENT_DEPARTMENT_STAGE: dict[str, str] = {
     "research": "research",
@@ -184,6 +197,75 @@ class LangfuseApiTraceReader(LangfuseTraceReader):
         return max(timestamps) if timestamps else None
 
 
+# ── 부서장(Hermes Profile) ────────────────────────────────────────────────────
+#
+# ▶ Worker Registry 매니페스트(orchestration/contracts/worker_registry.v1.json)는
+#   **Worker 만** 담는다(schema 가 department/worker_id/trigger 세 키로 고정).
+#   부서장은 직원이 아니라 본부장이라 그 목록에 없고, 편제표(LLM Worker 10명)와도
+#   별개다. 그래서 신원은 부서 Profile 의 `agent.head_persona` 에서 읽는다 -
+#   write 측(apps/api/hermes_boundary.py)이 이벤트 이름을 만들 때 읽는 **같은
+#   파일의 같은 키**다. 두 쪽이 다른 출처를 보면 조용히 어긋난다.
+#
+#   ⚠ 이것만 매니페스트 경계 밖이다. 부서장을 매니페스트 v2 에 넣을지는 미결이고
+#     (그 계약은 리서치 소유), 그때까지 include_heads 는 opt-in 으로 둔다.
+DEPARTMENT_PROFILE_DIR: dict[str, str] = {
+    "research": "01-research",
+    "trading": "02-trading",
+    "risk": "03-risk",
+    "quant-backtest": "04-quant-backtest",
+    "accounting-portfolio": "05-accounting-portfolio",
+    "qa": "06-ai-qa-audit",
+}
+
+# 컨테이너에는 저장소 트리가 없고 Profile 만 read-only 로 마운트된다
+# (departments/07-agent-workforce/compose.yaml).
+PROFILE_MOUNT_ROOT_ENV = "WORKFORCE_PROFILE_ROOT"
+DEFAULT_PROFILE_MOUNT_ROOT = Path("/app/profiles")
+
+
+@dataclass(frozen=True)
+class HeadProfileSpec:
+    """부서장 1명. WorkerMetadata 와 같은 속성 이름을 쓴다 - 판정 루프가 둘을
+    구분하지 않고 그대로 돌 수 있어야 한다."""
+
+    worker_id: str
+    # 부서장은 "요청이 올 때" 돈다. conditional Worker 의 trigger 자리에 그 사실을
+    # 적어 리포트가 그대로 읽히게 한다.
+    trigger: str = "on_request"
+
+
+def load_head_profile_spec(repo_root: Path, department: str) -> HeadProfileSpec | None:
+    """부서 Profile 의 `agent.head_persona`. 없으면 None, 못 읽으면 예외."""
+
+    directory = DEPARTMENT_PROFILE_DIR.get(department)
+    if directory is None:
+        raise ValueError(f"unknown_investment_department:{department}")
+    try:
+        import yaml
+    except ModuleNotFoundError as exc:  # pragma: no cover - 이미지 빌드 결함
+        raise WorkerRegistryUnavailable(f"pyyaml_not_installed:{exc}") from exc
+
+    mount_root = Path(os.environ.get(PROFILE_MOUNT_ROOT_ENV) or DEFAULT_PROFILE_MOUNT_ROOT)
+    candidates = (
+        repo_root / "departments" / directory / "hermes" / "config.yaml",
+        mount_root / department / "config.yaml",
+    )
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception as exc:  # noqa: BLE001 - 깨진 Profile 도 "모른다" 로 접힌다
+            raise WorkerRegistryUnavailable(
+                f"profile_unreadable:{department}:{type(exc).__name__}"
+            ) from exc
+        persona = str((config.get("agent") or {}).get("head_persona") or "").strip()
+        return HeadProfileSpec(persona) if persona else None
+    # Worker 목록은 매니페스트에서 이미 받았다 - 부서장만 못 읽은 것을 빈 목록으로
+    # 위장하지 않는다("유휴 없음"이 아니라 "모른다").
+    raise WorkerRegistryUnavailable(f"head_profile_not_found:{department}")
+
+
 def check_idle_agents(
     *,
     reader: LangfuseTraceReader | None = None,
@@ -192,6 +274,7 @@ def check_idle_agents(
     idle_threshold_hours: float = 4.0,
     now: datetime | None = None,
     repo_root: Path = ROOT,
+    include_heads: bool = False,
 ) -> list[WorkerIdleReport]:
     """6개 투자본부(기본값)의 등록된 Worker 전원에 대해 유휴 여부를 판정한다.
 
@@ -202,12 +285,18 @@ def check_idle_agents(
 
     if idle_threshold_hours <= 0:
         raise ValueError("idle_threshold_hours 는 양수여야 한다")
-    if load_worker_specs is None:
-        # 워커 목록 자체를 못 얻으므로 "전원 UNAVAILABLE" 조차 만들 수 없다.
-        # 빈 목록으로 돌려주면 "유휴 워커 없음"으로 **오독**되므로 명시적으로 알린다.
+
+    for department in departments:
+        if department not in INVESTMENT_DEPARTMENT_STAGE:
+            raise ValueError(f"unknown_investment_department:{department}")
+    if load_worker_registry is None or workers_for_department is None:
         raise WorkerRegistryUnavailable(
             f"worker_registry_unavailable:{_WORKER_REGISTRY_IMPORT_ERROR}"
         )
+    try:
+        registry = load_worker_registry(repo_root)
+    except WorkerRegistryError as exc:
+        raise WorkerRegistryUnavailable(f"worker_registry_unavailable:{exc}") from exc
 
     now = now or datetime.now(timezone.utc)
     since = now - timedelta(hours=lookback_hours)
@@ -223,7 +312,13 @@ def check_idle_agents(
         stage = INVESTMENT_DEPARTMENT_STAGE.get(department)
         if stage is None:
             raise ValueError(f"unknown_investment_department:{department}")
-        specs = load_worker_specs(repo_root, department)
+        specs: tuple[Any, ...] = tuple(workers_for_department(registry, department))
+        if include_heads:
+            # 기본값에서 빠져 있다 - 기본 응답 인원이 말없이 늘면 이 리포트를 인용한
+            # 과거 문장의 뜻이 바뀐다(load_head_profile_spec 머리말 참고).
+            head = load_head_profile_spec(repo_root, department)
+            if head is not None:
+                specs = (head, *specs)
         for spec in specs:
             if reader is None:
                 reports.append(

@@ -77,6 +77,8 @@ def test_dispatch_guard_keeps_legacy_lane_signature_compatible(monkeypatch):
 
 @pytest.mark.parametrize(("assignee", "expected"), [
     ("research-department", {"MCP_RESEARCH_API_KEY"}),
+    ("research-liaison", {"MCP_RESEARCH_API_KEY"}),
+    ("quant-liaison", {"MCP_RESEARCH_API_KEY"}),
     ("quant-backtest-department", {
         "MCP_RESEARCH_API_KEY", "TIMESCALE_DATABASE_URL"}),
     ("trading-department", {"MCP_TRADING_ORDER_API_KEY"}),

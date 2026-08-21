@@ -5,10 +5,9 @@
 #       3.1절(부서당 Image 1개, command만 바꿔 역할 분리), 6.3절(트레이딩본부 Container 목록),
 #       11.1절(Image 기준), docs/02-engineering/TRADING_DOMAIN_API_SPEC.md
 #
-# ▶ Build Context가 저장소 루트가 아니라 **departments/02-trading** 이다
-#   (00-ceo-office/01-research와 같고, 03-risk/06-ai-qa-audit와 다르다).
-#   api/app.py가 contracts/oms/broker/multileg/capability만 import하고 다른 본부 코드를
-#   참조하지 않는다 - 리스크본부는 반대로 우리 contracts를 import해서 루트 Context가 필요했다.
+# ▶ 조건주문 엔진의 공통 deterministic 계약을 함께 패키징하므로 Build Context는
+#   저장소 루트다. Hermes나 다른 부서 런타임을 import하는 것이 아니라
+#   orchestration/conditional_rules의 순수 계약·평가 코드만 포함한다.
 #
 # ▶ psycopg2-binary와 redis는 2026-08-10에 추가했다. 위 주석이 예고한 "psycopg
 #   OrderStore가 들어오는 순간"이 왔다 - store_postgres.py가 생겼고 api/app.py가
@@ -24,18 +23,21 @@ FROM python:3.12-slim
 # 버전은 이 저장소에서 이미 검증된 값(risk/audit/ceo Dockerfile과 동일 pin)으로 고정한다.
 RUN pip install --no-cache-dir \
     fastapi==0.128.8 "uvicorn[standard]==0.39.0" pydantic==2.13.3 \
-    psycopg2-binary==2.9.12 redis==7.0.1
+    psycopg2-binary==2.9.12 redis==7.0.1 httpx==0.28.1
 
 WORKDIR /app/departments/02-trading
 # app.py가 sys.path에 넣는 하위 폴더 이름과 같아야 한다(_DEPT / _sub).
-COPY api ./api
-COPY contracts ./contracts
-COPY oms ./oms
-COPY broker ./broker
-COPY multileg ./multileg
-COPY capability ./capability
-COPY directives ./directives
+COPY departments/02-trading/api ./api
+COPY departments/02-trading/contracts ./contracts
+COPY departments/02-trading/oms ./oms
+COPY departments/02-trading/broker ./broker
+COPY departments/02-trading/multileg ./multileg
+COPY departments/02-trading/capability ./capability
+COPY departments/02-trading/directives ./directives
+COPY departments/02-trading/rules ./rules
+COPY orchestration/conditional_rules /app/orchestration/conditional_rules
 
-ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app:/app/departments/02-trading:/app/departments/02-trading/api
 
 CMD ["uvicorn", "app:app", "--app-dir", "api", "--host", "0.0.0.0", "--port", "8000"]

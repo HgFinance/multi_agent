@@ -444,7 +444,9 @@ def test_health_and_read_only_routes_remain_public(client: TestClient) -> None:
 
 def test_trading_image_and_compose_ship_the_internal_auth_boundary() -> None:
     dockerfile = (TRADING_ROOT / "Dockerfile").read_text(encoding="utf-8")
-    assert "COPY api ./api" in dockerfile
+    assert "COPY departments/02-trading/api ./api" in dockerfile
+    assert "COPY departments/02-trading/rules ./rules" in dockerfile
+    assert "COPY orchestration/conditional_rules" in dockerfile
     assert (TRADING_ROOT / "api" / "internal_service_auth.py").is_file()
 
     for path in (

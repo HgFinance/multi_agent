@@ -73,6 +73,7 @@ from oms import OrderStore
 from store_postgres import OrderStorePersistenceError, PostgresOrderStore
 from paper_broker import PaperBroker, Quote
 from directive_routes import configure_directive_runtime, router as directive_router
+from conditional_rule_routes import router as conditional_rule_router
 from directives.service import DirectiveServiceError, require_paper_execution_mode
 from internal_service_auth import (
     BROKER_EVENT_POLICY,
@@ -92,6 +93,7 @@ API_VERSION = "v1"
 
 app = FastAPI(title="Trading Domain API", version=API_VERSION)
 app.include_router(directive_router)
+app.include_router(conditional_rule_router)
 
 
 @app.on_event("startup")
@@ -775,7 +777,13 @@ def health() -> dict:
     return {
         "status": "degraded" if _paper_db_error else "ok",
         "api_version": API_VERSION,
+        # Strategy OMS and authenticated direct-user directives intentionally
+        # have separate adapter selections.  Expose both so a healthy local
+        # strategy simulator cannot hide a miswired LS PAPER direct lane.
         "adapter": _oms.adapter,
+        "user_directive_adapter": os.environ.get(
+            "TRADING_BROKER_ADAPTER", "paper"
+        ).strip().lower(),
         "store": "supabase execution.*" if _paper_db_durable else "in-memory (offline/test)",
         "store_available": _paper_db_error is None,
         "store_error": _paper_db_error,
@@ -793,6 +801,9 @@ def health_ready() -> dict:
     return {
         "status": "ready",
         "api_version": API_VERSION,
+        "user_directive_adapter": os.environ.get(
+            "TRADING_BROKER_ADAPTER", "paper"
+        ).strip().lower(),
         "store": "supabase execution.*" if _paper_db_durable else "in-memory (offline/test)",
         "intents": len(_oms.store.list_intents()),
         "orders": len(_oms.store.list_orders()),

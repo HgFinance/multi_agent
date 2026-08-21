@@ -352,7 +352,8 @@ def _apply_citation_checks(result: dict[str, Any], tools: Mapping[str, Any],
 def run_employee_workers(payload: Mapping[str, Any], *, llm: WorkerLLM | None = None) -> dict[str, Any]:
     """직원 레지스트리 진입점. **회계본부에 들어오는 유일한 문이다.**"""
     tools = accounting_tools()
-    result = run_worker_registry(WORKER_SPECS, payload, tools=tools, llm=llm)
+    # stage 는 event name 이 쓰는 이름 공간이다 - 부서 키(accounting-portfolio)가 아니라 accounting.
+    result = run_worker_registry(WORKER_SPECS, payload, tools=tools, llm=llm, stage="accounting")
     result = _apply_citation_checks(result, tools, payload)
 
     # back-office-runner 는 레지스트리 밖이다. 공용 런타임은 그래프마다 LLM 을

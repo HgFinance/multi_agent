@@ -55,4 +55,6 @@ WORKER_SPECS = (
 
 
 def run_employee_workers(payload: Mapping[str, Any], *, llm: WorkerLLM | None = None) -> dict[str, Any]:
-    return run_worker_registry(WORKER_SPECS, payload, tools=tools_for_specs(WORKER_SPECS), llm=llm)
+    # stage 는 event name 이 쓰는 이름 공간이다 - 부서 키(quant-backtest)가 아니라 quant.
+    return run_worker_registry(WORKER_SPECS, payload, tools=tools_for_specs(WORKER_SPECS),
+                               llm=llm, stage="quant")

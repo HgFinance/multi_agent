@@ -9,7 +9,6 @@ import {
   formatPercent,
   ORDER_KINDS,
   PortfolioLiveError,
-  type DailyReturnPoint,
   type Holding,
   type OrderEvent,
   type PortfolioLive,
@@ -44,28 +43,6 @@ const FALLBACK_KIND_LABELS: Record<string, string> = {
   CANCELLED: "취소",
   REJECTED: "거부",
 };
-
-const STREAM_STATUS: Record<string, { label: string; tone: string }> = {
-  CONNECTED: {
-    label: "연결됨",
-    tone: "border-tertiary-fixed-dim bg-tertiary-fixed/30 text-on-tertiary-fixed-variant",
-  },
-  IDLE: { label: "연결 준비", tone: "border-outline-variant bg-surface-container text-on-surface-variant" },
-  DISCONNECTED: { label: "연결 끊김", tone: "border-error/40 bg-error-container text-on-error-container" },
-  STOPPED: { label: "중지됨", tone: "border-outline-variant bg-surface-container text-on-surface-variant" },
-};
-
-function Badge({ children, tone }: { children: React.ReactNode; tone?: string }) {
-  return (
-    <span
-      className={`inline-flex items-center whitespace-nowrap rounded-full border px-2.5 py-0.5 text-[10px] font-semibold ${
-        tone ?? "border-outline-variant bg-surface-container-lowest text-on-surface-variant"
-      }`}
-    >
-      {children}
-    </span>
-  );
-}
 
 function KindTile({ kind, label, count }: { kind: string; label: string; count: number }) {
   return (
@@ -204,123 +181,64 @@ function PortfolioAllocationChart({ rows }: { rows: Holding[] }) {
   );
 }
 
-function formatDailyReturnDate(value: string): string {
-  const digits = value.replace(/\D/g, "");
-  if (digits.length >= 8) return `${digits.slice(4, 6)}/${digits.slice(6, 8)}`;
-  return value;
-}
+/**
+ * 종목별 평가 수익률 막대. LS 잔고 조회(t0424)가 이미 종목별 `return_rate`를
+ * 주므로 별도 조회 없이 그 값만 정렬·시각화한다 - 기간별 수익률(FOCCQ33600)은
+ * 모의투자 계좌에서 브로커가 그 자체로 막아(rsp_cd 01900) 대신할 수 없다.
+ */
+function HoldingReturnChart({ rows }: { rows: Holding[] }) {
+  const items = rows
+    .map((holding) => ({
+      key: holding.symbol ?? holding.name ?? "",
+      label: holding.name ?? holding.symbol ?? "이름 없음",
+      value: parseChartNumber(holding.return_rate),
+    }))
+    .filter((item): item is { key: string; label: string; value: number } => item.value !== null)
+    .sort((left, right) => right.value - left.value);
 
-function DailyReturnChart({
-  points,
-  error,
-}: {
-  points: DailyReturnPoint[];
-  error?: string | null;
-}) {
-  const chartPoints = points
-    .map((point) => ({ ...point, value: parseChartNumber(point.return_rate) }))
-    .filter((point): point is DailyReturnPoint & { value: number } => point.value !== null)
-    .sort((left, right) => left.date.localeCompare(right.date))
-    .slice(-30);
+  const maxMagnitude = Math.max(1, ...items.map((item) => Math.abs(item.value)));
 
   return (
     <div className="w-full min-w-0 rounded-md border border-outline-variant bg-surface-container-low px-4 py-3">
       <div className="flex items-center justify-between gap-3">
         <span className="flex items-center gap-2 text-label-md font-label-md uppercase text-on-surface-variant">
           <span className="material-symbols-outlined text-[16px]" aria-hidden="true">
-            monitoring
+            bar_chart
           </span>
-          일별 수익률 현황
+          종목별 평가 수익률
         </span>
-        <span className="text-[11px] text-on-surface-variant">{chartPoints.length}일</span>
+        <span className="text-[11px] text-on-surface-variant">{items.length}종목</span>
       </div>
 
-      {chartPoints.length > 0 ? (
-        (() => {
-          const width = 640;
-          const height = 210;
-          const left = 46;
-          const right = 12;
-          const top = 16;
-          const bottom = 34;
-          const plotWidth = width - left - right;
-          const plotHeight = height - top - bottom;
-          const values = chartPoints.map((point) => point.value);
-          const minValue = Math.min(0, ...values);
-          const maxValue = Math.max(0, ...values);
-          const valueRange = Math.max(maxValue - minValue, 1);
-          const xStep = plotWidth / Math.max(chartPoints.length - 1, 1);
-          const coordinates = chartPoints.map((point, index) => ({
-            x: left + index * xStep,
-            y: top + ((maxValue - point.value) / valueRange) * plotHeight,
-          }));
-          const line = coordinates.map((point) => `${point.x},${point.y}`).join(" ");
-          const ticks = [maxValue, (maxValue + minValue) / 2, minValue];
-          const latest = chartPoints[chartPoints.length - 1];
-
-          return (
-            <>
-              <div className="mt-3 overflow-hidden rounded border border-outline-variant bg-surface-container-lowest">
-                <svg
-                  viewBox={`0 0 ${width} ${height}`}
-                  className="h-52 w-full"
-                  role="img"
-                  aria-label="일별 수익률 선 그래프"
-                >
-                  {ticks.map((tick, index) => {
-                    const y = top + ((maxValue - tick) / valueRange) * plotHeight;
-                    return (
-                      <g key={`${tick}-${index}`}>
-                        <line x1={left} x2={width - right} y1={y} y2={y} stroke="#e0e3e5" strokeWidth="1" />
-                        <text x={left - 8} y={y + 4} textAnchor="end" fill="#687078" fontSize="11">
-                          {tick.toFixed(1)}%
-                        </text>
-                      </g>
-                    );
-                  })}
-                  <polyline
-                    points={line}
-                    fill="none"
-                    stroke="#c83f79"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth="3"
+      {items.length > 0 ? (
+        <ul className="m-0 mt-3 flex flex-col gap-2.5 p-0">
+          {items.map((item) => {
+            const positive = item.value >= 0;
+            const widthPercent = (Math.abs(item.value) / maxMagnitude) * 100;
+            return (
+              <li key={item.key} className="list-none">
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <span className="truncate text-on-surface" title={item.label}>
+                    {item.label}
+                  </span>
+                  <span className={`shrink-0 font-data-mono font-semibold ${positive ? "text-primary" : "text-error"}`}>
+                    {positive ? "+" : ""}
+                    {item.value.toFixed(2)}%
+                  </span>
+                </div>
+                <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-surface-container-lowest">
+                  <div
+                    className={`h-full rounded-full ${positive ? "bg-primary" : "bg-error"}`}
+                    style={{ width: `${Math.max(widthPercent, 2)}%` }}
                   />
-                  {coordinates.map((point, index) => (
-                    <circle
-                      key={`${chartPoints[index].date}-${index}`}
-                      cx={point.x}
-                      cy={point.y}
-                      r={index === coordinates.length - 1 ? 4 : 2.5}
-                      fill="#c83f79"
-                    />
-                  ))}
-                  {[0, Math.floor((chartPoints.length - 1) / 2), chartPoints.length - 1].map((index) => (
-                    <text
-                      key={`date-${index}`}
-                      x={coordinates[index].x}
-                      y={height - 10}
-                      textAnchor="middle"
-                      fill="#687078"
-                      fontSize="11"
-                    >
-                      {formatDailyReturnDate(chartPoints[index].date)}
-                    </text>
-                  ))}
-                </svg>
-              </div>
-              <div className="mt-2 flex items-center justify-between gap-3 text-xs text-on-surface-variant">
-                <span>최근 {formatDailyReturnDate(latest.date)}</span>
-                <strong className={`font-data-mono ${latest.value < 0 ? "text-error" : "text-primary"}`}>
-                  {latest.value.toFixed(2)}%
-                </strong>
-              </div>
-            </>
-          );
-        })()
+                </div>
+              </li>
+            );
+          })}
+        </ul>
       ) : (
         <p className="m-0 mt-3 flex min-h-[13rem] items-center justify-center rounded border border-outline-variant bg-surface-container-lowest px-4 text-center text-xs text-on-surface-variant">
-          {error ? "일별 수익률을 불러오지 못했습니다." : "일별 수익률 데이터가 없습니다."}
+          종목별 수익률을 확인하는 중입니다.
         </p>
       )}
     </div>
@@ -420,9 +338,16 @@ export default function LivePortfolioPanel() {
   const error = query.error ?? null;
   const loading = query.isPending;
 
-  const status = data ? STREAM_STATUS[data.stream.status] ?? STREAM_STATUS.IDLE : null;
   const kinds =
     data?.orders.kinds ?? ORDER_KINDS.map((kind) => ({ kind, label: FALLBACK_KIND_LABELS[kind] }));
+
+  // 오늘 사건만 남긴다. 실시간분은 UTC 오프셋(`...+00:00`), 과거 조회분은 KST
+  // naive(`2026-08-18T15:19:47`)라 앞 10자를 자르면 새벽에 하루가 어긋난다 -
+  // Date로 파싱하면 둘 다 같은 로컬 시각으로 떨어진다.
+  const today = new Date().toDateString();
+  const recentOrders = (data?.orders.recent ?? []).filter(
+    (event) => new Date(event.received_at).toDateString() === today,
+  );
 
   return (
     <section
@@ -436,10 +361,6 @@ export default function LivePortfolioPanel() {
           </span>
           <span className="truncate">trading_portfolio.live</span>
         </span>
-        <div className="flex shrink-0 items-center gap-1.5">
-          {data ? <Badge>{data.environment_label}</Badge> : null}
-          {status ? <Badge tone={status.tone}>{status.label}</Badge> : null}
-        </div>
       </div>
 
       <div className="space-y-5 p-4 md:p-6">
@@ -459,10 +380,7 @@ export default function LivePortfolioPanel() {
 
           <div className="grid min-w-0 gap-4 lg:grid-cols-2">
             <PortfolioAllocationChart rows={data?.holdings.rows ?? []} />
-            <DailyReturnChart
-              points={data?.performance?.daily_returns ?? []}
-              error={data?.performance?.error}
-            />
+            <HoldingReturnChart rows={data?.holdings.rows ?? []} />
           </div>
         </div>
 
@@ -564,7 +482,7 @@ export default function LivePortfolioPanel() {
               <h3 id="live-orders-title" className="m-0 text-title-md font-title-md text-primary">
                 주문 사건
               </h3>
-              <span className="text-xs text-on-surface-variant">{data?.orders.recent.length ?? 0}건</span>
+              <span className="text-xs text-on-surface-variant">{recentOrders.length}건</span>
             </div>
             {data?.orders.error ? (
               <p role="alert" className="m-0 border-b border-error/40 bg-error-container px-4 py-2 text-xs text-on-error-container">
@@ -585,8 +503,8 @@ export default function LivePortfolioPanel() {
                   </tr>
                 </thead>
                 <tbody>
-                  {data && data.orders.recent.length > 0 ? (
-                    data.orders.recent.map((event) => (
+                  {recentOrders.length > 0 ? (
+                    recentOrders.map((event) => (
                       <EventRow
                         key={`${event.kind}-${event.order_no ?? "none"}-${event.received_at}-${event.seq}`}
                         event={event}

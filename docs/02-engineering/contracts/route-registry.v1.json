@@ -224,6 +224,14 @@
         },
         {
           "method": "GET",
+          "path": "/trading/v1/conditional-rule-executions/rules/{rule_id}/context"
+        },
+        {
+          "method": "POST",
+          "path": "/trading/v1/conditional-rule-executions/{rule_execution_id}/submit"
+        },
+        {
+          "method": "GET",
           "path": "/trading/v1/market-rules/tick-size"
         },
         {
@@ -946,6 +954,10 @@
         },
         {
           "method": "GET",
+          "path": "/ui/ceo/conversation/stream"
+        },
+        {
+          "method": "GET",
           "path": "/ui/commands/audit"
         },
         {
@@ -954,7 +966,43 @@
         },
         {
           "method": "GET",
+          "path": "/ui/conditional-rules"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/conditional-rules"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/conditional-rules/preview"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/conditional-rules/{rule_id}"
+        },
+        {
+          "method": "DELETE",
+          "path": "/ui/conditional-rules/{rule_id}"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/conditional-rules/{rule_id}/activate"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/conditional-rules/{rule_id}/pause"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/conditional-rules/{rule_id}/resume"
+        },
+        {
+          "method": "GET",
           "path": "/ui/discord/messages"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/discord/thread"
         },
         {
           "method": "GET",

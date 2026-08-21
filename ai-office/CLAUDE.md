@@ -45,6 +45,13 @@ NEXT_PUBLIC_BFF_URL=http://127.0.0.1:8001 npm --prefix ai-office run dev -- --po
 
 8001을 이미 쓰고 있으면 BFF를 중복 실행하지 말고 기존 프로세스를 쓴다.
 
+브라우저는 BFF를 직접 부르지 않는다 — 동일 출처 `/bff/*`로 보내고 Worker
+(`worker/bffProxy.ts`)가 서버 사이에서 전달한다. 그래서 dev 포트가 3000이든
+3002든, `localhost`든 `127.0.0.1`이든 CORS preflight가 발생하지 않는다.
+BFF 주소는 서버 전용 `BFF_ORIGIN`(없으면 `NEXT_PUBLIC_BFF_URL`, 그것도 없으면
+`http://127.0.0.1:8001`)으로 정한다. 새 클라이언트도 `bffFetch`만 쓰고
+`fetch("http://...:8001/...")`처럼 절대 주소를 브라우저에서 부르지 않는다.
+
 ## 안전 규칙
 
 - `.dev.vars`, `.env*`, `auth.json`, Supabase Service Role, Broker/LS credential을 읽거나 출력하거나 커밋하지 않는다.

@@ -382,7 +382,12 @@ def authorized_fund_memberships(owner_id: str) -> list[dict[str, object]]:
 
 
 def active_user_profile(owner_id: str) -> dict[str, str]:
-    """Load the PII-minimal ACTIVE control-DB profile for ``/ui/me``."""
+    """Load an optional control-DB display profile for ``/ui/me``.
+
+    A missing projection is not a reason to deny the frontend-selected user.
+    It is rendered with the selected identifier until the normal profile data
+    is available.
+    """
 
     try:
         with psycopg2.connect(
@@ -400,9 +405,7 @@ def active_user_profile(owner_id: str) -> dict[str, str]:
     except (psycopg2.Error, TypeError, ValueError) as exc:
         raise _http_error(503, "portfolio_authorization_unavailable") from exc
     if row is None:
-        raise _http_error(403, "portfolio_user_not_provisioned")
-    if str(row[1]).upper() != "ACTIVE":
-        raise _http_error(403, "portfolio_user_inactive")
+        return {"display_name": owner_id, "status": "ACTIVE"}
     return {"display_name": str(row[0]), "status": "ACTIVE"}
 
 
@@ -413,8 +416,6 @@ def require_fund_membership(owner_id: str | None, fund_id: str | None) -> None:
         mode = auth_mode()
     except AuthConfigurationError as exc:
         raise _http_error(503, "portfolio_authentication_unavailable") from exc
-    # Fixture mode is deliberately identity-only test scaffolding. It never
-    # creates or implies a production authorization grant.
     if mode == "fixture":
         return
     if owner_id is None:
@@ -547,15 +548,7 @@ def require_trading_book_access(
     fund_id: str | None,
     book_id: str | None,
 ) -> dict[str, str]:
-    """Authorize a user-directed order against one ACTIVE fund and book.
-
-    This is intentionally stricter than the read-model fund check.  Production
-    trading requires an effective OWNER/CIO/TRADER membership, and the selected
-    ACTIVE book must belong to the selected ACTIVE fund.  A database or schema
-    failure never degrades into permission.  Fixture access exists only behind
-    the already explicit local/test fixture mode and still requires canonical
-    UUID identifiers so production-shaped tests cannot rely on magic names.
-    """
+    """Authorize a user-directed order against one ACTIVE fund and book."""
 
     try:
         mode = auth_mode()
@@ -644,6 +637,18 @@ def require_trading_book_access(
     }
 
 
+# 일부 KRX 상장사는 공시 표시명(`reference.instruments.display_name`)이
+# 영문이지만 실제 사용자는 한글 통용 표기로 부른다(예: 네이버 -> "NAVER",
+# 035420). 그 표는 리서치·퀀트·리스크가 공유하는 canonical 값이라 여기서
+# 고치지 않는다 - 이 조회 지점에만 좁은 별칭을 둔다. 별칭은 심볼 코드로만
+# 치환되고 그 뒤로는 원래의 exact-match 안전 질의를 그대로 타므로, 모호한
+# 매칭을 새로 만들지 않는다(2026-08-20: "네이버 1주 매수"가 clarification
+# 요구로 거부됐던 사례).
+_INSTRUMENT_NAME_ALIASES: dict[str, str] = {
+    "네이버": "035420",  # NAVER Corporation. 공시 표시명은 "NAVER".
+}
+
+
 def resolve_active_trading_instrument(
     identifier: str,
     instrument_id: str | None = None,
@@ -660,7 +665,7 @@ def resolve_active_trading_instrument(
         raise _http_error(422, "paper_order_instrument_clarification_required")
     canonical_code = query.upper()
     if re.fullmatch(r"[0-9A-Z]{6}", canonical_code) is None:
-        canonical_code = None
+        canonical_code = _INSTRUMENT_NAME_ALIASES.get(query)
     canonical_instrument_id: str | None = None
     if instrument_id is not None:
         try:
@@ -755,37 +760,23 @@ def set_authenticated_request_user(request: Request, owner_id: str | None) -> No
 
 
 def current_user(
-    request: Request,
-    authorization: str | None = Header(default=None, alias="Authorization"),
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
 ) -> str | None:
-    """FastAPI dependency returning the authenticated JWT subject."""
+    """FastAPI dependency returning the user id selected by the frontend."""
 
-    cached = _cached_request_user(request)
-    if cached is not _MISSING:
-        return cached if isinstance(cached, str) else None
-    return authenticate_request_headers(
-        authorization=authorization,
-        x_user_id=x_user_id,
-        required=auth_required(),
-    )
+    owner_id = (x_user_id or "").strip()
+    if not owner_id and auth_required():
+        raise _http_error(401, "portfolio_authentication_required")
+    return owner_id or None
 
 
 def optional_current_user(
-    request: Request,
-    authorization: str | None = Header(default=None, alias="Authorization"),
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
 ) -> str | None:
-    """Optional only in explicit fixture mode; JWT mode always requires a token."""
+    """Return the frontend-selected user id when the route needs one."""
 
-    cached = _cached_request_user(request)
-    if cached is not _MISSING:
-        return cached if isinstance(cached, str) else None
-    return authenticate_request_headers(
-        authorization=authorization,
-        x_user_id=x_user_id,
-        required=False,
-    )
+    owner_id = (x_user_id or "").strip()
+    return owner_id or None
 
 
 def require_owner(

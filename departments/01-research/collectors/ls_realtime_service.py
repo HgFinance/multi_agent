@@ -479,10 +479,7 @@ async def run_capture(window: SessionWindow, symbols: tuple[str, ...], stop: asy
 
     env = load_project_env()
     SourceRegistry(env=env).require(SOURCE_ID)
-    # ▶ **시세는 `LS_MARKET_ENV`, 주문은 `LS_ENV`.** (재일님 결정 2026-08-12)
-    #   예전엔 하나였다. 주문을 PAPER 로 두려고 LS_ENV=PAPER 를 쓰면 시세까지
-    #   모의 서버로 붙어, 프리마켓 한 시간 동안 체결이 0건이었다(실측 8/12).
-    #   모의 시세는 진짜처럼 생긴 가짜라 조용히 흘러가면 백테스트가 사실로 읽는다.
+    # REST 토큰과 WebSocket 모두 단일 LS_ENV를 사용한다.
     mode = market_env(env)
     ws_base = env["LS_WS_BASE_URL_PAPER"] if mode == "PAPER" else env["LS_WS_BASE_URL"]
     ws_url = ws_base.rstrip("/") + WEBSOCKET_PATH
@@ -711,29 +708,17 @@ def _check_symbols_precedence(tmp_path: Path):
     print("  Watchlist 로드           OK")
 
 
-def _check_market_env_is_separate_from_orders():
-    """**주문을 PAPER 로 둬도 시세는 실전이어야 한다.** (재일님 결정 2026-08-12)
-
-    하나의 LS_ENV 가 둘을 같이 정하던 때, LS_ENV=PAPER 로 두자 수집기가 모의
-    소켓(:29443)에 붙어 프리마켓 한 시간 동안 체결이 0건이었다. 모의 시세는
-    **진짜처럼 생긴 가짜**라 조용히 흘러가면 백테스트가 그걸 사실로 읽는다.
-    """
-    # 주문이 PAPER 여도 시세는 건드리지 않는다
-    assert market_env({"LS_ENV": "PAPER"}) == "LIVE"
-    # 안 적어도 실전이다 - 못 받는 것은 티가 나고 잘못 받는 것은 티가 안 난다
+def _check_market_env_uses_ls_env():
+    """REST 토큰과 소켓이 단일 LS_ENV를 사용하는지 확인한다."""
+    assert market_env({"LS_ENV": "PAPER"}) == "PAPER"
+    assert market_env({"LS_ENV": "LIVE"}) == "LIVE"
     assert market_env({}) == "LIVE"
-    # 명시하면 그 값을 쓴다(모의 시세로 배선 시험을 할 수 있어야 한다)
-    assert market_env({"LS_MARKET_ENV": "paper"}) == "PAPER"
-    assert market_env({"LS_MARKET_ENV": "LIVE", "LS_ENV": "PAPER"}) == "LIVE"
-
-    # 소켓과 토큰이 **같은** 환경을 봐야 한다. 어긋나면 접속은 되고 데이터만
-    # 안 오는, 티가 안 나는 실패가 된다.
     import inspect
 
     src = inspect.getsource(run_capture)
-    assert "market_rest_client(env)" in src, "토큰이 주문 환경으로 발급된다"
-    assert "market_env(env)" in src, "소켓이 주문 환경을 본다"
-    print("  시세/주문 환경 분리        OK")
+    assert "market_rest_client(env)" in src, "REST 토큰이 LS_ENV를 보지 않는다"
+    assert "market_env(env)" in src, "소켓이 LS_ENV를 보지 않는다"
+    print("  시장/계좌 LS_ENV 단일화    OK")
 
 
 def _check_heartbeat():
@@ -785,7 +770,7 @@ if __name__ == "__main__":
         with tempfile.TemporaryDirectory() as td:
             _check_symbols_precedence(Path(td))
         _check_heartbeat()
-        _check_market_env_is_separate_from_orders()
+        _check_market_env_uses_ls_env()
         print("상주 시세 서비스 5개 영역 통과. 상주 실행은 인자 없이")
         raise SystemExit(0)
 

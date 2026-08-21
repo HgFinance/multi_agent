@@ -127,15 +127,38 @@ class LedgerStore:
         written = 0
         with self._session() as connection:
             for row in rows:
-                trade_date = str(row.get("trade_date") or "")
+                payload_row = dict(row)
+                trade_date = str(payload_row.get("trade_date") or "")
                 if not trade_date:
                     continue  # 날짜 없는 줄은 기간 조회에 걸리지 않아 적을 의미가 없다
-                settlement = str(row.get("settlement") or "UNSETTLED")
+                settlement = str(payload_row.get("settlement") or "UNSETTLED")
                 if settlement == "SETTLED":
+                    # The settlement TR does not repeat the original order
+                    # channel or broker order number. Preserve those observed
+                    # fields before replacing the D-day journal row, otherwise
+                    # an HTS/API attribution disappears exactly at T+2.
+                    prior = connection.execute(
+                        "SELECT payload FROM ledger_rows WHERE row_key = ?",
+                        (_unsettled_key(account, payload_row),),
+                    ).fetchone()
+                    if prior is not None:
+                        try:
+                            prior_payload = json.loads(prior["payload"])
+                        except (ValueError, TypeError):
+                            prior_payload = {}
+                        for field in (
+                            "execution_channel",
+                            "execution_channels",
+                            "broker_order_id",
+                            "broker_order_ids",
+                            "execution_count",
+                        ):
+                            if payload_row.get(field) in (None, [], ""):
+                                payload_row[field] = prior_payload.get(field)
                     # 확정본이 왔으면 미결제 줄은 치운다. 남기면 두 번 세어진다.
                     connection.execute(
                         "DELETE FROM ledger_rows WHERE row_key = ?",
-                        (_unsettled_key(account, row),),
+                        (_unsettled_key(account, payload_row),),
                     )
                 connection.execute(
                     "INSERT INTO ledger_rows"
@@ -144,8 +167,8 @@ class LedgerStore:
                     " ON CONFLICT(row_key) DO UPDATE SET"
                     " settlement = excluded.settlement, payload = excluded.payload,"
                     " observed_at = excluded.observed_at",
-                    (row_key(account, row), account, trade_date, settlement,
-                     json.dumps(dict(row), ensure_ascii=False), observed_at),
+                    (row_key(account, payload_row), account, trade_date, settlement,
+                     json.dumps(payload_row, ensure_ascii=False), observed_at),
                 )
                 written += 1
         return written
@@ -195,6 +218,10 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
             "category": "매도", "symbol": "000660", "symbol_name": "SK하이닉스",
             "commission": "250", "tax": "3340", "settled_amount": "1666410",
             "settlement": "UNSETTLED",
+            "execution_channel": "투혼(HTS)",
+            "execution_channels": ["투혼(HTS)"],
+            "broker_order_id": "12692",
+            "broker_order_ids": ["12692"],
         }
         assert store.record("****5601", [unsettled]) == 1
 
@@ -219,6 +246,8 @@ if __name__ == "__main__":  # 자체 점검 - pytest 미도입(CLAUDE.md)
         after = store.read("****5601", "2026-08-01", "2026-08-31")
         assert len(after) == 1, after
         assert after[0]["settlement"] == "SETTLED" and after[0]["realized_pnl"] == "4000"
+        assert after[0]["execution_channel"] == "투혼(HTS)"
+        assert after[0]["broker_order_id"] == "12692"
 
         # 기간 밖은 안 나온다
         assert store.read("****5601", "2026-07-01", "2026-07-31") == []

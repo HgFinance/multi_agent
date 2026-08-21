@@ -1,0 +1,413 @@
+"""Authenticated management API for conditional PAPER rules."""
+
+from __future__ import annotations
+
+import hashlib
+from datetime import datetime, timedelta, timezone
+from typing import Any
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from orchestration.conditional_rules import (
+    ConditionalRuleSpec,
+    EvaluationPolicy,
+    ExpressionNode,
+    RuleAction,
+    RuleState,
+    rule_fingerprint,
+    validate_rule_spec,
+)
+
+try:
+    from .conditional_rule_language import clarification_codes, preview_assumptions
+    from .conditional_rule_workflow import (
+        ConditionalRuleConflict,
+        ConditionalRuleNotFound,
+        ConditionalRuleRecord,
+        ConditionalRuleUnavailable,
+        conditional_rule_repository,
+    )
+    from .current_user import (
+        current_user,
+        require_trading_book_access,
+        resolve_active_trading_instrument,
+    )
+except ImportError:  # pragma: no cover - direct module execution compatibility
+    from conditional_rule_language import clarification_codes, preview_assumptions
+    from conditional_rule_workflow import (  # type: ignore[no-redef]
+        ConditionalRuleConflict,
+        ConditionalRuleNotFound,
+        ConditionalRuleRecord,
+        ConditionalRuleUnavailable,
+        conditional_rule_repository,
+    )
+    from current_user import (  # type: ignore[no-redef]
+        current_user,
+        require_trading_book_access,
+        resolve_active_trading_instrument,
+    )
+
+
+router = APIRouter(prefix="/ui/conditional-rules", tags=["conditional-paper-rules"])
+
+
+class ConditionalRuleCandidate(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    symbol: str = Field(min_length=1, max_length=80)
+    condition: ExpressionNode
+    action: RuleAction
+    evaluation: EvaluationPolicy
+    expires_at: datetime | None = None
+
+    @field_validator("expires_at")
+    @classmethod
+    def _aware_expiry(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("expires_at must include timezone")
+        return value
+
+
+class ConditionalRulePreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    fund_id: UUID
+    book_id: UUID
+    raw_instruction: str = Field(min_length=1, max_length=4000)
+    candidate: ConditionalRuleCandidate
+
+
+class ConditionalRulePreviewResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    activatable: bool
+    clarification_codes: tuple[str, ...]
+    assumptions: tuple[str, ...]
+    spec_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    spec: ConditionalRuleSpec
+    summary: dict[str, Any]
+
+
+class ConditionalRuleCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    client_request_id: str = Field(
+        min_length=8,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    )
+    raw_instruction: str = Field(min_length=1, max_length=4000)
+    expected_spec_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    spec: ConditionalRuleSpec
+
+
+class ConditionalRuleConfirmation(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    spec_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ConditionalRuleView(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    rule_id: UUID
+    state: RuleState
+    rule_version: int
+    spec_sha256: str
+    confirmed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+    spec: ConditionalRuleSpec
+    last_execution_state: str | None = None
+    last_guard_code: str | None = None
+    last_error_code: str | None = None
+    directive_id: UUID | None = None
+    status_message: str | None = None
+
+
+def _subject(value: str | None) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise HTTPException(status_code=401, detail="authentication_required")
+    return value
+
+
+def _raw_sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _expiry(value: datetime | None, *, now: datetime) -> datetime:
+    expiry = value.astimezone(timezone.utc) if value else now + timedelta(days=30)
+    if expiry <= now:
+        raise HTTPException(status_code=422, detail="conditional_rule_expiry_in_past")
+    if expiry > now + timedelta(days=365):
+        raise HTTPException(status_code=422, detail="conditional_rule_expiry_too_far")
+    return expiry
+
+
+def _view(record: ConditionalRuleRecord) -> ConditionalRuleView:
+    messages = {
+        "MARKET_CLOSED_NO_ORDER": (
+            "현재 장이 열려 있지 않아 주문을 제출하지 않았습니다. "
+            "체결·원장 반영도 없습니다."
+        ),
+        "MARKET_QUOTE_STALE": (
+            "현재가가 최신 상태가 아니어서 주문을 제출하지 않았습니다."
+        ),
+        "MARKET_SESSION_UNAVAILABLE": (
+            "장 운영 상태를 확인할 수 없어 주문을 제출하지 않았습니다."
+        ),
+        "TRADING_MARKET_SESSION_CLOSED": (
+            "현재 장이 열려 있지 않아 주문을 제출하지 않았습니다. "
+            "체결·원장 반영도 없습니다."
+        ),
+        "TRADING_MARKET_SESSION_UNAVAILABLE": (
+            "장 운영 상태를 확인할 수 없어 주문을 제출하지 않았습니다."
+        ),
+        "INSUFFICIENT_CASH": "현재 PAPER 현금 잔고가 부족해 주문하지 않았습니다.",
+        "INSUFFICIENT_POSITION": "현재 매도 가능 수량이 부족해 주문하지 않았습니다.",
+    }
+    return ConditionalRuleView(
+        rule_id=UUID(record.rule_id),
+        state=record.state,
+        rule_version=record.rule_version,
+        spec_sha256=record.spec_sha256,
+        confirmed_at=record.confirmed_at,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+        spec=record.spec,
+        last_execution_state=record.last_execution_state,
+        last_guard_code=record.last_guard_code,
+        last_error_code=record.last_error_code,
+        directive_id=UUID(record.directive_id) if record.directive_id else None,
+        status_message=messages.get(record.last_error_code or record.last_guard_code or ""),
+    )
+
+
+def _summary(spec: ConditionalRuleSpec) -> dict[str, Any]:
+    return {
+        "symbol": spec.symbol,
+        "condition": spec.condition.model_dump(mode="json", exclude_none=True),
+        "side": spec.action.side.value,
+        "sizing": spec.action.sizing.model_dump(mode="json", exclude_none=True),
+        "evaluation_clock": spec.evaluation.clock.value,
+        "primary_timeframe": (
+            spec.evaluation.primary_timeframe.value
+            if spec.evaluation.primary_timeframe
+            else None
+        ),
+        "execution_mode": "PAPER",
+        "repeat_policy": "ONCE",
+        "expires_at": spec.expires_at.isoformat(),
+    }
+
+
+def _build_preview(
+    request: ConditionalRulePreviewRequest,
+    *,
+    subject: str,
+    now: datetime | None = None,
+) -> ConditionalRulePreviewResponse:
+    instant = now or datetime.now(timezone.utc)
+    access = require_trading_book_access(
+        subject, str(request.fund_id), str(request.book_id)
+    )
+    resolved = resolve_active_trading_instrument(request.candidate.symbol, None)
+    spec = ConditionalRuleSpec.model_validate(
+        {
+            "schema_version": "conditional-trade-rule.v1",
+            "authority": {
+                "user_id": access["user_id"],
+                "fund_id": access["fund_id"],
+                "book_id": access["book_id"],
+            },
+            "instrument_id": resolved["instrument_id"],
+            "symbol": resolved["symbol"],
+            "condition": request.candidate.condition,
+            "action": request.candidate.action,
+            "evaluation": request.candidate.evaluation,
+            "execution_mode": "PAPER",
+            "repeat_policy": "ONCE",
+            "expires_at": _expiry(request.candidate.expires_at, now=instant),
+            "raw_instruction_sha256": _raw_sha256(request.raw_instruction),
+        }
+    )
+    validate_rule_spec(spec)
+    clarifications = clarification_codes(request.raw_instruction, spec)
+    digest = rule_fingerprint(spec)
+    return ConditionalRulePreviewResponse(
+        activatable=not clarifications,
+        clarification_codes=clarifications,
+        assumptions=preview_assumptions(request.raw_instruction, spec),
+        spec_sha256=digest,
+        spec=spec,
+        summary=_summary(spec),
+    )
+
+
+def _validate_create(
+    request: ConditionalRuleCreateRequest, *, subject: str
+) -> ConditionalRuleSpec:
+    spec = request.spec
+    digest = rule_fingerprint(spec)
+    if digest != request.expected_spec_sha256:
+        raise HTTPException(status_code=409, detail="conditional_rule_preview_changed")
+    if spec.raw_instruction_sha256 != _raw_sha256(request.raw_instruction):
+        raise HTTPException(status_code=409, detail="conditional_rule_instruction_changed")
+    access = require_trading_book_access(
+        subject, str(spec.authority.fund_id), str(spec.authority.book_id)
+    )
+    if str(spec.authority.user_id) != str(access["user_id"]):
+        raise HTTPException(status_code=403, detail="conditional_rule_authority_mismatch")
+    resolved = resolve_active_trading_instrument(spec.symbol, str(spec.instrument_id))
+    if (
+        str(resolved["instrument_id"]) != str(spec.instrument_id)
+        or resolved["symbol"] != spec.symbol
+    ):
+        raise HTTPException(status_code=409, detail="conditional_rule_instrument_changed")
+    now = datetime.now(timezone.utc)
+    if spec.expires_at <= now or spec.expires_at > now + timedelta(days=365):
+        raise HTTPException(status_code=422, detail="conditional_rule_expiry_invalid")
+    validate_rule_spec(spec)
+    clarifications = clarification_codes(request.raw_instruction, spec)
+    if clarifications:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "conditional_rule_clarification_required",
+                "fields": list(clarifications),
+            },
+        )
+    return spec
+
+
+def _workflow_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, ConditionalRuleNotFound):
+        return HTTPException(status_code=404, detail="conditional_rule_not_found")
+    if isinstance(exc, ConditionalRuleConflict):
+        return HTTPException(status_code=409, detail="conditional_rule_conflict")
+    return HTTPException(status_code=503, detail="conditional_rule_store_unavailable")
+
+
+@router.post("/preview", response_model=ConditionalRulePreviewResponse)
+def preview_conditional_rule(
+    request: ConditionalRulePreviewRequest,
+    subject: str | None = Depends(current_user),
+) -> ConditionalRulePreviewResponse:
+    return _build_preview(request, subject=_subject(subject))
+
+
+@router.post("", response_model=ConditionalRuleView, status_code=201)
+def create_conditional_rule(
+    request: ConditionalRuleCreateRequest,
+    subject: str | None = Depends(current_user),
+) -> ConditionalRuleView:
+    owner = _subject(subject)
+    spec = _validate_create(request, subject=owner)
+    try:
+        record = conditional_rule_repository().create_pending(
+            spec=spec,
+            raw_instruction=request.raw_instruction,
+            client_request_id=request.client_request_id,
+            parser_source="HERMES",
+        )
+    except (ConditionalRuleUnavailable, ConditionalRuleConflict) as exc:
+        raise _workflow_error(exc) from exc
+    return _view(record)
+
+
+@router.post("/{rule_id}/activate", response_model=ConditionalRuleView)
+def activate_conditional_rule(
+    rule_id: UUID,
+    request: ConditionalRuleConfirmation,
+    subject: str | None = Depends(current_user),
+) -> ConditionalRuleView:
+    owner = _subject(subject)
+    try:
+        repository = conditional_rule_repository()
+        current = repository.get(str(rule_id), user_id=owner)
+        if current is None:
+            raise ConditionalRuleNotFound("conditional rule not found")
+        require_trading_book_access(owner, current.fund_id, current.book_id)
+        return _view(
+            repository.activate(
+                str(rule_id),
+                user_id=owner,
+                confirmation_sha256=request.spec_sha256,
+            )
+        )
+    except (ConditionalRuleUnavailable, ConditionalRuleConflict, ConditionalRuleNotFound) as exc:
+        raise _workflow_error(exc) from exc
+
+
+def _transition(rule_id: UUID, subject: str | None, target: RuleState) -> ConditionalRuleView:
+    owner = _subject(subject)
+    try:
+        repository = conditional_rule_repository()
+        current = repository.get(str(rule_id), user_id=owner)
+        if current is None:
+            raise ConditionalRuleNotFound("conditional rule not found")
+        require_trading_book_access(owner, current.fund_id, current.book_id)
+        return _view(repository.transition(str(rule_id), user_id=owner, target=target))
+    except (ConditionalRuleUnavailable, ConditionalRuleConflict, ConditionalRuleNotFound) as exc:
+        raise _workflow_error(exc) from exc
+
+
+@router.post("/{rule_id}/pause", response_model=ConditionalRuleView)
+def pause_conditional_rule(
+    rule_id: UUID, subject: str | None = Depends(current_user)
+) -> ConditionalRuleView:
+    return _transition(rule_id, subject, RuleState.PAUSED)
+
+
+@router.post("/{rule_id}/resume", response_model=ConditionalRuleView)
+def resume_conditional_rule(
+    rule_id: UUID, subject: str | None = Depends(current_user)
+) -> ConditionalRuleView:
+    return _transition(rule_id, subject, RuleState.ACTIVE)
+
+
+@router.delete("/{rule_id}", response_model=ConditionalRuleView)
+def cancel_conditional_rule(
+    rule_id: UUID, subject: str | None = Depends(current_user)
+) -> ConditionalRuleView:
+    return _transition(rule_id, subject, RuleState.CANCELLED)
+
+
+@router.get("/{rule_id}", response_model=ConditionalRuleView)
+def get_conditional_rule(
+    rule_id: UUID, subject: str | None = Depends(current_user)
+) -> ConditionalRuleView:
+    owner = _subject(subject)
+    try:
+        record = conditional_rule_repository().get(str(rule_id), user_id=owner)
+    except ConditionalRuleUnavailable as exc:
+        raise _workflow_error(exc) from exc
+    if record is None:
+        raise HTTPException(status_code=404, detail="conditional_rule_not_found")
+    require_trading_book_access(owner, record.fund_id, record.book_id)
+    return _view(record)
+
+
+@router.get("", response_model=list[ConditionalRuleView])
+def list_conditional_rules(
+    subject: str | None = Depends(current_user),
+) -> list[ConditionalRuleView]:
+    owner = _subject(subject)
+    try:
+        records = conditional_rule_repository().list_for_user(owner)
+    except ConditionalRuleUnavailable as exc:
+        raise _workflow_error(exc) from exc
+    return [_view(record) for record in records]
+
+
+__all__ = [
+    "ConditionalRuleCandidate",
+    "ConditionalRuleCreateRequest",
+    "ConditionalRulePreviewRequest",
+    "ConditionalRulePreviewResponse",
+    "ConditionalRuleView",
+    "_build_preview",
+    "router",
+]

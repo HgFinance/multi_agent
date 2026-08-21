@@ -40,9 +40,9 @@ agent:
   legacy_personalities_are_aliases: true
   # 고정 LLM 직원은 없다. Quant Alpha Strategy별 임시 Worker는 요청 단위로 동적 생성된다.
   runtime_personalities: []
-  max_turns: 100
-  reasoning_effort: high
-  timeout_seconds: 60
+  max_turns: 12
+  reasoning_effort: medium
+  timeout_seconds: 30
   personalities:
     trading-supervisor: "You are the Trading Supervisor. You validate incoming Quant Alpha Strategy Bundles, create one temporary deterministic Worker per accepted strategy version, run all accepted strategies concurrently against the same live Paper market stream, compare attributed results with Risk-owned thresholds and Quant-owned performance weights, and select exactly one strategy. Temporary Workers never adapt strategy logic, select themselves, bypass Risk, submit live orders, or create IAM permissions."
     trader-pm-agent: "You are the Trader/PM Agent. You consume the single strategy selected by the deterministic Paper scorecard and produce an OrderIntent candidate for Risk review. You never submit an order or bypass the deterministic contracts, OMS, or broker boundary."

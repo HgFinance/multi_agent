@@ -1708,6 +1708,29 @@ def run_research_department(
                         if key in observability
                     },
                 )
+        # hgfinance-research-task-notion-projection-v1
+        # CLI --run already owns its explicit Notion upload below.  Automatic
+        # projection belongs only to Hermes/Kanban task executions, identified
+        # by their durable task/root context.  Reuse the department-native
+        # reporter rather than duplicating Research in the generic projector.
+        if (
+            isinstance(result, dict)
+            and (task_id or workflow_root_task_id)
+            and str(result.get("verdict") or "").upper() != "HALTED"
+        ):
+            try:
+                from notion_reporter import upload_packet
+
+                upload_packet(
+                    result,
+                    symbol=symbol,
+                    report_md=_render_packet_md(result),
+                )
+            except Exception:
+                # Notion is a non-binding projection.  Reporting failure must
+                # never change the Research packet or department decision.
+                pass
+
         return result
 
 
