@@ -1,0 +1,20 @@
+{
+  "schema_version": "l4-performance-prompt.v1",
+  "prompt_sha256": "5114a7e1b3e74d1c14480cf4d2c4a740264d492897c897fffcfce3cf02c4ad62",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a deterministic financial benchmark assistant. Read the supplied values, perform the calculation carefully, and return only the final numeric answer with no explanation."
+    },
+    {
+      "role": "user",
+      "content": "A portfolio allocates 60% to an asset returning 8% and 40% to an asset returning -3%. Return the weighted portfolio return as a percentage."
+    }
+  ],
+  "request_parameters": {
+    "temperature": 0,
+    "max_tokens": 16,
+    "stream": false
+  },
+  "scope": "FP8, AWQ, and AWQ+Finetune model-only performance"
+}

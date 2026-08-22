@@ -10,8 +10,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 ROOT = REPO / "benchmarks/quantization/results/aws_l4_fp8kv_v1"
-RUN_ID = "aws-l4-fp8kv-v1-20260822"
-SOURCE_PARENT = "29ef0d1"
+RUN_ID = "aws-l4-fp8kv-v1-fair-v2-20260822"
+SOURCE_PARENT = "f19f1ae"
 VARIANTS = ("FP8", "AWQ", "AWQ+Finetune", "AWQ+Reasoning", "AWQ+RAG")
 DIRS = {variant: ROOT / variant for variant in VARIANTS}
 
@@ -72,6 +72,11 @@ def score_paths(variant: str) -> tuple[Path, Path, Path, Path]:
     )
 
 
+def performance_path(variant: str) -> Path:
+    fair = DIRS[variant] / "performance_fair_v2.json"
+    return fair if fair.exists() else DIRS[variant] / "performance.json"
+
+
 def measured_variant(variant: str) -> dict:
     internal_path, external_path, internal_raw_path, external_raw_path = score_paths(variant)
     internal = load(internal_path)
@@ -106,7 +111,7 @@ def measured_variant(variant: str) -> dict:
         quality["glossary_hit_rate"] = sum(bool(row.get("hit")) for row in internal_raw["results"]) / len(internal_raw["results"])
         artifacts.append(rel(REPO / "benchmarks/quantization/knowledge/bok800_2026/glossary_rag_v1_manifest.json"))
     if variant in ("FP8", "AWQ"):
-        artifacts.extend(rel(DIRS[variant] / name) for name in ("performance.json", "endpoint.json", "runtime.log"))
+        artifacts.extend(rel(DIRS[variant] / name) for name in (performance_path(variant).name, "endpoint.json", "runtime.log"))
     if variant == "AWQ+Reasoning":
         rows = internal_raw["results"]
         quality.update(
@@ -134,13 +139,13 @@ def measured_variant(variant: str) -> dict:
         }
         artifacts.extend(
             rel(DIRS[variant] / name)
-            for name in ("adapter_provenance.json", "adapter_save_reload_report.json", "endpoint.json", "performance.json")
+            for name in ("adapter_provenance.json", "adapter_save_reload_report.json", "endpoint.json", performance_path(variant).name)
         )
     performance_status = "MEASURED_BASE_ONLY" if variant in ("AWQ+RAG", "AWQ+Reasoning") else "MEASURED"
-    if variant == "AWQ+Finetune":
+    if variant == "AWQ+Finetune" and not (DIRS[variant] / "performance_fair_v2.json").exists():
         performance_status = "NOT_MEASURED"
     performance = {"status": performance_status, "artifact_paths": artifacts}
-    if variant == "AWQ+Finetune":
+    if variant == "AWQ+Finetune" and performance_status == "NOT_MEASURED":
         performance["reason"] = "Quality-only Finetune run; standalone performance was not measured."
     return {"status": "MEASURED", "quality": quality, "performance": performance, "artifact_paths": artifacts}
 
@@ -222,9 +227,10 @@ def render_table(variants: dict, gates: dict) -> str:
         if metric in ("c1", "c2", "c4"):
             performance = current["performance"]
             if "metrics" not in performance: return "N/A (pipeline not measured)"
-            return f"{performance['metrics'][metric.upper()]['throughput_tok_s']:.2f} tok/s"
+            suffix = " (model-only)" if performance.get("status") == "MEASURED_BASE_ONLY" else ""
+            return f"{performance['metrics'][metric.upper()]['throughput_tok_s']:.2f} tok/s{suffix}"
         if metric == "e2e":
-            if variant in ("FP8", "AWQ"): return f"{current['performance']['metrics']['C1']['latency_p50_s']:.3f}s p50"
+            if variant in ("FP8", "AWQ", "AWQ+Finetune"): return f"{current['performance']['metrics']['C1']['latency_p50_s']:.3f}s p50"
             if variant == "AWQ+Reasoning": return f"{quality['reasoning_full_pipeline_latency_avg_s']:.3f}s avg"
             if variant == "AWQ+RAG": return f"{quality['avg_quality_latency_s']:.3f}s avg"
         if metric == "memory": return f"{current['performance']['model_load_memory_gib']:.2f} GiB" if "model_load_memory_gib" in current["performance"] else "N/A (quality-only)"
@@ -234,6 +240,10 @@ def render_table(variants: dict, gates: dict) -> str:
         if metric == "startup":
             if variant in ("FP8", "AWQ"):
                 return f"PASS HTTP 200 (~{current['performance']['startup_model_load_s']:.1f}s load)"
+            if variant == "AWQ+Finetune" and "startup_model_load_s" in current["performance"]:
+                return f"PASS HTTP 200 (~{current['performance']['startup_model_load_s']:.1f}s load; adapter)"
+            if variant in ("AWQ+Reasoning", "AWQ+RAG"):
+                return "PASS HTTP 200 (AWQ base endpoint)"
             return "PASS HTTP 200 (adapter loaded)" if current["status"] == "MEASURED" else "HOLD"
         if metric == "gate": return "BASELINE" if variant == "FP8" else "HOLD: External Overall/manual or variant gate"
         return "N/A"
@@ -247,7 +257,7 @@ def render_table(variants: dict, gates: dict) -> str:
         ("8K Concurrency", "concurrency"), ("Free VRAM", "free"), ("Startup/Endpoint", "startup"), ("Final Gate", "gate"),
     ]
     headers = ["Metric", *VARIANTS, "Verdict"]
-    lines = ["# AWS L4-fp8KV-v1 Five-Variant Comparison", "", f"Run ID: `{RUN_ID}`", "", "All measured variants use the same NVIDIA L4 runtime profile. This table is not comparable to earlier autoKV or FP8-KV performance runs.", "", "| " + " | ".join(headers) + " |", "|" + "|".join(["---"] * len(headers)) + "|"]
+    lines = ["# AWS L4-fp8KV-v1 Five-Variant Comparison", "", f"Run ID: `{RUN_ID}`", "", "All measured variants use the same NVIDIA L4 runtime profile. Model-only performance rows use the recorded fair-v2 prompt and identical C1/C2/C4 measurement policy. This table is not comparable to earlier autoKV or FP8-KV performance runs.", "", "| " + " | ".join(headers) + " |", "|" + "|".join(["---"] * len(headers)) + "|"]
     for label, metric in rows:
         values = [value(variant, metric) for variant in VARIANTS]
         verdict = "BASELINE" if metric == "gate" else ("HOLD" if any(item.startswith("HOLD") for item in values) or metric == "overall" else "Reported")
@@ -257,6 +267,7 @@ def render_table(variants: dict, gates: dict) -> str:
         "- AWQ+Finetune is reported only when the exact AWQ adapter has passed save/reload; NF4 adapters are never substituted.",
         "- AWQ+RAG uses the final term-explicit glossary. The first body-wide-alias attempt was excluded for prompt contamination.",
         "- AWQ+Reasoning stores the AWQ draft separately and scores only successful gpt-4o-mini rewrites.",
+        "- Fair model-only performance prompt and request policy: `performance_prompt_fair_v2.json`; pipeline latency for Reasoning/RAG remains separate from model-only throughput.",
         "- Port mapping was verified as `127.0.0.1:8000` only.",
     ])
     return "\n".join(lines) + "\n"
@@ -268,10 +279,28 @@ def main() -> int:
         variants["AWQ+Finetune"] = measured_variant("AWQ+Finetune")
     else:
         variants["AWQ+Finetune"] = make_hold_variant()
-    variants["FP8"]["performance"].update({"metrics": load(DIRS["FP8"] / "performance.json")["results"], "model_load_memory_gib": 15.39, "kv_cache_gib": 1.53, "free_vram_mib": 1416, "startup_model_load_s": 126.15})
-    variants["AWQ"]["performance"].update({"metrics": load(DIRS["AWQ"] / "performance.json")["results"], "model_load_memory_gib": 9.38, "kv_cache_gib": 8.90, "free_vram_mib": 1344, "startup_model_load_s": 79.93})
+    for variant in ("FP8", "AWQ", "AWQ+Finetune"):
+        path = performance_path(variant)
+        if path.exists():
+            measured = load(path)
+            log_metrics = measured.get("log_metrics", {})
+            gpu = measured.get("gpu_after_load", {})
+            variants[variant]["performance"].update(
+                {
+                    "metrics": measured["results"],
+                    "model_load_memory_gib": log_metrics.get("model_load_memory_gib"),
+                    "kv_cache_gib": log_metrics.get("kv_cache_gib"),
+                    "kv_cache_tokens": log_metrics.get("kv_cache_tokens"),
+                    "free_vram_mib": gpu.get("memory_free_mib"),
+                    "startup_model_load_s": log_metrics.get("model_load_s", measured.get("startup_endpoint_s")),
+                    "performance_prompt_sha256": measured.get("prompt_sha256"),
+                }
+            )
+    base_perf = load(performance_path("AWQ"))
     for variant in ("AWQ+Reasoning", "AWQ+RAG"):
-        variants[variant]["performance"].update({"model_load_memory_gib": 9.38, "kv_cache_gib": 8.90, "free_vram_mib": 1344})
+        base_log = base_perf.get("log_metrics", {})
+        base_gpu = base_perf.get("gpu_after_load", {})
+        variants[variant]["performance"].update({"status": "MEASURED_BASE_ONLY", "metrics": base_perf["results"], "model_load_memory_gib": base_log.get("model_load_memory_gib", 9.38), "kv_cache_gib": base_log.get("kv_cache_gib", 8.90), "free_vram_mib": base_gpu.get("memory_free_mib", 1344), "performance_prompt_sha256": base_perf.get("prompt_sha256")})
     for variant in VARIANTS:
         provenance = {
             "schema_version": "l4-fp8kv-provenance.v1", "run_id": RUN_ID, "variant": variant,
@@ -294,7 +323,7 @@ def main() -> int:
         "comparability_statement": "Fair relative comparison within one NVIDIA L4-fp8KV-v1 runtime profile. Not comparable to the previous FP8-KV or autoKV performance runs.",
         "runtime": RUNTIME, "profile": PROFILE, "primary_external_metric": "overall_accuracy", "secondary_external_metric": "auto_mean_score",
         "variants": variants, "gate": {"vs_fp8": gates, "internal_gate_definition": "relative quality degradation <= 3%, no new Critical Failure, no Request Error increase", "external_gate_definition": "frozen External-50 Overall accuracy; unavailable until FinanceBench manual adjudication is complete", "verdict": "HOLD", "hold_reasons": hold_reasons},
-        "source_artifacts": [path for variant in VARIANTS for path in variants[variant]["artifact_paths"]],
+        "source_artifacts": [path for variant in VARIANTS for path in variants[variant]["artifact_paths"]] + [rel(ROOT / "performance_prompt_fair_v2.json")],
         "notes": ["All measured raw outputs and scores use frozen Internal-50 v2 and External-50 v1 datasets.", "The first RAG attempt was excluded because body-wide aliases caused prompt contamination; the final glossary retains only term-explicit aliases.", "FinanceBench diagnostics are retained separately and are not the primary external gate."],
     }
     (ROOT / "aws_l4_fp8kv_v1_comparison.json").write_text(json.dumps(comparison, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
