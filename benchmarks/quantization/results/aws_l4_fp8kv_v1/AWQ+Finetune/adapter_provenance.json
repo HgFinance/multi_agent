@@ -1,0 +1,126 @@
+{
+  "schema_version": "awq-adapter-provenance.v1",
+  "status": "TRAINED",
+  "base_model": "Qwen/Qwen2.5-14B-Instruct-AWQ",
+  "base_model_local_path": "/opt/hgfinance/models/Qwen2.5-14B-Instruct-AWQ",
+  "base_revision": "539535859b135b0244c91f3e59816150c8056698",
+  "quantization": {
+    "quant_method": "awq",
+    "bits": 4,
+    "group_size": 128,
+    "version": "gemm",
+    "zero_point": true
+  },
+  "target_modules": [
+    "q_proj",
+    "k_proj",
+    "v_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj"
+  ],
+  "adapter": {
+    "rank": 16,
+    "alpha": 32,
+    "dropout": 0.05,
+    "dtype": "bfloat16"
+  },
+  "dataset": {
+    "train_path": "training_runs/hgfinance-awq-finance-v1/prepared/train.jsonl",
+    "train_sha256": "dfb5cc4bd3a629f84d674bf12b90d06bdc09f84fa682953647175fbee5c8bcff",
+    "train_count": 1350,
+    "validation_path": "training_runs/hgfinance-awq-finance-v1/prepared/validation.jsonl",
+    "validation_sha256": "6a23ff169c0e211efd62c31b31f8e03a9196dd17c2fc20b009846f6d5923e4dd",
+    "validation_count": 150
+  },
+  "tokenizer_audit": {
+    "records": 1500,
+    "min_tokens": 73,
+    "p50_tokens": 591,
+    "p95_tokens": 1503,
+    "max_tokens": 3205,
+    "max_seq_length": 4096,
+    "over_limit": 0
+  },
+  "training": {
+    "epochs": 1.0,
+    "updates": 169,
+    "gradient_accumulation_steps": 8,
+    "learning_rate": 0.0001,
+    "seed": 66,
+    "mean_train_loss": 0.4309417454475193,
+    "mean_validation_loss": 0.46845812726086783,
+    "max_train_loss": 12.388962745666504,
+    "min_train_loss": 1.3271524949232116e-05
+  },
+  "runtime": {
+    "python": "3.12.13",
+    "torch": "2.6.0+cu124",
+    "cuda": "12.4",
+    "gpu": "NVIDIA L4",
+    "model_load_and_train_seconds": 4442.824
+  },
+  "adapter_files": {
+    "config": "adapter_config.json",
+    "config_sha256": "80e23d48f71d644bb494f0873dae6ba0c003d0c13b15f548ed2ff141d13c1d1a",
+    "weights": "adapter_model.safetensors",
+    "weights_sha256": "d2cfbe4dd8f3a7476294c086e2fc213c52352e25fce81b0df53b4196e538446b",
+    "tensor_count": 672
+  },
+  "target_count": 336,
+  "save_reload": {
+    "schema_version": "awq-adapter-save-reload.v1",
+    "status": "PASS",
+    "container": "hgfinance-vllm-runtime-20260822",
+    "image": "vllm/vllm-openai:v0.27.1",
+    "vllm": "0.27.1",
+    "base_model": "Qwen2.5-14B-Instruct-AWQ",
+    "base_model_parent": "Qwen2.5-14B-Instruct-AWQ",
+    "adapter_name": "hgfinance-awq-finetune",
+    "adapter_path_in_container": "/tmp/adapter",
+    "models_endpoint": "HTTP 200; base and adapter listed",
+    "served_models": [
+      "Qwen2.5-14B-Instruct-AWQ",
+      "hgfinance-awq-finetune"
+    ],
+    "adapter_visible": true,
+    "canary": {
+      "model": "hgfinance-awq-finetune",
+      "finish_reason": "stop",
+      "content": "40%"
+    },
+    "adapter_config_sha256": "80e23d48f71d644bb494f0873dae6ba0c003d0c13b15f548ed2ff141d13c1d1a",
+    "adapter_weights_sha256": "d2cfbe4dd8f3a7476294c086e2fc213c52352e25fce81b0df53b4196e538446b",
+    "target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj",
+      "gate_proj",
+      "up_proj",
+      "down_proj"
+    ]
+  },
+  "endpoint": {
+    "status": "PASS",
+    "endpoint": "http://127.0.0.1:8000",
+    "http_status": 200,
+    "public_binding": "Docker host port is 127.0.0.1:8000 only",
+    "container": "hgfinance-vllm-runtime-20260822",
+    "model": "Qwen2.5-14B-Instruct-AWQ",
+    "adapter_model": "hgfinance-awq-finetune",
+    "adapter_path": "/tmp/adapter",
+    "served_models": [
+      "Qwen2.5-14B-Instruct-AWQ",
+      "hgfinance-awq-finetune"
+    ],
+    "runtime_profile": {
+      "max_model_len": 8192,
+      "gpu_memory_utilization": 0.85,
+      "kv_cache_dtype": "fp8_e4m3",
+      "enable_prefix_caching": true,
+      "attention_backend": "FLASHINFER"
+    }
+  }
+}

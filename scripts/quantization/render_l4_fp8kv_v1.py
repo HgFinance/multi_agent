@@ -11,7 +11,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 ROOT = REPO / "benchmarks/quantization/results/aws_l4_fp8kv_v1"
 RUN_ID = "aws-l4-fp8kv-v1-20260822"
-SOURCE_PARENT = "4c2014c"
+SOURCE_PARENT = "29ef0d1"
 VARIANTS = ("FP8", "AWQ", "AWQ+Finetune", "AWQ+Reasoning", "AWQ+RAG")
 DIRS = {variant: ROOT / variant for variant in VARIANTS}
 
@@ -119,7 +119,29 @@ def measured_variant(variant: str) -> dict:
                 "reasoning_retry_count": sum(row.get("critic_retry_count", 0) for row in rows),
             }
         )
-    performance = {"status": "MEASURED_BASE_ONLY" if variant in ("AWQ+RAG", "AWQ+Reasoning") else "MEASURED", "artifact_paths": artifacts}
+    if variant == "AWQ+Finetune":
+        adapter_provenance = load(DIRS[variant] / "adapter_provenance.json")
+        quality["adapter"] = {
+            "base_model": adapter_provenance["base_model"],
+            "base_revision": adapter_provenance["base_revision"],
+            "quantization": adapter_provenance["quantization"],
+            "target_modules": adapter_provenance["target_modules"],
+            "train_count": adapter_provenance["dataset"]["train_count"],
+            "validation_count": adapter_provenance["dataset"]["validation_count"],
+            "adapter_config_sha256": adapter_provenance["adapter_files"]["config_sha256"],
+            "adapter_weights_sha256": adapter_provenance["adapter_files"]["weights_sha256"],
+            "save_reload_status": adapter_provenance["save_reload"]["status"],
+        }
+        artifacts.extend(
+            rel(DIRS[variant] / name)
+            for name in ("adapter_provenance.json", "adapter_save_reload_report.json", "endpoint.json", "performance.json")
+        )
+    performance_status = "MEASURED_BASE_ONLY" if variant in ("AWQ+RAG", "AWQ+Reasoning") else "MEASURED"
+    if variant == "AWQ+Finetune":
+        performance_status = "NOT_MEASURED"
+    performance = {"status": performance_status, "artifact_paths": artifacts}
+    if variant == "AWQ+Finetune":
+        performance["reason"] = "Quality-only Finetune run; standalone performance was not measured."
     return {"status": "MEASURED", "quality": quality, "performance": performance, "artifact_paths": artifacts}
 
 
@@ -255,18 +277,23 @@ def main() -> int:
             "schema_version": "l4-fp8kv-provenance.v1", "run_id": RUN_ID, "variant": variant,
             "status": variants[variant]["status"], "source_parent_commit": SOURCE_PARENT,
             "runtime": RUNTIME, "profile": PROFILE,
-            "serving": {"endpoint": "http://127.0.0.1:8000", "model": "Qwen2.5-14B-Instruct-FP8-dynamic" if variant == "FP8" else "Qwen2.5-14B-Instruct-AWQ", "launch_args": ["--max-model-len", "8192", "--gpu-memory-utilization", "0.85", "--kv-cache-dtype", "fp8_e4m3", "--enable-prefix-caching", "--host", "0.0.0.0", "--port", "8000"], "endpoint_health": "HTTP 200; localhost binding 127.0.0.1:8000", "backend": "FLASHINFER"},
+            "serving": {"endpoint": "http://127.0.0.1:8000", "model": "Qwen2.5-14B-Instruct-FP8-dynamic" if variant == "FP8" else ("hgfinance-awq-finetune" if variant == "AWQ+Finetune" else "Qwen2.5-14B-Instruct-AWQ"), "launch_args": ["--max-model-len", "8192", "--gpu-memory-utilization", "0.85", "--kv-cache-dtype", "fp8_e4m3", "--enable-prefix-caching", "--host", "0.0.0.0", "--port", "8000"] + (["--enable-lora", "--lora-modules", "hgfinance-awq-finetune=/tmp/adapter"] if variant == "AWQ+Finetune" else []), "endpoint_health": "HTTP 200; localhost binding 127.0.0.1:8000; exact AWQ adapter listed and canary passed" if variant == "AWQ+Finetune" else "HTTP 200; localhost binding 127.0.0.1:8000", "backend": "FLASHINFER"},
             "datasets": {"internal50_v2_sha256": "ad2bdaf5ea381c2fc151fce1f1859f7f925b86fd03b830319cd97af17709e978", "external50_v1_sha256": sha256(REPO / "benchmarks/quantization/external50_v1.json")},
             "artifacts": variants[variant]["artifact_paths"], "quality": variants[variant]["quality"], "performance": variants[variant]["performance"],
         }
         if variants[variant].get("hold_reason"): provenance["hold_reason"] = variants[variant]["hold_reason"]
         (DIRS[variant] / "provenance.json").write_text(json.dumps(provenance, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     gates = gate_results(variants)
+    hold_reasons = ["External Overall is not asserted because FinanceBench manual adjudication is pending."]
+    if variants["AWQ+Finetune"]["status"] == "HOLD":
+        hold_reasons.insert(0, variants["AWQ+Finetune"].get("hold_reason", "AWQ+Finetune was not executed."))
+    if gates["AWQ+RAG"].get("new_critical_regression", 0):
+        hold_reasons.append("AWQ+RAG adds one new Internal critical failure.")
     comparison = {
         "schema_version": "quantization-comparison.v2", "run_id": RUN_ID, "source_parent_commit": SOURCE_PARENT, "status": "HOLD",
         "comparability_statement": "Fair relative comparison within one NVIDIA L4-fp8KV-v1 runtime profile. Not comparable to the previous FP8-KV or autoKV performance runs.",
         "runtime": RUNTIME, "profile": PROFILE, "primary_external_metric": "overall_accuracy", "secondary_external_metric": "auto_mean_score",
-        "variants": variants, "gate": {"vs_fp8": gates, "internal_gate_definition": "relative quality degradation <= 3%, no new Critical Failure, no Request Error increase", "external_gate_definition": "frozen External-50 Overall accuracy; unavailable until FinanceBench manual adjudication is complete", "verdict": "HOLD", "hold_reasons": ["AWQ+Finetune has no exact compatible adapter.", "External Overall is not asserted because FinanceBench manual adjudication is pending.", "AWQ+RAG adds one new Internal critical failure."]},
+        "variants": variants, "gate": {"vs_fp8": gates, "internal_gate_definition": "relative quality degradation <= 3%, no new Critical Failure, no Request Error increase", "external_gate_definition": "frozen External-50 Overall accuracy; unavailable until FinanceBench manual adjudication is complete", "verdict": "HOLD", "hold_reasons": hold_reasons},
         "source_artifacts": [path for variant in VARIANTS for path in variants[variant]["artifact_paths"]],
         "notes": ["All measured raw outputs and scores use frozen Internal-50 v2 and External-50 v1 datasets.", "The first RAG attempt was excluded because body-wide aliases caused prompt contamination; the final glossary retains only term-explicit aliases.", "FinanceBench diagnostics are retained separately and are not the primary external gate."],
     }

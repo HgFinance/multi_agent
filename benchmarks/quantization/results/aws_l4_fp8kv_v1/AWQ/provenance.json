@@ -3,7 +3,7 @@
   "run_id": "aws-l4-fp8kv-v1-20260822",
   "variant": "AWQ",
   "status": "MEASURED",
-  "source_parent_commit": "4c2014c",
+  "source_parent_commit": "29ef0d1",
   "runtime": {
     "gpu": "NVIDIA L4",
     "python": "3.12.13",

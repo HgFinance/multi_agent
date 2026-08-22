@@ -1,6 +1,6 @@
 {
   "schema_version": "awq-finetune-training.v1",
-  "status": "PREPARED_NOT_TRAINED",
+  "status": "TRAINED_AND_SERVING_VERIFIED",
   "runtime_profile": "L4-fp8KV-v1",
   "training_scope": [
     "financial_arithmetic",
@@ -28,23 +28,35 @@
     "audited_in_container": "hgfinance-vllm-runtime-20260822"
   },
   "runtime_training_preflight": {
-    "status": "BLOCKED_FOR_TRAINING",
+    "status": "PASS",
+    "training_environment": "isolated host venv; existing AWS L4 host; no second Docker container",
     "python": "3.12.13",
-    "vllm": "0.27.1",
-    "transformers": "5.15.0",
-    "bitsandbytes_available": true,
-    "accelerate_available": true,
-    "peft_available": false,
-    "reason": "The serving image is not a training image; install and pin PEFT in an isolated training environment before training."
+    "torch": "2.6.0+cu124",
+    "cuda": "12.4",
+    "gpu": "NVIDIA L4",
+    "transformers": "4.51.3",
+    "autoawq": "0.2.9",
+    "peft": "0.20.0",
+    "bitsandbytes": "0.45.3",
+    "reason": "Exact AWQ base loaded, LoRA trained, adapter saved, and vLLM serving-stack reload passed."
   },
   "served_awq_base": {
     "model_name": "Qwen2.5-14B-Instruct-AWQ",
     "quantization": "awq",
-    "revision": "must be resolved from the served model before adapter training",
+    "revision": "539535859b135b0244c91f3e59816150c8056698",
     "container_model_path": "/models/Qwen2.5-14B-Instruct-AWQ",
     "config_sha256": "0c174aa8d52f5dec4c2e0d4b3ec4b1ff261d16bb80b58f03c1c06528e6ed6640",
     "tokenizer_config_sha256": "5b5d4f65d0acd3b2d56a35b56d374a36cbc1c8fa5cf3b3febbbfabf22f359583",
-    "tokenizer_sha256": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539"
+    "tokenizer_sha256": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539",
+    "revision_source": "Hugging Face Qwen/Qwen2.5-14B-Instruct-AWQ model snapshot",
+    "adapter_base_model": "Qwen/Qwen2.5-14B-Instruct-AWQ",
+    "adapter_quantization": {
+      "quant_method": "awq",
+      "bits": 4,
+      "group_size": 128,
+      "version": "gemm",
+      "zero_point": true
+    }
   },
   "staging_training_recipe": {
     "purpose": "configuration scaffold only",
@@ -68,21 +80,38 @@
     "optimizer": "paged_adamw_8bit"
   },
   "awq_adapter_gate": {
-    "status": "HOLD",
-    "reason": "The existing training recipe is NF4 QLoRA. No adapter is being labeled AWQ-compatible until exact base model, revision, AWQ quantization, target modules, metadata, and save/reload are verified.",
-    "required_before_valid_comparison": [
-      "resolve exact served AWQ model revision and tokenizer",
-      "use a training path that produces an adapter compatible with that exact AWQ base",
-      "verify target modules and adapter metadata",
-      "save and reload the adapter in the same serving stack",
-      "run tokenizer no-truncation audit"
+    "status": "PASS",
+    "reason": "Exact AWQ adapter trained and loaded by vLLM against the exact Qwen2.5-14B-Instruct-AWQ base.",
+    "base_revision": "539535859b135b0244c91f3e59816150c8056698",
+    "target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj",
+      "gate_proj",
+      "up_proj",
+      "down_proj"
     ],
-    "prohibited_substitution": "existing NF4 Risk QLoRA adapter"
+    "save_reload": "PASS",
+    "served_adapter_name": "hgfinance-awq-finetune",
+    "adapter_path_external": "/tmp/hgfinance-awq-finetune-v1/adapter",
+    "adapter_path_container": "/tmp/adapter",
+    "adapter_config_sha256": "80e23d48f71d644bb494f0873dae6ba0c003d0c13b15f548ed2ff141d13c1d1a",
+    "adapter_weights_sha256": "d2cfbe4dd8f3a7476294c086e2fc213c52352e25fce81b0df53b4196e538446b",
+    "prohibited_substitution": "existing NF4 Risk QLoRA adapter was not used"
   },
   "next_training_outputs": [
     "adapter_config.json",
     "adapter_model.safetensors",
     "adapter_save_reload_report.json",
     "adapter_provenance.json"
-  ]
+  ],
+  "training_outputs": {
+    "adapter_config_sha256": "80e23d48f71d644bb494f0873dae6ba0c003d0c13b15f548ed2ff141d13c1d1a",
+    "adapter_weights_sha256": "d2cfbe4dd8f3a7476294c086e2fc213c52352e25fce81b0df53b4196e538446b",
+    "adapter_not_committed": "weights remain outside Git; hashes and serving provenance are committed",
+    "serving_artifacts": "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune",
+    "internal_score": "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/internal50_score.json",
+    "external_score": "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/external50_score.json"
+  }
 }

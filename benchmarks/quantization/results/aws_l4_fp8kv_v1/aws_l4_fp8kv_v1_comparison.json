@@ -1,7 +1,7 @@
 {
   "schema_version": "quantization-comparison.v2",
   "run_id": "aws-l4-fp8kv-v1-20260822",
-  "source_parent_commit": "4c2014c",
+  "source_parent_commit": "29ef0d1",
   "status": "HOLD",
   "comparability_statement": "Fair relative comparison within one NVIDIA L4-fp8KV-v1 runtime profile. Not comparable to the previous FP8-KV or autoKV performance runs.",
   "runtime": {
@@ -507,19 +507,118 @@
       ]
     },
     "AWQ+Finetune": {
-      "status": "HOLD",
-      "quality": null,
+      "status": "MEASURED",
+      "quality": {
+        "internal_quality": 0.76,
+        "internal_passed": 38,
+        "internal_total": 50,
+        "critical_failures": 1,
+        "critical_failed_ids": [
+          "v2-046"
+        ],
+        "request_errors": 0,
+        "categories": {
+          "accounting_reasoning": {
+            "n": 6,
+            "passed": 4,
+            "accuracy": 0.6666666666666666
+          },
+          "evidence_reasoning": {
+            "n": 6,
+            "passed": 6,
+            "accuracy": 1.0
+          },
+          "financial_arithmetic": {
+            "n": 10,
+            "passed": 4,
+            "accuracy": 0.4
+          },
+          "portfolio_trading_reasoning": {
+            "n": 6,
+            "passed": 5,
+            "accuracy": 0.8333333333333334
+          },
+          "quant_reasoning": {
+            "n": 6,
+            "passed": 6,
+            "accuracy": 1.0
+          },
+          "risk_reasoning": {
+            "n": 7,
+            "passed": 7,
+            "accuracy": 1.0
+          },
+          "structured_output": {
+            "n": 5,
+            "passed": 2,
+            "accuracy": 0.4
+          },
+          "uncertainty_fail_closed": {
+            "n": 4,
+            "passed": 4,
+            "accuracy": 1.0
+          }
+        },
+        "avg_quality_latency_s": 0.2771987482794793,
+        "external_overall": null,
+        "external_overall_reason": "FinanceBench manual adjudication is required; frozen External-50 Overall is not asserted from auto-only output.",
+        "finqa": 0.75,
+        "tatqa": 0.8,
+        "financebench_manual": null,
+        "financebench_diagnostic": 0.3853,
+        "auto_mean": 0.7612,
+        "external_auto_passed": 27,
+        "external_auto_scored_n": 35,
+        "adapter": {
+          "base_model": "Qwen/Qwen2.5-14B-Instruct-AWQ",
+          "base_revision": "539535859b135b0244c91f3e59816150c8056698",
+          "quantization": {
+            "quant_method": "awq",
+            "bits": 4,
+            "group_size": 128,
+            "version": "gemm",
+            "zero_point": true
+          },
+          "target_modules": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj"
+          ],
+          "train_count": 1350,
+          "validation_count": 150,
+          "adapter_config_sha256": "80e23d48f71d644bb494f0873dae6ba0c003d0c13b15f548ed2ff141d13c1d1a",
+          "adapter_weights_sha256": "d2cfbe4dd8f3a7476294c086e2fc213c52352e25fce81b0df53b4196e538446b",
+          "save_reload_status": "PASS"
+        }
+      },
       "performance": {
-        "status": "HOLD",
-        "reason": "No adapter_config.json + adapter_model.safetensors for an exact AWQ-compatible adapter was found in the existing mounted model/checkpoint paths. No NF4 adapter was substituted and no finetune benchmark was run."
+        "status": "NOT_MEASURED",
+        "artifact_paths": [
+          "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/internal50_raw.json",
+          "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/internal50_score.json",
+          "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/external50_raw.json",
+          "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/external50_score.json",
+          "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/adapter_provenance.json",
+          "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/adapter_save_reload_report.json",
+          "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/endpoint.json",
+          "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/performance.json"
+        ],
+        "reason": "Quality-only Finetune run; standalone performance was not measured."
       },
       "artifact_paths": [
         "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/internal50_raw.json",
         "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/internal50_score.json",
         "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/external50_raw.json",
-        "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/external50_score.json"
-      ],
-      "hold_reason": "No adapter_config.json + adapter_model.safetensors for an exact AWQ-compatible adapter was found in the existing mounted model/checkpoint paths. No NF4 adapter was substituted and no finetune benchmark was run."
+        "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/external50_score.json",
+        "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/adapter_provenance.json",
+        "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/adapter_save_reload_report.json",
+        "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/endpoint.json",
+        "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/performance.json"
+      ]
     }
   },
   "gate": {
@@ -534,12 +633,13 @@
         "reason": "FinanceBench manual adjudication is required; frozen External-50 Overall is not asserted from auto-only output."
       },
       "AWQ+Finetune": {
-        "internal_relative_delta_vs_fp8": null,
+        "internal_relative_delta_vs_fp8": 0.085714,
         "external_overall_delta_vs_fp8": null,
-        "new_critical_regression": null,
-        "request_error_regression": null,
+        "new_critical_regression": 0,
+        "new_critical_ids": [],
+        "request_error_regression": 0,
         "verdict": "HOLD",
-        "reason": "No adapter_config.json + adapter_model.safetensors for an exact AWQ-compatible adapter was found in the existing mounted model/checkpoint paths. No NF4 adapter was substituted and no finetune benchmark was run."
+        "reason": "FinanceBench manual adjudication is required; frozen External-50 Overall is not asserted from auto-only output."
       },
       "AWQ+Reasoning": {
         "internal_relative_delta_vs_fp8": -0.485714,
@@ -579,7 +679,6 @@
     "external_gate_definition": "frozen External-50 Overall accuracy; unavailable until FinanceBench manual adjudication is complete",
     "verdict": "HOLD",
     "hold_reasons": [
-      "AWQ+Finetune has no exact compatible adapter.",
       "External Overall is not asserted because FinanceBench manual adjudication is pending.",
       "AWQ+RAG adds one new Internal critical failure."
     ]
@@ -603,6 +702,10 @@
     "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/internal50_score.json",
     "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/external50_raw.json",
     "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/external50_score.json",
+    "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/adapter_provenance.json",
+    "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/adapter_save_reload_report.json",
+    "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/endpoint.json",
+    "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/performance.json",
     "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Reasoning/internal50_raw.json",
     "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Reasoning/internal50_score.json",
     "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Reasoning/external50_raw.json",
