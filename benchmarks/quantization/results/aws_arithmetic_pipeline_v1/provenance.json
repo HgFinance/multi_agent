@@ -40,5 +40,12 @@
     "external50_raw.json": "55a4b071d18d5ff565067499fd40b27e52879282d4106bc7b9cb4e8243bce162",
     "external50_score.json": "32e6002de03e6cd3739f36359eea7d3bd056b769c092af356fd02d05f20b59b1"
   },
+  "source_artifact_paths": {
+    "internal50_raw.json": "benchmarks/quantization/results/aws_arithmetic_pipeline_v1/internal50_raw.json",
+    "internal50_score.json": "benchmarks/quantization/results/aws_arithmetic_pipeline_v1/internal50_score.json",
+    "external50_raw.json": "benchmarks/quantization/results/aws_arithmetic_pipeline_v1/external50_raw.json",
+    "external50_score.json": "benchmarks/quantization/results/aws_arithmetic_pipeline_v1/external50_score.json",
+    "adapter_runtime_verification.json": "benchmarks/quantization/results/aws_arithmetic_pipeline_v1/adapter_runtime_verification.json"
+  },
   "hold_reason": "External Auto Mean regressed from 0.7709 to 0.7325 versus the AWQ baseline."
 }

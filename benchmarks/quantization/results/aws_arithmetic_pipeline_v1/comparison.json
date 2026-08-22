@@ -82,19 +82,19 @@
   },
   "source_artifacts": {
     "internal50_raw.json": {
-      "path": "/tmp/hgfinance-arithmetic-pipeline-v1/internal50_raw.json",
+      "path": "benchmarks/quantization/results/aws_arithmetic_pipeline_v1/internal50_raw.json",
       "sha256": "dd7d192f557a71f3bbe11dc91855d4668e8263efb7973f823ba9a7488ca2de35"
     },
     "internal50_score.json": {
-      "path": "/tmp/hgfinance-arithmetic-pipeline-v1/internal50_score.json",
+      "path": "benchmarks/quantization/results/aws_arithmetic_pipeline_v1/internal50_score.json",
       "sha256": "73edfeddbea4c6e41f7c9c19405bf7be2f2bdbc4d4832b44440f33e1fbc7f7fe"
     },
     "external50_raw.json": {
-      "path": "/tmp/hgfinance-arithmetic-pipeline-v1/external50_raw.json",
+      "path": "benchmarks/quantization/results/aws_arithmetic_pipeline_v1/external50_raw.json",
       "sha256": "55a4b071d18d5ff565067499fd40b27e52879282d4106bc7b9cb4e8243bce162"
     },
     "external50_score.json": {
-      "path": "/tmp/hgfinance-arithmetic-pipeline-v1/external50_score.json",
+      "path": "benchmarks/quantization/results/aws_arithmetic_pipeline_v1/external50_score.json",
       "sha256": "32e6002de03e6cd3739f36359eea7d3bd056b769c092af356fd02d05f20b59b1"
     }
   },
