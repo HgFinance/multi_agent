@@ -21,7 +21,12 @@ def find_adapter() -> Path:
 def main() -> None:
     path = find_adapter()
     source = path.read_text(encoding="utf-8")
-    required = ("class DiscordAdapter", "def _discord_message_admission", "async def send(")
+    required = (
+        "class DiscordAdapter",
+        "def _discord_message_admission",
+        "async def _dispatch_discord_message",
+        "async def send(",
+    )
     missing = [marker for marker in required if marker not in source]
     if missing:
         raise SystemExit(f"Hermes Discord adapter contract changed: missing {missing}")

@@ -109,6 +109,25 @@ retire_legacy_skill() {
   echo " retired legacy skill: $dept/$legacy_rel -> $backup_dir"
 }
 
+retire_duplicate_skill_if_identical() {
+  local dept="$1"
+  local skill_rel="$2"
+  local canonical_dir="$REPO_ROOT/skills/$skill_rel"
+  local profile_dir="$(dest_for "$dept")/skills/$skill_rel"
+
+  if [ ! -d "$profile_dir" ] || [ ! -d "$canonical_dir" ]; then
+    return 0
+  fi
+  # Only retire a profile copy when the complete skill tree is byte-identical
+  # to the shared canonical source.  A locally diverged skill remains visible
+  # and is reported for explicit review instead of being overwritten/moved.
+  if ! diff -qr -- "$canonical_dir" "$profile_dir" >/dev/null; then
+    echo " preserve divergent duplicate: $dept/$skill_rel" >&2
+    return 0
+  fi
+  retire_legacy_skill "$dept" "$skill_rel"
+}
+
 case "$MODE" in
   push)
     echo "Syncing repo -> ~/.hermes/profiles (config.yaml, SOUL.md, owned skills)"
@@ -122,9 +141,17 @@ case "$MODE" in
     done
     sync_local_skill "ceo-agent" "ceo/hermes-multi-agent-pipelines" "orchestration/hermes-multi-agent-pipelines"
     sync_local_skill "research-department" "methodology-scout" "research/methodology-scout"
-    sync_local_skill "research-department" "research/financial-equity-research" "research/financial-equity-research"
+    # Shared /opt/shared-skills is the canonical copy for this byte-identical
+    # research skill; retire only an identical profile duplicate so qualified
+    # and categorized skill_view names do not become ambiguous.
+    retire_duplicate_skill_if_identical "research-department" "research/financial-equity-research"
     sync_local_skill "quant-backtest-department" "experiment-factory" "quant/experiment-factory"
-    sync_local_skill "quant-backtest-department" "quant/equity-quant-assessment" "quant/equity-quant-assessment"
+    # The same byte-identical skill is mounted at /opt/shared-skills in the
+    # runtime. Keeping a profile mirror makes Hermes skill_view report an
+    # ambiguity and forces an avoidable provider re-plan. The shared copy is
+    # canonical; retire only an identical profile duplicate into the existing
+    # recoverable backup area.
+    retire_duplicate_skill_if_identical "quant-backtest-department" "quant/equity-quant-assessment"
     retire_legacy_skill "risk-management" "autonomous-ai-agents/hermes-multi-agent-pipelines"
   ;;
   pull)

@@ -157,6 +157,12 @@ FAILURE_OUTCOMES = frozenset(
 PRIMARY_DEPARTMENTS = frozenset(
     {"research", "quant", "trading", "risk", "accounting"}
 )
+# ``qa-department`` is a valid Hermes assignee for the governance QA lane, but
+# it is not an ordinary analysis primary. Keep this boundary local to initial
+# primary materialization so RUN_QA continues to use the same canonical profile.
+PRIMARY_MATERIALIZATION_BLOCKED_PROFILES = frozenset(
+    {canonical_profile_for_department("qa")}
+)
 SUPERVISOR_MARKER = "hgfinance.ceo-supervisor.v1"
 SUPERVISOR_WAKE_MARKER = "hgfinance.ceo-supervisor.wakeup.v1"
 
@@ -668,6 +674,22 @@ def _blocked_decision(
     )
 
 
+def _empty_primary_request_user_input_decision(
+    state: SupervisorState,
+) -> SupervisorDecision:
+    """Reuse the existing clarification action for an empty user plan."""
+
+    return SupervisorDecision(
+        SupervisorAction.REQUEST_USER_INPUT,
+        state.parent_task_id,
+        assignee=canonical_profile_for_department("ceo"),
+        title="CEO planner produced no executable child task",
+        body=f"{SUPERVISOR_MARKER} action=REQUEST_USER_INPUT no_analysis_children",
+        parent_task_ids=(),
+        reason="no_analysis_children",
+    )
+
+
 # hgfinance-batch-delegation-materializer-v1
 _DELEGATION_INSTRUCTION_PREFIX = "delegation_instruction."
 _ANALYSIS_EXECUTION_MODES = frozenset(
@@ -813,9 +835,52 @@ def _initial_primary_materialization_decisions(
         )
         return ()
 
+    blocked_profiles = tuple(
+        profile
+        for profile in state.missing_primary_profiles
+        if profile in PRIMARY_MATERIALIZATION_BLOCKED_PROFILES
+    )
+    selected_profiles = set(state.selected_primary_profiles)
+    blocked_profile_set = set(blocked_profiles)
+    if blocked_profiles and selected_profiles.issubset(blocked_profile_set):
+        # A durable supervisor-created control child is the existing
+        # REQUEST_USER_INPUT idempotency record. Do not recreate or re-log the
+        # same clarification during the done-root recovery window.
+        if state.has_action(SupervisorAction.REQUEST_USER_INPUT):
+            return ()
+        for profile in blocked_profiles:
+            logger.warning(
+                "invalid-primary-selection root=%s profile=%s "
+                "reason=ROLE_NOT_PRIMARY_ELIGIBLE",
+                state.parent_task_id,
+                profile,
+            )
+        return (_empty_primary_request_user_input_decision(state),)
+
+    # Mixed plans still materialize their valid profiles. Emit the invalid
+    # selection diagnostic only while a valid profile is still being
+    # materialized; once those children exist, recovery has durable evidence
+    # that the mixed plan was already handled.
+    if blocked_profiles and (
+        not state.analysis_children
+        or any(
+            profile not in blocked_profile_set
+            for profile in state.missing_primary_profiles
+        )
+    ):
+        for profile in blocked_profiles:
+            logger.warning(
+                "invalid-primary-selection root=%s profile=%s "
+                "reason=ROLE_NOT_PRIMARY_ELIGIBLE",
+                state.parent_task_id,
+                profile,
+            )
+
     decisions: list[SupervisorDecision] = []
 
     for profile in state.missing_primary_profiles:
+        if profile in PRIMARY_MATERIALIZATION_BLOCKED_PROFILES:
+            continue
         department = department_for_canonical_profile(profile)
 
         decisions.append(
@@ -999,15 +1064,7 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
                 state.parent_task_id,
             )
             return None
-        return SupervisorDecision(
-            SupervisorAction.REQUEST_USER_INPUT,
-            state.parent_task_id,
-            assignee=canonical_profile_for_department("ceo"),
-            title="CEO planner produced no executable child task",
-            body=f"{SUPERVISOR_MARKER} action=REQUEST_USER_INPUT no_analysis_children",
-            parent_task_ids=(),
-            reason="no_analysis_children",
-        )
+        return _empty_primary_request_user_input_decision(state)
 
     if state.missing_primary_profiles:
         logger.info(
@@ -1072,6 +1129,21 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
 
     if state.workflow_mode == "analysis":
         if state.qa_required and not state.qa_children:
+            usable_primary_count = len(state.usable_analysis_children)
+            all_primary_blocked = bool(state.analysis_children) and all(
+                child.blocked for child in state.analysis_children
+            )
+            if usable_primary_count == 0 and all_primary_blocked:
+                logger.info(
+                    "qa-readiness root=%s usable_primary_results=0 "
+                    "blocked_primary_results=%d qa_skip_reason=all_primary_blocked",
+                    state.parent_task_id,
+                    len(state.analysis_children),
+                )
+                # There is no analysis body for QA to audit. Preserve the
+                # existing analysis synthesis path, which already carries the
+                # blocked primary summaries to the CEO failure-aware result.
+                return _analysis_synthesis_decision(state)
             return SupervisorDecision(
                 SupervisorAction.RUN_QA,
                 state.parent_task_id,
@@ -2359,6 +2431,37 @@ DEPARTMENT_DISCORD_LABELS: dict[str, tuple[str, str]] = {
     "qa-department": ("✅", "QA 부서"),
 }
 
+DEPARTMENT_ANALYSIS_LABELS: dict[str, str] = {
+    "research-department": "요청된 투자 판단 근거 조사",
+    "quant-backtest-department": "요청된 정량·시장 신호 분석",
+    "risk-management": "요청된 투자 리스크 분석",
+}
+
+
+def _department_analysis_label(profile: str) -> str:
+    return DEPARTMENT_ANALYSIS_LABELS.get(profile, "요청된 부서 분석")
+
+
+def _failure_category_for_department_card(*texts: str) -> str:
+    """Return a safe user-facing provider category, never raw error text."""
+
+    if not any(str(text or "").strip() for text in texts):
+        return ""
+
+    verdict = classify_failure(*texts)
+    if verdict.kind is FailureKind.CAPACITY:
+        return "PROVIDER_QUOTA"
+    if verdict.kind is FailureKind.CREDENTIALS:
+        return "PROVIDER_AUTH"
+    return "PROVIDER_OTHER"
+
+
+def _safe_failure_reason(category: str) -> str:
+    return {
+        "PROVIDER_QUOTA": "provider 사용량·쿼터 제한으로 분석을 완료하지 못했습니다.",
+        "PROVIDER_AUTH": "provider 인증 문제로 분석을 완료하지 못했습니다.",
+    }.get(category, "외부 분석 provider 문제로 결과를 완료하지 못했습니다.")
+
 
 def _task_timestamp_ms(task: Mapping[str, Any], field: str) -> int:
     try:
@@ -2379,8 +2482,10 @@ def _department_progress_text(
     kind: str,
     *,
     summary: str = "",
+    analysis_result: str = "",
     missing_dependencies: Sequence[str] = (),
     failure_kind: str = "",
+    failure_category: str = "",
 ) -> str | None:
     icon, label = DEPARTMENT_DISCORD_LABELS.get(
         profile,
@@ -2424,6 +2529,36 @@ def _department_progress_text(
         return f"{icon} **{label}**\n분석을 완료했습니다."
 
     if (
+        normalized
+        in {
+            "blocked",
+            "failed",
+            "error",
+            "gave_up",
+            "crashed",
+            "timed_out",
+            "spawn_failed",
+        }
+        and str(analysis_result or "").strip()
+        and failure_kind != FailureKind.PROTOCOL.value
+    ):
+        result_text = str(analysis_result).strip()
+        if len(result_text) > 450:
+            result_text = result_text[:447].rstrip() + "..."
+        quoted = "\n".join(
+            f"> {line}" if line.strip() else ">"
+            for line in result_text.splitlines()
+        )
+        return (
+            f"{icon} **{label}**\n"
+            "⚠️ **제한된 결과**\n\n"
+            "**확보한 분석**\n"
+            f"{quoted}\n\n"
+            "**미확보**\n"
+            f"- {_department_analysis_label(profile)}"
+        )
+
+    if (
         normalized == "blocked"
         and missing_dependencies
         and failure_kind != FailureKind.PROTOCOL.value
@@ -2455,7 +2590,13 @@ def _department_progress_text(
         if str(summary or "").strip():
             return (
                 f"{icon} **{label}**\n"
-                "⚠️ 제한된 결과만 확보됐습니다. CEO 종합에서 누락 범위를 밝힙니다."
+                "⚠️ **분석을 완료하지 못했습니다.**\n\n"
+                "**원인**\n"
+                f"- {_safe_failure_reason(failure_category)}\n\n"
+                "**확보한 분석**\n"
+                "- 없음\n\n"
+                "**미확보**\n"
+                f"- {_department_analysis_label(profile)}"
             )
         return (
             f"{icon} **{label}**\n"
@@ -2534,6 +2675,92 @@ class CeoSupervisorService:
     def _parent_lock(self, parent_task_id: str) -> threading.Lock:
         with self._parent_locks_lock:
             return self._parent_locks.setdefault(parent_task_id, threading.Lock())
+
+    @staticmethod
+    def _synthesis_availability(state: SupervisorState) -> str:
+        """Return bounded synthesis availability metadata for timing logs."""
+
+        if state.workflow_mode != "analysis":
+            return "binding"
+        selected_count = len(state.selected_primary_profiles) or len(
+            state.analysis_children
+        )
+        if selected_count <= 0:
+            return "unknown"
+        usable_count = len(state.usable_analysis_children)
+        if usable_count >= selected_count:
+            return "complete"
+        if usable_count > 0:
+            return "partial"
+        return "blocked"
+
+    @staticmethod
+    def _log_synthesis_timing(
+        timing: Mapping[str, Any],
+        *,
+        success: bool,
+    ) -> None:
+        """Emit bounded T0-T8 timing data without payload/body content."""
+
+        def wall_duration(start: str, end: str) -> int:
+            started = int(timing.get(start) or 0)
+            finished = int(timing.get(end) or 0)
+            if started <= 0 or finished < started:
+                return -1
+            return finished - started
+
+        def monotonic_duration(start: str, end: str) -> int:
+            started = int(timing.get(start) or 0)
+            finished = int(timing.get(end) or 0)
+            if started <= 0 or finished < started:
+                return -1
+            return (finished - started) // 1_000_000
+
+        logger.info(
+            "supervisor-synthesis-timing request_id=%s root_id=%s "
+            "source_task_id=%s event_id=%s synthesis_task_id=%s "
+            "workflow_mode=%s primary_departments=%s availability=%s "
+            "partial=%s success=%s "
+            "t0_ms=%d t1_ms=%d t2_ms=%d t3_ms=%d t4_ms=%d t5_ms=%d "
+            "t6_ms=%d t7a_ms=%d t7b_ms=%d t7c_ms=%d t8_ms=%d "
+            "t0_t1_ms=%d t1_t2_ms=%d t2_t3_ms=%d t3_t4_ms=%d "
+            "t4_t5_ms=%d t5_t6_ms=%d t6_t7a_ms=%d t7a_t7b_ms=%d "
+            "t7b_t7c_ms=%d t7c_t8_ms=%d t0_t8_ms=%d "
+            "task_created_at_ms=%d",
+            str(timing.get("request_id") or ""),
+            str(timing.get("root_id") or ""),
+            str(timing.get("source_task_id") or ""),
+            str(timing.get("event_id") or ""),
+            str(timing.get("synthesis_task_id") or ""),
+            str(timing.get("workflow_mode") or "unknown"),
+            str(timing.get("primary_departments") or ""),
+            str(timing.get("availability") or "unknown"),
+            str(bool(timing.get("partial"))).lower(),
+            str(bool(success)).lower(),
+            int(timing.get("t0_ms") or 0),
+            int(timing.get("t1_ms") or 0),
+            int(timing.get("t2_ms") or 0),
+            int(timing.get("t3_ms") or 0),
+            int(timing.get("t4_ms") or 0),
+            int(timing.get("t5_ms") or 0),
+            int(timing.get("t6_ms") or 0),
+            int(timing.get("t7a_ms") or 0),
+            int(timing.get("t7b_ms") or 0),
+            int(timing.get("t7c_ms") or 0),
+            int(timing.get("t8_ms") or 0),
+            wall_duration("t0_ms", "t1_ms"),
+            wall_duration("t1_ms", "t2_ms"),
+            wall_duration("t2_ms", "t3_ms"),
+            monotonic_duration("t3_mono_ns", "t4_mono_ns"),
+            monotonic_duration("t4_mono_ns", "t5_mono_ns"),
+            monotonic_duration("t5_mono_ns", "t6_mono_ns"),
+            monotonic_duration("t6_mono_ns", "t7a_mono_ns"),
+            monotonic_duration("t7a_mono_ns", "t7b_mono_ns"),
+            monotonic_duration("t7b_mono_ns", "t7c_mono_ns"),
+            monotonic_duration("t7c_mono_ns", "t8_mono_ns"),
+            wall_duration("t0_ms", "t8_ms"),
+            int(timing.get("task_created_at_ms") or 0),
+        )
 
     @staticmethod
     def _wakeup_comments(root_payload: Mapping[str, Any]) -> dict[str, str]:
@@ -3183,18 +3410,22 @@ class CeoSupervisorService:
             or ""
         ).casefold()
 
-        department_result = (
-            child.final_answer
-            or child.result
-            or child.summary
+        analysis_result = str(child.final_answer or child.result or "").strip()
+        department_result = analysis_result or child.summary
+        failure_category = _failure_category_for_department_card(
+            child.summary,
+            child.error,
+            child.block_reason,
         )
 
         content = _department_progress_text(
             child.profile,
             kind,
             summary=department_result,
+            analysis_result=analysis_result,
             missing_dependencies=child.missing_dependencies,
             failure_kind=child.failure_kind,
+            failure_category=failure_category,
         )
         if not content:
             return None
@@ -3464,6 +3695,44 @@ class CeoSupervisorService:
 
                 if not decisions:
                     continue
+
+                if any(
+                    decision.action != SupervisorAction.CREATE_TASK
+                    for decision in decisions
+                ):
+                    for decision in decisions:
+                        self._execute(decision, state)
+                    materialized.extend(decisions)
+                    logger.info(
+                        "empty-primary-clarification-materialized "
+                        "root=%s action=%s",
+                        root_id,
+                        decisions[0].action.value,
+                    )
+                    continue
+
+                # Publish the CEO-authored delegation card before any primary
+                # task can claim and project its own department card.  The
+                # durable Discord idempotency key keeps recovery/replay safe.
+                try:
+                    bridge_status = self._bridge_root_completion_to_discord(
+                        root_task_id=root_id,
+                        root_payload=root_payload,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "ceo-root-discord-bridge-failed root=%s error=%s",
+                        root_id,
+                        type(exc).__name__,
+                    )
+                    bridge_status = "failed"
+
+                logger.info(
+                    "root-planning-complete-projected-before-primary-create "
+                    "root=%s status=%s",
+                    root_id,
+                    bridge_status,
+                )
 
                 # hgfinance-parallel-primary-fanout-v1
                 #
@@ -3754,7 +4023,6 @@ class CeoSupervisorService:
             return False, None
 
         root_payload = show(task_id)
-        self._remember_workflow_root(task_id, task_id, (root_payload,))
         root_body = str(root_payload.get("body") or "")
 
         is_planning_root = (
@@ -3771,6 +4039,13 @@ class CeoSupervisorService:
             or workflow_mode_from_body(root_body) != "analysis"
         ):
             return False, None
+
+        # Only a confirmed planning root may seed the root cache with itself.
+        # A CEO-assigned synthesis task also reaches this fast path by
+        # assignee, but it is a child of the planning root. Caching that child
+        # as its own root poisons the next authoritative reconciliation and
+        # sends it through the legacy full-board/abort path.
+        self._remember_workflow_root(task_id, task_id, (root_payload,))
 
         selected_profiles = selected_primary_profiles_from_task(root_payload)
         materialization_body = _materialization_plan_body(root_payload)
@@ -3823,6 +4098,42 @@ class CeoSupervisorService:
             # authoritative recovery/workflow path rather than being swallowed.
             return False, None
 
+        if any(
+            decision.action != SupervisorAction.CREATE_TASK
+            for decision in decisions
+        ):
+            for decision in decisions:
+                self._execute(decision, state)
+            logger.info(
+                "empty-primary-clarification-materialized "
+                "root=%s action=%s",
+                task_id,
+                decisions[0].action.value,
+            )
+            return True, decisions[0]
+
+        # Commit the CEO delegation projection before the first primary create.
+        # The existing idempotency store owns replay/recovery deduplication.
+        try:
+            bridge_status = self._bridge_root_completion_to_discord(
+                root_task_id=task_id,
+                root_payload=root_payload,
+            )
+        except Exception as exc:
+            logger.warning(
+                "ceo-root-discord-bridge-failed root=%s error=%s",
+                task_id,
+                type(exc).__name__,
+            )
+            bridge_status = "failed"
+
+        logger.info(
+            "root-planning-complete-fast-projected-before-primary-create "
+            "root=%s status=%s",
+            task_id,
+            bridge_status,
+        )
+
         if len(decisions) == 1:
             self._execute(decisions[0], state)
         else:
@@ -3851,21 +4162,8 @@ class CeoSupervisorService:
             ",".join(decision.assignee or "" for decision in decisions),
         )
 
-        try:
-            bridge_status = self._bridge_root_completion_to_discord(
-                root_task_id=task_id,
-                root_payload=root_payload,
-            )
-        except Exception as exc:
-            logger.warning(
-                "ceo-root-discord-bridge-failed root=%s error=%s",
-                task_id,
-                type(exc).__name__,
-            )
-            bridge_status = "failed"
-
         logger.info(
-            "root-planning-complete-fast-projected root=%s status=%s",
+            "root-planning-complete-fast-primary-created root=%s status=%s",
             task_id,
             bridge_status,
         )
@@ -4036,6 +4334,7 @@ class CeoSupervisorService:
 
     def handle_terminal_event(self, event: Mapping[str, Any]) -> SupervisorDecision | None:
         handler_started_ms = time.time_ns() // 1_000_000
+        handler_started_mono_ns = time.perf_counter_ns()
         event_consumed_ms = int(
             event.get("_event_consumed_ms") or handler_started_ms
         )
@@ -4043,6 +4342,7 @@ class CeoSupervisorService:
         event_persisted_ms = int(
             event.get("_event_persisted_ms") or event_created_ms
         )
+        event_detected_ms = int(event.get("_event_detected_ms") or 0)
         task_id = str(event.get("task_id") or event.get("id") or "")
         kind = str(event.get("kind") or event.get("event_type") or event.get("status") or "").casefold()
         if not task_id:
@@ -4183,8 +4483,11 @@ class CeoSupervisorService:
                     )
 
             root_resolved_ms = time.time_ns() // 1_000_000
+            lock_started_ms = time.time_ns() // 1_000_000
+            lock_started_mono_ns = time.perf_counter_ns()
             with self._parent_lock(root_id):
                 lock_acquired_ms = time.time_ns() // 1_000_000
+                lock_acquired_mono_ns = time.perf_counter_ns()
                 # Keep one authoritative read after acquiring the workflow lock.
                 # The cache removes only redundant root discovery; it never
                 # replaces freshness-sensitive workflow reconstruction.
@@ -4214,6 +4517,26 @@ class CeoSupervisorService:
                 if not root_payload:
                     root_payload = show(root_id) if callable(show) else {}
                 workflow_ready_ms = time.time_ns() // 1_000_000
+                workflow_ready_mono_ns = time.perf_counter_ns()
+                synthesis_timing_base: dict[str, Any] = {
+                    "request_id": event.get("request_id"),
+                    "root_id": root_id,
+                    "source_task_id": task_id,
+                    "event_id": event_key,
+                    "t0_ms": event_persisted_ms,
+                    "t1_ms": event_detected_ms,
+                    "t2_ms": handler_started_ms,
+                    "t3_ms": lock_started_ms,
+                    "t4_ms": lock_acquired_ms,
+                    "t5_ms": workflow_ready_ms,
+                    "t3_mono_ns": lock_started_mono_ns,
+                    "t4_mono_ns": lock_acquired_mono_ns,
+                    "t5_mono_ns": workflow_ready_mono_ns,
+                    "workflow_mode": "unknown",
+                    "primary_departments": "",
+                    "availability": "unknown",
+                    "partial": False,
+                }
                 timing_task = next(
                     (
                         payload
@@ -4262,12 +4585,25 @@ class CeoSupervisorService:
                 def execute_timed(
                     action_decision: SupervisorDecision,
                     action_state: SupervisorState,
+                    *,
+                    synthesis_timing: dict[str, Any] | None = None,
                 ) -> None:
                     action_started_ms = time.time_ns() // 1_000_000
+                    action_started_mono_ns = time.perf_counter_ns()
+                    if synthesis_timing is not None:
+                        synthesis_timing["t7a_ms"] = action_started_ms
+                        synthesis_timing["t7a_mono_ns"] = action_started_mono_ns
+                    execution_succeeded = False
                     try:
-                        self._execute(action_decision, action_state)
+                        self._execute(
+                            action_decision,
+                            action_state,
+                            synthesis_timing=synthesis_timing,
+                        )
+                        execution_succeeded = True
                     finally:
                         action_completed_ms = time.time_ns() // 1_000_000
+                        action_completed_mono_ns = time.perf_counter_ns()
                         logger.info(
                             "supervisor-action-timing root=%s task=%s event=%s "
                             "action=%s workflow_ready=%d action_started=%d "
@@ -4283,6 +4619,13 @@ class CeoSupervisorService:
                             _elapsed_ms(workflow_ready_ms, action_started_ms),
                             _elapsed_ms(action_started_ms, action_completed_ms),
                         )
+                        if synthesis_timing is not None:
+                            synthesis_timing["t8_ms"] = action_completed_ms
+                            synthesis_timing["t8_mono_ns"] = action_completed_mono_ns
+                            self._log_synthesis_timing(
+                                synthesis_timing,
+                                success=execution_succeeded,
+                            )
                 # The root is a planning/scope task in the current contract. Its
                 # terminal transition means planning finished, not that the
                 # workflow is ready for synthesis. Primary child events are the
@@ -4554,6 +4897,32 @@ class CeoSupervisorService:
                     allow_primary_passthrough=self.discord_delivery is not None,
                 )
 
+                def new_synthesis_timing(
+                    action_state: SupervisorState,
+                    decision_completed_ms: int,
+                    decision_completed_mono_ns: int,
+                ) -> dict[str, Any]:
+                    availability = self._synthesis_availability(action_state)
+                    departments = sorted(
+                        {
+                            child.profile
+                            for child in action_state.analysis_children
+                            if child.profile
+                        }
+                    )
+                    timing = dict(synthesis_timing_base)
+                    timing.update(
+                        {
+                            "workflow_mode": action_state.workflow_mode,
+                            "primary_departments": ",".join(departments),
+                            "availability": availability,
+                            "partial": availability in {"partial", "blocked"},
+                            "t6_ms": decision_completed_ms,
+                            "t6_mono_ns": decision_completed_mono_ns,
+                        }
+                    )
+                    return timing
+
                 initial_primary_decisions = (
                     _initial_primary_materialization_decisions(
                         state,
@@ -4650,6 +5019,7 @@ class CeoSupervisorService:
 
                 decision_started_ms = time.time_ns() // 1_000_000
                 decision = self.decider(state)
+                decision_completed_mono_ns = time.perf_counter_ns()
                 decision_completed_ms = time.time_ns() // 1_000_000
                 if (
                     wakeups >= self.max_wakeups
@@ -4658,6 +5028,8 @@ class CeoSupervisorService:
                     )
                 ):
                     decision = self.decider(replace(state, wakeups=wakeups))
+                    decision_completed_mono_ns = time.perf_counter_ns()
+                    decision_completed_ms = time.time_ns() // 1_000_000
                 if state.primary_ready:
                     logger.info(
                         "primary-ready root=%s selected=%d ready=%d",
@@ -4681,6 +5053,16 @@ class CeoSupervisorService:
                     # watch loop acknowledged the event.
                     decision = None
                     action = "NONE"
+                synthesis_timing = (
+                    new_synthesis_timing(
+                        state,
+                        decision_completed_ms,
+                        decision_completed_mono_ns,
+                    )
+                    if decision is not None
+                    and decision.action == SupervisorAction.SYNTHESIZE
+                    else None
+                )
                 budget_consumed = self._consumes_wakeup_budget(
                     decision.action if decision is not None else None
                 )
@@ -4748,7 +5130,11 @@ class CeoSupervisorService:
                 if action_already_executed:
                     project_terminal_observers()
                     return None
-                execute_timed(decision, state)
+                execute_timed(
+                    decision,
+                    state,
+                    synthesis_timing=synthesis_timing,
+                )
                 if (
                     decision.action == SupervisorAction.RUN_QA
                     and state.workflow_mode == "analysis"
@@ -4846,7 +5232,16 @@ class CeoSupervisorService:
                             synthesis is not None
                             and synthesis.action == SupervisorAction.SYNTHESIZE
                         ):
-                            execute_timed(synthesis, state)
+                            synthesis_timing = new_synthesis_timing(
+                                state,
+                                time.time_ns() // 1_000_000,
+                                time.perf_counter_ns(),
+                            )
+                            execute_timed(
+                                synthesis,
+                                state,
+                                synthesis_timing=synthesis_timing,
+                            )
                             action = f"{action},SYNTHESIZE"
                 if decision.action == SupervisorAction.CREATE_TASK:
                     self._replans[root_id] = self._replans.get(root_id, 0) + 1
@@ -4918,7 +5313,13 @@ class CeoSupervisorService:
             return value.casefold() == "true"
         raise SupervisorValidationError("qa_required must be a boolean")
 
-    def _execute(self, decision: SupervisorDecision, state: SupervisorState) -> None:
+    def _execute(
+        self,
+        decision: SupervisorDecision,
+        state: SupervisorState,
+        *,
+        synthesis_timing: dict[str, Any] | None = None,
+    ) -> None:
         allowed_parent_ids = {state.parent_task_id} | {
             child.task_id for child in state.children
         }
@@ -5038,6 +5439,9 @@ class CeoSupervisorService:
                     else ""
                 )
             )
+            if synthesis_timing is not None and role == "synthesis":
+                synthesis_timing["t7b_ms"] = time.time_ns() // 1_000_000
+                synthesis_timing["t7b_mono_ns"] = time.perf_counter_ns()
             created = self.client.create_task(
                 title=decision.title,
                 body=build_scoped_task_body(
@@ -5051,6 +5455,20 @@ class CeoSupervisorService:
                 parent_task_ids=decision.parent_task_ids,
                 idempotency_key=idempotency_key,
             )
+            if synthesis_timing is not None and role == "synthesis":
+                synthesis_timing["t7c_ms"] = time.time_ns() // 1_000_000
+                synthesis_timing["t7c_mono_ns"] = time.perf_counter_ns()
+                if isinstance(created, Mapping):
+                    created_task = created.get("task", created)
+                    if isinstance(created_task, Mapping):
+                        synthesis_timing["synthesis_task_id"] = (
+                            created_task.get("id")
+                            or created_task.get("task_id")
+                        )
+                        synthesis_timing["task_created_at_ms"] = _task_timestamp_ms(
+                            created_task,
+                            "created_at",
+                        )
             if role == "primary":
                 logger.info(
                     "primary-create root=%s assignee=%s producer=ceo-supervisor dedup_key=%s created=%s",

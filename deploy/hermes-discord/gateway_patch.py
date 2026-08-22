@@ -26,6 +26,20 @@ from orchestration.discord_idempotency import (
 
 logger = logging.getLogger(__name__)
 _INSTALL_MARKER = "_hgfinance_discord_idempotency_installed"
+_PREFILTER_DROP_REASONS = frozenset(
+    {
+        "BOT_AUTHOR",
+        "SELF_MESSAGE",
+        "WEBHOOK",
+        "UNSUPPORTED_MESSAGE_TYPE",
+        "CHANNEL_POLICY",
+        "THREAD_POLICY",
+        "MENTION_POLICY",
+        "EMPTY_OR_UNSUPPORTED",
+        "DEDUP",
+        "OTHER",
+    }
+)
 
 
 def _profile_name() -> str:
@@ -107,6 +121,196 @@ def _log_event(
     logger.info("discord_gateway_event %s", safe_json_log_fields(**fields))
 
 
+def _safe_message_type(message: Any) -> str:
+    message_type = getattr(message, "type", None)
+    name = getattr(message_type, "name", None)
+    if name:
+        return str(name)
+    value = getattr(message_type, "value", None)
+    if value is not None:
+        return str(value)
+    return "unknown"
+
+
+def _safe_is_webhook(message: Any) -> bool:
+    try:
+        return bool(getattr(message, "webhook_id", None))
+    except Exception:  # pragma: no cover - defensive against Discord objects
+        return False
+
+
+def _safe_has_bot_mention(adapter: Any, message: Any) -> bool:
+    checker = getattr(adapter, "_self_is_raw_mentioned", None)
+    if not callable(checker):
+        return False
+    try:
+        return bool(checker(message))
+    except Exception:  # pragma: no cover - telemetry must never affect ingress
+        return False
+
+
+def _raw_message_fields(adapter: Any, message: Any) -> dict[str, Any]:
+    context = _message_context(message, adapter)
+    channel = getattr(message, "channel", None)
+    parent_id = getattr(channel, "parent_id", None)
+    if parent_id is None:
+        parent = getattr(channel, "parent", None)
+        parent_id = getattr(parent, "id", None)
+    author = getattr(message, "author", None)
+    is_webhook = _safe_is_webhook(message)
+    is_bot = bool(getattr(author, "bot", False)) if author is not None else False
+    if is_webhook:
+        author_kind = "webhook"
+    elif author is None:
+        author_kind = "unknown"
+    elif is_bot:
+        author_kind = "bot"
+    else:
+        author_kind = "human"
+    return {
+        "message_id": str(getattr(message, "id", "") or "unknown"),
+        "guild_id": context.get("guild_id"),
+        "channel_id": context.get("channel_id"),
+        # For a thread this is its parent; for a parent/DM it is the current
+        # channel.  The current channel remains in channel_id above.
+        "thread_or_parent_id": str(parent_id or context.get("channel_id") or "unknown"),
+        "author_kind": author_kind,
+        "message_type": _safe_message_type(message),
+        "is_bot": is_bot,
+        "is_webhook": is_webhook,
+        "has_bot_mention": _safe_has_bot_mention(adapter, message),
+    }
+
+
+def _log_raw_message(adapter: Any, message: Any) -> None:
+    try:
+        logger.info(
+            "discord-raw-message %s",
+            safe_json_log_fields(**_raw_message_fields(adapter, message)),
+        )
+    except Exception:  # pragma: no cover - logging must not affect ingress
+        logger.debug("discord raw-message telemetry failed", exc_info=True)
+
+
+def _log_pre_filter_drop(
+    adapter: Any,
+    message: Any,
+    *,
+    stage: str,
+    reason: str,
+) -> None:
+    try:
+        if reason not in _PREFILTER_DROP_REASONS:
+            reason = "OTHER"
+        context = _message_context(message, adapter)
+        logger.info(
+            "discord-pre-filter-drop %s",
+            safe_json_log_fields(
+                message_id=str(getattr(message, "id", "") or "unknown"),
+                stage=stage,
+                reason=reason,
+                guild_id=context.get("guild_id"),
+                channel_id=context.get("channel_id"),
+            ),
+        )
+    except Exception:  # pragma: no cover - logging must not affect ingress
+        logger.debug("discord pre-filter telemetry failed", exc_info=True)
+
+
+def _admission_drop_reason(adapter: Any, message: Any, *, claim: bool) -> str:
+    """Best-effort reason label for a false admission result.
+
+    Hermes remains the sole owner of admission semantics.  This function only
+    inspects the same stable metadata/configuration after Hermes has decided to
+    reject the message; it never makes the admission decision itself.
+    """
+
+    message_id = str(getattr(message, "id", "") or "")
+    dedup = getattr(adapter, "_dedup", None)
+    contains = getattr(dedup, "contains", None)
+    if message_id and callable(contains):
+        try:
+            if bool(contains(message_id)):
+                return "DEDUP"
+        except Exception:
+            pass
+
+    client = getattr(adapter, "_client", None)
+    author = getattr(message, "author", None)
+    client_user = getattr(client, "user", None)
+    if author is not None and client_user is not None and author == client_user:
+        return "SELF_MESSAGE"
+
+    message_type = _safe_message_type(message).casefold()
+    if message_type not in {"unknown", "default", "reply"}:
+        return "UNSUPPORTED_MESSAGE_TYPE"
+
+    if _safe_is_webhook(message):
+        return "WEBHOOK"
+
+    if bool(getattr(author, "bot", False)):
+        try:
+            allow_bots = str(adapter._get_allow_bots()).strip().lower()
+        except Exception:
+            allow_bots = "none"
+        if allow_bots == "none":
+            return "BOT_AUTHOR"
+        try:
+            explicit_mention = bool(adapter._self_is_explicitly_mentioned(message))
+        except Exception:
+            explicit_mention = False
+        if allow_bots == "mentions" and not explicit_mention:
+            return "MENTION_POLICY"
+        try:
+            if adapter._discord_bots_require_inline_mention() and not _safe_has_bot_mention(
+                adapter, message
+            ):
+                return "MENTION_POLICY"
+        except Exception:
+            pass
+        return "OTHER"
+
+    # Avoid re-running the potentially role-aware user check on the hot path.
+    # When no user/role allowlist or open-mode flag is present, a false human
+    # admission is the channel-scoped policy branch in Hermes.  Other policy
+    # failures remain deliberately generic rather than guessing.
+    try:
+        has_user_or_role_policy = bool(
+            getattr(adapter, "_allowed_user_ids", set())
+            or getattr(adapter, "_allowed_role_ids", set())
+        )
+        open_mode = bool(
+            adapter._discord_allow_all_users() or adapter._gateway_allow_all_users()
+        )
+        if not has_user_or_role_policy and not open_mode:
+            return "CHANNEL_POLICY"
+    except Exception:
+        pass
+
+    raw_self_mention = False
+    try:
+        raw_self_mention = bool(adapter._self_is_explicitly_mentioned(message))
+    except Exception:
+        pass
+    mentions = getattr(message, "mentions", None) or ()
+    if raw_self_mention or mentions:
+        return "MENTION_POLICY"
+    try:
+        ignore_no_mention = os.getenv("DISCORD_IGNORE_NO_MENTION", "true").lower() in {
+            "true",
+            "1",
+            "yes",
+        }
+        if ignore_no_mention and not _safe_has_bot_mention(adapter, message):
+            free_channels = adapter._discord_free_response_channels()
+            channel_keys = adapter._discord_channel_keys(message)
+            if "*" not in free_channels and not (channel_keys & free_channels):
+                return "MENTION_POLICY"
+    except Exception:
+        pass
+    return "OTHER"
+
+
 def _store(adapter: Any) -> DiscordIdempotencyStore:
     store = getattr(adapter, "_hgfinance_idempotency", None)
     if store is None:
@@ -147,6 +351,21 @@ def _wrap_init(cls: type[Any]) -> None:
     cls.__init__ = wrapped
 
 
+def _wrap_dispatch(cls: type[Any]) -> None:
+    """Log the live Discord callback before any admission policy runs."""
+
+    if not hasattr(cls, "_dispatch_discord_message"):
+        return
+    original = cls._dispatch_discord_message
+
+    @functools.wraps(original)
+    async def wrapped(self: Any, message: Any, *args: Any, **kwargs: Any) -> Any:
+        _log_raw_message(self, message)
+        return await original(self, message, *args, **kwargs)
+
+    cls._dispatch_discord_message = wrapped
+
+
 def _wrap_admission(cls: type[Any]) -> None:
     original = cls._discord_message_admission
 
@@ -158,6 +377,12 @@ def _wrap_admission(cls: type[Any]) -> None:
             context["guild_id"], context["channel_id"], message_id
         )
         if bool(kwargs.get("claim", False)) and message_id and self._dedup.contains(message_id):
+            _log_pre_filter_drop(
+                self,
+                message,
+                stage="admission",
+                reason="DEDUP",
+            )
             _log_event(
                 self,
                 message_id=message_id,
@@ -169,6 +394,16 @@ def _wrap_admission(cls: type[Any]) -> None:
             return False, False
         admitted, role_authorized = original(self, message, *args, **kwargs)
         if not admitted:
+            _log_pre_filter_drop(
+                self,
+                message,
+                stage="admission",
+                reason=_admission_drop_reason(
+                    self,
+                    message,
+                    claim=bool(kwargs.get("claim", False)),
+                ),
+            )
             return admitted, role_authorized
 
         claim = bool(kwargs.get("claim", False))
@@ -180,10 +415,22 @@ def _wrap_admission(cls: type[Any]) -> None:
             # idempotency claim.  Do not change permission/mention policy.
             if message_id:
                 self._dedup.discard(message_id)
+            _log_pre_filter_drop(
+                self,
+                message,
+                stage="idempotency",
+                reason="OTHER",
+            )
             logger.error("discord_gateway_event idempotency_unavailable error_type=%s", type(exc).__name__)
             return False, False
 
         if not result.admitted:
+            _log_pre_filter_drop(
+                self,
+                message,
+                stage="idempotency",
+                reason="DEDUP",
+            )
             _log_event(
                 self,
                 message_id=message_id,
@@ -799,6 +1046,7 @@ def install(cls: type[Any]) -> None:
     if getattr(cls, _INSTALL_MARKER, False):
         return
     _wrap_init(cls)
+    _wrap_dispatch(cls)
     _wrap_admission(cls)
     _wrap_handle_message(cls)
     _wrap_processing_complete(cls)

@@ -13,11 +13,15 @@ open and the native retry behaviour remains in charge.
 from __future__ import annotations
 
 import json
+import importlib
 import logging
 import os
+import shutil
+import sys
 import threading
 import time
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 LOG = logging.getLogger(__name__)
@@ -62,6 +66,7 @@ _HARD_QUOTA_MARKERS = (
     "exceeded your current quota",
     "out of extra usage",
     "account is deactivated",
+    "usage limit has been reached",
     "spending limit",
     "spend cap exceeded",
 )
@@ -273,8 +278,48 @@ def _error_details(error: Any, classifier: Any, classified: Any) -> tuple[Any, s
     return status, _normalise(code), message, body
 
 
+def _import_hermes_module(name: str) -> Any:
+    """Import an upstream Hermes module from the dispatcher bootstrap path.
+
+    ``sitecustomize`` runs before the Hermes CLI entry point.  In the
+    production image ``hermes_cli`` is importable at that point, while the
+    sibling ``agent``/``run_agent`` modules become discoverable only after the
+    Hermes package root has been resolved.  The old direct imports therefore
+    made the optional fail-fast policy silently fail open on every dispatcher
+    start.  Reuse the installed Hermes package location; do not create a
+    second reader/runtime or hard-code an installation path.
+    """
+    try:
+        return importlib.import_module(name)
+    except ModuleNotFoundError as exc:
+        top_level = name.split(".", 1)[0]
+        if exc.name != top_level:
+            raise
+
+    roots: list[Path] = []
+    web_dist = os.environ.get("HERMES_WEB_DIST", "").strip()
+    if web_dist:
+        roots.append(Path(web_dist).resolve().parent.parent)
+    hermes_bin = shutil.which("hermes")
+    if hermes_bin:
+        roots.append(Path(hermes_bin).resolve().parent.parent)
+    try:
+        hermes_cli = importlib.import_module("hermes_cli")
+    except ModuleNotFoundError:
+        hermes_cli = None
+    cli_file = getattr(hermes_cli, "__file__", None)
+    if cli_file:
+        roots.append(Path(cli_file).resolve().parent.parent)
+    for root in roots:
+        hermes_root = str(root)
+        if root.is_dir() and hermes_root not in sys.path:
+            sys.path.insert(0, hermes_root)
+    importlib.invalidate_caches()
+    return importlib.import_module(name)
+
+
 def _install_classifier() -> None:
-    import agent.error_classifier as classifier
+    classifier = _import_hermes_module("agent.error_classifier")
 
     original = getattr(classifier, "classify_api_error", None)
     if not callable(original) or getattr(original, "_hgfinance_provider_hook", False):
@@ -459,7 +504,8 @@ def _install_agent_hooks() -> None:
     # AIAgent lives in the Hermes repository root (``run_agent.py``), not in
     # the ``agent`` package. Keep this import lazy because the dispatcher
     # itself does not need to construct an agent.
-    from run_agent import AIAgent
+    run_agent = _import_hermes_module("run_agent")
+    AIAgent = run_agent.AIAgent
 
     if getattr(AIAgent.run_conversation, "_hgfinance_provider_hook", False):
         return

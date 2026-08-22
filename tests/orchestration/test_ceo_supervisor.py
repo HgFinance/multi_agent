@@ -13,6 +13,7 @@ from orchestration.adapters.ceo_supervisor import (
     HermesKanbanClient,
     HermesKanbanCommandError,
     SupervisorAction,
+    SupervisorDecision,
     SupervisorState,
     SupervisorValidationError,
     _analysis_synthesis_decision,
@@ -225,6 +226,52 @@ class SupervisorPolicyTest(unittest.TestCase):
         self.assertIn("정상적으로 인계되지 않았", protocol)
         self.assertNotIn("의존성이 부족", protocol)
 
+    def test_provider_quota_blocked_without_result_is_not_labeled_partial(self) -> None:
+        content = _department_progress_text(
+            "research-department",
+            "blocked",
+            summary="PROVIDER_QUOTA internal detail must stay hidden",
+            failure_category="PROVIDER_QUOTA",
+        )
+
+        self.assertIsNotNone(content)
+        self.assertIn("분석을 완료하지 못했습니다", content)
+        self.assertIn("쿼터 제한", content)
+        self.assertIn("확보한 분석", content)
+        self.assertIn("없음", content)
+        self.assertNotIn("제한된 결과", content)
+        self.assertNotIn("internal detail", content)
+
+    def test_provider_auth_blocked_without_result_is_safe(self) -> None:
+        content = _department_progress_text(
+            "risk-management",
+            "blocked",
+            summary="PROVIDER_AUTH raw credential detail must stay hidden",
+            failure_category="PROVIDER_AUTH",
+        )
+
+        self.assertIsNotNone(content)
+        self.assertIn("인증 문제", content)
+        self.assertIn("확보한 분석", content)
+        self.assertIn("없음", content)
+        self.assertNotIn("제한된 결과", content)
+        self.assertNotIn("credential detail", content)
+
+    def test_blocked_partial_result_keeps_partial_body_and_label(self) -> None:
+        content = _department_progress_text(
+            "quant-backtest-department",
+            "blocked",
+            summary="PROVIDER_QUOTA",
+            analysis_result="partial trend evidence",
+            failure_category="PROVIDER_QUOTA",
+        )
+
+        self.assertIsNotNone(content)
+        self.assertIn("제한된 결과", content)
+        self.assertIn("partial trend evidence", content)
+        self.assertIn("미확보", content)
+        self.assertNotIn("분석을 완료하지 못했습니다", content)
+
     def test_analysis_synthesis_labels_partial_result_usability(self) -> None:
         usable = (
             "2026-08-20 기준 분석입니다. result body with citation=12345678 "
@@ -295,12 +342,20 @@ class SupervisorPolicyTest(unittest.TestCase):
                     "research-department",
                     "done",
                     body="workflow_role=primary",
+                    result=(
+                        "2026-08-22 analysis body citation=12345678 "
+                        "with stated limitations."
+                    ),
                 ),
                 child(
                     "accounting",
                     "accounting-portfolio-department",
                     "done",
                     body="workflow_role=primary",
+                    result=(
+                        "2026-08-22 accounting body citation=87654321 "
+                        "with stated limitations."
+                    ),
                 ),
             ),
         )
@@ -331,6 +386,77 @@ class SupervisorPolicyTest(unittest.TestCase):
         self.assertIn("QA runs independently", second.body)
         self.assertIn("not a synthesis prerequisite", second.body)
         self.assertNotIn("after QA", second.body.casefold())
+
+    def test_all_blocked_primary_results_skip_qa_and_synthesize_failure_aware(self) -> None:
+        state = SupervisorState(
+            "root",
+            (
+                child(
+                    "research",
+                    "research-department",
+                    "blocked",
+                    block_kind="capability",
+                    summary="PROVIDER_QUOTA",
+                    result="",
+                ),
+                child(
+                    "quant",
+                    "quant-backtest-department",
+                    "blocked",
+                    block_kind="capability",
+                    summary="PROVIDER_QUOTA",
+                    result="",
+                ),
+                child(
+                    "risk",
+                    "risk-management",
+                    "blocked",
+                    block_kind="capability",
+                    summary="PROVIDER_AUTH",
+                    result="",
+                ),
+            ),
+            selected_primary_profiles=(
+                "research-department",
+                "quant-backtest-department",
+                "risk-management",
+            ),
+            workflow_mode="analysis",
+            qa_required=True,
+        )
+
+        decision = decide_supervisor(state)
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
+        self.assertEqual(decision.reason, "primary_results_ready_fast_path")
+        self.assertEqual(decision.parent_task_ids, ())
+        self.assertIn("synthesis_availability=blocked", decision.body)
+
+    def test_non_root_synthesis_does_not_poison_root_cache(self) -> None:
+        class SynthesisClient:
+            def show(self, task_id: str):
+                return {
+                    "id": task_id,
+                    "assignee": "ceo-agent",
+                    "status": "done",
+                    "body": (
+                        "workflow_root_task_id=root\n"
+                        "workflow_role=synthesis\n"
+                        "workflow_mode=analysis\n"
+                    ),
+                }
+
+        service = CeoSupervisorService(SynthesisClient())
+
+        handled, decision = service._materialize_completed_analysis_root_fast(
+            task_id="synthesis",
+            kind="completed",
+        )
+
+        self.assertFalse(handled)
+        self.assertIsNone(decision)
+        self.assertIsNone(service._cached_workflow_root("synthesis"))
 
     def test_replan_is_scope_bound_without_root_execution_dependency(self) -> None:
         client = FakeClient()
@@ -1018,6 +1144,55 @@ class FakeClient:
 
     def block_task(self, task_id: str, reason: str) -> None:
         self.blocked.append(task_id)
+
+
+class SynthesisTimingInstrumentationTest(unittest.TestCase):
+    def test_synthesis_timing_logs_create_boundary_without_payload(self) -> None:
+        client = FakeClient()
+        client.root_body = build_root_body("analysis", "request-1")
+        service = CeoSupervisorService(
+            client,
+            qa_required=False,
+            decider=lambda state: SupervisorDecision(
+                SupervisorAction.SYNTHESIZE,
+                state.parent_task_id,
+                assignee="ceo-agent",
+                title="CEO final synthesis",
+                body="synthesis body",
+                parent_task_ids=tuple(child.task_id for child in state.analysis_children),
+            ),
+        )
+        service._project_terminal_task = lambda **kwargs: None
+        service._deliver_department_progress = lambda **kwargs: None
+        service._reconcile_department_terminal_progress = lambda **kwargs: None
+
+        with self.assertLogs(
+            "orchestration.adapters.ceo_supervisor",
+            level="INFO",
+        ) as captured:
+            service.handle_terminal_event(
+                {
+                    "event_id": "synthesis-timing-1",
+                    "request_id": "request-1",
+                    "task_id": "r",
+                    "kind": "completed",
+                    "_event_persisted_ms": 1_000_000,
+                    "_event_detected_ms": 1_000_100,
+                    "_event_consumed_ms": 1_000_200,
+                }
+            )
+
+        timing = next(
+            line
+            for line in captured.output
+            if "supervisor-synthesis-timing" in line
+        )
+        self.assertIn("request_id=request-1", timing)
+        self.assertIn("root_id=root", timing)
+        self.assertIn("synthesis_task_id=new-1", timing)
+        self.assertIn("t7b_t7c_ms=", timing)
+        self.assertIn("t0_t8_ms=", timing)
+        self.assertNotIn("synthesis body", timing)
 
 
 class SupervisorWakeupTest(unittest.TestCase):
@@ -2289,6 +2464,80 @@ class ReadyPrimaryPlanRecoveryTest(unittest.TestCase):
         self.assertEqual(decisions, ())
         self.assertEqual(client.created, [])
 
+    def test_recovery_does_not_materialize_invalid_qa_primary(self) -> None:
+        """Replay/recovery must apply the same primary-role guard."""
+
+        import time
+
+        now = int(time.time())
+
+        class Client(FakeClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.root_body = ReadyPrimaryPlanRecoveryTest._root_body()
+                self.ceo_comment = {
+                    "id": 1003,
+                    "task_id": "root",
+                    "author": "ceo-agent",
+                    "body": (
+                        "selected_primary_profiles=qa-department\n"
+                        "analysis_mode=fast_advisory\n"
+                        "workflow_mode=analysis\n"
+                        "producer=ceo-hermes-direct\n"
+                        "qa_required=false\n"
+                        "delegation_instruction.qa-department=Audit the analysis.\n"
+                    ),
+                    "created_at": now - 5,
+                }
+
+            def list_tasks(self):
+                return (
+                    {
+                        "id": "root",
+                        "status": "done",
+                        "created_at": now - 20,
+                        "completed_at": now - 5,
+                        "body": self.root_body,
+                    },
+                )
+
+            def show(self, task_id: str):
+                if task_id == "root":
+                    return {
+                        "id": "root",
+                        "status": "done",
+                        "created_at": now - 20,
+                        "completed_at": now - 5,
+                        "body": self.root_body,
+                        "metadata": {
+                            "selected_primary_profiles": "qa-department",
+                        },
+                        "comments": [self.ceo_comment],
+                    }
+                return super().show(task_id)
+
+        client = Client()
+        service = CeoSupervisorService(client)
+
+        with self.assertLogs(
+            "orchestration.adapters.ceo_supervisor", level="WARNING"
+        ) as captured:
+            first = service.materialize_ready_primary_plans()
+            # A second recovery pass must not revive or re-log the invalid plan.
+            second = service.materialize_ready_primary_plans()
+
+        self.assertEqual(len(first), 1)
+        self.assertEqual(first[0].action, SupervisorAction.REQUEST_USER_INPUT)
+        self.assertEqual(len(client.created), 1)
+        self.assertEqual(client.created[0]["assignee"], "ceo-agent")
+        self.assertIn("workflow_role=control", client.created[0]["body"])
+        self.assertEqual(second, ())
+        self.assertEqual(len(client.created), 1)
+        self.assertEqual(
+            sum("invalid-primary-selection" in line for line in captured.output),
+            1,
+        )
+
 
 class InitialPrimaryMaterializationTest(unittest.TestCase):
     """CEO one-pass delegation plan -> deterministic primary materialization."""
@@ -2342,6 +2591,71 @@ class InitialPrimaryMaterializationTest(unittest.TestCase):
                 "analysis_mode=fast_advisory" in decision.body
                 for decision in decisions
             )
+        )
+
+    def test_qa_department_is_not_materialized_as_analysis_primary(self) -> None:
+        body = (
+            "origin=user-query\n"
+            "workflow_role=root\n"
+            "workflow_mode=analysis\n"
+            "analysis_mode=fast_advisory\n"
+            "selected_primary_profiles=qa-department\n"
+            "delegation_instruction.qa-department=Audit the requested analysis.\n"
+        )
+        state = SupervisorState(
+            parent_task_id="root",
+            children=(),
+            workflow_mode="analysis",
+            selected_primary_profiles=("qa-department",),
+            root_is_user_query=True,
+        )
+
+        with self.assertLogs(
+            "orchestration.adapters.ceo_supervisor", level="WARNING"
+        ) as captured:
+            decisions = _initial_primary_materialization_decisions(state, body)
+
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0].action, SupervisorAction.REQUEST_USER_INPUT)
+        self.assertEqual(decisions[0].assignee, "ceo-agent")
+        self.assertIn("action=REQUEST_USER_INPUT", decisions[0].body)
+        self.assertTrue(
+            any(
+                "invalid-primary-selection" in line
+                and "profile=qa-department" in line
+                and "ROLE_NOT_PRIMARY_ELIGIBLE" in line
+                for line in captured.output
+            )
+        )
+
+    def test_mixed_selection_skips_qa_but_keeps_valid_primaries(self) -> None:
+        body = (
+            "origin=user-query\n"
+            "workflow_role=root\n"
+            "workflow_mode=analysis\n"
+            "analysis_mode=fast_advisory\n"
+            "selected_primary_profiles=research-department,qa-department,risk-management\n"
+            "delegation_instruction.research-department=Assess the research evidence.\n"
+            "delegation_instruction.qa-department=Audit the requested analysis.\n"
+            "delegation_instruction.risk-management=Assess the downside risks.\n"
+        )
+        state = SupervisorState(
+            parent_task_id="root",
+            children=(),
+            workflow_mode="analysis",
+            selected_primary_profiles=(
+                "research-department",
+                "qa-department",
+                "risk-management",
+            ),
+            root_is_user_query=True,
+        )
+
+        decisions = _initial_primary_materialization_decisions(state, body)
+
+        self.assertEqual(
+            tuple(decision.assignee for decision in decisions),
+            ("research-department", "risk-management"),
         )
 
     def test_existing_primary_materializes_only_missing_profiles(self) -> None:
@@ -2409,6 +2723,7 @@ class InitialPrimaryMaterializationTest(unittest.TestCase):
             (),
         )
 
+
     def test_duplicate_primary_suppresses_materialization(self) -> None:
         first = child(
             "research-1",
@@ -2451,7 +2766,157 @@ class InitialPrimaryMaterializationTest(unittest.TestCase):
         )
 
 
+class DelegationProjectionOrderingTest(unittest.TestCase):
+    selected = (
+        "research-department",
+        "quant-backtest-department",
+        "risk-management",
+    )
 
+    @classmethod
+    def root_body(cls) -> str:
+        return (
+            "origin=user-query\n"
+            "workflow_role=root\n"
+            "workflow_mode=analysis\n"
+            "analysis_mode=fast_advisory\n"
+            "selected_primary_profiles="
+            + ",".join(cls.selected)
+            + "\n"
+            "delegation_instruction.research-department=Research plan\n"
+            "delegation_instruction.quant-backtest-department=Quant plan\n"
+            "delegation_instruction.risk-management=Risk plan\n"
+        )
+
+    def test_delegation_card_commits_before_primary_creation(self) -> None:
+        timeline: list[str] = []
+
+        class Client:
+            def __init__(self, home: str) -> None:
+                self.environment = {"HERMES_HOME": home}
+                self.created: list[dict[str, object]] = []
+
+            def show(self, task_id: str):
+                return {
+                    "id": task_id,
+                    "assignee": "ceo-agent",
+                    "status": "done",
+                    "body": self.root_body(),
+                }
+
+            def create_task(self, **kwargs):
+                timeline.append(f"child:{kwargs['assignee']}")
+                self.created.append(kwargs)
+                return {"id": f"child-{len(self.created)}"}
+
+            def root_body(self):
+                return DelegationProjectionOrderingTest.root_body()
+
+        class Delivery:
+            def __init__(self, home: str) -> None:
+                self.environment = {"HERMES_HOME": home}
+                self.calls = 0
+
+            def upsert_thread_card(self, **kwargs):
+                self.calls += 1
+                timeline.append("ceo-dispatch")
+                return "sent"
+
+        with tempfile.TemporaryDirectory() as home:
+            client = Client(home)
+            delivery = Delivery(home)
+            service = CeoSupervisorService(client, discord_delivery=delivery)
+
+            handled, decision = service._materialize_completed_analysis_root_fast(
+                task_id="root",
+                kind="completed",
+            )
+
+        self.assertTrue(handled)
+        self.assertIsNotNone(decision)
+        self.assertEqual(timeline[0], "ceo-dispatch")
+        self.assertCountEqual(
+            timeline[1:],
+            [
+                "child:research-department",
+                "child:quant-backtest-department",
+                "child:risk-management",
+            ],
+        )
+        self.assertEqual(delivery.calls, 1)
+
+    def test_delegation_failure_does_not_change_child_execution_policy(self) -> None:
+        timeline: list[str] = []
+
+        class Client:
+            environment = {"HERMES_HOME": "/tmp/ceo-ordering-failure"}
+
+            def show(self, task_id: str):
+                return {
+                    "id": task_id,
+                    "assignee": "ceo-agent",
+                    "status": "done",
+                    "body": DelegationProjectionOrderingTest.root_body(),
+                }
+
+            def create_task(self, **kwargs):
+                timeline.append(f"child:{kwargs['assignee']}")
+                return {"id": kwargs["assignee"]}
+
+        class FailingDelivery:
+            def upsert_thread_card(self, **kwargs):
+                timeline.append("ceo-dispatch-attempt")
+                raise RuntimeError("delivery failure")
+
+        service = CeoSupervisorService(Client(), discord_delivery=FailingDelivery())
+        handled, _ = service._materialize_completed_analysis_root_fast(
+            task_id="root",
+            kind="completed",
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(timeline[0], "ceo-dispatch-attempt")
+        self.assertEqual(len(timeline), 4)
+
+    def test_replayed_root_event_keeps_delegation_card_exactly_once(self) -> None:
+        timeline: list[str] = []
+
+        class Client:
+            environment = {"HERMES_HOME": "/tmp/ceo-ordering-replay"}
+
+            def __init__(self):
+                self.created = []
+
+            def show(self, task_id: str):
+                return {
+                    "id": task_id,
+                    "assignee": "ceo-agent",
+                    "status": "done",
+                    "body": DelegationProjectionOrderingTest.root_body(),
+                }
+
+            def create_task(self, **kwargs):
+                self.created.append(kwargs)
+                return {"id": f"child-{len(self.created)}"}
+
+        class Delivery:
+            def upsert_thread_card(self, **kwargs):
+                timeline.append("ceo-dispatch")
+                return "sent"
+
+        client = Client()
+        service = CeoSupervisorService(client, discord_delivery=Delivery())
+        event = {
+            "event_id": "root-replay",
+            "task_id": "root",
+            "assignee": "ceo-agent",
+            "kind": "completed",
+        }
+
+        service.handle_terminal_event(event)
+        service.handle_terminal_event(event)
+
+        self.assertEqual(timeline, ["ceo-dispatch"])
 
 class SupervisorWorkflowRootCacheTest(unittest.TestCase):
     """Hot-path root cache removes redundant workflow reconstruction."""

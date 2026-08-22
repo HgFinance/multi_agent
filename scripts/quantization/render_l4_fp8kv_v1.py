@@ -205,11 +205,14 @@ def render_table(variants: dict, gates: dict) -> str:
             if variant in ("FP8", "AWQ"): return f"{current['performance']['metrics']['C1']['latency_p50_s']:.3f}s p50"
             if variant == "AWQ+Reasoning": return f"{quality['reasoning_full_pipeline_latency_avg_s']:.3f}s avg"
             if variant == "AWQ+RAG": return f"{quality['avg_quality_latency_s']:.3f}s avg"
-        if metric == "memory": return f"{current['performance']['model_load_memory_gib']:.2f} GiB"
-        if metric == "kv": return f"{current['performance']['kv_cache_gib']:.2f} GiB"
+        if metric == "memory": return f"{current['performance']['model_load_memory_gib']:.2f} GiB" if "model_load_memory_gib" in current["performance"] else "N/A (quality-only)"
+        if metric == "kv": return f"{current['performance']['kv_cache_gib']:.2f} GiB" if "kv_cache_gib" in current["performance"] else "N/A (quality-only)"
         if metric == "concurrency": return "N/A (capacity not measured)"
-        if metric == "free": return f"{current['performance']['free_vram_mib']} MiB"
-        if metric == "startup": return f"PASS HTTP 200 (~{current['performance']['startup_model_load_s']:.1f}s load)" if variant in ("FP8", "AWQ") else "PASS HTTP 200 (AWQ endpoint reused)"
+        if metric == "free": return f"{current['performance']['free_vram_mib']} MiB" if "free_vram_mib" in current["performance"] else "N/A (quality-only)"
+        if metric == "startup":
+            if variant in ("FP8", "AWQ"):
+                return f"PASS HTTP 200 (~{current['performance']['startup_model_load_s']:.1f}s load)"
+            return "PASS HTTP 200 (adapter loaded)" if current["status"] == "MEASURED" else "HOLD"
         if metric == "gate": return "BASELINE" if variant == "FP8" else "HOLD: External Overall/manual or variant gate"
         return "N/A"
 
@@ -229,7 +232,7 @@ def render_table(variants: dict, gates: dict) -> str:
         lines.append("| " + " | ".join([label, *values, verdict]) + " |")
     lines.extend([
         "", "## Notes", "", "- External Overall is N/A because FinanceBench requires manual adjudication; Auto Mean is reported separately.",
-        "- AWQ+Finetune is HOLD because no exact AWQ-compatible adapter was present; no NF4 adapter was substituted.",
+        "- AWQ+Finetune is reported only when the exact AWQ adapter has passed save/reload; NF4 adapters are never substituted.",
         "- AWQ+RAG uses the final term-explicit glossary. The first body-wide-alias attempt was excluded for prompt contamination.",
         "- AWQ+Reasoning stores the AWQ draft separately and scores only successful gpt-4o-mini rewrites.",
         "- Port mapping was verified as `127.0.0.1:8000` only.",
@@ -239,7 +242,10 @@ def render_table(variants: dict, gates: dict) -> str:
 
 def main() -> int:
     variants = {variant: measured_variant(variant) for variant in ("FP8", "AWQ", "AWQ+Reasoning", "AWQ+RAG")}
-    variants["AWQ+Finetune"] = make_hold_variant()
+    if (DIRS["AWQ+Finetune"] / "internal50_score.json").exists() and (DIRS["AWQ+Finetune"] / "external50_score.json").exists():
+        variants["AWQ+Finetune"] = measured_variant("AWQ+Finetune")
+    else:
+        variants["AWQ+Finetune"] = make_hold_variant()
     variants["FP8"]["performance"].update({"metrics": load(DIRS["FP8"] / "performance.json")["results"], "model_load_memory_gib": 15.39, "kv_cache_gib": 1.53, "free_vram_mib": 1416, "startup_model_load_s": 126.15})
     variants["AWQ"]["performance"].update({"metrics": load(DIRS["AWQ"] / "performance.json")["results"], "model_load_memory_gib": 9.38, "kv_cache_gib": 8.90, "free_vram_mib": 1344, "startup_model_load_s": 79.93})
     for variant in ("AWQ+Reasoning", "AWQ+RAG"):

@@ -151,6 +151,8 @@ class DiscordGatewayPatchTests(unittest.TestCase):
                 "class DiscordAdapter:\n"
                 "    def _discord_message_admission(self):\n"
                 "        return True\n"
+                "    async def _dispatch_discord_message(self):\n"
+                "        return True\n"
                 "    async def send(self):\n"
                 "        return None\n",
                 encoding="utf-8",
@@ -408,3 +410,196 @@ class AsyncForwardToIngressTests(unittest.IsolatedAsyncioTestCase):
         finally:
             release.set()
             timer.cancel()
+
+
+class DiscordPreAcceptTelemetryTests(unittest.IsolatedAsyncioTestCase):
+    class _Author:
+        def __init__(self, *, bot: bool = False, author_id: str = "author-1") -> None:
+            self.bot = bot
+            self.id = author_id
+
+    class _Channel:
+        id = "channel-1"
+        parent_id = None
+
+    class _Guild:
+        id = "guild-1"
+
+    class _Message:
+        def __init__(self) -> None:
+            self.id = "message-1"
+            self.content = "private user content with token=should-not-be-logged"
+            self.type = None
+            self.mentions: list[object] = []
+            self.channel = DiscordPreAcceptTelemetryTests._Channel()
+            self.guild = DiscordPreAcceptTelemetryTests._Guild()
+            self.author = DiscordPreAcceptTelemetryTests._Author()
+
+    class _Dedup:
+        def __init__(self, *, contains: bool = False) -> None:
+            self._contains = contains
+
+        def contains(self, message_id: str) -> bool:  # noqa: ARG002
+            return self._contains
+
+        def discard(self, message_id: str) -> None:  # noqa: ARG002
+            return None
+
+    def _assert_log_contains(self, records: list[object], text: str) -> None:
+        self.assertTrue(any(text in str(record.getMessage()) for record in records))  # type: ignore[union-attr]
+
+    async def test_raw_callback_logs_metadata_and_accepted_correlation(self) -> None:
+        class Adapter:
+            def __init__(self) -> None:
+                self._dedup = DiscordPreAcceptTelemetryTests._Dedup()
+                self._client = type("Client", (), {"user": object()})()
+
+            def _self_is_raw_mentioned(self, message):  # noqa: ANN001
+                return False
+
+            def _discord_message_admission(self, message, *, claim):  # noqa: ANN001, ARG002
+                return True, False
+
+            async def _dispatch_discord_message(self, message):  # noqa: ANN001
+                admitted, _role_authorized = self._discord_message_admission(
+                    message, claim=True
+                )
+                return admitted
+
+        gateway_patch._wrap_admission(Adapter)
+        gateway_patch._wrap_dispatch(Adapter)
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            "os.environ",
+            {"HERMES_HOME": directory, "HERMES_PROFILE": "ceo-agent"},
+            clear=False,
+        ), self.assertLogs(gateway_patch.logger, level="INFO") as captured:
+            result = await Adapter()._dispatch_discord_message(self._Message())
+
+        self.assertTrue(result)
+        self._assert_log_contains(captured.records, "discord-raw-message")
+        self._assert_log_contains(captured.records, "discord_gateway_event")
+        combined = "\n".join(record.getMessage() for record in captured.records)
+        self.assertNotIn("private user content with token=should-not-be-logged", combined)
+        self.assertNotIn("token=should-not-be-logged", combined)
+        self.assertIn('"message_id":"message-1"', combined)
+        self.assertIn('"author_kind":"human"', combined)
+
+    async def test_bot_drop_logs_bot_reason_without_content(self) -> None:
+        class Adapter:
+            def __init__(self) -> None:
+                self._dedup = DiscordPreAcceptTelemetryTests._Dedup()
+                self._client = type("Client", (), {"user": object()})()
+
+            def _discord_message_admission(self, message, *, claim):  # noqa: ANN001, ARG002
+                return False, False
+
+            def _get_allow_bots(self):
+                return "none"
+
+        message = self._Message()
+        message.author = self._Author(bot=True)
+        gateway_patch._wrap_admission(Adapter)
+        with self.assertLogs(gateway_patch.logger, level="INFO") as captured:
+            self.assertEqual(Adapter()._discord_message_admission(message, claim=True), (False, False))
+        self._assert_log_contains(captured.records, '"reason":"BOT_AUTHOR"')
+        self._assert_log_contains(captured.records, "discord-pre-filter-drop")
+
+    async def test_webhook_drop_logs_webhook_reason(self) -> None:
+        class Adapter:
+            def __init__(self) -> None:
+                self._dedup = DiscordPreAcceptTelemetryTests._Dedup()
+                self._client = type("Client", (), {"user": object()})()
+
+            def _discord_message_admission(self, message, *, claim):  # noqa: ANN001, ARG002
+                return False, False
+
+        message = self._Message()
+        message.webhook_id = "webhook-1"
+        gateway_patch._wrap_admission(Adapter)
+        with self.assertLogs(gateway_patch.logger, level="INFO") as captured:
+            self.assertEqual(Adapter()._discord_message_admission(message, claim=True), (False, False))
+        self._assert_log_contains(captured.records, '"reason":"WEBHOOK"')
+
+    async def test_channel_policy_drop_logs_channel_reason(self) -> None:
+        class Adapter:
+            def __init__(self) -> None:
+                self._dedup = DiscordPreAcceptTelemetryTests._Dedup()
+                self._client = type("Client", (), {"user": object()})()
+                self._allowed_user_ids = set()
+                self._allowed_role_ids = set()
+
+            def _discord_message_admission(self, message, *, claim):  # noqa: ANN001, ARG002
+                return False, False
+
+            def _discord_allow_all_users(self):
+                return False
+
+            def _gateway_allow_all_users(self):
+                return False
+
+        gateway_patch._wrap_admission(Adapter)
+        with self.assertLogs(gateway_patch.logger, level="INFO") as captured:
+            self.assertEqual(Adapter()._discord_message_admission(self._Message(), claim=True), (False, False))
+        self._assert_log_contains(captured.records, '"reason":"CHANNEL_POLICY"')
+
+    async def test_mention_policy_drop_logs_mention_reason(self) -> None:
+        class Adapter:
+            def __init__(self) -> None:
+                self._dedup = DiscordPreAcceptTelemetryTests._Dedup()
+                self._client = type("Client", (), {"user": object()})()
+
+            def _discord_message_admission(self, message, *, claim):  # noqa: ANN001, ARG002
+                return False, False
+
+            def _discord_allow_all_users(self):
+                return True
+
+            def _gateway_allow_all_users(self):
+                return False
+
+            def _self_is_explicitly_mentioned(self, message):  # noqa: ANN001
+                return False
+
+            def _self_is_raw_mentioned(self, message):  # noqa: ANN001
+                return False
+
+            def _discord_free_response_channels(self):
+                return set()
+
+            def _discord_channel_keys(self, message):  # noqa: ANN001
+                return {"channel-1"}
+
+        gateway_patch._wrap_admission(Adapter)
+        with patch.dict("os.environ", {"DISCORD_IGNORE_NO_MENTION": "true"}), self.assertLogs(
+            gateway_patch.logger, level="INFO"
+        ) as captured:
+            self.assertEqual(Adapter()._discord_message_admission(self._Message(), claim=True), (False, False))
+        self._assert_log_contains(captured.records, '"reason":"MENTION_POLICY"')
+
+    async def test_dedup_drop_logs_dedup_reason(self) -> None:
+        class Adapter:
+            def __init__(self) -> None:
+                self._dedup = DiscordPreAcceptTelemetryTests._Dedup(contains=True)
+                self._client = type("Client", (), {"user": object()})()
+
+            def _discord_message_admission(self, message, *, claim):  # noqa: ANN001, ARG002
+                raise AssertionError("dedup must short-circuit the original admission")
+
+        gateway_patch._wrap_admission(Adapter)
+        with self.assertLogs(gateway_patch.logger, level="INFO") as captured:
+            self.assertEqual(Adapter()._discord_message_admission(self._Message(), claim=True), (False, False))
+        self._assert_log_contains(captured.records, '"reason":"DEDUP"')
+
+    async def test_telemetry_does_not_log_auth_or_payload_values(self) -> None:
+        class Adapter:
+            def _self_is_raw_mentioned(self, message):  # noqa: ANN001
+                return False
+
+        message = self._Message()
+        message.content = "Authorization: Bearer secret-value"
+        with self.assertLogs(gateway_patch.logger, level="INFO") as captured:
+            gateway_patch._log_raw_message(Adapter(), message)
+        combined = "\n".join(record.getMessage() for record in captured.records)
+        self.assertNotIn("Authorization", combined)
+        self.assertNotIn("secret-value", combined)
+        self.assertNotIn("private user content", combined)

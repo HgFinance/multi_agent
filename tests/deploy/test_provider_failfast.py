@@ -52,6 +52,13 @@ def test_hard_quota_text_requires_explicit_exhaustion_signal() -> None:
     )
 
 
+def test_codex_usage_limit_exhaustion_is_hard_quota() -> None:
+    assert provider_failfast.is_hard_quota_429(
+        status_code=429,
+        message="HTTP 429: The usage limit has been reached",
+    )
+
+
 def test_transient_429_and_server_errors_are_not_hard_quota() -> None:
     assert not provider_failfast.is_hard_quota_429(
         status_code=429,
