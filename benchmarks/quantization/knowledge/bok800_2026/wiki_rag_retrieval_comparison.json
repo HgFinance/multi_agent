@@ -1,0 +1,1548 @@
+{
+  "schema_version": "bok800-wiki-rag-retrieval-comparison.v1",
+  "status": "RETRIEVAL_ONLY",
+  "same_questions": true,
+  "query_dataset": "benchmarks/quantization/internal50_v2_reasoning.json",
+  "query_dataset_sha256": "ad2bdaf5ea381c2fc151fce1f1859f7f925b86fd03b830319cd97af17709e978",
+  "knowledge_root": "benchmarks/quantization/knowledge/bok800_2026",
+  "wiki_documents": 789,
+  "glossary_entries": 391,
+  "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc",
+  "summary": {
+    "cases": 50,
+    "wiki_nonempty_hits": 47,
+    "wiki_hit_rate": 0.94,
+    "rag_nonempty_hits": 34,
+    "rag_hit_rate": 0.68
+  },
+  "quality_scores": null,
+  "rows": [
+    {
+      "id": "v2-001",
+      "question": "Calculate the gross margin percentage.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.5001,
+        "top_k": [
+          {
+            "page": "224-719fcbbe5b",
+            "score": 7.411204
+          },
+          {
+            "page": "088-396559ed23",
+            "score": 6.772199
+          },
+          {
+            "page": "078-d0e139a982",
+            "score": 6.244179
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.3098,
+        "matched_terms": [
+          "시장평균환율(MAR)",
+          "주가수익비율(PER)",
+          "주당순이익(EPS)"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-002",
+      "question": "Calculate realized PnL in KRW.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.4032,
+        "top_k": [
+          {
+            "page": "279-e3459a7868",
+            "score": 7.075216
+          },
+          {
+            "page": "003-63e8e53929",
+            "score": 5.75955
+          },
+          {
+            "page": "771-818dea2f58",
+            "score": 4.957667
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.2762,
+        "matched_terms": [
+          "녹색GDP"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-003",
+      "question": "Calculate projected cash after settlement.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.3931,
+        "top_k": [
+          {
+            "page": "560-0abfc8b270",
+            "score": 7.327245
+          },
+          {
+            "page": "639-2b2ff437b0",
+            "score": 6.636047
+          },
+          {
+            "page": "019-88cae80297",
+            "score": 5.860255
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.2741,
+        "matched_terms": [
+          "녹색기후기금(GCF)",
+          "상품공동기금(CFC)",
+          "유럽연합(EU)",
+          "전자상거래",
+          "EC방식"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-004",
+      "question": "Calculate the total transaction cost in KRW.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.4801,
+        "top_k": [
+          {
+            "page": "638-c766bc09cc",
+            "score": 8.442483
+          },
+          {
+            "page": "279-e3459a7868",
+            "score": 7.075216
+          },
+          {
+            "page": "228-3cf593e404",
+            "score": 6.869736
+          }
+        ]
+      },
+      "rag": {
+        "hit": false,
+        "latency_ms": 0.2981,
+        "matched_terms": [],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-005",
+      "question": "Calculate the percentage return.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.2952,
+        "top_k": [
+          {
+            "page": "638-c766bc09cc",
+            "score": 10.2372
+          },
+          {
+            "page": "078-d0e139a982",
+            "score": 6.244179
+          },
+          {
+            "page": "653-c497d3bad7",
+            "score": 4.779615
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.2724,
+        "matched_terms": [
+          "주가수익비율(PER)",
+          "주당순이익(EPS)"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-006",
+      "question": "Calculate EPS in KRW per share.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.4399,
+        "top_k": [
+          {
+            "page": "577-6ed387a0df",
+            "score": 24.20623
+          },
+          {
+            "page": "583-78ddd466be",
+            "score": 22.143804
+          },
+          {
+            "page": "578-a6d13853a8",
+            "score": 13.831718
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.2672,
+        "matched_terms": [
+          "유럽연합(EU)",
+          "주가수익비율(PER)",
+          "주가지수옵션",
+          "주당순이익(EPS)"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-007",
+      "question": "Calculate the P/E ratio.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.2586,
+        "top_k": [
+          {
+            "page": "001-fb347c1d2f",
+            "score": 6.036501
+          },
+          {
+            "page": "577-6ed387a0df",
+            "score": 5.553921
+          },
+          {
+            "page": "075-07ff2267ac",
+            "score": 4.956878
+          }
+        ]
+      },
+      "rag": {
+        "hit": false,
+        "latency_ms": 0.2623,
+        "matched_terms": [],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-008",
+      "question": "Calculate debt-to-equity percentage.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.3841,
+        "top_k": [
+          {
+            "page": "001-fb347c1d2f",
+            "score": 11.410813
+          },
+          {
+            "page": "283-638ae76d28",
+            "score": 9.26542
+          },
+          {
+            "page": "269-91241bbf06",
+            "score": 8.633759
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.2651,
+        "matched_terms": [
+          "교환사채(EB)",
+          "주가수익비율(PER)",
+          "주당순이익(EPS)"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-009",
+      "question": "Calculate the portfolio return percentage.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.3546,
+        "top_k": [
+          {
+            "page": "638-c766bc09cc",
+            "score": 10.2372
+          },
+          {
+            "page": "078-d0e139a982",
+            "score": 6.244179
+          },
+          {
+            "page": "619-d3129a16b7",
+            "score": 6.207265
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.2807,
+        "matched_terms": [
+          "주가수익비율(PER)",
+          "주당순이익(EPS)"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-010",
+      "question": "Calculate the break-even sale price in KRW.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.5182,
+        "top_k": [
+          {
+            "page": "279-e3459a7868",
+            "score": 7.075216
+          },
+          {
+            "page": "577-6ed387a0df",
+            "score": 5.921525
+          },
+          {
+            "page": "003-63e8e53929",
+            "score": 5.75955
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.2845,
+        "matched_terms": [
+          "녹색GDP",
+          "미달러화지수"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-011",
+      "question": "Classify the journal.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.2602,
+        "top_k": [
+          {
+            "page": "442-96006e974b",
+            "score": 5.435995
+          },
+          {
+            "page": "653-c497d3bad7",
+            "score": 4.779615
+          },
+          {
+            "page": "617-9e49d3fde2",
+            "score": 4.481193
+          }
+        ]
+      },
+      "rag": {
+        "hit": false,
+        "latency_ms": 0.2587,
+        "matched_terms": [],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-012",
+      "question": "What should happen when 'bf-100' is received again?",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.792,
+        "top_k": [
+          {
+            "page": "478-a2d29ded21",
+            "score": 5.547266
+          },
+          {
+            "page": "730-68621abb28",
+            "score": 4.970698
+          },
+          {
+            "page": "230-c395ee5cad",
+            "score": 4.681103
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.2745,
+        "matched_terms": [
+          "상품공동기금(CFC)",
+          "연구개발(R&D)",
+          "유럽연합(EU)",
+          "전자상거래",
+          "EC방식"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-013",
+      "question": "What should the employee do with official NAV production?",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.6705,
+        "top_k": [
+          {
+            "page": "458-e15c5a8264",
+            "score": 5.796085
+          },
+          {
+            "page": "320-c6885ace8c",
+            "score": 5.617035
+          },
+          {
+            "page": "061-4265232767",
+            "score": 5.323612
+          }
+        ]
+      },
+      "rag": {
+        "hit": false,
+        "latency_ms": 0.269,
+        "matched_terms": [],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-014",
+      "question": "Calculate the net cash received in KRW.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.4967,
+        "top_k": [
+          {
+            "page": "560-0abfc8b270",
+            "score": 7.327245
+          },
+          {
+            "page": "279-e3459a7868",
+            "score": 7.075216
+          },
+          {
+            "page": "003-63e8e53929",
+            "score": 5.75955
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.3092,
+        "matched_terms": [
+          "상품공동기금(CFC)",
+          "유럽연합(EU)",
+          "전자상거래",
+          "EC방식"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-015",
+      "question": "Classify reconciliation.",
+      "wiki": {
+        "hit": false,
+        "latency_ms": 0.2084,
+        "top_k": []
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.2749,
+        "matched_terms": [
+          "상품공동기금(CFC)",
+          "유럽연합(EU)",
+          "전자상거래",
+          "EC방식"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-016",
+      "question": "Calculate realized PnL in KRW.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.3607,
+        "top_k": [
+          {
+            "page": "279-e3459a7868",
+            "score": 7.075216
+          },
+          {
+            "page": "003-63e8e53929",
+            "score": 5.75955
+          },
+          {
+            "page": "771-818dea2f58",
+            "score": 4.957667
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.2655,
+        "matched_terms": [
+          "녹색GDP"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-017",
+      "question": "Should the new order be approved?",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.4567,
+        "top_k": [
+          {
+            "page": "169-2b90c63462",
+            "score": 7.545474
+          },
+          {
+            "page": "111-9237cf080d",
+            "score": 5.910938
+          },
+          {
+            "page": "502-e4ace4b927",
+            "score": 5.180623
+          }
+        ]
+      },
+      "rag": {
+        "hit": false,
+        "latency_ms": 0.2698,
+        "matched_terms": [],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-018",
+      "question": "Should the order be approved?",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.3518,
+        "top_k": [
+          {
+            "page": "169-2b90c63462",
+            "score": 7.545474
+          },
+          {
+            "page": "653-c497d3bad7",
+            "score": 4.779615
+          },
+          {
+            "page": "617-9e49d3fde2",
+            "score": 4.481193
+          }
+        ]
+      },
+      "rag": {
+        "hit": false,
+        "latency_ms": 0.2609,
+        "matched_terms": [],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-019",
+      "question": "Choose the appropriate action.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.3471,
+        "top_k": [
+          {
+            "page": "008-fba8a12f2a",
+            "score": 5.394106
+          },
+          {
+            "page": "653-c497d3bad7",
+            "score": 4.779615
+          },
+          {
+            "page": "617-9e49d3fde2",
+            "score": 4.481193
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.2631,
+        "matched_terms": [
+          "로렌츠곡선"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-020",
+      "question": "Choose the appropriate action.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.2896,
+        "top_k": [
+          {
+            "page": "008-fba8a12f2a",
+            "score": 5.394106
+          },
+          {
+            "page": "653-c497d3bad7",
+            "score": 4.779615
+          },
+          {
+            "page": "617-9e49d3fde2",
+            "score": 4.481193
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.2743,
+        "matched_terms": [
+          "로렌츠곡선"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-021",
+      "question": "Should the sell order be approved?",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.4103,
+        "top_k": [
+          {
+            "page": "371-975a98eba1",
+            "score": 8.325387
+          },
+          {
+            "page": "459-7f386c1491",
+            "score": 8.132325
+          },
+          {
+            "page": "169-2b90c63462",
+            "score": 7.545474
+          }
+        ]
+      },
+      "rag": {
+        "hit": false,
+        "latency_ms": 0.2596,
+        "matched_terms": [],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-022",
+      "question": "Should the position be approved?",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.3873,
+        "top_k": [
+          {
+            "page": "449-9af076a28c",
+            "score": 10.527988
+          },
+          {
+            "page": "099-d47cdaf794",
+            "score": 5.871274
+          },
+          {
+            "page": "189-162ab35e5c",
+            "score": 5.651998
+          }
+        ]
+      },
+      "rag": {
+        "hit": false,
+        "latency_ms": 0.2815,
+        "matched_terms": [],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-023",
+      "question": "Should a new order be approved?",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.3455,
+        "top_k": [
+          {
+            "page": "169-2b90c63462",
+            "score": 7.545474
+          },
+          {
+            "page": "111-9237cf080d",
+            "score": 5.910938
+          },
+          {
+            "page": "502-e4ace4b927",
+            "score": 5.180623
+          }
+        ]
+      },
+      "rag": {
+        "hit": false,
+        "latency_ms": 0.2965,
+        "matched_terms": [],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-024",
+      "question": "Is the order valid?",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.3368,
+        "top_k": [
+          {
+            "page": "169-2b90c63462",
+            "score": 7.545474
+          },
+          {
+            "page": "653-c497d3bad7",
+            "score": 4.779615
+          },
+          {
+            "page": "617-9e49d3fde2",
+            "score": 4.481193
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.2614,
+        "matched_terms": [
+          "블록체인"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-025",
+      "question": "Is the order valid?",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.2925,
+        "top_k": [
+          {
+            "page": "169-2b90c63462",
+            "score": 7.545474
+          },
+          {
+            "page": "653-c497d3bad7",
+            "score": 4.779615
+          },
+          {
+            "page": "617-9e49d3fde2",
+            "score": 4.481193
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.3005,
+        "matched_terms": [
+          "블록체인"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-026",
+      "question": "Is this snapshot valid?",
+      "wiki": {
+        "hit": false,
+        "latency_ms": 0.3225,
+        "top_k": []
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.2621,
+        "matched_terms": [
+          "국민계정체계(SNA)",
+          "국민대차대조표",
+          "명목국내총생산/실질국내총생산",
+          "블록체인",
+          "생산세",
+          "연구개발(R&D)",
+          "지식재산생산물투자",
+          "환경계정"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-027",
+      "question": "Is the target weight valid?",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.377,
+        "top_k": [
+          {
+            "page": "682-c274e5f75e",
+            "score": 6.684573
+          },
+          {
+            "page": "242-efe74c499d",
+            "score": 5.352165
+          },
+          {
+            "page": "653-c497d3bad7",
+            "score": 4.779615
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.261,
+        "matched_terms": [
+          "블록체인"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-028",
+      "question": "Are the target weights valid?",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.3536,
+        "top_k": [
+          {
+            "page": "682-c274e5f75e",
+            "score": 6.684573
+          },
+          {
+            "page": "242-efe74c499d",
+            "score": 5.352165
+          },
+          {
+            "page": "653-c497d3bad7",
+            "score": 4.779615
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.275,
+        "matched_terms": [
+          "블록체인"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-029",
+      "question": "How many additional shares should be bought?",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.5435,
+        "top_k": [
+          {
+            "page": "159-ce49f5ce66",
+            "score": 9.585084
+          },
+          {
+            "page": "449-9af076a28c",
+            "score": 5.910938
+          },
+          {
+            "page": "144-e784c7fab3",
+            "score": 5.909485
+          }
+        ]
+      },
+      "rag": {
+        "hit": false,
+        "latency_ms": 0.2634,
+        "matched_terms": [],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-030",
+      "question": "Calculate drawdown percentage.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.259,
+        "top_k": [
+          {
+            "page": "078-d0e139a982",
+            "score": 6.244179
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.3032,
+        "matched_terms": [
+          "주가수익비율(PER)",
+          "주당순이익(EPS)"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-031",
+      "question": "Calculate range position percentage.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.3054,
+        "top_k": [
+          {
+            "page": "449-9af076a28c",
+            "score": 10.527988
+          },
+          {
+            "page": "078-d0e139a982",
+            "score": 6.244179
+          },
+          {
+            "page": "099-d47cdaf794",
+            "score": 5.871274
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.372,
+        "matched_terms": [
+          "주가수익비율(PER)",
+          "주당순이익(EPS)"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-032",
+      "question": "Calculate the A/D ratio.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.3246,
+        "top_k": [
+          {
+            "page": "001-fb347c1d2f",
+            "score": 6.036501
+          },
+          {
+            "page": "577-6ed387a0df",
+            "score": 5.553921
+          },
+          {
+            "page": "075-07ff2267ac",
+            "score": 4.956878
+          }
+        ]
+      },
+      "rag": {
+        "hit": false,
+        "latency_ms": 0.2973,
+        "matched_terms": [],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-033",
+      "question": "Calculate the z-score.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.3041,
+        "top_k": [
+          {
+            "page": "653-c497d3bad7",
+            "score": 4.779615
+          },
+          {
+            "page": "617-9e49d3fde2",
+            "score": 4.481193
+          },
+          {
+            "page": "752-9ce3afa302",
+            "score": 4.408754
+          }
+        ]
+      },
+      "rag": {
+        "hit": false,
+        "latency_ms": 0.2812,
+        "matched_terms": [],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-034",
+      "question": "Calculate annualized volatility percentage.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.3485,
+        "top_k": [
+          {
+            "page": "078-d0e139a982",
+            "score": 6.244179
+          },
+          {
+            "page": "774-fe2405a812",
+            "score": 6.117149
+          },
+          {
+            "page": "788-c3858f6524",
+            "score": 5.308958
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.3414,
+        "matched_terms": [
+          "주가수익비율(PER)",
+          "주당순이익(EPS)"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-035",
+      "question": "Calculate the Sharpe ratio.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.3168,
+        "top_k": [
+          {
+            "page": "001-fb347c1d2f",
+            "score": 6.036501
+          },
+          {
+            "page": "577-6ed387a0df",
+            "score": 5.553921
+          },
+          {
+            "page": "075-07ff2267ac",
+            "score": 4.956878
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.2649,
+        "matched_terms": [
+          "공개시장운영",
+          "기준금리",
+          "단일금리방식/복수금리방식",
+          "어음관리계좌(CMA)",
+          "일중RP제도",
+          "통화안정계정",
+          "통화안정증권",
+          "환매조건부매매/RP/Repo"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-036",
+      "question": "Classify the claim.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.2716,
+        "top_k": [
+          {
+            "page": "130-083bf395bc",
+            "score": 6.618072
+          },
+          {
+            "page": "653-c497d3bad7",
+            "score": 4.779615
+          },
+          {
+            "page": "617-9e49d3fde2",
+            "score": 4.481193
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.2945,
+        "matched_terms": [
+          "연구개발(R&D)"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-037",
+      "question": "Classify the claim.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.2347,
+        "top_k": [
+          {
+            "page": "130-083bf395bc",
+            "score": 6.618072
+          },
+          {
+            "page": "653-c497d3bad7",
+            "score": 4.779615
+          },
+          {
+            "page": "617-9e49d3fde2",
+            "score": 4.481193
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.2592,
+        "matched_terms": [
+          "연구개발(R&D)"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-038",
+      "question": "Classify the factual claim.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.3163,
+        "top_k": [
+          {
+            "page": "130-083bf395bc",
+            "score": 6.618072
+          },
+          {
+            "page": "653-c497d3bad7",
+            "score": 4.779615
+          },
+          {
+            "page": "617-9e49d3fde2",
+            "score": 4.481193
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.2644,
+        "matched_terms": [
+          "연구개발(R&D)"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-039",
+      "question": "Classify a claim that the closing price was exactly KRW 70,000.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.7767,
+        "top_k": [
+          {
+            "page": "140-d570036488",
+            "score": 8.142999
+          },
+          {
+            "page": "392-70f6a692ad",
+            "score": 7.499893
+          },
+          {
+            "page": "141-39298862a9",
+            "score": 7.475183
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.2719,
+        "matched_terms": [
+          "금융의 증권화",
+          "미달러화지수",
+          "연구개발(R&D)"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-040",
+      "question": "Can that article support the 10:00 decision?",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.6528,
+        "top_k": [
+          {
+            "page": "752-9ce3afa302",
+            "score": 8.264076
+          },
+          {
+            "page": "710-f8795950fe",
+            "score": 7.167816
+          },
+          {
+            "page": "730-68621abb28",
+            "score": 6.356213
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.2671,
+        "matched_terms": [
+          "상품공동기금(CFC)",
+          "유럽연합(EU)",
+          "전자상거래",
+          "EC방식"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-041",
+      "question": "Classify the claim.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.2366,
+        "top_k": [
+          {
+            "page": "130-083bf395bc",
+            "score": 6.618072
+          },
+          {
+            "page": "653-c497d3bad7",
+            "score": 4.779615
+          },
+          {
+            "page": "617-9e49d3fde2",
+            "score": 4.481193
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.2574,
+        "matched_terms": [
+          "연구개발(R&D)"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-042",
+      "question": "What should the employee do?",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.4304,
+        "top_k": [
+          {
+            "page": "653-c497d3bad7",
+            "score": 4.779615
+          },
+          {
+            "page": "617-9e49d3fde2",
+            "score": 4.481193
+          },
+          {
+            "page": "752-9ce3afa302",
+            "score": 4.408754
+          }
+        ]
+      },
+      "rag": {
+        "hit": false,
+        "latency_ms": 0.378,
+        "matched_terms": [],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-043",
+      "question": "What should the employee do?",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.3775,
+        "top_k": [
+          {
+            "page": "653-c497d3bad7",
+            "score": 4.779615
+          },
+          {
+            "page": "617-9e49d3fde2",
+            "score": 4.481193
+          },
+          {
+            "page": "752-9ce3afa302",
+            "score": 4.408754
+          }
+        ]
+      },
+      "rag": {
+        "hit": false,
+        "latency_ms": 0.2637,
+        "matched_terms": [],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-044",
+      "question": "Which result should be used?",
+      "wiki": {
+        "hit": false,
+        "latency_ms": 0.4037,
+        "top_k": []
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.3618,
+        "matched_terms": [
+          "미달러화지수"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-045",
+      "question": "What is the appropriate conclusion?",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.3542,
+        "top_k": [
+          {
+            "page": "653-c497d3bad7",
+            "score": 4.779615
+          },
+          {
+            "page": "617-9e49d3fde2",
+            "score": 4.481193
+          },
+          {
+            "page": "752-9ce3afa302",
+            "score": 4.408754
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.2655,
+        "matched_terms": [
+          "미달러화지수"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-046",
+      "question": "Return the requested structured decision.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.3928,
+        "top_k": [
+          {
+            "page": "638-c766bc09cc",
+            "score": 10.2372
+          },
+          {
+            "page": "653-c497d3bad7",
+            "score": 4.779615
+          },
+          {
+            "page": "617-9e49d3fde2",
+            "score": 4.481193
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.2654,
+        "matched_terms": [
+          "상품공동기금(CFC)",
+          "유럽연합(EU)",
+          "전자상거래",
+          "EC방식",
+          "ESTR"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-047",
+      "question": "Return the calculation as JSON.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.4208,
+        "top_k": [
+          {
+            "page": "638-c766bc09cc",
+            "score": 10.2372
+          },
+          {
+            "page": "078-d0e139a982",
+            "score": 6.244179
+          },
+          {
+            "page": "653-c497d3bad7",
+            "score": 4.779615
+          }
+        ]
+      },
+      "rag": {
+        "hit": false,
+        "latency_ms": 0.2979,
+        "matched_terms": [],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-048",
+      "question": "Return the evidence decision as JSON.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.4097,
+        "top_k": [
+          {
+            "page": "638-c766bc09cc",
+            "score": 10.2372
+          },
+          {
+            "page": "078-d0e139a982",
+            "score": 6.244179
+          },
+          {
+            "page": "653-c497d3bad7",
+            "score": 4.779615
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.266,
+        "matched_terms": [
+          "블록체인",
+          "상품공동기금(CFC)",
+          "유럽연합(EU)",
+          "전자상거래",
+          "EC방식"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-049",
+      "question": "Return the permitted action and maximum additional notional.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.58,
+        "top_k": [
+          {
+            "page": "638-c766bc09cc",
+            "score": 10.2372
+          },
+          {
+            "page": "159-ce49f5ce66",
+            "score": 9.585084
+          },
+          {
+            "page": "752-9ce3afa302",
+            "score": 8.536352
+          }
+        ]
+      },
+      "rag": {
+        "hit": true,
+        "latency_ms": 0.2709,
+        "matched_terms": [
+          "주가수익비율(PER)",
+          "주당순이익(EPS)"
+        ],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    },
+    {
+      "id": "v2-050",
+      "question": "Return the result as JSON.",
+      "wiki": {
+        "hit": true,
+        "latency_ms": 0.3426,
+        "top_k": [
+          {
+            "page": "638-c766bc09cc",
+            "score": 10.2372
+          },
+          {
+            "page": "078-d0e139a982",
+            "score": 6.244179
+          },
+          {
+            "page": "653-c497d3bad7",
+            "score": 4.779615
+          }
+        ]
+      },
+      "rag": {
+        "hit": false,
+        "latency_ms": 0.2755,
+        "matched_terms": [],
+        "glossary_sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc"
+      },
+      "model_quality": null
+    }
+  ],
+  "next_step": "Run model responses with the same base model, prompt, and runtime before comparing quality."
+}

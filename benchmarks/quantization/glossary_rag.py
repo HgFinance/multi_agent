@@ -16,6 +16,7 @@ class GlossaryEntry:
     definition: str
     scope: str
     unit: str | None = None
+    aliases: tuple[str, ...] = ()
 
 
 def load_glossary(path: Path) -> tuple[str, list[GlossaryEntry]]:
@@ -27,13 +28,24 @@ def load_glossary(path: Path) -> tuple[str, list[GlossaryEntry]]:
     for row in payload:
         if not isinstance(row, dict) or row.get("scope") not in ALLOWED_SCOPES:
             raise ValueError("glossary contains an out-of-scope entry")
-        entries.append(GlossaryEntry(row["term"], row["definition"], row["scope"], row.get("unit")))
+        aliases = row.get("aliases", [])
+        if not isinstance(aliases, list) or not all(isinstance(alias, str) and alias.strip() for alias in aliases):
+            raise ValueError("glossary aliases must be a list of non-empty strings")
+        entries.append(
+            GlossaryEntry(
+                row["term"], row["definition"], row["scope"], row.get("unit"), tuple(aliases)
+            )
+        )
     return hashlib.sha256(raw).hexdigest(), entries
 
 
 def inject(prompt: str, entries: list[GlossaryEntry]) -> tuple[str, list[str]]:
     lowered = prompt.casefold()
-    hits = [entry for entry in entries if entry.term.casefold() in lowered]
+    hits = [
+        entry
+        for entry in entries
+        if any(candidate.casefold() in lowered for candidate in (entry.term, *entry.aliases))
+    ]
     lines = ["GLOSSARY (deterministic matches only):"]
     lines.extend(f"- {entry.term}: {entry.definition}" for entry in hits)
     return "\n".join(lines) + "\n\n" + prompt, [entry.term for entry in hits]

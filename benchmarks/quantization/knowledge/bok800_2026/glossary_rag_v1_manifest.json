@@ -1,0 +1,57 @@
+{
+  "schema_version": "glossary-manifest.v1",
+  "name": "HgFinance BOK 800 arithmetic glossary",
+  "version": "bok-800-arithmetic-glossary-v1",
+  "sha256": "629554ccd0364e3112cb8b9b9228091de711d8e23c8b330423a0645e7a35c3fc",
+  "source_documents": [
+    {
+      "name": "한국은행 경제금융용어 800선",
+      "version": "2026-01-29",
+      "source_url": "https://www.bok.or.kr/portal/bbs/B0000249/view.do?depth=200765&menuNo=200765&nttId=10096081&oldMenuNo=201150&programType=newsData&relate=Y",
+      "file_url": "https://www.bok.or.kr/fileSrc/portal/5cbf35f51f3842dd9ed1fba7cef5199a/1/74ac2f04b15c4debac64fd6931aea9fd.pdf",
+      "local_pdf": "not committed; source artifact verified outside the repository",
+      "sha256": "d48f701f84324f734aa2b4fa255d69df2d46bc311e27a16fe50f48041cc9ac9b",
+      "license_provenance": "Official Bank of Korea public download; preserve source citation and do not redistribute the PDF artifact."
+    }
+  ],
+  "scope": [
+    "financial_arithmetic"
+  ],
+  "excluded_scope": [
+    "risk",
+    "risk_terminology",
+    "structured_output_not_present_in_source_pdf"
+  ],
+  "entries": 391,
+  "selection": {
+    "rule": "deterministic keyword allowlist minus deterministic risk-term denylist",
+    "risk_terms_checked": [
+      "리스크",
+      "위험",
+      "건전성",
+      "부실",
+      "취약성",
+      "금융위기",
+      "신용위험",
+      "유동성위험",
+      "운영위험",
+      "시스템위험",
+      "감독",
+      "규제",
+      "대손",
+      "VaR",
+      "Value at Risk",
+      "FSI",
+      "FVI",
+      "HDRI",
+      "NPL"
+    ],
+    "source_entries_total": 789,
+    "source_entries_selected": 391
+  },
+  "artifacts": {
+    "wiki_index": "benchmarks/quantization/knowledge/bok800_2026/wiki/index.md",
+    "wiki_entities": "benchmarks/quantization/knowledge/bok800_2026/wiki/entities",
+    "glossary": "benchmarks/quantization/knowledge/bok800_2026/glossary_rag_v1.json"
+  }
+}

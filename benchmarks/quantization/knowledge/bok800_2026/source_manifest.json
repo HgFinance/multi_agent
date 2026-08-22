@@ -1,0 +1,15 @@
+{
+  "schema_version": "bok800-wiki-source.v1",
+  "wiki_version": "bok-800-2026-source-preserving-v1",
+  "source_pdf_sha256": "d48f701f84324f734aa2b4fa255d69df2d46bc311e27a16fe50f48041cc9ac9b",
+  "source_text_sha256": "df31f868e58bf0d60a8816b8c51f2b4cd03376dcda010d7815e03fc3b8a12e34",
+  "source_url": "https://www.bok.or.kr/portal/bbs/B0000249/view.do?depth=200765&menuNo=200765&nttId=10096081&oldMenuNo=201150&programType=newsData&relate=Y",
+  "source_file_url": "https://www.bok.or.kr/fileSrc/portal/5cbf35f51f3842dd9ed1fba7cef5199a/1/74ac2f04b15c4debac64fd6931aea9fd.pdf",
+  "source_pdf_pages": 428,
+  "toc_entries": 789,
+  "wiki_entries": 789,
+  "rag_arithmetic_entries": 391,
+  "extraction": "pypdf text extraction; source-preserving deterministic heading/body parser",
+  "llm_rewrite": false,
+  "confidence_policy": "EXTRACTED only; no inferred definition is written"
+}

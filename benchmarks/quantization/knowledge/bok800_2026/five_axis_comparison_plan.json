@@ -1,0 +1,42 @@
+{
+  "schema_version": "five-axis-comparison-plan.v1",
+  "runtime_profile": "L4-fp8KV-v1",
+  "primary_variants": [
+    "FP8",
+    "AWQ",
+    "AWQ+Finetune",
+    "AWQ+Reasoning",
+    "AWQ+RAG"
+  ],
+  "wiki_role": "offline knowledge compilation and diagnostic retrieval baseline; not a sixth primary model variant",
+  "rag_role": "runtime deterministic glossary injection using glossary_rag_v1.json",
+  "fairness_contract": {
+    "gpu": "same NVIDIA L4",
+    "max_model_len": 8192,
+    "gpu_memory_utilization": 0.85,
+    "kv_cache_dtype": "fp8_e4m3",
+    "prefix_caching": true,
+    "temperature": 0,
+    "stream": false,
+    "sequential_quality": true
+  },
+  "wiki_vs_rag_diagnostic": {
+    "same_questions": true,
+    "same_base_model": "Qwen2.5-14B-Instruct-AWQ",
+    "wiki_context": "bounded source-preserving entity pages selected by deterministic BM25/term match",
+    "rag_context": "deterministic glossary entries selected by glossary_rag.py",
+    "separate_metrics": [
+      "model_only_latency",
+      "retrieval_latency",
+      "full_pipeline_latency",
+      "hit_rate",
+      "citation_grounding"
+    ],
+    "status": "READY_FOR_RUNTIME_EXECUTION"
+  },
+  "artifacts": {
+    "source_manifest": "benchmarks/quantization/knowledge/bok800_2026/source_manifest.json",
+    "glossary_manifest": "benchmarks/quantization/knowledge/bok800_2026/glossary_rag_v1_manifest.json",
+    "comparison_plan": "benchmarks/quantization/knowledge/bok800_2026/five_axis_comparison_plan.json"
+  }
+}
