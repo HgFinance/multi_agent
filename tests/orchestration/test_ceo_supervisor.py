@@ -1195,6 +1195,356 @@ class SynthesisTimingInstrumentationTest(unittest.TestCase):
         self.assertNotIn("synthesis body", timing)
 
 
+class UnmaterializedPrimaryFinalDeliveryTest(unittest.TestCase):
+    @staticmethod
+    def root_payload(*, final_answer: str = "") -> dict[str, object]:
+        return {
+            "id": "root-invalid-primary",
+            "assignee": "ceo-agent",
+            "status": "done",
+            "final_answer": final_answer,
+            "body": (
+                "hgfinance.ceo-workflow-scope.v1\n"
+                "workflow_role=planning\n"
+                "root_task_role=scope_and_planning\n"
+                "planning_terminal_state=done_after_child_creation\n"
+                "workflow_mode=analysis\n"
+                "origin=user-query\n"
+                "analysis_mode=fast_advisory\n"
+                "selected_primary_profiles=qa-department\n"
+                "delegation_instruction.qa-department=Measure the system response latency.\n"
+                "discord_request_id=discord:request-invalid-primary\n"
+                "discord_channel_id=channel-invalid-primary\n"
+                "discord_message_id=message-invalid-primary\n"
+                "discord_thread_id=thread-invalid-primary\n"
+            ),
+        }
+
+    class Delivery:
+        def __init__(self) -> None:
+            self.cards: list[dict[str, object]] = []
+            self.finals: list[dict[str, object]] = []
+            self._final_keys: set[str] = set()
+
+        def upsert_thread_card(self, **kwargs):
+            self.cards.append(kwargs)
+            return "sent"
+
+        def deliver_to_existing_thread(self, **kwargs):
+            response_key = str(kwargs.get("response_key_suffix") or "")
+            if response_key in self._final_keys:
+                return "deduped"
+            self._final_keys.add(response_key)
+            self.finals.append(kwargs)
+            return "sent"
+
+    class Client:
+        environment = {"HERMES_HOME": "/tmp/ceo-invalid-primary-final"}
+
+        def __init__(self, root: dict[str, object]) -> None:
+            self.root = root
+            self.created: list[dict[str, object]] = []
+
+        def workflow_root(self, task_id):
+            return self.root["id"]
+
+        def authoritative_workflow_snapshot(self, root_id, task_id):
+            return root_id, (), self.root
+
+        def show(self, task_id):
+            return self.root
+
+        def create_task(self, **kwargs):
+            self.created.append(kwargs)
+            return {"id": "blocked-control"}
+
+        def comment_task(self, task_id, text):
+            return None
+
+    class LateChildClient(Client):
+        def __init__(self, root: dict[str, object], child: dict[str, object]) -> None:
+            super().__init__(root)
+            self.child = child
+
+        def authoritative_workflow_snapshot(self, root_id, task_id):
+            return root_id, (self.child,), self.root
+
+        def show(self, task_id):
+            if task_id == self.child["id"]:
+                return self.child
+            return super().show(task_id)
+
+    @staticmethod
+    def late_qa_child(root_id: str, *, status: str = "blocked") -> dict[str, object]:
+        return {
+            "id": "qa-late-child",
+            "assignee": "qa-department",
+            "status": status,
+            "block_reason": "terminal marker missing after worker exit",
+            "body": build_scoped_task_body(
+                "QA terminal failure",
+                root_id,
+                role="qa",
+                workflow_mode="analysis",
+            ),
+        }
+
+    def test_invalid_primary_uses_delegation_card_and_one_direct_final(self) -> None:
+        root = self.root_payload(final_answer="CEO usable final answer")
+        client = self.Client(root)
+        delivery = self.Delivery()
+        service = CeoSupervisorService(client, discord_delivery=delivery)
+        event = {
+            "event_id": "invalid-primary-completed",
+            "task_id": root["id"],
+            "kind": "completed",
+            "_event_persisted_ms": 1_000,
+            "_event_detected_ms": 1_001,
+            "_event_consumed_ms": 1_002,
+        }
+
+        service.handle_terminal_event(event)
+        service.handle_terminal_event(event)
+
+        # Planner metadata without a materialized child is not a delegation
+        # projection.  The root still gets one final response through the
+        # existing direct/failure response plane.
+        self.assertEqual(len(delivery.cards), 0)
+        self.assertEqual(len(delivery.finals), 1)
+        self.assertEqual(delivery.finals[0]["title"], "🧠 CEO 답변")
+        self.assertEqual(delivery.finals[0]["content"], "CEO usable final answer")
+        self.assertEqual(client.created, [])
+
+    def test_invalid_primary_without_result_creates_existing_blocked_control(self) -> None:
+        root = self.root_payload()
+        client = self.Client(root)
+        delivery = self.Delivery()
+        service = CeoSupervisorService(client, discord_delivery=delivery)
+
+        status = service._reconcile_unmaterialized_primary_root(
+            root_task_id=root["id"],
+            root_payload=root,
+            task_payloads=(root,),
+        )
+
+        self.assertEqual(status, "blocked")
+        self.assertEqual(len(delivery.finals), 0)
+        self.assertEqual(len(client.created), 1)
+        self.assertEqual(client.created[0]["assignee"], "ceo-agent")
+        self.assertEqual(client.created[0]["initial_status"], "blocked")
+        self.assertIn("action=REQUEST_USER_INPUT", client.created[0]["body"])
+
+    def test_materialized_valid_primary_does_not_use_invalid_primary_fallback(self) -> None:
+        root = self.root_payload(final_answer="CEO planner metadata")
+        root["body"] = str(root["body"]).replace(
+            "selected_primary_profiles=qa-department",
+            "selected_primary_profiles=research-department",
+        ).replace(
+            "delegation_instruction.qa-department=Measure the system response latency.",
+            "delegation_instruction.research-department=Research the system response latency.",
+        )
+        research = {
+            "id": "research-primary",
+            "assignee": "research-department",
+            "status": "done",
+            "body": (
+                "workflow_root_task_id=root-invalid-primary\n"
+                "workflow_role=primary\n"
+                "workflow_mode=analysis"
+            ),
+        }
+        client = self.Client(root)
+        delivery = self.Delivery()
+        service = CeoSupervisorService(client, discord_delivery=delivery)
+
+        status = service._reconcile_unmaterialized_primary_root(
+            root_task_id=root["id"],
+            root_payload=root,
+            task_payloads=(root, research),
+        )
+
+        self.assertIsNone(status)
+        self.assertEqual(delivery.finals, [])
+        self.assertEqual(client.created, [])
+
+    def test_existing_synthesis_owns_final_delivery(self) -> None:
+        root = self.root_payload(final_answer="CEO planner metadata")
+        synthesis = {
+            "id": "existing-synthesis",
+            "assignee": "ceo-agent",
+            "status": "done",
+            "body": (
+                "workflow_root_task_id=root-invalid-primary\n"
+                "workflow_role=synthesis\n"
+                "workflow_mode=analysis"
+            ),
+        }
+        client = self.Client(root)
+        delivery = self.Delivery()
+        service = CeoSupervisorService(client, discord_delivery=delivery)
+
+        status = service._reconcile_unmaterialized_primary_root(
+            root_task_id=root["id"],
+            root_payload=root,
+            task_payloads=(root, synthesis),
+        )
+
+        self.assertIsNone(status)
+        self.assertEqual(delivery.finals, [])
+        self.assertEqual(client.created, [])
+
+    def test_late_optional_qa_block_delivers_existing_ceo_result_once(self) -> None:
+        root = self.root_payload(final_answer="CEO usable final answer")
+        child = self.late_qa_child(str(root["id"]))
+        client = self.LateChildClient(root, child)
+        delivery = self.Delivery()
+        service = CeoSupervisorService(client, discord_delivery=delivery)
+        service._project_terminal_task = lambda **kwargs: None
+
+        event = {
+            "event_id": "late-qa-blocked-1",
+            "task_id": child["id"],
+            "kind": "blocked",
+            "qa_required": False,
+        }
+
+        service.handle_terminal_event(event)
+
+        self.assertEqual(len(delivery.finals), 1)
+        self.assertEqual(delivery.finals[0]["title"], "🧠 CEO 답변")
+        self.assertEqual(delivery.finals[0]["content"], "CEO usable final answer")
+
+    def test_late_child_without_ceo_result_delivers_explicit_failure_once(self) -> None:
+        root = self.root_payload()
+        child = self.late_qa_child(str(root["id"]))
+        client = self.LateChildClient(root, child)
+        delivery = self.Delivery()
+        service = CeoSupervisorService(client, discord_delivery=delivery)
+        service._project_terminal_task = lambda **kwargs: None
+
+        event = {
+            "event_id": "late-qa-blocked-2",
+            "task_id": child["id"],
+            "kind": "blocked",
+            "qa_required": False,
+        }
+
+        service.handle_terminal_event(event)
+
+        self.assertEqual(len(delivery.finals), 1)
+        self.assertEqual(delivery.finals[0]["title"], "⚠️ CEO 처리 결과")
+        self.assertIn("완료되지 않았습니다", delivery.finals[0]["content"])
+        self.assertIn("최종 분석 결과", delivery.finals[0]["content"])
+
+    def test_planner_summary_is_not_reused_as_late_final(self) -> None:
+        root = self.root_payload()
+        root["runs"] = [
+            {
+                "metadata": {
+                    "summary": "QA fast_advisory 점검으로 위임했습니다.",
+                    "selected_primary_profiles": "qa-department",
+                }
+            }
+        ]
+        child = self.late_qa_child(str(root["id"]))
+        client = self.LateChildClient(root, child)
+        delivery = self.Delivery()
+        service = CeoSupervisorService(client, discord_delivery=delivery)
+
+        status = service._reconcile_late_child_finalization(
+            root_task_id=str(root["id"]),
+            root_payload=root,
+            task_payloads=(root, child),
+            task_id=str(child["id"]),
+        )
+
+        self.assertEqual(status, "sent")
+        self.assertEqual(len(delivery.finals), 1)
+        self.assertEqual(delivery.finals[0]["title"], "⚠️ CEO 처리 결과")
+        self.assertNotIn("위임했습니다", delivery.finals[0]["content"])
+
+    def test_late_child_terminal_replay_is_idempotent(self) -> None:
+        root = self.root_payload(final_answer="CEO usable final answer")
+        child = self.late_qa_child(str(root["id"]))
+        client = self.LateChildClient(root, child)
+        delivery = self.Delivery()
+        service = CeoSupervisorService(client, discord_delivery=delivery)
+        service._project_terminal_task = lambda **kwargs: None
+
+        for event_id in ("late-qa-blocked-3a", "late-qa-blocked-3b"):
+            service.handle_terminal_event(
+                {
+                    "event_id": event_id,
+                    "task_id": child["id"],
+                    "kind": "blocked",
+                    "qa_required": False,
+                }
+            )
+
+        self.assertEqual(len(delivery.finals), 1)
+
+    def test_late_child_does_not_race_existing_synthesis(self) -> None:
+        root = self.root_payload(final_answer="CEO planner metadata")
+        child = self.late_qa_child(str(root["id"]))
+        synthesis = {
+            "id": "existing-synthesis",
+            "assignee": "ceo-agent",
+            "status": "ready",
+            "body": build_scoped_task_body(
+                "synthesis",
+                str(root["id"]),
+                role="synthesis",
+                workflow_mode="analysis",
+            ),
+        }
+        client = self.LateChildClient(root, child)
+        delivery = self.Delivery()
+        service = CeoSupervisorService(client, discord_delivery=delivery)
+        service._project_terminal_task = lambda **kwargs: None
+
+        status = service._reconcile_late_child_finalization(
+            root_task_id=str(root["id"]),
+            root_payload=root,
+            task_payloads=(root, child, synthesis),
+            task_id=str(child["id"]),
+        )
+
+        self.assertIsNone(status)
+        self.assertEqual(delivery.finals, [])
+
+    def test_materialized_eligible_primary_keeps_delegated_synthesis_path(self) -> None:
+        root = self.root_payload(final_answer="CEO planner metadata")
+        root["body"] = str(root["body"]).replace(
+            "selected_primary_profiles=qa-department",
+            "selected_primary_profiles=research-department",
+        )
+        research = {
+            "id": "research-primary",
+            "assignee": "research-department",
+            "status": "done",
+            "result": "research result",
+            "body": build_scoped_task_body(
+                "research result",
+                str(root["id"]),
+                role="primary",
+                workflow_mode="analysis",
+            ),
+        }
+        client = self.LateChildClient(root, research)
+        delivery = self.Delivery()
+        service = CeoSupervisorService(client, discord_delivery=delivery)
+
+        status = service._reconcile_late_child_finalization(
+            root_task_id=str(root["id"]),
+            root_payload=root,
+            task_payloads=(root, research),
+            task_id="research-primary",
+        )
+
+        self.assertIsNone(status)
+        self.assertEqual(delivery.finals, [])
+
+
 class SupervisorWakeupTest(unittest.TestCase):
     def test_startup_reconciliation_recovers_direct_root_and_blocked_primary(self) -> None:
         class ExistingRootClient(FakeClient):
@@ -2538,6 +2888,95 @@ class ReadyPrimaryPlanRecoveryTest(unittest.TestCase):
             1,
         )
 
+    def test_handled_empty_primary_is_excluded_before_recovery_materialization(
+        self,
+    ) -> None:
+        """A durable clarification removes the root from later recovery polls."""
+
+        import time
+
+        now = int(time.time())
+
+        class Client(FakeClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.root_body = ReadyPrimaryPlanRecoveryTest._root_body()
+                self.payloads = []
+                self.ceo_comment = {
+                    "id": 1004,
+                    "task_id": "root",
+                    "author": "ceo-agent",
+                    "body": (
+                        "selected_primary_profiles=qa-department\n"
+                        "analysis_mode=fast_advisory\n"
+                        "workflow_mode=analysis\n"
+                        "producer=ceo-hermes-direct\n"
+                        "qa_required=false\n"
+                        "delegation_instruction.qa-department=Audit the analysis.\n"
+                    ),
+                    "created_at": now - 5,
+                }
+                self.show_calls = 0
+
+            def list_tasks(self):
+                rows = [
+                    {
+                        "id": "root",
+                        "status": "done",
+                        "created_at": now - 20,
+                        "completed_at": now - 5,
+                        "body": self.root_body,
+                    }
+                ]
+                for index, payload in enumerate(self.payloads):
+                    rows.append(
+                        {
+                            "id": payload["id"],
+                            "status": payload["status"],
+                            "created_at": now - 4 + index,
+                            "body": payload["body"],
+                            "idempotency_key": self.created[index][
+                                "idempotency_key"
+                            ],
+                        }
+                    )
+                return tuple(rows)
+
+            def show(self, task_id: str):
+                self.show_calls += 1
+                if task_id == "root":
+                    return {
+                        "id": "root",
+                        "status": "done",
+                        "created_at": now - 20,
+                        "completed_at": now - 5,
+                        "body": self.root_body,
+                        "metadata": {
+                            "selected_primary_profiles": "qa-department",
+                        },
+                        "comments": [self.ceo_comment, *self.comments],
+                    }
+                return super().show(task_id)
+
+        client = Client()
+        service = CeoSupervisorService(client)
+
+        with self.assertLogs(
+            "orchestration.adapters.ceo_supervisor", level="WARNING"
+        ) as captured:
+            first = service.materialize_ready_primary_plans()
+            second = service.materialize_ready_primary_plans()
+
+        self.assertEqual(len(first), 1)
+        self.assertEqual(first[0].action, SupervisorAction.REQUEST_USER_INPUT)
+        self.assertEqual(second, ())
+        self.assertEqual(len(client.created), 1)
+        self.assertEqual(client.show_calls, 1)
+        self.assertEqual(
+            sum("invalid-primary-selection" in line for line in captured.output),
+            1,
+        )
+
 
 class InitialPrimaryMaterializationTest(unittest.TestCase):
     """CEO one-pass delegation plan -> deterministic primary materialization."""
@@ -2627,6 +3066,32 @@ class InitialPrimaryMaterializationTest(unittest.TestCase):
                 for line in captured.output
             )
         )
+
+    def test_qa_only_without_delegation_plan_requests_user_input(self) -> None:
+        body = (
+            "origin=user-query\n"
+            "workflow_role=root\n"
+            "workflow_mode=analysis\n"
+            "analysis_mode=fast_advisory\n"
+            "selected_primary_profiles=qa-department\n"
+        )
+        state = SupervisorState(
+            parent_task_id="root",
+            children=(),
+            workflow_mode="analysis",
+            selected_primary_profiles=("qa-department",),
+            root_is_user_query=True,
+        )
+
+        with self.assertLogs(
+            "orchestration.adapters.ceo_supervisor", level="WARNING"
+        ):
+            decisions = _initial_primary_materialization_decisions(state, body)
+
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0].action, SupervisorAction.REQUEST_USER_INPUT)
+        self.assertEqual(decisions[0].assignee, "ceo-agent")
+        self.assertIn("action=REQUEST_USER_INPUT", decisions[0].body)
 
     def test_mixed_selection_skips_qa_but_keeps_valid_primaries(self) -> None:
         body = (
@@ -2834,9 +3299,13 @@ class DelegationProjectionOrderingTest(unittest.TestCase):
 
         self.assertTrue(handled)
         self.assertIsNotNone(decision)
-        self.assertEqual(timeline[0], "ceo-dispatch")
+        self.assertEqual(
+            timeline[-1],
+            "ceo-dispatch",
+            "delegation display must follow durable child creation",
+        )
         self.assertCountEqual(
-            timeline[1:],
+            timeline[:-1],
             [
                 "child:research-department",
                 "child:quant-backtest-department",
@@ -2875,7 +3344,7 @@ class DelegationProjectionOrderingTest(unittest.TestCase):
         )
 
         self.assertTrue(handled)
-        self.assertEqual(timeline[0], "ceo-dispatch-attempt")
+        self.assertEqual(timeline[-1], "ceo-dispatch-attempt")
         self.assertEqual(len(timeline), 4)
 
     def test_replayed_root_event_keeps_delegation_card_exactly_once(self) -> None:

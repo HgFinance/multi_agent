@@ -240,6 +240,71 @@ class CeoRootTaskBoundaryTest(unittest.TestCase):
         self.assertFalse(acknowledgement["planning"]["qa_required"])
         self.assertNotIn("QA", acknowledgement["answer"])
 
+    def test_planned_metadata_without_materialized_child_does_not_claim_delegation(self) -> None:
+        # Regression for t_71e0df48: the CEO run metadata selected QA, but no
+        # QA child was created.  A planning summary must not become a
+        # user-facing delegation claim.
+        root = {
+            "id": "t_71e0df48",
+            "children": [],
+            "latest_summary": "QA fast_advisory 점검으로 위임했습니다.",
+            "runs": [
+                {
+                    # Hermes task_runs expose metadata as JSON text in the
+                    # production show projection.
+                    "metadata": json.dumps(
+                        {
+                            "selected_primary_profiles": "qa-department",
+                            "analysis_mode": "fast_advisory",
+                        }
+                    )
+                }
+            ],
+        }
+
+        acknowledgement = ceo._planning_acknowledgement(root)
+
+        self.assertEqual(acknowledgement["status"], "accepted")
+        self.assertEqual(acknowledgement["planning"]["planned_departments"], ["qa-department"])
+        self.assertEqual(acknowledgement["planning"]["materialized_departments"], [])
+        self.assertNotIn("QA에서", acknowledgement["answer"])
+        self.assertIn("CEO가 직접 확인 중입니다", acknowledgement["answer"])
+
+    def test_display_uses_materialized_primary_children_only(self) -> None:
+        root = {
+            "id": "t_root",
+            "children": [
+                {
+                    "id": "t_research",
+                    "assignee": "research-department",
+                    "body": "workflow_role=primary",
+                },
+            ],
+            "runs": [
+                {
+                    "metadata": {
+                        "selected_primary_profiles": (
+                            "research-department,qa-department"
+                        ),
+                        "qa_required": True,
+                    }
+                }
+            ],
+        }
+
+        acknowledgement = ceo._planning_acknowledgement(root)
+
+        self.assertEqual(
+            acknowledgement["planning"]["selected_departments"],
+            ["research-department"],
+        )
+        self.assertEqual(
+            acknowledgement["planning"]["planned_departments"],
+            ["research-department", "qa-department"],
+        )
+        self.assertFalse(acknowledgement["planning"]["qa_required"])
+        self.assertNotIn("QA", acknowledgement["answer"])
+
     def test_planning_projection_uses_current_root_scope_only(self) -> None:
         root = {"id": "t_root", "children": []}
         rows = (

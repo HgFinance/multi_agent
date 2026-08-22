@@ -73,6 +73,11 @@ from orchestration.kanban_root_index import (
     SQLiteRootScopedIndex,
     kanban_db_path,
 )
+from orchestration.primary_task_idempotency import (
+    REQUEST_USER_INPUT_ACTION_BODY,
+    is_analysis_primary_eligible,
+    request_user_input_idempotency_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -156,12 +161,6 @@ FAILURE_OUTCOMES = frozenset(
 )
 PRIMARY_DEPARTMENTS = frozenset(
     {"research", "quant", "trading", "risk", "accounting"}
-)
-# ``qa-department`` is a valid Hermes assignee for the governance QA lane, but
-# it is not an ordinary analysis primary. Keep this boundary local to initial
-# primary materialization so RUN_QA continues to use the same canonical profile.
-PRIMARY_MATERIALIZATION_BLOCKED_PROFILES = frozenset(
-    {canonical_profile_for_department("qa")}
 )
 SUPERVISOR_MARKER = "hgfinance.ceo-supervisor.v1"
 SUPERVISOR_WAKE_MARKER = "hgfinance.ceo-supervisor.wakeup.v1"
@@ -684,10 +683,28 @@ def _empty_primary_request_user_input_decision(
         state.parent_task_id,
         assignee=canonical_profile_for_department("ceo"),
         title="CEO planner produced no executable child task",
-        body=f"{SUPERVISOR_MARKER} action=REQUEST_USER_INPUT no_analysis_children",
+        body=REQUEST_USER_INPUT_ACTION_BODY,
         parent_task_ids=(),
         reason="no_analysis_children",
     )
+
+
+def _handled_empty_primary_control_root(
+    payload: Mapping[str, Any],
+) -> str | None:
+    """Return the root handled by an existing empty-primary control child."""
+
+    body = str(payload.get("body") or "")
+    root_id = terminal_workflow_root(payload)
+    if (
+        not root_id
+        or terminal_workflow_role(payload) != "control"
+        or SUPERVISOR_MARKER not in body
+        or f"action={SupervisorAction.REQUEST_USER_INPUT.value}" not in body
+        or "no_analysis_children" not in body
+    ):
+        return None
+    return root_id
 
 
 # hgfinance-batch-delegation-materializer-v1
@@ -825,6 +842,20 @@ def _initial_primary_materialization_decisions(
             ",".join(selected),
             ",".join(plan),
         )
+        if selected and all(
+            not is_analysis_primary_eligible(profile)
+            for profile in selected
+        ):
+            if state.has_action(SupervisorAction.REQUEST_USER_INPUT):
+                return ()
+            for profile in selected:
+                logger.warning(
+                    "invalid-primary-selection root=%s profile=%s "
+                    "reason=ROLE_NOT_PRIMARY_ELIGIBLE",
+                    state.parent_task_id,
+                    profile,
+                )
+            return (_empty_primary_request_user_input_decision(state),)
         return ()
 
     analysis_mode = _analysis_execution_mode_from_root_body(root_body)
@@ -838,7 +869,7 @@ def _initial_primary_materialization_decisions(
     blocked_profiles = tuple(
         profile
         for profile in state.missing_primary_profiles
-        if profile in PRIMARY_MATERIALIZATION_BLOCKED_PROFILES
+        if not is_analysis_primary_eligible(profile)
     )
     selected_profiles = set(state.selected_primary_profiles)
     blocked_profile_set = set(blocked_profiles)
@@ -879,7 +910,7 @@ def _initial_primary_materialization_decisions(
     decisions: list[SupervisorDecision] = []
 
     for profile in state.missing_primary_profiles:
-        if profile in PRIMARY_MATERIALIZATION_BLOCKED_PROFILES:
+        if not is_analysis_primary_eligible(profile):
             continue
         department = department_for_canonical_profile(profile)
 
@@ -2890,6 +2921,15 @@ class CeoSupervisorService:
                 )
                 return None
 
+        if task_id == root_task_id:
+            root_final_status = self._reconcile_unmaterialized_primary_root(
+                root_task_id=root_task_id,
+                root_payload=task,
+                task_payloads=(task, *task_payloads),
+            )
+            if root_final_status is not None:
+                return root_final_status
+
         body = str(task.get("body") or "")
         role = terminal_workflow_role(task) or ""
         task_action = terminal_action(task) or terminal_action({"body": body})
@@ -3073,14 +3113,20 @@ class CeoSupervisorService:
         *,
         root_task_id: str,
         root_payload: Mapping[str, Any],
+        task_payloads: Sequence[Mapping[str, Any]] | None = None,
+        materialized_primary_profiles: Sequence[str] | None = None,
     ) -> str | None:
         """Bridge a completed CEO planning root to existing Discord delivery.
 
         No semantic routing happens here.
 
-        Existing CEO-authored durable state decides the UX:
+        Existing durable execution state decides the UX:
         - no selected primary + root final_answer -> direct CEO reply
-        - selected primaries -> one CEO delegation card
+        - materialized selected primaries -> one CEO delegation card
+
+        Planner metadata alone never authorizes a delegation card.  Callers
+        that have just created children may pass their successful assignees;
+        terminal/recovery callers pass the authoritative task projection.
 
         Existing Discord delivery methods own correlation, idempotency,
         message creation/update, and thread targeting.
@@ -3114,6 +3160,39 @@ class CeoSupervisorService:
         store = DiscordIdempotencyStore(delivery_home)
 
         selected = selected_primary_profiles_from_task(root_payload)
+
+        if selected:
+            if materialized_primary_profiles is not None:
+                materialized = {
+                    str(profile).strip()
+                    for profile in materialized_primary_profiles
+                    if str(profile).strip()
+                }
+            else:
+                payloads = task_payloads
+                if payloads is None:
+                    children = root_payload.get("children")
+                    payloads = tuple(
+                        child
+                        for child in children
+                        if isinstance(child, Mapping)
+                    ) if isinstance(children, Sequence) and not isinstance(
+                        children, (str, bytes)
+                    ) else ()
+                materialized = {
+                    child.profile
+                    for child in self._materialized_primary_children(
+                        root_task_id=root_task_id,
+                        task_payloads=payloads,
+                    )
+                }
+            selected = tuple(profile for profile in selected if profile in materialized)
+            if not selected:
+                logger.info(
+                    "ceo-root-discord-bridge root=%s mode=planned-not-materialized",
+                    root_task_id,
+                )
+                return None
 
         # Delegated workflow:
         # reuse the CEO's existing durable selection + delegation instructions.
@@ -3160,11 +3239,38 @@ class CeoSupervisorService:
             )
             return status
 
-        # Direct CEO answer:
-        # reuse ChildTaskState's existing run-metadata final_answer fallback.
-        root_state = ChildTaskState.from_hermes(root_payload)
+        return self._deliver_direct_ceo_answer(
+            root_task_id=root_task_id,
+            root_payload=root_payload,
+            store=store,
+            profile=ceo_profile,
+        )
 
-        content = _text(
+    @staticmethod
+    def _materialized_primary_children(
+        *,
+        root_task_id: str,
+        task_payloads: Sequence[Mapping[str, Any]],
+    ) -> tuple[ChildTaskState, ...]:
+        """Return only authoritative, materialized analysis primary tasks."""
+
+        children: list[ChildTaskState] = []
+        for payload in task_payloads:
+            child = ChildTaskState.from_hermes(payload)
+            if (
+                child.task_id != root_task_id
+                and child.is_in_workflow(root_task_id)
+                and child.is_analysis
+            ):
+                children.append(child)
+        return tuple(children)
+
+    @staticmethod
+    def _root_response_content(root_payload: Mapping[str, Any]) -> str:
+        """Read an existing CEO result without treating planner metadata as one."""
+
+        root_state = ChildTaskState.from_hermes(root_payload)
+        return _text(
             root_state.final_answer
             or root_state.result
             or root_state.summary
@@ -3173,6 +3279,55 @@ class CeoSupervisorService:
             or root_payload.get("result")
         )
 
+    @staticmethod
+    def _root_explicit_response_content(
+        root_payload: Mapping[str, Any],
+    ) -> str:
+        """Read only explicit answer fields, excluding planner summaries.
+
+        A CEO completion summary can describe an intended delegation.  When
+        no child was materialized, treating that summary as a direct answer
+        repeats the planning/materialization mismatch to the user.  Explicit
+        result/final_answer fields remain valid direct answers.
+        """
+
+        content = _text(
+            root_payload.get("final_answer")
+            or root_payload.get("result")
+        )
+        if content:
+            return content
+
+        runs = root_payload.get("runs")
+        if not isinstance(runs, Sequence) or isinstance(runs, (str, bytes)):
+            return ""
+        for run in reversed(runs):
+            if not isinstance(run, Mapping):
+                continue
+            metadata = run.get("metadata")
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    metadata = {}
+            if not isinstance(metadata, Mapping):
+                continue
+            content = _text(metadata.get("final_answer") or metadata.get("result"))
+            if content:
+                return content
+        return ""
+
+    def _deliver_direct_ceo_answer(
+        self,
+        *,
+        root_task_id: str,
+        root_payload: Mapping[str, Any],
+        store: DiscordIdempotencyStore,
+        profile: str,
+    ) -> str:
+        """Deliver the existing root answer through the normal final helper."""
+
+        content = self._root_response_content(root_payload)
         if not content:
             logger.info(
                 "ceo-root-discord-bridge root=%s mode=direct status=empty",
@@ -3187,7 +3342,7 @@ class CeoSupervisorService:
             content=content,
             title="🧠 CEO 답변",
             store=store,
-            profile=ceo_profile,
+            profile=profile,
             response_key_suffix=f"ceo-direct:{root_task_id}",
         )
 
@@ -3196,6 +3351,258 @@ class CeoSupervisorService:
             root_task_id,
             status,
         )
+        return status
+
+    def _reconcile_unmaterialized_primary_root(
+        self,
+        *,
+        root_task_id: str,
+        root_payload: Mapping[str, Any],
+        task_payloads: Sequence[Mapping[str, Any]],
+    ) -> str | None:
+        """Close an invalid all-primary plan without losing the user response.
+
+        Planner selections are intent metadata.  This guard applies only when
+        every selected profile is known to be ineligible for primary
+        materialization (currently the governance QA profile) and the
+        authoritative workflow contains no materialized primary child.
+        """
+
+        selected = tuple(selected_primary_profiles_from_task(root_payload))
+        if not selected or not all(
+            not is_analysis_primary_eligible(profile)
+            for profile in selected
+        ):
+            return None
+
+        materialized = self._materialized_primary_children(
+            root_task_id=root_task_id,
+            task_payloads=task_payloads,
+        )
+        if materialized:
+            return None
+
+        # A response-plane synthesis, even if its terminal event is being
+        # replayed, owns final delivery. Never race it with a CEO direct
+        # fallback based only on the planning root's metadata.
+        for payload in task_payloads:
+            candidate = ChildTaskState.from_hermes(payload)
+            if (
+                candidate.task_id != root_task_id
+                and candidate.is_in_workflow(root_task_id)
+                and candidate.workflow_role == "synthesis"
+            ):
+                return None
+
+        # For an all-ineligible selected plan, a summary is commonly just the
+        # CEO's delegation acknowledgement.  Only an explicit result can
+        # satisfy the direct-response branch; otherwise emit the existing
+        # explicit blocked/failure response below.
+        content = self._root_explicit_response_content(root_payload)
+        if content and self.discord_delivery is not None:
+            environment = getattr(self.client, "environment", os.environ)
+            hermes_home = environment.get("HERMES_HOME", "/opt/data")
+            ceo_profile = canonical_profile_for_department("ceo")
+            ceo_profile_home = os.path.join(hermes_home, "profiles", ceo_profile)
+            delivery_home = (
+                ceo_profile_home
+                if os.path.isdir(ceo_profile_home)
+                else hermes_home
+            )
+            status = self._deliver_direct_ceo_answer(
+                root_task_id=root_task_id,
+                root_payload=root_payload,
+                store=DiscordIdempotencyStore(delivery_home),
+                profile=ceo_profile,
+            )
+            if status in {"sent", "deduped"}:
+                logger.info(
+                    "ceo-root-invalid-primary-final root=%s selected=%s status=%s",
+                    root_task_id,
+                    ",".join(selected),
+                    status,
+                )
+                return status
+
+        # Preserve the delivery helper's existing retry/failure semantics. A
+        # usable answer that could not be delivered is not equivalent to an
+        # empty answer and must not be replaced by a fabricated blocked result.
+        if content:
+            return None
+
+        # No usable CEO result exists. Preserve the existing explicit blocked
+        # control-task semantics; never fabricate a final answer.
+        state = SupervisorState(
+            parent_task_id=root_task_id,
+            children=materialized,
+            workflow_mode="analysis",
+            selected_primary_profiles=selected,
+            root_is_user_query=True,
+            allow_primary_passthrough=self.discord_delivery is not None,
+        )
+        decision = _empty_primary_request_user_input_decision(state)
+        self._execute(decision, state)
+        logger.warning(
+            "ceo-root-invalid-primary-blocked root=%s selected=%s",
+            root_task_id,
+            ",".join(selected),
+        )
+        return "blocked"
+
+    @staticmethod
+    def _materialized_terminal_children(
+        *,
+        root_task_id: str,
+        task_payloads: Sequence[Mapping[str, Any]],
+    ) -> tuple[ChildTaskState, ...]:
+        """Return terminal materialized children, including optional QA work."""
+
+        terminal: list[ChildTaskState] = []
+        for payload in task_payloads:
+            child = ChildTaskState.from_hermes(payload)
+            if (
+                child.task_id != root_task_id
+                and child.is_in_workflow(root_task_id)
+                and child.terminal
+            ):
+                terminal.append(child)
+        return tuple(terminal)
+
+    @staticmethod
+    def _response_synthesis_exists(
+        *,
+        root_task_id: str,
+        task_payloads: Sequence[Mapping[str, Any]],
+    ) -> bool:
+        for payload in task_payloads:
+            child = ChildTaskState.from_hermes(payload)
+            if (
+                child.task_id != root_task_id
+                and child.is_in_workflow(root_task_id)
+                and child.workflow_role == "synthesis"
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _terminal_failure_content(child: ChildTaskState) -> str:
+        """Build an explicit, non-fabricated user-facing failure response."""
+
+        _, label = DEPARTMENT_DISCORD_LABELS.get(
+            child.profile,
+            ("⚠️", child.profile),
+        )
+        if child.failure_kind == FailureKind.PROTOCOL.value:
+            reason = "정상적인 terminal 결과가 인계되지 않았습니다."
+        else:
+            category = _failure_category_for_department_card(
+                child.summary,
+                child.error,
+                child.block_reason,
+            )
+            reason = _safe_failure_reason(category)
+        return (
+            "⚠️ **요청 처리 결과**\n"
+            f"{label} 작업이 완료되지 않았습니다.\n"
+            f"- 사유: {reason}\n\n"
+            "확인 가능한 최종 분석 결과가 없어 성공 답변을 만들지 않았습니다."
+        )
+
+    def _reconcile_late_child_finalization(
+        self,
+        *,
+        root_task_id: str,
+        root_payload: Mapping[str, Any],
+        task_payloads: Sequence[Mapping[str, Any]],
+        task_id: str,
+    ) -> str | None:
+        """Re-check final response completeness after a root's late child terminal."""
+
+        if self.discord_delivery is None:
+            return None
+        root_body = str(root_payload.get("body") or "")
+        if (
+            workflow_mode_from_body(root_body) != "analysis"
+            or not is_user_query_body(root_body)
+            or str(root_payload.get("status") or "").casefold()
+            not in TERMINAL_STATUSES
+            or task_id == root_task_id
+        ):
+            return None
+
+        terminal_children = self._materialized_terminal_children(
+            root_task_id=root_task_id,
+            task_payloads=task_payloads,
+        )
+        terminal_child = next(
+            (child for child in terminal_children if child.task_id == task_id),
+            None,
+        )
+        if terminal_child is None:
+            return None
+
+        # A materialized eligible primary still owns the normal delegated /
+        # synthesis path.  Late optional-child finalization must not turn a
+        # valid Research/Quant/Risk workflow into an early CEO direct answer.
+        if self._materialized_primary_children(
+            root_task_id=root_task_id,
+            task_payloads=task_payloads,
+        ):
+            return None
+
+        # A response-plane synthesis owns delivery. Do not race it with a
+        # direct/blocked fallback merely because an optional child finished.
+        if self._response_synthesis_exists(
+            root_task_id=root_task_id,
+            task_payloads=task_payloads,
+        ):
+            return None
+
+        environment = getattr(self.client, "environment", os.environ)
+        hermes_home = environment.get("HERMES_HOME", "/opt/data")
+        ceo_profile = canonical_profile_for_department("ceo")
+        ceo_profile_home = os.path.join(hermes_home, "profiles", ceo_profile)
+        delivery_home = (
+            ceo_profile_home
+            if os.path.isdir(ceo_profile_home)
+            else hermes_home
+        )
+        store = DiscordIdempotencyStore(delivery_home)
+
+        # A planner summary can only describe intended delegation.  If the
+        # late child is the control/failure path for an unmaterialized plan,
+        # reuse an explicit CEO result only; otherwise deliver the existing
+        # terminal failure response instead of repeating the stale delegation
+        # claim.
+        root_content = self._root_explicit_response_content(root_payload)
+        if root_content:
+            status = self._deliver_direct_ceo_answer(
+                root_task_id=root_task_id,
+                root_payload=root_payload,
+                store=store,
+                profile=ceo_profile,
+            )
+        else:
+            status = self.discord_delivery.deliver_to_existing_thread(
+                root_task_id=root_task_id,
+                source_task=root_payload,
+                root_task=root_payload,
+                content=self._terminal_failure_content(terminal_child),
+                title="⚠️ CEO 처리 결과",
+                store=store,
+                profile=ceo_profile,
+                response_key_suffix=f"ceo-blocked:{root_task_id}",
+            )
+
+        if status in {"sent", "deduped"}:
+            logger.info(
+                "ceo-late-child-finalization root=%s child=%s status=%s "
+                "mode=%s",
+                root_task_id,
+                task_id,
+                status,
+                "direct" if root_content else "blocked",
+            )
         return status
 
 
@@ -3576,6 +3983,17 @@ class CeoSupervisorService:
             board_rows = list_tasks()
         else:
             board_rows = listed_rows
+
+        # The indexed candidate query excludes these roots upstream.  Keep
+        # the same marker check for the full-board fallback and for callers
+        # that provide a broader snapshot: once the durable clarification
+        # exists, this invalid empty-primary plan is already handled.
+        handled_empty_primary_roots = {
+            handled_root
+            for row in board_rows
+            for handled_root in (_handled_empty_primary_control_root(row),)
+            if handled_root
+        }
         for row in board_rows:
             task_id = str(row.get("id") or row.get("task_id") or "")
             body = str(row.get("body") or "")
@@ -3602,6 +4020,7 @@ class CeoSupervisorService:
                 )
                 or not is_user_query_body(body)
                 or workflow_mode_from_body(body) != "analysis"
+                or task_id in handled_empty_primary_roots
             ):
                 continue
 
@@ -3665,6 +4084,16 @@ class CeoSupervisorService:
 
                 _, payloads = workflow(root_id)
 
+                # A recovery snapshot can race the board candidate snapshot.
+                # Re-check the authoritative workflow children immediately
+                # before decision generation so the handled marker still wins
+                # even when it was created after candidate discovery.
+                if any(
+                    _handled_empty_primary_control_root(payload) == root_id
+                    for payload in payloads
+                ):
+                    continue
+
                 children = tuple(
                     ChildTaskState.from_hermes(payload)
                     for payload in payloads
@@ -3711,29 +4140,6 @@ class CeoSupervisorService:
                     )
                     continue
 
-                # Publish the CEO-authored delegation card before any primary
-                # task can claim and project its own department card.  The
-                # durable Discord idempotency key keeps recovery/replay safe.
-                try:
-                    bridge_status = self._bridge_root_completion_to_discord(
-                        root_task_id=root_id,
-                        root_payload=root_payload,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "ceo-root-discord-bridge-failed root=%s error=%s",
-                        root_id,
-                        type(exc).__name__,
-                    )
-                    bridge_status = "failed"
-
-                logger.info(
-                    "root-planning-complete-projected-before-primary-create "
-                    "root=%s status=%s",
-                    root_id,
-                    bridge_status,
-                )
-
                 # hgfinance-parallel-primary-fanout-v1
                 #
                 # Initial analysis primaries are independent: they deliberately
@@ -3776,6 +4182,31 @@ class CeoSupervisorService:
                         decision.assignee or ""
                         for decision in decisions
                     ),
+                )
+
+                # A delegation card is a projection of durable children, not
+                # of the planner's intended set.  Publish only after the
+                # successful idempotent creates above.
+                try:
+                    bridge_status = self._bridge_root_completion_to_discord(
+                        root_task_id=root_id,
+                        root_payload=root_payload,
+                        materialized_primary_profiles=tuple(
+                            decision.assignee or "" for decision in decisions
+                        ),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "ceo-root-discord-bridge-failed root=%s error=%s",
+                        root_id,
+                        type(exc).__name__,
+                    )
+                    bridge_status = "failed"
+                logger.info(
+                    "root-planning-complete-projected-after-primary-create "
+                    "root=%s status=%s",
+                    root_id,
+                    bridge_status,
                 )
 
                 materialized.extend(decisions)
@@ -4102,6 +4533,13 @@ class CeoSupervisorService:
             decision.action != SupervisorAction.CREATE_TASK
             for decision in decisions
         ):
+            final_status = self._reconcile_unmaterialized_primary_root(
+                root_task_id=task_id,
+                root_payload=root_payload,
+                task_payloads=(root_payload,),
+            )
+            if final_status is not None:
+                return True, None
             for decision in decisions:
                 self._execute(decision, state)
             logger.info(
@@ -4111,28 +4549,6 @@ class CeoSupervisorService:
                 decisions[0].action.value,
             )
             return True, decisions[0]
-
-        # Commit the CEO delegation projection before the first primary create.
-        # The existing idempotency store owns replay/recovery deduplication.
-        try:
-            bridge_status = self._bridge_root_completion_to_discord(
-                root_task_id=task_id,
-                root_payload=root_payload,
-            )
-        except Exception as exc:
-            logger.warning(
-                "ceo-root-discord-bridge-failed root=%s error=%s",
-                task_id,
-                type(exc).__name__,
-            )
-            bridge_status = "failed"
-
-        logger.info(
-            "root-planning-complete-fast-projected-before-primary-create "
-            "root=%s status=%s",
-            task_id,
-            bridge_status,
-        )
 
         if len(decisions) == 1:
             self._execute(decisions[0], state)
@@ -4161,6 +4577,24 @@ class CeoSupervisorService:
             len(decisions),
             ",".join(decision.assignee or "" for decision in decisions),
         )
+
+        # The delegation card is a projection of durable children.  Publish
+        # it only after the idempotent child creates above have succeeded.
+        try:
+            bridge_status = self._bridge_root_completion_to_discord(
+                root_task_id=task_id,
+                root_payload=root_payload,
+                materialized_primary_profiles=tuple(
+                    decision.assignee or "" for decision in decisions
+                ),
+            )
+        except Exception as exc:
+            logger.warning(
+                "ceo-root-discord-bridge-failed root=%s error=%s",
+                task_id,
+                type(exc).__name__,
+            )
+            bridge_status = "failed"
 
         logger.info(
             "root-planning-complete-fast-primary-created root=%s status=%s",
@@ -4644,6 +5078,7 @@ class CeoSupervisorService:
                             bridge_status = self._bridge_root_completion_to_discord(
                                 root_task_id=root_id,
                                 root_payload=root_payload,
+                                task_payloads=(root_payload, *payloads),
                             )
                         except Exception as exc:
                             # UI projection must never mutate or block workflow
@@ -4663,6 +5098,11 @@ class CeoSupervisorService:
                             root_id,
                             event_key,
                             bridge_status,
+                        )
+                        self._reconcile_unmaterialized_primary_root(
+                            root_task_id=root_id,
+                            root_payload=root_payload,
+                            task_payloads=(root_payload, *payloads),
                         )
                         return None
                 try:
@@ -4795,6 +5235,31 @@ class CeoSupervisorService:
                     for payload in payloads
                     if payload.get("assignee") is not None
                 )
+                response_payloads = (root_payload, *payloads)
+                if terminal_task_payload is not None and not any(
+                    str(payload.get("id") or payload.get("task_id") or "")
+                    == task_id
+                    for payload in response_payloads
+                ):
+                    response_payloads = (*response_payloads, terminal_task_payload)
+                try:
+                    self._reconcile_late_child_finalization(
+                        root_task_id=root_id,
+                        root_payload=root_payload,
+                        task_payloads=response_payloads,
+                        task_id=task_id,
+                    )
+                except Exception as exc:
+                    # Final delivery remains retryable through the existing
+                    # idempotent helper and a later terminal/recovery wakeup.
+                    # Never turn a child terminal event into a supervisor crash.
+                    logger.warning(
+                        "ceo-late-child-finalization-failed root=%s child=%s "
+                        "error=%s",
+                        root_id,
+                        task_id,
+                        type(exc).__name__,
+                    )
                 unmarked_primary_ids = tuple(
                     child.task_id
                     for child in children
@@ -5357,7 +5822,9 @@ class CeoSupervisorService:
                 ),
                 assignee=decision.assignee or canonical_profile_for_department("ceo"),
                 parent_task_ids=decision.parent_task_ids,
-                idempotency_key=f"{state.parent_task_id}:supervisor:user-input",
+                idempotency_key=request_user_input_idempotency_key(
+                    state.parent_task_id
+                ),
                 initial_status="blocked",
             )
             return

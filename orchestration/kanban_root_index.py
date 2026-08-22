@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Mapping
 from urllib.parse import quote
 
+from orchestration.primary_task_idempotency import REQUEST_USER_INPUT_SUFFIX
+
 
 ROOT_COLUMN = "workflow_root_task_id"
 ROOT_INDEX_NAME = "idx_tasks_workflow_root_task_id"
@@ -248,6 +250,17 @@ class SQLiteRootScopedIndex:
             completed_at_expression = (
                 "completed_at" if "completed_at" in columns else "NULL"
             )
+            # An empty-primary clarification is a durable terminal handling
+            # marker for the invalid plan.  Exclude only that exact control
+            # child from recovery discovery; other REQUEST_USER_INPUT tasks
+            # remain eligible for the existing recovery paths.
+            control_key_clause = ""
+            query_parameters: tuple[object, ...] = ()
+            if "idempotency_key" in columns:
+                control_key_clause = (
+                    "AND control.idempotency_key = tasks.id || ? "
+                )
+                query_parameters = (REQUEST_USER_INPUT_SUFFIX,)
             rows = conn.execute(
                 "SELECT id, body, status, created_at, "
                 f"{completed_at_expression} AS completed_at "
@@ -256,7 +269,19 @@ class SQLiteRootScopedIndex:
                 "instr(body, 'workflow_role=root') > 0 OR "
                 "instr(body, 'root_task_role=scope_and_planning') > 0 OR "
                 "instr(body, 'workflow_role=synthesis') > 0"
-                ") ORDER BY created_at ASC, id ASC"
+                ") AND NOT EXISTS ("
+                "SELECT 1 FROM tasks AS control "
+                "WHERE control.workflow_root_task_id = tasks.id "
+                "AND control.status != 'archived' "
+                "AND instr("
+                "char(10) || replace(coalesce(control.body, ''), char(13), '') "
+                "|| char(10), char(10) || 'workflow_role=control' || char(10)"
+                ") > 0 "
+                "AND instr(control.body, 'action=REQUEST_USER_INPUT') > 0 "
+                "AND instr(control.body, 'no_analysis_children') > 0 "
+                f"{control_key_clause}"
+                ") ORDER BY created_at ASC, id ASC",
+                query_parameters,
             ).fetchall()
             return tuple(
                 {

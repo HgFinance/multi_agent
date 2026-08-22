@@ -219,6 +219,12 @@ def main() -> int:
     parser.add_argument("--rank", type=int, default=16)
     parser.add_argument("--alpha", type=int, default=32)
     parser.add_argument("--dropout", type=float, default=0.05)
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=Path,
+        default=None,
+        help="optional directory where each epoch adapter and validation loss are saved",
+    )
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")
@@ -284,6 +290,44 @@ def main() -> int:
     steps_per_epoch = (len(train) + args.gradient_accumulation_steps - 1) // args.gradient_accumulation_steps
     total_updates = max(1, int(args.epochs * steps_per_epoch))
     losses: list[float] = []
+    checkpoint_validation_losses: list[dict[str, Any]] = []
+
+    def evaluate_validation() -> list[float]:
+        model.eval()
+        values: list[float] = []
+        with torch.no_grad():
+            for record in validation:
+                input_ids, attention_mask, labels = collate_one(tokenizer, record, args.max_seq_length)
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels, use_cache=False)
+                values.append(float(outputs.loss.detach().cpu()))
+                del input_ids, attention_mask, labels, outputs
+        model.train()
+        return values
+
+    def save_checkpoint(epoch_number: int, validation_losses: list[float]) -> None:
+        if args.checkpoint_dir is None:
+            return
+        checkpoint = args.checkpoint_dir / f"epoch-{epoch_number}"
+        checkpoint.mkdir(parents=True, exist_ok=True)
+        save_file(adapter_state(model), str(checkpoint / "adapter_model.safetensors"), metadata={"format": "pt"})
+        checkpoint_config = adapter_config(
+            args.adapter_base_model or str(args.base_model),
+            args.base_revision,
+            args.rank,
+            args.alpha,
+            args.dropout,
+        )
+        (checkpoint / "adapter_config.json").write_text(
+            json.dumps(checkpoint_config, indent=2) + "\n", encoding="utf-8"
+        )
+        checkpoint_validation_losses.append(
+            {
+                "epoch": epoch_number,
+                "mean_validation_loss": sum(validation_losses) / len(validation_losses),
+                "checkpoint": str(checkpoint),
+            }
+        )
+
     optimizer.zero_grad(set_to_none=True)
     update = 0
     for epoch in range(max(1, int(args.epochs))):
@@ -305,15 +349,21 @@ def main() -> int:
             del input_ids, attention_mask, labels, outputs, loss
         gc.collect()
         torch.cuda.empty_cache()
+        validation_losses = evaluate_validation()
+        save_checkpoint(epoch + 1, validation_losses)
+        print(
+            json.dumps(
+                {
+                    "epoch": epoch + 1,
+                    "mean_validation_loss": sum(validation_losses) / len(validation_losses),
+                    "checkpoint": str(args.checkpoint_dir / f"epoch-{epoch + 1}") if args.checkpoint_dir else None,
+                }
+            ),
+            flush=True,
+        )
 
     model.eval()
-    eval_losses: list[float] = []
-    with torch.no_grad():
-        for record in validation:
-            input_ids, attention_mask, labels = collate_one(tokenizer, record, args.max_seq_length)
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels, use_cache=False)
-            eval_losses.append(float(outputs.loss.detach().cpu()))
-            del input_ids, attention_mask, labels, outputs
+    eval_losses = evaluate_validation()
     state = adapter_state(model)
     save_file(state, str(args.output_dir / "adapter_model.safetensors"), metadata={"format": "pt"})
     config = adapter_config(
@@ -352,6 +402,7 @@ def main() -> int:
             "mean_validation_loss": sum(eval_losses) / len(eval_losses),
             "max_train_loss": max(losses),
             "min_train_loss": min(losses),
+            "checkpoint_validation_losses": checkpoint_validation_losses,
         },
         "runtime": {
             "python": __import__("platform").python_version(),

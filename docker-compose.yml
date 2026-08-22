@@ -1182,6 +1182,10 @@ services:
       # 어느 프로필이 무엇을 쓸 수 있는지는 orchestration/skill_contract.py 가 정한다.
       - ./skills:/opt/shared-skills:ro
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
+      # QA-only worker boundary: preserve Hermes behavior while converting a
+      # clean exit without a Kanban terminal marker into the existing block
+      # handoff. The wrapper is never used by other profiles/services.
+      - ./scripts:/opt/hgfinance/scripts:ro
     environment:
       HERMES_UID: 1000
       HERMES_GID: 1000
@@ -1190,6 +1194,7 @@ services:
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      HERMES_BIN: /opt/hgfinance/scripts/qa_hermes_worker.py
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0

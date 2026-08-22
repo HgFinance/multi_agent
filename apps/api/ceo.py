@@ -387,16 +387,42 @@ def _planning_profiles(task: Mapping[str, object]) -> tuple[list[str], bool, boo
     if isinstance(declared_qa, bool):
         qa_required = qa_required or declared_qa
 
-    summary = str(task.get("latest_summary") or "").casefold()
-    if not selected and summary:
-        for profile in _PRIMARY_PROFILE_ORDER:
-            if any(alias.casefold() in summary for alias in _PROFILE_ALIASES[profile]):
-                selected.append(profile)
-    if not qa_required and re.search(r"\bqa\b|quality|검증|감사", summary):
-        qa_required = True
-    if not synthesis_present and re.search(r"synth|합성|최종 의견", summary):
-        synthesis_present = True
+    # A run summary is an outcome/prose field, not a durable execution plan.
+    # Inferring a department from it made a root with only
+    # ``selected_primary_profiles`` in run metadata look delegated even when
+    # materialization created no child (t_71e0df48).  Keep this function
+    # limited to explicit planning metadata and materialized child markers.
     return selected, qa_required, synthesis_present
+
+
+def _materialized_planning_profiles(
+    task: Mapping[str, object],
+) -> tuple[list[str], bool, bool]:
+    """Return departments represented by actual root-scoped child tasks.
+
+    Planned/selected metadata is intentionally not used here.  The response
+    plane must not tell a user that a department was delegated until a durable
+    child with the corresponding workflow role exists in this root projection.
+    """
+
+    selected: list[str] = []
+    qa_present = False
+    synthesis_present = False
+    for child in _child_records(task.get("children")):
+        assignee = str(child.get("assignee") or child.get("profile") or "").strip()
+        if assignee not in CANONICAL_PROFILES:
+            continue
+        body = str(child.get("body") or "")
+        role_match = re.search(r"(?:^|\n)workflow_role=(\w+)", body)
+        role = role_match.group(1).casefold() if role_match else ""
+        if assignee == "qa-department" and role == "qa":
+            qa_present = True
+        elif assignee == "ceo-agent" and role == "synthesis":
+            synthesis_present = True
+        elif assignee in _PRIMARY_PROFILE_ORDER and role in {"", "primary"}:
+            if assignee not in selected:
+                selected.append(assignee)
+    return selected, qa_present, synthesis_present
 
 
 def _planning_summary(
@@ -451,10 +477,16 @@ def _scoped_planning_projection(
 
 
 def _planning_acknowledgement(task: Mapping[str, object]) -> dict[str, object]:
-    selected, qa_required, synthesis_present = _planning_profiles(task)
+    planned, planned_qa, planned_synthesis = _planning_profiles(task)
+    selected, qa_required, synthesis_present = _materialized_planning_profiles(task)
     actions = [f"{_PROFILE_LABEL[p]}에서 {_PROFILE_COPY[p]}" for p in selected]
     if actions:
         answer = f"{'· '.join(actions)}하겠습니다."
+    elif planned or planned_qa or planned_synthesis:
+        answer = (
+            "선택된 부서 작업이 아직 실행 가능한 상태로 생성되지 않아 "
+            "CEO가 직접 확인 중입니다."
+        )
     else:
         answer = "CEO workflow를 접수했습니다. 실제 planning 결과가 준비되면 선택된 부서와 다음 단계를 표시하겠습니다."
     if synthesis_present:
@@ -476,13 +508,17 @@ def _planning_acknowledgement(task: Mapping[str, object]) -> dict[str, object]:
             steps.append("CEO Synthesis")
         if qa_required:
             steps.append("QA (async evaluation)")
-    planned = bool(selected or qa_required or synthesis_present)
+    materialized = bool(selected or qa_required or synthesis_present)
     return {
-        "status": "planned" if planned else "accepted",
+        "status": "planned" if materialized else "accepted",
         "planning": {
             "selected_departments": selected,
+            "planned_departments": planned,
+            "materialized_departments": selected,
             "steps": steps,
             "qa_required": qa_required,
+            "planned_qa_required": planned_qa,
+            "planned_synthesis": planned_synthesis,
             "summary": _planning_summary(task, selected, qa_required),
         },
         "answer": answer,

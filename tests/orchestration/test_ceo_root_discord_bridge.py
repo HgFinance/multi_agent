@@ -118,6 +118,10 @@ class CeoRootDiscordBridgeTest(unittest.TestCase):
             result = service._bridge_root_completion_to_discord(
                 root_task_id="root-delegated",
                 root_payload=root,
+                materialized_primary_profiles=(
+                    "risk-management",
+                    "accounting-portfolio-department",
+                ),
             )
 
             self.assertEqual(result, "created")

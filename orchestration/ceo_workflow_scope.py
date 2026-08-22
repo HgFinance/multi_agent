@@ -207,6 +207,12 @@ def selected_primary_profiles_from_task(
                 return explicit_selection
 
     def from_metadata(value: Any) -> tuple[str, ...]:
+        if isinstance(value, str):
+            try:
+                decoded = json.loads(value)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return ()
+            return from_metadata(decoded)
         if isinstance(value, Mapping):
             for key in (
                 PRIMARY_SELECTION_FIELD,

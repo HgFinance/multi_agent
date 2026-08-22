@@ -214,6 +214,95 @@ def test_recovery_candidate_rows_are_discovery_only(tmp_path) -> None:
     assert rows[0]["status"] == "done"
 
 
+def test_recovery_candidates_exclude_handled_empty_primary_root(tmp_path) -> None:
+    path = tmp_path / "kanban.db"
+    _make_board(path)
+    index = SQLiteRootScopedIndex({"HERMES_KANBAN_DB": str(path)})
+    index.prepare()
+
+    control_body = (
+        "hgfinance.ceo-workflow-scope.v1\n"
+        f"workflow_root_task_id={ROOT}\n"
+        "workflow_role=control\n"
+        "workflow_mode=analysis\n"
+        "hgfinance.ceo-supervisor.v1 action=REQUEST_USER_INPUT "
+        "no_analysis_children\n"
+    )
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO tasks(id, body, status, created_at) VALUES (?, ?, ?, ?)",
+        ("t_control", control_body, "blocked", 6),
+    )
+    conn.commit()
+    conn.close()
+
+    assert index.recovery_candidate_rows() == ()
+
+
+def test_recovery_candidates_keep_other_request_user_input_root(tmp_path) -> None:
+    path = tmp_path / "kanban.db"
+    _make_board(path)
+    index = SQLiteRootScopedIndex({"HERMES_KANBAN_DB": str(path)})
+    index.prepare()
+
+    control_body = (
+        "hgfinance.ceo-workflow-scope.v1\n"
+        f"workflow_root_task_id={ROOT}\n"
+        "workflow_role=control\n"
+        "workflow_mode=analysis\n"
+        "hgfinance.ceo-supervisor.v1 action=REQUEST_USER_INPUT\n"
+    )
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO tasks(id, body, status, created_at) VALUES (?, ?, ?, ?)",
+        ("t_control", control_body, "blocked", 6),
+    )
+    conn.commit()
+    conn.close()
+
+    assert [row["id"] for row in index.recovery_candidate_rows()] == [ROOT]
+
+
+def test_recovery_candidates_use_stable_control_idempotency_key(tmp_path) -> None:
+    path = tmp_path / "kanban.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE tasks ("
+        "id TEXT PRIMARY KEY, body TEXT, status TEXT NOT NULL, "
+        "created_at INTEGER NOT NULL, idempotency_key TEXT"
+        ")"
+    )
+    conn.execute(
+        "INSERT INTO tasks(id, body, status, created_at, idempotency_key) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (ROOT, build_root_body("query", "request"), "done", 1, "root-key"),
+    )
+    control_body = (
+        "hgfinance.ceo-workflow-scope.v1\n"
+        f"workflow_root_task_id={ROOT}\n"
+        "workflow_role=control\n"
+        "workflow_mode=analysis\n"
+        "hgfinance.ceo-supervisor.v1 action=REQUEST_USER_INPUT "
+        "no_analysis_children\n"
+    )
+    conn.execute(
+        "INSERT INTO tasks(id, body, status, created_at, idempotency_key) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (
+            "t_control",
+            control_body,
+            "blocked",
+            2,
+            f"{ROOT}:supervisor:user-input",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    index = SQLiteRootScopedIndex({"HERMES_KANBAN_DB": str(path)})
+    assert index.recovery_candidate_rows() == ()
+
+
 def test_indexed_snapshot_omits_full_board_list_and_shows_every_candidate() -> None:
     payloads = _payloads()
     calls: list[tuple[str, ...]] = []
