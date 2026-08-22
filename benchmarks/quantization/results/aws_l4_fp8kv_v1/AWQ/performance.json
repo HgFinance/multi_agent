@@ -1,0 +1,65 @@
+{
+  "variant": "AWQ",
+  "model": "Qwen2.5-14B-Instruct-AWQ",
+  "endpoint": "http://127.0.0.1:8000/v1/chat/completions",
+  "gpu": "NVIDIA L4, 21248 MiB, 1344 MiB",
+  "prompt_sha256": "917662f4a4c1b2e435ab5bcdd0c35a56055c1fa55404f6f6e781ca6f05e0843d",
+  "warmup_requests": 2,
+  "sample_batches": 5,
+  "concurrency_levels": [
+    1,
+    2,
+    4
+  ],
+  "measurement": "same fixed prompt, same request count, non-streaming; performance only",
+  "results": {
+    "C1": {
+      "requests": 5,
+      "batches": 5,
+      "duration_s": 0.7261,
+      "latency_p50_s": 0.1444,
+      "latency_p95_s": 0.1451,
+      "throughput_tok_s": 20.6644,
+      "completion_tokens": 15,
+      "batch_elapsed_s": [
+        0.14473005800391547,
+        0.1463851220032666,
+        0.144776468994678,
+        0.1445205519994488,
+        0.14547500800108537
+      ]
+    },
+    "C2": {
+      "requests": 10,
+      "batches": 5,
+      "duration_s": 0.7353,
+      "latency_p50_s": 0.1462,
+      "latency_p95_s": 0.1479,
+      "throughput_tok_s": 40.8171,
+      "completion_tokens": 30,
+      "batch_elapsed_s": [
+        0.14863281200814527,
+        0.14680593300727196,
+        0.14694741800485644,
+        0.14662262800266035,
+        0.14597818099719007
+      ]
+    },
+    "C4": {
+      "requests": 20,
+      "batches": 5,
+      "duration_s": 0.765,
+      "latency_p50_s": 0.1518,
+      "latency_p95_s": 0.1547,
+      "throughput_tok_s": 78.455,
+      "completion_tokens": 60,
+      "batch_elapsed_s": [
+        0.15551242600486148,
+        0.15166406299977098,
+        0.15284213500854094,
+        0.15281475400843192,
+        0.15193649000138976
+      ]
+    }
+  }
+}

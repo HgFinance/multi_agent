@@ -1,0 +1,71 @@
+{
+  "schema_version": "l4-fp8kv-provenance.v1",
+  "run_id": "aws-l4-fp8kv-v1-20260822",
+  "variant": "AWQ+Finetune",
+  "status": "HOLD",
+  "source_parent_commit": "4c2014c",
+  "runtime": {
+    "gpu": "NVIDIA L4",
+    "python": "3.12.13",
+    "vllm": "0.27.1",
+    "flashinfer": "0.6.16.post3",
+    "cuda_nvcc": "13.0.88",
+    "attention_backend": "FLASHINFER",
+    "max_model_len": 8192,
+    "gpu_memory_utilization": 0.85,
+    "kv_cache_dtype": "fp8_e4m3",
+    "prefix_caching": true,
+    "temperature": 0,
+    "stream": false,
+    "host_bind": "127.0.0.1:8000",
+    "endpoint_verified": true,
+    "container": "hgfinance-vllm-runtime-20260822",
+    "image": "vllm/vllm-openai:v0.27.1"
+  },
+  "profile": {
+    "name": "L4-fp8KV-v1",
+    "gpu": "NVIDIA L4",
+    "max_model_len": 8192,
+    "gpu_memory_utilization": 0.85,
+    "kv_cache_dtype": "fp8_e4m3",
+    "enable_prefix_caching": true,
+    "temperature": 0,
+    "stream": false,
+    "quality_execution": "sequential"
+  },
+  "serving": {
+    "endpoint": "http://127.0.0.1:8000",
+    "model": "Qwen2.5-14B-Instruct-AWQ",
+    "launch_args": [
+      "--max-model-len",
+      "8192",
+      "--gpu-memory-utilization",
+      "0.85",
+      "--kv-cache-dtype",
+      "fp8_e4m3",
+      "--enable-prefix-caching",
+      "--host",
+      "0.0.0.0",
+      "--port",
+      "8000"
+    ],
+    "endpoint_health": "HTTP 200; localhost binding 127.0.0.1:8000",
+    "backend": "FLASHINFER"
+  },
+  "datasets": {
+    "internal50_v2_sha256": "ad2bdaf5ea381c2fc151fce1f1859f7f925b86fd03b830319cd97af17709e978",
+    "external50_v1_sha256": "197f0828fee37a8a0ca7551304efa722b005a3d26379a2cc613ece36b315956f"
+  },
+  "artifacts": [
+    "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/internal50_raw.json",
+    "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/internal50_score.json",
+    "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/external50_raw.json",
+    "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Finetune/external50_score.json"
+  ],
+  "quality": null,
+  "performance": {
+    "status": "HOLD",
+    "reason": "No adapter_config.json + adapter_model.safetensors for an exact AWQ-compatible adapter was found in the existing mounted model/checkpoint paths. No NF4 adapter was substituted and no finetune benchmark was run."
+  },
+  "hold_reason": "No adapter_config.json + adapter_model.safetensors for an exact AWQ-compatible adapter was found in the existing mounted model/checkpoint paths. No NF4 adapter was substituted and no finetune benchmark was run."
+}

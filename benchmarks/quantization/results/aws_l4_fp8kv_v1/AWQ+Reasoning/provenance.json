@@ -1,0 +1,157 @@
+{
+  "schema_version": "l4-fp8kv-provenance.v1",
+  "run_id": "aws-l4-fp8kv-v1-20260822",
+  "variant": "AWQ+Reasoning",
+  "status": "MEASURED",
+  "source_parent_commit": "4c2014c",
+  "runtime": {
+    "gpu": "NVIDIA L4",
+    "python": "3.12.13",
+    "vllm": "0.27.1",
+    "flashinfer": "0.6.16.post3",
+    "cuda_nvcc": "13.0.88",
+    "attention_backend": "FLASHINFER",
+    "max_model_len": 8192,
+    "gpu_memory_utilization": 0.85,
+    "kv_cache_dtype": "fp8_e4m3",
+    "prefix_caching": true,
+    "temperature": 0,
+    "stream": false,
+    "host_bind": "127.0.0.1:8000",
+    "endpoint_verified": true,
+    "container": "hgfinance-vllm-runtime-20260822",
+    "image": "vllm/vllm-openai:v0.27.1"
+  },
+  "profile": {
+    "name": "L4-fp8KV-v1",
+    "gpu": "NVIDIA L4",
+    "max_model_len": 8192,
+    "gpu_memory_utilization": 0.85,
+    "kv_cache_dtype": "fp8_e4m3",
+    "enable_prefix_caching": true,
+    "temperature": 0,
+    "stream": false,
+    "quality_execution": "sequential"
+  },
+  "serving": {
+    "endpoint": "http://127.0.0.1:8000",
+    "model": "Qwen2.5-14B-Instruct-AWQ",
+    "launch_args": [
+      "--max-model-len",
+      "8192",
+      "--gpu-memory-utilization",
+      "0.85",
+      "--kv-cache-dtype",
+      "fp8_e4m3",
+      "--enable-prefix-caching",
+      "--host",
+      "0.0.0.0",
+      "--port",
+      "8000"
+    ],
+    "endpoint_health": "HTTP 200; localhost binding 127.0.0.1:8000",
+    "backend": "FLASHINFER"
+  },
+  "datasets": {
+    "internal50_v2_sha256": "ad2bdaf5ea381c2fc151fce1f1859f7f925b86fd03b830319cd97af17709e978",
+    "external50_v1_sha256": "197f0828fee37a8a0ca7551304efa722b005a3d26379a2cc613ece36b315956f"
+  },
+  "artifacts": [
+    "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Reasoning/internal50_raw.json",
+    "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Reasoning/internal50_score.json",
+    "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Reasoning/external50_raw.json",
+    "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Reasoning/external50_score.json"
+  ],
+  "quality": {
+    "internal_quality": 0.36,
+    "internal_passed": 18,
+    "internal_total": 50,
+    "critical_failures": 13,
+    "critical_failed_ids": [
+      "v2-012",
+      "v2-015",
+      "v2-017",
+      "v2-018",
+      "v2-020",
+      "v2-021",
+      "v2-022",
+      "v2-023",
+      "v2-038",
+      "v2-040",
+      "v2-042",
+      "v2-043",
+      "v2-046"
+    ],
+    "request_errors": 0,
+    "categories": {
+      "accounting_reasoning": {
+        "n": 6,
+        "passed": 1,
+        "accuracy": 0.16666666666666666
+      },
+      "evidence_reasoning": {
+        "n": 6,
+        "passed": 4,
+        "accuracy": 0.6666666666666666
+      },
+      "financial_arithmetic": {
+        "n": 10,
+        "passed": 3,
+        "accuracy": 0.3
+      },
+      "portfolio_trading_reasoning": {
+        "n": 6,
+        "passed": 1,
+        "accuracy": 0.16666666666666666
+      },
+      "quant_reasoning": {
+        "n": 6,
+        "passed": 4,
+        "accuracy": 0.6666666666666666
+      },
+      "risk_reasoning": {
+        "n": 7,
+        "passed": 1,
+        "accuracy": 0.14285714285714285
+      },
+      "structured_output": {
+        "n": 5,
+        "passed": 2,
+        "accuracy": 0.4
+      },
+      "uncertainty_fail_closed": {
+        "n": 4,
+        "passed": 2,
+        "accuracy": 0.5
+      }
+    },
+    "avg_quality_latency_s": 0.873848,
+    "external_overall": null,
+    "external_overall_reason": "FinanceBench manual adjudication is required; frozen External-50 Overall is not asserted from auto-only output.",
+    "finqa": 0.55,
+    "tatqa": 0.8,
+    "financebench_manual": null,
+    "financebench_diagnostic": 0.5007,
+    "auto_mean": 0.6555,
+    "external_auto_passed": 23,
+    "external_auto_scored_n": 35,
+    "critic_model": "gpt-4o-mini",
+    "reasoning_success_cases": 50,
+    "reasoning_total_cost_usd": 0.00065175,
+    "reasoning_model_only_latency_avg_s": 0.361582,
+    "reasoning_full_pipeline_latency_avg_s": 0.873852,
+    "reasoning_retry_count": 0
+  },
+  "performance": {
+    "status": "MEASURED_BASE_ONLY",
+    "artifact_paths": [
+      "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Reasoning/internal50_raw.json",
+      "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Reasoning/internal50_score.json",
+      "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Reasoning/external50_raw.json",
+      "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+Reasoning/external50_score.json"
+    ],
+    "model_load_memory_gib": 9.38,
+    "kv_cache_gib": 8.9,
+    "free_vram_mib": 1344
+  }
+}

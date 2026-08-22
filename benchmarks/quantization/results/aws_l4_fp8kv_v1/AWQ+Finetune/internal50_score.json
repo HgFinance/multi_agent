@@ -1,0 +1,10 @@
+{
+  "schema_version": "variant-result.v1",
+  "variant": "AWQ+Finetune",
+  "status": "HOLD",
+  "scores": null,
+  "reason": "No adapter_config.json + adapter_model.safetensors for an exact AWQ-compatible adapter was found in the existing mounted model/checkpoint paths. No NF4 adapter was substituted and no finetune benchmark was run.",
+  "manifest": "AWQ+Finetune/provenance.json",
+  "runtime": "L4-fp8KV-v1",
+  "errors": []
+}

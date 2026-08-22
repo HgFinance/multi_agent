@@ -1,0 +1,65 @@
+{
+  "variant": "FP8",
+  "model": "Qwen2.5-14B-Instruct-FP8-dynamic",
+  "endpoint": "http://127.0.0.1:8000/v1/chat/completions",
+  "gpu": "NVIDIA L4, 21176 MiB, 1416 MiB",
+  "prompt_sha256": "917662f4a4c1b2e435ab5bcdd0c35a56055c1fa55404f6f6e781ca6f05e0843d",
+  "warmup_requests": 2,
+  "sample_batches": 5,
+  "concurrency_levels": [
+    1,
+    2,
+    4
+  ],
+  "measurement": "same fixed prompt, same request count, non-streaming; performance only",
+  "results": {
+    "C1": {
+      "requests": 5,
+      "batches": 5,
+      "duration_s": 1.3457,
+      "latency_p50_s": 0.2677,
+      "latency_p95_s": 0.2691,
+      "throughput_tok_s": 11.1488,
+      "completion_tokens": 15,
+      "batch_elapsed_s": [
+        0.2692663510097191,
+        0.2694614909996744,
+        0.2710599239944713,
+        0.2675413090037182,
+        0.2681121350033209
+      ]
+    },
+    "C2": {
+      "requests": 10,
+      "batches": 5,
+      "duration_s": 1.3561,
+      "latency_p50_s": 0.2704,
+      "latency_p95_s": 0.2713,
+      "throughput_tok_s": 22.1263,
+      "completion_tokens": 30,
+      "batch_elapsed_s": [
+        0.2720333409961313,
+        0.27071596500172745,
+        0.27066248399205506,
+        0.27090486099768896,
+        0.27153628700762056
+      ]
+    },
+    "C4": {
+      "requests": 20,
+      "batches": 5,
+      "duration_s": 1.3796,
+      "latency_p50_s": 0.2747,
+      "latency_p95_s": 0.2769,
+      "throughput_tok_s": 43.4983,
+      "completion_tokens": 60,
+      "batch_elapsed_s": [
+        0.2778372489992762,
+        0.274169879994588,
+        0.2747609150101198,
+        0.2769760450028116,
+        0.27562059900083113
+      ]
+    }
+  }
+}

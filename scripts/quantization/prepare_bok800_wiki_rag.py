@@ -392,15 +392,15 @@ def build_glossary(entries: list[Entry]) -> list[dict[str, object]]:
     for entry in entries:
         if not is_arithmetic_entry(entry):
             continue
-        ascii_aliases = re.findall(
-            r"\b(?:[A-Z]{2,}[A-Za-z0-9-]*|[A-Z][A-Za-z]*\d+[A-Za-z0-9-]*)\b",
-            f"{entry.term} {entry.body}",
+        # Only retain abbreviations explicitly present in the canonical term.
+        # Body-wide token extraction causes unrelated terms such as country or
+        # organization abbreviations to match English benchmark prompts and
+        # inject irrelevant definitions into the context.
+        term_aliases = re.findall(
+            r"\b(?:[A-Za-z]{2,}[0-9A-Za-z-]*|[A-Z][A-Za-z]*\d+[A-Za-z0-9-]*)\b",
+            entry.term,
         )
-        aliases = [
-            alias
-            for alias in dict.fromkeys([*entry.related_terms, *ascii_aliases])
-            if not is_risk_text(alias)
-        ]
+        aliases = [alias for alias in dict.fromkeys(term_aliases) if not is_risk_text(alias)]
         glossary.append(
             {
                 "term": entry.term,

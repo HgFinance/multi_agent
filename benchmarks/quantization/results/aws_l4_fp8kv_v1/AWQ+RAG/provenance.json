@@ -1,0 +1,145 @@
+{
+  "schema_version": "l4-fp8kv-provenance.v1",
+  "run_id": "aws-l4-fp8kv-v1-20260822",
+  "variant": "AWQ+RAG",
+  "status": "MEASURED",
+  "source_parent_commit": "4c2014c",
+  "runtime": {
+    "gpu": "NVIDIA L4",
+    "python": "3.12.13",
+    "vllm": "0.27.1",
+    "flashinfer": "0.6.16.post3",
+    "cuda_nvcc": "13.0.88",
+    "attention_backend": "FLASHINFER",
+    "max_model_len": 8192,
+    "gpu_memory_utilization": 0.85,
+    "kv_cache_dtype": "fp8_e4m3",
+    "prefix_caching": true,
+    "temperature": 0,
+    "stream": false,
+    "host_bind": "127.0.0.1:8000",
+    "endpoint_verified": true,
+    "container": "hgfinance-vllm-runtime-20260822",
+    "image": "vllm/vllm-openai:v0.27.1"
+  },
+  "profile": {
+    "name": "L4-fp8KV-v1",
+    "gpu": "NVIDIA L4",
+    "max_model_len": 8192,
+    "gpu_memory_utilization": 0.85,
+    "kv_cache_dtype": "fp8_e4m3",
+    "enable_prefix_caching": true,
+    "temperature": 0,
+    "stream": false,
+    "quality_execution": "sequential"
+  },
+  "serving": {
+    "endpoint": "http://127.0.0.1:8000",
+    "model": "Qwen2.5-14B-Instruct-AWQ",
+    "launch_args": [
+      "--max-model-len",
+      "8192",
+      "--gpu-memory-utilization",
+      "0.85",
+      "--kv-cache-dtype",
+      "fp8_e4m3",
+      "--enable-prefix-caching",
+      "--host",
+      "0.0.0.0",
+      "--port",
+      "8000"
+    ],
+    "endpoint_health": "HTTP 200; localhost binding 127.0.0.1:8000",
+    "backend": "FLASHINFER"
+  },
+  "datasets": {
+    "internal50_v2_sha256": "ad2bdaf5ea381c2fc151fce1f1859f7f925b86fd03b830319cd97af17709e978",
+    "external50_v1_sha256": "197f0828fee37a8a0ca7551304efa722b005a3d26379a2cc613ece36b315956f"
+  },
+  "artifacts": [
+    "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+RAG/internal50_raw.json",
+    "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+RAG/internal50_score.json",
+    "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+RAG/external50_raw.json",
+    "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+RAG/external50_score.json",
+    "benchmarks/quantization/knowledge/bok800_2026/glossary_rag_v1_manifest.json"
+  ],
+  "quality": {
+    "internal_quality": 0.7,
+    "internal_passed": 35,
+    "internal_total": 50,
+    "critical_failures": 2,
+    "critical_failed_ids": [
+      "v2-038",
+      "v2-046"
+    ],
+    "request_errors": 0,
+    "categories": {
+      "accounting_reasoning": {
+        "n": 6,
+        "passed": 5,
+        "accuracy": 0.8333333333333334
+      },
+      "evidence_reasoning": {
+        "n": 6,
+        "passed": 5,
+        "accuracy": 0.8333333333333334
+      },
+      "financial_arithmetic": {
+        "n": 10,
+        "passed": 2,
+        "accuracy": 0.2
+      },
+      "portfolio_trading_reasoning": {
+        "n": 6,
+        "passed": 5,
+        "accuracy": 0.8333333333333334
+      },
+      "quant_reasoning": {
+        "n": 6,
+        "passed": 5,
+        "accuracy": 0.8333333333333334
+      },
+      "risk_reasoning": {
+        "n": 7,
+        "passed": 7,
+        "accuracy": 1.0
+      },
+      "structured_output": {
+        "n": 5,
+        "passed": 2,
+        "accuracy": 0.4
+      },
+      "uncertainty_fail_closed": {
+        "n": 4,
+        "passed": 4,
+        "accuracy": 1.0
+      }
+    },
+    "avg_quality_latency_s": 0.7639579999999999,
+    "external_overall": null,
+    "external_overall_reason": "FinanceBench manual adjudication is required; frozen External-50 Overall is not asserted from auto-only output.",
+    "finqa": 0.8,
+    "tatqa": 0.8667,
+    "financebench_manual": null,
+    "financebench_diagnostic": 0.6211,
+    "auto_mean": 0.831,
+    "external_auto_passed": 29,
+    "external_auto_scored_n": 35,
+    "glossary_version": "bok-800-arithmetic-glossary-v1",
+    "glossary_sha256": "d3da5743695146b492835d1e71b7d373ffc268686917e8e4494378b7e823f369",
+    "glossary_hit_rate": 1.0
+  },
+  "performance": {
+    "status": "MEASURED_BASE_ONLY",
+    "artifact_paths": [
+      "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+RAG/internal50_raw.json",
+      "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+RAG/internal50_score.json",
+      "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+RAG/external50_raw.json",
+      "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+RAG/external50_score.json",
+      "benchmarks/quantization/knowledge/bok800_2026/glossary_rag_v1_manifest.json"
+    ],
+    "model_load_memory_gib": 9.38,
+    "kv_cache_gib": 8.9,
+    "free_vram_mib": 1344
+  }
+}
