@@ -247,6 +247,133 @@ AST calculator 자체가 틀린 것이 아니라, LLM이 잘못된 스케일·�
 
 반면 `01079` acquisition list와 `01163` cash-flow ranking은 내용상 상당 부분 맞지만 긴 목록·설명 형식 때문에 자동 diagnostic이 낮게 나오는 사례입니다. 이런 경우는 모델 오류와 scorer의 형식 민감도를 수동 adjudication에서 분리해야 합니다.
 
+## 부록 A. Generic Hybrid 잔여 오류의 실제 문제 지문
+
+아래 지문은 frozen Internal-50 v2와 External-50 v1에서 그대로 추출한 것이다. 정답은 오류 원인을 설명하기 위한 기준값이며, dataset/scorer는 변경하지 않았다.
+
+### Internal-50 v2
+
+#### v2-008 — Debt-to-equity percentage
+
+- 문제: `Calculate debt-to-equity percentage.`
+- 지문:
+  ```
+  A company has:
+  - Total debt: KRW 240 billion
+  - Equity: KRW 160 billion
+
+  Debt-to-equity (%) = debt / equity * 100.
+  ```
+- 기준 정답: `150.0`
+- Unit/Scale 출력: `1,500`
+- 실패 원인: percentage-point와 ratio scale 혼동
+
+#### v2-009 — Portfolio return percentage
+
+- 문제: `Calculate the portfolio return percentage.`
+- 지문:
+  ```
+  A two-asset portfolio has:
+  - Asset A: 60% weight, +8% return
+  - Asset B: 40% weight, -3% return
+
+  Portfolio return is the weighted average return.
+  ```
+- 기준 정답: `3.6`
+- Unit/Scale 출력: `0.036`
+- 실패 원인: 비율 계산 결과를 요청된 percentage-point로 변환하지 않음
+
+#### v2-016 — FIFO realized PnL
+
+- 문제: `Calculate realized PnL in KRW.`
+- 지문:
+  ```
+  FIFO inventory:
+  - Lot 1: 50 shares at KRW 40,000
+  - Lot 2: 70 shares at KRW 45,000
+
+  The employee sells 80 shares at KRW 50,000.
+  Total sell fee is KRW 10,000.
+
+  Realized PnL =
+  net sale proceeds minus FIFO cost basis.
+  ```
+- 기준 정답: `640000`
+- Unit/Scale 출력: `-1160000`
+- 실패 원인: FIFO cost basis와 매도 수수료 적용 순서 오류
+
+#### v2-046 — Stale snapshot structured decision
+
+- 문제: `Return the requested structured decision.`
+- 지문:
+  ```
+  Risk rule:
+  A snapshot older than 5 seconds requires rejection.
+  Snapshot age is 9 seconds.
+
+  Return JSON with exactly these keys:
+  - decision: "APPROVE" or "REJECT"
+  - reason: short snake_case reason
+  ```
+- 기준 정답: `{"decision": "REJECT", "reason": "stale_snapshot"}`
+- Unit/Scale 출력: `{"decision": "REJECT", "reason": "snapshot_age_exceeds_limit"}`
+- 실패 원인: JSON 형식은 맞지만 계약상 허용된 의미값과 불일치; critical failure
+
+#### v2-047 — Realized PnL JSON
+
+- 문제: `Return the calculation as JSON.`
+- 지문:
+  ```
+  Trade:
+  - Buy 80 shares at KRW 48,000
+  - Sell 80 shares at KRW 51,500
+  - Total fees KRW 12,000
+
+  Realized PnL = sale proceeds - purchase cost - fees.
+
+  Return JSON with exactly:
+  - pnl: integer KRW
+  - profitable: boolean
+  ```
+- 기준 정답: `{"pnl": 268000, "profitable": true}`
+- Unit/Scale 출력: `{"pnl": 2000, "profitable": true}`
+- 실패 원인: schema는 통과하지만 계산 의미가 틀림
+
+#### v2-049 — Position limit resize
+
+- 문제: `Return the permitted action and maximum additional notional.`
+- 지문:
+  ```
+  Portfolio NAV: KRW 50,000,000
+  Soft issuer limit: 25% of NAV
+  Current issuer exposure: KRW 11,000,000
+
+  The employee may add exposure only up to the soft limit.
+
+  Return JSON with exactly:
+  - action: "APPROVE" or "RESIZE"
+  - max_additional_notional: integer KRW
+  ```
+- 기준 정답: `{"action": "RESIZE", "max_additional_notional": 1500000}`
+- Unit/Scale 출력: action과 최대 추가 notional 모두 기준 계약과 불일치
+- 실패 원인: soft limit, current exposure, action semantics를 혼동
+
+### External-50 v1 자동 실패 지문
+
+다음은 Generic Hybrid의 External Auto Mean 실패 항목이다. `External Overall`은 FinanceBench 수동 adjudication 전까지 확정하지 않는다.
+
+| ID | 출처 | 실제 문제 지문 | 기준 정답 |
+|---|---|---|---|
+| `finqa:ETFC/2011/page_144.pdf-2` | FinQA | `as of december 31 , 2010 , what was the ratio of collateral pledged to the bank by its derivatives counterparties to overnight and other short-term borrowings` | `4.6` |
+| `finqa:C/2008/page_44.pdf-2` | FinQA | `what was the percentage change in non-interest revenue from 2007 to 2008?` | `2.50515` |
+| `finqa:MRO/2003/page_45.pdf-2` | FinQA | `what were total distillates sales in millions for the three year period ? 365 346 345` | `1056.0` |
+| `finqa:HWM/2018/page_96.pdf-2` | FinQA | `considering the average exercise price of options , what is the increase in the total value of stock options observed during 2016 and 2017 , in millions of dollars?` | `16.43` |
+| `finqa:IP/2009/page_45.pdf-1` | FinQA | `what percentage of contractual obligations for future payments under existing debt and lease commitments and purchase obligations at december 31 , 2009 due in 2011 are maturities of long-term debt?` | `0.40796` |
+| `finqa:ILMN/2008/page_86.pdf-4` | FinQA | `what was the change in millions of company contributions to the employee benefit plans retirement plan between 2007 and 2008?` | `1.2` |
+| `tatqa:0f032004-ec01-40a0-831b-aac3f7e1b5c7` | TAT-QA | `How often does the company review the actuarial assumptions which the periodic benefit cost and the actuarial present value of projected benefit obligations are based on?` | `Annual basis` |
+| `tatqa:9c364cfe-84e4-479d-b3ca-dab2b412e8c4` | TAT-QA | `What is the average financing costs between 2018 and 2019?` | `-1581 million` |
+
+이 부록의 문제 지문과 기준값은 분석용으로만 기록한다. 새 정답 규칙이나 case-ID 기반 fallback을 추가하지 않는다.
 ## 10. 성능까지 포함한 최종 종합
 
 | 평가축 | FP8 | AWQ | 판정 |
