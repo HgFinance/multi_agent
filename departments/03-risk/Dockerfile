@@ -22,10 +22,16 @@
 FROM python:3.12-slim
 
 # 버전은 이 저장소에서 실제로 테스트를 통과한 값으로 고정한다(2026-08-03 pip freeze).
+# langfuse: 이 이미지의 Worker 실행기가 HR 관측 이벤트를 발행한다
+# (orchestration/llm_observability.publish_worker_activity). 없으면 publish 가
+# ModuleNotFoundError 를 삼키고 **조용히 False** 를 돌려줘, 자격증명이 멀쩡한데
+# 이벤트만 0건인 상태가 된다(2026-08-23 실측: ceo-kanban-supervisor 에서 같은
+# 결함을 추적하는 데 몇 시간이 걸렸다). 루트 requirements.txt 와 같은 pin.
 RUN pip install --no-cache-dir \
     fastapi==0.128.8 "uvicorn[standard]==0.39.0" pydantic==2.13.3 \
     psycopg2-binary==2.9.12 python-dotenv==1.2.1 redis==7.0.1 \
-    openai==2.35.1 langgraph==0.6.11
+    openai==2.35.1 langgraph==0.6.11 \
+    langfuse==4.14.3
 
 WORKDIR /app
 # 저장소 루트 기준 상대 경로를 그대로 유지한다 - api/app.py의 parents[3] 계산과 맞아야 한다.

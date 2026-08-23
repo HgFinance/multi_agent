@@ -4824,7 +4824,7 @@ class CeoSupervisorService:
                 status, errors = "BLOCKED", 0
             else:
                 status, errors = "DEGRADED", 1
-            publish_head_activity(
+            published = publish_head_activity(
                 stage=stage,
                 head_persona=persona,
                 status=status,
@@ -4832,8 +4832,22 @@ class CeoSupervisorService:
                 trace_id=task_id,
                 source="kanban_card",
             )
-        except Exception:  # noqa: BLE001 - 계측이 워크플로를 멈추지 못한다
-            logger.debug("head-card-activity-publish-skipped task=%s", task_id)
+            if not published:
+                # ▶ 이 한 줄이 없어서 2026-08-23 에 몇 시간을 태웠다. 이 이미지에
+                #   langfuse 가 없어 publish 가 조용히 False 를 돌려주고 있었는데,
+                #   코드·자격증명·프로필 해석이 전부 정상이라 어디가 끊겼는지
+                #   보이지 않았다. **관측 코드가 자기 실패를 관측하지 못하면
+                #   관측이 없는 것과 같다** - 그래서 DEBUG 가 아니라 WARNING 이다.
+                logger.warning(
+                    "head-card-activity-not-published task=%s stage=%s persona=%s "
+                    "(langfuse 미설치·자격증명 부재·전송 실패 중 하나)",
+                    task_id, stage, persona,
+                )
+        except Exception as exc:  # noqa: BLE001 - 계측이 워크플로를 멈추지 못한다
+            logger.warning(
+                "head-card-activity-publish-failed task=%s error=%s: %s",
+                task_id, type(exc).__name__, exc,
+            )
 
     def handle_terminal_event(self, event: Mapping[str, Any]) -> SupervisorDecision | None:
         handler_started_ms = time.time_ns() // 1_000_000
