@@ -136,6 +136,13 @@ services:
       RESEARCH_API_URL: ${RESEARCH_API_URL:-http://research-api:8035}
       RISK_API_URL: ${RISK_API_URL:-http://risk-api:8000}
       QA_API_URL: ${QA_API_URL:-http://audit-api:8000}
+      # HR 유휴 Worker 관측(GET /ui/workforce/idle-agents) 프록시 대상.
+      # workforce.py 기본값(http://127.0.0.1:8044)은 호스트 2-프로세스 로컬
+      # 구성 전용이다 - 이 컨테이너 안에서는 자기 자신을 가리켜 connection
+      # refused 가 난다(risk-api/audit-api 와 같은 실수, 바로 위 주석 참고).
+      # workforce-api 는 이 파일의 include(departments/07-agent-workforce/
+      # compose.yaml)로 같은 네트워크에 있고, 컨테이너 내부 포트는 8000이다.
+      WORKFORCE_API_URL: ${WORKFORCE_API_URL:-http://workforce-api:8000}
       # 페이퍼 전략 컨테이너 상태·전원. docker 소켓은 이 서비스가 아니라
       # `strategy-runtime-control` sidecar가 쥔다(그 서비스 정의 주석 참고).
       STRATEGY_RUNTIME_API_URL: ${STRATEGY_RUNTIME_API_URL:-http://strategy-runtime-control:8000}
@@ -1824,6 +1831,7 @@ services:
       RISK_API_URL: ${RISK_API_URL:-http://risk-api:8000}
       QA_API_URL: ${QA_API_URL:-http://audit-api:8000}
       GOVERNANCE_API_URL: ${GOVERNANCE_API_URL:-http://governance-api:8000}
+      WORKFORCE_API_URL: ${WORKFORCE_API_URL:-http://workforce-api:8000}
       # ▶ 포트폴리오 파이프라인 Worker 런타임.
       #   이 둘이 없으면 `_configured_worker_runtime()` 이 `deterministic_test`
       #   로 떨어져 **부서 Worker 응답이 전부 TEST 고정문자열**이 된다. 컨테이너로
