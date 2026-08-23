@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass
@@ -382,6 +382,178 @@ def _safe_langfuse_client() -> Any:
         secret_key=os.environ["LANGFUSE_SECRET_KEY"],
         host=os.getenv("LANGFUSE_HOST") or "https://cloud.langfuse.com",
     )
+
+
+def _native_observation_metadata(
+    *, worker_id: str, role: str, stage: str, trace_id: str | None = None
+) -> dict[str, str | bool]:
+    """Metadata safe for native Langfuse span/generation observations.
+
+    Native observation fields own latency and token usage.  Do not duplicate
+    them in metadata: the Langfuse UI does not aggregate arbitrary metadata
+    into its built-in latency/token dashboards.  Prompt and completion text
+    stay absent by policy; these identifiers are fixed operational labels.
+    """
+
+    metadata: dict[str, str | bool] = {
+        "observability_schema": "llm.native.v1",
+        "worker_id": worker_id,
+        "role": role,
+        "stage": stage,
+        "raw_payloads_sent": False,
+    }
+    if trace_id:
+        # This application ID is not guaranteed to satisfy Langfuse trace-ID
+        # syntax, so it remains a correlation label rather than being forced
+        # into the SDK's trace context.
+        metadata["application_trace_id"] = trace_id
+    return metadata
+
+
+def _usage_details(usage: Any) -> dict[str, int]:
+    """Translate OpenAI-compatible usage without retaining provider payloads."""
+
+    if usage is None:
+        return {}
+    input_tokens = next(
+        (getattr(usage, name, None) for name in ("prompt_tokens", "input_tokens")
+         if getattr(usage, name, None) is not None),
+        None,
+    )
+    output_tokens = next(
+        (getattr(usage, name, None) for name in ("completion_tokens", "output_tokens")
+         if getattr(usage, name, None) is not None),
+        None,
+    )
+    details: dict[str, int] = {}
+    if input_tokens is not None:
+        details["input"] = int(input_tokens)
+    if output_tokens is not None:
+        details["output"] = int(output_tokens)
+    if details:
+        details["total"] = sum(details.values())
+    return details
+
+
+@dataclass
+class _NativeLangfuseObservation:
+    """Best-effort handle exposed by the redacted native-observation scopes."""
+
+    observation: Any | None = None
+
+    def set_usage(self, usage: Any) -> None:
+        details = _usage_details(usage)
+        if not details or self.observation is None:
+            return
+        with contextlib.suppress(Exception):
+            self.observation.update(usage_details=details)
+
+
+@contextlib.contextmanager
+def _redacted_native_observation(
+    *,
+    as_type: Literal["span", "generation"],
+    name: str,
+    model_name: str | None = None,
+    metadata: dict[str, str | bool],
+) -> Iterator[_NativeLangfuseObservation]:
+    """Create a Langfuse native observation without allowing SDK failures to break work.
+
+    ``start_as_current_observation`` is deliberately used instead of an
+    independent event so a generation becomes a child of its Worker span.
+    Inputs and outputs are omitted altogether: native timing/token fields do
+    not require business prompt or response text.
+    """
+
+    manager: Any | None = None
+    handle = _NativeLangfuseObservation()
+    if langfuse_enabled():
+        try:
+            kwargs: dict[str, Any] = {
+                "as_type": as_type,
+                "name": name,
+                "metadata": metadata,
+            }
+            if model_name:
+                kwargs["model"] = model_name
+            manager = _safe_langfuse_client().start_as_current_observation(**kwargs)
+            handle.observation = manager.__enter__()
+        except Exception:
+            # Observability remains non-binding.  An unavailable SDK/client
+            # must not change a trading-adjacent Worker result.
+            if manager is not None:
+                with contextlib.suppress(Exception):
+                    manager.__exit__(None, None, None)
+            manager = None
+            handle.observation = None
+
+    try:
+        yield handle
+    except BaseException as exc:
+        if manager is not None:
+            with contextlib.suppress(Exception):
+                manager.__exit__(type(exc), exc, exc.__traceback__)
+            manager = None
+        raise
+    finally:
+        if manager is not None:
+            with contextlib.suppress(Exception):
+                manager.__exit__(None, None, None)
+
+
+@contextlib.contextmanager
+def redacted_langfuse_worker_span(
+    *, worker_id: str, role: str, stage: str | None, trace_id: str | None = None
+) -> Iterator[None]:
+    """Native Worker-duration span for the Langfuse latency dashboard."""
+
+    # Legacy callers without a canonical stage intentionally remain
+    # uninstrumented instead of creating a misleading ``unknown`` series.
+    if not stage:
+        yield
+        return
+    with _redacted_native_observation(
+        as_type="span",
+        name="worker.run",
+        metadata=_native_observation_metadata(
+            worker_id=worker_id, role=role, stage=stage, trace_id=trace_id,
+        ),
+    ):
+        yield
+
+
+@contextlib.contextmanager
+def redacted_langfuse_generation(
+    *, worker_id: str, role: str, stage: str, model_name: str, trace_id: str | None = None
+) -> Iterator[_NativeLangfuseObservation]:
+    """Native LLM generation with automatic duration and explicit token usage."""
+
+    with _redacted_native_observation(
+        as_type="generation",
+        name="ollama.chat.completions",
+        model_name=model_name,
+        metadata=_native_observation_metadata(
+            worker_id=worker_id, role=role, stage=stage, trace_id=trace_id,
+        ),
+    ) as generation:
+        yield generation
+
+
+@contextlib.contextmanager
+def redacted_current_worker_generation() -> Iterator[_NativeLangfuseObservation]:
+    """Attach an LLM call to the Worker span held in the current context."""
+
+    metric = _CURRENT_METRIC.get()
+    if metric is None:
+        yield _NativeLangfuseObservation()
+        return
+    with redacted_langfuse_generation(
+        worker_id=metric.worker_id,
+        role=metric.role,
+        stage=metric.stage,
+        model_name=metric.model_name,
+    ) as generation:
+        yield generation
 
 
 def publish_langfuse_metric(
