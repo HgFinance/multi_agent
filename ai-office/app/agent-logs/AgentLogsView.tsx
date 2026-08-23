@@ -51,9 +51,14 @@ function PerformanceMetrics({ metrics }: { metrics: LlmPerformanceMetric[] }) {
   const measured = metrics.filter((item) => Number.isFinite(item.latency_ms) && item.latency_ms >= 0);
   if (measured.length === 0) {
     return (
-      <section className="bg-surface-container-lowest border border-outline-variant rounded-lg p-4" aria-label="Worker 성능 지표">
-        <h3 className="text-title-md font-title-md text-primary m-0">Worker 성능 지표</h3>
-        <p className="text-body-sm font-body-sm text-on-surface-variant mt-2 mb-0">
+      <section className="overflow-hidden rounded-lg border border-outline-variant bg-surface-container-lowest" aria-label="Worker 성능 지표">
+        <header className="flex items-center gap-3 border-b border-outline-variant bg-surface-container-low px-4 py-3">
+          <span className="material-symbols-outlined rounded-md border border-outline-variant bg-surface-container-lowest p-1.5 text-[20px] text-primary" aria-hidden="true">
+            monitoring
+          </span>
+          <h3 className="m-0 text-title-md font-title-md text-primary">Worker 성능 지표</h3>
+        </header>
+        <p className="m-0 p-4 text-body-sm font-body-sm text-on-surface-variant">
           HR이 관찰하는 최근 Worker 지연·토큰·실행 상태가 아직 수집되지 않았습니다.
         </p>
       </section>
@@ -73,17 +78,23 @@ function PerformanceMetrics({ metrics }: { metrics: LlmPerformanceMetric[] }) {
   const recent = [...measured].slice(-10).reverse();
 
   return (
-    <section className="bg-surface-container-lowest border border-outline-variant rounded-lg p-4" aria-label="Worker 성능 지표">
-      <div className="flex justify-between gap-3 flex-wrap items-baseline">
-        <div>
-          <h3 className="text-title-md font-title-md text-primary m-0">Worker 성능 지표</h3>
-          <p className="text-xs text-on-surface-variant mt-1 mb-0">
+    <section className="overflow-hidden rounded-lg border border-outline-variant bg-surface-container-lowest" aria-label="Worker 성능 지표">
+      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-outline-variant bg-surface-container-low px-4 py-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="material-symbols-outlined shrink-0 rounded-md border border-outline-variant bg-surface-container-lowest p-1.5 text-[20px] text-primary" aria-hidden="true">
+            monitoring
+          </span>
+          <div className="min-w-0">
+            <h3 className="m-0 text-title-md font-title-md text-primary">Worker 성능 지표</h3>
+            <p className="m-0 mt-1 text-xs text-on-surface-variant">
             HR이 관찰하는 전체 Worker 실행 지표입니다. 모델 입력·출력 원문은 표시하거나 전송하지 않습니다.
-          </p>
+            </p>
+          </div>
         </div>
-        <span className="text-xs text-on-surface-variant">표본 {measured.length}건</span>
-      </div>
-      <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-2">
+        <span className="rounded-full border border-outline-variant bg-surface-container-lowest px-2.5 py-0.5 text-xs text-on-surface-variant">표본 {measured.length}건</span>
+      </header>
+      <div className="p-4">
+      <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
         {[
           ["평균 지연", formatLatency(average)],
           ["P95 지연", p95 === null ? "측정값 없음" : formatLatency(p95)],
@@ -125,6 +136,7 @@ function PerformanceMetrics({ metrics }: { metrics: LlmPerformanceMetric[] }) {
             ))}
           </tbody>
         </table>
+      </div>
       </div>
     </section>
   );
