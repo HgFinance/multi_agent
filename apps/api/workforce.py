@@ -83,4 +83,75 @@ async def workforce_idle_agents(
     )
 
 
-__all__ = ["WORKFORCE_API_URL", "router", "workforce_idle_agents"]
+@router.get("/ui/workforce/roster")
+async def workforce_roster() -> Any:
+    """등록된 Agent 전원의 고용 상태·현재 Profile Version·모델 좌표.
+
+    순수 프록시다 - `workforce-api GET /workforce/v1/roster`가 이미
+    DATABASE_URL 미설정을 501로 정직하게 응답한다(In-Memory 대체로 위장하지
+    않음, api/app.py 머리말 참고). 여기서 빈 목록으로 바꿔치기하지 않는다.
+    """
+
+    return await _workforce_get("/workforce/v1/roster")
+
+
+@router.get("/ui/workforce/agents/{agent_id}/access")
+async def workforce_agent_access(agent_id: str) -> Any:
+    """Agent 한 명의 Access Assignment 목록 - Roster 카드를 펼쳤을 때만 호출한다.
+
+    Roster는 벌크 조회지만 Access는 workforce-api에도 Agent 단건 엔드포인트
+    (`GET /workforce/v1/agents/{agent_id}/access`)만 있다. 등록 Agent 전원을
+    로드 시점에 N+1로 훑지 않고, 화면에서 사용자가 펼친 행 하나만 그때 부른다 -
+    벌크 Access 조회가 필요해지면 그때 workforce-api에 department 단위 API를
+    새로 만든다(roster 목록에서 미리 다 부르지 않는다).
+    """
+
+    return await _workforce_get(f"/workforce/v1/agents/{agent_id}/access")
+
+
+@router.get("/ui/workforce/hiring-requests")
+async def workforce_hiring_requests(status: str | None = None) -> Any:
+    """채용 제안 전원 - DRAFT/OPEN/EVALUATING/APPROVED/REJECTED/CLOSED.
+
+    순수 프록시다. workforce-api 쪽 Hiring Repository는 access.py와 같은 이유로
+    DATABASE_URL 미설정 시 501이 아니라 In-Memory로 조용히 대체된다(roster와
+    다른 설계 - api/app.py 머리말 참고) - 이 화면에서 빈 목록이 "미설정"인지
+    "정말 0건"인지는 workforce-api 쪽 설정을 봐야 한다.
+    """
+
+    return await _workforce_get("/workforce/v1/hiring-requests", params={"status": status} if status else None)
+
+
+@router.get("/ui/workforce/improvements")
+async def workforce_improvements() -> Any:
+    """자기 개선 후보(ImprovementCandidate) 전원 - PROPOSED부터 종료 상태까지.
+
+    순수 프록시다. hiring-requests와 같은 이유로 DATABASE_URL 미설정 시 501이
+    아니라 In-Memory 대체다.
+    """
+
+    return await _workforce_get("/workforce/v1/improvements")
+
+
+@router.get("/ui/workforce/workforce-plans")
+async def workforce_plans() -> Any:
+    """6개 투자본부 전체의 Workforce Plan(HR-01 Capacity Report/Staffing Scenario).
+
+    순수 프록시다 - `workforce-api GET /workforce/v1/workforce-plans`가 이미
+    department_code 단위 API 대신 전체를 모아서 준다(idle-agents와 같은 이유:
+    이 화면의 소비자가 항상 전체를 본다). 여기서 부서별로 N번 부르지 않는다.
+    """
+
+    return await _workforce_get("/workforce/v1/workforce-plans")
+
+
+__all__ = [
+    "WORKFORCE_API_URL",
+    "router",
+    "workforce_idle_agents",
+    "workforce_roster",
+    "workforce_agent_access",
+    "workforce_hiring_requests",
+    "workforce_improvements",
+    "workforce_plans",
+]

@@ -11,6 +11,8 @@ import LivePortfolioPanel from "../components/LivePortfolioPanel";
 import ResearchPanel from "../components/ResearchPanel";
 import WorkerPerformancePanel from "../components/WorkerPerformancePanel";
 import WorkforceIdleAgentsPanel from "../components/WorkforceIdleAgentsPanel";
+import WorkforceLifecyclePanel from "../components/WorkforceLifecyclePanel";
+import WorkforceRosterPanel from "../components/WorkforceRosterPanel";
 
 /**
  * 선택한 부서 한 곳의 직원 Registry·내부 메시지·LLM 성과.
@@ -62,6 +64,19 @@ function Disclosure({
 
 function Empty({ children }: { children: React.ReactNode }) {
   return <p className="text-body-sm font-body-sm text-on-surface-variant m-0 py-2">{children}</p>;
+}
+
+/** HR 산출물 3단 그룹(직원 현황/성과·효율성/조직 구성·개선) 구분용 소제목. */
+function GroupHeading({ index, title, hint }: { index: number; title: string; hint: string }) {
+  return (
+    <div className="flex items-baseline gap-2 px-1">
+      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/15 text-[11px] font-bold text-primary">
+        {index}
+      </span>
+      <h3 className="m-0 text-body-md font-body-md font-bold text-on-surface">{title}</h3>
+      <span className="text-[11px] text-on-surface-variant">{hint}</span>
+    </div>
+  );
 }
 
 export default function DepartmentInspector({
@@ -168,10 +183,25 @@ export default function DepartmentInspector({
           돌려 쓰면 미확정 주문이 장부 화면에 올라온다. */}
       {department.domain === "accounting" ? <AccountingLedgerPanel /> : null}
       {department.domain === "workforce" ? (
-        <>
-          <WorkerPerformancePanel metrics={data.metrics} />
-          <WorkforceIdleAgentsPanel />
-        </>
+        <div className="flex flex-col gap-6">
+          <div className="flex flex-col gap-3">
+            <GroupHeading index={1} title="직원 현황" hint="Roster · 행을 클릭하면 Access가 펼쳐집니다" />
+            <WorkforceRosterPanel />
+          </div>
+          <div className="flex flex-col gap-3">
+            <GroupHeading
+              index={2}
+              title="성과 및 효율성"
+              hint="Quality+Capacity+Cost 통합 Scorecard 연동 예정"
+            />
+            <WorkerPerformancePanel metrics={data.metrics} />
+            <WorkforceIdleAgentsPanel />
+          </div>
+          <div className="flex flex-col gap-3">
+            <GroupHeading index={3} title="조직 구성 및 개선" hint="Plan · Hiring · Improvement" />
+            <WorkforceLifecyclePanel />
+          </div>
+        </div>
       ) : null}
       {/* 퀀트는 채택된 알파 전략 - 지금 실제로 도는 페이퍼 컨테이너 1개를 본다
           (`strategy.strategies` 레지스트리는 아직 아무도 안 쓴다). */}
