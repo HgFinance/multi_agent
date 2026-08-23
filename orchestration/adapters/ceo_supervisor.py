@@ -4494,6 +4494,27 @@ class CeoSupervisorService:
         task_id: str,
         kind: str,
     ) -> tuple[bool, SupervisorDecision | None]:
+        """Serialize fast root projection with all other root materializers."""
+
+        if kind not in {"done", "completed"}:
+            return False, None
+
+        # The Discord bridge is intentionally before child CREATE_TASK.  Hold
+        # the same per-root lock used by the recovery/materialization lane for
+        # that whole interval; otherwise a concurrent recovery pass can create
+        # a child while the bridge is still waiting on Discord.
+        with self._parent_lock(task_id):
+            return self._materialize_completed_analysis_root_fast_locked(
+                task_id=task_id,
+                kind=kind,
+            )
+
+    def _materialize_completed_analysis_root_fast_locked(
+        self,
+        *,
+        task_id: str,
+        kind: str,
+    ) -> tuple[bool, SupervisorDecision | None]:
         """Fast-path a completed CEO analysis root without workflow() reconstruction.
 
         Returns ``(handled, decision)``.  The normal workflow path remains the

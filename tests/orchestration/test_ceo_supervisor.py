@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -3448,6 +3449,66 @@ class DelegationProjectionOrderingTest(unittest.TestCase):
         self.assertTrue(handled)
         self.assertEqual(timeline[0], "ceo-dispatch-attempt")
         self.assertEqual(len(timeline), 4)
+
+    def test_fast_projection_lock_blocks_concurrent_root_materialization(self) -> None:
+        bridge_started = threading.Event()
+        release_bridge = threading.Event()
+        child_created = threading.Event()
+        timeline: list[str] = []
+
+        class Client:
+            environment = {"HERMES_HOME": "/tmp/ceo-ordering-lock"}
+
+            def show(self, task_id: str):
+                return {
+                    "id": task_id,
+                    "assignee": "ceo-agent",
+                    "status": "done",
+                    "body": DelegationProjectionOrderingTest.root_body(),
+                }
+
+            def create_task(self, **kwargs):
+                timeline.append(f"child:{kwargs['assignee']}")
+                child_created.set()
+                return {"id": kwargs["assignee"]}
+
+        class BlockingDelivery:
+            def upsert_thread_card(self, **kwargs):
+                timeline.append("ceo-dispatch")
+                bridge_started.set()
+                self_release = release_bridge.wait(timeout=2)
+                if not self_release:
+                    raise AssertionError("test bridge was not released")
+                return "sent"
+
+        service = CeoSupervisorService(Client(), discord_delivery=BlockingDelivery())
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fast = pool.submit(
+                service._materialize_completed_analysis_root_fast,
+                task_id="root",
+                kind="completed",
+            )
+            self.assertTrue(bridge_started.wait(timeout=2))
+
+            # A second materializer must not dispatch a child while the fast
+            # path is still publishing the CEO delegation card.
+            concurrent = pool.submit(
+                service._materialize_completed_analysis_root_fast,
+                task_id="root",
+                kind="completed",
+            )
+            time.sleep(0.05)
+            self.assertFalse(child_created.is_set())
+            release_bridge.set()
+            fast.result(timeout=2)
+            concurrent.result(timeout=2)
+
+        self.assertGreaterEqual(timeline.count("ceo-dispatch"), 1)
+        self.assertTrue(child_created.is_set())
+        first_child_index = next(
+            index for index, item in enumerate(timeline) if item.startswith("child:")
+        )
+        self.assertLess(timeline.index("ceo-dispatch"), first_child_index)
 
     def test_replayed_root_event_keeps_delegation_card_exactly_once(self) -> None:
         timeline: list[str] = []
