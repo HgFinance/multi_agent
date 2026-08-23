@@ -489,7 +489,12 @@ _STAGE_SUFFIXES = {
         "Convert percent notation p% to p/100 (for example 0.015% becomes "
         "0.015/100, never 0.015). Expand billion, million, and thousand into "
         "their numeric scale, and make numerator and denominator use the same "
-        "unit. Keep the requested result unit explicit in the expression."
+        "unit. Keep the requested result unit explicit in the expression. "
+        "The percent sign itself is forbidden in EXPR. When the requested "
+        "result is percentage points, multiply the final ratio by 100 after "
+        "converting percentage inputs to fractions; use a pattern such as "
+        "((p/100)*(r/100) + (q/100)*(s/100)) * 100 with the supplied numeric "
+        "literals substituted."
     ),
     "domain_formula": (
         " Apply a supplied domain formula only when its terms are present. "
@@ -522,7 +527,20 @@ _NUMERIC_METADATA_SCHEMA = {
         "result_unit": {"type": "string"},
         "scale": {
             "type": "string",
-            "description": "Source/result scale such as 1, 1e3, 1e6, 1e9, or percent-points.",
+            "enum": [
+                "1",
+                "fraction",
+                "percent",
+                "percent_points",
+                "currency",
+                "shares",
+                "count",
+                "none",
+                "1e3",
+                "1e6",
+                "1e9",
+            ],
+            "description": "Canonical source/result scale; use 1e3, 1e6, or 1e9 rather than words.",
         },
         "formula_name": {"type": "string"},
         "explanation": {"type": "string"},
@@ -662,7 +680,7 @@ def _stage_numeric(
 ) -> dict[str, Any]:
     """Run the same EXPR/AST path with cumulative generic prompt treatments."""
 
-    if stage == "selective_unit_scale":
+    if stage in {"selective_unit_scale", "structured_fewshot_consensus"}:
         return _run_numeric_with_metadata(
             case=case, prompt=prompt, url=url, model=model, timeout=timeout
         )
@@ -712,6 +730,143 @@ def _run_text(*, case: dict[str, Any], prompt: str, url: str, model: str, timeou
             "attempts": [],
             "error": str(exc),
         }
+
+
+def _run_choice(
+    *,
+    case: dict[str, Any],
+    prompt: str,
+    url: str,
+    model: str,
+    timeout: float,
+) -> dict[str, Any]:
+    """Constrain a generic label task to the labels supplied by the contract.
+
+    The allowed labels come from the request contract, never from the frozen
+    answer.  The model still selects the label; there is no deterministic
+    answer substitution when a request or validation fails.
+    """
+
+    labels = [str(label) for label in case.get("allowed_labels", [])]
+    if not labels:
+        return {
+            "prediction": "",
+            "raw_prediction": "",
+            "final_source": "guided_choice_schema_missing",
+            "route": "guided_choice",
+            "attempts": [],
+            "error": "no allowed labels supplied by the request contract",
+        }
+    schema = {
+        "type": "object",
+        "properties": {"label": {"type": "string", "enum": labels}},
+        "required": ["label"],
+        "additionalProperties": False,
+    }
+    response_format = vllm_response_format(schema, name="hybrid_choice")
+    messages = [
+        *_text_messages(case, prompt),
+        {
+            "role": "user",
+            "content": (
+                "Return exactly one JSON object with the key `label`. Select the "
+                "label that follows from the supplied context. Do not explain. "
+                f"The allowed labels are: {', '.join(labels)}."
+            ),
+        },
+    ]
+    attempts: list[dict[str, Any]] = []
+    for phase in ("initial", "retry"):
+        try:
+            response = call_model(
+                url=url,
+                model=model,
+                messages=messages,
+                response_format=response_format,
+                timeout=timeout,
+            )
+        except RuntimeError as exc:
+            return {
+                "prediction": "",
+                "raw_prediction": "",
+                "final_source": "guided_choice_request_error",
+                "route": "guided_choice",
+                "attempts": attempts,
+                "error": str(exc),
+            }
+        validation = validate_json(response["content"], schema)
+        attempts.append({
+            **response,
+            "phase": phase,
+            "valid": validation.valid,
+            "validation_error": validation.error,
+        })
+        if validation.valid:
+            audit_messages = [
+                *messages,
+                {"role": "assistant", "content": response["content"]},
+                {
+                    "role": "user",
+                    "content": (
+                        "Audit the selected label against the supplied context. "
+                        "Keep it only if the context supports it; otherwise select "
+                        "the label that follows from the explicit rule and facts. "
+                        "Do not use outside knowledge, hidden answers, or benchmark "
+                        "identifiers. Return only the same JSON object."
+                    ),
+                },
+            ]
+            try:
+                audited = call_model(
+                    url=url,
+                    model=model,
+                    messages=audit_messages,
+                    response_format=response_format,
+                    timeout=timeout,
+                )
+                audit_validation = validate_json(audited["content"], schema)
+                attempts.append({
+                    **audited,
+                    "phase": "semantic_audit",
+                    "valid": audit_validation.valid,
+                    "validation_error": audit_validation.error,
+                })
+                if audit_validation.valid:
+                    return {
+                        "prediction": audit_validation.value["label"],
+                        "raw_prediction": response["content"],
+                        "final_raw_prediction": audited["content"],
+                        "final_source": "guided_choice_semantic_audit",
+                        "route": "guided_choice",
+                        "attempts": attempts,
+                        "schema": schema,
+                        "error": None,
+                    }
+            except RuntimeError as exc:
+                attempts.append({"phase": "semantic_audit", "error": str(exc)})
+            return {
+                "prediction": validation.value["label"],
+                "raw_prediction": response["content"],
+                "final_source": "guided_choice_enum",
+                "route": "guided_choice",
+                "attempts": attempts,
+                "schema": schema,
+                "error": None,
+            }
+        messages = [
+            *messages,
+            {"role": "assistant", "content": response["content"]},
+            {"role": "user", "content": retry_instruction(schema, validation.error or "invalid choice")},
+        ]
+    return {
+        "prediction": "",
+        "raw_prediction": attempts[-1].get("content", "") if attempts else "",
+        "final_source": "guided_choice_validation_error",
+        "route": "guided_choice",
+        "attempts": attempts,
+        "schema": schema,
+        "error": attempts[-1].get("validation_error", "choice validation failed") if attempts else "no response",
+    }
 
 
 def _run_internal_case(
@@ -798,6 +953,9 @@ def _run_internal_case(
         else:
             outcome = _run_structured(case=case, prompt=prompt, url=url, model=base_model, timeout=timeout)
             route = "guided_json_schema"
+    elif scoring_type == "choice":
+        outcome = _run_choice(case=case, prompt=prompt, url=url, model=base_model, timeout=timeout)
+        route = "guided_choice"
     else:
         outcome = _run_text(case=case, prompt=prompt, url=url, model=base_model, timeout=timeout)
         route = "text_passthrough"

@@ -194,7 +194,10 @@ def _run_numeric(
                         "Check every unit conversion, percentage-to-points "
                         "conversion, sign, and operation. Return the corrected "
                         "expression only as EXPR: <expression>; if it is correct, "
-                        "repeat it exactly."
+                        "repeat it exactly. If the question asks for a percentage "
+                        "or percentage return, a fraction such as 0.036 is not "
+                        "the final requested unit: multiply the final ratio by 100 "
+                        "and return percentage points."
                     ),
                 },
             ]
@@ -240,6 +243,19 @@ def _run_numeric(
                     "attempts": attempts,
                     "error": str(exc),
                 }
+            repair_hint = (
+                "The previous response was not a safe expression. Retry with exactly one line in the form EXPR: "
+                "<numeric expression>; do not answer from memory."
+            )
+            if "%" in attempts[-1].get("content", ""):
+                repair_hint += (
+                    " The percent sign is not valid expression syntax: rewrite every numeric p% as (p / 100) "
+                    "and use an explicit * 100 only when the requested result is percentage points."
+                )
+            messages = [
+                *messages,
+                {"role": "user", "content": repair_hint},
+            ]
     raise AssertionError("unreachable")
 
 
