@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "reac
 import {
   fetchOperations,
   subscribeOperationsStream,
+  type LlmPerformanceMetric,
   type OperationsDepartment,
   type OperationsView,
 } from "../lib/operationsClient";
@@ -35,6 +36,91 @@ const STATUS_VIEW: Record<string, { label: string; tone: string }> = {
 
 const EMPTY_DEPARTMENTS: OperationsDepartment[] = [];
 const NO_SUBSCRIBE = () => () => {};
+
+function formatLatency(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return "측정값 없음";
+  return value >= 1_000 ? `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}초` : `${Math.round(value)}ms`;
+}
+
+function percentile(values: number[], percentileValue: number): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * percentileValue) - 1)];
+}
+
+function PerformanceMetrics({ metrics }: { metrics: LlmPerformanceMetric[] }) {
+  const measured = metrics.filter((item) => Number.isFinite(item.latency_ms) && item.latency_ms >= 0);
+  if (measured.length === 0) return null;
+
+  const latencies = measured.map((item) => item.latency_ms);
+  const average = Math.round(latencies.reduce((total, value) => total + value, 0) / latencies.length);
+  const p95 = percentile(latencies, 0.95);
+  const tokenTotal = measured.reduce(
+    (total, item) => total + (item.prompt_tokens ?? 0) + (item.completion_tokens ?? 0),
+    0,
+  );
+  const hasTokenMeasurement = measured.some(
+    (item) => item.prompt_tokens != null || item.completion_tokens != null,
+  );
+  const recent = [...measured].slice(-10).reverse();
+
+  return (
+    <section className="bg-surface-container-lowest border border-outline-variant rounded-lg p-4" aria-label="최근 Worker 성능">
+      <div className="flex justify-between gap-3 flex-wrap items-baseline">
+        <div>
+          <h2 className="text-title-md font-title-md text-primary m-0">최근 Worker 성능</h2>
+          <p className="text-xs text-on-surface-variant mt-1 mb-0">
+            현재 요청에서 수집한 실행 지표입니다. 모델 입력·출력 원문은 표시하거나 전송하지 않습니다.
+          </p>
+        </div>
+        <span className="text-xs text-on-surface-variant">표본 {measured.length}건</span>
+      </div>
+      <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-2">
+        {[
+          ["평균 지연", formatLatency(average)],
+          ["P95 지연", p95 === null ? "측정값 없음" : formatLatency(p95)],
+          ["최대 지연", formatLatency(Math.max(...latencies))],
+          ["입·출력 토큰", hasTokenMeasurement ? tokenTotal.toLocaleString("ko-KR") : "미측정"],
+        ].map(([label, value]) => (
+          <div key={label} className="rounded border border-outline-variant bg-surface-container-low px-3 py-2">
+            <p className="m-0 text-xs text-on-surface-variant">{label}</p>
+            <strong className="font-data-mono text-body-md text-on-surface">{value}</strong>
+          </div>
+        ))}
+      </div>
+      <div className="mt-3 overflow-x-auto">
+        <table className="w-full min-w-[680px] text-left text-xs">
+          <thead className="text-on-surface-variant">
+            <tr className="border-b border-outline-variant">
+              <th className="pb-2 pr-3 font-medium">부서</th>
+              <th className="pb-2 pr-3 font-medium">Worker</th>
+              <th className="pb-2 pr-3 font-medium">모델</th>
+              <th className="pb-2 pr-3 font-medium">지연</th>
+              <th className="pb-2 pr-3 font-medium">입력/출력 토큰</th>
+              <th className="pb-2 font-medium">상태</th>
+            </tr>
+          </thead>
+          <tbody>
+            {recent.map((metric, index) => (
+              <tr key={`${metric.stage}-${metric.worker_id}-${index}`} className="border-b border-outline-variant/60 text-on-surface">
+                <td className="py-2 pr-3">{metric.stage}</td>
+                <td className="py-2 pr-3 font-data-mono">{metric.worker_id}</td>
+                <td className="py-2 pr-3 font-data-mono">{metric.model_name || "미측정"}</td>
+                <td className="py-2 pr-3 font-data-mono">{formatLatency(metric.latency_ms)}</td>
+                <td className="py-2 pr-3 font-data-mono">
+                  {metric.prompt_tokens == null && metric.completion_tokens == null
+                    ? "미측정"
+                    : `${metric.prompt_tokens ?? 0} / ${metric.completion_tokens ?? 0}`}
+                </td>
+                <td className="py-2">{metric.status}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
 
 function usePageHost(): string {
   return useSyncExternalStore(
@@ -407,7 +493,7 @@ export default function AgentLogsView() {
   const discordDepartment =
     departments.find((item) => item.department_code === "ceo-agent") ?? departments[0] ?? null;
 
-  const metrics = [
+  const summaryMetrics = [
     { label: "부서", value: departments.length || 8 },
     { label: "등록 직원", value: registeredWorkers },
     { label: "실행 중", value: activeWorkers },
@@ -453,7 +539,7 @@ export default function AgentLogsView() {
       <HermesKanbanBoard board={kanban} error={kanbanError} loading={kanbanLoading} kanbanUrl={kanbanUrl} />
 
       <section className="flex flex-wrap gap-2" aria-label="전체 부서 요약">
-        {metrics.map((metric) => (
+        {summaryMetrics.map((metric) => (
           <span
             key={metric.label}
             className="px-4 py-2 rounded border border-outline-variant bg-surface-container-lowest text-body-sm font-body-sm text-on-surface-variant"
@@ -470,6 +556,8 @@ export default function AgentLogsView() {
           BFF keepalive <b className="font-data-mono text-on-surface">{lastKeepalive ? new Date(lastKeepalive).toLocaleTimeString("ko-KR") : "waiting"}</b>
         </span>
       </section>
+
+      <PerformanceMetrics metrics={data?.metrics ?? []} />
 
       {/* 접기는 native `<details>`가 한다 - 열림 상태·키보드·스크린리더가 전부 딸려
           온다. `<details>`에 flex를 주면 닫혀도 내용이 보이므로 레이아웃은 안쪽

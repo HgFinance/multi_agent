@@ -45,6 +45,7 @@ from orchestration.llm_observability import (
     publish_langfuse_metric,
     publish_metric,
     redacted_trace,
+    redacted_langfuse_worker_span,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -967,18 +968,24 @@ async def _invoke_worker(
         else "deterministic-test",
     )
     try:
-        if stage in {"risk", "qa"}:
-            trace = module.SkillTrace()
-            app = module.build_worker_graph(
-                spec,
-                tool,
-                worker_llm,
-                trace=trace,
-            )
-        else:
-            app = build_independent_worker_graph(spec, tool, worker_llm)
-        # Required async LangGraph boundary: never replace this with invoke().
-        state = await app.ainvoke({"worker_id": spec.worker_id, "input": dict(payload)})
+        with redacted_langfuse_worker_span(
+            worker_id=spec.worker_id,
+            role=spec.role,
+            stage=stage,
+            trace_id=str(payload.get("trace_id") or payload.get("case_id") or ""),
+        ):
+            if stage in {"risk", "qa"}:
+                trace = module.SkillTrace()
+                app = module.build_worker_graph(
+                    spec,
+                    tool,
+                    worker_llm,
+                    trace=trace,
+                )
+            else:
+                app = build_independent_worker_graph(spec, tool, worker_llm)
+            # Required async LangGraph boundary: never replace this with invoke().
+            state = await app.ainvoke({"worker_id": spec.worker_id, "input": dict(payload)})
         report = {
             "stage": stage,
             "worker_id": spec.worker_id,

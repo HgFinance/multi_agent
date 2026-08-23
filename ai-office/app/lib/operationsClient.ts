@@ -82,6 +82,10 @@ export type LlmPerformanceMetric = {
   attempts: number;
   latency_ms: number;
   eval_score: number | null;
+  llm_calls?: number;
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+  error_count?: number;
 };
 
 export type OperationsView = {
