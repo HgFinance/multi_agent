@@ -75,6 +75,19 @@ except ModuleNotFoundError:  # 배포된 workforce-api 이미지에는 orchestra
 class WorkerRegistryUnavailable(RuntimeError):
     """부서 Worker registry 를 이 런타임에서 읽을 수 없다(유휴 판정 불가)."""
 
+
+class HeadProfilesUnavailable(WorkerRegistryUnavailable):
+    """부서장 신원만 못 읽었다 - Worker 목록 자체는 멀쩡하다(2026-08-20).
+
+    둘을 같은 예외로 던지면 호출부가 구분할 방법이 문자열 매칭뿐이라, 부서장을
+    못 읽었다는 이유로 **Worker 리포트까지 통째로 실패**한다(실측: 매니페스트
+    전환으로 Profile 이 이 컨테이너에서 사라지자 --include-heads 가 그렇게 됐다).
+
+    WorkerRegistryUnavailable 를 상속하는 이유: 부서장을 필수로 요구하는 호출부는
+    기존처럼 잡으면 되고, Worker 만으로 진행할 수 있는 호출부만 이 타입을 따로
+    잡으면 된다. 새로 생긴 실패가 조용히 무시되지는 않는다.
+    """
+
 ROOT = Path(__file__).resolve().parents[3]
 
 if str(ROOT) not in sys.path:
@@ -243,7 +256,7 @@ def load_head_profile_spec(repo_root: Path, department: str) -> HeadProfileSpec 
     try:
         import yaml
     except ModuleNotFoundError as exc:  # pragma: no cover - 이미지 빌드 결함
-        raise WorkerRegistryUnavailable(f"pyyaml_not_installed:{exc}") from exc
+        raise HeadProfilesUnavailable(f"pyyaml_not_installed:{exc}") from exc
 
     mount_root = Path(os.environ.get(PROFILE_MOUNT_ROOT_ENV) or DEFAULT_PROFILE_MOUNT_ROOT)
     candidates = (
@@ -256,14 +269,14 @@ def load_head_profile_spec(repo_root: Path, department: str) -> HeadProfileSpec 
         try:
             config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         except Exception as exc:  # noqa: BLE001 - 깨진 Profile 도 "모른다" 로 접힌다
-            raise WorkerRegistryUnavailable(
+            raise HeadProfilesUnavailable(
                 f"profile_unreadable:{department}:{type(exc).__name__}"
             ) from exc
         persona = str((config.get("agent") or {}).get("head_persona") or "").strip()
         return HeadProfileSpec(persona) if persona else None
     # Worker 목록은 매니페스트에서 이미 받았다 - 부서장만 못 읽은 것을 빈 목록으로
     # 위장하지 않는다("유휴 없음"이 아니라 "모른다").
-    raise WorkerRegistryUnavailable(f"head_profile_not_found:{department}")
+    raise HeadProfilesUnavailable(f"head_profile_not_found:{department}")
 
 
 def check_idle_agents(
