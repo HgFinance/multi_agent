@@ -507,3 +507,85 @@ def test_bff_and_card_paths_use_the_same_head_identity() -> None:
     for profile in hermes_boundary.PROFILE_CONTAINERS:
         assert observability.head_persona_for_profile(profile) ==             observability.head_persona_for_profile(profile)
         assert observability.stage_for_profile(profile)
+
+
+# ---------------------------------------------------------------------------
+# 2026-08-20: 실측치(토큰·호출수) 전달
+#
+# record_llm_call() 은 네 모델 경로 전부에서 이미 불리고 있었는데, 그 값을 담을
+# begin_worker_metric() 컨텍스트가 portfolio_recommendation 에서만 열려서 나머지
+# 경로의 측정치가 매번 버려지고 있었다. 여기서 고정하는 것은 두 가지다:
+#   (1) 실행기가 컨텍스트를 열어 토큰이 이벤트에 실린다
+#   (2) 그 전달이 **async fan-out 을 건너서도** 유지된다 - contextvars 는 Task
+#       생성 시점에 복사되므로, 컨텍스트를 잘못된 자리에서 열면 조용히 0 이 된다
+# ---------------------------------------------------------------------------
+
+
+class _Usage:
+    def __init__(self, prompt: int, completion: int) -> None:
+        self.prompt_tokens = prompt
+        self.completion_tokens = completion
+
+
+def _token_reporting_llm(_system: str, _prompt: str) -> str:
+    """실제 Worker LLM 과 같은 자리에서 record_llm_call 을 부르는 대역."""
+
+    observability.record_llm_call(usage=_Usage(31, 17), latency_ms=42)
+    return '{"summary":"ok","confidence":0.8,"evidence_refs":["tool"],"escalate":false}'
+
+
+def test_shared_runtime_publishes_measured_tokens(captured: _FakeLangfuseClient) -> None:
+    run_worker_registry(
+        (_demo_spec(),),
+        {"anything": 1},
+        tools={"demo-worker": lambda value: {"tool": "demo", "value": value}},
+        llm=_token_reporting_llm,
+        stage="research",
+    )
+    metadata = captured.events[-1]["metadata"]
+    assert metadata["prompt_tokens"] == 31
+    assert metadata["completion_tokens"] == 17
+    assert metadata["llm_calls"] == 1
+    assert metadata["model_name"], "model_name 이 비면 비용 집계에서 모델을 못 가른다"
+
+
+def test_measured_tokens_survive_async_fan_out(captured: _FakeLangfuseClient) -> None:
+    """워커 두 명이 동시에 돌아도 각자의 토큰이 섞이지 않아야 한다.
+
+    contextvars 는 Task 마다 복사본을 갖는다 - 컨텍스트를 fan-out 바깥에서 열면
+    두 워커의 호출이 한 metric 에 합쳐지거나 서로를 덮어쓴다.
+    """
+
+    specs = (
+        WorkerSpec("worker-a", "A", ("demo.tool",), "always"),
+        WorkerSpec("worker-b", "B", ("demo.tool",), "always"),
+    )
+    tools = {spec.worker_id: (lambda value: {"tool": "demo", "value": value}) for spec in specs}
+    run_worker_registry(specs, {"anything": 1}, tools=tools,
+                        llm=_token_reporting_llm, stage="qa")
+
+    by_worker = {
+        event["metadata"]["worker_id"]: event["metadata"]
+        for event in captured.events
+        if event["name"].startswith("llm.performance.metric:")
+    }
+    assert set(by_worker) == {"worker-a", "worker-b"}
+    for worker_id, metadata in by_worker.items():
+        assert metadata["llm_calls"] == 1, f"{worker_id} 의 호출수가 섞였다: {metadata}"
+        assert metadata["prompt_tokens"] == 31, f"{worker_id} 토큰 누락/합산: {metadata}"
+
+
+def test_unmeasured_run_still_omits_token_fields(captured: _FakeLangfuseClient) -> None:
+    """모델을 안 부른 실행은 토큰 필드가 아예 없어야 한다 - 0 은 관측 사실로 읽힌다."""
+
+    run_worker_registry(
+        (_demo_spec(),),
+        {"anything": 1},
+        tools={"demo-worker": lambda value: {"tool": "demo", "value": value}},
+        llm=_llm,  # record_llm_call 을 부르지 않는 대역
+        stage="research",
+    )
+    metadata = captured.events[-1]["metadata"]
+    assert "prompt_tokens" not in metadata
+    assert "completion_tokens" not in metadata
+    assert metadata.get("llm_calls", 0) == 0 or "llm_calls" not in metadata

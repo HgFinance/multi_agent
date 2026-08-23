@@ -56,6 +56,8 @@ from departments.risk_qa_worker_profiles import (
     tech_profile_for,
 )
 from orchestration.llm_observability import (
+    begin_worker_metric,
+    end_worker_metric,
     publish_worker_activity,
     publish_worker_opportunity,
     record_llm_call,
@@ -1520,16 +1522,28 @@ async def run_employee_workers_async(
         """
 
         started = time.perf_counter()
+        # 토큰·호출수는 record_llm_call() 이 이미 잰다 - begin_worker_metric() 이
+        # 열려 있어야 그 값이 쌓인다(2026-08-20, 공용 런타임과 같은 계약).
+        metric_token = begin_worker_metric(
+            worker_id=spec.worker_id, role=spec.role,
+            stage="qa", model_name=_model_name(),
+        )
         report = await _execute_one(spec)
+        status = str(report.get("status", "DEGRADED"))
+        attempts = int(report.get("attempts", 0) or 0)
+        measured = end_worker_metric(
+            metric_token, status=status, attempts=attempts, eval_score=None,
+        )
         publish_worker_activity(
             stage="qa",
             worker_id=spec.worker_id,
             role=spec.role,
-            status=str(report.get("status", "DEGRADED")),
-            attempts=int(report.get("attempts", 0) or 0),
+            status=status,
+            attempts=attempts,
             latency_ms=int((time.perf_counter() - started) * 1000),
-            error_count=0 if report.get("status") == "COMPLETED" else 1,
+            error_count=0 if status == "COMPLETED" else 1,
             trace_id=str(trace_id or ""),
+            measured=measured,
         )
         return report
 
