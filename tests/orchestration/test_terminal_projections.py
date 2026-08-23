@@ -256,6 +256,37 @@ class TerminalProjectionTests(unittest.TestCase):
         original_query = payload["properties"]["original_query"]["rich_text"][0]["text"]["content"]
         self.assertEqual(original_query, "Compare the selected companies")
 
+    def test_single_delegated_primary_projects_started_card(self) -> None:
+        root = dict(self.root)
+        root["body"] += "\nselected_primary_profiles=research-department\n"
+        child = dict(self.primary[0])
+        child["status"] = "running"
+
+        class Delivery:
+            def __init__(self) -> None:
+                self.cards: list[dict[str, Any]] = []
+
+            def upsert_thread_card(self, **kwargs: Any) -> str:
+                self.cards.append(kwargs)
+                return "created"
+
+        delivery = Delivery()
+        service = CeoSupervisorService(
+            FakeSupervisorClient(root, [child]),
+            discord_delivery=delivery,
+        )
+
+        status = service._deliver_department_progress(
+            root_task_id=ROOT,
+            root_payload=root,
+            task_payload=child,
+            event={"task_id": RESEARCH, "kind": "started"},
+        )
+
+        self.assertEqual(status, "created")
+        self.assertEqual(len(delivery.cards), 1)
+        self.assertIn("⏳ 분석 중입니다...", delivery.cards[0]["content"])
+
     def test_ceo_schema_is_reused_but_projection_query_remains_idempotent(self) -> None:
         transport = FakeNotionTransport()
         projection = CeoNotionProjection(

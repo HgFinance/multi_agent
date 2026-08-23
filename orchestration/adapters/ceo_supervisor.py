@@ -3138,13 +3138,14 @@ class CeoSupervisorService:
 
         No semantic routing happens here.
 
-        Existing durable execution state decides the UX:
+        Existing execution state/validated plan decides the UX:
         - no selected primary + root final_answer -> direct CEO reply
         - materialized selected primaries -> one CEO delegation card
 
-        Planner metadata alone never authorizes a delegation card.  Callers
-        that have just created children may pass their successful assignees;
-        terminal/recovery callers pass the authoritative task projection.
+        Planner metadata alone never authorizes a delegation card.  The initial
+        materializer may pass its already-validated primary decisions before
+        child dispatch so the delegation card is visible first; terminal and
+        recovery callers pass the authoritative task projection.
 
         Existing Discord delivery methods own correlation, idempotency,
         message creation/update, and thread targeting.
@@ -3653,7 +3654,9 @@ class CeoSupervisorService:
         selected, _ = split_planner_selection(
             selected_primary_profiles_from_task(root_payload)
         )
-        if len(selected) < 2:
+        if not selected:
+            # CEO-direct workflows have no delegated department progress card.
+            # A single delegated primary still needs visible lifecycle progress.
             return
 
         show = getattr(self.client, "show", None)
@@ -3824,8 +3827,9 @@ class CeoSupervisorService:
         selected, _ = split_planner_selection(
             selected_primary_profiles_from_task(root_payload)
         )
-        if len(selected) < 2:
-            # Keep the existing single-primary fast path quiet.
+        if not selected:
+            # Keep CEO-direct workflows quiet; delegated single-primary work
+            # still needs a visible department lifecycle card.
             return None
 
         child = ChildTaskState.from_hermes(task_payload)
@@ -4178,6 +4182,34 @@ class CeoSupervisorService:
                     )
                     continue
 
+                # Publish the CEO delegation card before dispatching any
+                # primary child.  A child can claim/start immediately after
+                # CREATE_TASK, so publishing afterwards allows a department
+                # progress card to overtake the delegation card in Discord.
+                try:
+                    bridge_status = self._bridge_root_completion_to_discord(
+                        root_task_id=root_id,
+                        root_payload=root_payload,
+                        materialized_primary_profiles=tuple(
+                            decision.assignee or "" for decision in decisions
+                        ),
+                    )
+                except Exception as exc:
+                    # Existing policy: a Discord delegation failure must not
+                    # prevent primary execution.
+                    logger.warning(
+                        "ceo-root-discord-bridge-failed root=%s error=%s",
+                        root_id,
+                        type(exc).__name__,
+                    )
+                    bridge_status = "failed"
+                logger.info(
+                    "root-planning-complete-projected-before-primary-create "
+                    "root=%s status=%s",
+                    root_id,
+                    bridge_status,
+                )
+
                 # hgfinance-parallel-primary-fanout-v1
                 #
                 # Initial analysis primaries are independent: they deliberately
@@ -4220,31 +4252,6 @@ class CeoSupervisorService:
                         decision.assignee or ""
                         for decision in decisions
                     ),
-                )
-
-                # A delegation card is a projection of durable children, not
-                # of the planner's intended set.  Publish only after the
-                # successful idempotent creates above.
-                try:
-                    bridge_status = self._bridge_root_completion_to_discord(
-                        root_task_id=root_id,
-                        root_payload=root_payload,
-                        materialized_primary_profiles=tuple(
-                            decision.assignee or "" for decision in decisions
-                        ),
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "ceo-root-discord-bridge-failed root=%s error=%s",
-                        root_id,
-                        type(exc).__name__,
-                    )
-                    bridge_status = "failed"
-                logger.info(
-                    "root-planning-complete-projected-after-primary-create "
-                    "root=%s status=%s",
-                    root_id,
-                    bridge_status,
                 )
 
                 materialized.extend(decisions)
@@ -4598,6 +4605,33 @@ class CeoSupervisorService:
             )
             return True, decisions[0]
 
+        # Publish before any primary child is dispatched.  The child may start
+        # synchronously during CREATE_TASK, so a post-create bridge can produce
+        # a department card before the CEO delegation card.
+        try:
+            bridge_status = self._bridge_root_completion_to_discord(
+                root_task_id=task_id,
+                root_payload=root_payload,
+                materialized_primary_profiles=tuple(
+                    decision.assignee or "" for decision in decisions
+                ),
+            )
+        except Exception as exc:
+            # A Discord projection failure must not change child execution.
+            logger.warning(
+                "ceo-root-discord-bridge-failed root=%s error=%s",
+                task_id,
+                type(exc).__name__,
+            )
+            bridge_status = "failed"
+
+        logger.info(
+            "root-planning-complete-fast-projected-before-primary-create "
+            "root=%s status=%s",
+            task_id,
+            bridge_status,
+        )
+
         if len(decisions) == 1:
             self._execute(decisions[0], state)
         else:
@@ -4626,29 +4660,6 @@ class CeoSupervisorService:
             ",".join(decision.assignee or "" for decision in decisions),
         )
 
-        # The delegation card is a projection of durable children.  Publish
-        # it only after the idempotent child creates above have succeeded.
-        try:
-            bridge_status = self._bridge_root_completion_to_discord(
-                root_task_id=task_id,
-                root_payload=root_payload,
-                materialized_primary_profiles=tuple(
-                    decision.assignee or "" for decision in decisions
-                ),
-            )
-        except Exception as exc:
-            logger.warning(
-                "ceo-root-discord-bridge-failed root=%s error=%s",
-                task_id,
-                type(exc).__name__,
-            )
-            bridge_status = "failed"
-
-        logger.info(
-            "root-planning-complete-fast-primary-created root=%s status=%s",
-            task_id,
-            bridge_status,
-        )
         return True, decisions[0]
 
     def _cached_workflow_root(self, task_id: str) -> str | None:
