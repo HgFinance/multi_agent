@@ -11,6 +11,125 @@ function percentile(values: number[], percentileValue: number): number | null {
   return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * percentileValue) - 1)];
 }
 
+type StatusCategory = "success" | "error" | "active" | "neutral";
+
+/** 실행 상태 문자열은 부서마다(REJECT/DEGRADED/HOLD/...) 제각각이라 의미를 다 알 수
+ *  없다 - 그래서 "정확히 어떤 상태였나"는 라벨 그대로 보여주고, 색은 네 카테고리
+ *  키워드 기준으로만 나눈다(과잉 해석하지 않는다). */
+function categorizeStatus(status: string): StatusCategory {
+  const upper = status.toUpperCase();
+  if (/(ERROR|FAIL|REJECT|DENY|DEGRADED|BLOCKED)/.test(upper)) return "error";
+  if (/(COMPLETED|APPROVE|ACCEPT|^OK$)/.test(upper)) return "success";
+  if (/(RUNNING|QUEUED|WAITING|PENDING)/.test(upper)) return "active";
+  return "neutral";
+}
+
+const CATEGORY_COLOR: Record<StatusCategory, string> = {
+  success: "var(--color-tertiary-fixed-dim)",
+  error: "var(--color-error)",
+  active: "var(--color-primary)",
+  neutral: "var(--color-outline)",
+};
+
+const CATEGORY_SWATCH_CLASS: Record<StatusCategory, string> = {
+  success: "bg-tertiary-fixed-dim",
+  error: "bg-error",
+  active: "bg-primary",
+  neutral: "bg-outline",
+};
+
+type StatusSlice = { label: string; count: number; percent: number; category: StatusCategory };
+
+function statusBreakdown(measured: LlmPerformanceMetric[]): StatusSlice[] {
+  const counts = new Map<string, number>();
+  for (const item of measured) {
+    const label = item.status || "미확인";
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  const total = measured.length;
+  return [...counts.entries()]
+    .map(([label, count]) => ({ label, count, percent: (count / total) * 100, category: categorizeStatus(label) }))
+    .sort((left, right) => right.count - left.count);
+}
+
+/** 실행 상태 도넛. completed류는 초록, 오류성 상태는 빨강, 진행 중은 파랑, 그
+ *  외는 회색 - 색만으로 구분하지 않도록 범례에 라벨을 항상 같이 둔다. */
+function StatusDonutChart({ slices }: { slices: StatusSlice[] }) {
+  const total = slices.reduce((sum, slice) => sum + slice.count, 0);
+
+  return (
+    <div className="w-full min-w-0 rounded-md border border-outline-variant bg-surface-container-low px-4 py-3">
+      <div className="flex items-center justify-between gap-3">
+        <span className="flex items-center gap-2 text-label-md font-label-md uppercase text-on-surface-variant">
+          <span className="material-symbols-outlined text-[16px]" aria-hidden="true">
+            donut_small
+          </span>
+          실행 상태 분포
+        </span>
+        <span className="text-[11px] text-on-surface-variant">{total}건</span>
+      </div>
+
+      {slices.length > 0 ? (
+        <div className="mt-3 grid grid-cols-[7rem_minmax(0,1fr)] items-center gap-4">
+          <div className="relative h-28 w-28 shrink-0" role="img" aria-label="실행 상태별 비율">
+            <svg viewBox="0 0 120 120" className="h-full w-full -rotate-90" aria-hidden="true">
+              <circle cx="60" cy="60" r="42" fill="none" stroke="#e0e3e5" strokeWidth="16" />
+              {slices.reduce<{ offset: number; elements: React.ReactNode[] }>(
+                (result, slice) => {
+                  const visiblePercent = Math.max(slice.percent, 0.5);
+                  result.elements.push(
+                    <circle
+                      key={slice.label}
+                      cx="60"
+                      cy="60"
+                      r="42"
+                      fill="none"
+                      pathLength="100"
+                      stroke={CATEGORY_COLOR[slice.category]}
+                      strokeDasharray={`${visiblePercent} ${100 - visiblePercent}`}
+                      strokeDashoffset={-result.offset}
+                      strokeWidth="16"
+                    />,
+                  );
+                  result.offset += visiblePercent;
+                  return result;
+                },
+                { offset: 0, elements: [] },
+              ).elements}
+            </svg>
+            <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-center">
+              <strong className="font-data-mono text-sm text-primary">{total}건</strong>
+            </div>
+          </div>
+
+          <ul className="m-0 min-w-0 space-y-2 p-0">
+            {slices.map((slice) => (
+              <li key={slice.label} className="flex min-w-0 items-center justify-between gap-2 text-xs">
+                <span className="flex min-w-0 items-center gap-2">
+                  <span
+                    className={`h-2.5 w-2.5 shrink-0 rounded-full ${CATEGORY_SWATCH_CLASS[slice.category]}`}
+                    aria-hidden="true"
+                  />
+                  <span className="truncate text-on-surface" title={slice.label}>
+                    {slice.label}
+                  </span>
+                </span>
+                <span className="shrink-0 font-data-mono text-on-surface-variant">
+                  {slice.count}건 · {slice.percent.toFixed(0)}%
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : (
+        <p className="m-0 mt-3 flex min-h-[7rem] items-center justify-center rounded border border-outline-variant bg-surface-container-lowest px-4 text-center text-xs text-on-surface-variant">
+          실행 상태 데이터를 확인하는 중입니다.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function WorkerMetricsArtifactHeader({ samples }: { samples?: number }) {
   return (
     <div className="flex items-center justify-between gap-3 border-b border-outline-variant bg-surface-container-low px-4 py-2.5">
@@ -66,6 +185,7 @@ export default function WorkerPerformancePanel({ metrics }: { metrics: LlmPerfor
     (item) => item.prompt_tokens != null || item.completion_tokens != null,
   );
   const recent = [...measured].slice(-10).reverse();
+  const statusSlices = statusBreakdown(measured);
 
   return (
     <section className="min-w-0 overflow-hidden rounded-lg border border-outline-variant bg-surface-container-lowest shadow-sm" aria-labelledby="worker-performance-title">
@@ -98,6 +218,10 @@ export default function WorkerPerformancePanel({ metrics }: { metrics: LlmPerfor
               <strong className="mt-1 block font-data-mono text-body-md text-on-surface">{value}</strong>
             </div>
           ))}
+        </div>
+
+        <div className="min-w-0 max-w-xl">
+          <StatusDonutChart slices={statusSlices} />
         </div>
 
         <div className="overflow-x-auto rounded-lg border border-outline-variant">
