@@ -1,9 +1,12 @@
 "use client";
 
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
+  fetchAgentAccess,
   fetchWorkforceRoster,
   WorkforceRosterError,
+  type AccessAssignment,
   type EmploymentStatus,
   type RosterAgent,
   type WorkforceRoster,
@@ -104,40 +107,128 @@ function EmploymentCountTiles({ agents }: { agents: RosterAgent[] }) {
   );
 }
 
-function RosterRow({ agent }: { agent: RosterAgent }) {
+/** Roster 행을 펼쳤을 때만 마운트된다 - 그때 처음 Access를 불러온다(N+1 방지). */
+function AccessAssignmentsDetail({ agentId }: { agentId: string }) {
+  const query = useQuery<{ assignments: AccessAssignment[] }, WorkforceRosterError>({
+    queryKey: ["workforce-agent-access", agentId],
+    queryFn: () => fetchAgentAccess(agentId),
+    staleTime: 60_000,
+    retry: false,
+  });
+
+  if (query.isPending) {
+    return <p className="m-0 px-3 py-2 text-xs text-on-surface-variant">Access를 불러오는 중입니다…</p>;
+  }
+  if (query.error) {
+    return (
+      <p
+        className={`m-0 px-3 py-2 text-xs ${
+          query.error.status === 501 ? "text-on-surface-variant" : "text-error"
+        }`}
+      >
+        {query.error.status === 501 ? "Access 저장소가 연결돼 있지 않습니다." : query.error.message}
+      </p>
+    );
+  }
+  const assignments = query.data?.assignments ?? [];
+  if (assignments.length === 0) {
+    return <p className="m-0 px-3 py-2 text-xs text-on-surface-variant">부여된 Access가 없습니다.</p>;
+  }
+  return (
+    <div className="overflow-x-auto px-3 py-2">
+      <table className="w-full min-w-[560px] text-left text-[11px]">
+        <thead className="text-on-surface-variant">
+          <tr>
+            <th className="px-2 py-1 font-semibold">종류</th>
+            <th className="px-2 py-1 font-semibold">대상</th>
+            <th className="px-2 py-1 font-semibold">상태</th>
+            <th className="px-2 py-1 font-semibold">유효기간</th>
+          </tr>
+        </thead>
+        <tbody>
+          {assignments.map((assignment) => (
+            <tr key={assignment.assignment_id} className="border-t border-outline-variant/40">
+              <td className="px-2 py-1 font-data-mono">{assignment.resource_kind}</td>
+              <td className="px-2 py-1 font-data-mono">{assignment.resource_ref}</td>
+              <td className="px-2 py-1">{assignment.status}</td>
+              <td className="px-2 py-1 font-data-mono text-on-surface-variant">
+                {new Date(assignment.effective_from).toLocaleDateString("ko-KR")} ~{" "}
+                {new Date(assignment.effective_to).toLocaleDateString("ko-KR")}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function RosterRow({
+  agent,
+  expanded,
+  onToggle,
+}: {
+  agent: RosterAgent;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
   const view = employmentView(agent.employment_status);
   const profile = agent.current_profile_version;
   return (
-    <tr className="border-t border-outline-variant/60 text-on-surface">
-      <td className="px-3 py-2">{agent.department_code}</td>
-      <td className="px-3 py-2">
-        <div className="min-w-0">
-          <span className="block truncate font-data-mono" title={agent.employee_code}>
-            {agent.display_name}
+    <>
+      <tr
+        className="cursor-pointer border-t border-outline-variant/60 text-on-surface hover:bg-surface-container-low"
+        onClick={onToggle}
+        aria-expanded={expanded}
+      >
+        <td className="px-3 py-2">{agent.department_code}</td>
+        <td className="px-3 py-2">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className="material-symbols-outlined shrink-0 text-[14px] text-on-surface-variant" aria-hidden="true">
+              {expanded ? "expand_more" : "chevron_right"}
+            </span>
+            <div className="min-w-0">
+              <span className="block truncate font-data-mono" title={agent.employee_code}>
+                {agent.display_name}
+              </span>
+              <span className="block truncate text-[11px] text-on-surface-variant">{agent.employee_code}</span>
+            </div>
+          </div>
+        </td>
+        <td className="px-3 py-2 font-data-mono text-on-surface-variant">{agent.role_code}</td>
+        <td className="px-3 py-2">
+          <span className={`inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-[10px] font-semibold ${view.tone}`}>
+            <span className="material-symbols-outlined text-[12px]" aria-hidden="true">
+              {view.icon}
+            </span>
+            {view.label}
           </span>
-          <span className="block truncate text-[11px] text-on-surface-variant">{agent.employee_code}</span>
-        </div>
-      </td>
-      <td className="px-3 py-2 font-data-mono text-on-surface-variant">{agent.role_code}</td>
-      <td className="px-3 py-2">
-        <span className={`inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-[10px] font-semibold ${view.tone}`}>
-          <span className="material-symbols-outlined text-[12px]" aria-hidden="true">
-            {view.icon}
-          </span>
-          {view.label}
-        </span>
-      </td>
-      <td className="px-3 py-2 font-data-mono">
-        {profile ? `${profile.model.provider} / ${profile.model.model_name}` : "미배정"}
-      </td>
-      <td className="px-3 py-2 font-data-mono text-on-surface-variant">
-        {profile ? `v${profile.version} · ${profile.status}` : "—"}
-      </td>
-    </tr>
+        </td>
+        <td className="px-3 py-2 font-data-mono">
+          {profile ? `${profile.model.provider} / ${profile.model.model_name}` : "미배정"}
+        </td>
+        <td className="px-3 py-2 font-data-mono text-on-surface-variant">
+          {profile ? `v${profile.version} · ${profile.status}` : "—"}
+        </td>
+      </tr>
+      {expanded ? (
+        <tr className="bg-surface-container-lowest">
+          <td colSpan={6} className="p-0">
+            <div className="border-b border-outline-variant/60">
+              <p className="m-0 px-3 pt-2 text-[10px] font-semibold uppercase text-on-surface-variant">
+                Access (더보기)
+              </p>
+              <AccessAssignmentsDetail agentId={agent.agent_id} />
+            </div>
+          </td>
+        </tr>
+      ) : null}
+    </>
   );
 }
 
 export default function WorkforceRosterPanel() {
+  const [expandedAgentId, setExpandedAgentId] = useState<string | null>(null);
   const query = useQuery<WorkforceRoster, WorkforceRosterError>({
     queryKey: ["workforce-roster"],
     queryFn: () => fetchWorkforceRoster(),
@@ -163,8 +254,7 @@ export default function WorkforceRosterPanel() {
             등록 Agent 인력 현황
           </h2>
           <p className="mt-2 max-w-3xl text-body-sm font-body-sm text-on-surface-variant">
-            workforce.agent_profiles에 등록된 Agent 전원의 고용 상태와 현재 Profile Version·모델 좌표입니다. 부서장은
-            이 목록에 없습니다(직원만).
+            workforce.agent_profiles에 등록된 Agent 전원의 고용 상태와 현재 Profile Version·모델 좌표입니다. 부서장은 이 목록에 없습니다(직원만).
           </p>
         </div>
 
@@ -208,7 +298,16 @@ export default function WorkforceRosterPanel() {
                 </thead>
                 <tbody>
                   {agents.length > 0 ? (
-                    agents.map((agent) => <RosterRow key={agent.agent_id} agent={agent} />)
+                    agents.map((agent) => (
+                      <RosterRow
+                        key={agent.agent_id}
+                        agent={agent}
+                        expanded={expandedAgentId === agent.agent_id}
+                        onToggle={() =>
+                          setExpandedAgentId((current) => (current === agent.agent_id ? null : agent.agent_id))
+                        }
+                      />
+                    ))
                   ) : (
                     <tr>
                       <td colSpan={6} className="px-3 py-7 text-center text-sm text-on-surface-variant">

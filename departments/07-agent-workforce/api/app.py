@@ -1220,6 +1220,25 @@ def list_workforce_plans(department_code: str):
     return {"workforce_plans": [_plan_dict(p) for p in _plan_repo.list_plans_by_department(department_id)]}
 
 
+@app.get("/workforce/v1/workforce-plans")
+def list_all_workforce_plans():
+    """6개 투자본부 전체의 Workforce Plan — idle-agents(list_idle_agents)와 같은 이유로
+    department_code 필터 없는 전체 목록도 둔다. HR 조직 구성 화면은 부서 하나씩이
+    아니라 항상 전체를 본다. department_code -> department_id 해석이 안 되는(아직
+    workforce.departments에 없는) 부서는 "plan 없음"으로 접지 않고 건너뛴다 - 그
+    부서가 존재하지 않는다는 뜻이지 이 부서의 plan이 0건이라는 관측이 아니다."""
+    plans: list[dict] = []
+    for department_code in INVESTMENT_DEPARTMENT_STAGE:
+        try:
+            department_id = _resolve_department_id(department_code)
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                continue
+            raise
+        plans.extend(_plan_dict(p) for p in _plan_repo.list_plans_by_department(department_id))
+    return {"workforce_plans": plans}
+
+
 @app.post("/workforce/v1/workforce-plans/{plan_id}/approve")
 def approve_workforce_plan(plan_id: str, body: PlanApprovalIn):
     plan = _plan_repo.get_plan(plan_id)
@@ -1541,6 +1560,20 @@ if __name__ == "__main__":
 
     r29 = client.get("/workforce/v1/departments/07-agent-workforce/workforce-plans")
     assert len(r29.json()["workforce_plans"]) == 1
+
+    # 7b. 전체 목록(GET /workforce/v1/workforce-plans) - 투자본부(research)는 잡히고
+    # HR 자신("07-agent-workforce")은 INVESTMENT_DEPARTMENT_STAGE 밖이라 빠진다.
+    r29b = client.post("/workforce/v1/departments/research/workforce-plans", json={
+        "period_start": t0, "period_end": t_exp,
+        "skill_gaps": {"quant": 1}, "actions": [{"type": "HIRE", "role": "HR-01"}],
+        "budget": {"monthly_usd": "3000"},
+    })
+    assert r29b.status_code == 200, r29b.text
+    r29c = client.get("/workforce/v1/workforce-plans")
+    all_plans = r29c.json()["workforce_plans"]
+    assert any(p["department_id"] == "research" for p in all_plans), r29c.text
+    assert not any(p["department_id"] == "07-agent-workforce" for p in all_plans), r29c.text
+    print("ok - 전체 Workforce Plan 목록이 투자본부만 모으고 HR 자신은 제외함을 확인")
 
     r30 = client.post(f"/workforce/v1/workforce-plans/{plan_id}/retire")
     assert r30.status_code == 200 and r30.json()["status"] == "RETIRED", r30.text
