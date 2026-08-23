@@ -27,7 +27,10 @@ router = APIRouter(tags=["workforce"])
 # compose.yaml). risk.py/qa.py와 같은 이유로 문서화된 로컬 2-프로세스 구성이
 # 별도 env 파일 없이 그대로 동작하게 기본값을 둔다.
 WORKFORCE_API_URL = os.getenv("WORKFORCE_API_URL", "http://127.0.0.1:8044").strip().rstrip("/")
-WORKFORCE_API_TIMEOUT_SECONDS = float(os.getenv("WORKFORCE_API_TIMEOUT_SECONDS", "8"))
+# idle-agents는 workforce-api가 등록된 Worker마다 Langfuse API를 순차 호출한다
+# (observability.py check_idle_agents) - 8명 기준으로도 왕복이 쌓이면 8초를 쉽게
+# 넘긴다. GOVERNANCE_API_TIMEOUT_SECONDS(30)와 같은 예산을 쓴다.
+WORKFORCE_API_TIMEOUT_SECONDS = float(os.getenv("WORKFORCE_API_TIMEOUT_SECONDS", "30"))
 
 
 async def _workforce_get(path: str, *, params: dict[str, Any] | None = None) -> Any:
