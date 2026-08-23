@@ -12,6 +12,7 @@ openai
 pandas
 numpy
 scipy
+jsonschema>=4.10,<5
 
 # --- API & realtime (initial stack per HEDGE_FUND_MASTER_PLAN.md 13.1) ---
 fastapi

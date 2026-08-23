@@ -1,0 +1,56 @@
+{
+  "schema_version": "aws-l4-fp8kv-generic-hybrid-comparison.v1",
+  "runtime_profile": "L4-fp8KV-v1",
+  "variant": "AWQ+Hybrid Generic",
+  "status": "HOLD",
+  "runtime": {
+    "gpu": "NVIDIA L4",
+    "python": "3.12.13",
+    "vllm": "0.27.1",
+    "flashinfer": "0.6.16.post3",
+    "cuda_nvcc": "13.0.88",
+    "kv_cache_dtype": "fp8_e4m3",
+    "max_model_len": 8192,
+    "gpu_memory_utilization": 0.85,
+    "endpoint_verified": true
+  },
+  "quality": {
+    "internal_total": 50,
+    "internal_passed": 45,
+    "internal_quality": 0.90,
+    "financial_arithmetic": 0.80,
+    "structured_output": 0.40,
+    "critical_failures": 1,
+    "request_errors": 0,
+    "finqa": 0.70,
+    "tatqa": 0.8667,
+    "financebench_diagnostic": 0.490,
+    "financebench_manual": null,
+    "external_overall": null,
+    "auto_mean": 0.7657
+  },
+  "policy": {
+    "arithmetic": "LLM EXPR generation -> safe AST evaluation; no answer rules or deterministic fallback",
+    "structured_output": "guided JSON -> JSON Schema validation -> one LLM semantic audit; invalid/unverified output is HOLD/error",
+    "rag": "question-only exact glossary matching for FinanceBench; BOK glossary v1",
+    "gold_used_by_model": false
+  },
+  "performance": {
+    "status": "NOT_RERUN_AFTER_PIPELINE_CHANGE",
+    "model_only": null,
+    "full_pipeline": null
+  },
+  "source_artifacts": {
+    "internal_raw": "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+HybridGeneric/internal50_raw.json",
+    "internal_score": "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+HybridGeneric/internal50_score.json",
+    "external_raw": "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+HybridGeneric/external50_raw.json",
+    "external_score": "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+HybridGeneric/external50_score.json",
+    "provenance": "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+HybridGeneric/provenance.json",
+    "error_analysis": "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+HybridGeneric/hybrid_error_analysis.md"
+  },
+  "hold_reasons": [
+    "one Internal-50 critical failure remains",
+    "FinanceBench manual adjudication is pending",
+    "performance was not rerun after the pipeline implementation changed"
+  ]
+}

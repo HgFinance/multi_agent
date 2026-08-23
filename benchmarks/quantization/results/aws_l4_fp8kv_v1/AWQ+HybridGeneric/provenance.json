@@ -1,0 +1,39 @@
+{
+  "schema_version": "aws-hybrid-generic-provenance.v1",
+  "variant": "AWQ+HybridGenericPipeline",
+  "model": "hgfinance-awq-arithmetic-2epoch",
+  "endpoint": "http://127.0.0.1:8000/v1/chat/completions",
+  "datasets": {
+    "internal50_v2_sha256": "ad2bdaf5ea381c2fc151fce1f1859f7f925b86fd03b830319cd97af17709e978",
+    "external50_v1_sha256": "197f0828fee37a8a0ca7551304efa722b005a3d26379a2cc613ece36b315956f"
+  },
+  "glossary": {
+    "sha256": "d3da5743695146b492835d1e71b7d373ffc268686917e8e4494378b7e823f369",
+    "scope": "FinanceBench and internal accounting context only",
+    "matching": "question-only exact term/alias matching; context noise and stop aliases excluded",
+    "financebench_hits": "1/15 (EPS)"
+  },
+  "no_deterministic_answer_fallback": true,
+  "structured_output": {
+    "guided_json": true,
+    "json_schema_validation": true,
+    "semantic_audit_retry": true,
+    "unsupported_schema": "HOLD/error"
+  },
+  "arithmetic": {
+    "llm_output": "EXPR:<pure arithmetic expression>",
+    "execution": "safe AST; numeric literals and + - * / ** only",
+    "answer_rules": "none"
+  },
+  "measured_quality": {
+    "internal50": "45/50 = 90.0%",
+    "internal_financial_arithmetic": "8/10 = 80.0%",
+    "internal_structured_output": "2/5 = 40.0%",
+    "internal_critical_failures": 1,
+    "external_finqa": "14/20 = 70.0%",
+    "external_tatqa": "13/15 = 86.7%",
+    "external_auto_mean": 0.7657,
+    "financebench_diagnostic": 0.490,
+    "financebench_manual": "required"
+  }
+}
