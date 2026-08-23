@@ -33,7 +33,12 @@ COPY departments/01-research/evidence ./evidence
 COPY departments/04-quant-backtest/pipeline/stock_universe.py \
      /app/departments/04-quant-backtest/pipeline/stock_universe.py
 
-RUN pip install --no-cache-dir langgraph==0.6.7
+# langfuse: 이 이미지의 Worker 실행기가 HR 관측 이벤트를 발행한다
+# (orchestration/llm_observability.publish_worker_activity). 없으면 publish 가
+# ModuleNotFoundError 를 삼키고 **조용히 False** 를 돌려줘, 자격증명이 멀쩡한데
+# 이벤트만 0건인 상태가 된다(2026-08-23 실측: ceo-kanban-supervisor 에서 같은
+# 결함을 추적하는 데 몇 시간이 걸렸다). 루트 requirements.txt 와 같은 pin.
+RUN pip install --no-cache-dir langgraph==0.6.7 langfuse==4.14.3
 
 ENV PYTHONUNBUFFERED=1
 
