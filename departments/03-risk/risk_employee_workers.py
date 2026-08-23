@@ -72,6 +72,8 @@ from orchestration.llm_observability import (
     publish_worker_activity,
     publish_worker_opportunity,
     record_llm_call,
+    redacted_current_worker_generation,
+    redacted_langfuse_worker_span,
 )
 
 
@@ -199,14 +201,16 @@ def default_worker_llm(system: str, prompt: str) -> str:
     )
     started = time.perf_counter()
     try:
-        response = client.chat.completions.create(
-            model=_model_name(),
-            temperature=0,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": prompt},
-            ],
-        )
+        with redacted_current_worker_generation() as generation:
+            response = client.chat.completions.create(
+                model=_model_name(),
+                temperature=0,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            generation.set_usage(getattr(response, "usage", None))
         record_llm_call(
             usage=getattr(response, "usage", None),
             latency_ms=int((time.perf_counter() - started) * 1000),
@@ -971,7 +975,13 @@ async def run_employee_workers_async(
             worker_id=spec.worker_id, role=spec.role,
             stage="risk", model_name=_model_name(),
         )
-        report = await _execute_one(spec)
+        with redacted_langfuse_worker_span(
+            worker_id=spec.worker_id,
+            role=spec.role,
+            stage="risk",
+            trace_id=str(trace_id or ""),
+        ):
+            report = await _execute_one(spec)
         status = str(report.get("status", "DEGRADED"))
         attempts = int(report.get("attempts", 0) or 0)
         measured = end_worker_metric(

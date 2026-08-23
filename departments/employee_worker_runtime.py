@@ -27,6 +27,8 @@ from orchestration.llm_observability import (
     publish_worker_activity,
     publish_worker_opportunity,
     record_llm_call,
+    redacted_current_worker_generation,
+    redacted_langfuse_worker_span,
 )
 
 WorkerLLM = Callable[..., str]
@@ -138,7 +140,9 @@ def default_worker_llm(system: str, prompt: str, *,
                 "type": "json_schema",
                 "json_schema": {"name": "worker_context", "schema": json_schema},
             }
-        response = client.chat.completions.create(**kwargs)
+        with redacted_current_worker_generation() as generation:
+            response = client.chat.completions.create(**kwargs)
+            generation.set_usage(getattr(response, "usage", None))
         record_llm_call(
             usage=getattr(response, "usage", None),
             latency_ms=int((time.perf_counter() - started) * 1000),
@@ -697,7 +701,13 @@ async def run_worker_registry_async(
             worker_id=spec.worker_id, role=spec.role,
             stage=stage or "", model_name=model_name(),
         ) if stage else None
-        report = await _execute_one(spec)
+        with redacted_langfuse_worker_span(
+            worker_id=spec.worker_id,
+            role=spec.role,
+            stage=stage,
+            trace_id=str(payload.get("trace_id") or payload.get("case_id") or ""),
+        ):
+            report = await _execute_one(spec)
         if stage and metric_token is not None:
             status = str(report.get("status", "DEGRADED"))
             attempts = int(report.get("attempts", 0) or 0)
