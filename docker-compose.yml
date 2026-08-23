@@ -1540,6 +1540,7 @@ services:
       NOTION_CEO_DB: ${NOTION_CEO_DB:-}
       DATABASE_URL: ${DATABASE_URL:-}
       RISK_QA_DATABASE_URL: ${RISK_QA_DATABASE_URL:-}
+      ACCOUNTING_API_URL: ${ACCOUNTING_API_URL:-http://accounting-api:8000}
     mem_limit: 512m
     mem_reservation: 128m
     cpus: 0.5
@@ -1576,6 +1577,12 @@ services:
       PYTHONPATH: /opt/hgfinance
       KANBAN_RETENTION_INTERVAL_SECONDS: ${KANBAN_RETENTION_INTERVAL_SECONDS:-900}
       KANBAN_CLI_TIMEOUT_SECONDS: ${KANBAN_CLI_TIMEOUT_SECONDS:-30}
+      # Retention reconstructs authoritative workflows in a long-lived
+      # maintenance process. Do not retain full show payloads in the shared
+      # read cache; this lane must stay bounded under the 256MB limit.
+      KANBAN_READ_CACHE_TTL_SECONDS: "0"
+      KANBAN_DONE_CACHE_TTL_SECONDS: "0"
+      CEO_KANBAN_FETCH_WORKERS: "1"
     mem_limit: 256m
     mem_reservation: 64m
     cpus: 0.25

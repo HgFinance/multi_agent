@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import signal
+import shutil
 import sqlite3
 import time
 from collections import Counter
@@ -53,6 +54,7 @@ LOG = logging.getLogger(__name__)
 ACTIVE_AGE_SECONDS = 24 * 60 * 60
 PURGE_AGE_SECONDS = 7 * 24 * 60 * 60
 ARCHIVED_STATUS = "archived"
+AUDIT_CAPSULE_SCHEMA_VERSION = "qa-hr.audit.v1"
 ACTIVE_RUN_STATUSES = frozenset({"running", "claimed", "spawned", "processing"})
 RECOVERY_PENDING_VALUES = frozenset(
     {"pending", "queued", "running", "retry", "retrying", "required", "open"}
@@ -97,6 +99,7 @@ class AuditMetadata:
     final_result_ref: str | None
     discord_thread_id: str | None
     discord_message_id: str | None
+    qa_hr_capsule_json: str
 
 
 @dataclass(frozen=True)
@@ -116,6 +119,9 @@ class RetentionRun:
     eligible_task_count: int = 0
     would_archive_task_count: int = 0
     blocked_reason_histogram: tuple[tuple[str, int], ...] = ()
+    artifact_removed_count: int = 0
+    artifact_cleanup_skipped_count: int = 0
+    capsule_backfilled_count: int = 0
 
 
 class KanbanMaintenance(Protocol):
@@ -182,6 +188,104 @@ def _run_rows(node: WorkflowNode) -> tuple[Mapping[str, Any], ...]:
     if not isinstance(runs, Sequence) or isinstance(runs, (str, bytes, bytearray)):
         return ()
     return tuple(item for item in runs if isinstance(item, Mapping))
+
+
+def _safe_capsule_label(value: Any) -> str | None:
+    """Return a bounded enum-like label; never persist free-form error text."""
+
+    text = str(value or "").strip().upper()
+    if not text or len(text) > 64 or not re.fullmatch(r"[A-Z0-9_.:-]+", text):
+        return None
+    return text
+
+
+def _is_hr_node(node: WorkflowNode) -> bool:
+    profile = node.profile.casefold()
+    department = node.department.casefold()
+    return profile in {"hr-department", "workforce", "workforce-department"} or department in {
+        "hr",
+        "workforce",
+    }
+
+
+def _count_labels(values: Iterable[str | None]) -> dict[str, int]:
+    counts = Counter(value for value in values if value)
+    return dict(sorted(counts.items()))
+
+
+def _node_failure_category(node: WorkflowNode) -> str | None:
+    for key in ("failure_category", "error_category", "block_kind", "protocol_state"):
+        label = _safe_capsule_label(node.raw.get(key))
+        if label:
+            return label
+    return None
+
+
+def _run_summary(node: WorkflowNode) -> dict[str, int]:
+    runs = _run_rows(node)
+    protocol_violations = 0
+    gave_up = 0
+    for run in runs:
+        values = [
+            str(run.get(key) or "").casefold()
+            for key in ("failure_category", "error_category", "protocol_state", "outcome", "status")
+        ]
+        if any("protocol_violation" in value for value in values):
+            protocol_violations += 1
+        if any(value in {"gave_up", "give_up"} for value in values) or bool(run.get("gave_up")):
+            gave_up += 1
+    return {
+        "run_count": len(runs),
+        "retry_count": max(len(runs) - 1, 0),
+        "protocol_violation_count": protocol_violations,
+        "gave_up_count": gave_up,
+    }
+
+
+def _capsule_section(nodes: Sequence[WorkflowNode], *, root_task_id: str) -> dict[str, Any]:
+    roles = [node.role(root_task_id=root_task_id) for node in nodes]
+    run_totals = Counter()
+    for node in nodes:
+        run_totals.update(_run_summary(node))
+    return {
+        "task_count": len(nodes),
+        "task_ids": [node.task_id for node in nodes],
+        "roles": _count_labels(roles),
+        "profiles": _count_labels(node.profile for node in nodes),
+        "statuses": _count_labels(node.status for node in nodes),
+        "failure_categories": _count_labels(_node_failure_category(node) for node in nodes),
+        **dict(sorted(run_totals.items())),
+    }
+
+
+def build_qa_hr_capsule(workflow: Workflow) -> str:
+    """Build the compact post-purge evidence retained for QA and HR.
+
+    This deliberately excludes body, title, summary, result, comments, raw
+    events, raw run errors, provider output, and user content. Task IDs and
+    aggregate execution fields are retained so the two review functions can
+    judge lifecycle, assignment, retry, and protocol quality after purge.
+    """
+
+    nodes = workflow.nodes
+    qa_nodes = tuple(node for node in nodes if node.is_qa)
+    hr_nodes = tuple(node for node in nodes if _is_hr_node(node))
+    capsule = {
+        "schema_version": AUDIT_CAPSULE_SCHEMA_VERSION,
+        "root_id": workflow.root_task_id,
+        "workflow": {
+            "task_count": len(nodes),
+            "task_ids": [node.task_id for node in nodes],
+            "final_status": workflow.status,
+            "qa_enabled": bool(workflow.qa_enabled),
+            "qa_blocks_response": bool(workflow.qa_blocks_response),
+            "qa_materialized": bool(workflow.qa_materialized),
+            "qa_legacy_primary_present": bool(workflow.qa_legacy_primary_present),
+        },
+        "qa": _capsule_section(qa_nodes, root_task_id=workflow.root_task_id),
+        "hr": _capsule_section(hr_nodes, root_task_id=workflow.root_task_id),
+    }
+    return json.dumps(capsule, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 def _has_active_execution(node: WorkflowNode) -> bool:
@@ -551,6 +655,7 @@ def build_audit_metadata(workflow: Workflow, delivery: DeliveryState) -> AuditMe
         final_result_ref=str(result_ref),
         discord_thread_id=delivery.thread_id or correlation.thread_id,
         discord_message_id=delivery.message_id or correlation.message_id,
+        qa_hr_capsule_json=build_qa_hr_capsule(workflow),
     )
 
 
@@ -580,9 +685,22 @@ class AuditStore:
                 discord_thread_id TEXT,
                 discord_message_id TEXT,
                 archived_at INTEGER NOT NULL,
-                purged_at INTEGER
+                purged_at INTEGER,
+                qa_hr_capsule_json TEXT NOT NULL DEFAULT '{}'
             )"""
         )
+        columns = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(workflow_retention_audit)")
+        }
+        if "qa_hr_capsule_json" not in columns:
+            # Compatibility migration for the existing minimal audit DB. This
+            # is the audit store only; the operational Kanban schema/data is
+            # never rewritten by this migration.
+            conn.execute(
+                "ALTER TABLE workflow_retention_audit "
+                "ADD COLUMN qa_hr_capsule_json TEXT NOT NULL DEFAULT '{}'"
+            )
         conn.commit()
         return conn
 
@@ -592,8 +710,9 @@ class AuditStore:
                 """INSERT INTO workflow_retention_audit
                 (root_id, request_id, final_status, created_at, terminal_at,
                  completed_at, departments, total_latency_ms, final_result_ref,
-                 discord_thread_id, discord_message_id, archived_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 discord_thread_id, discord_message_id, archived_at,
+                 qa_hr_capsule_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(root_id) DO UPDATE SET
                   request_id=excluded.request_id,
                   final_status=excluded.final_status,
@@ -605,6 +724,7 @@ class AuditStore:
                   final_result_ref=excluded.final_result_ref,
                   discord_thread_id=excluded.discord_thread_id,
                   discord_message_id=excluded.discord_message_id,
+                  qa_hr_capsule_json=excluded.qa_hr_capsule_json,
                   archived_at=MIN(workflow_retention_audit.archived_at, excluded.archived_at)""",
                 (
                     metadata.root_id,
@@ -619,6 +739,7 @@ class AuditStore:
                     metadata.discord_thread_id,
                     metadata.discord_message_id,
                     int(archived_at),
+                    metadata.qa_hr_capsule_json,
                 ),
             )
             conn.commit()
@@ -628,6 +749,21 @@ class AuditStore:
             return conn.execute(
                 "SELECT * FROM workflow_retention_audit WHERE root_id = ?", (root_id,)
             ).fetchone()
+
+    def update_capsule_if_missing(self, root_id: str, capsule_json: str) -> bool:
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT qa_hr_capsule_json FROM workflow_retention_audit WHERE root_id = ?",
+                (root_id,),
+            ).fetchone()
+            if row is None or str(row[0] or "{}").strip() not in {"", "{}"}:
+                return False
+            conn.execute(
+                "UPDATE workflow_retention_audit SET qa_hr_capsule_json = ? WHERE root_id = ?",
+                (capsule_json, root_id),
+            )
+            conn.commit()
+            return True
 
     def purge_candidates(self, *, now: int) -> tuple[sqlite3.Row, ...]:
         with closing(self._connect()) as conn:
@@ -834,6 +970,66 @@ class SQLiteKanbanMaintenance:
                     raise
 
 
+class FilesystemArtifactCleaner:
+    """Remove only task-scoped Kanban artifacts after a DB purge commits.
+
+    Hermes stores these artifacts outside SQLite. The cleaner intentionally
+    knows only the three task-scoped roots and refuses path traversal or
+    symlink escapes. It never scans or removes an entire archive directory.
+    """
+
+    def __init__(self, environment: Mapping[str, str] | None = None) -> None:
+        env = dict(environment or os.environ)
+        configured = env.get("HERMES_KANBAN_HOME", "").strip()
+        self.kanban_home = Path(configured or (Path.home() / ".hermes" / "shared-kanban")).expanduser()
+        self.artifact_root = (self.kanban_home / "kanban").resolve()
+        self.logs_root = (self.artifact_root / "logs").resolve()
+        self.workspaces_root = (self.artifact_root / "workspaces").resolve()
+        self.attachments_root = (self.artifact_root / "attachments").resolve()
+
+    @staticmethod
+    def _safe_task_id(task_id: str) -> bool:
+        return bool(re.fullmatch(r"[A-Za-z0-9_.-]+", str(task_id)))
+
+    @staticmethod
+    def _inside(path: Path, root: Path) -> bool:
+        try:
+            path.resolve(strict=False).relative_to(root.resolve(strict=False))
+            return True
+        except ValueError:
+            return False
+
+    def _remove(self, path: Path, root: Path) -> tuple[int, int]:
+        if not self._inside(path, root) or not path.exists() and not path.is_symlink():
+            return 0, 0
+        try:
+            if path.is_symlink() or path.is_file():
+                path.unlink()
+            elif path.is_dir():
+                shutil.rmtree(path)
+            return 1, 0
+        except OSError as exc:
+            LOG.warning("kanban-retention-artifact-cleanup-failed path=%s error=%s", path.name, type(exc).__name__)
+            return 0, 1
+
+    def cleanup(self, task_ids: Sequence[str]) -> tuple[int, int]:
+        removed = 0
+        skipped = 0
+        for task_id in dict.fromkeys(str(value) for value in task_ids):
+            if not self._safe_task_id(task_id):
+                skipped += 1
+                continue
+            for path, root in (
+                (self.logs_root / f"{task_id}.log", self.logs_root),
+                (self.workspaces_root / task_id, self.workspaces_root),
+                (self.attachments_root / task_id, self.attachments_root),
+            ):
+                count, failures = self._remove(path, root)
+                removed += count
+                skipped += failures
+        return removed, skipped
+
+
 class RetentionWorker:
     def __init__(
         self,
@@ -848,6 +1044,7 @@ class RetentionWorker:
         dry_run: bool = False,
         allow_purge: bool = True,
         max_archive_roots: int | None = None,
+        artifact_cleanup: Callable[[Sequence[str]], tuple[int, int]] | None = None,
     ) -> None:
         self.maintenance = maintenance
         self.audit = audit
@@ -858,6 +1055,7 @@ class RetentionWorker:
         self.clock = clock
         self.dry_run = dry_run
         self.allow_purge = allow_purge
+        self.artifact_cleanup = artifact_cleanup or FilesystemArtifactCleaner(self.environment).cleanup
         if max_archive_roots is not None and max_archive_roots <= 0:
             raise ValueError("max_archive_roots must be positive")
         self.max_archive_roots = max_archive_roots
@@ -913,12 +1111,35 @@ class RetentionWorker:
         reconstruction_started = time.perf_counter()
         skipped: list[tuple[str, str]] = []
         blocked_reasons: Counter[str] = Counter()
+        capsule_backfilled_count = 0
         archived_count = 0
-        eligible_records: list[tuple[str, Workflow, RetentionDecision]] = []
+        # Keep only the bounded mutation batch in memory. Holding every
+        # reconstructed workflow here retains full event/run graphs until the
+        # pass ends and can exceed the maintenance container's memory limit on
+        # a historical board.
+        eligible_root_ids_list: list[str] = []
+        archive_records: list[tuple[str, Workflow, RetentionDecision]] = []
+        eligible_task_count = 0
         for root_id in archived_root_ids:
             if self.dry_run:
                 continue
-            if self.audit.get(root_id) is not None:
+            existing_audit = self.audit.get(root_id)
+            if existing_audit is not None:
+                if str(existing_audit["qa_hr_capsule_json"] or "{}").strip() not in {"", "{}"}:
+                    continue
+                try:
+                    workflow = self._load(
+                        root_id,
+                        include_archived=True,
+                        listed_rows=archived_rows,
+                    )
+                    if self.audit.update_capsule_if_missing(
+                        root_id,
+                        build_qa_hr_capsule(workflow),
+                    ):
+                        capsule_backfilled_count += 1
+                except (KanbanTaskNotFound, KanbanUnavailable, RetentionError, sqlite3.Error) as exc:
+                    skipped.append((root_id, f"capsule_backfill_error:{type(exc).__name__}"))
                 continue
             try:
                 workflow = self._load(
@@ -966,16 +1187,15 @@ class RetentionWorker:
                     skipped.append((root_id, decision.reason))
                     blocked_reasons[retention_block_category(decision.reason)] += 1
                     continue
-                eligible_records.append((root_id, workflow, decision))
+                eligible_root_ids_list.append(root_id)
+                eligible_task_count += len(workflow.nodes)
+                if self.max_archive_roots is None or len(archive_records) < self.max_archive_roots:
+                    archive_records.append((root_id, workflow, decision))
             except (KanbanTaskNotFound, KanbanUnavailable, RetentionError, sqlite3.Error) as exc:
                 skipped.append((root_id, f"maintenance_error:{type(exc).__name__}"))
                 blocked_reasons["UNKNOWN/LEGACY"] += 1
 
-        eligible_root_ids = tuple(root_id for root_id, _workflow, _decision in eligible_records)
-        if self.max_archive_roots is None:
-            archive_records = eligible_records
-        else:
-            archive_records = eligible_records[: self.max_archive_roots]
+        eligible_root_ids = tuple(eligible_root_ids_list)
         would_archive_root_ids = tuple(root_id for root_id, _workflow, _decision in archive_records)
 
         if not self.dry_run:
@@ -1002,6 +1222,8 @@ class RetentionWorker:
 
         cleanup_started = time.perf_counter()
         purged_count = 0
+        artifact_removed_count = 0
+        artifact_cleanup_skipped_count = 0
         for row in purge_rows:
             root_id = str(row["root_id"])
             try:
@@ -1020,7 +1242,11 @@ class RetentionWorker:
                 if self.audit.get(root_id) is None:
                     skipped.append((root_id, "audit_summary_missing"))
                     continue
+                task_ids = tuple(node.task_id for node in workflow.nodes)
                 if self.maintenance.purge_workflow(root_id, [node.task_id for node in workflow.nodes if node.task_id != root_id]):
+                    removed, skipped_artifacts = self.artifact_cleanup(task_ids)
+                    artifact_removed_count += removed
+                    artifact_cleanup_skipped_count += skipped_artifacts
                     self.audit.mark_purged(root_id, purged_at=now)
                     purged_count += 1
                 else:
@@ -1050,9 +1276,12 @@ class RetentionWorker:
             skipped=tuple(skipped),
             eligible_root_ids=eligible_root_ids,
             would_archive_root_ids=would_archive_root_ids,
-            eligible_task_count=sum(len(workflow.nodes) for _, workflow, _ in eligible_records),
+            eligible_task_count=eligible_task_count,
             would_archive_task_count=sum(len(workflow.nodes) for _, workflow, _ in archive_records),
             blocked_reason_histogram=tuple(sorted(blocked_reasons.items())),
+            artifact_removed_count=artifact_removed_count,
+            artifact_cleanup_skipped_count=artifact_cleanup_skipped_count,
+            capsule_backfilled_count=capsule_backfilled_count,
         )
 
 
@@ -1111,6 +1340,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             LOG.info(
                 "kanban-retention active_tasks=%d active_roots=%d eligible_roots=%d "
                 "would_archive_roots=%d archived=%d purged=%d "
+                "artifacts_removed=%d artifact_cleanup_skipped=%d "
+                "capsules_backfilled=%d "
                 "list_ms=%.2f reconstruction_ms=%.2f recovery_ms=%.2f cleanup_ms=%.2f skipped=%d",
                 result.active_task_count,
                 result.active_root_count,
@@ -1118,6 +1349,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 len(result.would_archive_root_ids),
                 result.archived_count,
                 result.purged_count,
+                result.artifact_removed_count,
+                result.artifact_cleanup_skipped_count,
+                result.capsule_backfilled_count,
                 result.list_ms,
                 result.reconstruction_ms,
                 result.recovery_ms,
@@ -1155,13 +1389,16 @@ __all__ = [
     "ACTIVE_AGE_SECONDS",
     "AuditMetadata",
     "AuditStore",
+    "AUDIT_CAPSULE_SCHEMA_VERSION",
     "DeliveryState",
     "DiscordLedgerReader",
+    "FilesystemArtifactCleaner",
     "RetentionDecision",
     "RetentionRun",
     "RetentionWorker",
     "SQLiteKanbanMaintenance",
     "build_audit_metadata",
+    "build_qa_hr_capsule",
     "default_audit_path",
     "evaluate_workflow",
     "main",

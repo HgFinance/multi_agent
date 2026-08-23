@@ -303,7 +303,6 @@ export default function AccountingLedgerPanel() {
         <div className="flex shrink-0 items-center gap-1.5">
           {data ? <Badge>{data.environment_label}</Badge> : null}
           {data?.account.masked ? <Badge>계좌 {data.account.masked}</Badge> : null}
-          <Badge>비공식</Badge>
         </div>
       </div>
 

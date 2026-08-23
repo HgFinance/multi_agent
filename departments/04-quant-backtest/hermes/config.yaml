@@ -103,6 +103,13 @@ mcp_servers:
     headers:
       Authorization: Bearer ${MCP_RESEARCH_API_KEY}
     enabled: true
+  # Valuation is a read-only LS projection. The credential remains isolated in
+  # ls-mcp; this profile receives tools, never broker credentials.
+  ls-securities:
+    url: http://ls-mcp:8038/mcp
+    headers:
+      Authorization: Bearer ${MCP_RESEARCH_API_KEY}
+    enabled: true
 
 hiring_priority:
   quant-backtest-supervisor:

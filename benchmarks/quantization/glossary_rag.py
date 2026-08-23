@@ -11,6 +11,65 @@ from pathlib import Path
 ALLOWED_SCOPES = {"financial_arithmetic", "structured_output"}
 _STOP_ALIASES = {"a", "an", "and", "of", "or", "the", "to", "two", "group"}
 
+# Version-pinned, answer-key-free additions used by the selective Hybrid
+# evaluation.  These are definitions and routing context, not benchmark
+# answers or case-specific rules.
+SELECTIVE_V2_ENTRIES = (
+    {
+        "term": "ROA",
+        "definition": (
+            "Return on assets (ROA) is a profitability ratio. Unless the supplied "
+            "context specifies another convention, use net income divided by the "
+            "relevant average total assets and preserve the requested percentage "
+            "or ratio scale."
+        ),
+        "scope": "financial_arithmetic",
+        "aliases": ["return on assets", "return on asset"],
+    },
+    {
+        "term": "fixed asset turnover",
+        "definition": (
+            "Fixed asset turnover relates revenue to the fixed-asset base. Use the "
+            "denominator and period explicitly supplied by the context; do not "
+            "replace average fixed assets with an ending balance without evidence."
+        ),
+        "scope": "financial_arithmetic",
+        "aliases": ["fixed assets turnover", "asset turnover"],
+    },
+    {
+        "term": "quick ratio",
+        "definition": (
+            "Quick ratio measures liquid assets relative to current liabilities. "
+            "Use the liquid-asset components and the denominator stated in the "
+            "context, and distinguish a numeric ratio from a requested yes/no "
+            "interpretation."
+        ),
+        "scope": "financial_arithmetic",
+        "aliases": ["acid test ratio", "acid-test ratio"],
+    },
+    {
+        "term": "gross margin applicability",
+        "definition": (
+            "Gross margin is revenue less cost of goods sold divided by revenue. "
+            "For a financial institution, do not assume ordinary cost of goods sold "
+            "exists; state that the metric is not applicable unless the supplied "
+            "evidence defines the required components."
+        ),
+        "scope": "financial_arithmetic",
+        "aliases": ["gross margin relevance", "financial institution margin"],
+    },
+    {
+        "term": "fiscal-year mapping",
+        "definition": (
+            "Fiscal-year mapping aligns each table value with the exact fiscal year "
+            "or reporting date named in the question. Compare like periods only and "
+            "do not infer a year from row order when labels are available."
+        ),
+        "scope": "financial_arithmetic",
+        "aliases": ["fiscal year mapping", "reporting-period mapping"],
+    },
+)
+
 
 @dataclass(frozen=True)
 class GlossaryEntry:
@@ -39,6 +98,29 @@ def load_glossary(path: Path) -> tuple[str, list[GlossaryEntry]]:
             )
         )
     return hashlib.sha256(raw).hexdigest(), entries
+
+
+def load_selective_v2_glossary(path: Path) -> tuple[str, list[GlossaryEntry]]:
+    """Load the existing glossary plus generic v2 definitions.
+
+    The digest covers both the source file and the immutable supplement so
+    provenance changes whenever either knowledge source changes.
+    """
+
+    digest, entries = load_glossary(path)
+    additions = [
+        GlossaryEntry(
+            row["term"], row["definition"], row["scope"], row.get("unit"), tuple(row.get("aliases", []))
+        )
+        for row in SELECTIVE_V2_ENTRIES
+    ]
+    supplement_bytes = json.dumps(
+        SELECTIVE_V2_ENTRIES, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    combined_digest = hashlib.sha256(
+        path.read_bytes() + b"\n-- selective-v2 supplement --\n" + supplement_bytes
+    ).hexdigest()
+    return combined_digest, [*entries, *additions]
 
 
 def inject(

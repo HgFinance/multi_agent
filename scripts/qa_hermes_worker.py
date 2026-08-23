@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""QA-only Hermes worker boundary.
+"""QA terminal-contract boundary for dispatcher-spawned Hermes workers.
 
 The Kanban dispatcher owns the worker subprocess, but the Hermes CLI can exit
 successfully before calling a Kanban terminal tool (for example when the
 configured provider has no credential).  That leaves a running claim behind
 and the dispatcher correctly reports a protocol violation.  This wrapper is
-installed only for the QA Hermes container and turns that narrow, observable
-condition into the existing typed ``kanban_block`` handoff.
+used as the dispatcher's worker executable and turns that narrow, observable
+condition into the existing typed ``kanban_block`` handoff for the QA profile.
+Non-QA profiles are delegated to the unchanged Hermes executable.
 
 Normal Hermes execution, provider selection, retry policy, and terminal tools
 are otherwise untouched.
@@ -163,7 +164,7 @@ def _block_owned_task(task_id: str, *, reason: str = BLOCK_REASON) -> bool:
     """Use Hermes' existing CLI handoff, preserving expected_run_id env."""
 
     env = os.environ.copy()
-    # The wrapper is HERMES_BIN for the QA gateway.  Prevent the handoff
+    # The wrapper is HERMES_BIN for the dispatcher.  Prevent the handoff
     # command from recursively invoking this wrapper.
     env["HERMES_BIN"] = REAL_HERMES
     command = [
@@ -195,7 +196,7 @@ def _run_real_worker(argv: Sequence[str]) -> int:
     """Run the unmodified Hermes worker and inherit its task log streams."""
 
     env = os.environ.copy()
-    # The gateway points HERMES_BIN at this wrapper.  The delegated Hermes
+    # The dispatcher points HERMES_BIN at this wrapper.  The delegated Hermes
     # process must see the real binary so any nested Hermes resolution cannot
     # recurse back into the wrapper.
     env["HERMES_BIN"] = REAL_HERMES

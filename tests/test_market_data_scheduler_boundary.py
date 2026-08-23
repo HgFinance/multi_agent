@@ -223,6 +223,33 @@ def test_request_time_citations_do_not_persist_external_responses() -> None:
         assert forbidden not in corp_index_source
 
 
+def test_dart_corp_index_failure_cooldown_prevents_duplicate_fetches(monkeypatch) -> None:
+    external = _load_module(
+        "external_sources_corp_index_cooldown", EXTERNAL_SOURCES_PATH
+    )
+    calls = 0
+
+    def fail_get(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise TimeoutError("simulated DART timeout")
+
+    monkeypatch.setattr(external, "_get", fail_get)
+    monkeypatch.setattr(external, "_dart_key", lambda: "test-key")
+    monkeypatch.setattr(external, "_CORP_INDEX_TIMEOUT_SECONDS", 5)
+    monkeypatch.setattr(external, "_CORP_INDEX_FAILURE_COOLDOWN_SECONDS", 60)
+
+    for _ in range(2):
+        try:
+            external._load_corp_index()
+        except RuntimeError as exc:
+            assert "DART 기업" in str(exc)
+        else:
+            raise AssertionError("DART failure should be surfaced")
+
+    assert calls == 1
+
+
 def test_non_market_collectors_have_no_compose_reactivation_path() -> None:
     for filename in ("docker-compose.yml", "docker-compose.override.yml"):
         path = ROOT / filename

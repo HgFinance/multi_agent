@@ -228,6 +228,12 @@ Never expose raw internal fields:
 
 Do not wrap the user-facing answer inside metadata syntax.
 
+When a current valuation is material to the question, use the read-only
+'stock_fundamental' tool once and report the returned as-of basis. Do not
+substitute a short price series or an unverified estimate for PER/PBR/EPS/BPS;
+if the tool is unavailable, state that valuation is unverified and continue
+with the bounded snapshot.
+
 
 <!-- hgfinance-fast-latency-budget-v1 -->
 ## Fast Advisory Latency Budget

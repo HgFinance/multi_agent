@@ -137,6 +137,10 @@ from portfolio_schemas import (
     PortfolioRecommendationStatusResponse,
     PortfolioUniverseListResponse,
 )
+from strategy_runtime_client import (
+    StrategyRuntimeProxyError,
+    strategy_runtime_request,
+)
 from portfolio_universe import DEFAULT_UNIVERSE_ID, get_universe, universe_options
 
 try:
@@ -426,6 +430,12 @@ async def _on_governance_transport_error(request: Request, exc: GovernanceTransp
 @app.exception_handler(PortfolioProxyError)
 async def _on_portfolio_proxy_error(request: Request, exc: PortfolioProxyError) -> JSONResponse:
     """accounting-api 오류 본문을 접지 않고 그대로 넘긴다(governance와 같은 이유)."""
+    return JSONResponse(status_code=exc.status_code, content=exc.payload)
+
+
+@app.exception_handler(StrategyRuntimeProxyError)
+async def _on_strategy_runtime_proxy_error(request: Request, exc: StrategyRuntimeProxyError) -> JSONResponse:
+    """strategy-runtime-control sidecar 오류 본문을 접지 않고 그대로 넘긴다."""
     return JSONResponse(status_code=exc.status_code, content=exc.payload)
 
 
@@ -821,6 +831,46 @@ async def ui_decide_mandate_approval(
     bound = _identity_bound_body(body, owner_id, inject=("approved_by",))
     await _authorized_approval(approval_id, owner_id)
     return await _governance_request("POST", f"/governance/v1/approvals/{approval_id}/decide", body=bound)
+
+
+# ── 페이퍼 전략 컨테이너(mlpipe-paper) ──────────────────────────────────────────
+# 실제 docker 조작·파일 읽기는 이 프로세스가 아니라 `strategy-runtime-control`
+# sidecar가 한다(`strategy_runtime_client.py` 머리말) - `portfolio-bff`는 이
+# 저장소에서 유일하게 외부에 노출되는 서비스라 docker 소켓을 직접 쥐지 않는다.
+
+
+@app.get("/ui/strategy-runtime/spike-fade")
+async def ui_strategy_runtime_snapshot(
+    owner_id: str | None = Depends(current_user),
+) -> object:
+    """채택된 페이퍼 전략 1개의 실시간 상태 - 읽기 전용.
+
+    Fund별로 나뉘지 않는다 - 지금 떠 있는 전략 프로세스가 이 배포 전체에 하나뿐이고
+    `strategy.signals` 밖에서는 Fund와 묶는 컬럼 자체가 없다(스키마 조사 결과).
+    """
+    return await strategy_runtime_request("GET", "/snapshot")
+
+
+class StrategyPowerRequest(BaseModel):
+    action: Literal["start", "stop"]
+
+
+@app.post("/ui/strategy-runtime/spike-fade/power")
+async def ui_strategy_runtime_power(
+    body: StrategyPowerRequest,
+    owner_id: str | None = Depends(current_user),
+) -> object:
+    """`strategy-spike-fade` 컨테이너 하나만 시작/정지한다(sidecar에 위임).
+
+    기본은 꺼져 있다(sidecar의 `ENABLE_STRATEGY_CONTAINER_CONTROL`). 컨테이너를
+    새로 만들거나 세션 날짜를 바꾸지 않으므로 되돌리기 쉽지만, 그래도 누가
+    눌렀는지는 최소한 남긴다.
+    """
+    result = await strategy_runtime_request("POST", "/power", body={"action": body.action})
+    # 정식 감사 원장에 넣을 사건은 아니라 stdout 기록으로 최소화한다 - 그래도
+    # "누가 눌렀는지 전혀 안 남는다"보다는 낫다.
+    print(f"[strategy-runtime] owner={owner_id or 'unknown'} action={body.action}")
+    return result
 
 
 def _integration_status() -> dict[str, dict[str, object]]:

@@ -11,10 +11,13 @@ from unittest.mock import patch
 from apps.api import ceo_kanban_read
 from orchestration.adapters.ceo_supervisor import HermesKanbanClient
 from orchestration.kanban_retention import (
+    AUDIT_CAPSULE_SCHEMA_VERSION,
     AuditStore,
     DeliveryState,
+    FilesystemArtifactCleaner,
     RetentionWorker,
     SQLiteKanbanMaintenance,
+    build_qa_hr_capsule,
     evaluate_workflow,
 )
 from orchestration.kanban_retention_lock import workflow_mutation_lock
@@ -301,6 +304,98 @@ def test_purge_requires_audit_row(tmp_path: Path) -> None:
     assert maintenance.purged == []
 
 
+def test_audit_store_migrates_legacy_schema_with_qa_hr_capsule(tmp_path: Path) -> None:
+    audit_path = tmp_path / "retention-audit.db"
+    with sqlite3.connect(audit_path) as conn:
+        conn.execute(
+            """CREATE TABLE workflow_retention_audit (
+                root_id TEXT PRIMARY KEY,
+                request_id TEXT,
+                final_status TEXT NOT NULL,
+                created_at INTEGER,
+                terminal_at INTEGER,
+                completed_at INTEGER,
+                departments TEXT NOT NULL,
+                total_latency_ms INTEGER,
+                final_result_ref TEXT,
+                discord_thread_id TEXT,
+                discord_message_id TEXT,
+                archived_at INTEGER NOT NULL,
+                purged_at INTEGER
+            )"""
+        )
+
+    with AuditStore(audit_path)._connect() as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(workflow_retention_audit)")}
+    assert "qa_hr_capsule_json" in columns
+
+
+def test_qa_hr_capsule_contains_only_compact_review_fields() -> None:
+    qa = _node(
+        "qa-retention",
+        role="qa",
+        status="blocked",
+        runs=[
+            {
+                "status": "failed",
+                "outcome": "protocol_violation",
+                "ended_at": NOW,
+                "error": "raw provider detail must not be retained",
+            }
+        ],
+    )
+    qa["assignee"] = "qa-department"
+    hr = _node("hr-retention", role="primary")
+    hr["assignee"] = "hr-department"
+    workflow = ceo_kanban_read.Workflow(
+        root_task_id=ROOT,
+        nodes=tuple(
+            ceo_kanban_read.WorkflowNode.from_hermes(payload)
+            for payload in (_node(ROOT), qa, hr)
+        ),
+        metadata={},
+        root_payload=_node(ROOT),
+    )
+
+    capsule = json.loads(build_qa_hr_capsule(workflow))
+    assert capsule["schema_version"] == AUDIT_CAPSULE_SCHEMA_VERSION
+    assert capsule["qa"]["task_count"] == 1
+    assert capsule["qa"]["protocol_violation_count"] == 1
+    assert capsule["hr"]["task_count"] == 1
+    encoded = json.dumps(capsule, ensure_ascii=False)
+    assert "raw provider detail" not in encoded
+    assert "body" not in encoded
+    assert "summary" not in encoded
+
+
+def test_filesystem_artifact_cleanup_is_task_scoped(tmp_path: Path) -> None:
+    home = tmp_path / "shared-kanban"
+    for relative in (
+        "kanban/logs/root-retention.log",
+        "kanban/workspaces/root-retention/output.txt",
+        "kanban/attachments/root-retention/evidence.md",
+        "kanban/logs/unrelated.log",
+        "kanban/workspaces/unrelated/keep.txt",
+        "kanban/attachments/unrelated/keep.md",
+    ):
+        path = home / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x", encoding="utf-8")
+
+    removed, skipped = FilesystemArtifactCleaner(
+        {"HERMES_KANBAN_HOME": str(home)}
+    ).cleanup([ROOT, "root-retention"])
+
+    assert removed == 3
+    assert skipped == 0
+    assert not (home / "kanban/logs/root-retention.log").exists()
+    assert not (home / "kanban/workspaces/root-retention").exists()
+    assert not (home / "kanban/attachments/root-retention").exists()
+    assert (home / "kanban/logs/unrelated.log").exists()
+    assert (home / "kanban/workspaces/unrelated/keep.txt").exists()
+    assert (home / "kanban/attachments/unrelated/keep.md").exists()
+
+
 def test_legacy_archived_workflow_is_audited_before_old_purge(tmp_path: Path) -> None:
     maintenance = FakeMaintenance()
     audit = AuditStore(tmp_path / "retention-audit.db")
@@ -382,7 +477,7 @@ def test_supervisor_mutation_waits_for_retention_lock(tmp_path: Path) -> None:
             started.set()
             client.create_task(
                 title="child",
-                body=f"workflow_root_task_id={ROOT}",
+                body=f"workflow_root_task_id={ROOT}\nworkflow_role=primary\n",
                 assignee="research-department",
                 parent_task_ids=[ROOT],
                 idempotency_key="req-lock",

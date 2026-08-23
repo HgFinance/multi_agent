@@ -113,6 +113,70 @@ def vllm_response_format(schema: dict[str, Any], name: str = "structured_respons
     }
 
 
+def control_envelope_schema(result_schema: dict[str, Any]) -> dict[str, Any]:
+    """Wrap an application result in a generic fail-closed control envelope.
+
+    The envelope is an internal transport contract.  The benchmark's frozen
+    scorer still receives only ``result`` after validation, so these control
+    fields cannot change the benchmark's exact JSON contract.
+    """
+
+    return {
+        "type": "object",
+        "properties": {
+            "status": {
+                "type": "string",
+                "enum": ["SUCCESS", "INSUFFICIENT_DATA", "INVALID"],
+            },
+            "result": {"oneOf": [result_schema, {"type": "null"}]},
+            "expression": {"type": ["string", "null"]},
+            "missing_params": {"type": "array", "items": {"type": "string"}},
+            "reason": {"type": ["string", "null"]},
+        },
+        "required": ["status", "result", "expression", "missing_params", "reason"],
+        "additionalProperties": False,
+    }
+
+
+def unwrap_control_envelope(
+    raw: str,
+    result_schema: dict[str, Any],
+) -> StructuredValidation:
+    """Validate an envelope and return only its exact application result.
+
+    ``INSUFFICIENT_DATA`` and ``INVALID`` are deliberately errors for a
+    benchmark answer.  They are retained by the caller as diagnostics and
+    must never be converted into a guessed result.
+    """
+
+    envelope_schema = control_envelope_schema(result_schema)
+    envelope = validate_json(raw, envelope_schema)
+    if not envelope.valid:
+        return envelope
+    value = envelope.value
+    # A fail-closed response may still have a valid application result, for
+    # example {"status":"INSUFFICIENT_DATA", "value":null}.  The control
+    # status is diagnostic; the frozen scorer receives that exact result after
+    # schema validation.  Only a null result is an unscorable response.
+    if value.get("result") is None:
+        reason = value.get("reason") or value["status"]
+        missing = value.get("missing_params") or []
+        suffix = f"; missing_params={missing}" if missing else ""
+        return StructuredValidation(
+            value=None,
+            valid=False,
+            error=f"structured status {value['status']}: {reason}{suffix}",
+        )
+    result = validate_json(json.dumps(value["result"], ensure_ascii=False), result_schema)
+    if not result.valid:
+        return StructuredValidation(
+            value=None,
+            valid=False,
+            error=f"envelope result invalid: {result.error}",
+        )
+    return result
+
+
 def retry_instruction(schema: dict[str, Any], error: str) -> str:
     return (
         "Your previous structured response failed validation.\n"

@@ -38,6 +38,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -141,30 +142,68 @@ def _dart_json(endpoint: str, **params) -> dict:
 # ── 기업 코드 색인 (corpCode.xml - 프로세스 메모리에서만 재사용) ────────────
 _corp_index: list | None = None
 _corp_lock = Lock()
+_corp_index_failure_until = 0.0
+_corp_index_failure_reason = ""
+_CORP_INDEX_TIMEOUT_SECONDS = max(
+    5,
+    int(os.environ.get("MCP_DART_CORP_INDEX_TIMEOUT_SECONDS", "20")),
+)
+_CORP_INDEX_FAILURE_COOLDOWN_SECONDS = max(
+    5,
+    int(os.environ.get("MCP_DART_CORP_INDEX_FAILURE_COOLDOWN_SECONDS", "60")),
+)
 
 
 def _load_corp_index() -> list:
-    global _corp_index
+    global _corp_index, _corp_index_failure_until, _corp_index_failure_reason
     with _corp_lock:
         if _corp_index is not None:
             return _corp_index
-        _spend("dart", DART_DAILY_CAP)
-        q = urllib.parse.urlencode({"crtfc_key": _dart_key()})
-        raw = _get(f"{DART_BASE}/corpCode.xml?{q}", timeout=60)
-        with zipfile.ZipFile(io.BytesIO(raw)) as z:
-            xml = z.read(z.namelist()[0])
-        out = []
-        for el in ET.fromstring(xml).iter("list"):
-            stock = (el.findtext("stock_code") or "").strip()
-            if not stock:
-                continue  # 상장사만 - 비상장 10만 건은 색인에서 뺀다
-            out.append({"corp_code": el.findtext("corp_code"),
-                        "corp_name": (el.findtext("corp_name") or "").strip(),
-                        "stock_code": stock})
-        # corpCode.xml도 외부 응답이다. 디스크 캐시는 작은 편의 기능이지만
-        # "시세 외 응답 비영속" 경계를 깨므로 프로세스 수명 안에서만 재사용한다.
-        _corp_index = out
-        return out
+        now = time.monotonic()
+        if now < _corp_index_failure_until:
+            raise RuntimeError(
+                "DART 기업 색인 일시 사용 불가 "
+                f"(재시도 대기 중: {_corp_index_failure_reason or 'external_error'})"
+            )
+        try:
+            _spend("dart", DART_DAILY_CAP)
+            q = urllib.parse.urlencode({"crtfc_key": _dart_key()})
+            raw = _get(
+                f"{DART_BASE}/corpCode.xml?{q}",
+                timeout=_CORP_INDEX_TIMEOUT_SECONDS,
+            )
+            with zipfile.ZipFile(io.BytesIO(raw)) as z:
+                xml = z.read(z.namelist()[0])
+            out = []
+            for el in ET.fromstring(xml).iter("list"):
+                stock = (el.findtext("stock_code") or "").strip()
+                if not stock:
+                    continue  # 상장사만 - 비상장 10만 건은 색인에서 뺀다
+                out.append({"corp_code": el.findtext("corp_code"),
+                            "corp_name": (el.findtext("corp_name") or "").strip(),
+                            "stock_code": stock})
+            # corpCode.xml도 외부 응답이다. 디스크 캐시는 작은 편의 기능이지만
+            # "시세 외 응답 비영속" 경계를 깨므로 프로세스 수명 안에서만 재사용한다.
+            _corp_index = out
+            _corp_index_failure_until = 0.0
+            _corp_index_failure_reason = ""
+            return out
+        except BudgetExhausted:
+            raise
+        except Exception as exc:
+            # A failed full-index fetch used to leave the cache empty, so every
+            # subsequent resolver call paid the same 60-second network cost.
+            # Keep the failure non-persistent, but suppress equivalent retries
+            # for a short cooldown. The caller still receives a truthful
+            # unavailable error and may retry after the cooldown.
+            _corp_index_failure_reason = type(exc).__name__
+            _corp_index_failure_until = (
+                time.monotonic() + _CORP_INDEX_FAILURE_COOLDOWN_SECONDS
+            )
+            raise RuntimeError(
+                "DART 기업 색인을 가져오지 못했다: "
+                f"{_corp_index_failure_reason}"
+            ) from exc
 
 
 def _resolve(query: str) -> list[dict]:

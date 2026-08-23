@@ -349,9 +349,13 @@ class PITView:
         # 창 안에 조정 점프가 있으면 계산하지 않는다. closes 가 잘라 준 시계열
         # 길이가 요청한 창을 못 채우는 것으로 드러난다(같은 판정을 두 번 쓰지
         # 않으려고 여기서도 그 함수를 그대로 쓴다).
-        if len(self.closes(symbol, lookback + 1)) < lookback + 1:
+        # closes() removes zero-notional carry-forward closes and adjustment gaps.
+        # Require the complete path: checking only endpoints would bridge a
+        # trading halt and turn a stale close into a fabricated return.
+        observed = self.closes(symbol, lookback + 1)
+        if len(observed) != lookback + 1:
             return None
-        return float(b) / float(a) - 1.0
+        return float(observed[-1]) / float(observed[0]) - 1.0
 
     def daily_returns(self, symbol: str, n: int) -> list[float]:
         px = self.closes(symbol, n + 1)

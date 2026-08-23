@@ -648,6 +648,8 @@ def build_root_body(
     qa_enabled: bool | None = None,
     qa_blocks_response: bool | None = None,
     langsmith_trace_context: str | None = None,
+    advisory_fund_id: str | None = None,
+    advisory_book_id: str | None = None,
 ) -> str:
     """Build a root body that is unambiguous before the root ID exists.
 
@@ -725,6 +727,18 @@ def build_root_body(
         if langsmith_trace_context
         else ""
     )
+    # Analysis-only portfolio context.  These are opaque durable identifiers,
+    # never credentials or portfolio values.  PAPER roots already carry their
+    # separate order scope and must not enter this advisory lane.
+    advisory_lines = ""
+    if user_paper_order_scope is None:
+        for marker, value in (
+            ("advisory_fund_id", advisory_fund_id),
+            ("advisory_book_id", advisory_book_id),
+        ):
+            normalized = str(value or "").strip()
+            if normalized and not any(char.isspace() or char == "=" for char in normalized):
+                advisory_lines += f"{marker}={normalized}\n"
     return (
         f"{CEO_WORKFLOW_SCOPE_MARKER}\n"
         f"workflow_scope={CEO_WORKFLOW_SCOPE_POLICY}\n"
@@ -735,6 +749,7 @@ def build_root_body(
         f"{paper_order_block}"
         f"{discord_lines}"
         f"{langsmith_line}"
+        f"{advisory_lines}"
         f"qa_enabled={str(canonical_qa_enabled).lower()}\n"
         f"qa_blocks_response={str(canonical_qa_blocks).lower()}\n"
         "response_plane=primary_results_ready\n"

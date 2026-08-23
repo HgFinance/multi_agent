@@ -96,6 +96,7 @@ from reconciliation import (
     reconcile_fills,
     reconcile_positions,
 )
+from db_read_model import build_accounting_sections
 
 API_VERSION = "v1"
 
@@ -658,6 +659,48 @@ def positions(ledger_id: UUID) -> dict:
              "average_cost": _d(p.average_cost), "cost_basis": _d(p.cost_basis)}
             for i, p in sorted(pos.items(), key=lambda kv: str(kv[0]))
         ],
+        **_provenance(),
+    }
+
+
+@app.get(f"/accounting/{API_VERSION}/ledgers/{{ledger_id}}/advisory-snapshot")
+def advisory_snapshot(ledger_id: UUID) -> dict:
+    """Read-only NAV/holdings context for Risk advisory.
+
+    This endpoint deliberately exposes the existing accounting read model, not
+    a new valuation or authorization decision.  ``authoritative`` remains
+    false until the existing NAV close approval exists.  Missing snapshots are
+    reported as 404 rather than fabricated zeroes.
+    """
+
+    led = _ledger(ledger_id)
+    if _repo is None:
+        raise HTTPException(
+            503,
+            _envelope(
+                "ACCOUNTING_ADVISORY_SNAPSHOT_UNAVAILABLE",
+                "durable accounting read model is unavailable",
+            ),
+        )
+    sections = build_accounting_sections(_repo, ledger_id)
+    if sections is None:
+        raise HTTPException(
+            404,
+            _envelope(
+                "ACCOUNTING_ADVISORY_SNAPSHOT_NOT_FOUND",
+                "no evaluated portfolio snapshot exists for this book",
+            ),
+        )
+    return {
+        "contract": "hgfinance.risk-advisory-portfolio.v1",
+        "fund_id": str(led.fund_id),
+        "book_id": str(ledger_id),
+        "portfolio": sections["portfolio"],
+        "sector_exposure": {
+            "status": "unavailable_reference_mapping",
+            "mapped_positions": 0,
+            "unmapped_positions": len(sections["portfolio"].get("positions", [])),
+        },
         **_provenance(),
     }
 
