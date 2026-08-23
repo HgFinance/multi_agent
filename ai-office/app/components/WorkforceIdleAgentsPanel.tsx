@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   fetchWorkforceIdleAgents,
@@ -7,6 +8,7 @@ import {
   type IdleStatus,
   type WorkerIdleReport,
   type WorkforceIdleAgents,
+  type WorkforceIdleWindow,
 } from "../lib/workforceIdleClient";
 
 /**
@@ -18,6 +20,16 @@ import {
  */
 
 const POLL_MS = 60_000;
+
+type WindowKey = "daily" | "weekly";
+
+/** 일간은 오늘 하루(4시간 넘게 안 잡히면 IDLE), 주간은 최근 7일(하루 넘게 안
+ *  잡히면 IDLE) - 창이 넓어지면 "유휴"의 기준도 같이 넓어져야 한다. 그렇지
+ *  않으면 주간 보기에서 정상 근무 패턴(야간·주말 공백)이 전부 IDLE로 뜬다. */
+const WINDOW_OPTIONS: Record<WindowKey, WorkforceIdleWindow & { label: string }> = {
+  daily: { label: "일간", lookbackHours: 24, idleThresholdHours: 4 },
+  weekly: { label: "주간", lookbackHours: 24 * 7, idleThresholdHours: 24 },
+};
 
 const STATUS_ORDER: IdleStatus[] = ["ACTIVE", "IDLE", "UNOBSERVED", "UNAVAILABLE"];
 
@@ -70,6 +82,39 @@ function formatIdleHours(value: number | null): string {
   if (value === null || !Number.isFinite(value)) return "—";
   if (value < 1) return `${Math.round(value * 60)}분 전`;
   return `${value.toFixed(1)}시간 전`;
+}
+
+function WindowToggle({
+  value,
+  onChange,
+}: {
+  value: WindowKey;
+  onChange: (next: WindowKey) => void;
+}) {
+  return (
+    <div
+      className="flex shrink-0 items-stretch overflow-hidden rounded border border-outline-variant bg-surface-container-lowest"
+      role="group"
+      aria-label="관측 창"
+    >
+      {(Object.keys(WINDOW_OPTIONS) as WindowKey[]).map((key) => {
+        const on = value === key;
+        return (
+          <button
+            key={key}
+            type="button"
+            aria-pressed={on}
+            onClick={() => onChange(key)}
+            className={`px-3 py-1.5 text-label-md font-label-md font-semibold transition-colors ${
+              key !== "daily" ? "border-l border-outline-variant" : ""
+            } ${on ? "bg-secondary-container text-primary" : "text-on-surface-variant hover:bg-surface-container"}`}
+          >
+            {WINDOW_OPTIONS[key].label}
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 function WorkforceIdleArtifactHeader({ samples }: { samples?: number }) {
@@ -144,9 +189,11 @@ function IdleAgentRow({ report }: { report: WorkerIdleReport }) {
 }
 
 export default function WorkforceIdleAgentsPanel() {
+  const [windowKey, setWindowKey] = useState<WindowKey>("daily");
+  const activeWindow = WINDOW_OPTIONS[windowKey];
   const query = useQuery<WorkforceIdleAgents, WorkforceIdleAgentsError>({
-    queryKey: ["workforce-idle-agents"],
-    queryFn: () => fetchWorkforceIdleAgents(),
+    queryKey: ["workforce-idle-agents", windowKey],
+    queryFn: () => fetchWorkforceIdleAgents(activeWindow),
     refetchInterval: POLL_MS,
     staleTime: 0,
     retry: false,
@@ -163,15 +210,18 @@ export default function WorkforceIdleAgentsPanel() {
     >
       <WorkforceIdleArtifactHeader samples={data ? reports.length : undefined} />
       <div className="space-y-5 p-4 md:p-6">
-        <div className="min-w-0">
-          <p className="m-0 text-label-md font-label-md uppercase text-on-surface-variant">Workforce · Idle Observability</p>
-          <h2 id="workforce-idle-title" className="mt-2 text-headline-md font-headline-md font-bold text-primary">
-            투자본부 Worker 유휴 상태
-          </h2>
-          <p className="mt-2 max-w-3xl text-body-sm font-body-sm text-on-surface-variant">
-            6개 투자본부에 등록된 Worker 전원의 최근 실행 관측 시각을 Langfuse에서 읽어 판정합니다. 원문 프롬프트·응답은
-            받지 않고 시각만 비교합니다.
-          </p>
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="min-w-0">
+            <p className="m-0 text-label-md font-label-md uppercase text-on-surface-variant">Workforce · Idle Observability</p>
+            <h2 id="workforce-idle-title" className="mt-2 text-headline-md font-headline-md font-bold text-primary">
+              투자본부 Worker 유휴 상태
+            </h2>
+            <p className="mt-2 max-w-3xl text-body-sm font-body-sm text-on-surface-variant">
+              6개 투자본부에 등록된 Worker 전원의 최근 실행 관측 시각을 Langfuse에서 읽어 판정합니다. 원문 프롬프트·응답은
+              받지 않고 시각만 비교합니다.
+            </p>
+          </div>
+          <WindowToggle value={windowKey} onChange={setWindowKey} />
         </div>
 
         {error ? (
@@ -235,7 +285,10 @@ export default function WorkforceIdleAgentsPanel() {
         ) : null}
 
         <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-t border-outline-variant pt-3 text-xs text-on-surface-variant">
-          <span>Langfuse 타임스탬프 기준 · 원문은 이 화면에 실리지 않습니다</span>
+          <span>
+            {activeWindow.label} 관측 · 최근 {activeWindow.lookbackHours}시간 · 임계 {activeWindow.idleThresholdHours}시간 ·
+            Langfuse 타임스탬프 기준(원문 미포함)
+          </span>
           <span>{POLL_MS / 1000}초마다 자동 갱신</span>
         </div>
       </div>

@@ -58,10 +58,20 @@ function hasIdleAgentsShape(value: unknown): value is WorkforceIdleAgents {
   return Array.isArray((value as Record<string, unknown>).idle_agents);
 }
 
-export async function fetchWorkforceIdleAgents(): Promise<WorkforceIdleAgents> {
+export type WorkforceIdleWindow = {
+  /** 관측 창(시간). 이 창 안에 한 번도 안 잡히면 UNOBSERVED다. */
+  lookbackHours: number;
+  /** 이 시간보다 오래 전 관측이면 IDLE, 안이면 ACTIVE. */
+  idleThresholdHours: number;
+};
+
+export async function fetchWorkforceIdleAgents(window?: WorkforceIdleWindow): Promise<WorkforceIdleAgents> {
+  const query = window
+    ? `?lookback_hours=${window.lookbackHours}&idle_threshold_hours=${window.idleThresholdHours}`
+    : "";
   let response: Response;
   try {
-    response = await bffFetch("/ui/workforce/idle-agents", {
+    response = await bffFetch(`/ui/workforce/idle-agents${query}`, {
       cache: "no-store",
       headers: { Accept: "application/json" },
     });
