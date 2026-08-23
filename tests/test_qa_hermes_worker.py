@@ -149,3 +149,29 @@ def test_known_empty_codex_pool_blocks_before_starting_hermes(tmp_path, monkeypa
 
     assert qa_worker.main(["chat", "-q", "work kanban task t_qa"]) == 0
     assert calls == ["t_qa"]
+
+
+def test_non_qa_dispatcher_worker_delegates_to_real_hermes(monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_research")
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "11")
+    monkeypatch.setenv("HERMES_PROFILE", "research-department")
+    calls = []
+
+    def fake_execvpe(executable, argv, env):
+        calls.append((executable, list(argv), dict(env)))
+        raise RuntimeError("exec intercepted")
+
+    monkeypatch.setattr(qa_worker.os, "execvpe", fake_execvpe)
+
+    try:
+        qa_worker.main(["--cli", "chat", "-q", "work kanban task t_research"])
+    except RuntimeError as exc:
+        assert str(exc) == "exec intercepted"
+    else:
+        raise AssertionError("non-QA worker did not delegate")
+
+    assert len(calls) == 1
+    executable, argv, env = calls[0]
+    assert executable == qa_worker.REAL_HERMES
+    assert argv[0] == qa_worker.REAL_HERMES
+    assert env["HERMES_BIN"] == qa_worker.REAL_HERMES

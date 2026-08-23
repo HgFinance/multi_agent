@@ -4,7 +4,9 @@ from pathlib import Path
 from benchmarks.quantization.glossary_rag import inject, load_glossary
 from benchmarks.quantization.safe_expression import ExpressionError, evaluate_response
 from benchmarks.quantization.structured_output import (
+    control_envelope_schema,
     infer_schema_from_contract,
+    unwrap_control_envelope,
     validate_json,
 )
 
@@ -31,6 +33,30 @@ class GenericHybridTests(unittest.TestCase):
         self.assertIsNotNone(schema)
         self.assertTrue(validate_json('{"action":"RESIZE","max_additional_notional":1500000}', schema).valid)
         self.assertFalse(validate_json('{"action":"RESIZE","unexpected":1}', schema).valid)
+
+    def test_structured_control_envelope_unwraps_only_valid_result(self):
+        context = (
+            'Return JSON with exactly:\n'
+            '- action: "APPROVE" or "RESIZE"\n'
+            '- max_additional_notional: integer KRW\n'
+        )
+        result_schema = infer_schema_from_contract(context)
+        envelope_schema = control_envelope_schema(result_schema)
+        raw = (
+            '{"status":"SUCCESS","result":{"action":"RESIZE",'
+            '"max_additional_notional":1500000},"expression":null,'
+            '"missing_params":[],"reason":null}'
+        )
+        self.assertTrue(validate_json(raw, envelope_schema).valid)
+        unwrapped = unwrap_control_envelope(raw, result_schema)
+        self.assertTrue(unwrapped.valid)
+        self.assertEqual(unwrapped.value["action"], "RESIZE")
+
+        insufficient = (
+            '{"status":"INSUFFICIENT_DATA","result":null,"expression":null,'
+            '"missing_params":["denominator"],"reason":"missing input"}'
+        )
+        self.assertFalse(unwrap_control_envelope(insufficient, result_schema).valid)
 
     def test_glossary_does_not_match_substrings(self):
         path = Path("benchmarks/quantization/knowledge/bok800_2026/glossary_rag_v1.json")

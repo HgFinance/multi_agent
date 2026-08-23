@@ -34,6 +34,14 @@ def test_production_services_pin_the_shared_kanban_database() -> None:
         )
 
 
+def test_dispatcher_routes_workers_through_qa_terminal_boundary() -> None:
+    source = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    dispatcher = _service_block(source, "kanban-dispatcher")
+
+    assert "HERMES_BIN: /app/repo/scripts/qa_hermes_worker.py" in dispatcher
+    assert "- .:/app/repo:ro" in dispatcher
+
+
 def test_retention_worker_is_separate_and_uses_shared_lock_and_audit_lane() -> None:
     source = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     worker = _service_block(source, "kanban-retention-worker")
