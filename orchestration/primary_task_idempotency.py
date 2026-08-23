@@ -10,14 +10,18 @@ from __future__ import annotations
 
 import fcntl
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 SCOPE_MARKER = "hgfinance.ceo-workflow-scope.v1"
 PRIMARY_ROLE = "primary"
+QA_ROLE = "qa"
 CONTROL_ROLE = "control"
+KNOWN_WORKFLOW_ROLES = frozenset(
+    {PRIMARY_ROLE, QA_ROLE}
+)
 REQUEST_USER_INPUT_ACTION_BODY = (
     "hgfinance.ceo-supervisor.v1 action=REQUEST_USER_INPUT no_analysis_children"
 )
@@ -86,10 +90,116 @@ def _marker_value(body: Any, key: str) -> str | None:
     return None
 
 
+def _metadata_value(metadata: Any, key: str) -> Any:
+    """Read role metadata from the small shapes used by Hermes."""
+
+    if isinstance(metadata, Mapping):
+        value = metadata.get(key)
+        if value is not None:
+            return value
+        for nested_key in (
+            "metadata",
+            "workflow_metadata",
+            "task_metadata",
+            "run_metadata",
+        ):
+            value = _metadata_value(metadata.get(nested_key), key)
+            if value is not None:
+                return value
+    return getattr(metadata, key, None)
+
+
+def _normalize_role(value: Any) -> str | None:
+    normalized = str(value or "").strip().casefold()
+    return normalized or None
+
+
+def _key_role_identity(
+    idempotency_key: Any,
+    assignee: str,
+) -> tuple[str, str, str] | None:
+    """Parse canonical and legacy scoped role keys.
+
+    New producers use ``<root>:<role>:<assignee>``.  The legacy reader
+    compatibility shape is ``<root>:<assignee>:<role>``.  Unknown non-scoped
+    keys are ignored because root/control tasks have separate contracts.
+    """
+
+    key = str(idempotency_key or "").strip()
+    if not key:
+        return None
+    left, separator, right = key.rpartition(":")
+    if not separator:
+        return None
+    root, separator, middle = left.rpartition(":")
+    if not separator or not root.strip():
+        return None
+
+    middle_role = _normalize_role(middle)
+    right_role = _normalize_role(right)
+    if middle_role in KNOWN_WORKFLOW_ROLES:
+        return root.strip(), middle_role, right.strip().casefold()
+    if right_role in KNOWN_WORKFLOW_ROLES:
+        return root.strip(), right_role, middle.strip().casefold()
+    return None
+
+
+def _resolve_create_identity(
+    body: Any,
+    assignee: Any,
+    idempotency_key: Any = None,
+    *,
+    workflow_role: Any = None,
+    metadata: Any = None,
+) -> tuple[str | None, str | None, str | None]:
+    """Resolve ``(root, role, error)`` for a durable create.
+
+    Explicit role markers must agree with one another and with a scoped
+    idempotency key.  Conflicts are returned as errors so every create path
+    can fail closed before invoking Hermes or touching durable state.
+    """
+
+    body_role = _normalize_role(_marker_value(body, "workflow_role"))
+    argument_role = _normalize_role(workflow_role)
+    metadata_role = _normalize_role(_metadata_value(metadata, "workflow_role"))
+    declared_roles = tuple(
+        role for role in (argument_role, body_role, metadata_role) if role is not None
+    )
+    if len(set(declared_roles)) > 1:
+        return None, None, "conflicting workflow_role declarations"
+    declared_role = declared_roles[0] if declared_roles else None
+
+    key_identity = _key_role_identity(
+        idempotency_key,
+        str(assignee or "").strip().casefold(),
+    )
+    key_root = key_role = key_assignee = None
+    if key_identity is not None:
+        key_root, key_role, key_assignee = key_identity
+        canonical_assignee = str(assignee or "").strip().casefold()
+        if key_assignee != canonical_assignee:
+            return None, None, "idempotency_key assignee conflicts with create assignee"
+
+    if declared_role and key_role and declared_role != key_role:
+        return None, None, "workflow_role conflicts with idempotency_key role"
+
+    body_root = _marker_value(body, "workflow_root_task_id")
+    if body_root and key_root and body_root.strip() != key_root.strip():
+        return None, None, "workflow_root_task_id conflicts with idempotency_key root"
+    return (
+        (body_root or key_root or "").strip() or None,
+        declared_role or key_role,
+        None,
+    )
+
+
 def scoped_primary_identity(
     body: Any,
     assignee: Any,
     idempotency_key: Any = None,
+    *,
+    workflow_role: Any = None,
+    metadata: Any = None,
 ) -> tuple[str, str] | None:
     """Return ``(root_task_id, canonical_assignee)`` for a primary create.
 
@@ -99,59 +209,72 @@ def scoped_primary_identity(
     narrow fallback for calls whose body has not yet been decorated.
     """
 
-    has_scope_marker = SCOPE_MARKER in {
-        line.strip() for line in str(body or "").splitlines()
-    }
-    body_role = _marker_value(body, "workflow_role")
-    if has_scope_marker or body_role:
-        if body_role != PRIMARY_ROLE:
-            return None
-    elif idempotency_key is None:
+    root_task_id, resolved_role, error = _resolve_create_identity(
+        body,
+        assignee,
+        idempotency_key,
+        workflow_role=workflow_role,
+        metadata=metadata,
+    )
+    if error or resolved_role != PRIMARY_ROLE:
         return None
-    root_task_id = _marker_value(body, "workflow_root_task_id")
     canonical_assignee = str(assignee or "").strip().casefold()
     if root_task_id and canonical_assignee:
         return root_task_id, canonical_assignee
-
-    key = str(idempotency_key or "").strip()
-    key_prefix, separator, key_tail = key.rpartition(":")
-    if not separator:
-        return None
-
-    # Current supervisor/CLI production shape: <root>:primary:<assignee>.
-    if key_tail.strip().casefold() == canonical_assignee:
-        key_root, role_separator, key_role = key_prefix.rpartition(":")
-        if (
-            role_separator
-            and key_role.strip().casefold() == PRIMARY_ROLE
-            and key_root.strip()
-        ):
-            return key_root.strip(), canonical_assignee
-
-    # Older tool callers used <root>:<assignee>:primary. Keep accepting it
-    # for replay/compatibility while both forms converge on this helper.
-    if key_tail.strip().casefold() != PRIMARY_ROLE:
-        return None
-    key_root, assignee_separator, key_assignee = key_prefix.rpartition(":")
-    if (
-        not assignee_separator
-        or not key_root.strip()
-        or key_assignee.strip().casefold() != canonical_assignee
-    ):
-        return None
-    return key_root.strip(), canonical_assignee
+    return None
 
 
 def reject_invalid_primary_create(
     body: Any,
     assignee: Any,
     idempotency_key: Any = None,
+    *,
+    workflow_role: Any = None,
+    metadata: Any = None,
 ) -> str | None:
     """Return a rejection before an invalid analysis-primary durable create."""
 
-    identity = scoped_primary_identity(body, assignee, idempotency_key)
-    if identity is not None and not is_analysis_primary_eligible(identity[1]):
+    _, resolved_role, error = _resolve_create_identity(
+        body,
+        assignee,
+        idempotency_key,
+        workflow_role=workflow_role,
+        metadata=metadata,
+    )
+    if error:
+        return error
+    if resolved_role == PRIMARY_ROLE and not is_analysis_primary_eligible(assignee):
         return "CEO primary task assignee is not analysis-primary eligible"
+    return None
+
+
+def validate_primary_create(
+    body: Any,
+    assignee: Any,
+    idempotency_key: Any = None,
+    *,
+    workflow_role: Any = None,
+    metadata: Any = None,
+) -> str | None:
+    """Validate the complete primary-create contract before durable I/O."""
+
+    rejection = reject_invalid_primary_create(
+        body,
+        assignee,
+        idempotency_key,
+        workflow_role=workflow_role,
+        metadata=metadata,
+    )
+    if rejection:
+        return rejection
+    if requires_scoped_primary_contract(
+        body,
+        assignee,
+        idempotency_key=idempotency_key,
+        workflow_role=workflow_role,
+        metadata=metadata,
+    ):
+        return "CEO primary task requires workflow_root_task_id and workflow_role=primary"
     return None
 
 
@@ -159,6 +282,9 @@ def requires_scoped_primary_contract(
     body: Any,
     assignee: Any,
     idempotency_key: Any = None,
+    *,
+    workflow_role: Any = None,
+    metadata: Any = None,
 ) -> bool:
     """Whether a CEO create must carry the scoped-primary contract."""
 
@@ -166,7 +292,11 @@ def requires_scoped_primary_contract(
     return (
         is_analysis_primary_eligible(canonical_assignee)
         and scoped_primary_identity(
-            body, canonical_assignee, idempotency_key=idempotency_key
+            body,
+            canonical_assignee,
+            idempotency_key=idempotency_key,
+            workflow_role=workflow_role,
+            metadata=metadata,
         )
         is None
     )
@@ -306,6 +436,7 @@ __all__ = [
     "request_user_input_idempotency_key",
     "request_user_input_task_body",
     "reject_invalid_primary_create",
+    "validate_primary_create",
     "scoped_primary_create_lock",
     "scoped_primary_identity",
 ]

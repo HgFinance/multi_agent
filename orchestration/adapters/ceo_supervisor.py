@@ -77,6 +77,7 @@ from orchestration.primary_task_idempotency import (
     REQUEST_USER_INPUT_ACTION_BODY,
     is_analysis_primary_eligible,
     request_user_input_idempotency_key,
+    validate_primary_create,
 )
 from orchestration.qa_contract import (
     canonical_qa_contract,
@@ -1840,6 +1841,15 @@ class HermesKanbanClient:
         request = CanonicalKanbanTaskRequest(
             assignee, title, body, idempotency_key, priority=priority
         )
+        primary_rejection = validate_primary_create(
+            request.body,
+            request.assignee,
+            request.idempotency_key,
+        )
+        if primary_rejection:
+            # This is deliberately before lock acquisition and subprocess
+            # construction: an invalid QA-primary must not reach Hermes CLI.
+            raise SupervisorValidationError(primary_rejection)
         args: list[str] = ["kanban", "create", request.title, "--body", request.body]
         args.extend(("--assignee", request.assignee))
         for parent_task_id in parent_task_ids:

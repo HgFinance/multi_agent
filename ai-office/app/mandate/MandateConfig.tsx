@@ -7,6 +7,7 @@ import {
   INTERVIEW_DONE,
   MINDSET_BY_RISK_PROFILE,
   MandateSubmissionError,
+  PROFILE_RECOVERY_STEP_INDEX,
   applyChoice,
   applySuggestions,
   capitalUnitFor,
@@ -241,6 +242,12 @@ function MandateConfigForm({ userId, fundId }: { userId: string; fundId: string 
   const [busy, setBusy] = useState(false);
   /** 서버가 정한 실질 위험 등급. **화면이 재계산하지 않는다**(API_SPEC 2.3). */
   const [riskBand, setRiskBand] = useState("");
+  /**
+   * 이 Fund에 이미 저장된 Mandate가 있는지. 인터뷰가 재개될 때(아래
+   * `PROFILE_RECOVERY_STEP_INDEX` 참고) 자본·승인 방식처럼 이미 저장된 값을
+   * 다시 묻지 않기 위한 신호로 `nextStep`에 넘긴다.
+   */
+  const [mandateAlreadySaved, setMandateAlreadySaved] = useState(false);
   const draftScopeId = `${userId}.${fundId}`;
   const chatEndRef = useRef<HTMLDivElement>(null);
   const resetDialogRef = useRef<HTMLDialogElement>(null);
@@ -384,17 +391,34 @@ function MandateConfigForm({ userId, fundId }: { userId: string; fundId: string 
 
       setDraft(next);
       if (hasStoredMandate) {
-        setStep(INTERVIEW.length);
+        setMandateAlreadySaved(true);
+        /*
+         * 지침은 있는데 적합성 프로필이 없는 상태가 실제로 생긴다(프로필 저장
+         * 경로가 지침보다 늦게 붙었다). 예전엔 여기서 바로 인터뷰를 완료
+         * 상태로 건너뛰고 "좌측에서 고른 뒤 저장하면 불러온다"고만 말했는데,
+         * `submitMandateDraft`는 기간·유동성 응답이 없으면 적합성 프로필
+         * 저장 자체를 건너뛴다(지어낸 값을 넣지 않으려고 - `mandateClient.ts`
+         * `draftToInvestorProfile` 참고). 그 두 답을 받을 방법이 이 화면에
+         * 없었으니 그 약속은 지켜질 수 없었다 - 위험 성향·투자 경험이 자본·
+         * 통화 같은 다른 항목과 달리 저장되지 않는 것처럼 보인 원인이다.
+         * 남은 질문(기간·유동성)부터 인터뷰를 재개해 실제로 저장까지
+         * 이어지게 한다 - 자본·승인 방식은 이미 저장된 값이라 다시 묻지
+         * 않는다(`PROFILE_RECOVERY_STEP_INDEX`의 skipIf 참고).
+         */
+        const resumeStep = profileMissing
+          ? nextStep(next, PROFILE_RECOVERY_STEP_INDEX, { hasStoredMandate: true })
+          : INTERVIEW.length;
+        setStep(resumeStep);
         setMessages([
           { from: "agent", text: "저장된 지침을 불러왔습니다. 좌측에서 바로 수정하실 수 있어요." },
-          // 지침은 있는데 적합성 프로필이 없는 상태가 실제로 생긴다(프로필 저장
-          // 경로가 지침보다 늦게 붙었다). 그때 위험 성향·투자 경험만 기본값으로
-          // 보이는데, 말해주지 않으면 "일부만 안 불러와진다"로만 보인다.
           ...(profileMissing
-            ? [{
-                from: "agent" as const,
-                text: "다만 위험 성향·투자 경험은 아직 저장된 적이 없어 기본값으로 표시했습니다. 좌측에서 고른 뒤 저장하면 다음부터 그대로 불러옵니다.",
-              }]
+            ? [
+                {
+                  from: "agent" as const,
+                  text: "다만 위험 성향·투자 경험은 아직 저장된 적이 없어 기본값으로 표시했습니다. 좌측에서 먼저 고른 뒤, 아래 남은 질문에 답하고 저장하면 함께 저장됩니다.",
+                },
+                { from: "agent" as const, text: INTERVIEW[resumeStep]?.prompt ?? INTERVIEW_DONE },
+              ]
             : []),
         ]);
       }
@@ -451,7 +475,7 @@ function MandateConfigForm({ userId, fundId }: { userId: string; fundId: string 
 
   /** 대본의 다음 질문(또는 완료 문구)을 붙이고 단계를 옮긴다. */
   function advance(from: number, next: MandateDraft, extra: ChatMessage[] = []) {
-    const target = nextStep(next, from);
+    const target = nextStep(next, from, { hasStoredMandate: mandateAlreadySaved });
     setStep(target);
     setMessages((current) => [
       ...current,
@@ -627,14 +651,6 @@ function MandateConfigForm({ userId, fundId }: { userId: string; fundId: string 
                 기본 운용 파라미터를 확인하고 저장하세요.<br />복합적이거나 세밀한 조건은 AI 어시스턴트와의 대화를 통해 정교화되며, 최종
                 거버넌스 버전은 제출 후 생성돼요.
               </p>
-            </div>
-            <div
-              className="flex items-center gap-2 bg-surface-container-high px-3 py-1 rounded-full text-xs font-medium text-secondary shrink-0"
-              role="status"
-              aria-live="polite"
-            >
-              <span className={`w-2 h-2 rounded-full ${hydrating ? "bg-tertiary-fixed-dim animate-pulse" : "bg-secondary"}`} aria-hidden="true" />
-              {hydrating ? "CONNECTING" : "CONNECTED"}
             </div>
           </header>
 

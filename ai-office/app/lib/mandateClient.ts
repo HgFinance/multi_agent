@@ -379,6 +379,16 @@ export function applyChoice(draft: MandateDraft, patch: Partial<MandateDraft>): 
 
 // ── 인터뷰 대본 ───────────────────────────────────────────────────────────────
 
+/**
+ * Mandate metadata는 이미 있지만 적합성 프로필이 없는 상태(`profileMissing`)를
+ * 알려준다. 이 상태에서 자본·승인방식은 **이미 저장된 Mandate 값**이라 다시
+ * 묻지 않는다 - 다시 물으면 기간·유동성만 회수하면 되는 화면이 자본까지
+ * 처음부터 다시 받는 화면이 된다.
+ */
+export interface InterviewContext {
+  hasStoredMandate: boolean;
+}
+
 export interface InterviewStep {
   /** 어시스턴트가 던지는 질문. */
   prompt: string;
@@ -389,7 +399,7 @@ export interface InterviewStep {
   /** `POST /ui/mandate-assistant/suggest`로 보낸다. */
   llm?: true;
   /** 앞 단계에서 이미 채워졌으면 다시 묻지 않는다. */
-  skipIf?: (draft: MandateDraft) => boolean;
+  skipIf?: (draft: MandateDraft, ctx: InterviewContext) => boolean;
   /** 되물을 때 쓰는 안내. `parse` 단계에만 있다. */
   retry?: string;
 }
@@ -473,6 +483,10 @@ export const INTERVIEW: InterviewStep[] = [
     // `capitalUnitFor`를 보지 않고 만원으로 고정해도 어긋나지 않는다.
     prompt: "운용할 기본 자산은 얼마인가요? (만원 단위로 입력해 주세요)",
     retry: "만원 단위 숫자로 입력해 주세요. 예: 10000 (= 1억원)",
+    // Mandate가 이미 저장돼 있으면 자본은 이미 답한 값이다(`policyToDraft`가
+    // 채워뒀다) - 적합성 프로필만 없어서 기간·유동성만 회수하는 화면에서
+    // 이미 정해진 자본까지 다시 묻지 않는다.
+    skipIf: (_draft, ctx) => ctx.hasStoredMandate,
     parse: (text) => {
       const manWon = digitsOf(text);
       return manWon !== null && manWon > 0 ? { baseCapital: manWon * MAN_WON } : null;
@@ -480,6 +494,8 @@ export const INTERVIEW: InterviewStep[] = [
   },
   {
     prompt: "마지막입니다. 주문 승인 방식을 골라주세요.",
+    // 위와 같은 이유 - 승인 방식도 이미 저장된 Mandate 값이다.
+    skipIf: (_draft, ctx) => ctx.hasStoredMandate,
     choices: [
       { label: "자동 실행", patch: { approvalMode: "auto" } },
       { label: "관리자 승인 필요", patch: { approvalMode: "manual" } },
@@ -487,13 +503,28 @@ export const INTERVIEW: InterviewStep[] = [
   },
 ];
 
+/**
+ * Mandate는 있는데 적합성 프로필이 없을 때(`profileMissing`) 재개할 지점.
+ * 목표·성향·경험은 이미 값이 있거나 좌측 버튼으로 바로 고를 수 있어 다시
+ * 묻지 않고, 기간 질문(유일하게 `skipIf`와 `parse`를 동시에 갖는 단계)부터
+ * 다시 시작한다 - 인덱스를 그대로 적으면 대본 순서가 바뀔 때 조용히
+ * 어긋난다.
+ */
+export const PROFILE_RECOVERY_STEP_INDEX = INTERVIEW.findIndex(
+  (step) => Boolean(step.skipIf) && Boolean(step.parse),
+);
+
 export const INTERVIEW_DONE =
   "사용자 mandate를 저장하겠습니다. 페이지 좌측의 mandate 페이지를 통해서 세부적인 내용을 변경할 수 있습니다.";
 
 /** `skipIf`가 붙은 단계를 건너뛰고 실제로 물어볼 다음 단계를 찾는다. */
-export function nextStep(draft: MandateDraft, from: number): number {
+export function nextStep(
+  draft: MandateDraft,
+  from: number,
+  ctx: InterviewContext = { hasStoredMandate: false },
+): number {
   let index = from;
-  while (index < INTERVIEW.length && INTERVIEW[index].skipIf?.(draft)) index += 1;
+  while (index < INTERVIEW.length && INTERVIEW[index].skipIf?.(draft, ctx)) index += 1;
   return index;
 }
 

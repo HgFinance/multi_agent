@@ -45,6 +45,7 @@ def _install(source: str) -> str:
         "    requires_scoped_primary_contract,\n"
         "    scoped_primary_create_lock,\n"
         "    scoped_primary_identity,\n"
+        "    validate_primary_create,\n"
         ")\n"
     )
     if "from __future__ import annotations" in source:
@@ -66,8 +67,12 @@ def _install(source: str) -> str:
         (f"            {line}" if line else line) for line in create_block.splitlines()
     )
     replacement = (
-            "            _primary_rejection = reject_invalid_primary_create(\n"
-            "                body, assignee, idempotency_key=idempotency_key\n"
+            "            _primary_rejection = validate_primary_create(\n"
+            "                body,\n"
+            "                assignee,\n"
+            "                idempotency_key=idempotency_key,\n"
+            "                workflow_role=(args.get('workflow_role') if isinstance(args, dict) else getattr(args, 'workflow_role', None)),\n"
+            "                metadata=(args.get('metadata') if isinstance(args, dict) else getattr(args, 'metadata', None)),\n"
             "            )\n"
             "            if _primary_rejection:\n"
             "                raise ValueError(_primary_rejection)\n"
@@ -131,7 +136,7 @@ def _install_cli(source: str) -> str:
     import_line = (
         f"{CLI_MARKER}\n"
         "from orchestration.primary_task_idempotency import "
-        "reject_invalid_primary_create\n"
+        "validate_primary_create\n"
     )
     anchor = "from hermes_cli import kanban_swarm as ks\n"
     if anchor not in source:
@@ -141,10 +146,12 @@ def _install_cli(source: str) -> str:
     function_start = source.index("def _cmd_create")
     guard_anchor = source.index("    with kb.connect_closing() as conn:\n", function_start)
     guard = (
-        "    _primary_rejection = reject_invalid_primary_create(\n"
+        "    _primary_rejection = validate_primary_create(\n"
         '        getattr(args, "body", None),\n'
         '        getattr(args, "assignee", None),\n'
         '        getattr(args, "idempotency_key", None),\n'
+        '        workflow_role=getattr(args, "workflow_role", None),\n'
+        '        metadata=getattr(args, "metadata", None),\n'
         "    )\n"
         "    if _primary_rejection:\n"
         '        print(f"kanban: {_primary_rejection}", file=sys.stderr)\n'

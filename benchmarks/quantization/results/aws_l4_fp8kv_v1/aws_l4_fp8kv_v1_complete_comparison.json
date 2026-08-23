@@ -1,0 +1,149 @@
+{
+  "schema_version": "aws-l4-fp8kv-complete-comparison.v1",
+  "run_id": "aws-l4-fp8kv-v1-fair-v2-20260822-plus-hybrid-external-20260822",
+  "status": "HOLD_PENDING_HYBRID_INTERNAL_PERFORMANCE_FINANCEBENCH_MANUAL",
+  "comparability_statement": "The five base variants are comparable within L4-fp8KV-v1. The Hybrid External-50 result is comparable for quality only; its full-pipeline latency is not comparable to model-only C1 performance.",
+  "runtime": {
+    "gpu": "NVIDIA L4",
+    "python": "3.12.13",
+    "vllm": "0.27.1",
+    "flashinfer": "0.6.16.post3",
+    "cuda_nvcc": "13.0.88",
+    "attention_backend": "FLASHINFER",
+    "max_model_len": 8192,
+    "gpu_memory_utilization": 0.85,
+    "kv_cache_dtype": "fp8_e4m3",
+    "prefix_caching": true,
+    "temperature": 0,
+    "stream": false,
+    "endpoint_verified": true,
+    "container": "hgfinance-vllm-runtime-20260822"
+  },
+  "internal_dataset_sha256": "ad2bdaf5ea381c2fc151fce1f1859f7f925b86fd03b830319cd97af17709e978",
+  "external_dataset_sha256": "197f0828fee37a8a0ca7551304efa722b005a3d26379a2cc613ece36b315956f",
+  "metric_rules": {
+    "quality_pass_rate": "Internal-50 v2 passed/n",
+    "relative_quality_delta_vs_fp8": "(variant_quality - FP8_quality) / FP8_quality",
+    "external_overall": "null until FinanceBench manual adjudication is complete",
+    "auto_mean": "frozen scorer Auto Mean over FinQA and TAT-QA; secondary metric only",
+    "financebench_diagnostic": "automated diagnostic, not the primary external gate"
+  },
+  "variants": {
+    "FP8": {
+      "status": "MEASURED",
+      "quality_pass_rate": {"passed": 35, "total": 50, "score": 0.70},
+      "critical_failures": 1,
+      "new_critical_regression": null,
+      "request_errors": 0,
+      "categories": {
+        "financial_arithmetic": {"passed": 3, "total": 10, "score": 0.30},
+        "risk_reasoning": {"passed": 7, "total": 7, "score": 1.0},
+        "portfolio_trading": {"passed": 5, "total": 6, "score": 0.8333},
+        "accounting": {"passed": 4, "total": 6, "score": 0.6667},
+        "quant": {"passed": 5, "total": 6, "score": 0.8333},
+        "evidence": {"passed": 5, "total": 6, "score": 0.8333},
+        "structured_output": {"passed": 2, "total": 5, "score": 0.40},
+        "uncertainty_fail_closed": {"passed": 4, "total": 4, "score": 1.0}
+      },
+      "external": {"finqa": 0.75, "tatqa": 1.0, "financebench_diagnostic": 0.5874, "financebench_manual": null, "overall": null, "auto_mean": 0.8556},
+      "performance": {"c1_tok_s": 12.46, "c2_tok_s": 24.80, "c4_tok_s": 49.06, "c1_latency_p50_s": 0.401, "model_load_memory_gib": 15.39, "kv_cache_gib": 2.79, "free_vram_mib": 1416}
+    },
+    "AWQ": {
+      "status": "MEASURED",
+      "quality_pass_rate": {"passed": 36, "total": 50, "score": 0.72},
+      "critical_failures": 1,
+      "new_critical_regression": 0,
+      "request_errors": 0,
+      "categories": {
+        "financial_arithmetic": {"passed": 2, "total": 10, "score": 0.20},
+        "risk_reasoning": {"passed": 7, "total": 7, "score": 1.0},
+        "portfolio_trading": {"passed": 5, "total": 6, "score": 0.8333},
+        "accounting": {"passed": 4, "total": 6, "score": 0.6667},
+        "quant": {"passed": 6, "total": 6, "score": 1.0},
+        "evidence": {"passed": 6, "total": 6, "score": 1.0},
+        "structured_output": {"passed": 2, "total": 5, "score": 0.40},
+        "uncertainty_fail_closed": {"passed": 4, "total": 4, "score": 1.0}
+      },
+      "external": {"finqa": 0.65, "tatqa": 0.9333, "financebench_diagnostic": 0.5895, "financebench_manual": null, "overall": null, "auto_mean": 0.7709},
+      "performance": {"c1_tok_s": 22.24, "c2_tok_s": 43.98, "c4_tok_s": 85.20, "c1_latency_p50_s": 0.180, "model_load_memory_gib": 9.38, "kv_cache_gib": 8.90, "free_vram_mib": 1344}
+    },
+    "AWQ+Finetune": {
+      "status": "MEASURED",
+      "quality_pass_rate": {"passed": 38, "total": 50, "score": 0.76},
+      "critical_failures": 1,
+      "new_critical_regression": 0,
+      "request_errors": 0,
+      "categories": {
+        "financial_arithmetic": {"passed": 4, "total": 10, "score": 0.40},
+        "risk_reasoning": {"passed": 7, "total": 7, "score": 1.0},
+        "portfolio_trading": {"passed": 5, "total": 6, "score": 0.8333},
+        "accounting": {"passed": 4, "total": 6, "score": 0.6667},
+        "quant": {"passed": 6, "total": 6, "score": 1.0},
+        "evidence": {"passed": 6, "total": 6, "score": 1.0},
+        "structured_output": {"passed": 2, "total": 5, "score": 0.40},
+        "uncertainty_fail_closed": {"passed": 4, "total": 4, "score": 1.0}
+      },
+      "external": {"finqa": 0.75, "tatqa": 0.80, "financebench_diagnostic": 0.3853, "financebench_manual": null, "overall": null, "auto_mean": 0.7612},
+      "performance": {"c1_tok_s": 21.00, "c2_tok_s": 41.74, "c4_tok_s": 81.56, "c1_latency_p50_s": 0.238, "model_load_memory_gib": 9.51, "kv_cache_gib": 8.77, "free_vram_mib": 338}
+    },
+    "AWQ+Reasoning": {
+      "status": "MEASURED_HOLD",
+      "quality_pass_rate": {"passed": 18, "total": 50, "score": 0.36},
+      "critical_failures": 13,
+      "new_critical_regression": 12,
+      "request_errors": 0,
+      "categories": {
+        "financial_arithmetic": {"passed": 3, "total": 10, "score": 0.30},
+        "risk_reasoning": {"passed": 1, "total": 7, "score": 0.1429},
+        "portfolio_trading": {"passed": 1, "total": 6, "score": 0.1667},
+        "accounting": {"passed": 1, "total": 6, "score": 0.1667},
+        "quant": {"passed": 4, "total": 6, "score": 0.6667},
+        "evidence": {"passed": 4, "total": 6, "score": 0.6667},
+        "structured_output": {"passed": 2, "total": 5, "score": 0.40},
+        "uncertainty_fail_closed": {"passed": 2, "total": 4, "score": 0.50}
+      },
+      "external": {"finqa": 0.55, "tatqa": 0.80, "financebench_diagnostic": 0.5007, "financebench_manual": null, "overall": null, "auto_mean": 0.6555},
+      "performance": {"c1_tok_s": 22.24, "c2_tok_s": 43.98, "c4_tok_s": 85.20, "performance_scope": "AWQ base model-only", "full_pipeline_c1_e2e_avg_s": 0.874}
+    },
+    "AWQ+RAG": {
+      "status": "MEASURED_HOLD",
+      "quality_pass_rate": {"passed": 35, "total": 50, "score": 0.70},
+      "critical_failures": 2,
+      "new_critical_regression": 1,
+      "request_errors": 0,
+      "categories": {
+        "financial_arithmetic": {"passed": 2, "total": 10, "score": 0.20},
+        "risk_reasoning": {"passed": 7, "total": 7, "score": 1.0},
+        "portfolio_trading": {"passed": 5, "total": 6, "score": 0.8333},
+        "accounting": {"passed": 5, "total": 6, "score": 0.8333},
+        "quant": {"passed": 5, "total": 6, "score": 0.8333},
+        "evidence": {"passed": 5, "total": 6, "score": 0.8333},
+        "structured_output": {"passed": 2, "total": 5, "score": 0.40},
+        "uncertainty_fail_closed": {"passed": 4, "total": 4, "score": 1.0}
+      },
+      "external": {"finqa": 0.80, "tatqa": 0.8667, "financebench_diagnostic": 0.6211, "financebench_manual": null, "overall": null, "auto_mean": 0.8310},
+      "performance": {"c1_tok_s": 22.24, "c2_tok_s": 43.98, "c4_tok_s": 85.20, "performance_scope": "AWQ base model-only", "full_pipeline_c1_e2e_avg_s": 0.764}
+    },
+    "AWQ+Hybrid Selective": {
+      "status": "HOLD_PENDING_INTERNAL_PERFORMANCE_MANUAL",
+      "quality_pass_rate": null,
+      "critical_failures": null,
+      "new_critical_regression": null,
+      "request_errors": 0,
+      "categories": null,
+      "external": {"finqa": 0.80, "tatqa": 0.9333, "financebench_diagnostic": 0.5793, "financebench_manual": null, "overall": null, "auto_mean": 0.8563},
+      "performance": {"model_only": null, "full_pipeline_avg_s": 7.6742, "full_pipeline_p50_s": 7.5744, "full_pipeline_p95_s": 14.0257, "note": "External-50 pipeline latency; not comparable to model-only C1."},
+      "routing": {"accounting": 21, "arithmetic": 2, "arithmetic_accounting": 19, "passthrough": 8, "planner_calls": 21, "formatter_calls": 11, "fallbacks": 10, "api_errors": 0},
+      "source_artifacts": "/tmp/hgfinance-hybrid-e2e-v1/"
+    }
+  },
+  "historical_reference_not_merged": {
+    "financebench_manual": {"FP8": "7/15 = 46.7%", "AWQ": "8/15 = 53.3%"},
+    "external_overall": {"FP8": "37/50 = 74.0%", "AWQ": "37/50 = 74.0%"}
+  },
+  "gates": {
+    "five_variant_current_run": "HOLD until FinanceBench manual adjudication for External Overall",
+    "hybrid_external_auto_mean": "PASS versus paired fresh AWQ baseline (0.8563 vs 0.7706)",
+    "hybrid_final_promotion": "HOLD until Internal-50 v2, fair model-only performance, and manual FinanceBench"
+  }
+}

@@ -1088,6 +1088,108 @@ class SupervisorPolicyTest(unittest.TestCase):
 
 
 
+class HermesCreateBoundaryTest(unittest.TestCase):
+    def test_supervisor_rejects_invalid_qa_primary_before_cli(self) -> None:
+        import json
+        import subprocess
+
+        calls: list[list[str]] = []
+
+        def runner(args, **kwargs):
+            calls.append(list(args))
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                json.dumps({"id": "task-created"}),
+                "",
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = HermesKanbanClient(
+                runner=runner,
+                environment={"HERMES_KANBAN_HOME": tmp},
+            )
+            with self.assertRaises(SupervisorValidationError):
+                client.create_task(
+                    title="QA primary",
+                    body="workflow_root_task_id=root\nworkflow_role=primary",
+                    assignee="qa-department",
+                    parent_task_ids=("root",),
+                    idempotency_key="root:primary:qa-department",
+                )
+
+        self.assertEqual(calls, [])
+
+    def test_late_create_after_root_done_still_rejects_qa_primary(self) -> None:
+        import json
+        import subprocess
+
+        calls: list[list[str]] = []
+
+        def runner(args, **kwargs):
+            calls.append(list(args))
+            return subprocess.CompletedProcess(args, 0, json.dumps({"id": "late"}), "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = HermesKanbanClient(
+                runner=runner,
+                environment={"HERMES_KANBAN_HOME": tmp},
+            )
+            with self.assertRaises(SupervisorValidationError):
+                client.create_task(
+                    title="Late QA primary",
+                    body=(
+                        "workflow_root_task_id=root\n"
+                        "workflow_role=primary\n"
+                        "root_status=done"
+                    ),
+                    assignee="qa-department",
+                    parent_task_ids=("root",),
+                    idempotency_key="root:primary:qa-department",
+                )
+
+        self.assertEqual(calls, [])
+
+    def test_supervisor_allows_governance_qa_and_valid_primary(self) -> None:
+        import json
+        import subprocess
+
+        calls: list[list[str]] = []
+
+        def runner(args, **kwargs):
+            calls.append(list(args))
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                json.dumps({"id": f"task-{len(calls)}"}),
+                "",
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            client = HermesKanbanClient(
+                runner=runner,
+                environment={"HERMES_KANBAN_HOME": tmp},
+            )
+            governance = client.create_task(
+                title="QA governance",
+                body="workflow_root_task_id=root\nworkflow_role=qa",
+                assignee="qa-department",
+                parent_task_ids=("root",),
+                idempotency_key="root:qa:qa-department",
+            )
+            primary = client.create_task(
+                title="Research primary",
+                body="workflow_root_task_id=root\nworkflow_role=primary",
+                assignee="research-department",
+                parent_task_ids=("root",),
+                idempotency_key="root:primary:research-department",
+            )
+
+        self.assertEqual(governance["id"], "task-1")
+        self.assertEqual(primary["id"], "task-2")
+        self.assertEqual(len(calls), 2)
+
+
 class FakeClient:
     def __init__(self) -> None:
         self.payloads = [

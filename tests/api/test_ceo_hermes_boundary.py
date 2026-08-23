@@ -84,6 +84,18 @@ class CreateKanbanTaskCliContractTest(unittest.TestCase):
         self.assertNotIn("--initial-status", command)
         self.assertNotIn("ready", command)
 
+    def test_invalid_qa_primary_is_rejected_before_bff_cli(self) -> None:
+        with patch.object(hermes_boundary.subprocess, "run") as run:
+            with self.assertRaises(ValueError):
+                hermes_boundary.create_kanban_task(
+                    assignee="qa-department",
+                    title="QA primary",
+                    body="workflow_root_task_id=root\nworkflow_role=primary",
+                    idempotency_key="root:primary:qa-department",
+                )
+
+        run.assert_not_called()
+
 
 class CeoRootTaskBoundaryTest(unittest.TestCase):
     def test_root_task_failure_does_not_call_ceo(self) -> None:

@@ -10,8 +10,10 @@ from orchestration.primary_task_idempotency import (
     find_existing_scoped_primary,
     is_analysis_primary_eligible,
     requires_scoped_primary_contract,
+    reject_invalid_primary_create,
     request_user_input_idempotency_key,
     scoped_primary_identity,
+    validate_primary_create,
 )
 
 
@@ -100,6 +102,43 @@ def test_scoped_identity_requires_canonical_marker_and_primary_role() -> None:
         "qa-department",
         idempotency_key="root:qa-department:primary",
     ) == ("root", "qa-department")
+
+
+def test_role_and_key_conflicts_fail_closed_before_create() -> None:
+    assert "conflicts" in str(
+        reject_invalid_primary_create(
+            body("root", role="qa"),
+            "qa-department",
+            idempotency_key="root:primary:qa-department",
+        )
+    )
+    assert "conflicts" in str(
+        reject_invalid_primary_create(
+            body("root", role="primary"),
+            "research-department",
+            idempotency_key="root:qa:research-department",
+        )
+    )
+    assert "not analysis-primary eligible" in str(
+        reject_invalid_primary_create(
+            "plain production body",
+            "qa-department",
+            idempotency_key="root:primary:qa-department",
+        )
+    )
+
+
+def test_validate_primary_create_allows_governance_and_valid_primary() -> None:
+    assert validate_primary_create(body("root", role="qa"), "qa-department") is None
+    assert (
+        validate_primary_create(
+            body("root", role="primary"),
+            "research-department",
+            idempotency_key="root:primary:research-department",
+        )
+        is None
+    )
+    assert validate_primary_create("plain task", "research-department") is not None
     assert scoped_primary_identity(
         "plain production body",
         "qa-department",
@@ -274,6 +313,15 @@ registry.register(name="kanban_create", handler=_handle_create)
                     "idempotency_key": "key-only-root:qa-department:primary",
                 }
             )
+            explicit_role_conflict = registered_create(
+                {
+                    "title": "Conflicting QA role",
+                    "body": "plain production body",
+                    "assignee": "qa-department",
+                    "workflow_role": "qa",
+                    "idempotency_key": "key-only-root:primary:qa-department",
+                }
+            )
             governance = registered_create(
                 {
                     "title": "Governance QA",
@@ -301,6 +349,7 @@ registry.register(name="kanban_create", handler=_handle_create)
     assert "not analysis-primary eligible" in str(qa_primary)
     assert "not analysis-primary eligible" in str(qa_primary_retry)
     assert "not analysis-primary eligible" in str(key_only_qa_primary)
+    assert "conflicts" in str(explicit_role_conflict)
     assert governance == "task-1"
     assert research == "task-2"
     assert risk == "task-3"

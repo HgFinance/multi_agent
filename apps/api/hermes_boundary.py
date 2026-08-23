@@ -40,6 +40,7 @@ try:
         CanonicalKanbanTaskRequest,
     )
     from orchestration.ceo_workflow_scope import build_root_comment
+    from orchestration.primary_task_idempotency import validate_primary_create
 except ImportError:  # pragma: no cover - `python apps/api/hermes_boundary.py` 직접 실행
     # 스크립트로 직접 돌리면 sys.path[0] 이 apps/api 라 저장소 루트가 안 보인다.
     # (`from ..orchestration...` 는 이 파일이 패키지 안이 아니라 어떤 경로로도
@@ -52,6 +53,7 @@ except ImportError:  # pragma: no cover - `python apps/api/hermes_boundary.py` �
         CanonicalKanbanTaskRequest,
     )
     from orchestration.ceo_workflow_scope import build_root_comment
+    from orchestration.primary_task_idempotency import validate_primary_create
 
 # Hermes chat은 응답이 문자열이어도 Profile의 Tool을 실행할 수 있다. 인증, 사용자별
 # 권한과 Tool Allowlist가 붙기 전에는 명시적인 로컬 개발 Opt-in 없이는 열지 않는다.
@@ -183,6 +185,14 @@ def create_kanban_task(
         "on",
     }:
         return None
+    primary_rejection = validate_primary_create(
+        request.body,
+        request.assignee,
+        request.idempotency_key,
+    )
+    if primary_rejection:
+        # Keep invalid QA-primary requests out of the CLI and durable board.
+        raise ValueError(primary_rejection)
 
     # 부서에 매이지 않는 명령이라 department=None 이다. 로컬(docker) 모드에서는
     # 컨테이너 안에서 돌아 보드 경로·권한이 에이전트와 같아진다.
