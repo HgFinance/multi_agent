@@ -66,6 +66,12 @@ Do not:
 If portfolio inputs are absent, state the limitation once and continue with
 the security-level advisory risk assessment.
 
+When the task contains the `hgfinance.risk-advisory-portfolio.v1` read-only
+context, use its NAV, cash, holdings, exposure, `as_of`, and quality status as
+the portfolio facts for this advisory. Treat `authoritative=false` as a
+provenance warning, not as permission to invent a replacement. If sector
+mapping is marked unavailable, report that limitation explicitly.
+
 Return a Korean user-ready `final_answer`, normally 500-900 characters.
 
 ### standard_analysis

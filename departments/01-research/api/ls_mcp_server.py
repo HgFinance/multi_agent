@@ -72,7 +72,18 @@ TJJ_CODES = {
 
 def _shcode_of(query: str) -> dict:
     """기업명 또는 6자리 코드 -> {stock_code, corp_name}. DART 색인 재사용."""
-    hits = _resolve(query)
+    normalized = str(query or "").strip()
+    if len(normalized) == 6 and normalized.isdigit():
+        # LS TRs need the exchange symbol, not a DART corp_code. Avoid paying
+        # for the large corpCode.xml index when the caller already supplied
+        # the canonical six-digit KRX symbol. Name resolution still uses the
+        # DART index below and keeps its existing failure semantics.
+        return {
+            "corp_code": None,
+            "corp_name": normalized,
+            "stock_code": normalized,
+        }
+    hits = _resolve(normalized)
     if not hits:
         raise RuntimeError(f"'{query}' 종목을 찾지 못했다 - 6자리 코드로 재시도할 것")
     return hits[0]

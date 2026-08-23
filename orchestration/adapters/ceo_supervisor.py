@@ -85,6 +85,7 @@ from orchestration.qa_contract import (
     canonical_qa_contract,
     split_planner_selection,
 )
+from orchestration.risk_advisory_context import fetch_risk_advisory_context
 
 logger = logging.getLogger(__name__)
 
@@ -502,6 +503,9 @@ class SupervisorState:
     root_is_user_query: bool = False
     # Enabled only by the production service when final Discord delivery exists.
     allow_primary_passthrough: bool = False
+    # Optional read-only portfolio snapshot for the Risk advisory child.
+    # Missing context is normal and must never block task creation.
+    risk_advisory_context: str | None = None
 
     def __post_init__(self) -> None:
         # Keep the old constructor field for callers/tests and resolve it once
@@ -3636,6 +3640,9 @@ class CeoSupervisorService:
             selected_primary_profiles=selected,
             root_is_user_query=True,
             allow_primary_passthrough=self.discord_delivery is not None,
+            risk_advisory_context=fetch_risk_advisory_context(
+                str(root_payload.get("body") or "")
+            ),
         )
         decision = _empty_primary_request_user_input_decision(state)
         self._execute(decision, state)
@@ -4339,6 +4346,7 @@ class CeoSupervisorService:
                     allow_primary_passthrough=(
                         self.discord_delivery is not None
                     ),
+                    risk_advisory_context=fetch_risk_advisory_context(root_body),
                 )
 
                 decisions = _initial_primary_materialization_decisions(
@@ -4787,6 +4795,7 @@ class CeoSupervisorService:
             selected_primary_profiles=recovery_selected_profiles,
             root_is_user_query=True,
             allow_primary_passthrough=self.discord_delivery is not None,
+            risk_advisory_context=fetch_risk_advisory_context(root_body),
         )
 
         decisions = _initial_primary_materialization_decisions(
@@ -5671,6 +5680,7 @@ class CeoSupervisorService:
                     selected_primary_profiles=selected_profiles,
                     root_is_user_query=is_user_query_body(root_body),
                     allow_primary_passthrough=self.discord_delivery is not None,
+                    risk_advisory_context=fetch_risk_advisory_context(root_body),
                 )
 
                 def new_synthesis_timing(
@@ -6226,10 +6236,21 @@ class CeoSupervisorService:
             if synthesis_timing is not None and role == "synthesis":
                 synthesis_timing["t7b_ms"] = time.time_ns() // 1_000_000
                 synthesis_timing["t7b_mono_ns"] = time.perf_counter_ns()
+            task_body = decision.body
+            if (
+                role == "primary"
+                and decision.assignee == canonical_profile_for_department("risk")
+                and state.risk_advisory_context
+            ):
+                task_body = (
+                    f"{task_body}\n\n"
+                    "Read-only portfolio context (do not treat as trade authorization):\n"
+                    f"{state.risk_advisory_context}"
+                )
             created = self.client.create_task(
                 title=decision.title,
                 body=build_scoped_task_body(
-                    decision.body,
+                    task_body,
                     state.parent_task_id,
                     role=role,
                     workflow_mode=state.workflow_mode,

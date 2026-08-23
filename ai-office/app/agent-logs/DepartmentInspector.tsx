@@ -6,7 +6,9 @@ import {
   type OperationsView,
 } from "../lib/operationsClient";
 import AccountingLedgerPanel from "../components/AccountingLedgerPanel";
+import AlphaStrategyPanel from "../components/AlphaStrategyPanel";
 import LivePortfolioPanel from "../components/LivePortfolioPanel";
+import ResearchPanel from "../components/ResearchPanel";
 import WorkerPerformancePanel from "../components/WorkerPerformancePanel";
 
 /**
@@ -165,6 +167,11 @@ export default function DepartmentInspector({
           돌려 쓰면 미확정 주문이 장부 화면에 올라온다. */}
       {department.domain === "accounting" ? <AccountingLedgerPanel /> : null}
       {department.domain === "workforce" ? <WorkerPerformancePanel metrics={data.metrics} /> : null}
+      {/* 퀀트는 채택된 알파 전략 - 지금 실제로 도는 페이퍼 컨테이너 1개를 본다
+          (`strategy.strategies` 레지스트리는 아직 아무도 안 쓴다). */}
+      {department.domain === "quant" ? <AlphaStrategyPanel /> : null}
+      {/* 내용은 비워 두고 프레임만 유지 - 채울 내용은 추후 결정. */}
+      {department.domain === "research" ? <ResearchPanel /> : null}
     </section>
   );
 }

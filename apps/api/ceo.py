@@ -1318,6 +1318,8 @@ def ceo_query(
                 langsmith_trace_context=(
                     root_trace.context if root_trace is not None else None
                 ),
+                advisory_fund_id=getattr(req, "fund_id", None),
+                advisory_book_id=getattr(req, "book_id", None),
             ),
             idempotency_key=req.request_id,
         )

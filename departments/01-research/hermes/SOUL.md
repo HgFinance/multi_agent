@@ -54,6 +54,8 @@ Purpose: bounded point-in-time evidence memo.
 - Do not dispatch additional scouts merely for completeness.
 - Do not duplicate Quant valuation/trend work.
 - Do not duplicate Risk downside analysis.
+- If an external resolver or MCP call fails, do not repeat the same call more
+  than once; state the source limitation and finish the bounded memo.
 - Stop once the current business direction, 1-2 catalysts and 1-2 major
   uncertainties are adequately supported.
 

@@ -6,6 +6,13 @@ const STORAGE_PREFIX = "hgfinance.activeFund.v1.";
 let activeUserId: string | null = null;
 let activeFundId: string | null = null;
 let authorizedFundIds = new Set<string>();
+// `activeFundId === null` is ambiguous on its own - it means both "`/ui/me`
+// hasn't answered yet" (fall back to the fixed account's fund) and "`/ui/me`
+// answered with zero funds" (the fixed account's fund is not authorized here
+// and must not be used, per the currentFundId() comment below). This flag
+// tells the two apart so a real zero-fund answer never gets silently
+// overwritten by the offline bootstrap fallback.
+let resolved = false;
 
 function storageKey(userId: string): string {
   return `${STORAGE_PREFIX}${userId}`;
@@ -21,6 +28,7 @@ export function configureAuthorizedFunds(userId: string, fundIds: readonly strin
   const normalized = fundIds.map((value) => value.trim()).filter(Boolean);
   authorizedFundIds = new Set(normalized);
   activeUserId = userId;
+  resolved = true;
 
   let preferred: string | null = null;
   if (typeof window !== "undefined") {
@@ -65,6 +73,7 @@ export function clearAuthorizedFunds(): void {
   activeUserId = null;
   activeFundId = null;
   authorizedFundIds = new Set();
+  resolved = false;
   if (changed) emitScopeChange();
 }
 
@@ -74,13 +83,21 @@ export function currentFundId(): string | undefined {
   // offline bootstrap fallback; preferring it here could route a PAPER
   // command to a fund that has no authorized trading book.
   if (activeFundId) return activeFundId;
+  // `/ui/me`가 이미 답했는데(설령 0건이어도) 여기서 고정 계정의 fundId로
+  // 떨어지면, 서버가 "이 계정엔 이 Fund 권한이 없다"고 말한 직후에 바로 그
+  // Fund로 요청을 보내는 꼴이 된다(2026-08-23 실측: `portfolio_fund_forbidden`
+  // 403 - 원인은 로컬 timescaledb의 fixture 데이터 누락이었지만, 이 코드는
+  // 그 상황에서도 조용히 하드코딩된 fund로 계속 요청을 보내 오류를 반복시켰다).
+  // "아직 답을 못 받음"과 "답을 받았는데 권한이 0건"은 다른 상태라 `resolved`로
+  // 가른다.
+  if (resolved) return undefined;
   // `fixtureAuthEnabled` 분기를 없앴다(2026-08-19) - 실제 Supabase 인증을
   // 붙이지 않기로 했으므로, 이 값이 `undefined`일 이유가 없다. 예전에는 이
   // 판정이 `NEXT_PUBLIC_AUTH_MODE` 환경변수(`authMode.ts`)에 걸려 있었는데,
   // 그 값이 SSR과 클라이언트 번들에서 다르게 읽혀(vite.config.ts의 Cloudflare
   // Worker/Vite 클라이언트 분리 구조 때문) 계정을 계속 못 찾는 상태가 됐다
-  // ("계정에 연결된 Fund가 없습니다"가 반복해서 뜬 원인). 고정 계정 하나뿐이니
-  // 조건 없이 그 계정의 fundId를 쓴다.
+  // ("계정에 연결된 Fund가 없습니다"가 반복해서 뜬 원인). `/ui/me` 응답 전
+  // 첫 렌더에서만 고정 계정의 fundId로 떨어진다.
   return readStoredAccount().fundId ?? undefined;
 }
 
