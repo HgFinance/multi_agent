@@ -95,6 +95,16 @@ def test_scoped_identity_requires_canonical_marker_and_primary_role() -> None:
     )
     assert scoped_primary_identity("RUN_QA\nworkflow_root_task_id=root", "research-department") is None
     assert scoped_primary_identity(body("root", role="qa"), "research-department") is None
+    assert scoped_primary_identity(
+        "plain production body",
+        "qa-department",
+        idempotency_key="root:qa-department:primary",
+    ) == ("root", "qa-department")
+    assert scoped_primary_identity(
+        "plain production body",
+        "qa-department",
+        idempotency_key="root:primary:qa-department",
+    ) == ("root", "qa-department")
 
 
 def test_ceo_primary_create_requires_scope_marker() -> None:
@@ -154,7 +164,7 @@ def test_request_user_input_helper_is_durable_and_exactly_once() -> None:
     assert "workflow_role=control" in str(kanban.created[0]["body"])
 
 
-def test_installed_ceo_create_guard_blocks_qa_primary_but_preserves_qa_role() -> None:
+def test_installed_ceo_create_guard_rejects_invalid_primary_before_create() -> None:
     module_path = "deploy/ceo-kanban/install_primary_idempotency.py"
     spec = importlib.util.spec_from_file_location("primary_patch_live_path", module_path)
     assert spec is not None and spec.loader is not None
@@ -175,7 +185,8 @@ def _handle_create(args, **kw):
     session_id = args.get("session_id")
     idempotency_key = args.get("idempotency_key")
     kb, conn = _connect()
-    if True:
+    try:
+        if True:
             new_tid = kb.create_task(
                 conn,
                 title=str(title).strip(),
@@ -191,6 +202,18 @@ def _handle_create(args, **kw):
             )
             new_task = kb.get_task(conn, new_tid)
             return new_tid
+    except ValueError as e:
+        return f"ERROR: {e}"
+
+class Registry:
+    def __init__(self):
+        self.handlers = {}
+
+    def register(self, *, name, handler, **kwargs):
+        self.handlers[name] = handler
+
+registry = Registry()
+registry.register(name="kanban_create", handler=_handle_create)
 """
     patched = module._install(native)
     compile(patched, "<installed-kanban-tool>", "exec")
@@ -215,6 +238,8 @@ def _handle_create(args, **kw):
 
     kanban = FakeKanban()
     namespace = {"_connect": lambda: (kanban, object())}
+    exec(patched, namespace)
+    registered_create = namespace["registry"].handlers["kanban_create"]
     with tempfile.TemporaryDirectory() as tmp:
         with patch.dict(
             os.environ,
@@ -225,7 +250,7 @@ def _handle_create(args, **kw):
             clear=False,
         ):
             qa_body = body("root", role="primary") + "\nworkflow_mode=analysis"
-            first = exec(patched, namespace) or namespace["_handle_create"](
+            qa_primary = registered_create(
                 {
                     "title": "QA primary",
                     "body": qa_body,
@@ -233,7 +258,7 @@ def _handle_create(args, **kw):
                     "idempotency_key": "root:qa-department:primary",
                 }
             )
-            second = namespace["_handle_create"](
+            qa_primary_retry = registered_create(
                 {
                     "title": "QA primary retry",
                     "body": qa_body,
@@ -241,14 +266,22 @@ def _handle_create(args, **kw):
                     "idempotency_key": "root:qa-department:primary",
                 }
             )
-            governance = namespace["_handle_create"](
+            key_only_qa_primary = registered_create(
+                {
+                    "title": "QA primary without decorated body",
+                    "body": "plain production body",
+                    "assignee": "qa-department",
+                    "idempotency_key": "key-only-root:qa-department:primary",
+                }
+            )
+            governance = registered_create(
                 {
                     "title": "Governance QA",
                     "body": body("root", role="qa"),
                     "assignee": "qa-department",
                 }
             )
-            research = namespace["_handle_create"](
+            research = registered_create(
                 {
                     "title": "Research primary",
                     "body": body("mixed-root", role="primary"),
@@ -256,15 +289,7 @@ def _handle_create(args, **kw):
                     "idempotency_key": "mixed-root:research-department:primary",
                 }
             )
-            mixed_qa = namespace["_handle_create"](
-                {
-                    "title": "Mixed QA primary",
-                    "body": body("mixed-root", role="primary"),
-                    "assignee": "qa-department",
-                    "idempotency_key": "mixed-root:qa-department:primary",
-                }
-            )
-            risk = namespace["_handle_create"](
+            risk = registered_create(
                 {
                     "title": "Risk primary",
                     "body": body("mixed-root", role="primary"),
@@ -273,20 +298,18 @@ def _handle_create(args, **kw):
                 }
             )
 
-    assert first == second == "task-1"
-    assert governance == "task-2"
-    assert research == "task-3"
-    assert mixed_qa == "task-4"
-    assert risk == "task-5"
+    assert "not analysis-primary eligible" in str(qa_primary)
+    assert "not analysis-primary eligible" in str(qa_primary_retry)
+    assert "not analysis-primary eligible" in str(key_only_qa_primary)
+    assert governance == "task-1"
+    assert research == "task-2"
+    assert risk == "task-3"
     assert [item["assignee"] for item in kanban.created] == [
-        "ceo-agent",
         "qa-department",
         "research-department",
-        "ceo-agent",
         "risk-management",
     ]
-    assert "workflow_role=control" in str(kanban.created[0]["body"])
-    assert "workflow_role=qa" in str(kanban.created[1]["body"])
+    assert "workflow_role=qa" in str(kanban.created[0]["body"])
 
 
 def test_installer_patches_native_kanban_create_once() -> None:
@@ -318,3 +341,99 @@ def _handle_create(args, **kw):
     assert "scoped_primary_create_lock" in first
     assert "requires_scoped_primary_contract" in first
     assert first.count("new_tid = kb.create_task(") == 2
+
+
+def test_installed_cli_create_guard_rejects_primary_before_durable_create() -> None:
+    module_path = "deploy/ceo-kanban/install_primary_idempotency.py"
+    spec = importlib.util.spec_from_file_location("primary_cli_patch", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    native = """from __future__ import annotations
+
+import sys
+
+from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_swarm as ks
+
+def _cmd_create(args):
+    with kb.connect_closing() as conn:
+        task_id = kb.create_task(
+            conn,
+            title=args.title,
+            body=args.body,
+            assignee=args.assignee,
+            created_by=args.created_by,
+            idempotency_key=getattr(args, "idempotency_key", None),
+        )
+    return task_id
+
+def kanban_command(args):
+    handlers = {"create": _cmd_create}
+    return handlers[args.command](args)
+"""
+    patched = module._install_cli(native)
+    assert patched == module._install_cli(patched)
+    compile(patched, "<installed-kanban-cli>", "exec")
+    assert module.CLI_MARKER in patched
+
+    class FakeKanban:
+        def __init__(self) -> None:
+            self.create_calls = 0
+
+        def connect_closing(self):
+            class Connection:
+                def __enter__(self):
+                    return object()
+
+                def __exit__(self, *args):
+                    return False
+
+            return Connection()
+
+        def create_task(self, connection, **kwargs):
+            self.create_calls += 1
+            return "task-created"
+
+    fake_kb = FakeKanban()
+    from types import ModuleType, SimpleNamespace
+
+    fake_hermes_cli = ModuleType("hermes_cli")
+    fake_kanban_swarm = ModuleType("hermes_cli.kanban_swarm")
+    fake_hermes_cli.kanban_db = fake_kb
+    fake_hermes_cli.kanban_swarm = fake_kanban_swarm
+    namespace = {}
+    import sys
+
+    with patch.dict(
+        sys.modules,
+        {
+            "hermes_cli": fake_hermes_cli,
+            "hermes_cli.kanban_db": fake_kb,
+            "hermes_cli.kanban_swarm": fake_kanban_swarm,
+        },
+    ):
+        exec(patched, namespace)
+
+    qa_primary = SimpleNamespace(
+        title="QA primary",
+        body="workflow_root_task_id=root\nworkflow_role=primary",
+        assignee="qa-department",
+        created_by="ceo-agent",
+        idempotency_key="root:primary:qa-department",
+    )
+    governance_qa = SimpleNamespace(
+        title="Governance QA",
+        body="workflow_root_task_id=root\nworkflow_role=qa",
+        assignee="qa-department",
+        created_by="ceo-agent",
+        idempotency_key=None,
+    )
+
+    qa_primary.command = "create"
+    governance_qa.command = "create"
+    assert namespace["kanban_command"](qa_primary) == 2
+    assert fake_kb.create_calls == 0
+    assert namespace["kanban_command"](governance_qa) == "task-created"
+    assert fake_kb.create_calls == 1

@@ -38,9 +38,11 @@ to add approval departments.
 - Do not interpret the order and do not call an order tool. CEO has no order
   capability. The Trading task can submit one non-binding interpretation to a
   trusted, deterministic PAPER-only boundary.
-- Mark this CEO planning root `done` with `qa_required=false` after confirming
-  the already-scoped Trading primary. Planning completion is not an execution,
-  fill, or accounting acknowledgement.
+- Mark this CEO planning root `done` with `qa_enabled=false` and
+  `qa_blocks_response=false` after confirming the already-scoped Trading
+  primary. Keep legacy `qa_required=false` when that compatibility marker is
+  required. Planning completion is not an execution, fill, or accounting
+  acknowledgement.
 - This narrow lane follows the user's explicit PAPER instruction instead of the
   strategy proposal Risk/QA lane. It never bypasses authentication, current
   fund/book membership, instrument resolution, cash/position limits, market
@@ -233,7 +235,7 @@ profiles, and picking the right one is your routing duty:
   A new advisory analysis is not a liaison lookup merely because it is
   non-binding or read-only with respect to financial state.
 
-The current CEO task is both the workflow scope and the planning task. After creating the selected primary tasks, mark this planning task `done`; do not wait here for their results. Hermes `--parent` is an execution dependency, not a scope/grouping edge. Primary children must not pass `parents=[your-task-id]`; include `hgfinance.ceo-workflow-scope.v1`, `workflow_root_task_id=<your-task-id>`, and `workflow_role=primary` in each child body. QA must use only completed primary task IDs as parents with `workflow_role=qa`; CEO synthesis must use `workflow_role=synthesis`. All scoped tasks must report a structured summary, result, error, and block reason on their terminal transition. For non-binding analysis, after all selected primary children reach a terminal state, create QA audit and CEO synthesis as parallel children with the same primary parents; synthesis does not wait for QA. The CEO response acknowledgement must say that the CEO will synthesize selected primary results when ready; never say that QA must finish before the response. QA is a separate post-hoc asynchronous evaluation lane. For binding or high-risk action, retain the existing fail-closed Risk, QA, and approval gates before any proposal or execution. A request may explicitly set `qa_required: false` in terminal completion metadata when QA is not needed. Treat `blocked` as distinct from failed: request user input for genuine ambiguity, retry only bounded transient failures, and replan rather than silently substituting a profile. Do not retry indefinitely.
+The current CEO task is both the workflow scope and the planning task. After creating the selected primary tasks, mark this planning task `done`; do not wait here for their results. Hermes `--parent` is an execution dependency, not a scope/grouping edge. Primary children must not pass `parents=[your-task-id]`; include `hgfinance.ceo-workflow-scope.v1`, `workflow_root_task_id=<your-task-id>`, and `workflow_role=primary` in each child body. QA must use only completed primary task IDs as parents with `workflow_role=qa`; CEO synthesis must use `workflow_role=synthesis`. All scoped tasks must report a structured summary, result, error, and block reason on their terminal transition. For non-binding analysis, after all selected primary children reach a terminal state, create QA audit and CEO synthesis as parallel children with the same primary parents; synthesis does not wait for QA. The CEO response acknowledgement must say that the CEO will synthesize selected primary results when ready; never say that QA must finish before the response. QA is a separate post-hoc asynchronous evaluation lane. For binding or high-risk action, retain the existing fail-closed Risk, QA, and approval gates before any proposal or execution. A request may use the legacy `qa_required` completion marker only through the canonical adapter; new roots must use `qa_enabled` and `qa_blocks_response`. Treat `blocked` as distinct from failed: request user input for genuine ambiguity, retry only bounded transient failures, and replan rather than silently substituting a profile. Do not retry indefinitely.
 ## Investor mandate snapshot
 
 Your task body may carry an `hgfinance.mandate-snapshot.v1` block under
@@ -324,9 +326,14 @@ For a non-binding informational, advisory, read-only, current-state inspection, 
 `workflow_role=root`
 `workflow_mode=analysis`
 `producer=ceo-hermes-direct`
-`qa_required=false`
+`qa_enabled=true`
+`qa_blocks_response=false`
 
-`qa_required=false` means QA is not a prerequisite for the user response; it does not disable the supervisor's independent asynchronous post-hoc QA lane.
+`qa_enabled` controls whether the independent governance audit is created and
+`qa_blocks_response` controls whether that audit gates synthesis/final response.
+The legacy `qa_required` marker may remain for compatibility, but it is not the
+canonical representation. An explicitly excluded analysis uses
+`qa_enabled=false` and `qa_blocks_response=false`.
 
 For a binding/high-risk request that can authorize or lead to an order, trade, production change, workforce/permission change, ledger/NAV mutation, capital allocation change, or other governed execution, the root body MUST contain:
 
@@ -334,6 +341,8 @@ For a binding/high-risk request that can authorize or lead to an order, trade, p
 `workflow_role=root`
 `workflow_mode=binding`
 `producer=ceo-hermes-direct`
+`qa_enabled=true`
+`qa_blocks_response=true`
 
 Never omit `workflow_mode` from a newly created scoped root and never rely on the supervisor's legacy fallback to infer it.
 

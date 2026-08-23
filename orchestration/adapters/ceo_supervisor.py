@@ -78,6 +78,10 @@ from orchestration.primary_task_idempotency import (
     is_analysis_primary_eligible,
     request_user_input_idempotency_key,
 )
+from orchestration.qa_contract import (
+    canonical_qa_contract,
+    split_planner_selection,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -427,9 +431,23 @@ class ChildTaskState:
     def is_analysis(self) -> bool:
         """Whether this task is a current workflow's primary analysis child."""
 
-        if self.is_background_research or self.is_supervisor or self.is_qa:
+        if (
+            self.is_background_research
+            or self.is_supervisor
+            or self.is_qa
+            or self.profile == canonical_profile_for_department("qa")
+        ):
             return False
         return self.workflow_role == "primary"
+
+    @property
+    def is_legacy_qa_primary(self) -> bool:
+        """A historical QA task incorrectly materialized as ``primary``."""
+
+        return (
+            self.profile == canonical_profile_for_department("qa")
+            and self.workflow_role == "primary"
+        )
 
     @property
     def is_background_research(self) -> bool:
@@ -467,6 +485,8 @@ class SupervisorState:
     max_retries: int = 2
     max_wakeups: int = 8
     qa_required: bool = True
+    qa_enabled: bool | None = None
+    qa_blocks_response: bool | None = None
     workflow_mode: str = "analysis"
     # The root mandate is the single source of truth.  This flag only controls
     # whether supervisor-created children receive a reference to that snapshot.
@@ -479,6 +499,20 @@ class SupervisorState:
     root_is_user_query: bool = False
     # Enabled only by the production service when final Discord delivery exists.
     allow_primary_passthrough: bool = False
+
+    def __post_init__(self) -> None:
+        # Keep the old constructor field for callers/tests and resolve it once
+        # into the canonical policy used by decisions. Binding remains the
+        # historical fail-closed gate unless a caller supplies an explicit
+        # canonical policy (PAPER passes qa_enabled=false).
+        enabled = self.qa_enabled
+        if enabled is None:
+            enabled = True if self.workflow_mode == "binding" else bool(self.qa_required)
+        blocks = self.qa_blocks_response
+        if blocks is None:
+            blocks = self.workflow_mode == "binding" and bool(enabled)
+        object.__setattr__(self, "qa_enabled", bool(enabled))
+        object.__setattr__(self, "qa_blocks_response", bool(blocks) and bool(enabled))
 
     @property
     def analysis_children(self) -> tuple[ChildTaskState, ...]:
@@ -568,6 +602,24 @@ class SupervisorState:
             if child.is_in_workflow(self.parent_task_id)
             and child.is_qa
             and not child.is_supervisor
+        )
+
+    @property
+    def qa_materialized(self) -> bool:
+        """True only for an explicit durable ``workflow_role=qa`` child."""
+
+        return any(
+            child.is_in_workflow(self.parent_task_id)
+            and child.workflow_role == "qa"
+            for child in self.children
+        )
+
+    @property
+    def qa_legacy_primary_present(self) -> bool:
+        return any(
+            child.is_in_workflow(self.parent_task_id)
+            and child.is_legacy_qa_primary
+            for child in self.children
         )
 
     @property
@@ -754,6 +806,12 @@ def _delegation_plan_from_root_body(body: str) -> dict[str, str]:
         except CanonicalProfileError:
             return {}
 
+        # QA is governance work, never an analysis-primary instruction.  A
+        # legacy planner may still have emitted a QA line; the canonical
+        # materializer ignores it rather than creating workflow_role=primary.
+        if profile == canonical_profile_for_department("qa"):
+            continue
+
         if profile in plan:
             # Duplicate plan entries are ambiguous. Fail closed rather than
             # silently choosing one instruction.
@@ -825,15 +883,32 @@ def _initial_primary_materialization_decisions(
     if state.workflow_mode != "analysis" or not state.root_is_user_query:
         return ()
 
-    if (
-        not state.selected_primary_profiles
-        or not state.missing_primary_profiles
-        or state.duplicate_primary_profiles
-    ):
+    raw_selected = tuple(state.selected_primary_profiles)
+    selected = tuple(
+        profile for profile in raw_selected if is_analysis_primary_eligible(profile)
+    )
+    if not selected:
+        if raw_selected and all(
+            not is_analysis_primary_eligible(profile) for profile in raw_selected
+        ):
+            if state.has_action(SupervisorAction.REQUEST_USER_INPUT):
+                return ()
+            for profile in raw_selected:
+                logger.warning(
+                    "invalid-primary-selection root=%s profile=%s "
+                    "reason=ROLE_NOT_PRIMARY_ELIGIBLE",
+                    state.parent_task_id,
+                    profile,
+                )
+            return (_empty_primary_request_user_input_decision(state),)
+        return ()
+
+    present = {child.profile for child in state.analysis_children}
+    missing = tuple(profile for profile in selected if profile not in present)
+    if not missing or state.duplicate_primary_profiles:
         return ()
 
     plan = _delegation_plan_from_root_body(root_body)
-    selected = tuple(state.selected_primary_profiles)
 
     if set(plan) != set(selected):
         logger.warning(
@@ -842,20 +917,6 @@ def _initial_primary_materialization_decisions(
             ",".join(selected),
             ",".join(plan),
         )
-        if selected and all(
-            not is_analysis_primary_eligible(profile)
-            for profile in selected
-        ):
-            if state.has_action(SupervisorAction.REQUEST_USER_INPUT):
-                return ()
-            for profile in selected:
-                logger.warning(
-                    "invalid-primary-selection root=%s profile=%s "
-                    "reason=ROLE_NOT_PRIMARY_ELIGIBLE",
-                    state.parent_task_id,
-                    profile,
-                )
-            return (_empty_primary_request_user_input_decision(state),)
         return ()
 
     analysis_mode = _analysis_execution_mode_from_root_body(root_body)
@@ -866,52 +927,9 @@ def _initial_primary_materialization_decisions(
         )
         return ()
 
-    blocked_profiles = tuple(
-        profile
-        for profile in state.missing_primary_profiles
-        if not is_analysis_primary_eligible(profile)
-    )
-    selected_profiles = set(state.selected_primary_profiles)
-    blocked_profile_set = set(blocked_profiles)
-    if blocked_profiles and selected_profiles.issubset(blocked_profile_set):
-        # A durable supervisor-created control child is the existing
-        # REQUEST_USER_INPUT idempotency record. Do not recreate or re-log the
-        # same clarification during the done-root recovery window.
-        if state.has_action(SupervisorAction.REQUEST_USER_INPUT):
-            return ()
-        for profile in blocked_profiles:
-            logger.warning(
-                "invalid-primary-selection root=%s profile=%s "
-                "reason=ROLE_NOT_PRIMARY_ELIGIBLE",
-                state.parent_task_id,
-                profile,
-            )
-        return (_empty_primary_request_user_input_decision(state),)
-
-    # Mixed plans still materialize their valid profiles. Emit the invalid
-    # selection diagnostic only while a valid profile is still being
-    # materialized; once those children exist, recovery has durable evidence
-    # that the mixed plan was already handled.
-    if blocked_profiles and (
-        not state.analysis_children
-        or any(
-            profile not in blocked_profile_set
-            for profile in state.missing_primary_profiles
-        )
-    ):
-        for profile in blocked_profiles:
-            logger.warning(
-                "invalid-primary-selection root=%s profile=%s "
-                "reason=ROLE_NOT_PRIMARY_ELIGIBLE",
-                state.parent_task_id,
-                profile,
-            )
-
     decisions: list[SupervisorDecision] = []
 
-    for profile in state.missing_primary_profiles:
-        if not is_analysis_primary_eligible(profile):
-            continue
+    for profile in missing:
         department = department_for_canonical_profile(profile)
 
         decisions.append(
@@ -1159,7 +1177,7 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
     )
 
     if state.workflow_mode == "analysis":
-        if state.qa_required and not state.qa_children:
+        if state.qa_enabled and not state.qa_children:
             usable_primary_count = len(state.usable_analysis_children)
             all_primary_blocked = bool(state.analysis_children) and all(
                 child.blocked for child in state.analysis_children
@@ -1206,7 +1224,7 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
             return synthesis
         return None
     # Binding/high-risk workflows retain the existing fail-closed QA path.
-    if state.qa_required:
+    if state.qa_blocks_response:
         if not state.qa_children:
             parent_ids = tuple(child.task_id for child in state.analysis_children)
             return SupervisorDecision(
@@ -3159,7 +3177,9 @@ class CeoSupervisorService:
         )
         store = DiscordIdempotencyStore(delivery_home)
 
-        selected = selected_primary_profiles_from_task(root_payload)
+        selected, _ = split_planner_selection(
+            selected_primary_profiles_from_task(root_payload)
+        )
 
         if selected:
             if materialized_primary_profiles is not None:
@@ -3630,7 +3650,9 @@ class CeoSupervisorService:
         if not is_user_query_body(root_body):
             return
 
-        selected = selected_primary_profiles_from_task(root_payload)
+        selected, _ = split_planner_selection(
+            selected_primary_profiles_from_task(root_payload)
+        )
         if len(selected) < 2:
             return
 
@@ -3716,7 +3738,9 @@ class CeoSupervisorService:
         if not is_user_query_body(root_body):
             return
 
-        selected = selected_primary_profiles_from_task(root_payload)
+        selected, _ = split_planner_selection(
+            selected_primary_profiles_from_task(root_payload)
+        )
         if len(selected) < 2:
             return
 
@@ -3797,7 +3821,9 @@ class CeoSupervisorService:
         if not is_user_query_body(root_body):
             return None
 
-        selected = selected_primary_profiles_from_task(root_payload)
+        selected, _ = split_planner_selection(
+            selected_primary_profiles_from_task(root_payload)
+        )
         if len(selected) < 2:
             # Keep the existing single-primary fast path quiet.
             return None
@@ -4073,11 +4099,17 @@ class CeoSupervisorService:
                 ):
                     continue
 
-                selected_profiles = (
-                    selected_primary_profiles_from_task(root_payload)
+                raw_selected_profiles = selected_primary_profiles_from_task(root_payload)
+                selected_profiles, planner_qa_requested = split_planner_selection(
+                    raw_selected_profiles
                 )
+                # Keep the raw selection in this compatibility recovery state
+                # so an all-QA legacy plan still gets the existing explicit
+                # clarification instead of disappearing silently.  The
+                # materializer itself filters QA below.
+                recovery_selected_profiles = raw_selected_profiles
 
-                if not selected_profiles:
+                if not raw_selected_profiles:
                     continue
 
                 materialization_body = _materialization_plan_body(root_payload)
@@ -4108,9 +4140,15 @@ class CeoSupervisorService:
                     max_retries=self.max_retries,
                     max_wakeups=self.max_wakeups,
                     qa_required=False,
+                    qa_enabled=canonical_qa_contract(
+                        workflow_mode="analysis",
+                        body=root_body,
+                        planner_qa_requested=planner_qa_requested,
+                    ).qa_enabled,
+                    qa_blocks_response=False,
                     workflow_mode="analysis",
                     has_mandate=mandate_snapshot_present(root_body),
-                    selected_primary_profiles=selected_profiles,
+                    selected_primary_profiles=recovery_selected_profiles,
                     root_is_user_query=True,
                     allow_primary_passthrough=(
                         self.discord_delivery is not None
@@ -4478,12 +4516,16 @@ class CeoSupervisorService:
         # sends it through the legacy full-board/abort path.
         self._remember_workflow_root(task_id, task_id, (root_payload,))
 
-        selected_profiles = selected_primary_profiles_from_task(root_payload)
+        raw_selected_profiles = selected_primary_profiles_from_task(root_payload)
+        selected_profiles, planner_qa_requested = split_planner_selection(
+            raw_selected_profiles
+        )
+        recovery_selected_profiles = raw_selected_profiles
         materialization_body = _materialization_plan_body(root_payload)
 
         # A direct CEO answer has no selected primary plan.  It is still a root
         # completion and can be projected immediately without workflow().
-        if not selected_profiles:
+        if not raw_selected_profiles:
             try:
                 bridge_status = self._bridge_root_completion_to_discord(
                     root_task_id=task_id,
@@ -4512,9 +4554,15 @@ class CeoSupervisorService:
             max_retries=self.max_retries,
             max_wakeups=self.max_wakeups,
             qa_required=False,
+            qa_enabled=canonical_qa_contract(
+                workflow_mode="analysis",
+                body=root_body,
+                planner_qa_requested=planner_qa_requested,
+            ).qa_enabled,
+            qa_blocks_response=False,
             workflow_mode="analysis",
             has_mandate=mandate_snapshot_present(root_body),
-            selected_primary_profiles=selected_profiles,
+            selected_primary_profiles=recovery_selected_profiles,
             root_is_user_query=True,
             allow_primary_passthrough=self.discord_delivery is not None,
         )
@@ -5294,7 +5342,10 @@ class CeoSupervisorService:
                 # primary in that compatibility path. The authoritative client
                 # already returned the same show() payloads above; re-reading
                 # them only adds latency and API load.
-                selected_profiles = selected_primary_profiles_from_task(root_payload)
+                raw_selected_profiles = selected_primary_profiles_from_task(root_payload)
+                selected_profiles, planner_qa_requested = split_planner_selection(
+                    raw_selected_profiles
+                )
                 if (
                     workflow_mode == "analysis"
                     and is_user_query_body(root_body)
@@ -5355,6 +5406,26 @@ class CeoSupervisorService:
                         if user_paper_order_scope is not None
                         else self._qa_required_from_event(event)
                     ),
+                    qa_enabled=canonical_qa_contract(
+                        workflow_mode=workflow_mode,
+                        body=root_body,
+                        metadata=event.get("metadata")
+                        if isinstance(event.get("metadata"), Mapping)
+                        else None,
+                        legacy_qa_required=self._qa_required_from_event(event),
+                        paper_order=user_paper_order_scope is not None,
+                        planner_qa_requested=planner_qa_requested,
+                    ).qa_enabled,
+                    qa_blocks_response=canonical_qa_contract(
+                        workflow_mode=workflow_mode,
+                        body=root_body,
+                        metadata=event.get("metadata")
+                        if isinstance(event.get("metadata"), Mapping)
+                        else None,
+                        legacy_qa_required=self._qa_required_from_event(event),
+                        paper_order=user_paper_order_scope is not None,
+                        planner_qa_requested=planner_qa_requested,
+                    ).qa_blocks_response,
                     workflow_mode=workflow_mode,
                     has_mandate=mandate_snapshot_present(root_body),
                     selected_primary_profiles=selected_profiles,

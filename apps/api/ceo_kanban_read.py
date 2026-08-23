@@ -55,7 +55,9 @@ from orchestration.ceo_workflow_scope import (
     CEO_WORKFLOW_SCOPE_MARKER,
     requested_by_from_body,
     selected_primary_profiles_from_task,
+    workflow_mode_from_body,
 )
+from orchestration.qa_contract import canonical_qa_contract, split_planner_selection
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -711,11 +713,13 @@ class Workflow:
     def primary_nodes(self) -> tuple[WorkflowNode, ...]:
         """실제 분석을 수행하는 부서 Task. CEO 제어 Task(Synthesis 등)와 QA는 뺀다."""
 
-        selected = set(selected_primary_profiles_from_task(self.root_payload))
+        raw_selected = selected_primary_profiles_from_task(self.root_payload)
+        selected, _ = split_planner_selection(raw_selected)
         return tuple(
             node
             for node in self.descendants
             if node.role(root_task_id=self.root_task_id) == ROLE_PRIMARY
+            and node.profile != QA_PROFILE
             and (not selected or node.profile in selected)
         )
 
@@ -767,11 +771,13 @@ class Workflow:
 
     @property
     def qa_required(self) -> bool:
-        """QA Task 존재가 유일한 durable 신호다. 없으면 Supervisor 기본값(True).
+        """Legacy compatibility projection; use split QA fields internally.
 
         Synthesis까지 갔는데 QA Task가 하나도 없다면, 그 워크플로는 실제로
         `qa_required=false`로 돌았다는 뜻이다. 그 전에는 아직 QA 단계에
-        도달하지 않았을 뿐이므로 기본값을 유지한다.
+        도달하지 않았을 뿐이므로 기본값을 유지한다. New consumers must use
+        ``qa_enabled``, ``qa_blocks_response`` and ``qa_materialized`` instead;
+        this property intentionally preserves the old external field semantics.
         """
 
         declared: Any = self.metadata.get("qa_required")
@@ -782,6 +788,41 @@ class Workflow:
         if self.qa_nodes:
             return True
         return self.synthesis_node is None
+
+    @property
+    def _qa_contract(self):
+        raw_selected = selected_primary_profiles_from_task(self.root_payload)
+        _, planner_qa_requested = split_planner_selection(raw_selected)
+        workflow_mode = workflow_mode_from_body(self.root.body)
+        return canonical_qa_contract(
+            workflow_mode=workflow_mode,
+            body=self.root.body,
+            metadata=self.metadata,
+            planner_qa_requested=planner_qa_requested,
+        )
+
+    @property
+    def qa_enabled(self) -> bool:
+        return self._qa_contract.qa_enabled
+
+    @property
+    def qa_blocks_response(self) -> bool:
+        return self._qa_contract.qa_blocks_response
+
+    @property
+    def qa_materialized(self) -> bool:
+        return any(
+            node.role(root_task_id=self.root_task_id) == ROLE_QA
+            for node in self.descendants
+        )
+
+    @property
+    def qa_legacy_primary_present(self) -> bool:
+        return any(
+            node.profile == QA_PROFILE
+            and node.role(root_task_id=self.root_task_id) == ROLE_PRIMARY
+            for node in self.descendants
+        )
 
     @property
     def status(self) -> str:

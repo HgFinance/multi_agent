@@ -86,27 +86,89 @@ def _marker_value(body: Any, key: str) -> str | None:
     return None
 
 
-def scoped_primary_identity(body: Any, assignee: Any) -> tuple[str, str] | None:
-    """Return ``(root_task_id, canonical_assignee)`` for a primary body."""
+def scoped_primary_identity(
+    body: Any,
+    assignee: Any,
+    idempotency_key: Any = None,
+) -> tuple[str, str] | None:
+    """Return ``(root_task_id, canonical_assignee)`` for a primary create.
 
-    if SCOPE_MARKER not in {line.strip() for line in str(body or "").splitlines()}:
-        return None
-    if _marker_value(body, "workflow_role") != PRIMARY_ROLE:
+    The structured body marker is authoritative when present.  The CEO-agent
+    contract also carries the same role in an idempotency-key shape.  Accept
+    the two production shapes seen across the tool and CLI boundaries as a
+    narrow fallback for calls whose body has not yet been decorated.
+    """
+
+    has_scope_marker = SCOPE_MARKER in {
+        line.strip() for line in str(body or "").splitlines()
+    }
+    body_role = _marker_value(body, "workflow_role")
+    if has_scope_marker or body_role:
+        if body_role != PRIMARY_ROLE:
+            return None
+    elif idempotency_key is None:
         return None
     root_task_id = _marker_value(body, "workflow_root_task_id")
     canonical_assignee = str(assignee or "").strip().casefold()
-    if not root_task_id or not canonical_assignee:
+    if root_task_id and canonical_assignee:
+        return root_task_id, canonical_assignee
+
+    key = str(idempotency_key or "").strip()
+    key_prefix, separator, key_tail = key.rpartition(":")
+    if not separator:
         return None
-    return root_task_id, canonical_assignee
+
+    # Current supervisor/CLI production shape: <root>:primary:<assignee>.
+    if key_tail.strip().casefold() == canonical_assignee:
+        key_root, role_separator, key_role = key_prefix.rpartition(":")
+        if (
+            role_separator
+            and key_role.strip().casefold() == PRIMARY_ROLE
+            and key_root.strip()
+        ):
+            return key_root.strip(), canonical_assignee
+
+    # Older tool callers used <root>:<assignee>:primary. Keep accepting it
+    # for replay/compatibility while both forms converge on this helper.
+    if key_tail.strip().casefold() != PRIMARY_ROLE:
+        return None
+    key_root, assignee_separator, key_assignee = key_prefix.rpartition(":")
+    if (
+        not assignee_separator
+        or not key_root.strip()
+        or key_assignee.strip().casefold() != canonical_assignee
+    ):
+        return None
+    return key_root.strip(), canonical_assignee
 
 
-def requires_scoped_primary_contract(body: Any, assignee: Any) -> bool:
+def reject_invalid_primary_create(
+    body: Any,
+    assignee: Any,
+    idempotency_key: Any = None,
+) -> str | None:
+    """Return a rejection before an invalid analysis-primary durable create."""
+
+    identity = scoped_primary_identity(body, assignee, idempotency_key)
+    if identity is not None and not is_analysis_primary_eligible(identity[1]):
+        return "CEO primary task assignee is not analysis-primary eligible"
+    return None
+
+
+def requires_scoped_primary_contract(
+    body: Any,
+    assignee: Any,
+    idempotency_key: Any = None,
+) -> bool:
     """Whether a CEO create must carry the scoped-primary contract."""
 
     canonical_assignee = str(assignee or "").strip().casefold()
     return (
         is_analysis_primary_eligible(canonical_assignee)
-        and scoped_primary_identity(body, canonical_assignee) is None
+        and scoped_primary_identity(
+            body, canonical_assignee, idempotency_key=idempotency_key
+        )
+        is None
     )
 
 
@@ -243,6 +305,7 @@ __all__ = [
     "requires_scoped_primary_contract",
     "request_user_input_idempotency_key",
     "request_user_input_task_body",
+    "reject_invalid_primary_create",
     "scoped_primary_create_lock",
     "scoped_primary_identity",
 ]

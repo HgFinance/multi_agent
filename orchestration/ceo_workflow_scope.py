@@ -103,6 +103,9 @@ _PRIMARY_PROFILE_ALIASES = {
     "risk-management": ("risk-management", "risk management", "risk", "리스크관리"),
     "hr-department": ("hr-department", "workforce", "hr", "인사"),
 }
+_GOVERNANCE_PROFILE_ALIASES = {
+    "qa-department": ("qa-department", "qa", "quality assurance", "quality-assurance"),
+}
 
 
 def primary_idempotency_key(root_task_id: str, profile: str) -> str:
@@ -166,7 +169,11 @@ def selected_primary_profiles_from_body(body: str) -> tuple[str, ...]:
     selected: list[str] = []
     for value in values:
         normalized = value.strip().strip(" .,:;()[]{}").casefold()
-        for profile, aliases in _PRIMARY_PROFILE_ALIASES.items():
+        aliases_by_profile = {
+            **_PRIMARY_PROFILE_ALIASES,
+            **_GOVERNANCE_PROFILE_ALIASES,
+        }
+        for profile, aliases in aliases_by_profile.items():
             if normalized == profile or normalized in {
                 alias.casefold() for alias in aliases
             }:
@@ -631,6 +638,8 @@ def build_root_body(
     discord_message_id: str | None = None,
     discord_guild_id: str | None = None,
     discord_thread_id: str | None = None,
+    qa_enabled: bool | None = None,
+    qa_blocks_response: bool | None = None,
 ) -> str:
     """Build a root body that is unambiguous before the root ID exists.
 
@@ -663,6 +672,24 @@ def build_root_body(
 
     if workflow_mode not in WORKFLOW_MODES:
         raise ValueError("workflow_mode must be analysis or binding")
+    # New roots carry the split QA intent explicitly.  PAPER roots are never
+    # put through the governance lane; their legacy ``qa_required=false``
+    # marker remains below for external compatibility.
+    canonical_qa_enabled = (
+        False
+        if user_paper_order_scope is not None
+        else True
+        if qa_enabled is None
+        else bool(qa_enabled)
+    )
+    canonical_qa_blocks = (
+        False
+        if user_paper_order_scope is not None
+        else workflow_mode == "binding"
+        if qa_blocks_response is None
+        else bool(qa_blocks_response)
+    )
+    canonical_qa_blocks = canonical_qa_blocks and canonical_qa_enabled
     requested_by_line = f"requested_by={requested_by}\n" if requested_by else ""
     paper_order_block = (
         build_user_paper_order_scope(user_paper_order_scope) + "\n"
@@ -694,6 +721,8 @@ def build_root_body(
         f"{requested_by_line}"
         f"{paper_order_block}"
         f"{discord_lines}"
+        f"qa_enabled={str(canonical_qa_enabled).lower()}\n"
+        f"qa_blocks_response={str(canonical_qa_blocks).lower()}\n"
         "response_plane=primary_results_ready\n"
         "governance_plane=async_qa\n"
         "qa_is_not_synthesis_prerequisite=true\n"

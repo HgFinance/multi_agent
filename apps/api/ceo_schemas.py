@@ -35,6 +35,22 @@ class TaskWorkflow(BaseModel):
             "async evaluation lane이며, binding/high-risk workflow에서만 blocking gate일 수 있다."
         )
     )
+    qa_enabled: bool = Field(
+        default=True,
+        description="이 workflow에서 durable QA governance task를 실행할지 여부.",
+    )
+    qa_blocks_response: bool = Field(
+        default=False,
+        description="QA terminal을 synthesis/final prerequisite로 사용할지 여부.",
+    )
+    qa_materialized: bool = Field(
+        default=False,
+        description="workflow_role=qa인 durable child가 실제 존재하는지 여부.",
+    )
+    qa_legacy_primary_present: bool = Field(
+        default=False,
+        description="과거 QA가 workflow_role=primary로 잘못 저장된 legacy 관측값.",
+    )
 
 
 class TaskProgress(BaseModel):
@@ -52,6 +68,10 @@ class CeoPlanning(BaseModel):
     selected_departments: list[str] = Field(default_factory=list)
     steps: list[str] = Field(default_factory=list)
     qa_required: bool = False
+    qa_enabled: bool = True
+    qa_blocks_response: bool = False
+    qa_materialized: bool = False
+    qa_legacy_primary_present: bool = False
     summary: str | None = None
 
 

@@ -135,6 +135,10 @@ from orchestration.user_order_language import (
     is_clearly_non_executable_order_language,
     looks_like_user_order_request,
 )
+from orchestration.qa_contract import (
+    canonical_qa_contract,
+    split_planner_selection,
+)
 
 router = APIRouter(prefix="/ui/ceo", tags=["ceo-office"])
 logger = logging.getLogger(__name__)
@@ -304,9 +308,13 @@ def _planning_profiles(task: Mapping[str, object]) -> tuple[list[str], bool, boo
     qa_required = False
     synthesis_present = False
     children = _child_records(task.get("children"))
-    declared_primary = selected_primary_profiles_from_task(task)
+    raw_declared_primary = selected_primary_profiles_from_task(task)
+    declared_primary, planner_qa_requested = split_planner_selection(
+        raw_declared_primary
+    )
     if declared_primary:
         selected.extend(declared_primary)
+    qa_required = planner_qa_requested
     metadata = task.get("metadata")
     if isinstance(metadata, str):
         try:
@@ -425,6 +433,25 @@ def _materialized_planning_profiles(
     return selected, qa_present, synthesis_present
 
 
+def _qa_materialization_facts(
+    task: Mapping[str, object],
+) -> tuple[bool, bool]:
+    """Return canonical QA-role presence and legacy QA-primary presence."""
+
+    canonical = False
+    legacy_primary = False
+    for child in _child_records(task.get("children")):
+        assignee = str(child.get("assignee") or child.get("profile") or "").strip()
+        body = str(child.get("body") or "")
+        role_match = re.search(r"(?:^|\n)workflow_role=(\w+)", body)
+        role = role_match.group(1).casefold() if role_match else ""
+        if assignee == "qa-department" and role == "qa":
+            canonical = True
+        elif assignee == "qa-department" and role == "primary":
+            legacy_primary = True
+    return canonical, legacy_primary
+
+
 def _planning_summary(
     task: Mapping[str, object],
     selected: Sequence[str],
@@ -479,6 +506,19 @@ def _scoped_planning_projection(
 def _planning_acknowledgement(task: Mapping[str, object]) -> dict[str, object]:
     planned, planned_qa, planned_synthesis = _planning_profiles(task)
     selected, qa_required, synthesis_present = _materialized_planning_profiles(task)
+    qa_materialized, qa_legacy_primary_present = _qa_materialization_facts(task)
+    body = str(task.get("body") or "")
+    workflow_mode = (
+        "binding"
+        if re.search(r"(?:^|\n)workflow_mode=binding(?:\n|$)", body.casefold())
+        else "analysis"
+    )
+    qa_contract = canonical_qa_contract(
+        workflow_mode=workflow_mode,
+        body=body,
+        metadata=task.get("metadata") if isinstance(task.get("metadata"), Mapping) else None,
+        planner_qa_requested=planned_qa,
+    )
     actions = [f"{_PROFILE_LABEL[p]}에서 {_PROFILE_COPY[p]}" for p in selected]
     if actions:
         answer = f"{'· '.join(actions)}하겠습니다."
@@ -492,12 +532,7 @@ def _planning_acknowledgement(task: Mapping[str, object]) -> dict[str, object]:
     if synthesis_present:
         answer += " CEO가 최종 종합합니다."
     steps = [_PROFILE_LABEL[p] for p in selected]
-    binding = bool(
-        re.search(
-            r"(?:^|\n)workflow_mode=binding(?:\n|$)",
-            str(task.get("body") or "").casefold(),
-        )
-    )
+    binding = workflow_mode == "binding"
     if binding:
         if qa_required:
             steps.append("QA (blocking gate)")
@@ -518,6 +553,10 @@ def _planning_acknowledgement(task: Mapping[str, object]) -> dict[str, object]:
             "steps": steps,
             "qa_required": qa_required,
             "planned_qa_required": planned_qa,
+            "qa_enabled": qa_contract.qa_enabled,
+            "qa_blocks_response": qa_contract.qa_blocks_response,
+            "qa_materialized": qa_materialized,
+            "qa_legacy_primary_present": qa_legacy_primary_present,
             "planned_synthesis": planned_synthesis,
             "summary": _planning_summary(task, selected, qa_required),
         },
@@ -1313,6 +1352,10 @@ def _status_payload(workflow: Workflow) -> dict[str, object]:
         workflow=TaskWorkflow(
             selected_departments=list(workflow.selected_departments),
             qa_required=workflow.qa_required,
+            qa_enabled=workflow.qa_enabled,
+            qa_blocks_response=workflow.qa_blocks_response,
+            qa_materialized=workflow.qa_materialized,
+            qa_legacy_primary_present=workflow.qa_legacy_primary_present,
         ),
         progress=TaskProgress(
             primary_total=len(workflow.primary_nodes),
