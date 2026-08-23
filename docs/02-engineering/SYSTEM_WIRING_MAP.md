@@ -201,7 +201,7 @@
 ### [main] 2026-08-13 에 바뀐 것 — 지도 반영 필수 4건
 
 1. **입구가 하나 더 생겼다: Web/Discord 공용 mirror ingress.** `apps/api/ceo_mirror.py` + `ceo_mirror_api.py` — `POST /ui/ceo/ingress`(202) 로 들어오면 채널(Web/Discord)이 달라도 **한 사용자 메시지 = CEO 실행 하나**가 되게 dedupe 경계(Redis, TTL 7일)를 통과한다. 결과는 `GET /ui/ceo/events` + `/events/stream`(SSE) 로 미러링. 기존 `/ui/ceo/ask` 폴링 경로도 유지.
-2. **다계정이 들어왔다.** `apps/api/current_user.py` 가 `X-User-Id` 헤더 판정의 단일 지점(placeholder 회원 3명, seed). **인증이 아니다** — 서명·만료 없음, 폐쇄망 팀 테스트 전제라고 모듈 스스로 명시. Mandate 소유자 판정이 여기 걸린다.
+2. **고정 테스트 계정이 있다.** `apps/api/current_user.py` 가 `X-User-Id` 헤더 판정의 단일 지점이며 프론트와 Discord는 `DISCORD_ACTOR_MAP`의 같은 binding을 쓴다. **인증이 아니다** — 서명·만료 없음, 폐쇄망 팀 테스트 전제라고 모듈 스스로 명시. Mandate 소유자 판정이 여기 걸린다.
 3. **뿌리 카드 body 에 Mandate 스냅샷 블록이 실린다**(cd57f41) — CEO 플래너가 질의와 함께 사용자의 위임 조건을 읽는다.
 4. **QA·SYNTHESIS 직렬 규칙이 갈라졌다** (SOUL.md + `ceo_supervisor.py` `workflow_mode`):
    - **non-binding 분석**: primary 종결 후 QA 와 SYNTHESIS 를 **병렬** 생성 — 종합이 QA 를 기다리지 않는다 (§3 그림의 ⑤→⑥→⑦ 직렬은 binding 경로에만 해당).

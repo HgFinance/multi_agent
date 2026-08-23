@@ -1,5 +1,5 @@
 import vinext from "vinext";
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 import hostingConfig from "./.openai/hosting.json";
 import { sites } from "./build/sites-vite-plugin";
 
@@ -33,7 +33,11 @@ const localBindingConfig = {
     : [],
 };
 
-export default defineConfig(async () => {
+export default defineConfig(async ({ mode }) => {
+  // 고정 fixture 계정은 저장소 루트의 DISCORD_ACTOR_MAP 한 곳에서만 읽는다.
+  // 이 값은 Discord ID와 공개 UUID만 담으며 브라우저의 fixture 헤더에도 필요하다.
+  const fixtureEnv = loadEnv(mode, "..", "DISCORD_ACTOR_MAP");
+  const discordActorMap = fixtureEnv.DISCORD_ACTOR_MAP ?? process.env.DISCORD_ACTOR_MAP ?? "";
   // Keep Wrangler and Miniflare state project-local. These are non-secret tool
   // settings; application environment belongs in ignored `.env*` files.
   process.env.WRANGLER_WRITE_LOGS ??= "false";
@@ -44,6 +48,9 @@ export default defineConfig(async () => {
   const { cloudflare } = await import("@cloudflare/vite-plugin");
 
   return {
+    define: {
+      "process.env.DISCORD_ACTOR_MAP": JSON.stringify(discordActorMap),
+    },
     server: isCodexSeatbeltSandbox
       ? { watch: { useFsEvents: false, usePolling: true } }
       : undefined,

@@ -667,7 +667,7 @@ risk-api가 `risk.decision.v1`을 Redis `risk-qa-events`에 발행(결정 이벤
 ## 10. 프런트엔드 — ai-office
 
 - **정체**: Next.js 16 App Router를 `vinext`(Vite 기반 런타임)로 구동, Cloudflare Workers 타깃, React 19 + Tailwind 4. 이 저장소의 유일한 JS 앱(루트 `package.json`이 위임). **레거시가 아니라 현행 운영 프런트** — 8/12~13에 사실상 재건축된 커밋 이력.
-- **연결**: 자체 DB 없음(drizzle 스키마 의도적으로 빈 파일, D1/R2 언바운드). 모든 실데이터는 BFF `NEXT_PUBLIC_BFF_URL`(기본 `127.0.0.1:8001`)의 `/ui/*` 6계열 엔드포인트로만. 인증은 하드코딩 테스트 사용자 3명의 무서명 `X-User-Id`(파일 스스로 "인증이 아니다"라고 문서화). Supabase/Hermes 직접 호출 0.
+- **연결**: 자체 DB 없음(drizzle 스키마 의도적으로 빈 파일, D1/R2 언바운드). 모든 실데이터는 BFF `NEXT_PUBLIC_BFF_URL`(기본 `127.0.0.1:8001`)의 `/ui/*` 6계열 엔드포인트로만. 인증은 `DISCORD_ACTOR_MAP` 첫 binding에서 읽는 무서명 `X-User-Id` fixture 값(파일 스스로 "인증이 아니다"라고 문서화). Supabase/Hermes 직접 호출 0.
 - **화면 4개**:
   - `/` — 픽셀 오피스 시뮬레이션 게임 (완전 로컬, 백엔드 호출 0)
   - `/dashboard` — CEO ask(계약 v1·v2 수용) + 부서별 진행 카드(1초→5초 폴링, NO_ANSWER/STALE/NO_ASSIGNEE 명시 구분). 칸반 임베드는 **자리표시자만**. KPI 타일은 미기동 로컬 심 스냅샷(전부 0), "결과물 창고"는 하드코딩 2행

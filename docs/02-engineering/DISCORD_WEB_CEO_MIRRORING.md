@@ -125,7 +125,7 @@ CEO 중복 실행을 막는다. Redis가 없는 로컬 단위 테스트에서는
 
 ## 채널 ↔ 테스트 계정 매핑 제안 (2026-08-18, 미구현)
 
-프론트엔드는 테스트 계정 3명을 계정 전환 버튼으로 오가며
+프론트엔드는 `DISCORD_ACTOR_MAP`의 첫 유효 binding을 고정 테스트 계정으로 사용하며
 (`ai-office/app/lib/currentAccount.ts`), 계정마다 다른 Mandate를 참조한다. Discord
 쪽에는 그 계정 개념이 없어 **같은 요청이 채널만 다를 뿐 전부 "요청자 불명"으로
 들어온다.** 웹과 Discord를 같은 사용자 기준으로 비교하려면 이 매핑이 필요하다.
@@ -161,9 +161,7 @@ Discord author 기준보다 **채널 기준**을 먼저 붙일 것을 제안한�
 트레이딩 담당이 user1 채널에서 쳐도 user1 요청이 되는 편이 E2E 확인에 편하다.
 
 ```text
-#ceo-user1  -> user_id 00000000-0000-4000-8000-00000000cec0 / fund b13f5cd1-...
-#ceo-user2  -> user_id ...cec1 / fund 50a3c28c-...
-#ceo-user3  -> user_id ...cec2 / fund 3838f7d6-...
+DISCORD_ACTOR_MAP=<discord_user_id>:<user_id>:<fund_id>
 ```
 
 매핑표는 어댑터 환경변수 하나로 둔다. 진짜 인증이 붙으면 Discord author 기준으로
