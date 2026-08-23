@@ -3300,12 +3300,12 @@ class DelegationProjectionOrderingTest(unittest.TestCase):
         self.assertTrue(handled)
         self.assertIsNotNone(decision)
         self.assertEqual(
-            timeline[-1],
+            timeline[0],
             "ceo-dispatch",
-            "delegation display must follow durable child creation",
+            "delegation display must precede primary child dispatch",
         )
         self.assertCountEqual(
-            timeline[:-1],
+            timeline[1:],
             [
                 "child:research-department",
                 "child:quant-backtest-department",
@@ -3344,7 +3344,7 @@ class DelegationProjectionOrderingTest(unittest.TestCase):
         )
 
         self.assertTrue(handled)
-        self.assertEqual(timeline[-1], "ceo-dispatch-attempt")
+        self.assertEqual(timeline[0], "ceo-dispatch-attempt")
         self.assertEqual(len(timeline), 4)
 
     def test_replayed_root_event_keeps_delegation_card_exactly_once(self) -> None:
