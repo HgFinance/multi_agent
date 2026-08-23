@@ -163,6 +163,9 @@ class CeoAsk(hermes_boundary.AgentAsk):
     # to one exact Book.  The server never guesses a Book when more than one is
     # available; the UI may preselect only a sole authorized Book.
     book_id: str | None = None
+    # Ingress source is metadata-only observability context. It does not
+    # participate in routing or execution semantics.
+    source: str | None = None
 
 
 # Hermes Task ID 형식(`t_` + hex). 경로 파라미터가 CLI 인자로 들어가므로
@@ -1285,23 +1288,64 @@ def ceo_query(
             mandate=mandate,
         )
 
-    task = hermes_boundary.create_kanban_task(
-        assignee=canonical_profile_for_department("ceo"),
-        title=f"사용자 질의: {req.query[:120]}",
-        body=build_root_body(
-            req.query,
-            req.request_id,
-            workflow_mode=infer_workflow_mode(req.query),
-            mandate=mandate,
-            requested_by=owner_id,
-            discord_channel_id=discord_channel_id,
-            discord_message_id=discord_message_id,
-            discord_guild_id=discord_guild_id,
-            discord_thread_id=discord_thread_id,
-        ),
-        idempotency_key=req.request_id,
-    )
+    workflow_mode = infer_workflow_mode(req.query)
+    root_trace = None
+    try:
+        from orchestration.llm_observability import start_root_trace
+
+        root_trace = start_root_trace(
+            request_id=req.request_id,
+            workflow_mode=workflow_mode,
+            source=getattr(req, "source", None),
+        )
+    except Exception:  # noqa: BLE001 - observability remains fail-open.
+        root_trace = None
+
+    try:
+        task = hermes_boundary.create_kanban_task(
+            assignee=canonical_profile_for_department("ceo"),
+            title=f"사용자 질의: {req.query[:120]}",
+            body=build_root_body(
+                req.query,
+                req.request_id,
+                workflow_mode=workflow_mode,
+                mandate=mandate,
+                requested_by=owner_id,
+                discord_channel_id=discord_channel_id,
+                discord_message_id=discord_message_id,
+                discord_guild_id=discord_guild_id,
+                discord_thread_id=discord_thread_id,
+                langsmith_trace_context=(
+                    root_trace.context if root_trace is not None else None
+                ),
+            ),
+            idempotency_key=req.request_id,
+        )
+    except Exception as exc:
+        if root_trace is not None:
+            from orchestration.llm_observability import close_root_trace
+
+            close_root_trace(
+                root_trace.context,
+                request_id=req.request_id,
+                workflow_mode=workflow_mode,
+                source=getattr(req, "source", None),
+                status="error",
+                error_class=type(exc).__name__,
+            )
+        raise
     if not task or not task.get("task_id"):
+        if root_trace is not None:
+            from orchestration.llm_observability import close_root_trace
+
+            close_root_trace(
+                root_trace.context,
+                request_id=req.request_id,
+                workflow_mode=workflow_mode,
+                source=getattr(req, "source", None),
+                status="error",
+                error_class="root_create_failed",
+            )
         raise HTTPException(
             status_code=503,
             detail="CEO root Kanban task를 생성하지 못했습니다. Hermes Kanban runtime을 확인하세요.",
@@ -1315,6 +1359,18 @@ def ceo_query(
     if not hermes_boundary.comment_root_scope(
         task_id=str(task["task_id"]), request_id=req.request_id
     ):
+        if root_trace is not None:
+            from orchestration.llm_observability import close_root_trace
+
+            close_root_trace(
+                root_trace.context,
+                request_id=req.request_id,
+                root_id=str(task["task_id"]),
+                workflow_mode=workflow_mode,
+                source=getattr(req, "source", None),
+                status="error",
+                error_class="root_scope_failed",
+            )
         raise HTTPException(
             status_code=503,
             detail="CEO root Kanban scope를 기록하지 못했습니다. 재시도하세요.",

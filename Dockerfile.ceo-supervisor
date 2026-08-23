@@ -36,4 +36,5 @@ RUN test -x /opt/hermes/.venv/bin/python3 \
         fastapi \
         pydantic \
         langfuse==4.14.3 \
-    && /opt/hermes/.venv/bin/python3 -c "import fastapi, pydantic, psycopg2, langfuse"
+        langsmith==0.10.17 \
+    && /opt/hermes/.venv/bin/python3 -c "import fastapi, pydantic, psycopg2, langfuse, langsmith"

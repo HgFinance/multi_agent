@@ -309,6 +309,55 @@ class CeoMirrorExecutionTest(unittest.TestCase):
         self.assertEqual(captured[0].fund_id, "fund-abc")
         self.assertEqual(captured[0].book_id, "book-abc")
 
+    def test_non_binding_ceo_query_forwards_source_to_ceo_boundary(self) -> None:
+        response = {
+            "task_id": "t_trace_root",
+            "status": "planned",
+            "binding": False,
+            "planning": {"workflow_mode": "analysis"},
+        }
+        with (
+            patch.object(ceo_mirror_api, "resolve_discord_actor", return_value=None),
+            patch("apps.api.ceo.ceo_query", return_value=response) as ceo_query,
+        ):
+            actual = ceo_mirror_api._ceo_query(
+                CanonicalIngress(
+                    query="분석 질의",
+                    request_id="discord:trace-root-1",
+                    source="discord",
+                    source_message_id="trace-root-1",
+                    actor_id="discord-user",
+                )
+            )
+
+        self.assertIs(actual, response)
+        forwarded = ceo_query.call_args.args[0]
+        self.assertEqual(forwarded.source, "discord")
+
+    def test_binding_ceo_query_does_not_emit_langsmith_root_trace(self) -> None:
+        response = {
+            "task_id": "order-root",
+            "status": "accepted",
+            "binding": True,
+        }
+        with (
+            patch.object(ceo_mirror_api, "resolve_discord_actor", return_value=None),
+            patch("apps.api.ceo.ceo_query", return_value=response),
+            patch("orchestration.llm_observability.publish_root_trace") as publish,
+        ):
+            actual = ceo_mirror_api._ceo_query(
+                CanonicalIngress(
+                    query="주문 실행 요청",
+                    request_id="discord:trace-binding-1",
+                    source="discord",
+                    source_message_id="trace-binding-1",
+                    actor_id="discord-user",
+                )
+            )
+
+        self.assertIs(actual, response)
+        publish.assert_not_called()
+
     def test_discord_actor_mapping_resolves_one_active_trading_book(self) -> None:
         """A Discord author can enter the same exact PAPER account boundary."""
 

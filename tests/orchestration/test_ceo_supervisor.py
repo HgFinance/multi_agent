@@ -178,6 +178,33 @@ class AnswerBodyHandoffTest(unittest.TestCase):
         for body in self._bodies_for(result=""):
             self.assertIn("answer_body_missing", body)
 
+    def test_run_metadata_result_is_used_as_canonical_answer_body(self) -> None:
+        # Production-shaped handoff: kanban_complete(result=...) is surfaced
+        # through the latest run metadata before task-level hydration.
+        state = SupervisorState(
+            "root",
+            (
+                ChildTaskState.from_hermes(
+                    {
+                        "id": "r",
+                        "assignee": "research-department",
+                        "status": "done",
+                        "body": (
+                            "workflow_root_task_id=root\n"
+                            "workflow_role=primary\n"
+                            "workflow_mode=analysis"
+                        ),
+                        "runs": [{"metadata": {"result": self.ANSWER}}],
+                    }
+                ),
+            ),
+            selected_primary_profiles=("research-department",),
+            workflow_mode="analysis",
+        )
+
+        self.assertEqual(state.usable_analysis_children[0].result, self.ANSWER)
+        self.assertEqual(len(state.usable_analysis_children), 1)
+
 
 class SupervisorPolicyTest(unittest.TestCase):
     def test_latest_run_failure_and_missing_dependencies_are_preserved(self) -> None:
@@ -3416,6 +3443,18 @@ class DelegationProjectionOrderingTest(unittest.TestCase):
             ],
         )
         self.assertEqual(delivery.calls, 1)
+        self.assertIn(
+            "Fast advisory execution guardrails:",
+            str(client.created[0]["body"]),
+        )
+        self.assertIn(
+            "complete user-facing answer in result",
+            str(client.created[0]["body"]),
+        )
+        self.assertIn(
+            "summary to a brief handoff",
+            str(client.created[0]["body"]),
+        )
 
     def test_delegation_failure_does_not_change_child_execution_policy(self) -> None:
         timeline: list[str] = []
@@ -3509,6 +3548,68 @@ class DelegationProjectionOrderingTest(unittest.TestCase):
             index for index, item in enumerate(timeline) if item.startswith("child:")
         )
         self.assertLess(timeline.index("ceo-dispatch"), first_child_index)
+
+    def test_fast_projection_skips_after_authoritative_primary_exists(self) -> None:
+        class Client:
+            environment = {"HERMES_HOME": "/tmp/ceo-ordering-existing"}
+
+            def __init__(self) -> None:
+                self.created: list[dict[str, object]] = []
+
+            def show(self, task_id: str):
+                if task_id == "root":
+                    return {
+                        "id": task_id,
+                        "assignee": "ceo-agent",
+                        "status": "done",
+                        "body": DelegationProjectionOrderingTest.root_body(),
+                    }
+                return next(
+                    item for item in self.created if item["id"] == task_id
+                )
+
+            def root_scoped_task_ids(self, root_id: str):
+                return (root_id,) + tuple(item["id"] for item in self.created)
+
+            def create_task(self, **kwargs):
+                task_id = f"child-{len(self.created) + 1}"
+                payload = {
+                    "id": task_id,
+                    "assignee": kwargs["assignee"],
+                    "status": "ready",
+                    "body": kwargs["body"],
+                }
+                self.created.append(payload)
+                return payload
+
+        class Delivery:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def upsert_thread_card(self, **kwargs):
+                self.calls += 1
+                return "sent"
+
+        client = Client()
+        delivery = Delivery()
+        service = CeoSupervisorService(client, discord_delivery=delivery)
+
+        first_handled, _ = service._materialize_completed_analysis_root_fast(
+            task_id="root",
+            kind="completed",
+        )
+        second_handled, second_decision = (
+            service._materialize_completed_analysis_root_fast(
+                task_id="root",
+                kind="completed",
+            )
+        )
+
+        self.assertTrue(first_handled)
+        self.assertFalse(second_handled)
+        self.assertIsNone(second_decision)
+        self.assertEqual(len(client.created), 3)
+        self.assertEqual(delivery.calls, 1)
 
     def test_replayed_root_event_keeps_delegation_card_exactly_once(self) -> None:
         timeline: list[str] = []

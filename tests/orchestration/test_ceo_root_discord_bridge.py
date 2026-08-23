@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from orchestration.adapters.ceo_supervisor import CeoSupervisorService
 
@@ -160,6 +161,37 @@ class CeoRootDiscordBridgeTest(unittest.TestCase):
             self.assertEqual(result, "empty")
             self.assertEqual(delivery.cards, [])
             self.assertEqual(delivery.details, [])
+
+    def test_root_trace_close_is_idempotent_within_supervisor_instance(self):
+        with tempfile.TemporaryDirectory() as home:
+            delivery = DeliverySpy()
+            service = self.service(home, delivery)
+            root = {
+                "id": "root-trace",
+                "status": "done",
+                "body": root_body("langsmith_trace_context=trace-root\n"),
+            }
+
+            with patch(
+                "orchestration.llm_observability.close_root_trace",
+                return_value=True,
+            ) as close:
+                self.assertTrue(
+                    service._close_root_trace(
+                        root_id="root-trace",
+                        root_payload=root,
+                        status="completed",
+                    )
+                )
+                self.assertTrue(
+                    service._close_root_trace(
+                        root_id="root-trace",
+                        root_payload=root,
+                        status="completed",
+                    )
+                )
+
+            close.assert_called_once()
 
 
 class CeoRootFastPathTest(unittest.TestCase):

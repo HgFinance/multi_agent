@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import os
+import sys
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -101,7 +102,8 @@ def _metric_metadata(metric: dict[str, Any], *, trace_id: str | None = None) -> 
         # (2026-08-20). bff_ask=BFF 가 직접 CLI 를 띄운 턴, kanban_card=CEO
         # 워크플로 카드가 끝난 것. 원인 추적이 안 되면 "왜 이 이벤트가 났지"에
         # 답할 수 없다. 값은 우리가 정한 고정 문자열이라 payload 유출이 아니다.
-        "source",
+        "source", "request_id", "root_id", "task_id", "department",
+        "workflow_role", "workflow_mode", "provider",
         "latency_ms", "eval_score", "error_count", "raw_payloads_sent",
     }
     result = {key: metric[key] for key in allowed if key in metric}
@@ -124,22 +126,43 @@ def redacted_trace(*, trace_id: str, model_name: str, stage: str) -> Iterator[No
     if not langsmith_enabled():
         yield
         return
-    from langsmith import tracing_context
+    try:
+        from langsmith import tracing_context
 
-    metadata = {
-        "observability_schema": "llm.performance.v1",
-        "raw_payloads_sent": False,
-        "model_name": model_name,
-        "stage": stage,
-    }
-    with tracing_context(
-        client=_safe_langsmith_client(),
-        project_name=os.getenv("LANGSMITH_PROJECT"),
-        tags=["hgfinance", "redacted", f"stage:{stage}"],
-        metadata=metadata,
-        enabled=True,
-    ):
+        metadata = {
+            "observability_schema": "llm.performance.v1",
+            "raw_payloads_sent": False,
+            "model_name": model_name,
+            "stage": stage,
+        }
+        observer = tracing_context(
+            client=_safe_langsmith_client(),
+            project_name=os.getenv("LANGSMITH_PROJECT"),
+            tags=["hgfinance", "redacted", f"stage:{stage}"],
+            metadata=metadata,
+            enabled=True,
+        )
+        observer.__enter__()
+    except Exception:
+        # Observability setup is optional; business execution must continue.
         yield
+        return
+
+    try:
+        yield
+    except BaseException:
+        # Preserve the business exception.  A tracing context cleanup failure
+        # must never replace it or turn it into an observability failure.
+        try:
+            observer.__exit__(*sys.exc_info())
+        except Exception:
+            pass
+        raise
+    else:
+        try:
+            observer.__exit__(None, None, None)
+        except Exception:
+            pass
 
 
 def publish_metric(metric: dict[str, Any], *, trace_id: str | None = None) -> bool:
@@ -163,6 +186,150 @@ def publish_metric(metric: dict[str, Any], *, trace_id: str | None = None) -> bo
         )
         return True
     except Exception:
+        return False
+
+
+def publish_root_trace(
+    *,
+    request_id: str,
+    root_id: str | None = None,
+    workflow_mode: str | None = None,
+    source: str | None = None,
+    status: str = "accepted",
+) -> bool:
+    """Publish one redacted user-query root observation.
+
+    This is deliberately a metadata-only metric rather than a wrapper around
+    the business function.  LangSmith is an optional observer: missing SDK,
+    credentials, network, serialization, or client errors are all swallowed
+    by :func:`publish_metric` and cannot change the CEO workflow result.
+    """
+
+    return publish_metric(
+        {
+            "schema_version": "llm.workflow-root.v1",
+            "worker_id": "ceo-root",
+            "role": "workflow_root",
+            "stage": "ceo-ingress",
+            "status": str(status or "accepted"),
+            "request_id": str(request_id),
+            "root_id": str(root_id) if root_id else None,
+            "workflow_mode": str(workflow_mode) if workflow_mode else None,
+            "source": str(source) if source else None,
+            "raw_payloads_sent": False,
+        },
+        trace_id=str(request_id),
+    )
+
+
+@dataclass
+class RootTraceHandle:
+    """Best-effort handle for one metadata-only workflow root run."""
+
+    context: str
+    request_id: str
+    workflow_mode: str
+    source: str | None = None
+
+
+def start_root_trace(
+    *,
+    request_id: str,
+    workflow_mode: str,
+    source: str | None = None,
+) -> RootTraceHandle | None:
+    """Create and post a redacted LangSmith root run, fail-open."""
+
+    if not langsmith_enabled():
+        return None
+    try:
+        from langsmith import RunTree
+
+        metadata = _metric_metadata(
+            {
+                "schema_version": "llm.workflow-root.v2",
+                "worker_id": "ceo-root",
+                "role": "workflow_root",
+                "stage": "ceo-ingress",
+                "status": "accepted",
+                "request_id": str(request_id),
+                "workflow_mode": str(workflow_mode),
+                "source": str(source) if source else None,
+                "raw_payloads_sent": False,
+            }
+        )
+        run = RunTree(
+            name="hgfinance.user-query",
+            run_type="chain",
+            inputs={},
+            outputs={},
+            project_name=os.getenv("LANGSMITH_PROJECT") or None,
+            tags=["hgfinance", "workflow-root", "redacted"],
+            extra={"metadata": metadata},
+            ls_client=_safe_langsmith_client(),
+        )
+        run.post()
+        context = str(run.to_headers().get("langsmith-trace") or "")
+        if not context:
+            return None
+        return RootTraceHandle(
+            context=context,
+            request_id=str(request_id),
+            workflow_mode=str(workflow_mode),
+            source=str(source) if source else None,
+        )
+    except Exception:
+        # Observability setup/post/serialization errors never become workflow
+        # errors and leave the caller without a propagation marker.
+        return None
+
+
+def close_root_trace(
+    trace_context: str | None,
+    *,
+    request_id: str | None = None,
+    root_id: str | None = None,
+    workflow_mode: str | None = None,
+    source: str | None = None,
+    status: str,
+    error_class: str | None = None,
+) -> bool:
+    """Close a previously posted root run through its distributed context."""
+
+    if not trace_context or not langsmith_enabled():
+        return False
+    try:
+        from langsmith import RunTree
+
+        run = RunTree.from_headers(
+            {"langsmith-trace": str(trace_context)},
+            project_name=os.getenv("LANGSMITH_PROJECT") or None,
+            ls_client=_safe_langsmith_client(),
+        )
+        if run is None:
+            return False
+        metadata = _metric_metadata(
+            {
+                "schema_version": "llm.workflow-root.v2",
+                "worker_id": "ceo-root",
+                "role": "workflow_root",
+                "stage": "ceo-terminal",
+                "status": str(status),
+                "request_id": str(request_id) if request_id else None,
+                "root_id": str(root_id) if root_id else None,
+                "workflow_mode": str(workflow_mode) if workflow_mode else None,
+                "source": str(source) if source else None,
+                "raw_payloads_sent": False,
+            }
+        )
+        run.end(
+            error=str(error_class) if error_class else None,
+            metadata=metadata,
+        )
+        run.patch(exclude_inputs=True)
+        return True
+    except Exception:
+        # LangSmith must not delay or fail a durable finalization.
         return False
 
 

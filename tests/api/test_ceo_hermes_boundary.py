@@ -129,6 +129,31 @@ class CeoRootTaskBoundaryTest(unittest.TestCase):
         self.assertIsNone(response["session_id"])
 
     @patch.dict("os.environ", {"CEO_PLANNING_WAIT_SECONDS": "0"}, clear=False)
+    def test_root_trace_context_is_optional_root_body_metadata(self) -> None:
+        request = ceo.CeoAsk(
+            query="q",
+            request_id="request-trace-context",
+            source="discord",
+        )
+        task = {"task_id": "t_root", "status": "ready"}
+        trace = MagicMock(context="trace-root.00000000-0000-0000-0000-000000000001")
+        with (
+            patch("orchestration.llm_observability.start_root_trace", return_value=trace),
+            patch.object(ceo.hermes_boundary, "create_kanban_task", return_value=task) as create,
+            patch.object(ceo.hermes_boundary, "comment_root_scope", return_value=True),
+            patch.object(ceo.hermes_boundary, "show_kanban_task", return_value=None),
+        ):
+            response = ceo.ceo_query(request)
+
+        self.assertEqual(response["task_id"], "t_root")
+        body = create.call_args.kwargs["body"]
+        self.assertIn(
+            "langsmith_trace_context=trace-root.00000000-0000-0000-0000-000000000001",
+            body,
+        )
+        self.assertNotIn("## User request\n", body.split("langsmith_trace_context=", 1)[0])
+
+    @patch.dict("os.environ", {"CEO_PLANNING_WAIT_SECONDS": "0"}, clear=False)
     def test_mandate_snapshot_is_frozen_into_the_root_body(self) -> None:
         """`fund_id`가 오면 Mandate 한도가 root body에 박힌다.
 

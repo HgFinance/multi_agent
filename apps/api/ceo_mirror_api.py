@@ -189,10 +189,11 @@ def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
         discord_guild_id = mirror.guild_id if mirror else None
         discord_thread_id = mirror.thread_id if mirror else None
 
-    return ceo.ceo_query(
+    response = ceo.ceo_query(
         CeoAsk(
             query=request.query,
             request_id=request.request_id,
+            source=request.source,
             fund_id=fund_id,
             book_id=book_id,
         ),
@@ -202,6 +203,8 @@ def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
         discord_guild_id=discord_guild_id,
         discord_thread_id=discord_thread_id,
     )
+
+    return response
 
 
 def _execute(request: CanonicalIngress):

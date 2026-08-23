@@ -24,6 +24,7 @@ CONTINUOUS_RESEARCH_PLANE = "continuous_research"
 BACKGROUND_RESEARCH_ROLE = "background_research"
 PRIMARY_SELECTION_FIELD = "selected_primary_profiles"
 WORKFLOW_MODES = frozenset({"analysis", "binding"})
+LANGSMITH_TRACE_CONTEXT_MARKER = "langsmith_trace_context"
 
 _NON_EXECUTION_QUESTION_RE = re.compile(
     r"\?|(?:할까|할까요|해도\s*돼|해도\s*될까|"
@@ -79,6 +80,12 @@ def workflow_root_from_body(body: str) -> str:
     """이 카드가 속한 워크플로 루트 ID. 없으면 빈 문자열."""
 
     return read_marker(body, "workflow_root_task_id")
+
+
+def langsmith_trace_context_from_body(body: str) -> str:
+    """Read the optional redacted LangSmith dotted-order context."""
+
+    return read_marker(body, LANGSMITH_TRACE_CONTEXT_MARKER)
 
 # These aliases make the CEO planner's durable selection machine-readable.
 # They do not choose departments; the planner remains the source of truth.
@@ -640,6 +647,7 @@ def build_root_body(
     discord_thread_id: str | None = None,
     qa_enabled: bool | None = None,
     qa_blocks_response: bool | None = None,
+    langsmith_trace_context: str | None = None,
 ) -> str:
     """Build a root body that is unambiguous before the root ID exists.
 
@@ -712,6 +720,11 @@ def build_root_body(
         # `message_reference` 답글로 나가므로 이 값은 선택이다.
         if discord_thread_id:
             discord_lines += f"discord_thread_id={discord_thread_id}" + chr(10)
+    langsmith_line = (
+        f"{LANGSMITH_TRACE_CONTEXT_MARKER}={langsmith_trace_context}\n"
+        if langsmith_trace_context
+        else ""
+    )
     return (
         f"{CEO_WORKFLOW_SCOPE_MARKER}\n"
         f"workflow_scope={CEO_WORKFLOW_SCOPE_POLICY}\n"
@@ -721,6 +734,7 @@ def build_root_body(
         f"{requested_by_line}"
         f"{paper_order_block}"
         f"{discord_lines}"
+        f"{langsmith_line}"
         f"qa_enabled={str(canonical_qa_enabled).lower()}\n"
         f"qa_blocks_response={str(canonical_qa_blocks).lower()}\n"
         "response_plane=primary_results_ready\n"
@@ -974,6 +988,7 @@ __all__ = [
     "CEO_WORKFLOW_REUSE_POLICY",
     "CEO_WORKFLOW_SCOPE_MARKER",
     "CEO_WORKFLOW_SCOPE_POLICY",
+    "LANGSMITH_TRACE_CONTEXT_MARKER",
     "CONTINUOUS_RESEARCH_MARKER",
     "CONTINUOUS_RESEARCH_PLANE",
     "PRIMARY_SELECTION_FIELD",
@@ -984,6 +999,7 @@ __all__ = [
     "workflow_root_from_body",
     "workflow_role_from_body",
     "is_user_query_body",
+    "langsmith_trace_context_from_body",
     "read_marker",
     "WORKFLOW_ROLES",
     "WorkflowScopeReferences",

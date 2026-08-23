@@ -97,6 +97,13 @@ services:
       SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
       PORTFOLIO_RUNTIME_STORE_PATH: /var/lib/portfolio/runtime.sqlite3
       PORTFOLIO_RUNTIME_EMBEDDED_WORKER: "false"
+      # Optional metadata-only LangSmith root observation.  The BFF already
+      # carries the SDK transitively through LangGraph; this wiring does not
+      # change CEO/Kanban or execution control flow.
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-}
       PORTFOLIO_GOVERNANCE_BINDING_ENABLED: ${PORTFOLIO_GOVERNANCE_BINDING_ENABLED:-false}
       # 기본값이 비어 있으면 온보딩 프록시(/ui/mandates, /ui/mandate-assistant/suggest
       # 등)가 전부 503 governance_api_unavailable 이 된다. governance-api 는 같은
@@ -129,6 +136,9 @@ services:
       RESEARCH_API_URL: ${RESEARCH_API_URL:-http://research-api:8035}
       RISK_API_URL: ${RISK_API_URL:-http://risk-api:8000}
       QA_API_URL: ${QA_API_URL:-http://audit-api:8000}
+      # 페이퍼 전략 컨테이너 상태·전원. docker 소켓은 이 서비스가 아니라
+      # `strategy-runtime-control` sidecar가 쥔다(그 서비스 정의 주석 참고).
+      STRATEGY_RUNTIME_API_URL: ${STRATEGY_RUNTIME_API_URL:-http://strategy-runtime-control:8000}
       KANBAN_ATTACH_ROOT: /opt/kanban/kanban/attachments
       KANBAN_WORKSPACE_ROOT: /opt/kanban/kanban/workspaces
       # Discord 연동(2026-08-18). 셋 다 비어 있으면 관련 기능만 조용히 꺼지고
@@ -1212,7 +1222,8 @@ services:
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
       # QA-only worker boundary: preserve Hermes behavior while converting a
       # clean exit without a Kanban terminal marker into the existing block
-      # handoff. The wrapper is never used by other profiles/services.
+      # handoff. The shared dispatcher selects this wrapper for worker
+      # subprocesses and its profile gate keeps other profiles unchanged.
       - ./scripts:/opt/hgfinance/scripts:ro
     environment:
       HERMES_UID: 1000
@@ -1401,6 +1412,7 @@ services:
       HERMES_KANBAN_HOME: /opt/data/shared-kanban
       HERMES_KANBAN_DB: /opt/data/shared-kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      HERMES_BIN: /app/repo/scripts/qa_hermes_worker.py
       KANBAN_DISPATCH_INTERVAL: ${KANBAN_DISPATCH_INTERVAL:-60}
       # The dispatcher spawns the department workers, so MCP profile headers are
       # expanded from this process environment rather than a gateway container.
@@ -1518,6 +1530,12 @@ services:
       LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      # Optional metadata-only LangSmith root lifecycle close. This is
+      # fail-open and does not participate in Supervisor decisions.
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-}
       NOTION_TOKEN: ${NOTION_TOKEN:-}
       NOTION_CEO_DB: ${NOTION_CEO_DB:-}
       DATABASE_URL: ${DATABASE_URL:-}
@@ -1717,6 +1735,35 @@ services:
       HERMES_EXEC_MODE: docker
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+
+  # 페이퍼 전략 컨테이너(mlpipe-paper) 상태·전원 제어. `portfolio-bff`가 이
+  # 저장소에서 유일하게 외부에 노출되는 서비스라 거기에 docker 소켓을 직접
+  # 물리지 않는다(`ui-bff`의 "Docker-exec transport"를 물려받지 않기로 한
+  # 결정과 같은 이유, 아래 ui-bff 주석 참고) - card-watchdog과 같은
+  # docker-outside-of-docker 선례를 그대로 따른다. host 포트를 publish하지
+  # 않는다 - `portfolio-bff`만 내부 네트워크로 부른다
+  # (`STRATEGY_RUNTIME_API_URL`).
+  strategy-runtime-control:
+    image: hedgefund-factory:latest
+    container_name: hedgefund-strategy-runtime-control
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    command: ["python", "-m", "uvicorn", "strategy_runtime_server:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      PYTHONPATH: /app:/app/apps/api
+      MLPIPE_PAPER_HOME: /mlpipe-paper
+      # 기본은 꺼져 있다 - 운영자가 명시적으로 켜야 전원 조작이 된다
+      # (`apps/api/strategy_runtime.py` 머리말의 기본값 정책).
+      ENABLE_STRATEGY_CONTAINER_CONTROL: ${ENABLE_STRATEGY_CONTAINER_CONTROL:-false}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # 읽기 전용 - 이 서비스는 원장·팩 파일을 읽기만 한다. 쓰기는 컨테이너
+      # 자신(mlpipe-paper)만 한다.
+      - /home/ubuntu/mlpipe-paper:/mlpipe-paper:ro
 
   # BFF (apps/api). 프런트(ai-office)가 붙는 유일한 관문이다.
   # 이것도 호스트 셸 프로세스였다 - 프런트가 "BFF 연결 대기 중" 만 띄우고

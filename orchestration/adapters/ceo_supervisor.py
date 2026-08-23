@@ -50,6 +50,7 @@ from orchestration.ceo_workflow_scope import (
     build_scoped_task_body,
     extract_scope_references,
     is_user_query_body,
+    langsmith_trace_context_from_body,
     mandate_snapshot_present,
     primary_idempotency_key,
     selected_primary_profiles_from_task,
@@ -57,6 +58,7 @@ from orchestration.ceo_workflow_scope import (
     validate_workflow_scope,
     workflow_mode_from_body,
     workflow_role_from_body,
+    read_marker,
 )
 from orchestration.discord_delivery import (
     DiscordFinalDelivery,
@@ -765,6 +767,15 @@ _DELEGATION_INSTRUCTION_PREFIX = "delegation_instruction."
 _ANALYSIS_EXECUTION_MODES = frozenset(
     {"fast_advisory", "standard_analysis", "full_experiment"}
 )
+_FAST_ADVISORY_EXECUTION_GUIDANCE = (
+    "\n\nFast advisory execution guardrails:\n"
+    "- Use at most two fresh authoritative source fetch rounds.\n"
+    "- Do not delegate, run experiments/backtests, create artifacts, or repeat equivalent lookups.\n"
+    "- Stop once the current direction, up to two drivers, up to two uncertainties, and one or two checks are supported.\n"
+    "- If a non-critical datum is unavailable, state the limitation and produce the bounded final_answer.\n"
+    "- Return a concise Korean user-ready final_answer; do not return an operational progress report.\n"
+    "- When calling kanban_complete, put the complete user-facing answer in result (the canonical downstream answer body). Keep summary to a brief handoff; do not leave the answer only in summary or metadata."
+)
 
 
 def _analysis_execution_mode_from_root_body(body: str) -> str | None:
@@ -932,6 +943,11 @@ def _initial_primary_materialization_decisions(
 
     for profile in missing:
         department = department_for_canonical_profile(profile)
+        execution_guidance = (
+            _FAST_ADVISORY_EXECUTION_GUIDANCE
+            if analysis_mode == "fast_advisory"
+            else ""
+        )
 
         decisions.append(
             SupervisorDecision(
@@ -941,7 +957,8 @@ def _initial_primary_materialization_decisions(
                 title=f"CEO delegated {department} analysis",
                 body=(
                     f"producer=ceo-supervisor-materializer\n"
-                    f"analysis_mode={analysis_mode}\n\n"
+                    f"analysis_mode={analysis_mode}\n"
+                    f"{execution_guidance}\n\n"
                     f"{plan[profile]}"
                 ),
                 parent_task_ids=(),
@@ -2730,6 +2747,50 @@ class CeoSupervisorService:
 
         self._parent_locks: dict[str, threading.Lock] = {}
         self._parent_locks_lock = threading.Lock()
+        self._closed_root_traces: set[str] = set()
+        self._closed_root_traces_lock = threading.Lock()
+
+    def _close_root_trace(
+        self,
+        *,
+        root_id: str,
+        root_payload: Mapping[str, Any],
+        status: str,
+        error_class: str | None = None,
+    ) -> bool:
+        """Close one root trace after the existing response-plane decision."""
+
+        with self._closed_root_traces_lock:
+            if root_id in self._closed_root_traces:
+                return True
+
+        body = str(root_payload.get("body") or "")
+        context = langsmith_trace_context_from_body(body)
+        if not context:
+            return False
+        try:
+            from orchestration.llm_observability import close_root_trace
+
+            closed = close_root_trace(
+                context,
+                request_id=read_marker(body, "request_id") or None,
+                root_id=root_id,
+                workflow_mode=workflow_mode_from_body(body),
+                source=read_marker(body, "source") or None,
+                status=status,
+                error_class=error_class,
+            )
+        except Exception as exc:  # noqa: BLE001 - observability is fail-open.
+            logger.warning(
+                "langsmith-root-close-failed root=%s error=%s",
+                root_id,
+                type(exc).__name__,
+            )
+            return False
+        if closed:
+            with self._closed_root_traces_lock:
+                self._closed_root_traces.add(root_id)
+        return closed
 
     def _parent_lock(self, parent_task_id: str) -> threading.Lock:
         with self._parent_locks_lock:
@@ -2920,6 +2981,15 @@ class CeoSupervisorService:
         """Run a terminal observer without changing the supervisor decision."""
 
         delivery_status: str | None = None
+        root_payload = next(
+            (
+                payload
+                for payload in task_payloads
+                if str(payload.get("id") or payload.get("task_id") or "")
+                == root_task_id
+            ),
+            {},
+        )
 
         task = next(
             (
@@ -3077,6 +3147,31 @@ class CeoSupervisorService:
                     delivery_completed_ms,
                     _elapsed_ms(delivery_started_ms, delivery_completed_ms),
                 )
+
+        # The response-synthesis terminal is the existing finalization
+        # boundary. Close observability only after delivery succeeded (or when
+        # delivery is intentionally absent in non-Discord deployments).
+        if response_synthesis and (
+            self.discord_delivery is None
+            or delivery_status in {"sent", "deduped"}
+        ):
+            terminal_status = str(
+                task.get("status") or task.get("outcome") or "completed"
+            ).casefold()
+            self._close_root_trace(
+                root_id=root_task_id,
+                root_payload=root_payload,
+                status=(
+                    "blocked"
+                    if terminal_status in {"blocked", "gave_up", "failed", "crashed"}
+                    else "completed"
+                ),
+                error_class=(
+                    terminal_status
+                    if terminal_status in {"gave_up", "failed", "crashed", "timed_out"}
+                    else None
+                ),
+            )
 
         # Non-binding observers run after the user response lane. Their
         # filesystem/HTTP work must not delay completed synthesis delivery.
@@ -3270,12 +3365,19 @@ class CeoSupervisorService:
             )
             return status
 
-        return self._deliver_direct_ceo_answer(
+        status = self._deliver_direct_ceo_answer(
             root_task_id=root_task_id,
             root_payload=root_payload,
             store=store,
             profile=ceo_profile,
         )
+        if status in {"sent", "deduped"}:
+            self._close_root_trace(
+                root_id=root_task_id,
+                root_payload=root_payload,
+                status="completed",
+            )
+        return status
 
     @staticmethod
     def _materialized_primary_children(
@@ -3295,6 +3397,65 @@ class CeoSupervisorService:
             ):
                 children.append(child)
         return tuple(children)
+
+    def _fast_path_has_materialized_primary_children(
+        self,
+        root_task_id: str,
+    ) -> bool:
+        """Check indexed authoritative children before fast fan-out.
+
+        A ready/recovery lane can materialize a completed root before the
+        terminal fast path acquires the root lock.  An empty fast-path child
+        snapshot would then replay the whole primary plan and rely on create
+        idempotency to suppress durable duplicates.  Use the root index as a
+        discovery hint, then verify candidates with authoritative ``show``.
+        """
+
+        root_query = getattr(self.client, "root_scoped_task_ids", None)
+        show = getattr(self.client, "show", None)
+        if not callable(root_query) or not callable(show):
+            return False
+
+        try:
+            candidate_ids = tuple(root_query(root_task_id))
+        except (
+            RootScopedIndexUnavailable,
+            HermesKanbanCommandError,
+            OSError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            logger.debug(
+                "ready-primary-fast-existing-check-skipped root=%s reason=%s",
+                root_task_id,
+                type(exc).__name__,
+            )
+            return False
+
+        for raw_candidate_id in candidate_ids:
+            candidate_id = str(raw_candidate_id or "").strip()
+            if not candidate_id or candidate_id == root_task_id:
+                continue
+            try:
+                payload = show(candidate_id)
+                child = ChildTaskState.from_hermes(payload)
+            except (
+                CanonicalProfileError,
+                HermesKanbanCommandError,
+                OSError,
+                TypeError,
+                ValueError,
+            ):
+                continue
+
+            if (
+                child.task_id == candidate_id
+                and child.is_in_workflow(root_task_id)
+                and child.is_analysis
+            ):
+                return True
+
+        return False
 
     @staticmethod
     def _root_response_content(root_payload: Mapping[str, Any]) -> str:
@@ -3447,6 +3608,11 @@ class CeoSupervisorService:
                 profile=ceo_profile,
             )
             if status in {"sent", "deduped"}:
+                self._close_root_trace(
+                    root_id=root_task_id,
+                    root_payload=root_payload,
+                    status="completed",
+                )
                 logger.info(
                     "ceo-root-invalid-primary-final root=%s selected=%s status=%s",
                     root_task_id,
@@ -3626,6 +3792,12 @@ class CeoSupervisorService:
             )
 
         if status in {"sent", "deduped"}:
+            self._close_root_trace(
+                root_id=root_task_id,
+                root_payload=root_payload,
+                status=("completed" if root_content else "blocked"),
+                error_class=None if root_content else "child_terminal_failure",
+            )
             logger.info(
                 "ceo-late-child-finalization root=%s child=%s status=%s "
                 "mode=%s",
@@ -4583,6 +4755,18 @@ class CeoSupervisorService:
                 bridge_status,
             )
             return True, None
+
+        # A ready/recovery materializer may have created primaries before the
+        # terminal fast path. Do not replay the whole fan-out and depend on
+        # idempotency to reject it; let the normal authoritative path reconcile
+        # any genuinely missing child instead.
+        if self._fast_path_has_materialized_primary_children(task_id):
+            logger.info(
+                "ready-primary-fast-skipped root=%s "
+                "reason=authoritative-primary-present",
+                task_id,
+            )
+            return False, None
 
         state = SupervisorState(
             parent_task_id=task_id,
@@ -5608,6 +5792,12 @@ class CeoSupervisorService:
                         passthrough.profile,
                         delivery_status,
                     )
+                    if delivery_status in {"sent", "deduped"}:
+                        self._close_root_trace(
+                            root_id=root_id,
+                            root_payload=root_payload,
+                            status="completed",
+                        )
 
                 decision_started_ms = time.time_ns() // 1_000_000
                 decision = self.decider(state)
