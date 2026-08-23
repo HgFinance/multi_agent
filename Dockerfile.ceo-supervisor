@@ -19,6 +19,11 @@ COPY --chmod=0644 deploy/ceo-kanban/install_primary_idempotency.py /tmp/install_
 RUN python3 /tmp/install_primary_idempotency.py \
     && rm -f /tmp/install_primary_idempotency.py
 
+# langfuse: 이 컨테이너는 카드 종료를 관측해 부서장 1턴을 발행한다
+# (orchestration/adapters/ceo_supervisor.py::_publish_head_card_activity).
+# 없으면 publish 가 ModuleNotFoundError 를 삼키고 **조용히 False** 를 돌려줘,
+# 코드·자격증명·프로필 해석이 전부 정상인데 이벤트만 0건인 상태가 된다
+# (2026-08-23 실측). 루트 requirements.txt 가 확인한 버전과 같은 pin.
 # Hermes CLI와 supervisor가 동일한 runtime interpreter를 사용하도록 기존
 # Hermes venv를 명시한다. system Python은 PEP 668 externally-managed 상태다.
 ENV PATH="/opt/hermes/.venv/bin:${PATH}"
@@ -30,4 +35,5 @@ RUN test -x /opt/hermes/.venv/bin/python3 \
         psycopg2-binary==2.9.12 \
         fastapi \
         pydantic \
-    && /opt/hermes/.venv/bin/python3 -c "import fastapi, pydantic, psycopg2"
+        langfuse==4.14.3 \
+    && /opt/hermes/.venv/bin/python3 -c "import fastapi, pydantic, psycopg2, langfuse"
