@@ -96,7 +96,7 @@ from reconciliation import (
     reconcile_fills,
     reconcile_positions,
 )
-from db_read_model import build_accounting_sections
+from db_read_model import build_accounting_sections, build_sector_exposure
 
 API_VERSION = "v1"
 
@@ -696,11 +696,11 @@ def advisory_snapshot(ledger_id: UUID) -> dict:
         "fund_id": str(led.fund_id),
         "book_id": str(ledger_id),
         "portfolio": sections["portfolio"],
-        "sector_exposure": {
-            "status": "unavailable_reference_mapping",
-            "mapped_positions": 0,
-            "unmapped_positions": len(sections["portfolio"].get("positions", [])),
-        },
+        "sector_exposure": build_sector_exposure(
+            _repo,
+            ledger_id,
+            sections["portfolio"].get("positions", []),
+        ),
         **_provenance(),
     }
 

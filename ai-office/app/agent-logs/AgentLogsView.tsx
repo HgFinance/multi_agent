@@ -1,5 +1,6 @@
 "use client";
 
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   fetchOperations,
@@ -13,7 +14,7 @@ import { KANBAN_BASE_URL, resolveKanbanUrl } from "../lib/kanbanUrl";
 import { readDiscordMessages, readDiscordThread, type DiscordMessage } from "../lib/discordClient";
 import { DiscordAvatar, formatClock, formatDay, messageText, renderDiscordMarkup } from "../lib/discordRender";
 import HermesKanbanBoard from "./HermesKanbanBoard";
-import { fetchHermesKanban, type HermesKanbanBoard as HermesKanbanBoardData } from "../lib/kanbanClient";
+import { fetchHermesKanban } from "../lib/kanbanClient";
 
 /**
  * Agent Logs — 페이지 상단(전체 부서 실행 현황).
@@ -430,14 +431,29 @@ export default function AgentLogsView() {
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
   const [streamState, setStreamState] = useState<"connecting" | "connected" | "degraded">("connecting");
   const [lastKeepalive, setLastKeepalive] = useState<string | null>(null);
-  const [kanban, setKanban] = useState<HermesKanbanBoardData | null>(null);
-  const [kanbanError, setKanbanError] = useState("");
-  const [kanbanLoading, setKanbanLoading] = useState(true);
   const pageHost = usePageHost();
   const kanbanUrl = useMemo(
     () => resolveKanbanUrl(KANBAN_BASE_URL, pageHost || undefined),
     [pageHost],
   );
+  // 대시보드(DashboardView.tsx)의 같은 `hermes-kanban` 조회와 동일한 주기 -
+  // 여기서만 5초 SSE-polling에 얹혀 두 배로 자주 부르지 않는다. 서버 캐시
+  // TTL(KANBAN_READ_CACHE_TTL_SECONDS=3초, ceo_kanban_read.py)보다 여유
+  // 있게 길어야 매 polling이 캐시를 그냥 지나치지 않는다.
+  const kanbanQuery = useQuery({
+    queryKey: ["hermes-kanban"],
+    queryFn: fetchHermesKanban,
+    refetchInterval: 10_000,
+    staleTime: 3_000,
+    retry: false,
+  });
+  const kanban = kanbanQuery.data ?? null;
+  const kanbanError = kanbanQuery.isError
+    ? kanbanQuery.error instanceof Error
+      ? kanbanQuery.error.message
+      : String(kanbanQuery.error)
+    : "";
+  const kanbanLoading = kanbanQuery.isLoading;
 
   useEffect(() => {
     let alive = true;
@@ -446,17 +462,6 @@ export default function AgentLogsView() {
         .then((next) => alive && setData(next))
         .catch((cause) => alive && setError(cause instanceof Error ? cause.message : String(cause)))
         .finally(() => alive && setLoading(false));
-      fetchHermesKanban()
-        .then((next) => {
-          if (!alive) return;
-          setKanban(next);
-          setKanbanError("");
-        })
-        .catch((cause: unknown) => {
-          if (!alive) return;
-          setKanbanError(cause instanceof Error ? cause.message : String(cause));
-        })
-        .finally(() => alive && setKanbanLoading(false));
     };
 
     refresh();

@@ -193,6 +193,103 @@ def build_accounting_sections(repo: LedgerRepository, book_id: UUID) -> dict | N
     }
 
 
+def build_sector_exposure(
+    repo: LedgerRepository,
+    book_id: UUID,
+    positions: list[dict],
+) -> dict:
+    """Resolve sector weights only from canonical reference mappings.
+
+    No sector is inferred from a symbol/name heuristic.  ``industry_code`` is
+    the current reference classification when issuer linkage exists; metadata
+    sector labels are accepted only as an explicitly stored reference value.
+    """
+
+    by_instrument = {
+        str(position.get("instrument_id")): position
+        for position in positions
+        if position.get("instrument_id")
+    }
+    if not by_instrument:
+        return {
+            "status": "unavailable_no_positions",
+            "mapped_positions": 0,
+            "unmapped_positions": 0,
+            "exposure": {},
+        }
+
+    try:
+        with repo.cursor() as cur:
+            cur.execute(
+                """
+                select ph.instrument_id::text,
+                       coalesce(
+                         nullif(iss.industry_code, ''),
+                         nullif(iss.metadata ->> 'sector', ''),
+                         nullif(i.metadata ->> 'sector', '')
+                       ) as sector,
+                       case
+                         when nullif(iss.industry_code, '') is not null
+                           then 'reference.issuers.industry_code'
+                         when nullif(iss.metadata ->> 'sector', '') is not null
+                           then 'reference.issuers.metadata.sector'
+                         when nullif(i.metadata ->> 'sector', '') is not null
+                           then 'reference.instruments.metadata.sector'
+                         else null
+                       end as sector_source
+                  from api.position_holdings ph
+                  join reference.instruments i
+                    on i.instrument_id = ph.instrument_id
+                  left join reference.issuers iss
+                    on iss.issuer_id = i.issuer_id
+                 where ph.book_id = %s
+                """,
+                (book_id,),
+            )
+            mappings = {
+                instrument_id: (sector, source)
+                for instrument_id, sector, source in cur.fetchall()
+            }
+    except Exception:  # reference enrichment must not hide NAV/holdings
+        return {
+            "status": "unavailable_reference_mapping",
+            "mapped_positions": 0,
+            "unmapped_positions": len(by_instrument),
+            "exposure": {},
+        }
+
+    exposure: dict[str, Decimal] = {}
+    sources: set[str] = set()
+    mapped = 0
+    for instrument_id, position in by_instrument.items():
+        sector, source = mappings.get(instrument_id, (None, None))
+        if not sector:
+            continue
+        mapped += 1
+        sources.add(str(source))
+        exposure[str(sector)] = exposure.get(str(sector), Decimal(0)) + Decimal(
+            str(position.get("market_value") or "0")
+        )
+
+    total = sum((Decimal(str(p.get("market_value") or "0")) for p in positions), Decimal(0))
+    status = "mapped" if mapped == len(by_instrument) else "partially_mapped"
+    if mapped == 0:
+        status = "unavailable_reference_mapping"
+    return {
+        "status": status,
+        "mapped_positions": mapped,
+        "unmapped_positions": max(0, len(by_instrument) - mapped),
+        "sources": sorted(sources),
+        "exposure": {
+            sector: {
+                "market_value": _d(value),
+                "weight": _d(value / total) if total else None,
+            }
+            for sector, value in sorted(exposure.items())
+        },
+    }
+
+
 if __name__ == "__main__":
     try:
         from dotenv import load_dotenv
