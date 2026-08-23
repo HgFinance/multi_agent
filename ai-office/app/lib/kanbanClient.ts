@@ -58,18 +58,19 @@ function isKanbanCard(value: unknown): value is HermesKanbanCard {
 
 function isHermesKanbanBoard(value: unknown): value is HermesKanbanBoard {
   if (!isRecord(value)) return false;
+  const columns = value.columns;
   if (
     value.schema_version !== "hermes.agent-kanban.v1" ||
     value.source !== "hermes-kanban" ||
     value.read_only !== true ||
     typeof value.observed_at !== "string" ||
-    !isRecord(value.columns)
+    !isRecord(columns)
   ) {
     return false;
   }
 
   return HERMES_KANBAN_COLUMNS.every((column) => {
-    const cards = value.columns[column];
+    const cards = columns[column];
     return Array.isArray(cards) && cards.every(isKanbanCard);
   });
 }
