@@ -19,7 +19,7 @@ python3 skills/agentic-rag/main.py --persona compliance-policy-agent --query "..
 python3 departments/01-research/collectors/collector_scheduler.py --check                              # 네트워크 없음
 python3 departments/01-research/api/external_sources.py                                                # 네트워크 없음
 supabase db reset                                    # 운영 DB: supabase/migrations/, 시계열: timescaledb/migrations/
-python scripts/check_test_user_wiring.py             # 테스트 계정 3명: 프론트 하드코딩 ↔ 실 DB 대조(읽기 전용)
+python scripts/check_test_user_wiring.py             # fixture actor map ↔ 실 DB 대조(읽기 전용)
 python -m unittest discover -s tests/schema -p "test_*.py" -v
 ```
 

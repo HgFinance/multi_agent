@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
-"""테스트 계정 3명의 체인이 프론트엔드 하드코딩과 실 DB에서 **일치하는지** 대조한다.
+"""고정 프론트엔드 테스트 계정 체인이 실 DB와 **일치하는지** 대조한다.
 
 ## 왜 필요한가
 
-2026-08-12에 플레이스홀더 회원 3명을 `supabase/seed.sql`에 넣었는데, 그 회원이
-소유하는 Fund 3개(2026-08-13)는 라이브 DB에만 만들고 seed에는 넣지 않았다. 그
-상태로 일주일 가까이 아무도 몰랐다 — `supabase db reset`을 하면 프론트엔드가
-하드코딩한 `fund_id`가 존재하지 않는 행을 가리키는데, reset을 안 하니 드러나지
-않았다. `governance.fund_memberships`가 0건이라 RLS 함수
+플레이스홀더 회원과 그 사용자가 소유하는 Fund가 한동안 별도로 관리돼,
+`supabase db reset`을 하면 프론트엔드가 하드코딩한 `fund_id`가 존재하지 않는 행을
+가리키는데 reset을 안 하니 드러나지 않았다. `governance.fund_memberships`가 0건이라 RLS 함수
 `governance.can_access_fund()`가 service_role 외 전부 false를 뱉고 있던 것도
 같은 이유로 묻혀 있었다.
 
 **이 스크립트는 그 어긋남을 실행 한 번으로 드러낸다.** 세 곳을 대조한다:
 
-  1. `ai-office/app/lib/currentAccount.ts`의 `TEST_ACCOUNTS` (프론트엔드 하드코딩)
+  1. `.env`의 `DISCORD_ACTOR_MAP` 첫 binding (프론트엔드·Discord 공통 fixture 설정)
   2. 실 DB의 `auth.users` / `governance.user_profiles` / `accounting.funds`
   3. 실 DB의 `governance.fund_memberships` (소유 관계)
 
@@ -47,21 +45,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ACCOUNTS_TS = REPO_ROOT / "ai-office" / "app" / "lib" / "currentAccount.ts"
-
-# `userId: "..."` / `fundId: "..."` 를 순서대로 뽑는다. `fundId: null`도 잡아서
-# "화면은 Fund가 없다고 보는데 DB에는 있다"는 어긋남까지 드러낸다.
-_ACCOUNT_RE = re.compile(
-    r'userId:\s*"([0-9a-fA-F-]{36})"'
-    r'.*?fundId:\s*(?:"([0-9a-fA-F-]{36})"|null)'
-    r'.*?label:\s*"([^"]*)"',
-    re.DOTALL,
-)
-# label이 userId보다 앞에 오는 항목도 있으므로 두 순서를 모두 시도한다.
-_ACCOUNT_RE_LABEL_FIRST = re.compile(
-    r'userId:\s*"([0-9a-fA-F-]{36})"'
-    r',\s*label:\s*"([^"]*)"'
-    r'.*?fundId:\s*(?:"([0-9a-fA-F-]{36})"|null)',
-    re.DOTALL,
+_ACTOR_MAP_ENTRY_RE = re.compile(
+    r"^\d{15,25}:([0-9a-fA-F-]{36}):([0-9a-fA-F-]{36})$"
 )
 
 
@@ -89,34 +74,28 @@ def read_env_value(name: str) -> str | None:
 
 
 def parse_frontend_accounts() -> list[dict[str, str | None]]:
-    """`currentAccount.ts`의 `TEST_ACCOUNTS`를 읽는다.
+    """`DISCORD_ACTOR_MAP`의 첫 유효 binding을 프론트 fixture 계정으로 읽는다.
 
-    TypeScript를 실행하지 않고 정규식으로 뽑는 이유: 이 점검을 돌리려고 Node 런타임을
-    요구하면 DB 담당자가 못 돌린다. 대신 파싱에 실패하면 조용히 0건을 주지 않고
-    예외로 멈춘다 - "계정이 0개라 전부 일치"는 최악의 거짓 통과다.
+    프론트가 이 환경 변수에서 같은 값을 받는지 소스도 함께 확인한다. map은 Discord
+    작성자마다 여러 entry를 가질 수 있지만, 고정 프론트 fixture는 첫 유효 3칸 binding
+    하나만 쓴다.
     """
 
     if not ACCOUNTS_TS.exists():
         raise SystemExit(f"프론트엔드 계정 파일을 찾지 못했다: {ACCOUNTS_TS}")
     source = io.open(ACCOUNTS_TS, encoding="utf-8").read()
-    block_start = source.find("TEST_ACCOUNTS")
-    if block_start < 0:
-        raise SystemExit(f"{ACCOUNTS_TS}에 TEST_ACCOUNTS 선언이 없다")
-    block = source[block_start:]
+    if "DISCORD_ACTOR_MAP" not in source:
+        raise SystemExit(f"{ACCOUNTS_TS}가 DISCORD_ACTOR_MAP을 참조하지 않는다")
 
-    accounts: list[dict[str, str | None]] = []
-    for match in _ACCOUNT_RE_LABEL_FIRST.finditer(block):
-        user_id, label, fund_id = match.groups()
-        accounts.append({"user_id": user_id, "label": label, "fund_id": fund_id})
-    if not accounts:
-        for match in _ACCOUNT_RE.finditer(block):
-            user_id, fund_id, label = match.groups()
-            accounts.append({"user_id": user_id, "label": label, "fund_id": fund_id})
-    if not accounts:
-        raise SystemExit(
-            f"{ACCOUNTS_TS}에서 계정을 하나도 파싱하지 못했다 - 파일 형식이 바뀌었는지 확인하라"
-        )
-    return accounts
+    raw = read_env_value("DISCORD_ACTOR_MAP")
+    if not raw:
+        raise SystemExit("DISCORD_ACTOR_MAP이 비어 있다")
+    for entry in re.split(r"[,\s]+", raw):
+        match = _ACTOR_MAP_ENTRY_RE.fullmatch(entry.strip())
+        if match:
+            user_id, fund_id = match.groups()
+            return [{"user_id": user_id, "label": "fixture", "fund_id": fund_id}]
+    raise SystemExit("DISCORD_ACTOR_MAP에 유효한 discord_id:user_id:fund_id binding이 없다")
 
 
 def main() -> int:
