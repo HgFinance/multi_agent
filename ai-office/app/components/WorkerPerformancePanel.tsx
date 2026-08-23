@@ -166,7 +166,9 @@ export default function WorkerPerformancePanel({ metrics }: { metrics: LlmPerfor
             <p className="m-0 text-label-md font-label-md uppercase text-on-surface-variant">Workforce · Worker Observability</p>
             <h2 id="worker-performance-title" className="mt-2 text-headline-md font-headline-md font-bold text-primary">Worker 지연·토큰 현황</h2>
             <p className="mt-2 max-w-3xl text-body-sm font-body-sm text-on-surface-variant">
-              HR이 관찰하는 최근 Worker 지연·토큰·실행 상태가 아직 수집되지 않았습니다.
+              포트폴리오 추천 파이프라인이 이 BFF에서 실행되며 남긴 Worker 지연·토큰·실행 상태가 아직 없습니다. 다른
+              경로(Hermes/Kanban 배차)로 실행된 Worker는 이 카드에 잡히지 않습니다 - 전체 Worker는{" "}
+              <span className="font-semibold text-on-surface">투자본부 Worker 유휴 상태</span> 카드를 보세요.
             </p>
           </div>
         </div>
@@ -196,7 +198,9 @@ export default function WorkerPerformancePanel({ metrics }: { metrics: LlmPerfor
             <p className="m-0 text-label-md font-label-md uppercase text-on-surface-variant">Workforce · Worker Observability</p>
             <h2 id="worker-performance-title" className="mt-2 text-headline-md font-headline-md font-bold text-primary">Worker 지연·토큰 현황</h2>
             <p className="mt-2 max-w-3xl text-body-sm font-body-sm text-on-surface-variant">
-              HR이 관찰하는 전체 Worker 실행 지표입니다. 모델 입력·출력 원문은 표시하거나 전송하지 않습니다.
+              포트폴리오 추천 파이프라인이 이 BFF에서 실행되며 호출한 Worker만의 지표입니다(재시작 시 초기화, 최근
+              100건). 다른 경로(Hermes/Kanban 배차)로 실행된 Worker나 회사 전체 현황은 이 카드에 없습니다. 모델
+              입력·출력 원문은 표시하거나 전송하지 않습니다.
             </p>
           </div>
           <div className="shrink-0 rounded-md border border-outline-variant bg-surface-container-low px-4 py-3 text-right">
