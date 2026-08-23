@@ -7,6 +7,7 @@ import {
 } from "../lib/operationsClient";
 import AccountingLedgerPanel from "../components/AccountingLedgerPanel";
 import LivePortfolioPanel from "../components/LivePortfolioPanel";
+import WorkerPerformancePanel from "../components/WorkerPerformancePanel";
 
 /**
  * 선택한 부서 한 곳의 직원 Registry·내부 메시지·LLM 성과.
@@ -163,6 +164,7 @@ export default function DepartmentInspector({
       {/* 회계는 주문 상태가 아니라 확정된 거래와 비용을 본다. 같은 패널을
           돌려 쓰면 미확정 주문이 장부 화면에 올라온다. */}
       {department.domain === "accounting" ? <AccountingLedgerPanel /> : null}
+      {department.domain === "workforce" ? <WorkerPerformancePanel metrics={data.metrics} /> : null}
     </section>
   );
 }

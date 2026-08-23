@@ -4,7 +4,6 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactN
 import {
   fetchOperations,
   subscribeOperationsStream,
-  type LlmPerformanceMetric,
   type OperationsDepartment,
   type OperationsView,
 } from "../lib/operationsClient";
@@ -35,112 +34,6 @@ const STATUS_VIEW: Record<string, { label: string; tone: string }> = {
 
 const EMPTY_DEPARTMENTS: OperationsDepartment[] = [];
 const NO_SUBSCRIBE = () => () => {};
-
-function formatLatency(value: number): string {
-  if (!Number.isFinite(value) || value < 0) return "측정값 없음";
-  return value >= 1_000 ? `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}초` : `${Math.round(value)}ms`;
-}
-
-function percentile(values: number[], percentileValue: number): number | null {
-  if (values.length === 0) return null;
-  const sorted = [...values].sort((left, right) => left - right);
-  return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * percentileValue) - 1)];
-}
-
-function PerformanceMetrics({ metrics }: { metrics: LlmPerformanceMetric[] }) {
-  const measured = metrics.filter((item) => Number.isFinite(item.latency_ms) && item.latency_ms >= 0);
-  if (measured.length === 0) {
-    return (
-      <section className="overflow-hidden rounded-lg border border-outline-variant bg-surface-container-lowest" aria-label="Worker 성능 지표">
-        <header className="flex items-center gap-3 border-b border-outline-variant bg-surface-container-low px-4 py-3">
-          <span className="material-symbols-outlined rounded-md border border-outline-variant bg-surface-container-lowest p-1.5 text-[20px] text-primary" aria-hidden="true">
-            monitoring
-          </span>
-          <h3 className="m-0 text-title-md font-title-md text-primary">Worker 성능 지표</h3>
-        </header>
-        <p className="m-0 p-4 text-body-sm font-body-sm text-on-surface-variant">
-          HR이 관찰하는 최근 Worker 지연·토큰·실행 상태가 아직 수집되지 않았습니다.
-        </p>
-      </section>
-    );
-  }
-
-  const latencies = measured.map((item) => item.latency_ms);
-  const average = Math.round(latencies.reduce((total, value) => total + value, 0) / latencies.length);
-  const p95 = percentile(latencies, 0.95);
-  const tokenTotal = measured.reduce(
-    (total, item) => total + (item.prompt_tokens ?? 0) + (item.completion_tokens ?? 0),
-    0,
-  );
-  const hasTokenMeasurement = measured.some(
-    (item) => item.prompt_tokens != null || item.completion_tokens != null,
-  );
-  const recent = [...measured].slice(-10).reverse();
-
-  return (
-    <section className="overflow-hidden rounded-lg border border-outline-variant bg-surface-container-lowest" aria-label="Worker 성능 지표">
-      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-outline-variant bg-surface-container-low px-4 py-3">
-        <div className="flex min-w-0 items-center gap-3">
-          <span className="material-symbols-outlined shrink-0 rounded-md border border-outline-variant bg-surface-container-lowest p-1.5 text-[20px] text-primary" aria-hidden="true">
-            monitoring
-          </span>
-          <div className="min-w-0">
-            <h3 className="m-0 text-title-md font-title-md text-primary">Worker 성능 지표</h3>
-            <p className="m-0 mt-1 text-xs text-on-surface-variant">
-            HR이 관찰하는 전체 Worker 실행 지표입니다. 모델 입력·출력 원문은 표시하거나 전송하지 않습니다.
-            </p>
-          </div>
-        </div>
-        <span className="rounded-full border border-outline-variant bg-surface-container-lowest px-2.5 py-0.5 text-xs text-on-surface-variant">표본 {measured.length}건</span>
-      </header>
-      <div className="p-4">
-      <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
-        {[
-          ["평균 지연", formatLatency(average)],
-          ["P95 지연", p95 === null ? "측정값 없음" : formatLatency(p95)],
-          ["최대 지연", formatLatency(Math.max(...latencies))],
-          ["입·출력 토큰", hasTokenMeasurement ? tokenTotal.toLocaleString("ko-KR") : "미측정"],
-        ].map(([label, value]) => (
-          <div key={label} className="rounded border border-outline-variant bg-surface-container-low px-3 py-2">
-            <p className="m-0 text-xs text-on-surface-variant">{label}</p>
-            <strong className="font-data-mono text-body-md text-on-surface">{value}</strong>
-          </div>
-        ))}
-      </div>
-      <div className="mt-3 overflow-x-auto">
-        <table className="w-full min-w-[680px] text-left text-xs">
-          <thead className="text-on-surface-variant">
-            <tr className="border-b border-outline-variant">
-              <th className="pb-2 pr-3 font-medium">부서</th>
-              <th className="pb-2 pr-3 font-medium">Worker</th>
-              <th className="pb-2 pr-3 font-medium">모델</th>
-              <th className="pb-2 pr-3 font-medium">지연</th>
-              <th className="pb-2 pr-3 font-medium">입력/출력 토큰</th>
-              <th className="pb-2 font-medium">상태</th>
-            </tr>
-          </thead>
-          <tbody>
-            {recent.map((metric, index) => (
-              <tr key={`${metric.stage}-${metric.worker_id}-${index}`} className="border-b border-outline-variant/60 text-on-surface">
-                <td className="py-2 pr-3">{metric.stage}</td>
-                <td className="py-2 pr-3 font-data-mono">{metric.worker_id}</td>
-                <td className="py-2 pr-3 font-data-mono">{metric.model_name || "미측정"}</td>
-                <td className="py-2 pr-3 font-data-mono">{formatLatency(metric.latency_ms)}</td>
-                <td className="py-2 pr-3 font-data-mono">
-                  {metric.prompt_tokens == null && metric.completion_tokens == null
-                    ? "미측정"
-                    : `${metric.prompt_tokens ?? 0} / ${metric.completion_tokens ?? 0}`}
-                </td>
-                <td className="py-2">{metric.status}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      </div>
-    </section>
-  );
-}
 
 function usePageHost(): string {
   return useSyncExternalStore(
@@ -808,10 +701,7 @@ export default function AgentLogsView() {
       )}
 
       {selected && data ? (
-        <>
-          <DepartmentInspector department={selected} data={data} />
-          {selected.department_code === "hr-department" ? <PerformanceMetrics metrics={data.metrics} /> : null}
-        </>
+        <DepartmentInspector department={selected} data={data} />
       ) : departments.length > 0 ? (
         <p className="text-body-sm font-body-sm text-on-surface-variant">
           부서 카드를 누르면 부서 상태와 연결된 결과물이 아래에 펼쳐집니다.
