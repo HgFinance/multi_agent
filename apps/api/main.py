@@ -159,6 +159,12 @@ try:
     from .user_orders import router as user_orders_router
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
     from user_orders import router as user_orders_router
+try:
+    from .workforce import WORKFORCE_API_URL
+    from .workforce import router as workforce_router
+except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
+    from workforce import WORKFORCE_API_URL
+    from workforce import router as workforce_router
 from ui_read_model import build_ui_snapshot
 
 app = FastAPI(
@@ -388,6 +394,9 @@ app.include_router(risk_router)
 app.include_router(qa_router)
 app.include_router(user_orders_router)
 app.include_router(conditional_rules_router)
+# HR이 6개 투자본부 Worker의 유휴 상태(ACTIVE/IDLE/UNOBSERVED/UNAVAILABLE)를 읽는
+# 얇은 프록시. 판정 로직은 workforce-api(departments/07-agent-workforce)가 갖는다.
+app.include_router(workforce_router)
 
 
 # Browser는 Domain API를 직접 호출하지 않는다. Mandate 변경은 CEO Office가 소유하므로
@@ -1214,6 +1223,7 @@ def health_ready() -> dict[str, object]:
         #   찌르면 readiness 가 남의 서비스 지연에 묶인다(그건 각 부서 /health/ready 몫).
         "risk": {"status": "READY" if RISK_API_URL else "NOT_CONFIGURED"},
         "qa": {"status": "READY" if QA_API_URL else "NOT_CONFIGURED"},
+        "workforce": {"status": "READY" if WORKFORCE_API_URL else "NOT_CONFIGURED"},
         "control_database": {
             "status": "READY"
             if (
