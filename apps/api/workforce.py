@@ -83,4 +83,16 @@ async def workforce_idle_agents(
     )
 
 
-__all__ = ["WORKFORCE_API_URL", "router", "workforce_idle_agents"]
+@router.get("/ui/workforce/roster")
+async def workforce_roster() -> Any:
+    """등록된 Agent 전원의 고용 상태·현재 Profile Version·모델 좌표.
+
+    순수 프록시다 - `workforce-api GET /workforce/v1/roster`가 이미
+    DATABASE_URL 미설정을 501로 정직하게 응답한다(In-Memory 대체로 위장하지
+    않음, api/app.py 머리말 참고). 여기서 빈 목록으로 바꿔치기하지 않는다.
+    """
+
+    return await _workforce_get("/workforce/v1/roster")
+
+
+__all__ = ["WORKFORCE_API_URL", "router", "workforce_idle_agents", "workforce_roster"]

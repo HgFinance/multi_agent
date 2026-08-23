@@ -11,6 +11,7 @@ import LivePortfolioPanel from "../components/LivePortfolioPanel";
 import ResearchPanel from "../components/ResearchPanel";
 import WorkerPerformancePanel from "../components/WorkerPerformancePanel";
 import WorkforceIdleAgentsPanel from "../components/WorkforceIdleAgentsPanel";
+import WorkforceRosterPanel from "../components/WorkforceRosterPanel";
 
 /**
  * 선택한 부서 한 곳의 직원 Registry·내부 메시지·LLM 성과.
@@ -171,6 +172,7 @@ export default function DepartmentInspector({
         <>
           <WorkerPerformancePanel metrics={data.metrics} />
           <WorkforceIdleAgentsPanel />
+          <WorkforceRosterPanel />
         </>
       ) : null}
       {/* 퀀트는 채택된 알파 전략 - 지금 실제로 도는 페이퍼 컨테이너 1개를 본다
