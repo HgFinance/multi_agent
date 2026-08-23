@@ -320,6 +320,28 @@ const _EMPTY_RESULT: TaskResultResponse = {
 };
 
 /**
+ * Kanban graph는 Hermes profile 이름을, result.departments는 논리 부서 코드를
+ * 사용한다. 두 표현을 여기서만 맞춘다. 알 수 없는 profile은 그대로 두어 BFF가
+ * 새 키를 추가해도 결과를 숨기지 않는다.
+ */
+const DEPARTMENT_CODE_BY_PROFILE: Readonly<Record<string, string>> = {
+  "ceo-agent": "ceo",
+  "research-department": "research",
+  "research-liaison": "research",
+  "quant-backtest-department": "quant",
+  "quant-liaison": "quant",
+  "trading-department": "trading",
+  "accounting-portfolio-department": "accounting",
+  "risk-management": "risk",
+  "qa-department": "qa",
+  "hr-department": "hr",
+};
+
+function departmentCodeForProfile(profile: string): string {
+  return DEPARTMENT_CODE_BY_PROFILE[profile] ?? profile;
+}
+
+/**
  * PR #224의 graph/result API를 정규화한다.
  *
  * `status`+`graph`(10초 주기)와 `result`(15초 주기, 아직 안 왔으면 `null`)를
@@ -333,10 +355,11 @@ export function buildCeoProgress(
   const effectiveResult = result ?? _EMPTY_RESULT;
 
   const summaryFor = (node: TaskGraphResponse["nodes"][number]): string => {
-    if (node.id === graph.root && effectiveResult.result?.summary) {
+    // 최종 synthesis는 `departments`가 아니라 최상위 `result`에만 있다.
+    if ((node.id === graph.root || node.role === "synthesis") && effectiveResult.result?.summary) {
       return effectiveResult.result.summary;
     }
-    return effectiveResult.departments[node.department] ?? "";
+    return effectiveResult.departments[departmentCodeForProfile(node.department)] ?? "";
   };
 
   const cards = graph.nodes.map((node) => {
