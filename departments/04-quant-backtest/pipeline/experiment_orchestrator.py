@@ -28,9 +28,11 @@ from __future__ import annotations
 
 import gc
 import json
+import os
 import sys
 import uuid
 from dataclasses import dataclass, field
+from numbers import Integral
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -61,7 +63,9 @@ TRIAL_RESERVATION_OPTIONAL_KEYS = frozenset({"counted_aliases"})
 from strategy_templates import (           # noqa: E402  (같은 디렉터리 모듈)
     NOT_IMPLEMENTED,
     TEMPLATES,
+    _mk,
     resolve,
+    signal_scores,
     template_for_edge,
 )
 
@@ -87,6 +91,66 @@ STRATEGY_CATALOG: dict[str, dict] = {
     }
     for t in TEMPLATES.values()
 }
+
+
+def zero_experiment_edges(experiment_counts: dict[str, int],
+                          edge_vocab=None) -> list[str]:
+    """Return implemented edge types with no recorded experiment executions.
+
+    The factory census reports this as a dead transition. Keep the check pure:
+    callers supply already-counted ledger rows, while the execution catalog
+    remains the single source of truth. Missing keys count as zero, but negative
+    counts are rejected because they indicate a broken census query.
+    """
+    vocab = STRATEGY_CATALOG if edge_vocab is None else edge_vocab
+    out = []
+    for edge in sorted(vocab):
+        raw = experiment_counts.get(edge, 0)
+        # Census counts are data, not user-friendly numeric input. Coercion
+        # silently turns 1.5/True/"3" into executions and makes malformed
+        # ledger input look healthy. Accept integer-like scalar types only.
+        if isinstance(raw, bool) or not isinstance(raw, Integral):
+            raise ValueError(f"invalid experiment count for {edge!r}: {raw!r}")
+        count = int(raw)
+        if count < 0:
+            raise ValueError(f"negative experiment count for {edge!r}: {count}")
+        if count == 0:
+            out.append(edge)
+    return out
+
+
+def smoke_experiment_edges(edge_vocab=None) -> dict[str, dict]:
+    """Execute one deterministic signal path for each requested edge.
+
+    This is deliberately a smoke execution, not a ledger count: it proves that
+    a catalog entry can reach its own template and produce measured scores on a
+    fixed PIT fixture.  A failed edge is not substituted with another template.
+    """
+    vocab = STRATEGY_CATALOG if edge_vocab is None else edge_vocab
+    market = _mk(n_days=90)
+    # The fixture's fixed liquidity shock is at indices 55..59.  Evaluating at
+    # that date makes liquidity_shock_reversal observable while still providing
+    # the 60-day history required by breakout and illiquidity_premium.
+    until = market.dates[59]
+    params = {"lookback_days": 20, "adv_window": 60}
+    report = {}
+    for edge in sorted(vocab):
+        template = template_for_edge(edge)
+        if template is None:
+            why = NOT_IMPLEMENTED.get(edge, "template lookup failed")
+            raise RuntimeError(f"{edge!r} is not runnable: {why}")
+        scores = signal_scores(market, until, template=template, params=params)
+        if not scores:
+            raise RuntimeError(
+                f"{edge!r} smoke execution returned no measured scores"
+            )
+        report[edge] = {
+            "template_id": template.template_id,
+            "score_count": len(scores),
+            "status": "SMOKE_EXECUTED",
+        }
+    return report
+
 # v2 부터 notional 을 담는다(유동성 계층 슬리피지 재료). v1 파티션 파일은
 # v2 빌드가 같은 경로에 덮어써 매니페스트와 해시가 어긋난다 - 해시 가드가
 # 실제로 그것을 잡았다("재현성이 깨진 채 돌지 않는다").
@@ -240,13 +304,24 @@ def dataset_of(hyp: dict) -> tuple[str, str]:
 
 
 def execution_data_products(products) -> list:
-    """Add the daily price primitive required by every executable strategy."""
+    """Add the daily price primitive only for daily execution lanes.
+
+    INTRADAY_EVENT hypotheses are replayed from a typed raw-event authority;
+    forcing market_bars into their requirements makes the resolver demand
+    one manifest covering daily bars and raw quotes/ticks, which no governed
+    intraday authority is allowed to provide.
+    """
     out = list(products or [])
+    has_raw_events = {str(product) for product in out} >= {
+        "market_quotes", "market_ticks"
+    }
     has_bars = any(
         str(product) == "market_bars"
         or str(product).startswith(f"{DATASET_NAME}/")
         for product in out
     )
+    if has_raw_events:
+        return out
     return out if has_bars else ["market_bars", *out]
 
 
@@ -977,6 +1052,17 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         from source_registry import load_project_env
 
         env = load_project_env()
+        # Runner containers expose the unified control DSN as QUANT_DATABASE_URL.
+        # Prefer explicit *process* role-specific DSNs, but do not let a stale
+        # .env value (often localhost:5434 in this workspace) hide a live
+        # mounted service. load_project_env() merges .env first, so checking
+        # env[...] here would incorrectly preserve that stale value.
+        unified_dsn = os.environ.get("QUANT_DATABASE_URL", "")
+        if unified_dsn:
+            if not os.environ.get("DATABASE_URL"):
+                env["DATABASE_URL"] = unified_dsn
+            if not os.environ.get("TIMESCALE_DATABASE_URL"):
+                env["TIMESCALE_DATABASE_URL"] = unified_dsn
         if own_conn and not env.get("DATABASE_URL"):
             # A runner container may have market access but no metadata-writer DSN.
             # Report this as an honest execution-surface block instead of raising
@@ -2087,6 +2173,10 @@ def _check_feasibility_gate():
         {"expected_edge": {"type": "mean_reversion"},
          "required_data_products": ["krx-basket-daily/v1"]}, ds)
     assert ok_rev, "REV-5 구현 후에도 mean_reversion 이 막혀 있다"
+    # Typed raw-event authority owns its inputs; daily bars must not be
+    # forced into an intraday manifest resolution request.
+    assert execution_data_products(["market_quotes", "market_ticks"]) == ["market_quotes", "market_ticks"]
+    assert execution_data_products(["market_bars"]) == ["market_bars"]
     # 미구현 전략 -> NOT_RUNNABLE (카탈로그에 없는 가상 전략으로 검증)
     ok2, missing2, backlog2 = feasibility(
         {"expected_edge": {"type": "pairs_trading"},
@@ -2394,6 +2484,43 @@ def _check_chain_failure_releases_hypothesis():
         f"실패 후 PROPOSED 복귀가 없다 - RUNNING 감금 재발: {cur.update_sqls}"
 
 
+def _check_zero_experiment_edges_is_deterministic():
+    """Dead-transition census is explicit and never treats missing as executed."""
+    counts = {
+        "breakout": 0,
+        "illiquidity_premium": 0,
+        "liquidity_shock_reversal": 0,
+        "low_max": 0,
+        "low_volatility": 0,
+        "momentum": 3,
+    }
+    target = {
+        "breakout", "illiquidity_premium", "liquidity_shock_reversal",
+        "low_max", "low_volatility",
+    }
+    assert zero_experiment_edges(counts, target) == sorted(target)
+    assert zero_experiment_edges({"momentum": 3}, {"momentum"}) == []
+    # F2P: every observed dead edge gets one real deterministic smoke execution
+    # before it can be removed or reported as NOT_IMPLEMENTED.
+    smoke = smoke_experiment_edges(target)
+    assert set(smoke) == target
+    assert all(item["status"] == "SMOKE_EXECUTED" and item["score_count"] > 0
+               for item in smoke.values()), smoke
+    try:
+        zero_experiment_edges({"momentum": -1}, {"momentum"})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("negative census count was accepted")
+    for bad in (1.5, True, "3"):
+        try:
+            zero_experiment_edges({"momentum": bad}, {"momentum"})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"malformed census count was accepted: {bad!r}")
+
+
 def _check_dataset_comes_from_hypothesis():
     """**데이터셋은 사상 결과에서 온다 - 상수가 아니다.** (2026-08-12)
 
@@ -2546,6 +2673,8 @@ if __name__ == "__main__":
     # 정의만 해 두고 부르지 않던 검사 - 안 부르는 검사는 검사가 아니다
     _check_dataset_comes_from_hypothesis()
     print("  데이터셋 상수 아님       OK")
+    _check_zero_experiment_edges_is_deterministic()
+    print("  죽은전이 계열 계수       OK")
     _check_gate_note_carries_the_distance()
     print("  기각에도 관문 거리 적재   OK")
     _check_self_falsification_is_wired()

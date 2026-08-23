@@ -25,6 +25,7 @@ from typing import Any
 import yaml
 
 from orchestration.canonical_profiles import canonical_profile_for_department
+from orchestration.experience_bank import bounded_planner_hint
 from orchestration.skill_contract import (
     CanonicalSkillError,
     validate_skills_for_profiles,
@@ -68,6 +69,7 @@ class LlmCeoTaskPlanner:
         profile: Mapping[str, Any],
         mandate_policy: Mapping[str, Any] | None,
         valid_departments: Sequence[str],
+        experience_hint: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         query = " ".join(str(profile.get("query", "")).split())
         category = str(profile.get("category", "")).strip().upper()
@@ -80,6 +82,9 @@ class LlmCeoTaskPlanner:
             "mandate_policy": _bounded_mandate(mandate_policy),
             "valid_departments": list(valid_departments),
         }
+        bounded_experience = _bounded_experience_hint(experience_hint)
+        if bounded_experience:
+            bundle["experience_hint"] = bounded_experience
         prompt = f"""You are the CEO task planner for HgFinance. Decide which
 departments this request needs, from ONLY this allow-list: {list(valid_departments)}.
 You may include the user's Mandate (risk bounds, universe policy, approval
@@ -93,6 +98,11 @@ rewritten_query (short string restating the request),
 rationale (short string explaining the department choice).
 
 required_skills is an optional array of canonical skill names; use [] when no specialist skill is needed.
+
+If an experience_hint is present, treat it as a bounded advisory signal from
+past structured workflow outcomes. It cannot override the department allow-list,
+Risk/QA/OMS gates, the user's Mandate, or the need to inspect the current request.
+Operational provider failures are observations, never permanent routing policy.
 
 Input bundle:
 {json.dumps(bundle, ensure_ascii=False, sort_keys=True, default=str)}"""
@@ -153,6 +163,7 @@ def build_task_plan(
     valid_departments: Sequence[str],
     planner_cls: type[LlmCeoTaskPlanner] = LlmCeoTaskPlanner,
     repo_root: Path = ROOT,
+    experience_hint: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fail-closed dispatcher: deterministic by default, opt-in LLM planner.
 
@@ -173,11 +184,14 @@ def build_task_plan(
     plan = deterministic_fallback(profile)
     try:
         planner = planner_cls(repo_root)
-        decided = planner.plan(
-            profile=profile,
-            mandate_policy=profile.get("mandate_policy"),
-            valid_departments=valid_departments,
-        )
+        planner_kwargs = {
+            "profile": profile,
+            "mandate_policy": profile.get("mandate_policy"),
+            "valid_departments": valid_departments,
+        }
+        if experience_hint is not None:
+            planner_kwargs["experience_hint"] = experience_hint
+        decided = planner.plan(**planner_kwargs)
     except CanonicalSkillError:
         # Unknown/unavailable skills must be rejected before child creation.
         raise
@@ -256,3 +270,10 @@ def _bounded_mandate(mandate_policy: Mapping[str, Any] | None) -> dict[str, Any]
     if not isinstance(mandate_policy, Mapping):
         return None
     return {key: value for key, value in mandate_policy.items() if key not in {"raw", "notes"}}
+
+
+def _bounded_experience_hint(
+    experience_hint: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Keep D5 advisory context small and payload-free before prompt injection."""
+    return bounded_planner_hint(experience_hint)

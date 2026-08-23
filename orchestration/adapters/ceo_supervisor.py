@@ -69,6 +69,10 @@ from orchestration.failure_taxonomy import FailureKind, classify_failure
 from orchestration.adapters.department_notion_projection import (
     DepartmentNotionProjection,
 )
+from orchestration.experience_bank import (
+    ExperienceBank,
+    build_discord_experience_record,
+)
 from orchestration.kanban_retention_lock import workflow_mutation_lock
 from orchestration.kanban_root_index import (
     RootScopedIndexUnavailable,
@@ -2701,6 +2705,7 @@ class CeoSupervisorService:
         qa_projection: Any | None = None,
         discord_delivery: DiscordFinalDelivery | None = None,
         department_notion_projection: Any | None = None,
+        experience_bank: ExperienceBank | None = None,
     ) -> None:
         self.client = client
         self.max_retries = max_retries
@@ -2711,6 +2716,7 @@ class CeoSupervisorService:
         self.synthesis_projection = synthesis_projection
         self.qa_projection = qa_projection
         self.discord_delivery = discord_delivery
+        self.experience_bank = experience_bank or ExperienceBank.from_env()
         self._department_notion_projection = (
             department_notion_projection
             if department_notion_projection is not None
@@ -2753,6 +2759,68 @@ class CeoSupervisorService:
         self._parent_locks_lock = threading.Lock()
         self._closed_root_traces: set[str] = set()
         self._closed_root_traces_lock = threading.Lock()
+        self._d5_recorded_roots: set[str] = set()
+        self._d5_recording_roots: set[str] = set()
+        self._d5_record_lock = threading.Lock()
+
+    def _record_discord_experience_once(
+        self,
+        *,
+        root_id: str,
+        root_payload: Mapping[str, Any],
+    ) -> None:
+        """Record one safe D5 aggregate after the response-plane finalization."""
+
+        if not getattr(self.experience_bank, "enabled", False):
+            return
+        root = str(root_id or "").strip()
+        body = str(root_payload.get("body") or "")
+        if (
+            not root
+            or not is_user_query_body(body)
+            or user_paper_order_scope_from_body(body) is not None
+        ):
+            return
+        with self._d5_record_lock:
+            if root in self._d5_recorded_roots or root in self._d5_recording_roots:
+                return
+            self._d5_recording_roots.add(root)
+        try:
+            workflow_root, task_payloads = self.client.workflow(root)
+            if workflow_root != root:
+                return
+            terminal_status = str(
+                root_payload.get("status")
+                or root_payload.get("outcome")
+                or "completed"
+            )
+            record = build_discord_experience_record(
+                root_id=root,
+                root_payload=root_payload,
+                task_payloads=task_payloads,
+                terminal_status=terminal_status,
+            )
+            result = self.experience_bank.record(record)
+            if result.available:
+                with self._d5_record_lock:
+                    self._d5_recorded_roots.add(root)
+            logger.info(
+                "memo_harness_d5_discord_record root=%s mode=%s "
+                "available=%s written=%s",
+                root,
+                result.mode,
+                str(result.available).lower(),
+                str(result.written).lower(),
+            )
+        except Exception as exc:  # noqa: BLE001 - D5 is advisory/fail-open.
+            logger.warning(
+                "memo_harness_d5_discord_record_failed root=%s error=%s",
+                root,
+                type(exc).__name__,
+            )
+        finally:
+            with self._d5_record_lock:
+                self._d5_recording_roots.discard(root)
 
     def _close_root_trace(
         self,
@@ -2763,6 +2831,11 @@ class CeoSupervisorService:
         error_class: str | None = None,
     ) -> bool:
         """Close one root trace after the existing response-plane decision."""
+
+        self._record_discord_experience_once(
+            root_id=root_id,
+            root_payload=root_payload,
+        )
 
         with self._closed_root_traces_lock:
             if root_id in self._closed_root_traces:

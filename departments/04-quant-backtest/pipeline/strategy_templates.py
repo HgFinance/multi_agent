@@ -380,6 +380,11 @@ class PITView:
             a = self._m.closes.get((idx[i - 1], symbol))
             b = self._m.closes.get((idx[i], symbol))
             if a is not None and b is not None and float(a) > 0:
+                # Corporate-action-like integer gaps are unit changes, not returns.
+                # Do not emit the fabricated +900%/+2900% observation; leave the
+                # date absent so downstream PIT joins cannot treat it as measured.
+                if looks_like_unadjusted_adjustment_gap(float(a), float(b)):
+                    continue
                 out[idx[i]] = float(b) / float(a) - 1.0
         return out
 
@@ -1202,6 +1207,10 @@ def _check_unadjusted_split_does_not_become_a_return():
     v = PITView(m, m.dates[-1])
     # 조정 점프가 창 안에 있으면 그 종목의 장기 수익률은 계산되지 않는다
     assert v.total_return("SPLIT10", 30) is None, v.total_return("SPLIT10", 30)
+    # 날짜별 수익률 경로도 같은 보호선을 써야 한다. 이 검사는 기존
+    # returns_by_date가 100 -> 1000을 +900%로 내보내던 결함을 먼저 드러낸다.
+    split_returns = v.returns_by_date("SPLIT10", 30)
+    assert all(abs(r) < 1.0 for r in split_returns.values()), split_returns
     # 진짜 급등과 정상 종목은 그대로 산출된다(과잉 차단 금지)
     assert v.total_return("SURGE", 30) is not None
     assert v.total_return("REAL", 30) is not None

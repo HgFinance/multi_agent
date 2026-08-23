@@ -174,8 +174,16 @@ def _check_author_is_recorded():
 def _check_brief_reads_it():
     """**적으면 다음 주기에 도달하는가.** 안 닿으면 적을 이유가 없다."""
     import inspect
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]
-                           / "01-research" / "factory"))
+    # The writable quant workspace is mounted beside the canonical read-only
+    # repo in production; the old parents[2] layout resolves to /app and misses
+    # the shared research package there.
+    for _factory in (
+        Path("/app/repo/departments/01-research/factory"),
+        Path(__file__).resolve().parents[2] / "01-research" / "factory",
+    ):
+        if _factory.is_dir():
+            sys.path.insert(0, str(_factory))
+            break
     import cycle_brief  # noqa: PLC0415
 
     src = inspect.getsource(cycle_brief.load_lessons)

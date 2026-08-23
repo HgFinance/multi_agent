@@ -650,6 +650,7 @@ def build_root_body(
     langsmith_trace_context: str | None = None,
     advisory_fund_id: str | None = None,
     advisory_book_id: str | None = None,
+    experience_hint: Mapping[str, Any] | None = None,
 ) -> str:
     """Build a root body that is unambiguous before the root ID exists.
 
@@ -739,6 +740,7 @@ def build_root_body(
             normalized = str(value or "").strip()
             if normalized and not any(char.isspace() or char == "=" for char in normalized):
                 advisory_lines += f"{marker}={normalized}\n"
+    experience_lines = _experience_hint_section(experience_hint)
     return (
         f"{CEO_WORKFLOW_SCOPE_MARKER}\n"
         f"workflow_scope={CEO_WORKFLOW_SCOPE_POLICY}\n"
@@ -750,6 +752,7 @@ def build_root_body(
         f"{discord_lines}"
         f"{langsmith_line}"
         f"{advisory_lines}"
+        f"{experience_lines}"
         f"qa_enabled={str(canonical_qa_enabled).lower()}\n"
         f"qa_blocks_response={str(canonical_qa_blocks).lower()}\n"
         "response_plane=primary_results_ready\n"
@@ -774,6 +777,35 @@ def build_root_body(
         f"{_mandate_section(mandate)}"
         "\n## User request\n"
         f"{query}"
+    )
+
+
+def _experience_hint_section(
+    experience_hint: Mapping[str, Any] | None,
+) -> str:
+    """Render only the bounded active D5 hint into the CEO planning body."""
+
+    if not isinstance(experience_hint, Mapping):
+        return ""
+    try:
+        from orchestration.experience_bank import bounded_planner_hint
+
+        bounded = bounded_planner_hint(experience_hint)
+    except Exception:  # noqa: BLE001 - D5 must never break root creation.
+        return ""
+    if not bounded:
+        return ""
+    encoded = json.dumps(
+        bounded,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )[:2400]
+    return (
+        "## D5 advisory experience hint (non-authoritative)\n"
+        f"{encoded}\n"
+        "Use only as a bounded preference. Deterministic workflow, safety, "
+        "eligibility, QA, Risk, PAPER, and fail-closed rules take precedence.\n"
     )
 
 

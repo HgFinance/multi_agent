@@ -70,6 +70,9 @@ services:
       # Canonical operational/control Postgres. Supabase is an identity
       # provider only and must not be used as this runtime data plane.
       DATABASE_URL: ${DATABASE_URL:?.env needs the private operational PostgreSQL DATABASE_URL}
+      MEMOHARNESS_D5_MODE: ${MEMOHARNESS_D5_MODE:-off}
+      MEMOHARNESS_D5_TOP_K: ${MEMOHARNESS_D5_TOP_K:-5}
+      MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS: ${MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS:-1500}
       CONDITIONAL_RULE_DATABASE_URL: ${CONDITIONAL_RULE_DATABASE_URL:-${DATABASE_URL:-}}
       CONDITIONAL_RULE_DATABASE_ROLE: ${CONDITIONAL_RULE_DATABASE_ROLE:-svc_conditional_rule_orchestrator}
       PORTFOLIO_DATA_MODE: "production"
@@ -330,6 +333,9 @@ services:
       # The worker loads the governed portfolio catalog itself. Omitting this
       # DSN must not make the production worker fall back to test fixtures.
       DATABASE_URL: ${DATABASE_URL:?.env needs the private operational PostgreSQL DATABASE_URL}
+      MEMOHARNESS_D5_MODE: ${MEMOHARNESS_D5_MODE:-off}
+      MEMOHARNESS_D5_TOP_K: ${MEMOHARNESS_D5_TOP_K:-5}
+      MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS: ${MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS:-1500}
       PORTFOLIO_DATA_MODE: "production"
       PORTFOLIO_RUNTIME_STORE_PATH: /var/lib/portfolio/runtime.sqlite3
       PORTFOLIO_RUNTIME_EMBEDDED_WORKER: "false"
@@ -1543,6 +1549,9 @@ services:
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-}
+      MEMOHARNESS_D5_MODE: ${MEMOHARNESS_D5_MODE:-off}
+      MEMOHARNESS_D5_TOP_K: ${MEMOHARNESS_D5_TOP_K:-5}
+      MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS: ${MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS:-1500}
       NOTION_TOKEN: ${NOTION_TOKEN:-}
       NOTION_CEO_DB: ${NOTION_CEO_DB:-}
       DATABASE_URL: ${DATABASE_URL:-}

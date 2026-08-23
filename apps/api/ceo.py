@@ -139,6 +139,7 @@ from orchestration.qa_contract import (
     canonical_qa_contract,
     split_planner_selection,
 )
+from orchestration.experience_bank import ExperienceBank
 
 router = APIRouter(prefix="/ui/ceo", tags=["ceo-office"])
 logger = logging.getLogger(__name__)
@@ -1289,6 +1290,19 @@ def ceo_query(
         )
 
     workflow_mode = infer_workflow_mode(req.query)
+    d5_bank = ExperienceBank.from_env()
+    d5_lookup = None
+    if d5_bank.enabled:
+        d5_lookup = d5_bank.lookup(
+            case_type="discord_ceo",
+            binding=workflow_mode == "binding",
+            correlation_id=req.request_id,
+        )
+    d5_hint = (
+        d5_lookup.planner_hint
+        if d5_lookup is not None and d5_bank.mode == "active"
+        else None
+    )
     root_trace = None
     try:
         from orchestration.llm_observability import start_root_trace
@@ -1320,6 +1334,7 @@ def ceo_query(
                 ),
                 advisory_fund_id=getattr(req, "fund_id", None),
                 advisory_book_id=getattr(req, "book_id", None),
+                experience_hint=d5_hint,
             ),
             idempotency_key=req.request_id,
         )
@@ -1357,6 +1372,69 @@ def ceo_query(
         task["task_id"],
         req.request_id,
     )
+    if d5_lookup is not None:
+        hint_metadata = (
+            d5_lookup.planner_hint
+            if isinstance(d5_lookup.planner_hint, Mapping)
+            else {}
+        )
+
+        def _hint_count(key: str) -> int:
+            value = hint_metadata.get(key)
+            return min(len(value), 20) if isinstance(value, (list, tuple)) else 0
+
+        try:
+            matched_successes = max(
+                0, min(int(hint_metadata.get("successful_runs", 0)), 20)
+            )
+        except (TypeError, ValueError):
+            matched_successes = 0
+        matched_failures = max(d5_lookup.matched_count - matched_successes, 0)
+        error_category = str(d5_lookup.error_code or "NONE")[:64]
+        root_id = str(task["task_id"])
+
+        # The application logger runs above INFO in the production BFF.  Keep
+        # these two events payload-free and use the existing logger so the
+        # already-computed timings are visible in the container log without a
+        # second timer, DB write, network sink, or model call.
+        logger.warning(
+            "event=memo_harness_d5_lookup root_id=%s mode=%s success=%s "
+            "matched_successes=%d matched_failures=%d matched_patterns=%d "
+            "lookup_ms=%d error_category=%s",
+            root_id,
+            d5_lookup.mode,
+            str(bool(d5_lookup.available)).lower(),
+            matched_successes,
+            matched_failures,
+            _hint_count("lessons"),
+            d5_lookup.lookup_ms,
+            error_category,
+        )
+        logger.warning(
+            "event=memo_harness_d5_hint root_id=%s mode=%s hint_present=%s "
+            "hint_injected=%s support_count=%d preferred_policy_count=%d "
+            "avoid_profile_count=%d avoid_pattern_count=%d hint_build_ms=%d",
+            root_id,
+            d5_lookup.mode,
+            str(bool(d5_hint)).lower(),
+            str(d5_lookup.mode == "active" and bool(d5_hint)).lower(),
+            matched_successes,
+            _hint_count("successful_policies"),
+            _hint_count("avoid_profiles"),
+            _hint_count("avoid_patterns"),
+            d5_lookup.hint_build_ms,
+        )
+        logger.info(
+            "ceo-planning root=%s request_id=%s producer=portfolio-bff",
+            str(task["task_id"]),
+            req.request_id,
+        )
+    else:
+        logger.info(
+            "ceo-planning root=%s request_id=%s producer=portfolio-bff",
+            task["task_id"],
+            req.request_id,
+        )
 
     if not hermes_boundary.comment_root_scope(
         task_id=str(task["task_id"]), request_id=req.request_id

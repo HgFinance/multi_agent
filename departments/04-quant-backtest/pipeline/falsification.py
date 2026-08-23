@@ -59,18 +59,56 @@ _PATTERNS = (
         # therefore does not match the legacy "exceed ... charges" branch.
         r"|(?i:(net\s+predicted\s+taker\s+pnl).{0,80}"
         r"(does\s+not\s+exceed|not\s+exceed|fails?\s+to\s+exceed).{0,100}"
-        r"(observed\s+spread|spread).{0,80}(governed\s+round[- ]?trip|round[- ]?trip\s+charges))")),
+        r"(observed\s+spread|spread).{0,80}(governed\s+round[- ]?trip|round[- ]?trip\s+charges))"
+        # Queue criteria also describe the same executable-cost claim using
+        # the measured markout name rather than "net predicted taker PnL".
+        # Keep this branch bounded to an explicit threshold so arbitrary prose
+        # is never upgraded to a runnable test.
+        r"|(?i:(cost[- ]adjusted\s+)?(?:[0-9]+[- ]second\s+)?"
+        r"markout.{0,80}(does\s+not\s+exceed|not\s+exceed|fails?\s+to\s+exceed)"
+        r".{0,30}[0-9]+(?:\.[0-9]+)?\s*(?:bp|bps|basis\s*points))"
+        # Queue criteria use "clear" for the same locked cost hurdle.
+        r"|(?i:(?:cost[- ]adjusted|taker|gated\s+signal|signal).{0,80}"
+        r"(?:does\s+not\s+clear|fails?\s+to\s+clear|cannot\s+clear|fails?\s+cost\s+hurdle)"
+        r".{0,100}(?:spread|charge|fee|hurdle|edge|23\s*bp|11\.5\s*bp))"
+        r"|(?i:(?:signal|pnl|displacement).{0,60}(?:cannot|fails?\s+to)\s+clear\s+spread\s+plus)"
+        r"|(?i:23\s*bp\s+round[- ]?trip\s+hurdle)"
+        r"|(?:(?:주\s*)?상호작용).{0,30}23\s*bp.{0,30}(?:hurdle|비용)")),
     ("window_signs", re.compile(
         r"(롤링|rolling|walk[- ]?forward|창).{0,30}"
         r"(절반|다수|부호|불안정|반전|재현\s*실패|한\s*구간|한\s*국면)"
-        r"|(국면).{0,20}(집중)")),
-    ("window_count", re.compile(r"(walk[- ]?forward|창).{0,12}\d+\s*개\s*미만")),
+        r"|(국면).{0,20}(집중)"
+        r"|(?i:(?:sign|effect|result).{0,60}(?:negative|unstable|one[- ]session|one[- ]regime|confined|reverses?|vanishes?).{0,60}(?:session|regime|out[- ]of[- ]sample|replicate))"
+        r"|(?i:(?:fails?\s+to\s+replicate|confined\s+to|effect\s+is).{0,60}(?:session|regime|instrument|one[- ]session|one[- ]regime))"
+        r"|(?i:(?:effect|result).{0,60}(?:exists|confined|survives).{0,30}(?:one\s+session|one\s+liquidity\s+bucket|independent\s+sessions?))"
+        r"|(?i:failure\s+to\s+replicate.{0,40}(?:sessions?|instruments?))")),
+    ("window_count", re.compile(
+        r"(walk[- ]?forward|창).{0,12}\d+\s*개\s*미만"
+        r"|(?i:(?:fewer|less than|under).{0,20}(?:completed )?(?:KRX )?sessions)"
+        r"|(?i:(?:underpowered|insufficient).{0,30}(?:data|sessions|sample))")),
     ("beats_baseline", re.compile(
         r"(baseline|기준선|벤치마크).{0,20}(대비|보다).{0,20}"
         r"(초과수익\s*없|높지\s*않|이하)"
         r"|(fails?\s+to\s+exceed|does\s+not\s+exceed|not\s+exceed).{0,50}"
         r"(baseline|benchmark|equal[_ ]weight|buy[_ ]and[_ ]hold)"
-        r"|(초과수익|excess\s+return).{0,30}(below|under|less\s+than|이하|없)")),
+        r"|(초과수익|excess\s+return).{0,30}(below|under|less\s+than|이하|없)"
+        r"|(?i:(?:no|not|does not|fails? to).{0,50}(?:incremental|improvement|distinct|positive|difference|better|indistinguishable).{0,60}(?:markout|pnl|return|effect|control|baseline|microprice|midprice|queue|gate|strata))"
+        r"|(?i:(?:does not improve|performs similarly|match(?:es)?|indistinguishable|unchanged).{0,60}(?:microprice|midprice|control|gate|strata|effect|markout|pnl|baseline))"
+        r"|(?i:(?:fails? cost hurdle|non[- ]positive calibration|negative calibration|PIT alignment fails?|alignment failure))"
+        r"|(?i:(?:control|gate|ablation|strata).{0,40}(?:performs similarly|unchanged|indistinguishable))"
+        r"|(?i:(?:effect|markout|pnl).{0,40}(?:unchanged|absent|disappears|indistinguishable))"
+        # Queue proposals also use calibration language for the same
+        # executable sign/baseline test. Keep the branch bounded.
+        r"|(?i:(?:fitted\s+score[- ]?to[- ]?bps|calibration).{0,50}"
+        r"(?:relation|slope).{0,30}(?:non[- ]?positive|negative|zero))"
+        r"|(?i:(?:negative|non[- ]?positive|zero).{0,30}"
+        r"(?:pre[- ]?OOS|calibration).{0,30}(?:relation|slope))"
+        r"|(?i:(?:fails?\s+to\s+add|no\s+incremental).{0,60}"
+        r"(?:net\s+)?(?:[0-9]+[- ]?second\s+)?markout.{0,60}(?:tape[- ]?only|control|baseline))"
+        # A cost hurdle can be phrased as an unchanged hurdle.
+        r"|(?i:(?:fails?\s+to\s+clear|does\s+not\s+clear).{0,50}"
+        r"(?:unchanged\s+)?[0-9]+(?:\.[0-9]+)?\s*bp"
+        r".{0,40}(?:round[- ]?trip|hurdle|cost))")),
     # 창별 최악 낙폭·창간 Sharpe 산포는 `fragility_summary` 가 이미 재는 값이다
     ("window_mdd", re.compile(r"창.{0,10}(MDD|낙폭)")),
     ("window_sharpe_std", re.compile(r"창간?\s*Sharpe.{0,10}(표준편차|산포|std)")),
@@ -296,6 +334,7 @@ _REAL = [                       # 2026-08-12 에이전트가 실제로 쓴 문�
     "호가불균형 분위수별 20일 선도수익률의 단조성이 사라짐",
     "locked predicted BPS exceeds the current spread, governed round-trip charges, and minimum_predicted_edge_bps",
     "net predicted taker PnL does not exceed observed spread plus governed round-trip charges",
+    "cost-adjusted 5-second markout does not exceed 23bp",
 ]
 
 
@@ -313,6 +352,7 @@ def _check_real_sentences_are_classified():
     assert kinds[_REAL[8]] == ("monotonic", True)
     assert kinds[_REAL[9]] == ("cost_stress", True), kinds[_REAL[9]]
     assert kinds[_REAL[10]] == ("cost_stress", True), kinds[_REAL[10]]
+    assert kinds[_REAL[11]] == ("cost_stress", True), kinds[_REAL[11]]
     runnable = sum(1 for k, r in kinds.values() if r)
     print(f"  실제 문장 분류           OK ({runnable}/{len(_REAL)} 실행 가능)")
 

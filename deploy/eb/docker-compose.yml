@@ -43,6 +43,9 @@ services:
     environment:
       PYTHONPATH: /app:/app/apps/api
       DATABASE_URL: *operational-database-url
+      MEMOHARNESS_D5_MODE: ${MEMOHARNESS_D5_MODE:-off}
+      MEMOHARNESS_D5_TOP_K: ${MEMOHARNESS_D5_TOP_K:-5}
+      MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS: ${MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS:-1500}
       PORTFOLIO_DATA_MODE: "production"
       APP_ENV: ${APP_ENV:-production}
       PORTFOLIO_AUTH_MODE: ${PORTFOLIO_AUTH_MODE:-supabase_jwt}
@@ -120,6 +123,9 @@ services:
     environment:
       PYTHONPATH: /app:/app/apps/api
       DATABASE_URL: *operational-database-url
+      MEMOHARNESS_D5_MODE: ${MEMOHARNESS_D5_MODE:-off}
+      MEMOHARNESS_D5_TOP_K: ${MEMOHARNESS_D5_TOP_K:-5}
+      MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS: ${MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS:-1500}
       PORTFOLIO_DATA_MODE: "production"
       PORTFOLIO_RUNTIME_STORE_PATH: /var/lib/portfolio/runtime.sqlite3
       PORTFOLIO_RUNTIME_EMBEDDED_WORKER: "false"

@@ -1070,8 +1070,14 @@ def _print_catalog(rows: list[dict]) -> None:
 if __name__ == "__main__":
     if "--list" in sys.argv:
         import psycopg2                                # noqa: PLC0415
-        sys.path.insert(0, str(Path(__file__).resolve().parents[2]
-                               / "01-research" / "collectors"))
+        # The canonical research mirror is /app/repo. The historical relative
+        # checkout path is retained as a fallback for local source trees.
+        for _research_collectors in (
+            Path("/app/repo/departments/01-research/collectors"),
+            Path(__file__).resolve().parents[2] / "01-research" / "collectors",
+        ):
+            if _research_collectors.is_dir():
+                sys.path.insert(0, str(_research_collectors))
         from source_registry import load_project_env   # noqa: PLC0415
 
         _c = psycopg2.connect(load_project_env()["DATABASE_URL"], connect_timeout=20)

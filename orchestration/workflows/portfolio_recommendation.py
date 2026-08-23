@@ -19,6 +19,7 @@ from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
+from time import monotonic
 from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -32,6 +33,11 @@ from departments.employee_worker_runtime import (
     tools_for_specs,
 )
 from orchestration.adapters.ceo_task_planner import build_task_plan
+from orchestration.experience_bank import (
+    ExperienceBank,
+    build_experience_record,
+    experience_case_type,
+)
 from orchestration.contracts.mas import (
     DepartmentHandoff,
     build_replay_metadata,
@@ -1091,6 +1097,7 @@ def _initial_state(
     profile: Mapping[str, Any],
     candidates: Sequence[Mapping[str, Any]],
     data_context: Mapping[str, Any] | None = None,
+    experience_hint: Mapping[str, Any] | None = None,
 ) -> PortfolioPipelineState:
     now = str(profile.get("as_of", ""))
     seed_hash = _hash({"profile": profile, "candidates": candidates})
@@ -1104,6 +1111,7 @@ def _initial_state(
             profile,
             deterministic_fallback=build_ceo_task_plan,
             valid_departments=DEPARTMENTS,
+            experience_hint=experience_hint,
         ),
         "portfolio_candidates": [dict(item) for item in candidates],
         "data_context": dict(
@@ -1725,6 +1733,8 @@ async def run_portfolio_recommendation_pipeline_async(
     failure remains a degraded, HOLD result.
     """
 
+    workflow_started = monotonic()
+    d5_bank = ExperienceBank.from_env()
     data_context: Mapping[str, Any] | None = None
     if candidates is None:
         adapter_module = _load_control_db_adapter()
@@ -1760,6 +1770,15 @@ async def run_portfolio_recommendation_pipeline_async(
             "summary": "Portfolio recommendation pipeline started.",
         }
     )
+    d5_lookup = await asyncio.to_thread(
+        d5_bank.lookup,
+        case_type=experience_case_type(profile),
+        binding=bool(profile.get("binding", False)),
+    )
+    # Shadow mode deliberately performs the same lookup and timing but does
+    # not alter the existing D4 planner prompt. Active mode is the only mode
+    # allowed to pass the bounded hint into the existing planner.
+    experience_hint = d5_lookup.planner_hint if d5_bank.mode == "active" else None
     app = build_portfolio_recommendation_graph(event_callback=emit)
     with redacted_trace(
         trace_id=event_run_id,
@@ -1767,7 +1786,7 @@ async def run_portfolio_recommendation_pipeline_async(
         stage="portfolio-recommendation",
     ):
         state = await app.ainvoke(
-            _initial_state(profile, candidates, data_context),
+            _initial_state(profile, candidates, data_context, experience_hint),
             config={
                 "run_name": "portfolio-recommendation-full",
                 "tags": [
@@ -1796,6 +1815,12 @@ async def run_portfolio_recommendation_pipeline_async(
     result["pipeline_events"] = pipeline_events
     result["pipeline_event_count"] = len(pipeline_events)
     result["replay"] = build_replay_metadata(profile, candidates, result).model_dump(mode="json")
+    record = build_experience_record(
+        profile,
+        result,
+        latency_ms=int((monotonic() - workflow_started) * 1000),
+    )
+    await asyncio.to_thread(d5_bank.record, record)
     return result
 
 

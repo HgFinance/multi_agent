@@ -111,6 +111,9 @@ services:
     environment:
       <<: *control-environment
       CONTROL_DATABASE_URL: *control-database-url
+      MEMOHARNESS_D5_MODE: ${MEMOHARNESS_D5_MODE:-off}
+      MEMOHARNESS_D5_TOP_K: ${MEMOHARNESS_D5_TOP_K:-5}
+      MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS: ${MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS:-1500}
       ORDER_ORCHESTRATOR_DATABASE_URL: *order-database-url
       CONDITIONAL_RULE_DATABASE_URL: *conditional-orchestrator-database-url
       CONDITIONAL_RULE_DATABASE_ROLE: svc_conditional_rule_orchestrator
@@ -189,7 +192,11 @@ services:
 
   portfolio-worker:
     depends_on: *control-dependency
-    environment: *control-environment
+    environment:
+      <<: *control-environment
+      MEMOHARNESS_D5_MODE: ${MEMOHARNESS_D5_MODE:-off}
+      MEMOHARNESS_D5_TOP_K: ${MEMOHARNESS_D5_TOP_K:-5}
+      MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS: ${MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS:-1500}
 
   ls-realtime:
     environment: *control-and-market-environment
@@ -216,9 +223,32 @@ services:
     depends_on: *control-dependency
     environment: *control-environment
 
+  factory-kanban-dispatcher:
+    # 실행면 이미지(quant-py·agent-reach 포함). 카드를 도는 에이전트가
+    # 이 컨테이너 안에서 뜨므로 작업면은 여기 있어야 한다
+    # (Dockerfile.agent-runtime 머리말 참고, 2026-08-23 배선).
+    image: hedgefund-agent-runtime:latest
+    environment:
+      # 퀀트 프로필 config.yaml 의 ${QUANT_DATABASE_URL} 이 여기서 풀린다.
+      # RLS: quant.hypotheses/experiments 정책은 svc_quant 전용이라
+      # runtime 롤 그대로면 오류 없이 0행이 보인다(2026-08-23 실측).
+      # trading 과 같은 SET ROLE 패턴을 쓴다 - runtime 은 이미 멤버다.
+      QUANT_DATABASE_URL: "postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_quant"
+      # 퀀트 프로필의 TIMESCALE_DATABASE_URL 이 이 변수를 보간한다.
+      HEDGEFUND_TSDB_PASSWORD: ${HEDGEFUND_TSDB_PASSWORD:?}
+
   research-mcp:
     depends_on: *control-dependency
-    environment: *control-environment
+    environment:
+      <<: *control-environment
+      # Worker 모델 좌표(2026-08-23): 모델 오버레이를 빠뜨린 재생성이
+      # 회의론자 워커를 부재한 Ollama 로 폴백시켰다. AWS 배포는 이
+      # 오버레이를 항상 타므로 좌표를 여기 둔다.
+      WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-http://vllm:8000/v1}
+      WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-Qwen2.5-14B-Instruct-AWQ}
+      WORKER_MODEL_API_KEY: ${WORKER_MODEL_API_KEY:-vllm}
+      WORKER_MODEL_TIMEOUT_SECONDS: ${WORKER_MODEL_TIMEOUT_SECONDS:-120}
+      WORKER_MODEL_REGISTRY_PATH: /app/departments/01-research/config/worker_model_registry.json
 
   research-liaison-mcp:
     depends_on: *control-dependency
