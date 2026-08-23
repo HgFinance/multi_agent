@@ -1,0 +1,3800 @@
+{
+  "scorer": "HgFinance-External50-Scorer-v3-final",
+  "raw_file": "/tmp/hgfinance-hybrid-e2e-v1-corrected/hybrid_raw.json",
+  "model": "Qwen2.5-14B-Instruct-AWQ",
+  "auto_scored_n": 35,
+  "auto_passed": 30,
+  "auto_pass_rate": 0.8571,
+  "auto_mean_score": 0.8563,
+  "financebench_status": "manual_required",
+  "sources": {
+    "FinQA": {
+      "n": 20,
+      "passed": 16,
+      "pass_rate": 0.8,
+      "mean_score": 0.8
+    },
+    "TAT-QA": {
+      "n": 15,
+      "passed": 14,
+      "pass_rate": 0.9333,
+      "mean_score": 0.9314
+    },
+    "FinanceBench": {
+      "n": 15,
+      "status": "manual_required",
+      "diagnostic_mean": 0.5852
+    }
+  },
+  "results": [
+    {
+      "id": "finqa:ABC/2005/page_49.pdf-4",
+      "source": "FinQA",
+      "split": "test",
+      "question": "as of september 30 , 2005 , what percentage of employees that had received termination notices were actually terminated?",
+      "gold": "0.9",
+      "prediction": "90%",
+      "finish_reason": "stop",
+      "latency_s": 6.6844,
+      "prompt_tokens": 1569,
+      "completion_tokens": 181,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "arithmetic+accounting",
+      "baseline_prediction": "As of September 30, 2005, approximately 700 employees had received termination notices as a result of the 2004 and 2005 initiatives, of which approximately 630 have been terminated.\n\nTo find the percentage of employees that had received termination notices and were actually terminated:\n\n\\[ \\text{Percentage} = \\left( \\frac{\\text{Number Terminated}}{\\text{Number Receiving Termination Notices}} \\right) \\times 100 \\]\n\n\\[ \\text{Percentage} = \\left( \\frac{630}{700} \\right) \\times 100 \\]\n\n\\[ \\text{Percentage} = 0.9 \\times 100 \\]\n\n\\[ \\text{Percentage} = 90\\% \\]\n\nFinal answer: 90%",
+      "final_source": "arithmetic_adapter",
+      "fallback": false,
+      "planner": {
+        "status": "ok",
+        "attempt": 1,
+        "latency_s": 1.4056,
+        "prompt_tokens": 1658,
+        "completion_tokens": 132,
+        "plan": {
+          "kind": "calculation",
+          "answer_type": "percent",
+          "variables": [
+            {
+              "id": "termination_notices",
+              "value": 700,
+              "unit": "employees",
+              "evidence": "approximately 700 employees had received termination notices as a result of the 2004 and 2005 initiatives"
+            },
+            {
+              "id": "terminated_employees",
+              "value": 630,
+              "unit": "employees",
+              "evidence": "of which approximately 630 have been terminated"
+            }
+          ],
+          "steps": [
+            {
+              "id": "step1",
+              "operation": "divide",
+              "inputs": [
+                "terminated_employees",
+                "termination_notices"
+              ]
+            },
+            {
+              "id": "step2",
+              "operation": "multiply",
+              "inputs": [
+                "step1",
+                "100"
+              ]
+            }
+          ],
+          "final_id": "step2",
+          "final_unit": "percent"
+        }
+      },
+      "plan": {
+        "kind": "calculation",
+        "answer_type": "percent",
+        "variables": [
+          {
+            "id": "termination_notices",
+            "value": 700,
+            "unit": "employees",
+            "evidence": "approximately 700 employees had received termination notices as a result of the 2004 and 2005 initiatives"
+          },
+          {
+            "id": "terminated_employees",
+            "value": 630,
+            "unit": "employees",
+            "evidence": "of which approximately 630 have been terminated"
+          }
+        ],
+        "steps": [
+          {
+            "id": "step1",
+            "operation": "divide",
+            "inputs": [
+              "terminated_employees",
+              "termination_notices"
+            ]
+          },
+          {
+            "id": "step2",
+            "operation": "multiply",
+            "inputs": [
+              "step1",
+              "100"
+            ]
+          }
+        ],
+        "final_id": "step2",
+        "final_unit": "percent"
+      },
+      "calculator_value": "90.0",
+      "calculator_text": "90%",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [
+        "주가수익비율(PER)",
+        "G2(Group of Two)"
+      ],
+      "glossary_hit": false,
+      "formatter": {
+        "content": "90%",
+        "finish_reason": "stop",
+        "latency_s": 0.1986,
+        "prompt_tokens": 324,
+        "completion_tokens": 4
+      },
+      "model_only_latency_s": 6.6844,
+      "full_pipeline_latency_s": 8.2886,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "numeric_v2"
+    },
+    {
+      "id": "finqa:ETFC/2011/page_144.pdf-2",
+      "source": "FinQA",
+      "split": "test",
+      "question": "as of december 31 , 2010 , what was the ratio of collateral pledged to the bank by its derivatives counterparties to overnight and other short-term borrowings",
+      "gold": "4.6",
+      "prediction": "As of December 31, 2010, the collateral pledged to the bank by its derivatives counterparties was $0.5 million, and the overnight and other short-term borrowings were also $0.5 million.\n\nThe ratio of collateral pledged to overnight and other short-term borrowings is therefore:\n\n\\[ \\frac{0.5 \\text{ million}}{0.5 \\text{ million}} = 1 \\]\n\nFinal answer: The ratio is 1.",
+      "finish_reason": "stop",
+      "latency_s": 2.867,
+      "prompt_tokens": 1396,
+      "completion_tokens": 78,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "accounting",
+      "baseline_prediction": "The ratio of collateral pledged to the bank by its derivatives counterparties to overnight and other short-term borrowings as of December 31, 2010, is:\n\n\\[ \\frac{19.3 \\text{ million}}{0.5 \\text{ million}} = 38.6 \\]\n\nTherefore, the ratio is 38.6.",
+      "final_source": "base_awq_accounting_glossary",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": "bok-800-arithmetic-glossary-v1",
+      "glossary_sha256": "d3da5743695146b492835d1e71b7d373ffc268686917e8e4494378b7e823f369",
+      "matched_terms": [
+        "세계은행(World Bank)",
+        "은행인수어음(BA)",
+        "환매조건부매매/RP/Repo",
+        "G2(Group of Two)"
+      ],
+      "glossary_hit": true,
+      "formatter": {
+        "rag_latency_s": 3.8355,
+        "rag_prompt_tokens": 2650
+      },
+      "model_only_latency_s": 2.867,
+      "full_pipeline_latency_s": 2.867,
+      "score_v2": 0.0,
+      "passed_v2": false,
+      "metric_v2": "numeric_v2"
+    },
+    {
+      "id": "finqa:DISH/2010/page_117.pdf-1",
+      "source": "FinQA",
+      "split": "test",
+      "question": "what percentage of total minimum lease payments are due after 2015?",
+      "gold": "0.50195",
+      "prediction": "To calculate the percentage of total minimum lease payments due after 2015:\n\nTotal minimum lease payments = $777,443,000\nAmount due thereafter = $390,239,000\n\nPercentage calculation:\n\\[ \\left( \\frac{390,239}{777,443} \\right) \\times 100 \\approx 50.25\\% \\]\n\nFinal answer: 50.25%",
+      "finish_reason": "stop",
+      "latency_s": 3.9825,
+      "prompt_tokens": 710,
+      "completion_tokens": 110,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "arithmetic+accounting",
+      "baseline_prediction": "To calculate the percentage of total minimum lease payments due after 2015:\n\nTotal minimum lease payments = $777,443,000\nAmount due thereafter = $390,239,000\n\nPercentage calculation:\n\\[ \\left( \\frac{390,239}{777,443} \\right) \\times 100 \\approx 50.25\\% \\]\n\nFinal answer: 50.25%",
+      "final_source": "fallback_awq_invalid_plan",
+      "fallback": true,
+      "planner": {
+        "status": "ok",
+        "attempt": 1,
+        "latency_s": 1.4624,
+        "prompt_tokens": 861,
+        "completion_tokens": 133,
+        "plan": {
+          "kind": "calculation",
+          "answer_type": "percent",
+          "variables": [
+            {
+              "id": "total_minimum_lease_payments",
+              "value": 777443,
+              "unit": "thousands",
+              "evidence": "total minimum lease payments"
+            },
+            {
+              "id": "minimum_lease_payments_after_2015",
+              "value": 390239,
+              "unit": "thousands",
+              "evidence": "thereafter"
+            }
+          ],
+          "steps": [
+            {
+              "id": "step1",
+              "operation": "divide",
+              "inputs": [
+                "minimum_lease_payments_after_2015",
+                "total_minimum_lease_payments"
+              ]
+            },
+            {
+              "id": "step2",
+              "operation": "multiply",
+              "inputs": [
+                "step1",
+                "100"
+              ]
+            }
+          ],
+          "final_id": "step2",
+          "final_unit": "percent"
+        },
+        "calculator_error": "variable value is not grounded in evidence"
+      },
+      "plan": {
+        "kind": "calculation",
+        "answer_type": "percent",
+        "variables": [
+          {
+            "id": "total_minimum_lease_payments",
+            "value": 777443,
+            "unit": "thousands",
+            "evidence": "total minimum lease payments"
+          },
+          {
+            "id": "minimum_lease_payments_after_2015",
+            "value": 390239,
+            "unit": "thousands",
+            "evidence": "thereafter"
+          }
+        ],
+        "steps": [
+          {
+            "id": "step1",
+            "operation": "divide",
+            "inputs": [
+              "minimum_lease_payments_after_2015",
+              "total_minimum_lease_payments"
+            ]
+          },
+          {
+            "id": "step2",
+            "operation": "multiply",
+            "inputs": [
+              "step1",
+              "100"
+            ]
+          }
+        ],
+        "final_id": "step2",
+        "final_unit": "percent"
+      },
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [
+        "순이자마진(NIM)",
+        "주가수익비율(PER)",
+        "G2(Group of Two)"
+      ],
+      "glossary_hit": false,
+      "formatter": null,
+      "model_only_latency_s": 3.9825,
+      "full_pipeline_latency_s": 5.4449,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "numeric_v2"
+    },
+    {
+      "id": "finqa:MRO/2013/page_19.pdf-4",
+      "source": "FinQA",
+      "split": "test",
+      "question": "what percentage of net undeveloped acres expiring were located in the u.s in 2014?",
+      "gold": "0.24744",
+      "prediction": "24.74%",
+      "finish_reason": "stop",
+      "latency_s": 4.8388,
+      "prompt_tokens": 1286,
+      "completion_tokens": 130,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "arithmetic+accounting",
+      "baseline_prediction": "To find the percentage of net undeveloped acres expiring in the U.S. in 2014:\n\n1. Identify the number of net undeveloped acres expiring in the U.S. in 2014: 145 thousand acres.\n2. Identify the worldwide total of net undeveloped acres expiring in 2014: 586 thousand acres.\n3. Calculate the percentage: \\( \\frac{145}{586} \\times 100 = 24.74\\% \\).\n\nFinal answer: 24.74%",
+      "final_source": "arithmetic_adapter",
+      "fallback": false,
+      "planner": {
+        "status": "ok",
+        "attempt": 1,
+        "latency_s": 1.5178,
+        "prompt_tokens": 1416,
+        "completion_tokens": 176,
+        "plan": {
+          "kind": "calculation",
+          "answer_type": "percent",
+          "variables": [
+            {
+              "id": "net_undeveloped_acres_expiring_us_2014",
+              "value": 145,
+              "unit": "thousands",
+              "evidence": "net undeveloped acres expiring 2014 in the U.S. is 145"
+            },
+            {
+              "id": "net_undeveloped_acres_expiring_worldwide_2014",
+              "value": 586,
+              "unit": "thousands",
+              "evidence": "total net undeveloped acres expiring worldwide in 2014 is 586"
+            }
+          ],
+          "steps": [
+            {
+              "id": "step1",
+              "operation": "divide",
+              "inputs": [
+                "net_undeveloped_acres_expiring_us_2014",
+                "net_undeveloped_acres_expiring_worldwide_2014"
+              ]
+            },
+            {
+              "id": "step2",
+              "operation": "multiply",
+              "inputs": [
+                "step1",
+                "100"
+              ]
+            }
+          ],
+          "final_id": "step2",
+          "final_unit": "percent"
+        }
+      },
+      "plan": {
+        "kind": "calculation",
+        "answer_type": "percent",
+        "variables": [
+          {
+            "id": "net_undeveloped_acres_expiring_us_2014",
+            "value": 145,
+            "unit": "thousands",
+            "evidence": "net undeveloped acres expiring 2014 in the U.S. is 145"
+          },
+          {
+            "id": "net_undeveloped_acres_expiring_worldwide_2014",
+            "value": 586,
+            "unit": "thousands",
+            "evidence": "total net undeveloped acres expiring worldwide in 2014 is 586"
+          }
+        ],
+        "steps": [
+          {
+            "id": "step1",
+            "operation": "divide",
+            "inputs": [
+              "net_undeveloped_acres_expiring_us_2014",
+              "net_undeveloped_acres_expiring_worldwide_2014"
+            ]
+          },
+          {
+            "id": "step2",
+            "operation": "multiply",
+            "inputs": [
+              "step1",
+              "100"
+            ]
+          }
+        ],
+        "final_id": "step2",
+        "final_unit": "percent"
+      },
+      "calculator_value": "24.74402730375426621160409556",
+      "calculator_text": "24.74%",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [
+        "주가수익비율(PER)",
+        "G2(Group of Two)"
+      ],
+      "glossary_hit": false,
+      "formatter": {
+        "content": "24.74%",
+        "finish_reason": "stop",
+        "latency_s": 0.288,
+        "prompt_tokens": 273,
+        "completion_tokens": 7
+      },
+      "model_only_latency_s": 4.8388,
+      "full_pipeline_latency_s": 6.6446,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "numeric_v2"
+    },
+    {
+      "id": "finqa:AAL/2016/page_8.pdf-1",
+      "source": "FinQA",
+      "split": "test",
+      "question": "what portion of the total full-time employees of mainline operations are pilots and flight crew instructors?",
+      "gold": "0.13202",
+      "prediction": "To find the portion of the total full-time employees of mainline operations who are pilots and flight crew instructors, we need to calculate the ratio of pilots and flight crew instructors to the total number of mainline operations employees.\n\nFrom the table:\n- Number of pilots and flight crew instructors: 13400\n- Total number of mainline operations employees: 101500\n\nThe calculation is:\n\\[ \\frac{13400}{101500} = \\frac{134}{1015} \\approx 0.132 \\]\n\nTherefore, the portion of the total full-time employees of mainline operations who are pilots and flight crew instructors is approximately **13.2%**.",
+      "finish_reason": "stop",
+      "latency_s": 5.8537,
+      "prompt_tokens": 1088,
+      "completion_tokens": 157,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "arithmetic+accounting",
+      "baseline_prediction": "To find the portion of the total full-time employees of mainline operations who are pilots and flight crew instructors, we need to calculate the ratio of pilots and flight crew instructors to the total number of mainline operations employees.\n\nFrom the table:\n- Number of pilots and flight crew instructors: 13400\n- Total number of mainline operations employees: 101500\n\nThe calculation is:\n\\[ \\frac{13400}{101500} = \\frac{134}{1015} \\approx 0.132 \\]\n\nTherefore, the portion of the total full-time employees of mainline operations who are pilots and flight crew instructors is approximately **13.2%**.",
+      "final_source": "fallback_awq_invalid_plan",
+      "fallback": true,
+      "planner": {
+        "status": "ok",
+        "attempt": 1,
+        "latency_s": 2.1954,
+        "prompt_tokens": 1218,
+        "completion_tokens": 143,
+        "plan": {
+          "kind": "calculation",
+          "answer_type": "percent",
+          "variables": [
+            {
+              "id": "pilots_and_instructors",
+              "value": 13400,
+              "unit": "employees",
+              "evidence": "pilots and flight crew training instructors | 13400 | 3400 | 16800"
+            },
+            {
+              "id": "total_full_time_employees",
+              "value": 101500,
+              "unit": "employees",
+              "evidence": "total | 101500 | 20800 | 122300"
+            }
+          ],
+          "steps": [
+            {
+              "id": "step1",
+              "operation": "divide",
+              "inputs": [
+                "pilots_and_instructors",
+                "total_full_time_employees"
+              ]
+            },
+            {
+              "id": "step2",
+              "operation": "multiply",
+              "inputs": [
+                "step1"
+              ]
+            }
+          ],
+          "final_id": "step2",
+          "final_unit": "percent"
+        },
+        "calculator_error": "percent answer missing percent semantics"
+      },
+      "plan": {
+        "kind": "calculation",
+        "answer_type": "percent",
+        "variables": [
+          {
+            "id": "pilots_and_instructors",
+            "value": 13400,
+            "unit": "employees",
+            "evidence": "pilots and flight crew training instructors | 13400 | 3400 | 16800"
+          },
+          {
+            "id": "total_full_time_employees",
+            "value": 101500,
+            "unit": "employees",
+            "evidence": "total | 101500 | 20800 | 122300"
+          }
+        ],
+        "steps": [
+          {
+            "id": "step1",
+            "operation": "divide",
+            "inputs": [
+              "pilots_and_instructors",
+              "total_full_time_employees"
+            ]
+          },
+          {
+            "id": "step2",
+            "operation": "multiply",
+            "inputs": [
+              "step1"
+            ]
+          }
+        ],
+        "final_id": "step2",
+        "final_unit": "percent"
+      },
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [
+        "주가수익비율(PER)",
+        "G2(Group of Two)"
+      ],
+      "glossary_hit": false,
+      "formatter": null,
+      "model_only_latency_s": 5.8537,
+      "full_pipeline_latency_s": 8.0491,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "numeric_v2"
+    },
+    {
+      "id": "finqa:AMT/2014/page_160.pdf-1",
+      "source": "FinQA",
+      "split": "test",
+      "question": "what is the percentage change in aggregate rent expense from 2013 to 2014?",
+      "gold": "0.3227",
+      "prediction": "32.27%",
+      "finish_reason": "stop",
+      "latency_s": 8.1369,
+      "prompt_tokens": 856,
+      "completion_tokens": 225,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "arithmetic+accounting",
+      "baseline_prediction": "To calculate the percentage change in aggregate rent expense from 2013 to 2014:\n\n1. Identify the rent expenses:\n   - 2014: $655.0 million\n   - 2013: $495.2 million\n\n2. Calculate the difference:\n   \\[\n   \\text{Difference} = \\$655.0 \\text{ million} - \\$495.2 \\text{ million} = \\$159.8 \\text{ million}\n   \\]\n\n3. Calculate the percentage change relative to the 2013 value:\n   \\[\n   \\text{Percentage Change} = \\left( \\frac{\\$159.8 \\text{ million}}{\\$495.2 \\text{ million}} \\right) \\times 100 \\approx 32.27\\%\n   \\]\n\nFinal Answer: The percentage change in aggregate rent expense from 2013 to 2014 is approximately 32.27%.",
+      "final_source": "arithmetic_adapter",
+      "fallback": false,
+      "planner": {
+        "status": "ok",
+        "attempt": 1,
+        "latency_s": 1.7261,
+        "prompt_tokens": 1009,
+        "completion_tokens": 175,
+        "plan": {
+          "kind": "calculation",
+          "answer_type": "percent",
+          "variables": [
+            {
+              "id": "rent_2013",
+              "value": 495.2,
+              "unit": "million",
+              "evidence": "aggregate rent expense for the year ended December 31, 2013 approximated $ 495.2 million"
+            },
+            {
+              "id": "rent_2014",
+              "value": 655.0,
+              "unit": "million",
+              "evidence": "aggregate rent expense for the year ended December 31, 2014 approximated $ 655.0 million"
+            }
+          ],
+          "steps": [
+            {
+              "id": "step1",
+              "operation": "subtract",
+              "inputs": [
+                "rent_2014",
+                "rent_2013"
+              ]
+            },
+            {
+              "id": "step2",
+              "operation": "divide",
+              "inputs": [
+                "step1",
+                "rent_2013"
+              ]
+            },
+            {
+              "id": "step3",
+              "operation": "multiply",
+              "inputs": [
+                "step2",
+                "100"
+              ]
+            }
+          ],
+          "final_id": "step3",
+          "final_unit": "percent"
+        }
+      },
+      "plan": {
+        "kind": "calculation",
+        "answer_type": "percent",
+        "variables": [
+          {
+            "id": "rent_2013",
+            "value": 495.2,
+            "unit": "million",
+            "evidence": "aggregate rent expense for the year ended December 31, 2013 approximated $ 495.2 million"
+          },
+          {
+            "id": "rent_2014",
+            "value": 655.0,
+            "unit": "million",
+            "evidence": "aggregate rent expense for the year ended December 31, 2014 approximated $ 655.0 million"
+          }
+        ],
+        "steps": [
+          {
+            "id": "step1",
+            "operation": "subtract",
+            "inputs": [
+              "rent_2014",
+              "rent_2013"
+            ]
+          },
+          {
+            "id": "step2",
+            "operation": "divide",
+            "inputs": [
+              "step1",
+              "rent_2013"
+            ]
+          },
+          {
+            "id": "step3",
+            "operation": "multiply",
+            "inputs": [
+              "step2",
+              "100"
+            ]
+          }
+        ],
+        "final_id": "step3",
+        "final_unit": "percent"
+      },
+      "calculator_value": "32.26978998384491114701130856",
+      "calculator_text": "32.27%",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [
+        "주가수익비율(PER)"
+      ],
+      "glossary_hit": false,
+      "formatter": {
+        "content": "32.27%",
+        "finish_reason": "stop",
+        "latency_s": 0.3605,
+        "prompt_tokens": 367,
+        "completion_tokens": 7
+      },
+      "model_only_latency_s": 8.1369,
+      "full_pipeline_latency_s": 10.2235,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "numeric_v2"
+    },
+    {
+      "id": "finqa:C/2008/page_44.pdf-2",
+      "source": "FinQA",
+      "split": "test",
+      "question": "what was the percentage change in non-interest revenue from 2007 to 2008?",
+      "gold": "2.50515",
+      "prediction": "-250.52%",
+      "finish_reason": "stop",
+      "latency_s": 10.2403,
+      "prompt_tokens": 923,
+      "completion_tokens": 283,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "arithmetic+accounting",
+      "baseline_prediction": "To calculate the percentage change in non-interest revenue from 2007 to 2008:\n\n1. Identify the non-interest revenue values:\n   - 2008: 438 million dollars\n   - 2007: -291 million dollars\n\n2. Calculate the difference:\n   \\[\n   \\text{Difference} = 438 - (-291) = 438 + 291 = 729 \\text{ million dollars}\n   \\]\n\n3. Calculate the percentage change using the formula:\n   \\[\n   \\text{Percentage Change} = \\left( \\frac{\\text{New Value} - \\text{Old Value}}{\\text{Old Value}} \\right) \\times 100\n   \\]\n   Substituting the values:\n   \\[\n   \\text{Percentage Change} = \\left( \\frac{438 - (-291)}{-291} \\right) \\times 100 = \\left( \\frac{729}{-291} \\right) \\times 100 = -250.69\\%\n   \\]\n\nThe percentage change in non-interest revenue from 2007 to 2008 is -250.69%.",
+      "final_source": "arithmetic_adapter",
+      "fallback": false,
+      "planner": {
+        "status": "ok",
+        "attempt": 1,
+        "latency_s": 1.7124,
+        "prompt_tokens": 1039,
+        "completion_tokens": 186,
+        "plan": {
+          "kind": "calculation",
+          "answer_type": "percent",
+          "variables": [
+            {
+              "id": "non_interest_revenue_2008",
+              "value": 438,
+              "unit": "million dollars",
+              "evidence": "non-interest revenue | 438 | -291 ( 291 ) | -599 ( 599 )"
+            },
+            {
+              "id": "non_interest_revenue_2007",
+              "value": -291,
+              "unit": "million dollars",
+              "evidence": "non-interest revenue | 438 | -291 ( 291 ) | -599 ( 599 )"
+            }
+          ],
+          "steps": [
+            {
+              "id": "step1",
+              "operation": "subtract",
+              "inputs": [
+                "non_interest_revenue_2008",
+                "non_interest_revenue_2007"
+              ]
+            },
+            {
+              "id": "step2",
+              "operation": "divide",
+              "inputs": [
+                "step1",
+                "non_interest_revenue_2007"
+              ]
+            },
+            {
+              "id": "step3",
+              "operation": "multiply",
+              "inputs": [
+                "step2",
+                "100"
+              ]
+            }
+          ],
+          "final_id": "step3",
+          "final_unit": "percent"
+        }
+      },
+      "plan": {
+        "kind": "calculation",
+        "answer_type": "percent",
+        "variables": [
+          {
+            "id": "non_interest_revenue_2008",
+            "value": 438,
+            "unit": "million dollars",
+            "evidence": "non-interest revenue | 438 | -291 ( 291 ) | -599 ( 599 )"
+          },
+          {
+            "id": "non_interest_revenue_2007",
+            "value": -291,
+            "unit": "million dollars",
+            "evidence": "non-interest revenue | 438 | -291 ( 291 ) | -599 ( 599 )"
+          }
+        ],
+        "steps": [
+          {
+            "id": "step1",
+            "operation": "subtract",
+            "inputs": [
+              "non_interest_revenue_2008",
+              "non_interest_revenue_2007"
+            ]
+          },
+          {
+            "id": "step2",
+            "operation": "divide",
+            "inputs": [
+              "step1",
+              "non_interest_revenue_2007"
+            ]
+          },
+          {
+            "id": "step3",
+            "operation": "multiply",
+            "inputs": [
+              "step2",
+              "100"
+            ]
+          }
+        ],
+        "final_id": "step3",
+        "final_unit": "percent"
+      },
+      "calculator_value": "-250.5154639175257731958762887",
+      "calculator_text": "-250.52%",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [
+        "주가수익비율(PER)"
+      ],
+      "glossary_hit": false,
+      "formatter": {
+        "content": "-250.52%",
+        "finish_reason": "stop",
+        "latency_s": 0.3672,
+        "prompt_tokens": 427,
+        "completion_tokens": 9
+      },
+      "model_only_latency_s": 10.2403,
+      "full_pipeline_latency_s": 12.3199,
+      "score_v2": 0.0,
+      "passed_v2": false,
+      "metric_v2": "numeric_v2"
+    },
+    {
+      "id": "finqa:LKQ/2016/page_87.pdf-3",
+      "source": "FinQA",
+      "split": "test",
+      "question": "what was the cumulative rental expense from 2014 to 2016 in millions",
+      "gold": "528.4",
+      "prediction": "528.4 million",
+      "finish_reason": "stop",
+      "latency_s": 4.0324,
+      "prompt_tokens": 753,
+      "completion_tokens": 111,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "arithmetic",
+      "baseline_prediction": "The cumulative rental expense from 2014 to 2016 is calculated as follows:\n\n- 2016: $211.5 million\n- 2015: $168.4 million\n- 2014: $148.5 million\n\nCumulative rental expense = $211.5 + $168.4 + $148.5 = $528.4 million\n\nFinal answer: $528.4 million",
+      "final_source": "arithmetic_adapter",
+      "fallback": false,
+      "planner": {
+        "status": "ok",
+        "attempt": 1,
+        "latency_s": 1.8441,
+        "prompt_tokens": 934,
+        "completion_tokens": 228,
+        "plan": {
+          "kind": "calculation",
+          "answer_type": "currency",
+          "variables": [
+            {
+              "id": "rental_expense_2014",
+              "value": 148.5,
+              "unit": "million",
+              "evidence": "rental expense for operating leases was approximately $ 148.5 million during the year ended december 31 , 2014"
+            },
+            {
+              "id": "rental_expense_2015",
+              "value": 168.4,
+              "unit": "million",
+              "evidence": "rental expense for operating leases was approximately $ 168.4 million during the year ended december 31 , 2015"
+            },
+            {
+              "id": "rental_expense_2016",
+              "value": 211.5,
+              "unit": "million",
+              "evidence": "rental expense for operating leases was approximately $ 211.5 million during the year ended december 31 , 2016"
+            }
+          ],
+          "steps": [
+            {
+              "id": "step1",
+              "operation": "add",
+              "inputs": [
+                "rental_expense_2014",
+                "rental_expense_2015"
+              ]
+            },
+            {
+              "id": "step2",
+              "operation": "add",
+              "inputs": [
+                "step1",
+                "rental_expense_2016"
+              ]
+            }
+          ],
+          "final_id": "step2",
+          "final_unit": "million"
+        }
+      },
+      "plan": {
+        "kind": "calculation",
+        "answer_type": "currency",
+        "variables": [
+          {
+            "id": "rental_expense_2014",
+            "value": 148.5,
+            "unit": "million",
+            "evidence": "rental expense for operating leases was approximately $ 148.5 million during the year ended december 31 , 2014"
+          },
+          {
+            "id": "rental_expense_2015",
+            "value": 168.4,
+            "unit": "million",
+            "evidence": "rental expense for operating leases was approximately $ 168.4 million during the year ended december 31 , 2015"
+          },
+          {
+            "id": "rental_expense_2016",
+            "value": 211.5,
+            "unit": "million",
+            "evidence": "rental expense for operating leases was approximately $ 211.5 million during the year ended december 31 , 2016"
+          }
+        ],
+        "steps": [
+          {
+            "id": "step1",
+            "operation": "add",
+            "inputs": [
+              "rental_expense_2014",
+              "rental_expense_2015"
+            ]
+          },
+          {
+            "id": "step2",
+            "operation": "add",
+            "inputs": [
+              "step1",
+              "rental_expense_2016"
+            ]
+          }
+        ],
+        "final_id": "step2",
+        "final_unit": "million"
+      },
+      "calculator_value": "528.4",
+      "calculator_text": "528.4 million",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "formatter": {
+        "content": "528.4 million",
+        "finish_reason": "stop",
+        "latency_s": 0.2879,
+        "prompt_tokens": 253,
+        "completion_tokens": 7
+      },
+      "model_only_latency_s": 4.0324,
+      "full_pipeline_latency_s": 6.1644,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "numeric_v2"
+    },
+    {
+      "id": "finqa:MRO/2003/page_45.pdf-2",
+      "source": "FinQA",
+      "split": "test",
+      "question": "what were total distillates sales in millions for the three year period ? 365 346 345",
+      "gold": "1056.0",
+      "prediction": "1056 millions",
+      "finish_reason": "stop",
+      "latency_s": 9.1866,
+      "prompt_tokens": 1045,
+      "completion_tokens": 253,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "arithmetic+accounting",
+      "baseline_prediction": "Total distillates sales for the three-year period in thousands of barrels per day are 365 for 2003, 346 for 2002, and 345 for 2001. To convert these to millions of barrels over a year, we need to multiply each yearly figure by 365 days and then divide by 1,000 to convert barrels to millions of barrels:\n\nFor 2003: \\( 365 \\times 365 / 1000 = 133.225 \\) million barrels\nFor 2002: \\( 346 \\times 365 / 1000 = 126.59 \\) million barrels\nFor 2001: \\( 345 \\times 365 / 1000 = 125.825 \\) million barrels\n\nTherefore, the total distillates sales in millions of barrels for the three-year period are 133.225, 126.59, and 125.825 respectively.",
+      "final_source": "arithmetic_adapter",
+      "fallback": false,
+      "planner": {
+        "status": "ok",
+        "attempt": 1,
+        "latency_s": 2.0689,
+        "prompt_tokens": 1185,
+        "completion_tokens": 208,
+        "plan": {
+          "kind": "calculation",
+          "answer_type": "number",
+          "variables": [
+            {
+              "id": "distillates_2003",
+              "value": 365,
+              "unit": "thousands of barrels per day",
+              "evidence": "distillates | 365 | 346 | 345"
+            },
+            {
+              "id": "distillates_2002",
+              "value": 346,
+              "unit": "thousands of barrels per day",
+              "evidence": "distillates | 365 | 346 | 345"
+            },
+            {
+              "id": "distillates_2001",
+              "value": 345,
+              "unit": "thousands of barrels per day",
+              "evidence": "distillates | 365 | 346 | 345"
+            }
+          ],
+          "steps": [
+            {
+              "id": "step1",
+              "operation": "add",
+              "inputs": [
+                "distillates_2003",
+                "distillates_2002",
+                "distillates_2001"
+              ]
+            },
+            {
+              "id": "step2",
+              "operation": "divide",
+              "inputs": [
+                "step1"
+              ]
+            },
+            {
+              "id": "step3",
+              "operation": "multiply",
+              "inputs": [
+                "step2"
+              ]
+            }
+          ],
+          "final_id": "step3",
+          "final_unit": "millions"
+        }
+      },
+      "plan": {
+        "kind": "calculation",
+        "answer_type": "number",
+        "variables": [
+          {
+            "id": "distillates_2003",
+            "value": 365,
+            "unit": "thousands of barrels per day",
+            "evidence": "distillates | 365 | 346 | 345"
+          },
+          {
+            "id": "distillates_2002",
+            "value": 346,
+            "unit": "thousands of barrels per day",
+            "evidence": "distillates | 365 | 346 | 345"
+          },
+          {
+            "id": "distillates_2001",
+            "value": 345,
+            "unit": "thousands of barrels per day",
+            "evidence": "distillates | 365 | 346 | 345"
+          }
+        ],
+        "steps": [
+          {
+            "id": "step1",
+            "operation": "add",
+            "inputs": [
+              "distillates_2003",
+              "distillates_2002",
+              "distillates_2001"
+            ]
+          },
+          {
+            "id": "step2",
+            "operation": "divide",
+            "inputs": [
+              "step1"
+            ]
+          },
+          {
+            "id": "step3",
+            "operation": "multiply",
+            "inputs": [
+              "step2"
+            ]
+          }
+        ],
+        "final_id": "step3",
+        "final_unit": "millions"
+      },
+      "calculator_value": "1056",
+      "calculator_text": "1056 millions",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [
+        "주가수익비율(PER)"
+      ],
+      "glossary_hit": false,
+      "formatter": {
+        "content": "1056 millions",
+        "finish_reason": "stop",
+        "latency_s": 0.3883,
+        "prompt_tokens": 402,
+        "completion_tokens": 6
+      },
+      "model_only_latency_s": 9.1866,
+      "full_pipeline_latency_s": 11.6438,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "numeric_v2"
+    },
+    {
+      "id": "finqa:GS/2014/page_51.pdf-1",
+      "source": "FinQA",
+      "split": "test",
+      "question": "what is the percentage in total assets in 2014?",
+      "gold": "-0.06063",
+      "prediction": "The total assets in 2014 are given as $856,240 million. Since the question asks for the percentage in total assets in 2014, and no specific portion of the assets is mentioned, the percentage of total assets in 2014 is considered to be 100%.\n\nFinal answer: 100%",
+      "finish_reason": "stop",
+      "latency_s": 2.1877,
+      "prompt_tokens": 1302,
+      "completion_tokens": 59,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "accounting",
+      "baseline_prediction": "The total assets in 2014 are reported as $856,240 million. Since the question asks for a percentage and does not specify a comparison or base amount, there's insufficient information provided to calculate a percentage. \n\nInsufficient information to calculate a percentage.",
+      "final_source": "base_awq_accounting_glossary",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": "bok-800-arithmetic-glossary-v1",
+      "glossary_sha256": "d3da5743695146b492835d1e71b7d373ffc268686917e8e4494378b7e823f369",
+      "matched_terms": [
+        "주가수익비율(PER)"
+      ],
+      "glossary_hit": true,
+      "formatter": {
+        "rag_latency_s": 2.9198,
+        "rag_prompt_tokens": 1694
+      },
+      "model_only_latency_s": 2.1877,
+      "full_pipeline_latency_s": 2.1877,
+      "score_v2": 0.0,
+      "passed_v2": false,
+      "metric_v2": "numeric_v2"
+    },
+    {
+      "id": "finqa:ABMD/2005/page_29.pdf-2",
+      "source": "FinQA",
+      "split": "test",
+      "question": "did compensation expense related to the company 2019s employee stock purchase plan grow from 2004 to 2005?",
+      "gold": "yes",
+      "prediction": "Yes, the compensation expense related to the company's employee stock purchase plan grew from $19,000 in 2004 to $28,000 in 2005.",
+      "finish_reason": "stop",
+      "latency_s": 1.6765,
+      "prompt_tokens": 1079,
+      "completion_tokens": 45,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "passthrough",
+      "baseline_prediction": "Yes, the compensation expense related to the company's employee stock purchase plan grew from $19,000 in 2004 to $28,000 in 2005.",
+      "final_source": "base_awq_passthrough",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "formatter": null,
+      "model_only_latency_s": 1.6765,
+      "full_pipeline_latency_s": 1.6765,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "text_v2"
+    },
+    {
+      "id": "finqa:HIG/2004/page_140.pdf-1",
+      "source": "FinQA",
+      "split": "test",
+      "question": "in the adoption of the prospective method what was the ratio of the other comprehensive income to the net income reclassifying certain separate accounts to general account",
+      "gold": "9.8",
+      "prediction": "The ratio of other comprehensive income to net income when reclassifying certain separate accounts to the general account is calculated as follows:\n\nOther comprehensive income: $294\nNet income: $30\n\nRatio = $294 / $30 = 9.8",
+      "finish_reason": "stop",
+      "latency_s": 1.9147,
+      "prompt_tokens": 1709,
+      "completion_tokens": 51,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "accounting",
+      "baseline_prediction": "The ratio of other comprehensive income to net income when reclassifying certain separate accounts to the general account is:\n\n\\[ \\frac{294}{30} = 9.8 \\]\n\nTherefore, the ratio is 9.8.",
+      "final_source": "base_awq_accounting_glossary",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": "bok-800-arithmetic-glossary-v1",
+      "glossary_sha256": "d3da5743695146b492835d1e71b7d373ffc268686917e8e4494378b7e823f369",
+      "matched_terms": [
+        "뉴스심리지수(NSI)",
+        "G2(Group of Two)"
+      ],
+      "glossary_hit": true,
+      "formatter": {
+        "rag_latency_s": 2.147,
+        "rag_prompt_tokens": 2349
+      },
+      "model_only_latency_s": 1.9147,
+      "full_pipeline_latency_s": 1.9147,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "numeric_v2"
+    },
+    {
+      "id": "finqa:HWM/2018/page_96.pdf-2",
+      "source": "FinQA",
+      "split": "test",
+      "question": "considering the average exercise price of options , what is the increase in the total value of stock options observed during 2016 and 2017 , in millions of dollars?",
+      "gold": "16.43",
+      "prediction": "16.43 million dollars",
+      "finish_reason": "stop",
+      "latency_s": 8.9574,
+      "prompt_tokens": 482,
+      "completion_tokens": 248,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "arithmetic+accounting",
+      "baseline_prediction": "To calculate the increase in the total value of stock options observed during 2016 and 2017, we need to multiply the number of stock options by their respective average exercise prices for each year and then find the difference between these two values.\n\nFor 2017:\n- Number of stock options = 11 million\n- Average exercise price = $33.32\nTotal value for 2017 = 11 * 33.32 = 366.52 million dollars\n\nFor 2016:\n- Number of stock options = 13 million\n- Average exercise price = $26.93\nTotal value for 2016 = 13 * 26.93 = 350.09 million dollars\n\nIncrease in total value from 2016 to 2017:\n= Total value for 2017 - Total value for 2016\n= 366.52 - 350.09\n= 16.43 million dollars\n\nFinal Answer: 16.43 million dollars",
+      "final_source": "arithmetic_adapter",
+      "fallback": false,
+      "planner": {
+        "status": "ok",
+        "attempt": 1,
+        "latency_s": 2.1057,
+        "prompt_tokens": 683,
+        "completion_tokens": 273,
+        "plan": {
+          "kind": "calculation",
+          "answer_type": "currency",
+          "variables": [
+            {
+              "id": "exercise_price_2016",
+              "value": 26.93,
+              "unit": "dollars",
+              "evidence": "the average exercise price of options per share was $ 26.93 for 2016"
+            },
+            {
+              "id": "exercise_price_2017",
+              "value": 33.32,
+              "unit": "dollars",
+              "evidence": "the average exercise price of options per share was $ 33.32 for 2017"
+            },
+            {
+              "id": "stock_options_2016",
+              "value": 13,
+              "unit": "millions",
+              "evidence": "stock options ( 1 ) | 9 | 11 | 13 for 2016"
+            },
+            {
+              "id": "stock_options_2017",
+              "value": 11,
+              "unit": "millions",
+              "evidence": "stock options ( 1 ) | 9 | 11 | 13 for 2017"
+            }
+          ],
+          "steps": [
+            {
+              "id": "total_value_2016",
+              "operation": "multiply",
+              "inputs": [
+                "exercise_price_2016",
+                "stock_options_2016"
+              ]
+            },
+            {
+              "id": "total_value_2017",
+              "operation": "multiply",
+              "inputs": [
+                "exercise_price_2017",
+                "stock_options_2017"
+              ]
+            },
+            {
+              "id": "increase_in_value",
+              "operation": "subtract",
+              "inputs": [
+                "total_value_2017",
+                "total_value_2016"
+              ]
+            }
+          ],
+          "final_id": "increase_in_value",
+          "final_unit": "dollars"
+        }
+      },
+      "plan": {
+        "kind": "calculation",
+        "answer_type": "currency",
+        "variables": [
+          {
+            "id": "exercise_price_2016",
+            "value": 26.93,
+            "unit": "dollars",
+            "evidence": "the average exercise price of options per share was $ 26.93 for 2016"
+          },
+          {
+            "id": "exercise_price_2017",
+            "value": 33.32,
+            "unit": "dollars",
+            "evidence": "the average exercise price of options per share was $ 33.32 for 2017"
+          },
+          {
+            "id": "stock_options_2016",
+            "value": 13,
+            "unit": "millions",
+            "evidence": "stock options ( 1 ) | 9 | 11 | 13 for 2016"
+          },
+          {
+            "id": "stock_options_2017",
+            "value": 11,
+            "unit": "millions",
+            "evidence": "stock options ( 1 ) | 9 | 11 | 13 for 2017"
+          }
+        ],
+        "steps": [
+          {
+            "id": "total_value_2016",
+            "operation": "multiply",
+            "inputs": [
+              "exercise_price_2016",
+              "stock_options_2016"
+            ]
+          },
+          {
+            "id": "total_value_2017",
+            "operation": "multiply",
+            "inputs": [
+              "exercise_price_2017",
+              "stock_options_2017"
+            ]
+          },
+          {
+            "id": "increase_in_value",
+            "operation": "subtract",
+            "inputs": [
+              "total_value_2017",
+              "total_value_2016"
+            ]
+          }
+        ],
+        "final_id": "increase_in_value",
+        "final_unit": "dollars"
+      },
+      "calculator_value": "16.43",
+      "calculator_text": "16.43 dollars",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [
+        "뉴스심리지수(NSI)",
+        "G2(Group of Two)"
+      ],
+      "glossary_hit": false,
+      "formatter": {
+        "content": "16.43 million dollars",
+        "finish_reason": "stop",
+        "latency_s": 0.4268,
+        "prompt_tokens": 409,
+        "completion_tokens": 8
+      },
+      "model_only_latency_s": 8.9574,
+      "full_pipeline_latency_s": 11.4899,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "numeric_v2"
+    },
+    {
+      "id": "finqa:MRO/2004/page_125.pdf-2",
+      "source": "FinQA",
+      "split": "test",
+      "question": "what was the 2004 rate of decrease in development costs?",
+      "gold": "0.11347",
+      "prediction": "The development costs incurred during the period in 2004 were $711 million. There is no indication of a decrease in development costs in 2004; rather, there is an amount spent. Therefore, the rate of decrease in development costs for 2004 is 0%.",
+      "finish_reason": "stop",
+      "latency_s": 1.9845,
+      "prompt_tokens": 714,
+      "completion_tokens": 54,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "accounting",
+      "baseline_prediction": "The development costs in 2004 were $711 million. There is no prior year's data provided to calculate a rate of decrease. Therefore, the evidence is insufficient to determine the rate of decrease in development costs for 2004.",
+      "final_source": "base_awq_accounting_glossary",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": "bok-800-arithmetic-glossary-v1",
+      "glossary_sha256": "d3da5743695146b492835d1e71b7d373ffc268686917e8e4494378b7e823f369",
+      "matched_terms": [
+        "G2(Group of Two)"
+      ],
+      "glossary_hit": true,
+      "formatter": {
+        "rag_latency_s": 2.3894,
+        "rag_prompt_tokens": 1038
+      },
+      "model_only_latency_s": 1.9845,
+      "full_pipeline_latency_s": 1.9845,
+      "score_v2": 0.0,
+      "passed_v2": false,
+      "metric_v2": "numeric_v2"
+    },
+    {
+      "id": "finqa:IP/2009/page_45.pdf-1",
+      "source": "FinQA",
+      "split": "test",
+      "question": "what percentage of contractual obligations for future payments under existing debt and lease commitments and purchase obligations at december 31 , 2009 due in 2011 are maturities of long-term debt?",
+      "gold": "0.40796",
+      "prediction": "40.8%",
+      "finish_reason": "stop",
+      "latency_s": 6.7106,
+      "prompt_tokens": 1673,
+      "completion_tokens": 182,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "arithmetic+accounting",
+      "baseline_prediction": "To find the percentage of contractual obligations for future payments under existing debt and lease commitments and purchase obligations due in 2011 that are maturities of long-term debt:\n\n1. Identify the total contractual obligations for 2011 from the table: $1407 million.\n2. Identify the maturities of long-term debt for 2011 from the table: $28 million.\n\nCalculate the percentage:\n\\[ \\text{Percentage} = \\left( \\frac{\\text{Maturities of long-term debt}}{\\text{Total contractual obligations}} \\right) \\times 100 \\]\n\\[ \\text{Percentage} = \\left( \\frac{28}{1407} \\right) \\times 100 \\approx 1.99\\% \\]\n\nFinal answer: 1.99%",
+      "final_source": "arithmetic_adapter",
+      "fallback": false,
+      "planner": {
+        "status": "ok",
+        "attempt": 1,
+        "latency_s": 1.8605,
+        "prompt_tokens": 1717,
+        "completion_tokens": 193,
+        "plan": {
+          "kind": "calculation",
+          "answer_type": "percent",
+          "variables": [
+            {
+              "id": "maturities_long_term_debt_2011",
+              "value": 574,
+              "unit": "million",
+              "evidence": "maturities of long-term debt ( a ) | $ 304 | $ 574 | $ 199 | $ 131 | $ 562 | $ 7263"
+            },
+            {
+              "id": "total_obligations_2011",
+              "value": 1407,
+              "unit": "million",
+              "evidence": "total ( d ) | $ 3262 | $ 1407 | $ 946 | $ 783 | $ 1173 | $ 16284"
+            }
+          ],
+          "steps": [
+            {
+              "id": "step1",
+              "operation": "divide",
+              "inputs": [
+                "maturities_long_term_debt_2011",
+                "total_obligations_2011"
+              ]
+            },
+            {
+              "id": "step2",
+              "operation": "multiply",
+              "inputs": [
+                "step1",
+                "100"
+              ]
+            }
+          ],
+          "final_id": "step2",
+          "final_unit": "percent"
+        }
+      },
+      "plan": {
+        "kind": "calculation",
+        "answer_type": "percent",
+        "variables": [
+          {
+            "id": "maturities_long_term_debt_2011",
+            "value": 574,
+            "unit": "million",
+            "evidence": "maturities of long-term debt ( a ) | $ 304 | $ 574 | $ 199 | $ 131 | $ 562 | $ 7263"
+          },
+          {
+            "id": "total_obligations_2011",
+            "value": 1407,
+            "unit": "million",
+            "evidence": "total ( d ) | $ 3262 | $ 1407 | $ 946 | $ 783 | $ 1173 | $ 16284"
+          }
+        ],
+        "steps": [
+          {
+            "id": "step1",
+            "operation": "divide",
+            "inputs": [
+              "maturities_long_term_debt_2011",
+              "total_obligations_2011"
+            ]
+          },
+          {
+            "id": "step2",
+            "operation": "multiply",
+            "inputs": [
+              "step1",
+              "100"
+            ]
+          }
+        ],
+        "final_id": "step2",
+        "final_unit": "percent"
+      },
+      "calculator_value": "40.79601990049751243781094527",
+      "calculator_text": "40.8%",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [
+        "교환사채(EB)",
+        "주가수익비율(PER)",
+        "G2(Group of Two)",
+        "P-CBO(Primary Collateralized Bond Obligation)"
+      ],
+      "glossary_hit": false,
+      "formatter": {
+        "content": "40.8%",
+        "finish_reason": "stop",
+        "latency_s": 0.2475,
+        "prompt_tokens": 345,
+        "completion_tokens": 6
+      },
+      "model_only_latency_s": 6.7106,
+      "full_pipeline_latency_s": 8.8186,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "numeric_v2"
+    },
+    {
+      "id": "finqa:GS/2012/page_121.pdf-2",
+      "source": "FinQA",
+      "split": "test",
+      "question": "what is the percentage change in total financial liabilities at fair value in 2012?",
+      "gold": "-0.02828",
+      "prediction": "-2.83%",
+      "finish_reason": "stop",
+      "latency_s": 10.6317,
+      "prompt_tokens": 1047,
+      "completion_tokens": 293,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "arithmetic+accounting",
+      "baseline_prediction": "To calculate the percentage change in total financial liabilities at fair value in 2012:\n\n1. Identify the total financial liabilities at fair value for both years:\n   - As of December 2012: $377,677 million\n   - As of December 2011: $388,669 million\n\n2. Calculate the difference between the two years:\n   \\[\n   \\text{Difference} = \\$377,677 \\text{ million} - \\$388,669 \\text{ million} = -\\$10,992 \\text{ million}\n   \\]\n\n3. Calculate the percentage change using the formula:\n   \\[\n   \\text{Percentage Change} = \\left( \\frac{\\text{New Value} - \\text{Old Value}}{\\text{Old Value}} \\right) \\times 100\n   \\]\n   Substituting the values:\n   \\[\n   \\text{Percentage Change} = \\left( \\frac{-\\$10,992 \\text{ million}}{\\$388,669 \\text{ million}} \\right) \\times 100 \\approx -2.83\\%\n   \\]\n\nThe percentage change in total financial liabilities at fair value in 2012 is approximately -2.83%.",
+      "final_source": "arithmetic_adapter",
+      "fallback": false,
+      "planner": {
+        "status": "ok",
+        "attempt": 2,
+        "latency_s": 2.169,
+        "prompt_tokens": 1170,
+        "completion_tokens": 190,
+        "plan": {
+          "kind": "calculation",
+          "answer_type": "percent",
+          "variables": [
+            {
+              "id": "total_financial_liabilities_2012",
+              "value": 377677,
+              "unit": "millions",
+              "evidence": "total financial liabilities at fair value | $ 377677 | $ 388669"
+            },
+            {
+              "id": "total_financial_liabilities_2011",
+              "value": 388669,
+              "unit": "millions",
+              "evidence": "total financial liabilities at fair value | $ 377677 | $ 388669"
+            }
+          ],
+          "steps": [
+            {
+              "id": "calculate_change",
+              "operation": "subtract",
+              "inputs": [
+                "total_financial_liabilities_2012",
+                "total_financial_liabilities_2011"
+              ]
+            },
+            {
+              "id": "calculate_percentage_change",
+              "operation": "divide",
+              "inputs": [
+                "calculate_change",
+                "total_financial_liabilities_2011"
+              ]
+            },
+            {
+              "id": "calculate_percentage_change_final",
+              "operation": "multiply",
+              "inputs": [
+                "calculate_percentage_change",
+                "100"
+              ]
+            }
+          ],
+          "final_id": "calculate_percentage_change_final",
+          "final_unit": "percent"
+        }
+      },
+      "plan": {
+        "kind": "calculation",
+        "answer_type": "percent",
+        "variables": [
+          {
+            "id": "total_financial_liabilities_2012",
+            "value": 377677,
+            "unit": "millions",
+            "evidence": "total financial liabilities at fair value | $ 377677 | $ 388669"
+          },
+          {
+            "id": "total_financial_liabilities_2011",
+            "value": 388669,
+            "unit": "millions",
+            "evidence": "total financial liabilities at fair value | $ 377677 | $ 388669"
+          }
+        ],
+        "steps": [
+          {
+            "id": "calculate_change",
+            "operation": "subtract",
+            "inputs": [
+              "total_financial_liabilities_2012",
+              "total_financial_liabilities_2011"
+            ]
+          },
+          {
+            "id": "calculate_percentage_change",
+            "operation": "divide",
+            "inputs": [
+              "calculate_change",
+              "total_financial_liabilities_2011"
+            ]
+          },
+          {
+            "id": "calculate_percentage_change_final",
+            "operation": "multiply",
+            "inputs": [
+              "calculate_percentage_change",
+              "100"
+            ]
+          }
+        ],
+        "final_id": "calculate_percentage_change_final",
+        "final_unit": "percent"
+      },
+      "calculator_value": "-2.828113381823608263072177097",
+      "calculator_text": "-2.83%",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [
+        "주가수익비율(PER)"
+      ],
+      "glossary_hit": false,
+      "formatter": {
+        "content": "-2.83%",
+        "finish_reason": "stop",
+        "latency_s": 0.4355,
+        "prompt_tokens": 432,
+        "completion_tokens": 7
+      },
+      "model_only_latency_s": 10.6317,
+      "full_pipeline_latency_s": 13.2362,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "numeric_v2"
+    },
+    {
+      "id": "finqa:ETR/2004/page_239.pdf-3",
+      "source": "FinQA",
+      "split": "test",
+      "question": "what is the growth rate in net revenue for entergy mississippi , inc . in 2003?",
+      "gold": "0.12204",
+      "prediction": "To calculate the growth rate in net revenue for Entergy Mississippi, Inc. in 2003:\n\n1. Identify the net revenue values:\n   - 2002 net revenue: $380.2 million\n   - 2003 net revenue: $426.6 million\n\n2. Apply the formula for growth rate:\n   \\[\n   \\text{Growth Rate} = \\frac{\\text{New Value} - \\text{Old Value}}{\\text{Old Value}} \\times 100\n   \\]\n\n3. Substitute the values into the formula:\n   \\[\n   \\text{Growth Rate} = \\frac{426.6 - 380.2}{380.2} \\times 100\n   \\]\n\n4. Calculate the difference and then the growth rate:\n   \\[\n   \\text{Difference} = 426.6 - 380.2 = 46.4 \\text{ million}\n   \\]\n   \\[\n   \\text{Growth Rate} = \\frac{46.4}{380.2} \\times 100 \\approx 12.20\\%\n   \\]\n\nThe growth rate in net revenue for Entergy Mississippi, Inc. in 2003 is approximately 12.20%.",
+      "finish_reason": "stop",
+      "latency_s": 10.5896,
+      "prompt_tokens": 727,
+      "completion_tokens": 293,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "arithmetic+accounting",
+      "baseline_prediction": "To calculate the growth rate in net revenue for Entergy Mississippi, Inc. in 2003:\n\n1. Identify the net revenue values:\n   - 2002 net revenue: $380.2 million\n   - 2003 net revenue: $426.6 million\n\n2. Apply the formula for growth rate:\n   \\[\n   \\text{Growth Rate} = \\frac{\\text{New Value} - \\text{Old Value}}{\\text{Old Value}} \\times 100\n   \\]\n\n3. Substitute the values into the formula:\n   \\[\n   \\text{Growth Rate} = \\frac{426.6 - 380.2}{380.2} \\times 100\n   \\]\n\n4. Calculate the difference and then the growth rate:\n   \\[\n   \\text{Difference} = 426.6 - 380.2 = 46.4 \\text{ million}\n   \\]\n   \\[\n   \\text{Growth Rate} = \\frac{46.4}{380.2} \\times 100 \\approx 12.20\\%\n   \\]\n\nThe growth rate in net revenue for Entergy Mississippi, Inc. in 2003 is approximately 12.20%.",
+      "final_source": "fallback_awq_invalid_plan",
+      "fallback": true,
+      "planner": {
+        "status": "ok",
+        "attempt": 1,
+        "latency_s": 1.8278,
+        "prompt_tokens": 919,
+        "completion_tokens": 162,
+        "plan": {
+          "kind": "calculation",
+          "answer_type": "percent",
+          "variables": [
+            {
+              "id": "net_revenue_2002",
+              "value": 380.2,
+              "unit": "million",
+              "evidence": "2002 net revenue | $ 380.2"
+            },
+            {
+              "id": "net_revenue_2003",
+              "value": 426.6,
+              "unit": "million",
+              "evidence": "2003 net revenue | $ 426.6"
+            }
+          ],
+          "steps": [
+            {
+              "id": "step1",
+              "operation": "subtract",
+              "inputs": [
+                "net_revenue_2003",
+                "net_revenue_2002"
+              ]
+            },
+            {
+              "id": "step2",
+              "operation": "divide",
+              "inputs": [
+                "step1",
+                "net_revenue_2002"
+              ]
+            },
+            {
+              "id": "step3",
+              "operation": "multiply",
+              "inputs": [
+                "step2",
+                "100"
+              ]
+            }
+          ],
+          "final_id": "step3",
+          "final_unit": "percent"
+        },
+        "calculator_error": "percent answer missing percent semantics"
+      },
+      "plan": {
+        "kind": "calculation",
+        "answer_type": "percent",
+        "variables": [
+          {
+            "id": "net_revenue_2002",
+            "value": 380.2,
+            "unit": "million",
+            "evidence": "2002 net revenue | $ 380.2"
+          },
+          {
+            "id": "net_revenue_2003",
+            "value": 426.6,
+            "unit": "million",
+            "evidence": "2003 net revenue | $ 426.6"
+          }
+        ],
+        "steps": [
+          {
+            "id": "step1",
+            "operation": "subtract",
+            "inputs": [
+              "net_revenue_2003",
+              "net_revenue_2002"
+            ]
+          },
+          {
+            "id": "step2",
+            "operation": "divide",
+            "inputs": [
+              "step1",
+              "net_revenue_2002"
+            ]
+          },
+          {
+            "id": "step3",
+            "operation": "multiply",
+            "inputs": [
+              "step2",
+              "100"
+            ]
+          }
+        ],
+        "final_id": "step3",
+        "final_unit": "percent"
+      },
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [
+        "생산자물가지수(PPI)"
+      ],
+      "glossary_hit": false,
+      "formatter": null,
+      "model_only_latency_s": 10.5896,
+      "full_pipeline_latency_s": 12.4174,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "numeric_v2"
+    },
+    {
+      "id": "finqa:ILMN/2008/page_86.pdf-4",
+      "source": "FinQA",
+      "split": "test",
+      "question": "what was the change in millions of company contributions to the employee benefit plans retirement plan between 2007 and 2008?",
+      "gold": "1.2",
+      "prediction": "The change in millions of company contributions to the employee benefit plans retirement plan between 2007 and 2008 is:\n\n$2.6 million - $1.4 million = $1.2 million\n\nTherefore, the company contributions increased by $1.2 million from 2007 to 2008.",
+      "finish_reason": "stop",
+      "latency_s": 2.6217,
+      "prompt_tokens": 978,
+      "completion_tokens": 72,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "accounting",
+      "baseline_prediction": "The change in millions of company contributions to the employee benefit plans retirement plan between 2007 and 2008 is:\n\n$2.6 million - $1.4 million = $1.2 million\n\nTherefore, the company contributions increased by $1.2 million from 2007 to 2008.",
+      "final_source": "base_awq_accounting_glossary",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": "bok-800-arithmetic-glossary-v1",
+      "glossary_sha256": "d3da5743695146b492835d1e71b7d373ffc268686917e8e4494378b7e823f369",
+      "matched_terms": [
+        "G2(Group of Two)"
+      ],
+      "glossary_hit": true,
+      "formatter": {
+        "rag_latency_s": 2.647,
+        "rag_prompt_tokens": 1302
+      },
+      "model_only_latency_s": 2.6217,
+      "full_pipeline_latency_s": 2.6217,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "numeric_v2"
+    },
+    {
+      "id": "finqa:GPN/2010/page_87.pdf-2",
+      "source": "FinQA",
+      "split": "test",
+      "question": "what is the percentage change in the after-tax share-based compensation cost from 2009 to 2010?",
+      "gold": "0.25532",
+      "prediction": "0.24%",
+      "finish_reason": "stop",
+      "latency_s": 9.8428,
+      "prompt_tokens": 1055,
+      "completion_tokens": 271,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "arithmetic+accounting",
+      "baseline_prediction": "To calculate the percentage change in the after-tax share-based compensation cost from 2009 to 2010:\n\n1. Determine the after-tax share-based compensation cost for each year:\n   - 2009: Share-based compensation cost = $14.6 million; Income tax benefit = $(5.2) million\n     After-tax cost = $14.6 million - $(5.2) million = $9.4 million\n   - 2010: Share-based compensation cost = $18.1 million; Income tax benefit = $(6.3) million\n     After-tax cost = $18.1 million - $(6.3) million = $11.8 million\n\n2. Calculate the percentage change:\n   Percentage change = ((New Value - Original Value) / Original Value) * 100\n   = (($11.8 million - $9.4 million) / $9.4 million) * 100\n   = ($2.4 million / $9.4 million) * 100\n   = 25.53%\n\nThe percentage change in the after-tax share-based compensation cost from 2009 to 2010 is approximately 25.53%.",
+      "final_source": "arithmetic_adapter",
+      "fallback": false,
+      "planner": {
+        "status": "ok",
+        "attempt": 1,
+        "latency_s": 1.9652,
+        "prompt_tokens": 1194,
+        "completion_tokens": 192,
+        "plan": {
+          "kind": "calculation",
+          "answer_type": "percent",
+          "variables": [
+            {
+              "id": "share_based_compensation_2010",
+              "value": 18.1,
+              "unit": "million",
+              "evidence": "share-based compensation cost | $ 18.1 | $ 14.6 | $ 13.8"
+            },
+            {
+              "id": "share_based_compensation_2009",
+              "value": 14.6,
+              "unit": "million",
+              "evidence": "share-based compensation cost | $ 18.1 | $ 14.6 | $ 13.8"
+            }
+          ],
+          "steps": [
+            {
+              "id": "calculate_change",
+              "operation": "subtract",
+              "inputs": [
+                "share_based_compensation_2010",
+                "share_based_compensation_2009"
+              ]
+            },
+            {
+              "id": "calculate_percentage_change",
+              "operation": "divide",
+              "inputs": [
+                "calculate_change",
+                "share_based_compensation_2009"
+              ]
+            },
+            {
+              "id": "convert_to_percentage",
+              "operation": "multiply",
+              "inputs": [
+                "calculate_percentage_change"
+              ]
+            }
+          ],
+          "final_id": "convert_to_percentage",
+          "final_unit": "percent"
+        }
+      },
+      "plan": {
+        "kind": "calculation",
+        "answer_type": "percent",
+        "variables": [
+          {
+            "id": "share_based_compensation_2010",
+            "value": 18.1,
+            "unit": "million",
+            "evidence": "share-based compensation cost | $ 18.1 | $ 14.6 | $ 13.8"
+          },
+          {
+            "id": "share_based_compensation_2009",
+            "value": 14.6,
+            "unit": "million",
+            "evidence": "share-based compensation cost | $ 18.1 | $ 14.6 | $ 13.8"
+          }
+        ],
+        "steps": [
+          {
+            "id": "calculate_change",
+            "operation": "subtract",
+            "inputs": [
+              "share_based_compensation_2010",
+              "share_based_compensation_2009"
+            ]
+          },
+          {
+            "id": "calculate_percentage_change",
+            "operation": "divide",
+            "inputs": [
+              "calculate_change",
+              "share_based_compensation_2009"
+            ]
+          },
+          {
+            "id": "convert_to_percentage",
+            "operation": "multiply",
+            "inputs": [
+              "calculate_percentage_change"
+            ]
+          }
+        ],
+        "final_id": "convert_to_percentage",
+        "final_unit": "percent"
+      },
+      "calculator_value": "0.2397260273972602739726027397",
+      "calculator_text": "0.24%",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [
+        "은행인수어음(BA)",
+        "주가수익비율(PER)"
+      ],
+      "glossary_hit": false,
+      "formatter": {
+        "content": "0.24%",
+        "finish_reason": "stop",
+        "latency_s": 0.3956,
+        "prompt_tokens": 416,
+        "completion_tokens": 6
+      },
+      "model_only_latency_s": 9.8428,
+      "full_pipeline_latency_s": 12.2036,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "numeric_v2"
+    },
+    {
+      "id": "finqa:AAL/2013/page_172.pdf-1",
+      "source": "FinQA",
+      "split": "test",
+      "question": "what portion of the total bankruptcy settlement obligations are related to labor deemed claims?",
+      "gold": "0.15653",
+      "prediction": "The labor-related deemed claim is $849 million. The total bankruptcy settlement obligations are $5424 million.\n\nTo find the portion related to labor deemed claims:\n\\[ \\frac{849}{5424} = 0.1565 \\]\n\nTherefore, the portion of the total bankruptcy settlement obligations related to labor deemed claims is **15.65%**.",
+      "finish_reason": "stop",
+      "latency_s": 3.0955,
+      "prompt_tokens": 1326,
+      "completion_tokens": 84,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "arithmetic+accounting",
+      "baseline_prediction": "The labor-related deemed claim is $849 million. The total bankruptcy settlement obligations are $5424 million.\n\nTo find the portion related to labor deemed claims:\n\\[ \\frac{849}{5424} = 0.1565 \\]\n\nTherefore, the portion of the total bankruptcy settlement obligations related to labor deemed claims is **15.65%**.",
+      "final_source": "fallback_awq_invalid_plan",
+      "fallback": true,
+      "planner": {
+        "status": "ok",
+        "attempt": 1,
+        "latency_s": 1.1592,
+        "prompt_tokens": 1503,
+        "completion_tokens": 120,
+        "plan": {
+          "kind": "calculation",
+          "answer_type": "percent",
+          "variables": [
+            {
+              "id": "total_obligations",
+              "value": 5424,
+              "unit": "million",
+              "evidence": "total | $ 5424"
+            },
+            {
+              "id": "labor_claims",
+              "value": 849,
+              "unit": "million",
+              "evidence": "labor-related deemed claim | 849"
+            }
+          ],
+          "steps": [
+            {
+              "id": "step1",
+              "operation": "divide",
+              "inputs": [
+                "labor_claims",
+                "total_obligations"
+              ]
+            },
+            {
+              "id": "step2",
+              "operation": "multiply",
+              "inputs": [
+                "step1",
+                "100"
+              ]
+            }
+          ],
+          "final_id": "step2",
+          "final_unit": "percent"
+        },
+        "calculator_error": "percent answer missing percent semantics"
+      },
+      "plan": {
+        "kind": "calculation",
+        "answer_type": "percent",
+        "variables": [
+          {
+            "id": "total_obligations",
+            "value": 5424,
+            "unit": "million",
+            "evidence": "total | $ 5424"
+          },
+          {
+            "id": "labor_claims",
+            "value": 849,
+            "unit": "million",
+            "evidence": "labor-related deemed claim | 849"
+          }
+        ],
+        "steps": [
+          {
+            "id": "step1",
+            "operation": "divide",
+            "inputs": [
+              "labor_claims",
+              "total_obligations"
+            ]
+          },
+          {
+            "id": "step2",
+            "operation": "multiply",
+            "inputs": [
+              "step1",
+              "100"
+            ]
+          }
+        ],
+        "final_id": "step2",
+        "final_unit": "percent"
+      },
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [
+        "세계은행(World Bank)",
+        "은행인수어음(BA)",
+        "G2(Group of Two)",
+        "P-CBO(Primary Collateralized Bond Obligation)"
+      ],
+      "glossary_hit": false,
+      "formatter": null,
+      "model_only_latency_s": 3.0955,
+      "full_pipeline_latency_s": 4.2547,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "numeric_v2"
+    },
+    {
+      "id": "tatqa:ebbf3324-49cd-4fa6-a3ef-a6b9f5f9dee8",
+      "source": "TAT-QA",
+      "split": "dev",
+      "question": "In which year was Products and licensing costs less than 10,000,000?",
+      "gold": "2018",
+      "prediction": "The Products and licensing costs were less than 10,000,000 in 2018.",
+      "finish_reason": "stop",
+      "latency_s": 1.518,
+      "prompt_tokens": 501,
+      "completion_tokens": 42,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "accounting",
+      "baseline_prediction": "The Products and licensing costs were less than 10,000,000 in 2018, with a value of $8,078,870.",
+      "final_source": "base_awq_accounting_glossary",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": "bok-800-arithmetic-glossary-v1",
+      "glossary_sha256": "d3da5743695146b492835d1e71b7d373ffc268686917e8e4494378b7e823f369",
+      "matched_terms": [
+        "뉴스심리지수(NSI)"
+      ],
+      "glossary_hit": true,
+      "formatter": {
+        "rag_latency_s": 1.0115,
+        "rag_prompt_tokens": 827
+      },
+      "model_only_latency_s": 1.518,
+      "full_pipeline_latency_s": 1.518,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "tatqa_hybrid_v2"
+    },
+    {
+      "id": "tatqa:1df09c12-95de-481c-bcab-607c2fd69da2",
+      "source": "TAT-QA",
+      "split": "dev",
+      "question": "What was the Gross Profit in 2019, 2018 and 2017 respectively?",
+      "gold": "137,347 | 100,284 | 72,849 thousand",
+      "prediction": "The Gross Profit in 2019, 2018, and 2017 respectively was $137,347, $100,284, and $72,849.",
+      "finish_reason": "stop",
+      "latency_s": 1.9057,
+      "prompt_tokens": 509,
+      "completion_tokens": 52,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "passthrough",
+      "baseline_prediction": "The Gross Profit in 2019, 2018, and 2017 respectively was $137,347, $100,284, and $72,849.",
+      "final_source": "base_awq_passthrough",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "formatter": null,
+      "model_only_latency_s": 1.9057,
+      "full_pipeline_latency_s": 1.9057,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "tatqa_hybrid_v2"
+    },
+    {
+      "id": "tatqa:e533cad8-8912-4956-97a8-a51179fa6a8c",
+      "source": "TAT-QA",
+      "split": "dev",
+      "question": "What are the respective values of Finjan Blue future commitments that are less than one year and between 2-5 years?",
+      "gold": "2,000 | 2,000 thousand",
+      "prediction": "The respective values of Finjan Blue future commitments are $2,000 for less than one year and $2,000 for 2-5 years.",
+      "finish_reason": "stop",
+      "latency_s": 1.3275,
+      "prompt_tokens": 325,
+      "completion_tokens": 36,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "accounting",
+      "baseline_prediction": "The respective values of Finjan Blue future commitments are:\nLess Than 1 Year: $2,000\n2-5 Years: $2,000",
+      "final_source": "base_awq_accounting_glossary",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": "bok-800-arithmetic-glossary-v1",
+      "glossary_sha256": "d3da5743695146b492835d1e71b7d373ffc268686917e8e4494378b7e823f369",
+      "matched_terms": [
+        "G2(Group of Two)"
+      ],
+      "glossary_hit": true,
+      "formatter": {
+        "rag_latency_s": 1.3406,
+        "rag_prompt_tokens": 649
+      },
+      "model_only_latency_s": 1.3275,
+      "full_pipeline_latency_s": 1.3275,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "tatqa_hybrid_v2"
+    },
+    {
+      "id": "tatqa:0f032004-ec01-40a0-831b-aac3f7e1b5c7",
+      "source": "TAT-QA",
+      "split": "dev",
+      "question": "How often does the company review the actuarial assumptions which the periodic benefit cost and the actuarial present value of projected benefit obligations are based on?",
+      "gold": "Annual basis",
+      "prediction": "The company reviews the actuarial assumptions on an annual basis.",
+      "finish_reason": "stop",
+      "latency_s": 0.5424,
+      "prompt_tokens": 399,
+      "completion_tokens": 14,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "accounting",
+      "baseline_prediction": "The company reviews the actuarial assumptions on an annual basis.",
+      "final_source": "base_awq_accounting_glossary",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": "bok-800-arithmetic-glossary-v1",
+      "glossary_sha256": "d3da5743695146b492835d1e71b7d373ffc268686917e8e4494378b7e823f369",
+      "matched_terms": [
+        "은행인수어음(BA)",
+        "주가수익비율(PER)",
+        "G2(Group of Two)",
+        "P-CBO(Primary Collateralized Bond Obligation)"
+      ],
+      "glossary_hit": true,
+      "formatter": {
+        "rag_latency_s": 0.5493,
+        "rag_prompt_tokens": 1530
+      },
+      "model_only_latency_s": 0.5424,
+      "full_pipeline_latency_s": 0.5424,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "tatqa_hybrid_v2"
+    },
+    {
+      "id": "tatqa:98d2b708-8948-4755-9407-e8c9c7a97883",
+      "source": "TAT-QA",
+      "split": "dev",
+      "question": "Where does the company reports the intangible impairment charges?",
+      "gold": "The Company reports intangible impairment charges within the Asset impairment expense line of our Consolidated Statements of Operations.",
+      "prediction": "The company reports intangible impairment charges within the Asset impairment expense line of its Consolidated Statements of Operations.",
+      "finish_reason": "stop",
+      "latency_s": 0.8287,
+      "prompt_tokens": 387,
+      "completion_tokens": 22,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "accounting",
+      "baseline_prediction": "The company reports intangible impairment charges within the Asset impairment expense line of their Consolidated Statements of Operations.",
+      "final_source": "base_awq_accounting_glossary",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": "bok-800-arithmetic-glossary-v1",
+      "glossary_sha256": "d3da5743695146b492835d1e71b7d373ffc268686917e8e4494378b7e823f369",
+      "matched_terms": [
+        "환매조건부매매/RP/Repo"
+      ],
+      "glossary_hit": true,
+      "formatter": {
+        "rag_latency_s": 0.8298,
+        "rag_prompt_tokens": 645
+      },
+      "model_only_latency_s": 0.8287,
+      "full_pipeline_latency_s": 0.8287,
+      "score_v2": 0.9444,
+      "passed_v2": true,
+      "metric_v2": "tatqa_hybrid_v2"
+    },
+    {
+      "id": "tatqa:d5072c93-36bb-432c-adc8-6334fd6fe7ac",
+      "source": "TAT-QA",
+      "split": "dev",
+      "question": "What was the change in Transportation equipment in 2019 from 2018?",
+      "gold": "-23 thousand",
+      "prediction": "The change in Transportation equipment in 2019 from 2018 is calculated as follows:\n\n$613 - $636 = -$23 thousand\n\nFinal answer: -$23 thousand",
+      "finish_reason": "stop",
+      "latency_s": 1.6567,
+      "prompt_tokens": 346,
+      "completion_tokens": 45,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "passthrough",
+      "baseline_prediction": "The change in Transportation equipment in 2019 from 2018 is calculated as follows:\n\n$613 - $636 = -$23 thousand\n\nFinal answer: -$23 thousand",
+      "final_source": "base_awq_passthrough",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "formatter": null,
+      "model_only_latency_s": 1.6567,
+      "full_pipeline_latency_s": 1.6567,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "tatqa_hybrid_v2"
+    },
+    {
+      "id": "tatqa:9c364cfe-84e4-479d-b3ca-dab2b412e8c4",
+      "source": "TAT-QA",
+      "split": "dev",
+      "question": "What is the average financing costs between 2018 and 2019?",
+      "gold": "-1581 million",
+      "prediction": "To find the average financing costs between 2018 and 2019:\n\n1. Identify the net financing costs for each year:\n   - 2019: €(1,655) million\n   - 2018: €(389) million\n\n2. Calculate the sum of the net financing costs over the two years:\n   \\[\n   -1,655 + (-389) = -2,044 \\text{ million euros}\n   \\]\n\n3. Divide the total by 2 to get the average:\n   \\[\n   \\frac{-2,044}{2} = -1,022 \\text{ million euros}\n   \\]\n\nThe average financing costs between 2018 and 2019 is €(1,022) million.",
+      "finish_reason": "stop",
+      "latency_s": 6.6111,
+      "prompt_tokens": 439,
+      "completion_tokens": 183,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "arithmetic",
+      "baseline_prediction": "To find the average financing costs between 2018 and 2019:\n\n1. Identify the net financing costs for each year:\n   - 2019: €(1,655) million\n   - 2018: €(389) million\n\n2. Calculate the sum of the net financing costs over the two years:\n   \\[\n   -1,655 + (-389) = -2,044 \\text{ million euros}\n   \\]\n\n3. Divide the total by 2 to get the average:\n   \\[\n   \\frac{-2,044}{2} = -1,022 \\text{ million euros}\n   \\]\n\nThe average financing costs between 2018 and 2019 is €(1,022) million.",
+      "final_source": "fallback_awq_invalid_plan",
+      "fallback": true,
+      "planner": {
+        "status": "ok",
+        "attempt": 1,
+        "latency_s": 1.5562,
+        "prompt_tokens": 644,
+        "completion_tokens": 153,
+        "plan": {
+          "kind": "calculation",
+          "answer_type": "number",
+          "variables": [
+            {
+              "id": "net_financing_costs_2019",
+              "value": -1655,
+              "unit": "€m",
+              "evidence": "Net financing costs | (1,655) | 2019"
+            },
+            {
+              "id": "net_financing_costs_2018",
+              "value": -389,
+              "unit": "€m",
+              "evidence": "Net financing costs | (389) | 2018"
+            }
+          ],
+          "steps": [
+            {
+              "id": "step1",
+              "operation": "add",
+              "inputs": [
+                "net_financing_costs_2019",
+                "net_financing_costs_2018"
+              ]
+            },
+            {
+              "id": "step2",
+              "operation": "divide",
+              "inputs": [
+                "step1",
+                "2"
+              ]
+            }
+          ],
+          "final_id": "step2",
+          "final_unit": "€m"
+        },
+        "calculator_error": "variable value is not grounded in evidence"
+      },
+      "plan": {
+        "kind": "calculation",
+        "answer_type": "number",
+        "variables": [
+          {
+            "id": "net_financing_costs_2019",
+            "value": -1655,
+            "unit": "€m",
+            "evidence": "Net financing costs | (1,655) | 2019"
+          },
+          {
+            "id": "net_financing_costs_2018",
+            "value": -389,
+            "unit": "€m",
+            "evidence": "Net financing costs | (389) | 2018"
+          }
+        ],
+        "steps": [
+          {
+            "id": "step1",
+            "operation": "add",
+            "inputs": [
+              "net_financing_costs_2019",
+              "net_financing_costs_2018"
+            ]
+          },
+          {
+            "id": "step2",
+            "operation": "divide",
+            "inputs": [
+              "step1",
+              "2"
+            ]
+          }
+        ],
+        "final_id": "step2",
+        "final_unit": "€m"
+      },
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "formatter": null,
+      "model_only_latency_s": 6.6111,
+      "full_pipeline_latency_s": 8.1673,
+      "score_v2": 0.0263,
+      "passed_v2": false,
+      "metric_v2": "tatqa_hybrid_v2"
+    },
+    {
+      "id": "tatqa:d05ff4c9-8709-4fa1-b546-a2d6b7fd39cc",
+      "source": "TAT-QA",
+      "split": "dev",
+      "question": "What is the company's total other non-current assets as at December 31, 2018?",
+      "gold": "$8,620",
+      "prediction": "The company's total other non-current assets as at December 31, 2018 is $8,620 thousand.",
+      "finish_reason": "stop",
+      "latency_s": 1.0908,
+      "prompt_tokens": 252,
+      "completion_tokens": 30,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "passthrough",
+      "baseline_prediction": "The company's total other non-current assets as at December 31, 2018 is $8,620 thousand.",
+      "final_source": "base_awq_passthrough",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "formatter": null,
+      "model_only_latency_s": 1.0908,
+      "full_pipeline_latency_s": 1.0908,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "tatqa_hybrid_v2"
+    },
+    {
+      "id": "tatqa:62f8f0d9-7670-40aa-9a54-86df84c7df25",
+      "source": "TAT-QA",
+      "split": "dev",
+      "question": "What is another name for the defined benefit plan?",
+      "gold": "Woolworths Group Superannuation Plan",
+      "prediction": "Another name for the defined benefit plan is the Woolworths Group Superannuation Plan (WGSP or the Plan).",
+      "finish_reason": "stop",
+      "latency_s": 0.9391,
+      "prompt_tokens": 414,
+      "completion_tokens": 25,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "passthrough",
+      "baseline_prediction": "Another name for the defined benefit plan is the Woolworths Group Superannuation Plan (WGSP or the Plan).",
+      "final_source": "base_awq_passthrough",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "formatter": null,
+      "model_only_latency_s": 0.9391,
+      "full_pipeline_latency_s": 0.9391,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "tatqa_hybrid_v2"
+    },
+    {
+      "id": "tatqa:6cd013f3-3064-417a-b00c-4096f84b3525",
+      "source": "TAT-QA",
+      "split": "dev",
+      "question": "What are the respective amounts capitalized to internal use software related to continuing operations for the years ended December 31, 2019 and 2018?",
+      "gold": "$3,800 | $6,690",
+      "prediction": "The respective amounts capitalized to internal use software related to continuing operations for the years ended December 31, 2019 and 2018 are $3,800 and $6,690.",
+      "finish_reason": "stop",
+      "latency_s": 1.7706,
+      "prompt_tokens": 660,
+      "completion_tokens": 48,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "accounting",
+      "baseline_prediction": "The respective amounts capitalized to internal use software related to continuing operations for the years ended December 31, 2019 and 2018 are $3,800 and $6,690.",
+      "final_source": "base_awq_accounting_glossary",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": "bok-800-arithmetic-glossary-v1",
+      "glossary_sha256": "d3da5743695146b492835d1e71b7d373ffc268686917e8e4494378b7e823f369",
+      "matched_terms": [
+        "주가수익비율(PER)"
+      ],
+      "glossary_hit": true,
+      "formatter": {
+        "rag_latency_s": 2.1025,
+        "rag_prompt_tokens": 1052
+      },
+      "model_only_latency_s": 1.7706,
+      "full_pipeline_latency_s": 1.7706,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "tatqa_hybrid_v2"
+    },
+    {
+      "id": "tatqa:611e2914-6d3f-4e81-a9f0-f210d5005b60",
+      "source": "TAT-QA",
+      "split": "dev",
+      "question": "What is Trade receivables?",
+      "gold": "amounts due from customers for rental income, goods sold or services performed in the ordinary course of business.",
+      "prediction": "Trade receivables are amounts due from customers for rental income, goods sold or services performed in the ordinary course of business.",
+      "finish_reason": "stop",
+      "latency_s": 0.9743,
+      "prompt_tokens": 557,
+      "completion_tokens": 26,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "passthrough",
+      "baseline_prediction": "Trade receivables are amounts due from customers for rental income, goods sold or services performed in the ordinary course of business.",
+      "final_source": "base_awq_passthrough",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "formatter": null,
+      "model_only_latency_s": 0.9743,
+      "full_pipeline_latency_s": 0.9743,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "tatqa_hybrid_v2"
+    },
+    {
+      "id": "tatqa:1352b9c0-2cca-432e-807e-08580574f3a8",
+      "source": "TAT-QA",
+      "split": "dev",
+      "question": "What is the average operating income (loss) across 2017, 2018 and 2019?",
+      "gold": "-1161.33 thousand",
+      "prediction": "To find the average operating income (loss) across the three years:\n\n1. Sum up the operating income (loss) for each year:\n   - 2019: $(2,235)$\n   - 2018: $(6,986)$\n   - 2017: $5,737$\n\n2. Calculate the sum:\n   \\[\n   -2,235 - 6,986 + 5,737 = -3,484\n   \\]\n\n3. Divide the sum by the number of years (3):\n   \\[\n   \\frac{-3,484}{3} = -1,161.33\n   \\]\n\nThe average operating income (loss) across 2017, 2018, and 2019 is \\(-1,161.33\\) thousand dollars.",
+      "finish_reason": "stop",
+      "latency_s": 7.2545,
+      "prompt_tokens": 853,
+      "completion_tokens": 200,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "arithmetic+accounting",
+      "baseline_prediction": "To find the average operating income (loss) across the three years:\n\n1. Sum up the operating income (loss) for each year:\n   - 2019: $(2,235)$\n   - 2018: $(6,986)$\n   - 2017: $5,737$\n\n2. Calculate the sum:\n   \\[\n   -2,235 - 6,986 + 5,737 = -3,484\n   \\]\n\n3. Divide the sum by the number of years (3):\n   \\[\n   \\frac{-3,484}{3} = -1,161.33\n   \\]\n\nThe average operating income (loss) across 2017, 2018, and 2019 is \\(-1,161.33\\) thousand dollars.",
+      "final_source": "fallback_awq_invalid_plan",
+      "fallback": true,
+      "planner": {
+        "status": "ok",
+        "attempt": 1,
+        "latency_s": 1.9399,
+        "prompt_tokens": 1063,
+        "completion_tokens": 195,
+        "plan": {
+          "kind": "calculation",
+          "answer_type": "number",
+          "variables": [
+            {
+              "id": "operating_income_2019",
+              "value": -2235,
+              "unit": "currency",
+              "evidence": "Operating income (loss) for 2019 is $ (2,235)"
+            },
+            {
+              "id": "operating_income_2018",
+              "value": -6986,
+              "unit": "currency",
+              "evidence": "Operating income (loss) for 2018 is $ (6,986)"
+            },
+            {
+              "id": "operating_income_2017",
+              "value": 5737,
+              "unit": "currency",
+              "evidence": "Operating income (loss) for 2017 is $ 5,737"
+            }
+          ],
+          "steps": [
+            {
+              "id": "step1",
+              "operation": "add",
+              "inputs": [
+                "operating_income_2019",
+                "operating_income_2018",
+                "operating_income_2017"
+              ]
+            },
+            {
+              "id": "step2",
+              "operation": "divide",
+              "inputs": [
+                "step1",
+                "3"
+              ]
+            }
+          ],
+          "final_id": "step2",
+          "final_unit": "currency"
+        },
+        "calculator_error": "variable value is not grounded in evidence"
+      },
+      "plan": {
+        "kind": "calculation",
+        "answer_type": "number",
+        "variables": [
+          {
+            "id": "operating_income_2019",
+            "value": -2235,
+            "unit": "currency",
+            "evidence": "Operating income (loss) for 2019 is $ (2,235)"
+          },
+          {
+            "id": "operating_income_2018",
+            "value": -6986,
+            "unit": "currency",
+            "evidence": "Operating income (loss) for 2018 is $ (6,986)"
+          },
+          {
+            "id": "operating_income_2017",
+            "value": 5737,
+            "unit": "currency",
+            "evidence": "Operating income (loss) for 2017 is $ 5,737"
+          }
+        ],
+        "steps": [
+          {
+            "id": "step1",
+            "operation": "add",
+            "inputs": [
+              "operating_income_2019",
+              "operating_income_2018",
+              "operating_income_2017"
+            ]
+          },
+          {
+            "id": "step2",
+            "operation": "divide",
+            "inputs": [
+              "step1",
+              "3"
+            ]
+          }
+        ],
+        "final_id": "step2",
+        "final_unit": "currency"
+      },
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [
+        "주가수익비율(PER)"
+      ],
+      "glossary_hit": false,
+      "formatter": null,
+      "model_only_latency_s": 7.2545,
+      "full_pipeline_latency_s": 9.1944,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "tatqa_hybrid_v2"
+    },
+    {
+      "id": "tatqa:d5656a8c-6ef7-4e56-a3d4-8e3dc2bd5bed",
+      "source": "TAT-QA",
+      "split": "dev",
+      "question": "What was the percentage change in total emissions?",
+      "gold": "-5.93 percent",
+      "prediction": "-5.93%",
+      "finish_reason": "stop",
+      "latency_s": 7.2003,
+      "prompt_tokens": 469,
+      "completion_tokens": 200,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "arithmetic+accounting",
+      "baseline_prediction": "To calculate the percentage change in total emissions:\n\n\\[ \\text{Percentage change} = \\left( \\frac{\\text{New value} - \\text{Old value}}{\\text{Old value}} \\right) \\times 100 \\]\n\nSubstitute the values from the table:\n\n\\[ \\text{Percentage change} = \\left( \\frac{4,785.7 - 5,087.6}{5,087.6} \\right) \\times 100 \\]\n\n\\[ \\text{Percentage change} = \\left( \\frac{-301.9}{5,087.6} \\right) \\times 100 \\]\n\n\\[ \\text{Percentage change} = (-0.0592) \\times 100 \\]\n\n\\[ \\text{Percentage change} = -5.92\\% \\]\n\nFinal answer: -5.92%",
+      "final_source": "arithmetic_adapter",
+      "fallback": false,
+      "planner": {
+        "status": "ok",
+        "attempt": 1,
+        "latency_s": 1.5985,
+        "prompt_tokens": 674,
+        "completion_tokens": 192,
+        "plan": {
+          "kind": "calculation",
+          "answer_type": "percent",
+          "variables": [
+            {
+              "id": "total_emissions_2019",
+              "value": 4785.7,
+              "unit": "Tonnes of CO2e",
+              "evidence": "Total emissions in 2019: 4,785.7 Tonnes of CO2e"
+            },
+            {
+              "id": "total_emissions_2018",
+              "value": 5087.6,
+              "unit": "Tonnes of CO2e",
+              "evidence": "Total emissions in 2018: 5,087.6 Tonnes of CO2e"
+            }
+          ],
+          "steps": [
+            {
+              "id": "step1",
+              "operation": "subtract",
+              "inputs": [
+                "total_emissions_2018",
+                "total_emissions_2019"
+              ]
+            },
+            {
+              "id": "step2",
+              "operation": "divide",
+              "inputs": [
+                "step1",
+                "total_emissions_2018"
+              ]
+            },
+            {
+              "id": "step3",
+              "operation": "multiply",
+              "inputs": [
+                "step2",
+                "100"
+              ]
+            }
+          ],
+          "final_id": "step3",
+          "final_unit": "percent"
+        }
+      },
+      "plan": {
+        "kind": "calculation",
+        "answer_type": "percent",
+        "variables": [
+          {
+            "id": "total_emissions_2019",
+            "value": 4785.7,
+            "unit": "Tonnes of CO2e",
+            "evidence": "Total emissions in 2019: 4,785.7 Tonnes of CO2e"
+          },
+          {
+            "id": "total_emissions_2018",
+            "value": 5087.6,
+            "unit": "Tonnes of CO2e",
+            "evidence": "Total emissions in 2018: 5,087.6 Tonnes of CO2e"
+          }
+        ],
+        "steps": [
+          {
+            "id": "step1",
+            "operation": "subtract",
+            "inputs": [
+              "total_emissions_2018",
+              "total_emissions_2019"
+            ]
+          },
+          {
+            "id": "step2",
+            "operation": "divide",
+            "inputs": [
+              "step1",
+              "total_emissions_2018"
+            ]
+          },
+          {
+            "id": "step3",
+            "operation": "multiply",
+            "inputs": [
+              "step2",
+              "100"
+            ]
+          }
+        ],
+        "final_id": "step3",
+        "final_unit": "percent"
+      },
+      "calculator_value": "5.934035694630080981209214561",
+      "calculator_text": "5.93%",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [
+        "주가수익비율(PER)"
+      ],
+      "glossary_hit": false,
+      "formatter": {
+        "content": "-5.93%",
+        "finish_reason": "stop",
+        "latency_s": 0.286,
+        "prompt_tokens": 328,
+        "completion_tokens": 7
+      },
+      "model_only_latency_s": 7.2003,
+      "full_pipeline_latency_s": 9.0848,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "tatqa_hybrid_v2"
+    },
+    {
+      "id": "tatqa:0bc2f342-ba84-4967-867b-351e30f69be1",
+      "source": "TAT-QA",
+      "split": "dev",
+      "question": "In which years was Other assets provided?",
+      "gold": "2019 | 2018",
+      "prediction": "Other assets were provided for the years 2019 and 2018.",
+      "finish_reason": "stop",
+      "latency_s": 0.7604,
+      "prompt_tokens": 316,
+      "completion_tokens": 20,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "passthrough",
+      "baseline_prediction": "Other assets were provided for the years 2019 and 2018.",
+      "final_source": "base_awq_passthrough",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "formatter": null,
+      "model_only_latency_s": 0.7604,
+      "full_pipeline_latency_s": 0.7604,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "tatqa_hybrid_v2"
+    },
+    {
+      "id": "tatqa:d2969c34-708e-4ab0-8e21-32c0b18c544c",
+      "source": "TAT-QA",
+      "split": "dev",
+      "question": "What is the ratio of current deferred revenue to non-current deferred revenue as of end of period?",
+      "gold": "1.3",
+      "prediction": "The ratio of current deferred revenue to non-current deferred revenue as of the end of the period can be calculated by dividing the balance at the end of the period for deferred revenue (current) by the balance at the end of the period for deferred revenue (non-current).\n\nFrom the table provided:\n- Deferred revenue (current) at the end of the period is $4,483.\n- Deferred revenue (non-current) at the end of the period is $3,444.\n\nTherefore, the ratio is:\n\n\\[ \\frac{4,483}{3,444} = 1.30 \\]\n\nThe ratio of current deferred revenue to non-current deferred revenue as of the end of the period is 1.30.",
+      "finish_reason": "stop",
+      "latency_s": 3.6875,
+      "prompt_tokens": 825,
+      "completion_tokens": 101,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "accounting",
+      "baseline_prediction": "Based on the provided evidence:\n\nCurrent deferred revenue at the end of the period: $4,483\nNon-current deferred revenue at the end of the period: $3,444\n\nRatio = Current deferred revenue / Non-current deferred revenue\n= $4,483 / $3,444\n≈ 1.30\n\nThe ratio of current deferred revenue to non-current deferred revenue as of the end of the period is approximately 1.30.",
+      "final_source": "base_awq_accounting_glossary",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": "bok-800-arithmetic-glossary-v1",
+      "glossary_sha256": "d3da5743695146b492835d1e71b7d373ffc268686917e8e4494378b7e823f369",
+      "matched_terms": [
+        "주가수익비율(PER)",
+        "G2(Group of Two)"
+      ],
+      "glossary_hit": true,
+      "formatter": {
+        "rag_latency_s": 5.6855,
+        "rag_prompt_tokens": 1531
+      },
+      "model_only_latency_s": 3.6875,
+      "full_pipeline_latency_s": 3.6875,
+      "score_v2": 1.0,
+      "passed_v2": true,
+      "metric_v2": "tatqa_hybrid_v2"
+    },
+    {
+      "id": "financebench_id_00394",
+      "source": "FinanceBench",
+      "split": "OPEN_SOURCE",
+      "question": "In 2022 Q2, which of JPM's business segments had the highest net income?",
+      "gold": "Corporate & Investment Bank. Its net income was $3725 million.",
+      "prediction": "In 2022 Q2, JPM's Corporate & Investment Bank segment does not have its net income directly provided in the given data format. However, we can see that the Asset & Wealth Management segment had a net income of $1,004 million. The Consumer & Community Banking and Commercial Banking segments' net incomes are also not directly stated but can be inferred from the provided data. Given the information available, the Asset & Wealth Management segment shows the highest net income among the provided segments with $1,004 million.",
+      "finish_reason": "stop",
+      "latency_s": 2.8902,
+      "prompt_tokens": 864,
+      "completion_tokens": 79,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "accounting",
+      "baseline_prediction": "In 2022 Q2, JPM's Consumer & Community Banking segment does not have its net income directly listed, but we can infer it from the \"Total\" section which aggregates all segments. However, based on the provided data, the Asset & Wealth Management segment had a net income of $1,004 million, which is the highest among the listed segments.",
+      "final_source": "base_awq_accounting_glossary",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": "bok-800-arithmetic-glossary-v1",
+      "glossary_sha256": "d3da5743695146b492835d1e71b7d373ffc268686917e8e4494378b7e823f369",
+      "matched_terms": [
+        "G2(Group of Two)"
+      ],
+      "glossary_hit": true,
+      "formatter": {
+        "rag_latency_s": 4.1061,
+        "rag_prompt_tokens": 1188
+      },
+      "model_only_latency_s": 2.8902,
+      "full_pipeline_latency_s": 2.8902,
+      "score_v2": 0.1304,
+      "passed_v2": null,
+      "metric_v2": "manual_required"
+    },
+    {
+      "id": "financebench_id_01079",
+      "source": "FinanceBench",
+      "split": "OPEN_SOURCE",
+      "question": "What are major acquisitions that AMCOR has done in FY2023, FY2022 and FY2021?",
+      "gold": "Amcor completed these acquisitions during FY2023:\n-100% equity interest of a flexibles manufacturing company in the Czech Republic\n- 100% equity interest in a medical device packaging manufacturing site in\nShanghai, China.\n-acquisition of a New Zealand-based leading manufacturer of state-of-the-art, automated protein\npackaging machines.",
+      "prediction": "Based on the provided evidence:\n\n- In **FY2023** (specifically in Q1 and Q2):\n  - Acquisition of a medical device packaging manufacturing site in Shanghai, China for $60 million (March 17, 2023).\n  - Acquisition of a New Zealand based leading manufacturer of state-of-the-art, automated protein packaging machines for $45 million (May 31, 2023).\n\n- In **FY2022** (specifically in Q4):\n  - Acquisition of 100% equity interest in a Czech Republic company that operates a world-class flexible packaging manufacturing plant for $59 million (August 1, 2022).\n\nThere is no information provided about acquisitions in **FY2021**. Therefore, the evidence is insufficient to determine if AMCOR made any acquisitions during that fiscal year.",
+      "finish_reason": "stop",
+      "latency_s": 6.755,
+      "prompt_tokens": 707,
+      "completion_tokens": 186,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "passthrough",
+      "baseline_prediction": "Based on the provided evidence:\n\n- In **FY2023** (specifically in Q1 and Q2):\n  - Acquisition of a medical device packaging manufacturing site in Shanghai, China for $60 million (March 17, 2023).\n  - Acquisition of a New Zealand based leading manufacturer of state-of-the-art, automated protein packaging machines for $45 million (May 31, 2023).\n\n- In **FY2022** (specifically in Q4):\n  - Acquisition of 100% equity interest in a Czech Republic company that operates a world-class flexible packaging manufacturing plant for $59 million (August 1, 2022).\n\nThere is no information provided about acquisitions in **FY2021**. Therefore, the evidence is insufficient to determine if AMCOR made any acquisitions during that fiscal year.",
+      "final_source": "base_awq_passthrough",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "formatter": null,
+      "model_only_latency_s": 6.755,
+      "full_pipeline_latency_s": 6.755,
+      "score_v2": 0.5,
+      "passed_v2": null,
+      "metric_v2": "manual_required"
+    },
+    {
+      "id": "financebench_id_01490",
+      "source": "FinanceBench",
+      "split": "OPEN_SOURCE",
+      "question": "What is the amount of the gain accruing to JnJ as a result of the separation of its Consumer Health business segment, as of August 30, 2023?",
+      "gold": "JnJ will make a gain of approximately $20 billion from the separation of its Consumer Health business segment.",
+      "prediction": "The gain accruing to Johnson & Johnson as a result of the separation of its Consumer Health business segment, as of August 30, 2023, is approximately $20 billion in the third quarter of 2023.",
+      "finish_reason": "stop",
+      "latency_s": 1.5516,
+      "prompt_tokens": 686,
+      "completion_tokens": 42,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "accounting",
+      "baseline_prediction": "The gain accruing to JnJ as a result of the separation of its Consumer Health business segment, as of August 30, 2023, is approximately $20 billion.",
+      "final_source": "base_awq_accounting_glossary",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": "bok-800-arithmetic-glossary-v1",
+      "glossary_sha256": "d3da5743695146b492835d1e71b7d373ffc268686917e8e4494378b7e823f369",
+      "matched_terms": [
+        "G2(Group of Two)"
+      ],
+      "glossary_hit": true,
+      "formatter": {
+        "rag_latency_s": 1.9189,
+        "rag_prompt_tokens": 1010
+      },
+      "model_only_latency_s": 1.5516,
+      "full_pipeline_latency_s": 1.5516,
+      "score_v2": 1.0,
+      "passed_v2": null,
+      "metric_v2": "manual_required"
+    },
+    {
+      "id": "financebench_id_00651",
+      "source": "FinanceBench",
+      "split": "OPEN_SOURCE",
+      "question": "Is growth in JnJ's adjusted EPS expected to accelerate in FY2023?",
+      "gold": "No, rate of growth in adjusted EPS is expected to decelerate slightly from 3.6% in FY2022 to 3.5% in FY2023.",
+      "prediction": "Based on the provided evidence:\n\n- In 2022, the adjusted EPS increased by 3.6%.\n- For 2023, the company guides for an adjusted EPS of $10.50, reflecting a growth of 3.5%.\n\nThe growth rate for adjusted EPS in 2023 (3.5%) is slightly lower than the growth rate in 2022 (3.6%). Therefore, the growth in JnJ's adjusted EPS is not expected to accelerate in FY2023.",
+      "finish_reason": "stop",
+      "latency_s": 4.8934,
+      "prompt_tokens": 372,
+      "completion_tokens": 135,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "accounting",
+      "baseline_prediction": "Based on the provided evidence, Johnson & Johnson expects its adjusted EPS to grow by 3.5% in FY2023. To determine if this represents acceleration, we need to compare it with the growth rate in the previous year. The evidence states that in 2022, the full-year adjusted EPS increased by 3.6%. \n\nSince 3.5% is slightly lower than the 3.6% increase in 2022, the growth in JnJ's adjusted EPS is not expected to accelerate in FY2023; rather, it is expected to decelerate slightly. \n\nFinal Answer: No",
+      "final_source": "base_awq_accounting_glossary",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": "bok-800-arithmetic-glossary-v1",
+      "glossary_sha256": "d3da5743695146b492835d1e71b7d373ffc268686917e8e4494378b7e823f369",
+      "matched_terms": [
+        "주당순이익(EPS)"
+      ],
+      "glossary_hit": true,
+      "formatter": {
+        "rag_latency_s": 4.2278,
+        "rag_prompt_tokens": 755
+      },
+      "model_only_latency_s": 4.8934,
+      "full_pipeline_latency_s": 4.8934,
+      "score_v2": 1.0,
+      "passed_v2": null,
+      "metric_v2": "manual_required"
+    },
+    {
+      "id": "financebench_id_03473",
+      "source": "FinanceBench",
+      "split": "OPEN_SOURCE",
+      "question": "What is the FY2017 return on assets (ROA) for Coca Cola? ROA is defined as: FY2017 net income / (average total assets between FY2016 and FY2017). Round your answer to two decimal places. Give a response to the question by relying on the details shown in the balance sheet and the P&L statement.",
+      "gold": "0.01",
+      "prediction": "To calculate the Return on Assets (ROA) for Coca-Cola in FY2017:\n\n1. **Net Income**: From the income statement, the net income for FY2017 is $1,283 million.\n2. **Average Total Assets**: The total assets for FY2017 and FY2016 are $87,896 million and $87,270 million, respectively. Therefore, the average total assets are:\n   \\[\n   \\text{Average Total Assets} = \\frac{87,896 + 87,270}{2} = \\frac{175,166}{2} = 87,583 \\text{ million}\n   \\]\n\n3. **ROA Calculation**:\n   \\[\n   \\text{ROA} = \\frac{\\text{Net Income}}{\\text{Average Total Assets}} = \\frac{1,283}{87,583} \\approx 0.01464\n   \\]\n   Converting this to a percentage and rounding to two decimal places:\n   \\[\n   \\text{ROA} \\approx 1.46\\%\n   \\]\n\nTherefore, the FY2017 return on assets (ROA) for Coca-Cola is approximately **1.46%**.",
+      "finish_reason": "stop",
+      "latency_s": 10.7761,
+      "prompt_tokens": 1863,
+      "completion_tokens": 292,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "arithmetic+accounting",
+      "baseline_prediction": "To calculate the Return on Assets (ROA) for Coca-Cola in FY2017:\n\n1. **Net Income**: From the income statement, the net income for FY2017 is $1,283 million.\n2. **Average Total Assets**: The total assets for FY2017 and FY2016 are $87,896 million and $87,270 million, respectively. Therefore, the average total assets are:\n   \\[\n   \\text{Average Total Assets} = \\frac{87,896 + 87,270}{2} = \\frac{175,166}{2} = 87,583 \\text{ million}\n   \\]\n\n3. **ROA Calculation**:\n   \\[\n   \\text{ROA} = \\frac{\\text{Net Income}}{\\text{Average Total Assets}} = \\frac{1,283}{87,583} \\approx 0.01464\n   \\]\n   Converting this to a percentage and rounding to two decimal places:\n   \\[\n   \\text{ROA} \\approx 1.46\\%\n   \\]\n\nTherefore, the FY2017 return on assets (ROA) for Coca-Cola is approximately **1.46%**.",
+      "final_source": "fallback_awq_invalid_plan",
+      "fallback": true,
+      "planner": {
+        "status": "ok",
+        "attempt": 1,
+        "latency_s": 1.6177,
+        "prompt_tokens": 1737,
+        "completion_tokens": 196,
+        "plan": {
+          "kind": "calculation",
+          "answer_type": "percent",
+          "variables": [
+            {
+              "id": "net_income_2017",
+              "value": 1248,
+              "unit": "million",
+              "evidence": "NET INCOME ATTRIBUTABLE TO SHAREOWNERS OF THE COCA-COLA COMPANY for FY2017 is $1,248 million."
+            },
+            {
+              "id": "total_assets_2016",
+              "value": 87270,
+              "unit": "million",
+              "evidence": "TOTAL ASSETS for FY2016 is $87,270 million."
+            },
+            {
+              "id": "total_assets_2017",
+              "value": 87896,
+              "unit": "million",
+              "evidence": "TOTAL ASSETS for FY2017 is $87,896 million."
+            }
+          ],
+          "steps": [
+            {
+              "id": "average_total_assets",
+              "operation": "average",
+              "inputs": [
+                "total_assets_2016",
+                "total_assets_2017"
+              ]
+            },
+            {
+              "id": "roa",
+              "operation": "divide",
+              "inputs": [
+                "net_income_2017",
+                "average_total_assets"
+              ]
+            }
+          ],
+          "final_id": "roa",
+          "final_unit": "percent"
+        },
+        "calculator_error": "percent answer missing percent semantics"
+      },
+      "plan": {
+        "kind": "calculation",
+        "answer_type": "percent",
+        "variables": [
+          {
+            "id": "net_income_2017",
+            "value": 1248,
+            "unit": "million",
+            "evidence": "NET INCOME ATTRIBUTABLE TO SHAREOWNERS OF THE COCA-COLA COMPANY for FY2017 is $1,248 million."
+          },
+          {
+            "id": "total_assets_2016",
+            "value": 87270,
+            "unit": "million",
+            "evidence": "TOTAL ASSETS for FY2016 is $87,270 million."
+          },
+          {
+            "id": "total_assets_2017",
+            "value": 87896,
+            "unit": "million",
+            "evidence": "TOTAL ASSETS for FY2017 is $87,896 million."
+          }
+        ],
+        "steps": [
+          {
+            "id": "average_total_assets",
+            "operation": "average",
+            "inputs": [
+              "total_assets_2016",
+              "total_assets_2017"
+            ]
+          },
+          {
+            "id": "roa",
+            "operation": "divide",
+            "inputs": [
+              "net_income_2017",
+              "average_total_assets"
+            ]
+          }
+        ],
+        "final_id": "roa",
+        "final_unit": "percent"
+      },
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [
+        "은행인수어음(BA)",
+        "G2(Group of Two)"
+      ],
+      "glossary_hit": false,
+      "formatter": null,
+      "model_only_latency_s": 10.7761,
+      "full_pipeline_latency_s": 12.3938,
+      "score_v2": 1.0,
+      "passed_v2": null,
+      "metric_v2": "manual_required"
+    },
+    {
+      "id": "financebench_id_07507",
+      "source": "FinanceBench",
+      "split": "OPEN_SOURCE",
+      "question": "What is Adobe's year-over-year change in unadjusted operating income from FY2015 to FY2016 (in units of percents and round to one decimal place)? Give a solution to the question by using the income statement.",
+      "gold": "65.4%",
+      "prediction": "To calculate the year-over-year change in unadjusted operating income from FY2015 to FY2016:\n\n1. Identify the operating income for each year:\n   - FY2015: $903,095 thousand\n   - FY2016: $1,493,602 thousand\n\n2. Calculate the difference in operating income:\n   \\[\n   \\Delta \\text{Operating Income} = 1,493,602 - 903,095 = 590,507 \\text{ thousand}\n   \\]\n\n3. Calculate the percentage change relative to the FY2015 operating income:\n   \\[\n   \\text{Percentage Change} = \\left(\\frac{590,507}{903,095}\\right) \\times 100 \\approx 65.4\\%\n   \\]\n\nTherefore, Adobe's year-over-year change in unadjusted operating income from FY2015 to FY2016 is approximately 65.4%.",
+      "finish_reason": "stop",
+      "latency_s": 8.5084,
+      "prompt_tokens": 1039,
+      "completion_tokens": 234,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "accounting",
+      "baseline_prediction": "To calculate the year-over-year change in unadjusted operating income from FY2015 to FY2016:\n\n1. Identify the operating income for both years:\n   - FY2016: $1,493,602 thousand\n   - FY2015: $903,095 thousand\n\n2. Calculate the difference in operating income:\n   \\[\n   \\Delta \\text{Operating Income} = 1,493,602 - 903,095 = 590,507 \\text{ thousand}\n   \\]\n\n3. Calculate the percentage change relative to the FY2015 operating income:\n   \\[\n   \\text{Percentage Change} = \\left(\\frac{590,507}{903,095}\\right) \\times 100 \\approx 65.4\\%\n   \\]\n\nFinal Answer: The year-over-year change in unadjusted operating income from FY2015 to FY2016 is approximately 65.4%.",
+      "final_source": "base_awq_accounting_glossary",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": "bok-800-arithmetic-glossary-v1",
+      "glossary_sha256": "d3da5743695146b492835d1e71b7d373ffc268686917e8e4494378b7e823f369",
+      "matched_terms": [
+        "주가수익비율(PER)",
+        "G2(Group of Two)"
+      ],
+      "glossary_hit": true,
+      "formatter": {
+        "rag_latency_s": 8.6262,
+        "rag_prompt_tokens": 1745
+      },
+      "model_only_latency_s": 8.5084,
+      "full_pipeline_latency_s": 8.5084,
+      "score_v2": 1.0,
+      "passed_v2": null,
+      "metric_v2": "manual_required"
+    },
+    {
+      "id": "financebench_id_01163",
+      "source": "FinanceBench",
+      "split": "OPEN_SOURCE",
+      "question": "Among operations, investing, and financing activities, which brought in the most (or lost the least) cash flow for Nike in FY2023?",
+      "gold": "Among the three, cash flow from operations was the highest for Nike in FY2023.",
+      "prediction": "To determine which activity brought in the most cash flow for Nike in FY2023, we need to look at the cash flows from operations, investing, and financing activities:\n\n- Cash provided (used) by operations: $5,841 million\n- Cash provided (used) by investing activities: $564 million\n- Cash provided (used) by financing activities: $(7,447) million\n\nComparing these values, the operations activity brought in the most cash flow with $5,841 million.\n\nFinal Answer: Operations",
+      "finish_reason": "stop",
+      "latency_s": 1.2399,
+      "prompt_tokens": 965,
+      "completion_tokens": 33,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "accounting",
+      "baseline_prediction": "Operations brought in the most cash flow for Nike in FY2023, with cash provided by operations amounting to $5,841 million.",
+      "final_source": "base_awq_accounting_glossary",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": "bok-800-arithmetic-glossary-v1",
+      "glossary_sha256": "d3da5743695146b492835d1e71b7d373ffc268686917e8e4494378b7e823f369",
+      "matched_terms": [
+        "주가수익비율(PER)"
+      ],
+      "glossary_hit": true,
+      "formatter": {
+        "rag_latency_s": 4.2608,
+        "rag_prompt_tokens": 1357
+      },
+      "model_only_latency_s": 1.2399,
+      "full_pipeline_latency_s": 1.2399,
+      "score_v2": 0.2093,
+      "passed_v2": null,
+      "metric_v2": "manual_required"
+    },
+    {
+      "id": "financebench_id_00521",
+      "source": "FinanceBench",
+      "split": "OPEN_SOURCE",
+      "question": "What are major acquisitions that Ulta Beauty has done in FY2023 and FY2022?",
+      "gold": "Ulta Beauty did not make any acquisitions in FY2023 and FY2022.",
+      "prediction": "Based on the provided evidence, there is no detailed information about specific acquisitions made by Ulta Beauty in FY2023 and FY2022. The evidence only shows a net amount of $-1,220 for acquisitions in FY2023, which does not provide enough detail to identify major acquisitions. Therefore, the evidence is insufficient to answer the question fully.",
+      "finish_reason": "stop",
+      "latency_s": 2.9219,
+      "prompt_tokens": 723,
+      "completion_tokens": 80,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "passthrough",
+      "baseline_prediction": "Based on the provided evidence, there is no detailed information about specific acquisitions made by Ulta Beauty in FY2023 and FY2022. The evidence only shows a net amount of $-1,220 for acquisitions in FY2023, which does not provide enough detail to identify major acquisitions. Therefore, the evidence is insufficient to answer the question fully.",
+      "final_source": "base_awq_passthrough",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "formatter": null,
+      "model_only_latency_s": 2.9219,
+      "full_pipeline_latency_s": 2.9219,
+      "score_v2": 0.2462,
+      "passed_v2": null,
+      "metric_v2": "manual_required"
+    },
+    {
+      "id": "financebench_id_00222",
+      "source": "FinanceBench",
+      "split": "OPEN_SOURCE",
+      "question": "Does AMD have a reasonably healthy liquidity profile based on its quick ratio for FY22? If the quick ratio is not relevant to measure liquidity, please state that and explain why.",
+      "gold": "Yes. The quick ratio is 1.57, calculated as (cash and cash equivalents+Short term investments+Accounts receivable, net+receivables from related parties)/ (current liabilities).",
+      "prediction": "No, the quick ratio is not relevant to measure liquidity. The quick ratio does not consider all current assets and may not accurately reflect a company's ability to meet short-term obligations.",
+      "finish_reason": "stop",
+      "latency_s": 12.4062,
+      "prompt_tokens": 776,
+      "completion_tokens": 342,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "arithmetic+accounting",
+      "baseline_prediction": "To determine if AMD has a reasonably healthy liquidity profile based on its quick ratio for FY22, we need to calculate the quick ratio using the provided data.\n\nThe quick ratio is calculated as follows:\n\n\\[ \\text{Quick Ratio} = \\frac{\\text{Current Assets} - \\text{Inventories}}{\\text{Current Liabilities}} \\]\n\nFrom the balance sheet:\n- Current Assets (excluding inventories): Cash and cash equivalents ($4,835 million) + Short-term investments ($1,020 million) + Accounts receivable, net ($4,126 million) + Receivables from related parties ($2 million) + Prepaid expenses and other current assets ($1,265 million) = $11,248 million\n- Inventories: $3,771 million\n- Current Liabilities: $6,369 million\n\nNow, calculate the quick ratio:\n\n\\[ \\text{Quick Ratio} = \\frac{11,248 - 3,771}{6,369} = \\frac{7,477}{6,369} \\approx 1.17 \\]\n\nA quick ratio of approximately 1.17 indicates that for every dollar of current liabilities, there is about $1.17 in highly liquid assets (excluding inventories).\n\nThis quick ratio suggests that AMD has a reasonably healthy liquidity profile for FY22, as it is above 1, indicating sufficient liquid assets to cover short-term obligations.\n\nFinal Answer: Yes, AMD has a reasonably healthy liquidity profile based on its quick ratio for FY22.",
+      "final_source": "arithmetic_adapter",
+      "fallback": false,
+      "planner": {
+        "status": "ok",
+        "attempt": 1,
+        "latency_s": 0.9693,
+        "prompt_tokens": 876,
+        "completion_tokens": 104,
+        "plan": {
+          "kind": "calculation",
+          "answer_type": "number",
+          "variables": [
+            {
+              "id": "current_assets",
+              "value": 15019,
+              "unit": "millions",
+              "evidence": "Total current assets: 15,019"
+            },
+            {
+              "id": "current_liabilities",
+              "value": 6369,
+              "unit": "millions",
+              "evidence": "Total current liabilities: 6,369"
+            }
+          ],
+          "steps": [
+            {
+              "id": "quick_ratio",
+              "operation": "divide",
+              "inputs": [
+                "current_assets",
+                "current_liabilities"
+              ]
+            }
+          ],
+          "final_id": "quick_ratio",
+          "final_unit": "number"
+        }
+      },
+      "plan": {
+        "kind": "calculation",
+        "answer_type": "number",
+        "variables": [
+          {
+            "id": "current_assets",
+            "value": 15019,
+            "unit": "millions",
+            "evidence": "Total current assets: 15,019"
+          },
+          {
+            "id": "current_liabilities",
+            "value": 6369,
+            "unit": "millions",
+            "evidence": "Total current liabilities: 6,369"
+          }
+        ],
+        "steps": [
+          {
+            "id": "quick_ratio",
+            "operation": "divide",
+            "inputs": [
+              "current_assets",
+              "current_liabilities"
+            ]
+          }
+        ],
+        "final_id": "quick_ratio",
+        "final_unit": "number"
+      },
+      "calculator_value": "2.358140995446694928560213534",
+      "calculator_text": "2.36 number",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [
+        "은행인수어음(BA)"
+      ],
+      "glossary_hit": false,
+      "formatter": {
+        "content": "No, the quick ratio is not relevant to measure liquidity. The quick ratio does not consider all current assets and may not accurately reflect a company's ability to meet short-term obligations.",
+        "finish_reason": "stop",
+        "latency_s": 1.7162,
+        "prompt_tokens": 498,
+        "completion_tokens": 37
+      },
+      "model_only_latency_s": 12.4062,
+      "full_pipeline_latency_s": 15.0917,
+      "score_v2": 0.1786,
+      "passed_v2": null,
+      "metric_v2": "manual_required"
+    },
+    {
+      "id": "financebench_id_00206",
+      "source": "FinanceBench",
+      "split": "OPEN_SOURCE",
+      "question": "Are JPM's gross margins historically consistent (not fluctuating more than roughly 2% each year)? If gross margins are not a relevant metric for a company like this, then please state that and explain why.",
+      "gold": "Since JPM is a financial institution, gross margin is not a relevant metric.",
+      "prediction": "The provided evidence does not contain information about JPM's gross margins or their historical consistency. Therefore, it is impossible to determine if JPM's gross margins have been historically consistent based solely on the given information.\n\nFurthermore, the evidence suggests that JPMorgan Chase operates in multiple sectors including investment banking, consumer and small business banking, commercial banking, financial transaction processing, and asset management. Given the diverse nature of its operations, gross margin may not be the most relevant metric to assess the overall performance of the company. Instead, metrics such as return on equity, net income, and revenue growth might provide a clearer picture of the company's financial health across different divisions.",
+      "finish_reason": "stop",
+      "latency_s": 5.8201,
+      "prompt_tokens": 319,
+      "completion_tokens": 160,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "accounting",
+      "baseline_prediction": "The provided evidence does not contain information about JPM's gross margins or their historical consistency. Therefore, it is impossible to determine if gross margins are historically consistent based solely on the given data.\n\nFurthermore, for a company like JPMorgan Chase, which operates in multiple sectors including investment banking, consumer and small business banking, commercial banking, financial transaction processing, and asset management, gross margin may not be the most relevant metric to assess overall performance. Instead, metrics such as return on equity, net income, and revenue growth might provide a clearer picture of the company's financial health across its diverse operations.\n\nFinal Answer: Insufficient evidence to determine historical consistency of gross margins. Gross margins may not be the most relevant metric for assessing the performance of a diversified financial services company like JPMorgan Chase.",
+      "final_source": "base_awq_accounting_glossary",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": "bok-800-arithmetic-glossary-v1",
+      "glossary_sha256": "d3da5743695146b492835d1e71b7d373ffc268686917e8e4494378b7e823f369",
+      "matched_terms": [
+        "뉴스심리지수(NSI)",
+        "시장평균환율(MAR)"
+      ],
+      "glossary_hit": true,
+      "formatter": {
+        "rag_latency_s": 4.9201,
+        "rag_prompt_tokens": 1035
+      },
+      "model_only_latency_s": 5.8201,
+      "full_pipeline_latency_s": 5.8201,
+      "score_v2": 0.126,
+      "passed_v2": null,
+      "metric_v2": "manual_required"
+    },
+    {
+      "id": "financebench_id_08286",
+      "source": "FinanceBench",
+      "split": "OPEN_SOURCE",
+      "question": "By drawing conclusions from the information stated only in the income statement, what is Amazon's FY2019 net income attributable to shareholders (in USD millions)?",
+      "gold": "$11588.00",
+      "prediction": "Amazon's FY2019 net income attributable to shareholders is $11,588 million.",
+      "finish_reason": "stop",
+      "latency_s": 0.8735,
+      "prompt_tokens": 747,
+      "completion_tokens": 23,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "accounting",
+      "baseline_prediction": "Amazon's FY2019 net income attributable to shareholders is $11,588 million.",
+      "final_source": "base_awq_passthrough",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "formatter": null,
+      "model_only_latency_s": 0.8735,
+      "full_pipeline_latency_s": 0.8735,
+      "score_v2": 1.0,
+      "passed_v2": null,
+      "metric_v2": "manual_required"
+    },
+    {
+      "id": "financebench_id_00606",
+      "source": "FinanceBench",
+      "split": "OPEN_SOURCE",
+      "question": "Did Ulta Beauty's wages expense as a percent of net sales increase or decrease in FY2023?",
+      "gold": "Wages expense as a percent of net sales increased in FY2023. The answer here assumes FY2023 refers to the 12 months ended on January 28, 2023 (although the company refers to this period as its fiscal 2022.",
+      "prediction": "Based on the provided evidence, there is no specific mention of Ulta Beauty's wages expense as a percent of net sales for FY2023. The evidence only provides information up to FY2022. Therefore, the evidence is insufficient to determine whether Ulta Beauty's wages expense as a percent of net sales increased or decreased in FY2023.",
+      "finish_reason": "stop",
+      "latency_s": 1.8145,
+      "prompt_tokens": 478,
+      "completion_tokens": 49,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "accounting",
+      "baseline_prediction": "The evidence provided does not contain information about Ulta Beauty's wages expense as a percent of net sales for FY2023. Therefore, it is not possible to determine if the wages expense increased or decreased based on the given data.",
+      "final_source": "base_awq_accounting_glossary",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": "bok-800-arithmetic-glossary-v1",
+      "glossary_sha256": "d3da5743695146b492835d1e71b7d373ffc268686917e8e4494378b7e823f369",
+      "matched_terms": [
+        "주가수익비율(PER)",
+        "G2(Group of Two)"
+      ],
+      "glossary_hit": true,
+      "formatter": {
+        "rag_latency_s": 2.8142,
+        "rag_prompt_tokens": 1184
+      },
+      "model_only_latency_s": 1.8145,
+      "full_pipeline_latency_s": 1.8145,
+      "score_v2": 0.3871,
+      "passed_v2": null,
+      "metric_v2": "manual_required"
+    },
+    {
+      "id": "financebench_id_05915",
+      "source": "FinanceBench",
+      "split": "OPEN_SOURCE",
+      "question": "What is the FY2018 fixed asset turnover ratio for CVS Health? Fixed asset turnover ratio is defined as: FY2018 revenue / (average PP&E between FY2017 and FY2018). Round your answer to two decimal places. Calculate what was asked by utilizing the line items clearly shown in the P&L statement and the balance sheet.",
+      "gold": "17.98",
+      "prediction": "17.98 ratio",
+      "finish_reason": "stop",
+      "latency_s": 11.4007,
+      "prompt_tokens": 1828,
+      "completion_tokens": 308,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "arithmetic+accounting",
+      "baseline_prediction": "To calculate the fixed asset turnover ratio for FY2018, we use the formula:\n\n\\[ \\text{Fixed Asset Turnover Ratio} = \\frac{\\text{FY2018 Revenue}}{\\text{Average Property, Plant, and Equipment (PP&E)}} \\]\n\nFirst, identify the relevant figures from the provided evidence:\n- **FY2018 Revenue**: $194,579 million\n- **FY2018 PP&E**: $11,349 million\n- **FY2017 PP&E**: $10,292 million\n\nNext, calculate the average PP&E between FY2017 and FY2018:\n\\[ \\text{Average PP&E} = \\frac{\\text{FY2018 PP&E} + \\text{FY2017 PP&E}}{2} = \\frac{11,349 + 10,292}{2} = \\frac{21,641}{2} = 10,820.5 \\text{ million} \\]\n\nNow, compute the fixed asset turnover ratio:\n\\[ \\text{Fixed Asset Turnover Ratio} = \\frac{194,579}{10,820.5} \\approx 17.98 \\]\n\nTherefore, the fixed asset turnover ratio for FY2018 is approximately **17.98**.",
+      "final_source": "arithmetic_adapter",
+      "fallback": false,
+      "planner": {
+        "status": "ok",
+        "attempt": 1,
+        "latency_s": 2.0646,
+        "prompt_tokens": 1690,
+        "completion_tokens": 172,
+        "plan": {
+          "kind": "calculation",
+          "answer_type": "ratio",
+          "variables": [
+            {
+              "id": "revenue_fy2018",
+              "value": 194579,
+              "unit": "million",
+              "evidence": "Total revenues 194,579"
+            },
+            {
+              "id": "ppe_fy2017",
+              "value": 10292,
+              "unit": "million",
+              "evidence": "Property and equipment, net 10,292"
+            },
+            {
+              "id": "ppe_fy2018",
+              "value": 11349,
+              "unit": "million",
+              "evidence": "Property and equipment, net 11,349"
+            }
+          ],
+          "steps": [
+            {
+              "id": "average_ppe",
+              "operation": "average",
+              "inputs": [
+                "ppe_fy2017",
+                "ppe_fy2018"
+              ]
+            },
+            {
+              "id": "fixed_asset_turnover_ratio",
+              "operation": "divide",
+              "inputs": [
+                "revenue_fy2018",
+                "average_ppe"
+              ]
+            }
+          ],
+          "final_id": "fixed_asset_turnover_ratio",
+          "final_unit": "ratio"
+        }
+      },
+      "plan": {
+        "kind": "calculation",
+        "answer_type": "ratio",
+        "variables": [
+          {
+            "id": "revenue_fy2018",
+            "value": 194579,
+            "unit": "million",
+            "evidence": "Total revenues 194,579"
+          },
+          {
+            "id": "ppe_fy2017",
+            "value": 10292,
+            "unit": "million",
+            "evidence": "Property and equipment, net 10,292"
+          },
+          {
+            "id": "ppe_fy2018",
+            "value": 11349,
+            "unit": "million",
+            "evidence": "Property and equipment, net 11,349"
+          }
+        ],
+        "steps": [
+          {
+            "id": "average_ppe",
+            "operation": "average",
+            "inputs": [
+              "ppe_fy2017",
+              "ppe_fy2018"
+            ]
+          },
+          {
+            "id": "fixed_asset_turnover_ratio",
+            "operation": "divide",
+            "inputs": [
+              "revenue_fy2018",
+              "average_ppe"
+            ]
+          }
+        ],
+        "final_id": "fixed_asset_turnover_ratio",
+        "final_unit": "ratio"
+      },
+      "calculator_value": "17.98244073748902546093064091",
+      "calculator_text": "17.98 ratio",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [
+        "은행인수어음(BA)",
+        "G2(Group of Two)"
+      ],
+      "glossary_hit": false,
+      "formatter": {
+        "content": "17.98 ratio",
+        "finish_reason": "stop",
+        "latency_s": 0.5225,
+        "prompt_tokens": 507,
+        "completion_tokens": 7
+      },
+      "model_only_latency_s": 11.4007,
+      "full_pipeline_latency_s": 13.9878,
+      "score_v2": 1.0,
+      "passed_v2": null,
+      "metric_v2": "manual_required"
+    },
+    {
+      "id": "financebench_id_01491",
+      "source": "FinanceBench",
+      "split": "OPEN_SOURCE",
+      "question": "What is the amount of the cash proceeds that JnJ realised from the separation of Kenvue (formerly Consumer Health business segment), as of August 30, 2023?",
+      "gold": "JnJ realised $13.2 billion in cash proceeds from the separation of Kenvue.",
+      "prediction": "Johnson & Johnson realised $13.2 billion in cash proceeds from the separation of Kenvue, formerly its Consumer Health business segment, as of August 30, 2023.",
+      "finish_reason": "stop",
+      "latency_s": 1.019,
+      "prompt_tokens": 687,
+      "completion_tokens": 27,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "accounting",
+      "baseline_prediction": "The amount of the cash proceeds that Johnson & Johnson realised from the separation of Kenvue is $13.2 billion.",
+      "final_source": "base_awq_accounting_glossary",
+      "fallback": false,
+      "planner": null,
+      "plan": null,
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": "bok-800-arithmetic-glossary-v1",
+      "glossary_sha256": "d3da5743695146b492835d1e71b7d373ffc268686917e8e4494378b7e823f369",
+      "matched_terms": [
+        "G2(Group of Two)"
+      ],
+      "glossary_hit": true,
+      "formatter": {
+        "rag_latency_s": 1.5582,
+        "rag_prompt_tokens": 1011
+      },
+      "model_only_latency_s": 1.019,
+      "full_pipeline_latency_s": 1.019,
+      "score_v2": 1.0,
+      "passed_v2": null,
+      "metric_v2": "manual_required"
+    },
+    {
+      "id": "financebench_id_06247",
+      "source": "FinanceBench",
+      "split": "OPEN_SOURCE",
+      "question": "What is FY2018 days payable outstanding (DPO) for Walmart? DPO is defined as: 365 * (average accounts payable between FY2017 and FY2018) / (FY2018 COGS + change in inventory between FY2017 and FY2018). Round your answer to two decimal places. Please base your judgments on the information provided primarily in the statement of financial position and the P&L statement.",
+      "gold": "42.69",
+      "prediction": "To calculate the Days Payable Outstanding (DPO), we use the formula:\n\n\\[ \\text{DPO} = \\frac{365 \\times (\\text{Average Accounts Payable})}{\\text{(COGS + Change in Inventory)}} \\]\n\nFirst, we need to find the average accounts payable between FY2017 and FY2018:\n\n\\[ \\text{Average Accounts Payable} = \\frac{\\text{Accounts Payable FY2018} + \\text{Accounts Payable FY2017}}{2} \\]\n\\[ \\text{Average Accounts Payable} = \\frac{46,092 + 41,433}{2} \\]\n\\[ \\text{Average Accounts Payable} = \\frac{87,525}{2} \\]\n\\[ \\text{Average Accounts Payable} = 43,762.5 \\]\n\nNext, we calculate the Cost of Goods Sold (COGS) for FY2018:\n\n\\[ \\text{COGS FY2018} = 373,396 \\]\n\nThen, we determine the change in inventory between FY2017 and FY2018:\n\n\\[ \\text{Change in Inventory} = \\text{Inventory FY2018} - \\text{Inventory FY2017} \\]\n\\[ \\text{Change in Inventory} = 43,783 - 43,046 \\]\n\\[ \\text{Change in Inventory} = 737 \\]\n\nNow, we can compute the denominator of the DPO formula:\n\n\\[ \\text{Denominator} = \\text{COGS FY2018} + \\text{Change in Inventory} \\]\n\\[ \\text{Denominator} = 3",
+      "finish_reason": "length",
+      "latency_s": 14.0597,
+      "prompt_tokens": 1504,
+      "completion_tokens": 384,
+      "error": null,
+      "pipeline_variant": "AWQ+HybridSelectivePipeline",
+      "route": "arithmetic+accounting",
+      "baseline_prediction": "To calculate the Days Payable Outstanding (DPO), we use the formula:\n\n\\[ \\text{DPO} = \\frac{365 \\times (\\text{Average Accounts Payable})}{\\text{(COGS + Change in Inventory)}} \\]\n\nFirst, we need to find the average accounts payable between FY2017 and FY2018:\n\n\\[ \\text{Average Accounts Payable} = \\frac{\\text{Accounts Payable FY2018} + \\text{Accounts Payable FY2017}}{2} \\]\n\\[ \\text{Average Accounts Payable} = \\frac{46,092 + 41,433}{2} \\]\n\\[ \\text{Average Accounts Payable} = \\frac{87,525}{2} \\]\n\\[ \\text{Average Accounts Payable} = 43,762.5 \\]\n\nNext, we calculate the Cost of Goods Sold (COGS) for FY2018:\n\n\\[ \\text{COGS FY2018} = 373,396 \\]\n\nThen, we determine the change in inventory between FY2017 and FY2018:\n\n\\[ \\text{Change in Inventory} = \\text{Inventory FY2018} - \\text{Inventory FY2017} \\]\n\\[ \\text{Change in Inventory} = 43,783 - 43,046 \\]\n\\[ \\text{Change in Inventory} = 737 \\]\n\nNow, we can compute the denominator of the DPO formula:\n\n\\[ \\text{Denominator} = \\text{COGS FY2018} + \\text{Change in Inventory} \\]\n\\[ \\text{Denominator} = 3",
+      "final_source": "fallback_awq_invalid_plan",
+      "fallback": true,
+      "planner": {
+        "status": "ok",
+        "attempt": 1,
+        "latency_s": 2.0676,
+        "prompt_tokens": 1393,
+        "completion_tokens": 250,
+        "plan": {
+          "kind": "calculation",
+          "answer_type": "number",
+          "variables": [
+            {
+              "id": "FY2018_COGS",
+              "value": 373396,
+              "unit": "million",
+              "evidence": "Cost of sales 2018: $373,396 million"
+            },
+            {
+              "id": "change_in_inventory",
+              "value": 737,
+              "unit": "million",
+              "evidence": "Inventories 2018: $43,783 million, Inventories 2017: $43,046 million, Change = 43,783 - 43,046 = 737 million"
+            },
+            {
+              "id": "average_accounts_payable",
+              "value": 43612.5,
+              "unit": "million",
+              "evidence": "Accounts payable 2018: $46,092 million, Accounts payable 2017: $41,433 million, Average = (46,092 + 41,433) / 2 = 43,612.5 million"
+            }
+          ],
+          "steps": [
+            {
+              "id": "step1",
+              "operation": "add",
+              "inputs": [
+                "FY2018_COGS",
+                "change_in_inventory"
+              ]
+            },
+            {
+              "id": "step2",
+              "operation": "multiply",
+              "inputs": [
+                "average_accounts_payable",
+                "365"
+              ]
+            },
+            {
+              "id": "step3",
+              "operation": "divide",
+              "inputs": [
+                "step2",
+                "step1"
+              ]
+            }
+          ],
+          "final_id": "step3",
+          "final_unit": "days"
+        },
+        "calculator_error": "variable value is not grounded in evidence"
+      },
+      "plan": {
+        "kind": "calculation",
+        "answer_type": "number",
+        "variables": [
+          {
+            "id": "FY2018_COGS",
+            "value": 373396,
+            "unit": "million",
+            "evidence": "Cost of sales 2018: $373,396 million"
+          },
+          {
+            "id": "change_in_inventory",
+            "value": 737,
+            "unit": "million",
+            "evidence": "Inventories 2018: $43,783 million, Inventories 2017: $43,046 million, Change = 43,783 - 43,046 = 737 million"
+          },
+          {
+            "id": "average_accounts_payable",
+            "value": 43612.5,
+            "unit": "million",
+            "evidence": "Accounts payable 2018: $46,092 million, Accounts payable 2017: $41,433 million, Average = (46,092 + 41,433) / 2 = 43,612.5 million"
+          }
+        ],
+        "steps": [
+          {
+            "id": "step1",
+            "operation": "add",
+            "inputs": [
+              "FY2018_COGS",
+              "change_in_inventory"
+            ]
+          },
+          {
+            "id": "step2",
+            "operation": "multiply",
+            "inputs": [
+              "average_accounts_payable",
+              "365"
+            ]
+          },
+          {
+            "id": "step3",
+            "operation": "divide",
+            "inputs": [
+              "step2",
+              "step1"
+            ]
+          }
+        ],
+        "final_id": "step3",
+        "final_unit": "days"
+      },
+      "calculator_value": null,
+      "calculator_text": null,
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [
+        "국민처분가능소득(NDI)/ 국민총처분가능소득(GNDI)",
+        "시장평균환율(MAR)",
+        "은행인수어음(BA)",
+        "G2(Group of Two)"
+      ],
+      "glossary_hit": false,
+      "formatter": null,
+      "model_only_latency_s": 14.0597,
+      "full_pipeline_latency_s": 16.1273,
+      "score_v2": 0.0,
+      "passed_v2": null,
+      "metric_v2": "manual_required"
+    }
+  ]
+}

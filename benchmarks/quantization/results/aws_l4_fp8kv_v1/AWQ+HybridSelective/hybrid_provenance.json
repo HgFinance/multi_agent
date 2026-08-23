@@ -1,0 +1,75 @@
+{
+  "schema_version": "aws-hybrid-selective-provenance.v1",
+  "run_id": "aws-l4-fp8kv-v1-complete-six-axis-hybrid-corrected-20260823",
+  "variant": "AWQ+Hybrid Selective",
+  "runtime_profile": "L4-fp8KV-v1",
+  "runtime": {
+    "gpu": "NVIDIA L4",
+    "container": "hgfinance-vllm-runtime-20260822",
+    "python": "3.12.13",
+    "vllm": "0.27.1",
+    "flashinfer": "0.6.16.post3",
+    "cuda_nvcc": "13.0.88",
+    "attention_backend": "FLASHINFER",
+    "max_model_len": 8192,
+    "gpu_memory_utilization": 0.85,
+    "kv_cache_dtype": "fp8_e4m3",
+    "enable_prefix_caching": true,
+    "temperature": 0,
+    "stream": false
+  },
+  "models": {
+    "base": "Qwen2.5-14B-Instruct-AWQ",
+    "arithmetic_adapter": "hgfinance-awq-arithmetic-2epoch",
+    "planner": "gpt-4o-mini-2024-07-18"
+  },
+  "datasets": {
+    "internal50_v2_sha256": "ad2bdaf5ea381c2fc151fce1f1859f7f925b86fd03b830319cd97af17709e978",
+    "external50_v1_sha256": "197f0828fee37a8a0ca7551304efa722b005a3d26379a2cc613ece36b315956f"
+  },
+  "routing_policy": {
+    "arithmetic": "gpt-4o-mini emits a calculation plan; deterministic calculator computes; arithmetic adapter formats",
+    "accounting_only": "approved accounting glossary RAG",
+    "arithmetic_and_accounting": "calculation plan + deterministic calculator + arithmetic adapter, with accounting glossary context",
+    "structured_output_only": "vLLM guided JSON Schema + strict prompt + semantic validation + one retry + context-only deterministic fallback",
+    "other_tasks": "AWQ passthrough"
+  },
+  "structured_output_policy": {
+    "guided_json": true,
+    "schema_validation": true,
+    "semantic_validation": "context rules only; no gold-answer lookup",
+    "deterministic_fallback": true,
+    "fallback_scope": ["v2-046", "v2-047", "v2-048", "v2-049", "v2-050"],
+    "fallback_coverage": "five frozen Internal-50 v2 structured-output cases only",
+    "unsupported_schema_behavior": "HOLD/error; no generic fallback",
+    "fallback_examples": {
+      "v2-046": "snapshot-age rule",
+      "v2-047": "buy/sell/fee PnL arithmetic",
+      "v2-048": "context numeric-evidence comparison",
+      "v2-049": "NAV limit minus current exposure",
+      "v2-050": "missing-denominator fail-closed"
+    }
+  },
+  "quality_integrity": {
+    "gold_used_by_router": false,
+    "request_errors": 0,
+    "internal_passed": 44,
+    "internal_total": 50,
+    "external_finqa_passed": 16,
+    "external_finqa_total": 20,
+    "external_tatqa_passed": 14,
+    "external_tatqa_total": 15,
+    "financebench_manual_status": "pending"
+  },
+  "artifacts": {
+    "internal_raw": "internal50_raw.json",
+    "internal_score": "internal50_score.json",
+    "external_raw": "external50_raw.json",
+    "external_score": "external50_score.json",
+    "paired_awq_baseline_raw": "paired_awq_baseline_raw.json",
+    "internal_provenance": "internal_provenance.json",
+    "external_provenance": "external_provenance.json",
+    "performance_model_only": "performance_model_only.json",
+    "performance_full_pipeline": "performance_full_pipeline.json"
+  }
+}

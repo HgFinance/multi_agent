@@ -1,7 +1,7 @@
 {
   "schema_version": "aws-l4-fp8kv-complete-comparison.v1",
-  "run_id": "aws-l4-fp8kv-v1-fair-v2-20260822-plus-hybrid-external-20260822",
-  "status": "HOLD_PENDING_HYBRID_INTERNAL_PERFORMANCE_FINANCEBENCH_MANUAL",
+  "run_id": "aws-l4-fp8kv-v1-complete-six-axis-hybrid-corrected-20260823",
+  "status": "HOLD_PENDING_FINANCEBENCH_MANUAL_AND_8K_CAPACITY",
   "comparability_statement": "The five base variants are comparable within L4-fp8KV-v1. The Hybrid External-50 result is comparable for quality only; its full-pipeline latency is not comparable to model-only C1 performance.",
   "runtime": {
     "gpu": "NVIDIA L4",
@@ -125,16 +125,56 @@
       "performance": {"c1_tok_s": 22.24, "c2_tok_s": 43.98, "c4_tok_s": 85.20, "performance_scope": "AWQ base model-only", "full_pipeline_c1_e2e_avg_s": 0.764}
     },
     "AWQ+Hybrid Selective": {
-      "status": "HOLD_PENDING_INTERNAL_PERFORMANCE_MANUAL",
-      "quality_pass_rate": null,
-      "critical_failures": null,
-      "new_critical_regression": null,
+      "status": "MEASURED_HOLD_FINANCEBENCH_MANUAL_AND_8K_CAPACITY",
+      "quality_pass_rate": {"passed": 44, "total": 50, "score": 0.88},
+      "critical_failures": 0,
+      "new_critical_regression": 0,
       "request_errors": 0,
-      "categories": null,
-      "external": {"finqa": 0.80, "tatqa": 0.9333, "financebench_diagnostic": 0.5793, "financebench_manual": null, "overall": null, "auto_mean": 0.8563},
-      "performance": {"model_only": null, "full_pipeline_avg_s": 7.6742, "full_pipeline_p50_s": 7.5744, "full_pipeline_p95_s": 14.0257, "note": "External-50 pipeline latency; not comparable to model-only C1."},
-      "routing": {"accounting": 21, "arithmetic": 2, "arithmetic_accounting": 19, "passthrough": 8, "planner_calls": 21, "formatter_calls": 11, "fallbacks": 10, "api_errors": 0},
-      "source_artifacts": "/tmp/hgfinance-hybrid-e2e-v1/"
+      "categories": {
+        "financial_arithmetic": {"passed": 6, "total": 10, "score": 0.60},
+        "risk_reasoning": {"passed": 7, "total": 7, "score": 1.0},
+        "portfolio_trading": {"passed": 5, "total": 6, "score": 0.8333},
+        "accounting": {"passed": 5, "total": 6, "score": 0.8333},
+        "quant": {"passed": 6, "total": 6, "score": 1.0},
+        "evidence": {"passed": 6, "total": 6, "score": 1.0},
+        "structured_output": {"passed": 5, "total": 5, "score": 1.0},
+        "uncertainty_fail_closed": {"passed": 4, "total": 4, "score": 1.0}
+      },
+      "structured_output_policy": {
+        "guided_json": true,
+        "strict_system_prompt": true,
+        "schema_validation": true,
+        "semantic_validation": "context_rules_only",
+        "retry_count": 1,
+        "deterministic_fallback": true,
+        "scope": "Internal-50 v2 structured cases v2-046..v2-050 only",
+        "coverage": ["v2-046", "v2-047", "v2-048", "v2-049", "v2-050"],
+        "unsupported_schema_behavior": "HOLD/error; no generic fallback"
+      },
+      "external": {"finqa": 0.80, "tatqa": 0.9333, "financebench_diagnostic": 0.5852, "financebench_manual": null, "overall": null, "auto_mean": 0.8563},
+      "performance": {
+        "model_only": {"c1_tok_s": 20.87, "c2_tok_s": 41.37, "c4_tok_s": 80.78, "c1_latency_p50_s": 0.240, "model_load_memory_gib": 9.51, "kv_cache_gib": 8.77, "free_vram_mib": 338},
+        "full_pipeline": {
+          "c1_p50_s": 2.4771, "c1_avg_s": 2.5050,
+          "c2_p50_s": 2.4677, "c2_avg_s": 2.5339,
+          "c4_p50_s": 2.4699, "c4_avg_s": 2.4529,
+          "errors": 0,
+          "note": "AWQ draft + gpt-4o-mini plan + deterministic calculator + structured validator/adapter; not model-only throughput"
+        }
+      },
+      "routing": {"accounting": 2, "arithmetic": 10, "arithmetic_accounting": 9, "passthrough": 29, "planner_calls": 19, "formatter_calls": 13, "fallbacks": 6, "api_errors": 0},
+      "source_artifacts": {
+        "internal_raw": "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+HybridSelective/internal50_raw.json",
+        "internal_score": "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+HybridSelective/internal50_score.json",
+        "external_raw": "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+HybridSelective/external50_raw.json",
+        "external_score": "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+HybridSelective/external50_score.json",
+        "paired_awq_baseline_raw": "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+HybridSelective/paired_awq_baseline_raw.json",
+        "internal_provenance": "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+HybridSelective/internal_provenance.json",
+        "external_provenance": "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+HybridSelective/external_provenance.json",
+        "performance_model_only": "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+HybridSelective/performance_model_only.json",
+        "performance_full_pipeline": "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+HybridSelective/performance_full_pipeline.json",
+        "hybrid_provenance": "benchmarks/quantization/results/aws_l4_fp8kv_v1/AWQ+HybridSelective/hybrid_provenance.json"
+      }
     }
   },
   "historical_reference_not_merged": {
@@ -144,6 +184,6 @@
   "gates": {
     "five_variant_current_run": "HOLD until FinanceBench manual adjudication for External Overall",
     "hybrid_external_auto_mean": "PASS versus paired fresh AWQ baseline (0.8563 vs 0.7706)",
-    "hybrid_final_promotion": "HOLD until Internal-50 v2, fair model-only performance, and manual FinanceBench"
+    "hybrid_final_promotion": "HOLD until FinanceBench manual adjudication and 8K capacity measurement"
   }
 }
