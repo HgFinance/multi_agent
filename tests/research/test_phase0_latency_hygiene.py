@@ -94,7 +94,6 @@ class Phase0LatencyHygieneTest(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
-                "LANGCHAIN_TRACING_V2": "true",
                 "LANGSMITH_TRACING": "true",
                 "LANGSMITH_API_KEY": "configured-but-not-recorded",
                 "LANGSMITH_PROJECT": "First",
@@ -134,7 +133,6 @@ class Phase0LatencyHygieneTest(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
-                "LANGCHAIN_TRACING_V2": "true",
                 "LANGSMITH_TRACING": "true",
                 "LANGSMITH_API_KEY": "configured-but-not-recorded",
             },
@@ -149,7 +147,7 @@ class Phase0LatencyHygieneTest(unittest.TestCase):
     def test_tracing_disabled_preserves_workflow_body(self) -> None:
         with patch.dict(
             os.environ,
-            {"LANGCHAIN_TRACING_V2": "false", "LANGSMITH_TRACING": "false"},
+            {"LANGSMITH_TRACING": "false"},
         ):
             with redacted_span("research.department") as span:
                 self.assertIsNone(span)

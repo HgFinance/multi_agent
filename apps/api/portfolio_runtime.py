@@ -110,12 +110,12 @@ def _department_label(department: str | None) -> str:
 def langsmith_observability() -> dict[str, Any]:
     """Expose only safe tracing configuration metadata to the operator UI."""
 
-    tracing_enabled = os.getenv("LANGCHAIN_TRACING_V2", os.getenv("LANGSMITH_TRACING", "")).casefold() in {
+    tracing_enabled = os.getenv("LANGSMITH_TRACING", "").casefold() in {
         "1", "true", "yes", "on"
     }
     endpoint = os.getenv("LANGSMITH_ENDPOINT", "").strip()
     api_key_configured = bool(os.getenv("LANGSMITH_API_KEY", "").strip())
-    project = os.getenv("LANGCHAIN_PROJECT") or os.getenv("LANGSMITH_PROJECT")
+    project = os.getenv("LANGSMITH_PROJECT")
     parsed = urlsplit(endpoint)
     safe_endpoint = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else None
     return {
@@ -768,10 +768,6 @@ class PortfolioRuntime:
         try:
             # Respect explicit backend LangSmith configuration. The browser never
             # receives credentials; only safe observability metadata is projected.
-            if "LANGCHAIN_TRACING_V2" not in os.environ:
-                os.environ["LANGCHAIN_TRACING_V2"] = os.getenv("LANGSMITH_TRACING", "false")
-            if os.getenv("LANGSMITH_PROJECT") and not os.getenv("LANGCHAIN_PROJECT"):
-                os.environ["LANGCHAIN_PROJECT"] = os.environ["LANGSMITH_PROJECT"]
             data_mode = portfolio_data_mode()
             # CEO task planner input: best-effort, never blocks the run (see
             # governance_client.fetch_mandate_policy_content docstring).

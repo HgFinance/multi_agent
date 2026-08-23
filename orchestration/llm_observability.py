@@ -89,7 +89,7 @@ def record_llm_call(*, usage: Any = None, latency_ms: int = 0, error: bool = Fal
 
 
 def langsmith_enabled() -> bool:
-    tracing = os.getenv("LANGCHAIN_TRACING_V2", os.getenv("LANGSMITH_TRACING", ""))
+    tracing = os.getenv("LANGSMITH_TRACING", "")
     return tracing.casefold() in {"1", "true", "yes", "on"} and bool(os.getenv("LANGSMITH_API_KEY", "").strip())
 
 
@@ -134,7 +134,7 @@ def redacted_trace(*, trace_id: str, model_name: str, stage: str) -> Iterator[No
     }
     with tracing_context(
         client=_safe_langsmith_client(),
-        project_name=os.getenv("LANGCHAIN_PROJECT") or os.getenv("LANGSMITH_PROJECT"),
+        project_name=os.getenv("LANGSMITH_PROJECT"),
         tags=["hgfinance", "redacted", f"stage:{stage}"],
         metadata=metadata,
         enabled=True,
@@ -155,7 +155,7 @@ def publish_metric(metric: dict[str, Any], *, trace_id: str | None = None) -> bo
             run_type="chain",
             inputs={},
             outputs={},
-            project_name=os.getenv("LANGCHAIN_PROJECT") or os.getenv("LANGSMITH_PROJECT"),
+            project_name=os.getenv("LANGSMITH_PROJECT"),
             tags=["hgfinance", "metric", "redacted", f"worker:{metric.get('worker_id', 'unknown')}"],
             extra={"metadata": safe},
             hide_inputs=True,

@@ -75,7 +75,7 @@ _SAFE_METADATA_KEYS = {
 def langsmith_enabled() -> bool:
     """Return whether Research may emit best-effort LangSmith spans."""
 
-    enabled = os.getenv("LANGCHAIN_TRACING_V2", os.getenv("LANGSMITH_TRACING", ""))
+    enabled = os.getenv("LANGSMITH_TRACING", "")
     return enabled.strip().lower() in _TRUE_VALUES and bool(
         os.getenv("LANGSMITH_API_KEY", "").strip()
     )

@@ -18,11 +18,9 @@ def json_cell(value: Any) -> str:
 
 
 def langsmith_handoff(trace_id: str) -> dict[str, Any]:
-    enabled = os.environ.get(
-        "LANGCHAIN_TRACING_V2", os.environ.get("LANGSMITH_TRACING", "")
-    )
+    enabled = os.environ.get("LANGSMITH_TRACING", "")
     enabled = enabled.casefold() in {"1", "true", "yes", "on"}
-    project = os.environ.get("LANGCHAIN_PROJECT") or os.environ.get("LANGSMITH_PROJECT")
+    project = os.environ.get("LANGSMITH_PROJECT")
     run_id = os.environ.get("LANGSMITH_RUN_ID")
     return {
         "trace_id": str(trace_id),

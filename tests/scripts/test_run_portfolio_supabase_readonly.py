@@ -46,7 +46,7 @@ def test_load_profile_requires_exactly_one_input() -> None:
 
 def test_diagnose_only_does_not_require_a_profile(monkeypatch, capsys) -> None:
     before_database_url = os.environ.get("DATABASE_URL")
-    before_tracing = os.environ.get("LANGCHAIN_TRACING_V2")
+    before_tracing = os.environ.get("LANGSMITH_TRACING")
 
     class Diagnostics:
         status = "PASS"
@@ -92,4 +92,4 @@ def test_diagnose_only_does_not_require_a_profile(monkeypatch, capsys) -> None:
     assert '"candidate_count": 1' in output
     assert '"research_mode": "REQUEST_TIME_MCP"' in output
     assert os.environ.get("DATABASE_URL") == before_database_url
-    assert os.environ.get("LANGCHAIN_TRACING_V2") == before_tracing
+    assert os.environ.get("LANGSMITH_TRACING") == before_tracing

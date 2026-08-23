@@ -127,7 +127,6 @@ async def _main_async_runtime(argv: list[str] | None = None) -> int:
     # Keep tracing disabled and load local configuration only for an actual CLI run.
     # Importing this module in a test or another process must not mutate its environment
     # or initialize the workflow runtime.
-    os.environ["LANGCHAIN_TRACING_V2"] = "false"
     os.environ["LANGSMITH_TRACING"] = "false"
 
     try:

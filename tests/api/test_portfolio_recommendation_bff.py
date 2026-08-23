@@ -15,7 +15,6 @@ os.environ["PORTFOLIO_WORKER_RUNTIME"] = "deterministic_test"
 os.environ["PORTFOLIO_REQUIRE_MANDATE_BINDING"] = "false"
 os.environ["PORTFOLIO_GOVERNANCE_BINDING_ENABLED"] = "false"
 os.environ["PORTFOLIO_AUTH_REQUIRED"] = "false"
-os.environ["LANGCHAIN_TRACING_V2"] = "false"
 os.environ["LANGSMITH_TRACING"] = "false"
 
 from fastapi import HTTPException

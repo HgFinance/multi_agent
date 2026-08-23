@@ -231,7 +231,7 @@ def _ls_project() -> str:
 
 def _langsmith_handoff(trace_id: str) -> dict[str, Any]:
     """리포트·소비자에게 넘기는 것은 Trace 원문이 아니라 이 좌표뿐이다."""
-    flag = os.environ.get("LANGCHAIN_TRACING_V2", os.environ.get("LANGSMITH_TRACING", ""))
+    flag = os.environ.get("LANGSMITH_TRACING", "")
     enabled = flag.casefold() in {"1", "true", "yes", "on"}
     return {
         "trace_id": str(trace_id),
@@ -1333,7 +1333,7 @@ def _check_langsmith_observability():
     """기본은 꺼짐이고, Project 는 회계본부로 격리된다.
     실제 그래프를 켠 채로 돌리지 않는다 - 이 점검은 네트워크를 타면 안 된다."""
     saved = {k: os.environ.get(k) for k in
-             ("LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2", "LANGSMITH_PROJECT")}
+             ("LANGSMITH_TRACING", "LANGSMITH_PROJECT")}
     try:
         for k in saved:
             os.environ.pop(k, None)
