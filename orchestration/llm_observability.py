@@ -288,6 +288,7 @@ def publish_worker_activity(
     latency_ms: int = 0,
     error_count: int = 0,
     trace_id: str | None = None,
+    measured: dict[str, Any] | None = None,
 ) -> bool:
     """Worker 실행 한 건을 HR 유휴 관측용으로 기록한다(2026-08-20).
 
@@ -305,15 +306,24 @@ def publish_worker_activity(
       유휴 리포트에서 가장 위험한 종류의 오차다(정리 대상으로 오판된다).
     """
 
-    # ▶ 모르는 값을 0/"" 으로 채우지 않는다(2026-08-20 수정). 이 경로에는
-    #   begin_worker_metric() 컨텍스트가 없어 llm_calls·model_name·토큰수를 셀
-    #   방법이 자체가 없다 - 그런데 llm_calls: 0 을 보내면 "모델을 한 번도 안
-    #   불렀다"는 **관측 사실**로 읽힌다. 실측(2026-08-20): 모델 엔드포인트가 없는
-    #   컨테이너에서 DEGRADED 로 끝난 Worker 가 llm_calls 0 을 달고 나갔는데,
-    #   그 0 은 실패의 증거가 아니라 우리가 안 센 결과였다. quality.py
-    #   aggregate_quality() 의 None/0 구분과 같은 원칙 - 필드를 아예 뺀다.
+    # ▶ 모르는 값을 0/"" 으로 채우지 않는다(2026-08-20). llm_calls: 0 은 "모델을
+    #   한 번도 안 불렀다"는 **관측 사실**로 읽히는데, 안 센 것과 0 은 다르다
+    #   (quality.py aggregate_quality() 의 None/0 구분과 같은 원칙).
+    #
+    #   `measured` 는 end_worker_metric() 이 돌려준 실측치다. 있으면 토큰·모델·
+    #   호출수가 함께 나가고, 없으면 그 필드들은 아예 빠진다. record_llm_call() 이
+    #   네 모델 경로 전부(공용 런타임·Risk·QA·Worker Model Gateway)에서 이미
+    #   불리고 있었는데 begin_worker_metric() 컨텍스트가 열려 있지 않아 그 값이
+    #   버려지고 있었다 - 이 인자가 그 값을 살리는 통로다.
+    measured = measured or {}
+    optional = {
+        key: measured[key]
+        for key in ("llm_calls", "model_name", "prompt_tokens", "completion_tokens", "retries")
+        if measured.get(key) not in (None, "")
+    }
     return publish_langfuse_metric(
         {
+            **optional,
             "schema_version": "llm.performance.v1",
             "worker_id": worker_id,
             "role": role,

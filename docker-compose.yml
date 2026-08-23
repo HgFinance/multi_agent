@@ -692,6 +692,14 @@ services:
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-}
+      # Langfuse(2026-08-20). 본부장이 이 컨테이너 안에서 Worker(MCP 도구 경로 포함)를
+      # 직접 돌리는 실행이 있다 - portfolio-bff/worker 계측만으로는 이 경로가 안 잡혀
+      # HR 리포트에서 실제로 일한 Worker 가 UNOBSERVED 로 보였다. `.env`는
+      # .dockerignore 라 컨테이너 안 load_dotenv 가 못 읽으므로 여기 명시한다.
+      LANGFUSE_TRACING: ${LANGFUSE_TRACING:-false}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
       # 파이프라인이 부르는 조회면·로컬 모델. Ollama 는 호스트 프로세스다.
       MARKET_API_URL: http://market-api:8036
       RESEARCH_API_URL: http://research-api:8035
@@ -1026,6 +1034,14 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OLLAMA_BASE_URL: ${OLLAMA_DOCKER_BASE_URL:-http://host.docker.internal:11434/v1}
       OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-qwen3:1.7b}
+      # Langfuse(2026-08-20). 본부장이 이 컨테이너 안에서 Worker(MCP 도구 경로 포함)를
+      # 직접 돌리는 실행이 있다 - portfolio-bff/worker 계측만으로는 이 경로가 안 잡혀
+      # HR 리포트에서 실제로 일한 Worker 가 UNOBSERVED 로 보였다. `.env`는
+      # .dockerignore 라 컨테이너 안 load_dotenv 가 못 읽으므로 여기 명시한다.
+      LANGFUSE_TRACING: ${LANGFUSE_TRACING:-false}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
       OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-8}
       RISK_SERVICE_AUTH_SECRET: ${RISK_SERVICE_AUTH_SECRET:-}
       RISK_SERVICE_AUTH_ISSUER: ${RISK_SERVICE_AUTH_ISSUER:-}
@@ -1074,6 +1090,14 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OLLAMA_BASE_URL: ${OLLAMA_DOCKER_BASE_URL:-http://host.docker.internal:11434/v1}
       OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-qwen3:1.7b}
+      # Langfuse(2026-08-20). 본부장이 이 컨테이너 안에서 Worker(MCP 도구 경로 포함)를
+      # 직접 돌리는 실행이 있다 - portfolio-bff/worker 계측만으로는 이 경로가 안 잡혀
+      # HR 리포트에서 실제로 일한 Worker 가 UNOBSERVED 로 보였다. `.env`는
+      # .dockerignore 라 컨테이너 안 load_dotenv 가 못 읽으므로 여기 명시한다.
+      LANGFUSE_TRACING: ${LANGFUSE_TRACING:-false}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
       OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-8}
       QA_SERVICE_AUTH_SECRET: ${QA_SERVICE_AUTH_SECRET:-}
       QA_SERVICE_AUTH_ISSUER: ${QA_SERVICE_AUTH_ISSUER:-}
