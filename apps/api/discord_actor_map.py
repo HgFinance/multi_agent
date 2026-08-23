@@ -36,7 +36,7 @@ Discord 계정으로 질문하면 배정된 테스트 유저의 Mandate로 판�
 
 여러 명은 쉼표로 잇는다. 공백·줄바꿈은 무시한다. 사람마다 uuid가 다르다.
 
-    DISCORD_ACTOR_MAP=111:0000...cec2,222:0000...cec0
+    DISCORD_ACTOR_MAP=111:0000...cec0,222:0000...cec1
 
 ## 매핑이 없으면
 
@@ -169,7 +169,7 @@ def discord_id_for_user(user_id: str | None) -> str | None:
     """역방향: 테스트 계정 uuid → Discord 작성자 id. 없으면 `None`.
 
     미러 게시물의 요청자 표시에 쓴다(`apps/api/discord_mirror.py`). 채널에
-    `[web-mirror] 00000000-0000-4000-8000-00000000cec2`가 뜨면 사람은 누가
+    `[web-mirror] 00000000-0000-4000-8000-00000000cec0`가 뜨면 사람은 누가
     물었는지 알 수 없다.
 
     **한 테스트 계정에 여러 Discord 사용자가 붙어 있으면 `None`을 준다.** 팀원
@@ -191,52 +191,52 @@ def discord_id_for_user(user_id: str | None) -> str | None:
 if __name__ == "__main__":
     from unittest.mock import patch
 
-    user3 = "00000000-0000-4000-8000-00000000cec2"
-    fund3 = "3838f7d6-0c7c-4e54-85f3-316a451e7eeb"
     user1 = "00000000-0000-4000-8000-00000000cec0"
-    fund1 = "b13f5cd1-5df0-4025-92cf-9be03b1a0296"
+    fund1 = "3838f7d6-0c7c-4e54-85f3-316a451e7eeb"
+    user2 = "00000000-0000-4000-8000-00000000cec1"
+    fund2 = "50a3c28c-6cee-4bcf-ab07-fa97093dca8e"
 
-    with patch.dict(os.environ, {ACTOR_MAP_ENV: f"123456789012345678:{user3}:{fund3}"}):
+    with patch.dict(os.environ, {ACTOR_MAP_ENV: f"123456789012345678:{user1}:{fund1}"}):
         binding = resolve("123456789012345678")
         assert binding is not None
-        assert binding.user_id == user3 and binding.fund_id == fund3, binding
+        assert binding.user_id == user1 and binding.fund_id == fund1, binding
         assert resolve("999999999999999999") is None
         assert resolve("") is None
         assert resolve(None) is None
 
     # 여러 명 + 공백·줄바꿈 혼용
-    raw = f"  123456789012345678:{user3}:{fund3} ,\n 234567890123456789:{user1}:{fund1}  "
+    raw = f"  123456789012345678:{user1}:{fund1} ,\n 234567890123456789:{user2}:{fund2}  "
     with patch.dict(os.environ, {ACTOR_MAP_ENV: raw}):
         assert len(actor_table()) == 2
-        assert resolve("234567890123456789").fund_id == fund1
+        assert resolve("234567890123456789").fund_id == fund2
 
     # 잘못된 항목은 버리되 나머지는 살린다 - 오타 하나로 전체가 죽지 않는다.
-    broken = f"not-a-snowflake:{user3}:{fund3},123456789012345678:{user3}:{fund3},999:x:y"
+    broken = f"not-a-snowflake:{user1}:{fund1},123456789012345678:{user1}:{fund1},999:x:y"
     with patch.dict(os.environ, {ACTOR_MAP_ENV: broken}):
         table = actor_table()
         assert list(table) == ["123456789012345678"], list(table)
 
     # 2칸 형식(권장) - fund는 역참조로 푼다.
-    with patch.dict(os.environ, {ACTOR_MAP_ENV: f"123456789012345678:{user3}"}):
+    with patch.dict(os.environ, {ACTOR_MAP_ENV: f"123456789012345678:{user1}"}):
         binding = resolve("123456789012345678")
-        assert binding is not None and binding.user_id == user3, binding
+        assert binding is not None and binding.user_id == user1, binding
         assert binding.fund_id is None, binding
 
     # fund 모양이 틀리면 그 항목을 버린다(조용히 역참조로 넘어가지 않는다).
-    with patch.dict(os.environ, {ACTOR_MAP_ENV: f"123456789012345678:{user3}:not-a-uuid"}):
+    with patch.dict(os.environ, {ACTOR_MAP_ENV: f"123456789012345678:{user1}:not-a-uuid"}):
         assert resolve("123456789012345678") is None
 
     # 역방향 조회 - 표시 이름용.
-    with patch.dict(os.environ, {ACTOR_MAP_ENV: f"123456789012345678:{user3}"}):
-        assert discord_id_for_user(user3) == "123456789012345678"
-        assert discord_id_for_user(user1) is None
+    with patch.dict(os.environ, {ACTOR_MAP_ENV: f"123456789012345678:{user1}"}):
+        assert discord_id_for_user(user1) == "123456789012345678"
+        assert discord_id_for_user(user2) is None
         assert discord_id_for_user(None) is None
 
     # 한 계정에 두 사람이 붙어 있으면 고르지 않는다 - 남이 물은 것처럼 보인다.
-    shared = f"123456789012345678:{user3},234567890123456789:{user3}"
+    shared = f"123456789012345678:{user1},234567890123456789:{user1}"
     with patch.dict(os.environ, {ACTOR_MAP_ENV: shared}):
         assert len(actor_table()) == 2
-        assert discord_id_for_user(user3) is None
+        assert discord_id_for_user(user1) is None
 
     # 미설정이면 빈 표. 예외를 올리지 않는다.
     with patch.dict(os.environ, {ACTOR_MAP_ENV: ""}):

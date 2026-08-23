@@ -194,7 +194,7 @@ def _asked_by_label(asked_by: object) -> str | None:
 
     ## 왜 멘션(`<@id>`)으로 바꾸나
 
-    테스트 계정 uuid를 그대로 찍으면(`[web-mirror] 00000000-...cec2`) 채널을 보는
+    테스트 계정 uuid를 그대로 찍으면(`[web-mirror] 00000000-...cec0`) 채널을 보는
     사람이 누가 물었는지 알 수 없다. `DISCORD_ACTOR_MAP`에 그 계정과 이어진
     Discord 사용자가 **정확히 한 명**이면 멘션으로 렌더한다 - Discord가 그 사람의
     표시 이름으로 보여준다.
@@ -442,15 +442,15 @@ if __name__ == "__main__":
     # 표시 이름: 매핑된 계정은 멘션으로 렌더된다(알림은 allowed_mentions로 차단).
     from discord_actor_map import ACTOR_MAP_ENV
 
-    user3 = "00000000-0000-4000-8000-00000000cec2"
-    with patch.dict(os.environ, {ACTOR_MAP_ENV: f"123456789012345678:{user3}"}):
-        named = build_content("q", asked_by=user3)
+    user1 = "00000000-0000-4000-8000-00000000cec0"
+    with patch.dict(os.environ, {ACTOR_MAP_ENV: f"123456789012345678:{user1}"}):
+        named = build_content("q", asked_by=user1)
         assert named.startswith(MIRROR_TAG + " <@123456789012345678>"), named
 
     # 매핑이 없으면 uuid 그대로 - 남의 이름으로 보이는 것보다 낫다.
     with patch.dict(os.environ, {ACTOR_MAP_ENV: ""}):
-        plain_uuid = build_content("q", asked_by=user3)
-        assert plain_uuid.startswith(MIRROR_TAG + " " + user3), plain_uuid
+        plain_uuid = build_content("q", asked_by=user1)
+        assert plain_uuid.startswith(MIRROR_TAG + " " + user1), plain_uuid
 
     # 러너 판정: pytest 환경변수만으로도 차단된다.
     with patch.dict(

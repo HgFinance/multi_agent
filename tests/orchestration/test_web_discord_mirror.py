@@ -112,18 +112,18 @@ class DiscordActorMappingTest(unittest.TestCase):
     Discord에서 물으면 안 붙는 상태가 된다.
     """
 
-    USER3 = "00000000-0000-4000-8000-00000000cec2"
-    FUND3 = "3838f7d6-0c7c-4e54-85f3-316a451e7eeb"
+    USER1 = "00000000-0000-4000-8000-00000000cec0"
+    FUND1 = "3838f7d6-0c7c-4e54-85f3-316a451e7eeb"
     DISCORD_ID = "123456789012345678"
 
     def test_mapped_author_resolves_to_the_test_account(self) -> None:
-        entry = f"{self.DISCORD_ID}:{self.USER3}:{self.FUND3}"
+        entry = f"{self.DISCORD_ID}:{self.USER1}:{self.FUND1}"
         with patch.dict(os.environ, {ACTOR_MAP_ENV: entry}):
             binding = resolve_actor(self.DISCORD_ID)
 
         self.assertIsNotNone(binding)
-        self.assertEqual(binding.user_id, self.USER3)
-        self.assertEqual(binding.fund_id, self.FUND3)
+        self.assertEqual(binding.user_id, self.USER1)
+        self.assertEqual(binding.fund_id, self.FUND1)
 
     def test_unmapped_author_is_left_alone(self) -> None:
         """매핑이 없으면 기본 계정으로 채우지 않는다(개발 원칙 9).
@@ -132,14 +132,14 @@ class DiscordActorMappingTest(unittest.TestCase):
         `None`이면 Mandate 없이 진행하고, 그게 정확한 사실이다.
         """
 
-        entry = f"{self.DISCORD_ID}:{self.USER3}:{self.FUND3}"
+        entry = f"{self.DISCORD_ID}:{self.USER1}:{self.FUND1}"
         with patch.dict(os.environ, {ACTOR_MAP_ENV: entry}):
             self.assertIsNone(resolve_actor("999999999999999999"))
 
     def test_malformed_entry_does_not_kill_the_rest(self) -> None:
         """오타 한 줄로 표 전체가 죽지 않는다 - BFF 기동을 막으면 안 된다."""
 
-        raw = f"@홍길동:{self.USER3}:{self.FUND3},{self.DISCORD_ID}:{self.USER3}:{self.FUND3}"
+        raw = f"@홍길동:{self.USER1}:{self.FUND1},{self.DISCORD_ID}:{self.USER1}:{self.FUND1}"
         with patch.dict(os.environ, {ACTOR_MAP_ENV: raw}):
             self.assertIsNotNone(resolve_actor(self.DISCORD_ID))
 
@@ -156,14 +156,14 @@ class UserToFundReverseLookupTest(unittest.TestCase):
     관계가 채워지며 서버가 직접 풀 수 있게 됐고, 매핑표의 fund 칸은 선택이 됐다.
     """
 
-    USER3 = "00000000-0000-4000-8000-00000000cec2"
+    USER1 = "00000000-0000-4000-8000-00000000cec0"
 
     def test_two_field_entry_leaves_fund_to_the_lookup(self) -> None:
-        with patch.dict(os.environ, {ACTOR_MAP_ENV: f"123456789012345678:{self.USER3}"}):
+        with patch.dict(os.environ, {ACTOR_MAP_ENV: f"123456789012345678:{self.USER1}"}):
             binding = resolve_actor("123456789012345678")
 
         self.assertIsNotNone(binding)
-        self.assertEqual(binding.user_id, self.USER3)
+        self.assertEqual(binding.user_id, self.USER1)
         self.assertIsNone(binding.fund_id)
 
     def test_declared_fund_still_wins(self) -> None:
@@ -175,7 +175,7 @@ class UserToFundReverseLookupTest(unittest.TestCase):
 
         fund = "3838f7d6-0c7c-4e54-85f3-316a451e7eeb"
         with patch.dict(
-            os.environ, {ACTOR_MAP_ENV: f"123456789012345678:{self.USER3}:{fund}"}
+            os.environ, {ACTOR_MAP_ENV: f"123456789012345678:{self.USER1}:{fund}"}
         ):
             self.assertEqual(resolve_actor("123456789012345678").fund_id, fund)
 
@@ -191,7 +191,7 @@ class UserToFundReverseLookupTest(unittest.TestCase):
         from apps.api import governance_client
 
         with patch.object(governance_client, "GOVERNANCE_API_URL", ""):
-            self.assertIsNone(governance_client.fetch_fund_id_by_user(self.USER3))
+            self.assertIsNone(governance_client.fetch_fund_id_by_user(self.USER1))
 
 class MirrorIsOffDuringTestsTest(unittest.TestCase):
     """테스트 실행 중에는 절대 Discord에 글이 나가지 않는다.
@@ -286,22 +286,22 @@ class SourceDecidesWhetherWeRepostTest(unittest.TestCase):
 class MirrorLabelTest(unittest.TestCase):
     """요청자 표시. uuid를 그대로 찍으면 채널에서 누가 물었는지 알 수 없다."""
 
-    USER3 = "00000000-0000-4000-8000-00000000cec2"
+    USER1 = "00000000-0000-4000-8000-00000000cec0"
 
     def test_mapped_user_renders_as_a_mention(self) -> None:
-        with patch.dict(os.environ, {ACTOR_MAP_ENV: f"123456789012345678:{self.USER3}"}):
-            content = build_content("q", asked_by=self.USER3)
+        with patch.dict(os.environ, {ACTOR_MAP_ENV: f"123456789012345678:{self.USER1}"}):
+            content = build_content("q", asked_by=self.USER1)
 
         self.assertTrue(content.startswith(f"{MIRROR_TAG} <@123456789012345678>"))
 
     def test_shared_account_falls_back_to_the_uuid(self) -> None:
         """한 계정을 둘이 쓰면 아무나 고르지 않는다 - 남이 물은 것처럼 보인다."""
 
-        shared = f"123456789012345678:{self.USER3},234567890123456789:{self.USER3}"
+        shared = f"123456789012345678:{self.USER1},234567890123456789:{self.USER1}"
         with patch.dict(os.environ, {ACTOR_MAP_ENV: shared}):
-            content = build_content("q", asked_by=self.USER3)
+            content = build_content("q", asked_by=self.USER1)
 
-        self.assertTrue(content.startswith(f"{MIRROR_TAG} {self.USER3}"))
+        self.assertTrue(content.startswith(f"{MIRROR_TAG} {self.USER1}"))
 
 
 class ThreadIsRequiredForDepartmentDetailTest(unittest.TestCase):

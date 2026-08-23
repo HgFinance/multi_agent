@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
@@ -16,6 +17,7 @@ import {
   isBrowserSafeSupabaseKey,
   validateSupabasePublishableKey,
 } from "../app/lib/supabaseBrowser.ts";
+import { accountFromDiscordActorMap } from "../app/lib/currentAccount.ts";
 
 function base64url(value) {
   return Buffer.from(JSON.stringify(value)).toString("base64url");
@@ -25,7 +27,7 @@ function legacySupabaseJwt(role) {
   return `${base64url({ alg: "HS256", typ: "JWT" })}.${base64url({ role })}.signature`;
 }
 
-test("identity is a fixed account and never depends on an environment variable", () => {
+test("fixture identity reads the first valid Discord actor binding", () => {
   // 2026-08-19: `NEXT_PUBLIC_AUTH_MODE` 기반 분기를 없앴다. 이 앱은 Cloudflare
   // Worker(SSR)와 Vite 클라이언트가 env를 서로 다른 경로로 받아, 같은 코드가
   // 서버에서는 fixture로 클라이언트에서는 supabase로 평가되는 일이 반복됐다.
@@ -33,6 +35,12 @@ test("identity is a fixed account and never depends on an environment variable",
   assert.equal(resolveAuthMode(), "fixture");
   assert.equal(resolveAuthMode("supabase", "production"), "fixture");
   assert.equal(resolveAuthMode(undefined, undefined), "fixture");
+  const userId = randomUUID();
+  const fundId = randomUUID();
+  const account = accountFromDiscordActorMap(`${"9".repeat(18)}:${userId}:${fundId}`);
+  assert.equal(account.userId, userId);
+  assert.equal(account.fundId, fundId);
+  assert.equal(accountFromDiscordActorMap("invalid").userId, "");
 });
 
 test("login next accepts only same-origin absolute paths", () => {
