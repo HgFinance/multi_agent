@@ -22,6 +22,8 @@ from typing import Any, TypedDict
 from langgraph.graph import END, StateGraph
 
 from orchestration.llm_observability import (
+    begin_worker_metric,
+    end_worker_metric,
     publish_worker_activity,
     publish_worker_opportunity,
     record_llm_call,
@@ -683,17 +685,35 @@ async def run_worker_registry_async(
         """
 
         started = time.perf_counter()
+        # ▶ 토큰·호출수는 record_llm_call() 이 이미 재고 있다. 다만 그 값이 쌓이려면
+        #   begin_worker_metric() 컨텍스트가 열려 있어야 한다 - 지금까지 그 컨텍스트가
+        #   portfolio_recommendation 한 곳에서만 열려서, 이 경로의 실측치는 매번
+        #   버려지고 있었다(2026-08-20). 여기서 열어 스코어카드 cost 축을 살린다.
+        #
+        #   model_name 은 이 런타임이 선언한 기본값이다. Worker Model Gateway 가
+        #   워커별로 다른 모델을 해석하면 실제 값과 어긋날 수 있어, 그 경우는
+        #   호출부가 llm_factory 로 좌표를 바꾸는 쪽이 정본이다.
+        metric_token = begin_worker_metric(
+            worker_id=spec.worker_id, role=spec.role,
+            stage=stage or "", model_name=model_name(),
+        ) if stage else None
         report = await _execute_one(spec)
-        if stage:
+        if stage and metric_token is not None:
+            status = str(report.get("status", "DEGRADED"))
+            attempts = int(report.get("attempts", 0) or 0)
+            measured = end_worker_metric(
+                metric_token, status=status, attempts=attempts, eval_score=None,
+            )
             publish_worker_activity(
                 stage=stage,
                 worker_id=spec.worker_id,
                 role=spec.role,
-                status=str(report.get("status", "DEGRADED")),
-                attempts=int(report.get("attempts", 0) or 0),
+                status=status,
+                attempts=attempts,
                 latency_ms=int((time.perf_counter() - started) * 1000),
-                error_count=0 if report.get("status") == "COMPLETED" else 1,
+                error_count=0 if status == "COMPLETED" else 1,
                 trace_id=str(payload.get("trace_id") or payload.get("case_id") or ""),
+                measured=measured,
             )
         return report
 
