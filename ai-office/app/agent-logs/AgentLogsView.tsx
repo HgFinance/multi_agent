@@ -51,7 +51,16 @@ function percentile(values: number[], percentileValue: number): number | null {
 
 function PerformanceMetrics({ metrics }: { metrics: LlmPerformanceMetric[] }) {
   const measured = metrics.filter((item) => Number.isFinite(item.latency_ms) && item.latency_ms >= 0);
-  if (measured.length === 0) return null;
+  if (measured.length === 0) {
+    return (
+      <section className="bg-surface-container-lowest border border-outline-variant rounded-lg p-4" aria-label="Worker 성능 지표">
+        <h3 className="text-title-md font-title-md text-primary m-0">Worker 성능 지표</h3>
+        <p className="text-body-sm font-body-sm text-on-surface-variant mt-2 mb-0">
+          HR이 관찰하는 최근 Worker 지연·토큰·실행 상태가 아직 수집되지 않았습니다.
+        </p>
+      </section>
+    );
+  }
 
   const latencies = measured.map((item) => item.latency_ms);
   const average = Math.round(latencies.reduce((total, value) => total + value, 0) / latencies.length);
@@ -66,12 +75,12 @@ function PerformanceMetrics({ metrics }: { metrics: LlmPerformanceMetric[] }) {
   const recent = [...measured].slice(-10).reverse();
 
   return (
-    <section className="bg-surface-container-lowest border border-outline-variant rounded-lg p-4" aria-label="최근 Worker 성능">
+    <section className="bg-surface-container-lowest border border-outline-variant rounded-lg p-4" aria-label="Worker 성능 지표">
       <div className="flex justify-between gap-3 flex-wrap items-baseline">
         <div>
-          <h2 className="text-title-md font-title-md text-primary m-0">최근 Worker 성능</h2>
+          <h3 className="text-title-md font-title-md text-primary m-0">Worker 성능 지표</h3>
           <p className="text-xs text-on-surface-variant mt-1 mb-0">
-            현재 요청에서 수집한 실행 지표입니다. 모델 입력·출력 원문은 표시하거나 전송하지 않습니다.
+            HR이 관찰하는 전체 Worker 실행 지표입니다. 모델 입력·출력 원문은 표시하거나 전송하지 않습니다.
           </p>
         </div>
         <span className="text-xs text-on-surface-variant">표본 {measured.length}건</span>
@@ -562,8 +571,6 @@ export default function AgentLogsView() {
         </span>
       </section>
 
-      <PerformanceMetrics metrics={data?.metrics ?? []} />
-
       {/* 접기는 native `<details>`가 한다 - 열림 상태·키보드·스크린리더가 전부 딸려
           온다. `<details>`에 flex를 주면 닫혀도 내용이 보이므로 레이아웃은 안쪽
           div가 맡는다. `<section aria-label>`은 landmark라 남겨 둔다. */}
@@ -622,7 +629,10 @@ export default function AgentLogsView() {
       )}
 
       {selected && data ? (
-        <DepartmentInspector department={selected} data={data} />
+        <>
+          <DepartmentInspector department={selected} data={data} />
+          {selected.department_code === "hr-department" ? <PerformanceMetrics metrics={data.metrics} /> : null}
+        </>
       ) : departments.length > 0 ? (
         <p className="text-body-sm font-body-sm text-on-surface-variant">
           부서 카드를 누르면 부서 상태와 연결된 결과물이 아래에 펼쳐집니다.
