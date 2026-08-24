@@ -81,6 +81,7 @@ _PATTERNS = (
         r"|(?i:(?:sign|effect|result).{0,60}(?:negative|unstable|one[- ]session|one[- ]regime|confined|reverses?|vanishes?).{0,60}(?:session|regime|out[- ]of[- ]sample|replicate))"
         r"|(?i:(?:fails?\s+to\s+replicate|confined\s+to|effect\s+is).{0,60}(?:session|regime|instrument|one[- ]session|one[- ]regime))"
         r"|(?i:(?:effect|result).{0,60}(?:exists|confined|survives).{0,30}(?:one\s+session|one\s+liquidity\s+bucket|independent\s+sessions?))"
+        r"|(?i:(?:one|single)\s+(?:session|regime|liquidity\s+bucket)(?:\s+only)?(?:\s+or\s+(?:one|single)\s+(?:session|regime|liquidity\s+bucket))?)"
         r"|(?i:failure\s+to\s+replicate.{0,40}(?:sessions?|instruments?))")),
     ("window_count", re.compile(
         r"(walk[- ]?forward|창).{0,12}\d+\s*개\s*미만"

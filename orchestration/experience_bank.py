@@ -25,21 +25,17 @@ from dataclasses import dataclass
 from time import monotonic
 from typing import Any, Callable, Mapping, Sequence
 
+from orchestration.experience_retention_policy import (
+    D5_WRITE_STOP_RELATION_BYTES,
+    OPERATIONAL_FAILURE_CODES,
+)
+
 
 LOGGER = logging.getLogger(__name__)
 TABLE_NAME = "experience.workflow_experiences"
 MODES = frozenset({"off", "shadow", "active"})
 _CODE_RE = re.compile(r"[^A-Z0-9_.:-]+")
-_OPERATIONAL_FAILURE_CODES = frozenset(
-    {
-        "PROVIDER_AUTH",
-        "PROVIDER_QUOTA",
-        "PROVIDER_UNAVAILABLE",
-        "PROVIDER_TIMEOUT",
-        "NETWORK_TIMEOUT",
-        "RATE_LIMITED",
-    }
-)
+_OPERATIONAL_FAILURE_CODES = OPERATIONAL_FAILURE_CODES
 
 
 @dataclass(frozen=True)
@@ -478,6 +474,17 @@ class ExperienceBank:
                     "SET LOCAL statement_timeout = %s",
                     (self.statement_timeout_ms,),
                 )
+                # Capacity protection is scoped to the D5 relation, not the
+                # whole control database.  At the write-stop threshold D5
+                # fails open so the user workflow is never blocked.
+                cursor.execute(
+                    "SELECT pg_total_relation_size(%s::regclass)",
+                    (TABLE_NAME,),
+                )
+                relation_size_row = getattr(cursor, "fetchone", lambda: (0,))()
+                relation_size = max(0, int((relation_size_row or (0,))[0] or 0))
+                if relation_size >= D5_WRITE_STOP_RELATION_BYTES:
+                    return self._write_failure(started, "D5_CAPACITY_LIMIT")
                 identity = _bounded_text(
                     record.experience_identity or "",
                     160,

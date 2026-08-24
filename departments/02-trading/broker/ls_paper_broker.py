@@ -19,6 +19,8 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx
+import hashlib
+from pathlib import Path
 
 
 KST = ZoneInfo("Asia/Seoul")
@@ -29,6 +31,55 @@ _DEFAULT_SUCCESS_CODES = frozenset({"0000", "00000"})
 # globally could turn an order rejection into a false acknowledgement.
 _TR_SUCCESS_CODES = {"CSPAQ13700": frozenset({"00136"})}
 _ORDER_HISTORY_CACHE_SECONDS = 1.1
+
+
+
+_SHARED_TOKEN_TTL_SECONDS = 3600
+
+
+def _shared_token_cache_path(app_key):
+    """Cross-process shared token cache (opt-in via LS_TOKEN_CACHE_DIR).
+
+    Protocol identical to the research collector cache: the file
+    ls_token_{ENV}_{sha256(app_key)[:12]}.json holds token + expires_at.
+    LS keeps ONE active token per app key, so independent issuers
+    invalidate each other (measured 2026-08-24: ~1 websocket kick/min
+    while several processes each re-issued on short private TTLs).
+    """
+    base = os.environ.get("LS_TOKEN_CACHE_DIR", "").strip()
+    if not base:
+        return None
+    mode = os.environ.get("LS_ENV", "PAPER").strip().upper() or "PAPER"
+    key_id = hashlib.sha256(app_key.encode()).hexdigest()[:12]
+    return Path(base) / f"ls_token_{mode}_{key_id}.json"
+
+
+def _read_shared_token(path):
+    if path is None:
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        expires = datetime.fromisoformat(payload["expires_at"])
+        now = datetime.now(timezone.utc)
+        if now + timedelta(seconds=60) < expires and payload.get("token"):
+            return str(payload["token"]), expires
+    except (OSError, KeyError, ValueError):
+        return None
+    return None
+
+
+def _write_shared_token(path, token, expires_at):
+    if path is None:
+        return
+    try:
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps({"token": token,
+                        "expires_at": expires_at.isoformat()}),
+            encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
 
 
 class LSPaperBrokerError(RuntimeError):
@@ -172,6 +223,11 @@ class LSPaperBroker:
         now = datetime.now(timezone.utc)
         if self._token and now + timedelta(seconds=30) < self._token_expires_at:
             return self._token
+        shared = _read_shared_token(
+            _shared_token_cache_path(self.config.app_key))
+        if shared is not None:
+            self._token, self._token_expires_at = shared
+            return self._token
         try:
             response = self._client.post(
                 self.config.base_url + "/oauth2/token",
@@ -204,15 +260,13 @@ class LSPaperBroker:
             raise LSPaperBrokerError(
                 "LS_PAPER_RESPONSE_INVALID", "LS OAuth response has no access token"
             )
-        raw_expiry = body.get("expires_in", body.get("expire_in", 300))
-        try:
-            expires_in = max(60, int(raw_expiry))
-        except (TypeError, ValueError) as exc:
-            raise LSPaperBrokerError(
-                "LS_PAPER_RESPONSE_INVALID", "LS OAuth expiry is invalid"
-            ) from exc
+        # unified 1h TTL - see _shared_token_cache_path docstring
         self._token = token
-        self._token_expires_at = now + timedelta(seconds=expires_in)
+        self._token_expires_at = now + timedelta(
+            seconds=_SHARED_TOKEN_TTL_SECONDS)
+        _write_shared_token(
+            _shared_token_cache_path(self.config.app_key),
+            token, self._token_expires_at)
         return token
 
     def _post_tr(

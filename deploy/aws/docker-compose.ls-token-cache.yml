@@ -1,0 +1,45 @@
+# LS shared token cache - one active token per app key, so every
+# LS client process on this host must share one issuance.
+# Apply as a THIRD -f after docker-compose.yml and
+# deploy/aws/docker-compose.paper-order.yml.
+services:
+  portfolio-bff:
+    environment:
+      LS_TOKEN_CACHE_DIR: /var/ls-token
+    volumes:
+      - /home/ubuntu/ls-token-cache:/var/ls-token
+  conditional-rule-worker:
+    environment:
+      LS_TOKEN_CACHE_DIR: /var/ls-token
+    volumes:
+      - /home/ubuntu/ls-token-cache:/var/ls-token
+  ls-realtime:
+    environment:
+      LS_TOKEN_CACHE_DIR: /var/ls-token
+    volumes:
+      - /home/ubuntu/ls-token-cache:/var/ls-token
+  batch-collectors:
+    environment:
+      LS_TOKEN_CACHE_DIR: /var/ls-token
+    volumes:
+      - /home/ubuntu/ls-token-cache:/var/ls-token
+  ls-mcp:
+    environment:
+      LS_TOKEN_CACHE_DIR: /var/ls-token
+    volumes:
+      - /home/ubuntu/ls-token-cache:/var/ls-token
+  reference-bootstrap:
+    environment:
+      LS_TOKEN_CACHE_DIR: /var/ls-token
+    volumes:
+      - /home/ubuntu/ls-token-cache:/var/ls-token
+  trading-api:
+    environment:
+      LS_TOKEN_CACHE_DIR: /var/ls-token
+    volumes:
+      - /home/ubuntu/ls-token-cache:/var/ls-token
+  trading-directive-worker:
+    environment:
+      LS_TOKEN_CACHE_DIR: /var/ls-token
+    volumes:
+      - /home/ubuntu/ls-token-cache:/var/ls-token

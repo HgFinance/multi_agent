@@ -234,8 +234,11 @@ services:
       # runtime 롤 그대로면 오류 없이 0행이 보인다(2026-08-23 실측).
       # trading 과 같은 SET ROLE 패턴을 쓴다 - runtime 은 이미 멤버다.
       QUANT_DATABASE_URL: "postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_quant"
-      # 퀀트 프로필의 TIMESCALE_DATABASE_URL 이 이 변수를 보간한다.
+      # 퀀트 프로필의 TIMESCALE_DATABASE_URL 이 이 변수를 **전체-값**으로
+      # 치환한다. hermes 프로필 env 는 문자열 중간 ${VAR} 를 치환하지
+      # 않는다(2026-08-24 실측) - 완성 URL 을 여기서 내린다.
       HEDGEFUND_TSDB_PASSWORD: ${HEDGEFUND_TSDB_PASSWORD:?}
+      TIMESCALE_DATABASE_URL: *admin-market-database-url
 
   research-mcp:
     depends_on: *control-dependency

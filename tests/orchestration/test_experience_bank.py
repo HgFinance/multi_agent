@@ -21,9 +21,10 @@ from orchestration.experience_bank import (
 
 
 class _Cursor:
-    def __init__(self, rows=(), rowcount=1):
+    def __init__(self, rows=(), rowcount=1, scalar=0):
         self.rows = list(rows)
         self.rowcount = rowcount
+        self.scalar = scalar
         self.executed = []
 
     def execute(self, query, args=()):
@@ -32,13 +33,16 @@ class _Cursor:
     def fetchall(self):
         return list(self.rows)
 
+    def fetchone(self):
+        return (self.scalar,)
+
     def close(self):
         return None
 
 
 class _Connection:
-    def __init__(self, rows=(), rowcount=1):
-        self.cursor_obj = _Cursor(rows, rowcount)
+    def __init__(self, rows=(), rowcount=1, scalar=0):
+        self.cursor_obj = _Cursor(rows, rowcount, scalar)
         self.commits = 0
         self.rollbacks = 0
 
@@ -132,6 +136,32 @@ class ExperienceBankTest(unittest.TestCase):
         self.assertIn("ON CONFLICT (experience_identity)", query)
         self.assertIn("experience_identity", query)
         self.assertNotIn("user prompt", str(args).lower())
+
+    def test_record_fails_open_at_d5_write_stop_capacity(self):
+        connection = _Connection(rowcount=1, scalar=48 * 1024 * 1024)
+        bank = ExperienceBank(
+            "postgresql://test",
+            mode="shadow",
+            connect_factory=lambda *_args, **_kwargs: connection,
+        )
+        result = bank.record(
+            ExperienceRecord(
+                case_type="investment_analysis",
+                binding=False,
+                primary_departments=("research",),
+                orchestration_policy="analysis_parallel",
+                success=True,
+                failure_codes=(),
+                latency_ms=10,
+                qa_enabled=True,
+                qa_blocks_response=False,
+                lesson="structured outcome",
+                source_run_id="capacity-test",
+            )
+        )
+        self.assertFalse(result.written)
+        self.assertEqual(result.error_code, "D5_CAPACITY_LIMIT")
+        self.assertFalse(any("INSERT INTO" in query for query, _args in connection.cursor_obj.executed))
 
     def test_lookup_sets_bounded_statement_timeout_and_separate_timings(self):
         connection = _Connection(rows=[])

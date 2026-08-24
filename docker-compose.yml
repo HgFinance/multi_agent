@@ -1605,6 +1605,35 @@ services:
     pids_limit: 64
     stop_grace_period: 20s
 
+  # MemoHarness D5 owns a separate Postgres relation from Kanban's SQLite
+  # retention lane. Keep cleanup isolated from request/supervisor latency and
+  # limit it to the Experience Bank table.
+  memo-harness-retention-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.ceo-supervisor
+    image: hedgefund-ceo-supervisor:latest
+    container_name: hedgefund-memo-harness-retention-worker
+    restart: unless-stopped
+    init: true
+    command: ["python3", "/opt/hgfinance/orchestration/experience_retention.py", "--interval", "${MEMOHARNESS_D5_RETENTION_INTERVAL_SECONDS:-86400}"]
+    volumes:
+      - .:/opt/hgfinance:ro
+    environment:
+      PYTHONPATH: /opt/hgfinance
+      MEMOHARNESS_D5_DATABASE_URL: ${MEMOHARNESS_D5_DATABASE_URL:-${CONTROL_DATABASE_URL:-${DATABASE_URL:-}}}
+      MEMOHARNESS_D5_RETENTION_ENABLED: ${MEMOHARNESS_D5_RETENTION_ENABLED:-true}
+      MEMOHARNESS_D5_RETENTION_INTERVAL_SECONDS: ${MEMOHARNESS_D5_RETENTION_INTERVAL_SECONDS:-86400}
+      MEMOHARNESS_D5_RETENTION_BATCH_SIZE: ${MEMOHARNESS_D5_RETENTION_BATCH_SIZE:-500}
+      MEMOHARNESS_D5_RETENTION_MAX_PRESSURE_BATCHES: ${MEMOHARNESS_D5_RETENTION_MAX_PRESSURE_BATCHES:-10}
+      MEMOHARNESS_D5_RETENTION_VACUUM_ANALYZE: ${MEMOHARNESS_D5_RETENTION_VACUUM_ANALYZE:-true}
+      MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS: ${MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS:-1500}
+    mem_limit: 128m
+    mem_reservation: 32m
+    cpus: 0.1
+    pids_limit: 32
+    stop_grace_period: 20s
+
   # ── 방법론 스카우트 도구 면 (2026-08-10, 재일) ─────────────────────────────
   # **기본 `docker compose up` 에서는 뜨지 않는다.** profiles 로 묶어 두었으니
   # `docker compose --profile research-skills up -d` 로만 기동한다 - 검증 전
