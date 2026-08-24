@@ -151,7 +151,23 @@ class _Claim(AbstractContextManager["_Claim"]):
             self.page_id = page_id
             return
         value = json.dumps({"state": "done", "page_id": page_id})
-        self.redis.set(self.key, value, ex=self.owner.dedupe_ttl_seconds)
+        if not self._redis_owned:
+            # A waiter may have observed the page created by the current owner.
+            # It must not overwrite that owner's token or completion marker.
+            self.page_id = page_id
+            return
+        # Completion is a compare-and-set, not an unconditional SET.  If the
+        # bounded lock TTL elapsed and another worker acquired the claim, the
+        # late worker must not replace the newer worker's marker.
+        self.redis.eval(
+            "if redis.call('get', KEYS[1]) ~= ARGV[1] then return 0 end "
+            "return redis.call('set', KEYS[1], ARGV[2], 'EX', ARGV[3])",
+            1,
+            self.key,
+            self.token,
+            value,
+            str(self.owner.dedupe_ttl_seconds),
+        )
         self._redis_owned = False
         self.page_id = page_id
 
