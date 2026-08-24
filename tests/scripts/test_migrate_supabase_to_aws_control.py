@@ -555,3 +555,155 @@ def test_only_the_trace_table_is_filtered():
     findings = make_table("audit", "findings", pk="finding_id")
     assert migrate._where_clause(findings, True) == ""
 
+
+@requires_live_db
+def test_live_control_authoritative_never_writes_and_reports_divergence(live_connections):
+    """control owns these rows; the tool reports differences but copies nothing."""
+
+    source, target = live_connections
+    with target.cursor() as cursor:
+        cursor.execute(
+            "insert into mig_test.parent (parent_id, name) values (%s, %s)",
+            (UUID(int=11), "control-only"),
+        )
+    target.commit()
+    with source.cursor() as cursor:
+        cursor.execute(
+            "insert into mig_test.parent (parent_id, name) values (%s, %s)",
+            (UUID(int=12), "supabase-only"),
+        )
+    source.commit()
+
+    seed = migrate.resolve_seed_identity()
+    with source.cursor() as sc, target.cursor() as tc:
+        parent = migrate.introspect_domain_schema(sc)[("mig_test", "parent")]
+        classification = migrate.classify_table(
+            sc, tc, parent, seed, policy=migrate.POLICY_CONTROL_AUTHORITATIVE
+        )
+
+    assert classification.to_insert == []
+    # The control-only row is expected under this policy and is not an error.
+    assert classification.unexplained_target_only == []
+    assert any("source-only" in d for d in classification.divergences)
+
+    with target.cursor() as cursor:
+        cursor.execute("select count(*) from mig_test.parent")
+        assert cursor.fetchone()[0] == 1
+
+
+@requires_live_db
+def test_live_accepted_metadata_drift_collapses_a_conflict(live_connections):
+    source, target = live_connections
+    parent_id = UUID(int=21)
+    for connection, name in ((source, "a"), (target, "b")):
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "insert into mig_test.parent (parent_id, name) values (%s, %s)",
+                (parent_id, name),
+            )
+        connection.commit()
+
+    seed = migrate.resolve_seed_identity()
+    with source.cursor() as sc, target.cursor() as tc:
+        parent = migrate.introspect_domain_schema(sc)[("mig_test", "parent")]
+        blocked = migrate.classify_table(sc, tc, parent, seed)
+        accepted = migrate.classify_table(
+            sc, tc, parent, seed,
+            accepted_drift=frozenset({"mig_test.parent:name"}),
+        )
+
+    assert len(blocked.conflicts) == 1
+    # Nothing is ignored unless the operator named that exact column.
+    assert accepted.conflicts == []
+    assert accepted.already_present == 1
+
+
+@requires_live_db
+def test_live_copy_is_one_transaction_the_caller_owns(live_connections):
+    """A failure mid-run must leave control exactly as it was."""
+
+    source, target = live_connections
+    with source.cursor() as cursor:
+        cursor.execute(
+            "insert into mig_test.parent (parent_id, name) values (%s, %s)",
+            (UUID(int=31), "rolled-back"),
+        )
+    source.commit()
+
+    seed = migrate.resolve_seed_identity()
+    with source.cursor() as sc, target.cursor() as tc:
+        parent = migrate.introspect_domain_schema(sc)[("mig_test", "parent")]
+        classification = migrate.classify_table(sc, tc, parent, seed)
+    migrate.copy_table(target, parent, classification.to_insert)
+    target.rollback()  # stand in for a failure on a later table
+
+    with target.cursor() as cursor:
+        cursor.execute("select count(*) from mig_test.parent")
+        assert cursor.fetchone()[0] == 0
+
+
+@requires_live_db
+def test_live_empty_table_does_not_consume_sequence_value_one(live_connections):
+    source, target = live_connections
+    with target.cursor() as cursor:
+        cursor.execute("create table mig_test.counter (id serial primary key, note text)")
+    target.commit()
+    try:
+        with target.cursor() as cursor:
+            table = migrate._introspect_table(cursor, "mig_test", "counter")
+            migrate._fixup_sequences(cursor, table)
+            cursor.execute("select nextval(pg_get_serial_sequence('mig_test.counter','id'))")
+            assert cursor.fetchone()[0] == 1
+        target.commit()
+    finally:
+        with target.cursor() as cursor:
+            cursor.execute("drop table mig_test.counter")
+        target.commit()
+
+
+@requires_live_db
+def test_live_always_identity_keys_are_preserved_exactly(live_connections):
+    """GENERATED ALWAYS AS IDENTITY rejects explicit values without an override."""
+
+    source, target = live_connections
+    ddl = (
+        "create table mig_test.ident ("
+        "  id integer generated always as identity primary key,"
+        "  note text not null)"
+    )
+    for connection in (source, target):
+        with connection.cursor() as cursor:
+            cursor.execute(ddl)
+        connection.commit()
+    try:
+        with source.cursor() as cursor:
+            cursor.execute(
+                "insert into mig_test.ident (id, note) overriding system value "
+                "values (%s, %s), (%s, %s)",
+                (41, "first", 42, "second"),
+            )
+        source.commit()
+
+        seed = migrate.resolve_seed_identity()
+        with source.cursor() as sc, target.cursor() as tc:
+            table = migrate.introspect_domain_schema(sc)[("mig_test", "ident")]
+            assert table.has_always_identity
+            classification = migrate.classify_table(sc, tc, table, seed)
+        migrate.copy_table(target, table, classification.to_insert)
+        target.commit()
+
+        with target.cursor() as cursor:
+            cursor.execute("select id, note from mig_test.ident order by id")
+            assert cursor.fetchall() == [(41, "first"), (42, "second")]
+            # ...and the identity sequence must not hand out a colliding key next.
+            cursor.execute(
+                "insert into mig_test.ident (note) values (%s) returning id", ("third",)
+            )
+            assert cursor.fetchone()[0] > 42
+        target.commit()
+    finally:
+        for connection in (source, target):
+            with connection.cursor() as cursor:
+                cursor.execute("drop table if exists mig_test.ident")
+            connection.commit()
+
