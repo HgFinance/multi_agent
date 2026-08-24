@@ -83,6 +83,20 @@ async def workforce_idle_agents(
     )
 
 
+@router.get("/ui/workforce/capacity")
+async def workforce_capacity(lookback_hours: float = 24.0) -> Any:
+    """6개 투자본부 전체의 Langfuse 기반 Capacity(용량) 관측.
+
+    순수 프록시다 - `workforce-api GET /workforce/v1/departments/capacity`가
+    이미 Langfuse 실행 이벤트를 직접 집계해서 준다(idle-agents와 같은 원리,
+    별도 DB Snapshot 파이프라인 없이). 여기서 그 집계를 다시 하지 않는다.
+    """
+
+    return await _workforce_get(
+        "/workforce/v1/departments/capacity", params={"lookback_hours": lookback_hours}
+    )
+
+
 @router.get("/ui/workforce/roster")
 async def workforce_roster() -> Any:
     """등록된 Agent 전원의 고용 상태·현재 Profile Version·모델 좌표.
@@ -149,6 +163,7 @@ __all__ = [
     "WORKFORCE_API_URL",
     "router",
     "workforce_idle_agents",
+    "workforce_capacity",
     "workforce_roster",
     "workforce_agent_access",
     "workforce_hiring_requests",
