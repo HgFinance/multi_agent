@@ -9,7 +9,9 @@ from orchestration.llm_observability import (
     _metric_metadata,
     langfuse_enabled,
     langfuse_worker_event_name,
+    langsmith_project,
     close_root_trace,
+    publish_metric,
     publish_langfuse_metric,
     publish_root_trace,
     redacted_trace,
@@ -80,6 +82,8 @@ def _clear_langfuse_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "LANGSMITH_ENDPOINT",
         "LANGSMITH_API_KEY",
         "LANGSMITH_PROJECT",
+        "LANGSMITH_METRICS_PROJECT",
+        "LANGSMITH_EVALS_PROJECT",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -183,6 +187,54 @@ def test_publish_root_trace_swallows_client_failure(
     assert publish_root_trace(request_id="discord:req-1", root_id="t_root") is False
 
 
+def test_langsmith_projects_keep_workflow_and_metrics_separate(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LANGSMITH_PROJECT", "First")
+    monkeypatch.setenv("LANGSMITH_METRICS_PROJECT", "HgFinance-Metrics")
+    monkeypatch.setenv("LANGSMITH_EVALS_PROJECT", "HgFinance-Evals")
+
+    assert langsmith_project("workflow") == "First"
+    assert langsmith_project("metrics") == "HgFinance-Metrics"
+    assert langsmith_project("evals") == "HgFinance-Evals"
+
+
+def test_publish_metric_uses_metrics_project_without_creating_a_second_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "key-not-printed")
+    monkeypatch.setenv("LANGSMITH_PROJECT", "First")
+    monkeypatch.setenv("LANGSMITH_METRICS_PROJECT", "HgFinance-Metrics")
+
+    import orchestration.llm_observability as observability
+
+    client = Mock()
+    monkeypatch.setattr(observability, "_safe_langsmith_client", lambda: client)
+
+    assert publish_metric(
+        {"worker_id": "qwen-risk-worker", "stage": "risk", "status": "COMPLETED"},
+        trace_id="t_worker",
+    ) is True
+
+    assert client.create_run.call_count == 1
+    kwargs = client.create_run.call_args.kwargs
+    assert kwargs["project_name"] == "HgFinance-Metrics"
+    assert kwargs["inputs"] == {}
+    assert kwargs["outputs"] == {}
+
+
+def test_publish_metric_defaults_to_metrics_project(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "key-not-printed")
+
+    import orchestration.llm_observability as observability
+
+    client = Mock()
+    monkeypatch.setattr(observability, "_safe_langsmith_client", lambda: client)
+
+    assert publish_metric({"worker_id": "qwen-research-worker"}) is True
+    assert client.create_run.call_args.kwargs["project_name"] == "HgFinance-Metrics"
+
+
 def test_publish_root_trace_sends_empty_payload_with_correlation_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -223,9 +275,11 @@ def test_start_root_trace_posts_and_returns_only_dotted_order_context(
 
     class FakeRunTree:
         posted = 0
+        instance = None
 
         def __init__(self, **kwargs):
             self.kwargs = kwargs
+            type(self).instance = self
 
         def post(self):
             type(self).posted += 1
@@ -248,6 +302,7 @@ def test_start_root_trace_posts_and_returns_only_dotted_order_context(
     assert handle is not None
     assert handle.context.startswith("trace-root.")
     assert FakeRunTree.posted == 1
+    assert FakeRunTree.instance.kwargs["project_name"] == "First"
     assert not hasattr(handle, "prompt")
 
 

@@ -1,8 +1,16 @@
-"""QA 부서 카드에 표시할 LangSmith trace 요약 - read-only, 자격증명 미노출.
+"""Legacy read-only QA trace timeseries for the department card.
 
-`orchestration/llm_observability.py`의 `publish_metric()`이 QA Worker 실행마다
-`schema_version: llm.performance.v1` 이벤트를 남긴다(prompt/output은 절대 전송하지
-않는다, 같은 파일 머리말). run 자체의 `tags`는 실측(2026-08-24, `list_runs`) 결과
+이 모듈은 dashboard compatibility reader다. feedback evaluator, QA approval
+ledger, offline benchmark gate, CEO advisory의 source가 아니다. 새 평가 흐름은
+``orchestration.langsmith_feedback``가 담당한다. 자격증명과 raw payload는
+읽거나 출력하지 않는다.
+
+실제 Worker LangGraph root run은 `LANGSMITH_PROJECT`(production `First`)에
+남고, `orchestration/llm_observability.py`의 기존 `publish_metric()` 요약 핑은
+고빈도 성능 데이터이므로 `LANGSMITH_METRICS_PROJECT`(기본
+`HgFinance-Metrics`)로 분리된다. 따라서 이 QA 화면은 metric ping이 아니라
+`First`에 있는 실제 `stage=qa` Worker trace를 읽는다(prompt/output은 절대
+전송하지 않는다). run 자체의 `tags`는 실측(2026-08-24, `list_runs`) 결과
 비어 있고 - `redacted_trace()`가 여는 `tracing_context`의 태그가 LangGraph 자체
 root run까지 전파되지 않는다 - 부서 구분은 오직 `extra.metadata.stage`에만 있다.
 그래서 여기서는 `stage:qa` 태그가 아니라 이 metadata 필드로 판정한다.
@@ -12,14 +20,13 @@ root run까지 전파되지 않는다 - 부서 구분은 오직 `extra.metadata.
 `extra.metadata.status`(AgentLogsView.tsx의 `degraded` 판정과 같은 집합:
 DEGRADED/BLOCKED/ERROR)와 `error_count`로 판정한다.
 
-2026-08-24 정정: 위 root run 전파 문제는 `publish_metric()`이 남기는 요약 핑
-(worker 실행당 1건)에만 국한된 게 아니었다 - 각 부서 Worker의 실제 LangGraph
+2026-08-24 정정: 위 root run 전파 문제는 각 부서 Worker의 실제 LangGraph
 실행 자체(`departments/employee_worker_runtime.py`, `.../qa_employee_workers.py`,
 `.../risk_employee_workers.py`의 `invoke()`/`ainvoke()`)도 `config=` 없이 맨 호출
 이라 root run에 `stage`가 전혀 안 붙고 있었다 - 실측 결과 프로젝트 root run의
 91%가 이름 `LangGraph`·tags 없음·metadata 없음이었고, 그래서 이 화면의 Trace
-Count가 실제 QA 실행량의 1%도 못 세고 있었다. 지금은 두 곳(metric 핑 + Worker
-그래프 invoke 자체)이 모두 `extra.metadata.stage`를 남기므로
+Count가 실제 QA 실행량의 1%도 못 세고 있었다. 지금은 Worker 그래프
+invoke 자체가 `extra.metadata.stage`를 남기므로
 (`orchestration/llm_observability.py`의 `worker_graph_trace_config()`), 아래
 `_QA_STAGE` 필터가 실제 실행량을 온전히 잡는다.
 

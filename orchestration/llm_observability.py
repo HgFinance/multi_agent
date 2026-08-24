@@ -94,6 +94,23 @@ def langsmith_enabled() -> bool:
     return tracing.casefold() in {"1", "true", "yes", "on"} and bool(os.getenv("LANGSMITH_API_KEY", "").strip())
 
 
+def langsmith_project(scope: Literal["workflow", "metrics", "evals"] = "workflow") -> str | None:
+    """Return the single configured LangSmith project for an observability scope.
+
+    Workflow/root/worker traces stay together in ``LANGSMITH_PROJECT`` so QA can
+    inspect one request tree.  High-frequency empty-payload performance events
+    use a separate project and never change the existing producer call sites.
+    Evaluation producers may opt into the reserved evals project without
+    reusing the production project.
+    """
+
+    if scope == "metrics":
+        return os.getenv("LANGSMITH_METRICS_PROJECT", "").strip() or "HgFinance-Metrics"
+    if scope == "evals":
+        return os.getenv("LANGSMITH_EVALS_PROJECT", "").strip() or "HgFinance-Evals"
+    return os.getenv("LANGSMITH_PROJECT", "").strip() or None
+
+
 def _metric_metadata(metric: dict[str, Any], *, trace_id: str | None = None) -> dict[str, Any]:
     allowed = {
         "schema_version", "worker_id", "role", "stage", "model_name", "status",
@@ -164,7 +181,7 @@ def redacted_trace(*, trace_id: str, model_name: str, stage: str) -> Iterator[No
         }
         observer = tracing_context(
             client=_safe_langsmith_client(),
-            project_name=os.getenv("LANGSMITH_PROJECT"),
+            project_name=langsmith_project("workflow"),
             tags=["hgfinance", "redacted", f"stage:{stage}"],
             metadata=metadata,
             enabled=True,
@@ -192,8 +209,20 @@ def redacted_trace(*, trace_id: str, model_name: str, stage: str) -> Iterator[No
             pass
 
 
-def publish_metric(metric: dict[str, Any], *, trace_id: str | None = None) -> bool:
-    """Send an empty-payload metric run; never send prompt or completion text."""
+def publish_metric(
+    metric: dict[str, Any],
+    *,
+    trace_id: str | None = None,
+    project_name: str | None = None,
+) -> bool:
+    """Send one empty-payload performance metric to the metrics project.
+
+    This is the legacy single-event metric producer.  Only its destination is
+    separated from the workflow trace project; no second metric/run is made.
+    New feedback evaluation aggregates these events in bounded windows rather
+    than creating one QA artifact per event. ``project_name`` is retained for
+    the compatibility root publisher below.
+    """
 
     if not langsmith_enabled():
         return False
@@ -205,7 +234,7 @@ def publish_metric(metric: dict[str, Any], *, trace_id: str | None = None) -> bo
             run_type="chain",
             inputs={},
             outputs={},
-            project_name=os.getenv("LANGSMITH_PROJECT"),
+            project_name=project_name or langsmith_project("metrics"),
             tags=["hgfinance", "metric", "redacted", f"worker:{metric.get('worker_id', 'unknown')}"],
             extra={"metadata": safe},
             hide_inputs=True,
@@ -224,10 +253,12 @@ def publish_root_trace(
     source: str | None = None,
     status: str = "accepted",
 ) -> bool:
-    """Publish one redacted user-query root observation.
+    """Publish one legacy redacted user-query observation.
 
-    This is deliberately a metadata-only metric rather than a wrapper around
-    the business function.  LangSmith is an optional observer: missing SDK,
+    Compatibility only: current BFF user-query lifecycle tracing must use
+    :func:`start_root_trace` and its terminal close path. This function writes
+    a standalone metadata metric and does not create a lifecycle-aware root or
+    a distributed child span. LangSmith is an optional observer: missing SDK,
     credentials, network, serialization, or client errors are all swallowed
     by :func:`publish_metric` and cannot change the CEO workflow result.
     """
@@ -246,6 +277,7 @@ def publish_root_trace(
             "raw_payloads_sent": False,
         },
         trace_id=str(request_id),
+        project_name=langsmith_project("workflow"),
     )
 
 
@@ -290,7 +322,7 @@ def start_root_trace(
             run_type="chain",
             inputs={},
             outputs={},
-            project_name=os.getenv("LANGSMITH_PROJECT") or None,
+            project_name=langsmith_project("workflow"),
             tags=["hgfinance", "workflow-root", "redacted"],
             extra={"metadata": metadata},
             ls_client=_safe_langsmith_client(),
@@ -330,7 +362,7 @@ def close_root_trace(
 
         run = RunTree.from_headers(
             {"langsmith-trace": str(trace_context)},
-            project_name=os.getenv("LANGSMITH_PROJECT") or None,
+            project_name=langsmith_project("workflow"),
             ls_client=_safe_langsmith_client(),
         )
         if run is None:

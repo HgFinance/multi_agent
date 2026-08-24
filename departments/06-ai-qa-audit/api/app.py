@@ -117,6 +117,7 @@ from eval_runner import (
     EvalSet,
     InMemoryEvalAuditRepository,
 )
+from orchestration.langsmith_feedback import FeedbackConfig, FeedbackLedger
 from tool_permission_check import (
     AgentToolPolicy,
     check_tool_permission,
@@ -501,6 +502,20 @@ class EvalResultResponse(BaseModel):
     error_code: str | None
 
 
+class ObservabilityFeedbackDecisionRequest(BaseModel):
+    decision: str = Field(pattern=r"^(APPROVED|REJECTED)$")
+    approved_by: str = Field(min_length=1, max_length=128)
+    reason: str = Field(min_length=1, max_length=240)
+
+
+class ObservabilityBenchmarkStatusRequest(BaseModel):
+    status: str = Field(pattern=r"^(RUNNING|PASSED|FAILED)$")
+    benchmark_id: str = Field(min_length=1, max_length=160)
+    score: float | None = Field(default=None, ge=0, le=1)
+    report_ref: str = Field(default="", max_length=240)
+    result_summary: str = Field(default="", max_length=240)
+
+
 # --- App --------------------------------------------------------------------------
 app = FastAPI(title="QA Domain API", version="v1")
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -533,6 +548,14 @@ def _serialize_eval_execution(function):
     return wrapped
 _eval_comparisons: dict[str, ChampionComparison | None] = {}
 _eval_idempotency: dict[str, tuple[str, EvalRunResponse]] = {}
+_feedback_ledger: FeedbackLedger | None = None
+
+
+def _observability_feedback_ledger() -> FeedbackLedger:
+    global _feedback_ledger
+    if _feedback_ledger is None:
+        _feedback_ledger = FeedbackLedger(FeedbackConfig.from_env().state_path)
+    return _feedback_ledger
 
 def _eval_request_fingerprint(body: EvalRunRequest) -> str:
     payload = json.dumps(body.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
@@ -966,6 +989,107 @@ def rag_observability():
             node: latency_summary(node)
             for node in ("retrieve", "grade", "generate", "hallucination_check")
         }
+    }
+
+
+@app.get("/qa/v1/observability/feedback/pending")
+def pending_observability_feedback(
+    limit: int = 50,
+    authorization: str | None = Header(default=None),
+):
+    """Return redacted, unevaluated findings for QA review.
+
+    This endpoint reads the local coordination ledger only.  It never calls
+    LangSmith on the request path and never returns model inputs/outputs.
+    """
+
+    _require_eval_service_token(authorization, required_scope="qa.observability.read")
+    bounded_limit = max(1, min(int(limit), 100))
+    return {
+        "status": "READY",
+        "items": _observability_feedback_ledger().pending(bounded_limit),
+    }
+
+
+@app.post("/qa/v1/observability/feedback/{artifact_id}/decision")
+def decide_observability_feedback(
+    artifact_id: str,
+    body: ObservabilityFeedbackDecisionRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Append one QA approval/rejection decision for a feedback artifact."""
+
+    _require_eval_service_token(authorization, required_scope="qa.observability.approve")
+    if not _observability_feedback_ledger().approve(
+        artifact_id,
+        body.decision,
+        body.approved_by,
+        body.reason,
+    ):
+        raise HTTPException(status_code=409, detail={"error_code": "FEEDBACK_DECISION_EXISTS_OR_INVALID"})
+    return {
+        "status": body.decision,
+        "artifact_id": artifact_id,
+        "approved_by": body.approved_by,
+        "benchmark_status": "PENDING" if body.decision == "APPROVED" else None,
+    }
+
+
+@app.get("/qa/v1/observability/feedback/approved")
+def approved_observability_feedback(
+    department: str | None = None,
+    limit: int = 3,
+    authorization: str | None = Header(default=None),
+):
+    """Return only bounded QA-approved hints for an internal consumer."""
+
+    _require_eval_service_token(authorization, required_scope="qa.observability.read")
+    config = FeedbackConfig.from_env()
+    return _observability_feedback_ledger().approved_hints(
+        department=department,
+        limit=max(1, min(int(limit), config.max_feedback_items)),
+        max_chars=config.max_feedback_chars,
+    ) or {"schema_version": "hgfinance.observability.feedback.v1", "items": []}
+
+
+@app.get("/qa/v1/observability/feedback/benchmark/candidates")
+def observability_benchmark_candidates(
+    limit: int = 50,
+    authorization: str | None = Header(default=None),
+):
+    """Return redacted QA-approved candidates for an offline benchmark runner."""
+
+    _require_eval_service_token(authorization, required_scope="qa.observability.benchmark")
+    return {
+        "status": "READY",
+        "candidates": _observability_feedback_ledger().benchmark_candidates(
+            max(1, min(int(limit), 100))
+        ),
+    }
+
+
+@app.post("/qa/v1/observability/feedback/{artifact_id}/benchmark")
+def update_observability_benchmark(
+    artifact_id: str,
+    body: ObservabilityBenchmarkStatusRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Record only an offline benchmark gate result; raw benchmark data is excluded."""
+
+    _require_eval_service_token(authorization, required_scope="qa.observability.benchmark")
+    if not _observability_feedback_ledger().update_benchmark(
+        artifact_id,
+        status=body.status,
+        benchmark_id=body.benchmark_id,
+        score=body.score,
+        report_ref=body.report_ref,
+        result_summary=body.result_summary,
+    ):
+        raise HTTPException(status_code=409, detail={"error_code": "BENCHMARK_UPDATE_INVALID"})
+    return {
+        "status": body.status,
+        "artifact_id": artifact_id,
+        "benchmark_id": body.benchmark_id,
     }
 
 

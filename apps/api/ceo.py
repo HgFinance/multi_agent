@@ -1770,6 +1770,16 @@ def ceo_query(
         if d5_lookup is not None and d5_bank.mode == "active"
         else None
     )
+    approved_feedback = None
+    try:
+        # This is a local, bounded SQLite read only when feedback mode is
+        # active.  It never calls LangSmith on the CEO hot path; missing or
+        # locked feedback state simply produces no advisory hint.
+        from orchestration.langsmith_feedback import approved_feedback_hint
+
+        approved_feedback = approved_feedback_hint()
+    except Exception:  # noqa: BLE001 - advisory feedback is fail-open.
+        approved_feedback = None
     root_trace = None
     try:
         from orchestration.llm_observability import start_root_trace
@@ -1802,6 +1812,7 @@ def ceo_query(
                 advisory_fund_id=getattr(req, "fund_id", None),
                 advisory_book_id=getattr(req, "book_id", None),
                 experience_hint=d5_hint,
+                approved_feedback_hint=approved_feedback,
             ),
             idempotency_key=req.request_id,
         )

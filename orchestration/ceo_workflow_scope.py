@@ -661,6 +661,7 @@ def build_root_body(
     advisory_fund_id: str | None = None,
     advisory_book_id: str | None = None,
     experience_hint: Mapping[str, Any] | None = None,
+    approved_feedback_hint: Mapping[str, Any] | None = None,
     user_paper_order_include_primary_selection: bool = True,
     deferred_conditional_analysis: bool = False,
 ) -> str:
@@ -756,6 +757,7 @@ def build_root_body(
             if normalized and not any(char.isspace() or char == "=" for char in normalized):
                 advisory_lines += f"{marker}={normalized}\n"
     experience_lines = _experience_hint_section(experience_hint)
+    feedback_lines = _approved_feedback_section(approved_feedback_hint)
     return (
         f"{CEO_WORKFLOW_SCOPE_MARKER}\n"
         f"workflow_scope={CEO_WORKFLOW_SCOPE_POLICY}\n"
@@ -768,6 +770,7 @@ def build_root_body(
         f"{langsmith_line}"
         f"{advisory_lines}"
         f"{experience_lines}"
+        f"{feedback_lines}"
         f"qa_enabled={str(canonical_qa_enabled).lower()}\n"
         f"qa_blocks_response={str(canonical_qa_blocks).lower()}\n"
         "response_plane=primary_results_ready\n"
@@ -822,6 +825,53 @@ def _experience_hint_section(
         f"{encoded}\n"
         "Use only as a bounded preference. Deterministic workflow, safety, "
         "eligibility, QA, Risk, PAPER, and fail-closed rules take precedence.\n"
+    )
+
+
+def _approved_feedback_section(
+    feedback_hint: Mapping[str, Any] | None,
+) -> str:
+    """Render only QA-approved, payload-free feedback in active mode.
+
+    This is additive advisory context.  It is intentionally separate from the
+    D5 experience marker so B7, QA role parsing, and planner policy cannot
+    mistake observability feedback for a business contract.
+    """
+
+    if not isinstance(feedback_hint, Mapping):
+        return ""
+    items = feedback_hint.get("items")
+    if not isinstance(items, list) or not items:
+        return ""
+    safe_items: list[dict[str, Any]] = []
+    for item in items[:3]:
+        if not isinstance(item, Mapping):
+            continue
+        safe_items.append(
+            {
+                "department": str(item.get("department") or "")[:64],
+                "decision": str(item.get("decision") or "")[:64],
+                "finding_codes": [str(value)[:64] for value in item.get("finding_codes", [])[:8]]
+                if isinstance(item.get("finding_codes"), list)
+                else [],
+                "summaries": [str(value)[:180] for value in item.get("summaries", [])[:4]]
+                if isinstance(item.get("summaries"), list)
+                else [],
+            }
+        )
+    if not safe_items:
+        return ""
+    encoded = json.dumps(
+        {"schema_version": "hgfinance.observability.feedback.v1", "items": safe_items},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )[:1600]
+    return (
+        "## QA-approved observability feedback (non-authoritative)\n"
+        f"{encoded}\n"
+        "Use only as a bounded improvement signal. Deterministic workflow, "
+        "safety, eligibility, QA, Risk, PAPER, and fail-closed rules take precedence.\n"
     )
 
 

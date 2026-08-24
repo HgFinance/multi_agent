@@ -106,7 +106,14 @@ services:
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
-      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
+      LANGSMITH_METRICS_PROJECT: ${LANGSMITH_METRICS_PROJECT:-HgFinance-Metrics}
+      LANGSMITH_EVALS_PROJECT: ${LANGSMITH_EVALS_PROJECT:-HgFinance-Evals}
+      # Feedback evaluation is background-only.  `shadow` publishes redacted
+      # findings to Evals; only `active` permits QA-approved bounded hints to
+      # reach a later CEO planning request.
+      LANGSMITH_FEEDBACK_MODE: ${LANGSMITH_FEEDBACK_MODE:-shadow}
+      LANGSMITH_FEEDBACK_STATE_PATH: /var/lib/portfolio/langsmith-feedback.sqlite3
       PORTFOLIO_GOVERNANCE_BINDING_ENABLED: ${PORTFOLIO_GOVERNANCE_BINDING_ENABLED:-false}
       # 기본값이 비어 있으면 온보딩 프록시(/ui/mandates, /ui/mandate-assistant/suggest
       # 등)가 전부 503 governance_api_unavailable 이 된다. governance-api 는 같은
@@ -139,6 +146,7 @@ services:
       RESEARCH_API_URL: ${RESEARCH_API_URL:-http://research-api:8035}
       RISK_API_URL: ${RISK_API_URL:-http://risk-api:8000}
       QA_API_URL: ${QA_API_URL:-http://audit-api:8000}
+      QA_API_AUTH_TOKEN: ${QA_API_AUTH_TOKEN:-}
       # HR 유휴 Worker 관측(GET /ui/workforce/idle-agents) 프록시 대상.
       # workforce.py 기본값(http://127.0.0.1:8044)은 호스트 2-프로세스 로컬
       # 구성 전용이다 - 이 컨테이너 안에서는 자기 자신을 가리켜 connection
@@ -342,6 +350,27 @@ services:
       PORTFOLIO_RUNTIME_EMBEDDED_WORKER: "false"
       PORTFOLIO_WORKER_LEASE_SECONDS: ${PORTFOLIO_WORKER_LEASE_SECONDS:-60}
       PORTFOLIO_WORKER_POLL_SECONDS: ${PORTFOLIO_WORKER_POLL_SECONDS:-0.5}
+      # The queued worker is an existing LangSmith metric producer through
+      # orchestration/workflows/portfolio_recommendation.py. Keep its
+      # workflow traces and high-frequency metric runs in separate projects.
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
+      LANGSMITH_METRICS_PROJECT: ${LANGSMITH_METRICS_PROJECT:-HgFinance-Metrics}
+      LANGSMITH_EVALS_PROJECT: ${LANGSMITH_EVALS_PROJECT:-HgFinance-Evals}
+      LANGSMITH_FEEDBACK_MODE: ${LANGSMITH_FEEDBACK_MODE:-shadow}
+      LANGSMITH_FEEDBACK_STATE_PATH: /var/lib/portfolio/langsmith-feedback.sqlite3
+      LANGSMITH_FEEDBACK_POLL_SECONDS: ${LANGSMITH_FEEDBACK_POLL_SECONDS:-30}
+      LANGSMITH_FEEDBACK_LOOKBACK_SECONDS: ${LANGSMITH_FEEDBACK_LOOKBACK_SECONDS:-180}
+      LANGSMITH_FEEDBACK_BATCH_SIZE: ${LANGSMITH_FEEDBACK_BATCH_SIZE:-25}
+      LANGSMITH_FEEDBACK_MAX_PENDING: ${LANGSMITH_FEEDBACK_MAX_PENDING:-500}
+      LANGSMITH_FEEDBACK_RETENTION_DAYS: ${LANGSMITH_FEEDBACK_RETENTION_DAYS:-30}
+      LANGSMITH_FEEDBACK_LATENCY_WARN_MS: ${LANGSMITH_FEEDBACK_LATENCY_WARN_MS:-60000}
+      LANGSMITH_FEEDBACK_MAX_ITEMS: ${LANGSMITH_FEEDBACK_MAX_ITEMS:-3}
+      LANGSMITH_FEEDBACK_MAX_CHARS: ${LANGSMITH_FEEDBACK_MAX_CHARS:-1200}
+      LANGSMITH_FEEDBACK_METRICS_WINDOW_SECONDS: ${LANGSMITH_FEEDBACK_METRICS_WINDOW_SECONDS:-300}
+      LANGSMITH_FEEDBACK_METRICS_MAX_RUNS: ${LANGSMITH_FEEDBACK_METRICS_MAX_RUNS:-100}
       # Langfuse(2026-08-10 도입, 993682f). 이 컨테이너가 llm.performance.metric
       # 이벤트를 **쓰는** 쪽이다 - HR(workforce-api)이 같은 자격증명으로 읽는다.
       # `.env`는 .dockerignore에 걸려 이미지에 안 들어가므로 여기 나열한 키만
@@ -656,7 +685,7 @@ services:
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
-      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
       # Tool Gateway 강제 모드. 기본은 관측(위반을 헤더·로그로만 드러냄) -
       # 기존 호출자(분석가 코드)가 아직 X-Agent-Persona 를 안 붙이므로 강제부터
       # 켜면 파이프라인이 통째로 멈춘다. 호출자를 다 고친 뒤 true 로 올린다.
@@ -715,7 +744,9 @@ services:
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
-      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
+      LANGSMITH_METRICS_PROJECT: ${LANGSMITH_METRICS_PROJECT:-HgFinance-Metrics}
+      LANGSMITH_EVALS_PROJECT: ${LANGSMITH_EVALS_PROJECT:-HgFinance-Evals}
       # Langfuse(2026-08-20). 본부장이 이 컨테이너 안에서 Worker(MCP 도구 경로 포함)를
       # 직접 돌리는 실행이 있다 - portfolio-bff/worker 계측만으로는 이 경로가 안 잡혀
       # HR 리포트에서 실제로 일한 Worker 가 UNOBSERVED 로 보였다. `.env`는
@@ -960,7 +991,7 @@ services:
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
-      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0
@@ -1066,6 +1097,13 @@ services:
       LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      # Risk's independent Qwen compliance worker emits its LangGraph worker
+      # trace here; the shared project keeps it attached to the request tree.
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
+      LANGSMITH_METRICS_PROJECT: ${LANGSMITH_METRICS_PROJECT:-HgFinance-Metrics}
       OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-8}
       RISK_SERVICE_AUTH_SECRET: ${RISK_SERVICE_AUTH_SECRET:-}
       RISK_SERVICE_AUTH_ISSUER: ${RISK_SERVICE_AUTH_ISSUER:-}
@@ -1106,7 +1144,11 @@ services:
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
-      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
+      LANGSMITH_METRICS_PROJECT: ${LANGSMITH_METRICS_PROJECT:-HgFinance-Metrics}
+      LANGSMITH_EVALS_PROJECT: ${LANGSMITH_EVALS_PROJECT:-HgFinance-Evals}
+      LANGSMITH_FEEDBACK_MODE: ${LANGSMITH_FEEDBACK_MODE:-shadow}
+      LANGSMITH_FEEDBACK_STATE_PATH: /var/lib/portfolio/langsmith-feedback.sqlite3
       REDIS_URL: redis://redis:6379/0
       RISK_QA_EVENT_REDIS_URL: redis://redis:6379/0
       RISK_QA_RUNTIME: ${RISK_QA_RUNTIME:-}
@@ -1128,6 +1170,8 @@ services:
       QA_SERVICE_AUTH_AUDIENCE: ${QA_SERVICE_AUTH_AUDIENCE:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      - portfolio_runtime_data:/var/lib/portfolio
     ports:
       - "127.0.0.1:8042:8000"   # 로컬 전용 - 외부 노출 금지
     healthcheck:
@@ -1247,7 +1291,7 @@ services:
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
-      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
       HERMES_KANBAN_HOME: /opt/kanban
       HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
@@ -1554,7 +1598,7 @@ services:
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
-      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
       MEMOHARNESS_D5_MODE: ${MEMOHARNESS_D5_MODE:-off}
       MEMOHARNESS_D5_TOP_K: ${MEMOHARNESS_D5_TOP_K:-5}
       MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS: ${MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS:-1500}

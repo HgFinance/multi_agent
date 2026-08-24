@@ -35,6 +35,24 @@ export type LangsmithQaTraces = {
   detail?: string;
 };
 
+export type LangsmithFeedbackItem = {
+  artifact_id: string;
+  source_run_id: string;
+  eval_run_id: string;
+  department: string;
+  decision: string;
+  score: number | null;
+  finding_codes: string[];
+  summaries: string[];
+  metadata: Record<string, unknown>;
+  created_at: string;
+};
+
+export type LangsmithFeedbackPending = {
+  status: string;
+  items: LangsmithFeedbackItem[];
+};
+
 function explainError(body: unknown, status: number): string {
   if (typeof body === "object" && body !== null && "detail" in body) {
     const detail = (body as { detail?: unknown }).detail;
@@ -57,4 +75,33 @@ export async function fetchQaLangsmithTraces(days = 7): Promise<LangsmithQaTrace
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) throw new Error(explainError(body, response.status));
   return body as LangsmithQaTraces;
+}
+
+export async function fetchQaLangsmithFeedback(limit = 50): Promise<LangsmithFeedbackPending> {
+  const response = await bffFetch(
+    `/ui/qa/observability/feedback/pending?limit=${encodeURIComponent(String(limit))}`,
+    { cache: "no-store", headers: { Accept: "application/json" } },
+  );
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(explainError(body, response.status));
+  return body as LangsmithFeedbackPending;
+}
+
+export async function decideQaLangsmithFeedback(
+  artifactId: string,
+  decision: "APPROVED" | "REJECTED",
+  reason: string,
+): Promise<{ status: string; artifact_id: string }> {
+  const response = await bffFetch(
+    `/ui/qa/observability/feedback/${encodeURIComponent(artifactId)}/decision`,
+    {
+      method: "POST",
+      cache: "no-store",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ decision, reason }),
+    },
+  );
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(explainError(body, response.status));
+  return body as { status: string; artifact_id: string };
 }

@@ -30,7 +30,13 @@ async def _qa_request(method: str, path: str, *, body: dict[str, Any]) -> Any:
                 "message": "QA_API_URL is not configured",
             },
         )
-    headers = {"X-Qa-Internal-Token": QA_API_AUTH_TOKEN} if QA_API_AUTH_TOKEN else None
+    headers = {}
+    if QA_API_AUTH_TOKEN:
+        # Legacy routes still receive the existing internal header.  The
+        # observability feedback routes additionally use the service-auth
+        # bearer contract enforced by audit-api.
+        headers["X-Qa-Internal-Token"] = QA_API_AUTH_TOKEN
+        headers["Authorization"] = f"Bearer {QA_API_AUTH_TOKEN}"
     try:
         async with httpx.AsyncClient(base_url=QA_API_URL, timeout=QA_API_TIMEOUT_SECONDS) as client:
             response = await client.request(method, path, json=body, headers=headers)
@@ -74,4 +80,49 @@ async def qa_langsmith_traces(
     return await qa_trace_timeseries(days=days)
 
 
-__all__ = ["QA_API_URL", "assess_qa_verification", "qa_langsmith_traces", "router"]
+@router.get("/ui/qa/observability/feedback/pending")
+async def qa_observability_feedback_pending(
+    limit: int = 50,
+    owner_id: str | None = Depends(current_user),
+) -> Any:
+    """Return redacted LangSmith findings awaiting QA review."""
+
+    del owner_id
+    return await _qa_request(
+        "GET",
+        f"/qa/v1/observability/feedback/pending?limit={max(1, min(int(limit), 100))}",
+        body={},
+    )
+
+
+@router.post("/ui/qa/observability/feedback/{artifact_id}/decision")
+async def decide_qa_observability_feedback(
+    artifact_id: str,
+    body: dict[str, Any],
+    owner_id: str | None = Depends(current_user),
+) -> Any:
+    """Submit one server-attributed QA approval/rejection decision."""
+
+    decision = str(body.get("decision") or "").upper()
+    reason = str(body.get("reason") or "").strip()
+    if decision not in {"APPROVED", "REJECTED"} or not reason:
+        raise HTTPException(status_code=422, detail="invalid_feedback_decision")
+    return await _qa_request(
+        "POST",
+        f"/qa/v1/observability/feedback/{artifact_id}/decision",
+        body={
+            "decision": decision,
+            "approved_by": owner_id or "qa-user",
+            "reason": reason[:240],
+        },
+    )
+
+
+__all__ = [
+    "QA_API_URL",
+    "assess_qa_verification",
+    "qa_langsmith_traces",
+    "qa_observability_feedback_pending",
+    "decide_qa_observability_feedback",
+    "router",
+]

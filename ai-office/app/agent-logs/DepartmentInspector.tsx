@@ -9,6 +9,7 @@ import AccountingLedgerPanel from "../components/AccountingLedgerPanel";
 import AlphaStrategyPanel from "../components/AlphaStrategyPanel";
 import LivePortfolioPanel from "../components/LivePortfolioPanel";
 import QaLangsmithPanel from "../components/QaLangsmithPanel";
+import QaLangsmithFeedbackPanel from "../components/QaLangsmithFeedbackPanel";
 import ResearchPanel from "../components/ResearchPanel";
 import WorkerPerformancePanel from "../components/WorkerPerformancePanel";
 import WorkforceCapacityPanel from "../components/WorkforceCapacityPanel";
@@ -215,7 +216,12 @@ export default function DepartmentInspector({
       {department.domain === "research" ? <ResearchPanel /> : null}
       {/* QA는 자기 축(검증 판정)이 아니라 자기 파이프라인이 실제로 도는지를 본다 -
           stage:qa로 태깅된 LangSmith redacted trace 집계. */}
-      {department.domain === "qa" ? <QaLangsmithPanel /> : null}
+      {department.domain === "qa" ? (
+        <>
+          <QaLangsmithPanel />
+          <QaLangsmithFeedbackPanel />
+        </>
+      ) : null}
     </section>
   );
 }
