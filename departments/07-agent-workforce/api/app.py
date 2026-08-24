@@ -102,6 +102,7 @@ from observability import (
     INVESTMENT_DEPARTMENT_STAGE,
     HeadProfilesUnavailable,
     WorkerRegistryUnavailable,
+    check_department_capacity,
     check_idle_agents,
 )
 from quality import QualitySnapshot, aggregate_quality
@@ -1183,6 +1184,32 @@ def list_idle_agents(
     if head_profiles_unavailable:
         response["head_profiles_unavailable"] = head_profiles_unavailable
     return response
+
+
+@app.get("/workforce/v1/departments/capacity")
+def get_departments_capacity(lookback_hours: float = 24.0):
+    """6개 투자본부 전체의 Langfuse 기반 Capacity(용량) 관측(2026-08-24).
+
+    `workforce.capacity_snapshots` writer가 아직 없어(P1-2 미착수) 아래
+    GET .../scorecard의 capacity 필드는 항상 null이다. idle-agents와 같은
+    원리로 Langfuse 실행 이벤트를 직접 집계해 그 빈 자리를 메운다 - 별도
+    DB Snapshot 파이프라인을 새로 놓지 않는다. queue_p95_ms는 이 경로에서
+    항상 None이다(observability.py DepartmentCapacityReport 참고 - 대기열
+    진입 시점을 재는 계측이 없다).
+    """
+
+    if lookback_hours <= 0:
+        raise HTTPException(status_code=422, detail="lookback_hours must be positive")
+    try:
+        reports = check_department_capacity(
+            departments=tuple(INVESTMENT_DEPARTMENT_STAGE), lookback_hours=lookback_hours,
+        )
+    except WorkerRegistryUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "worker_registry_unavailable", "message": str(exc)},
+        ) from exc
+    return {"capacity": [r.as_dict() for r in reports]}
 
 
 # --- 3.6 Workforce Plan (HR-01 Capacity Report/Staffing Scenario 저장소) --------------

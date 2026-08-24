@@ -17,6 +17,12 @@ compliance-policy-agent Trace 에는 Mandate/제한종목 질의응답 같은 Ri
 않고, timestamp 하나만 본다. TraceWithDetails.metadata 도 읽지 않는다 — metadata
 안의 eval_score 등은 QA 소유 판정이라 여기서 복제하면 원본과 어긋날 수 있다.
 
+⚠ 경계 확장(2026-08-24, Capacity): `list_worker_activity()`는 metadata 중
+`latency_ms`/`error_count`/`retries` **셋만** 추가로 읽는다. 이 셋은 QA 판정이
+아니라 이 이벤트를 쓴 실행기 자신의 값이다(`_metric_metadata()` 허용 목록 —
+`orchestration/llm_observability.py`). eval_score·input·output은 여전히 절대
+읽지 않는다 — 그 경계는 그대로다.
+
 ## 부서 키가 두 개인 이유
 
 - orchestration/employee_dispatch.py 의 EMPLOYEE_MODULE_BY_DEPARTMENT 키:
@@ -121,6 +127,27 @@ INVESTMENT_DEPARTMENT_STAGE: dict[str, str] = {
 }
 
 
+def _safe_int(value: Any) -> int | None:
+    """metadata 값을 int 로 바꾼다 - 형이 안 맞으면(None 포함) None."""
+
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _percentile(values: list[float], fraction: float) -> float | None:
+    """values 의 fraction 분위수(예: 0.95 -> p95). values 가 비면 None."""
+
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, round(fraction * (len(ordered) - 1))))
+    return ordered[index]
+
+
 class IdleStatus(str, Enum):
     ACTIVE = "ACTIVE"
     IDLE = "IDLE"
@@ -163,11 +190,37 @@ class LangfuseQueryError(RuntimeError):
     """Langfuse 조회 자체가 실패함 (자격증명·네트워크·API 응답 이상)."""
 
 
+@dataclass(frozen=True)
+class WorkerActivityRecord:
+    """실행 이벤트 한 건에서 Capacity 계산에 필요한 필드만 뽑는다.
+
+    latency_ms/error_count/retries는 이 이벤트를 쓴 실행기 자신의 값이다
+    (publish_worker_activity() 참고) - QA 소유 eval_score 나 input/output 원문은
+    여기 없다(위 "원문을 읽지 않는다" 절 참고).
+    """
+
+    timestamp: datetime
+    latency_ms: int | None
+    error_count: int | None
+    retries: int | None
+
+
 class LangfuseTraceReader:
     """조회 전용 인터페이스. read 측이라 create_event 계열은 갖지 않는다."""
 
     def latest_event_timestamp(self, *, event_name: str, since: datetime) -> datetime | None:
         """event_name 을 가진 가장 최근 이벤트의 timestamp. 없으면 None."""
+
+        raise NotImplementedError
+
+    def list_worker_activity(
+        self, *, event_name: str, since: datetime, limit: int = 200
+    ) -> list[WorkerActivityRecord]:
+        """event_name 을 가진 최근 이벤트들의 latency_ms/error_count/retries.
+
+        Capacity(용량) 집계 전용이다 - 유휴 판정(latest_event_timestamp)과 달리
+        여러 건을 모아 arrivals/p95/rate를 계산해야 해서 별도 메서드로 둔다.
+        """
 
         raise NotImplementedError
 
@@ -208,6 +261,28 @@ class LangfuseApiTraceReader(LangfuseTraceReader):
             raise LangfuseQueryError(f"langfuse_trace_list_failed:{type(exc).__name__}") from exc
         timestamps = [item.timestamp for item in page.data if item.timestamp is not None]
         return max(timestamps) if timestamps else None
+
+    def list_worker_activity(
+        self, *, event_name: str, since: datetime, limit: int = 200
+    ) -> list[WorkerActivityRecord]:
+        try:
+            page = self._client.api.trace.list(name=event_name, from_timestamp=since, limit=limit)
+        except Exception as exc:  # noqa: BLE001 - 조회 실패는 항상 UNAVAILABLE 로 접힌다.
+            raise LangfuseQueryError(f"langfuse_trace_list_failed:{type(exc).__name__}") from exc
+        records: list[WorkerActivityRecord] = []
+        for item in page.data:
+            if item.timestamp is None:
+                continue
+            metadata = item.metadata if isinstance(item.metadata, dict) else {}
+            records.append(
+                WorkerActivityRecord(
+                    timestamp=item.timestamp,
+                    latency_ms=_safe_int(metadata.get("latency_ms")),
+                    error_count=_safe_int(metadata.get("error_count")),
+                    retries=_safe_int(metadata.get("retries")),
+                )
+            )
+        return records
 
 
 # ── 부서장(Hermes Profile) ────────────────────────────────────────────────────
@@ -387,6 +462,159 @@ def check_idle_agents(
     return reports
 
 
+class CapacityObservationStatus(str, Enum):
+    MEASURED = "MEASURED"
+    # Langfuse 가 꺼져 있거나 조회 자체가 실패함 - IdleStatus.UNAVAILABLE 과 같은
+    # 이유. "부하가 0이다"(측정됨)와 "모른다"(측정 실패)를 섞지 않는다.
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+@dataclass(frozen=True)
+class DepartmentCapacityReport:
+    """부서 하나의 Langfuse 기반 Capacity 관측 한 건.
+
+    `workforce.capacity_snapshots` writer가 아직 없어(P1-2 미착수) DB 기반
+    `GET .../scorecard`의 capacity 필드가 항상 null이다 - 이 리포트가 그 빈
+    자리를 Langfuse 직접 집계로 메운다(idle-agents 와 같은 원리). DB Snapshot과
+    스키마가 다르므로 `cost.py`의 `CapacitySnapshot`으로 강제하지 않는다 -
+    출처가 다른 두 값을 같은 타입으로 섞으면 어느 쪽 계약을 따르는지 흐려진다.
+
+    department 등록 Worker 전원을 합산한 값이라 여러 Worker가 겹쳐 돌면
+    utilization 이 1.0을 넘을 수 있다 - 단일 서버 가동률이 아니라 "부서 총
+    작업시간 / 관측 시간" 비율이라서다. queue_p95_ms 는 영구적으로 없다 -
+    지금 계측(publish_worker_activity)은 "작업이 끝났다" 시점 이벤트 하나뿐이고
+    "작업이 도착했다"(대기열 진입) 시점을 별도로 남기지 않는다.
+    """
+
+    department: str
+    window_start: datetime
+    window_end: datetime
+    status: CapacityObservationStatus
+    arrivals: int | None
+    duration_p95_ms: float | None
+    retry_rate: float | None
+    error_rate: float | None
+    utilization: float | None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "department": self.department,
+            "window_start": self.window_start.isoformat(),
+            "window_end": self.window_end.isoformat(),
+            "status": self.status.value,
+            "arrivals": self.arrivals,
+            "duration_p95_ms": self.duration_p95_ms,
+            "retry_rate": self.retry_rate,
+            "error_rate": self.error_rate,
+            "utilization": self.utilization,
+            "queue_p95_ms": None,
+        }
+
+
+def compute_department_capacity(
+    *,
+    department: str,
+    reader: LangfuseTraceReader | None,
+    since: datetime,
+    now: datetime,
+    repo_root: Path,
+) -> DepartmentCapacityReport:
+    """department 등록 Worker 전원의 실행 이벤트를 모아 Capacity 하나로 합친다."""
+
+    stage = INVESTMENT_DEPARTMENT_STAGE.get(department)
+    if stage is None:
+        raise ValueError(f"unknown_investment_department:{department}")
+    if load_worker_registry is None or workers_for_department is None:
+        raise WorkerRegistryUnavailable(
+            f"worker_registry_unavailable:{_WORKER_REGISTRY_IMPORT_ERROR}"
+        )
+    try:
+        registry = load_worker_registry(repo_root)
+    except WorkerRegistryError as exc:
+        raise WorkerRegistryUnavailable(f"worker_registry_unavailable:{exc}") from exc
+
+    def _unavailable() -> DepartmentCapacityReport:
+        return DepartmentCapacityReport(
+            department=department, window_start=since, window_end=now,
+            status=CapacityObservationStatus.UNAVAILABLE,
+            arrivals=None, duration_p95_ms=None, retry_rate=None, error_rate=None,
+            utilization=None,
+        )
+
+    if reader is None:
+        return _unavailable()
+
+    specs = tuple(workers_for_department(registry, department))
+    records: list[WorkerActivityRecord] = []
+    try:
+        for spec in specs:
+            event_name = langfuse_worker_event_name(stage=stage, worker_id=spec.worker_id)
+            records.extend(reader.list_worker_activity(event_name=event_name, since=since))
+    except LangfuseQueryError:
+        return _unavailable()
+
+    arrivals = len(records)
+    if arrivals == 0:
+        return DepartmentCapacityReport(
+            department=department, window_start=since, window_end=now,
+            status=CapacityObservationStatus.MEASURED,
+            arrivals=0, duration_p95_ms=None, retry_rate=None, error_rate=None,
+            utilization=None,
+        )
+
+    latencies = [float(r.latency_ms) for r in records if r.latency_ms is not None]
+    errors = [r.error_count for r in records if r.error_count is not None]
+    retries = [r.retries for r in records if r.retries is not None]
+    window_ms = max((now - since).total_seconds() * 1000.0, 1.0)
+
+    return DepartmentCapacityReport(
+        department=department, window_start=since, window_end=now,
+        status=CapacityObservationStatus.MEASURED,
+        arrivals=arrivals,
+        duration_p95_ms=_percentile(latencies, 0.95) if latencies else None,
+        error_rate=(sum(errors) / arrivals) if errors else None,
+        retry_rate=(sum(retries) / arrivals) if retries else None,
+        utilization=(sum(latencies) / window_ms) if latencies else None,
+    )
+
+
+def check_department_capacity(
+    *,
+    reader: LangfuseTraceReader | None = None,
+    departments: tuple[str, ...] = tuple(INVESTMENT_DEPARTMENT_STAGE),
+    lookback_hours: float = 24.0,
+    now: datetime | None = None,
+    repo_root: Path = ROOT,
+) -> list[DepartmentCapacityReport]:
+    """6개 투자본부(기본값) 전체의 Capacity 를 부서 단위로 하나씩 돌려준다.
+
+    check_idle_agents() 와 같은 실패 모드다 - reader 를 못 만들거나 조회가 실패하면
+    UNAVAILABLE 로 접고, arrivals=0(측정됐지만 실행이 없었다)과 구분한다.
+    """
+
+    if lookback_hours <= 0:
+        raise ValueError("lookback_hours 는 양수여야 한다")
+    for department in departments:
+        if department not in INVESTMENT_DEPARTMENT_STAGE:
+            raise ValueError(f"unknown_investment_department:{department}")
+
+    now = now or datetime.now(timezone.utc)
+    since = now - timedelta(hours=lookback_hours)
+
+    if reader is None:
+        try:
+            reader = LangfuseApiTraceReader()
+        except LangfuseQueryError:
+            reader = None
+
+    return [
+        compute_department_capacity(
+            department=department, reader=reader, since=since, now=now, repo_root=repo_root,
+        )
+        for department in departments
+    ]
+
+
 # ---------------------------------------------------------------------------
 # 자체 점검 (python departments/07-agent-workforce/scorecard/observability.py)
 # ---------------------------------------------------------------------------
@@ -446,3 +674,59 @@ if __name__ == "__main__":
     print(f"  자격증명 없음 -> 전원 UNAVAILABLE - OK ({len(unavailable_reports)}개 Worker)")
 
     print("본부 6개 유휴 판정 자체 점검 통과.")
+
+    # ── Capacity(2026-08-24) ────────────────────────────────────────────────
+
+    class _FixedActivityReader(LangfuseTraceReader):
+        """모든 event_name 에 같은 레코드 3건(latency 100/200/900ms, error 1건,
+        retry 1건)을 돌려주는 대역 - Worker 수와 무관하게 집계값을 손으로
+        검산할 수 있게 고정한다."""
+
+        def list_worker_activity(self, *, event_name: str, since: datetime, limit: int = 200):
+            return [
+                WorkerActivityRecord(timestamp=now, latency_ms=100, error_count=0, retries=0),
+                WorkerActivityRecord(timestamp=now, latency_ms=200, error_count=1, retries=1),
+                WorkerActivityRecord(timestamp=now, latency_ms=900, error_count=0, retries=0),
+            ]
+
+    research_workers = check_idle_agents(reader=_NoneReader(), departments=("research",), now=now)
+    n_research_workers = len({r.worker_id for r in research_workers})
+    assert n_research_workers >= 1, "리서치 워커가 0명이라 이 점검이 성립하지 않는다"
+
+    cap_reports = check_department_capacity(
+        reader=_FixedActivityReader(), departments=("research",), lookback_hours=1.0, now=now,
+    )
+    assert len(cap_reports) == 1
+    cap = cap_reports[0]
+    assert cap.status is CapacityObservationStatus.MEASURED, cap
+    assert cap.arrivals == 3 * n_research_workers, (cap.arrivals, n_research_workers)
+    assert cap.duration_p95_ms == 900.0, cap.duration_p95_ms  # 3건 중 p95 -> 최댓값
+    assert abs(cap.error_rate - (1 / 3)) < 1e-9, cap.error_rate
+    assert abs(cap.retry_rate - (1 / 3)) < 1e-9, cap.retry_rate
+    assert cap.utilization is not None and cap.utilization > 0, cap.utilization
+    assert cap.as_dict()["queue_p95_ms"] is None  # 이 계측 경로에서 영구적으로 None
+    print(f"  Capacity 집계(arrivals/p95/error_rate/retry_rate/utilization) - OK ({cap.arrivals}건)")
+
+    # arrivals=0 인 부서(레코드 없음)는 MEASURED 이되 나머지가 전부 None이다 -
+    # "측정했더니 0건"과 "측정을 못 했다"를 구분한다.
+    class _EmptyActivityReader(LangfuseTraceReader):
+        def list_worker_activity(self, *, event_name: str, since: datetime, limit: int = 200):
+            return []
+
+    empty_reports = check_department_capacity(
+        reader=_EmptyActivityReader(), departments=("qa",), lookback_hours=1.0, now=now,
+    )
+    assert empty_reports[0].status is CapacityObservationStatus.MEASURED
+    assert empty_reports[0].arrivals == 0
+    assert empty_reports[0].duration_p95_ms is None and empty_reports[0].utilization is None
+    print("  arrivals=0 -> MEASURED(0건), 나머지 None - OK")
+
+    # reader=None(자격증명 없음)이면 전부 UNAVAILABLE - "부하 없음"으로 위장하지 않는다.
+    os.environ.pop("LANGFUSE_PUBLIC_KEY", None)
+    os.environ.pop("LANGFUSE_SECRET_KEY", None)
+    unavailable_cap = check_department_capacity(departments=("qa",), now=now)
+    assert unavailable_cap[0].status is CapacityObservationStatus.UNAVAILABLE
+    assert unavailable_cap[0].arrivals is None
+    print("  자격증명 없음 -> Capacity 전부 UNAVAILABLE - OK")
+
+    print("Capacity(Langfuse 기반) 자체 점검 통과.")
