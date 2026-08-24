@@ -15,6 +15,7 @@ from .contracts import (
     SizingPolicy,
     SizingType,
     Timeframe,
+    ValueUnit,
     expression_fingerprint,
     rule_fingerprint,
 )
@@ -85,6 +86,7 @@ __all__ = [
     "SizingPolicy",
     "SizingType",
     "Timeframe",
+    "ValueUnit",
     "SubmitReadyExecution",
     "TriggerClaim",
     "evaluate_condition",

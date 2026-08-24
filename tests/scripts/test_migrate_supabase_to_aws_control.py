@@ -440,7 +440,11 @@ def test_live_pk_collision_with_different_content_is_a_conflict(live_connections
         tables = migrate.introspect_domain_schema(sc)
         parent = tables[("mig_test", "parent")]
         classification = migrate.classify_table(sc, tc, parent, seed)
-        assert classification.conflicts == [str(parent_id)]
+        # The conflict names the differing COLUMN so an operator can triage
+        # without re-querying, but never the value -- rows may hold personal data.
+        assert classification.conflicts == [f"pk={parent_id} differs in name"]
+        assert "source-name" not in str(classification.conflicts)
+        assert "target-name" not in str(classification.conflicts)
 
 
 @requires_live_db
@@ -483,3 +487,71 @@ def test_live_checksum_matches_after_copy(live_connections):
         target_hash, target_rows = migrate.compute_table_checksum(tc, parent)
         assert source_hash == target_hash
         assert source_rows == target_rows == 1
+
+
+# ---------------------------------------------------------------------------
+# Scope manifest: an undeclared table must stop the run, never be guessed
+# ---------------------------------------------------------------------------
+
+
+def test_scope_manifest_rejects_unknown_policy(tmp_path):
+    path = tmp_path / "scope.json"
+    path.write_text('{"tables": {"audit.findings": "MERGE"}}')
+    with pytest.raises(migrate.MigrationError, match="unknown policy"):
+        migrate.load_scope(path)
+
+
+def test_scope_manifest_requires_a_tables_mapping(tmp_path):
+    path = tmp_path / "scope.json"
+    path.write_text('{"tables": {}}')
+    with pytest.raises(migrate.MigrationError, match="no 'tables' mapping"):
+        migrate.load_scope(path)
+
+
+def test_scope_manifest_missing_file_is_operator_safe(tmp_path):
+    with pytest.raises(migrate.MigrationError, match="not found"):
+        migrate.load_scope(tmp_path / "absent.json")
+
+
+def test_scope_manifest_accepts_both_declared_policies(tmp_path):
+    path = tmp_path / "scope.json"
+    path.write_text(
+        '{"tables": {"audit.findings": "COPY",'
+        ' "execution.orders": "CONTROL_AUTHORITATIVE"}}'
+    )
+    scope = migrate.load_scope(path)
+    assert scope["audit.findings"] == migrate.POLICY_COPY
+    assert scope["execution.orders"] == migrate.POLICY_CONTROL_AUTHORITATIVE
+
+
+def test_execute_requires_a_scope_file():
+    arguments = migrate.build_parser().parse_args(
+        [
+            "--execute",
+            "--confirm-source-supabase",
+            "--confirm-target-control",
+            "--target-backup-reference",
+            "snap-1",
+        ]
+    )
+    assert arguments.scope_file == ""
+
+
+# ---------------------------------------------------------------------------
+# The run must not mistake its own audit trace for migrated data
+# ---------------------------------------------------------------------------
+
+
+def test_migration_trace_is_filtered_out_of_target_reads():
+    traces = make_table("audit", "traces", pk="trace_id")
+    assert migrate._where_clause(traces, True) == (
+        " where trace_type <> 'DATA_MIGRATION'"
+    )
+    # ...but the source is read unfiltered, so a real source trace still moves.
+    assert migrate._where_clause(traces, False) == ""
+
+
+def test_only_the_trace_table_is_filtered():
+    findings = make_table("audit", "findings", pk="finding_id")
+    assert migrate._where_clause(findings, True) == ""
+

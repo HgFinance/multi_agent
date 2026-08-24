@@ -310,6 +310,13 @@ def test_conditional_command_uses_only_the_precreated_trading_primary(
     assert "mcp_tool=process_user_conditional_paper_rule" in trading_body
     assert "activation_policy=IMMEDIATE_AFTER_DETERMINISTIC_VALIDATION" in trading_body
     assert "Do not create Risk, QA, Research, Accounting" in trading_body
+    assert "MARKET uses only type+field" in trading_body
+    assert "Price literals" in trading_body
+    assert "unit=PRICE" in trading_body
+    assert "Canonical daily-SMA example" in trading_body
+    assert "TIMEFRAME_REQUIRED_FOR_CROSS" in trading_body
+    assert "max_data_age_seconds=30" in trading_body
+    assert "trusted 10-minute default" in trading_body
     assert raw in trading_body
     assert response["conditional_rule"] is True
     assert response["order_state"] == "RULE_INTERPRETATION_QUEUED"

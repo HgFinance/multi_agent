@@ -125,6 +125,31 @@ class ExpressionNode(BaseModel):
     operand: "ExpressionNode | None" = None
     children: tuple["ExpressionNode", ...] | None = None
 
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_matching_market_unit_hint(cls, value: Any) -> Any:
+        """Accept only a redundant, correct unit hint on a MARKET leaf."""
+
+        if not isinstance(value, dict):
+            return value
+        node_type = str(value.get("type") or "").strip().upper()
+        field = str(value.get("field") or "").strip().upper()
+        supplied = str(value.get("unit") or "").strip().upper()
+        inferred = {
+            "LAST_PRICE": "PRICE",
+            "OPEN": "PRICE",
+            "HIGH": "PRICE",
+            "LOW": "PRICE",
+            "CLOSE": "PRICE",
+            "VOLUME": "VOLUME",
+        }.get(field)
+        if node_type == "MARKET" and inferred is not None and supplied == inferred:
+            normalized = dict(value)
+            normalized.pop("unit", None)
+            return normalized
+        return value
+
     @model_validator(mode="after")
     def _shape_matches_type(self) -> "ExpressionNode":
         populated = {
@@ -237,7 +262,7 @@ class EvaluationPolicy(BaseModel):
     clock: EvaluationClock
     primary_timeframe: Timeframe | None = None
     market_closed_policy: MarketClosedPolicy = MarketClosedPolicy.REJECT_TRIGGER
-    max_data_age_seconds: int = Field(default=10, ge=1, le=300)
+    max_data_age_seconds: int = Field(default=30, ge=1, le=300)
 
     @model_validator(mode="after")
     def _clock_contract(self) -> "EvaluationPolicy":

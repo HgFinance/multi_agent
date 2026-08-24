@@ -35,6 +35,7 @@ _SUPPORTED_INDICATOR_PATTERN = "|".join(re.escape(term) for term in _SUPPORTED_I
 _ORDER_ACTION = re.compile(r"(?:매수|매도|buy|sell)", re.IGNORECASE)
 _CONDITIONAL_TRIGGER = re.compile(
     r"(?:조건\s*주문|이면|라면|할\s*때|경우|이상|이하|초과|미만|"
+    r"높으면|낮으면|오르면|내리면|넘으면|떨어지면|도달하면|닿으면|터치하면|"
     r"상향\s*돌파|하향\s*이탈|골든\s*크로스|데드\s*크로스|"
     r"이동\s*평균|이평|볼린저|거래량|평단|매입가|"
     r"상승\s*시|하락\s*시|" + _SUPPORTED_INDICATOR_PATTERN + r")",

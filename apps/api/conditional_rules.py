@@ -138,7 +138,7 @@ def _raw_sha256(value: str) -> str:
 
 
 def _expiry(value: datetime | None, *, now: datetime) -> datetime:
-    expiry = value.astimezone(timezone.utc) if value else now + timedelta(days=30)
+    expiry = value.astimezone(timezone.utc) if value else now + timedelta(minutes=10)
     if expiry <= now:
         raise HTTPException(status_code=422, detail="conditional_rule_expiry_in_past")
     if expiry > now + timedelta(days=365):

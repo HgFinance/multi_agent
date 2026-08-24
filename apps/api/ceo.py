@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import time
+from hashlib import sha256
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -62,6 +63,7 @@ try:
     from .governance_client import fetch_current_mandate_by_fund
     from .user_order_workflow import (
         UserOrderRequestConflict,
+        UserOrderRequestRecord,
         UserOrderWorkflowUnavailable,
         user_order_repository,
     )
@@ -107,6 +109,7 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
     )
     from user_order_workflow import (  # type: ignore[no-redef]
         UserOrderRequestConflict,
+        UserOrderRequestRecord,
         UserOrderWorkflowUnavailable,
         user_order_repository,
     )
@@ -135,6 +138,10 @@ from orchestration.user_order_language import (
     is_clearly_non_executable_order_language,
     looks_like_user_order_request,
 )
+from orchestration.compound_paper_orders import (
+    build_compound_conditional_candidate,
+    parse_compound_paper_order,
+)
 from orchestration.qa_contract import (
     canonical_qa_contract,
     split_planner_selection,
@@ -143,6 +150,13 @@ from orchestration.experience_bank import ExperienceBank
 
 router = APIRouter(prefix="/ui/ceo", tags=["ceo-office"])
 logger = logging.getLogger(__name__)
+
+
+def _compound_leg_request_id(request_id: str, suffix: str) -> str:
+    value = f"{request_id}:{suffix}"
+    if len(value) <= 128:
+        return value
+    return f"compound-{sha256(value.encode('utf-8')).hexdigest()}:{suffix}"
 
 
 class CeoAsk(hermes_boundary.AgentAsk):
@@ -847,12 +861,30 @@ def _conditional_rule_child_body(
             "Supported expression node types are LITERAL, MARKET, PORTFOLIO, INDICATOR,",
             "ARITHMETIC, COMPARISON, LOGICAL, NOT, and CROSS.",
             f"Supported indicators are {_conditional_rule_indicator_catalog_prompt()}.",
+            "Node field ownership is strict: MARKET uses only type+field; LITERAL uses",
+            "only type+value+unit; INDICATOR uses type+name+timeframe and optional",
+            "output/parameters. Never put unit on MARKET or INDICATOR. Price literals",
+            "use unit=PRICE, including values written in Korean as 원.",
+            "Before the single tool call, check every recursive node and remove fields",
+            "that do not belong to that node type. Do not use the tool call as validation.",
+            "Canonical quote-price example: condition={type:COMPARISON,operator:GTE,",
+            "left:{type:MARKET,field:LAST_PRICE},right:{type:LITERAL,value:70000,unit:PRICE}},",
+            "evaluation={clock:QUOTE}.",
+            "Canonical daily-SMA example: condition={type:COMPARISON,operator:GT,",
+            "left:{type:MARKET,field:CLOSE},right:{type:INDICATOR,name:SMA,timeframe:1D,",
+            "parameters:{PERIOD:5}}}, evaluation={clock:BAR_CLOSE,primary_timeframe:1D}.",
+            "Canonical Bollinger upper example uses name=BOLLINGER, output=UPPER,",
+            "timeframe=1D, parameters={PERIOD:20,STDDEV:2} and compares MARKET CLOSE.",
             "Use comparison operators GT/GTE/LT/LTE/EQ, cross ABOVE/BELOW, logical",
             "AND/OR, and only 1M/5M/15M/1H/1D timeframes. If an indicator timeframe",
             "is omitted, use 1D completed bars and BAR_CLOSE; never default an explicit",
             "intraday phrase to another timeframe. Portfolio/last-price-only rules use",
             "QUOTE. POSITION_PERCENT is a ratio in (0,1], FIXED_SHARES is an integer,",
-            "and ALL is sell-only. Omit expires_at to use the trusted 30-day default.",
+            "and ALL is sell-only. Omit expires_at to use the trusted 10-minute default.",
+            "Use the trusted max_data_age_seconds=30 default; never reduce it unless the user explicitly asks.",
+            "CROSS always requires BAR_CLOSE and an explicit primary_timeframe; when the",
+            "instruction gives no timeframe for a price-only cross, return candidate=null",
+            "with clarification_reason=TIMEFRAME_REQUIRED_FOR_CROSS instead of guessing.",
             "For an explicit 지정가/limit order, preserve order_type=LIMIT and the exact user-provided limit_price; never calculate or invent a price. Without explicit limit evidence, use the default MARKET action.",
             "The trusted tool resolves the symbol, validates authority, units, semantics,",
             "idempotency, and activates the exact rule. Do not claim ACTIVE unless the",
@@ -896,12 +928,232 @@ def _mark_paper_order_failed(
         )
 
 
+def _route_compound_user_paper_order(
+    req: CeoAsk,
+    *,
+    owner_id: str | None,
+    mandate: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """Compose existing PAPER order and conditional-rule authorities.
+
+    The rule is created pending and is activated only by the existing
+    conditional-rule worker after the immediate request reaches COMPLETED.
+    No second order executor is introduced here.
+    """
+
+    plan = parse_compound_paper_order(req.query)
+    if plan is None:
+        raise HTTPException(status_code=422, detail="compound_paper_order_unsupported")
+    if not isinstance(owner_id, str) or not owner_id.strip():
+        raise HTTPException(status_code=401, detail="portfolio_authentication_required")
+    if not req.fund_id:
+        raise HTTPException(status_code=422, detail="portfolio_fund_id_required")
+    if not req.book_id:
+        raise HTTPException(status_code=422, detail="portfolio_book_id_required")
+    if not _user_paper_order_workflow_enabled():
+        raise HTTPException(status_code=503, detail="paper_order_hermes_runtime_unavailable")
+
+    # These imports stay local so the normal CEO analysis path does not acquire
+    # conditional-rule dependencies when it is not an order request.
+    from .conditional_rules import (  # noqa: PLC0415
+        ConditionalRuleCandidate,
+        ConditionalRulePreviewRequest,
+        _build_preview,
+    )
+    from .conditional_rule_workflow import (  # noqa: PLC0415
+        ConditionalRuleConflict,
+        ConditionalRuleUnavailable,
+        conditional_rule_repository,
+    )
+    from orchestration.conditional_rules import RuleState  # noqa: PLC0415
+    from .paper_order_bundle import (  # noqa: PLC0415
+        PaperOrderBundleError,
+        paper_order_bundle_repository,
+    )
+
+    access = require_trading_book_access(owner_id, req.fund_id, req.book_id)
+    immediate_request_id = _compound_leg_request_id(req.request_id, "buy")
+    conditional_request_id = _compound_leg_request_id(req.request_id, "sell-rule")
+    orders = user_order_repository()
+    bundles = None
+    rule = None
+    try:
+        immediate_record = orders.admit(
+            user_id=access["user_id"],
+            fund_id=access["fund_id"],
+            book_id=access["book_id"],
+            client_request_id=immediate_request_id,
+            raw_instruction=plan.immediate_instruction,
+        )
+        bundles = paper_order_bundle_repository()
+        bundle = bundles.create(
+            user_id=access["user_id"],
+            fund_id=access["fund_id"],
+            book_id=access["book_id"],
+            client_request_id=req.request_id,
+            raw_instruction=req.query,
+            immediate_order_request_id=immediate_record.order_request_id,
+            required_quantity=plan.immediate_quantity,
+        )
+        if bundle.conditional_rule_id is not None or bundle.state != "RECEIVED":
+            # The parent request is the idempotency boundary.  A replay must
+            # never cancel or rebuild an already-bound rule.
+            return {
+                "schema_version": _PLANNING_SCHEMA_VERSION,
+                "department": "ceo-agent",
+                "binding": False,
+                "status": "planned",
+                "answer": "동일한 compound PAPER 요청이 이미 접수되어 기존 상태를 반환합니다.",
+                "planning": {
+                    "schema_version": "ceo.planning.v1",
+                    "selected_departments": ["trading-department"],
+                    "steps": ["Replay existing compound PAPER bundle"],
+                    "qa_required": False,
+                    "summary": "기존 bundle을 재사용했습니다.",
+                },
+                "session_id": None,
+                "order_request_id": immediate_record.order_request_id,
+                "order_state": bundle.state,
+                "order_mode": "PAPER",
+                "compound_paper_order": True,
+                "bundle_id": bundle.bundle_id,
+                "conditional_rule_id": bundle.conditional_rule_id,
+            }
+        candidate = ConditionalRuleCandidate.model_validate(
+            build_compound_conditional_candidate(plan)
+        )
+        preview = _build_preview(
+            ConditionalRulePreviewRequest(
+                fund_id=access["fund_id"],
+                book_id=access["book_id"],
+                raw_instruction=plan.conditional_instruction,
+                candidate=candidate,
+            ),
+            subject=access["user_id"],
+        )
+        if not preview.activatable:
+            raise ConditionalRuleConflict(
+                "compound conditional rule requires clarification: "
+                + ",".join(preview.clarification_codes)
+            )
+        rule = conditional_rule_repository().create_pending(
+            spec=preview.spec,
+            raw_instruction=plan.conditional_instruction,
+            client_request_id=conditional_request_id,
+            parser_source="DETERMINISTIC",
+        )
+        bundle = bundles.bind_conditional_rule(bundle.bundle_id, rule.rule_id)
+    except (
+        UserOrderRequestConflict,
+        UserOrderWorkflowUnavailable,
+        PaperOrderBundleError,
+        ConditionalRuleConflict,
+        ConditionalRuleUnavailable,
+        HTTPException,
+    ) as exc:
+        if bundles is not None and "bundle" in locals():
+            try:
+                bundles.mark_failed(
+                    bundle.bundle_id,
+                    code="COMPOUND_ADMISSION_FAILED",
+                    message=type(exc).__name__,
+                )
+            except Exception:  # noqa: BLE001 - preserve the admission error.
+                logger.exception("compound PAPER admission cleanup failed")
+        if rule is not None:
+            try:
+                conditional_rule_repository().transition(
+                    rule.rule_id,
+                    user_id=access["user_id"],
+                    target=RuleState.CANCELLED,
+                )
+            except Exception:  # noqa: BLE001 - preserve the admission error.
+                logger.exception("compound PAPER rule cleanup failed")
+        if "immediate_record" in locals():
+            try:
+                orders.mark_outcome(
+                    immediate_record.order_request_id,
+                    state="FAILED",
+                    error_code="COMPOUND_ADMISSION_FAILED",
+                    error_message="compound PAPER bundle was not fully admitted",
+                )
+            except Exception:  # noqa: BLE001 - preserve the admission error.
+                logger.exception("compound PAPER order cleanup failed")
+        raise HTTPException(
+            status_code=409 if isinstance(exc, UserOrderRequestConflict) else 503,
+            detail="compound_paper_order_admission_failed",
+        ) from exc
+
+    immediate_request = req.model_copy(
+        update={
+            "query": plan.immediate_instruction,
+            "request_id": immediate_request_id,
+        }
+    )
+    try:
+        immediate_response = _route_user_paper_order(
+            immediate_request,
+            owner_id=owner_id,
+            mandate=mandate,
+            pre_admitted_record=immediate_record,
+        )
+    except Exception as exc:  # noqa: BLE001 - close the pending composition.
+        try:
+            bundles.mark_failed(
+                bundle.bundle_id,
+                code="IMMEDIATE_ORDER_ROUTING_FAILED",
+                message=type(exc).__name__,
+            )
+            conditional_rule_repository().transition(
+                rule.rule_id,
+                user_id=access["user_id"],
+                target=RuleState.CANCELLED,
+            )
+        except Exception:  # noqa: BLE001 - original failure remains authoritative.
+            logger.exception("compound PAPER cleanup failed bundle=%s", bundle.bundle_id)
+        raise
+
+    return {
+        "schema_version": _PLANNING_SCHEMA_VERSION,
+        "department": "ceo-agent",
+        "binding": False,
+        "task_id": str(immediate_response.get("task_id") or ""),
+        "task": immediate_response.get("task") or {},
+        "status": "planned",
+        "answer": (
+            "PAPER 매수 주문을 기존 Trading 경로로 접수했습니다. 매수 수량이 전량 "
+            "체결된 뒤 기존 조건주문 worker가 265,000원 초과 시 매도 규칙을 "
+            "자동 활성화합니다. 부분체결·실패 시 조건주문은 활성화하지 않습니다."
+        ),
+        "planning": {
+            "schema_version": "ceo.planning.v1",
+            "selected_departments": ["trading-department"],
+            "steps": [
+                "Existing PAPER buy directive",
+                "Wait for full fill",
+                "Activate existing conditional rule",
+            ],
+            "qa_required": False,
+            "summary": "기존 PAPER 주문과 조건주문 경로를 하나의 durable bundle로 연결했습니다.",
+        },
+        "session_id": None,
+        "order_request_id": immediate_record.order_request_id,
+        "order_state": bundle.state,
+        "order_mode": "PAPER",
+        "compound_paper_order": True,
+        "bundle_id": bundle.bundle_id,
+        "conditional_rule_id": rule.rule_id,
+        "trading_task_id": immediate_response.get("trading_task_id"),
+    }
+
+
 def _route_user_paper_order(
     req: CeoAsk,
     *,
     owner_id: str | None,
     mandate: Mapping[str, object] | None,
     conditional_rule: bool = False,
+    pre_admitted_record: UserOrderRequestRecord | None = None,
 ) -> dict[str, object]:
     """Durably route one direct user workflow to Trading Hermes, always PAPER."""
 
@@ -925,23 +1177,34 @@ def _route_user_paper_order(
     # This is admission, not execution. It canonicalizes the authenticated
     # user/Fund/Book tuple before anything is exposed to Hermes.
     access = require_trading_book_access(owner_id, req.fund_id, req.book_id)
-    try:
-        repository = user_order_repository()
-        record = repository.admit(
-            user_id=access["user_id"],
-            fund_id=access["fund_id"],
-            book_id=access["book_id"],
-            client_request_id=req.request_id,
-            raw_instruction=req.query,
-        )
-    except UserOrderRequestConflict as exc:
-        raise HTTPException(
-            status_code=409, detail="paper_order_request_id_conflict"
-        ) from exc
-    except UserOrderWorkflowUnavailable as exc:
-        raise HTTPException(
-            status_code=503, detail="paper_order_workflow_unavailable"
-        ) from exc
+    repository = user_order_repository()
+    if pre_admitted_record is None:
+        try:
+            record = repository.admit(
+                user_id=access["user_id"],
+                fund_id=access["fund_id"],
+                book_id=access["book_id"],
+                client_request_id=req.request_id,
+                raw_instruction=req.query,
+            )
+        except UserOrderRequestConflict as exc:
+            raise HTTPException(
+                status_code=409, detail="paper_order_request_id_conflict"
+            ) from exc
+        except UserOrderWorkflowUnavailable as exc:
+            raise HTTPException(
+                status_code=503, detail="paper_order_workflow_unavailable"
+            ) from exc
+    else:
+        record = pre_admitted_record
+        if (
+            record.client_request_id != req.request_id
+            or record.raw_instruction != req.query
+            or record.user_id != str(access["user_id"])
+            or record.fund_id != str(access["fund_id"])
+            or record.book_id != str(access["book_id"])
+        ):
+            raise HTTPException(status_code=409, detail="paper_order_admission_mismatch")
     admitted_at = time.monotonic()
 
     scope = UserPaperOrderScope(
@@ -1271,6 +1534,13 @@ def ceo_query(
     # `fund_id`가 없다. 속성 부재로 500을 내는 대신 "Mandate 없음"으로 떨어진다.
     fund_id = getattr(req, "fund_id", None)
     mandate = fetch_current_mandate_by_fund(fund_id) if fund_id else None
+
+    if parse_compound_paper_order(req.query) is not None:
+        return _route_compound_user_paper_order(
+            req,
+            owner_id=owner_id if isinstance(owner_id, str) else None,
+            mandate=mandate,
+        )
 
     if looks_like_conditional_paper_rule(req.query):
         return _route_user_paper_order(

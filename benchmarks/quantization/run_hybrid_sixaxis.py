@@ -1352,6 +1352,7 @@ def _run_external_scoped_split(
     direct: bool = False,
     retrieve_context: bool = False,
     evidence_plan: bool = False,
+    numeric_stage: str = "unit_normalization",
 ) -> dict[str, Any]:
     """Separate numeric adapter use from glossary-RAG text use."""
 
@@ -1413,7 +1414,7 @@ def _run_external_scoped_split(
 
     if task_type == "CALCULATION":
         outcome = _stage_numeric(
-            stage="unit_normalization",
+            stage=numeric_stage,
             case=case,
             prompt=prompt,
             url=url,
@@ -1537,7 +1538,7 @@ def _run_external_case(
 
     context = case["context"]
     glossary_meta = {"version": None, "sha256": None, "matched_terms": [], "hit": False}
-    if case.get("source") == "FinanceBench" and stage not in {"finance_scoped_split", "finance_scoped_split_strict", "finance_scoped_split_strict_direct", "finance_scoped_context_rag", "finance_scoped_evidence_plan"}:
+    if case.get("source") == "FinanceBench" and stage not in {"finance_scoped_split", "finance_scoped_split_strict", "finance_scoped_split_strict_direct", "finance_scoped_context_rag", "finance_scoped_evidence_plan", "finance_selective_reasoning"}:
         context, glossary_meta = _glossary_prompt(
             context,
             glossary,
@@ -1552,7 +1553,7 @@ def _run_external_case(
     started = time.perf_counter()
 
     if case.get("source") == "FinanceBench":
-        if stage in {"finance_scoped_split", "finance_scoped_split_strict", "finance_scoped_split_strict_direct", "finance_scoped_context_rag", "finance_scoped_evidence_plan"}:
+        if stage in {"finance_scoped_split", "finance_scoped_split_strict", "finance_scoped_split_strict_direct", "finance_scoped_context_rag", "finance_scoped_evidence_plan", "finance_selective_reasoning"}:
             outcome = _run_external_scoped_split(
                 case=case,
                 prompt=prompt,
@@ -1561,10 +1562,11 @@ def _run_external_case(
                 arithmetic_model=arithmetic_model,
                 timeout=timeout,
                 glossary=glossary,
-                strict=stage in {"finance_scoped_split_strict", "finance_scoped_split_strict_direct", "finance_scoped_context_rag", "finance_scoped_evidence_plan"},
+                strict=stage in {"finance_scoped_split_strict", "finance_scoped_split_strict_direct", "finance_scoped_context_rag", "finance_scoped_evidence_plan", "finance_selective_reasoning"},
                 direct=stage in {"finance_scoped_split_strict_direct", "finance_scoped_context_rag"},
                 retrieve_context=stage in {"finance_scoped_context_rag", "finance_scoped_evidence_plan"},
-                evidence_plan=stage == "finance_scoped_evidence_plan",
+                evidence_plan=stage in {"finance_scoped_evidence_plan", "finance_selective_reasoning"},
+                numeric_stage="expr_ast" if stage == "finance_selective_reasoning" else "unit_normalization",
             )
             if outcome.get("glossary_applied_to") == "text":
                 glossary_meta = {
@@ -1721,7 +1723,7 @@ def main() -> int:
     parser.add_argument("--arithmetic-model", required=True)
     parser.add_argument(
         "--stage",
-        choices=("expr_ast", "unit_normalization", "domain_formula", "fifo_fewshot", "finance_typed_routing", "finqa_numeric_routing", "finance_direct_answer", "finance_scoped_split", "finance_scoped_split_strict", "finance_scoped_split_strict_direct", "finance_scoped_context_rag", "finance_scoped_evidence_plan", "structured_envelope", "structured_consensus", "structured_reasoned_consensus", "structured_grounded_consensus", "structured_adapter_consensus", "structured_fewshot_consensus", "selective_unit_scale"),
+        choices=("expr_ast", "unit_normalization", "domain_formula", "fifo_fewshot", "finance_typed_routing", "finqa_numeric_routing", "finance_direct_answer", "finance_scoped_split", "finance_scoped_split_strict", "finance_scoped_split_strict_direct", "finance_scoped_context_rag", "finance_scoped_evidence_plan", "finance_selective_reasoning", "structured_envelope", "structured_consensus", "structured_reasoned_consensus", "structured_grounded_consensus", "structured_adapter_consensus", "structured_fewshot_consensus", "selective_unit_scale"),
         default="expr_ast",
     )
     parser.add_argument("--url", default=ENDPOINT)

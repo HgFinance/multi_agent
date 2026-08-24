@@ -24,6 +24,9 @@ from directives.repository import DirectiveRepositoryError
 from orchestration.conditional_rules import SizingType
 
 
+CONDITIONAL_LIMIT_QUOTE_MAX_AGE_SECONDS = 600.0
+
+
 router = APIRouter(
     prefix="/trading/v1/conditional-rule-executions",
     tags=["conditional-paper-rules"],
@@ -190,6 +193,11 @@ def submit_conditional_rule_execution(
     record = service.submit_trusted_rule(
         admission.request,
         admission.proof,
+        market_quote_max_age_seconds=(
+            CONDITIONAL_LIMIT_QUOTE_MAX_AGE_SECONDS
+            if admission.spec.action.order_type == "LIMIT"
+            else None
+        ),
     )
     return record.view()
 

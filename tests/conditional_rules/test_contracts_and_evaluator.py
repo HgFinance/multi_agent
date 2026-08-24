@@ -120,6 +120,40 @@ def test_explicit_limit_action_preserves_exact_krw_price() -> None:
         )
 
 
+
+def test_matching_market_unit_hint_is_removed_before_strict_shape_check() -> None:
+    node = ExpressionNode.model_validate(
+        {"type": "MARKET", "field": "LAST_PRICE", "unit": "PRICE"}
+    )
+
+    assert node.model_dump(mode="json", exclude_none=True) == {
+        "type": "MARKET",
+        "field": "LAST_PRICE",
+    }
+
+
+def test_mismatched_market_unit_hint_still_fails_closed() -> None:
+    with pytest.raises(ValueError, match="MARKET node has unexpected fields"):
+        ExpressionNode.model_validate(
+            {"type": "MARKET", "field": "LAST_PRICE", "unit": "KRW"}
+        )
+
+
+
+def test_evaluation_policy_defaults_to_thirty_second_quote_freshness() -> None:
+    spec = rule(
+        {
+            "type": "COMPARISON",
+            "operator": "GT",
+            "left": {"type": "MARKET", "field": "LAST_PRICE"},
+            "right": literal("1", "PRICE"),
+        },
+        evaluation={"clock": "QUOTE"},
+    )
+
+    assert spec.evaluation.max_data_age_seconds == 30
+
+
 def test_quote_clock_rejects_indicator_and_non_last_price_fields() -> None:
     with pytest.raises(RuleSemanticError, match="completed bars"):
         validate_rule_spec(

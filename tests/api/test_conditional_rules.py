@@ -7,6 +7,7 @@ from uuid import UUID
 import pytest
 
 from apps.api import conditional_rules as api
+from apps.api.conditional_rule_language import looks_like_conditional_paper_rule
 from apps.api.conditional_rule_workflow import (
     ConditionalRuleConflict,
     InMemoryConditionalRuleRepository,
@@ -80,6 +81,20 @@ def preview_request(raw: str, candidate: dict | None = None):
     )
 
 
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        "000660 SK하이닉스 현재가가 2000000원보다 낮으면 1800000원 지정가로 1주 매수해줘",
+        "삼성전자 주가가 5일 이동평균선보다 높으면 1주 매수",
+        "네이버 주가가 200000원 아래로 떨어지면 1주 매도",
+        "삼성전자 볼린저밴드 상단에 닿으면 1주 매도",
+    ),
+)
+def test_explicit_korean_condition_endings_route_to_conditional_lane(raw: str) -> None:
+    assert looks_like_conditional_paper_rule(raw) is True
+
+
 def test_ambiguous_return_baseline_and_position_percent_are_blocked(monkeypatch) -> None:
     install_scope(monkeypatch)
 
@@ -112,6 +127,24 @@ def test_explicit_average_entry_and_holding_percent_are_activatable(monkeypatch)
         "ONE_SHOT",
         "MARKET_CLOSED_REJECTS_WITHOUT_ORDER",
     )
+
+
+
+def test_omitted_expiry_defaults_to_ten_minutes(monkeypatch) -> None:
+    install_scope(monkeypatch)
+    candidate = profit_candidate()
+    candidate.pop("expires_at")
+
+    preview = api._build_preview(
+        preview_request(
+            "삼성전자 평균 매입가 대비 5% 상승시 보유수량의 20% 매도",
+            candidate,
+        ),
+        subject=USER_ID,
+        now=NOW,
+    )
+
+    assert preview.spec.expires_at == NOW + timedelta(minutes=10)
 
 
 def test_unqualified_daily_indicator_is_visible_confirmation_assumption(monkeypatch) -> None:

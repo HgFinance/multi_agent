@@ -142,6 +142,106 @@ class PostgresRuleWorkerStore:
                 retryable=True,
             ) from exc
 
+    def activate_ready_bundles(self, *, limit: int = 100) -> int:
+        """Activate a deferred rule only after its immediate request completed."""
+
+        try:
+            with self._connect() as connection, connection.cursor() as cursor:
+                self._set_role(cursor)
+                cursor.execute(
+                    """
+                    select bundle.bundle_id, bundle.conditional_rule_id,
+                           request.state, rule.state, rule.current_version,
+                           version.spec_sha256
+                      from execution.user_paper_order_bundles bundle
+                      join execution.user_order_requests request
+                        on request.order_request_id=bundle.immediate_order_request_id
+                      join execution.conditional_trade_rules rule
+                        on rule.rule_id=bundle.conditional_rule_id
+                      join execution.conditional_trade_rule_versions version
+                        on version.rule_id=rule.rule_id
+                       and version.rule_version=rule.current_version
+                     where bundle.state='WAITING_FOR_IMMEDIATE_FILL'
+                       and rule.state in ('PENDING_CONFIRMATION','EXPIRED')
+                     order by bundle.updated_at,bundle.bundle_id
+                     limit %s
+                     for update of bundle,rule,request skip locked
+                    """,
+                    (max(1, min(limit, 1000)),),
+                )
+                changed = 0
+                for bundle_id, rule_id, request_state, rule_state, rule_version, spec_sha in cursor.fetchall():
+                    if request_state == "COMPLETED" and str(rule_state) == "PENDING_CONFIRMATION":
+                        cursor.execute(
+                            """
+                            update execution.conditional_trade_rules
+                               set state='ACTIVE',confirmation_sha256=%s,
+                                   confirmed_at=now(),version=version+1
+                             where rule_id=%s and state='PENDING_CONFIRMATION'
+                            """,
+                            (str(spec_sha), rule_id),
+                        )
+                        if cursor.rowcount != 1:
+                            continue
+                        cursor.execute(
+                            """
+                            update execution.user_paper_order_bundles
+                               set state='CONDITIONAL_ACTIVE',version=version+1
+                             where bundle_id=%s and state='WAITING_FOR_IMMEDIATE_FILL'
+                            """,
+                            (bundle_id,),
+                        )
+                        cursor.execute(
+                            """
+                            insert into execution.conditional_trade_rule_events (
+                              event_id,rule_id,rule_version,event_type,from_state,
+                              to_state,payload
+                            ) values (%s,%s,%s,'BUNDLE_ACTIVATED',
+                                      'PENDING_CONFIRMATION','ACTIVE',%s)
+                            on conflict (event_id) do nothing
+                            """,
+                            (
+                                _stable_id("dep_", bundle_id, "ACTIVATED"),
+                                rule_id,
+                                rule_version,
+                                Json({"bundle_id": str(bundle_id)}),
+                            ),
+                        )
+                        changed += 1
+                    elif str(rule_state) == "EXPIRED" or request_state in {
+                        "FAILED",
+                        "UNKNOWN",
+                        "CLARIFICATION_REQUIRED",
+                        "REJECTED",
+                    }:
+                        cursor.execute(
+                            """
+                            update execution.conditional_trade_rules
+                               set state='FAILED',version=version+1,
+                                   completed_at=now()
+                             where rule_id=%s and state='PENDING_CONFIRMATION'
+                            """,
+                            (rule_id,),
+                        )
+                        cursor.execute(
+                            """
+                            update execution.user_paper_order_bundles
+                               set state='FAILED',error_code='IMMEDIATE_ORDER_NOT_FILLED',
+                                   error_message='immediate PAPER order did not complete',
+                                   completed_at=now(),version=version+1
+                             where bundle_id=%s and state='WAITING_FOR_IMMEDIATE_FILL'
+                            """,
+                            (bundle_id,),
+                        )
+                        changed += 1
+                return changed
+        except psycopg2.Error as exc:
+            raise RuleWorkerStoreError(
+                "CONDITIONAL_RULE_DATABASE_UNAVAILABLE",
+                "could not activate deferred compound PAPER rules",
+                retryable=True,
+            ) from exc
+
     def list_claimed(
         self, *, limit: int = 100
     ) -> list[tuple[ActiveRule, TriggerClaim]]:

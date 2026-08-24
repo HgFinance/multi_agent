@@ -34,7 +34,7 @@ class TrustedQuote:
 
 
 class MarketDataProvider(Protocol):
-    def quote(self, instrument: InstrumentRef, *, now: datetime) -> TrustedQuote: ...
+    def quote(self, instrument: InstrumentRef, *, now: datetime, max_age_seconds: float | None = None) -> TrustedQuote: ...
 
 
 def _aware(value: Any) -> datetime:
@@ -64,6 +64,7 @@ def validate_quote(
     instrument: InstrumentRef,
     *,
     now: datetime,
+    max_age_seconds: float | None = None,
 ) -> TrustedQuote:
     if now.tzinfo is None:
         raise MarketDataError("TRADING_MARKET_TIME_INVALID", "timezone-aware market time required", 500)
@@ -74,11 +75,11 @@ def validate_quote(
             409,
         )
     try:
-        max_age = float(os.environ.get("TRADING_MARKET_QUOTE_MAX_AGE_SECONDS", "10"))
+        max_age = float(max_age_seconds) if max_age_seconds is not None else float(os.environ.get("TRADING_MARKET_QUOTE_MAX_AGE_SECONDS", "10"))
         future_skew = float(os.environ.get("TRADING_MARKET_QUOTE_FUTURE_SKEW_SECONDS", "2"))
     except ValueError as exc:
         raise MarketDataError("TRADING_MARKET_POLICY_INVALID", "quote freshness policy is invalid", 503) from exc
-    if not (0 < max_age <= 300) or not (0 <= future_skew <= 30):
+    if not (0 < max_age <= 600) or not (0 <= future_skew <= 30):
         raise MarketDataError("TRADING_MARKET_POLICY_INVALID", "quote freshness policy is outside bounds", 503)
     age = (now.astimezone(timezone.utc) - quote_value.observed_at.astimezone(timezone.utc)).total_seconds()
     if age > max_age or age < -future_skew:
@@ -99,11 +100,11 @@ class FixtureMarketDataProvider:
     def set_quote(self, quote_value: TrustedQuote) -> None:
         self.quotes[quote_value.symbol] = quote_value
 
-    def quote(self, instrument: InstrumentRef, *, now: datetime) -> TrustedQuote:
+    def quote(self, instrument: InstrumentRef, *, now: datetime, max_age_seconds: float | None = None) -> TrustedQuote:
         value = self.quotes.get(instrument.symbol)
         if value is None:
             raise MarketDataError("TRADING_MARKET_QUOTE_UNAVAILABLE", "fixture quote is unavailable", 503)
-        return validate_quote(value, instrument, now=now)
+        return validate_quote(value, instrument, now=now, max_age_seconds=max_age_seconds)
 
 
 class HttpMarketDataProvider:
@@ -126,7 +127,7 @@ class HttpMarketDataProvider:
     def from_env(cls) -> "HttpMarketDataProvider":
         return cls(os.environ.get("MARKET_API_URL", ""))
 
-    def quote(self, instrument: InstrumentRef, *, now: datetime) -> TrustedQuote:
+    def quote(self, instrument: InstrumentRef, *, now: datetime, max_age_seconds: float | None = None) -> TrustedQuote:
         url = f"{self.base_url}/snapshot/{quote(instrument.symbol, safe='')}"
         request = Request(
             url,
@@ -158,7 +159,7 @@ class HttpMarketDataProvider:
             ask_size=_decimal(level.get("total_ask_size"), "total_ask_size", positive=False),
             source="market-api:last_quote",
         )
-        return validate_quote(value, instrument, now=now)
+        return validate_quote(value, instrument, now=now, max_age_seconds=max_age_seconds)
 
 
 __all__ = [

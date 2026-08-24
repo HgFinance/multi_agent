@@ -109,7 +109,18 @@ _PATTERNS = (
         # A cost hurdle can be phrased as an unchanged hurdle.
         r"|(?i:(?:fails?\s+to\s+clear|does\s+not\s+clear).{0,50}"
         r"(?:unchanged\s+)?[0-9]+(?:\.[0-9]+)?\s*bp"
-        r".{0,40}(?:round[- ]?trip|hurdle|cost))")),
+        r".{0,40}(?:round[- ]?trip|hurdle|cost))"
+        # Intraday proposals often express the same baseline/ablation
+        # falsification as a short wrapped fragment.
+        r"|(?i:(?:controls?|gate|ablation).{0,60}"
+        r"(?:match|same|unchanged|indistinguishable).{0,60}"
+        r"(?:full\s+gate|effect|signal|control|baseline))"
+        r"|(?i:(?:signal|effect).{0,40}not\s+distinct\s+from.{0,80}"
+        r"(?:microprice|midprice|control|baseline|state))"
+        r"|(?i:(?:effect|signal).{0,60}(?:not\s+)?(?:superior|better).{0,60}"
+        r"(?:parent|baseline|control|cross[- ]?time))"
+        r"|(?i:remov(?:e|ing).{0,40}(?:gate|condition|filter).{0,40}"
+        r"(?:unchanged|same|invariant))")),
     # 창별 최악 낙폭·창간 Sharpe 산포는 `fragility_summary` 가 이미 재는 값이다
     ("window_mdd", re.compile(r"창.{0,10}(MDD|낙폭)")),
     ("window_sharpe_std", re.compile(r"창간?\s*Sharpe.{0,10}(표준편차|산포|std)")),
@@ -188,8 +199,24 @@ def _criteria_texts(criteria) -> list[str]:
             out.extend(_criteria_texts(value))
         return out
     if isinstance(criteria, (list, tuple)):
+        # Long criteria are occasionally persisted as adjacent wrapped
+        # strings (e.g. ``"locked "``, ``"spread+charges hurdle"``).
+        # Treating each fragment as a test loses the actual falsification
+        # sentence. Rejoin only clear continuation fragments; independent
+        # criteria remain separate.
+        items = list(criteria)
+        merged: list = []
+        for item in items:
+            if (merged and isinstance(merged[-1], str) and isinstance(item, str)
+                    and merged[-1].strip() not in {"note", "fragility_rules"}
+                    and (merged[-1].endswith((" ", "\t", "\n"))
+                         or item.lower().startswith(("or ", "and ", "또는 ", "및 ")))
+                    and (item[:1].islower() or item[:1] in "가-힣")):
+                merged[-1] = merged[-1].rstrip() + " " + item.lstrip()
+            else:
+                merged.append(item)
         out: list[str] = []
-        for item in criteria:
+        for item in merged:
             out.extend(_criteria_texts(item))
         return out
     return [str(criteria)]

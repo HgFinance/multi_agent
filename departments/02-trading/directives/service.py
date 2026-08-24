@@ -205,6 +205,7 @@ class UserDirectiveService:
         proof: DirectiveProof,
         *,
         now: datetime | None = None,
+        market_quote_max_age_seconds: float | None = None,
     ) -> DirectiveRecord:
         """Submit one DB-verified standing rule through the same mechanical gate.
 
@@ -218,7 +219,12 @@ class UserDirectiveService:
             bind_proof(proof, request)
         except Exception as exc:
             raise _translate(exc) from exc
-        return self._submit_bound(request, proof, current_time=current_time)
+        return self._submit_bound(
+            request,
+            proof,
+            current_time=current_time,
+            market_quote_max_age_seconds=market_quote_max_age_seconds,
+        )
 
     def _submit_bound(
         self,
@@ -226,6 +232,7 @@ class UserDirectiveService:
         proof: DirectiveProof,
         *,
         current_time: datetime,
+        market_quote_max_age_seconds: float | None = None,
     ) -> DirectiveRecord:
         try:
             record, created = self.repository.accept(request, proof)
@@ -254,7 +261,12 @@ class UserDirectiveService:
                 elif record.state is not DirectiveState.RUNNING:
                     result = self._status_locked(record, now=current_time)
                 elif request.action is DirectiveAction.PLACE_ORDER:
-                    result = self._place(record, request, now=current_time)
+                    result = self._place(
+                        record,
+                        request,
+                        now=current_time,
+                        market_quote_max_age_seconds=market_quote_max_age_seconds,
+                    )
                 elif request.action is DirectiveAction.CANCEL_ALL:
                     result = self._cancel_all(record)
                 else:
@@ -867,6 +879,7 @@ class UserDirectiveService:
         request: UserDirectiveRequest,
         *,
         now: datetime,
+        market_quote_max_age_seconds: float | None = None,
     ) -> DirectiveRecord:
         payload = request.place_order()
         instrument = self.repository.resolve_instrument(
@@ -883,7 +896,11 @@ class UserDirectiveService:
         # Fail the economic preflight before mutating any lower-priority order.
         # The same book lock remains held for the subsequent revalidation.
         expires_at = self.repository.market_session_close(now=now)
-        trusted = self.market_data.quote(instrument, now=now)
+        trusted = self.market_data.quote(
+            instrument,
+            now=now,
+            max_age_seconds=market_quote_max_age_seconds,
+        )
         reserve_cash: Decimal | None = None
         reduce_only = payload.side == "SELL"
         if payload.side == "BUY":

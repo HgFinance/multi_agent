@@ -59,6 +59,48 @@ instead of submitting an immediate order.
    `rule_active=true`, and never claim an order or fill merely because the rule
    became active.
 
+
+#### Conditional AST construction contract
+
+The recursive MCP schema is a union represented as one object, so optional
+fields visible in the schema do **not** belong to every node. Before the one
+allowed tool call, recursively check each node against this field ownership:
+
+- `MARKET`: exactly `type`, `field`. Never add `unit`; `LAST_PRICE`, `OPEN`,
+  `HIGH`, `LOW`, and `CLOSE` imply `PRICE`, while `VOLUME` implies `VOLUME`.
+- `LITERAL`: exactly `type`, `value`, `unit`. A stock price written with `원`
+  uses `unit=PRICE`, not `KRW`; `KRW` is for cash/market-value amounts.
+- `INDICATOR`: `type`, `name`, `timeframe`, with optional `output`, `parameters`,
+  `source`, or `provider`. Never add `field`, `value`, or `unit`.
+- `COMPARISON`/`CROSS`/`ARITHMETIC`: exactly `type`, `operator`, `left`, `right`.
+- `LOGICAL`: exactly `type`, `operator`, `children`; `NOT`: exactly `type`,
+  `operand`; `PORTFOLIO`: exactly `type`, `field`.
+
+Use these canonical patterns:
+
+```json
+{"condition":{"type":"COMPARISON","operator":"GTE","left":{"type":"MARKET","field":"LAST_PRICE"},"right":{"type":"LITERAL","value":"70000","unit":"PRICE"}},"evaluation":{"clock":"QUOTE"}}
+```
+
+```json
+{"condition":{"type":"COMPARISON","operator":"GT","left":{"type":"MARKET","field":"CLOSE"},"right":{"type":"INDICATOR","name":"SMA","timeframe":"1D","parameters":{"PERIOD":5}}},"evaluation":{"clock":"BAR_CLOSE","primary_timeframe":"1D"}}
+```
+
+For a Bollinger upper band use `name=BOLLINGER`, `output=UPPER`, and
+`parameters={"PERIOD":20,"STDDEV":2}`. For an explicit conditional limit
+order, set `action.order_type=LIMIT` and copy the exact stated price to
+`action.limit_price`; otherwise use `MARKET` and omit `limit_price`.
+
+`CROSS` is edge-triggered and always uses `BAR_CLOSE` plus an explicit
+`primary_timeframe`. If a price-only cross instruction omits its timeframe,
+return `candidate=null` with `TIMEFRAME_REQUIRED_FOR_CROSS`; never guess a bar
+interval. Perform this field/units/clock self-check before calling the tool.
+The tool may be called exactly once, so do not send a draft AST as a probe.
+Use the trusted `max_data_age_seconds=30` default and never reduce it unless the
+user explicitly asks for a stricter freshness window.
+Rules with no explicit expiry remain active for 10 minutes. The independent worker
+checks them every 30 seconds and stops after trigger or expiry.
+
 For the immediate-order marker:
 
 1. Read only the exact original instruction and the frozen scope references in

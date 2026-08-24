@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import sys
 from contextlib import nullcontext
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
@@ -16,8 +18,18 @@ sys.path.insert(0, str(TRADING_ROOT / "api"))
 from conditional_rule_routes import (  # noqa: E402
     _assert_confirmed_rule_quantity,
 )
-from rules.admission import _conditional_order_payload  # noqa: E402
+from rules.admission import (  # noqa: E402
+    ConditionalRuleAdmissionError,
+    _assert_recent_evaluation,
+    _conditional_order_payload,
+)
 from directives.contracts import DirectiveAction, UserDirectiveRequest  # noqa: E402
+from directives.market_data import (  # noqa: E402
+    MarketDataError,
+    TrustedQuote,
+    validate_quote,
+)
+from directives.repository import InstrumentRef  # noqa: E402
 from directives.service import DirectiveServiceError  # noqa: E402
 from orchestration.conditional_rules import ConditionalRuleSpec  # noqa: E402
 
@@ -119,3 +131,46 @@ def test_confirmed_limit_price_is_passed_to_the_paper_directive() -> None:
 
     assert payload["order_type"] == "LIMIT"
     assert payload["limit_price"] == "299500"
+
+
+def test_conditional_evaluation_must_still_be_recent_at_trading_admission() -> None:
+    spec = _spec(sizing_type="FIXED_SHARES", sizing_value="1")
+    now = datetime(2026, 8, 24, 3, 30, tzinfo=timezone.utc)
+
+    _assert_recent_evaluation(spec, now - timedelta(seconds=29), now=now)
+    with pytest.raises(ConditionalRuleAdmissionError) as raised:
+        _assert_recent_evaluation(spec, now - timedelta(seconds=31), now=now)
+
+    assert raised.value.code == "TRADING_CONDITIONAL_RULE_EVALUATION_STALE"
+
+
+def test_conditional_limit_quote_can_use_rule_lifetime_cap_only_with_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRADING_MARKET_QUOTE_MAX_AGE_SECONDS", "30")
+    now = datetime(2026, 8, 24, 3, 30, tzinfo=timezone.utc)
+    instrument = InstrumentRef(uuid4(), "000660", Decimal("1"), None, "KRW")
+    quote = TrustedQuote(
+        str(instrument.instrument_id),
+        instrument.symbol,
+        now - timedelta(seconds=100),
+        Decimal("1678000"),
+        Decimal("1679000"),
+        Decimal("100"),
+        Decimal("100"),
+        "fixture",
+    )
+
+    with pytest.raises(MarketDataError) as raised:
+        validate_quote(quote, instrument, now=now)
+    assert raised.value.code == "TRADING_MARKET_QUOTE_STALE"
+
+    assert (
+        validate_quote(
+            quote,
+            instrument,
+            now=now,
+            max_age_seconds=600,
+        )
+        is quote
+    )

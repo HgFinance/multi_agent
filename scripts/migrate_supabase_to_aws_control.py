@@ -68,6 +68,23 @@ EXCLUDED_SCHEMAS = frozenset(
 )
 NO_BASE_TABLE_SCHEMAS = frozenset({"public", "api"})
 
+# This tool records its own run in audit.traces on the target.  That row has no
+# source counterpart, so every read of the target must filter it out -- without
+# this, a successful run reports its own bookkeeping as a checksum mismatch
+# (status PARTIAL, exit 1) and a re-run rejects it as unexplained target-only
+# data, permanently wedging the migration.
+MIGRATION_TRACE_TYPE = "DATA_MIGRATION"
+TARGET_ONLY_EXCLUSIONS: dict[str, str] = {
+    "audit.traces": f"trace_type <> '{MIGRATION_TRACE_TYPE}'",
+}
+
+
+def _where_clause(table: "TableInfo", apply_exclusion: bool) -> str:
+    if not apply_exclusion:
+        return ""
+    predicate = TARGET_ONLY_EXCLUSIONS.get(table.qualified)
+    return f" where {predicate}" if predicate else ""
+
 
 def _load_bootstrap_module():
     spec = importlib.util.spec_from_file_location(
@@ -100,6 +117,7 @@ class ColumnInfo:
     not_null: bool
     is_generated: bool
     ordinal: int
+    identity: str = ""  # '' none, 'a' GENERATED ALWAYS, 'd' BY DEFAULT
 
 
 @dataclass(frozen=True)
@@ -147,6 +165,16 @@ class TableInfo:
     def all_column_names(self) -> tuple[str, ...]:
         return tuple(column.name for column in self.columns)
 
+    @property
+    def has_always_identity(self) -> bool:
+        """True when a column is GENERATED ALWAYS AS IDENTITY.
+
+        Preserving the source's exact key values then requires OVERRIDING
+        SYSTEM VALUE; without it PostgreSQL rejects the insert outright.
+        """
+
+        return any(column.identity == "a" for column in self.columns)
+
 
 def _discover_base_table_schemas(cursor) -> dict[str, list[str]]:
     cursor.execute(
@@ -170,7 +198,7 @@ def _introspect_table(cursor, schema: str, table: str) -> TableInfo:
     cursor.execute(
         """
         select a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull,
-               a.attgenerated <> '', a.attnum
+               a.attgenerated <> '', a.attnum, a.attidentity
           from pg_attribute a
           join pg_class c on c.oid = a.attrelid
           join pg_namespace n on n.oid = c.relnamespace
@@ -187,6 +215,7 @@ def _introspect_table(cursor, schema: str, table: str) -> TableInfo:
             not_null=bool(row[2]),
             is_generated=bool(row[3]),
             ordinal=int(row[4]),
+            identity=str(row[5] or ""),
         )
         for row in cursor.fetchall()
     )
@@ -544,13 +573,55 @@ def is_known_seed_row(table: TableInfo, pk_values: tuple[Any, ...], seed: SeedId
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Scope manifest
+# ---------------------------------------------------------------------------
+#
+# Measured 2026-08-24: hosted Supabase holds 245 domain rows while AWS control
+# holds 135,833 -- control has been the operational source of truth for most of
+# the estate, and only a handful of tables still carry Supabase-only rows.  A
+# blanket "everything must match" rule therefore aborts on ~135,800 legitimate
+# target-only rows and can never complete.  Rather than guess which side wins
+# per table, every table must be declared in a reviewed manifest.  An
+# undeclared table is fatal: fail-closed, and the operator has to decide.
+
+POLICY_COPY = "COPY"
+POLICY_CONTROL_AUTHORITATIVE = "CONTROL_AUTHORITATIVE"
+VALID_POLICIES = frozenset({POLICY_COPY, POLICY_CONTROL_AUTHORITATIVE})
+
+
+def load_scope(path: Path) -> dict[str, str]:
+    """Load the reviewed per-table policy manifest."""
+
+    try:
+        raw = json.loads(path.read_text())
+    except FileNotFoundError:
+        raise MigrationError("scope manifest not found at the given path")
+    except json.JSONDecodeError:
+        raise MigrationError("scope manifest is not valid JSON")
+    tables = raw.get("tables")
+    if not isinstance(tables, dict) or not tables:
+        raise MigrationError("scope manifest has no 'tables' mapping")
+    scope: dict[str, str] = {}
+    for qualified, policy in tables.items():
+        if policy not in VALID_POLICIES:
+            raise MigrationError(
+                f"scope manifest gives {qualified} an unknown policy; "
+                f"expected one of {sorted(VALID_POLICIES)}"
+            )
+        scope[str(qualified)] = str(policy)
+    return scope
+
+
 @dataclass
 class TableClassification:
     table: TableInfo
+    policy: str = POLICY_COPY
     to_insert: list[tuple[Any, ...]] = field(default_factory=list)
     already_present: int = 0
     conflicts: list[str] = field(default_factory=list)
     unexplained_target_only: list[str] = field(default_factory=list)
+    divergences: list[str] = field(default_factory=list)
     source_count: int = 0
     target_count: int = 0
 
@@ -603,23 +674,38 @@ def _known_seed_pk_set(cursor, table: TableInfo, seed: SeedIdentity) -> set[Any]
     return values
 
 
+def _differing_columns(
+    table: TableInfo, left: Sequence[Any], right: Sequence[Any]
+) -> list[str]:
+    """Column NAMES that differ -- never the values, which may be personal."""
+
+    return [
+        name
+        for name, a, b in zip(table.all_column_names, left, right)
+        if row_digest([a]) != row_digest([b])
+    ]
+
+
 def classify_table(
     source_cursor,
     target_cursor,
     table: TableInfo,
     seed: SeedIdentity,
+    policy: str = POLICY_COPY,
+    accepted_drift: frozenset[str] = frozenset(),
 ) -> TableClassification:
     pk_columns = table.primary_key_columns
     all_columns = table.all_column_names
     order_clause = ", ".join(f'"{col}"' for col in pk_columns)
     select_clause = ", ".join(f'"{col}"' for col in all_columns)
-    query = (
-        f'select {select_clause} from "{table.schema}"."{table.name}" '
-        f"order by {order_clause}"
-    )
+    def _query(apply_exclusion: bool) -> str:
+        return (
+            f'select {select_clause} from "{table.schema}"."{table.name}"'
+            f"{_where_clause(table, apply_exclusion)} order by {order_clause}"
+        )
 
-    def _keyed_rows(cursor) -> dict[Any, tuple[Any, ...]]:
-        cursor.execute(query)
+    def _keyed_rows(cursor, apply_exclusion: bool = False) -> dict[Any, tuple[Any, ...]]:
+        cursor.execute(_query(apply_exclusion))
         rows: dict[Any, tuple[Any, ...]] = {}
         pk_indexes = [all_columns.index(col) for col in pk_columns]
         for row in cursor.fetchall():
@@ -630,12 +716,27 @@ def classify_table(
         return rows
 
     source_rows = _keyed_rows(source_cursor)
-    target_rows = _keyed_rows(target_cursor)
+    target_rows = _keyed_rows(target_cursor, apply_exclusion=True)
     known_seed_pks = _known_seed_pk_set(target_cursor, table, seed)
 
     result = TableClassification(
-        table=table, source_count=len(source_rows), target_count=len(target_rows)
+        table=table,
+        policy=policy,
+        source_count=len(source_rows),
+        target_count=len(target_rows),
     )
+
+    if policy == POLICY_CONTROL_AUTHORITATIVE:
+        # control is declared the source of truth here: never write, and treat
+        # target-only rows as expected.  Real differences are still surfaced so
+        # a reviewer sees them -- they just do not block the run.
+        for key, values in source_rows.items():
+            if key not in target_rows:
+                result.divergences.append(f"source-only pk={key}")
+            elif row_digest(values) != row_digest(target_rows[key]):
+                columns = _differing_columns(table, values, target_rows[key])
+                result.divergences.append(f"pk={key} differs in {','.join(columns)}")
+        return result
 
     for key, values in source_rows.items():
         if key not in target_rows:
@@ -643,8 +744,15 @@ def classify_table(
             continue
         if row_digest(values) == row_digest(target_rows[key]):
             result.already_present += 1
-        else:
-            result.conflicts.append(str(key))
+            continue
+        columns = _differing_columns(table, values, target_rows[key])
+        remaining = [c for c in columns if f"{table.qualified}:{c}" not in accepted_drift]
+        if not remaining:
+            # every differing column was explicitly accepted as server-generated
+            # metadata by the operator; the row is the same row.
+            result.already_present += 1
+            continue
+        result.conflicts.append(f"pk={key} differs in {','.join(remaining)}")
 
     for key in target_rows:
         if key in source_rows:
@@ -674,14 +782,18 @@ def copy_table(target_connection, table: TableInfo, rows: Sequence[tuple[Any, ..
 
     with target_connection.cursor() as cursor:
         bootstrap._set_transaction_timeouts(cursor)
+        overriding = " overriding system value" if table.has_always_identity else ""
         execute_values(
             cursor,
-            f'insert into "{table.schema}"."{table.name}" ({column_list}) values %s',
+            f'insert into "{table.schema}"."{table.name}" ({column_list})'
+            f"{overriding} values %s",
             payload,
             page_size=500,
         )
         _fixup_sequences(cursor, table)
-    target_connection.commit()
+    # No commit here.  The whole copy is one transaction owned by run() so that
+    # a failure mid-way leaves control exactly as it was, rather than committed
+    # up to some arbitrary table boundary.
 
 
 def _fixup_sequences(cursor, table: TableInfo) -> None:
@@ -697,7 +809,11 @@ def _fixup_sequences(cursor, table: TableInfo) -> None:
             f'select coalesce(max("{column}"), 0) from "{table.schema}"."{table.name}"'
         )
         max_value = cursor.fetchone()[0]
-        cursor.execute("select setval(%s, %s, true)", (sequence_name, max(max_value, 1)))
+        if not max_value:
+            # No rows: leave the sequence untouched.  setval(seq, 1, true) would
+            # consume value 1 and make the next insert start at 2.
+            continue
+        cursor.execute("select setval(%s, %s, true)", (sequence_name, max_value))
 
 
 # ---------------------------------------------------------------------------
@@ -705,7 +821,9 @@ def _fixup_sequences(cursor, table: TableInfo) -> None:
 # ---------------------------------------------------------------------------
 
 
-def compute_table_checksum(cursor, table: TableInfo) -> tuple[str, int]:
+def compute_table_checksum(
+    cursor, table: TableInfo, apply_exclusion: bool = False
+) -> tuple[str, int]:
     all_columns = table.all_column_names
     order_clause = ", ".join(f'"{col}"' for col in table.primary_key_columns)
     select_clause = ", ".join(f'"{col}"' for col in all_columns)
@@ -714,8 +832,8 @@ def compute_table_checksum(cursor, table: TableInfo) -> tuple[str, int]:
     with cursor.connection.cursor(name=f"migration_hash_{table.schema}_{table.name}") as named:
         named.itersize = 2000
         named.execute(
-            f'select {select_clause} from "{table.schema}"."{table.name}" '
-            f"order by {order_clause}"
+            f'select {select_clause} from "{table.schema}"."{table.name}"'
+            f"{_where_clause(table, apply_exclusion)} order by {order_clause}"
         )
         for row in named:
             digest.update(row_digest(row).encode("utf-8"))
@@ -747,9 +865,20 @@ DOMAIN_INVARIANT_QUERIES: dict[str, str] = {
 }
 
 
-def run_domain_invariants(source_cursor, target_cursor) -> list[str]:
+def run_domain_invariants(
+    source_cursor, target_cursor, copy_tables: set[str] | None = None
+) -> list[str]:
+    """Compare ledger/order invariants for tables the source actually owns.
+
+    Tables declared CONTROL_AUTHORITATIVE are skipped: control holds rows that
+    hosted Supabase never had, so an equality check there always fails and
+    would drown the real signal.
+    """
+
     problems: list[str] = []
     for qualified, query in DOMAIN_INVARIANT_QUERIES.items():
+        if copy_tables is not None and qualified not in copy_tables:
+            continue
         source_cursor.execute(query)
         source_value = source_cursor.fetchone()
         target_cursor.execute(query)
@@ -791,6 +920,26 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="operator attestation: snapshot id or note proving control was backed up",
     )
+    parser.add_argument(
+        "--scope-file",
+        default="",
+        help=(
+            "path to the reviewed per-table policy manifest; required for "
+            "--execute.  Without it a dry-run reports the manifest that would "
+            "be needed instead of guessing one."
+        ),
+    )
+    parser.add_argument(
+        "--accept-metadata-drift",
+        action="append",
+        default=[],
+        metavar="schema.table:column",
+        help=(
+            "explicitly accept that a server-generated column differs between "
+            "source and target for otherwise-identical rows.  Repeatable.  "
+            "Nothing is ignored unless named here."
+        ),
+    )
     return parser
 
 
@@ -806,7 +955,19 @@ def _open_connections():
         with connection.cursor() as cursor:
             cursor.execute("set time zone 'UTC'")
         connection.commit()
+    # Structurally guarantee this tool can never write to hosted Supabase.
+    # psycopg2 applies this per transaction rather than as a session-level SET;
+    # a session-level read-only SET leaks through the Supabase connection
+    # pooler and has previously frozen unrelated workloads sharing the pool.
+    source.set_session(readonly=True)
     return source, target
+
+
+def _guard_read_cursor(cursor) -> None:
+    """Bound every long scan so a slow read cannot stall the lock queue."""
+
+    cursor.execute("set local statement_timeout = '600s'")
+    cursor.execute("set local lock_timeout = '15s'")
 
 
 def run(arguments: argparse.Namespace) -> dict[str, Any]:
@@ -845,7 +1006,9 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
                 for key in order:
                     table = source_schema[key]
                     source_hash, source_rows = compute_table_checksum(source_cursor, table)
-                    target_hash, target_rows = compute_table_checksum(target_cursor, table)
+                    target_hash, target_rows = compute_table_checksum(
+                        target_cursor, table, apply_exclusion=True
+                    )
                     report["tables"].append(
                         {
                             "table": table.qualified,
@@ -856,14 +1019,61 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
                     )
                 return report
 
-            classifications: dict[tuple[str, str], TableClassification] = {}
-            for key in order:
-                classifications[key] = classify_table(
-                    source_cursor, target_cursor, source_schema[key], seed
+            scope_path = arguments.scope_file.strip()
+            if execute and not scope_path:
+                raise MigrationError(
+                    "--execute requires --scope-file; every table must carry a "
+                    "reviewed policy before any row is written"
+                )
+            scope = load_scope(Path(scope_path)) if scope_path else {}
+            accepted_drift = frozenset(arguments.accept_metadata_drift)
+
+            undeclared = [
+                f"{key[0]}.{key[1]}" for key in order if f"{key[0]}.{key[1]}" not in scope
+            ]
+            if scope and undeclared:
+                raise MigrationError(
+                    f"{len(undeclared)} table(s) have no policy in the scope "
+                    f"manifest, e.g. {', '.join(undeclared[:5])}; declare each "
+                    "as COPY or CONTROL_AUTHORITATIVE"
                 )
 
+            classifications: dict[tuple[str, str], TableClassification] = {}
+            for key in order:
+                qualified = f"{key[0]}.{key[1]}"
+                classifications[key] = classify_table(
+                    source_cursor,
+                    target_cursor,
+                    source_schema[key],
+                    seed,
+                    policy=scope.get(qualified, POLICY_COPY),
+                    accepted_drift=accepted_drift,
+                )
+
+            if not scope:
+                # No manifest: report what one would have to say, and stop.
+                # Proposing a policy here would be guessing which database wins.
+                return {
+                    "mode": "dry-run",
+                    "migration_readiness": "SCOPE MANIFEST REQUIRED",
+                    "tables_in_scope": len(order),
+                    "undeclared_tables": len(undeclared),
+                    "needs_decision": [
+                        {
+                            "table": classifications[key].table.qualified,
+                            "source_rows": classifications[key].source_count,
+                            "target_rows": classifications[key].target_count,
+                        }
+                        for key in order
+                        if classifications[key].source_count
+                        or classifications[key].target_count
+                    ],
+                }
+
             conflict_tables = [
-                c for c in classifications.values() if c.conflicts or c.unexplained_target_only
+                c
+                for c in classifications.values()
+                if c.policy == POLICY_COPY and (c.conflicts or c.unexplained_target_only)
             ]
             report: dict[str, Any] = {
                 "mode": "execute" if execute else "dry-run",
@@ -881,8 +1091,10 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
                         "table": classifications[key].table.qualified,
                         "source_rows": classifications[key].source_count,
                         "target_rows": classifications[key].target_count,
+                        "policy": classifications[key].policy,
                         "to_insert": len(classifications[key].to_insert),
                         "already_present": classifications[key].already_present,
+                        "divergences": classifications[key].divergences,
                     }
                     for key in order
                 ],
@@ -909,16 +1121,38 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
                 )
             target.commit()
 
+            with target.cursor() as constraint_cursor:
+                # Deferring lets the single transaction insert in FK order
+                # without tripping on any deferrable cycle in the graph.
+                constraint_cursor.execute("set constraints all deferred")
+            copied_tables = 0
             for key in order:
-                copy_table(target, source_schema[key], classifications[key].to_insert)
+                rows = classifications[key].to_insert
+                if not rows:
+                    continue
+                copy_table(target, source_schema[key], rows)
+                copied_tables += 1
+            target.commit()
 
+            copy_keys = [
+                key for key in order if classifications[key].policy == POLICY_COPY
+            ]
             with source.cursor() as sc, target.cursor() as tc:
-                invariant_problems = run_domain_invariants(sc, tc)
+                _guard_read_cursor(sc)
+                _guard_read_cursor(tc)
+                invariant_problems = run_domain_invariants(
+                    sc, tc, {f"{k[0]}.{k[1]}" for k in copy_keys}
+                )
                 level_mismatches: list[str] = []
-                for key in order:
+                # A CONTROL_AUTHORITATIVE table is expected to differ -- that is
+                # the whole point of the declaration -- so comparing its
+                # checksum would report a mismatch on every healthy run.
+                for key in copy_keys:
                     table = source_schema[key]
                     source_hash, source_rows = compute_table_checksum(sc, table)
-                    target_hash, target_rows = compute_table_checksum(tc, table)
+                    target_hash, target_rows = compute_table_checksum(
+                        tc, table, apply_exclusion=True
+                    )
                     if source_hash != target_hash or source_rows != target_rows:
                         level_mismatches.append(table.qualified)
 

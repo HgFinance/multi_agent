@@ -61,6 +61,30 @@ def _conditional_order_payload(
     }
 
 
+
+def _assert_recent_evaluation(
+    spec: ConditionalRuleSpec,
+    evaluated_at: datetime,
+    *,
+    now: datetime,
+) -> None:
+    if evaluated_at.tzinfo is None:
+        raise ConditionalRuleAdmissionError(
+            "TRADING_CONDITIONAL_RULE_EVALUATION_TIME_INVALID",
+            "conditional evaluation timestamp is not timezone-aware",
+            500,
+        )
+    age = (
+        now.astimezone(timezone.utc)
+        - evaluated_at.astimezone(timezone.utc)
+    ).total_seconds()
+    if age < -5 or age > spec.evaluation.max_data_age_seconds:
+        raise ConditionalRuleAdmissionError(
+            "TRADING_CONDITIONAL_RULE_EVALUATION_STALE",
+            "conditional evaluation is outside the confirmed freshness window",
+            409,
+        )
+
 class PostgresConditionalRuleAdmissionRepository:
     def __init__(self, dsn: str, *, role: str = "svc_trading_api") -> None:
         if not dsn.strip():
@@ -98,10 +122,12 @@ class PostgresConditionalRuleAdmissionRepository:
                                rule.rule_id,rule.user_id,rule.fund_id,rule.book_id,
                                rule.state,rule.current_version,rule.execution_mode,
                                rule.confirmation_sha256,
-                               version.spec,version.spec_sha256
+                               version.spec,version.spec_sha256,evaluation.created_at
                           from execution.conditional_rule_executions execution
                           join execution.conditional_rule_triggers trigger
                             on trigger.trigger_id=execution.trigger_id
+                          join execution.conditional_rule_evaluations evaluation
+                            on evaluation.evaluation_id=trigger.evaluation_id
                           join execution.conditional_trade_rules rule
                             on rule.rule_id=execution.rule_id
                           join execution.conditional_trade_rule_versions version
@@ -146,6 +172,7 @@ class PostgresConditionalRuleAdmissionRepository:
             confirmation_sha256,
             raw_spec,
             spec_sha256,
+            evaluation_created_at,
         ) = row
         if execution_state not in {"PENDING", "SUBMITTING", "SUBMITTED"}:
             raise ConditionalRuleAdmissionError(
@@ -198,6 +225,7 @@ class PostgresConditionalRuleAdmissionRepository:
                 "stored conditional rule payload does not match its fingerprint",
                 500,
             )
+        _assert_recent_evaluation(spec, evaluation_created_at, now=current)
         expected_scope = (
             str(spec.authority.user_id),
             str(spec.authority.fund_id),

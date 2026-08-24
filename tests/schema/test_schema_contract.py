@@ -231,6 +231,22 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  # from immediate USER_DIRECTIVE requests and automated
                  # strategy OrderIntents.
                  "20260820000300_conditional_paper_rules.sql",
+                 # 사용자 주문 요청과 브로커 주문 식별자를 상관키로 묶는다.
+                 "20260820000400_user_order_broker_correlation.sql",
+                 # LS PAPER 브로커의 주문 접수 응답을 멱등하게 기록한다.
+                 "20260820000500_ls_paper_broker_order_ack.sql",
+                 # 8개 부서 로스터를 재정합한다(on conflict do update).
+                 "20260824000100_workforce_roster_full_reconcile.sql",
+                 # MemoHarness 경험 축적 저장소. 20260824000100 과 버전이
+                 # 충돌해 000150 으로 옮겼다 - 원본 000100 은 이미 hosted
+                 # Supabase 에 workforce 로스터로 기록되어 있어 그쪽을
+                 # 건드리면 이력이 어긋난다.
+                 "20260824000150_memo_harness_experience_bank.sql",
+                 # 보존 워커에게 관계 한정 delete 만 준다.
+                 "20260824000200_memo_harness_retention_privileges.sql",
+                 # 복합 PAPER 요청은 기존 즉시주문/조건부규칙의 합성일 뿐
+                 # 두 번째 주문 원장이 아니다.
+                 "20260824000600_compound_paper_order_bundles.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 
@@ -1041,7 +1057,10 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             # +3 (2026-08-18): durable CEO/Hermes PAPER-order requests,
             # append-only interpretations, and transition audit events.
             # +7: 20260820000300_conditional_paper_rules.sql
-            "execution": 30,
+            # +1: 20260824000600_compound_paper_order_bundles.sql — 복합
+            # PAPER 요청은 기존 즉시주문/조건부규칙의 합성이며 두 번째
+            # 주문 원장이 아니다.
+            "execution": 31,
             "governance": 20,
             # +1 (재일, 2026-08-10): 공장 재편으로 실험 사전등록/결과 원장 확장
             # +1 (재일, 2026-08-16): 사전 데이터 타당성 점검을 trial에서 분리

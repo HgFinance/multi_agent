@@ -39,6 +39,7 @@ from orchestration.conditional_rules import (
     IndicatorValue,
     PostgresRuleWorkerStore,
     RuleState,
+    RuleWorkerStoreError,
     SubmitReadyExecution,
     Timeframe,
     TriggerClaim,
@@ -116,6 +117,7 @@ class RuntimeInputs:
 
 class WorkerStore(Protocol):
     def expire_due(self) -> int: ...
+    def activate_ready_bundles(self, *, limit: int = 100) -> int: ...
     def list_active(self, *, limit: int = 100) -> list[ActiveRule]: ...
     def list_claimed(
         self, *, limit: int = 100
@@ -821,6 +823,19 @@ class ConditionalRuleWorker:
             "submitted": 0,
             "errors": 0,
         }
+        # This is a durable state transition, not a second order path.  The
+        # existing conditional-rule worker activates a pending rule only after
+        # the linked immediate PAPER request is COMPLETED.
+        activate_ready_bundles = getattr(self.store, "activate_ready_bundles", None)
+        if callable(activate_ready_bundles):
+            try:
+                activate_ready_bundles(limit=self.batch_size)
+            except RuleWorkerStoreError as exc:
+                counts["errors"] += 1
+                LOG.warning(
+                    "deferred compound PAPER activation unavailable",
+                    extra={"code": exc.code, "retryable": exc.retryable},
+                )
         for execution in self.store.list_submit_ready(limit=self.batch_size):
             counts["retried"] += 1
             counts["submitted"] += int(self._submit(execution))
@@ -896,7 +911,7 @@ def _settings() -> tuple[PostgresRuleWorkerStore, HttpRuntimeClient, float, int]
         market_api_url=os.getenv("MARKET_API_URL", "http://market-api:8036"),
         timeout_seconds=float(os.getenv("CONDITIONAL_RULE_HTTP_TIMEOUT_SECONDS", "8")),
     )
-    poll = max(float(os.getenv("CONDITIONAL_RULE_WORKER_POLL_SECONDS", "1")), 0.1)
+    poll = max(float(os.getenv("CONDITIONAL_RULE_WORKER_POLL_SECONDS", "30")), 0.1)
     batch = max(int(os.getenv("CONDITIONAL_RULE_WORKER_BATCH_SIZE", "100")), 1)
     return store, client, poll, batch
 
