@@ -1557,6 +1557,13 @@ services:
       DATABASE_URL: ${DATABASE_URL:-}
       RISK_QA_DATABASE_URL: ${RISK_QA_DATABASE_URL:-}
       ACCOUNTING_API_URL: ${ACCOUNTING_API_URL:-http://accounting-api:8000}
+      # Accounting/Portfolio primary tasks get a read-only snapshot attached
+      # to their task body (orchestration/accounting_advisory_context.py) -
+      # that profile has no shell tool, so this is its only path to confirmed
+      # NAV/PnL/cash figures. Same canonical demo PAPER fund the reconciler
+      # and dashboard already use.
+      ACCOUNTING_ADVISORY_FUND_ID: ${ACCOUNTING_ADVISORY_FUND_ID:-3838f7d6-0c7c-4e54-85f3-316a451e7eeb}
+      PORTFOLIO_BFF_INTERNAL_URL: ${PORTFOLIO_BFF_INTERNAL_URL:-http://portfolio-bff:8000}
     mem_limit: 512m
     mem_reservation: 128m
     cpus: 0.5
@@ -1621,7 +1628,10 @@ services:
       - .:/opt/hgfinance:ro
     environment:
       PYTHONPATH: /opt/hgfinance
-      MEMOHARNESS_D5_DATABASE_URL: ${MEMOHARNESS_D5_DATABASE_URL:-${CONTROL_DATABASE_URL:-${DATABASE_URL:-}}}
+      # D5 is part of the private operational/control plane. Do not let a
+      # stale hosted-Supabase D5 override point the maintenance worker at a
+      # database that does not contain the Experience Bank relation.
+      MEMOHARNESS_D5_DATABASE_URL: ${DATABASE_URL:-}
       MEMOHARNESS_D5_RETENTION_ENABLED: ${MEMOHARNESS_D5_RETENTION_ENABLED:-true}
       MEMOHARNESS_D5_RETENTION_INTERVAL_SECONDS: ${MEMOHARNESS_D5_RETENTION_INTERVAL_SECONDS:-86400}
       MEMOHARNESS_D5_RETENTION_BATCH_SIZE: ${MEMOHARNESS_D5_RETENTION_BATCH_SIZE:-500}

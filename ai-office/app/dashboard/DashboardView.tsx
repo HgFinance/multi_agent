@@ -2,7 +2,6 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useSyncExternalStore } from "react";
-import { COMPANY } from "../../company.config";
 import LivePortfolioPanel from "../components/LivePortfolioPanel";
 import { fetchHermesKanban, type HermesKanbanCard } from "../lib/kanbanClient";
 import { KANBAN_BASE_URL, resolveKanbanUrl } from "../lib/kanbanUrl";
@@ -46,7 +45,7 @@ function usePageHost(): string {
   );
 }
 
-function RecentOutputsPanel() {
+export function RecentOutputsPanel() {
   const pageHost = usePageHost();
   const kanbanUrl = useMemo(
     () => resolveKanbanUrl(KANBAN_BASE_URL, pageHost || undefined),
@@ -153,23 +152,8 @@ export default function DashboardView() {
           <LivePortfolioPanel />
         </div>
 
-        <RecentOutputsPanel />
       </main>
 
-      <footer className="border-t border-outline-variant bg-surface-container-lowest w-full">
-        <div className="max-w-app mx-auto px-margin-mobile md:px-margin-desktop py-4 flex justify-between items-center gap-4 flex-wrap text-label-md font-label-md">
-          <b className="text-primary">{COMPANY.name}</b>
-          <span className="text-on-surface-variant">
-            © {new Date().getFullYear()} {COMPANY.name}. Operational Intelligence Layer.
-          </span>
-          {/* 아직 화면이 없어 링크로 만들지 않는다 */}
-          <span className="flex gap-4 text-on-surface-variant">
-            <span>Privacy Policy</span>
-            <span>Compliance</span>
-            <span>API Docs</span>
-          </span>
-        </div>
-      </footer>
     </>
   );
 }

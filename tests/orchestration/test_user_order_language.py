@@ -69,6 +69,14 @@ from orchestration.user_order_language import (
             OrderType.LIMIT,
             "270000",
         ),
+        (
+            "124500 아이티센글로벌 시장가로 30주 매수해줘",
+            "124500",
+            OrderSide.BUY,
+            "30",
+            OrderType.MARKET,
+            None,
+        ),
     ],
 )
 def test_deterministic_candidate_builds_exact_verified_order_evidence(
@@ -307,6 +315,27 @@ def test_place_order_accepts_redundant_exact_action_side_evidence() -> None:
     assert isinstance(result, VerifiedPaperDirective)
     assert result.payload is not None
     assert result.payload.quantity == "3"
+
+
+def test_place_order_accepts_exact_semantic_tokens_from_inflected_command() -> None:
+    raw = "124500 아이티센글로벌 시장가로 30주 매수해줘"
+    result = _execute_place(
+        raw,
+        _place_candidate(
+            raw,
+            instrument="아이티센글로벌",
+            side_text="매수",
+            side=OrderSide.BUY,
+            quantity_text="30",
+            quantity=30,
+            order_type_text="시장가",
+            order_type=OrderType.MARKET,
+        ),
+    )
+
+    assert result.payload is not None
+    assert result.payload.instrument_mention == "124500"
+    assert result.payload.quantity == "30"
 
 
 def test_exact_user_example_compiles_to_unresolved_paper_payload() -> None:

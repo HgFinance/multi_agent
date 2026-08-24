@@ -58,6 +58,10 @@ services:
       TRADING_INTERNAL_SERVICE_AUTH_ISSUER: ${TRADING_INTERNAL_SERVICE_AUTH_ISSUER:-hedgefund-service-issuer}
       TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE: ${TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE:-trading-api}
       MARKET_API_URL: ${MARKET_API_URL:-http://market-api:8036}
+      # Natural-language admission and Kanban binding add processing time
+      # before Trading reads L1. Keep a bounded cushion while still rejecting
+      # genuinely stale market data.
+      TRADING_MARKET_QUOTE_MAX_AGE_SECONDS: ${TRADING_MARKET_QUOTE_MAX_AGE_SECONDS:-30}
     ports:
       - "127.0.0.1:8045:8000"   # 로컬 전용 - 외부 노출 금지 (risk-api 8041 이하 같은 정책)
     healthcheck:

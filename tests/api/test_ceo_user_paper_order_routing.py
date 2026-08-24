@@ -150,8 +150,22 @@ def test_exact_sample_is_durably_bound_before_either_card_is_released(
     assert response["task"]["status"] == "done"
 
 
+@pytest.mark.parametrize(
+    ("raw", "instrument", "quantity"),
+    [
+        ("<@1536991290842030130> 삼성전자 3주 매수", "삼성전자", "3"),
+        (
+            "124500 아이티센글로벌 시장가로 30주 매수해줘",
+            "124500 아이티센글로벌",
+            "30",
+        ),
+    ],
+)
 def test_unambiguous_production_order_uses_deterministic_fast_path(
     monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+    instrument: str,
+    quantity: str,
 ) -> None:
     events: list[str] = []
     repository = _OrderedRepository(events)
@@ -182,15 +196,15 @@ def test_unambiguous_production_order_uses_deterministic_fast_path(
         assert kwargs["root_task_id"] == "t_root1"
         assert kwargs["trading_task_id"] == "t_trade1"
         interpretation = kwargs["interpretation"]
-        assert interpretation["instrument_mention"] == "삼성전자"
+        assert interpretation["instrument_mention"] == instrument
         assert interpretation["side"] == "BUY"
-        assert interpretation["quantity"] == "3"
+        assert interpretation["quantity"] == quantity
         return execution
 
     monkeypatch.setattr(ceo, "process_deterministic_user_paper_order", process)
     response = ceo.ceo_query(
         ceo.CeoAsk(
-            query="<@1536991290842030130> 삼성전자 3주 매수",
+            query=raw,
             request_id="request-fast-100",
             fund_id=FUND_ID,
             book_id=BOOK_ID,

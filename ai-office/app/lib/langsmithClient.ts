@@ -1,0 +1,60 @@
+import { bffFetch } from "./bffClient";
+
+/**
+ * QA 부서 카드용 LangSmith trace 집계 client — BFF `/ui/qa/observability/langsmith` 조회.
+ *
+ * `LANGSMITH_API_KEY`는 BFF(`apps/api/langsmith_traces.py`) 밖으로 나가지 않는다.
+ * 브라우저는 날짜별 집계 숫자만 받는다 - AI Office CLAUDE.md 규칙대로 자격증명이
+ * 필요한 외부 서비스를 브라우저가 직접 부르지 않는다.
+ */
+
+export type LangsmithStatus = "READY" | "NOT_CONFIGURED" | "ERROR";
+
+export type LangsmithDailyTrace = {
+  date: string;
+  success: number;
+  error: number;
+};
+
+export type LangsmithDailyLatency = {
+  date: string;
+  p50_seconds: number | null;
+  p99_seconds: number | null;
+};
+
+export type LangsmithQaTraces = {
+  status: LangsmithStatus;
+  configured: boolean;
+  project: string | null;
+  days: number;
+  generated_at: string;
+  trace_count: number;
+  error_rate_pct: number | null;
+  daily: LangsmithDailyTrace[];
+  latency: LangsmithDailyLatency[];
+  detail?: string;
+};
+
+function explainError(body: unknown, status: number): string {
+  if (typeof body === "object" && body !== null && "detail" in body) {
+    const detail = (body as { detail?: unknown }).detail;
+    if (typeof detail === "string" && detail.trim()) return detail;
+  }
+  return `LangSmith 집계 조회 실패 (HTTP ${status})`;
+}
+
+export async function fetchQaLangsmithTraces(days = 7): Promise<LangsmithQaTraces> {
+  let response: Response;
+  try {
+    response = await bffFetch(`/ui/qa/observability/langsmith?days=${encodeURIComponent(String(days))}`, {
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+    });
+  } catch {
+    throw new Error("BFF에 연결하지 못해 LangSmith 집계를 가져오지 못했습니다.");
+  }
+
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(explainError(body, response.status));
+  return body as LangsmithQaTraces;
+}

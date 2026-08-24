@@ -84,6 +84,44 @@ def _resolved_owner(owner_id: object) -> str | None:
     return owner_id if isinstance(owner_id, str) and owner_id.strip() else None
 
 
+def _validate_discord_correlation(request: CanonicalIngress) -> None:
+    """Reject Discord ingress that cannot be replied to safely.
+
+    A Discord-origin request must carry the original message coordinates from
+    the gateway.  Guessing a channel or accepting a generic request id lets a
+    workflow complete successfully while making its final response
+    undeliverable.  Web ingress deliberately does not use this contract: its
+    mirror post supplies coordinates inside ``_ceo_query``.
+    """
+
+    if request.source != "discord":
+        return
+
+    missing = [
+        field
+        for field in ("discord_channel_id", "discord_message_id")
+        if not str(getattr(request, field) or "").strip()
+    ]
+    if missing:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "discord_correlation_metadata_required",
+                "missing": missing,
+            },
+        )
+
+    expected_request_id = f"discord:{request.discord_message_id}"
+    if request.request_id != expected_request_id:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "discord_correlation_request_id_mismatch",
+                "expected": expected_request_id,
+            },
+        )
+
+
 def _require_mirror_request_owner(
     request_id: str, owner_id: object
 ) -> Any:
@@ -355,6 +393,7 @@ def mirror_ingress(
         raise HTTPException(status_code=401, detail="discord_ingress_authentication_required")
     if request.source != "discord" and internal_discord:
         raise HTTPException(status_code=403, detail="discord_ingress_source_forbidden")
+    _validate_discord_correlation(request)
     owner = _resolved_owner(owner_id)
     if request.source != "discord" and owner_id is None:
         raise HTTPException(status_code=401, detail="portfolio_authentication_required")

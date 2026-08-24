@@ -1,0 +1,176 @@
+"""QA 부서 카드에 표시할 LangSmith trace 요약 - read-only, 자격증명 미노출.
+
+`orchestration/llm_observability.py`의 `publish_metric()`이 QA Worker 실행마다
+`schema_version: llm.performance.v1` 이벤트를 남긴다(prompt/output은 절대 전송하지
+않는다, 같은 파일 머리말). run 자체의 `tags`는 실측(2026-08-24, `list_runs`) 결과
+비어 있고 - `redacted_trace()`가 여는 `tracing_context`의 태그가 LangGraph 자체
+root run까지 전파되지 않는다 - 부서 구분은 오직 `extra.metadata.stage`에만 있다.
+그래서 여기서는 `stage:qa` 태그가 아니라 이 metadata 필드로 판정한다.
+
+같은 이유로 run 자체의 `error` 필드도 쓰지 않는다 - `publish_metric()`은
+`create_run()`에 `error=`를 넘기지 않으므로 항상 비어 있다. 실패 여부는
+`extra.metadata.status`(AgentLogsView.tsx의 `degraded` 판정과 같은 집합:
+DEGRADED/BLOCKED/ERROR)와 `error_count`로 판정한다.
+
+LangSmith는 선택적 추적 어댑터다(`docs/02-engineering/TECH_STACK_DECISIONS.md`).
+자격증명이 없거나 API 호출이 실패해도 이 모듈은 예외를 던지지 않고 상태 문자열로만
+알린다 - 관측 실패가 카드 렌더를 막으면 안 된다.
+"""
+
+from __future__ import annotations
+
+import os
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+from starlette.concurrency import run_in_threadpool
+
+_QA_STAGE = "qa"
+# AgentLogsView.tsx의 `degraded` 판정과 같은 집합 - 화면 전체에서 "실패"의 뜻을
+# 하나로 맞춘다.
+_ERROR_STATUSES = {"DEGRADED", "BLOCKED", "ERROR"}
+_MAX_DAYS = 30
+_MAX_RUNS = 3000
+
+
+def _configured() -> bool:
+    tracing = os.getenv("LANGSMITH_TRACING", "").casefold() in {"1", "true", "yes", "on"}
+    return tracing and bool(os.getenv("LANGSMITH_API_KEY", "").strip())
+
+
+def _percentile(values: list[float], pct: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return round(ordered[0], 3)
+    rank = (len(ordered) - 1) * pct
+    lower = int(rank)
+    upper = min(lower + 1, len(ordered) - 1)
+    if lower == upper:
+        return round(ordered[lower], 3)
+    interpolated = ordered[lower] + (ordered[upper] - ordered[lower]) * (rank - lower)
+    return round(interpolated, 3)
+
+
+def _day_range(days: int) -> list[str]:
+    today = datetime.now(timezone.utc).date()
+    return [(today - timedelta(days=offset)).isoformat() for offset in range(days - 1, -1, -1)]
+
+
+def _is_error(metadata: dict[str, Any]) -> bool:
+    status = str(metadata.get("status") or "").upper()
+    if status in _ERROR_STATUSES:
+        return True
+    error_count = metadata.get("error_count")
+    return isinstance(error_count, (int, float)) and error_count > 0
+
+
+def _latency_seconds(metadata: dict[str, Any], started: datetime, ended: datetime | None) -> float | None:
+    # publish_metric()이 이미 계산해 보낸 값을 우선 쓴다 - 이 run 자체는 실행이
+    # 끝난 뒤에야 사후 기록되므로(redacted metric), start/end_time 차이가 실제
+    # Worker 지연시간과 다를 수 있다.
+    latency_ms = metadata.get("latency_ms")
+    if isinstance(latency_ms, (int, float)) and latency_ms > 0:
+        return latency_ms / 1000
+    if ended is not None:
+        return (ended - started).total_seconds()
+    return None
+
+
+def _collect(days: int, project: str | None) -> dict[str, Any]:
+    from langsmith import Client
+
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    client = Client()
+    # `limit=`은 페이지 크기로 그대로 전달돼 API의 페이지당 상한(100)을 넘기면
+    # 400을 낸다(실측, 2026-08-24) - 전체 상한은 여기서 직접(_MAX_RUNS) 끊는다.
+    # 부서 구분이 태그가 아니라 metadata에 있어서(머리말) 서버 필터를 걸 수 없고,
+    # root run을 받아 이 안에서 stage=="qa"만 추린다.
+    runs = client.list_runs(
+        project_name=project,
+        is_root=True,
+        start_time=since,
+        select=["start_time", "end_time", "extra"],
+    )
+
+    by_day: dict[str, dict[str, Any]] = defaultdict(lambda: {"success": 0, "error": 0, "latencies": []})
+    for seen, run in enumerate(runs):
+        if seen >= _MAX_RUNS:
+            break
+        extra = getattr(run, "extra", None) or {}
+        metadata = extra.get("metadata") or {}
+        if metadata.get("stage") != _QA_STAGE:
+            continue
+        started = getattr(run, "start_time", None)
+        if started is None:
+            continue
+        bucket = by_day[started.date().isoformat()]
+        if _is_error(metadata):
+            bucket["error"] += 1
+        else:
+            bucket["success"] += 1
+        latency = _latency_seconds(metadata, started, getattr(run, "end_time", None))
+        if latency is not None:
+            bucket["latencies"].append(latency)
+
+    date_keys = _day_range(days)
+    daily = [
+        {"date": day, "success": by_day[day]["success"], "error": by_day[day]["error"]}
+        for day in date_keys
+    ]
+    latency = [
+        {
+            "date": day,
+            "p50_seconds": _percentile(by_day[day]["latencies"], 0.5),
+            "p99_seconds": _percentile(by_day[day]["latencies"], 0.99),
+        }
+        for day in date_keys
+    ]
+    total = sum(row["success"] + row["error"] for row in daily)
+    total_error = sum(row["error"] for row in daily)
+
+    return {
+        "status": "READY",
+        "configured": True,
+        "project": project,
+        "days": days,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "trace_count": total,
+        "error_rate_pct": round((total_error / total) * 100, 2) if total else 0.0,
+        "daily": daily,
+        "latency": latency,
+    }
+
+
+def _empty(status: str, days: int, *, configured: bool, detail: str | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "status": status,
+        "configured": configured,
+        "project": os.getenv("LANGSMITH_PROJECT") or None,
+        "days": days,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "trace_count": 0,
+        "error_rate_pct": None,
+        "daily": [{"date": day, "success": 0, "error": 0} for day in _day_range(days)],
+        "latency": [{"date": day, "p50_seconds": None, "p99_seconds": None} for day in _day_range(days)],
+    }
+    if detail:
+        payload["detail"] = detail
+    return payload
+
+
+async def qa_trace_timeseries(days: int = 7) -> dict[str, Any]:
+    """`metadata.stage == "qa"`인 LangSmith root run을 날짜별로 집계한다."""
+
+    days = max(1, min(int(days), _MAX_DAYS))
+    if not _configured():
+        return _empty("NOT_CONFIGURED", days, configured=False)
+    try:
+        return await run_in_threadpool(_collect, days, os.getenv("LANGSMITH_PROJECT") or None)
+    except Exception as exc:  # noqa: BLE001 - 관측 실패가 카드 렌더를 막으면 안 된다
+        return _empty("ERROR", days, configured=True, detail=type(exc).__name__)
+
+
+__all__ = ["qa_trace_timeseries"]

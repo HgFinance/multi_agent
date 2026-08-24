@@ -647,6 +647,9 @@ def require_trading_book_access(
 _INSTRUMENT_NAME_ALIASES: dict[str, str] = {
     "네이버": "035420",  # NAVER Corporation. 공시 표시명은 "NAVER".
 }
+_NUMERIC_CODE_WITH_DISPLAY_NAME_RE = re.compile(
+    r"^(?P<code>\d{6})(?:\s+[가-힣A-Za-z][가-힣A-Za-z0-9&+._\- ]{0,72})?$"
+)
 
 
 def resolve_active_trading_instrument(
@@ -663,7 +666,8 @@ def resolve_active_trading_instrument(
     query = " ".join(str(identifier).strip().split())
     if not query:
         raise _http_error(422, "paper_order_instrument_clarification_required")
-    canonical_code = query.upper()
+    code_with_name = _NUMERIC_CODE_WITH_DISPLAY_NAME_RE.fullmatch(query)
+    canonical_code = code_with_name.group("code") if code_with_name else query.upper()
     if re.fullmatch(r"[0-9A-Z]{6}", canonical_code) is None:
         canonical_code = _INSTRUMENT_NAME_ALIASES.get(query)
     canonical_instrument_id: str | None = None

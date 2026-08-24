@@ -6,6 +6,7 @@ import OfficeWorld from "./game/OfficeWorld";
 import TopNav from "./components/TopNav";
 import OfficeControls from "./components/OfficeControls";
 import RightRail from "./components/RightRail";
+import SiteFooter from "./components/SiteFooter";
 import { Company, type Agent, type Snapshot } from "./game/sim";
 
 /**
@@ -174,7 +175,7 @@ export default function Home() {
   return (
     <div className="bg-background text-on-background min-h-screen flex flex-col font-sans">
       <TopNav current="ai-office" />
-      <main className="w-full max-w-app mx-auto p-margin-mobile md:p-margin-desktop flex flex-col gap-gutter">
+      <main className="flex-1 w-full max-w-app mx-auto p-margin-mobile md:p-margin-desktop flex flex-col gap-gutter">
         {/* 상단: 개요&컨트롤 — 가로 전체 폭 */}
         <OfficeControls engine={engine} snap={snap} onDuty={onDuty} onStart={() => engine.start()} />
 
@@ -187,6 +188,7 @@ export default function Home() {
           <RightRail engine={engine} snap={snap} selectedId={selectedId} onSelect={onSelect} />
         </div>
       </main>
+      <SiteFooter />
       {selected ? <ProfileModal agent={selected} onClose={() => setSelectedId(null)} /> : null}
     </div>
   );

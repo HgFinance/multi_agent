@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import TopNav from "../components/TopNav";
+import SiteFooter from "../components/SiteFooter";
 import MandateConfig from "./MandateConfig";
 
 export const metadata: Metadata = {
@@ -11,6 +12,7 @@ export default function MandatePage() {
     <div className="bg-background text-on-background min-h-screen flex flex-col font-sans">
       <TopNav current="mandate" />
       <MandateConfig />
+      <SiteFooter />
     </div>
   );
 }

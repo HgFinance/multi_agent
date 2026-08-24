@@ -6,7 +6,14 @@ import os
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+
+try:  # Reuse the projector imported by ``apps.api.main`` in the local process.
+    from current_user import current_user
+    from langsmith_traces import qa_trace_timeseries
+except ImportError:  # pragma: no cover - package import path
+    from .current_user import current_user
+    from .langsmith_traces import qa_trace_timeseries
 
 router = APIRouter(tags=["qa-mandate"])
 QA_API_URL = os.getenv("QA_API_URL", "").strip().rstrip("/")
@@ -52,4 +59,19 @@ async def assess_qa_verification(verification_id: str, body: dict[str, Any]) -> 
     )
 
 
-__all__ = ["QA_API_URL", "assess_qa_verification", "router"]
+@router.get("/ui/qa/observability/langsmith")
+async def qa_langsmith_traces(
+    days: int = 7,
+    owner_id: str | None = Depends(current_user),
+) -> Any:
+    """QA 부서 카드에 표시할 LangSmith trace 집계 - read-only, 자격증명 미노출.
+
+    `LANGSMITH_API_KEY`는 이 프로세스(BFF) 밖으로 나가지 않는다 - 브라우저는
+    이 집계 결과만 받는다.
+    """
+
+    del owner_id  # 인증 게이트만 거치면 되고 요청자별로 값이 갈리지 않는다.
+    return await qa_trace_timeseries(days=days)
+
+
+__all__ = ["QA_API_URL", "assess_qa_verification", "qa_langsmith_traces", "router"]

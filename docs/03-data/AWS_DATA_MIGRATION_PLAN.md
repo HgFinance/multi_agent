@@ -150,6 +150,14 @@ v2 에서 호가 5단계 깊이 기울기나 동시호가 구간 분리를 쓰�
 그래서 §3.2 범위를 정하는 것이 곧 **"과거 어디까지 재계산할 수 있는가"** 를
 정하는 것이다.
 
+> 2026-08-24 참고: §2의 `research.*(Supabase) — 이미 클라우드, 옮길 것 없음`은
+> 이 문서가 TimescaleDB/Parquet 이전만 다루던 시점의 가정이다. Domain schema
+> (governance/workforce/reference/research/quant/strategy/execution/risk/
+> accounting/audit/experience) 자체를 Hosted Supabase에서 AWS `control`로 옮기는
+> 별도 1회성 작업은
+> [SUPABASE_TO_AWS_CONTROL_MIGRATION.md](../02-engineering/SUPABASE_TO_AWS_CONTROL_MIGRATION.md)
+> 참고 — 이 문서의 범위는 아니다.
+
 ## 7. 아직 안 정한 것 (임의로 정하지 않는다)
 
 - S3 버킷·리전·수명주기 정책

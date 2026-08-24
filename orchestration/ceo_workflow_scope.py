@@ -775,6 +775,7 @@ def build_root_body(
         # Mandate 블록은 scope 지시문 뒤, 사용자 질의 앞에 온다. `extract_user_query`가
         # `## User request` 뒤만 잘라내므로 이 블록이 질의에 섞이지 않는다.
         f"{_mandate_section(mandate)}"
+        f"{_accounting_snapshot_section(advisory_fund_id)}"
         "\n## User request\n"
         f"{query}"
     )
@@ -816,6 +817,36 @@ def _mandate_section(mandate: Mapping[str, Any] | None) -> str:
     if not block:
         return ""
     return f"\n## Investor mandate (frozen snapshot)\n{block}\n"
+
+
+CEO_ACCOUNTING_SNAPSHOT_MARKER = "hgfinance.accounting-snapshot.v1"
+
+
+def _accounting_snapshot_section(advisory_fund_id: str | None) -> str:
+    """Confirmed Accounting Engine snapshot, embedded root-side.
+
+    The accounting-portfolio-department head agent has no shell/web tool
+    (deliberately - a Posted Journal must never be reachable from an LLM
+    turn). It reads this instead via `kanban show <root_task_id>`, the same
+    way it already reads `## Investor mandate` above. Missing context (no
+    fund_id, BFF unreachable) is normal and must never block root creation -
+    the department states its own data limitation in that case.
+    """
+
+    try:
+        from orchestration.accounting_advisory_context import (
+            fetch_accounting_advisory_context,
+        )
+
+        block = fetch_accounting_advisory_context(advisory_fund_id)
+    except Exception:  # noqa: BLE001 - advisory enrichment must never break root creation.
+        block = None
+    if not block:
+        return ""
+    return (
+        f"\n## Accounting Engine snapshot (read-only, {CEO_ACCOUNTING_SNAPSHOT_MARKER})\n"
+        f"{block}\n"
+    )
 
 
 _REQUESTED_BY_RE = re.compile(r"(?m)^requested_by=(\S+)\s*$")
@@ -1032,6 +1063,7 @@ def validate_workflow_scope(
 __all__ = [
     "BACKGROUND_RESEARCH_ROLE",
     "CEO_MANDATE_SNAPSHOT_MARKER",
+    "CEO_ACCOUNTING_SNAPSHOT_MARKER",
     "CEO_WORKFLOW_REUSE_POLICY",
     "CEO_WORKFLOW_SCOPE_MARKER",
     "CEO_WORKFLOW_SCOPE_POLICY",

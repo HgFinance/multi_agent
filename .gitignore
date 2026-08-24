@@ -64,6 +64,7 @@ departments/01-research/var/
 departments/01-research/reports/
 ai-office/*.log
 /test-results/
+/migration_reports/
 
 # EB 배포 번들 - scripts/package_eb_bundle.ps1 이 저장소 내용으로 매번 다시 만든다
 dist/

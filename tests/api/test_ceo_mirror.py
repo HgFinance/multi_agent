@@ -160,30 +160,78 @@ class CeoMirrorExecutionTest(unittest.TestCase):
             accepted = ceo_mirror_api.mirror_ingress(
                 CanonicalIngress(
                     query="discord query",
-                    request_id="request-discord-1",
+                    request_id="discord:111111111111111111",
                     source="discord",
-                    source_message_id="discord:channel:1",
+                    source_message_id="111111111111111111",
                     actor_id="discord-user",
+                    discord_channel_id="channel-1",
+                    discord_message_id="111111111111111111",
                 ),
                 _http_request(internal_discord=True),
             )
             ignored = ceo_mirror_api.mirror_ingress(
                 CanonicalIngress(
                     query="discord mirror",
-                    request_id="request-discord-mirror",
+                    request_id="discord:222222222222222222",
                     source="discord",
-                    source_message_id="discord:channel:2",
+                    source_message_id="222222222222222222",
                     actor_id="ceo-agent",
                     actor_type="bot",
                     mirrored=True,
+                    discord_channel_id="channel-1",
+                    discord_message_id="222222222222222222",
                 ),
                 _http_request(internal_discord=True),
             )
 
-        self.assertEqual(calls, ["request-discord-1"])
+        self.assertEqual(calls, ["discord:111111111111111111"])
         self.assertEqual(accepted.task_id, "t_discord")
         self.assertTrue(ignored.ignored)
         self.assertEqual(ignored.reason, "bot_mirror_ignored")
+
+    def test_discord_ingress_rejects_missing_reply_coordinates(self) -> None:
+        with patch.object(ceo_mirror_api, "_ceo_query") as ceo_query:
+            with self.assertRaises(ceo_mirror_api.HTTPException) as raised:
+                ceo_mirror_api.mirror_ingress(
+                    CanonicalIngress(
+                        query="discord query",
+                        request_id="discord:333333333333333333",
+                        source="discord",
+                        source_message_id="333333333333333333",
+                        actor_id="discord-user",
+                    ),
+                    _http_request(internal_discord=True),
+                )
+
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertEqual(
+            raised.exception.detail["code"],
+            "discord_correlation_metadata_required",
+        )
+        ceo_query.assert_not_called()
+
+    def test_discord_ingress_rejects_request_id_not_bound_to_message(self) -> None:
+        with patch.object(ceo_mirror_api, "_ceo_query") as ceo_query:
+            with self.assertRaises(ceo_mirror_api.HTTPException) as raised:
+                ceo_mirror_api.mirror_ingress(
+                    CanonicalIngress(
+                        query="discord query",
+                        request_id="request-without-discord-binding",
+                        source="discord",
+                        source_message_id="444444444444444444",
+                        actor_id="discord-user",
+                        discord_channel_id="channel-1",
+                        discord_message_id="444444444444444444",
+                    ),
+                    _http_request(internal_discord=True),
+                )
+
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertEqual(
+            raised.exception.detail["code"],
+            "discord_correlation_request_id_mismatch",
+        )
+        ceo_query.assert_not_called()
 
     def test_event_id_is_published_once_and_lanes_are_independent(self) -> None:
         request = CanonicalIngress(

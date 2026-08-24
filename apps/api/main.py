@@ -294,6 +294,23 @@ def _request_timeout_seconds() -> float:
     return value if value > 0 else 30.0
 
 
+# `POST /ui/ceo/ask`는 `ceo_mirror.execute_once()`가 첫 요청을 동기로
+# 끝까지 실행한 뒤에야 응답한다(202는 "같은 request_id로 이미 처리 중인
+# 다른 호출"에만 붙는 재시도 안내이지, 원 호출이 빨리 돌아온다는 뜻이 아니다).
+# 실행 안에는 Trading Hermes 라우팅 등 LLM이 낀 다단계 처리가 들어 있어
+# 다른 단순 조회 경로보다 정상적으로도 오래 걸린다. 그래서 이 경로만 기본
+# 타임아웃보다 넉넉한 예산을 준다 - 나머지 경로는 "멈추면 바로 드러나야
+# 한다"는 안전망 성격을 그대로 유지한다(위 주석 참고).
+def _ceo_ask_timeout_seconds() -> float:
+    try:
+        value = float(os.getenv("BFF_CEO_ASK_TIMEOUT_SECONDS", "60"))
+    except ValueError:
+        return 60.0
+    return value if value > 0 else 60.0
+
+
+_CEO_ASK_PATH_SUFFIXES = ("/ui/ceo/ask",)
+
 # SSE 는 설계상 응답을 열어 둔 채 오래 산다. 데드라인을 걸면 정상 스트림을 끊게
 # 되므로 스트리밍 경로는 제외한다(스트림 수명은 핸들러 안의
 # `UI_MIRROR_SSE_SECONDS` 가 이미 유한하게 제한한다).
@@ -307,11 +324,16 @@ class RequestDeadlineMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send) -> None:
-        if scope["type"] != "http" or str(scope.get("path", "")).endswith(
-            _STREAMING_PATH_SUFFIXES
-        ):
+        path = str(scope.get("path", ""))
+        if scope["type"] != "http" or path.endswith(_STREAMING_PATH_SUFFIXES):
             await self.app(scope, receive, send)
             return
+
+        deadline_seconds = (
+            _ceo_ask_timeout_seconds()
+            if path.endswith(_CEO_ASK_PATH_SUFFIXES)
+            else _request_timeout_seconds()
+        )
 
         started = False
 
@@ -322,7 +344,7 @@ class RequestDeadlineMiddleware:
             await send(message)
 
         try:
-            with anyio.fail_after(_request_timeout_seconds()):
+            with anyio.fail_after(deadline_seconds):
                 await self.app(scope, receive, send_wrapper)
         except TimeoutError:
             # 이미 응답 헤더가 나갔으면 두 번째 응답을 보낼 수 없다. 그때는

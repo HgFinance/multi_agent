@@ -446,6 +446,21 @@ def test_alphanumeric_code_resolution_is_strip_upper_and_format_bounded(
     assert params[:3] == ("00088K", "00088K", "00088k")
 
 
+def test_leading_six_digit_code_wins_over_trailing_display_name(monkeypatch) -> None:
+    monkeypatch.setenv("CONTROL_DATABASE_URL", "postgresql://control/test")
+    connection, cursor = _db_connection(None)
+    cursor.fetchall.return_value = [(str(INSTRUMENT_ID), "124500")]
+    with patch.object(auth.psycopg2, "connect", return_value=connection):
+        resolved = auth.resolve_active_trading_instrument("124500 아이티센글로벌")
+
+    assert resolved == {
+        "instrument_id": str(INSTRUMENT_ID),
+        "symbol": "124500",
+    }
+    params = cursor.execute.call_args.args[1]
+    assert params[:3] == ("124500", "124500", "124500 아이티센글로벌")
+
+
 @pytest.mark.parametrize("rows", [[], [(str(uuid4()), "005930"), (str(uuid4()), "005930")]])
 def test_unknown_or_ambiguous_name_requires_clarification(monkeypatch, rows) -> None:
     monkeypatch.setenv("CONTROL_DATABASE_URL", "postgresql://control/test")

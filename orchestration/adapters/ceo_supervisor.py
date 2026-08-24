@@ -90,6 +90,7 @@ from orchestration.qa_contract import (
     split_planner_selection,
 )
 from orchestration.risk_advisory_context import fetch_risk_advisory_context
+from orchestration.accounting_advisory_context import fetch_accounting_advisory_context
 
 logger = logging.getLogger(__name__)
 
@@ -510,6 +511,10 @@ class SupervisorState:
     # Optional read-only portfolio snapshot for the Risk advisory child.
     # Missing context is normal and must never block task creation.
     risk_advisory_context: str | None = None
+    # Same idea for the Accounting/Portfolio primary - that profile has no
+    # shell tool (deliberately, see accounting_advisory_context.py), so this
+    # is its only way to see confirmed NAV/PnL/cash figures.
+    accounting_advisory_context: str | None = None
 
     def __post_init__(self) -> None:
         # Keep the old constructor field for callers/tests and resolve it once
@@ -3716,6 +3721,7 @@ class CeoSupervisorService:
             risk_advisory_context=fetch_risk_advisory_context(
                 str(root_payload.get("body") or "")
             ),
+            accounting_advisory_context=fetch_accounting_advisory_context(),
         )
         decision = _empty_primary_request_user_input_decision(state)
         self._execute(decision, state)
@@ -4420,6 +4426,7 @@ class CeoSupervisorService:
                         self.discord_delivery is not None
                     ),
                     risk_advisory_context=fetch_risk_advisory_context(root_body),
+                    accounting_advisory_context=fetch_accounting_advisory_context(),
                 )
 
                 decisions = _initial_primary_materialization_decisions(
@@ -4869,6 +4876,7 @@ class CeoSupervisorService:
             root_is_user_query=True,
             allow_primary_passthrough=self.discord_delivery is not None,
             risk_advisory_context=fetch_risk_advisory_context(root_body),
+            accounting_advisory_context=fetch_accounting_advisory_context(),
         )
 
         decisions = _initial_primary_materialization_decisions(
@@ -5754,6 +5762,7 @@ class CeoSupervisorService:
                     root_is_user_query=is_user_query_body(root_body),
                     allow_primary_passthrough=self.discord_delivery is not None,
                     risk_advisory_context=fetch_risk_advisory_context(root_body),
+                    accounting_advisory_context=fetch_accounting_advisory_context(),
                 )
 
                 def new_synthesis_timing(
@@ -6319,6 +6328,18 @@ class CeoSupervisorService:
                     f"{task_body}\n\n"
                     "Read-only portfolio context (do not treat as trade authorization):\n"
                     f"{state.risk_advisory_context}"
+                )
+            if (
+                role == "primary"
+                and decision.assignee == canonical_profile_for_department("accounting")
+                and state.accounting_advisory_context
+            ):
+                task_body = (
+                    f"{task_body}\n\n"
+                    "Confirmed Accounting Engine snapshot (source_of_record=/ui/snapshot, "
+                    "authoritative=false pending official NAV close) - "
+                    "use these figures rather than declining for lack of evidence:\n"
+                    f"{state.accounting_advisory_context}"
                 )
             created = self.client.create_task(
                 title=decision.title,

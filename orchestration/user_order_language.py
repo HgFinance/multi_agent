@@ -333,7 +333,11 @@ _ORDER_CONTEXT_RE = re.compile(
 )
 
 _INSTRUMENT_RE = re.compile(
-    r"(?:[0-9A-Za-z]{6}|[가-힣A-Za-z][가-힣A-Za-z0-9&+._\- ]{0,79})"
+    r"(?:"
+    r"\d{6}(?:\s+[가-힣A-Za-z][가-힣A-Za-z0-9&+._\- ]{0,72})?"
+    r"|[0-9A-Za-z]{6}"
+    r"|[가-힣A-Za-z][가-힣A-Za-z0-9&+._\- ]{0,79}"
+    r")"
 )
 _ALLOWED_RESIDUAL_RE = re.compile(
     r"^(?:(?:을|를|은|는|이|가|에|에서|로|으로|좀|만|내|현재|계좌|"
@@ -504,13 +508,26 @@ def _expected_evidence(
     field: EvidenceField,
     span: tuple[int, int],
     normalized: str,
+    alternative_spans: tuple[tuple[int, int], ...] = (),
 ) -> bool:
     item = evidence.get(field)
     return bool(
         item
-        and (item.start, item.end) == span
+        and (item.start, item.end) in (span, *alternative_spans)
         and item.normalized == normalized
     )
+
+
+def _literal_subspan(match: re.Match[str], *tokens: str) -> tuple[int, int]:
+    """Return the first deterministic semantic token inside a grammar match."""
+
+    text = match.group(0)
+    for token in tokens:
+        offset = text.find(token)
+        if offset >= 0:
+            start = match.start() + offset
+            return start, start + len(token)
+    return match.span()
 
 
 def _price_value(match: re.Match[str]) -> int:
@@ -687,15 +704,62 @@ def _verify_place_order(
         limit_price = None
         price_span = None
 
+    consumed = [
+        side_match.span(),
+        quantity_match.span(),
+        *adornment_spans,
+    ]
+    if order_type_span is not None:
+        consumed.append(order_type_span)
+    if price_span is not None:
+        consumed.append(price_span)
+    if limit_markers:
+        consumed.append(limit_markers[0].span())
+    authoritative_instrument_span = _deterministic_instrument_span(
+        raw_text, list(dict.fromkeys(consumed))
+    )
+    if authoritative_instrument_span is None:
+        return _clarify(digest, OrderReasonCode.MISSING_OR_CONFLICTING_INSTRUMENT)
+    authoritative_instrument = raw_text[
+        authoritative_instrument_span[0] : authoritative_instrument_span[1]
+    ]
+
     instrument = evidence.get(EvidenceField.INSTRUMENT)
     if instrument is None:
         return _clarify(digest, OrderReasonCode.EVIDENCE_MISSING)
+    allowed_instrument_evidence = {
+        (authoritative_instrument_span, authoritative_instrument)
+    }
+    verified_instrument_mention = authoritative_instrument
+    numeric_code_with_name = re.fullmatch(
+        r"(?P<code>\d{6})\s+(?P<name>[가-힣A-Za-z][가-힣A-Za-z0-9&+._\- ]{0,72})",
+        authoritative_instrument,
+    )
+    if numeric_code_with_name is not None:
+        code = numeric_code_with_name.group("code")
+        name = numeric_code_with_name.group("name")
+        code_start = authoritative_instrument_span[0]
+        name_start = code_start + numeric_code_with_name.start("name")
+        allowed_instrument_evidence.update(
+            {
+                ((code_start, code_start + len(code)), code),
+                ((name_start, name_start + len(name)), name),
+            }
+        )
+        # A user-supplied six-digit code is authoritative. The adjacent name
+        # remains useful grounding, but can never override the catalog lookup.
+        verified_instrument_mention = code
     if (
         candidate.instrument_mention != instrument.text
         or instrument.normalized != candidate.instrument_mention
         or not _INSTRUMENT_RE.fullmatch(instrument.text)
     ):
         return _clarify(digest, OrderReasonCode.MISSING_OR_CONFLICTING_INSTRUMENT)
+    if (
+        ((instrument.start, instrument.end), instrument.text)
+        not in allowed_instrument_evidence
+    ):
+        return _clarify(digest, OrderReasonCode.UNSUPPORTED_TEXT)
 
     required_fields = {
         EvidenceField.INSTRUMENT,
@@ -720,6 +784,12 @@ def _verify_place_order(
         field=EvidenceField.ACTION,
         span=side_match.span(),
         normalized=DirectiveAction.PLACE_ORDER.value,
+        alternative_spans=(
+            _literal_subspan(
+                side_match,
+                *(("매수", "구매", "사") if side is OrderSide.BUY else ("매도", "팔")),
+            ),
+        ),
     ):
         return _clarify(digest, OrderReasonCode.EVIDENCE_FIELD_MISMATCH)
     if candidate.side is not side or candidate.quantity != str(quantity):
@@ -734,11 +804,18 @@ def _verify_place_order(
         field=EvidenceField.SIDE,
         span=side_match.span(),
         normalized=side.value,
+        alternative_spans=(
+            _literal_subspan(
+                side_match,
+                *(("매수", "구매", "사") if side is OrderSide.BUY else ("매도", "팔")),
+            ),
+        ),
     ) or not _expected_evidence(
         evidence,
         field=EvidenceField.QUANTITY,
         span=quantity_match.span(),
         normalized=str(quantity),
+        alternative_spans=(quantity_match.span("token"),),
     ) or (
         order_type_span is not None
         and not _expected_evidence(
@@ -746,6 +823,16 @@ def _verify_place_order(
             field=EvidenceField.ORDER_TYPE,
             span=order_type_span,
             normalized=order_type.value,
+            alternative_spans=(
+                _literal_subspan(
+                    market_markers[0]
+                    if order_type is OrderType.MARKET
+                    else limit_markers[0],
+                    "시장가" if order_type is OrderType.MARKET else "지정가",
+                ),
+            )
+            if market_markers or limit_markers
+            else (),
         )
     ):
         return _clarify(digest, OrderReasonCode.EVIDENCE_FIELD_MISMATCH)
@@ -760,18 +847,7 @@ def _verify_place_order(
     ):
         return _clarify(digest, OrderReasonCode.EVIDENCE_FIELD_MISMATCH)
 
-    consumed = [
-        side_match.span(),
-        quantity_match.span(),
-        (instrument.start, instrument.end),
-    ]
-    consumed.extend(adornment_spans)
-    if order_type_span is not None:
-        consumed.append(order_type_span)
-    if price_span is not None:
-        consumed.append(price_span)
-    if limit_markers:
-        consumed.append(limit_markers[0].span())
+    consumed.append(authoritative_instrument_span)
     if not _residual_supported(raw_text, list(dict.fromkeys(consumed))):
         return _clarify(digest, OrderReasonCode.UNSUPPORTED_TEXT)
 
@@ -779,7 +855,7 @@ def _verify_place_order(
         raw_text_sha256=digest,
         action=DirectiveAction.PLACE_ORDER,
         payload=CanonicalPlaceOrderPayload(
-            instrument_mention=candidate.instrument_mention,
+            instrument_mention=verified_instrument_mention,
             side=side,
             quantity=str(quantity),
             order_type=order_type,

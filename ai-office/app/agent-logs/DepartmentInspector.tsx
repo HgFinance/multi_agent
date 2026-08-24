@@ -8,11 +8,13 @@ import {
 import AccountingLedgerPanel from "../components/AccountingLedgerPanel";
 import AlphaStrategyPanel from "../components/AlphaStrategyPanel";
 import LivePortfolioPanel from "../components/LivePortfolioPanel";
+import QaLangsmithPanel from "../components/QaLangsmithPanel";
 import ResearchPanel from "../components/ResearchPanel";
 import WorkerPerformancePanel from "../components/WorkerPerformancePanel";
 import WorkforceIdleAgentsPanel from "../components/WorkforceIdleAgentsPanel";
 import WorkforceLifecyclePanel from "../components/WorkforceLifecyclePanel";
 import WorkforceRosterPanel from "../components/WorkforceRosterPanel";
+import { RecentOutputsPanel } from "../dashboard/DashboardView";
 
 /**
  * 선택한 부서 한 곳의 직원 Registry·내부 메시지·LLM 성과.
@@ -177,6 +179,7 @@ export default function DepartmentInspector({
           <Empty>이 부서의 Worker Registry를 기다리는 중입니다.</Empty>
         )}
       </Disclosure>
+      {code === "ceo-agent" ? <RecentOutputsPanel /> : null}
 
       {department.domain === "trading" ? <LivePortfolioPanel /> : null}
       {/* 회계는 주문 상태가 아니라 확정된 거래와 비용을 본다. 같은 패널을
@@ -208,6 +211,9 @@ export default function DepartmentInspector({
       {department.domain === "quant" ? <AlphaStrategyPanel /> : null}
       {/* 내용은 비워 두고 프레임만 유지 - 채울 내용은 추후 결정. */}
       {department.domain === "research" ? <ResearchPanel /> : null}
+      {/* QA는 자기 축(검증 판정)이 아니라 자기 파이프라인이 실제로 도는지를 본다 -
+          stage:qa로 태깅된 LangSmith redacted trace 집계. */}
+      {department.domain === "qa" ? <QaLangsmithPanel /> : null}
     </section>
   );
 }

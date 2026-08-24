@@ -64,6 +64,16 @@ import httpx
 
 DISCORD_API = "https://discord.com/api/v10"
 
+# `post_question()`은 메시지 게시 + 스레드 생성을 순차 호출한다(최악의 경우
+# 이 값의 2배). `/ui/ceo/ask`의 전체 요청 예산은 `BFF_REQUEST_TIMEOUT_SECONDS`
+# (기본 30초)이고, 이 미러 게시는 그 안에서 실제 주문 라우팅보다 먼저 실행된다.
+# 10초씩 두 번(최대 20초)을 쓰면 이 모듈 머리말의 "Discord가 죽어도 CEO
+# 워크플로는 돌아가야 한다"는 계약이 시간 축에서는 지켜지지 않는다 - Discord가
+# 살아있지만 느리기만 해도 CEO 요청이 504로 죽는다(2026-08-24 실측). 평소
+# 왕복은 0.2~0.3초이므로 3초면 정상 상황에는 넉넉하고, 장애 상황에는 예산을
+# 압도하지 않는다.
+_MIRROR_HTTP_TIMEOUT_SECONDS = 3.0
+
 # 읽기 모듈과 같은 환경변수를 쓴다. 채널을 따로 두면 "질문은 A 채널, 답변은 B
 # 채널"이 되어 이력이 갈라진다.
 CHANNEL_ENV = "DISCORD_CEO_CHANNEL_ID"
@@ -278,7 +288,7 @@ def post_question(query: str, *, asked_by: object = None) -> MirrorPost | None:
                 # @everyone 이나 역할 멘션이 들어 있어도 알림이 나가지 않는다.
                 "allowed_mentions": {"parse": []},
             },
-            timeout=10.0,
+            timeout=_MIRROR_HTTP_TIMEOUT_SECONDS,
         )
     except httpx.HTTPError as exc:
         _LOGGER.warning(
@@ -373,7 +383,7 @@ def _start_thread(
             f"{DISCORD_API}/channels/{channel_id}/messages/{message_id}/threads",
             headers={"Authorization": f"Bot {token}"},
             json={"name": name, "auto_archive_duration": _THREAD_AUTO_ARCHIVE_MINUTES},
-            timeout=10.0,
+            timeout=_MIRROR_HTTP_TIMEOUT_SECONDS,
         )
     except httpx.HTTPError as exc:
         _LOGGER.warning(

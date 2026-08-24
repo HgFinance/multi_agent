@@ -1061,7 +1061,13 @@ def orchestrate(hypothesis_id: str | None = None, *, conn=None,
         if unified_dsn:
             if not os.environ.get("DATABASE_URL"):
                 env["DATABASE_URL"] = unified_dsn
-            if not os.environ.get("TIMESCALE_DATABASE_URL"):
+            # ▶ 프로세스 env 가 비어도 .env 의 시장 DSN 이 살아 있으면 그것을
+            #   쓴다(2026-08-24). dispatch-guard 스코핑이 워커 하위 프로세스의
+            #   TIMESCALE 을 지우는데, 여기서 unified(control) 로 덮으면
+            #   ext_src 없는 control 을 재서 SOURCE_EMPTY 를 오판한다.
+            #   unified 폴백은 .env 에도 없을 때만이다.
+            if (not os.environ.get("TIMESCALE_DATABASE_URL")
+                    and not env.get("TIMESCALE_DATABASE_URL")):
                 env["TIMESCALE_DATABASE_URL"] = unified_dsn
         if own_conn and not env.get("DATABASE_URL"):
             # A runner container may have market access but no metadata-writer DSN.
