@@ -41,6 +41,8 @@ def _local_lock(key: str) -> Lock:
 
 
 def _page_id(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value or None
     if isinstance(value, Mapping):
         raw = value.get("id")
         return str(raw) if raw else None
