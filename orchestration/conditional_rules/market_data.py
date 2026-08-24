@@ -160,8 +160,172 @@ class LSPaperMarketPriceResolver:
         )
 
 
+class LSTimescaleMarketPriceResolver:
+    """Read the latest tick already collected by the shared LS WebSocket.
+
+    ``ls-realtime`` owns the broker WebSocket and writes one canonical tick
+    stream to ``market.market_ticks``.  The conditional worker deliberately
+    does not open another broker connection: it reads the latest row by the
+    authoritative instrument id.  The pool is bounded because rule evaluation
+    is parallel, and the statement timeout keeps a market-database problem
+    fail-closed instead of blocking the worker cycle.
+    """
+
+    def __init__(
+        self,
+        pool,
+        *,
+        statement_timeout_ms: int = 1500,
+    ) -> None:
+        self._pool = pool
+        self._statement_timeout_ms = max(100, min(int(statement_timeout_ms), 10_000))
+
+    @classmethod
+    def from_env(cls) -> "LSTimescaleMarketPriceResolver":
+        dsn = os.getenv("CONDITIONAL_RULE_MARKET_DATABASE_URL", "").strip()
+        if not dsn:
+            raise MarketPriceResolverError(
+                "MARKET_PRICE_SHARED_DATABASE_REQUIRED",
+                "shared market database URL is required for LS realtime prices",
+                retryable=False,
+            )
+        try:
+            from psycopg2.pool import ThreadedConnectionPool
+
+            pool = ThreadedConnectionPool(
+                1,
+                max(
+                    1,
+                    min(
+                        int(os.getenv("CONDITIONAL_RULE_MARKET_MAX_CONNECTIONS", "8")),
+                        16,
+                    ),
+                ),
+                dsn,
+                connect_timeout=max(
+                    1,
+                    min(
+                        int(
+                            os.getenv(
+                                "CONDITIONAL_RULE_MARKET_CONNECT_TIMEOUT_SECONDS", "2"
+                            )
+                        ),
+                        10,
+                    ),
+                ),
+            )
+            return cls(
+                pool,
+                statement_timeout_ms=int(
+                    os.getenv("CONDITIONAL_RULE_MARKET_STATEMENT_TIMEOUT_MS", "1500")
+                ),
+            )
+        except MarketPriceResolverError:
+            raise
+        except Exception as exc:
+            raise MarketPriceResolverError(
+                "MARKET_PRICE_SHARED_DATABASE_UNAVAILABLE",
+                "shared LS realtime market database is unavailable",
+            ) from exc
+
+    @staticmethod
+    def _aware(value: object, *, field: str) -> datetime:
+        if not isinstance(value, datetime):
+            raise MarketPriceResolverError(
+                "MARKET_PRICE_INVALID",
+                f"market tick {field} is invalid",
+                retryable=False,
+            )
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    def snapshot_for_instrument(self, symbol: str, instrument_id: object) -> MarketPriceSnapshot:
+        normalized = symbol.strip().upper()
+        if not normalized or len(normalized) != 6 or not normalized.isalnum():
+            raise MarketPriceResolverError(
+                "MARKET_PRICE_SYMBOL_INVALID",
+                "market-price symbol is invalid",
+                retryable=False,
+            )
+        connection = None
+        try:
+            connection = self._pool.getconn()
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "select set_config('statement_timeout', %s, true)",
+                    (str(self._statement_timeout_ms),),
+                )
+                cursor.execute(
+                    """
+                    select event_time, observed_at, price, market, provider
+                      from market.market_ticks
+                     where instrument_id=%s
+                     order by event_time desc, received_at desc
+                     limit 1
+                    """,
+                    (instrument_id,),
+                )
+                row = cursor.fetchone()
+            connection.commit()
+        except Exception as exc:
+            if connection is not None:
+                try:
+                    connection.rollback()
+                except Exception:  # noqa: BLE001 - connection may already be closed
+                    pass
+            if getattr(exc, "pgcode", None) == "57014":
+                raise MarketPriceResolverError(
+                    "MARKET_PRICE_SHARED_DATABASE_TIMEOUT",
+                    "shared LS realtime market tick query timed out",
+                ) from exc
+            raise MarketPriceResolverError(
+                "MARKET_PRICE_SHARED_DATABASE_UNAVAILABLE",
+                "shared LS realtime market tick query failed",
+            ) from exc
+        finally:
+            if connection is not None:
+                try:
+                    self._pool.putconn(connection)
+                except Exception:  # noqa: BLE001 - pool cleanup must not mask the result
+                    pass
+
+        if not row:
+            raise MarketPriceResolverError(
+                "MARKET_PRICE_SHARED_DATA_GAP",
+                "no LS realtime tick is available for the instrument",
+            )
+        event_time, observed_at, price, market, provider = row
+        # ``observed_at`` is the freshness boundary; event_time is the broker
+        # event clock and can legitimately lag receipt during reconnects.
+        self._aware(event_time, field="event_time")
+        return MarketPriceSnapshot(
+            symbol=normalized,
+            price=_decimal_price(price, field="market.market_ticks.price"),
+            observed_at=self._aware(observed_at, field="observed_at"),
+            source=(
+                "LS_REALTIME_TICK:"
+                f"{str(provider or 'UNKNOWN').strip()[:32]}:"
+                f"{str(market or 'UNKNOWN').strip()[:16]}"
+            ),
+        )
+
+    def snapshot(self, symbol: str) -> MarketPriceSnapshot:
+        raise MarketPriceResolverError(
+            "MARKET_PRICE_INSTRUMENT_REQUIRED",
+            "shared LS realtime prices require the canonical instrument id",
+            retryable=False,
+        )
+
+    def close(self) -> None:
+        closeall = getattr(self._pool, "closeall", None)
+        if callable(closeall):
+            closeall()
+
+
 __all__ = [
     "LSPaperMarketPriceResolver",
+    "LSTimescaleMarketPriceResolver",
     "MarketPriceResolver",
     "MarketPriceResolverError",
     "MarketPriceSnapshot",

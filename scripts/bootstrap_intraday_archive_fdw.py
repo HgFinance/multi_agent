@@ -143,7 +143,7 @@ def parse_database_url(
         password = unquote(parsed.password) if parsed.password is not None else None
         database = unquote(parsed.path.lstrip("/"))
         host = parsed.hostname
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError):
         raise BootstrapError(f"{label} is not a valid PostgreSQL URL") from None
 
     if parsed.scheme not in {"postgresql", "postgres"}:

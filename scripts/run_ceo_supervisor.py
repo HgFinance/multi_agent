@@ -491,7 +491,7 @@ def watch_events_sqlite(
                     connection,
                     int(cursor or 0),
                 )
-            except (OSError, sqlite3.Error) as exc:
+            except (OSError, sqlite3.Error):
                 _close_watch_connection(connection)
                 connection = None
                 if consecutive_failures >= retry_limit:

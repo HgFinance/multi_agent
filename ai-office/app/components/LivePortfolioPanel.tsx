@@ -323,6 +323,42 @@ function EventRow({ event }: { event: OrderEvent }) {
   );
 }
 
+function TodayTradingSummary({ activity }: { activity: PortfolioLive["today_activity"] }) {
+  if (!activity) return null;
+  const activityData = activity.data;
+
+  return (
+    <section className="min-w-0 rounded-lg border border-outline-variant bg-surface-container-lowest" aria-labelledby="today-trading-title">
+      <div className="flex items-center justify-between gap-3 border-b border-outline-variant px-4 py-3">
+        <div>
+          <h3 id="today-trading-title" className="m-0 text-title-md font-title-md text-primary">오늘 거래 요약</h3>
+          <p className="m-0 mt-1 text-xs text-on-surface-variant">오늘 체결된 거래와 결제 흐름을 빠르게 확인합니다.</p>
+        </div>
+        <span className="text-xs text-on-surface-variant">{activity.as_of ? "오늘 기준" : "확인 중"}</span>
+      </div>
+      {activity.error ? (
+        <p role="alert" className="m-0 border-b border-error/40 bg-error-container px-4 py-2 text-xs text-on-error-container">
+          오늘 거래 요약을 불러오지 못했습니다: {activity.error}
+        </p>
+      ) : null}
+      {activityData ? (
+        <div className="grid grid-cols-2 gap-2 p-4 md:grid-cols-3 lg:grid-cols-6">
+          <SummaryTile label="거래 횟수" value={String(activityData.trade_count) + "건"} />
+          <SummaryTile label="매수 금액" value={formatMoney(activityData.summary.buy_amount)} />
+          <SummaryTile label="매도 금액" value={formatMoney(activityData.summary.sell_amount)} />
+          <SummaryTile label="총 거래금액" value={formatMoney(activityData.summary.total_amount)} />
+          <SummaryTile label="수수료" value={formatMoney(activityData.summary.total_fee)} />
+          <SummaryTile label="세금" value={formatMoney(activityData.summary.total_tax)} />
+        </div>
+      ) : (
+        <p className="m-0 px-4 py-6 text-center text-sm text-on-surface-variant">
+          {activity.as_of ? "오늘 체결된 거래가 없습니다." : "오늘 거래 요약을 확인하는 중입니다."}
+        </p>
+      )}
+    </section>
+  );
+}
+
 export default function LivePortfolioPanel() {
   // 재조회가 실패해도 `data`는 마지막 성공값 그대로 남고 `error`만 따로 온다 -
   // 한 번 끊겼다고 화면에 떠 있던 잔고가 사라지지 않는다.
@@ -413,6 +449,8 @@ export default function LivePortfolioPanel() {
             계좌 상태를 확인하는 중입니다…
           </p>
         ) : null}
+
+        <TodayTradingSummary activity={data?.today_activity} />
 
         {/* 잔고 요약 */}
         <div className="grid grid-cols-2 gap-2 md:grid-cols-5" aria-label="계좌 요약">

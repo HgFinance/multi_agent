@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Iterable
 
 BRIDGE_VERSION = "quant-research-bridge-v1"

@@ -27,7 +27,6 @@
 
 from __future__ import annotations
 
-import json
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone

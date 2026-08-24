@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "api"))
@@ -25,6 +26,16 @@ from risk_engine import RiskVerdict
 now = datetime.now(timezone.utc)
 fund, book, strategy, aapl = uuid4(), uuid4(), uuid4(), uuid4()
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def request_context_mode(monkeypatch: pytest.MonkeyPatch):
+    """Keep this request-contract suite independent from production .env."""
+
+    monkeypatch.setenv("RISK_QA_RUNTIME", "")
+    monkeypatch.setenv("RISK_CONTEXT_SOURCE", "request")
+    monkeypatch.setenv("DATABASE_URL", "")
+    monkeypatch.setenv("RISK_QA_DATABASE_URL", "")
 
 
 def order_intent_payload(qty="100", side="BUY") -> dict:

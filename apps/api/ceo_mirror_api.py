@@ -189,9 +189,9 @@ def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
     if owner_id and not fund_id:
         fund_id = fetch_fund_id_by_user(owner_id)
 
-    if request.source == "discord" and owner_id and fund_id and not book_id:
-        # Discord carries a stable author id, not a browser-selected Book.  A
-        # unique ACTIVE trading Book for the mapped Fund is deterministic; an
+    if owner_id and fund_id and not book_id:
+        # Web or Discord may omit Book. A unique ACTIVE trading Book for the
+        # resolved Fund is deterministic; an
         # absent or ambiguous choice remains unset so the order admission
         # boundary returns clarification instead of guessing an account.
         matching_books = [

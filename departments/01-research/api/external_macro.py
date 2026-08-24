@@ -24,7 +24,7 @@ import os
 import sys
 import urllib.parse
 import urllib.request
-from datetime import date, datetime
+from datetime import datetime
 
 from external_sources import _get, _snapshot, spend
 

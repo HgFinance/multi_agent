@@ -46,7 +46,6 @@ try:
         PostgresGrantPlan,
         ProvisioningError,
         RedisNamespacePlan,
-        ToolConfirmationPlan,
         plan_provisioning,
     )
 except ModuleNotFoundError:  # direct/standalone execution
@@ -54,7 +53,6 @@ except ModuleNotFoundError:  # direct/standalone execution
         PostgresGrantPlan,
         ProvisioningError,
         RedisNamespacePlan,
-        ToolConfirmationPlan,
         plan_provisioning,
     )
 

@@ -406,6 +406,45 @@ class CeoMirrorExecutionTest(unittest.TestCase):
         self.assertIs(actual, response)
         publish.assert_not_called()
 
+    def test_web_scope_resolves_one_active_trading_book_when_book_is_omitted(self) -> None:
+        from apps.api.ceo import CeoAsk
+
+        user_id = str(uuid4())
+        fund_id = str(uuid4())
+        book_id = str(uuid4())
+        captured: list[CeoAsk] = []
+
+        def fake_ceo_query(
+            req: CeoAsk, owner_id: str | None = None, **_coordinates: object
+        ) -> dict[str, object]:
+            del owner_id
+            captured.append(req)
+            return {"task_id": "t_web_order", "status": "accepted"}
+
+        ingress = CanonicalIngress(
+            query="삼성전자 분봉 120일선 돌파시 매수해줘",
+            request_id="request-web-book-fallback",
+            source="web",
+            source_message_id="request-web-book-fallback",
+            actor_id=user_id,
+            actor_type="user",
+            fund_id=fund_id,
+        )
+        with (
+            patch.object(
+                ceo_mirror_api,
+                "authorized_trading_books",
+                return_value=[{"fund_id": fund_id, "book_id": book_id, "name": "MAIN"}],
+            ),
+            patch.object(ceo_mirror_api, "post_question", return_value=None),
+            patch("apps.api.ceo.ceo_query", side_effect=fake_ceo_query),
+        ):
+            response = ceo_mirror_api._ceo_query(ingress)
+
+        self.assertEqual(response["task_id"], "t_web_order")
+        self.assertEqual(captured[0].fund_id, fund_id)
+        self.assertEqual(captured[0].book_id, book_id)
+
     def test_discord_actor_mapping_resolves_one_active_trading_book(self) -> None:
         """A Discord author can enter the same exact PAPER account boundary."""
 

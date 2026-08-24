@@ -203,6 +203,38 @@ def test_http_runtime_client_uses_ls_price_and_only_reuses_within_cycle() -> Non
     assert resolver.calls == ["005930", "005930"]
 
 
+def test_http_runtime_client_passes_canonical_instrument_to_shared_tick_resolver() -> None:
+    instrument_id = UUID("40000000-0000-0000-0000-000000000001")
+
+    class InstrumentAwareResolver:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def snapshot_for_instrument(self, symbol, received_instrument_id):
+            self.calls.append((symbol, received_instrument_id))
+            return MarketPriceSnapshot(
+                symbol=symbol,
+                price=Decimal("258000"),
+                observed_at=datetime.now(timezone.utc),
+                source="test-shared-ls-realtime",
+            )
+
+        def snapshot(self, symbol):
+            raise AssertionError("shared resolver must receive the instrument id")
+
+    resolver = InstrumentAwareResolver()
+    client = HttpRuntimeClient(
+        trading_api_url="http://trading.test",
+        market_api_url="http://market.test",
+        price_resolver=resolver,
+    )
+
+    price, _observed_at, _context = client._snapshot("005930", instrument_id)
+
+    assert price == Decimal("258000")
+    assert resolver.calls == [("005930", instrument_id)]
+
+
 class ContextRevokedClient(FakeClient):
     def __init__(self, runtime_inputs: RuntimeInputs) -> None:
         super().__init__(runtime_inputs)

@@ -735,7 +735,6 @@ def _check_guards():
 def _run(seconds: float, symbols: tuple[str, ...]) -> int:
     import asyncio
 
-    from ls_client import LsRestClient
     from market_repository import TimescaleMarketRepository
     from reference_repository import SupabaseReferenceRepository
 

@@ -195,7 +195,9 @@ export async function askCeo(
   query: string,
   requestId?: string,
   bookId?: string,
+  fundId?: string,
 ): Promise<CeoQueryResult> {
+  const resolvedFundId = fundId ?? currentFundId();
   let response: Response;
   try {
     response = await bffFetch("/ui/ceo/ask", {
@@ -212,7 +214,7 @@ export async function askCeo(
         // 서버에 `user_id -> fund_id` 역참조 경로가 없어(fund_memberships가
         // 비어 있다) 화면이 쌍으로 보낸다. 없으면 생략 - BFF가 Mandate
         // 스냅샷 없이 진행하고 없는 한도를 지어내지 않는다.
-        ...(currentFundId() ? { fund_id: currentFundId() } : {}),
+        ...(resolvedFundId ? { fund_id: resolvedFundId } : {}),
         // 주문일 가능성이 있는 자연어를 위해 서버가 검증할 PAPER Book 범위를
         // 전달한다. 선택하지 않았으면 생략해 일반 자문은 그대로 사용할 수 있다.
         ...(bookId ? { book_id: bookId } : {}),

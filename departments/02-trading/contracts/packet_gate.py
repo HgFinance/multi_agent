@@ -37,7 +37,7 @@ from uuid import UUID
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
 
-from contracts import MarketSnapshot, Side, StrategySignal
+from contracts import MarketSnapshot, StrategySignal
 
 PUBLISHED = "PUBLISHED"
 NEGATIVE = "negative"

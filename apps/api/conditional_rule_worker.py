@@ -52,6 +52,7 @@ from orchestration.conditional_rules.semantic import normalized_indicator_parame
 from orchestration.conditional_rules.indicators import DEFAULT_REGISTRY
 from orchestration.conditional_rules.market_data import (
     LSPaperMarketPriceResolver,
+    LSTimescaleMarketPriceResolver,
     MarketPriceResolver,
     MarketPriceResolverError,
 )
@@ -484,10 +485,13 @@ class HttpRuntimeClient:
             raise RuntimeDataError("TRADING_CONTEXT_INVALID", "Trading context is invalid")
         return value
 
-    def _snapshot(self, symbol: str) -> tuple[Decimal, datetime, dict[str, Any]]:
+    def _snapshot(
+        self, symbol: str, instrument_id: UUID | None = None
+    ) -> tuple[Decimal, datetime, dict[str, Any]]:
         normalized = symbol.strip().upper()
+        cache_key = f"{normalized}:{instrument_id or ''}"
         with self._cycle_prices_lock:
-            cached = self._cycle_prices.get(normalized)
+            cached = self._cycle_prices.get(cache_key)
         if cached is not None:
             return cached
         resolver = self._price_resolver
@@ -496,12 +500,26 @@ class HttpRuntimeClient:
                 resolver = self._price_resolver
                 if resolver is None:
                     try:
-                        resolver = LSPaperMarketPriceResolver.from_env()
+                        # The collection layer owns the single LS WebSocket.
+                        # When its market DB is wired, consume that shared tick
+                        # stream instead of opening one REST request per rule.
+                        if os.getenv(
+                            "CONDITIONAL_RULE_MARKET_DATABASE_URL", ""
+                        ).strip():
+                            resolver = LSTimescaleMarketPriceResolver.from_env()
+                        else:
+                            # Compatibility for local deployments that have
+                            # not yet wired the market DB overlay.
+                            resolver = LSPaperMarketPriceResolver.from_env()
                     except MarketPriceResolverError as exc:
                         raise RuntimeDataError(exc.code, str(exc), retryable=exc.retryable) from exc
                     self._price_resolver = resolver
         try:
-            snapshot = resolver.snapshot(normalized)
+            shared_snapshot = getattr(resolver, "snapshot_for_instrument", None)
+            if instrument_id is not None and callable(shared_snapshot):
+                snapshot = shared_snapshot(normalized, instrument_id)
+            else:
+                snapshot = resolver.snapshot(normalized)
         except MarketPriceResolverError as exc:
             raise RuntimeDataError(exc.code, str(exc), retryable=exc.retryable) from exc
         value = {
@@ -514,10 +532,10 @@ class HttpRuntimeClient:
         }
         result = (snapshot.price, snapshot.observed_at, value)
         with self._cycle_prices_lock:
-            cached = self._cycle_prices.get(normalized)
+            cached = self._cycle_prices.get(cache_key)
             if cached is not None:
                 return cached
-            self._cycle_prices[normalized] = result
+            self._cycle_prices[cache_key] = result
             return result
 
     def _bars(self, symbol: str, timeframe: Timeframe, limit: int) -> list[Candle]:
@@ -564,7 +582,9 @@ class HttpRuntimeClient:
         if not isinstance(portfolio_raw, dict) or not isinstance(instrument, dict):
             raise RuntimeDataError("TRADING_CONTEXT_INVALID", "Trading portfolio context is invalid")
 
-        current_price, quote_at, _ = self._snapshot(rule.spec.symbol)
+        current_price, quote_at, _ = self._snapshot(
+            rule.spec.symbol, rule.spec.instrument_id
+        )
         history = _required_history(rule)
         bars = {
             timeframe: self._bars(
@@ -641,7 +661,26 @@ class HttpRuntimeClient:
                     minimum=Decimal("0"),
                 )
                 symbol = str(holding.get("symbol", ""))
-                price = current_price if symbol == rule.spec.symbol else self._snapshot(symbol)[0]
+                holding_instrument_id = holding.get("instrument_id")
+                if symbol == rule.spec.symbol:
+                    price = current_price
+                else:
+                    # The shared tick feed is keyed by the canonical
+                    # instrument identity, not by a potentially ambiguous
+                    # display symbol.  Trading's holdings read model already
+                    # carries this field; the REST compatibility resolver can
+                    # still use the symbol when running without the feed.
+                    parsed_instrument_id = None
+                    if holding_instrument_id is not None:
+                        try:
+                            parsed_instrument_id = UUID(str(holding_instrument_id))
+                        except (ValueError, AttributeError) as exc:
+                            raise RuntimeDataError(
+                                "TRADING_CONTEXT_INVALID",
+                                "holding.instrument_id is invalid",
+                                retryable=False,
+                            ) from exc
+                    price = self._snapshot(symbol, parsed_instrument_id)[0]
                 nav += quantity * price
             if nav <= 0:
                 raise RuntimeDataError(
@@ -1021,6 +1060,13 @@ def main() -> int:
     if args.healthcheck:
         store.list_active(limit=1)
         HttpRuntimeClient._service_token()
+        # In the deployed PAPER stack the market DB is the shared LS realtime
+        # feed boundary.  Prove that optional wiring is reachable during the
+        # healthcheck; otherwise the process can be healthy while silently
+        # falling back to per-rule REST polling.
+        if os.getenv("CONDITIONAL_RULE_MARKET_DATABASE_URL", "").strip():
+            resolver = LSTimescaleMarketPriceResolver.from_env()
+            resolver.close()
         print("conditional-rule-worker ready")
         return 0
     if args.once:

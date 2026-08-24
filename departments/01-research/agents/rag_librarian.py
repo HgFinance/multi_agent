@@ -27,7 +27,6 @@ import re
 import sys
 import urllib.request
 import zipfile
-from datetime import datetime, timezone
 from html import unescape
 from pathlib import Path
 

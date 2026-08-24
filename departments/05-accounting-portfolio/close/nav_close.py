@@ -366,8 +366,8 @@ if __name__ == "__main__":
         pass
 
     sys.path.insert(0, str(_HERE.parent.parent / "02-trading" / "contracts"))
-    from ledger import Ledger, PeriodClosedError, Position  # noqa: E402
-    from portfolio import MarkPrice, PositionValuation, value_portfolio  # noqa: E402
+    from ledger import Ledger, PeriodClosedError  # noqa: E402
+    from portfolio import PositionValuation  # noqa: E402
     from reconciliation import Break, Severity  # noqa: E402
 
     D = Decimal

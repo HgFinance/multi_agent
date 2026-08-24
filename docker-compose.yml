@@ -100,6 +100,14 @@ services:
       SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
       PORTFOLIO_RUNTIME_STORE_PATH: /var/lib/portfolio/runtime.sqlite3
       PORTFOLIO_RUNTIME_EMBEDDED_WORKER: "false"
+      # Optional shared Qwen Worker model plane. When WORKER_MODEL_BASE_URL
+      # is present, the Worker Model Gateway takes precedence over the local
+      # Ollama fallback; Hermes remains the department-head boundary.
+      WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-}
+      WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-awq}
+      WORKER_MODEL_API_KEY: ${WORKER_MODEL_API_KEY:-vllm}
+      WORKER_MODEL_TIMEOUT_SECONDS: ${WORKER_MODEL_TIMEOUT_SECONDS:-120}
+      WORKER_MODEL_REGISTRY_PATH: ${WORKER_MODEL_REGISTRY_PATH:-/app/departments/01-research/config/worker_model_registry.json}
       # Optional metadata-only LangSmith root observation.  The BFF already
       # carries the SDK transitively through LangGraph; this wiring does not
       # change CEO/Kanban or execution control flow.
@@ -289,6 +297,8 @@ services:
     container_name: hedgefund-conditional-rule-worker
     restart: unless-stopped
     depends_on:
+      timescaledb:
+        condition: service_healthy
       trading-api:
         condition: service_healthy
       market-api:
@@ -301,6 +311,13 @@ services:
       CONDITIONAL_RULE_WORKER_DATABASE_ROLE: ${CONDITIONAL_RULE_WORKER_DATABASE_ROLE:-svc_conditional_rule_worker}
       TRADING_API_URL: ${TRADING_API_URL:-http://trading-api:8000}
       MARKET_API_URL: ${MARKET_API_URL:-http://market-api:8036}
+      # ls-realtime owns the single LS WebSocket and writes canonical ticks to
+      # TimescaleDB.  The conditional worker reads that shared stream by
+      # instrument_id; it does not open one broker connection per rule.
+      CONDITIONAL_RULE_MARKET_DATABASE_URL: ${CONDITIONAL_RULE_MARKET_DATABASE_URL:-postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?HEDGEFUND_TSDB_PASSWORD is required}@timescaledb:5432/market}
+      CONDITIONAL_RULE_MARKET_CONNECT_TIMEOUT_SECONDS: ${CONDITIONAL_RULE_MARKET_CONNECT_TIMEOUT_SECONDS:-2}
+      CONDITIONAL_RULE_MARKET_STATEMENT_TIMEOUT_MS: ${CONDITIONAL_RULE_MARKET_STATEMENT_TIMEOUT_MS:-1500}
+      CONDITIONAL_RULE_MARKET_MAX_CONNECTIONS: ${CONDITIONAL_RULE_MARKET_MAX_CONNECTIONS:-8}
       TRADING_INTERNAL_SERVICE_AUTH_SECRET: ${TRADING_INTERNAL_SERVICE_AUTH_SECRET:?A separate 32-byte internal Trading auth secret is required}
       TRADING_INTERNAL_SERVICE_AUTH_ISSUER: ${TRADING_INTERNAL_SERVICE_AUTH_ISSUER:-hedgefund-service-issuer}
       TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE: ${TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE:-trading-api}
@@ -324,6 +341,43 @@ services:
     mem_limit: 384m
     cpus: 0.5
     pids_limit: 96
+
+  # Conditional-rule retention is isolated from the hot evaluator.  It only
+  # deletes terminal audit detail after the configured grace periods; active
+  # rules and executions linked to PAPER directives are never touched.
+  conditional-rule-retention-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.conditional-rule-worker
+    container_name: hedgefund-conditional-rule-retention-worker
+    restart: unless-stopped
+    init: true
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    command: ["python", "-m", "apps.api.conditional_rule_retention"]
+    environment:
+      PYTHONPATH: /app
+      APP_ENV: ${APP_ENV:-production}
+      CONDITIONAL_RULE_RETENTION_DATABASE_URL: ${CONDITIONAL_RULE_RETENTION_DATABASE_URL:-${CONDITIONAL_RULE_DATABASE_URL:-${DATABASE_URL:-}}}
+      CONDITIONAL_RULE_RETENTION_DATABASE_ROLE: svc_conditional_rule_worker
+      CONDITIONAL_RULE_RETENTION_ENABLED: ${CONDITIONAL_RULE_RETENTION_ENABLED:-true}
+      CONDITIONAL_RULE_RETENTION_INTERVAL_SECONDS: ${CONDITIONAL_RULE_RETENTION_INTERVAL_SECONDS:-86400}
+      CONDITIONAL_RULE_RETENTION_BATCH_SIZE: ${CONDITIONAL_RULE_RETENTION_BATCH_SIZE:-500}
+      CONDITIONAL_RULE_EVALUATION_RETENTION_DAYS: ${CONDITIONAL_RULE_EVALUATION_RETENTION_DAYS:-30}
+      CONDITIONAL_RULE_DETAIL_RETENTION_DAYS: ${CONDITIONAL_RULE_DETAIL_RETENTION_DAYS:-90}
+      CONDITIONAL_RULE_OUTBOX_RETENTION_DAYS: ${CONDITIONAL_RULE_OUTBOX_RETENTION_DAYS:-7}
+      CONDITIONAL_RULE_RETENTION_STATEMENT_TIMEOUT_MS: ${CONDITIONAL_RULE_RETENTION_STATEMENT_TIMEOUT_MS:-1500}
+    healthcheck:
+      test: ["CMD", "python", "-m", "apps.api.conditional_rule_retention", "--healthcheck"]
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 20s
+    mem_limit: 128m
+    mem_reservation: 32m
+    cpus: 0.1
+    pids_limit: 32
 
   portfolio-worker:
     build:
@@ -350,6 +404,13 @@ services:
       PORTFOLIO_RUNTIME_EMBEDDED_WORKER: "false"
       PORTFOLIO_WORKER_LEASE_SECONDS: ${PORTFOLIO_WORKER_LEASE_SECONDS:-60}
       PORTFOLIO_WORKER_POLL_SECONDS: ${PORTFOLIO_WORKER_POLL_SECONDS:-0.5}
+      # Use the shared vLLM/Qwen plane when configured; otherwise the Gateway
+      # deliberately retains its existing Ollama development fallback.
+      WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-}
+      WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-awq}
+      WORKER_MODEL_API_KEY: ${WORKER_MODEL_API_KEY:-vllm}
+      WORKER_MODEL_TIMEOUT_SECONDS: ${WORKER_MODEL_TIMEOUT_SECONDS:-120}
+      WORKER_MODEL_REGISTRY_PATH: ${WORKER_MODEL_REGISTRY_PATH:-/app/departments/01-research/config/worker_model_registry.json}
       # The queued worker is an existing LangSmith metric producer through
       # orchestration/workflows/portfolio_recommendation.py. Keep its
       # workflow traces and high-frequency metric runs in separate projects.

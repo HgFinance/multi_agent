@@ -66,7 +66,16 @@ def test_risk_mandate_projects_workers_into_office_operations_read_model() -> No
             )
 
         assert response.status_code == 200, response.text
-        with patch.dict(os.environ, {"DATABASE_URL": ""}, clear=False):
+        with patch.dict(
+            os.environ,
+            {
+                "DATABASE_URL": "",
+                "ACCOUNTING_MODE": "OFFLINE",
+                "ACCOUNTING_DURABLE_REQUIRED": "",
+                "PAPER_DB": "",
+            },
+            clear=False,
+        ):
             _repo.cache_clear()
             operations = TestClient(app).get("/ui/snapshot").json()["operations"]
         risk = next(

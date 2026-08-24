@@ -34,25 +34,22 @@ binding QA verdict, approve an order, write a ledger, or close a finding.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import importlib.util
 import json
 import os
 import sys
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, TypedDict
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from langgraph.graph import END, StateGraph
 
 from departments.employee_worker_runtime import WorkerSpec, run_coroutine_sync
 from departments.risk_qa_worker_profiles import (
     QA_WORKER_TECH,
-    WorkerTechProfile,
     tech_profile_for,
 )
 from orchestration.llm_observability import (

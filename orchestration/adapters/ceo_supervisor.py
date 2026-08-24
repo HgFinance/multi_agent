@@ -60,10 +60,7 @@ from orchestration.ceo_workflow_scope import (
     workflow_role_from_body,
     read_marker,
 )
-from orchestration.discord_delivery import (
-    DiscordFinalDelivery,
-    correlation_from_task,
-)
+from orchestration.discord_delivery import DiscordFinalDelivery
 from orchestration.discord_idempotency import DiscordIdempotencyStore
 from orchestration.failure_taxonomy import FailureKind, classify_failure
 from orchestration.adapters.department_notion_projection import (
@@ -3300,8 +3297,6 @@ class CeoSupervisorService:
                 #
                 # Legacy/web/no-thread flows retain the historical parent reply
                 # as a compatibility fallback.
-                correlation = correlation_from_task(delivery_task)
-
                 # Always let DiscordFinalDelivery resolve the existing thread
                 # first. It can recover the thread from explicit correlation,
                 # the inbound ledger, or the Discord starter message id.

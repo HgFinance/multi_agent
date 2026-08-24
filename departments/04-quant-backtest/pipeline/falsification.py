@@ -33,7 +33,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -82,11 +82,32 @@ _PATTERNS = (
         r"|(?i:(?:fails?\s+to\s+replicate|confined\s+to|effect\s+is).{0,60}(?:session|regime|instrument|one[- ]session|one[- ]regime))"
         r"|(?i:(?:effect|result).{0,60}(?:exists|confined|survives).{0,30}(?:one\s+session|one\s+liquidity\s+bucket|independent\s+sessions?))"
         r"|(?i:(?:one|single)\s+(?:session|regime|liquidity\s+bucket)(?:\s+only)?(?:\s+or\s+(?:one|single)\s+(?:session|regime|liquidity\s+bucket))?)"
-        r"|(?i:failure\s+to\s+replicate.{0,40}(?:sessions?|instruments?))")),
+        r"|(?i:failure\s+to\s+replicate.{0,40}(?:sessions?|instruments?))"
+        # Queue proposals use short negative phrasing for the same
+        # reproducibility/fragility test; the runner evaluates it from the
+        # frozen session/window series.
+        r"|(?i:(?:effect|result).{0,50}(?:disappears|vanishes|reverses?).{0,50}(?:out[- ]of[- ]sample|separate\s+sessions?|instrument\s+shard|session\s+shard|regime))"
+        r"|(?i:(?:effect|result).{0,50}(?:confined|present\s+only).{0,50}(?:one|single).{0,30}(?:instrument|session|regime|liquidity\s+bucket))")),
     ("window_count", re.compile(
         r"(walk[- ]?forward|창).{0,12}\d+\s*개\s*미만"
         r"|(?i:(?:fewer|less than|under).{0,20}(?:completed )?(?:KRX )?sessions)"
         r"|(?i:(?:underpowered|insufficient).{0,30}(?:data|sessions|sample))")),
+    # Intraday proposals distinguish ablations/controls from aggregate
+    # baseline. Keep a dedicated kind so total excess return is not reused.
+    ("control_comparison", re.compile(
+        r"(?i:(?:does not beat|fails? to beat|performs equally|equally strong|"
+        r"as strong as|not weaker|no (?:incremental|improvement|difference)|"
+        r"indistinguishable|차별 없음|증분되지 않음|우월하지 않음).{0,100}"
+        r"(?:control|ablation|signed[- ]?tape|depth[- ]?slope|microprice|midprice|"
+        r"ungated|opposite[- ]?sign|parent|queue|tightness|interaction|effect|markout))")),
+    ("alignment_audit", re.compile(
+        r"(?i:(?:latency|timestamp|quote[- ]?trade).{0,50}"
+        r"(?:alignment|misalignment|audit|정렬|오류|overlap).{0,40}"
+        r"(?:fail|remove|오류|없음|effect)?)")),
+    ("calibration_sign", re.compile(
+        r"(?i:(?:calibration|realized_volatility).{0,80}"
+        r"(?:negative|non[- ]?positive|음수|부호).{0,40}"
+        r"(?:relation|slope|관계|관계가)?)")),
     ("beats_baseline", re.compile(
         r"(baseline|기준선|벤치마크).{0,20}(대비|보다).{0,20}"
         r"(초과수익\s*없|높지\s*않|이하)"
@@ -290,6 +311,27 @@ def run(tests, metrics: dict, *, window_metrics=None,
                 out.append(TestResult(
                     text=str(t), kind=kind, ran=True, survived=sd <= bar,
                     detail=f"창간 Sharpe 표준편차 {sd:.3f} (기준 {bar})"))
+        elif kind == "control_comparison":
+            ex = metrics.get("control_comparison_excess_return_pct")
+            out.append(TestResult(
+                text=str(t), kind=kind, ran=ex is not None,
+                survived=(float(ex) > 0) if ex is not None else None,
+                detail=(f"통제 대비 증분수익 {float(ex):+.2f}%p" if ex is not None
+                        else "통제 비교 측정 결과가 없다")))
+        elif kind == "alignment_audit":
+            passed = metrics.get("alignment_audit_pass")
+            out.append(TestResult(
+                text=str(t), kind=kind, ran=passed is not None,
+                survived=bool(passed) if passed is not None else None,
+                detail=(f"timestamp/latency 정렬 감사 통과={bool(passed)}"
+                        if passed is not None else "정렬 감사 결과가 없다")))
+        elif kind == "calibration_sign":
+            slope = metrics.get("calibration_slope")
+            out.append(TestResult(
+                text=str(t), kind=kind, ran=slope is not None,
+                survived=(float(slope) > 0) if slope is not None else None,
+                detail=(f"calibration slope {float(slope):+.6g}" if slope is not None
+                        else "calibration slope 결과가 없다")))
         elif kind == "beats_baseline":
             ex = metrics.get("excess_return_pct")
             out.append(TestResult(

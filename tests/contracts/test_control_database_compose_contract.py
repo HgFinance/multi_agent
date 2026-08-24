@@ -21,6 +21,7 @@ EXPECTED_DEFAULT_CONTROL_DB_CONSUMERS = {
     "accounting-api",
     "accounting-close-scheduler",
     "accounting-ledger-consumer",
+    "accounting-ls-paper-reconciler",
     "audit-api",
     "batch-collectors",
     "ceo-kanban-supervisor",

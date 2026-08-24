@@ -266,14 +266,15 @@ test("CEO chat unifies advice and PAPER commands while keeping book scope explic
     "utf8",
   );
   assert.match(controlRoom, /궁금한 점을 묻거나 매매를 지시하면 대표가 확인해 처리합니다/);
-  assert.match(controlRoom, /authorizedBooksForFund\(portfolio\.profile, portfolio\.activeFundId\)/);
+  assert.match(controlRoom, /authorizedBooksForFund\(portfolio\.profile, effectiveFundId\)/);
   assert.match(controlRoom, /authorizedBooks\.length === 1/);
   assert.match(controlRoom, /계좌를 선택하세요/);
   assert.match(controlRoom, /질문과 안내는 계속 사용할 수 있습니다/);
   assert.doesNotMatch(controlRoom, /PAPER ONLY · LIVE 아님/);
   assert.doesNotMatch(controlRoom, /LIVE 아님/);
-  assert.match(controlRoom, /askCeo\(text, undefined, bookId\)/);
+  assert.match(controlRoom, /askCeo\(text, undefined, bookId, fundId\)/);
   assert.doesNotMatch(controlRoom, /PaperOrderConsole|setMode\("paper"\)|role="tablist"/);
+  assert.match(ceoClient, /fundId\?: string/);
   assert.match(ceoClient, /bookId\?: string/);
   assert.match(ceoClient, /bookId \? \{ book_id: bookId \} : \{\}/);
 });

@@ -244,7 +244,6 @@ class ExperienceRetentionWorker:
             try:
                 cursor.execute("SET LOCAL statement_timeout = %s", (self.statement_timeout_ms,))
                 before = self._size(cursor)
-                band = capacity_band(before)
                 expired = 0
                 pressure = 0
                 if not dry_run:

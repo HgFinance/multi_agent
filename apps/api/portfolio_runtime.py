@@ -38,6 +38,7 @@ except ModuleNotFoundError:  # pragma: no cover - package import path
     from apps.api import kanban_tracker
 
 from portfolio_store import PortfolioRuntimeStore, _process_alive
+from orchestration.llm_observability import langsmith_project
 
 from orchestration.workflows.portfolio_recommendation import (
     run_portfolio_recommendation_pipeline_async,
@@ -115,7 +116,7 @@ def langsmith_observability() -> dict[str, Any]:
     }
     endpoint = os.getenv("LANGSMITH_ENDPOINT", "").strip()
     api_key_configured = bool(os.getenv("LANGSMITH_API_KEY", "").strip())
-    project = os.getenv("LANGSMITH_PROJECT")
+    project = langsmith_project("workflow")
     parsed = urlsplit(endpoint)
     safe_endpoint = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else None
     return {
@@ -124,6 +125,8 @@ def langsmith_observability() -> dict[str, Any]:
         "tracing_enabled": tracing_enabled,
         "endpoint": safe_endpoint,
         "project": project or None,
+        "metrics_project": langsmith_project("metrics"),
+        "evals_project": langsmith_project("evals"),
     }
 
 

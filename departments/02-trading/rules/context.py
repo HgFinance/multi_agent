@@ -6,7 +6,6 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from typing import Any
 from uuid import UUID
 
 import psycopg2

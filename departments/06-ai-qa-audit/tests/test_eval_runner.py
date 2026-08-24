@@ -7,7 +7,6 @@ import pytest
 
 from eval_runner import (
     AppendOnlyViolation,
-    CandidateSpec,
     EvalCase,
     EvalErrorCode,
     EvalMetric,

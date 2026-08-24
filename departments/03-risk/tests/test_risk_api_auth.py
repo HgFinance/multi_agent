@@ -51,6 +51,11 @@ def _headers(
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("RISK_SERVICE_AUTH_SECRET", RISK_TEST_SECRET)
+    # apps.api.main may have loaded the production .env before this module is
+    # collected. These tests intentionally exercise the verifier without
+    # deployment-specific issuer/audience claims.
+    monkeypatch.delenv("RISK_SERVICE_AUTH_ISSUER", raising=False)
+    monkeypatch.delenv("RISK_SERVICE_AUTH_AUDIENCE", raising=False)
     store = _FakeStateStore()
     monkeypatch.setattr(risk_api, "_state_store", store)
     return TestClient(risk_api.app), store

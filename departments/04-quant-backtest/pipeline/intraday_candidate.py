@@ -11,11 +11,10 @@ from __future__ import annotations
 
 from collections import defaultdict
 import copy
-from datetime import timezone
 import hashlib
 import heapq
 import math
-from statistics import fmean, median, pstdev
+from statistics import fmean, median
 from zoneinfo import ZoneInfo
 
 from intraday_alpha_ast import evaluate as evaluate_ast

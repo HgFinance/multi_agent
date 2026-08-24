@@ -44,7 +44,7 @@ AccessRequest는 이미 존재하는 Agent의 자원 접근을 다루지만, Hir
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Any

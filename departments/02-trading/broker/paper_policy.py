@@ -1,7 +1,7 @@
 """Shared deterministic execution-cost policy for every PAPER order lane."""
 from __future__ import annotations
 
-from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 
 DEFAULT_FEE_BPS = Decimal("1.5")

@@ -32,6 +32,8 @@ import { PanelBar } from "./PanelBar";
  */
 
 /** 입력란 아래에 보여주는 빠른 질문. 누르면 그대로 전송한다. */
+const PAPER_ORDER_LANGUAGE = /(?:매수|매도|주문|사줘|팔아줘|지정가|시장가)/;
+
 const QUICK_QUESTIONS = [
   "오늘 전체 업무 현황을 요약해줘",
   "지금 막혀 있는 업무와 이유를 알려줘",
@@ -79,9 +81,20 @@ export function CeoControlRoomChat() {
 
 function CeoControlRoomChatSession() {
   const portfolio = usePortfolioSession();
+  const effectiveFundId = useMemo(() => {
+    const activeFund = portfolio.profile?.funds.find(
+      (fund) => fund.fundId === portfolio.activeFundId,
+    );
+    if (activeFund?.books.length) return activeFund.fundId;
+    const tradeableFunds = portfolio.profile?.funds.filter((fund) => fund.books.length > 0) ?? [];
+    return tradeableFunds.length === 1 ? tradeableFunds[0].fundId : portfolio.activeFundId;
+  }, [portfolio.activeFundId, portfolio.profile]);
+  const usingFallbackTradingFund = Boolean(
+    effectiveFundId && effectiveFundId !== portfolio.activeFundId,
+  );
   const authorizedBooks = useMemo(
-    () => authorizedBooksForFund(portfolio.profile, portfolio.activeFundId),
-    [portfolio.activeFundId, portfolio.profile],
+    () => authorizedBooksForFund(portfolio.profile, effectiveFundId),
+    [effectiveFundId, portfolio.profile],
   );
   const [requestedBookId, setRequestedBookId] = useState("");
   const selectedBook =
@@ -91,6 +104,7 @@ function CeoControlRoomChatSession() {
   const selectedBookId = selectedBook?.bookId ?? "";
   const [draft, setDraft] = useState("");
   const [submitted, setSubmitted] = useState<SubmittedRequest | null>(null);
+  const [localError, setLocalError] = useState("");
 
   const activeTaskId = submitted?.taskId ?? null;
   const activeOrderRequestId = submitted?.orderRequestId ?? null;
@@ -133,17 +147,25 @@ function CeoControlRoomChatSession() {
   });
 
   const sendMutation = useMutation({
-    mutationFn: ({ text, bookId }: { text: string; bookId?: string }) =>
-      askCeo(text, undefined, bookId),
+    mutationFn: ({ text, bookId, fundId }: { text: string; bookId?: string; fundId?: string }) =>
+      askCeo(text, undefined, bookId, fundId),
   });
 
   async function send(text: string) {
     const value = text.trim();
     if (!value || sendMutation.isPending) return;
     setDraft("");
+    setLocalError("");
+    if (PAPER_ORDER_LANGUAGE.test(value) && !selectedBookId) {
+      setLocalError(
+        "매매 지시를 보내려면 거래 가능한 PAPER 계좌를 선택하세요. 요청은 아직 전송하지 않았습니다.",
+      );
+      return;
+    }
     try {
       const response = await sendMutation.mutateAsync({
         text: value,
+        fundId: effectiveFundId ?? undefined,
         ...(selectedBookId ? { bookId: selectedBookId } : {}),
       });
       setSubmitted({
@@ -160,11 +182,11 @@ function CeoControlRoomChatSession() {
   }
 
   const busy = sendMutation.isPending;
-  const error = sendMutation.isError
+  const error = localError || (sendMutation.isError
     ? sendMutation.error instanceof Error
       ? sendMutation.error.message
       : String(sendMutation.error)
-    : "";
+    : "");
 
   return (
     <section className="lg:col-span-1 bg-surface-container-lowest border border-outline-variant rounded-lg overflow-hidden shadow-sm flex flex-col">
@@ -195,6 +217,12 @@ function CeoControlRoomChatSession() {
             </label>
           ) : null}
         </div>
+
+        {usingFallbackTradingFund ? (
+          <p id="ceo-paper-book-help" role="status" className="mt-2 mb-0 text-[11px] text-on-surface-variant">
+            현재 선택된 Fund에 거래 계좌가 없어 연결된 유일한 PAPER 계좌로 매매 지시를 보냅니다.
+          </p>
+        ) : null}
 
         {authorizedBooks.length === 0 ? (
           <p id="ceo-paper-book-help" role="status" className="mt-2 mb-0 text-[11px] text-on-surface-variant">

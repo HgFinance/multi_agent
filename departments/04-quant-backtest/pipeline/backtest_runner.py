@@ -45,7 +45,7 @@ from itertools import zip_longest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from pit_dataset import DATA_ROOT, content_hash, load_partition, resolve_object_path
+from pit_dataset import content_hash, load_partition, resolve_object_path
 from stock_universe import assert_stock_only_universe
 
 RUNNER_VERSION = "quant-backtest-runner-v1"
@@ -2332,7 +2332,6 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
     반환: {"status": 0|중복0, "experiment_id", "backtest_run_id", "metrics",
            "input_hash", "duplicate": bool}
     """
-    import psycopg2
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "01-research" / "collectors"))
     from source_registry import load_project_env

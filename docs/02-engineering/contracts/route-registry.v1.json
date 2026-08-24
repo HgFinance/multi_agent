@@ -426,6 +426,26 @@
         },
         {
           "method": "GET",
+          "path": "/qa/v1/observability/feedback/approved"
+        },
+        {
+          "method": "GET",
+          "path": "/qa/v1/observability/feedback/benchmark/candidates"
+        },
+        {
+          "method": "GET",
+          "path": "/qa/v1/observability/feedback/pending"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/observability/feedback/{artifact_id}/benchmark"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/observability/feedback/{artifact_id}/decision"
+        },
+        {
+          "method": "GET",
           "path": "/qa/v1/observability/runtime"
         },
         {
@@ -551,6 +571,10 @@
         },
         {
           "method": "GET",
+          "path": "/workforce/v1/departments/capacity"
+        },
+        {
+          "method": "GET",
           "path": "/workforce/v1/departments/{department_code}/quality-snapshots"
         },
         {
@@ -632,6 +656,10 @@
         {
           "method": "POST",
           "path": "/workforce/v1/workforce-plans/{plan_id}/retire"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/workforce-plans"
         }
       ]
     },
@@ -775,6 +803,10 @@
     "accounting-api": {
       "status": "IMPLEMENTED_PAPER",
       "operations": [
+        {
+          "method": "GET",
+          "path": "/accounting/v1/ledgers/{ledger_id}/advisory-snapshot"
+        },
         {
           "method": "POST",
           "path": "/accounting/v1/ledgers"
@@ -1118,7 +1150,47 @@
         },
         {
           "method": "GET",
+          "path": "/ui/workforce/agents/{agent_id}/access"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/workforce/capacity"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/workforce/hiring-requests"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/workforce/idle-agents"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/workforce/improvements"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/workforce/roster"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/workforce/workforce-plans"
+        },
+        {
+          "method": "GET",
           "path": "/ui/qa"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/qa/observability/feedback/pending"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/qa/observability/feedback/{artifact_id}/decision"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/qa/observability/langsmith"
         },
         {
           "method": "POST",
@@ -1143,6 +1215,14 @@
         {
           "method": "GET",
           "path": "/ui/snapshot"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/strategy-runtime/spike-fade"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/strategy-runtime/spike-fade/power"
         },
         {
           "method": "GET",

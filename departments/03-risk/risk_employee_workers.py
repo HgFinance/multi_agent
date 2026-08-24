@@ -35,7 +35,6 @@ import os
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, TypedDict
@@ -58,7 +57,6 @@ from tools.legal_wiki_tool import (
 from departments.employee_worker_runtime import WorkerSpec, run_coroutine_sync
 from departments.risk_qa_worker_profiles import (
     RISK_WORKER_TECH,
-    WorkerTechProfile,
     tech_profile_for,
 )
 from orchestration.contracts.mas import (

@@ -209,6 +209,14 @@ _SQL_LIBRARY_SCORECARD = """
 _WORKER_JOBS: dict[str, dict] = {}
 _WORKER_JOBS_LOCK = threading.Lock()
 _TASK_ID_RE = re.compile(r"^(t_[0-9A-Za-z]+)(?:$|[-:#/])")
+_SKEPTIC_WORKER_ID = "competing-explanation-worker"
+_SKEPTIC_CODES = frozenset({
+    "BETA_EXPOSURE",
+    "LIQUIDITY_PREMIUM",
+    "DATA_MINING",
+    "COST_UNACCOUNTED",
+})
+_SKEPTIC_REVIEW_CONTRACT_VERSION = "research.skeptic-review.v2"
 
 
 def _writer_connection(dsn: str, *, connector=None):
@@ -238,6 +246,53 @@ def _db():
     from source_registry import load_project_env
 
     return _writer_connection(load_project_env()["DATABASE_URL"])
+
+
+def _result_has_valid_skeptic_worker(result: dict | None) -> bool:
+    """Check the already-validated in-memory result before coalescing a job."""
+
+    value = result or {}
+    if value.get("degraded") is True or _SKEPTIC_WORKER_ID not in value.get("executed", []):
+        return False
+    report = next(
+        (item for item in value.get("workers", [])
+         if item.get("worker_id") == _SKEPTIC_WORKER_ID),
+        None,
+    )
+    output = (report or {}).get("output") or {}
+    return bool(
+        report
+        and report.get("status") == "COMPLETED"
+        and output.get("schema_valid") is True
+        and isinstance(output.get("skeptic_reviews"), list)
+        and output.get("skeptic_reviews")
+    )
+
+
+def _reusable_skeptic_job(payload: dict, proposal_draft: str) -> dict | None:
+    """Return a running/validated exact-draft job to avoid duplicate Qwen work.
+
+    Holding questions may be present in the same MCP request, so only a pure
+    proposal run can be coalesced. The raw draft digest, not a caller label,
+    is the identity key.
+    """
+
+    if not proposal_draft or "holding_question" in payload:
+        return None
+    digest = _text_digest(proposal_draft)
+    with _WORKER_JOBS_LOCK:
+        for _job_id, job in reversed(list(_WORKER_JOBS.items())):
+            if job.get("proposal_draft_sha256") != digest:
+                continue
+            if "holding_question" in (job.get("payload_fields") or []):
+                continue
+            if job.get("status") == "RUNNING":
+                return dict(job)
+            if job.get("status") == "COMPLETED" and _result_has_valid_skeptic_worker(
+                job.get("result")
+            ):
+                return dict(job)
+    return None
 
 
 def _rows(sql: str, params: tuple = ()) -> list[dict]:
@@ -456,6 +511,122 @@ def render_skeptic_reviews(reviews: list[dict]) -> str:
     return "\n\n".join(blocks)
 
 
+def load_cached_skeptic_reviews(
+    conn, planner_text: str
+) -> tuple[list[dict], dict | None, str]:
+    """Load a complete, exact-draft review cache before starting a Worker.
+
+    The table is written only after ``verified_skeptic_reviews`` succeeds, so
+    this is a reuse path for validated artifacts, not a trust shortcut. A
+    partial or malformed cache is a miss and must never be joined into a new
+    review.
+    """
+
+    digest = _text_digest(planner_text)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select title, competing_explanation, competing_codes, verdict,
+                   falsification_test, planner_run, skeptic_run, created_at
+             from research.proposal_review_outcomes
+             where proposal_draft_sha256 = %s
+               and review_contract_version = %s
+             order by title
+        """,
+            (digest, _SKEPTIC_REVIEW_CONTRACT_VERSION),
+        )
+        rows = cur.fetchall()
+    if not rows:
+        return [], None, "no exact-draft skeptic cache"
+
+    planner_titles = [
+        match.group(1).strip()
+        for match in re.finditer(
+            r"(?m)^\s*TITLE\s*:\s*(.+?)\s*$", str(planner_text or "")
+        )
+        if match.group(1).strip()
+    ]
+    reviews = [
+        {
+            "title": str(row[0] or "").strip(),
+            "competing_explanation": str(row[1] or "").strip(),
+            "competing_codes": list(row[2] or []),
+            "verdict": str(row[3] or "").strip().upper(),
+            "falsification_test": str(row[4] or "").strip(),
+        }
+        for row in rows
+    ]
+    review_titles = [review["title"] for review in reviews]
+    valid = bool(planner_titles) and (
+        len(review_titles) == len(planner_titles)
+        and len(set(review_titles)) == len(review_titles)
+        and sorted(review_titles) == sorted(planner_titles)
+        and all(
+            review["competing_explanation"]
+            and review["competing_codes"]
+            and set(review["competing_codes"]) <= _SKEPTIC_CODES
+            and review["verdict"] in {"PROCEED", "STOP"}
+            and review["falsification_test"]
+            for review in reviews
+        )
+    )
+    if not valid:
+        return [], None, "exact-draft skeptic cache is incomplete or invalid"
+    metadata = {
+        "cache_key": digest,
+        "source_skeptic_runs": sorted({str(row[6]) for row in rows}),
+        "source_planner_runs": sorted({str(row[5]) for row in rows}),
+        "created_at": max(str(row[7]) for row in rows),
+    }
+    return reviews, metadata, ""
+
+
+def _cached_skeptic_result(
+    planner_text: str, reviews: list[dict], metadata: dict
+) -> dict:
+    """Build the same non-binding worker envelope from a verified cache."""
+
+    digest = _text_digest(planner_text)
+    report = {
+        "worker_id": _SKEPTIC_WORKER_ID,
+        "role": "Competing explanation and falsification analyst",
+        "tools": ["research.outcomes.read", "research.evidence.search"],
+        "status": "COMPLETED",
+        "attempts": 0,
+        "output": {
+            "worker_id": _SKEPTIC_WORKER_ID,
+            "summary": "Reused a previously verified skeptic review for the exact proposal draft.",
+            "confidence": 1.0,
+            "evidence_refs": [f"proposal_draft_sha256:{digest}"],
+            "escalate": False,
+            "schema_valid": True,
+            "skeptic_reviews": reviews,
+            "cache_hit": True,
+        },
+        "error": None,
+        "output_contract": "research.worker-context.v1",
+        "input_hash": digest,
+        "cache_hit": True,
+    }
+    return {
+        "runtime": {
+            "executor": "verified_skeptic_cache",
+            "topology": "cached_non_binding_worker_context",
+            "provider": "cache",
+            "model": "none",
+        },
+        "workers": [report],
+        "executed": [_SKEPTIC_WORKER_ID],
+        "failed": [],
+        "not_executed": ["holdings-analyst-worker"],
+        "degraded": False,
+        "input_hash": digest,
+        "binding": False,
+        "cache_hit": True,
+        "cache": metadata,
+    }
+
+
 def load_persisted_skeptic_reviews(conn, skeptic_run: str,
                                     planner_run: str,
                                     planner_text: str) -> tuple[list[dict], str]:
@@ -471,12 +642,14 @@ def load_persisted_skeptic_reviews(conn, skeptic_run: str,
         cur.execute("""
             select title, competing_explanation, competing_codes, verdict,
                    falsification_test
-              from research.proposal_review_outcomes
+             from research.proposal_review_outcomes
              where proposal_draft_sha256 = %s
+               and review_contract_version = %s
                and skeptic_run = %s
                and planner_run = %s
              order by title
-        """, (digest, str(skeptic_run or "").strip(),
+        """, (digest, _SKEPTIC_REVIEW_CONTRACT_VERSION,
+              str(skeptic_run or "").strip(),
               str(planner_run or "").strip()))
         rows = cur.fetchall()
     if not rows:
@@ -529,8 +702,9 @@ def persist_skeptic_reviews(conn, planner_text: str, reviews: list[dict], *,
                 insert into research.proposal_review_outcomes
                   (review_id, case_id, lead_ids, title, proposal_draft_sha256,
                    verdict, competing_explanation, competing_codes,
-                   falsification_test, planner_run, skeptic_run)
-                values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                   falsification_test, planner_run, skeptic_run,
+                   review_contract_version)
+                values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 on conflict (proposal_draft_sha256, title) do nothing
                 returning review_id
             """, (
@@ -539,6 +713,7 @@ def persist_skeptic_reviews(conn, planner_text: str, reviews: list[dict], *,
                 str(review["competing_explanation"]),
                 list(review["competing_codes"]),
                 str(review["falsification_test"]), planner_run, skeptic_run,
+                _SKEPTIC_REVIEW_CONTRACT_VERSION,
             ))
             written += int(cur.fetchone() is not None)
     conn.commit()
@@ -934,6 +1109,20 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
             sym = normalize_symbol(symbol) if str(symbol or "").strip() else ""
         except ValueError as e:
             return {"ok": False, "error": str(e)}
+        reusable = _reusable_skeptic_job(
+            payload, payload.get("proposal_draft", "")
+        )
+        if reusable is not None:
+            return {
+                "job_id": reusable["job_id"],
+                "status": reusable["status"],
+                "payload_fields": sorted(payload),
+                "symbol": sym or None,
+                "evidence_first": False,
+                "cache_hit": True,
+                "coalesced": reusable["status"] == "RUNNING",
+                "note": "동일 proposal_draft_sha256의 검증된 Worker 결과를 재사용한다",
+            }
         job_id = register_worker_job(
             sorted(payload), now=datetime.now(KST), symbol=sym,
             proposal_draft=payload.get("proposal_draft", ""))
@@ -943,6 +1132,53 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
             # FAILED job 에 evidence 요약이 남아야 진단이 된다.
             evidence_summary = None
             try:
+                # 제출 후 원장에 보존된 exact-draft review는 이미
+                # verified_skeptic_reviews를 통과한 산출물이다. 같은 원문을
+                # 다시 생성하지 않고 새 job envelope에 재수화한다.
+                if "proposal_draft" in payload and "holding_question" not in payload:
+                    cache_conn = None
+                    try:
+                        cache_conn = _db()
+                        cached_reviews, cache_metadata, cache_error = (
+                            load_cached_skeptic_reviews(
+                                cache_conn, payload["proposal_draft"]
+                            )
+                        )
+                    except Exception as cache_exc:  # noqa: BLE001 - cache is optional
+                        cached_reviews, cache_metadata = [], None
+                        cache_error = f"cache_lookup:{type(cache_exc).__name__}"
+                    finally:
+                        if cache_conn is not None:
+                            cache_conn.close()
+                    if cached_reviews and cache_metadata is not None:
+                        cached_result = _cached_skeptic_result(
+                            payload["proposal_draft"],
+                            cached_reviews,
+                            cache_metadata,
+                        )
+                        finish_worker_job(
+                            job_id,
+                            result=cached_result,
+                            model_plane={
+                                "cache_hit": True,
+                                "cache_key": cache_metadata["cache_key"],
+                                "source_skeptic_runs": cache_metadata[
+                                    "source_skeptic_runs"
+                                ],
+                            },
+                            error=None,
+                            now=datetime.now(KST),
+                            evidence={
+                                "skeptic_cache": "hit",
+                                "cache_key": cache_metadata["cache_key"],
+                            },
+                        )
+                        return
+                    if cache_error and cache_error != "no exact-draft skeptic cache":
+                        evidence_summary = {
+                            "skeptic_cache": "miss_or_unavailable",
+                            "reason": cache_error,
+                        }
                 gateway, employee_workers = _worker_modules()
                 # Evidence First (§11) - Worker 를 부르기 전에 근거부터 모은다.
                 # 실패해도 job 을 죽이지 않는다 - 소스별 상태가 evidence 에
@@ -1619,7 +1855,12 @@ def _check_skeptic_review_persistence():
         recovered, "job_test", "t_test-planner", draft)
     assert not error and durable[0]["verdict"] == "STOP", (durable, error)
     _sql, _params = recovered.cur.calls[0]
-    assert _params == (_text_digest(draft), "job_test", "t_test-planner")
+    assert _params == (
+        _text_digest(draft),
+        _SKEPTIC_REVIEW_CONTRACT_VERSION,
+        "job_test",
+        "t_test-planner",
+    )
     print("  스켑틱 심사 영구기억      OK")
 
 

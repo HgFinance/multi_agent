@@ -503,7 +503,6 @@ def to_lead(block: dict, *, lens: str, source_type: str, case_id: str,
     excerpt = clip_excerpt(block.get("EXCERPT") or block.get("MECHANISM") or "")
     mech = (block.get("MECHANISM") or "").strip()
     reported = (block.get("REPORTED_EFFECT") or "").strip()
-    testable = (block.get("TESTABLE_WITH") or "").strip()
     counterparty = (block.get("COUNTERPARTY") or "").strip()
 
     # 우리 데이터로 어떻게 재현하는지 못 적었으면 규칙으로 못 옮긴다.

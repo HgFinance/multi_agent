@@ -145,7 +145,7 @@ def reconcile_to_nav(statements: dict[str, Any], snapshot) -> dict[str, Any]:
 
 
 if __name__ == "__main__":
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timezone
     from uuid import uuid4
 
     sys.path.insert(0, str(_HERE.parent.parent / "02-trading" / "contracts"))

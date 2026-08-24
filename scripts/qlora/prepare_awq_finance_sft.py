@@ -16,9 +16,7 @@ import argparse
 import ast
 import hashlib
 import json
-import math
 import random
-import re
 import sys
 from collections import Counter
 from pathlib import Path

@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from safetensors.torch import load_file, save_file
+from safetensors.torch import save_file
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 

@@ -162,6 +162,32 @@ def _validate_skeptic_reviews_against_input(value: Any,
     return reviews
 
 
+_SKEPTIC_HIDDEN_FIELDS = frozenset({
+    # These are author-provided objections. Passing them to the independent
+    # reviewer creates an anchoring path and lets an apparently independent
+    # review become a paraphrase of the planner's answer.
+    "COMPETING_EXPLANATION",
+    "COMPETING_CODES",
+    "FALSIFICATION_TESTS",
+})
+
+
+def build_skeptic_view(proposal_draft: str) -> str:
+    """Project a proposal for independent review without prior objections.
+
+    The raw proposal remains in the payload for digest binding and audit. Only
+    this derived view is exposed through the Worker context tool.
+    """
+
+    lines: list[str] = []
+    for line in str(proposal_draft or "").replace("\r\n", "\n").split("\n"):
+        key, separator, _value = line.partition(":")
+        if separator and key.strip().upper() in _SKEPTIC_HIDDEN_FIELDS:
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
 # ▶ 방법론 스카우트는 여기 없다. 웹 검색·열람·검증 도구가 **본부장(Hermes)에만**
 #   있어서 로컬 모델 워커로는 조사 자체가 성립하지 않기 때문이다 - 자리를 남겨두면
 #   "조사했는데 아무것도 못 찾았다"가 조용히 정상처럼 보인다. 공장 쪽 조사는
@@ -179,14 +205,14 @@ WORKER_SPECS = (
         "Competing explanation and falsification analyst",
         ("research.outcomes.read", "research.evidence.search"),
         "proposal_draft",
-        ("proposal_draft",),
+        ("skeptic_view",),
         # Keep the shared non-binding envelope; skeptic_reviews is a validated
         # station-specific artifact inside it, not a new authority boundary.
         output_contract="research.worker-context.v1",
         prompt_instructions=(
-            "Review every proposal block in proposal_draft independently. A block begins "
+            "Review every proposal block in the supplied skeptic_view independently. A block begins "
             "ONLY at a line starting `TITLE:`; LEAD_IDS, ECONOMIC_RATIONALE, COUNTERPARTY, "
-            "EDGE_TYPE, UNIVERSE_KEY, COMPETING_EXPLANATION, and COMPETING_CODES are fields, "
+            "EDGE_TYPE, and UNIVERSE_KEY are fields, "
             "NOT additional proposal titles. Copy the exact text after each TITLE: into "
             "exactly one skeptic_reviews item. Every item MUST contain all five keys in "
             "this exact shape: {\"title\":\"exact title\",\"competing_explanation\":\"strongest "
@@ -227,6 +253,13 @@ def run_employee_workers(payload: Mapping[str, Any], *, llm: WorkerLLM | None = 
     """
     # stage= 는 HR 유휴 관측 이벤트 이름에 들어간다(2026-08-20). 안 주면 본부장이
     # MCP 로 직접 돌린 실행이 계측에서 빠져 HR 리포트에 IDLE 로 뜬다.
-    return run_worker_registry(WORKER_SPECS, payload,
+    worker_payload = dict(payload)
+    if worker_payload.get("proposal_draft"):
+        # Never trust a caller-supplied projection. The raw draft is the
+        # auditable source and the projection is derived at the boundary.
+        worker_payload["skeptic_view"] = build_skeptic_view(
+            str(worker_payload["proposal_draft"])
+        )
+    return run_worker_registry(WORKER_SPECS, worker_payload,
                                tools=tools_for_specs(WORKER_SPECS),
                                llm=llm, llm_factory=llm_factory, stage="research")

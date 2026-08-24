@@ -178,6 +178,10 @@ services:
       APP_ENV: production
       DATABASE_URL: *conditional-worker-database-url
       CONDITIONAL_RULE_DATABASE_URL: *conditional-worker-database-url
+      CONDITIONAL_RULE_MARKET_DATABASE_URL: *market-database-url
+      CONDITIONAL_RULE_MARKET_CONNECT_TIMEOUT_SECONDS: ${CONDITIONAL_RULE_MARKET_CONNECT_TIMEOUT_SECONDS:-2}
+      CONDITIONAL_RULE_MARKET_STATEMENT_TIMEOUT_MS: ${CONDITIONAL_RULE_MARKET_STATEMENT_TIMEOUT_MS:-1500}
+      CONDITIONAL_RULE_MARKET_MAX_CONNECTIONS: ${CONDITIONAL_RULE_MARKET_MAX_CONNECTIONS:-8}
       CONDITIONAL_RULE_WORKER_DATABASE_ROLE: svc_conditional_rule_worker
       CONDITIONAL_RULE_WORKER_MAX_WORKERS: ${CONDITIONAL_RULE_WORKER_MAX_WORKERS:-8}
       TRADING_API_URL: http://trading-api:8000
@@ -190,6 +194,23 @@ services:
       LS_APP_SECRET_KEY_PAPER: ${LS_APP_SECRET_KEY_PAPER:?LS PAPER AppSecret is required for conditional price reads}
       LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
       LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}
+
+  conditional-rule-retention-worker:
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    environment:
+      APP_ENV: production
+      DATABASE_URL: *conditional-worker-database-url
+      CONDITIONAL_RULE_RETENTION_DATABASE_URL: *conditional-worker-database-url
+      CONDITIONAL_RULE_RETENTION_DATABASE_ROLE: svc_conditional_rule_worker
+      CONDITIONAL_RULE_RETENTION_ENABLED: ${CONDITIONAL_RULE_RETENTION_ENABLED:-true}
+      CONDITIONAL_RULE_RETENTION_INTERVAL_SECONDS: ${CONDITIONAL_RULE_RETENTION_INTERVAL_SECONDS:-86400}
+      CONDITIONAL_RULE_RETENTION_BATCH_SIZE: ${CONDITIONAL_RULE_RETENTION_BATCH_SIZE:-500}
+      CONDITIONAL_RULE_EVALUATION_RETENTION_DAYS: ${CONDITIONAL_RULE_EVALUATION_RETENTION_DAYS:-30}
+      CONDITIONAL_RULE_DETAIL_RETENTION_DAYS: ${CONDITIONAL_RULE_DETAIL_RETENTION_DAYS:-90}
+      CONDITIONAL_RULE_OUTBOX_RETENTION_DAYS: ${CONDITIONAL_RULE_OUTBOX_RETENTION_DAYS:-7}
+      CONDITIONAL_RULE_RETENTION_STATEMENT_TIMEOUT_MS: ${CONDITIONAL_RULE_RETENTION_STATEMENT_TIMEOUT_MS:-1500}
 
   portfolio-worker:
     depends_on: *control-dependency
@@ -239,7 +260,9 @@ services:
       # 치환한다. hermes 프로필 env 는 문자열 중간 ${VAR} 를 치환하지
       # 않는다(2026-08-24 실측) - 완성 URL 을 여기서 내린다.
       HEDGEFUND_TSDB_PASSWORD: ${HEDGEFUND_TSDB_PASSWORD:?}
-      TIMESCALE_DATABASE_URL: *admin-market-database-url
+      # The dispatcher only needs market reads. Keep the deployment runtime
+      # on the least-privilege market login; admin-market is bootstrap-only.
+      TIMESCALE_DATABASE_URL: *market-database-url
 
   research-mcp:
     depends_on: *control-dependency
@@ -299,6 +322,7 @@ services:
   memo-harness-retention-worker:
     depends_on: *control-dependency
     environment:
+      DATABASE_URL: *control-database-url
       MEMOHARNESS_D5_DATABASE_URL: *control-database-url
       MEMOHARNESS_D5_RETENTION_VACUUM_ANALYZE: "false"
 

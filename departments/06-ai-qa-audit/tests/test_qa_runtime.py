@@ -10,7 +10,7 @@ import pytest
 QA_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(QA_DIR))
 
-from qa_runtime import QARunner, ToolRequest, build_qa_task_context
+from qa_runtime import QARunner, build_qa_task_context
 from runtime_contracts import ErrorCode, WorkerStatus, canonical_payload_hash
 
 

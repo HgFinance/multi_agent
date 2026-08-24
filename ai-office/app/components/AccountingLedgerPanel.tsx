@@ -274,6 +274,61 @@ function FinancialStatement({ data }: { data: AccountingLedger | null }) {
   );
 }
 
+function AccountingCloseStatus({ data }: { data: AccountingLedger | null }) {
+  if (!data) return null;
+  const totalCount = Math.max(data.totals.count, 0);
+  const unsettledCount = Math.max(data.totals.unsettled_count, 0);
+  const settledCount = Math.max(totalCount - unsettledCount, 0);
+  const settledPercent = totalCount > 0 ? Math.round((settledCount / totalCount) * 100) : 0;
+  const persistedLabel = data.persisted === true ? "저장된 원장" : data.persisted === false ? "조회 결과" : "상태 확인 중";
+  const sourceLabel = data.authoritative ? "공식 기준" : "참고 기준";
+
+  return (
+    <section className="min-w-0 rounded-lg border border-outline-variant bg-surface-container-lowest" aria-labelledby="accounting-close-status-title">
+      <div className="border-b border-outline-variant bg-surface-container-low px-4 py-3">
+        <h3 id="accounting-close-status-title" className="m-0 text-title-md font-title-md font-semibold text-primary">이번 기간 결산 상태</h3>
+        <p className="m-0 mt-1 text-body-sm font-body-sm text-on-surface-variant">
+          아래 장부 숫자가 확정값인지, 아직 결제가 남았는지 먼저 확인합니다.
+        </p>
+      </div>
+      <div className="grid grid-cols-2 gap-2 p-4 md:grid-cols-4">
+        <div className="rounded-md border border-outline-variant bg-surface px-3 py-2.5">
+          <span className="block text-xs text-on-surface-variant">원장 상태</span>
+          <strong className="mt-1 block text-body-md font-body-md text-on-surface">{persistedLabel}</strong>
+        </div>
+        <div className="rounded-md border border-outline-variant bg-surface px-3 py-2.5">
+          <span className="block text-xs text-on-surface-variant">결제 완료</span>
+          <strong className="mt-1 block font-data-mono text-body-md text-on-surface">{settledCount}건</strong>
+        </div>
+        <div className="rounded-md border border-outline-variant bg-surface px-3 py-2.5">
+          <span className="block text-xs text-on-surface-variant">결제 대기</span>
+          <strong className="mt-1 block font-data-mono text-body-md text-on-surface">{unsettledCount}건</strong>
+        </div>
+        <div className="rounded-md border border-outline-variant bg-surface px-3 py-2.5">
+          <span className="block text-xs text-on-surface-variant">손익 기준</span>
+          <strong className="mt-1 block text-body-md font-body-md text-on-surface">{sourceLabel}</strong>
+        </div>
+      </div>
+      <div className="px-4 pb-4">
+        <div className="flex items-center justify-between gap-2 text-xs text-on-surface-variant">
+          <span>결제 진행률</span>
+          <span className="font-data-mono">{settledCount}/{totalCount}건 · {settledPercent}%</span>
+        </div>
+        <div className="mt-2 h-2 overflow-hidden rounded-full bg-surface-container-high" aria-label={"결제 진행률 " + settledPercent + "%"}>
+          <div className="h-full rounded-full bg-primary transition-[width]" style={{ width: settledPercent + "%" }} />
+        </div>
+        {unsettledCount > 0 ? (
+          <p className="m-0 mt-3 rounded border border-primary/30 bg-secondary-container px-3 py-2 text-body-sm text-primary">
+            결제가 끝나지 않은 거래가 {unsettledCount}건 있어 최종 잔액과 손익은 변동될 수 있습니다.
+          </p>
+        ) : (
+          <p className="m-0 mt-3 text-xs text-on-surface-variant">이 기간에는 결제 대기 거래가 없습니다.</p>
+        )}
+      </div>
+    </section>
+  );
+}
+
 export default function AccountingLedgerPanel() {
   const query = useQuery<AccountingLedger, AccountingLedgerError>({
     queryKey: ["accounting-ledger"],
@@ -371,6 +426,8 @@ export default function AccountingLedgerPanel() {
             당일 매매일지를 불러오지 못했습니다: {data.today_error}. 아래 표에는 저장된 기록만 표시됩니다.
           </p>
         ) : null}
+
+        <AccountingCloseStatus data={data} />
 
         <FinancialStatement data={data} />
 

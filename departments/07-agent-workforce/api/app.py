@@ -1485,7 +1485,7 @@ if __name__ == "__main__":
 
     # 6. P0-3 ACTIVE 전이 증거 실재성 게이트 - In-Memory Roster/Evidence Repository를
     # 채운 뒤에만 의미가 있으므로 여기서부터 module 전역을 재배선한다.
-    from roster import InMemoryRosterRepository, ProfileVersionStatus
+    from roster import InMemoryRosterRepository
 
     _roster_repo = InMemoryRosterRepository()
     _roster_repo.seed_agent(AgentSummary(

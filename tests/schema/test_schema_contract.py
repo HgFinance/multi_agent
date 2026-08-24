@@ -249,6 +249,12 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  "20260824000600_compound_paper_order_bundles.sql",
                  # 조건부 거래 평가 경로에 읽기 권한만 준다.
                  "20260824000700_conditional_trading_evaluation_read.sql",
+                 # 기존 반론을 보지 않는 skeptic 입력 계약을 구버전
+                 # review cache와 분리한다.
+                 "20260824000800_skeptic_review_contract_version.sql",
+                 # 조건부 거래 평가의 bounded retention 인덱스와 기존
+                 # worker principal 재사용 권한을 등록한다.
+                 "20260824000900_conditional_rule_retention.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 

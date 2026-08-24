@@ -37,7 +37,7 @@ from __future__ import annotations
 import argparse
 import math
 import sys
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -388,9 +388,8 @@ def _check_pit_is_structural():
     신호는 `PITView(market, d)` 만 보고, forward return 은 `d` 다음을 본다.
     d 이후 가격이 바뀌어도 그날의 IC 계산에 쓰인 **신호 점수**는 같아야 한다.
     """
-    from datetime import date as _d
 
-    from strategy_templates import PITView, pit_view_for, resolve
+    from strategy_templates import PITView, resolve
     base = {f"S{s}": [100.0 + s + i * 0.1 for i in range(40)] for s in range(40)}
     m1 = _mk(base)
     future = {k: v[:] for k, v in base.items()}

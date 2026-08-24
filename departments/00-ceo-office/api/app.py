@@ -115,7 +115,6 @@ from approval import (
     revoke as revoke_approval,
 )
 from actor_identity import (
-    ActorUserStatus,
     InMemoryActorIdentityRepository,
     UnverifiedActorUserError,
     verify_actor_user,

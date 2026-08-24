@@ -109,7 +109,6 @@ def main() -> int:
 
     print(f"blocked {len(rows)}장")
     for kind, ids in sorted(buckets.items(), key=lambda kv: -len(kv[1])):
-        sample = classify_failure(kind.value)
         mark = "회복대상" if kind in {
             FailureKind.CREDENTIALS, FailureKind.CAPACITY, FailureKind.TIMEOUT,
             FailureKind.SKILL_MISSING, FailureKind.PROTOCOL,

@@ -64,7 +64,6 @@ from strategy_templates import (           # noqa: E402  (같은 디렉터리 �
     NOT_IMPLEMENTED,
     TEMPLATES,
     _mk,
-    resolve,
     signal_scores,
     template_for_edge,
 )
@@ -1707,7 +1706,6 @@ def _default_chain(hyp: dict, hypothesis_id: str | None = None) -> dict:
     walk_forward 의 조각(make_windows/run_window/fragility_summary)을
     같은 config 로 재사용한다 - 검증 규칙을 두 벌 만들지 않는다.
     """
-    import psycopg2
     from backtest_runner import (
         COST_MODEL,
         DEFAULT_CONFIG,

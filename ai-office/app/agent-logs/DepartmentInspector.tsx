@@ -7,10 +7,12 @@ import {
 } from "../lib/operationsClient";
 import AccountingLedgerPanel from "../components/AccountingLedgerPanel";
 import AlphaStrategyPanel from "../components/AlphaStrategyPanel";
+import CeoOperationsPanel from "../components/CeoOperationsPanel";
 import LivePortfolioPanel from "../components/LivePortfolioPanel";
 import QaLangsmithPanel from "../components/QaLangsmithPanel";
 import QaLangsmithFeedbackPanel from "../components/QaLangsmithFeedbackPanel";
 import ResearchPanel from "../components/ResearchPanel";
+import RiskMandatePanel from "../components/RiskMandatePanel";
 import WorkerPerformancePanel from "../components/WorkerPerformancePanel";
 import WorkforceCapacityPanel from "../components/WorkforceCapacityPanel";
 import WorkforceIdleAgentsPanel from "../components/WorkforceIdleAgentsPanel";
@@ -181,12 +183,34 @@ export default function DepartmentInspector({
           <Empty>이 부서의 Worker Registry를 기다리는 중입니다.</Empty>
         )}
       </Disclosure>
-      {code === "ceo-agent" ? <RecentOutputsPanel /> : null}
+      {code === "ceo-agent" ? (
+        <div className="flex flex-col gap-3">
+          <GroupHeading index={1} title="지시·결과 흐름" hint="Dispatch · Result Storage" />
+          <RecentOutputsPanel />
+          <CeoOperationsPanel data={data} />
+        </div>
+      ) : null}
 
-      {department.domain === "trading" ? <LivePortfolioPanel /> : null}
+      {department.domain === "trading" ? (
+        <div className="flex flex-col gap-3">
+          <GroupHeading index={1} title="오늘 거래와 포트폴리오" hint="체결 · 결제 · 보유 · 손익" />
+          <LivePortfolioPanel />
+        </div>
+      ) : null}
+      {code === "risk-management" ? (
+        <div className="flex flex-col gap-3">
+          <GroupHeading index={1} title="사용자 Mandate와 주문 전 확인" hint="허용 범위 · 한도 · Risk Gate" />
+          <RiskMandatePanel />
+        </div>
+      ) : null}
       {/* 회계는 주문 상태가 아니라 확정된 거래와 비용을 본다. 같은 패널을
           돌려 쓰면 미확정 주문이 장부 화면에 올라온다. */}
-      {department.domain === "accounting" ? <AccountingLedgerPanel /> : null}
+      {department.domain === "accounting" ? (
+        <div className="flex flex-col gap-3">
+          <GroupHeading index={1} title="결산·원장 상태" hint="확정 · 미결제 · 비용" />
+          <AccountingLedgerPanel />
+        </div>
+      ) : null}
       {department.domain === "workforce" ? (
         <div className="flex flex-col gap-6">
           <div className="flex flex-col gap-3">

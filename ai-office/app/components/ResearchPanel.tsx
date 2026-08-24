@@ -39,14 +39,6 @@ const CHANNEL_DEPARTMENT = "ceo-agent";
 const RESEARCH_BOT_NAME = "HERMES-RESEARCH";
 const MAX_THREADS_TO_OPEN = 12;
 
-function Badge({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="inline-flex items-center whitespace-nowrap rounded-full border border-outline-variant bg-surface-container-lowest px-2.5 py-0.5 text-[10px] font-semibold text-on-surface-variant">
-      {children}
-    </span>
-  );
-}
-
 function isResearchMessage(message: DiscordMessage): boolean {
   return message.author.trim().toUpperCase() === RESEARCH_BOT_NAME && messageText(message.text).length > 0;
 }

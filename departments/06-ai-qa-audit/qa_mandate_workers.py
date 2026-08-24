@@ -30,8 +30,6 @@ Risk Verdict를 바꾸거나, Risk Namespace를 조회하거나, RiskEngine을
 from __future__ import annotations
 
 import dataclasses
-import hashlib
-import json
 import os
 import sys
 from collections.abc import Mapping, Sequence

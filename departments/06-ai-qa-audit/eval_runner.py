@@ -70,9 +70,9 @@ def _call_with_timeout(call: Callable[[], Any], timeout_ms: int) -> Any:
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 try:
-    from .runtime_contracts import ErrorCode, sha256_hash, utc_now
+    from .runtime_contracts import sha256_hash, utc_now
 except ImportError:  # pragma: no cover - direct ``sys.path`` imports
-    from runtime_contracts import ErrorCode, sha256_hash, utc_now  # type: ignore[no-redef]
+    from runtime_contracts import sha256_hash, utc_now  # type: ignore[no-redef]
 
 
 class EvalMetric(StrEnum):

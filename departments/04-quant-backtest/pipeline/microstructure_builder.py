@@ -844,7 +844,6 @@ def build_day_external(market_conn, src_conn, day: date, *,
     bucket = datetime.combine(day, datetime.min.time(), tzinfo=KST)
     miss = missing_sources(rows)
     partial = partial_source_gaps(rows)
-    miss_tag = f', "missing_source": "{"+".join(miss)}"' if miss else ""
     payload, grades, unmapped = [], {"PASS": 0, "WARN": 0, "FAIL": 0}, 0
     for (sym, spread, di, ofi, intensity, rvol, n_ticks, n_quotes,
          tvalue, tvolume, ofi_c, ofi_o, ofi_sd, cvwap, sp_ratio,

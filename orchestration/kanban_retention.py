@@ -1082,7 +1082,6 @@ class RetentionWorker:
         return self.workflow_loader(root_id, **kwargs)
 
     def run_once(self) -> RetentionRun:
-        started = time.perf_counter()
         now = int(self.clock())
         rows_started = time.perf_counter()
         active_rows = self.row_lister(include_archived=False)

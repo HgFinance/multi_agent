@@ -474,7 +474,6 @@ def _fetch_market_session(trade_date: date):
 
 async def run_capture(window: SessionWindow, symbols: tuple[str, ...], stop: asyncio.Event) -> None:
     """세션 창 하나를 수집한다. 창이 끝나거나 stop 이 설 때까지."""
-    from ls_client import LsRestClient
     from market_repository import TimescaleMarketRepository
 
     env = load_project_env()

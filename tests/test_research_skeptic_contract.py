@@ -51,6 +51,58 @@ def test_research_worker_emits_pydantic_validated_skeptic_reviews() -> None:
     assert review["competing_codes"] == ["LIQUIDITY_PREMIUM"]
 
 
+def test_skeptic_view_removes_planner_objections_but_keeps_auditable_mechanism() -> None:
+    draft = (
+        "TITLE: Flow gate\n"
+        "ECONOMIC_RATIONALE: low activity changes information content\n"
+        "COMPETING_EXPLANATION: planner supplied answer\n"
+        "COMPETING_CODES: DATA_MINING\n"
+        "FALSIFICATION_TESTS: planner supplied test\n"
+        "DATA_TABLES: market_ticks"
+    )
+
+    view = research_workers.build_skeptic_view(draft)
+
+    assert "TITLE: Flow gate" in view
+    assert "ECONOMIC_RATIONALE: low activity" in view
+    assert "DATA_TABLES: market_ticks" in view
+    assert "planner supplied answer" not in view
+    assert "COMPETING_CODES" not in view
+    assert "planner supplied test" not in view
+
+
+def test_research_worker_prompt_uses_skeptic_view_not_raw_prior_objections() -> None:
+    prompts: list[str] = []
+
+    def llm(_system: str, prompt: str) -> str:
+        prompts.append(prompt)
+        return json.dumps({
+            "summary": "Independent review completed.",
+            "confidence": 0.8,
+            "evidence_refs": ["proposal:draft"],
+            "escalate": False,
+            "skeptic_reviews": [_review()],
+        })
+
+    research_workers.run_employee_workers(
+        {
+            "proposal_draft": (
+                "TITLE: Deep-book OFI\n"
+                "ECONOMIC_RATIONALE: test mechanism\n"
+                "COMPETING_EXPLANATION: do not expose this answer\n"
+                "COMPETING_CODES: DATA_MINING\n"
+                "FALSIFICATION_TESTS: do not expose this test"
+            )
+        },
+        llm=llm,
+    )
+
+    assert len(prompts) == 1
+    assert "ECONOMIC_RATIONALE: test mechanism" in prompts[0]
+    assert "do not expose this answer" not in prompts[0]
+    assert "do not expose this test" not in prompts[0]
+
+
 def test_skeptic_review_forbids_unknown_fields_and_codes() -> None:
     with pytest.raises(ValidationError):
         research_workers.SkepticReviewV1.model_validate(

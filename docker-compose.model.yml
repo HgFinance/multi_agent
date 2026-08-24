@@ -20,6 +20,13 @@
 #   vLLM 은 compose 네트워크 안에서 vllm:8000 으로만 불린다. 호스트 게시는
 #   127.0.0.1 한정 - EC2 보안그룹과 무관하게 외부 노출이 없다.
 
+x-worker-model-environment: &worker-model-environment
+  WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-http://vllm:8000/v1}
+  WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-awq}
+  WORKER_MODEL_API_KEY: ${WORKER_MODEL_API_KEY:-vllm}
+  WORKER_MODEL_TIMEOUT_SECONDS: ${WORKER_MODEL_TIMEOUT_SECONDS:-120}
+  WORKER_MODEL_REGISTRY_PATH: ${WORKER_MODEL_REGISTRY_PATH:-/app/departments/01-research/config/worker_model_registry.json}
+
 services:
   vllm:
     image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
@@ -89,18 +96,22 @@ services:
   # 로컬 Ollama 경로도 독립 회의론자 Worker를 똑같이 실행할 수 있다.
   research-mcp:
     environment:
-      WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-http://vllm:8000/v1}
-      WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-awq}
-      WORKER_MODEL_API_KEY: ${WORKER_MODEL_API_KEY:-vllm}
-      WORKER_MODEL_TIMEOUT_SECONDS: ${WORKER_MODEL_TIMEOUT_SECONDS:-120}
-      WORKER_MODEL_REGISTRY_PATH: /app/departments/01-research/config/worker_model_registry.json
+      <<: *worker-model-environment
+
+  # Portfolio recommendation Workers use the same shared model plane. The
+  # BFF entry is included for the explicitly supported embedded-worker mode;
+  # production normally executes through portfolio-worker.
+  portfolio-bff:
+    environment:
+      <<: *worker-model-environment
+
+  portfolio-worker:
+    environment:
+      <<: *worker-model-environment
 
   # Risk compliance-policy-worker uses the same shared Qwen14B model plane.
   # Hermes remains the Risk department head; this only changes the independent
   # employee Worker model boundary.
   risk-api:
     environment:
-      WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-http://vllm:8000/v1}
-      WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-Qwen2.5-14B-Instruct-AWQ}
-      WORKER_MODEL_API_KEY: ${WORKER_MODEL_API_KEY:-vllm}
-      WORKER_MODEL_TIMEOUT_SECONDS: ${WORKER_MODEL_TIMEOUT_SECONDS:-120}
+      <<: *worker-model-environment

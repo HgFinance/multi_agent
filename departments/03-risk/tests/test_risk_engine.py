@@ -24,6 +24,7 @@ for _p in (_ENGINE_DIR, _CONTRACTS_DIR, _OMS_DIR):
 
 from contracts import (
     BrokerOrderState,
+    ExecutionAuthority,
     MarketSnapshot,
     OrderIntent,
     OrderType,
@@ -544,6 +545,11 @@ def test_22_risk_decision_passes_through_real_oms_gate():
     oms.request_risk_review(rec)
     oms.apply_risk_decision(rec, assessment.decision)
     order = oms.create_broker_order(rec, intent)
+    rec.authority = ExecutionAuthority.STRATEGY
+    rec.authority_ref = "STRAT-TEST"
+    oms.strategy_switchboard.enable(
+        "STRAT-TEST", actor="user:test", reason="Risk gate contract test"
+    )
     oms.submit(order, rec)
     assert order.state is BrokerOrderState.SUBMITTED, (
         "RiskEngine 판정이 OMS Risk Gate를 통과해야 한다"
