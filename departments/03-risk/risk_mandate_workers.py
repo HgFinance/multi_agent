@@ -18,6 +18,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -30,6 +32,7 @@ from tools.legal_wiki_tool import (
     COMPLIANCE_MANDATE_CONTEXT,
     LegalWikiAnswerFn,
     LegalWikiQueryInput,
+    LegalWikiQueryOutput,
     query_legal_wiki,
 )
 from tools.order_tools import OrderComplianceInput, evaluate_order_compliance
@@ -264,7 +267,7 @@ class _SafeComplianceLLM:
 
 def _run_compliance_employee_graph(
     request: RiskMandateAssessmentRequest,
-    risk_report: Mapping[str, Any],
+    risk_report: Mapping[str, Any] | None = None,
     *,
     employee_llm: Any | None = None,
     legal_answer_fn: LegalWikiAnswerFn | None = None,
@@ -280,7 +283,7 @@ def _run_compliance_employee_graph(
         "trace_id": request.trace_id or request.event_id or _input_hash(request)[:16],
         "as_of": request.as_of,
         "input_hash": _input_hash(request),
-        "assessment": dict(risk_report),
+        "assessment": dict(risk_report or {}),
         "context": request.model_dump(mode="json"),
         "compliance": {
             "query": request.compliance_query or "",
@@ -298,6 +301,7 @@ def _run_compliance_employee_graph(
         payload,
         llm=runtime_llm,
         legal_answer_fn=legal_answer_fn,
+        include_deterministic_runner=False,
     )
     runtime["model_available"] = bool(getattr(runtime_llm, "uses_model", True))
     runtime["generation_degraded"] = not runtime["model_available"]
@@ -781,10 +785,11 @@ def _legal_query(
     request: RiskMandateAssessmentRequest,
     *,
     legal_answer_fn: LegalWikiAnswerFn | None,
+    legal_result: LegalWikiQueryOutput | None = None,
 ) -> dict[str, Any]:
     """법령·행정규칙·법령해석례·판례 근거를 LLM-Wiki(Arm C)로 조회한다."""
 
-    result = query_legal_wiki(
+    result = legal_result or query_legal_wiki(
         LegalWikiQueryInput(
             query=request.compliance_query or "Risk mandate legal compliance",
             mandate_context=COMPLIANCE_MANDATE_CONTEXT,
@@ -826,6 +831,7 @@ def run_compliance_policy_worker(
     *,
     pinecone: PineconeEvidenceClient | None = None,
     legal_answer_fn: LegalWikiAnswerFn | None = None,
+    legal_result: LegalWikiQueryOutput | None = None,
 ) -> dict[str, Any]:
     """Route to the query_mode-specific advisory check; never authoritative, never binding.
 
@@ -842,12 +848,20 @@ def run_compliance_policy_worker(
     if mode == "RISK_POLICY_REVIEW":
         return _risk_policy_review(request, pinecone=pinecone)
     if mode == "LEGAL_QUERY":
-        return _legal_query(request, legal_answer_fn=legal_answer_fn)
+        return _legal_query(
+            request,
+            legal_answer_fn=legal_answer_fn,
+            legal_result=legal_result,
+        )
 
     # MIXED_REVIEW: 내부 정책과 법률 근거를 모두 조회하고, 둘 중 하나라도 확인이
     # 필요하면 ESCALATE로 합친다. 수치 한도 계산은 risk-runner가 별도로 수행한다.
     policy_report = _risk_policy_review(request, pinecone=pinecone)
-    legal_report = _legal_query(request, legal_answer_fn=legal_answer_fn)
+    legal_report = _legal_query(
+        request,
+        legal_answer_fn=legal_answer_fn,
+        legal_result=legal_result,
+    )
     escalate = policy_report["verdict"] == "ESCALATE" or legal_report["verdict"] == "ESCALATE"
     return _worker_envelope(
         request,
@@ -1029,13 +1043,44 @@ def assess_mandate(
         else RiskMandateAssessmentRequest.model_validate(request)
     )
     dispatch = build_risk_head_dispatch(normalized)
-    risk_report = run_risk_runner(normalized)
-    employee_runtime = _run_compliance_employee_graph(
-        normalized,
-        risk_report,
-        employee_llm=employee_llm,
-        legal_answer_fn=legal_answer_fn,
-    )
+    fanout_started = time.perf_counter()
+
+    def _run_timed_risk() -> tuple[dict[str, Any], float]:
+        started = time.perf_counter()
+        report = run_risk_runner(normalized)
+        return report, (time.perf_counter() - started) * 1000
+
+    def _run_timed_compliance() -> tuple[dict[str, Any], float]:
+        started = time.perf_counter()
+        runtime = _run_compliance_employee_graph(
+            normalized,
+            None,
+            employee_llm=employee_llm,
+            legal_answer_fn=legal_answer_fn,
+        )
+        return runtime, (time.perf_counter() - started) * 1000
+
+    # The deterministic mandate/risk checks and the compliance worker (which
+    # owns LLM-Wiki retrieval when the route requires it) have no data
+    # dependency at this boundary. Keep them in the same two-way fan-out so a
+    # slow legal/model path cannot serialize the numeric risk path.
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="risk-mandate") as pool:
+        risk_future = pool.submit(_run_timed_risk)
+        compliance_future = pool.submit(_run_timed_compliance)
+        risk_report, risk_runner_ms = risk_future.result()
+        employee_runtime, compliance_worker_ms = compliance_future.result()
+
+    fanout_wall_ms = (time.perf_counter() - fanout_started) * 1000
+    timing = {
+        "risk_runner_ms": round(risk_runner_ms, 2),
+        "compliance_worker_ms": round(compliance_worker_ms, 2),
+        "fanout_wall_ms": round(fanout_wall_ms, 2),
+        "estimated_serial_ms": round(risk_runner_ms + compliance_worker_ms, 2),
+        "estimated_parallel_saving_ms": round(
+            max(0.0, risk_runner_ms + compliance_worker_ms - fanout_wall_ms),
+            2,
+        ),
+    }
     runtime_worker = next(
         (
             worker
@@ -1047,11 +1092,27 @@ def assess_mandate(
     generated = runtime_worker.get("output", {})
     resolved_mode = generated.get("query_mode") or normalized.query_mode
     routed_request = normalized.model_copy(update={"query_mode": resolved_mode})
+
+    # The compliance graph already ran the legal tool for LEGAL_QUERY and
+    # MIXED_REVIEW. Rehydrate that validated tool result instead of issuing a
+    # second LLM-Wiki request while building the public compliance envelope.
+    cached_legal_result: LegalWikiQueryOutput | None = None
+    tool_output = runtime_worker.get("tool_output")
+    if isinstance(tool_output, Mapping) and isinstance(tool_output.get("legal"), Mapping):
+        try:
+            cached_legal_result = LegalWikiQueryOutput.model_validate(tool_output["legal"])
+        except Exception:  # noqa: BLE001 - malformed observability/cache data is fail-open
+            cached_legal_result = None
     compliance_report = run_compliance_policy_worker(
         routed_request,
         pinecone=pinecone,
         legal_answer_fn=legal_answer_fn,
+        legal_result=cached_legal_result,
     )
+    legal_route = resolved_mode in ("LEGAL_QUERY", "MIXED_REVIEW")
+    timing["legal_lookup_reused"] = bool(cached_legal_result)
+    timing["legal_lookup_count"] = 1 if legal_route else 0
+    employee_runtime["timing"] = timing
     compliance_report["routing"] = {
         "query_mode": resolved_mode,
         "routing_rationale": generated.get("routing_rationale"),

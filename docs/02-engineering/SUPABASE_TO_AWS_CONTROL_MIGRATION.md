@@ -52,34 +52,65 @@
 **지금 그대로 실행하면 안 된다** — 다른 세션이 작업 중인 미커밋 마이그레이션까지 라이브 DB 에 적용된다.
 해당 작업자와 조율한 뒤 실행할 것.
 
-## 6. 충돌 정책 — 표마다 명시 선언
+## 6. 결론 — control 을 기준으로 정합화한다
 
 `control` 에 정당한 target-only 행이 135,810 개 있으므로 "전부 일치해야 한다"는 규칙은 영원히 중단만 한다.
-그렇다고 어느 쪽이 이기는지 추측하지 않는다. **모든 표가 매니페스트에 선언되어야 하고, 미선언 표는 치명적 오류다.**
+어느 쪽이 이기는지 추측하지 않되, **실측 결과 기준은 명확히 control 이다.**
 
 `deploy/aws/supabase_control_migration_scope.json` (210개 표):
 
 | 정책 | 개수 | 의미 |
 |---|---|---|
-| `COPY` | 8 | Supabase 에만 있는 행을 control 로 넣는다 |
-| `CONTROL_AUTHORITATIVE` | 202 | control 이 SoT. **절대 쓰지 않는다.** 차이는 보고만 |
+| `COPY` | 7 | Supabase 에만 있는 audit·eval 기록 88행을 control 로 넣는다 |
+| `CONTROL_AUTHORITATIVE` | 203 | control 이 SoT. **절대 쓰지 않는다.** 차이는 보고만 |
 
-`COPY` 대상 8개 표(총 91행): `audit.findings`(55), `audit.eval_runs`(14), `audit.eval_results`(14),
-`audit.incident_events`(2), `audit.incidents`(1), `audit.eval_sets`(1), `audit.corrective_actions`(1),
-`governance.mandates`(3).
+미선언 표는 치명적 오류다(fail-closed).
 
-### 사람이 결정해야 하는 10개 표
+### 옮기는 것: audit·eval 88행
 
-양쪽 모두 행이 있고 개수가 다르다. 현재 초안은 전부 `CONTROL_AUTHORITATIVE`(= 쓰지 않음)로 두었다.
+`audit.findings`(55), `audit.eval_runs`(14), `audit.eval_results`(14), `audit.incident_events`(2),
+`audit.incidents`(1), `audit.eval_sets`(1), `audit.corrective_actions`(1).
 
-| 표 | source | control | 비고 |
-|---|---|---|---|
-| `governance.user_profiles` | 3 | 2 | **Supabase 에만 있는 사용자 1명.** identity 문제 — 방치하면 그 사용자는 control 에 없다 |
-| `governance.fund_memberships` | 3 | 4 | |
-| `accounting.funds` | 3 | 2 | |
-| `accounting.ledger_accounts` | 9 | 15 | |
-| `quant.dataset_manifests` | 2 | 3 | |
-| `workforce.*` (5개 표) | 45/45/28/8/5 | 23/23/23/2/3 | 4절 마이그레이션 적용으로 해소됨 |
+이 블록은 **외부 FK 컬럼이 전부 NULL 로 자기완결**이다(실측: `incidents.fund_id`,
+`eval_sets.approval_id`, `eval_runs.candidate_strategy_version_id`, `findings.fund_id`,
+`findings.artifact_version_id` 모두 non-null 0건). 부모 행 없이 단독 복사가 되고, control 은 0행이라 충돌도 없다.
+
+### 남기고 버리는 것: 테스트 픽스처
+
+Supabase 에만 있는 나머지는 전부 합성 테스트 데이터다. **실제로 잃는 것이 없다.**
+
+- `governance.user_profiles` 3행 — `00000000-…cec0/1/2`, 이름 "(가입 전 임시)"·"(전환 테스트용)",
+  `auth.users` 이메일이 `*.invalid`, **`last_sign_in_at` 전부 NULL(아무도 로그인한 적 없음)**.
+- `accounting.funds` 3행 — 이름이 그대로 `Test CEO Mandate Fund`, `Test User 2 Mandate Fund`, `Test User 3 Mandate Fund`.
+- `governance.mandates` 3행 — 위 테스트 사용자·펀드 위에 얹힌 것. FK 부모를 안 옮기므로 이것도 안 옮긴다.
+
+### workforce 격차는 복사하지 않는다
+
+`workforce.agent_profiles` 45 vs 23 등은 canonical 마이그레이션
+`20260824000100_workforce_roster_full_reconcile` 를 control 이 아직 적용하지 않아서 생긴 것이다.
+**체인을 적용하면 해소된다.** 행을 복사하면 마이그레이션 이력 구멍을 덮어버린다.
+
+## 6-1. 진짜 선행 과제는 데이터가 아니라 배선 (BLOCKER)
+
+실행 중인 컨테이너 31개 중 **`hedgefund-governance-api` 1개만** 아직 Supabase 트랜잭션 풀러(6543)를 가리킨다.
+나머지 30개는 `timescaledb:5432`(control)를 쓴다. 즉 지금은 **split-brain** 이다.
+
+근원은 루트 `.env` 다:
+
+```
+DATABASE_URL=postgresql://…@aws-0-ap-northeast-2.pooler.supabase.com:6543/postgres
+QUANT_DATABASE_URL=postgresql://…@aws-1-ap-northeast-2.pooler.supabase.com:6543/postgres
+```
+
+AWS 오버레이(`deploy/aws/docker-compose.paper-order.yml`)는 이를 control 로 덮어쓰지만,
+오버레이 없이 뜬 서비스는 루트 값을 그대로 쓴다. 그래서 governance-api 가 `governance.mandates` 를
+Supabase 에 계속 쓰고 있었다(최근 쓰기 2026-08-23 09:47, Supabase 전체 최근 쓰기 2026-08-24 00:44).
+
+**이걸 먼저 고치지 않으면 정합화해도 즉시 다시 갈라진다.** 순서는:
+
+1. `hedgefund-governance-api` 를 control 로 재배선 (루트 `.env` 또는 오버레이 적용)
+2. 그 다음 88행 복사
+3. 검증
 
 ## 7. Case A~D 처리
 
@@ -145,5 +176,6 @@ python scripts/migrate_supabase_to_aws_control.py --validate-only
 ## 12. 남은 위험
 
 - **control 이력 drift 미해결**(5절). 이게 풀리기 전에는 dry-run 자체가 fail-closed 로 중단된다.
-- 6절 10개 표는 사람 결정 대기. 특히 `governance.user_profiles` 의 사용자 1명.
+- **`hedgefund-governance-api` 재배선 미완료**(6-1절). 이게 살아 있는 동안 Supabase 는 계속 쓰인다.
+- Supabase 에 남기는 테스트 픽스처는 프로젝트를 지울 때까지 그대로 남는다(의도된 결정).
 - 이 호스트는 여러 세션이 동시에 쓴다. 실행 시점 조율 필요.

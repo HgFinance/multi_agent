@@ -707,3 +707,78 @@ def test_live_always_identity_keys_are_preserved_exactly(live_connections):
                 cursor.execute("drop table if exists mig_test.ident")
             connection.commit()
 
+
+# ---------------------------------------------------------------------------
+# control runs ahead of the abandoned remnant; strictness follows the scope
+# ---------------------------------------------------------------------------
+
+
+def _one_col(schema, name, coltype):
+    return make_table(
+        schema, name,
+        columns=(migrate.ColumnInfo("id", "uuid", True, False, 1),
+                 migrate.ColumnInfo("payload", coltype, False, False, 2)),
+    )
+
+
+def test_structural_drift_outside_copy_scope_is_ignored():
+    source = {("audit", "findings"): _one_col("audit", "findings", "jsonb")}
+    target = {
+        ("audit", "findings"): _one_col("audit", "findings", "jsonb"),
+        # control-only table from a migration the remnant never received
+        ("execution", "bundles"): _one_col("execution", "bundles", "text"),
+    }
+    scope = {("audit", "findings")}
+    assert migrate.compare_schemas(source, target, scope=scope) == []
+    # ...but without a scope the same pair is reported, so the strict mode stays.
+    assert migrate.compare_schemas(source, target) != []
+
+
+def test_structural_drift_inside_copy_scope_still_fails():
+    source = {("audit", "findings"): _one_col("audit", "findings", "jsonb")}
+    target = {("audit", "findings"): _one_col("audit", "findings", "text")}
+    scope = {("audit", "findings")}
+    problems = migrate.compare_schemas(source, target, scope=scope)
+    assert problems and "type/nullability drift" in problems[0]
+
+
+class _VersionCursor:
+    def __init__(self, versions):
+        self._versions = versions
+
+    def execute(self, *_args, **_kwargs):
+        return None
+
+    def fetchall(self):
+        return [(v,) for v in self._versions]
+
+
+def _chain_versions():
+    migrations = migrate.bootstrap.discover_migrations(
+        migrate.bootstrap.CONTROL_MIGRATIONS, migrate.bootstrap.CONTROL_PATTERN
+    )
+    return [m.version for m in migrations]
+
+
+def test_source_may_lag_the_repository_chain():
+    """The remnant is frozen; trailing the chain must not block the copy."""
+
+    versions = _chain_versions()
+    migrate.verify_source_migration_versions(_VersionCursor(versions[:-4]))
+    migrate.verify_source_migration_versions(_VersionCursor(versions))
+
+
+def test_source_ahead_of_the_repository_chain_still_aborts():
+    versions = _chain_versions()
+    with pytest.raises(migrate.bootstrap.BootstrapError):
+        migrate.verify_source_migration_versions(
+            _VersionCursor(versions + ["29990101000000"])
+        )
+
+
+def test_source_holding_an_unknown_version_aborts():
+    versions = _chain_versions()
+    tampered = versions[:-1] + ["20260101999999"]
+    with pytest.raises(migrate.bootstrap.BootstrapError):
+        migrate.verify_source_migration_versions(_VersionCursor(tampered))
+

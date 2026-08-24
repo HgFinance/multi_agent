@@ -230,6 +230,8 @@ def bars(
 ):
     """봉 조회 - 백필(ls_chart)과 자체 파생이 한 테이블에서 나온다(source 로 구분)."""
     iid = _iid_or_404(symbol)
+    if interval == "3M":
+        raise HTTPException(422, "3M interval is unsupported; use 5M")
     derived_intervals = {
         "5M": "5 minutes",
         "15M": "15 minutes",

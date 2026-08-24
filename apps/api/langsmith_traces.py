@@ -12,6 +12,17 @@ root run까지 전파되지 않는다 - 부서 구분은 오직 `extra.metadata.
 `extra.metadata.status`(AgentLogsView.tsx의 `degraded` 판정과 같은 집합:
 DEGRADED/BLOCKED/ERROR)와 `error_count`로 판정한다.
 
+2026-08-24 정정: 위 root run 전파 문제는 `publish_metric()`이 남기는 요약 핑
+(worker 실행당 1건)에만 국한된 게 아니었다 - 각 부서 Worker의 실제 LangGraph
+실행 자체(`departments/employee_worker_runtime.py`, `.../qa_employee_workers.py`,
+`.../risk_employee_workers.py`의 `invoke()`/`ainvoke()`)도 `config=` 없이 맨 호출
+이라 root run에 `stage`가 전혀 안 붙고 있었다 - 실측 결과 프로젝트 root run의
+91%가 이름 `LangGraph`·tags 없음·metadata 없음이었고, 그래서 이 화면의 Trace
+Count가 실제 QA 실행량의 1%도 못 세고 있었다. 지금은 두 곳(metric 핑 + Worker
+그래프 invoke 자체)이 모두 `extra.metadata.stage`를 남기므로
+(`orchestration/llm_observability.py`의 `worker_graph_trace_config()`), 아래
+`_QA_STAGE` 필터가 실제 실행량을 온전히 잡는다.
+
 LangSmith는 선택적 추적 어댑터다(`docs/02-engineering/TECH_STACK_DECISIONS.md`).
 자격증명이 없거나 API 호출이 실패해도 이 모듈은 예외를 던지지 않고 상태 문자열로만
 알린다 - 관측 실패가 카드 렌더를 막으면 안 된다.

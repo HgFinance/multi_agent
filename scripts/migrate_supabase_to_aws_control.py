@@ -296,11 +296,22 @@ def introspect_domain_schema(cursor) -> dict[tuple[str, str], TableInfo]:
 
 
 def compare_schemas(
-    source: dict[tuple[str, str], TableInfo], target: dict[tuple[str, str], TableInfo]
+    source: dict[tuple[str, str], TableInfo],
+    target: dict[tuple[str, str], TableInfo],
+    scope: set[tuple[str, str]] | None = None,
 ) -> list[str]:
+    """Require exact structural identity for the tables being copied.
+
+    control legitimately runs ahead of the abandoned Supabase remnant by several
+    migrations, so a whole-estate comparison can never pass again.  Structural
+    identity still has to hold exactly for every table in COPY scope -- that is
+    the data being moved -- but demanding it for the 203 tables this tool never
+    reads or writes would block the copy for no safety gain.
+    """
+
     problems: list[str] = []
-    source_keys = set(source)
-    target_keys = set(target)
+    source_keys = set(source) if scope is None else set(source) & scope
+    target_keys = set(target) if scope is None else set(target) & scope
     for key in sorted(source_keys - target_keys):
         problems.append(f"missing on target: {key[0]}.{key[1]}")
     for key in sorted(target_keys - source_keys):
@@ -377,16 +388,16 @@ def verify_source_migration_versions(cursor) -> None:
     migrations = bootstrap.discover_migrations(
         bootstrap.CONTROL_MIGRATIONS, bootstrap.CONTROL_PATTERN
     )
-    expected = [migration.version for migration in migrations]
     cursor.execute(
         "select version from supabase_migrations.schema_migrations order by version"
     )
     actual = [str(row[0]) for row in cursor.fetchall()]
-    if actual != expected:
-        raise MigrationError(
-            "source Supabase migration history does not exactly match "
-            "supabase/migrations/; repository and source have drifted apart"
-        )
+    # The source trailing the repository chain is expected: it is a frozen
+    # remnant and nothing pushes migrations to it any more.  Being AHEAD, or
+    # holding a version the repository does not, still aborts -- that would mean
+    # the source carries schema this tool cannot reason about.  Reuses the
+    # bootstrap's own prefix rule rather than a second implementation of it.
+    bootstrap.validate_applied_prefix(migrations, iter(actual), "source Supabase")
 
 
 # ---------------------------------------------------------------------------
@@ -989,13 +1000,30 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
 
             source_schema = introspect_domain_schema(source_cursor)
             target_schema = introspect_domain_schema(target_cursor)
-            problems = compare_schemas(source_schema, target_schema)
+            # The manifest must be read before the structural check, because it
+            # decides which tables the check applies to.
+            scope_path_early = arguments.scope_file.strip()
+            scope_early = load_scope(Path(scope_path_early)) if scope_path_early else {}
+            copy_scope = {
+                key
+                for key in source_schema
+                if scope_early.get(f"{key[0]}.{key[1]}", POLICY_COPY) == POLICY_COPY
+            }
+            problems = compare_schemas(
+                source_schema, target_schema, scope=copy_scope if scope_early else None
+            )
             if problems:
                 raise MigrationError(
                     "schema compatibility FAILED: " + "; ".join(problems[:20])
                 )
 
-            order = dependency_order(source_schema)
+            # Order only the tables being copied.  Classifying the other 203
+            # would pull ~135k control rows into memory to prove something the
+            # manifest already decided.
+            order = dependency_order(
+                {key: table for key, table in source_schema.items() if key in copy_scope}
+            )
+            all_source_keys = sorted(source_schema)
 
             if validate_only:
                 report = {
@@ -1019,17 +1047,18 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
                     )
                 return report
 
-            scope_path = arguments.scope_file.strip()
-            if execute and not scope_path:
+            if execute and not scope_path_early:
                 raise MigrationError(
                     "--execute requires --scope-file; every table must carry a "
                     "reviewed policy before any row is written"
                 )
-            scope = load_scope(Path(scope_path)) if scope_path else {}
+            scope = scope_early
             accepted_drift = frozenset(arguments.accept_metadata_drift)
 
             undeclared = [
-                f"{key[0]}.{key[1]}" for key in order if f"{key[0]}.{key[1]}" not in scope
+                f"{key[0]}.{key[1]}"
+                for key in all_source_keys
+                if f"{key[0]}.{key[1]}" not in scope
             ]
             if scope and undeclared:
                 raise MigrationError(

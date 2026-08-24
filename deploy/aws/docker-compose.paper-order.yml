@@ -179,6 +179,7 @@ services:
       DATABASE_URL: *conditional-worker-database-url
       CONDITIONAL_RULE_DATABASE_URL: *conditional-worker-database-url
       CONDITIONAL_RULE_WORKER_DATABASE_ROLE: svc_conditional_rule_worker
+      CONDITIONAL_RULE_WORKER_MAX_WORKERS: ${CONDITIONAL_RULE_WORKER_MAX_WORKERS:-8}
       TRADING_API_URL: http://trading-api:8000
       MARKET_API_URL: http://market-api:8036
       TRADING_INTERNAL_SERVICE_AUTH_SECRET: ${TRADING_INTERNAL_SERVICE_AUTH_SECRET:?A separate 32-byte internal Trading auth secret is required}
@@ -248,7 +249,7 @@ services:
       # 회의론자 워커를 부재한 Ollama 로 폴백시켰다. AWS 배포는 이
       # 오버레이를 항상 타므로 좌표를 여기 둔다.
       WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-http://vllm:8000/v1}
-      WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-Qwen2.5-14B-Instruct-AWQ}
+      WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-awq}
       WORKER_MODEL_API_KEY: ${WORKER_MODEL_API_KEY:-vllm}
       WORKER_MODEL_TIMEOUT_SECONDS: ${WORKER_MODEL_TIMEOUT_SECONDS:-120}
       WORKER_MODEL_REGISTRY_PATH: /app/departments/01-research/config/worker_model_registry.json
@@ -266,6 +267,12 @@ services:
     environment:
       <<: *control-environment
       RISK_QA_DATABASE_URL: *control-database-url
+      # Risk compliance-policy-worker uses the shared Qwen14B model plane.
+      # The Risk Hermes head remains a separate supervisor process.
+      WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-http://vllm:8000/v1}
+      WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-Qwen2.5-14B-Instruct-AWQ}
+      WORKER_MODEL_API_KEY: ${WORKER_MODEL_API_KEY:-vllm}
+      WORKER_MODEL_TIMEOUT_SECONDS: ${WORKER_MODEL_TIMEOUT_SECONDS:-120}
 
   audit-api:
     environment:

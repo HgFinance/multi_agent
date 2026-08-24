@@ -50,6 +50,7 @@ class ValueUnit(StrEnum):
 
 class Timeframe(StrEnum):
     M1 = "1M"
+    M3 = "3M"
     M5 = "5M"
     M15 = "15M"
     H1 = "1H"

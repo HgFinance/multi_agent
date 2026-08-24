@@ -29,6 +29,7 @@ from orchestration.llm_observability import (
     record_llm_call,
     redacted_current_worker_generation,
     redacted_langfuse_worker_span,
+    worker_graph_trace_config,
 )
 
 WorkerLLM = Callable[..., str]
@@ -648,7 +649,14 @@ async def run_worker_registry_async(
         try:
             app = build_independent_worker_graph(
                 spec, tool, _resolve_worker_llm(spec, llm, llm_factory))
-            state = await app.ainvoke({"worker_id": spec.worker_id, "input": dict(payload)})
+            trace_config = (
+                worker_graph_trace_config(stage=stage, worker_id=spec.worker_id, role=spec.role)
+                if stage
+                else None
+            )
+            state = await app.ainvoke(
+                {"worker_id": spec.worker_id, "input": dict(payload)}, config=trace_config
+            )
             return {
                 "worker_id": spec.worker_id,
                 "role": spec.role,

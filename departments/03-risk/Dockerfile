@@ -36,6 +36,12 @@ RUN pip install --no-cache-dir \
 WORKDIR /app
 # 저장소 루트 기준 상대 경로를 그대로 유지한다 - api/app.py의 parents[3] 계산과 맞아야 한다.
 COPY departments/03-risk ./departments/03-risk
+# Shared Worker Model Gateway. Production model-plane overlays inject the
+# vLLM/Qwen14B coordinates; without them the local Ollama fallback remains.
+COPY departments/worker_model_gateway.py ./departments/worker_model_gateway.py
+# Risk's employee graph imports these shared runtime contracts directly.
+COPY departments/employee_worker_runtime.py ./departments/employee_worker_runtime.py
+COPY departments/risk_qa_worker_profiles.py ./departments/risk_qa_worker_profiles.py
 COPY departments/02-trading/contracts ./departments/02-trading/contracts
 COPY skills/agentic-rag ./skills/agentic-rag
 COPY apps/observability ./apps/observability

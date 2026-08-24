@@ -63,6 +63,7 @@ from orchestration.llm_observability import (
     record_llm_call,
     redacted_current_worker_generation,
     redacted_langfuse_worker_span,
+    worker_graph_trace_config,
 )
 
 # This module is loaded directly from its file path by the shared dispatcher.
@@ -1299,7 +1300,10 @@ def _run_employee_workers_sequential(
         worker_trace = SkillTrace()
         state = build_worker_graph(
             spec, tools[spec.worker_id], llm, trace=worker_trace
-        ).invoke({"worker_id": spec.worker_id, "input": payload})
+        ).invoke(
+            {"worker_id": spec.worker_id, "input": payload},
+            config=worker_graph_trace_config(stage="qa", worker_id=spec.worker_id, role=spec.role),
+        )
         report = _normalize_worker_report_status(
             {
                 "worker_id": spec.worker_id,
@@ -1438,7 +1442,10 @@ async def run_employee_workers_async(
                 tools[spec.worker_id],
                 llm,
                 trace=worker_trace,
-            ).ainvoke({"worker_id": spec.worker_id, "input": payload})
+            ).ainvoke(
+                {"worker_id": spec.worker_id, "input": payload},
+                config=worker_graph_trace_config(stage="qa", worker_id=spec.worker_id, role=spec.role),
+            )
             report = {
                 "worker_id": spec.worker_id,
                 "role": spec.role,

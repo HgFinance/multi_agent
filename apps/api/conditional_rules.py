@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
@@ -14,6 +15,7 @@ from orchestration.conditional_rules import (
     ConditionalRuleSpec,
     EvaluationPolicy,
     ExpressionNode,
+    Timeframe,
     RuleAction,
     RuleState,
     rule_fingerprint,
@@ -127,6 +129,69 @@ class ConditionalRuleView(BaseModel):
     status_message: str | None = None
 
 
+_THREE_MINUTE_BAR = re.compile(r"(?<!\d)3\s*분봉")
+
+
+def _rewrite_three_minute_nodes(node: ExpressionNode) -> tuple[ExpressionNode, bool]:
+    """Map an explicit 3분봉 request to the supported 5분봉 feed.
+
+    The system has no independent 3M market-data capability. This boundary
+    rewrites only the requested timeframe to the existing 5M feed; it never
+    aggregates 1M candles or creates a second market-data path.
+    """
+
+    changed = False
+    updates: dict[str, Any] = {}
+    if node.timeframe is Timeframe.M3:
+        updates["timeframe"] = Timeframe.M5
+        changed = True
+    for field in ("left", "right", "operand"):
+        child = getattr(node, field)
+        if child is None:
+            continue
+        replacement, child_changed = _rewrite_three_minute_nodes(child)
+        if child_changed:
+            updates[field] = replacement
+            changed = True
+    if node.children:
+        children = []
+        children_changed = False
+        for child in node.children:
+            replacement, child_changed = _rewrite_three_minute_nodes(child)
+            children.append(replacement)
+            children_changed = children_changed or child_changed
+        if children_changed:
+            updates["children"] = tuple(children)
+            changed = True
+    return (node.model_copy(update=updates), changed) if changed else (node, False)
+
+
+def _normalize_supported_timeframe(
+    candidate: ConditionalRuleCandidate, raw_instruction: str
+) -> tuple[ConditionalRuleCandidate, bool, bool]:
+    """Return candidate, fallback-notice flag, and interpretation-mismatch flag."""
+
+    if not _THREE_MINUTE_BAR.search(raw_instruction):
+        return candidate, False, False
+    condition, condition_changed = _rewrite_three_minute_nodes(candidate.condition)
+    primary = candidate.evaluation.primary_timeframe
+    evaluation_changed = primary is Timeframe.M3
+    if evaluation_changed:
+        evaluation = candidate.evaluation.model_copy(
+            update={"primary_timeframe": Timeframe.M5}
+        )
+    else:
+        evaluation = candidate.evaluation
+    if condition_changed or evaluation_changed:
+        candidate = candidate.model_copy(
+            update={"condition": condition, "evaluation": evaluation}
+        )
+        return candidate, True, False
+    if primary is Timeframe.M5:
+        return candidate, True, False
+    return candidate, False, True
+
+
 def _subject(value: str | None) -> str:
     if not isinstance(value, str) or not value.strip():
         raise HTTPException(status_code=401, detail="authentication_required")
@@ -138,6 +203,9 @@ def _raw_sha256(value: str) -> str:
 
 
 def _expiry(value: datetime | None, *, now: datetime) -> datetime:
+    # Conditional rules are intentionally short-lived unless the user gives
+    # an explicit expiry. This keeps a PAPER test from becoming a durable
+    # unattended order instruction.
     expiry = value.astimezone(timezone.utc) if value else now + timedelta(minutes=10)
     if expiry <= now:
         raise HTTPException(status_code=422, detail="conditional_rule_expiry_in_past")
@@ -185,8 +253,10 @@ def _view(record: ConditionalRuleRecord) -> ConditionalRuleView:
     )
 
 
-def _summary(spec: ConditionalRuleSpec) -> dict[str, Any]:
-    return {
+def _summary(
+    spec: ConditionalRuleSpec, *, timeframe_fallback: bool = False
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
         "symbol": spec.symbol,
         "condition": spec.condition.model_dump(mode="json", exclude_none=True),
         "side": spec.action.side.value,
@@ -205,6 +275,13 @@ def _summary(spec: ConditionalRuleSpec) -> dict[str, Any]:
         "repeat_policy": "ONCE",
         "expires_at": spec.expires_at.isoformat(),
     }
+    if timeframe_fallback:
+        result["timeframe_fallback"] = {
+            "requested": "3M",
+            "used": "5M",
+            "reason": "3M_UNSUPPORTED",
+        }
+    return result
 
 
 def _build_preview(
@@ -214,10 +291,13 @@ def _build_preview(
     now: datetime | None = None,
 ) -> ConditionalRulePreviewResponse:
     instant = now or datetime.now(timezone.utc)
+    candidate, timeframe_fallback, timeframe_mismatch = _normalize_supported_timeframe(
+        request.candidate, request.raw_instruction
+    )
     access = require_trading_book_access(
         subject, str(request.fund_id), str(request.book_id)
     )
-    resolved = resolve_active_trading_instrument(request.candidate.symbol, None)
+    resolved = resolve_active_trading_instrument(candidate.symbol, None)
     spec = ConditionalRuleSpec.model_validate(
         {
             "schema_version": "conditional-trade-rule.v1",
@@ -228,25 +308,31 @@ def _build_preview(
             },
             "instrument_id": resolved["instrument_id"],
             "symbol": resolved["symbol"],
-            "condition": request.candidate.condition,
-            "action": request.candidate.action,
-            "evaluation": request.candidate.evaluation,
+            "condition": candidate.condition,
+            "action": candidate.action,
+            "evaluation": candidate.evaluation,
             "execution_mode": "PAPER",
             "repeat_policy": "ONCE",
-            "expires_at": _expiry(request.candidate.expires_at, now=instant),
+            "expires_at": _expiry(candidate.expires_at, now=instant),
             "raw_instruction_sha256": _raw_sha256(request.raw_instruction),
         }
     )
     validate_rule_spec(spec)
-    clarifications = clarification_codes(request.raw_instruction, spec)
+    clarifications = list(clarification_codes(request.raw_instruction, spec))
+    if timeframe_mismatch:
+        clarifications.append("TIMEFRAME_3M_UNSUPPORTED")
+    clarifications = tuple(dict.fromkeys(clarifications))
+    assumptions = list(preview_assumptions(request.raw_instruction, spec))
+    if timeframe_fallback:
+        assumptions.append("TIMEFRAME_FALLBACK_3M_TO_5M")
     digest = rule_fingerprint(spec)
     return ConditionalRulePreviewResponse(
         activatable=not clarifications,
         clarification_codes=clarifications,
-        assumptions=preview_assumptions(request.raw_instruction, spec),
+        assumptions=tuple(dict.fromkeys(assumptions)),
         spec_sha256=digest,
         spec=spec,
-        summary=_summary(spec),
+        summary=_summary(spec, timeframe_fallback=timeframe_fallback),
     )
 
 

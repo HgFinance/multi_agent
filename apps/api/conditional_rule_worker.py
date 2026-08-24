@@ -9,10 +9,12 @@ server-derived directive through its existing PAPER boundary.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 import logging
 import os
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -118,7 +120,7 @@ class RuntimeInputs:
 class WorkerStore(Protocol):
     def expire_due(self) -> int: ...
     def activate_ready_bundles(self, *, limit: int = 100) -> int: ...
-    def list_active(self, *, limit: int = 100) -> list[ActiveRule]: ...
+    def list_active(self, *, limit: int = 100, offset: int = 0) -> list[ActiveRule]: ...
     def list_claimed(
         self, *, limit: int = 100
     ) -> list[tuple[ActiveRule, TriggerClaim]]: ...
@@ -381,11 +383,14 @@ class HttpRuntimeClient:
         self.timeout_seconds = max(1.0, min(float(timeout_seconds), 30.0))
         self._price_resolver = price_resolver
         self._cycle_prices: dict[str, tuple[Decimal, datetime, dict[str, Any]]] = {}
+        self._cycle_prices_lock = threading.Lock()
+        self._price_resolver_lock = threading.Lock()
 
     def begin_cycle(self) -> None:
         """Drop the bounded per-cycle quote snapshot before polling again."""
 
-        self._cycle_prices.clear()
+        with self._cycle_prices_lock:
+            self._cycle_prices.clear()
 
     @staticmethod
     def _service_token() -> str:
@@ -481,16 +486,20 @@ class HttpRuntimeClient:
 
     def _snapshot(self, symbol: str) -> tuple[Decimal, datetime, dict[str, Any]]:
         normalized = symbol.strip().upper()
-        cached = self._cycle_prices.get(normalized)
+        with self._cycle_prices_lock:
+            cached = self._cycle_prices.get(normalized)
         if cached is not None:
             return cached
         resolver = self._price_resolver
         if resolver is None:
-            try:
-                resolver = LSPaperMarketPriceResolver.from_env()
-            except MarketPriceResolverError as exc:
-                raise RuntimeDataError(exc.code, str(exc), retryable=exc.retryable) from exc
-            self._price_resolver = resolver
+            with self._price_resolver_lock:
+                resolver = self._price_resolver
+                if resolver is None:
+                    try:
+                        resolver = LSPaperMarketPriceResolver.from_env()
+                    except MarketPriceResolverError as exc:
+                        raise RuntimeDataError(exc.code, str(exc), retryable=exc.retryable) from exc
+                    self._price_resolver = resolver
         try:
             snapshot = resolver.snapshot(normalized)
         except MarketPriceResolverError as exc:
@@ -504,8 +513,12 @@ class HttpRuntimeClient:
             "observed_at": snapshot.observed_at.isoformat(),
         }
         result = (snapshot.price, snapshot.observed_at, value)
-        self._cycle_prices[normalized] = result
-        return result
+        with self._cycle_prices_lock:
+            cached = self._cycle_prices.get(normalized)
+            if cached is not None:
+                return cached
+            self._cycle_prices[normalized] = result
+            return result
 
     def _bars(self, symbol: str, timeframe: Timeframe, limit: int) -> list[Candle]:
         query = urllib.parse.urlencode({"interval": timeframe.value, "limit": limit})
@@ -739,10 +752,48 @@ class HttpRuntimeClient:
 
 
 class ConditionalRuleWorker:
-    def __init__(self, store: WorkerStore, client: RuntimeClient, *, batch_size: int = 100) -> None:
+    def __init__(
+        self,
+        store: WorkerStore,
+        client: RuntimeClient,
+        *,
+        batch_size: int = 100,
+        max_workers: int = 8,
+    ) -> None:
         self.store = store
         self.client = client
         self.batch_size = max(1, min(int(batch_size), 1000))
+        self.max_workers = max(1, min(int(max_workers), 32, self.batch_size))
+        self._active_offset = 0
+
+    @staticmethod
+    def _merge_counts(total: dict[str, int], delta: Mapping[str, int]) -> None:
+        for key, value in delta.items():
+            total[key] = total.get(key, 0) + int(value)
+
+    def _parallel_map(self, items: list[Any], function: Any) -> list[dict[str, int]]:
+        if not items:
+            return []
+        if self.max_workers == 1 or len(items) == 1:
+            return [function(item) for item in items]
+        results: list[dict[str, int]] = []
+        with ThreadPoolExecutor(
+            max_workers=min(self.max_workers, len(items)),
+            thread_name_prefix="conditional-rule",
+        ) as executor:
+            futures = {executor.submit(function, item): item for item in items}
+            for future in as_completed(futures):
+                item = futures[future]
+                try:
+                    results.append(future.result())
+                except Exception:  # noqa: BLE001 - isolate one rule from the batch.
+                    rule_id = getattr(item, "rule_id", "unknown")
+                    LOG.exception(
+                        "conditional rule parallel evaluation failed",
+                        extra={"rule_id": str(rule_id)},
+                    )
+                    results.append({"errors": 1})
+        return results
 
     def _submit(self, execution: SubmitReadyExecution) -> bool:
         self.store.mark_submitting(execution.rule_execution_id)
@@ -810,6 +861,77 @@ class ConditionalRuleWorker:
         )
         return execution is not None and self._submit(execution)
 
+    def _recover_claimed(self, item: tuple[ActiveRule, TriggerClaim]) -> dict[str, int]:
+        rule, claim = item
+        return {
+            "claimed_recovered": 1,
+            "submitted": int(self._guard_claim(rule, claim)),
+        }
+
+    def _evaluate_active(self, rule: ActiveRule) -> dict[str, int]:
+        counts = {"evaluated": 0, "triggered": 0, "submitted": 0, "errors": 0}
+        try:
+            inputs = self.client.load_inputs(rule)
+        except (RuntimeDataError, EvaluationError) as exc:
+            counts["errors"] += 1
+            LOG.warning(
+                "conditional rule runtime data unavailable",
+                extra={
+                    "rule_id": str(rule.rule_id),
+                    "code": getattr(exc, "code", "RUNTIME_DATA_INVALID"),
+                },
+            )
+            return counts
+        try:
+            result = evaluate_condition(rule.spec, inputs.evaluation_context)
+        except EvaluationError as exc:
+            counts["errors"] += 1
+            self.store.record_error(
+                rule,
+                evaluation_key=inputs.evaluation_key,
+                context_sha256=inputs.context_sha256,
+                data_watermark=inputs.data_watermark,
+                error_code=exc.code,
+                error_message=str(exc),
+            )
+            return counts
+        counts["evaluated"] += 1
+        if not result:
+            self.store.record_false(
+                rule,
+                evaluation_key=inputs.evaluation_key,
+                context_sha256=inputs.context_sha256,
+                data_watermark=inputs.data_watermark,
+            )
+            return counts
+        claim = self.store.claim_true(
+            rule,
+            evaluation_key=inputs.evaluation_key,
+            context_sha256=inputs.context_sha256,
+            data_watermark=inputs.data_watermark,
+        )
+        if claim is None:
+            return counts
+        counts["triggered"] += 1
+        counts["submitted"] += int(self._guard_claim(rule, claim))
+        return counts
+
+    def _next_active_batch(self) -> list[ActiveRule]:
+        """Rotate bounded pages so rules after the first page are not starved."""
+
+        batch = self.store.list_active(
+            limit=self.batch_size,
+            offset=self._active_offset,
+        )
+        if not batch and self._active_offset:
+            self._active_offset = 0
+            batch = self.store.list_active(limit=self.batch_size, offset=0)
+        if len(batch) < self.batch_size:
+            self._active_offset = 0
+        else:
+            self._active_offset += len(batch)
+        return batch
+
     def process_once(self) -> dict[str, int]:
         begin_cycle = getattr(self.client, "begin_cycle", None)
         if callable(begin_cycle):
@@ -839,60 +961,20 @@ class ConditionalRuleWorker:
         for execution in self.store.list_submit_ready(limit=self.batch_size):
             counts["retried"] += 1
             counts["submitted"] += int(self._submit(execution))
-        for rule, claim in self.store.list_claimed(limit=self.batch_size):
-            counts["claimed_recovered"] += 1
-            counts["submitted"] += int(self._guard_claim(rule, claim))
-        for rule in self.store.list_active(limit=self.batch_size):
-            try:
-                inputs = self.client.load_inputs(rule)
-            except (RuntimeDataError, EvaluationError) as exc:
-                counts["errors"] += 1
-                LOG.warning(
-                    "conditional rule runtime data unavailable",
-                    extra={
-                        "rule_id": str(rule.rule_id),
-                        "code": getattr(exc, "code", "RUNTIME_DATA_INVALID"),
-                    },
-                )
-                continue
-            try:
-                result = evaluate_condition(rule.spec, inputs.evaluation_context)
-            except EvaluationError as exc:
-                counts["errors"] += 1
-                # A deterministic error for a concrete market watermark is
-                # append-only. A later bar/quote gets a new evaluation key.
-                self.store.record_error(
-                    rule,
-                    evaluation_key=inputs.evaluation_key,
-                    context_sha256=inputs.context_sha256,
-                    data_watermark=inputs.data_watermark,
-                    error_code=exc.code,
-                    error_message=str(exc),
-                )
-                continue
-            counts["evaluated"] += 1
-            if not result:
-                self.store.record_false(
-                    rule,
-                    evaluation_key=inputs.evaluation_key,
-                    context_sha256=inputs.context_sha256,
-                    data_watermark=inputs.data_watermark,
-                )
-                continue
-            claim = self.store.claim_true(
-                rule,
-                evaluation_key=inputs.evaluation_key,
-                context_sha256=inputs.context_sha256,
-                data_watermark=inputs.data_watermark,
-            )
-            if claim is None:
-                continue
-            counts["triggered"] += 1
-            counts["submitted"] += int(self._guard_claim(rule, claim))
+        for delta in self._parallel_map(
+            self.store.list_claimed(limit=self.batch_size),
+            self._recover_claimed,
+        ):
+            self._merge_counts(counts, delta)
+        for delta in self._parallel_map(
+            self._next_active_batch(),
+            self._evaluate_active,
+        ):
+            self._merge_counts(counts, delta)
         return counts
 
 
-def _settings() -> tuple[PostgresRuleWorkerStore, HttpRuntimeClient, float, int]:
+def _settings() -> tuple[PostgresRuleWorkerStore, HttpRuntimeClient, float, int, int]:
     dsn = os.getenv("CONDITIONAL_RULE_DATABASE_URL", "").strip()
     if not dsn:
         raise RuntimeDataError(
@@ -913,7 +995,11 @@ def _settings() -> tuple[PostgresRuleWorkerStore, HttpRuntimeClient, float, int]
     )
     poll = max(float(os.getenv("CONDITIONAL_RULE_WORKER_POLL_SECONDS", "30")), 0.1)
     batch = max(int(os.getenv("CONDITIONAL_RULE_WORKER_BATCH_SIZE", "100")), 1)
-    return store, client, poll, batch
+    workers = max(
+        1,
+        min(int(os.getenv("CONDITIONAL_RULE_WORKER_MAX_WORKERS", "8")), 32),
+    )
+    return store, client, poll, batch, workers
 
 
 def main() -> int:
@@ -925,8 +1011,13 @@ def main() -> int:
         level=os.getenv("LOG_LEVEL", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    store, client, poll, batch = _settings()
-    worker = ConditionalRuleWorker(store, client, batch_size=batch)
+    store, client, poll, batch, workers = _settings()
+    worker = ConditionalRuleWorker(
+        store,
+        client,
+        batch_size=batch,
+        max_workers=workers,
+    )
     if args.healthcheck:
         store.list_active(limit=1)
         HttpRuntimeClient._service_token()

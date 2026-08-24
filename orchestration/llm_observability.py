@@ -112,6 +112,33 @@ def _metric_metadata(metric: dict[str, Any], *, trace_id: str | None = None) -> 
     return result
 
 
+def worker_graph_trace_config(*, stage: str, worker_id: str, role: str = "") -> dict[str, Any]:
+    """LangGraph ``invoke()``/``ainvoke()`` config that tags a Worker's own root run.
+
+    `redacted_trace()`의 ambient `tracing_context()`는 같은 코루틴 안에서 바로
+    이어지는 `ainvoke()`에만 닿는다 - `asyncio.gather()`로 fan-out된 Worker별
+    독립 그래프(각 부서 `_execute_one`)나 Node 함수 안에서 새로 빌드해 부르는
+    그래프에는 전파되지 않는다(실측, 2026-08-24: LangSmith 프로젝트 root run의
+    91%가 이름 `LangGraph`·tags 없음·metadata 없음으로 찍혀 있었다 - QA 카드
+    Trace Count가 실제 트래픽의 1%도 못 세는 원인이었다). 이 함수가 만드는
+    `config=`를 invoke 호출에 직접 넘기면 LangGraph의 `RunnableConfig` → tracer
+    배선이 ambient context를 거치지 않고 그 run에 확실히 붙는다 - 읽는 쪽
+    (`apps/api/langsmith_traces.py`)도 `extra.metadata.stage`만 본다.
+    """
+
+    return {
+        "run_name": f"worker.{worker_id}",
+        "tags": ["hgfinance", f"stage:{stage}", "redacted"],
+        "metadata": {
+            "observability_schema": "llm.performance.v1",
+            "stage": stage,
+            "worker_id": worker_id,
+            "role": role,
+            "raw_payloads_sent": False,
+        },
+    }
+
+
 @lru_cache(maxsize=1)
 def _safe_langsmith_client() -> Any:
     from langsmith import Client

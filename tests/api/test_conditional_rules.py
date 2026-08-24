@@ -86,6 +86,7 @@ def preview_request(raw: str, candidate: dict | None = None):
     "raw",
     (
         "000660 SK하이닉스 현재가가 2000000원보다 낮으면 1800000원 지정가로 1주 매수해줘",
+        "삼성전자 3분봉 60일선 돌파시 1주 매수해줘",
         "삼성전자 주가가 5일 이동평균선보다 높으면 1주 매수",
         "네이버 주가가 200000원 아래로 떨어지면 1주 매도",
         "삼성전자 볼린저밴드 상단에 닿으면 1주 매도",
@@ -93,6 +94,42 @@ def preview_request(raw: str, candidate: dict | None = None):
 )
 def test_explicit_korean_condition_endings_route_to_conditional_lane(raw: str) -> None:
     assert looks_like_conditional_paper_rule(raw) is True
+
+
+def test_three_minute_request_uses_supported_five_minute_feed_and_discloses_fallback(monkeypatch) -> None:
+    install_scope(monkeypatch)
+    candidate = {
+        "symbol": "삼성전자",
+        "condition": {
+            "type": "CROSS",
+            "operator": "ABOVE",
+            "left": {"type": "MARKET", "field": "CLOSE"},
+            "right": {
+                "type": "INDICATOR",
+                "name": "SMA",
+                "timeframe": "3M",
+                "parameters": {"PERIOD": 60},
+            },
+        },
+        "action": {"side": "BUY", "sizing": {"type": "FIXED_SHARES", "value": "1"}},
+        "evaluation": {"clock": "BAR_CLOSE", "primary_timeframe": "3M"},
+    }
+
+    preview = api._build_preview(
+        preview_request("삼성전자 3분봉 60일선 돌파시 1주 매수해줘", candidate),
+        subject=USER_ID,
+        now=NOW,
+    )
+
+    assert preview.activatable is True
+    assert preview.spec.evaluation.primary_timeframe.value == "5M"
+    assert preview.spec.condition.right.timeframe.value == "5M"
+    assert "TIMEFRAME_FALLBACK_3M_TO_5M" in preview.assumptions
+    assert preview.summary["timeframe_fallback"] == {
+        "requested": "3M",
+        "used": "5M",
+        "reason": "3M_UNSUPPORTED",
+    }
 
 
 def test_ambiguous_return_baseline_and_position_percent_are_blocked(monkeypatch) -> None:

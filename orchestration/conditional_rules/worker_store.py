@@ -111,7 +111,7 @@ class PostgresRuleWorkerStore:
             spec=spec,
         )
 
-    def list_active(self, *, limit: int = 100) -> list[ActiveRule]:
+    def list_active(self, *, limit: int = 100, offset: int = 0) -> list[ActiveRule]:
         try:
             with self._connect() as connection, connection.cursor() as cursor:
                 self._set_role(cursor)
@@ -128,9 +128,12 @@ class PostgresRuleWorkerStore:
                        and rule.repeat_policy='ONCE' and rule.expires_at>now()
                        and rule.confirmation_sha256=version.spec_sha256
                      order by rule.updated_at,rule.rule_id
-                     limit %s
+                     limit %s offset %s
                     """,
-                    (max(1, min(limit, 1000)),),
+                    (
+                        max(1, min(limit, 1000)),
+                        max(0, min(int(offset), 1_000_000)),
+                    ),
                 )
                 return [self._active_row(row) for row in cursor.fetchall()]
         except RuleWorkerStoreError:

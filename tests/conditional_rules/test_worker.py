@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import threading
 import urllib.error
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -108,8 +109,8 @@ class FakeStore:
     def expire_due(self) -> int:
         return 0
 
-    def list_active(self, *, limit: int = 100):
-        return self.active[:limit]
+    def list_active(self, *, limit: int = 100, offset: int = 0):
+        return self.active[offset : offset + limit]
 
     def list_claimed(self, *, limit: int = 100):
         return self.claimed[:limit]
@@ -230,6 +231,61 @@ def test_false_condition_is_recorded_without_trigger() -> None:
     assert store.false == 1
     assert store.claims == 0
     assert client.submit_calls == 0
+
+
+def test_active_rules_are_evaluated_with_bounded_parallelism() -> None:
+    rule = active_rule(threshold="100")
+    store = FakeStore(rule)
+    store.active = [rule, rule]
+
+    class ParallelClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__(inputs(price="90"))
+            self.barrier = threading.Barrier(2)
+            self.lock = threading.Lock()
+            self.active_loads = 0
+            self.max_active_loads = 0
+
+        def load_inputs(self, rule: ActiveRule) -> RuntimeInputs:
+            del rule
+            with self.lock:
+                self.active_loads += 1
+                self.max_active_loads = max(
+                    self.max_active_loads, self.active_loads
+                )
+            try:
+                self.barrier.wait(timeout=2)
+                return self.runtime_inputs
+            finally:
+                with self.lock:
+                    self.active_loads -= 1
+
+    client = ParallelClient()
+    result = ConditionalRuleWorker(
+        store,
+        client,
+        max_workers=2,
+    ).process_once()
+
+    assert result["evaluated"] == 2
+    assert result["errors"] == 0
+    assert store.false == 2
+    assert client.max_active_loads == 2
+
+
+def test_active_rule_pages_rotate_without_starvation() -> None:
+    rule = active_rule(threshold="100")
+    store = FakeStore(rule)
+    store.active = [rule, rule]
+    client = FakeClient(inputs(price="90"))
+    worker = ConditionalRuleWorker(store, client, batch_size=1, max_workers=1)
+
+    first = worker.process_once()
+    second = worker.process_once()
+
+    assert first["evaluated"] == 1
+    assert second["evaluated"] == 1
+    assert store.false == 2
 
 
 def test_true_condition_rechecks_guard_and_submits_existing_paper_lane() -> None:

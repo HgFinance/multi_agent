@@ -78,6 +78,14 @@ allowed tool call, recursively check each node against this field ownership:
 
 Use these canonical patterns:
 
+For intraday Korean chart shorthand, `3분봉 60일선 돌파시` is parsed as
+`CROSS ABOVE` of completed MARKET CLOSE over SMA(60). The market-data
+capability is 5M; there is no independent 3M feed and no 1M-derived 3M path.
+The trusted boundary maps an explicit 3분봉 request to 5M and reports
+`TIMEFRAME_FALLBACK_3M_TO_5M` to the user. A BUY rule must include an
+explicit quantity; if omitted, use `candidate=null` with `QUANTITY_REQUIRED`
+rather than inventing a share count.
+
 ```json
 {"condition":{"type":"COMPARISON","operator":"GTE","left":{"type":"MARKET","field":"LAST_PRICE"},"right":{"type":"LITERAL","value":"70000","unit":"PRICE"}},"evaluation":{"clock":"QUOTE"}}
 ```
@@ -90,6 +98,11 @@ For a Bollinger upper band use `name=BOLLINGER`, `output=UPPER`, and
 `parameters={"PERIOD":20,"STDDEV":2}`. For an explicit conditional limit
 order, set `action.order_type=LIMIT` and copy the exact stated price to
 `action.limit_price`; otherwise use `MARKET` and omit `limit_price`.
+
+An explicit `3분봉` plus `N선` or `N일선` means SMA with
+`parameters={"PERIOD":N}` before the trusted 3M-to-5M compatibility fallback;
+do not derive a new timeframe. For a BUY rule without quantity, return
+`candidate=null` with `QUANTITY_REQUIRED` and never assume one share.
 
 `CROSS` is edge-triggered and always uses `BAR_CLOSE` plus an explicit
 `primary_timeframe`. If a price-only cross instruction omits its timeframe,

@@ -1,10 +1,19 @@
 {
   "_comment": [
-    "DRAFT - requires human review before --execute.",
-    "Generated from measured row counts on 2026-08-24 (source=hosted Supabase, target=AWS control).",
-    "COPY: hosted Supabase holds rows control has never had.",
-    "CONTROL_AUTHORITATIVE: control is the operational source of truth; the tool never writes.",
-    "Tables listed in _review_required have rows on BOTH sides in differing numbers and need an explicit human decision."
+    "REVIEWED 2026-08-24. control is the standard; Supabase is a remnant.",
+    "Measured: source=245 domain rows, target=135,833.",
+    "COPY (7 tables / 88 rows): the audit + eval trail.  Every outward FK column",
+    "  on these tables is entirely NULL, so the block is self-contained and needs",
+    "  no parent rows.  control holds 0 of them, so there is nothing to conflict.",
+    "CONTROL_AUTHORITATIVE (203 tables): control is the source of truth; the tool",
+    "  never writes.  This deliberately leaves behind the Supabase-only test",
+    "  fixtures -- 3 synthetic users (emails *.invalid, last_sign_in NULL, never",
+    "  signed in), 3 funds literally named 'Test ... Mandate Fund', and the 3",
+    "  mandates built on them.  Nothing real is discarded.",
+    "workforce.* differences are NOT copied: they come from the canonical",
+    "  migration 20260824000100_workforce_roster_full_reconcile, which control has",
+    "  not applied yet.  Applying the chain fixes them; copying rows would paper",
+    "  over a migration-history gap."
   ],
   "_measured_at": "2026-08-24",
   "_review_required": [
@@ -32,31 +41,6 @@
       "table": "quant.dataset_manifests",
       "source": 2,
       "control": 3
-    },
-    {
-      "table": "workforce.agent_profile_versions",
-      "source": 28,
-      "control": 23
-    },
-    {
-      "table": "workforce.agent_profiles",
-      "source": 45,
-      "control": 23
-    },
-    {
-      "table": "workforce.departments",
-      "source": 8,
-      "control": 2
-    },
-    {
-      "table": "workforce.models",
-      "source": 5,
-      "control": 3
-    },
-    {
-      "table": "workforce.role_templates",
-      "source": 45,
-      "control": 23
     }
   ],
   "tables": {
@@ -149,7 +133,7 @@
     "governance.investment_cases": "CONTROL_AUTHORITATIVE",
     "governance.mandate_decisions": "CONTROL_AUTHORITATIVE",
     "governance.mandate_versions": "CONTROL_AUTHORITATIVE",
-    "governance.mandates": "COPY",
+    "governance.mandates": "CONTROL_AUTHORITATIVE",
     "governance.notifications": "CONTROL_AUTHORITATIVE",
     "governance.report_runs": "CONTROL_AUTHORITATIVE",
     "governance.user_preferences": "CONTROL_AUTHORITATIVE",
@@ -270,5 +254,11 @@
     "workforce.skills": "CONTROL_AUTHORITATIVE",
     "workforce.tools": "CONTROL_AUTHORITATIVE",
     "workforce.workforce_plans": "CONTROL_AUTHORITATIVE"
+  },
+  "_decision": {
+    "standard": "AWS control PostgreSQL",
+    "copy_rows_total": 88,
+    "left_behind": "Supabase-only test fixtures (users/funds/mandates)",
+    "blocking_prerequisite": "hedgefund-governance-api still points at the Supabase pooler (6543); repoint it at control first or the estate re-diverges immediately"
   }
 }

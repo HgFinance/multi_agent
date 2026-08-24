@@ -74,6 +74,7 @@ from orchestration.llm_observability import (
     record_llm_call,
     redacted_current_worker_generation,
     redacted_langfuse_worker_span,
+    worker_graph_trace_config,
 )
 
 
@@ -184,13 +185,36 @@ def _model_name() -> str:
     return os.getenv("OLLAMA_CHAT_MODEL") or "qwen3:1.7b"
 
 
+def _runtime_model_info(worker_id: str = "compliance-policy-worker") -> tuple[str, str]:
+    """Return the effective provider/model without making a model request."""
+
+    if (os.getenv("WORKER_MODEL_BASE_URL") or "").strip():
+        try:
+            from departments.worker_model_gateway import resolve
+
+            binding = resolve(worker_id)
+            return binding.provider, binding.model
+        except Exception:  # noqa: BLE001 - metadata must not hide worker errors
+            return (
+                "vllm-openai",
+                os.getenv("WORKER_MODEL_NAME") or "qwen2.5-14b-instruct-awq",
+            )
+    return "ollama", _model_name()
+
+
 def _base_url() -> str:
     raw = (os.getenv("OLLAMA_BASE_URL") or "http://127.0.0.1:11434/v1").rstrip("/")
     return raw if raw.endswith("/v1") else f"{raw}/v1"
 
 
 def default_worker_llm(system: str, prompt: str) -> str:
-    """Call the local Ollama OpenAI-compatible endpoint lazily."""
+    """Call the configured Worker Model Gateway, or the local Ollama fallback."""
+
+    if (os.getenv("WORKER_MODEL_BASE_URL") or "").strip():
+        from departments.worker_model_gateway import llm_for_worker
+
+        worker_llm, _binding = llm_for_worker("compliance-policy-worker")
+        return worker_llm(system, prompt)
 
     from openai import OpenAI
 
@@ -780,7 +804,7 @@ def _worker_context_for_report(
             for index, ref in enumerate(evidence_refs)
         ),
         profile_version=spec.profile_version,
-        model_version=_model_name(),
+        model_version=_runtime_model_info()[1],
         input_hash=input_hash,
         attempt=attempt,
         timeout_ms=timeout_ms,
@@ -811,7 +835,10 @@ def _run_employee_workers_sequential(
         worker_trace = SkillTrace()
         state = build_worker_graph(
             spec, tools[spec.worker_id], llm, trace=worker_trace
-        ).invoke({"worker_id": spec.worker_id, "input": payload})
+        ).invoke(
+            {"worker_id": spec.worker_id, "input": payload},
+            config=worker_graph_trace_config(stage="risk", worker_id=spec.worker_id, role=spec.role),
+        )
         reports.append(
             {
                 "worker_id": spec.worker_id,
@@ -827,6 +854,7 @@ def _run_employee_workers_sequential(
                 "technology": spec.tech_profile.as_dict() if spec.tech_profile else {},
                 "skill_results": state.get("skill_results", []),
                 "rag_plan": state.get("rag_plan", {}),
+                "tool_output": state.get("tool_output", {}),
                 "trace": state.get("trace_manifest", {}),
                 "worker_context": _worker_context_for_report(
                     spec,
@@ -844,8 +872,8 @@ def _run_employee_workers_sequential(
     return {
         "runtime": {
             "executor": "LangGraph",
-            "provider": "ollama",
-            "model": _model_name(),
+            "provider": _runtime_model_info()[0],
+            "model": _runtime_model_info()[1],
             "max_retries": 2,
             "max_attempts": 3,
             "technology_profiles": {
@@ -867,6 +895,8 @@ async def run_employee_workers_async(
     payload: dict[str, Any],
     llm: WorkerLLM | None = None,
     legal_answer_fn: LegalWikiAnswerFn | None = None,
+    *,
+    include_deterministic_runner: bool = True,
 ) -> dict[str, Any]:
     """Fan out guarded Risk Worker graphs and deterministically fan them in."""
 
@@ -893,7 +923,10 @@ async def run_employee_workers_async(
                 tools[spec.worker_id],
                 llm,
                 trace=worker_trace,
-            ).ainvoke({"worker_id": spec.worker_id, "input": payload})
+            ).ainvoke(
+                {"worker_id": spec.worker_id, "input": payload},
+                config=worker_graph_trace_config(stage="risk", worker_id=spec.worker_id, role=spec.role),
+            )
             return {
                 "worker_id": spec.worker_id,
                 "role": spec.role,
@@ -908,6 +941,7 @@ async def run_employee_workers_async(
                 "technology": spec.tech_profile.as_dict() if spec.tech_profile else {},
                 "skill_results": state.get("skill_results", []),
                 "rag_plan": state.get("rag_plan", {}),
+                "tool_output": state.get("tool_output", {}),
                 "trace": state.get("trace_manifest", {}),
                 "worker_context": _worker_context_for_report(
                     spec,
@@ -945,6 +979,7 @@ async def run_employee_workers_async(
                 "technology": spec.tech_profile.as_dict() if spec.tech_profile else {},
                 "skill_results": [],
                 "rag_plan": {},
+                "tool_output": {},
                 "trace": {},
                 "worker_context": _worker_context_for_report(
                     spec,
@@ -973,7 +1008,7 @@ async def run_employee_workers_async(
         # 열려 있어야 그 값이 쌓인다(2026-08-20, 공용 런타임과 같은 계약).
         metric_token = begin_worker_metric(
             worker_id=spec.worker_id, role=spec.role,
-            stage="risk", model_name=_model_name(),
+            stage="risk", model_name=_runtime_model_info(spec.worker_id)[1],
         )
         with redacted_langfuse_worker_span(
             worker_id=spec.worker_id,
@@ -1010,16 +1045,28 @@ async def run_employee_workers_async(
                 trace_id=str(trace_id or ""),
             )
 
-    reports = list(await asyncio.gather(*(run_one(spec) for spec in eligible)))
+    # Legal evidence retrieval/generation and the deterministic RiskEngine
+    # runner are independent. Run them concurrently so the model/legal path
+    # cannot delay market/liquidity/counterparty facts.
+    if include_deterministic_runner:
+        worker_reports, deterministic_report = await asyncio.gather(
+            asyncio.gather(*(run_one(spec) for spec in eligible)),
+            asyncio.to_thread(risk_runner, payload),
+        )
+    else:
+        worker_reports = await asyncio.gather(*(run_one(spec) for spec in eligible))
+        deterministic_report = None
+    reports = list(worker_reports)
     failed = [item["worker_id"] for item in reports if item["status"] != "COMPLETED"]
     # risk-runner는 레지스트리 밖이다 - LLM Worker의 failed/degraded 판정에 섞이지 않는다.
-    reports.append(risk_runner(payload))
+    if deterministic_report is not None:
+        reports.append(deterministic_report)
     return {
         "runtime": {
             "executor": "LangGraph",
             "topology": "async_fan_out_fan_in_independent_graphs",
-            "provider": "ollama",
-            "model": _model_name(),
+            "provider": _runtime_model_info()[0],
+            "model": _runtime_model_info()[1],
             "max_retries": 2,
             "max_attempts": 3,
             "technology_profiles": {
@@ -1042,7 +1089,9 @@ async def run_employee_workers_async(
 def run_employee_workers(
     payload: dict[str, Any],
     llm: WorkerLLM | None = None,
-    legal_answer_fn: LegalWikiAnswerFn | None = None
+    legal_answer_fn: LegalWikiAnswerFn | None = None,
+    *,
+    include_deterministic_runner: bool = True,
 ) -> dict[str, Any]:
     """Synchronous compatibility boundary for the async Risk fan-in."""
 
@@ -1051,5 +1100,6 @@ def run_employee_workers(
             payload,
             llm=llm,
             legal_answer_fn=legal_answer_fn,
+            include_deterministic_runner=include_deterministic_runner,
         )
     )

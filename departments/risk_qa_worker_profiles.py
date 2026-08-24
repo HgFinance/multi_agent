@@ -33,7 +33,7 @@ RISK_WORKER_TECH: Final[Mapping[str, WorkerTechProfile]] = {
             "Agentic RAG retrieve·grade·generate·hallucination_check",
             "PIT·ACL·citation·provenance validators",
             "Supabase pgvector/BM25 adapter when configured",
-            "Ollama grounded advisory node",
+            "Worker Model Gateway (production vLLM Qwen2.5-14B-AWQ; dev Ollama fallback)",
         ),
         usage=(
             "정책 문서의 observed/published 시점을 as_of 이전으로 제한한다",
@@ -127,4 +127,3 @@ def tech_profile_for(
         return registry[worker_id]
     except KeyError as exc:
         raise KeyError(f"worker_tech_profile_missing:{worker_id}") from exc
-

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 
 RISK_DIR = Path(__file__).resolve().parents[1]
@@ -10,6 +11,7 @@ sys.path.insert(0, str(RISK_DIR))
 CONTRACTS_TEST_DIR = Path(__file__).resolve().parents[3] / "tests" / "contracts"
 sys.path.insert(0, str(CONTRACTS_TEST_DIR))
 
+import risk_mandate_workers as mandate_module
 from risk_mandate_workers import (
     PineconeEvidenceClient,
     RiskMandateAssessmentRequest,
@@ -318,6 +320,88 @@ def test_assessment_fans_in_all_five_compliance_routes_into_risk_head_state() ->
         assert state["worker_results"]["compliance-policy-worker"]["generated_answer"]
         assert state["audit"]["trace"]["compliance-policy-worker"]
         assert result["employee_runtime"]["workers"]
+
+
+def test_legal_wiki_result_is_reused_after_compliance_worker_retrieval() -> None:
+    calls: list[str] = []
+
+    def employee_llm(system: str, prompt: str) -> str:
+        del system, prompt
+        return '{"summary":"법률 근거를 확인했습니다.","confidence":0.8,"evidence_refs":[],"escalate":false}'
+
+    def legal_answer(query: str, as_of: str, mandate: str) -> dict[str, object]:
+        del as_of, mandate
+        calls.append(query)
+        return {
+            "answer": {
+                "verdict": "no_breach",
+                "rationale": "확인된 위반 근거가 없습니다.",
+                "confidence": 0.8,
+                "escalate": False,
+                "cited_documents": ["law-test-1"],
+            },
+            "pages_visited": ["law-test-1"],
+            "context_chars": 100,
+        }
+
+    result = assess_mandate(
+        _mandate(
+            query_mode="LEGAL_QUERY",
+            compliance_query="내부자 거래 관련 법률 기준",
+        ),
+        employee_llm=employee_llm,
+        legal_answer_fn=legal_answer,
+    )
+
+    assert calls == ["내부자 거래 관련 법률 기준"]
+    timing = result["employee_runtime"]["timing"]
+    assert timing["legal_lookup_count"] == 1
+    assert timing["legal_lookup_reused"] is True
+    assert result["employees"]["compliance-policy-worker"]["legal_status"] == "OK"
+
+
+def test_mandate_risk_and_compliance_paths_start_concurrently(monkeypatch) -> None:
+    barrier = threading.Barrier(2, timeout=2)
+    original_risk_runner = mandate_module.run_risk_runner
+
+    def timed_risk(request):
+        barrier.wait()
+        return original_risk_runner(request)
+
+    def timed_compliance(request, risk_report=None, **kwargs):
+        del request, risk_report, kwargs
+        barrier.wait()
+        return {
+            "workers": [
+                {
+                    "worker_id": "compliance-policy-worker",
+                    "status": "COMPLETED",
+                    "output": {
+                        "query_mode": "NOT_APPLICABLE",
+                        "summary": "",
+                        "escalate": False,
+                    },
+                    "trace": {},
+                    "tool_output": {},
+                }
+            ],
+            "degraded": False,
+            "generation_degraded": False,
+            "runtime": {},
+        }
+
+    monkeypatch.setattr(mandate_module, "run_risk_runner", timed_risk)
+    monkeypatch.setattr(
+        mandate_module,
+        "_run_compliance_employee_graph",
+        timed_compliance,
+    )
+
+    result = assess_mandate(_mandate(query_mode="NOT_APPLICABLE"))
+
+    assert result["pipeline_status"] in {"COMPLETED", "DEGRADED"}
+    timing = result["employee_runtime"]["timing"]
+    assert timing["fanout_wall_ms"] <= timing["estimated_serial_ms"] + 50
 
 
 def test_risk_head_emits_agent_task_result_conformant_to_the_canonical_schema() -> None:

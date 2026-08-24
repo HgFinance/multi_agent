@@ -95,13 +95,22 @@ def _validate_task_states(
     _reject("TRADING_TASK_STATE_NOT_EXECUTABLE")
 
 
-def _clarification_message(codes: tuple[str, ...]) -> str:
+def _clarification_message(
+    codes: tuple[str, ...], *, raw_instruction: str | None = None
+) -> str:
     labels = {
         "AMBIGUOUS_POSITION_PERCENT": "매도 비중의 기준(보유수량 기준)을 명시해 주세요",
         "AMBIGUOUS_RETURN_BASELINE": "상승·하락률의 기준(평균 매입가 등)을 명시해 주세요",
         "TIMEFRAME_NOT_IN_INSTRUCTION": "지표의 봉 주기를 명시해 주세요",
+        "TIMEFRAME_3M_UNSUPPORTED": "3분봉 데이터는 지원하지 않습니다. 5분봉으로 수행하려면 5분봉으로 다시 요청해 주세요",
+        "QUANTITY_REQUIRED": "매수 수량을 명시해 주세요(예: 1주)",
     }
     details = "; ".join(labels.get(code, code) for code in codes)
+    if raw_instruction and "3분봉" in " ".join(raw_instruction.split()):
+        details = (
+            "3분봉 데이터는 지원하지 않아 5분봉으로 수행합니다"
+            + ("; " + details if details else "")
+        )
     return (
         "조건주문을 활성화하지 않았습니다. "
         + (details or "조건을 한 가지 의미로 확정할 수 없습니다")
@@ -109,13 +118,35 @@ def _clarification_message(codes: tuple[str, ...]) -> str:
     )
 
 
-def _active_result(record: Any) -> dict[str, Any]:
+def _active_result(
+    record: Any, *, assumptions: tuple[str, ...] = ()
+) -> dict[str, Any]:
     spec = record.spec
     sizing = spec.action.sizing
     sizing_text = (
         "전량"
         if sizing.type.value == "ALL"
         else f"{sizing.value} ({sizing.type.value})"
+    )
+    timeframe_fallback = "TIMEFRAME_FALLBACK_3M_TO_5M" in assumptions
+    user_message = (
+        (
+            "요청한 3분봉 기능이 없어 5분봉 완성봉 기준으로 대체했습니다. "
+            "이 안내는 조건주문 요약에도 기록됩니다. "
+        )
+        if timeframe_fallback
+        else ""
+    ) + (
+        "조건주문이 PAPER 모드로 즉시 활성화되었습니다. "
+        f"종목 {spec.symbol}, {spec.action.side.value}, 수량 {sizing_text}, "
+        f"주문유형 {spec.action.order_type}"
+        + (
+            f" {spec.action.limit_price}원"
+            if spec.action.limit_price is not None
+            else ""
+        )
+        + ", 1회 실행 규칙입니다. 조건 충족 시 deterministic guard를 통과한 "
+        "경우에만 PAPER OMS로 제출됩니다."
     )
     return {
         "schema_version": RESULT_SCHEMA_VERSION,
@@ -144,20 +175,14 @@ def _active_result(record: Any) -> dict[str, Any]:
             ),
             "expires_at": spec.expires_at.isoformat(),
             "repeat_policy": "ONCE",
+            **(
+                {"timeframe_fallback": {"requested": "3M", "used": "5M", "reason": "3M_UNSUPPORTED"}}
+                if timeframe_fallback
+                else {}
+            ),
         },
-        "user_message": (
-            "조건주문이 PAPER 모드로 즉시 활성화되었습니다. "
-            f"종목 {spec.symbol}, {spec.action.side.value}, 수량 {sizing_text}, "
-            f"주문유형 {spec.action.order_type}"
-            + (
-                f" {spec.action.limit_price}원"
-                if spec.action.limit_price is not None
-                else ""
-            )
-            + ", "
-            "1회 실행 규칙입니다. 조건 충족 시 deterministic guard를 통과한 "
-            "경우에만 PAPER OMS로 제출됩니다."
-        ),
+        "assumptions": list(assumptions),
+        "user_message": user_message,
     }
 
 
@@ -208,7 +233,7 @@ def process_user_conditional_paper_rule(
             "mode": "PAPER",
             "rule_active": False,
             "reason_codes": [reason],
-            "user_message": _clarification_message((reason,)),
+            "user_message": _clarification_message((reason,), raw_instruction=admission.raw_instruction),
         }
 
     interpretation = candidate.model_dump(mode="json", exclude_none=True)
@@ -259,7 +284,7 @@ def process_user_conditional_paper_rule(
             "mode": "PAPER",
             "rule_active": False,
             "reason_codes": [code],
-            "user_message": _clarification_message((code,)),
+            "user_message": _clarification_message((code,), raw_instruction=admission.raw_instruction),
         }
 
     if not preview.activatable:
@@ -275,7 +300,9 @@ def process_user_conditional_paper_rule(
             "rule_active": False,
             "reason_codes": list(preview.clarification_codes),
             "assumptions": list(preview.assumptions),
-            "user_message": _clarification_message(preview.clarification_codes),
+            "user_message": _clarification_message(
+                preview.clarification_codes, raw_instruction=admission.raw_instruction
+            ),
         }
 
     try:
@@ -326,7 +353,7 @@ def process_user_conditional_paper_rule(
         canonical_payload=payload,
         payload_sha256=canonical_payload_sha256(payload),
     )
-    return _active_result(rule)
+    return _active_result(rule, assumptions=preview.assumptions)
 
 
 __all__ = [

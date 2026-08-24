@@ -138,6 +138,18 @@ def test_higher_intraday_bars_are_canonically_derived_from_final_one_minute_rows
     assert captured["params"] == ("instrument-1", "ls_chart", 30)
 
 
+def test_three_minute_bars_are_rejected_instead_of_derived(monkeypatch):
+    import pytest
+
+    monkeypatch.setattr(market_api, "_iid_or_404", lambda _symbol: "instrument-1")
+
+    with pytest.raises(market_api.HTTPException) as exc_info:
+        market_api.bars("005930", interval="3M", limit=62, source=None, to=None)
+
+    assert exc_info.value.status_code == 422
+    assert "use 5M" in str(exc_info.value.detail)
+
+
 def test_one_minute_bar_reads_remain_direct(monkeypatch):
     captured = {}
     monkeypatch.setattr(market_api, "_iid_or_404", lambda _symbol: "instrument-1")
