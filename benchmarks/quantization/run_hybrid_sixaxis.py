@@ -879,6 +879,7 @@ def _run_internal_case(
     glossary: tuple[str, list[Any]] | None,
     stage: str,
 ) -> dict[str, Any]:
+    internal_stage = "selective_unit_scale" if stage == "finqa_numeric_routing" else stage
     context = case["context"]
     question = case["question"]
     scoring_type = case.get("scoring_type")
@@ -900,7 +901,7 @@ def _run_internal_case(
             query=question,
             version=(
                 "bok-800-arithmetic-glossary-v2-selective"
-                if stage in {"selective_unit_scale", "finance_typed_routing"}
+                if internal_stage in {"selective_unit_scale", "finance_typed_routing"}
                 else "bok-800-arithmetic-glossary-v1"
             ),
         )
@@ -909,17 +910,17 @@ def _run_internal_case(
 
     if scoring_type == "numeric":
         outcome = _stage_numeric(
-            stage=stage, case=case, prompt=prompt, url=url, model=arithmetic_model, timeout=timeout
+            stage=internal_stage, case=case, prompt=prompt, url=url, model=arithmetic_model, timeout=timeout
         )
         route = "expr_ast"
     elif scoring_type == "json_exact":
-        if stage == "structured_envelope":
+        if internal_stage == "structured_envelope":
             outcome = _run_structured_envelope(case=case, prompt=prompt, url=url, model=base_model, timeout=timeout)
             route = "guided_json_envelope"
-        elif stage == "structured_consensus":
+        elif internal_stage == "structured_consensus":
             outcome = _run_structured_consensus(case=case, prompt=prompt, url=url, model=base_model, timeout=timeout)
             route = "guided_json_consensus"
-        elif stage in {"structured_reasoned_consensus", "structured_grounded_consensus"}:
+        elif internal_stage in {"structured_reasoned_consensus", "structured_grounded_consensus"}:
             outcome = _run_structured_consensus(
                 case=case,
                 prompt=prompt,
@@ -929,7 +930,7 @@ def _run_internal_case(
                 reasoned=True,
             )
             route = "guided_json_reasoned_consensus"
-        elif stage == "structured_adapter_consensus":
+        elif internal_stage == "structured_adapter_consensus":
             outcome = _run_structured_consensus(
                 case=case,
                 prompt=prompt,
@@ -939,7 +940,7 @@ def _run_internal_case(
                 reasoned=True,
             )
             route = "guided_json_arithmetic_adapter_consensus"
-        elif stage == "structured_fewshot_consensus":
+        elif internal_stage == "structured_fewshot_consensus":
             outcome = _run_structured_consensus(
                 case=case,
                 prompt=prompt,
@@ -1046,6 +1047,75 @@ def _run_external_selective(
         )
     outcome = _run_text(case=case, prompt=text_prompt, url=url, model=base_model, timeout=timeout)
     outcome.update({"route": "financebench_text", "router": routed})
+    return outcome
+
+
+def _run_finqa_numeric_routing(
+    *,
+    case: dict[str, Any],
+    prompt: str,
+    url: str,
+    base_model: str,
+    arithmetic_model: str,
+    timeout: float,
+) -> dict[str, Any]:
+    """Use the arithmetic adapter only for explicit FinQA calculations."""
+
+    route_schema = {
+        "type": "object",
+        "properties": {"task_type": {"type": "string", "enum": ["CALCULATION", "TEXT"]}},
+        "required": ["task_type"],
+        "additionalProperties": False,
+    }
+    route_prompt = (
+        f"{prompt}\n\nClassify this FinQA question before answering. Return CALCULATION only "
+        "when the question explicitly asks to compute one numeric amount, ratio, "
+        "percentage, rate, difference, or formula result from the supplied table "
+        "and context. Return TEXT for table selection, evidence, comparison, "
+        "explanation, or any question that does not ask for one numeric result. "
+        "When uncertain, return TEXT. Return only the JSON route object."
+    )
+    try:
+        routed = call_model(
+            url=url,
+            model=base_model,
+            messages=_text_messages(case, route_prompt),
+            response_format=vllm_response_format(route_schema, name="finqa_numeric_route"),
+            timeout=timeout,
+        )
+        validation = validate_json(routed["content"], route_schema)
+        if not validation.valid:
+            raise RuntimeError(validation.error or "invalid FinQA numeric route")
+    except RuntimeError as exc:
+        return {
+            "prediction": "",
+            "raw_prediction": "",
+            "final_source": "finqa_numeric_route_error",
+            "route": "finqa_numeric_route_error",
+            "router": None,
+            "attempts": [],
+            "error": str(exc),
+        }
+
+    if validation.value["task_type"] == "CALCULATION":
+        outcome = _stage_numeric(
+            stage="structured_fewshot_consensus",
+            case=case,
+            prompt=prompt,
+            url=url,
+            model=arithmetic_model,
+            timeout=timeout,
+        )
+        outcome.update({"route": "finqa_numeric_adapter", "router": routed})
+        return outcome
+
+    outcome = _run_official_external_text(
+        case=case,
+        url=url,
+        model=base_model,
+        timeout=timeout,
+    )
+    outcome.update({"route": "finqa_text_passthrough", "router": routed})
     return outcome
 
 
@@ -1503,6 +1573,16 @@ def _run_external_case(
                     "matched_terms": outcome.get("scoped_matched_terms", []),
                     "hit": outcome.get("scoped_glossary_hit", False),
                 }
+        elif stage == "finqa_numeric_routing":
+            outcome = _run_external_selective(
+                case=case,
+                prompt=prompt,
+                url=url,
+                base_model=base_model,
+                arithmetic_model=arithmetic_model,
+                timeout=timeout,
+                stage="structured_fewshot_consensus",
+            )
         elif stage == "finance_typed_routing":
             outcome = _run_external_typed_finance(
                 case=case,
@@ -1523,6 +1603,16 @@ def _run_external_case(
                 stage=stage,
             )
         route = outcome.get("route") or "financebench_error"
+    elif case.get("source") == "FinQA" and stage == "finqa_numeric_routing":
+        outcome = _run_finqa_numeric_routing(
+            case=case,
+            prompt=prompt,
+            url=url,
+            base_model=base_model,
+            arithmetic_model=arithmetic_model,
+            timeout=timeout,
+        )
+        route = outcome.get("route") or "finqa_numeric_error"
     else:
         # FinQA/TAT-QA are the external automatic gate. Preserve the frozen
         # runner's exact system/user prompt contract; FinanceBench-only
@@ -1631,7 +1721,7 @@ def main() -> int:
     parser.add_argument("--arithmetic-model", required=True)
     parser.add_argument(
         "--stage",
-        choices=("expr_ast", "unit_normalization", "domain_formula", "fifo_fewshot", "finance_typed_routing", "finance_direct_answer", "finance_scoped_split", "finance_scoped_split_strict", "finance_scoped_split_strict_direct", "finance_scoped_context_rag", "finance_scoped_evidence_plan", "structured_envelope", "structured_consensus", "structured_reasoned_consensus", "structured_grounded_consensus", "structured_adapter_consensus", "structured_fewshot_consensus", "selective_unit_scale"),
+        choices=("expr_ast", "unit_normalization", "domain_formula", "fifo_fewshot", "finance_typed_routing", "finqa_numeric_routing", "finance_direct_answer", "finance_scoped_split", "finance_scoped_split_strict", "finance_scoped_split_strict_direct", "finance_scoped_context_rag", "finance_scoped_evidence_plan", "structured_envelope", "structured_consensus", "structured_reasoned_consensus", "structured_grounded_consensus", "structured_adapter_consensus", "structured_fewshot_consensus", "selective_unit_scale"),
         default="expr_ast",
     )
     parser.add_argument("--url", default=ENDPOINT)
@@ -1699,7 +1789,7 @@ def main() -> int:
         },
         "external_routing": {
             "FinanceBench": "query-scoped glossary plus LLM calculation/text routing",
-            "FinQA": "AWQ text passthrough",
+            "FinQA": "numeric-only routing" if args.stage == "finqa_numeric_routing" else "AWQ text passthrough",
             "TAT-QA": "AWQ text passthrough",
         },
     }

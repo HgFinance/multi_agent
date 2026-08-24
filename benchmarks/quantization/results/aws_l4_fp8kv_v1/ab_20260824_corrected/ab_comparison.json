@@ -1,0 +1,46 @@
+{
+  "schema_version": "aws-hybrid-routing-ab-corrected.v1",
+  "runner": "benchmarks/quantization/run_hybrid_sixaxis.py",
+  "baseline_stage": "structured_fewshot_consensus",
+  "baseline_source": "/tmp/hgfinance_final7axis_run.sh",
+  "runtime_profile": "L4-fp8KV-v1",
+  "endpoint": "http://127.0.0.1:8000/v1/chat/completions",
+  "datasets": {
+    "internal50_v2_sha256": "ad2bdaf5ea381c2fc151fce1f1859f7f925b86fd03b830319cd97af17709e978",
+    "external50_v1_sha256": "197f0828fee37a8a0ca7551304efa722b005a3d26379a2cc613ece36b315956f"
+  },
+  "baseline": {
+    "internal_quality": 0.92,
+    "critical_failures": 0,
+    "structured_output": 0.8,
+    "finqa": 0.7,
+    "tatqa": 0.9333,
+    "financebench_diagnostic": 0.585,
+    "auto_mean": 0.7992
+  },
+  "candidates": {
+    "A_finance_scoped_context": {
+      "stage": "finance_scoped_context_rag",
+      "internal_route_unchanged": true,
+      "finqa": 0.7,
+      "tatqa": 0.9333,
+      "financebench_diagnostic": 0.492,
+      "auto_mean": 0.7992,
+      "status": "REJECT",
+      "reason": "FinanceBench diagnostic regressed from 0.585 to 0.492"
+    },
+    "B_finqa_numeric": {
+      "stage": "finqa_numeric_routing",
+      "internal_route_unchanged": true,
+      "finqa": 0.65,
+      "tatqa": 0.9333,
+      "financebench_diagnostic": 0.621,
+      "auto_mean": 0.7706,
+      "status": "REJECT",
+      "reason": "FinQA and Auto Mean regressed despite FinanceBench diagnostic improvement"
+    }
+  },
+  "decision": "No candidate promoted; retain structured_fewshot_consensus as the Hybrid+Unit/Scale baseline.",
+  "financebench_official_accuracy": "MANUAL_REQUIRED",
+  "earlier_selective_unit_scale_results": "INVALID_FOR_THIS_COMPARISON"
+}

@@ -1,0 +1,72 @@
+{
+  "schema_version": "aws-hybrid-routing-ab.v1",
+  "status": "SUPERSEDED_INVALID_STAGE",
+  "superseded_by": "../ab_20260824_corrected/ab_comparison.json",
+  "runtime_profile": "L4-fp8KV-v1",
+  "endpoint": "http://127.0.0.1:8000/v1/chat/completions",
+  "datasets": {
+    "internal50_v2_sha256": "ad2bdaf5ea381c2fc151fce1f1859f7f925b86fd03b830319cd97af17709e978",
+    "external50_v1_sha256": "197f0828fee37a8a0ca7551304efa722b005a3d26379a2cc613ece36b315956f"
+  },
+  "historical_final_baseline": {
+    "internal_quality": 0.92,
+    "critical_failures": 0,
+    "structured_output": 0.80,
+    "finqa": 0.70,
+    "tatqa": 0.9333,
+    "financebench_diagnostic": 0.622,
+    "auto_mean": 0.7992
+  },
+  "paired_baseline": {
+    "stage": "selective_unit_scale",
+    "internal_quality": 0.88,
+    "critical_failures": 1,
+    "request_errors": 0,
+    "structured_output": 0.40,
+    "finqa": 0.70,
+    "tatqa": 0.9333,
+    "financebench_diagnostic": 0.508,
+    "auto_mean": 0.7992,
+    "status": "REFERENCE"
+  },
+  "candidates": {
+    "A_finance_scoped_context": {
+      "stage": "finance_scoped_context_rag",
+      "internal_quality": 0.86,
+      "critical_failures": 1,
+      "request_errors": 0,
+      "structured_output": 0.40,
+      "finqa": 0.65,
+      "tatqa": 0.9333,
+      "financebench_diagnostic": 0.492,
+      "auto_mean": 0.7706,
+      "status": "REJECT"
+    },
+    "B_finance_typed": {
+      "stage": "finance_typed_routing",
+      "internal_quality": 0.86,
+      "critical_failures": 1,
+      "request_errors": 0,
+      "structured_output": 0.40,
+      "finqa": 0.70,
+      "tatqa": 0.9333,
+      "financebench_diagnostic": 0.449,
+      "auto_mean": 0.7992,
+      "status": "REJECT"
+    },
+    "C_finqa_numeric": {
+      "stage": "finqa_numeric_routing",
+      "internal_quality": 0.88,
+      "critical_failures": 1,
+      "request_errors": 0,
+      "structured_output": 0.40,
+      "finqa": 0.75,
+      "tatqa": 0.9333,
+      "financebench_diagnostic": 0.506,
+      "auto_mean": 0.8277,
+      "status": "HOLD_NEEDS_REPLICATE"
+    }
+  },
+  "decision": "No candidate promoted. C is promising for FinQA and Auto Mean but requires replicate evidence because FinanceBench diagnostic was 0.506 versus paired baseline 0.508.",
+  "deterministic_answer_fallback": false
+}
