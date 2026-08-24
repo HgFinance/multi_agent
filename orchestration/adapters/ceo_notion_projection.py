@@ -12,6 +12,10 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from departments.notion_markdown import markdown_to_notion_blocks
+from orchestration.adapters.notion_idempotency import (
+    NotionIdempotency,
+    NotionIdempotencyError,
+)
 from orchestration.adapters.notion_schema_cache import BoundedNotionSchemaCache
 from orchestration.adapters.terminal_projection_utils import (
     action,
@@ -288,6 +292,10 @@ class CeoNotionProjection:
         self.transport = transport
         self.kanban_client = kanban_client
         self._schema_cache = BoundedNotionSchemaCache()
+        self._idempotency = NotionIdempotency(
+            self.env,
+            namespace="ceo-projection",
+        )
 
     def _comment_marker(self, projection_key: str) -> str:
         return f"{PROJECTION_MARKER} projection_key={projection_key} status=created"
@@ -488,31 +496,6 @@ class CeoNotionProjection:
                     "failed", key, retryable=retryable, error=str(exc)
                 ).as_dict()
             projection_schema = True
-        existing: Sequence[Mapping[str, Any]] = ()
-        if projection_schema:
-            try:
-                existing = transport.query_projection(database_id, key)
-            except NotionProjectionError as exc:
-                if exc.status == 400:
-                    self._schema_cache.invalidate(database_id)
-                retryable = exc.status is None or exc.status >= 500 or exc.status == 429
-                logger.warning("ceo_notion_projection_query_failed", extra={"error": str(exc)})
-                return CeoSynthesisProjectionResult(
-                    "failed", key, retryable=retryable, error=str(exc)
-                ).as_dict()
-        # The schema was inspected above; only projection-key schemas query it.
-        # Projection-key lookup is used only when the database exposes that property.
-        if existing:
-            page_id = str(existing[0].get("id") or "") if isinstance(existing[0], Mapping) else None
-            return CeoSynthesisProjectionResult("duplicate", key, page_id, duplicate=True).as_dict()
-        refreshed_task = task
-        if self.kanban_client is not None and self._has_comment_marker(task, key) is False:
-            try:
-                refreshed_task = self.kanban_client.show(task_id(task))
-            except Exception:  # noqa: BLE001 - fallback is best effort
-                refreshed_task = task
-        if self._has_comment_marker(refreshed_task, key):
-            return CeoSynthesisProjectionResult("duplicate", key, duplicate=True).as_dict()
         if current_report_schema and self.kanban_client is None:
             return CeoSynthesisProjectionResult(
                 "failed",
@@ -548,7 +531,43 @@ class CeoNotionProjection:
             }
         children = markdown_to_notion_blocks(report)
         try:
-            page = transport.create_page(database_id, properties, children)
+            def lookup() -> Sequence[Mapping[str, Any]] | Mapping[str, Any]:
+                existing: Sequence[Mapping[str, Any]] = ()
+                if projection_schema:
+                    existing = transport.query_projection(database_id, key)
+                    if existing:
+                        return existing
+                refreshed_task = task
+                if self.kanban_client is not None and not self._has_comment_marker(task, key):
+                    try:
+                        refreshed_task = self.kanban_client.show(task_id(task))
+                    except Exception:  # noqa: BLE001 - fallback is best effort
+                        refreshed_task = task
+                if self._has_comment_marker(refreshed_task, key):
+                    return {"__notion_existing__": True}
+                return existing
+
+            def create() -> Mapping[str, Any]:
+                return transport.create_page(database_id, properties, children)
+
+            result = self._idempotency.execute(
+                database_id,
+                key,
+                lookup=lookup,
+                create=create,
+            )
+            if result.duplicate:
+                return CeoSynthesisProjectionResult(
+                    "duplicate",
+                    key,
+                    result.page_id,
+                    duplicate=True,
+                ).as_dict()
+        except NotionIdempotencyError as exc:
+            logger.warning("ceo_notion_projection_claim_failed", extra={"error": str(exc)})
+            return CeoSynthesisProjectionResult(
+                "failed", key, retryable=True, error=str(exc)
+            ).as_dict()
         except NotionProjectionError as exc:
             if exc.status == 400:
                 self._schema_cache.invalidate(database_id)
@@ -558,7 +577,7 @@ class CeoNotionProjection:
                 "failed", key, retryable=retryable, error=str(exc)
             ).as_dict()
         try:
-            page_id = str(page.get("id") or "")
+            page_id = result.page_id
             if self.kanban_client is not None:
                 try:
                     self.kanban_client.comment_task(task_id(task), self._comment_marker(key))
