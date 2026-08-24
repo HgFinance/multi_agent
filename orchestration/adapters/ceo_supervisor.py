@@ -89,6 +89,9 @@ from orchestration.qa_contract import (
     canonical_qa_contract,
     split_planner_selection,
 )
+from orchestration.compound_paper_orders import (
+    parse_analysis_then_conditional_paper_order,
+)
 from orchestration.risk_advisory_context import fetch_risk_advisory_context
 from orchestration.accounting_advisory_context import fetch_accounting_advisory_context
 
@@ -679,6 +682,7 @@ class SupervisorDecision:
     parent_task_ids: tuple[str, ...] = ()
     reason: str = ""
     retry_count: int = 0
+    initial_status: str | None = None
 
 
 def _blocked_decision(
@@ -980,6 +984,130 @@ def _initial_primary_materialization_decisions(
         )
 
     return tuple(decisions)
+
+
+def _deferred_conditional_decision(
+    state: SupervisorState,
+    root_body: str,
+) -> SupervisorDecision | None:
+    """Release an existing conditional-rule lane after Research completes.
+
+    The BFF stores the authenticated order authority on the analysis root, but
+    deliberately does not create a Trading card up front.  This gate is the
+    only producer for the deferred Trading card and is idempotent on both the
+    durable order binding and the stable root/profile key.
+    """
+
+    if read_marker(root_body, "deferred_conditional") != "true":
+        return None
+    if read_marker(root_body, "deferred_conditional_policy") != (
+        "AFTER_RESEARCH_PRIMARY_COMPLETED"
+    ):
+        return None
+    order_request_id = read_marker(root_body, "deferred_conditional_order_request_id")
+    required_profile = read_marker(root_body, "deferred_conditional_required_profile")
+    if not order_request_id or required_profile != "research-department":
+        logger.warning(
+            "deferred-conditional-invalid-root root=%s",
+            state.parent_task_id,
+        )
+        return None
+
+    trading_profile = canonical_profile_for_department("trading")
+    if any(
+        child.profile == trading_profile
+        and child.is_in_workflow(state.parent_task_id)
+        and "hgfinance.user-conditional-paper-rule.v1" in child.body
+        for child in state.children
+    ):
+        return None
+
+    research = tuple(
+        child
+        for child in state.children
+        if child.profile == required_profile
+        and child.is_in_workflow(state.parent_task_id)
+        and child.workflow_role == "primary"
+    )
+    if len(research) != 1:
+        return None
+    research_child = research[0]
+    if not research_child.done or research_child.blocked or research_child.failed:
+        return None
+    if research_child.error or research_child.block_reason:
+        return None
+    if not grade_answer(
+        research_child.result or research_child.final_answer,
+        summary=research_child.summary,
+    ).usable:
+        logger.info(
+            "deferred-conditional-research-not-usable root=%s task=%s",
+            state.parent_task_id,
+            research_child.task_id,
+        )
+        return None
+
+    try:
+        from apps.api.ceo import _conditional_rule_child_body  # noqa: PLC0415
+        from apps.api.user_order_workflow import user_order_repository  # noqa: PLC0415
+
+        record = user_order_repository().get(order_request_id)
+        if record is None or record.ceo_root_task_id not in {None, state.parent_task_id}:
+            logger.warning(
+                "deferred-conditional-authority-mismatch root=%s order_request=%s",
+                state.parent_task_id,
+                order_request_id,
+            )
+            return None
+        plan = parse_analysis_then_conditional_paper_order(record.raw_instruction)
+        if plan is None:
+            logger.warning(
+                "deferred-conditional-parse-failed root=%s order_request=%s",
+                state.parent_task_id,
+                order_request_id,
+            )
+            return None
+        from orchestration.ceo_workflow_scope import UserPaperOrderScope  # noqa: PLC0415
+
+        scope = UserPaperOrderScope(
+            order_request_id=record.order_request_id,
+            raw_instruction_sha256=record.raw_instruction_sha256,
+            fund_id=record.fund_id,
+            book_id=record.book_id,
+        )
+        body = _conditional_rule_child_body(
+            query=plan.conditional_instruction,
+            scope=scope,
+            root_task_id=state.parent_task_id,
+            request_id=record.client_request_id,
+            has_mandate=state.has_mandate,
+        )
+    except Exception as exc:  # noqa: BLE001 - no order without authority.
+        logger.warning(
+            "deferred-conditional-authority-read-failed root=%s error=%s",
+            state.parent_task_id,
+            type(exc).__name__,
+        )
+        return None
+
+    body = "\n".join(
+        (
+            body,
+            "hgfinance.deferred-conditional-paper.v1",
+            f"deferred_conditional_order_request_id={order_request_id}",
+            "deferred_conditional_prerequisite=research-department",
+        )
+    )
+    return SupervisorDecision(
+        SupervisorAction.CREATE_TASK,
+        state.parent_task_id,
+        assignee=trading_profile,
+        title="Research 완료 후 PAPER 조건주문 해석 및 검증",
+        body=body,
+        parent_task_ids=(),
+        reason="deferred_conditional_after_research",
+        initial_status="blocked",
+    )
 
 
 
@@ -5892,7 +6020,11 @@ class CeoSupervisorService:
                         )
 
                 decision_started_ms = time.time_ns() // 1_000_000
-                decision = self.decider(state)
+                deferred_decision = _deferred_conditional_decision(
+                    state,
+                    root_body,
+                )
+                decision = deferred_decision or self.decider(state)
                 decision_completed_mono_ns = time.perf_counter_ns()
                 decision_completed_ms = time.time_ns() // 1_000_000
                 if (
@@ -6353,7 +6485,42 @@ class CeoSupervisorService:
                 assignee=decision.assignee,
                 parent_task_ids=decision.parent_task_ids,
                 idempotency_key=idempotency_key,
+                initial_status=decision.initial_status,
             )
+            if decision.reason == "deferred_conditional_after_research":
+                order_request_id = read_marker(
+                    task_body,
+                    "deferred_conditional_order_request_id",
+                )
+                created_task = created.get("task", created) if isinstance(created, Mapping) else {}
+                trading_task_id = str(
+                    created_task.get("id") or created_task.get("task_id") or ""
+                ) if isinstance(created_task, Mapping) else ""
+                if not order_request_id or not trading_task_id:
+                    logger.error(
+                        "deferred-conditional-binding-missing root=%s task=%s",
+                        state.parent_task_id,
+                        trading_task_id or "unknown",
+                    )
+                    return
+                try:
+                    from apps.api.user_order_workflow import user_order_repository  # noqa: PLC0415
+
+                    user_order_repository().bind_trading_task(
+                        order_request_id,
+                        trading_task_id,
+                    )
+                    # The card was created blocked so the authority binding is
+                    # durable before Hermes can interpret or activate a rule.
+                    self.client.unblock_task(trading_task_id)
+                except Exception as exc:  # noqa: BLE001 - leave it safely blocked.
+                    logger.error(
+                        "deferred-conditional-binding-failed root=%s task=%s error=%s",
+                        state.parent_task_id,
+                        trading_task_id,
+                        type(exc).__name__,
+                    )
+                    return
             if synthesis_timing is not None and role == "synthesis":
                 synthesis_timing["t7c_ms"] = time.time_ns() // 1_000_000
                 synthesis_timing["t7c_mono_ns"] = time.perf_counter_ns()

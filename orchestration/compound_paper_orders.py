@@ -1,4 +1,4 @@
-"""Small, deterministic grammar for one safe compound PAPER request.
+"""Small, deterministic grammars for safe compound PAPER requests.
 
 This module only recognizes the explicitly supported shape:
 
@@ -45,6 +45,16 @@ _TRIGGER = re.compile(
     r"(?:주|주식|개)\s*매도(?:해\s*(?:줘|주세요|줘요)|해줘|해주세요|해)?\s*$",
     re.IGNORECASE,
 )
+_ANALYSIS_THEN_CONDITIONAL = re.compile(
+    r"^(?:research|리서치)\s*분석\s*후\s*(?P<conditional>.+?)\s*$",
+    re.IGNORECASE,
+)
+_PRICE_TRIGGER = re.compile(
+    r"(?P<instrument>.+?)\s+"
+    r"(?P<price>[1-9]\d{0,2}(?:,\d{3})*|[1-9]\d*)\s*원?\s*"
+    r"(?:초과|넘으면|이상이면|이상(?:일\s*때)?)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -59,6 +69,19 @@ class CompoundPaperOrderPlan:
     trigger_price: Decimal
     trigger_operator: str
     immediate_candidate: HermesOrderCandidate
+
+
+@dataclass(frozen=True)
+class AnalysisThenConditionalPaperOrderPlan:
+    """A research prerequisite followed by the existing Trading rule lane.
+
+    This is intentionally a routing plan only.  It does not create a rule or
+    an order.  The supervisor creates the existing Trading interpretation card
+    only after the requested Research primary reaches a usable terminal state.
+    """
+
+    analysis_instruction: str
+    conditional_instruction: str
 
 
 def _integer(value: str) -> int:
@@ -121,6 +144,37 @@ def parse_compound_paper_order(raw_text: str) -> CompoundPaperOrderPlan | None:
     )
 
 
+def parse_analysis_then_conditional_paper_order(
+    raw_text: str,
+) -> AnalysisThenConditionalPaperOrderPlan | None:
+    """Recognize ``Research analysis first, then conditional PAPER order``.
+
+    The analysis clause is kept separate from the conditional instruction so
+    the CEO planner cannot accidentally route the whole request to the direct
+    Trading fast lane.  Recognition is deliberately narrow and fail-closed;
+    unsupported language remains on the ordinary conditional path.
+    """
+
+    normalized = _clean_query(raw_text)
+    match = _ANALYSIS_THEN_CONDITIONAL.fullmatch(normalized)
+    if match is None:
+        return None
+    conditional = match.group("conditional").strip(" .")
+    trigger = _PRICE_TRIGGER.search(conditional)
+    if trigger is None or "매도" not in conditional:
+        return None
+    instrument = trigger.group("instrument").strip(" ,")
+    if not instrument:
+        return None
+    return AnalysisThenConditionalPaperOrderPlan(
+        analysis_instruction=(
+            f"{instrument}에 대한 Research 관점의 투자 분석을 수행하고 "
+            "분석 근거와 불확실성을 정리해 주세요."
+        ),
+        conditional_instruction=conditional,
+    )
+
+
 def build_compound_conditional_candidate(
     plan: CompoundPaperOrderPlan,
     *,
@@ -155,7 +209,9 @@ def build_compound_conditional_candidate(
 
 
 __all__ = [
+    "AnalysisThenConditionalPaperOrderPlan",
     "CompoundPaperOrderPlan",
     "build_compound_conditional_candidate",
+    "parse_analysis_then_conditional_paper_order",
     "parse_compound_paper_order",
 ]

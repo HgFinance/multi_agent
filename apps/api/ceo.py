@@ -130,6 +130,7 @@ from orchestration.ceo_workflow_scope import (
     build_user_paper_order_scope,
     infer_workflow_mode,
     primary_idempotency_key,
+    read_marker,
     requested_by_from_body,
     selected_primary_profiles_from_task,
 )
@@ -139,7 +140,9 @@ from orchestration.user_order_language import (
     looks_like_user_order_request,
 )
 from orchestration.compound_paper_orders import (
+    AnalysisThenConditionalPaperOrderPlan,
     build_compound_conditional_candidate,
+    parse_analysis_then_conditional_paper_order,
     parse_compound_paper_order,
 )
 from orchestration.qa_contract import (
@@ -928,6 +931,176 @@ def _mark_paper_order_failed(
         )
 
 
+def _route_analysis_then_conditional_paper_order(
+    req: CeoAsk,
+    *,
+    plan: AnalysisThenConditionalPaperOrderPlan,
+    owner_id: str | None,
+    mandate: Mapping[str, object] | None,
+    discord_channel_id: str | None,
+    discord_message_id: str | None,
+    discord_guild_id: str | None,
+    discord_thread_id: str | None,
+) -> dict[str, object]:
+    """Run Research first, then hand the existing condition lane to Trading.
+
+    This route is deliberately a composition of the existing user-order
+    authority and CEO/Supervisor workflow.  It does not create a second order
+    ledger or a conditional rule early: the supervisor binds the existing
+    order request to a Trading card only after the Research primary completes.
+    """
+
+    if not isinstance(owner_id, str) or not owner_id.strip():
+        raise HTTPException(status_code=401, detail="portfolio_authentication_required")
+    if not req.fund_id:
+        raise HTTPException(status_code=422, detail="portfolio_fund_id_required")
+    if not req.book_id:
+        raise HTTPException(status_code=422, detail="portfolio_book_id_required")
+    if not _user_paper_order_workflow_enabled():
+        raise HTTPException(status_code=503, detail="paper_order_hermes_runtime_unavailable")
+
+    access = require_trading_book_access(owner_id, req.fund_id, req.book_id)
+    repository = user_order_repository()
+    try:
+        record = repository.admit(
+            user_id=access["user_id"],
+            fund_id=access["fund_id"],
+            book_id=access["book_id"],
+            client_request_id=req.request_id,
+            raw_instruction=req.query,
+        )
+    except UserOrderRequestConflict as exc:
+        raise HTTPException(status_code=409, detail="paper_order_request_id_conflict") from exc
+    except UserOrderWorkflowUnavailable as exc:
+        raise HTTPException(status_code=503, detail="paper_order_workflow_unavailable") from exc
+
+    if record.ceo_root_task_id:
+        existing_root = hermes_boundary.show_kanban_task(record.ceo_root_task_id)
+        if existing_root is None:
+            raise HTTPException(status_code=503, detail="paper_order_kanban_unavailable")
+        existing_body = str(existing_root.get("body") or "")
+        if (
+            read_marker(existing_body, "deferred_conditional") == "true"
+            and read_marker(existing_body, "deferred_conditional_order_request_id")
+            == record.order_request_id
+        ):
+            return _analysis_then_conditional_accepted_response(
+                existing_root,
+                _wait_for_planning(record.ceo_root_task_id),
+                record=record,
+                plan=plan,
+            )
+        # The request id is already bound to a different workflow shape. Never
+        # relabel that historical root or create a second order workflow.
+        raise HTTPException(status_code=409, detail="paper_order_request_already_bound")
+
+    scope = UserPaperOrderScope(
+        order_request_id=record.order_request_id,
+        raw_instruction_sha256=record.raw_instruction_sha256,
+        fund_id=record.fund_id,
+        book_id=record.book_id,
+    )
+    root_body = build_root_body(
+        plan.analysis_instruction,
+        req.request_id,
+        workflow_mode="analysis",
+        mandate=mandate,
+        requested_by=access["user_id"],
+        user_paper_order_scope=scope,
+        user_paper_order_include_primary_selection=False,
+        deferred_conditional_analysis=True,
+        discord_channel_id=discord_channel_id,
+        discord_message_id=discord_message_id,
+        discord_guild_id=discord_guild_id,
+        discord_thread_id=discord_thread_id,
+        advisory_fund_id=access["fund_id"],
+        advisory_book_id=access["book_id"],
+    )
+    root_body = "\n".join(
+        (
+            root_body,
+            "hgfinance.analysis-then-conditional-paper.v1",
+            "deferred_conditional=true",
+            f"deferred_conditional_order_request_id={record.order_request_id}",
+            "deferred_conditional_required_profile=research-department",
+            "deferred_conditional_policy=AFTER_RESEARCH_PRIMARY_COMPLETED",
+            f"deferred_conditional_instruction_sha256={sha256(plan.conditional_instruction.encode('utf-8')).hexdigest()}",
+        )
+    )
+    try:
+        root = hermes_boundary.create_kanban_task(
+            assignee=canonical_profile_for_department("ceo"),
+            title=f"사용자 질의: {plan.analysis_instruction[:120]}",
+            body=root_body,
+            idempotency_key=req.request_id,
+        )
+        if not root or not root.get("task_id"):
+            raise HTTPException(status_code=503, detail="paper_order_kanban_unavailable")
+        root_task_id = str(root["task_id"])
+        if not hermes_boundary.comment_root_scope(
+            task_id=root_task_id, request_id=req.request_id
+        ):
+            raise HTTPException(status_code=503, detail="paper_order_kanban_unavailable")
+        record = repository.bind_root(record.order_request_id, root_task_id)
+    except HTTPException:
+        _mark_paper_order_failed(
+            repository,
+            record.order_request_id,
+            error_code="ANALYSIS_ROOT_CREATE_FAILED",
+            error_message="analysis prerequisite root could not be created",
+        )
+        raise
+    except (UserOrderRequestConflict, UserOrderWorkflowUnavailable) as exc:
+        _mark_paper_order_failed(
+            repository,
+            record.order_request_id,
+            error_code="ANALYSIS_ROOT_BIND_FAILED",
+            error_message=str(exc),
+        )
+        raise HTTPException(status_code=503, detail="paper_order_workflow_unavailable") from exc
+    except Exception as exc:  # noqa: BLE001 - preserve the API boundary contract.
+        _mark_paper_order_failed(
+            repository,
+            record.order_request_id,
+            error_code="ANALYSIS_ROOT_CREATE_FAILED",
+            error_message=type(exc).__name__,
+        )
+        raise HTTPException(status_code=503, detail="paper_order_kanban_unavailable") from exc
+
+    return _analysis_then_conditional_accepted_response(
+        root,
+        _wait_for_planning(root_task_id),
+        record=record,
+        plan=plan,
+    )
+
+
+def _analysis_then_conditional_accepted_response(
+    root: Mapping[str, object],
+    planning: Mapping[str, object],
+    *,
+    record: UserOrderRequestRecord,
+    plan: AnalysisThenConditionalPaperOrderPlan,
+) -> dict[str, object]:
+    response = _accepted_response(root, planning)
+    response.update(
+        {
+            "answer": (
+                "Research 분석을 먼저 진행합니다. Research가 정상 완료된 뒤에만 "
+                "기존 Trading 조건주문 경로가 다음 조건을 해석·검증합니다: "
+                f"{plan.conditional_instruction}. 분석 전에 조건주문을 활성화하지 않습니다."
+            ),
+            "order_request_id": record.order_request_id,
+            "order_state": record.state,
+            "order_mode": "PAPER",
+            "conditional_rule": True,
+            "analysis_then_conditional": True,
+            "conditional_rule_activation": "AFTER_RESEARCH_PRIMARY_COMPLETED",
+        }
+    )
+    return response
+
+
 def _route_compound_user_paper_order(
     req: CeoAsk,
     *,
@@ -1534,6 +1707,21 @@ def ceo_query(
     # `fund_id`가 없다. 속성 부재로 500을 내는 대신 "Mandate 없음"으로 떨어진다.
     fund_id = getattr(req, "fund_id", None)
     mandate = fetch_current_mandate_by_fund(fund_id) if fund_id else None
+
+    analysis_then_conditional_plan = parse_analysis_then_conditional_paper_order(
+        req.query
+    )
+    if analysis_then_conditional_plan is not None:
+        return _route_analysis_then_conditional_paper_order(
+            req,
+            plan=analysis_then_conditional_plan,
+            owner_id=owner_id if isinstance(owner_id, str) else None,
+            mandate=mandate,
+            discord_channel_id=discord_channel_id,
+            discord_message_id=discord_message_id,
+            discord_guild_id=discord_guild_id,
+            discord_thread_id=discord_thread_id,
+        )
 
     if parse_compound_paper_order(req.query) is not None:
         return _route_compound_user_paper_order(

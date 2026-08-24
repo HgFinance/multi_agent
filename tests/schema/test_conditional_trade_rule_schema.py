@@ -8,6 +8,12 @@ MIGRATION = (
     / "migrations"
     / "20260820000300_conditional_paper_rules.sql"
 )
+TRADING_EVALUATION_READ_MIGRATION = (
+    ROOT
+    / "supabase"
+    / "migrations"
+    / "20260824000700_conditional_trading_evaluation_read.sql"
+)
 
 
 def compact() -> str:
@@ -51,6 +57,20 @@ def test_rule_versions_and_evaluations_are_append_only_for_callers() -> None:
     assert "execution.conditional_trade_rule_versions" in sql
     assert "grant update ( state,current_version" in sql
     assert "grant update (state,guard_code)" in sql
+
+
+def test_trading_admission_has_read_only_paper_evaluation_access() -> None:
+    sql = " ".join(
+        TRADING_EVALUATION_READ_MIGRATION.read_text(encoding="utf-8")
+        .lower()
+        .split()
+    )
+
+    assert "grant select on execution.conditional_rule_evaluations to svc_trading_api" in sql
+    assert "conditional_rule_evaluations_trading_select" in sql
+    assert "rule.execution_mode = 'paper'" in sql
+    assert "grant insert" not in sql
+    assert "grant update" not in sql
 
 
 def test_lifecycle_trigger_rejects_unsafe_transitions() -> None:

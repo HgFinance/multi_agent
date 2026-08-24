@@ -282,6 +282,10 @@ services:
     environment:
       <<: *control-environment
       RISK_QA_DATABASE_URL: *control-database-url
+      # The supervisor binds the already-admitted PAPER request before it
+      # releases the deferred Trading card. Use the isolated order role.
+      ORDER_ORCHESTRATOR_DATABASE_URL: *order-database-url
+      ORDER_ORCHESTRATOR_DATABASE_ROLE: svc_order_orchestrator
 
   # MemoHarness retention must use the same private control database as the
   # BFF and supervisor. Hosted Supabase is identity-only in this deployment.

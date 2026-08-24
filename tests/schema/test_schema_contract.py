@@ -247,6 +247,8 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  # 복합 PAPER 요청은 기존 즉시주문/조건부규칙의 합성일 뿐
                  # 두 번째 주문 원장이 아니다.
                  "20260824000600_compound_paper_order_bundles.sql",
+                 # 조건부 거래 평가 경로에 읽기 권한만 준다.
+                 "20260824000700_conditional_trading_evaluation_read.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 

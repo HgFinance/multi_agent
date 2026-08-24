@@ -330,6 +330,81 @@ def test_conditional_command_uses_only_the_precreated_trading_primary(
     assert stored.trading_task_id == "t_trade1"
 
 
+def test_research_then_conditional_creates_analysis_root_without_trading_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = InMemoryUserOrderRequestRepository()
+    create = Mock(return_value={"task_id": "t_analysis_root", "status": "ready"})
+    monkeypatch.setattr(ceo, "fetch_current_mandate_by_fund", lambda _fund: None)
+    monkeypatch.setattr(ceo, "user_order_repository", lambda: repository)
+    monkeypatch.setattr(
+        ceo,
+        "require_trading_book_access",
+        lambda _owner, _fund, _book: {
+            "user_id": USER_ID,
+            "fund_id": FUND_ID,
+            "book_id": BOOK_ID,
+        },
+    )
+    monkeypatch.setattr(ceo.hermes_boundary, "create_kanban_task", create)
+    monkeypatch.setattr(ceo.hermes_boundary, "comment_root_scope", lambda **_kw: True)
+    monkeypatch.setattr(
+        ceo,
+        "_wait_for_planning",
+        lambda _task_id: {
+            "status": "accepted",
+            "planning": {"selected_departments": []},
+            "answer": "accepted",
+        },
+    )
+
+    raw = "research 분석 후 삼성전자 262,000원 초과 시 5주 매도 조건주문"
+    response = ceo.ceo_query(
+        ceo.CeoAsk(
+            query=raw,
+            request_id="discord:analysis-then-rule-1",
+            fund_id=FUND_ID,
+            book_id=BOOK_ID,
+        ),
+        owner_id=USER_ID,
+    )
+
+    assert create.call_count == 1
+    root_body = create.call_args.kwargs["body"]
+    assert "deferred_conditional=true" in root_body
+    assert "deferred_conditional_required_profile=research-department" in root_body
+    assert "selected_primary_profiles=trading-department" not in root_body
+    assert "Research 관점의 투자 분석" in root_body
+    assert response["analysis_then_conditional"] is True
+    assert response["conditional_rule_activation"] == (
+        "AFTER_RESEARCH_PRIMARY_COMPLETED"
+    )
+    assert "삼성전자 262,000원 초과 시 5주 매도 조건주문" in response["answer"]
+    assert response["order_state"] == "KANBAN_QUEUED"
+    stored = repository.get(response["order_request_id"])
+    assert stored is not None
+    assert stored.ceo_root_task_id == "t_analysis_root"
+    assert stored.trading_task_id is None
+
+    monkeypatch.setattr(
+        ceo.hermes_boundary,
+        "show_kanban_task",
+        lambda _task_id: {"task_id": "t_analysis_root", "body": root_body},
+    )
+    create.reset_mock()
+    replay = ceo.ceo_query(
+        ceo.CeoAsk(
+            query=raw,
+            request_id="discord:analysis-then-rule-1",
+            fund_id=FUND_ID,
+            book_id=BOOK_ID,
+        ),
+        owner_id=USER_ID,
+    )
+    assert replay["task_id"] == "t_analysis_root"
+    assert create.call_count == 0
+
+
 def test_conditional_advice_question_does_not_enter_the_binding_lane(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

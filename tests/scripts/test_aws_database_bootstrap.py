@@ -24,10 +24,15 @@ def test_discovers_complete_unique_canonical_chains() -> None:
         bootstrap.MARKET_MIGRATIONS, bootstrap.MARKET_PATTERN
     )
 
-    assert len(control) == 94
+    # 99 = 94 + user_order_broker_correlation, ls_paper_broker_order_ack,
+    # workforce_roster_full_reconcile, memo_harness_experience_bank (moved
+    # to 000150 to clear a duplicate 20260824000100 version),
+    # memo_harness_retention_privileges, compound_paper_order_bundles,
+    # conditional_trading_evaluation_read.
+    assert len(control) == 100
     assert len(market) == 8
     assert control[-1].path.name == (
-        "20260820000400_user_order_broker_correlation.sql"
+        "20260824000700_conditional_trading_evaluation_read.sql"
     )
     assert market[-1].path.name == "008_microstructure_depth_capacity.sql"
     assert len({migration.version for migration in control}) == len(control)

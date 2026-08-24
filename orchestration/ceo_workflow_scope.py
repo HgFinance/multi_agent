@@ -388,8 +388,17 @@ def user_paper_order_scope_from_body(body: str) -> UserPaperOrderScope | None:
     return UserPaperOrderScope(**values)
 
 
-def build_user_paper_order_scope(scope: UserPaperOrderScope) -> str:
-    """Serialize a non-secret PAPER-order reference as exact-line markers."""
+def build_user_paper_order_scope(
+    scope: UserPaperOrderScope,
+    *,
+    include_primary_selection: bool = True,
+) -> str:
+    """Serialize a non-secret PAPER-order reference as exact-line markers.
+
+    Deferred analysis→condition workflows carry the same authority scope on
+    their analysis root, but must not advertise Trading as the planner's
+    initial primary.  The default remains unchanged for the direct PAPER lane.
+    """
 
     if scope.mode != USER_PAPER_ORDER_MODE:
         raise ValueError("user order mode must be PAPER")
@@ -402,11 +411,11 @@ def build_user_paper_order_scope(scope: UserPaperOrderScope) -> str:
         for value in required
     ):
         raise ValueError("user PAPER order scope identifiers must be non-empty tokens")
-    return "\n".join(
+    lines = [USER_PAPER_ORDER_SCOPE_MARKER, "request_kind=user_paper_order"]
+    if include_primary_selection:
+        lines.append(f"{PRIMARY_SELECTION_FIELD}=trading-department")
+    lines.extend(
         (
-            USER_PAPER_ORDER_SCOPE_MARKER,
-            "request_kind=user_paper_order",
-            f"{PRIMARY_SELECTION_FIELD}=trading-department",
             "qa_required=false",
             f"order_request_id={scope.order_request_id}",
             f"raw_instruction_sha256={digest}",
@@ -415,6 +424,7 @@ def build_user_paper_order_scope(scope: UserPaperOrderScope) -> str:
             f"order_mode={USER_PAPER_ORDER_MODE}",
         )
     )
+    return "\n".join(lines)
 
 
 @dataclass(frozen=True)
@@ -651,6 +661,8 @@ def build_root_body(
     advisory_fund_id: str | None = None,
     advisory_book_id: str | None = None,
     experience_hint: Mapping[str, Any] | None = None,
+    user_paper_order_include_primary_selection: bool = True,
+    deferred_conditional_analysis: bool = False,
 ) -> str:
     """Build a root body that is unambiguous before the root ID exists.
 
@@ -688,7 +700,7 @@ def build_root_body(
     # marker remains below for external compatibility.
     canonical_qa_enabled = (
         False
-        if user_paper_order_scope is not None
+        if user_paper_order_scope is not None and not deferred_conditional_analysis
         else True
         if qa_enabled is None
         else bool(qa_enabled)
@@ -703,7 +715,10 @@ def build_root_body(
     canonical_qa_blocks = canonical_qa_blocks and canonical_qa_enabled
     requested_by_line = f"requested_by={requested_by}\n" if requested_by else ""
     paper_order_block = (
-        build_user_paper_order_scope(user_paper_order_scope) + "\n"
+        build_user_paper_order_scope(
+            user_paper_order_scope,
+            include_primary_selection=user_paper_order_include_primary_selection,
+        ) + "\n"
         if user_paper_order_scope is not None
         else ""
     )

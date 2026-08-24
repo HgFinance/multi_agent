@@ -1535,6 +1535,11 @@ services:
       # subprocess remains the code-level fallback when this is unset.
       CEO_SUPERVISOR_WATCH_SOURCE: sqlite
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      # Deferred Research -> Trading PAPER workflows bind the existing order
+      # authority from the supervisor before the Trading card is unblocked.
+      # Keep the isolated order login explicit; an empty value fails closed.
+      ORDER_ORCHESTRATOR_DATABASE_URL: ${ORDER_ORCHESTRATOR_DATABASE_URL:-}
+      ORDER_ORCHESTRATOR_DATABASE_ROLE: ${ORDER_ORCHESTRATOR_DATABASE_ROLE:-svc_order_orchestrator}
       PYTHONPATH: /opt/hgfinance
       # Langfuse(2026-08-20). Discord/웹 사용자 질의는 BFF 가 부서장을 직접 부르지
       # 않고 카드로 넘긴다 - 그 카드가 끝나는 것을 보는 유일한 프로세스가 여기다.
