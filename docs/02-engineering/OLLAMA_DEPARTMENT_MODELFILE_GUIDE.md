@@ -4,9 +4,9 @@
 
 현재 직원 모델은 검증 전까지 `qwen3:1.7b`로 고정한다. 다른 Ollama 모델은 `ollama list`로 설치 여부를 확인하고, Worker benchmark → HR 제안 → QA 독립 검증 → CEO 승인 후에만 Worker별로 변경한다. 자동 교체와 무제한 재시도는 금지한다. 기존 `Modelfile` alias는 호환·개발용이며, 실행 기준은 각 부서의 `employee_workers.py` Registry다.
 
-> 현재 구현 범위는 LLM Worker 기준 CEO 1, HR 5, Research 6, Trading 2, Risk 1, Quant/Backtest 7, Accounting/Portfolio 1, AI QA 2이며, 결정론 runner(`desk-runner`, `risk-runner`, `qa-runner`, `back-office-runner`) 4명을 더해 총 29명이다. 도현님 담당 부서에서는 Bull/Bear와 예외 조사 Worker만 Ollama를 사용하고, desk/back-office 업무는 결정론 모듈이 수행한다. `Modelfile`은 보조 alias 정의이며, 실제 직원 수의 Source of Truth가 아니다.
+> 현재 구현 범위는 LLM Worker 기준 CEO 1, HR 1, Research 2, Trading 0, Risk 1, Quant/Backtest 2, Accounting/Portfolio 1, AI QA 2이며, 결정론 runner(`desk-runner`, `risk-runner`, `qa-runner`, `back-office-runner`, `ceo-runner`) 5명을 더해 총 23명이다(2026-08-24, workforce.agent_profiles 전수조사 갱신 — 이전 "CEO 1·HR 5·Research 6·...·총 29명" 스냅샷은 Research/Quant 축소, Trading Bull/Bear 제거, HR 통합 이전 값이라 폐기). 도현님 담당 부서에서는 예외 조사 Worker(`exception-investigation-worker`)만 Ollama를 사용한다 — Trading Bull/Bear Worker는 2026-08-10에 제거됐고, desk/back-office 업무는 결정론 모듈이 수행한다. `Modelfile`은 보조 alias 정의이며, 실제 직원 수의 Source of Truth가 아니다.
 >
-> 최초 등록 Commit: `9d14f12`, 실행 감사 기준: `3cab251` (2026-08-01)
+> 최초 등록 Commit: `9d14f12`, 실행 감사 기준: `3cab251` (2026-08-01). 인원 수 재검증: 2026-08-24 (`WORKER_ROLE_BOUNDARIES.md`, `supabase/migrations/20260824000100_workforce_roster_full_reconcile.sql` 대조)
 >
 > 적용 범위: 로컬·저비용 보조 모델, Model Gateway와 Docker `local-llm` Profile
 
