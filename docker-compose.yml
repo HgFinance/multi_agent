@@ -1282,6 +1282,12 @@ services:
         # This is a non-secret Discord→public UUID fixture binding used by the
         # existing closed-network UI contract; secrets are never build args.
         DISCORD_ACTOR_MAP: ${DISCORD_ACTOR_MAP:-}
+        # The mode is a public frontend build contract. The Supabase URL and
+        # publishable/anon key are browser-safe; service-role material is never
+        # passed to the frontend image.
+        PORTFOLIO_AUTH_MODE: ${PORTFOLIO_AUTH_MODE:-supabase_jwt}
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL:-${SUPABASE_URL:-}}
+        NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY:-${SUPABASE_PUBLISHABLE_KEY:-${SUPABASE_ANON_KEY:-}}}
     container_name: hedgefund-ai-office
     restart: unless-stopped
     logging:

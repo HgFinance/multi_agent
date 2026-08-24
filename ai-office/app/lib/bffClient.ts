@@ -1,6 +1,10 @@
-import { type FrontendAuthMode } from "./authMode";
+import { AUTH_MODE, type FrontendAuthMode } from "./authMode";
 import { readStoredAccount } from "./currentAccount";
-import { AuthenticationRequiredError } from "./supabaseBrowser";
+import {
+  AuthenticationRequiredError,
+  getSupabaseAccessToken,
+  getSupabaseUserId,
+} from "./supabaseBrowser";
 
 const configuredBff = process.env.NEXT_PUBLIC_BFF_URL?.trim();
 export const BFF = (configuredBff || "http://127.0.0.1:8001").replace(/\/+$/, "");
@@ -69,21 +73,24 @@ export function buildBffAuthHeaders(
 /**
  * 이 요청에 실을 신원 헤더.
  *
- * `AUTH_MODE`/`fixtureAuthEnabled`로 분기하지 않는다(2026-08-19) - 실제
- * Supabase 인증을 붙이지 않기로 했는데, 그 두 값은 `NEXT_PUBLIC_AUTH_MODE`
- * 환경변수에서 나오고 이 값이 SSR·클라이언트 번들에서 다르게 읽히는 문제가
- * 반복됐다(vite.config.ts: Cloudflare Worker와 Vite 클라이언트 빌드가 env를
- * 따로 받는다). `AUTH_MODE`가 잘못 "supabase"로 평가되면 `X-User-Id` 대신
- * `Authorization: Bearer <uuid>`를 보내버려 서버가 그걸 서명된 JWT로 검증하려다
- * 실패한다. 고정 계정 하나뿐이니 무조건 `fixture` 헤더를 만든다.
+ * 모드는 Vite가 서버·클라이언트에 같은 상수로 주입한다. Supabase mode에서는
+ * access token만 보내고, fixture mode에서만 폐쇄망용 `X-User-Id`를 보낸다.
  */
 async function authenticatedHeaders(init: BffRequestInit, forceRefresh = false): Promise<Headers> {
-  void forceRefresh; // Supabase 재발급 경로가 없어져 더 이상 쓰이지 않는다.
+  if (AUTH_MODE === "supabase") {
+    return buildBffAuthHeaders(
+      "supabase",
+      init.headers,
+      await getSupabaseAccessToken(forceRefresh),
+    );
+  }
+  void forceRefresh;
   return buildBffAuthHeaders("fixture", init.headers, readStoredAccount().userId);
 }
 
 /** Verified browser identity for legacy request bodies that still require an actor field. */
 export async function getAuthenticatedSubject(): Promise<string> {
+  if (AUTH_MODE === "supabase") return getSupabaseUserId();
   return readStoredAccount().userId;
 }
 
