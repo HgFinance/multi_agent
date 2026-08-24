@@ -33,6 +33,7 @@ from __future__ import annotations
 # is retained only as historical context.
 import os
 import hashlib
+import importlib.util
 import json
 from functools import wraps
 from threading import Lock
@@ -75,6 +76,30 @@ def _configured_evidence_corpus() -> Path:
 
 for _p in (_QA_DIR, _EVIDENCE_DIR, _AUDIT_DIR, _AGENTIC_RAG_DIR, _REPO_ROOT):
     sys.path.insert(0, str(_p))
+
+
+def _load_qa_repository():
+    """Load QA's repository without claiming the process-wide ``repository`` name.
+
+    Workforce and accounting prototypes historically expose a top-level
+    ``repository`` module.  Which implementation wins then depends on pytest
+    collection order.  The QA API only needs this module's exported classes,
+    so load its file under a stable, domain-owned namespace instead.
+    """
+
+    module_name = "hgfinance_qa_audit.repository"
+    spec = importlib.util.spec_from_file_location(
+        module_name, _QA_DIR / "repository.py"
+    )
+    if spec is None or spec.loader is None:  # pragma: no cover - packaging error
+        raise ImportError("cannot load the QA repository module")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_qa_repository = _load_qa_repository()
 from corpus_registry import inspect_policy_corpus
 from evidence_qa_engine import (
     Artifact,
@@ -133,12 +158,10 @@ _DATABASE_URL = (
     or os.environ.get("DATABASE_URL", "").strip()
 )
 _QA_RUNTIME = os.environ.get("RISK_QA_RUNTIME", "").strip().lower()
-from repository import (
-    DomainEventConflict,
-    ForwardQaRequestConflict,
-    PostgresAuditRepository,
-    QaDecisionPersistenceError,
-)
+DomainEventConflict = _qa_repository.DomainEventConflict
+ForwardQaRequestConflict = _qa_repository.ForwardQaRequestConflict
+PostgresAuditRepository = _qa_repository.PostgresAuditRepository
+QaDecisionPersistenceError = _qa_repository.QaDecisionPersistenceError
 
 if _QA_RUNTIME == "test" or not _DATABASE_URL:
     _audit_repository = None

@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI, HTTPException
+from fastapi import Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.testclient import TestClient
 
@@ -13,6 +14,30 @@ from apps.api import main as bff_main
 from apps.api import ceo_mirror_api
 from apps.api.ceo_mirror import CanonicalIngress, InMemoryMirrorStore, execute_once
 from apps.api.main import app
+
+
+@pytest.fixture(autouse=True)
+def _use_explicit_subject_for_domain_boundary_tests():
+    """Keep domain-ownership tests independent from Supabase JWKS transport.
+
+    Authentication itself is covered by ``test_current_user.py``. These tests
+    exercise the next boundary (fund/resource ownership), so they provide an
+    explicit subject through FastAPI's dependency override instead of relying
+    on an unsigned production header being accepted by the real dependency.
+    """
+
+    def subject(x_user_id: str | None = Header(default=None, alias="X-User-Id")) -> str | None:
+        return x_user_id
+
+    app.dependency_overrides[bff_main.current_user] = subject
+    app.dependency_overrides[ceo_mirror_api.current_user] = subject
+    app.dependency_overrides[ceo_mirror_api.optional_current_user] = subject
+    try:
+        yield
+    finally:
+        app.dependency_overrides.pop(bff_main.current_user, None)
+        app.dependency_overrides.pop(ceo_mirror_api.current_user, None)
+        app.dependency_overrides.pop(ceo_mirror_api.optional_current_user, None)
 
 
 def test_ui_boundary_does_not_require_a_bearer_token() -> None:
@@ -483,6 +508,8 @@ def test_discord_mirror_ingress_accepts_only_the_private_bridge_key() -> None:
                 "request_id": "discord:991122334455667788",
                 "source": "discord",
                 "source_message_id": "991122334455667788",
+                "discord_channel_id": "channel-1",
+                "discord_message_id": "991122334455667788",
                 "actor_id": "123456789012345678",
                 "actor_type": "user",
             },

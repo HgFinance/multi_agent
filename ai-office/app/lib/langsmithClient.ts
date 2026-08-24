@@ -8,7 +8,7 @@ import { bffFetch } from "./bffClient";
  * 필요한 외부 서비스를 브라우저가 직접 부르지 않는다.
  */
 
-export type LangsmithStatus = "READY" | "NOT_CONFIGURED" | "ERROR";
+export type LangsmithStatus = "READY" | "NOT_CONFIGURED" | "DEGRADED" | "ERROR";
 
 export type LangsmithDailyTrace = {
   date: string;
@@ -33,6 +33,7 @@ export type LangsmithQaTraces = {
   daily: LangsmithDailyTrace[];
   latency: LangsmithDailyLatency[];
   detail?: string;
+  cached?: boolean;
 };
 
 export type LangsmithFeedbackItem = {

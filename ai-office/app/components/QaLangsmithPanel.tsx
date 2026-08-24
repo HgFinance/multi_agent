@@ -274,56 +274,7 @@ export default function QaLangsmithPanel() {
     );
   }
 
-  // 별도 mockdata 변수 없이 스크린샷 굴곡을 구현하는 수치들을 직접 인라인 할당
-  const data: LangsmithQaTraces = query.data ?? {
-    status: "READY",
-    configured: true,
-    project: "qa-project",
-    trace_count: 397,
-    error_rate_pct: 0,
-    days: 8,
-    generated_at: new Date().toISOString(),
-    daily: [
-      { date: "2026-08-17", success: 17, error: 0 },
-      { date: "2026-08-17-2", success: 29, error: 0 },
-      { date: "2026-08-18", success: 21, error: 0 },
-      { date: "2026-08-18-2", success: 22, error: 0 },
-      { date: "2026-08-19", success: 0, error: 0 },
-      { date: "2026-08-19-2", success: 29, error: 0 },
-      { date: "2026-08-20", success: 4, error: 0 },
-      { date: "2026-08-20-2", success: 0, error: 0 },
-      { date: "2026-08-20-3", success: 57, error: 0 },
-      { date: "2026-08-21", success: 34, error: 0 },
-      { date: "2026-08-21-2", success: 36, error: 0 },
-      { date: "2026-08-21-3", success: 22, error: 0 },
-      { date: "2026-08-22", success: 0, error: 0 },
-      { date: "2026-08-22-2", success: 0, error: 0 },
-      { date: "2026-08-23", success: 1, error: 0 },
-      { date: "2026-08-23-2", success: 69, error: 0 },
-      { date: "2026-08-24", success: 68, error: 0 },
-      { date: "2026-08-24-2", success: 20, error: 0 },
-    ],
-    latency: [
-      { date: "2026-08-17", p50_seconds: 5, p99_seconds: 6 },
-      { date: "2026-08-17-2", p50_seconds: 5, p99_seconds: 8 },
-      { date: "2026-08-18", p50_seconds: 3, p99_seconds: 8 },
-      { date: "2026-08-18-2", p50_seconds: 3, p99_seconds: 10 },
-      { date: "2026-08-19", p50_seconds: 3, p99_seconds: 9 },
-      { date: "2026-08-19-2", p50_seconds: 3, p99_seconds: 8 },
-      { date: "2026-08-20", p50_seconds: 4, p99_seconds: 7 },
-      { date: "2026-08-20-2", p50_seconds: 4, p99_seconds: 9 },
-      { date: "2026-08-20-3", p50_seconds: 3, p99_seconds: 8 },
-      { date: "2026-08-21", p50_seconds: 4, p99_seconds: 7 },
-      { date: "2026-08-21-2", p50_seconds: 4, p99_seconds: 13 },
-      { date: "2026-08-21-3", p50_seconds: 4, p99_seconds: 10 },
-      { date: "2026-08-22", p50_seconds: 3, p99_seconds: 5 },
-      { date: "2026-08-22-2", p50_seconds: 1, p99_seconds: 1 },
-      { date: "2026-08-23", p50_seconds: 0, p99_seconds: 0 },
-      { date: "2026-08-23-2", p50_seconds: 10, p99_seconds: 15 },
-      { date: "2026-08-24", p50_seconds: 0, p99_seconds: 182 },
-      { date: "2026-08-24-2", p50_seconds: 0, p99_seconds: 115 },
-    ],
-  };
+  const data: LangsmithQaTraces = query.data;
 
   const traceSeries: Series[] = [
     { id: "success", label: "Success", color: SUCCESS_COLOR, values: data.daily.map((row) => row.success) },

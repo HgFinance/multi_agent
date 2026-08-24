@@ -1,4 +1,5 @@
 import { readStoredAccount } from "./currentAccount";
+import { AUTH_MODE } from "./authMode";
 
 export const PORTFOLIO_SCOPE_CHANGED_EVENT = "hgfinance:portfolio-scope-changed";
 
@@ -98,6 +99,7 @@ export function currentFundId(): string | undefined {
   // Worker/Vite 클라이언트 분리 구조 때문) 계정을 계속 못 찾는 상태가 됐다
   // ("계정에 연결된 Fund가 없습니다"가 반복해서 뜬 원인). `/ui/me` 응답 전
   // 첫 렌더에서만 고정 계정의 fundId로 떨어진다.
+  if (AUTH_MODE !== "fixture") return undefined;
   return readStoredAccount().fundId ?? undefined;
 }
 

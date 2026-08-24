@@ -527,12 +527,21 @@ def conversation_stream(
 
         return False
 
-    def generate():
+    async def generate():
         try:
             import redis
 
-            client = redis.Redis.from_url(redis_url, decode_responses=True)
-            client.ping()
+            # Keep Redis socket failures bounded.  A synchronous generator is
+            # particularly costly here because Starlette would reserve one
+            # thread-pool token for every connected browser while XREAD waits.
+            client = redis.Redis.from_url(
+                redis_url,
+                decode_responses=True,
+                socket_connect_timeout=2.0,
+                socket_timeout=3.0,
+                health_check_interval=30,
+            )
+            await run_in_threadpool(client.ping)
         except Exception:
             yield "event: error\ndata: {\"detail\":\"conversation_stream_unavailable\"}\n\n"
             return
@@ -545,7 +554,8 @@ def conversation_stream(
 
         while time.monotonic() < deadline:
             try:
-                rows = client.xread(
+                rows = await run_in_threadpool(
+                    client.xread,
                     {stream_name: cursor},
                     count=100,
                     block=1000,
@@ -572,7 +582,7 @@ def conversation_stream(
                     if event.event_type not in allowed_event_types:
                         continue
 
-                    if not event_visible(event):
+                    if not await run_in_threadpool(event_visible, event):
                         continue
 
                     emitted = True

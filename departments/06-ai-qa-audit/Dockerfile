@@ -36,6 +36,10 @@ COPY departments/06-ai-qa-audit ./departments/06-ai-qa-audit
 # Shared Worker Model Gateway. The model overlay injects Qwen AWQ v1
 # coordinates; without the overlay, the QA image retains its local fallback.
 COPY departments/worker_model_gateway.py ./departments/worker_model_gateway.py
+# QA employee graphs import the shared WorkerSpec/runtime and the common
+# technology profile definitions at request time, not only during API startup.
+COPY departments/employee_worker_runtime.py ./departments/employee_worker_runtime.py
+COPY departments/risk_qa_worker_profiles.py ./departments/risk_qa_worker_profiles.py
 # The independent reproduction worker reuses the frozen, pure forward
 # evaluator in a separate process.  It does not import quant's DB writer or
 # receive svc_quant privileges.

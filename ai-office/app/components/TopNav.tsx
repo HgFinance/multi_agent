@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { COMPANY } from "../../company.config";
+import { useAuth } from "../lib/AuthProvider";
 import { DEFAULT_ACCOUNT, type TestAccount } from "../lib/currentAccount";
 
 /**
@@ -52,15 +53,24 @@ function AccountDot({ account, size }: { account: TestAccount; size: "sm" | "md"
  * 안 일어나는 죽은 UI가 되므로, 정적 표시로 바꿨다.
  */
 function FixedAccountBadge() {
+  const auth = useAuth();
+  const account: TestAccount = auth.mode === "fixture"
+    ? DEFAULT_ACCOUNT
+    : {
+        userId: auth.userId ?? "",
+        label: auth.email ?? auth.userId ?? "Authenticated user",
+        fundId: null,
+        colorClass: "bg-primary",
+      };
   return (
     <div
       className="flex items-center gap-2 rounded-full p-1 pr-3"
-      aria-label={`현재 계정: ${DEFAULT_ACCOUNT.label}`}
-      title={DEFAULT_ACCOUNT.label}
+      aria-label={`현재 계정: ${account.label}`}
+      title={account.label}
     >
-      <AccountDot account={DEFAULT_ACCOUNT} size="md" />
+      <AccountDot account={account} size="md" />
       <span className="hidden text-label-md font-medium text-on-surface-variant lg:inline">
-        {DEFAULT_ACCOUNT.label}
+        {account.label}
       </span>
     </div>
   );

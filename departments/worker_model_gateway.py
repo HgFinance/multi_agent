@@ -22,6 +22,8 @@
 
 ▶ 해석 규칙 (환경변수 계약)
   WORKER_MODEL_BASE_URL 이 설정돼 있으면 → vLLM(OpenAI 호환) 경로:
+    WORKER_MODEL_HOST_BASE_URL    (호스트에서 직접 실행할 때의 vLLM 주소)
+    WORKER_MODEL_EXECUTION_CONTEXT (host|container; 주소 해석을 명시)
     WORKER_MODEL_NAME             (기본 qwen2.5-14b-instruct-awq)
     WORKER_MODEL_API_KEY          (기본 vllm - vLLM 은 키를 검사하지 않지만
                                    OpenAI 호환 헤더 형식은 지킨다)
@@ -170,6 +172,16 @@ def resolve(worker_id: str | None = None, *,
     adapter_id, adapter_version = _adapter_for(registry, worker_id)
 
     vllm_base = (e.get("WORKER_MODEL_BASE_URL") or "").strip()
+    # The same .env is used by host-side E2E jobs and containers.  Keep the
+    # container DNS name as the default inside Docker, while allowing a host
+    # process to use the loopback-published model endpoint.  Explicit context
+    # wins; the /.dockerenv fallback keeps old compose invocations compatible.
+    execution_context = (e.get("WORKER_MODEL_EXECUTION_CONTEXT") or "").strip().lower()
+    if vllm_base and e is os.environ and (
+        execution_context == "host"
+        or (not execution_context and not Path("/.dockerenv").exists())
+    ):
+        vllm_base = (e.get("WORKER_MODEL_HOST_BASE_URL") or vllm_base).strip()
     if vllm_base:
         base_model = (e.get("WORKER_MODEL_NAME") or "").strip() or DEFAULT_VLLM_MODEL
         return ModelBinding(

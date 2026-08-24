@@ -22,7 +22,10 @@ import {
   validateDraft,
 } from "../lib/mandateClient";
 import { provisionalRiskScore, type Experience } from "../lib/mandatePresets";
+import { AUTH_MODE } from "../lib/authMode";
+import { useAuth } from "../lib/AuthProvider";
 import { DEFAULT_ACCOUNT } from "../lib/currentAccount";
+import { usePortfolioSession } from "../lib/PortfolioSessionProvider";
 
 /**
  * 운용 지침 설정 화면.
@@ -223,8 +226,10 @@ function FieldLabel({ children, hint }: { children: React.ReactNode; hint?: stri
  * 계정에 항상 값이 있어 아래 분기를 타지 않는다.
  */
 export default function MandateConfig() {
-  const userId = DEFAULT_ACCOUNT.userId;
-  const fundId = DEFAULT_ACCOUNT.fundId;
+  const auth = useAuth();
+  const portfolio = usePortfolioSession();
+  const userId = auth.userId ?? (AUTH_MODE === "fixture" ? DEFAULT_ACCOUNT.userId : "");
+  const fundId = portfolio.activeFundId ?? (AUTH_MODE === "fixture" ? DEFAULT_ACCOUNT.fundId : null);
   if (!fundId) return null;
   return <MandateConfigForm key={userId} userId={userId} fundId={fundId} />;
 }

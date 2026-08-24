@@ -103,10 +103,23 @@ def test_explicit_test_fixture_accepts_header_and_can_be_optional() -> None:
         )
 
 
-def test_current_user_uses_the_frontend_selected_user_without_bearer_verification() -> None:
+def test_current_user_rejects_unsigned_identity_in_jwt_mode() -> None:
     subject = str(uuid4())
     with patch.dict(os.environ, _jwt_env(), clear=False):
-        assert auth.current_user(x_user_id=subject) == subject
+        with pytest.raises(HTTPException) as error:
+            auth.current_user(x_user_id=subject)
+    assert error.value.status_code == 401
+    assert error.value.detail == "portfolio_authentication_required"
+
+
+def test_current_user_delegates_bearer_identity_to_the_shared_boundary() -> None:
+    subject = str(uuid4())
+    with patch.object(auth, "authenticate_request_headers", return_value=subject) as authenticate:
+        assert auth.current_user(authorization="Bearer verified", x_user_id=subject) == subject
+    authenticate.assert_called_once_with(
+        authorization="Bearer verified",
+        x_user_id=subject,
+    )
 
 
 def test_jwt_mode_never_accepts_x_user_id_without_bearer() -> None:

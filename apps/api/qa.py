@@ -10,10 +10,12 @@ from fastapi import APIRouter, Depends, HTTPException
 
 try:  # Reuse the projector imported by ``apps.api.main`` in the local process.
     from current_user import current_user
+    from current_user import require_any_fund_membership
     from langsmith_traces import qa_trace_timeseries
     from orchestration.langsmith_feedback import canonical_department
 except ImportError:  # pragma: no cover - package import path
     from .current_user import current_user
+    from .current_user import require_any_fund_membership
     from .langsmith_traces import qa_trace_timeseries
     from orchestration.langsmith_feedback import canonical_department
 
@@ -38,6 +40,17 @@ def _feedback_department(value: str) -> str:
     if normalized not in _FEEDBACK_DEPARTMENTS:
         raise HTTPException(status_code=422, detail="invalid_feedback_department")
     return normalized
+
+
+def _require_feedback_actor(owner_id: str | None) -> str:
+    """Require an authenticated operator with an effective fund grant."""
+
+    if not owner_id:
+        raise HTTPException(status_code=401, detail="portfolio_authentication_required")
+    # Production requires a real local authorization projection. Explicit
+    # fixture mode remains available for deterministic local/test runs.
+    require_any_fund_membership(owner_id)
+    return owner_id
 
 
 async def _qa_request(method: str, path: str, *, body: dict[str, Any]) -> Any:
@@ -95,7 +108,7 @@ async def qa_langsmith_traces(
     이 집계 결과만 받는다.
     """
 
-    del owner_id  # 인증 게이트만 거치면 되고 요청자별로 값이 갈리지 않는다.
+    _require_feedback_actor(owner_id)
     return await qa_trace_timeseries(days=days)
 
 
@@ -106,7 +119,7 @@ async def qa_observability_feedback_pending(
 ) -> Any:
     """Return redacted LangSmith findings awaiting QA review."""
 
-    del owner_id
+    _require_feedback_actor(owner_id)
     return await _qa_request(
         "GET",
         f"/qa/v1/observability/feedback/pending?limit={max(1, min(int(limit), 100))}",
@@ -122,8 +135,7 @@ async def department_observability_feedback(
 ) -> Any:
     """Return only the selected department's redacted LangSmith findings."""
 
-    if not owner_id:
-        raise HTTPException(status_code=401, detail="portfolio_authentication_required")
+    owner_id = _require_feedback_actor(owner_id)
     department_key = _feedback_department(department)
     return await _qa_request(
         "GET",
@@ -141,8 +153,7 @@ async def add_department_observability_feedback(
 ) -> Any:
     """Append a comment scoped to the selected department's own artifact."""
 
-    if not owner_id:
-        raise HTTPException(status_code=401, detail="portfolio_authentication_required")
+    owner_id = _require_feedback_actor(owner_id)
     department_key = _feedback_department(department)
     comment = str(body.get("comment") or "").strip()
     if not comment:
@@ -166,6 +177,7 @@ async def decide_qa_observability_feedback(
 ) -> Any:
     """Submit one server-attributed QA approval/rejection decision."""
 
+    owner_id = _require_feedback_actor(owner_id)
     decision = str(body.get("decision") or "").upper()
     reason = str(body.get("reason") or "").strip()
     if decision not in {"APPROVED", "REJECTED"} or not reason:

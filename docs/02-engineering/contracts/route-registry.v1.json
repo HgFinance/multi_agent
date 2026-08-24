@@ -437,6 +437,14 @@
           "path": "/qa/v1/observability/feedback/pending"
         },
         {
+          "method": "GET",
+          "path": "/qa/v1/observability/feedback/department/{department}"
+        },
+        {
+          "method": "POST",
+          "path": "/qa/v1/observability/feedback/{artifact_id}/department-review"
+        },
+        {
           "method": "POST",
           "path": "/qa/v1/observability/feedback/{artifact_id}/benchmark"
         },
@@ -1183,6 +1191,14 @@
         {
           "method": "GET",
           "path": "/ui/qa/observability/feedback/pending"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/departments/{department}/observability/feedback"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/departments/{department}/observability/feedback/{artifact_id}"
         },
         {
           "method": "POST",

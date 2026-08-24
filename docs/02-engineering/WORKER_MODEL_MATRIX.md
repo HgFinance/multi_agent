@@ -43,7 +43,10 @@ this prevents a benchmark-specialist LoRA from silently changing risk, QA,
 CEO, or workforce behavior. Deterministic runners and embedding-only APIs do
 not receive Worker model credentials.
 
-Team rule: do not run `docker run` or raw `docker compose ... up ... vllm`.
+Team rule: do not use `docker run` to start a vLLM server or raw
+`docker compose ... up ... vllm`. The fetch/quantization helpers may use an
+isolated `docker run --rm --entrypoint` for offline artifact preparation; that
+is not a serving container.
 `vllm_runtime.sh check` is the acceptance check and rejects manual containers,
 duplicate model containers, image drift, missing `hedgefund_default`/`vllm`
 network wiring, and non-loopback host exposure.

@@ -776,6 +776,12 @@ def current_user(
     check and can never establish identity by itself.
     """
 
+    # Direct unit callers do not pass FastAPI's Header marker, while FastAPI
+    # replaces it with the actual string before invoking this dependency.
+    if not isinstance(authorization, str):
+        authorization = None
+    if not isinstance(x_user_id, str):
+        x_user_id = None
     return authenticate_request_headers(
         authorization=authorization,
         x_user_id=x_user_id,
@@ -794,6 +800,11 @@ def optional_current_user(
     valid bridge request before its route-level authorization check runs.
     """
 
+    if not isinstance(authorization, str):
+        authorization = None
+    if not isinstance(x_user_id, str):
+        x_user_id = None
+
     try:
         from .discord_ingress_auth import bearer_is_authorized
     except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
@@ -803,11 +814,20 @@ def optional_current_user(
         return None
     if not authorization and not (x_user_id or "").strip():
         return None
-    return authenticate_request_headers(
-        authorization=authorization,
-        x_user_id=x_user_id,
-        required=False,
-    )
+    try:
+        return authenticate_request_headers(
+            authorization=authorization,
+            x_user_id=x_user_id,
+            required=False,
+        )
+    except HTTPException as exc:
+        # Optional routes retain their own source-specific 401 response when
+        # a caller presents an invalid ordinary user token. Availability and
+        # configuration failures still propagate rather than becoming an
+        # anonymous request.
+        if exc.status_code == 401:
+            return None
+        raise
 
 
 def require_owner(

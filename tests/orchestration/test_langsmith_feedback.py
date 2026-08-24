@@ -160,6 +160,47 @@ def test_ledger_is_idempotent_and_approval_creates_bounded_hint(tmp_path) -> Non
     assert "prompt" not in str(hint)
 
 
+def test_department_review_is_scoped_and_append_only(tmp_path) -> None:
+    ledger = FeedbackLedger(str(tmp_path / "feedback.sqlite3"))
+    assert ledger.enqueue("source-research", "First") is True
+    assert ledger.claim() is not None
+    artifact_id = ledger.complete(
+        "source-research",
+        "eval-research",
+        evaluate_observation(
+            TraceObservation(
+                source_run_id="source-research",
+                name="worker.research",
+                status="success",
+                started_at=None,
+                ended_at=None,
+                metadata={"stage": "research", "raw_payloads_sent": False},
+            )
+        ),
+    )
+
+    assert ledger.department_feedback("research-department", 10)[0]["artifact_id"] == artifact_id
+    review = ledger.add_department_review(
+        artifact_id,
+        target_department="research-department",
+        reviewer_department="research",
+        reviewer_user_id="operator-1",
+        comment="상관관계 메타데이터를 다음 실행에서 보강합니다.",
+    )
+    assert review is not None
+    assert review["target_department"] == "research"
+    assert ledger.add_department_review(
+        artifact_id,
+        target_department="trading-department",
+        reviewer_department="trading",
+        reviewer_user_id="operator-1",
+        comment="다른 부서 artifact에는 쓸 수 없어야 합니다.",
+    ) is None
+    item = ledger.department_feedback("research", 10)[0]
+    assert item["review_count"] == 1
+    assert item["reviews"][0]["comment"].startswith("상관관계")
+
+
 def test_active_hint_is_local_only_and_requires_passed_benchmark(tmp_path, monkeypatch) -> None:
     path = tmp_path / "feedback.sqlite3"
     ledger = FeedbackLedger(str(path))

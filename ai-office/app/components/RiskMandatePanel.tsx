@@ -3,7 +3,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { loadMandateForFund, type MandatePolicyPayload, type StoredMandate } from "../lib/mandateClient";
 import { usePortfolioSession } from "../lib/PortfolioSessionProvider";
-import { DEFAULT_ACCOUNT } from "../lib/currentAccount";
 
 type RiskBounds = MandatePolicyPayload["risk_bounds"];
 type UniversePolicy = MandatePolicyPayload["universe_policy"];
@@ -67,8 +66,7 @@ function Snapshot({ mandate }: { mandate: StoredMandate | null }) {
 
 export default function RiskMandatePanel() {
   const { activeFundId, profile } = usePortfolioSession();
-  const defaultFundId = DEFAULT_ACCOUNT.fundId;
-  const mandateFundId = profile?.funds.some((fund) => fund.fundId === defaultFundId) ? defaultFundId : activeFundId;
+  const mandateFundId = activeFundId ?? profile?.funds[0]?.fundId ?? null;
   const query = useQuery<StoredMandate | null, Error>({ queryKey: ["risk-mandate-snapshot", mandateFundId], queryFn: () => loadMandateForFund(mandateFundId as string), enabled: Boolean(mandateFundId), staleTime: 30_000, refetchInterval: 30_000, retry: false });
   const loading = Boolean(mandateFundId) && query.isPending;
   const error = query.error?.message ?? "";

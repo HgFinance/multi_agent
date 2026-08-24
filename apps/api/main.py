@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import time
@@ -34,6 +35,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
+from urllib.request import Request as UrlRequest
+from urllib.request import urlopen
 from uuid import UUID
 
 import anyio
@@ -97,16 +100,30 @@ from command_service import (
     IdempotencyConflict,
     TradingStateCommand,
 )
-from current_user import (
-    active_user_profile,
-    auth_mode,
-    authorized_fund_memberships,
-    authorized_trading_books,
-    current_user,
-    require_any_fund_membership,
-    require_fund_membership,
-    require_owner,
-)
+try:
+    # Keep the dependency object identical to the package-relative imports in
+    # ceo/ceo_mirror_api.  The fallback is only for direct script execution.
+    from .current_user import (
+        active_user_profile,
+        auth_mode,
+        authorized_fund_memberships,
+        authorized_trading_books,
+        current_user,
+        require_any_fund_membership,
+        require_fund_membership,
+        require_owner,
+    )
+except ImportError:  # pragma: no cover - direct ``python apps/api/main.py``
+    from current_user import (
+        active_user_profile,
+        auth_mode,
+        authorized_fund_memberships,
+        authorized_trading_books,
+        current_user,
+        require_any_fund_membership,
+        require_fund_membership,
+        require_owner,
+    )
 from department_agents import router as department_agent_router
 from discord_ingress_auth import (
     DISCORD_INGRESS_PATH,
@@ -1230,6 +1247,82 @@ def health() -> dict:
         "status_event_type": "agent.status.v1",
         "status_sequence": agent_status_snapshot()["sequence"],
     }
+
+
+def _model_plane_readiness() -> dict[str, object]:
+    """Check the configured Worker model, without leaking its endpoint.
+
+    ``deterministic_test`` is deliberately network-free.  For real workers,
+    readiness checks the OpenAI-compatible ``/models`` contract and verifies
+    that the configured served model is actually present.  This catches the
+    host/container DNS split and model-name drift before an E2E pipeline spends
+    its retry budget on a doomed generation request.
+    """
+
+    runtime = os.getenv("PORTFOLIO_WORKER_RUNTIME", "deterministic_test").strip().lower()
+    if runtime == "deterministic_test":
+        return {
+            "status": "READY",
+            "provider": "deterministic_test",
+            "reachable": True,
+        }
+
+    configured_base = (
+        os.getenv("WORKER_MODEL_BASE_URL", "").strip()
+        or os.getenv("OLLAMA_BASE_URL", "").strip()
+    )
+    if not configured_base:
+        return {
+            "status": "NOT_CONFIGURED",
+            "provider": runtime or "unknown",
+            "reachable": False,
+        }
+
+    try:
+        from departments.worker_model_gateway import resolve
+
+        binding = resolve()
+        base_url = binding.base_url.rstrip("/")
+        models_url = f"{base_url}/models"
+        request = UrlRequest(
+            models_url,
+            headers={"Authorization": f"Bearer {binding.api_key}"},
+        )
+        timeout = max(
+            0.2,
+            min(float(os.getenv("WORKER_MODEL_HEALTH_TIMEOUT_SECONDS", "2")), 5.0),
+        )
+        with urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        model_ids = {
+            str(item.get("id"))
+            for item in (payload.get("data") or [])
+            if isinstance(item, dict) and item.get("id")
+        }
+        expected = {binding.model, binding.base_model}
+        if not model_ids.intersection(expected):
+            return {
+                "status": "UNAVAILABLE",
+                "provider": binding.provider,
+                "model": binding.model,
+                "reachable": True,
+                "reason": "configured_model_not_served",
+            }
+        return {
+            "status": "READY",
+            "provider": binding.provider,
+            "model": binding.model,
+            "reachable": True,
+        }
+    except Exception as exc:  # noqa: BLE001 - readiness must never expose internals
+        return {
+            "status": "UNAVAILABLE",
+            "provider": "configured_model",
+            "reachable": False,
+            "reason": type(exc).__name__,
+        }
+
+
 @app.get("/health/ready")
 def health_ready() -> dict[str, object]:
     """Expose dependency readiness without secrets or claiming operational durability."""
@@ -1254,12 +1347,7 @@ def health_ready() -> dict[str, object]:
             )
             else "NOT_CONFIGURED"
         },
-        "ollama": {
-            "status": "READY"
-            if os.getenv("PORTFOLIO_WORKER_RUNTIME", "deterministic_test") == "deterministic_test"
-            or os.getenv("OLLAMA_BASE_URL", "").strip()
-            else "NOT_CONFIGURED"
-        },
+        "model_plane": _model_plane_readiness(),
         "pipeline": {"status": "READY" if RUNTIME is not None else "UNAVAILABLE"},
         "runtime_store": {"status": "READY" if RUNTIME.durable else "NOT_CONFIGURED"},
         "mandate_binding": {

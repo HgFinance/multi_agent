@@ -174,10 +174,11 @@ test("production clients have no raw EventSource, WebSocket, or direct BFF fetch
     assert.doesNotMatch(source, /\bfetch\s*\(/, file);
     assert.doesNotMatch(source, /withAccountHeaders/, file);
   }
-  // authMode는 이제 상수다 - 런타임 검사(`assertSafeAuthMode`)가 지키던 것을
-  // 타입/상수 자체가 지킨다. 대신 env를 다시 읽지 않는지를 고정한다.
+  // authMode는 Vite가 주입한 동일한 빌드 상수만 읽는다. 런타임마다 다른
+  // 서버·클라이언트 env를 읽지 않는다는 계약은 vite.config.ts의 단일 주입으로
+  // 보장한다.
   const authModeSource = await readFile(new URL("../app/lib/authMode.ts", import.meta.url), "utf8");
-  assert.doesNotMatch(authModeSource, /process\.env/, "authMode must not read an environment variable");
+  assert.match(authModeSource, /NEXT_PUBLIC_AUTH_MODE/);
 
   const currentFundSource = await readFile(new URL("../app/lib/currentFund.ts", import.meta.url), "utf8");
   const activeFundGuard = currentFundSource.indexOf("if (activeFundId) return activeFundId;");

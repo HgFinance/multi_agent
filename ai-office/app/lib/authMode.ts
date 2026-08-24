@@ -21,9 +21,6 @@ export const AUTH_MODE: FrontendAuthMode = normalizeAuthMode(
 export const fixtureAuthEnabled = AUTH_MODE === "fixture";
 
 /** 과거 호출부 호환용. 모드는 빌드 시 주입된 단일 값만 사용한다. */
-export function resolveAuthMode(
-  _configured?: unknown,
-  _runtimeEnvironment?: unknown,
-): FrontendAuthMode {
+export function resolveAuthMode(): FrontendAuthMode {
   return AUTH_MODE;
 }

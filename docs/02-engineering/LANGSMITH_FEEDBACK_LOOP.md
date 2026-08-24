@@ -30,6 +30,25 @@ First/Metrics metadata
 model, Hermes 동작은 바뀌지 않는다. `PASSED` 뒤에도 hint는 비권위 참고자료일
 뿐이며, 자동 prompt/model 배포는 하지 않는다.
 
+### Department self-review
+
+각 부서 화면에는 자기 부서의 `department_key`와 일치하는 redacted finding만
+표시된다. 부서 의견은 `langsmith_feedback_reviews`에 append-only로 저장되며
+`reviewer_user_id`, `reviewer_department`, 대상 부서, 시각, 의견을 남긴다.
+이 의견은 QA 승인이나 benchmark를 대신하지 않는다. 즉 부서는 자기 trace에
+설명·이슈·수정 방향을 남길 수 있고, QA만 최종 승인/반려와 benchmark gate를
+수행한다.
+
+부서별 경로:
+
+- `GET /ui/departments/{department}/observability/feedback`
+- `POST /ui/departments/{department}/observability/feedback/{artifact_id}`
+- `GET /qa/v1/observability/feedback/department/{department}`
+- `POST /qa/v1/observability/feedback/{artifact_id}/department-review`
+
+운영 모드에서는 BFF가 유효한 fund membership을 확인한 사용자만 이 경로를
+사용할 수 있다. fixture 모드는 local/test에서만 허용된다.
+
 ### Active 전환 runbook
 
 1. `shadow`를 유지한 상태로 자연 trace가 `HgFinance-Evals`에 쌓이는지 확인한다.
@@ -54,6 +73,11 @@ worker는 `shadow`로 계속 평가를 수행해도 된다.
 잠금/오류/잘못된 데이터는 hint를 버리고 원래 CEO 경로를 계속 실행한다. 따라서
 QA 대기나 LangSmith network latency가 CEO, Discord finalization, Kanban, provider를
 막지 않는다.
+
+QA trace dashboard도 최근 집계 결과를 짧게 캐시하고, LangSmith rate limit 동안에는
+마지막 성공 집계를 반환한다. 첫 조회량을 줄이기 위해 AI Office 기본 범위는 최근
+2일이며, rate limit이 발생하고 성공 캐시가 없으면 가짜 수치 대신 `DEGRADED` 상태를
+표시한다.
 
 유입이 처리량을 넘으면 업무 흐름을 보호하기 위해 pending 상한(기본 500)을 넘는
 관측 finding을 버린다. Metrics는 개별 event를 approval queue에 넣지 않고 5분당
@@ -128,6 +152,8 @@ the application does not delete external traces automatically.
 QA reviews redacted findings through:
 
 - `GET /qa/v1/observability/feedback/pending`
+- `GET /qa/v1/observability/feedback/department/{department}`
+- `POST /qa/v1/observability/feedback/{artifact_id}/department-review`
 - `POST /qa/v1/observability/feedback/{artifact_id}/decision`
 - `GET /qa/v1/observability/feedback/approved`
 - `GET /qa/v1/observability/feedback/benchmark/candidates`

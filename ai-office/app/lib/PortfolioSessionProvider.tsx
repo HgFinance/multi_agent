@@ -2,6 +2,8 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { createContext, useContext, useEffect, useMemo, useSyncExternalStore } from "react";
+import { AUTH_MODE } from "./authMode";
+import { useAuth } from "./AuthProvider";
 import { bffFetch } from "./bffClient";
 import { DEFAULT_ACCOUNT, accountFor } from "./currentAccount";
 import {
@@ -44,8 +46,10 @@ async function fetchCurrentUser(userId: string): Promise<CurrentUserProfile> {
       if (projected.userId !== userId) throw new Error("current_user_subject_mismatch");
       return projected;
     }
+    if (AUTH_MODE === "supabase") throw new Error(`portfolio_current_user_http_${response.status}`);
   } catch (error) {
     if (error instanceof Error && error.message === "current_user_subject_mismatch") throw error;
+    if (AUTH_MODE === "supabase") throw error;
     // 제어 DB 없이 도는 로컬 데모를 허용한다. 아래 fallback은 읽기 전용이고
     // book 식별자를 지어내지 않는다.
   }
@@ -62,13 +66,12 @@ async function fetchCurrentUser(userId: string): Promise<CurrentUserProfile> {
 }
 
 export function PortfolioSessionProvider({ children }: { children: React.ReactNode }) {
-  // 고정 계정을 직접 쓴다 - `useAuth()`의 Supabase 세션 상태에 걸지 않는다.
-  // 그 상태는 실제 인증을 안 붙이는 지금 `authenticated`가 될 수 없어, 조회가
-  // 영영 `enabled: false`로 남고 프로필이 `null`인 채 멈췄다(2026-08-19).
-  const userId = DEFAULT_ACCOUNT.userId;
+  const auth = useAuth();
+  const userId = auth.userId ?? (AUTH_MODE === "fixture" ? DEFAULT_ACCOUNT.userId : "");
   const query = useQuery({
     queryKey: ["portfolio-current-user", userId],
     queryFn: () => fetchCurrentUser(userId),
+    enabled: Boolean(userId) && (AUTH_MODE === "fixture" || auth.status === "authenticated"),
     retry: false,
   });
   const profile = query.data ?? null;
