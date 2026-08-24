@@ -4,8 +4,6 @@
   "scripts": {
     "dev": "npm --prefix ai-office run dev --",
     "bff": "DATABASE_URL='' .venv/bin/python -m uvicorn apps.api.main:app --reload --port 8001",
-    "backend": ".venv/bin/python -m uvicorn backend.app.main:app --reload --port 8002",
-    "backend:test": ".venv/bin/python -m pytest backend/tests -q",
     "build": "npm --prefix ai-office run build",
     "test": "npm --prefix ai-office test",
     "lint": "npm --prefix ai-office run lint"
