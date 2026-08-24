@@ -140,6 +140,12 @@ Execution budget:
 - Use at most **2 fresh authoritative source fetches**.
 - Use the task's supplied context before any external lookup.
 - Do not open a third source merely to confirm an already supported point.
+- When the company and ticker are already supplied, do not spend a fetch round
+  on DART/entity resolution or a source catalog. Start with one direct official
+  IR/DART/news source; resolve only when the ticker is genuinely ambiguous.
+- Treat every connector as single-attempt. If an MCP, browser, or resolver
+  call fails, hangs, or returns no usable data, do not retry that connector or
+  launch a second fallback loop. State the limitation and finish.
 - Do not launch secondary agents, scouts, factories, artifacts, or reports.
 - Do not perform valuation calculations, market-statistic calculations, or
   downside modelling owned by Quant/Risk.
@@ -153,3 +159,6 @@ Execution budget:
 
 Target execution time: **under 60 seconds**.
 Target final_answer size: **400-650 Korean characters**.
+- Do not use shell/Python extraction for ordinary source reading; summarize the
+  returned source directly and call `kanban_complete` as soon as the budget is
+  satisfied.

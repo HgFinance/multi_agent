@@ -784,6 +784,9 @@ _ANALYSIS_EXECUTION_MODES = frozenset(
 _FAST_ADVISORY_EXECUTION_GUIDANCE = (
     "\n\nFast advisory execution guardrails:\n"
     "- Use at most two fresh authoritative source fetch rounds.\n"
+    "- Treat each external connector as single-attempt: if it fails, hangs, or returns no usable data, do not call that connector again.\n"
+    "- Prefer one direct authoritative source or search result over resolver/catalog exploration; do not spend a turn repairing a connector.\n"
+    "- Keep the complete fast advisory within the task's bounded turn budget; after the evidence budget is met, call kanban_complete immediately.\n"
     "- Do not delegate, run experiments/backtests, create artifacts, or repeat equivalent lookups.\n"
     "- Stop once the current direction, up to two drivers, up to two uncertainties, and one or two checks are supported.\n"
     "- If a non-critical datum is unavailable, state the limitation and produce the bounded final_answer.\n"

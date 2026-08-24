@@ -10,17 +10,18 @@ condition into the existing typed ``kanban_block`` handoff for the QA profile.
 Non-QA profiles are delegated to the unchanged Hermes executable.
 
 Normal Hermes execution, provider selection, retry policy, and terminal tools
-are otherwise untouched.
+are otherwise untouched. Dispatcher-owned ``fast_advisory`` tasks receive a
+task-scoped CLI turn cap; standard analysis and experiment tasks do not.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import json
 import sqlite3
 import subprocess
 import sys
-import json
 from pathlib import Path
 from typing import Sequence
 
@@ -30,6 +31,10 @@ REAL_HERMES = os.environ.get(
     "/opt/hermes/.venv/bin/hermes",
 )
 QA_PROFILE = "qa-department"
+FAST_ADVISORY_MODE = "analysis_mode=fast_advisory"
+DEFAULT_FAST_ADVISORY_MAX_TURNS = 32
+MIN_FAST_ADVISORY_MAX_TURNS = 8
+MAX_FAST_ADVISORY_MAX_TURNS = 64
 BLOCK_KIND = "capability"
 BLOCK_REASON = (
     "QA worker exited successfully without kanban_complete or kanban_block; "
@@ -83,6 +88,81 @@ def _read_live_run_state(
         return None, None, None
     finally:
         conn.close()
+
+
+def _task_is_fast_advisory(
+    db_path: str | os.PathLike[str] | None,
+    task_id: str | None,
+) -> bool:
+    """Read the execution mode without mutating the Kanban board.
+
+    The dispatcher invokes this wrapper for every profile.  Keeping the mode
+    check here means the fast budget is task-scoped rather than a lower global
+    profile budget that could weaken standard analysis or experiments.
+    """
+
+    if not db_path or not task_id:
+        return False
+    db_uri = f"file:{Path(db_path).resolve()}?mode=ro"
+    try:
+        conn = sqlite3.connect(db_uri, uri=True, timeout=1.0)
+    except (OSError, sqlite3.Error):
+        return False
+    try:
+        row = conn.execute(
+            "SELECT body FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+    return bool(row and isinstance(row[0], str) and FAST_ADVISORY_MODE in row[0])
+
+
+def _fast_advisory_max_turns() -> int:
+    """Return a bounded, operator-tunable fast-advisory turn budget."""
+
+    raw = os.environ.get(
+        "HGFINANCE_FAST_ADVISORY_MAX_TURNS",
+        str(DEFAULT_FAST_ADVISORY_MAX_TURNS),
+    ).strip()
+    try:
+        configured = int(raw)
+    except ValueError:
+        configured = DEFAULT_FAST_ADVISORY_MAX_TURNS
+    return min(
+        MAX_FAST_ADVISORY_MAX_TURNS,
+        max(MIN_FAST_ADVISORY_MAX_TURNS, configured),
+    )
+
+
+def _bounded_worker_argv(
+    argv: Sequence[str],
+    *,
+    db_path: str | os.PathLike[str] | None = None,
+    task_id: str | None = None,
+) -> list[str]:
+    """Add a budget only to dispatcher-owned fast-advisory chat workers."""
+
+    args = list(argv)
+    if not _task_is_fast_advisory(db_path, task_id):
+        return args
+    try:
+        chat_index = args.index("chat")
+    except ValueError:
+        return args
+    if any(
+        arg == "--max-turns" or arg.startswith("--max-turns=")
+        for arg in args
+    ):
+        return args
+    return [
+        *args[: chat_index + 1],
+        "--max-turns",
+        str(_fast_advisory_max_turns()),
+        *args[chat_index + 1 :],
+    ]
 
 
 def _still_owned_and_unfinished(
@@ -200,8 +280,13 @@ def _run_real_worker(argv: Sequence[str]) -> int:
     # process must see the real binary so any nested Hermes resolution cannot
     # recurse back into the wrapper.
     env["HERMES_BIN"] = REAL_HERMES
+    worker_argv = _bounded_worker_argv(
+        argv,
+        db_path=env.get("HERMES_KANBAN_DB"),
+        task_id=env.get("HERMES_KANBAN_TASK"),
+    )
     completed = subprocess.run(
-        [REAL_HERMES, *argv],
+        [REAL_HERMES, *worker_argv],
         check=False,
         env=env,
     )
@@ -225,7 +310,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not _is_qa_kanban_worker():
         env = os.environ.copy()
         env["HERMES_BIN"] = REAL_HERMES
-        os.execvpe(REAL_HERMES, [REAL_HERMES, *args], env)
+        worker_argv = _bounded_worker_argv(
+            args,
+            db_path=env.get("HERMES_KANBAN_DB"),
+            task_id=env.get("HERMES_KANBAN_TASK"),
+        )
+        os.execvpe(REAL_HERMES, [REAL_HERMES, *worker_argv], env)
         raise AssertionError("os.execvpe returned unexpectedly")
 
     task_id, run_id = _task_context()

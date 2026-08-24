@@ -180,7 +180,18 @@ services:
       # 글을 쓰지 않는다(2026-08-18: 테스트가 실제 채널에 글을 쓴 사고).
       DISCORD_MIRROR_ENABLED: ${DISCORD_MIRROR_ENABLED:-false}
       DISCORD_BOT_TOKEN_CEO: ${DISCORD_BOT_TOKEN_CEO:-}
+      # Department Agent Logs are read through this BFF as well.  Keep every
+      # department bot token server-side; the browser receives normalized
+      # messages only and never receives a token.
+      DISCORD_BOT_TOKEN_HR: ${DISCORD_BOT_TOKEN_HR:-}
+      DISCORD_BOT_TOKEN_RESEARCH: ${DISCORD_BOT_TOKEN_RESEARCH:-}
+      DISCORD_BOT_TOKEN_QUANT: ${DISCORD_BOT_TOKEN_QUANT:-}
+      DISCORD_BOT_TOKEN_ACCOUNTING: ${DISCORD_BOT_TOKEN_ACCOUNTING:-}
+      DISCORD_BOT_TOKEN_TRADING: ${DISCORD_BOT_TOKEN_TRADING:-}
+      DISCORD_BOT_TOKEN_RISK: ${DISCORD_BOT_TOKEN_RISK:-}
+      DISCORD_BOT_TOKEN_QA: ${DISCORD_BOT_TOKEN_QA:-}
       DISCORD_CEO_CHANNEL_ID: ${DISCORD_CEO_CHANNEL_ID:-}
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
       DISCORD_ACTOR_MAP: ${DISCORD_ACTOR_MAP:-}
       # LS 브로커 조회 배선(2026-08-19). `.env`는 `.dockerignore`에 걸려 이미지에
       # 들어가지 않으므로 apps/api/main.py의 load_dotenv가 컨테이너 안에서는
@@ -1584,6 +1595,9 @@ services:
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
       HERMES_BIN: /app/repo/scripts/qa_hermes_worker.py
       KANBAN_DISPATCH_INTERVAL: ${KANBAN_DISPATCH_INTERVAL:-60}
+      # Fast advisory only; standard analysis and experiments keep profile
+      # budgets. The wrapper clamps this value to a safe 8..64 range.
+      HGFINANCE_FAST_ADVISORY_MAX_TURNS: ${HGFINANCE_FAST_ADVISORY_MAX_TURNS:-32}
       # The dispatcher spawns the department workers, so MCP profile headers are
       # expanded from this process environment rather than a gateway container.
       MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
@@ -1720,6 +1734,9 @@ services:
       NOTION_RISK_DB: ${NOTION_RISK_DB:-}
       NOTION_QUANT_BACKTEST_DB: ${NOTION_QUANT_BACKTEST_DB:-}
       NOTION_TRADING_DB: ${NOTION_TRADING_DB:-}
+      NOTION_ACCOUNTING_DB: ${NOTION_ACCOUNTING_DB:-}
+      NOTION_QA_DB: ${NOTION_QA_DB:-}
+      NOTION_HR_DB: ${NOTION_HR_DB:-}
       DATABASE_URL: ${DATABASE_URL:-}
       RISK_QA_DATABASE_URL: ${RISK_QA_DATABASE_URL:-}
       ACCOUNTING_API_URL: ${ACCOUNTING_API_URL:-http://accounting-api:8000}

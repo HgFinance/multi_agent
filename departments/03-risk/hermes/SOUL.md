@@ -189,6 +189,9 @@ assessment rather than a comprehensive risk review.
 Hard execution budget:
 - Use supplied task evidence first.
 - Perform at most **2 fresh external evidence fetches**.
+- Treat each search/fetch connector as single-attempt. If it fails or stalls,
+  do not retry the same connector or begin a broad fallback search; disclose
+  the missing evidence and finish.
 - Do not run broad legal, regulatory, macro, sector, or news searches merely
   for completeness.
 - Do not recompute Quant statistics.

@@ -19,7 +19,8 @@ def _db_with_running_run(path: Path, *, task_id: str = "t_qa", run_id: int = 7):
         CREATE TABLE tasks (
             id TEXT PRIMARY KEY,
             status TEXT NOT NULL,
-            current_run_id INTEGER
+            current_run_id INTEGER,
+            body TEXT
         );
         CREATE TABLE task_runs (
             id INTEGER PRIMARY KEY,
@@ -175,3 +176,54 @@ def test_non_qa_dispatcher_worker_delegates_to_real_hermes(monkeypatch):
     assert executable == qa_worker.REAL_HERMES
     assert argv[0] == qa_worker.REAL_HERMES
     assert env["HERMES_BIN"] == qa_worker.REAL_HERMES
+
+
+def test_fast_advisory_gets_task_scoped_turn_budget(tmp_path, monkeypatch):
+    db = tmp_path / "kanban.db"
+    _db_with_running_run(db)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE tasks SET body = ? WHERE id = 't_qa'",
+        ("analysis_mode=fast_advisory\nquestion",),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("HGFINANCE_FAST_ADVISORY_MAX_TURNS", "18")
+
+    bounded = qa_worker._bounded_worker_argv(
+        ["--profile", "research-department", "chat", "-q", "work"],
+        db_path=db,
+        task_id="t_qa",
+    )
+
+    assert bounded == [
+        "--profile",
+        "research-department",
+        "chat",
+        "--max-turns",
+        "18",
+        "-q",
+        "work",
+    ]
+
+
+def test_fast_budget_does_not_change_standard_or_explicit_budget(tmp_path):
+    db = tmp_path / "kanban.db"
+    _db_with_running_run(db)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE tasks SET body = ? WHERE id = 't_qa'",
+        ("analysis_mode=standard_analysis\nquestion",),
+    )
+    conn.commit()
+    conn.close()
+
+    standard = ["chat", "-q", "work"]
+    explicit = ["chat", "--max-turns", "80", "-q", "work"]
+
+    assert qa_worker._bounded_worker_argv(
+        standard, db_path=db, task_id="t_qa"
+    ) == standard
+    assert qa_worker._bounded_worker_argv(
+        explicit, db_path=db, task_id="t_qa"
+    ) == explicit

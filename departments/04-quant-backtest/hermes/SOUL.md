@@ -245,6 +245,9 @@ Hard execution budget:
 - At most **2 market/fundamental data fetch rounds** total.
 - A stale/null critical market value may be retried **once only**.
 - Never retry a non-critical missing metric.
+- Treat each data connector as single-attempt. If an MCP/API call fails or
+  stalls, do not retry it or switch into a broad recovery loop; state the
+  unavailable metric and continue with the bounded snapshot.
 - Never run backtest, simulation, walk-forward, PBO, robustness,
   optimization, parameter search, experiment factory, script generation,
   notebook generation, or artifact generation.
