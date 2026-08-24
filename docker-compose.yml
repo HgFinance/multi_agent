@@ -153,7 +153,10 @@ services:
       MARKET_API_URL: ${MARKET_API_URL:-http://market-api:8036}
       RESEARCH_API_URL: ${RESEARCH_API_URL:-http://research-api:8035}
       RISK_API_URL: ${RISK_API_URL:-http://risk-api:8000}
-      QA_API_URL: ${QA_API_URL:-http://audit-api:8000}
+      # Inside the compose network, loopback points back to portfolio-bff.
+      # Keep the host/local override separate so QA observability reaches the
+      # canonical audit-api service in production.
+      QA_API_URL: ${QA_API_INTERNAL_URL:-http://audit-api:8000}
       QA_API_AUTH_TOKEN: ${QA_API_AUTH_TOKEN:-}
       # HR 유휴 Worker 관측(GET /ui/workforce/idle-agents) 프록시 대상.
       # workforce.py 기본값(http://127.0.0.1:8044)은 호스트 2-프로세스 로컬
@@ -229,6 +232,16 @@ services:
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
     ports:
       - "${PORTFOLIO_BFF_PORT:-8001}:8000"
+    # ai-office는 `depends_on: portfolio-bff: condition: service_healthy`로
+    # 이 컨테이너가 실제로 요청을 받을 수 있을 때까지 기다린다. 여기 healthcheck가
+    # 없으면 그 조건이 성립할 수 없어(2026-08-24) ai-office가 FastAPI 앱의
+    # DB 연결이 끝나기 전에 붙어 `/bff/*` 프록시 요청이 순간적으로 500을 본다.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
 
   # Trusted, internal-only bridge from the Trading Hermes interpretation to
   # authenticated PAPER directive admission. Hermes receives only the MCP

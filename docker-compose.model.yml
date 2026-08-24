@@ -31,6 +31,10 @@ services:
   vllm:
     image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
     container_name: hedgefund-vllm
+    # Must share the control-plane network so Worker containers can resolve
+    # the stable `vllm` service name instead of falling back to host/bridge DNS.
+    networks:
+      - default
     restart: unless-stopped
     # PyTorch 공유 메모리 - 없으면 tensor 로딩이 죽는다
     ipc: host

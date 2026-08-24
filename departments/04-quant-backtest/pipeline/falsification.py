@@ -72,6 +72,7 @@ _PATTERNS = (
         r"(?:does\s+not\s+clear|fails?\s+to\s+clear|cannot\s+clear|fails?\s+cost\s+hurdle)"
         r".{0,100}(?:spread|charge|fee|hurdle|edge|23\s*bp|11\.5\s*bp))"
         r"|(?i:(?:signal|pnl|displacement).{0,60}(?:cannot|fails?\s+to)\s+clear\s+spread\s+plus)"
+        r"|(?i:(?:net\s+predicted\s+edge|predicted\s+markout|median\s+net\s+markout).{0,100}(?:fails?\s+to|does\s+not|not|fails?).{0,30}(?:clear|exceed|spread).{0,100}(?:spread|charges?|latency|costs?|hurdle))"
         r"|(?i:23\s*bp\s+round[- ]?trip\s+hurdle)"
         r"|(?:(?:주\s*)?상호작용).{0,30}23\s*bp.{0,30}(?:hurdle|비용)")),
     ("window_signs", re.compile(
@@ -99,7 +100,10 @@ _PATTERNS = (
         r"as strong as|not weaker|no (?:incremental|improvement|difference)|"
         r"indistinguishable|차별 없음|증분되지 않음|우월하지 않음).{0,100}"
         r"(?:control|ablation|signed[- ]?tape|depth[- ]?slope|microprice|midprice|"
-        r"ungated|opposite[- ]?sign|parent|queue|tightness|interaction|effect|markout))")),
+        r"ungated|opposite[- ]?sign|parent|queue|tightness|interaction|effect|markout)"
+        r"|(?i:(?:ungated|gated|opposite[- ]?sign|negative[- ]?sign|wide[- ]?spread|tight[- ]?spread|freshness|selection|queue[- ]?only|tightness[- ]?only|interaction).{0,80}"
+        r"(?:performs equally|equally strong|not weaker|no (?:incremental|improvement|difference)|indistinguishable|does not survive|as strong as))"
+        r"|(?:통제|게이트|고변동성|저변동성).{0,80}(?:증분되지 않음|차별 없음|우월하지 않음))")),
     ("alignment_audit", re.compile(
         r"(?i:(?:latency|timestamp|quote[- ]?trade).{0,50}"
         r"(?:alignment|misalignment|audit|정렬|오류|overlap).{0,40}"
@@ -119,6 +123,11 @@ _PATTERNS = (
         r"|(?i:(?:fails? cost hurdle|non[- ]positive calibration|negative calibration|PIT alignment fails?|alignment failure))"
         r"|(?i:(?:control|gate|ablation|strata).{0,40}(?:performs similarly|unchanged|indistinguishable))"
         r"|(?i:(?:effect|markout|pnl).{0,40}(?:unchanged|absent|disappears|indistinguishable))"
+        r"|(?i:(?:wide[- ]?spread|spread|queue|gate|5[- ]?second|300[- ]?second|parent).{0,80}"
+        r"(?:same effect|effect invariant|unchanged|not superior|no difference|우월하지 않음|불변))"
+        r"|(?:효과|마크아웃).{0,80}(?:우월하지 않음|불변|동일 효과)"
+        r"|(?i:(?:raw\s+)?(?:microprice|midprice).{0,60}(?:no|not|without).{0,30}(?:incremental|additional).{0,30}(?:markout|effect|pnl))"
+        r"|(?:마이크로프라이스|midprice).{0,30}(?:대비|대해서).{0,30}(?:증분|추가).{0,20}(?:markout|효과).{0,20}(?:없|없음)"
         # Queue proposals also use calibration language for the same
         # executable sign/baseline test. Keep the branch bounded.
         r"|(?i:(?:fitted\s+score[- ]?to[- ]?bps|calibration).{0,50}"
