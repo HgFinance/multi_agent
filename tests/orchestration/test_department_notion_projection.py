@@ -179,7 +179,7 @@ def test_create_schema_error_invalidates_cache_for_next_retry():
     assert transport.create_calls == 2
 
 
-def test_non_trading_quant_department_is_skipped():
+def test_unconfigured_research_projection_is_skipped_without_guessing_db():
     task = _trading_task()
     task["assignee"] = "research-department"
 
@@ -194,3 +194,51 @@ def test_non_trading_quant_department_is_skipped():
     )
 
     assert result.status == "skipped"
+    assert result.error == "NOTION_RESEARCH_DB missing"
+
+
+def test_research_projection_uses_explicit_research_database():
+    transport = FakeTransport(
+        {
+            "종목": {"type": "title"},
+            "서술": {"type": "rich_text"},
+            "생성 시각": {"type": "date"},
+        }
+    )
+    projection = DepartmentNotionProjection(
+        env={"NOTION_TOKEN": "x", "NOTION_RESEARCH_DB": "research-db"},
+        transport=transport,
+    )
+
+    task = _trading_task()
+    task["assignee"] = "research-department"
+    task["title"] = "Samsung evidence review"
+
+    result = projection.project(root_task_id="t_root1", task=task)
+
+    assert result.status == "created"
+    database_id, props, _ = transport.created[0]
+    assert database_id == "research-db"
+    assert props["종목"]["title"][0]["text"]["content"].startswith("t_trade1 · ")
+
+
+def test_risk_projection_uses_explicit_risk_database():
+    transport = FakeTransport(
+        {
+            "제목": {"type": "title"},
+            "서술": {"type": "rich_text"},
+        }
+    )
+    projection = DepartmentNotionProjection(
+        env={"NOTION_TOKEN": "x", "NOTION_RISK_DB": "risk-db"},
+        transport=transport,
+    )
+
+    task = _trading_task()
+    task["assignee"] = "risk-management"
+    task["title"] = "Samsung risk review"
+
+    result = projection.project(root_task_id="t_root1", task=task)
+
+    assert result.status == "created"
+    assert transport.created[0][0] == "risk-db"

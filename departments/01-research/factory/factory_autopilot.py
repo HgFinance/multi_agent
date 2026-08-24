@@ -4631,7 +4631,6 @@ def _check_delivery_is_the_tool_call_not_text():
     # 그 버그 클래스가 재현된다. 서식 문구는 반드시 도구 호출 용도로 읽혀야 한다.
     import inspect as _ins
 
-    _card_src = _ins.getsource(run_cycle) if "run_cycle" in globals() else ""
     _whole = _ins.getsource(sys.modules[__name__])
     _i = _whole.find("공장 주기 [기획자]")
     _blk = _whole[_i:_i + 4000]

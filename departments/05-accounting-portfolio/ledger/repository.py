@@ -152,9 +152,17 @@ class LedgerRepository:
         cls, dsn: str, *, database_role: str | None = None
     ) -> LedgerRepository:
         _, _, ThreadedConnectionPool = _load_driver()
-        # minconn=0 - 유휴 커넥션을 잡지 않는다
+        # minconn=0 - 유휴 커넥션을 잡지 않는다.  The UI snapshot endpoint
+        # can be polled by several browser clients at once; a fixed maxconn=4
+        # caused transient PoolError 500s even though the database itself was
+        # healthy.  Keep the bound configurable for the deployment's pooler.
+        try:
+            maxconn = int(os.environ.get("ACCOUNTING_DATABASE_POOL_MAX", "8"))
+        except (TypeError, ValueError):
+            maxconn = 8
+        maxconn = max(4, min(maxconn, 32))
         return cls(
-            ThreadedConnectionPool(0, 4, dsn), database_role=database_role
+            ThreadedConnectionPool(0, maxconn, dsn), database_role=database_role
         )
 
     @classmethod

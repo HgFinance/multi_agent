@@ -274,8 +274,10 @@ def test_service_evaluates_allowlisted_snapshot_without_reading_run_payload(tmp_
     class _Client:
         def __init__(self, **kwargs):
             self.read_called = False
+            self.list_calls = []
 
         def list_runs(self, **kwargs):
+            self.list_calls.append(kwargs)
             if kwargs.get("project_name") == "First":
                 return iter([_Run()])
             return iter([])
@@ -311,6 +313,10 @@ def test_service_evaluates_allowlisted_snapshot_without_reading_run_payload(tmp_
 
     assert result["completed"] == 1
     assert fake_client.read_called is False
+    root_call = fake_client.list_calls[0]
+    assert "end_time" in root_call
+    assert "start_time" not in root_call
+    assert "gt(end_time" in root_call["filter"]
 
 
 def test_service_is_noop_when_langsmith_is_disabled(tmp_path, monkeypatch) -> None:

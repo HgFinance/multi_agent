@@ -21,6 +21,7 @@ from orchestration.conditional_rules import (
     ConditionalRuleSpec,
     EvaluationContext,
     EvaluationFrame,
+    EvaluationError,
     SubmitReadyExecution,
     TriggerClaim,
 )
@@ -303,6 +304,33 @@ def test_active_rules_are_evaluated_with_bounded_parallelism() -> None:
     assert result["errors"] == 0
     assert store.false == 2
     assert client.max_active_loads == 2
+
+
+def test_insufficient_history_is_backed_off_without_submitting() -> None:
+    rule = active_rule()
+    store = FakeStore(rule)
+
+    class HistoryGapClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__(inputs(price="90"))
+            self.loads = 0
+
+        def load_inputs(self, rule: ActiveRule) -> RuntimeInputs:
+            del rule
+            self.loads += 1
+            raise EvaluationError("INSUFFICIENT_HISTORY", "history is not ready")
+
+    client = HistoryGapClient()
+    worker = ConditionalRuleWorker(store, client, history_backoff_seconds=300)
+
+    first = worker.process_once()
+    second = worker.process_once()
+
+    assert first["errors"] == 1
+    assert second["errors"] == 0
+    assert second["deferred"] == 1
+    assert client.loads == 1
+    assert client.submit_calls == 0
 
 
 def test_active_rule_pages_rotate_without_starvation() -> None:

@@ -1,7 +1,11 @@
 """Non-binding Notion projection for completed department tasks.
 
-Only Trading and Quant are projected here. Other departments already own
-native Notion reporters and must not be duplicated by this observer.
+Trading and Quant keep their existing projection contract. Research and Risk
+also have native reporters for their standalone department pipelines, but a
+CEO/Kanban task is a separate execution boundary: when their database IDs are
+explicitly wired into the Supervisor, this observer records that terminal
+task once without importing or invoking the native reporter. That avoids a
+duplicate cross-boundary upload while making the natural CEO path observable.
 """
 
 from __future__ import annotations
@@ -37,11 +41,15 @@ DEFAULT_DATABASES = {
 DATABASE_ENV = {
     "trading": "NOTION_TRADING_DB",
     "quant-backtest": "NOTION_QUANT_BACKTEST_DB",
+    "research": "NOTION_RESEARCH_DB",
+    "risk": "NOTION_RISK_DB",
 }
 
 TITLE_PROPERTY = {
     "trading": "제목",
     "quant-backtest": "전략·백테스트 run",
+    "research": "종목",
+    "risk": "제목",
 }
 
 PROJECTION_MARKER = "hgfinance.department-notion-projection.v1"
@@ -227,7 +235,7 @@ def _body_markdown(
     safe_metadata = safe_json(metadata)
 
     parts = [
-        f"# Department Task Result",
+        "# Department Task Result",
         "",
         f"- Task ID: `{task_id(task)}`",
         f"- Workflow Root Task ID: `{root_task_id}`",
@@ -264,7 +272,7 @@ def _body_markdown(
 
 
 class DepartmentNotionProjection:
-    """Project terminal Trading/Quant task output into existing Notion DBs."""
+    """Project terminal department task output into explicitly wired DBs."""
 
     def __init__(
         self,
@@ -309,7 +317,7 @@ class DepartmentNotionProjection:
         tid = task_id(task)
         department = _department(task)
 
-        if department not in {"trading", "quant-backtest"}:
+        if department not in DATABASE_ENV:
             return DepartmentProjectionResult(
                 "skipped",
                 department=department,
@@ -336,8 +344,20 @@ class DepartmentNotionProjection:
         db_env = DATABASE_ENV[department]
         database_id = str(
             self.env.get(db_env)
-            or DEFAULT_DATABASES[department]
+            or DEFAULT_DATABASES.get(department, "")
         ).strip()
+
+        # Research/Risk are opt-in here because their standalone reporters
+        # remain the owner of their own department pipelines.  The Supervisor
+        # only projects them when the corresponding DB is explicitly wired;
+        # never guess a database ID or silently write into another department.
+        if not database_id:
+            return DepartmentProjectionResult(
+                "skipped",
+                department=department,
+                task_id=tid,
+                error=f"{db_env} missing",
+            )
 
         if not token:
             return DepartmentProjectionResult(

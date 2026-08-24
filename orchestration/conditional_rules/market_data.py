@@ -176,9 +176,11 @@ class LSTimescaleMarketPriceResolver:
         pool,
         *,
         statement_timeout_ms: int = 1500,
+        lookback_days: int = 7,
     ) -> None:
         self._pool = pool
         self._statement_timeout_ms = max(100, min(int(statement_timeout_ms), 10_000))
+        self._lookback_days = max(1, min(int(lookback_days), 30))
 
     @classmethod
     def from_env(cls) -> "LSTimescaleMarketPriceResolver":
@@ -218,6 +220,9 @@ class LSTimescaleMarketPriceResolver:
                 pool,
                 statement_timeout_ms=int(
                     os.getenv("CONDITIONAL_RULE_MARKET_STATEMENT_TIMEOUT_MS", "1500")
+                ),
+                lookback_days=int(
+                    os.getenv("CONDITIONAL_RULE_MARKET_LOOKBACK_DAYS", "7")
                 ),
             )
         except MarketPriceResolverError:
@@ -261,10 +266,11 @@ class LSTimescaleMarketPriceResolver:
                     select event_time, observed_at, price, market, provider
                       from market.market_ticks
                      where instrument_id=%s
+                       and event_time >= now() - (%s * interval '1 day')
                      order by event_time desc, received_at desc
                      limit 1
                     """,
-                    (instrument_id,),
+                    (instrument_id, self._lookback_days),
                 )
                 row = cursor.fetchone()
             connection.commit()

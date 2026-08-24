@@ -798,11 +798,16 @@ class ConditionalRuleWorker:
         *,
         batch_size: int = 100,
         max_workers: int = 8,
+        history_backoff_seconds: float = 300.0,
     ) -> None:
         self.store = store
         self.client = client
         self.batch_size = max(1, min(int(batch_size), 1000))
         self.max_workers = max(1, min(int(max_workers), 32, self.batch_size))
+        self.history_backoff_seconds = max(
+            30.0, min(float(history_backoff_seconds), 3600.0)
+        )
+        self._history_backoff_until: dict[tuple[UUID, int], float] = {}
         self._active_offset = 0
 
     @staticmethod
@@ -909,10 +914,30 @@ class ConditionalRuleWorker:
 
     def _evaluate_active(self, rule: ActiveRule) -> dict[str, int]:
         counts = {"evaluated": 0, "triggered": 0, "submitted": 0, "errors": 0}
+        backoff_key = (rule.rule_id, rule.rule_version)
+        now = time.monotonic()
+        backoff_until = self._history_backoff_until.get(backoff_key)
+        if backoff_until is not None:
+            if now < backoff_until:
+                return {"deferred": 1}
+            self._history_backoff_until.pop(backoff_key, None)
         try:
             inputs = self.client.load_inputs(rule)
         except (RuntimeDataError, EvaluationError) as exc:
             counts["errors"] += 1
+            if isinstance(exc, EvaluationError) and exc.code == "INSUFFICIENT_HISTORY":
+                self._history_backoff_until[backoff_key] = (
+                    time.monotonic() + self.history_backoff_seconds
+                )
+                LOG.warning(
+                    "conditional rule waiting for market history",
+                    extra={
+                        "rule_id": str(rule.rule_id),
+                        "code": exc.code,
+                        "retry_after_seconds": int(self.history_backoff_seconds),
+                    },
+                )
+                return counts
             LOG.warning(
                 "conditional rule runtime data unavailable",
                 extra={
@@ -921,6 +946,7 @@ class ConditionalRuleWorker:
                 },
             )
             return counts
+        self._history_backoff_until.pop(backoff_key, None)
         try:
             result = evaluate_condition(rule.spec, inputs.evaluation_context)
         except EvaluationError as exc:
@@ -983,6 +1009,7 @@ class ConditionalRuleWorker:
             "triggered": 0,
             "submitted": 0,
             "errors": 0,
+            "deferred": 0,
         }
         # This is a durable state transition, not a second order path.  The
         # existing conditional-rule worker activates a pending rule only after
@@ -1056,6 +1083,9 @@ def main() -> int:
         client,
         batch_size=batch,
         max_workers=workers,
+        history_backoff_seconds=float(
+            os.getenv("CONDITIONAL_RULE_HISTORY_BACKOFF_SECONDS", "300")
+        ),
     )
     if args.healthcheck:
         store.list_active(limit=1)

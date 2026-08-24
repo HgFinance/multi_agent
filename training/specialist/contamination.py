@@ -10,7 +10,6 @@ from typing import Any, Iterable
 
 from .schema import DatasetValidationError, ValidatedExample, normalize_text
 
-
 HELD_OUT_BENCHMARK_MANIFEST: dict[str, tuple[str, ...]] = {
     "External-50": ("external50_v1.json",),
     "Internal-v1": ("internal50_v1.json",),
@@ -70,7 +69,21 @@ def _benchmark_texts(
     missing_sets: list[str] = []
     unreadable_sets: list[str] = []
     for benchmark_name, relative_paths in manifest.items():
-        candidates = [root / relative_path for relative_path in relative_paths]
+        candidates = []
+        for relative_path in relative_paths:
+            candidates.append(root / relative_path)
+            # The 2026-08-24 archive consolidation moved the historical
+            # Internal-v1 fixture under the archive, but training still needs
+            # that frozen holdout to reject contamination.  Keep the active
+            # path preferred and use the archive only as a compatibility
+            # source; do not copy or mutate the evidence file.
+            candidates.append(
+                root
+                / "archive"
+                / "20260824-experimental"
+                / "json"
+                / Path(relative_path).name
+            )
         readable = False
         for candidate in candidates:
             if not candidate.is_file():

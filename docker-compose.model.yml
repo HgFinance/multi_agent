@@ -57,6 +57,8 @@ services:
     volumes:
       # EBS Runtime Cache (§8.4). adapters/ 하위는 LoRA 승격 시 쓴다.
       - ${HGF_MODEL_DIR:-/opt/hgfinance/models}:/models
+      # Approved AWQ v1 arithmetic adapter for this AWS runtime profile.
+      - ${WORKER_LORA_ADAPTER_DIR:-/tmp/hgfinance-awq-specialists-v1/arithmetic/adapter-2epoch}:/tmp/adapter:ro
       # Persist vLLM/Torch compile artifacts across restarts. Without this,
       # a cold restart repeats the highest-RAM compile path on an L4 host.
       - ${VLLM_CACHE_DIR:-/tmp/hgfinance-runtime-vllm-cache}:/root/.cache
@@ -67,6 +69,8 @@ services:
       # departments/01-research/config/worker_model_registry.json 이 같은 이름을 쓴다
       - --served-model-name
       - ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-awq}
+      # Compatibility alias for existing callers of the v1 runtime.
+      - Qwen2.5-14B-Instruct-AWQ
       - --host
       - 0.0.0.0
       - --port
@@ -83,6 +87,8 @@ services:
       # Multi-LoRA 준비 - adapter 가 아직 없어도 켜 둔다. 승인된 LoRA 는
       # /v1/load_lora_adapter 로 올리고 worker_model_registry.json 에 적는다.
       - --enable-lora
+      - --lora-modules
+      - ${WORKER_LORA_ADAPTER_NAME:-hgfinance-awq-arithmetic-2epoch}=/tmp/adapter
       - --max-loras
       - "4"
       - --max-lora-rank

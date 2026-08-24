@@ -3405,10 +3405,11 @@ class CeoSupervisorService:
                     },
                 )
 
-        # Trading/Quant terminal results are projected to their existing
-        # Notion databases as a non-binding observer. Research/Risk/
-        # Accounting/QA/HR retain their native reporters, so this projector
-        # deliberately skips them.
+        # Department terminal results are projected to explicitly wired
+        # Notion databases as a non-binding observer. Research/Risk native
+        # reporters remain responsible for their standalone pipelines; the
+        # optional DB wiring here covers the separate CEO/Kanban boundary and
+        # is idempotent per terminal task title.
         try:
             department_projection = self._department_notion_projection.project(
                 root_task_id=root_task_id,

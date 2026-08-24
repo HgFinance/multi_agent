@@ -255,6 +255,9 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  # 조건부 거래 평가의 bounded retention 인덱스와 기존
                  # worker principal 재사용 권한을 등록한다.
                  "20260824000900_conditional_rule_retention.sql",
+                 # 복합 PAPER 활성화가 연결된 즉시 주문 상태를 읽을 수
+                 # 있도록 조건부 워커에 요청 테이블 SELECT 정책을 준다.
+                 "20260824001000_conditional_worker_bundle_request_read.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 

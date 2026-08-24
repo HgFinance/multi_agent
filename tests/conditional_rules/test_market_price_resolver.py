@@ -115,7 +115,7 @@ def test_shared_realtime_tick_resolver_reads_one_latest_tick_by_instrument() -> 
     event_time = datetime(2026, 8, 24, 5, 0, tzinfo=timezone.utc)
     observed_at = datetime(2026, 8, 24, 5, 0, 1, tzinfo=timezone.utc)
     pool = FakePool((event_time, observed_at, "258000", "KRX", "LS"))
-    resolver = LSTimescaleMarketPriceResolver(pool)
+    resolver = LSTimescaleMarketPriceResolver(pool, lookback_days=7)
 
     snapshot = resolver.snapshot_for_instrument("005930", instrument_id)
 
@@ -123,8 +123,9 @@ def test_shared_realtime_tick_resolver_reads_one_latest_tick_by_instrument() -> 
     assert snapshot.price == Decimal("258000")
     assert snapshot.observed_at == observed_at
     assert snapshot.source == "LS_REALTIME_TICK:LS:KRX"
-    assert pool.connection.cursor_instance.executed[1][1] == (instrument_id,)
+    assert pool.connection.cursor_instance.executed[1][1] == (instrument_id, 7)
     assert "market.market_ticks" in pool.connection.cursor_instance.executed[1][0]
+    assert "event_time >= now()" in pool.connection.cursor_instance.executed[1][0]
     assert "limit 1" in pool.connection.cursor_instance.executed[1][0].lower()
     assert pool.connection.commits == 1
     assert pool.returned == [pool.connection]

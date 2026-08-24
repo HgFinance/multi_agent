@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import sys
@@ -20,7 +21,6 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
-
 
 HERE = Path(__file__).resolve().parent
 ACCOUNTING_ROOT = HERE.parent
@@ -39,7 +39,32 @@ from ledger import (  # noqa: E402
     JournalLine,
     Ledger,
 )
-from repository import LedgerRepository  # noqa: E402
+
+
+def _load_ledger_repository():
+    """Resolve the accounting repository without cross-department collisions."""
+
+    try:
+        from repository import LedgerRepository as repository_type  # noqa: E402
+
+        return repository_type
+    except ImportError:
+        # Several legacy department entry points expose a top-level
+        # ``repository`` module. If another department was imported first in
+        # a long-lived process, load the accounting sibling by its file path
+        # instead of accepting the wrong repository implementation.
+        path = LEDGER_ROOT / "repository.py"
+        spec = importlib.util.spec_from_file_location(
+            "_hgfinance_accounting_ledger_repository", path
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load accounting repository: {path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.LedgerRepository
+
+
+LedgerRepository = _load_ledger_repository()
 
 
 class LSPaperAlignmentError(RuntimeError):

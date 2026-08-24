@@ -131,7 +131,11 @@ class FeedbackConfig:
             state_path=os.getenv("LANGSMITH_FEEDBACK_STATE_PATH", "/var/lib/portfolio/langsmith-feedback.sqlite3").strip()
             or "/var/lib/portfolio/langsmith-feedback.sqlite3",
             poll_seconds=_float("LANGSMITH_FEEDBACK_POLL_SECONDS", 30.0, 5.0, 300.0),
-            lookback_seconds=_int("LANGSMITH_FEEDBACK_LOOKBACK_SECONDS", 180, 30, 86_400),
+            # Discovery is based on completed roots' end_time, not only their
+            # start_time.  Keep a bounded completion window so a long-running
+            # workflow can still be found after it finishes without scanning
+            # the whole project.
+            lookback_seconds=_int("LANGSMITH_FEEDBACK_LOOKBACK_SECONDS", 900, 30, 86_400),
             batch_size=_int("LANGSMITH_FEEDBACK_BATCH_SIZE", 25, 1, 100),
             max_pending=_int("LANGSMITH_FEEDBACK_MAX_PENDING", 500, 10, 10_000),
             retention_days=_int("LANGSMITH_FEEDBACK_RETENTION_DAYS", 30, 1, 365),
@@ -874,12 +878,39 @@ class LangSmithFeedbackService:
             client = Client(hide_inputs=True, hide_outputs=True, hide_metadata=False)
             now = datetime.now(timezone.utc)
             since = now - timedelta(seconds=self.config.lookback_seconds)
-            for run in client.list_runs(
-                project_name=self.config.workflow_project,
-                is_root=True,
-                start_time=since,
-                select=["id", "name", "status", "start_time", "end_time", "extra"],
-            ):
+            # A root may start before the observation window and finish inside
+            # it (the common case for a multi-worker advisory).  Filtering by
+            # start_time alone silently loses that root.  Use the server-side
+            # end_time filter and keep a bounded page; the SQLite source-run
+            # key makes repeated pages idempotent and the next poll catches
+            # older rows when the page is full.
+            root_filter = f'gt(end_time, "{since.isoformat()}")'
+            root_limit = min(100, max(self.config.batch_size * 4, self.config.batch_size))
+            try:
+                root_runs = client.list_runs(
+                    project_name=self.config.workflow_project,
+                    is_root=True,
+                    filter=root_filter,
+                    end_time=now,
+                    limit=root_limit,
+                    select=["id", "name", "status", "start_time", "end_time", "extra"],
+                )
+                root_runs = list(root_runs)
+            except Exception as exc:  # noqa: BLE001 - preserve SDK compatibility
+                LOGGER.warning(
+                    "langsmith_feedback_end_time_query_fallback error=%s",
+                    type(exc).__name__,
+                )
+                root_runs = list(
+                    client.list_runs(
+                        project_name=self.config.workflow_project,
+                        is_root=True,
+                        start_time=since,
+                        limit=root_limit,
+                        select=["id", "name", "status", "start_time", "end_time", "extra"],
+                    )
+                )
+            for run in root_runs:
                 observation = observation_from_run(run)
                 if not observation.source_run_id or not observation.ended_at:
                     continue

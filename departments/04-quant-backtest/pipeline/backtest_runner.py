@@ -2516,7 +2516,11 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
             # ▶ **원본 행을 붙들지 않는다** (2026-08-14 실측)
             #   `load_dataset` 이 돌려준 dict 리스트(v3 = 725만 행)와
             #   `Market` 이 동시에 살아 있으면 같은 데이터를 두 벌 든다.
-            del rows
+            # Rebind instead of deleting the local name.  The preparation
+            # handler below still needs the rows when Market.from_rows rejects
+            # non-chronological input, while a successful materialization must
+            # release the large loader list before attaching microstructure.
+            rows = None
             gc.collect()
             # ▶ 신호가 요구하면 미시구조를 붙인다(2026-08-14).
             _micro_n = attach_micro_if_needed(market, config, conn)
@@ -2536,7 +2540,7 @@ def register_and_run(name: str, version: str, *, seed: int = 0,
                 if isinstance(
                         preparation_error, UnmeasuredAdjustmentOrderingError):
                     audit = _ordering_failure_audit_manifest(
-                        rows, preparation_error)
+                        rows or [], preparation_error)
                 else:
                     audit = _failure_adjustment_audit_manifest(
                         market, preparation_error)

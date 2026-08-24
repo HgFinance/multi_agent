@@ -104,6 +104,10 @@ _PATTERNS = (
         r"|(?i:(?:ungated|gated|opposite[- ]?sign|negative[- ]?sign|wide[- ]?spread|tight[- ]?spread|freshness|selection|queue[- ]?only|tightness[- ]?only|interaction).{0,80}"
         r"(?:performs equally|equally strong|not weaker|no (?:incremental|improvement|difference)|indistinguishable|does not survive|as strong as))"
         r"|(?:통제|게이트|고변동성|저변동성).{0,80}(?:증분되지 않음|차별 없음|우월하지 않음))")),
+    ("control_comparison_korean", re.compile(
+        r"(?i)(?:raw\s+)?(?:microprice|midprice).{0,80}(?:대비|vs\.?|versus).{0,40}(?:증분|incremental).{0,30}(?:markout|효과).{0,20}(?:없|없음|none|absent)"
+        r"|(?:큐|queue|spread|게이트).{0,40}(?:하나|조건).{0,30}(?:제거|해제).{0,40}(?:효과|마크아웃).{0,20}(?:불변|동일|없)"
+        r"|\d+초.{0,30}(?:효과|마크아웃).{0,50}(?:\d+초|교차시간).{0,30}(?:부모|parent).{0,30}(?:우월하지 않음|차별 없음|동일|not superior)")),
     ("alignment_audit", re.compile(
         r"(?i:(?:latency|timestamp|quote[- ]?trade).{0,50}"
         r"(?:alignment|misalignment|audit|정렬|오류|overlap).{0,40}"
@@ -237,6 +241,17 @@ def _criteria_texts(criteria) -> list[str]:
         items = list(criteria)
         merged: list = []
         for item in items:
+            # A legacy writer split one comparison list into independent
+            # entries, e.g. "over tape-only", "divergence-only",
+            # "convergence and opposite-sign controls". Rejoin only
+            # short lowercase comparison fragments; ordinary criteria remain
+            # separate and no prose is invented.
+            if (merged and isinstance(merged[-1], str) and isinstance(item, str)
+                    and " over " in merged[-1].lower()
+                    and re.fullmatch(r"[a-z][a-z0-9-]*(?:\s+and\s+[a-z][a-z0-9-]*)*"
+                                    r"(?:\s+controls?)?", item.strip(), re.I)):
+                merged[-1] = merged[-1].rstrip() + " " + item.strip()
+                continue
             if (merged and isinstance(merged[-1], str) and isinstance(item, str)
                     and merged[-1].strip() not in {"note", "fragility_rules"}
                     and (merged[-1].endswith((" ", "\t", "\n"))

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -11,7 +12,12 @@ sys.path.insert(0, str(QA_DIR))
 import qa_employee_workers
 from qa_employee_workers import _audit_tool, qa_runner, run_employee_workers
 
-import scripts as qa_scripts
+_SCRIPTS_SPEC = importlib.util.spec_from_file_location(
+    "qa_employee_scripts", QA_DIR / "scripts.py"
+)
+assert _SCRIPTS_SPEC and _SCRIPTS_SPEC.loader
+qa_scripts = importlib.util.module_from_spec(_SCRIPTS_SPEC)
+_SCRIPTS_SPEC.loader.exec_module(qa_scripts)
 
 
 def _llm(_system: str, _prompt: str) -> str:

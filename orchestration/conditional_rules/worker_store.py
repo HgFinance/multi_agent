@@ -168,7 +168,11 @@ class PostgresRuleWorkerStore:
                        and rule.state in ('PENDING_CONFIRMATION','EXPIRED')
                      order by bundle.updated_at,bundle.bundle_id
                      limit %s
-                     for update of bundle,rule,request skip locked
+                     -- The request row is read-only here.  Lock only the rows
+                     -- transitioned by this worker so its read-only RLS policy
+                     -- is sufficient and another worker cannot claim the same
+                     -- bundle/rule transition.
+                     for update of bundle,rule skip locked
                     """,
                     (max(1, min(limit, 1000)),),
                 )

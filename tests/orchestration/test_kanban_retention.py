@@ -223,6 +223,44 @@ def test_active_reconstruction_excludes_archived_rows() -> None:
     assert calls == [False]
 
 
+def test_active_root_reconstruction_is_bounded_parallel(tmp_path: Path) -> None:
+    started = threading.Barrier(2)
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def loader(_root_id: str, **_):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            started.wait(timeout=2)
+            return _workflow()
+        finally:
+            with lock:
+                active -= 1
+
+    worker = RetentionWorker(
+        maintenance=FakeMaintenance(),
+        audit=AuditStore(tmp_path / "audit.db"),
+        workflow_loader=loader,
+        row_lister=lambda **_: [],
+        root_workers=2,
+    )
+
+    results = list(
+        worker._inspect_active_roots(
+            ("root-one", "root-two"),
+            active_rows=(),
+            now=NOW,
+        )
+    )
+
+    assert len(results) == 2
+    assert max_active == 2
+
+
 def test_archive_then_purge_preserves_audit_and_forbids_under_7_days(tmp_path: Path) -> None:
     maintenance = FakeMaintenance()
     audit = AuditStore(tmp_path / "retention-audit.db")

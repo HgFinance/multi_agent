@@ -12,6 +12,7 @@ rows are held in memory only while a candidate is being evaluated.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import json
 import logging
 import os
@@ -1044,6 +1045,7 @@ class RetentionWorker:
         dry_run: bool = False,
         allow_purge: bool = True,
         max_archive_roots: int | None = None,
+        root_workers: int | None = None,
         artifact_cleanup: Callable[[Sequence[str]], tuple[int, int]] | None = None,
     ) -> None:
         self.maintenance = maintenance
@@ -1059,6 +1061,16 @@ class RetentionWorker:
         if max_archive_roots is not None and max_archive_roots <= 0:
             raise ValueError("max_archive_roots must be positive")
         self.max_archive_roots = max_archive_roots
+        configured_root_workers = (
+            root_workers
+            if root_workers is not None
+            else self.environment.get("KANBAN_RETENTION_ROOT_WORKERS", "2")
+        )
+        try:
+            configured_root_workers = int(configured_root_workers)
+        except (TypeError, ValueError):
+            configured_root_workers = 2
+        self.root_workers = max(1, min(configured_root_workers, 4))
 
     def _load(
         self,
@@ -1080,6 +1092,82 @@ class RetentionWorker:
         if accepts_listed_rows:
             kwargs["listed_rows"] = listed_rows
         return self.workflow_loader(root_id, **kwargs)
+
+    def _inspect_active_root(
+        self,
+        root_id: str,
+        *,
+        active_rows: Sequence[Mapping[str, Any]],
+        now: int,
+    ) -> tuple[str, Workflow | None, RetentionDecision | None, str | None]:
+        """Reconstruct and evaluate one root without mutating the board."""
+
+        try:
+            workflow = self._load(
+                root_id,
+                include_archived=False,
+                listed_rows=active_rows,
+            )
+            decision = evaluate_workflow(
+                workflow,
+                now=now,
+                delivery=self.delivery_reader.state(workflow),
+            )
+            return root_id, workflow, decision, None
+        except (KanbanTaskNotFound, KanbanUnavailable, RetentionError, sqlite3.Error) as exc:
+            return root_id, None, None, f"maintenance_error:{type(exc).__name__}"
+
+    def _inspect_active_roots(
+        self,
+        root_ids: Sequence[str],
+        *,
+        active_rows: Sequence[Mapping[str, Any]],
+        now: int,
+    ) -> Iterable[tuple[str, Workflow | None, RetentionDecision | None, str | None]]:
+        """Inspect roots in a small pool while keeping workflow graphs bounded."""
+
+        if not root_ids:
+            return
+        workers = min(self.root_workers, len(root_ids))
+        if workers == 1:
+            for root_id in root_ids:
+                yield self._inspect_active_root(root_id, active_rows=active_rows, now=now)
+            return
+
+        # Keep only ``workers`` futures in flight. Replenishing as soon as a
+        # root completes avoids head-of-line blocking when one Hermes CLI call
+        # is slow, while still bounding reconstructed workflow graphs and
+        # subprocess memory.
+        with ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix="kanban-retention",
+        ) as pool:
+            root_iter = iter(root_ids)
+            futures = {
+                pool.submit(
+                    self._inspect_active_root,
+                    root_id,
+                    active_rows=active_rows,
+                    now=now,
+                )
+                for root_id in [next(root_iter, None) for _ in range(workers)]
+                if root_id is not None
+            }
+            while futures:
+                done, _pending = wait(futures, return_when=FIRST_COMPLETED)
+                for future in done:
+                    futures.remove(future)
+                    yield future.result()
+                    next_root = next(root_iter, None)
+                    if next_root is not None:
+                        futures.add(
+                            pool.submit(
+                                self._inspect_active_root,
+                                next_root,
+                                active_rows=active_rows,
+                                now=now,
+                            )
+                        )
 
     def run_once(self) -> RetentionRun:
         now = int(self.clock())
@@ -1170,29 +1258,24 @@ class RetentionWorker:
 
         purge_rows = () if self.dry_run or not self.allow_purge else self.audit.purge_candidates(now=now)
         recovery_ms = (time.perf_counter() - recovery_started) * 1000
-        for root_id in root_ids:
-            try:
-                workflow = self._load(
-                    root_id,
-                    include_archived=False,
-                    listed_rows=active_rows,
-                )
-                decision = evaluate_workflow(
-                    workflow,
-                    now=now,
-                    delivery=self.delivery_reader.state(workflow),
-                )
-                if not decision.eligible:
-                    skipped.append((root_id, decision.reason))
-                    blocked_reasons[retention_block_category(decision.reason)] += 1
-                    continue
-                eligible_root_ids_list.append(root_id)
-                eligible_task_count += len(workflow.nodes)
-                if self.max_archive_roots is None or len(archive_records) < self.max_archive_roots:
-                    archive_records.append((root_id, workflow, decision))
-            except (KanbanTaskNotFound, KanbanUnavailable, RetentionError, sqlite3.Error) as exc:
-                skipped.append((root_id, f"maintenance_error:{type(exc).__name__}"))
+        for root_id, workflow, decision, error in self._inspect_active_roots(
+            root_ids,
+            active_rows=active_rows,
+            now=now,
+        ):
+            if error is not None:
+                skipped.append((root_id, error))
                 blocked_reasons["UNKNOWN/LEGACY"] += 1
+                continue
+            assert workflow is not None and decision is not None
+            if not decision.eligible:
+                skipped.append((root_id, decision.reason))
+                blocked_reasons[retention_block_category(decision.reason)] += 1
+                continue
+            eligible_root_ids_list.append(root_id)
+            eligible_task_count += len(workflow.nodes)
+            if self.max_archive_roots is None or len(archive_records) < self.max_archive_roots:
+                archive_records.append((root_id, workflow, decision))
 
         eligible_root_ids = tuple(eligible_root_ids_list)
         would_archive_root_ids = tuple(root_id for root_id, _workflow, _decision in archive_records)
