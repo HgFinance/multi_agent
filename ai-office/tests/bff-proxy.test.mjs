@@ -19,6 +19,7 @@ test("proxy prefix matches only the BFF namespace", () => {
 
 test("BFF base falls back, trims, and rejects unsafe origins", () => {
   assert.equal(resolveBffBase({}), "http://127.0.0.1:8001");
+  assert.equal(resolveBffBase(undefined), "http://127.0.0.1:8001");
   assert.equal(resolveBffBase({ NEXT_PUBLIC_BFF_URL: "http://127.0.0.1:8001/" }), "http://127.0.0.1:8001");
   assert.equal(resolveBffBase({ BFF_ORIGIN: "https://bff.example.com", NEXT_PUBLIC_BFF_URL: "http://127.0.0.1:8001" }), "https://bff.example.com");
   for (const bad of ["ftp://bff.example.com", "http://user:pw@bff.example.com", "http://bff.example.com/?x=1", "not-a-url"]) {

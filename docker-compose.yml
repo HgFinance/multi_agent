@@ -1245,6 +1245,43 @@ services:
     cpus: 0.5
     pids_limit: 64
 
+  # Canonical AI Office frontend.  This is separate from the Hermes dashboard:
+  # it serves the read-only operator UI and sends browser calls through its
+  # same-origin /bff proxy to portfolio-bff.  No Hermes credentials or Docker
+  # socket are exposed to this container.
+  ai-office:
+    build:
+      context: .
+      dockerfile: ai-office/Dockerfile
+      args:
+        # This is a non-secret Discord→public UUID fixture binding used by the
+        # existing closed-network UI contract; secrets are never build args.
+        DISCORD_ACTOR_MAP: ${DISCORD_ACTOR_MAP:-}
+    container_name: hedgefund-ai-office
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      portfolio-bff:
+        condition: service_healthy
+    environment:
+      BFF_ORIGIN: ${AI_OFFICE_BFF_ORIGIN:-http://portfolio-bff:8000}
+    ports:
+      - "127.0.0.1:${AI_OFFICE_PORT:-3004}:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    mem_limit: 768m
+    mem_reservation: 256m
+    cpus: 1.0
+    pids_limit: 128
+
   # qa-worker: Risk Decision Stream을 QA Audit 수신 이력으로 적재한다(qa_events/worker.py).
   # audit-api와 같은 Image, command만 다르다(계획서 3.1). REDIS_URL 없으면 즉시 종료하는
   # 프로세스라 여기서는 `:?`로 필수 처리한다(다른 서비스는 REDIS_URL이 선택值).

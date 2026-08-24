@@ -53,6 +53,9 @@ services:
     volumes:
       # EBS Runtime Cache (§8.4). adapters/ 하위는 LoRA 승격 시 쓴다.
       - ${HGF_MODEL_DIR:-/opt/hgfinance/models}:/models
+      # Persist vLLM/Torch compile artifacts across restarts. Without this,
+      # a cold restart repeats the highest-RAM compile path on an L4 host.
+      - ${VLLM_CACHE_DIR:-/tmp/hgfinance-runtime-vllm-cache}:/root/.cache
     command:
       - --model
       - /models/${WORKER_BASE_MODEL_DIRNAME:-Qwen2.5-14B-Instruct-AWQ}
@@ -72,6 +75,7 @@ services:
       # KV 를 FP8 로 - 24GB 에서 동시성 여유가 이걸로 벌어진다
       - --kv-cache-dtype
       - ${VLLM_KV_CACHE_DTYPE:-fp8}
+      - --enable-prefix-caching
       # Multi-LoRA 준비 - adapter 가 아직 없어도 켜 둔다. 승인된 LoRA 는
       # /v1/load_lora_adapter 로 올리고 worker_model_registry.json 에 적는다.
       - --enable-lora

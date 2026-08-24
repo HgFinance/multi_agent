@@ -205,12 +205,7 @@ export default function DepartmentInspector({
       ) : null}
       {/* 회계는 주문 상태가 아니라 확정된 거래와 비용을 본다. 같은 패널을
           돌려 쓰면 미확정 주문이 장부 화면에 올라온다. */}
-      {department.domain === "accounting" ? (
-        <div className="flex flex-col gap-3">
-          <GroupHeading index={1} title="결산·원장 상태" hint="확정 · 미결제 · 비용" />
-          <AccountingLedgerPanel />
-        </div>
-      ) : null}
+      {department.domain === "accounting" ? <AccountingLedgerPanel /> : null}
       {department.domain === "workforce" ? (
         <div className="flex flex-col gap-6">
           <div className="flex flex-col gap-3">

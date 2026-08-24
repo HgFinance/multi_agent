@@ -52,8 +52,18 @@ export interface BffProxyEnv {
 }
 
 /** 신뢰할 수 있는 BFF base URL만 통과시킨다. */
-export function resolveBffBase(env: BffProxyEnv): string {
-  const configured = (env.BFF_ORIGIN ?? env.NEXT_PUBLIC_BFF_URL ?? "").trim();
+export function resolveBffBase(env: BffProxyEnv | undefined): string {
+  // Cloudflare supplies `env`; vinext's Node production server invokes the
+  // Worker entry with an undefined binding object.  Keep the same allowlist
+  // in both runtimes and use the private process env only on the Node side.
+  const processEnv = typeof process !== "undefined" ? process.env : undefined;
+  const configured = (
+    env?.BFF_ORIGIN ??
+    env?.NEXT_PUBLIC_BFF_URL ??
+    processEnv?.BFF_ORIGIN ??
+    processEnv?.NEXT_PUBLIC_BFF_URL ??
+    ""
+  ).trim();
   const candidate = configured || DEFAULT_BFF_ORIGIN;
   let parsed: URL;
   try {

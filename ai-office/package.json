@@ -9,7 +9,7 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "node --experimental-strip-types --import ./tests/register-ts-loader.mjs --test tests/office-simulation.test.mjs tests/mandate-interview.test.mjs tests/kanban-url.test.mjs tests/auth-boundary.test.mjs tests/paper-order.test.mjs tests/risk-mandate-panel.test.mjs tests/ceo-operations-panel.test.mjs tests/trading-portfolio-panel.test.mjs tests/accounting-ledger-panel.test.mjs tests/bff-proxy.test.mjs tests/ceo-client.test.mjs",
+    "test": "node --experimental-strip-types --import ./tests/register-ts-loader.mjs --test tests/office-simulation.test.mjs tests/mandate-interview.test.mjs tests/kanban-url.test.mjs tests/auth-boundary.test.mjs tests/paper-order.test.mjs tests/risk-mandate-panel.test.mjs tests/ceo-operations-panel.test.mjs tests/trading-portfolio-panel.test.mjs tests/bff-proxy.test.mjs tests/ceo-client.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },
