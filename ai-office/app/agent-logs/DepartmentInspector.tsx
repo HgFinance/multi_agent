@@ -11,6 +11,7 @@ import LivePortfolioPanel from "../components/LivePortfolioPanel";
 import QaLangsmithPanel from "../components/QaLangsmithPanel";
 import ResearchPanel from "../components/ResearchPanel";
 import WorkerPerformancePanel from "../components/WorkerPerformancePanel";
+import WorkforceCapacityPanel from "../components/WorkforceCapacityPanel";
 import WorkforceIdleAgentsPanel from "../components/WorkforceIdleAgentsPanel";
 import WorkforceLifecyclePanel from "../components/WorkforceLifecyclePanel";
 import WorkforceRosterPanel from "../components/WorkforceRosterPanel";
@@ -195,9 +196,10 @@ export default function DepartmentInspector({
             <GroupHeading
               index={2}
               title="성과 및 효율성"
-              hint="Quality+Capacity+Cost 통합 Scorecard 연동 예정"
+              hint="Capacity는 Langfuse 실측 연동 완료 — Quality+Cost 통합 Scorecard는 아직 연동 전"
             />
             <WorkerPerformancePanel metrics={data.metrics} />
+            <WorkforceCapacityPanel />
             <WorkforceIdleAgentsPanel />
           </div>
           <div className="flex flex-col gap-3">
