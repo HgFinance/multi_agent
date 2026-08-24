@@ -66,8 +66,8 @@ class HermesCreateBoundaryTest(unittest.TestCase):
             result = hermes_boundary.create_kanban_task(
                 assignee="risk-management",
                 title="risk",
-                body="body",
-                idempotency_key="id-1",
+                body="workflow_root_task_id=root\nworkflow_role=primary\nbody",
+                idempotency_key="root:primary:risk-management",
             )
         self.assertEqual(result["task_id"], "task-1")
         command = run.call_args.args[0]

@@ -66,6 +66,12 @@ ACCOUNTING_LEDGER_DATABASE_ROLE = "svc_accounting_ledger"
 
 def durable_required_from_env() -> bool:
     mode = os.environ.get("ACCOUNTING_MODE", "").strip().upper()
+    # An explicit offline mode is the operator/test contract.  It must win
+    # over inherited PAPER_DB or ACCOUNTING_DURABLE_REQUIRED values from a
+    # shared .env; otherwise importing another service can silently turn an
+    # offline E2E read into a durable-database failure.
+    if mode == "OFFLINE":
+        return False
     flag = os.environ.get("ACCOUNTING_DURABLE_REQUIRED", "").strip().lower()
     paper_db = os.environ.get("PAPER_DB", "").strip().lower()
     return (

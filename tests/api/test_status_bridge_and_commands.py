@@ -6,6 +6,7 @@ import os
 import unittest
 
 os.environ["DATABASE_URL"] = ""
+os.environ["ACCOUNTING_MODE"] = "OFFLINE"
 os.environ["ENABLE_AGENT_ASK"] = "0"
 
 from fastapi.testclient import TestClient

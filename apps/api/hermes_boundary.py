@@ -61,6 +61,22 @@ ENABLE_AGENT_ASK = os.getenv("ENABLE_AGENT_ASK", "false").strip().lower() in {
 }
 
 
+def agent_ask_enabled() -> bool:
+    """Resolve the feature flag at call time, without import-order leakage.
+
+    ``main`` and the domain routers are imported by several E2E modules.  A
+    module-level snapshot made the first import win, so a later test or
+    deployment environment could change ``ENABLE_AGENT_ASK`` without changing
+    the behavior.  Keep the constant for compatibility with existing callers
+    that patch it, while honoring an explicitly present environment value.
+    """
+
+    configured = os.getenv("ENABLE_AGENT_ASK")
+    if configured is None:
+        return ENABLE_AGENT_ASK
+    return configured.strip().lower() in {"1", "true", "yes", "on"}
+
+
 class AgentAsk(BaseModel):
     """부서 Agent 질의 Body. 부서 이름이 없는 것이 이 계약의 핵심이다."""
 
@@ -533,7 +549,7 @@ def ask(
     `enabled` 는 어느 스위치가 이 호출을 허가했는지 호출자가 명시하는 자리다.
     기본은 지금까지처럼 `ENABLE_AGENT_ASK` 다.
     """
-    if not (ENABLE_AGENT_ASK if enabled is None else enabled):
+    if not (agent_ask_enabled() if enabled is None else enabled):
         raise HTTPException(
             503,
             "Agent 질의는 인증·Tool Allowlist 연결 전까지 기본 비활성화 상태입니다.",

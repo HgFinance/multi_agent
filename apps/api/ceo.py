@@ -526,6 +526,12 @@ def _planning_acknowledgement(task: Mapping[str, object]) -> dict[str, object]:
     planned, planned_qa, planned_synthesis = _planning_profiles(task)
     selected, qa_required, synthesis_present = _materialized_planning_profiles(task)
     qa_materialized, qa_legacy_primary_present = _qa_materialization_facts(task)
+    planned_departments = list(planned)
+    if planned_qa and "qa-department" not in planned_departments:
+        # QA is a governance lane, not an analysis primary.  It still belongs
+        # in the durable *planned* set; ``selected_departments`` remains the
+        # materialized primary set so the UI never claims an uncreated child.
+        planned_departments.append("qa-department")
     body = str(task.get("body") or "")
     workflow_mode = (
         "binding"
@@ -567,7 +573,7 @@ def _planning_acknowledgement(task: Mapping[str, object]) -> dict[str, object]:
         "status": "planned" if materialized else "accepted",
         "planning": {
             "selected_departments": selected,
-            "planned_departments": planned,
+            "planned_departments": planned_departments,
             "materialized_departments": selected,
             "steps": steps,
             "qa_required": qa_required,

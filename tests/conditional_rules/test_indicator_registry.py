@@ -38,6 +38,25 @@ from orchestration.conditional_rules.worker_store import ActiveRule
 NOW = datetime(2026, 8, 20, 1, 0, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def no_live_ls_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep registry contract tests offline even when another module loads .env."""
+
+    for name in (
+        "LS_ENV",
+        "LS_APP_KEY",
+        "LS_APP_KEY_LIVE",
+        "LS_APP_KEY_PAPER",
+        "LS_APP_SECRET_KEY",
+        "LS_APP_SECRET_KEY_LIVE",
+        "LS_APP_SECRET_KEY_PAPER",
+        "LS_REST_BASE_URL",
+        "LS_REST_BASE_URL_LIVE",
+        "LS_REST_BASE_URL_PAPER",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 def _rule(condition: dict, *, clock: str = "BAR_CLOSE", timeframe: str = "1D") -> ConditionalRuleSpec:
     evaluation = {"clock": clock}
     if clock == "BAR_CLOSE":

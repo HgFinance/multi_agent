@@ -1230,7 +1230,7 @@ def health() -> dict:
     return {
         "status": "ok",
         "mode": "DEMO",
-        "agent_ask_enabled": hermes_boundary.ENABLE_AGENT_ASK,
+        "agent_ask_enabled": hermes_boundary.agent_ask_enabled(),
         # 부서 Agent 호출이 어느 런타임으로 나가는지. BFF 가 컨테이너로 뜨면
         # `hermes` 바이너리가 그 안에 없어 `docker exec` 로 나가야 한다 - 그 상태를
         # 화면에서 구분할 수 있어야 "열려 있는 줄 알았다"가 없다.

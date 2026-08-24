@@ -70,7 +70,7 @@ def agent_ask(req: hermes_boundary.AgentAsk) -> dict:
     # **게이트가 라우팅보다 먼저다.** L0 이 모델을 안 부른다고 해서 비활성 엔드포인트가
     # 일부만 열리면, 최적화가 조용히 보안 경계를 깎은 것이 된다. 라우팅은 게이트 안쪽의
     # 비용 최적화일 뿐이다.
-    if not hermes_boundary.ENABLE_AGENT_ASK:
+    if not hermes_boundary.agent_ask_enabled():
         raise HTTPException(
             503,
             "Agent 질의는 인증·Tool Allowlist 연결 전까지 기본 비활성화 상태입니다.",

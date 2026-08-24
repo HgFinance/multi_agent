@@ -678,12 +678,14 @@ class CeoTaskApiTest(unittest.TestCase):
         self.assertEqual(body["status"], "running")
         self.assertEqual(body["root_task_id"], ROOT_ID)
         self.assertEqual(
-            body["workflow"],
-            {
-                "selected_departments": ["research-department", "risk-management"],
-                "qa_required": True,
-            },
+            body["workflow"]["selected_departments"],
+            ["research-department", "risk-management"],
         )
+        self.assertTrue(body["workflow"]["qa_required"])
+        self.assertTrue(body["workflow"]["qa_enabled"])
+        self.assertFalse(body["workflow"]["qa_blocks_response"])
+        self.assertTrue(body["workflow"]["qa_materialized"])
+        self.assertFalse(body["workflow"]["qa_legacy_primary_present"])
         self.assertEqual(
             body["progress"],
             {"primary_total": 2, "primary_done": 1, "qa": "todo", "synthesis": "todo"},

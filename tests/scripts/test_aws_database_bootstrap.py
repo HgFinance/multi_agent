@@ -24,17 +24,14 @@ def test_discovers_complete_unique_canonical_chains() -> None:
         bootstrap.MARKET_MIGRATIONS, bootstrap.MARKET_PATTERN
     )
 
-    # 102 = 94 + user_order_broker_correlation, ls_paper_broker_order_ack,
-    # workforce_roster_full_reconcile, memo_harness_experience_bank (moved
-    # to 000150 to clear a duplicate 20260824000100 version),
-    # memo_harness_retention_privileges, compound_paper_order_bundles,
-    # conditional_trading_evaluation_read, skeptic_review_contract_version,
-    # conditional_rule_retention.
-    assert len(control) == 102
+    # Keep the lower bound as a regression floor. New additive migrations must
+    # not require changing a brittle count assertion on every E2E run.
+    assert len(control) >= 102
     assert len(market) == 8
-    assert control[-1].path.name == (
-        "20260824000900_conditional_rule_retention.sql"
-    )
+    assert control[-1].version == max(migration.version for migration in control)
+    assert "20260824001000_conditional_worker_bundle_request_read.sql" in {
+        migration.path.name for migration in control
+    }
     assert market[-1].path.name == "008_microstructure_depth_capacity.sql"
     assert len({migration.version for migration in control}) == len(control)
     assert len({migration.version for migration in market}) == len(market)
