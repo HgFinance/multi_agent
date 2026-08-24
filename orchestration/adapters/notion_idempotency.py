@@ -54,6 +54,14 @@ def _page_id(value: Any) -> str | None:
     return None
 
 
+def _has_existing(value: Any) -> bool:
+    if isinstance(value, Mapping) and value.get("__notion_existing__"):
+        return True
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return bool(value)
+    return bool(_page_id(value))
+
+
 def _claim_key(namespace: str, database_id: str, projection_key: str) -> str:
     digest = sha256(
         f"{namespace}\0{database_id}\0{projection_key}".encode("utf-8")
@@ -109,7 +117,7 @@ class _Claim(AbstractContextManager["_Claim"]):
                 # before writing the done marker.  Re-query before waiting.
                 found = self.lookup()
                 found_id = _page_id(found)
-                if found_id:
+                if _has_existing(found):
                     self._mark_done(found_id)
                     self.duplicate = True
                     self.page_id = found_id
@@ -230,7 +238,7 @@ class NotionIdempotency:
                 return NotionIdempotencyResult(duplicate=True, page_id=claim.page_id)
             existing = lookup()
             existing_id = _page_id(existing)
-            if existing_id:
+            if _has_existing(existing):
                 claim.complete(existing_id)
                 return NotionIdempotencyResult(duplicate=True, page_id=existing_id)
             page = create()

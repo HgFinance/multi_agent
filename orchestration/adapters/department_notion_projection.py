@@ -20,6 +20,9 @@ from typing import Any
 
 from departments.notion_markdown import markdown_to_notion_blocks
 from orchestration.adapters.notion_schema_cache import BoundedNotionSchemaCache
+from orchestration.adapters.notion_idempotency import (
+    NotionIdempotency,
+)
 from orchestration.adapters.terminal_projection_utils import (
     iso_timestamp,
     merged_run_metadata,
@@ -284,6 +287,10 @@ class DepartmentNotionProjection:
         self.transport = transport
         self._transport_token: str | None = None
         self._schema_cache = BoundedNotionSchemaCache()
+        self._idempotency = NotionIdempotency(
+            self.env,
+            namespace="department-projection",
+        )
 
     def _transport_for(self, token: str) -> Any:
         if self.transport is None or (
@@ -402,25 +409,6 @@ class DepartmentNotionProjection:
 
         title = _task_title(task, department)
 
-        try:
-            existing = transport.query_title(
-                database_id,
-                title_property,
-                title,
-            )
-        except DepartmentNotionProjectionError as exc:
-            if exc.status == 400:
-                self._schema_cache.invalidate(database_id)
-            raise
-
-        if existing:
-            return DepartmentProjectionResult(
-                "duplicate",
-                department=department,
-                task_id=tid,
-                duplicate=True,
-            )
-
         metadata = merged_run_metadata(task)
         result_text = summary(task, metadata)
 
@@ -480,20 +468,33 @@ class DepartmentNotionProjection:
 
         children = markdown_to_notion_blocks(body)
 
-        try:
-            page = transport.create_page(
-                database_id,
-                props,
-                children,
-            )
-        except DepartmentNotionProjectionError as exc:
-            if exc.status == 400:
-                self._schema_cache.invalidate(database_id)
-            raise
+        def lookup() -> Sequence[Mapping[str, Any]]:
+            try:
+                return transport.query_title(database_id, title_property, title)
+            except DepartmentNotionProjectionError as exc:
+                if exc.status == 400:
+                    self._schema_cache.invalidate(database_id)
+                raise
+
+        def create() -> Mapping[str, Any]:
+            try:
+                return transport.create_page(database_id, props, children)
+            except DepartmentNotionProjectionError as exc:
+                if exc.status == 400:
+                    self._schema_cache.invalidate(database_id)
+                raise
+
+        result = self._idempotency.execute(
+            database_id,
+            f"{department}:{title}",
+            lookup=lookup,
+            create=create,
+        )
 
         return DepartmentProjectionResult(
-            "created",
+            "duplicate" if result.duplicate else "created",
             department=department,
             task_id=tid,
-            page_id=str(page.get("id") or "") or None,
+            page_id=result.page_id,
+            duplicate=result.duplicate,
         )
