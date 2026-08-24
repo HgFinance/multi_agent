@@ -28,10 +28,10 @@ from langgraph.types import Send
 from departments.employee_worker_runtime import (
     WorkerSpec,
     build_independent_worker_graph,
-    default_worker_llm,
     should_run,
     tools_for_specs,
 )
+from departments.worker_model_gateway import llm_for_worker
 from orchestration.adapters.ceo_task_planner import build_task_plan
 from orchestration.experience_bank import (
     ExperienceBank,
@@ -955,13 +955,23 @@ async def _invoke_worker(
         )
     configured_runtime = _configured_worker_runtime()
     use_ollama = configured_runtime in {"ollama", "live"}
-    worker_llm = default_worker_llm
+    # ▶ 2026-08-24: default_worker_llm(Ollama 하드코딩) 대신 Worker Model
+    #   Gateway(departments/worker_model_gateway.py)로 모델 좌표를 해석한다.
+    #   WORKER_MODEL_BASE_URL이 설정된 배포(vLLM/Qwen2.5-14B-AWQ)에서는 그
+    #   경로로 실제 호출이 나가고, 설정이 없으면 기존 DEV Ollama 기본값과
+    #   완전히 같은 값으로 떨어진다(gateway resolve()의 DEV fallback 계약) -
+    #   로컬 동작은 바뀌지 않는다. 이 교체 전에는 실제 서빙 중인 모델(vLLM)이
+    #   아니라 존재하지 않는 Ollama 엔드포인트를 계속 불러 latency는 찍히고
+    #   토큰(usage)은 영구 미측정이었다 - WorkerPerformancePanel "미측정"의
+    #   원인이 여기였다(evidence-wiring-audit, 2026-08-24).
+    gateway_llm, gateway_binding = llm_for_worker(spec.worker_id)
+    worker_llm = gateway_llm
     if str(payload.get("source", "TEST")).upper() == "TEST":
         # Let the operator projection observe a real running Worker graph in
         # local TEST mode; this does not create work or alter any result.
         await asyncio.sleep(float(os.getenv("PORTFOLIO_WORKER_UI_YIELD_SECONDS", "0.15")))
         worker_llm = (
-            default_worker_llm
+            gateway_llm
             if use_ollama
             else _deterministic_worker_llm
         )
@@ -969,9 +979,7 @@ async def _invoke_worker(
         worker_id=spec.worker_id,
         role=spec.role,
         stage=stage,
-        model_name=(os.getenv("OLLAMA_CHAT_MODEL") or "qwen3:1.7b")
-        if worker_llm is default_worker_llm
-        else "deterministic-test",
+        model_name=gateway_binding.model if worker_llm is gateway_llm else "deterministic-test",
     )
     try:
         with redacted_langfuse_worker_span(
