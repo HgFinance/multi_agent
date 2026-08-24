@@ -12,6 +12,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from qa_api_loader import load_qa_api
+
 import qa_events.redis_event_bus as event_bus_module
 from qa_events.redis_event_bus import (
     FORWARD_QA_DLQ_STREAM,
@@ -407,7 +409,7 @@ def test_explicit_poison_error_is_deterministic():
 
 
 def test_primary_bus_factory_configures_bounded_poison_dlq(monkeypatch):
-    from api import app as qa_app
+    qa_app = load_qa_api()
 
     configured = {}
 
@@ -436,7 +438,7 @@ def test_primary_bus_factory_configures_bounded_poison_dlq(monkeypatch):
 
 @pytest.mark.parametrize("poison_kind", ["malformed", "unsupported"])
 def test_primary_poison_does_not_starve_forward_qa(poison_kind):
-    from api import app as qa_app
+    qa_app = load_qa_api()
 
     client = FakeRedis()
     risk_bus = RedisEventBus(
@@ -492,7 +494,7 @@ def test_primary_poison_does_not_starve_forward_qa(poison_kind):
 
 
 def test_api_handler_unsupported_event_uses_bounded_dlq():
-    from api import app as qa_app
+    qa_app = load_qa_api()
 
     client = FakeRedis()
     bus = RedisEventBus(
@@ -519,7 +521,7 @@ def test_api_handler_unsupported_event_uses_bounded_dlq():
 
 
 def test_api_handler_database_unavailable_remains_pending(monkeypatch):
-    from api import app as qa_app
+    qa_app = load_qa_api()
 
     monkeypatch.setattr(qa_app, "_audit_repository", None)
     client = FakeRedis()

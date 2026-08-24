@@ -26,6 +26,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -35,6 +37,8 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+
+from orchestration.adapters.notion_idempotency import NotionIdempotency
 
 _DEV_VARS = _REPO_ROOT / "ai-office" / ".dev.vars"
 _NOTION_VERSION = "2022-06-28"
@@ -87,6 +91,9 @@ def _load_dev_vars() -> dict:
     """
     merged = _parse_env_file(_REPO_ROOT / ".env")
     merged.update({k: v for k, v in _parse_env_file(_DEV_VARS).items() if v})
+    redis_url = os.getenv("NOTION_IDEMPOTENCY_REDIS_URL") or os.getenv("REDIS_URL")
+    if redis_url:
+        merged.setdefault("NOTION_IDEMPOTENCY_REDIS_URL", redis_url)
     return merged
 
 
@@ -172,6 +179,7 @@ def upload_packet(packet: dict, *, symbol: str, report_md: str = "",
     if not token or not db_id:
         return {"ok": False,
                 "reason": "NOTION_TOKEN/NOTION_RESEARCH_DB 미설정 - 업로드 생략"}
+    rest: list[dict] = []
     try:
         payload = {"parent": {"database_id": db_id},
                    "properties": build_properties(packet, symbol=symbol)}
@@ -185,10 +193,49 @@ def upload_packet(packet: dict, *, symbol: str, report_md: str = "",
             #   append 로 이어 붙인다.
             payload["children"] = blocks[:_NOTION_MAX_CHILDREN]
             rest = blocks[_NOTION_MAX_CHILDREN:]
-        status, body = _post("pages", payload, token)
+
+        input_hash = str(packet.get("input_hash") or "").strip()
+        if not input_hash:
+            input_hash = hashlib.sha256(
+                json.dumps(packet, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+            ).hexdigest()
+        projection_key = f"{symbol}:{input_hash}"
+        idempotency = NotionIdempotency(env, namespace="research-reporter")
+
+        def lookup():
+            query_status, query_body = _post(
+                f"databases/{db_id}/query",
+                {
+                    "filter": {
+                        "property": "input_hash",
+                        "rich_text": {"equals": input_hash},
+                    },
+                    "page_size": 1,
+                },
+                token,
+            )
+            if query_status != 200:
+                raise RuntimeError(f"notion_query_failed:{query_status}")
+            return query_body.get("results") or []
+
+        def create():
+            create_status, create_body = _post("pages", payload, token)
+            if create_status != 200:
+                raise RuntimeError(f"notion_create_failed:{create_status}:{create_body}")
+            return create_body
+
+        result = idempotency.execute(
+            db_id,
+            projection_key,
+            lookup=lookup,
+            create=create,
+        )
+        if result.duplicate:
+            return {"ok": True, "duplicate": True}
+        body = result.page if isinstance(result.page, dict) else {}
     except Exception as e:  # noqa: BLE001 - Notion 은 구속력 없는 Projection 이다
         return {"ok": False, "reason": f"업로드 예외: {type(e).__name__}: {e}"[:200]}
-    if status == 200:
+    if body:
         page_id = body.get("id")
         appended, append_error = 0, None
         while rest and page_id:
@@ -210,7 +257,7 @@ def upload_packet(packet: dict, *, symbol: str, report_md: str = "",
             # 본문 일부가 빠졌다는 사실을 숨기지 않는다
             out["append_error"] = append_error
         return out
-    return {"ok": False, "status": status, "error": body.get("message", body)}
+    return {"ok": False, "reason": "Notion page creation returned no body"}
 
 
 # ---------------------------------------------------------------------------

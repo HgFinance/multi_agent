@@ -101,6 +101,7 @@ services:
       SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
       PORTFOLIO_RUNTIME_STORE_PATH: /var/lib/portfolio/runtime.sqlite3
       PORTFOLIO_RUNTIME_EMBEDDED_WORKER: "false"
+      PORTFOLIO_WORKER_RUNTIME: ${PORTFOLIO_WORKER_RUNTIME:-ollama}
       # Optional shared Qwen Worker model plane. When WORKER_MODEL_BASE_URL
       # is present, the Worker Model Gateway takes precedence over the local
       # Ollama fallback; Hermes remains the department-head boundary.

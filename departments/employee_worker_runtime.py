@@ -116,9 +116,9 @@ def _gateway_binding(worker_id: str | None = None):
     return resolve(worker_id)
 
 
-def model_name(worker_id: str | None = None) -> str:
+def model_name(worker_id: str | None = None, *, injected: bool = False) -> str:
     """Return the effective Worker model without exposing API credentials."""
-    binding = _gateway_binding(worker_id)
+    binding = None if injected else _gateway_binding(worker_id)
     if binding is not None:
         return binding.model
     return os.getenv("OLLAMA_CHAT_MODEL") or "qwen3:1.7b"
@@ -613,9 +613,13 @@ def _run_worker_registry_sequential(
             "input_hash": input_hash,
         })
     failed = [item["worker_id"] for item in reports if item["status"] != "COMPLETED"]
-    binding = _gateway_binding()
+    # An explicitly injected LLM owns its provider metadata (test doubles and
+    # domain adapters commonly use this path).  Do not label that callback as
+    # the process-global vLLM binding merely because a developer .env happens
+    # to contain WORKER_MODEL_BASE_URL.
+    binding = _gateway_binding() if llm is None and llm_factory is None else None
     return {
-        "runtime": {"executor": "LangGraph", "topology": "async_fan_out_fan_in_independent_graphs", "provider": binding.provider if binding else "ollama", "model": model_name(), "max_retries": 2, "max_attempts": 3},
+        "runtime": {"executor": "LangGraph", "topology": "async_fan_out_fan_in_independent_graphs", "provider": binding.provider if binding else "ollama", "model": model_name(injected=llm is not None), "max_retries": 2, "max_attempts": 3},
         "workers": reports,
         "executed": [item["worker_id"] for item in reports if item["status"] == "COMPLETED"],
         "failed": failed,
@@ -781,13 +785,13 @@ async def run_worker_registry_async(
     # asyncio.gather preserves input order, making fan-in reproducible.
     reports = list(await asyncio.gather(*(run_one(spec) for spec in eligible)))
     failed = [item["worker_id"] for item in reports if item["status"] != "COMPLETED"]
-    binding = _gateway_binding()
+    binding = _gateway_binding() if llm is None and llm_factory is None else None
     return {
         "runtime": {
             "executor": "LangGraph",
             "topology": "async_fan_out_fan_in_independent_graphs",
             "provider": binding.provider if binding else "ollama",
-            "model": model_name(),
+            "model": model_name(injected=llm is not None),
             "max_retries": 2,
             "max_attempts": 3,
         },

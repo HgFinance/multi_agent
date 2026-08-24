@@ -18,6 +18,7 @@ Notion은 Projection일 뿐이다 - 이 모듈이 실패해도(미설정, 네트
 from __future__ import annotations
 
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -29,6 +30,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from reporting import notion_rich_text_chunks
+from orchestration.adapters.notion_idempotency import NotionIdempotency
 
 _DEV_VARS = Path(__file__).resolve().parent.parent.parent / "ai-office" / ".dev.vars"
 _NOTION_VERSION = "2022-06-28"
@@ -44,6 +46,9 @@ def _load_dev_vars() -> dict:
             continue
         k, v = line.split("=", 1)
         env[k.strip()] = v.strip()
+    redis_url = os.getenv("NOTION_IDEMPOTENCY_REDIS_URL") or os.getenv("REDIS_URL")
+    if redis_url:
+        env.setdefault("NOTION_IDEMPOTENCY_REDIS_URL", redis_url)
     return env
 
 
@@ -92,12 +97,43 @@ def upload_report(out: dict, *, report_md: str = "", env: dict | None = None) ->
         payload = {"parent": {"database_id": db_id}, "properties": props}
         if report_md:
             payload["children"] = markdown_to_notion_blocks(report_md)
-        status, body = _post("pages", payload, token)
+        title = f"{out.get('report_type', 'DAILY')} {out.get('as_of')}"
+        idempotency = NotionIdempotency(env, namespace="ceo-reporter")
+
+        def lookup():
+            query_status, query_body = _post(
+                f"databases/{db_id}/query",
+                {
+                    "filter": {
+                        "property": "제목",
+                        "title": {"equals": title},
+                    },
+                    "page_size": 1,
+                },
+                token,
+            )
+            if query_status != 200:
+                raise RuntimeError(f"notion_query_failed:{query_status}")
+            return query_body.get("results") or []
+
+        def create():
+            create_status, create_body = _post("pages", payload, token)
+            if create_status != 200:
+                raise RuntimeError(f"notion_create_failed:{create_status}:{create_body}")
+            return create_body
+
+        result = idempotency.execute(
+            db_id,
+            title,
+            lookup=lookup,
+            create=create,
+        )
+        if result.duplicate:
+            return {"ok": True, "duplicate": True}
+        body = result.page if isinstance(result.page, dict) else {}
     except Exception as e:  # noqa: BLE001 - Notion은 비바인딩 Projection이라 오류를 흡수한다.
         return {"ok": False, "reason": f"업로드 예외: {e}"}
-    if status == 200:
-        return {"ok": True, "url": body.get("url")}
-    return {"ok": False, "status": status, "error": body.get("message", body)}
+    return {"ok": True, "url": body.get("url")}
 
 
 # ── 자체 점검 (네트워크 없음) ──────────────────────────────────────────────

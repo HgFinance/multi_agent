@@ -20,9 +20,15 @@ import time
 from pathlib import Path
 
 _API_DIR = Path(__file__).resolve().parents[1] / "api"
+_WORKFORCE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_API_DIR))
+sys.path.insert(0, str(_WORKFORCE_DIR))
 
-from app import _handle_workforce_event, _workforce_event_bus
+from workforce_api_loader import load_workforce_api
+
+_workforce_api = load_workforce_api()
+_handle_workforce_event = _workforce_api._handle_workforce_event
+_workforce_event_bus = _workforce_api._workforce_event_bus
 
 
 def main() -> None:

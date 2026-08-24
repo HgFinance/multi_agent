@@ -47,7 +47,7 @@ def hr_app():
 
 @pytest.fixture()
 def service_against_hr(hr_app):
-    from service import PlatformIamService
+    from platform_iam.service import PlatformIamService
 
     # starlette.testclient.TestClient는 httpx.Client의 서브클래스라(anyio portal로
     # ASGI 앱에 동기 브리지) service.py의 httpx.Client 타입 자리에 그대로 넣을 수
@@ -96,10 +96,10 @@ def _approve_via_hr(
 def test_data_request_end_to_end_reaches_provisioned(hr_app, service_against_hr, monkeypatch: pytest.MonkeyPatch) -> None:
     request_id = _approve_via_hr(hr_app, resource_kind="DATA", resource_ref="market-api:read")
 
-    import provisioning
+    import platform_iam.provisioning as provisioning
     monkeypatch.setitem(provisioning.RESOURCE_REF_GRANTS, "market-api:read", ("SELECT", "workspace.market_data"))
 
-    import postgres_role_manager
+    import platform_iam.postgres_role_manager as postgres_role_manager
     monkeypatch.setattr(
         postgres_role_manager, "apply_grant_plan", lambda plan, **_: plan.provisioning_ref
     )
@@ -120,7 +120,7 @@ def test_data_request_end_to_end_reaches_provisioned(hr_app, service_against_hr,
 def test_environment_request_end_to_end_reaches_provisioned(hr_app, service_against_hr, monkeypatch: pytest.MonkeyPatch) -> None:
     request_id = _approve_via_hr(hr_app, resource_kind="ENVIRONMENT", resource_ref="memory-namespace")
 
-    import redis_namespace_manager
+    import platform_iam.redis_namespace_manager as redis_namespace_manager
     monkeypatch.setattr(
         redis_namespace_manager, "register_namespace", lambda plan, **_: plan.provisioning_ref
     )

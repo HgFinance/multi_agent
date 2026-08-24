@@ -21,6 +21,8 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 _QA_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_QA_DIR))
 
+from qa_api_loader import load_qa_api  # noqa: E402
+
 from qa_events.redis_event_bus import (  # noqa: E402
     INTRADAY_FORWARD_QA_REQUESTED_EVENT,
     QaEventPoisonError,
@@ -465,11 +467,10 @@ def main(argv: list[str] | None = None) -> None:
     if arguments:
         raise SystemExit(f"unknown QA worker arguments: {arguments}")
 
-    from api.app import (  # noqa: PLC0415
-        _forward_qa_event_bus,
-        _qa_event_bus,
-        _record_risk_event,
-    )
+    qa_api = load_qa_api()
+    _forward_qa_event_bus = qa_api._forward_qa_event_bus
+    _qa_event_bus = qa_api._qa_event_bus
+    _record_risk_event = qa_api._record_risk_event
 
     risk_bus = _qa_event_bus()
     forward_bus = _forward_qa_event_bus()

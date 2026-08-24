@@ -51,6 +51,7 @@ Notion 은 Projection 일 뿐이다 - 이 모듈이 실패해도 마감의 nav_s
 from __future__ import annotations
 
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -64,6 +65,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from departments.notion_markdown import markdown_to_notion_blocks
+from orchestration.adapters.notion_idempotency import NotionIdempotency
 
 # 앞에 오는 파일이 이긴다. root .env 가 정본(모듈 상단 참고).
 _ENV_FILES = (_REPO_ROOT / ".env", _REPO_ROOT / "ai-office" / ".dev.vars")
@@ -119,6 +121,9 @@ def _load_env() -> dict:
                 continue
             k, v = line.split("=", 1)
             env.setdefault(k.strip(), v.strip())   # 먼저 읽은 파일이 이긴다
+    redis_url = os.getenv("NOTION_IDEMPOTENCY_REDIS_URL") or os.getenv("REDIS_URL")
+    if redis_url:
+        env.setdefault("NOTION_IDEMPOTENCY_REDIS_URL", redis_url)
     return env
 
 
@@ -262,13 +267,43 @@ def upload_close(out: dict, *, report_md: str = "", env: dict | None = None) -> 
             intro = (f"**결정론적 MD 리포트 저장:** `{_report_path(out.get('close_id'))}`\n\n"
                      f"{report_md}")
             payload["children"] = markdown_to_notion_blocks(intro)
-        status, body = _post("pages", payload, token)
+        title = f"{acc_date or '?'} · {out.get('close_id') or 'close'}"
+        idempotency = NotionIdempotency(env, namespace="accounting-reporter")
+
+        def lookup():
+            query_status, query_body = _post(
+                f"databases/{db_id}/query",
+                {
+                    "filter": {
+                        "property": "제목",
+                        "title": {"equals": title},
+                    },
+                    "page_size": 1,
+                },
+                token,
+            )
+            if query_status != 200:
+                raise RuntimeError(f"notion_query_failed:{query_status}")
+            return query_body.get("results") or []
+
+        def create():
+            create_status, create_body = _post("pages", payload, token)
+            if create_status != 200:
+                raise RuntimeError(f"notion_create_failed:{create_status}:{create_body}")
+            return create_body
+
+        result = idempotency.execute(
+            db_id,
+            title,
+            lookup=lookup,
+            create=create,
+        )
+        if result.duplicate:
+            return {"ok": True, "duplicate": True}
+        body = result.page if isinstance(result.page, dict) else {}
     except Exception as e:   # 네트워크 오류 등 - 절대 파이프라인을 죽이지 않는다  # noqa: BLE001 - intentional fallback boundary
         return {"ok": False, "reason": f"업로드 예외: {type(e).__name__}"}
-    if status == 200:
-        return {"ok": True, "url": body.get("url")}
-    # 속성이 DB 에 아직 없으면 400 이다. 조용히 성공한 척하지 않는다.
-    return {"ok": False, "status": status, "error": body.get("message", body)}
+    return {"ok": True, "url": body.get("url")}
 
 
 # ── 자체 점검 (네트워크 없음) ──────────────────────────────────────────────

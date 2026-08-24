@@ -36,6 +36,7 @@ Snapshot을 직접 실어 보냄)만 그대로 동작한다.
 from __future__ import annotations
 
 import os
+import importlib.util
 import sys
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -186,18 +187,34 @@ except ImportError:
     PostgresHiringRequestRepository = None  # type: ignore[assignment,misc]
 
 _WORKFORCE_EVENTS_DIR = _BASE / "workforce_events"
-sys.path.insert(0, str(_WORKFORCE_EVENTS_DIR))
 
-from redis_event_bus import (
-    DEFAULT_GROUP as _WORKFORCE_EVENT_GROUP,
-)
-from redis_event_bus import (
-    DEFAULT_STREAM as _WORKFORCE_EVENT_STREAM,
-)
-from redis_event_bus import (
-    RedisEventBus,
-    WorkforceEventBusError,
-)
+
+def _load_workforce_event_bus():
+    """Load the workforce bus without claiming the generic module name.
+
+    CEO, QA, and Workforce each own a deliberately independent Redis adapter,
+    but all legacy entrypoints called it ``redis_event_bus``.  Import order
+    could therefore give this API CEO's class and error type.  A stable domain
+    namespace makes the ownership explicit while preserving direct script use.
+    """
+
+    module_name = "hgfinance_workforce.redis_event_bus"
+    spec = importlib.util.spec_from_file_location(
+        module_name, _WORKFORCE_EVENTS_DIR / "redis_event_bus.py"
+    )
+    if spec is None or spec.loader is None:  # pragma: no cover - packaging error
+        raise ImportError("cannot load the workforce event bus module")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_workforce_event_bus = _load_workforce_event_bus()
+_WORKFORCE_EVENT_GROUP = _workforce_event_bus.DEFAULT_GROUP
+_WORKFORCE_EVENT_STREAM = _workforce_event_bus.DEFAULT_STREAM
+RedisEventBus = _workforce_event_bus.RedisEventBus
+WorkforceEventBusError = _workforce_event_bus.WorkforceEventBusError
 
 # --- Request 모델 --------------------------------------------------------------
 

@@ -16,6 +16,7 @@ RiskState의 바인딩 판정은 절대 바뀌지 않는다. 모든 실패를 �
 from __future__ import annotations
 
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -28,6 +29,7 @@ if str(_REPO_ROOT) not in sys.path:
 from reporting import notion_rich_text_chunks
 
 from departments.notion_markdown import markdown_to_notion_blocks
+from orchestration.adapters.notion_idempotency import NotionIdempotency
 
 _DEV_VARS = Path(__file__).resolve().parent.parent.parent / "ai-office" / ".dev.vars"
 _NOTION_VERSION = "2022-06-28"
@@ -43,6 +45,9 @@ def _load_dev_vars() -> dict:
             continue
         k, v = line.split("=", 1)
         env[k.strip()] = v.strip()
+    redis_url = os.getenv("NOTION_IDEMPOTENCY_REDIS_URL") or os.getenv("REDIS_URL")
+    if redis_url:
+        env.setdefault("NOTION_IDEMPOTENCY_REDIS_URL", redis_url)
     return env
 
 
@@ -140,12 +145,43 @@ def upload_case(
                 f"**결정론적 MD 리포트 저장:** `{report_path}`\n\n{report_md}"
             )
             payload["children"] = markdown_to_notion_blocks(report_intro)
-        status, body = _post("pages", payload, token)
+        title = f"risk_request_id: {out['risk_request_id']}"
+        idempotency = NotionIdempotency(env, namespace="risk-reporter")
+
+        def lookup():
+            query_status, query_body = _post(
+                f"databases/{db_id}/query",
+                {
+                    "filter": {
+                        "property": "제목",
+                        "title": {"equals": title},
+                    },
+                    "page_size": 1,
+                },
+                token,
+            )
+            if query_status != 200:
+                raise RuntimeError(f"notion_query_failed:{query_status}")
+            return query_body.get("results") or []
+
+        def create():
+            create_status, create_body = _post("pages", payload, token)
+            if create_status != 200:
+                raise RuntimeError(f"notion_create_failed:{create_status}:{create_body}")
+            return create_body
+
+        result = idempotency.execute(
+            db_id,
+            title,
+            lookup=lookup,
+            create=create,
+        )
+        if result.duplicate:
+            return {"ok": True, "duplicate": True}
+        body = result.page if isinstance(result.page, dict) else {}
     except Exception as e:  # noqa: BLE001 - Notion is a non-binding projection.
         return {"ok": False, "reason": f"업로드 예외: {e}"}
-    if status == 200:
-        return {"ok": True, "url": body.get("url")}
-    return {"ok": False, "status": status, "error": body.get("message", body)}
+    return {"ok": True, "url": body.get("url")}
 
 
 # ── 자체 점검 (네트워크 없음) ──────────────────────────────────────────────

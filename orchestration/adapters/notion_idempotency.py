@@ -26,9 +26,16 @@ class NotionIdempotencyError(RuntimeError):
 
 
 class NotionIdempotencyResult:
-    def __init__(self, *, duplicate: bool, page_id: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        duplicate: bool,
+        page_id: str | None = None,
+        page: Any | None = None,
+    ) -> None:
         self.duplicate = duplicate
         self.page_id = page_id
+        self.page = page
 
 
 _LOCKS_GUARD = Lock()
@@ -246,4 +253,5 @@ class NotionIdempotency:
             return NotionIdempotencyResult(
                 duplicate=False,
                 page_id=_page_id(page),
+                page=page,
             )

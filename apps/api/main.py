@@ -1260,17 +1260,17 @@ def _model_plane_readiness() -> dict[str, object]:
     """
 
     runtime = os.getenv("PORTFOLIO_WORKER_RUNTIME", "deterministic_test").strip().lower()
-    if runtime == "deterministic_test":
+    configured_base = (
+        os.getenv("WORKER_MODEL_BASE_URL", "").strip()
+        or os.getenv("OLLAMA_BASE_URL", "").strip()
+    )
+    if runtime == "deterministic_test" and not configured_base:
         return {
             "status": "READY",
             "provider": "deterministic_test",
             "reachable": True,
         }
 
-    configured_base = (
-        os.getenv("WORKER_MODEL_BASE_URL", "").strip()
-        or os.getenv("OLLAMA_BASE_URL", "").strip()
-    )
     if not configured_base:
         return {
             "status": "NOT_CONFIGURED",
@@ -1327,6 +1327,7 @@ def _model_plane_readiness() -> dict[str, object]:
 def health_ready() -> dict[str, object]:
     """Expose dependency readiness without secrets or claiming operational durability."""
 
+    model_plane = _model_plane_readiness()
     dependencies = {
         "bff": {"status": "READY"},
         "governance": {"status": "READY" if GOVERNANCE_API_URL else "NOT_CONFIGURED"},
@@ -1347,7 +1348,10 @@ def health_ready() -> dict[str, object]:
             )
             else "NOT_CONFIGURED"
         },
-        "model_plane": _model_plane_readiness(),
+        "model_plane": model_plane,
+        # Backward-compatible read-only alias for dashboards that used the
+        # pre-Qwen key.  Both names point to the same measured dependency.
+        "ollama": model_plane,
         "pipeline": {"status": "READY" if RUNTIME is not None else "UNAVAILABLE"},
         "runtime_store": {"status": "READY" if RUNTIME.durable else "NOT_CONFIGURED"},
         "mandate_binding": {
@@ -1371,6 +1375,15 @@ def health_ready() -> dict[str, object]:
 @lru_cache(maxsize=1)
 def _repo():
     """회계 원장 저장소. DATABASE_URL이 없으면 None이고 Snapshot은 전부 DEMO다."""
+    # The deterministic E2E mode intentionally has no database.  Do not let a
+    # production PAPER_DB setting inherited from the developer's .env turn a
+    # test-only read path into a persistence exception; real worker modes still
+    # fail closed through LedgerRepository.from_env().
+    if (
+        os.getenv("PORTFOLIO_WORKER_RUNTIME", "").strip().lower() == "deterministic_test"
+        and not os.getenv("DATABASE_URL", "").strip()
+    ):
+        return None
     return db_read_model.LedgerRepository.from_env()
 
 

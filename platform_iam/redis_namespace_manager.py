@@ -30,8 +30,8 @@ from functools import lru_cache
 from typing import Any
 
 try:
-    from provisioning import RedisNamespacePlan
-except ModuleNotFoundError:  # direct/standalone execution
+    from .provisioning import RedisNamespacePlan
+except ImportError:  # direct/standalone execution
     from platform_iam.provisioning import RedisNamespacePlan
 
 _REGISTRY_KEY = "platform_iam:namespaces"

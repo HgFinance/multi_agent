@@ -53,8 +53,8 @@ from functools import lru_cache
 from typing import Any
 
 try:
-    from provisioning import PostgresGrantPlan
-except ModuleNotFoundError:  # direct/standalone execution
+    from .provisioning import PostgresGrantPlan
+except ImportError:  # direct/standalone execution
     from platform_iam.provisioning import PostgresGrantPlan
 
 # GRANT verb는 여기서도 다시 검증한다 - provisioning.py의 RESOURCE_REF_GRANTS가

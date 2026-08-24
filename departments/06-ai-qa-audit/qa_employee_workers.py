@@ -187,8 +187,12 @@ WORKER_SPECS: tuple[WorkerSpec, ...] = (
 )
 
 
-def _runtime_model_info(worker_id: str | None = None) -> tuple[str, str]:
-    if (os.getenv("WORKER_MODEL_BASE_URL") or "").strip():
+def _runtime_model_info(
+    worker_id: str | None = None,
+    *,
+    injected: bool = False,
+) -> tuple[str, str]:
+    if not injected and (os.getenv("WORKER_MODEL_BASE_URL") or "").strip():
         try:
             from departments.worker_model_gateway import resolve
 
@@ -1264,7 +1268,7 @@ def _trigger_failure_result(
             "executor": "LangGraph",
             "topology": topology,
             "provider": _runtime_model_info()[0],
-            "model": _model_name(),
+            "model": _runtime_model_info()[1],
             "max_retries": 2,
             "max_attempts": 3,
             "technology_profiles": {
@@ -1387,8 +1391,8 @@ def _run_employee_workers_sequential(
     return {
         "runtime": {
             "executor": "LangGraph",
-            "provider": _runtime_model_info()[0],
-            "model": _model_name(),
+            "provider": _runtime_model_info(injected=llm is not None)[0],
+            "model": _runtime_model_info(injected=llm is not None)[1],
             "max_retries": 2,
             "max_attempts": 3,
             "technology_profiles": {
@@ -1622,8 +1626,8 @@ async def run_employee_workers_async(
         "runtime": {
             "executor": "LangGraph",
             "topology": "async_fan_out_fan_in_independent_graphs",
-            "provider": _runtime_model_info()[0],
-            "model": _model_name(),
+            "provider": _runtime_model_info(injected=llm is not None)[0],
+            "model": _runtime_model_info(injected=llm is not None)[1],
             "max_retries": 2,
             "max_attempts": 3,
             "technology_profiles": {

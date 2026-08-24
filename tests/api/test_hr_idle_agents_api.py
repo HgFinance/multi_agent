@@ -15,8 +15,11 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "departments/07-agent-workforce/api"))
 sys.path.insert(0, str(ROOT / "departments/07-agent-workforce/scorecard"))
+sys.path.insert(0, str(ROOT / "departments/07-agent-workforce"))
 
-import app as workforce_api  # noqa: E402
+from workforce_api_loader import load_workforce_api  # noqa: E402
+
+workforce_api = load_workforce_api()
 from observability import WorkerRegistryUnavailable  # noqa: E402
 
 

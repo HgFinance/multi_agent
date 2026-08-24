@@ -122,7 +122,12 @@ def _missing_evidence(payload: Mapping[str, Any]) -> list[str]:
     return missing
 
 
-def _hold_result(payload: Mapping[str, Any], missing: list[str]) -> dict[str, Any]:
+def _hold_result(
+    payload: Mapping[str, Any],
+    missing: list[str],
+    *,
+    injected: bool = False,
+) -> dict[str, Any]:
     """Adaptive routing: insufficient evidence produces no LLM-generated profile."""
 
     input_hash = hashlib.sha256(
@@ -137,7 +142,7 @@ def _hold_result(payload: Mapping[str, Any], missing: list[str]) -> dict[str, An
             "executor": "LangGraph",
             "topology": "async_fan_out_fan_in_independent_graphs",
             "provider": "ollama",
-            "model": model_name(),
+            "model": model_name(injected=injected),
             "max_retries": 2,
             "max_attempts": 3,
         },
@@ -255,7 +260,7 @@ def run_employee_workers(
 
     missing = _missing_evidence(payload)
     if missing:
-        return _hold_result(payload, missing)
+        return _hold_result(payload, missing, injected=llm is not None)
 
     result = run_worker_registry(
         WORKER_SPECS, payload, tools=tools_for_specs(WORKER_SPECS), llm=llm

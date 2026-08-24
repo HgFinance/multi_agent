@@ -42,13 +42,13 @@ from typing import Any
 import httpx
 
 try:
-    from provisioning import (
+    from .provisioning import (
         PostgresGrantPlan,
         ProvisioningError,
         RedisNamespacePlan,
         plan_provisioning,
     )
-except ModuleNotFoundError:  # direct/standalone execution
+except ImportError:  # direct/standalone execution
     from platform_iam.provisioning import (
         PostgresGrantPlan,
         ProvisioningError,
@@ -176,14 +176,20 @@ class PlatformIamService:
                     return ProvisioningOutcome(
                         request_id, resource_kind, "FAILED", "DATABASE_URL 미설정 - DATA provisioning 불가"
                     )
-                from postgres_role_manager import apply_grant_plan  # lazy: psycopg2 optional
+                try:
+                    from .postgres_role_manager import apply_grant_plan  # lazy: psycopg2 optional
+                except ImportError:  # direct/standalone execution
+                    from postgres_role_manager import apply_grant_plan
                 ref = apply_grant_plan(plan, dsn=self._postgres_dsn)
             elif isinstance(plan, RedisNamespacePlan):
                 if not self._redis_url:
                     return ProvisioningOutcome(
                         request_id, resource_kind, "FAILED", "REDIS_URL 미설정 - ENVIRONMENT provisioning 불가"
                     )
-                from redis_namespace_manager import register_namespace  # lazy: redis optional
+                try:
+                    from .redis_namespace_manager import register_namespace  # lazy: redis optional
+                except ImportError:  # direct/standalone execution
+                    from redis_namespace_manager import register_namespace
                 ref = register_namespace(plan, redis_url=self._redis_url)
             else:  # pragma: no cover - TOOL은 위에서 이미 갈렸다
                 return ProvisioningOutcome(request_id, resource_kind, "FAILED", "알 수 없는 계획 타입")

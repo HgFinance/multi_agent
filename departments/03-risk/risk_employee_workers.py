@@ -183,10 +183,14 @@ def _model_name() -> str:
     return os.getenv("OLLAMA_CHAT_MODEL") or "qwen3:1.7b"
 
 
-def _runtime_model_info(worker_id: str = "compliance-policy-worker") -> tuple[str, str]:
+def _runtime_model_info(
+    worker_id: str = "compliance-policy-worker",
+    *,
+    injected: bool = False,
+) -> tuple[str, str]:
     """Return the effective provider/model without making a model request."""
 
-    if (os.getenv("WORKER_MODEL_BASE_URL") or "").strip():
+    if not injected and (os.getenv("WORKER_MODEL_BASE_URL") or "").strip():
         try:
             from departments.worker_model_gateway import resolve
 
@@ -870,8 +874,8 @@ def _run_employee_workers_sequential(
     return {
         "runtime": {
             "executor": "LangGraph",
-            "provider": _runtime_model_info()[0],
-            "model": _runtime_model_info()[1],
+            "provider": _runtime_model_info(injected=llm is not None)[0],
+            "model": _runtime_model_info(injected=llm is not None)[1],
             "max_retries": 2,
             "max_attempts": 3,
             "technology_profiles": {
@@ -1063,8 +1067,8 @@ async def run_employee_workers_async(
         "runtime": {
             "executor": "LangGraph",
             "topology": "async_fan_out_fan_in_independent_graphs",
-            "provider": _runtime_model_info()[0],
-            "model": _runtime_model_info()[1],
+            "provider": _runtime_model_info(injected=llm is not None)[0],
+            "model": _runtime_model_info(injected=llm is not None)[1],
             "max_retries": 2,
             "max_attempts": 3,
             "technology_profiles": {

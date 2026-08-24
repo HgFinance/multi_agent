@@ -33,6 +33,8 @@ QA_TEST_SECRET = "test-qa-service-auth-secret-0123456789"
 def _qa_runtime_and_auth(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("RISK_QA_RUNTIME", "test")
     monkeypatch.setenv("QA_SERVICE_AUTH_SECRET", QA_TEST_SECRET)
+    monkeypatch.setenv("QA_SERVICE_AUTH_ISSUER", "qa-test-issuer")
+    monkeypatch.setenv("QA_SERVICE_AUTH_AUDIENCE", "qa-test-audience")
 
 
 def _qa_close_headers(subject: str) -> dict[str, str]:
@@ -42,6 +44,8 @@ def _qa_close_headers(subject: str) -> dict[str, str]:
         department="qa-department",
         service="qa-api",
         scopes=["qa.corrective_action.close"],
+        iss="qa-test-issuer",
+        aud="qa-test-audience",
     )
     return {"Authorization": f"Bearer {token}"}
 
