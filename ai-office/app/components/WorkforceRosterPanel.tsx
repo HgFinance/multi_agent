@@ -20,6 +20,10 @@ import {
 
 const POLL_MS = 120_000;
 
+/** "현재 일하는 직원"으로 보는 고용 상태 — CANDIDATE(입사 전)·SUSPENDED(정지)·
+ * RETIRED(퇴사)는 기본 목록에서 숨긴다. 필터를 끄면 전체 상태를 보여준다. */
+const CURRENTLY_WORKING_STATUSES: ReadonlySet<EmploymentStatus> = new Set(["ACTIVE", "PROBATION"]);
+
 const EMPLOYMENT_VIEW: Record<EmploymentStatus, { label: string; tone: string; icon: string }> = {
   CANDIDATE: {
     label: "CANDIDATE",
@@ -58,7 +62,7 @@ function employmentView(status: string) {
   );
 }
 
-function WorkforceRosterArtifactHeader({ samples }: { samples?: number }) {
+function WorkforceRosterArtifactHeader({ visible, total }: { visible?: number; total?: number }) {
   return (
     <div className="flex items-center justify-between gap-3 border-b border-outline-variant bg-surface-container-low px-4 py-2.5">
       <span className="flex min-w-0 items-center gap-2 text-label-md font-label-md text-on-surface-variant">
@@ -71,9 +75,9 @@ function WorkforceRosterArtifactHeader({ samples }: { samples?: number }) {
         <span className="inline-flex items-center whitespace-nowrap rounded-full border border-outline-variant bg-surface-container-lowest px-2.5 py-0.5 text-[10px] font-semibold text-on-surface-variant">
           HR 관측
         </span>
-        {samples !== undefined ? (
+        {total !== undefined ? (
           <span className="inline-flex items-center whitespace-nowrap rounded-full border border-outline-variant bg-surface-container-lowest px-2.5 py-0.5 text-[10px] font-semibold text-on-surface-variant">
-            등록 {samples}명
+            {visible !== undefined && visible !== total ? `근무 중 ${visible} / 등록 ${total}명` : `등록 ${total}명`}
           </span>
         ) : null}
       </div>
@@ -229,6 +233,7 @@ function RosterRow({
 
 export default function WorkforceRosterPanel() {
   const [expandedAgentId, setExpandedAgentId] = useState<string | null>(null);
+  const [showAllStatuses, setShowAllStatuses] = useState(false);
   const query = useQuery<WorkforceRoster, WorkforceRosterError>({
     queryKey: ["workforce-roster"],
     queryFn: () => fetchWorkforceRoster(),
@@ -240,13 +245,20 @@ export default function WorkforceRosterPanel() {
   const error = query.error ?? null;
   const loading = query.isPending;
   const agents = data?.agents ?? [];
+  const visibleAgents = showAllStatuses
+    ? agents
+    : agents.filter((agent) => CURRENTLY_WORKING_STATUSES.has(agent.employment_status as EmploymentStatus));
+  const hiddenCount = agents.length - visibleAgents.length;
 
   return (
     <section
       className="min-w-0 overflow-hidden rounded-lg border border-outline-variant bg-surface-container-lowest shadow-sm"
       aria-labelledby="workforce-roster-title"
     >
-      <WorkforceRosterArtifactHeader samples={data ? agents.length : undefined} />
+      <WorkforceRosterArtifactHeader
+        total={data ? agents.length : undefined}
+        visible={data ? visibleAgents.length : undefined}
+      />
       <div className="space-y-5 p-4 md:p-6">
         <div className="min-w-0">
           <p className="m-0 text-label-md font-label-md uppercase text-on-surface-variant">Workforce · Roster</p>
@@ -257,6 +269,29 @@ export default function WorkforceRosterPanel() {
             workforce.agent_profiles에 등록된 Agent 전원의 고용 상태와 현재 Profile Version·모델 좌표입니다. 부서장은 이 목록에 없습니다(직원만).
           </p>
         </div>
+
+        {data ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowAllStatuses((current) => !current)}
+              aria-pressed={!showAllStatuses}
+              className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[11px] font-semibold transition-colors ${
+                showAllStatuses
+                  ? "border-outline-variant bg-surface-container-low text-on-surface-variant"
+                  : "border-primary/30 bg-secondary-container text-primary"
+              }`}
+            >
+              <span className="material-symbols-outlined text-[14px]" aria-hidden="true">
+                {showAllStatuses ? "visibility" : "filter_alt"}
+              </span>
+              {showAllStatuses ? "전체 보기 (CANDIDATE·SUSPENDED·RETIRED 포함)" : "현재 근무 중인 Agent만 보기"}
+            </button>
+            {!showAllStatuses && hiddenCount > 0 ? (
+              <span className="text-[11px] text-on-surface-variant">퇴사·후보·정지 {hiddenCount}명 숨김</span>
+            ) : null}
+          </div>
+        ) : null}
 
         {error ? (
           <div
@@ -297,8 +332,8 @@ export default function WorkforceRosterPanel() {
                   </tr>
                 </thead>
                 <tbody>
-                  {agents.length > 0 ? (
-                    agents.map((agent) => (
+                  {visibleAgents.length > 0 ? (
+                    visibleAgents.map((agent) => (
                       <RosterRow
                         key={agent.agent_id}
                         agent={agent}
@@ -311,7 +346,9 @@ export default function WorkforceRosterPanel() {
                   ) : (
                     <tr>
                       <td colSpan={6} className="px-3 py-7 text-center text-sm text-on-surface-variant">
-                        아직 등록된 Agent가 없습니다.
+                        {agents.length > 0
+                          ? "현재 근무 중인 Agent가 없습니다 (필터를 해제하면 전체를 볼 수 있습니다)."
+                          : "아직 등록된 Agent가 없습니다."}
                       </td>
                     </tr>
                   )}
