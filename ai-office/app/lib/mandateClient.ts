@@ -31,7 +31,6 @@ import {
   type MandatePreset,
   type PolicyConstraintViolation,
 } from "./mandatePresets";
-import { currentFundId } from "./currentFund";
 import type {
   AssetClassId,
   LiquidityNeed,
@@ -631,8 +630,8 @@ function errorMessage(body: unknown, status: number): string {
 export async function requestMandateSuggestion(
   messages: { role: "user" | "assistant"; content: string }[],
   draft: MandateDraft,
+  fundId: string,
 ): Promise<AssistantReply> {
-  const fundId = currentFundId();
   if (!fundId) {
     throw new MandateSubmissionError(
       "현재 계정에 연결된 Fund가 없습니다. 계정을 전환하거나 관리자에게 문의하세요.",
@@ -805,6 +804,13 @@ export interface MandateSubmitResult {
  * 지침 저장 버튼의 진입점. verifiedUserId는 AuthProvider의 Supabase session
  * subject이고, BFF가 같은 subject와 Fund membership을 다시 검증한다.
  *
+ * `fundId`는 호출부(`MandateConfig.tsx`)가 이 폼을 읽어올 때 쓴 것과 **같은
+ * 값**을 그대로 넘겨야 한다. 예전에는 여기서 `currentFund.ts`의 전역
+ * `currentFundId()`를 따로 불렀는데, 그 값은 계정 전환 UI가 있던 시절
+ * `localStorage`에 남은 선택을 그대로 읽어 화면이 실제로 불러온 Fund와
+ * 어긋날 수 있었다 - 저장은 옛 선택의 Fund로, 조회는 고정 계정의 Fund로 갈라져
+ * "저장했는데 안 불러와진다"는 증상이 났다(2026-08-24 실측).
+ *
  * 쓰기가 둘이다 — 현재 Mandate metadata(거버넌스)와 적합성 프로필. 순서는 정책이 먼저다:
  * 정책이 주 산출물이고, 적합성 저장소 장애가 거버넌스 저장을 막는 것은 방향이
  * 반대다.
@@ -816,6 +822,7 @@ export async function submitMandateDraft(
   draft: MandateDraft,
   objectiveText: string,
   verifiedUserId: string,
+  fundId: string,
 ): Promise<MandateSubmitResult> {
   // 네트워크를 타기 전에 먼저 막는다 - 서버가 어차피 같은 제약으로 거절하지만,
   // 여기서 잡으면 어느 슬라이더가 문제인지 구체적으로 말해줄 수 있다.
@@ -826,7 +833,6 @@ export async function submitMandateDraft(
     );
   }
 
-  const fundId = currentFundId();
   if (!fundId) {
     throw new MandateSubmissionError(
       "현재 계정에 연결된 Fund가 없습니다. 계정을 전환하거나 관리자에게 문의하세요.",

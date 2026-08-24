@@ -523,7 +523,7 @@ function MandateConfigForm({ userId, fundId }: { userId: string; fundId: string 
         role: message.from === "agent" ? ("assistant" as const) : ("user" as const),
         content: message.text,
       }));
-      const result = await requestMandateSuggestion(history, draft);
+      const result = await requestMandateSuggestion(history, draft, fundId);
       const applied = applySuggestions(draft, result.suggestions);
       // 제안이 목표 문장을 못 뽑았어도(LLM 장애 시 서버가 빈 제안으로 감싼다)
       // 사용자가 직접 쓴 문장은 그대로 남긴다 - 추론이 아니라 사용자의 말이다.
@@ -606,7 +606,7 @@ function MandateConfigForm({ userId, fundId }: { userId: string; fundId: string 
       const fallbackObjective = `${RISK_PROFILES.find((p) => p.id === draft.riskProfile)?.label ?? "균형"} 성향 · 지침`;
       const objectiveText = draft.objective.trim() || fallbackObjective;
 
-      const result = await submitMandateDraft(draft, objectiveText, userId);
+      const result = await submitMandateDraft(draft, objectiveText, userId, fundId);
       // 커밋됐으므로 임시 초안은 지운다 - 남겨두면 다음 방문에 DB 저장본 대신
       // 옛 초안이 복원돼 방금 저장한 값이 안 보인다.
       try {
