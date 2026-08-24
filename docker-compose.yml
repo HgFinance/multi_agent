@@ -1680,9 +1680,9 @@ services:
       timeout: 3s
       retries: 12
       start_period: 10s
-    mem_limit: 1g
+    mem_limit: 8g
     mem_reservation: 192m
-    cpus: 1.0
+    cpus: 4.0
     pids_limit: 256
     stop_grace_period: 20s
 

@@ -180,8 +180,21 @@ def default_root() -> Path:
     configured = os.environ.get("INTRADAY_SAMPLE_CACHE_ROOT")
     if configured:
         return Path(configured)
-    return Path(__file__).resolve().parents[3] / "quant-data" / \
+    candidate = Path(__file__).resolve().parents[3] / "quant-data" / \
         "intraday-discovery-cache"
+    # Shared mounts may be root-owned in worker containers. Fall back to
+    # the writable project workspace instead of failing after registration.
+    try:
+        candidate.mkdir(parents=True, exist_ok=True)
+        probe = candidate / ".write-probe"
+        probe.touch(exist_ok=True)
+        probe.unlink()
+        return candidate
+    except OSError:
+        fallback = Path(os.environ.get("QUANT_WORKSPACE", "/tmp")) / \
+            "intraday-discovery-cache"
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
 
 
 def _safe_token(value: str, name: str) -> str:

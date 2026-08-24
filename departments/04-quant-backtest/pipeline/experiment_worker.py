@@ -35,7 +35,14 @@ WORKER_VERSION = "quant-experiment-worker-v4"
 
 # 가설이 RUNNING 에 갇혀 있다고 보는 시간. lease 만료(30분)보다 짧으면 아직
 # 큐에서 도는 작업을 뺏게 되므로 같은 값을 쓴다.
-HYPOTHESIS_STALL_MIN = 30
+#
+# ▶ 조정 가능하게 둔 이유 (2026-08-24 실측)
+#   인트라데이 63세션 틱 리플레이가 이 시간을 넘기면 **일하는 중인데도**
+#   좀비로 몰려 CANCELLED 된다(실험 두 건이 정확히 30:00 / 30:07 에 닫혔다).
+#   진짜 소요를 재기 전에 상수를 찍어 바꾸면 다음에 또 틀리므로, 환경변수로
+#   열어 두고 실측한 값으로 정한다. 기본값은 그대로 30 이다.
+#   근본 처방은 러너가 lease 를 갱신하는 심장박동이다 - 소요를 안 뒤에 만든다.
+HYPOTHESIS_STALL_MIN = int(os.getenv("HYPOTHESIS_STALL_MIN", "30"))
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))

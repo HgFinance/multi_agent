@@ -337,6 +337,18 @@ services:
       <<: *control-session-environment
       QUANT_DATABASE_URL: *control-database-url
       TIMESCALE_DATABASE_URL: *market-database-url
+      # 63세션 틱 리플레이는 30분을 넘긴다 - 일하는 중인 실험을 좀비로
+      # 몰아 죽이지 않도록 실측 전까지 넉넉히 둔다(2026-08-24 실측: 두 건이
+      # 정확히 30:00 에 CANCELLED 로 닫혔다).
+      HYPOTHESIS_STALL_MIN: ${HYPOTHESIS_STALL_MIN:-180}
+    volumes:
+      # ▶ 코드를 마운트한다 (2026-08-24 실측)
+      #   이 컨테이너는 코드가 이미지에 구워져 있어 저장소 수정이 닿지 않았다.
+      #   HYPOTHESIS_STALL_MIN 을 env 로 열어 놓고 180 을 줬는데도 워커는
+      #   이미지 안의 옛 상수 30 을 계속 썼고, 33분째 일하던 실험을 죽였다.
+      #   디스패처는 이미 같은 방식으로 저장소를 마운트한다 - 관례를 맞춘다.
+      - ./departments/04-quant-backtest:/app/departments/04-quant-backtest:ro
+      - ./departments/01-research:/app/departments/01-research:ro
 
   governance-api:
     depends_on: *control-dependency

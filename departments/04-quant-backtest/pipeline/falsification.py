@@ -108,6 +108,11 @@ _PATTERNS = (
         r"(?i)(?:raw\s+)?(?:microprice|midprice).{0,80}(?:대비|vs\.?|versus).{0,40}(?:증분|incremental).{0,30}(?:markout|효과).{0,20}(?:없|없음|none|absent)"
         r"|(?:큐|queue|spread|게이트).{0,40}(?:하나|조건).{0,30}(?:제거|해제).{0,40}(?:효과|마크아웃).{0,20}(?:불변|동일|없)"
         r"|\d+초.{0,30}(?:효과|마크아웃).{0,50}(?:\d+초|교차시간).{0,30}(?:부모|parent).{0,30}(?:우월하지 않음|차별 없음|동일|not superior)")),
+    # Queue proposals occasionally persisted a bare control token (for
+    # example ``midprice``) as one list element. Treat it as the named
+    # control comparison; run() still requires a measured key.
+    ("control_comparison", re.compile(
+        r"(?i)^\s*(?:raw\s+)?(?:microprice|midprice)\s*$")),
     ("alignment_audit", re.compile(
         r"(?i:(?:latency|timestamp|quote[- ]?trade).{0,50}"
         r"(?:alignment|misalignment|audit|정렬|오류|overlap).{0,40}"
@@ -459,6 +464,15 @@ def _check_nested_criteria_are_executed():
     print("  dict 기준 정규화          OK")
 
 
+def _check_bare_control_tokens_are_not_dead():
+    """실제 원장에 있던 단독 `midprice` 기준도 실행면으로 보낸다."""
+    kind, runnable = classify("midprice")
+    assert (kind, runnable) == ("control_comparison", True), (kind, runnable)
+    result = run(["midprice"], {})[0]
+    assert not result.ran and result.survived is None, result
+    print("  단독 control 기준 분류    OK (측정키 없으면 미실행)")
+
+
 def _check_unrun_is_not_pass():
     """**안 돌린 것을 견딘 것으로 세지 않는다.** 가장 중요한 규칙이다."""
     rs = run(_REAL, {"excess_return_pct": 100.0})   # 창·비용 재실행 없음
@@ -565,6 +579,7 @@ def _selfcheck() -> int:
     _check_real_sentences_are_classified()
     _check_unrun_is_not_pass()
     _check_nested_criteria_are_executed()
+    _check_bare_control_tokens_are_not_dead()
     _check_cost_stress_can_refute()
     _check_explicit_falsifications_use_measured_keys()
     _check_window_signs()

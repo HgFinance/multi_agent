@@ -2554,13 +2554,23 @@ def _register(meta_conn, hypothesis_id: str, config: dict) -> tuple[str, str, bo
                 "select experiment_id::text, status from quant.experiments "
                 "where input_hash=%s for update", (digest,))
             experiment_id, status = cur.fetchone()
-            if status == "FAILED":
+            if status in ("FAILED", "CANCELLED"):
                 # Exactly one retrying worker can reclaim a failed immutable
                 # input.  Existing metrics are deterministic upserts.
+                #
+                # ▶ CANCELLED 도 회수 대상이다 (2026-08-24 실측)
+                #   좀비 정리(`experiment_worker._SQL_CANCEL_ZOMBIES`)는
+                #   backtest_runs 도 experiment_outcomes 도 **없을 때만**
+                #   CANCELLED 를 찍는다 - 즉 결과가 없다는 뜻이다. 그리고 같은
+                #   정리가 가설을 PROPOSED 로 되돌려 "다시 하라" 고 말한다.
+                #   여기서 입력을 영구히 막으면 두 부품이 서로 모순돼 그 가설은
+                #   영원히 못 돈다(OOM 으로 죽은 실험 하나가 계열 전체를 굳혔다).
+                #   COMPLETED 는 여전히 duplicate 다 - 그건 결과가 있다.
                 cur.execute(
                     "update quant.experiments set status='RUNNING', "
                     "started_at=now(), ended_at=null where experiment_id=%s "
-                    "and status='FAILED' returning experiment_id", (experiment_id,))
+                    "and status=%s returning experiment_id",
+                    (experiment_id, status))
                 duplicate = cur.fetchone() is None
             elif status == "COMPLETED":
                 duplicate = True
