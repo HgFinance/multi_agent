@@ -4,7 +4,10 @@ import { useQuery } from "@tanstack/react-query";
 import { fetchQaLangsmithTraces, type LangsmithQaTraces } from "../lib/langsmithClient";
 
 const POLL_MS = 60_000;
-const DAYS = 8;
+// LangSmith root-run pagination is rate-limited on the high-volume project.
+// The backend caches aggregates, and the dashboard keeps the default window
+// bounded so the first load remains useful instead of rendering a blank chart.
+const DAYS = 2;
 
 // 스크린샷 그래프 팔레트 색상
 const SUCCESS_COLOR = "#48A27C";
@@ -255,6 +258,21 @@ export default function QaLangsmithPanel() {
     staleTime: 30_000,
     retry: false,
   });
+
+  if (query.isPending || query.isError || !query.data || query.data.status !== "READY") {
+    const detail = query.data?.detail ?? (query.isError ? query.error.message : "LangSmith aggregate is not ready");
+    return (
+      <section
+        className="min-w-0 overflow-hidden rounded-lg border border-outline-variant bg-surface-container-lowest shadow-sm"
+        aria-labelledby="qa-langsmith-title"
+      >
+        <div className="border-b border-outline-variant bg-surface-container-low px-4 py-2.5">
+          <span id="qa-langsmith-title" className="text-body-lg font-semibold text-on-surface">Traces</span>
+        </div>
+        <p className="m-0 p-4 text-xs text-on-surface-variant">{detail}</p>
+      </section>
+    );
+  }
 
   // 별도 mockdata 변수 없이 스크린샷 굴곡을 구현하는 수치들을 직접 인라인 할당
   const data: LangsmithQaTraces = query.data ?? {

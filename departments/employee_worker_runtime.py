@@ -2,7 +2,7 @@
 
 Department heads are Hermes profiles.  This module owns only the employee
 boundary: one compiled LangGraph per Worker, allow-listed context tools, a
-local Ollama LLM call, bounded retries, and a non-binding ``worker-context``
+  Worker Model Gateway/OpenAI-compatible call, bounded retries, and a non-binding ``worker-context``
 output.  It never owns orders, Risk/QA verdicts, ledger postings, or HR
 permission grants.
 """
@@ -107,8 +107,20 @@ class WorkerSpec:
     structured_artifact: StructuredArtifactSpec | None = None
 
 
-def model_name() -> str:
-    """Return the temporary low-memory Worker model; Hermes Head is separate."""
+def _gateway_binding(worker_id: str | None = None):
+    """Resolve the production model lazily; keep local tests Ollama-compatible."""
+    if not (os.getenv("WORKER_MODEL_BASE_URL") or "").strip():
+        return None
+    from departments.worker_model_gateway import resolve
+
+    return resolve(worker_id)
+
+
+def model_name(worker_id: str | None = None) -> str:
+    """Return the effective Worker model without exposing API credentials."""
+    binding = _gateway_binding(worker_id)
+    if binding is not None:
+        return binding.model
     return os.getenv("OLLAMA_CHAT_MODEL") or "qwen3:1.7b"
 
 
@@ -119,7 +131,13 @@ def _ollama_base_url() -> str:
 
 def default_worker_llm(system: str, prompt: str, *,
                        json_schema: Mapping[str, Any] | None = None) -> str:
-    """Call the configured local Ollama OpenAI-compatible endpoint."""
+    """Call the configured Worker model; Ollama remains the local fallback."""
+
+    if (os.getenv("WORKER_MODEL_BASE_URL") or "").strip():
+        from departments.worker_model_gateway import llm_for_worker
+
+        worker_llm, _binding = llm_for_worker()
+        return worker_llm(system, prompt, json_schema=json_schema)
 
     from openai import OpenAI
 
@@ -429,7 +447,12 @@ def build_independent_worker_graph(spec: WorkerSpec, tool: WorkerTool, llm: Work
         return {"tool_output": dict(tool(state.get("input", {})))}
 
     def call_llm(state: WorkerState) -> dict[str, Any]:
-        worker_llm = llm or default_worker_llm
+        worker_llm = llm
+        if worker_llm is None and (os.getenv("WORKER_MODEL_BASE_URL") or "").strip():
+            from departments.worker_model_gateway import llm_for_worker
+
+            worker_llm, _binding = llm_for_worker(spec.worker_id)
+        worker_llm = worker_llm or default_worker_llm
         # ▶ 필드의 **타입과 범위를 프롬프트에 명시한다** (2026-08-12).
         #   전에는 "Return JSON with summary, confidence, evidence_refs, and escalate"
         #   로만 적었다. 그러면 모델이 타입을 추측하고, 실측에서 **네 모델이 전부**
@@ -541,7 +564,14 @@ def _resolve_worker_llm(spec: WorkerSpec, llm: WorkerLLM | None,
     """
     if llm_factory is not None:
         return llm_factory(spec.worker_id)
-    return llm
+    if llm is not None:
+        return llm
+    if (os.getenv("WORKER_MODEL_BASE_URL") or "").strip():
+        from departments.worker_model_gateway import llm_for_worker
+
+        worker_llm, _binding = llm_for_worker(spec.worker_id)
+        return worker_llm
+    return None
 
 
 def _run_worker_registry_sequential(
@@ -583,8 +613,9 @@ def _run_worker_registry_sequential(
             "input_hash": input_hash,
         })
     failed = [item["worker_id"] for item in reports if item["status"] != "COMPLETED"]
+    binding = _gateway_binding()
     return {
-        "runtime": {"executor": "LangGraph", "topology": "async_fan_out_fan_in_independent_graphs", "provider": "ollama", "model": model_name(), "max_retries": 2, "max_attempts": 3},
+        "runtime": {"executor": "LangGraph", "topology": "async_fan_out_fan_in_independent_graphs", "provider": binding.provider if binding else "ollama", "model": model_name(), "max_retries": 2, "max_attempts": 3},
         "workers": reports,
         "executed": [item["worker_id"] for item in reports if item["status"] == "COMPLETED"],
         "failed": failed,
@@ -707,7 +738,7 @@ async def run_worker_registry_async(
         #   호출부가 llm_factory 로 좌표를 바꾸는 쪽이 정본이다.
         metric_token = begin_worker_metric(
             worker_id=spec.worker_id, role=spec.role,
-            stage=stage or "", model_name=model_name(),
+            stage=stage or "", model_name=model_name(spec.worker_id),
         ) if stage else None
         with redacted_langfuse_worker_span(
             worker_id=spec.worker_id,
@@ -750,11 +781,12 @@ async def run_worker_registry_async(
     # asyncio.gather preserves input order, making fan-in reproducible.
     reports = list(await asyncio.gather(*(run_one(spec) for spec in eligible)))
     failed = [item["worker_id"] for item in reports if item["status"] != "COMPLETED"]
+    binding = _gateway_binding()
     return {
         "runtime": {
             "executor": "LangGraph",
             "topology": "async_fan_out_fan_in_independent_graphs",
-            "provider": "ollama",
+            "provider": binding.provider if binding else "ollama",
             "model": model_name(),
             "max_retries": 2,
             "max_attempts": 3,

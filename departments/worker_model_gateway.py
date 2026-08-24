@@ -10,7 +10,7 @@
 ▶ 왜 이 모듈이 필요한가
   지금까지 Worker 의 모델 호출은 employee_worker_runtime.default_worker_llm
   (Ollama 전용, openai 패키지 필요, timeout 기본 8초)에 박혀 있었다.
-  AWS 의 Worker 모델은 vLLM 위 Qwen2.5-14B FP8 이고, 부서별 LoRA 가 붙으면
+  AWS 의 Worker 모델은 vLLM 위 Qwen2.5-14B AWQ v1 이고, 부서별 LoRA 가 붙으면
   worker_id → adapter 해석이 필요해진다. 그 해석을 Worker 나 부서 코드가
   하지 않고 **여기서만** 한다 - Worker 는 adapter_id 를 고르지 않는다(§7.2).
 
@@ -35,9 +35,9 @@
 ▶ Worker Registry (worker_id → adapter)
   WORKER_MODEL_REGISTRY_PATH 의 JSON(worker-model-registry.v1)이 워커별
   adapter 를 결정한다. adapter 는 status 가 "enabled" 일 때만 적용되고,
-  그 외에는 base model 로 서빙한다. 지금은 두 워커 모두 adapter 없음
-  ("none") - LoRA 가 승인되면 registry 만 바꾼다. 파일이 없으면 전원
-  base model 이다(조용한 실패가 아니라 **의도된 기본값**이다).
+  그 외에는 base model 로 서빙한다. 현재 Qwen AWQ v1은 전사 LLM Worker의
+  base model이며 arithmetic adapter는 명시적 route 전용이다. 파일이 없으면
+  전원 base model 이다(조용한 실패가 아니라 **의도된 기본값**이다).
 
 실행: python departments/worker_model_gateway.py   # 자체 점검 (네트워크 없음)
 """

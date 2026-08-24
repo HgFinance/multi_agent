@@ -43,6 +43,9 @@ The repository currently verifies the following shape:
   `qwen2.5-14b-instruct-awq`, with 8192/0.85 serving defaults and FP8 KV
   cache. FP8/16384/0.90 is retained only where historical benchmark or
   runbook material explicitly describes the former baseline.
+- The serving image is pinned by digest and the only supported vLLM entrypoint
+  is `scripts/model_plane/vllm_runtime.sh`. Its guard rejects non-Compose
+  ownership, duplicate Qwen/vLLM containers, network drift, and image drift.
 - `origin/main` tracks FP8/AWQ quality result artifacts. Infrastructure VRAM,
   KV-token, and throughput measurements are not present in the tracked result
   files and are not inferred here.
@@ -108,8 +111,9 @@ the corresponding `employee_workers.py` implementation.
 This is **10 LLM workers + 5 deterministic runners**. The department-head
 profiles are a separate layer: current profile configuration selects
 `openai-codex` with `gpt-5.6-luna` where the head runtime is declared. Employee
-runtime configuration selects LangGraph/Ollama with default `qwen3:1.7b` where
-the department config declares that path. This distinction is enforced by
+runtime configuration selects the Qwen AWQ v1 Worker Model Gateway in the
+production model overlay, with local Ollama `qwen3:1.7b` retained only as an
+explicit development fallback. This distinction is enforced by
 `tests/test_worker_architecture.py` and
 `docs/02-engineering/WORKER_ROLE_BOUNDARIES.md`.
 

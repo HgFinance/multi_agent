@@ -187,8 +187,31 @@ WORKER_SPECS: tuple[WorkerSpec, ...] = (
 )
 
 
-def _model_name() -> str:
-    return os.getenv("OLLAMA_CHAT_MODEL") or "qwen3:1.7b"
+def _runtime_model_info(worker_id: str | None = None) -> tuple[str, str]:
+    if (os.getenv("WORKER_MODEL_BASE_URL") or "").strip():
+        try:
+            from departments.worker_model_gateway import resolve
+
+            binding = resolve(worker_id)
+            return binding.provider, binding.model
+        except Exception:  # noqa: BLE001 - metadata must not hide QA execution
+            return "vllm-openai", os.getenv("WORKER_MODEL_NAME") or "qwen2.5-14b-instruct-awq"
+    return "ollama", os.getenv("OLLAMA_CHAT_MODEL") or "qwen3:1.7b"
+
+
+def _model_name(worker_id: str | None = None) -> str:
+    return _runtime_model_info(worker_id)[1]
+
+
+def _worker_llm(spec: WorkerSpec, llm: WorkerLLM | None) -> WorkerLLM:
+    if llm is not None:
+        return llm
+    if (os.getenv("WORKER_MODEL_BASE_URL") or "").strip():
+        from departments.worker_model_gateway import llm_for_worker
+
+        worker_llm, _binding = llm_for_worker(spec.worker_id)
+        return worker_llm
+    return default_worker_llm
 
 
 def _base_url() -> str:
@@ -197,6 +220,12 @@ def _base_url() -> str:
 
 
 def default_worker_llm(system: str, prompt: str) -> str:
+    if (os.getenv("WORKER_MODEL_BASE_URL") or "").strip():
+        from departments.worker_model_gateway import llm_for_worker
+
+        worker_llm, _binding = llm_for_worker()
+        return worker_llm(system, prompt)
+
     from openai import OpenAI
 
     client = OpenAI(
@@ -431,7 +460,7 @@ def build_worker_graph(
                 "error": state.get("error", "SKILL_BOUNDARY_FAILED"),
                 "trace_manifest": _manifest(state),
             }
-        worker_llm = llm or default_worker_llm
+        worker_llm = _worker_llm(spec, llm)
         tech_profile = spec.tech_profile.as_dict() if spec.tech_profile else {}
         require_entries = spec.worker_id == "incident-postmortem-worker"
         # 필드 타입을 명시한다 - risk 와 같은 이유(2026-08-12 실측).
@@ -1234,7 +1263,7 @@ def _trigger_failure_result(
         "runtime": {
             "executor": "LangGraph",
             "topology": topology,
-            "provider": "ollama",
+            "provider": _runtime_model_info()[0],
             "model": _model_name(),
             "max_retries": 2,
             "max_attempts": 3,
@@ -1358,7 +1387,7 @@ def _run_employee_workers_sequential(
     return {
         "runtime": {
             "executor": "LangGraph",
-            "provider": "ollama",
+            "provider": _runtime_model_info()[0],
             "model": _model_name(),
             "max_retries": 2,
             "max_attempts": 3,
@@ -1593,7 +1622,7 @@ async def run_employee_workers_async(
         "runtime": {
             "executor": "LangGraph",
             "topology": "async_fan_out_fan_in_independent_graphs",
-            "provider": "ollama",
+            "provider": _runtime_model_info()[0],
             "model": _model_name(),
             "max_retries": 2,
             "max_attempts": 3,

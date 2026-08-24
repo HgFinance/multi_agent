@@ -43,7 +43,7 @@ python -m unittest discover -s tests/schema -p "test_*.py" -v
 
 검증된 Strategy Bundle만 트레이딩으로 넘어가고, 이미 배포된 Agent 개선(`agent_evolution_cycle`)도 QA·CEO 승인을 건너뛰지 않는다. 모든 step은 실패 시 안전한 기본값(REJECT/HOLD/DENY/ESCALATE/ROLLBACK)으로 떨어진다. `hr-department`는 투자 본부가 아니라 CEO 직속 Shared Service다.
 
-**Hermes(부서) vs LangGraph(직원)**: Hermes Profile 8개가 부서 오케스트레이션을 맡고, 소속 직원(**LLM Worker 10명**)은 각자 독립 LangGraph Worker + Ollama `qwen3:1.7b`로 동작한다. Worker는 읽기 결과만 부서장에게 전달할 뿐 주문·판정·원장·권한 변경은 하지 않는다. **결정론 러너 5개**(`desk-runner`/`risk-runner`/`qa-runner`/`back-office-runner`/`ceo-runner`)는 모델을 부르지 않으므로 따로 센다.
+**Hermes(부서) vs LangGraph(직원)**: Hermes Profile 8개가 부서 오케스트레이션을 맡고, 소속 직원(**LLM Worker 10명**)은 각자 독립 LangGraph Worker + 운영 Qwen AWQ v1(`qwen2.5-14b-instruct-awq`)로 동작한다. Worker는 읽기 결과만 부서장에게 전달할 뿐 주문·판정·원장·권한 변경은 하지 않는다. 로컬 Ollama `qwen3:1.7b`는 개발 fallback이고, AWS vLLM은 `scripts/model_plane/vllm_runtime.sh` 단일 진입점으로만 관리한다. **결정론 러너 5개**(`desk-runner`/`risk-runner`/`qa-runner`/`back-office-runner`/`ceo-runner`)는 모델을 부르지 않으므로 따로 센다.
 
 부서별 LLM Worker 편제(총 10명) — 정본은 각 부서 `hermes/config.yaml`의 `workers`이고, `tests/test_worker_architecture.py::test_final_worker_shape_has_no_duplicate_roles`이 대조한다:
 

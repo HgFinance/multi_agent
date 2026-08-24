@@ -38,6 +38,8 @@ LangSmith는 선택적 추적 어댑터다(`docs/02-engineering/TECH_STACK_DECIS
 from __future__ import annotations
 
 import os
+import threading
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -50,6 +52,12 @@ _QA_STAGE = "qa"
 _ERROR_STATUSES = {"DEGRADED", "BLOCKED", "ERROR"}
 _MAX_DAYS = 30
 _MAX_RUNS = 3000
+_TRACE_CACHE_TTL_SECONDS = 120.0
+_TRACE_RATE_LIMIT_BACKOFF_SECONDS = 300.0
+_TRACE_CACHE: dict[tuple[int, str], tuple[float, dict[str, Any]]] = {}
+_TRACE_RATE_LIMIT_UNTIL: dict[tuple[int, str], float] = {}
+_TRACE_INFLIGHT: set[tuple[int, str]] = set()
+_TRACE_CACHE_LOCK = threading.Lock()
 
 
 def _configured() -> bool:
@@ -185,10 +193,49 @@ async def qa_trace_timeseries(days: int = 7) -> dict[str, Any]:
     days = max(1, min(int(days), _MAX_DAYS))
     if not _configured():
         return _empty("NOT_CONFIGURED", days, configured=False)
+    project = os.getenv("LANGSMITH_PROJECT") or ""
+    cache_key = (days, project)
+    now = time.monotonic()
+    with _TRACE_CACHE_LOCK:
+        cached = _TRACE_CACHE.get(cache_key)
+        if cached is not None and now - cached[0] < _TRACE_CACHE_TTL_SECONDS:
+            return {**cached[1], "cached": True}
+        if now < _TRACE_RATE_LIMIT_UNTIL.get(cache_key, 0.0):
+            if cached is not None:
+                return {
+                    **cached[1],
+                    "cached": True,
+                    "detail": "LangSmith rate limit backoff; serving the last successful aggregate",
+                }
+            return _empty("DEGRADED", days, configured=True, detail="LangSmith rate limit backoff")
+        if cache_key in _TRACE_INFLIGHT:
+            if cached is not None:
+                return {**cached[1], "cached": True, "detail": "LangSmith aggregate query in progress"}
+            return _empty("DEGRADED", days, configured=True, detail="LangSmith aggregate query in progress")
+        _TRACE_INFLIGHT.add(cache_key)
     try:
-        return await run_in_threadpool(_collect, days, os.getenv("LANGSMITH_PROJECT") or None)
+        result = await run_in_threadpool(_collect, days, project or None)
+        with _TRACE_CACHE_LOCK:
+            _TRACE_CACHE[cache_key] = (time.monotonic(), result)
+            _TRACE_RATE_LIMIT_UNTIL.pop(cache_key, None)
+        return result
     except Exception as exc:  # noqa: BLE001 - 관측 실패가 카드 렌더를 막으면 안 된다
-        return _empty("ERROR", days, configured=True, detail=type(exc).__name__)
+        detail = type(exc).__name__
+        is_rate_limited = "ratelimit" in detail.casefold() or "rate_limit" in detail.casefold()
+        with _TRACE_CACHE_LOCK:
+            if is_rate_limited:
+                _TRACE_RATE_LIMIT_UNTIL[cache_key] = time.monotonic() + _TRACE_RATE_LIMIT_BACKOFF_SECONDS
+            cached = _TRACE_CACHE.get(cache_key)
+        if cached is not None:
+            return {
+                **cached[1],
+                "cached": True,
+                "detail": f"{detail}; serving the last successful aggregate",
+            }
+        return _empty("DEGRADED" if is_rate_limited else "ERROR", days, configured=True, detail=detail)
+    finally:
+        with _TRACE_CACHE_LOCK:
+            _TRACE_INFLIGHT.discard(cache_key)
 
 
 __all__ = ["qa_trace_timeseries"]

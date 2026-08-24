@@ -18,7 +18,7 @@ MODEL_REPO="${1:-RedHatAI/Qwen2.5-14B-Instruct-FP8-dynamic}"
 DEST_ROOT="${HGF_MODEL_DIR:-/opt/hgfinance/models}"
 DIRNAME="${2:-$(basename "$MODEL_REPO")}"
 DEST="$DEST_ROOT/$DIRNAME"
-VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:latest}"
+VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai@sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "== ${MODEL_REPO} -> ${DEST}"
@@ -49,7 +49,7 @@ cat <<EOF
        aws s3 sync "$DEST" "s3://\${HGF_MODEL_BUCKET}/models/$DIRNAME" \\
          --exclude 'hf-cache/*'
   2) 서빙 (repo 루트에서):
-       docker compose -f docker-compose.yml -f docker-compose.model.yml up -d vllm
+       scripts/model_plane/vllm_runtime.sh up
   3) 다른 EC2 에서 EBS 를 다시 만들 때는 HF 가 아니라 S3 에서 받는다:
        aws s3 sync "s3://\${HGF_MODEL_BUCKET}/models/$DIRNAME" "$DEST"
        python3 scripts/model_plane/model_manifest.py --model-dir "$DEST" --verify

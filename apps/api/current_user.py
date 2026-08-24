@@ -764,23 +764,50 @@ def set_authenticated_request_user(request: Request, owner_id: str | None) -> No
 
 
 def current_user(
+    authorization: str | None = Header(default=None, alias="Authorization"),
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
 ) -> str | None:
-    """FastAPI dependency returning the user id selected by the frontend."""
+    """Authenticate every user-facing route through the same header boundary.
 
-    owner_id = (x_user_id or "").strip()
-    if not owner_id and auth_required():
-        raise _http_error(401, "portfolio_authentication_required")
-    return owner_id or None
+    ``authenticate_request_headers`` is deliberately kept as the single
+    implementation for both direct callers and FastAPI dependencies.  In
+    production this means ``Authorization: Bearer`` is verified; an
+    ``X-User-Id`` header can only accompany a verified token as an equality
+    check and can never establish identity by itself.
+    """
+
+    return authenticate_request_headers(
+        authorization=authorization,
+        x_user_id=x_user_id,
+    )
 
 
 def optional_current_user(
+    authorization: str | None = Header(default=None, alias="Authorization"),
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
 ) -> str | None:
-    """Return the frontend-selected user id when the route needs one."""
+    """Authenticate an optional browser subject while allowing the private bridge.
 
-    owner_id = (x_user_id or "").strip()
-    return owner_id or None
+    The Discord ingress uses its own single-purpose Bearer credential and
+    resolves the Discord actor inside the BFF.  That credential must not be
+    sent to Supabase JWT verification, otherwise the route would reject a
+    valid bridge request before its route-level authorization check runs.
+    """
+
+    try:
+        from .discord_ingress_auth import bearer_is_authorized
+    except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
+        from discord_ingress_auth import bearer_is_authorized  # type: ignore[no-redef]
+
+    if bearer_is_authorized(authorization):
+        return None
+    if not authorization and not (x_user_id or "").strip():
+        return None
+    return authenticate_request_headers(
+        authorization=authorization,
+        x_user_id=x_user_id,
+        required=False,
+    )
 
 
 def require_owner(

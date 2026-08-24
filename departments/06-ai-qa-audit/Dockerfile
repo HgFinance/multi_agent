@@ -33,6 +33,9 @@ RUN pip install --no-cache-dir \
 
 WORKDIR /app
 COPY departments/06-ai-qa-audit ./departments/06-ai-qa-audit
+# Shared Worker Model Gateway. The model overlay injects Qwen AWQ v1
+# coordinates; without the overlay, the QA image retains its local fallback.
+COPY departments/worker_model_gateway.py ./departments/worker_model_gateway.py
 # The independent reproduction worker reuses the frozen, pure forward
 # evaluator in a separate process.  It does not import quant's DB writer or
 # receive svc_quant privileges.

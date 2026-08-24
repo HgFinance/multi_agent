@@ -231,8 +231,10 @@ def test_profile_worker_registry_counts_and_models() -> None:
                 config["employee_runtime"]["topology"]
                 == "async_fan_out_fan_in_independent_graphs"
             )
-            assert config["employee_runtime"]["model_default"] == "qwen3:1.7b"
-            assert config["employee_runtime"]["model_selection"]["active_model"] == "qwen3:1.7b"
+            assert config["employee_runtime"]["provider"] == "vllm-openai"
+            assert config["employee_runtime"]["model_default"] == "qwen2.5-14b-instruct-awq"
+            assert config["employee_runtime"]["model_selection"]["active_model"] == "qwen2.5-14b-instruct-awq"
+            assert config["employee_runtime"]["model_profile"] == "qwen-awq-v1"
             assert config["employee_runtime"]["max_retries"] == 2
             assert config["employee_runtime"]["max_attempts"] == 3
         # 2026-08-10: 본부장 모델이 부서마다 갈린다. 리서치·퀀트(재일)는 논문 정독과

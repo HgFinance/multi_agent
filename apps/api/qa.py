@@ -11,14 +11,33 @@ from fastapi import APIRouter, Depends, HTTPException
 try:  # Reuse the projector imported by ``apps.api.main`` in the local process.
     from current_user import current_user
     from langsmith_traces import qa_trace_timeseries
+    from orchestration.langsmith_feedback import canonical_department
 except ImportError:  # pragma: no cover - package import path
     from .current_user import current_user
     from .langsmith_traces import qa_trace_timeseries
+    from orchestration.langsmith_feedback import canonical_department
 
 router = APIRouter(tags=["qa-mandate"])
 QA_API_URL = os.getenv("QA_API_URL", "").strip().rstrip("/")
 QA_API_AUTH_TOKEN = os.getenv("QA_API_AUTH_TOKEN", "").strip()
 QA_API_TIMEOUT_SECONDS = float(os.getenv("QA_API_TIMEOUT_SECONDS", "8"))
+_FEEDBACK_DEPARTMENTS = frozenset({
+    "research",
+    "trading",
+    "risk",
+    "qa",
+    "quant",
+    "accounting-portfolio",
+    "ceo",
+    "hr",
+})
+
+
+def _feedback_department(value: str) -> str:
+    normalized = canonical_department(value)
+    if normalized not in _FEEDBACK_DEPARTMENTS:
+        raise HTTPException(status_code=422, detail="invalid_feedback_department")
+    return normalized
 
 
 async def _qa_request(method: str, path: str, *, body: dict[str, Any]) -> Any:
@@ -95,6 +114,50 @@ async def qa_observability_feedback_pending(
     )
 
 
+@router.get("/ui/departments/{department}/observability/feedback")
+async def department_observability_feedback(
+    department: str,
+    limit: int = 50,
+    owner_id: str | None = Depends(current_user),
+) -> Any:
+    """Return only the selected department's redacted LangSmith findings."""
+
+    if not owner_id:
+        raise HTTPException(status_code=401, detail="portfolio_authentication_required")
+    department_key = _feedback_department(department)
+    return await _qa_request(
+        "GET",
+        f"/qa/v1/observability/feedback/department/{department_key}?limit={max(1, min(int(limit), 100))}",
+        body={},
+    )
+
+
+@router.post("/ui/departments/{department}/observability/feedback/{artifact_id}")
+async def add_department_observability_feedback(
+    department: str,
+    artifact_id: str,
+    body: dict[str, Any],
+    owner_id: str | None = Depends(current_user),
+) -> Any:
+    """Append a comment scoped to the selected department's own artifact."""
+
+    if not owner_id:
+        raise HTTPException(status_code=401, detail="portfolio_authentication_required")
+    department_key = _feedback_department(department)
+    comment = str(body.get("comment") or "").strip()
+    if not comment:
+        raise HTTPException(status_code=422, detail="invalid_department_feedback_comment")
+    return await _qa_request(
+        "POST",
+        f"/qa/v1/observability/feedback/{artifact_id}/department-review",
+        body={
+            "reviewer_user_id": owner_id,
+            "reviewer_department": department_key,
+            "comment": comment[:1_200],
+        },
+    )
+
+
 @router.post("/ui/qa/observability/feedback/{artifact_id}/decision")
 async def decide_qa_observability_feedback(
     artifact_id: str,
@@ -123,6 +186,8 @@ __all__ = [
     "assess_qa_verification",
     "qa_langsmith_traces",
     "qa_observability_feedback_pending",
+    "department_observability_feedback",
+    "add_department_observability_feedback",
     "decide_qa_observability_feedback",
     "router",
 ]

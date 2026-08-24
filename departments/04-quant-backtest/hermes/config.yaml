@@ -200,14 +200,17 @@ employee_runtime:
   executor: langgraph
   topology: async_fan_out_fan_in_independent_graphs
   worker_graph_module: departments/04-quant-backtest/employee_workers.py
-  provider: ollama
-  model_env: OLLAMA_CHAT_MODEL
-  model_default: qwen3:1.7b
-  base_url_env: OLLAMA_BASE_URL
+  provider: vllm-openai
+  model_env: WORKER_MODEL_NAME
+  model_default: qwen2.5-14b-instruct-awq
+  base_url_env: WORKER_MODEL_BASE_URL
+  model_profile: qwen-awq-v1
+  adapter_registry: departments/01-research/config/worker_model_registry.json
   model_selection:
-    active_model: qwen3:1.7b
-    candidate_source: ollama list
-    selection_policy: fixed_until_worker_benchmark_approved
+    active_model: qwen2.5-14b-instruct-awq
+    candidate_source: worker_model_registry + qwen-awq-v1 benchmark artifacts
+    selection_policy: fixed_until_worker_benchmark_and_quality_gate_approved
+    quality_gate: FinanceBench_HOLD; serving_only
     matrix_document: docs/02-engineering/WORKER_MODEL_MATRIX.md
   output_contract: quant.worker-context.v1
   max_retries: 2

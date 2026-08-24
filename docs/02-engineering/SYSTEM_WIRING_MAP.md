@@ -129,7 +129,7 @@
 
 원칙(CLAUDE.md): **LLM 은 관련성 판단·서술만.** 판정·수치·권한은 결정론 코드. 워커 출력은 `worker-context.v1`(confidence 0~1 float, evidence 없으면 escalate 강제), 러너 출력은 `{부서}.{러너}.v1`(summary 필드 자체가 없음 — 서술 금지의 기계적 표현).
 
-### LLM 워커 10명 (Ollama qwen3:1.7b, 독립 LangGraph)
+### LLM 워커 10명 (Qwen AWQ v1, 독립 LangGraph)
 
 | 부서 | 워커 | 언제 뜨나 | 하는 일 |
 |---|---|---|---|

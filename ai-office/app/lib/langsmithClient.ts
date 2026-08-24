@@ -53,6 +53,26 @@ export type LangsmithFeedbackPending = {
   items: LangsmithFeedbackItem[];
 };
 
+export type DepartmentFeedbackReview = {
+  review_id: string;
+  target_department: string;
+  reviewer_department: string;
+  reviewer_user_id: string;
+  comment: string;
+  created_at: string;
+};
+
+export type DepartmentFeedbackItem = LangsmithFeedbackItem & {
+  review_count: number;
+  reviews: DepartmentFeedbackReview[];
+};
+
+export type DepartmentFeedbackResponse = {
+  status: string;
+  department: string;
+  items: DepartmentFeedbackItem[];
+};
+
 function explainError(body: unknown, status: number): string {
   if (typeof body === "object" && body !== null && "detail" in body) {
     const detail = (body as { detail?: unknown }).detail;
@@ -104,4 +124,36 @@ export async function decideQaLangsmithFeedback(
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) throw new Error(explainError(body, response.status));
   return body as { status: string; artifact_id: string };
+}
+
+export async function fetchDepartmentLangsmithFeedback(
+  department: string,
+  limit = 50,
+): Promise<DepartmentFeedbackResponse> {
+  const response = await bffFetch(
+    `/ui/departments/${encodeURIComponent(department)}/observability/feedback?limit=${encodeURIComponent(String(limit))}`,
+    { cache: "no-store", headers: { Accept: "application/json" } },
+  );
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(explainError(body, response.status));
+  return body as DepartmentFeedbackResponse;
+}
+
+export async function addDepartmentLangsmithFeedback(
+  department: string,
+  artifactId: string,
+  comment: string,
+): Promise<{ status: string; review_id: string; artifact_id: string }> {
+  const response = await bffFetch(
+    `/ui/departments/${encodeURIComponent(department)}/observability/feedback/${encodeURIComponent(artifactId)}`,
+    {
+      method: "POST",
+      cache: "no-store",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ comment }),
+    },
+  );
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(explainError(body, response.status));
+  return body as { status: string; review_id: string; artifact_id: string };
 }

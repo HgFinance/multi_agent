@@ -33,6 +33,29 @@ FEEDBACK_SCHEMA = "hgfinance.observability.feedback.v1"
 FEEDBACK_MODES = frozenset({"off", "shadow", "active"})
 TERMINAL_STATUSES = frozenset({"success", "completed", "complete", "error", "failed", "blocked", "degraded"})
 ERROR_STATUSES = frozenset({"error", "failed", "blocked", "degraded", "gave_up", "timed_out"})
+_DEPARTMENT_CANONICAL = {
+    "research": "research",
+    "research-department": "research",
+    "trading": "trading",
+    "trading-department": "trading",
+    "risk": "risk",
+    "risk-management": "risk",
+    "qa": "qa",
+    "qa-department": "qa",
+    "quant": "quant",
+    "quant-backtest": "quant",
+    "quant-backtest-department": "quant",
+    "accounting": "accounting-portfolio",
+    "portfolio": "accounting-portfolio",
+    "portfolio-recommendation": "accounting-portfolio",
+    "accounting-portfolio": "accounting-portfolio",
+    "accounting-portfolio-department": "accounting-portfolio",
+    "ceo": "ceo",
+    "ceo-agent": "ceo",
+    "ceo-terminal": "ceo",
+    "hr": "hr",
+    "hr-department": "hr",
+}
 _SAFE_METADATA_KEYS = frozenset(
     {
         "request_id",
@@ -67,6 +90,13 @@ def _now() -> str:
 
 def _bounded_text(value: Any, limit: int = 160) -> str:
     return " ".join(str(value or "").split())[:limit]
+
+
+def canonical_department(value: Any) -> str:
+    """Normalize a UI department code and a trace stage into one key."""
+
+    candidate = _bounded_text(value, 64).lower()
+    return _DEPARTMENT_CANONICAL.get(candidate, candidate)
 
 
 def _bounded_int(value: Any, default: int = 0, maximum: int = 2_147_483_647) -> int:
@@ -330,6 +360,7 @@ class FeedbackLedger:
                     source_run_id TEXT NOT NULL UNIQUE,
                     eval_run_id TEXT NOT NULL,
                     department TEXT NOT NULL,
+                    department_key TEXT NOT NULL DEFAULT '',
                     decision TEXT NOT NULL,
                     score REAL,
                     finding_codes TEXT NOT NULL,
@@ -357,8 +388,36 @@ class FeedbackLedger:
                 );
                 CREATE INDEX IF NOT EXISTS idx_feedback_benchmarks_status
                     ON langsmith_feedback_benchmarks(status, updated_at);
+                CREATE TABLE IF NOT EXISTS langsmith_feedback_reviews (
+                    review_id TEXT PRIMARY KEY,
+                    artifact_id TEXT NOT NULL,
+                    target_department TEXT NOT NULL,
+                    reviewer_department TEXT NOT NULL,
+                    reviewer_user_id TEXT NOT NULL,
+                    comment TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_feedback_reviews_artifact
+                    ON langsmith_feedback_reviews(artifact_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_feedback_reviews_department
+                    ON langsmith_feedback_reviews(target_department, created_at);
                 """
             )
+            artifact_columns = {
+                str(row["name"])
+                for row in db.execute("PRAGMA table_info(langsmith_feedback_artifacts)").fetchall()
+            }
+            if "department_key" not in artifact_columns:
+                db.execute(
+                    "ALTER TABLE langsmith_feedback_artifacts ADD COLUMN department_key TEXT NOT NULL DEFAULT ''"
+                )
+            for row in db.execute(
+                "SELECT artifact_id, department FROM langsmith_feedback_artifacts WHERE department_key=''"
+            ).fetchall():
+                db.execute(
+                    "UPDATE langsmith_feedback_artifacts SET department_key=? WHERE artifact_id=?",
+                    (canonical_department(row["department"]), row["artifact_id"]),
+                )
             columns = {
                 str(row["name"])
                 for row in db.execute("PRAGMA table_info(langsmith_feedback_jobs)").fetchall()
@@ -477,13 +536,15 @@ class FeedbackLedger:
                 return str(existing["artifact_id"])
             db.execute(
                 """INSERT OR IGNORE INTO langsmith_feedback_artifacts
-                (artifact_id, source_run_id, eval_run_id, department, decision, score, finding_codes, summaries, metadata, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (artifact_id, source_run_id, eval_run_id, department, department_key,
+                 decision, score, finding_codes, summaries, metadata, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     artifact_id,
                     source_run_id,
                     eval_run_id,
                     result.department,
+                    canonical_department(result.department),
                     result.decision,
                     result.score,
                     json.dumps(list(result.finding_codes), separators=(",", ":")),
@@ -520,6 +581,114 @@ class FeedbackLedger:
                 (limit,),
             ).fetchall()
         return [self._artifact(row) for row in rows]
+
+    def department_feedback(self, department: str, limit: int = 50) -> list[dict[str, Any]]:
+        """Return redacted findings and append-only reviews for one department.
+
+        The department key is matched against the artifact's server-derived
+        metadata. Callers cannot attach a department comment to another
+        department's trace by changing the UI label.
+        """
+
+        department_key = canonical_department(department)
+        limit = max(1, min(int(limit), 100))
+        with self._connect() as db:
+            rows = db.execute(
+                """SELECT a.*, d.decision AS approval_decision, d.approved_by,
+                    d.reason AS approval_reason,
+                    COUNT(r.review_id) AS review_count
+                FROM langsmith_feedback_artifacts a
+                LEFT JOIN langsmith_feedback_decisions d ON d.artifact_id=a.artifact_id
+                LEFT JOIN langsmith_feedback_reviews r ON r.artifact_id=a.artifact_id
+                WHERE a.department_key=?
+                GROUP BY a.artifact_id
+                ORDER BY a.created_at DESC LIMIT ?""",
+                (department_key, limit),
+            ).fetchall()
+            reviews_by_artifact: dict[str, list[dict[str, Any]]] = {}
+            if rows:
+                placeholders = ",".join("?" for _ in rows)
+                review_rows = db.execute(
+                    f"""SELECT review_id, artifact_id, target_department,
+                        reviewer_department, reviewer_user_id, comment, created_at
+                    FROM langsmith_feedback_reviews
+                    WHERE artifact_id IN ({placeholders})
+                    ORDER BY created_at ASC""",
+                    tuple(row["artifact_id"] for row in rows),
+                ).fetchall()
+                for review in review_rows:
+                    reviews_by_artifact.setdefault(str(review["artifact_id"]), []).append(
+                        {
+                            "review_id": review["review_id"],
+                            "target_department": review["target_department"],
+                            "reviewer_department": review["reviewer_department"],
+                            "reviewer_user_id": review["reviewer_user_id"],
+                            "comment": review["comment"],
+                            "created_at": review["created_at"],
+                        }
+                    )
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = self._artifact(row)
+            item["review_count"] = int(row["review_count"] or 0)
+            item["reviews"] = reviews_by_artifact.get(str(row["artifact_id"]), [])
+            result.append(item)
+        return result
+
+    def add_department_review(
+        self,
+        artifact_id: str,
+        *,
+        target_department: str,
+        reviewer_department: str,
+        reviewer_user_id: str,
+        comment: str,
+    ) -> dict[str, Any] | None:
+        """Append one self-department review without changing QA authority."""
+
+        target_key = canonical_department(target_department)
+        reviewer_key = canonical_department(reviewer_department)
+        bounded_comment = _bounded_text(comment, 1_200)
+        bounded_user = _bounded_text(reviewer_user_id, 128)
+        if not target_key or target_key != reviewer_key or not bounded_user or not bounded_comment:
+            return None
+        try:
+            with self._connect() as db:
+                artifact = db.execute(
+                    "SELECT artifact_id, department, department_key FROM langsmith_feedback_artifacts WHERE artifact_id=?",
+                    (artifact_id,),
+                ).fetchone()
+                if artifact is None or artifact["department_key"] != target_key:
+                    return None
+                review_id = f"review-{uuid4().hex}"
+                now = _now()
+                db.execute(
+                    """INSERT INTO langsmith_feedback_reviews
+                    (review_id, artifact_id, target_department, reviewer_department,
+                     reviewer_user_id, comment, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        review_id,
+                        artifact_id,
+                        target_key,
+                        reviewer_key,
+                        bounded_user,
+                        bounded_comment,
+                        now,
+                    ),
+                )
+                return {
+                    "review_id": review_id,
+                    "artifact_id": artifact_id,
+                    "target_department": target_key,
+                    "reviewer_department": reviewer_key,
+                    "reviewer_user_id": bounded_user,
+                    "comment": bounded_comment,
+                    "created_at": now,
+                }
+        except sqlite3.Error:
+            LOGGER.exception("langsmith_department_review_failed")
+            return None
 
     def approve(self, artifact_id: str, decision: str, approved_by: str, reason: str) -> bool:
         if decision not in {"APPROVED", "REJECTED"}:
@@ -718,6 +887,13 @@ class FeedbackLedger:
             )
             db.execute(
                 """DELETE FROM langsmith_feedback_benchmarks
+                WHERE artifact_id IN (
+                    SELECT artifact_id FROM langsmith_feedback_artifacts WHERE created_at < ?
+                )""",
+                (cutoff,),
+            )
+            db.execute(
+                """DELETE FROM langsmith_feedback_reviews
                 WHERE artifact_id IN (
                     SELECT artifact_id FROM langsmith_feedback_artifacts WHERE created_at < ?
                 )""",

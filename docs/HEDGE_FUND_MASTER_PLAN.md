@@ -14,7 +14,7 @@
 
 > **Current runtime override (2026-08-24, workforce.agent_profiles 전수조사로 갱신)**: 현재 실행 계층은 8개 Hermes Head, 10개 LLM Worker, 5개 결정론 runner(`desk-runner`, `risk-runner`, `qa-runner`, `back-office-runner`, `ceo-runner`)로 구성된 총 23명이다. 도현님 담당 부서는 Trading 1명(LLM 0 + `desk-runner`), Accounting/Portfolio 2명(LLM 1 + `back-office-runner`)이다. 2026-08-07의 "29명" 스냅샷은 이후 여러 차례의 tool 강등(Research 6→2, Quant 7→2, Trading Bull/Bear 제거, Risk·QA·Accounting 강등, HR 5→1 통합)을 반영하지 못한 값이라 폐기한다. 상세 역할 경계·감축 이력은 [WORKER_ROLE_BOUNDARIES.md](02-engineering/WORKER_ROLE_BOUNDARIES.md)가 우선하며, 이 문서의 목표 아키텍처·과거 구현 스냅샷은 현재 Runtime과 섞어 해석하지 않는다.
 
-> 전사 Worker Graph 실행 계층은 [Department Worker Graph Architecture](02-engineering/DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)를 따른다. 8개 부서장은 Hermes Agent와 Codex/Claude Code 연결 모델이고, LLM 직원은 직원별 독립 LangGraph Worker Graph와 Ollama `qwen3:1.7b`를 사용한다. 결정론 runner는 별도 Python 실행 경로로 Trading·Risk·QA·Accounting의 계산·검증을 담당하며 LLM Registry와 구분한다. Worker context는 비바인딩이며 결정론적 Gate가 판정을 소유한다.
+> 전사 Worker Graph 실행 계층은 [Department Worker Graph Architecture](02-engineering/DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)를 따른다. 8개 부서장은 Hermes Agent와 Codex/Claude Code 연결 모델이고, LLM 직원은 직원별 독립 LangGraph Worker Graph와 운영 Qwen AWQ v1을 사용한다. 로컬 Ollama `qwen3:1.7b`는 개발 fallback이다. 결정론 runner는 별도 Python 실행 경로로 Trading·Risk·QA·Accounting의 계산·검증을 담당하며 LLM Registry와 구분한다. Worker context는 비바인딩이며 결정론적 Gate가 판정을 소유한다.
 
 > Risk는 2명(LLM 1 + `risk-runner`), AI QA/감사는 3명(LLM 2 + `qa-runner`)으로 운영하며 나머지 부서도 동일한 독립 Worker 계층으로 운영한다. 직원 모델 교체는 [Worker 모델 배치 기준](02-engineering/WORKER_MODEL_MATRIX.md)에 따라 `ollama list` 확인과 benchmark·HR·QA 승인 후에만 허용한다.
 

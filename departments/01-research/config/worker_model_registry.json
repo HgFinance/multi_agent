@@ -1,19 +1,72 @@
 {
   "registry_version": "worker-model-registry.v1",
-  "department": "research",
-  "_comment": "worker_id → adapter 해석 정본. Worker 는 adapter_id 를 직접 고르지 않는다(FINAL_RUNTIME_ARCHITECTURE §7.2). adapter 는 status 가 'enabled' 일 때만 서빙에 적용된다 - registered/implemented 상태는 base model 로 돈다. LoRA 가 QA·CEO 승인을 통과하면 이 파일만 바꾼다.",
+  "department": "enterprise",
+  "runtime_profile": "qwen-awq-v1",
+  "_comment": "전사 Worker의 모델 좌표 정본이다. Worker는 adapter_id를 직접 고르지 않는다. Qwen AWQ v1 base는 모든 LLM Worker의 운영 기본값이며, arithmetic LoRA는 명시적인 Worker route를 추가할 때만 enabled로 바꾼다. FinanceBench diagnostic은 HOLD이므로 이 파일은 serving 전파를 의미할 뿐 품질 승격·binding 권한 승인을 의미하지 않는다.",
   "base_model": {
     "served_model_name": "qwen2.5-14b-instruct-awq",
     "source": "/models/Qwen2.5-14B-Instruct-AWQ",
-    "quantization": "AWQ W4A16 (Marlin serving kernel)"
+    "compatibility_alias": "Qwen2.5-14B-Instruct-AWQ",
+    "quantization": "AWQ W4A16 (Marlin serving kernel)",
+    "context_length": 8192,
+    "gpu_memory_utilization": 0.85,
+    "kv_cache_dtype": "fp8"
+  },
+  "adapters": {
+    "hgfinance-awq-arithmetic-2epoch": {
+      "version": "arithmetic-2epoch",
+      "source": "/tmp/adapter",
+      "status": "available_for_explicit_route",
+      "quality_gate": "FinanceBench_HOLD"
+    }
   },
   "workers": {
+    "executive-briefing-worker": {
+      "adapter_id": null,
+      "adapter_version": "none",
+      "status": "base_model"
+    },
     "competing-explanation-worker": {
       "adapter_id": null,
       "adapter_version": "none",
       "status": "base_model"
     },
     "holdings-analyst-worker": {
+      "adapter_id": null,
+      "adapter_version": "none",
+      "status": "base_model"
+    },
+    "compliance-policy-worker": {
+      "adapter_id": null,
+      "adapter_version": "none",
+      "status": "base_model"
+    },
+    "result-interpretation-worker": {
+      "adapter_id": null,
+      "adapter_version": "none",
+      "status": "base_model"
+    },
+    "strategy-author-worker": {
+      "adapter_id": null,
+      "adapter_version": "none",
+      "status": "base_model"
+    },
+    "exception-investigation-worker": {
+      "adapter_id": null,
+      "adapter_version": "none",
+      "status": "base_model"
+    },
+    "hallucination-critic-worker": {
+      "adapter_id": null,
+      "adapter_version": "none",
+      "status": "base_model"
+    },
+    "incident-postmortem-worker": {
+      "adapter_id": null,
+      "adapter_version": "none",
+      "status": "base_model"
+    },
+    "profile-architecture-worker": {
       "adapter_id": null,
       "adapter_version": "none",
       "status": "base_model"

@@ -5,8 +5,10 @@
 #       §7.2(Multi-LoRA), §8.4(EBS=Runtime Cache), §12 Phase 4.
 #
 # ▶ 쓰는 법 (AWS EC2, GPU 필수)
-#     docker compose -f docker-compose.yml -f docker-compose.model.yml up -d vllm
-#     docker compose -f docker-compose.yml -f docker-compose.model.yml up -d research-mcp
+#     scripts/model_plane/vllm_runtime.sh up
+#     scripts/model_plane/vllm_runtime.sh check
+#   vLLM은 반드시 위 래퍼를 통해서만 관리한다. 원시 docker run/compose 명령은
+#   이미지 pin·Compose ownership·네트워크 alias 검사를 우회하므로 운영 절차가 아니다.
 #   모델 파일은 먼저 EBS 에 있어야 한다:
 #     scripts/model_plane/fetch_base_model.sh   (HF → EBS 최초 1회)
 #   S3 가 Source of Truth, EBS(/opt/hgfinance/models)는 Runtime Cache 다(§8.3-8.4).
@@ -23,14 +25,24 @@
 x-worker-model-environment: &worker-model-environment
   WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-http://vllm:8000/v1}
   WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-awq}
+  WORKER_MODEL_PROFILE: ${WORKER_MODEL_PROFILE:-qwen-awq-v1}
   WORKER_MODEL_API_KEY: ${WORKER_MODEL_API_KEY:-vllm}
   WORKER_MODEL_TIMEOUT_SECONDS: ${WORKER_MODEL_TIMEOUT_SECONDS:-120}
   WORKER_MODEL_REGISTRY_PATH: ${WORKER_MODEL_REGISTRY_PATH:-/app/departments/01-research/config/worker_model_registry.json}
+  WORKER_LORA_ADAPTER_NAME: ${WORKER_LORA_ADAPTER_NAME:-hgfinance-awq-arithmetic-2epoch}
+  WORKER_LORA_ADAPTER_VERSION: ${WORKER_LORA_ADAPTER_VERSION:-arithmetic-2epoch}
 
 services:
   vllm:
-    image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
+    # Never use a mutable tag for the serving plane. The wrapper exports this
+    # same digest and refuses containers that drift from it.
+    image: ${VLLM_IMAGE:-vllm/vllm-openai@sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967}
     container_name: hedgefund-vllm
+    labels:
+      com.hgfinance.runtime.owner: compose
+      com.hgfinance.runtime.profile: qwen-awq-v1
+      com.hgfinance.runtime.launcher: scripts/model_plane/vllm_runtime.sh
+      com.hgfinance.runtime.image_digest: sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967
     # Must share the control-plane network so Worker containers can resolve
     # the stable `vllm` service name instead of falling back to host/bridge DNS.
     networks:
@@ -118,14 +130,35 @@ services:
   portfolio-bff:
     environment:
       <<: *worker-model-environment
+    volumes:
+      - ./departments/01-research/config:/app/departments/01-research/config:ro
 
   portfolio-worker:
     environment:
       <<: *worker-model-environment
+    volumes:
+      - ./departments/01-research/config:/app/departments/01-research/config:ro
 
   # Risk compliance-policy-worker uses the same shared Qwen14B model plane.
   # Hermes remains the Risk department head; this only changes the independent
   # employee Worker model boundary.
   risk-api:
+    environment:
+      <<: *worker-model-environment
+    volumes:
+      - ./departments/01-research/config:/app/departments/01-research/config:ro
+
+  # QA's independent employee Workers use the same gateway. qa-worker and
+  # qa-reproduction-worker stay deterministic/event-driven and intentionally
+  # do not receive model credentials.
+  audit-api:
+    environment:
+      <<: *worker-model-environment
+    volumes:
+      - ./departments/01-research/config:/app/departments/01-research/config:ro
+
+  # The CEO supervisor may execute the employee briefing Worker through the
+  # paper pipeline. Hermes itself remains the department-head boundary.
+  ceo-kanban-supervisor:
     environment:
       <<: *worker-model-environment

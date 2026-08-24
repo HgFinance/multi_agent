@@ -15,7 +15,7 @@ set -euo pipefail
 SRC_MODEL="${1:-Qwen/Qwen2.5-1.5B-Instruct}"
 OUT_DIRNAME="${2:-$(basename "$SRC_MODEL")-FP8-dynamic}"
 DEST_ROOT="${HGF_MODEL_DIR:-/opt/hgfinance/models}"
-VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:latest}"
+VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai@sha256:0a51ea5b4ae2dc5d81890e5173f54203d2a3ae0cfffe51b8fd2afd4391bfd967}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 GPU_ARGS=(--gpus all)
@@ -45,7 +45,7 @@ cat <<EOF
 양자화 아티팩트 검증(서빙까지 해봐야 완료다):
   WORKER_BASE_MODEL_DIRNAME=$OUT_DIRNAME \\
   WORKER_MODEL_NAME=$(echo "$OUT_DIRNAME" | tr '[:upper:]' '[:lower:]') \\
-  docker compose -f docker-compose.yml -f docker-compose.model.yml up -d vllm
+  scripts/model_plane/vllm_runtime.sh up
   curl -s http://127.0.0.1:8000/v1/models
 S3 업로드(정본화):
   aws s3 sync "$DEST_ROOT/$OUT_DIRNAME" "s3://\${HGF_MODEL_BUCKET}/models/$OUT_DIRNAME"

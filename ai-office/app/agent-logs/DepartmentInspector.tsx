@@ -8,6 +8,7 @@ import {
 import AccountingLedgerPanel from "../components/AccountingLedgerPanel";
 import AlphaStrategyPanel from "../components/AlphaStrategyPanel";
 import CeoOperationsPanel from "../components/CeoOperationsPanel";
+import DepartmentLangsmithFeedbackPanel from "../components/DepartmentLangsmithFeedbackPanel";
 import LivePortfolioPanel from "../components/LivePortfolioPanel";
 import QaLangsmithPanel from "../components/QaLangsmithPanel";
 import QaLangsmithFeedbackPanel from "../components/QaLangsmithFeedbackPanel";
@@ -241,6 +242,7 @@ export default function DepartmentInspector({
           <QaLangsmithFeedbackPanel />
         </>
       ) : null}
+      <DepartmentLangsmithFeedbackPanel department={code} />
     </section>
   );
 }

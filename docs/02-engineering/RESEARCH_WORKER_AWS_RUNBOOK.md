@@ -1,9 +1,8 @@
 # 리서치본부 Worker Runtime + Model Plane AWS 런북
 
-> **Scope/status:** 이 런북은 tracked FP8 model-plane 절차의 historical/design
-> baseline이다. 현재 AWS가 AWQ로 전환되었다는 외부 runtime 상태는 이 저장소에서
-> 검증되지 않았으며, 최신 구현 상태는
-> [CURRENT_PROJECT_ARCHITECTURE.md](../CURRENT_PROJECT_ARCHITECTURE.md)를 따른다.
+> **Scope/status:** 이 런북은 현재 Qwen AWQ v1 model-plane 절차를 설명한다.
+> 실제 readiness는 문서가 아니라 `scripts/model_plane/vllm_runtime.sh check`로
+> 확인한다. FP8은 historical benchmark/rollback reference로만 남긴다.
 
 소유: 재일 · 작성 2026-08-13 · 상태: Phase 2/3 첫 수직 슬라이스 (Research)
 
@@ -17,7 +16,7 @@ research-mcp (LangGraph runner - employee_worker_runtime)
       ↓ Worker Model Gateway (departments/worker_model_gateway.py)   ← 신규
 vLLM (hedgefund-vllm, compose 오버레이)                               ← 신규
       ↓
-Qwen2.5-14B-Instruct FP8 (EBS /opt/hgfinance/models, S3 가 정본)
+Qwen2.5-14B-Instruct AWQ v1 + arithmetic adapter (EBS /opt/hgfinance/models, S3 가 정본)
 ```
 
 부서 내부만 구현한다 - 부서 간 통신은 이 런북 범위 밖이다.
@@ -113,7 +112,7 @@ python3 scripts/model_plane/model_manifest.py --model-dir /opt/hgfinance/models/
 
 ```bash
 cd ~/hgfinance
-docker compose -f docker-compose.yml -f docker-compose.model.yml up -d vllm
+scripts/model_plane/vllm_runtime.sh up
 docker logs -f hedgefund-vllm     # "Application startup complete" 까지 수 분
 ```
 
@@ -122,13 +121,29 @@ docker logs -f hedgefund-vllm     # "Application startup complete" 까지 수 �
 ```bash
 curl -s http://127.0.0.1:8000/v1/models | python3 -m json.tool
 curl -s http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
-  "model": "qwen2.5-14b-instruct-fp8",
+  "model": "qwen2.5-14b-instruct-awq",
   "messages": [{"role":"user","content":"한 문장으로 자기소개"}],
   "max_tokens": 64}' | python3 -m json.tool
 ```
 
-OOM 이 나면 `.env` 에 `VLLM_MAX_MODEL_LEN=8192` 를 넣고 다시 올린다.
-(L4 24GB 기본값은 16384. g6e 48GB 면 32768 로 올려도 된다.)
+OOM 이 나면 먼저 `scripts/model_plane/vllm_runtime.sh check`와 로그를 확인한다.
+L4 24GB에서는 `.env`의 `VLLM_MAX_MODEL_LEN=8192`,
+`VLLM_GPU_MEMORY_UTILIZATION=0.85`를 유지한다. g6e 48GB 프로파일은 별도
+benchmark·승인 없이 올리지 않는다.
+
+### 3.1 vLLM ownership guard
+
+팀원은 vLLM을 `docker run`으로 띄우거나 다른 이름으로 복제하지 않는다. 아래
+검사는 컨테이너를 삭제하지 않고 Compose project/service label, 고정 이미지
+digest, `hedgefund_default`의 `vllm` alias, loopback port, health, served model,
+arithmetic adapter를 모두 확인한다:
+
+```bash
+scripts/model_plane/vllm_runtime.sh check
+```
+
+수동/중복 컨테이너가 발견되면 guard가 중지하고 소유자 확인을 요구한다. 자동
+삭제·볼륨 prune은 의도적으로 하지 않는다.
 
 ## 4. research-mcp 재기동 (모델 배선 주입)
 
