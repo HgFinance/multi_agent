@@ -1,6 +1,9 @@
 # Supabase → AWS control 도메인 데이터 이전
 
-상태: **구현 완료 · 실행 전(dry-run 미완주)** · 실측일 2026-08-24
+상태: **완주 — 60행 이전 완료·검증됨** · 2026-08-24
+
+실행 기록: 배선 수정 → 이력 정합화(95→100) → dry-run PASS → 60행 이전 COMPLETED →
+재실행 멱등 확인(to_insert 0). 보류: `audit.eval_runs`/`eval_results` 28행(9절).
 
 ## 1. 이 작업이 실제로 무엇인가
 
@@ -172,6 +175,33 @@ python scripts/migrate_supabase_to_aws_control.py --validate-only
 - 검증 실패 → **cutover 하지 않는다.** 복사는 단일 트랜잭션이라 부분 적용 상태가 남지 않는다.
 - cutover 이후 문제 발견 → 9절 1단계 덤프를 `pg_restore` 로 복원.
 - 양방향 복제는 만들지 않는다.
+
+## 11-1. 실행 결과 (2026-08-24)
+
+| 단계 | 결과 |
+|---|---|
+| governance-api 재배선 | 완료 05:27. Supabase 를 가리키는 컨테이너 **0개** |
+| 이력 정합화 | 적용 95 → **100**. workforce 23→40, departments 2→**8** |
+| dry-run | PASS, 충돌 0 |
+| 이전 | **60행 COMPLETED**, 체크섬 불일치 0, 도메인 불변식 위반 0 |
+| 재실행 | `to_insert: 0` / `already_present: 60` — 멱등 실증, 중복 0 |
+
+리포트: `migration_reports/supabase_to_control_20260824T063507Z.json`(이전),
+`…063739Z.json`(재실행). 백업: `~/hgfinance-db-backups/control-pre-audit-copy-20260824.dump`.
+
+`audit.traces` 의 DATA_MIGRATION 기록은 COMPLETED 1건 + FAILED 4건(아래 실패 이력)이다.
+
+### 실행 중 잡은 결함 3건
+
+1. **`can't adapt type 'dict'`** — psycopg2 는 `jsonb` 를 dict 로 읽지만 그대로 쓸 수 없다.
+   선언된 컬럼 타입이 json/jsonb 일 때만 `Json()` 으로 감싼다. **파이썬 타입으로 판단하면 안 된다**:
+   `text[]` 도 파이썬 list 라서, 감싸면 실제 배열이 JSON 문자열로 망가진다.
+   라이브 회귀 시험 추가(jsonb + text[] 동시 검증).
+2. **실패한 실행의 트레이스가 영구 RUNNING** — 트레이스는 복사 전에 커밋되므로, 복사가 롤백되면
+   죽은 실행이 영원히 진행중으로 남았다. 예외 경로에서 FAILED 로 닫는다.
+3. **preflight 가 트리거를 안 봤다** — `compare_schemas` 는 pg_constraint 만 읽어서,
+   `audit.eval_runs` 의 BEFORE INSERT 가드가 복사 도중에야 터졌다. 이제 COPY 대상 표에
+   행 단위 BEFORE INSERT 트리거가 있으면 **preflight 에서 표·트리거 이름을 대고 거부**한다.
 
 ## 12. 남은 위험
 

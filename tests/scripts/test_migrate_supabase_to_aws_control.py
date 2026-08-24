@@ -782,3 +782,120 @@ def test_source_holding_an_unknown_version_aborts():
     with pytest.raises(migrate.bootstrap.BootstrapError):
         migrate.verify_source_migration_versions(_VersionCursor(tampered))
 
+
+# ---------------------------------------------------------------------------
+# jsonb round-trips: psycopg2 reads jsonb as dict but cannot write a bare dict
+# ---------------------------------------------------------------------------
+
+
+def test_json_positions_uses_declared_type_not_python_type():
+    table = make_table(
+        "audit", "findings",
+        columns=(
+            migrate.ColumnInfo("id", "uuid", True, False, 1),
+            migrate.ColumnInfo("impact", "jsonb", False, False, 2),
+            migrate.ColumnInfo("tags", "text[]", False, False, 3),
+            migrate.ColumnInfo("note", "text", False, False, 4),
+        ),
+    )
+    positions = migrate._json_positions(table, ("id", "impact", "tags", "note"))
+    # Only the jsonb column.  A text[] is also a Python list, and wrapping it
+    # would silently turn a real array into a JSON string.
+    assert positions == {1}
+
+
+@requires_live_db
+def test_live_jsonb_and_array_columns_round_trip_exactly(live_connections):
+    source, target = live_connections
+    ddl = (
+        "create table mig_test.payloads ("
+        "  id uuid primary key,"
+        "  impact jsonb,"
+        "  tags text[],"
+        "  note text)"
+    )
+    for connection in (source, target):
+        with connection.cursor() as cursor:
+            cursor.execute(ddl)
+        connection.commit()
+    try:
+        row_id = UUID(int=51)
+        impact = {"severity": "high", "counts": [1, 2, 3], "nested": {"k": "v"}}
+        with source.cursor() as cursor:
+            cursor.execute(
+                "insert into mig_test.payloads (id, impact, tags, note) "
+                "values (%s, %s, %s, %s)",
+                (row_id, migrate.json.dumps(impact), ["a", "b"], "hello"),
+            )
+        source.commit()
+
+        seed = migrate.resolve_seed_identity()
+        with source.cursor() as sc, target.cursor() as tc:
+            table = migrate.introspect_domain_schema(sc)[("mig_test", "payloads")]
+            classification = migrate.classify_table(sc, tc, table, seed)
+            assert len(classification.to_insert) == 1
+        migrate.copy_table(target, table, classification.to_insert)
+        target.commit()
+
+        with target.cursor() as cursor:
+            cursor.execute("select id, impact, tags, note from mig_test.payloads")
+            got = cursor.fetchone()
+        assert got[0] == row_id
+        assert got[1] == impact          # jsonb survived as a structure
+        assert got[2] == ["a", "b"]      # text[] stayed a real array
+        assert got[3] == "hello"
+
+        # ...and the copied row must hash equal to the source row.
+        with source.cursor() as sc, target.cursor() as tc:
+            src_hash, src_n = migrate.compute_table_checksum(sc, table)
+            tgt_hash, tgt_n = migrate.compute_table_checksum(tc, table)
+        assert (src_hash, src_n) == (tgt_hash, tgt_n)
+    finally:
+        for connection in (source, target):
+            with connection.cursor() as cursor:
+                cursor.execute("drop table if exists mig_test.payloads")
+            connection.commit()
+
+
+@requires_live_db
+def test_live_before_insert_guard_is_caught_in_preflight(live_connections):
+    """A state-machine guard must refuse during preflight, not mid-copy."""
+
+    _source, target = live_connections
+    with target.cursor() as cursor:
+        cursor.execute("create table mig_test.guarded (id uuid primary key, status text)")
+        cursor.execute(
+            """
+            create function mig_test.only_queued() returns trigger as $$
+            begin
+              if new.status <> 'QUEUED' then
+                raise check_violation using message = 'must be inserted QUEUED';
+              end if;
+              return new;
+            end $$ language plpgsql
+            """
+        )
+        cursor.execute(
+            "create trigger guarded_lifecycle before insert on mig_test.guarded "
+            "for each row execute function mig_test.only_queued()"
+        )
+    target.commit()
+    try:
+        with target.cursor() as cursor:
+            scope = {("mig_test", "guarded")}
+            blocking = migrate.detect_insert_blocking_triggers(cursor, scope)
+            assert blocking == [
+                "mig_test.guarded has BEFORE INSERT trigger guarded_lifecycle"
+            ]
+            # A table outside COPY scope is not reported: we never write it.
+            assert migrate.detect_insert_blocking_triggers(cursor, set()) == []
+            assert migrate.detect_insert_blocking_triggers(
+                cursor, {("mig_test", "parent")}
+            ) == []
+        target.commit()
+    finally:
+        with target.cursor() as cursor:
+            cursor.execute("drop table if exists mig_test.guarded")
+            cursor.execute("drop function if exists mig_test.only_queued()")
+        target.commit()
+

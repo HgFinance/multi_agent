@@ -73,8 +73,8 @@
     "audit.deployment_events": "CONTROL_AUTHORITATIVE",
     "audit.domain_events": "CONTROL_AUTHORITATIVE",
     "audit.eval_comparisons": "CONTROL_AUTHORITATIVE",
-    "audit.eval_results": "COPY",
-    "audit.eval_runs": "COPY",
+    "audit.eval_results": "CONTROL_AUTHORITATIVE",
+    "audit.eval_runs": "CONTROL_AUTHORITATIVE",
     "audit.eval_sets": "COPY",
     "audit.finding_events": "CONTROL_AUTHORITATIVE",
     "audit.findings": "COPY",
@@ -257,8 +257,17 @@
   },
   "_decision": {
     "standard": "AWS control PostgreSQL",
-    "copy_rows_total": 88,
+    "copy_rows_total": 60,
     "left_behind": "Supabase-only test fixtures (users/funds/mandates)",
     "blocking_prerequisite": "hedgefund-governance-api still points at the Supabase pooler (6543); repoint it at control first or the estate re-diverges immediately"
+  },
+  "_deferred": {
+    "tables": [
+      "audit.eval_runs",
+      "audit.eval_results"
+    ],
+    "source_rows": 28,
+    "reason": "audit.eval_runs carries a BEFORE INSERT append-only guard (eval_runs_lifecycle_guard -> validate_eval_run_transition) that only admits rows in QUEUED status with no ended_at.  The source rows are completed runs, so importing them verbatim requires deliberately suspending an audit-integrity guard.  audit.eval_results is held with them because it is FK-dependent.",
+    "status": "HELD - not discarded.  The rows remain in hosted Supabase and can be copied later if the guard bypass is approved."
   }
 }

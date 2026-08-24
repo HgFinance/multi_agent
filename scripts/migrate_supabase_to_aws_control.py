@@ -352,6 +352,40 @@ def compare_schemas(
     return problems
 
 
+def detect_insert_blocking_triggers(
+    cursor, scope: set[tuple[str, str]]
+) -> list[str]:
+    """Row-level BEFORE INSERT triggers on tables we are about to write.
+
+    ``compare_schemas`` reads pg_constraint, which does not know about triggers.
+    A state-machine guard such as audit.eval_runs' append-only lifecycle check
+    therefore stays invisible until the copy is already running and fails
+    mid-transaction.  Surfacing it during preflight turns that into a clean
+    refusal that names the table and the trigger.
+    """
+
+    if not scope:
+        return []
+    cursor.execute(
+        """
+        select n.nspname, c.relname, t.tgname
+          from pg_trigger t
+          join pg_class c on c.oid = t.tgrelid
+          join pg_namespace n on n.oid = c.relnamespace
+         where not t.tgisinternal
+           and (t.tgtype & 1) = 1   -- FOR EACH ROW
+           and (t.tgtype & 2) = 2   -- BEFORE
+           and (t.tgtype & 4) = 4   -- INSERT
+         order by 1, 2, 3
+        """
+    )
+    return [
+        f"{schema}.{table} has BEFORE INSERT trigger {trigger}"
+        for schema, table, trigger in cursor.fetchall()
+        if (schema, table) in scope
+    ]
+
+
 def verify_target_migration_history(cursor) -> None:
     """Reuse the bootstrap script's own drift-detection, not a reimplementation."""
 
@@ -780,16 +814,45 @@ def classify_table(
 # ---------------------------------------------------------------------------
 
 
+JSON_TYPES = frozenset({"json", "jsonb"})
+
+
+def _json_positions(table: TableInfo, insertable: Sequence[str]) -> set[int]:
+    """Positions of json/jsonb columns, decided by the DECLARED column type.
+
+    psycopg2 parses a jsonb column into a plain dict on read but cannot adapt a
+    dict back on write, so those values need a Json() wrapper.  The decision has
+    to come from the column type, not from isinstance(value, list): a Python
+    list is equally the shape of a real PostgreSQL array such as text[], and
+    wrapping one of those would corrupt it into a JSON string.
+    """
+
+    declared = {column.name: column.full_type for column in table.columns}
+    return {
+        position
+        for position, name in enumerate(insertable)
+        if declared.get(name, "").rstrip("[]") in JSON_TYPES
+    }
+
+
 def copy_table(target_connection, table: TableInfo, rows: Sequence[tuple[Any, ...]]) -> None:
     if not rows:
         return
-    from psycopg2.extras import execute_values
+    from psycopg2.extras import Json, execute_values
 
     all_columns = table.all_column_names
     insertable = table.insertable_columns
     indexes = [all_columns.index(col) for col in insertable]
     column_list = ", ".join(f'"{col}"' for col in insertable)
-    payload = [tuple(row[i] for i in indexes) for row in rows]
+    json_positions = _json_positions(table, insertable)
+    payload = []
+    for row in rows:
+        values = [row[i] for i in indexes]
+        for position in json_positions:
+            value = values[position]
+            if isinstance(value, (dict, list)):
+                values[position] = Json(value)
+        payload.append(tuple(values))
 
     with target_connection.cursor() as cursor:
         bootstrap._set_transaction_timeouts(cursor)
@@ -1017,6 +1080,16 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
                     "schema compatibility FAILED: " + "; ".join(problems[:20])
                 )
 
+            blocking = detect_insert_blocking_triggers(target_cursor, copy_scope)
+            if blocking:
+                raise MigrationError(
+                    "target refuses plain inserts on tables in COPY scope: "
+                    + "; ".join(blocking)
+                    + ". Move the table to CONTROL_AUTHORITATIVE, or get an "
+                    "explicit decision to suspend the guard -- this tool will "
+                    "not disable an audit trigger on its own"
+                )
+
             # Order only the tables being copied.  Classifying the other 203
             # would pull ~135k control rows into memory to prove something the
             # manifest already decided.
@@ -1029,7 +1102,15 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
                 report = {
                     "mode": "validate-only",
                     "tables": [],
-                    "domain_invariants": run_domain_invariants(source_cursor, target_cursor),
+                    # Same scope rule as the execute path.  Without it, every
+                    # CONTROL_AUTHORITATIVE ledger table reports an "invariant
+                    # mismatch" that is simply the declared policy working, and
+                    # that noise hides a real regression.
+                    "domain_invariants": run_domain_invariants(
+                        source_cursor,
+                        target_cursor,
+                        {f"{key[0]}.{key[1]}" for key in order},
+                    ),
                 }
                 for key in order:
                     table = source_schema[key]
@@ -1150,18 +1231,35 @@ def run(arguments: argparse.Namespace) -> dict[str, Any]:
                 )
             target.commit()
 
-            with target.cursor() as constraint_cursor:
-                # Deferring lets the single transaction insert in FK order
-                # without tripping on any deferrable cycle in the graph.
-                constraint_cursor.execute("set constraints all deferred")
-            copied_tables = 0
-            for key in order:
-                rows = classifications[key].to_insert
-                if not rows:
-                    continue
-                copy_table(target, source_schema[key], rows)
-                copied_tables += 1
-            target.commit()
+            try:
+                with target.cursor() as constraint_cursor:
+                    # Deferring lets the single transaction insert in FK order
+                    # without tripping on any deferrable cycle in the graph.
+                    constraint_cursor.execute("set constraints all deferred")
+                copied_tables = 0
+                for key in order:
+                    rows = classifications[key].to_insert
+                    if not rows:
+                        continue
+                    copy_table(target, source_schema[key], rows)
+                    copied_tables += 1
+                target.commit()
+            except Exception:
+                # The copy rolls back whole, but the trace row was committed
+                # before it started.  Leaving it RUNNING would misreport a dead
+                # run as in-flight forever, so close it out honestly.
+                target.rollback()
+                with target.cursor() as failed_cursor:
+                    failed_cursor.execute(
+                        """
+                        update audit.traces
+                           set ended_at = now(), status = 'FAILED'
+                         where trace_id = %s
+                        """,
+                        (run_id,),
+                    )
+                target.commit()
+                raise
 
             copy_keys = [
                 key for key in order if classifications[key].policy == POLICY_COPY
