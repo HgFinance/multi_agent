@@ -90,7 +90,7 @@ function ColumnShell({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex min-w-0 flex-col gap-2 rounded-lg border border-outline-variant bg-surface p-3">
+    <div className="flex min-w-0 flex-col gap-1.5 rounded-lg border border-outline-variant bg-surface p-2.5">
       <div className="flex items-center justify-between gap-2">
         <span className="flex min-w-0 items-center gap-1.5 text-body-sm font-body-sm font-bold text-on-surface">
           <span className="material-symbols-outlined text-[16px] text-on-surface-variant" aria-hidden="true">
@@ -148,7 +148,7 @@ function HiringColumn() {
       empty={requests.length === 0}
     >
       {requests.map((request) => (
-        <article key={request.request_id} className="rounded-md border border-outline-variant bg-surface-container-low p-2.5">
+        <article key={request.request_id} className="rounded-md border border-outline-variant bg-surface-container-low p-2">
           <div className="flex items-start justify-between gap-2">
             <span className="min-w-0 truncate font-data-mono text-[11px] text-on-surface-variant" title={request.department_id}>
               {request.department_id}
@@ -187,7 +187,7 @@ function ImprovementColumn() {
       empty={candidates.length === 0}
     >
       {candidates.map((candidate) => (
-        <article key={candidate.candidate_id} className="rounded-md border border-outline-variant bg-surface-container-low p-2.5">
+        <article key={candidate.candidate_id} className="rounded-md border border-outline-variant bg-surface-container-low p-2">
           <div className="flex items-start justify-between gap-2">
             <span className="min-w-0 truncate font-data-mono text-[11px] text-on-surface-variant" title={candidate.target_ref}>
               {candidate.target_type} · {candidate.target_ref}
@@ -225,7 +225,7 @@ function PlanColumn() {
       empty={plans.length === 0}
     >
       {plans.map((plan) => (
-        <article key={plan.plan_id} className="rounded-md border border-outline-variant bg-surface-container-low p-2.5">
+        <article key={plan.plan_id} className="rounded-md border border-outline-variant bg-surface-container-low p-2">
           <div className="flex items-start justify-between gap-2">
             <span className="min-w-0 truncate font-data-mono text-[11px] text-on-surface-variant" title={plan.department_id}>
               {plan.department_id}
@@ -258,25 +258,24 @@ export default function WorkforceLifecyclePanel() {
       aria-labelledby="workforce-lifecycle-title"
     >
       <LifecycleArtifactHeader />
-      <div className="space-y-5 p-4 md:p-6">
+      <div className="space-y-2 px-4 py-3">
         <div className="min-w-0">
-          <p className="m-0 text-label-md font-label-md uppercase text-on-surface-variant">Workforce · Lifecycle</p>
-          <h2 id="workforce-lifecycle-title" className="mt-2 text-headline-md font-headline-md font-bold text-primary">
+          <h2 id="workforce-lifecycle-title" className="m-0 text-title-sm font-title-sm font-bold text-primary">
             조직 구성 및 개선
           </h2>
-          <p className="mt-2 max-w-3xl text-body-sm font-body-sm text-on-surface-variant">
+          <p className="mt-0.5 max-w-3xl text-[11px] leading-snug text-on-surface-variant">
             인력 계획(Plan)에 따라 채용(Hiring)을 제안하고, 기존 인력의 개선 후보(Improvement)를 검토하는 흐름입니다.
             읽기 전용이며, 승인·전이는 이 화면에서 실행하지 않습니다.
           </p>
         </div>
 
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+        <div className="grid grid-cols-1 gap-2 lg:grid-cols-3">
           <PlanColumn />
           <HiringColumn />
           <ImprovementColumn />
         </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-t border-outline-variant pt-3 text-xs text-on-surface-variant">
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-t border-outline-variant pt-2 text-[11px] text-on-surface-variant">
           <span>workforce.workforce_plans / hiring_requests / improvement_candidates 기준</span>
           <span>{POLL_MS / 1000}초마다 자동 갱신</span>
         </div>

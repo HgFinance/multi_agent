@@ -87,8 +87,8 @@ function CapacityRow({ report }: { report: DepartmentCapacityReport }) {
   const view = statusView(report.status);
   return (
     <tr className="border-t border-outline-variant/60 text-on-surface">
-      <td className="px-3 py-2 font-data-mono">{report.department}</td>
-      <td className="px-3 py-2">
+      <td className="px-2.5 py-1.5 font-data-mono">{report.department}</td>
+      <td className="px-2.5 py-1.5">
         <span className={`inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-[10px] font-semibold ${view.tone}`}>
           <span className="material-symbols-outlined text-[12px]" aria-hidden="true">
             {view.icon}
@@ -96,11 +96,11 @@ function CapacityRow({ report }: { report: DepartmentCapacityReport }) {
           {view.label}
         </span>
       </td>
-      <td className="px-3 py-2 font-data-mono">{report.arrivals ?? "—"}</td>
-      <td className="px-3 py-2 font-data-mono">{formatMs(report.duration_p95_ms)}</td>
-      <td className="px-3 py-2 font-data-mono">{formatRate(report.error_rate)}</td>
-      <td className="px-3 py-2 font-data-mono">{formatRate(report.retry_rate)}</td>
-      <td className="px-3 py-2 font-data-mono">{formatUtilization(report.utilization)}</td>
+      <td className="px-2.5 py-1.5 font-data-mono">{report.arrivals ?? "—"}</td>
+      <td className="px-2.5 py-1.5 font-data-mono">{formatMs(report.duration_p95_ms)}</td>
+      <td className="px-2.5 py-1.5 font-data-mono">{formatRate(report.error_rate)}</td>
+      <td className="px-2.5 py-1.5 font-data-mono">{formatRate(report.retry_rate)}</td>
+      <td className="px-2.5 py-1.5 font-data-mono">{formatUtilization(report.utilization)}</td>
     </tr>
   );
 }
@@ -124,13 +124,12 @@ export default function WorkforceCapacityPanel() {
       aria-labelledby="workforce-capacity-title"
     >
       <CapacityArtifactHeader samples={data ? reports.length : undefined} />
-      <div className="space-y-5 p-4 md:p-6">
+      <div className="space-y-2 px-4 py-3">
         <div className="min-w-0">
-          <p className="m-0 text-label-md font-label-md uppercase text-on-surface-variant">Workforce · Capacity</p>
-          <h2 id="workforce-capacity-title" className="mt-2 text-headline-md font-headline-md font-bold text-primary">
+          <h2 id="workforce-capacity-title" className="m-0 text-title-sm font-title-sm font-bold text-primary">
             투자본부 용량(Capacity) 관측
           </h2>
-          <p className="mt-2 max-w-3xl text-body-sm font-body-sm text-on-surface-variant">
+          <p className="mt-0.5 max-w-3xl text-[11px] leading-snug text-on-surface-variant">
             최근 24시간 Langfuse 실행 이벤트를 부서별로 집계한 값입니다(도착 건수·처리시간
             p95·오류율·재시도율·가동률). 정식 Quality+Cost 통합 Scorecard 연동 전까지는
             이 값이 Capacity의 유일한 실측 출처입니다.
@@ -139,7 +138,7 @@ export default function WorkforceCapacityPanel() {
 
         {error ? (
           <div
-            className={`rounded-lg border p-4 text-sm ${
+            className={`rounded-lg border p-3 text-xs ${
               error.status === 503
                 ? "border-outline-variant bg-surface-container-low text-on-surface-variant"
                 : "border-error/40 bg-error-container text-on-error-container"
@@ -154,23 +153,23 @@ export default function WorkforceCapacityPanel() {
         ) : null}
 
         {loading && !data && !error ? (
-          <p className="m-0 rounded-lg border border-outline-variant bg-surface-container-low p-5 text-sm text-on-surface-variant">
+          <p className="m-0 rounded-lg border border-outline-variant bg-surface-container-low p-3 text-xs text-on-surface-variant">
             Capacity를 확인하는 중입니다…
           </p>
         ) : null}
 
         {data ? (
           <div className="overflow-x-auto rounded-lg border border-outline-variant">
-            <table className="w-full min-w-[720px] text-left text-xs">
+            <table className="w-full min-w-[640px] text-left text-xs">
               <thead className="bg-surface-container text-label-md text-on-surface-variant">
                 <tr>
-                  <th className="px-3 py-2 font-semibold">부서</th>
-                  <th className="px-3 py-2 font-semibold">상태</th>
-                  <th className="px-3 py-2 font-semibold">도착 건수</th>
-                  <th className="px-3 py-2 font-semibold">처리시간 p95</th>
-                  <th className="px-3 py-2 font-semibold">오류율</th>
-                  <th className="px-3 py-2 font-semibold">재시도율</th>
-                  <th className="px-3 py-2 font-semibold">가동률</th>
+                  <th className="px-2.5 py-1.5 font-semibold">부서</th>
+                  <th className="px-2.5 py-1.5 font-semibold">상태</th>
+                  <th className="px-2.5 py-1.5 font-semibold">도착 건수</th>
+                  <th className="px-2.5 py-1.5 font-semibold">처리시간 p95</th>
+                  <th className="px-2.5 py-1.5 font-semibold">오류율</th>
+                  <th className="px-2.5 py-1.5 font-semibold">재시도율</th>
+                  <th className="px-2.5 py-1.5 font-semibold">가동률</th>
                 </tr>
               </thead>
               <tbody>
@@ -188,7 +187,7 @@ export default function WorkforceCapacityPanel() {
           </div>
         ) : null}
 
-        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-t border-outline-variant pt-3 text-xs text-on-surface-variant">
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-t border-outline-variant pt-2 text-[11px] text-on-surface-variant">
           <span>Langfuse 실행 이벤트 집계 기준 · 대기시간(queue)은 계측 대상 아님</span>
           <span>{POLL_MS / 1000}초마다 자동 갱신</span>
         </div>
