@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, "/app/departments/01-research/api")
 sys.path.insert(0, "/app")
@@ -30,6 +31,8 @@ IN_PATH = os.environ.get("CARDS_IN", "/tmp/cards.json")
 OUT_PATH = os.environ.get("CARDS_OUT", "/tmp/cards_final.json")
 NEWS_N = int(os.environ.get("NEWS_N", "10"))
 DISCLOSURE_DAYS = int(os.environ.get("DISCLOSURE_DAYS", "14"))
+# vLLM 을 독점하지 않는 선. 같은 서버를 부서 워커들이 같이 쓴다.
+CONCURRENCY = int(os.environ.get("JUDGE_CONCURRENCY", "3"))
 
 
 def fetch_news(company: str) -> tuple[list[dict], str]:
@@ -66,20 +69,31 @@ def fetch_disclosures(company: str) -> tuple[list[dict], str]:
     return items, citation
 
 
-def _rehydrate(card: dict) -> list[AxisScore]:
-    """1.5층 카드의 축 목록을 AxisScore 로 되돌린다(뉴스·공시·테마는 뺀다)."""
-    axes = []
+def _rehydrate(card: dict) -> tuple[list[AxisScore], list[dict]]:
+    """카드의 축을 **채점용**과 **관측용**으로 가른다.
+
+    `AxisScore` 는 status=OK 면 숫자 value 를 요구한다 - 그 불변식이
+    `blend_axes` 의 가중합을 지킨다. 관측 기반 추천 카드의 축(ownership·
+    theme 등)은 점수가 아니라 사실이라 value 가 없고, 가중치표에도 없다.
+    그대로 밀어넣으면 "ownership: OK 인데 value 가 없다" 로 죽는다(실측).
+
+    돌려주는 것: (채점 가능한 축, 그대로 실어 보낼 관측 축)
+    """
+    scored: list[AxisScore] = []
+    passthrough: list[dict] = []
     for a in card["axes"]:
-        # theme 도 뺀다 - 아래에서 다시 붙인다. 안 빼면 축이 두 번 실려
-        # 카드에 중복 출력되고, 그 축이 OK 였다면 가중치가 두 번 세어진다.
+        # 뉴스·공시·테마는 아래에서 다시 붙인다 - 안 빼면 축이 두 번 실린다.
         if a["axis"] in {"news", "disclosure", "theme"}:
             continue
-        if a["status"] == STATUS_OK:
-            axes.append(AxisScore(a["axis"], STATUS_OK, a["value"],
-                                  {"summary": a.get("summary", "")}))
+        if a["status"] == STATUS_OK and a.get("value") is None:
+            passthrough.append(a)          # 관측 - 채점하지 않는다
+        elif a["status"] == STATUS_OK:
+            scored.append(AxisScore(a["axis"], STATUS_OK, a["value"],
+                                    {"summary": a.get("summary", "")}))
         else:
-            axes.append(AxisScore(a["axis"], a["status"], None, {}, (), a.get("reason", "")))
-    return axes
+            scored.append(AxisScore(a["axis"], a["status"], None, {}, (),
+                                    a.get("reason", "")))
+    return scored, passthrough
 
 
 def main() -> int:
@@ -95,8 +109,7 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001
         print(f"DART 기업색인 워밍업 실패 {type(exc).__name__} - 공시 축은 기권된다")
 
-    out = []
-    for card in cards:
+    def process(card: dict) -> dict:
         symbol = card["symbol"]
         company = card.get("company") or ""
         if not company:
@@ -106,10 +119,9 @@ def main() -> int:
                 {"axis": "disclosure", "status": "ABSTAINED", "value": None,
                  "reason": "회사명 미상", "summary": ""},
             ]
-            out.append(card)
-            continue
+            return card
 
-        axes = _rehydrate(card)
+        axes, observed = _rehydrate(card)
 
         # ── 뉴스 ──────────────────────────────────────────────────────────
         try:
@@ -132,10 +144,20 @@ def main() -> int:
         axes.append(axd)
         disc_detail = axd.detail
 
-        axes.append(abstain("theme", "수집 소스 없음", no_source=True))
+        # 테마는 이제 소스가 있다(ls:t1532). 카드에 실려 왔으면 그대로 쓰고,
+        # 없으면 그때만 기권이다 - 예전처럼 무조건 NO_SOURCE 로 덮지 않는다.
+        theme_axis = next((a for a in card["axes"] if a["axis"] == "theme"), None)
+        if theme_axis and theme_axis.get("status") == STATUS_OK:
+            observed.append(theme_axis)
+        elif theme_axis:
+            axes.append(abstain("theme", theme_axis.get("reason") or "테마 없음"))
+        else:
+            axes.append(abstain("theme", "조회하지 않음"))
 
         comp = blend_axes(axes)
-        card["axes"] = [
+        # 관측 축은 채점 뒤에 다시 얹는다 - 답변에는 나가야 하지만
+        # 가중합에는 들어가지 않는다.
+        card["axes"] = observed + [
             {"axis": a.axis, "status": a.status, "value": a.value,
              "reason": a.reason,
              "summary": a.detail.get("summary", "") if a.axis not in {"news", "disclosure"}
@@ -153,7 +175,13 @@ def main() -> int:
             "news": news_detail.get("items", []),
             "disclosures": disc_detail.get("items", []),
         }
-        out.append(card)
+        return card
+
+    t_judge = time.time()
+    with ThreadPoolExecutor(max_workers=CONCURRENCY) as pool:
+        out = list(pool.map(process, cards))
+    print(f"판정 {len(out)}종목 {time.time()-t_judge:.0f}초 "
+          f"(동시성 {CONCURRENCY})", flush=True)
 
     out.sort(key=lambda c: (c["composite"]["value"] is None,
                             -(c["composite"]["value"] or 0)))
@@ -166,19 +194,35 @@ def main() -> int:
         print("=" * 78)
         print(f"{c['symbol']} {c.get('company','')}  ·  {c.get('업종') or '업종 미상'}")
         if comp["status"] == COMPOSITE_OK:
-            print(f"종합 {comp['display']}/100   현재가 {c['last_close']:,.0f}   "
+            close = c.get("last_close")
+            close_txt = f"{close:,.0f}" if isinstance(close, (int, float)) else "—"
+            print(f"종합 {comp['display']}/100   현재가 {close_txt}   "
                   f"유효축 {comp['effective_weight']:.0%}")
         else:
             print(f"종합 산출 안 함 - {comp['reason']}")
-        p = c["plan"]
-        print(f"  진입 {p['entry_low']:,.0f}~{p['entry_high']:,.0f}  "
-              f"목표 {p['target']:,.0f}  손절 {p['stop']:,.0f}  RR {p['reward_risk']}")
+        # 계획이 기각되면 진입·목표·손절이 전부 None 이다. 미리보기가 죽으면
+        # 산출 파일은 이미 저장됐는데도 파이프라인이 멈춘다(set -e).
+        p = c.get("plan") or {}
+
+        def _n(key: str) -> str:
+            v = p.get(key)
+            return f"{v:,.0f}" if isinstance(v, (int, float)) else "—"
+
+        if p.get("target") is None:
+            print(f"  가격계획 없음 — {p.get('reason') or p.get('status') or '사유 미상'}")
+        else:
+            print(f"  진입 {_n('entry_low')}~{_n('entry_high')}  "
+                  f"목표 {_n('target')}  손절 {_n('stop')}  RR {p.get('reward_risk')}")
         for a in c["axes"]:
             contrib = comp.get("contributions", {}).get(a["axis"])
-            if a["status"] == STATUS_OK:
-                print(f"  {a['axis']:<12}{a['value']:+.3f}  기여 {contrib:+.3f}  {a['summary']}")
-            else:
+            if a["status"] != STATUS_OK:
                 print(f"  {a['axis']:<12}   —      —       {a['status']} · {a['reason']}")
+            elif a.get("value") is None:
+                # 관측 축은 점수가 없다 - 값 자리에 숫자를 찍으면 안 된다.
+                print(f"  {a['axis']:<12} 관측     —       {a.get('summary','')}")
+            else:
+                cs = f"{contrib:+.3f}" if isinstance(contrib, (int, float)) else "  —  "
+                print(f"  {a['axis']:<12}{a['value']:+.3f}  기여 {cs}  {a.get('summary','')}")
         for n in c.get("narrative", {}).get("news", [])[:4]:
             print(f"    [{n['polarity']}/{n['impact']}] {n['title'][:52]} — {n['why']}")
         for d in c.get("narrative", {}).get("disclosures", [])[:3]:

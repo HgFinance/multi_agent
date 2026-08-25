@@ -12,6 +12,7 @@ import copy
 import functools
 import logging
 import os
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,14 @@ from orchestration.discord_idempotency import (
     IdempotencyStoreUnavailable,
     canonical_discord_dedup_key,
     safe_json_log_fields,
+)
+from orchestration.qa_discord_feedback import (
+    QA_FEEDBACK_MARKER,
+    QaFeedbackCommand,
+    artifact_id_from_text,
+    parse_qa_feedback_command,
+    qa_feedback_channel_id,
+    submit_qa_feedback_decision,
 )
 
 logger = logging.getLogger(__name__)
@@ -351,6 +360,176 @@ def _wrap_init(cls: type[Any]) -> None:
     cls.__init__ = wrapped
 
 
+def _qa_channel_matches(message: Any) -> bool:
+    expected = qa_feedback_channel_id()
+    if not expected:
+        return False
+    channel = getattr(message, "channel", None)
+    current = str(getattr(channel, "id", "") or "")
+    parent = str(getattr(channel, "parent_id", "") or "")
+    return expected in {current, parent}
+
+
+def _csv_ids(name: str) -> set[str]:
+    raw = os.getenv(name, "")
+    return {
+        value
+        for value in (part.strip() for part in raw.replace(",", " ").split())
+        if value.isdigit()
+    }
+
+
+def _qa_approver_authorized(message: Any) -> bool:
+    author = getattr(message, "author", None)
+    author_id = str(getattr(author, "id", "") or "")
+    guild_owner_id = str(
+        getattr(getattr(message, "guild", None), "owner_id", "") or ""
+    )
+    if author_id and author_id == guild_owner_id:
+        return True
+    allowed_users = _csv_ids("QA_DISCORD_APPROVER_USER_IDS")
+    allowed_roles = _csv_ids("QA_DISCORD_APPROVER_ROLE_IDS")
+    if not allowed_users and not allowed_roles:
+        return False
+    if author_id in allowed_users:
+        return True
+    role_ids = {
+        str(getattr(role, "id", "") or "")
+        for role in (getattr(author, "roles", None) or ())
+    }
+    return bool(role_ids.intersection(allowed_roles))
+
+
+async def _qa_reply(message: Any, content: str) -> None:
+    reply = getattr(message, "reply", None)
+    if callable(reply):
+        await reply(str(content)[:1900], mention_author=False)
+        return
+    send = getattr(getattr(message, "channel", None), "send", None)
+    if callable(send):
+        await send(str(content)[:1900])
+
+
+async def _artifact_from_reply(message: Any) -> str | None:
+    reference = getattr(message, "reference", None)
+    resolved = getattr(reference, "resolved", None)
+    artifact_id = artifact_id_from_text(getattr(resolved, "content", ""))
+    if artifact_id:
+        return artifact_id
+    referenced_id = str(getattr(reference, "message_id", "") or "")
+    fetch_message = getattr(getattr(message, "channel", None), "fetch_message", None)
+    if referenced_id and callable(fetch_message):
+        try:
+            referenced = await fetch_message(int(referenced_id))
+            return artifact_id_from_text(getattr(referenced, "content", ""))
+        except Exception:
+            logger.info(
+                "qa-discord-feedback status=reference_unavailable message_id=%s",
+                str(getattr(message, "id", "") or "unknown"),
+            )
+    return None
+
+
+async def _maybe_handle_qa_feedback_message(adapter: Any, message: Any) -> bool | None:
+    """Own QA review cards and approval commands before normal chat admission."""
+
+    if _profile_name() != "qa-department" or not _qa_channel_matches(message):
+        return None
+    content = str(getattr(message, "content", "") or "")
+    author = getattr(message, "author", None)
+    client_user = getattr(getattr(adapter, "_client", None), "user", None)
+    message_id = str(getattr(message, "id", "") or "")
+
+    # The background evaluator publishes through this same existing QA bot.
+    # The exact marker and self identity are both required before bypassing the
+    # upstream self-message rejection and invoking the QA Hermes Agent once.
+    if author is not None and client_user is not None and author == client_user:
+        if QA_FEEDBACK_MARKER not in content:
+            return None
+        try:
+            dedup_key, _context, claim = _claim_inbound(
+                adapter,
+                message,
+                handler="qa_feedback_agent",
+            )
+        except IdempotencyStoreUnavailable:
+            logger.error("qa-discord-feedback status=failed_closed reason=idempotency_unavailable")
+            return True
+        if not claim.admitted:
+            return True
+        _store(adapter).mark_inbound(dedup_key, "PROCESSING", _profile_name())
+        try:
+            result = await adapter._handle_message(message)
+            if not result:
+                _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())
+            return bool(result)
+        except Exception:
+            _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())
+            raise
+
+    if bool(getattr(author, "bot", True)):
+        return None
+    command = parse_qa_feedback_command(content)
+    if command is None:
+        return None
+    try:
+        dedup_key, _context, claim = _claim_inbound(
+            adapter,
+            message,
+            handler="qa_feedback_decision",
+        )
+    except IdempotencyStoreUnavailable:
+        await _qa_reply(message, "QA 승인 원장을 사용할 수 없어 요청을 처리하지 않았습니다.")
+        return True
+    if not claim.admitted:
+        return True
+    _store(adapter).mark_inbound(dedup_key, "PROCESSING", _profile_name())
+    if not _qa_approver_authorized(message):
+        _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())
+        await _qa_reply(message, "이 채널의 QA 승인 권한이 없습니다.")
+        return True
+    artifact_id = command.artifact_id or await _artifact_from_reply(message)
+    if not artifact_id:
+        _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())
+        await _qa_reply(
+            message,
+            "artifact를 찾지 못했습니다. QA 응답에 Reply하거나 `승인 feedback-... 사유` 형식으로 입력해 주세요.",
+        )
+        return True
+    resolved = QaFeedbackCommand(
+        decision=command.decision,
+        artifact_id=artifact_id,
+        reason=command.reason,
+    )
+    try:
+        status, _body = await asyncio.to_thread(
+            submit_qa_feedback_decision,
+            resolved,
+            actor_id=str(getattr(author, "id", "") or "unknown"),
+            message_id=message_id,
+        )
+    except Exception as exc:
+        _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())
+        logger.warning(
+            "qa-discord-feedback status=failed_closed error_type=%s message_id=%s",
+            type(exc).__name__,
+            message_id,
+        )
+        await _qa_reply(message, "QA 원장 연결에 실패해 결정은 적용되지 않았습니다.")
+        return True
+    if status in {200, 201, 202}:
+        _store(adapter).mark_inbound(dedup_key, "COMPLETED", _profile_name())
+        gate = "offline benchmark PENDING" if resolved.decision == "APPROVED" else "반려 완료"
+        await _qa_reply(message, f"{artifact_id}: {resolved.decision} 기록 완료 · {gate}")
+    elif status == 409:
+        _store(adapter).mark_inbound(dedup_key, "COMPLETED", _profile_name())
+        await _qa_reply(message, f"{artifact_id}: 이미 결정된 artifact라 중복 적용하지 않았습니다.")
+    else:
+        _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())
+        await _qa_reply(message, f"{artifact_id}: QA 원장이 HTTP {status}로 거부해 적용되지 않았습니다.")
+    return True
+
+
 def _wrap_dispatch(cls: type[Any]) -> None:
     """Log the live Discord callback before any admission policy runs."""
 
@@ -361,6 +540,9 @@ def _wrap_dispatch(cls: type[Any]) -> None:
     @functools.wraps(original)
     async def wrapped(self: Any, message: Any, *args: Any, **kwargs: Any) -> Any:
         _log_raw_message(self, message)
+        handled = await _maybe_handle_qa_feedback_message(self, message)
+        if handled is not None:
+            return handled
         return await original(self, message, *args, **kwargs)
 
     cls._dispatch_discord_message = wrapped
@@ -482,6 +664,7 @@ INGRESS_URL_ENV = "HGFINANCE_DISCORD_INGRESS_URL"
 INGRESS_TIMEOUT_ENV = "HGFINANCE_DISCORD_INGRESS_TIMEOUT_SECONDS"
 INGRESS_SECRET_ENV = "CEO_DISCORD_INGRESS_API_KEY"
 INGRESS_PROFILES = frozenset({"ceo-agent", "trading-department"})
+_INGRESS_RETRY_DELAYS_SECONDS = (0.25, 0.75, 1.5)
 
 
 def _ingress_url() -> str:
@@ -543,6 +726,20 @@ def _mark_ingress_forwarded(adapter: Any, message_id: str) -> None:
         logger.error(
             "discord-ingress ledger_ack=failed message_id=%s", message_id
         )
+
+
+def _mark_ingress_failed(adapter: Any, message_id: str) -> None:
+    """Close an unsuccessful handoff honestly so it is not stuck as active."""
+
+    if adapter is None:
+        return
+    try:
+        store = _store(adapter)
+        dedup_key = store.inbound_key_for_message(message_id, _profile_name())
+        if dedup_key:
+            store.mark_inbound(dedup_key, "FAILED", _profile_name())
+    except IdempotencyStoreUnavailable:
+        logger.error("discord-ingress ledger_fail_ack=failed message_id=%s", message_id)
 
 
 def _forward_to_ingress(message: Any, adapter: Any) -> bool:
@@ -612,53 +809,72 @@ def _forward_to_ingress(message: Any, adapter: Any) -> bool:
     if not payload["query"]:
         return False
 
-    try:
-        import json as _json
-        import urllib.error
-        import urllib.request
+    import json as _json
+    import urllib.error
+    import urllib.request
 
-        request = urllib.request.Request(
-            url,
-            data=_json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {ingress_secret}",
-            },
-            method="POST",
-        )
-        timeout = float(os.getenv(INGRESS_TIMEOUT_ENV, "30"))
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            status = int(getattr(response, "status", 0) or 0)
-    except urllib.error.HTTPError as exc:
-        # 409는 **같은 메시지를 이미 받았다**는 뜻이다(mirror dedup). 다시
-        # Hermes로 흘리면 중복 실행이 되므로 "넘겼다"로 친다.
-        if exc.code == 409:
-            logger.info(
-                "discord-ingress status=duplicate message_id=%s", message_id
+    request = urllib.request.Request(
+        url,
+        data=_json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {ingress_secret}",
+        },
+        method="POST",
+    )
+    timeout = float(os.getenv(INGRESS_TIMEOUT_ENV, "30"))
+    retryable_http = frozenset({429, 500, 502, 503, 504})
+    for attempt in range(len(_INGRESS_RETRY_DELAYS_SECONDS) + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                status = int(getattr(response, "status", 0) or 0)
+        except urllib.error.HTTPError as exc:
+            # The BFF binds the exact Discord message ID before execution, so
+            # a retry after an ambiguous transport outcome cannot create a
+            # second workflow.  409 proves an earlier attempt already won.
+            if exc.code == 409:
+                logger.info(
+                    "discord-ingress status=duplicate message_id=%s", message_id
+                )
+                _mark_ingress_forwarded(adapter, message_id)
+                return True
+            if (
+                exc.code in retryable_http
+                and attempt < len(_INGRESS_RETRY_DELAYS_SECONDS)
+            ):
+                time.sleep(_INGRESS_RETRY_DELAYS_SECONDS[attempt])
+                continue
+            logger.warning(
+                "discord-ingress status=failed_closed reason=http_%s message_id=%s",
+                exc.code,
+                message_id,
             )
-            _mark_ingress_forwarded(adapter, message_id)
+            _mark_ingress_failed(adapter, message_id)
             return True
-        logger.warning(
-            "discord-ingress status=failed_closed reason=http_%s message_id=%s",
-            exc.code,
-            message_id,
-        )
-        return True
-    except Exception as exc:  # noqa: BLE001 - ambiguous commit must not be replayed.
-        logger.warning(
-            "discord-ingress status=failed_closed reason=transport "
-            "exception_type=%s message_id=%s",
-            type(exc).__name__,
-            message_id,
-        )
-        return True
+        except Exception as exc:  # noqa: BLE001 - retried with one stable request ID.
+            if attempt < len(_INGRESS_RETRY_DELAYS_SECONDS):
+                time.sleep(_INGRESS_RETRY_DELAYS_SECONDS[attempt])
+                continue
+            logger.warning(
+                "discord-ingress status=failed_closed reason=transport "
+                "exception_type=%s message_id=%s",
+                type(exc).__name__,
+                message_id,
+            )
+            _mark_ingress_failed(adapter, message_id)
+            return True
 
-    if status not in (200, 202):
+        if status in (200, 202):
+            break
+        if status in retryable_http and attempt < len(_INGRESS_RETRY_DELAYS_SECONDS):
+            time.sleep(_INGRESS_RETRY_DELAYS_SECONDS[attempt])
+            continue
         logger.warning(
             "discord-ingress status=failed_closed reason=http_%s message_id=%s",
             status,
             message_id,
         )
+        _mark_ingress_failed(adapter, message_id)
         return True
     _mark_ingress_forwarded(adapter, message_id)
     logger.info("discord-ingress status=forwarded message_id=%s", message_id)

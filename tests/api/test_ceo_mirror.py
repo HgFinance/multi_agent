@@ -109,6 +109,39 @@ class CeoMirrorExecutionTest(unittest.TestCase):
         self.assertFalse(first.duplicate)
         self.assertTrue(second.duplicate)
 
+    def test_failed_execution_releases_only_the_unfinished_exact_claim(self) -> None:
+        request = CanonicalIngress(
+            query="conditional order",
+            request_id="request-recoverable-failure",
+            source="discord",
+            source_message_id="discord:recoverable-failure",
+            actor_id="discord-user",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "temporary failure"):
+            execute_once(
+                request,
+                store=self.store,
+                execute=lambda: (_ for _ in ()).throw(
+                    RuntimeError("temporary failure")
+                ),
+            )
+
+        recovered = execute_once(
+            request,
+            store=self.store,
+            execute=lambda: {"task_id": "t_recovered"},
+        )
+        replay = execute_once(
+            request,
+            store=self.store,
+            execute=lambda: {"task_id": "must-not-run"},
+        )
+
+        self.assertEqual(recovered.response, {"task_id": "t_recovered"})
+        self.assertTrue(replay.duplicate)
+        self.assertEqual(replay.response, {"task_id": "t_recovered"})
+
     def test_request_id_cannot_be_rebound_across_any_authority_field(self) -> None:
         original_values = {
             "query": "삼성전자 10주 시장가 매수",

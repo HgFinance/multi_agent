@@ -337,20 +337,25 @@ def test_exact_name_resolves_to_one_canonical_active_stock(monkeypatch) -> None:
     assert params[:3] == (None, None, "삼성 전자")
 
 
-def test_known_korean_alias_resolves_via_symbol_code(monkeypatch) -> None:
-    """ "네이버"의 공시 표시명은 "NAVER"라 exact-match만으로는 안 잡힌다 -
-    별칭이 심볼 코드로 치환돼 같은 안전 질의를 그대로 타는지 확인한다."""
+@pytest.mark.parametrize(
+    ("mention", "symbol"),
+    [("네이버", "035420"), ("하이닉스", "000660")],
+)
+def test_known_korean_alias_resolves_via_symbol_code(
+    monkeypatch, mention: str, symbol: str
+) -> None:
+    """통용 별칭도 명시된 심볼로만 치환한 뒤 exact-match 안전 질의를 탄다."""
     monkeypatch.setenv("CONTROL_DATABASE_URL", "postgresql://control/test")
     connection, cursor = _db_connection(None)
-    cursor.fetchall.return_value = [(str(INSTRUMENT_ID), "035420")]
+    cursor.fetchall.return_value = [(str(INSTRUMENT_ID), symbol)]
     with patch.object(auth.psycopg2, "connect", return_value=connection):
-        resolved = auth.resolve_active_trading_instrument("네이버")
+        resolved = auth.resolve_active_trading_instrument(mention)
     assert resolved == {
         "instrument_id": str(INSTRUMENT_ID),
-        "symbol": "035420",
+        "symbol": symbol,
     }
     params = cursor.execute.call_args.args[1]
-    assert params[:3] == ("035420", "035420", "네이버")
+    assert params[:3] == (symbol, symbol, mention)
 
 
 def test_alphanumeric_code_resolution_is_strip_upper_and_format_bounded(

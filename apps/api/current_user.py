@@ -381,6 +381,7 @@ def require_trading_book_access(
 # 요구로 거부됐던 사례).
 _INSTRUMENT_NAME_ALIASES: dict[str, str] = {
     "네이버": "035420",  # NAVER Corporation. 공시 표시명은 "NAVER".
+    "하이닉스": "000660",  # 사용자가 흔히 생략하는 canonical 상호 접두사 "SK".
 }
 _NUMERIC_CODE_WITH_DISPLAY_NAME_RE = re.compile(
     r"^(?P<code>\d{6})(?:\s+[가-힣A-Za-z][가-힣A-Za-z0-9&+._\- ]{0,72})?$"

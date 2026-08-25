@@ -133,15 +133,35 @@ class PostgresRuleWorkerStore:
                     """
                     select rule.rule_id,execution.rule_execution_id,
                            execution.directive_id,rule.user_id,rule.fund_id,
-                           rule.book_id,rule.client_request_id,
+                           rule.book_id,
+                           coalesce(request.client_request_id,
+                                    rule.client_request_id),
                            request.order_request_id,request.ceo_root_task_id,
                            request.trading_task_id
                       from execution.conditional_trade_rules rule
                       join execution.conditional_rule_executions execution
                         on execution.rule_id=rule.rule_id
-                      left join execution.user_order_requests request
-                        on request.user_id=rule.user_id
-                       and request.client_request_id=rule.client_request_id
+                      left join lateral (
+                        select admitted.order_request_id,
+                               admitted.client_request_id,
+                               admitted.ceo_root_task_id,
+                               admitted.trading_task_id
+                          from execution.user_order_requests admitted
+                         where admitted.user_id=rule.user_id
+                           and (
+                             admitted.client_request_id=rule.client_request_id
+                             or admitted.canonical_payload->>'rule_id'
+                                  = rule.rule_id::text
+                             or coalesce(
+                                  admitted.canonical_payload->'rule_ids',
+                                  '[]'::jsonb
+                                ) ? rule.rule_id::text
+                           )
+                         order by
+                           (admitted.client_request_id=rule.client_request_id) desc,
+                           admitted.updated_at desc
+                         limit 1
+                      ) request on true
                      where rule.rule_id=%s and execution.directive_id=%s
                      order by execution.created_at desc
                      limit 1
@@ -916,14 +936,34 @@ class PostgresRuleWorkerStore:
                     select execution.trigger_id,execution.rule_id,
                            execution.rule_version,execution.state,
                            rule.user_id,rule.fund_id,rule.book_id,
-                           rule.client_request_id,request.order_request_id,
+                           coalesce(request.client_request_id,
+                                    rule.client_request_id),
+                           request.order_request_id,
                            request.ceo_root_task_id,request.trading_task_id
                       from execution.conditional_rule_executions execution
                       join execution.conditional_trade_rules rule
                         on rule.rule_id=execution.rule_id
-                      left join execution.user_order_requests request
-                        on request.user_id=rule.user_id
-                       and request.client_request_id=rule.client_request_id
+                      left join lateral (
+                        select admitted.order_request_id,
+                               admitted.client_request_id,
+                               admitted.ceo_root_task_id,
+                               admitted.trading_task_id
+                          from execution.user_order_requests admitted
+                         where admitted.user_id=rule.user_id
+                           and (
+                             admitted.client_request_id=rule.client_request_id
+                             or admitted.canonical_payload->>'rule_id'
+                                  = rule.rule_id::text
+                             or coalesce(
+                                  admitted.canonical_payload->'rule_ids',
+                                  '[]'::jsonb
+                                ) ? rule.rule_id::text
+                           )
+                         order by
+                           (admitted.client_request_id=rule.client_request_id) desc,
+                           admitted.updated_at desc
+                         limit 1
+                      ) request on true
                      where execution.rule_execution_id=%s
                      for update of execution
                     """,

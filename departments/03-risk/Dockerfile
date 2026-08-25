@@ -39,6 +39,7 @@ COPY departments/03-risk ./departments/03-risk
 # Shared Worker Model Gateway. Production model-plane overlays inject the
 # vLLM/Qwen14B coordinates; without them the local Ollama fallback remains.
 COPY departments/worker_model_gateway.py ./departments/worker_model_gateway.py
+COPY departments/01-research/config/worker_model_registry.json ./departments/01-research/config/worker_model_registry.json
 # Risk's employee graph imports these shared runtime contracts directly.
 COPY departments/employee_worker_runtime.py ./departments/employee_worker_runtime.py
 COPY departments/risk_qa_worker_profiles.py ./departments/risk_qa_worker_profiles.py

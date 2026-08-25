@@ -39,6 +39,7 @@ import os
 import re
 import sys
 import time
+from pathlib import Path
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -154,10 +155,47 @@ _CORP_INDEX_FAILURE_COOLDOWN_SECONDS = max(
 )
 
 
+# corpCode.xml 다운로드가 **222초** 걸린다(2026-08-24 실측, 상장사 3,985건).
+# 프로세스 안에서만 캐시하면 컨테이너를 새로 띄울 때마다 첫 공시 조회가 4분
+# 멈춘다. 종목코드-기업명 대응표는 "시세 외 응답 비영속" 경계가 지키려는
+# 판단 근거가 아니라 **식별자 사전**이므로, 짧은 TTL 디스크 캐시를 둔다.
+# 조회 응답(공시 내용)은 여전히 저장하지 않는다.
+_CORP_INDEX_CACHE_PATH = Path(
+    os.environ.get("DART_CORP_INDEX_CACHE", "/tmp/dart_corp_index.json"))
+_CORP_INDEX_CACHE_TTL_SECONDS = int(
+    os.environ.get("DART_CORP_INDEX_CACHE_TTL", str(24 * 3600)))
+
+
+def _load_corp_index_cache() -> list | None:
+    try:
+        st = _CORP_INDEX_CACHE_PATH.stat()
+        if time.time() - st.st_mtime > _CORP_INDEX_CACHE_TTL_SECONDS:
+            return None
+        value = json.loads(_CORP_INDEX_CACHE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    if isinstance(value, list) and value and isinstance(value[0], dict):
+        return value
+    return None
+
+
+def _save_corp_index_cache(rows: list) -> None:
+    try:
+        tmp = _CORP_INDEX_CACHE_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(_CORP_INDEX_CACHE_PATH)
+    except OSError:
+        pass  # 캐시는 편의 기능이다 - 못 써도 조회는 그대로 된다
+
+
 def _load_corp_index() -> list:
     global _corp_index, _corp_index_failure_until, _corp_index_failure_reason
     with _corp_lock:
         if _corp_index is not None:
+            return _corp_index
+        cached = _load_corp_index_cache()
+        if cached is not None:
+            _corp_index = cached
             return _corp_index
         now = time.monotonic()
         if now < _corp_index_failure_until:
@@ -187,6 +225,7 @@ def _load_corp_index() -> list:
             _corp_index = out
             _corp_index_failure_until = 0.0
             _corp_index_failure_reason = ""
+            _save_corp_index_cache(out)
             return out
         except BudgetExhausted:
             raise

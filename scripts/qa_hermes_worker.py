@@ -10,8 +10,9 @@ condition into the existing typed ``kanban_block`` handoff for the QA profile.
 Non-QA profiles are delegated to the unchanged Hermes executable.
 
 Normal Hermes execution, provider selection, retry policy, and terminal tools
-are otherwise untouched. Dispatcher-owned ``fast_advisory`` tasks receive a
-task-scoped CLI turn cap; standard analysis and experiment tasks do not.
+are otherwise untouched. Dispatcher-owned user-query planning, response
+synthesis, and ``fast_advisory`` tasks receive task-scoped turn/reasoning
+budgets; standard analysis and experiment tasks do not.
 """
 
 from __future__ import annotations
@@ -32,9 +33,16 @@ REAL_HERMES = os.environ.get(
 )
 QA_PROFILE = "qa-department"
 FAST_ADVISORY_MODE = "analysis_mode=fast_advisory"
-DEFAULT_FAST_ADVISORY_MAX_TURNS = 32
+DEFAULT_FAST_ADVISORY_MAX_TURNS = 12
 MIN_FAST_ADVISORY_MAX_TURNS = 8
 MAX_FAST_ADVISORY_MAX_TURNS = 64
+DEFAULT_USER_RESPONSE_MAX_TURNS = 12
+MIN_USER_RESPONSE_MAX_TURNS = 8
+MAX_USER_RESPONSE_MAX_TURNS = 32
+DEFAULT_USER_RESPONSE_REASONING = "medium"
+_REASONING_LEVELS = frozenset(
+    {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+)
 BLOCK_KIND = "capability"
 BLOCK_REASON = (
     "QA worker exited successfully without kanban_complete or kanban_block; "
@@ -90,34 +98,42 @@ def _read_live_run_state(
         conn.close()
 
 
-def _task_is_fast_advisory(
+def _task_body(
     db_path: str | os.PathLike[str] | None,
     task_id: str | None,
-) -> bool:
-    """Read the execution mode without mutating the Kanban board.
+) -> str:
+    """Read only the assigned task body without mutating the Kanban board.
 
-    The dispatcher invokes this wrapper for every profile.  Keeping the mode
-    check here means the fast budget is task-scoped rather than a lower global
-    profile budget that could weaken standard analysis or experiments.
+    The body is used only for exact control markers. It is never logged or
+    copied into observability metadata.
     """
 
     if not db_path or not task_id:
-        return False
+        return ""
     db_uri = f"file:{Path(db_path).resolve()}?mode=ro"
     try:
         conn = sqlite3.connect(db_uri, uri=True, timeout=1.0)
     except (OSError, sqlite3.Error):
-        return False
+        return ""
     try:
         row = conn.execute(
             "SELECT body FROM tasks WHERE id = ?",
             (task_id,),
         ).fetchone()
     except sqlite3.Error:
-        return False
+        return ""
     finally:
         conn.close()
-    return bool(row and isinstance(row[0], str) and FAST_ADVISORY_MODE in row[0])
+    return row[0] if row and isinstance(row[0], str) else ""
+
+
+def _task_is_fast_advisory(
+    db_path: str | os.PathLike[str] | None,
+    task_id: str | None,
+) -> bool:
+    """Return whether the task carries the exact fast-advisory marker."""
+
+    return FAST_ADVISORY_MODE in _task_body(db_path, task_id)
 
 
 def _fast_advisory_max_turns() -> int:
@@ -137,30 +153,89 @@ def _fast_advisory_max_turns() -> int:
     )
 
 
+def _user_response_max_turns() -> int:
+    raw = os.environ.get(
+        "HGFINANCE_USER_RESPONSE_MAX_TURNS",
+        str(DEFAULT_USER_RESPONSE_MAX_TURNS),
+    ).strip()
+    try:
+        configured = int(raw)
+    except ValueError:
+        configured = DEFAULT_USER_RESPONSE_MAX_TURNS
+    return min(
+        MAX_USER_RESPONSE_MAX_TURNS,
+        max(MIN_USER_RESPONSE_MAX_TURNS, configured),
+    )
+
+
+def _user_response_reasoning() -> str:
+    configured = os.environ.get(
+        "HGFINANCE_USER_RESPONSE_REASONING",
+        DEFAULT_USER_RESPONSE_REASONING,
+    ).strip().casefold()
+    return (
+        configured
+        if configured in _REASONING_LEVELS
+        else DEFAULT_USER_RESPONSE_REASONING
+    )
+
+
+def _response_task_kind(body: str) -> str | None:
+    """Classify only bounded tasks on the user-facing response plane."""
+
+    if FAST_ADVISORY_MODE in body:
+        return "fast_advisory"
+    if "origin=user-query" in body and "root_task_role=scope_and_planning" in body:
+        return "user_query_planning"
+    if "workflow_role=synthesis" in body and "workflow_plane=response" in body:
+        return "response_synthesis"
+    return None
+
+
 def _bounded_worker_argv(
     argv: Sequence[str],
     *,
     db_path: str | os.PathLike[str] | None = None,
     task_id: str | None = None,
 ) -> list[str]:
-    """Add a budget only to dispatcher-owned fast-advisory chat workers."""
+    """Bound only dispatcher-owned tasks on the user response plane."""
 
     args = list(argv)
-    if not _task_is_fast_advisory(db_path, task_id):
+    body = _task_body(db_path, task_id)
+    task_kind = _response_task_kind(body)
+    if task_kind is None:
         return args
     try:
         chat_index = args.index("chat")
     except ValueError:
         return args
-    if any(
+    has_turn_budget = any(
         arg == "--max-turns" or arg.startswith("--max-turns=")
         for arg in args
-    ):
+    )
+    has_reasoning = any(
+        arg == "--reasoning" or arg.startswith("--reasoning=")
+        for arg in args
+    )
+    additions: list[str] = []
+    if not has_turn_budget:
+        additions.extend(
+            [
+                "--max-turns",
+                str(
+                    _fast_advisory_max_turns()
+                    if task_kind == "fast_advisory"
+                    else _user_response_max_turns()
+                ),
+            ]
+        )
+    if not has_reasoning:
+        additions.extend(["--reasoning", _user_response_reasoning()])
+    if not additions:
         return args
     return [
         *args[: chat_index + 1],
-        "--max-turns",
-        str(_fast_advisory_max_turns()),
+        *additions,
         *args[chat_index + 1 :],
     ]
 

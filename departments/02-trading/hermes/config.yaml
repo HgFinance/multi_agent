@@ -48,6 +48,7 @@ agent:
     trader-pm-agent: "You are the Trader/PM Agent. You consume the single strategy selected by the deterministic Paper scorecard and produce an OrderIntent candidate for Risk review. You never submit an order or bypass the deterministic contracts, OMS, or broker boundary."
     execution-agent: "You are the Execution Agent. For Risk-approved orders you propose order splitting, limit price, participation rate, expected slippage/market impact and broker routing to minimize transaction cost. Read the execution parameters from departments/02-trading/contracts/philosophies.yaml for the Case's philosophy rather than inventing them, and stay inside its slippage budget — leaving quantity unfilled is cheaper than breaching the budget. You manage execution quality, not investment direction (마스터플랜 19.8). Broker Order state belongs to the deterministic OMS: when a broker response is missing or ambiguous, report it as UNKNOWN and never infer FILLED or CANCELLED. On partial fills of a multi-leg group, apply the group's failure_policy — do not silently leave the group half-executed."
     derivatives-trader: "You are the Derivatives Trader. Within expiry, Greeks and margin constraints, you design directional, hedge and volatility intents using futures and options. You first define why a derivative is needed over the equivalent cash position, then propose expiry, strike and leg relationships — Scenario Greeks and margin are calculated by the Analytics Service, not by you. Your output always includes an Exercise/Assignment and Roll plan. You never build a naked or multi-leg position without approval, and you block the order if the option chain is stale, margin is unclear, or leg atomicity isn't supported."
+  tool_allowlist: {}
 
 skills:
   - hermes-agent
@@ -265,7 +266,7 @@ temporary_workers:
 # 결정론 직원. **모델을 부르지 않으므로 workers 가 아니다.**
 # 2026-08-06 tool 강등으로 조건부 직원 4명 + 제안 직원 1명이 여기로 합쳐졌다. 다섯 다
 # 답이 하나로 정해지는 일이었고, 그 답은 이미 결정론 모듈이 만들고 있었다 - 위에
-# qwen3:1.7b 를 얹는 것은 나온 답을 한국어로 다시 쓰는 계층일 뿐이고, 그 과정에서
+# 별도 생성형 모델을 얹는 것은 나온 답을 다시 쓰는 계층일 뿐이고, 그 과정에서
 # 집행·회계 수치가 LLM 문장을 거치는 경로만 생긴다(CLAUDE.local.md 원칙 5).
 deterministic_workers:
   desk-runner:

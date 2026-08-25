@@ -43,6 +43,7 @@ services:
       # 로컬 오프라인/테스트 모드를 선택할 수 있다.
       PAPER_DB: ${PAPER_DB:-true}
       DATABASE_URL: ${DATABASE_URL:-}
+      TRADING_OMS_DATABASE_URL: ${TRADING_OMS_DATABASE_URL:-}
       APP_ENV: ${APP_ENV:-development}
       TRADING_EXECUTION_MODE: PAPER
       TRADING_BROKER_ADAPTER: paper
@@ -62,6 +63,9 @@ services:
       # before Trading reads L1. Keep a bounded cushion while still rejecting
       # genuinely stale market data.
       TRADING_MARKET_QUOTE_MAX_AGE_SECONDS: ${TRADING_MARKET_QUOTE_MAX_AGE_SECONDS:-30}
+      LS_TOKEN_CACHE_DIR: /var/lib/ls-token-cache
+    volumes:
+      - ls_token_cache:/var/lib/ls-token-cache
     ports:
       - "127.0.0.1:8045:8000"   # 로컬 전용 - 외부 노출 금지 (risk-api 8041 이하 같은 정책)
     healthcheck:
@@ -129,6 +133,9 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: ${DATABASE_URL:-}
+      # Dedicated SELECT/UPDATE-only relay role. The legacy OMS variable is a
+      # compatibility fallback in code, not the production authority.
+      TRADING_OUTBOX_DATABASE_URL: ${TRADING_OUTBOX_DATABASE_URL:-}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       RELAY_POLL_SECONDS: ${RELAY_POLL_SECONDS:-1.0}
       RELAY_MAX_ATTEMPTS: ${RELAY_MAX_ATTEMPTS:-12}

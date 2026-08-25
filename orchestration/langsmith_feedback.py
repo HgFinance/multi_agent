@@ -19,10 +19,13 @@ import os
 import sqlite3
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 LOGGER = logging.getLogger(__name__)
@@ -80,6 +83,20 @@ _SAFE_METADATA_KEYS = frozenset(
         "window_start",
         "window_end",
         "p95_latency_ms",
+        "trace_kind",
+        "latency_scope",
+        "trace_id",
+        "semantic_qa_version",
+        "semantic_qa_evaluator",
+        "semantic_qa_verdict",
+        "semantic_qa_score",
+        "semantic_qa_completeness",
+        "semantic_qa_groundedness",
+        "semantic_qa_temporal_consistency",
+        "semantic_qa_uncertainty_honesty",
+        "semantic_qa_relevance",
+        "semantic_qa_finding_count",
+        "semantic_qa_finding_codes",
     }
 )
 
@@ -223,25 +240,35 @@ def observation_from_run(run: Any) -> TraceObservation:
         if key not in raw_metadata:
             continue
         value = raw_metadata[key]
-        if key in {"request_id", "root_id", "task_id", "workflow_mode", "workflow_role", "department", "stage", "worker_id", "role", "status", "error_class", "provider", "model_name", "source"}:
+        if key in {"request_id", "root_id", "task_id", "trace_id", "workflow_mode", "workflow_role", "department", "stage", "worker_id", "role", "status", "error_class", "provider", "model_name", "source", "trace_kind", "latency_scope", "semantic_qa_version", "semantic_qa_evaluator", "semantic_qa_verdict", "semantic_qa_finding_codes"}:
             metadata[key] = _bounded_text(value, 160)
-        elif key in {"error_count", "latency_ms", "metric_count", "p95_latency_ms"}:
+        elif key in {"error_count", "latency_ms", "metric_count", "p95_latency_ms", "semantic_qa_finding_count"}:
             metadata[key] = _bounded_int(value)
         elif key in {"window_start", "window_end"}:
             metadata[key] = _bounded_text(value, 64)
-        elif key == "eval_score":
+        elif key in {"eval_score", "semantic_qa_score", "semantic_qa_completeness", "semantic_qa_groundedness", "semantic_qa_temporal_consistency", "semantic_qa_uncertainty_honesty", "semantic_qa_relevance"}:
             score = _bounded_score(value)
             if score is not None:
                 metadata[key] = score
         elif key == "raw_payloads_sent":
             metadata[key] = bool(value)
+    start_time = getattr(run, "start_time", None)
+    end_time = getattr(run, "end_time", None)
+    if "latency_ms" not in metadata and start_time is not None and end_time is not None:
+        try:
+            metadata["latency_ms"] = _bounded_int(
+                max(0.0, (end_time - start_time).total_seconds()) * 1_000,
+                maximum=3_600_000,
+            )
+        except (AttributeError, TypeError, ValueError):
+            pass
     metadata.setdefault("raw_payloads_sent", False)
     return TraceObservation(
         source_run_id=_bounded_text(getattr(run, "id", ""), 128),
         name=_bounded_text(getattr(run, "name", ""), 160),
         status=_bounded_text(getattr(run, "status", ""), 32).lower(),
-        started_at=getattr(run, "start_time", None).isoformat() if getattr(run, "start_time", None) else None,
-        ended_at=getattr(run, "end_time", None).isoformat() if getattr(run, "end_time", None) else None,
+        started_at=start_time.isoformat() if start_time else None,
+        ended_at=end_time.isoformat() if end_time else None,
         metadata=metadata,
     )
 
@@ -280,6 +307,16 @@ def evaluate_observation(
     if score is not None and score < 0.8:
         findings.append("STRUCTURED_EVAL_SCORE_LOW")
         summaries.append("structured worker evaluation score is below the review threshold")
+    semantic_score = _bounded_score(metadata.get("semantic_qa_score"))
+    semantic_verdict = _bounded_text(metadata.get("semantic_qa_verdict"), 32).upper()
+    if semantic_verdict == "FAIL":
+        findings.append("SEMANTIC_QA_FAILED")
+        summaries.append("answer contract semantic QA failed")
+    elif semantic_score is not None and semantic_score < 0.8:
+        findings.append("SEMANTIC_QA_SCORE_LOW")
+        summaries.append("answer contract semantic QA score is below the review threshold")
+    if score is None:
+        score = semantic_score
     if not findings:
         decision = "OBSERVED_PASS"
         summaries.append("metadata-only trace passed operational checks")
@@ -293,6 +330,7 @@ def evaluate_observation(
         "source_project": _bounded_text(source_project, 120),
         "source_name": observation.name,
         "source": metadata.get("source"),
+        "trace_id": metadata.get("trace_id"),
         "request_id": metadata.get("request_id"),
         "root_id": metadata.get("root_id"),
         "task_id": metadata.get("task_id"),
@@ -300,13 +338,27 @@ def evaluate_observation(
         "workflow_role": observation.workflow_role,
         "department": observation.department,
         "status": status,
+        "trace_kind": metadata.get("trace_kind"),
+        "latency_scope": metadata.get("latency_scope"),
         "latency_ms": latency_ms or None,
+        "latency_threshold_ms": max(0, int(latency_warn_ms)),
         "p95_latency_ms": _bounded_int(metadata.get("p95_latency_ms")) or None,
         "metric_count": _bounded_int(metadata.get("metric_count")) or None,
         "window_start": metadata.get("window_start"),
         "window_end": metadata.get("window_end"),
         "error_count": error_count,
         "eval_score": score,
+        "semantic_qa_version": metadata.get("semantic_qa_version"),
+        "semantic_qa_evaluator": metadata.get("semantic_qa_evaluator"),
+        "semantic_qa_verdict": semantic_verdict or None,
+        "semantic_qa_score": semantic_score,
+        "semantic_qa_completeness": _bounded_score(metadata.get("semantic_qa_completeness")),
+        "semantic_qa_groundedness": _bounded_score(metadata.get("semantic_qa_groundedness")),
+        "semantic_qa_temporal_consistency": _bounded_score(metadata.get("semantic_qa_temporal_consistency")),
+        "semantic_qa_uncertainty_honesty": _bounded_score(metadata.get("semantic_qa_uncertainty_honesty")),
+        "semantic_qa_relevance": _bounded_score(metadata.get("semantic_qa_relevance")),
+        "semantic_qa_finding_count": _bounded_int(metadata.get("semantic_qa_finding_count")) or None,
+        "semantic_qa_finding_codes": metadata.get("semantic_qa_finding_codes"),
         "raw_payloads_sent": False,
     }
     return EvaluationResult(
@@ -388,19 +440,14 @@ class FeedbackLedger:
                 );
                 CREATE INDEX IF NOT EXISTS idx_feedback_benchmarks_status
                     ON langsmith_feedback_benchmarks(status, updated_at);
-                CREATE TABLE IF NOT EXISTS langsmith_feedback_reviews (
-                    review_id TEXT PRIMARY KEY,
-                    artifact_id TEXT NOT NULL,
-                    target_department TEXT NOT NULL,
-                    reviewer_department TEXT NOT NULL,
-                    reviewer_user_id TEXT NOT NULL,
-                    comment TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                CREATE TABLE IF NOT EXISTS langsmith_feedback_discord_deliveries (
+                    artifact_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL CHECK(status IN ('CLAIMED', 'DELIVERED', 'FAILED_FINAL')),
+                    discord_message_id TEXT,
+                    error_code TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );
-                CREATE INDEX IF NOT EXISTS idx_feedback_reviews_artifact
-                    ON langsmith_feedback_reviews(artifact_id, created_at);
-                CREATE INDEX IF NOT EXISTS idx_feedback_reviews_department
-                    ON langsmith_feedback_reviews(target_department, created_at);
                 """
             )
             artifact_columns = {
@@ -582,114 +629,6 @@ class FeedbackLedger:
             ).fetchall()
         return [self._artifact(row) for row in rows]
 
-    def department_feedback(self, department: str, limit: int = 50) -> list[dict[str, Any]]:
-        """Return redacted findings and append-only reviews for one department.
-
-        The department key is matched against the artifact's server-derived
-        metadata. Callers cannot attach a department comment to another
-        department's trace by changing the UI label.
-        """
-
-        department_key = canonical_department(department)
-        limit = max(1, min(int(limit), 100))
-        with self._connect() as db:
-            rows = db.execute(
-                """SELECT a.*, d.decision AS approval_decision, d.approved_by,
-                    d.reason AS approval_reason,
-                    COUNT(r.review_id) AS review_count
-                FROM langsmith_feedback_artifacts a
-                LEFT JOIN langsmith_feedback_decisions d ON d.artifact_id=a.artifact_id
-                LEFT JOIN langsmith_feedback_reviews r ON r.artifact_id=a.artifact_id
-                WHERE a.department_key=?
-                GROUP BY a.artifact_id
-                ORDER BY a.created_at DESC LIMIT ?""",
-                (department_key, limit),
-            ).fetchall()
-            reviews_by_artifact: dict[str, list[dict[str, Any]]] = {}
-            if rows:
-                placeholders = ",".join("?" for _ in rows)
-                review_rows = db.execute(
-                    f"""SELECT review_id, artifact_id, target_department,
-                        reviewer_department, reviewer_user_id, comment, created_at
-                    FROM langsmith_feedback_reviews
-                    WHERE artifact_id IN ({placeholders})
-                    ORDER BY created_at ASC""",
-                    tuple(row["artifact_id"] for row in rows),
-                ).fetchall()
-                for review in review_rows:
-                    reviews_by_artifact.setdefault(str(review["artifact_id"]), []).append(
-                        {
-                            "review_id": review["review_id"],
-                            "target_department": review["target_department"],
-                            "reviewer_department": review["reviewer_department"],
-                            "reviewer_user_id": review["reviewer_user_id"],
-                            "comment": review["comment"],
-                            "created_at": review["created_at"],
-                        }
-                    )
-        result: list[dict[str, Any]] = []
-        for row in rows:
-            item = self._artifact(row)
-            item["review_count"] = int(row["review_count"] or 0)
-            item["reviews"] = reviews_by_artifact.get(str(row["artifact_id"]), [])
-            result.append(item)
-        return result
-
-    def add_department_review(
-        self,
-        artifact_id: str,
-        *,
-        target_department: str,
-        reviewer_department: str,
-        reviewer_user_id: str,
-        comment: str,
-    ) -> dict[str, Any] | None:
-        """Append one self-department review without changing QA authority."""
-
-        target_key = canonical_department(target_department)
-        reviewer_key = canonical_department(reviewer_department)
-        bounded_comment = _bounded_text(comment, 1_200)
-        bounded_user = _bounded_text(reviewer_user_id, 128)
-        if not target_key or target_key != reviewer_key or not bounded_user or not bounded_comment:
-            return None
-        try:
-            with self._connect() as db:
-                artifact = db.execute(
-                    "SELECT artifact_id, department, department_key FROM langsmith_feedback_artifacts WHERE artifact_id=?",
-                    (artifact_id,),
-                ).fetchone()
-                if artifact is None or artifact["department_key"] != target_key:
-                    return None
-                review_id = f"review-{uuid4().hex}"
-                now = _now()
-                db.execute(
-                    """INSERT INTO langsmith_feedback_reviews
-                    (review_id, artifact_id, target_department, reviewer_department,
-                     reviewer_user_id, comment, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        review_id,
-                        artifact_id,
-                        target_key,
-                        reviewer_key,
-                        bounded_user,
-                        bounded_comment,
-                        now,
-                    ),
-                )
-                return {
-                    "review_id": review_id,
-                    "artifact_id": artifact_id,
-                    "target_department": target_key,
-                    "reviewer_department": reviewer_key,
-                    "reviewer_user_id": bounded_user,
-                    "comment": bounded_comment,
-                    "created_at": now,
-                }
-        except sqlite3.Error:
-            LOGGER.exception("langsmith_department_review_failed")
-            return None
-
     def approve(self, artifact_id: str, decision: str, approved_by: str, reason: str) -> bool:
         if decision not in {"APPROVED", "REJECTED"}:
             return False
@@ -717,6 +656,53 @@ class FeedbackLedger:
         except sqlite3.Error:
             LOGGER.exception("langsmith_feedback_decision_failed")
             return False
+
+    def claim_discord_delivery(self, artifact_id: str) -> bool:
+        """Claim one permanent delivery attempt for an artifact.
+
+        Discord has no idempotency-key header.  A transport timeout can be an
+        ambiguous commit, so this claim is never automatically replayed.
+        """
+
+        now = _now()
+        try:
+            with self._connect() as db:
+                cursor = db.execute(
+                    """INSERT OR IGNORE INTO langsmith_feedback_discord_deliveries
+                    (artifact_id, status, created_at, updated_at)
+                    SELECT artifact_id, 'CLAIMED', ?, ?
+                    FROM langsmith_feedback_artifacts WHERE artifact_id=?""",
+                    (now, now, artifact_id),
+                )
+                return cursor.rowcount == 1
+        except sqlite3.Error:
+            LOGGER.exception("langsmith_feedback_discord_claim_failed")
+            return False
+
+    def finish_discord_delivery(
+        self,
+        artifact_id: str,
+        *,
+        delivered: bool,
+        discord_message_id: str = "",
+        error_code: str = "",
+    ) -> None:
+        try:
+            with self._connect() as db:
+                db.execute(
+                    """UPDATE langsmith_feedback_discord_deliveries
+                    SET status=?, discord_message_id=?, error_code=?, updated_at=?
+                    WHERE artifact_id=? AND status='CLAIMED'""",
+                    (
+                        "DELIVERED" if delivered else "FAILED_FINAL",
+                        _bounded_text(discord_message_id, 80) or None,
+                        _bounded_text(error_code, 120) or None,
+                        _now(),
+                        artifact_id,
+                    ),
+                )
+        except sqlite3.Error:
+            LOGGER.exception("langsmith_feedback_discord_finish_failed")
 
     def approved_hints(self, department: str | None, limit: int, max_chars: int) -> dict[str, Any] | None:
         limit = max(1, min(int(limit), 10))
@@ -893,7 +879,7 @@ class FeedbackLedger:
                 (cutoff,),
             )
             db.execute(
-                """DELETE FROM langsmith_feedback_reviews
+                """DELETE FROM langsmith_feedback_discord_deliveries
                 WHERE artifact_id IN (
                     SELECT artifact_id FROM langsmith_feedback_artifacts WHERE created_at < ?
                 )""",
@@ -911,10 +897,15 @@ class FeedbackLedger:
 
 
 def _evaluation_metadata(result: EvaluationResult) -> dict[str, Any]:
+    has_semantic = result.metadata.get("semantic_qa_version") is not None
     return {
         **result.metadata,
         "schema_version": FEEDBACK_SCHEMA,
-        "evaluation_type": "metadata_contract",
+        "evaluation_type": (
+            "metadata_contract+semantic_answer_contract"
+            if has_semantic
+            else "metadata_contract"
+        ),
         "decision": result.decision,
         "finding_codes": list(result.finding_codes)[:12],
         "finding_count": len(result.finding_codes),
@@ -1013,6 +1004,79 @@ def _aggregate_metric_window(
             "raw_payloads_sent": False,
         },
     )
+
+
+def _publish_qa_discord_request(
+    ledger: FeedbackLedger,
+    artifact_id: str,
+    result: EvaluationResult,
+) -> bool:
+    """Publish one redacted QA card through the existing QA bot identity."""
+
+    from orchestration.qa_discord_feedback import (
+        format_qa_feedback_request,
+        is_actionable_feedback,
+        qa_feedback_channel_id,
+    )
+
+    if not is_actionable_feedback(result.finding_codes):
+        return False
+    channel_id = qa_feedback_channel_id()
+    token = os.getenv("DISCORD_BOT_TOKEN_QA", "").strip()
+    if not channel_id or not token:
+        return False
+    if not ledger.claim_discord_delivery(artifact_id):
+        return False
+    content = format_qa_feedback_request(
+        artifact_id=artifact_id,
+        department=result.department,
+        decision=result.decision,
+        finding_codes=result.finding_codes,
+        summaries=result.summaries,
+        metadata=result.metadata,
+    )
+    request = Request(
+        f"https://discord.com/api/v10/channels/{channel_id}/messages",
+        data=json.dumps(
+            {"content": content, "allowed_mentions": {"parse": []}},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+        headers={
+            "Authorization": f"Bot {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "HgFinance-QA-Feedback/1.0",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=8.0) as response:
+            raw = response.read().decode("utf-8")
+        payload = json.loads(raw) if raw else {}
+        message_id = str(payload.get("id") or "") if isinstance(payload, Mapping) else ""
+        if not message_id:
+            raise RuntimeError("discord_message_id_missing")
+        ledger.finish_discord_delivery(
+            artifact_id,
+            delivered=True,
+            discord_message_id=message_id,
+        )
+        return True
+    except HTTPError as exc:
+        ledger.finish_discord_delivery(
+            artifact_id,
+            delivered=False,
+            error_code=f"discord_http_{exc.code}",
+        )
+    except (URLError, TimeoutError, ValueError, RuntimeError, OSError) as exc:
+        # A timeout may mean Discord committed the message.  Never replay an
+        # ambiguous attempt; the artifact id in the card supports manual audit.
+        ledger.finish_discord_delivery(
+            artifact_id,
+            delivered=False,
+            error_code=type(exc).__name__,
+        )
+    return False
 
 
 class LangSmithFeedbackService:
@@ -1158,7 +1222,9 @@ class LangSmithFeedbackService:
                     eval_run_id = publish_evaluation(result, self.config.evals_project)
                     if not eval_run_id:
                         raise RuntimeError("eval_publish_unavailable")
-                    self.ledger.complete(job["source_run_id"], eval_run_id, result)
+                    artifact_id = self.ledger.complete(job["source_run_id"], eval_run_id, result)
+                    if self.config.mode == "active":
+                        _publish_qa_discord_request(self.ledger, artifact_id, result)
                     completed += 1
                 except Exception as exc:  # noqa: BLE001 - retry outside business path
                     failed += 1

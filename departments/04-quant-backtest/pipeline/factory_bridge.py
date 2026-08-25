@@ -1352,6 +1352,33 @@ def lessons_from(*, failed_criteria=(), regime_concerns=(),
         out.append("BASELINE_NOT_BEATEN")
     if any("turnover" in x for x in f):
         out.append("COST_SENSITIVE")
+    # ▶ 소진 계열 차단기의 **페달** (2026-08-25 실측)
+    #   `formula_evolution_engine._cost_infeasible_failure()` 가 이 코드를
+    #   기다리는데 쓰는 곳이 없어 브레이크가 영원히 안 걸렸다. 관문은 이미
+    #   `NET_EDGE_NOT_POSITIVE`·`CALIBRATION_COST_INFEASIBLE` 를 조항으로
+    #   남기고 있었다 - 사상표에 줄이 없었을 뿐이다.
+    #   이건 성과 주장이 아니라 **실행 가능성** 주장이라 거래 0건에서도 참이다
+    #   ("어떤 진입도 비용을 못 넘는다"). 그래서 _no_trade 분기 밖에 둔다.
+    #   ⚠ **잰 것만 주장한다** (연구 벤치 r0001, 2026-08-25 정정)
+    #     `NET_EDGE_NOT_POSITIVE` 는 "측정된 순엣지가 음수" 가 아니라 "양수가
+    #     아니다" 라서 라벨이 NULL 이어도 켜진다. 실제로 후보 45셀 중 수익
+    #     라벨이 붙은 셀이 **0개**였다 - 수익성을 잰 적이 없었다. 그 상태로
+    #     이 교훈을 발행하면 안 잰 것을 근거로 계열을 영구히 소진 처리한다.
+    #     그래서 **마크아웃 수치가 실제로 있을 때만** 발행한다. 없으면
+    #     `UNDERPOWERED_DATA` 가 맡는다(표본이 사양을 못 받쳤다 - 그게 사실).
+    _measured_markout = None
+    for _k in ("mean_mid_markout_bps", "mean_net_bps_per_opportunity"):
+        try:
+            _v = (oos_summary or {}).get(_k)
+            if _v is not None:
+                _measured_markout = float(_v)
+                break
+        except (TypeError, ValueError):
+            continue
+    if (_measured_markout is not None
+            and any("net_edge_not_positive" in x or "cost_infeasible" in x
+                    for x in f)):
+        out.append("NO_COST_FEASIBLE_ENTRY")
     if any("drawdown" in x for x in f):
         out.append("BEAR_FRAGILE")
     # ▶ **관문을 못 거쳐도 지표가 말하는 것은 남긴다** (2026-08-10 실측)

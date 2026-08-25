@@ -240,7 +240,16 @@ WORKER_SPECS = (
             context_validator=_validate_skeptic_reviews_against_input,
         ),
     ),
-    WorkerSpec("holdings-analyst-worker", "Portfolio holdings question-answering analyst", ("research.evidence.search", "research.news.read", "research.market_snapshot.read"), "holding_question", ("holding_question", "portfolio_state", "news")),
+    # portfolio_state.price_levels 에 서버가 계산한 지지·저항·목표·손절이
+    # 실린다. 지시가 없으면 모델이 그 값을 무시하고 자기 숫자를 답한다 -
+    # 목표가는 근거를 검증할 수 있어야 하므로 인용만 허용한다.
+    WorkerSpec("holdings-analyst-worker", "Portfolio holdings question-answering analyst", (
+               "research.evidence.search", "research.news.read", "research.market_snapshot.read"),
+               "holding_question",
+               ("holding_question", "portfolio_state", "news"),
+               prompt_instructions=(
+                   "가격 수치(목표가·손절가·지지·저항·진입가)는 portfolio_state.price_levels 에 있는 값만 인용한다. 거기 없거나 status 가 OK 가 아니면 계산되지 않았다고 말하고, 직접 계산하거나 추정한 숫자를 답하지 마라. 뉴스·공시는 news 블록의 제목만 근거로 쓴다."
+               )),
 )
 
 

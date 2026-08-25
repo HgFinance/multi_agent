@@ -112,7 +112,9 @@ def test_legacy_bff_stays_fixture_only_beside_private_operational_data() -> None
     assert environment["PORTFOLIO_AUTH_REQUIRED"] == "false"
     assert environment["USER_PAPER_ORDER_WORKFLOW_ENABLED"] == "true"
     assert environment["USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED"] == "true"
-    assert environment["PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON"] == "[]"
+    assert environment["PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON"].startswith(
+        "${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:"
+    )
     assert environment["DATABASE_URL"].endswith(
         "/${HEDGEFUND_CONTROL_DB_NAME:-control}"
     )
@@ -150,6 +152,9 @@ def test_conditional_rule_runtime_uses_two_dedicated_logins() -> None:
     assert mcp["CONDITIONAL_RULE_DATABASE_ROLE"] == (
         "svc_conditional_rule_orchestrator"
     )
+    assert mcp["PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON"].startswith(
+        "${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:"
+    )
     assert "postgresql://hgfinance_conditional_worker:" in worker[
         "CONDITIONAL_RULE_DATABASE_URL"
     ]
@@ -169,6 +174,24 @@ def test_conditional_rule_runtime_uses_two_dedicated_logins() -> None:
     )
     assert "hermes" not in worker_image.casefold()
     assert "USER 65532:65532" in worker_image
+
+
+def test_realtime_and_paper_execution_share_the_existing_ls_token_cache() -> None:
+    root = _yaml(ROOT / "docker-compose.yml")
+    trading = _yaml(ROOT / "departments" / "02-trading" / "compose.yaml")
+    realtime = root["services"]["ls-realtime"]
+    execution = trading["services"]["trading-api"]
+
+    assert realtime["environment"]["LS_TOKEN_CACHE_DIR"] == (
+        "/var/lib/ls-token-cache"
+    )
+    assert execution["environment"]["LS_TOKEN_CACHE_DIR"] == (
+        "/var/lib/ls-token-cache"
+    )
+    mount = "ls_token_cache:/var/lib/ls-token-cache"
+    assert mount in realtime["volumes"]
+    assert mount in execution["volumes"]
+    assert "ls_token_cache" in root["volumes"]
 
 
 def test_discord_ingress_secret_is_scoped_to_bff_and_order_gateways() -> None:

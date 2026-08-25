@@ -223,7 +223,7 @@ workers:
 # 2026-08-06 tool 강등으로 core-risk-worker(RiskEngine.check_order 서술)와
 # derivatives-counterparty-worker(counterparty_health CheckOutcome 서술)가 여기로
 # 합쳐졌다. 둘 다 답이 하나로 정해지는 일이었고, 그 답은 이미 RiskEngine이 만들고
-# 있었다 - 위에 qwen3:1.7b 를 얹는 것은 나온 verdict 를 다시 서술하는 계층일 뿐이고,
+# 있었다 - 위에 별도 생성형 모델을 얹는 것은 verdict를 다시 서술하는 계층일 뿐이고,
 # 그 과정에서 Risk 수치가 LLM 문장을 거치는 경로만 생긴다(CLAUDE.md 개발 원칙 4·9번).
 deterministic_workers:
   risk-runner:

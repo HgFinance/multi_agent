@@ -37,8 +37,9 @@ psycopg OrderStore 구현은 팀장 확인 대기 항목이다(CLAUDE.local.md "
 """
 from __future__ import annotations
 
-import sys
 import os
+import sys
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -56,6 +57,7 @@ sys.path.insert(0, str(_DEPT))
 for _sub in ("contracts", "oms", "broker", "multileg", "capability"):
     sys.path.insert(0, str(_DEPT / _sub))
 
+from conditional_rule_routes import router as conditional_rule_router
 from contracts import (
     LOT_SIZE,
     BrokerOrderState,
@@ -68,12 +70,8 @@ from contracts import (
     TimeInForce,
     tick_size,
 )
-from oms import OMS, BrokerOrder, OMSError, OrderIntentRecord
-from oms import OrderStore
-from store_postgres import OrderStorePersistenceError, PostgresOrderStore
-from paper_broker import PaperBroker, Quote
-from directive_routes import configure_directive_runtime, router as directive_router
-from conditional_rule_routes import router as conditional_rule_router
+from directive_routes import configure_directive_runtime
+from directive_routes import router as directive_router
 from directives.service import DirectiveServiceError, require_paper_execution_mode
 from internal_service_auth import (
     BROKER_EVENT_POLICY,
@@ -88,21 +86,29 @@ from internal_service_auth import (
     authenticate_internal_service,
     required_internal_auth_config,
 )
+from oms import OMS, BrokerOrder, OMSError, OrderIntentRecord, OrderStore
+from paper_broker import PaperBroker, Quote
+from store_postgres import OrderStorePersistenceError, PostgresOrderStore
 
 API_VERSION = "v1"
 
-app = FastAPI(title="Trading Domain API", version=API_VERSION)
-app.include_router(directive_router)
-app.include_router(conditional_rule_router)
-
-
-@app.on_event("startup")
 def _validate_trading_runtime() -> None:
     """Fail startup unless the authenticated order plane is strictly PAPER."""
     require_paper_execution_mode()
     if os.environ.get("APP_ENV", "").strip().lower() in {"prod", "production"}:
         required_internal_auth_config()
     configure_directive_runtime()
+
+
+@asynccontextmanager
+async def _trading_lifespan(_app: FastAPI):
+    _validate_trading_runtime()
+    yield
+
+
+app = FastAPI(title="Trading Domain API", version=API_VERSION, lifespan=_trading_lifespan)
+app.include_router(directive_router)
+app.include_router(conditional_rule_router)
 
 # ── 저장 모드 ──────────────────────────────────────────────────────────────────
 # PAPER_DB is an explicit opt-in.  A missing/failed durable dependency never
@@ -117,7 +123,11 @@ if _paper_db_required:
     _dsn = (
         _paper_db_value
         if _paper_db_value and "://" in _paper_db_value
-        else os.environ.get("PAPER_DATABASE_URL") or os.environ.get("DATABASE_URL")
+        else (
+            os.environ.get("TRADING_OMS_DATABASE_URL")
+            or os.environ.get("PAPER_DATABASE_URL")
+            or os.environ.get("DATABASE_URL")
+        )
     )
     if not _dsn or _dsn.strip().lower() in {"1", "true", "yes", "on"}:
         _paper_db_error = "PAPER_DB가 요구됐지만 PAPER_DATABASE_URL/DATABASE_URL이 없습니다"

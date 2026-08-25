@@ -109,10 +109,11 @@ _PATTERNS = (
         r"|(?:큐|queue|spread|게이트).{0,40}(?:하나|조건).{0,30}(?:제거|해제).{0,40}(?:효과|마크아웃).{0,20}(?:불변|동일|없)"
         r"|\d+초.{0,30}(?:효과|마크아웃).{0,50}(?:\d+초|교차시간).{0,30}(?:부모|parent).{0,30}(?:우월하지 않음|차별 없음|동일|not superior)")),
     # Queue proposals occasionally persisted a bare control token (for
-    # example ``midprice``) as one list element. Treat it as the named
-    # control comparison; run() still requires a measured key.
+    # example ``midprice`` or ``tight-spread-only``) as one list element.
+    # Treat it as the named control comparison; run() still requires the
+    # measured key, so a label can never become a fabricated pass.
     ("control_comparison", re.compile(
-        r"(?i)^\s*(?:raw\s+)?(?:microprice|midprice)\s*$")),
+        r"(?i)^\s*(?:raw\s+)?(?:microprice|midprice|tight[- ]spread[- ]only|tight[- ]spread)\s*$")),
     ("alignment_audit", re.compile(
         r"(?i:(?:latency|timestamp|quote[- ]?trade).{0,50}"
         r"(?:alignment|misalignment|audit|정렬|오류|overlap).{0,40}"
@@ -466,10 +467,13 @@ def _check_nested_criteria_are_executed():
 
 def _check_bare_control_tokens_are_not_dead():
     """실제 원장에 있던 단독 `midprice` 기준도 실행면으로 보낸다."""
-    kind, runnable = classify("midprice")
-    assert (kind, runnable) == ("control_comparison", True), (kind, runnable)
-    result = run(["midprice"], {})[0]
-    assert not result.ran and result.survived is None, result
+    for token in ("midprice", "tight-spread-only"):
+        kind, runnable = classify(token)
+        assert (kind, runnable) == ("control_comparison", True), (token, kind, runnable)
+        result = run([token], {})[0]
+        assert not result.ran and result.survived is None, (token, result)
+    measured = run(["tight-spread-only"], {"control_comparison_excess_return_pct": 1.0})[0]
+    assert measured.ran and measured.survived is True, measured
     print("  단독 control 기준 분류    OK (측정키 없으면 미실행)")
 
 

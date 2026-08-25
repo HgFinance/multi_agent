@@ -52,6 +52,8 @@ from orchestration.llm_observability import (
     publish_metric,
     redacted_trace,
     redacted_langfuse_worker_span,
+    trace_correlation_metadata,
+    worker_graph_trace_config,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -981,12 +983,16 @@ async def _invoke_worker(
         stage=stage,
         model_name=gateway_binding.model if worker_llm is gateway_llm else "deterministic-test",
     )
+    correlation = trace_correlation_metadata(
+        payload,
+        input_hash=str(payload.get("input_hash") or ""),
+    )
     try:
         with redacted_langfuse_worker_span(
             worker_id=spec.worker_id,
             role=spec.role,
             stage=stage,
-            trace_id=str(payload.get("trace_id") or payload.get("case_id") or ""),
+            trace_id=correlation.get("trace_id", ""),
         ):
             if stage in {"risk", "qa"}:
                 trace = module.SkillTrace()
@@ -999,7 +1005,15 @@ async def _invoke_worker(
             else:
                 app = build_independent_worker_graph(spec, tool, worker_llm)
             # Required async LangGraph boundary: never replace this with invoke().
-            state = await app.ainvoke({"worker_id": spec.worker_id, "input": dict(payload)})
+            state = await app.ainvoke(
+                {"worker_id": spec.worker_id, "input": dict(payload)},
+                config=worker_graph_trace_config(
+                    stage=stage,
+                    worker_id=spec.worker_id,
+                    role=spec.role,
+                    correlation=correlation,
+                ),
+            )
         report = {
             "stage": stage,
             "worker_id": spec.worker_id,
@@ -1024,15 +1038,15 @@ async def _invoke_worker(
         )
         report["performance"] = performance
         publish_metric(
-            performance,
-            trace_id=str(payload.get("trace_id") or payload.get("case_id") or ""),
+            {**performance, **correlation},
+            trace_id=correlation.get("trace_id", ""),
         )
         # LangSmith 와 이중 계측(2026-08-10, HR 유휴 Agent 관측용). 이 한 지점이
         # research/quant/trading/risk/qa/accounting 6개 투자본부의 모든 Worker 실행을
         # 통과하므로(employee_worker_runtime 공유 경로) 부서별로 따로 배선하지 않는다.
         publish_langfuse_metric(
-            performance,
-            trace_id=str(payload.get("trace_id") or payload.get("case_id") or ""),
+            {**performance, **correlation},
+            trace_id=correlation.get("trace_id", ""),
         )
         if event_callback:
             event_callback(
@@ -1073,15 +1087,15 @@ async def _invoke_worker(
         performance = end_worker_metric(metric_token, status="DEGRADED", attempts=0, eval_score=0.0)
         report["performance"] = performance
         publish_metric(
-            performance,
-            trace_id=str(payload.get("trace_id") or payload.get("case_id") or ""),
+            {**performance, **correlation},
+            trace_id=correlation.get("trace_id", ""),
         )
         # LangSmith 와 이중 계측(2026-08-10, HR 유휴 Agent 관측용). 이 한 지점이
         # research/quant/trading/risk/qa/accounting 6개 투자본부의 모든 Worker 실행을
         # 통과하므로(employee_worker_runtime 공유 경로) 부서별로 따로 배선하지 않는다.
         publish_langfuse_metric(
-            performance,
-            trace_id=str(payload.get("trace_id") or payload.get("case_id") or ""),
+            {**performance, **correlation},
+            trace_id=correlation.get("trace_id", ""),
         )
         if event_callback:
             event_callback(
@@ -1788,10 +1802,18 @@ async def run_portfolio_recommendation_pipeline_async(
     # allowed to pass the bounded hint into the existing planner.
     experience_hint = d5_lookup.planner_hint if d5_bank.mode == "active" else None
     app = build_portfolio_recommendation_graph(event_callback=emit)
+    pipeline_correlation = trace_correlation_metadata(
+        profile,
+        input_hash=event_run_id,
+        trace_id=event_run_id,
+        case_id=str(profile.get("case_id") or f"case-{event_run_id}"),
+        task_id=str(profile.get("task_id") or f"case-{event_run_id}-task"),
+    )
     with redacted_trace(
         trace_id=event_run_id,
         model_name=os.getenv("OLLAMA_CHAT_MODEL") or "qwen3:1.7b",
         stage="portfolio-recommendation",
+        correlation=pipeline_correlation,
     ):
         state = await app.ainvoke(
             _initial_state(profile, candidates, data_context, experience_hint),
@@ -1805,6 +1827,7 @@ async def run_portfolio_recommendation_pipeline_async(
                 ],
                 "metadata": {
                     "observability_schema": "llm.performance.v1",
+                    **pipeline_correlation,
                     "raw_payloads_sent": False,
                 },
             },

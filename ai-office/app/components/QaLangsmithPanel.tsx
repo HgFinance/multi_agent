@@ -217,6 +217,14 @@ function StatTile({ label, value, hint }: { label: string; value: string; hint?:
   );
 }
 
+function cacheNotice(data: LangsmithQaTraces): string | null {
+  if (!data.cached) return null;
+  if (data.cache_reason === "rate_limit") return "LangSmith 요청 제한으로 마지막 정상 집계를 표시하고 있습니다.";
+  if (data.cache_reason === "error") return "LangSmith 오류로 마지막 정상 집계를 표시하고 있습니다.";
+  if (data.cache_reason === "inflight") return "새 집계를 조회하는 동안 마지막 정상 집계를 표시하고 있습니다.";
+  return null;
+}
+
 function DataTable({ data }: { data: LangsmithQaTraces }) {
   const latencyByDate = new Map(data.latency.map((row) => [row.date, row]));
   return (
@@ -266,8 +274,11 @@ export default function QaLangsmithPanel() {
         className="min-w-0 overflow-hidden rounded-lg border border-outline-variant bg-surface-container-lowest shadow-sm"
         aria-labelledby="qa-langsmith-title"
       >
-        <div className="border-b border-outline-variant bg-surface-container-low px-4 py-2.5">
+        <div className="flex items-center justify-between gap-2 border-b border-outline-variant bg-surface-container-low px-4 py-2.5">
           <span id="qa-langsmith-title" className="text-body-lg font-semibold text-on-surface">Traces</span>
+          {query.data?.cached ? (
+            <span className="text-[11px] text-on-surface-variant">캐시 집계</span>
+          ) : null}
         </div>
         <p className="m-0 p-4 text-xs text-on-surface-variant">{detail}</p>
       </section>
@@ -275,6 +286,10 @@ export default function QaLangsmithPanel() {
   }
 
   const data: LangsmithQaTraces = query.data;
+  const notice = cacheNotice(data);
+  const cacheAge = typeof data.cache_age_seconds === "number"
+    ? `캐시 ${Math.round(data.cache_age_seconds)}초 경과`
+    : undefined;
 
   const traceSeries: Series[] = [
     { id: "success", label: "Success", color: SUCCESS_COLOR, values: data.daily.map((row) => row.success) },
@@ -310,15 +325,28 @@ export default function QaLangsmithPanel() {
             expand_more
           </span>
         </span>
-        {data?.project ? <span className="shrink-0 text-[11px] text-outline">project: {data.project}</span> : null}
+        <span className="flex shrink-0 items-center gap-2 text-[11px] text-outline">
+          {data.cached ? <span aria-label="캐시에서 제공됨">캐시 집계</span> : <span>실시간 집계</span>}
+          {data.project ? <span>project: {data.project}</span> : null}
+        </span>
       </div>
 
       <div className="space-y-4 p-4 md:p-6">
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
           <StatTile label="트레이스 수" value={`${data.trace_count}건`} hint={`최근 ${data.days}일`} />
           <StatTile label="에러율" value={data.error_rate_pct !== null ? `${data.error_rate_pct}%` : "—"} />
-          <StatTile label="갱신 시각" value={new Date(data.generated_at).toLocaleTimeString("ko-KR")} />
+          <StatTile
+            label={data.cached ? "원본 갱신 시각" : "갱신 시각"}
+            value={new Date(data.generated_at).toLocaleTimeString("ko-KR")}
+            hint={cacheAge}
+          />
         </div>
+
+        {notice ? (
+          <p className="m-0 rounded-md border border-secondary/30 bg-secondary-container/30 px-3 py-2 text-xs text-on-surface-variant" role="status">
+            {notice}
+          </p>
+        ) : null}
 
         <div className="grid min-w-0 grid-cols-1 gap-4 xl:grid-cols-2">
           <div className="min-w-0 rounded-lg border border-outline-variant bg-surface-container-lowest">

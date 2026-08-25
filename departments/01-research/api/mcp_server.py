@@ -97,6 +97,7 @@ ACTIVE_MARKET_COLLECTOR_JOB_NAMES = frozenset({
     "style-index",
     "calendar-observed",
     "label-snapshot",
+    "chart-minute-universe",
     "chart-daily-universe",
 })
 
@@ -393,6 +394,24 @@ def register_worker_job(payload_fields: list[str], *, now: datetime,
     return job_id
 
 
+def build_tiered_answer(evidence: dict | None, result: dict | None,
+                        *, now: datetime) -> dict | None:
+    """근거 등급이 붙은 사용자 답변. 실패해도 job 을 죽이지 않는다.
+
+    조립기 정본은 `departments/01-research/evidence/answer_builder.py` 다 -
+    배치 추천 경로와 **같은 모듈**을 써야 같은 종목에 같은 문장이 나간다.
+    """
+    if not evidence or not evidence.get("symbol"):
+        return None
+    try:
+        answer_builder = _research_evidence_module("answer_builder")
+        return answer_builder.from_holdings_evidence(
+            evidence, as_of=now.date().isoformat(), worker_result=result)
+    except Exception as exc:  # noqa: BLE001 - 답변 조립 실패가 결과를 못 죽인다
+        return {"status": "FAILED",
+                "reason": f"{type(exc).__name__}: {str(exc)[:120]}"}
+
+
 def finish_worker_job(job_id: str, *, result: dict | None,
                       model_plane: dict | None, error: str | None,
                       now: datetime, evidence: dict | None = None) -> dict:
@@ -410,6 +429,7 @@ def finish_worker_job(job_id: str, *, result: dict | None,
         j["result"] = result
         j["model_plane"] = model_plane
         j["evidence"] = evidence
+        j["tiered_answer"] = build_tiered_answer(evidence, result, now=now)
         j["error"] = error
         return dict(j)
 
@@ -785,6 +805,18 @@ def gather_holdings_evidence(symbol: str, *, get=None, search_news=None,
     sources: dict[str, dict] = {}
     out: dict = {"symbol": symbol, "sources": sources}
 
+    # 회사명. 답변에 "005930(005930)" 이라고 나가지 않게 한다. DART 기업색인은
+    # 어차피 공시 조회에서 로드되므로 추가 비용이 없다(실패는 무시 - 이름이
+    # 없다고 근거 수집이 멈출 이유는 없다).
+    try:
+        from external_sources import _resolve as _resolve_corp
+
+        hits = _resolve_corp(symbol)
+        if hits:
+            out["company"] = hits[0].get("corp_name") or symbol
+    except Exception:  # noqa: BLE001, S110 - 이름은 부가정보다
+        pass
+
     try:
         if search_news is None:
             from external_sources import news_search as search_news_call
@@ -821,7 +853,8 @@ def gather_holdings_evidence(symbol: str, *, get=None, search_news=None,
     try:
         if search_disclosures is None:
             from external_sources import (
-                dart_search_disclosures as search_disclosures_call)
+                dart_search_disclosures as search_disclosures_call,
+            )
         else:
             search_disclosures_call = search_disclosures
         response = search_disclosures_call(corp=symbol, days=7, page=1)
@@ -851,6 +884,41 @@ def gather_holdings_evidence(symbol: str, *, get=None, search_news=None,
         sources["disclosures"] = {"status": "FAILED",
                                   "mode": "ON_DEMAND_MCP",
                                   "reason": f"{type(e).__name__}: {e}"}
+
+    # ── 가격 레벨 ────────────────────────────────────────────────────
+    # 목표가·손절가는 **숫자**라서 LLM 이 지어내면 근거를 검증할 수 없다.
+    # market-api 가 일봉에서 결정론으로 계산한 값을 실어 준다. 계산 규칙은
+    # 재현되지만 수익 보장이 아니라서 caveat 를 같이 싣는다(실측: 목표
+    # 선도달 31.0% vs 손절 선도달 62.1%).
+    try:
+        if get is None:
+            get = _evidence_getter()
+        base = os.environ.get("MARKET_API_URL", "http://127.0.0.1:8036").rstrip("/")
+        lv = get(f"{base}/levels/{symbol}")
+        if not isinstance(lv, dict) or "status" not in lv:
+            raise TypeError("levels 응답 형식이 아니다")
+        # 응답이 크면 워커 프롬프트 예산을 먹는다 - 필요한 것만 남긴다.
+        out["price_levels"] = {
+            "status": lv.get("status"),
+            "last_close": lv.get("last_close"),
+            "atr": lv.get("atr"),
+            "supports": [{"price": x.get("price"), "touches": x.get("touches")}
+                         for x in (lv.get("supports") or [])[:3]],
+            "resistances": [{"price": x.get("price"), "touches": x.get("touches")}
+                            for x in (lv.get("resistances") or [])[:3]],
+            "entry_low": lv.get("entry_low"), "entry_high": lv.get("entry_high"),
+            "target": lv.get("target"), "stop": lv.get("stop"),
+            "reward_risk": lv.get("reward_risk"), "risk_pct": lv.get("risk_pct"),
+            "target_basis": lv.get("target_basis"), "stop_basis": lv.get("stop_basis"),
+            "reason": lv.get("reason"),
+            "evidence_tier": "DERIVED",
+            "caveat": lv.get("caveat"),
+        }
+        sources["price_levels"] = {"status": lv.get("status"),
+                                   "source": "market-api /levels"}
+    except Exception as e:  # noqa: BLE001 - 한 소스 실패가 전체를 못 죽인다
+        sources["price_levels"] = {"status": "FAILED",
+                                   "reason": f"{type(e).__name__}: {e}"}
 
     try:
         evidence_bundle = _research_evidence_module("bundle")
@@ -911,6 +979,12 @@ def merge_holdings_evidence(payload: dict, evidence: dict) -> dict:
         "user_state": (_clip_text(p["portfolio_state"])
                        if p.get("portfolio_state") else None),
         "price_context": ctx,
+        # 지지·저항·목표·손절. **이걸 안 실으면 Worker 가 목표가를 스스로
+        # 지어낸다** - 사용자가 목표가를 물으면 LLM 은 근거 없이도 숫자를
+        # 답한다(2026-08-25 실측: payload 에 price_levels 가 없어 답변에
+        # 목표가가 아예 빠졌다). 서버가 일봉에서 결정론으로 계산한 값을
+        # 여기 실어야 Worker 는 **설명만** 하게 된다.
+        "price_levels": evidence.get("price_levels"),
     }
     merged_state = {k: v for k, v in state_block.items() if v}
     if merged_state:
@@ -1081,7 +1155,7 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
         """(gateway, employee_workers). 후자는 langgraph 를 끌어와 무겁다 -
         health 처럼 gateway 만 필요한 자리는 _gateway_module 을 쓴다."""
         gateway = _gateway_module()
-        import employee_workers                 # _BASE 에서 온다
+        import employee_workers  # _BASE 에서 온다
         return gateway, employee_workers
 
     @server.tool(
@@ -1402,7 +1476,8 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
             return {"ok": False,
                     "error": "model_version·prompt_version 이 필요하다 - "
                              "계보 없는 리드는 재현할 수 없어 받지 않는다"}
-        from datetime import datetime as _dt, timezone as _tz
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
 
         case_id = f"scout-{lens.lower()}-{_dt.now(_tz.utc):%Y%m%d}"
         r = lead_intake.intake(text, lens=lens, source_type=source_type,
@@ -1666,9 +1741,9 @@ def build_server(*, host: str = "0.0.0.0", port: int = DEFAULT_PORT,
     # 외부 정보원(DART·네이버·ECOS·FRED) 질의 도구 - 정성 데이터의 MCP 검색 통합
     # (재일 결정 2026-08-13, docs/02-engineering/MCP_ONDEMAND_ARCHITECTURE.md).
     # 별도 모듈인 이유: 예산·비영속 인용 해시·정직성 규약을 한 파일에서 감사한다.
-    from external_sources import register_external_tools
-    from external_macro import register_macro_tools
     from external_global import register_global_tools
+    from external_macro import register_macro_tools
+    from external_sources import register_external_tools
     register_external_tools(server)
     register_macro_tools(server)
     register_global_tools(server)

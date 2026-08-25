@@ -202,12 +202,14 @@ def test_fast_advisory_gets_task_scoped_turn_budget(tmp_path, monkeypatch):
         "chat",
         "--max-turns",
         "18",
+        "--reasoning",
+        "medium",
         "-q",
         "work",
     ]
 
 
-def test_fast_budget_does_not_change_standard_or_explicit_budget(tmp_path):
+def test_response_budget_does_not_change_standard_or_explicit_budget(tmp_path):
     db = tmp_path / "kanban.db"
     _db_with_running_run(db)
     conn = sqlite3.connect(db)
@@ -224,6 +226,46 @@ def test_fast_budget_does_not_change_standard_or_explicit_budget(tmp_path):
     assert qa_worker._bounded_worker_argv(
         standard, db_path=db, task_id="t_qa"
     ) == standard
+    assert qa_worker._bounded_worker_argv(
+        explicit, db_path=db, task_id="t_qa"
+    ) == explicit
+
+
+def test_user_query_planning_and_synthesis_receive_bounded_budget(tmp_path):
+    db = tmp_path / "kanban.db"
+    _db_with_running_run(db)
+
+    def bounded(body):
+        conn = sqlite3.connect(db)
+        conn.execute("UPDATE tasks SET body = ? WHERE id = 't_qa'", (body,))
+        conn.commit()
+        conn.close()
+        return qa_worker._bounded_worker_argv(
+            ["chat", "-q", "work"], db_path=db, task_id="t_qa"
+        )
+
+    assert bounded("origin=user-query\nroot_task_role=scope_and_planning") == [
+        "chat", "--max-turns", "12", "--reasoning", "medium", "-q", "work"
+    ]
+    assert bounded("workflow_role=synthesis\nworkflow_plane=response") == [
+        "chat", "--max-turns", "12", "--reasoning", "medium", "-q", "work"
+    ]
+
+
+def test_explicit_response_reasoning_and_turn_budget_are_preserved(tmp_path):
+    db = tmp_path / "kanban.db"
+    _db_with_running_run(db)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE tasks SET body = ? WHERE id = 't_qa'",
+        ("analysis_mode=fast_advisory",),
+    )
+    conn.commit()
+    conn.close()
+
+    explicit = [
+        "chat", "--max-turns", "9", "--reasoning", "high", "-q", "work"
+    ]
     assert qa_worker._bounded_worker_argv(
         explicit, db_path=db, task_id="t_qa"
     ) == explicit

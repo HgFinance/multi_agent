@@ -57,37 +57,70 @@ def _publish_answer_qa(
     snapshot: Any,
     qa: SemanticQaResult,
 ) -> bool:
-    """Reuse the existing redacted LangSmith lifecycle for one verified answer."""
+    """Publish one redacted QA evaluation without reopening a closed root run."""
 
     try:
+        from langsmith import RunTree
+
         from orchestration.ceo_workflow_scope import (
             langsmith_trace_context_from_body,
         )
+        from orchestration.langsmith_feedback import (
+            EvaluationResult,
+            publish_evaluation,
+        )
         from orchestration.llm_observability import (
-            close_root_trace,
-            publish_root_trace,
+            _safe_langsmith_client,
+            langsmith_project,
         )
 
         body = str(root_task.get("body") or "")
         context = langsmith_trace_context_from_body(body)
-        if not context:
-            return publish_root_trace(
-                request_id=str(record.client_request_id),
-                root_id=_task_id(root_task) or None,
-                workflow_mode="binding",
-                source="conditional-execution-consumer",
-                status="completed",
-                semantic_qa=qa.as_metadata(),
+        source_trace_id = ""
+        if context:
+            run = RunTree.from_headers(
+                {"langsmith-trace": str(context)},
+                project_name=langsmith_project("workflow"),
+                ls_client=_safe_langsmith_client(),
             )
-        return close_root_trace(
-            context,
-            request_id=str(record.client_request_id),
-            root_id=_task_id(root_task) or None,
-            task_id=_task_id(root_task) or None,
-            workflow_mode="binding",
-            source="conditional-execution-consumer",
-            status="completed",
-            semantic_qa=qa.as_metadata(),
+            if run is not None:
+                source_trace_id = str(run.id)
+        root_id = _task_id(root_task)
+        source_id = (
+            f"{source_trace_id or record.client_request_id}:"
+            f"conditional:{snapshot.directive_id}"
+        )[:128]
+        metadata = {
+            "schema_version": "hgfinance.observability.feedback.v1",
+            "source_run_id": source_id,
+            "source_project": langsmith_project("workflow"),
+            "source": "conditional-execution-consumer",
+            "trace_id": source_trace_id or None,
+            "request_id": str(record.client_request_id),
+            "root_id": root_id or None,
+            "task_id": root_id or None,
+            "workflow_mode": "binding",
+            "workflow_role": "conditional-execution-verification",
+            "department": "trading",
+            "status": "completed",
+            "raw_payloads_sent": False,
+            **qa.as_metadata(),
+        }
+        result = EvaluationResult(
+            source_run_id=source_id,
+            department="trading",
+            workflow_role="conditional-execution-verification",
+            decision=("OBSERVED_PASS" if qa.verdict == "PASS" else "REVIEW_REQUIRED"),
+            score=qa.score,
+            finding_codes=qa.finding_codes,
+            summaries=("authoritative conditional execution answer QA evaluated",),
+            metadata=metadata,
+        )
+        return bool(
+            publish_evaluation(
+                result,
+                str(os.getenv("LANGSMITH_EVALS_PROJECT") or "HgFinance-Evals"),
+            )
         )
     except Exception:
         LOG.warning("conditional answer LangSmith QA publication failed")
@@ -143,20 +176,14 @@ class ConditionalRuleNotificationConsumer:
             raise ConditionalNotificationError(
                 "conditional event correlation is incomplete"
             )
-        required = {
-            "user_id",
-            "fund_id",
-            "book_id",
-            "client_request_id",
-            "order_request_id",
-            "ceo_root_task_id",
-            "trading_task_id",
-        }
-        if not all(context.get(key) for key in required):
-            resolved = self.rule_store.notification_context(
-                rule_id=rule_id, directive_id=directive_id
-            )
-            context.update(resolved.__dict__)
+        # Redis is a delivery boundary, not an authority boundary.  Always
+        # replace its correlation metadata with the durable rule/request link.
+        # This also resolves multi-condition rules, whose per-rule request key
+        # intentionally differs from the parent admitted request key.
+        resolved = self.rule_store.notification_context(
+            rule_id=rule_id, directive_id=directive_id
+        )
+        context.update(resolved.__dict__)
         context["rule_id"] = rule_id
         context["directive_id"] = directive_id
         return context
@@ -215,6 +242,16 @@ class ConditionalRuleNotificationConsumer:
         if not event_id:
             raise ConditionalNotificationError("conditional event_id is missing")
         context = self._context(event)
+        if not context.get("order_request_id"):
+            # Rules admitted outside the user-order workflow have no Discord,
+            # Kanban, or Notion target.  Acknowledge them instead of retaining a
+            # permanently poisonous Redis entry.
+            LOG.info(
+                "conditional report has no admitted order event_id=%s rule=%s",
+                event_id,
+                context.get("rule_id"),
+            )
+            return True
         record = self.order_store.get(str(context["order_request_id"]))
         if record is None:
             raise ConditionalNotificationError("linked order request was not found")

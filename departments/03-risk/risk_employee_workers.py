@@ -72,6 +72,7 @@ from orchestration.llm_observability import (
     record_llm_call,
     redacted_current_worker_generation,
     redacted_langfuse_worker_span,
+    trace_correlation_metadata,
     worker_graph_trace_config,
 )
 
@@ -839,7 +840,18 @@ def _run_employee_workers_sequential(
             spec, tools[spec.worker_id], llm, trace=worker_trace
         ).invoke(
             {"worker_id": spec.worker_id, "input": payload},
-            config=worker_graph_trace_config(stage="risk", worker_id=spec.worker_id, role=spec.role),
+            config=worker_graph_trace_config(
+                stage="risk",
+                worker_id=spec.worker_id,
+                role=spec.role,
+                correlation=trace_correlation_metadata(
+                    payload,
+                    input_hash=input_hash,
+                    case_id=case_id,
+                    task_id=task_id,
+                    trace_id=trace_id,
+                ),
+            ),
         )
         reports.append(
             {
@@ -927,7 +939,18 @@ async def run_employee_workers_async(
                 trace=worker_trace,
             ).ainvoke(
                 {"worker_id": spec.worker_id, "input": payload},
-                config=worker_graph_trace_config(stage="risk", worker_id=spec.worker_id, role=spec.role),
+                config=worker_graph_trace_config(
+                    stage="risk",
+                    worker_id=spec.worker_id,
+                    role=spec.role,
+                    correlation=trace_correlation_metadata(
+                        payload,
+                        input_hash=input_hash,
+                        case_id=case_id,
+                        task_id=task_id,
+                        trace_id=trace_id,
+                    ),
+                ),
             )
             return {
                 "worker_id": spec.worker_id,
@@ -1033,6 +1056,15 @@ async def run_employee_workers_async(
             latency_ms=int((time.perf_counter() - started) * 1000),
             error_count=0 if status == "COMPLETED" else 1,
             trace_id=str(trace_id or ""),
+            request_id=trace_correlation_metadata(
+                payload,
+                input_hash=input_hash,
+                case_id=case_id,
+                task_id=task_id,
+                trace_id=trace_id,
+            ).get("request_id"),
+            root_id=case_id,
+            task_id=task_id,
             measured=measured,
         )
         return report

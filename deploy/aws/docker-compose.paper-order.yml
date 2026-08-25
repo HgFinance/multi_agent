@@ -13,6 +13,8 @@ x-control-database-url: &control-database-url "postgresql://hgfinance_runtime:${
 x-market-database-url: &market-database-url "postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD:?HEDGEFUND_RUNTIME_DB_PASSWORD is required}@timescaledb:5432/market"
 x-order-database-url: &order-database-url "postgresql://hgfinance_order_runtime:${HEDGEFUND_ORDER_DB_PASSWORD:?HEDGEFUND_ORDER_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}"
 x-trading-database-url: &trading-database-url "postgresql://hgfinance_trading_runtime:${HEDGEFUND_TRADING_DB_PASSWORD:?HEDGEFUND_TRADING_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_trading_api"
+x-trading-oms-database-url: &trading-oms-database-url "postgresql://hgfinance_trading_runtime:${HEDGEFUND_TRADING_DB_PASSWORD:?HEDGEFUND_TRADING_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_strategy_paper_executor"
+x-trading-outbox-database-url: &trading-outbox-database-url "postgresql://hgfinance_trading_runtime:${HEDGEFUND_TRADING_DB_PASSWORD:?HEDGEFUND_TRADING_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_trading_outbox_relay"
 x-accounting-database-url: &accounting-database-url "postgresql://hgfinance_accounting_runtime:${HEDGEFUND_ACCOUNTING_DB_PASSWORD:?HEDGEFUND_ACCOUNTING_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_accounting_ledger"
 x-conditional-orchestrator-database-url: &conditional-orchestrator-database-url "postgresql://hgfinance_conditional_orchestrator:${HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD:?HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_conditional_rule_orchestrator"
 x-conditional-worker-database-url: &conditional-worker-database-url "postgresql://hgfinance_conditional_worker:${HEDGEFUND_CONDITIONAL_WORKER_DB_PASSWORD:?HEDGEFUND_CONDITIONAL_WORKER_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_conditional_rule_worker"
@@ -119,10 +121,16 @@ services:
       APP_ENV: production
       PORTFOLIO_DATA_MODE: production
       PORTFOLIO_AUTH_MODE: fixture
+      PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: ${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:?An explicit PAPER trading-book fixture grant is required}
       PORTFOLIO_AUTH_REQUIRED: "false"
       USER_PAPER_ORDER_WORKFLOW_ENABLED: "true"
       USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED: "true"
-      PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: "[]"
+      WORKER_MODEL_EXECUTION_CONTEXT: container
+      WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-http://vllm:8000/v1}
+      WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-awq}
+      WORKER_MODEL_API_KEY: ${WORKER_MODEL_API_KEY:-vllm}
+      WORKER_MODEL_TIMEOUT_SECONDS: ${WORKER_MODEL_TIMEOUT_SECONDS:-120}
+      WORKER_MODEL_REGISTRY_PATH: /app/departments/01-research/config/worker_model_registry.json
       CEO_DISCORD_INGRESS_API_KEY: ${CEO_DISCORD_INGRESS_API_KEY:?CEO_DISCORD_INGRESS_API_KEY is required}
       DISCORD_ACTOR_MAP: ${DISCORD_ACTOR_MAP:?DISCORD_ACTOR_MAP is required}
       # Empty is deliberate for this backend-only deployment: Starlette emits
@@ -154,6 +162,7 @@ services:
       ORDER_ORCHESTRATOR_DATABASE_ROLE: svc_order_orchestrator
       CONDITIONAL_RULE_DATABASE_URL: *conditional-orchestrator-database-url
       CONDITIONAL_RULE_DATABASE_ROLE: svc_conditional_rule_orchestrator
+      PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: ${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:?An explicit PAPER trading-book fixture grant is required}
       APP_ENV: production
       PORTFOLIO_DATA_MODE: production
       PORTFOLIO_AUTH_MODE: fixture
@@ -308,6 +317,7 @@ services:
       # 회의론자 워커를 부재한 Ollama 로 폴백시켰다. AWS 배포는 이
       # 오버레이를 항상 타므로 좌표를 여기 둔다.
       WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-http://vllm:8000/v1}
+      WORKER_MODEL_EXECUTION_CONTEXT: container
       WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-awq}
       WORKER_MODEL_API_KEY: ${WORKER_MODEL_API_KEY:-vllm}
       WORKER_MODEL_TIMEOUT_SECONDS: ${WORKER_MODEL_TIMEOUT_SECONDS:-120}
@@ -326,17 +336,25 @@ services:
     environment:
       <<: *control-environment
       RISK_QA_DATABASE_URL: *control-database-url
-      # Risk compliance-policy-worker uses the shared Qwen14B model plane.
-      # The Risk Hermes head remains a separate supervisor process.
       WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-http://vllm:8000/v1}
-      WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-Qwen2.5-14B-Instruct-AWQ}
+      WORKER_MODEL_EXECUTION_CONTEXT: container
+      WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-awq}
       WORKER_MODEL_API_KEY: ${WORKER_MODEL_API_KEY:-vllm}
       WORKER_MODEL_TIMEOUT_SECONDS: ${WORKER_MODEL_TIMEOUT_SECONDS:-120}
+      WORKER_MODEL_REGISTRY_PATH: /app/departments/01-research/config/worker_model_registry.json
+      # Risk compliance-policy-worker uses the shared Qwen14B model plane.
+      # The Risk Hermes head remains a separate supervisor process.
 
   audit-api:
     environment:
       <<: *control-session-environment
       RISK_QA_DATABASE_URL: *control-database-url
+      WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-http://vllm:8000/v1}
+      WORKER_MODEL_EXECUTION_CONTEXT: container
+      WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-awq}
+      WORKER_MODEL_API_KEY: ${WORKER_MODEL_API_KEY:-vllm}
+      WORKER_MODEL_TIMEOUT_SECONDS: ${WORKER_MODEL_TIMEOUT_SECONDS:-120}
+      WORKER_MODEL_REGISTRY_PATH: /app/departments/01-research/config/worker_model_registry.json
 
   qa-worker:
     environment:
@@ -412,6 +430,7 @@ services:
     depends_on: *control-dependency
     environment:
       DATABASE_URL: *trading-database-url
+      TRADING_OMS_DATABASE_URL: *trading-oms-database-url
       PAPER_DB: "true"
       APP_ENV: production
       TRADING_EXECUTION_MODE: PAPER
@@ -455,6 +474,7 @@ services:
   trading-outbox-relay:
     environment:
       DATABASE_URL: *trading-database-url
+      TRADING_OUTBOX_DATABASE_URL: *trading-outbox-database-url
 
   accounting-api:
     depends_on: *control-dependency

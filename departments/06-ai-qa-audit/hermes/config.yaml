@@ -291,7 +291,7 @@ workers:
 # ops-and-permission-worker(OpsHealthMonitor/check_tool_permission 서술)가 여기로
 # 합쳐졌다. 셋 다 답이 하나로 정해지는 일이었고, 그 답은 이미 각 결정론 엔진이
 # 만들고 있었다(tool_permission_check.py 자체 docstring: "판정은 결정론적 코드가
-# 하고 LLM은 결과를 설명만 한다") - 위에 qwen3:1.7b 를 얹는 것은 나온 판정을 다시
+# 하고 LLM은 결과를 설명만 한다") - 위에 별도 생성형 모델을 얹는 것은 판정을 다시
 # 서술하는 계층일 뿐이다(CLAUDE.md 개발 원칙 4·9번).
 deterministic_workers:
   qa-runner:

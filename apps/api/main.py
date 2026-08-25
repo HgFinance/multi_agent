@@ -101,6 +101,7 @@ from command_service import (
     IdempotencyConflict,
     TradingStateCommand,
 )
+
 try:
     # Keep the dependency object identical to the package-relative imports in
     # ceo/ceo_mirror_api.  The fallback is only for direct script execution.
@@ -128,7 +129,11 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py``
 from department_agents import router as department_agent_router
 from discord_ingress_auth import (
     DISCORD_INGRESS_PATH,
+)
+from discord_ingress_auth import (
     bearer_is_authorized as discord_ingress_bearer_is_authorized,
+)
+from discord_ingress_auth import (
     mark_request as mark_discord_ingress_request,
 )
 from discord_read import router as discord_read_router
@@ -155,11 +160,11 @@ from portfolio_schemas import (
     PortfolioRecommendationStatusResponse,
     PortfolioUniverseListResponse,
 )
+from portfolio_universe import DEFAULT_UNIVERSE_ID, get_universe, universe_options
 from strategy_runtime_client import (
     StrategyRuntimeProxyError,
     strategy_runtime_request,
 )
-from portfolio_universe import DEFAULT_UNIVERSE_ID, get_universe, universe_options
 
 try:
     from .qa import QA_API_URL
@@ -941,6 +946,13 @@ def _integration_status() -> dict[str, dict[str, object]]:
         if os.getenv(name, "").strip()
     )
 
+    discord_bot_mirror = (
+        os.getenv("DISCORD_MIRROR_ENABLED", "").strip().casefold()
+        in {"1", "true", "yes", "on"}
+        and configured("DISCORD_BOT_TOKEN_CEO", "DISCORD_CEO_CHANNEL_ID")
+    )
+    discord_webhook = configured("DISCORD_WEBHOOK_URL")
+
     return {
         "notion": {
             "configured": configured("NOTION_TOKEN", "NOTION_BRIEFING_DB"),
@@ -950,9 +962,15 @@ def _integration_status() -> dict[str, dict[str, object]]:
             "database_scope": "projection_only",
         },
         "discord": {
-            "configured": configured("DISCORD_WEBHOOK_URL"),
+            "configured": discord_bot_mirror or discord_webhook,
             "label": "Discord 전송",
-            "need": "DISCORD_WEBHOOK_URL 미설정",
+            "transport": "bot_mirror" if discord_bot_mirror else "webhook_compat",
+            "need": (
+                "DISCORD_MIRROR_ENABLED / DISCORD_BOT_TOKEN_CEO / "
+                "DISCORD_CEO_CHANNEL_ID 미설정"
+                if not discord_bot_mirror and not discord_webhook
+                else ""
+            ),
         },
         "instagram": {
             "configured": False,

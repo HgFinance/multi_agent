@@ -72,8 +72,14 @@ TJJ_CODES = {
 
 def _shcode_of(query: str) -> dict:
     """기업명 또는 6자리 코드 -> {stock_code, corp_name}. DART 색인 재사용."""
-    normalized = str(query or "").strip()
-    if len(normalized) == 6 and normalized.isdigit():
+    normalized = str(query or "").strip().upper()
+    # KRX 코드는 숫자 6자리가 기본이지만 **문자가 섞인 것도 있다**
+    # (신형우선주·신주인수권: 0015N0, 900290 같은 외국주 포함). isdigit() 로만
+    # 보면 그런 코드가 아래 DART 기업명 조회로 새고, corpCode.xml 다운로드가
+    # 222초 걸려 호출자가 예외도 없이 멈춘다(2026-08-24 실측: 배치가 첫 종목에서
+    # 멎어 뒤 종목이 통째로 빠졌다). 영숫자 6자리면 그대로 거래소 심볼로 본다.
+    if len(normalized) == 6 and normalized.isalnum() and any(
+            ch.isdigit() for ch in normalized):
         # LS TRs need the exchange symbol, not a DART corp_code. Avoid paying
         # for the large corpCode.xml index when the caller already supplied
         # the canonical six-digit KRX symbol. Name resolution still uses the
@@ -202,6 +208,32 @@ def investor_flow(corp: str, days: int = 10) -> dict:
                       "아니다. 장중 수급이 필요하면 program_trade_trend(t1637) 또는 "
                       "market_investor_flow_intraday(t1602) 를 쓸 것."}
     out["citation"] = _snapshot("investor_flow", {"corp": corp, "days": days}, out)
+    return out
+
+
+def stock_themes(corp: str) -> dict:
+    """종목이 편입된 테마 목록 (LS t1532 종목별테마).
+
+    테마는 **관측**이지 판단이 아니다 - "이 종목이 무슨 테마로 묶여 거래되는가"는
+    거래소/정보업체가 분류한 사실이고, 그 테마가 오른다는 뜻은 아니다.
+    avgdiff 는 그 테마 편입 종목들의 평균 등락률이라 같이 싣는다.
+    """
+    resolved = _shcode_of(corp)
+    spend("ls", LS_DAILY_CAP)
+    body = _client().call_tr(
+        path="/stock/sector", tr_cd="t1532",
+        in_block={"t1532InBlock": {"shcode": resolved["stock_code"]}},
+        rate_limit_per_sec=1.0)
+    rows = body.get("t1532OutBlock1") or body.get("t1532OutBlock") or []
+    if isinstance(rows, dict):
+        rows = [rows]
+    items = [{"테마명": r.get("tmname"), "테마코드": r.get("tmcode"),
+              "테마평균등락률_pct": r.get("avgdiff")}
+             for r in rows if r.get("tmname")]
+    out = {"corp": resolved, "count": len(items), "items": items,
+           "tr": "t1532", "queried_at": datetime.now().isoformat(),
+           "note": "지금 시점 조회값 - 백테스트·사후 채점 인용 금지"}
+    out["citation"] = _snapshot("stock_themes", {"corp": corp}, out)
     return out
 
 
@@ -408,6 +440,9 @@ def build_server(host: str = "0.0.0.0", port: int = DEFAULT_PORT):
         description="종목 밸류에이션 요약(FnGuide): PER/PBR/EPS/BPS/ROE/ROA/"
                     "EV·EBITDA/예상PER + 외인비율·시총. 업종 상대비교는 종목별 "
                     "반복 호출. 무료(LS).")(stock_fundamental)
+    server.tool(
+        name="stock_themes",
+        description="종목이 편입된 테마 목록(LS t1532). 테마명·테마코드·테마 평균등락률. 분류된 사실이며 그 테마가 오른다는 뜻은 아니다.")(stock_themes)
     server.tool(
         name="ls_tr_spec",
         description="TR 하나의 전체 명세(요청·응답 필드 한글 설명). 큐레이션 없는 "

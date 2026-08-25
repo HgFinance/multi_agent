@@ -2554,7 +2554,19 @@ def _register(meta_conn, hypothesis_id: str, config: dict) -> tuple[str, str, bo
                 "select experiment_id::text, status from quant.experiments "
                 "where input_hash=%s for update", (digest,))
             experiment_id, status = cur.fetchone()
-            if status in ("FAILED", "CANCELLED"):
+            # ▶ 보고서가 있으면 **완주한 것이다** - 상태가 무엇이든 다시 돌리지
+            #   않는다(2026-08-24 실측: 살아 있는 실험을 30분 기준으로 취소한
+            #   뒤 회수가 다른 프로세스에 내줘 같은 experiment_id 에 둘이
+            #   붙었고, 나중 쪽이 다른 지문을 저장하려다 터졌다).
+            #   `intraday_report_manifests` 는 불변이라 상태 문자열보다
+            #   사실에 가깝다.
+            cur.execute(
+                "select 1 from quant.intraday_report_manifests "
+                "where experiment_id=%s", (experiment_id,))
+            already_reported = cur.fetchone() is not None
+            if already_reported:
+                duplicate = True
+            elif status in ("FAILED", "CANCELLED"):
                 # Exactly one retrying worker can reclaim a failed immutable
                 # input.  Existing metrics are deterministic upserts.
                 #

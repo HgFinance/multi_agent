@@ -552,6 +552,8 @@ _SQL_CANCEL_ZOMBIES = """
                         where r.experiment_id = e.experiment_id)
        and not exists (select 1 from research.experiment_outcomes o
                         where o.experiment_id = e.experiment_id::text)
+       and not exists (select 1 from quant.intraday_report_manifests m
+                        where m.experiment_id = e.experiment_id)
 """
 
 _SQL_CANCEL_TERMINAL_ZOMBIES = """
@@ -567,6 +569,8 @@ _SQL_CANCEL_TERMINAL_ZOMBIES = """
                         where r.experiment_id = e.experiment_id)
        and not exists (select 1 from research.experiment_outcomes o
                         where o.experiment_id = e.experiment_id::text)
+       and not exists (select 1 from quant.intraday_report_manifests m
+                        where m.experiment_id = e.experiment_id)
 """
 
 

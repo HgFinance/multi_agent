@@ -437,14 +437,6 @@
           "path": "/qa/v1/observability/feedback/pending"
         },
         {
-          "method": "GET",
-          "path": "/qa/v1/observability/feedback/department/{department}"
-        },
-        {
-          "method": "POST",
-          "path": "/qa/v1/observability/feedback/{artifact_id}/department-review"
-        },
-        {
           "method": "POST",
           "path": "/qa/v1/observability/feedback/{artifact_id}/benchmark"
         },

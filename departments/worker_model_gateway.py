@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Worker Model Gateway - 직원 Worker 가 부를 모델의 단일 해석 지점.
 
 소유: 재일 (리서치본부 첫 적용, 계약은 부서 공용)

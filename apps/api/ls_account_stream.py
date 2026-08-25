@@ -1099,7 +1099,14 @@ class _Feed:
         event = normalize_order_event(tr_cd, body, self.seq)
         self.events.appendleft(event)
         if not self.account:
-            self.account = _account(body)
+            account = _account(body)
+            if account:
+                # CSPAQ12200 can transiently fail while the authenticated
+                # realtime channel is already usable.  Once an order event
+                # proves which account the channel belongs to, the old REST
+                # error is no longer the current account state.
+                self.account = account
+                self.account_error = None
         if event["kind"] == "FILLED":
             apply_fill(self.local_positions, event)
         return event["kind"]

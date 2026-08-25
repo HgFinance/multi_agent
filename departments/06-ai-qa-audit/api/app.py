@@ -531,12 +531,6 @@ class ObservabilityFeedbackDecisionRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=240)
 
 
-class DepartmentFeedbackRequest(BaseModel):
-    reviewer_user_id: str = Field(min_length=1, max_length=128)
-    reviewer_department: str = Field(min_length=1, max_length=128)
-    comment: str = Field(min_length=1, max_length=1_200)
-
-
 class ObservabilityBenchmarkStatusRequest(BaseModel):
     status: str = Field(pattern=r"^(RUNNING|PASSED|FAILED)$")
     benchmark_id: str = Field(min_length=1, max_length=160)
@@ -1038,49 +1032,6 @@ def pending_observability_feedback(
         "status": "READY",
         "items": _observability_feedback_ledger().pending(bounded_limit),
     }
-
-
-@app.get("/qa/v1/observability/feedback/department/{department}")
-def department_observability_feedback(
-    department: str,
-    limit: int = 50,
-    authorization: str | None = Header(default=None),
-):
-    """Return findings belonging to one department with its review history."""
-
-    _require_eval_service_token(authorization, required_scope="qa.observability.read")
-    bounded_limit = max(1, min(int(limit), 100))
-    return {
-        "status": "READY",
-        "department": department,
-        "items": _observability_feedback_ledger().department_feedback(department, bounded_limit),
-    }
-
-
-@app.post("/qa/v1/observability/feedback/{artifact_id}/department-review")
-def add_department_observability_feedback(
-    artifact_id: str,
-    body: DepartmentFeedbackRequest,
-    authorization: str | None = Header(default=None),
-):
-    """Append a self-department comment; QA approval remains a separate gate."""
-
-    # Keep the existing deployed BFF service token compatible. This endpoint
-    # only appends a scoped comment; it cannot approve, benchmark, or publish.
-    _require_eval_service_token(authorization, required_scope="qa.observability.approve")
-    review = _observability_feedback_ledger().add_department_review(
-        artifact_id,
-        target_department=body.reviewer_department,
-        reviewer_department=body.reviewer_department,
-        reviewer_user_id=body.reviewer_user_id,
-        comment=body.comment,
-    )
-    if review is None:
-        raise HTTPException(status_code=409, detail={
-            "error_code": "DEPARTMENT_FEEDBACK_SCOPE_INVALID",
-            "message": "피드백 대상 부서와 artifact 부서가 일치하지 않습니다",
-        })
-    return {"status": "RECORDED", **review}
 
 
 @app.post("/qa/v1/observability/feedback/{artifact_id}/decision")

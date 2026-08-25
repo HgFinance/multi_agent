@@ -29,6 +29,9 @@ echo "── 1.5층: 수급·공매도·밸류 (ls-mcp) ────────
 for f in instrument_scoring.py enrich_candidates.py; do
   docker cp "$HERE/$f" hedgefund-ls-mcp:/tmp/ >/dev/null
 done
+# price_levels 는 리서치 소유 정본이라 이미지에도 있지만, 저장소 쪽이
+# 최신일 수 있으므로 같이 실어 /tmp 사본이 먼저 잡히게 한다.
+docker cp "$REPO/departments/01-research/evidence/price_levels.py" hedgefund-ls-mcp:/tmp/ >/dev/null
 docker cp "$WORK/candidates.json" hedgefund-ls-mcp:/tmp/candidates.json >/dev/null
 docker exec -e SCREEN_OUT=/tmp/candidates.json -e ENRICH_MAX="$ENRICH_MAX" \
   hedgefund-ls-mcp python /tmp/enrich_candidates.py
@@ -40,10 +43,15 @@ echo "   DART 기업색인 워밍업에 ~220초가 걸린다(프로세스 캐시
 for f in instrument_scoring.py narrative_axes.py judge_candidates.py; do
   docker cp "$HERE/$f" hedgefund-research-mcp:/tmp/ >/dev/null
 done
+docker cp "$REPO/departments/01-research/evidence/price_levels.py" hedgefund-research-mcp:/tmp/ >/dev/null
 docker cp "$WORK/cards.json" hedgefund-research-mcp:/tmp/cards.json >/dev/null
 docker exec -e CARDS_IN=/tmp/cards.json -e CARDS_OUT=/tmp/cards_final.json \
   hedgefund-research-mcp python /tmp/judge_candidates.py
 docker cp hedgefund-research-mcp:/tmp/cards_final.json "$WORK/cards_final.json" >/dev/null
 
 echo
-echo "완료 -> $WORK/cards_final.json"
+echo "── 3층: 근거 등급 답변 생성 (호스트) ─────────────────────────"
+CARDS_FINAL="$WORK/cards_final.json" ANSWERS_OUT="$WORK/answers.json"   "$REPO/.venv/bin/python" "$HERE/render_answers.py"
+
+echo
+echo "완료 -> $WORK/answers.json"
