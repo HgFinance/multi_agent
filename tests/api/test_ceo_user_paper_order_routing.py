@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
@@ -7,6 +8,7 @@ import pytest
 from fastapi import HTTPException
 
 from apps.api import ceo
+from orchestration import llm_observability
 from apps.api.user_order_workflow import InMemoryUserOrderRequestRepository
 from orchestration.ceo_workflow_scope import (
     requested_by_from_body,
@@ -287,6 +289,11 @@ def test_conditional_command_uses_only_the_precreated_trading_primary(
     create = _install_successful_route(
         monkeypatch, events=events, repository=repository
     )
+    monkeypatch.setattr(
+        llm_observability,
+        "start_root_trace",
+        lambda **_kwargs: SimpleNamespace(context="trace-conditional-root"),
+    )
     raw = "삼성전자 5분봉 RSI가 30을 상향 돌파하면 1주 매수"
 
     response = ceo.ceo_query(
@@ -306,6 +313,7 @@ def test_conditional_command_uses_only_the_precreated_trading_primary(
     assert root_call.kwargs["initial_status"] == "running"
     assert trading_call.kwargs["initial_status"] == "blocked"
     trading_body = trading_call.kwargs["body"]
+    assert "langsmith_trace_context=trace-conditional-root" in root_call.kwargs["body"]
     assert "hgfinance.user-conditional-paper-rule.v1" in trading_body
     assert "mcp_tool=process_user_conditional_paper_rule" in trading_body
     assert "activation_policy=IMMEDIATE_AFTER_DETERMINISTIC_VALIDATION" in trading_body
@@ -317,6 +325,9 @@ def test_conditional_command_uses_only_the_precreated_trading_primary(
     assert "TIMEFRAME_REQUIRED_FOR_CROSS" in trading_body
     assert "max_data_age_seconds=30" in trading_body
     assert "trusted 10-minute default" in trading_body
+    assert "For 2-4 independent conditional actions" in trading_body
+    assert "pass candidates in source-text order" in trading_body
+    assert "multiple actions, and LIVE" not in trading_body
     assert raw in trading_body
     assert response["conditional_rule"] is True
     assert response["order_state"] == "RULE_INTERPRETATION_QUEUED"

@@ -21,16 +21,15 @@ from apps.api.paper_order_mcp import (
 )
 from orchestration.contracts.user_paper_order import TextEvidence
 
-
 ROOT = Path(__file__).resolve().parents[2]
 VALID_KEY = "paper-order-mcp-9f4e61d807a248e8a2b17f"
+
 
 def test_text_evidence_schema_explains_instrument_normalization() -> None:
     description = TextEvidence.model_json_schema()["properties"]["normalized"][
         "description"
     ]
     assert "INSTRUMENT must exactly equal instrument_mention" in description
-
 
 
 def _yaml(path: str) -> dict:
@@ -104,14 +103,13 @@ def test_http_boundary_rejects_missing_and_wrong_bearer() -> None:
         status, response_headers = asyncio.run(request(headers))
         assert status == 401
         assert response_headers["www-authenticate"] == "Bearer"
-    assert asyncio.run(
-        request({"Authorization": f"Bearer {VALID_KEY}"})
-    )[0] == 204
+    assert asyncio.run(request({"Authorization": f"Bearer {VALID_KEY}"}))[0] == 204
 
 
-def test_server_exposes_exactly_two_lazy_delegating_tools(monkeypatch) -> None:
+def test_server_exposes_command_tools_and_scoped_status_reader(monkeypatch) -> None:
     order_calls: list[dict] = []
     conditional_calls: list[dict] = []
+    status_calls: list[dict] = []
     fake = ModuleType("apps.api.user_order_orchestrator")
     conditional_fake = ModuleType("apps.api.conditional_rule_orchestrator")
 
@@ -127,6 +125,16 @@ def test_server_exposes_exactly_two_lazy_delegating_tools(monkeypatch) -> None:
     conditional_fake.process_user_conditional_paper_rule = (  # type: ignore[attr-defined]
         orchestrate_conditional
     )
+
+    def read_status(**kwargs):
+        status_calls.append(kwargs)
+        return {
+            "authority_verified": True,
+            "workflow_state": "ACCOUNTING_PENDING",
+            "final_answer": "권위 상태 확인",
+        }
+
+    conditional_fake.get_user_conditional_paper_rule_status = read_status  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "apps.api.user_order_orchestrator", fake)
     monkeypatch.setitem(
         sys.modules, "apps.api.conditional_rule_orchestrator", conditional_fake
@@ -137,6 +145,7 @@ def test_server_exposes_exactly_two_lazy_delegating_tools(monkeypatch) -> None:
     assert [tool.name for tool in tools] == [
         "process_user_paper_order",
         "process_user_conditional_paper_rule",
+        "get_user_conditional_paper_rule_status",
     ]
     schema = tools[0].inputSchema
     candidate_ref = schema["properties"]["interpretation"]["$ref"]
@@ -221,12 +230,20 @@ def test_server_exposes_exactly_two_lazy_delegating_tools(monkeypatch) -> None:
         {
             "root_task_id": "root-1",
             "trading_task_id": "trade-1",
-            "candidate": ConditionalRuleCandidate.model_validate(
-                conditional_candidate
-            ),
+            "candidate": ConditionalRuleCandidate.model_validate(conditional_candidate),
+            "candidates": None,
             "clarification_reason": None,
         }
     ]
+
+    status_result = asyncio.run(
+        server.call_tool(
+            "get_user_conditional_paper_rule_status",
+            {"root_task_id": "root-1", "trading_task_id": "trade-1"},
+        )
+    )
+    assert status_result[1]["authority_verified"] is True
+    assert status_calls == [{"root_task_id": "root-1", "trading_task_id": "trade-1"}]
 
 
 def test_transport_accepts_contradictory_candidate_for_durable_verifier(
@@ -424,12 +441,8 @@ def test_compose_keeps_authority_secrets_out_of_trading_hermes() -> None:
         "apps.api.paper_order_mcp",
         "--healthcheck",
     ]
-    assert service["depends_on"]["trading-api"] == {
-        "condition": "service_healthy"
-    }
-    assert any(
-        str(volume).endswith(":/opt/kanban") for volume in service["volumes"]
-    )
+    assert service["depends_on"]["trading-api"] == {"condition": "service_healthy"}
+    assert any(str(volume).endswith(":/opt/kanban") for volume in service["volumes"])
     for key in (
         "DATABASE_URL",
         "ORDER_ORCHESTRATOR_DATABASE_ROLE",
@@ -498,6 +511,7 @@ def test_trading_profile_and_prompts_pin_the_one_shot_paper_lane() -> None:
     assert "hgfinance.user-paper-order-interpretation.v1" in trading
     assert "process_user_paper_order` exactly once" in trading
     assert "process_user_conditional_paper_rule` exactly once" in trading
+    assert "get_user_conditional_paper_rule_status` exactly once" in trading
     for rejected in (
         "Questions/advice",
         "negation/prohibition",

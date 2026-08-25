@@ -169,9 +169,8 @@ class CeoAsk(hermes_boundary.AgentAsk):
 
     **왜 서버가 user_id로 fund를 찾지 않고 화면이 보내나**: `governance.fund_memberships`
     (user<->fund 연결 테이블)가 아직 비어 있어 `user_id -> fund_id` 역참조 경로가
-    없다. 프론트엔드가 계정을 하드코딩하는 단계이므로 `fund_id`도 그 쌍으로 함께
-    보내는 편이 조회 경로를 새로 만드는 것보다 단순하다. 진짜 로그인이 붙으면
-    그때 `fund_memberships`로 옮긴다.
+    없다. 로컬 UI는 고정 데모 계정 단계이므로 `fund_id`도 그 쌍으로 함께 보내며,
+    외부 로그인이나 계정 매핑은 이 모의투자 범위에 포함하지 않는다.
     """
 
     fund_id: str | None = None
@@ -295,10 +294,10 @@ def _load(task_id: str, *, max_workers: int | None = None) -> Workflow:
 
 
 def _require_ceo_task_owner(body: str, authenticated_owner_id: str | None) -> None:
-    """Prevent authenticated users from reading another user's task graph."""
+    """Prevent one local fixture identity from reading another task graph."""
 
-    # Explicit fixture mode may intentionally have no identity. Production JWT
-    # mode can never reach here without one because ``current_user`` is strict.
+    # The supported local mode may intentionally have no identity. There is no
+    # browser JWT mode in this repository.
     # Direct unit/domain calls see FastAPI's ``Depends`` sentinel rather than a
     # resolved request identity.  Only a concrete string is an authenticated
     # subject; HTTP requests always pass the dependency-resolved value.
@@ -818,7 +817,7 @@ def _deterministic_order_child_body(
             "execution_mode=PAPER_ONLY",
             "interpreter=DETERMINISTIC_EXACT_EVIDENCE",
             "No Risk/QA/Research approval is required for this direct user order.",
-            "The trusted server still rechecks the exact text, authenticated Fund/Book,",
+            "The trusted server still rechecks the exact text, fixed Fund/Book fixture,",
             "instrument resolution, idempotency, OMS state, and broker execution evidence.",
             "",
             "## Exact user instruction",
@@ -859,12 +858,18 @@ def _conditional_rule_child_body(
             "execution_mode=PAPER_ONLY",
             "activation_policy=IMMEDIATE_AFTER_DETERMINISTIC_VALIDATION",
             "mcp_tool=process_user_conditional_paper_rule",
-            "Interpret the exact user instruction below into one ConditionalRuleCandidate AST.",
+            "Interpret the exact user instruction below into one or more ConditionalRuleCandidate ASTs.",
             "Call process_user_conditional_paper_rule exactly once with this root/task scope.",
             "Do not create Risk, QA, Research, Accounting, or additional Trading tasks.",
             "Never invent a symbol, condition, threshold, timeframe, side, or sizing value.",
-            "Questions, advice, negation, examples, ambiguity, multiple actions, and LIVE",
-            "requests must use candidate=null with a concise clarification_reason.",
+            "Questions, advice, negation, examples, ambiguity, and LIVE requests must",
+            "use candidate=null and candidates=null with a concise clarification_reason.",
+            "For one action, pass candidate. For 2-4 independent conditional actions,",
+            "pass candidates in source-text order and leave candidate=null. A leading",
+            "symbol shared by coordinated clauses applies to each clause; never invent",
+            "a different symbol. Each candidate must preserve its own comparator,",
+            "threshold, side, and sizing. Never collapse branches with different actions",
+            "into one LOGICAL OR rule.",
             "Supported expression node types are LITERAL, MARKET, PORTFOLIO, INDICATOR,",
             "ARITHMETIC, COMPARISON, LOGICAL, NOT, and CROSS.",
             f"Supported indicators are {_conditional_rule_indicator_catalog_prompt()}.",
@@ -1340,6 +1345,7 @@ def _route_user_paper_order(
     mandate: Mapping[str, object] | None,
     conditional_rule: bool = False,
     pre_admitted_record: UserOrderRequestRecord | None = None,
+    langsmith_trace_context: str | None = None,
 ) -> dict[str, object]:
     """Durably route one direct user workflow to Trading Hermes, always PAPER."""
 
@@ -1360,7 +1366,7 @@ def _route_user_paper_order(
     if not conditional_rule and _deterministic_paper_order_fast_path_enabled():
         deterministic_candidate = deterministic_order_candidate(req.query)
 
-    # This is admission, not execution. It canonicalizes the authenticated
+    # This is admission, not execution. It canonicalizes the fixed local
     # user/Fund/Book tuple before anything is exposed to Hermes.
     access = require_trading_book_access(owner_id, req.fund_id, req.book_id)
     repository = user_order_repository()
@@ -1413,6 +1419,7 @@ def _route_user_paper_order(
             mandate=mandate,
             requested_by=access["user_id"],
             user_paper_order_scope=scope,
+            langsmith_trace_context=langsmith_trace_context,
         ),
         idempotency_key=req.request_id,
         # A running scope container cannot be claimed by the CEO dispatcher,
@@ -1661,6 +1668,54 @@ def _route_user_paper_order(
     )
 
 
+def _route_traced_user_paper_order(
+    req: CeoAsk,
+    *,
+    owner_id: str | None,
+    mandate: Mapping[str, object] | None,
+    conditional_rule: bool,
+) -> dict[str, object]:
+    """Route the direct PAPER lane with the same redacted root trace as analysis."""
+
+    root_trace = None
+    try:
+        from orchestration.llm_observability import start_root_trace
+
+        root_trace = start_root_trace(
+            request_id=req.request_id,
+            workflow_mode="binding",
+            source=getattr(req, "source", None),
+        )
+    except Exception:  # noqa: BLE001 - observability remains fail-open.
+        root_trace = None
+    try:
+        return _route_user_paper_order(
+            req,
+            owner_id=owner_id,
+            mandate=mandate,
+            conditional_rule=conditional_rule,
+            langsmith_trace_context=(
+                root_trace.context if root_trace is not None else None
+            ),
+        )
+    except Exception as exc:
+        if root_trace is not None:
+            try:
+                from orchestration.llm_observability import close_root_trace
+
+                close_root_trace(
+                    root_trace.context,
+                    request_id=req.request_id,
+                    workflow_mode="binding",
+                    source=getattr(req, "source", None),
+                    status="error",
+                    error_class=type(exc).__name__,
+                )
+            except Exception:  # noqa: BLE001 - tracing cannot mask route failure.
+                pass
+        raise
+
+
 def ceo_query(
     req: CeoAsk,
     owner_id: str | None = Depends(optional_current_user),
@@ -1744,7 +1799,7 @@ def ceo_query(
         )
 
     if looks_like_conditional_paper_rule(req.query):
-        return _route_user_paper_order(
+        return _route_traced_user_paper_order(
             req,
             owner_id=owner_id if isinstance(owner_id, str) else None,
             mandate=mandate,
@@ -1754,10 +1809,11 @@ def ceo_query(
     if looks_like_user_order_request(
         req.query
     ) and not is_clearly_non_executable_order_language(req.query):
-        return _route_user_paper_order(
+        return _route_traced_user_paper_order(
             req,
             owner_id=owner_id if isinstance(owner_id, str) else None,
             mandate=mandate,
+            conditional_rule=False,
         )
 
     workflow_mode = infer_workflow_mode(req.query)

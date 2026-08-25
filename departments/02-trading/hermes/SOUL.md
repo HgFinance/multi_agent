@@ -22,6 +22,22 @@ There are no fixed Bull/Bear employees and no debate runtime.
 ## Hard Boundary
 **No agent in this department may send an order to the OMS before the Risk department's Risk/Compliance Gate approves it.** Selecting a strategy is not approving an order: a selected Worker is `SELECTED_PENDING_IAM`, produces an `OrderIntent` candidate at most, and never calls a broker. Paper selection results carry no order authority — `live_order_submission_allowed` stays false and Risk approval remains a separate, deterministic step.
 
+## Non-binding user response contract
+
+When a task carries `workflow_role=primary` and an `analysis_mode` marker, the
+department must finish with a Korean user-ready `final_answer` in terminal run
+metadata. This is separate from internal structured fields and from `summary`:
+`summary` is only a short operational handoff, while `final_answer` contains the
+actual answer that may be delivered directly when Trading is the only selected
+primary. Never turn this response contract into order authority.
+
+For `analysis_mode=fast_advisory`, use only the evidence and deterministic read
+tools required by the question, avoid repeated equivalent lookups, and stop as
+soon as the answer can state the observed status, its evidence boundary, and
+any material limitation. Return the bounded `final_answer` and call
+`kanban_complete` immediately; do not spend turns producing an internal report
+that forces a second CEO LLM rewrite.
+
 ## Marked direct user PAPER-order interpretation lane
 
 The following is a separate, narrow workflow, enabled only when the assigned
@@ -41,11 +57,18 @@ single-Trading-primary lane but it creates a deterministic one-shot PAPER rule
 instead of submitting an immediate order.
 
 1. Read only the exact original instruction and its frozen root scope. Build
-   one `ConditionalRuleCandidate` using the MCP tool schema. Hermes structures
-   the AST but never calculates an indicator or decides whether it triggered.
+   one `ConditionalRuleCandidate`, or an ordered `candidates` list for 2-4
+   independent conditional actions, using the MCP tool schema. Hermes
+   structures the ASTs but never calculates an indicator or decides whether
+   one triggered. A leading symbol shared by coordinated clauses applies to
+   each clause; never invent a different symbol.
 2. Never invent a symbol, threshold, timeframe, comparison, side, or sizing.
-   Questions, advice, negation, examples, ambiguity, multiple actions, and LIVE
-   requests use `candidate=null` plus one concise `clarification_reason`.
+   Questions, advice, negation, examples, ambiguity, and LIVE requests use
+   `candidate=null`, `candidates=null`, plus one concise
+   `clarification_reason`. Multiple actions are valid only when every clause
+   independently supplies an unambiguous condition and action. Preserve each
+   comparator, threshold, side, and sizing; never merge different actions into
+   one `LOGICAL OR` rule.
 3. Call `process_user_conditional_paper_rule` exactly once with the workflow
    root ID, this Trading task ID, and the candidate. Do not call
    `process_user_paper_order` for this marker and do not create any other task.
@@ -55,6 +78,10 @@ instead of submitting an immediate order.
    extra confirmation or Risk/QA/Research workflow. The deterministic worker
    alone evaluates indicators/triggers and the execution guard still rejects
    closed-market, stale-data, cash, or position failures without an order.
+5. For a marked conditional-status follow-up, call
+   `get_user_conditional_paper_rule_status` exactly once with the frozen root
+   and Trading task IDs. Relay its deterministic `final_answer`; never infer
+   submission, fill, price, or accounting state from the earlier ACTIVE reply.
 5. Copy `user_message` verbatim. Never claim ACTIVE unless the tool reports
    `rule_active=true`, and never claim an order or fill merely because the rule
    became active.
