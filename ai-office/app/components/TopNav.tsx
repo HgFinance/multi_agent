@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { COMPANY } from "../../company.config";
+import { useAuth } from "../lib/AuthProvider";
 import { DEFAULT_ACCOUNT, type TestAccount } from "../lib/currentAccount";
 
 /**
@@ -13,8 +14,13 @@ import { DEFAULT_ACCOUNT, type TestAccount } from "../lib/currentAccount";
  * `"use client"`인 이유: `AccountDot`의 색 토큰 계산과 훗날의 상호작용을 위해
  * 클라이언트 컴포넌트로 둔다.
  *
- * 계정은 데모용 Fund Owner 하나로 고정한다. 사용자 전환 UI나 세션 메뉴는
- * 제공하지 않는다.
+ * **계정 표시는 로그인이 아니다.** 근거는 `app/lib/currentAccount.ts` 머리말에
+ * 적어뒀다 - 요약하면 `X-User-Id`는 서명이 없어 신원을 증명하지 않는다.
+ * 계정이 Fund Owner 하나로 고정돼(2026-08-19) 전환 UI가 없고, 실제 Supabase
+ * 인증도 붙이지 않으므로(2026-08-19) 세션 메뉴도 없다 - env 값으로 둘 중
+ * 하나를 고르던 분기 자체를 없앴다. 그 분기가 SSR/클라이언트 사이에서
+ * `NEXT_PUBLIC_AUTH_MODE` 주입 경로 차이로 어긋나 화면에 "Authenticated user
+ * / Supabase session / 로그아웃"이 잘못 뜬 적이 있었다(2026-08-19 실측).
  */
 
 export type NavKey = "dashboard" | "ai-office" | "mandate" | "agent-logs";
@@ -47,7 +53,15 @@ function AccountDot({ account, size }: { account: TestAccount; size: "sm" | "md"
  * 안 일어나는 죽은 UI가 되므로, 정적 표시로 바꿨다.
  */
 function FixedAccountBadge() {
-  const account: TestAccount = DEFAULT_ACCOUNT;
+  const auth = useAuth();
+  const account: TestAccount = auth.mode === "fixture"
+    ? DEFAULT_ACCOUNT
+    : {
+        userId: auth.userId ?? "",
+        label: auth.email ?? auth.userId ?? "Authenticated user",
+        fundId: null,
+        colorClass: "bg-primary",
+      };
   return (
     <div
       className="flex items-center gap-2 rounded-full p-1 pr-3"

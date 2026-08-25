@@ -42,7 +42,7 @@
 ```bash
 # 저장소 루트에서 실행
 npm --prefix ai-office install
-NEXT_PUBLIC_BFF_URL=http://127.0.0.1:8001 npm run dev -- --port 3000
+NEXT_PUBLIC_AUTH_MODE=fixture NEXT_PUBLIC_BFF_URL=http://127.0.0.1:8001 npm run dev -- --port 3000
 ```
 
 현재 Worker 실행 구간을 화면에 반영하기 위해 Snapshot 폴링은 `400ms`로 동작한다.
@@ -55,10 +55,10 @@ AI Office는 브라우저에서 부서 API나 DB를 직접 호출하지 않고 `
 
 ```bash
 # 저장소 루트, 외부 DB 없이 DEMO Read Model로 실행
-APP_ENV=local PORTFOLIO_AUTH_MODE=fixture PORTFOLIO_AUTH_REQUIRED=false ACCOUNTING_MODE=OFFLINE PORTFOLIO_RUNTIME_STORE_PATH=/tmp/hgfinance-portfolio.sqlite3 DATABASE_URL='' .venv/bin/python -m uvicorn apps.api.main:app --reload --port 8001
+DATABASE_URL='' .venv/bin/python -m uvicorn apps.api.main:app --reload --port 8001
 
 # 별도 터미널, 저장소 루트에서 실행
-NEXT_PUBLIC_BFF_URL=http://127.0.0.1:8001 npm run dev -- --port 3000
+NEXT_PUBLIC_AUTH_MODE=fixture NEXT_PUBLIC_BFF_URL=http://127.0.0.1:8001 npm run dev -- --port 3000
 ```
 
 프론트 폴더에서 직접 실행하려면 `npm run dev`를 사용한다. 저장소 루트에서 `npm run dev`를 실행하면 루트 스크립트가 `ai-office`로 전달한다.
@@ -69,12 +69,24 @@ NEXT_PUBLIC_BFF_URL=http://127.0.0.1:8001 npm run dev -- --port 3000
 
 연동 상태는 BFF의 `GET /ui/integrations`에서 읽으며, 비밀값은 브라우저로 보내지 않는다.
 
-## BFF 통신 방식
+## Production 인증
 
-AI Office는 사용자 계정 화면 없이 고정된 데모 계정 ID를 BFF에 전달한다.
-브라우저 요청은 항상 동일 출처 `/bff/*`로 보내고, Worker가 내부 BFF로
-전달하므로 브라우저 CORS preflight가 발생하지 않는다. 실데이터 권한이나
-운영자 계정 관리는 이 데모 UI의 범위에 포함하지 않는다.
+Production은 Supabase Auth session의 access token을 모든 BFF HTTP 요청에
+`Authorization: Bearer`로 전송한다. `X-User-Id` fixture는
+`NEXT_PUBLIC_AUTH_MODE=fixture`를 명시한 local/test에서만 허용되며 production
+build에서는 즉시 실패한다.
+
+브라우저에는 `NEXT_PUBLIC_SUPABASE_URL`과
+`NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`만 둔다. publishable key는
+`sb_publishable_*` 또는 legacy `anon` JWT만 허용하며 service-role과
+`sb_secret_*`는 거부한다. 로그인 뒤 BFF `GET /ui/me`가 ACTIVE 사용자와 유효한
+Fund membership을 반환해야 화면이 열린다. membership이 없으면 자동 생성하지
+않고 onboarding 필요 상태로 차단한다.
+
+CEO timeline SSE는 native EventSource 대신 Bearer를 붙일 수 있는 fetch stream을
+사용한다. 브라우저 WebSocket은 Authorization header를 설정할 수 없으므로 one-use
+ticket 계약이 생길 때까지 Operations 화면은 인증된 `/ui/snapshot`을 5초 간격으로
+polling한다. JWT를 URL이나 WebSocket subprotocol에 넣지 않는다.
 
 `8001` 포트가 이미 사용 중이면 기존 프로세스를 확인한 뒤 종료하거나 다른 포트를 사용한다.
 

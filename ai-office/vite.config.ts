@@ -34,9 +34,14 @@ const localBindingConfig = {
 };
 
 export default defineConfig(async ({ mode }) => {
-  // 서버·클라이언트가 같은 데모 계정 binding을 사용하도록 여기서 한 번만 주입한다.
+  // 서버·클라이언트가 같은 빌드 계약을 사용하도록 인증 모드와 공개 Supabase
+  // 설정을 여기서 한 번만 주입한다. 비밀키는 이 값들에 포함하지 않는다.
   const env = loadEnv(mode, "..", "");
   const discordActorMap = env.DISCORD_ACTOR_MAP ?? process.env.DISCORD_ACTOR_MAP ?? "";
+  const authMode = (process.env.PORTFOLIO_AUTH_MODE ?? process.env.NEXT_PUBLIC_AUTH_MODE ?? env.PORTFOLIO_AUTH_MODE ?? env.NEXT_PUBLIC_AUTH_MODE ?? "fixture").trim().toLowerCase();
+  const frontendAuthMode = authMode === "supabase" || authMode === "supabase_jwt" ? "supabase" : "fixture";
+  const supabaseUrl = env.NEXT_PUBLIC_SUPABASE_URL ?? env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
+  const supabasePublishableKey = env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ?? env.SUPABASE_PUBLISHABLE_KEY ?? env.SUPABASE_ANON_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ?? "";
   // Keep Wrangler and Miniflare state project-local. These are non-secret tool
   // settings; application environment belongs in ignored `.env*` files.
   process.env.WRANGLER_WRITE_LOGS ??= "false";
@@ -49,6 +54,9 @@ export default defineConfig(async ({ mode }) => {
   return {
     define: {
       "process.env.DISCORD_ACTOR_MAP": JSON.stringify(discordActorMap),
+      "process.env.NEXT_PUBLIC_AUTH_MODE": JSON.stringify(frontendAuthMode),
+      "process.env.NEXT_PUBLIC_SUPABASE_URL": JSON.stringify(supabaseUrl),
+      "process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY": JSON.stringify(supabasePublishableKey),
     },
     server: isCodexSeatbeltSandbox
       ? { watch: { useFsEvents: false, usePolling: true } }

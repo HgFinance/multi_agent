@@ -801,8 +801,8 @@ export interface MandateSubmitResult {
 }
 
 /**
- * 지침 저장 버튼의 진입점. verifiedUserId는 현재 데모 계정 ID이고, BFF가
- * 같은 subject와 Fund membership을 다시 확인한다.
+ * 지침 저장 버튼의 진입점. verifiedUserId는 AuthProvider의 Supabase session
+ * subject이고, BFF가 같은 subject와 Fund membership을 다시 검증한다.
  *
  * `fundId`는 호출부(`MandateConfig.tsx`)가 이 폼을 읽어올 때 쓴 것과 **같은
  * 값**을 그대로 넘겨야 한다. 예전에는 여기서 `currentFund.ts`의 전역

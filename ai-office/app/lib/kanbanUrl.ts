@@ -18,14 +18,15 @@ const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
 /**
  * 임베드할 보드 주소. `/kanban`으로 고정하고, **host를 이 페이지에 맞춘다.**
  *
- * ## 왜 host를 맞추는가 (iframe 안에서 보드 상태가 유지되지 않던 원인)
+ * ## 왜 host를 맞추는가 (iframe 안에서 로그인이 안 되던 원인)
  *
  * Hermes 세션 쿠키는 `SameSite=Lax` 고정이다(설치본
  * `hermes_cli/dashboard_auth/cookies.py`의 `_common_attrs`, 설정으로 바꿀 수
  * 없다). Lax 쿠키는 **cross-site iframe에 저장·전송되지 않는다.** 그래서
  * 페이지가 `localhost:3002`인데 보드가 `127.0.0.1:9119`면 - 브라우저에게 이
- * 둘은 서로 다른 site라 브라우저가 보드의 SameSite 쿠키를 iframe에 유지하지
- * 않는다. 그 결과 보드가 매번 초기 상태로 돌아간다.
+ * 둘은 서로 다른 site다 - 로그인 POST는 200을 받아도 세션이 남지 않는다.
+ * 이어서 `/kanban`을 열면 쿠키가 없어 다시 `/login`으로 튕기고, 화면에는
+ * "로그인해도 계속 로그인 페이지"로 보인다.
  *
  * SameSite 판정에 **포트는 들어가지 않는다.** host만 같으면 3002↔9119도 같은
  * site라 쿠키가 그대로 흐른다. 그래서 포트는 두고 host만 바꾼다.
@@ -45,7 +46,9 @@ export function resolveKanbanUrl(value: string, pageHost?: string): string | nul
     }
     const pathname = url.pathname.replace(/\/+$/, "");
     if (pathname && pathname !== "/kanban") return null;
-    // 임베드 시 기본 화면은 항상 보드여야 한다.
+    // 로그인 뒤 기본 화면이 보드여야 한다. Hermes가 `/kanban`을
+    // `/login?next=%2Fkanban`으로 돌리고, 로그인에 성공하면 그 `next`로
+    // 돌아온다(설치본 `dashboard_auth/routes.py`가 값을 검증한다).
     url.pathname = "/kanban";
     if (pageHost && pageHost !== url.hostname && LOOPBACK_HOSTS.has(pageHost) && LOOPBACK_HOSTS.has(url.hostname)) {
       url.hostname = pageHost;

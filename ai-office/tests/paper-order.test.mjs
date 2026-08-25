@@ -118,7 +118,7 @@ test("current-user contract rejects duplicate or malformed trading books", () =>
   );
 });
 
-test("each explicit PAPER action creates one key and enables only idempotent transport replay", () => {
+test("each explicit PAPER action creates one key and enables only idempotent auth transport replay", () => {
   let sequence = 0;
   const uuid = () => `00000000-0000-4000-8000-${String(++sequence).padStart(12, "0")}`;
   const input = { fundId: "fund-1", bookId: "book-2", query: "삼성전자 2주 시장가 매수" };
@@ -127,7 +127,7 @@ test("each explicit PAPER action creates one key and enables only idempotent tra
 
   assert.equal(first.path, "/trading/agent/order");
   assert.notEqual(first.idempotencyKey, second.idempotencyKey);
-  assert.equal(first.init.retryIdempotentMutation, true);
+  assert.equal(first.init.retryMutationAfterRefresh, true);
   assert.equal(new Headers(first.init.headers).get("Idempotency-Key"), first.idempotencyKey);
   assert.deepEqual(JSON.parse(String(first.init.body)), {
     fund_id: "fund-1",
@@ -148,7 +148,7 @@ test("each explicit PAPER action creates one key and enables only idempotent tra
   assert.notEqual(changedAction.submission.idempotencyKey, first.idempotencyKey);
 });
 
-test("ambiguous PAPER retry identity survives reload only in the current user/fund/book scope", () => {
+test("ambiguous PAPER retry identity survives reload only in the authenticated user/fund/book scope", () => {
   const storage = new MemoryStorage();
   const scope = { accountId: "user-1", fundId: "fund-1", bookId: "book-2" };
   const input = { fundId: "fund-1", bookId: "book-2", query: " 삼성전자 2주 시장가 매수 " };

@@ -152,7 +152,11 @@ export function readableRuntimeMessage(text: string): { summary: string; action?
 
 export async function fetchOperations(): Promise<OperationsView> {
   let response: Response;
-  // Fund가 선택되어 있으면 서버가 해당 데모 Fund의 snapshot을 반환한다.
+  // `/ui/snapshot`은 supabase_jwt 모드에서 `fund_id` 없이는 422
+  // portfolio_fund_id_required로 떨어진다(apps/api/current_user.py
+  // require_fund_membership) - book_id는 절대 안 보낸다(같은 엔드포인트가
+  // 그건 supabase_jwt 모드에서 422 portfolio_book_selection_forbidden으로
+  // 막는다). ceoClient.ts의 `/ui/ceo/ask`와 같은 패턴이다.
   const fundId = currentFundId();
   const path = fundId ? `/ui/snapshot?fund_id=${encodeURIComponent(fundId)}` : "/ui/snapshot";
   try {
@@ -212,8 +216,9 @@ export type OperationsStreamHandlers = {
 };
 
 /**
- * Poll the BFF snapshot until browser-compatible one-use WebSocket tickets are
- * available. The browser keeps using the polling path for now.
+ * Poll the authenticated BFF snapshot until browser-compatible one-use
+ * WebSocket tickets are available. A native browser WebSocket cannot attach
+ * the production Authorization header.
  */
 export function subscribeOperationsStream(handlers: OperationsStreamHandlers): () => void {
   if (typeof window === "undefined") return () => {};

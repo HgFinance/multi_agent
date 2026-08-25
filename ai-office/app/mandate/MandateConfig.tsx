@@ -22,6 +22,8 @@ import {
   validateDraft,
 } from "../lib/mandateClient";
 import { provisionalRiskScore, type Experience } from "../lib/mandatePresets";
+import { AUTH_MODE } from "../lib/authMode";
+import { useAuth } from "../lib/AuthProvider";
 import { DEFAULT_ACCOUNT } from "../lib/currentAccount";
 import { usePortfolioSession } from "../lib/PortfolioSessionProvider";
 
@@ -210,15 +212,24 @@ function FieldLabel({ children, hint }: { children: React.ReactNode; hint?: stri
  * 계정이 Fund Owner 하나로 고정돼(`currentAccount.ts`, 2026-08-19) 폼 scope도
  * 그 고정 계정을 그대로 쓴다.
  *
+ * ## 왜 "펀드 권한 설정이 필요합니다" 안내 화면을 없앴나
+ *
+ * 예전에는 `useAuth()`의 Supabase 세션과 `usePortfolioSession()`의 서버 승인
+ * Fund가 둘 다 있어야 폼을 열었다. 실제 Supabase 인증을 붙이지 않기로
+ * 했으므로(2026-08-19) `auth.userId`가 채워질 경로 자체가 없어, 이 화면이
+ * **항상** 떴다 - "권한이 없다"가 아니라 "권한을 확인하는 기능을 쓰지 않는다"는
+ * 상태를 오인하게 만들었다.
+ *
  * `DEFAULT_ACCOUNT.fundId`가 없는 경우를 방어적으로 다루는 이유: 인터페이스
  * `TestAccount.fundId`가 여전히 `string | null`이기 때문이다(서버에
  * `user_id -> fund_id` 역참조가 없다는 사실은 그대로다) - 실제로는 이 고정
  * 계정에 항상 값이 있어 아래 분기를 타지 않는다.
  */
 export default function MandateConfig() {
+  const auth = useAuth();
   const portfolio = usePortfolioSession();
-  const userId = DEFAULT_ACCOUNT.userId;
-  const fundId = portfolio.activeFundId ?? DEFAULT_ACCOUNT.fundId;
+  const userId = auth.userId ?? (AUTH_MODE === "fixture" ? DEFAULT_ACCOUNT.userId : "");
+  const fundId = portfolio.activeFundId ?? (AUTH_MODE === "fixture" ? DEFAULT_ACCOUNT.fundId : null);
   if (!fundId) return null;
   return <MandateConfigForm key={userId} userId={userId} fundId={fundId} />;
 }

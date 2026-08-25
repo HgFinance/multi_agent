@@ -63,7 +63,7 @@ export function sseReconnectDelay(
   return Math.min(maximumMs, baseMs * 2 ** Math.min(Math.max(failureCount - 1, 0), 5));
 }
 
-export interface BffSseOptions {
+export interface AuthenticatedSseOptions {
   path(cursor: string | null): string;
   initialCursor?: string;
   onEvent(event: ParsedSseEvent): void;
@@ -83,8 +83,8 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-/** BFF fetch-stream SSE with cursor recovery and bounded backoff. */
-export function subscribeBffSse(options: BffSseOptions): () => void {
+/** Authenticated fetch-stream SSE with cursor recovery and bounded backoff. */
+export function subscribeAuthenticatedSse(options: AuthenticatedSseOptions): () => void {
   if (typeof window === "undefined") return () => {};
   const controller = new AbortController();
   let cursor = options.initialCursor ?? null;
