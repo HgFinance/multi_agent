@@ -95,6 +95,8 @@ class PositionRiskPlanRequest(BaseModel):
     task_id: str = Field(min_length=1, max_length=200)
     trace_id: str = Field(min_length=1, max_length=200)
     current_quantity: Decimal = Field(default=Decimal(0), ge=0)
+    current_gross_exposure: Decimal | None = Field(default=None, ge=0)
+    current_instrument_weight: Decimal | None = Field(default=None, ge=0)
     existing_plan: ExistingPositionPlan | None = None
     max_snapshot_age_seconds: int = Field(default=300, ge=1, le=3600)
 
@@ -141,6 +143,8 @@ class PositionRiskPlan(BaseModel):
     position_risk_amount: Decimal | None = None
     quantity_cap: Decimal | None = None
     current_quantity: Decimal = Decimal(0)
+    mandate_limits: dict[str, Decimal] = Field(default_factory=dict)
+    portfolio_usage: dict[str, Decimal] = Field(default_factory=dict)
     reward_risk_ratio: Decimal | None = None
     liquidation_stages: list[LiquidationStage] = Field(default_factory=list)
     calculation_version: str = CALCULATION_VERSION
@@ -234,6 +238,17 @@ def _defer(
         reason_codes=reasons,
         review_triggers=["AUTHORITATIVE_SNAPSHOT_REQUIRED"],
         current_quantity=request.current_quantity,
+        mandate_limits={
+            "max_instrument_weight": request.mandate.max_instrument_weight,
+        },
+        portfolio_usage={
+            key: value
+            for key, value in {
+                "current_gross_exposure": request.current_gross_exposure,
+                "current_instrument_weight": request.current_instrument_weight,
+            }.items()
+            if value is not None
+        },
         task_id=request.task_id,
         trace_id=request.trace_id,
     )
@@ -374,6 +389,17 @@ def plan_position_risk(
         position_risk_amount=risk_amount,
         quantity_cap=quantity_cap,
         current_quantity=item.current_quantity,
+        mandate_limits={
+            "max_instrument_weight": item.mandate.max_instrument_weight,
+        },
+        portfolio_usage={
+            key: value
+            for key, value in {
+                "current_gross_exposure": item.current_gross_exposure,
+                "current_instrument_weight": item.current_instrument_weight,
+            }.items()
+            if value is not None
+        },
         reward_risk_ratio=reward_risk,
         liquidation_stages=[
             LiquidationStage(sequence=1, trigger_price=take_profit, quantity_fraction=Decimal("0.50"), action="TAKE_PROFIT"),

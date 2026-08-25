@@ -35,6 +35,7 @@ from orchestration.adapters.terminal_projection_utils import (
     workflow_root,
 )
 from orchestration.canonical_profiles import department_for_canonical_profile
+from orchestration.risk_plan_projection import format_position_risk_plan
 
 DEFAULT_DATABASES = {
     "trading": "2903de9e2a7b4f6d967f709e6640ec16",
@@ -291,16 +292,7 @@ def _body_markdown(
                 "",
                 "## Position Risk Plan (read-only projection)",
                 "",
-                f"- Risk Plan ID: `{risk_plan.get('risk_plan_id') or ''}`",
-                f"- Mandate Version: `{risk_plan.get('mandate_version_id') or ''}`",
-                f"- State / Action: `{risk_plan.get('state') or 'PROPOSED'}` / `{risk_plan.get('action') or ''}`",
-                f"- Regime / As Of: `{risk_plan.get('regime') or ''}` / `{risk_plan.get('as_of') or ''}`",
-                f"- Entry / Stop / Take Profit: `{risk_plan.get('entry_reference')}` / `{risk_plan.get('stop_price')}` / `{risk_plan.get('take_profit_price')}`",
-                f"- Quantity Cap / Loss Budget: `{risk_plan.get('quantity_cap')}` / `{risk_plan.get('position_risk_amount')}`",
-                f"- Trailing Activation / Distance: `{risk_plan.get('trailing_activation_price')}` / `{risk_plan.get('trailing_distance')}`",
-                f"- Expires At: `{risk_plan.get('expires_at') or ''}`",
-                f"- Calculation / Input Hash: `{risk_plan.get('calculation_version') or ''}` / `{risk_plan.get('input_hash') or ''}`",
-                f"- Data Quality: `{risk_plan.get('data_quality') or ''}`",
+                format_position_risk_plan(risk_plan),
                 "",
                 "This page is not authoritative. Canonical state remains in the Risk database.",
             ]

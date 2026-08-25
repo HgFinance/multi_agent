@@ -17,6 +17,15 @@ def format_position_risk_plan(plan: Mapping[str, Any]) -> str:
         f"- 멘데이트 버전: `{plan.get('mandate_version_id') or '미확인'}`",
         f"- 시장 레짐·기준시각: `{plan.get('regime') or '미확인'}` · `{plan.get('as_of') or '미확인'}`",
     ]
+    mandate_limits = plan.get("mandate_limits") or {}
+    portfolio_usage = plan.get("portfolio_usage") or {}
+    if isinstance(mandate_limits, Mapping) and isinstance(portfolio_usage, Mapping):
+        lines.append(
+            "- 멘데이트/실사용: 종목 비중 "
+            f"`{portfolio_usage.get('current_instrument_weight', '미확인')}` / "
+            f"`{mandate_limits.get('max_instrument_weight', '미확인')}`; Gross "
+            f"`{portfolio_usage.get('current_gross_exposure', '미확인')}`"
+        )
     if action == "PROPOSE":
         lines.extend(
             [

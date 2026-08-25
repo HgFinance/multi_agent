@@ -118,6 +118,6 @@ curl http://127.0.0.1:8046/health
   Hermes는 이 API/MCP 경계로만 부른다(같은 프로세스에 import하지 않는다).
   **`PUT`·`PATCH`·`DELETE`가 하나도 없다** — 불변식 2를 라우팅 표로 집행한 것이고,
   자체 점검이 라우팅 표를 훑어 이를 강제한다. 정정은 `/reverse` 하나뿐.
-  설계서: [ACCOUNTING_PORTFOLIO_DOMAIN_API_SPEC.md](../../docs/02-engineering/ACCOUNTING_PORTFOLIO_DOMAIN_API_SPEC.md)
+  설계서: [Unified Domain API Specification](../../docs/02-engineering/UNIFIED_DOMAIN_API_SPEC.md)
 - D2 Prototype 단계다. 남은 것은 저장소 — 원장이 아직 프로세스 메모리이고
   `accounting.*` 연결은 트레이딩 OMS와 같은 미결 항목이다(설계서 4절)

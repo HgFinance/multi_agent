@@ -11,7 +11,7 @@
 >
 > 소유: 재일 (리서치본부) / 소비자: 퀀트본부
 >
-> 상위 기준: [MASTER_PLAN](../HEDGE_FUND_MASTER_PLAN.md) → [DATA_GOVERNANCE_GUIDE](DATA_GOVERNANCE_GUIDE.md) → 이 문서
+> 상위 기준: [MASTER_PLAN](../HEDGE_FUND_MASTER_PLAN.md) → [DATA_GOVERNANCE_GUIDE](../03-data/DATA_GOVERNANCE_GUIDE.md) → 이 문서
 
 ## 1. 이 문서가 정하는 것
 

@@ -281,7 +281,7 @@ CATEGORY_WORKFLOWS / CATEGORY_DEPARTMENTS 표    ← 권한 경계, 결정론 �
 
 **응답 봉투는 결정론 계획을 기반으로 만든다.** planner 모듈은 `workflows`를 import 하지 않아(단방향 유지) `CATEGORY_WORKFLOWS` 같은 호출부 전용 값을 계산할 수 없다. 그래서 결정론 계획을 먼저 만들고 LLM이 정한 것만 덮어쓴다 — 이렇게 하지 않으면 `workflow`·`category_recognized`가 LLM 경로에서 기본값으로 덮인다.
 
-계약은 [tests/test_ceo_task_planner.py](../../tests/test_ceo_task_planner.py) 8건이 고정한다. opt-in 경로는 평소 CI에서 돌지 않아 결함이 조용히 쌓이므로, 켜는 순간 드러나는 것들을 테스트로 잡아둔다.
+계약은 [tests/orchestration/test_ceo_task_planner.py](../../tests/orchestration/test_ceo_task_planner.py)가 고정한다. opt-in 경로는 평소 CI에서 돌지 않아 결함이 조용히 쌓이므로, 켜는 순간 드러나는 것들을 테스트로 잡아둔다.
 
 이 패턴은 저장소에 이미 선례가 있다. [mandate_assistant.py](../../departments/00-ceo-office/src/mandate/mandate_assistant.py)의 `ALLOWED_SUGGESTION_FIELDS`가 같은 구조다 — LLM이 제안하되 허용 목록 밖 필드는 `dropped_fields`로 버리고 조용히 통과시키지 않는다.
 

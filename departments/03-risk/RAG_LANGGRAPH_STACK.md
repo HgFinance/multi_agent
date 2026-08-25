@@ -130,7 +130,7 @@ audit.rag_graph_extractions
 
 운영 전 Acceptance는 동일 입력의 `input_hash`가 같은 Risk 결과를 만들고, 검색된 근거·정책 버전·Tool Call·fallback 사유를 `trace_id`로 재현할 수 있는지 확인한다.
 
-참조: [Risk Profile](hermes/config.yaml), [Risk Worker Graph](risk_employee_workers.py), [Worker Role Boundaries](../../docs/02-engineering/WORKER_ROLE_BOUNDARIES.md), [Risk·QA Domain API](../../docs/02-engineering/RISK_QA_DOMAIN_API_SPEC.md), [Agentic RAG](../../skills/agentic-rag/SKILL.md).
+참조: [Risk Profile](hermes/config.yaml), [Risk Worker Graph](risk_employee_workers.py), [Worker Role Boundaries](../../docs/02-engineering/WORKER_ROLE_BOUNDARIES.md), [Unified Domain API](../../docs/02-engineering/UNIFIED_DOMAIN_API_SPEC.md), [Agentic RAG](../../skills/agentic-rag/SKILL.md).
 
 ## 8. 직원별 Required Skill ID
 

@@ -4,7 +4,7 @@
 >
 > 기준일: 2026-08-12 · 소유: 재일 (리서치/퀀트)
 >
-> 상위 기준: [MASTER_PLAN](../HEDGE_FUND_MASTER_PLAN.md) → [DATA_GOVERNANCE_GUIDE](../02-engineering/DATA_GOVERNANCE_GUIDE.md)
+> 상위 기준: [MASTER_PLAN](../HEDGE_FUND_MASTER_PLAN.md) → [DATA_GOVERNANCE_GUIDE](DATA_GOVERNANCE_GUIDE.md)
 
 ## 1. 이 문서가 답하는 것
 

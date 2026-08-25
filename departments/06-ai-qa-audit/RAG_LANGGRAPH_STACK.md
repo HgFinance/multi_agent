@@ -177,7 +177,7 @@ QA 판정·Audit Trail(`audit.rag_runs` 등)의 Source of Truth는 계속 Supaba
 5. Incident 데이터가 충분히 쌓인 뒤 HyperExtraction을 human-reviewed inference로 추가한다.
 6. `qwen3:1.7b`의 decomposition·entity extraction 품질을 benchmark하고, 모델 변경은 HR·QA·CEO 승인 후 수행한다.
 
-참조: [QA Profile](hermes/config.yaml), [QA Worker Graph](qa_employee_workers.py), [Worker Role Boundaries](../../docs/02-engineering/WORKER_ROLE_BOUNDARIES.md), [Risk·QA Domain API](../../docs/02-engineering/RISK_QA_DOMAIN_API_SPEC.md), [Agentic RAG](../../skills/agentic-rag/SKILL.md).
+참조: [QA Profile](hermes/config.yaml), [QA Worker Graph](qa_employee_workers.py), [Worker Role Boundaries](../../docs/02-engineering/WORKER_ROLE_BOUNDARIES.md), [Unified Domain API](../../docs/02-engineering/UNIFIED_DOMAIN_API_SPEC.md), [Agentic RAG](../../skills/agentic-rag/SKILL.md).
 
 ## 11. 직원별 Required Skill ID
 
