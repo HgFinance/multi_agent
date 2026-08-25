@@ -34,7 +34,12 @@ answer from local files or historical task data.
 For idle-Agent monitoring - which employee Workers are running and which are
 not - the first read must be:
 
-`GET http://workforce-api:8000/workforce/v1/departments/idle-agents?lookback_hours=24`
+`GET http://workforce-api:8000/workforce/v1/departments/observability?lookback_hours=24`
+
+That one call also returns capacity, LLM usage and trigger rates for the
+same window. Do not issue four separate reads for them - they were four
+endpoints until 2026-08-26 and each one re-read the same Langfuse events.
+Read `idle_agents` from the response for the states below.
 
 Report the four states separately. Never collapse them into a single "idle"
 count, and never turn any of them into a headcount action on their own:

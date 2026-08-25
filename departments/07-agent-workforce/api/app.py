@@ -104,12 +104,8 @@ from hiring_request import (
 from hiring_request import transition as hiring_transition
 from observability import (
     INVESTMENT_DEPARTMENT_STAGE,
-    HeadProfilesUnavailable,
     WorkerRegistryUnavailable,
-    check_department_capacity,
-    check_department_llm_usage,
-    check_idle_agents,
-    check_worker_trigger_rates,
+    collect_workforce_observability,
 )
 from action import (
     ActionReviewMismatchError,
@@ -1648,7 +1644,7 @@ def record_capacity_snapshot(body: CapacitySnapshotRecordIn):
     """플랫폼 관측이 보고한 용량 계측 1건을 기록한다.
 
     record_cost_snapshot과 같은 이유 - 이 엔드포인트가 생기기 전까지
-    workforce.capacity_snapshots 에는 writer 가 없었고, GET .../departments/capacity
+    workforce.capacity_snapshots 에는 writer 가 없었고, GET .../departments/observability 의 capacity
     는 Langfuse 실행 이벤트를 직접 집계해 그 자리를 메웠다(2026-08-24). 그 우회 경로는
     그대로 둔다 - 여기서는 DB Snapshot 이라는 두 번째 경로를 추가할 뿐이다.
 
@@ -1756,42 +1752,47 @@ def list_quality_snapshots(department_code: str, window_start: datetime, window_
 # "관측 도구가 꺼져 있다"는 다른 문제라 에러 처리 방식도 다르게 간다.
 
 
-@app.get("/workforce/v1/departments/idle-agents")
-def list_idle_agents(
+@app.get("/workforce/v1/departments/observability")
+def get_departments_observability(
     lookback_hours: float = 24.0,
     idle_threshold_hours: float = 4.0,
     include_heads: bool = False,
 ):
-    """6개 투자본부 Worker 전원의 유휴 판정. department_code 필터는 아직 없다 -
-    이 리포트의 소비자(HR 부서장 주간 계획)가 항상 전체를 보기 때문이다."""
+    """6개 투자본부의 Langfuse 실측 관측 4종을 **한 번에** 돌려준다.
+
+    2026-08-26 통합. 이전에는 idle-agents / capacity / llm-usage / trigger-rates
+    네 엔드포인트였고, 넷이 각자 reader 를 만들어 같은 실행 이벤트를 네 번 읽었다.
+    Worker 8명 기준 화면 1회당 Langfuse 왕복 40회, 그중 capacity 와 llm-usage 는
+    event_name·창·limit 이 글자 그대로 같은 질의였다(집계 축만 달랐다). 60초 폴링이라
+    그게 그대로 분당 부하가 됐다. 지금은 Worker 당 최대 2회(실행 이벤트 1 + 미발화
+    건수 1)로 접힌다 - observability.py WindowedActivityReader 참고.
+
+    네 값을 굳이 한 응답에 묶는 근거: 넷 다 조회 키(부서/Worker)와 관측 창이 같다.
+    따로 두면 호출부가 창을 각자 정하게 되고, 그러면 같은 화면 안에서 서로 다른
+    창의 숫자가 나란히 놓인다(실제로 그랬다 - 유휴 표는 패널이 고른 창, Capacity
+    표는 고정 24h).
+
+    department_code 필터는 없다 - 이 리포트의 소비자(HR 부서장 주간 계획, Operator
+    Workforce 패널)가 항상 전체를 본다.
+
+    실패 규약은 통합 전과 같다. Langfuse 자격증명 부재·조회 실패는 501/503 이 아니라
+    항목별 UNAVAILABLE 이고("쉬고 있다"와 "우리가 모른다"를 섞지 않는다), Worker
+    registry 부재만 503 이다(빈 목록=유휴 없음 으로 위장하지 않는다).
+    """
 
     if idle_threshold_hours <= 0:
         raise HTTPException(status_code=422, detail="idle_threshold_hours must be positive")
-    head_profiles_unavailable: str | None = None
+    if lookback_hours <= 0:
+        raise HTTPException(status_code=422, detail="lookback_hours must be positive")
     try:
-        try:
-            reports = check_idle_agents(
-                departments=tuple(INVESTMENT_DEPARTMENT_STAGE),
-                lookback_hours=lookback_hours,
-                idle_threshold_hours=idle_threshold_hours,
-                # 2026-08-20: 부서장 포함은 opt-in 이다. 기본 응답 인원이 말없이 8 -> 14 로
-                # 늘면 이 리포트를 인용한 과거 문장들의 뜻이 바뀐다.
-                include_heads=include_heads,
-            )
-        except HeadProfilesUnavailable as exc:
-            # 부서장 신원(agent.head_persona)은 Worker Registry 매니페스트가 담지
-            # 않는 유일한 값이고 이 컨테이너는 매니페스트만 본다 - 즉 현재 경계에서
-            # **정상적인 상태**다. 그 하나 때문에 Worker 판정까지 503 으로 막지
-            # 않는다. 대신 부서장이 빠졌다는 사실을 응답에 실어 보낸다 - 조용히
-            # 빼면 부서장이 "전부 정상"으로 읽힌다(SOUL.md 해석 규칙: 관측하지
-            # 못한 것을 관측 결과로 바꾸지 않는다).
-            head_profiles_unavailable = str(exc)
-            reports = check_idle_agents(
-                departments=tuple(INVESTMENT_DEPARTMENT_STAGE),
-                lookback_hours=lookback_hours,
-                idle_threshold_hours=idle_threshold_hours,
-                include_heads=False,
-            )
+        observed = collect_workforce_observability(
+            departments=tuple(INVESTMENT_DEPARTMENT_STAGE),
+            lookback_hours=lookback_hours,
+            idle_threshold_hours=idle_threshold_hours,
+            # 2026-08-20: 부서장 포함은 opt-in 이다. 기본 응답 인원이 말없이 8 -> 14 로
+            # 늘면 이 리포트를 인용한 과거 문장들의 뜻이 바뀐다.
+            include_heads=include_heads,
+        )
     except WorkerRegistryUnavailable as exc:
         # 배포 이미지에 다른 본부 Worker registry 가 없다. 빈 목록(=유휴 없음)으로
         # 위장하지 않고 503 으로 알린다 - "관측했더니 깨끗하다"와 "관측을 못 했다"는
@@ -1800,84 +1801,7 @@ def list_idle_agents(
             status_code=503,
             detail={"error": "worker_registry_unavailable", "message": str(exc)},
         ) from exc
-    response: dict = {"idle_agents": [r.as_dict() for r in reports]}
-    if head_profiles_unavailable:
-        response["head_profiles_unavailable"] = head_profiles_unavailable
-    return response
-
-
-@app.get("/workforce/v1/departments/capacity")
-def get_departments_capacity(lookback_hours: float = 24.0):
-    """6개 투자본부 전체의 Langfuse 기반 Capacity(용량) 관측(2026-08-24).
-
-    2026-08-25 부터 `workforce.capacity_snapshots`에 writer(POST
-    /workforce/v1/capacity-snapshots)가 생겼지만, 아직 그쪽에 보고를 넣는 호출자가
-    없어 GET .../scorecard의 capacity 필드는 여전히 null이 나오는 경우가 흔하다.
-    이 엔드포인트는 그 자리를 대신 메우는 별도 경로다 - idle-agents와 같은 원리로
-    Langfuse 실행 이벤트를 직접 집계한다. queue_p95_ms는 이 경로에서 항상 None이다
-    (observability.py DepartmentCapacityReport 참고 - 대기열 진입 시점을 재는 계측이
-    없다).
-    """
-
-    if lookback_hours <= 0:
-        raise HTTPException(status_code=422, detail="lookback_hours must be positive")
-    try:
-        reports = check_department_capacity(
-            departments=tuple(INVESTMENT_DEPARTMENT_STAGE), lookback_hours=lookback_hours,
-        )
-    except WorkerRegistryUnavailable as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={"error": "worker_registry_unavailable", "message": str(exc)},
-        ) from exc
-    return {"capacity": [r.as_dict() for r in reports]}
-
-
-@app.get("/workforce/v1/departments/llm-usage")
-def get_departments_llm_usage(lookback_hours: float = 24.0):
-    """6개 투자본부 전체의 Langfuse 기반 LLM 사용량(모델·토큰·상태) 관측.
-
-    capacity와 같은 이벤트(llm.performance.metric)를 읽지만 latency/재시도가
-    아니라 llm_calls/model_name/prompt_tokens/completion_tokens/attempts/status를
-    집계한다. llm_calls/prompt_tokens/completion_tokens는 begin_worker_metric()
-    컨텍스트가 열려 있었던 실행에서만 나오므로, arrivals > 0이어도 None일 수 있다.
-    """
-
-    if lookback_hours <= 0:
-        raise HTTPException(status_code=422, detail="lookback_hours must be positive")
-    try:
-        reports = check_department_llm_usage(
-            departments=tuple(INVESTMENT_DEPARTMENT_STAGE), lookback_hours=lookback_hours,
-        )
-    except WorkerRegistryUnavailable as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={"error": "worker_registry_unavailable", "message": str(exc)},
-        ) from exc
-    return {"llm_usage": [r.as_dict() for r in reports]}
-
-
-@app.get("/workforce/v1/departments/trigger-rates")
-def get_departments_trigger_rates(lookback_hours: float = 24.0):
-    """6개 투자본부 전체의 Worker 발화율.
-
-    fire_rate = execution_count / (execution_count + opportunity_count).
-    분모가 0이면(이 창에 기회 자체가 없었다) fire_rate는 0.0이 아니라 None이다 -
-    cost.py 불변식 3과 같은 원칙("측정 안 됨"과 "측정했더니 0"을 섞지 않는다).
-    """
-
-    if lookback_hours <= 0:
-        raise HTTPException(status_code=422, detail="lookback_hours must be positive")
-    try:
-        reports = check_worker_trigger_rates(
-            departments=tuple(INVESTMENT_DEPARTMENT_STAGE), lookback_hours=lookback_hours,
-        )
-    except WorkerRegistryUnavailable as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={"error": "worker_registry_unavailable", "message": str(exc)},
-        ) from exc
-    return {"trigger_rates": [r.as_dict() for r in reports]}
+    return observed.as_dict()
 
 
 # --- 3.6 Workforce Plan (HR-01 Capacity Report/Staffing Scenario 저장소) --------------

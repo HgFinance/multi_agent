@@ -27,9 +27,10 @@ router = APIRouter(tags=["workforce"])
 # compose.yaml). risk.py/qa.py와 같은 이유로 문서화된 로컬 2-프로세스 구성이
 # 별도 env 파일 없이 그대로 동작하게 기본값을 둔다.
 WORKFORCE_API_URL = os.getenv("WORKFORCE_API_URL", "http://127.0.0.1:8044").strip().rstrip("/")
-# idle-agents는 workforce-api가 등록된 Worker마다 Langfuse API를 순차 호출한다
-# (observability.py check_idle_agents) - 8명 기준으로도 왕복이 쌓이면 8초를 쉽게
-# 넘긴다. GOVERNANCE_API_TIMEOUT_SECONDS(30)와 같은 예산을 쓴다.
+# observability는 workforce-api가 등록된 Worker마다 Langfuse API를 순차 호출한다
+# (observability.py collect_workforce_observability) - 통합으로 Worker당 왕복이
+# 5회에서 최대 2회로 줄었지만 여전히 순차라 8초를 넘길 수 있다.
+# GOVERNANCE_API_TIMEOUT_SECONDS(30)와 같은 예산을 쓴다.
 WORKFORCE_API_TIMEOUT_SECONDS = float(os.getenv("WORKFORCE_API_TIMEOUT_SECONDS", "30"))
 
 
@@ -60,68 +61,34 @@ async def _workforce_get(path: str, *, params: dict[str, Any] | None = None) -> 
     return payload
 
 
-@router.get("/ui/workforce/idle-agents")
-async def workforce_idle_agents(
+@router.get("/ui/workforce/observability")
+async def workforce_observability(
     lookback_hours: float = 24.0,
     idle_threshold_hours: float = 4.0,
 ) -> Any:
-    """6개 투자본부 Worker 전원의 ACTIVE/IDLE/UNOBSERVED/UNAVAILABLE 판정.
+    """6개 투자본부의 Langfuse 실측 관측 4종(유휴·Capacity·LLM 사용량·발화율).
 
-    순수 프록시다 - `workforce-api GET /workforce/v1/departments/idle-agents`가
-    이미 자격증명 미설정·조회 실패를 501이 아니라 워커별 UNAVAILABLE로 접는다
+    순수 프록시다 - `workforce-api GET /workforce/v1/departments/observability`가
+    이미 자격증명 미설정·조회 실패를 501이 아니라 항목별 UNAVAILABLE 로 접는다
     (observability.py). 여기서 그 판정을 다시 만들지 않는다.
+
+    2026-08-26 통합. 이전에는 idle-agents/capacity/llm-usage/trigger-rates 네 개를
+    각각 중계했고, 화면 한 장이 그 넷을 동시에 불렀다. 네 요청이 workforce-api
+    쪽에서 각자 Langfuse 를 훑어 같은 실행 이벤트를 네 번 읽었으므로, BFF 를
+    합치는 것만으로는 왕복이 줄지 않는다 - 실제 절감은 workforce-api 쪽
+    WindowedActivityReader 가 하고 이 프록시는 그 창구를 하나로 만든다.
     """
 
     if idle_threshold_hours <= 0:
         raise HTTPException(status_code=422, detail="idle_threshold_hours must be positive")
+    if lookback_hours <= 0:
+        raise HTTPException(status_code=422, detail="lookback_hours must be positive")
     return await _workforce_get(
-        "/workforce/v1/departments/idle-agents",
+        "/workforce/v1/departments/observability",
         params={
             "lookback_hours": lookback_hours,
             "idle_threshold_hours": idle_threshold_hours,
         },
-    )
-
-
-@router.get("/ui/workforce/capacity")
-async def workforce_capacity(lookback_hours: float = 24.0) -> Any:
-    """6개 투자본부 전체의 Langfuse 기반 Capacity(용량) 관측.
-
-    순수 프록시다 - `workforce-api GET /workforce/v1/departments/capacity`가
-    이미 Langfuse 실행 이벤트를 직접 집계해서 준다(idle-agents와 같은 원리,
-    별도 DB Snapshot 파이프라인 없이). 여기서 그 집계를 다시 하지 않는다.
-    """
-
-    return await _workforce_get(
-        "/workforce/v1/departments/capacity", params={"lookback_hours": lookback_hours}
-    )
-
-
-@router.get("/ui/workforce/trigger-rates")
-async def workforce_trigger_rates(lookback_hours: float = 24.0) -> Any:
-    """Worker별 발화율 - 실행 / (실행 + 미발화).
-
-    순수 프록시다. idle-agents가 UNOBSERVED 하나로 뭉뚱그리는 두 상황을 나눠준다 -
-    "이 창에 기회 자체가 없었다"(fire_rate=null)와 "기회가 있었는데 한 번도 안
-    켜졌다"(fire_rate=0). 그 구분은 workforce-api가 하고(observability.py
-    check_worker_trigger_rates) 여기서 다시 만들지 않는다.
-    """
-
-    return await _workforce_get(
-        "/workforce/v1/departments/trigger-rates", params={"lookback_hours": lookback_hours}
-    )
-
-
-@router.get("/ui/workforce/llm-usage")
-async def workforce_llm_usage(lookback_hours: float = 24.0) -> Any:
-    """부서별 LLM 사용량 - 모델 호출수·토큰·시도·상태 분포.
-
-    순수 프록시다. capacity와 같은 Langfuse 실행 이벤트를 읽지만 지연·재시도가
-    아니라 토큰·모델 축을 집계한다(observability.py check_department_llm_usage).
-    """
-
-    return await _workforce_get(
-        "/workforce/v1/departments/llm-usage", params={"lookback_hours": lookback_hours}
     )
 
 
@@ -190,10 +157,7 @@ async def workforce_plans() -> Any:
 __all__ = [
     "WORKFORCE_API_URL",
     "router",
-    "workforce_idle_agents",
-    "workforce_capacity",
-    "workforce_trigger_rates",
-    "workforce_llm_usage",
+    "workforce_observability",
     "workforce_roster",
     "workforce_agent_access",
     "workforce_hiring_requests",

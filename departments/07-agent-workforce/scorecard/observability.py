@@ -231,8 +231,55 @@ class WorkerActivityRecord:
     completion_tokens: int | None
 
 
+DEFAULT_ACTIVITY_PAGE_LIMIT = 200
+# 한 Worker·한 창에서 실측으로 모을 최대 페이지 수(200 x 10 = 2000건). 이 상한을
+# 넘긴 창은 records 가 표본이 되지만 total_items 는 서버 meta 에서 오므로 건수는
+# 계속 정확하다 - 잘린 것을 "그만큼만 있었다"로 바꾸지 않는 것이 요점이다.
+MAX_ACTIVITY_PAGES = 10
+
+
+@dataclass(frozen=True)
+class WorkerActivityPage:
+    """한 (event_name, 창) 조합에서 읽어온 실행 이벤트 묶음.
+
+    total_items 가 records 길이와 따로 있는 이유: 이전 count_events() 는
+    len(page.data) 를 돌려줬고, 그래서 창 안에 limit(200) 이상이 쌓이면 실행·미발화
+    둘 다 200 으로 포화돼 fire_rate 가 실제와 무관하게 0.5 로 수렴했다 - 예외 없이
+    조용히 틀리는 종류의 실패다. total_items 는 서버 meta 에서 받아오므로 records
+    가 잘려도 건수는 정확하다.
+    """
+
+    records: tuple[WorkerActivityRecord, ...]
+    total_items: int
+    truncated: bool
+
+
 class LangfuseTraceReader:
     """조회 전용 인터페이스. read 측이라 create_event 계열은 갖지 않는다."""
+
+    def fetch_worker_activity(
+        self, *, event_name: str, since: datetime, max_pages: int = MAX_ACTIVITY_PAGES
+    ) -> WorkerActivityPage:
+        """이 모듈의 단일 조회 원시함수 - 창 안의 실행 이벤트를 모아 돌려준다.
+
+        기본 구현은 기존 list_worker_activity() 로 접는다. 이 인터페이스를 직접
+        구현한 테스트 대역(tests/test_hr_idle_agents.py 등)이 새 메서드를 몰라도
+        계속 동작해야 해서다 - 대역을 다 고치게 만들면 이번 변경의 회귀 위험이
+        판정 로직이 아니라 대역 쪽으로 옮겨간다.
+        """
+
+        records = tuple(self.list_worker_activity(event_name=event_name, since=since))
+        return WorkerActivityPage(records=records, total_items=len(records), truncated=False)
+
+    def count_worker_activity(self, *, event_name: str, since: datetime) -> int:
+        """건수만 필요한 조회(미발화 이벤트). 기본 구현은 count_events() 로 접는다.
+
+        fetch_worker_activity() 와 나눠 두는 이유: 미발화(not_executed) 이벤트는
+        조건부 Worker 라면 하루에도 수백 건이 쌓이는데 발화율은 그 **개수**만
+        쓴다. 레코드를 다 끌어오면 쓰지도 않을 페이지를 도는 꼴이다.
+        """
+
+        return self.count_events(event_name=event_name, since=since)
 
     def latest_event_timestamp(self, *, event_name: str, since: datetime) -> datetime | None:
         """event_name 을 가진 가장 최근 이벤트의 timestamp. 없으면 None."""
@@ -283,55 +330,217 @@ class LangfuseApiTraceReader(LangfuseTraceReader):
             host=os.environ.get("LANGFUSE_HOST") or "https://cloud.langfuse.com",
         )
 
-    def latest_event_timestamp(self, *, event_name: str, since: datetime) -> datetime | None:
+    def _list_page(self, *, event_name: str, since: datetime, limit: int, page: int):
         try:
-            # order_by 문자열 문법이 langfuse 버전별로 갈릴 수 있어 서버 정렬에
-            # 기대지 않는다 - limit 으로 조회량을 lookback 창 안으로 제한한 뒤
-            # 클라이언트에서 max() 로 가장 최근 것만 뽑는다.
-            page = self._client.api.trace.list(
-                name=event_name,
-                from_timestamp=since,
-                limit=50,
+            return self._client.api.trace.list(
+                name=event_name, from_timestamp=since, limit=limit, page=page,
             )
         except Exception as exc:  # noqa: BLE001 - 조회 실패는 항상 UNAVAILABLE 로 접힌다.
             raise LangfuseQueryError(f"langfuse_trace_list_failed:{type(exc).__name__}") from exc
-        timestamps = [item.timestamp for item in page.data if item.timestamp is not None]
+
+    def fetch_worker_activity(
+        self, *, event_name: str, since: datetime, max_pages: int = MAX_ACTIVITY_PAGES
+    ) -> WorkerActivityPage:
+        """창 안의 실행 이벤트를 페이지 끝까지 모은다 - Langfuse 를 만지는 유일한 경로.
+
+        ▶ 서버 정렬에 기대지 않는다. order_by 문자열 문법이 langfuse 버전별로
+          갈리기 때문인데, 이전 구현은 그 대신 `limit=50` 한 장만 받아 클라이언트
+          max() 를 썼다. 창 안에 50건이 넘으면 그 한 장에 최신 건이 없을 수 있고,
+          그러면 멀쩡히 도는 Worker 가 IDLE/UNOBSERVED 로 뒤집힌다. 페이지를 끝까지
+          도는 쪽이 그 가정 자체를 없앤다.
+        """
+
+        records: list[WorkerActivityRecord] = []
+        total_items: int | None = None
+        truncated = False
+        page_number = 1
+        while True:
+            page = self._list_page(
+                event_name=event_name, since=since,
+                limit=DEFAULT_ACTIVITY_PAGE_LIMIT, page=page_number,
+            )
+            if total_items is None:
+                total_items = _meta_int(page, "total_items")
+            records.extend(_activity_records(page))
+            if not page.data:
+                break
+            total_pages = _meta_int(page, "total_pages")
+            if total_pages is not None and page_number >= total_pages:
+                break
+            if total_pages is None and len(page.data) < DEFAULT_ACTIVITY_PAGE_LIMIT:
+                # meta 를 못 읽는 서버·대역에서는 "덜 찬 페이지"가 끝의 신호다.
+                break
+            if page_number >= max_pages:
+                truncated = True
+                break
+            page_number += 1
+        return WorkerActivityPage(
+            records=tuple(records),
+            total_items=total_items if total_items is not None else len(records),
+            truncated=truncated,
+        )
+
+    def count_worker_activity(self, *, event_name: str, since: datetime) -> int:
+        """meta.total_items 만 읽는다 - limit=1 이라 페이로드가 거의 없다.
+
+        레코드를 모으지 않으므로 왕복 한 번으로 끝나고, 예전 count_events() 처럼
+        limit 에서 포화되지도 않는다.
+        """
+
+        page = self._list_page(event_name=event_name, since=since, limit=1, page=1)
+        total_items = _meta_int(page, "total_items")
+        return total_items if total_items is not None else len(page.data)
+
+    # 아래 셋은 기존 호출부·테스트 대역과의 계약을 위해 남긴다. 전부 위의 두
+    # 원시함수로 접히므로 Langfuse 를 실제로 부르는 자리는 _list_page 하나다.
+
+    def latest_event_timestamp(self, *, event_name: str, since: datetime) -> datetime | None:
+        page = self.fetch_worker_activity(event_name=event_name, since=since)
+        timestamps = [r.timestamp for r in page.records]
         return max(timestamps) if timestamps else None
 
     def list_worker_activity(
-        self, *, event_name: str, since: datetime, limit: int = 200
+        self, *, event_name: str, since: datetime, limit: int = DEFAULT_ACTIVITY_PAGE_LIMIT
     ) -> list[WorkerActivityRecord]:
-        try:
-            page = self._client.api.trace.list(name=event_name, from_timestamp=since, limit=limit)
-        except Exception as exc:  # noqa: BLE001 - 조회 실패는 항상 UNAVAILABLE 로 접힌다.
-            raise LangfuseQueryError(f"langfuse_trace_list_failed:{type(exc).__name__}") from exc
-        records: list[WorkerActivityRecord] = []
-        for item in page.data:
-            if item.timestamp is None:
-                continue
-            metadata = item.metadata if isinstance(item.metadata, dict) else {}
-            records.append(
-                WorkerActivityRecord(
-                    timestamp=item.timestamp,
-                    latency_ms=_safe_int(metadata.get("latency_ms")),
-                    error_count=_safe_int(metadata.get("error_count")),
-                    retries=_safe_int(metadata.get("retries")),
-                    attempts=_safe_int(metadata.get("attempts")),
-                    status=_safe_str(metadata.get("status")),
-                    llm_calls=_safe_int(metadata.get("llm_calls")),
-                    model_name=_safe_str(metadata.get("model_name")),
-                    prompt_tokens=_safe_int(metadata.get("prompt_tokens")),
-                    completion_tokens=_safe_int(metadata.get("completion_tokens")),
-                )
-            )
-        return records
+        return list(self.fetch_worker_activity(event_name=event_name, since=since).records)
 
-    def count_events(self, *, event_name: str, since: datetime, limit: int = 200) -> int:
+    def count_events(
+        self, *, event_name: str, since: datetime, limit: int = DEFAULT_ACTIVITY_PAGE_LIMIT
+    ) -> int:
+        return self.count_worker_activity(event_name=event_name, since=since)
+
+
+def _meta_int(page: Any, field: str) -> int | None:
+    """Traces.meta 의 정수 필드(total_items/total_pages). 없으면 None.
+
+    meta 를 못 읽는 경우를 0 으로 바꾸지 않는다 - 0 은 "창이 비었다"는 관측이고
+    None 은 "서버가 안 알려줬다"라서, 호출부가 len(records) 로 접을 수 있어야 한다.
+    """
+
+    meta = getattr(page, "meta", None)
+    if meta is None:
+        return None
+    return _safe_int(getattr(meta, field, None))
+
+
+def _activity_records(page: Any) -> list[WorkerActivityRecord]:
+    """Traces 한 페이지에서 metadata 허용 목록만 뽑는다(input/output 은 안 읽는다)."""
+
+    records: list[WorkerActivityRecord] = []
+    for item in page.data:
+        if item.timestamp is None:
+            continue
+        metadata = item.metadata if isinstance(item.metadata, dict) else {}
+        records.append(
+            WorkerActivityRecord(
+                timestamp=item.timestamp,
+                latency_ms=_safe_int(metadata.get("latency_ms")),
+                error_count=_safe_int(metadata.get("error_count")),
+                retries=_safe_int(metadata.get("retries")),
+                attempts=_safe_int(metadata.get("attempts")),
+                status=_safe_str(metadata.get("status")),
+                llm_calls=_safe_int(metadata.get("llm_calls")),
+                model_name=_safe_str(metadata.get("model_name")),
+                prompt_tokens=_safe_int(metadata.get("prompt_tokens")),
+                completion_tokens=_safe_int(metadata.get("completion_tokens")),
+            )
+        )
+    return records
+
+
+class WindowedActivityReader(LangfuseTraceReader):
+    """공용 fetch 층 - (event_name, 창) 하나당 Langfuse 왕복을 한 번만 낸다.
+
+    2026-08-26 신설. 그 전까지 유휴·Capacity·LLM 사용량·발화율 네 집계가 각자
+    reader 를 만들어 **같은 이벤트를 네 번** 읽었다. Worker 8명 기준 화면 1회당
+    왕복 40회였고, 그중 Capacity 와 LLM 사용량은 event_name·since·limit 이 글자
+    그대로 같은 질의였다(집계 축만 달랐다). 60초 폴링이라 그 값이 그대로 분당
+    부하가 된다.
+
+    이 클래스는 판정을 하지 않는다 - 네 집계 함수의 로직은 그대로 두고, 그들이
+    부르는 reader 만 이걸로 바꾸면 중복 질의가 캐시에서 접힌다. 그래서 집계 로직과
+    왕복 절약이 서로를 망가뜨리지 않는다.
+
+    실패도 캐시한다: 죽은 Worker 하나를 네 집계가 각각 다시 물어보면 장애 때
+    왕복이 원래대로 돌아간다.
+
+    ⚠ 요청 수명(request-scoped)이다. 창(since)이 키에 들어가 있어 다음 폴링은 다른
+      키가 되지만, 그렇다고 프로세스 수명으로 들고 있으면 관측값이 낡는다 -
+      collect_workforce_observability() 가 호출마다 새로 만든다.
+    """
+
+    def __init__(self, inner: LangfuseTraceReader) -> None:
+        self._inner = inner
+        self._pages: dict[tuple[str, str], WorkerActivityPage] = {}
+        self._counts: dict[tuple[str, str], int] = {}
+        self._failures: dict[tuple[str, str], str] = {}
+        # 실제로 나간 논리 질의 수. 테스트가 중복 제거를 관측하는 자리다
+        # (tests/test_hr_shared_activity_reader.py).
+        self.queries = 0
+
+    @staticmethod
+    def _key(event_name: str, since: datetime) -> tuple[str, str]:
+        return (event_name, since.isoformat())
+
+    def _raise_cached_failure(self, key: tuple[str, str]) -> None:
+        cached = self._failures.get(key)
+        if cached is not None:
+            raise LangfuseQueryError(cached)
+
+    def fetch_worker_activity(
+        self, *, event_name: str, since: datetime, max_pages: int = MAX_ACTIVITY_PAGES
+    ) -> WorkerActivityPage:
+        key = self._key(event_name, since)
+        self._raise_cached_failure(key)
+        cached_page = self._pages.get(key)
+        if cached_page is not None:
+            return cached_page
         try:
-            page = self._client.api.trace.list(name=event_name, from_timestamp=since, limit=limit)
-        except Exception as exc:  # noqa: BLE001 - 조회 실패는 항상 UNAVAILABLE 로 접힌다.
-            raise LangfuseQueryError(f"langfuse_trace_list_failed:{type(exc).__name__}") from exc
-        return len(page.data)
+            page = self._inner.fetch_worker_activity(
+                event_name=event_name, since=since, max_pages=max_pages
+            )
+        except LangfuseQueryError as exc:
+            self._failures[key] = str(exc)
+            raise
+        self.queries += 1
+        self._pages[key] = page
+        self._counts[key] = page.total_items
+        return page
+
+    def count_worker_activity(self, *, event_name: str, since: datetime) -> int:
+        key = self._key(event_name, since)
+        self._raise_cached_failure(key)
+        cached_page = self._pages.get(key)
+        if cached_page is not None:
+            # 이미 레코드를 받아온 창이면 건수는 공짜다 - 발화율의 분자(실행 건수)가
+            # 유휴·Capacity 와 같은 이벤트라서 여기서 왕복 하나가 통째로 사라진다.
+            return cached_page.total_items
+        cached_count = self._counts.get(key)
+        if cached_count is not None:
+            return cached_count
+        try:
+            count = self._inner.count_worker_activity(event_name=event_name, since=since)
+        except LangfuseQueryError as exc:
+            self._failures[key] = str(exc)
+            raise
+        self.queries += 1
+        self._counts[key] = count
+        return count
+
+    def latest_event_timestamp(self, *, event_name: str, since: datetime) -> datetime | None:
+        page = self.fetch_worker_activity(event_name=event_name, since=since)
+        timestamps = [r.timestamp for r in page.records]
+        return max(timestamps) if timestamps else None
+
+    def list_worker_activity(
+        self, *, event_name: str, since: datetime, limit: int = DEFAULT_ACTIVITY_PAGE_LIMIT
+    ) -> list[WorkerActivityRecord]:
+        return list(self.fetch_worker_activity(event_name=event_name, since=since).records)
+
+    def count_events(
+        self, *, event_name: str, since: datetime, limit: int = DEFAULT_ACTIVITY_PAGE_LIMIT
+    ) -> int:
+        return self.count_worker_activity(event_name=event_name, since=since)
 
 
 # ── 부서장(Hermes Profile) ────────────────────────────────────────────────────
@@ -965,6 +1174,121 @@ def check_worker_trigger_rates(
     return reports
 
 
+# ── 통합 관측 ─────────────────────────────────────────────────────────────────
+#
+# 네 집계(유휴·Capacity·LLM 사용량·발화율)를 **한 번의 호출로** 돌려주는 자리다.
+# 각각을 따로 부르면 같은 Langfuse 이벤트를 네 번 읽는다 - WindowedActivityReader
+# 머리말 참고. 판정 로직은 위 네 함수 그대로고, 여기서는 reader 하나를 공유시키는
+# 것과 창(window)을 하나로 고정하는 일만 한다.
+
+
+@dataclass(frozen=True)
+class WorkforceObservability:
+    """한 창에서 관측한 네 리포트 묶음. HR 통합 엔드포인트 응답 하나에 대응."""
+
+    window_start: datetime
+    window_end: datetime
+    idle_agents: tuple[WorkerIdleReport, ...]
+    capacity: tuple[DepartmentCapacityReport, ...]
+    llm_usage: tuple[DepartmentLlmUsageReport, ...]
+    trigger_rates: tuple[WorkerTriggerRateReport, ...]
+    # 부서장 신원만 못 읽은 경우의 사유(Worker 판정은 정상) - 조용히 빼면 부서장이
+    # "전부 정상"으로 읽힌다(list_idle_agents 머리말과 같은 이유).
+    head_profiles_unavailable: str | None
+    # 이 호출이 Langfuse 에 실제로 낸 논리 질의 수. 관측 자체를 관측한다 - 중복
+    # 제거가 조용히 풀리면(예: 창이 어긋나 캐시 키가 갈라지면) 이 값이 먼저 는다.
+    langfuse_queries: int
+
+    def as_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "window_start": self.window_start.isoformat(),
+            "window_end": self.window_end.isoformat(),
+            "idle_agents": [r.as_dict() for r in self.idle_agents],
+            "capacity": [r.as_dict() for r in self.capacity],
+            "llm_usage": [r.as_dict() for r in self.llm_usage],
+            "trigger_rates": [r.as_dict() for r in self.trigger_rates],
+            "langfuse_queries": self.langfuse_queries,
+        }
+        if self.head_profiles_unavailable:
+            payload["head_profiles_unavailable"] = self.head_profiles_unavailable
+        return payload
+
+
+def collect_workforce_observability(
+    *,
+    reader: LangfuseTraceReader | None = None,
+    departments: tuple[str, ...] = tuple(INVESTMENT_DEPARTMENT_STAGE),
+    lookback_hours: float = 24.0,
+    idle_threshold_hours: float = 4.0,
+    now: datetime | None = None,
+    repo_root: Path = ROOT,
+    include_heads: bool = False,
+) -> WorkforceObservability:
+    """네 관측을 한 창·한 reader 로 모아 돌려준다.
+
+    Worker 한 명당 Langfuse 왕복은 최대 2회다 - 실행 이벤트 1회(유휴·Capacity·
+    LLM 사용량·발화율 분자가 전부 여기서 나온다) + 미발화 이벤트 건수 1회. 네
+    엔드포인트를 따로 부르던 이전 구조는 같은 Worker 를 5회 물었다.
+
+    reader 가 None 이면 check_idle_agents() 와 같은 규칙이다 - 자격증명이 없거나
+    langfuse 가 없으면 네 리포트 전부 UNAVAILABLE 로 접힌다(개발 원칙 9).
+    """
+
+    if idle_threshold_hours <= 0:
+        raise ValueError("idle_threshold_hours 는 양수여야 한다")
+    if lookback_hours <= 0:
+        raise ValueError("lookback_hours 는 양수여야 한다")
+
+    now = now or datetime.now(timezone.utc)
+    since = now - timedelta(hours=lookback_hours)
+
+    if reader is None:
+        try:
+            reader = LangfuseApiTraceReader()
+        except LangfuseQueryError:
+            reader = None
+
+    # 창이 같아야 캐시 키가 같다. 그래서 now 를 여기서 한 번 고정해 네 집계에
+    # 그대로 넘긴다 - 각자 datetime.now() 를 부르게 두면 since 가 미세하게 어긋나
+    # 캐시가 통째로 빗나가고, 왕복이 조용히 원래대로 돌아간다.
+    shared: LangfuseTraceReader | None = (
+        WindowedActivityReader(reader) if reader is not None else None
+    )
+    common = {
+        "reader": shared,
+        "departments": departments,
+        "lookback_hours": lookback_hours,
+        "now": now,
+        "repo_root": repo_root,
+    }
+
+    head_profiles_unavailable: str | None = None
+    try:
+        idle = check_idle_agents(
+            idle_threshold_hours=idle_threshold_hours, include_heads=include_heads, **common
+        )
+    except HeadProfilesUnavailable as exc:
+        head_profiles_unavailable = str(exc)
+        idle = check_idle_agents(
+            idle_threshold_hours=idle_threshold_hours, include_heads=False, **common
+        )
+
+    capacity = check_department_capacity(**common)
+    llm_usage = check_department_llm_usage(**common)
+    trigger_rates = check_worker_trigger_rates(**common)
+
+    return WorkforceObservability(
+        window_start=since,
+        window_end=now,
+        idle_agents=tuple(idle),
+        capacity=tuple(capacity),
+        llm_usage=tuple(llm_usage),
+        trigger_rates=tuple(trigger_rates),
+        head_profiles_unavailable=head_profiles_unavailable,
+        langfuse_queries=shared.queries if isinstance(shared, WindowedActivityReader) else 0,
+    )
+
+
 # ---------------------------------------------------------------------------
 # 자체 점검 (python departments/07-agent-workforce/scorecard/observability.py)
 # ---------------------------------------------------------------------------
@@ -1176,3 +1500,56 @@ if __name__ == "__main__":
     print("  자격증명 없음 -> 발화율 전부 UNAVAILABLE - OK")
 
     print("발화율(Langfuse 기반) 자체 점검 통과.")
+
+    # ── 통합 관측(2026-08-26) ────────────────────────────────────────────────
+    #
+    # 여기서 세는 것은 판정이 아니라 **왕복 수**다. 네 집계가 다시 각자 조회하게
+    # 회귀해도 값은 전부 맞게 나오고 화면도 정상이라, 왕복을 직접 세지 않으면
+    # 아무도 모른다.
+    class _CountingReader(LangfuseTraceReader):
+        def __init__(self) -> None:
+            self.fetches: list[str] = []
+            self.counts: list[str] = []
+
+        def fetch_worker_activity(
+            self, *, event_name: str, since: datetime, max_pages: int = MAX_ACTIVITY_PAGES
+        ) -> WorkerActivityPage:
+            self.fetches.append(event_name)
+            record = WorkerActivityRecord(
+                timestamp=since + timedelta(hours=1),
+                latency_ms=900, error_count=0, retries=0, attempts=1, status="SUCCESS",
+                llm_calls=1, model_name="qwen2.5-14b-instruct-awq",
+                prompt_tokens=500, completion_tokens=80,
+            )
+            return WorkerActivityPage(records=(record,), total_items=1, truncated=False)
+
+        def count_worker_activity(self, *, event_name: str, since: datetime) -> int:
+            self.counts.append(event_name)
+            return 2
+
+    counting = _CountingReader()
+    merged = collect_workforce_observability(reader=counting, departments=("research",), now=now)
+    research_workers = len(
+        [r for r in check_idle_agents(reader=_NoneReader(), departments=("research",), now=now)]
+    )
+    assert len(counting.fetches) == research_workers, counting.fetches
+    assert len(set(counting.fetches)) == research_workers, "같은 실행 이벤트를 두 번 읽었다"
+    assert len(counting.counts) == research_workers, counting.counts
+    assert merged.langfuse_queries == research_workers * 2, merged.langfuse_queries
+    print(f"  Worker 당 왕복 2회(실행 1 + 미발화 1) - OK ({research_workers}명)")
+
+    assert merged.idle_agents and merged.capacity and merged.llm_usage and merged.trigger_rates
+    assert merged.window_start < merged.window_end
+    print("  네 리포트가 한 응답에 - OK")
+
+    # 캐시가 창을 무시하면 낡은 값이 섞인다.
+    windowed = WindowedActivityReader(_CountingReader())
+    _name = langfuse_worker_event_name(stage="research", worker_id="w")
+    windowed.fetch_worker_activity(event_name=_name, since=now - timedelta(hours=24))
+    windowed.fetch_worker_activity(event_name=_name, since=now - timedelta(hours=24))
+    assert windowed.queries == 1, "같은 창을 두 번 조회했다"
+    windowed.fetch_worker_activity(event_name=_name, since=now - timedelta(hours=168))
+    assert windowed.queries == 2, "다른 창인데 캐시가 재사용됐다"
+    print("  같은 창은 1회, 다른 창은 별도 조회 - OK")
+
+    print("통합 관측(공용 fetch 층) 자체 점검 통과.")

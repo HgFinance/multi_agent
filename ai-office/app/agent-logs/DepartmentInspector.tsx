@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+
 import {
   readableRuntimeStatus,
   type OperationsDepartment,
@@ -17,6 +19,7 @@ import WorkforceCapacityPanel from "../components/WorkforceCapacityPanel";
 import WorkforceIdleAgentsPanel from "../components/WorkforceIdleAgentsPanel";
 import WorkforceLifecyclePanel from "../components/WorkforceLifecyclePanel";
 import WorkforceRosterPanel from "../components/WorkforceRosterPanel";
+import type { WorkforceObservabilityWindowKey } from "../lib/workforceObservabilityClient";
 import { RecentOutputsPanel } from "../dashboard/DashboardView";
 
 /**
@@ -92,6 +95,14 @@ export default function DepartmentInspector({
   data: OperationsView;
 }) {
   const code = department.department_code;
+
+  // Workforce 관측 창은 두 패널(유휴/Capacity)이 **같이** 쓴다. 여기서 들고 있는
+  // 이유는 두 가지다. (1) 창이 같아야 React Query 가 두 패널의 요청을 하나로
+  // 접는다 - 갈리면 왕복이 조용히 두 배가 된다(workforce-api 는 요청마다 Worker
+  // 전원의 Langfuse 이벤트를 훑는다). (2) 창이 갈리면 같은 화면에 서로 다른 창의
+  // 숫자가 나란히 놓인다 - 통합 전에 실제로 그랬다(유휴 표는 토글이 고른 창,
+  // Capacity 표는 코드에 박힌 24h).
+  const [workforceWindow, setWorkforceWindow] = useState<WorkforceObservabilityWindowKey>("daily");
 
   const liveByWorker = new Map(
     data.agentStatuses.filter((agent) => agent.department_code === code).map((agent) => [agent.worker_id, agent]),
@@ -218,8 +229,11 @@ export default function DepartmentInspector({
               hint="Capacity는 Langfuse 실측 연동 완료 — Quality+Cost 통합 Scorecard는 아직 연동 전"
             />
             <WorkerPerformancePanel metrics={data.metrics} />
-            <WorkforceCapacityPanel />
-            <WorkforceIdleAgentsPanel />
+            <WorkforceCapacityPanel windowKey={workforceWindow} />
+            <WorkforceIdleAgentsPanel
+              windowKey={workforceWindow}
+              onWindowChange={setWorkforceWindow}
+            />
           </div>
           <div className="flex flex-col gap-3">
             <GroupHeading index={3} title="조직 구성 및 개선" hint="Plan · Hiring · Improvement" />

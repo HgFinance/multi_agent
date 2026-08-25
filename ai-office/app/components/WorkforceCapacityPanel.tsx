@@ -1,16 +1,14 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
 import {
-  fetchWorkforceCapacity,
-  fetchWorkforceLlmUsage,
-  WorkforceCapacityError,
+  OBSERVABILITY_POLL_MS,
+  WORKFORCE_OBSERVABILITY_WINDOWS,
+  useWorkforceObservability,
   type CapacityObservationStatus,
   type DepartmentCapacityReport,
   type DepartmentLlmUsageReport,
-  type WorkforceCapacity,
-  type WorkforceLlmUsage,
-} from "../lib/workforceCapacityClient";
+  type WorkforceObservabilityWindowKey,
+} from "../lib/workforceObservabilityClient";
 
 /**
  * HR이 6개 투자본부의 Capacity(용량)를 관측하는 읽기 전용 산출물 카드.
@@ -20,8 +18,6 @@ import {
  * 집계한 값을 보여준다(WorkforceIdleAgentsPanel과 같은 원리). 판정/집계는
  * workforce-api가 하고 이 화면은 결과만 표시한다.
  */
-
-const POLL_MS = 60_000;
 
 const STATUS_VIEW: Record<CapacityObservationStatus, { label: string; tone: string; icon: string }> = {
   MEASURED: {
@@ -138,29 +134,25 @@ function CapacityRow({
   );
 }
 
-export default function WorkforceCapacityPanel() {
-  const query = useQuery<WorkforceCapacity, WorkforceCapacityError>({
-    queryKey: ["workforce-capacity"],
-    queryFn: () => fetchWorkforceCapacity(24),
-    refetchInterval: POLL_MS,
-    staleTime: 0,
-    retry: false,
-  });
-  // 같은 Langfuse 창을 읽는 두 번째 집계 - 부서 키가 같아 아래 표에 컬럼으로 합친다.
-  // 실패해도 capacity 표는 그대로 보여준다(사용량 칸만 "—"가 된다).
-  const usageQuery = useQuery<WorkforceLlmUsage, WorkforceCapacityError>({
-    queryKey: ["workforce-llm-usage"],
-    queryFn: () => fetchWorkforceLlmUsage(24),
-    refetchInterval: POLL_MS,
-    staleTime: 0,
-    retry: false,
-  });
+export default function WorkforceCapacityPanel({
+  windowKey,
+}: {
+  windowKey: WorkforceObservabilityWindowKey;
+}) {
+  // Capacity 와 LLM 사용량은 **같은 Langfuse 실행 이벤트**를 축만 달리해 집계한
+  // 값이다 - 통합 전에는 두 요청이 workforce-api 에서 event_name·창·limit 이 글자
+  // 그대로 같은 질의를 두 번 냈다. 이제 한 요청이고, 유휴 패널이 같은 창을 보고
+  // 있으면 그 쪽과도 캐시를 공유한다(2026-08-26 통합).
+  //
+  // 창을 props 로 받는 이유: 예전엔 여기만 24h 로 박혀 있어서, 유휴 패널을 주간으로
+  // 바꾸면 같은 화면에 24h Capacity 와 7d 유휴가 나란히 놓였다.
+  const query = useWorkforceObservability(WORKFORCE_OBSERVABILITY_WINDOWS[windowKey]);
   const data = query.data ?? null;
   const error = query.error ?? null;
   const loading = query.isPending;
   const reports = data?.capacity ?? [];
   const usageByDepartment = new Map(
-    (usageQuery.data?.llm_usage ?? []).map((item) => [item.department, item]),
+    (data?.llm_usage ?? []).map((item) => [item.department, item]),
   );
 
   return (
@@ -247,7 +239,7 @@ export default function WorkforceCapacityPanel() {
             Langfuse 실행 이벤트 집계 기준 · 대기시간(queue)은 계측 대상 아님 · 모델 호출·토큰이 &ldquo;—&rdquo;이면
             해당 실행이 토큰 계측 컨텍스트 밖이었다는 뜻입니다(0회 호출이 아닙니다)
           </span>
-          <span>{POLL_MS / 1000}초마다 자동 갱신</span>
+          <span>{OBSERVABILITY_POLL_MS / 1000}초마다 자동 갱신</span>
         </div>
       </div>
     </section>
