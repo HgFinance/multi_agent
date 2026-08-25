@@ -174,8 +174,8 @@ def validate_preset_alignment(
 
 
 __all__ = [
-    "RISK_PRESETS",
     "PRESET_VERSION",
+    "RISK_PRESETS",
     "PresetAlignment",
     "RiskPreset",
     "resolve_risk_preset",

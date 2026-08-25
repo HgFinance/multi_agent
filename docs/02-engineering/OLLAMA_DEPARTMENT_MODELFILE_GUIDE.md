@@ -1,14 +1,19 @@
 # Ollama Department Modelfile Guide
 
-현재 8개 부서의 확정 직원 런타임은 Hermes 부서장과 분리된 **직원별 독립 LangGraph Worker Graph + Ollama `qwen3:1.7b`**다. 주소와 모델은 `OLLAMA_BASE_URL`·`OLLAMA_CHAT_MODEL`로 주입하고, Profile의 `model`은 부서장 Hermes 모델만 의미한다. 상세 역할·도구·trigger는 [Department Worker Graph Architecture](DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)와 [Worker Model Matrix](WORKER_MODEL_MATRIX.md)를 따른다.
+> **상태:** LOCAL FALLBACK / HISTORICAL COMPATIBILITY
+> **검토일:** 2026-08-25 UTC
+> 운영 Worker 모델 정본은 [Worker Model Matrix](WORKER_MODEL_MATRIX.md),
+> `docker-compose.model.yml`과 enterprise worker registry다.
 
-현재 직원 모델은 검증 전까지 `qwen3:1.7b`로 고정한다. 다른 Ollama 모델은 `ollama list`로 설치 여부를 확인하고, Worker benchmark → HR 제안 → QA 독립 검증 → CEO 승인 후에만 Worker별로 변경한다. 자동 교체와 무제한 재시도는 금지한다. 기존 `Modelfile` alias는 호환·개발용이며, 실행 기준은 각 부서의 `employee_workers.py` Registry다.
+현재 운영 직원 런타임은 Hermes 부서장과 분리된 **직원별 독립 LangGraph Worker Graph + Worker Model Gateway + Qwen2.5-14B-Instruct-AWQ**다. 이 문서는 Worker Model Gateway가 명시적으로 local fallback을 선택했을 때 사용하는 Ollama `qwen3:1.7b`와 기존 부서별 alias만 설명한다. 주소와 모델은 `OLLAMA_BASE_URL`·`OLLAMA_CHAT_MODEL`로 주입하고, Profile의 Head model과 Worker model은 구분한다. 상세 역할·도구·trigger는 [Department Worker Graph Architecture](DEPARTMENT_WORKER_GRAPH_ARCHITECTURE.md)와 [Worker Model Matrix](WORKER_MODEL_MATRIX.md)를 따른다.
 
-> 현재 구현 범위는 LLM Worker 기준 CEO 1, HR 1, Research 2, Trading 0, Risk 1, Quant/Backtest 2, Accounting/Portfolio 1, AI QA 2이며, 결정론 runner(`desk-runner`, `risk-runner`, `qa-runner`, `back-office-runner`, `ceo-runner`) 5명을 더해 총 23명이다(2026-08-24, workforce.agent_profiles 전수조사 갱신 — 이전 "CEO 1·HR 5·Research 6·...·총 29명" 스냅샷은 Research/Quant 축소, Trading Bull/Bear 제거, HR 통합 이전 값이라 폐기). 도현님 담당 부서에서는 예외 조사 Worker(`exception-investigation-worker`)만 Ollama를 사용한다 — Trading Bull/Bear Worker는 2026-08-10에 제거됐고, desk/back-office 업무는 결정론 모듈이 수행한다. `Modelfile`은 보조 alias 정의이며, 실제 직원 수의 Source of Truth가 아니다.
+로컬 fallback의 기본 모델은 `qwen3:1.7b`다. 다른 Ollama 모델은 `ollama list`로 설치 여부를 확인하고, Worker benchmark → HR 제안 → QA 독립 검증 → CEO 승인 후에만 변경한다. 자동 교체와 무제한 재시도는 금지한다. 기존 `Modelfile` alias는 호환·개발용이며, 운영 실행 기준은 enterprise worker registry와 각 부서의 `employee_workers.py` registry다.
+
+> 현재 구현 범위는 Hermes Head 8개, LLM Worker 10개(CEO 1, HR 1, Research 2, Trading 0, Risk 1, Quant/Backtest 2, Accounting/Portfolio 1, AI QA 2), 결정론 runner 5개로 총 23개 실행 역할이다. 도현님 담당 부서에서는 `exception-investigation-worker`만 LLM-capable Worker이며 운영 기본은 Qwen AWQ, Ollama는 명시적 fallback이다. Trading Bull/Bear Worker는 제거됐고 desk/back-office 업무는 결정론 모듈이 수행한다. `Modelfile`은 보조 alias 정의이며 실제 직원 수의 Source of Truth가 아니다.
 >
 > 최초 등록 Commit: `9d14f12`, 실행 감사 기준: `3cab251` (2026-08-01). 인원 수 재검증: 2026-08-24 (`WORKER_ROLE_BOUNDARIES.md`, `supabase/migrations/20260824000100_workforce_roster_full_reconcile.sql` 대조)
 >
-> 적용 범위: 로컬·저비용 보조 모델, Model Gateway와 Docker `local-llm` Profile
+> 적용 범위: 로컬·저비용 fallback, 호환 alias, Model Gateway의 Ollama 경로
 
 ## 1. 목적
 
@@ -30,14 +35,14 @@
 
 | 조직 | 파일 | Base Model | 확정 Local Alias | 현재 상태 |
 |---|---|---|---|---|
-| CEO Office | [`departments/00-ceo-office/Modelfile`](../../departments/00-ceo-office/Modelfile) | `qwen3:1.7b` | `agent-ceo` | 현재 CEO Worker 고정값; Hermes Head와 분리 |
-| 리서치본부 | [`departments/01-research/Modelfile`](../../departments/01-research/Modelfile) | `qwen3:1.7b` | `agent-research` | 현재 Worker 고정값 |
-| 트레이딩본부 | [`departments/02-trading/Modelfile`](../../departments/02-trading/Modelfile) | `qwen3:1.7b` | `agent-trading` | 현재 Worker 고정값 |
+| CEO Office | [`departments/00-ceo-office/Modelfile`](../../departments/00-ceo-office/Modelfile) | `qwen3:1.7b` | `agent-ceo` | local fallback alias; Hermes Head와 분리 |
+| 리서치본부 | [`departments/01-research/Modelfile`](../../departments/01-research/Modelfile) | `qwen3:1.7b` | `agent-research` | local fallback alias |
+| 트레이딩본부 | [`departments/02-trading/Modelfile`](../../departments/02-trading/Modelfile) | `qwen3:1.7b` | `agent-trading` | 호환 alias; 현재 고정 LLM Worker 없음 |
 | 리스크본부 | [`departments/03-risk/Modelfile`](../../departments/03-risk/Modelfile) | `qwen3:1.7b` | `agent-risk` (호환 Alias) | 실제 실행은 LangGraph Worker |
-| 퀀트/백테스트본부 | [`departments/04-quant-backtest/Modelfile`](../../departments/04-quant-backtest/Modelfile) | `qwen3:1.7b` | `agent-quant` | 현재 Worker 고정값 |
-| 회계/포트폴리오본부 | [`departments/05-accounting-portfolio/Modelfile`](../../departments/05-accounting-portfolio/Modelfile) | `qwen3:1.7b` | `agent-accounting` | 현재 Worker 고정값 |
+| 퀀트/백테스트본부 | [`departments/04-quant-backtest/Modelfile`](../../departments/04-quant-backtest/Modelfile) | `qwen3:1.7b` | `agent-quant` | local fallback alias |
+| 회계/포트폴리오본부 | [`departments/05-accounting-portfolio/Modelfile`](../../departments/05-accounting-portfolio/Modelfile) | `qwen3:1.7b` | `agent-accounting` | local fallback alias |
 | AI QA/감사본부 | [`departments/06-ai-qa-audit/Modelfile`](../../departments/06-ai-qa-audit/Modelfile) | `qwen3:1.7b` | `agent-qa` (호환 Alias) | 실제 실행은 LangGraph Worker |
-| Agent Workforce 인사팀 | [`departments/07-agent-workforce/Modelfile`](../../departments/07-agent-workforce/Modelfile) | `qwen3:1.7b` | `agent-hr` | 현재 Worker 고정값 |
+| Agent Workforce 인사팀 | [`departments/07-agent-workforce/Modelfile`](../../departments/07-agent-workforce/Modelfile) | `qwen3:1.7b` | `agent-hr` | local fallback alias |
 
 ### 2.1 현재 SYSTEM 역할 요약
 
@@ -68,7 +73,7 @@ Prompt 전문을 이 문서에 복제하면 각 본부가 `Modelfile`을 고도�
 | CEO·HR Smoke Script | 구현, 비결정 응답 육안 확인용이며 Assert·Digest 기록 없음 |
 | 8개 Alias Build와 Digest 기록 | 공통 Manifest와 실행 증거 없음 |
 | 본부별 Golden/Adversarial Eval | 미구현 |
-| Hermes Supervisor Model | 8개 부서 Head 모두 `openai-codex/gpt-5.6-luna` (Claude Code 승인 대체 경로), 직원은 독립 LangGraph + Ollama `qwen3:1.7b` |
+| Hermes Supervisor / Worker Model | 8개 Head는 `openai-codex/gpt-5.6-luna`; 직원은 독립 LangGraph + Qwen AWQ가 운영 기본이고 Ollama `qwen3:1.7b`는 local fallback |
 
 따라서 현재 완료 상태는 **Risk/QA Worker Graph 코드·Profile 계약의 Git 등록과 일부 Hermes Runtime 실행**이다. 로컬 Ollama 모델 다운로드·Health, 호환 Alias Build, 공통 Gateway와 Production 배포는 별도 운영 증거가 필요한 경계다.
 
@@ -77,7 +82,7 @@ Prompt 전문을 이 문서에 복제하면 각 본부가 `Modelfile`을 고도�
 | Base Model | 배치 조직 | 의도 | 허용 업무 |
 |---|---|---|---|
 | `hermes3` | Historical alias only | 이전 로컬 검토 실험 | 현재 Worker에 자동 배정하지 않음 |
-| `qwen3:1.7b` | 전 부서 Worker | 현재 고정 기본값 | 역할별 Context, 근거 요약, 조건부 검토 |
+| `qwen3:1.7b` | 전 부서 fallback alias | local fallback 기본값 | 역할별 Context, 근거 요약, 조건부 검토 |
 | 향후 light/standard/heavy 후보 | Worker별 benchmark 대상 | 현재 자동 배정하지 않음 | HR 제안·QA 검증·CEO 승인 후 변경 |
 
 Base Model 선택은 초기 가설이다. 모델 이름만으로 업무 적합성을 확정하지 않는다. 본부별 Eval 결과, 지연, 메모리와 비용을 비교해 유지하거나 변경한다.
@@ -258,7 +263,7 @@ Prompt와 응답 전문은 무조건 Log에 남기지 않는다. Data Classifica
 
 ## 9. Version과 재현성
 
-과거 Prototype의 `FROM hermes3`, `FROM qwen2.5`, `FROM qwen2.5-coder` 기록은 현재 Worker 기본값이 아니다. 현재 Worker Modelfile은 `FROM qwen3:1.7b`이며, 변경 시에는 Worker Model Matrix 승인 절차로 digest와 재현성을 고정한다.
+과거 Prototype의 `FROM hermes3`, `FROM qwen2.5`, `FROM qwen2.5-coder` 기록은 현재 운영 Worker 기본값이 아니다. local fallback Modelfile은 `FROM qwen3:1.7b`이며, 변경 시에는 Worker Model Matrix 승인 절차로 digest와 재현성을 고정한다.
 
 Production 승격 전 다음을 고정한다.
 

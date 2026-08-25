@@ -22,7 +22,6 @@ from position_risk_lifecycle import (
 )
 from position_risk_planner import plan_position_risk
 
-
 NOW = datetime(2026, 8, 25, 2, 0, tzinfo=timezone.utc)
 
 

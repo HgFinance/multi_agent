@@ -72,6 +72,17 @@ for _p in (_RISK_DIR, _ENGINE_DIR, _CONTRACTS_DIR, _AGENTIC_RAG_DIR, _REPO_ROOT)
     sys.path.insert(0, str(_p))
 
 from contracts import OrderIntent
+from mandate_limit_compiler import (
+    MandateLimitCompilationRequest,
+    compile_mandate_limits,
+)
+from mandate_presets import (
+    PRESET_VERSION,
+    RISK_PRESETS,
+    PresetAlignment,
+    resolve_risk_preset,
+    validate_preset_alignment,
+)
 from p1.analytics import (
     KillSwitchState,
     P1GateDecision,
@@ -80,7 +91,13 @@ from p1.analytics import (
 )
 from p1_runtime_api import router as p1_runtime_router
 from p2_derivatives_api import router as p2_derivatives_router
+from position_risk_lifecycle import RiskPlanTransition, validate_transition
+from position_risk_planner import PositionRiskPlanRequest, plan_position_risk
 from risk_context_repository import PostgresRiskContextRepository, RiskContextLoadError
+from risk_control_repository import (
+    RiskControlPersistenceError,
+    RiskControlRepository,
+)
 from risk_engine import (
     CounterpartyHealth,
     CounterpartyStatus,
@@ -103,24 +120,7 @@ from risk_events.redis_event_bus import (
     decision_event_id,
 )
 from risk_mandate_workers import RiskMandateAssessmentRequest, assess_mandate
-from mandate_limit_compiler import (
-    MandateLimitCompilationRequest,
-    compile_mandate_limits,
-)
-from mandate_presets import (
-    PRESET_VERSION,
-    RISK_PRESETS,
-    PresetAlignment,
-    resolve_risk_preset,
-    validate_preset_alignment,
-)
-from position_risk_lifecycle import RiskPlanTransition, validate_transition
-from position_risk_planner import PositionRiskPlanRequest, plan_position_risk
 from risk_observability import risk_span
-from risk_control_repository import (
-    RiskControlPersistenceError,
-    RiskControlRepository,
-)
 from risk_repository import RiskDecisionPersistenceError, RiskDecisionRepository
 from trading_state_store import (
     RedisTradingStateStore,

@@ -21,10 +21,11 @@ import json
 import math
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 PIPELINE_VERSION = "awq-hybrid-upgrade-v1"
 
@@ -109,7 +110,7 @@ def _load_glossary(path_text: str) -> tuple[str, tuple[dict[str, Any], ...]]:
     raw = path.read_bytes()
     payload = json.loads(raw)
     if not isinstance(payload, list):
-        raise ValueError("glossary must be a JSON array")
+        raise TypeError("glossary must be a JSON array")
     rows: list[dict[str, Any]] = []
     for row in payload:
         if not isinstance(row, dict):
@@ -143,7 +144,7 @@ def glossary_hits(
 ) -> tuple[str | None, tuple[GlossaryHit, ...]]:
     try:
         digest, entries = _load_glossary(str(_glossary_path(config)))
-    except (OSError, ValueError, json.JSONDecodeError):
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
         return None, ()
     hits: list[GlossaryHit] = []
     for entry in entries:
@@ -242,7 +243,7 @@ def validate_structured_output(raw: str, schema: Mapping[str, Any]) -> str | Non
         from jsonschema import Draft202012Validator
 
         violation = next(Draft202012Validator(dict(schema)).iter_errors(value), None)
-    except Exception:  # dependency absence must not disable vLLM guided decoding
+    except ModuleNotFoundError:  # vLLM guided decoding still constrains syntax
         violation = None
     if violation is None:
         return None

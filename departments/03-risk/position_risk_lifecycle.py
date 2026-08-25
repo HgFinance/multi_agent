@@ -7,9 +7,8 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
-
 from position_risk_planner import PositionRiskPlan
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class RiskPlanState(StrEnum):

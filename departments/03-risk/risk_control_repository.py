@@ -52,7 +52,7 @@ class RiskControlRepository:
         self._pool = pool
 
     @classmethod
-    def connect(cls, dsn: str) -> "RiskControlRepository":
+    def connect(cls, dsn: str) -> RiskControlRepository:
         _, pool_type = _driver()
         return cls(pool_type(0, 4, dsn))
 

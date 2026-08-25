@@ -10,8 +10,8 @@ duplicate cross-boundary upload while making the natural CEO path observable.
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import os
 import urllib.error
 import urllib.request

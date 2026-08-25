@@ -1,6 +1,7 @@
 # Worker Model Matrix
 
-> Compatibility index. This path is retained because repository documents and department profiles link to it. It does not own current worker counts, role definitions, serving defaults, or runtime contracts.
+> **Status:** CURRENT REFERENCE · **reviewed:** 2026-08-25 UTC
+> Compatibility index. This path is retained because repository documents and department profiles link to it. Executable serving values remain owned by Compose and the enterprise worker registry.
 
 ## Canonical sources
 
@@ -17,9 +18,9 @@
 
 | Base model | Served name | Context | GPU utilization | KV cache | LoRA capacity |
 |---|---|---:|---:|---|---|
-| Qwen2.5-14B-Instruct-AWQ | qwen2.5-14b-instruct-awq | 8192 | 0.85 | fp8 | enabled; max loras 4, rank 32, CPU loras 8 |
+| Qwen2.5-14B-Instruct-AWQ | qwen2.5-14b-instruct-awq | 4096 default | 0.85 | fp8 | enabled; max loras 4, rank 32, CPU loras 8 |
 
-This is tracked configuration, not proof that an AWS process is currently healthy. FP8 and older 16K/0.90 values are historical benchmark or rollback references only.
+This is checkout configuration, not proof that an AWS process is currently healthy. `VLLM_MAX_MODEL_LEN` may explicitly override the default. FP8 and older 8K/16K measurements are historical benchmark or rollback references only.
 
 ## Qwen AWQ v1 operational profile
 

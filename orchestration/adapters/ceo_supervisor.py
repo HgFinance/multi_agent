@@ -15,19 +15,24 @@ import sqlite3
 import subprocess
 import threading
 import time
-from contextlib import contextmanager
 from collections.abc import Callable, Collection, Mapping, Sequence
+from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Any
 from pathlib import Path
+from typing import Any
 
+from orchestration.accounting_advisory_context import fetch_accounting_advisory_context
+from orchestration.adapters.department_notion_projection import (
+    DepartmentNotionProjection,
+)
 from orchestration.adapters.terminal_projection_utils import (
     action as terminal_action,
 )
 from orchestration.adapters.terminal_projection_utils import (
     is_background_research,
+    merged_run_metadata,
 )
 from orchestration.adapters.terminal_projection_utils import (
     workflow_role as terminal_workflow_role,
@@ -35,9 +40,7 @@ from orchestration.adapters.terminal_projection_utils import (
 from orchestration.adapters.terminal_projection_utils import (
     workflow_root as terminal_workflow_root,
 )
-from orchestration.adapters.terminal_projection_utils import merged_run_metadata
 from orchestration.answer_contract import grade_answer
-from orchestration.semantic_qa import evaluate_prompt_answer
 from orchestration.canonical_profiles import (
     USER_QUERY_PRIORITY,
     CanonicalKanbanTaskRequest,
@@ -56,23 +59,23 @@ from orchestration.ceo_workflow_scope import (
     langsmith_trace_context_from_body,
     mandate_snapshot_present,
     primary_idempotency_key,
+    read_marker,
     selected_primary_profiles_from_task,
     user_paper_order_scope_from_body,
     validate_workflow_scope,
     workflow_mode_from_body,
     workflow_role_from_body,
-    read_marker,
+)
+from orchestration.compound_paper_orders import (
+    parse_analysis_then_conditional_paper_order,
 )
 from orchestration.discord_delivery import DiscordFinalDelivery
 from orchestration.discord_idempotency import DiscordIdempotencyStore
-from orchestration.failure_taxonomy import FailureKind, classify_failure
-from orchestration.adapters.department_notion_projection import (
-    DepartmentNotionProjection,
-)
 from orchestration.experience_bank import (
     ExperienceBank,
     build_discord_experience_record,
 )
+from orchestration.failure_taxonomy import FailureKind, classify_failure
 from orchestration.kanban_retention_lock import workflow_mutation_lock
 from orchestration.kanban_root_index import (
     RootScopedIndexUnavailable,
@@ -89,12 +92,9 @@ from orchestration.qa_contract import (
     canonical_qa_contract,
     split_planner_selection,
 )
-from orchestration.compound_paper_orders import (
-    parse_analysis_then_conditional_paper_order,
-)
 from orchestration.risk_advisory_context import fetch_risk_advisory_context
 from orchestration.risk_plan_projection import format_position_risk_plan
-from orchestration.accounting_advisory_context import fetch_accounting_advisory_context
+from orchestration.semantic_qa import evaluate_prompt_answer
 from orchestration.workforce_advisory_context import fetch_workforce_advisory_context
 
 logger = logging.getLogger(__name__)
@@ -1087,7 +1087,9 @@ def _deferred_conditional_decision(
                 order_request_id,
             )
             return None
-        from orchestration.ceo_workflow_scope import UserPaperOrderScope  # noqa: PLC0415
+        from orchestration.ceo_workflow_scope import (
+            UserPaperOrderScope,  # noqa: PLC0415
+        )
 
         scope = UserPaperOrderScope(
             order_request_id=record.order_request_id,
@@ -6761,7 +6763,9 @@ class CeoSupervisorService:
                     )
                     return
                 try:
-                    from apps.api.user_order_workflow import user_order_repository  # noqa: PLC0415
+                    from apps.api.user_order_workflow import (
+                        user_order_repository,  # noqa: PLC0415
+                    )
 
                     user_order_repository().bind_trading_task(
                         order_request_id,

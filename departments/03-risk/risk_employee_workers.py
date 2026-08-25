@@ -265,7 +265,9 @@ def default_worker_llm(
         from departments.worker_model_gateway import llm_for_worker
 
         worker_llm, _binding = llm_for_worker("compliance-policy-worker")
-        if json_schema is not None:
+        if json_schema is not None and getattr(
+            worker_llm, "_json_schema_capable", False
+        ):
             return worker_llm(system, prompt, json_schema=json_schema)
         return worker_llm(system, prompt)
 

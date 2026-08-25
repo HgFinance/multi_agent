@@ -8,10 +8,11 @@ Engine recheck, reservation, and idempotency layers remain mandatory.
 from __future__ import annotations
 
 import hashlib
-from decimal import Decimal, ROUND_DOWN
-from typing import Any, Mapping
+from collections.abc import Mapping
+from decimal import ROUND_DOWN, Decimal
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from orchestration.conditional_rules import EvaluationPolicy, ExpressionNode, RuleAction
 
@@ -80,17 +81,17 @@ def build_paper_rule_bundle(
     if len(canonical_symbol) != 6 or not canonical_symbol.isalnum():
         raise ValueError("symbol must be a six-character market symbol")
     quantity_cap = Decimal(str(plan["quantity_cap"])).quantize(
-        Decimal("1"), rounding=ROUND_DOWN
+        Decimal(1), rounding=ROUND_DOWN
     )
     current_quantity = Decimal(str(plan["current_quantity"])).quantize(
-        Decimal("1"), rounding=ROUND_DOWN
+        Decimal(1), rounding=ROUND_DOWN
     )
     quantity = min(quantity_cap, current_quantity)
     if quantity <= 0:
         raise ValueError("an ACTIVE exit plan requires a positive protected position")
     take_quantity = max(
         Decimal(1),
-        (quantity * Decimal("0.50")).quantize(Decimal("1"), rounding=ROUND_DOWN),
+        (quantity * Decimal("0.50")).quantize(Decimal(1), rounding=ROUND_DOWN),
     )
     evaluation = {
         "clock": "QUOTE",

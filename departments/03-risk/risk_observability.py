@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import time
 from collections.abc import Iterator, Mapping
 from functools import lru_cache
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 RISK_SPANS = frozenset(
     {
@@ -83,7 +86,8 @@ def risk_span(name: str, metadata: Mapping[str, Any]) -> Iterator[Any]:
             enabled=True,
         )
         run = context.__enter__()
-    except Exception:  # optional observer never changes Risk semantics
+    except Exception as exc:  # noqa: BLE001 - optional observer is fail-open
+        logger.debug("Risk span unavailable: %s", type(exc).__name__)
         yield None
         return
     try:
@@ -103,8 +107,8 @@ def risk_span(name: str, metadata: Mapping[str, Any]) -> Iterator[Any]:
             context._end_on_exit = False
             run.patch()
             context.__exit__(None, None, None)
-        except Exception:
-            pass
+        except Exception as observer_exc:  # noqa: BLE001
+            logger.debug("Risk span error close failed: %s", type(observer_exc).__name__)
         raise
     else:
         try:
@@ -117,8 +121,8 @@ def risk_span(name: str, metadata: Mapping[str, Any]) -> Iterator[Any]:
                 )
             )
             context.__exit__(None, None, None)
-        except Exception:
-            pass
+        except Exception as observer_exc:  # noqa: BLE001
+            logger.debug("Risk span success close failed: %s", type(observer_exc).__name__)
 
 
 __all__ = ["RISK_SPANS", "risk_span"]

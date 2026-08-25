@@ -14,13 +14,12 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timedelta
-from decimal import Decimal, ROUND_DOWN
+from decimal import ROUND_DOWN, Decimal
 from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-
 from risk_observability import risk_span
 
 CALCULATION_VERSION = "dynamic-position-risk-planner.v1"
@@ -100,7 +99,7 @@ class PositionRiskPlanRequest(BaseModel):
     max_snapshot_age_seconds: int = Field(default=300, ge=1, le=3600)
 
     @model_validator(mode="after")
-    def timezone_required(self) -> "PositionRiskPlanRequest":
+    def timezone_required(self) -> PositionRiskPlanRequest:
         for name, value in (
             ("as_of", self.as_of),
             ("market.observed_at", self.market.observed_at),
@@ -181,14 +180,14 @@ def classify_regime(market: DynamicMarketSnapshot) -> MarketRegime:
         not market.tradable
         or market.realized_vol_annualized >= Decimal("0.60")
         or market.gap_risk_pct >= Decimal("0.08")
-        or market.spread_bps >= Decimal("120")
+        or market.spread_bps >= Decimal(120)
     ):
         return MarketRegime.STRESS
     if market.trend_score <= Decimal("-0.35"):
         return MarketRegime.DOWNTREND
     if (
         market.realized_vol_annualized >= Decimal("0.35")
-        or market.spread_bps >= Decimal("50")
+        or market.spread_bps >= Decimal(50)
         or market.gap_risk_pct >= Decimal("0.035")
     ):
         return MarketRegime.CAUTION
@@ -286,7 +285,7 @@ def plan_position_risk(
     daily_sigma = item.market.realized_vol_annualized / Decimal("15.874507866")
     volatility_distance = entry * daily_sigma * Decimal("1.25")
     gap_distance = entry * item.market.gap_risk_pct
-    spread_distance = entry * item.market.spread_bps / Decimal("10000") * Decimal("2")
+    spread_distance = entry * item.market.spread_bps / Decimal(10000) * Decimal(2)
     with risk_span("risk.stop-calculation", trace_metadata):
         stop_distance = max(
             item.market.atr * atr_factor,
@@ -328,10 +327,10 @@ def plan_position_risk(
     ).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
     if item.existing_plan is not None:
         risk_amount = min(risk_amount, item.existing_plan.position_risk_amount)
-    risk_quantity = (risk_amount / stop_distance).quantize(Decimal("1"), rounding=ROUND_DOWN)
+    risk_quantity = (risk_amount / stop_distance).quantize(Decimal(1), rounding=ROUND_DOWN)
     concentration_quantity = (
         item.mandate.base_capital * item.mandate.max_instrument_weight / entry
-    ).quantize(Decimal("1"), rounding=ROUND_DOWN)
+    ).quantize(Decimal(1), rounding=ROUND_DOWN)
     quantity_cap = min(risk_quantity, concentration_quantity)
     if quantity_cap <= 0:
         return _defer(item, input_hash, DataQuality.VALID, ["QUANTITY_CAP_ZERO"], regime=regime)

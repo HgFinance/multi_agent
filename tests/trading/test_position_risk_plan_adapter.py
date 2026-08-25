@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-
 MODULE = (
     Path(__file__).resolve().parents[2]
     / "departments"

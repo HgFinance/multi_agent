@@ -115,11 +115,6 @@ from approval import (
 from approval import (
     revoke as revoke_approval,
 )
-from actor_identity import (
-    InMemoryActorIdentityRepository,
-    UnverifiedActorUserError,
-    verify_actor_user,
-)
 from case_root import (
     CaseEvent,
     CaseRecord,
@@ -206,7 +201,6 @@ from service import (
     InMemoryMandateVersionRepository,
     MandateAlreadyExistsError,
     MandateVersionService,
-    compute_content_hash,
 )
 
 try:

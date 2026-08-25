@@ -397,17 +397,14 @@ The repository supports these findings:
    canonical cross-department order/fill/journal path as incomplete or
    historical. A fresh AWS/runtime probe is needed before calling it
    production-ready.
-2. **Main integration drift:** the model plane is aligned on this branch and
-`origin/main` is seven commits ahead with additional forward-QA
-dispatch/reproduction, quant experiment, Compose, migration, and contract-test
-changes. This document follows main for current architecture; runtime health
-remains unverified.
+2. **Working-tree/runtime drift:** current configuration contains recent
+   model, routing, migration and contract changes, but repository presence does
+   not establish that the same revision is deployed or healthy on AWS.
 3. **Governance integration:** QA/Risk engines and APIs are present, but active
    policy corpus, credentials, production evidence, and continuous runtime
    records are environment-dependent and not verifiable from this checkout.
-4. **Benchmark reproducibility:** FP8/AWQ quality result artifacts are tracked
-   on `origin/main`; the requested VRAM/KV/throughput/restart measurements are
-   not tracked and must not be inferred from quality scores.
+4. **Benchmark reproducibility:** historical and current result families use
+   different runtime settings and must remain separated by run provenance.
 5. **Orchestration measurement:** direct/fast-path code exists, but the current
    checkout has no reliable measurement proving whether delegate initial ACK,
    GPU inference, or another step is the dominant latency bottleneck.
@@ -416,19 +413,19 @@ remains unverified.
 
 | Area | Status | Evidence |
 |---|---|---|
-| 8 department profiles and current worker registry | IMPLEMENTED / TRACKED_MAIN | `departments/*/hermes/config.yaml`, `employee_workers.py`, `tests/test_worker_architecture.py`; 8 heads, 10 LLM-capable workers, 5 deterministic runners |
+| 8 department profiles and current worker registry | IMPLEMENTED | `departments/*/hermes/config.yaml`, `employee_workers.py`, `tests/test_worker_architecture.py`; 8 heads, 10 LLM-capable workers, 5 deterministic runners |
 | worker context and department handoff contracts | IMPLEMENTED | `docs/02-engineering/contracts/worker-context.v1.json`, `department-handoff.v1.json` |
 | deterministic trading contracts/OMS/paper broker | IMPLEMENTED / PARTIAL | `departments/02-trading/contracts`, `oms`, `broker`, paper-loop tests |
 | deterministic Risk Engine and fail-closed state | IMPLEMENTED / PARTIAL | `departments/03-risk/engine`, `harness`, Risk tests |
 | PIT quant dataset and strategy lifecycle | IMPLEMENTED / PARTIAL | `departments/04-quant-backtest/pipeline/pit_dataset.py`, `strategy_lifecycle.py` |
 | deterministic accounting ledger/reconciliation/reporting | IMPLEMENTED / PARTIAL | `departments/05-accounting-portfolio`, accounting close-loop tests |
 | QA evidence/model-risk/eval runners | IMPLEMENTED / PARTIAL | `departments/06-ai-qa-audit/evidence`, `model_risk.py`, `eval_runner.py` |
-| forward-QA dispatch and lease-fenced reproduction | IMPLEMENTED / PARTIAL / TRACKED_MAIN | `departments/06-ai-qa-audit/qa_events/worker.py`, `reproduction_worker.py`, Compose service, forward-QA migrations and tests; runtime health not verified |
-| intraday quant experiment/forward-confirmation gates | IMPLEMENTED / PARTIAL / TRACKED_MAIN | `departments/04-quant-backtest/pipeline/intraday_experiment_runner.py`, `intraday_trial_ledger.py`, `intraday_candidate.py`, release/publish tests; operational data not verified |
-| external AWS AWQ serving checkpoint | TRACKED_MAIN; RUNTIME_VERIFIED unavailable | `origin/main` commit `b3fb8c5` and its Compose/gateway/registry changes; live AWS health is not proven |
-| FP8/AWQ quality result table | TRACKED_MAIN | immutable result files under `benchmarks/quantization/results/`; no external runtime observation is claimed |
+| forward-QA dispatch and lease-fenced reproduction | IMPLEMENTED / PARTIAL | `departments/06-ai-qa-audit/qa_events/worker.py`, `reproduction_worker.py`, Compose service, forward-QA migrations and tests; runtime health not verified |
+| intraday quant experiment/forward-confirmation gates | IMPLEMENTED / PARTIAL | `departments/04-quant-backtest/pipeline/intraday_experiment_runner.py`, `intraday_trial_ledger.py`, `intraday_candidate.py`, release/publish tests; operational data not verified |
+| external AWS AWQ serving checkpoint | CONFIGURED; RUNTIME_VERIFIED unavailable | Compose/gateway/registry configure AWQ; live AWS health is not established here |
+| FP8/AWQ/LoRA/Hybrid quality results | RESULT ARTIFACTS | provenance-bearing result directories under `benchmarks/quantization/results/`; no external runtime observation is implied |
 | VRAM/KV/throughput infrastructure table | NOT VERIFIED | requested memory/throughput/restart values are not present in tracked result artifacts or inspected history |
-| reusable Common + Department QLoRA pipeline | PLANNED | no training notebook/script/validator found |
+| reusable Common + Department QLoRA pipeline | PARTIAL | specialist dataset preparation and adapter artifacts exist; general promotion workflow remains incomplete |
 | continuously operated end-to-end production runtime | PARTIAL / NOT RUNTIME-VERIFIED | historical status records and code exist; current runtime evidence absent |
 
 For status semantics, retain the repository’s distinction: `IMPLEMENTED` means
@@ -438,7 +435,7 @@ run, and `RUNTIME_VERIFIED` requires an actual API/DB/process observation.
 ## 15. Next Milestones
 
 1. Reconcile the tracked model-plane source of truth with the actual AWS
-   runtime: record the AWQ model digest, served name, 8192/0.85 settings, LoRA
+   runtime: record the AWQ model digest, served name, effective 4096/0.85 settings, LoRA
    limits, startup/restart behavior, and VRAM from the target environment.
 2. Add immutable, hashed infrastructure benchmark manifests for FP8, AWQ,
    and AWQ+LoRA. Keep External-50, Internal-50 v1, and Internal-50 v2 held out
@@ -459,21 +456,21 @@ run, and `RUNTIME_VERIFIED` requires an actual API/DB/process observation.
 | Path | Role | Audit classification | Overlap/authority |
 |---|---|---|---|
 | `docs/README.md` | documentation portal | CURRENT | links only; does not own detailed current-state facts |
-| `docs/CURRENT_PROJECT_ARCHITECTURE.md` | canonical current architecture | CURRENT / TRACKED_MAIN-aware | owns current architecture summary and source audit |
+| `docs/CURRENT_PROJECT_ARCHITECTURE.md` | canonical current architecture | CANONICAL CURRENT | owns current architecture summary and source audit |
 | `docs/PROJECT_IMPLEMENTATION_STATUS.md` | implementation/readiness board | CURRENT + HISTORICAL snapshots | owns status vocabulary and dated evidence; links here for architecture |
 | `docs/02-engineering/FINAL_RUNTIME_ARCHITECTURE.md` | detailed runtime contracts | CURRENT detail / PARTIAL implementation | owns execution boundaries, retries, adapters, and gate topology |
-| `docs/02-engineering/RISK_QA_DOCKER_RUNBOOK.md` | Risk/QA container and preflight procedure | DEPARTMENT RUNTIME DOC / TRACKED_MAIN | operational runbook; does not replace this architecture or status board |
+| `docs/02-engineering/RISK_QA_DOCKER_RUNBOOK.md` | Risk/QA container and preflight procedure | RUNBOOK | operational runbook; does not replace this architecture or status board |
 | `docs/02-engineering/WORKER_ROLE_BOUNDARIES.md` | worker permissions and roles | CURRENT reference | owns detailed role/authority matrix |
 | `docs/HEDGE_FUND_MASTER_PLAN.md` | target state and long-term plan | TARGET STATE / HISTORICAL snapshots | does not override current implementation evidence |
 | `docs/02-engineering/CEO_CONVERSATIONAL_ROUTING_SPEC.md` | routing design and implementation notes | PARTIAL | department-local routing detail; current topology is cross-checked here |
-| `docs/02-engineering/WORKER_MODEL_MATRIX.md` | model assignment target/history | HISTORICAL / TARGET | does not override main registry or serving config |
-| `docs/02-engineering/RESEARCH_WORKER_AWS_RUNBOOK.md` | Research worker AWS procedure | DEPARTMENT DOC / not edited in this audit | ownership-sensitive; current model source remains Compose/gateway/registry |
+| `docs/02-engineering/WORKER_MODEL_MATRIX.md` | model compatibility index | CURRENT REFERENCE | does not override registry or serving config |
+| `docs/02-engineering/RESEARCH_WORKER_AWS_RUNBOOK.md` | Research worker AWS procedure | RUNBOOK / needs AWQ review | current model source remains Compose/gateway/registry |
 | `docs/02-engineering/SYSTEM_WIRING_MAP.md` | dated wiring snapshot | HISTORICAL / PARTIAL | useful audit snapshot; not a live topology source |
 | `docs/06-integrations/*` and generated provider references | provider/API reference | INTEGRATION REFERENCE | excluded from architecture consolidation |
 
-No document was deleted in this audit. Potential archival/removal candidates
-require a separate review because some contain historical rationale or dated
-runtime evidence.
+The 2026-08-17 AS-IS blueprints are retained under `docs/archive/2026-08-17/`.
+Documentation lifecycle and generated-reference exclusions are defined in
+`docs/DOCUMENTATION_GOVERNANCE.md`.
 
 ## 17. Evidence Index
 

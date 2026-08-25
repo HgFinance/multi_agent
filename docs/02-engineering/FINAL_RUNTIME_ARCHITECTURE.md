@@ -1,15 +1,16 @@
 # HgFinance 최종 Runtime 아키텍처
 
-상태: **상세 구현 기준선(DESIGN BASELINE)**
+상태: **CURRENT REFERENCE / 상세 구현 기준선(DESIGN BASELINE)**
+검토일: **2026-08-25 UTC**
 범위: Natural Language Query + Mandate를 받아 부서 Task를 동적으로 라우팅하고, Hermes·LangGraph Worker·결정론 Engine·QA를 거쳐 비구속적 결과를 반환하는 TEST/INTEGRATION/PRODUCTION_ADVISORY 경로
 
 > **Current snapshot link:** 현재 worker registry·실제 구현 상태·serving 설정은
 > [CURRENT_PROJECT_ARCHITECTURE.md](../CURRENT_PROJECT_ARCHITECTURE.md)를 우선한다.
 > 이 문서는 상세 실행 계약과 historical/design baseline이다.
 
-이 문서는 구현자가 별도 구두 설명 없이 runtime Pipeline을 구현할 수 있도록 작성한 실행 계약이다. Master Plan과 Domain API·DB Contract를 대체하지 않는다. 현재-state 충돌 시 최신 `origin/main` executable code/config와 [CURRENT_PROJECT_ARCHITECTURE.md](../CURRENT_PROJECT_ARCHITECTURE.md)를 우선하고, 이 문서는 runtime 세부를 보완한다. `HEDGE_FUND_MASTER_PLAN.md`는 target-state 문서다.
+이 문서는 구현자가 별도 구두 설명 없이 runtime Pipeline을 구현할 수 있도록 작성한 실행 계약이다. Master Plan과 Domain API·DB Contract를 대체하지 않는다. 현재-state 충돌 시 현재 checkout의 executable code/config와 [CURRENT_PROJECT_ARCHITECTURE.md](../CURRENT_PROJECT_ARCHITECTURE.md)를 우선하고, 이 문서는 runtime 세부를 보완한다. `HEDGE_FUND_MASTER_PLAN.md`는 target-state 문서다.
 
-1. 최신 `origin/main` executable code/config 및 tracked runtime evidence
+1. 현재 checkout의 executable code/config 및 provenance가 있는 runtime evidence
 2. `CURRENT_PROJECT_ARCHITECTURE.md`
 3. 이 문서의 runtime contract
 4. `docs/02-engineering/contracts/*.json`
@@ -73,7 +74,7 @@ flowchart LR
 |---|---|---|---|---|
 | `DEV` | 개발자별 부서 구현·단위 Contract | Mock 또는 Ollama `qwen3:1.7b` | 개발자별 Local Supabase/Postgres | 금지 |
 | `INTEGRATION` | CEO부터 8개 Profile까지 전체 Handoff 연결 | Deterministic Stub 또는 TEST Ollama | 별도 Integration Supabase | 금지 |
-| `PRODUCTION_ADVISORY` | AWS에서 실제 데이터 기반 추천·분석 | `origin/main` 기준 Qwen2.5-14B AWQ + LoRA, 승인된 Head Provider | 별도 Production Supabase | 주문·Ledger·Broker 쓰기 금지 |
+| `PRODUCTION_ADVISORY` | AWS에서 실제 데이터 기반 추천·분석 | 현재 registry 기준 Qwen2.5-14B AWQ + selective LoRA/Hybrid, 승인된 Head Provider | 별도 Production Supabase | 주문·Ledger·Broker 쓰기 금지 |
 | `PRODUCTION_LIVE` | 실제 Broker·운영 Posting | 별도 승인 필요 | 운영 DB | 현재 기본 OFF |
 
 `PRODUCTION_ADVISORY`는 운영 인프라를 사용하는 Read-only/Paper 단계다. `PRODUCTION_LIVE`로 자동 승격하지 않는다.
@@ -161,7 +162,7 @@ Department Head Hermes
 Head Provider Gateway      LangGraph Runner / Worker Runtime
   ├─ Claude Adapter           ↓
   └─ Codex Adapter          Worker Model Gateway
-├─ Qwen2.5-14B-Instruct-AWQ (origin/main)
+├─ Qwen2.5-14B-Instruct-AWQ (current registry)
                               └─ Department LoRA Adapter
 ```
 
@@ -180,7 +181,7 @@ CEO/Department Head Hermes와 LangGraph Worker는 서로 다른 모델 서버 �
 | `worker-runtime` | Worker Graph 실행 | 내부 |
 | `worker-model-gateway` | Worker의 Qwen2.5-14B AWQ 호출과 Department LoRA Adapter 선택 | 내부 |
 | `redis` | Queue, Event, Cache | 내부 |
-| `qa-reproduction-worker` | `origin/main`의 accepted forward evidence를 lease-fenced read-only market transaction으로 재현하고 PASS/FAIL/INCONCLUSIVE를 기록 | 내부; runtime health 미검증 |
+| `qa-reproduction-worker` | accepted forward evidence를 lease-fenced read-only market transaction으로 재현하고 PASS/FAIL/INCONCLUSIVE를 기록 | 내부; runtime health 미검증 |
 | `migration-runner` | Migration/Seed One-shot | 상주 금지 |
 
 8개 Hermes Profile은 논리적 Runtime 8개다. 비용 절감을 위해 같은 EC2에 배치할 수 있지만, Profile·Memory·Credential·Tool Allowlist는 각각 격리한다. Trading과 Risk의 권한을 같은 Process/Token으로 합치지 않는다.

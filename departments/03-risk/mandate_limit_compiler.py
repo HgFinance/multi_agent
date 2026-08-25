@@ -9,14 +9,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
-from decimal import Decimal, ROUND_DOWN
+from datetime import datetime
+from decimal import ROUND_DOWN, Decimal
 from typing import Any, Literal
 from uuid import UUID, uuid5
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-
 from mandate_presets import PRESET_VERSION, PresetAlignment, validate_preset_alignment
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 COMPILER_VERSION = "mandate-limit-compiler.v1"
 _POLICY_NAMESPACE = UUID("364df2d5-f40a-4e30-a198-00b1a24cb2af")
@@ -33,7 +32,7 @@ class HardMandateLimits(BaseModel):
     max_daily_loss_pct: Decimal = Field(gt=0, le=1)
     max_drawdown_pct: Decimal = Field(gt=0, le=1)
     trade_risk_budget_pct: Decimal = Field(gt=0, le=1)
-    min_order_notional: Decimal = Field(default=Decimal("0"), ge=0)
+    min_order_notional: Decimal = Field(default=Decimal(0), ge=0)
     max_order_notional: Decimal | None = Field(default=None, gt=0)
     allowed_instrument_ids: list[UUID] | None = None
     allowed_asset_classes: list[str] | None = None
@@ -42,7 +41,7 @@ class HardMandateLimits(BaseModel):
     excluded_sectors: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def monotonic_limits(self) -> "HardMandateLimits":
+    def monotonic_limits(self) -> HardMandateLimits:
         if self.max_instrument_weight > self.max_sector_weight:
             raise ValueError("max_instrument_weight must not exceed max_sector_weight")
         if self.max_sector_weight > self.max_gross_exposure:
@@ -136,16 +135,16 @@ def compile_mandate_limits(
         else MandateLimitCompilationRequest.model_validate(request)
     )
     input_hash = _hash(item)
-    common = dict(
-        fund_id=item.fund_id,
-        mandate_id=item.mandate_id,
-        mandate_version_id=str(item.mandate_version_id),
-        mindset=item.mindset,
-        experience=item.experience,
-        effective_from=item.effective_from,
-        input_hash=input_hash,
-        trace_id=item.trace_id,
-    )
+    common = {
+        "fund_id": item.fund_id,
+        "mandate_id": item.mandate_id,
+        "mandate_version_id": str(item.mandate_version_id),
+        "mindset": item.mindset,
+        "experience": item.experience,
+        "effective_from": item.effective_from,
+        "input_hash": input_hash,
+        "trace_id": item.trace_id,
+    }
     if (
         item.mandate_version_id == "unversioned"
         or item.mandate_version is None
