@@ -1,7 +1,7 @@
 ---
 name: skill-authoring
-description: "네가 뚫은 병목을 다음 사람이 다시 뚫지 않게 스킬로 남긴다. 같은 문제를 두 번 이상 만났거나, 남들이 '없다'고 오진하는 것을 네가 찾아냈을 때 쓴다. 스킬을 쓰고, 검사로 고정하고, 프로필에 설치하는 절차."
-version: 0.1.0
+description: "네가 뚫은 병목을 다음 사람이 다시 뚫지 않게 스킬로 남긴다. 같은 문제가 서로 다른 실행에서 세 번 이상 반복됐거나, 남들이 '없다'고 오진하는 것을 네가 찾아냈을 때 쓴다. 사건 기록부터 검증·승인·정본 승격·진화·퇴역까지 다루는 절차."
+version: 1.0.0
 platforms: [linux, macos, windows]
 metadata:
   hermes:
@@ -30,7 +30,7 @@ metadata:
 ## 언제 쓰나 — 그리고 언제 안 쓰나
 
 **쓴다:**
-- 같은 종류의 문제를 **두 번** 만났다
+- 같은 종류의 문제를 **서로 다른 실행에서 세 번** 만났다
 - 남들이(또는 네가) "없다/안 된다" 고 오진하던 것을 사실로 밝혔다
 - 절차가 있는데 아무도 몰라서 안 쓰이고 있다
 - 네 판단이 매번 같은 규칙을 따르고 있다 — 그러면 그건 규칙이지 판단이 아니다
@@ -74,16 +74,17 @@ quant-py "$SKILLDIR/scripts/<도구>.py"
 고친 뒤에는 원인이 당연해 보여서 **증상을 잊는다.** 증상이 없으면 다음
 사람은 그 스킬을 못 찾는다. 실제 예외 메시지·로그 줄을 그대로 붙여라.
 
-### 2. 쓴다
+### 2. 사건을 영속 원장에 넣고 제안을 만든다
 
-```
-skills/<이름>/
-  SKILL.md              # frontmatter: name, description, version, metadata.hermes
-  scripts/<도구>.py      # 있으면
+```bash
+python scripts/evolution_skills.py ingest \
+  --department 01-research --input /path/to/occurrences.jsonl
+python scripts/evolution_skills.py propose --department 01-research
 ```
 
-`description` 이 검색 열쇠다. **증상 문장을 넣어라** — "언제 쓰는지" 가
-description 에 없으면 아무도 안 부른다.
+제안은 `~/.hermes/evolution-skills/proposals/`에만 기록된다. 생성 모델은 운영
+정본인 `qwen2.5-14b-instruct-awq`로 고정한다. 모델이나 Agent가 저장소의
+`skills/`에 직접 쓰면 안 된다.
 
 ### 3. 도구를 붙였으면 실제로 돌려 본다
 
@@ -113,20 +114,27 @@ def _check_<사고이름>():
 "검사를 만들었다" 와 "그 검사가 그 사고를 잡는다" 는 다르다. 실제로 정규식이
 자기가 만들어진 사고 문장을 못 잡은 일이 있었다.
 
-### 5. 프로필에 설치한다
+### 5. QA·소유자 검토 뒤 정본에 승격한다
 
 ```bash
-# 프로필 구조가 한 겹 더 들어가 있을 수 있다 - 실측으로 잡는다
-DEST=$(find /opt/data -type d -name skills | head -1)
-cp -r skills/<이름> "$DEST/"
-find /opt/data -path "*<이름>*"          # 들어갔는지 확인
+python scripts/evolution_skills.py approve <proposal-id> \
+  --approved-by <검토자> --qa-verdict PASS
+python scripts/evolution_skills.py promote <proposal-id>
+python scripts/evolution_skills.py status
 ```
+
+승격기가 `skills/evolved/<이름>/`의 소스·provenance와
+`skills/evolution-registry.json`의 소유자 맵을 함께 갱신한다. 런타임의 공유
+스킬 마운트는 읽기 전용이다. QA FAIL이면 `REJECTED`로 닫고 승격하지 않는다.
 
 ### 6. 이어 놓는다
 
 새 스킬은 **관련 스킬에서 가리켜야** 발견된다. `metadata.hermes.related_skills`
 에 적고, 관련 스킬 본문에도 한 줄 링크를 넣어라. 아무도 안 가리키는 스킬은
 없는 것과 같다.
+
+전체 상태 전이, provenance 필드, 분류·퇴역 규칙과 운영 명령은
+[Evolution lifecycle](references/evolution-lifecycle.md)을 따른다.
 
 ## 성과를 올리는 스킬로 넘어갈 때
 
@@ -165,3 +173,7 @@ find /opt/data -path "*<이름>*"          # 들어갔는지 확인
 
 **한 스킬에 다 넣지 않는다.** 진단·구축·판정은 다른 일이다. 섞으면 아무도
 끝까지 안 읽는다.
+
+**호출 횟수 0으로 삭제하지 않는다.** bundled·project-owned·evolved·
+generated-cache를 먼저 구분한다. evolved 스킬은 대체 스킬 또는 소유자의
+명시적 무대체 승인이 있을 때만 `RETIRED`로 바꾸며 소스와 계보는 보존한다.

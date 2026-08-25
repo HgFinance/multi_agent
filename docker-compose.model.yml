@@ -167,3 +167,40 @@ services:
   ceo-kanban-supervisor:
     environment:
       <<: *worker-model-environment
+
+  # Evolution Skill proposal worker. It may write occurrences/proposals only;
+  # the canonical repository mount is deliberately read-only. Promotion is a
+  # separate host control-plane command after QA PASS and named approval.
+  skill-evolution-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.factory
+    image: hedgefund-factory:latest
+    container_name: hedgefund-skill-evolution-worker
+    restart: unless-stopped
+    depends_on:
+      vllm:
+        condition: service_healthy
+    command:
+      - python
+      - scripts/evolution_skills.py
+      - --state-root
+      - /var/lib/evolution-skills
+      - --registry
+      - /opt/shared-skills/evolution-registry.json
+      - daemon
+      - --department
+      - 01-research
+      - --department
+      - 04-quant-backtest
+      - --model-base-url
+      - http://vllm:8000/v1
+      - --interval-seconds
+      - ${EVOLUTION_SKILL_INTERVAL_SECONDS:-900}
+    environment:
+      <<: *worker-model-environment
+      EVOLUTION_SKILLS_HOME: /var/lib/evolution-skills
+      EVOLUTION_SKILL_REGISTRY_PATH: /opt/shared-skills/evolution-registry.json
+    volumes:
+      - ${EVOLUTION_SKILLS_HOST_DIR:-/home/ubuntu/.hermes/evolution-skills}:/var/lib/evolution-skills
+      - ./skills:/opt/shared-skills:ro

@@ -8,6 +8,11 @@ from collections.abc import Iterable
 from pathlib import Path
 from types import MappingProxyType
 
+from orchestration.evolution_skills import (
+    EvolutionSkillError,
+    active_registry_bindings,
+)
+
 CANONICAL_SHARED_SKILL_ROOT = Path(__file__).resolve().parents[1] / "skills"
 
 # 프로필 목록은 **여기서 다시 적지 않는다.** 2026-08-14 실측: 이 모듈이 자기
@@ -27,7 +32,7 @@ from orchestration.canonical_profiles import (  # noqa: E402
 #   모른다 - 감사 스크립트(scripts/audit_contracts.py)가 읽을 수 있게 집합으로
 #   옮긴다. 계약에 이름만 남기는 이유는 그대로다: 소스가 생기기 전까지 카드가
 #   그 스킬을 실행 가능하다고 착각하면 안 된다.
-CANONICAL_SKILLS = frozenset(
+STATIC_CANONICAL_SKILLS = frozenset(
     {
         "agentic-rag",
         # 2026-08-13 공장 능동화 3종: 병목을 만난 부서가 스스로 진단·구축·기록한다.
@@ -72,8 +77,7 @@ SHARED_PORTFOLIO_SKILL_PROFILES = frozenset(
 # A skill may be used only by its semantic owner. Shared skills list every
 # profile that is explicitly part of the shared contract. Skills not present
 # here are not silently assigned to a profile.
-SKILL_OWNER_BY_NAME = MappingProxyType(
-    {
+_STATIC_SKILL_OWNER_BY_NAME = {
         "agentic-rag": frozenset({"risk-management", "qa-department"}),
         "dataset-engineering": frozenset(
             {"quant-backtest-department", "research-department"}
@@ -100,6 +104,26 @@ SKILL_OWNER_BY_NAME = MappingProxyType(
             {"quant-backtest-department", "research-department", "qa-department"}
         ),
     }
+
+EVOLUTION_SKILL_REGISTRY = Path(
+    os.environ.get(
+        "EVOLUTION_SKILL_REGISTRY_PATH",
+        str(CANONICAL_SHARED_SKILL_ROOT / "evolution-registry.json"),
+    )
+).expanduser().resolve()
+try:
+    ACTIVE_EVOLUTION_SKILLS, _EVOLUTION_SKILL_OWNERS = active_registry_bindings(
+        EVOLUTION_SKILL_REGISTRY
+    )
+except EvolutionSkillError as exc:
+    # A corrupt registry must stop task creation rather than silently exposing
+    # an unowned generated skill.
+    raise RuntimeError(f"invalid evolution skill registry: {exc}") from exc
+
+REGISTERED_EVOLUTION_SKILLS = frozenset(_EVOLUTION_SKILL_OWNERS)
+CANONICAL_SKILLS = STATIC_CANONICAL_SKILLS | REGISTERED_EVOLUTION_SKILLS
+SKILL_OWNER_BY_NAME = MappingProxyType(
+    {**_STATIC_SKILL_OWNER_BY_NAME, **_EVOLUTION_SKILL_OWNERS}
 )
 
 # This skill is intentionally not assigned until a domain-specific owner is
@@ -111,6 +135,15 @@ _SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$")
 
 class CanonicalSkillError(ValueError):
     """Raised before a task with an unresolvable skill can be created."""
+
+
+def _live_evolution_contract() -> tuple[frozenset[str], dict[str, frozenset[str]]]:
+    """Reload the small registry so activation does not require a process restart."""
+
+    try:
+        return active_registry_bindings(EVOLUTION_SKILL_REGISTRY)
+    except EvolutionSkillError as exc:
+        raise CanonicalSkillError(f"invalid evolution skill registry: {exc}") from exc
 
 
 def _candidate_roots(root: Path | None = None) -> tuple[Path, ...]:
@@ -132,8 +165,12 @@ def resolve_canonical_skill(skill_name: str, *, root: Path | None = None) -> Pat
     """Resolve one canonical skill without searching another profile."""
 
     name = str(skill_name or "").strip()
-    if not _SKILL_NAME_RE.fullmatch(name) or name not in CANONICAL_SKILLS:
+    active_evolved, evolved_owners = _live_evolution_contract()
+    known = STATIC_CANONICAL_SKILLS | frozenset(evolved_owners)
+    if not _SKILL_NAME_RE.fullmatch(name) or name not in known:
         raise CanonicalSkillError(f"unknown or non-canonical skill: {skill_name!r}")
+    if name in evolved_owners and name not in active_evolved:
+        raise CanonicalSkillError(f"evolution skill is not active: {name}")
     matches = [
         skill_md
         for candidate_root in _candidate_roots(root)
@@ -152,9 +189,11 @@ def skill_owners(skill_name: str) -> frozenset[str]:
     """Return the explicit semantic owner set for one canonical skill."""
 
     name = str(skill_name or "").strip()
-    if not _SKILL_NAME_RE.fullmatch(name) or name not in CANONICAL_SKILLS:
+    _, evolved_owners = _live_evolution_contract()
+    known = STATIC_CANONICAL_SKILLS | frozenset(evolved_owners)
+    if not _SKILL_NAME_RE.fullmatch(name) or name not in known:
         raise CanonicalSkillError(f"unknown or non-canonical skill: {skill_name!r}")
-    owners = SKILL_OWNER_BY_NAME.get(name)
+    owners = evolved_owners.get(name) or _STATIC_SKILL_OWNER_BY_NAME.get(name)
     if not owners:
         raise CanonicalSkillError(f"skill ownership is unresolved: {name}")
     return owners
@@ -257,7 +296,11 @@ def validate_required_skills(
 
 
 __all__ = [
+    "ACTIVE_EVOLUTION_SKILLS",
     "AMBIGUOUS_CUSTOM_SKILLS",
+    "EVOLUTION_SKILL_REGISTRY",
+    "REGISTERED_EVOLUTION_SKILLS",
+    "STATIC_CANONICAL_SKILLS",
     "CANONICAL_SHARED_SKILL_ROOT",
     "CANONICAL_PROFILES",
     "CANONICAL_SKILLS",

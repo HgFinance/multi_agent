@@ -1552,7 +1552,15 @@ def _record_pipeline_run(*, symbol: str, trace_id: str, started, ended,
 #
 # 무엇을 남길지는 **코드가 정한다.** "오늘 뭐가 아쉬웠어?" 를 LLM 에게 물으면
 # 매번 다른 답이 나와 셀 수 없다 - 셀 수 없으면 반복도 없다.
-_OCCURRENCE_LOG = Path(__file__).resolve().parent / "var" / "occurrences.jsonl"
+_EVOLUTION_SKILLS_HOME = Path(
+    os.environ.get("EVOLUTION_SKILLS_HOME")
+    or (
+        str(Path(os.environ["HERMES_HOME"]) / "evolution-skills")
+        if os.environ.get("HERMES_HOME")
+        else str(Path.home() / ".hermes/evolution-skills")
+    )
+)
+_OCCURRENCE_LOG = _EVOLUTION_SKILLS_HOME / "occurrences.jsonl"
 
 
 def collect_occurrences(out: dict, *, run_id: str, symbol: str,
@@ -1598,7 +1606,10 @@ def append_occurrences(events: list[dict], *,
         tgt.parent.mkdir(parents=True, exist_ok=True)
         with tgt.open("a", encoding="utf-8") as f:
             for e in events:
-                f.write(json.dumps(e, ensure_ascii=False) + chr(10))
+                payload = dict(e)
+                payload.setdefault("department", "01-research")
+                payload.setdefault("recorded_at", datetime.now(timezone.utc).isoformat())
+                f.write(json.dumps(payload, ensure_ascii=False) + chr(10))
         return len(events)
     except OSError:
         return 0

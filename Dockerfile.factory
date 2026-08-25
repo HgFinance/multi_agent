@@ -44,7 +44,8 @@ RUN set -eux; \
 RUN pip install --no-cache-dir \
       psycopg2-binary==2.9.10 pydantic==2.11.7 python-dotenv==1.1.1 \
       numpy==2.3.2 pandas==2.3.1 pyarrow==25.0.0 \
-      fastapi==0.116.1 "uvicorn[standard]==0.35.0" httpx==0.28.1
+      fastapi==0.116.1 "uvicorn[standard]==0.35.0" httpx==0.28.1 \
+      PyYAML==6.0.2
 
 # langgraph: BFF 의 포트폴리오 추천 워크플로(orchestration/workflows)가 쓴다.
 # 무거워서 레이어를 나눈다 - 공장 상주 셋은 이걸 안 쓰지만 같은 이미지다.
@@ -104,6 +105,7 @@ COPY tests/e2e                          ./tests/e2e
 # 워크플로가 `departments.employee_worker_runtime` 로 임포트한다 - 부서 폴더만
 # 복사하면 패키지는 생기는데 이 파일들이 없어 임포트가 죽는다.
 COPY departments/employee_worker_runtime.py ./departments/employee_worker_runtime.py
+COPY departments/worker_model_gateway.py    ./departments/worker_model_gateway.py
 COPY departments/notion_markdown.py         ./departments/notion_markdown.py
 COPY departments/risk_qa_worker_profiles.py ./departments/risk_qa_worker_profiles.py
 
@@ -111,6 +113,8 @@ COPY departments/risk_qa_worker_profiles.py ./departments/risk_qa_worker_profile
 # A container-layer hotfix must become visible as unhealthy instead of letting
 # the autopilot and worker silently execute different field registries.
 COPY scripts/factory_runtime_contract.py ./scripts/factory_runtime_contract.py
+COPY scripts/evolution_skills.py         ./scripts/evolution_skills.py
+COPY skills/evolution-registry.json      ./skills/evolution-registry.json
 RUN python scripts/factory_runtime_contract.py write
 
 ENV PYTHONUNBUFFERED=1 PYTHONPATH=/app

@@ -1219,6 +1219,32 @@ class LangSmithFeedbackService:
                         latency_warn_ms=self.config.latency_warn_ms,
                         source_project=str(job["project_name"] or self.config.workflow_project),
                     )
+                    # Deterministic, redacted failure codes are the operational
+                    # occurrence source for Evolution Skills. This is advisory
+                    # and fail-open: it never blocks trace evaluation.
+                    try:
+                        from orchestration.evolution_skills import (
+                            EvolutionSkillStore,
+                            record_trace_occurrences,
+                        )
+
+                        record_trace_occurrences(
+                            EvolutionSkillStore(
+                                Path(
+                                    os.getenv(
+                                        "EVOLUTION_SKILLS_HOME",
+                                        "/var/lib/evolution-skills",
+                                    )
+                                )
+                            ),
+                            department=result.department,
+                            run_id=result.source_run_id,
+                            finding_codes=result.finding_codes,
+                            detail="; ".join(result.summaries),
+                            at=observation.ended_at or "",
+                        )
+                    except Exception:  # noqa: BLE001 - advisory learning path
+                        LOGGER.exception("evolution_skill_occurrence_write_failed")
                     eval_run_id = publish_evaluation(result, self.config.evals_project)
                     if not eval_run_id:
                         raise RuntimeError("eval_publish_unavailable")

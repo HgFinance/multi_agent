@@ -597,6 +597,10 @@ services:
       LANGSMITH_FEEDBACK_MAX_CHARS: ${LANGSMITH_FEEDBACK_MAX_CHARS:-1200}
       LANGSMITH_FEEDBACK_METRICS_WINDOW_SECONDS: ${LANGSMITH_FEEDBACK_METRICS_WINDOW_SECONDS:-300}
       LANGSMITH_FEEDBACK_METRICS_MAX_RUNS: ${LANGSMITH_FEEDBACK_METRICS_MAX_RUNS:-100}
+      # Redacted deterministic Research/Quant findings become durable skill
+      # occurrences. The proposal worker shares this host path; canonical
+      # skills remain a separate read-only mount.
+      EVOLUTION_SKILLS_HOME: /var/lib/evolution-skills
       # Internal QA-only notification. The existing QA bot posts one redacted
       # card and the qa-hermes gateway consumes its exact signed marker.
       QA_DISCORD_CHANNEL_ID: ${QA_DISCORD_CHANNEL_ID:-1541636723006775477}
@@ -612,6 +616,7 @@ services:
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
     volumes:
       - portfolio_runtime_data:/var/lib/portfolio
+      - ${EVOLUTION_SKILLS_HOST_DIR:-/home/ubuntu/.hermes/evolution-skills}:/var/lib/evolution-skills
 
   timescaledb:
     image: timescale/timescaledb-ha:pg17
