@@ -198,6 +198,7 @@ class RiskControlRepository:
                       regime, action, state, entry_reference, stop_price,
                       take_profit_price, trailing_activation_price, trailing_distance,
                       position_risk_amount, quantity_cap, current_quantity,
+                      mandate_limits, portfolio_usage,
                       reward_risk_ratio, liquidation_stages, calculation_version,
                       input_hash, data_quality, reason_codes, review_triggers,
                       execution_mode, trace_id, task_id
@@ -205,7 +206,8 @@ class RiskControlRepository:
                       %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PROPOSED',
                       %s, %s, %s, %s, %s, %s,
                       %s, %s, %s, %s, %s, %s,
-                      %s, %s, %s, %s, %s, %s
+                      %s, %s, %s, %s, %s, %s,
+                      %s, %s
                     )
                     on conflict (fund_id, instrument_id, input_hash, calculation_version)
                     do nothing
@@ -230,6 +232,8 @@ class RiskControlRepository:
                         plan.position_risk_amount,
                         plan.quantity_cap,
                         plan.current_quantity,
+                        Json(_json_safe(plan.mandate_limits)),
+                        Json(_json_safe(plan.portfolio_usage)),
                         plan.reward_risk_ratio,
                         Json(_json_safe(payload["liquidation_stages"])),
                         plan.calculation_version,
