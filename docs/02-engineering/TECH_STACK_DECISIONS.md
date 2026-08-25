@@ -1,6 +1,7 @@
 # Personal Hedge Fund Agent - Technology Stack Decisions
 
-> 문서 상태: Core Stack v1.5
+> 문서 상태: CURRENT REFERENCE · Core Stack v1.6
+> 검토일: 2026-08-25 UTC
 > 최상위 기준: [HEDGE_FUND_MASTER_PLAN.md](../HEDGE_FUND_MASTER_PLAN.md)  
 > 범위: Core Paper Trading 구현  
 > 원칙: 사용자가 지정한 필수 도구를 유지하되 기능 중복과 Vendor Lock-in을 최소화한다.  
@@ -17,8 +18,10 @@
 |---|---|---|
 | Hermes Agent | 필수 | 사용자-facing CIO/Supervisor, Tool·Skill 실행, 장기 사용자 Context |
 | LangGraph | 필수 | 투자위원회, Strategy Promotion과 승인 가능한 상태 Workflow |
-| Amazon Bedrock Claude | 필수 | Production/통합 환경의 주 LLM |
-| Ollama | 필수 | 로컬 개발, Offline Test, 저비용 보조 모델과 Embedding |
+| Head Provider Gateway | 필수 | 현재 Hermes Head는 `openai-codex/gpt-5.6-luna`; 대체 provider는 profile allow-list와 승인 절차 적용 |
+| Qwen2.5-14B-Instruct-AWQ + vLLM | 필수 | 운영 Employee Worker 기본 모델; Worker Model Gateway 뒤에서 선택적 LoRA/Hybrid 적용 |
+| Ollama | 선택 fallback | 로컬 개발, Offline Test와 명시적 저비용 fallback |
+| Amazon Bedrock Claude | 후보 adapter | 현행 주 LLM이 아님; 별도 구현·평가·승인 후 Head/Model Gateway 대체 경로로 사용 가능 |
 | Supabase PostgreSQL | 필수 | PostgreSQL, pgvector, 문서·Artifact Storage (사용자 Auth 제외) |
 | Docker | 필수 | 서비스별 Runtime 격리와 재현 가능한 개발 환경 |
 | Render | 보류 | 초기 Demo 배포 후보, 실시간 Worker 적합성 검증 전 미확정 |
@@ -39,7 +42,7 @@ Pinecone 예외는 [ADR-0006](adr/0006-pinecone-for-risk-qa-static-corpora.md)�
 | Queue/Hot State | Redis + redis-py | P0 필수 |
 | Market Data | LS증권 Open API + KRX Tick Collector Adapter | P0 확정 |
 | Time-Series DB | 별도 TimescaleDB + Parquet 장기 Archive | P0, 리서치·퀀트 전용 |
-| Agent Model Adapter | langchain-aws + langchain-ollama | P0 필수 |
+| Agent Model Adapter | Head Provider Gateway + Worker Model Gateway; `langchain-aws`/`langchain-ollama`는 선택 adapter | P0 경계 필수 |
 | LangGraph Persistence | langgraph-checkpoint-postgres | P0 필수 |
 | DataFrame/Feature | Polars + NumPy | P0 필수 |
 | File Format | PyArrow + Parquet | P0 필수 |
@@ -153,31 +156,33 @@ class ModelGateway:
     async def embed(self, texts: list[str]) -> EmbeddingResponse: ...
 ```
 
-구현 Adapter:
+현재 모델 경계:
 
-- `BedrockClaudeAdapter`: Amazon Bedrock의 Claude 호출
-- `OllamaChatAdapter`: 로컬 Chat Model
-- `BedrockEmbeddingAdapter`: Production Embedding 후보
-- `OllamaEmbeddingAdapter`: 로컬 Embedding
+- Head: profile이 `openai-codex/gpt-5.6-luna`를 선택하며 승인된 provider 대체 경로를 둔다.
+- Worker: `departments/worker_model_gateway.py`가 vLLM Qwen AWQ, adapter와 Hybrid route를 해석한다.
+- Local fallback: 같은 Worker Gateway의 Ollama 경로를 명시적으로 선택한다.
+- Bedrock Chat/Embedding: 설계 후보이며 현재 주 runtime이나 구현 완료로 간주하지 않는다.
 
 독립 LangGraph Worker Graph에서는 직접 `boto3`나 Ollama URL을 호출하지 않고 Gateway와 allow-listed tool을 주입한다.
 
-### 3.2 Bedrock Claude
+### 3.2 Head Provider와 Bedrock 후보
 
-- `langchain-aws`의 Bedrock Chat Integration 또는 AWS SDK를 사용한다.
-- 공통 Model Gateway에서는 Bedrock Converse/Messages 계열 API를 감싼다.
+- 현재 Head provider는 부서 profile의 `openai-codex/gpt-5.6-luna`다.
+- Bedrock을 도입하면 `langchain-aws` 또는 AWS SDK를 provider adapter 뒤에서 사용한다.
+- Bedrock Converse/Messages 계열 API를 직접 Worker 코드에 넣지 않는다.
 - Model ID, Region, Temperature, Max Token과 Prompt Version을 설정으로 관리한다.
 - AWS Credential은 환경변수 Access Key보다 Workload Identity/Profile을 우선한다.
 - Token, Latency, Error, Throttle과 추정 비용을 기록한다.
 - Claude 장애 시 신규 Agent 분석만 중단하며 Risk/OMS는 계속 동작한다.
 
-AWS를 전체 배포 Cloud로 선택하지 않아도 Bedrock을 Model Provider로 사용할 수 있다.
+AWS를 전체 배포 Cloud로 선택하지 않아도 Bedrock을 Model Provider로 사용할 수 있지만,
+후보 adapter의 존재와 현재 활성 provider를 같은 것으로 표현하지 않는다.
 
 ### 3.3 Ollama
 
 - 로컬 개발과 CI의 선택적 Agent Test에 사용한다.
 - 빠른 Event 분류와 요약용 소형 Model을 둔다.
-- Prompt 구조는 Bedrock Adapter와 동일하게 유지한다.
+- Prompt 구조는 Worker Model Gateway 계약과 호환되게 유지한다.
 - Test에서는 Model Tag 또는 Digest를 고정한다.
 - Ollama 결과와 Bedrock 결과를 동일하다고 가정하지 않는다.
 - Risk, 주문수량과 PnL처럼 결정론이 필요한 계산에는 사용하지 않는다.
@@ -512,7 +517,7 @@ LangSmith는 선택적 개발 추적 어댑터다. 기본 tracing은 `LANGSMITH_
 4. FastAPI Domain API
 5. WebSocket/Feature Worker
 6. Model Gateway와 Ollama Adapter
-7. Bedrock Claude Adapter
+7. 승인된 Head Provider 대체 adapter(필요 시 Bedrock 포함)
 8. LangGraph Decision Workflow와 Postgres Checkpoint
 9. Hermes API/MCP Adapter
 10. RAG와 pgvector
@@ -524,7 +529,7 @@ LangSmith는 선택적 개발 추적 어댑터다. 기본 tracing은 `LANGSMITH_
 ## 15. 기술 선택 완료 조건
 
 - [ ] Hermes와 LangGraph의 소유 State와 호출 방향이 분리됐다.
-- [ ] Bedrock/Ollama가 동일 Model Gateway Contract를 구현한다.
+- [ ] Head Provider와 Worker Model Gateway의 호출·권한·telemetry 경계가 분리된다.
 - [ ] Embedding Model별 Vector Index가 분리된다.
 - [ ] Supabase에 Tick Stream을 Row 단위로 적재하지 않는다.
 - [ ] Redis 장애 후 Source of Truth에서 상태를 재구성한다.
@@ -549,7 +554,7 @@ LangSmith는 선택적 개발 추적 어댑터다. 기본 tracing은 `LANGSMITH_
 
 ## 17. 최종 결정
 
-> Hermes는 사용자-facing CIO Supervisor, LangGraph는 투자 Workflow, Bedrock Claude는 주 LLM, Ollama는 로컬·저비용 Model, Supabase PostgreSQL은 Transaction·Vector·Storage, 별도 TimescaleDB는 리서치·퀀트 시계열, Redis는 Queue·Hot State, Docker는 Runtime 경계로 사용한다. 이 로컬 모의투자 범위에는 사용자 Auth·로그인·세션을 구현하지 않는다. FastAPI/Pydantic/SQLAlchemy가 Domain API를 구성하고 Polars/Parquet/DuckDB가 시장 데이터와 연구 Dataset을 처리한다. Frontend는 `ai-office` 기반 Next.js·React·TypeScript로 확정하며 Pixel Office와 업무 Dashboard를 결합한다. UI는 공식 Backend 상태의 Projection과 승인 요청만 담당하고 Risk, OMS와 거래 원장은 결정론적 Backend가 독점한다.
+> Hermes는 사용자-facing CIO Supervisor, LangGraph는 투자 Workflow다. 현재 Head는 `openai-codex/gpt-5.6-luna`, Employee Worker는 Worker Model Gateway 뒤의 Qwen2.5-14B-Instruct-AWQ를 사용하며, 선택적 LoRA/Hybrid와 명시적 Ollama fallback을 분리한다. Bedrock Claude는 승인 전 후보 adapter다. Supabase PostgreSQL은 Transaction·Vector·Storage, 별도 TimescaleDB는 리서치·퀀트 시계열, Redis는 Queue·Hot State, Docker는 Runtime 경계로 사용한다. 이 로컬 모의투자 범위에는 사용자 Auth·로그인·세션을 구현하지 않는다. FastAPI/Pydantic/SQLAlchemy가 Domain API를 구성하고 Polars/Parquet/DuckDB가 시장 데이터와 연구 Dataset을 처리한다. Frontend는 `ai-office` 기반 Next.js·React·TypeScript이며 UI는 공식 Backend 상태의 Projection과 승인 요청만 담당하고 Risk, OMS와 거래 원장은 결정론적 Backend가 독점한다.
 
 Kafka/Redpanda, Flink, ClickHouse, Feast, Neo4j, Ray와 Kubernetes는 현재 Core 확정 스택이 아니다.
 부하, Replay, Feature 일관성, Graph Query, 분산 연구 또는 배포 격리 문제가 실측되고 기존 스택이

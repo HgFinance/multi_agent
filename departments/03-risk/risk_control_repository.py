@@ -203,7 +203,8 @@ class RiskControlRepository:
                       execution_mode, trace_id, task_id
                     ) values (
                       %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PROPOSED',
-                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                      %s, %s, %s, %s, %s, %s,
+                      %s, %s, %s, %s, %s, %s,
                       %s, %s, %s, %s, %s, %s
                     )
                     on conflict (fund_id, instrument_id, input_hash, calculation_version)

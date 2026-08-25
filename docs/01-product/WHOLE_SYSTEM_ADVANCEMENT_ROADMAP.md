@@ -588,8 +588,10 @@ valid_from/to  참조 데이터가 유효한 기간
 |---|---|---|
 | 상위 Agent | Hermes | CEO/Supervisor, Memory, Skill, 사용자 Context와 업무 위임 |
 | 투자 Workflow | LangGraph | 상태 머신, Checkpoint, Interrupt/Resume와 승인 |
-| 주 LLM | Amazon Bedrock Claude | 통합 환경의 Deep Reasoning과 Model Gateway |
-| 로컬 LLM | Ollama | 개발, Offline Eval, 저비용 분류와 장애 대체 |
+| Head Provider | 현재 `openai-codex/gpt-5.6-luna` | Hermes Head의 계획·종합; 대체 provider는 승인 절차 적용 |
+| Worker LLM | Qwen2.5-14B-Instruct-AWQ + vLLM | Worker Model Gateway, 선택적 LoRA/Hybrid |
+| 로컬 fallback | Ollama | 개발, Offline Eval과 명시적 장애 대체 |
+| 후보 provider | Amazon Bedrock Claude | 현행 주 LLM이 아니며 adapter 구현·평가·승인 후 검토 |
 | Domain API | FastAPI, Pydantic v2 | 계약 검증과 본부별 API |
 | Transaction DB | Supabase PostgreSQL | 업무, 결정, 주문, 장부, 감사와 RLS/DB 권한 |
 | Vector Search | pgvector | 초기 Hybrid RAG와 Evidence Retrieval |
@@ -600,7 +602,7 @@ valid_from/to  참조 데이터가 유효한 기간
 | Runtime | Docker, Docker Compose | 서비스 격리와 재현 가능한 배포 |
 | Frontend | Next.js, React, TypeScript | AI Office와 Operator Control Plane |
 
-Hermes와 LangGraph는 Risk, OMS와 Ledger를 대체하지 않는다. Bedrock Guardrails도 결정론적 Risk
+Hermes와 LangGraph는 Risk, OMS와 Ledger를 대체하지 않는다. Provider guardrail도 결정론적 Risk
 Gate나 Tool 권한 통제를 대체하지 않는다.
 
 ### 8.2 바로 보강할 도구
