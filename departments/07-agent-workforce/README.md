@@ -116,6 +116,12 @@ Scorecard 관찰의 실제 API 배선.
   아니라 `None` — cost.py 불변식 3과 같은 원칙. 창구는
   `GET /workforce/v1/departments/trigger-rates`.
 
+- `scorecard/observability.py` — `check_department_llm_usage()`(2026-08-25). capacity와
+  같은 실행 이벤트를 읽지만 latency/재시도가 아니라 `llm_calls`/`model_name`/
+  `prompt_tokens`/`completion_tokens`/`attempts`/`status`를 집계한다. 이 넷 중 앞의
+  셋은 `begin_worker_metric()` 컨텍스트가 열려 있었던 실행에서만 나오므로
+  `arrivals > 0`이어도 `None`일 수 있다. 창구는 `GET /workforce/v1/departments/llm-usage`.
+
 ## planning/
 
 - `planning/workforce_plan.py` — **P1-2 HR-04 Workforce Plan** 상태 머신. HR-01

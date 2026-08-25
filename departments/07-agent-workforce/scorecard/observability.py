@@ -17,8 +17,9 @@ compliance-policy-agent Trace 에는 Mandate/제한종목 질의응답 같은 Ri
 않고, timestamp 하나만 본다. TraceWithDetails.metadata 도 읽지 않는다 — metadata
 안의 eval_score 등은 QA 소유 판정이라 여기서 복제하면 원본과 어긋날 수 있다.
 
-⚠ 경계 확장(2026-08-24, Capacity): `list_worker_activity()`는 metadata 중
-`latency_ms`/`error_count`/`retries` **셋만** 추가로 읽는다. 이 셋은 QA 판정이
+⚠ 경계 확장(2026-08-24 Capacity, 2026-08-25 LLM 사용량): `list_worker_activity()`는
+metadata 중 `latency_ms`/`error_count`/`retries`/`attempts`/`status`/`llm_calls`/
+`model_name`/`prompt_tokens`/`completion_tokens`만 추가로 읽는다. 전부 QA 판정이
 아니라 이 이벤트를 쓴 실행기 자신의 값이다(`_metric_metadata()` 허용 목록 —
 `orchestration/llm_observability.py`). eval_score·input·output은 여전히 절대
 읽지 않는다 — 그 경계는 그대로다.
@@ -147,6 +148,14 @@ def _safe_int(value: Any) -> int | None:
         return None
 
 
+def _safe_str(value: Any) -> str | None:
+    """metadata 값을 str 로 바꾼다 - 빈 값(None/"")은 None."""
+
+    if value in (None, ""):
+        return None
+    return str(value)
+
+
 def _percentile(values: list[float], fraction: float) -> float | None:
     """values 의 fraction 분위수(예: 0.95 -> p95). values 가 비면 None."""
 
@@ -201,17 +210,25 @@ class LangfuseQueryError(RuntimeError):
 
 @dataclass(frozen=True)
 class WorkerActivityRecord:
-    """실행 이벤트 한 건에서 Capacity 계산에 필요한 필드만 뽑는다.
+    """실행 이벤트 한 건에서 Capacity/LLM 사용량 계산에 필요한 필드만 뽑는다.
 
-    latency_ms/error_count/retries는 이 이벤트를 쓴 실행기 자신의 값이다
-    (publish_worker_activity() 참고) - QA 소유 eval_score 나 input/output 원문은
-    여기 없다(위 "원문을 읽지 않는다" 절 참고).
+    전부 이 이벤트를 쓴 실행기 자신의 값이다(publish_worker_activity() 참고) -
+    QA 소유 eval_score 나 input/output 원문은 여기 없다(위 "원문을 읽지 않는다"
+    절 참고). attempts/status는 매 이벤트에 항상 있고, llm_calls/model_name/
+    prompt_tokens/completion_tokens는 begin_worker_metric() 컨텍스트가 열려
+    있었을 때만 있다(둘 다 없으면 None) - retries와 같은 조건이다.
     """
 
     timestamp: datetime
     latency_ms: int | None
     error_count: int | None
     retries: int | None
+    attempts: int | None
+    status: str | None
+    llm_calls: int | None
+    model_name: str | None
+    prompt_tokens: int | None
+    completion_tokens: int | None
 
 
 class LangfuseTraceReader:
@@ -299,6 +316,12 @@ class LangfuseApiTraceReader(LangfuseTraceReader):
                     latency_ms=_safe_int(metadata.get("latency_ms")),
                     error_count=_safe_int(metadata.get("error_count")),
                     retries=_safe_int(metadata.get("retries")),
+                    attempts=_safe_int(metadata.get("attempts")),
+                    status=_safe_str(metadata.get("status")),
+                    llm_calls=_safe_int(metadata.get("llm_calls")),
+                    model_name=_safe_str(metadata.get("model_name")),
+                    prompt_tokens=_safe_int(metadata.get("prompt_tokens")),
+                    completion_tokens=_safe_int(metadata.get("completion_tokens")),
                 )
             )
         return records
@@ -641,6 +664,170 @@ def check_department_capacity(
     ]
 
 
+# ── LLM 사용량 ─────────────────────────────────────────────────────────────────
+#
+# compute_department_capacity와 별도 함수로 두는 이유: capacity는 지연·재시도·
+# 오류(latency_ms/retries/error_count)를 다루고, 여기는 모델·토큰·상태
+# (llm_calls/model_name/prompt_tokens/completion_tokens/attempts/status)를
+# 다룬다 - 같은 이벤트를 다시 읽지만 집계 목적이 달라 idle/capacity/fire-rate가
+# 나뉜 것과 같은 이유로 분리한다.
+
+
+class LlmUsageObservationStatus(str, Enum):
+    MEASURED = "MEASURED"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+@dataclass(frozen=True)
+class DepartmentLlmUsageReport:
+    """부서 하나의 Langfuse 기반 LLM 사용량 관측 한 건.
+
+    llm_calls/prompt_tokens/completion_tokens는 begin_worker_metric() 컨텍스트가
+    열려 있었던 이벤트에서만 나온다 - arrivals(관측된 이벤트 수) > 0이어도 이
+    셋은 None일 수 있다(그 창의 실행이 전부 컨텍스트 밖이었을 경우). 0과 None을
+    섞지 않는다(cost.py 불변식 3과 동일 원칙) - 그래서 "합산할 값이 하나도
+    없었다"와 "합산했더니 0이었다"를 구분해 값이 있는 레코드가 하나도 없으면
+    None을 돌려준다.
+    """
+
+    department: str
+    window_start: datetime
+    window_end: datetime
+    status: LlmUsageObservationStatus
+    arrivals: int | None
+    llm_calls: int | None
+    prompt_tokens: int | None
+    completion_tokens: int | None
+    avg_attempts: float | None
+    status_counts: dict[str, int] | None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "department": self.department,
+            "window_start": self.window_start.isoformat(),
+            "window_end": self.window_end.isoformat(),
+            "status": self.status.value,
+            "arrivals": self.arrivals,
+            "llm_calls": self.llm_calls,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "avg_attempts": self.avg_attempts,
+            "status_counts": self.status_counts,
+        }
+
+
+def compute_department_llm_usage(
+    *,
+    department: str,
+    reader: LangfuseTraceReader | None,
+    since: datetime,
+    now: datetime,
+    repo_root: Path,
+) -> DepartmentLlmUsageReport:
+    """department 등록 Worker 전원의 실행 이벤트를 모아 LLM 사용량 하나로 합친다."""
+
+    stage = INVESTMENT_DEPARTMENT_STAGE.get(department)
+    if stage is None:
+        raise ValueError(f"unknown_investment_department:{department}")
+    if load_worker_registry is None or workers_for_department is None:
+        raise WorkerRegistryUnavailable(
+            f"worker_registry_unavailable:{_WORKER_REGISTRY_IMPORT_ERROR}"
+        )
+    try:
+        registry = load_worker_registry(repo_root)
+    except WorkerRegistryError as exc:
+        raise WorkerRegistryUnavailable(f"worker_registry_unavailable:{exc}") from exc
+
+    def _unavailable() -> DepartmentLlmUsageReport:
+        return DepartmentLlmUsageReport(
+            department=department, window_start=since, window_end=now,
+            status=LlmUsageObservationStatus.UNAVAILABLE,
+            arrivals=None, llm_calls=None, prompt_tokens=None, completion_tokens=None,
+            avg_attempts=None, status_counts=None,
+        )
+
+    if reader is None:
+        return _unavailable()
+
+    specs = tuple(workers_for_department(registry, department))
+    records: list[WorkerActivityRecord] = []
+    try:
+        for spec in specs:
+            event_name = langfuse_worker_event_name(stage=stage, worker_id=spec.worker_id)
+            records.extend(reader.list_worker_activity(event_name=event_name, since=since))
+    except LangfuseQueryError:
+        return _unavailable()
+
+    arrivals = len(records)
+    if arrivals == 0:
+        return DepartmentLlmUsageReport(
+            department=department, window_start=since, window_end=now,
+            status=LlmUsageObservationStatus.MEASURED,
+            arrivals=0, llm_calls=None, prompt_tokens=None, completion_tokens=None,
+            avg_attempts=None, status_counts=None,
+        )
+
+    llm_calls = [r.llm_calls for r in records if r.llm_calls is not None]
+    prompt_tokens = [r.prompt_tokens for r in records if r.prompt_tokens is not None]
+    completion_tokens = [r.completion_tokens for r in records if r.completion_tokens is not None]
+    attempts = [r.attempts for r in records if r.attempts is not None]
+    statuses = [r.status for r in records if r.status is not None]
+
+    status_counts: dict[str, int] | None = None
+    if statuses:
+        status_counts = {}
+        for s in statuses:
+            status_counts[s] = status_counts.get(s, 0) + 1
+
+    return DepartmentLlmUsageReport(
+        department=department, window_start=since, window_end=now,
+        status=LlmUsageObservationStatus.MEASURED,
+        arrivals=arrivals,
+        llm_calls=sum(llm_calls) if llm_calls else None,
+        prompt_tokens=sum(prompt_tokens) if prompt_tokens else None,
+        completion_tokens=sum(completion_tokens) if completion_tokens else None,
+        avg_attempts=(sum(attempts) / len(attempts)) if attempts else None,
+        status_counts=status_counts,
+    )
+
+
+def check_department_llm_usage(
+    *,
+    reader: LangfuseTraceReader | None = None,
+    departments: tuple[str, ...] = tuple(INVESTMENT_DEPARTMENT_STAGE),
+    lookback_hours: float = 24.0,
+    now: datetime | None = None,
+    repo_root: Path = ROOT,
+) -> list[DepartmentLlmUsageReport]:
+    """6개 투자본부(기본값) 전체의 LLM 사용량을 부서 단위로 하나씩 돌려준다.
+
+    check_department_capacity()와 같은 실패 모드다 - reader를 못 만들거나 조회가
+    실패하면 UNAVAILABLE로 접는다.
+    """
+
+    if lookback_hours <= 0:
+        raise ValueError("lookback_hours 는 양수여야 한다")
+    for department in departments:
+        if department not in INVESTMENT_DEPARTMENT_STAGE:
+            raise ValueError(f"unknown_investment_department:{department}")
+
+    now = now or datetime.now(timezone.utc)
+    since = now - timedelta(hours=lookback_hours)
+
+    if reader is None:
+        try:
+            reader = LangfuseApiTraceReader()
+        except LangfuseQueryError:
+            reader = None
+
+    return [
+        compute_department_llm_usage(
+            department=department, reader=reader, since=since, now=now, repo_root=repo_root,
+        )
+        for department in departments
+    ]
+
+
 # ── 발화율(fire rate) ─────────────────────────────────────────────────────────
 #
 # check_idle_agents()에 합치지 않는 이유: idle-agents 는 "가장 최근 실행이
@@ -842,14 +1029,27 @@ if __name__ == "__main__":
 
     class _FixedActivityReader(LangfuseTraceReader):
         """모든 event_name 에 같은 레코드 3건(latency 100/200/900ms, error 1건,
-        retry 1건)을 돌려주는 대역 - Worker 수와 무관하게 집계값을 손으로
-        검산할 수 있게 고정한다."""
+        retry 1건, llm_calls 2/3/1, tokens 100+50/200+80/50+20, attempts 1/2/1,
+        status COMPLETED/DEGRADED/COMPLETED)을 돌려주는 대역 - Worker 수와
+        무관하게 집계값을 손으로 검산할 수 있게 고정한다."""
 
         def list_worker_activity(self, *, event_name: str, since: datetime, limit: int = 200):
             return [
-                WorkerActivityRecord(timestamp=now, latency_ms=100, error_count=0, retries=0),
-                WorkerActivityRecord(timestamp=now, latency_ms=200, error_count=1, retries=1),
-                WorkerActivityRecord(timestamp=now, latency_ms=900, error_count=0, retries=0),
+                WorkerActivityRecord(
+                    timestamp=now, latency_ms=100, error_count=0, retries=0,
+                    attempts=1, status="COMPLETED", llm_calls=2,
+                    model_name="qwen2.5-14b-instruct-awq", prompt_tokens=100, completion_tokens=50,
+                ),
+                WorkerActivityRecord(
+                    timestamp=now, latency_ms=200, error_count=1, retries=1,
+                    attempts=2, status="DEGRADED", llm_calls=3,
+                    model_name="qwen2.5-14b-instruct-awq", prompt_tokens=200, completion_tokens=80,
+                ),
+                WorkerActivityRecord(
+                    timestamp=now, latency_ms=900, error_count=0, retries=0,
+                    attempts=1, status="COMPLETED", llm_calls=1,
+                    model_name="qwen2.5-14b-instruct-awq", prompt_tokens=50, completion_tokens=20,
+                ),
             ]
 
     research_workers = check_idle_agents(reader=_NoneReader(), departments=("research",), now=now)
@@ -893,6 +1093,43 @@ if __name__ == "__main__":
     print("  자격증명 없음 -> Capacity 전부 UNAVAILABLE - OK")
 
     print("Capacity(Langfuse 기반) 자체 점검 통과.")
+
+    # ── LLM 사용량(2026-08-25) ──────────────────────────────────────────────
+
+    usage_reports = check_department_llm_usage(
+        reader=_FixedActivityReader(), departments=("research",), lookback_hours=1.0, now=now,
+    )
+    assert len(usage_reports) == 1
+    usage = usage_reports[0]
+    assert usage.status is LlmUsageObservationStatus.MEASURED, usage
+    assert usage.arrivals == 3 * n_research_workers, (usage.arrivals, n_research_workers)
+    assert usage.llm_calls == 6 * n_research_workers, usage.llm_calls  # 2+3+1
+    assert usage.prompt_tokens == 350 * n_research_workers, usage.prompt_tokens  # 100+200+50
+    assert usage.completion_tokens == 150 * n_research_workers, usage.completion_tokens  # 50+80+20
+    assert abs(usage.avg_attempts - (4 / 3)) < 1e-9, usage.avg_attempts  # (1+2+1)/3
+    assert usage.status_counts == {"COMPLETED": 2 * n_research_workers, "DEGRADED": n_research_workers}, (
+        usage.status_counts
+    )
+    print(f"  LLM 사용량 집계(llm_calls/tokens/avg_attempts/status_counts) - OK ({usage.arrivals}건)")
+
+    # arrivals=0이면 MEASURED이되 나머지는 전부 None - "측정했더니 0"과 "잴 값이 없었다"를 구분.
+    empty_usage = check_department_llm_usage(
+        reader=_EmptyActivityReader(), departments=("qa",), lookback_hours=1.0, now=now,
+    )
+    assert empty_usage[0].status is LlmUsageObservationStatus.MEASURED
+    assert empty_usage[0].arrivals == 0
+    assert empty_usage[0].llm_calls is None and empty_usage[0].status_counts is None
+    print("  arrivals=0 -> MEASURED(0건), 나머지 None - OK")
+
+    # reader=None(자격증명 없음)이면 전부 UNAVAILABLE.
+    os.environ.pop("LANGFUSE_PUBLIC_KEY", None)
+    os.environ.pop("LANGFUSE_SECRET_KEY", None)
+    unavailable_usage = check_department_llm_usage(departments=("qa",), now=now)
+    assert unavailable_usage[0].status is LlmUsageObservationStatus.UNAVAILABLE
+    assert unavailable_usage[0].llm_calls is None
+    print("  자격증명 없음 -> LLM 사용량 전부 UNAVAILABLE - OK")
+
+    print("LLM 사용량(Langfuse 기반) 자체 점검 통과.")
 
     # ── 발화율(2026-08-25) ──────────────────────────────────────────────────
 

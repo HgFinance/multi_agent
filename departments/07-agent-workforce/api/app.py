@@ -104,6 +104,7 @@ from observability import (
     HeadProfilesUnavailable,
     WorkerRegistryUnavailable,
     check_department_capacity,
+    check_department_llm_usage,
     check_idle_agents,
     check_worker_trigger_rates,
 )
@@ -1461,6 +1462,30 @@ def get_departments_capacity(lookback_hours: float = 24.0):
             detail={"error": "worker_registry_unavailable", "message": str(exc)},
         ) from exc
     return {"capacity": [r.as_dict() for r in reports]}
+
+
+@app.get("/workforce/v1/departments/llm-usage")
+def get_departments_llm_usage(lookback_hours: float = 24.0):
+    """6개 투자본부 전체의 Langfuse 기반 LLM 사용량(모델·토큰·상태) 관측.
+
+    capacity와 같은 이벤트(llm.performance.metric)를 읽지만 latency/재시도가
+    아니라 llm_calls/model_name/prompt_tokens/completion_tokens/attempts/status를
+    집계한다. llm_calls/prompt_tokens/completion_tokens는 begin_worker_metric()
+    컨텍스트가 열려 있었던 실행에서만 나오므로, arrivals > 0이어도 None일 수 있다.
+    """
+
+    if lookback_hours <= 0:
+        raise HTTPException(status_code=422, detail="lookback_hours must be positive")
+    try:
+        reports = check_department_llm_usage(
+            departments=tuple(INVESTMENT_DEPARTMENT_STAGE), lookback_hours=lookback_hours,
+        )
+    except WorkerRegistryUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "worker_registry_unavailable", "message": str(exc)},
+        ) from exc
+    return {"llm_usage": [r.as_dict() for r in reports]}
 
 
 @app.get("/workforce/v1/departments/trigger-rates")
