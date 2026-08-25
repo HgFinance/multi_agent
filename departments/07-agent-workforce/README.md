@@ -137,6 +137,22 @@ Scorecard 관찰의 실제 API 배선.
   셋은 `begin_worker_metric()` 컨텍스트가 열려 있었던 실행에서만 나오므로
   `arrivals > 0`이어도 `None`일 수 있다. 창구는 `GET /workforce/v1/departments/llm-usage`.
 
+## roster/ (생명주기 이벤트)
+
+- `roster/lifecycle_event.py` — Agent 상태 전이 감사 기록(`workforce.lifecycle_events`).
+  `change_status()`가 `employment_status`를 바꾸면서 그 전이를 어디에도 남기지 않던 공백을 메운다 —
+  "승인 없는 활성화 0"(HR-04 KPI)을 현재 상태가 아니라 **이벤트로** 확인할 수 있어야 한다.
+  - **상태 변경과 이벤트 기록은 한 트랜잭션이다**(`postgres_roster_repository.change_status`).
+    나눠 쓰면 상태는 바뀌었는데 이벤트가 없는 창이 생기고, 그게 이 표가 막으려는 감사 공백이다.
+  - **ACTIVE 전이 이벤트는 근거(`approvals`) 없이 남길 수 없다** — `qa_eval_run_id`/`ceo_approval_id`가
+    `approvals`에 함께 실린다. 없는 근거를 빈 값으로 채우지 않는다.
+  - `trace_id`는 호출자가 준다(`POST .../status`의 필수 필드). 없을 때 만들어 채우지 않는다 —
+    지어낸 `trace_id`는 아무것과도 이어지지 않으면서 상관관계가 있는 것처럼 보인다.
+  - ⚠ 이 표에는 **append-only 트리거**가 걸려 있다(`improvement_candidate_events`와 같은 취급,
+    `cost_snapshots`/`capacity_snapshots`와는 다르다). update/delete가 거부되므로 한번 쓴 이벤트는
+    정정할 수 없다 — 그래서 `postgres_roster_repository` 자체 점검은 실 DB에서 상태를 바꾸지 않는다.
+  - 조회: `GET /workforce/v1/agents/{agent_id}/lifecycle-events`.
+
 ## performance/
 
 - `performance/` — **HR-03 성과 평가와 조치**. `scorecard/quality.py`의 종착지다 —

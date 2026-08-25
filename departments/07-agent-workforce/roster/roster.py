@@ -239,8 +239,16 @@ class RosterRepository:
         raise NotImplementedError
 
     def change_status(
-        self, agent_id: str, *, to_status: EmploymentStatus, at: datetime
+        self, agent_id: str, *, to_status: EmploymentStatus, at: datetime,
+        trace_id: str, reason: str | None = None, approvals: list | None = None,
     ) -> None:
+        """상태를 바꾸고 그 전이를 workforce.lifecycle_events 에 남긴다.
+
+        trace_id/reason/approvals 가 여기 있는 이유: 전이 사실만 남기면 "무슨 근거로
+        ACTIVE 가 됐는지"를 사후에 확인할 수 없다(HR-04 KPI "승인 없는 활성화 0").
+        구현은 상태 변경과 이벤트 기록을 **한 트랜잭션**에 넣어야 한다 -
+        lifecycle_event.py 불변식 1.
+        """
         raise NotImplementedError
 
     def get_profile_version_tool_allowlist(self, profile_version_id: str) -> dict | None:
@@ -255,6 +263,7 @@ class InMemoryRosterRepository(RosterRepository):
     def __init__(self) -> None:
         self._agents: dict[str, AgentSummary] = {}
         self._versions: dict[str, list[ProfileVersionRow]] = {}
+        self._lifecycle_events: list[dict] = []
 
     def seed_agent(self, agent: AgentSummary) -> None:
         """테스트·개발용 seed. 실 구현에서는 workforce.agent_profiles를 조회한다."""
@@ -295,11 +304,27 @@ class InMemoryRosterRepository(RosterRepository):
                     return row.submission.tool_allowlist
         return None
 
-    def change_status(self, agent_id: str, *, to_status: EmploymentStatus, at: datetime) -> None:
+    def change_status(
+        self, agent_id: str, *, to_status: EmploymentStatus, at: datetime,
+        trace_id: str = "", reason: str | None = None, approvals: list | None = None,
+    ) -> None:
         agent = self._agents.get(agent_id)
         if agent is None:
             raise AgentNotFoundError(f"agent_id={agent_id}를 찾을 수 없다")
+        # In-Memory 도 전이를 남긴다 - 실 DB 구현만 기록하면 이 대역으로 도는 테스트가
+        # "이벤트 없이 상태가 바뀌는" 경로를 정상으로 보게 된다.
+        self._lifecycle_events.append(
+            {
+                "agent_id": agent_id, "event_type": "STATUS_CHANGE",
+                "from_status": agent.employment_status.value, "to_status": to_status.value,
+                "approvals": approvals or [], "reason": reason,
+                "trace_id": trace_id, "occurred_at": at,
+            }
+        )
         self._agents[agent_id] = AgentSummary(**{**agent.__dict__, "employment_status": to_status})
+
+    def list_lifecycle_events(self, agent_id: str) -> list[dict]:
+        return [e for e in self._lifecycle_events if e["agent_id"] == agent_id]
 
 
 # ---------------------------------------------------------------------------

@@ -130,6 +130,7 @@ from probation import (
     open_probation,
 )
 from quality import QualitySnapshot, aggregate_quality, collect_quality_references
+from lifecycle_event import MissingActivationApprovalsError, activation_approvals
 from review import MissingRoleMetricsError, PerformanceReview, ReviewDecision
 from roster import (
     AgentNotFoundError,
@@ -593,6 +594,10 @@ class StatusChangeRequestIn(BaseModel):
     idempotency_key: str
     qa_eval_run_id: str | None = None
     ceo_approval_id: str | None = None
+    # workforce.lifecycle_events.trace_id 가 not null 이라 호출자가 줘야 한다.
+    # 없을 때 여기서 만들어 채우지 않는다 - 지어낸 trace_id 는 아무것과도 이어지지
+    # 않으면서 상관관계가 있는 것처럼 보인다(lifecycle_event.py 참고).
+    trace_id: str = Field(min_length=1)
 
 
 class BudgetAssessmentRequest(BaseModel):
@@ -917,6 +922,7 @@ for _exc_type in (
     PlanIllegalTransition, UnverifiedPlanApprovalError, MissingScorecardEvidenceError,
     ActionIllegalTransition, MissingVerificationError, ActionReviewMismatchError,
     ProbationAlreadyClosedError, OverlappingProbationError,
+    MissingActivationApprovalsError,
 ):
     @app.exception_handler(_exc_type)
     def _on_domain_error(request, exc, _status={  # noqa: B006 - 클로저 캡처용 기본값 트릭
@@ -941,6 +947,9 @@ for _exc_type in (
         ActionReviewMismatchError: 403,
         # 수습도 같은 원칙 - 이미 종료됐거나 이미 열려 있는 것은 상태 충돌이라 409.
         ProbationAlreadyClosedError: 409, OverlappingProbationError: 409,
+        # 근거 없는 ACTIVE 전이 이벤트는 MissingActivationEvidenceError 와 같은
+        # 종류의 결함이라 같은 409.
+        MissingActivationApprovalsError: 409,
     }):
         return JSONResponse(status_code=_status[type(exc)], content={
             "error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None,
@@ -1223,8 +1232,24 @@ def change_agent_status(agent_id: str, body: StatusChangeRequestIn):
             eval_run_status=eval_run_status, approval_decision=ceo_approval_decision,
             tool_allowlist=tool_allowlist,
         )
-    _roster_repo.change_status(agent_id, to_status=body.to_status, at=datetime.now(timezone.utc))
+    # 상태 변경과 생명주기 이벤트는 저장소가 한 트랜잭션에서 처리한다 - 여기서
+    # 나눠 부르면 상태는 바뀌었는데 이벤트가 없는 창이 생긴다.
+    _roster_repo.change_status(
+        agent_id, to_status=body.to_status, at=datetime.now(timezone.utc),
+        trace_id=body.trace_id, reason=body.reason,
+        approvals=activation_approvals(
+            qa_eval_run_id=body.qa_eval_run_id, ceo_approval_id=body.ceo_approval_id,
+        ),
+    )
     return _agent_summary_dict(_roster_repo.get_agent(agent_id))
+
+
+@app.get("/workforce/v1/agents/{agent_id}/lifecycle-events")
+def list_agent_lifecycle_events(agent_id: str):
+    """이 Agent 의 상태 전이 이력. "승인 없는 활성화 0"(HR-04 KPI)을 현재 상태가
+    아니라 이벤트로 확인할 수 있게 하는 조회다."""
+    _require_roster_repo()
+    return {"lifecycle_events": _roster_repo.list_lifecycle_events(agent_id)}
 
 
 # --- 3.3 Improvement Candidate (F19) ----------------------------------------------
@@ -2147,7 +2172,7 @@ if __name__ == "__main__":
     assert r17.status_code == 501, r17.text
     r18 = client.post("/workforce/v1/agents/a1/status", json={
         "to_status": "ACTIVE", "profile_version_id": "pv1", "reason": "x",
-        "idempotency_key": "idem-1",
+        "idempotency_key": "idem-1", "trace_id": "tr-1",
     })
     assert r18.status_code == 409, r18.text  # validate_status_change가 501 확인보다 먼저 막는다
 
@@ -2173,7 +2198,7 @@ if __name__ == "__main__":
     r19 = client.post("/workforce/v1/agents/a-p03/status", json={
         "to_status": "ACTIVE", "profile_version_id": pv_id, "reason": "x",
         "idempotency_key": "idem-p03-1", "qa_eval_run_id": "eval-ghost",
-        "ceo_approval_id": "appr-ghost",
+        "ceo_approval_id": "appr-ghost", "trace_id": "tr-p03-1",
     })
     assert r19.status_code == 403 and r19.json()["error_code"] == "UnverifiedActivationEvidenceError", \
         r19.text
@@ -2184,7 +2209,7 @@ if __name__ == "__main__":
     r20 = client.post("/workforce/v1/agents/a-p03/status", json={
         "to_status": "ACTIVE", "profile_version_id": pv_id, "reason": "x",
         "idempotency_key": "idem-p03-2", "qa_eval_run_id": "eval-running",
-        "ceo_approval_id": "appr-pending",
+        "ceo_approval_id": "appr-pending", "trace_id": "tr-p03-2",
     })
     assert r20.status_code == 403, r20.text
 
@@ -2193,7 +2218,7 @@ if __name__ == "__main__":
     r21 = client.post("/workforce/v1/agents/a-p03/status", json={
         "to_status": "ACTIVE", "profile_version_id": pv_id, "reason": "x",
         "idempotency_key": "idem-p03-3", "qa_eval_run_id": "eval-other-pv",
-        "ceo_approval_id": "appr-pending",
+        "ceo_approval_id": "appr-pending", "trace_id": "tr-p03-3",
     })
     assert r21.status_code == 403, r21.text
 
@@ -2211,7 +2236,7 @@ if __name__ == "__main__":
     r22 = client.post("/workforce/v1/agents/a-p03/status", json={
         "to_status": "ACTIVE", "profile_version_id": empty_allowlist_agent.profile_version_id,
         "reason": "x", "idempotency_key": "idem-p03-4", "qa_eval_run_id": "eval-empty-tools",
-        "ceo_approval_id": "appr-empty-tools",
+        "ceo_approval_id": "appr-empty-tools", "trace_id": "tr-p03-4",
     })
     assert r22.status_code == 409 and r22.json()["error_code"] == "ToolAllowlistMissingError", r22.text
 
@@ -2221,10 +2246,33 @@ if __name__ == "__main__":
     r23 = client.post("/workforce/v1/agents/a-p03/status", json={
         "to_status": "ACTIVE", "profile_version_id": pv_id, "reason": "x",
         "idempotency_key": "idem-p03-5", "qa_eval_run_id": "eval-ok", "ceo_approval_id": "appr-ok",
+        "trace_id": "tr-p03-5",
     })
     assert r23.status_code == 200 and r23.json()["employment_status"] == "ACTIVE", r23.text
     print("ok - P0-3 ACTIVE 전이 증거 실재성 게이트 5개 시나리오 통과 "
           "(위조 증거 403, 미완료/미승인 403, 증거 재사용 차단 403, tool_allowlist 없음 409, 정상 승인 200)")
+
+    # 6f. 그 ACTIVE 전이가 lifecycle_events 에 남아야 한다 - "승인 없는 활성화 0"을
+    #     현재 상태가 아니라 이벤트로 확인할 수 있어야 한다(HR-04 KPI).
+    r23a = client.get("/workforce/v1/agents/a-p03/lifecycle-events")
+    assert r23a.status_code == 200, r23a.text
+    _events = r23a.json()["lifecycle_events"]
+    assert len(_events) == 1, f"상태는 바뀌었는데 이벤트가 {len(_events)}건이다"
+    _ev = _events[0]
+    assert _ev["from_status"] == "CANDIDATE" and _ev["to_status"] == "ACTIVE", _ev
+    assert _ev["trace_id"] == "tr-p03-5", _ev
+    # 근거가 함께 남는다 - 전이 사실만 있고 근거가 없으면 사후 확인이 안 된다.
+    assert {a["id"] for a in _ev["approvals"]} == {"eval-ok", "appr-ok"}, _ev
+
+    # 6g. trace_id 없이는 상태를 바꿀 수 없다 - 지어내서 채우지 않는다.
+    r23b = client.post("/workforce/v1/agents/a-p03/status", json={
+        "to_status": "SUSPENDED", "profile_version_id": pv_id, "reason": "x",
+        "idempotency_key": "idem-p03-6",
+    })
+    assert r23b.status_code == 422, r23b.text
+    # 거절된 전이는 이벤트도 상태도 남기지 않는다.
+    assert len(client.get("/workforce/v1/agents/a-p03/lifecycle-events").json()["lifecycle_events"]) == 1
+    print("ok - lifecycle-events 2개 시나리오 통과 (ACTIVE 전이가 근거와 함께 기록, trace_id 없으면 422)")
 
     # 7. Workforce Plan (P1-2 HR-04) - DRAFT 생성 -> 위조/미실재 승인 차단 -> 실재 승인
     # -> 승인 없이 ACTIVE 시도 차단 -> 활성화 -> 종료 상태 재전이 차단.
