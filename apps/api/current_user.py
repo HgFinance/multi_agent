@@ -52,7 +52,7 @@ def auth_mode() -> str:
 
     configured = os.getenv("PORTFOLIO_AUTH_MODE", "fixture").strip().casefold()
     if configured not in {"", "fixture"}:
-        raise AuthConfigurationError("fixture_only_authentication")
+        raise AuthConfigurationError("fixture_only_portfolio_identity")
     return "fixture"
 
 

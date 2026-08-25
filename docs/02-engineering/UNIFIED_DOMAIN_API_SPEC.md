@@ -88,7 +88,7 @@ Worker를 별도 프로세스나 Queue로 분리해도 내부 계약은 worker-c
 - Production 목표는 Service Token과 mTLS다. Token Subject의 department, service, scopes를 검증한다.
 - 현재 구현은 Risk Trading State 명령과 QA Corrective Action 종결에 대해 짧은 수명의 HS256 Bearer Service Token(`sub`, `department`, `service`, `scopes`, `exp`)을 검증한다. 전역 Issuer/JWKS·mTLS·IAM 및 `sub`와 `agent_id/profile_version_id` 매핑은 배포 전 연결 대상이며, 이 명령 단위 검증만으로 Production 인증 완료로 간주하지 않는다.
 - Scope 형식은 department.resource.action.read 또는 department.resource.action이다. Fund·Book·Case 범위를 벗어나면 403이다.
-- Browser와 Agent는 Domain API를 직접 공개 호출하지 않는다. BFF 또는 승인된 내부 Service/MCP Gateway를 사용한다. 인증 사용자의 PAPER mutation은 Operator BFF만 공개 경계로 사용한다.
+- Browser와 Agent는 Domain API를 직접 공개 호출하지 않는다. BFF 또는 승인된 내부 Service/MCP Gateway를 사용한다. 로컬 fixture PAPER mutation은 Operator BFF 경계에서만 다룬다.
 - CEO·Worker·LLM에게 Supabase Service Role, Broker Credential, LS Credential을 제공하지 않는다.
 - Agent Tool은 allow-list된 제안·조회·검증 도구만 노출한다. 주문 Submit, Risk 결정 적용, Ledger Posting, 권한 Provisioning은 Agent Tool이 직접 수행하지 않는다.
 
@@ -99,10 +99,10 @@ Worker를 별도 프로세스나 Queue로 분리해도 내부 계약은 worker-c
 
 - Agent·alpha·전략 Worker·rebalancer가 만든 자동 주문 후보는 기존 Risk Decision을
   반드시 통과한다.
-- 검증된 JWT `sub`가 자기 ACTIVE Fund/Book에 명시한 `USER_DIRECTIVE`는 별도 사용자
+- BFF가 선택한 고정 데모 ID가 자기 ACTIVE Fund/Book에 명시한 `USER_DIRECTIVE`는 별도 사용자
   authority다. alpha·rebalancer·Risk는 이 PAPER 결정을 경제적으로 veto/resize하지
   않는다.
-- BFF는 body `user_id`를 권한으로 쓰지 않고 verified subject를 actor로 결합하며,
+- BFF는 body `user_id`를 권한으로 쓰지 않고 고정 데모 ID를 actor로 결합하며,
   `OWNER | CIO | TRADER` membership과 canonical Fund/Book 관계를 확인한다.
 - Trading Hermes는 표시된 CEO 주문 원문을 strict schema/evidence span으로
   비구속 구조화할 수 있지만 주문 권한은 없다. 원문 digest와 의미는 결정론 verifier가
@@ -315,7 +315,7 @@ case_id는 Case 종속 Event에서 required이며, Mandate·Workforce·Reporting
 위 흐름은 `AUTOMATED_STRATEGY` 주문에 대한 불변식이다. 인증 사용자의 명시적
 PAPER 명령은 다음의 별도 흐름이며 자동 전략과 권한 증거를 공유하지 않는다.
 
-    User natural-language command → JWT subject + exact Fund/Book admission
+    User natural-language command → fixed fixture ID + exact Fund/Book admission
       → CEO Kanban root → Trading Hermes non-binding candidate
       → exact-text/digest/evidence deterministic verifier
       → current Fund/Book membership + mechanical admission + idempotency
@@ -346,7 +346,7 @@ reservation이 모두 0인 경우에만 허용한다.
 | 대상 | 소유자 | 금지된 위임 |
 |---|---|---|
 | Risk 승인·Resize·Reject·Trading State | Risk Engine | Risk Agent·Trading·QA가 결정론 Gate를 대체 |
-| 명시적 사용자 PAPER directive | 검증된 사용자 JWT subject; BFF/parser는 전달·구조화, Trading Domain은 mechanical admission/실행 | Hermes·LLM·alpha·rebalancer가 지시를 만들거나 변경; Risk가 경제적 veto/resize; LIVE로 승격 |
+| 명시적 사용자 PAPER directive | 고정 데모 ID; BFF/parser는 전달·구조화, Trading Domain은 mechanical admission/실행 | Hermes·LLM·alpha·rebalancer가 지시를 만들거나 변경; Risk가 경제적 veto/resize; LIVE로 승격 |
 | QA PASS/WARN/FAIL·Finding 종결 | QA Service + 독립 Verifier | Trading·Risk·CEO가 자기 승인을 대체 |
 | OrderIntent·Broker Order | Trading OMS | trader-pm-agent가 Broker Submit 직접 수행 |
 | Fill 기반 Journal·Position·NAV | Accounting Service | OrderIntent·Signal·CEO가 Ledger Posting |
@@ -477,7 +477,7 @@ CEO 라우터는 `category`를 최소 부서 집합의 시작점으로 삼고 `q
 
 CEO 자연어 질의와 그 실행 추적은 `/ui/ceo/*` Route가 담당한다. 일반 자문 경로는
 **Hermes Kanban을 실행 Source of Truth로 삼는 읽기 전용 Projection + Task 생성
-경계**다. 다만 인증된 명시적 주문 문장은 별도 `user_paper_order` 표시 root와
+경계**다. 다만 명시적 주문 문장은 별도 `user_paper_order` 표시 root와
 Trading primary를 durable DB에 먼저 결합한다. Trading Hermes 결과의
 `binding: false` 해석 자체에는 주문 권한이 없으며, 서버의 exact-text 검증과 현재
 Fund/Book 재인가를 모두 통과한 경우에만 PAPER OMS admission으로 이어진다.

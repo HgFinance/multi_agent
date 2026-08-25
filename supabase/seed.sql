@@ -157,9 +157,9 @@ join workforce.models m on m.provider = v.model_provider and m.model_name = v.mo
 on conflict (agent_id, version) do nothing;
 
 -- ===========================================================================
--- [CEO Office] GOV-02 2단계 — 플레이스홀더 회원 1건
+-- [CEO Office] GOV-02 2단계 — 고정 데모 identity 1건
 -- 소유: 영주. 근거: supabase/migrations/20260729000200_governance_workforce.sql
---   (governance.mandates.owner_user_id NOT NULL -> governance.user_profiles -> auth.users)
+--   (governance.mandates.owner_user_id NOT NULL -> governance.user_profiles)
 --
 -- CEO Office 부서·Agent Roster 등재는 **의도적으로 하지 않는다**(2026-08-04 팀 결정).
 -- 전체 Prototype이 나올 때까지 각 부서 직원 변동이 계속 예상되므로 workforce.agent_profiles
@@ -170,62 +170,41 @@ on conflict (agent_id, version) do nothing;
 -- 여부와 무관하게 필요한 보완이다.
 -- ===========================================================================
 
--- 플레이스홀더 회원 1건 — 회원가입 기능이 붙기 전까지의 임시 데이터
+-- 고정 데모 identity 1건 — 로컬 모의투자 전용 데이터
 --
--- 왜 필요한가: governance.mandates.owner_user_id가 NOT NULL이면서 governance.user_profiles
--- FK다. user_profiles는 다시 auth.users FK라 2단계 삽입이 필요하다. 회원이 0건이면
--- Mandate를 만들 수 없다(GOV-01 작업 때 실제로 막혔던 지점).
+-- 왜 필요한가: governance.mandates.owner_user_id가 NOT NULL이면서
+-- governance.user_profiles FK라 Mandate 계약 테스트에 최소 한 행이 필요하다.
 --
 -- 안전장치:
---   - email은 RFC 2606이 예약한 `.invalid` TLD를 써서 절대 실제 주소가 될 수 없게 한다.
---   - encrypted_password를 넣지 않아 이 계정으로는 로그인이 불가능하다.
---   - display_name에 PLACEHOLDER를 박아 조회 결과만 봐도 임시 데이터임이 드러난다.
+--   - display_name에 LOCAL FIXTURE를 박아 조회 결과만 봐도 임시 데이터임이 드러난다.
 --   - **자동 기본값으로 쓰지 않는다.** 승인자를 비워 보냈을 때 이 회원으로 조용히 채우면
 --     감사 기록에 '사람이 승인했다'고 남는데 실제로는 아무도 승인하지 않은 상태가 된다
 --     (approval.py decide() 주석과 같은 원칙). 호출자가 명시적으로 지정할 때만 쓴다.
--- 제거 조건: 회원가입/인증 기능이 붙으면 이 두 행을 실제 사용자로 교체한다.
-insert into auth.users (id, aud, role, email)
-values (
-  '00000000-0000-4000-8000-00000000cec0',
-  'authenticated', 'authenticated', 'placeholder-ceo-owner@hedgefund.invalid'
-)
-on conflict (id) do nothing;
-
 insert into governance.user_profiles (user_id, display_name, timezone, status)
 values (
   '00000000-0000-4000-8000-00000000cec0',
-  'PLACEHOLDER Fund Owner (회원가입 전 임시)', 'Asia/Seoul', 'ACTIVE'
+  'LOCAL FIXTURE Fund Owner', 'Asia/Seoul', 'ACTIVE'
 )
 on conflict (user_id) do nothing;
 
--- 플레이스홀더 회원 2건 추가 (2026-08-12) — 프론트엔드 계정 전환 테스트용
+-- 고정 데모 identity 2건 추가 (2026-08-12) — DB 격리 테스트용
 --
 -- 왜 3명인가: 온보딩·Mandate·적합성 프로필이 전부 `user_id` 기준으로 갈라지는데
 -- 회원이 1명이면 "다른 사용자에게는 안 보인다"를 검증할 수 없다. 프론트엔드는
 -- 이 3개 UUID를 하드코딩해 계정 전환 버튼으로 `X-User-Id`를 바꿔 보낸다.
 --
 -- **이건 인증이 아니다.** `X-User-Id`는 서명이 없어 누구나 아무 UUID나 보낼 수
--- 있다(apps/api/current_user.py 머리말). 폐쇄망 팀 테스트 전제이며, 공개 배포
--- 전에 실제 인증으로 교체해야 한다.
+-- 있다(apps/api/current_user.py 머리말). 로컬 폐쇄망 모의투자 전용이다.
 --
--- 위 1건과 같은 안전장치를 그대로 적용한다: `.invalid` TLD(RFC 2606),
--- 비밀번호 없음(로그인 불가), display_name에 PLACEHOLDER 표시.
+-- 위 1건과 같은 안전장치를 그대로 적용한다: display_name에 LOCAL FIXTURE 표시.
 -- UUID는 `...cec1`/`...cec2`로 기존 `...cec0` 다음 번호를 이어 붙여, 조회 결과에서
 -- 세 계정이 한 묶음임이 드러나게 한다.
-insert into auth.users (id, aud, role, email)
-values
-  ('00000000-0000-4000-8000-00000000cec1',
-   'authenticated', 'authenticated', 'placeholder-user-2@hedgefund.invalid'),
-  ('00000000-0000-4000-8000-00000000cec2',
-   'authenticated', 'authenticated', 'placeholder-user-3@hedgefund.invalid')
-on conflict (id) do nothing;
-
 insert into governance.user_profiles (user_id, display_name, timezone, status)
 values
   ('00000000-0000-4000-8000-00000000cec1',
-   'PLACEHOLDER User 2 (계정 전환 테스트용)', 'Asia/Seoul', 'ACTIVE'),
+   'LOCAL FIXTURE User 2', 'Asia/Seoul', 'ACTIVE'),
   ('00000000-0000-4000-8000-00000000cec2',
-   'PLACEHOLDER User 3 (계정 전환 테스트용)', 'Asia/Seoul', 'ACTIVE')
+   'LOCAL FIXTURE User 3', 'Asia/Seoul', 'ACTIVE')
 on conflict (user_id) do nothing;
 
 -- ===========================================================================
@@ -269,7 +248,7 @@ on conflict (user_id) do nothing;
 -- 아래 값은 **추정이 아니라 새 Supabase 프로젝트 조회 결과**다(2026-08-18,
 -- `select fund_id, fund_code, name, base_currency, inception_date, status
 -- from accounting.funds`). 이 파일이 실 DB와 어긋나 있던 것이 원래 문제였으므로,
--- 값을 바꿀 때는 반드시 실 DB와 대조한다(scripts/check_test_user_wiring.py).
+-- 값을 바꿀 때는 이 고정 데모 계약과 함께 대조한다.
 --
 -- ⚠ 옛 프로젝트에는 같은 fund_id가 다른 name/inception_date로 들어 있었다
 -- ('CEO Mandate Contract Test Fund', 2026-01-01 등). 옛 DB를 근거로 이 값을

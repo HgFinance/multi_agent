@@ -1,8 +1,8 @@
 begin;
 
 -- Raw point-in-time inputs are retained for Risk projection/replay.  This
--- private control database is reached only by domain services; browser JWT
--- roles have no direct table policy because the JSON payload can contain
+-- private control database is reached only by domain services; browser clients
+-- have no direct table policy because the JSON payload can contain
 -- portfolio details.
 create table if not exists risk.input_snapshots (
   event_id uuid primary key,

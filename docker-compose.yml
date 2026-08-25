@@ -76,20 +76,18 @@ services:
       MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS: ${MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS:-1500}
       CONDITIONAL_RULE_DATABASE_URL: ${CONDITIONAL_RULE_DATABASE_URL:-${DATABASE_URL:-}}
       CONDITIONAL_RULE_DATABASE_ROLE: ${CONDITIONAL_RULE_DATABASE_ROLE:-svc_conditional_rule_orchestrator}
-      PORTFOLIO_DATA_MODE: "production"
+      PORTFOLIO_DATA_MODE: "test"
       # AI Office uses the fixed closed-network demo identity.
-      APP_ENV: ${AI_OFFICE_APP_ENV:-local}
+      APP_ENV: local
       PORTFOLIO_AUTH_MODE: fixture
       PORTFOLIO_AUTH_REQUIRED: "false"
       PORTFOLIO_LIVE_MODE: fixture
-      PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: ${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:-[{"user_id":"00000000-0000-4000-8000-00000000cec0","fund_id":"5c26db42-ce83-4daf-b1dc-c81680c13a6c","book_id":"07d913de-9a5b-4cf5-b893-31a625445761","name":"MAIN","role":"TRADER","fund_status":"ACTIVE","book_status":"ACTIVE"}]}
-      # This stack includes shared Kanban, dispatcher, Trading Hermes and the
-      # authenticated MCP bridge, so the CEO natural-language PAPER lane may
-      # be admitted. Deployment bundles without that runtime must set false.
-      USER_PAPER_ORDER_WORKFLOW_ENABLED: "true"
-      # Exact single-order commands use the code-built evidence interpreter;
-      # ambiguous/conditional language still goes through Trading Hermes.
-      USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED: "true"
+      PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: '[{"user_id":"00000000-0000-4000-8000-00000000cec0","fund_id":"5c26db42-ce83-4daf-b1dc-c81680c13a6c","book_id":"07d913de-9a5b-4cf5-b893-31a625445761","name":"MAIN","role":"TRADER","fund_status":"ACTIVE","book_status":"ACTIVE"}]'
+      # Local mock-investment UI is read-only. No user-login or paper-order
+      # workflow is enabled in this Compose profile.
+      USER_PAPER_ORDER_WORKFLOW_ENABLED: "false"
+      USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED: "false"
+      ACCOUNTING_MODE: OFFLINE
       PORTFOLIO_CORS_ALLOW_ORIGINS: ${PORTFOLIO_CORS_ALLOW_ORIGINS:-}
       PORTFOLIO_RUNTIME_STORE_PATH: /var/lib/portfolio/runtime.sqlite3
       PORTFOLIO_RUNTIME_EMBEDDED_WORKER: "false"
@@ -127,7 +125,7 @@ services:
       # 비어 있으면 503 portfolio_api_unavailable 이다(인메모리 후퇴 없음).
       PORTFOLIO_API_URL: ${PORTFOLIO_API_URL:-http://accounting-api:8000}
       # Browser user directives terminate here. Only a short payload-bound
-      # proof is sent to trading-api; the Supabase access token is never relayed.
+      # proof is sent to trading-api; no browser login token exists or is relayed.
       TRADING_API_URL: ${TRADING_API_URL:-http://trading-api:8000}
       TRADING_SERVICE_AUTH_SECRET: ${TRADING_SERVICE_AUTH_SECRET:?A 32-byte trading service proof secret is required}
       TRADING_SERVICE_AUTH_ISSUER: ${TRADING_SERVICE_AUTH_ISSUER:-portfolio-bff}
@@ -192,16 +190,16 @@ services:
       # 계좌 스트림은 ENABLE_LS_ORDER_EVENTS, 원장 REST 조회는
       # ENABLE_LS_ACCOUNT_DATA, 시장 순위 REST 조회는 ENABLE_LS_MARKET_DATA로
       # 각각 켠다. 모두 읽기 전용이며 주문은 나가지 않는다.
-      ENABLE_LS_ORDER_EVENTS: ${ENABLE_LS_ORDER_EVENTS:-false}
+      ENABLE_LS_ORDER_EVENTS: "false"
       # Read-only broker account snapshot. Keep this independent from order
       # event ingestion so enabling a balance view never enables execution.
-      ENABLE_BROKER_SNAPSHOT: ${ENABLE_BROKER_SNAPSHOT:-false}
+      ENABLE_BROKER_SNAPSHOT: "false"
       BROKER_SNAPSHOT_CACHE_SECONDS: ${BROKER_SNAPSHOT_CACHE_SECONDS:-10}
-      ENABLE_LS_MARKET_DATA: ${ENABLE_LS_MARKET_DATA:-false}
-      ENABLE_LS_ACCOUNT_DATA: ${ENABLE_LS_ACCOUNT_DATA:-false}
+      ENABLE_LS_MARKET_DATA: "false"
+      ENABLE_LS_ACCOUNT_DATA: "false"
       # portfolio-bff owns read-only market/account observations. PAPER order
       # execution is isolated behind Trading's separately authenticated lane.
-      LS_ENV: ${LS_ENV:-LIVE}
+      LS_ENV: PAPER
       LS_APP_KEY: ${LS_APP_KEY:-}
       LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
       LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}

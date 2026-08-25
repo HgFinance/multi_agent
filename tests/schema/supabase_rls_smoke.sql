@@ -1,8 +1,5 @@
 begin;
 
-insert into auth.users (id)
-values ('90000000-0000-0000-0000-000000000001');
-
 insert into governance.user_profiles (user_id, display_name)
 values ('90000000-0000-0000-0000-000000000001', 'RLS Smoke User');
 

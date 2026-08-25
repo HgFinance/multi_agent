@@ -199,7 +199,7 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  # distinct historical-search authority, never the live
                  # receipt-clock event manifest.
                  "20260818001400_intraday_completed_second_dataset.sql",
-                 # Authenticated USER-priority PAPER directives use durable
+                 # Local fixture USER-priority PAPER directives use durable
                  # roots/proofs/legs/reservations plus a per-book barrier.
                  "20260818001500_paper_user_directive_execution.sql",
                  # User authority is durably bound before CEO/Kanban/Hermes

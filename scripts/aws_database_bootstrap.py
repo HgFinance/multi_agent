@@ -1632,7 +1632,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--seed-paper-principal",
         action="store_true",
-        help="provision the configured Supabase subject, PAPER fund/book and cash",
+        help="provision the configured local demo identity, PAPER fund/book and cash",
     )
     parser.add_argument(
         "--top-up-paper-cash",

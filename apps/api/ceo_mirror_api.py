@@ -356,8 +356,8 @@ def mirror_ask(
     dedup(`_execute`/`MirrorStore`)과 Web/Discord 공용 event journal
     (`_publish_workflow_projection`)이 이 함수를 감싸는 layer다.
 
-    `owner_id`는 중앙 인증 경계가 검증한 Supabase JWT `sub`다. 로컬/test fixture
-    모드에서만 같은 의존성이 `X-User-Id`를 읽는다. `actor_id`를 그대로 재사용하는
+    `owner_id`는 로컬 모의투자에서 BFF가 선택한 고정 데모 ID다. 브라우저 로그인이나
+    외부 JWT를 검증하지 않으며, 같은 의존성이 `X-User-Id`를 읽는다. `actor_id`를 그대로 재사용하는
     이유는 dedup 키(`source`+`source_message_id`)가
     `actor_id`를 쓰지 않아 안전하기 때문이다 - `ceo_mirror.py`의
     `InMemoryMirrorStore._source_key`/`RedisMirrorStore._source_key` 참고.

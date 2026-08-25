@@ -1,11 +1,12 @@
-"""Authenticated, highest-priority user directives for PAPER trading only.
+"""Highest-priority local-fixture directives for PAPER trading only.
 
-The browser never talks to OMS or a broker directly.  This router authenticates
-the Supabase subject, authorizes one active fund/book, deterministically parses
-an optional Korean instruction, and forwards a payload-bound service proof to
-the private trading API.  Alpha and Risk services are intentionally absent from
-this user-directive lane.
+The browser never talks to OMS or a broker directly. This router uses the fixed
+local demo identity, authorizes one active fund/book, deterministically parses an
+optional Korean instruction, and forwards a payload-bound service proof to the
+private trading API. Alpha and Risk services are intentionally absent from this
+read-only local UI lane.
 """
+
 from __future__ import annotations
 
 import re

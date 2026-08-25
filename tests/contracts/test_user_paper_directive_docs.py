@@ -1,8 +1,8 @@
-"""Documentation contract for the explicit-user PAPER authority lane.
+"""Documentation contract for the explicit local-fixture PAPER authority lane.
 
 The repository historically used the unqualified sentence "all orders pass
 Risk".  ADR-0007 narrows that invariant to Agent/automated orders while
-keeping authenticated user PAPER directives deterministic and fail-closed.
+keeping local-fixture PAPER directives deterministic and fail-closed.
 """
 
 from __future__ import annotations

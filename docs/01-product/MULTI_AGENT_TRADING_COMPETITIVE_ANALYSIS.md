@@ -82,7 +82,7 @@ TradingAgents, FINCON과 여러 파생 프로젝트가 이미 사용하고 있�
 |---|---|---|---|
 | [TradingAgents](https://github.com/TauricResearch/TradingAgents) | 한 종목에 대한 분석, 토론과 거래 결정 | 실제 투자회사 역할 구조, Bull/Bear 토론, Risk·Portfolio 승인, LangGraph Checkpoint, 구조화 출력 | 회사 전체의 회계·인사·감사 운영과 한국 시장 전 종목 Event 처리 |
 | [ai-hedge-fund](https://github.com/virattt/ai-hedge-fund) | 유명 투자자 Persona와 분석 Agent의 포트폴리오 판단 | 이해하기 쉬운 Demo, 다양한 투자 스타일, Risk·Portfolio Agent | 현재 교육용 POC 성격이며 실제 주문을 하지 않음. Persona 의견과 공식 통제의 경계가 약함 |
-| [TradingGoose](https://github.com/TradingGoose/TradingGoose.github.io) | 실시간 사건 기반 다종목 분석과 Alpaca 주문 | Full-stack UI, Supabase Auth/RBAC/RLS, Paper·Live, 승인 화면, 실시간 Workflow | TradingAgents 계열 투자 분석 제품에 가깝고 Ledger·NAV·인력 개선 조직은 제한적 |
+| [TradingGoose](https://github.com/TradingGoose/TradingGoose.github.io) | 실시간 사건 기반 다종목 분석과 Alpaca 주문 | Full-stack UI, 외부 Auth/RBAC/RLS, Paper·Live, 승인 화면, 실시간 Workflow | TradingAgents 계열 투자 분석 제품에 가깝고 Ledger·NAV·인력 개선 조직은 제한적 |
 | [AlpacaTradingAgent](https://github.com/huygiatrng/AlpacaTradingAgent) | TradingAgents 판단을 Alpaca Paper·Live로 실행 | 주식·Crypto, 예약 실행, UI, Memory와 Workflow Resume | 특정 Broker 실행 확장에 집중. 회사 운영과 독립 회계·감사 구조는 제한적 |
 | [AutoHedge](https://github.com/The-Swarm-Corporation/AutoHedge) | Director → Quant → Risk → Execution 파이프라인 | 간결한 자동 실행 구조, JSON 계약, Crypto Venue 연결 | 소수 Agent의 선형 구조이며 조직 통제, 공식 원장과 데이터 거버넌스가 제한적 |
 | [AgenticTrading](https://github.com/Open-Finance-Lab/AgenticTrading) | Planner가 Data·Alpha·Risk·Portfolio·Execution Agent Pool을 동적 DAG로 구성 | Agent Registry, 동적 Orchestration, Transaction Cost, Backtest, Audit와 Memory를 포괄 | 우리와 가장 가까운 개념. 한국 시장 데이터, 공식 회계 원장, 인사·QA 조직과 운영 UI가 차별화 지점 |

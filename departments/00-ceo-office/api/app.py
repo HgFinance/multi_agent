@@ -656,10 +656,7 @@ else:
     committee_repo = InMemoryCommitteeRepository()
 
 # P0-1(2026-08-05, TEAM_YOUNGJU_CEO_HR_GUIDE.md v2.0) - actor_user_id 실재성 검증.
-# 서명된 Subject 인증(mTLS/JWT)은 아직 없다(Platform/IAM 선행 과제, actor_identity.py
-# 모듈 docstring 참고) - 팀 합의로 governance.user_profiles에 심어둔 테스트 회원을
-# "로그인된 사용자"로 간주하고, actor_user_id가 그 행을 실제로 가리키는지(존재 + ACTIVE)만
-# 검증한다. 이전에는 빈 문자열만 아니면 통과했다.
+# 로컬 고정 데모 identity가 governance.user_profiles에 실재하고 ACTIVE인지 확인한다.
 if os.environ.get("DATABASE_URL") and PostgresActorIdentityRepository is not None:
     actor_identity_repo = PostgresActorIdentityRepository.connect(os.environ["DATABASE_URL"])
 else:
@@ -2032,7 +2029,7 @@ if __name__ == "__main__":
         _mandate_checkpointer = InMemorySaver()
     if not isinstance(actor_identity_repo, InMemoryActorIdentityRepository):
         actor_identity_repo = InMemoryActorIdentityRepository()
-    # 자체 점검이 쓰는 테스트 로그인 Identity를 미리 심어둔다(P0-1 게이트가 이제 실재성을
+    # 자체 점검이 쓰는 고정 데모 identity를 미리 심어둔다(P0-1 게이트가 이제 실재성을
     # 검사하므로, 임의 문자열은 더 이상 통과하지 않는다).
     actor_identity_repo.seed("00000000-0000-4000-8000-00000000cec0")
     actor_identity_repo.seed("user-1")
