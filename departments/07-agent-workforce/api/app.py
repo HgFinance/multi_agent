@@ -62,7 +62,9 @@ _SCORECARD_DIR = _BASE / "scorecard"
 _ROSTER_DIR = _BASE / "roster"
 _PLANNING_DIR = _BASE / "planning"
 _HIRING_DIR = _BASE / "hiring"
-for _p in (_LIFECYCLE_DIR, _IMPROVEMENTS_DIR, _SCORECARD_DIR, _ROSTER_DIR, _PLANNING_DIR, _HIRING_DIR):
+_PERFORMANCE_DIR = _BASE / "performance"
+for _p in (_LIFECYCLE_DIR, _IMPROVEMENTS_DIR, _SCORECARD_DIR, _ROSTER_DIR, _PLANNING_DIR,
+           _HIRING_DIR, _PERFORMANCE_DIR):
     sys.path.insert(0, str(_p))
 
 from access import (
@@ -108,7 +110,18 @@ from observability import (
     check_idle_agents,
     check_worker_trigger_rates,
 )
+from action import (
+    ActionReviewMismatchError,
+    ActionStatus,
+    ActionType,
+    MissingVerificationError,
+    PerformanceAction,
+    open_action,
+)
+from action import IllegalTransition as ActionIllegalTransition
+from action import transition as action_transition
 from quality import QualitySnapshot, aggregate_quality, collect_quality_references
+from review import MissingRoleMetricsError, PerformanceReview, ReviewDecision
 from roster import (
     AgentNotFoundError,
     AgentSummary,
@@ -198,6 +211,17 @@ try:
     from postgres_hiring_repository import PostgresHiringRequestRepository
 except ImportError:
     PostgresHiringRequestRepository = None  # type: ignore[assignment,misc]
+
+try:
+    from postgres_performance_repository import (
+        PostgresPerformanceRepository,
+        UnknownPerformanceSubjectError,
+    )
+except ImportError:
+    PostgresPerformanceRepository = None  # type: ignore[assignment,misc]
+
+    class UnknownPerformanceSubjectError(RuntimeError):  # type: ignore[no-redef]
+        """psycopg2 미설치 대체 - 이 경로에서는 애초에 기록이 501 로 막힌다."""
 
 _WORKFORCE_EVENTS_DIR = _BASE / "workforce_events"
 
@@ -396,6 +420,64 @@ class QualitySnapshotIn(BaseModel):
     finding_count: int | None = Field(default=None, ge=0)
     rework_rate: str | None = None
     role_kpi: dict = {}
+
+
+class PerformanceReviewIn(BaseModel):
+    """POST /workforce/v1/agents/{agent_id}/performance-reviews Request.
+
+    agent_id 는 경로에서 받는다(본문과 경로가 어긋날 여지를 없앤다). role_metrics 에
+    기본값을 두지 않는 이유는 review.py 불변식 2와 같다 - 조치를 제안하는 평가는
+    근거 없이 만들 수 없고, 빈 dict 를 기본값으로 두면 그 게이트가 조용히 통과된다.
+    """
+
+    profile_version_id: str = Field(min_length=1)
+    period_start: datetime
+    period_end: datetime
+    reviewer: str = Field(min_length=1)
+    decision: ReviewDecision
+    role_metrics: dict
+    cost: dict = {}
+    findings: list = []
+
+    @model_validator(mode="after")
+    def _period_is_forward_and_action_has_basis(self) -> "PerformanceReviewIn":
+        """CostSnapshotRecordIn._window_is_forward 와 같은 이유 - DB 유무와 무관하게
+        본문 결함을 먼저 422 로 돌려준다.
+
+        role_metrics 게이트(review.py 불변식 2)도 여기서 같이 지킨다. PerformanceReview
+        가 다시 검사하지만, 저장소가 없으면 그 전에 501 이 나서 검사에 도달하지 못한다 -
+        "DB 안 붙었다"가 "근거 없이 비활성화를 제안했다"를 가리면 안 된다.
+        """
+        if self.period_end <= self.period_start:
+            raise ValueError("period_end 는 period_start 이후여야 한다")
+        if self.decision != ReviewDecision.CONTINUE and not self.role_metrics:
+            raise ValueError(
+                f"{self.decision.value} 제안에는 역할 KPI(role_metrics)가 필요하다"
+            )
+        return self
+
+
+class PerformanceActionIn(BaseModel):
+    """POST /workforce/v1/agents/{agent_id}/performance-actions Request."""
+
+    action_type: ActionType
+    due_at: datetime
+    plan: dict
+    review_id: str | None = None
+
+    @model_validator(mode="after")
+    def _plan_is_present(self) -> "PerformanceActionIn":
+        """action.py 불변식 2를 요청 계층에서도 지킨다 - 저장소가 없을 때 501 이
+        "계획 없는 조치"를 가리지 않도록(PerformanceReviewIn 과 같은 이유)."""
+        if not self.plan:
+            raise ValueError("plan 이 비어 있으면 조치를 만들 수 없다 - 무엇을 할지가 조치다")
+        return self
+
+
+class PerformanceActionTransitionIn(BaseModel):
+    to_status: ActionStatus
+    at: datetime
+    verification: dict | None = None
 
 
 class WorkforcePlanIn(BaseModel):
@@ -757,6 +839,14 @@ if os.environ.get("DATABASE_URL") and PostgresPlanApprovalEvidenceRepository is 
 else:
     _plan_evidence_repo = InMemoryPlanApprovalEvidenceRepository()
 
+# 성과 평가·조치는 In-Memory 대체를 두지 않는다. 역할 축소·비활성화 제안과 그 이행
+# 기록은 잃어버리면 안 되는 감사 기록이라, 저장소가 없으면 빈 성공 대신 501 로 막는다
+# (Scorecard/Roster 와 같은 처리).
+if os.environ.get("DATABASE_URL") and PostgresPerformanceRepository is not None:
+    _performance_repo = PostgresPerformanceRepository.connect(os.environ["DATABASE_URL"])
+else:
+    _performance_repo = None
+
 
 def _resolve_department_id(department_code: str) -> str:
     """department_code -> department_id. 실 DB가 있으면 workforce.departments를
@@ -781,6 +871,7 @@ for _exc_type in (
     IllegalTransition, CandidateSelfApprovalError, MissingEvidenceError, CandidateIllegalTransition,
     MissingActivationEvidenceError, UnverifiedActivationEvidenceError, ToolAllowlistMissingError,
     PlanIllegalTransition, UnverifiedPlanApprovalError, MissingScorecardEvidenceError,
+    ActionIllegalTransition, MissingVerificationError, ActionReviewMismatchError,
 ):
     @app.exception_handler(_exc_type)
     def _on_domain_error(request, exc, _status={  # noqa: B006 - 클로저 캡처용 기본값 트릭
@@ -798,6 +889,11 @@ for _exc_type in (
         # 근거 없는 KEPT/ROLLED_BACK 은 MissingEvidenceError(승인 근거 없음)와 같은
         # 종류의 결함이라 같은 409다.
         MissingScorecardEvidenceError: 409,
+        # 성과 조치도 같은 원칙: 허용 안 된 전이·근거 없는 종료는 409, 평가와 어긋난
+        # 조치는 "칸은 채웠지만 실재와 다르다"라 403(UnverifiedActivationEvidenceError
+        # 와 같은 방향).
+        ActionIllegalTransition: 409, MissingVerificationError: 409,
+        ActionReviewMismatchError: 403,
     }):
         return JSONResponse(status_code=_status[type(exc)], content={
             "error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None,
@@ -822,6 +918,22 @@ def _on_unknown_capacity_subject(request, exc: UnknownCapacitySnapshotSubjectErr
     """UnknownCostSnapshotSubjectError와 같은 이유 - 등록되지 않은 department/agent로
     온 용량 보고는 재시도해도 낫지 않는 호출자 오류라 404다."""
     return JSONResponse(status_code=404, content={
+        "error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+@app.exception_handler(UnknownPerformanceSubjectError)
+def _on_unknown_performance_subject(request, exc: UnknownPerformanceSubjectError):
+    """UnknownCostSnapshotSubjectError 와 같은 이유 - 재시도해도 낫지 않는 호출자 오류."""
+    return JSONResponse(status_code=404, content={
+        "error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+@app.exception_handler(MissingRoleMetricsError)
+def _on_missing_role_metrics(request, exc: MissingRoleMetricsError):
+    """근거 없이 역할 축소·비활성화를 제안하려 함 (review.py 불변식 2). 본문 결함이라 422."""
+    return JSONResponse(status_code=422, content={
         "error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None,
     })
 
@@ -1137,6 +1249,113 @@ def get_improvement_scorecards(candidate_id: str):
     if _improvement_repo.get_candidate(candidate_id) is None:
         raise HTTPException(status_code=404, detail=f"improvement {candidate_id} 없음")
     return {"scorecards": [s.model_dump(mode="json") for s in _improvement_repo.scorecards_for(candidate_id)]}
+
+
+# --- 3.3b Performance Review / Action (HR-03) ---------------------------------------
+#
+# quality_snapshots 의 role_kpi 는 집계되지 않고 출처만 붙어 Scorecard 로 나간다
+# (collect_quality_references) - 그 값을 해석해 평가로 만드는 쪽이 HR-03 이고, 그
+# 결과가 여기 role_metrics 다.
+#
+# 이 두 엔드포인트는 **제안까지만** 한다. decision=DEACTIVATION 이나 DEACTIVATION
+# 조치가 VERIFIED 가 돼도 Agent 의 employment status 는 바뀌지 않는다 - 실제 비활성화는
+# CEO 승인과 roster 전이 게이트(P0-3)를 따로 거친다.
+
+
+def _review_dict(r: PerformanceReview) -> dict:
+    return {
+        "review_id": r.review_id, "agent_id": r.agent_id,
+        "profile_version_id": r.profile_version_id,
+        "period_start": r.period_start.isoformat(), "period_end": r.period_end.isoformat(),
+        "decision": r.decision.value, "reviewer": r.reviewer,
+        "role_metrics": r.role_metrics, "cost": r.cost, "findings": r.findings,
+        "proposes_action": r.proposes_action,
+    }
+
+
+def _action_dict(a: PerformanceAction) -> dict:
+    return {
+        "action_id": a.action_id, "agent_id": a.agent_id, "review_id": a.review_id,
+        "action_type": a.action_type.value, "plan": a.plan,
+        "due_at": a.due_at.isoformat(), "verification": a.verification,
+        "status": a.status.value,
+        "completed_at": a.completed_at.isoformat() if a.completed_at else None,
+    }
+
+
+@app.post("/workforce/v1/agents/{agent_id}/performance-reviews")
+def record_performance_review(agent_id: str, body: PerformanceReviewIn):
+    """HR-03 성과 평가 1건을 기록한다. 같은 기간 재평가는 갱신이다."""
+    if _performance_repo is None:
+        raise HTTPException(status_code=501, detail="DATABASE_URL 미설정 - 성과 평가 기록 불가")
+    review = PerformanceReview(
+        review_id="", agent_id=agent_id, profile_version_id=body.profile_version_id,
+        period_start=body.period_start, period_end=body.period_end,
+        decision=body.decision, reviewer=body.reviewer,
+        role_metrics=body.role_metrics, cost=body.cost, findings=body.findings,
+    )
+    review_id, created = _performance_repo.save_review(review)
+    stored = PerformanceReview(**{**review.__dict__, "review_id": review_id})
+    return {**_review_dict(stored), "created": created}
+
+
+@app.get("/workforce/v1/agents/{agent_id}/performance-reviews")
+def list_performance_reviews(agent_id: str):
+    if _performance_repo is None:
+        raise HTTPException(status_code=501, detail="DATABASE_URL 미설정 - 성과 평가 조회 불가")
+    return {"reviews": [_review_dict(r) for r in _performance_repo.list_reviews_by_agent(agent_id)]}
+
+
+@app.post("/workforce/v1/agents/{agent_id}/performance-actions")
+def record_performance_action(agent_id: str, body: PerformanceActionIn):
+    """성과 조치를 등록한다(OPEN).
+
+    review_id 를 붙이면 그 평가의 decision 을 **저장소에서 읽어** 조치 종류와 대조한다
+    (action.py 불변식 4) - 호출자가 본문으로 decision 을 실어 보내면 근거를 지어낼 수
+    있어서, improvements 의 Scorecard 게이트와 같은 방식으로 저장된 값을 쓴다.
+    """
+    if _performance_repo is None:
+        raise HTTPException(status_code=501, detail="DATABASE_URL 미설정 - 성과 조치 기록 불가")
+    review_decision: str | None = None
+    if body.review_id is not None:
+        review = _performance_repo.get_review(body.review_id)
+        if review is None:
+            raise HTTPException(status_code=404, detail=f"review {body.review_id} 없음")
+        if review.agent_id != agent_id:
+            # 다른 Agent 의 평가를 근거로 조치를 붙이는 것을 막는다.
+            raise HTTPException(
+                status_code=403, detail="이 평가는 다른 Agent 의 것이라 근거가 될 수 없다",
+            )
+        review_decision = review.decision.value
+    action = open_action(
+        action_id=str(uuid4()), agent_id=agent_id, action_type=body.action_type,
+        due_at=body.due_at, plan=body.plan,
+        review_id=body.review_id, review_decision=review_decision,
+    )
+    _performance_repo.save_action(action)
+    return _action_dict(action)
+
+
+@app.post("/workforce/v1/performance-actions/{action_id}/transitions")
+def transition_performance_action(action_id: str, body: PerformanceActionTransitionIn):
+    if _performance_repo is None:
+        raise HTTPException(status_code=501, detail="DATABASE_URL 미설정 - 성과 조치 전이 불가")
+    action = _performance_repo.get_action(action_id)
+    if action is None:
+        raise HTTPException(status_code=404, detail=f"action {action_id} 없음")
+    updated = action_transition(
+        action, body.to_status, at=body.at, verification=body.verification,
+    )
+    _performance_repo.save_action(updated)
+    return _action_dict(updated)
+
+
+@app.get("/workforce/v1/agents/{agent_id}/performance-actions")
+def list_performance_actions(agent_id: str, status: ActionStatus | None = None):
+    if _performance_repo is None:
+        raise HTTPException(status_code=501, detail="DATABASE_URL 미설정 - 성과 조치 조회 불가")
+    actions = _performance_repo.list_actions_by_agent(agent_id, status=status)
+    return {"actions": [_action_dict(a) for a in actions]}
 
 
 # --- 3.4 Scorecard / Budget ----------------------------------------------------------
@@ -1642,6 +1861,9 @@ if __name__ == "__main__":
         # 원래 _improvement_repo를 이미 캡처했다 - 재배선 안 하면 실 DB를 계속 쓴다.
     _scorecard_repo = None
     _roster_repo = None  # 아래 5번 블록까지는 "미설정시 501"을 그대로 검증한다.
+    # 성과 평가·조치도 같은 이유로 끊는다. 안 끊으면 이 self-check 가 합성 ID로 실
+    # Supabase 에 INSERT 를 시도한다(실측 2026-08-25: FK/컬럼 에러로 깨졌다).
+    _performance_repo = None
     if not isinstance(_activation_evidence_repo, InMemoryActivationEvidenceRepository):
         _activation_evidence_repo = InMemoryActivationEvidenceRepository()
     if not isinstance(_plan_repo, InMemoryPlanRepository):
@@ -2040,5 +2262,63 @@ if __name__ == "__main__":
           "(저장소 없음 501, 보고자 없음 422, 음수 arrivals 422, 역전 window 422, "
           "subject 없음 422, 조회 501, 조회 subject 없음 400)")
 
-    print("ok - Workforce Domain API 9개 영역(access/improvements/scorecard/budget/roster/"
-          "P0-3 게이트/workforce-plan/cost-snapshots/capacity-snapshots) 점검 통과")
+    # --- performance review/action (HR-03) ---------------------------------------------
+    #
+    # DATABASE_URL 없이 도는 자체 점검이라 _performance_repo 가 None 이다 - 여기서
+    # 지킬 수 있는 건 (1) 저장소 없이 빈 성공을 돌려주지 않는가, (2) 본문 검증이 DB
+    # 유무보다 먼저 걸리는가 둘이다. 계약·상태머신 검증은 performance/review.py 와
+    # performance/action.py 자체 점검이 담당한다.
+    _perf_agent = "44444444-4444-4444-4444-444444444444"
+    _review_body = {
+        "profile_version_id": "55555555-5555-5555-5555-555555555555",
+        "period_start": t0, "period_end": t_exp, "reviewer": "hr-03",
+        "decision": "PIP", "role_metrics": {"sla_compliance": 0.71},
+    }
+
+    r45 = client.post(f"/workforce/v1/agents/{_perf_agent}/performance-reviews", json=_review_body)
+    assert r45.status_code == 501, r45.text  # 저장소 없이 "기록 완료"로 보이면 안 된다
+
+    r46 = client.post(f"/workforce/v1/agents/{_perf_agent}/performance-reviews",
+                      json={**_review_body, "reviewer": ""})
+    assert r46.status_code == 422, r46.text  # 누가 제안했는지 없이 남길 수 없다
+
+    r47 = client.post(f"/workforce/v1/agents/{_perf_agent}/performance-reviews",
+                      json={**_review_body, "decision": "TERMINATE"})
+    assert r47.status_code == 422, r47.text  # DDL check 와 같은 어휘 밖의 결정
+
+    r48 = client.post(f"/workforce/v1/agents/{_perf_agent}/performance-reviews",
+                      json={k: v for k, v in _review_body.items() if k != "role_metrics"})
+    # 조치를 제안하는 평가에 근거가 없다 - 501(DB 없음)이 이걸 가리면 안 된다.
+    assert r48.status_code == 422, r48.text
+
+    r49 = client.post(f"/workforce/v1/agents/{_perf_agent}/performance-reviews",
+                      json={**_review_body,
+                            "period_start": _review_body["period_end"],
+                            "period_end": _review_body["period_start"]})
+    assert r49.status_code == 422, r49.text
+
+    r50 = client.post(f"/workforce/v1/agents/{_perf_agent}/performance-actions", json={
+        "action_type": "PIP", "due_at": t_exp, "plan": {"goal": "SLA 회복"},
+    })
+    assert r50.status_code == 501, r50.text
+
+    r51 = client.post(f"/workforce/v1/agents/{_perf_agent}/performance-actions", json={
+        "action_type": "PIP", "due_at": t_exp, "plan": {},
+    })
+    # 계획 없는 조치는 조치가 아니다 - 501 이 이 결함을 가리면 안 된다.
+    assert r51.status_code == 422, r51.text
+
+    r51a = client.post(f"/workforce/v1/agents/{_perf_agent}/performance-reviews",
+                       json={**_review_body, "role_metrics": {}})
+    # 빈 role_metrics 로 PIP 제안 - 필드를 빼는 것(r48)과 달리 Pydantic 필수 검사에는
+    # 걸리지 않으므로, 게이트가 요청 계층에도 있어야 잡힌다.
+    assert r51a.status_code == 422, r51a.text
+
+    r52 = client.get(f"/workforce/v1/agents/{_perf_agent}/performance-actions")
+    assert r52.status_code == 501, r52.text
+    print("ok - performance review/action 9개 시나리오 통과 "
+          "(저장소 없음 501, 평가자 없음 422, 어휘 밖 decision 422, role_metrics 누락 422, "
+          "역전 period 422, 조치 저장소 없음 501, 빈 plan 422, 빈 role_metrics 422, 조회 501)")
+
+    print("ok - Workforce Domain API 10개 영역(access/improvements/scorecard/budget/roster/"
+          "P0-3 게이트/workforce-plan/cost-snapshots/capacity-snapshots/performance) 점검 통과")

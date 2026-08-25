@@ -137,6 +137,27 @@ Scorecard 관찰의 실제 API 배선.
   셋은 `begin_worker_metric()` 컨텍스트가 열려 있었던 실행에서만 나오므로
   `arrivals > 0`이어도 `None`일 수 있다. 창구는 `GET /workforce/v1/departments/llm-usage`.
 
+## performance/
+
+- `performance/` — **HR-03 성과 평가와 조치**. `scorecard/quality.py`의 종착지다 —
+  `quality_snapshots`의 `role_kpi`는 집계되지 않고 출처만 붙어 Scorecard로 나가는데, 그 값을
+  **해석**해 평가로 만드는 쪽이 HR-03이고 그 결과가 `performance_reviews.role_metrics`다.
+  - `review.py` — `PerformanceReview` 계약. **조치를 제안하는 평가는 역할 KPI 없이 만들 수 없다**
+    (`MissingRoleMetricsError`) — 역할 축소·비활성화 제안은 되돌리기 어려운 결정이라 근거를 요구한다.
+    `decision` 어휘는 새로 짓지 않고 `performance_actions.action_type` 4개 + `CONTINUE`를 쓴다
+    (`supabase/migrations/20260825000300_...`가 같은 값으로 DDL check를 건다).
+  - `action.py` — `PerformanceAction` 상태 머신. `OPEN → IN_PROGRESS → VERIFIED/CANCELLED`,
+    `OVERDUE`는 **종료가 아니다**(기한 넘김이 조용한 면제가 되면 안 된다). `VERIFIED`는
+    `verification` 없이 통과하지 않고(DDL check와 같은 규칙), `review_id`를 붙이면 그 평가의
+    `decision`과 조치 종류가 같아야 한다(`ActionReviewMismatchError`).
+  - `postgres_performance_repository.py` — psycopg2 저장 계층. 같은 (agent, profile version,
+    period) 재평가는 새 행이 아니라 갱신이다.
+  - **제안까지만 한다.** `decision=DEACTIVATION`이거나 `DEACTIVATION` 조치가 `VERIFIED`가 돼도
+    Agent의 employment status는 바뀌지 않는다 — 실제 비활성화는 CEO 승인과 roster 전이
+    게이트(P0-3)를 따로 거친다. 두 모듈 다 `roster`를 import하지 않고, 자체 점검이 그걸 고정한다.
+  - 창구: `POST/GET /workforce/v1/agents/{agent_id}/performance-reviews`,
+    `POST/GET .../performance-actions`, `POST /workforce/v1/performance-actions/{id}/transitions`.
+
 ## planning/
 
 - `planning/workforce_plan.py` — **P1-2 HR-04 Workforce Plan** 상태 머신. HR-01

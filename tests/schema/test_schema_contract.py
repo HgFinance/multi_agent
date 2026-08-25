@@ -267,6 +267,10 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  # department_id/agent_id 는 하나만 있어도 되므로 nulls not distinct
                  # unique index 를 쓴다.
                  "20260825000200_workforce_capacity_snapshot_writer.sql",
+                 # performance_reviews 에 writer 를 붙이면서 decision 값 어휘를
+                 # 앱 계약(review.py ReviewDecision)과 같은 check 로 고정하고,
+                 # 형제 테이블에 다 있는 작성자 칸(reviewer)을 추가한다.
+                 "20260825000300_workforce_performance_review_writer.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 
