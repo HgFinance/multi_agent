@@ -381,7 +381,7 @@ Hermes의 재귀적 자기 개선은 Runtime Memory 폴더를 Git에 넣는 방�
 | `db/*.sql` 상단 팀 문서 경로 | 오래된 설명, 비 MD | `docs/05-teams/` 경로로 후속 수정 필요 |
 | `config.yaml`의 Timeout 일치 주석 | 오래된 설명, 비 MD | Profile 기본 Timeout과 Workflow Step Timeout은 의미가 다르므로 YAML 주석 후속 수정 필요 |
 | `agent_evolution_cycle`과 Hermes 조직 학습 | 부분 정합, 비 MD | Profile 개선 Prototype은 존재하나 Improvement Registry, Skill Write Gate, 독립 Eval Runner와 Scorecard 연결 필요 |
-| Bedrock/Ollama 목표와 현재 Nous Profile | 상태 구분 필요 | 현재 Profile은 개발 Runtime, Bedrock/Ollama는 목표 Model Gateway임을 문서에 명시 |
+| 과거 Bedrock/Ollama 목표와 현재 provider/Worker model 혼재 | 상태 구분 필요 | Head는 openai-codex, Worker는 Qwen AWQ, Ollama는 local fallback, Bedrock은 후보 adapter로 명시 |
 | LS Open API 문서 | 정합 | REST·WebSocket 42개 API 묶음과 365개 TR 참조가 문서 지도에 연결됨 |
 | `ai-office`와 8개 조직 | 부분 정합 | 8개 조직·2개 층 전환 완료, Backend 조직 Registry 기반 배치는 미완료 |
 | `ai-office`와 금융 Source of Truth | 부분 연결 | DEMO BFF·Trading/Portfolio Fixture는 존재하며 공식 Snapshot·WebSocket와 Kanban Status Bridge는 미완료. 외부 사용자 로그인·세션은 범위 밖 |

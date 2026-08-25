@@ -2,8 +2,8 @@
 
 > **Status:** CANONICAL CURRENT · **reviewed:** 2026-08-25 UTC
 >
-> **Source audit:** current checkout is `main` rooted at `8826a9c`; at review
-> time it is 1 commit ahead and 0 behind `origin/main` (`7b254c4`). Current
+> **Source audit:** current checkout is `main` rooted at `5357d41`; at review
+> time it is 11 commits ahead and 0 behind `origin/main` (`1b9e58c`). Current
 > claims below were checked against this working tree's executable code,
 > Compose, registry and tests. Uncommitted files are repository evidence, not
 > proof of a running AWS process.

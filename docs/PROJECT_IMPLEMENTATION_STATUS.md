@@ -5,7 +5,7 @@
 
 ## Scope and evidence
 
-Audit basis: current `main` checkout rooted at `8826a9c`; at review time it is 1 commit ahead and 0 behind `origin/main` (`7b254c4`). Executable code, Compose, registry, migration and tests were inspected in the working tree. No live AWS process, API, database, or GPU verification was performed in this documentation audit.
+Audit basis: current `main` checkout rooted at `5357d41`; at review time it is 11 commits ahead and 0 behind `origin/main` (`1b9e58c`). Executable code, Compose, registry, migration and tests were inspected in the working tree. No live AWS process, API, database, or GPU verification was performed in this documentation audit.
 
 Status vocabulary:
 
@@ -19,7 +19,7 @@ Status vocabulary:
 
 | Area | Status | Evidence | Runtime verification | Gap | Next action |
 |---|---|---|---|---|---|
-| Source-of-truth alignment | CURRENT CHECKOUT REVIEWED | `main` `8826a9c`; `origin/main` `7b254c4`; local ahead 1/behind 0 at review time | None in this checkout | Deployment revision may differ from the working tree | Record deployed revision with runtime evidence |
+| Source-of-truth alignment | CURRENT CHECKOUT REVIEWED | `main` `5357d41`; `origin/main` `1b9e58c`; local ahead 11/behind 0 at review time | None in this checkout | Deployment revision may differ from the working tree | Record deployed revision with runtime evidence |
 | Department heads and worker registry | IMPLEMENTED / TEST_VERIFIED | 8 Hermes profiles, 10 LLM-capable workers, 5 deterministic runners; `tests/test_worker_architecture.py`; department `config.yaml` and `employee_workers.py` | Current process topology not verified | End-to-end lifecycle is not one completed production path | Run environment-specific contract probes |
 | Worker authority boundaries | IMPLEMENTED / TEST_VERIFIED | `WORKER_ROLE_BOUNDARIES.md`; deterministic Risk, OMS, ledger/NAV, reconciliation, QA and release-gate boundaries | External services not verified | Some cross-department acceptance scenarios remain partial | Keep authority checks in contract tests |
 | Worker model serving | IMPLEMENTED / CONFIGURED | Compose, `departments/worker_model_gateway.py`, and enterprise registry use Qwen2.5-14B-Instruct-AWQ, 4096, 0.85, KV FP8, LoRA 4/32/8 | AWS digest, startup, restart, API health, VRAM not verified | Effective environment override and live health require runtime evidence | Capture approved canary evidence separately |

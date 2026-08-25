@@ -10,7 +10,7 @@
 > serving은 [CURRENT_PROJECT_ARCHITECTURE.md](CURRENT_PROJECT_ARCHITECTURE.md)를
 > 우선한다. 기존 snapshot 수치를 현재 runtime으로 재사용하지 않는다.
 
-> **Local Compose runtime baseline (2026-08-10)**: 현재 로컬 통합 실행 기준은 루트 [`docker-compose.yml`](../docker-compose.yml)과 [로컬 Compose Runtime 기준선](02-engineering/LOCAL_COMPOSE_RUNTIME_BASELINE.md)이다. Compose 병합 결과는 기본 서비스 26개이며 `portfolio`와 `dashboard` Profile을 모두 켜면 29개다. 이 서비스 수는 Hermes Head·Worker의 논리적 수와 별도 축이다. `docker compose config`로 확인한 선언 수와 실제 컨테이너 실행 상태를 혼동하지 않는다.
+> **Local Compose runtime baseline:** 현재 로컬 통합 실행 기준은 루트 [`docker-compose.yml`](../docker-compose.yml)과 [로컬 Compose Runtime 기준선](02-engineering/LOCAL_COMPOSE_RUNTIME_BASELINE.md)이다. 서비스 수는 Compose가 소유하며 문서 본문에 중복 고정하지 않는다. `docker compose config --services`로 확인한 선언 수와 실제 컨테이너 실행 상태를 혼동하지 않는다.
 
 > **Current runtime override (2026-08-24, workforce.agent_profiles 전수조사로 갱신)**: 현재 실행 계층은 8개 Hermes Head, 10개 LLM Worker, 5개 결정론 runner(`desk-runner`, `risk-runner`, `qa-runner`, `back-office-runner`, `ceo-runner`)로 구성된 총 23명이다. 도현님 담당 부서는 Trading 1명(LLM 0 + `desk-runner`), Accounting/Portfolio 2명(LLM 1 + `back-office-runner`)이다. 2026-08-07의 "29명" 스냅샷은 이후 여러 차례의 tool 강등(Research 6→2, Quant 7→2, Trading Bull/Bear 제거, Risk·QA·Accounting 강등, HR 5→1 통합)을 반영하지 못한 값이라 폐기한다. 상세 역할 경계·감축 이력은 [WORKER_ROLE_BOUNDARIES.md](02-engineering/WORKER_ROLE_BOUNDARIES.md)가 우선하며, 이 문서의 목표 아키텍처·과거 구현 스냅샷은 현재 Runtime과 섞어 해석하지 않는다.
 
@@ -1213,7 +1213,7 @@ Paper 환경은 Version이 있는 Borrow Availability와 Borrow Fee Scenario를 
 
 초기에는 서비스 수를 과도하게 늘리지 않는다. 프로세스 경계가 필요한 실시간 수신, 에이전트 Worker, Risk/OMS를 우선 분리한다.
 
-현재 로컬 구현은 이 원칙을 루트 Compose로 구체화한다. `docker-compose.yml`은 `timescaledb`, Research 수집기·조회 API·MCP, `redis`, Risk·QA API/Worker, 8개 부서 계층의 선언된 Hermes와 CEO·Trading·Accounting·Workforce API/Worker를 병합한다. 기본 기동은 26개 서비스이고 `portfolio`·`dashboard` Profile을 모두 활성화하면 29개다. 이는 로컬 Integration Runtime의 현재 선언이며, 아래 Production 선택(Managed Container, HA DB, Object Storage)은 별도 전환 Gate를 통과해야 한다. 상세 목록과 포트는 [로컬 Compose Runtime 기준선](02-engineering/LOCAL_COMPOSE_RUNTIME_BASELINE.md)을 따른다.
+현재 로컬 구현은 이 원칙을 루트 Compose로 구체화한다. `docker-compose.yml`은 `timescaledb`, Research 수집기·조회 API·MCP, `redis`, Risk·QA API/Worker, 8개 부서 계층의 선언된 Hermes와 CEO·Trading·Accounting·Workforce API/Worker를 병합한다. 현재 선언 수, 선택 profile과 포트는 [로컬 Compose Runtime 기준선](02-engineering/LOCAL_COMPOSE_RUNTIME_BASELINE.md)이 소유한다. 아래 Production 선택(Managed Container, HA DB, Object Storage)은 별도 전환 Gate를 통과해야 한다.
 
 ### 13.2 Hot Path와 Cold Path
 

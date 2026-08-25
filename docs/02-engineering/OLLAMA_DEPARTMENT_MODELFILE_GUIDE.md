@@ -69,13 +69,13 @@ Prompt 전문을 이 문서에 복제하면 각 본부가 `Modelfile`을 고도�
 | Ollama Local Runtime 설치 | 감사 Host에는 CLI 없음, 팀 공용 Remote Endpoint는 코드에 존재하나 자동 Health 증거 없음 |
 | Docker Compose `ollama` Service | 미구현 |
 | `ollama-model-init` One-shot Service | 미구현 |
-| Model Gateway `OllamaChatAdapter` | 문서 계약만 존재, 구현 미확인 |
+| Worker Model Gateway의 Ollama fallback | 구현됨; local endpoint health와 alias digest는 별도 검증 필요 |
 | CEO·HR Smoke Script | 구현, 비결정 응답 육안 확인용이며 Assert·Digest 기록 없음 |
 | 8개 Alias Build와 Digest 기록 | 공통 Manifest와 실행 증거 없음 |
 | 본부별 Golden/Adversarial Eval | 미구현 |
 | Hermes Supervisor / Worker Model | 8개 Head는 `openai-codex/gpt-5.6-luna`; 직원은 독립 LangGraph + Qwen AWQ가 운영 기본이고 Ollama `qwen3:1.7b`는 local fallback |
 
-따라서 현재 완료 상태는 **Risk/QA Worker Graph 코드·Profile 계약의 Git 등록과 일부 Hermes Runtime 실행**이다. 로컬 Ollama 모델 다운로드·Health, 호환 Alias Build, 공통 Gateway와 Production 배포는 별도 운영 증거가 필요한 경계다.
+따라서 Worker Model Gateway와 Qwen AWQ 운영 설정은 구현돼 있다. 이 문서가 다루는 로컬 Ollama 모델 다운로드·Health와 호환 alias build/digest는 별도 실행 증거가 필요하며, 그 증거가 Qwen 운영 배포 상태를 대신하지 않는다.
 
 ## 3. 모델 선택 의도
 

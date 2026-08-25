@@ -471,7 +471,7 @@ CEO 라우터는 `category`를 최소 부서 집합의 시작점으로 삼고 `q
 - `max_drawdown_pct`는 퍼센트가 아닌 비율이다. `0.10`은 최대 손실률 10%를 뜻하며 `10`은 유효하지 않다. 허용 범위는 `0 < value <= 1`이다.
 - 현재 제품 범위는 국내 주식이며, 기본 `KOREA_EQUITY_WATCHLIST`는 `KOREA_EQUITY`만 노출하고 채권·글로벌 주식·파생상품·현금성 자산을 후보 목록에 포함하지 않는다.
 - Supabase live 실행에서는 `reference.instruments`와 `reference.instrument_symbols`를 `execution.market_snapshots`와 Point-in-Time 조인해 티커를 만든다. 연결 실패나 PIT 종목 부재 시 정적 TEST 카탈로그로 조용히 대체하지 않고 `UNAVAILABLE/HOLD`로 종료한다.
-- Worker 모델 실행은 `PORTFOLIO_WORKER_RUNTIME=ollama`, `OLLAMA_BASE_URL=http://localhost:11434/v1`, `OLLAMA_CHAT_MODEL=qwen3:1.7b`를 사용한다. Ollama 장애·계약 오류는 `DEGRADED/HOLD`이며 자동 승격하지 않는다.
+- 기본 로컬 BFF만 실행할 때는 `PORTFOLIO_WORKER_RUNTIME=ollama`, `OLLAMA_BASE_URL=http://localhost:11434/v1`, `OLLAMA_CHAT_MODEL=qwen3:1.7b`를 사용한다. 운영 model overlay는 Worker Model Gateway의 Qwen AWQ 좌표를 주입한다. 어느 경로든 모델 장애·계약 오류는 `DEGRADED/HOLD`이며 자동 승격하지 않는다.
 
 ### 10.7 BFF CEO Kanban 질의 Surface
 

@@ -101,7 +101,7 @@
 
 ### P1-1. `MODEL-03`·`QA-03`·`OPS-01`
 
-- Hermes Head는 `openai-codex/gpt-5.6-luna`, 직원 Worker는 Ollama `qwen3:1.7b`라는 계층을 Profile·Worker Registry·Checker에서 일치시킨다.
+- Hermes Head는 `openai-codex/gpt-5.6-luna`, 직원 Worker 운영 기본은 Worker Model Gateway의 Qwen AWQ, Ollama `qwen3:1.7b`는 local fallback이라는 계층을 Profile·Worker Registry·Checker에서 일치시킨다.
 - QA의 개인 GPU IP/직접 endpoint를 제거하고 승인된 Model Gateway만 사용한다.
 - Risk/QA 운영 Credential, DB RLS, Service Identity, rotation, audit event, 최소 권한을 preflight로 검사한다.
 - preflight 누락은 `READY`가 아니라 `BLOCKED`/`DENY`여야 한다.
@@ -136,7 +136,7 @@
 | unsupported/contradicted claim 존재 | QA hallucination-critic-worker (LLM) | 미해결 claim이면 QA PASS 금지 |
 | incident 입력 존재 | QA incident-postmortem-worker (LLM) | append-only timeline과 human review로 종료 |
 
-기술 스택과 Worker별 성과 지표는 [`WORKER_ROLE_BOUNDARIES.md`](../02-engineering/WORKER_ROLE_BOUNDARIES.md)와 실행 메타데이터 [`departments/risk_qa_worker_profiles.py`](../../departments/risk_qa_worker_profiles.py)에 함께 정의한다. 성과는 단순 완료 수가 아니라 freshness·PIT·citation·determinism·false-clear·permission violation·latency·replay completeness를 기록한다. Ollama `qwen3:1.7b`는 구조화된 근거의 advisory 서술만 담당하고, 바인딩 판정·권한·상태 전이는 결정론적 Engine/API가 담당한다.
+기술 스택과 Worker별 성과 지표는 [`WORKER_ROLE_BOUNDARIES.md`](../02-engineering/WORKER_ROLE_BOUNDARIES.md)와 실행 메타데이터 [`departments/risk_qa_worker_profiles.py`](../../departments/risk_qa_worker_profiles.py)에 함께 정의한다. 성과는 단순 완료 수가 아니라 freshness·PIT·citation·determinism·false-clear·permission violation·latency·replay completeness를 기록한다. Qwen AWQ와 Ollama fallback 모두 구조화된 근거의 advisory 서술만 담당하고, 바인딩 판정·권한·상태 전이는 결정론적 Engine/API가 담당한다.
 
 외부 쓰기는 이 부서 Worker의 기본 권한이 아니다. Risk/QA 도메인 API의 write scope가 존재하더라도 현재 포트폴리오 추천 실행은 `external_writes=false`이며, Worker allowlist는 read/calculation 도구만 허용한다. 실제 write를 연결할 때는 별도 command path, service token, SoD, `idempotency_key`, `expected_version`, append-only audit event와 음성 테스트가 먼저 필요하다.
 

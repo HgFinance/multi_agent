@@ -1,18 +1,18 @@
 # Department Backend Integration and Docker Plan
 
-> 상태: 전 본부 Backend 연결과 Container 운영의 구현 기준 v1.3
+> 상태: TARGET / MIGRATION PLAN v1.4
 >
 > 기준일: 2026-08-03
 >
 > 적용 범위: CEO Office, 6개 본부, Agent Workforce 인사팀, AI Office와 공통 Platform
 >
-> 본부별 Local Model 기준: [Ollama Department Modelfile Guide](OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)
+> 운영 Worker 모델 기준: [Worker Model Matrix](WORKER_MODEL_MATRIX.md) · Local fallback: [Ollama Department Modelfile Guide](OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)
 >
 > 실제 실행 증거·2주 통합 보드와 Owner별 Daily Scrum: [실행 현황과 통합 계획 v2.2](../PROJECT_IMPLEMENTATION_STATUS.md)
 
 ## 1. 이 문서가 결정하는 것
 
-> **현재 Compose 기준선 (2026-08-10)**: 루트 [`docker-compose.yml`](../../docker-compose.yml)은 `name: hedgefund`와 Compose `include`로 CEO Office·Trading·Accounting/Portfolio·Agent Workforce Fragment를 병합한다. 기본 Compose 서비스는 26개이고 `portfolio`·`dashboard` Profile을 모두 켜면 29개다. 현재 서비스·포트·볼륨은 [로컬 Compose Runtime 기준선](LOCAL_COMPOSE_RUNTIME_BASELINE.md)을 따른다. `docker compose config --services`는 설정 검증이며 실제 기동·health·DB 입출력 검증은 별도다.
+> **현재 Compose 기준선 (2026-08-25 재검토)**: 루트 [`docker-compose.yml`](../../docker-compose.yml)은 `name: hedgefund`와 Compose `include`로 부서 fragment를 병합한다. 현재 서비스 수·profile·포트·볼륨은 [로컬 Compose Runtime 기준선](LOCAL_COMPOSE_RUNTIME_BASELINE.md)이 소유한다. `docker compose config --services`는 설정 검증이며 실제 기동·health·DB 입출력 검증은 별도다.
 
 현재 Compose에는 `risk-api`, `audit-api`, `qa-worker`, `trading-api`, `accounting-api`, `governance-api`, `workforce-api`와 각 선언된 Hermes가 포함돼 있다. 아래의 “미구현/미연결” 표현은 Container 선언 여부가 아니라 API 연결, Canonical DB Row, Event Consumer 또는 Acceptance Scenario가 남아 있다는 의미로만 사용한다.
 
@@ -29,7 +29,11 @@
 
 [기술 스택 결정 9절](TECH_STACK_DECISIONS.md#9-docker-구성)의 `api`, `streaming-worker`, `agent-worker`, `hermes`는 논리적 Runtime 종류를 뜻한다. 전 본부를 각각 하나의 거대 Container로 합친다는 의미가 아니며, 실제 Service 이름과 배포 단위는 이 문서가 구체화한다.
 
-## 2. 현재 상태
+## 2. Historical implementation snapshot
+
+아래 2.1 표는 문서 작성 시점인 2026-08-03의 migration 출발점이다. 현행 구현 완료
+여부는 [Implementation Status](../PROJECT_IMPLEMENTATION_STATUS.md)와 executable
+Compose/API/test를 사용하고, 이 표의 “미구현”을 현재 주장으로 읽지 않는다.
 
 ### 2.1 이미 구현된 것
 
@@ -48,9 +52,9 @@
 | AI Office BFF | DEMO BFF, 8개 조직 UI와 Risk·QA 계약 Panel | Clean Build·Render 2/2, 공식 Runtime Snapshot 미구현 |
 | 로컬 보조 모델 | 8개 `Modelfile`, CEO·HR Smoke Script, Research/Quant 모델 실측 선택 | 공통 Ollama·Model Gateway·자동 Eval 미구현 |
 
-### 2.2 현재 Compose의 의미
+### 2.2 현행 Compose 해석 (2026-08-25 보정)
 
-루트 `docker-compose.yml`은 현재 전사 로컬 통합 Compose다. 기본 26개 서비스와 선택 Profile 3개 서비스를 선언하며, 같은 PC의 별도 `trading-*` Compose와 Redis는 이 프로젝트와 분리된 외부 프로젝트로 취급한다. 제품이나 Acceptance Test는 그 외부 프로젝트에 의존하지 않는다. 실제 서비스 상태는 `docker compose ps`와 health/API/DB smoke test로 별도 기록한다.
+루트 `docker-compose.yml`은 현재 전사 로컬 통합 Compose다. 선언 수와 선택 profile은 Compose와 [로컬 기준선](LOCAL_COMPOSE_RUNTIME_BASELINE.md)에서 확인한다. 같은 PC의 별도 `trading-*` Compose와 Redis는 이 프로젝트와 분리된 외부 프로젝트로 취급한다. 제품이나 Acceptance Test는 그 외부 프로젝트에 의존하지 않는다. 실제 서비스 상태는 `docker compose ps`와 health/API/DB smoke test로 별도 기록한다.
 
 현재 정상 동작하는 수집기를 한 번에 재작성하지 않는다. 다음 구조로 옮길 때도 Service 이름, Volume과 Migration 순서를 유지하면서 한 서비스씩 이동한다.
 

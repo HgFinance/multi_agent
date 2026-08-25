@@ -70,7 +70,7 @@ sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart doc
 | `departments/01-research/config/worker_model_registry.json` | worker → adapter 정본 (지금은 전원 base) |
 | `departments/01-research/api/mcp_server.py` | `run_research_workers`/`get_worker_job`/`worker_model_health` 도구 |
 | `docker-compose.model.yml` | vllm 서비스 + research-mcp 모델 배선 오버레이 |
-| `scripts/model_plane/*` | 모델 다운로드·FP8 양자화·manifest |
+| `scripts/model_plane/*` | 모델 다운로드·manifest; FP8 quantization helper는 legacy benchmark/rollback 전용 |
 
 ```bash
 cd ~/hgfinance
@@ -86,19 +86,17 @@ docker compose build research-mcp
 cd ~/hgfinance
 chmod +x scripts/model_plane/*.sh
 
-# 2-1. 14B FP8 사전 양자화 체크포인트 (~15GB, 최초 1회)
-scripts/model_plane/fetch_base_model.sh
-# → /opt/hgfinance/models/Qwen2.5-14B-Instruct-FP8-dynamic + manifest.json
+# 2-1. 현재 운영 AWQ checkpoint를 명시적으로 받는다.
+# 주의: fetch_base_model.sh의 인자 없는 기본값은 아직 legacy FP8이므로 사용하지 않는다.
+scripts/model_plane/fetch_base_model.sh \
+  Qwen/Qwen2.5-14B-Instruct-AWQ \
+  Qwen2.5-14B-Instruct-AWQ
+# → /opt/hgfinance/models/Qwen2.5-14B-Instruct-AWQ + manifest.json
 
-# 2-2. (요구사항: 양자화를 AWS 에서 직접 테스트) 1.5B 로 양자화 파이프라인 검증
-#      BF16 로드 → FP8_DYNAMIC → 저장 → quantization_record.json → manifest
-scripts/model_plane/run_quantize_fp8.sh
-# 14B 직접 양자화는 RAM 64GB+ 인스턴스에서만 (quantize_fp8.py 머리말 참고)
-
-# 2-3. S3 를 정본으로 (버킷 이름 정한 뒤 1회)
+# 2-2. S3를 정본으로 만든다(버킷 이름을 정한 뒤 최초 1회).
 export HGF_MODEL_BUCKET=<버킷이름>
-aws s3 sync /opt/hgfinance/models/Qwen2.5-14B-Instruct-FP8-dynamic \
-  "s3://$HGF_MODEL_BUCKET/models/Qwen2.5-14B-Instruct-FP8-dynamic" --exclude 'hf-cache/*'
+aws s3 sync /opt/hgfinance/models/Qwen2.5-14B-Instruct-AWQ \
+  "s3://$HGF_MODEL_BUCKET/models/Qwen2.5-14B-Instruct-AWQ" --exclude 'hf-cache/*'
 ```
 
 EBS 를 새로 만들 때는 HF 가 아니라 S3 에서 받고 manifest 로 검증한다:
@@ -107,6 +105,10 @@ EBS 를 새로 만들 때는 HF 가 아니라 S3 에서 받고 manifest 로 검�
 aws s3 sync "s3://$HGF_MODEL_BUCKET/models/<이름>" /opt/hgfinance/models/<이름>
 python3 scripts/model_plane/model_manifest.py --model-dir /opt/hgfinance/models/<이름> --verify
 ```
+
+FP8 download와 `run_quantize_fp8.sh`는 historical benchmark 또는 명시적 rollback
+검증에만 사용한다. FP8 artifact를 `Qwen2.5-14B-Instruct-AWQ` 디렉터리 이름으로
+복사하거나 현재 Compose에 연결하지 않는다.
 
 ## 3. vLLM 기동
 
@@ -280,7 +282,7 @@ docker exec -u hermes -i hedgefund-research-hermes hermes chat -Q \
   `/opt/hgfinance/models/loras/<이름>` 에 두고 `/v1/load_lora_adapter` 로 적재 →
   `worker_model_registry.json` 의 해당 worker 에 `adapter_id`/`status: enabled` 기록.
   주의: adapter 에 `modules_to_save`(embed/lm_head)를 넣으면 양자화 베이스 위에서
-  못 쓴다. 평가는 FP8+LoRA 조합으로 다시 돌린다.
+  못 쓴다. 평가는 adapter manifest에 기록된 정확한 AWQ base + LoRA 조합으로 다시 돌린다.
 - 다른 부서 수직 슬라이스: 같은 패턴(부서 MCP 에 worker 실행 도구 + 게이트웨이 주입).
 - Worker Registry 를 파일에서 DB 로 승격, envelope(model_version/adapter_version)
   스탬핑을 부서 결과 계약에 연결.

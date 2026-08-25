@@ -1,6 +1,7 @@
 # Local Compose Runtime Baseline
 
-검토 기준: 2026-08-11 (KST)
+> **상태:** CURRENT RUNBOOK
+> **검토 기준:** 2026-08-25 UTC
 
 이 문서는 루트 [`docker-compose.yml`](../../docker-compose.yml)의 실제 로컬 개발·통합 Runtime을 설명한다. 서비스 수·포트·Profile이 이 문서와 다르면 Compose 파일을 먼저 확인하고 문서를 갱신한다.
 
@@ -18,15 +19,18 @@
 
 | 명령 | 서비스 수 | 추가 서비스 |
 |---|---:|---|
-| `docker compose config --services` | 30 | 기본 통합 Runtime |
-| `docker compose --profile portfolio config --services` | 32 | `portfolio-bff`, `portfolio-worker` |
-| `docker compose --profile dashboard config --services` | 31 | `hermes-dashboard` |
-| `docker compose --profile portfolio --profile dashboard config --services` | 33 | Portfolio + Dashboard |
-| `docker compose --profile research-skills config --services` | 32 | `paper-search-mcp`, `youtube-transcript-mcp` |
+| `docker compose config --services` | 55 | 기본 통합 Runtime; `portfolio-bff`와 `portfolio-worker` 포함 |
+| `docker compose --profile dashboard config --services` | 56 | `hermes-dashboard` 추가 |
+| `docker compose --profile research-skills config --services` | 57 | `paper-search-mcp`, `youtube-transcript-mcp` 추가 |
+| `docker compose --profile dashboard --profile research-skills config --services` | 58 | 선택 서비스 전체 |
 
 `config --services`는 선언·include·interpolation 검증일 뿐 컨테이너가 실행 중이라는 뜻은 아니다. 실행 여부는 `docker compose ps`, Healthcheck, API smoke test로 확인한다.
 
 ## 3. 서비스 배치
+
+아래 표는 책임 경계를 설명하는 대표 서비스 목록이다. 55개 전체 inventory의 정본은
+`docker compose config --services`이며, 신규 relay·scheduler·retention worker를 이 표에
+일일이 복사해 전체 목록처럼 관리하지 않는다.
 
 ### Market/Data Plane
 
@@ -76,7 +80,7 @@ Hermes Dashboard 자체가 Kanban의 공식 UI다. AI Office는 보드를 복제
 
 ### Operator BFF
 
-`portfolio-bff`는 `portfolio` Profile에서만 실행하는 `apps/api` FastAPI BFF다. 호스트 `${PORTFOLIO_BFF_PORT:-8001}` → 컨테이너 `8000`으로 게시한다.
+`portfolio-bff`는 기본 Compose에서 실행하는 `apps/api` FastAPI BFF다. 호스트 `${PORTFOLIO_BFF_PORT:-8001}` → 컨테이너 `8000`으로 게시한다.
 
 AI Office 로컬 모의투자는 이 BFF의 고정 데모 ID 경계와 LS PAPER 읽기 경계를 사용한다.
 시장 상위종목·계좌·보유종목·체결 요약은 LS 조회에서 오며, `npm run bff`가
@@ -118,9 +122,9 @@ Dashboard 화면은 `NEXT_PUBLIC_HERMES_DASHBOARD_URL`에 있는 Hermes 공식 D
 ```bash
 docker compose up -d
 docker compose logs -f timescaledb
-docker compose --profile portfolio up -d
 docker compose --profile dashboard up -d
-docker compose --profile portfolio --profile dashboard up -d
+docker compose --profile research-skills up -d
+docker compose --profile dashboard --profile research-skills up -d
 docker compose ps
 docker compose down       # 컨테이너만 제거, named volume 유지
 docker compose down -v    # 데이터까지 삭제
