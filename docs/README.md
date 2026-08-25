@@ -8,6 +8,9 @@
 > `origin/main`과 현재 branch가 다르면 canonical current-state 문서의 source
 > audit를 우선한다.
 
+<img width="1536" height="1024" alt="image" src="https://github.com/user-attachments/assets/46247b5e-0cbe-46d6-835f-7d129366c8f9" />
+
+
 ## Canonical documentation hierarchy
 
 | Document | Role |
