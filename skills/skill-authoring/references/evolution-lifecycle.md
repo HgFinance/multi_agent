@@ -29,6 +29,16 @@ QA FAIL은 `REJECTED`다. 모델 생성 실패와 검증 실패는 정본을 변
 제안 워커에는 운영 상태 경로만 쓰기 권한을 준다. `skills/`는 읽기 전용으로
 마운트하고, 승인 후 호스트 control-plane 명령만 정본을 바꾼다.
 
+## 사건 발생원
+
+- 현재 운영 발생원은 LangSmith feedback bridge다. Research·Quant trace의
+  결정론적 finding만 소유 부서 occurrence로 변환한다.
+- 새 발생원은 `append_occurrences_to_path()` 또는 `EvolutionSkillStore`를 통해
+  같은 원장·중복 제거 계약을 사용해야 한다.
+- 같은 `department + kind + source run ID`는 동시 기록돼도 한 번만 센다.
+- `scripts/evolution_skills.py daemon`이 후보와 제안만 만들며 승인·승격은 하지
+  않는다. 구형 `agents/skill_forge.py` 실행 경로는 사용하지 않는다.
+
 ## provenance 필수값
 
 evolved 스킬은 다음을 반드시 가진다.
@@ -49,25 +59,26 @@ evolved 스킬은 다음을 반드시 가진다.
 
 ```bash
 # 자동 수집 상태와 제안 확인
-python scripts/evolution_skills.py status
-python scripts/evolution_skills.py propose --department 01-research --dry-run
+python3 scripts/evolution_skills.py status
+python3 scripts/evolution_skills.py propose --department 01-research --dry-run
 
 # 현재 소스 분류 감사(삭제하지 않음)
-python scripts/evolution_skills.py inventory
+python3 scripts/evolution_skills.py inventory
 
 # 검토와 활성화
-python scripts/evolution_skills.py approve <proposal-id> \
+python3 scripts/evolution_skills.py approve <proposal-id> \
   --approved-by <name> --qa-verdict PASS
-python scripts/evolution_skills.py promote <proposal-id>
+python3 scripts/evolution_skills.py promote <proposal-id>
+python3 scripts/evolution_skills.py validate
 
 # 성과 기록
-python scripts/evolution_skills.py feedback --slug <slug> --version <n> \
+python3 scripts/evolution_skills.py feedback --slug <slug> --version <n> \
   --run-id <run-id> --score <0..1> --detail <요약>
 
 # 퇴역: 둘 중 하나가 필수이며 파일은 삭제하지 않는다
-python scripts/evolution_skills.py retire --slug <slug> \
+python3 scripts/evolution_skills.py retire --slug <slug> \
   --approved-by <owner> --owner-profile <owner-profile> --replacement <active-slug>
-python scripts/evolution_skills.py retire --slug <slug> \
+python3 scripts/evolution_skills.py retire --slug <slug> \
   --approved-by <owner> --owner-profile <owner-profile> \
   --owner-approved-no-replacement
 ```

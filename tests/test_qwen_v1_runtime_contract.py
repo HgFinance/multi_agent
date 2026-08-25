@@ -14,6 +14,12 @@ ROOT = Path(__file__).resolve().parents[1]
 REGISTRY = ROOT / "departments/01-research/config/worker_model_registry.json"
 MODEL_COMPOSE = ROOT / "docker-compose.model.yml"
 RUNTIME_SCRIPT = ROOT / "scripts/model_plane/vllm_runtime.sh"
+OPERATIONAL_MODEL_DOCS = (
+    ROOT / "docs/02-engineering/AS_IS_PIPELINE_BLUEPRINT.md",
+    ROOT / "docs/02-engineering/RESEARCH_WORKER_AWS_RUNBOOK.md",
+    ROOT
+    / "hgfinance_common_training_v1/HgFinance_QLoRA_Department_Adapter_Training.ipynb",
+)
 
 EXPECTED_LLM_WORKERS = {
     "executive-briefing-worker",
@@ -29,8 +35,14 @@ EXPECTED_LLM_WORKERS = {
 }
 
 DEPARTMENT_CODES = (
-    "ceo", "hr", "research", "trading", "risk", "quant-backtest",
-    "accounting-portfolio", "qa",
+    "ceo",
+    "hr",
+    "research",
+    "trading",
+    "risk",
+    "quant-backtest",
+    "accounting-portfolio",
+    "qa",
 )
 
 
@@ -71,9 +83,7 @@ def test_registry_matches_executable_workers_and_trading_is_deterministic() -> N
     assert set(registry["workers"]) == executable_workers
 
     trading = yaml.safe_load(
-        (ROOT / "departments/02-trading/hermes/config.yaml").read_text(
-            encoding="utf-8"
-        )
+        (ROOT / "departments/02-trading/hermes/config.yaml").read_text(encoding="utf-8")
     )
     runtime = trading["employee_runtime"]
     assert runtime["provider"] == "none"
@@ -88,7 +98,9 @@ def test_runtime_entrypoint_is_pinned_and_fail_closed() -> None:
     assert "vllm/vllm-openai:latest" not in compose
     assert digest in compose
     assert "com.hgfinance.runtime.owner: compose" in compose
-    assert "com.hgfinance.runtime.launcher: scripts/model_plane/vllm_runtime.sh" in compose
+    assert (
+        "com.hgfinance.runtime.launcher: scripts/model_plane/vllm_runtime.sh" in compose
+    )
     assert "refusing to stop or remove it" in script
     assert "docker run" not in script
     assert "check_duplicate_model_containers" in script
@@ -97,3 +109,10 @@ def test_runtime_entrypoint_is_pinned_and_fail_closed() -> None:
     assert "${VLLM_MAX_MODEL_LEN:-4096}" in compose
     assert "${VLLM_MAX_MODEL_LEN:-8192}" not in compose
     assert "\n      - --model\n" not in compose
+
+
+def test_operational_model_docs_match_the_4096_runtime_contract() -> None:
+    for path in OPERATIONAL_MODEL_DOCS:
+        text = path.read_text(encoding="utf-8")
+        assert "max_model_len=8192" not in text, path
+        assert "VLLM_MAX_MODEL_LEN=8192" not in text, path

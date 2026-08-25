@@ -14,8 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from departments.worker_model_gateway import ModelBinding, worker_llm
-from orchestration.evolution_skills import (
+from departments.worker_model_gateway import ModelBinding, worker_llm  # noqa: E402
+from orchestration.evolution_skills import (  # noqa: E402
     OWNER_TO_DEPARTMENT,
     PRODUCTION_GENERATION_MODEL,
     EvolutionSkillError,
@@ -31,7 +31,9 @@ from orchestration.evolution_skills import (
 )
 
 DEFAULT_STATE_ROOT = Path(
-    os.environ.get("EVOLUTION_SKILLS_HOME", str(Path.home() / ".hermes/evolution-skills"))
+    os.environ.get(
+        "EVOLUTION_SKILLS_HOME", str(Path.home() / ".hermes/evolution-skills")
+    )
 )
 DEFAULT_REGISTRY = ROOT / "skills/evolution-registry.json"
 
@@ -58,7 +60,9 @@ def _occurrences(store: EvolutionSkillStore, department: str) -> list[Occurrence
     ]
 
 
-def _proposal_history(store: EvolutionSkillStore) -> tuple[dict[str, int], dict[str, set[str]]]:
+def _proposal_history(
+    store: EvolutionSkillStore,
+) -> tuple[dict[str, int], dict[str, set[str]]]:
     versions: dict[str, int] = {}
     consumed: dict[str, set[str]] = {}
     if not store.proposals_dir.exists():
@@ -66,21 +70,27 @@ def _proposal_history(store: EvolutionSkillStore) -> tuple[dict[str, int], dict[
     for state_path in store.proposals_dir.glob("*/state.json"):
         try:
             state = json.loads(state_path.read_text(encoding="utf-8"))
-            provenance = json.loads((state_path.parent / "provenance.json").read_text(encoding="utf-8"))
+            provenance = json.loads(
+                (state_path.parent / "provenance.json").read_text(encoding="utf-8")
+            )
         except (OSError, ValueError):
             continue
         if state.get("status") == "REJECTED":
             continue
         slug = str(state.get("slug") or "")
         versions[slug] = max(versions.get(slug, 0), int(state.get("version") or 0))
-        consumed.setdefault(slug, set()).update(str(run) for run in provenance.get("runs") or [])
+        consumed.setdefault(slug, set()).update(
+            str(run) for run in provenance.get("runs") or []
+        )
     return versions, consumed
 
 
 def _binding(base_url: str) -> ModelBinding:
     return ModelBinding(
         provider="vllm-openai",
-        base_url=base_url.rstrip("/") if base_url.rstrip("/").endswith("/v1") else base_url.rstrip("/") + "/v1",
+        base_url=base_url.rstrip("/")
+        if base_url.rstrip("/").endswith("/v1")
+        else base_url.rstrip("/") + "/v1",
         model=PRODUCTION_GENERATION_MODEL,
         base_model=PRODUCTION_GENERATION_MODEL,
         adapter_id=None,
@@ -113,7 +123,11 @@ def _run_proposals(args: argparse.Namespace, *, department: str | None = None) -
             "department": department,
             "candidate_count": len(candidates),
             "candidates": [
-                {"slug": candidate.slug, "version": candidate.version, "runs": list(candidate.runs)}
+                {
+                    "slug": candidate.slug,
+                    "version": candidate.version,
+                    "runs": list(candidate.runs),
+                }
                 for candidate in candidates
             ],
             "written": [],
@@ -181,7 +195,11 @@ def cmd_daemon(args: argparse.Namespace) -> None:
 
 
 def cmd_approve(args: argparse.Namespace) -> None:
-    _print(_store(args).approve(args.proposal_id, approved_by=args.approved_by, qa_verdict=args.qa_verdict))
+    _print(
+        _store(args).approve(
+            args.proposal_id, approved_by=args.approved_by, qa_verdict=args.qa_verdict
+        )
+    )
 
 
 def cmd_promote(args: argparse.Namespace) -> None:
@@ -203,7 +221,9 @@ def cmd_feedback(args: argparse.Namespace) -> None:
         or entry.get("status") != "active"
         or int(entry.get("current_version") or 0) != args.version
     ):
-        raise EvolutionSkillError("feedback requires the active registered skill version")
+        raise EvolutionSkillError(
+            "feedback requires the active registered skill version"
+        )
     owners = list(entry.get("owner_profiles") or [])
     if len(owners) != 1 or owners[0] not in OWNER_TO_DEPARTMENT:
         raise EvolutionSkillError("feedback skill owner is unresolved")
@@ -215,7 +235,14 @@ def cmd_feedback(args: argparse.Namespace) -> None:
         detail=args.detail,
         department=OWNER_TO_DEPARTMENT[owners[0]],
     )
-    _print({"recorded": True, "slug": args.slug, "version": args.version, "run_id": args.run_id})
+    _print(
+        {
+            "recorded": True,
+            "slug": args.slug,
+            "version": args.version,
+            "run_id": args.run_id,
+        }
+    )
 
 
 def cmd_retire(args: argparse.Namespace) -> None:
@@ -282,7 +309,9 @@ def cmd_validate(args: argparse.Namespace) -> None:
     result = validate_canonical_registry(ROOT, Path(args.registry))
     _print(result)
     if not result["ok"]:
-        raise EvolutionSkillError(f"canonical registry validation failed: {result['errors']}")
+        raise EvolutionSkillError(
+            f"canonical registry validation failed: {result['errors']}"
+        )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -292,15 +321,21 @@ def _parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     ingest = sub.add_parser("ingest")
-    ingest.add_argument("--department", required=True, choices=("01-research", "04-quant-backtest"))
+    ingest.add_argument(
+        "--department", required=True, choices=("01-research", "04-quant-backtest")
+    )
     ingest.add_argument("--input", required=True)
     ingest.set_defaults(func=cmd_ingest)
 
     propose = sub.add_parser("propose")
-    propose.add_argument("--department", required=True, choices=("01-research", "04-quant-backtest"))
+    propose.add_argument(
+        "--department", required=True, choices=("01-research", "04-quant-backtest")
+    )
     propose.add_argument(
         "--model-base-url",
-        default=os.environ.get("EVOLUTION_SKILL_MODEL_BASE_URL", "http://127.0.0.1:8000/v1"),
+        default=os.environ.get(
+            "EVOLUTION_SKILL_MODEL_BASE_URL", "http://127.0.0.1:8000/v1"
+        ),
     )
     propose.add_argument("--dry-run", action="store_true")
     propose.set_defaults(func=cmd_propose)
@@ -314,7 +349,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     daemon.add_argument(
         "--model-base-url",
-        default=os.environ.get("EVOLUTION_SKILL_MODEL_BASE_URL", "http://127.0.0.1:8000/v1"),
+        default=os.environ.get(
+            "EVOLUTION_SKILL_MODEL_BASE_URL", "http://127.0.0.1:8000/v1"
+        ),
     )
     daemon.add_argument("--dry-run", action="store_true")
     daemon.add_argument("--interval-seconds", type=int, default=900)

@@ -241,7 +241,7 @@ Hermes는 이 저장소의 코드가 아니다. 업스트림 **NousResearch `her
 프로바이더는 compose에 하드코딩하지 않고 `/opt/data/config.yaml`의 `provider:`와 `auth.json`이 결정한다 (`docker-compose.yml:708-711`).
 
 **모델 플레인 (GPU 오버레이)** — `docker-compose.model.yml`:
-- vLLM은 digest-pinned `vllm/vllm-openai` 이미지, `127.0.0.1:8000` 루프백 전용, `--model /models/Qwen2.5-14B-Instruct-AWQ --served-model-name qwen2.5-14b-instruct-awq --max-model-len 8192 --gpu-memory-utilization 0.85 --kv-cache-dtype fp8 --enable-lora --max-loras 4` (`docker-compose.model.yml`), `HF_HUB_OFFLINE=1` (무단 다운로드 방지), healthcheck start_period 600s. 기동·점검은 `scripts/model_plane/vllm_runtime.sh`만 사용한다.
+- vLLM은 digest-pinned `vllm/vllm-openai` 이미지, `127.0.0.1:8000` 루프백 전용, `--model /models/Qwen2.5-14B-Instruct-AWQ --served-model-name qwen2.5-14b-instruct-awq --max-model-len 4096 --gpu-memory-utilization 0.85 --kv-cache-dtype fp8 --enable-lora --max-loras 4` (`docker-compose.model.yml`), `HF_HUB_OFFLINE=1` (무단 다운로드 방지), healthcheck start_period 600s. 기동·점검은 `scripts/model_plane/vllm_runtime.sh`만 사용한다.
 - 모델 준비 스크립트: `scripts/model_plane/fetch_base_model.sh` (S3→EBS, RedHatAI FP8 사전 양자화 체크포인트), `quantize_fp8.py` (llm-compressor, 파이프라인 검증용 1.5B), `model_manifest.py` (파일별 sha256 + 복합 digest).
 - `WORKER_MODEL_*`/`VLLM_*`/`HGF_MODEL_DIR`는 모델 오버레이와 `.env.example`에 선언한다. 오버레이를 잊은 로컬 개발은 의도적으로 Ollama fallback이지만 AWS 운영은 `vllm_runtime.sh check`가 Compose·이미지·네트워크·모델 alias 불일치를 실패시킨다. arithmetic LoRA는 vLLM에 로드되지만 레지스트리에서 explicit route로만 선택되며 FinanceBench HOLD를 품질 승격으로 우회하지 않는다.
 

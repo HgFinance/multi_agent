@@ -3,7 +3,7 @@
 검토일: 2026-08-04  
 상태: 설계 제안. 현재 운영 활성화나 신규 Library 도입을 의미하지 않는다.
 
-이 문서는 Risk 부서의 LangGraph 노드, RAG 기법, 내부 API 호출, 저장소 경계를 정의한다. 부서장은 Hermes와 `openai-codex/gpt-5.6-luna`를 사용하고, 직원 Worker는 현재 Ollama `qwen3:1.7b`를 사용한다. `qwen3:8b`나 `qwen2.5:7b`는 HR·QA benchmark와 CEO 승인을 거친 후보일 뿐 자동 활성화하지 않는다.
+이 문서는 Risk 부서의 LangGraph 노드, RAG 기법, 내부 API 호출, 저장소 경계를 정의한다. 부서장은 Hermes와 `openai-codex/gpt-5.6-luna`를 사용한다. 직원 Worker의 AWS 운영 정본은 vLLM `qwen2.5-14b-instruct-awq`이고, Ollama `qwen3:1.7b`는 `WORKER_MODEL_BASE_URL`이 없는 로컬 개발 fallback이다. 임의의 8B·7B 모델을 운영 기본값으로 활성화하지 않는다.
 
 **2026-08-06 tool 강등**: `core-risk-worker`·`derivatives-counterparty-worker`는 결정론 `risk-runner` 하나로
 합쳐졌다(`WORKER_SPECS` LLM Registry 밖, 매 케이스 항상 실행). 아래 표의 두 Worker 행은 강등 전 설계를

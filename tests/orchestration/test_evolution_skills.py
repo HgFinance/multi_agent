@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -52,7 +53,9 @@ def _candidate(*, first_run: int = 1, active_version: int | None = None):
     return detect_candidates(
         rows,
         department="01-research",
-        active_versions={"repeated-quote-timeout": active_version} if active_version else None,
+        active_versions={"repeated-quote-timeout": active_version}
+        if active_version
+        else None,
     )[0]
 
 
@@ -81,8 +84,32 @@ def test_occurrences_are_persistent_and_deduplicated_by_run(tmp_path: Path) -> N
     )
 
     assert store.append_occurrences([row, row]) == 1
-    assert EvolutionSkillStore(tmp_path / "state").load_occurrences() == store.load_occurrences()
+    assert (
+        EvolutionSkillStore(tmp_path / "state").load_occurrences()
+        == store.load_occurrences()
+    )
     assert len(store.load_occurrences()) == 1
+
+
+def test_concurrent_occurrence_writers_cannot_double_count_one_run(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state"
+    row = Occurrence(
+        kind="tool timeout",
+        detail="same source execution",
+        run_id="run-1",
+        department="01-research",
+    )
+
+    def append_once(_index: int) -> int:
+        return EvolutionSkillStore(state).append_occurrences([row])
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        counts = list(pool.map(append_once, range(16)))
+
+    assert sum(counts) == 1
+    assert len(EvolutionSkillStore(state).load_occurrences()) == 1
 
 
 def test_candidate_requires_three_distinct_unconsumed_runs() -> None:
@@ -110,7 +137,9 @@ def test_candidate_requires_three_distinct_unconsumed_runs() -> None:
     )
 
 
-def test_generation_requires_governed_14b_and_deterministic_structure(tmp_path: Path) -> None:
+def test_generation_requires_governed_14b_and_deterministic_structure(
+    tmp_path: Path,
+) -> None:
     store = EvolutionSkillStore(tmp_path)
     candidate = _candidate()
 
@@ -121,7 +150,12 @@ def test_generation_requires_governed_14b_and_deterministic_structure(tmp_path: 
             model_metadata=_metadata("qwen2.5-8b-instruct"),
         )
     assert store.candidates_path.is_file()
-    assert json.loads(store.candidates_path.read_text(encoding="utf-8").splitlines()[0])["status"] == "CANDIDATE"
+    assert (
+        json.loads(store.candidates_path.read_text(encoding="utf-8").splitlines()[0])[
+            "status"
+        ]
+        == "CANDIDATE"
+    )
 
     state = store.create_proposal(
         candidate,
@@ -135,7 +169,9 @@ def test_generation_requires_governed_14b_and_deterministic_structure(tmp_path: 
     assert state["validation"]["ok"] is False
 
 
-def test_approval_requires_validation_qa_pass_and_named_approver(tmp_path: Path) -> None:
+def test_approval_requires_validation_qa_pass_and_named_approver(
+    tmp_path: Path,
+) -> None:
     store = EvolutionSkillStore(tmp_path)
     candidate = _candidate()
     state = store.create_proposal(
@@ -154,7 +190,9 @@ def test_approval_requires_validation_qa_pass_and_named_approver(tmp_path: Path)
         model_metadata=_metadata(),
     )
     with pytest.raises(EvolutionSkillError, match="review requires"):
-        second_store.approve(second_state["proposal_id"], approved_by="", qa_verdict="PASS")
+        second_store.approve(
+            second_state["proposal_id"], approved_by="", qa_verdict="PASS"
+        )
 
     approved = second_store.approve(
         second_state["proposal_id"], approved_by="qa", qa_verdict="PASS"
@@ -162,7 +200,9 @@ def test_approval_requires_validation_qa_pass_and_named_approver(tmp_path: Path)
     assert approved["status"] == "APPROVED"
 
 
-def test_promotion_registers_and_activates_without_runtime_writes(tmp_path: Path) -> None:
+def test_promotion_registers_and_activates_without_runtime_writes(
+    tmp_path: Path,
+) -> None:
     state_root = tmp_path / "state"
     repo = tmp_path / "repo"
     registry = repo / "skills/evolution-registry.json"
@@ -181,7 +221,10 @@ def test_promotion_registers_and_activates_without_runtime_writes(tmp_path: Path
     assert active_state["status"] == "ACTIVE"
     assert active_state["regression_validation"]["ok"] is True
     assert source.is_file() and provenance.is_file()
-    assert json.loads(provenance.read_text(encoding="utf-8"))["approved_by"] == "qa-owner@example.com"
+    assert (
+        json.loads(provenance.read_text(encoding="utf-8"))["approved_by"]
+        == "qa-owner@example.com"
+    )
     active, owners = active_registry_bindings(registry)
     assert active == {"repeated-quote-timeout"}
     assert owners["repeated-quote-timeout"] == {"research-department"}
@@ -197,7 +240,9 @@ def test_tampering_after_validation_blocks_promotion(tmp_path: Path) -> None:
     )
 
     with pytest.raises(EvolutionSkillError, match="changed after validation"):
-        promote_proposal(store, approved["proposal_id"], repository_root=tmp_path / "repo")
+        promote_proposal(
+            store, approved["proposal_id"], repository_root=tmp_path / "repo"
+        )
 
 
 def test_project_owned_slug_cannot_be_overwritten(tmp_path: Path) -> None:
@@ -212,21 +257,29 @@ def test_project_owned_slug_cannot_be_overwritten(tmp_path: Path) -> None:
         promote_proposal(store, approved["proposal_id"], repository_root=repo)
 
 
-def test_evolution_supersedes_old_version_and_retirement_preserves_source(tmp_path: Path) -> None:
+def test_evolution_supersedes_old_version_and_retirement_preserves_source(
+    tmp_path: Path,
+) -> None:
     store = EvolutionSkillStore(tmp_path / "state")
     repo = tmp_path / "repo"
     registry = repo / "skills/evolution-registry.json"
 
     first = _approved_proposal(store)
-    promote_proposal(store, first["proposal_id"], repository_root=repo, registry_path=registry)
+    promote_proposal(
+        store, first["proposal_id"], repository_root=repo, registry_path=registry
+    )
 
     second_candidate = _candidate(first_run=4, active_version=1)
     second = _approved_proposal(store, candidate=second_candidate)
-    promote_proposal(store, second["proposal_id"], repository_root=repo, registry_path=registry)
+    promote_proposal(
+        store, second["proposal_id"], repository_root=repo, registry_path=registry
+    )
 
     _, first_state = store.load_proposal(first["proposal_id"])
     _, second_state = store.load_proposal(second["proposal_id"])
-    entry = json.loads(registry.read_text(encoding="utf-8"))["skills"]["repeated-quote-timeout"]
+    entry = json.loads(registry.read_text(encoding="utf-8"))["skills"][
+        "repeated-quote-timeout"
+    ]
     assert first_state["status"] == "SUPERSEDED"
     assert second_state["status"] == "ACTIVE"
     assert entry["current_version"] == 2
@@ -272,9 +325,13 @@ def test_registry_regression_check_detects_canonical_drift(tmp_path: Path) -> No
     repo = tmp_path / "repo"
     registry = repo / "skills/evolution-registry.json"
     approved = _approved_proposal(store)
-    promote_proposal(store, approved["proposal_id"], repository_root=repo, registry_path=registry)
+    promote_proposal(
+        store, approved["proposal_id"], repository_root=repo, registry_path=registry
+    )
     source = repo / "skills/evolved/repeated-quote-timeout/SKILL.md"
-    source.write_text(source.read_text(encoding="utf-8") + "\ndrift\n", encoding="utf-8")
+    source.write_text(
+        source.read_text(encoding="utf-8") + "\ndrift\n", encoding="utf-8"
+    )
 
     result = validate_canonical_registry(repo, registry)
     assert result["ok"] is False
@@ -291,13 +348,18 @@ def test_runtime_contract_activates_and_retires_without_module_reload(
     registry = repo / "skills/evolution-registry.json"
     monkeypatch.setattr(contract, "EVOLUTION_SKILL_REGISTRY", registry)
     approved = _approved_proposal(store)
-    promote_proposal(store, approved["proposal_id"], repository_root=repo, registry_path=registry)
+    promote_proposal(
+        store, approved["proposal_id"], repository_root=repo, registry_path=registry
+    )
 
-    assert contract.validate_skill_for_profile(
-        "repeated-quote-timeout",
-        "research-department",
-        root=repo / "skills",
-    ) == "repeated-quote-timeout"
+    assert (
+        contract.validate_skill_for_profile(
+            "repeated-quote-timeout",
+            "research-department",
+            root=repo / "skills",
+        )
+        == "repeated-quote-timeout"
+    )
 
     retire_skill(
         store,
@@ -375,25 +437,33 @@ def test_low_performance_feedback_drives_next_version_candidate(tmp_path: Path) 
 
 def test_trace_findings_feed_only_owned_departments(tmp_path: Path) -> None:
     store = EvolutionSkillStore(tmp_path)
-    assert record_trace_occurrences(
-        store,
-        department="research",
-        run_id="trace-1",
-        finding_codes=("high_latency", "high_latency"),
-        detail="redacted deterministic summary",
-    ) == 1
-    assert record_trace_occurrences(
-        store,
-        department="trading",
-        run_id="trace-2",
-        finding_codes=("order_failure",),
-    ) == 0
+    assert (
+        record_trace_occurrences(
+            store,
+            department="research",
+            run_id="trace-1",
+            finding_codes=("high_latency", "high_latency"),
+            detail="redacted deterministic summary",
+        )
+        == 1
+    )
+    assert (
+        record_trace_occurrences(
+            store,
+            department="trading",
+            run_id="trace-2",
+            finding_codes=("order_failure",),
+        )
+        == 0
+    )
     row = store.load_occurrences()[0]
     assert row["kind"] == "trace-high-latency"
     assert row["department"] == "01-research"
 
 
-def test_inventory_distinguishes_sources_and_never_authorizes_deletion(tmp_path: Path) -> None:
+def test_inventory_distinguishes_sources_and_never_authorizes_deletion(
+    tmp_path: Path,
+) -> None:
     repo = tmp_path / "repo"
     project = repo / "skills/project-procedure"
     bundled_root = tmp_path / "runtime/skills"

@@ -36,6 +36,34 @@ class FakeCeoAdapter:
 
 
 class PaperPipelineAdapterTest(unittest.TestCase):
+    def test_retired_research_packet_pipeline_fails_closed_by_default(self) -> None:
+        adapter = PaperPipelineAdapter(Path.cwd(), ceo_adapter=FakeCeoAdapter())
+        adapter._run_employee_workers = lambda *_args, **_kwargs: {  # type: ignore[method-assign]
+            "department": "research",
+            "status": "COMPLETED",
+            "binding": False,
+        }
+        context = {
+            "case_request": {
+                "case_id": "retired-research-default",
+                "symbol": "AAPL",
+                "side": "BUY",
+                "quantity": 1,
+                "order_type": "LIMIT",
+                "limit_price": "200.00",
+                "stage": "paper",
+            }
+        }
+
+        adapter.research("case_request", "research_packet", context)
+
+        packet = context["artifacts"]["research_packet"]
+        report = context["department_reports"]["research"]
+        self.assertEqual(packet["status"], "DEGRADED")
+        self.assertFalse(packet["evidence_available"])
+        self.assertEqual(report["safe_action"], "HOLD")
+        self.assertIn("retired", report["error_message"])
+
     def test_full_handoff_reaches_ceo_without_external_writes(self) -> None:
         ceo = FakeCeoAdapter()
         adapter = PaperPipelineAdapter(
@@ -82,7 +110,9 @@ class PaperPipelineAdapterTest(unittest.TestCase):
         self.assertEqual(len(run.steps), 7)
         self.assertEqual(run.steps[-1].status, "DISPATCHED")
         self.assertEqual(run.metadata["ceo_decision"]["binding"], False)
-        self.assertEqual(run.metadata["ceo_decision"]["binding_decision"], "HOLD / ESCALATE")
+        self.assertEqual(
+            run.metadata["ceo_decision"]["binding_decision"], "HOLD / ESCALATE"
+        )
         self.assertIsNotNone(ceo.received)
         self.assertEqual(
             set(ceo.received["department_reports"]),
@@ -105,7 +135,6 @@ class PaperPipelineAdapterTest(unittest.TestCase):
                 '"rationale":"unsafe","escalate":false}'
             )
 
-
     def test_risk_and_qa_runners_keep_local_modules_isolated(self) -> None:
         risk = _default_risk_runner(Path.cwd())
         qa = _default_qa_runner(Path.cwd())
@@ -113,8 +142,12 @@ class PaperPipelineAdapterTest(unittest.TestCase):
         # __file__ carries the native separator, so compare on a posix-normalized
         # path — the assertion is about which department module was loaded, not
         # about which OS the suite runs on.
-        risk_file = Path(risk.__paper_module__.__dict__["md_cell"].__globals__["__file__"]).as_posix()
-        qa_file = Path(qa.__paper_module__.__dict__["md_cell"].__globals__["__file__"]).as_posix()
+        risk_file = Path(
+            risk.__paper_module__.__dict__["md_cell"].__globals__["__file__"]
+        ).as_posix()
+        qa_file = Path(
+            qa.__paper_module__.__dict__["md_cell"].__globals__["__file__"]
+        ).as_posix()
         self.assertIn("departments/03-risk/reporting.py", risk_file)
         self.assertIn("departments/06-ai-qa-audit/reporting.py", qa_file)
         self.assertIsNot(

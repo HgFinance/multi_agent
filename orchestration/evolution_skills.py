@@ -21,7 +21,6 @@ from typing import Any
 
 import yaml
 
-
 SCHEMA_VERSION = "hgfinance.evolution-skills.v1"
 REGISTRY_VERSION = "hgfinance.evolution-skill-registry.v1"
 PRODUCTION_GENERATION_MODEL = "qwen2.5-14b-instruct-awq"
@@ -29,7 +28,9 @@ OWNED_DEPARTMENTS = {
     "01-research": "research-department",
     "04-quant-backtest": "quant-backtest-department",
 }
-OWNER_TO_DEPARTMENT = {owner: department for department, owner in OWNED_DEPARTMENTS.items()}
+OWNER_TO_DEPARTMENT = {
+    owner: department for department, owner in OWNED_DEPARTMENTS.items()
+}
 TRACE_DEPARTMENT_TO_OWNER = {
     "research": "01-research",
     "research-department": "01-research",
@@ -39,7 +40,6 @@ TRACE_DEPARTMENT_TO_OWNER = {
 }
 MIN_OCCURRENCES = 3
 MAX_SKILLS_PER_RUN = 2
-ACTIVE_STATES = frozenset({"ACTIVE"})
 PROPOSAL_STATES = frozenset(
     {"PROPOSED", "VALIDATED", "APPROVED", "ACTIVE", "SUPERSEDED", "RETIRED", "REJECTED"}
 )
@@ -72,12 +72,16 @@ def _utcnow() -> str:
 
 
 def _json_bytes(value: object) -> bytes:
-    return (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode()
+    return (
+        json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    ).encode()
 
 
 def _write_json_atomic(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, raw_tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    fd, raw_tmp = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
     tmp = Path(raw_tmp)
     try:
         with os.fdopen(fd, "wb") as handle:
@@ -130,6 +134,86 @@ class SkillCandidate:
         value = re.sub(r"[^a-z0-9]+", "-", self.kind.lower()).strip("-")
         value = value[:64].rstrip("-")
         return value or "unnamed"
+
+
+def append_occurrences_to_path(
+    path: Path,
+    occurrences: Iterable[Occurrence],
+) -> int:
+    """Append valid occurrences once, with one lock covering read and write.
+
+    Multiple producers share the same JSONL ledger. Deduplication outside the
+    file lock allowed two concurrent writers to count one source run twice.
+    """
+
+    rows = [
+        occurrence
+        for occurrence in occurrences
+        if occurrence.department in OWNED_DEPARTMENTS
+        and occurrence.kind.strip()
+        and occurrence.run_id.strip()
+    ]
+    if not rows:
+        return 0
+
+    path = path.expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+", encoding="utf-8") as handle:
+        try:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        except (ImportError, OSError):
+            pass
+
+        handle.seek(0)
+        existing: set[tuple[str, str, str]] = set()
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                item = json.loads(line)
+                key = (
+                    str(item.get("department") or ""),
+                    str(item.get("kind") or ""),
+                    str(item.get("run_id") or ""),
+                )
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise EvolutionSkillError(
+                    f"invalid occurrence ledger row {line_number}"
+                ) from exc
+            if key[2]:
+                existing.add(key)
+
+        pending: list[dict[str, Any]] = []
+        for occurrence in rows:
+            key = (
+                occurrence.department,
+                occurrence.kind.strip(),
+                occurrence.run_id.strip(),
+            )
+            if key in existing:
+                continue
+            payload = asdict(occurrence)
+            payload.update(
+                {
+                    "kind": key[1],
+                    "run_id": key[2],
+                    "recorded_at": _utcnow(),
+                }
+            )
+            pending.append(payload)
+            existing.add(key)
+
+        if pending:
+            handle.seek(0, os.SEEK_END)
+            handle.writelines(
+                json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n"
+                for item in pending
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        return len(pending)
 
 
 def detect_candidates(
@@ -241,7 +325,13 @@ def render_skill(candidate: SkillCandidate, body: str) -> str:
             }
         },
     }
-    return "---\n" + yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False).strip() + "\n---\n\n" + body.strip() + "\n"
+    return (
+        "---\n"
+        + yaml.safe_dump(frontmatter, allow_unicode=True, sort_keys=False).strip()
+        + "\n---\n\n"
+        + body.strip()
+        + "\n"
+    )
 
 
 def parse_skill_markdown(markdown: str) -> tuple[dict[str, Any], str]:
@@ -284,7 +374,11 @@ def validate_artifacts(
     if not body.startswith(f"# {expected_slug}"):
         errors.append("body title does not match the governed slug")
     errors.extend(f"boundary violation: {hit}" for hit in check_boundary(body))
-    errors.extend(f"unfinished placeholder: {token}" for token in _PLACEHOLDERS if token in markdown)
+    errors.extend(
+        f"unfinished placeholder: {token}"
+        for token in _PLACEHOLDERS
+        if token in markdown
+    )
     if len(markdown) > 30_000:
         errors.append("skill entrypoint exceeds 30,000 characters")
     if provenance.get("schema_version") != SCHEMA_VERSION:
@@ -292,8 +386,13 @@ def validate_artifacts(
     if provenance.get("classification") != "evolved":
         errors.append("classification must be evolved")
     if provenance.get("generation_model") != PRODUCTION_GENERATION_MODEL:
-        errors.append("production evolution skills must be generated by the governed 14B model")
-    if provenance.get("slug") != expected_slug or provenance.get("version") != expected_version:
+        errors.append(
+            "production evolution skills must be generated by the governed 14B model"
+        )
+    if (
+        provenance.get("slug") != expected_slug
+        or provenance.get("version") != expected_version
+    ):
         errors.append("provenance identity mismatch")
     if int(provenance.get("occurrences") or 0) < MIN_OCCURRENCES:
         errors.append("fewer than three distinct occurrences")
@@ -318,30 +417,11 @@ class EvolutionSkillStore:
         self.proposals_dir = self.root / "proposals"
 
     def append_occurrences(self, occurrences: Iterable[Occurrence]) -> int:
-        existing = {
-            (item.get("department"), item.get("kind"), item.get("run_id"))
-            for item in self.load_occurrences()
-            if item.get("run_id")
-        }
-        count = 0
-        for occurrence in occurrences:
-            if (
-                occurrence.department not in OWNED_DEPARTMENTS
-                or not occurrence.kind.strip()
-                or not occurrence.run_id.strip()
-            ):
-                continue
-            key = (occurrence.department, occurrence.kind.strip(), occurrence.run_id)
-            if occurrence.run_id and key in existing:
-                continue
-            payload = asdict(occurrence)
-            payload["recorded_at"] = _utcnow()
-            _append_jsonl(self.occurrences_path, payload)
-            existing.add(key)
-            count += 1
-        return count
+        return append_occurrences_to_path(self.occurrences_path, occurrences)
 
-    def load_occurrences(self, *, department: str | None = None) -> list[dict[str, Any]]:
+    def load_occurrences(
+        self, *, department: str | None = None
+    ) -> list[dict[str, Any]]:
         if not self.occurrences_path.exists():
             return []
         rows: list[dict[str, Any]] = []
@@ -401,7 +481,9 @@ class EvolutionSkillStore:
     ) -> dict[str, Any]:
         candidate_id = self.record_candidate(candidate)
         if model_metadata.get("model_version") != PRODUCTION_GENERATION_MODEL:
-            raise EvolutionSkillError("proposal generation must use the governed 14B model")
+            raise EvolutionSkillError(
+                "proposal generation must use the governed 14B model"
+            )
         body = draft_body(candidate, llm)
         if body is None:
             raise EvolutionSkillError("LLM returned no usable skill body")
@@ -478,12 +560,16 @@ class EvolutionSkillStore:
             raise EvolutionSkillError("unknown proposal lifecycle state")
         return target, state
 
-    def approve(self, proposal_id: str, *, approved_by: str, qa_verdict: str) -> dict[str, Any]:
+    def approve(
+        self, proposal_id: str, *, approved_by: str, qa_verdict: str
+    ) -> dict[str, Any]:
         target, state = self.load_proposal(proposal_id)
         if state["status"] != "VALIDATED":
             raise EvolutionSkillError("only a validated proposal can be approved")
         if qa_verdict not in {"PASS", "FAIL"} or not approved_by.strip():
-            raise EvolutionSkillError("review requires PASS or FAIL and a named approver")
+            raise EvolutionSkillError(
+                "review requires PASS or FAIL and a named approver"
+            )
         if qa_verdict == "FAIL":
             return self.set_status(
                 proposal_id,
@@ -504,16 +590,24 @@ class EvolutionSkillStore:
             }
         )
         _write_json_atomic(target / "state.json", state)
-        self.record_event(proposal_id, "APPROVED", {"approved_by": approved_by, "qa_verdict": qa_verdict})
+        self.record_event(
+            proposal_id,
+            "APPROVED",
+            {"approved_by": approved_by, "qa_verdict": qa_verdict},
+        )
         return state
 
-    def set_status(self, proposal_id: str, status: str, detail: Mapping[str, Any]) -> dict[str, Any]:
+    def set_status(
+        self, proposal_id: str, status: str, detail: Mapping[str, Any]
+    ) -> dict[str, Any]:
         if status not in PROPOSAL_STATES:
             raise EvolutionSkillError(f"unknown lifecycle state: {status}")
         target, state = self.load_proposal(proposal_id)
         current = str(state["status"])
         if status not in ALLOWED_TRANSITIONS[current]:
-            raise EvolutionSkillError(f"invalid lifecycle transition: {current} -> {status}")
+            raise EvolutionSkillError(
+                f"invalid lifecycle transition: {current} -> {status}"
+            )
         state["status"] = status
         state["updated_at"] = _utcnow()
         state.update(detail)
@@ -521,7 +615,9 @@ class EvolutionSkillStore:
         self.record_event(proposal_id, status, detail)
         return state
 
-    def record_event(self, proposal_id: str, event: str, detail: Mapping[str, Any]) -> None:
+    def record_event(
+        self, proposal_id: str, event: str, detail: Mapping[str, Any]
+    ) -> None:
         _append_jsonl(
             self.events_path,
             {
@@ -549,7 +645,9 @@ class EvolutionSkillStore:
         if not 0.0 <= score_value <= 1.0:
             raise EvolutionSkillError("feedback score must be between 0 and 1")
         if department is not None and department not in OWNED_DEPARTMENTS:
-            raise EvolutionSkillError("feedback department is not an evolution skill owner")
+            raise EvolutionSkillError(
+                "feedback department is not an evolution skill owner"
+            )
         _append_jsonl(
             self.root / "feedback.jsonl",
             {
@@ -621,7 +719,9 @@ def load_registry(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"registry_version": REGISTRY_VERSION, "skills": {}}
     registry = json.loads(path.read_text(encoding="utf-8"))
-    if registry.get("registry_version") != REGISTRY_VERSION or not isinstance(registry.get("skills"), dict):
+    if registry.get("registry_version") != REGISTRY_VERSION or not isinstance(
+        registry.get("skills"), dict
+    ):
         raise EvolutionSkillError("invalid evolution skill registry")
     return registry
 
@@ -636,7 +736,11 @@ def promote_proposal(
     """Promote one approved proposal into the canonical repository tree."""
 
     target, state = store.load_proposal(proposal_id)
-    if state["status"] != "APPROVED" or state.get("qa_verdict") != "PASS" or not state.get("approved_by"):
+    if (
+        state["status"] != "APPROVED"
+        or state.get("qa_verdict") != "PASS"
+        or not state.get("approved_by")
+    ):
         raise EvolutionSkillError("promotion requires recorded QA PASS and approval")
     markdown = (target / "SKILL.md").read_text(encoding="utf-8")
     provenance = json.loads((target / "provenance.json").read_text(encoding="utf-8"))
@@ -646,8 +750,12 @@ def promote_proposal(
         expected_slug=state["slug"],
         expected_version=int(state["version"]),
     )
-    if not validation["ok"] or validation["content_hash"] != state["validation"].get("content_hash"):
-        raise EvolutionSkillError(f"proposal changed after validation: {validation['errors']}")
+    if not validation["ok"] or validation["content_hash"] != state["validation"].get(
+        "content_hash"
+    ):
+        raise EvolutionSkillError(
+            f"proposal changed after validation: {validation['errors']}"
+        )
 
     repo = repository_root.resolve()
     registry_file = (registry_path or repo / "skills/evolution-registry.json").resolve()
@@ -655,7 +763,8 @@ def promote_proposal(
     colliding_sources = [
         path
         for path in (repo / "skills").rglob("SKILL.md")
-        if path.parent.name == state["slug"] and path.parent.resolve() != canonical_dir.resolve()
+        if path.parent.name == state["slug"]
+        and path.parent.resolve() != canonical_dir.resolve()
     ]
     if colliding_sources:
         raise EvolutionSkillError(
@@ -675,7 +784,9 @@ def promote_proposal(
     if existing and int(existing.get("current_version") or 0) >= int(state["version"]):
         raise EvolutionSkillError("registry already contains this or a newer version")
     if existing and existing.get("status") != "active":
-        raise EvolutionSkillError("retired skill cannot be overwritten; create a new slug")
+        raise EvolutionSkillError(
+            "retired skill cannot be overwritten; create a new slug"
+        )
 
     skill_path.write_text(markdown, encoding="utf-8")
     canonical_provenance = dict(provenance)
@@ -705,12 +816,16 @@ def promote_proposal(
     if existing:
         previous_id = existing.get("proposal_id")
         if previous_id:
-            store.set_status(str(previous_id), "SUPERSEDED", {"superseded_by": proposal_id})
+            store.set_status(
+                str(previous_id), "SUPERSEDED", {"superseded_by": proposal_id}
+            )
     existing_registry["skills"][state["slug"]]["proposal_id"] = proposal_id
     _write_json_atomic(registry_file, existing_registry)
     regression = validate_canonical_registry(repo, registry_file)
     if not regression["ok"]:
-        raise EvolutionSkillError(f"canonical registry regression failed: {regression['errors']}")
+        raise EvolutionSkillError(
+            f"canonical registry regression failed: {regression['errors']}"
+        )
     return store.set_status(
         proposal_id,
         "ACTIVE",
@@ -738,7 +853,9 @@ def retire_skill(
     if not approved_by.strip():
         raise EvolutionSkillError("retirement requires a named approver")
     if not replacement and not owner_approved_no_replacement:
-        raise EvolutionSkillError("retirement requires a replacement or explicit no-replacement approval")
+        raise EvolutionSkillError(
+            "retirement requires a replacement or explicit no-replacement approval"
+        )
     repo = repository_root.resolve()
     registry_file = (registry_path or repo / "skills/evolution-registry.json").resolve()
     registry = load_registry(registry_file)
@@ -746,7 +863,9 @@ def retire_skill(
     if not entry or entry.get("status") != "active":
         raise EvolutionSkillError("only an active evolved skill can be retired")
     if owner_profile not in set(entry.get("owner_profiles") or []):
-        raise EvolutionSkillError("retirement approval must name a registered owner profile")
+        raise EvolutionSkillError(
+            "retirement approval must name a registered owner profile"
+        )
     if replacement:
         replacement_entry = registry["skills"].get(replacement)
         if not replacement_entry or replacement_entry.get("status") != "active":
@@ -754,7 +873,9 @@ def retire_skill(
         if not set(entry.get("owner_profiles") or []).issubset(
             set(replacement_entry.get("owner_profiles") or [])
         ):
-            raise EvolutionSkillError("replacement does not cover the retiring skill owners")
+            raise EvolutionSkillError(
+                "replacement does not cover the retiring skill owners"
+            )
     entry.update(
         {
             "status": "retired",
@@ -768,11 +889,17 @@ def retire_skill(
     _write_json_atomic(registry_file, registry)
     proposal_id = entry.get("proposal_id")
     if proposal_id:
-        store.set_status(str(proposal_id), "RETIRED", {"retired_by": approved_by, "replacement": replacement})
+        store.set_status(
+            str(proposal_id),
+            "RETIRED",
+            {"retired_by": approved_by, "replacement": replacement},
+        )
     return entry
 
 
-def active_registry_bindings(path: Path) -> tuple[frozenset[str], dict[str, frozenset[str]]]:
+def active_registry_bindings(
+    path: Path,
+) -> tuple[frozenset[str], dict[str, frozenset[str]]]:
     registry = load_registry(path)
     active: set[str] = set()
     owners: dict[str, frozenset[str]] = {}
@@ -885,7 +1012,9 @@ def inventory_skills(
             parts = {part.lower() for part in skill_path.parts}
             if provenance.get("classification") == "evolved" or slug in evolved:
                 classification = "evolved"
-            elif "proposals" in parts or ".cache" in parts or "generated-cache" in parts:
+            elif (
+                "proposals" in parts or ".cache" in parts or "generated-cache" in parts
+            ):
                 classification = "generated-cache"
             elif skill_path.is_relative_to(project_skills):
                 classification = "project-owned"
@@ -915,13 +1044,14 @@ def inventory_skills(
         "generated_at": _utcnow(),
         "roots": [str(Path(root).expanduser().resolve()) for root in roots],
         "counts": dict(sorted(counts.items())),
-        "entries": sorted(entries, key=lambda entry: (str(entry["name"]), str(entry["path"]))),
+        "entries": sorted(
+            entries, key=lambda entry: (str(entry["name"]), str(entry["path"]))
+        ),
         "deletion_policy": "usage counts are quality signals only; inventory never deletes",
     }
 
 
 __all__ = [
-    "ACTIVE_STATES",
     "EvolutionSkillError",
     "EvolutionSkillStore",
     "MAX_SKILLS_PER_RUN",
@@ -934,6 +1064,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "SkillCandidate",
     "active_registry_bindings",
+    "append_occurrences_to_path",
     "check_boundary",
     "detect_candidates",
     "draft_body",

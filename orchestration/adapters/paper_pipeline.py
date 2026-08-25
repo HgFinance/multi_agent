@@ -122,7 +122,9 @@ class PaperPipelineAdapter:
         }
         report = {
             "department": department,
-            "status": "COMPLETED" if employee_context.get("status") == "COMPLETED" else "DEGRADED",
+            "status": "COMPLETED"
+            if employee_context.get("status") == "COMPLETED"
+            else "DEGRADED",
             "binding": False,
             "paper_only": True,
             "employee_context": employee_context,
@@ -163,7 +165,10 @@ class PaperPipelineAdapter:
         return result
 
     def research(
-        self, _input_contract: str, _output_contract: str, context: MutableMapping[str, object]
+        self,
+        _input_contract: str,
+        _output_contract: str,
+        context: MutableMapping[str, object],
     ) -> str:
         case = _case(context)
         employee_context = self._run_employee_workers(
@@ -171,11 +176,18 @@ class PaperPipelineAdapter:
         )
         report: dict[str, object]
         try:
-            runner = self._research_runner or _default_research_runner(self.repo_root)
+            if self._research_runner is None:
+                raise RuntimeError(
+                    "legacy Research Packet pipeline is retired; "
+                    "inject an approved paper research runner"
+                )
+            runner = self._research_runner
             with _disable_research_persistence(runner):
                 raw = dict(runner(str(case["symbol"])))
             report = _department_summary("research", raw)
-            packet_status = "COMPLETED" if report["status"] == "COMPLETED" else "DEGRADED"
+            packet_status = (
+                "COMPLETED" if report["status"] == "COMPLETED" else "DEGRADED"
+            )
         except Exception as exc:  # noqa: BLE001 - paper boundary stays fail-closed
             packet_status = "DEGRADED"
             report = _failure_report("research", exc, safe_action="HOLD")
@@ -194,12 +206,18 @@ class PaperPipelineAdapter:
         return _detail("research", report, "research_packet")
 
     def trading(
-        self, _input_contract: str, _output_contract: str, context: MutableMapping[str, object]
+        self,
+        _input_contract: str,
+        _output_contract: str,
+        context: MutableMapping[str, object],
     ) -> str:
         case = _case(context)
         self._run_employee_workers(
             "trading",
-            {"case_request": case, "research_packet": _artifact(context, "research_packet")},
+            {
+                "case_request": case,
+                "research_packet": _artifact(context, "research_packet"),
+            },
             context,
         )
         now = datetime.now(timezone.utc)
@@ -216,7 +234,9 @@ class PaperPipelineAdapter:
             "quality": "ok",
         }
         order_intent = {
-            "order_intent_id": str(uuid5(_PAPER_NAMESPACE, f"intent:{case['case_id']}")),
+            "order_intent_id": str(
+                uuid5(_PAPER_NAMESPACE, f"intent:{case['case_id']}")
+            ),
             "trade_case_id": str(trade_case_id),
             "fund_id": str(fund_id),
             "book_id": str(book_id),
@@ -246,7 +266,10 @@ class PaperPipelineAdapter:
         return _detail("trading", report, "order_intent")
 
     def risk(
-        self, _input_contract: str, _output_contract: str, context: MutableMapping[str, object]
+        self,
+        _input_contract: str,
+        _output_contract: str,
+        context: MutableMapping[str, object],
     ) -> str:
         case = _case(context)
         order_intent = _artifact(context, "order_intent")
@@ -273,7 +296,10 @@ class PaperPipelineAdapter:
         return _detail("risk", report, "risk_decision")
 
     def qa(
-        self, _input_contract: str, _output_contract: str, context: MutableMapping[str, object]
+        self,
+        _input_contract: str,
+        _output_contract: str,
+        context: MutableMapping[str, object],
     ) -> str:
         case = _case(context)
         risk_decision = _artifact(context, "risk_decision")
@@ -300,13 +326,21 @@ class PaperPipelineAdapter:
         return _detail("qa", report, "qa_assessment")
 
     def oms_fill_gate(
-        self, _input_contract: str, _output_contract: str, context: MutableMapping[str, object]
+        self,
+        _input_contract: str,
+        _output_contract: str,
+        context: MutableMapping[str, object],
     ) -> str:
         risk = _artifact(context, "risk_decision")
         qa = _artifact(context, "qa_assessment")
-        risk_verdict = str(risk.get("verdict", risk.get("candidate_verdict", "reject"))).lower()
+        risk_verdict = str(
+            risk.get("verdict", risk.get("candidate_verdict", "reject"))
+        ).lower()
         qa_verdict = str(qa.get("verdict", "FAIL")).upper()
-        approved = risk_verdict in {"approve", "resize"} and qa_verdict in {"PASS", "WARN"}
+        approved = risk_verdict in {"approve", "resize"} and qa_verdict in {
+            "PASS",
+            "WARN",
+        }
         result = {
             "status": "PAPER_NOT_SUBMITTED" if approved else "BLOCKED",
             "submitted": False,
@@ -330,7 +364,10 @@ class PaperPipelineAdapter:
         return _detail("oms-fill-gate", report, "execution_result")
 
     def accounting(
-        self, _input_contract: str, _output_contract: str, context: MutableMapping[str, object]
+        self,
+        _input_contract: str,
+        _output_contract: str,
+        context: MutableMapping[str, object],
     ) -> str:
         execution = _artifact(context, "execution_result")
         employee_context = self._run_employee_workers(
@@ -356,7 +393,10 @@ class PaperPipelineAdapter:
         return _detail("accounting", report, "accounting_snapshot")
 
     def ceo(
-        self, _input_contract: str, _output_contract: str, context: MutableMapping[str, object]
+        self,
+        _input_contract: str,
+        _output_contract: str,
+        context: MutableMapping[str, object],
     ) -> str:
         case = _case(context)
         reports = context.get("department_reports", {})
@@ -389,7 +429,9 @@ class PaperPipelineAdapter:
             context.setdefault("domain_failures", []).append(f"ceo:{exc}")
         decision["employee_context"] = employee_context
         report = {
-            "status": "COMPLETED" if decision.get("runtime", {}).get("call_status") == "succeeded" else "DEGRADED",
+            "status": "COMPLETED"
+            if decision.get("runtime", {}).get("call_status") == "succeeded"
+            else "DEGRADED",
             "binding": False,
             "recommendation": decision.get("recommendation"),
             "binding_decision": decision.get("binding_decision"),
@@ -424,8 +466,12 @@ def _store(
     employee_contexts = context.get("employee_context", {})
     stage = report_name(report, contract)
     employee_stage = {"accounting": "accounting-portfolio"}.get(stage, stage)
-    worker_context = artifact.get("employee_context") if isinstance(artifact, Mapping) else None
-    if not isinstance(worker_context, Mapping) and isinstance(employee_contexts, Mapping):
+    worker_context = (
+        artifact.get("employee_context") if isinstance(artifact, Mapping) else None
+    )
+    if not isinstance(worker_context, Mapping) and isinstance(
+        employee_contexts, Mapping
+    ):
         worker_context = employee_contexts.get(employee_stage)
     if isinstance(worker_context, Mapping):
         report_for_head["employee_context"] = _bounded_worker_context(worker_context)
@@ -436,7 +482,16 @@ def _bounded_worker_context(value: Mapping[str, object]) -> dict[str, object]:
     """Keep Worker evidence useful to the head without unbounded prompt growth."""
 
     bounded: dict[str, object] = {}
-    for key in ("department", "status", "runtime", "executed", "failed", "not_executed", "input_hash", "binding"):
+    for key in (
+        "department",
+        "status",
+        "runtime",
+        "executed",
+        "failed",
+        "not_executed",
+        "input_hash",
+        "binding",
+    ):
         if key in value:
             bounded[key] = value[key]
     workers = value.get("workers")
@@ -444,7 +499,14 @@ def _bounded_worker_context(value: Mapping[str, object]) -> dict[str, object]:
         bounded["workers"] = [
             {
                 key: item[key]
-                for key in ("worker_id", "role", "status", "attempts", "error", "output_contract")
+                for key in (
+                    "worker_id",
+                    "role",
+                    "status",
+                    "attempts",
+                    "error",
+                    "output_contract",
+                )
                 if key in item
             }
             for item in workers
@@ -454,15 +516,18 @@ def _bounded_worker_context(value: Mapping[str, object]) -> dict[str, object]:
 
 
 def report_name(report: Mapping[str, object], contract: str) -> str:
-    return str(report.get("department") or {
-        "research_packet": "research",
-        "order_intent": "trading",
-        "risk_decision": "risk",
-        "qa_assessment": "qa",
-        "execution_result": "oms-fill-gate",
-        "accounting_snapshot": "accounting",
-        "ceo_case_summary": "ceo",
-    }.get(contract, contract))
+    return str(
+        report.get("department")
+        or {
+            "research_packet": "research",
+            "order_intent": "trading",
+            "risk_decision": "risk",
+            "qa_assessment": "qa",
+            "execution_result": "oms-fill-gate",
+            "accounting_snapshot": "accounting",
+            "ceo_case_summary": "ceo",
+        }.get(contract, contract)
+    )
 
 
 def _detail(stage: str, report: Mapping[str, object], contract: str) -> str:
@@ -475,14 +540,19 @@ def _detail(stage: str, report: Mapping[str, object], contract: str) -> str:
 
 def _case(context: Mapping[str, object]) -> MutableMapping[str, object]:
     value = context.get("case_request")
-    if not isinstance(value, MutableMapping) or value.get("stage") not in {"paper", "test"}:
+    if not isinstance(value, MutableMapping) or value.get("stage") not in {
+        "paper",
+        "test",
+    }:
         raise ValueError("paper/test case_request is required")
     return value
 
 
 def _artifact(context: Mapping[str, object], contract: str) -> dict[str, object]:
     artifacts = context.get("artifacts")
-    if not isinstance(artifacts, Mapping) or not isinstance(artifacts.get(contract), Mapping):
+    if not isinstance(artifacts, Mapping) or not isinstance(
+        artifacts.get(contract), Mapping
+    ):
         raise TypeError(f"missing paper artifact: {contract}")
     return dict(artifacts[contract])
 
@@ -494,7 +564,9 @@ def _summary_text(raw: Mapping[str, object]) -> str:
     return "paper department output received"
 
 
-def _department_summary(department: str, raw: Mapping[str, object]) -> dict[str, object]:
+def _department_summary(
+    department: str, raw: Mapping[str, object]
+) -> dict[str, object]:
     status = str(raw.get("pipeline_status", raw.get("status", "COMPLETED"))).upper()
     if status not in {"COMPLETED", "DEGRADED", "FAILED", "HALTED"}:
         status = "COMPLETED"
@@ -548,7 +620,9 @@ def _department_summary(department: str, raw: Mapping[str, object]) -> dict[str,
     }
 
 
-def _failure_report(department: str, exc: Exception, *, safe_action: str) -> dict[str, object]:
+def _failure_report(
+    department: str, exc: Exception, *, safe_action: str
+) -> dict[str, object]:
     return {
         "department": department,
         "status": "DEGRADED",
@@ -586,7 +660,9 @@ def _qa_failure(exc: Exception) -> dict[str, object]:
     }
 
 
-def _risk_context(case: Mapping[str, object], order_intent: Mapping[str, object]) -> dict[str, object]:
+def _risk_context(
+    case: Mapping[str, object], order_intent: Mapping[str, object]
+) -> dict[str, object]:
     fund_id = str(order_intent["fund_id"])
     instrument_id = str(order_intent["instrument_id"])
     now = str(order_intent["snapshot"]["as_of"])
@@ -698,8 +774,7 @@ def _load_script(repo_root: Path, name: str, relative_path: str) -> Any:
         loaded_local_modules = {
             module_name: loaded
             for module_name, loaded in list(sys.modules.items())
-            if _is_department_module(repo_root, loaded)
-            and module_name != name
+            if _is_department_module(repo_root, loaded) and module_name != name
         }
         sys.path[:] = previous_path
         for module_name in list(sys.modules):
@@ -717,18 +792,17 @@ def _load_script(repo_root: Path, name: str, relative_path: str) -> Any:
     return module
 
 
-def _default_research_runner(repo_root: Path) -> DepartmentRunner:
-    module = _load_script(repo_root, "paper_research_scripts", "departments/01-research/scripts.py")
-    return _bind_department_runner(module, "run_research_department")
-
-
 def _default_risk_runner(repo_root: Path) -> DepartmentRunner:
-    module = _load_script(repo_root, "paper_risk_scripts", "departments/03-risk/scripts.py")
+    module = _load_script(
+        repo_root, "paper_risk_scripts", "departments/03-risk/scripts.py"
+    )
     return _bind_department_runner(module, "run_risk_department")
 
 
 def _default_qa_runner(repo_root: Path) -> DepartmentRunner:
-    module = _load_script(repo_root, "paper_qa_scripts", "departments/06-ai-qa-audit/scripts.py")
+    module = _load_script(
+        repo_root, "paper_qa_scripts", "departments/06-ai-qa-audit/scripts.py"
+    )
     return _bind_department_runner(module, "run_qa_department")
 
 
@@ -758,7 +832,9 @@ def _activate_department_runtime(module: Any):
     sys.path[:0] = list(module.__paper_import_paths__)
     previous_hermes_home = os.environ.get("HERMES_HOME")
     hermes_profile = module.__paper_hermes_profile__
-    os.environ["HERMES_HOME"] = str(Path.home() / ".hermes" / "profiles" / hermes_profile)
+    os.environ["HERMES_HOME"] = str(
+        Path.home() / ".hermes" / "profiles" / hermes_profile
+    )
     try:
         yield
     finally:

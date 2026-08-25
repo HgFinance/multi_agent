@@ -127,7 +127,7 @@ curl -s http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/
 ```
 
 OOM 이 나면 먼저 `scripts/model_plane/vllm_runtime.sh check`와 로그를 확인한다.
-L4 24GB에서는 `.env`의 `VLLM_MAX_MODEL_LEN=8192`,
+L4 24GB에서는 `.env`의 `VLLM_MAX_MODEL_LEN=4096`,
 `VLLM_GPU_MEMORY_UTILIZATION=0.85`를 유지한다. g6e 48GB 프로파일은 별도
 benchmark·승인 없이 올리지 않는다.
 
