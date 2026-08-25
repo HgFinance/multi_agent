@@ -19,10 +19,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from departments.notion_markdown import markdown_to_notion_blocks
-from orchestration.adapters.notion_schema_cache import BoundedNotionSchemaCache
 from orchestration.adapters.notion_idempotency import (
     NotionIdempotency,
 )
+from orchestration.adapters.notion_schema_cache import BoundedNotionSchemaCache
 from orchestration.adapters.terminal_projection_utils import (
     iso_timestamp,
     merged_run_metadata,
@@ -34,7 +34,6 @@ from orchestration.adapters.terminal_projection_utils import (
     workflow_root,
 )
 from orchestration.canonical_profiles import department_for_canonical_profile
-
 
 DEFAULT_DATABASES = {
     "trading": "2903de9e2a7b4f6d967f709e6640ec16",
@@ -95,9 +94,7 @@ class _NotionTransport:
                 detail = json.loads(exc.read())
             except Exception:
                 detail = str(exc)
-            raise DepartmentNotionProjectionError(
-                str(detail), status=exc.code
-            ) from exc
+            raise DepartmentNotionProjectionError(str(detail), status=exc.code) from exc
         except (OSError, ValueError) as exc:
             raise DepartmentNotionProjectionError(str(exc)) from exc
 
@@ -146,6 +143,20 @@ class _NotionTransport:
             },
         )
 
+    def update_page(
+        self, page_id: str, properties: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        return self._request(
+            "PATCH", f"pages/{page_id}", {"properties": dict(properties)}
+        )
+
+    def append_blocks(
+        self, page_id: str, children: Sequence[Mapping[str, Any]]
+    ) -> Mapping[str, Any]:
+        return self._request(
+            "PATCH", f"blocks/{page_id}/children", {"children": list(children)}
+        )
+
 
 @dataclass(frozen=True)
 class DepartmentProjectionResult:
@@ -188,10 +199,7 @@ def _date(value: Any) -> dict[str, Any] | None:
 
 def _department(task: Mapping[str, Any]) -> str | None:
     profile = str(
-        task.get("assignee")
-        or task.get("profile")
-        or task.get("assigned_to")
-        or ""
+        task.get("assignee") or task.get("profile") or task.get("assigned_to") or ""
     ).strip()
     if not profile:
         return None
@@ -209,10 +217,7 @@ def _department(task: Mapping[str, Any]) -> str | None:
 def _task_title(task: Mapping[str, Any], department: str) -> str:
     tid = task_id(task)
     raw = str(
-        task.get("title")
-        or task.get("name")
-        or task.get("subject")
-        or ""
+        task.get("title") or task.get("name") or task.get("subject") or ""
     ).strip()
 
     if not raw:
@@ -294,8 +299,7 @@ class DepartmentNotionProjection:
 
     def _transport_for(self, token: str) -> Any:
         if self.transport is None or (
-            self._transport_token is not None
-            and self._transport_token != token
+            self._transport_token is not None and self._transport_token != token
         ):
             self.transport = _NotionTransport(token)
             self._transport_token = token
@@ -319,7 +323,9 @@ class DepartmentNotionProjection:
         workflow_tasks: Sequence[Mapping[str, Any]] = (),
         event: Mapping[str, Any] | None = None,
     ) -> DepartmentProjectionResult:
-        del workflow_tasks, event
+        del workflow_tasks
+        force_upsert = bool((event or {}).get("force_upsert"))
+        correction = str((event or {}).get("correction") or "").strip()
 
         tid = task_id(task)
         department = _department(task)
@@ -350,8 +356,7 @@ class DepartmentNotionProjection:
         token = str(self.env.get("NOTION_TOKEN") or "").strip()
         db_env = DATABASE_ENV[department]
         database_id = str(
-            self.env.get(db_env)
-            or DEFAULT_DATABASES.get(department, "")
+            self.env.get(db_env) or DEFAULT_DATABASES.get(department, "")
         ).strip()
 
         # Research/Risk are opt-in here because their standalone reporters
@@ -410,7 +415,7 @@ class DepartmentNotionProjection:
         title = _task_title(task, department)
 
         metadata = merged_run_metadata(task)
-        result_text = summary(task, metadata)
+        result_text = correction or summary(task, metadata)
 
         props: dict[str, Any] = {
             title_property: _title(title),
@@ -423,9 +428,7 @@ class DepartmentNotionProjection:
             props["원본 리포트"] = _rich_text(result_text)
 
         created = (
-            task.get("completed_at")
-            or task.get("updated_at")
-            or task.get("created_at")
+            task.get("completed_at") or task.get("updated_at") or task.get("created_at")
         )
         if "생성 시각" in properties_schema:
             date_value = _date(created)
@@ -483,6 +486,40 @@ class DepartmentNotionProjection:
                 if exc.status == 400:
                     self._schema_cache.invalidate(database_id)
                 raise
+
+        if force_upsert:
+            existing = lookup()
+            if existing:
+                page_id = str(existing[0].get("id") or "").strip()
+                update_page = getattr(transport, "update_page", None)
+                append_blocks = getattr(transport, "append_blocks", None)
+                if not page_id or not callable(update_page):
+                    raise DepartmentNotionProjectionError(
+                        "Notion transport does not support page upsert"
+                    )
+                update_page(page_id, props)
+                correction_is_in_properties = any(
+                    name in props for name in ("서술", "원본 리포트")
+                )
+                if (
+                    correction
+                    and callable(append_blocks)
+                    and not correction_is_in_properties
+                ):
+                    append_blocks(page_id, children)
+                return DepartmentProjectionResult(
+                    "updated",
+                    department=department,
+                    task_id=tid,
+                    page_id=page_id,
+                )
+            created = create()
+            return DepartmentProjectionResult(
+                "created",
+                department=department,
+                task_id=tid,
+                page_id=str(created.get("id") or "") or None,
+            )
 
         result = self._idempotency.execute(
             database_id,

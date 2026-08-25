@@ -54,10 +54,18 @@ class DiscordGatewayWiringTests(unittest.TestCase):
                     block,
                     service,
                 )
+            elif service == "qa-hermes":
+                self.assertIn("dockerfile: Dockerfile.hermes-discord", block, service)
+                self.assertIn(
+                    "image: hedgefund-hermes-discord:qa-feedback-v1",
+                    block,
+                    service,
+                )
             else:
                 self.assertIn("image: nousresearch/hermes-agent:latest", block, service)
             self.assertNotIn("HERMES_GATEWAY_IMAGE", block, service)
-            self.assertNotIn("Dockerfile.hermes-discord", block, service)
+            if service != "qa-hermes":
+                self.assertNotIn("Dockerfile.hermes-discord", block, service)
             self.assertIn(f"HERMES_PROFILE: {profile}", block, service)
             profiles.add(profile)
         self.assertEqual(profiles, set(EXPECTED_GATEWAY_PROFILES.values()))
@@ -164,6 +172,7 @@ class DiscordGatewayWiringTests(unittest.TestCase):
             "orchestration/__init__.py",
             "orchestration/discord_idempotency.py",
             "orchestration/primary_task_idempotency.py",
+            "orchestration/qa_discord_feedback.py",
         )
         for name in ("Dockerfile.hermes-discord", "Dockerfile.ceo-hermes"):
             dockerfile = (ROOT / name).read_text(encoding="utf-8")

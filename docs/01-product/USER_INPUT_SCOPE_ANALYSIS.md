@@ -140,7 +140,7 @@ F(승인 세분화)·H(프리셋)·I(정렬도)는 위 결정에 종속되므로
 | Mandate 승인 이력 | `governance.mandate_decisions`, `governance.approvals`, `governance.cases` | ✅ 존재 |
 | `InvestorProfile` | **없음** | 🔴 `suitability.py`는 순수 함수이고 대응 테이블이 없다. 사용자가 성향을 입력해도 **저장할 곳이 없다** |
 | `UserPreferences` | `governance.user_preferences` | ⚠️ 테이블만 있고 이를 쓰는 코드 없음 |
-| 사용자 신원 | `governance.user_profiles` | ⚠️ `display_name`/`timezone`/`status`뿐. 투자 성향 필드 없음. `auth.users` FK인데 현재 환경에 0건 |
+| 사용자 신원 | `governance.user_profiles` | ⚠️ `display_name`/`timezone`/`status`뿐. 투자 성향 필드 없음. 로컬 고정 fixture ID만 사용 |
 
 **신규 필드를 넣을 자리**: `mandate_versions`의 jsonb 컬럼 4개는 스키마 변경 없이 확장 가능하다. 특히 `execution_rules`는 현재 `MandatePolicy`가 매핑하지 않는 빈 칸이라 §5-C/§5-F 결과를 담을 후보다. 단 jsonb 내부 계약은 `policy.py`가 정의하므로 Pydantic 모델을 함께 고쳐야 한다.
 

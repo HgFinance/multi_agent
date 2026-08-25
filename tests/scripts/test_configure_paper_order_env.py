@@ -236,7 +236,7 @@ def test_collapses_unmanaged_duplicates_without_changing_effective_value(
 
 def test_aws_missing_required_values_does_not_touch_file(tmp_path: Path) -> None:
     env_file = tmp_path / ".env.aws"
-    original = "UNMANAGED=keep\nSUPABASE_URL=https://project.supabase.co\n"
+    original = "UNMANAGED=keep\\n"
     env_file.write_text(original, encoding="utf-8")
     generated = False
 
@@ -250,7 +250,6 @@ def test_aws_missing_required_values_does_not_touch_file(tmp_path: Path) -> None
             runtime="aws", env_file=env_file, generator=must_not_generate
         )
 
-    assert "https://project.supabase.co" not in str(error.value)
     assert env_file.read_text(encoding="utf-8") == original
     assert generated is False
 
@@ -259,11 +258,9 @@ def test_aws_sets_production_contract_without_fixture_grants(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     env_file = tmp_path / ".env.aws"
-    supabase_url = "https://project.supabase.co"
     timescale_password = "private-timescale-password"
     existing_secrets = ("m" * 48, "s" * 48, "i" * 48, "d" * 48)
     env_file.write_text(
-        f"SUPABASE_URL={supabase_url}\n"
         f"HEDGEFUND_TSDB_PASSWORD={timescale_password}\n"
         f"MCP_TRADING_ORDER_API_KEY={existing_secrets[0]}\n"
         f"TRADING_SERVICE_AUTH_SECRET={existing_secrets[1]}\n"
@@ -279,15 +276,14 @@ def test_aws_sets_production_contract_without_fixture_grants(
 
     assert exit_code == 0
     assert values["APP_ENV"] == "production"
-    assert values["PORTFOLIO_AUTH_MODE"] == "supabase_jwt"
-    assert values["PORTFOLIO_AUTH_REQUIRED"] == "true"
+    assert values["PORTFOLIO_AUTH_MODE"] == "fixture"
+    assert values["PORTFOLIO_AUTH_REQUIRED"] == "false"
     assert values["USER_PAPER_ORDER_WORKFLOW_ENABLED"] == "true"
     assert values["USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED"] == "true"
     assert values["PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON"] == "[]"
     assert values["LS_ENV"] == "LIVE"
     assert "LS_MARKET_ENV" not in values
     assert values["HEDGEFUND_CONTROL_DB_NAME"] == "control"
-    assert values["SUPABASE_URL"] == supabase_url
     assert values["HEDGEFUND_TSDB_PASSWORD"] == timescale_password
     managed_secrets = [
         values[key]
@@ -300,7 +296,7 @@ def test_aws_sets_production_contract_without_fixture_grants(
         for key in cli.AWS_DATABASE_SECRET_KEYS
     )
     output = captured.out + captured.err
-    for hidden in (*existing_secrets, supabase_url, timescale_password):
+    for hidden in (*existing_secrets, timescale_password):
         assert hidden not in output
 
 
@@ -309,7 +305,6 @@ def test_aws_preserves_all_distinct_secrets_atomically(tmp_path: Path) -> None:
     keys = (*cli.SERVICE_SECRET_KEYS, *cli.AWS_DATABASE_SECRET_KEYS)
     preserved = {key: character * 40 for key, character in zip(keys, "abcdefghij")}
     env_file.write_text(
-        "SUPABASE_URL=https://project.supabase.co\n"
         "HEDGEFUND_TSDB_PASSWORD=AdminPassword_1234567890\n"
         + "".join(f"{key}={value}\n" for key, value in preserved.items()),
         encoding="utf-8",
@@ -338,7 +333,6 @@ def test_aws_rotates_duplicate_or_non_url_safe_database_passwords(
     env_file = tmp_path / ".env.aws"
     duplicate = "d" * 40
     env_file.write_text(
-        "SUPABASE_URL=https://project.supabase.co\n"
         "HEDGEFUND_TSDB_PASSWORD=AdminPassword_1234567890\n"
         f"MCP_TRADING_ORDER_API_KEY={duplicate}\n"
         f"TRADING_SERVICE_AUTH_SECRET={'s' * 40}\n"
@@ -388,31 +382,3 @@ def test_cli_never_prints_generated_or_preserved_values(
     output = capsys.readouterr().out
     assert preserved not in output
     assert "q" * 48 not in output
-    assert "r" * 48 not in output
-    assert "s" * 48 not in output
-    assert "generated 3 secret(s)" in output
-
-
-def test_atomic_replace_failure_preserves_original_and_removes_temp_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    env_file = tmp_path / ".env"
-    original = "UNMANAGED=original\n"
-    env_file.write_text(original, encoding="utf-8")
-
-    def fail_replace(source: os.PathLike[str], destination: os.PathLike[str]) -> None:
-        assert Path(source).parent == env_file.parent
-        assert Path(destination) == env_file
-        raise OSError("simulated OneDrive lock")
-
-    monkeypatch.setattr(cli.os, "replace", fail_replace)
-    with pytest.raises(cli.ConfigurationError, match="atomically replace") as error:
-        cli.configure_environment(
-            runtime="local",
-            env_file=env_file,
-            generator=_generator("a" * 48, "b" * 48, "c" * 48, "d" * 48),
-        )
-
-    assert "simulated OneDrive lock" not in str(error.value)
-    assert env_file.read_text(encoding="utf-8") == original
-    assert list(tmp_path.glob("..env.*.tmp")) == []

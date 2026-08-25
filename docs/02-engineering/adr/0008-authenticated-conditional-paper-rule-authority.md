@@ -1,4 +1,4 @@
-# ADR-0008: 인증된 조건부 PAPER 규칙을 별도 standing authority로 둔다
+# ADR-0008: 로컬 fixture 조건부 PAPER 규칙을 별도 standing authority로 둔다
 
 - 상태: Accepted
 - 날짜: 2026-08-20
@@ -20,8 +20,8 @@
 | 레인 | 권한 출처 | 실행 전 필수 조건 |
 |---|---|---|
 | `AUTOMATED_STRATEGY` | alpha/전략 Worker | 기존 Risk Decision과 OMS gate |
-| `USER_DIRECTIVE` | 인증 사용자의 즉시 PAPER 지시 | ADR-0007의 기계적 admission |
-| `USER_CONDITIONAL_RULE` | 인증 사용자가 정확한 규칙 지문을 확인한 standing PAPER 지시 | 결정론 평가, exactly-once trigger, 실행 직전 admission |
+| `USER_DIRECTIVE` | 고정 fixture 사용자의 즉시 PAPER 지시 | ADR-0007의 기계적 admission |
+| `USER_CONDITIONAL_RULE` | 고정 fixture 사용자가 정확한 규칙 지문을 확인한 standing PAPER 지시 | 결정론 평가, exactly-once trigger, 실행 직전 admission |
 
 조건부 규칙은 자동 alpha 승격 권한이 아니며, 자동 전략이 이 테이블에 규칙을 만들어
 Risk gate를 우회할 수 없다. 반대로 research/quant factory의 무한 탐색 작업은 조건부
@@ -29,8 +29,8 @@ Risk gate를 우회할 수 없다. 반대로 research/quant factory의 무한 �
 
 ### 2. LLM은 AST 제안까지만 한다
 
-Hermes는 자연어를 versioned JSON AST 후보로 바꿀 수 있다. BFF는 인증된 JWT
-`sub`, Fund/Book membership, canonical instrument, 원문 hash, schema/semantic/unit
+Hermes는 자연어를 versioned JSON AST 후보로 바꿀 수 있다. BFF는 고정 fixture ID,
+Fund/Book membership, canonical instrument, 원문 hash, schema/semantic/unit
 검사를 독립적으로 수행한다. 사용자는 정규화된 종목·조건·봉 주기·수량·만료·PAPER
 표시를 보고 그 exact `spec_sha256`을 확인해야 한다. 확인 이후 AST나 action이 한
 비트라도 달라지면 재확인이 필요하다.
@@ -75,9 +75,9 @@ Rule의 `COMPLETED`는 exactly-once action이 durable USER_DIRECTIVE로 접수�
 뜻이다. 주문 체결 완료를 뜻하지 않는다. 실제 주문 상태와 fill/원장 반영은 반환된
 `directive_id`의 기존 상태 머신에서 별도로 조회한다.
 
-### 6. 저장소와 인증을 분리한다
+### 6. 저장소와 서비스 권한을 분리한다
 
-- `svc_conditional_rule_orchestrator`: 인증된 규칙 생성·확인·일시정지·취소
+- `svc_conditional_rule_orchestrator`: fixture 범위 규칙 생성·확인·일시정지·취소
 - `svc_conditional_rule_worker`: 평가·trigger·execution/outbox 전이
 - `svc_trading_api`: rule execution을 읽고 서버 측 directive를 유도하는 마지막 admission
 

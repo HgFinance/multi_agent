@@ -357,7 +357,8 @@ Hermes의 재귀적 자기 개선은 Runtime Memory 폴더를 Git에 넣는 방�
 ### 단계 6. AI Office Frontend 이전
 
 - 이전 완료 전에는 `ai-office/`를 실행 기준으로 유지하고 `apps/operator-web/`를 동시에 운영하지 않는다.
-- `DEMO` Mode를 동결한 뒤 8개 조직, REST Snapshot, WebSocket Event Store와 Supabase Auth를 연결한다.
+- `DEMO` Mode를 동결한 뒤 8개 조직, REST Snapshot과 WebSocket Event Store를 fixture 환경에서 연결한다.
+  사용자 로그인·세션은 구현하지 않는다.
 - `apps/operator-web/` 이동은 Import, Lockfile, Cloudflare·Hosting 설정, Docker와 CI 경로를 같은 PR에서 수정한다.
 - Pixel Office는 Domain Event의 Projection만 담당하고 Browser에서 Risk, OMS, Ledger와 거래 DB를 직접 수정하지 않는다.
 - 상세 단계와 완료 조건은 [AI Office Frontend Plan](AI_OFFICE_FRONTEND_PLAN.md)을 따른다.
@@ -383,7 +384,7 @@ Hermes의 재귀적 자기 개선은 Runtime Memory 폴더를 Git에 넣는 방�
 | Bedrock/Ollama 목표와 현재 Nous Profile | 상태 구분 필요 | 현재 Profile은 개발 Runtime, Bedrock/Ollama는 목표 Model Gateway임을 문서에 명시 |
 | LS Open API 문서 | 정합 | REST·WebSocket 42개 API 묶음과 365개 TR 참조가 문서 지도에 연결됨 |
 | `ai-office`와 8개 조직 | 부분 정합 | 8개 조직·2개 층 전환 완료, Backend 조직 Registry 기반 배치는 미완료 |
-| `ai-office`와 금융 Source of Truth | 부분 연결 | DEMO BFF·Trading/Portfolio Fixture는 존재하나 Supabase Auth, 공식 Snapshot·WebSocket와 Kanban Status Bridge는 미완료 |
+| `ai-office`와 금융 Source of Truth | 부분 연결 | DEMO BFF·Trading/Portfolio Fixture는 존재하며 공식 Snapshot·WebSocket와 Kanban Status Bridge는 미완료. 외부 사용자 로그인·세션은 범위 밖 |
 
 ## 13. 완료 기준
 

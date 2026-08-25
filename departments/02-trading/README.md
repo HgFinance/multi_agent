@@ -6,7 +6,7 @@
 
 퀀트본부가 제공한 검증 가능한 Alpha Strategy Bundle을 받아 전략별 임시 Worker를 1:1로 생성한다. 모든 Worker는 같은 실시간 Paper 시장 스트림을 병렬 소비하고, 공유 Paper 계정 안에서 전략별 체결·포지션·성과 attribution을 유지한다. Trading은 Risk 소유 임계값과 Quant 소유 성과 가중치를 결정론적으로 조합해 정확히 하나의 전략을 선정한다.
 
-고정 Bull/Bear 직원과 토론 경로는 없다. `StrategySignal` ≠ `OrderIntent` ≠ `Order`이며, 선정 결과도 Risk Gate와 기존 OMS/Broker 경계를 우회하지 않는다. 이 문장은 Agent·alpha·자동 전략 레인에 적용된다. 인증된 사용자의 직접 PAPER 지시는 [ADR-0007](../../docs/02-engineering/adr/0007-authenticated-user-paper-directive-authority.md)의 별도 `USER_DIRECTIVE` authority다.
+고정 Bull/Bear 직원과 토론 경로는 없다. `StrategySignal` ≠ `OrderIntent` ≠ `Order`이며, 선정 결과도 Risk Gate와 기존 OMS/Broker 경계를 우회하지 않는다. 이 문장은 Agent·alpha·자동 전략 레인에 적용된다. 로컬 모의투자의 직접 PAPER 지시는 [ADR-0007](../../docs/02-engineering/adr/0007-authenticated-user-paper-directive-authority.md)의 별도 `USER_DIRECTIVE` 경계지만 현재 Compose에서는 비활성화한다.
 
 ## Runtime 구성
 
@@ -35,7 +35,7 @@
 
 | 항목 | 자동 전략 레인 | 사용자 직접 PAPER 레인 |
 |---|---|---|
-| source | Agent/alpha/strategy/rebalancer | 검증된 JWT `sub`의 명시적 지시 |
+| source | Agent/alpha/strategy/rebalancer | BFF가 선택한 고정 데모 ID의 명시적 지시 |
 | priority | 전략·Risk 계약이 결정 | `USER_DIRECTIVE_HIGHEST` |
 | 경제적 veto | 결정론 Risk Decision 필수 | Risk·alpha·rebalancer가 사용자의 명시적 PAPER 결정을 veto/resize하지 않음 |
 | 실행 전 경계 | Risk·QA·OMS | auth, ACTIVE Fund/Book membership, parser, account mechanics, idempotency, PAPER-only |
@@ -44,7 +44,7 @@
 Hermes는 사용자의 authority를 소유하지 않는다. 대화 원문을 자의로 보충하거나
 종목·방향·수량을 선택하지 않으며, 결정론 parser와 Operator BFF가 구조화한다.
 `/trading/agent/order`라는 호환 경로 이름도 Agent submit 권한을 뜻하지 않는다.
-본문 `user_id`는 받지 않고 BFF가 검증된 JWT subject를 actor로 결합한다.
+본문 `user_id`는 권한으로 받지 않고 BFF가 고정 데모 ID를 actor로 결합한다.
 
 공개 BFF 명령은 단일 `PLACE_ORDER`, canonical 계정 기반 `SELL_ALL`, canonical
 미종료 주문 기반 `CANCEL_ALL`이다. mutation마다 `Idempotency-Key`가 필요하고,

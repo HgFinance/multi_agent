@@ -102,17 +102,19 @@ def test_database_bootstrap_image_receives_canonical_migration_trees() -> None:
     assert "COPY . ." in dockerfile
 
 
-def test_production_bff_uses_supabase_jwt_but_private_operational_data() -> None:
+def test_legacy_bff_stays_fixture_only_beside_private_operational_data() -> None:
     services = _yaml(OVERLAY_PATH)["services"]
     environment = services["portfolio-bff"]["environment"]
 
     assert environment["APP_ENV"] == "production"
     assert environment["PORTFOLIO_DATA_MODE"] == "production"
-    assert environment["PORTFOLIO_AUTH_MODE"] == "supabase_jwt"
-    assert environment["PORTFOLIO_AUTH_REQUIRED"] == "true"
+    assert environment["PORTFOLIO_AUTH_MODE"] == "fixture"
+    assert environment["PORTFOLIO_AUTH_REQUIRED"] == "false"
     assert environment["USER_PAPER_ORDER_WORKFLOW_ENABLED"] == "true"
     assert environment["USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED"] == "true"
-    assert environment["PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON"] == "[]"
+    assert environment["PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON"].startswith(
+        "${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:"
+    )
     assert environment["DATABASE_URL"].endswith(
         "/${HEDGEFUND_CONTROL_DB_NAME:-control}"
     )
@@ -120,9 +122,6 @@ def test_production_bff_uses_supabase_jwt_but_private_operational_data() -> None
     assert "postgresql://hgfinance_order_runtime:" in environment[
         "ORDER_ORCHESTRATOR_DATABASE_URL"
     ]
-    assert "SUPABASE_URL" in environment
-    assert environment["SUPABASE_PUBLISHABLE_KEY"] == "${SUPABASE_PUBLISHABLE_KEY:-}"
-    assert environment["SUPABASE_ANON_KEY"] == "${SUPABASE_ANON_KEY:-}"
     assert environment["PORTFOLIO_CORS_ALLOW_ORIGINS"] == (
         "${PORTFOLIO_CORS_ALLOW_ORIGINS:-}"
     )
@@ -132,7 +131,6 @@ def test_production_bff_uses_supabase_jwt_but_private_operational_data() -> None
     assert environment["DISCORD_ACTOR_MAP"] == (
         "${DISCORD_ACTOR_MAP:?DISCORD_ACTOR_MAP is required}"
     )
-    assert "SUPABASE_SERVICE_ROLE_KEY" not in environment
 
 
 def test_conditional_rule_runtime_uses_two_dedicated_logins() -> None:
@@ -154,6 +152,9 @@ def test_conditional_rule_runtime_uses_two_dedicated_logins() -> None:
     assert mcp["CONDITIONAL_RULE_DATABASE_ROLE"] == (
         "svc_conditional_rule_orchestrator"
     )
+    assert mcp["PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON"].startswith(
+        "${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:"
+    )
     assert "postgresql://hgfinance_conditional_worker:" in worker[
         "CONDITIONAL_RULE_DATABASE_URL"
     ]
@@ -173,6 +174,24 @@ def test_conditional_rule_runtime_uses_two_dedicated_logins() -> None:
     )
     assert "hermes" not in worker_image.casefold()
     assert "USER 65532:65532" in worker_image
+
+
+def test_realtime_and_paper_execution_share_the_existing_ls_token_cache() -> None:
+    root = _yaml(ROOT / "docker-compose.yml")
+    trading = _yaml(ROOT / "departments" / "02-trading" / "compose.yaml")
+    realtime = root["services"]["ls-realtime"]
+    execution = trading["services"]["trading-api"]
+
+    assert realtime["environment"]["LS_TOKEN_CACHE_DIR"] == (
+        "/var/lib/ls-token-cache"
+    )
+    assert execution["environment"]["LS_TOKEN_CACHE_DIR"] == (
+        "/var/lib/ls-token-cache"
+    )
+    mount = "ls_token_cache:/var/lib/ls-token-cache"
+    assert mount in realtime["volumes"]
+    assert mount in execution["volumes"]
+    assert "ls_token_cache" in root["volumes"]
 
 
 def test_discord_ingress_secret_is_scoped_to_bff_and_order_gateways() -> None:
@@ -222,12 +241,14 @@ def test_critical_services_use_one_control_only_login_and_exact_role() -> None:
     services = overlay["services"]
     order = overlay["x-order-database-url"]
     trading = overlay["x-trading-database-url"]
+    relay = overlay["x-trading-outbox-database-url"]
     accounting = overlay["x-accounting-database-url"]
 
     assert order.endswith("/${HEDGEFUND_CONTROL_DB_NAME:-control}")
     assert "/${HEDGEFUND_CONTROL_DB_NAME:-control}?" in trading
     assert "/${HEDGEFUND_CONTROL_DB_NAME:-control}?" in accounting
     assert "options=-c%20role%3Dsvc_trading_api" in trading
+    assert "options=-c%20role%3Dsvc_trading_outbox_relay" in relay
     assert "options=-c%20role%3Dsvc_accounting_ledger" in accounting
     assert all("/market" not in dsn for dsn in (order, trading, accounting))
     order_environment = services["paper-order-orchestrator-mcp"]["environment"]
@@ -249,7 +270,10 @@ def test_critical_services_use_one_control_only_login_and_exact_role() -> None:
     assert trading_worker["DATABASE_URL"] == trading
     assert "TRADING_DIRECTIVE_DATABASE_URL" not in trading_worker
     assert trading_worker["TRADING_DATABASE_ROLE"] == "svc_trading_api"
-    assert services["trading-outbox-relay"]["environment"]["DATABASE_URL"] == trading
+    relay_environment = services["trading-outbox-relay"]["environment"]
+    assert relay_environment["DATABASE_URL"] == trading
+    assert relay_environment["TRADING_OUTBOX_DATABASE_URL"] == relay
+    assert "TRADING_OMS_DATABASE_URL" not in relay_environment
     for service_name in (
         "accounting-api",
         "accounting-ledger-consumer",

@@ -79,7 +79,7 @@ Scorecard 관찰의 실제 API 배선.
   - `append_cost_snapshot()`(`postgres_scorecard_repository.py`) — 플랫폼 과금 계측이
     보고한 비용 1건을 적는다. **집행이 아니라 보고 수납이다** — 토큰·금액은 여전히
     플랫폼이 만들고 인사팀은 계산하지 않는다. 그래서 `recorded_by`(2026-08-25 추가,
-    `supabase/migrations/20260825000100_...`)를 필수로 요구한다 — 보고자 없이 적힌
+    `supabase/migrations/20260825000300_...`)를 필수로 요구한다 — 보고자 없이 적힌
     행은 인사팀이 지어낸 값과 구별되지 않는다.
     같은 `(agent, profile version, window)` 재보고는 **행을 늘리지 않고 갱신한다** —
     reader 가 창 안의 행을 합산하므로 중복 행은 곧 사용량 2배이고 예산 판정이 뒤집힌다.
@@ -118,7 +118,7 @@ Scorecard 관찰의 실제 API 배선.
     인사팀이 직접 집계하고, cost/capacity 는 플랫폼이 만든 것을 받아 적기만 한다
     (`append_cost_snapshot`/`append_capacity_snapshot`, 2026-08-25). `capacity_snapshots`도
     cost 와 같은 계약이다 — `recorded_by` 필수, 같은 `(department, agent, window)` 재보고는
-    갱신(`supabase/migrations/20260825000200_...`). `department_id`/`agent_id`는 DDL check 상
+    갱신(`supabase/migrations/20260825000400_...`). `department_id`/`agent_id`는 DDL check 상
     하나만 있어도 되므로 unique index 는 `nulls not distinct`를 쓴다(일반 unique 는 null 을
     서로 다른 값으로 봐서 같은 부서 단위 재보고를 막지 못한다). 창구는
     `POST/GET /workforce/v1/capacity-snapshots`. 여전히 `scorecard/observability.py`가
@@ -161,7 +161,7 @@ Scorecard 관찰의 실제 API 배선.
   - `review.py` — `PerformanceReview` 계약. **조치를 제안하는 평가는 역할 KPI 없이 만들 수 없다**
     (`MissingRoleMetricsError`) — 역할 축소·비활성화 제안은 되돌리기 어려운 결정이라 근거를 요구한다.
     `decision` 어휘는 새로 짓지 않고 `performance_actions.action_type` 4개 + `CONTINUE`를 쓴다
-    (`supabase/migrations/20260825000300_...`가 같은 값으로 DDL check를 건다).
+    (`supabase/migrations/20260825000500_...`가 같은 값으로 DDL check를 건다).
   - `action.py` — `PerformanceAction` 상태 머신. `OPEN → IN_PROGRESS → VERIFIED/CANCELLED`,
     `OVERDUE`는 **종료가 아니다**(기한 넘김이 조용한 면제가 되면 안 된다). `VERIFIED`는
     `verification` 없이 통과하지 않고(DDL check와 같은 규칙), `review_id`를 붙이면 그 평가의
@@ -177,7 +177,7 @@ Scorecard 관찰의 실제 API 배선.
     바꿀 수 없다** — `close_probation`도 `ProbationCloseIn`도 `success_metrics`를 받을 자리가
     아예 없고, 자체 점검이 그 부재를 고정한다. `EXTENDED`는 이 행을 닫고 다음 관찰은 새 행으로
     연다. 같은 Agent에 **열린 수습은 하나뿐**이다 — 행 하나만 보는 DDL check로는 못 막아
-    부분 unique index로 강제한다(`supabase/migrations/20260825000400_...`).
+    부분 unique index로 강제한다(`supabase/migrations/20260825000600_...`).
     `stage`(SHADOW/PAPER) 순서는 제약하지 않는다 — DDL도 문서도 순서를 정한 곳이 없다.
   - 창구: `POST/GET /workforce/v1/agents/{agent_id}/performance-reviews`,
     `POST/GET .../performance-actions`, `POST /workforce/v1/performance-actions/{id}/transitions`,

@@ -1,8 +1,7 @@
 """Repository-wide deterministic test environment.
 
-Tests that use the portfolio BFF must opt into its unsigned fixture identity;
-production defaults to verified Supabase JWT and never infers fixture mode from
-pytest itself.
+Tests that use the portfolio BFF must opt into its explicit local fixture
+identity. The repository has no browser login or external user-auth mode.
 """
 from __future__ import annotations
 

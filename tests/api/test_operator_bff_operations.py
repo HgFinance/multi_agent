@@ -8,10 +8,10 @@ import tempfile
 import unittest
 from unittest import mock
 
-
 # The BFF must remain testable in DEMO mode without attempting a configured
 # remote database.  This does not expose or print the caller's real DSN.
 os.environ["DATABASE_URL"] = ""
+os.environ["PORTFOLIO_WORKER_RUNTIME"] = "deterministic_test"
 # PortfolioRuntime is a module-level singleton that reads its "latest job" from
 # this store at import time. Without a private path, it picks up whatever real
 # job a previous app run or another test process left in the shared default
@@ -21,10 +21,10 @@ os.environ["PORTFOLIO_RUNTIME_STORE_PATH"] = os.path.join(
     tempfile.gettempdir(), f"hgfinance-portfolio-operations-tests-{os.getpid()}.sqlite3"
 )
 
-from fastapi.testclient import TestClient  # noqa: E402
+from fastapi.testclient import TestClient
 
-from apps.api.main import app, _repo  # noqa: E402
-from apps.api.operations_read_model import _profile_data, _registry  # noqa: E402
+from apps.api.main import _repo, app
+from apps.api.operations_read_model import _profile_data, _registry
 
 
 class OperatorBffOperationsTest(unittest.TestCase):
@@ -106,7 +106,14 @@ class OperatorBffOperationsTest(unittest.TestCase):
         variables the projection reads instead.
         """
 
-        keys = ("NOTION_TOKEN", "NOTION_BRIEFING_DB", "DISCORD_WEBHOOK_URL")
+        keys = (
+            "NOTION_TOKEN",
+            "NOTION_BRIEFING_DB",
+            "DISCORD_WEBHOOK_URL",
+            "DISCORD_MIRROR_ENABLED",
+            "DISCORD_BOT_TOKEN_CEO",
+            "DISCORD_CEO_CHANNEL_ID",
+        )
         with mock.patch.dict(os.environ, {k: env.get(k, "") for k in keys}, clear=False):
             response = self.client.get("/ui/integrations")
         self.assertEqual(response.status_code, 200)

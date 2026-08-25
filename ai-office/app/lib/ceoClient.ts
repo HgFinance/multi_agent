@@ -268,7 +268,7 @@ function outcomeFor(
   return node.department ? "STALE" : "NO_ASSIGNEE";
 }
 
-/** Verified JWT subject 범위의 CEO root task만 조회한다. */
+/** Fixed local fixture identity 범위의 CEO root task만 조회한다. */
 export async function listCeoTasks(): Promise<CeoTaskListResponse> {
   return getJson<CeoTaskListResponse>("/ui/ceo/tasks");
 }

@@ -280,7 +280,7 @@ class PostgresPerformanceRepository:
 
         같은 Agent 에 열린 수습이 이미 있으면 거절한다(불변식 4).
 
-        실제 방어는 부분 unique index 다(20260825000400 migration) - 열린 수습이 없을
+        실제 방어는 부분 unique index 다(20260825000600 migration) - 열린 수습이 없을
         때는 잠글 행이 없어서 select-then-insert 로는 동시 요청 둘을 막지 못한다.
         여기 select 는 **더 나은 에러 메시지**를 위한 것이고, 경합에서 뚫리면 아래
         23505(unique_violation)가 같은 예외로 접힌다.

@@ -61,9 +61,7 @@ class UntrustedHermesOrderCandidate(BaseModel):
 
     model_config = ConfigDict(extra="allow", frozen=True)
 
-    schema_version: SkipValidation[
-        Literal["user-paper-order-interpretation.v1"]
-    ] = None
+    schema_version: SkipValidation[Literal["user-paper-order-interpretation.v1"]] = None
     mode: SkipValidation[Literal["PAPER"]] = None
     binding: SkipValidation[Literal[False]] = None
     raw_text_sha256: SkipValidation[str] = None
@@ -93,9 +91,7 @@ def validate_api_key(value: str | None) -> str:
     if token != raw:
         raise RuntimeError("MCP_TRADING_ORDER_API_KEY must not contain whitespace")
     if len(token.encode("utf-8")) < MIN_API_KEY_BYTES:
-        raise RuntimeError(
-            "MCP_TRADING_ORDER_API_KEY must contain at least 32 bytes"
-        )
+        raise RuntimeError("MCP_TRADING_ORDER_API_KEY must contain at least 32 bytes")
     if any(marker in lowered for marker in _PLACEHOLDER_MARKERS):
         raise RuntimeError("MCP_TRADING_ORDER_API_KEY must not be a placeholder")
     if len(set(token)) == 1:
@@ -135,9 +131,7 @@ class BearerAuthMiddleware:
                 if raw_name.lower() == b"authorization"
             ]
             header = (
-                authorization_headers[0]
-                if len(authorization_headers) == 1
-                else None
+                authorization_headers[0] if len(authorization_headers) == 1 else None
             )
             if not is_authorized(header, self.api_key):
                 body = b'{"error":"unauthorized","detail":"Bearer credential required"}'
@@ -197,6 +191,7 @@ async def _delegate_conditional_rule(
     root_task_id: str,
     trading_task_id: str,
     candidate: ConditionalRuleCandidate | None,
+    candidates: tuple[ConditionalRuleCandidate, ...] | None,
     clarification_reason: str | None,
 ) -> dict[str, Any]:
     from apps.api.conditional_rule_orchestrator import (  # noqa: PLC0415
@@ -207,6 +202,7 @@ async def _delegate_conditional_rule(
         root_task_id=root_task_id,
         trading_task_id=trading_task_id,
         candidate=candidate,
+        candidates=candidates,
         clarification_reason=clarification_reason,
     )
     if inspect.isawaitable(result):
@@ -219,8 +215,27 @@ async def _delegate_conditional_rule(
     return result
 
 
+async def _delegate_conditional_status(
+    *, root_task_id: str, trading_task_id: str
+) -> dict[str, Any]:
+    from apps.api.conditional_rule_orchestrator import (  # noqa: PLC0415
+        get_user_conditional_paper_rule_status as read_status,
+    )
+
+    result = await asyncio.to_thread(
+        read_status,
+        root_task_id=root_task_id,
+        trading_task_id=trading_task_id,
+    )
+    if not isinstance(result, dict):
+        raise RuntimeError(
+            "conditional-rule status reader returned a non-object result"
+        )
+    return result
+
+
 def build_server(*, host: str = "0.0.0.0", port: int = MCP_PORT):
-    """Build the two-tool FastMCP server supported by the pinned image."""
+    """Build the narrow PAPER command/read FastMCP server."""
 
     from mcp.server.fastmcp import FastMCP
 
@@ -266,11 +281,14 @@ def build_server(*, host: str = "0.0.0.0", port: int = MCP_PORT):
     @server.tool(
         name="process_user_conditional_paper_rule",
         description=(
-            "Submit exactly one strict Trading-Hermes AST for a marked, "
+            "Submit exactly one tool call containing one or more strict "
+            "Trading-Hermes ASTs for a marked, "
             "authenticated conditional PAPER-rule workflow. The trusted "
             "boundary reloads the original user/Fund/Book scope, resolves the "
-            "instrument, validates units and semantics, and immediately "
-            "activates the exact fingerprint. Pass candidate=null only when "
+            "instrument, validates every rule before activation, and immediately "
+            "activates the exact fingerprints. Use candidates for multiple "
+            "independent condition/action clauses and candidate for legacy "
+            "single-rule calls. Pass both as null only when "
             "the instruction is ambiguous or unsupported; never pass user, "
             "fund, book, execution mode, API tokens, or service proofs."
         ),
@@ -280,13 +298,34 @@ def build_server(*, host: str = "0.0.0.0", port: int = MCP_PORT):
         root_task_id: str,
         trading_task_id: str,
         candidate: ConditionalRuleCandidate | None = None,
+        candidates: tuple[ConditionalRuleCandidate, ...] | None = None,
         clarification_reason: str | None = None,
     ) -> dict[str, Any]:
         return await _delegate_conditional_rule(
             root_task_id=root_task_id,
             trading_task_id=trading_task_id,
             candidate=candidate,
+            candidates=candidates,
             clarification_reason=clarification_reason,
+        )
+
+    @server.tool(
+        name="get_user_conditional_paper_rule_status",
+        description=(
+            "Read the authoritative Trading status for the conditional PAPER "
+            "rule already bound to this exact CEO root and Trading task. This "
+            "tool is read-only and returns a deterministic final_answer; report "
+            "that answer without inferring submission, fill, or accounting state."
+        ),
+        structured_output=True,
+    )
+    async def get_user_conditional_paper_rule_status(
+        root_task_id: str,
+        trading_task_id: str,
+    ) -> dict[str, Any]:
+        return await _delegate_conditional_status(
+            root_task_id=root_task_id,
+            trading_task_id=trading_task_id,
         )
 
     return server
@@ -310,8 +349,7 @@ def check_readiness() -> None:
     validate_api_key(os.environ.get("MCP_TRADING_ORDER_API_KEY"))
     dsn = os.environ.get("ORDER_ORCHESTRATOR_DATABASE_URL", "").strip()
     production = (
-        os.environ.get("APP_ENV", "development").casefold()
-        in {"production", "staging"}
+        os.environ.get("APP_ENV", "development").casefold() in {"production", "staging"}
         or os.environ.get("PORTFOLIO_DATA_MODE", "").casefold() == "production"
     )
     if not dsn and not production:
@@ -363,9 +401,7 @@ def check_readiness() -> None:
             if not tables or any(table is None for table in tables):
                 raise RuntimeError("conditional PAPER rule migration is not ready")
 
-    kanban_db = Path(
-        os.environ.get("HERMES_KANBAN_DB", "/opt/kanban/kanban.db")
-    )
+    kanban_db = Path(os.environ.get("HERMES_KANBAN_DB", "/opt/kanban/kanban.db"))
     if not kanban_db.is_file():
         raise RuntimeError("shared Kanban database is not ready")
     kanban = sqlite3.connect(
@@ -376,9 +412,9 @@ def check_readiness() -> None:
     finally:
         kanban.close()
 
-    trading_url = os.environ.get(
-        "TRADING_API_URL", "http://trading-api:8000"
-    ).rstrip("/")
+    trading_url = os.environ.get("TRADING_API_URL", "http://trading-api:8000").rstrip(
+        "/"
+    )
     if not trading_url:
         raise RuntimeError("TRADING_API_URL is required")
     with urllib.request.urlopen(f"{trading_url}/health/ready", timeout=3) as response:

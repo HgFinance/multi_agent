@@ -56,6 +56,10 @@ ENDPOINT_SCOPES: dict[str, str] = {
     # 놓고도 **어디서도 강제되지 않던** 구멍을 메운다.
     "/snapshot": "market.snapshot.read",
     "/bars": "market.bars.read",
+    # /levels 는 일봉에서 계산한 파생물이라 같은 자료·같은 민감도다.
+    # 새 scope 를 만들면 부서 config.yaml 에 선언이 없어 강제 모드에서
+    # gateway_misconfigured(500) 로 죽는다.
+    "/levels": "market.bars.read",
     "/breadth": "market.breadth.read",
     "/dq/summary": "market.dq.read",
     "/regime/daily": "market.regime.read",

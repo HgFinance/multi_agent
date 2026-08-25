@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "collectors"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "evidence"))
 
 from fastapi import FastAPI, HTTPException, Query
 from source_registry import load_project_env
@@ -294,6 +295,51 @@ def bars(
         where instrument_id = %s and interval_code = %s{cond}
         order by bucket_time desc limit %s
     """, tuple(params))
+
+
+@app.get("/levels/{symbol}")
+def levels(
+    symbol: str,
+    lookback: int = Query(130, ge=60, le=400,
+                          description="레벨 계산에 쓸 일봉 수"),
+):
+    """지지·저항·진입·목표·손절. **일봉에서 결정론으로 계산한다.**
+
+    LLM 이 목표가를 지어내지 못하게 하려고 서버가 낸다. 계산 규칙은 재현되지만
+    수익을 보장하지 않는다 - 응답의 `caveat` 를 반드시 같이 노출할 것
+    (실측: 목표 선도달 31.0% vs 손절 선도달 62.1%).
+    """
+    from price_levels import CAVEAT, PLAN_OK, price_plan
+
+    rows = bars(symbol, interval="1D", limit=lookback, source="ls_chart", to=None)
+    # bars 는 최신순으로 준다 - price_plan 은 마지막이 최신인 순서를 먹는다.
+    ordered = list(reversed(rows))
+    plan = price_plan(ordered)
+    out = {
+        "symbol": symbol,
+        "status": plan.status,
+        "bars_used": len(ordered),
+        "last_close": plan.last_close,
+        "atr": plan.atr,
+        "supports": [{"price": lv.price, "touches": lv.touches,
+                      "strength": lv.strength, "basis": lv.basis}
+                     for lv in plan.supports],
+        "resistances": [{"price": lv.price, "touches": lv.touches,
+                         "strength": lv.strength, "basis": lv.basis}
+                        for lv in plan.resistances],
+        "caveat": CAVEAT,
+        "evidence_tier": "DERIVED",
+    }
+    if plan.status == PLAN_OK:
+        out.update({
+            "entry_low": plan.entry_low, "entry_high": plan.entry_high,
+            "target": plan.target, "stop": plan.stop,
+            "reward_risk": plan.reward_risk, "risk_pct": plan.risk_pct,
+            "target_basis": plan.target_basis, "stop_basis": plan.stop_basis,
+        })
+    else:
+        out["reason"] = plan.reason
+    return out
 
 
 @app.get("/breadth")

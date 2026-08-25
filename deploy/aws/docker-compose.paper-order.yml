@@ -4,9 +4,8 @@
 #   docker compose --project-name hedgefund --env-file <runtime.env> \
 #     -f docker-compose.yml -f deploy/aws/docker-compose.paper-order.yml ...
 #
-# Hosted Supabase is identity-only.  Both operational databases are private
-# databases in the same EC2 Timescale/PostgreSQL container; applications never
-# receive the hosted Supabase database URL.
+# This overlay is retained for database/runtime reference only. User login and
+# hosted identity are not part of the supported mock-investment application.
 
 x-admin-control-database-url: &admin-control-database-url "postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?HEDGEFUND_TSDB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}"
 x-admin-market-database-url: &admin-market-database-url "postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?HEDGEFUND_TSDB_PASSWORD is required}@timescaledb:5432/market"
@@ -14,6 +13,8 @@ x-control-database-url: &control-database-url "postgresql://hgfinance_runtime:${
 x-market-database-url: &market-database-url "postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD:?HEDGEFUND_RUNTIME_DB_PASSWORD is required}@timescaledb:5432/market"
 x-order-database-url: &order-database-url "postgresql://hgfinance_order_runtime:${HEDGEFUND_ORDER_DB_PASSWORD:?HEDGEFUND_ORDER_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}"
 x-trading-database-url: &trading-database-url "postgresql://hgfinance_trading_runtime:${HEDGEFUND_TRADING_DB_PASSWORD:?HEDGEFUND_TRADING_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_trading_api"
+x-trading-oms-database-url: &trading-oms-database-url "postgresql://hgfinance_trading_runtime:${HEDGEFUND_TRADING_DB_PASSWORD:?HEDGEFUND_TRADING_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_strategy_paper_executor"
+x-trading-outbox-database-url: &trading-outbox-database-url "postgresql://hgfinance_trading_runtime:${HEDGEFUND_TRADING_DB_PASSWORD:?HEDGEFUND_TRADING_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_trading_outbox_relay"
 x-accounting-database-url: &accounting-database-url "postgresql://hgfinance_accounting_runtime:${HEDGEFUND_ACCOUNTING_DB_PASSWORD:?HEDGEFUND_ACCOUNTING_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_accounting_ledger"
 x-conditional-orchestrator-database-url: &conditional-orchestrator-database-url "postgresql://hgfinance_conditional_orchestrator:${HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD:?HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_conditional_rule_orchestrator"
 x-conditional-worker-database-url: &conditional-worker-database-url "postgresql://hgfinance_conditional_worker:${HEDGEFUND_CONDITIONAL_WORKER_DB_PASSWORD:?HEDGEFUND_CONDITIONAL_WORKER_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_conditional_rule_worker"
@@ -119,20 +120,19 @@ services:
       CONDITIONAL_RULE_DATABASE_ROLE: svc_conditional_rule_orchestrator
       APP_ENV: production
       PORTFOLIO_DATA_MODE: production
-      PORTFOLIO_AUTH_MODE: supabase_jwt
-      PORTFOLIO_AUTH_REQUIRED: "true"
+      PORTFOLIO_AUTH_MODE: fixture
+      PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: ${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:?An explicit PAPER trading-book fixture grant is required}
+      PORTFOLIO_AUTH_REQUIRED: "false"
       USER_PAPER_ORDER_WORKFLOW_ENABLED: "true"
       USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED: "true"
-      PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: "[]"
+      WORKER_MODEL_EXECUTION_CONTEXT: container
+      WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-http://vllm:8000/v1}
+      WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-awq}
+      WORKER_MODEL_API_KEY: ${WORKER_MODEL_API_KEY:-vllm}
+      WORKER_MODEL_TIMEOUT_SECONDS: ${WORKER_MODEL_TIMEOUT_SECONDS:-120}
+      WORKER_MODEL_REGISTRY_PATH: /app/departments/01-research/config/worker_model_registry.json
       CEO_DISCORD_INGRESS_API_KEY: ${CEO_DISCORD_INGRESS_API_KEY:?CEO_DISCORD_INGRESS_API_KEY is required}
       DISCORD_ACTOR_MAP: ${DISCORD_ACTOR_MAP:?DISCORD_ACTOR_MAP is required}
-      SUPABASE_URL: ${SUPABASE_URL:?Hosted Supabase Auth URL is required}
-      # ES256/RS256 access tokens are verified directly against Auth JWKS, so
-      # browser API keys are optional.  Legacy HS256 tokens still require one
-      # of these public keys at request time; privileged service keys are never
-      # accepted or passed under a service-role setting.
-      SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY:-}
-      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
       # Empty is deliberate for this backend-only deployment: Starlette emits
       # no allow-origin header and rejects browser preflights.  If a UI is
       # deployed later, only its exact HTTPS origin(s) may be supplied.
@@ -162,9 +162,10 @@ services:
       ORDER_ORCHESTRATOR_DATABASE_ROLE: svc_order_orchestrator
       CONDITIONAL_RULE_DATABASE_URL: *conditional-orchestrator-database-url
       CONDITIONAL_RULE_DATABASE_ROLE: svc_conditional_rule_orchestrator
+      PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: ${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:?An explicit PAPER trading-book fixture grant is required}
       APP_ENV: production
       PORTFOLIO_DATA_MODE: production
-      PORTFOLIO_AUTH_MODE: supabase_jwt
+      PORTFOLIO_AUTH_MODE: fixture
 
   conditional-rule-worker:
     depends_on:
@@ -211,6 +212,50 @@ services:
       CONDITIONAL_RULE_DETAIL_RETENTION_DAYS: ${CONDITIONAL_RULE_DETAIL_RETENTION_DAYS:-90}
       CONDITIONAL_RULE_OUTBOX_RETENTION_DAYS: ${CONDITIONAL_RULE_OUTBOX_RETENTION_DAYS:-7}
       CONDITIONAL_RULE_RETENTION_STATEMENT_TIMEOUT_MS: ${CONDITIONAL_RULE_RETENTION_STATEMENT_TIMEOUT_MS:-1500}
+
+  conditional-rule-outbox-relay:
+    depends_on:
+      <<: *control-dependency
+      redis:
+        condition: service_healthy
+    environment:
+      APP_ENV: production
+      DATABASE_URL: *conditional-worker-database-url
+      CONDITIONAL_RULE_DATABASE_URL: *conditional-worker-database-url
+      CONDITIONAL_RULE_WORKER_DATABASE_ROLE: svc_conditional_rule_worker
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      CONDITIONAL_RULE_EVENT_STREAM: ${CONDITIONAL_RULE_EVENT_STREAM:-hf:conditional-rule-events:v1}
+      CONDITIONAL_RULE_EVENT_STREAM_MAXLEN: ${CONDITIONAL_RULE_EVENT_STREAM_MAXLEN:-10000}
+      CONDITIONAL_RULE_OUTBOX_POLL_SECONDS: ${CONDITIONAL_RULE_OUTBOX_POLL_SECONDS:-1}
+      CONDITIONAL_RULE_OUTBOX_BATCH_SIZE: ${CONDITIONAL_RULE_OUTBOX_BATCH_SIZE:-100}
+
+  conditional-rule-notification-consumer:
+    depends_on:
+      <<: *control-dependency
+      redis:
+        condition: service_healthy
+      trading-api:
+        condition: service_healthy
+    environment:
+      APP_ENV: production
+      PORTFOLIO_AUTH_MODE: fixture
+      PORTFOLIO_AUTH_REQUIRED: "false"
+      DATABASE_URL: *control-database-url
+      ORDER_ORCHESTRATOR_DATABASE_URL: *order-database-url
+      ORDER_ORCHESTRATOR_DATABASE_ROLE: svc_order_orchestrator
+      CONDITIONAL_RULE_DATABASE_URL: *conditional-worker-database-url
+      CONDITIONAL_RULE_WORKER_DATABASE_ROLE: svc_conditional_rule_worker
+      TRADING_API_URL: http://trading-api:8000
+      TRADING_SERVICE_AUTH_SECRET: ${TRADING_SERVICE_AUTH_SECRET:?A 32-byte trading service proof secret is required}
+      TRADING_SERVICE_AUTH_ISSUER: ${TRADING_SERVICE_AUTH_ISSUER:-portfolio-bff}
+      TRADING_SERVICE_AUTH_AUDIENCE: ${TRADING_SERVICE_AUTH_AUDIENCE:-trading-api}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      CONDITIONAL_RULE_EVENT_STREAM: ${CONDITIONAL_RULE_EVENT_STREAM:-hf:conditional-rule-events:v1}
+      CONDITIONAL_RULE_NOTIFICATION_GROUP: ${CONDITIONAL_RULE_NOTIFICATION_GROUP:-conditional-paper-reporting-v1}
+      CONDITIONAL_RULE_NOTIFICATION_RETRY_MS: ${CONDITIONAL_RULE_NOTIFICATION_RETRY_MS:-2000}
+      NOTION_TOKEN: ${NOTION_TOKEN:-}
+      NOTION_CEO_DB: ${NOTION_CEO_DB:-}
+      NOTION_TRADING_DB: ${NOTION_TRADING_DB:-}
 
   portfolio-worker:
     depends_on: *control-dependency
@@ -272,6 +317,7 @@ services:
       # 회의론자 워커를 부재한 Ollama 로 폴백시켰다. AWS 배포는 이
       # 오버레이를 항상 타므로 좌표를 여기 둔다.
       WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-http://vllm:8000/v1}
+      WORKER_MODEL_EXECUTION_CONTEXT: container
       WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-awq}
       WORKER_MODEL_API_KEY: ${WORKER_MODEL_API_KEY:-vllm}
       WORKER_MODEL_TIMEOUT_SECONDS: ${WORKER_MODEL_TIMEOUT_SECONDS:-120}
@@ -290,17 +336,25 @@ services:
     environment:
       <<: *control-environment
       RISK_QA_DATABASE_URL: *control-database-url
-      # Risk compliance-policy-worker uses the shared Qwen14B model plane.
-      # The Risk Hermes head remains a separate supervisor process.
       WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-http://vllm:8000/v1}
-      WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-Qwen2.5-14B-Instruct-AWQ}
+      WORKER_MODEL_EXECUTION_CONTEXT: container
+      WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-awq}
       WORKER_MODEL_API_KEY: ${WORKER_MODEL_API_KEY:-vllm}
       WORKER_MODEL_TIMEOUT_SECONDS: ${WORKER_MODEL_TIMEOUT_SECONDS:-120}
+      WORKER_MODEL_REGISTRY_PATH: /app/departments/01-research/config/worker_model_registry.json
+      # Risk compliance-policy-worker uses the shared Qwen14B model plane.
+      # The Risk Hermes head remains a separate supervisor process.
 
   audit-api:
     environment:
       <<: *control-session-environment
       RISK_QA_DATABASE_URL: *control-database-url
+      WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-http://vllm:8000/v1}
+      WORKER_MODEL_EXECUTION_CONTEXT: container
+      WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-awq}
+      WORKER_MODEL_API_KEY: ${WORKER_MODEL_API_KEY:-vllm}
+      WORKER_MODEL_TIMEOUT_SECONDS: ${WORKER_MODEL_TIMEOUT_SECONDS:-120}
+      WORKER_MODEL_REGISTRY_PATH: /app/departments/01-research/config/worker_model_registry.json
 
   qa-worker:
     environment:
@@ -318,7 +372,7 @@ services:
       ORDER_ORCHESTRATOR_DATABASE_ROLE: svc_order_orchestrator
 
   # MemoHarness retention must use the same private control database as the
-  # BFF and supervisor. Hosted Supabase is identity-only in this deployment.
+  # BFF and supervisor.
   memo-harness-retention-worker:
     depends_on: *control-dependency
     environment:
@@ -376,6 +430,7 @@ services:
     depends_on: *control-dependency
     environment:
       DATABASE_URL: *trading-database-url
+      TRADING_OMS_DATABASE_URL: *trading-oms-database-url
       PAPER_DB: "true"
       APP_ENV: production
       TRADING_EXECUTION_MODE: PAPER
@@ -419,6 +474,7 @@ services:
   trading-outbox-relay:
     environment:
       DATABASE_URL: *trading-database-url
+      TRADING_OUTBOX_DATABASE_URL: *trading-outbox-database-url
 
   accounting-api:
     depends_on: *control-dependency

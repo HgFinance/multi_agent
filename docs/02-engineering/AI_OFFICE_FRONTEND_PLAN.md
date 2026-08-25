@@ -133,8 +133,8 @@ Hermes Kanban은 Agent 업무 배정·진행·차단 상태의 Source다. `Kanba
 Task를 수정하지 않는다. 상세 결정은 [ADR-0001](adr/0001-hermes-kanban-agent-status-bridge.md)을 따른다.
 
 현재 `apps/api/main.py`는 `/health`, `/ui/snapshot`, `/ws/operations`, domain Read Model과 안전한 승인 요청 Command 계약을 제공하는 DEMO BFF다.
-`/agent/ask`는 Hermes Tool 실행 가능성 때문에 기본 비활성화하며, Supabase Auth·사용자 권한·Profile
-Tool Allowlist가 연결되기 전에는 운영에서 열지 않는다.
+`/agent/ask`는 Hermes Tool 실행 가능성 때문에 기본 비활성화한다. 현재 프론트는 고정 데모 ID와
+로컬 PAPER 권한만 사용하며 외부 사용자 로그인·세션·프로필 인증은 이 모의투자 범위에 없다.
 
 ### 5.3 UI Event Envelope
 
@@ -211,7 +211,7 @@ Frontend는 Backend의 허용된 Command만 호출한다. Browser에서 Database
 
 모든 위험 명령은 다음을 만족한다.
 
-- Supabase Auth 기반 사용자 Identity와 역할을 확인한다.
+- 로컬 PAPER의 고정 데모 ID와 역할 범위를 확인한다. 외부 사용자 로그인은 구현하지 않는다.
 - 실행 전 현재 상태, 영향 범위와 필요한 승인자를 보여준다.
 - 사유와 멱등 키를 필수로 받고 낡은 `expected_version`을 거절한다.
 - Backend가 Policy, Risk와 상태 전이를 다시 검증한다.
@@ -286,7 +286,8 @@ apps/operator-web/ 또는 이전 완료 전 ai-office/
 ### Phase UI-1. 조직 구조와 Read-only 실시간 연결
 
 - 8개 조직·2개 층 Prototype을 Backend 조직 Registry 기반 배치로 전환한다.
-- Supabase Auth, REST Snapshot, WebSocket Reconnect와 Gap Recovery를 구현한다.
+- REST Snapshot, WebSocket Reconnect와 Gap Recovery를 로컬 PAPER 환경에서 구현한다. 사용자 로그인은
+  이 단계의 범위에 포함하지 않는다.
 - Market Feed, Agent Queue, Risk State, Portfolio Snapshot을 읽기 전용으로 연결한다.
 - Kanban Status Bridge, Agent Status Projector와 `agent.status.v1`을 연결한다.
 - 완료 기준: Backend 재시작과 Event 누락 후에도 화면이 공식 Snapshot과 다시 일치한다.

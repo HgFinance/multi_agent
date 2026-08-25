@@ -7,6 +7,7 @@ ENV PYTHONPATH="/opt/hgfinance:${PYTHONPATH}"
 
 COPY --chmod=0644 orchestration/__init__.py /opt/hgfinance/orchestration/__init__.py
 COPY --chmod=0644 orchestration/discord_idempotency.py /opt/hgfinance/orchestration/discord_idempotency.py
+COPY --chmod=0644 orchestration/qa_discord_feedback.py /opt/hgfinance/orchestration/qa_discord_feedback.py
 COPY --chmod=0644 orchestration/primary_task_idempotency.py /opt/hgfinance/orchestration/primary_task_idempotency.py
 COPY --chmod=0644 deploy/hermes-discord/gateway_patch.py /opt/hgfinance/gateway_patch.py
 COPY --chmod=0644 deploy/hermes-discord/install_patch.py /tmp/install_hermes_discord_patch.py

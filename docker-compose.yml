@@ -76,19 +76,18 @@ services:
       MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS: ${MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS:-1500}
       CONDITIONAL_RULE_DATABASE_URL: ${CONDITIONAL_RULE_DATABASE_URL:-${DATABASE_URL:-}}
       CONDITIONAL_RULE_DATABASE_ROLE: ${CONDITIONAL_RULE_DATABASE_ROLE:-svc_conditional_rule_orchestrator}
-      PORTFOLIO_DATA_MODE: "production"
+      PORTFOLIO_DATA_MODE: "test"
       # AI Office uses the fixed closed-network demo identity.
-      APP_ENV: ${AI_OFFICE_APP_ENV:-local}
+      APP_ENV: local
       PORTFOLIO_AUTH_MODE: fixture
       PORTFOLIO_AUTH_REQUIRED: "false"
+      PORTFOLIO_LIVE_MODE: broker
       PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: ${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:-[]}
-      # This stack includes shared Kanban, dispatcher, Trading Hermes and the
-      # authenticated MCP bridge, so the CEO natural-language PAPER lane may
-      # be admitted. Deployment bundles without that runtime must set false.
-      USER_PAPER_ORDER_WORKFLOW_ENABLED: "true"
-      # Exact single-order commands use the code-built evidence interpreter;
-      # ambiguous/conditional language still goes through Trading Hermes.
-      USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED: "true"
+      # Local mock-investment UI is read-only. No user-login or paper-order
+      # workflow is enabled in this Compose profile.
+      USER_PAPER_ORDER_WORKFLOW_ENABLED: "false"
+      USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED: "false"
+      ACCOUNTING_MODE: OFFLINE
       PORTFOLIO_CORS_ALLOW_ORIGINS: ${PORTFOLIO_CORS_ALLOW_ORIGINS:-}
       PORTFOLIO_RUNTIME_STORE_PATH: /var/lib/portfolio/runtime.sqlite3
       PORTFOLIO_RUNTIME_EMBEDDED_WORKER: "false"
@@ -97,6 +96,7 @@ services:
       # is present, the Worker Model Gateway takes precedence over the local
       # Ollama fallback; Hermes remains the department-head boundary.
       WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-}
+      WORKER_MODEL_EXECUTION_CONTEXT: container
       WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-awq}
       WORKER_MODEL_API_KEY: ${WORKER_MODEL_API_KEY:-vllm}
       WORKER_MODEL_TIMEOUT_SECONDS: ${WORKER_MODEL_TIMEOUT_SECONDS:-120}
@@ -126,7 +126,7 @@ services:
       # 비어 있으면 503 portfolio_api_unavailable 이다(인메모리 후퇴 없음).
       PORTFOLIO_API_URL: ${PORTFOLIO_API_URL:-http://accounting-api:8000}
       # Browser user directives terminate here. Only a short payload-bound
-      # proof is sent to trading-api; the Supabase access token is never relayed.
+      # proof is sent to trading-api; no browser login token exists or is relayed.
       TRADING_API_URL: ${TRADING_API_URL:-http://trading-api:8000}
       TRADING_SERVICE_AUTH_SECRET: ${TRADING_SERVICE_AUTH_SECRET:?A 32-byte trading service proof secret is required}
       TRADING_SERVICE_AUTH_ISSUER: ${TRADING_SERVICE_AUTH_ISSUER:-portfolio-bff}
@@ -191,16 +191,16 @@ services:
       # 계좌 스트림은 ENABLE_LS_ORDER_EVENTS, 원장 REST 조회는
       # ENABLE_LS_ACCOUNT_DATA, 시장 순위 REST 조회는 ENABLE_LS_MARKET_DATA로
       # 각각 켠다. 모두 읽기 전용이며 주문은 나가지 않는다.
-      ENABLE_LS_ORDER_EVENTS: ${ENABLE_LS_ORDER_EVENTS:-false}
+      ENABLE_LS_ORDER_EVENTS: "true"
       # Read-only broker account snapshot. Keep this independent from order
       # event ingestion so enabling a balance view never enables execution.
-      ENABLE_BROKER_SNAPSHOT: ${ENABLE_BROKER_SNAPSHOT:-false}
+      ENABLE_BROKER_SNAPSHOT: "true"
       BROKER_SNAPSHOT_CACHE_SECONDS: ${BROKER_SNAPSHOT_CACHE_SECONDS:-10}
-      ENABLE_LS_MARKET_DATA: ${ENABLE_LS_MARKET_DATA:-false}
-      ENABLE_LS_ACCOUNT_DATA: ${ENABLE_LS_ACCOUNT_DATA:-false}
+      ENABLE_LS_MARKET_DATA: "true"
+      ENABLE_LS_ACCOUNT_DATA: "true"
       # portfolio-bff owns read-only market/account observations. PAPER order
       # execution is isolated behind Trading's separately authenticated lane.
-      LS_ENV: ${LS_ENV:-LIVE}
+      LS_ENV: PAPER
       LS_APP_KEY: ${LS_APP_KEY:-}
       LS_APP_SECRET_KEY: ${LS_APP_SECRET_KEY:-}
       LS_REST_BASE_URL: ${LS_REST_BASE_URL:-}
@@ -247,6 +247,49 @@ services:
       retries: 5
       start_period: 10s
 
+  # The browser SSE endpoint remains a low-latency read path, but it is not
+  # allowed to be the only producer of workflow events. This reconciler reads
+  # the same Kanban board and writes through the same idempotent projection
+  # function, so a disconnected browser cannot leave CEO_FINAL missing.
+  ceo-mirror-projection-worker:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: hedgefund-ceo-mirror-projection-worker
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    user: "1000:1000"
+    command: ["python", "-m", "apps.api.ceo_mirror_projection_worker"]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      PYTHONPATH: /app:/app/apps/api
+      HERMES_BIN: /usr/local/bin/hermes
+      # Projection only reads the shared Kanban board. Keep it away from the
+      # BFF's credential-bearing Hermes home; this also makes the non-root
+      # reconciler independent of a root-owned .env file.
+      HERMES_HOME: /tmp/hermes-cli
+      HERMES_KANBAN_HOME: /opt/kanban
+      HERMES_KANBAN_DB: /opt/kanban/kanban.db
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      UI_MIRROR_REDIS_URL: ${UI_MIRROR_REDIS_URL:-${REDIS_URL:-redis://redis:6379/0}}
+      UI_MIRROR_STREAM: ${UI_MIRROR_STREAM:-hf:ui-ceo-mirror:v1}
+      UI_MIRROR_PROJECTION_BATCH_SIZE: ${UI_MIRROR_PROJECTION_BATCH_SIZE:-2}
+      UI_MIRROR_PROJECTION_POLL_SECONDS: ${UI_MIRROR_PROJECTION_POLL_SECONDS:-5}
+    volumes:
+      - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
+    healthcheck:
+      test: ["CMD", "python", "-m", "apps.api.ceo_mirror_projection_worker", "--healthcheck"]
+      interval: 15s
+      timeout: 8s
+      retries: 5
+      start_period: 20s
+
   # Trusted, internal-only bridge from the Trading Hermes interpretation to
   # authenticated PAPER directive admission. Hermes receives only the MCP
   # bearer key; database and payload-proof credentials stay in this process.
@@ -273,6 +316,7 @@ services:
       APP_ENV: ${AI_OFFICE_APP_ENV:-local}
       PORTFOLIO_DATA_MODE: "production"
       PORTFOLIO_AUTH_MODE: fixture
+      PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: ${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:-[]}
       DATABASE_URL: ${DATABASE_URL:?.env needs the private operational PostgreSQL DATABASE_URL}
       ORDER_ORCHESTRATOR_DATABASE_ROLE: ${ORDER_ORCHESTRATOR_DATABASE_ROLE:-svc_order_orchestrator}
       CONDITIONAL_RULE_DATABASE_URL: ${CONDITIONAL_RULE_DATABASE_URL:-${DATABASE_URL:-}}
@@ -338,7 +382,7 @@ services:
       TRADING_INTERNAL_SERVICE_AUTH_SECRET: ${TRADING_INTERNAL_SERVICE_AUTH_SECRET:?A separate 32-byte internal Trading auth secret is required}
       TRADING_INTERNAL_SERVICE_AUTH_ISSUER: ${TRADING_INTERNAL_SERVICE_AUTH_ISSUER:-hedgefund-service-issuer}
       TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE: ${TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE:-trading-api}
-      CONDITIONAL_RULE_WORKER_POLL_SECONDS: ${CONDITIONAL_RULE_WORKER_POLL_SECONDS:-30.0}
+      CONDITIONAL_RULE_WORKER_POLL_SECONDS: ${CONDITIONAL_RULE_WORKER_POLL_SECONDS:-1.0}
       CONDITIONAL_RULE_WORKER_BATCH_SIZE: ${CONDITIONAL_RULE_WORKER_BATCH_SIZE:-100}
       CONDITIONAL_RULE_WORKER_MAX_WORKERS: ${CONDITIONAL_RULE_WORKER_MAX_WORKERS:-8}
       CONDITIONAL_RULE_HTTP_TIMEOUT_SECONDS: ${CONDITIONAL_RULE_HTTP_TIMEOUT_SECONDS:-8}
@@ -357,6 +401,109 @@ services:
       start_period: 20s
     mem_limit: 384m
     cpus: 0.5
+    pids_limit: 96
+
+  # Transactional conditional-rule events are published only after the rule
+  # state transition commits. Redis is the delivery stream; event_id is the
+  # consumer idempotency key, so a crash between Redis and PostgreSQL commits
+  # remains at-least-once rather than silently losing an audit event.
+  conditional-rule-outbox-relay:
+    build:
+      context: .
+      dockerfile: Dockerfile.conditional-rule-worker
+    container_name: hedgefund-conditional-rule-outbox-relay
+    restart: unless-stopped
+    init: true
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: ["python", "-m", "apps.api.conditional_rule_outbox_relay"]
+    environment:
+      PYTHONPATH: /app
+      APP_ENV: ${APP_ENV:-production}
+      CONDITIONAL_RULE_DATABASE_URL: ${CONDITIONAL_RULE_OUTBOX_DATABASE_URL:-${CONDITIONAL_RULE_DATABASE_URL:-${DATABASE_URL:-}}}
+      CONDITIONAL_RULE_WORKER_DATABASE_ROLE: ${CONDITIONAL_RULE_WORKER_DATABASE_ROLE:-svc_conditional_rule_worker}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      CONDITIONAL_RULE_EVENT_STREAM: ${CONDITIONAL_RULE_EVENT_STREAM:-hf:conditional-rule-events:v1}
+      CONDITIONAL_RULE_EVENT_STREAM_MAXLEN: ${CONDITIONAL_RULE_EVENT_STREAM_MAXLEN:-10000}
+      CONDITIONAL_RULE_OUTBOX_POLL_SECONDS: ${CONDITIONAL_RULE_OUTBOX_POLL_SECONDS:-1}
+      CONDITIONAL_RULE_OUTBOX_BATCH_SIZE: ${CONDITIONAL_RULE_OUTBOX_BATCH_SIZE:-100}
+    healthcheck:
+      test: ["CMD", "python", "-m", "apps.api.conditional_rule_outbox_relay", "--healthcheck"]
+      interval: 15s
+      # The small image is CPU-capped and imports the shared deterministic
+      # rule package before the check runs; eight seconds made a healthy DB
+      # boundary report unhealthy during cold-start.
+      timeout: 30s
+      retries: 5
+      start_period: 30s
+    mem_limit: 128m
+    mem_reservation: 32m
+    cpus: 0.1
+
+  # Missing adapter only: consumes the existing conditional outbox stream,
+  # re-reads the existing Trading directive API, and calls the existing
+  # Discord/Kanban/Notion projection owners. It owns no bot or execution state.
+  conditional-rule-notification-consumer:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: hedgefund-conditional-rule-notification-consumer
+    restart: unless-stopped
+    init: true
+    user: "1000:1000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      trading-api:
+        condition: service_healthy
+    command: ["python", "-m", "apps.api.conditional_rule_notification_consumer"]
+    environment:
+      PYTHONPATH: /app:/app/apps/api
+      APP_ENV: ${APP_ENV:-production}
+      PORTFOLIO_AUTH_MODE: ${PORTFOLIO_AUTH_MODE:-fixture}
+      PORTFOLIO_AUTH_REQUIRED: ${PORTFOLIO_AUTH_REQUIRED:-false}
+      PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: ${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:-[]}
+      DATABASE_URL: ${DATABASE_URL:-}
+      ORDER_ORCHESTRATOR_DATABASE_URL: ${ORDER_ORCHESTRATOR_DATABASE_URL:-${DATABASE_URL:-}}
+      ORDER_ORCHESTRATOR_DATABASE_ROLE: ${ORDER_ORCHESTRATOR_DATABASE_ROLE:-svc_order_orchestrator}
+      CONDITIONAL_RULE_DATABASE_URL: ${CONDITIONAL_RULE_NOTIFICATION_DATABASE_URL:-${CONDITIONAL_RULE_WORKER_DATABASE_URL:-${CONDITIONAL_RULE_DATABASE_URL:-${DATABASE_URL:-}}}}
+      CONDITIONAL_RULE_WORKER_DATABASE_ROLE: ${CONDITIONAL_RULE_WORKER_DATABASE_ROLE:-svc_conditional_rule_worker}
+      TRADING_API_URL: ${TRADING_API_URL:-http://trading-api:8000}
+      TRADING_SERVICE_AUTH_SECRET: ${TRADING_SERVICE_AUTH_SECRET:?A 32-byte trading service proof secret is required}
+      TRADING_SERVICE_AUTH_ISSUER: ${TRADING_SERVICE_AUTH_ISSUER:-portfolio-bff}
+      TRADING_SERVICE_AUTH_AUDIENCE: ${TRADING_SERVICE_AUTH_AUDIENCE:-trading-api}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      CONDITIONAL_RULE_EVENT_STREAM: ${CONDITIONAL_RULE_EVENT_STREAM:-hf:conditional-rule-events:v1}
+      CONDITIONAL_RULE_NOTIFICATION_GROUP: ${CONDITIONAL_RULE_NOTIFICATION_GROUP:-conditional-paper-reporting-v1}
+      CONDITIONAL_RULE_NOTIFICATION_RETRY_MS: ${CONDITIONAL_RULE_NOTIFICATION_RETRY_MS:-2000}
+      HERMES_BIN: /usr/local/bin/hermes
+      HERMES_HOME: /opt/data
+      HERMES_KANBAN_HOME: /opt/kanban
+      HERMES_KANBAN_DB: /opt/kanban/kanban.db
+      NOTION_TOKEN: ${NOTION_TOKEN:-}
+      NOTION_CEO_DB: ${NOTION_CEO_DB:-}
+      NOTION_TRADING_DB: ${NOTION_TRADING_DB:-}
+      # Reuse the existing redacted workflow trace and feedback projects. The
+      # consumer emits only bounded semantic-QA metadata, never answer text.
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
+      LANGSMITH_METRICS_PROJECT: ${LANGSMITH_METRICS_PROJECT:-HgFinance-Metrics}
+      LANGSMITH_EVALS_PROJECT: ${LANGSMITH_EVALS_PROJECT:-HgFinance-Evals}
+    volumes:
+      - /home/ubuntu/.hermes:/opt/data
+      - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
+    healthcheck:
+      test: ["CMD", "python", "-m", "apps.api.conditional_rule_notification_consumer", "--healthcheck"]
+      interval: 15s
+      timeout: 30s
+      retries: 5
+      start_period: 30s
+    mem_limit: 256m
+    mem_reservation: 64m
+    cpus: 0.25
     pids_limit: 96
 
   # Conditional-rule retention is isolated from the hot evaluator.  It only
@@ -388,9 +535,9 @@ services:
     healthcheck:
       test: ["CMD", "python", "-m", "apps.api.conditional_rule_retention", "--healthcheck"]
       interval: 30s
-      timeout: 8s
+      timeout: 30s
       retries: 3
-      start_period: 20s
+      start_period: 30s
     mem_limit: 128m
     mem_reservation: 32m
     cpus: 0.1
@@ -424,6 +571,7 @@ services:
       # Use the shared vLLM/Qwen plane when configured; otherwise the Gateway
       # deliberately retains its existing Ollama development fallback.
       WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-}
+      WORKER_MODEL_EXECUTION_CONTEXT: container
       WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-awq}
       WORKER_MODEL_API_KEY: ${WORKER_MODEL_API_KEY:-vllm}
       WORKER_MODEL_TIMEOUT_SECONDS: ${WORKER_MODEL_TIMEOUT_SECONDS:-120}
@@ -449,6 +597,10 @@ services:
       LANGSMITH_FEEDBACK_MAX_CHARS: ${LANGSMITH_FEEDBACK_MAX_CHARS:-1200}
       LANGSMITH_FEEDBACK_METRICS_WINDOW_SECONDS: ${LANGSMITH_FEEDBACK_METRICS_WINDOW_SECONDS:-300}
       LANGSMITH_FEEDBACK_METRICS_MAX_RUNS: ${LANGSMITH_FEEDBACK_METRICS_MAX_RUNS:-100}
+      # Internal QA-only notification. The existing QA bot posts one redacted
+      # card and the qa-hermes gateway consumes its exact signed marker.
+      QA_DISCORD_CHANNEL_ID: ${QA_DISCORD_CHANNEL_ID:-1541636723006775477}
+      DISCORD_BOT_TOKEN_QA: ${DISCORD_BOT_TOKEN_QA:-}
       # Langfuse(2026-08-10 도입, 993682f). 이 컨테이너가 llm.performance.metric
       # 이벤트를 **쓰는** 쪽이다 - HR(workforce-api)이 같은 자격증명으로 읽는다.
       # `.env`는 .dockerignore에 걸려 이미지에 안 들어가므로 여기 나열한 키만
@@ -543,6 +695,9 @@ services:
       LS_REST_BASE_URL_PAPER: ${LS_REST_BASE_URL_PAPER:-}
       LS_WS_BASE_URL: ${LS_WS_BASE_URL:-}
       LS_WS_BASE_URL_PAPER: ${LS_WS_BASE_URL_PAPER:-}
+      # LS는 앱키당 활성 토큰 하나를 유지한다. Trading PAPER 주문기와 같은
+      # 기존 파일 캐시 규격을 공유해 별도 발급이 서로를 무효화하지 않게 한다.
+      LS_TOKEN_CACHE_DIR: /var/lib/ls-token-cache
       # ▶ 전종목 구독 (2026-08-03, 재일님 지시)
       #   ETF·ETN 은 instrument_type 이 달라 애초에 안 들어온다(STOCK 만).
       #   거래정지·관리종목 등 제한 171 을 뺀 2,595종목 = 5,190구독 =
@@ -553,6 +708,7 @@ services:
 
     volumes:
       - ./departments/01-research/config:/app/departments/01-research/config:ro
+      - ls_token_cache:/var/lib/ls-token-cache
 
     # 장중 140구독 스트림 - 뉴스보다 처리량이 크다
     mem_limit: 768m
@@ -1165,6 +1321,14 @@ services:
       RISK_QA_RUNTIME: ${RISK_QA_RUNTIME:-}
       RISK_QA_PRODUCTION_ENABLED: ${RISK_QA_PRODUCTION_ENABLED:-false}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # All advisory Worker calls use the same Gateway contract. Empty base URL
+      # intentionally keeps the local Ollama fallback for development only.
+      WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-}
+      WORKER_MODEL_EXECUTION_CONTEXT: container
+      WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-awq}
+      WORKER_MODEL_API_KEY: ${WORKER_MODEL_API_KEY:-vllm}
+      WORKER_MODEL_TIMEOUT_SECONDS: ${WORKER_MODEL_TIMEOUT_SECONDS:-120}
+      WORKER_MODEL_REGISTRY_PATH: ${WORKER_MODEL_REGISTRY_PATH:-/app/departments/01-research/config/worker_model_registry.json}
       OLLAMA_BASE_URL: ${OLLAMA_DOCKER_BASE_URL:-http://host.docker.internal:11434/v1}
       OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-qwen3:1.7b}
       # Langfuse(2026-08-20). 본부장이 이 컨테이너 안에서 Worker(MCP 도구 경로 포함)를
@@ -1232,6 +1396,12 @@ services:
       RISK_QA_RUNTIME: ${RISK_QA_RUNTIME:-}
       RISK_QA_PRODUCTION_ENABLED: ${RISK_QA_PRODUCTION_ENABLED:-false}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      WORKER_MODEL_BASE_URL: ${WORKER_MODEL_BASE_URL:-}
+      WORKER_MODEL_EXECUTION_CONTEXT: container
+      WORKER_MODEL_NAME: ${WORKER_MODEL_NAME:-qwen2.5-14b-instruct-awq}
+      WORKER_MODEL_API_KEY: ${WORKER_MODEL_API_KEY:-vllm}
+      WORKER_MODEL_TIMEOUT_SECONDS: ${WORKER_MODEL_TIMEOUT_SECONDS:-120}
+      WORKER_MODEL_REGISTRY_PATH: ${WORKER_MODEL_REGISTRY_PATH:-/app/departments/01-research/config/worker_model_registry.json}
       OLLAMA_BASE_URL: ${OLLAMA_DOCKER_BASE_URL:-http://host.docker.internal:11434/v1}
       OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-qwen3:1.7b}
       # Langfuse(2026-08-20). 본부장이 이 컨테이너 안에서 Worker(MCP 도구 경로 포함)를
@@ -1375,7 +1545,10 @@ services:
     stop_grace_period: 20s
 
   qa-hermes:
-    image: nousresearch/hermes-agent:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.hermes-discord
+    image: hedgefund-hermes-discord:qa-feedback-v1
     container_name: hedgefund-qa-hermes
     restart: unless-stopped
     command: ["sleep", "infinity"]
@@ -1411,6 +1584,22 @@ services:
       HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
       HERMES_BIN: /opt/hgfinance/scripts/qa_hermes_worker.py
+      QA_DISCORD_CHANNEL_ID: ${QA_DISCORD_CHANNEL_ID:-1541636723006775477}
+      # This is the dedicated QA room. It lets the exact self-authored
+      # observability marker reach Hermes without creating an extra bot.
+      DISCORD_FREE_RESPONSE_CHANNELS: ${QA_DISCORD_FREE_RESPONSE_CHANNELS:-1541636723006775477}
+      QA_DISCORD_APPROVER_USER_IDS: ${QA_DISCORD_APPROVER_USER_IDS:-}
+      QA_DISCORD_APPROVER_ROLE_IDS: ${QA_DISCORD_APPROVER_ROLE_IDS:-}
+      QA_FEEDBACK_API_URL: http://audit-api:8000
+      QA_API_AUTH_TOKEN: ${QA_API_AUTH_TOKEN:-}
+    # Check the same uid/HOME as the gateway. Root and hermes can have separate
+    # provider auth caches, so a root-only healthcheck can report a false ready.
+    healthcheck:
+      test: ["CMD-SHELL", "setpriv --reuid=1000 --regid=1000 --clear-groups env HOME=/opt/data /opt/hermes/.venv/bin/hermes auth status openai-codex 2>&1 | grep -q 'logged in'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
     mem_limit: 1g
     mem_reservation: 192m
     cpus: 1.0
@@ -1523,13 +1712,11 @@ services:
   #   실측 근거: 공장 카드가 running 3 개를 전부 물어 CEO 질의 카드가 6 분 넘게
   #   ready 에 앉았다. 초과분은 skipped_per_profile_capped 로 분류돼 보인다.
   #
-  #   ⚠ **`hermes kanban daemon` 으로 돌리면 이 설정이 조용히 무시된다.**
-  #     run_daemon 은 dispatch_once 에 max_spawn/failure_limit 만 넘기고 상한 두 개를
-  #     전달하지 않는다(kanban_db.py 실측). 같은 순간 통제 시험에서 daemon 경로는
-  #     4 장(3 장이 동일 프로필)을 띄웠고 dispatch 경로는 0 장이었다.
-  #     이 서비스의 기본값(게이트웨이 내장 dispatcher, kanban_watchers.py)과
-  #     일회성 `hermes kanban dispatch` 는 둘 다 설정을 읽으므로 문제없다 -
-  #     deprecated 된 standalone daemon 으로 바꿀 때만 주의하면 된다.
+  #   현재 Hermes의 `run_daemon`은 매 tick `kanban.max_in_progress`를 다시 읽어
+  #   board-wide 상한을 `dispatch_once`에 전달한다(2026-08-25 런타임 소스 확인).
+  #   과거 버전은 이 상한을 누락했으므로 이미지 업그레이드 때 계약 테스트와 함께
+  #   재확인한다. `max_in_progress_per_profile`은 standalone daemon 인자에 아직
+  #   전달되지 않으므로, 사용자 보드의 최종 안전 상한은 board-wide 3이다.
   #
   #   최종 형태는 보드 분리다: 공장 전용 board + 전용 dispatcher 컨테이너
   #   (`hermes kanban --board <slug>`; 보드마다 DB·workspace·dispatcher 루프가 독립).
@@ -1553,7 +1740,7 @@ services:
     # DEPRECATED standalone escape hatch. 이 컨테이너는 gateway가 아니라
     # Kanban dispatcher만 실행하므로 per-profile gateway를 supervise하지 않는다.
     command:
-      ["/bin/sh", "-c", "python3 /app/repo/deploy/hermes-dispatch-guard/check_guard.py && exec hermes kanban daemon --force --interval \"$${KANBAN_DISPATCH_INTERVAL:-60}\" --pidfile /opt/data/shared-kanban/dispatcher.pid --verbose"]
+      ["/bin/sh", "-c", "python3 /app/repo/deploy/hermes-dispatch-guard/check_guard.py && exec hermes kanban daemon --force --interval \"$${KANBAN_DISPATCH_INTERVAL:-1}\" --pidfile /opt/data/shared-kanban/dispatcher.pid --verbose"]
     # Hermes 최신 s6 이미지에서는 Docker `user:` 고정을 사용하지 않는다.
     # 컨테이너는 root로 bootstrap한 뒤 HERMES_UID/HERMES_GID=1000으로
     # runtime user와 /opt/data 소유권을 host UID/GID에 맞춘다.
@@ -1586,10 +1773,16 @@ services:
       HERMES_KANBAN_DB: /opt/data/shared-kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
       HERMES_BIN: /app/repo/scripts/qa_hermes_worker.py
-      KANBAN_DISPATCH_INTERVAL: ${KANBAN_DISPATCH_INTERVAL:-60}
-      # Fast advisory only; standard analysis and experiments keep profile
-      # budgets. The wrapper clamps this value to a safe 8..64 range.
-      HGFINANCE_FAST_ADVISORY_MAX_TURNS: ${HGFINANCE_FAST_ADVISORY_MAX_TURNS:-32}
+      # The live board has operated at a one-second tick without queue buildup;
+      # keep that latency behavior on fresh deployments too. Hermes still
+      # enforces the board-wide max_in_progress cap on every daemon tick.
+      KANBAN_DISPATCH_INTERVAL: ${KANBAN_DISPATCH_INTERVAL:-1}
+      # Fast user-facing control-plane tasks only; standard analysis and
+      # experiments keep profile budgets. The wrapper preserves explicit
+      # per-task overrides and clamps these defaults to bounded ranges.
+      HGFINANCE_FAST_ADVISORY_MAX_TURNS: ${HGFINANCE_FAST_ADVISORY_MAX_TURNS:-12}
+      HGFINANCE_USER_RESPONSE_MAX_TURNS: ${HGFINANCE_USER_RESPONSE_MAX_TURNS:-12}
+      HGFINANCE_USER_RESPONSE_REASONING: ${HGFINANCE_USER_RESPONSE_REASONING:-medium}
       # The dispatcher spawns the department workers, so MCP profile headers are
       # expanded from this process environment rather than a gateway container.
       MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
@@ -2034,7 +2227,6 @@ services:
       UI_MIRROR_STREAM: ${UI_MIRROR_STREAM:-hf:ui-ceo-mirror:v1}
       UI_MIRROR_DEDUPE_TTL_SECONDS: ${UI_MIRROR_DEDUPE_TTL_SECONDS:-604800}
       TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
-      SUPABASE_URL: ${SUPABASE_URL:-}
       # 부서 호출·카드 생성이 전부 docker exec 로 나간다.
       HERMES_EXEC_MODE: docker
       KANBAN_ACCESS_MODE: docker
@@ -2085,6 +2277,7 @@ services:
 volumes:
   redis_data:
   tsdb_data:
+  ls_token_cache:
   portfolio_runtime_data:
   factory_state:
   factory_kanban_data:

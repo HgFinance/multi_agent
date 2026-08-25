@@ -29,6 +29,7 @@ from orchestration.llm_observability import (
     record_llm_call,
     redacted_current_worker_generation,
     redacted_langfuse_worker_span,
+    trace_correlation_metadata,
     worker_graph_trace_config,
 )
 
@@ -600,7 +601,15 @@ def _run_worker_registry_sequential(
         except Exception as exc:  # noqa: BLE001 - 모델 좌표 해석 실패는 fail-closed
             reports.append({"worker_id": spec.worker_id, "role": spec.role, "tools": list(spec.tools), "status": "DEGRADED", "attempts": 0, "output": {}, "error": f"llm_factory:{type(exc).__name__}", "output_contract": spec.output_contract, "input_hash": input_hash})
             continue
-        state = build_independent_worker_graph(spec, tool, worker_llm).invoke({"worker_id": spec.worker_id, "input": dict(payload)})
+        state = build_independent_worker_graph(spec, tool, worker_llm).invoke(
+            {"worker_id": spec.worker_id, "input": dict(payload)},
+            config=worker_graph_trace_config(
+                stage="legacy",
+                worker_id=spec.worker_id,
+                role=spec.role,
+                correlation=trace_correlation_metadata(payload, input_hash=input_hash),
+            ),
+        )
         reports.append({
             "worker_id": spec.worker_id,
             "role": spec.role,
@@ -667,6 +676,7 @@ async def run_worker_registry_async(
     """
 
     input_hash = hashlib.sha256(_compact(payload).encode("utf-8")).hexdigest()
+    correlation = trace_correlation_metadata(payload, input_hash=input_hash)
     not_executed = [spec.worker_id for spec in specs if not should_run(spec, payload)]
     eligible = [spec for spec in specs if should_run(spec, payload)]
 
@@ -685,7 +695,12 @@ async def run_worker_registry_async(
             app = build_independent_worker_graph(
                 spec, tool, _resolve_worker_llm(spec, llm, llm_factory))
             trace_config = (
-                worker_graph_trace_config(stage=stage, worker_id=spec.worker_id, role=spec.role)
+                worker_graph_trace_config(
+                    stage=stage,
+                    worker_id=spec.worker_id,
+                    role=spec.role,
+                    correlation=correlation,
+                )
                 if stage
                 else None
             )
@@ -748,7 +763,7 @@ async def run_worker_registry_async(
             worker_id=spec.worker_id,
             role=spec.role,
             stage=stage,
-            trace_id=str(payload.get("trace_id") or payload.get("case_id") or ""),
+            trace_id=correlation.get("trace_id", ""),
         ):
             report = await _execute_one(spec)
         if stage and metric_token is not None:
@@ -765,7 +780,10 @@ async def run_worker_registry_async(
                 attempts=attempts,
                 latency_ms=int((time.perf_counter() - started) * 1000),
                 error_count=0 if status == "COMPLETED" else 1,
-                trace_id=str(payload.get("trace_id") or payload.get("case_id") or ""),
+                trace_id=correlation.get("trace_id", ""),
+                request_id=correlation.get("request_id"),
+                root_id=correlation.get("root_id"),
+                task_id=correlation.get("task_id"),
                 measured=measured,
             )
         return report
@@ -779,7 +797,7 @@ async def run_worker_registry_async(
                     stage=stage,
                     worker_id=spec.worker_id,
                     role=spec.role,
-                    trace_id=str(payload.get("trace_id") or payload.get("case_id") or ""),
+                    trace_id=correlation.get("trace_id", ""),
                 )
 
     # asyncio.gather preserves input order, making fan-in reproducible.

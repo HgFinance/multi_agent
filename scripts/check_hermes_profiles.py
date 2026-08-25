@@ -30,6 +30,10 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 CHECK_VERSION = "hermes-profile-contract-check-v2"
 
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from departments.worker_model_gateway import DEFAULT_VLLM_MODEL
+
 # CLAUDE.md "env: 가 부서마다 다르다" - 아무 키나 넣지 않는다
 ANTHROPIC = {"ceo-agent", "research-department", "qa-department",
              "quant-backtest-department"}
@@ -71,7 +75,7 @@ EXPECTED_MODELS = {
 # Worker model is a separate contract from the Hermes Head model above.
 # This is intentionally a temporary low-memory test default; do not change
 # EXPECTED_MODELS when switching employee Workers.
-EXPECTED_WORKER_MODEL = "qwen3:1.7b"
+EXPECTED_WORKER_MODEL = DEFAULT_VLLM_MODEL
 
 DEPARTMENTS = {
     "ceo-agent": "00-ceo-office",
@@ -129,16 +133,45 @@ def get_allowlist(cfg: dict):
     재일 리서치는 최상위였다(2026-08-02 이 검사가 잡았다). Hermes 가 읽지 않는
     키라 둘 다 동작은 같지만, 계약 문서가 부서마다 다른 모양이면 검사·리뷰가
     새므로 **읽을 때 둘 다 본다**(관용) + 아래에서 위치 불일치를 경고한다."""
-    return (cfg.get("agent") or {}).get("tool_allowlist") or cfg.get("tool_allowlist")
+    agent = cfg.get("agent") or {}
+    if "tool_allowlist" in agent:
+        return agent["tool_allowlist"]
+    return cfg.get("tool_allowlist")
+
+
+def _declared_personas(cfg: dict) -> set[str]:
+    """Return canonical, planned, and explicitly retained persona ids.
+
+    ``agent.personalities`` contains historical prompt aliases in several
+    profiles. Runtime workers live under ``workers`` and are the authority for
+    execution. Planned hires still need a permission entry before activation,
+    so they remain in the validation scope without becoming active workers.
+    """
+
+    agent = cfg.get("agent") or {}
+    registry = cfg.get("staff_registry") or {}
+    personalities = set((agent.get("personalities") or {}).keys())
+    workers = set((cfg.get("workers") or {}).keys())
+    runtime = set(agent.get("runtime_personalities") or workers)
+    planned = set((cfg.get("hiring_priority") or {}).keys())
+    legacy = set((registry.get("legacy_personas") or {}).keys())
+    head = {str(agent.get("head_persona"))} if agent.get("head_persona") else set()
+    return personalities | workers | runtime | planned | legacy | head
 
 
 def check_persona_consistency(dept: str, cfg: dict) -> list[str]:
-    personas = set((cfg.get("agent") or {}).get("personalities") or {})
+    agent = cfg.get("agent") or {}
+    declared = _declared_personas(cfg)
     errs = []
     allow = get_allowlist(cfg)
     if allow is not None:
-        missing = personas - set(allow)
-        extra = set(allow) - personas
+        # Worker tool contracts live in the executable WorkerSpec registry;
+        # this YAML allowlist governs Hermes personalities. An explicit empty
+        # map therefore means "no domain tools", not a missing declaration.
+        required = ({str(agent["head_persona"])}
+                    if allow and agent.get("head_persona") else set())
+        missing = required - set(allow)
+        extra = set(allow) - declared
         if missing:
             errs.append(f"{dept}: 허용목록 없는 페르소나 {sorted(missing)} - "
                         f"권한이 정의되지 않은 직원이다")
@@ -146,7 +179,7 @@ def check_persona_consistency(dept: str, cfg: dict) -> list[str]:
             errs.append(f"{dept}: 존재하지 않는 페르소나의 허용목록 {sorted(extra)}")
     hp = cfg.get("hiring_priority")
     if hp is not None:
-        ghost = set(hp) - personas
+        ghost = set(hp) - declared
         if ghost:
             errs.append(f"{dept}: hiring_priority 에만 있는 페르소나 {sorted(ghost)}")
     return errs
@@ -167,6 +200,14 @@ def check_boundary(dept: str, cfg: dict) -> list[str]:
 def check_worker_model(dept: str, cfg: dict) -> list[str]:
     """Verify the employee Worker model without changing the Head contract."""
     runtime = cfg.get("employee_runtime") or {}
+    if runtime.get("provider") == "none":
+        active_model = (runtime.get("model_selection") or {}).get("active_model")
+        errors: list[str] = []
+        if runtime.get("model_default") not in (None, "none"):
+            errors.append(f"{dept}: deterministic runtime must not declare a Worker model")
+        if active_model not in (None, "none"):
+            errors.append(f"{dept}: deterministic runtime active_model must be none")
+        return errors
     model_default = runtime.get("model_default")
     active_model = (runtime.get("model_selection") or {}).get("active_model")
     errors: list[str] = []
@@ -229,7 +270,11 @@ def _check_rules():
     assert not check_boundary("research-department", ok)
 
     # 페르소나를 늘리고 허용목록을 빠뜨린 경우 - 실제로 흔한 실수
-    grew = {**ok, "agent": {"personalities": {"a": "p", "b": "p", "c": "p"}}}
+    grew = {**ok, "agent": {
+        "head_persona": "c",
+        "runtime_personalities": ["a", "b", "c"],
+        "personalities": {"a": "p", "b": "p", "c": "p"},
+    }}
     assert any("허용목록 없는 페르소나" in e
                for e in check_persona_consistency("research-department", grew))
     # 배정 아닌 키

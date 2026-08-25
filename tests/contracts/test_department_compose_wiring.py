@@ -151,7 +151,7 @@ class DepartmentComposeWiringTests(unittest.TestCase):
             service,
         )
         self.assertIn(
-            '--interval \\"$${KANBAN_DISPATCH_INTERVAL:-60}\\"', service
+            '--interval \\"$${KANBAN_DISPATCH_INTERVAL:-1}\\"', service
         )
         self.assertNotIn('command: ["gateway", "run"]', service)
         self.assertIn(
@@ -162,7 +162,22 @@ class DepartmentComposeWiringTests(unittest.TestCase):
         self.assertIn("HERMES_KANBAN_HOME: /opt/data/shared-kanban", service)
         self.assertIn('HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"', service)
         self.assertIn(
-            "KANBAN_DISPATCH_INTERVAL: ${KANBAN_DISPATCH_INTERVAL:-60}",
+            "KANBAN_DISPATCH_INTERVAL: ${KANBAN_DISPATCH_INTERVAL:-1}",
+            service,
+        )
+        self.assertIn(
+            "HGFINANCE_FAST_ADVISORY_MAX_TURNS: "
+            "${HGFINANCE_FAST_ADVISORY_MAX_TURNS:-12}",
+            service,
+        )
+        self.assertIn(
+            "HGFINANCE_USER_RESPONSE_MAX_TURNS: "
+            "${HGFINANCE_USER_RESPONSE_MAX_TURNS:-12}",
+            service,
+        )
+        self.assertIn(
+            "HGFINANCE_USER_RESPONSE_REASONING: "
+            "${HGFINANCE_USER_RESPONSE_REASONING:-medium}",
             service,
         )
         self.assertIn(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -15,11 +16,9 @@ import psycopg2
 from psycopg2 import sql
 from psycopg2.extras import Json, register_uuid
 
-from .contracts import ConditionalRuleSpec, rule_fingerprint
+from .contracts import ConditionalRuleSpec, expression_fingerprint, rule_fingerprint
 from .identities import evaluation_id, execution_idempotency_key, trigger_id
 from .semantic import validate_rule_spec
-from .contracts import expression_fingerprint
-
 
 register_uuid()
 
@@ -55,6 +54,30 @@ class SubmitReadyExecution:
     idempotency_key: str
 
 
+@dataclass(frozen=True)
+class ConditionalRuleOutboxRow:
+    event_id: str
+    aggregate_id: str
+    event_type: str
+    payload: dict[str, Any]
+    created_at: datetime
+    attempts: int
+
+
+@dataclass(frozen=True)
+class ConditionalNotificationContext:
+    rule_id: str
+    rule_execution_id: str
+    directive_id: str
+    user_id: str
+    fund_id: str
+    book_id: str
+    client_request_id: str
+    order_request_id: str | None
+    ceo_root_task_id: str | None
+    trading_task_id: str | None
+
+
 def _stable_id(prefix: str, *parts: object) -> str:
     raw = "\x1f".join(str(part) for part in parts).encode("utf-8")
     return prefix + hashlib.sha256(raw).hexdigest()[:48]
@@ -82,6 +105,96 @@ class PostgresRuleWorkerStore:
 
     def _set_role(self, cursor: Any) -> None:
         cursor.execute(sql.SQL("set local role {}").format(sql.Identifier(self.role)))
+
+    def healthcheck(self) -> None:
+        """Check the database boundary without scanning domain tables."""
+
+        try:
+            with self._connect() as connection, connection.cursor() as cursor:
+                self._set_role(cursor)
+                cursor.execute("select 1")
+                cursor.fetchone()
+        except psycopg2.Error as exc:
+            raise RuleWorkerStoreError(
+                "CONDITIONAL_RULE_DATABASE_UNAVAILABLE",
+                "conditional rule database healthcheck failed",
+                retryable=True,
+            ) from exc
+
+    def notification_context(
+        self, *, rule_id: str, directive_id: str
+    ) -> ConditionalNotificationContext:
+        """Resolve legacy/minimal outbox payloads without a second status store."""
+
+        try:
+            with self._connect() as connection, connection.cursor() as cursor:
+                self._set_role(cursor)
+                cursor.execute(
+                    """
+                    select rule.rule_id,execution.rule_execution_id,
+                           execution.directive_id,rule.user_id,rule.fund_id,
+                           rule.book_id,
+                           coalesce(request.client_request_id,
+                                    rule.client_request_id),
+                           request.order_request_id,request.ceo_root_task_id,
+                           request.trading_task_id
+                      from execution.conditional_trade_rules rule
+                      join execution.conditional_rule_executions execution
+                        on execution.rule_id=rule.rule_id
+                      left join lateral (
+                        select admitted.order_request_id,
+                               admitted.client_request_id,
+                               admitted.ceo_root_task_id,
+                               admitted.trading_task_id
+                          from execution.user_order_requests admitted
+                         where admitted.user_id=rule.user_id
+                           and (
+                             admitted.client_request_id=rule.client_request_id
+                             or admitted.canonical_payload->>'rule_id'
+                                  = rule.rule_id::text
+                             or coalesce(
+                                  admitted.canonical_payload->'rule_ids',
+                                  '[]'::jsonb
+                                ) ? rule.rule_id::text
+                           )
+                         order by
+                           (admitted.client_request_id=rule.client_request_id) desc,
+                           admitted.updated_at desc
+                         limit 1
+                      ) request on true
+                     where rule.rule_id=%s and execution.directive_id=%s
+                     order by execution.created_at desc
+                     limit 1
+                    """,
+                    (UUID(str(rule_id)), UUID(str(directive_id))),
+                )
+                row = cursor.fetchone()
+                if row is None:
+                    raise RuleWorkerStoreError(
+                        "CONDITIONAL_NOTIFICATION_CONTEXT_MISSING",
+                        "conditional directive correlation was not found",
+                        retryable=True,
+                    )
+                return ConditionalNotificationContext(
+                    rule_id=str(row[0]),
+                    rule_execution_id=str(row[1]),
+                    directive_id=str(row[2]),
+                    user_id=str(row[3]),
+                    fund_id=str(row[4]),
+                    book_id=str(row[5]),
+                    client_request_id=str(row[6]),
+                    order_request_id=str(row[7]) if row[7] else None,
+                    ceo_root_task_id=str(row[8]) if row[8] else None,
+                    trading_task_id=str(row[9]) if row[9] else None,
+                )
+        except RuleWorkerStoreError:
+            raise
+        except (ValueError, psycopg2.Error) as exc:
+            raise RuleWorkerStoreError(
+                "CONDITIONAL_RULE_DATABASE_UNAVAILABLE",
+                "could not resolve conditional notification context",
+                retryable=True,
+            ) from exc
 
     @staticmethod
     def _active_row(row: tuple[Any, ...]) -> ActiveRule:
@@ -177,8 +290,18 @@ class PostgresRuleWorkerStore:
                     (max(1, min(limit, 1000)),),
                 )
                 changed = 0
-                for bundle_id, rule_id, request_state, rule_state, rule_version, spec_sha in cursor.fetchall():
-                    if request_state == "COMPLETED" and str(rule_state) == "PENDING_CONFIRMATION":
+                for (
+                    bundle_id,
+                    rule_id,
+                    request_state,
+                    rule_state,
+                    rule_version,
+                    spec_sha,
+                ) in cursor.fetchall():
+                    if (
+                        request_state == "COMPLETED"
+                        and str(rule_state) == "PENDING_CONFIRMATION"
+                    ):
                         cursor.execute(
                             """
                             update execution.conditional_trade_rules
@@ -790,7 +913,12 @@ class PostgresRuleWorkerStore:
                      where rule_execution_id=%s
                        and state in ('PENDING','SUBMITTING')
                     """,
-                    (state, code, message[:1000] if message else None, rule_execution_id),
+                    (
+                        state,
+                        code,
+                        message[:1000] if message else None,
+                        rule_execution_id,
+                    ),
                 )
         except psycopg2.Error as exc:
             raise RuleWorkerStoreError(
@@ -806,10 +934,38 @@ class PostgresRuleWorkerStore:
                 cursor.execute(
                     """
                     select execution.trigger_id,execution.rule_id,
-                           execution.rule_version,execution.state
+                           execution.rule_version,execution.state,
+                           rule.user_id,rule.fund_id,rule.book_id,
+                           coalesce(request.client_request_id,
+                                    rule.client_request_id),
+                           request.order_request_id,
+                           request.ceo_root_task_id,request.trading_task_id
                       from execution.conditional_rule_executions execution
+                      join execution.conditional_trade_rules rule
+                        on rule.rule_id=execution.rule_id
+                      left join lateral (
+                        select admitted.order_request_id,
+                               admitted.client_request_id,
+                               admitted.ceo_root_task_id,
+                               admitted.trading_task_id
+                          from execution.user_order_requests admitted
+                         where admitted.user_id=rule.user_id
+                           and (
+                             admitted.client_request_id=rule.client_request_id
+                             or admitted.canonical_payload->>'rule_id'
+                                  = rule.rule_id::text
+                             or coalesce(
+                                  admitted.canonical_payload->'rule_ids',
+                                  '[]'::jsonb
+                                ) ? rule.rule_id::text
+                           )
+                         order by
+                           (admitted.client_request_id=rule.client_request_id) desc,
+                           admitted.updated_at desc
+                         limit 1
+                      ) request on true
                      where execution.rule_execution_id=%s
-                     for update
+                     for update of execution
                     """,
                     (rule_execution_id,),
                 )
@@ -819,7 +975,19 @@ class PostgresRuleWorkerStore:
                         "CONDITIONAL_RULE_EXECUTION_MISSING",
                         "conditional execution disappeared",
                     )
-                trigger_identity, rule_id, rule_version, state = row
+                (
+                    trigger_identity,
+                    rule_id,
+                    rule_version,
+                    state,
+                    user_id,
+                    fund_id,
+                    book_id,
+                    client_request_id,
+                    order_request_id,
+                    ceo_root_task_id,
+                    trading_task_id,
+                ) = row
                 if state == "SUBMITTED":
                     return
                 if state not in {"PENDING", "SUBMITTING"}:
@@ -861,6 +1029,19 @@ class PostgresRuleWorkerStore:
                 payload = {
                     "rule_execution_id": str(rule_execution_id),
                     "directive_id": str(directive_id),
+                    "user_id": str(user_id),
+                    "fund_id": str(fund_id),
+                    "book_id": str(book_id),
+                    "client_request_id": str(client_request_id),
+                    "order_request_id": (
+                        str(order_request_id) if order_request_id else None
+                    ),
+                    "ceo_root_task_id": (
+                        str(ceo_root_task_id) if ceo_root_task_id else None
+                    ),
+                    "trading_task_id": (
+                        str(trading_task_id) if trading_task_id else None
+                    ),
                 }
                 cursor.execute(
                     """
@@ -899,9 +1080,88 @@ class PostgresRuleWorkerStore:
                 retryable=True,
             ) from exc
 
+    def drain_outbox(
+        self,
+        publisher: Callable[[ConditionalRuleOutboxRow], None],
+        *,
+        limit: int = 100,
+    ) -> dict[str, int]:
+        """Publish conditional-rule events with DB-locked, at-least-once claims.
+
+        The Redis publish happens inside the short database transaction while
+        the selected rows are locked. A crash after Redis accepts an event but
+        before the commit can produce a duplicate, so consumers must dedupe by
+        ``event_id``. That is the intended outbox contract; marking an event as
+        published before the external write would lose events.
+        """
+
+        counts = {"picked": 0, "published": 0, "failed": 0}
+        try:
+            with self._connect() as connection, connection.cursor() as cursor:
+                self._set_role(cursor)
+                cursor.execute(
+                    """
+                    select event_id,aggregate_id,event_type,payload,
+                           created_at,attempts
+                      from execution.conditional_rule_outbox
+                     where published_at is null
+                     order by created_at,event_id
+                     limit %s
+                       for update skip locked
+                    """,
+                    (max(1, min(int(limit), 1000)),),
+                )
+                rows = [
+                    ConditionalRuleOutboxRow(
+                        event_id=str(row[0]),
+                        aggregate_id=str(row[1]),
+                        event_type=str(row[2]),
+                        payload=dict(row[3] or {}),
+                        created_at=row[4],
+                        attempts=int(row[5]),
+                    )
+                    for row in cursor.fetchall()
+                ]
+                counts["picked"] = len(rows)
+                for row in rows:
+                    try:
+                        publisher(row)
+                    except Exception as exc:  # noqa: BLE001 - preserve retryable row
+                        cursor.execute(
+                            """
+                            update execution.conditional_rule_outbox
+                               set attempts=attempts+1,last_error=%s
+                             where event_id=%s and published_at is null
+                            """,
+                            (str(exc)[:2000], row.event_id),
+                        )
+                        counts["failed"] += 1
+                    else:
+                        cursor.execute(
+                            """
+                            update execution.conditional_rule_outbox
+                               set published_at=now(),attempts=attempts+1,
+                                   last_error=null
+                             where event_id=%s and published_at is null
+                            """,
+                            (row.event_id,),
+                        )
+                        counts["published"] += 1
+            return counts
+        except RuleWorkerStoreError:
+            raise
+        except psycopg2.Error as exc:
+            raise RuleWorkerStoreError(
+                "CONDITIONAL_RULE_OUTBOX_UNAVAILABLE",
+                "could not drain conditional rule outbox",
+                retryable=True,
+            ) from exc
+
 
 __all__ = [
     "ActiveRule",
+    "ConditionalNotificationContext",
+    "ConditionalRuleOutboxRow",
     "PostgresRuleWorkerStore",
     "RuleWorkerStoreError",
     "SubmitReadyExecution",

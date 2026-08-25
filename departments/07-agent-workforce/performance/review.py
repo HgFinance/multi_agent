@@ -89,7 +89,7 @@ class PerformanceReview:
     period_end: datetime
     decision: ReviewDecision
     # 누가 평가했는가. 형제 테이블의 recorded_by/author 와 같은 자리다
-    # (20260825000300 migration) - 역할 축소·비활성화 제안이 누구 것인지 없이 남으면
+    # (20260825000500 migration) - 역할 축소·비활성화 제안이 누구 것인지 없이 남으면
     # CEO 승인 단계에서 자기 평가와 독립 평가를 구별할 수 없다.
     reviewer: str = ""
     # 역할별 KPI 값. 이름은 역할마다 다르다(AGENT_EMPLOYEE_PROFILES.md 각 프로필의

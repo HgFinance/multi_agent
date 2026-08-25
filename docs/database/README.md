@@ -167,7 +167,7 @@ supabase db reset
 supabase db push
 ```
 
-Frontend는 Supabase Auth로 사용자 Identity를 얻고 FastAPI BFF가 권한에 맞게 조합한 `api` Read Model을 조회한다. Browser에 내부 Domain Schema와 금융 상태 쓰기 권한을 직접 노출하지 않는다. `service_role` Key는 Backend Secret Manager에만 두며 Browser, Agent Prompt, Log와 Dataset에 넣지 않는다. 현재 `ai-office`의 Drizzle/D1 Schema는 금융 Source of Truth가 아니다.
+현재 `ai-office` Frontend는 로컬 fixture의 고정 데모 ID로 FastAPI BFF가 조합한 `api` Read Model을 조회한다. 외부 사용자 로그인·세션은 구현하지 않는다. Browser에 내부 Domain Schema와 금융 상태 쓰기 권한을 직접 노출하지 않는다. `service_role` Key는 Backend Secret Manager에만 두며 Browser, Agent Prompt, Log와 Dataset에 넣지 않는다. 현재 `ai-office`의 Drizzle/D1 Schema는 금융 Source of Truth가 아니다.
 
 ### TimescaleDB
 

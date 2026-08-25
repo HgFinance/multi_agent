@@ -39,15 +39,24 @@ PROJECTION_MARKER = "hgfinance.ceo-notion-projection.v1"
 
 
 class NotionProjectionTransport(Protocol):
-    def database_schema(self, database_id: str) -> Mapping[str, Any]:
-        ...
-    def query_projection(self, database_id: str, projection_key: str) -> Sequence[Mapping[str, Any]]: ...
+    def database_schema(self, database_id: str) -> Mapping[str, Any]: ...
+    def query_projection(
+        self, database_id: str, projection_key: str
+    ) -> Sequence[Mapping[str, Any]]: ...
 
     def create_page(
         self,
         database_id: str,
         properties: Mapping[str, Any],
         children: Sequence[Mapping[str, Any]],
+    ) -> Mapping[str, Any]: ...
+
+    def update_page(
+        self, page_id: str, properties: Mapping[str, Any]
+    ) -> Mapping[str, Any]: ...
+
+    def append_blocks(
+        self, page_id: str, children: Sequence[Mapping[str, Any]]
     ) -> Mapping[str, Any]: ...
 
 
@@ -89,6 +98,32 @@ class _NotionHttpTransport:
             raise NotionProjectionError("Notion returned a non-object response")
         return decoded
 
+    def _patch(self, path: str, body: Mapping[str, Any]) -> Mapping[str, Any]:
+        request = urllib.request.Request(
+            f"https://api.notion.com/v1/{path}",
+            data=json.dumps(body).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.token}",
+                "Notion-Version": self.version,
+                "Content-Type": "application/json",
+            },
+            method="PATCH",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                decoded = json.loads(response.read())
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = json.loads(exc.read())
+            except (TypeError, ValueError):
+                detail = str(exc)
+            raise NotionProjectionError(str(detail), status=exc.code) from exc
+        except (OSError, ValueError) as exc:
+            raise NotionProjectionError(str(exc)) from exc
+        if not isinstance(decoded, Mapping):
+            raise NotionProjectionError("Notion returned a non-object response")
+        return decoded
+
     def database_schema(self, database_id: str) -> Mapping[str, Any]:
         request = urllib.request.Request(
             f"https://api.notion.com/v1/databases/{database_id}",
@@ -114,13 +149,31 @@ class _NotionHttpTransport:
             raise NotionProjectionError("Notion database response was not an object")
         return decoded
 
-    def query_projection(self, database_id: str, projection_key: str) -> Sequence[Mapping[str, Any]]:
+    def query_projection(
+        self, database_id: str, projection_key: str
+    ) -> Sequence[Mapping[str, Any]]:
         response = self._post(
             f"databases/{database_id}/query",
             {
                 "filter": {
                     "property": "projection_key",
                     "rich_text": {"equals": projection_key},
+                },
+                "page_size": 1,
+            },
+        )
+        results = response.get("results", [])
+        return results if isinstance(results, Sequence) else ()
+
+    def query_title(
+        self, database_id: str, property_name: str, title: str
+    ) -> Sequence[Mapping[str, Any]]:
+        response = self._post(
+            f"databases/{database_id}/query",
+            {
+                "filter": {
+                    "property": property_name,
+                    "title": {"equals": title},
                 },
                 "page_size": 1,
             },
@@ -142,6 +195,16 @@ class _NotionHttpTransport:
                 "children": list(children),
             },
         )
+
+    def update_page(
+        self, page_id: str, properties: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        return self._patch(f"pages/{page_id}", {"properties": dict(properties)})
+
+    def append_blocks(
+        self, page_id: str, children: Sequence[Mapping[str, Any]]
+    ) -> Mapping[str, Any]:
+        return self._patch(f"blocks/{page_id}/children", {"children": list(children)})
 
 
 @dataclass(frozen=True)
@@ -195,7 +258,9 @@ def _property_options(property_schema: Mapping[str, Any]) -> tuple[str, ...]:
     if not isinstance(select, Mapping):
         return ()
     options = select.get("options")
-    if not isinstance(options, Sequence) or isinstance(options, (str, bytes, bytearray)):
+    if not isinstance(options, Sequence) or isinstance(
+        options, (str, bytes, bytearray)
+    ):
         return ()
     return tuple(
         str(option.get("name"))
@@ -214,7 +279,10 @@ def _choose_option(
     preferred: Sequence[str],
 ) -> str:
     property_schema = properties.get(property_name)
-    if not isinstance(property_schema, Mapping) or _property_type(property_schema) != "select":
+    if (
+        not isinstance(property_schema, Mapping)
+        or _property_type(property_schema) != "select"
+    ):
         raise NotionProjectionError(
             f"CEO report property {property_name!r} must be a select",
         )
@@ -269,12 +337,16 @@ def _is_ceo_report_schema(properties: Mapping[str, Any]) -> bool:
         "문제·위험": "rich_text",
         "다음 우선순위": "rich_text",
     }
-    return all(_property_type(properties.get(name, {})) == expected for name, expected in expected_types.items())
+    return all(
+        _property_type(properties.get(name, {})) == expected
+        for name, expected in expected_types.items()
+    )
 
 
 def _is_projection_key_schema(properties: Mapping[str, Any]) -> bool:
     return "projection_key" in properties and any(
-        _property_type(properties.get(name, {})) == "title" for name in ("제목", "title")
+        _property_type(properties.get(name, {})) == "title"
+        for name in ("제목", "title")
     )
 
 
@@ -303,8 +375,13 @@ class CeoNotionProjection:
     def _has_comment_marker(self, task: Mapping[str, Any], projection_key: str) -> bool:
         marker = self._comment_marker(projection_key)
         comments = task.get("comments")
-        if isinstance(comments, Sequence) and not isinstance(comments, (str, bytes, bytearray)):
-            return any(marker in str(item.get("body") if isinstance(item, Mapping) else item) for item in comments)
+        if isinstance(comments, Sequence) and not isinstance(
+            comments, (str, bytes, bytearray)
+        ):
+            return any(
+                marker in str(item.get("body") if isinstance(item, Mapping) else item)
+                for item in comments
+            )
         return marker in str(task.get("comment") or "")
 
     def _workflow_fields(
@@ -341,26 +418,31 @@ class CeoNotionProjection:
         ]
         departments = list(
             dict.fromkeys(
-                str(item.get("assignee"))
-                for item in primary
-                if item.get("assignee")
+                str(item.get("assignee")) for item in primary if item.get("assignee")
             )
         )
         primary_ids = [task_id(item) for item in primary]
-        qa_ids = list(ids_from(metadata.get("qa_task_ids"))) or [task_id(item) for item in qa]
+        qa_ids = list(ids_from(metadata.get("qa_task_ids"))) or [
+            task_id(item) for item in qa
+        ]
         return {
             "root_task_id": root_task_id,
             "synthesis_task_id": task_id(task),
             "original_query": str(
-                metadata.get("original_query") or metadata.get("query") or original_query
+                metadata.get("original_query")
+                or metadata.get("query")
+                or original_query
             ),
             "final_answer": summary(task, metadata),
             "selected_departments": departments,
-            "workflow_mode": workflow_mode(task) or str(metadata.get("workflow_mode") or "analysis"),
+            "workflow_mode": workflow_mode(task)
+            or str(metadata.get("workflow_mode") or "analysis"),
             "primary_task_ids": primary_ids,
             "qa_task_ids": qa_ids,
             "created_at": iso_timestamp(task.get("created_at")),
-            "completed_at": iso_timestamp(task.get("completed_at") or task.get("finished_at")),
+            "completed_at": iso_timestamp(
+                task.get("completed_at") or task.get("finished_at")
+            ),
             "projection_key": f"ceo-synthesis:{root_task_id}:{task_id(task)}",
         }
 
@@ -380,21 +462,28 @@ class CeoNotionProjection:
             )
         ]
         terminal = [item for item in request_tasks if terminal_success(item)]
-        completed = [item for item in terminal if str(item.get("status") or "").casefold() in {"done", "completed"}]
+        completed = [
+            item
+            for item in terminal
+            if str(item.get("status") or "").casefold() in {"done", "completed"}
+        ]
         running = [
             item
             for item in request_tasks
-            if str(item.get("status") or "").casefold() in {"claimed", "running", "in_progress"}
+            if str(item.get("status") or "").casefold()
+            in {"claimed", "running", "in_progress"}
         ]
         approval = [
             item
             for item in request_tasks
-            if str(item.get("status") or "").casefold() in {"approval_pending", "pending_approval", "awaiting_approval"}
+            if str(item.get("status") or "").casefold()
+            in {"approval_pending", "pending_approval", "awaiting_approval"}
         ]
         blocked = [
             item
             for item in request_tasks
-            if str(item.get("status") or "").casefold() in {"blocked", "failed", "error", "expired"}
+            if str(item.get("status") or "").casefold()
+            in {"blocked", "failed", "error", "expired"}
         ]
         primary_summaries = "\n".join(
             f"{item.get('assignee')}: {summary(item, merged_run_metadata(item))}"
@@ -407,8 +496,12 @@ class CeoNotionProjection:
             if is_request_scoped_role(item, fields["root_task_id"], "qa")
         )
         final_answer = str(fields["final_answer"] or "")
-        state = _choose_option(properties, "상태", ("완료", "COMPLETED", "DONE", "완료됨"))
-        category = _choose_option(properties, "구분", ("CEO", "CEO 종합", "SYNTHESIS", "보고서", "분석"))
+        state = _choose_option(
+            properties, "상태", ("완료", "COMPLETED", "DONE", "완료됨")
+        )
+        category = _choose_option(
+            properties, "구분", ("CEO", "CEO 종합", "SYNTHESIS", "보고서", "분석")
+        )
         return {
             "브리핑명": _title(f"CEO Synthesis · {fields['root_task_id']}"),
             "기준일": _date(fields["completed_at"] or fields["created_at"]),
@@ -421,14 +514,22 @@ class CeoNotionProjection:
             "차단·오류": _number(len(blocked)),
             "대표 결정사항": _rich_text(final_answer),
             "핵심 성과": _rich_text(primary_summaries),
-            "문제·위험": _rich_text(qa_summaries or "QA evaluation may be asynchronous."),
-            "다음 우선순위": _rich_text("Review unresolved findings and follow-up actions."),
+            "문제·위험": _rich_text(
+                qa_summaries or "QA evaluation may be asynchronous."
+            ),
+            "다음 우선순위": _rich_text(
+                "Review unresolved findings and follow-up actions."
+            ),
         }
 
-    def _schema(self, transport: NotionProjectionTransport, database_id: str) -> Mapping[str, Any]:
+    def _schema(
+        self, transport: NotionProjectionTransport, database_id: str
+    ) -> Mapping[str, Any]:
         schema_reader = getattr(transport, "database_schema", None)
         if not callable(schema_reader):
-            raise NotionProjectionError("Notion transport does not support database schema inspection")
+            raise NotionProjectionError(
+                "Notion transport does not support database schema inspection"
+            )
         return schema_reader(database_id)
 
     def project(
@@ -439,6 +540,8 @@ class CeoNotionProjection:
         workflow_tasks: Sequence[Mapping[str, Any]],
         event: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        force_upsert = bool((event or {}).get("force_upsert"))
+        correction = str((event or {}).get("correction") or "").strip()
         if workflow_role(task) != "synthesis" or action(task) != "SYNTHESIZE":
             return CeoSynthesisProjectionResult("skipped").as_dict()
         if not terminal_success(task):
@@ -448,10 +551,15 @@ class CeoNotionProjection:
         database_id = str(self.env.get("NOTION_CEO_DB") or "")
         token = str(self.env.get("NOTION_TOKEN") or "")
         fields = self._workflow_fields(root_task_id, task, workflow_tasks)
+        if correction:
+            fields["final_answer"] = correction
         key = fields["projection_key"]
         if not database_id or not token:
             return CeoSynthesisProjectionResult(
-                "failed", projection_key=key, retryable=True, error="NOTION_TOKEN/NOTION_CEO_DB missing"
+                "failed",
+                projection_key=key,
+                retryable=True,
+                error="NOTION_TOKEN/NOTION_CEO_DB missing",
             ).as_dict()
         transport = self.transport or _NotionHttpTransport(token)
         current_report_schema = False
@@ -491,7 +599,9 @@ class CeoNotionProjection:
             # database_schema() and still fail closed on schema errors.
             if callable(getattr(transport, "database_schema", None)):
                 retryable = exc.status is None or exc.status >= 500 or exc.status == 429
-                logger.warning("ceo_notion_projection_schema_failed", extra={"error": str(exc)})
+                logger.warning(
+                    "ceo_notion_projection_schema_failed", extra={"error": str(exc)}
+                )
                 return CeoSynthesisProjectionResult(
                     "failed", key, retryable=retryable, error=str(exc)
                 ).as_dict()
@@ -512,7 +622,9 @@ class CeoNotionProjection:
             f"{fields['final_answer']}"
         )
         if current_report_schema:
-            properties = self._ceo_report_properties(schema_properties, fields, workflow_tasks)
+            properties = self._ceo_report_properties(
+                schema_properties, fields, workflow_tasks
+            )
         else:
             properties = {
                 "제목": _title(f"CEO Synthesis · {root_task_id}"),
@@ -531,14 +643,32 @@ class CeoNotionProjection:
             }
         children = markdown_to_notion_blocks(report)
         try:
+
             def lookup() -> Sequence[Mapping[str, Any]] | Mapping[str, Any]:
                 existing: Sequence[Mapping[str, Any]] = ()
                 if projection_schema:
                     existing = transport.query_projection(database_id, key)
                     if existing:
                         return existing
+                elif current_report_schema and force_upsert:
+                    query_title = getattr(transport, "query_title", None)
+                    if callable(query_title):
+                        existing = query_title(
+                            database_id,
+                            "브리핑명",
+                            f"CEO Synthesis · {root_task_id}",
+                        )
+                        if existing:
+                            return existing
+                if force_upsert:
+                    # An explicit correction treats the authoritative Notion
+                    # query as truth.  A stale Kanban/idempotency marker must
+                    # not hide a page that was deleted or moved.
+                    return existing
                 refreshed_task = task
-                if self.kanban_client is not None and not self._has_comment_marker(task, key):
+                if self.kanban_client is not None and not self._has_comment_marker(
+                    task, key
+                ):
                     try:
                         refreshed_task = self.kanban_client.show(task_id(task))
                     except Exception:  # noqa: BLE001 - fallback is best effort
@@ -549,6 +679,35 @@ class CeoNotionProjection:
 
             def create() -> Mapping[str, Any]:
                 return transport.create_page(database_id, properties, children)
+
+            if force_upsert:
+                existing = lookup()
+                if isinstance(existing, Mapping):
+                    existing_rows: Sequence[Mapping[str, Any]] = ()
+                else:
+                    existing_rows = existing
+                if existing_rows:
+                    page_id = str(existing_rows[0].get("id") or "").strip()
+                    update_page = getattr(transport, "update_page", None)
+                    append_blocks = getattr(transport, "append_blocks", None)
+                    if not page_id or not callable(update_page):
+                        raise NotionProjectionError(
+                            "Notion transport does not support page upsert"
+                        )
+                    update_page(page_id, properties)
+                    if (
+                        correction
+                        and callable(append_blocks)
+                        and not current_report_schema
+                    ):
+                        append_blocks(page_id, children)
+                    return CeoSynthesisProjectionResult(
+                        "updated", key, page_id
+                    ).as_dict()
+                created = create()
+                return CeoSynthesisProjectionResult(
+                    "created", key, str(created.get("id") or "") or None
+                ).as_dict()
 
             result = self._idempotency.execute(
                 database_id,
@@ -564,7 +723,9 @@ class CeoNotionProjection:
                     duplicate=True,
                 ).as_dict()
         except NotionIdempotencyError as exc:
-            logger.warning("ceo_notion_projection_claim_failed", extra={"error": str(exc)})
+            logger.warning(
+                "ceo_notion_projection_claim_failed", extra={"error": str(exc)}
+            )
             return CeoSynthesisProjectionResult(
                 "failed", key, retryable=True, error=str(exc)
             ).as_dict()
@@ -572,7 +733,9 @@ class CeoNotionProjection:
             if exc.status == 400:
                 self._schema_cache.invalidate(database_id)
             retryable = exc.status is None or exc.status >= 500 or exc.status == 429
-            logger.warning("ceo_notion_projection_create_failed", extra={"error": str(exc)})
+            logger.warning(
+                "ceo_notion_projection_create_failed", extra={"error": str(exc)}
+            )
             return CeoSynthesisProjectionResult(
                 "failed", key, retryable=retryable, error=str(exc)
             ).as_dict()
@@ -580,13 +743,19 @@ class CeoNotionProjection:
             page_id = result.page_id
             if self.kanban_client is not None:
                 try:
-                    self.kanban_client.comment_task(task_id(task), self._comment_marker(key))
+                    self.kanban_client.comment_task(
+                        task_id(task), self._comment_marker(key)
+                    )
                 except Exception as exc:  # noqa: BLE001 - page is already durable
-                    logger.warning("ceo_notion_projection_marker_failed", extra={"error": str(exc)})
+                    logger.warning(
+                        "ceo_notion_projection_marker_failed", extra={"error": str(exc)}
+                    )
             return CeoSynthesisProjectionResult("created", key, page_id).as_dict()
         except Exception as exc:  # noqa: BLE001 - non-binding side effect
             logger.warning("ceo_notion_projection_failed", extra={"error": str(exc)})
-            return CeoSynthesisProjectionResult("failed", key, retryable=True, error=str(exc)).as_dict()
+            return CeoSynthesisProjectionResult(
+                "failed", key, retryable=True, error=str(exc)
+            ).as_dict()
 
 
 __all__ = ["PROJECTION_MARKER", "CeoNotionProjection", "CeoSynthesisProjectionResult"]

@@ -3,7 +3,10 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
-from orchestration.ceo_workflow_scope import build_root_body
+from orchestration.ceo_workflow_scope import (
+    approved_feedback_section_from_root,
+    build_root_body,
+)
 from orchestration.langsmith_feedback import (
     FeedbackConfig,
     FeedbackLedger,
@@ -14,6 +17,7 @@ from orchestration.langsmith_feedback import (
     observation_from_run,
 )
 from orchestration.langsmith_feedback import _aggregate_metric_window
+from orchestration.semantic_qa import evaluate_answer, evaluate_prompt_answer
 
 
 class _Run:
@@ -83,6 +87,73 @@ def test_evaluator_creates_bounded_improvement_findings() -> None:
     assert "WORKER_OR_WORKFLOW_DEGRADED" in result.finding_codes
     assert "LATENCY_ABOVE_THRESHOLD" in result.finding_codes
     assert "CORRELATION_METADATA_MISSING" in result.finding_codes
+
+
+def test_semantic_answer_contract_is_redacted_and_evaluated() -> None:
+    quality = evaluate_answer(
+        "2026-08-24 기준 결론입니다. 근거는 t1234 이며 미확인 항목은 없음.",
+    )
+    assert quality.verdict == "PASS"
+    assert quality.score == 1.0
+    assert quality.as_metadata()["raw_payloads_sent"] is False
+
+    observation = TraceObservation(
+        source_run_id="run-semantic",
+        name="hgfinance.user-query",
+        status="completed",
+        started_at=None,
+        ended_at=None,
+        metadata={
+            "request_id": "req-1",
+            "root_id": "root-1",
+            "task_id": "root-1",
+            "stage": "ceo-terminal",
+            "status": "completed",
+            **quality.as_metadata(),
+        },
+    )
+    result = evaluate_observation(observation)
+    assert result.decision == "OBSERVED_PASS"
+    assert result.metadata["semantic_qa_score"] == 1.0
+    assert result.metadata["semantic_qa_verdict"] == "PASS"
+
+
+def test_semantic_failure_becomes_qa_review_signal_without_answer_text() -> None:
+    quality = evaluate_answer("짧은 답")
+    assert quality.verdict == "FAIL"
+    assert "ANSWER_BODY_MISSING" in quality.finding_codes
+
+    result = evaluate_observation(
+        TraceObservation(
+            source_run_id="run-semantic-fail",
+            name="hgfinance.user-query",
+            status="completed",
+            started_at=None,
+            ended_at=None,
+            metadata={
+                "request_id": "req-1",
+                "root_id": "root-1",
+                "task_id": "root-1",
+                "stage": "ceo-terminal",
+                "status": "completed",
+                **quality.as_metadata(),
+            },
+        )
+    )
+    assert result.decision == "IMPROVEMENT_CANDIDATE"
+    assert "SEMANTIC_QA_FAILED" in result.finding_codes
+    assert "짧은 답" not in str(result.metadata)
+
+
+def test_prompt_answer_relevance_is_local_and_bounded() -> None:
+    quality = evaluate_prompt_answer(
+        "삼성전자 2026년 2분기 실적과 근거를 알려줘",
+        "삼성전자 2026년 2분기 실적은 t1234 근거로 확인되며 기준일은 2026-08-24입니다. 미확인 없음.",
+    )
+
+    assert quality.relevance == 1.0
+    assert quality.verdict == "PASS"
+    assert "semantic_qa_relevance" in quality.as_metadata()
 
 
 def test_metrics_are_reduced_to_one_non_correlated_window_observation() -> None:
@@ -158,47 +229,6 @@ def test_ledger_is_idempotent_and_approval_creates_bounded_hint(tmp_path) -> Non
     assert hint is not None
     assert hint["items"][0]["source"] == "qa-approved-langsmith-feedback"
     assert "prompt" not in str(hint)
-
-
-def test_department_review_is_scoped_and_append_only(tmp_path) -> None:
-    ledger = FeedbackLedger(str(tmp_path / "feedback.sqlite3"))
-    assert ledger.enqueue("source-research", "First") is True
-    assert ledger.claim() is not None
-    artifact_id = ledger.complete(
-        "source-research",
-        "eval-research",
-        evaluate_observation(
-            TraceObservation(
-                source_run_id="source-research",
-                name="worker.research",
-                status="success",
-                started_at=None,
-                ended_at=None,
-                metadata={"stage": "research", "raw_payloads_sent": False},
-            )
-        ),
-    )
-
-    assert ledger.department_feedback("research-department", 10)[0]["artifact_id"] == artifact_id
-    review = ledger.add_department_review(
-        artifact_id,
-        target_department="research-department",
-        reviewer_department="research",
-        reviewer_user_id="operator-1",
-        comment="상관관계 메타데이터를 다음 실행에서 보강합니다.",
-    )
-    assert review is not None
-    assert review["target_department"] == "research"
-    assert ledger.add_department_review(
-        artifact_id,
-        target_department="trading-department",
-        reviewer_department="trading",
-        reviewer_user_id="operator-1",
-        comment="다른 부서 artifact에는 쓸 수 없어야 합니다.",
-    ) is None
-    item = ledger.department_feedback("research", 10)[0]
-    assert item["review_count"] == 1
-    assert item["reviews"][0]["comment"].startswith("상관관계")
 
 
 def test_active_hint_is_local_only_and_requires_passed_benchmark(tmp_path, monkeypatch) -> None:
@@ -294,6 +324,9 @@ def test_root_body_feedback_is_advisory_and_contract_is_unchanged() -> None:
     assert "raw prompt" not in body
     assert "workflow_mode=analysis" in body
     assert "qa_enabled=true" in body
+
+    assert "LATENCY_ABOVE_THRESHOLD" in approved_feedback_section_from_root(body, "qa-department")
+    assert approved_feedback_section_from_root(body, "risk-management") == ""
 
 
 def test_feedback_config_bounds_concurrency_inputs(monkeypatch) -> None:

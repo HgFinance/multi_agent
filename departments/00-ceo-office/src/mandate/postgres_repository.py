@@ -23,10 +23,8 @@ config.yaml의 not_started 항목은 이 구현을 "asyncpg"로 적어뒀지만,
     get_mandate_current/get_fund_base_currency)를 존재하지 않는 UUID로 검증한다 - 이건
     governance.mandates 부모 행이 없어도 안전하게 통과한다.
   - insert()/set_mandate_current()/set_effective_to()/record_decision() 쓰기 경로는
-    governance.mandates 부모 행이 필요하고, 그 행은 owner_user_id(auth.users FK)를
-    요구한다. auth.users는 Supabase Auth로만 만들 수 있어(계정 생성으로 우회 금지)
-    2026-08-03까지 왕복 검증을 못 했다. 2026-08-04 GOV-02 2단계에서 플레이스홀더
-    회원(supabase/seed.sql, RFC 2606 .invalid 주소, 로그인 불가)을 seed한 뒤로는
+    governance.mandates 부모 행이 필요하고, 그 행은 control-plane identity FK를
+    요구한다. 로컬 fixture에서는 고정 데모 identity를 seed한 뒤
     tests/schema/supabase_governance_test_fixture.sql의 TEST-CEO-MANDATE Fund와
     엮어 실제 MandateVersionService.propose_version()/MandateActivationService.
     activate()를 그대로 태워 4개 쓰기 메서드 전부 검증한다(아래 자체 점검 참고).
@@ -742,7 +740,7 @@ if __name__ == "__main__":
 
         # 2) 쓰기 경로(insert/set_mandate_current/set_effective_to/record_decision) -
         #    tests/schema/supabase_governance_test_fixture.sql의 TEST-CEO-MANDATE Fund와
-        #    supabase/seed.sql의 플레이스홀더 회원이 둘 다 있어야 governance.mandates
+        #    고정 데모 user_profiles 행이 둘 다 있어야 governance.mandates
         #    부모 행을 만들 수 있다(둘 다 이 Repository의 책임 밖 - docstring 참고).
         conn = repo._pool.getconn()
         try:
@@ -756,9 +754,8 @@ if __name__ == "__main__":
             repo._pool.putconn(conn)
 
         if fund_row is None or user_row is None:
-            print("SKIP - 쓰기 경로 왕복 검증: TEST-CEO-MANDATE Fund 또는 플레이스홀더 "
-                  "회원이 없다 (psql -f tests/schema/supabase_governance_test_fixture.sql "
-                  "과 supabase/seed.sql 선행 필요)")
+            print("SKIP - 쓰기 경로 왕복 검증: TEST-CEO-MANDATE Fund 또는 고정 데모 "
+                  "user_profiles 행이 없다")
             raise SystemExit(0)
         fund_id, owner_user_id = str(fund_row[0]), str(user_row[0])
 

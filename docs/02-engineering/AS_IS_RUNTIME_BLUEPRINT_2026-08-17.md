@@ -105,7 +105,7 @@ flowchart TB
 | Portfolio BFF | `uvicorn apps.api.main:app` | UI REST | snapshot, task status, recommendation run | request-response |
 | CEO Mirror | `apps/api/ceo_mirror*.py` | Web/Discord canonical ingress | Redis/in-memory event journal, deduped CEO call | request-response + SSE |
 | CEO workflow | `apps/api/ceo.py` | CEO query | Kanban root task | async task submit |
-| Kanban dispatcher | `kanban daemon` | ready cards | Hermes agent processes/card transitions | loop, 기본 60초 |
+| Kanban dispatcher | `kanban daemon` | ready cards | Hermes agent processes/card transitions | loop, 기본 1초 + board-wide 동시 실행 상한 |
 | CEO supervisor | `scripts/run_ceo_supervisor.py` | terminal card watch events | QA/synthesis/retry/input cards | event loop, 1초 interval |
 | Direct agent ask | `apps/api/hermes_boundary.py` | department/query | one text answer/session | request마다 subprocess |
 | Portfolio runtime | `apps/api/portfolio_runtime.py` | validated profile | durable run projection | API enqueue + worker polling |
@@ -311,7 +311,7 @@ flowchart LR
 
 | Loop | 주기/trigger | 하는 일 | 실패 의미 |
 |---|---|---|---|
-| Kanban dispatcher | 기본 60초 | ready card claim, Hermes profile 실행 | card blocked/retry; shared dispatcher 병목 |
+| Kanban dispatcher | 기본 1초 | ready card claim, Hermes profile 실행 | card blocked/retry; shared dispatcher 병목 |
 | CEO supervisor | watch + 1초 interval | terminal event에 QA/synthesis/retry/input 결정 | workflow terminal projection 지연 |
 | Portfolio worker | 짧은 poll | SQLite queue claim/heartbeat/run | run은 durable queue에 남음 |
 | LS realtime | 세션 기반 long-running | websocket tick/quote capture | 실시간 gap; heartbeat 통계 |

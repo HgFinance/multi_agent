@@ -174,6 +174,7 @@ def _empty(status: str, days: int, *, configured: bool, detail: str | None = Non
     payload: dict[str, Any] = {
         "status": status,
         "configured": configured,
+        "cached": False,
         "project": os.getenv("LANGSMITH_PROJECT") or None,
         "days": days,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -185,6 +186,39 @@ def _empty(status: str, days: int, *, configured: bool, detail: str | None = Non
     if detail:
         payload["detail"] = detail
     return payload
+
+
+def _cached_response(
+    payload: dict[str, Any],
+    cached_at: float,
+    *,
+    reason: str,
+    detail: str | None = None,
+) -> dict[str, Any]:
+    """Annotate a reused aggregate without mutating the shared cache value."""
+
+    result = {
+        **payload,
+        "cached": True,
+        "cache_age_seconds": round(max(0.0, time.monotonic() - cached_at), 1),
+        "cache_reason": reason,
+    }
+    if detail:
+        result["detail"] = detail
+    return result
+
+
+def _is_rate_limited(exc: Exception) -> bool:
+    """Recognize LangSmith throttling without depending on one SDK version."""
+
+    status_code = getattr(exc, "status_code", None)
+    if str(status_code) == "429":
+        return True
+    response = getattr(exc, "response", None)
+    if str(getattr(response, "status_code", None)) == "429":
+        return True
+    text = f"{type(exc).__name__} {exc}".casefold()
+    return "ratelimit" in text or "rate_limit" in text or "too many requests" in text
 
 
 async def qa_trace_timeseries(days: int = 7) -> dict[str, Any]:
@@ -199,39 +233,50 @@ async def qa_trace_timeseries(days: int = 7) -> dict[str, Any]:
     with _TRACE_CACHE_LOCK:
         cached = _TRACE_CACHE.get(cache_key)
         if cached is not None and now - cached[0] < _TRACE_CACHE_TTL_SECONDS:
-            return {**cached[1], "cached": True}
+            return _cached_response(cached[1], cached[0], reason="ttl")
         if now < _TRACE_RATE_LIMIT_UNTIL.get(cache_key, 0.0):
             if cached is not None:
-                return {
-                    **cached[1],
-                    "cached": True,
-                    "detail": "LangSmith rate limit backoff; serving the last successful aggregate",
-                }
+                return _cached_response(
+                    cached[1],
+                    cached[0],
+                    reason="rate_limit",
+                    detail="LangSmith rate limit backoff; serving the last successful aggregate",
+                )
             return _empty("DEGRADED", days, configured=True, detail="LangSmith rate limit backoff")
         if cache_key in _TRACE_INFLIGHT:
             if cached is not None:
-                return {**cached[1], "cached": True, "detail": "LangSmith aggregate query in progress"}
+                return _cached_response(
+                    cached[1],
+                    cached[0],
+                    reason="inflight",
+                    detail="LangSmith aggregate query in progress",
+                )
             return _empty("DEGRADED", days, configured=True, detail="LangSmith aggregate query in progress")
         _TRACE_INFLIGHT.add(cache_key)
     try:
         result = await run_in_threadpool(_collect, days, project or None)
+        # Make the cache contract explicit for the first successful response.
+        # This lets the UI distinguish a live aggregate from a reused one
+        # without inferring it from ``generated_at``.
+        result = {**result, "cached": False, "cache_age_seconds": 0.0, "cache_reason": None}
         with _TRACE_CACHE_LOCK:
             _TRACE_CACHE[cache_key] = (time.monotonic(), result)
             _TRACE_RATE_LIMIT_UNTIL.pop(cache_key, None)
         return result
     except Exception as exc:  # noqa: BLE001 - 관측 실패가 카드 렌더를 막으면 안 된다
         detail = type(exc).__name__
-        is_rate_limited = "ratelimit" in detail.casefold() or "rate_limit" in detail.casefold()
+        is_rate_limited = _is_rate_limited(exc)
         with _TRACE_CACHE_LOCK:
             if is_rate_limited:
                 _TRACE_RATE_LIMIT_UNTIL[cache_key] = time.monotonic() + _TRACE_RATE_LIMIT_BACKOFF_SECONDS
             cached = _TRACE_CACHE.get(cache_key)
         if cached is not None:
-            return {
-                **cached[1],
-                "cached": True,
-                "detail": f"{detail}; serving the last successful aggregate",
-            }
+            return _cached_response(
+                cached[1],
+                cached[0],
+                reason="rate_limit" if is_rate_limited else "error",
+                detail=f"{detail}; serving the last successful aggregate",
+            )
         return _empty("DEGRADED" if is_rate_limited else "ERROR", days, configured=True, detail=detail)
     finally:
         with _TRACE_CACHE_LOCK:

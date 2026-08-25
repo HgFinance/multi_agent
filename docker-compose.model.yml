@@ -78,7 +78,8 @@ services:
       # a cold restart repeats the highest-RAM compile path on an L4 host.
       - ${VLLM_CACHE_DIR:-/tmp/hgfinance-runtime-vllm-cache}:/root/.cache
     command:
-      - --model
+      # vLLM 0.27+ requires the served model as the positional argument;
+      # the legacy --model flag is deprecated and scheduled for removal.
       - /models/${WORKER_BASE_MODEL_DIRNAME:-Qwen2.5-14B-Instruct-AWQ}
       # 계약 문자열 - tests/contracts/test_unified_api_contract.py 와
       # departments/01-research/config/worker_model_registry.json 이 같은 이름을 쓴다
@@ -90,9 +91,10 @@ services:
       - 0.0.0.0
       - --port
       - "8000"
-      # L4 24GB 기준 보수값. g6e(L40S 48GB)면 32768 로 올린다.
+      # 현재 Worker 호출 실측에서 8K가 남아돌아 기본 컨텍스트를 4K로 제한한다.
+      # 더 긴 컨텍스트가 필요할 때만 명시적 환경 변수로 올린다.
       - --max-model-len
-      - ${VLLM_MAX_MODEL_LEN:-8192}
+      - ${VLLM_MAX_MODEL_LEN:-4096}
       - --gpu-memory-utilization
       - ${VLLM_GPU_MEMORY_UTILIZATION:-0.85}
       # KV 를 FP8 로 - 24GB 에서 동시성 여유가 이걸로 벌어진다

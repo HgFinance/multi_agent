@@ -23,9 +23,8 @@ try:
         MirrorStoreUnavailable,
         build_default_mirror_store,
         execute_once,
-        publish_mirror_event,
-        stable_event_id,
     )
+    from .ceo_mirror_projection import publish_workflow_projection
     from .ceo_schemas import CeoQueryAcceptedResponse
     from .current_user import (
         authorized_trading_books,
@@ -51,8 +50,9 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
         MirrorStoreUnavailable,
         build_default_mirror_store,
         execute_once,
-        publish_mirror_event,
-        stable_event_id,
+    )
+    from ceo_mirror_projection import (  # type: ignore[no-redef]
+        publish_workflow_projection,
     )
     from ceo_schemas import CeoQueryAcceptedResponse  # type: ignore[no-redef]
     from current_user import (  # type: ignore[no-redef]
@@ -260,79 +260,6 @@ def _execute(request: CanonicalIngress):
         ) from exc
 
 
-def _publish_workflow_projection(request_id: str) -> None:
-    """Project sanitized Kanban states into the shared mirror stream.
-
-    Kanban remains the execution source of truth. This projection never stores
-    prompts, tool transcripts, or hidden reasoning and is idempotent by event
-    id, so repeated SSE polling cannot duplicate events.
-    """
-
-    record = MIRROR_STORE.get_request(request_id)
-    if record is None or not record.response:
-        return
-    task_id = str(record.response.get("task_id") or "").strip()
-    if not task_id:
-        return
-    try:
-        try:
-            from .ceo_kanban_read import load_workflow
-        except ImportError:  # pragma: no cover
-            from ceo_kanban_read import load_workflow  # type: ignore[no-redef]
-
-        workflow = load_workflow(task_id)
-    except Exception:  # noqa: BLE001 - read projection must not break SSE.
-        return
-
-    request = record.request
-    for node in workflow.nodes:
-        status = str(node.status or "unknown").casefold()
-        if node.is_qa:
-            event_type = (
-                "QA_RESULT"
-                if status in {"done", "completed", "failed", "blocked"}
-                else "QA_STARTED"
-            )
-            lane = "evaluation"
-        elif node.role(root_task_id=workflow.root_task_id) == "synthesis":
-            event_type = (
-                "CEO_FINAL"
-                if status in {"done", "completed"}
-                else "CEO_SYNTHESIS_STARTED"
-            )
-            lane = "execution"
-        else:
-            event_type = {
-                "done": "TASK_COMPLETED",
-                "completed": "TASK_COMPLETED",
-                "failed": "TASK_FAILED",
-                "blocked": "TASK_FAILED",
-            }.get(status, "TASK_STARTED")
-            lane = "execution"
-        parent_task_id = node.parents[0] if node.parents else None
-        summary = (node.summary or node.error or node.block_reason or "").strip()
-        publish_mirror_event(
-            MIRROR_STORE,
-            request=request,
-            event_type=event_type,
-            status=status,
-            actor_id=node.profile or "hermes-kanban",
-            actor_type="agent",
-            lane=lane,
-            task_id=node.task_id,
-            parent_task_id=parent_task_id,
-            summary=summary,
-            payload={
-                "department_id": node.profile,
-                "role": node.role(root_task_id=workflow.root_task_id),
-                "run_outcome": node.run_outcome,
-            },
-            event_id=stable_event_id(
-                "workflow", request_id, node.task_id, event_type, status, summary
-            ),
-        )
-
-
 @router.post(
     "/ask",
     status_code=202,
@@ -354,10 +281,10 @@ def mirror_ask(
     새로 만들어 넘기므로(값만 옮겨 담는다), 두 모듈이 서로 다른 요청 스키마를
     독자적으로 들고 있다가 조용히 갈라지는 상태가 구조적으로 불가능하다.
     dedup(`_execute`/`MirrorStore`)과 Web/Discord 공용 event journal
-    (`_publish_workflow_projection`)이 이 함수를 감싸는 layer다.
+    (`publish_workflow_projection`)이 이 함수를 감싸는 layer다.
 
-    `owner_id`는 중앙 인증 경계가 검증한 Supabase JWT `sub`다. 로컬/test fixture
-    모드에서만 같은 의존성이 `X-User-Id`를 읽는다. `actor_id`를 그대로 재사용하는
+    `owner_id`는 로컬 모의투자에서 BFF가 선택한 고정 데모 ID다. 브라우저 로그인이나
+    외부 JWT를 검증하지 않으며, 같은 의존성이 `X-User-Id`를 읽는다. `actor_id`를 그대로 재사용하는
     이유는 dedup 키(`source`+`source_message_id`)가
     `actor_id`를 쓰지 않아 안전하기 때문이다 - `ceo_mirror.py`의
     `InMemoryMirrorStore._source_key`/`RedisMirrorStore._source_key` 참고.
@@ -433,7 +360,7 @@ def mirror_events(
     owner_id: str | None = Depends(current_user),
 ) -> MirrorEventListResponse:
     _require_mirror_request_owner(request_id, owner_id)
-    _publish_workflow_projection(request_id)
+    publish_workflow_projection(MIRROR_STORE, request_id)
     return MirrorEventListResponse(
         request_id=request_id, events=MIRROR_STORE.read_events(request_id, after)
     )
@@ -463,7 +390,9 @@ def mirror_event_stream(
             1.0, float(os.getenv("UI_MIRROR_SSE_SECONDS", "25"))
         )
         while time.monotonic() < deadline:
-            await run_in_threadpool(_publish_workflow_projection, request_id)
+            await run_in_threadpool(
+                publish_workflow_projection, MIRROR_STORE, request_id
+            )
             events = await run_in_threadpool(
                 MIRROR_STORE.read_events, request_id, cursor
             )

@@ -36,6 +36,7 @@ from orchestration.adapters.terminal_projection_utils import (
     workflow_root as terminal_workflow_root,
 )
 from orchestration.answer_contract import grade_answer
+from orchestration.semantic_qa import evaluate_prompt_answer
 from orchestration.canonical_profiles import (
     USER_QUERY_PRIORITY,
     CanonicalKanbanTaskRequest,
@@ -47,6 +48,7 @@ from orchestration.canonical_profiles import (
 from orchestration.ceo_workflow_scope import (
     CEO_WORKFLOW_SCOPE_MARKER,
     WorkflowScopeViolation,
+    approved_feedback_section_from_root,
     build_scoped_task_body,
     extract_scope_references,
     is_user_query_body,
@@ -965,6 +967,10 @@ def _initial_primary_materialization_decisions(
             if analysis_mode == "fast_advisory"
             else ""
         )
+        feedback_guidance = approved_feedback_section_from_root(
+            root_body,
+            department,
+        )
 
         decisions.append(
             SupervisorDecision(
@@ -976,7 +982,8 @@ def _initial_primary_materialization_decisions(
                     f"producer=ceo-supervisor-materializer\n"
                     f"analysis_mode={analysis_mode}\n"
                     f"{execution_guidance}\n\n"
-                    f"{plan[profile]}"
+                    f"{plan[profile]}\n\n"
+                    f"{feedback_guidance}"
                 ),
                 parent_task_ids=(),
                 reason=f"initial_primary_materialize:{profile}",
@@ -2978,6 +2985,17 @@ class CeoSupervisorService:
         context = langsmith_trace_context_from_body(body)
         if not context:
             return False
+        # Evaluate the user-facing answer while it is still inside the
+        # application boundary.  Only bounded dimensions/codes leave this
+        # process; prompt/answer text is never sent to LangSmith.
+        answer = self._root_explicit_response_content(root_payload)
+        prompt = body.split("\n## User request\n", 1)[1].strip() if "\n## User request\n" in body else ""
+        semantic_qa = evaluate_prompt_answer(
+            prompt,
+            answer,
+            summary=str(root_payload.get("summary") or ""),
+            status=status,
+        )
         try:
             from orchestration.llm_observability import close_root_trace
 
@@ -2985,10 +3003,12 @@ class CeoSupervisorService:
                 context,
                 request_id=read_marker(body, "request_id") or None,
                 root_id=root_id,
+                task_id=root_id,
                 workflow_mode=workflow_mode_from_body(body),
                 source=read_marker(body, "source") or None,
                 status=status,
                 error_class=error_class,
+                semantic_qa=semantic_qa.as_metadata(),
             )
         except Exception as exc:  # noqa: BLE001 - observability is fail-open.
             logger.warning(

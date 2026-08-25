@@ -501,8 +501,14 @@ async def run_capture(window: SessionWindow, symbols: tuple[str, ...], stop: asy
         remaining = (window.ends_at - datetime.now(KST)).total_seconds()
         if remaining <= 0:
             return
-        repos = [TimescaleMarketRepository(dsn) for _ in shards]
-        sinks = [MarketSink(r) for r in repos]
+        # WebSocket은 공급자 구독 한도 때문에 shard별로 필요하지만, 모든 worker는
+        # 같은 asyncio event loop에서 동기식으로 flush한다. 따라서 DB 연결까지
+        # shard마다 하나씩 만들 이유가 없다. 전 종목 26 sockets가 26개의 idle
+        # PostgreSQL backend를 점유해 주문/조건 worker를 고갈시킨 사례가 있어,
+        # 단일 repository connection을 모든 sink가 공유한다.
+        repository = TimescaleMarketRepository(dsn)
+        repos = [repository]
+        sinks = [MarketSink(repository) for _ in shards]
         try:
             workers = [
                 LsRealtimeWorker(

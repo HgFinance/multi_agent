@@ -352,14 +352,81 @@ class ForwardToIngressTests(unittest.TestCase):
         opened.assert_not_called()
 
     def test_transport_failure_is_consumed_to_prevent_ambiguous_replay(self) -> None:
-        """전달 실패는 조용히 버리지 않고 기존 경로로 되돌린다."""
+        """동일 request id로 한정 재시도한 뒤에도 실패하면 닫힌다."""
+
+        calls = 0
 
         def boom(request, timeout=None):  # noqa: ANN001
+            nonlocal calls
+            calls += 1
             raise OSError("connection refused")
 
         env = self._env()
-        with patch.dict("os.environ", env), patch("urllib.request.urlopen", boom):
+        with patch.dict("os.environ", env), patch(
+            "urllib.request.urlopen", boom
+        ), patch.object(gateway_patch.time, "sleep"):
             self.assertTrue(gateway_patch._forward_to_ingress(self._message(), None))
+        self.assertEqual(calls, 4)
+
+    def test_transport_retry_uses_one_idempotent_payload_and_completes_lease(self) -> None:
+        class _Response:
+            status = 202
+
+            def __enter__(self):  # noqa: ANN204
+                return self
+
+            def __exit__(self, *args: object) -> bool:
+                return False
+
+        class _Adapter:
+            pass
+
+        calls = 0
+
+        def recover(request, timeout=None):  # noqa: ANN001
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise OSError("connection refused")
+            return _Response()
+
+        message = self._message(message_id="retry-handoff-1")
+        env = self._env()
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            "os.environ", {**env, "HERMES_HOME": directory}
+        ), patch("urllib.request.urlopen", recover), patch.object(
+            gateway_patch.time, "sleep"
+        ):
+            adapter = _Adapter()
+            store = gateway_patch._store(adapter)
+            dedup_key = gateway_patch.canonical_discord_dedup_key(
+                "guild-1", "chan-1", "retry-handoff-1"
+            )
+            store.claim_inbound(
+                dedup_key=dedup_key,
+                message_id="retry-handoff-1",
+                guild_id="guild-1",
+                channel_id="chan-1",
+                thread_id=None,
+                profile="ceo-agent",
+                handler="live",
+            )
+            store.mark_inbound(dedup_key, "PROCESSING", "ceo-agent")
+
+            self.assertTrue(gateway_patch._forward_to_ingress(message, adapter))
+            duplicate = store.claim_inbound(
+                dedup_key=dedup_key,
+                message_id="retry-handoff-1",
+                guild_id="guild-1",
+                channel_id="chan-1",
+                thread_id=None,
+                profile="ceo-agent",
+                handler="live",
+            )
+
+        self.assertEqual(calls, 2)
+        self.assertFalse(duplicate.admitted)
+        self.assertEqual(duplicate.state, "COMPLETED")
 
     def test_auth_rejection_is_consumed_instead_of_bypassing_bff(self) -> None:
         import urllib.error

@@ -110,8 +110,8 @@ implementation:
     어휘 재사용). status 갱신과 case_events append를 한 트랜잭션으로 처리
   - GOV-02 에스컬레이션 — src/escalation/. 엔드포인트 4개 + governance.escalation.v1 발행. RESOLVED에
     resolution 필수, severity 무기록 하향 차단
-  - 플레이스홀더 회원 seed — auth.users/user_profiles 1건(RFC 2606 .invalid, 로그인 불가). Mandate
-    owner_user_id NOT NULL 차단 해제. 자동 기본값으로는 쓰지 않는다
+  - 고정 데모 identity seed — user_profiles 1건. Mandate owner_user_id NOT NULL
+    차단 해제. 자동 기본값으로는 쓰지 않는다
   - 부서 코드 통일 — Hermes Profile 이름(ceo-agent/hr-department 등)으로 정본 확정. 스펙 2.2·2.3 갱신
     + AGENT-WORKFORCE 행 rename 마이그레이션
   - Mandate 쓰기 경로 왕복 검증 — TEST-CEO-MANDATE Fund + 플레이스홀더 회원으로 governance.mandates
@@ -136,13 +136,9 @@ implementation:
     UC-1~7 + Risk/QA 거절 11개(change_workflow.py) + 실 DB 통합 1개(PostgresSaver, psycopg3
     prepare_threshold=None으로 Supabase transaction-pooler 비호환 회피) + API 계층 3개(app.py)
     통과(2026-08-05)'
-  - P0-1 actor_user_id 실재성 검증 — src/approval/actor_identity.py. 서명된 Subject 인증(mTLS/JWT)은
-    Platform/IAM 선행 과제라 아직 없다(팀 합의 2026-08-05, TEAM_YOUNGJU_CEO_HR_GUIDE.md P0-1 참고)
-    - 그 전까지 governance.user_profiles에 심어둔 테스트 회원을 '로그인된 사용자'로 간주하고, actor_user_id가
-    그 행에 실재하고 status=ACTIVE인지만 검증한다(UnverifiedActorUserError → 403). decide/revoke
-    엔드포인트에 배선. actor_agent_id의 workforce.agent_profiles 매핑 검증(DENY)은 Agent Roster
-    등재 유예 결정(2026-08-04)과 충돌해 계속 BLOCKED. Production 전환 전 실제 Auth로 교체 필수 - 이 검증을 서명
-    검증으로 착각하지 않는다
+  - P0-1 actor_user_id 실재성 검증 — src/approval/actor_identity.py. 로컬 고정 데모 identity가
+    governance.user_profiles에 실재하고 status=ACTIVE인지 검증한다(UnverifiedActorUserError → 403).
+    decide/revoke 엔드포인트에 배선하며, 이 검증을 외부 로그인이나 서명 검증으로 착각하지 않는다
   - 'P0-2 GOV-02 전체 상태 Replay — tests/test_gov02_replay.py. Investment Case→Approval→Committee
     Open/Vote/Close→Governance Decision(committee.close_session의 CommitteeDecisionRecord로
     대신함, 범용 record_decision 테이블은 여전히 미정)→Escalation→Notification→Case Resolve를 실 Postgres

@@ -7,24 +7,21 @@
 
 ## 팀 합의 (2026-08-05) — 실제 로그인 시스템이 아니다
 
-이 저장소에는 Production 인증(서명된 JWT/mTLS, Supabase Auth 로그인)이 아직 없다
+이 저장소의 로컬 모의투자에는 로그인·세션·외부 사용자 인증이 없다
 (TECH_STACK_DECISIONS.md 3.1절 "Production 목표는 Service Token과 mTLS다" - 아직 목표일 뿐
 구현되지 않음). P0-1이 요구하는 "서명된 Subject" 검증을 지금 이 모듈이 혼자 만들어낼 수는
 없다 - Platform/IAM 전체의 인증 아키텍처 결정이라 CEO Office 코드 하나로 지어낼 성질이
 아니다(CLAUDE.md "설계 공백을 임의로 채우지 않는다").
 
-그래서 팀은 다음으로 합의했다: **`supabase/seed.sql`에 미리 심어둔 테스트 회원 행을
-"로그인된 사용자"로 간주하고, `actor_user_id`가 그 행을 실제로 가리키는지(존재 +
+그래서 팀은 다음으로 합의했다: **고정 데모 identity의 user_profiles 행을
+로컬 주체로 간주하고, `actor_user_id`가 그 행을 실제로 가리키는지(존재 +
 `status='ACTIVE'`)만 결정론적으로 검증한다.** 이건 "누가 보냈는지 서명으로 증명"이 아니라
 "자칭하는 사용자가 최소한 DB에 실재하는 활성 계정인가"까지만 좁힌 검증이다 - 이전에는
 `actor_user_id`가 빈 문자열만 아니면 무엇이든 통과했다(approval.py의 `MissingActorUserError`는
 "비어있는지"만 봤다). 그 상태보다는 분명히 강하지만, 진짜 신원 증명은 아니다.
 
-**Production 전환 조건**: 이 모듈의 `PostgresActorIdentityRepository`는 Platform/IAM이 실제
-Auth(서명된 세션/토큰)를 붙이면 교체 대상이다 - `governance.user_profiles` 직접 조회를 걷어내고
-그 Auth가 검증한 Subject를 그대로 신뢰하는 형태로 바뀐다. 그 전까지 이 경로로 통과한 모든
-결정은 "테스트 Identity로 진행했다"는 사실을 감사 기록(`conditions._decider`)에서 숨기지
-않는다(approval.py `decide()`가 이미 그렇게 한다 - 이 모듈은 그 앞단 게이트만 담당).
+이 경로는 서명된 신원을 만들어내거나 대체하지 않는다. 통과한 모든 결정은 로컬 fixture
+identity로 진행했다는 사실을 감사 기록(`conditions._decider`)에서 숨기지 않는다.
 
 자체 점검: python departments/00-ceo-office/src/approval/actor_identity.py
 """
@@ -190,12 +187,12 @@ if __name__ == "__main__":
         import uuid
 
         assert pg_repo.get_status(str(uuid.uuid4())) is None, "존재하지 않는 uuid인데 상태가 나옴"
-        # supabase/seed.sql의 팀 합의 테스트 로그인 Identity - 존재하면 반드시 ACTIVE여야 한다
+        # 고정 데모 identity - 존재하면 반드시 ACTIVE여야 한다
         # (seed.sql이 status='ACTIVE'로 심는다).
         placeholder_id = "00000000-0000-4000-8000-00000000cec0"
         status = pg_repo.get_status(placeholder_id)
         if status is None:
-            print("SKIP - 플레이스홀더 테스트 회원이 없다 (supabase/seed.sql 미적용)")
+            print("SKIP - 고정 데모 user_profiles 행이 없다")
         else:
             assert status is ActorUserStatus.ACTIVE, status
             verify_actor_user(status, placeholder_id)

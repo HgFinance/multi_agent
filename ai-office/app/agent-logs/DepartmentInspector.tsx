@@ -8,10 +8,8 @@ import {
 import AccountingLedgerPanel from "../components/AccountingLedgerPanel";
 import AlphaStrategyPanel from "../components/AlphaStrategyPanel";
 import CeoOperationsPanel from "../components/CeoOperationsPanel";
-import DepartmentLangsmithFeedbackPanel from "../components/DepartmentLangsmithFeedbackPanel";
 import LivePortfolioPanel from "../components/LivePortfolioPanel";
 import QaLangsmithPanel from "../components/QaLangsmithPanel";
-import QaLangsmithFeedbackPanel from "../components/QaLangsmithFeedbackPanel";
 import ResearchPanel from "../components/ResearchPanel";
 import RiskMandatePanel from "../components/RiskMandatePanel";
 import WorkerPerformancePanel from "../components/WorkerPerformancePanel";
@@ -237,12 +235,8 @@ export default function DepartmentInspector({
       {/* QA는 자기 축(검증 판정)이 아니라 자기 파이프라인이 실제로 도는지를 본다 -
           stage:qa로 태깅된 LangSmith redacted trace 집계. */}
       {department.domain === "qa" ? (
-        <>
-          <QaLangsmithPanel />
-          <QaLangsmithFeedbackPanel />
-        </>
+        <QaLangsmithPanel />
       ) : null}
-      <DepartmentLangsmithFeedbackPanel department={code} />
     </section>
   );
 }

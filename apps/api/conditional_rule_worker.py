@@ -9,7 +9,6 @@ server-derived directive through its existing PAPER boundary.
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 import logging
@@ -19,10 +18,12 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Mapping, Protocol
+from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 import jwt
@@ -48,7 +49,6 @@ from orchestration.conditional_rules import (
     evaluate_condition,
     guard_rule_execution,
 )
-from orchestration.conditional_rules.semantic import normalized_indicator_parameters
 from orchestration.conditional_rules.indicators import DEFAULT_REGISTRY
 from orchestration.conditional_rules.market_data import (
     LSPaperMarketPriceResolver,
@@ -56,7 +56,7 @@ from orchestration.conditional_rules.market_data import (
     MarketPriceResolver,
     MarketPriceResolverError,
 )
-
+from orchestration.conditional_rules.semantic import normalized_indicator_parameters
 
 LOG = logging.getLogger("conditional-rule-worker")
 INTERNAL_SCOPE = "trading.conditional_rule.execute"
@@ -1088,7 +1088,7 @@ def main() -> int:
         ),
     )
     if args.healthcheck:
-        store.list_active(limit=1)
+        store.healthcheck()
         HttpRuntimeClient._service_token()
         # In the deployed PAPER stack the market DB is the shared LS realtime
         # feed boundary.  Prove that optional wiring is reachable during the

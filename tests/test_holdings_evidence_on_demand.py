@@ -74,7 +74,12 @@ def test_default_holdings_evidence_is_on_demand_and_price_only_uses_market_api(
         ("news", {"query": "005930", "display": 10, "sort": "date"}),
         ("disclosures", {"corp": "005930", "days": 7, "page": 1}),
     ]
-    assert len(market_urls) == 1 and "/bars/005930" in market_urls[0]
+    # 시세성 조회는 **market-api 로만** 나간다. 2026-08-25 에 /levels 가
+    # 추가돼 호출이 2건이 됐다 - 개수가 아니라 "어디로 나가는가"가 계약이다.
+    assert len(market_urls) == 2, market_urls
+    assert all(u.startswith("http://127.0.0.1:8036/") for u in market_urls), market_urls
+    assert any("/bars/005930" in u for u in market_urls), market_urls
+    assert any("/levels/005930" in u for u in market_urls), market_urls
     assert evidence["news_headlines"][0]["evidence_id"] == (
         "mcp:news_search:news-snapshot:item-1")
     assert evidence["disclosures_7d"][0]["evidence_id"] == (
@@ -85,6 +90,9 @@ def test_default_holdings_evidence_is_on_demand_and_price_only_uses_market_api(
     assert evidence["sources"]["news"]["mode"] == "ON_DEMAND_MCP"
     assert evidence["sources"]["disclosures"]["mode"] == "ON_DEMAND_MCP"
     assert evidence["sources"]["price_context"]["status"] == "UNAVAILABLE"
+    # 레벨 조회가 실패해도 근거 묶음이 죽지 않고 사유가 남는다
+    assert evidence["sources"]["price_levels"]["status"] == "FAILED"
+    assert "price_levels" not in evidence
 
 
 def test_holdings_sources_fail_independently_and_merged_prompt_stays_bounded() -> None:

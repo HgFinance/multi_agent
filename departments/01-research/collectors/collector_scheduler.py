@@ -109,6 +109,14 @@ JOBS: tuple[Job, ...] = (
     # 일별 시장 라벨 스냅샷. 가격·breadth에서 계산한 레짐만 기록한다.
     Job("label-snapshot", ("collectors/label_snapshot_collector.py", "--collect"),
         daily_at=time(16, 30)),
+    # Conditional BAR_CLOSE rules use the market-api's canonical derived 5M
+    # feed. That feed aggregates final 1M candles, so keep a short, overlapping
+    # LS chart window for the full stock universe. It is deliberately separate
+    # from the daily chart job: daily bars cannot satisfy intraday rules.
+    Job("chart-minute-universe",
+        ("collectors/chart_backfill_collector.py",
+         "--minute", "--universe", "--days", "3", "--ncnt", "1"),
+        daily_at=time(20, 30), timeout_seconds=4 * 60 * 60),
     # 전종목 확정 일봉. 장중 LS 호출과 경합하지 않도록 21:00에 실행하며 최근
     # 3일을 겹쳐 받아 장애·휴일 구간을 멱등하게 복구한다. 긴 작업이라 마지막.
     Job("chart-daily-universe",
@@ -129,6 +137,7 @@ MARKET_DATA_JOB_NAMES = frozenset(
         "universe-restrictions",
         "chart-daily-universe",
         "label-snapshot",
+        "chart-minute-universe",
         "vkospi",
         "style-index",
         "calendar-observed",

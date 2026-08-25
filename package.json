@@ -2,9 +2,9 @@
   "name": "multi-agent-workspace",
   "private": true,
   "scripts": {
-    "dev": "PORTFOLIO_AUTH_MODE=fixture NEXT_PUBLIC_AUTH_MODE=fixture npm --prefix ai-office run dev --",
-    "bff": "APP_ENV=local PORTFOLIO_AUTH_MODE=fixture PORTFOLIO_AUTH_REQUIRED=false ACCOUNTING_MODE=OFFLINE PORTFOLIO_RUNTIME_STORE_PATH=/tmp/hgfinance-portfolio.sqlite3 DATABASE_URL='' .venv/bin/python -m uvicorn apps.api.main:app --reload --port 8001",
-    "build": "PORTFOLIO_AUTH_MODE=fixture NEXT_PUBLIC_AUTH_MODE=fixture npm --prefix ai-office run build",
+    "dev": "npm --prefix ai-office run dev --",
+    "bff": "APP_ENV=local PORTFOLIO_LIVE_MODE=broker ENABLE_LS_ORDER_EVENTS=true ENABLE_BROKER_SNAPSHOT=true ENABLE_LS_MARKET_DATA=true ENABLE_LS_ACCOUNT_DATA=true LS_ENV=PAPER LS_ACCOUNT_NO_PAPER=5601 ACCOUNTING_MODE=OFFLINE PORTFOLIO_RUNTIME_STORE_PATH=/tmp/hgfinance-portfolio.sqlite3 DATABASE_URL='' .venv/bin/python -m uvicorn apps.api.main:app --reload --port 8001",
+    "build": "npm --prefix ai-office run build",
     "test": "npm --prefix ai-office test",
     "lint": "npm --prefix ai-office run lint"
   }

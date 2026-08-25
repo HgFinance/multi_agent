@@ -129,3 +129,26 @@ def test_ls_auth_error_detail_keeps_broker_reason_without_credentials() -> None:
 
     assert "모의투자 비밀번호 오류입니다." in ls_account_stream._ls_error_detail(Error())
     assert "HTTP 403" in ls_account_stream._ls_error_detail(Error())
+
+
+def test_realtime_account_event_clears_stale_initial_account_lookup_error() -> None:
+    feed = ls_account_stream._Feed()
+    feed.account_error = "HTTPStatusError: 500"
+
+    kind = feed.ingest(
+        {
+            "header": {"tr_cd": "SC1"},
+            "body": {
+                "accno1": "1234567890",
+                "ordno": "42",
+                "shtnIsuno": "A005930",
+                "bnstp": "2",
+                "execqty": "1",
+                "execprc": "70000",
+            },
+        }
+    )
+
+    assert kind == "FILLED"
+    assert feed.account == "1234567890"
+    assert feed.account_error is None

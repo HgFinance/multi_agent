@@ -1,4 +1,4 @@
-# ADR-0007: 인증된 사용자 PAPER 지시를 Agent 주문과 분리된 권한으로 둔다
+# ADR-0007: 로컬 고정 데모 PAPER 지시를 Agent 주문과 분리된 권한으로 둔다
 
 - 상태: Accepted
 - 날짜: 2026-08-18
@@ -14,7 +14,7 @@
 권한을 하나로 취급했다.
 
 1. Agent, alpha, 전략 Worker 또는 rebalancer가 만든 **자동 주문 후보**
-2. 인증된 사용자가 자기 Fund/Book에 명시적으로 내린 **PAPER 주문 지시**
+2. 로컬 고정 데모 사용자가 자기 Fund/Book에 명시적으로 내린 **PAPER 주문 지시**
 
 두 번째 입력에도 첫 번째 입력의 경제적 판단 Gate를 적용하면 사용자가 확정한 PAPER
 명령을 alpha·rebalancer 또는 Risk 정책이 다시 결정하는 역전이 생긴다. 반대로 이
@@ -28,7 +28,7 @@
 | 레인 | 권한 출처 | 경제적 판단 | 반드시 통과할 경계 |
 |---|---|---|---|
 | `AUTOMATED_STRATEGY` | Agent, alpha, 전략 Worker, rebalancer | 결정론적 Risk Decision 필수. Risk가 승인·축소·거부할 수 있다. | 기존 StrategySignal → OrderIntent → Risk → OMS 계약 전체 |
-| `USER_DIRECTIVE` | Supabase JWT로 인증된 실제 사용자 | 사용자의 명시적 PAPER 결정을 alpha·rebalancer·Risk가 veto하거나 재사이징하지 않는다. | 인증·권한·Fund/Book 결합·결정론 파싱·기계적 주문 검증·멱등·영속성·`PAPER` 전용 |
+| `USER_DIRECTIVE` | BFF가 선택한 고정 데모 사용자 ID | 사용자의 명시적 PAPER 결정을 alpha·rebalancer·Risk가 veto하거나 재사이징하지 않는다. | fixture identity·Fund/Book 결합·결정론 파싱·기계적 주문 검증·멱등·영속성·`PAPER` 전용 |
 
 `USER_DIRECTIVE_HIGHEST`는 PAPER 제어면에서 사용자 지시가 자동 전략 제안보다
 우선한다는 뜻이다. LIVE 권한, Broker Credential, 원장 수정 권한 또는 성공 상태를
@@ -37,7 +37,7 @@
 
 ### 2. Hermes와 LLM은 사용자 권한을 소유하지 않는다
 
-- CEO는 인증된 원문과 Fund/Book을 durable 요청 row 및 차단된 Kanban root/Trading
+- CEO는 고정 데모 ID와 원문·Fund/Book을 durable 요청 row 및 차단된 Kanban root/Trading
   카드에 먼저 결합한 뒤에만 Trading 카드를 해제한다.
 - Trading Hermes는 다양한 자연어를 엄격한 스키마와 exact evidence span으로
   **제안**할 수 있지만, 그 결과는 `binding=false`이고 사용자·Fund·Book·symbol 또는
@@ -46,7 +46,7 @@
 - BFF의 결정론 verifier가 원문 SHA-256, 모든 evidence span, 방향·수량·주문유형,
   질문·부정·조건·복합명령·LIVE 표현을 독립적으로 다시 검사한다. 모호하거나
   지원하지 않는 문장은 추정 실행하지 않고 clarification/rejection으로 남긴다.
-- 구조화된 사용자 주문도 BFF가 검증된 JWT `sub`를 actor로 결합한다. 요청 본문의
+- 구조화된 사용자 주문도 BFF가 고정 데모 ID를 actor로 결합한다. 요청 본문의
   `user_id`나 Hermes profile 이름은 권한 증거가 아니다.
 - `/trading/agent/order`는 대화 클라이언트 호환 경로 이름일 뿐, Agent 주문 권한을
   만들지 않는다. 이 경로도 인증된 사용자의 원문 지시와 같은 `USER_DIRECTIVE`
@@ -70,7 +70,7 @@ directive와 대상 snapshot이 durable PAPER store에 기록된 뒤에만 반�
 다음 검사는 항상 결정론적으로 수행하고, 실패하거나 확정할 수 없으면 주문을 만들지
 않는다.
 
-- JWT `sub`, ACTIVE 사용자, `OWNER | CIO | TRADER` 역할
+- 고정 데모 ID, ACTIVE 사용자, `OWNER | CIO | TRADER` 역할
 - 요청 Fund와 Book의 canonical 결합 및 사용자 membership
 - `mode == PAPER`; LIVE mode·LIVE 주문 route·계좌번호·계좌 비밀번호 입력 금지
 - 지원 symbol/side/order type, 양수 수량, lot/tick, limit price, TTL

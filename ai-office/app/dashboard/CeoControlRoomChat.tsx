@@ -11,8 +11,8 @@ import {
   type CardOutcome,
   type CeoQueryPlanning,
 } from "../lib/ceoClient";
-import { useAuth } from "../lib/AuthProvider";
 import { usePortfolioSession } from "../lib/PortfolioSessionProvider";
+import { DEFAULT_ACCOUNT } from "../lib/currentAccount";
 import {
   authorizedBooksForFund,
   selectedAuthorizedBook,
@@ -71,9 +71,8 @@ type SubmittedRequest = {
 };
 
 export function CeoControlRoomChat() {
-  const auth = useAuth();
   const portfolio = usePortfolioSession();
-  const scopeKey = `${auth.userId ?? "unauthenticated"}:${portfolio.activeFundId ?? "no-fund"}`;
+  const scopeKey = `${DEFAULT_ACCOUNT.userId}:${portfolio.activeFundId ?? "no-fund"}`;
 
   // 계정이나 Fund가 바뀌면 이전 사용자의 단발 결과와 주문 ID를 모두 폐기한다.
   return <CeoControlRoomChatSession key={scopeKey} />;

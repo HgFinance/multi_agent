@@ -1,38 +1,26 @@
 #!/usr/bin/env python3
-"""Portfolio BFF의 사용자 인증과 소유권 판정을 담당하는 단일 경계.
+"""Portfolio BFF의 로컬 모의투자 사용자 경계를 담당한다.
 
-운영 모드에서는 hosted Supabase Auth가 발급한 access token의 서명, issuer,
-audience, 만료와 ``authenticated`` role을 검증하고 JWT ``sub``만 사용자 ID로
-사용한다. ``X-User-Id``는 서명된 신원 자료가 아니므로 운영 신원을 만들 수 없다.
+이 저장소는 로그인·세션·외부 사용자 인증을 구현하지 않는다. 로컬 모의투자
+실행에서는 ``DISCORD_ACTOR_MAP``으로 정한 하나의 고정 데모 ID를
+``X-User-Id``로 전달한다. 이 헤더는 공개 서비스의 사용자 인증 수단이 아니다.
 
-기존 deterministic fixture는 ``APP_ENV=local|test``와
-``PORTFOLIO_AUTH_MODE=fixture``를 *둘 다* 명시한 경우에만 사용할 수 있다. 따라서
-환경 변수를 빼먹은 배포는 fixture로 조용히 후퇴하지 않고 Supabase JWT 모드에서
-fail closed 한다.
+``PORTFOLIO_AUTH_MODE``에 다른 값이 들어오면 fixture-only 계약 위반으로 즉시
+실패한다. 운영 배포와 외부 사용자 로그인 연동은 이 모의투자 범위에 포함하지 않는다.
 """
 from __future__ import annotations
 
 import json
 import os
 import re
-from functools import lru_cache
-from urllib.parse import urlsplit
 from uuid import UUID
 
-import httpx
-import jwt
 import psycopg2
 from fastapi import Header, HTTPException, Request
-from jwt import PyJWKClient
-from jwt.exceptions import PyJWKClientConnectionError, PyJWTError
 
-_AUTH_REQUIRED_DEFAULT = "true"
-_DEFAULT_AUTH_MODE = "supabase_jwt"
-_FIXTURE_ENVIRONMENTS = frozenset({"local", "test"})
-_SUPPORTED_JWT_ALGORITHMS = ("RS256", "ES256", "EdDSA")
+_AUTH_REQUIRED_DEFAULT = "false"
 _REQUEST_STATE_KEY = "portfolio_authenticated_user_id"
 _MISSING = object()
-_EXTERNAL_USER_DISPLAY_NAME = "Authenticated Supabase user"
 
 
 class AuthConfigurationError(RuntimeError):
@@ -40,7 +28,7 @@ class AuthConfigurationError(RuntimeError):
 
 
 def _http_error(status_code: int, detail: str) -> HTTPException:
-    # Do not include a JWT, URL, key id, or upstream exception in browser errors.
+    # Do not include a credential, URL, key id, or upstream exception in browser errors.
     return HTTPException(status_code=status_code, detail=detail)
 
 
@@ -56,231 +44,16 @@ def auth_required() -> bool:
 
 
 def auth_mode() -> str:
-    """Resolve the authentication mode without an insecure implicit fallback."""
+    """Resolve the only supported authentication mode.
 
-    mode = (os.getenv("PORTFOLIO_AUTH_MODE", _DEFAULT_AUTH_MODE).strip().casefold())
-    if mode not in {_DEFAULT_AUTH_MODE, "fixture"}:
-        raise AuthConfigurationError("unsupported portfolio authentication mode")
+    A non-fixture value is rejected loudly so a removed login implementation
+    cannot return by configuration drift.
+    """
 
-    runtime_environment = os.getenv("APP_ENV", "production").strip().casefold()
-    if mode == "fixture" and runtime_environment not in _FIXTURE_ENVIRONMENTS:
-        raise AuthConfigurationError("fixture authentication is not allowed here")
-    return mode
-
-
-def _trusted_https_url(value: str, *, setting: str) -> str:
-    normalized = value.strip().rstrip("/")
-    parsed = urlsplit(normalized)
-    runtime_environment = os.getenv("APP_ENV", "production").strip().casefold()
-    allowed_schemes = {"https"}
-    if runtime_environment in _FIXTURE_ENVIRONMENTS:
-        allowed_schemes.add("http")
-    if (
-        not normalized
-        or parsed.scheme.casefold() not in allowed_schemes
-        or not parsed.netloc
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise AuthConfigurationError(f"invalid {setting}")
-    return normalized
-
-
-def _supabase_auth_settings() -> tuple[str, str, str]:
-    configured_issuer = os.getenv("SUPABASE_AUTH_ISSUER", "").strip()
-    if configured_issuer:
-        issuer = _trusted_https_url(configured_issuer, setting="Supabase issuer")
-    else:
-        supabase_url = _trusted_https_url(
-            os.getenv("SUPABASE_URL", ""), setting="Supabase URL"
-        )
-        issuer = f"{supabase_url}/auth/v1"
-
-    configured_jwks_url = os.getenv("SUPABASE_AUTH_JWKS_URL", "").strip()
-    jwks_url = _trusted_https_url(
-        configured_jwks_url or f"{issuer}/.well-known/jwks.json",
-        setting="Supabase JWKS URL",
-    )
-    audience = os.getenv("SUPABASE_AUTH_AUDIENCE", "authenticated").strip()
-    if not audience or any(character.isspace() for character in audience):
-        raise AuthConfigurationError("invalid Supabase audience")
-    return issuer, audience, jwks_url
-
-
-def _supabase_publishable_key() -> str:
-    """Return only a browser-safe API key; reject service-role/secret material."""
-
-    value = (
-        os.getenv("SUPABASE_PUBLISHABLE_KEY", "").strip()
-        or os.getenv("SUPABASE_ANON_KEY", "").strip()
-    )
-    if not value or value.startswith("sb_secret_"):
-        raise AuthConfigurationError("Supabase publishable key is unavailable")
-    if value.startswith("sb_publishable_"):
-        return value
-
-    # Legacy anon keys are themselves long-lived JWTs. Inspecting this API key
-    # is safe for classification only; it is never accepted as a user token.
-    try:
-        key_claims = jwt.decode(
-            value,
-            options={
-                "verify_signature": False,
-                "verify_aud": False,
-                "verify_exp": False,
-            },
-            algorithms=["HS256"],
-        )
-    except PyJWTError as exc:
-        raise AuthConfigurationError("invalid Supabase publishable key") from exc
-    if key_claims.get("role") != "anon":
-        raise AuthConfigurationError("privileged Supabase key is forbidden")
-    return value
-
-
-@lru_cache(maxsize=4)
-def _jwks_client(jwks_url: str) -> PyJWKClient:
-    # Supabase publishes current asymmetric keys here. A bounded in-memory cache
-    # avoids putting Auth in the request hot path while still permitting rotation.
-    return PyJWKClient(
-        jwks_url,
-        cache_keys=True,
-        max_cached_keys=16,
-        cache_jwk_set=True,
-        lifespan=300,
-        timeout=5,
-    )
-
-
-def _canonical_user_uuid(value: object) -> str:
-    try:
-        return str(UUID(str(value)))
-    except (TypeError, ValueError, AttributeError) as exc:
-        raise _http_error(401, "portfolio_access_token_invalid") from exc
-
-
-def _validate_authenticated_claims(claims: dict[str, object]) -> str:
-    if claims.get("role") != "authenticated":
-        raise _http_error(401, "portfolio_access_token_invalid")
-    return _canonical_user_uuid(claims.get("sub"))
-
-
-def _fetch_supabase_user_id(*, user_url: str, api_key: str, token: str) -> str:
-    """Ask Supabase Auth to verify a legacy/shared-secret access token."""
-
-    try:
-        response = httpx.get(
-            user_url,
-            headers={"apikey": api_key, "Authorization": f"Bearer {token}"},
-            follow_redirects=False,
-            timeout=5.0,
-        )
-    except httpx.RequestError as exc:
-        raise _http_error(503, "portfolio_authentication_unavailable") from exc
-    if response.status_code == 429 or response.status_code >= 500:
-        raise _http_error(503, "portfolio_authentication_unavailable")
-    if response.status_code != 200:
-        raise _http_error(401, "portfolio_access_token_invalid")
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        raise _http_error(503, "portfolio_authentication_unavailable") from exc
-    if not isinstance(payload, dict):
-        raise _http_error(503, "portfolio_authentication_unavailable")
-    return _canonical_user_uuid(payload.get("id"))
-
-
-def _verify_legacy_supabase_access_token(
-    token: str, *, issuer: str, audience: str
-) -> str:
-    """Verify HS256 with Auth `/user`; never load the Supabase JWT secret."""
-
-    api_key = _supabase_publishable_key()
-    try:
-        # The Auth server establishes authenticity. We still validate the token
-        # contract locally, then bind its subject to the server-returned user.
-        claims = jwt.decode(
-            token,
-            options={
-                "require": ["aud", "exp", "iat", "iss", "role", "sub"],
-                "verify_signature": False,
-                "verify_aud": True,
-                "verify_exp": True,
-                "verify_iat": True,
-                "verify_iss": True,
-                "verify_nbf": True,
-            },
-            algorithms=["HS256"],
-            audience=audience,
-            issuer=issuer,
-        )
-    except PyJWTError as exc:
-        raise _http_error(401, "portfolio_access_token_invalid") from exc
-    subject = _validate_authenticated_claims(claims)
-    verified_user_id = _fetch_supabase_user_id(
-        user_url=f"{issuer}/user", api_key=api_key, token=token
-    )
-    if verified_user_id != subject:
-        raise _http_error(401, "portfolio_access_token_invalid")
-    return subject
-
-
-def verify_supabase_access_token(token: str) -> str:
-    """Verify one Supabase access token and return its canonical user UUID."""
-
-    try:
-        issuer, audience, jwks_url = _supabase_auth_settings()
-        unverified_header = jwt.get_unverified_header(token)
-        algorithm = unverified_header.get("alg")
-        if algorithm == "HS256":
-            return _verify_legacy_supabase_access_token(
-                token, issuer=issuer, audience=audience
-            )
-        if algorithm not in _SUPPORTED_JWT_ALGORITHMS:
-            raise _http_error(401, "portfolio_access_token_invalid")
-        signing_key = _jwks_client(jwks_url).get_signing_key_from_jwt(token)
-        claims = jwt.decode(
-            token,
-            key=signing_key.key,
-            algorithms=list(_SUPPORTED_JWT_ALGORITHMS),
-            audience=audience,
-            issuer=issuer,
-            options={
-                "require": ["aud", "exp", "iat", "iss", "role", "sub"],
-                "verify_signature": True,
-                "verify_aud": True,
-                "verify_exp": True,
-                "verify_iat": True,
-                "verify_iss": True,
-                "verify_nbf": True,
-            },
-        )
-    except AuthConfigurationError as exc:
-        raise _http_error(503, "portfolio_authentication_unavailable") from exc
-    except PyJWKClientConnectionError as exc:
-        raise _http_error(503, "portfolio_authentication_unavailable") from exc
-    except PyJWTError as exc:
-        raise _http_error(401, "portfolio_access_token_invalid") from exc
-
-    return _validate_authenticated_claims(claims)
-
-
-def _bearer_token(authorization: str | None) -> str | None:
-    raw = (authorization or "").strip()
-    if not raw:
-        return None
-    scheme, separator, credentials = raw.partition(" ")
-    token = credentials.strip()
-    if (
-        not separator
-        or scheme.casefold() != "bearer"
-        or not token
-        or any(character.isspace() for character in token)
-    ):
-        raise _http_error(401, "portfolio_access_token_invalid")
-    return token
+    configured = os.getenv("PORTFOLIO_AUTH_MODE", "fixture").strip().casefold()
+    if configured not in {"", "fixture"}:
+        raise AuthConfigurationError("fixture_only_portfolio_identity")
+    return "fixture"
 
 
 def _control_database_url() -> str:
@@ -296,44 +69,6 @@ def _control_database_url() -> str:
     if not value:
         raise _http_error(503, "portfolio_identity_projection_unavailable")
     return value
-
-
-def _project_verified_subject(owner_id: str) -> None:
-    """Idempotently project a verified Auth subject into the control DB.
-
-    Hosted Supabase Auth remains the identity source of truth.  The control DB
-    stores only the verified UUID, a non-identifying operational label and the
-    last observation time so domain foreign keys have a local parent row.
-    Existing status/display preferences are deliberately never overwritten.
-    """
-
-    try:
-        with psycopg2.connect(
-            _control_database_url(), connect_timeout=5
-        ) as connection, connection.cursor() as cursor:
-            cursor.execute(
-                """
-                insert into governance.user_profiles
-                  (user_id, display_name, timezone, status,
-                   identity_provider, auth_subject_observed_at)
-                values (%s, %s, 'Asia/Seoul', 'ACTIVE', 'supabase', now())
-                on conflict (user_id) do update
-                  set auth_subject_observed_at = excluded.auth_subject_observed_at
-                returning status
-                """,
-                (owner_id, _EXTERNAL_USER_DISPLAY_NAME),
-            )
-            row = cursor.fetchone()
-            if row is None or str(row[0]).upper() != "ACTIVE":
-                # Raising inside the connection context rolls back even the
-                # observation-time update.  SUSPENDED/CLOSED is never revived.
-                raise _http_error(403, "portfolio_user_inactive")
-    except HTTPException:
-        raise
-    except (psycopg2.Error, TypeError, ValueError) as exc:
-        # Schema drift, connectivity and malformed DSNs are authorization
-        # failures, not a reason to continue without the local FK parent.
-        raise _http_error(503, "portfolio_identity_projection_unavailable") from exc
 
 
 def authorized_fund_memberships(owner_id: str) -> list[dict[str, object]]:
@@ -646,6 +381,7 @@ def require_trading_book_access(
 # 요구로 거부됐던 사례).
 _INSTRUMENT_NAME_ALIASES: dict[str, str] = {
     "네이버": "035420",  # NAVER Corporation. 공시 표시명은 "NAVER".
+    "하이닉스": "000660",  # 사용자가 흔히 생략하는 canonical 상호 접두사 "SK".
 }
 _NUMERIC_CODE_WITH_DISPLAY_NAME_RE = re.compile(
     r"^(?P<code>\d{6})(?:\s+[가-힣A-Za-z][가-힣A-Za-z0-9&+._\- ]{0,72})?$"
@@ -723,29 +459,16 @@ def resolve_active_trading_instrument(
 
 def authenticate_request_headers(
     *,
-    authorization: str | None,
     x_user_id: str | None,
     required: bool | None = None,
 ) -> str | None:
-    """Authenticate request headers according to the explicit deployment mode."""
+    """Resolve the fixed local demo identity from the explicit header."""
 
     try:
-        mode = auth_mode()
+        auth_mode()
     except AuthConfigurationError as exc:
         raise _http_error(503, "portfolio_authentication_unavailable") from exc
 
-    if mode == _DEFAULT_AUTH_MODE:
-        token = _bearer_token(authorization)
-        if token is None:
-            raise _http_error(401, "portfolio_authentication_required")
-        owner_id = verify_supabase_access_token(token)
-        claimed_header_id = (x_user_id or "").strip()
-        if claimed_header_id and claimed_header_id != owner_id:
-            raise _http_error(403, "portfolio_identity_header_mismatch")
-        _project_verified_subject(owner_id)
-        return owner_id
-
-    # Fixture identity exists solely for explicit local/test deterministic runs.
     owner_id = (x_user_id or "").strip()
     effective_required = auth_required() if required is None else required
     if not owner_id and effective_required:
@@ -764,41 +487,20 @@ def set_authenticated_request_user(request: Request, owner_id: str | None) -> No
 
 
 def current_user(
-    authorization: str | None = Header(default=None, alias="Authorization"),
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
 ) -> str | None:
-    """Authenticate every user-facing route through the same header boundary.
+    """Read the fixed demo identity used by the local mock stack."""
 
-    ``authenticate_request_headers`` is deliberately kept as the single
-    implementation for both direct callers and FastAPI dependencies.  In
-    production this means ``Authorization: Bearer`` is verified; an
-    ``X-User-Id`` header can only accompany a verified token as an equality
-    check and can never establish identity by itself.
-    """
-
-    # Direct unit callers do not pass FastAPI's Header marker, while FastAPI
-    # replaces it with the actual string before invoking this dependency.
-    if not isinstance(authorization, str):
-        authorization = None
     if not isinstance(x_user_id, str):
         x_user_id = None
-    return authenticate_request_headers(
-        authorization=authorization,
-        x_user_id=x_user_id,
-    )
+    return authenticate_request_headers(x_user_id=x_user_id)
 
 
 def optional_current_user(
     authorization: str | None = Header(default=None, alias="Authorization"),
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
 ) -> str | None:
-    """Authenticate an optional browser subject while allowing the private bridge.
-
-    The Discord ingress uses its own single-purpose Bearer credential and
-    resolves the Discord actor inside the BFF.  That credential must not be
-    sent to Supabase JWT verification, otherwise the route would reject a
-    valid bridge request before its route-level authorization check runs.
-    """
+    """Read an optional demo identity while preserving the private Discord bridge."""
 
     if not isinstance(authorization, str):
         authorization = None
@@ -812,22 +514,9 @@ def optional_current_user(
 
     if bearer_is_authorized(authorization):
         return None
-    if not authorization and not (x_user_id or "").strip():
+    if not (x_user_id or '').strip():
         return None
-    try:
-        return authenticate_request_headers(
-            authorization=authorization,
-            x_user_id=x_user_id,
-            required=False,
-        )
-    except HTTPException as exc:
-        # Optional routes retain their own source-specific 401 response when
-        # a caller presents an invalid ordinary user token. Availability and
-        # configuration failures still propagate rather than becoming an
-        # anonymous request.
-        if exc.status_code == 401:
-            return None
-        raise
+    return authenticate_request_headers(x_user_id=x_user_id, required=False)
 
 
 def require_owner(
@@ -860,5 +549,4 @@ __all__ = [
     "require_trading_book_access",
     "resolve_active_trading_instrument",
     "set_authenticated_request_user",
-    "verify_supabase_access_token",
 ]

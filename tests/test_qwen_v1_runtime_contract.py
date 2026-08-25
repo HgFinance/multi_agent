@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from departments.worker_model_gateway import DEFAULT_VLLM_MODEL, resolve
+import yaml
 
+from departments.worker_model_gateway import DEFAULT_VLLM_MODEL, resolve
+from orchestration.employee_dispatch import load_worker_specs
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY = ROOT / "departments/01-research/config/worker_model_registry.json"
@@ -25,6 +27,11 @@ EXPECTED_LLM_WORKERS = {
     "incident-postmortem-worker",
     "profile-architecture-worker",
 }
+
+DEPARTMENT_CODES = (
+    "ceo", "hr", "research", "trading", "risk", "quant-backtest",
+    "accounting-portfolio", "qa",
+)
 
 
 def test_registry_covers_every_llm_worker_and_keeps_adapter_explicit() -> None:
@@ -51,6 +58,29 @@ def test_gateway_resolves_qwen_v1_for_every_worker_without_network() -> None:
         assert binding.adapter_id is None
 
 
+def test_registry_matches_executable_workers_and_trading_is_deterministic() -> None:
+    """Keep the model registry from silently drifting from WorkerSpec code."""
+
+    registry = json.loads(REGISTRY.read_text(encoding="utf-8"))
+    executable_workers = {
+        spec.worker_id
+        for department in DEPARTMENT_CODES
+        for spec in load_worker_specs(ROOT, department)
+    }
+    assert executable_workers == EXPECTED_LLM_WORKERS
+    assert set(registry["workers"]) == executable_workers
+
+    trading = yaml.safe_load(
+        (ROOT / "departments/02-trading/hermes/config.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    runtime = trading["employee_runtime"]
+    assert runtime["provider"] == "none"
+    assert runtime["model_selection"]["active_model"] == "none"
+    assert trading["workers"] == {}
+
+
 def test_runtime_entrypoint_is_pinned_and_fail_closed() -> None:
     compose = MODEL_COMPOSE.read_text(encoding="utf-8")
     script = RUNTIME_SCRIPT.read_text(encoding="utf-8")
@@ -62,3 +92,8 @@ def test_runtime_entrypoint_is_pinned_and_fail_closed() -> None:
     assert "refusing to stop or remove it" in script
     assert "docker run" not in script
     assert "check_duplicate_model_containers" in script
+    assert "Qwen2.5-14B-Instruct-AWQ" in compose
+    assert "qwen2.5-14b-instruct-awq" in compose
+    assert "${VLLM_MAX_MODEL_LEN:-4096}" in compose
+    assert "${VLLM_MAX_MODEL_LEN:-8192}" not in compose
+    assert "\n      - --model\n" not in compose

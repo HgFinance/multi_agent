@@ -2,8 +2,6 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { createContext, useContext, useEffect, useMemo, useSyncExternalStore } from "react";
-import { AUTH_MODE } from "./authMode";
-import { useAuth } from "./AuthProvider";
 import { bffFetch } from "./bffClient";
 import { DEFAULT_ACCOUNT, accountFor } from "./currentAccount";
 import {
@@ -26,16 +24,10 @@ interface PortfolioSessionValue {
 const PortfolioSessionContext = createContext<PortfolioSessionValue | null>(null);
 
 /**
- * 현재 사용자 프로필. `/ui/me`가 우선이고, 실패하면 고정 계정으로 떨어진다.
+ * 현재 데모 계정 프로필. `/ui/me`가 우선이고, 실패하면 고정 계정으로 떨어진다.
  *
- * `fixtureAuthEnabled` 분기를 없앴다(2026-08-19). 그 플래그는
- * `NEXT_PUBLIC_AUTH_MODE` 환경변수에서 나오는데, SSR과 클라이언트 번들이 env를
- * 따로 받는 구조(vite.config.ts) 탓에 브라우저에서 `false`로 평가돼 fallback
- * 경로가 통째로 막혔다 - `/ui/me`가 실패하면 그대로 throw 돼서 화면이
- * "계정에 연결된 Fund가 없습니다"에서 멈췄다.
- *
- * 서버 응답이 여전히 canonical이다. fallback은 PAPER 주문 권한을 만들지 않는다
- * (`books: []`) - 거래 권한은 서버 투영으로만 생긴다.
+ * 서버 응답이 여전히 canonical이다. 로컬 fixture에서는 서버가 고정된 PAPER
+ * book을 투영하고, 제어 DB가 없을 때만 읽기 전용 fallback으로 내려간다.
  */
 async function fetchCurrentUser(userId: string): Promise<CurrentUserProfile> {
   try {
@@ -46,10 +38,9 @@ async function fetchCurrentUser(userId: string): Promise<CurrentUserProfile> {
       if (projected.userId !== userId) throw new Error("current_user_subject_mismatch");
       return projected;
     }
-    if (AUTH_MODE === "supabase") throw new Error(`portfolio_current_user_http_${response.status}`);
+    if (response.status === 401) throw new Error("portfolio_current_user_unavailable");
   } catch (error) {
     if (error instanceof Error && error.message === "current_user_subject_mismatch") throw error;
-    if (AUTH_MODE === "supabase") throw error;
     // 제어 DB 없이 도는 로컬 데모를 허용한다. 아래 fallback은 읽기 전용이고
     // book 식별자를 지어내지 않는다.
   }
@@ -66,12 +57,11 @@ async function fetchCurrentUser(userId: string): Promise<CurrentUserProfile> {
 }
 
 export function PortfolioSessionProvider({ children }: { children: React.ReactNode }) {
-  const auth = useAuth();
-  const userId = auth.userId ?? (AUTH_MODE === "fixture" ? DEFAULT_ACCOUNT.userId : "");
+  const userId = DEFAULT_ACCOUNT.userId;
   const query = useQuery({
     queryKey: ["portfolio-current-user", userId],
     queryFn: () => fetchCurrentUser(userId),
-    enabled: Boolean(userId) && (AUTH_MODE === "fixture" || auth.status === "authenticated"),
+    enabled: Boolean(userId),
     retry: false,
   });
   const profile = query.data ?? null;
@@ -105,10 +95,8 @@ export function PortfolioSessionProvider({ children }: { children: React.ReactNo
     }),
     [activeFundId, profile, query.error, query.isLoading],
   );
-  // 로딩·에러·온보딩 게이트 화면을 없앴다(2026-08-19). 셋 다 `auth.status`가
-  // `authenticated`인지에 걸려 있었는데, 실제 인증을 붙이지 않는 지금 그 값은
-  // 그 상태가 될 수 없어 화면이 멈추거나 반대로 영영 안 뜨는 분기였다. 조회
-  // 실패는 이제 각 화면이 자기 맥락에서 알린다.
+  // 프로필 조회 실패는 각 화면이 자기 맥락에서 알린다. 데모 화면 자체는
+  // 프로필 API가 없어도 계속 렌더링한다.
   return <PortfolioSessionContext.Provider value={value}>{children}</PortfolioSessionContext.Provider>;
 }
 

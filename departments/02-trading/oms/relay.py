@@ -75,7 +75,11 @@ def poll(store, publish, *, max_attempts: int = MAX_ATTEMPTS) -> outbox.DrainRes
 
 
 def serve() -> None:
-    dsn = os.environ.get("DATABASE_URL", "").strip()
+    dsn = (
+        os.environ.get("TRADING_OUTBOX_DATABASE_URL", "").strip()
+        or os.environ.get("TRADING_OMS_DATABASE_URL", "").strip()
+        or os.environ.get("DATABASE_URL", "").strip()
+    )
     redis_url = os.environ.get("REDIS_URL", "").strip()
     if not dsn:
         raise SystemExit("[relay] DATABASE_URL이 없습니다")

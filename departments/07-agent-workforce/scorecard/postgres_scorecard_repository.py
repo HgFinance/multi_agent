@@ -138,7 +138,7 @@ class PostgresScorecardRepository:
         같은 (agent_id, profile_version_id, window_start, window_end)를 다시 보고하면
         **행을 늘리지 않고 갱신한다**. reader 가 창 안의 행을 합산하기 때문에 - 재보고가
         새 행이 되면 사용량이 조용히 두 배가 되고 예산 판정이 뒤집힌다
-        (20260825000100 migration 의 unique index 가 그 키다).
+        (20260825000300 migration 의 unique index 가 그 키다).
 
         수치 자체는 검증하지 않는다(그건 플랫폼 소유다). 대신 **적으면 안 되는 것**만
         막는다 - 보고자 없는 행, 역전된 창, 음수. 음수 비용·토큰은 DDL 이 막지 않지만
@@ -257,7 +257,7 @@ class PostgresScorecardRepository:
         같은 (department_id, agent_id, window_start, window_end)를 다시 보고하면
         **행을 늘리지 않고 갱신한다**. 새 행으로 쌓이면 재보고 이력이 무한히 늘고,
         동일 window_end 동률이 생기면 어느 쪽이 최신인지 모호해진다
-        (20260825000200 migration 의 `nulls not distinct` unique index가 그 키다 -
+        (20260825000400 migration 의 `nulls not distinct` unique index가 그 키다 -
         department_id/agent_id 는 DDL check 상 하나만 있어도 되므로 null 도 값으로
         취급해야 부서 단위/Agent 단위 재보고가 각각 막힌다).
 

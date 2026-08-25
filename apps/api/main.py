@@ -6,12 +6,13 @@
 
 이 파일은 조립만 한다. 부서별 Agent 경로는 각 Router 파일이 소유한다
 (`accounting.py`, `trading.py`, `department_agents.py`). 프로세스는 하나다 - 부서별로 프로세스를 쪼개는
-것은 Service Identity와 인증이 실제로 생긴 뒤에 한다.
+부서별 분리는 Service Identity 경계가 필요할 때 별도 작업으로 한다. 브라우저
+사용자 로그인·세션은 이 로컬 모의투자 범위에 포함하지 않는다.
 
 경계 두 개를 코드로 강제한다.
 
 1. **금융 상태는 Read-only다.** 이 서비스에는 주문 제출·분개 Posting·상태 변경 경로가 없다.
-   계획 6절의 위험 Command(SET_TRADING_STATE 등)는 인증·승인·Audit가 붙기 전까지
+   계획 6절의 위험 Command(SET_TRADING_STATE 등)는 승인·Audit 경계가 갖춰지기 전까지
    여기 열지 않는다. Hermes chat은 Tool을 실행할 수 있으므로 기본 비활성화한다.
 2. **Agent 응답은 수치가 아니다.** `/{부서}/agent/ask`가 돌려주는 것은 Hermes CLI의
    텍스트고, 공식 Position·PnL·NAV는 오직 `/ui/snapshot`에서만 나온다
@@ -100,6 +101,7 @@ from command_service import (
     IdempotencyConflict,
     TradingStateCommand,
 )
+
 try:
     # Keep the dependency object identical to the package-relative imports in
     # ceo/ceo_mirror_api.  The fallback is only for direct script execution.
@@ -127,7 +129,11 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py``
 from department_agents import router as department_agent_router
 from discord_ingress_auth import (
     DISCORD_INGRESS_PATH,
+)
+from discord_ingress_auth import (
     bearer_is_authorized as discord_ingress_bearer_is_authorized,
+)
+from discord_ingress_auth import (
     mark_request as mark_discord_ingress_request,
 )
 from discord_read import router as discord_read_router
@@ -154,11 +160,11 @@ from portfolio_schemas import (
     PortfolioRecommendationStatusResponse,
     PortfolioUniverseListResponse,
 )
+from portfolio_universe import DEFAULT_UNIVERSE_ID, get_universe, universe_options
 from strategy_runtime_client import (
     StrategyRuntimeProxyError,
     strategy_runtime_request,
 )
-from portfolio_universe import DEFAULT_UNIVERSE_ID, get_universe, universe_options
 
 try:
     from .qa import QA_API_URL
@@ -452,10 +458,9 @@ PORTFOLIO_GOVERNANCE_BINDING_PATH = (
     ).strip()
     or "/governance/v1/mandates/{mandate_id}/current"
 )
-# The deployment must provide a trusted authenticated subject header. Local
-# deterministic tests explicitly opt out; missing identity is never accepted in
-# the production default.
-PORTFOLIO_AUTH_REQUIRED = os.getenv("PORTFOLIO_AUTH_REQUIRED", "true").casefold() in {"1", "true", "yes", "on"}
+# Local mock runs do not require a browser identity. A caller may still provide
+# the fixed X-User-Id demo header when a seeded trading book is needed.
+PORTFOLIO_AUTH_REQUIRED = os.getenv("PORTFOLIO_AUTH_REQUIRED", "false").casefold() in {"1", "true", "yes", "on"}
 PORTFOLIO_REQUIRE_MANDATE_BINDING = os.getenv("PORTFOLIO_REQUIRE_MANDATE_BINDING", "true").casefold() in {
     "1",
     "true",
@@ -543,9 +548,8 @@ def _require_portfolio_owner(owner_id: str | None, expected_user_id: str | None 
     """소유권 판정을 `current_user.require_owner`에 위임한다.
 
     판정을 라우트마다 흩어놓지 않는 이유는 `apps/api/current_user.py` 머리말에
-    적어뒀다 - 요약하면 `X-User-Id`는 인증이 아니고, 진짜 인증으로 교체할 때
-    고칠 지점이 한 곳이어야 한다. 이 래퍼는 기존 호출부(3곳)를 그대로 두기 위해
-    남긴 얇은 껍데기다.
+    적어뒀다 - 요약하면 `X-User-Id`는 로그인 세션이 아니라 고정 fixture 식별자다.
+    이 래퍼는 기존 호출부(3곳)를 그대로 두기 위해 남긴 얇은 껍데기다.
     """
 
     # 플래그를 명시적으로 넘긴다 - 이 모듈 상수는 테스트가 patch하는 지점이라
@@ -573,7 +577,7 @@ def _identity_bound_body(
     *,
     inject: tuple[str, ...] = (),
 ) -> dict[str, object]:
-    """Reject unsigned caller identities and pin required fields to JWT sub."""
+    """Reject mismatched fields and pin them to the local fixture identity."""
 
     bound = dict(body)
     if owner_id is None:
@@ -942,6 +946,13 @@ def _integration_status() -> dict[str, dict[str, object]]:
         if os.getenv(name, "").strip()
     )
 
+    discord_bot_mirror = (
+        os.getenv("DISCORD_MIRROR_ENABLED", "").strip().casefold()
+        in {"1", "true", "yes", "on"}
+        and configured("DISCORD_BOT_TOKEN_CEO", "DISCORD_CEO_CHANNEL_ID")
+    )
+    discord_webhook = configured("DISCORD_WEBHOOK_URL")
+
     return {
         "notion": {
             "configured": configured("NOTION_TOKEN", "NOTION_BRIEFING_DB"),
@@ -951,9 +962,15 @@ def _integration_status() -> dict[str, dict[str, object]]:
             "database_scope": "projection_only",
         },
         "discord": {
-            "configured": configured("DISCORD_WEBHOOK_URL"),
+            "configured": discord_bot_mirror or discord_webhook,
             "label": "Discord 전송",
-            "need": "DISCORD_WEBHOOK_URL 미설정",
+            "transport": "bot_mirror" if discord_bot_mirror else "webhook_compat",
+            "need": (
+                "DISCORD_MIRROR_ENABLED / DISCORD_BOT_TOKEN_CEO / "
+                "DISCORD_CEO_CHANNEL_ID 미설정"
+                if not discord_bot_mirror and not discord_webhook
+                else ""
+            ),
         },
         "instagram": {
             "configured": False,
@@ -981,8 +998,12 @@ def ui_current_user(
 
     if owner_id is None:
         raise HTTPException(status_code=401, detail="portfolio_authentication_required")
-    profile = active_user_profile(owner_id)
-    memberships = authorized_fund_memberships(owner_id)
+    if auth_mode() == "fixture":
+        profile = {"display_name": owner_id, "status": "ACTIVE"}
+        memberships: list[dict[str, object]] = []
+    else:
+        profile = active_user_profile(owner_id)
+        memberships = authorized_fund_memberships(owner_id)
     trading_books = authorized_trading_books(owner_id)
     books_by_fund: dict[str, list[dict[str, str]]] = {}
     for book in trading_books:
@@ -994,6 +1015,9 @@ def ui_current_user(
         roles_by_fund.setdefault(str(membership["fund_id"]), set()).add(
             str(membership["role"])
         )
+    if auth_mode() == "fixture":
+        for book in trading_books:
+            roles_by_fund.setdefault(str(book["fund_id"]), set()).add("TRADER")
     funds = [
         {
             "fund_id": fund_id,
@@ -1464,10 +1488,6 @@ def ui_snapshot(
     아무것도 평가되지 않은 초기 상태일 수 있으므로 대시보드를 통째로 죽이지 않고
     Scripted Loop로 남되 `sources`가 그 사실을 밝힌다.
     """
-    if auth_mode() == "supabase_jwt" and book_id is not None:
-        raise HTTPException(
-            status_code=422, detail="portfolio_book_selection_forbidden"
-        )
     require_fund_membership(
         owner_id, str(fund_id) if fund_id is not None else None
     )
@@ -1574,14 +1594,8 @@ def ui_command_audit(
 ) -> dict[str, object]:
     """Return BFF-local audit events; no broker or ledger credentials are exposed."""
 
-    memberships = require_any_fund_membership(owner_id)
+    require_any_fund_membership(owner_id)
     events = COMMAND_SERVICE.audit_events()
-    if auth_mode() != "fixture":
-        allowed_funds = {str(row["fund_id"]) for row in memberships}
-        events = [
-            event for event in events
-            if str(event.get("fund_id") or "") in allowed_funds
-        ]
     return {"schema_version": "operator-command-audit.v1", "events": events}
 
 
@@ -1852,7 +1866,7 @@ if __name__ == "__main__":
         # 돌려주고 OMS·Risk Engine·Broker·Ledger를 바꾸지 않는다.
         "/ui/commands/trading-state",
         "/ui/commands/audit",
-        # Authenticated user directives are the highest-priority PAPER lane.
+        # Local-fixture user directives are the highest-priority PAPER lane.
         # The BFF authorizes fund/book ownership and the trading domain owns OMS.
         "/ui/paper-orders",
         "/ui/paper-orders/sell-all",

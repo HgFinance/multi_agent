@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg2
 from psycopg2.extras import register_uuid
@@ -39,6 +39,18 @@ class ConditionalRuleAdmission:
     spec: ConditionalRuleSpec
     request: UserDirectiveRequest
     proof: DirectiveProof
+
+
+def _fresh_proof_jti(execution_id: object) -> str:
+    """Mint a one-use proof identity for each HTTP submission attempt.
+
+    The durable execution idempotency key, not the proof JTI, identifies the
+    order. Reusing a deterministic JTI after a response timeout makes the
+    directive repository correctly reject the retry as a replay, hiding the
+    already-created authoritative directive from the caller.
+    """
+
+    return f"conditional-rule:{execution_id}:{uuid4()}"
 
 
 def _conditional_order_payload(
@@ -278,7 +290,7 @@ class PostgresConditionalRuleAdmissionRepository:
             instruction_ref=request.instruction_ref,
             idempotency_key=request.idempotency_key,
             payload_sha256=request.payload_sha256(),
-            jti=f"conditional-rule:{execution_id}",
+            jti=_fresh_proof_jti(execution_id),
             issued_at=issued,
             not_before=issued,
             expires_at=issued + 60,

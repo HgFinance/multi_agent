@@ -210,3 +210,12 @@ def test_full_universe_builder_query_is_current_ls_krx_stock_only():
     assert "upper(i.status) = 'active'" in source
     assert "upper(i.venue) in ('kospi', 'kosdaq')" in source
     assert "metadata->>'is_spac'" in source
+
+
+def test_realtime_shards_share_one_timescale_repository_connection():
+    source = Path(ls_realtime_service.__file__).read_text(encoding="utf-8")
+
+    assert "repository = TimescaleMarketRepository(dsn)" in source
+    assert "repos = [repository]" in source
+    assert "MarketSink(repository) for _ in shards" in source
+    assert "TimescaleMarketRepository(dsn) for _ in shards" not in source

@@ -19,11 +19,11 @@
 
 HgFinance is an eight-department multi-agent financial/trading platform. The
 current execution model separates department-head Hermes agents, conditional
-LangGraph workers, deterministic Python runners, and authenticated user
+LangGraph workers, deterministic Python runners, and a local fixture user
 authority. The LLM interprets, compares evidence, writes explanations, and
 proposes structured non-binding outputs. Deterministic contracts and engines
 own exact calculations, automated-order risk enforcement, accounting
-authority, QA gates, and state transitions. An authenticated user's explicit
+authority, QA gates, and state transitions. A local fixture user's explicit
 PAPER directive is a separate authority, not an LLM decision.
 
 The repository currently verifies the following shape:
@@ -35,7 +35,7 @@ The repository currently verifies the following shape:
 - Trading, risk, accounting, quant, and QA contracts and deterministic modules
   exist, but the repository does not prove one continuously operated,
   end-to-end production order lifecycle.
-- The Operator BFF exposes a narrow authenticated `USER_DIRECTIVE` PAPER lane.
+- The Operator BFF contains a narrow local-fixture `USER_DIRECTIVE` PAPER lane.
   It does not create a LIVE lane or give Hermes/agents order authority; see
   [ADR-0007](02-engineering/adr/0007-authenticated-user-paper-directive-authority.md).
 - Both this checkout and `origin/main` track the promoted
@@ -126,7 +126,7 @@ Important role clarifications:
 - `02-trading/employee_workers.py` has no fixed LLM worker registry. Its
   temporary strategy helper is explicitly non-binding and cannot submit a
   live order or bypass Risk. This automated-strategy rule is distinct from an
-  authenticated user's explicit PAPER directive.
+  local fixture user's explicit PAPER directive.
 - The Risk and QA supervisors can synthesize and escalate, but their config
   forbids protected write tools. The binding owners are the deterministic
   engines/runners.
@@ -139,7 +139,7 @@ Important role clarifications:
 | point-in-time and citation checks | deterministic research/QA code, including `EvidenceQaEngine` | IMPLEMENTED |
 | exact order and risk validation | `departments/03-risk/engine/risk_engine.py` and trading contracts/OMS | IMPLEMENTED |
 | final `APPROVE` / `RESIZE` / `REJECT` risk verdict | deterministic Risk Engine | IMPLEMENTED |
-| explicit user PAPER authority | verified JWT subject + durable CEO/Kanban scope; Trading Hermes proposes a non-binding parse, deterministic BFF verifier and Trading Domain own admission/execution | IMPLEMENTED/PARTIAL; PAPER only |
+| explicit user PAPER authority | fixed fixture ID + durable CEO/Kanban scope; Trading Hermes proposes a non-binding parse, deterministic BFF verifier and Trading Domain own admission/execution | IMPLEMENTED/PARTIAL; disabled in local read-only UI |
 | ledger posting, NAV/valuation, reconciliation | accounting ledger, fill consumer, valuation/reporting modules | IMPLEMENTED/PARTIAL |
 | strategy experiment state and release gate | quant pipeline, PIT dataset and lifecycle modules | IMPLEMENTED/PARTIAL |
 | QA PASS/WARN/FAIL, model-risk thresholds, permission checks | QA deterministic engines | IMPLEMENTED/PARTIAL |
@@ -157,7 +157,7 @@ flowchart LR
     A[Agent / alpha / rebalancer] --> O[Automated OrderIntent]
     O --> R[Deterministic Risk Decision]
     R --> AP[Automated PAPER OMS]
-    U[Authenticated user] --> C[CEO ingress + durable PAPER scope]
+    U[Local fixture user] --> C[CEO ingress + durable PAPER scope]
     C --> H[Trading Hermes non-binding interpretation]
     H --> P[Exact-text deterministic verifier]
     P --> G[Current Fund/Book + account mechanics + idempotency]
@@ -370,7 +370,7 @@ was found in tracked source; QLoRA training remains `PLANNED`.
 | LangSmith / Langfuse | optional observability/evaluation integrations | PARTIAL; tracing defaults and access boundaries require runtime verification |
 | Docker Compose | control-plane services plus separate GPU model-plane overlay | IMPLEMENTED as configuration; running state not verified here |
 | Hermes | department-head profiles; tracked profiles differ from external runtime under `~/.hermes/profiles/` | IMPLEMENTED configuration; external runtime not verified |
-| APIs / BFF | FastAPI department APIs, read-only AI Office/portfolio projections, and the narrow authenticated-user PAPER command edge | PARTIAL; BFF transports ADR-0007 authority but must not own broker, Risk, ledger, NAV, or LIVE authority |
+| APIs / BFF | FastAPI department APIs and read-only AI Office/portfolio projections; the PAPER command edge is disabled in local UI | PARTIAL; BFF must not own broker, Risk, ledger, NAV, or LIVE authority |
 | External financial data | LS/KRX market-data collectors; OpenDART·macro·news·web request-time Research MCP | PARTIAL; credentials, freshness, and live availability are environment-dependent; qualitative sources are not persistently collected |
 
 The repository distinguishes canonical PostgreSQL/TimescaleDB state from Redis
@@ -400,8 +400,8 @@ tests:
   candidate is submitted to QA; Quant does not directly promote production.
 - Trading's Agent/alpha/automated lane accepts typed `OrderIntent` and cannot
   bypass a valid RiskDecision.
-- An authenticated user's explicit PAPER `USER_DIRECTIVE` is not an Agent
-  OrderIntent. The verified subject is the authority, while the deterministic
+- A local fixture user's explicit PAPER `USER_DIRECTIVE` is not an Agent
+  OrderIntent. The fixed fixture ID is the local scope, while the deterministic
   BFF/parser and Trading Domain enforce Fund/Book ownership, account mechanics,
   idempotency, and PAPER-only execution without an economic Risk veto.
 - Risk Engine enforces mandate, tradability, freshness, concentration,

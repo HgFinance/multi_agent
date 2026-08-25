@@ -179,6 +179,9 @@ def main() -> int:
         comp = blend_axes(axes)
         cards.append({
             "symbol": symbol,
+            # 답변의 기준일. 1층 payload 의 as_of(마지막 일봉 시각)를
+            # 그대로 물려준다 - 조회 시각이 아니라 **데이터 시각**이다.
+            "as_of": payload.get("as_of", ""),
             "company": c.get("company", ""),
             "last_close": c["last_close"],
             "atr": c["atr"],

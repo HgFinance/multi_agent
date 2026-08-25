@@ -10,9 +10,9 @@ Scope: base tables in the domain schemas owned by ``supabase/migrations``
 (discovered at run time, never hardcoded).  Supabase-managed schemas
 (``auth``, ``storage``, ``realtime``, ...) are never read or copied, and
 ``public``/``api`` are asserted to hold zero base tables rather than silently
-skipped.  Hosted Supabase Auth is never touched: ``governance.user_profiles``
-is copied like any other domain table, preserving the exact ``user_id`` UUID
-(the verified Supabase JWT ``sub``), with no local ``auth.users`` created.
+skipped.  Hosted identity data is never touched: ``governance.user_profiles``
+is copied like any other domain table, preserving the exact local demo
+``user_id`` UUID; no browser account or login session is created.
 
 Every run is fail-closed: any schema drift, PK collision with different
 content, unexplained target-only data, or non-deferrable circular foreign key

@@ -13,9 +13,9 @@ combined with `deploy/aws/docker-compose.paper-order.yml`.
 
 ## Runtime boundary
 
-- Hosted Supabase is identity-only. `SUPABASE_URL` selects the Auth issuer;
-  ES256/RS256 access tokens are verified against its public JWKS endpoint.
-  A hosted Supabase database URL is never used by an application container.
+- This repository does not implement hosted user login or session handling.
+  The supported application mode is a local fixed demo identity; this AWS
+  overlay is retained only as a legacy runtime/database reference.
 - The private `timescaledb` container owns two distinct PostgreSQL databases:
   `control` for operational/domain state and `market` for price,
   tick/quote and microstructure data.  The development host publication on
@@ -43,9 +43,9 @@ combined with `deploy/aws/docker-compose.paper-order.yml`.
   intent, reservation, broker-order/fill, outbox or accounting mutation grant. Existing
   Quant/Audit/QA workers may explicitly reduce to their existing scoped roles;
   none can reduce to an order, Trading, or Accounting critical role.
-- `portfolio-bff` is fixed to production `supabase_jwt` authentication with
-  required authentication and an empty fixture grant list.  Because this EC2
-  deployment is currently backend-only, its CORS allowlist may be empty: no
+- `portfolio-bff` is fixed to the local fixture identity with no required
+  login. Because this EC2 overlay is not a supported application deployment,
+  its CORS allowlist may be empty: no
   browser origin receives an allow-origin header and browser preflights are
   rejected.
 - Discord ingress stays on the private Compose network. `ceo-hermes` posts to
@@ -64,7 +64,6 @@ combined with `deploy/aws/docker-compose.paper-order.yml`.
 The source `.env` must contain valid values for:
 
 - `HEDGEFUND_TSDB_PASSWORD` (URL-safe, at least 16 characters);
-- `SUPABASE_URL`;
 - `LS_APP_KEY`, `LS_APP_SECRET_KEY`, and `LS_REST_BASE_URL` for read-only KRX
   instrument-master and calendar evidence calls (these credentials are not
   passed to Trading and cannot change its hard `paper` broker adapter);
@@ -94,16 +93,9 @@ fragments and empty entries inside a non-empty list stop deployment.
 Docker Compose 2.24.4 or newer is required because the overlay uses the
 official `!override` merge tag to remove the development database port.
 
-`SUPABASE_PUBLISHABLE_KEY` and legacy `SUPABASE_ANON_KEY` are optional for the
-current asymmetric-token project.  If both are absent, deployment fetches the
-configured JWKS URL, the configured Auth issuer's JWKS URL, or by default
-`SUPABASE_URL/auth/v1/.well-known/jwks.json`) without redirects and requires a
-public P-256/ES256 or at-least-2048-bit RSA/RS256 verification key. Symmetric
-`oct`, private-key material, unsupported algorithms, malformed/oversized JSON
-and an unreachable endpoint all stop deployment before databases are touched.
-A public key remains necessary only if legacy HS256 access tokens must be
-verified through Supabase Auth `/user`; never put an `sb_secret_` or service
-role key in either browser-key setting.
+No user-login key, session secret, or browser identity provider is required.
+Do not add one to this legacy overlay; open the mock-investment UI locally
+with the root `npm run bff` and `npm run dev` commands.
 
 `scripts/configure_paper_order_env.py --runtime aws` remains the
 credential configuration utility. Detached-release `runtime.env` state under
@@ -147,7 +139,7 @@ After migrations, the bootstrap idempotently provisions:
 
 | Item | Value |
 |---|---|
-| Supabase subject | `00000000-0000-4000-8000-00000000cec0` |
+| Fixed demo subject | `00000000-0000-4000-8000-00000000cec0` |
 | PAPER fund | `5c26db42-ce83-4daf-b1dc-c81680c13a6c` / `ACC01-PAPER` / KRW |
 | PAPER book | `07d913de-9a5b-4cf5-b893-31a625445761` / `MAIN` |
 | Memberships | active `OWNER` and `TRADER` |

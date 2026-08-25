@@ -5,7 +5,6 @@ import inspect
 import sys
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SCHEDULER_PATH = (
     ROOT / "departments/01-research/collectors/collector_scheduler.py"
@@ -29,6 +28,15 @@ EXPECTED_MARKET_JOBS = {
     "style-index": ("collectors/style_index_collector.py", "--collect"),
     "calendar-observed": ("collectors/calendar_collector.py", "--collect"),
     "label-snapshot": ("collectors/label_snapshot_collector.py", "--collect"),
+    "chart-minute-universe": (
+        "collectors/chart_backfill_collector.py",
+        "--minute",
+        "--universe",
+        "--days",
+        "3",
+        "--ncnt",
+        "1",
+    ),
     "chart-daily-universe": (
         "collectors/chart_backfill_collector.py",
         "--daily",

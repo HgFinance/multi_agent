@@ -450,7 +450,7 @@ export default function AgentLogsView() {
                 : "border-outline text-on-surface-variant"
             }`}
           >
-            {streamState === "connected" ? "BFF AUTH POLLING CONNECTED" : streamState === "connecting" ? "BFF POLLING STARTING" : "BFF POLLING DEGRADED"}
+            {streamState === "connected" ? "BFF POLLING CONNECTED" : streamState === "connecting" ? "BFF POLLING STARTING" : "BFF POLLING DEGRADED"}
           </span>
         </div>
       </section>
@@ -469,7 +469,7 @@ export default function AgentLogsView() {
       </section>
       <section className="flex flex-wrap gap-2" aria-label="Runtime event status">
         <span className="px-4 py-2 rounded border border-outline-variant bg-surface-container-lowest text-body-sm font-body-sm text-on-surface-variant">
-          BFF auth polling <b className="font-data-mono text-on-surface">{streamState === "connected" ? "connected" : "waiting"}</b>
+          BFF polling <b className="font-data-mono text-on-surface">{streamState === "connected" ? "connected" : "waiting"}</b>
         </span>
         <span className="px-4 py-2 rounded border border-outline-variant bg-surface-container-lowest text-body-sm font-body-sm text-on-surface-variant">
           BFF keepalive <b className="font-data-mono text-on-surface">{lastKeepalive ? new Date(lastKeepalive).toLocaleTimeString("ko-KR") : "waiting"}</b>
@@ -542,7 +542,7 @@ export default function AgentLogsView() {
       ) : null}
 
       <p className="text-xs text-outline">
-        BFF authenticated polling + keepalive Source: <code>/ui/snapshot</code> · WebSocket은 one-use ticket 도입 전 비활성 · 부서 수와 Worker 수 Source: 각 Hermes Profile의 Worker Registry
+        BFF polling + keepalive Source: <code>/ui/snapshot</code> · WebSocket은 one-use ticket 도입 전 비활성 · 부서 수와 Worker 수 Source: 각 Hermes Profile의 Worker Registry
       </p>
     </main>
   );

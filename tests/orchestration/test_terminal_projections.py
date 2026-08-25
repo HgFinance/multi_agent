@@ -90,19 +90,45 @@ class FakeNotionTransport:
             }
         }
 
-    def query_projection(self, database_id: str, projection_key: str) -> list[dict[str, Any]]:
+    def query_projection(
+        self, database_id: str, projection_key: str
+    ) -> list[dict[str, Any]]:
         self.query_calls += 1
         if self.fail:
             raise NotionProjectionError("notion unavailable", status=503)
         return [page for page in self.pages if page["projection_key"] == projection_key]
 
-    def create_page(self, database_id: str, properties: dict[str, Any], children: list[dict[str, Any]]) -> dict[str, Any]:
+    def create_page(
+        self,
+        database_id: str,
+        properties: dict[str, Any],
+        children: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         self.create_calls += 1
         if self.fail:
             raise NotionProjectionError("notion unavailable", status=503)
         key = properties["projection_key"]["rich_text"][0]["text"]["content"]
-        self.pages.append({"id": f"page-{len(self.pages) + 1}", "projection_key": key, "properties": properties, "children": children})
+        self.pages.append(
+            {
+                "id": f"page-{len(self.pages) + 1}",
+                "projection_key": key,
+                "properties": properties,
+                "children": children,
+            }
+        )
         return self.pages[-1]
+
+    def update_page(self, page_id: str, properties: dict[str, Any]) -> dict[str, Any]:
+        page = next(page for page in self.pages if page["id"] == page_id)
+        page["properties"] = properties
+        return page
+
+    def append_blocks(
+        self, page_id: str, children: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        page = next(page for page in self.pages if page["id"] == page_id)
+        page["children"].extend(children)
+        return page
 
 
 class ProductionReportNotionTransport:
@@ -113,8 +139,18 @@ class ProductionReportNotionTransport:
 
     def database_schema(self, _database_id: str) -> dict[str, Any]:
         names = (
-            "브리핑명", "기준일", "상태", "구분", "전체 업무", "완료", "진행 중",
-            "승인 대기", "차단·오류", "대표 결정사항", "핵심 성과", "문제·위험",
+            "브리핑명",
+            "기준일",
+            "상태",
+            "구분",
+            "전체 업무",
+            "완료",
+            "진행 중",
+            "승인 대기",
+            "차단·오류",
+            "대표 결정사항",
+            "핵심 성과",
+            "문제·위험",
             "다음 우선순위",
         )
         properties: dict[str, Any] = {
@@ -129,9 +165,39 @@ class ProductionReportNotionTransport:
             properties[name] = {"type": "rich_text", "rich_text": {}}
         return {"properties": properties}
 
-    def create_page(self, _database_id: str, properties: dict[str, Any], children: list[dict[str, Any]]) -> dict[str, Any]:
-        page = {"id": f"page-{len(self.pages) + 1}", "properties": properties, "children": children}
+    def create_page(
+        self,
+        _database_id: str,
+        properties: dict[str, Any],
+        children: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        page = {
+            "id": f"page-{len(self.pages) + 1}",
+            "properties": properties,
+            "children": children,
+        }
         self.pages.append(page)
+        return page
+
+    def query_title(
+        self, _database_id: str, _property_name: str, title: str
+    ) -> list[dict[str, Any]]:
+        return [
+            page
+            for page in self.pages
+            if page["properties"]["브리핑명"]["title"][0]["text"]["content"] == title
+        ]
+
+    def update_page(self, page_id: str, properties: dict[str, Any]) -> dict[str, Any]:
+        page = next(page for page in self.pages if page["id"] == page_id)
+        page["properties"] = properties
+        return page
+
+    def append_blocks(
+        self, page_id: str, children: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        page = next(page for page in self.pages if page["id"] == page_id)
+        page["children"].extend(children)
         return page
 
 
@@ -181,13 +247,19 @@ class TerminalProjectionWiringTests(unittest.TestCase):
     def test_supervisor_observes_synthesis_once_without_changing_decision(self) -> None:
         root = {"id": ROOT, "body": build_root_body("q", "req-1"), "status": "done"}
         primary = _task(RESEARCH, "primary", assignee="research-department")
-        synthesis = _task(SYNTHESIS, "synthesis", action="SYNTHESIZE", assignee="ceo-agent")
+        synthesis = _task(
+            SYNTHESIS, "synthesis", action="SYNTHESIZE", assignee="ceo-agent"
+        )
         client = FakeSupervisorClient(root, [primary, synthesis])
         projection = FakeSupervisorProjection()
         service = CeoSupervisorService(client, synthesis_projection=projection)
 
-        first = service.handle_terminal_event({"event_id": "s1", "task_id": SYNTHESIS, "kind": "completed"})
-        second = service.handle_terminal_event({"event_id": "s1", "task_id": SYNTHESIS, "kind": "completed"})
+        first = service.handle_terminal_event(
+            {"event_id": "s1", "task_id": SYNTHESIS, "kind": "completed"}
+        )
+        second = service.handle_terminal_event(
+            {"event_id": "s1", "task_id": SYNTHESIS, "kind": "completed"}
+        )
 
         self.assertIsNotNone(first)
         self.assertEqual(first.action.value, "RUN_QA")
@@ -198,7 +270,9 @@ class TerminalProjectionWiringTests(unittest.TestCase):
 class TerminalProjectionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.primary = [
-            _task(RESEARCH, "primary", assignee="research-department", summary="research"),
+            _task(
+                RESEARCH, "primary", assignee="research-department", summary="research"
+            ),
             _task(RISK, "primary", assignee="risk-management", summary="risk"),
         ]
         self.qa = _task(
@@ -253,8 +327,36 @@ class TerminalProjectionTests(unittest.TestCase):
         payload = transport.pages[0]
         self.assertNotIn("reasoning", str(payload).casefold())
         self.assertNotIn("chain_of_thought", str(payload).casefold())
-        original_query = payload["properties"]["original_query"]["rich_text"][0]["text"]["content"]
+        original_query = payload["properties"]["original_query"]["rich_text"][0][
+            "text"
+        ]["content"]
         self.assertEqual(original_query, "Compare the selected companies")
+
+    def test_synthesis_correction_updates_existing_page(self) -> None:
+        transport = FakeNotionTransport()
+        projection = CeoNotionProjection(
+            env={"NOTION_TOKEN": "token", "NOTION_CEO_DB": "ceo-db"},
+            transport=transport,
+        )
+        projection.project(
+            root_task_id=ROOT,
+            task=self.synthesis,
+            workflow_tasks=self.workflow,
+        )
+
+        corrected = projection.project(
+            root_task_id=ROOT,
+            task=self.synthesis,
+            workflow_tasks=self.workflow,
+            event={
+                "force_upsert": True,
+                "correction": "권위 DB 확인: 248250원 체결, 회계 반영 대기",
+            },
+        )
+
+        self.assertEqual(corrected["status"], "updated")
+        self.assertEqual(len(transport.pages), 1)
+        self.assertIn("248250", str(transport.pages[0]["children"]))
 
     def test_single_delegated_primary_projects_started_card(self) -> None:
         root = dict(self.root)
@@ -340,24 +442,77 @@ class TerminalProjectionTests(unittest.TestCase):
 
     def test_production_ceo_report_schema_maps_properties_and_marker(self) -> None:
         transport = ProductionReportNotionTransport()
-        client = type("Kanban", (), {"comments": [], "comment_task": lambda self, task_id, text: self.comments.append((task_id, text))})()
+        client = type(
+            "Kanban",
+            (),
+            {
+                "comments": [],
+                "comment_task": lambda self, task_id, text: self.comments.append(
+                    (task_id, text)
+                ),
+            },
+        )()
         projection = CeoNotionProjection(
             env={"NOTION_TOKEN": "token", "NOTION_CEO_DB": "ceo-db"},
             transport=transport,
             kanban_client=client,
         )
-        result = projection.project(root_task_id=ROOT, task=self.synthesis, workflow_tasks=self.workflow)
+        result = projection.project(
+            root_task_id=ROOT, task=self.synthesis, workflow_tasks=self.workflow
+        )
         self.assertEqual(result["status"], "created")
         properties = transport.pages[0]["properties"]
-        self.assertEqual(set(properties), {
-            "브리핑명", "기준일", "상태", "구분", "전체 업무", "완료", "진행 중",
-            "승인 대기", "차단·오류", "대표 결정사항", "핵심 성과", "문제·위험",
-            "다음 우선순위",
-        })
+        self.assertEqual(
+            set(properties),
+            {
+                "브리핑명",
+                "기준일",
+                "상태",
+                "구분",
+                "전체 업무",
+                "완료",
+                "진행 중",
+                "승인 대기",
+                "차단·오류",
+                "대표 결정사항",
+                "핵심 성과",
+                "문제·위험",
+                "다음 우선순위",
+            },
+        )
         self.assertEqual(properties["상태"]["select"]["name"], "완료")
         self.assertEqual(properties["구분"]["select"]["name"], "CEO")
         self.assertEqual(properties["전체 업무"]["number"], len(self.workflow))
-        self.assertIn("projection_key=ceo-synthesis:t_root:t_synthesis", client.comments[0][1])
+        self.assertIn(
+            "projection_key=ceo-synthesis:t_root:t_synthesis", client.comments[0][1]
+        )
+
+    def test_production_ceo_correction_recreates_missing_page(self) -> None:
+        transport = ProductionReportNotionTransport()
+        client = type(
+            "Kanban",
+            (),
+            {
+                "comment_task": lambda *_args: None,
+                "show": lambda _self, _task_id: self.synthesis,
+            },
+        )()
+        projection = CeoNotionProjection(
+            env={"NOTION_TOKEN": "token", "NOTION_CEO_DB": "ceo-db"},
+            transport=transport,
+            kanban_client=client,
+        )
+
+        result = projection.project(
+            root_task_id=ROOT,
+            task=self.synthesis,
+            workflow_tasks=self.workflow,
+            event={"force_upsert": True, "correction": "248250원 체결 정정"},
+        )
+
+        self.assertEqual(result["status"], "created")
+        self.assertEqual(len(transport.pages), 1)
+        self.assertIn("248250", str(transport.pages[0]))
 
     def test_primary_and_qa_done_do_not_create_notion_page(self) -> None:
         transport = FakeNotionTransport()
@@ -365,15 +520,29 @@ class TerminalProjectionTests(unittest.TestCase):
             env={"NOTION_TOKEN": "token", "NOTION_CEO_DB": "ceo-db"},
             transport=transport,
         )
-        self.assertEqual(projection.project(root_task_id=ROOT, task=self.primary[0], workflow_tasks=self.workflow)["status"], "skipped")
-        self.assertEqual(projection.project(root_task_id=ROOT, task=self.qa, workflow_tasks=self.workflow)["status"], "skipped")
+        self.assertEqual(
+            projection.project(
+                root_task_id=ROOT, task=self.primary[0], workflow_tasks=self.workflow
+            )["status"],
+            "skipped",
+        )
+        self.assertEqual(
+            projection.project(
+                root_task_id=ROOT, task=self.qa, workflow_tasks=self.workflow
+            )["status"],
+            "skipped",
+        )
         self.assertEqual(transport.pages, [])
 
     def test_qa_persists_lossless_verdict_and_primary_ids_once(self) -> None:
         repository = FakeAuditRepository()
         projection = QaAuditProjection(repository=repository)
-        first = projection.project(root_task_id=ROOT, task=self.qa, workflow_tasks=self.workflow)
-        second = QaAuditProjection(repository=repository).project(root_task_id=ROOT, task=self.qa, workflow_tasks=self.workflow)
+        first = projection.project(
+            root_task_id=ROOT, task=self.qa, workflow_tasks=self.workflow
+        )
+        second = QaAuditProjection(repository=repository).project(
+            root_task_id=ROOT, task=self.qa, workflow_tasks=self.workflow
+        )
         self.assertEqual(first["status"], "persisted")
         self.assertEqual(second["status"], "duplicate")
         self.assertEqual(len(repository.records), 1)
@@ -429,7 +598,7 @@ class TerminalProjectionTests(unittest.TestCase):
     def test_qa_projection_uses_root_selected_primary_profiles(self) -> None:
         selected_root = dict(self.root)
         selected_root["body"] = (
-            f'{self.root["body"]}\n'
+            f"{self.root['body']}\n"
             "selected_primary_profiles=research-department,risk-management"
         )
         accounting = _task(
@@ -457,7 +626,7 @@ class TerminalProjectionTests(unittest.TestCase):
         )
         selected_root = dict(self.root)
         selected_root["body"] = (
-            f'{self.root["body"]}\n'
+            f"{self.root['body']}\n"
             "selected_primary_profiles=research-department,risk-management"
         )
         repository = FakeAuditRepository()
@@ -488,7 +657,9 @@ class TerminalProjectionTests(unittest.TestCase):
         self.assertIsNotNone(decision)
         self.assertEqual(decision.action.value, "SYNTHESIZE")
 
-    def test_terminal_reconciliation_does_not_repeat_successful_current_card(self) -> None:
+    def test_terminal_reconciliation_does_not_repeat_successful_current_card(
+        self,
+    ) -> None:
         class DeliverySpy:
             def __init__(self) -> None:
                 self.calls: list[str] = []
@@ -498,7 +669,9 @@ class TerminalProjectionTests(unittest.TestCase):
                 return "created"
 
         root = dict(self.root)
-        root["body"] += "\nselected_primary_profiles=research-department,risk-management"
+        root["body"] += (
+            "\nselected_primary_profiles=research-department,risk-management"
+        )
         client = FakeSupervisorClient(root, [*self.primary])
         delivery = DeliverySpy()
         service = CeoSupervisorService(client, discord_delivery=delivery)
@@ -508,7 +681,11 @@ class TerminalProjectionTests(unittest.TestCase):
             root_task_id=ROOT,
             root_payload=root,
             task_payload=current,
-            event={"event_id": "terminal-current", "task_id": RESEARCH, "kind": "completed"},
+            event={
+                "event_id": "terminal-current",
+                "task_id": RESEARCH,
+                "kind": "completed",
+            },
         )
         service._reconcile_department_terminal_progress(
             root_task_id=ROOT,
@@ -534,7 +711,9 @@ class TerminalProjectionTests(unittest.TestCase):
                 return "failed" if len(self.calls) == 1 else "created"
 
         root = dict(self.root)
-        root["body"] += "\nselected_primary_profiles=research-department,risk-management"
+        root["body"] += (
+            "\nselected_primary_profiles=research-department,risk-management"
+        )
         client = Client(root, [*self.primary])
         delivery = DeliverySpy()
         service = CeoSupervisorService(
@@ -544,7 +723,11 @@ class TerminalProjectionTests(unittest.TestCase):
         )
 
         service.handle_terminal_event(
-            {"event_id": "terminal-retryable-card", "task_id": RESEARCH, "kind": "completed"}
+            {
+                "event_id": "terminal-retryable-card",
+                "task_id": RESEARCH,
+                "kind": "completed",
+            }
         )
 
         self.assertEqual(delivery.calls[:2], [RESEARCH, RESEARCH])

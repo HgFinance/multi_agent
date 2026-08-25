@@ -37,8 +37,6 @@ jobs:
         env:
           CONTROL_DATABASE_URL: postgresql://contract:contract@db.invalid/control
           PORTFOLIO_CORS_ALLOW_ORIGINS: https://portfolio.example.invalid
-          SUPABASE_URL: https://identity.example.invalid
-          SUPABASE_PUBLISHABLE_KEY: sb_publishable_contract_only
           TRADING_SERVICE_AUTH_SECRET: contract-service-proof-secret-0123456789
           TRADING_INTERNAL_SERVICE_AUTH_SECRET: contract-internal-proof-secret-0123456
           MARKET_API_URL: https://market.example.invalid

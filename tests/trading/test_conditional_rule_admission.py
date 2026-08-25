@@ -22,6 +22,7 @@ from rules.admission import (  # noqa: E402
     ConditionalRuleAdmissionError,
     _assert_recent_evaluation,
     _conditional_order_payload,
+    _fresh_proof_jti,
 )
 from directives.contracts import DirectiveAction, UserDirectiveRequest  # noqa: E402
 from directives.market_data import (  # noqa: E402
@@ -142,6 +143,17 @@ def test_conditional_evaluation_must_still_be_recent_at_trading_admission() -> N
         _assert_recent_evaluation(spec, now - timedelta(seconds=31), now=now)
 
     assert raised.value.code == "TRADING_CONDITIONAL_RULE_EVALUATION_STALE"
+
+
+def test_each_conditional_submission_attempt_gets_a_fresh_one_use_proof() -> None:
+    execution_id = uuid4()
+
+    first = _fresh_proof_jti(execution_id)
+    second = _fresh_proof_jti(execution_id)
+
+    assert first.startswith(f"conditional-rule:{execution_id}:")
+    assert second.startswith(f"conditional-rule:{execution_id}:")
+    assert first != second
 
 
 def test_conditional_limit_quote_can_use_rule_lifetime_cap_only_with_override(

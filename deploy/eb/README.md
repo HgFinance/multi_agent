@@ -50,41 +50,10 @@ EB Docker 플랫폼은 **번들 루트의 `docker-compose.yml`** 을 실행한�
 eb init --platform "Docker running on 64bit Amazon Linux 2023" --region ap-northeast-2
 eb create hedgefund-paper --instance-types t3.large --single
 
-# CONTROL_DATABASE_URL은 Supabase DB가 아니라 같은 AWS private network 안의
-# operational PostgreSQL을 가리킨다. 누락되면 Compose가 어떤 서비스도 시작하지 않는다.
-TRADING_PROOF_SECRET="$(openssl rand -hex 32)"
-TRADING_INTERNAL_AUTH_SECRET="$(openssl rand -hex 32)"
-eb setenv \
-  CONTROL_DATABASE_URL='postgresql://...private-operational-postgres...' \
-  APP_ENV=production \
-  PORTFOLIO_AUTH_MODE=supabase_jwt \
-  PORTFOLIO_AUTH_REQUIRED=true \
-  PORTFOLIO_CORS_ALLOW_ORIGINS='https://app.example.com' \
-  SUPABASE_URL='https://YOUR_PROJECT_REF.supabase.co' \
-  SUPABASE_PUBLISHABLE_KEY='sb_publishable_...' \
-  SUPABASE_AUTH_AUDIENCE=authenticated \
-  PORTFOLIO_DATA_MODE=production \
-  TRADING_SERVICE_AUTH_SECRET="$TRADING_PROOF_SECRET" \
-  TRADING_SERVICE_AUTH_ISSUER=portfolio-bff \
-  TRADING_SERVICE_AUTH_AUDIENCE=trading-api \
-  TRADING_INTERNAL_SERVICE_AUTH_SECRET="$TRADING_INTERNAL_AUTH_SECRET" \
-  TRADING_INTERNAL_SERVICE_AUTH_ISSUER=hedgefund-service-issuer \
-  TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE=trading-api \
-  MARKET_API_URL='http://private-market-api.internal:8036' \
-  PAPER_DB=true \
-  ACCOUNTING_MODE=PAPER_DB
-unset TRADING_PROOF_SECRET TRADING_INTERNAL_AUTH_SECRET
-
-eb deploy --staged
+# 현재 단계에서는 AWS/EB 배포를 수행하지 않는다. 이 디렉터리는 예전 배포
+# 형식을 보존한 참고 자료일 뿐이며, 로그인·세션·외부 사용자 인증은 구현하지
+# 않는다. 모의투자는 저장소 루트에서 `npm run bff`와 `npm run dev`로만 연다.
 ```
-
-`SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` are required Compose inputs, so
-an EB deployment stops during Compose interpolation when either is absent. The
-issuer and JWKS URL default to `<SUPABASE_URL>/auth/v1` and its well-known JWKS
-endpoint; set `SUPABASE_AUTH_ISSUER` / `SUPABASE_AUTH_JWKS_URL` only when the
-hosted Auth project publishes different endpoints. Never provide
-`SUPABASE_SERVICE_ROLE_KEY` or the Supabase JWT signing secret to
-`portfolio-bff`: user JWT verification needs only public identity settings.
 
 `PORTFOLIO_CORS_ALLOW_ORIGINS` is a comma-separated list of exact HTTP or HTTPS
 frontend origins (scheme + host + optional port, no path and no wildcard).
@@ -93,7 +62,7 @@ GET/POST/PUT/OPTIONS methods and its explicit request-header allowlist,
 including `X-User-Id`; credentialed cookies remain disabled.
 
 `TRADING_SERVICE_AUTH_SECRET` is a private BFF-to-Trading proof secret and must
-be identical in both containers; it is never a Supabase key or browser value.
+be identical in both containers; it is never a browser value.
 The example generates a fresh 256-bit value; placeholder strings are rejected
 even when they are longer than 32 bytes.
 `TRADING_INTERNAL_SERVICE_AUTH_SECRET` is a distinct verifier secret for the

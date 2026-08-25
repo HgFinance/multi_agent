@@ -127,4 +127,4 @@ finally { $zip.Dispose() }
 
 $sizeMb = [Math]::Round((Get-Item $out).Length / 1MB, 1)
 Write-Host "ok - $out ($sizeMb MB)"
-Write-Host "다음: deploy/eb/README.md 3절대로 CONTROL_DATABASE_URL, PORTFOLIO_CORS_ALLOW_ORIGINS, SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY 등 필수값을 eb setenv 한 뒤 eb deploy"
+Write-Host "현재는 EB 배포를 수행하지 않습니다. 로컬 모의투자는 저장소 루트의 npm run bff / npm run dev를 사용하세요."

@@ -156,7 +156,11 @@ class MirrorStore(Protocol):
 
     def get_request(self, request_id: str) -> MirrorRequestRecord | None: ...
 
+    def list_request_ids(self, *, limit: int = 1000) -> list[str]: ...
+
     def save_response(self, request_id: str, response: dict[str, Any]) -> None: ...
+
+    def release_request(self, request: CanonicalIngress) -> bool: ...
 
     def publish_event(self, event: MirrorEvent) -> bool: ...
 
@@ -237,6 +241,11 @@ class InMemoryMirrorStore:
         with self._lock:
             return self._requests.get(request_id)
 
+    def list_request_ids(self, *, limit: int = 1000) -> list[str]:
+        with self._lock:
+            bounded_limit = max(1, min(int(limit), 10_000))
+            return list(self._requests)[-bounded_limit:]
+
     def save_response(self, request_id: str, response: dict[str, Any]) -> None:
         with self._lock:
             record = self._requests.get(request_id)
@@ -245,6 +254,23 @@ class InMemoryMirrorStore:
             self._requests[request_id] = MirrorRequestRecord(
                 record.request, dict(response)
             )
+
+    def release_request(self, request: CanonicalIngress) -> bool:
+        """Release only the same unfinished claim after execution raised."""
+
+        with self._lock:
+            record = self._requests.get(request.request_id)
+            if (
+                record is None
+                or record.response is not None
+                or not _same_canonical_request(record.request, request)
+            ):
+                return False
+            source_key = self._source_key(request)
+            if self._source_index.get(source_key) == request.request_id:
+                self._source_index.pop(source_key, None)
+            self._requests.pop(request.request_id, None)
+            return True
 
     def publish_event(self, event: MirrorEvent) -> bool:
         with self._lock:
@@ -326,6 +352,10 @@ class RedisMirrorStore:
         self.request_prefix = "hf:ui-ceo-mirror:request:"
         self.source_prefix = "hf:ui-ceo-mirror:source:"
         self.event_prefix = "hf:ui-ceo-mirror:event:"
+        # SCAN is incremental. Keep the cursor on the long-lived worker store
+        # so a large request backlog is visited over successive cycles instead
+        # of returning the same first keys forever.
+        self._request_scan_cursor = 0
 
     @staticmethod
     def _source_key(request: CanonicalIngress) -> str:
@@ -391,6 +421,36 @@ class RedisMirrorStore:
             response=payload.get("response"),
         )
 
+    def list_request_ids(self, *, limit: int = 1000) -> list[str]:
+        """Return a bounded request-id page without blocking Redis.
+
+        The projection worker is a reconciler, not a second source of truth. A
+        Redis SCAN page lets it discover requests that never opened an SSE
+        connection while preserving the existing request TTL and avoiding
+        KEYS on the production Redis instance.
+        """
+
+        bounded_limit = max(1, min(int(limit), 10_000))
+        prefix_length = len(self.request_prefix)
+        request_ids: list[str] = []
+        cursor = self._request_scan_cursor
+        while True:
+            cursor, keys = self.client.scan(
+                cursor=cursor,
+                match=f"{self.request_prefix}*",
+                count=min(max(bounded_limit * 2, 50), 500),
+            )
+            for key in keys:
+                request_id = str(key)[prefix_length:]
+                if request_id:
+                    request_ids.append(request_id)
+                if len(request_ids) >= bounded_limit:
+                    break
+            if len(request_ids) >= bounded_limit or cursor == 0:
+                break
+        self._request_scan_cursor = int(cursor)
+        return request_ids
+
     def save_response(self, request_id: str, response: dict[str, Any]) -> None:
         key = self.request_prefix + request_id
         raw = self.client.get(key)
@@ -399,6 +459,38 @@ class RedisMirrorStore:
         payload = json.loads(raw)
         payload["response"] = response
         self.client.set(key, json.dumps(payload), ex=self.ttl_seconds)
+
+    def release_request(self, request: CanonicalIngress) -> bool:
+        """Atomically release one exact unfinished canonical ingress claim."""
+
+        request_key = self.request_prefix + request.request_id
+        raw = self.client.get(request_key)
+        if not raw:
+            return False
+        payload = json.loads(raw)
+        stored = CanonicalIngress.model_validate(payload["request"])
+        if payload.get("response") is not None or not _same_canonical_request(
+            stored, request
+        ):
+            return False
+        source_key = self.source_prefix + self._source_key(request)
+        released = self.client.eval(
+            """
+            if redis.call('GET', KEYS[1]) == ARGV[1]
+               and redis.call('GET', KEYS[2]) == ARGV[2] then
+              redis.call('DEL', KEYS[1])
+              redis.call('DEL', KEYS[2])
+              return 1
+            end
+            return 0
+            """,
+            2,
+            request_key,
+            source_key,
+            raw,
+            request.request_id,
+        )
+        return bool(released)
 
     def publish_event(self, event: MirrorEvent) -> bool:
         key = self.event_prefix + event.event_id
@@ -461,14 +553,14 @@ class ResilientMirrorStore:
         self.primary = primary
         self.fallback = fallback
 
-    def _call(self, method: str, *args: Any) -> Any:
+    def _call(self, method: str, *args: Any, **kwargs: Any) -> Any:
         try:
-            return getattr(self.primary, method)(*args)
+            return getattr(self.primary, method)(*args, **kwargs)
         except MirrorRequestConflict:
             raise
         except Exception:  # noqa: BLE001 - BFF must not turn Redis outage into a CEO retry storm.
             if self.fallback is not None:
-                return getattr(self.fallback, method)(*args)
+                return getattr(self.fallback, method)(*args, **kwargs)
             raise MirrorStoreUnavailable(
                 f"mirror store unavailable during {method}"
             ) from None
@@ -481,8 +573,14 @@ class ResilientMirrorStore:
     def get_request(self, request_id: str) -> MirrorRequestRecord | None:
         return self._call("get_request", request_id)
 
+    def list_request_ids(self, *, limit: int = 1000) -> list[str]:
+        return self._call("list_request_ids", limit=limit)
+
     def save_response(self, request_id: str, response: dict[str, Any]) -> None:
         self._call("save_response", request_id, response)
+
+    def release_request(self, request: CanonicalIngress) -> bool:
+        return bool(self._call("release_request", request))
 
     def publish_event(self, event: MirrorEvent) -> bool:
         return bool(self._call("publish_event", event))
@@ -620,7 +718,16 @@ def execute_once(
             ),
         )
 
-    response = execute()
+    try:
+        response = execute()
+    except Exception:
+        # The lower CEO/order boundaries use this same request ID and are
+        # independently idempotent.  Keeping an empty mirror claim forever is
+        # therefore less safe than releasing only the exact unfinished claim:
+        # it turns a correctable validation/configuration outage into a silent
+        # permanent drop.
+        store.release_request(request)
+        raise
     store.save_response(request.request_id, response)
     task_id = str(response.get("task_id") or "") or None
     if created and task_id:

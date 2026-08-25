@@ -2,8 +2,8 @@
 -- It creates the minimum parent row needed to exercise the governance.mandates
 -- FK path (fund_id) for PostgresMandateVersionRepository integration tests.
 --
--- It deliberately does NOT create a governance.user_profiles/auth.users row -
--- Supabase Auth owns account creation, not this fixture. A governance.mandates
+-- It deliberately does NOT create a governance.user_profiles row -
+-- Account creation is outside this fixture. A governance.mandates
 -- row still cannot be inserted with this fixture alone (owner_user_id is
 -- not null) - see departments/00-ceo-office/src/mandate/postgres_repository.py
 -- self-check for what that blocks.

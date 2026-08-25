@@ -53,6 +53,7 @@ test("proxy forwards identity headers server-side and never a cookie", async () 
         headers: {
           "x-user-id": "user-1",
           "idempotency-key": "key-1",
+          authorization: "Bearer stale",
           cookie: "session=secret",
         },
       }),
@@ -70,6 +71,7 @@ test("proxy forwards identity headers server-side and never a cookie", async () 
     const forwarded = new Headers(seen[0].init.headers);
     assert.equal(forwarded.get("x-user-id"), "user-1");
     assert.equal(forwarded.get("idempotency-key"), "key-1");
+    assert.equal(forwarded.get("authorization"), null);
     assert.equal(forwarded.get("cookie"), null);
     assert.equal(forwarded.get("x-forwarded-host"), "localhost:3002");
     assert.equal(seen[0].init.redirect, "manual");

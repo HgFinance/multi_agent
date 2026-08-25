@@ -1,17 +1,11 @@
 /**
- * 명시적 local/test fixture 모드에서만 쓰는 고정 계정.
- *
- * ## ⚠️ 이건 인증이 아니다
+ * AI Office 화면과 로컬 BFF 통신에 사용하는 고정 데모 계정.
  *
  * `X-User-Id`는 서명도 만료도 없는 평범한 헤더다. 누구나 아무 UUID나 보낼 수
- * 있으므로 **신원을 증명하지 않는다.** 폐쇄망 팀 테스트 전제이며, 공개 배포
- * production에서는 `AuthProvider`와 JWT Bearer 경계가 이 모듈을 사용하지 않는다.
+ * 있으므로 공개 배포의 사용자 식별 수단으로 사용하지 않는다. 폐쇄망 데모와
+ * 결정론 테스트 전제다.
  *
- * 그래서 화면에 "로그인"이라고 쓰지 않는다 — 로그인 기능이 없는데 있는 것처럼
- * 보이면 안 된다. 이 앱의 기존 원칙과 같다(`TopNav.tsx`: 연결 안 된 항목은
- * 링크가 아니라 disabled 버튼).
- *
- * 실제 사용자의 허가된 펀드는 `/ui/me`와 `PortfolioSessionProvider`가 관리한다.
+ * 실제 Fund 데이터가 있으면 `/ui/me`와 `PortfolioSessionProvider`가 보강한다.
  *
  * ## 왜 계정이 하나로 고정됐나 (2026-08-19)
  *
@@ -54,12 +48,16 @@ export interface TestAccount {
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DISCORD_ID_RE = /^\d{15,25}$/;
 
-const UNCONFIGURED_ACCOUNT: TestAccount = {
-  userId: "",
+const LOCAL_DEMO_ACCOUNT: TestAccount = {
+  userId: "00000000-0000-4000-8000-00000000cec0",
   label: "Fund Owner",
-  fundId: null,
+  fundId: "5c26db42-ce83-4daf-b1dc-c81680c13a6c",
   colorClass: "bg-primary",
 };
+
+// Keep the local mock usable even when DISCORD_ACTOR_MAP is not provided.
+// This is a fixture identity, not a login or a public-service credential.
+const UNCONFIGURED_ACCOUNT: TestAccount = LOCAL_DEMO_ACCOUNT;
 
 export function accountFromDiscordActorMap(raw: string | undefined): TestAccount {
   for (const entry of (raw ?? "").split(/[\s,]+/)) {
@@ -85,8 +83,8 @@ export const DEFAULT_ACCOUNT = accountFromDiscordActorMap(process.env.DISCORD_AC
 /**
  * 계정을 항상 환경에서 정한 고정값으로 준다. 인자는 시그니처 호환용으로만 남아 있다
  * (`PortfolioSessionProvider.tsx`가 여전히 값을 넘겨 부른다) - 계정이 하나뿐이므로
- * "찾는다"는 개념 자체가 없다. Supabase 세션이 이 uuid와 다른 값을 들고 있어도
- * (비-fixture 경로에서는 애초에 호출되지 않는다) 조용히 고정 계정으로 떨어진다.
+ * "찾는다"는 개념 자체가 없다. 호출부가 전달하는 값과 무관하게 고정 계정을
+ * 반환한다.
  */
 export function accountFor(userId?: string | null): TestAccount {
   void userId;

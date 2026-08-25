@@ -75,6 +75,7 @@ ENABLE_LS_ORDER_EVENTS = _env_flag("ENABLE_LS_ORDER_EVENTS")
 ENABLE_LS_MARKET_DATA = _env_flag("ENABLE_LS_MARKET_DATA")
 # 거래내역·잔고 조회도 REST만 사용한다. 실시간 주문 이벤트와 분리한다.
 ENABLE_LS_ACCOUNT_DATA = _env_flag("ENABLE_LS_ACCOUNT_DATA")
+PORTFOLIO_LIVE_MODE = os.getenv("PORTFOLIO_LIVE_MODE", "broker").strip().casefold()
 MAX_EVENTS = int(os.getenv("LS_ORDER_EVENTS_MAX", "200"))
 # 거래내역 TR은 초당 1건이다. 화면이 3초마다 폴링해도 브로커를 때리지 않도록
 # 응답을 캐시한다 - 확정된 과거 거래라 자주 바뀌지 않는다.
@@ -698,6 +699,49 @@ def normalize_today_trades(payload: dict[str, Any], today: str) -> dict[str, Any
     return {"rows": merged}
 
 
+def summarize_today_trade_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build the today-summary contract from normalized broker trade rows.
+
+    Some PAPER accounts return the trade rows but omit ``t0150OutBlock``.
+    Those rows are still authoritative broker observations, so the dashboard
+    can derive a bounded summary without turning the missing summary block into
+    a fake 500/error state.
+    """
+
+    buy_quantity = sell_quantity = Decimal(0)
+    buy_amount = sell_amount = Decimal(0)
+    total_fee = total_tax = total_settlement = Decimal(0)
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        side = str(row.get("category") or "")
+        quantity = _dec(row.get("quantity"))
+        amount = abs(_dec(row.get("amount")))
+        settled = _dec(row.get("settled_amount"))
+        if "매수" in side:
+            buy_quantity += quantity
+            buy_amount += amount
+        elif "매도" in side:
+            sell_quantity += quantity
+            sell_amount += amount
+        total_fee += _dec(row.get("commission"))
+        total_tax += _dec(row.get("tax"))
+        total_settlement += settled
+    return {
+        "trade_count": len(rows),
+        "summary": {
+            "buy_quantity": _number(buy_quantity),
+            "sell_quantity": _number(sell_quantity),
+            "buy_amount": _number(buy_amount),
+            "sell_amount": _number(sell_amount),
+            "total_amount": _number(buy_amount + sell_amount),
+            "total_fee": _number(total_fee),
+            "total_tax": _number(total_tax),
+            "total_settlement": _number(total_settlement),
+        },
+    }
+
+
 def _dec(value: Any) -> Decimal:
     """합계용. 해석 못 하는 값은 0으로 두되 행 자체는 버리지 않는다."""
     if value is None or value == "":
@@ -1055,7 +1099,14 @@ class _Feed:
         event = normalize_order_event(tr_cd, body, self.seq)
         self.events.appendleft(event)
         if not self.account:
-            self.account = _account(body)
+            account = _account(body)
+            if account:
+                # CSPAQ12200 can transiently fail while the authenticated
+                # realtime channel is already usable.  Once an order event
+                # proves which account the channel belongs to, the old REST
+                # error is no longer the current account state.
+                self.account = account
+                self.account_error = None
         if event["kind"] == "FILLED":
             apply_fill(self.local_positions, event)
         return event["kind"]
@@ -1273,6 +1324,13 @@ async def _fetch_today_activity(config: Any, token: str) -> dict[str, Any]:
     return normalize_today_activity(body)
 
 
+async def _fetch_today_activity_fallback(config: Any, token: str) -> dict[str, Any]:
+    """Use the working normalized trade ledger when t0150 omits its summary."""
+
+    payload = await _fetch_today_trades(config, token)
+    return summarize_today_trade_rows(payload)
+
+
 async def _fetch_today_executions(
     config: Any, token: str
 ) -> tuple[dict[tuple[str, str], dict[str, Any]], list[dict[str, Any]]]:
@@ -1363,8 +1421,15 @@ async def _resync_today_activity(config: Any, token: str) -> None:
     """당일 매매 요약 실패가 계좌 잔고 스트림을 막지 않게 별도로 기록한다."""
     try:
         FEED.sync_today_activity(await _fetch_today_activity(config, token))
-    except Exception as exc:  # noqa: BLE001 - 카드만 비활성화하고 계좌 스트림은 유지한다
-        FEED.today_activity_error = _ls_error_detail(exc)[:300]
+    except Exception as exc:  # noqa: BLE001 - PAPER 응답 변형은 행 기반으로 복구한다
+        try:
+            FEED.sync_today_activity(
+                await _fetch_today_activity_fallback(config, token)
+            )
+        except Exception:  # noqa: BLE001 - 카드만 비활성화하고 계좌 스트림은 유지한다
+            FEED.today_activity_error = _ls_error_detail(exc)[:300]
+        else:
+            FEED.today_activity_error = None
     else:
         FEED.today_activity_error = None
 
@@ -1378,7 +1443,11 @@ async def _run_feed() -> None:
             config, ws_url = _config()
             token, _ = await _issue_token(config)
 
-            if not FEED.account:
+            configured_account = _configured_account(config.environment)
+            if configured_account:
+                FEED.account = configured_account
+                FEED.account_error = None
+            elif not FEED.account:
                 try:
                     FEED.account = await _fetch_account_no(config, token)
                 except Exception as exc:  # noqa: BLE001 - 계좌 조회 실패가 구독을 막지 않는다
@@ -1430,16 +1499,71 @@ async def _run_feed() -> None:
 # 조회
 # --------------------------------------------------------------------------
 
+def _fixture_portfolio_live() -> dict[str, Any]:
+    """Return a deterministic empty PAPER view for the local mock stack."""
+
+    now = datetime.now(timezone.utc).isoformat()
+    zero_summary = {
+        "buy_quantity": "0",
+        "sell_quantity": "0",
+        "buy_amount": "0",
+        "sell_amount": "0",
+        "total_amount": "0",
+        "total_fee": "0",
+        "total_tax": "0",
+        "total_settlement": "0",
+    }
+    return {
+        "schema_version": "trading.portfolio-live.v1",
+        "environment": "PAPER",
+        "environment_label": "모의투자",
+        "account": {"registered": True, "masked": "모의계좌", "error": None},
+        "stream": {"status": "IDLE", "error": None, "connected_at": None},
+        "orders": {
+            "kinds": [{"kind": kind, "label": KIND_LABELS[kind]} for kind in KINDS],
+            "counts": {kind: 0 for kind in KINDS},
+            "source": "LOCAL_FIXTURE",
+            "error": None,
+            "recent": [],
+        },
+        "holdings": {
+            "as_of": now,
+            "error": None,
+            "synced": True,
+            "drift": [],
+            "net_asset": "0",
+            "realized_pnl": "0",
+            "purchase_amount": "0",
+            "valuation": "0",
+            "valuation_pnl": "0",
+            "rows": [],
+        },
+        "today_activity": {
+            "as_of": now,
+            "error": None,
+            "data": {"trade_count": 0, "summary": zero_summary},
+        },
+        "server_time": now,
+        "authoritative": False,
+        "official_nav_source": "/accounting/v1/ledgers/{ledger_id}",
+    }
+
 def _registered_account() -> str | None:
     """정본은 브로커가 말해 준 값이다. `.env`는 계좌가 여럿일 때의 덮어쓰기용."""
-    environment = os.getenv("LS_ENV", "LIVE").strip().upper()
-    suffix = "_PAPER" if environment == "PAPER" else ""
-    return (os.getenv("LS_ACCOUNT_NO" + suffix, "") or "").strip() or FEED.account
+    return _configured_account() or FEED.account
+
+
+def _configured_account(environment: str | None = None) -> str | None:
+    selected = (environment or os.getenv("LS_ENV", "LIVE")).strip().upper()
+    suffix = "_PAPER" if selected == "PAPER" else ""
+    return (os.getenv("LS_ACCOUNT_NO" + suffix, "") or "").strip() or None
 
 
 @router.get("/ui/portfolio/live", operation_id="portfolio_live")
 async def portfolio_live(limit: int = 50) -> dict[str, Any]:
     """주문 상태와 브로커 잔고. 화면이 폴링으로 읽는다."""
+    if PORTFOLIO_LIVE_MODE == "fixture":
+        return _fixture_portfolio_live()
     if not ENABLE_LS_ORDER_EVENTS:
         raise HTTPException(
             503,

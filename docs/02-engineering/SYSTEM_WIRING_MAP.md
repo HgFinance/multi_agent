@@ -99,7 +99,7 @@
 
 | 서비스 | 하는 일 |
 |---|---|
-| `kanban-dispatcher` | **카드를 실제로 돌리는 유일한 엔진.** 60초 tick 으로 ready 카드를 집어 자기 컨테이너 안에서 `profiles/<assignee>` 를 HERMES_HOME 삼아 에이전트 subprocess 를 띄운다. 8개 프로필 전체를 보는 유일한 고권한 컨테이너 — 포트 절대 미게시. **이게 죽으면 카드는 ready 로 영원히 앉는다** |
+| `kanban-dispatcher` | **카드를 실제로 돌리는 유일한 엔진.** 1초 tick 으로 ready 카드를 집어 자기 컨테이너 안에서 `profiles/<assignee>` 를 HERMES_HOME 삼아 에이전트 subprocess 를 띄운다. Hermes의 board-wide `max_in_progress` 상한은 매 tick 유지한다. 8개 프로필 전체를 보는 유일한 고권한 컨테이너 — 포트 절대 미게시. **이게 죽으면 카드는 ready 로 영원히 앉는다** |
 | `ceo-kanban-supervisor` | CEO 종결 감시자. `kanban watch` 로 종결 이벤트를 구독해, primary 자식이 다 끝나면 QA 카드를, QA 가 끝나면 SYNTHESIZE 카드를 만든다. 이벤트당 최대 1개 bounded action, wakeup 은 root comment 로 durable 기록 |
 
 ### 🏭 전략 공장 (3)
@@ -179,7 +179,7 @@
                           │   생성은 docker exec → qa-hermes 의 hermes kanban create
                           │   scope 마커 comment 실패 시 503 fail-closed
                           ▼
-                 kanban-dispatcher (60초 tick)
+                 kanban-dispatcher (1초 tick)
                           │ ②ready 카드 집기 → 자기 안에서 ceo-agent 에이전트 spawn
                           ▼
                  CEO 플래너 턴 ③필요한 부서만 골라 자식 카드 생성 (고정 순서 없음)

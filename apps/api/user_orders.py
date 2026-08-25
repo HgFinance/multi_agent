@@ -1,11 +1,12 @@
-"""Authenticated, highest-priority user directives for PAPER trading only.
+"""Highest-priority local-fixture directives for PAPER trading only.
 
-The browser never talks to OMS or a broker directly.  This router authenticates
-the Supabase subject, authorizes one active fund/book, deterministically parses
-an optional Korean instruction, and forwards a payload-bound service proof to
-the private trading API.  Alpha and Risk services are intentionally absent from
-this user-directive lane.
+The browser never talks to OMS or a broker directly. This router uses the fixed
+local demo identity, authorizes one active fund/book, deterministically parses an
+optional Korean instruction, and forwards a payload-bound service proof to the
+private trading API. Alpha and Risk services are intentionally absent from this
+read-only local UI lane.
 """
+
 from __future__ import annotations
 
 import re
@@ -228,9 +229,7 @@ class UserDirectiveResponse(BaseModel):
 class PaperOrderWorkflowStatusResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["user-paper-order-status.v1"] = (
-        "user-paper-order-status.v1"
-    )
+    schema_version: Literal["user-paper-order-status.v1"] = "user-paper-order-status.v1"
     order_request_id: UUID
     client_request_id: str
     request_source: Literal["DISCORD", "WEB_OR_API"]
@@ -264,15 +263,9 @@ _GROUPED_INTEGER = r"(?:[1-9]\d{0,2}(?:,\d{3})+|[1-9]\d*)"
 _QUANTITY_PATTERN = re.compile(
     rf"(?<![\d,])({_GROUPED_INTEGER})\s*(?:주식|주)(?![\d,])"
 )
-_CODE_PATTERN = re.compile(
-    r"(?<![0-9A-Za-z,])([0-9A-Za-z]{6})(?![0-9A-Za-z,])"
-)
-_WON_PRICE_PATTERN = re.compile(
-    rf"(?<![\d,])({_GROUPED_INTEGER})\s*원"
-)
-_LIMIT_PRICE_PATTERN = re.compile(
-    rf"지정가(?:는|로|에)?\s*({_GROUPED_INTEGER})\s*원?"
-)
+_CODE_PATTERN = re.compile(r"(?<![0-9A-Za-z,])([0-9A-Za-z]{6})(?![0-9A-Za-z,])")
+_WON_PRICE_PATTERN = re.compile(rf"(?<![\d,])({_GROUPED_INTEGER})\s*원")
+_LIMIT_PRICE_PATTERN = re.compile(rf"지정가(?:는|로|에)?\s*({_GROUPED_INTEGER})\s*원?")
 _MARKET_PATTERN = re.compile(r"시장가(?:로|에)?")
 _LIMIT_MARKER_PATTERN = re.compile(r"지정가(?:는|로|에)?")
 
@@ -297,9 +290,7 @@ _CANCEL_ALL_PATTERN = re.compile(
     r"철회(?:해\s*줘|해줘|해주세요|해|하세요|하자)?)"
     r"(?:\s*(?:주세요|줘))?[.!]*$"
 )
-_ALLOWED_ORDER_RESIDUAL = re.compile(
-    r"^(?:(?:을|를|은|는|에|로|으로|좀|주문)\s*)*$"
-)
+_ALLOWED_ORDER_RESIDUAL = re.compile(r"^(?:(?:을|를|은|는|에|로|으로|좀|주문)\s*)*$")
 
 
 def _decimal_text(value: Decimal) -> str:
@@ -426,7 +417,8 @@ def parse_user_order_query(query: str) -> tuple[DirectiveAction, dict[str, Any]]
     elif selected_price_match is not None:
         consumed_spans.append(selected_price_match.span())
         consumed_spans.extend(
-            match.span() for match in _LIMIT_MARKER_PATTERN.finditer(normalized)
+            match.span()
+            for match in _LIMIT_MARKER_PATTERN.finditer(normalized)
             if not (
                 selected_price_match.start() <= match.start()
                 and match.end() <= selected_price_match.end()
@@ -478,7 +470,13 @@ def _idempotency_key(value: str | None) -> str:
 
 
 def _instruction_ref(
-    *, subject: str, fund_id: str, book_id: str, action: str, key: str, payload_hash: str
+    *,
+    subject: str,
+    fund_id: str,
+    book_id: str,
+    action: str,
+    key: str,
+    payload_hash: str,
 ) -> str:
     identity = canonical_json(
         {
@@ -514,9 +512,7 @@ def _validated_response(
         "directive_id": str(directive_id) if directive_id is not None else None,
         "fund_id": str(fund_id) if fund_id is not None else None,
         "book_id": str(book_id) if book_id is not None else None,
-        "action": (
-            action.value if isinstance(action, DirectiveAction) else action
-        ),
+        "action": (action.value if isinstance(action, DirectiveAction) else action),
         "instruction_ref": instruction_ref,
         "idempotency_key": idempotency_key,
         "payload_sha256": expected_payload_sha256,
@@ -594,9 +590,7 @@ def _submit(
             idempotency_key=key,
             payload_hash=payload_hash,
         )
-        raw = submit_user_directive(
-            body=body, proof=proof, idempotency_key=key
-        )
+        raw = submit_user_directive(body=body, proof=proof, idempotency_key=key)
     except TradingProofConfigurationError as exc:
         raise HTTPException(
             status_code=503, detail="trading_service_auth_unavailable"
@@ -666,9 +660,34 @@ def read_verified_paper_directive_status(
     )
 
 
-@router.post(
-    "/ui/paper-orders", response_model=UserDirectiveResponse, status_code=202
-)
+def read_paper_directive_status_for_admitted_authority(
+    *,
+    user_id: str,
+    fund_id: str,
+    book_id: str,
+    directive_id: str,
+) -> UserDirectiveResponse:
+    """Read status for a system workflow whose authority was already admitted.
+
+    This is not an HTTP route and deliberately does not repeat interactive
+    portfolio authorization.  Its caller must first match all four identifiers
+    against the immutable user-order admission and the conditional execution
+    event.  The Trading read still uses the existing short-lived, scoped proof
+    and the same response validation as every user-facing status lookup.
+    """
+
+    access = {
+        "user_id": str(UUID(str(user_id))),
+        "fund_id": str(UUID(str(fund_id))),
+        "book_id": str(UUID(str(book_id))),
+    }
+    return _status_for_access(
+        directive_id=UUID(str(directive_id)),
+        access=access,
+    )
+
+
+@router.post("/ui/paper-orders", response_model=UserDirectiveResponse, status_code=202)
 @router.post(
     "/trading/agent/order",
     response_model=UserDirectiveResponse,
@@ -677,9 +696,7 @@ def read_verified_paper_directive_status(
 )
 def place_paper_order(
     request: PaperOrderRequest,
-    idempotency_key: Annotated[
-        str | None, Header(alias="Idempotency-Key")
-    ] = None,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
     subject: str | None = Depends(current_user),
 ) -> UserDirectiveResponse:
     try:
@@ -713,9 +730,7 @@ def place_paper_order(
 )
 def sell_all_paper_positions(
     request: PaperAggregateRequest,
-    idempotency_key: Annotated[
-        str | None, Header(alias="Idempotency-Key")
-    ] = None,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
     subject: str | None = Depends(current_user),
 ) -> UserDirectiveResponse:
     return _submit(
@@ -735,9 +750,7 @@ def sell_all_paper_positions(
 )
 def cancel_all_paper_orders(
     request: PaperAggregateRequest,
-    idempotency_key: Annotated[
-        str | None, Header(alias="Idempotency-Key")
-    ] = None,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
     subject: str | None = Depends(current_user),
 ) -> UserDirectiveResponse:
     return _submit(
@@ -754,6 +767,12 @@ def _status(
     *, directive_id: UUID, fund_id: UUID, book_id: UUID, subject: str | None
 ) -> UserDirectiveResponse:
     access = require_trading_book_access(subject, str(fund_id), str(book_id))
+    return _status_for_access(directive_id=directive_id, access=access)
+
+
+def _status_for_access(
+    *, directive_id: UUID, access: dict[str, str]
+) -> UserDirectiveResponse:
     payload_hash = payload_sha256({})
     status_key = f"status:{directive_id}"
     try:
@@ -782,9 +801,7 @@ def _status(
     )
 
 
-@router.get(
-    "/ui/paper-orders/{directive_id}", response_model=UserDirectiveResponse
-)
+@router.get("/ui/paper-orders/{directive_id}", response_model=UserDirectiveResponse)
 @router.get(
     "/ui/paper-orders/{directive_id}/status",
     response_model=UserDirectiveResponse,
