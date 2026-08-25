@@ -46,8 +46,8 @@ from typing import Any
 from uuid import uuid4
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, model_validator
 
 # 저장소 루트의 .env를 읽는다 - 이미 설정된 프로세스 환경변수는 덮어쓰지 않는다
@@ -107,6 +107,7 @@ from observability import (
     WorkerRegistryUnavailable,
     collect_workforce_observability,
 )
+from scorecard_brief import build_scorecard_brief
 from action import (
     ActionReviewMismatchError,
     ActionStatus,
@@ -1538,6 +1539,15 @@ def _budget_assessment_dict(assessment) -> dict:
 
 @app.get("/workforce/v1/departments/{department_code}/scorecard")
 def get_department_scorecard_real(department_code: str, window_start: datetime, window_end: datetime):
+    return _real_department_scorecard(department_code, window_start, window_end)
+
+
+def _real_department_scorecard(department_code: str, window_start: datetime, window_end: datetime) -> dict:
+    """실 Snapshot 조회 본체. GET .../scorecard 와 scorecard-brief 가 함께 쓴다.
+
+    브리프가 이 함수를 거치지 않고 자체 조회를 만들면, 같은 부서의 같은 창을 두
+    경로가 서로 다르게 집계하는 순간을 아무도 못 잡는다.
+    """
     if _scorecard_repo is None:
         raise HTTPException(
             status_code=501,
@@ -1565,6 +1575,37 @@ def get_department_scorecard_real(department_code: str, window_start: datetime, 
         capacity=capacity, cost_snapshots=cost_snapshots,
         finding_count=finding_count, rework_rate=rework_rate,
         quality_references=collect_quality_references(quality_snapshots).as_dict(),
+    )
+
+
+@app.get("/workforce/v1/departments/scorecard-brief", response_class=PlainTextResponse)
+def get_department_scorecard_brief(
+    window_start: datetime,
+    window_end: datetime,
+    department_code: list[str] = Query(...),
+):
+    """부서 Scorecard 를 부서장(LLM) 컨텍스트용 마크다운 브리프로 인코딩해 돌려준다.
+
+    JSON 응답(GET .../scorecard)은 그대로 둔다 - 이 엔드포인트는 같은 값의 **다른
+    인코딩**이지 다른 집계가 아니다(둘 다 _real_department_scorecard 를 거친다).
+    부서 6개를 나란히 비교하는 소비자는 부서장 하나뿐이라, 부서별 4블록 중첩 JSON 을
+    6번 받아 스스로 맞붙이게 하지 않는다.
+
+    department_code 는 필수이고 반복 지정한다. 기본값으로 "6개 투자본부"를 여기서
+    정하지 않는다 - Workforce Plan 쪽(list_workforce_plans)이 쓰는 부서 키와
+    workforce.departments 의 정본 department_code 가 서로 다른 이름 공간이라
+    (INVESTMENT_DEPARTMENT_STAGE 는 Langfuse stage 키다), 여기서 한쪽을 골라 기본값을
+    만들면 조용히 빈 브리프가 나온다. 호출자가 정본 코드를 명시하게 둔다.
+
+    결측 규약은 JSON 과 같다 - Snapshot 없음은 0 이 아니라 NO_SNAPSHOT 이고, 창이
+    다른 부서는 한 표에 묶이지 않는다(scorecard_brief.py).
+    """
+    scorecards = [
+        _real_department_scorecard(code, window_start, window_end) for code in department_code
+    ]
+    return PlainTextResponse(
+        build_scorecard_brief(scorecards),
+        media_type="text/markdown; charset=utf-8",
     )
 
 
@@ -2059,6 +2100,21 @@ if __name__ == "__main__":
     # 아니라 "참조가 없었다"는 사실이고, GET 경로가 quality_snapshots 에서 채운다.
     assert r13.json()["quality"]["eval_run_ids"] == [], r13.text
     assert r13.json()["quality"]["role_kpi"] == [], r13.text
+
+    # 3-1. Scorecard 브리프(부서장 컨텍스트용 마크다운 인코딩).
+    # JSON 경로와 같은 조회를 거치므로 저장소가 없으면 브리프도 501이다 - 표 모양만
+    # 갖춘 빈 브리프를 성공처럼 돌려주면 부서장이 "지표 없음"을 관측 결과로 읽는다.
+    r13c = client.get("/workforce/v1/departments/scorecard-brief", params={
+        "window_start": t0, "window_end": t_exp, "department_code": ["research-department"],
+    })
+    assert r13c.status_code == 501, r13c.text
+    # 부서를 하나도 지정하지 않으면 기본값(6개 본부)을 만들지 않고 거절한다.
+    r13d = client.get("/workforce/v1/departments/scorecard-brief",
+                      params={"window_start": t0, "window_end": t_exp})
+    assert r13d.status_code == 422, r13d.text
+    # 이 경로가 {department_code}/scorecard 라우트에 잡아먹히지 않아야 한다
+    # (그러면 부서 이름이 "scorecard-brief"인 404가 되고 원인이 안 보인다).
+    assert "scorecard-brief" not in r13c.json()["detail"], r13c.text
 
     # 3a. Quality Snapshot - DATABASE_URL 없는 이 self-check 환경에서는 501로 막혀야
     # 한다(실 DB 왕복 검증은 postgres_scorecard_repository.py 자체 점검이 담당).

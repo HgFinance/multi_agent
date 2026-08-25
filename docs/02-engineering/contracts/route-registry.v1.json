@@ -619,6 +619,10 @@
         },
         {
           "method": "GET",
+          "path": "/workforce/v1/departments/scorecard-brief"
+        },
+        {
+          "method": "GET",
           "path": "/workforce/v1/departments/{department_code}/quality-snapshots"
         },
         {
