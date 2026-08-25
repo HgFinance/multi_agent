@@ -833,19 +833,20 @@ def activate_limits_from_mandate(body: ActivatedMandateCompilationIn):
 def calculate_position_risk_plan(body: PositionRiskPlanRequest):
     """Calculate a deterministic PAPER proposal without creating an order."""
 
-    result = plan_position_risk(body)
+    root_metadata = {
+        "task_id": body.task_id,
+        "trace_id": body.trace_id,
+        "risk_plan_id": "pending-deterministic-id",
+        "mandate_version_id": str(body.mandate_version_id),
+        "input_hash": "pending-deterministic-hash",
+        "algorithm_version": "dynamic-position-risk-planner.v1",
+        "status": "running",
+    }
     with risk_span(
         "risk.advisory",
-        {
-            "task_id": result.task_id,
-            "trace_id": result.trace_id,
-            "risk_plan_id": str(result.risk_plan_id),
-            "mandate_version_id": result.mandate_version_id,
-            "input_hash": result.input_hash,
-            "algorithm_version": result.calculation_version,
-            "status": result.action,
-        },
+        root_metadata,
     ):
+        result = plan_position_risk(body)
         repository = _risk_control_repository()
         if repository is not None and result.action == "PROPOSE":
             try:
