@@ -7,6 +7,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -130,6 +131,8 @@ class ConditionalRuleView(BaseModel):
 
 
 _THREE_MINUTE_BAR = re.compile(r"(?<!\d)3\s*분봉")
+_KST = ZoneInfo("Asia/Seoul")
+_KRX_REGULAR_CLOSE = (15, 30)
 
 
 def _rewrite_three_minute_nodes(node: ExpressionNode) -> tuple[ExpressionNode, bool]:
@@ -202,11 +205,36 @@ def _raw_sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _default_krx_close(now: datetime) -> datetime:
+    """Return the current or next weekday KRX regular-session close.
+
+    Explicit expiries remain authoritative.  This bounded DAY-style fallback
+    replaces the surprising ten-minute TTL while ensuring an omitted expiry
+    never becomes an unattended multi-day instruction.  The order guard still
+    fail-closes against the authoritative market-session calendar.
+    """
+
+    local_now = now.astimezone(_KST)
+    day = local_now.date()
+    while True:
+        close = datetime(
+            day.year,
+            day.month,
+            day.day,
+            *_KRX_REGULAR_CLOSE,
+            tzinfo=_KST,
+        )
+        if day.weekday() < 5 and close > local_now:
+            return close.astimezone(timezone.utc)
+        day += timedelta(days=1)
+
+
 def _expiry(value: datetime | None, *, now: datetime) -> datetime:
-    # Conditional rules are intentionally short-lived unless the user gives
-    # an explicit expiry. This keeps a PAPER test from becoming a durable
-    # unattended order instruction.
-    expiry = value.astimezone(timezone.utc) if value else now + timedelta(minutes=10)
+    expiry = (
+        value.astimezone(timezone.utc)
+        if value
+        else _default_krx_close(now)
+    )
     if expiry <= now:
         raise HTTPException(status_code=422, detail="conditional_rule_expiry_in_past")
     if expiry > now + timedelta(days=365):
@@ -323,6 +351,8 @@ def _build_preview(
         clarifications.append("TIMEFRAME_3M_UNSUPPORTED")
     clarifications = tuple(dict.fromkeys(clarifications))
     assumptions = list(preview_assumptions(request.raw_instruction, spec))
+    if candidate.expires_at is None:
+        assumptions.append("DEFAULT_EXPIRY_KRX_REGULAR_CLOSE")
     if timeframe_fallback:
         assumptions.append("TIMEFRAME_FALLBACK_3M_TO_5M")
     digest = rule_fingerprint(spec)

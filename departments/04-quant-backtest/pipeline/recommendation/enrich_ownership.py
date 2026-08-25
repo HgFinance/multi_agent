@@ -38,7 +38,22 @@ def _levels(symbol: str) -> dict:
 def main() -> int:
     t0 = time.time()
     scan = json.load(open(IN, encoding="utf-8"))
-    cands = scan.get("candidates", [])[:MAX_N]
+
+    # ▶ 기관 매수를 먼저 본다. 섞인 candidates 에서 상위 N 을 뽑으면 %p 가 큰
+    #   지배주주 종목만 걸려서, 정작 "외부 기관이 돈 주고 샀다"는 신호가
+    #   정밀조회에 한 번도 안 들어간다(실측 2026-08-25: 상위 5개 전부 계열).
+    seen, cands = set(), []
+    for bucket in ("by_institution", "by_controlling", "candidates"):
+        for c in scan.get(bucket, []):
+            if c["symbol"] in seen:
+                continue
+            seen.add(c["symbol"])
+            c = dict(c, _bucket=bucket)
+            cands.append(c)
+            if len(cands) >= MAX_N:
+                break
+        if len(cands) >= MAX_N:
+            break
     print(f"매집 후보 {len(scan.get('candidates', []))}개 중 {len(cands)}개 정밀조회 "
           f"(창 {scan['window']['begin']}~{scan['window']['end']})", flush=True)
 
@@ -49,11 +64,14 @@ def main() -> int:
 
         # ── 지분공시 매집 (관측) ─────────────────────────────────────────
         holders = ", ".join(c.get("buyers", [])[:3])
+        types = c.get("by_buyer_type_pp") or {}
+        type_txt = " ".join(f"{k}:{v:+.2f}%p" for k, v in types.items())
+        own_summary = (f"지분공시 장내 순증 {c['net_market_buy_ratio_pp']:+.2f}%p"
+                       f"{' (' + type_txt + ')' if type_txt else ''}, "
+                       f"매수자 {c['buyer_count']}명({holders})")
         axes.append({
             "axis": "ownership", "status": "OK", "value": None, "reason": "",
-            "summary": (f"지분공시 장내 순증 {c['net_market_buy_ratio_pp']:+.2f}%p, "
-                        f"매수자 {c['buyer_count']}명({holders})"),
-            "detail": c,
+            "summary": own_summary, "detail": c,
         })
 
         # ── 수급 (t1717) ────────────────────────────────────────────────
@@ -61,11 +79,20 @@ def main() -> int:
             flow = ls.investor_flow(sym, 25); calls += 1
             rows = flow.get("items", [])
             def streak(key, positive):
-                n = 0
+                """선두 미집계는 건너뛰고, 중간 구멍에서만 끊는다.
+
+                t1717 은 장중에 그날 집계를 안 준다. 목록이 최신순이라 첫 행이
+                늘 비어 있고, 거기서 끊으면 연속일수가 **항상 0** 이 된다
+                (실측 2026-08-25에 그 상태였다).
+                """
+                n, started = 0, False
                 for r in rows:
                     v = r.get(key)
                     if v is None:
-                        break
+                        if started:
+                            break
+                        continue
+                    started = True
                     if (v > 0) if positive else (v < 0):
                         n += 1
                     else:
@@ -105,11 +132,24 @@ def main() -> int:
         fund = None
         try:
             fund = ls.stock_fundamental(sym); calls += 1
+            cap = fund.get("시가총액_억원")
+            # ▶ 규모를 같이 낸다. 1%p 는 시총 100억 회사와 20조 회사에서
+            #   금액이 2,000배 차이다 - 숫자만 나란히 두면 오독한다.
+            try:
+                cap_won = float(str(cap).replace(",", "")) if cap else None
+            except (TypeError, ValueError):
+                cap_won = None
+            est = (cap_won * c["net_market_buy_ratio_pp"] / 100.0
+                   if cap_won else None)
+            scale = (f" · 시총 {cap_won:,.0f}억, 매수 추정 {est:,.0f}억"
+                     if est is not None else "")
             axes.append({"axis": "valuation", "status": "OK", "value": None, "reason": "",
                          "summary": (f"예상PER {fund.get('예상PER')} PBR {fund.get('PBR')} "
                                      f"ROE {fund.get('ROE')} 외국인비율 "
-                                     f"{fund.get('외국인비율_pct')}%"),
-                         "detail": {"citation": fund.get("citation")}})
+                                     f"{fund.get('외국인비율_pct')}%{scale}"),
+                         "detail": {"citation": fund.get("citation"),
+                                    "market_cap_100m_krw": cap_won,
+                                    "est_buy_100m_krw": est}})
         except Exception as exc:  # noqa: BLE001
             axes.append({"axis": "valuation", "status": "ABSTAINED", "value": None,
                          "reason": f"{type(exc).__name__}: {str(exc)[:70]}", "summary": ""})
@@ -140,6 +180,7 @@ def main() -> int:
             "plan": plan,
             "axes": axes,
             "ownership": c,
+            "bucket": c.get("_bucket"),
             # 관측 기반 추천이라 예측 점수를 만들지 않는다.
             "composite": {"status": "INSUFFICIENT",
                           "reason": "관측 기반 추천 - 축을 가중합한 예측 점수를 내지 않는다"},

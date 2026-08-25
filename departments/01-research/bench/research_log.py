@@ -275,12 +275,19 @@ def consume_idea(question: str) -> None:
     IDEA_QUEUE.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def add_idea(question: str) -> None:
-    """사람이 아이디어를 던지는 입구."""
+def add_idea(question: str, *, kind: str = "measure") -> None:
+    """사람이 아이디어를 던지는 입구.
+
+    `kind` 를 지정할 수 있다 - 문헌 질문을 측정 카드로 내보내면 에이전트가
+    DB 도구로 웹 질문에 답하려 든다(2026-08-25 실측).
+    """
+    if kind not in ("measure", "literature"):
+        raise ValueError("kind 는 measure 또는 literature")
     _ensure_dirs()
     with IDEA_QUEUE.open("a", encoding="utf-8") as f:
         f.write(json.dumps({"question": question.strip(), "ts": _now(),
-                            "consumed": False}, ensure_ascii=False) + "\n")
+                            "kind": kind, "consumed": False},
+                           ensure_ascii=False) + "\n")
 
 
 # ── 자체 점검 ───────────────────────────────────────────────────────────────
@@ -378,12 +385,14 @@ def _cli(argv: list[str]) -> int:
     sub.add_parser("show", help="로그를 사람이 읽게 출력")
     i = sub.add_parser("idea", help="아이디어를 큐에 넣는다")
     i.add_argument("question")
+    i.add_argument("--kind", default="measure",
+                   choices=["measure", "literature"])
 
     a = p.parse_args(argv)
 
     if a.cmd == "idea":
-        add_idea(a.question)
-        print("아이디어 접수")
+        add_idea(a.question, kind=a.kind)
+        print(f"아이디어 접수({a.kind})")
         return 0
     if a.cmd == "show":
         for e in sorted(latest_by_id().values(), key=lambda x: x.id):

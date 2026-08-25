@@ -67,11 +67,14 @@ services:
       HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_CEO_API_URL: http://ceo-hermes:8642/v1
       HERMES_CEO_API_KEY: ${CEO_HERMES_API_KEY:-}
-      # Canonical operational/control Postgres. Supabase is an identity
-      # provider only and must not be used as this runtime data plane.
+      # Canonical operational/control PostgreSQL connection only. Supabase Auth,
+      # browser login, OAuth, user sessions, and bearer-user tokens are unsupported.
       DATABASE_URL: ${DATABASE_URL:?.env needs the private operational PostgreSQL DATABASE_URL}
       ACCOUNTING_DATABASE_POOL_MAX: ${ACCOUNTING_DATABASE_POOL_MAX:-8}
-      MEMOHARNESS_D5_MODE: ${MEMOHARNESS_D5_MODE:-off}
+      MEMOHARNESS_D5_MODE: ${MEMOHARNESS_D5_MODE:-active}
+      # D5 is a private operational experience bank, not Supabase Auth and
+      # not the browser application's general DATABASE_URL.
+      MEMOHARNESS_D5_DATABASE_URL: ${MEMOHARNESS_D5_DATABASE_URL:-postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD:?HEDGEFUND_RUNTIME_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}}
       MEMOHARNESS_D5_TOP_K: ${MEMOHARNESS_D5_TOP_K:-5}
       MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS: ${MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS:-1500}
       CONDITIONAL_RULE_DATABASE_URL: ${CONDITIONAL_RULE_DATABASE_URL:-${DATABASE_URL:-}}
@@ -476,6 +479,7 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       CONDITIONAL_RULE_EVENT_STREAM: ${CONDITIONAL_RULE_EVENT_STREAM:-hf:conditional-rule-events:v1}
       CONDITIONAL_RULE_NOTIFICATION_GROUP: ${CONDITIONAL_RULE_NOTIFICATION_GROUP:-conditional-paper-reporting-v1}
+      CONDITIONAL_RULE_PROJECTION_GROUP: ${CONDITIONAL_RULE_PROJECTION_GROUP:-conditional-paper-projection-v1}
       CONDITIONAL_RULE_NOTIFICATION_RETRY_MS: ${CONDITIONAL_RULE_NOTIFICATION_RETRY_MS:-2000}
       HERMES_BIN: /usr/local/bin/hermes
       HERMES_HOME: /opt/data
@@ -496,9 +500,9 @@ services:
       - /home/ubuntu/.hermes:/opt/data
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
     healthcheck:
-      test: ["CMD", "python", "-m", "apps.api.conditional_rule_notification_consumer", "--healthcheck"]
-      interval: 15s
-      timeout: 30s
+      test: ["CMD", "python", "-m", "apps.api.conditional_rule_notification_health"]
+      interval: 30s
+      timeout: 10s
       retries: 5
       start_period: 30s
     mem_limit: 256m
@@ -560,7 +564,8 @@ services:
       # The worker loads the governed portfolio catalog itself. Omitting this
       # DSN must not make the production worker fall back to test fixtures.
       DATABASE_URL: ${DATABASE_URL:?.env needs the private operational PostgreSQL DATABASE_URL}
-      MEMOHARNESS_D5_MODE: ${MEMOHARNESS_D5_MODE:-off}
+      MEMOHARNESS_D5_MODE: ${MEMOHARNESS_D5_MODE:-active}
+      MEMOHARNESS_D5_DATABASE_URL: ${MEMOHARNESS_D5_DATABASE_URL:-postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD:?HEDGEFUND_RUNTIME_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}}
       MEMOHARNESS_D5_TOP_K: ${MEMOHARNESS_D5_TOP_K:-5}
       MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS: ${MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS:-1500}
       PORTFOLIO_DATA_MODE: "production"
@@ -619,7 +624,10 @@ services:
       - ${EVOLUTION_SKILLS_HOST_DIR:-/home/ubuntu/.hermes/evolution-skills}:/var/lib/evolution-skills
 
   timescaledb:
-    image: timescale/timescaledb-ha:pg17
+    # A mutable pg17 tag caused an unrelated application deployment to pull a
+    # new 800MB database image and attempt an implicit database replacement.
+    # Database upgrades are explicit maintenance, never a side effect of an API deploy.
+    image: timescale/timescaledb-ha@sha256:eaaab826932c579d5d4e3a3479446da931cabb8703cf7caf1038eb14d40754fa
     container_name: hedgefund-timescaledb
     restart: unless-stopped
     logging:
@@ -650,11 +658,11 @@ services:
     # 아래 값은 "이 컨테이너가 다른 프로젝트를 굶기지 않는다"를 보장한다.
     # 역방향 보호(다른 프로젝트가 우리를 굶기지 않기)는 그쪽에도 상한이 있어야 한다.
     #
-    # 서버로 옮길 때는 cpuset 을 지우고 호스트 코어 수에 맞춰 cpus 만 조정한다.
+    # cpus 는 호스트 코어 번호와 무관한 이식 가능한 상한이다. 과거의
+    # cpuset=22,23은 8코어 호스트에서 재배포 자체를 막았으므로 사용하지 않는다.
     mem_limit: 4g              # 하드 상한. 초과 시 이 컨테이너만 OOM
     mem_reservation: 1g        # 소프트 보장 — 메모리 압박 시 커널이 우선 유지
     cpus: 2.0                  # 24코어 중 2코어 상당으로 제한
-    cpuset: "22,23"            # 마지막 2코어에 핀 고정 (0~23 중)
     pids_limit: 512
     shm_size: 256mb            # 병렬 쿼리용 공유 메모리 (기본 64MB는 부족)
 
@@ -686,9 +694,10 @@ services:
         condition: service_healthy
 
     environment:
-      # Reference(세션·종목)는 Supabase, 시세 적재는 같은 compose 의 TimescaleDB.
-      # 호스트의 127.0.0.1:5434 는 컨테이너 안에서 안 통한다 - 서비스 이름으로 간다.
-      DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
+      # Reference(세션·종목)의 운영 authority는 같은 PostgreSQL 인스턴스의
+      # control DB다. 범용 DATABASE_URL이 빈 Supabase DB로 바뀌어도 실시간
+      # 수집기를 0종목으로 재시작하지 않도록 전용 URL 경계를 둔다.
+      DATABASE_URL: ${REFERENCE_DATABASE_URL:-postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/control}
       TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
       # REST 토큰과 WebSocket 모두 같은 LS_ENV를 사용한다.
       LS_ENV: ${LS_ENV:-LIVE}
@@ -710,6 +719,8 @@ services:
       #   전환 후 소켓 수와 유입을 반드시 확인한다. 거절되면 서비스가 실패하도록
       #   두고, 검토된 시장 종목 파일을 LS_WATCH_SYMBOLS_FILE로 명시한다.
       LS_WATCH_SYMBOLS_FILE: config/full_universe.txt
+      # 장중 두 권위 스트림이 이 시간보다 오래 멈추면 컨테이너를 unhealthy로 표시한다.
+      LS_HEALTH_MAX_DATA_AGE_SECONDS: ${LS_HEALTH_MAX_DATA_AGE_SECONDS:-180}
 
     volumes:
       - ./departments/01-research/config:/app/departments/01-research/config:ro
@@ -720,6 +731,13 @@ services:
     mem_reservation: 128m
     cpus: 1.0
     pids_limit: 64
+
+    healthcheck:
+      test: ["CMD", "python", "collectors/ls_realtime_service.py", "--healthcheck"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
 
     stop_grace_period: 30s
 
@@ -749,7 +767,7 @@ services:
         condition: service_healthy
 
     environment:
-      DATABASE_URL: ${DATABASE_URL:?.env 에 DATABASE_URL 이 필요하다}
+      DATABASE_URL: ${REFERENCE_DATABASE_URL:-postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/control}
       TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
       # Breadth(t1511/t8424)와 관측 Calendar(t8410)가 LS REST 를 쓴다
       LS_ENV: ${LS_ENV:-LIVE}
@@ -1915,7 +1933,8 @@ services:
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
-      MEMOHARNESS_D5_MODE: ${MEMOHARNESS_D5_MODE:-off}
+      MEMOHARNESS_D5_MODE: ${MEMOHARNESS_D5_MODE:-active}
+      MEMOHARNESS_D5_DATABASE_URL: ${MEMOHARNESS_D5_DATABASE_URL:-postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD:?HEDGEFUND_RUNTIME_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}}
       MEMOHARNESS_D5_TOP_K: ${MEMOHARNESS_D5_TOP_K:-5}
       MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS: ${MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS:-1500}
       NOTION_TOKEN: ${NOTION_TOKEN:-}
@@ -2005,7 +2024,7 @@ services:
       # D5 is part of the private operational/control plane. Do not let a
       # stale hosted-Supabase D5 override point the maintenance worker at a
       # database that does not contain the Experience Bank relation.
-      MEMOHARNESS_D5_DATABASE_URL: ${DATABASE_URL:-}
+      MEMOHARNESS_D5_DATABASE_URL: ${MEMOHARNESS_D5_DATABASE_URL:-postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD:?HEDGEFUND_RUNTIME_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}}
       MEMOHARNESS_D5_RETENTION_ENABLED: ${MEMOHARNESS_D5_RETENTION_ENABLED:-true}
       MEMOHARNESS_D5_RETENTION_INTERVAL_SECONDS: ${MEMOHARNESS_D5_RETENTION_INTERVAL_SECONDS:-86400}
       MEMOHARNESS_D5_RETENTION_BATCH_SIZE: ${MEMOHARNESS_D5_RETENTION_BATCH_SIZE:-500}
@@ -2016,6 +2035,82 @@ services:
     mem_reservation: 32m
     cpus: 0.1
     pids_limit: 32
+    stop_grace_period: 20s
+
+  # Notion is a projection sink, not a source of truth.  Keep its free-tier
+  # workspace bounded in a separate maintenance lane; this worker archives
+  # pages through the API after seven days and removes exact replay records.
+  notion-retention-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.ceo-supervisor
+    image: hedgefund-ceo-supervisor:latest
+    container_name: hedgefund-notion-retention-worker
+    restart: unless-stopped
+    init: true
+    command: ["python3", "/opt/hgfinance/orchestration/adapters/notion_retention.py", "--interval", "${NOTION_RETENTION_INTERVAL_SECONDS:-86400}"]
+    volumes:
+      - .:/opt/hgfinance:ro
+    environment:
+      PYTHONPATH: /opt/hgfinance
+      NOTION_TOKEN: ${NOTION_TOKEN:-}
+      NOTION_CEO_DB: ${NOTION_CEO_DB:-}
+      NOTION_BRIEFING_DB: ${NOTION_BRIEFING_DB:-}
+      NOTION_RESEARCH_DB: ${NOTION_RESEARCH_DB:-}
+      NOTION_TRADING_DB: ${NOTION_TRADING_DB:-}
+      NOTION_RISK_DB: ${NOTION_RISK_DB:-}
+      NOTION_QUANT_BACKTEST_DB: ${NOTION_QUANT_BACKTEST_DB:-}
+      NOTION_ACCOUNTING_DB: ${NOTION_ACCOUNTING_DB:-}
+      NOTION_QA_DB: ${NOTION_QA_DB:-}
+      NOTION_HR_DB: ${NOTION_HR_DB:-}
+      NOTION_RETENTION_ENABLED: ${NOTION_RETENTION_ENABLED:-true}
+      NOTION_RETENTION_DAYS: ${NOTION_RETENTION_DAYS:-7}
+      NOTION_RETENTION_DEDUPE_EXACT: ${NOTION_RETENTION_DEDUPE_EXACT:-true}
+      NOTION_RETENTION_BATCH_SIZE: ${NOTION_RETENTION_BATCH_SIZE:-250}
+      NOTION_RETENTION_INTERVAL_SECONDS: ${NOTION_RETENTION_INTERVAL_SECONDS:-86400}
+    mem_limit: 128m
+    mem_reservation: 32m
+    cpus: 0.1
+    pids_limit: 32
+    stop_grace_period: 20s
+
+  # Discord cleanup is likewise isolated from ingress and mirror projection.
+  # The scheduled path has a seven-day age gate; current incident cleanup is
+  # an explicit one-shot command and is never enabled by this service default.
+  discord-retention-worker:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    image: hedgefund-portfolio-bff:latest
+    container_name: hedgefund-discord-retention-worker
+    restart: unless-stopped
+    init: true
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: ["python", "/app/orchestration/discord_retention.py", "--interval", "${DISCORD_RETENTION_INTERVAL_SECONDS:-86400}"]
+    volumes:
+      - /home/ubuntu/.hermes:/opt/data:ro
+      - ./orchestration/discord_retention.py:/app/orchestration/discord_retention.py:ro
+    environment:
+      PYTHONPATH: /app:/app/apps/api
+      HERMES_HOME: /opt/data
+      HERMES_PROFILE: ceo-agent
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      UI_MIRROR_REDIS_URL: ${UI_MIRROR_REDIS_URL:-${REDIS_URL:-redis://redis:6379/0}}
+      UI_MIRROR_STREAM: ${UI_MIRROR_STREAM:-hf:ui-ceo-mirror:v1}
+      DISCORD_BOT_TOKEN_CEO: ${DISCORD_BOT_TOKEN_CEO:-}
+      DISCORD_CEO_CHANNEL_ID: ${DISCORD_CEO_CHANNEL_ID:-}
+      DISCORD_RETENTION_CHANNEL_IDS: ${DISCORD_RETENTION_CHANNEL_IDS:-}
+      DISCORD_RETENTION_ENABLED: ${DISCORD_RETENTION_ENABLED:-true}
+      DISCORD_RETENTION_DAYS: ${DISCORD_RETENTION_DAYS:-7}
+      DISCORD_RETENTION_MAX_MESSAGES: ${DISCORD_RETENTION_MAX_MESSAGES:-500}
+      DISCORD_RETENTION_MAX_REQUESTS: ${DISCORD_RETENTION_MAX_REQUESTS:-500}
+      DISCORD_RETENTION_INTERVAL_SECONDS: ${DISCORD_RETENTION_INTERVAL_SECONDS:-86400}
+    mem_limit: 128m
+    mem_reservation: 32m
+    cpus: 0.1
+    pids_limit: 64
     stop_grace_period: 20s
 
   # ── 방법론 스카우트 도구 면 (2026-08-10, 재일) ─────────────────────────────

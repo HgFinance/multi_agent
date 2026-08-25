@@ -16,8 +16,9 @@ def test_auth_mode_is_fixture_only_by_default() -> None:
         assert auth.auth_mode() == "fixture"
 
 
-def test_auth_mode_rejects_removed_external_mode() -> None:
-    with patch.dict(os.environ, {"PORTFOLIO_AUTH_MODE": "external"}, clear=False):
+@pytest.mark.parametrize("removed_mode", ("external", "supabase", "login", "oauth"))
+def test_auth_mode_rejects_removed_external_mode(removed_mode: str) -> None:
+    with patch.dict(os.environ, {"PORTFOLIO_AUTH_MODE": removed_mode}, clear=False):
         with pytest.raises(auth.AuthConfigurationError, match="fixture_only"):
             auth.auth_mode()
 

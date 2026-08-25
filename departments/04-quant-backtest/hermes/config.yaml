@@ -105,6 +105,26 @@ mcp_servers:
     enabled: true
   # Valuation is a read-only LS projection. The credential remains isolated in
   # ls-mcp; this profile receives tools, never broker credentials.
+  # ▶ 문헌 조사면 (2026-08-25 재일) - **셸이 아니라 도구로 준다**
+  #   연구 벤치의 문헌 카드가 카드 본문으로 `mcporter call ...` 을 알려주는
+  #   식이었는데, 그러면 카드가 알려준 카드만 검색할 수 있다. 에이전트가
+  #   벽에 부딪혔을 때 스스로 읽으려면 **도구 목록에 있어야** 한다.
+  #
+  #   paper-search 는 **stdio 서버**다. compose 의 `--transport http`
+  #   `--port 8041` 은 이 패키지가 무시하고 즉시 끝나서, 컨테이너로
+  #   띄우면 크래시
+  #   루프만 돈다(2026-08-25 실측). 그래서 uvx stdio 로 문다.
+  #   실측: search_crossref ✅ / read_arxiv_paper ✅ 본문 전체
+  #        search_arxiv ❌ 엉뚱한 분야 / search_semantic ❌ 키 없으면 빈 배열
+  paper-search:
+    command: uvx
+    args: [paper-search-mcp]
+    enabled: true
+  # 주제를 서술하면 찾는 의미검색. 키가 필요 없다. Crossref 가 제목·DOI 로
+  # 정확히 찾는 쪽이라면 이쪽은 **무엇을 찾을지 모를 때** 쓴다.
+  exa:
+    url: https://mcp.exa.ai/mcp
+    enabled: true
   ls-securities:
     url: http://ls-mcp:8038/mcp
     headers:

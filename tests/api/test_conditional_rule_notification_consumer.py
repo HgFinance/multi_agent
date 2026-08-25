@@ -226,6 +226,93 @@ def test_consumer_uses_authoritative_context_and_acks_unlinked_rule() -> None:
     assert status_calls == []
 
 
+def test_delivery_lane_does_not_wait_for_kanban_notion_or_langsmith() -> None:
+    record = UserOrderRequestRecord(
+        order_request_id="77777777-7777-4777-8777-777777777777",
+        user_id="11111111-1111-4111-8111-111111111111",
+        fund_id="22222222-2222-4222-8222-222222222222",
+        book_id="33333333-3333-4333-8333-333333333333",
+        client_request_id="discord:guild:channel:123456789",
+        raw_instruction="삼성전자 조건 매도",
+        normalized_instruction="삼성전자 조건 매도",
+        raw_instruction_sha256="0" * 64,
+        ceo_root_task_id="t_root1",
+        trading_task_id="t_trade1",
+    )
+
+    class ForbiddenDependency:
+        def __getattr__(self, name):
+            raise AssertionError(f"immediate lane touched slow dependency: {name}")
+
+    orders = OrderStore(record)
+    discord = Discord()
+    consumer = ConditionalRuleNotificationConsumer(
+        rule_store=RuleStore(record),
+        order_store=orders,
+        status_reader=lambda **_kwargs: _directive(accounting_pending=False),
+        kanban_client=ForbiddenDependency(),
+        discord_delivery=discord,
+        discord_store=object(),
+        ceo_projection=ForbiddenDependency(),
+        department_projection=ForbiddenDependency(),
+        mode="delivery",
+    )
+
+    assert consumer.handle_event(
+        {
+            "event_id": "cro_fast",
+            "aggregate_id": "88888888-8888-4888-8888-888888888888",
+            "event_type": "DIRECTIVE_SUBMITTED",
+            "payload": {
+                "directive_id": "55555555-5555-4555-8555-555555555555",
+            },
+        }
+    ) is True
+    assert len(discord.calls) == 1
+    assert len(orders.transitions) == 1
+
+
+def test_projection_lane_does_not_redeliver_or_duplicate_order_audit() -> None:
+    record = UserOrderRequestRecord(
+        order_request_id="77777777-7777-4777-8777-777777777777",
+        user_id="11111111-1111-4111-8111-111111111111",
+        fund_id="22222222-2222-4222-8222-222222222222",
+        book_id="33333333-3333-4333-8333-333333333333",
+        client_request_id="discord:guild:channel:123456789",
+        raw_instruction="삼성전자 조건 매도",
+        normalized_instruction="삼성전자 조건 매도",
+        raw_instruction_sha256="0" * 64,
+        ceo_root_task_id="t_root1",
+        trading_task_id="t_trade1",
+    )
+    orders = OrderStore(record)
+    discord = Discord()
+    consumer = ConditionalRuleNotificationConsumer(
+        rule_store=RuleStore(record),
+        order_store=orders,
+        status_reader=lambda **_kwargs: _directive(accounting_pending=False),
+        kanban_client=Kanban(),
+        discord_delivery=discord,
+        discord_store=object(),
+        ceo_projection=Projection(),
+        department_projection=Projection(),
+        mode="projection",
+    )
+
+    assert consumer.handle_event(
+        {
+            "event_id": "cro_projection",
+            "aggregate_id": "88888888-8888-4888-8888-888888888888",
+            "event_type": "DIRECTIVE_SUBMITTED",
+            "payload": {
+                "directive_id": "55555555-5555-4555-8555-555555555555",
+            },
+        }
+    ) is True
+    assert discord.calls == []
+    assert orders.transitions == []
+
+
 def test_runner_does_not_let_one_poison_event_block_the_batch() -> None:
     class RedisBatch:
         def __init__(self) -> None:

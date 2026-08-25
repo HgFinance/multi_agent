@@ -53,6 +53,8 @@ RESEARCH_OUT = Path(os.getenv("RESEARCH_OUT",
                               str(Path.home() / "hgfinance" / "quant-data"
                                   / "research" / "out")))
 OUT_KEEP_DAYS = int(os.getenv("RESEARCH_OUT_KEEP_DAYS", "14"))
+TMP_ROOT = Path(os.getenv("DISK_TMP_ROOT", "/tmp"))
+TMP_VENV_MIN_AGE_DAYS = int(os.getenv("TMP_VENV_MIN_AGE_DAYS", "7"))
 
 # 연구 쿼리로 보는 표식. 라이브 수집(insert)·주문 경로는 여기 안 걸린다.
 _RESEARCH_QUERY = re.compile(
@@ -82,6 +84,56 @@ def level(free: float) -> str:
     if free < SAFE_GB:
         return "LOW"
     return "OK"
+
+
+def mounted_sources() -> set[str]:
+    """전 컨테이너(멈춘 것 포함)가 무는 호스트 경로.
+
+    **멈춘 컨테이너도 세는 게 맞다** - 다시 뜨면 그 경로를 요구한다.
+    도커를 못 부르면 빈 집합이 아니라 예외를 올려 호출부가 회수를 포기하게
+    한다. 확인 못 한 것을 "안 쓰는 것" 으로 취급하면 안 된다.
+    """
+    rc, out = _run(["docker", "ps", "-aq"])
+    if rc != 0:
+        raise RuntimeError(f"컨테이너 목록 조회 실패: {out.strip()[:80]}")
+    ids = [x for x in out.split() if x]
+    if not ids:
+        return set()
+    rc, out = _run(["docker", "inspect", "--format",
+                    "{{range .Mounts}}{{.Source}}\n{{end}}", *ids],
+                   timeout=180)
+    if rc != 0:
+        raise RuntimeError(f"마운트 조회 실패: {out.strip()[:80]}")
+    return {ln.strip() for ln in out.splitlines() if ln.strip()}
+
+
+def abandoned_tmp_venvs() -> list[tuple[Path, int]]:
+    """버려진 venv 와 그 크기. 셋 다 만족하는 것만 돌려준다."""
+    try:
+        busy = mounted_sources()
+    except RuntimeError:
+        return []                      # 확인 못 했으면 아무것도 안 만진다
+    cutoff = datetime.now(timezone.utc) - timedelta(days=TMP_VENV_MIN_AGE_DAYS)
+    found = []
+    if not TMP_ROOT.is_dir():
+        return []
+    for d in TMP_ROOT.iterdir():
+        try:
+            if not d.is_dir() or d.is_symlink():
+                continue
+            if not (d / "pyvenv.cfg").is_file():
+                continue               # ① venv 임이 증명된 것만
+            sd = str(d)
+            if any(m == sd or m.startswith(sd + "/") for m in busy):
+                continue               # ② 누가 물고 있으면 손대지 않는다
+            if datetime.fromtimestamp(d.stat().st_mtime, timezone.utc) >= cutoff:
+                continue               # ③ 최근 것은 둔다
+            size = sum(f.stat().st_size for f in d.rglob("*")
+                       if f.is_file() and not f.is_symlink())
+            found.append((d, size))
+        except OSError:
+            continue
+    return found
 
 
 # ── 회수: 다시 만들 수 있는 것만 ────────────────────────────────────────────
@@ -123,6 +175,19 @@ def reclaim(*, dry_run: bool = False) -> list[str]:
                 freed += size
             except OSError:
                 continue
+    # ④ 버려진 /tmp venv. pip 로 다시 만들어지므로 회수 대상이지만,
+    #    /tmp 에는 vLLM 이 무는 LoRA 어댑터도 산다 - 마운트 확인이 필수다.
+    for d, size in abandoned_tmp_venvs():
+        gb = size / 1024 ** 3
+        if dry_run:
+            done.append(f"[dry-run] 버려진 venv {d.name} ({gb:.1f}GB)")
+            continue
+        try:
+            shutil.rmtree(d)
+            done.append(f"버려진 venv 회수 {d.name} ({gb:.1f}GB)")
+        except OSError as e:
+            done.append(f"venv 회수 실패 {d.name}: {e}")
+
     done.append(f"{OUT_KEEP_DAYS}일 지난 산출물 {n}건 "
                 f"({freed / 1024 / 1024:.0f}MB)"
                 + (" [dry-run]" if dry_run else ""))
@@ -212,6 +277,55 @@ def _selfcheck() -> int:
     ok("이관 COPY 는 보호된다", bool(_PROTECTED.search(copy)))
     ok("연구 집계는 취소 대상", bool(_RESEARCH_QUERY.search(res))
        and not _PROTECTED.search(res))
+
+    # 버려진 venv 판정: 세 조건을 하나씩 어겨 보며 확인한다
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        old = datetime.now(timezone.utc) - timedelta(days=400)
+        stamp = old.timestamp()
+
+        def mk(name, *, venv=True, aged=True):
+            d = root / name
+            (d / "lib").mkdir(parents=True)
+            (d / "lib" / "x.bin").write_bytes(b"0" * 1024)
+            if venv:
+                (d / "pyvenv.cfg").write_text("home = /usr")
+            if aged:
+                os.utime(d, (stamp, stamp))
+            return d
+
+        real = mk("venv-old")
+        mk("venv-new", aged=False)
+        mk("not-a-venv", venv=False)
+        busy = mk("venv-busy")
+
+        import builtins  # noqa: F401  (가독성용 - 아래는 임시 대체다)
+        _saved_root, _saved_mounted = TMP_ROOT, mounted_sources
+        try:
+            globals()["TMP_ROOT"] = root
+            globals()["mounted_sources"] = lambda: {str(busy)}
+            names = {d.name for d, _ in abandoned_tmp_venvs()}
+        finally:
+            globals()["TMP_ROOT"] = _saved_root
+            globals()["mounted_sources"] = _saved_mounted
+
+        ok("버려진 venv 를 찾는다", "venv-old" in names)
+        ok("최근 venv 는 남긴다", "venv-new" not in names)
+        ok("venv 가 아니면 안 건드린다", "not-a-venv" not in names)
+        ok("마운트된 venv 는 안 건드린다", "venv-busy" not in names)
+
+        _saved_mounted = mounted_sources
+        try:
+            def _boom():
+                raise RuntimeError("도커 안 됨")
+            globals()["TMP_ROOT"] = root
+            globals()["mounted_sources"] = _boom
+            ok("마운트 확인 실패하면 아무것도 안 지운다",
+               abandoned_tmp_venvs() == [])
+        finally:
+            globals()["TMP_ROOT"] = _saved_root
+            globals()["mounted_sources"] = _saved_mounted
 
     ok("실제 여유를 읽는다", free_gb() > 0)
     print("자체점검 통과" if fails == 0 else f"자체점검 실패 {fails}건")

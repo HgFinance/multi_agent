@@ -41,9 +41,8 @@ async def _qa_request(method: str, path: str, *, body: dict[str, Any]) -> Any:
         )
     headers = {}
     if QA_API_AUTH_TOKEN:
-        # Legacy routes still receive the existing internal header.  The
-        # observability feedback routes additionally use the service-auth
-        # bearer contract enforced by audit-api.
+        # Verification assessment keeps the internal header for compatibility
+        # and also sends the service-auth bearer accepted by audit-api.
         headers["X-Qa-Internal-Token"] = QA_API_AUTH_TOKEN
         headers["Authorization"] = f"Bearer {QA_API_AUTH_TOKEN}"
     try:

@@ -901,7 +901,7 @@ def _conditional_rule_child_body(
             "If an indicator timeframe is omitted, use 1D completed bars and BAR_CLOSE; never",
             "default an explicit intraday phrase to another timeframe. Portfolio/last-price-only rules use",
             "QUOTE. POSITION_PERCENT is a ratio in (0,1], FIXED_SHARES is an integer,",
-            "and ALL is sell-only. Omit expires_at to use the trusted 10-minute default.",
+            "and ALL is sell-only. Omit expires_at to use the trusted KRX regular-session close default; do not claim the rule lasts until cancelled.",
             "Use the trusted max_data_age_seconds=30 default; never reduce it unless the user explicitly asks.",
             "CROSS always requires BAR_CLOSE and an explicit primary_timeframe; when the",
             "instruction gives no timeframe for a price-only cross, return candidate=null",

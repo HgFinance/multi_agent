@@ -295,7 +295,13 @@ def evaluate_observation(
     latency_ms = _bounded_int(metadata.get("latency_ms"))
     if latency_ms > latency_warn_ms:
         findings.append("LATENCY_ABOVE_THRESHOLD")
-        summaries.append("worker latency exceeded the configured observation threshold")
+        latency_scope = _bounded_text(metadata.get("latency_scope"), 40)
+        if latency_scope == "end_to_end":
+            summaries.append("end-to-end latency exceeded the configured observation threshold")
+        elif latency_scope == "worker_execution":
+            summaries.append("worker execution latency exceeded the configured observation threshold")
+        else:
+            summaries.append("observed latency exceeded the configured observation threshold")
     is_metrics_window = metadata.get("source") == "metrics-window"
     if not is_metrics_window and not metadata.get("request_id") and not metadata.get("root_id"):
         findings.append("CORRELATION_METADATA_MISSING")

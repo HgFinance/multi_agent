@@ -59,7 +59,9 @@ JUDGMENT_SCHEMA: dict[str, Any] = {
                     "relevant": {"type": "boolean"},
                     "polarity": {"type": "string", "enum": ["호재", "악재", "중립"]},
                     "impact": {"type": "string", "enum": ["high", "medium", "low"]},
-                    "why": {"type": "string", "maxLength": 120},
+                    # why 는 짧을수록 빠르다. 출력 토큰이 생성 시간을 결정한다
+                    # (실측 2026-08-25: 18건 판정 46초).
+                    "why": {"type": "string", "maxLength": 60},
                 },
             },
         }
@@ -253,6 +255,88 @@ def disclosure_axis(items, company, llm, **kw) -> AxisScore:
                  title_key="title", date_key="published_at", max_items=8, **kw)
 
 
+def judge_combined(news_items: Sequence[Mapping[str, Any]],
+                   disclosure_items: Sequence[Mapping[str, Any]],
+                   company: str, llm, *,
+                   news_max: int = 8, disclosure_max: int = 6
+                   ) -> tuple[AxisScore, AxisScore]:
+    """뉴스·공시를 **한 번에** 물어 두 축으로 가른다.
+
+    호출이 절반이 되고(실측 3단 72초 -> 40초대), 모델이 둘을 같이 보고
+    판단한다. 결과는 ref 접두사로 나눈다 - 뉴스는 `n*`, 공시는 `d*` 라
+    `fetch_news`/`fetch_disclosures` 가 이미 그렇게 붙여 준다.
+
+    한쪽이 비면 다른 쪽만 판정하고, 빈 쪽은 기권이다(0 이 아니다).
+    """
+    news_kept, news_folded = dedupe_by_headline(news_items, "title", company)
+    disc_kept, disc_folded = dedupe_by_headline(disclosure_items, "title", company)
+    news_kept = news_kept[:news_max]
+    disc_kept = disc_kept[:disclosure_max]
+
+    if not news_kept and not disc_kept:
+        return (abstain("news", f"{company} 관련 뉴스 0건"),
+                abstain("disclosure", f"{company} 관련 공시 0건"))
+
+    lines = []
+    if news_kept:
+        lines.append("[뉴스]")
+        lines += [f"{it.get('ref')}. [{it.get('published_at') or '날짜미상'}] "
+                  f"{_strip_tags(it.get('title'))}" for it in news_kept]
+    if disc_kept:
+        lines.append("[공시]")
+        lines += [f"{it.get('ref')}. [{it.get('published_at') or '날짜미상'}] "
+                  f"{_strip_tags(it.get('title'))}" for it in disc_kept]
+    prompt = (f"종목: {company}\n"
+              f"아래 {len(news_kept) + len(disc_kept)}건을 판정하라. "
+              f"뉴스와 공시가 같은 사건을 가리키면 각각 판정하되 "
+              f"impact 를 중복해서 크게 잡지 마라.\n\n" + "\n".join(lines))
+
+    try:
+        raw = llm(_SYSTEM, prompt, json_schema=JUDGMENT_SCHEMA)
+        judgments = {str(j["ref"]): j for j in json.loads(raw).get("items", [])}
+    except Exception as exc:  # noqa: BLE001 - 모델 실패는 기권이지 중립이 아니다
+        reason = f"LLM 판정 실패 {type(exc).__name__}: {str(exc)[:80]}"
+        return abstain("news", reason), abstain("disclosure", reason)
+
+    def build(axis_name: str, kept: list, folded: list) -> AxisScore:
+        if not kept:
+            return abstain(axis_name, f"{company} 관련 항목 0건")
+        scored, dropped = [], 0
+        for rank, it in enumerate(kept):
+            j = judgments.get(str(it.get("ref")))
+            if j is None or not j.get("relevant"):
+                dropped += 1
+                continue
+            sign = POLARITY_SIGN.get(str(j.get("polarity")), 0.0)
+            weight = IMPACT_WEIGHT.get(str(j.get("impact")), 0.3)
+            recency = 1.0 / (1.0 + rank * 0.25)
+            scored.append({
+                "ref": it.get("ref"), "title": _strip_tags(it.get("title")),
+                "published_at": it.get("published_at"), "url": it.get("url"),
+                "polarity": j.get("polarity"), "impact": j.get("impact"),
+                "why": j.get("why"), "contribution": sign * weight * recency,
+                "evidence_id": it.get("evidence_id"), "citation": it.get("citation"),
+            })
+        if not scored:
+            return abstain(axis_name,
+                           f"{company} 관련 항목 {len(kept)}건 모두 무관 판정(주가 무관)")
+        value = math.tanh(sum(s["contribution"] for s in scored) / EVIDENCE_SCALE)
+        pos = [s for s in scored if s["polarity"] == "호재"]
+        neg = [s for s in scored if s["polarity"] == "악재"]
+        return AxisScore(
+            axis=axis_name, status=STATUS_OK, value=value,
+            detail={"judged": len(kept), "relevant": len(scored),
+                    "dropped_irrelevant": dropped, "folded_duplicates": folded,
+                    "호재": len(pos), "악재": len(neg),
+                    "중립": len(scored) - len(pos) - len(neg), "items": scored},
+            evidence_refs=tuple(str(s["evidence_id"] or s["citation"] or s["ref"])
+                                for s in scored),
+        )
+
+    return (build("news", news_kept, news_folded),
+            build("disclosure", disc_kept, disc_folded))
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # 자체 점검 - 네트워크 없음, 가짜 LLM
 # ────────────────────────────────────────────────────────────────────────────
@@ -349,5 +433,37 @@ if __name__ == "__main__":
     kept_d, folded = dedupe_by_headline(dupes, "title", "다이나믹솔루션")
     assert [k["ref"] for k in kept_d] == ["n1", "n3"], kept_d
     assert folded == ["n2"], folded
+
+    # 합친 판정이 두 축으로 정확히 갈린다
+    def combo_llm(system, prompt, *, json_schema=None):
+        assert "[뉴스]" in prompt and "[공시]" in prompt, prompt
+        return json.dumps({"items": [
+            {"ref": "n1", "relevant": True, "polarity": "호재",
+             "impact": "high", "why": "수주"},
+            {"ref": "d1", "relevant": True, "polarity": "악재",
+             "impact": "high", "why": "증자"},
+        ]})
+
+    nax, dax = judge_combined(
+        [{"ref": "n1", "title": "한섬 대형 수주 공시", "published_at": "d"}],
+        [{"ref": "d1", "title": "한섬 유상증자 결정", "published_at": "d"}],
+        "한섬", combo_llm)
+    assert nax.axis == "news" and nax.value > 0, nax
+    assert dax.axis == "disclosure" and dax.value < 0, dax
+    assert nax.detail["호재"] == 1 and dax.detail["악재"] == 1
+
+    # 한쪽이 비면 그쪽만 기권이고 다른 쪽은 정상 판정된다
+    nax2, dax2 = judge_combined(
+        [{"ref": "n1", "title": "한섬 수주", "published_at": "d"}], [],
+        "한섬", lambda s, p, *, json_schema=None: json.dumps({"items": [
+            {"ref": "n1", "relevant": True, "polarity": "호재",
+             "impact": "high", "why": "x"}]}))
+    assert nax2.status == STATUS_OK and dax2.status == STATUS_ABSTAINED
+
+    # 둘 다 비면 LLM 을 부르지 않는다
+    called = []
+    n3, d3 = judge_combined([], [], "한섬",
+                            lambda *a, **k: called.append(1) or "{}")
+    assert not called and n3.status == STATUS_ABSTAINED and d3.status == STATUS_ABSTAINED
 
     print("narrative_axes self-check OK")

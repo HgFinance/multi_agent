@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping
+from datetime import timedelta, timezone
 from typing import Any
 
 from fastapi import HTTPException
@@ -138,6 +139,7 @@ def _active_result(record: Any, *, assumptions: tuple[str, ...] = ()) -> dict[st
         else f"{sizing.value} ({sizing.type.value})"
     )
     timeframe_fallback = "TIMEFRAME_FALLBACK_3M_TO_5M" in assumptions
+    expiry_kst = spec.expires_at.astimezone(timezone(timedelta(hours=9)))
     user_message = (
         (
             "요청한 3분봉 기능이 없어 5분봉 완성봉 기준으로 대체했습니다. "
@@ -155,7 +157,8 @@ def _active_result(record: Any, *, assumptions: tuple[str, ...] = ()) -> dict[st
             else ""
         )
         + ", 1회 실행 규칙입니다. 조건 충족 시 deterministic guard를 통과한 "
-        "경우에만 PAPER OMS로 제출됩니다."
+        "경우에만 PAPER OMS로 제출됩니다. "
+        f"추적 만료는 {expiry_kst:%Y-%m-%d %H:%M} KST입니다."
     )
     return {
         "schema_version": RESULT_SCHEMA_VERSION,
@@ -262,7 +265,8 @@ def _active_batch_result(
         "user_message": (
             f"서로 독립적인 PAPER 조건주문 {len(records)}개가 즉시 활성화되었습니다. "
             "각 규칙은 1회만 실행되며, 각 조건 충족 시 deterministic guard를 "
-            "통과한 경우에만 PAPER OMS로 제출됩니다."
+            "통과한 경우에만 PAPER OMS로 제출됩니다. 규칙별 추적 만료 시각은 "
+            "요약의 expires_at에 기록했습니다."
         ),
     }
 

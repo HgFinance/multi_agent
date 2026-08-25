@@ -196,9 +196,20 @@ mcp_servers:
   # 2026-08-13 가동 시도 -> 의존성 부패로 기동 실패 (youtube: mcp 라이브러리
   # FastMCP import 깨짐, paper: 재시작 루프). 죽은 서버를 켜두면 에이전트마다
   # 연결 대기가 생기므로 끈다. 백로그: uvx 버전 고정 후 재시도.
+  # 2026-08-25 재일: HTTP 컨테이너는 존재한 적이 없고, 띄워도 크래시 루프다
+  # (이 패키지는 stdio 서버라 transport/port 인자를 무시하고 즉시 끝난다).
+  # uvx stdio 로 물리고 켠다. 실측: search_crossref 정확, read_arxiv_paper 는
+  # 본문 전체를 준다. search_arxiv 와 search_semantic 은 쓰지 않는다.
+  # 일반 웹 검색. 부서 정본 research.web.search 는 구현이 Tavily 인데 키가
+  # 빈 값이라 죽어 있다(2026-08-25 실측). Exa 는 키가 필요 없고, 키워드가
+  # 아니라 찾는 페이지를 서술하면 된다.
+  exa:
+    url: https://mcp.exa.ai/mcp
+    enabled: true
   paper-search:
-    url: http://paper-search-mcp:8041/mcp
-    enabled: false
+    command: uvx
+    args: [paper-search-mcp]
+    enabled: true
   youtube-transcript:
     url: http://youtube-transcript-mcp:8042/mcp
     enabled: false

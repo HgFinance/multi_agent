@@ -496,6 +496,14 @@ async def _maybe_handle_qa_feedback_message(adapter: Any, message: Any) -> bool 
             "artifact를 찾지 못했습니다. QA 응답에 Reply하거나 `승인 feedback-... 사유` 형식으로 입력해 주세요.",
         )
         return True
+    if not command.reason:
+        _store(adapter).mark_inbound(dedup_key, "FAILED", _profile_name())
+        await _qa_reply(
+            message,
+            "결정 사유가 필요합니다. QA 결과에 Reply해 `승인 <사유>`를 입력하거나 "
+            "`승인 feedback-... <사유>` 형식으로 다시 입력해 주세요.",
+        )
+        return True
     resolved = QaFeedbackCommand(
         decision=command.decision,
         artifact_id=artifact_id,
@@ -519,8 +527,24 @@ async def _maybe_handle_qa_feedback_message(adapter: Any, message: Any) -> bool 
         return True
     if status in {200, 201, 202}:
         _store(adapter).mark_inbound(dedup_key, "COMPLETED", _profile_name())
-        gate = "offline benchmark PENDING" if resolved.decision == "APPROVED" else "반려 완료"
-        await _qa_reply(message, f"{artifact_id}: {resolved.decision} 기록 완료 · {gate}")
+        if resolved.decision == "APPROVED":
+            await _qa_reply(
+                message,
+                "## ✅ 관리자 결정 기록\n"
+                f"- **Artifact:** `{artifact_id}`\n"
+                "- **결정:** `APPROVED`\n"
+                "- **다음 단계:** `offline benchmark PENDING`\n"
+                "- **자동 변경:** 없음",
+            )
+        else:
+            await _qa_reply(
+                message,
+                "## ⛔ 관리자 결정 기록\n"
+                f"- **Artifact:** `{artifact_id}`\n"
+                "- **결정:** `REJECTED`\n"
+                "- **다음 단계:** 종료\n"
+                "- **자동 변경:** 없음",
+            )
     elif status == 409:
         _store(adapter).mark_inbound(dedup_key, "COMPLETED", _profile_name())
         await _qa_reply(message, f"{artifact_id}: 이미 결정된 artifact라 중복 적용하지 않았습니다.")

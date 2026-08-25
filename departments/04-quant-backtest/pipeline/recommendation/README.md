@@ -132,9 +132,9 @@ Q2 의 원인은 Q3 가 설명한다 — 같은 표본의 최대**불리**이동
 
 | 단 | 하는 일 | 실행 위치 | 실측 |
 |---|---|---|---|
-| 1 `scan_ownership` | DART 지분공시 시장 전체 → 매집 종목 | research-mcp | 공시 1,058건 → 상장사 503곳 → 7종목, 264초, DART 115회 |
-| 2 `enrich_ownership` | 수급(t1717)·테마(t1532)·밸류(t3320)·가격계획 | ls-mcp | LS 12회, 26초 |
-| 3 `judge_candidates` | 뉴스·공시 호재/악재 (vLLM) | research-mcp | 종목당 LLM 2회 |
+| 1 `scan_ownership` | DART 지분공시 시장 전체 → 매집 종목 | research-mcp | 공시 1,079건 → 상장사 509곳 **전수** → 34종목, 83초, DART 345회. 6시간 캐시 |
+| 2 `enrich_ownership` | 수급(t1717)·테마(t1532)·밸류(t3320)·가격계획 | ls-mcp | 종목당 LS 3회. 초당 1건이 계약이라 병렬화하지 않는다 |
+| 3 `judge_candidates` | 뉴스·공시 호재/악재 (vLLM) | research-mcp | 종목당 LLM **1회**(뉴스+공시 합침). 4종목 37초 |
 | 4 `render_answers` | 근거 등급 답변 | 호스트 | 즉시 |
 
 **증가를 다 매집으로 세지 않는다.** `ownership_flow.classify_reason` 이 사유를

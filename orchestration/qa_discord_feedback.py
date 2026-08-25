@@ -98,18 +98,21 @@ def format_qa_feedback_request(
     code_text = ", ".join(codes[:8]) or "NONE"
     return (
         f"{QA_FEEDBACK_MARKER}\n"
+        "## ① 자동 감지 · QA 검토 요청\n"
         f"feedback_artifact_id={_bounded(artifact_id, 80)}\n"
-        f"대상 부서: {_bounded(department, 64)}\n"
-        f"자동 분류: {_bounded(decision, 40)}\n"
-        f"finding: {code_text}\n"
+        f"- **대상 부서:** `{_bounded(department, 64)}`\n"
+        f"- **자동 분류:** `{_bounded(decision, 40)}`\n"
+        f"- **감지 신호:** `{code_text}`\n\n"
+        "### 관측\n"
         f"{observation_text}\n"
-        "증거 참조(원문 payload 제외):\n"
+        "\n### 증거 키 · 원문 payload 제외\n"
         f"{evidence_text}\n\n"
-        "QA Hermes는 이 메시지의 feedback_artifact_id 한 건만 검토하세요. "
-        "다른 대기 artifact를 같은 응답에 합치지 말고, 위 redacted 관측만으로 사실/추론을 구분해 "
-        "담당 부서와 구체적인 조치·검증 방법을 제안하세요. "
-        "승인이나 설정 변경은 직접 수행하지 마세요. 응답에 feedback_artifact_id를 그대로 남기세요.\n"
-        f"관리자 명령: `승인 {artifact_id} [사유]` 또는 `거부 {artifact_id} [사유]`"
+        "> 다음 메시지 `② QA Hermes 검토 결과`에서 사실·한계·조치·판단 가이드를 제공합니다.\n\n"
+        "### 관리자 결정\n"
+        "- QA 결과에 Reply: `승인 <사유 필수>` 또는 `거부 <사유 필수>`\n"
+        f"- 직접 입력: `승인 {artifact_id} <사유 필수>` 또는 `거부 {artifact_id} <사유 필수>`\n"
+        "- **보류:** 명령을 입력하지 않으면 `PENDING` 유지\n\n"
+        "QA Hermes는 이 artifact 한 건만 검토하고 승인·거부·설정 변경을 직접 수행하지 마세요."
     )[:1900]
 
 
@@ -132,9 +135,7 @@ def parse_qa_feedback_command(content: object) -> QaFeedbackCommand | None:
     if artifact_match:
         tail = (tail[: artifact_match.start()] + " " + tail[artifact_match.end() :]).strip(" ,:-")
     decision = "APPROVED" if verb in {"승인", "approve", "approved"} else "REJECTED"
-    reason = _bounded(tail, 240) or (
-        "Discord QA 관리자 승인" if decision == "APPROVED" else "Discord QA 관리자 거부"
-    )
+    reason = _bounded(tail, 240)
     return QaFeedbackCommand(decision=decision, artifact_id=artifact_id, reason=reason)
 
 

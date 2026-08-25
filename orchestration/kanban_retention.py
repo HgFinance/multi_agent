@@ -579,6 +579,39 @@ def _root_candidate(row: Mapping[str, Any]) -> bool:
     )
 
 
+def _archive_scan_root_ids(rows: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+    """Order root inspection toward the oldest terminal workflows first.
+
+    The authoritative workflow reconstruction remains the eligibility gate;
+    row fields are used only to choose scan order. This prevents a bounded
+    maintenance pass from reconstructing the entire historical board before
+    it can archive its first small batch.
+    """
+
+    candidates: dict[str, Mapping[str, Any]] = {}
+    for row in rows:
+        if not _root_candidate(row):
+            continue
+        root_id = str(row.get("id") or row.get("task_id") or "").strip()
+        if root_id:
+            candidates.setdefault(root_id, row)
+
+    def order(item: tuple[str, Mapping[str, Any]]) -> tuple[int, int, str]:
+        root_id, row = item
+        terminal_rank = (
+            0 if str(row.get("status") or "").casefold() in TERMINAL_STATUSES else 1
+        )
+        observed_at = (
+            _epoch(row.get("completed_at"))
+            or _epoch(row.get("terminal_at"))
+            or _epoch(row.get("created_at"))
+            or 2**63 - 1
+        )
+        return terminal_rank, observed_at, root_id
+
+    return tuple(root_id for root_id, _row in sorted(candidates.items(), key=order))
+
+
 def _request_id(workflow: Workflow) -> str | None:
     correlation = _correlation(workflow)
     if correlation.request_id:
@@ -771,7 +804,9 @@ class AuditStore:
             return tuple(
                 conn.execute(
                     "SELECT * FROM workflow_retention_audit "
-                    "WHERE purged_at IS NULL AND archived_at < ? ORDER BY archived_at",
+                    "WHERE purged_at IS NULL "
+                    "AND COALESCE(completed_at, terminal_at, archived_at) < ? "
+                    "ORDER BY COALESCE(completed_at, terminal_at, archived_at)",
                     (int(now - PURGE_AGE_SECONDS),),
                 ).fetchall()
             )
@@ -1169,6 +1204,68 @@ class RetentionWorker:
                             )
                         )
 
+    def _purge_archived_workflows(
+        self,
+        purge_rows: Sequence[Any],
+        *,
+        archived_rows: Sequence[Mapping[str, Any]],
+        now: int,
+        skipped: list[tuple[str, str]],
+    ) -> tuple[int, int, int, float]:
+        """Purge due workflows before the expensive active-board scan."""
+
+        cleanup_started = time.perf_counter()
+        purged_count = 0
+        artifact_removed_count = 0
+        artifact_cleanup_skipped_count = 0
+        for row in purge_rows:
+            root_id = str(row["root_id"])
+            try:
+                # Do not trust the audit row's old graph membership. The
+                # archived board is reconstructed again before purge.
+                workflow = self._load(
+                    root_id,
+                    include_archived=True,
+                    listed_rows=archived_rows,
+                )
+                if any(node.status != ARCHIVED_STATUS for node in workflow.nodes):
+                    skipped.append((root_id, "purge_not_fully_archived"))
+                    continue
+                # Explicit success check required by policy: a purge cannot
+                # proceed merely because an earlier INSERT was attempted.
+                if self.audit.get(root_id) is None:
+                    skipped.append((root_id, "audit_summary_missing"))
+                    continue
+                task_ids = tuple(node.task_id for node in workflow.nodes)
+                if self.maintenance.purge_workflow(
+                    root_id,
+                    [node.task_id for node in workflow.nodes if node.task_id != root_id],
+                ):
+                    removed, skipped_artifacts = self.artifact_cleanup(task_ids)
+                    artifact_removed_count += removed
+                    artifact_cleanup_skipped_count += skipped_artifacts
+                    self.audit.mark_purged(root_id, purged_at=now)
+                    purged_count += 1
+                else:
+                    skipped.append((root_id, "purge_cas_failed"))
+            except KanbanTaskNotFound:
+                # A previous purge may have committed the board deletion and
+                # died before marking the audit row. Treat that state as an
+                # idempotent completion; the audit row remains the proof.
+                if self.audit.get(root_id) is not None:
+                    self.audit.mark_purged(root_id, purged_at=now)
+                    purged_count += 1
+                else:
+                    skipped.append((root_id, "purge_root_missing_without_audit"))
+            except (KanbanUnavailable, RetentionError, sqlite3.Error) as exc:
+                skipped.append((root_id, f"purge_error:{type(exc).__name__}"))
+        return (
+            purged_count,
+            artifact_removed_count,
+            artifact_cleanup_skipped_count,
+            (time.perf_counter() - cleanup_started) * 1000,
+        )
+
     def run_once(self) -> RetentionRun:
         now = int(self.clock())
         rows_started = time.perf_counter()
@@ -1188,13 +1285,7 @@ class RetentionWorker:
                 and str(row.get("status") or "").casefold() == ARCHIVED_STATUS
             )
         )
-        root_ids = tuple(
-            dict.fromkeys(
-                str(row.get("id") or row.get("task_id"))
-                for row in active_rows
-                if _root_candidate(row)
-            )
-        )
+        root_ids = _archive_scan_root_ids(active_rows)
         reconstruction_started = time.perf_counter()
         skipped: list[tuple[str, str]] = []
         blocked_reasons: Counter[str] = Counter()
@@ -1258,6 +1349,24 @@ class RetentionWorker:
 
         purge_rows = () if self.dry_run or not self.allow_purge else self.audit.purge_candidates(now=now)
         recovery_ms = (time.perf_counter() - recovery_started) * 1000
+        (
+            purged_count,
+            artifact_removed_count,
+            artifact_cleanup_skipped_count,
+            cleanup_ms,
+        ) = self._purge_archived_workflows(
+            purge_rows,
+            archived_rows=archived_rows,
+            now=now,
+            skipped=skipped,
+        )
+        if purge_rows:
+            LOG.info(
+                "kanban-retention-purge due=%d purged=%d cleanup_ms=%.2f",
+                len(purge_rows),
+                purged_count,
+                cleanup_ms,
+            )
         for root_id, workflow, decision, error in self._inspect_active_roots(
             root_ids,
             active_rows=active_rows,
@@ -1276,6 +1385,16 @@ class RetentionWorker:
             eligible_task_count += len(workflow.nodes)
             if self.max_archive_roots is None or len(archive_records) < self.max_archive_roots:
                 archive_records.append((root_id, workflow, decision))
+            # Production mutations are deliberately bounded. Once this pass
+            # has a full safe batch, continuing to hydrate every other root
+            # only delays archive/purge by tens of minutes. Dry-run keeps the
+            # exhaustive scan so it can still report the whole board.
+            if (
+                not self.dry_run
+                and self.max_archive_roots is not None
+                and len(archive_records) >= self.max_archive_roots
+            ):
+                break
 
         eligible_root_ids = tuple(eligible_root_ids_list)
         would_archive_root_ids = tuple(root_id for root_id, _workflow, _decision in archive_records)
@@ -1302,49 +1421,6 @@ class RetentionWorker:
                     skipped.append((root_id, f"maintenance_error:{type(exc).__name__}"))
         reconstruction_ms = (time.perf_counter() - reconstruction_started) * 1000
 
-        cleanup_started = time.perf_counter()
-        purged_count = 0
-        artifact_removed_count = 0
-        artifact_cleanup_skipped_count = 0
-        for row in purge_rows:
-            root_id = str(row["root_id"])
-            try:
-                # Do not trust the audit row's old graph membership. The
-                # archived board is reconstructed again before purge.
-                workflow = self._load(
-                    root_id,
-                    include_archived=True,
-                    listed_rows=archived_rows,
-                )
-                if any(node.status != ARCHIVED_STATUS for node in workflow.nodes):
-                    skipped.append((root_id, "purge_not_fully_archived"))
-                    continue
-                # Explicit success check required by policy: a purge cannot
-                # proceed merely because an earlier INSERT was attempted.
-                if self.audit.get(root_id) is None:
-                    skipped.append((root_id, "audit_summary_missing"))
-                    continue
-                task_ids = tuple(node.task_id for node in workflow.nodes)
-                if self.maintenance.purge_workflow(root_id, [node.task_id for node in workflow.nodes if node.task_id != root_id]):
-                    removed, skipped_artifacts = self.artifact_cleanup(task_ids)
-                    artifact_removed_count += removed
-                    artifact_cleanup_skipped_count += skipped_artifacts
-                    self.audit.mark_purged(root_id, purged_at=now)
-                    purged_count += 1
-                else:
-                    skipped.append((root_id, "purge_cas_failed"))
-            except KanbanTaskNotFound:
-                # A previous purge may have committed the board deletion and
-                # died before marking the audit row. Treat that state as an
-                # idempotent completion; the audit row remains the proof.
-                if self.audit.get(root_id) is not None:
-                    self.audit.mark_purged(root_id, purged_at=now)
-                    purged_count += 1
-                else:
-                    skipped.append((root_id, "purge_root_missing_without_audit"))
-            except (KanbanUnavailable, RetentionError, sqlite3.Error) as exc:
-                skipped.append((root_id, f"purge_error:{type(exc).__name__}"))
-        cleanup_ms = (time.perf_counter() - cleanup_started) * 1000
         return RetentionRun(
             active_task_count=len(active_rows),
             active_root_count=len(root_ids),

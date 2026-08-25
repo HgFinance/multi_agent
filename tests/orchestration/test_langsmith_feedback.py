@@ -283,6 +283,32 @@ def test_ledger_cleanup_removes_expired_artifacts_and_decisions(tmp_path) -> Non
     assert ledger.approved_hints(None, limit=3, max_chars=1200) is None
 
 
+def test_unanswered_artifact_expires_without_becoming_rejected(tmp_path) -> None:
+    path = tmp_path / "feedback.sqlite3"
+    ledger = FeedbackLedger(str(path))
+    ledger.enqueue("source-unanswered", "First")
+    assert ledger.claim() is not None
+    ledger.complete(
+        "source-unanswered",
+        "eval-unanswered",
+        evaluate_observation(observation_from_run(_Run())),
+    )
+
+    assert len(ledger.pending(10)) == 1
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT COUNT(*) FROM langsmith_feedback_decisions").fetchone() == (0,)
+        assert db.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='langsmith_feedback_reviews'"
+        ).fetchone() == (0,)
+        db.execute("UPDATE langsmith_feedback_artifacts SET created_at='2000-01-01T00:00:00+00:00'")
+        db.execute("UPDATE langsmith_feedback_jobs SET updated_at='2000-01-01T00:00:00+00:00'")
+
+    assert ledger.cleanup(1) == 2
+    assert ledger.pending(10) == []
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT COUNT(*) FROM langsmith_feedback_decisions").fetchone() == (0,)
+
+
 def test_evaluation_run_id_is_stable_and_stale_jobs_are_reclaimable(tmp_path) -> None:
     assert evaluation_run_id("source-1", "HgFinance-Evals") == evaluation_run_id(
         "source-1", "HgFinance-Evals"

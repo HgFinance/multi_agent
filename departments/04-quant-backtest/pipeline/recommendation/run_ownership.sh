@@ -20,8 +20,9 @@ mkdir -p "$WORK"
 echo "── 1단: 지분공시 시장 전체 스캔 (research-mcp) ──────────────"
 echo "   DART list.json 1회 + 종목별 상세. 수백 초 걸린다."
 docker cp "$EV/ownership_flow.py" hedgefund-research-mcp:/app/departments/01-research/evidence/ >/dev/null
+# SCAN_MAX_CORPS 를 넘기지 않는다 - 모듈 기본값이 전수(999)다.
 docker cp "$HERE/scan_ownership.py" hedgefund-research-mcp:/tmp/ >/dev/null
-docker exec -e SCAN_DAYS="$DAYS" -e SCAN_MAX_CORPS=60 \
+docker exec -e SCAN_DAYS="$DAYS" \
   hedgefund-research-mcp python /tmp/scan_ownership.py
 docker cp hedgefund-research-mcp:/tmp/ownership_scan.json "$WORK/scan.json" >/dev/null
 

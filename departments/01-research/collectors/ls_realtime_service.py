@@ -32,6 +32,7 @@
 실행
   python collectors/ls_realtime_service.py            # 상주 실행
   python collectors/ls_realtime_service.py --check    # 자체 점검 (접속 없음)
+  python collectors/ls_realtime_service.py --healthcheck  # DB/장중 신선도 점검
 """
 from __future__ import annotations
 
@@ -87,6 +88,7 @@ DEFAULT_OPEN = time(9, 0)
 DEFAULT_CLOSE = time(15, 30)
 SESSION_RETRY_BACKOFF = 30.0
 IDLE_RECHECK_SECONDS = 4 * 3600.0  # 휴장일에 세션 판정을 다시 하는 주기
+DEFAULT_HEALTH_MAX_DATA_AGE_SECONDS = 180.0
 
 
 @dataclass(frozen=True)
@@ -645,6 +647,78 @@ async def main_async() -> int:
     return 0
 
 
+def runtime_healthcheck(environment: dict | None = None) -> None:
+    """Fail when the service is alive but its canonical market feed is stale.
+
+    Outside the configured capture window a reachable TimescaleDB is enough.
+    During the window both tick and quote authority must remain fresh. Queries
+    use the hypertable time ordering with LIMIT 1; they never aggregate the
+    full raw tables, which would itself become an ingest bottleneck.
+    """
+
+    import psycopg2
+
+    env = dict(environment or load_project_env())
+    dsn = (env.get("TIMESCALE_DATABASE_URL") or "").strip()
+    if not dsn:
+        raise LsRealtimeError("TIMESCALE_DATABASE_URL 이 없다")
+    now = datetime.now(KST)
+    session = _fetch_market_session(now.date())
+    window = resolve_window(
+        now.date(),
+        session,
+        pre_open_minutes=float(env.get("LS_PRE_OPEN_MINUTES") or 60),
+        post_close_minutes=float(env.get("LS_POST_CLOSE_MINUTES") or 275),
+    )
+    conn = psycopg2.connect(dsn, connect_timeout=3)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("set statement_timeout = '3s'")
+            cur.execute("select 1")
+            cur.fetchone()
+            in_capture_window = bool(
+                window.is_trading
+                and window.starts_at is not None
+                and window.ends_at is not None
+                and window.starts_at <= now < window.ends_at
+            )
+            if not in_capture_window:
+                return
+            latest: dict[str, datetime | None] = {}
+            for label, table in (
+                ("tick", "market.market_ticks"),
+                ("quote", "market.market_quotes"),
+            ):
+                cur.execute(
+                    f"select event_time from {table} "
+                    "order by event_time desc limit 1"
+                )
+                row = cur.fetchone()
+                latest[label] = row[0] if row else None
+    finally:
+        conn.close()
+
+    max_age = max(
+        float(
+            env.get("LS_HEALTH_MAX_DATA_AGE_SECONDS")
+            or DEFAULT_HEALTH_MAX_DATA_AGE_SECONDS
+        ),
+        30.0,
+    )
+    stale = []
+    for label, observed in latest.items():
+        if observed is None:
+            stale.append(f"{label}=missing")
+            continue
+        age = (now.astimezone(timezone.utc) - observed.astimezone(timezone.utc)).total_seconds()
+        if age > max_age:
+            stale.append(f"{label}_age={age:.1f}s")
+    if stale:
+        raise LsRealtimeError(
+            "장중 LS 권위 시세가 stale: " + ", ".join(stale)
+        )
+
+
 # ---------------------------------------------------------------------------
 # 자체 점검 - 접속 없이
 # ---------------------------------------------------------------------------
@@ -765,6 +839,11 @@ def _check_heartbeat():
 if __name__ == "__main__":
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
+
+    if "--healthcheck" in sys.argv:
+        runtime_healthcheck()
+        print("ls-realtime healthy")
+        raise SystemExit(0)
 
     if "--check" in sys.argv:
         import tempfile

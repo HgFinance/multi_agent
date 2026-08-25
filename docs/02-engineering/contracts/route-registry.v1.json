@@ -1250,22 +1250,6 @@
         },
         {
           "method": "GET",
-          "path": "/ui/qa/observability/feedback/pending"
-        },
-        {
-          "method": "GET",
-          "path": "/ui/departments/{department}/observability/feedback"
-        },
-        {
-          "method": "POST",
-          "path": "/ui/departments/{department}/observability/feedback/{artifact_id}"
-        },
-        {
-          "method": "POST",
-          "path": "/ui/qa/observability/feedback/{artifact_id}/decision"
-        },
-        {
-          "method": "GET",
           "path": "/ui/qa/observability/langsmith"
         },
         {

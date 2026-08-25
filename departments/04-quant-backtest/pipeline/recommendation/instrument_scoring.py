@@ -239,11 +239,27 @@ def momentum_axis_batch(
 # ────────────────────────────────────────────────────────────────────────────
 
 def _streak(values: Sequence[float | None], positive: bool) -> int:
-    """최신부터 세어 부호가 유지되는 일수. None(미집계)을 만나면 거기서 끊는다."""
+    """최신부터 세어 부호가 유지되는 일수.
+
+    **선두의 미집계(None)는 건너뛰고, 중간의 None 에서만 끊는다.**
+
+    t1717 은 장중에 그날 투자자별 집계를 아직 안 준다(None). 목록이 최신순이라
+    장중에는 **첫 행이 늘 None** 이고, 거기서 바로 끊으면 연속일수가 항상 0 이
+    된다 - 실측 2026-08-25: 다산솔루에타가 8/24 외인 +47,160, 8/21 +25,952 로
+    실제로 사고 있었는데 축이 "매수 0일"로 나왔다. 수급 축이 장중 내내
+    무력화돼 있었다.
+
+    "아직 모른다"와 "끊겼다"는 다르다. 선두 None 은 전자이므로 건너뛰고,
+    집계된 날들 사이의 None 은 후자이므로 끊는다.
+    """
     count = 0
+    started = False
     for v in values:
         if v is None:
-            break
+            if started:
+                break      # 집계된 날들 사이의 구멍 - 연속이 끊긴 것
+            continue       # 아직 집계 전 - 판단 보류
+        started = True
         if (v > 0) if positive else (v < 0):
             count += 1
         else:
@@ -552,10 +568,16 @@ if __name__ == "__main__":
     assert live_axis.detail["foreign_buy_streak"] == 20, live_axis.detail
     assert live_axis.value > 0.5, live_axis.value
 
+    # 선두 미집계(장중)는 건너뛴다 - 뒤의 연속일수가 그대로 살아야 한다
     rows_gap = [{"집계상태": "장중_미집계", "date": "20260824"}] + rows_live
     gap_axis = flow_axis(rows_gap, avg_daily_volume=1000)
-    assert gap_axis.detail["foreign_buy_streak"] == 0, "미집계를 순매수 끊김으로 읽었다"
+    assert gap_axis.detail["foreign_buy_streak"] == 20, gap_axis.detail
     assert gap_axis.detail["unaggregated_dates"] == ["20260824"]
+
+    # 중간 구멍은 거기서 끊는다 - "아직 모른다"가 아니라 자료가 빈 것이다
+    rows_mid = rows_live[:3] + [{"집계상태": "장중_미집계", "date": "x"}] + rows_live[3:]
+    mid_axis = flow_axis(rows_mid, avg_daily_volume=1000)
+    assert mid_axis.detail["foreign_buy_streak"] == 3, mid_axis.detail
 
     # 전 구간 미집계면 기권
     assert flow_axis([{"집계상태": "장중_미집계"}] * 3).status == STATUS_ABSTAINED

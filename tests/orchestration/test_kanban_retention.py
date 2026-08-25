@@ -303,7 +303,7 @@ def test_archive_then_purge_preserves_audit_and_forbids_under_7_days(tmp_path: P
         audit=audit,
         workflow_loader=loader,
         row_lister=rows,
-        clock=lambda: NOW + 6 * 24 * 3600,
+        clock=lambda: NOW + 4 * 24 * 3600,
     ).run_once()
     assert under_7_days.purged_count == 0
 
@@ -312,7 +312,7 @@ def test_archive_then_purge_preserves_audit_and_forbids_under_7_days(tmp_path: P
         audit=audit,
         workflow_loader=loader,
         row_lister=rows,
-        clock=lambda: NOW + 7 * 24 * 3600,
+        clock=lambda: NOW + 5 * 24 * 3600,
     ).run_once()
     assert before_purge.purged_count == 0
 
@@ -321,11 +321,57 @@ def test_archive_then_purge_preserves_audit_and_forbids_under_7_days(tmp_path: P
         audit=audit,
         workflow_loader=loader,
         row_lister=rows,
-        clock=lambda: NOW + 7 * 24 * 3600 + 1,
+        clock=lambda: NOW + 5 * 24 * 3600 + 1,
     ).run_once()
     assert after_purge.purged_count == 1
     assert audit.get(ROOT) is not None
-    assert audit.get(ROOT)["purged_at"] == NOW + 7 * 24 * 3600 + 1
+    assert audit.get(ROOT)["purged_at"] == NOW + 5 * 24 * 3600 + 1
+
+
+def test_bounded_production_scan_stops_after_oldest_safe_batch(tmp_path: Path) -> None:
+    rows = [
+        {
+            "id": "newer-root",
+            "body": (
+                "hgfinance.ceo-workflow-scope.v1\n"
+                "workflow_root_task_id=newer-root\n"
+                "## User request\nnewer\n"
+            ),
+            "status": "done",
+            "created_at": NOW - 2 * 24 * 3600,
+            "completed_at": NOW - 25 * 3600,
+        },
+        {
+            "id": "oldest-root",
+            "body": (
+                "hgfinance.ceo-workflow-scope.v1\n"
+                "workflow_root_task_id=oldest-root\n"
+                "## User request\noldest\n"
+            ),
+            "status": "done",
+            "created_at": NOW - 5 * 24 * 3600,
+            "completed_at": NOW - 3 * 24 * 3600,
+        },
+    ]
+    loaded: list[str] = []
+
+    def loader(root_id: str, **_):
+        loaded.append(root_id)
+        return _workflow()
+
+    result = RetentionWorker(
+        maintenance=FakeMaintenance(),
+        audit=AuditStore(tmp_path / "retention-audit.db"),
+        workflow_loader=loader,
+        row_lister=lambda *, include_archived=False: rows if not include_archived else [],
+        clock=lambda: NOW,
+        max_archive_roots=1,
+        root_workers=1,
+    ).run_once()
+
+    assert loaded == ["oldest-root"]
+    assert result.active_root_count == 2
+    assert result.archived_count == 1
 
 
 def test_purge_requires_audit_row(tmp_path: Path) -> None:
@@ -445,6 +491,7 @@ def test_legacy_archived_workflow_is_audited_before_old_purge(tmp_path: Path) ->
                 dict(
                     node.raw,
                     status="archived",
+                    completed_at=NOW - 8 * 24 * 3600,
                     events=[{"kind": "archived", "created_at": NOW - 8 * 24 * 3600}],
                 )
             )

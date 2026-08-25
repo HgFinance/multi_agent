@@ -25,14 +25,16 @@ import external_sources as ex
 from departments.worker_model_gateway import llm_for_worker
 
 from instrument_scoring import COMPOSITE_OK, STATUS_OK, AxisScore, abstain, blend_axes
-from narrative_axes import disclosure_axis, news_axis, prefilter
+from narrative_axes import judge_combined, prefilter
 
 IN_PATH = os.environ.get("CARDS_IN", "/tmp/cards.json")
 OUT_PATH = os.environ.get("CARDS_OUT", "/tmp/cards_final.json")
 NEWS_N = int(os.environ.get("NEWS_N", "10"))
 DISCLOSURE_DAYS = int(os.environ.get("DISCLOSURE_DAYS", "14"))
 # vLLM 을 독점하지 않는 선. 같은 서버를 부서 워커들이 같이 쓴다.
-CONCURRENCY = int(os.environ.get("JUDGE_CONCURRENCY", "3"))
+# 실측: 4종목 기준 동시성 3 -> 83초, 4 -> 47초, 8 -> 46초.
+# 종목 수를 넘으면 이득이 없고 vLLM 만 점유한다.
+CONCURRENCY = int(os.environ.get("JUDGE_CONCURRENCY", "6"))
 
 
 def fetch_news(company: str) -> tuple[list[dict], str]:
@@ -123,26 +125,26 @@ def main() -> int:
 
         axes, observed = _rehydrate(card)
 
-        # ── 뉴스 ──────────────────────────────────────────────────────────
+        # ── 뉴스·공시 (LLM 한 번) ────────────────────────────────────────
+        # 둘은 같은 종목의 같은 시점 재료이고 판정 기준도 같다. 따로 물으면
+        # 호출이 두 배이고, 모델이 "증자 공시"와 "증자 우려 기사"를 각각 세어
+        # 같은 사건을 중복 계산한다.
+        kept, raw_disc = [], []
         try:
             raw_news, _ = fetch_news(company)
             kept = prefilter(raw_news, company, text_keys=("title", "description"))
-            print(f"{symbol} {company}: 뉴스 {len(raw_news)}건 -> 사전필터 {len(kept)}건")
-            ax = news_axis(kept, company, llm)
         except Exception as exc:  # noqa: BLE001
-            ax = abstain("news", f"조회 실패 {type(exc).__name__}: {str(exc)[:80]}")
-        axes.append(ax)
-        news_detail = ax.detail
-
-        # ── 공시 ──────────────────────────────────────────────────────────
+            print(f"{symbol} 뉴스 조회 실패: {type(exc).__name__}")
         try:
             raw_disc, _ = fetch_disclosures(company)
-            print(f"{symbol} {company}: 공시 {len(raw_disc)}건({DISCLOSURE_DAYS}일)")
-            axd = disclosure_axis(raw_disc, company, llm)
         except Exception as exc:  # noqa: BLE001
-            axd = abstain("disclosure", f"조회 실패 {type(exc).__name__}: {str(exc)[:80]}")
+            print(f"{symbol} 공시 조회 실패: {type(exc).__name__}")
+        print(f"{symbol} {company}: 뉴스 {len(kept)}건 · 공시 {len(raw_disc)}건",
+              flush=True)
+        ax, axd = judge_combined(kept, raw_disc, company, llm)
+        axes.append(ax)
         axes.append(axd)
-        disc_detail = axd.detail
+        news_detail, disc_detail = ax.detail, axd.detail
 
         # 테마는 이제 소스가 있다(ls:t1532). 카드에 실려 왔으면 그대로 쓰고,
         # 없으면 그때만 기권이다 - 예전처럼 무조건 NO_SOURCE 로 덮지 않는다.
@@ -178,7 +180,8 @@ def main() -> int:
         return card
 
     t_judge = time.time()
-    with ThreadPoolExecutor(max_workers=CONCURRENCY) as pool:
+    with ThreadPoolExecutor(
+            max_workers=max(1, min(CONCURRENCY, len(cards)))) as pool:
         out = list(pool.map(process, cards))
     print(f"판정 {len(out)}종목 {time.time()-t_judge:.0f}초 "
           f"(동시성 {CONCURRENCY})", flush=True)

@@ -112,7 +112,8 @@ services:
     environment:
       <<: *control-environment
       CONTROL_DATABASE_URL: *control-database-url
-      MEMOHARNESS_D5_MODE: ${MEMOHARNESS_D5_MODE:-off}
+      MEMOHARNESS_D5_MODE: ${MEMOHARNESS_D5_MODE:-active}
+      MEMOHARNESS_D5_DATABASE_URL: *control-database-url
       MEMOHARNESS_D5_TOP_K: ${MEMOHARNESS_D5_TOP_K:-5}
       MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS: ${MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS:-1500}
       ORDER_ORCHESTRATOR_DATABASE_URL: *order-database-url
@@ -261,7 +262,8 @@ services:
     depends_on: *control-dependency
     environment:
       <<: *control-environment
-      MEMOHARNESS_D5_MODE: ${MEMOHARNESS_D5_MODE:-off}
+      MEMOHARNESS_D5_MODE: ${MEMOHARNESS_D5_MODE:-active}
+      MEMOHARNESS_D5_DATABASE_URL: *control-database-url
       MEMOHARNESS_D5_TOP_K: ${MEMOHARNESS_D5_TOP_K:-5}
       MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS: ${MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS:-1500}
 
@@ -365,6 +367,8 @@ services:
     depends_on: *control-dependency
     environment:
       <<: *control-environment
+      MEMOHARNESS_D5_MODE: ${MEMOHARNESS_D5_MODE:-active}
+      MEMOHARNESS_D5_DATABASE_URL: *control-database-url
       RISK_QA_DATABASE_URL: *control-database-url
       # The supervisor binds the already-admitted PAPER request before it
       # releases the deferred Trading card. Use the isolated order role.

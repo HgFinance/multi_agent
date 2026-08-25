@@ -167,7 +167,7 @@ def test_explicit_average_entry_and_holding_percent_are_activatable(monkeypatch)
 
 
 
-def test_omitted_expiry_defaults_to_ten_minutes(monkeypatch) -> None:
+def test_omitted_expiry_defaults_to_krx_regular_close(monkeypatch) -> None:
     install_scope(monkeypatch)
     candidate = profit_candidate()
     candidate.pop("expires_at")
@@ -181,7 +181,18 @@ def test_omitted_expiry_defaults_to_ten_minutes(monkeypatch) -> None:
         now=NOW,
     )
 
-    assert preview.spec.expires_at == NOW + timedelta(minutes=10)
+    assert preview.spec.expires_at == datetime(
+        2026, 8, 20, 6, 30, tzinfo=timezone.utc
+    )
+    assert "DEFAULT_EXPIRY_KRX_REGULAR_CLOSE" in preview.assumptions
+
+
+def test_omitted_expiry_after_close_uses_next_weekday_close() -> None:
+    friday_after_close = datetime(2026, 8, 21, 7, 0, tzinfo=timezone.utc)
+
+    assert api._expiry(None, now=friday_after_close) == datetime(
+        2026, 8, 24, 6, 30, tzinfo=timezone.utc
+    )
 
 
 def test_unqualified_daily_indicator_is_visible_confirmation_assumption(monkeypatch) -> None:

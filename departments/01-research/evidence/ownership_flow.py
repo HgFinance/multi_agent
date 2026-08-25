@@ -95,6 +95,58 @@ def _num(value: Any) -> float | None:
         return None
 
 
+# ── 매수자 유형 ──────────────────────────────────────────────────────────
+INSTITUTION = "INSTITUTION"    # 외부 운용사·펀드·연기금
+CONTROLLING = "CONTROLLING"    # 지배주주·지주회사·계열사
+INSIDER = "INSIDER"            # 임원·개인 주요주주
+BUYER_UNKNOWN = "UNKNOWN"
+
+_INSTITUTION_WORDS = (
+    "자산운용", "투자자문", "인베스트먼트", "캐피탈", "연금", "공제회", "운용",
+    "펀드", "신탁", "증권", "은행", "보험", "asset", "capital", "management",
+    "investment", "partners", "fund", "advisors", "securities", "llc", "ltd",
+    "inc", "l.p", "lp",
+)
+_CONTROLLING_WORDS = ("홀딩스", "지주", "그룹", "holdings", "group")
+
+
+def _tokens(name: str) -> set[str]:
+    return {t for t in re.split(r"[^0-9A-Za-z가-힣]+", str(name or "")) if len(t) > 1}
+
+
+def _shares_stem(buyer: str, company: str) -> bool:
+    """상호가 회사명과 어간을 공유하는가.
+
+    "다산인베스트 <-> 다산솔루에타", "평화홀딩스 <-> 평화산업" 처럼 계열은
+    앞머리를 공유한다. 토큰이 통째로 같지 않아도 앞 2글자가 겹치면 본다 -
+    한국 계열사 작명이 대체로 그렇다.
+    """
+    b, c = re.sub(r"\s+", "", str(buyer or "")), re.sub(r"\s+", "", str(company or ""))
+    if not b or not c:
+        return False
+    if _tokens(b) & _tokens(c):
+        return True
+    return len(b) >= 2 and len(c) >= 2 and b[:2] == c[:2]
+
+
+def classify_buyer(holder: str, company: str = "", source: str = "") -> str:
+    """보고자 이름으로 유형을 짐작한다. 확신 없으면 UNKNOWN 이다."""
+    name = str(holder or "").strip()
+    if not name:
+        return BUYER_UNKNOWN
+    low = name.lower()
+    if any(w in low for w in _CONTROLLING_WORDS) or _shares_stem(name, company):
+        return CONTROLLING
+    if any(w in low for w in _INSTITUTION_WORDS):
+        return INSTITUTION
+    if source == "elestock":
+        return INSIDER
+    # 법인 접미가 없고 3~4글자 한글이면 개인으로 본다(대주주 개인 보고).
+    if re.fullmatch(r"[가-힣]{2,4}", name):
+        return INSIDER
+    return BUYER_UNKNOWN
+
+
 @dataclass(frozen=True)
 class Filing:
     """지분공시 한 건. 원문 좌표(rcept_no)를 반드시 들고 다닌다."""
@@ -110,6 +162,7 @@ class Filing:
     qty_change: float | None
     reason: str
     reason_class: str = ""
+    buyer_type: str = ""
 
     def __post_init__(self) -> None:
         if not self.rcept_no:
@@ -117,6 +170,9 @@ class Filing:
             raise ValueError(f"rcept_no 없는 공시: {self.company} {self.holder}")
         object.__setattr__(self, "reason_class",
                            self.reason_class or classify_reason(self.reason))
+        object.__setattr__(self, "buyer_type",
+                           self.buyer_type or classify_buyer(
+                               self.holder, self.company, self.source))
 
 
 # 두 API 의 **필드 이름이 완전히 다르다**(2026-08-25 실측). 하나로 읽으면
@@ -181,6 +237,8 @@ class Accumulation:
     structural_ratio: float = 0.0
     disposal_ratio: float = 0.0
     unclassified_ratio: float = 0.0
+    # 유형별 장내 순증(%p). "누가 샀나"가 "얼마나"만큼 중요하다.
+    by_buyer_type: dict[str, float] = field(default_factory=dict)
     buyers: list[str] = field(default_factory=list)
     filings: list[Filing] = field(default_factory=list)
 
@@ -199,11 +257,15 @@ class Accumulation:
             "disposal_ratio_pp": round(self.disposal_ratio, 4),
             "unclassified_ratio_pp": round(self.unclassified_ratio, 4),
             "buyer_count": len(set(self.buyers)),
+            "by_buyer_type_pp": {k: round(v, 4)
+                                 for k, v in sorted(self.by_buyer_type.items())},
+            "institution_ratio_pp": round(self.by_buyer_type.get(INSTITUTION, 0.0), 4),
             "buyers": sorted(set(self.buyers))[:6],
             "filing_count": len(self.filings),
             "evidence": [
                 {"rcept_no": f.rcept_no, "filed_at": f.filed_at,
-                 "holder": f.holder, "ratio_change_pp": f.ratio_change,
+                 "holder": f.holder, "buyer_type": f.buyer_type,
+                 "ratio_change_pp": f.ratio_change,
                  "ratio_after_pct": f.ratio_after,
                  "reason": f.reason[:60], "reason_class": f.reason_class,
                  "source": f.source}
@@ -227,6 +289,8 @@ def aggregate(filings: Sequence[Filing]) -> list[Accumulation]:
         magnitude = abs(change)
         if f.reason_class == MARKET_BUY and change > 0:
             acc.market_buy_ratio += magnitude
+            acc.by_buyer_type[f.buyer_type] = (
+                acc.by_buyer_type.get(f.buyer_type, 0.0) + magnitude)
             if f.holder:
                 acc.buyers.append(f.holder)
         elif f.reason_class == STRUCTURAL and change > 0:
@@ -248,6 +312,83 @@ def rank_by_observation(accs: Sequence[Accumulation], *,
     return sorted(
         [a for a in accs if a.net_ratio >= min_net_ratio],
         key=lambda a: (-a.net_ratio, -len(set(a.buyers)), a.symbol),
+    )
+
+
+@dataclass
+class HolderBook:
+    """한 매수자가 조회 구간에 사 모은 종목들. 13F 의 한 줄에 해당한다."""
+
+    holder: str
+    buyer_type: str
+    positions: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def total_ratio(self) -> float:
+        return round(sum(p["ratio_change_pp"] for p in self.positions), 4)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "holder": self.holder,
+            "buyer_type": self.buyer_type,
+            "position_count": len(self.positions),
+            "total_ratio_pp": self.total_ratio,
+            "positions": sorted(self.positions,
+                                key=lambda x: -x["ratio_change_pp"]),
+        }
+
+
+def by_holder(filings: Sequence[Filing], *, only_market_buy: bool = True
+              ) -> list[HolderBook]:
+    """매수자별로 접는다. 여러 종목을 담은 쪽이 위로 온다.
+
+    `only_market_buy` 가 참이면 장내매수만 센다 - 전환사채 인수나 상장으로
+    생긴 지분은 "고른 것"이 아니라 "생긴 것"이라 포트폴리오로 읽으면 안 된다.
+    """
+    books: dict[str, HolderBook] = {}
+    for f in filings:
+        if not f.holder or not f.symbol or f.ratio_change is None:
+            continue
+        if only_market_buy and (f.reason_class != MARKET_BUY or f.ratio_change <= 0):
+            continue
+        book = books.setdefault(
+            f.holder, HolderBook(holder=f.holder, buyer_type=f.buyer_type))
+        # ▶ **종목 단위로 접는다.** 한 종목에 공시가 여러 건이면 그건 한
+        #   포지션을 나눠 산 것이지 여러 종목이 아니다(실측 2026-08-25:
+        #   정해운이 "3종목"으로 떴는데 닷밀 공시 3건이었다). 이 뷰의 요점이
+        #   "여러 곳을 담았나"라서 부풀면 뷰 자체가 거짓말이 된다.
+        pos = next((q for q in book.positions if q["symbol"] == f.symbol), None)
+        if pos is None:
+            book.positions.append({
+                "symbol": f.symbol, "company": f.company,
+                "ratio_change_pp": abs(f.ratio_change),
+                "ratio_after_pct": f.ratio_after,
+                "filed_at": f.filed_at, "rcept_no": f.rcept_no,
+                "filing_count": 1,
+            })
+        else:
+            pos["ratio_change_pp"] = round(
+                pos["ratio_change_pp"] + abs(f.ratio_change), 4)
+            pos["filing_count"] += 1
+            if f.filed_at > pos["filed_at"]:      # 최신 공시를 대표로
+                pos.update(filed_at=f.filed_at, rcept_no=f.rcept_no,
+                           ratio_after_pct=f.ratio_after)
+    # 종목 수가 먼저다 - 여러 곳을 담은 쪽이 포트폴리오를 짜고 있다는 뜻이다.
+    return sorted(books.values(),
+                  key=lambda b: (-len(b.positions), -b.total_ratio, b.holder))
+
+
+def rank_by_buyer_type(accs: Sequence[Accumulation], buyer_type: str, *,
+                       min_ratio: float = 0.3) -> list[Accumulation]:
+    """특정 유형의 매수만으로 줄을 세운다.
+
+    지배주주 거래와 외부 기관 거래를 한 줄에 세우면 늘 전자가 이긴다 -
+    지분을 크게 움직이는 쪽이라서지 신호가 강해서가 아니다. 문턱을 낮게
+    잡는 이유도 같다(기관은 1%p 를 잘 안 넘긴다).
+    """
+    return sorted(
+        [a for a in accs if a.by_buyer_type.get(buyer_type, 0.0) >= min_ratio],
+        key=lambda a: (-a.by_buyer_type.get(buyer_type, 0.0), a.symbol),
     )
 
 
@@ -343,5 +484,79 @@ if __name__ == "__main__":
     assert ele[0].reason_class == UNCLASSIFIED, ele[0].reason_class
     acc = aggregate(ele)[0]
     assert acc.market_buy_ratio == 0.0 and acc.unclassified_ratio == 0.06
+
+    # 매수자 유형
+    assert classify_buyer("MiriCapitalManagementLLC", "미코") == INSTITUTION
+    assert classify_buyer("삼성자산운용", "다른회사") == INSTITUTION
+    assert classify_buyer("대교홀딩스", "대교") == CONTROLLING
+    # 상호가 회사명 어간을 공유하면 계열로 본다
+    assert classify_buyer("다산인베스트", "다산솔루에타") == CONTROLLING
+    assert classify_buyer("평화홀딩스", "평화산업") == CONTROLLING
+    assert classify_buyer("홍성천", "파인디앤씨") == INSIDER
+    assert classify_buyer("안상헌", "가", source="elestock") == INSIDER
+    assert classify_buyer("", "가") == BUYER_UNKNOWN
+
+    # 유형별로 따로 센다
+    typed = parse_filings([
+        {"rcept_no": "T1", "corp_name": "미코", "stock_code": "059090",
+         "repror": "MiriCapitalManagementLLC", "rcept_dt": "20260820",
+         "stkrt": "6.0", "stkrt_irds": "1.72", "stkqy_irds": "1",
+         "report_resn": "장내매수"},
+        {"rcept_no": "T2", "corp_name": "대교", "stock_code": "019680",
+         "repror": "대교홀딩스", "rcept_dt": "20260820", "stkrt": "60",
+         "stkrt_irds": "3.99", "stkqy_irds": "1", "report_resn": "장내매수"},
+    ], source="majorstock")
+    accs2 = aggregate(typed)
+    by = {a.symbol: a for a in accs2}
+    assert by["059090"].by_buyer_type == {INSTITUTION: 1.72}, by["059090"].by_buyer_type
+    assert by["019680"].by_buyer_type == {CONTROLLING: 3.99}
+    # 전체 순위는 지배주주가 위지만, 기관만 세우면 미코가 1위다
+    assert [a.symbol for a in rank_by_observation(accs2)][0] == "019680"
+    inst = rank_by_buyer_type(accs2, INSTITUTION)
+    assert [a.symbol for a in inst] == ["059090"], [a.symbol for a in inst]
+    assert by["059090"].as_dict()["institution_ratio_pp"] == 1.72
+
+    # 매수자별 포트폴리오 - 여러 종목을 담은 쪽이 위로
+    multi = parse_filings([
+        {"rcept_no": "H1", "corp_name": "미코", "stock_code": "059090",
+         "repror": "MiriCapitalManagementLLC", "rcept_dt": "20260820",
+         "stkrt": "6", "stkrt_irds": "1.72", "stkqy_irds": "1",
+         "report_resn": "장내매수"},
+        {"rcept_no": "H2", "corp_name": "현대이지웰", "stock_code": "090850",
+         "repror": "MiriCapitalManagementLLC", "rcept_dt": "20260819",
+         "stkrt": "5.5", "stkrt_irds": "1.29", "stkqy_irds": "1",
+         "report_resn": "장내매수"},
+        {"rcept_no": "H3", "corp_name": "대교", "stock_code": "019680",
+         "repror": "대교홀딩스", "rcept_dt": "20260820", "stkrt": "60",
+         "stkrt_irds": "3.99", "stkqy_irds": "1", "report_resn": "장내매수"},
+        {"rcept_no": "H4", "corp_name": "가", "stock_code": "000001",
+         "repror": "누군가", "rcept_dt": "20260820", "stkrt": "9",
+         "stkrt_irds": "9.0", "stkqy_irds": "1", "report_resn": "전환사채 인수"},
+    ], source="majorstock")
+    books = by_holder(multi)
+    # 종목 2개를 담은 운용사가, 한 종목에 3.99%p 넣은 지주보다 위다
+    assert books[0].holder == "MiriCapitalManagementLLC", [b.holder for b in books]
+    assert len(books[0].positions) == 2 and books[0].buyer_type == INSTITUTION
+    assert abs(books[0].total_ratio - 3.01) < 1e-9, books[0].total_ratio
+    assert books[1].holder == "대교홀딩스"
+    # 전환사채로 생긴 지분은 포트폴리오가 아니다
+    assert all(b.holder != "누군가" for b in books), [b.holder for b in books]
+    d = books[0].as_dict()
+    assert d["positions"][0]["symbol"] == "059090" and d["position_count"] == 2
+
+    # 같은 종목 공시 여러 건은 **한 포지션**이다 - 종목 수가 부풀면 안 된다
+    repeat = parse_filings([
+        {"rcept_no": f"R{i}", "corp_name": "닷밀", "stock_code": "464580",
+         "repror": "정해운", "rcept_dt": f"2026082{i}", "stkrt": "10",
+         "stkrt_irds": v, "stkqy_irds": "1", "report_resn": "장내매수"}
+        for i, v in enumerate(("0.42", "0.32", "0.09"), start=1)
+    ], source="majorstock")
+    rb = by_holder(repeat)
+    assert len(rb) == 1 and len(rb[0].positions) == 1, rb[0].as_dict()
+    assert rb[0].positions[0]["filing_count"] == 3
+    assert abs(rb[0].positions[0]["ratio_change_pp"] - 0.83) < 1e-9
+    # 대표 공시는 가장 최신 것
+    assert rb[0].positions[0]["rcept_no"] == "R3"
+    assert rb[0].as_dict()["position_count"] == 1
 
     print("ownership_flow self-check OK")

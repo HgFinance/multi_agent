@@ -125,19 +125,45 @@ def pick_question() -> tuple[str, str, str, str]:
     for idea in rlog.pending_ideas():                  # ① 사람 개입이 최우선
         q = str(idea.get("question") or "").strip()
         if q and q not in asked:
-            return q, "user", "", "measure"
+            # 사람이 종류를 지정했으면 그대로 쓴다. 문헌 질문을 측정
+            # 카드로 내보내면 DB 도구로 웹 질문에 답하려 든다(실측).
+            k = str(idea.get("kind") or "measure")
+            return q, "user", "", (k if k in ("measure", "literature")
+                                   else "measure")
 
-    for found in rlog.recent_findings(limit=8):        # ② 벽을 만났으면 읽는다
-        for q in getattr(found, "lit_questions", []) or []:
-            q = str(q).strip()
-            if q and q not in asked:
-                return q, "auto", found.id, "literature"
+    # ② 벽을 만났으면 읽는다 - **단, 직전이 문헌이었으면 먼저 재고 온다.**
+    #   문헌은 또 문헌 질문을 낳는다. 문헌이 측정보다 우선이므로 이걸 막지
+    #   않으면 읽기가 큐를 영원히 앞지른다(2026-08-25 문헌 3연속 실측).
+    #   금지가 아니라 순서다 - 읽은 다음엔 그걸 재본다.
+    _recent = rlog.recent_findings(limit=8)
+    # **직전** 판정은 ts 정렬이 아니라 **기록 순서**로 한다. ts 는 초
+    # 단위라 같은 초에 닫힌 항목들의 정렬이 불안정하다(자체점검이 잡음).
+    # 로그는 append-only 라 마지막 DONE 줄이 곧 직전에 닫힌 항목이다.
+    _closed = [e for e in rlog.read_log() if e.status == "DONE"]
+    _just_read = (bool(_closed)
+                  and getattr(_closed[-1], "kind", "") == "literature")
+
+    if not _just_read:
+        for found in _recent:
+            for q in getattr(found, "lit_questions", []) or []:
+                q = str(q).strip()
+                if q and q not in asked:
+                    return q, "auto", found.id, "literature"
 
     for found in rlog.recent_findings(limit=8):        # ③ 자기개선(측정)
         for q in found.next_questions:
             q = str(q).strip()
             if q and q not in asked:
                 return q, "auto", found.id, "measure"
+
+    # ③-b 잴 것이 하나도 없으면 그때는 읽는 게 맞다. 위에서 직전이 문헌이라
+    #     건너뛰었던 문헌 질문을 여기서 집는다 - 미루는 것이지 버리는 게 아니다.
+    if _just_read:
+        for found in _recent:
+            for q in getattr(found, "lit_questions", []) or []:
+                q = str(q).strip()
+                if q and q not in asked:
+                    return q, "auto", found.id, "literature"
 
     for q in SEED_QUESTIONS:                           # ④ 씨앗
         if q not in asked:
@@ -258,6 +284,42 @@ quant-py /app/repo/departments/01-research/bench/research_log.py close \\
   --sessions 2026-06-02 --sessions 2026-06-03
 ```
 
+## 후보 지목 - **재놓고 그냥 넘어가지 마라**
+
+여기가 탐색이 확증으로 넘어가는 유일한 문이다. 아래 넷을 **동시에** 만족하는
+결과를 손에 쥐었으면 지목해라.
+
+  ① **비용을 뺀 뒤에도** 양수다. 총엣지가 아니라 순엣지다 - 스프레드·수수료를
+     빼고도 남아야 한다. 무엇을 어떻게 뺐는지 `claim` 에 적어라.
+  ② **규칙이다.** 상관계수나 IC 가 아니라 "언제 사고 언제 판다" 가 나와야
+     한다. 상관은 규칙이 아니다.
+  ③ **다시 돌릴 수 있다.** 스크립트가 `research/scripts/` 에 있고 인자만
+     바꾸면 다른 구간에서 그대로 돈다.
+  ④ **홀드아웃을 안 봤다.** 2026-08-06 이후 세션이 `--sessions` 에 없다.
+
+**지목은 승리 주장이 아니다.** "이걸 홀드아웃에서 다시 재 달라" 는 요청이다.
+판정은 네가 아니라 홀드아웃이 한다 - 틀렸으면 거기서 기각되고 그 기각도
+기록으로 남아 다음 실험이 그 자리를 다시 파지 않는다. **틀린 지목의 비용은
+확증 카드 한 장뿐이다.**
+
+거꾸로, 기준을 만족하는데 지목하지 않고 넘어가는 것은 **실패다.** 반증만
+쌓고 아무것도 내놓지 않는 루프는 돌지 않는 루프와 결과가 같다.
+
+```
+  --candidate '{{"name": "ofi_5m_strong",
+                "script": "research/scripts/r9999_<이름>.py",
+                "params": {{"horizon": "5m", "ofi_pct": 50}},
+                "claim": "|OFI| 상위 50% 사건을 5분 보유, 왕복 스프레드 차감 후 +X.Xbp",
+                "expected": {{"net_bps": 0.0, "n_events": 0}}}}'
+```
+
+`name`·`script`·`claim` 은 **없으면 기록 자체가 거부된다**(확증 카드가 무엇을
+동결할지 모른다). `params` 는 확증이 그대로 재현할 인자, `expected` 는 홀드아웃에서
+나올 것으로 네가 **미리** 적어 두는 숫자다 - 이 값이 사전등록 지문이 된다.
+
+아직 기준에 못 미치면 지목하지 마라. 대신 **무엇이 모자랐는지 숫자로**
+`--finding` 에 적어라("순엣지 −11.2bp 로 ① 미달").
+
 ## 규율 세 줄
 
 - **숫자에는 출처가 있어야 한다.** 스크립트 없이 숫자만 적으면 기록이 거부된다.
@@ -266,6 +328,8 @@ quant-py /app/repo/departments/01-research/bench/research_log.py close \\
   발견이다 - 무엇이 왜 안 됐는지 적고 그래서 무엇을 다르게 볼지 적어라.
 - **못 하겠으면 못 하겠다고 적어라.** 지어낸 숫자 하나가 뒤의 실험 열 개를
   오염시킨다. 막혔으면 `--finding` 에 무엇이 막았는지 쓰고 다음 질문을 남겨라.
+- **되면 됐다고 적어라.** 위 넷을 만족하는데 지목하지 않고 넘어가면, 그건
+  신중한 게 아니라 루프를 멎게 하는 것이다. 지목의 판정자는 홀드아웃이다.
 """
 
 
@@ -300,14 +364,55 @@ research_kind=literature
 그 벽을 남들은 어떻게 넘었는지(혹은 못 넘었는지) 찾는 것이 임무다.
 {prior}
 
-## 읽는 도구 (이 컨테이너에 다 있다)
+## 읽는 도구 - **아래는 2026-08-25 에 이 컨테이너에서 직접 돌려본 것이다**
 
-  `agent-reach doctor`         살아 있는 채널 확인
-  arXiv q-fin                  `reach-py -c "import feedparser; ..."`
-  임의 페이지                  `curl -s https://r.jina.ai/<URL>`
-  발표·인터뷰                  `yt-dlp --write-auto-subs --skip-download <URL>`
-  코드·저장소                  `gh search repos` / `gh search code`
-  의미검색                     `mcporter` (Exa)
+먼저 이 한 줄을 돌려라. 없으면 만들고 있으면 지나간다(컨테이너를 다시 만들면
+등록이 날아가므로 매번 확인하는 게 맞다):
+
+```
+mcporter list exa >/dev/null 2>&1 || \
+  mcporter config add exa https://mcp.exa.ai/mcp --scope home
+mcporter list paper-search >/dev/null 2>&1 || mcporter config add paper-search --command 'uvx paper-search-mcp' --scope home
+```
+
+**① 논문 검색 - Crossref.** 학술 문헌은 여기가 제일 정확하다.
+`queue position adverse selection limit order` 로 Moallemi-Yuan 큐 가치
+논문이 1순위로 나오는 것을 확인했다.
+
+```
+mcporter call paper-search.search_crossref max_results=5 query='order flow imbalance transaction cost passive execution'
+```
+
+**② 논문 전문 읽기 - 이게 제일 중요하다.** 초록만 읽고 결론을 지으면 그 위에
+세운 측정이 통째로 헛돈다. arXiv 번호를 알면 **본문 전체**가 나온다
+(`1011.6402` = Cont-Kukanov-Stoikov 로 확인).
+
+```
+mcporter call paper-search.read_arxiv_paper paper_id=1011.6402
+```
+
+**③ 의미검색 - 무엇을 찾을지 모를 때.** 키가 필요 없다. 키워드가 아니라
+*이상적인 페이지를 서술*해야 잘 나온다.
+
+```
+mcporter call exa.web_search_exa numResults=5 \
+  query='order flow imbalance alpha 가 스프레드 비용을 넘는지 재는 실증 연구'
+mcporter call exa.web_fetch_exa url='https://...'      # 본문 전체가 필요할 때
+```
+
+**④ arXiv 목록 훑기 - 반드시 https 다.** `http://` 는 301 만 돌려준다.
+
+```
+curl -sS -m 30 'https://export.arxiv.org/api/query?search_query=all:%22order+flow+imbalance%22&max_results=5'
+```
+
+**⑤ 임의 페이지** `curl -sS -m 30 https://r.jina.ai/<URL>` (가용 확인함)
+
+안 되는 것 - **시도하다 시간 버리지 마라**:
+`paper-search.search_arxiv` (미시구조 질의에 정수론 논문을 준다),
+`paper-search.search_semantic` (키 없으면 빈 배열), `gh search` (미인증),
+`yt-dlp` (JS 런타임 미설정), `TAVILY_API_KEY` (**빈 값**. 리서치 부서의
+`evidence/web_search.py` 는 이 경로로 못 쓴다).
 
 ## 산출물 - 이 셋
 
@@ -477,6 +582,31 @@ def status() -> None:
 
 
 # ── 자체 점검 ───────────────────────────────────────────────────────────────
+def _no_double_literature() -> bool:
+    """문헌이 양쪽 질문을 다 낳았을 때 **측정이 먼저** 나오는지.
+
+    실제로 r0005·r0006 이 그랬다 - 둘 다 측정 질문과 문헌 질문을 함께 냈는데
+    문헌이 먼저 뽑혀 나갔다.
+    """
+    e = rlog.open_entry("벽에 부딪힌 측정", origin="seed", kind="measure")
+    rlog.close_entry(e.id, script="s.py", numbers={"x": 1},
+                     finding="숫자 1 이 나왔다",
+                     next_questions=["이걸 다르게 재보자"],
+                     lit_questions=["남들은 어떻게 했나"])
+    q1, _, _, k1 = pick_question()
+    if k1 != "literature":
+        return False                       # 첫 문헌은 정상적으로 뽑혀야 한다
+
+    lit = rlog.open_entry(q1, origin="auto", kind="literature")
+    rlog.close_entry(lit.id, script="", numbers={},
+                     finding="문헌은 이렇게 했다",
+                     next_questions=["문헌이 시킨 측정"],
+                     lit_questions=["더 읽을 것"],
+                     citations=["https://example.org/p"])
+    _, _, _, k2 = pick_question()
+    return k2 == "measure"                 # 연속 문헌이면 실패
+
+
 def _selfcheck() -> int:
     import tempfile
     fails = 0
@@ -510,8 +640,16 @@ def _selfcheck() -> int:
            origin == "seed" and bool(q) and kind == "measure")
 
         rlog.add_idea("사람이 던진 질문")
-        q2, o2, _, _ = pick_question()
-        ok("사람 아이디어가 최우선", o2 == "user" and q2 == "사람이 던진 질문")
+        q2, o2, _, k2 = pick_question()
+        ok("사람 아이디어가 최우선",
+           o2 == "user" and q2 == "사람이 던진 질문" and k2 == "measure")
+        rlog.consume_idea("사람이 던진 질문")
+        rlog.add_idea("사람이 던진 문헌 질문", kind="literature")
+        _q, _o, _, klit = pick_question()
+        ok("사람이 문헌으로 지정하면 문헌 카드",
+           klit == "literature" and _q == "사람이 던진 문헌 질문")
+        rlog.consume_idea("사람이 던진 문헌 질문")
+        rlog.add_idea("사람이 던진 질문")
 
         e = rlog.open_entry("첫 질문", origin="seed")
         rlog.close_entry(e.id, script="s.py", numbers={"a": 1},
@@ -530,6 +668,7 @@ def _selfcheck() -> int:
                          next_questions=["패시브 체결로 재보자"],
                          citations=["https://example.org/paper"])
         q4, o4, p4, k4 = pick_question()
+        ok("문헌이 연속으로 큐를 앞지르지 못한다", _no_double_literature())
         ok("문헌 뒤에는 측정으로 돌아온다",
            k4 == "measure" and q4 in ("패시브 체결로 재보자", "파생 질문"))
         ok("문헌 카드는 스크립트 없이도 닫힌다",
@@ -538,8 +677,23 @@ def _selfcheck() -> int:
            rlog.latest_by_id()[e2.id].citations == ["https://example.org/paper"])
 
         lit = literature_card_body("r0009", "남들은?", e.id)
-        ok("문헌 카드에 읽는 도구가 있다",
-           "agent-reach" in lit and "yt-dlp" in lit)
+        ok("문헌 카드가 Exa 를 자가치유한다",
+           "mcporter config add exa" in lit and "mcporter list exa" in lit)
+        ok("문헌 카드가 arXiv 를 https 로 지시한다",
+           "https://export.arxiv.org" in lit
+           and "http://export.arxiv.org" not in lit)
+        ok("문헌 카드가 죽은 경로를 경고한다",
+           "TAVILY_API_KEY" in lit and "gh search" in lit)
+        ok("문헌 카드에 실제로 되는 도구가 있다",
+           "exa.web_search_exa" in lit and "r.jina.ai" in lit)
+        ok("문헌 카드가 논문 검색면을 준다",
+           "paper-search.search_crossref" in lit
+           and "paper-search.read_arxiv_paper" in lit)
+        ok("문헌 카드가 논문 검색면도 자가치유한다",
+           "mcporter list paper-search" in lit)
+        ok("문헌 카드가 망가진 논문 도구를 경고한다",
+           "paper-search.search_arxiv" in lit
+           and "paper-search.search_semantic" in lit)
         ok("문헌 카드가 측정 질문을 요구한다", "다음에 잴 것" in lit)
         ok("문헌 카드가 우리 숫자와 대조를 요구한다", "우리 숫자와 대조" in lit)
 
@@ -550,6 +704,16 @@ def _selfcheck() -> int:
         ok("카드가 측정 설계를 맡긴다", "측정을 직접 설계한다" in body)
         ok("카드에 종료 명령이 있다", "research_log.py close" in body)
         ok("카드가 비싼 쿼리를 금지한다", "싸게 먼저 재라" in body)
+        ok("카드가 후보 지목 입구를 연다",
+           "--candidate" in body and "후보 지목" in body)
+        ok("카드가 후보 기준을 숫자로 준다",
+           "비용을 뺀 뒤에도" in body and "홀드아웃을 안 봤다" in body)
+        ok("카드가 지목=승리주장 아님을 밝힌다",
+           "승리 주장이 아니다" in body)
+        ok("카드가 미지목도 실패임을 밝힌다",
+           "되면 됐다고 적어라" in body)
+        ok("카드가 필수 필드를 밝힌다",
+           all(k in body for k in ("name", "script", "claim")))
         ok("카드가 스크립트 경로를 강제한다", "계보에서 사라진다" in body)
 
     print("자체점검 통과" if fails == 0 else f"자체점검 실패 {fails}건")
@@ -565,6 +729,10 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("--status", action="store_true")
     m.add_argument("--idea", default="", help="아이디어를 큐에 넣는다")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--idea-kind", default="measure",
+                   choices=["measure", "literature"],
+                   dest="idea_kind",
+                   help="--idea 와 함께: 재는 질문인가 읽는 질문인가")
     p.add_argument("--interval-min", type=int, default=20)
     a = p.parse_args(argv)
 
@@ -574,8 +742,8 @@ def main(argv: list[str] | None = None) -> int:
         status()
         return 0
     if a.idea:
-        rlog.add_idea(a.idea)
-        print(f"아이디어 접수: {a.idea[:80]}")
+        rlog.add_idea(a.idea, kind=a.idea_kind)
+        print(f"아이디어 접수({a.idea_kind}): {a.idea[:80]}")
         return 0
     if a.once:
         run_once(dry_run=a.dry_run)

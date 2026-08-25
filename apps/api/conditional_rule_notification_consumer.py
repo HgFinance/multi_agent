@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import socket
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -43,7 +44,9 @@ from orchestration.semantic_qa import SemanticQaResult, evaluate_answer
 LOG = logging.getLogger("conditional-rule-notification-consumer")
 DEFAULT_STREAM = "hf:conditional-rule-events:v1"
 DEFAULT_GROUP = "conditional-paper-reporting-v1"
+DEFAULT_PROJECTION_GROUP = "conditional-paper-projection-v1"
 SUPPORTED_EVENT = "DIRECTIVE_SUBMITTED"
+CONSUMER_MODES = frozenset({"all", "delivery", "projection"})
 
 
 class ConditionalNotificationError(RuntimeError):
@@ -153,7 +156,10 @@ class ConditionalRuleNotificationConsumer:
         discord_store: Any,
         ceo_projection: Any,
         department_projection: Any,
+        mode: str = "all",
     ) -> None:
+        if mode not in CONSUMER_MODES:
+            raise ValueError(f"unsupported conditional notification mode: {mode}")
         self.rule_store = rule_store
         self.order_store = order_store
         self.status_reader = status_reader
@@ -162,6 +168,7 @@ class ConditionalRuleNotificationConsumer:
         self.discord_store = discord_store
         self.ceo_projection = ceo_projection
         self.department_projection = department_projection
+        self.mode = mode
 
     def _context(self, event: Mapping[str, Any]) -> dict[str, Any]:
         payload = event.get("payload") or {}
@@ -269,16 +276,20 @@ class ConditionalRuleNotificationConsumer:
         )
         workflow_state = _workflow_state_from_directive(directive)
         correlation = directive_execution_event_payload(record, directive)
-        self.order_store.mark_outcome(
-            record.order_request_id,
-            state=workflow_state,
-            directive_id=str(context["directive_id"]),
-            error_code=getattr(directive, "error_code", None)
-            if not isinstance(directive, Mapping)
-            else directive.get("error_code"),
-            event_type="BROKER_EXECUTION_SNAPSHOT",
-            event_payload=correlation,
-        )
+        # Only the immediate lane updates the existing user-order projection.
+        # The durable projection lane reads the same authority independently,
+        # but must not create a duplicate BROKER_EXECUTION_SNAPSHOT audit row.
+        if self.mode in {"all", "delivery"}:
+            self.order_store.mark_outcome(
+                record.order_request_id,
+                state=workflow_state,
+                directive_id=str(context["directive_id"]),
+                error_code=getattr(directive, "error_code", None)
+                if not isinstance(directive, Mapping)
+                else directive.get("error_code"),
+                event_type="BROKER_EXECUTION_SNAPSHOT",
+                event_payload=correlation,
+            )
         snapshot = build_conditional_execution_status(
             rule_id=str(context["rule_id"]),
             rule_execution_id=str(context.get("rule_execution_id") or "") or None,
@@ -304,8 +315,6 @@ class ConditionalRuleNotificationConsumer:
             "hgfinance.conditional-execution-correction.v2 "
             f"event_id={event_id} state={snapshot.workflow_state}"
         )
-        workflows = self._related_workflows(context)
-
         original_root: Mapping[str, Any] = {
             "id": str(context.get("ceo_root_task_id") or ""),
             "body": f"discord_request_id={record.client_request_id}",
@@ -314,6 +323,42 @@ class ConditionalRuleNotificationConsumer:
             "id": str(context.get("trading_task_id") or ""),
             "body": f"discord_request_id={record.client_request_id}",
         }
+
+        # The user-facing path ends here.  It needs only the authoritative DB
+        # snapshot, deterministic local QA, and the existing idempotent Discord
+        # sender.  Hermes CLI, Notion, and external LangSmith are deliberately
+        # excluded so their latency or outage cannot delay the fill report.
+        if self.mode in {"all", "delivery"}:
+            discord_status = self.discord_delivery.deliver_to_existing_thread(
+                root_task_id=str(
+                    context.get("ceo_root_task_id") or context["rule_id"]
+                ),
+                source_task=original_trading,
+                root_task=original_root,
+                content=content,
+                title="💹 조건주문 권위 상태",
+                store=self.discord_store,
+                profile=canonical_profile_for_department("ceo"),
+                response_key_suffix=(
+                    f"conditional-execution-qa-v2:{event_id}:"
+                    f"{snapshot.workflow_state}"
+                ),
+            )
+            if discord_status not in {"sent", "deduped"}:
+                if discord_status == "missing_thread":
+                    LOG.warning(
+                        "conditional report has no Discord thread event_id=%s root=%s",
+                        event_id,
+                        context.get("ceo_root_task_id"),
+                    )
+                    return True
+                raise ConditionalNotificationError(
+                    f"Discord conditional report failed: {discord_status}"
+                )
+        if self.mode == "delivery":
+            return True
+
+        workflows = self._related_workflows(context)
         for root_id, tasks in workflows:
             root_task = next(
                 (task for task in tasks if _task_id(task) == root_id), tasks[0]
@@ -374,30 +419,19 @@ class ConditionalRuleNotificationConsumer:
                     "권위 상태 답변의 로컬 QA 결과가 redacted LangSmith metadata로 기록되었습니다.",
                 )
 
-        discord_status = self.discord_delivery.deliver_to_existing_thread(
-            root_task_id=str(context.get("ceo_root_task_id") or context["rule_id"]),
-            source_task=original_trading,
-            root_task=original_root,
-            content=content,
-            title="💹 조건주문 권위 상태",
-            store=self.discord_store,
-            profile=canonical_profile_for_department("ceo"),
-            response_key_suffix=(
-                f"conditional-execution-qa-v2:{event_id}:{snapshot.workflow_state}"
-            ),
-        )
-        if discord_status not in {"sent", "deduped"}:
-            if discord_status == "missing_thread":
-                LOG.warning(
-                    "conditional report has no Discord thread event_id=%s root=%s",
-                    event_id,
-                    context.get("ceo_root_task_id"),
-                )
-                return True
-            raise ConditionalNotificationError(
-                f"Discord conditional report failed: {discord_status}"
-            )
         return True
+
+
+def _ensure_consumer_group(
+    client: Any, *, stream: str, group: str, start_id: str
+) -> None:
+    """Create one durable group without initializing a business consumer."""
+
+    try:
+        client.xgroup_create(stream, group, id=start_id, mkstream=True)
+    except redis.ResponseError as exc:
+        if "BUSYGROUP" not in str(exc):
+            raise
 
 
 class RedisConditionalNotificationRunner:
@@ -410,6 +444,7 @@ class RedisConditionalNotificationRunner:
         group: str = DEFAULT_GROUP,
         consumer_name: str | None = None,
         min_idle_ms: int = 2000,
+        group_start_id: str = "0",
     ) -> None:
         self.client = client
         self.consumer = consumer
@@ -417,13 +452,15 @@ class RedisConditionalNotificationRunner:
         self.group = group
         self.consumer_name = consumer_name or f"{socket.gethostname()}-{os.getpid()}"
         self.min_idle_ms = max(1000, int(min_idle_ms))
+        self.group_start_id = group_start_id
 
     def prepare(self) -> None:
-        try:
-            self.client.xgroup_create(self.stream, self.group, id="0", mkstream=True)
-        except redis.ResponseError as exc:
-            if "BUSYGROUP" not in str(exc):
-                raise
+        _ensure_consumer_group(
+            self.client,
+            stream=self.stream,
+            group=self.group,
+            start_id=self.group_start_id,
+        )
 
     @staticmethod
     def _event(fields: Mapping[str, Any]) -> dict[str, Any]:
@@ -488,6 +525,10 @@ def _discord_store(environment: Mapping[str, str]) -> DiscordIdempotencyStore:
 
 def build_runner(
     environment: Mapping[str, str] | None = None,
+    *,
+    mode: str = "all",
+    group: str | None = None,
+    group_start_id: str = "0",
 ) -> RedisConditionalNotificationRunner:
     env = dict(environment or os.environ)
     dsn = str(env.get("CONDITIONAL_RULE_DATABASE_URL") or "").strip()
@@ -498,7 +539,7 @@ def build_runner(
     ).strip()
     if not redis_url:
         raise RuntimeError("REDIS_URL is required")
-    kanban = HermesKanbanClient(environment=env)
+    kanban = HermesKanbanClient(environment=env) if mode != "delivery" else None
     rule_store = PostgresRuleWorkerStore(
         dsn,
         role=str(
@@ -511,10 +552,19 @@ def build_runner(
         order_store=user_order_repository(),
         status_reader=read_paper_directive_status_for_admitted_authority,
         kanban_client=kanban,
-        discord_delivery=DiscordFinalDelivery(environment=env),
-        discord_store=_discord_store(env),
-        ceo_projection=CeoNotionProjection(env=env, kanban_client=kanban),
-        department_projection=DepartmentNotionProjection(env=env),
+        discord_delivery=(
+            DiscordFinalDelivery(environment=env) if mode != "projection" else None
+        ),
+        discord_store=_discord_store(env) if mode != "projection" else None,
+        ceo_projection=(
+            CeoNotionProjection(env=env, kanban_client=kanban)
+            if mode != "delivery"
+            else None
+        ),
+        department_projection=(
+            DepartmentNotionProjection(env=env) if mode != "delivery" else None
+        ),
+        mode=mode,
     )
     client = redis.Redis.from_url(
         redis_url,
@@ -527,9 +577,43 @@ def build_runner(
         client,
         consumer,
         stream=str(env.get("CONDITIONAL_RULE_EVENT_STREAM") or DEFAULT_STREAM),
-        group=str(env.get("CONDITIONAL_RULE_NOTIFICATION_GROUP") or DEFAULT_GROUP),
+        group=(
+            group
+            or str(env.get("CONDITIONAL_RULE_NOTIFICATION_GROUP") or DEFAULT_GROUP)
+        ),
+        consumer_name=f"{socket.gethostname()}-{os.getpid()}-{mode}",
         min_idle_ms=int(env.get("CONDITIONAL_RULE_NOTIFICATION_RETRY_MS") or "2000"),
+        group_start_id=group_start_id,
     )
+
+
+def _run_forever(runner: RedisConditionalNotificationRunner) -> None:
+    while True:
+        try:
+            runner.poll_once(block_ms=1000)
+        except Exception:
+            LOG.exception(
+                "conditional %s cycle failed", runner.consumer.mode
+            )
+            time.sleep(1)
+
+
+def _run_projection_lane(environment: Mapping[str, str], group: str) -> None:
+    """Retry projection initialization without ever stopping Discord delivery."""
+
+    while True:
+        try:
+            runner = build_runner(
+                environment,
+                mode="projection",
+                group=group,
+                group_start_id="$",
+            )
+            runner.prepare()
+            _run_forever(runner)
+        except Exception:
+            LOG.exception("conditional projection lane initialization failed")
+            time.sleep(2)
 
 
 def main() -> int:
@@ -541,23 +625,49 @@ def main() -> int:
         level=os.getenv("LOG_LEVEL", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    runner = build_runner()
-    runner.prepare()
+    env = dict(os.environ)
     if args.healthcheck:
-        runner.client.ping()
-        runner.consumer.rule_store.healthcheck()
-        print("conditional-rule-notification-consumer ready")
-        return 0
-    while True:
+        from apps.api.conditional_rule_notification_health import main as health_main
+
+        return health_main()
+
+    delivery_runner = build_runner(env, mode="delivery")
+    delivery_runner.prepare()
+    projection_group = str(
+        env.get("CONDITIONAL_RULE_PROJECTION_GROUP") or DEFAULT_PROJECTION_GROUP
+    )
+    # Reserve the durable projection cursor before accepting a new event. The
+    # actual Notion/Kanban/LangSmith clients initialize independently below.
+    _ensure_consumer_group(
+        delivery_runner.client,
+        stream=delivery_runner.stream,
+        group=projection_group,
+        start_id="$",
+    )
+    if args.once:
         try:
-            runner.poll_once(block_ms=1000)
-        except Exception:
-            LOG.exception("conditional reporting cycle failed")
-            if args.once:
-                return 1
-            time.sleep(1)
-        if args.once:
+            projection_runner = build_runner(
+                env,
+                mode="projection",
+                group=projection_group,
+                group_start_id="$",
+            )
+            delivery_runner.poll_once(block_ms=1)
+            projection_runner.poll_once(block_ms=1)
             return 0
+        except Exception:
+            LOG.exception("conditional reporting one-shot cycle failed")
+            return 1
+
+    projection_thread = threading.Thread(
+        target=_run_projection_lane,
+        args=(env, projection_group),
+        name="conditional-projection",
+        daemon=True,
+    )
+    projection_thread.start()
+    _run_forever(delivery_runner)
+    return 0
 
 
 if __name__ == "__main__":
@@ -567,6 +677,7 @@ if __name__ == "__main__":
 __all__ = [
     "ConditionalNotificationError",
     "ConditionalRuleNotificationConsumer",
+    "DEFAULT_PROJECTION_GROUP",
     "RedisConditionalNotificationRunner",
     "build_runner",
     "main",

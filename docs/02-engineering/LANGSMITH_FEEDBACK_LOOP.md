@@ -54,7 +54,8 @@ marker가 일반 self-message/mention 규칙 때문에 유실되지 않는다.
 `HERMES-QA`, `HERMES-CEO`로 제한해야 한다. 요청 marker는 `HERMES-QA` self
 identity만 생성할 수 있으며, CEO 봇은 대화 참여만 가능하고 승인 주체가 아니다.
 사람은 QA Agent 응답에 Reply해
-`승인 [사유]` / `거부 [사유]`를 쓰거나, `승인 feedback-... [사유]` 형식을 쓴다.
+`승인 <사유>` / `거부 <사유>`를 쓰거나, `승인 feedback-... <사유>` 형식을 쓴다.
+artifact ID만 입력하거나 사유를 생략한 결정은 fail-closed로 기록하지 않는다.
 게이트웨이는 `QA_DISCORD_APPROVER_USER_IDS` 또는
 `QA_DISCORD_APPROVER_ROLE_IDS`의 명시적 allowlist를 확인하며 Discord guild owner도
 local administrator로 허용한다. 봇 계정과 미등록 사람은 fail-closed다.
@@ -67,6 +68,10 @@ latency scope, 관측값과 기준값을 증거 참조로 제공한다. Metrics 
 API 호출량으로 과장하지 않고 "집계된 metric trace 수"로 표기한다. QA Hermes는 이
 증거만으로 사실과 추론을 분리하고 담당 부서, 한 가지 조치, 재검증 방법을 제안한다.
 한 Agent 응답은 triggering message의 artifact 한 건만 다루며 다른 대기 카드를 합치지 않는다.
+Discord에는 artifact마다 두 역할만 나타난다. `① 자동 감지 · QA 검토 요청`은
+immutable evidence card이고, `② QA Hermes 검토 결과`는 이를 반복하지 않는 구조화된
+검토 의견이다. Hermes의 `승인 검토 권고`, `보류 권고`, `거부 검토 권고`는 사람을 위한
+비구속 의견이며 실제 결정은 허용된 사람의 명시적 명령만 기록한다.
 
 ### Active 전환 runbook
 
@@ -204,6 +209,11 @@ their approval decisions after `LANGSMITH_FEEDBACK_RETENTION_DAYS`. LangSmith
 project retention is controlled separately by the workspace retention policy;
 the application does not delete external traces automatically.
 
+No response is not a rejection. An artifact remains `PENDING` until an allowed
+human explicitly enters `승인`, `거부`, or `반려`; an unanswered artifact is
+eventually removed by the local retention cleanup without creating a rejection
+decision.
+
 ## Approval boundary
 
 Internal services retain these audit endpoints:
@@ -223,8 +233,8 @@ the existing release gates.
 The AI Office and BFF expose none of these decision routes. Discord is the
 human ingress; the existing audit API remains the sole decision writer.
 과거 frontend self-review용 `department/{department}`와 `department-review`
-endpoint 및 review writer는 제거됐다. 기존 SQLite 파일에 남은 과거 review table은
-승인·benchmark 이력 보존을 위해 자동 파괴하지 않지만 실행 경로에서는 읽거나 쓰지 않는다.
+endpoint, review writer, 빈 legacy review table은 제거됐다. 승인·benchmark 이력은
+각각의 단일 ledger table에만 보존한다.
 
 ## What this evaluates
 

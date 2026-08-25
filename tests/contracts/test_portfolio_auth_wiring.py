@@ -41,6 +41,35 @@ def test_fixed_identity_contract_is_explicit_in_source_and_package_metadata() ->
     assert not any(str(name).startswith("@") and "auth" in str(name).casefold() for name in package["dependencies"])
 
 
+def test_runtime_sources_do_not_implement_supabase_or_browser_session_auth() -> None:
+    runtime_roots = (
+        ROOT / "apps",
+        ROOT / "ai-office" / "app",
+        ROOT / "ai-office" / "worker",
+    )
+    forbidden = (
+        "supabase.auth",
+        "sign_in_with",
+        "signinwith",
+        "createbrowserclient",
+        "createserverclient",
+        "auth.getsession",
+        "auth.getuser",
+    )
+    for runtime_root in runtime_roots:
+        for source in runtime_root.rglob("*"):
+            if not source.is_file() or source.suffix not in {
+                ".py",
+                ".ts",
+                ".tsx",
+                ".js",
+                ".jsx",
+            }:
+                continue
+            contents = source.read_text(encoding="utf-8").casefold()
+            assert not any(token in contents for token in forbidden), source
+
+
 def test_root_scripts_pin_the_local_paper_stack() -> None:
     package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
     assert "PORTFOLIO_AUTH_MODE" not in package["scripts"]["dev"]
