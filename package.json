@@ -2,8 +2,8 @@
   "name": "multi-agent-workspace",
   "private": true,
   "scripts": {
-    "dev": "PORTFOLIO_AUTH_MODE=fixture npm --prefix ai-office run dev --",
-    "bff": "APP_ENV=local PORTFOLIO_AUTH_MODE=fixture PORTFOLIO_AUTH_REQUIRED=false PORTFOLIO_LIVE_MODE=fixture PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON='[{\"user_id\":\"00000000-0000-4000-8000-00000000cec0\",\"fund_id\":\"5c26db42-ce83-4daf-b1dc-c81680c13a6c\",\"book_id\":\"07d913de-9a5b-4cf5-b893-31a625445761\",\"name\":\"MAIN\",\"role\":\"TRADER\",\"fund_status\":\"ACTIVE\",\"book_status\":\"ACTIVE\"}]' ENABLE_LS_ORDER_EVENTS=false ENABLE_LS_MARKET_DATA=false ENABLE_LS_ACCOUNT_DATA=false LS_ENV=PAPER ACCOUNTING_MODE=OFFLINE PORTFOLIO_RUNTIME_STORE_PATH=/tmp/hgfinance-portfolio.sqlite3 DATABASE_URL='' .venv/bin/python -m uvicorn apps.api.main:app --reload --port 8001",
+    "dev": "npm --prefix ai-office run dev --",
+    "bff": "APP_ENV=local PORTFOLIO_LIVE_MODE=broker ENABLE_LS_ORDER_EVENTS=true ENABLE_BROKER_SNAPSHOT=true ENABLE_LS_MARKET_DATA=true ENABLE_LS_ACCOUNT_DATA=true LS_ENV=PAPER LS_ACCOUNT_NO_PAPER=5601 ACCOUNTING_MODE=OFFLINE PORTFOLIO_RUNTIME_STORE_PATH=/tmp/hgfinance-portfolio.sqlite3 DATABASE_URL='' .venv/bin/python -m uvicorn apps.api.main:app --reload --port 8001",
     "build": "npm --prefix ai-office run build",
     "test": "npm --prefix ai-office test",
     "lint": "npm --prefix ai-office run lint"

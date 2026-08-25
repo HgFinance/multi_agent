@@ -78,6 +78,13 @@ Hermes Dashboard 자체가 Kanban의 공식 UI다. AI Office는 보드를 복제
 
 `portfolio-bff`는 `portfolio` Profile에서만 실행하는 `apps/api` FastAPI BFF다. 호스트 `${PORTFOLIO_BFF_PORT:-8001}` → 컨테이너 `8000`으로 게시한다.
 
+AI Office 로컬 모의투자는 이 BFF의 고정 데모 ID 경계와 LS PAPER 읽기 경계를 사용한다.
+시장 상위종목·계좌·보유종목·체결 요약은 LS 조회에서 오며, `npm run bff`가
+`PORTFOLIO_LIVE_MODE=broker`, `ENABLE_LS_MARKET_DATA=true`,
+`ENABLE_LS_ACCOUNT_DATA=true`, `ENABLE_LS_ORDER_EVENTS=true`를 명시한다.
+계좌번호는 로컬 `.env`의 `LS_ACCOUNT_NO_PAPER=5601`이다. Supabase Auth 로그인과
+브라우저 세션은 이 실행 경계에 없다.
+
 주요 경로:
 
 - `GET /ui/snapshot`: 금융 Read Model과 운영 Projection
@@ -96,7 +103,7 @@ Hermes Dashboard 자체가 Kanban의 공식 UI다. AI Office는 보드를 복제
 호스트 개발 실행:
 
 ```bash
-DATABASE_URL='' .venv/bin/python -m uvicorn apps.api.main:app --reload --port 8001
+npm run bff
 NEXT_PUBLIC_BFF_URL=http://127.0.0.1:8001 \
 NEXT_PUBLIC_HERMES_DASHBOARD_URL=http://127.0.0.1:9119 \
 npm --prefix ai-office run dev -- --port 3002

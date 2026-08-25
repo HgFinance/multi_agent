@@ -14,21 +14,26 @@ def _portfolio_environment(relative_path: str) -> dict[str, object]:
     return compose["services"]["portfolio-bff"]["environment"]
 
 
-def test_local_bff_is_fixture_only_and_external_broker_reads_are_disabled() -> None:
+def test_local_bff_uses_paper_broker_read_projections() -> None:
     environment = _portfolio_environment("docker-compose.yml")
     assert environment["APP_ENV"] == "local"
     assert environment["PORTFOLIO_AUTH_MODE"] == "fixture"
     assert environment["PORTFOLIO_AUTH_REQUIRED"] == "false"
-    assert environment["PORTFOLIO_LIVE_MODE"] == "fixture"
+    assert environment["PORTFOLIO_LIVE_MODE"] == "broker"
+    assert environment["ENABLE_LS_ORDER_EVENTS"] == "true"
+    assert environment["ENABLE_BROKER_SNAPSHOT"] == "true"
+    assert environment["ENABLE_LS_MARKET_DATA"] == "true"
+    assert environment["ENABLE_LS_ACCOUNT_DATA"] == "true"
+    assert environment["LS_ENV"] == "PAPER"
 
 
-def test_legacy_deployment_bundle_does_not_enable_user_login() -> None:
+def test_reference_deployment_bundle_does_not_enable_browser_login() -> None:
     environment = _portfolio_environment("deploy/eb/docker-compose.yml")
     assert environment["PORTFOLIO_AUTH_MODE"] == "fixture"
     assert environment["PORTFOLIO_AUTH_REQUIRED"] == "false"
 
 
-def test_fixture_only_contract_is_explicit_in_source_and_package_metadata() -> None:
+def test_fixed_identity_contract_is_explicit_in_source_and_package_metadata() -> None:
     current_user = (ROOT / "apps/api/current_user.py").read_text(encoding="utf-8").casefold()
     package = json.loads((ROOT / "ai-office/package.json").read_text(encoding="utf-8"))
     assert "verify_" not in current_user
@@ -36,9 +41,14 @@ def test_fixture_only_contract_is_explicit_in_source_and_package_metadata() -> N
     assert not any(str(name).startswith("@") and "auth" in str(name).casefold() for name in package["dependencies"])
 
 
-def test_root_scripts_pin_the_local_mock_stack() -> None:
+def test_root_scripts_pin_the_local_paper_stack() -> None:
     package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
-    assert "PORTFOLIO_AUTH_MODE=fixture" in package["scripts"]["dev"]
-    assert "PORTFOLIO_AUTH_MODE=fixture" in package["scripts"]["bff"]
-    assert "PORTFOLIO_AUTH_REQUIRED=false" in package["scripts"]["bff"]
-    assert "PORTFOLIO_LIVE_MODE=fixture" in package["scripts"]["bff"]
+    assert "PORTFOLIO_AUTH_MODE" not in package["scripts"]["dev"]
+    assert "PORTFOLIO_LIVE_MODE=broker" in package["scripts"]["bff"]
+    assert "ENABLE_LS_ORDER_EVENTS=true" in package["scripts"]["bff"]
+    assert "ENABLE_BROKER_SNAPSHOT=true" in package["scripts"]["bff"]
+    assert "ENABLE_LS_MARKET_DATA=true" in package["scripts"]["bff"]
+    assert "ENABLE_LS_ACCOUNT_DATA=true" in package["scripts"]["bff"]
+    assert "LS_ENV=PAPER" in package["scripts"]["bff"]
+    assert "LS_ACCOUNT_NO_PAPER=5601" in package["scripts"]["bff"]
+    assert "PORTFOLIO_LIVE_MODE=fixture" not in package["scripts"]["bff"]
