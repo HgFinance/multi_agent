@@ -321,6 +321,58 @@ def test_usage_count_cannot_drive_retirement() -> None:
     assert "delete" not in {name.lower() for name in dir(EvolutionSkillStore)}
 
 
+def test_low_performance_feedback_drives_next_version_candidate(tmp_path: Path) -> None:
+    store = EvolutionSkillStore(tmp_path)
+    for number in range(1, 4):
+        store.record_feedback(
+            slug="repeated-quote-timeout",
+            version=1,
+            run_id=f"feedback-run-{number}",
+            score=0.25,
+            detail="recovery remained slow",
+            department="01-research",
+        )
+    store.record_feedback(
+        slug="repeated-quote-timeout",
+        version=1,
+        run_id="positive-run",
+        score=0.9,
+        department="01-research",
+    )
+    occurrences = [
+        Occurrence(
+            kind=str(row.get("kind") or ""),
+            detail=str(row.get("detail") or ""),
+            run_id=str(row.get("run_id") or ""),
+            symbol=str(row.get("symbol") or ""),
+            at=str(row.get("at") or ""),
+            department=str(row.get("department") or ""),
+        )
+        for row in store.load_occurrences()
+    ]
+
+    candidates = detect_candidates(
+        occurrences,
+        department="01-research",
+        active_versions={"repeated-quote-timeout": 1},
+    )
+    assert len(candidates) == 1
+    assert candidates[0].version == 2
+    assert candidates[0].runs == (
+        "feedback-run-1",
+        "feedback-run-2",
+        "feedback-run-3",
+    )
+
+    with pytest.raises(EvolutionSkillError, match="between 0 and 1"):
+        store.record_feedback(
+            slug="repeated-quote-timeout",
+            version=1,
+            run_id="bad-score",
+            score=2.0,
+        )
+
+
 def test_trace_findings_feed_only_owned_departments(tmp_path: Path) -> None:
     store = EvolutionSkillStore(tmp_path)
     assert record_trace_occurrences(
