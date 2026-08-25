@@ -108,7 +108,7 @@ from observability import (
     check_idle_agents,
     check_worker_trigger_rates,
 )
-from quality import QualitySnapshot, aggregate_quality
+from quality import QualitySnapshot, aggregate_quality, collect_quality_references
 from roster import (
     AgentNotFoundError,
     AgentSummary,
@@ -1210,6 +1210,7 @@ def get_department_scorecard_real(department_code: str, window_start: datetime, 
         department_code=department_code, window_start=window_start, window_end=window_end,
         capacity=capacity, cost_snapshots=cost_snapshots,
         finding_count=finding_count, rework_rate=rework_rate,
+        quality_references=collect_quality_references(quality_snapshots).as_dict(),
     )
 
 
@@ -1769,6 +1770,10 @@ if __name__ == "__main__":
                             "output_tokens": 100, "model_cost": "1", "case_count": 1}],
     })
     assert r13.status_code == 200 and r13.json()["cost"]["case_count"] == 1, r13.text
+    # 참조는 이 POST 경로(호출자가 수치를 직접 실어 보냄)에선 빈 목록이다 - null 이
+    # 아니라 "참조가 없었다"는 사실이고, GET 경로가 quality_snapshots 에서 채운다.
+    assert r13.json()["quality"]["eval_run_ids"] == [], r13.text
+    assert r13.json()["quality"]["role_kpi"] == [], r13.text
 
     # 3a. Quality Snapshot - DATABASE_URL 없는 이 self-check 환경에서는 501로 막혀야
     # 한다(실 DB 왕복 검증은 postgres_scorecard_repository.py 자체 점검이 담당).

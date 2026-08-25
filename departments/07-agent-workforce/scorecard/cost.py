@@ -214,11 +214,16 @@ def build_department_scorecard(
     cost_snapshots: list[CostSnapshot],
     finding_count: int | None = None,
     rework_rate: Decimal | None = None,
+    quality_references: dict | None = None,
 ) -> dict:
     """GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC 3.4 응답 형태로 조립한다.
 
     quality 의 Eval 원본은 QA/감사본부 소유(audit.eval_runs)다. 인사팀은 Reference 만
     싣고 값을 만들지 않는다 — eval_score 는 항상 None 으로 두고 audit-api 가 채운다.
+    그 Reference 를 실제로 싣는 자리가 quality_references 다(quality.py
+    QualityReferences) — eval_run_ids 가 없으면 소비자는 `eval_score: null` 만 보고
+    어느 Eval 을 열어야 할지 알 수 없다. role_kpi 도 여기로 함께 온다(집계하지 않고
+    출처별로 그대로).
     """
     if window_end <= window_start:
         raise ValueError("window_end 는 window_start 이후여야 한다")
@@ -259,6 +264,10 @@ def build_department_scorecard(
             "eval_score": None,  # audit-api 소유. 인사팀이 만들지 않는다.
             "finding_count": finding_count,
             "rework_rate": None if rework_rate is None else float(rework_rate),
+            # 참조는 전달만 한다 - 없으면 빈 목록이지 None 이 아니다(집계 실패가
+            # 아니라 "참조가 없었다"는 관측 사실이라서다). finding_count/rework_rate
+            # 와 마찬가지로 quality.py 타입이 아니라 이미 풀어진 값으로 받는다.
+            **(quality_references or {"eval_run_ids": [], "role_kpi": []}),
         },
     }
 
@@ -341,6 +350,22 @@ if __name__ == "__main__":
     assert isinstance(card["cost"]["input_tokens"], int)
     assert card["cost"]["model_cost"] == "2"
     assert card["quality"]["eval_score"] is None, "Eval 원본은 audit 소유 — 인사팀이 만들지 않는다"
+    # 참조를 안 넘기면 빈 목록이다(None 이 아니다 - "참조가 없었다"는 관측 사실).
+    assert card["quality"]["eval_run_ids"] == [] and card["quality"]["role_kpi"] == []
+
+    # 7-1) 참조를 넘기면 eval_score 가 None 이어도 어느 Eval 을 볼지 알 수 있다.
+    referenced = build_department_scorecard(
+        department_code="03-risk", window_start=t0, window_end=t1,
+        capacity=cap, cost_snapshots=[snap(cost="2", cases=120)], finding_count=2,
+        quality_references={
+            "eval_run_ids": ["eval-1"],
+            "role_kpi": [{"agent_id": "a1", "profile_version_id": "pv1",
+                          "role_kpi": {"citation_coverage": 0.97}}],
+        },
+    )
+    assert referenced["quality"]["eval_score"] is None, "참조를 실어도 값은 여전히 audit 소유"
+    assert referenced["quality"]["eval_run_ids"] == ["eval-1"]
+    assert referenced["quality"]["role_kpi"][0]["role_kpi"]["citation_coverage"] == 0.97
 
     # 8) Snapshot 없으면 0이 아니라 None (불변식 3).
     empty = build_department_scorecard(

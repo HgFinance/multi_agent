@@ -100,6 +100,18 @@ Scorecard 관찰의 실제 API 배선.
   이 모듈이 직접 집계하는 값은 `finding_count`/`rework_rate`뿐이다.
   - `aggregate_quality()` — Snapshot 목록을 합산/평균한다. **Snapshot이 없으면 `(None, None)`이다
     (0건으로 채우지 않는다)** — cost.py의 `UNKNOWN`과 같은 원칙.
+  - `collect_quality_references()` — `eval_run_id`와 `role_kpi`를 **집계하지 않고** 출처와 함께
+    모아 Scorecard `quality` 블록의 `eval_run_ids`/`role_kpi`로 싣는다(2026-08-25).
+    - `eval_run_id`는 `audit.eval_runs` 참조다. 인사팀은 `eval_score` 값을 복제하지 않고
+      Reference만 보관하는데, Scorecard가 그 참조를 안 실으면 소비자는 `eval_score: null`만
+      보고 **어느 Eval을 열어야 할지** 알 수 없다. 값을 만들지 않는 것과 참조를 전달하는 것은
+      배타적이지 않다.
+    - `role_kpi`는 역할별 KPI다. 이름은 역할마다 다르다
+      ([AGENT_EMPLOYEE_PROFILES](../../docs/04-organization/AGENT_EMPLOYEE_PROFILES.md)의 각
+      직원 프로필 `KPI:` 줄 — 예: HR-01은 "SLA 예측 오차, 과잉·과소 배치율, 비용 대비 처리량…").
+      **부서 단위로 합치지 않는다** — 역할마다 KPI 이름이 다르고 같은 이름이라도 비율·건수·SLA가
+      섞여 있어 합치는 규칙이 어디에도 정의돼 있지 않다. 출처(`agent_id`/`profile_version_id`)를
+      붙여 그대로 넘기고, 해석은 그 KPI 정의를 아는 쪽(HR-03 성과 평가)이 한다.
   - 실제 조회/기록은 `postgres_scorecard_repository.py`의 `append_quality_snapshot()`/
     `list_quality_snapshots_by_department()`/`list_quality_snapshots_by_agent()`가 맡는다.
     cost 와 다른 점은 **수치를 누가 만드느냐**다 — quality 의 `finding_count`/`rework_rate`는
