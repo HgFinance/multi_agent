@@ -92,6 +92,8 @@ create table if not exists risk.position_risk_plans (
   position_risk_amount numeric(38, 12),
   quantity_cap numeric(38, 12),
   current_quantity numeric(38, 12) not null default 0 check (current_quantity >= 0),
+  mandate_limits jsonb not null default '{}'::jsonb,
+  portfolio_usage jsonb not null default '{}'::jsonb,
   reward_risk_ratio numeric(38, 12),
   liquidation_stages jsonb not null default '[]'::jsonb,
   calculation_version text not null,

@@ -24,7 +24,8 @@ def format_position_risk_plan(plan: Mapping[str, Any]) -> str:
             "- 멘데이트/실사용: 종목 비중 "
             f"`{portfolio_usage.get('current_instrument_weight', '미확인')}` / "
             f"`{mandate_limits.get('max_instrument_weight', '미확인')}`; Gross "
-            f"`{portfolio_usage.get('current_gross_exposure', '미확인')}`"
+            f"`{portfolio_usage.get('current_gross_exposure', '미확인')}` / "
+            f"`{mandate_limits.get('max_gross_exposure', '미확인')}`"
         )
     if action == "PROPOSE":
         lines.extend(

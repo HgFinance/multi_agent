@@ -53,6 +53,7 @@ class DynamicRiskMandate(BaseModel):
     base_capital: Decimal = Field(gt=0)
     trade_risk_budget_pct: Decimal = Field(gt=0, le=1)
     max_instrument_weight: Decimal = Field(gt=0, le=1)
+    max_gross_exposure: Decimal | None = Field(default=None, gt=0)
     min_reward_risk_ratio: Decimal = Field(default=Decimal("1.20"), gt=0)
 
 
@@ -240,6 +241,11 @@ def _defer(
         current_quantity=request.current_quantity,
         mandate_limits={
             "max_instrument_weight": request.mandate.max_instrument_weight,
+            **(
+                {"max_gross_exposure": request.mandate.max_gross_exposure}
+                if request.mandate.max_gross_exposure is not None
+                else {}
+            ),
         },
         portfolio_usage={
             key: value
@@ -391,6 +397,11 @@ def plan_position_risk(
         current_quantity=item.current_quantity,
         mandate_limits={
             "max_instrument_weight": item.mandate.max_instrument_weight,
+            **(
+                {"max_gross_exposure": item.mandate.max_gross_exposure}
+                if item.mandate.max_gross_exposure is not None
+                else {}
+            ),
         },
         portfolio_usage={
             key: value
