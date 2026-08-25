@@ -66,7 +66,14 @@ class TokenBudget:
 
 @dataclass(frozen=True)
 class CostSnapshot:
-    """workforce.cost_snapshots 한 행. 컬럼과 1:1."""
+    """workforce.cost_snapshots 한 행. 컬럼과 1:1.
+
+    recorded_by 는 DB 컬럼상 not null 이지만 여기서는 선택값이다 - 이 dataclass 가
+    저장된 행과 **계산용으로만 만든 값** 둘 다를 나른다. POST .../scorecard 나
+    POST /budget-assessments 는 호출자가 실어 보낸 수치로 판정만 하고 저장하지
+    않으므로 보고자가 없다(None). 저장 경로(append_cost_snapshot)에서만 값을 요구한다 -
+    그쪽에서 빈 값을 거부한다.
+    """
 
     agent_id: str
     profile_version_id: str
@@ -79,6 +86,7 @@ class CostSnapshot:
     infra_cost: Decimal
     case_count: int
     currency: str = "USD"
+    recorded_by: str | None = None
 
     @property
     def total_tokens(self) -> int:

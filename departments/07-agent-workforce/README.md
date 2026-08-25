@@ -73,6 +73,14 @@ Scorecard 관찰의 실제 API 배선.
   - `assess_budget()` — 예산 대비 사용률과 조치 권고
   - `build_department_scorecard()` — `get_department_scorecard` 응답 조립
     (GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC §3.4)
+  - `append_cost_snapshot()`(`postgres_scorecard_repository.py`) — 플랫폼 과금 계측이
+    보고한 비용 1건을 적는다. **집행이 아니라 보고 수납이다** — 토큰·금액은 여전히
+    플랫폼이 만들고 인사팀은 계산하지 않는다. 그래서 `recorded_by`(2026-08-25 추가,
+    `supabase/migrations/20260825000100_...`)를 필수로 요구한다 — 보고자 없이 적힌
+    행은 인사팀이 지어낸 값과 구별되지 않는다.
+    같은 `(agent, profile version, window)` 재보고는 **행을 늘리지 않고 갱신한다** —
+    reader 가 창 안의 행을 합산하므로 중복 행은 곧 사용량 2배이고 예산 판정이 뒤집힌다.
+    창구는 `POST/GET /workforce/v1/agents/{agent_id}/cost-snapshots`.
 
 주의 두 가지:
 - **통제 부서(03-risk, 06-ai-qa-audit)는 예산을 초과해도 기능 축소를 권고하지 않는다.**
@@ -90,8 +98,11 @@ Scorecard 관찰의 실제 API 배선.
   - `aggregate_quality()` — Snapshot 목록을 합산/평균한다. **Snapshot이 없으면 `(None, None)`이다
     (0건으로 채우지 않는다)** — cost.py의 `UNKNOWN`과 같은 원칙.
   - 실제 조회/기록은 `postgres_scorecard_repository.py`의 `append_quality_snapshot()`/
-    `list_quality_snapshots_by_department()`/`list_quality_snapshots_by_agent()`가 맡는다
-    (cost/capacity와 달리 quality는 인사팀이 직접 쓴다 — F27 소유 분리와 반대 방향).
+    `list_quality_snapshots_by_department()`/`list_quality_snapshots_by_agent()`가 맡는다.
+    cost 와 다른 점은 **수치를 누가 만드느냐**다 — quality 의 `finding_count`/`rework_rate`는
+    인사팀이 직접 집계하고, cost 의 토큰·금액은 플랫폼이 만든 것을 받아 적기만 한다
+    (`append_cost_snapshot`). `capacity_snapshots`에는 아직 writer 가 없다(P1-2 미착수) —
+    지금은 `scorecard/observability.py`가 Langfuse 실행 이벤트를 직접 집계해 그 자리를 메운다.
 
 ## planning/
 

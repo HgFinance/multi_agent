@@ -258,6 +258,10 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  # 복합 PAPER 활성화가 연결된 즉시 주문 상태를 읽을 수
                  # 있도록 조건부 워커에 요청 테이블 SELECT 정책을 준다.
                  "20260824001000_conditional_worker_bundle_request_read.sql",
+                 # cost_snapshots 에 writer 를 붙이면서 보고자(recorded_by)와
+                 # 같은 창 재보고를 갱신으로 접는 unique key 를 추가한다 -
+                 # reader 가 창 안을 합산하므로 중복 행은 곧 사용량 2배다.
+                 "20260825000100_workforce_cost_snapshot_writer.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 

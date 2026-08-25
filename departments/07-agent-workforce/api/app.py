@@ -47,7 +47,7 @@ from uuid import uuid4
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # 저장소 루트의 .env를 읽는다 - 이미 설정된 프로세스 환경변수는 덮어쓰지 않는다
 # (override=False 기본값). CEO Office api/app.py와 동일한 이유(2026-08-05) - 이게
@@ -158,9 +158,15 @@ except ImportError:
     PostgresImprovementRepository = None  # type: ignore[assignment,misc]
 
 try:
-    from postgres_scorecard_repository import PostgresScorecardRepository
+    from postgres_scorecard_repository import (
+        PostgresScorecardRepository,
+        UnknownCostSnapshotSubjectError,
+    )
 except ImportError:
     PostgresScorecardRepository = None  # type: ignore[assignment,misc]
+
+    class UnknownCostSnapshotSubjectError(RuntimeError):  # type: ignore[no-redef]
+        """psycopg2 미설치 대체 - 이 경로에서는 애초에 기록이 501 로 막힌다."""
 
 try:
     from postgres_roster_repository import PostgresRosterRepository
@@ -298,6 +304,45 @@ class CostSnapshotIn(BaseModel):
     infra_cost: str = "0"
     case_count: int = 0
     currency: str = "USD"
+
+
+class CostSnapshotRecordIn(BaseModel):
+    """POST /workforce/v1/agents/{agent_id}/cost-snapshots Request.
+
+    CostSnapshotIn(계산 전용, 저장 안 함)과 두 군데가 다르다 - agent_id 는 경로에서
+    받고(본문과 경로가 어긋날 여지를 없앤다), recorded_by 를 필수로 받는다. 인사팀은
+    이 수치를 만들지 않고 플랫폼 과금 계측의 보고를 받아 적을 뿐이라, 보고자 없이
+    적힌 행은 인사팀이 지어낸 것과 구별되지 않는다.
+
+    기본값 0 을 두지 않는다 - CostSnapshotIn 쪽 0 기본값은 "그 항목을 안 실었다"는
+    뜻으로 쓸 수 있지만, 저장되는 행에서 0 은 "그만큼 안 썼다"는 관측 사실로 읽힌다
+    (cost.py 불변식 3). 안 재는 항목이 있으면 그걸 0 으로 적지 말고 보고를 미뤄야 한다.
+    """
+
+    profile_version_id: str = Field(min_length=1)
+    window_start: datetime
+    window_end: datetime
+    recorded_by: str = Field(min_length=1)
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    model_cost: str
+    tool_cost: str
+    infra_cost: str
+    case_count: int = Field(ge=0)
+    currency: str = "USD"
+
+    @model_validator(mode="after")
+    def _window_is_forward(self) -> "CostSnapshotRecordIn":
+        """역전된 창은 DB 유무와 무관하게 422 로 막는다.
+
+        append_cost_snapshot 도 같은 것을 검사하지만, DATABASE_URL 이 없으면 그 전에
+        501 이 나서 검사에 도달하지 못한다 - "DB 안 붙었다"가 "본문이 틀렸다"를 가려서
+        호출자가 자기 본문의 결함을 못 본다. 두 레이어가 각자 지킨다
+        (improvements/observation.py::CandidateScorecard 와 같은 패턴).
+        """
+        if self.window_end <= self.window_start:
+            raise ValueError("window_end 는 window_start 이후여야 한다")
+        return self
 
 
 class QualitySnapshotIn(BaseModel):
@@ -715,6 +760,19 @@ for _exc_type in (
         })
 
 
+@app.exception_handler(UnknownCostSnapshotSubjectError)
+def _on_unknown_cost_subject(request, exc: UnknownCostSnapshotSubjectError):
+    """등록되지 않은 agent/profile version 으로 온 비용 보고는 404다.
+
+    다른 기록 실패(연결 끊김 등)와 달리 재시도해도 낫지 않는 호출자 오류라
+    500 으로 뭉뚱그리지 않는다 - 플랫폼이 재시도 루프에 갇히면 그 창의 비용이
+    영영 안 들어오고, 그 결과는 "비용 0"이 아니라 "Snapshot 없음"으로 남는다.
+    """
+    return JSONResponse(status_code=404, content={
+        "error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
 @app.exception_handler(AgentNotFoundError)
 def _on_agent_not_found(request, exc: AgentNotFoundError):
     return JSONResponse(status_code=404, content={
@@ -1094,6 +1152,63 @@ def get_department_scorecard_real(department_code: str, window_start: datetime, 
         capacity=capacity, cost_snapshots=cost_snapshots,
         finding_count=finding_count, rework_rate=rework_rate,
     )
+
+
+def _cost_snapshot_dict(s: CostSnapshot) -> dict:
+    return {
+        "agent_id": s.agent_id, "profile_version_id": s.profile_version_id,
+        "window_start": s.window_start.isoformat(), "window_end": s.window_end.isoformat(),
+        "input_tokens": s.input_tokens, "output_tokens": s.output_tokens,
+        "model_cost": str(s.model_cost), "tool_cost": str(s.tool_cost),
+        "infra_cost": str(s.infra_cost), "case_count": s.case_count,
+        "currency": s.currency, "recorded_by": s.recorded_by,
+    }
+
+
+@app.post("/workforce/v1/agents/{agent_id}/cost-snapshots")
+def record_cost_snapshot(agent_id: str, body: CostSnapshotRecordIn):
+    """플랫폼 과금 계측이 보고한 비용 1건을 기록한다.
+
+    이 엔드포인트가 생기기 전까지 workforce.cost_snapshots 에는 writer 가 없었고
+    (자체 점검용 INSERT 뿐이었다), 그래서 GET .../scorecard 의 cost 블록과
+    budget-assessment 는 항상 "Snapshot 없음"으로 떨어졌다 - reader 만 있는 지표였다.
+
+    수치는 여기서 만들지 않는다(F27 담당 분리: 토큰 측정·과금은 플랫폼 소유).
+    같은 창을 다시 보고하면 행이 늘지 않고 갱신된다 - reader 가 창 안의 행을
+    합산하므로 중복 행은 곧 사용량 2배다(append_cost_snapshot 참고).
+    """
+    if _scorecard_repo is None:
+        raise HTTPException(
+            status_code=501,
+            detail="DATABASE_URL 미설정 - Cost Snapshot 기록 불가",
+        )
+    snapshot = CostSnapshot(
+        agent_id=agent_id, profile_version_id=body.profile_version_id,
+        window_start=body.window_start, window_end=body.window_end,
+        input_tokens=body.input_tokens, output_tokens=body.output_tokens,
+        model_cost=Decimal(body.model_cost), tool_cost=Decimal(body.tool_cost),
+        infra_cost=Decimal(body.infra_cost), case_count=body.case_count,
+        currency=body.currency, recorded_by=body.recorded_by,
+    )
+    _snapshot_id, created = _scorecard_repo.append_cost_snapshot(snapshot)
+    # created=False 는 같은 창 재보고(갱신)다. 조용히 숨기면 호출자가 자기 보고가
+    # 처음인지 덮어쓴 것인지 알 수 없다 - 중복 보고 버그가 그대로 묻힌다.
+    return {**_cost_snapshot_dict(snapshot), "created": created}
+
+
+@app.get("/workforce/v1/agents/{agent_id}/cost-snapshots")
+def list_cost_snapshots(agent_id: str, window_start: datetime, window_end: datetime):
+    if _scorecard_repo is None:
+        raise HTTPException(
+            status_code=501,
+            detail="DATABASE_URL 미설정 - Cost Snapshot 조회 불가",
+        )
+    if window_end <= window_start:
+        raise HTTPException(status_code=400, detail="window_end는 window_start 이후여야 한다")
+    snapshots = _scorecard_repo.list_cost_snapshots_by_agent(
+        agent_id, window_start=window_start, window_end=window_end,
+    )
+    return {"cost_snapshots": [_cost_snapshot_dict(s) for s in snapshots]}
 
 
 def _quality_snapshot_dict(s: QualitySnapshot) -> dict:
@@ -1626,5 +1741,55 @@ if __name__ == "__main__":
     print("ok - Workforce Plan(P1-2 HR-04) 6개 시나리오 통과 "
           "(DRAFT 생성, 위조 승인 403, 승인 없는 ACTIVE 409, 실재 승인 200, 활성화 200, 종료 후 재전이 409)")
 
-    print("ok - Workforce Domain API 7개 영역(access/improvements/scorecard/budget/roster/"
-          "P0-3 게이트/workforce-plan) 점검 통과")
+    # --- cost-snapshots writer (2026-08-25) ------------------------------------------
+    #
+    # 이 자체 점검은 DATABASE_URL 없이 돈다 - _scorecard_repo 가 None 이라 기록 자체는
+    # 501 이다. 그래서 여기서 지킬 수 있는 건 두 가지다: (1) 저장소 없이 빈 성공을
+    # 돌려주지 않는가, (2) 본문 검증이 DB 유무와 무관하게 먼저 걸리는가.
+    # 실 DB 왕복(멱등 재보고, FK 거부)은 postgres_scorecard_repository.py 자체 점검이
+    # 담당한다 - 여기서 흉내 내면 둘 다 반쪽이 된다.
+    _cost_agent = "11111111-1111-1111-1111-111111111111"
+    _cost_body = {
+        "profile_version_id": "22222222-2222-2222-2222-222222222222",
+        "window_start": "2026-08-25T00:00:00+00:00",
+        "window_end": "2026-08-25T01:00:00+00:00",
+        "recorded_by": "platform-metering",
+        "input_tokens": 100, "output_tokens": 50,
+        "model_cost": "1.5", "tool_cost": "0", "infra_cost": "0", "case_count": 1,
+    }
+
+    r32 = client.post(f"/workforce/v1/agents/{_cost_agent}/cost-snapshots", json=_cost_body)
+    # 501 - 저장소가 없는데 200 을 돌려주면 플랫폼이 "보고 완료"로 읽고 그 창의 비용이
+    # 영영 안 들어온다. quality-snapshots 와 같은 처리다.
+    assert r32.status_code == 501, r32.text
+
+    r33 = client.post(f"/workforce/v1/agents/{_cost_agent}/cost-snapshots",
+                      json={**_cost_body, "recorded_by": ""})
+    assert r33.status_code == 422, r33.text  # 보고자 없는 비용은 인사팀이 지어낸 것과 구별되지 않는다
+
+    r34 = client.post(f"/workforce/v1/agents/{_cost_agent}/cost-snapshots",
+                      json={**_cost_body, "input_tokens": -1})
+    assert r34.status_code == 422, r34.text
+
+    r35 = client.post(f"/workforce/v1/agents/{_cost_agent}/cost-snapshots",
+                      json={**_cost_body,
+                            "window_start": _cost_body["window_end"],
+                            "window_end": _cost_body["window_start"]})
+    # 422 여야 한다 - 501 이 나면 "DB 안 붙었다"가 "본문이 틀렸다"를 가린 것이다
+    # (CostSnapshotRecordIn._window_is_forward 가 이걸 위해 있다).
+    assert r35.status_code == 422, r35.text
+
+    r36 = client.post(f"/workforce/v1/agents/{_cost_agent}/cost-snapshots",
+                      json={k: v for k, v in _cost_body.items() if k != "input_tokens"})
+    assert r36.status_code == 422, r36.text  # 안 잰 항목을 0 으로 채워 넣지 않는다(기본값 없음)
+
+    r37 = client.get(f"/workforce/v1/agents/{_cost_agent}/cost-snapshots",
+                     params={"window_start": _cost_body["window_start"],
+                             "window_end": _cost_body["window_end"]})
+    assert r37.status_code == 501, r37.text
+    print("ok - cost-snapshots writer 6개 시나리오 통과 "
+          "(저장소 없음 501, 보고자 없음 422, 음수 토큰 422, 역전 window 422, "
+          "누락 필드 422, 조회 501)")
+
+    print("ok - Workforce Domain API 8개 영역(access/improvements/scorecard/budget/roster/"
+          "P0-3 게이트/workforce-plan/cost-snapshots) 점검 통과")
