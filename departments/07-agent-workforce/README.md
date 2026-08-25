@@ -40,6 +40,9 @@ hr-department chat -q 'Build the weekly workforce plan from department Queue/SLA
   - `workflow.py` — 후보 생명주기 상태 머신 + **권한 분리 게이트**. 작성자는 자기 후보를 단독
     승인할 수 없고(자기승인 차단), 승인엔 독립 승인자 + QA Eval 근거가 필요하다. 모든 전이는 같은
     `candidate_id`로 Append-only Event(`workforce.improvement_candidate_events`)에 기록.
+    `OBSERVING -> KEPT/ROLLED_BACK`은 해당 후보의 Scorecard가 최소 1건 있어야 통과한다
+    (`MissingScorecardEvidenceError` → 409, 2026-08-25). 어느 쪽으로 종료할지는 여전히
+    호출자 판단이고, 이 게이트는 그 판단이 관찰 기록에 근거했는지만 본다.
   - `repository.py` — asyncpg 실 저장 계층(`PostgresImprovementRepository`). 위 도메인 타입을
     `workforce.improvement_candidates`/`improvement_candidate_events` 컬럼과 1:1 매핑. `.env` 의
     `DATABASE_URL` 사용, 비밀번호/service_role Key 는 로그에 남기지 않는다.

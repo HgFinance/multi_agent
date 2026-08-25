@@ -13,6 +13,8 @@
   3. 모든 전이는 같은 candidate_id 로 Append-only Event 에 기록된다 (같은 ID 재현).
   4. 허용되지 않은 상태 전이와 종료 상태 재전이는 막는다 (조용한 덮어쓰기 금지).
   5. 후보 작성자는 Promotion(DEPLOYED)이나 Rollback(ROLLED_BACK)을 단독 수행할 수 없다.
+  6. KEPT/ROLLED_BACK 에는 관찰 중 기록된 CandidateScorecard 가 최소 1건 있어야 한다
+     (observation.py - 무엇을 고를지는 호출자 판단이고, 여기서는 근거 유무만 본다).
 
 자체 점검: python departments/07-agent-workforce/improvements/workflow.py
 """
@@ -26,6 +28,7 @@ from candidate import (
     CandidateStatus,
     ImprovementCandidate,
 )
+from observation import CandidateScorecard
 
 # 허용 전이표 (6.5 흐름).
 ALLOWED_TRANSITIONS: dict[CandidateStatus, frozenset[CandidateStatus]] = {
@@ -61,6 +64,16 @@ class SelfApprovalError(Exception):
 
 class MissingEvidenceError(Exception):
     """승인에 QA Eval 근거가 없음."""
+
+
+class MissingScorecardEvidenceError(Exception):
+    """KEPT/ROLLED_BACK 판단에 근거가 될 CandidateScorecard가 하나도 없음.
+
+    observation.py 모듈 docstring: "Promotion 이후 KEPT/ROLLED_BACK 판단에 사용한
+    비용·품질·안전·회귀 스냅샷을 후보 ID에 append-only로 귀속한다." 이 게이트가
+    없으면 그 문장이 문서에만 있고 강제되지 않는다 - 판단 근거를 하나도 안 남기고
+    OBSERVING에서 바로 종료 상태로 갈 수 있었다.
+    """
 
 
 @dataclass(frozen=True)
@@ -163,6 +176,7 @@ class ImprovementWorkflow:
         reason: str,
         at: datetime,
         approval: Approval | None = None,
+        scorecards: list[CandidateScorecard] | None = None,
     ) -> ImprovementCandidate:
         frm = candidate.status
 
@@ -175,6 +189,17 @@ class ImprovementWorkflow:
                 f"{frm.value} -> {to_status.value} 는 허용되지 않는다 "
                 f"(허용: {sorted(s.value for s in allowed)})"
             )
+
+        # KEPT/ROLLED_BACK 게이트: 판단 근거가 된 Scorecard가 최소 1건 있어야 한다.
+        # APPROVED 게이트(승인 근거 필수)와 같은 종류의 요구다 - 수치를 보고
+        # KEPT/ROLLED_BACK 중 무엇을 고를지는 여전히 호출자(actor) 판단이고,
+        # 여기서는 그 판단이 최소한 관찰 기록에 근거했는지만 강제한다.
+        if to_status in {CandidateStatus.KEPT, CandidateStatus.ROLLED_BACK}:
+            if not scorecards or not any(s.candidate_id == candidate.candidate_id for s in scorecards):
+                raise MissingScorecardEvidenceError(
+                    f"{to_status.value} 판단에는 OBSERVING 중 기록된 candidate_id="
+                    f"{candidate.candidate_id}의 Scorecard가 최소 1건 필요하다"
+                )
 
         qa_eval_run_id: str | None = None
 
@@ -221,7 +246,8 @@ class ImprovementWorkflow:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    from datetime import timezone
+    from datetime import timedelta, timezone
+    from decimal import Decimal
 
     from candidate import ImprovementCandidate
 
@@ -254,7 +280,20 @@ if __name__ == "__main__":
     assert c.status == CandidateStatus.APPROVED
     c = wf.transition(c, CandidateStatus.DEPLOYED, actor="hr", reason="v4 배포", at=now)
     c = wf.transition(c, CandidateStatus.OBSERVING, actor="hr", reason="Scorecard 관찰", at=now)
-    c = wf.transition(c, CandidateStatus.KEPT, actor="hr", reason="유지", at=now)
+    # Scorecard 없이 KEPT 시도는 거부돼야 한다 - 판단 근거 없이 종료 상태로 못 간다.
+    try:
+        wf.transition(c, CandidateStatus.KEPT, actor="hr", reason="유지", at=now)
+        raise AssertionError("Scorecard 없이 KEPT 가 통과함")
+    except MissingScorecardEvidenceError:
+        pass
+    scorecard = CandidateScorecard(
+        candidate_id=c.candidate_id, window_start=now, window_end=now + timedelta(hours=1),
+        recorded_by="hr-03", quality_score=Decimal("0.98"), safety_finding_count=0,
+        regression_count=0,
+    )
+    c = wf.transition(
+        c, CandidateStatus.KEPT, actor="hr", reason="유지", at=now, scorecards=[scorecard],
+    )
     assert c.status == CandidateStatus.KEPT
 
     # 같은 candidate_id 로 7개 Event, sequence 1..7 (같은 ID 재현).
@@ -325,20 +364,25 @@ if __name__ == "__main__":
     except SelfApprovalError:
         pass
 
-    # 7) 롤백 경로: OBSERVING -> ROLLED_BACK. 작성자는 Rollback도 단독 수행할 수 없다.
+    # 7) 롤백 경로: OBSERVING -> ROLLED_BACK. 작성자는 Rollback도 단독 수행할 수 없고,
+    #    Scorecard 없이는 ROLLED_BACK 도 KEPT 와 마찬가지로 거부된다.
     wf4 = ImprovementWorkflow()
     c4 = _candidate(candidate_id="ic-4")
-    for to, appr in [
-        (CandidateStatus.EVALUATING, None),
-        (CandidateStatus.SHADOW, None),
-        (CandidateStatus.PENDING_APPROVAL, None),
-        (CandidateStatus.APPROVED, Approval(approver="ceo", qa_eval_run_id="e9", reason="ok")),
-        (CandidateStatus.DEPLOYED, None),
-        (CandidateStatus.OBSERVING, None),
-        (CandidateStatus.ROLLED_BACK, None),
+    rollback_scorecard = CandidateScorecard(
+        candidate_id="ic-4", window_start=now, window_end=now + timedelta(hours=1),
+        recorded_by="hr-03", regression_count=2,
+    )
+    for to, appr, sc in [
+        (CandidateStatus.EVALUATING, None, None),
+        (CandidateStatus.SHADOW, None, None),
+        (CandidateStatus.PENDING_APPROVAL, None, None),
+        (CandidateStatus.APPROVED, Approval(approver="ceo", qa_eval_run_id="e9", reason="ok"), None),
+        (CandidateStatus.DEPLOYED, None, None),
+        (CandidateStatus.OBSERVING, None, None),
+        (CandidateStatus.ROLLED_BACK, None, [rollback_scorecard]),
     ]:
         actor = "independent-operator" if to in {CandidateStatus.DEPLOYED, CandidateStatus.ROLLED_BACK} else "hr"
-        c4 = wf4.transition(c4, to, actor=actor, reason="", at=now, approval=appr)
+        c4 = wf4.transition(c4, to, actor=actor, reason="", at=now, approval=appr, scorecards=sc)
     assert c4.status == CandidateStatus.ROLLED_BACK
 
     # 8) 종료 상태에서 추가 전이 불가.

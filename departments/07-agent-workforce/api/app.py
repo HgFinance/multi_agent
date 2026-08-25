@@ -129,6 +129,7 @@ from workflow import (
     ImprovementWorkflow,
     InMemoryImprovementRepository,
     MissingEvidenceError,
+    MissingScorecardEvidenceError,
 )
 from workflow import (
     IllegalTransition as CandidateIllegalTransition,
@@ -779,7 +780,7 @@ for _exc_type in (
     AccessSelfApprovalError, MissingProvisioningError, MissingRevocationEvidenceError,
     IllegalTransition, CandidateSelfApprovalError, MissingEvidenceError, CandidateIllegalTransition,
     MissingActivationEvidenceError, UnverifiedActivationEvidenceError, ToolAllowlistMissingError,
-    PlanIllegalTransition, UnverifiedPlanApprovalError,
+    PlanIllegalTransition, UnverifiedPlanApprovalError, MissingScorecardEvidenceError,
 ):
     @app.exception_handler(_exc_type)
     def _on_domain_error(request, exc, _status={  # noqa: B006 - 클로저 캡처용 기본값 트릭
@@ -794,6 +795,9 @@ for _exc_type in (
         # P1-2 - Workforce Plan도 같은 원칙: 위조/미실재 승인은 403, 허용 안 된 상태
         # 전이는 409.
         PlanIllegalTransition: 409, UnverifiedPlanApprovalError: 403,
+        # 근거 없는 KEPT/ROLLED_BACK 은 MissingEvidenceError(승인 근거 없음)와 같은
+        # 종류의 결함이라 같은 409다.
+        MissingScorecardEvidenceError: 409,
     }):
         return JSONResponse(status_code=_status[type(exc)], content={
             "error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None,
@@ -1093,8 +1097,14 @@ def transition_improvement(candidate_id: str, body: TransitionRequestIn):
     if body.approver is not None:
         approval = Approval(approver=body.approver, qa_eval_run_id=body.qa_eval_run_id or "",
                              reason=body.reason)
+    # KEPT/ROLLED_BACK 은 관찰 중 기록된 Scorecard 를 근거로 요구한다 - 저장된 것을
+    # 여기서 읽어 넘긴다(호출자가 본문으로 실어 보내면 근거를 지어낼 수 있다).
+    scorecards = None
+    if body.to_status in {CandidateStatus.KEPT, CandidateStatus.ROLLED_BACK}:
+        scorecards = _improvement_repo.scorecards_for(candidate_id)
     updated = _workflow.transition(
-        candidate, body.to_status, actor=body.actor, reason=body.reason, at=body.at, approval=approval,
+        candidate, body.to_status, actor=body.actor, reason=body.reason, at=body.at,
+        approval=approval, scorecards=scorecards,
     )
     _improvement_repo.save_candidate(updated)
     return updated.model_dump(mode="json")
@@ -1715,6 +1725,15 @@ if __name__ == "__main__":
         "to_status": "OBSERVING", "actor": "hr", "reason": "관찰 시작", "at": t0,
     })
     assert r10b.status_code == 200 and r10b.json()["status"] == "OBSERVING", r10b.text
+
+    # Scorecard 를 하나도 안 남기고 KEPT 로 종료하려는 시도는 409 - 근거 없는 승인
+    # (MissingEvidenceError)과 같은 종류의 결함이다. 거부된 전이는 Event 도 남기지
+    # 않으므로 아래 events 개수는 그대로 6이다.
+    r10c0 = client.post("/workforce/v1/improvements/ic-1/transitions", json={
+        "to_status": "KEPT", "actor": "hr", "reason": "근거 없는 유지", "at": t0,
+    })
+    assert r10c0.status_code == 409, r10c0.text
+
     r10c = client.post("/workforce/v1/improvements/ic-1/scorecards", json={
         "window_start": t0, "window_end": t_exp, "recorded_by": "hr-03",
         "input_tokens": 100, "output_tokens": 50, "total_cost": "1.25",
@@ -1726,6 +1745,16 @@ if __name__ == "__main__":
     assert len(r11.json()["events"]) == 6
     r11a = client.get("/workforce/v1/improvements/ic-1/scorecards")
     assert len(r11a.json()["scorecards"]) == 1
+
+    # Scorecard 가 생긴 뒤에는 같은 전이가 통과한다 - 게이트가 근거 유무만 보고,
+    # KEPT/ROLLED_BACK 중 무엇을 고를지는 여전히 호출자 판단이다.
+    r11b = client.post("/workforce/v1/improvements/ic-1/transitions", json={
+        "to_status": "KEPT", "actor": "hr", "reason": "관찰 결과 유지", "at": t0,
+    })
+    assert r11b.status_code == 200 and r11b.json()["status"] == "KEPT", r11b.text
+    assert len(client.get("/workforce/v1/improvements/ic-1/events").json()["events"]) == 7
+    print("ok - KEPT/ROLLED_BACK Scorecard 근거 게이트 2개 시나리오 통과 "
+          "(근거 없음 409, 근거 있음 200)")
 
     # 3. Scorecard - Snapshot 없으면 0이 아니라 None.
     r12 = client.post("/workforce/v1/departments/07-agent-workforce/scorecard", json={

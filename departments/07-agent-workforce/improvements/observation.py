@@ -4,6 +4,9 @@
 QA는 quality_score와 qa_eval_run_id의 원천 소유자이고, Platform은 비용 원천 소유자다.
 이 모듈은 그 값을 새로 판정하지 않고, Promotion 이후 KEPT/ROLLED_BACK 판단에 사용한
 비용·품질·안전·회귀 스냅샷을 후보 ID에 append-only로 귀속한다.
+
+이 귀속은 workflow.py 가 강제한다 - OBSERVING -> KEPT/ROLLED_BACK 전이는 해당
+candidate_id 의 Scorecard 가 최소 1건 있어야 통과한다(MissingScorecardEvidenceError).
 """
 from __future__ import annotations
 
