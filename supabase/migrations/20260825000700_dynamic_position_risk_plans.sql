@@ -136,6 +136,7 @@ create table if not exists risk.position_risk_plan_events (
   reason text not null,
   trace_id text not null,
   task_id text not null,
+  approval_ref text,
   idempotency_key text not null unique,
   occurred_at timestamptz not null default now()
 );
@@ -193,5 +194,35 @@ drop policy if exists position_risk_plans_fund_member_read
 create policy position_risk_plans_fund_member_read
   on risk.position_risk_plans for select to authenticated
   using (governance.can_access_fund(fund_id));
+
+drop policy if exists mandate_version_bindings_fund_member_read
+  on risk.mandate_version_bindings;
+create policy mandate_version_bindings_fund_member_read
+  on risk.mandate_version_bindings for select to authenticated
+  using (governance.can_access_fund(fund_id));
+
+drop policy if exists position_risk_plan_events_fund_member_read
+  on risk.position_risk_plan_events;
+create policy position_risk_plan_events_fund_member_read
+  on risk.position_risk_plan_events for select to authenticated
+  using (
+    exists (
+      select 1 from risk.position_risk_plans p
+      where p.risk_plan_id = position_risk_plan_events.risk_plan_id
+        and governance.can_access_fund(p.fund_id)
+    )
+  );
+
+drop policy if exists position_risk_plan_projections_fund_member_read
+  on risk.position_risk_plan_projections;
+create policy position_risk_plan_projections_fund_member_read
+  on risk.position_risk_plan_projections for select to authenticated
+  using (
+    exists (
+      select 1 from risk.position_risk_plans p
+      where p.risk_plan_id = position_risk_plan_projections.risk_plan_id
+        and governance.can_access_fund(p.fund_id)
+    )
+  );
 
 commit;

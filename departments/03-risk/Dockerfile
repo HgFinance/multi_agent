@@ -47,6 +47,7 @@ COPY departments/employee_worker_runtime.py ./departments/employee_worker_runtim
 COPY departments/risk_qa_worker_profiles.py ./departments/risk_qa_worker_profiles.py
 COPY departments/02-trading/contracts ./departments/02-trading/contracts
 COPY skills/agentic-rag ./skills/agentic-rag
+COPY skills/risk/mandate-dynamic-risk-controls ./skills/risk/mandate-dynamic-risk-controls
 COPY apps/observability ./apps/observability
 COPY apps/security ./apps/security
 # risk_mandate_workers.py 가 `orchestration.contracts.mas` 를 최상위에서 import 한다

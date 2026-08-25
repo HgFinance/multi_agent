@@ -223,6 +223,15 @@ async def transition_position_risk_plan(body: dict[str, Any]):
     )
 
 
+@router.post("/ui/risk/position-risk-plans/projections")
+async def record_position_risk_plan_projection(body: dict[str, Any]):
+    """Proxy non-authoritative Discord/Notion delivery evidence."""
+
+    return await _risk_request(
+        "POST", "/risk/v1/position-risk-plans/projections", body=body
+    )
+
+
 async def activate_mandate_limits(body: dict[str, Any]) -> Any:
     """Internal BFF orchestration helper used after Governance activation."""
 

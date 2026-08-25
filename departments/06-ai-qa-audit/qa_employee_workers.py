@@ -98,7 +98,7 @@ from qa_worker_skill_runtime.rag_router import choose_rag_route
 from qa_worker_skill_runtime.tools import invoke_tool
 from qa_worker_skill_runtime.trace import SkillTrace
 
-WorkerLLM = Callable[[str, str], str]
+WorkerLLM = Callable[..., str]
 WorkerTool = Callable[[dict[str, Any]], dict[str, Any]]
 
 
@@ -224,11 +224,20 @@ def _base_url() -> str:
     return raw if raw.endswith("/v1") else f"{raw}/v1"
 
 
-def default_worker_llm(system: str, prompt: str) -> str:
+def default_worker_llm(
+    system: str,
+    prompt: str,
+    *,
+    json_schema: dict[str, Any] | None = None,
+) -> str:
     if (os.getenv("WORKER_MODEL_BASE_URL") or "").strip():
         from departments.worker_model_gateway import llm_for_worker
 
         worker_llm, _binding = llm_for_worker()
+        if json_schema is not None and getattr(
+            worker_llm, "_json_schema_capable", False
+        ):
+            return worker_llm(system, prompt, json_schema=json_schema)
         return worker_llm(system, prompt)
 
     from openai import OpenAI
@@ -468,6 +477,34 @@ def build_worker_graph(
         worker_llm = _worker_llm(spec, llm)
         tech_profile = spec.tech_profile.as_dict() if spec.tech_profile else {}
         require_entries = spec.worker_id == "incident-postmortem-worker"
+        output_schema: dict[str, Any] = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "summary": {"type": "string"},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                "evidence_refs": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "escalate": {"type": "boolean"},
+            },
+            "required": ["summary", "confidence", "evidence_refs", "escalate"],
+        }
+        if require_entries:
+            output_schema["properties"]["entries"] = {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "entry_type": {"type": "string", "enum": ["FACT", "INFERENCE"]},
+                        "summary": {"type": "string"},
+                        "occurred_at": {"type": "string"},
+                    },
+                    "required": ["entry_type", "summary", "occurred_at"],
+                },
+            }
         # 필드 타입을 명시한다 - risk 와 같은 이유(2026-08-12 실측).
         system = (
             f"You are the {spec.role}. You are an AI-QA employee, not Hermes supervisor. "
@@ -501,8 +538,13 @@ def build_worker_graph(
         errors: list[str] = []
         for attempt in range(1, spec.max_attempts + 1):
             try:
+                raw = (
+                    worker_llm(system, prompt, json_schema=output_schema)
+                    if getattr(worker_llm, "_json_schema_capable", False)
+                    else worker_llm(system, prompt)
+                )
                 output, schema_valid = _parse_worker_output(
-                    worker_llm(system, prompt),
+                    raw,
                     spec.worker_id,
                     require_entries=require_entries,
                 )
@@ -929,7 +971,12 @@ def _qa_runner_projection(payload: dict[str, Any]) -> dict[str, Any]:
 def qa_runner(payload: dict[str, Any]) -> dict[str, Any]:
     """Compatibility projection backed exclusively by the canonical QARunner."""
 
-    from qa_runtime import QARunner, ToolRegistry, build_qa_task_context, canonical_payload_hash
+    from qa_runtime import (
+        QARunner,
+        ToolRegistry,
+        build_qa_task_context,
+        canonical_payload_hash,
+    )
 
     if not isinstance(payload, Mapping):
         return _qa_runner_failure("INVALID_INPUT")

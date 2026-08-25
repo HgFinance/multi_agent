@@ -170,6 +170,18 @@ def test_lifecycle_authority_and_relaxation_rules():
     with pytest.raises(ValueError, match="cannot enter"):
         validate_transition(transition.model_copy(update={"actor_type": "TRADING"}))
 
+    approval = transition.model_copy(
+        update={
+            "from_state": RiskPlanState.VALIDATED,
+            "to_state": RiskPlanState.USER_APPROVED,
+            "actor_type": "USER",
+            "idempotency_key": "transition-approval",
+        }
+    )
+    with pytest.raises(ValueError, match="approval_ref"):
+        validate_transition(approval)
+    validate_transition(approval.model_copy(update={"approval_ref": "decision-1"}))
+
     current = plan_position_risk(_request())
     proposed_payload = _request(
         fund_id=str(current.fund_id),

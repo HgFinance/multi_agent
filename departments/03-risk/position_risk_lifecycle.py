@@ -6,6 +6,7 @@ import hashlib
 from datetime import datetime
 from enum import StrEnum
 from typing import Literal
+from uuid import UUID
 
 from position_risk_planner import PositionRiskPlan
 from pydantic import BaseModel, ConfigDict, Field
@@ -54,7 +55,23 @@ class RiskPlanTransition(BaseModel):
     reason: str = Field(min_length=1, max_length=1000)
     trace_id: str = Field(min_length=1, max_length=128)
     task_id: str = Field(min_length=1, max_length=200)
+    approval_ref: str | None = Field(default=None, min_length=1, max_length=200)
     idempotency_key: str = Field(min_length=1, max_length=200)
+
+
+class RiskPlanProjectionRecord(BaseModel):
+    """Immutable payload identity plus mutable delivery/read-back state."""
+
+    risk_plan_id: UUID
+    target: Literal["DISCORD", "NOTION"]
+    projection_version: str = Field(min_length=1, max_length=100)
+    payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    external_id: str | None = Field(default=None, max_length=300)
+    delivery_status: Literal["PENDING", "DELIVERED", "FAILED"]
+    readback_status: Literal["NOT_CHECKED", "VERIFIED", "FAILED"] = "NOT_CHECKED"
+    error_code: str | None = Field(default=None, max_length=100)
+    task_id: str = Field(min_length=1, max_length=200)
+    trace_id: str = Field(min_length=1, max_length=128)
 
 
 def validate_transition(transition: RiskPlanTransition) -> None:
@@ -75,6 +92,11 @@ def validate_transition(transition: RiskPlanTransition) -> None:
         raise ValueError(
             f"actor {transition.actor_type} cannot enter {transition.to_state}"
         )
+    if transition.to_state in {
+        RiskPlanState.USER_APPROVED,
+        RiskPlanState.AUTO_POLICY_APPROVED,
+    } and not transition.approval_ref:
+        raise ValueError(f"{transition.to_state} requires an immutable approval_ref")
 
 
 def validate_superseding_plan(
@@ -110,6 +132,7 @@ def conditional_rule_idempotency_key(plan: PositionRiskPlan) -> str:
 
 
 __all__ = [
+    "RiskPlanProjectionRecord",
     "RiskPlanState",
     "RiskPlanTransition",
     "conditional_rule_idempotency_key",

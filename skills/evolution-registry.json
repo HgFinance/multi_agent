@@ -9,7 +9,7 @@
       "current_version": "1.0.0",
       "source": "skills/risk/mandate-dynamic-risk-controls/SKILL.md",
       "provenance": "skills/risk/mandate-dynamic-risk-controls/provenance.json",
-      "content_hash": "05358851095a6e673c618270a285a6050134fd08c165942daf65d92600a888d9",
+      "content_hash": "fcd0d829f1b52bd73fd6d50e7beb600c1c3604514f5d5020c38b25eb416a5c5e",
       "runtime_binding": "departments/03-risk/position_risk_planner.py",
       "qa_verdict": "NOT_RUN",
       "replacement": null

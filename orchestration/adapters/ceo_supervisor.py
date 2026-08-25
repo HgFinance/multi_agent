@@ -8,6 +8,7 @@ and chooses the next structured action.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -16,7 +17,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar, copy_context
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -93,6 +94,7 @@ from orchestration.qa_contract import (
     split_planner_selection,
 )
 from orchestration.risk_advisory_context import fetch_risk_advisory_context
+from orchestration.risk_observability import risk_span
 from orchestration.risk_plan_projection import format_position_risk_plan
 from orchestration.semantic_qa import evaluate_prompt_answer
 from orchestration.workforce_advisory_context import fetch_workforce_advisory_context
@@ -3577,12 +3579,35 @@ class CeoSupervisorService:
         # optional DB wiring here covers the separate CEO/Kanban boundary and
         # is idempotent per terminal task title.
         try:
-            department_projection = self._department_notion_projection.project(
-                root_task_id=root_task_id,
-                task=task,
-                workflow_tasks=task_payloads,
-                event=event,
+            terminal_metadata = merged_run_metadata(task)
+            risk_plan = terminal_metadata.get(
+                "position_risk_plan"
+            ) or terminal_metadata.get("risk_plan")
+            notion_context = (
+                risk_span(
+                    "risk.notion-projection",
+                    {
+                        "task_id": task_id,
+                        "trace_id": risk_plan.get("trace_id") or root_task_id,
+                        "risk_plan_id": risk_plan.get("risk_plan_id"),
+                        "mandate_version_id": risk_plan.get("mandate_version_id"),
+                        "input_hash": risk_plan.get("input_hash"),
+                        "algorithm_version": risk_plan.get("calculation_version"),
+                        "stage": "notion-projection",
+                        "target": "NOTION",
+                        "status": "running",
+                    },
+                )
+                if isinstance(risk_plan, Mapping)
+                else nullcontext()
             )
+            with notion_context:
+                department_projection = self._department_notion_projection.project(
+                    root_task_id=root_task_id,
+                    task=task,
+                    workflow_tasks=task_payloads,
+                    event=event,
+                )
             if department_projection.status not in {"skipped", "duplicate"}:
                 logger.info(
                     "department-notion-projection "
@@ -3601,7 +3626,8 @@ class CeoSupervisorService:
                             f"delivery_status={department_projection.delivery_status} "
                             f"readback_status={department_projection.readback_status} "
                             f"payload_hash={department_projection.payload_hash} "
-                            f"page_id={department_projection.page_id or ''}",
+                            f"page_id={department_projection.page_id or ''} "
+                            f"evidence_status={department_projection.evidence_status or ''}",
                         )
         except Exception as exc:
             logger.exception(
@@ -4422,12 +4448,15 @@ class CeoSupervisorService:
 
         analysis_result = str(child.final_answer or child.result or "").strip()
         department_result = analysis_result or child.summary
+        terminal_metadata: Mapping[str, Any] = {}
+        risk_plan: Mapping[str, Any] | None = None
         if child.profile == canonical_profile_for_department("risk"):
             terminal_metadata = merged_run_metadata(task_payload)
-            risk_plan = terminal_metadata.get(
+            candidate_plan = terminal_metadata.get(
                 "position_risk_plan"
             ) or terminal_metadata.get("risk_plan")
-            if isinstance(risk_plan, Mapping):
+            if isinstance(candidate_plan, Mapping):
+                risk_plan = candidate_plan
                 department_result = format_position_risk_plan(risk_plan)
         failure_category = _failure_category_for_department_card(
             child.summary,
@@ -4500,18 +4529,38 @@ class CeoSupervisorService:
             card_content = content
 
         try:
-            status = self.discord_delivery.upsert_thread_card(
-                root_task_id=root_task_id,
-                source_task=delivery_task,
-                root_task=root_payload,
-                content=card_content,
-                store=DiscordIdempotencyStore(delivery_home),
-                profile=child.profile,
-                response_key_suffix=(
-                    f"department-card:{child.task_id}"
-                ),
-                update_existing=(logical_kind != "started"),
+            discord_context = (
+                risk_span(
+                    "risk.discord-projection",
+                    {
+                        "task_id": child.task_id,
+                        "trace_id": risk_plan.get("trace_id") or root_task_id,
+                        "risk_plan_id": risk_plan.get("risk_plan_id"),
+                        "mandate_version_id": risk_plan.get("mandate_version_id"),
+                        "input_hash": risk_plan.get("input_hash"),
+                        "algorithm_version": risk_plan.get("calculation_version"),
+                        "stage": "discord-projection",
+                        "target": "DISCORD",
+                        "payload_hash": hashlib.sha256(
+                            card_content.encode("utf-8")
+                        ).hexdigest(),
+                        "status": "running",
+                    },
+                )
+                if risk_plan is not None
+                else nullcontext()
             )
+            with discord_context:
+                status = self.discord_delivery.upsert_thread_card(
+                    root_task_id=root_task_id,
+                    source_task=delivery_task,
+                    root_task=root_payload,
+                    content=card_content,
+                    store=DiscordIdempotencyStore(delivery_home),
+                    profile=child.profile,
+                    response_key_suffix=(f"department-card:{child.task_id}"),
+                    update_existing=(logical_kind != "started"),
+                )
         except Exception as exc:
             logger.warning(
                 "department-thread-card-failed "
@@ -4522,6 +4571,33 @@ class CeoSupervisorService:
                 type(exc).__name__,
             )
             return "failed"
+
+        if (
+            risk_plan is not None
+            and risk_plan.get("risk_plan_id")
+            and status not in {None, "failed"}
+        ):
+            recorder = getattr(
+                self._department_notion_projection,
+                "record_projection_evidence",
+                None,
+            )
+            if callable(recorder):
+                recorder(
+                    {
+                        "risk_plan_id": risk_plan.get("risk_plan_id"),
+                        "target": "DISCORD",
+                        "projection_version": "risk-plan-discord-projection.v1",
+                        "payload_hash": hashlib.sha256(
+                            card_content.encode("utf-8")
+                        ).hexdigest(),
+                        "external_id": None,
+                        "delivery_status": "DELIVERED",
+                        "readback_status": "NOT_CHECKED",
+                        "task_id": child.task_id,
+                        "trace_id": risk_plan.get("trace_id") or root_task_id,
+                    }
+                )
 
         if logical_kind == "started" and status not in {None, "failed"}:
             # Mark only after the Discord projection succeeds.  A failed

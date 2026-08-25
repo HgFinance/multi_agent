@@ -1,13 +1,13 @@
 ---
 name: mandate-dynamic-risk-controls
 description: Build or explain a versioned PAPER position risk plan from an approved mandate and authoritative portfolio/market snapshots. Use for stop-loss, take-profit, trailing-stop, quantity-cap, or risk-plan review requests; do not use for company research or direct order execution.
-version: 1.0.0
 metadata:
   hermes:
     category: risk
     owner_profile: risk-management
     source: hgfinance-project-owned
     reuse_policy: risk-owned-read-only
+    version: 1.0.0
 ---
 
 # Mandate dynamic risk controls

@@ -15,7 +15,7 @@ import json
 import os
 import urllib.error
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -94,7 +94,7 @@ class _NotionTransport:
         except urllib.error.HTTPError as exc:
             try:
                 detail = json.loads(exc.read())
-            except Exception:
+            except (OSError, TypeError, ValueError):
                 detail = str(exc)
             raise DepartmentNotionProjectionError(str(detail), status=exc.code) from exc
         except (OSError, ValueError) as exc:
@@ -175,6 +175,7 @@ class DepartmentProjectionResult:
     payload_hash: str | None = None
     delivery_status: str | None = None
     readback_status: str | None = None
+    evidence_status: str | None = None
 
 
 def _title(value: str) -> dict[str, Any]:
@@ -215,7 +216,7 @@ def _department(task: Mapping[str, Any]) -> str | None:
 
     try:
         department = department_for_canonical_profile(profile)
-    except Exception:
+    except (KeyError, ValueError):
         return None
 
     if department == "quant":
@@ -309,15 +310,46 @@ class DepartmentNotionProjection:
         *,
         env: Mapping[str, str] | None = None,
         transport: Any | None = None,
+        projection_recorder: Callable[[Mapping[str, Any]], Any] | None = None,
     ) -> None:
         self.env = env if env is not None else os.environ
         self.transport = transport
+        self.projection_recorder = projection_recorder
         self._transport_token: str | None = None
         self._schema_cache = BoundedNotionSchemaCache()
         self._idempotency = NotionIdempotency(
             self.env,
             namespace="department-projection",
         )
+
+    def record_projection_evidence(self, payload: Mapping[str, Any]) -> str:
+        """Persist observer evidence without changing Notion delivery success."""
+
+        try:
+            if self.projection_recorder is not None:
+                self.projection_recorder(payload)
+                return "RECORDED"
+
+            base_url = str(self.env.get("RISK_API_URL") or "").strip().rstrip("/")
+            if not base_url:
+                return "NOT_CONFIGURED"
+            data = json.dumps(dict(payload)).encode("utf-8")
+            headers = {"Content-Type": "application/json"}
+            token = str(self.env.get("RISK_API_AUTH_TOKEN") or "").strip()
+            if token:
+                headers["X-Risk-Internal-Token"] = token
+            request = urllib.request.Request(
+                f"{base_url}/risk/v1/position-risk-plans/projections",
+                data=data,
+                headers=headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=5) as response:
+                if response.status >= 300:
+                    return f"HTTP_{response.status}"
+            return "RECORDED"
+        except Exception as exc:  # noqa: BLE001 - observer is fail-open
+            return f"FAILED:{type(exc).__name__}"
 
     def _transport_for(self, token: str) -> Any:
         if self.transport is None or (
@@ -514,8 +546,31 @@ class DepartmentNotionProjection:
                         == page_id.replace("-", "")
                         else "FAILED"
                     )
-                except Exception:
+                except Exception:  # noqa: BLE001 - observer is fail-open
                     readback_status = "FAILED"
+            evidence_status = None
+            if risk_plan_id:
+                evidence_status = self.record_projection_evidence(
+                    {
+                        "risk_plan_id": risk_plan_id,
+                        "target": "NOTION",
+                        "projection_version": "risk-plan-notion-projection.v1",
+                        "payload_hash": payload_hash,
+                        "external_id": page_id,
+                        "delivery_status": "DELIVERED",
+                        "readback_status": (
+                            readback_status
+                            if readback_status in {"VERIFIED", "FAILED"}
+                            else "NOT_CHECKED"
+                        ),
+                        "task_id": tid,
+                        "trace_id": str(
+                            risk_plan.get("trace_id")
+                            or metadata.get("trace_id")
+                            or root_task_id
+                        ),
+                    }
+                )
             return DepartmentProjectionResult(
                 status,
                 department=department,
@@ -526,6 +581,7 @@ class DepartmentNotionProjection:
                 payload_hash=payload_hash,
                 delivery_status="DELIVERED",
                 readback_status=readback_status,
+                evidence_status=evidence_status,
             )
 
         def lookup() -> Sequence[Mapping[str, Any]]:

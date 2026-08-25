@@ -11,6 +11,7 @@ from uuid import UUID
 
 from mandate_limit_compiler import MandateLimitCompilation
 from position_risk_lifecycle import (
+    RiskPlanProjectionRecord,
     RiskPlanTransition,
     validate_transition,
 )
@@ -306,8 +307,9 @@ class RiskControlRepository:
                     """
                     insert into risk.position_risk_plan_events (
                       risk_plan_id, from_state, to_state, actor_type, actor_id,
-                      reason, trace_id, task_id, idempotency_key, occurred_at
-                    ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                      reason, trace_id, task_id, approval_ref, idempotency_key,
+                      occurred_at
+                    ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     on conflict (idempotency_key) do nothing
                     returning event_id
                     """,
@@ -320,6 +322,7 @@ class RiskControlRepository:
                         transition.reason,
                         transition.trace_id,
                         transition.task_id,
+                        transition.approval_ref,
                         transition.idempotency_key,
                         transition.occurred_at,
                     ),
@@ -351,6 +354,99 @@ class RiskControlRepository:
             connection.rollback()
             raise RiskControlPersistenceError(
                 f"position Risk Plan transition failed: {exc}"
+            ) from exc
+        finally:
+            self._pool.putconn(connection)
+
+    def record_projection(self, record: RiskPlanProjectionRecord) -> UUID:
+        """Persist final Discord/Notion delivery and read-back evidence."""
+
+        connection = self._pool.getconn()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    select projection_id, payload_hash
+                    from risk.position_risk_plan_projections
+                    where risk_plan_id = %s and target = %s
+                      and projection_version = %s
+                    for update
+                    """,
+                    (
+                        record.risk_plan_id,
+                        record.target,
+                        record.projection_version,
+                    ),
+                )
+                existing = cursor.fetchone()
+                if existing is not None:
+                    if str(existing[1]) != record.payload_hash:
+                        raise RiskControlPersistenceError(
+                            "projection version replayed with a different payload"
+                        )
+                    cursor.execute(
+                        """
+                        update risk.position_risk_plan_projections
+                        set external_id = %s, delivery_status = %s,
+                            readback_status = %s, error_code = %s,
+                            task_id = %s, trace_id = %s,
+                            delivered_at = case when %s = 'DELIVERED' then now()
+                                                else delivered_at end,
+                            readback_at = case when %s <> 'NOT_CHECKED' then now()
+                                               else readback_at end
+                        where projection_id = %s
+                        """,
+                        (
+                            record.external_id,
+                            record.delivery_status,
+                            record.readback_status,
+                            record.error_code,
+                            record.task_id,
+                            record.trace_id,
+                            record.delivery_status,
+                            record.readback_status,
+                            existing[0],
+                        ),
+                    )
+                    projection_id = UUID(str(existing[0]))
+                else:
+                    cursor.execute(
+                        """
+                        insert into risk.position_risk_plan_projections (
+                          risk_plan_id, target, projection_version, payload_hash,
+                          external_id, delivery_status, readback_status, error_code,
+                          task_id, trace_id, delivered_at, readback_at
+                        ) values (
+                          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                          case when %s = 'DELIVERED' then now() end,
+                          case when %s <> 'NOT_CHECKED' then now() end
+                        ) returning projection_id
+                        """,
+                        (
+                            record.risk_plan_id,
+                            record.target,
+                            record.projection_version,
+                            record.payload_hash,
+                            record.external_id,
+                            record.delivery_status,
+                            record.readback_status,
+                            record.error_code,
+                            record.task_id,
+                            record.trace_id,
+                            record.delivery_status,
+                            record.readback_status,
+                        ),
+                    )
+                    projection_id = UUID(str(cursor.fetchone()[0]))
+            connection.commit()
+            return projection_id
+        except RiskControlPersistenceError:
+            connection.rollback()
+            raise
+        except Exception as exc:
+            connection.rollback()
+            raise RiskControlPersistenceError(
+                f"position Risk Plan projection persistence failed: {exc}"
             ) from exc
         finally:
             self._pool.putconn(connection)

@@ -317,6 +317,38 @@
         },
         {
           "method": "GET",
+          "path": "/risk/v1/mandate-presets"
+        },
+        {
+          "method": "POST",
+          "path": "/risk/v1/mandate-limits/compile"
+        },
+        {
+          "method": "POST",
+          "path": "/risk/v1/mandate-limits/validate-proposed"
+        },
+        {
+          "method": "POST",
+          "path": "/risk/v1/mandate-limits/activate-from-mandate"
+        },
+        {
+          "method": "POST",
+          "path": "/risk/v1/position-risk-plans/calculate"
+        },
+        {
+          "method": "POST",
+          "path": "/risk/v1/position-risk-plans/transitions/validate"
+        },
+        {
+          "method": "POST",
+          "path": "/risk/v1/position-risk-plans/transitions"
+        },
+        {
+          "method": "POST",
+          "path": "/risk/v1/position-risk-plans/projections"
+        },
+        {
+          "method": "GET",
           "path": "/risk/v1/observability/rag"
         },
         {
@@ -1255,6 +1287,22 @@
         {
           "method": "POST",
           "path": "/ui/risk/mandates/{mandate_id}/assess"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/risk/mandate-presets"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/risk/position-risk-plans/calculate"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/risk/position-risk-plans/transitions"
+        },
+        {
+          "method": "POST",
+          "path": "/ui/risk/position-risk-plans/projections"
         },
         {
           "method": "GET",

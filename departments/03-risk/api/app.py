@@ -91,7 +91,11 @@ from p1.analytics import (
 )
 from p1_runtime_api import router as p1_runtime_router
 from p2_derivatives_api import router as p2_derivatives_router
-from position_risk_lifecycle import RiskPlanTransition, validate_transition
+from position_risk_lifecycle import (
+    RiskPlanProjectionRecord,
+    RiskPlanTransition,
+    validate_transition,
+)
 from position_risk_planner import (
     PositionRiskPlanRequest,
     plan_position_risk,
@@ -141,9 +145,9 @@ class MandateScopeIn(BaseModel):
     max_sector_weight: Decimal | None = None
     max_gross_exposure: Decimal | None = None
     allowed_asset_classes: list[str] | None = None
-    forbidden_asset_classes: list[str] = []
-    preferred_sectors: list[str] = []
-    excluded_sectors: list[str] = []
+    forbidden_asset_classes: list[str] = Field(default_factory=list)
+    preferred_sectors: list[str] = Field(default_factory=list)
+    excluded_sectors: list[str] = Field(default_factory=list)
 
 
 class LimitSetIn(BaseModel):
@@ -167,12 +171,12 @@ class PortfolioStateIn(BaseModel):
     cash: Decimal
     buying_power: Decimal
     gross_exposure: Decimal
-    positions: dict[UUID, Decimal] = {}
-    issuer_of: dict[UUID, str] = {}
-    issuer_exposure: dict[str, Decimal] = {}
-    instrument_asset_class: dict[UUID, str] = {}
-    instrument_sector: dict[UUID, str] = {}
-    sector_exposure: dict[str, Decimal] = {}
+    positions: dict[UUID, Decimal] = Field(default_factory=dict)
+    issuer_of: dict[UUID, str] = Field(default_factory=dict)
+    issuer_exposure: dict[str, Decimal] = Field(default_factory=dict)
+    instrument_asset_class: dict[UUID, str] = Field(default_factory=dict)
+    instrument_sector: dict[UUID, str] = Field(default_factory=dict)
+    sector_exposure: dict[str, Decimal] = Field(default_factory=dict)
     realized_pnl_today: Decimal = Decimal(0)
     unrealized_pnl_today: Decimal = Decimal(0)
     peak_equity: Decimal = Decimal(0)
@@ -194,7 +198,7 @@ class CounterpartyStatusIn(BaseModel):
 class RiskContextIn(BaseModel):
     mandate: MandateScopeIn
     limits: LimitSetIn
-    restricted_items: list[RestrictedItemIn] = []
+    restricted_items: list[RestrictedItemIn] = Field(default_factory=list)
     portfolio: PortfolioStateIn
     market_status: MarketStatusIn
     counterparty: CounterpartyStatusIn
@@ -248,7 +252,7 @@ class ActivatedMandateCompilationIn(BaseModel):
     preset_version: str
     risk_bounds: dict
     universe_policy: dict
-    allowed_assets: list[str] = []
+    allowed_assets: list[str] = Field(default_factory=list)
     effective_from: datetime
     trace_id: str = Field(min_length=1, max_length=128)
 
@@ -269,15 +273,15 @@ class P1RiskSnapshotIn(BaseModel):
     net_exposure: float
     value_at_risk: float | None = None
     expected_shortfall: float | None = None
-    stress_losses: dict[str, float] = {}
+    stress_losses: dict[str, float] = Field(default_factory=dict)
     correlation_shock_loss: float | None = None
     correlation_max: float | None = None
     quality_status: str
     input_hash: str = Field(min_length=1)
     calculation_version: str = Field(min_length=1)
     kill_switch_state: KillSwitchState
-    breaches: list[str] = []
-    exposure_components: list[dict] = []
+    breaches: list[str] = Field(default_factory=list)
+    exposure_components: list[dict] = Field(default_factory=list)
 
     def to_snapshot(self) -> P1RiskSnapshot:
         return P1RiskSnapshot(
@@ -850,8 +854,10 @@ def calculate_position_risk_plan(body: PositionRiskPlanRequest):
     with risk_span(
         "risk.advisory",
         root_metadata,
-    ):
+    ) as advisory_span:
         result = plan_position_risk(normalized)
+        if advisory_span is not None:
+            advisory_span.metadata["status"] = result.action
         repository = _risk_control_repository()
         if repository is not None and result.action == "PROPOSE":
             try:
@@ -902,6 +908,35 @@ def transition_position_risk_plan(body: RiskPlanTransition):
             },
         ) from exc
     return {"risk_plan_id": body.risk_plan_id, "state": state}
+
+
+@app.post("/risk/v1/position-risk-plans/projections")
+def record_position_risk_plan_projection(body: RiskPlanProjectionRecord):
+    """Persist read-only delivery evidence; it grants no trading authority."""
+
+    repository = _risk_control_repository()
+    if repository is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"error_code": "CANONICAL_RISK_DB_NOT_CONFIGURED"},
+        )
+    try:
+        projection_id = repository.record_projection(body)
+    except RiskControlPersistenceError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_code": "RISK_PLAN_PROJECTION_REJECTED",
+                "reason": str(exc),
+            },
+        ) from exc
+    return {
+        "projection_id": projection_id,
+        "risk_plan_id": body.risk_plan_id,
+        "target": body.target,
+        "delivery_status": body.delivery_status,
+        "readback_status": body.readback_status,
+    }
 
 
 @app.get("/risk/v1/observability/rag")

@@ -285,16 +285,28 @@ def test_risk_projection_uses_explicit_risk_database():
             "서술": {"type": "rich_text"},
         }
     )
+    records = []
     projection = DepartmentNotionProjection(
         env={"NOTION_TOKEN": "x", "NOTION_RISK_DB": "risk-db"},
         transport=transport,
+        projection_recorder=records.append,
     )
 
     task = _trading_task()
     task["assignee"] = "risk-management"
     task["title"] = "Samsung risk review"
+    task["run_metadata"]["position_risk_plan"] = {
+        "risk_plan_id": "1dc772a0-1775-4f3b-9434-a6d24897c349",
+        "trace_id": "risk-trace-1",
+        "state": "VALIDATED",
+        "action": "DEFER",
+    }
 
     result = projection.project(root_task_id="t_root1", task=task)
 
     assert result.status == "created"
     assert transport.created[0][0] == "risk-db"
+    assert result.evidence_status == "RECORDED"
+    assert records[0]["target"] == "NOTION"
+    assert records[0]["delivery_status"] == "DELIVERED"
+    assert records[0]["readback_status"] == "NOT_CHECKED"

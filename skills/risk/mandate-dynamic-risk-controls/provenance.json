@@ -9,10 +9,10 @@
   "generation_model": "not-applicable-project-owned",
   "parent_version": null,
   "created_at": "2026-08-25T00:00:00Z",
-  "content_hash": "05358851095a6e673c618270a285a6050134fd08c165942daf65d92600a888d9",
+  "content_hash": "fcd0d829f1b52bd73fd6d50e7beb600c1c3604514f5d5020c38b25eb416a5c5e",
   "validation": {
-    "skill_creator_quick_validate": "PENDING",
-    "planner_regression_tests": "PENDING",
+    "skill_creator_quick_validate": "PASS",
+    "planner_regression_tests": "PASS",
     "qa_verdict": "NOT_RUN"
   },
   "activation": {
