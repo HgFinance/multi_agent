@@ -15,6 +15,7 @@ from apps.api.ceo_mirror import CanonicalIngress, LockedRedisMirrorStore
 ROOT = Path(__file__).resolve().parents[2]
 _COMPOSE_TEST_ENV = {
     "DATABASE_URL": "postgresql://test:test@localhost/test",
+    "HEDGEFUND_RUNTIME_DB_PASSWORD": "compose-control-contract-test",
     "HEDGEFUND_TSDB_PASSWORD": "compose-contract-test",
     "CEO_DISCORD_INGRESS_API_KEY": "compose-discord-ingress-key-0123456789abcdef",
     "NAVER_CLIENT_ID": "compose-contract-test",

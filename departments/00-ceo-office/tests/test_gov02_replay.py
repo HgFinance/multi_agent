@@ -27,6 +27,7 @@ CAPITAL_ALLOCATION, object_id=<case_id>로 걸어도 DB 제약을 어기지 않�
 
 실행: python departments/00-ceo-office/tests/test_gov02_replay.py
 """
+# ruff: noqa: E402, I001
 from __future__ import annotations
 
 import os
@@ -44,6 +45,13 @@ load_dotenv()  # 저장소 루트 .env - 이미 설정된 값은 덮어쓰지 �
 
 _dsn = os.environ.get("DATABASE_URL")
 if not _dsn:
+    if "pytest" in sys.modules:
+        import pytest
+
+        pytest.skip(
+            "DATABASE_URL 미설정 - GOV-02 실제 DB Replay 생략",
+            allow_module_level=True,
+        )
     print("DATABASE_URL 미설정 - GOV-02 전체 상태 Replay는 건너뛴다")
     raise SystemExit(0)
 
