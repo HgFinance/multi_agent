@@ -1,5 +1,7 @@
 # AS-IS 파이프라인 설계도 — 코드 역추적 기준
 
+> **상태: HISTORICAL SNAPSHOT.** 현행 구조는 [Current Architecture](../CURRENT_PROJECT_ARCHITECTURE.md)를 따른다. 이후 명백한 경로·명칭 오류를 바로잡은 주석이 포함될 수 있지만, 이 문서를 현재 서비스 수나 배포 상태의 정본으로 사용하지 않는다.
+>
 > **작성일**: 2026-08-13 · **기준 스냅샷**: `merge/team-sync-20260812` 브랜치 (HEAD `892973c`) + 작업 트리의 미커밋 변경분
 > **방법론**: 기존 문서/README를 근거로 쓰지 않고, 실제 코드·compose·마이그레이션의 실행 흐름을 역추적했다. 모든 주장은 `파일:줄` 근거를 단다. 문서와 코드가 어긋나는 곳은 코드를 사실로 채택하고 "드리프트"로 표기했다.
 > **범위**: `multi_agent/` 저장소 전체 (부서 8개, apps, orchestration, 데이터 플레인, 인프라, ai-office 프런트엔드)
@@ -194,7 +196,7 @@ flowchart TB
 | Hermes 프로필 경로 | `${USERPROFILE}/.hermes-<부서>` (`override:29-106`) | `/home/ubuntu/.hermes/profiles/<부서>` | **Hermes 자체가 없음** |
 | dispatcher 이미지 | `Dockerfile.agent-runtime` 빌드 (quant-py, agent-reach, gh, mcporter 포함) | `nousresearch/hermes-agent:latest` **맨몸** | — |
 | dispatcher 메모리 | 8g + `--max 3` 스폰 캡 | **1g** (`docker-compose.yml:1081` — 과거 OOM 유발값) | — |
-| 직원 워커 LLM | Ollama `qwen3:1.7b` (8초 타임아웃) | vLLM 오버레이 적용 시 `qwen2.5-14b-fp8` | — |
+| 직원 워커 LLM | Ollama `qwen3:1.7b` (8초 타임아웃) | 현재 vLLM 오버레이는 `qwen2.5-14b-instruct-awq`; 당시 FP8 설명은 폐기 | — |
 | 서비스 구성 | 전체 스택 | 전체 스택 | 7개만: portfolio-bff/worker, trading-api/relay, accounting-api/consumer, 전용 redis |
 | 부서 에이전트 질의 | 가능 | 가능 | `/{부서}/agent/ask` **503 고정** (`deploy/eb/docker-compose.yml:20-22`) |
 | NAV 계산 | 가능 | 가능 | **불가** (market-api 부재로 마크 없음, `deploy/eb/README.md:100-108`) |

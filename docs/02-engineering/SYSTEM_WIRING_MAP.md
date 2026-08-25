@@ -1,6 +1,6 @@
 # 시스템 배선 지도 (System Wiring Map)
 
-> **Snapshot status:** 이 문서는 `origin/main`과 당시 컨테이너 상태를 대조한
+> **상태: HISTORICAL SNAPSHOT.** 이 문서는 `origin/main`과 당시 컨테이너 상태를 대조한
 > 배선 snapshot이다. 현재 아키텍처·worker registry·serving 상태는
 > [CURRENT_PROJECT_ARCHITECTURE.md](../CURRENT_PROJECT_ARCHITECTURE.md)를 우선한다.
 

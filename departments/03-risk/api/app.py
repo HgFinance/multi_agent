@@ -92,7 +92,11 @@ from p1.analytics import (
 from p1_runtime_api import router as p1_runtime_router
 from p2_derivatives_api import router as p2_derivatives_router
 from position_risk_lifecycle import RiskPlanTransition, validate_transition
-from position_risk_planner import PositionRiskPlanRequest, plan_position_risk
+from position_risk_planner import (
+    PositionRiskPlanRequest,
+    plan_position_risk,
+    position_risk_identity,
+)
 from risk_context_repository import PostgresRiskContextRepository, RiskContextLoadError
 from risk_control_repository import (
     RiskControlPersistenceError,
@@ -833,12 +837,13 @@ def activate_limits_from_mandate(body: ActivatedMandateCompilationIn):
 def calculate_position_risk_plan(body: PositionRiskPlanRequest):
     """Calculate a deterministic PAPER proposal without creating an order."""
 
+    normalized, input_hash, risk_plan_id = position_risk_identity(body)
     root_metadata = {
         "task_id": body.task_id,
         "trace_id": body.trace_id,
-        "risk_plan_id": "pending-deterministic-id",
+        "risk_plan_id": str(risk_plan_id),
         "mandate_version_id": str(body.mandate_version_id),
-        "input_hash": "pending-deterministic-hash",
+        "input_hash": input_hash,
         "algorithm_version": "dynamic-position-risk-planner.v1",
         "status": "running",
     }
@@ -846,7 +851,7 @@ def calculate_position_risk_plan(body: PositionRiskPlanRequest):
         "risk.advisory",
         root_metadata,
     ):
-        result = plan_position_risk(body)
+        result = plan_position_risk(normalized)
         repository = _risk_control_repository()
         if repository is not None and result.action == "PROPOSE":
             try:

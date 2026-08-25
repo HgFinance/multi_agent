@@ -11,7 +11,7 @@
 > 목적: 팀원이 자기 본부의 Agent, Service, Test와 운영 문서를 한 경계 안에서 관리하면서도 Risk·회계·감사의 독립성을 유지하게 한다.
 > Frontend 경계: [AI_OFFICE_FRONTEND_PLAN.md](AI_OFFICE_FRONTEND_PLAN.md)
 > Backend·Event·Docker 연결 경계: [DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md](DEPARTMENT_BACKEND_INTEGRATION_DOCKER_PLAN.md)
-> 본부별 Ollama Model 경계: [OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md](OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)
+> 운영 Worker 모델 경계: [WORKER_MODEL_MATRIX.md](WORKER_MODEL_MATRIX.md) · 로컬 fallback/호환 alias: [OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md](OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md)
 
 ## 1. 이 구조가 필요한 이유
 

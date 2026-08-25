@@ -194,6 +194,20 @@ def classify_regime(market: DynamicMarketSnapshot) -> MarketRegime:
     return MarketRegime.NORMAL
 
 
+def position_risk_identity(
+    request: PositionRiskPlanRequest | dict[str, Any],
+) -> tuple[PositionRiskPlanRequest, str, UUID]:
+    """Normalize once and expose the deterministic trace identity."""
+
+    item = (
+        request
+        if isinstance(request, PositionRiskPlanRequest)
+        else PositionRiskPlanRequest.model_validate(request)
+    )
+    input_hash = _hash(item)
+    return item, input_hash, uuid5(_PLAN_NAMESPACE, input_hash)
+
+
 def _defer(
     request: PositionRiskPlanRequest,
     input_hash: str,
@@ -228,13 +242,7 @@ def _defer(
 def plan_position_risk(
     request: PositionRiskPlanRequest | dict[str, Any],
 ) -> PositionRiskPlan:
-    item = (
-        request
-        if isinstance(request, PositionRiskPlanRequest)
-        else PositionRiskPlanRequest.model_validate(request)
-    )
-    input_hash = _hash(item)
-    plan_id = uuid5(_PLAN_NAMESPACE, input_hash)
+    item, input_hash, plan_id = position_risk_identity(request)
     trace_metadata = {
         "task_id": item.task_id,
         "trace_id": item.trace_id,
@@ -399,4 +407,5 @@ __all__ = [
     "PositionRiskPlanRequest",
     "classify_regime",
     "plan_position_risk",
+    "position_risk_identity",
 ]
