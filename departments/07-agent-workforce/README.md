@@ -155,8 +155,17 @@ Scorecard 관찰의 실제 API 배선.
   - **제안까지만 한다.** `decision=DEACTIVATION`이거나 `DEACTIVATION` 조치가 `VERIFIED`가 돼도
     Agent의 employment status는 바뀌지 않는다 — 실제 비활성화는 CEO 승인과 roster 전이
     게이트(P0-3)를 따로 거친다. 두 모듈 다 `roster`를 import하지 않고, 자체 점검이 그걸 고정한다.
+  - `probation.py` — `ProbationPeriod`(수습 기간). **종료 조건 없이 수습을 시작할 수 없다**
+    (`MissingSuccessMetricsError`) — HR-03이 "채용 **전에** Pass/Fail을 고정하고"라고 못박은 것이
+    정확히 "관찰이 끝난 뒤 기준을 만드는 것"을 막으려는 규칙이다. 그 이빨로 **판정 시 기준을
+    바꿀 수 없다** — `close_probation`도 `ProbationCloseIn`도 `success_metrics`를 받을 자리가
+    아예 없고, 자체 점검이 그 부재를 고정한다. `EXTENDED`는 이 행을 닫고 다음 관찰은 새 행으로
+    연다. 같은 Agent에 **열린 수습은 하나뿐**이다 — 행 하나만 보는 DDL check로는 못 막아
+    부분 unique index로 강제한다(`supabase/migrations/20260825000400_...`).
+    `stage`(SHADOW/PAPER) 순서는 제약하지 않는다 — DDL도 문서도 순서를 정한 곳이 없다.
   - 창구: `POST/GET /workforce/v1/agents/{agent_id}/performance-reviews`,
-    `POST/GET .../performance-actions`, `POST /workforce/v1/performance-actions/{id}/transitions`.
+    `POST/GET .../performance-actions`, `POST /workforce/v1/performance-actions/{id}/transitions`,
+    `POST/GET .../probations`, `POST /workforce/v1/probations/{id}/close`.
 
 ## planning/
 

@@ -120,6 +120,15 @@ from action import (
 )
 from action import IllegalTransition as ActionIllegalTransition
 from action import transition as action_transition
+from probation import (
+    MissingSuccessMetricsError,
+    ProbationAlreadyClosedError,
+    ProbationPeriod,
+    ProbationResult,
+    ProbationStage,
+    close_probation,
+    open_probation,
+)
 from quality import QualitySnapshot, aggregate_quality, collect_quality_references
 from review import MissingRoleMetricsError, PerformanceReview, ReviewDecision
 from roster import (
@@ -214,6 +223,7 @@ except ImportError:
 
 try:
     from postgres_performance_repository import (
+        OverlappingProbationError,
         PostgresPerformanceRepository,
         UnknownPerformanceSubjectError,
     )
@@ -221,6 +231,9 @@ except ImportError:
     PostgresPerformanceRepository = None  # type: ignore[assignment,misc]
 
     class UnknownPerformanceSubjectError(RuntimeError):  # type: ignore[no-redef]
+        """psycopg2 미설치 대체 - 이 경로에서는 애초에 기록이 501 로 막힌다."""
+
+    class OverlappingProbationError(RuntimeError):  # type: ignore[no-redef]
         """psycopg2 미설치 대체 - 이 경로에서는 애초에 기록이 501 로 막힌다."""
 
 _WORKFORCE_EVENTS_DIR = _BASE / "workforce_events"
@@ -478,6 +491,37 @@ class PerformanceActionTransitionIn(BaseModel):
     to_status: ActionStatus
     at: datetime
     verification: dict | None = None
+
+
+class ProbationOpenIn(BaseModel):
+    """POST /workforce/v1/agents/{agent_id}/probations Request.
+
+    success_metrics 에 기본값을 두지 않는다 - probation.py 불변식 1(Pass/Fail 기준은
+    관찰 전에 고정)이 기본값 `{}` 하나로 조용히 통과되면 안 된다.
+    """
+
+    profile_version_id: str = Field(min_length=1)
+    stage: ProbationStage
+    started_at: datetime
+    success_metrics: dict
+
+    @model_validator(mode="after")
+    def _has_success_metrics(self) -> "ProbationOpenIn":
+        """저장소가 없을 때 501 이 "기준 없이 수습을 열었다"를 가리지 않도록
+        요청 계층에서도 지킨다(PerformanceReviewIn 과 같은 이유)."""
+        if not self.success_metrics:
+            raise ValueError(
+                "success_metrics 없이 수습을 열 수 없다 - Pass/Fail 기준은 관찰 전에 고정한다"
+            )
+        return self
+
+
+class ProbationCloseIn(BaseModel):
+    """수습 판정. success_metrics 를 받지 않는다 - 기준은 판정 시점에 바뀌지 않는다
+    (probation.py 불변식 2). 받을 자리를 두면 그 불변식이 호출자 선의에 맡겨진다."""
+
+    result: ProbationResult
+    at: datetime
 
 
 class WorkforcePlanIn(BaseModel):
@@ -872,6 +916,7 @@ for _exc_type in (
     MissingActivationEvidenceError, UnverifiedActivationEvidenceError, ToolAllowlistMissingError,
     PlanIllegalTransition, UnverifiedPlanApprovalError, MissingScorecardEvidenceError,
     ActionIllegalTransition, MissingVerificationError, ActionReviewMismatchError,
+    ProbationAlreadyClosedError, OverlappingProbationError,
 ):
     @app.exception_handler(_exc_type)
     def _on_domain_error(request, exc, _status={  # noqa: B006 - 클로저 캡처용 기본값 트릭
@@ -894,6 +939,8 @@ for _exc_type in (
         # 와 같은 방향).
         ActionIllegalTransition: 409, MissingVerificationError: 409,
         ActionReviewMismatchError: 403,
+        # 수습도 같은 원칙 - 이미 종료됐거나 이미 열려 있는 것은 상태 충돌이라 409.
+        ProbationAlreadyClosedError: 409, OverlappingProbationError: 409,
     }):
         return JSONResponse(status_code=_status[type(exc)], content={
             "error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None,
@@ -933,6 +980,14 @@ def _on_unknown_performance_subject(request, exc: UnknownPerformanceSubjectError
 @app.exception_handler(MissingRoleMetricsError)
 def _on_missing_role_metrics(request, exc: MissingRoleMetricsError):
     """근거 없이 역할 축소·비활성화를 제안하려 함 (review.py 불변식 2). 본문 결함이라 422."""
+    return JSONResponse(status_code=422, content={
+        "error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+@app.exception_handler(MissingSuccessMetricsError)
+def _on_missing_success_metrics(request, exc: MissingSuccessMetricsError):
+    """종료 조건 없이 수습을 열려 함 (probation.py 불변식 1). 본문 결함이라 422."""
     return JSONResponse(status_code=422, content={
         "error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None,
     })
@@ -1356,6 +1411,64 @@ def list_performance_actions(agent_id: str, status: ActionStatus | None = None):
         raise HTTPException(status_code=501, detail="DATABASE_URL 미설정 - 성과 조치 조회 불가")
     actions = _performance_repo.list_actions_by_agent(agent_id, status=status)
     return {"actions": [_action_dict(a) for a in actions]}
+
+
+def _probation_dict(p: ProbationPeriod) -> dict:
+    return {
+        "probation_id": p.probation_id, "agent_id": p.agent_id,
+        "profile_version_id": p.profile_version_id, "stage": p.stage.value,
+        "started_at": p.started_at.isoformat(),
+        "ended_at": p.ended_at.isoformat() if p.ended_at else None,
+        "success_metrics": p.success_metrics,
+        "result": p.result.value if p.result else None,
+        "is_closed": p.is_closed,
+    }
+
+
+@app.post("/workforce/v1/agents/{agent_id}/probations")
+def open_agent_probation(agent_id: str, body: ProbationOpenIn):
+    """수습을 연다(HR-00: "활성화 후 수습 기간의 KPI와 종료 조건을 추적한다").
+
+    같은 Agent 에 열린 수습이 이미 있으면 409 다 - 기준이 둘이면 어느 쪽으로 판정할지
+    정해지지 않는다.
+    """
+    if _performance_repo is None:
+        raise HTTPException(status_code=501, detail="DATABASE_URL 미설정 - 수습 기록 불가")
+    probation = open_probation(
+        probation_id=str(uuid4()), agent_id=agent_id,
+        profile_version_id=body.profile_version_id, stage=body.stage,
+        started_at=body.started_at, success_metrics=body.success_metrics,
+    )
+    _performance_repo.open_probation(probation)
+    return _probation_dict(probation)
+
+
+@app.post("/workforce/v1/probations/{probation_id}/close")
+def close_agent_probation(probation_id: str, body: ProbationCloseIn):
+    """수습을 판정하고 닫는다. 기준(success_metrics)은 여기서 바뀌지 않는다.
+
+    PASSED 여도 Agent 가 ACTIVE 가 되지 않는다 - roster 전이는 QA Eval 실재성과 CEO
+    승인 게이트(P0-3)를 따로 거친다.
+    """
+    if _performance_repo is None:
+        raise HTTPException(status_code=501, detail="DATABASE_URL 미설정 - 수습 판정 불가")
+    probation = _performance_repo.get_probation(probation_id)
+    if probation is None:
+        raise HTTPException(status_code=404, detail=f"probation {probation_id} 없음")
+    closed = close_probation(probation, result=body.result, at=body.at)
+    _performance_repo.close_probation(closed)
+    return _probation_dict(closed)
+
+
+@app.get("/workforce/v1/agents/{agent_id}/probations")
+def list_agent_probations(agent_id: str):
+    if _performance_repo is None:
+        raise HTTPException(status_code=501, detail="DATABASE_URL 미설정 - 수습 조회 불가")
+    return {
+        "probations": [
+            _probation_dict(p) for p in _performance_repo.list_probations_by_agent(agent_id)
+        ]
+    }
 
 
 # --- 3.4 Scorecard / Budget ----------------------------------------------------------
@@ -2320,5 +2433,45 @@ if __name__ == "__main__":
           "(저장소 없음 501, 평가자 없음 422, 어휘 밖 decision 422, role_metrics 누락 422, "
           "역전 period 422, 조치 저장소 없음 501, 빈 plan 422, 빈 role_metrics 422, 조회 501)")
 
-    print("ok - Workforce Domain API 10개 영역(access/improvements/scorecard/budget/roster/"
-          "P0-3 게이트/workforce-plan/cost-snapshots/capacity-snapshots/performance) 점검 통과")
+    # --- probation (HR-00/HR-03) --------------------------------------------------------
+    _probation_body = {
+        "profile_version_id": "55555555-5555-5555-5555-555555555555",
+        "stage": "SHADOW", "started_at": t0,
+        "success_metrics": {"pass_if": {"sla_compliance": ">=0.95"}},
+    }
+
+    r53 = client.post(f"/workforce/v1/agents/{_perf_agent}/probations", json=_probation_body)
+    assert r53.status_code == 501, r53.text
+
+    r54 = client.post(f"/workforce/v1/agents/{_perf_agent}/probations",
+                      json={**_probation_body, "success_metrics": {}})
+    # 기준 없이 수습을 여는 것은 관찰이 끝난 뒤 기준을 만드는 것과 같다 - 501 이
+    # 이 결함을 가리면 안 된다.
+    assert r54.status_code == 422, r54.text
+
+    r55 = client.post(f"/workforce/v1/agents/{_perf_agent}/probations",
+                      json={k: v for k, v in _probation_body.items() if k != "success_metrics"})
+    assert r55.status_code == 422, r55.text
+
+    r56 = client.post(f"/workforce/v1/agents/{_perf_agent}/probations",
+                      json={**_probation_body, "stage": "LIVE"})
+    assert r56.status_code == 422, r56.text  # DDL check 밖의 stage
+
+    r57 = client.post("/workforce/v1/probations/pb-1/close", json={"result": "PASSED", "at": t_exp})
+    assert r57.status_code == 501, r57.text
+
+    # 판정 요청에 기준을 실어 보낼 자리가 없어야 한다(불변식 2) - extra 필드는
+    # Pydantic 기본값상 무시되므로, 모델에 필드가 없다는 것 자체를 고정한다.
+    assert "success_metrics" not in ProbationCloseIn.model_fields, (
+        "판정 요청이 기준을 받으면 관찰 후 기준 변경이 열린다"
+    )
+
+    r58 = client.get(f"/workforce/v1/agents/{_perf_agent}/probations")
+    assert r58.status_code == 501, r58.text
+    print("ok - probation 6개 시나리오 통과 "
+          "(저장소 없음 501, 빈 success_metrics 422, 누락 422, 어휘 밖 stage 422, "
+          "판정 저장소 없음 501, 조회 501) + 판정 요청에 기준 필드 없음")
+
+    print("ok - Workforce Domain API 11개 영역(access/improvements/scorecard/budget/roster/"
+          "P0-3 게이트/workforce-plan/cost-snapshots/capacity-snapshots/performance/probation) "
+          "점검 통과")

@@ -18,6 +18,10 @@
      거부한다(UnknownPerformanceSubjectError) - 재시도해도 낫지 않는 호출자 오류다.
   3. 조회 결과가 없으면 None/빈 목록을 그대로 돌려주고 기본값을 만들지 않는다
      (cost.py 불변식 3과 같은 원칙).
+  4. 같은 Agent 에 **열린 수습은 하나뿐이다**. 둘이 동시에 열려 있으면 어느 기준으로
+     판정할지가 정해지지 않는다 - probation.py 의 불변식 1(기준을 미리 고정)이
+     의미를 가지려면 그 기준이 하나여야 한다. 이건 행 하나만 보는 DDL check 로는
+     못 막아서 여기서 막는다.
 
 자체 점검: python departments/07-agent-workforce/performance/postgres_performance_repository.py
   - DATABASE_URL 없으면 import 만 확인한다(이 모듈의 거부 조건은 전부 DB 제약이라
@@ -31,6 +35,7 @@ from functools import lru_cache
 from typing import Any
 
 from action import ActionStatus, ActionType, PerformanceAction
+from probation import ProbationPeriod, ProbationResult, ProbationStage
 from review import PerformanceReview, ReviewDecision
 
 
@@ -40,6 +45,14 @@ class PerformancePersistenceError(RuntimeError):
 
 class UnknownPerformanceSubjectError(PerformancePersistenceError):
     """등록되지 않은 agent_id/profile_version_id/review_id 로 기록하려 한 경우 (불변식 2)."""
+
+
+class OverlappingProbationError(PerformancePersistenceError):
+    """같은 Agent 에 열린 수습이 이미 있다 (불변식 4).
+
+    둘이 동시에 열려 있으면 어느 기준으로 판정할지가 정해지지 않는다 - 앞의 수습을
+    먼저 닫아야 한다(EXTENDED 로 닫고 새 기간을 여는 것이 정상 경로다).
+    """
 
 
 @lru_cache(maxsize=1)
@@ -258,6 +271,147 @@ class PostgresPerformanceRepository:
             action_type=ActionType(action_type), plan=plan or {}, due_at=due_at,
             verification=verification, status=ActionStatus(status),
             completed_at=completed_at,
+        )
+
+    # --- probation_periods -----------------------------------------------------
+
+    def open_probation(self, probation: ProbationPeriod) -> str:
+        """수습 1건을 연다. probation_id 반환.
+
+        같은 Agent 에 열린 수습이 이미 있으면 거절한다(불변식 4).
+
+        실제 방어는 부분 unique index 다(20260825000400 migration) - 열린 수습이 없을
+        때는 잠글 행이 없어서 select-then-insert 로는 동시 요청 둘을 막지 못한다.
+        여기 select 는 **더 나은 에러 메시지**를 위한 것이고, 경합에서 뚫리면 아래
+        23505(unique_violation)가 같은 예외로 접힌다.
+        """
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    select probation_id from workforce.probation_periods
+                    where agent_id = %s and ended_at is null
+                    for update
+                    """,
+                    (probation.agent_id,),
+                )
+                existing = cur.fetchone()
+                if existing is not None:
+                    conn.rollback()
+                    raise OverlappingProbationError(
+                        f"agent_id={probation.agent_id} 에 이미 열린 수습이 있다 "
+                        f"(probation_id={existing[0]}) - 먼저 판정해 닫아야 한다"
+                    )
+                cur.execute(
+                    """
+                    insert into workforce.probation_periods (
+                        probation_id, agent_id, profile_version_id, stage,
+                        started_at, success_metrics
+                    ) values (%s, %s, %s, %s, %s, %s)
+                    returning probation_id
+                    """,
+                    (probation.probation_id, probation.agent_id,
+                     probation.profile_version_id, probation.stage.value,
+                     probation.started_at, json.dumps(probation.success_metrics)),
+                )
+                probation_id = cur.fetchone()[0]
+            conn.commit()
+            return str(probation_id)
+        except OverlappingProbationError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            conn.rollback()
+            # 23505 = unique_violation. 부분 unique index 가 경합을 잡은 경우라
+            # 위 select 가 놓친 것과 같은 결함이다 - 같은 예외로 접는다.
+            if getattr(exc, "pgcode", None) == "23505":
+                raise OverlappingProbationError(
+                    f"agent_id={probation.agent_id} 에 이미 열린 수습이 있다 - 먼저 판정해 닫아야 한다"
+                ) from exc
+            raise self._mapped_error(exc, f"probation 기록 실패: {exc}") from exc
+        finally:
+            self._pool.putconn(conn)
+
+    def close_probation(self, probation: ProbationPeriod) -> None:
+        """판정 결과를 반영한다.
+
+        success_metrics 를 update 목록에 넣지 않는다 - 기준은 판정 시점에 바뀌지
+        않는다(probation.py 불변식 2). close_probation 이 인자로도 안 받지만, 저장
+        계층에서 한 번 더 막아 다른 경로로 새는 것을 방지한다.
+        """
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    update workforce.probation_periods
+                    set ended_at = %s, result = %s
+                    where probation_id = %s and ended_at is null
+                    """,
+                    (probation.ended_at,
+                     probation.result.value if probation.result else None,
+                     probation.probation_id),
+                )
+                if cur.rowcount == 0:
+                    conn.rollback()
+                    raise PerformancePersistenceError(
+                        f"probation_id={probation.probation_id} 가 없거나 이미 종료됐다"
+                    )
+            conn.commit()
+        except PerformancePersistenceError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            conn.rollback()
+            raise self._mapped_error(exc, f"probation 판정 실패: {exc}") from exc
+        finally:
+            self._pool.putconn(conn)
+
+    def get_probation(self, probation_id: str) -> ProbationPeriod | None:
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    select probation_id, agent_id, profile_version_id, stage,
+                           started_at, success_metrics, ended_at, result
+                    from workforce.probation_periods where probation_id = %s
+                    """,
+                    (probation_id,),
+                )
+                row = cur.fetchone()
+            conn.commit()
+            return None if row is None else self._to_probation(row)
+        finally:
+            self._pool.putconn(conn)
+
+    def list_probations_by_agent(self, agent_id: str) -> list[ProbationPeriod]:
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    select probation_id, agent_id, profile_version_id, stage,
+                           started_at, success_metrics, ended_at, result
+                    from workforce.probation_periods
+                    where agent_id = %s order by started_at
+                    """,
+                    (agent_id,),
+                )
+                rows = cur.fetchall()
+            conn.commit()
+            return [self._to_probation(r) for r in rows]
+        finally:
+            self._pool.putconn(conn)
+
+    @staticmethod
+    def _to_probation(db_row: tuple) -> ProbationPeriod:
+        (probation_id, agent_id, profile_version_id, stage, started_at,
+         success_metrics, ended_at, result) = db_row
+        return ProbationPeriod(
+            probation_id=str(probation_id), agent_id=str(agent_id),
+            profile_version_id=str(profile_version_id), stage=ProbationStage(stage),
+            started_at=started_at, success_metrics=success_metrics or {},
+            ended_at=ended_at, result=ProbationResult(result) if result else None,
         )
 
     @staticmethod

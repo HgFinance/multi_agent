@@ -271,6 +271,10 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  # 앱 계약(review.py ReviewDecision)과 같은 check 로 고정하고,
                  # 형제 테이블에 다 있는 작성자 칸(reviewer)을 추가한다.
                  "20260825000300_workforce_performance_review_writer.sql",
+                 # 같은 Agent 에 열린 수습은 하나뿐이다 - 기준(success_metrics)을
+                 # 미리 고정한다는 규칙이 의미를 가지려면 그 기준이 하나여야 한다.
+                 # 행 하나만 보는 check 로는 못 막아 부분 unique index 를 쓴다.
+                 "20260825000400_workforce_probation_single_open.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 
