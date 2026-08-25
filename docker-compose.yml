@@ -77,13 +77,10 @@ services:
       CONDITIONAL_RULE_DATABASE_URL: ${CONDITIONAL_RULE_DATABASE_URL:-${DATABASE_URL:-}}
       CONDITIONAL_RULE_DATABASE_ROLE: ${CONDITIONAL_RULE_DATABASE_ROLE:-svc_conditional_rule_orchestrator}
       PORTFOLIO_DATA_MODE: "production"
-      # Hosted Supabase is identity-only. Operational data remains on the
-      # private PostgreSQL DSN above; the BFF never receives service-role.
-      APP_ENV: ${APP_ENV:-production}
-      PORTFOLIO_AUTH_MODE: ${PORTFOLIO_AUTH_MODE:-supabase_jwt}
-      PORTFOLIO_AUTH_REQUIRED: ${PORTFOLIO_AUTH_REQUIRED:-true}
-      # Local/test fixture mode must still receive an explicit user/fund/book
-      # grant.  Production Supabase-JWT mode ignores this value.
+      # AI Office uses the fixed closed-network demo identity.
+      APP_ENV: ${AI_OFFICE_APP_ENV:-local}
+      PORTFOLIO_AUTH_MODE: fixture
+      PORTFOLIO_AUTH_REQUIRED: "false"
       PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: ${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:-[]}
       # This stack includes shared Kanban, dispatcher, Trading Hermes and the
       # authenticated MCP bridge, so the CEO natural-language PAPER lane may
@@ -93,12 +90,6 @@ services:
       # ambiguous/conditional language still goes through Trading Hermes.
       USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED: "true"
       PORTFOLIO_CORS_ALLOW_ORIGINS: ${PORTFOLIO_CORS_ALLOW_ORIGINS:-}
-      SUPABASE_URL: ${SUPABASE_URL:-}
-      SUPABASE_AUTH_ISSUER: ${SUPABASE_AUTH_ISSUER:-}
-      SUPABASE_AUTH_JWKS_URL: ${SUPABASE_AUTH_JWKS_URL:-}
-      SUPABASE_AUTH_AUDIENCE: ${SUPABASE_AUTH_AUDIENCE:-authenticated}
-      SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY:-}
-      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
       PORTFOLIO_RUNTIME_STORE_PATH: /var/lib/portfolio/runtime.sqlite3
       PORTFOLIO_RUNTIME_EMBEDDED_WORKER: "false"
       PORTFOLIO_WORKER_RUNTIME: ${PORTFOLIO_WORKER_RUNTIME:-ollama}
@@ -279,9 +270,9 @@ services:
         max-file: "3"
     environment:
       PYTHONPATH: /app:/app/apps/api
-      APP_ENV: ${APP_ENV:-production}
+      APP_ENV: ${AI_OFFICE_APP_ENV:-local}
       PORTFOLIO_DATA_MODE: "production"
-      PORTFOLIO_AUTH_MODE: ${PORTFOLIO_AUTH_MODE:-supabase_jwt}
+      PORTFOLIO_AUTH_MODE: fixture
       DATABASE_URL: ${DATABASE_URL:?.env needs the private operational PostgreSQL DATABASE_URL}
       ORDER_ORCHESTRATOR_DATABASE_ROLE: ${ORDER_ORCHESTRATOR_DATABASE_ROLE:-svc_order_orchestrator}
       CONDITIONAL_RULE_DATABASE_URL: ${CONDITIONAL_RULE_DATABASE_URL:-${DATABASE_URL:-}}
@@ -1283,12 +1274,6 @@ services:
         # This is a non-secret Discord→public UUID fixture binding used by the
         # existing closed-network UI contract; secrets are never build args.
         DISCORD_ACTOR_MAP: ${DISCORD_ACTOR_MAP:-}
-        # The mode is a public frontend build contract. The Supabase URL and
-        # publishable/anon key are browser-safe; service-role material is never
-        # passed to the frontend image.
-        PORTFOLIO_AUTH_MODE: ${PORTFOLIO_AUTH_MODE:-supabase_jwt}
-        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL:-${SUPABASE_URL:-}}
-        NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY:-${SUPABASE_PUBLISHABLE_KEY:-${SUPABASE_ANON_KEY:-}}}
     container_name: hedgefund-ai-office
     restart: unless-stopped
     logging:

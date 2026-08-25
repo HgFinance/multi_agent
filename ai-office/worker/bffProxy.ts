@@ -19,7 +19,6 @@ const FORWARDED_REQUEST_HEADERS = [
   "accept",
   "accept-language",
   "content-type",
-  "authorization",
   "x-user-id",
   "idempotency-key",
   "x-request-id",

@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "dev": "npm --prefix ai-office run dev --",
-    "bff": "DATABASE_URL='' .venv/bin/python -m uvicorn apps.api.main:app --reload --port 8001",
+    "bff": "APP_ENV=local PORTFOLIO_AUTH_MODE=fixture PORTFOLIO_AUTH_REQUIRED=false ACCOUNTING_MODE=OFFLINE PORTFOLIO_RUNTIME_STORE_PATH=/tmp/hgfinance-portfolio.sqlite3 DATABASE_URL='' .venv/bin/python -m uvicorn apps.api.main:app --reload --port 8001",
     "build": "npm --prefix ai-office run build",
     "test": "npm --prefix ai-office test",
     "lint": "npm --prefix ai-office run lint"

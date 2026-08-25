@@ -244,7 +244,7 @@ function createPaperOrderSubmissionWithKey(
     init: {
       method: "POST",
       cache: "no-store",
-      retryMutationAfterRefresh: true,
+      retryIdempotentMutation: true,
       headers: {
         Accept: "application/json",
         "Content-Type": "application/json",
@@ -496,7 +496,7 @@ export async function submitPaperOrder(input: {
   query: string;
 }): Promise<PaperDirective> {
   // One invocation corresponds to one explicit click. `bffFetch` may reuse the
-  // same request/key only for its authenticated transport refresh retry.
+  // same request/key only for its explicit idempotent retry.
   const submission = createPaperOrderSubmission(input);
   return submitPaperOrderSubmission(submission);
 }

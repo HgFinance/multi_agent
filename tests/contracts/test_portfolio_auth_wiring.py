@@ -25,12 +25,20 @@ def _portfolio_environment(relative_path: str) -> dict[str, object]:
     return compose["services"]["portfolio-bff"]["environment"]
 
 
-def test_local_and_aws_bff_receive_identity_only_supabase_settings() -> None:
-    for compose_path in ("docker-compose.yml", "deploy/eb/docker-compose.yml"):
-        environment = _portfolio_environment(compose_path)
-        assert AUTH_ENVIRONMENT_KEYS <= environment.keys()
-        assert "SUPABASE_SERVICE_ROLE_KEY" not in environment
-        assert environment["PORTFOLIO_AUTH_MODE"] == "${PORTFOLIO_AUTH_MODE:-supabase_jwt}"
+def test_local_bff_uses_the_fixed_demo_identity() -> None:
+    environment = _portfolio_environment("docker-compose.yml")
+    assert environment["APP_ENV"] == "${AI_OFFICE_APP_ENV:-local}"
+    assert environment["PORTFOLIO_AUTH_MODE"] == "fixture"
+    assert environment["PORTFOLIO_AUTH_REQUIRED"] == "false"
+    assert not (AUTH_ENVIRONMENT_KEYS - {"APP_ENV", "PORTFOLIO_AUTH_MODE", "PORTFOLIO_AUTH_REQUIRED", "PORTFOLIO_CORS_ALLOW_ORIGINS"}) & environment.keys()
+    assert "SUPABASE_SERVICE_ROLE_KEY" not in environment
+
+
+def test_aws_bff_keeps_its_separate_deployment_contract() -> None:
+    environment = _portfolio_environment("deploy/eb/docker-compose.yml")
+    assert AUTH_ENVIRONMENT_KEYS <= environment.keys()
+    assert "SUPABASE_SERVICE_ROLE_KEY" not in environment
+    assert environment["PORTFOLIO_AUTH_MODE"] == "${PORTFOLIO_AUTH_MODE:-supabase_jwt}"
 
 
 def test_aws_auth_configuration_is_fail_fast_and_documented() -> None:

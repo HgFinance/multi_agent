@@ -1,19 +1,11 @@
-import { AUTH_MODE, type FrontendAuthMode } from "./authMode";
 import { readStoredAccount } from "./currentAccount";
-import {
-  AuthenticationRequiredError,
-  getSupabaseAccessToken,
-  getSupabaseUserId,
-} from "./supabaseBrowser";
 
 const configuredBff = process.env.NEXT_PUBLIC_BFF_URL?.trim();
 export const BFF = (configuredBff || "http://127.0.0.1:8001").replace(/\/+$/, "");
 
-export const AUTHENTICATION_REQUIRED_EVENT = "hgfinance:authentication-required";
-
 export interface BffRequestInit extends RequestInit {
-  /** Mutations are never replayed unless the caller explicitly proves idempotency. */
-  retryMutationAfterRefresh?: boolean;
+  /** Mutations are only replayable when the caller supplies an idempotency key. */
+  retryIdempotentMutation?: boolean;
   /** 이 요청만 다른 데드라인을 쓸 때. 0 이하면 데드라인을 걸지 않는다. */
   timeoutMs?: number;
 }
@@ -53,64 +45,40 @@ function requestUrl(path: string): string {
   return `${BFF}${path}`;
 }
 
-export function shouldRetryAfterAuthenticationFailure(method: string, explicitlyIdempotent = false): boolean {
-  return ["GET", "HEAD", "OPTIONS"].includes(method.toUpperCase()) || explicitlyIdempotent;
-}
-
-export function buildBffAuthHeaders(
-  mode: FrontendAuthMode,
+export function buildBffIdentityHeaders(
   input: HeadersInit | undefined,
-  credential: string,
+  userId: string,
 ): Headers {
   const headers = new Headers(input);
   headers.delete("X-User-Id");
   headers.delete("Authorization");
-  if (mode === "fixture") headers.set("X-User-Id", credential);
-  else headers.set("Authorization", `Bearer ${credential}`);
+  if (userId) headers.set("X-User-Id", userId);
   return headers;
 }
 
 /**
  * 이 요청에 실을 신원 헤더.
  *
- * 모드는 Vite가 서버·클라이언트에 같은 상수로 주입한다. Supabase mode에서는
- * access token만 보내고, fixture mode에서만 폐쇄망용 `X-User-Id`를 보낸다.
+ * 브라우저는 고정 데모 계정 ID만 보낸다. 사용자 자격증명이나 세션은 다루지
+ * 않는다.
  */
-async function authenticatedHeaders(init: BffRequestInit, forceRefresh = false): Promise<Headers> {
-  if (AUTH_MODE === "supabase") {
-    return buildBffAuthHeaders(
-      "supabase",
-      init.headers,
-      await getSupabaseAccessToken(forceRefresh),
-    );
-  }
-  void forceRefresh;
-  return buildBffAuthHeaders("fixture", init.headers, readStoredAccount().userId);
+function identityHeaders(init: BffRequestInit): Headers {
+  return buildBffIdentityHeaders(init.headers, readStoredAccount().userId);
 }
 
-/** Verified browser identity for legacy request bodies that still require an actor field. */
-export async function getAuthenticatedSubject(): Promise<string> {
-  if (AUTH_MODE === "supabase") return getSupabaseUserId();
+/** Current demo identity for legacy request bodies that still require an actor field. */
+export function getCurrentUserId(): string {
   return readStoredAccount().userId;
-}
-
-function notifyAuthenticationRequired(): void {
-  if (typeof window !== "undefined") {
-    window.dispatchEvent(new Event(AUTHENTICATION_REQUIRED_EVENT));
-  }
 }
 
 /**
  * The only HTTP transport allowed to call the production portfolio BFF.
  *
- * 401 재시도 경로를 없앴다(2026-08-19). 그 경로의 목적은 만료된 Supabase
- * access token을 재발급받아 한 번 더 보내는 것이었는데, 고정 계정 헤더
- * (`X-User-Id`)는 만료되지 않으므로 두 번째 시도가 첫 번째와 **완전히 같은
- * 요청**이 된다 - 같은 401을 두 번 받고 서버 부하만 두 배가 된다.
+ * 요청은 한 번만 전송한다. 재시도는 호출부가 멱등 키와 함께 별도로 관리한다.
  */
 export async function bffFetch(path: string, init: BffRequestInit = {}): Promise<Response> {
-  const { retryMutationAfterRefresh, timeoutMs, ...requestInit } = init;
-  void retryMutationAfterRefresh;
+  const { retryIdempotentMutation, timeoutMs, ...requestInit } = init;
+  void retryIdempotentMutation;
   // 호출자가 signal을 직접 넘겼으면(SSE 구독처럼 수명을 스스로 관리하는 경우)
   // 그 수명을 그대로 존중한다. 데드라인이 스트림을 끊으면 안 된다.
   const deadlineMs = timeoutMs ?? (requestInit.signal ? 0 : DEFAULT_TIMEOUT_MS);
@@ -122,12 +90,10 @@ export async function bffFetch(path: string, init: BffRequestInit = {}): Promise
       ...requestInit,
       cache: init.cache ?? "no-store",
       signal,
-      headers: await authenticatedHeaders(init),
+      headers: identityHeaders(init),
     });
   } catch (cause) {
-    if (cause instanceof AuthenticationRequiredError) notifyAuthenticationRequired();
     throw cause;
   }
-  if (response.status === 401) notifyAuthenticationRequired();
   return response;
 }
