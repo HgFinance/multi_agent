@@ -122,20 +122,36 @@ Scorecard 관찰의 실제 API 배선.
     하나만 있어도 되므로 unique index 는 `nulls not distinct`를 쓴다(일반 unique 는 null 을
     서로 다른 값으로 봐서 같은 부서 단위 재보고를 막지 못한다). 창구는
     `POST/GET /workforce/v1/capacity-snapshots`. 여전히 `scorecard/observability.py`가
-    Langfuse 실행 이벤트를 직접 집계해 `GET .../departments/capacity`를 메우는 우회 경로도
-    남아 있다 — DB Snapshot 쪽에 보고를 넣는 호출자가 아직 없어서다.
+    Langfuse 실행 이벤트를 직접 집계해 capacity 를 메우는 우회 경로도 남아 있다 — DB
+    Snapshot 쪽에 보고를 넣는 호출자가 아직 없어서다. 창구는 통합 엔드포인트의
+    `capacity` 필드다(아래).
 
 - `scorecard/observability.py` — `check_worker_trigger_rates()`(2026-08-25). 실행기 셋이
   발행하는 `llm.opportunity.v1`(trigger 미충족 1건) 이벤트를 읽어 `fire_rate = 실행 /
   (실행 + 미발화)`를 계산한다. 분모 0(이 창에 기회 자체가 없었다)은 `fire_rate` `0.0`이
-  아니라 `None` — cost.py 불변식 3과 같은 원칙. 창구는
-  `GET /workforce/v1/departments/trigger-rates`.
+  아니라 `None` — cost.py 불변식 3과 같은 원칙. 창구는 통합 엔드포인트의
+  `trigger_rates` 필드다(아래).
 
 - `scorecard/observability.py` — `check_department_llm_usage()`(2026-08-25). capacity와
   같은 실행 이벤트를 읽지만 latency/재시도가 아니라 `llm_calls`/`model_name`/
   `prompt_tokens`/`completion_tokens`/`attempts`/`status`를 집계한다. 이 넷 중 앞의
   셋은 `begin_worker_metric()` 컨텍스트가 열려 있었던 실행에서만 나오므로
-  `arrivals > 0`이어도 `None`일 수 있다. 창구는 `GET /workforce/v1/departments/llm-usage`.
+  `arrivals > 0`이어도 `None`일 수 있다. 창구는 통합 엔드포인트의 `llm_usage` 필드다(아래).
+
+- `scorecard/observability.py` — `WindowedActivityReader` / `collect_workforce_observability()`(2026-08-26 통합).
+  위 네 집계(유휴·Capacity·LLM 사용량·발화율)를 **한 창·한 reader** 로 묶어
+  `GET /workforce/v1/departments/observability` 하나로 돌려준다. 그 전에는 넷이
+  각각 엔드포인트였고 각자 reader 를 만들어 **같은 실행 이벤트를 네 번** 읽었다 —
+  Worker 8명 기준 화면 1회당 Langfuse 왕복 40회, 그중 capacity 와 llm-usage 는
+  event_name·창·limit 이 글자 그대로 같은 질의였다(집계 축만 달랐다). 60초 폴링이라
+  그게 그대로 분당 부하가 됐다. 지금은 Worker 당 최대 2회(실행 이벤트 1 + 미발화
+  건수 1)다. 왕복 수는 `tests/test_hr_shared_activity_reader.py`가 직접 센다 —
+  값은 맞는데 왕복만 늘어나는 회귀는 화면으로 보이지 않아서다.
+
+  같은 변경에서 건수 포화도 고쳤다. 이전 `count_events()`는 `len(page.data)`를
+  돌려줘서 창 안에 limit(200) 이상이 쌓이면 실행·미발화 둘 다 200으로 포화됐고,
+  `fire_rate`가 실제와 무관하게 0.5로 수렴했다. 지금은 서버 `meta.total_items`를
+  쓰고 레코드는 페이지 끝까지 모은다.
 
 ## roster/ (생명주기 이벤트)
 

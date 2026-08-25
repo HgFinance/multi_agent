@@ -615,19 +615,11 @@
         },
         {
           "method": "GET",
-          "path": "/workforce/v1/departments/capacity"
+          "path": "/workforce/v1/departments/observability"
         },
         {
           "method": "GET",
-          "path": "/workforce/v1/departments/idle-agents"
-        },
-        {
-          "method": "GET",
-          "path": "/workforce/v1/departments/llm-usage"
-        },
-        {
-          "method": "GET",
-          "path": "/workforce/v1/departments/trigger-rates"
+          "path": "/workforce/v1/departments/scorecard-brief"
         },
         {
           "method": "GET",
@@ -1218,15 +1210,7 @@
         },
         {
           "method": "GET",
-          "path": "/ui/workforce/capacity"
-        },
-        {
-          "method": "GET",
           "path": "/ui/workforce/hiring-requests"
-        },
-        {
-          "method": "GET",
-          "path": "/ui/workforce/idle-agents"
         },
         {
           "method": "GET",
@@ -1234,15 +1218,11 @@
         },
         {
           "method": "GET",
-          "path": "/ui/workforce/llm-usage"
+          "path": "/ui/workforce/observability"
         },
         {
           "method": "GET",
           "path": "/ui/workforce/roster"
-        },
-        {
-          "method": "GET",
-          "path": "/ui/workforce/trigger-rates"
         },
         {
           "method": "GET",

@@ -34,7 +34,12 @@ answer from local files or historical task data.
 For idle-Agent monitoring - which employee Workers are running and which are
 not - the first read must be:
 
-`GET http://workforce-api:8000/workforce/v1/departments/idle-agents?lookback_hours=24`
+`GET http://workforce-api:8000/workforce/v1/departments/observability?lookback_hours=24`
+
+That one call also returns capacity, LLM usage and trigger rates for the
+same window. Do not issue four separate reads for them - they were four
+endpoints until 2026-08-26 and each one re-read the same Langfuse events.
+Read `idle_agents` from the response for the states below.
 
 Report the four states separately. Never collapse them into a single "idle"
 count, and never turn any of them into a headcount action on their own:
@@ -56,6 +61,34 @@ matter how quiet it looks.
 This endpoint reports timestamps only. It never exposes Worker prompts or
 outputs, and you must not ask for that content - Risk/Compliance Trace bodies
 are outside HR's read scope.
+
+For a cross-department Scorecard review - Queue/SLA, cost and quality read
+side by side to decide which Profiles need revision - the read is:
+
+`GET http://workforce-api:8000/workforce/v1/departments/scorecard-brief?window_start=...&window_end=...&department_code=research-department&department_code=risk-management`
+
+Name every department explicitly; there is no "all departments" default. The
+response is Markdown tables, not JSON. It is the same aggregation as
+`GET .../departments/{department_code}/scorecard` - only encoded for reading -
+so do not re-fetch the JSON form to "check" it, and do not assemble a
+cross-department comparison yourself from six separate JSON reads.
+
+Read the tables under these rules:
+- `—` means no value (not aggregated, not observed). `0` means an observed
+  zero. They are different facts; never report `—` as zero cost, zero error
+  or zero findings.
+- `NO_SNAPSHOT` in the 관측 column means that block has no snapshot at all.
+  It is not usage of zero, and it is not a performance finding.
+- `status` and `recommended_action` are already decided by deterministic code
+  (`scorecard/cost.py`). Carry them; never re-judge them, and never apply a
+  threshold of your own to the numbers in the table.
+- `eval_score` is always empty here - AI QA/Audit owns it. Open the
+  `eval_run` references instead of treating the blank as a quality problem.
+- If the brief says the observation windows differ across departments, do not
+  compare those departments against each other.
+
+State numbers that appear in the brief. If a number is not in it, say it is
+not available rather than estimating one.
 
 Do not perform broad filesystem searches, SQLite discovery, config inspection,
 process inspection, memory search, or historical Kanban search merely to answer

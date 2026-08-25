@@ -1,18 +1,14 @@
 "use client";
 
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
 import {
-  fetchWorkforceIdleAgents,
-  fetchWorkforceTriggerRates,
-  WorkforceIdleAgentsError,
+  OBSERVABILITY_POLL_MS,
+  WORKFORCE_OBSERVABILITY_WINDOWS,
+  useWorkforceObservability,
   type IdleStatus,
   type WorkerIdleReport,
   type WorkerTriggerRateReport,
-  type WorkforceIdleAgents,
-  type WorkforceIdleWindow,
-  type WorkforceTriggerRates,
-} from "../lib/workforceIdleClient";
+  type WorkforceObservabilityWindowKey,
+} from "../lib/workforceObservabilityClient";
 
 /**
  * HR이 6개 투자본부 Worker의 유휴 상태를 관측하는 읽기 전용 산출물 카드.
@@ -21,18 +17,6 @@ import {
  * 그 판정 결과만 30초마다 다시 받는다 — 유휴 여부는 시간 단위로 바뀌는 값이라
  * LivePortfolioPanel(3초)만큼 자주 부를 이유가 없다.
  */
-
-const POLL_MS = 60_000;
-
-type WindowKey = "daily" | "weekly";
-
-/** 일간은 오늘 하루(4시간 넘게 안 잡히면 IDLE), 주간은 최근 7일(하루 넘게 안
- *  잡히면 IDLE) - 창이 넓어지면 "유휴"의 기준도 같이 넓어져야 한다. 그렇지
- *  않으면 주간 보기에서 정상 근무 패턴(야간·주말 공백)이 전부 IDLE로 뜬다. */
-const WINDOW_OPTIONS: Record<WindowKey, WorkforceIdleWindow & { label: string }> = {
-  daily: { label: "일간", lookbackHours: 24, idleThresholdHours: 4 },
-  weekly: { label: "주간", lookbackHours: 24 * 7, idleThresholdHours: 24 },
-};
 
 const STATUS_ORDER: IdleStatus[] = ["ACTIVE", "IDLE", "UNOBSERVED", "UNAVAILABLE"];
 
@@ -91,8 +75,8 @@ function WindowToggle({
   value,
   onChange,
 }: {
-  value: WindowKey;
-  onChange: (next: WindowKey) => void;
+  value: WorkforceObservabilityWindowKey;
+  onChange: (next: WorkforceObservabilityWindowKey) => void;
 }) {
   return (
     <div
@@ -100,7 +84,7 @@ function WindowToggle({
       role="group"
       aria-label="관측 창"
     >
-      {(Object.keys(WINDOW_OPTIONS) as WindowKey[]).map((key) => {
+      {(Object.keys(WORKFORCE_OBSERVABILITY_WINDOWS) as WorkforceObservabilityWindowKey[]).map((key) => {
         const on = value === key;
         return (
           <button
@@ -112,7 +96,7 @@ function WindowToggle({
               key !== "daily" ? "border-l border-outline-variant" : ""
             } ${on ? "bg-secondary-container text-primary" : "text-on-surface-variant hover:bg-surface-container"}`}
           >
-            {WINDOW_OPTIONS[key].label}
+            {WORKFORCE_OBSERVABILITY_WINDOWS[key].label}
           </button>
         );
       })}
@@ -224,31 +208,25 @@ function IdleAgentRow({ report, rate }: { report: WorkerIdleReport; rate?: Worke
   );
 }
 
-export default function WorkforceIdleAgentsPanel() {
-  const [windowKey, setWindowKey] = useState<WindowKey>("daily");
-  const activeWindow = WINDOW_OPTIONS[windowKey];
-  const query = useQuery<WorkforceIdleAgents, WorkforceIdleAgentsError>({
-    queryKey: ["workforce-idle-agents", windowKey],
-    queryFn: () => fetchWorkforceIdleAgents(activeWindow),
-    refetchInterval: POLL_MS,
-    staleTime: 0,
-    retry: false,
-  });
-  // 같은 창의 발화율 - UNOBSERVED 를 "기회 없음"과 "한 번도 안 켜짐"으로 가른다.
-  // 실패해도 유휴 표는 그대로 보여준다(발화율 칸만 "—"가 된다).
-  const rateQuery = useQuery<WorkforceTriggerRates, WorkforceIdleAgentsError>({
-    queryKey: ["workforce-trigger-rates", windowKey],
-    queryFn: () => fetchWorkforceTriggerRates(activeWindow.lookbackHours),
-    refetchInterval: POLL_MS,
-    staleTime: 0,
-    retry: false,
-  });
+export default function WorkforceIdleAgentsPanel({
+  windowKey,
+  onWindowChange,
+}: {
+  windowKey: WorkforceObservabilityWindowKey;
+  onWindowChange: (next: WorkforceObservabilityWindowKey) => void;
+}) {
+  const activeWindow = WORKFORCE_OBSERVABILITY_WINDOWS[windowKey];
+  // 유휴 판정과 발화율은 같은 창·같은 조회 키라 요청이 하나다(2026-08-26 통합).
+  // 발화율은 UNOBSERVED 를 "기회 없음"과 "한 번도 안 켜짐"으로 가른다 - 예전에는
+  // 그 값 하나 때문에 두 번째 쿼리를 따로 돌렸고, workforce-api 는 그때마다 같은
+  // Langfuse 이벤트를 다시 읽었다. Capacity 패널도 같은 창이면 이 쿼리를 공유한다.
+  const query = useWorkforceObservability(activeWindow);
   const data = query.data ?? null;
   const error = query.error ?? null;
   const loading = query.isPending;
   const reports = data?.idle_agents ?? [];
   const rateByWorker = new Map(
-    (rateQuery.data?.trigger_rates ?? []).map((item) => [`${item.department}-${item.worker_id}`, item]),
+    (data?.trigger_rates ?? []).map((item) => [`${item.department}-${item.worker_id}`, item]),
   );
 
   return (
@@ -269,7 +247,7 @@ export default function WorkforceIdleAgentsPanel() {
             발화율 컬럼은 UNOBSERVED 를 &ldquo;기회 자체가 없었다&rdquo;와 &ldquo;기회가 있었는데 한 번도 안 켜졌다&rdquo;로 가릅니다.
           </p>
           </div>
-          <WindowToggle value={windowKey} onChange={setWindowKey} />
+          <WindowToggle value={windowKey} onChange={onWindowChange} />
         </div>
 
         {error ? (
@@ -344,7 +322,7 @@ export default function WorkforceIdleAgentsPanel() {
             {activeWindow.label} 관측 · 최근 {activeWindow.lookbackHours}시간 · 임계 {activeWindow.idleThresholdHours}시간 ·
             Langfuse 타임스탬프 기준(원문 미포함)
           </span>
-          <span>{POLL_MS / 1000}초마다 자동 갱신</span>
+          <span>{OBSERVABILITY_POLL_MS / 1000}초마다 자동 갱신</span>
         </div>
       </div>
     </section>

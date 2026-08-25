@@ -96,7 +96,7 @@ CEO도 HR처럼 **부서장(Hermes) + 직원(LangGraph Worker) 2계층**이다.
 |---|---|---|---|
 | `workforce.roster.read` | `GET /workforce/v1/roster` → `_roster_repo.list_roster()` | 6개 투자본부 소속 Agent 명부 | HR 자신 — 입사·개정이 완료될 때 HR의 lifecycle 처리가 직접 씀([app.py:686](../../departments/07-agent-workforce/api/app.py)) |
 | `workforce.scorecard.read` | `GET /workforce/v1/departments/{code}/scorecard` → `build_department_scorecard()` | Capacity·비용·품질을 결정론 함수가 조립한 집계 | 원본 신호는 6개 투자본부의 Queue·비용 사용량(`cost_snapshots`, 별도 `POST .../cost_snapshots`로 기록). 품질 쪽 `eval_score`는 QA 소유 `audit.eval_runs`를 값으로 복제하지 않고 `eval_run_id`로만 참조한다([cost.py:206](../../departments/07-agent-workforce/scorecard/cost.py)) |
-| `workforce.idle_agents.read` (2026-08-10) | `GET /workforce/v1/departments/idle-agents` | 6개 투자본부 Worker의 최근 실행 timestamp | 각 투자본부의 Worker 실행 자체 — `portfolio_recommendation.py`가 Worker 실행마다 Langfuse에 이벤트를 발행하고([llm_observability.py](../../orchestration/llm_observability.py)), HR은 timestamp만 조회(원문은 절대 안 읽음) |
+| `workforce.idle_agents.read` (2026-08-10, 2026-08-26 통합) | `GET /workforce/v1/departments/observability` (`idle_agents` 필드) | 6개 투자본부 Worker의 최근 실행 timestamp | 각 투자본부의 Worker 실행 자체 — `portfolio_recommendation.py`가 Worker 실행마다 Langfuse에 이벤트를 발행하고([llm_observability.py](../../orchestration/llm_observability.py)), HR은 timestamp만 조회(원문은 절대 안 읽음) |
 
 **산출물 1종과 실측 공백**
 
