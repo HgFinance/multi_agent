@@ -203,6 +203,10 @@ class ForwardToIngressTests(unittest.TestCase):
             self.author = author
             self.channel = type("C", (), {"id": "chan-1", "parent_id": None})()
             self.guild = type("G", (), {"id": "guild-1"})()
+            self.replies: list[tuple[str, bool]] = []
+
+        async def reply(self, content: str, *, mention_author: bool = False) -> None:
+            self.replies.append((content, mention_author))
 
     def _message(self, content: str = "리서치 브리핑해줘", **kwargs: object):
         author = kwargs.pop("author", self._Author("123456789012345678"))
@@ -362,11 +366,15 @@ class ForwardToIngressTests(unittest.TestCase):
             raise OSError("connection refused")
 
         env = self._env()
+        message = self._message()
         with patch.dict("os.environ", env), patch(
             "urllib.request.urlopen", boom
         ), patch.object(gateway_patch.time, "sleep"):
-            self.assertTrue(gateway_patch._forward_to_ingress(self._message(), None))
+            self.assertTrue(gateway_patch._forward_to_ingress(message, None))
         self.assertEqual(calls, 4)
+        self.assertEqual(
+            getattr(message, gateway_patch._INGRESS_FAILURE_ATTRIBUTE), "transport"
+        )
 
     def test_transport_retry_uses_one_idempotent_payload_and_completes_lease(self) -> None:
         class _Response:
@@ -477,6 +485,24 @@ class AsyncForwardToIngressTests(unittest.IsolatedAsyncioTestCase):
         finally:
             release.set()
             timer.cancel()
+
+    async def test_fail_closed_ingress_notifies_user_without_replaying(self) -> None:
+        class _Message:
+            id = "failed-ingress-1"
+
+            def __init__(self) -> None:
+                self.replies: list[tuple[str, bool]] = []
+
+            async def reply(self, content: str, *, mention_author: bool = False) -> None:
+                self.replies.append((content, mention_author))
+
+        message = _Message()
+        gateway_patch._mark_ingress_failure(message, "http_503")
+        await gateway_patch._notify_ingress_failure(message)
+
+        self.assertEqual(len(message.replies), 1)
+        self.assertIn("자동으로 다시 실행하지 않았습니다", message.replies[0][0])
+        self.assertFalse(message.replies[0][1])
 
 
 class DiscordPreAcceptTelemetryTests(unittest.IsolatedAsyncioTestCase):

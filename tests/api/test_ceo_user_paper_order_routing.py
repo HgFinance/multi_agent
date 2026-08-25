@@ -324,7 +324,7 @@ def test_conditional_command_uses_only_the_precreated_trading_primary(
     assert "Canonical daily-SMA example" in trading_body
     assert "TIMEFRAME_REQUIRED_FOR_CROSS" in trading_body
     assert "max_data_age_seconds=30" in trading_body
-    assert "trusted 10-minute default" in trading_body
+    assert "trusted KRX regular-session close default" in trading_body
     assert "For 2-4 independent conditional actions" in trading_body
     assert "pass candidates in source-text order" in trading_body
     assert "multiple actions, and LIVE" not in trading_body

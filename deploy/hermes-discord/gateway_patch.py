@@ -689,6 +689,12 @@ INGRESS_TIMEOUT_ENV = "HGFINANCE_DISCORD_INGRESS_TIMEOUT_SECONDS"
 INGRESS_SECRET_ENV = "CEO_DISCORD_INGRESS_API_KEY"
 INGRESS_PROFILES = frozenset({"ceo-agent", "trading-department"})
 _INGRESS_RETRY_DELAYS_SECONDS = (0.25, 0.75, 1.5)
+_INGRESS_FAILURE_ATTRIBUTE = "_hgfinance_ingress_failure"
+_INGRESS_FAILURE_MESSAGE = (
+    "⚠️ 요청 접수 결과를 확인하지 못했습니다. 중복 주문 방지를 위해 자동으로 "
+    "다시 실행하지 않았습니다. 새 주문을 보내기 전에 현재 조건주문 상태를 "
+    "확인해 주세요. 오류 코드: CEO_INGRESS_UNAVAILABLE"
+)
 
 
 def _ingress_url() -> str:
@@ -704,6 +710,37 @@ def _ingress_secret() -> str | None:
     ):
         return None
     return value
+
+
+def _mark_ingress_failure(message: Any, reason: str) -> None:
+    """Attach only a bounded error category for the async user reply."""
+
+    try:
+        setattr(message, _INGRESS_FAILURE_ATTRIBUTE, str(reason)[:64])
+    except (AttributeError, TypeError):
+        pass
+
+
+async def _notify_ingress_failure(message: Any) -> None:
+    """Tell the user a fail-closed ingress did not silently accept an order."""
+
+    reply = getattr(message, "reply", None)
+    try:
+        if callable(reply):
+            await reply(_INGRESS_FAILURE_MESSAGE, mention_author=False)
+            return
+        channel = getattr(message, "channel", None)
+        send = getattr(channel, "send", None)
+        if callable(send):
+            await send(_INGRESS_FAILURE_MESSAGE)
+            return
+        raise AttributeError("Discord message has no reply transport")
+    except Exception as exc:  # noqa: BLE001 - reporting failure cannot replay an order.
+        logger.error(
+            "discord-ingress failure-notice=failed exception_type=%s message_id=%s",
+            type(exc).__name__,
+            str(getattr(message, "id", "") or ""),
+        )
 
 
 def _author_id(message: Any) -> str:
@@ -785,6 +822,7 @@ def _forward_to_ingress(message: Any, adapter: Any) -> bool:
         logger.error(
             "discord-ingress status=failed_closed reason=credential_unavailable"
         )
+        _mark_ingress_failure(message, "credential_unavailable")
         return True
     message_id = str(getattr(message, "id", "") or "")
     if not message_id:
@@ -873,6 +911,7 @@ def _forward_to_ingress(message: Any, adapter: Any) -> bool:
                 exc.code,
                 message_id,
             )
+            _mark_ingress_failure(message, f"http_{exc.code}")
             _mark_ingress_failed(adapter, message_id)
             return True
         except Exception as exc:  # noqa: BLE001 - retried with one stable request ID.
@@ -885,6 +924,7 @@ def _forward_to_ingress(message: Any, adapter: Any) -> bool:
                 type(exc).__name__,
                 message_id,
             )
+            _mark_ingress_failure(message, "transport")
             _mark_ingress_failed(adapter, message_id)
             return True
 
@@ -898,6 +938,7 @@ def _forward_to_ingress(message: Any, adapter: Any) -> bool:
             status,
             message_id,
         )
+        _mark_ingress_failure(message, f"http_{status}")
         _mark_ingress_failed(adapter, message_id)
         return True
     _mark_ingress_forwarded(adapter, message_id)
@@ -1127,6 +1168,8 @@ def _wrap_handle_message(cls: type[Any]) -> None:
         # message even when the outcome is ambiguous; replaying through direct
         # Hermes could create a second workflow after the BFF committed.
         if await _forward_to_ingress_async(routed_message, self):
+            if getattr(routed_message, _INGRESS_FAILURE_ATTRIBUTE, None):
+                await _notify_ingress_failure(routed_message)
             return True
 
         try:

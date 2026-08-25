@@ -960,6 +960,13 @@ def resolve_root_id(task_id: str, *, fetch: Fetch = show_task) -> str:
             break
         visited.add(current)
         current_payload = fetch(current)
+        # Some legacy ingress roots were persisted before ROOT_PENDING could
+        # be replaced with the real task ID. The CEO root marker plus the user
+        # request heading is authoritative for the row's own identity; do not
+        # follow that stale placeholder and misreport an existing root as
+        # missing during read/retention reconstruction.
+        if is_ceo_root_body(str(current_payload.get("body") or "")):
+            return current
         declared_root = _workflow_root_id(current_payload)
         if declared_root:
             fetch(declared_root)

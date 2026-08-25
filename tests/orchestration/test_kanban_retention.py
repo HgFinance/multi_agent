@@ -87,9 +87,10 @@ def _workflow(*, root_status: str = "done", child_status: str = "done", **root_c
 
 
 class FakeMaintenance:
-    def __init__(self) -> None:
+    def __init__(self, *, workflow_exists: bool = True) -> None:
         self.archived: list[tuple[str, tuple[str, ...]]] = []
         self.purged: list[tuple[str, tuple[str, ...]]] = []
+        self._workflow_exists = workflow_exists
 
     def archive_workflow(self, root_id: str, task_ids: list[str]) -> bool:
         self.archived.append((root_id, tuple(task_ids)))
@@ -98,6 +99,9 @@ class FakeMaintenance:
     def purge_workflow(self, root_id: str, task_ids: list[str]) -> bool:
         self.purged.append((root_id, tuple(task_ids)))
         return True
+
+    def workflow_exists(self, _root_id: str) -> bool:
+        return self._workflow_exists
 
 
 def _decision(workflow, *, delivery: DeliveryState = DeliveryState("not_required")):
@@ -261,6 +265,25 @@ def test_active_root_reconstruction_is_bounded_parallel(tmp_path: Path) -> None:
     assert max_active == 2
 
 
+def test_legacy_root_pending_marker_resolves_to_existing_root() -> None:
+    payload = _node(ROOT)
+    payload["body"] = str(payload["body"]).replace(
+        f"workflow_root_task_id={ROOT}",
+        "workflow_root_task_id=ROOT_PENDING",
+    )
+    payload["body"] = f"{payload['body']}## User request\nlegacy request\n"
+    fetched: list[str] = []
+
+    def fetch(task_id: str):
+        fetched.append(task_id)
+        if task_id != ROOT:
+            raise ceo_kanban_read.KanbanTaskNotFound(task_id)
+        return payload
+
+    assert ceo_kanban_read.resolve_root_id(ROOT, fetch=fetch) == ROOT
+    assert fetched == [ROOT]
+
+
 def test_archive_then_purge_preserves_audit_and_forbids_under_7_days(tmp_path: Path) -> None:
     maintenance = FakeMaintenance()
     audit = AuditStore(tmp_path / "retention-audit.db")
@@ -386,6 +409,44 @@ def test_purge_requires_audit_row(tmp_path: Path) -> None:
     result = worker.run_once()
     assert result.purged_count == 0
     assert maintenance.purged == []
+
+
+def test_missing_descendant_does_not_mark_existing_root_purged(tmp_path: Path) -> None:
+    maintenance = FakeMaintenance(workflow_exists=True)
+    audit = AuditStore(tmp_path / "retention-audit.db")
+    active = [{"id": ROOT, "body": _workflow().root.body, "status": "done"}]
+    state = {"archived": False}
+
+    def rows(*, include_archived: bool = False):
+        if include_archived and state["archived"]:
+            return [{"id": ROOT, "body": _workflow().root.body, "status": "archived"}]
+        return [] if state["archived"] or include_archived else active
+
+    def loader(_root_id: str, **_):
+        if state["archived"]:
+            raise ceo_kanban_read.KanbanTaskNotFound("missing legacy descendant")
+        return _workflow()
+
+    RetentionWorker(
+        maintenance=maintenance,
+        audit=audit,
+        workflow_loader=loader,
+        row_lister=rows,
+        clock=lambda: NOW,
+    ).run_once()
+    state["archived"] = True
+
+    result = RetentionWorker(
+        maintenance=maintenance,
+        audit=audit,
+        workflow_loader=loader,
+        row_lister=rows,
+        clock=lambda: NOW + 8 * 24 * 3600,
+    ).run_once()
+
+    assert result.purged_count == 0
+    assert audit.get(ROOT)["purged_at"] is None
+    assert (ROOT, "purge_graph_missing_root_still_exists") in result.skipped
 
 
 def test_audit_store_migrates_legacy_schema_with_qa_hr_capsule(tmp_path: Path) -> None:

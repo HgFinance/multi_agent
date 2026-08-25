@@ -130,6 +130,8 @@ class KanbanMaintenance(Protocol):
 
     def purge_workflow(self, root_id: str, task_ids: Sequence[str]) -> bool: ...
 
+    def workflow_exists(self, root_id: str) -> bool: ...
+
 
 def _epoch(value: Any) -> int | None:
     if isinstance(value, bool):
@@ -833,6 +835,13 @@ class SQLiteKanbanMaintenance:
         conn.row_factory = sqlite3.Row
         return conn
 
+    def workflow_exists(self, root_id: str) -> bool:
+        with closing(self._connect()) as conn:
+            return conn.execute(
+                "SELECT 1 FROM tasks WHERE id = ? LIMIT 1",
+                (str(root_id),),
+            ).fetchone() is not None
+
     @staticmethod
     def _placeholders(values: Sequence[str]) -> str:
         return ",".join("?" for _ in values)
@@ -1250,13 +1259,17 @@ class RetentionWorker:
                     skipped.append((root_id, "purge_cas_failed"))
             except KanbanTaskNotFound:
                 # A previous purge may have committed the board deletion and
-                # died before marking the audit row. Treat that state as an
-                # idempotent completion; the audit row remains the proof.
-                if self.audit.get(root_id) is not None:
+                # died before marking the audit row. Only a missing root is an
+                # idempotent completion: a missing/stale descendant must not
+                # falsely mark a still-existing workflow as purged.
+                if (
+                    self.audit.get(root_id) is not None
+                    and not self.maintenance.workflow_exists(root_id)
+                ):
                     self.audit.mark_purged(root_id, purged_at=now)
                     purged_count += 1
                 else:
-                    skipped.append((root_id, "purge_root_missing_without_audit"))
+                    skipped.append((root_id, "purge_graph_missing_root_still_exists"))
             except (KanbanUnavailable, RetentionError, sqlite3.Error) as exc:
                 skipped.append((root_id, f"purge_error:{type(exc).__name__}"))
         return (
