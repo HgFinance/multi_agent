@@ -97,6 +97,34 @@ async def workforce_capacity(lookback_hours: float = 24.0) -> Any:
     )
 
 
+@router.get("/ui/workforce/trigger-rates")
+async def workforce_trigger_rates(lookback_hours: float = 24.0) -> Any:
+    """Worker별 발화율 - 실행 / (실행 + 미발화).
+
+    순수 프록시다. idle-agents가 UNOBSERVED 하나로 뭉뚱그리는 두 상황을 나눠준다 -
+    "이 창에 기회 자체가 없었다"(fire_rate=null)와 "기회가 있었는데 한 번도 안
+    켜졌다"(fire_rate=0). 그 구분은 workforce-api가 하고(observability.py
+    check_worker_trigger_rates) 여기서 다시 만들지 않는다.
+    """
+
+    return await _workforce_get(
+        "/workforce/v1/departments/trigger-rates", params={"lookback_hours": lookback_hours}
+    )
+
+
+@router.get("/ui/workforce/llm-usage")
+async def workforce_llm_usage(lookback_hours: float = 24.0) -> Any:
+    """부서별 LLM 사용량 - 모델 호출수·토큰·시도·상태 분포.
+
+    순수 프록시다. capacity와 같은 Langfuse 실행 이벤트를 읽지만 지연·재시도가
+    아니라 토큰·모델 축을 집계한다(observability.py check_department_llm_usage).
+    """
+
+    return await _workforce_get(
+        "/workforce/v1/departments/llm-usage", params={"lookback_hours": lookback_hours}
+    )
+
+
 @router.get("/ui/workforce/roster")
 async def workforce_roster() -> Any:
     """등록된 Agent 전원의 고용 상태·현재 Profile Version·모델 좌표.
@@ -164,6 +192,8 @@ __all__ = [
     "router",
     "workforce_idle_agents",
     "workforce_capacity",
+    "workforce_trigger_rates",
+    "workforce_llm_usage",
     "workforce_roster",
     "workforce_agent_access",
     "workforce_hiring_requests",

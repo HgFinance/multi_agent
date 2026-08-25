@@ -4,7 +4,8 @@
 소유: 영주 (CEO Office)
 근거: docs/02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md F24,
       docs/05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md 3.1(governance.notifications),
-      docs/02-engineering/GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 5.3(report.ready.v1 등
+      docs/02-engineering/UNIFIED_DOMAIN_API_SPEC.md 6.2(Canonical Event),
+      contracts/event-registry.v1.json(report.ready.v1 등
       Governance/Workforce Stream 소비)
 
 여기에 LLM은 없다. 알림 채널·중복 억제 판정은 결정론적 코드만 한다 (CLAUDE.md
@@ -94,7 +95,7 @@ def compute_dedup_key(*, fund_id: str, event_type: str, scope_key: str) -> str:
 
 @dataclass(frozen=True)
 class NotificationRequest:
-    """소비하는 Domain Event 한 건 (API 설계서 5.2/5.3 Envelope의 payload 요약)."""
+    """소비하는 Domain Event 한 건 (event-envelope.v1 payload 요약)."""
 
     fund_id: str
     event_type: str

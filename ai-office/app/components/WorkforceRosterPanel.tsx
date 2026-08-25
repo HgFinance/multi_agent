@@ -185,8 +185,8 @@ function RosterRow({
         onClick={onToggle}
         aria-expanded={expanded}
       >
-        <td className="px-3 py-2">{agent.department_code}</td>
-        <td className="px-3 py-2">
+        <td className="px-2.5 py-1.5">{agent.department_code}</td>
+        <td className="px-2.5 py-1.5">
           <div className="flex min-w-0 items-center gap-1.5">
             <span className="material-symbols-outlined shrink-0 text-[14px] text-on-surface-variant" aria-hidden="true">
               {expanded ? "expand_more" : "chevron_right"}
@@ -200,7 +200,7 @@ function RosterRow({
           </div>
         </td>
         <td className="px-3 py-2 font-data-mono text-on-surface-variant">{agent.role_code}</td>
-        <td className="px-3 py-2">
+        <td className="px-2.5 py-1.5">
           <span className={`inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-[10px] font-semibold ${view.tone}`}>
             <span className="material-symbols-outlined text-[12px]" aria-hidden="true">
               {view.icon}
@@ -208,7 +208,7 @@ function RosterRow({
             {view.label}
           </span>
         </td>
-        <td className="px-3 py-2 font-data-mono">
+        <td className="px-2.5 py-1.5 font-data-mono">
           {profile ? `${profile.model.provider} / ${profile.model.model_name}` : "미배정"}
         </td>
         <td className="px-3 py-2 font-data-mono text-on-surface-variant">
@@ -259,13 +259,12 @@ export default function WorkforceRosterPanel() {
         total={data ? agents.length : undefined}
         visible={data ? visibleAgents.length : undefined}
       />
-      <div className="space-y-5 p-4 md:p-6">
+      <div className="space-y-2 px-4 py-3">
         <div className="min-w-0">
-          <p className="m-0 text-label-md font-label-md uppercase text-on-surface-variant">Workforce · Roster</p>
-          <h2 id="workforce-roster-title" className="mt-2 text-headline-md font-headline-md font-bold text-primary">
+          <h2 id="workforce-roster-title" className="m-0 text-title-sm font-title-sm font-bold text-primary">
             등록 Agent 인력 현황
           </h2>
-          <p className="mt-2 max-w-3xl text-body-sm font-body-sm text-on-surface-variant">
+          <p className="mt-0.5 max-w-3xl text-[11px] leading-snug text-on-surface-variant">
             workforce.agent_profiles에 등록된 Agent 전원의 고용 상태와 현재 Profile Version·모델 좌표입니다. 부서장은 이 목록에 없습니다(직원만).
           </p>
         </div>
@@ -295,7 +294,7 @@ export default function WorkforceRosterPanel() {
 
         {error ? (
           <div
-            className={`rounded-lg border p-4 text-sm ${
+            className={`rounded-lg border p-3 text-xs ${
               error.status === 501
                 ? "border-outline-variant bg-surface-container-low text-on-surface-variant"
                 : "border-error/40 bg-error-container text-on-error-container"
@@ -310,7 +309,7 @@ export default function WorkforceRosterPanel() {
         ) : null}
 
         {loading && !data && !error ? (
-          <p className="m-0 rounded-lg border border-outline-variant bg-surface-container-low p-5 text-sm text-on-surface-variant">
+          <p className="m-0 rounded-lg border border-outline-variant bg-surface-container-low p-3 text-xs text-on-surface-variant">
             Roster를 확인하는 중입니다…
           </p>
         ) : null}
@@ -320,15 +319,15 @@ export default function WorkforceRosterPanel() {
             <EmploymentCountTiles agents={agents} />
 
             <div className="overflow-x-auto rounded-lg border border-outline-variant">
-              <table className="w-full min-w-[720px] text-left text-xs">
+              <table className="w-full min-w-[640px] text-left text-xs">
                 <thead className="bg-surface-container text-label-md text-on-surface-variant">
                   <tr>
-                    <th className="px-3 py-2 font-semibold">부서</th>
-                    <th className="px-3 py-2 font-semibold">Agent</th>
-                    <th className="px-3 py-2 font-semibold">역할</th>
-                    <th className="px-3 py-2 font-semibold">고용 상태</th>
-                    <th className="px-3 py-2 font-semibold">모델</th>
-                    <th className="px-3 py-2 font-semibold">프로필 버전</th>
+                    <th className="px-2.5 py-1.5 font-semibold">부서</th>
+                    <th className="px-2.5 py-1.5 font-semibold">Agent</th>
+                    <th className="px-2.5 py-1.5 font-semibold">역할</th>
+                    <th className="px-2.5 py-1.5 font-semibold">고용 상태</th>
+                    <th className="px-2.5 py-1.5 font-semibold">모델</th>
+                    <th className="px-2.5 py-1.5 font-semibold">프로필 버전</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -358,7 +357,7 @@ export default function WorkforceRosterPanel() {
           </>
         ) : null}
 
-        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-t border-outline-variant pt-3 text-xs text-on-surface-variant">
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-t border-outline-variant pt-2 text-[11px] text-on-surface-variant">
           <span>workforce.agent_profiles 기준</span>
           <span>{POLL_MS / 1000}초마다 자동 갱신</span>
         </div>

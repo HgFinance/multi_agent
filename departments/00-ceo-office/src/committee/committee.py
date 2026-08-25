@@ -2,7 +2,7 @@
 """Y2 위원회 — Vote·Quorum·SoD 도메인 계약.
 
 소유: 영주 (CEO Office)
-근거: docs/02-engineering/GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 2.3절
+근거: docs/02-engineering/UNIFIED_DOMAIN_API_SPEC.md 5.4(Governance)
       (open/close_session ✅, submit_vote ✅ — "Quorum과 SoD 판정은 결정론적
       Service가 한다. API는 투표를 기록만 하고 정족수를 임의로 계산해 승인
       처리하지 않는다"),

@@ -4,7 +4,8 @@
 소유: 영주 (Agent Workforce 인사팀)
 근거: docs/02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md F27,
       docs/05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md 3.2, 10.3(비용과 품질),
-      docs/02-engineering/GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 3.4(get_department_scorecard)
+      docs/02-engineering/UNIFIED_DOMAIN_API_SPEC.md 5.4(Workforce),
+      contracts/route-registry.v1.json(GET /workforce/v1/departments/{department_code}/scorecard)
 
 F27은 두 부서가 나눠 맡는다. 이 모듈은 **인사팀 절반**이다.
   플랫폼/인프라 : 토큰 측정, 과금, 성능 저하 차단 (집행)
@@ -66,7 +67,14 @@ class TokenBudget:
 
 @dataclass(frozen=True)
 class CostSnapshot:
-    """workforce.cost_snapshots 한 행. 컬럼과 1:1."""
+    """workforce.cost_snapshots 한 행. 컬럼과 1:1.
+
+    recorded_by 는 DB 컬럼상 not null 이지만 여기서는 선택값이다 - 이 dataclass 가
+    저장된 행과 **계산용으로만 만든 값** 둘 다를 나른다. POST .../scorecard 나
+    POST /budget-assessments 는 호출자가 실어 보낸 수치로 판정만 하고 저장하지
+    않으므로 보고자가 없다(None). 저장 경로(append_cost_snapshot)에서만 값을 요구한다 -
+    그쪽에서 빈 값을 거부한다.
+    """
 
     agent_id: str
     profile_version_id: str
@@ -79,6 +87,7 @@ class CostSnapshot:
     infra_cost: Decimal
     case_count: int
     currency: str = "USD"
+    recorded_by: str | None = None
 
     @property
     def total_tokens(self) -> int:
@@ -91,7 +100,12 @@ class CostSnapshot:
 
 @dataclass(frozen=True)
 class CapacitySnapshot:
-    """workforce.capacity_snapshots 한 행. 지연은 _ms, 재시도·오류는 _rate."""
+    """workforce.capacity_snapshots 한 행. 지연은 _ms, 재시도·오류는 _rate.
+
+    recorded_by 는 CostSnapshot 과 같은 이유로 선택값이다 - 저장된 행과 계산용으로만
+    만든 값 둘 다 이 dataclass 로 나른다. 저장 경로(append_capacity_snapshot)에서만
+    값을 요구한다.
+    """
 
     window_start: datetime
     window_end: datetime
@@ -103,6 +117,7 @@ class CapacitySnapshot:
     utilization: Decimal | None
     department_id: str | None = None
     agent_id: str | None = None
+    recorded_by: str | None = None
 
 
 @dataclass(frozen=True)
@@ -187,7 +202,7 @@ def assess_budget(
 
 
 def _num(value: Decimal | None) -> str | None:
-    """numeric 은 부동소수점 오차를 피하려고 문자열로 직렬화한다 (API 설계서 3.4)."""
+    """numeric 은 부동소수점 오차를 피하려고 문자열로 직렬화한다."""
     return None if value is None else format(value, "f")
 
 
@@ -200,11 +215,20 @@ def build_department_scorecard(
     cost_snapshots: list[CostSnapshot],
     finding_count: int | None = None,
     rework_rate: Decimal | None = None,
+    quality_references: dict | None = None,
 ) -> dict:
-    """GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC 3.4 응답 형태로 조립한다.
+    """get_department_scorecard 응답을 조립한다.
+
+    응답 모양은 원래 GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC 3.4 가 정의했지만, 그 문서가
+    UNIFIED_DOMAIN_API_SPEC 로 통합되면서 개별 응답 모양은 옮겨지지 않았다 - 지금 정본은
+    이 함수와 아래 자체 점검이다.
 
     quality 의 Eval 원본은 QA/감사본부 소유(audit.eval_runs)다. 인사팀은 Reference 만
     싣고 값을 만들지 않는다 — eval_score 는 항상 None 으로 두고 audit-api 가 채운다.
+    그 Reference 를 실제로 싣는 자리가 quality_references 다(quality.py
+    QualityReferences) — eval_run_ids 가 없으면 소비자는 `eval_score: null` 만 보고
+    어느 Eval 을 열어야 할지 알 수 없다. role_kpi 도 여기로 함께 온다(집계하지 않고
+    출처별로 그대로).
     """
     if window_end <= window_start:
         raise ValueError("window_end 는 window_start 이후여야 한다")
@@ -245,6 +269,10 @@ def build_department_scorecard(
             "eval_score": None,  # audit-api 소유. 인사팀이 만들지 않는다.
             "finding_count": finding_count,
             "rework_rate": None if rework_rate is None else float(rework_rate),
+            # 참조는 전달만 한다 - 없으면 빈 목록이지 None 이 아니다(집계 실패가
+            # 아니라 "참조가 없었다"는 관측 사실이라서다). finding_count/rework_rate
+            # 와 마찬가지로 quality.py 타입이 아니라 이미 풀어진 값으로 받는다.
+            **(quality_references or {"eval_run_ids": [], "role_kpi": []}),
         },
     }
 
@@ -311,7 +339,7 @@ if __name__ == "__main__":
     except ValueError:
         pass
 
-    # 7) Scorecard 응답이 API 설계서 3.4 형태와 맞는지.
+    # 7) Scorecard 응답 모양(이 함수가 정본이다 - 위 docstring 참고).
     cap = CapacitySnapshot(
         window_start=t0, window_end=t1, arrivals=120,
         queue_p95_ms=Decimal("45000.0000"), duration_p95_ms=Decimal("300000.0000"),
@@ -327,6 +355,22 @@ if __name__ == "__main__":
     assert isinstance(card["cost"]["input_tokens"], int)
     assert card["cost"]["model_cost"] == "2"
     assert card["quality"]["eval_score"] is None, "Eval 원본은 audit 소유 — 인사팀이 만들지 않는다"
+    # 참조를 안 넘기면 빈 목록이다(None 이 아니다 - "참조가 없었다"는 관측 사실).
+    assert card["quality"]["eval_run_ids"] == [] and card["quality"]["role_kpi"] == []
+
+    # 7-1) 참조를 넘기면 eval_score 가 None 이어도 어느 Eval 을 볼지 알 수 있다.
+    referenced = build_department_scorecard(
+        department_code="03-risk", window_start=t0, window_end=t1,
+        capacity=cap, cost_snapshots=[snap(cost="2", cases=120)], finding_count=2,
+        quality_references={
+            "eval_run_ids": ["eval-1"],
+            "role_kpi": [{"agent_id": "a1", "profile_version_id": "pv1",
+                          "role_kpi": {"citation_coverage": 0.97}}],
+        },
+    )
+    assert referenced["quality"]["eval_score"] is None, "참조를 실어도 값은 여전히 audit 소유"
+    assert referenced["quality"]["eval_run_ids"] == ["eval-1"]
+    assert referenced["quality"]["role_kpi"][0]["role_kpi"]["citation_coverage"] == 0.97
 
     # 8) Snapshot 없으면 0이 아니라 None (불변식 3).
     empty = build_department_scorecard(

@@ -2,7 +2,7 @@
 """HR-02: roster.py의 RosterRepository 계약에 대한 실제 PostgreSQL 구현.
 
 소유: 영주 (Agent Workforce 인사팀)
-근거: docs/02-engineering/GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 3.1절,
+근거: docs/02-engineering/UNIFIED_DOMAIN_API_SPEC.md 5.4(Workforce - Roster·Profile 소유),
       supabase/migrations/20260729000200_governance_workforce.sql
       (workforce.agent_profiles/agent_profile_versions/role_templates/departments/models)
 
@@ -24,16 +24,21 @@ roster.py의 도메인 규칙(불변식 1·2, compute_artifact_hash)은 여기�
 
 자체 점검: python departments/07-agent-workforce/roster/postgres_roster_repository.py
   - DATABASE_URL 없으면 import만 확인한다.
-  - 있으면 실제 workforce.agent_profiles 행(HR-04, CANDIDATE 상태)을 찾아 Profile Version
-    제출 -> Roster 재조회 -> employment_status 전이까지 왕복 검증한 뒤 삽입한 Version 행만
-    정리(delete)한다. agent_profiles.current_version/employment_status는 자체 점검이
-    끝나면 원래 값으로 되돌린다(공유 개발 DB에 흔적을 남기지 않기 위해).
+  - 있으면 실제 workforce.agent_profiles 행을 찾아 Profile Version 제출 -> Roster 재조회
+    까지 왕복 검증한 뒤 삽입한 Version 행만 정리(delete)한다. agent_profiles.current_version은
+    자체 점검이 끝나면 원래 값으로 되돌린다(공유 개발 DB에 흔적을 남기지 않기 위해).
+  - **change_status 는 실 DB 로 부르지 않는다**(2026-08-25). 그 메서드가 이제
+    workforce.lifecycle_events 에 이벤트를 함께 쓰는데 그 표는 append-only 트리거로
+    보호돼 있어 자체 점검 흔적을 지울 수 없다. 그 검증은 roster.py 의 In-Memory 대역과
+    api/app.py 자체 점검이 담당한다.
 """
 from __future__ import annotations
 
+import json
 from functools import lru_cache
 from typing import Any
 
+from lifecycle_event import LifecycleEvent, LifecycleEventType
 from roster import (
     AgentNotFoundError,
     AgentSummary,
@@ -211,15 +216,38 @@ class PostgresRosterRepository(RosterRepository):
         finally:
             self._pool.putconn(conn)
 
-    def change_status(self, agent_id: str, *, to_status: EmploymentStatus, at) -> None:
+    def change_status(
+        self, agent_id: str, *, to_status: EmploymentStatus, at,
+        trace_id: str, reason: str | None = None, approvals: list | None = None,
+    ) -> None:
+        """상태를 바꾸고 **같은 트랜잭션에서** workforce.lifecycle_events 에 남긴다.
+
+        나눠 쓰면 상태는 바뀌었는데 이벤트가 없는 창이 생긴다 - 그게 정확히 이
+        이벤트가 막으려는 감사 공백이다(lifecycle_event.py 불변식 1). 그래서
+        commit 전에 UPDATE 와 INSERT 를 함께 넣는다.
+
+        from_status 는 UPDATE 전에 읽는다(읽고 나서 바꾸면 둘 다 새 값이 된다).
+        """
         conn = self._pool.getconn()
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "select 1 from workforce.agent_profiles where agent_id = %s", (agent_id,),
+                    "select employment_status from workforce.agent_profiles where agent_id = %s",
+                    (agent_id,),
                 )
-                if cur.fetchone() is None:
+                row = cur.fetchone()
+                if row is None:
                     raise AgentNotFoundError(f"agent_id={agent_id}를 찾을 수 없다")
+                from_status = row[0]
+
+                # 계약 검증을 UPDATE 앞에 둔다 - 근거 없는 ACTIVE 이벤트가 거절되면
+                # 상태 변경도 함께 막혀야 한다(이벤트만 실패하고 상태는 바뀌면
+                # 불변식 1이 무너진다).
+                event = LifecycleEvent(
+                    agent_id=agent_id, to_status=to_status.value, trace_id=trace_id,
+                    occurred_at=at, event_type=LifecycleEventType.STATUS_CHANGE,
+                    from_status=from_status, approvals=approvals or [], reason=reason,
+                )
 
                 cur.execute(
                     "update workforce.agent_profiles set employment_status = %s, updated_at = now() "
@@ -233,10 +261,50 @@ class PostgresRosterRepository(RosterRepository):
                         "(select current_version from workforce.agent_profiles where agent_id = %s)",
                         (to_status.value, agent_id, agent_id),
                     )
+                cur.execute(
+                    """
+                    insert into workforce.lifecycle_events (
+                        agent_id, event_type, from_status, to_status,
+                        approvals, reason, trace_id, occurred_at
+                    ) values (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (event.agent_id, event.event_type.value, event.from_status,
+                     event.to_status, json.dumps(event.approvals), event.reason,
+                     event.trace_id, event.occurred_at),
+                )
             conn.commit()
         except Exception:
             conn.rollback()
             raise
+        finally:
+            self._pool.putconn(conn)
+
+    def list_lifecycle_events(self, agent_id: str) -> list[dict]:
+        """이 Agent 의 생명주기 이벤트를 오래된 순으로. 이벤트는 append-only 라
+        조회만 제공한다(수정·삭제 경로를 만들지 않는다)."""
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    select event_id, agent_id, event_type, from_status, to_status,
+                           approvals, reason, trace_id, occurred_at, recorded_at
+                    from workforce.lifecycle_events
+                    where agent_id = %s order by occurred_at, recorded_at
+                    """,
+                    (agent_id,),
+                )
+                rows = cur.fetchall()
+            conn.commit()
+            return [
+                {
+                    "event_id": str(r[0]), "agent_id": str(r[1]), "event_type": r[2],
+                    "from_status": r[3], "to_status": r[4], "approvals": r[5] or [],
+                    "reason": r[6], "trace_id": str(r[7]),
+                    "occurred_at": r[8].isoformat(), "recorded_at": r[9].isoformat(),
+                }
+                for r in rows
+            ]
         finally:
             self._pool.putconn(conn)
 
@@ -379,12 +447,20 @@ if __name__ == "__main__":
                 pass
             print("ok - validate_status_change가 API 계층에서 ACTIVE를 막는 것을 재확인")
 
-            # 6) 실제 employment_status 전이 (SUSPENDED - 증거 불필요) 후 원복.
-            repo.change_status(agent_id, to_status=EmploymentStatus.SUSPENDED, at=datetime.now(timezone.utc))
-            after = repo.get_agent(agent_id)
-            assert after.employment_status == EmploymentStatus.SUSPENDED
-            assert after.current_profile_version.status == ProfileVersionStatus.SUSPENDED
-            print("ok - change_status (실 DB) 통과 - employment_status/profile_version.status 동시 갱신 확인")
+            # 6) change_status 는 여기서 부르지 않는다 (2026-08-25).
+            #
+            # 이제 이 메서드가 workforce.lifecycle_events 에 이벤트를 함께 쓰는데,
+            # 그 표에는 append-only 트리거가 걸려 있어(governance.reject_append_only_change)
+            # 자체 점검이 남긴 행을 **지울 수 없다**. 실측: 정리 블록의 delete 가
+            # 트리거에 걸려 실패하면서 정리 트랜잭션 전체가 롤백돼 employment_status
+            # 원복과 Version 행 삭제까지 같이 날아갔다.
+            #
+            # 감사 표가 append-only 인 것은 옳은 설계다. 그러니 여기서 실 DB 상태를
+            # 바꾸지 않는 쪽을 택한다 - change_status/lifecycle_events 검증은
+            # roster.py 의 In-Memory 대역과 api/app.py 자체 점검(6f/6g)이 담당한다.
+            repo.list_lifecycle_events(agent_id)  # 조회 경로는 SQL 문법까지 확인한다
+            print("ok - list_lifecycle_events 조회 (실 DB) 통과 "
+                  "(상태 전이는 여기서 하지 않는다 - 지울 수 없는 감사 행이 남는다)")
         finally:
             # 정리 - 자체 점검으로 만든 Version 행과 상태 변경을 원복한다.
             conn = repo._pool.getconn()

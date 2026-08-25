@@ -4,7 +4,7 @@
 소유: 영주 (CEO Office)
 근거: supabase/migrations/20260729000200_governance_workforce.sql(governance.escalations —
       severity/status 허용 값이 DDL에 이미 있다),
-      docs/02-engineering/GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 2.2절
+      docs/02-engineering/UNIFIED_DOMAIN_API_SPEC.md 5.4(Governance)
       (`POST /governance/v1/escalations` 제안), 5.3절(`governance.escalation.v1` Event),
       5.1절("risk-api — Trading State/Breach | CEO | Incident·Escalation")
 

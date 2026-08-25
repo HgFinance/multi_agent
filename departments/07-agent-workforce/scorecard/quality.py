@@ -4,7 +4,7 @@
 소유: 영주 (Agent Workforce 인사팀)
 근거: docs/05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md P1-2("Quality Snapshot과 Workforce
       Plan을 실제 데이터에서 집계·저장한다. 빈 집계를 정상 운영 상태로 표시하지 않는다"),
-      GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 3.4/7절
+      UNIFIED_DOMAIN_API_SPEC.md 5.4(Workforce), 9(구현 상태)
       대응 테이블: supabase/migrations/20260731000800_workforce_plan_quality_probation.sql
       (workforce.quality_snapshots)
 
@@ -17,6 +17,8 @@ cost.py와 같은 이유로 여기에 LLM은 없다. eval_score 원본은 QA/감
   2. department_id 또는 agent_id 중 하나는 있어야 한다 (DDL check 와 동일).
   3. Snapshot 이 없으면 0 으로 채우지 않는다 - cost.py 불변식 3 과 동일한 원칙.
      aggregate_quality([]) 는 (None, None) 이다.
+  4. eval_run_id 와 role_kpi 는 **집계하지 않고 출처를 붙여 그대로 싣는다**
+     (collect_quality_references). 이유는 그 함수 docstring 참고.
 
 자체 점검: python departments/07-agent-workforce/scorecard/quality.py
 """
@@ -25,6 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -74,6 +77,82 @@ def aggregate_quality(
     rework_rate = (sum(rated, Decimal(0)) / len(rated)) if rated else None
 
     return finding_count, rework_rate
+
+
+@dataclass(frozen=True)
+class RoleKpiEntry:
+    """역할 KPI 한 묶음과 그 출처.
+
+    KPI 이름은 역할마다 다르다(docs/04-organization/AGENT_EMPLOYEE_PROFILES.md 의
+    각 직원 프로필 `KPI:` 줄). 그래서 어느 Agent/Profile Version 의 값인지 없이
+    dict 만 들고 다니면 "이 숫자가 누구 것인지"를 잃는다.
+    """
+
+    agent_id: str | None
+    profile_version_id: str | None
+    role_kpi: dict
+
+
+@dataclass(frozen=True)
+class QualityReferences:
+    """Scorecard quality 블록에 **집계 없이** 실어 보내는 값.
+
+    eval_run_ids
+        audit.eval_runs 참조. 인사팀은 eval_score 를 복제하지 않고 Reference 만
+        보관한다(테이블 주석) - 그런데 Scorecard 가 이 참조를 안 실으면 소비자는
+        `eval_score: null` 만 보고 **어느 Eval 을 열어봐야 하는지** 알 수 없다.
+        값을 만들지 않는다는 원칙과, 참조를 전달한다는 원칙은 서로 배타적이지 않다.
+
+    role_kpi
+        역할별 KPI. **평균·합산하지 않는다** - 역할마다 KPI 이름이 다르고
+        (AGENT_EMPLOYEE_PROFILES.md), 같은 이름이라도 비율·건수·SLA 가 섞여 있어
+        부서 단위로 합치는 규칙이 어디에도 정의돼 있지 않다. 없는 규칙을 여기서
+        지어내면 숫자는 나오지만 뜻이 없다 - 출처를 붙여 그대로 넘기고, 해석은
+        그 KPI 정의를 아는 쪽(HR-03 성과 평가)이 한다.
+    """
+
+    eval_run_ids: list[str]
+    role_kpi: list[RoleKpiEntry]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "eval_run_ids": list(self.eval_run_ids),
+            "role_kpi": [
+                {
+                    "agent_id": e.agent_id,
+                    "profile_version_id": e.profile_version_id,
+                    "role_kpi": dict(e.role_kpi),
+                }
+                for e in self.role_kpi
+            ],
+        }
+
+
+def collect_quality_references(snapshots: list[QualitySnapshot]) -> QualityReferences:
+    """Snapshot 목록에서 eval_run_id 참조와 역할 KPI 를 출처와 함께 모은다.
+
+    aggregate_quality 와 나누는 이유: 저쪽은 **집계**(합산·평균)이고 이쪽은
+    **전달**이다. 둘을 한 함수에 두면 "이 값은 계산된 것인가 실린 것인가"가
+    호출부에서 흐려진다.
+
+    비어 있는 role_kpi(`{}`)는 싣지 않는다 - DDL 기본값이라 "KPI 를 안 쟀다"와
+    구별되지 않는 빈 칸이고, 그대로 실으면 출처만 있고 내용 없는 항목이 쌓인다.
+    eval_run_id 는 중복을 제거하되 처음 나온 순서를 유지한다(같은 Eval 을 여러
+    Snapshot 이 참조할 수 있다).
+    """
+    eval_run_ids: list[str] = []
+    for s in snapshots:
+        if s.eval_run_id and s.eval_run_id not in eval_run_ids:
+            eval_run_ids.append(s.eval_run_id)
+
+    role_kpi = [
+        RoleKpiEntry(
+            agent_id=s.agent_id, profile_version_id=s.profile_version_id, role_kpi=dict(s.role_kpi),
+        )
+        for s in snapshots
+        if s.role_kpi
+    ]
+    return QualityReferences(eval_run_ids=eval_run_ids, role_kpi=role_kpi)
 
 
 # ---------------------------------------------------------------------------
@@ -140,4 +219,32 @@ if __name__ == "__main__":
     assert finding_count == 2, "값 없는 Snapshot 을 0 으로 채워 합산을 왜곡시키면 안 된다"
     assert rework_rate == Decimal("0.05")
 
-    print("ok - Quality Snapshot 계약 8개 점검 통과")
+    # 9) 참조값 - eval_run_id 는 중복 제거하되 순서 유지, 빈 role_kpi 는 싣지 않는다.
+    kpi_a = QualitySnapshot(
+        window_start=t0, window_end=t1, recorded_by="hr-03", agent_id="a1",
+        profile_version_id="pv1", eval_run_id="eval-1",
+        role_kpi={"citation_coverage": 0.97, "retraction_rate": 0.01},
+    )
+    kpi_b = QualitySnapshot(
+        window_start=t0, window_end=t1, recorded_by="hr-03", agent_id="a2",
+        profile_version_id="pv2", eval_run_id="eval-2",
+        role_kpi={"orphan_task": 0, "sla_compliance": 0.99},
+    )
+    # eval-1 을 다시 참조하고 role_kpi 는 비어 있는 Snapshot.
+    dup = QualitySnapshot(
+        window_start=t0, window_end=t1, recorded_by="hr-03", agent_id="a3", eval_run_id="eval-1",
+    )
+    refs = collect_quality_references([kpi_a, kpi_b, dup])
+    assert refs.eval_run_ids == ["eval-1", "eval-2"], refs.eval_run_ids
+    assert len(refs.role_kpi) == 2, "빈 role_kpi 가 실렸다"
+    assert refs.role_kpi[0].agent_id == "a1"
+    assert refs.role_kpi[0].role_kpi["citation_coverage"] == 0.97
+    # 역할이 다르면 KPI 이름도 다르다 - 합치지 않고 출처별로 남는다.
+    assert refs.role_kpi[1].role_kpi.keys() != refs.role_kpi[0].role_kpi.keys()
+
+    # 10) Snapshot 이 없으면 참조도 빈 목록이다(없는 것을 지어내지 않는다).
+    empty_refs = collect_quality_references([])
+    assert empty_refs.eval_run_ids == [] and empty_refs.role_kpi == []
+    assert empty_refs.as_dict() == {"eval_run_ids": [], "role_kpi": []}
+
+    print("ok - Quality Snapshot 계약 10개 점검 통과")

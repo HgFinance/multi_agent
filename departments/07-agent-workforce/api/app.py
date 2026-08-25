@@ -3,7 +3,8 @@
 scorecard/cost.py를 감싸는 FastAPI 래퍼.
 
 소유: 영주 (Agent Workforce 인사팀)
-근거: docs/02-engineering/GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 3절(workforce-api),
+근거: docs/02-engineering/UNIFIED_DOMAIN_API_SPEC.md 5.4(Governance·Workforce·Reporting),
+      실행 Route 목록은 docs/02-engineering/contracts/route-registry.v1.json 이 정본이다,
       departments/03-risk/api/app.py·departments/06-ai-qa-audit/api/app.py 패턴.
 
 여기엔 새 판정 로직이 없다. access.py의 승인/부여/회수 상태 전이, workflow.py의
@@ -47,7 +48,7 @@ from uuid import uuid4
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # 저장소 루트의 .env를 읽는다 - 이미 설정된 프로세스 환경변수는 덮어쓰지 않는다
 # (override=False 기본값). CEO Office api/app.py와 동일한 이유(2026-08-05) - 이게
@@ -62,7 +63,9 @@ _SCORECARD_DIR = _BASE / "scorecard"
 _ROSTER_DIR = _BASE / "roster"
 _PLANNING_DIR = _BASE / "planning"
 _HIRING_DIR = _BASE / "hiring"
-for _p in (_LIFECYCLE_DIR, _IMPROVEMENTS_DIR, _SCORECARD_DIR, _ROSTER_DIR, _PLANNING_DIR, _HIRING_DIR):
+_PERFORMANCE_DIR = _BASE / "performance"
+for _p in (_LIFECYCLE_DIR, _IMPROVEMENTS_DIR, _SCORECARD_DIR, _ROSTER_DIR, _PLANNING_DIR,
+           _HIRING_DIR, _PERFORMANCE_DIR):
     sys.path.insert(0, str(_p))
 
 from access import (
@@ -104,9 +107,32 @@ from observability import (
     HeadProfilesUnavailable,
     WorkerRegistryUnavailable,
     check_department_capacity,
+    check_department_llm_usage,
     check_idle_agents,
+    check_worker_trigger_rates,
 )
-from quality import QualitySnapshot, aggregate_quality
+from action import (
+    ActionReviewMismatchError,
+    ActionStatus,
+    ActionType,
+    MissingVerificationError,
+    PerformanceAction,
+    open_action,
+)
+from action import IllegalTransition as ActionIllegalTransition
+from action import transition as action_transition
+from probation import (
+    MissingSuccessMetricsError,
+    ProbationAlreadyClosedError,
+    ProbationPeriod,
+    ProbationResult,
+    ProbationStage,
+    close_probation,
+    open_probation,
+)
+from quality import QualitySnapshot, aggregate_quality, collect_quality_references
+from lifecycle_event import MissingActivationApprovalsError, activation_approvals
+from review import MissingRoleMetricsError, PerformanceReview, ReviewDecision
 from roster import (
     AgentNotFoundError,
     AgentSummary,
@@ -127,6 +153,7 @@ from workflow import (
     ImprovementWorkflow,
     InMemoryImprovementRepository,
     MissingEvidenceError,
+    MissingScorecardEvidenceError,
 )
 from workflow import (
     IllegalTransition as CandidateIllegalTransition,
@@ -158,9 +185,19 @@ except ImportError:
     PostgresImprovementRepository = None  # type: ignore[assignment,misc]
 
 try:
-    from postgres_scorecard_repository import PostgresScorecardRepository
+    from postgres_scorecard_repository import (
+        PostgresScorecardRepository,
+        UnknownCapacitySnapshotSubjectError,
+        UnknownCostSnapshotSubjectError,
+    )
 except ImportError:
     PostgresScorecardRepository = None  # type: ignore[assignment,misc]
+
+    class UnknownCostSnapshotSubjectError(RuntimeError):  # type: ignore[no-redef]
+        """psycopg2 미설치 대체 - 이 경로에서는 애초에 기록이 501 로 막힌다."""
+
+    class UnknownCapacitySnapshotSubjectError(RuntimeError):  # type: ignore[no-redef]
+        """psycopg2 미설치 대체 - 이 경로에서는 애초에 기록이 501 로 막힌다."""
 
 try:
     from postgres_roster_repository import PostgresRosterRepository
@@ -185,6 +222,21 @@ try:
     from postgres_hiring_repository import PostgresHiringRequestRepository
 except ImportError:
     PostgresHiringRequestRepository = None  # type: ignore[assignment,misc]
+
+try:
+    from postgres_performance_repository import (
+        OverlappingProbationError,
+        PostgresPerformanceRepository,
+        UnknownPerformanceSubjectError,
+    )
+except ImportError:
+    PostgresPerformanceRepository = None  # type: ignore[assignment,misc]
+
+    class UnknownPerformanceSubjectError(RuntimeError):  # type: ignore[no-redef]
+        """psycopg2 미설치 대체 - 이 경로에서는 애초에 기록이 501 로 막힌다."""
+
+    class OverlappingProbationError(RuntimeError):  # type: ignore[no-redef]
+        """psycopg2 미설치 대체 - 이 경로에서는 애초에 기록이 501 로 막힌다."""
 
 _WORKFORCE_EVENTS_DIR = _BASE / "workforce_events"
 
@@ -300,6 +352,79 @@ class CostSnapshotIn(BaseModel):
     currency: str = "USD"
 
 
+class CostSnapshotRecordIn(BaseModel):
+    """POST /workforce/v1/agents/{agent_id}/cost-snapshots Request.
+
+    CostSnapshotIn(계산 전용, 저장 안 함)과 두 군데가 다르다 - agent_id 는 경로에서
+    받고(본문과 경로가 어긋날 여지를 없앤다), recorded_by 를 필수로 받는다. 인사팀은
+    이 수치를 만들지 않고 플랫폼 과금 계측의 보고를 받아 적을 뿐이라, 보고자 없이
+    적힌 행은 인사팀이 지어낸 것과 구별되지 않는다.
+
+    기본값 0 을 두지 않는다 - CostSnapshotIn 쪽 0 기본값은 "그 항목을 안 실었다"는
+    뜻으로 쓸 수 있지만, 저장되는 행에서 0 은 "그만큼 안 썼다"는 관측 사실로 읽힌다
+    (cost.py 불변식 3). 안 재는 항목이 있으면 그걸 0 으로 적지 말고 보고를 미뤄야 한다.
+    """
+
+    profile_version_id: str = Field(min_length=1)
+    window_start: datetime
+    window_end: datetime
+    recorded_by: str = Field(min_length=1)
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    model_cost: str
+    tool_cost: str
+    infra_cost: str
+    case_count: int = Field(ge=0)
+    currency: str = "USD"
+
+    @model_validator(mode="after")
+    def _window_is_forward(self) -> "CostSnapshotRecordIn":
+        """역전된 창은 DB 유무와 무관하게 422 로 막는다.
+
+        append_cost_snapshot 도 같은 것을 검사하지만, DATABASE_URL 이 없으면 그 전에
+        501 이 나서 검사에 도달하지 못한다 - "DB 안 붙었다"가 "본문이 틀렸다"를 가려서
+        호출자가 자기 본문의 결함을 못 본다. 두 레이어가 각자 지킨다
+        (improvements/observation.py::CandidateScorecard 와 같은 패턴).
+        """
+        if self.window_end <= self.window_start:
+            raise ValueError("window_end 는 window_start 이후여야 한다")
+        return self
+
+
+class CapacitySnapshotRecordIn(BaseModel):
+    """POST /workforce/v1/capacity-snapshots Request.
+
+    CostSnapshotRecordIn과 달리 agent_id를 경로에서 받지 않는다 - capacity는
+    department_id/agent_id 중 하나만 있어도 되므로(DDL check) 경로 하나로 두 종류
+    보고를 모두 표현할 수 없다. CapacitySnapshotIn(계산 전용, 저장 안 함)과는
+    recorded_by 필수, arrivals 기본값 없음이 다르다 - cost와 같은 이유
+    (CostSnapshotRecordIn 참고).
+    """
+
+    department_id: str | None = None
+    agent_id: str | None = None
+    window_start: datetime
+    window_end: datetime
+    recorded_by: str = Field(min_length=1)
+    arrivals: int = Field(ge=0)
+    queue_p95_ms: str | None = None
+    duration_p95_ms: str | None = None
+    retry_rate: str | None = None
+    error_rate: str | None = None
+    utilization: str | None = None
+
+    @model_validator(mode="after")
+    def _window_is_forward_and_subject_present(self) -> "CapacitySnapshotRecordIn":
+        """CostSnapshotRecordIn._window_is_forward와 같은 이유 - DB 유무와 무관하게
+        먼저 막는다. department_id/agent_id 둘 다 없는 것도 여기서 같이 막는다 -
+        DDL check까지 안 가고 422로 끝나야 "DB 안 붙었다"가 본문 결함을 가리지 않는다."""
+        if self.window_end <= self.window_start:
+            raise ValueError("window_end 는 window_start 이후여야 한다")
+        if self.department_id is None and self.agent_id is None:
+            raise ValueError("department_id/agent_id 중 하나는 있어야 한다")
+        return self
+
+
 class QualitySnapshotIn(BaseModel):
     window_start: datetime
     window_end: datetime
@@ -310,6 +435,95 @@ class QualitySnapshotIn(BaseModel):
     finding_count: int | None = Field(default=None, ge=0)
     rework_rate: str | None = None
     role_kpi: dict = {}
+
+
+class PerformanceReviewIn(BaseModel):
+    """POST /workforce/v1/agents/{agent_id}/performance-reviews Request.
+
+    agent_id 는 경로에서 받는다(본문과 경로가 어긋날 여지를 없앤다). role_metrics 에
+    기본값을 두지 않는 이유는 review.py 불변식 2와 같다 - 조치를 제안하는 평가는
+    근거 없이 만들 수 없고, 빈 dict 를 기본값으로 두면 그 게이트가 조용히 통과된다.
+    """
+
+    profile_version_id: str = Field(min_length=1)
+    period_start: datetime
+    period_end: datetime
+    reviewer: str = Field(min_length=1)
+    decision: ReviewDecision
+    role_metrics: dict
+    cost: dict = {}
+    findings: list = []
+
+    @model_validator(mode="after")
+    def _period_is_forward_and_action_has_basis(self) -> "PerformanceReviewIn":
+        """CostSnapshotRecordIn._window_is_forward 와 같은 이유 - DB 유무와 무관하게
+        본문 결함을 먼저 422 로 돌려준다.
+
+        role_metrics 게이트(review.py 불변식 2)도 여기서 같이 지킨다. PerformanceReview
+        가 다시 검사하지만, 저장소가 없으면 그 전에 501 이 나서 검사에 도달하지 못한다 -
+        "DB 안 붙었다"가 "근거 없이 비활성화를 제안했다"를 가리면 안 된다.
+        """
+        if self.period_end <= self.period_start:
+            raise ValueError("period_end 는 period_start 이후여야 한다")
+        if self.decision != ReviewDecision.CONTINUE and not self.role_metrics:
+            raise ValueError(
+                f"{self.decision.value} 제안에는 역할 KPI(role_metrics)가 필요하다"
+            )
+        return self
+
+
+class PerformanceActionIn(BaseModel):
+    """POST /workforce/v1/agents/{agent_id}/performance-actions Request."""
+
+    action_type: ActionType
+    due_at: datetime
+    plan: dict
+    review_id: str | None = None
+
+    @model_validator(mode="after")
+    def _plan_is_present(self) -> "PerformanceActionIn":
+        """action.py 불변식 2를 요청 계층에서도 지킨다 - 저장소가 없을 때 501 이
+        "계획 없는 조치"를 가리지 않도록(PerformanceReviewIn 과 같은 이유)."""
+        if not self.plan:
+            raise ValueError("plan 이 비어 있으면 조치를 만들 수 없다 - 무엇을 할지가 조치다")
+        return self
+
+
+class PerformanceActionTransitionIn(BaseModel):
+    to_status: ActionStatus
+    at: datetime
+    verification: dict | None = None
+
+
+class ProbationOpenIn(BaseModel):
+    """POST /workforce/v1/agents/{agent_id}/probations Request.
+
+    success_metrics 에 기본값을 두지 않는다 - probation.py 불변식 1(Pass/Fail 기준은
+    관찰 전에 고정)이 기본값 `{}` 하나로 조용히 통과되면 안 된다.
+    """
+
+    profile_version_id: str = Field(min_length=1)
+    stage: ProbationStage
+    started_at: datetime
+    success_metrics: dict
+
+    @model_validator(mode="after")
+    def _has_success_metrics(self) -> "ProbationOpenIn":
+        """저장소가 없을 때 501 이 "기준 없이 수습을 열었다"를 가리지 않도록
+        요청 계층에서도 지킨다(PerformanceReviewIn 과 같은 이유)."""
+        if not self.success_metrics:
+            raise ValueError(
+                "success_metrics 없이 수습을 열 수 없다 - Pass/Fail 기준은 관찰 전에 고정한다"
+            )
+        return self
+
+
+class ProbationCloseIn(BaseModel):
+    """수습 판정. success_metrics 를 받지 않는다 - 기준은 판정 시점에 바뀌지 않는다
+    (probation.py 불변식 2). 받을 자리를 두면 그 불변식이 호출자 선의에 맡겨진다."""
+
+    result: ProbationResult
+    at: datetime
 
 
 class WorkforcePlanIn(BaseModel):
@@ -350,7 +564,7 @@ class ScorecardRequest(BaseModel):
 class ProfileVersionSubmissionIn(BaseModel):
     """POST /workforce/v1/agents/{agent_id}/profile-versions Request.
 
-    agent_profile_versions 컬럼과 1:1 (GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 3.1).
+    agent_profile_versions 컬럼과 1:1 (UNIFIED_DOMAIN_API_SPEC.md 5.4).
     """
 
     model_id: str
@@ -381,6 +595,10 @@ class StatusChangeRequestIn(BaseModel):
     idempotency_key: str
     qa_eval_run_id: str | None = None
     ceo_approval_id: str | None = None
+    # workforce.lifecycle_events.trace_id 가 not null 이라 호출자가 줘야 한다.
+    # 없을 때 여기서 만들어 채우지 않는다 - 지어낸 trace_id 는 아무것과도 이어지지
+    # 않으면서 상관관계가 있는 것처럼 보인다(lifecycle_event.py 참고).
+    trace_id: str = Field(min_length=1)
 
 
 class BudgetAssessmentRequest(BaseModel):
@@ -671,6 +889,14 @@ if os.environ.get("DATABASE_URL") and PostgresPlanApprovalEvidenceRepository is 
 else:
     _plan_evidence_repo = InMemoryPlanApprovalEvidenceRepository()
 
+# 성과 평가·조치는 In-Memory 대체를 두지 않는다. 역할 축소·비활성화 제안과 그 이행
+# 기록은 잃어버리면 안 되는 감사 기록이라, 저장소가 없으면 빈 성공 대신 501 로 막는다
+# (Scorecard/Roster 와 같은 처리).
+if os.environ.get("DATABASE_URL") and PostgresPerformanceRepository is not None:
+    _performance_repo = PostgresPerformanceRepository.connect(os.environ["DATABASE_URL"])
+else:
+    _performance_repo = None
+
 
 def _resolve_department_id(department_code: str) -> str:
     """department_code -> department_id. 실 DB가 있으면 workforce.departments를
@@ -694,7 +920,10 @@ for _exc_type in (
     AccessSelfApprovalError, MissingProvisioningError, MissingRevocationEvidenceError,
     IllegalTransition, CandidateSelfApprovalError, MissingEvidenceError, CandidateIllegalTransition,
     MissingActivationEvidenceError, UnverifiedActivationEvidenceError, ToolAllowlistMissingError,
-    PlanIllegalTransition, UnverifiedPlanApprovalError,
+    PlanIllegalTransition, UnverifiedPlanApprovalError, MissingScorecardEvidenceError,
+    ActionIllegalTransition, MissingVerificationError, ActionReviewMismatchError,
+    ProbationAlreadyClosedError, OverlappingProbationError,
+    MissingActivationApprovalsError,
 ):
     @app.exception_handler(_exc_type)
     def _on_domain_error(request, exc, _status={  # noqa: B006 - 클로저 캡처용 기본값 트릭
@@ -709,10 +938,69 @@ for _exc_type in (
         # P1-2 - Workforce Plan도 같은 원칙: 위조/미실재 승인은 403, 허용 안 된 상태
         # 전이는 409.
         PlanIllegalTransition: 409, UnverifiedPlanApprovalError: 403,
+        # 근거 없는 KEPT/ROLLED_BACK 은 MissingEvidenceError(승인 근거 없음)와 같은
+        # 종류의 결함이라 같은 409다.
+        MissingScorecardEvidenceError: 409,
+        # 성과 조치도 같은 원칙: 허용 안 된 전이·근거 없는 종료는 409, 평가와 어긋난
+        # 조치는 "칸은 채웠지만 실재와 다르다"라 403(UnverifiedActivationEvidenceError
+        # 와 같은 방향).
+        ActionIllegalTransition: 409, MissingVerificationError: 409,
+        ActionReviewMismatchError: 403,
+        # 수습도 같은 원칙 - 이미 종료됐거나 이미 열려 있는 것은 상태 충돌이라 409.
+        ProbationAlreadyClosedError: 409, OverlappingProbationError: 409,
+        # 근거 없는 ACTIVE 전이 이벤트는 MissingActivationEvidenceError 와 같은
+        # 종류의 결함이라 같은 409.
+        MissingActivationApprovalsError: 409,
     }):
         return JSONResponse(status_code=_status[type(exc)], content={
             "error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None,
         })
+
+
+@app.exception_handler(UnknownCostSnapshotSubjectError)
+def _on_unknown_cost_subject(request, exc: UnknownCostSnapshotSubjectError):
+    """등록되지 않은 agent/profile version 으로 온 비용 보고는 404다.
+
+    다른 기록 실패(연결 끊김 등)와 달리 재시도해도 낫지 않는 호출자 오류라
+    500 으로 뭉뚱그리지 않는다 - 플랫폼이 재시도 루프에 갇히면 그 창의 비용이
+    영영 안 들어오고, 그 결과는 "비용 0"이 아니라 "Snapshot 없음"으로 남는다.
+    """
+    return JSONResponse(status_code=404, content={
+        "error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+@app.exception_handler(UnknownCapacitySnapshotSubjectError)
+def _on_unknown_capacity_subject(request, exc: UnknownCapacitySnapshotSubjectError):
+    """UnknownCostSnapshotSubjectError와 같은 이유 - 등록되지 않은 department/agent로
+    온 용량 보고는 재시도해도 낫지 않는 호출자 오류라 404다."""
+    return JSONResponse(status_code=404, content={
+        "error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+@app.exception_handler(UnknownPerformanceSubjectError)
+def _on_unknown_performance_subject(request, exc: UnknownPerformanceSubjectError):
+    """UnknownCostSnapshotSubjectError 와 같은 이유 - 재시도해도 낫지 않는 호출자 오류."""
+    return JSONResponse(status_code=404, content={
+        "error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+@app.exception_handler(MissingRoleMetricsError)
+def _on_missing_role_metrics(request, exc: MissingRoleMetricsError):
+    """근거 없이 역할 축소·비활성화를 제안하려 함 (review.py 불변식 2). 본문 결함이라 422."""
+    return JSONResponse(status_code=422, content={
+        "error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+@app.exception_handler(MissingSuccessMetricsError)
+def _on_missing_success_metrics(request, exc: MissingSuccessMetricsError):
+    """종료 조건 없이 수습을 열려 함 (probation.py 불변식 1). 본문 결함이라 422."""
+    return JSONResponse(status_code=422, content={
+        "error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None,
+    })
 
 
 @app.exception_handler(AgentNotFoundError)
@@ -945,8 +1233,24 @@ def change_agent_status(agent_id: str, body: StatusChangeRequestIn):
             eval_run_status=eval_run_status, approval_decision=ceo_approval_decision,
             tool_allowlist=tool_allowlist,
         )
-    _roster_repo.change_status(agent_id, to_status=body.to_status, at=datetime.now(timezone.utc))
+    # 상태 변경과 생명주기 이벤트는 저장소가 한 트랜잭션에서 처리한다 - 여기서
+    # 나눠 부르면 상태는 바뀌었는데 이벤트가 없는 창이 생긴다.
+    _roster_repo.change_status(
+        agent_id, to_status=body.to_status, at=datetime.now(timezone.utc),
+        trace_id=body.trace_id, reason=body.reason,
+        approvals=activation_approvals(
+            qa_eval_run_id=body.qa_eval_run_id, ceo_approval_id=body.ceo_approval_id,
+        ),
+    )
     return _agent_summary_dict(_roster_repo.get_agent(agent_id))
+
+
+@app.get("/workforce/v1/agents/{agent_id}/lifecycle-events")
+def list_agent_lifecycle_events(agent_id: str):
+    """이 Agent 의 상태 전이 이력. "승인 없는 활성화 0"(HR-04 KPI)을 현재 상태가
+    아니라 이벤트로 확인할 수 있게 하는 조회다."""
+    _require_roster_repo()
+    return {"lifecycle_events": _roster_repo.list_lifecycle_events(agent_id)}
 
 
 # --- 3.3 Improvement Candidate (F19) ----------------------------------------------
@@ -986,8 +1290,14 @@ def transition_improvement(candidate_id: str, body: TransitionRequestIn):
     if body.approver is not None:
         approval = Approval(approver=body.approver, qa_eval_run_id=body.qa_eval_run_id or "",
                              reason=body.reason)
+    # KEPT/ROLLED_BACK 은 관찰 중 기록된 Scorecard 를 근거로 요구한다 - 저장된 것을
+    # 여기서 읽어 넘긴다(호출자가 본문으로 실어 보내면 근거를 지어낼 수 있다).
+    scorecards = None
+    if body.to_status in {CandidateStatus.KEPT, CandidateStatus.ROLLED_BACK}:
+        scorecards = _improvement_repo.scorecards_for(candidate_id)
     updated = _workflow.transition(
-        candidate, body.to_status, actor=body.actor, reason=body.reason, at=body.at, approval=approval,
+        candidate, body.to_status, actor=body.actor, reason=body.reason, at=body.at,
+        approval=approval, scorecards=scorecards,
     )
     _improvement_repo.save_candidate(updated)
     return updated.model_dump(mode="json")
@@ -1020,6 +1330,171 @@ def get_improvement_scorecards(candidate_id: str):
     if _improvement_repo.get_candidate(candidate_id) is None:
         raise HTTPException(status_code=404, detail=f"improvement {candidate_id} 없음")
     return {"scorecards": [s.model_dump(mode="json") for s in _improvement_repo.scorecards_for(candidate_id)]}
+
+
+# --- 3.3b Performance Review / Action (HR-03) ---------------------------------------
+#
+# quality_snapshots 의 role_kpi 는 집계되지 않고 출처만 붙어 Scorecard 로 나간다
+# (collect_quality_references) - 그 값을 해석해 평가로 만드는 쪽이 HR-03 이고, 그
+# 결과가 여기 role_metrics 다.
+#
+# 이 두 엔드포인트는 **제안까지만** 한다. decision=DEACTIVATION 이나 DEACTIVATION
+# 조치가 VERIFIED 가 돼도 Agent 의 employment status 는 바뀌지 않는다 - 실제 비활성화는
+# CEO 승인과 roster 전이 게이트(P0-3)를 따로 거친다.
+
+
+def _review_dict(r: PerformanceReview) -> dict:
+    return {
+        "review_id": r.review_id, "agent_id": r.agent_id,
+        "profile_version_id": r.profile_version_id,
+        "period_start": r.period_start.isoformat(), "period_end": r.period_end.isoformat(),
+        "decision": r.decision.value, "reviewer": r.reviewer,
+        "role_metrics": r.role_metrics, "cost": r.cost, "findings": r.findings,
+        "proposes_action": r.proposes_action,
+    }
+
+
+def _action_dict(a: PerformanceAction) -> dict:
+    return {
+        "action_id": a.action_id, "agent_id": a.agent_id, "review_id": a.review_id,
+        "action_type": a.action_type.value, "plan": a.plan,
+        "due_at": a.due_at.isoformat(), "verification": a.verification,
+        "status": a.status.value,
+        "completed_at": a.completed_at.isoformat() if a.completed_at else None,
+    }
+
+
+@app.post("/workforce/v1/agents/{agent_id}/performance-reviews")
+def record_performance_review(agent_id: str, body: PerformanceReviewIn):
+    """HR-03 성과 평가 1건을 기록한다. 같은 기간 재평가는 갱신이다."""
+    if _performance_repo is None:
+        raise HTTPException(status_code=501, detail="DATABASE_URL 미설정 - 성과 평가 기록 불가")
+    review = PerformanceReview(
+        review_id="", agent_id=agent_id, profile_version_id=body.profile_version_id,
+        period_start=body.period_start, period_end=body.period_end,
+        decision=body.decision, reviewer=body.reviewer,
+        role_metrics=body.role_metrics, cost=body.cost, findings=body.findings,
+    )
+    review_id, created = _performance_repo.save_review(review)
+    stored = PerformanceReview(**{**review.__dict__, "review_id": review_id})
+    return {**_review_dict(stored), "created": created}
+
+
+@app.get("/workforce/v1/agents/{agent_id}/performance-reviews")
+def list_performance_reviews(agent_id: str):
+    if _performance_repo is None:
+        raise HTTPException(status_code=501, detail="DATABASE_URL 미설정 - 성과 평가 조회 불가")
+    return {"reviews": [_review_dict(r) for r in _performance_repo.list_reviews_by_agent(agent_id)]}
+
+
+@app.post("/workforce/v1/agents/{agent_id}/performance-actions")
+def record_performance_action(agent_id: str, body: PerformanceActionIn):
+    """성과 조치를 등록한다(OPEN).
+
+    review_id 를 붙이면 그 평가의 decision 을 **저장소에서 읽어** 조치 종류와 대조한다
+    (action.py 불변식 4) - 호출자가 본문으로 decision 을 실어 보내면 근거를 지어낼 수
+    있어서, improvements 의 Scorecard 게이트와 같은 방식으로 저장된 값을 쓴다.
+    """
+    if _performance_repo is None:
+        raise HTTPException(status_code=501, detail="DATABASE_URL 미설정 - 성과 조치 기록 불가")
+    review_decision: str | None = None
+    if body.review_id is not None:
+        review = _performance_repo.get_review(body.review_id)
+        if review is None:
+            raise HTTPException(status_code=404, detail=f"review {body.review_id} 없음")
+        if review.agent_id != agent_id:
+            # 다른 Agent 의 평가를 근거로 조치를 붙이는 것을 막는다.
+            raise HTTPException(
+                status_code=403, detail="이 평가는 다른 Agent 의 것이라 근거가 될 수 없다",
+            )
+        review_decision = review.decision.value
+    action = open_action(
+        action_id=str(uuid4()), agent_id=agent_id, action_type=body.action_type,
+        due_at=body.due_at, plan=body.plan,
+        review_id=body.review_id, review_decision=review_decision,
+    )
+    _performance_repo.save_action(action)
+    return _action_dict(action)
+
+
+@app.post("/workforce/v1/performance-actions/{action_id}/transitions")
+def transition_performance_action(action_id: str, body: PerformanceActionTransitionIn):
+    if _performance_repo is None:
+        raise HTTPException(status_code=501, detail="DATABASE_URL 미설정 - 성과 조치 전이 불가")
+    action = _performance_repo.get_action(action_id)
+    if action is None:
+        raise HTTPException(status_code=404, detail=f"action {action_id} 없음")
+    updated = action_transition(
+        action, body.to_status, at=body.at, verification=body.verification,
+    )
+    _performance_repo.save_action(updated)
+    return _action_dict(updated)
+
+
+@app.get("/workforce/v1/agents/{agent_id}/performance-actions")
+def list_performance_actions(agent_id: str, status: ActionStatus | None = None):
+    if _performance_repo is None:
+        raise HTTPException(status_code=501, detail="DATABASE_URL 미설정 - 성과 조치 조회 불가")
+    actions = _performance_repo.list_actions_by_agent(agent_id, status=status)
+    return {"actions": [_action_dict(a) for a in actions]}
+
+
+def _probation_dict(p: ProbationPeriod) -> dict:
+    return {
+        "probation_id": p.probation_id, "agent_id": p.agent_id,
+        "profile_version_id": p.profile_version_id, "stage": p.stage.value,
+        "started_at": p.started_at.isoformat(),
+        "ended_at": p.ended_at.isoformat() if p.ended_at else None,
+        "success_metrics": p.success_metrics,
+        "result": p.result.value if p.result else None,
+        "is_closed": p.is_closed,
+    }
+
+
+@app.post("/workforce/v1/agents/{agent_id}/probations")
+def open_agent_probation(agent_id: str, body: ProbationOpenIn):
+    """수습을 연다(HR-00: "활성화 후 수습 기간의 KPI와 종료 조건을 추적한다").
+
+    같은 Agent 에 열린 수습이 이미 있으면 409 다 - 기준이 둘이면 어느 쪽으로 판정할지
+    정해지지 않는다.
+    """
+    if _performance_repo is None:
+        raise HTTPException(status_code=501, detail="DATABASE_URL 미설정 - 수습 기록 불가")
+    probation = open_probation(
+        probation_id=str(uuid4()), agent_id=agent_id,
+        profile_version_id=body.profile_version_id, stage=body.stage,
+        started_at=body.started_at, success_metrics=body.success_metrics,
+    )
+    _performance_repo.open_probation(probation)
+    return _probation_dict(probation)
+
+
+@app.post("/workforce/v1/probations/{probation_id}/close")
+def close_agent_probation(probation_id: str, body: ProbationCloseIn):
+    """수습을 판정하고 닫는다. 기준(success_metrics)은 여기서 바뀌지 않는다.
+
+    PASSED 여도 Agent 가 ACTIVE 가 되지 않는다 - roster 전이는 QA Eval 실재성과 CEO
+    승인 게이트(P0-3)를 따로 거친다.
+    """
+    if _performance_repo is None:
+        raise HTTPException(status_code=501, detail="DATABASE_URL 미설정 - 수습 판정 불가")
+    probation = _performance_repo.get_probation(probation_id)
+    if probation is None:
+        raise HTTPException(status_code=404, detail=f"probation {probation_id} 없음")
+    closed = close_probation(probation, result=body.result, at=body.at)
+    _performance_repo.close_probation(closed)
+    return _probation_dict(closed)
+
+
+@app.get("/workforce/v1/agents/{agent_id}/probations")
+def list_agent_probations(agent_id: str):
+    if _performance_repo is None:
+        raise HTTPException(status_code=501, detail="DATABASE_URL 미설정 - 수습 조회 불가")
+    return {
+        "probations": [
+            _probation_dict(p) for p in _performance_repo.list_probations_by_agent(agent_id)
+        ]
+    }
 
 
 # --- 3.4 Scorecard / Budget ----------------------------------------------------------
@@ -1093,7 +1568,135 @@ def get_department_scorecard_real(department_code: str, window_start: datetime, 
         department_code=department_code, window_start=window_start, window_end=window_end,
         capacity=capacity, cost_snapshots=cost_snapshots,
         finding_count=finding_count, rework_rate=rework_rate,
+        quality_references=collect_quality_references(quality_snapshots).as_dict(),
     )
+
+
+def _cost_snapshot_dict(s: CostSnapshot) -> dict:
+    return {
+        "agent_id": s.agent_id, "profile_version_id": s.profile_version_id,
+        "window_start": s.window_start.isoformat(), "window_end": s.window_end.isoformat(),
+        "input_tokens": s.input_tokens, "output_tokens": s.output_tokens,
+        "model_cost": str(s.model_cost), "tool_cost": str(s.tool_cost),
+        "infra_cost": str(s.infra_cost), "case_count": s.case_count,
+        "currency": s.currency, "recorded_by": s.recorded_by,
+    }
+
+
+@app.post("/workforce/v1/agents/{agent_id}/cost-snapshots")
+def record_cost_snapshot(agent_id: str, body: CostSnapshotRecordIn):
+    """플랫폼 과금 계측이 보고한 비용 1건을 기록한다.
+
+    이 엔드포인트가 생기기 전까지 workforce.cost_snapshots 에는 writer 가 없었고
+    (자체 점검용 INSERT 뿐이었다), 그래서 GET .../scorecard 의 cost 블록과
+    budget-assessment 는 항상 "Snapshot 없음"으로 떨어졌다 - reader 만 있는 지표였다.
+
+    수치는 여기서 만들지 않는다(F27 담당 분리: 토큰 측정·과금은 플랫폼 소유).
+    같은 창을 다시 보고하면 행이 늘지 않고 갱신된다 - reader 가 창 안의 행을
+    합산하므로 중복 행은 곧 사용량 2배다(append_cost_snapshot 참고).
+    """
+    if _scorecard_repo is None:
+        raise HTTPException(
+            status_code=501,
+            detail="DATABASE_URL 미설정 - Cost Snapshot 기록 불가",
+        )
+    snapshot = CostSnapshot(
+        agent_id=agent_id, profile_version_id=body.profile_version_id,
+        window_start=body.window_start, window_end=body.window_end,
+        input_tokens=body.input_tokens, output_tokens=body.output_tokens,
+        model_cost=Decimal(body.model_cost), tool_cost=Decimal(body.tool_cost),
+        infra_cost=Decimal(body.infra_cost), case_count=body.case_count,
+        currency=body.currency, recorded_by=body.recorded_by,
+    )
+    _snapshot_id, created = _scorecard_repo.append_cost_snapshot(snapshot)
+    # created=False 는 같은 창 재보고(갱신)다. 조용히 숨기면 호출자가 자기 보고가
+    # 처음인지 덮어쓴 것인지 알 수 없다 - 중복 보고 버그가 그대로 묻힌다.
+    return {**_cost_snapshot_dict(snapshot), "created": created}
+
+
+@app.get("/workforce/v1/agents/{agent_id}/cost-snapshots")
+def list_cost_snapshots(agent_id: str, window_start: datetime, window_end: datetime):
+    if _scorecard_repo is None:
+        raise HTTPException(
+            status_code=501,
+            detail="DATABASE_URL 미설정 - Cost Snapshot 조회 불가",
+        )
+    if window_end <= window_start:
+        raise HTTPException(status_code=400, detail="window_end는 window_start 이후여야 한다")
+    snapshots = _scorecard_repo.list_cost_snapshots_by_agent(
+        agent_id, window_start=window_start, window_end=window_end,
+    )
+    return {"cost_snapshots": [_cost_snapshot_dict(s) for s in snapshots]}
+
+
+def _capacity_snapshot_dict(s: CapacitySnapshot) -> dict:
+    return {
+        "department_id": s.department_id, "agent_id": s.agent_id,
+        "window_start": s.window_start.isoformat(), "window_end": s.window_end.isoformat(),
+        "arrivals": s.arrivals,
+        "queue_p95_ms": str(s.queue_p95_ms) if s.queue_p95_ms is not None else None,
+        "duration_p95_ms": str(s.duration_p95_ms) if s.duration_p95_ms is not None else None,
+        "retry_rate": str(s.retry_rate) if s.retry_rate is not None else None,
+        "error_rate": str(s.error_rate) if s.error_rate is not None else None,
+        "utilization": str(s.utilization) if s.utilization is not None else None,
+        "recorded_by": s.recorded_by,
+    }
+
+
+@app.post("/workforce/v1/capacity-snapshots")
+def record_capacity_snapshot(body: CapacitySnapshotRecordIn):
+    """플랫폼 관측이 보고한 용량 계측 1건을 기록한다.
+
+    record_cost_snapshot과 같은 이유 - 이 엔드포인트가 생기기 전까지
+    workforce.capacity_snapshots 에는 writer 가 없었고, GET .../departments/capacity
+    는 Langfuse 실행 이벤트를 직접 집계해 그 자리를 메웠다(2026-08-24). 그 우회 경로는
+    그대로 둔다 - 여기서는 DB Snapshot 이라는 두 번째 경로를 추가할 뿐이다.
+
+    같은 창을 다시 보고하면 행이 늘지 않고 갱신된다 - get_capacity_snapshot 이 창
+    안에서 가장 늦은 행 1개를 고르므로, 중복 행은 재보고 이력만 무한히 늘린다
+    (append_capacity_snapshot 참고).
+    """
+    if _scorecard_repo is None:
+        raise HTTPException(
+            status_code=501,
+            detail="DATABASE_URL 미설정 - Capacity Snapshot 기록 불가",
+        )
+    snapshot = CapacitySnapshot(
+        department_id=body.department_id, agent_id=body.agent_id,
+        window_start=body.window_start, window_end=body.window_end, arrivals=body.arrivals,
+        queue_p95_ms=Decimal(body.queue_p95_ms) if body.queue_p95_ms is not None else None,
+        duration_p95_ms=Decimal(body.duration_p95_ms) if body.duration_p95_ms is not None else None,
+        retry_rate=Decimal(body.retry_rate) if body.retry_rate is not None else None,
+        error_rate=Decimal(body.error_rate) if body.error_rate is not None else None,
+        utilization=Decimal(body.utilization) if body.utilization is not None else None,
+        recorded_by=body.recorded_by,
+    )
+    _snapshot_id, created = _scorecard_repo.append_capacity_snapshot(snapshot)
+    return {**_capacity_snapshot_dict(snapshot), "created": created}
+
+
+@app.get("/workforce/v1/capacity-snapshots")
+def get_capacity_snapshot_endpoint(
+    window_start: datetime, window_end: datetime,
+    department_id: str | None = None, agent_id: str | None = None,
+):
+    # 쿼리 자체의 결함(역전 window, subject 없음)은 DB 유무와 무관하게 먼저 걸러야
+    # "DB 안 붙었다"(501)가 "질의가 틀렸다"(400)를 가리지 않는다
+    # (CostSnapshotRecordIn._window_is_forward와 같은 이유).
+    if window_end <= window_start:
+        raise HTTPException(status_code=400, detail="window_end는 window_start 이후여야 한다")
+    if department_id is None and agent_id is None:
+        raise HTTPException(status_code=400, detail="department_id/agent_id 중 하나는 있어야 한다")
+    if _scorecard_repo is None:
+        raise HTTPException(
+            status_code=501,
+            detail="DATABASE_URL 미설정 - Capacity Snapshot 조회 불가",
+        )
+    snapshot = _scorecard_repo.get_capacity_snapshot(
+        department_id=department_id, agent_id=agent_id,
+        window_start=window_start, window_end=window_end,
+    )
+    return {"capacity_snapshot": None if snapshot is None else _capacity_snapshot_dict(snapshot)}
 
 
 def _quality_snapshot_dict(s: QualitySnapshot) -> dict:
@@ -1207,12 +1810,13 @@ def list_idle_agents(
 def get_departments_capacity(lookback_hours: float = 24.0):
     """6개 투자본부 전체의 Langfuse 기반 Capacity(용량) 관측(2026-08-24).
 
-    `workforce.capacity_snapshots` writer가 아직 없어(P1-2 미착수) 아래
-    GET .../scorecard의 capacity 필드는 항상 null이다. idle-agents와 같은
-    원리로 Langfuse 실행 이벤트를 직접 집계해 그 빈 자리를 메운다 - 별도
-    DB Snapshot 파이프라인을 새로 놓지 않는다. queue_p95_ms는 이 경로에서
-    항상 None이다(observability.py DepartmentCapacityReport 참고 - 대기열
-    진입 시점을 재는 계측이 없다).
+    2026-08-25 부터 `workforce.capacity_snapshots`에 writer(POST
+    /workforce/v1/capacity-snapshots)가 생겼지만, 아직 그쪽에 보고를 넣는 호출자가
+    없어 GET .../scorecard의 capacity 필드는 여전히 null이 나오는 경우가 흔하다.
+    이 엔드포인트는 그 자리를 대신 메우는 별도 경로다 - idle-agents와 같은 원리로
+    Langfuse 실행 이벤트를 직접 집계한다. queue_p95_ms는 이 경로에서 항상 None이다
+    (observability.py DepartmentCapacityReport 참고 - 대기열 진입 시점을 재는 계측이
+    없다).
     """
 
     if lookback_hours <= 0:
@@ -1227,6 +1831,53 @@ def get_departments_capacity(lookback_hours: float = 24.0):
             detail={"error": "worker_registry_unavailable", "message": str(exc)},
         ) from exc
     return {"capacity": [r.as_dict() for r in reports]}
+
+
+@app.get("/workforce/v1/departments/llm-usage")
+def get_departments_llm_usage(lookback_hours: float = 24.0):
+    """6개 투자본부 전체의 Langfuse 기반 LLM 사용량(모델·토큰·상태) 관측.
+
+    capacity와 같은 이벤트(llm.performance.metric)를 읽지만 latency/재시도가
+    아니라 llm_calls/model_name/prompt_tokens/completion_tokens/attempts/status를
+    집계한다. llm_calls/prompt_tokens/completion_tokens는 begin_worker_metric()
+    컨텍스트가 열려 있었던 실행에서만 나오므로, arrivals > 0이어도 None일 수 있다.
+    """
+
+    if lookback_hours <= 0:
+        raise HTTPException(status_code=422, detail="lookback_hours must be positive")
+    try:
+        reports = check_department_llm_usage(
+            departments=tuple(INVESTMENT_DEPARTMENT_STAGE), lookback_hours=lookback_hours,
+        )
+    except WorkerRegistryUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "worker_registry_unavailable", "message": str(exc)},
+        ) from exc
+    return {"llm_usage": [r.as_dict() for r in reports]}
+
+
+@app.get("/workforce/v1/departments/trigger-rates")
+def get_departments_trigger_rates(lookback_hours: float = 24.0):
+    """6개 투자본부 전체의 Worker 발화율.
+
+    fire_rate = execution_count / (execution_count + opportunity_count).
+    분모가 0이면(이 창에 기회 자체가 없었다) fire_rate는 0.0이 아니라 None이다 -
+    cost.py 불변식 3과 같은 원칙("측정 안 됨"과 "측정했더니 0"을 섞지 않는다).
+    """
+
+    if lookback_hours <= 0:
+        raise HTTPException(status_code=422, detail="lookback_hours must be positive")
+    try:
+        reports = check_worker_trigger_rates(
+            departments=tuple(INVESTMENT_DEPARTMENT_STAGE), lookback_hours=lookback_hours,
+        )
+    except WorkerRegistryUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "worker_registry_unavailable", "message": str(exc)},
+        ) from exc
+    return {"trigger_rates": [r.as_dict() for r in reports]}
 
 
 # --- 3.6 Workforce Plan (HR-01 Capacity Report/Staffing Scenario 저장소) --------------
@@ -1349,6 +2000,9 @@ if __name__ == "__main__":
         # 원래 _improvement_repo를 이미 캡처했다 - 재배선 안 하면 실 DB를 계속 쓴다.
     _scorecard_repo = None
     _roster_repo = None  # 아래 5번 블록까지는 "미설정시 501"을 그대로 검증한다.
+    # 성과 평가·조치도 같은 이유로 끊는다. 안 끊으면 이 self-check 가 합성 ID로 실
+    # Supabase 에 INSERT 를 시도한다(실측 2026-08-25: FK/컬럼 에러로 깨졌다).
+    _performance_repo = None
     if not isinstance(_activation_evidence_repo, InMemoryActivationEvidenceRepository):
         _activation_evidence_repo = InMemoryActivationEvidenceRepository()
     if not isinstance(_plan_repo, InMemoryPlanRepository):
@@ -1433,6 +2087,15 @@ if __name__ == "__main__":
         "to_status": "OBSERVING", "actor": "hr", "reason": "관찰 시작", "at": t0,
     })
     assert r10b.status_code == 200 and r10b.json()["status"] == "OBSERVING", r10b.text
+
+    # Scorecard 를 하나도 안 남기고 KEPT 로 종료하려는 시도는 409 - 근거 없는 승인
+    # (MissingEvidenceError)과 같은 종류의 결함이다. 거부된 전이는 Event 도 남기지
+    # 않으므로 아래 events 개수는 그대로 6이다.
+    r10c0 = client.post("/workforce/v1/improvements/ic-1/transitions", json={
+        "to_status": "KEPT", "actor": "hr", "reason": "근거 없는 유지", "at": t0,
+    })
+    assert r10c0.status_code == 409, r10c0.text
+
     r10c = client.post("/workforce/v1/improvements/ic-1/scorecards", json={
         "window_start": t0, "window_end": t_exp, "recorded_by": "hr-03",
         "input_tokens": 100, "output_tokens": 50, "total_cost": "1.25",
@@ -1444,6 +2107,16 @@ if __name__ == "__main__":
     assert len(r11.json()["events"]) == 6
     r11a = client.get("/workforce/v1/improvements/ic-1/scorecards")
     assert len(r11a.json()["scorecards"]) == 1
+
+    # Scorecard 가 생긴 뒤에는 같은 전이가 통과한다 - 게이트가 근거 유무만 보고,
+    # KEPT/ROLLED_BACK 중 무엇을 고를지는 여전히 호출자 판단이다.
+    r11b = client.post("/workforce/v1/improvements/ic-1/transitions", json={
+        "to_status": "KEPT", "actor": "hr", "reason": "관찰 결과 유지", "at": t0,
+    })
+    assert r11b.status_code == 200 and r11b.json()["status"] == "KEPT", r11b.text
+    assert len(client.get("/workforce/v1/improvements/ic-1/events").json()["events"]) == 7
+    print("ok - KEPT/ROLLED_BACK Scorecard 근거 게이트 2개 시나리오 통과 "
+          "(근거 없음 409, 근거 있음 200)")
 
     # 3. Scorecard - Snapshot 없으면 0이 아니라 None.
     r12 = client.post("/workforce/v1/departments/07-agent-workforce/scorecard", json={
@@ -1458,6 +2131,10 @@ if __name__ == "__main__":
                             "output_tokens": 100, "model_cost": "1", "case_count": 1}],
     })
     assert r13.status_code == 200 and r13.json()["cost"]["case_count"] == 1, r13.text
+    # 참조는 이 POST 경로(호출자가 수치를 직접 실어 보냄)에선 빈 목록이다 - null 이
+    # 아니라 "참조가 없었다"는 사실이고, GET 경로가 quality_snapshots 에서 채운다.
+    assert r13.json()["quality"]["eval_run_ids"] == [], r13.text
+    assert r13.json()["quality"]["role_kpi"] == [], r13.text
 
     # 3a. Quality Snapshot - DATABASE_URL 없는 이 self-check 환경에서는 501로 막혀야
     # 한다(실 DB 왕복 검증은 postgres_scorecard_repository.py 자체 점검이 담당).
@@ -1496,7 +2173,7 @@ if __name__ == "__main__":
     assert r17.status_code == 501, r17.text
     r18 = client.post("/workforce/v1/agents/a1/status", json={
         "to_status": "ACTIVE", "profile_version_id": "pv1", "reason": "x",
-        "idempotency_key": "idem-1",
+        "idempotency_key": "idem-1", "trace_id": "tr-1",
     })
     assert r18.status_code == 409, r18.text  # validate_status_change가 501 확인보다 먼저 막는다
 
@@ -1522,7 +2199,7 @@ if __name__ == "__main__":
     r19 = client.post("/workforce/v1/agents/a-p03/status", json={
         "to_status": "ACTIVE", "profile_version_id": pv_id, "reason": "x",
         "idempotency_key": "idem-p03-1", "qa_eval_run_id": "eval-ghost",
-        "ceo_approval_id": "appr-ghost",
+        "ceo_approval_id": "appr-ghost", "trace_id": "tr-p03-1",
     })
     assert r19.status_code == 403 and r19.json()["error_code"] == "UnverifiedActivationEvidenceError", \
         r19.text
@@ -1533,7 +2210,7 @@ if __name__ == "__main__":
     r20 = client.post("/workforce/v1/agents/a-p03/status", json={
         "to_status": "ACTIVE", "profile_version_id": pv_id, "reason": "x",
         "idempotency_key": "idem-p03-2", "qa_eval_run_id": "eval-running",
-        "ceo_approval_id": "appr-pending",
+        "ceo_approval_id": "appr-pending", "trace_id": "tr-p03-2",
     })
     assert r20.status_code == 403, r20.text
 
@@ -1542,7 +2219,7 @@ if __name__ == "__main__":
     r21 = client.post("/workforce/v1/agents/a-p03/status", json={
         "to_status": "ACTIVE", "profile_version_id": pv_id, "reason": "x",
         "idempotency_key": "idem-p03-3", "qa_eval_run_id": "eval-other-pv",
-        "ceo_approval_id": "appr-pending",
+        "ceo_approval_id": "appr-pending", "trace_id": "tr-p03-3",
     })
     assert r21.status_code == 403, r21.text
 
@@ -1560,7 +2237,7 @@ if __name__ == "__main__":
     r22 = client.post("/workforce/v1/agents/a-p03/status", json={
         "to_status": "ACTIVE", "profile_version_id": empty_allowlist_agent.profile_version_id,
         "reason": "x", "idempotency_key": "idem-p03-4", "qa_eval_run_id": "eval-empty-tools",
-        "ceo_approval_id": "appr-empty-tools",
+        "ceo_approval_id": "appr-empty-tools", "trace_id": "tr-p03-4",
     })
     assert r22.status_code == 409 and r22.json()["error_code"] == "ToolAllowlistMissingError", r22.text
 
@@ -1570,10 +2247,33 @@ if __name__ == "__main__":
     r23 = client.post("/workforce/v1/agents/a-p03/status", json={
         "to_status": "ACTIVE", "profile_version_id": pv_id, "reason": "x",
         "idempotency_key": "idem-p03-5", "qa_eval_run_id": "eval-ok", "ceo_approval_id": "appr-ok",
+        "trace_id": "tr-p03-5",
     })
     assert r23.status_code == 200 and r23.json()["employment_status"] == "ACTIVE", r23.text
     print("ok - P0-3 ACTIVE 전이 증거 실재성 게이트 5개 시나리오 통과 "
           "(위조 증거 403, 미완료/미승인 403, 증거 재사용 차단 403, tool_allowlist 없음 409, 정상 승인 200)")
+
+    # 6f. 그 ACTIVE 전이가 lifecycle_events 에 남아야 한다 - "승인 없는 활성화 0"을
+    #     현재 상태가 아니라 이벤트로 확인할 수 있어야 한다(HR-04 KPI).
+    r23a = client.get("/workforce/v1/agents/a-p03/lifecycle-events")
+    assert r23a.status_code == 200, r23a.text
+    _events = r23a.json()["lifecycle_events"]
+    assert len(_events) == 1, f"상태는 바뀌었는데 이벤트가 {len(_events)}건이다"
+    _ev = _events[0]
+    assert _ev["from_status"] == "CANDIDATE" and _ev["to_status"] == "ACTIVE", _ev
+    assert _ev["trace_id"] == "tr-p03-5", _ev
+    # 근거가 함께 남는다 - 전이 사실만 있고 근거가 없으면 사후 확인이 안 된다.
+    assert {a["id"] for a in _ev["approvals"]} == {"eval-ok", "appr-ok"}, _ev
+
+    # 6g. trace_id 없이는 상태를 바꿀 수 없다 - 지어내서 채우지 않는다.
+    r23b = client.post("/workforce/v1/agents/a-p03/status", json={
+        "to_status": "SUSPENDED", "profile_version_id": pv_id, "reason": "x",
+        "idempotency_key": "idem-p03-6",
+    })
+    assert r23b.status_code == 422, r23b.text
+    # 거절된 전이는 이벤트도 상태도 남기지 않는다.
+    assert len(client.get("/workforce/v1/agents/a-p03/lifecycle-events").json()["lifecycle_events"]) == 1
+    print("ok - lifecycle-events 2개 시나리오 통과 (ACTIVE 전이가 근거와 함께 기록, trace_id 없으면 422)")
 
     # 7. Workforce Plan (P1-2 HR-04) - DRAFT 생성 -> 위조/미실재 승인 차단 -> 실재 승인
     # -> 승인 없이 ACTIVE 시도 차단 -> 활성화 -> 종료 상태 재전이 차단.
@@ -1626,5 +2326,201 @@ if __name__ == "__main__":
     print("ok - Workforce Plan(P1-2 HR-04) 6개 시나리오 통과 "
           "(DRAFT 생성, 위조 승인 403, 승인 없는 ACTIVE 409, 실재 승인 200, 활성화 200, 종료 후 재전이 409)")
 
-    print("ok - Workforce Domain API 7개 영역(access/improvements/scorecard/budget/roster/"
-          "P0-3 게이트/workforce-plan) 점검 통과")
+    # --- cost-snapshots writer (2026-08-25) ------------------------------------------
+    #
+    # 이 자체 점검은 DATABASE_URL 없이 돈다 - _scorecard_repo 가 None 이라 기록 자체는
+    # 501 이다. 그래서 여기서 지킬 수 있는 건 두 가지다: (1) 저장소 없이 빈 성공을
+    # 돌려주지 않는가, (2) 본문 검증이 DB 유무와 무관하게 먼저 걸리는가.
+    # 실 DB 왕복(멱등 재보고, FK 거부)은 postgres_scorecard_repository.py 자체 점검이
+    # 담당한다 - 여기서 흉내 내면 둘 다 반쪽이 된다.
+    _cost_agent = "11111111-1111-1111-1111-111111111111"
+    _cost_body = {
+        "profile_version_id": "22222222-2222-2222-2222-222222222222",
+        "window_start": "2026-08-25T00:00:00+00:00",
+        "window_end": "2026-08-25T01:00:00+00:00",
+        "recorded_by": "platform-metering",
+        "input_tokens": 100, "output_tokens": 50,
+        "model_cost": "1.5", "tool_cost": "0", "infra_cost": "0", "case_count": 1,
+    }
+
+    r32 = client.post(f"/workforce/v1/agents/{_cost_agent}/cost-snapshots", json=_cost_body)
+    # 501 - 저장소가 없는데 200 을 돌려주면 플랫폼이 "보고 완료"로 읽고 그 창의 비용이
+    # 영영 안 들어온다. quality-snapshots 와 같은 처리다.
+    assert r32.status_code == 501, r32.text
+
+    r33 = client.post(f"/workforce/v1/agents/{_cost_agent}/cost-snapshots",
+                      json={**_cost_body, "recorded_by": ""})
+    assert r33.status_code == 422, r33.text  # 보고자 없는 비용은 인사팀이 지어낸 것과 구별되지 않는다
+
+    r34 = client.post(f"/workforce/v1/agents/{_cost_agent}/cost-snapshots",
+                      json={**_cost_body, "input_tokens": -1})
+    assert r34.status_code == 422, r34.text
+
+    r35 = client.post(f"/workforce/v1/agents/{_cost_agent}/cost-snapshots",
+                      json={**_cost_body,
+                            "window_start": _cost_body["window_end"],
+                            "window_end": _cost_body["window_start"]})
+    # 422 여야 한다 - 501 이 나면 "DB 안 붙었다"가 "본문이 틀렸다"를 가린 것이다
+    # (CostSnapshotRecordIn._window_is_forward 가 이걸 위해 있다).
+    assert r35.status_code == 422, r35.text
+
+    r36 = client.post(f"/workforce/v1/agents/{_cost_agent}/cost-snapshots",
+                      json={k: v for k, v in _cost_body.items() if k != "input_tokens"})
+    assert r36.status_code == 422, r36.text  # 안 잰 항목을 0 으로 채워 넣지 않는다(기본값 없음)
+
+    r37 = client.get(f"/workforce/v1/agents/{_cost_agent}/cost-snapshots",
+                     params={"window_start": _cost_body["window_start"],
+                             "window_end": _cost_body["window_end"]})
+    assert r37.status_code == 501, r37.text
+    print("ok - cost-snapshots writer 6개 시나리오 통과 "
+          "(저장소 없음 501, 보고자 없음 422, 음수 토큰 422, 역전 window 422, "
+          "누락 필드 422, 조회 501)")
+
+    # --- capacity-snapshots writer (2026-08-25) ----------------------------------------
+    #
+    # cost-snapshots writer 자체 점검과 같은 범위 제한 - DATABASE_URL 없이 501/422
+    # 경계만 지킨다. 실 DB 왕복은 postgres_scorecard_repository.py 담당.
+    _capacity_body = {
+        "department_id": "33333333-3333-3333-3333-333333333333",
+        "window_start": "2026-08-25T00:00:00+00:00",
+        "window_end": "2026-08-25T01:00:00+00:00",
+        "recorded_by": "platform-metering",
+        "arrivals": 5, "utilization": "0.5",
+    }
+
+    r38 = client.post("/workforce/v1/capacity-snapshots", json=_capacity_body)
+    assert r38.status_code == 501, r38.text  # 저장소 없이 "보고 완료"로 보이면 안 된다
+
+    r39 = client.post("/workforce/v1/capacity-snapshots",
+                      json={**_capacity_body, "recorded_by": ""})
+    assert r39.status_code == 422, r39.text
+
+    r40 = client.post("/workforce/v1/capacity-snapshots",
+                      json={**_capacity_body, "arrivals": -1})
+    assert r40.status_code == 422, r40.text
+
+    r41 = client.post("/workforce/v1/capacity-snapshots",
+                      json={**_capacity_body,
+                            "window_start": _capacity_body["window_end"],
+                            "window_end": _capacity_body["window_start"]})
+    assert r41.status_code == 422, r41.text  # 역전 window - DB 안 붙었다는 이유로 가리지 않는다
+
+    r42 = client.post("/workforce/v1/capacity-snapshots",
+                      json={k: v for k, v in _capacity_body.items()
+                            if k not in ("department_id", "agent_id")})
+    assert r42.status_code == 422, r42.text  # department_id/agent_id 둘 다 없는 보고는 거부
+
+    r43 = client.get("/workforce/v1/capacity-snapshots",
+                     params={"window_start": _capacity_body["window_start"],
+                             "window_end": _capacity_body["window_end"],
+                             "department_id": _capacity_body["department_id"]})
+    assert r43.status_code == 501, r43.text
+
+    r44 = client.get("/workforce/v1/capacity-snapshots",
+                     params={"window_start": _capacity_body["window_start"],
+                             "window_end": _capacity_body["window_end"]})
+    assert r44.status_code == 400, r44.text  # 조회도 department_id/agent_id 없이는 400
+    print("ok - capacity-snapshots writer 7개 시나리오 통과 "
+          "(저장소 없음 501, 보고자 없음 422, 음수 arrivals 422, 역전 window 422, "
+          "subject 없음 422, 조회 501, 조회 subject 없음 400)")
+
+    # --- performance review/action (HR-03) ---------------------------------------------
+    #
+    # DATABASE_URL 없이 도는 자체 점검이라 _performance_repo 가 None 이다 - 여기서
+    # 지킬 수 있는 건 (1) 저장소 없이 빈 성공을 돌려주지 않는가, (2) 본문 검증이 DB
+    # 유무보다 먼저 걸리는가 둘이다. 계약·상태머신 검증은 performance/review.py 와
+    # performance/action.py 자체 점검이 담당한다.
+    _perf_agent = "44444444-4444-4444-4444-444444444444"
+    _review_body = {
+        "profile_version_id": "55555555-5555-5555-5555-555555555555",
+        "period_start": t0, "period_end": t_exp, "reviewer": "hr-03",
+        "decision": "PIP", "role_metrics": {"sla_compliance": 0.71},
+    }
+
+    r45 = client.post(f"/workforce/v1/agents/{_perf_agent}/performance-reviews", json=_review_body)
+    assert r45.status_code == 501, r45.text  # 저장소 없이 "기록 완료"로 보이면 안 된다
+
+    r46 = client.post(f"/workforce/v1/agents/{_perf_agent}/performance-reviews",
+                      json={**_review_body, "reviewer": ""})
+    assert r46.status_code == 422, r46.text  # 누가 제안했는지 없이 남길 수 없다
+
+    r47 = client.post(f"/workforce/v1/agents/{_perf_agent}/performance-reviews",
+                      json={**_review_body, "decision": "TERMINATE"})
+    assert r47.status_code == 422, r47.text  # DDL check 와 같은 어휘 밖의 결정
+
+    r48 = client.post(f"/workforce/v1/agents/{_perf_agent}/performance-reviews",
+                      json={k: v for k, v in _review_body.items() if k != "role_metrics"})
+    # 조치를 제안하는 평가에 근거가 없다 - 501(DB 없음)이 이걸 가리면 안 된다.
+    assert r48.status_code == 422, r48.text
+
+    r49 = client.post(f"/workforce/v1/agents/{_perf_agent}/performance-reviews",
+                      json={**_review_body,
+                            "period_start": _review_body["period_end"],
+                            "period_end": _review_body["period_start"]})
+    assert r49.status_code == 422, r49.text
+
+    r50 = client.post(f"/workforce/v1/agents/{_perf_agent}/performance-actions", json={
+        "action_type": "PIP", "due_at": t_exp, "plan": {"goal": "SLA 회복"},
+    })
+    assert r50.status_code == 501, r50.text
+
+    r51 = client.post(f"/workforce/v1/agents/{_perf_agent}/performance-actions", json={
+        "action_type": "PIP", "due_at": t_exp, "plan": {},
+    })
+    # 계획 없는 조치는 조치가 아니다 - 501 이 이 결함을 가리면 안 된다.
+    assert r51.status_code == 422, r51.text
+
+    r51a = client.post(f"/workforce/v1/agents/{_perf_agent}/performance-reviews",
+                       json={**_review_body, "role_metrics": {}})
+    # 빈 role_metrics 로 PIP 제안 - 필드를 빼는 것(r48)과 달리 Pydantic 필수 검사에는
+    # 걸리지 않으므로, 게이트가 요청 계층에도 있어야 잡힌다.
+    assert r51a.status_code == 422, r51a.text
+
+    r52 = client.get(f"/workforce/v1/agents/{_perf_agent}/performance-actions")
+    assert r52.status_code == 501, r52.text
+    print("ok - performance review/action 9개 시나리오 통과 "
+          "(저장소 없음 501, 평가자 없음 422, 어휘 밖 decision 422, role_metrics 누락 422, "
+          "역전 period 422, 조치 저장소 없음 501, 빈 plan 422, 빈 role_metrics 422, 조회 501)")
+
+    # --- probation (HR-00/HR-03) --------------------------------------------------------
+    _probation_body = {
+        "profile_version_id": "55555555-5555-5555-5555-555555555555",
+        "stage": "SHADOW", "started_at": t0,
+        "success_metrics": {"pass_if": {"sla_compliance": ">=0.95"}},
+    }
+
+    r53 = client.post(f"/workforce/v1/agents/{_perf_agent}/probations", json=_probation_body)
+    assert r53.status_code == 501, r53.text
+
+    r54 = client.post(f"/workforce/v1/agents/{_perf_agent}/probations",
+                      json={**_probation_body, "success_metrics": {}})
+    # 기준 없이 수습을 여는 것은 관찰이 끝난 뒤 기준을 만드는 것과 같다 - 501 이
+    # 이 결함을 가리면 안 된다.
+    assert r54.status_code == 422, r54.text
+
+    r55 = client.post(f"/workforce/v1/agents/{_perf_agent}/probations",
+                      json={k: v for k, v in _probation_body.items() if k != "success_metrics"})
+    assert r55.status_code == 422, r55.text
+
+    r56 = client.post(f"/workforce/v1/agents/{_perf_agent}/probations",
+                      json={**_probation_body, "stage": "LIVE"})
+    assert r56.status_code == 422, r56.text  # DDL check 밖의 stage
+
+    r57 = client.post("/workforce/v1/probations/pb-1/close", json={"result": "PASSED", "at": t_exp})
+    assert r57.status_code == 501, r57.text
+
+    # 판정 요청에 기준을 실어 보낼 자리가 없어야 한다(불변식 2) - extra 필드는
+    # Pydantic 기본값상 무시되므로, 모델에 필드가 없다는 것 자체를 고정한다.
+    assert "success_metrics" not in ProbationCloseIn.model_fields, (
+        "판정 요청이 기준을 받으면 관찰 후 기준 변경이 열린다"
+    )
+
+    r58 = client.get(f"/workforce/v1/agents/{_perf_agent}/probations")
+    assert r58.status_code == 501, r58.text
+    print("ok - probation 6개 시나리오 통과 "
+          "(저장소 없음 501, 빈 success_metrics 422, 누락 422, 어휘 밖 stage 422, "
+          "판정 저장소 없음 501, 조회 501) + 판정 요청에 기준 필드 없음")
+
+    print("ok - Workforce Domain API 11개 영역(access/improvements/scorecard/budget/roster/"
+          "P0-3 게이트/workforce-plan/cost-snapshots/capacity-snapshots/performance/probation) "
+          "점검 통과")

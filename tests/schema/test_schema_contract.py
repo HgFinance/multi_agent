@@ -265,6 +265,27 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  # 조건주문 알림 소비자가 최소 outbox payload를 기존 사용자
                  # 요청 권위와 읽기 전용으로 다시 연결할 수 있게 한다.
                  "20260825000200_conditional_notification_context_read.sql",
+                 # cost_snapshots 에 writer 를 붙이면서 보고자(recorded_by)와
+                 # 같은 창 재보고를 갱신으로 접는 unique key 를 추가한다 -
+                 # reader 가 창 안을 합산하므로 중복 행은 곧 사용량 2배다.
+                 # 아래 4개는 원래 000100~000400 이었다. main 이 같은 날짜
+                 # 000100/000200 을 먼저 쓰면서 Supabase 가 같은 version 으로
+                 # 보는 충돌이 생겨 000300~000600 으로 옮겼다(20260824000150
+                 # 과 같은 이유). 미적용 상태였으므로 옮기는 쪽이 이쪽이다.
+                 "20260825000300_workforce_cost_snapshot_writer.sql",
+                 # capacity_snapshots 에도 같은 이유로 writer 를 붙인다 - reader가
+                 # 창 안에서 최신 1건을 고르므로 재보고는 갱신이어야 한다.
+                 # department_id/agent_id 는 하나만 있어도 되므로 nulls not distinct
+                 # unique index 를 쓴다.
+                 "20260825000400_workforce_capacity_snapshot_writer.sql",
+                 # performance_reviews 에 writer 를 붙이면서 decision 값 어휘를
+                 # 앱 계약(review.py ReviewDecision)과 같은 check 로 고정하고,
+                 # 형제 테이블에 다 있는 작성자 칸(reviewer)을 추가한다.
+                 "20260825000500_workforce_performance_review_writer.sql",
+                 # 같은 Agent 에 열린 수습은 하나뿐이다 - 기준(success_metrics)을
+                 # 미리 고정한다는 규칙이 의미를 가지려면 그 기준이 하나여야 한다.
+                 # 행 하나만 보는 check 로는 못 막아 부분 unique index 를 쓴다.
+                 "20260825000600_workforce_probation_single_open.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 

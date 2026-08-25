@@ -4,7 +4,7 @@
 소유: 영주 (CEO Office)
 근거: docs/02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md F23,
       docs/05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md 5.4(Daily Report 필수 Section), 3.1(참조 데이터),
-      docs/02-engineering/GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 4절(reporting-api)
+      docs/02-engineering/UNIFIED_DOMAIN_API_SPEC.md 5.4(Reporting)
 
 F23은 두 부서가 나눠 맡는다. 회계본부의 `departments/05-accounting-portfolio/reporting/
 daily_report.py`는 전략별 PnL·Drawdown·비용·오류 **수치를 계산**한다. 이 모듈은 **CEO Office

@@ -3,7 +3,8 @@
 
 소유: 영주 (CEO Office)
 근거: docs/01-product/MINIMUM_SERVICE_UNIT_SPEC.md 12절(governance.cases/case_events),
-      docs/02-engineering/GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 2.2절(create_case ✅),
+      docs/02-engineering/UNIFIED_DOMAIN_API_SPEC.md 5.4(Governance - Case Root 는
+      /governance/v1/cases), 실행 상태는 contracts/route-registry.v1.json,
       supabase/migrations/20260804000200_governance_case_status.sql(이번에 제안한 status 제약)
 
 여기엔 LLM이 없다. Case 생성과 상태 전이는 전부 결정론적 코드다.

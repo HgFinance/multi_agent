@@ -4,11 +4,14 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   fetchWorkforceIdleAgents,
+  fetchWorkforceTriggerRates,
   WorkforceIdleAgentsError,
   type IdleStatus,
   type WorkerIdleReport,
+  type WorkerTriggerRateReport,
   type WorkforceIdleAgents,
   type WorkforceIdleWindow,
+  type WorkforceTriggerRates,
 } from "../lib/workforceIdleClient";
 
 /**
@@ -164,14 +167,44 @@ function StatusCountTiles({ reports }: { reports: WorkerIdleReport[] }) {
   );
 }
 
-function IdleAgentRow({ report }: { report: WorkerIdleReport }) {
+/**
+ * 발화율 칸. `fire_rate === null`(이 창에 기회 자체가 없었다)과 `0`(기회가 있었는데
+ * 한 번도 안 켜졌다)은 **다른 사실**이라 같은 표기로 뭉개지 않는다 - UNOBSERVED가
+ * 원래 이 둘을 구분 못 해서 이 컬럼을 붙였다.
+ */
+function FireRateCell({ rate }: { rate?: WorkerTriggerRateReport }) {
+  if (!rate || rate.status !== "MEASURED") {
+    return <span className="text-on-surface-variant">—</span>;
+  }
+  if (rate.fire_rate === null) {
+    return (
+      <span className="text-on-surface-variant" title="이 창에 이 Worker가 후보가 된 적이 없습니다(분모 0).">
+        기회 없음
+      </span>
+    );
+  }
+  const percent = `${(rate.fire_rate * 100).toFixed(0)}%`;
+  return (
+    <span
+      className={rate.fire_rate === 0 ? "font-semibold text-on-error-container" : ""}
+      title={`실행 ${rate.execution_count} / 미발화 ${rate.opportunity_count}`}
+    >
+      {percent}
+      <span className="ml-1 text-on-surface-variant">
+        ({rate.execution_count}/{(rate.execution_count ?? 0) + (rate.opportunity_count ?? 0)})
+      </span>
+    </span>
+  );
+}
+
+function IdleAgentRow({ report, rate }: { report: WorkerIdleReport; rate?: WorkerTriggerRateReport }) {
   const view = statusView(report.status);
   return (
     <tr className="border-t border-outline-variant/60 text-on-surface">
-      <td className="px-3 py-2">{report.department}</td>
-      <td className="px-3 py-2 font-data-mono">{report.worker_id}</td>
+      <td className="px-2.5 py-1.5">{report.department}</td>
+      <td className="px-2.5 py-1.5 font-data-mono">{report.worker_id}</td>
       <td className="px-3 py-2 font-data-mono text-on-surface-variant">{report.trigger}</td>
-      <td className="px-3 py-2">
+      <td className="px-2.5 py-1.5">
         <span
           className={`inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-[10px] font-semibold ${view.tone}`}
           title={view.hint}
@@ -182,8 +215,11 @@ function IdleAgentRow({ report }: { report: WorkerIdleReport }) {
           {view.label}
         </span>
       </td>
-      <td className="px-3 py-2 font-data-mono">{formatLastSeen(report.last_seen_at)}</td>
+      <td className="px-2.5 py-1.5 font-data-mono">{formatLastSeen(report.last_seen_at)}</td>
       <td className="px-3 py-2 font-data-mono text-on-surface-variant">{formatIdleHours(report.idle_hours)}</td>
+      <td className="border-l border-outline-variant/60 px-2.5 py-1.5 font-data-mono">
+        <FireRateCell rate={rate} />
+      </td>
     </tr>
   );
 }
@@ -198,10 +234,22 @@ export default function WorkforceIdleAgentsPanel() {
     staleTime: 0,
     retry: false,
   });
+  // 같은 창의 발화율 - UNOBSERVED 를 "기회 없음"과 "한 번도 안 켜짐"으로 가른다.
+  // 실패해도 유휴 표는 그대로 보여준다(발화율 칸만 "—"가 된다).
+  const rateQuery = useQuery<WorkforceTriggerRates, WorkforceIdleAgentsError>({
+    queryKey: ["workforce-trigger-rates", windowKey],
+    queryFn: () => fetchWorkforceTriggerRates(activeWindow.lookbackHours),
+    refetchInterval: POLL_MS,
+    staleTime: 0,
+    retry: false,
+  });
   const data = query.data ?? null;
   const error = query.error ?? null;
   const loading = query.isPending;
   const reports = data?.idle_agents ?? [];
+  const rateByWorker = new Map(
+    (rateQuery.data?.trigger_rates ?? []).map((item) => [`${item.department}-${item.worker_id}`, item]),
+  );
 
   return (
     <section
@@ -209,24 +257,24 @@ export default function WorkforceIdleAgentsPanel() {
       aria-labelledby="workforce-idle-title"
     >
       <WorkforceIdleArtifactHeader samples={data ? reports.length : undefined} />
-      <div className="space-y-5 p-4 md:p-6">
+      <div className="space-y-2 px-4 py-3">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="min-w-0">
-            <p className="m-0 text-label-md font-label-md uppercase text-on-surface-variant">Workforce · Idle Observability</p>
-            <h2 id="workforce-idle-title" className="mt-2 text-headline-md font-headline-md font-bold text-primary">
+            <h2 id="workforce-idle-title" className="m-0 text-title-sm font-title-sm font-bold text-primary">
               투자본부 Worker 유휴 상태
             </h2>
-            <p className="mt-2 max-w-3xl text-body-sm font-body-sm text-on-surface-variant">
+            <p className="mt-0.5 max-w-3xl text-[11px] leading-snug text-on-surface-variant">
               6개 투자본부에 등록된 Worker 전원의 최근 실행 관측 시각을 Langfuse에서 읽어 판정합니다. 원문 프롬프트·응답은
               받지 않고 시각만 비교합니다.
-            </p>
+            발화율 컬럼은 UNOBSERVED 를 &ldquo;기회 자체가 없었다&rdquo;와 &ldquo;기회가 있었는데 한 번도 안 켜졌다&rdquo;로 가릅니다.
+          </p>
           </div>
           <WindowToggle value={windowKey} onChange={setWindowKey} />
         </div>
 
         {error ? (
           <div
-            className={`rounded-lg border p-4 text-sm ${
+            className={`rounded-lg border p-3 text-xs ${
               error.status === 503
                 ? "border-outline-variant bg-surface-container-low text-on-surface-variant"
                 : "border-error/40 bg-error-container text-on-error-container"
@@ -241,7 +289,7 @@ export default function WorkforceIdleAgentsPanel() {
         ) : null}
 
         {loading && !data && !error ? (
-          <p className="m-0 rounded-lg border border-outline-variant bg-surface-container-low p-5 text-sm text-on-surface-variant">
+          <p className="m-0 rounded-lg border border-outline-variant bg-surface-container-low p-3 text-xs text-on-surface-variant">
             Worker 유휴 상태를 확인하는 중입니다…
           </p>
         ) : null}
@@ -257,23 +305,30 @@ export default function WorkforceIdleAgentsPanel() {
             ) : null}
 
             <div className="overflow-x-auto rounded-lg border border-outline-variant">
-              <table className="w-full min-w-[680px] text-left text-xs">
+              <table className="w-full min-w-[720px] text-left text-xs">
                 <thead className="bg-surface-container text-label-md text-on-surface-variant">
                   <tr>
-                    <th className="px-3 py-2 font-semibold">부서</th>
-                    <th className="px-3 py-2 font-semibold">Worker</th>
-                    <th className="px-3 py-2 font-semibold">trigger</th>
-                    <th className="px-3 py-2 font-semibold">상태</th>
-                    <th className="px-3 py-2 font-semibold">마지막 관측</th>
-                    <th className="px-3 py-2 font-semibold">경과</th>
+                    <th className="px-2.5 py-1.5 font-semibold">부서</th>
+                    <th className="px-2.5 py-1.5 font-semibold">Worker</th>
+                    <th className="px-2.5 py-1.5 font-semibold">trigger</th>
+                    <th className="px-2.5 py-1.5 font-semibold">상태</th>
+                    <th className="px-2.5 py-1.5 font-semibold">마지막 관측</th>
+                    <th className="px-2.5 py-1.5 font-semibold">경과</th>
+                    <th className="border-l border-outline-variant/60 px-2.5 py-1.5 font-semibold">발화율</th>
                   </tr>
                 </thead>
                 <tbody>
                   {reports.length > 0 ? (
-                    reports.map((report) => <IdleAgentRow key={`${report.department}-${report.worker_id}`} report={report} />)
+                    reports.map((report) => (
+                      <IdleAgentRow
+                        key={`${report.department}-${report.worker_id}`}
+                        report={report}
+                        rate={rateByWorker.get(`${report.department}-${report.worker_id}`)}
+                      />
+                    ))
                   ) : (
                     <tr>
-                      <td colSpan={6} className="px-3 py-7 text-center text-sm text-on-surface-variant">
+                      <td colSpan={7} className="px-3 py-7 text-center text-sm text-on-surface-variant">
                         아직 등록된 투자본부 Worker가 없습니다.
                       </td>
                     </tr>
@@ -284,7 +339,7 @@ export default function WorkforceIdleAgentsPanel() {
           </>
         ) : null}
 
-        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-t border-outline-variant pt-3 text-xs text-on-surface-variant">
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-t border-outline-variant pt-2 text-[11px] text-on-surface-variant">
           <span>
             {activeWindow.label} 관측 · 최근 {activeWindow.lookbackHours}시간 · 임계 {activeWindow.idleThresholdHours}시간 ·
             Langfuse 타임스탬프 기준(원문 미포함)

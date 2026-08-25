@@ -5,7 +5,7 @@
 근거: docs/05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md 5.1절
       ("사용자 요청 -> CEO Hermes 구조화 -> Draft Version -> Risk 검토 -> QA 검토 ->
        사용자 승인 -> Active -> Version Event 발행"),
-      docs/02-engineering/GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 2.4절
+      docs/02-engineering/UNIFIED_DOMAIN_API_SPEC.md 5.4(Governance - Mandate 소유)
       ("Mandate 변경 Workflow(LangGraph)는 두 노드 사이를 VersionResult로 넘긴다"),
       docs/02-engineering/TECH_STACK_DECISIONS.md 39행("LangGraph Persistence:
       langgraph-checkpoint-postgres, P0 필수")
