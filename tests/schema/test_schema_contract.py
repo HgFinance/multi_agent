@@ -262,6 +262,11 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  # 같은 창 재보고를 갱신으로 접는 unique key 를 추가한다 -
                  # reader 가 창 안을 합산하므로 중복 행은 곧 사용량 2배다.
                  "20260825000100_workforce_cost_snapshot_writer.sql",
+                 # capacity_snapshots 에도 같은 이유로 writer 를 붙인다 - reader가
+                 # 창 안에서 최신 1건을 고르므로 재보고는 갱신이어야 한다.
+                 # department_id/agent_id 는 하나만 있어도 되므로 nulls not distinct
+                 # unique index 를 쓴다.
+                 "20260825000200_workforce_capacity_snapshot_writer.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 

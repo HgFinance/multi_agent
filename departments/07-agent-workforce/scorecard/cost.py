@@ -99,7 +99,12 @@ class CostSnapshot:
 
 @dataclass(frozen=True)
 class CapacitySnapshot:
-    """workforce.capacity_snapshots 한 행. 지연은 _ms, 재시도·오류는 _rate."""
+    """workforce.capacity_snapshots 한 행. 지연은 _ms, 재시도·오류는 _rate.
+
+    recorded_by 는 CostSnapshot 과 같은 이유로 선택값이다 - 저장된 행과 계산용으로만
+    만든 값 둘 다 이 dataclass 로 나른다. 저장 경로(append_capacity_snapshot)에서만
+    값을 요구한다.
+    """
 
     window_start: datetime
     window_end: datetime
@@ -111,6 +116,7 @@ class CapacitySnapshot:
     utilization: Decimal | None
     department_id: str | None = None
     agent_id: str | None = None
+    recorded_by: str | None = None
 
 
 @dataclass(frozen=True)

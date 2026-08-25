@@ -160,12 +160,16 @@ except ImportError:
 try:
     from postgres_scorecard_repository import (
         PostgresScorecardRepository,
+        UnknownCapacitySnapshotSubjectError,
         UnknownCostSnapshotSubjectError,
     )
 except ImportError:
     PostgresScorecardRepository = None  # type: ignore[assignment,misc]
 
     class UnknownCostSnapshotSubjectError(RuntimeError):  # type: ignore[no-redef]
+        """psycopg2 미설치 대체 - 이 경로에서는 애초에 기록이 501 로 막힌다."""
+
+    class UnknownCapacitySnapshotSubjectError(RuntimeError):  # type: ignore[no-redef]
         """psycopg2 미설치 대체 - 이 경로에서는 애초에 기록이 501 로 막힌다."""
 
 try:
@@ -342,6 +346,40 @@ class CostSnapshotRecordIn(BaseModel):
         """
         if self.window_end <= self.window_start:
             raise ValueError("window_end 는 window_start 이후여야 한다")
+        return self
+
+
+class CapacitySnapshotRecordIn(BaseModel):
+    """POST /workforce/v1/capacity-snapshots Request.
+
+    CostSnapshotRecordIn과 달리 agent_id를 경로에서 받지 않는다 - capacity는
+    department_id/agent_id 중 하나만 있어도 되므로(DDL check) 경로 하나로 두 종류
+    보고를 모두 표현할 수 없다. CapacitySnapshotIn(계산 전용, 저장 안 함)과는
+    recorded_by 필수, arrivals 기본값 없음이 다르다 - cost와 같은 이유
+    (CostSnapshotRecordIn 참고).
+    """
+
+    department_id: str | None = None
+    agent_id: str | None = None
+    window_start: datetime
+    window_end: datetime
+    recorded_by: str = Field(min_length=1)
+    arrivals: int = Field(ge=0)
+    queue_p95_ms: str | None = None
+    duration_p95_ms: str | None = None
+    retry_rate: str | None = None
+    error_rate: str | None = None
+    utilization: str | None = None
+
+    @model_validator(mode="after")
+    def _window_is_forward_and_subject_present(self) -> "CapacitySnapshotRecordIn":
+        """CostSnapshotRecordIn._window_is_forward와 같은 이유 - DB 유무와 무관하게
+        먼저 막는다. department_id/agent_id 둘 다 없는 것도 여기서 같이 막는다 -
+        DDL check까지 안 가고 422로 끝나야 "DB 안 붙었다"가 본문 결함을 가리지 않는다."""
+        if self.window_end <= self.window_start:
+            raise ValueError("window_end 는 window_start 이후여야 한다")
+        if self.department_id is None and self.agent_id is None:
+            raise ValueError("department_id/agent_id 중 하나는 있어야 한다")
         return self
 
 
@@ -768,6 +806,15 @@ def _on_unknown_cost_subject(request, exc: UnknownCostSnapshotSubjectError):
     500 으로 뭉뚱그리지 않는다 - 플랫폼이 재시도 루프에 갇히면 그 창의 비용이
     영영 안 들어오고, 그 결과는 "비용 0"이 아니라 "Snapshot 없음"으로 남는다.
     """
+    return JSONResponse(status_code=404, content={
+        "error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None,
+    })
+
+
+@app.exception_handler(UnknownCapacitySnapshotSubjectError)
+def _on_unknown_capacity_subject(request, exc: UnknownCapacitySnapshotSubjectError):
+    """UnknownCostSnapshotSubjectError와 같은 이유 - 등록되지 않은 department/agent로
+    온 용량 보고는 재시도해도 낫지 않는 호출자 오류라 404다."""
     return JSONResponse(status_code=404, content={
         "error_code": type(exc).__name__, "message": str(exc), "detail": {}, "trace_id": None,
     })
@@ -1211,6 +1258,76 @@ def list_cost_snapshots(agent_id: str, window_start: datetime, window_end: datet
     return {"cost_snapshots": [_cost_snapshot_dict(s) for s in snapshots]}
 
 
+def _capacity_snapshot_dict(s: CapacitySnapshot) -> dict:
+    return {
+        "department_id": s.department_id, "agent_id": s.agent_id,
+        "window_start": s.window_start.isoformat(), "window_end": s.window_end.isoformat(),
+        "arrivals": s.arrivals,
+        "queue_p95_ms": str(s.queue_p95_ms) if s.queue_p95_ms is not None else None,
+        "duration_p95_ms": str(s.duration_p95_ms) if s.duration_p95_ms is not None else None,
+        "retry_rate": str(s.retry_rate) if s.retry_rate is not None else None,
+        "error_rate": str(s.error_rate) if s.error_rate is not None else None,
+        "utilization": str(s.utilization) if s.utilization is not None else None,
+        "recorded_by": s.recorded_by,
+    }
+
+
+@app.post("/workforce/v1/capacity-snapshots")
+def record_capacity_snapshot(body: CapacitySnapshotRecordIn):
+    """플랫폼 관측이 보고한 용량 계측 1건을 기록한다.
+
+    record_cost_snapshot과 같은 이유 - 이 엔드포인트가 생기기 전까지
+    workforce.capacity_snapshots 에는 writer 가 없었고, GET .../departments/capacity
+    는 Langfuse 실행 이벤트를 직접 집계해 그 자리를 메웠다(2026-08-24). 그 우회 경로는
+    그대로 둔다 - 여기서는 DB Snapshot 이라는 두 번째 경로를 추가할 뿐이다.
+
+    같은 창을 다시 보고하면 행이 늘지 않고 갱신된다 - get_capacity_snapshot 이 창
+    안에서 가장 늦은 행 1개를 고르므로, 중복 행은 재보고 이력만 무한히 늘린다
+    (append_capacity_snapshot 참고).
+    """
+    if _scorecard_repo is None:
+        raise HTTPException(
+            status_code=501,
+            detail="DATABASE_URL 미설정 - Capacity Snapshot 기록 불가",
+        )
+    snapshot = CapacitySnapshot(
+        department_id=body.department_id, agent_id=body.agent_id,
+        window_start=body.window_start, window_end=body.window_end, arrivals=body.arrivals,
+        queue_p95_ms=Decimal(body.queue_p95_ms) if body.queue_p95_ms is not None else None,
+        duration_p95_ms=Decimal(body.duration_p95_ms) if body.duration_p95_ms is not None else None,
+        retry_rate=Decimal(body.retry_rate) if body.retry_rate is not None else None,
+        error_rate=Decimal(body.error_rate) if body.error_rate is not None else None,
+        utilization=Decimal(body.utilization) if body.utilization is not None else None,
+        recorded_by=body.recorded_by,
+    )
+    _snapshot_id, created = _scorecard_repo.append_capacity_snapshot(snapshot)
+    return {**_capacity_snapshot_dict(snapshot), "created": created}
+
+
+@app.get("/workforce/v1/capacity-snapshots")
+def get_capacity_snapshot_endpoint(
+    window_start: datetime, window_end: datetime,
+    department_id: str | None = None, agent_id: str | None = None,
+):
+    # 쿼리 자체의 결함(역전 window, subject 없음)은 DB 유무와 무관하게 먼저 걸러야
+    # "DB 안 붙었다"(501)가 "질의가 틀렸다"(400)를 가리지 않는다
+    # (CostSnapshotRecordIn._window_is_forward와 같은 이유).
+    if window_end <= window_start:
+        raise HTTPException(status_code=400, detail="window_end는 window_start 이후여야 한다")
+    if department_id is None and agent_id is None:
+        raise HTTPException(status_code=400, detail="department_id/agent_id 중 하나는 있어야 한다")
+    if _scorecard_repo is None:
+        raise HTTPException(
+            status_code=501,
+            detail="DATABASE_URL 미설정 - Capacity Snapshot 조회 불가",
+        )
+    snapshot = _scorecard_repo.get_capacity_snapshot(
+        department_id=department_id, agent_id=agent_id,
+        window_start=window_start, window_end=window_end,
+    )
+    return {"capacity_snapshot": None if snapshot is None else _capacity_snapshot_dict(snapshot)}
+
+
 def _quality_snapshot_dict(s: QualitySnapshot) -> dict:
     return {
         "department_id": s.department_id, "agent_id": s.agent_id,
@@ -1322,12 +1439,13 @@ def list_idle_agents(
 def get_departments_capacity(lookback_hours: float = 24.0):
     """6개 투자본부 전체의 Langfuse 기반 Capacity(용량) 관측(2026-08-24).
 
-    `workforce.capacity_snapshots` writer가 아직 없어(P1-2 미착수) 아래
-    GET .../scorecard의 capacity 필드는 항상 null이다. idle-agents와 같은
-    원리로 Langfuse 실행 이벤트를 직접 집계해 그 빈 자리를 메운다 - 별도
-    DB Snapshot 파이프라인을 새로 놓지 않는다. queue_p95_ms는 이 경로에서
-    항상 None이다(observability.py DepartmentCapacityReport 참고 - 대기열
-    진입 시점을 재는 계측이 없다).
+    2026-08-25 부터 `workforce.capacity_snapshots`에 writer(POST
+    /workforce/v1/capacity-snapshots)가 생겼지만, 아직 그쪽에 보고를 넣는 호출자가
+    없어 GET .../scorecard의 capacity 필드는 여전히 null이 나오는 경우가 흔하다.
+    이 엔드포인트는 그 자리를 대신 메우는 별도 경로다 - idle-agents와 같은 원리로
+    Langfuse 실행 이벤트를 직접 집계한다. queue_p95_ms는 이 경로에서 항상 None이다
+    (observability.py DepartmentCapacityReport 참고 - 대기열 진입 시점을 재는 계측이
+    없다).
     """
 
     if lookback_hours <= 0:
@@ -1791,5 +1909,53 @@ if __name__ == "__main__":
           "(저장소 없음 501, 보고자 없음 422, 음수 토큰 422, 역전 window 422, "
           "누락 필드 422, 조회 501)")
 
-    print("ok - Workforce Domain API 8개 영역(access/improvements/scorecard/budget/roster/"
-          "P0-3 게이트/workforce-plan/cost-snapshots) 점검 통과")
+    # --- capacity-snapshots writer (2026-08-25) ----------------------------------------
+    #
+    # cost-snapshots writer 자체 점검과 같은 범위 제한 - DATABASE_URL 없이 501/422
+    # 경계만 지킨다. 실 DB 왕복은 postgres_scorecard_repository.py 담당.
+    _capacity_body = {
+        "department_id": "33333333-3333-3333-3333-333333333333",
+        "window_start": "2026-08-25T00:00:00+00:00",
+        "window_end": "2026-08-25T01:00:00+00:00",
+        "recorded_by": "platform-metering",
+        "arrivals": 5, "utilization": "0.5",
+    }
+
+    r38 = client.post("/workforce/v1/capacity-snapshots", json=_capacity_body)
+    assert r38.status_code == 501, r38.text  # 저장소 없이 "보고 완료"로 보이면 안 된다
+
+    r39 = client.post("/workforce/v1/capacity-snapshots",
+                      json={**_capacity_body, "recorded_by": ""})
+    assert r39.status_code == 422, r39.text
+
+    r40 = client.post("/workforce/v1/capacity-snapshots",
+                      json={**_capacity_body, "arrivals": -1})
+    assert r40.status_code == 422, r40.text
+
+    r41 = client.post("/workforce/v1/capacity-snapshots",
+                      json={**_capacity_body,
+                            "window_start": _capacity_body["window_end"],
+                            "window_end": _capacity_body["window_start"]})
+    assert r41.status_code == 422, r41.text  # 역전 window - DB 안 붙었다는 이유로 가리지 않는다
+
+    r42 = client.post("/workforce/v1/capacity-snapshots",
+                      json={k: v for k, v in _capacity_body.items()
+                            if k not in ("department_id", "agent_id")})
+    assert r42.status_code == 422, r42.text  # department_id/agent_id 둘 다 없는 보고는 거부
+
+    r43 = client.get("/workforce/v1/capacity-snapshots",
+                     params={"window_start": _capacity_body["window_start"],
+                             "window_end": _capacity_body["window_end"],
+                             "department_id": _capacity_body["department_id"]})
+    assert r43.status_code == 501, r43.text
+
+    r44 = client.get("/workforce/v1/capacity-snapshots",
+                     params={"window_start": _capacity_body["window_start"],
+                             "window_end": _capacity_body["window_end"]})
+    assert r44.status_code == 400, r44.text  # 조회도 department_id/agent_id 없이는 400
+    print("ok - capacity-snapshots writer 7개 시나리오 통과 "
+          "(저장소 없음 501, 보고자 없음 422, 음수 arrivals 422, 역전 window 422, "
+          "subject 없음 422, 조회 501, 조회 subject 없음 400)")
+
+    print("ok - Workforce Domain API 9개 영역(access/improvements/scorecard/budget/roster/"
+          "P0-3 게이트/workforce-plan/cost-snapshots/capacity-snapshots) 점검 통과")

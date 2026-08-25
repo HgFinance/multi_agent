@@ -100,9 +100,15 @@ Scorecard 관찰의 실제 API 배선.
   - 실제 조회/기록은 `postgres_scorecard_repository.py`의 `append_quality_snapshot()`/
     `list_quality_snapshots_by_department()`/`list_quality_snapshots_by_agent()`가 맡는다.
     cost 와 다른 점은 **수치를 누가 만드느냐**다 — quality 의 `finding_count`/`rework_rate`는
-    인사팀이 직접 집계하고, cost 의 토큰·금액은 플랫폼이 만든 것을 받아 적기만 한다
-    (`append_cost_snapshot`). `capacity_snapshots`에는 아직 writer 가 없다(P1-2 미착수) —
-    지금은 `scorecard/observability.py`가 Langfuse 실행 이벤트를 직접 집계해 그 자리를 메운다.
+    인사팀이 직접 집계하고, cost/capacity 는 플랫폼이 만든 것을 받아 적기만 한다
+    (`append_cost_snapshot`/`append_capacity_snapshot`, 2026-08-25). `capacity_snapshots`도
+    cost 와 같은 계약이다 — `recorded_by` 필수, 같은 `(department, agent, window)` 재보고는
+    갱신(`supabase/migrations/20260825000200_...`). `department_id`/`agent_id`는 DDL check 상
+    하나만 있어도 되므로 unique index 는 `nulls not distinct`를 쓴다(일반 unique 는 null 을
+    서로 다른 값으로 봐서 같은 부서 단위 재보고를 막지 못한다). 창구는
+    `POST/GET /workforce/v1/capacity-snapshots`. 여전히 `scorecard/observability.py`가
+    Langfuse 실행 이벤트를 직접 집계해 `GET .../departments/capacity`를 메우는 우회 경로도
+    남아 있다 — DB Snapshot 쪽에 보고를 넣는 호출자가 아직 없어서다.
 
 ## planning/
 

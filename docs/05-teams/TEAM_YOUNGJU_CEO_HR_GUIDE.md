@@ -127,7 +127,7 @@ not_started — `committee.close_session()`의 `CommitteeDecisionRecord`로 대�
 - Provisioning 성공을 API flag만으로 간주하지 말고 실제 권한 조회로 확인한다.
 - Quality Snapshot과 Workforce Plan을 실제 데이터에서 집계·저장한다. 빈 집계를 정상 운영 상태로 표시하지 않는다.
 - Cost Snapshot은 인사팀이 집계하지 않는다. 플랫폼 과금 계측의 보고를 `POST /workforce/v1/agents/{agent_id}/cost-snapshots`로 받아 적고, `recorded_by`로 보고자를 남긴다(2026-08-25). 같은 창 재보고는 행을 늘리지 않고 갱신한다 — Scorecard reader가 창 안을 합산하므로 중복 행은 곧 사용량 2배다.
-- `workforce.capacity_snapshots`에는 아직 writer가 없다. Langfuse 직접 집계(`GET /workforce/v1/departments/capacity`)가 그 자리를 메우고 있고, DB Snapshot으로 옮길지는 미결이다.
+- Capacity Snapshot도 같은 계약이다(2026-08-25). `POST /workforce/v1/capacity-snapshots`로 받아 적고 `recorded_by`를 남긴다. `department_id`/`agent_id`는 하나만 있어도 되므로(둘 다 없으면 거부) unique key가 `nulls not distinct`다. 같은 창 재보고는 갱신 — reader가 창 안에서 최신 1건을 고르므로 중복 행은 재보고 이력만 늘린다. Langfuse 직접 집계(`GET /workforce/v1/departments/capacity`)는 우회 경로로 그대로 남아 있다 — DB Snapshot 쪽에 실제로 보고를 넣는 호출자가 아직 없어서다.
 - Budget/Scorecard의 추천은 승인 명령이 아니라 설명·권고다.
 
 ### P1-3. 공통 CI·Frontend 경계
@@ -145,7 +145,7 @@ not_started — `committee.close_session()`의 `CommitteeDecisionRecord`로 대�
 | 동규 | Actor identity, Policy version, 승인·veto·revoke evidence | Risk/QA 운영 승인 금지 |
 | HR → 전 부서 | Profile/Tool/Model Version과 Access 상태 | Worker `ACTIVE` 금지 |
 | Platform/IAM → HR | Provisioning·회수·검증 이벤트 | Access를 부여된 것으로 표시 금지 |
-| Platform → HR | 창별 토큰·모델/도구/인프라 비용과 보고자(`cost-snapshots`) | Budget/Scorecard를 `UNKNOWN`으로 두고 0으로 채우지 않는다 |
+| Platform → HR | 창별 토큰·모델/도구/인프라 비용과 보고자(`cost-snapshots`), 창별 arrivals·지연·재시도율·오류율·가동률과 보고자(`capacity-snapshots`) | Budget/Scorecard를 `UNKNOWN`으로 두고 0으로 채우지 않는다 |
 
 ## 5. 검증
 

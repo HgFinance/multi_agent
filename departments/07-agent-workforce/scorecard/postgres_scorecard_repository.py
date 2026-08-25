@@ -13,17 +13,21 @@ Snapshot을 real DB에서 읽어오는 역할만 하고, 판정 로직(assess_bu
 scorecard)은 그대로 호출자가 그 결과를 넘겨 쓴다.
 
 불변식:
-  1. workforce.cost_snapshots.agent_id/profile_version_id는 not null FK다 - 등록되지
-     않은 agent_id로는 애초에 행이 존재할 수 없다(쓰기가 아니라 읽기 전용 Repository라
-     이 모듈이 직접 만들 일은 없다).
+  1. workforce.cost_snapshots.agent_id/profile_version_id, workforce.capacity_snapshots의
+     department_id/agent_id는 FK다 - 등록되지 않은 값으로 보고하면 append_*_snapshot이
+     UnknownCostSnapshotSubjectError/UnknownCapacitySnapshotSubjectError로 거부한다
+     (재시도해도 낫지 않는 호출자 오류를 일시 장애와 구분한다).
   2. workforce.capacity_snapshots는 department_id 또는 agent_id 중 하나 이상 있어야
-     한다(DDL check) - department 단위 질의와 agent 단위 질의를 분리한다.
+     한다(DDL check) - department 단위 질의/보고와 agent 단위 질의/보고를 분리한다.
   3. cost.py의 불변식 3(Snapshot 없음을 0으로 채우지 않는다)을 그대로 따른다 - 조회
      결과가 빈 목록/None이면 그대로 반환하고 여기서 기본값을 만들지 않는다.
+  4. cost/capacity 모두 같은 창 재보고는 새 행이 아니라 갱신이다 - reader가 cost는
+     창 안을 합산하고 capacity는 창 안에서 최신 1건을 고르므로, 중복 행은 각각
+     사용량 2배·최신 판정 모호로 이어진다.
 
 자체 점검: python departments/07-agent-workforce/scorecard/postgres_scorecard_repository.py
-  - DATABASE_URL 없으면 import 와 append_cost_snapshot 의 거부 조건만 확인한다
-    (거부는 DB 를 타기 전에 걸리므로 DSN 없이도 의미가 있다).
+  - DATABASE_URL 없으면 import 와 append_cost_snapshot/append_capacity_snapshot의 거부
+    조건만 확인한다 (거부는 DB 를 타기 전에 걸리므로 DSN 없이도 의미가 있다).
   - 있으면 실제 workforce.agent_profiles/departments 행을 찾아 cost_snapshots/
     capacity_snapshots에 자체 점검용 행을 넣고 조회 왕복 + 같은 창 재보고 멱등성을
     검증한 뒤 정리(delete)한다 (두 테이블 다 append-only 트리거가 없어 삭제 가능 -
@@ -60,6 +64,18 @@ class UnknownCostSnapshotSubjectError(CostSnapshotPersistenceError):
     """
 
 
+class CapacitySnapshotPersistenceError(RuntimeError):
+    """workforce.capacity_snapshots 기록에 실패한 경우."""
+
+
+class UnknownCapacitySnapshotSubjectError(CapacitySnapshotPersistenceError):
+    """등록되지 않은 department_id/agent_id 로 용량을 보고한 경우.
+
+    UnknownCostSnapshotSubjectError 와 같은 이유로 분리한다 - 재시도해도 낫지 않는
+    호출자 오류다.
+    """
+
+
 @lru_cache(maxsize=1)
 def _load_postgres_driver() -> Any:
     try:
@@ -73,20 +89,22 @@ def _load_postgres_driver() -> Any:
 
 
 class PostgresScorecardRepository:
-    """`workforce.cost_snapshots`/`workforce.quality_snapshots` 읽기/쓰기 +
-    `workforce.capacity_snapshots` 읽기 전용 조회.
+    """`workforce.cost_snapshots`/`workforce.capacity_snapshots`/`workforce.quality_snapshots`
+    읽기/쓰기.
 
     F27 담당 분리는 그대로다 - **수치를 만드는 주체**와 **행을 적는 주체**는 다르다.
-    cost 의 토큰·금액은 여전히 플랫폼/인프라의 과금 계측이 만들고, 인사팀은 그것을
-    귀속·Scorecard·권고에 쓴다. append_cost_snapshot 은 그 보고를 받아 적는 창구일
-    뿐 수치를 계산하지 않는다 - 그래서 recorded_by 를 반드시 요구한다(누가 보고한
-    값인지 없이 적으면 인사팀이 지어낸 것과 구별되지 않는다). quality 는 반대로
-    인사팀이 직접 집계해서 쓴다(quality_snapshots 테이블 주석: "여기 채우는 값은
-    인사팀이 집계하는 finding_count/rework_rate 뿐").
+    cost/capacity 의 토큰·금액·지연·재시도율은 여전히 플랫폼/인프라의 계측이 만들고,
+    인사팀은 그것을 귀속·Scorecard·권고에 쓴다. append_cost_snapshot/
+    append_capacity_snapshot 은 그 보고를 받아 적는 창구일 뿐 수치를 계산하지
+    않는다 - 그래서 recorded_by 를 반드시 요구한다(누가 보고한 값인지 없이 적으면
+    인사팀이 지어낸 것과 구별되지 않는다). quality 는 반대로 인사팀이 직접
+    집계해서 쓴다(quality_snapshots 테이블 주석: "여기 채우는 값은 인사팀이
+    집계하는 finding_count/rework_rate 뿐").
 
-    capacity 에는 여전히 쓰기가 없다 - writer 주체가 아직 정해지지 않았고
-    (P1-2 미착수), 지금은 observability.py 가 Langfuse 실행 이벤트를 직접 집계해
-    그 자리를 메우고 있다. 그쪽을 DB Snapshot 으로 옮길지는 별도 결정이다."""
+    2026-08-25 이전에는 capacity 에 쓰기가 없었고 observability.py 가 Langfuse 실행
+    이벤트를 직접 집계해 GET .../scorecard 의 capacity 자리를 메웠다. 그 우회
+    경로는 여기서 건드리지 않는다 - append_capacity_snapshot 은 DB Snapshot 이라는
+    두 번째 경로를 추가할 뿐이다."""
 
     def __init__(self, pool: Any) -> None:
         self._pool = pool
@@ -232,6 +250,83 @@ class PostgresScorecardRepository:
             recorded_by=recorded_by,
         )
 
+    def append_capacity_snapshot(self, snapshot: CapacitySnapshot) -> tuple[str, bool]:
+        """플랫폼이 보고한 용량 계측 1건을 적는다. (snapshot_id, 새로 만들었는가) 반환.
+
+        get_capacity_snapshot 은 창 안에서 window_end 가 가장 늦은 행 1개를 고른다 -
+        같은 (department_id, agent_id, window_start, window_end)를 다시 보고하면
+        **행을 늘리지 않고 갱신한다**. 새 행으로 쌓이면 재보고 이력이 무한히 늘고,
+        동일 window_end 동률이 생기면 어느 쪽이 최신인지 모호해진다
+        (20260825000200 migration 의 `nulls not distinct` unique index가 그 키다 -
+        department_id/agent_id 는 DDL check 상 하나만 있어도 되므로 null 도 값으로
+        취급해야 부서 단위/Agent 단위 재보고가 각각 막힌다).
+
+        수치 자체는 검증하지 않는다(그건 플랫폼 소유다). 대신 **적으면 안 되는 것**만
+        막는다 - 보고자 없는 행, 역전된 창, department/agent 둘 다 없는 행, 음수
+        (개발 원칙 9: 실패는 거래 확대가 아니라 차단 방향으로 - 음수 재시도율/오류율은
+        실제보다 한가한 것처럼 읽힌다).
+        """
+        if snapshot.recorded_by is None or not snapshot.recorded_by.strip():
+            raise ValueError("recorded_by 가 없으면 용량을 적을 수 없다 - 플랫폼 보고자를 남겨야 한다")
+        if snapshot.window_end <= snapshot.window_start:
+            raise ValueError("window_end 는 window_start 이후여야 한다")
+        if snapshot.department_id is None and snapshot.agent_id is None:
+            raise ValueError("department_id/agent_id 중 하나는 있어야 한다 (DDL check와 동일)")
+        if snapshot.arrivals < 0:
+            raise ValueError("arrivals 는 음수일 수 없다")
+        for _label, _value in (
+            ("queue_p95_ms", snapshot.queue_p95_ms), ("duration_p95_ms", snapshot.duration_p95_ms),
+            ("retry_rate", snapshot.retry_rate), ("error_rate", snapshot.error_rate),
+            ("utilization", snapshot.utilization),
+        ):
+            if _value is not None and _value < 0:
+                raise ValueError(f"{_label} 는 음수일 수 없다")
+
+        conn = self._pool.getconn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    insert into workforce.capacity_snapshots (
+                        department_id, agent_id, window_start, window_end, arrivals,
+                        queue_p95_ms, duration_p95_ms, retry_rate, error_rate, utilization,
+                        recorded_by
+                    ) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    on conflict (department_id, agent_id, window_start, window_end)
+                    do update set
+                        arrivals = excluded.arrivals,
+                        queue_p95_ms = excluded.queue_p95_ms,
+                        duration_p95_ms = excluded.duration_p95_ms,
+                        retry_rate = excluded.retry_rate,
+                        error_rate = excluded.error_rate,
+                        utilization = excluded.utilization,
+                        recorded_by = excluded.recorded_by
+                    returning snapshot_id, (xmax = 0) as inserted
+                    """,
+                    (snapshot.department_id, snapshot.agent_id,
+                     snapshot.window_start, snapshot.window_end, snapshot.arrivals,
+                     str(snapshot.queue_p95_ms) if snapshot.queue_p95_ms is not None else None,
+                     str(snapshot.duration_p95_ms) if snapshot.duration_p95_ms is not None else None,
+                     str(snapshot.retry_rate) if snapshot.retry_rate is not None else None,
+                     str(snapshot.error_rate) if snapshot.error_rate is not None else None,
+                     str(snapshot.utilization) if snapshot.utilization is not None else None,
+                     snapshot.recorded_by),
+                )
+                snapshot_id, inserted = cur.fetchone()
+            conn.commit()
+            return str(snapshot_id), bool(inserted)
+        except Exception as exc:  # noqa: BLE001
+            conn.rollback()
+            # 23503 = foreign_key_violation. UnknownCostSnapshotSubjectError 와 같은 이유.
+            if getattr(exc, "pgcode", None) == "23503":
+                raise UnknownCapacitySnapshotSubjectError(
+                    f"등록되지 않은 department_id/agent_id: department_id={snapshot.department_id}, "
+                    f"agent_id={snapshot.agent_id}"
+                ) from exc
+            raise CapacitySnapshotPersistenceError(f"capacity_snapshot 기록 실패: {exc}") from exc
+        finally:
+            self._pool.putconn(conn)
+
     def get_capacity_snapshot(
         self, *, department_id: str | None = None, agent_id: str | None = None,
         window_start: datetime, window_end: datetime,
@@ -248,7 +343,8 @@ class PostgresScorecardRepository:
                     cur.execute(
                         """
                         select department_id, agent_id, window_start, window_end, arrivals,
-                               queue_p95_ms, duration_p95_ms, retry_rate, error_rate, utilization
+                               queue_p95_ms, duration_p95_ms, retry_rate, error_rate, utilization,
+                               recorded_by
                         from workforce.capacity_snapshots
                         where department_id = %s and window_start >= %s and window_end <= %s
                         order by window_end desc
@@ -260,7 +356,8 @@ class PostgresScorecardRepository:
                     cur.execute(
                         """
                         select department_id, agent_id, window_start, window_end, arrivals,
-                               queue_p95_ms, duration_p95_ms, retry_rate, error_rate, utilization
+                               queue_p95_ms, duration_p95_ms, retry_rate, error_rate, utilization,
+                               recorded_by
                         from workforce.capacity_snapshots
                         where agent_id = %s and window_start >= %s and window_end <= %s
                         order by window_end desc
@@ -277,7 +374,7 @@ class PostgresScorecardRepository:
     @staticmethod
     def _to_capacity_snapshot(db_row: tuple) -> CapacitySnapshot:
         (department_id, agent_id, window_start, window_end, arrivals, queue_p95_ms,
-         duration_p95_ms, retry_rate, error_rate, utilization) = db_row
+         duration_p95_ms, retry_rate, error_rate, utilization, recorded_by) = db_row
         return CapacitySnapshot(
             window_start=window_start, window_end=window_end, arrivals=arrivals,
             queue_p95_ms=Decimal(queue_p95_ms) if queue_p95_ms is not None else None,
@@ -287,6 +384,7 @@ class PostgresScorecardRepository:
             utilization=Decimal(utilization) if utilization is not None else None,
             department_id=str(department_id) if department_id else None,
             agent_id=str(agent_id) if agent_id else None,
+            recorded_by=recorded_by,
         )
 
 
@@ -409,6 +507,27 @@ if __name__ == "__main__":
     _reject("음수 model_cost", model_cost=Decimal("-0.01"))
     print("ok - append_cost_snapshot 거부 조건 6개 통과")
 
+    def _reject_capacity(label: str, **overrides) -> None:
+        base = dict(
+            department_id="d1", agent_id=None, window_start=_t0, window_end=_t1,
+            arrivals=5, queue_p95_ms=None, duration_p95_ms=None, retry_rate=None,
+            error_rate=None, utilization=Decimal("0.5"), recorded_by="platform-metering",
+        )
+        base.update(overrides)
+        try:
+            _pure.append_capacity_snapshot(CapacitySnapshot(**base))
+            raise AssertionError(f"{label} 이 통과함")
+        except ValueError:
+            pass
+
+    _reject_capacity("보고자 없는 용량", recorded_by=None)
+    _reject_capacity("공백뿐인 보고자", recorded_by="   ")
+    _reject_capacity("역전된 window", window_start=_t1, window_end=_t0)
+    _reject_capacity("department/agent 둘 다 없음", department_id=None, agent_id=None)
+    _reject_capacity("음수 arrivals", arrivals=-1)
+    _reject_capacity("음수 utilization", utilization=Decimal("-0.01"))
+    print("ok - append_capacity_snapshot 거부 조건 6개 통과")
+
     dsn = os.environ.get("DATABASE_URL")
     if not dsn:
         print("DATABASE_URL 미설정 - 왕복 검증은 건너뛴다")
@@ -464,22 +583,21 @@ if __name__ == "__main__":
         assert created, "첫 보고는 새 행이어야 한다"
         print("ok - append_cost_snapshot 신규 기록 (실 DB) 통과")
 
-        conn = repo._pool.getconn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    insert into workforce.capacity_snapshots
-                      (department_id, window_start, window_end, arrivals, utilization)
-                    values (%s, %s, %s, 5, 0.5)
-                    returning snapshot_id
-                    """,
-                    (department_id, t0, t1),
-                )
-                capacity_snapshot_id = cur.fetchone()[0]
-            conn.commit()
-        finally:
-            repo._pool.putconn(conn)
+        # 2.5) capacity_snapshots도 2026-08-25 부터 raw INSERT 가 아니라
+        #      append_capacity_snapshot 을 탄다 - 같은 이유(자체 점검이 실제 writer
+        #      경로를 지나야 writer 결함을 잡는다).
+        def _self_check_capacity(**overrides) -> CapacitySnapshot:
+            base = dict(
+                department_id=department_id, agent_id=None, window_start=t0, window_end=t1,
+                arrivals=5, queue_p95_ms=None, duration_p95_ms=None, retry_rate=None,
+                error_rate=None, utilization=Decimal("0.5"), recorded_by="self-check",
+            )
+            base.update(overrides)
+            return CapacitySnapshot(**base)
+
+        capacity_snapshot_id, cap_created = repo.append_capacity_snapshot(_self_check_capacity())
+        assert cap_created, "첫 용량 보고는 새 행이어야 한다"
+        print("ok - append_capacity_snapshot 신규 기록 (실 DB) 통과")
 
         try:
             by_agent = repo.list_cost_snapshots_by_agent(agent_id, window_start=t0, window_end=t1)
@@ -514,7 +632,30 @@ if __name__ == "__main__":
 
             cap = repo.get_capacity_snapshot(department_id=department_id, window_start=t0, window_end=t1)
             assert cap is not None and cap.arrivals == 5
+            assert cap.recorded_by == "self-check", "보고자가 왕복에서 사라졌다"
             print("ok - get_capacity_snapshot (실 DB) 통과")
+
+            # 4.5) 같은 창 재보고 - capacity 도 새 행이 아니라 갱신이어야 한다
+            #      (nulls not distinct unique index 가 department_id 만 있고
+            #      agent_id 는 null 인 행끼리도 충돌시킨다).
+            again_cap_id, again_cap_created = repo.append_capacity_snapshot(
+                _self_check_capacity(arrivals=9, utilization=Decimal("0.9"))
+            )
+            assert again_cap_created is False, "같은 창 재보고가 새 용량 행을 만들었다"
+            assert str(again_cap_id) == str(capacity_snapshot_id), "재보고가 다른 행으로 갔다"
+            recapped = repo.get_capacity_snapshot(department_id=department_id, window_start=t0, window_end=t1)
+            assert recapped.arrivals == 9, "재보고 값이 반영되지 않았다"
+            print("ok - 같은 창 재보고가 용량 행을 늘리지 않고 갱신 (실 DB) 통과")
+
+            # 4.6) 등록되지 않은 department 로 온 보고는 일시 장애와 구분해서 거부한다.
+            try:
+                repo.append_capacity_snapshot(
+                    _self_check_capacity(department_id="00000000-0000-0000-0000-000000000000")
+                )
+                raise AssertionError("등록되지 않은 department_id 가 통과함")
+            except UnknownCapacitySnapshotSubjectError:
+                pass
+            print("ok - 미등록 department_id 보고 거부 (실 DB) 통과")
 
             # 5) 불변식 2 - department/agent 둘 다 없으면 거부.
             try:
