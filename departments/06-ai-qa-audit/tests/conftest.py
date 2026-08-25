@@ -23,3 +23,7 @@ from __future__ import annotations
 import os
 
 os.environ["LANGFUSE_TRACING"] = "false"
+# Earlier-collected CEO modules load the repository .env into the shared
+# pytest process. The QA app must never interpret that container-only DSN as
+# permission to open a production repository during test collection.
+os.environ["RISK_QA_RUNTIME"] = "test"

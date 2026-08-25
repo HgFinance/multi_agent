@@ -218,8 +218,8 @@ def test_request_time_citations_do_not_persist_external_responses() -> None:
         assert forbidden not in snapshot_source
     assert external._snapshot("news_search", {"q": "x"}, {"items": [1]})
 
-    # DART corpCode.xml도 외부 응답이다. 종목코드 해석을 빠르게 하려고 파일에
-    # 캐시하면 뉴스·공시 본문만 비영속이라는 반쪽 경계가 된다.
+    # DART corpCode.xml도 외부 응답이다. helper로 파일 I/O를 숨기는 우회까지
+    # 막아 뉴스·공시와 같은 비영속 경계를 유지한다.
     corp_index_source = inspect.getsource(external._load_corp_index)
     for forbidden in (
         "read_text(",
@@ -229,6 +229,13 @@ def test_request_time_citations_do_not_persist_external_responses() -> None:
         "MCP_CORP_CACHE",
     ):
         assert forbidden not in corp_index_source
+    module_source = EXTERNAL_SOURCES_PATH.read_text(encoding="utf-8")
+    for forbidden in (
+        "DART_CORP_INDEX_CACHE",
+        "_load_corp_index_cache",
+        "_save_corp_index_cache",
+    ):
+        assert forbidden not in module_source
 
 
 def test_dart_corp_index_failure_cooldown_prevents_duplicate_fetches(monkeypatch) -> None:

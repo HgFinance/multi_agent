@@ -173,9 +173,9 @@ MARKET_BUY / STRUCTURAL / DISPOSAL / UNCLASSIFIED 로 나누고 **장내 순증�
     docker inspect <container> \
       --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}'
 
-**DART 기업색인**은 첫 조회에 231초가 걸린다. 24시간 디스크 캐시가 있어
-(`DART_CORP_INDEX_CACHE`, 기본 `/tmp/dart_corp_index.json`) 두 번째부터 0초다.
-컨테이너를 새로 만들면 `/tmp` 가 비므로 다시 한 번 문다 — 그 실행만 느리다.
+**DART 기업색인**은 첫 조회에 231초가 걸린다. 외부 응답 비영속 계약 때문에
+프로세스 메모리에서만 재사용하므로 같은 프로세스의 두 번째 조회부터 빠르다.
+컨테이너를 새로 만들면 다시 한 번 조회한다 — 그 실행만 느리다.
 
 ## 실행
 

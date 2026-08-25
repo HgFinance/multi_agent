@@ -12,12 +12,10 @@ from fastapi.testclient import TestClient
 
 from tests.security.service_auth_test_utils import make_token
 
-
 TRADING_ROOT = Path(__file__).resolve().parents[2] / "departments" / "02-trading"
 sys.path.insert(0, str(TRADING_ROOT / "api"))
 sys.modules.pop("app", None)
 import app as trading_api  # noqa: E402
-
 
 SECRET = "test-internal-trading-auth-secret-0123456789"
 USER_PROOF_SECRET = "test-user-directive-proof-secret-0123456789"
@@ -216,64 +214,35 @@ def test_trading_hermes_intent_scope_cannot_approve_submit_fill_or_cancel(
 
 
 @pytest.mark.parametrize(
-    ("headers", "expected_code"),
+    ("auth_case", "expected_code"),
     [
-        (
-            _headers(
-                subject="svc-trading-hermes",
-                department="trading-department",
-                service="trading-hermes",
-                scopes=["trading.intent.write"],
-                issuer="wrong-issuer",
-            ),
-            "TRADING_INTERNAL_AUTH_ISSUER_DENIED",
-        ),
-        (
-            _headers(
-                subject="svc-trading-hermes",
-                department="trading-department",
-                service="trading-hermes",
-                scopes=["trading.intent.write"],
-                audience="wrong-audience",
-            ),
-            "TRADING_INTERNAL_AUTH_AUDIENCE_DENIED",
-        ),
-        (
-            _headers(
-                subject="svc-trading-hermes",
-                department="trading-department",
-                service="other-service",
-                scopes=["trading.intent.write"],
-            ),
-            "TRADING_INTERNAL_AUTH_IDENTITY_DENIED",
-        ),
-        (
-            _headers(
-                subject="svc-trading-hermes",
-                department="trading-department",
-                service="trading-hermes",
-                scopes=["trading.order.submit"],
-            ),
-            "TRADING_INTERNAL_AUTH_SCOPE_DENIED",
-        ),
-        (
-            _headers(
-                subject="svc-trading-hermes",
-                department="trading-department",
-                service="trading-hermes",
-                scopes=["trading.intent.write"],
-                issued_at=int(time.time()) - 120,
-                expires_at=int(time.time()) - 60,
-            ),
-            "TRADING_INTERNAL_AUTH_EXPIRED",
-        ),
+        ("issuer", "TRADING_INTERNAL_AUTH_ISSUER_DENIED"),
+        ("audience", "TRADING_INTERNAL_AUTH_AUDIENCE_DENIED"),
+        ("identity", "TRADING_INTERNAL_AUTH_IDENTITY_DENIED"),
+        ("scope", "TRADING_INTERNAL_AUTH_SCOPE_DENIED"),
+        ("expired", "TRADING_INTERNAL_AUTH_EXPIRED"),
     ],
 )
 def test_bad_issuer_audience_identity_scope_and_expiry_are_denied(
     client: TestClient,
-    headers: dict[str, str],
+    auth_case: str,
     expected_code: str,
 ) -> None:
+    now = int(time.time())
+    headers = _headers(
+        subject="svc-trading-hermes",
+        department="trading-department",
+        service=("other-service" if auth_case == "identity" else "trading-hermes"),
+        scopes=(
+            ["trading.order.submit"]
+            if auth_case == "scope"
+            else ["trading.intent.write"]
+        ),
+        issuer=("wrong-issuer" if auth_case == "issuer" else ISSUER),
+        audience=("wrong-audience" if auth_case == "audience" else AUDIENCE),
+        issued_at=(now - 120 if auth_case == "expired" else None),
+        expires_at=(now - 60 if auth_case == "expired" else None),
+    )
     response = client.post("/trading/v1/order-intents", json=_intent_body(), headers=headers)
     assert response.status_code in {401, 403}
     assert response.json()["error_code"] == expected_code

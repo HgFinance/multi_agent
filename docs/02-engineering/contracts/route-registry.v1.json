@@ -191,6 +191,10 @@
         },
         {
           "method": "GET",
+          "path": "/levels/{symbol}"
+        },
+        {
+          "method": "GET",
           "path": "/microstructure/{symbol}"
         },
         {

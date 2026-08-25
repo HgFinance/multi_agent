@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-
 ROOT = Path(__file__).resolve().parents[1]
 MCP_SERVER = ROOT / "departments" / "01-research" / "api" / "mcp_server.py"
 
@@ -27,6 +26,7 @@ def test_default_holdings_evidence_is_on_demand_and_price_only_uses_market_api(
     foreign_evidence = ModuleType("evidence")
     foreign_evidence.__path__ = []
     monkeypatch.setitem(sys.modules, "evidence", foreign_evidence)
+    monkeypatch.setenv("MARKET_API_URL", "http://127.0.0.1:8036")
     mcp = _load_mcp_server()
     calls: list[tuple[str, dict]] = []
     external = ModuleType("external_sources")
