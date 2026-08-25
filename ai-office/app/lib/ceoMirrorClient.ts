@@ -3,8 +3,8 @@
  * UI components can consume this without knowing Hermes or Kanban internals.
  */
 
-import { bffFetch, getAuthenticatedSubject } from "./bffClient";
-import { subscribeAuthenticatedSse } from "./sseClient";
+import { bffFetch, getCurrentUserId } from "./bffClient";
+import { subscribeBffSse } from "./sseClient";
 
 export type MirrorSource = "web" | "discord";
 export type MirrorLane = "execution" | "evaluation";
@@ -67,12 +67,12 @@ export function withVerifiedCeoActor(input: CeoMirrorIngress, actorId: string) {
 }
 
 export async function submitCeoMirror(input: CeoMirrorIngress) {
-  const actorId = await getAuthenticatedSubject();
+  const actorId = getCurrentUserId();
   const response = await bffFetch("/ui/ceo/ingress", {
     method: "POST",
     cache: "no-store",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
-    // The authenticated subject wins even if an untyped caller tries to inject identity fields.
+    // The configured demo subject wins even if an untyped caller tries to inject identity fields.
     body: JSON.stringify(withVerifiedCeoActor(input, actorId)),
   });
   const body: unknown = await response.json().catch(() => null);
@@ -108,7 +108,7 @@ export function subscribeCeoMirror(
     "IMPROVEMENT_CANDIDATE", "REGRESSION_RESULT", "PROMOTION_RESULT",
   ];
   const acceptedTypes = new Set<MirrorEventType>(eventTypes);
-  return subscribeAuthenticatedSse({
+  return subscribeBffSse({
     initialCursor: after,
     path(cursor) {
       const params = new URLSearchParams({ request_id: requestId });

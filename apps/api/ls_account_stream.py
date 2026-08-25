@@ -75,6 +75,7 @@ ENABLE_LS_ORDER_EVENTS = _env_flag("ENABLE_LS_ORDER_EVENTS")
 ENABLE_LS_MARKET_DATA = _env_flag("ENABLE_LS_MARKET_DATA")
 # 거래내역·잔고 조회도 REST만 사용한다. 실시간 주문 이벤트와 분리한다.
 ENABLE_LS_ACCOUNT_DATA = _env_flag("ENABLE_LS_ACCOUNT_DATA")
+PORTFOLIO_LIVE_MODE = os.getenv("PORTFOLIO_LIVE_MODE", "broker").strip().casefold()
 MAX_EVENTS = int(os.getenv("LS_ORDER_EVENTS_MAX", "200"))
 # 거래내역 TR은 초당 1건이다. 화면이 3초마다 폴링해도 브로커를 때리지 않도록
 # 응답을 캐시한다 - 확정된 과거 거래라 자주 바뀌지 않는다.
@@ -1430,6 +1431,55 @@ async def _run_feed() -> None:
 # 조회
 # --------------------------------------------------------------------------
 
+def _fixture_portfolio_live() -> dict[str, Any]:
+    """Return a deterministic empty PAPER view for the local mock stack."""
+
+    now = datetime.now(timezone.utc).isoformat()
+    zero_summary = {
+        "buy_quantity": "0",
+        "sell_quantity": "0",
+        "buy_amount": "0",
+        "sell_amount": "0",
+        "total_amount": "0",
+        "total_fee": "0",
+        "total_tax": "0",
+        "total_settlement": "0",
+    }
+    return {
+        "schema_version": "trading.portfolio-live.v1",
+        "environment": "PAPER",
+        "environment_label": "모의투자",
+        "account": {"registered": True, "masked": "모의계좌", "error": None},
+        "stream": {"status": "IDLE", "error": None, "connected_at": None},
+        "orders": {
+            "kinds": [{"kind": kind, "label": KIND_LABELS[kind]} for kind in KINDS],
+            "counts": {kind: 0 for kind in KINDS},
+            "source": "LOCAL_FIXTURE",
+            "error": None,
+            "recent": [],
+        },
+        "holdings": {
+            "as_of": now,
+            "error": None,
+            "synced": True,
+            "drift": [],
+            "net_asset": "0",
+            "realized_pnl": "0",
+            "purchase_amount": "0",
+            "valuation": "0",
+            "valuation_pnl": "0",
+            "rows": [],
+        },
+        "today_activity": {
+            "as_of": now,
+            "error": None,
+            "data": {"trade_count": 0, "summary": zero_summary},
+        },
+        "server_time": now,
+        "authoritative": False,
+        "official_nav_source": "/accounting/v1/ledgers/{ledger_id}",
+    }
+
 def _registered_account() -> str | None:
     """정본은 브로커가 말해 준 값이다. `.env`는 계좌가 여럿일 때의 덮어쓰기용."""
     environment = os.getenv("LS_ENV", "LIVE").strip().upper()
@@ -1440,6 +1490,8 @@ def _registered_account() -> str | None:
 @router.get("/ui/portfolio/live", operation_id="portfolio_live")
 async def portfolio_live(limit: int = 50) -> dict[str, Any]:
     """주문 상태와 브로커 잔고. 화면이 폴링으로 읽는다."""
+    if PORTFOLIO_LIVE_MODE == "fixture":
+        return _fixture_portfolio_live()
     if not ENABLE_LS_ORDER_EVENTS:
         raise HTTPException(
             503,

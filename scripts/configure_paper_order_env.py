@@ -55,7 +55,6 @@ ROTATABLE_MCP_KEYS = (
     "MCP_TRADING_ORDER_API_KEY",
 )
 AWS_REQUIRED_KEYS = (
-    "SUPABASE_URL",
     "HEDGEFUND_TSDB_PASSWORD",
 )
 
@@ -256,14 +255,14 @@ def _runtime_settings(runtime: str) -> dict[str, str]:
     if runtime == "aws":
         return {
             "APP_ENV": "production",
-            "PORTFOLIO_AUTH_MODE": "supabase_jwt",
-            "PORTFOLIO_AUTH_REQUIRED": "true",
+            "PORTFOLIO_AUTH_MODE": "fixture",
+            "PORTFOLIO_AUTH_REQUIRED": "false",
             "PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON": "[]",
             # LS market/account reads use LIVE; order execution remains
             # independently pinned to the local PAPER adapter below.
             # The AWS Compose overlay builds the private control DSN from the
             # local Timescale/PostgreSQL service and this database name.  A
-            # hosted Supabase DATABASE_URL must never be carried into the
+            # A hosted database URL must never be carried into the private
             # operational data plane.
             "HEDGEFUND_CONTROL_DB_NAME": "control",
             **common,

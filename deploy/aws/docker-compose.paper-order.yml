@@ -4,9 +4,8 @@
 #   docker compose --project-name hedgefund --env-file <runtime.env> \
 #     -f docker-compose.yml -f deploy/aws/docker-compose.paper-order.yml ...
 #
-# Hosted Supabase is identity-only.  Both operational databases are private
-# databases in the same EC2 Timescale/PostgreSQL container; applications never
-# receive the hosted Supabase database URL.
+# This overlay is retained for database/runtime reference only. User login and
+# hosted identity are not part of the supported mock-investment application.
 
 x-admin-control-database-url: &admin-control-database-url "postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?HEDGEFUND_TSDB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}"
 x-admin-market-database-url: &admin-market-database-url "postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?HEDGEFUND_TSDB_PASSWORD is required}@timescaledb:5432/market"
@@ -119,20 +118,13 @@ services:
       CONDITIONAL_RULE_DATABASE_ROLE: svc_conditional_rule_orchestrator
       APP_ENV: production
       PORTFOLIO_DATA_MODE: production
-      PORTFOLIO_AUTH_MODE: supabase_jwt
-      PORTFOLIO_AUTH_REQUIRED: "true"
+      PORTFOLIO_AUTH_MODE: fixture
+      PORTFOLIO_AUTH_REQUIRED: "false"
       USER_PAPER_ORDER_WORKFLOW_ENABLED: "true"
       USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED: "true"
       PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: "[]"
       CEO_DISCORD_INGRESS_API_KEY: ${CEO_DISCORD_INGRESS_API_KEY:?CEO_DISCORD_INGRESS_API_KEY is required}
       DISCORD_ACTOR_MAP: ${DISCORD_ACTOR_MAP:?DISCORD_ACTOR_MAP is required}
-      SUPABASE_URL: ${SUPABASE_URL:?Hosted Supabase Auth URL is required}
-      # ES256/RS256 access tokens are verified directly against Auth JWKS, so
-      # browser API keys are optional.  Legacy HS256 tokens still require one
-      # of these public keys at request time; privileged service keys are never
-      # accepted or passed under a service-role setting.
-      SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY:-}
-      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
       # Empty is deliberate for this backend-only deployment: Starlette emits
       # no allow-origin header and rejects browser preflights.  If a UI is
       # deployed later, only its exact HTTPS origin(s) may be supplied.
@@ -164,7 +156,7 @@ services:
       CONDITIONAL_RULE_DATABASE_ROLE: svc_conditional_rule_orchestrator
       APP_ENV: production
       PORTFOLIO_DATA_MODE: production
-      PORTFOLIO_AUTH_MODE: supabase_jwt
+      PORTFOLIO_AUTH_MODE: fixture
 
   conditional-rule-worker:
     depends_on:
@@ -318,7 +310,7 @@ services:
       ORDER_ORCHESTRATOR_DATABASE_ROLE: svc_order_orchestrator
 
   # MemoHarness retention must use the same private control database as the
-  # BFF and supervisor. Hosted Supabase is identity-only in this deployment.
+  # BFF and supervisor.
   memo-harness-retention-worker:
     depends_on: *control-dependency
     environment:

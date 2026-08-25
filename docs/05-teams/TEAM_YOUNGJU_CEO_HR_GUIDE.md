@@ -63,17 +63,13 @@ CEO/HR은 다른 부서의 Risk 거부권, QA 감사권, 주문 제출권, Ledge
 
 **담당:** 영주. **협업:** 동규, Platform/IAM.
 
-> **⚠️ 팀 합의 (2026-08-05) — 이건 실제 로그인 인증이 아니다.** 이 저장소에는 서명된
-> Subject 인증(mTLS/JWT, Supabase Auth 로그인)이 아직 없다 - Platform/IAM이 전체 인증
-> 아키텍처를 결정하기 전까지는 CEO Office 혼자 이 항목을 완전히 닫을 수 없다(설계
-> 공백을 임의로 채우지 않는다). 그래서 팀은 **`supabase/seed.sql`에 심어둔 테스트 회원
-> 행을 "로그인된 사용자"로 간주**하기로 합의했다: `actor_user_id`가 `governance.
-> user_profiles`에 실재하고 `status='ACTIVE'`인지만 결정론적으로 검증한다
-> (`departments/00-ceo-office/src/approval/actor_identity.py`,
-> `UnverifiedActorUserError` → 403). 이건 "서명으로 신원을 증명"이 아니라 "최소한 DB에
-> 실재하는 활성 계정인가"까지만 좁힌 검증이다 - **Production 배포 전 실제 Auth로 반드시
-> 교체해야 한다.** 아래 §6 Release Gate의 "승인자 Identity가 서명/검증됨"은 이 상태로는
-> 체크할 수 없다.
+> **⚠️ 현재 모의투자 범위 — 실제 로그인 인증이 아니다.** 이 저장소는 서명된 외부
+> Subject 인증이나 브라우저 사용자 세션을 구현하지 않는다. 로컬에서는 고정 데모 ID와
+> `governance.user_profiles`의 `ACTIVE` 상태만 결정론적으로 확인한다
+> (`departments/00-ceo-office/src/approval/actor_identity.py`, `UnverifiedActorUserError`
+> → 403). 이것은 공개 서비스의 사용자 인증이 아니며, 실제 운영 인증을 추가하는 것은
+> 별도 범위다. 아래 §6 Release Gate의 "승인자 Identity가 서명/검증됨"은 현재 모의투자
+> 실행의 완료 조건이 아니다.
 
 - Approval/Committee/Case API는 서명된 Subject 또는 검증 가능한 사용자 Identity를 받는다. → **현재는 위 팀 합의로 대체(실재성+ACTIVE만 검증), 서명 검증은 BLOCKED**
 - Subject의 department, role, scope, expiry, approval target을 결정론적으로 검증한다. → department/role/expiry는 기존대로 검증(`_ROLE_DECIDERS`, `is_expired`). scope(Fund 단위 권한 범위)는 `governance.fund_memberships`가 비어 있어 여전히 미검증

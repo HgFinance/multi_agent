@@ -26,8 +26,8 @@ pydantic>=2
 # PAPER order orchestration exposes an authenticated FastMCP endpoint directly;
 # do not rely on the separately installed Hermes CLI to provide this runtime.
 mcp>=1.26,<2
-# Portfolio BFF verifies hosted Supabase Auth access tokens locally via the
-# project's asymmetric JWKS. ``crypto`` supplies RSA/EC/EdDSA verification.
+# Internal service-token helpers use PyJWT. Browser/user login tokens are not
+# implemented by the local mock portfolio stack.
 PyJWT[crypto]>=2.8,<3
 
 # --- Storage clients ---

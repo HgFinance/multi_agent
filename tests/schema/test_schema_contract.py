@@ -195,9 +195,6 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  # Fund 생성 시 보수 발생주의 계정(2100/5200/5300)을 같은
                  # 트랜잭션에서 만들고, 기존 Fund도 idempotent하게 보정한다.
                  "20260818001300_fund_fee_account_provisioning.sql",
-                 # Hosted Supabase owns Auth while the private control DB keeps
-                 # only a PII-minimal verified-subject projection.
-                 "20260818001350_external_auth_subject_projection.sql",
                  # The imported 61-session completed-second archive is a
                  # distinct historical-search authority, never the live
                  # receipt-clock event manifest.
@@ -258,6 +255,13 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  # 복합 PAPER 활성화가 연결된 즉시 주문 상태를 읽을 수
                  # 있도록 조건부 워커에 요청 테이블 SELECT 정책을 준다.
                  "20260824001000_conditional_worker_bundle_request_read.sql",
+                 # Strategy PAPER OMS executor role and its SECURITY DEFINER
+                 # access grant are the next canonical migration pair.
+                 "20260824001100_strategy_paper_oms_runtime.sql",
+                 "20260824001200_strategy_paper_oms_function_grants.sql",
+                 # OMS와 USER_DIRECTIVE 양쪽 outbox를 발행하되 어느 쪽에도
+                 # INSERT 권한이 없는 전용 relay 역할을 둔다.
+                 "20260825000100_trading_outbox_relay_role.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 
@@ -295,21 +299,6 @@ class SupabaseSchemaContractTest(unittest.TestCase):
         self.assertIn("on conflict (fund_id, account_code) do nothing",
                       migration)
         self.assertNotIn("on conflict (account_code)", migration)
-
-    def test_external_auth_subject_is_not_fk_bound_to_local_auth_users(self) -> None:
-        """New hosted-Auth users must not depend on a stale restored auth.users row."""
-
-        migration = (
-            SUPABASE_MIGRATIONS
-            / "20260818001350_external_auth_subject_projection.sql"
-        ).read_text(encoding="utf-8").lower()
-        self.assertIn(
-            "drop constraint if exists user_profiles_user_id_fkey",
-            migration,
-        )
-        self.assertIn("identity_provider", migration)
-        self.assertIn("verified supabase access-token sub", migration)
-        self.assertNotIn("references auth.users", migration)
 
         foundation = (
             SUPABASE_MIGRATIONS / "20260729000100_foundation_reference.sql"

@@ -17,7 +17,6 @@ from fastapi.testclient import TestClient
 from apps.api import current_user as auth
 from apps.api import service_token, trading_client, user_orders
 
-
 SUBJECT = uuid4()
 FUND_ID = uuid4()
 BOOK_ID = uuid4()
@@ -85,9 +84,7 @@ def test_deterministic_parser_classifies_supported_korean_orders(
 
 
 def test_bff_canonicalizes_exact_alphanumeric_krx_codes_but_preserves_names() -> None:
-    action, payload = user_orders.parse_user_order_query(
-        "00088k 5주 시장가 매수"
-    )
+    action, payload = user_orders.parse_user_order_query("00088k 5주 시장가 매수")
     assert action is user_orders.DirectiveAction.PLACE_ORDER
     assert payload["symbol"] == "00088K"
 
@@ -224,7 +221,9 @@ def test_service_proof_rejects_short_secret(monkeypatch) -> None:
         "this-is-an-example-secret-that-is-long-enough",
     ],
 )
-def test_service_proof_rejects_long_placeholder_secret(monkeypatch, secret: str) -> None:
+def test_service_proof_rejects_long_placeholder_secret(
+    monkeypatch, secret: str
+) -> None:
     monkeypatch.setenv("TRADING_SERVICE_AUTH_SECRET", secret)
     with pytest.raises(service_token.TradingProofConfigurationError):
         service_token.trading_proof_settings()
@@ -241,7 +240,9 @@ def _db_connection(row: tuple[object, ...] | None):
     return connection, cursor
 
 
-def test_trading_book_access_fixture_executes_real_uuid_canonicalization(monkeypatch) -> None:
+def test_trading_book_access_fixture_executes_real_uuid_canonicalization(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("APP_ENV", "test")
     monkeypatch.setenv("PORTFOLIO_AUTH_MODE", "fixture")
     monkeypatch.setenv(
@@ -260,9 +261,7 @@ def test_trading_book_access_fixture_executes_real_uuid_canonicalization(monkeyp
             ]
         ),
     )
-    access = auth.require_trading_book_access(
-        str(SUBJECT), str(FUND_ID), str(BOOK_ID)
-    )
+    access = auth.require_trading_book_access(str(SUBJECT), str(FUND_ID), str(BOOK_ID))
     assert access == {
         "user_id": str(SUBJECT),
         "fund_id": str(FUND_ID),
@@ -276,9 +275,7 @@ def test_trading_book_access_fixture_has_no_implicit_book(monkeypatch) -> None:
     monkeypatch.setenv("PORTFOLIO_AUTH_MODE", "fixture")
     monkeypatch.setenv("PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON", "[]")
     with pytest.raises(HTTPException) as error:
-        auth.require_trading_book_access(
-            str(SUBJECT), str(FUND_ID), str(BOOK_ID)
-        )
+        auth.require_trading_book_access(str(SUBJECT), str(FUND_ID), str(BOOK_ID))
     assert error.value.status_code == 403
     assert error.value.detail == "portfolio_trading_book_forbidden"
 
@@ -321,77 +318,6 @@ def test_fixture_trading_books_require_explicit_active_trader_seed(monkeypatch) 
     ]
 
 
-def test_production_trading_book_projection_is_active_and_role_scoped(monkeypatch) -> None:
-    monkeypatch.setenv("APP_ENV", "production")
-    monkeypatch.setenv("PORTFOLIO_AUTH_MODE", "supabase_jwt")
-    monkeypatch.setenv("CONTROL_DATABASE_URL", "postgresql://control/test")
-    connection, cursor = _db_connection(None)
-    cursor.fetchall.return_value = [(str(FUND_ID), str(BOOK_ID), "Main Paper")]
-    with patch.object(auth.psycopg2, "connect", return_value=connection):
-        books = auth.authorized_trading_books(str(SUBJECT))
-    assert books == [
-        {
-            "fund_id": str(FUND_ID),
-            "book_id": str(BOOK_ID),
-            "name": "Main Paper",
-        }
-    ]
-    sql = " ".join(cursor.execute.call_args.args[0].split()).casefold()
-    assert "fm.role = any" in sql
-    assert "f.status = 'active'" in sql
-    assert "b.status = 'active'" in sql
-    assert "fm.effective_from <= now()" in sql
-
-
-def test_trading_book_access_only_allows_active_owner_cio_trader(monkeypatch) -> None:
-    monkeypatch.setenv("APP_ENV", "production")
-    monkeypatch.setenv("PORTFOLIO_AUTH_MODE", "supabase_jwt")
-    monkeypatch.setenv("CONTROL_DATABASE_URL", "postgresql://control/test")
-    connection, cursor = _db_connection(("TRADER",))
-    with patch.object(auth.psycopg2, "connect", return_value=connection):
-        access = auth.require_trading_book_access(
-            str(SUBJECT), str(FUND_ID), str(BOOK_ID)
-        )
-    assert access["role"] == "TRADER"
-    sql = " ".join(cursor.execute.call_args.args[0].split()).casefold()
-    assert "up.status = 'active'" in sql
-    assert "f.status = 'active'" in sql
-    assert "b.status = 'active'" in sql
-    assert "fm.role = any" in sql
-    assert "b.fund_id = f.fund_id" in sql
-    assert cursor.execute.call_args.args[1][3] == ["CIO", "OWNER", "TRADER"]
-
-
-def test_viewer_or_cross_fund_book_access_is_forbidden(monkeypatch) -> None:
-    monkeypatch.setenv("APP_ENV", "production")
-    monkeypatch.setenv("PORTFOLIO_AUTH_MODE", "supabase_jwt")
-    monkeypatch.setenv("CONTROL_DATABASE_URL", "postgresql://control/test")
-    connection, _ = _db_connection(None)
-    with (
-        patch.object(auth.psycopg2, "connect", return_value=connection),
-        pytest.raises(HTTPException) as error,
-    ):
-        auth.require_trading_book_access(str(SUBJECT), str(FUND_ID), str(BOOK_ID))
-    assert error.value.status_code == 403
-    assert error.value.detail == "portfolio_trading_book_forbidden"
-
-
-def test_trading_book_database_failure_is_fail_closed(monkeypatch) -> None:
-    monkeypatch.setenv("APP_ENV", "production")
-    monkeypatch.setenv("PORTFOLIO_AUTH_MODE", "supabase_jwt")
-    monkeypatch.setenv("CONTROL_DATABASE_URL", "postgresql://control/test")
-    with (
-        patch.object(
-            auth.psycopg2,
-            "connect",
-            side_effect=auth.psycopg2.OperationalError("offline"),
-        ),
-        pytest.raises(HTTPException) as error,
-    ):
-        auth.require_trading_book_access(str(SUBJECT), str(FUND_ID), str(BOOK_ID))
-    assert error.value.status_code == 503
-
-
 def test_exact_name_resolves_to_one_canonical_active_stock(monkeypatch) -> None:
     monkeypatch.setenv("CONTROL_DATABASE_URL", "postgresql://control/test")
     connection, cursor = _db_connection(None)
@@ -412,7 +338,7 @@ def test_exact_name_resolves_to_one_canonical_active_stock(monkeypatch) -> None:
 
 
 def test_known_korean_alias_resolves_via_symbol_code(monkeypatch) -> None:
-    """"네이버"의 공시 표시명은 "NAVER"라 exact-match만으로는 안 잡힌다 -
+    """ "네이버"의 공시 표시명은 "NAVER"라 exact-match만으로는 안 잡힌다 -
     별칭이 심볼 코드로 치환돼 같은 안전 질의를 그대로 타는지 확인한다."""
     monkeypatch.setenv("CONTROL_DATABASE_URL", "postgresql://control/test")
     connection, cursor = _db_connection(None)
@@ -461,7 +387,9 @@ def test_leading_six_digit_code_wins_over_trailing_display_name(monkeypatch) -> 
     assert params[:3] == ("124500", "124500", "124500 아이티센글로벌")
 
 
-@pytest.mark.parametrize("rows", [[], [(str(uuid4()), "005930"), (str(uuid4()), "005930")]])
+@pytest.mark.parametrize(
+    "rows", [[], [(str(uuid4()), "005930"), (str(uuid4()), "005930")]]
+)
 def test_unknown_or_ambiguous_name_requires_clarification(monkeypatch, rows) -> None:
     monkeypatch.setenv("CONTROL_DATABASE_URL", "postgresql://control/test")
     connection, cursor = _db_connection(None)
@@ -547,7 +475,9 @@ def test_eight_character_idempotency_key_is_accepted(monkeypatch) -> None:
                 "role": "OWNER",
             },
         ),
-        patch.object(user_orders, "issue_trading_directive_proof", return_value="proof"),
+        patch.object(
+            user_orders, "issue_trading_directive_proof", return_value="proof"
+        ),
         patch.object(user_orders, "submit_user_directive", side_effect=submit),
     ):
         response = TestClient(_app()).post(
@@ -560,15 +490,42 @@ def test_eight_character_idempotency_key_is_accepted(monkeypatch) -> None:
     assert response.json()["priority"] == 2000
 
 
+def test_admitted_authority_status_reuses_scoped_read_without_interactive_auth() -> (
+    None
+):
+    directive_id = uuid4()
+    raw = _directive_response()
+    raw["directive_id"] = str(directive_id)
+    raw["instruction_ref"] = f"conditional:{uuid4()}"
+    with (
+        patch.object(user_orders, "require_trading_book_access") as require_access,
+        patch.object(
+            user_orders, "issue_trading_directive_proof", return_value="proof"
+        ) as issue_proof,
+        patch.object(user_orders, "get_user_directive", return_value=raw) as get_status,
+    ):
+        response = user_orders.read_paper_directive_status_for_admitted_authority(
+            user_id=str(SUBJECT),
+            fund_id=str(FUND_ID),
+            book_id=str(BOOK_ID),
+            directive_id=str(directive_id),
+        )
+
+    assert response.directive_id == directive_id
+    require_access.assert_not_called()
+    issue_proof.assert_called_once()
+    assert issue_proof.call_args.kwargs["subject"] == str(SUBJECT)
+    assert issue_proof.call_args.kwargs["scope"] == "trading.user-directive.read"
+    get_status.assert_called_once_with(directive_id=str(directive_id), proof="proof")
+
+
 def test_place_order_resolves_canonical_symbol_and_never_calls_risk() -> None:
     captured: dict[str, object] = {}
     raw = _directive_response()
 
     def submit(**kwargs):
         captured.update(kwargs)
-        raw["payload_sha256"] = service_token.payload_sha256(
-            kwargs["body"]["payload"]
-        )
+        raw["payload_sha256"] = service_token.payload_sha256(kwargs["body"]["payload"])
         raw["instruction_ref"] = kwargs["body"]["instruction_ref"]
         return raw
 
@@ -588,7 +545,9 @@ def test_place_order_resolves_canonical_symbol_and_never_calls_risk() -> None:
             "resolve_active_trading_instrument",
             return_value={"instrument_id": str(INSTRUMENT_ID), "symbol": "005930"},
         ),
-        patch.object(user_orders, "issue_trading_directive_proof", return_value="proof"),
+        patch.object(
+            user_orders, "issue_trading_directive_proof", return_value="proof"
+        ),
         patch.object(user_orders, "submit_user_directive", side_effect=submit),
     ):
         response = TestClient(_app()).post(
@@ -614,7 +573,9 @@ def test_place_order_resolves_canonical_symbol_and_never_calls_risk() -> None:
     assert "user_id" not in body
     imports = {
         alias.name
-        for node in ast.walk(ast.parse(open(user_orders.__file__, encoding="utf-8").read()))
+        for node in ast.walk(
+            ast.parse(open(user_orders.__file__, encoding="utf-8").read())
+        )
         if isinstance(node, ast.Import)
         for alias in node.names
     }
@@ -633,7 +594,9 @@ def test_upstream_idempotency_conflict_is_preserved() -> None:
                 "role": "TRADER",
             },
         ),
-        patch.object(user_orders, "issue_trading_directive_proof", return_value="proof"),
+        patch.object(
+            user_orders, "issue_trading_directive_proof", return_value="proof"
+        ),
         patch.object(
             user_orders,
             "submit_user_directive",
@@ -682,7 +645,9 @@ def test_upstream_conflicts_are_not_misreported_as_idempotency(
     monkeypatch, error_code: str, expected: str
 ) -> None:
     monkeypatch.setenv("TRADING_API_URL", "http://trading-api:8000")
-    response = httpx.Response(409, json={"error_code": error_code, "message": "private"})
+    response = httpx.Response(
+        409, json={"error_code": error_code, "message": "private"}
+    )
     with patch.object(trading_client.httpx, "post", return_value=response):
         with pytest.raises(trading_client.TradingProxyError) as error:
             trading_client.submit_user_directive(

@@ -26,8 +26,10 @@
 
 ## 2. 경계
 
-- Supabase Auth 는 그대로 identity SoT. `auth.*` 는 읽지도 쓰지도 않는다.
-- `governance.user_profiles.user_id` 는 검증된 JWT `sub` 를 그대로 보존한다. 로컬 `auth.users` 를 만들지 않는다.
+- 이 문서는 데이터베이스 데이터 이전만 다룬다. `auth.*` 는 읽지도 쓰지 않으며 브라우저
+  로그인·세션·외부 사용자 Identity를 구현하거나 이전하지 않는다.
+- `governance.user_profiles.user_id` 는 로컬 모의투자의 고정 데모 ID를 보존한다. 별도 사용자
+  계정 테이블이나 로그인 토큰을 만들지 않는다.
 - `market`(TimescaleDB) 는 이번 범위 밖.
 - 제외 스키마: `auth storage realtime extensions vault graphql graphql_public supabase_functions supabase_migrations net pgbouncer pgsodium pgtle cron`.
   `public` / `api` 는 base table 이 0개임을 **검증**하고 넘어간다(조용히 건너뛰지 않는다).
@@ -82,8 +84,8 @@
 
 Supabase 에만 있는 나머지는 전부 합성 테스트 데이터다. **실제로 잃는 것이 없다.**
 
-- `governance.user_profiles` 3행 — `00000000-…cec0/1/2`, 이름 "(가입 전 임시)"·"(전환 테스트용)",
-  `auth.users` 이메일이 `*.invalid`, **`last_sign_in_at` 전부 NULL(아무도 로그인한 적 없음)**.
+- `governance.user_profiles` 3행 — `00000000-…cec0/1/2`, 이름 "(가입 전 임시)"·"(전환 테스트용)"인
+  테스트용 프로필 행이다. 로그인 이력이나 외부 계정은 이전하지 않는다.
 - `accounting.funds` 3행 — 이름이 그대로 `Test CEO Mandate Fund`, `Test User 2 Mandate Fund`, `Test User 3 Mandate Fund`.
 - `governance.mandates` 3행 — 위 테스트 사용자·펀드 위에 얹힌 것. FK 부모를 안 옮기므로 이것도 안 옮긴다.
 
@@ -167,8 +169,8 @@ python scripts/migrate_supabase_to_aws_control.py --validate-only
 ## 10. Cutover
 
 검증이 통과한 뒤에만 애플리케이션을 옮긴다. AWS 오버레이는 이미 `control` 을 가리키고 있고
-(`deploy/aws/docker-compose.paper-order.yml`), 계약 테스트가 control DSN 에 "SUPABASE" 문자열이 들어가는 것과
-컨테이너에 `SUPABASE_SERVICE_ROLE_KEY` 가 전달되는 것을 막고 있다. 프런트엔드의 Supabase Auth 클라이언트는 **그대로 둔다.**
+(`deploy/aws/docker-compose.paper-order.yml`), 계약 테스트가 control DSN에 외부 호스트 문자열이나
+브라우저용 인증 키가 들어가는 것을 막고 있다. 현재 프런트엔드에는 사용자 로그인 클라이언트가 없다.
 
 ## 11. 롤백
 

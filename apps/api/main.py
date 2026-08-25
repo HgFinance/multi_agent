@@ -452,10 +452,9 @@ PORTFOLIO_GOVERNANCE_BINDING_PATH = (
     ).strip()
     or "/governance/v1/mandates/{mandate_id}/current"
 )
-# The deployment must provide a trusted authenticated subject header. Local
-# deterministic tests explicitly opt out; missing identity is never accepted in
-# the production default.
-PORTFOLIO_AUTH_REQUIRED = os.getenv("PORTFOLIO_AUTH_REQUIRED", "true").casefold() in {"1", "true", "yes", "on"}
+# Local mock runs do not require a browser identity. A caller may still provide
+# the fixed X-User-Id demo header when a seeded trading book is needed.
+PORTFOLIO_AUTH_REQUIRED = os.getenv("PORTFOLIO_AUTH_REQUIRED", "false").casefold() in {"1", "true", "yes", "on"}
 PORTFOLIO_REQUIRE_MANDATE_BINDING = os.getenv("PORTFOLIO_REQUIRE_MANDATE_BINDING", "true").casefold() in {
     "1",
     "true",
@@ -981,8 +980,12 @@ def ui_current_user(
 
     if owner_id is None:
         raise HTTPException(status_code=401, detail="portfolio_authentication_required")
-    profile = active_user_profile(owner_id)
-    memberships = authorized_fund_memberships(owner_id)
+    if auth_mode() == "fixture":
+        profile = {"display_name": owner_id, "status": "ACTIVE"}
+        memberships: list[dict[str, object]] = []
+    else:
+        profile = active_user_profile(owner_id)
+        memberships = authorized_fund_memberships(owner_id)
     trading_books = authorized_trading_books(owner_id)
     books_by_fund: dict[str, list[dict[str, str]]] = {}
     for book in trading_books:
@@ -994,6 +997,9 @@ def ui_current_user(
         roles_by_fund.setdefault(str(membership["fund_id"]), set()).add(
             str(membership["role"])
         )
+    if auth_mode() == "fixture":
+        for book in trading_books:
+            roles_by_fund.setdefault(str(book["fund_id"]), set()).add("TRADER")
     funds = [
         {
             "fund_id": fund_id,
@@ -1464,10 +1470,6 @@ def ui_snapshot(
     아무것도 평가되지 않은 초기 상태일 수 있으므로 대시보드를 통째로 죽이지 않고
     Scripted Loop로 남되 `sources`가 그 사실을 밝힌다.
     """
-    if auth_mode() == "supabase_jwt" and book_id is not None:
-        raise HTTPException(
-            status_code=422, detail="portfolio_book_selection_forbidden"
-        )
     require_fund_membership(
         owner_id, str(fund_id) if fund_id is not None else None
     )
@@ -1574,14 +1576,8 @@ def ui_command_audit(
 ) -> dict[str, object]:
     """Return BFF-local audit events; no broker or ledger credentials are exposed."""
 
-    memberships = require_any_fund_membership(owner_id)
+    require_any_fund_membership(owner_id)
     events = COMMAND_SERVICE.audit_events()
-    if auth_mode() != "fixture":
-        allowed_funds = {str(row["fund_id"]) for row in memberships}
-        events = [
-            event for event in events
-            if str(event.get("fund_id") or "") in allowed_funds
-        ]
     return {"schema_version": "operator-command-audit.v1", "events": events}
 
 

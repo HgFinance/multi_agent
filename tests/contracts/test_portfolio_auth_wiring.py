@@ -1,23 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
-AUTH_ENVIRONMENT_KEYS = {
-    "APP_ENV",
-    "PORTFOLIO_AUTH_MODE",
-    "PORTFOLIO_AUTH_REQUIRED",
-    "PORTFOLIO_CORS_ALLOW_ORIGINS",
-    "SUPABASE_URL",
-    "SUPABASE_AUTH_ISSUER",
-    "SUPABASE_AUTH_JWKS_URL",
-    "SUPABASE_AUTH_AUDIENCE",
-    "SUPABASE_PUBLISHABLE_KEY",
-    "SUPABASE_ANON_KEY",
-}
 
 
 def _portfolio_environment(relative_path: str) -> dict[str, object]:
@@ -25,77 +14,31 @@ def _portfolio_environment(relative_path: str) -> dict[str, object]:
     return compose["services"]["portfolio-bff"]["environment"]
 
 
-def test_local_bff_uses_the_fixed_demo_identity() -> None:
+def test_local_bff_is_fixture_only_and_external_broker_reads_are_disabled() -> None:
     environment = _portfolio_environment("docker-compose.yml")
     assert environment["APP_ENV"] == "${AI_OFFICE_APP_ENV:-local}"
     assert environment["PORTFOLIO_AUTH_MODE"] == "fixture"
     assert environment["PORTFOLIO_AUTH_REQUIRED"] == "false"
-    assert not (AUTH_ENVIRONMENT_KEYS - {"APP_ENV", "PORTFOLIO_AUTH_MODE", "PORTFOLIO_AUTH_REQUIRED", "PORTFOLIO_CORS_ALLOW_ORIGINS"}) & environment.keys()
-    assert "SUPABASE_SERVICE_ROLE_KEY" not in environment
+    assert environment["PORTFOLIO_LIVE_MODE"] == "fixture"
 
 
-def test_aws_bff_keeps_its_separate_deployment_contract() -> None:
+def test_legacy_deployment_bundle_does_not_enable_user_login() -> None:
     environment = _portfolio_environment("deploy/eb/docker-compose.yml")
-    assert AUTH_ENVIRONMENT_KEYS <= environment.keys()
-    assert "SUPABASE_SERVICE_ROLE_KEY" not in environment
-    assert environment["PORTFOLIO_AUTH_MODE"] == "${PORTFOLIO_AUTH_MODE:-supabase_jwt}"
+    assert environment["PORTFOLIO_AUTH_MODE"] == "fixture"
+    assert environment["PORTFOLIO_AUTH_REQUIRED"] == "false"
 
 
-def test_aws_auth_configuration_is_fail_fast_and_documented() -> None:
-    environment = _portfolio_environment("deploy/eb/docker-compose.yml")
-    assert str(environment["SUPABASE_URL"]).startswith("${SUPABASE_URL:?")
-    assert str(environment["SUPABASE_PUBLISHABLE_KEY"]).startswith(
-        "${SUPABASE_PUBLISHABLE_KEY:?"
-    )
-    assert str(environment["PORTFOLIO_CORS_ALLOW_ORIGINS"]).startswith(
-        "${PORTFOLIO_CORS_ALLOW_ORIGINS:?"
-    )
-
-    runbook = (ROOT / "deploy/eb/README.md").read_text(encoding="utf-8")
-    for setting in (
-        "APP_ENV=production",
-        "PORTFOLIO_AUTH_MODE=supabase_jwt",
-        "PORTFOLIO_CORS_ALLOW_ORIGINS=",
-        "SUPABASE_URL=",
-        "SUPABASE_PUBLISHABLE_KEY=",
-        "SUPABASE_AUTH_AUDIENCE=authenticated",
-    ):
-        assert setting in runbook
-    assert "Never provide\n`SUPABASE_SERVICE_ROLE_KEY`" in runbook
+def test_fixture_only_contract_is_explicit_in_source_and_package_metadata() -> None:
+    current_user = (ROOT / "apps/api/current_user.py").read_text(encoding="utf-8").casefold()
+    package = json.loads((ROOT / "ai-office/package.json").read_text(encoding="utf-8"))
+    assert "verify_" not in current_user
+    assert "fixture_only_authentication" in current_user
+    assert not any(str(name).startswith("@") and "auth" in str(name).casefold() for name in package["dependencies"])
 
 
-def test_aws_bff_reaches_internal_accounting_api() -> None:
-    environment = _portfolio_environment("deploy/eb/docker-compose.yml")
-    assert environment["PORTFOLIO_API_URL"] == "http://accounting-api:8000"
-
-
-def test_aws_compose_ci_supplies_non_secret_contract_placeholders() -> None:
-    workflow = yaml.safe_load(
-        (ROOT / ".github/workflows/runtime-aws-contract.yml").read_text(
-            encoding="utf-8"
-        )
-    )
-    steps = workflow["jobs"]["elastic-beanstalk-bundle"]["steps"]
-    compose_step = next(
-        step for step in steps
-        if step.get("name") == "Validate Elastic Beanstalk Compose"
-    )
-    assert {
-        "CONTROL_DATABASE_URL",
-        "PORTFOLIO_CORS_ALLOW_ORIGINS",
-        "SUPABASE_URL",
-        "SUPABASE_PUBLISHABLE_KEY",
-    } <= compose_step["env"].keys()
-
-
-def test_legacy_ui_bff_has_no_supabase_privileged_key() -> None:
-    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
-    environment = compose["services"]["ui-bff"].get("environment") or {}
-    assert "SUPABASE_SERVICE_ROLE_KEY" not in environment
-
-
-def test_environment_template_requires_explicit_fixture_mode() -> None:
-    template = (ROOT / ".env.example").read_text(encoding="utf-8")
-    assert "APP_ENV=local" in template
-    assert "PORTFOLIO_AUTH_MODE=fixture" in template
-    assert "SUPABASE_AUTH_AUDIENCE=authenticated" in template
+def test_root_scripts_pin_the_local_mock_stack() -> None:
+    package = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
+    assert "PORTFOLIO_AUTH_MODE=fixture" in package["scripts"]["dev"]
+    assert "PORTFOLIO_AUTH_MODE=fixture" in package["scripts"]["bff"]
+    assert "PORTFOLIO_AUTH_REQUIRED=false" in package["scripts"]["bff"]
+    assert "PORTFOLIO_LIVE_MODE=fixture" in package["scripts"]["bff"]

@@ -1,4 +1,0 @@
-{
-  "status": "NOT_MEASURED",
-  "reason": "This request ran AWQ+Finetune quality only; no standalone performance sample was collected, so performance metrics remain null/N/A."
-}

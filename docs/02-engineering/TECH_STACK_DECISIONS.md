@@ -256,7 +256,8 @@ index_version
 - Connection Pool 상한과 PostgreSQL 최대 연결 수를 함께 관리한다.
 - SQLAlchemy Pool 위에 무분별하게 외부 Pool을 겹치지 않는다.
 - Migration은 Supabase Dashboard 수동 변경이 아니라 Alembic으로 수행한다.
-- Frontend는 Supabase Auth로 사용자 Identity를 얻고 금융 상태 조회와 모든 Command는 FastAPI BFF를 통한다.
+- Frontend는 로컬 fixture의 고정 데모 ID를 사용하고, 금융 상태 조회와 모든 Command는 FastAPI BFF를 통한다.
+  외부 사용자 로그인·세션은 현재 구현하지 않는다.
 - Row Level Security를 활성화하되 Service Role Key를 Browser에 노출하지 않는다.
 
 Supabase Realtime은 Dashboard 상태 알림에는 사용할 수 있지만 Market Data 전송 계층으로 사용하지 않는다.

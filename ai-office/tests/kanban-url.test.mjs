@@ -5,17 +5,16 @@ import { resolveKanbanUrl } from "../app/lib/kanbanUrl.ts";
 
 const HERMES = "http://127.0.0.1:9119";
 
-test("보드 경로는 항상 /kanban이다 (로그인 후 기본 화면)", () => {
-  // Hermes가 /kanban -> /login?next=%2Fkanban 으로 돌리고, 로그인에 성공하면
-  // 그 next로 돌아온다. 그래서 임베드 주소가 /kanban이면 로그인 직후 보드가 뜬다.
+test("보드 경로는 항상 /kanban이다", () => {
+  // 임베드 주소가 /kanban이면 보드가 바로 열린다.
   assert.equal(resolveKanbanUrl(HERMES), "http://127.0.0.1:9119/kanban");
   assert.equal(resolveKanbanUrl(`${HERMES}/`), "http://127.0.0.1:9119/kanban");
   assert.equal(resolveKanbanUrl(`${HERMES}/kanban`), "http://127.0.0.1:9119/kanban");
 });
 
 test("host를 페이지에 맞춘다 - SameSite=Lax 세션 쿠키 회귀", () => {
-  // 이게 어긋나면 iframe 안에서 로그인이 무한 반복된다: Lax 쿠키는 cross-site
-  // iframe에 저장되지 않아 /kanban이 매번 /login으로 튕긴다.
+  // host가 어긋나면 iframe 안에서 SameSite 쿠키가 유지되지 않아 보드 상태가
+  // 매번 초기화된다.
   assert.equal(resolveKanbanUrl(HERMES, "localhost"), "http://localhost:9119/kanban");
   assert.equal(resolveKanbanUrl("http://localhost:9119", "127.0.0.1"), "http://127.0.0.1:9119/kanban");
   // 포트는 SameSite 판정에 안 들어가므로 건드리지 않는다.

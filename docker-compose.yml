@@ -81,7 +81,8 @@ services:
       APP_ENV: ${AI_OFFICE_APP_ENV:-local}
       PORTFOLIO_AUTH_MODE: fixture
       PORTFOLIO_AUTH_REQUIRED: "false"
-      PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: ${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:-[]}
+      PORTFOLIO_LIVE_MODE: fixture
+      PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: ${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:-[{"user_id":"00000000-0000-4000-8000-00000000cec0","fund_id":"5c26db42-ce83-4daf-b1dc-c81680c13a6c","book_id":"07d913de-9a5b-4cf5-b893-31a625445761","name":"MAIN","role":"TRADER","fund_status":"ACTIVE","book_status":"ACTIVE"}]}
       # This stack includes shared Kanban, dispatcher, Trading Hermes and the
       # authenticated MCP bridge, so the CEO natural-language PAPER lane may
       # be admitted. Deployment bundles without that runtime must set false.

@@ -1,5 +1,4 @@
 import { readStoredAccount } from "./currentAccount";
-import { AUTH_MODE } from "./authMode";
 
 export const PORTFOLIO_SCOPE_CHANGED_EVENT = "hgfinance:portfolio-scope-changed";
 
@@ -92,14 +91,6 @@ export function currentFundId(): string | undefined {
   // "아직 답을 못 받음"과 "답을 받았는데 권한이 0건"은 다른 상태라 `resolved`로
   // 가른다.
   if (resolved) return undefined;
-  // `fixtureAuthEnabled` 분기를 없앴다(2026-08-19) - 실제 Supabase 인증을
-  // 붙이지 않기로 했으므로, 이 값이 `undefined`일 이유가 없다. 예전에는 이
-  // 판정이 `NEXT_PUBLIC_AUTH_MODE` 환경변수(`authMode.ts`)에 걸려 있었는데,
-  // 그 값이 SSR과 클라이언트 번들에서 다르게 읽혀(vite.config.ts의 Cloudflare
-  // Worker/Vite 클라이언트 분리 구조 때문) 계정을 계속 못 찾는 상태가 됐다
-  // ("계정에 연결된 Fund가 없습니다"가 반복해서 뜬 원인). `/ui/me` 응답 전
-  // 첫 렌더에서만 고정 계정의 fundId로 떨어진다.
-  if (AUTH_MODE !== "fixture") return undefined;
   return readStoredAccount().fundId ?? undefined;
 }
 

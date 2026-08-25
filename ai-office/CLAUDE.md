@@ -54,8 +54,8 @@ BFF 주소는 서버 전용 `BFF_ORIGIN`(없으면 `NEXT_PUBLIC_BFF_URL`, 그것
 
 ## 안전 규칙
 
-- `.dev.vars`, `.env*`, `auth.json`, Supabase Service Role, Broker/LS credential을 읽거나 출력하거나 커밋하지 않는다.
-- 브라우저에서 Supabase Service Role, Broker API, Hermes 내부 DB를 직접 호출하지 않는다.
+- `.dev.vars`, `.env*`, credential 파일, Broker/LS credential을 읽거나 출력하거나 커밋하지 않는다.
+- 브라우저에서 비밀 credential, Broker API, Hermes 내부 DB를 직접 호출하지 않는다.
 - Agent 텍스트에서 Position/PnL/NAV/Risk 판정을 추출해 확정하지 않는다.
 - Command는 `idempotency_key`, `expected_version`, 권한·정책 검증, Audit Event 없이 추가하지 않는다. CEO·Hermes·프론트 자체에는 주문 제출·원장 Posting·NAV 확정 권한이 없다. 예외적으로 ADR-0007의 명시적 PAPER 탭은 인증 사용자의 원문을 결정론적 BFF parser에 전달할 수 있지만, LLM이 보충·분류·승인하거나 브라우저가 Trading/Broker를 직접 호출해서는 안 된다.
 - 실패·heartbeat 없음·sequence gap은 성공으로 표시하지 않고 `STALE`/`DEGRADED`/`BLOCKED`/`ERROR` 중 실제 상태로 보여준다.

@@ -48,21 +48,16 @@ services:
       MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS: ${MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS:-1500}
       PORTFOLIO_DATA_MODE: "production"
       APP_ENV: ${APP_ENV:-production}
-      PORTFOLIO_AUTH_MODE: ${PORTFOLIO_AUTH_MODE:-supabase_jwt}
-      PORTFOLIO_AUTH_REQUIRED: ${PORTFOLIO_AUTH_REQUIRED:-true}
+      # This bundle is retained only as a legacy compose shape. User login is
+      # not implemented; the supported mock stack is local fixture-only.
+      PORTFOLIO_AUTH_MODE: fixture
+      PORTFOLIO_AUTH_REQUIRED: "false"
       # This legacy bundle intentionally excludes shared Kanban, dispatcher,
       # Trading Hermes and its MCP bridge. Fail before creating an orphan card;
       # deterministic authenticated PAPER API endpoints remain available.
       USER_PAPER_ORDER_WORKFLOW_ENABLED: "false"
       USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED: "false"
       PORTFOLIO_CORS_ALLOW_ORIGINS: ${PORTFOLIO_CORS_ALLOW_ORIGINS:?Exact frontend origin allowlist is required}
-      # Supabase is identity-only in AWS. Never pass service-role to the BFF.
-      SUPABASE_URL: ${SUPABASE_URL:?Hosted Supabase project URL is required for portfolio authentication}
-      SUPABASE_AUTH_ISSUER: ${SUPABASE_AUTH_ISSUER:-}
-      SUPABASE_AUTH_JWKS_URL: ${SUPABASE_AUTH_JWKS_URL:-}
-      SUPABASE_AUTH_AUDIENCE: ${SUPABASE_AUTH_AUDIENCE:-authenticated}
-      SUPABASE_PUBLISHABLE_KEY: ${SUPABASE_PUBLISHABLE_KEY:?Supabase publishable key is required for portfolio authentication}
-      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
       PORTFOLIO_API_URL: http://accounting-api:8000
       TRADING_API_URL: http://trading-api:8000
       TRADING_SERVICE_AUTH_SECRET: ${TRADING_SERVICE_AUTH_SECRET:?A 32-byte trading service proof secret is required}
