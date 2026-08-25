@@ -699,6 +699,49 @@ def normalize_today_trades(payload: dict[str, Any], today: str) -> dict[str, Any
     return {"rows": merged}
 
 
+def summarize_today_trade_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build the today-summary contract from normalized broker trade rows.
+
+    Some PAPER accounts return the trade rows but omit ``t0150OutBlock``.
+    Those rows are still authoritative broker observations, so the dashboard
+    can derive a bounded summary without turning the missing summary block into
+    a fake 500/error state.
+    """
+
+    buy_quantity = sell_quantity = Decimal(0)
+    buy_amount = sell_amount = Decimal(0)
+    total_fee = total_tax = total_settlement = Decimal(0)
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        side = str(row.get("category") or "")
+        quantity = _dec(row.get("quantity"))
+        amount = abs(_dec(row.get("amount")))
+        settled = _dec(row.get("settled_amount"))
+        if "매수" in side:
+            buy_quantity += quantity
+            buy_amount += amount
+        elif "매도" in side:
+            sell_quantity += quantity
+            sell_amount += amount
+        total_fee += _dec(row.get("commission"))
+        total_tax += _dec(row.get("tax"))
+        total_settlement += settled
+    return {
+        "trade_count": len(rows),
+        "summary": {
+            "buy_quantity": _number(buy_quantity),
+            "sell_quantity": _number(sell_quantity),
+            "buy_amount": _number(buy_amount),
+            "sell_amount": _number(sell_amount),
+            "total_amount": _number(buy_amount + sell_amount),
+            "total_fee": _number(total_fee),
+            "total_tax": _number(total_tax),
+            "total_settlement": _number(total_settlement),
+        },
+    }
+
+
 def _dec(value: Any) -> Decimal:
     """합계용. 해석 못 하는 값은 0으로 두되 행 자체는 버리지 않는다."""
     if value is None or value == "":
@@ -1274,6 +1317,13 @@ async def _fetch_today_activity(config: Any, token: str) -> dict[str, Any]:
     return normalize_today_activity(body)
 
 
+async def _fetch_today_activity_fallback(config: Any, token: str) -> dict[str, Any]:
+    """Use the working normalized trade ledger when t0150 omits its summary."""
+
+    payload = await _fetch_today_trades(config, token)
+    return summarize_today_trade_rows(payload)
+
+
 async def _fetch_today_executions(
     config: Any, token: str
 ) -> tuple[dict[tuple[str, str], dict[str, Any]], list[dict[str, Any]]]:
@@ -1364,8 +1414,15 @@ async def _resync_today_activity(config: Any, token: str) -> None:
     """당일 매매 요약 실패가 계좌 잔고 스트림을 막지 않게 별도로 기록한다."""
     try:
         FEED.sync_today_activity(await _fetch_today_activity(config, token))
-    except Exception as exc:  # noqa: BLE001 - 카드만 비활성화하고 계좌 스트림은 유지한다
-        FEED.today_activity_error = _ls_error_detail(exc)[:300]
+    except Exception as exc:  # noqa: BLE001 - PAPER 응답 변형은 행 기반으로 복구한다
+        try:
+            FEED.sync_today_activity(
+                await _fetch_today_activity_fallback(config, token)
+            )
+        except Exception:  # noqa: BLE001 - 카드만 비활성화하고 계좌 스트림은 유지한다
+            FEED.today_activity_error = _ls_error_detail(exc)[:300]
+        else:
+            FEED.today_activity_error = None
     else:
         FEED.today_activity_error = None
 
@@ -1379,7 +1436,11 @@ async def _run_feed() -> None:
             config, ws_url = _config()
             token, _ = await _issue_token(config)
 
-            if not FEED.account:
+            configured_account = _configured_account(config.environment)
+            if configured_account:
+                FEED.account = configured_account
+                FEED.account_error = None
+            elif not FEED.account:
                 try:
                     FEED.account = await _fetch_account_no(config, token)
                 except Exception as exc:  # noqa: BLE001 - 계좌 조회 실패가 구독을 막지 않는다
@@ -1482,9 +1543,13 @@ def _fixture_portfolio_live() -> dict[str, Any]:
 
 def _registered_account() -> str | None:
     """정본은 브로커가 말해 준 값이다. `.env`는 계좌가 여럿일 때의 덮어쓰기용."""
-    environment = os.getenv("LS_ENV", "LIVE").strip().upper()
-    suffix = "_PAPER" if environment == "PAPER" else ""
-    return (os.getenv("LS_ACCOUNT_NO" + suffix, "") or "").strip() or FEED.account
+    return _configured_account() or FEED.account
+
+
+def _configured_account(environment: str | None = None) -> str | None:
+    selected = (environment or os.getenv("LS_ENV", "LIVE")).strip().upper()
+    suffix = "_PAPER" if selected == "PAPER" else ""
+    return (os.getenv("LS_ACCOUNT_NO" + suffix, "") or "").strip() or None
 
 
 @router.get("/ui/portfolio/live", operation_id="portfolio_live")

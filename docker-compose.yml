@@ -81,7 +81,7 @@ services:
       APP_ENV: local
       PORTFOLIO_AUTH_MODE: fixture
       PORTFOLIO_AUTH_REQUIRED: "false"
-      PORTFOLIO_LIVE_MODE: fixture
+      PORTFOLIO_LIVE_MODE: broker
       PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: '[{"user_id":"00000000-0000-4000-8000-00000000cec0","fund_id":"5c26db42-ce83-4daf-b1dc-c81680c13a6c","book_id":"07d913de-9a5b-4cf5-b893-31a625445761","name":"MAIN","role":"TRADER","fund_status":"ACTIVE","book_status":"ACTIVE"}]'
       # Local mock-investment UI is read-only. No user-login or paper-order
       # workflow is enabled in this Compose profile.
@@ -190,13 +190,13 @@ services:
       # 계좌 스트림은 ENABLE_LS_ORDER_EVENTS, 원장 REST 조회는
       # ENABLE_LS_ACCOUNT_DATA, 시장 순위 REST 조회는 ENABLE_LS_MARKET_DATA로
       # 각각 켠다. 모두 읽기 전용이며 주문은 나가지 않는다.
-      ENABLE_LS_ORDER_EVENTS: "false"
+      ENABLE_LS_ORDER_EVENTS: "true"
       # Read-only broker account snapshot. Keep this independent from order
       # event ingestion so enabling a balance view never enables execution.
-      ENABLE_BROKER_SNAPSHOT: "false"
+      ENABLE_BROKER_SNAPSHOT: "true"
       BROKER_SNAPSHOT_CACHE_SECONDS: ${BROKER_SNAPSHOT_CACHE_SECONDS:-10}
-      ENABLE_LS_MARKET_DATA: "false"
-      ENABLE_LS_ACCOUNT_DATA: "false"
+      ENABLE_LS_MARKET_DATA: "true"
+      ENABLE_LS_ACCOUNT_DATA: "true"
       # portfolio-bff owns read-only market/account observations. PAPER order
       # execution is isolated behind Trading's separately authenticated lane.
       LS_ENV: PAPER

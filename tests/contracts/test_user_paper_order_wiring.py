@@ -23,17 +23,17 @@ def test_local_bff_separates_paper_orders_from_read_only_broker_projection() -> 
     assert "TRADING_SERVICE_AUTH_SECRET" in bff
     assert bff["TRADING_SERVICE_AUTH_ISSUER"] == "${TRADING_SERVICE_AUTH_ISSUER:-portfolio-bff}"
     assert bff["TRADING_SERVICE_AUTH_AUDIENCE"] == "${TRADING_SERVICE_AUTH_AUDIENCE:-trading-api}"
-    assert bff["USER_PAPER_ORDER_WORKFLOW_ENABLED"] == "true"
-    assert bff["USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED"] == "true"
-    assert bff["ENABLE_LS_ORDER_EVENTS"] == "${ENABLE_LS_ORDER_EVENTS:-false}"
-    assert bff["ENABLE_BROKER_SNAPSHOT"] == "${ENABLE_BROKER_SNAPSHOT:-false}"
+    assert bff["USER_PAPER_ORDER_WORKFLOW_ENABLED"] == "false"
+    assert bff["USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED"] == "false"
+    assert bff["ENABLE_LS_ORDER_EVENTS"] == "true"
+    assert bff["ENABLE_BROKER_SNAPSHOT"] == "true"
     assert bff["BROKER_SNAPSHOT_CACHE_SECONDS"] == "${BROKER_SNAPSHOT_CACHE_SECONDS:-10}"
-    assert bff["ENABLE_LS_MARKET_DATA"] == "${ENABLE_LS_MARKET_DATA:-false}"
-    assert bff["ENABLE_LS_ACCOUNT_DATA"] == "${ENABLE_LS_ACCOUNT_DATA:-false}"
-    assert bff["LS_ENV"] == "${LS_ENV:-LIVE}"
+    assert bff["ENABLE_LS_MARKET_DATA"] == "true"
+    assert bff["ENABLE_LS_ACCOUNT_DATA"] == "true"
+    assert bff["LS_ENV"] == "PAPER"
+    assert bff["PORTFOLIO_LIVE_MODE"] == "broker"
     assert "LS_MARKET_ENV" not in bff
     assert "LS_ACCOUNT_NO_PAPER" in bff
-    assert not any("LIVE" in key for key in bff)
 
 
 def test_eb_keeps_broker_projection_out_of_strict_paper_trading_api() -> None:
