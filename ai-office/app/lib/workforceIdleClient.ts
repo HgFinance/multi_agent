@@ -89,3 +89,58 @@ export async function fetchWorkforceIdleAgents(window?: WorkforceIdleWindow): Pr
   }
   return body;
 }
+
+/**
+ * Worker별 발화율 — 실행 / (실행 + 미발화).
+ *
+ * idle 판정이 UNOBSERVED 하나로 뭉뚱그리는 두 상황을 나눠준다:
+ *   fire_rate === null  이 창에 **기회 자체가 없었다**(분모 0) — 결함이 아니다
+ *   fire_rate === 0     기회가 있었는데 **한 번도 안 켜졌다**(분모 > 0, 분자 0)
+ *
+ * 그래서 0과 null을 화면에서 같은 칸으로 만들면 안 된다(workforce-api
+ * `check_worker_trigger_rates`가 이 구분을 만들어 준다).
+ */
+export type WorkerTriggerRateReport = {
+  department: string;
+  worker_id: string;
+  trigger: string;
+  window_start: string;
+  window_end: string;
+  status: "MEASURED" | "UNAVAILABLE" | string;
+  execution_count: number | null;
+  opportunity_count: number | null;
+  fire_rate: number | null;
+};
+
+export type WorkforceTriggerRates = {
+  trigger_rates: WorkerTriggerRateReport[];
+};
+
+function hasTriggerRateShape(value: unknown): value is WorkforceTriggerRates {
+  if (typeof value !== "object" || value === null) return false;
+  return Array.isArray((value as Record<string, unknown>).trigger_rates);
+}
+
+export async function fetchWorkforceTriggerRates(lookbackHours = 24): Promise<WorkforceTriggerRates> {
+  let response: Response;
+  try {
+    response = await bffFetch(`/ui/workforce/trigger-rates?lookback_hours=${lookbackHours}`, {
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+    });
+  } catch {
+    throw new WorkforceIdleAgentsError(
+      `BFF(${BFF})에 연결하지 못했습니다. FastAPI BFF가 실행 중인지 확인하세요.`,
+      0,
+    );
+  }
+
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new WorkforceIdleAgentsError(explain(body, response.status), response.status);
+  }
+  if (!hasTriggerRateShape(body)) {
+    throw new WorkforceIdleAgentsError("발화율 응답 계약이 올바르지 않습니다.", response.status);
+  }
+  return body;
+}

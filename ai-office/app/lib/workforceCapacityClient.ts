@@ -78,3 +78,56 @@ export async function fetchWorkforceCapacity(lookbackHours = 24): Promise<Workfo
   }
   return body;
 }
+
+/**
+ * 같은 Langfuse 실행 이벤트를 읽되 지연·재시도가 아니라 **토큰·모델 축**을 집계한
+ * 값이다(workforce-api `check_department_llm_usage`). Capacity와 부서 키가 같아
+ * 화면에서 한 표로 합쳐 보여준다 — 별도 패널을 만들지 않는다.
+ *
+ * llm_calls/prompt_tokens/completion_tokens는 `begin_worker_metric()` 컨텍스트가
+ * 열려 있었던 실행에서만 나온다 — `arrivals > 0`이어도 null일 수 있고, 그건
+ * "0번 불렀다"가 아니라 "그 창의 실행이 전부 계측 컨텍스트 밖이었다"는 뜻이다.
+ */
+export type DepartmentLlmUsageReport = {
+  department: string;
+  window_start: string;
+  window_end: string;
+  status: CapacityObservationStatus | string;
+  arrivals: number | null;
+  llm_calls: number | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  avg_attempts: number | null;
+  status_counts: Record<string, number> | null;
+};
+
+export type WorkforceLlmUsage = {
+  llm_usage: DepartmentLlmUsageReport[];
+};
+
+function hasLlmUsageShape(value: unknown): value is WorkforceLlmUsage {
+  if (typeof value !== "object" || value === null) return false;
+  return Array.isArray((value as Record<string, unknown>).llm_usage);
+}
+
+export async function fetchWorkforceLlmUsage(lookbackHours = 24): Promise<WorkforceLlmUsage> {
+  let response: Response;
+  try {
+    response = await bffFetch(`/ui/workforce/llm-usage?lookback_hours=${lookbackHours}`, {
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+    });
+  } catch {
+    throw new WorkforceCapacityError(
+      `BFF(${BFF})에 연결하지 못했습니다. FastAPI BFF가 실행 중인지 확인하세요.`,
+      0,
+    );
+  }
+
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) throw new WorkforceCapacityError(explain(body, response.status), response.status);
+  if (!hasLlmUsageShape(body)) {
+    throw new WorkforceCapacityError("LLM 사용량 응답 계약이 올바르지 않습니다.", response.status);
+  }
+  return body;
+}

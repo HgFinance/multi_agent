@@ -562,6 +562,42 @@
           "path": "/workforce/v1/agents/{agent_id}/budget-assessment"
         },
         {
+          "method": "GET",
+          "path": "/workforce/v1/agents/{agent_id}/cost-snapshots"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/agents/{agent_id}/cost-snapshots"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/agents/{agent_id}/lifecycle-events"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/agents/{agent_id}/performance-actions"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/agents/{agent_id}/performance-actions"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/agents/{agent_id}/performance-reviews"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/agents/{agent_id}/performance-reviews"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/agents/{agent_id}/probations"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/agents/{agent_id}/probations"
+        },
+        {
           "method": "POST",
           "path": "/workforce/v1/agents/{agent_id}/profile-versions"
         },
@@ -575,11 +611,27 @@
         },
         {
           "method": "GET",
-          "path": "/workforce/v1/departments/idle-agents"
+          "path": "/workforce/v1/capacity-snapshots"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/capacity-snapshots"
         },
         {
           "method": "GET",
           "path": "/workforce/v1/departments/capacity"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/departments/idle-agents"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/departments/llm-usage"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/departments/trigger-rates"
         },
         {
           "method": "GET",
@@ -622,11 +674,11 @@
           "path": "/workforce/v1/hiring-requests/{request_id}/transitions"
         },
         {
-          "method": "POST",
+          "method": "GET",
           "path": "/workforce/v1/improvements"
         },
         {
-          "method": "GET",
+          "method": "POST",
           "path": "/workforce/v1/improvements"
         },
         {
@@ -650,8 +702,20 @@
           "path": "/workforce/v1/improvements/{candidate_id}/transitions"
         },
         {
+          "method": "POST",
+          "path": "/workforce/v1/performance-actions/{action_id}/transitions"
+        },
+        {
+          "method": "POST",
+          "path": "/workforce/v1/probations/{probation_id}/close"
+        },
+        {
           "method": "GET",
           "path": "/workforce/v1/roster"
+        },
+        {
+          "method": "GET",
+          "path": "/workforce/v1/workforce-plans"
         },
         {
           "method": "POST",
@@ -664,10 +728,6 @@
         {
           "method": "POST",
           "path": "/workforce/v1/workforce-plans/{plan_id}/retire"
-        },
-        {
-          "method": "GET",
-          "path": "/workforce/v1/workforce-plans"
         }
       ]
     },
@@ -1178,7 +1238,15 @@
         },
         {
           "method": "GET",
+          "path": "/ui/workforce/llm-usage"
+        },
+        {
+          "method": "GET",
           "path": "/ui/workforce/roster"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/workforce/trigger-rates"
         },
         {
           "method": "GET",
