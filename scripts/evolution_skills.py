@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 from departments.worker_model_gateway import ModelBinding, worker_llm
 from orchestration.evolution_skills import (
+    OWNER_TO_DEPARTMENT,
     PRODUCTION_GENERATION_MODEL,
     EvolutionSkillError,
     EvolutionSkillStore,
@@ -195,12 +196,24 @@ def cmd_promote(args: argparse.Namespace) -> None:
 
 
 def cmd_feedback(args: argparse.Namespace) -> None:
+    registry = load_registry(Path(args.registry))
+    entry = registry["skills"].get(args.slug)
+    if (
+        not entry
+        or entry.get("status") != "active"
+        or int(entry.get("current_version") or 0) != args.version
+    ):
+        raise EvolutionSkillError("feedback requires the active registered skill version")
+    owners = list(entry.get("owner_profiles") or [])
+    if len(owners) != 1 or owners[0] not in OWNER_TO_DEPARTMENT:
+        raise EvolutionSkillError("feedback skill owner is unresolved")
     _store(args).record_feedback(
         slug=args.slug,
         version=args.version,
         run_id=args.run_id,
         score=args.score,
         detail=args.detail,
+        department=OWNER_TO_DEPARTMENT[owners[0]],
     )
     _print({"recorded": True, "slug": args.slug, "version": args.version, "run_id": args.run_id})
 

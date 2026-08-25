@@ -29,6 +29,7 @@ OWNED_DEPARTMENTS = {
     "01-research": "research-department",
     "04-quant-backtest": "quant-backtest-department",
 }
+OWNER_TO_DEPARTMENT = {owner: department for department, owner in OWNED_DEPARTMENTS.items()}
 TRACE_DEPARTMENT_TO_OWNER = {
     "research": "01-research",
     "research-department": "01-research",
@@ -532,9 +533,23 @@ class EvolutionSkillStore:
             },
         )
 
-    def record_feedback(self, *, slug: str, version: int, run_id: str, score: float, detail: str = "") -> None:
+    def record_feedback(
+        self,
+        *,
+        slug: str,
+        version: int,
+        run_id: str,
+        score: float,
+        detail: str = "",
+        department: str | None = None,
+    ) -> None:
         if not _NAME_RE.fullmatch(slug) or not run_id.strip():
             raise EvolutionSkillError("feedback requires a valid slug and run ID")
+        score_value = float(score)
+        if not 0.0 <= score_value <= 1.0:
+            raise EvolutionSkillError("feedback score must be between 0 and 1")
+        if department is not None and department not in OWNED_DEPARTMENTS:
+            raise EvolutionSkillError("feedback department is not an evolution skill owner")
         _append_jsonl(
             self.root / "feedback.jsonl",
             {
@@ -542,11 +557,26 @@ class EvolutionSkillStore:
                 "slug": slug,
                 "version": int(version),
                 "run_id": run_id.strip(),
-                "score": float(score),
+                "score": score_value,
                 "detail": detail[:500],
                 "at": _utcnow(),
             },
         )
+        # Three independent low-score executions become evidence for the next
+        # version. Positive feedback is retained but never creates churn alone.
+        if department and score_value < 0.5:
+            self.append_occurrences(
+                [
+                    Occurrence(
+                        kind=slug,
+                        detail=(
+                            f"active skill v{int(version)} low score {score_value:.3f}: {detail}"
+                        )[:180],
+                        run_id=run_id.strip(),
+                        department=department,
+                    )
+                ]
+            )
 
     def write_inventory(self, report: Mapping[str, Any]) -> Path:
         path = self.root / "inventory-latest.json"
@@ -897,6 +927,7 @@ __all__ = [
     "MAX_SKILLS_PER_RUN",
     "MIN_OCCURRENCES",
     "OWNED_DEPARTMENTS",
+    "OWNER_TO_DEPARTMENT",
     "Occurrence",
     "PRODUCTION_GENERATION_MODEL",
     "REGISTRY_VERSION",
