@@ -61,7 +61,10 @@ from typing import Any
 # Langfuse payloads remain timestamp-only and never include trace contents.
 
 try:
-    from orchestration.llm_observability import langfuse_worker_event_name
+    from orchestration.llm_observability import (
+        langfuse_worker_event_name,
+        langfuse_worker_opportunity_event_name,
+    )
 except ModuleNotFoundError:  # 배포된 workforce-api 이미지에는 orchestration 이 없다.
 
     def langfuse_worker_event_name(*, stage: str, worker_id: str) -> str:
@@ -76,6 +79,12 @@ except ModuleNotFoundError:  # 배포된 workforce-api 이미지에는 orchestra
         """
 
         return f"llm.performance.metric:{stage}:{worker_id}"
+
+    def langfuse_worker_opportunity_event_name(*, stage: str, worker_id: str) -> str:
+        """langfuse_worker_event_name 의 fallback 과 같은 이유 - 발화율 조회가
+        import 할 수 없는 런타임에서도 wire contract 를 놓치지 않게 복제한다."""
+
+        return f"llm.performance.opportunity:{stage}:{worker_id}"
 
 
 class WorkerRegistryUnavailable(RuntimeError):
@@ -224,6 +233,16 @@ class LangfuseTraceReader:
 
         raise NotImplementedError
 
+    def count_events(self, *, event_name: str, since: datetime, limit: int = 200) -> int:
+        """event_name 을 가진 이벤트 개수 (limit 초과분은 세지 않는다).
+
+        발화율(fire_rate) 집계 전용이다 - 실행/미발화 이벤트 각각의 건수만
+        필요하고 timestamp・metadata 는 안 쓴다. list_worker_activity 처럼 원문을
+        읽지 않는다(위 "원문을 읽지 않는다" 절과 동일).
+        """
+
+        raise NotImplementedError
+
 
 class LangfuseApiTraceReader(LangfuseTraceReader):
     """실제 Langfuse API 조회 구현. LANGFUSE_* 자격증명이 있을 때만 만든다."""
@@ -283,6 +302,13 @@ class LangfuseApiTraceReader(LangfuseTraceReader):
                 )
             )
         return records
+
+    def count_events(self, *, event_name: str, since: datetime, limit: int = 200) -> int:
+        try:
+            page = self._client.api.trace.list(name=event_name, from_timestamp=since, limit=limit)
+        except Exception as exc:  # noqa: BLE001 - 조회 실패는 항상 UNAVAILABLE 로 접힌다.
+            raise LangfuseQueryError(f"langfuse_trace_list_failed:{type(exc).__name__}") from exc
+        return len(page.data)
 
 
 # ── 부서장(Hermes Profile) ────────────────────────────────────────────────────
@@ -615,6 +641,143 @@ def check_department_capacity(
     ]
 
 
+# ── 발화율(fire rate) ─────────────────────────────────────────────────────────
+#
+# check_idle_agents()에 합치지 않는 이유: idle-agents 는 "가장 최근 실행이
+# 언제였나"(단일 timestamp)만 본다. 발화율은 "이 창 안에서 실행/미발화가 몇
+# 건씩이었나"(카운트 둘)가 필요해 조회 모양이 다르다 - compute_department_capacity
+# 가 idle 판정과 별도 함수로 분리된 것과 같은 이유.
+
+
+class TriggerRateObservationStatus(str, Enum):
+    MEASURED = "MEASURED"
+    # Langfuse 가 꺼져 있거나 조회 자체가 실패함 - CapacityObservationStatus.
+    # UNAVAILABLE 과 같은 이유.
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+@dataclass(frozen=True)
+class WorkerTriggerRateReport:
+    """Worker 한 명의 발화율 관측 한 건.
+
+    fire_rate 가 None 인 것과 0.0 인 것은 다른 사실이다 - None 은 "이 창 안에
+    기회 자체가 없었다"(분모 0, cost.py 불변식 3과 같은 원칙), 0.0 은 "기회가
+    있었는데 한 번도 안 켜졌다"(분모 > 0, 분자 0)다. 지금까지 이 둘은 idle-agents
+    쪽에서 똑같이 UNOBSERVED 로 보였다 - 여기서 분리해 낸다.
+    """
+
+    department: str
+    worker_id: str
+    trigger: str
+    window_start: datetime
+    window_end: datetime
+    status: TriggerRateObservationStatus
+    execution_count: int | None
+    opportunity_count: int | None
+    fire_rate: float | None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "department": self.department,
+            "worker_id": self.worker_id,
+            "trigger": self.trigger,
+            "window_start": self.window_start.isoformat(),
+            "window_end": self.window_end.isoformat(),
+            "status": self.status.value,
+            "execution_count": self.execution_count,
+            "opportunity_count": self.opportunity_count,
+            "fire_rate": self.fire_rate,
+        }
+
+
+def compute_worker_trigger_rate(
+    *, department: str, stage: str, spec: Any, reader: LangfuseTraceReader | None,
+    since: datetime, now: datetime,
+) -> WorkerTriggerRateReport:
+    """Worker 한 명의 실행/미발화 이벤트를 세어 발화율 하나로 합친다."""
+
+    if reader is None:
+        return WorkerTriggerRateReport(
+            department=department, worker_id=spec.worker_id, trigger=spec.trigger,
+            window_start=since, window_end=now,
+            status=TriggerRateObservationStatus.UNAVAILABLE,
+            execution_count=None, opportunity_count=None, fire_rate=None,
+        )
+
+    execution_name = langfuse_worker_event_name(stage=stage, worker_id=spec.worker_id)
+    opportunity_name = langfuse_worker_opportunity_event_name(stage=stage, worker_id=spec.worker_id)
+    try:
+        execution_count = reader.count_events(event_name=execution_name, since=since)
+        opportunity_count = reader.count_events(event_name=opportunity_name, since=since)
+    except LangfuseQueryError:
+        return WorkerTriggerRateReport(
+            department=department, worker_id=spec.worker_id, trigger=spec.trigger,
+            window_start=since, window_end=now,
+            status=TriggerRateObservationStatus.UNAVAILABLE,
+            execution_count=None, opportunity_count=None, fire_rate=None,
+        )
+
+    denominator = execution_count + opportunity_count
+    return WorkerTriggerRateReport(
+        department=department, worker_id=spec.worker_id, trigger=spec.trigger,
+        window_start=since, window_end=now,
+        status=TriggerRateObservationStatus.MEASURED,
+        execution_count=execution_count, opportunity_count=opportunity_count,
+        # 불변식 - 분모 0(이 창에 기회가 전혀 없었다)은 0.0이 아니라 None이다.
+        fire_rate=(execution_count / denominator) if denominator > 0 else None,
+    )
+
+
+def check_worker_trigger_rates(
+    *,
+    reader: LangfuseTraceReader | None = None,
+    departments: tuple[str, ...] = tuple(INVESTMENT_DEPARTMENT_STAGE),
+    lookback_hours: float = 24.0,
+    now: datetime | None = None,
+    repo_root: Path = ROOT,
+) -> list[WorkerTriggerRateReport]:
+    """6개 투자본부(기본값)의 등록된 Worker 전원에 대해 발화율을 계산한다.
+
+    check_idle_agents()와 같은 실패 모드다 - reader를 못 만들거나 조회가
+    실패하면 UNAVAILABLE로 접는다.
+    """
+
+    if lookback_hours <= 0:
+        raise ValueError("lookback_hours 는 양수여야 한다")
+    for department in departments:
+        if department not in INVESTMENT_DEPARTMENT_STAGE:
+            raise ValueError(f"unknown_investment_department:{department}")
+    if load_worker_registry is None or workers_for_department is None:
+        raise WorkerRegistryUnavailable(
+            f"worker_registry_unavailable:{_WORKER_REGISTRY_IMPORT_ERROR}"
+        )
+    try:
+        registry = load_worker_registry(repo_root)
+    except WorkerRegistryError as exc:
+        raise WorkerRegistryUnavailable(f"worker_registry_unavailable:{exc}") from exc
+
+    now = now or datetime.now(timezone.utc)
+    since = now - timedelta(hours=lookback_hours)
+
+    if reader is None:
+        try:
+            reader = LangfuseApiTraceReader()
+        except LangfuseQueryError:
+            reader = None
+
+    reports: list[WorkerTriggerRateReport] = []
+    for department in departments:
+        stage = INVESTMENT_DEPARTMENT_STAGE[department]
+        for spec in workers_for_department(registry, department):
+            reports.append(
+                compute_worker_trigger_rate(
+                    department=department, stage=stage, spec=spec, reader=reader,
+                    since=since, now=now,
+                )
+            )
+    return reports
+
+
 # ---------------------------------------------------------------------------
 # 자체 점검 (python departments/07-agent-workforce/scorecard/observability.py)
 # ---------------------------------------------------------------------------
@@ -730,3 +893,49 @@ if __name__ == "__main__":
     print("  자격증명 없음 -> Capacity 전부 UNAVAILABLE - OK")
 
     print("Capacity(Langfuse 기반) 자체 점검 통과.")
+
+    # ── 발화율(2026-08-25) ──────────────────────────────────────────────────
+
+    class _FixedCountReader(LangfuseTraceReader):
+        """실행 이벤트는 2건, 미발화 이벤트는 3건으로 고정 - fire_rate = 2/5 = 0.4를
+        손으로 검산할 수 있게 한다."""
+
+        def count_events(self, *, event_name: str, since: datetime, limit: int = 200) -> int:
+            return 2 if event_name.startswith("llm.performance.metric:") else 3
+
+    rate_reports = check_worker_trigger_rates(
+        reader=_FixedCountReader(), departments=("research",), lookback_hours=1.0, now=now,
+    )
+    assert len(rate_reports) == n_research_workers
+    for r in rate_reports:
+        assert r.status is TriggerRateObservationStatus.MEASURED, r
+        assert r.execution_count == 2 and r.opportunity_count == 3, r
+        assert abs(r.fire_rate - 0.4) < 1e-9, r.fire_rate
+    print(f"  발화율 = 실행/(실행+미발화) 계산 - OK ({len(rate_reports)}개 Worker, 0.4)")
+
+    # 분모 0(이 창에 기회 자체가 없었다)은 fire_rate 0.0이 아니라 None이어야 한다 -
+    # "발화율이 0%다"와 "잴 기회가 없었다"를 섞으면 조건부 Worker가 전부 저성과로
+    # 보인다.
+    class _ZeroCountReader(LangfuseTraceReader):
+        def count_events(self, *, event_name: str, since: datetime, limit: int = 200) -> int:
+            return 0
+
+    zero_reports = check_worker_trigger_rates(
+        reader=_ZeroCountReader(), departments=("qa",), lookback_hours=1.0, now=now,
+    )
+    assert all(r.status is TriggerRateObservationStatus.MEASURED for r in zero_reports)
+    assert all(r.execution_count == 0 and r.opportunity_count == 0 for r in zero_reports)
+    assert all(r.fire_rate is None for r in zero_reports), [r.fire_rate for r in zero_reports]
+    print("  분모 0 -> fire_rate None(0.0 아님) - OK")
+
+    # reader=None(자격증명 없음)이면 전부 UNAVAILABLE.
+    os.environ.pop("LANGFUSE_PUBLIC_KEY", None)
+    os.environ.pop("LANGFUSE_SECRET_KEY", None)
+    unavailable_rate = check_worker_trigger_rates(departments=("qa",), now=now)
+    assert unavailable_rate and all(
+        r.status is TriggerRateObservationStatus.UNAVAILABLE for r in unavailable_rate
+    )
+    assert all(r.fire_rate is None for r in unavailable_rate)
+    print("  자격증명 없음 -> 발화율 전부 UNAVAILABLE - OK")
+
+    print("발화율(Langfuse 기반) 자체 점검 통과.")

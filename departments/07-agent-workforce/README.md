@@ -110,6 +110,12 @@ Scorecard 관찰의 실제 API 배선.
     Langfuse 실행 이벤트를 직접 집계해 `GET .../departments/capacity`를 메우는 우회 경로도
     남아 있다 — DB Snapshot 쪽에 보고를 넣는 호출자가 아직 없어서다.
 
+- `scorecard/observability.py` — `check_worker_trigger_rates()`(2026-08-25). 실행기 셋이
+  발행하는 `llm.opportunity.v1`(trigger 미충족 1건) 이벤트를 읽어 `fire_rate = 실행 /
+  (실행 + 미발화)`를 계산한다. 분모 0(이 창에 기회 자체가 없었다)은 `fire_rate` `0.0`이
+  아니라 `None` — cost.py 불변식 3과 같은 원칙. 창구는
+  `GET /workforce/v1/departments/trigger-rates`.
+
 ## planning/
 
 - `planning/workforce_plan.py` — **P1-2 HR-04 Workforce Plan** 상태 머신. HR-01

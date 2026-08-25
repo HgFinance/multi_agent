@@ -105,6 +105,7 @@ from observability import (
     WorkerRegistryUnavailable,
     check_department_capacity,
     check_idle_agents,
+    check_worker_trigger_rates,
 )
 from quality import QualitySnapshot, aggregate_quality
 from roster import (
@@ -1460,6 +1461,29 @@ def get_departments_capacity(lookback_hours: float = 24.0):
             detail={"error": "worker_registry_unavailable", "message": str(exc)},
         ) from exc
     return {"capacity": [r.as_dict() for r in reports]}
+
+
+@app.get("/workforce/v1/departments/trigger-rates")
+def get_departments_trigger_rates(lookback_hours: float = 24.0):
+    """6개 투자본부 전체의 Worker 발화율.
+
+    fire_rate = execution_count / (execution_count + opportunity_count).
+    분모가 0이면(이 창에 기회 자체가 없었다) fire_rate는 0.0이 아니라 None이다 -
+    cost.py 불변식 3과 같은 원칙("측정 안 됨"과 "측정했더니 0"을 섞지 않는다).
+    """
+
+    if lookback_hours <= 0:
+        raise HTTPException(status_code=422, detail="lookback_hours must be positive")
+    try:
+        reports = check_worker_trigger_rates(
+            departments=tuple(INVESTMENT_DEPARTMENT_STAGE), lookback_hours=lookback_hours,
+        )
+    except WorkerRegistryUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "worker_registry_unavailable", "message": str(exc)},
+        ) from exc
+    return {"trigger_rates": [r.as_dict() for r in reports]}
 
 
 # --- 3.6 Workforce Plan (HR-01 Capacity Report/Staffing Scenario 저장소) --------------
