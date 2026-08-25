@@ -486,6 +486,10 @@ def test_deterministic_entry_records_distinct_non_hermes_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = _workflow(monkeypatch)
+    # The trusted BFF completes the scope-only root in place and keeps the
+    # deterministic Trading primary parked so no Hermes dispatcher can race it.
+    context.root["status"] = "done"
+    context.trading["status"] = "blocked"
     submit = Mock(return_value=_directive_response(context.record))
     monkeypatch.setattr(orchestrator, "submit_verified_paper_directive", submit)
     monkeypatch.setenv("PAPER_ORDER_STATUS_WAIT_SECONDS", "0")

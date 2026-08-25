@@ -5,8 +5,8 @@
   `portfolio-bff`는 이 저장소에서 유일하게 외부에 노출되는 서비스다
   (`docker-compose.yml` 주석 "프런트(ai-office)가 붙는 유일한 관문"). 거기에
   docker 소켓을 물리면 그 서비스 하나가 뚫렸을 때 호스트의 모든 컨테이너를
-  살릴 수 있다 - 정확히 그 이유로 `ui-bff`(레거시)의 "Docker-exec transport"를
-  `portfolio-bff`가 물려받지 않기로 이미 결정돼 있었다(`docker-compose.yml`
+  살릴 수 있다. 정확히 그 이유로 `portfolio-bff`는 HTTP 경계만 소유하고
+  Docker-exec transport는 갖지 않도록 이미 결정돼 있었다(`docker-compose.yml`
   133번째 줄 근처 주석).
 
   같은 저장소에 이미 있는 "docker-outside-of-docker" 선례

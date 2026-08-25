@@ -22,7 +22,9 @@ RISK_API_AUTH_TOKEN = os.getenv("RISK_API_AUTH_TOKEN", "").strip()
 RISK_API_TIMEOUT_SECONDS = float(os.getenv("RISK_API_TIMEOUT_SECONDS", "8"))
 
 
-async def _risk_request(method: str, path: str, *, body: dict[str, Any]) -> Any:
+async def _risk_request(
+    method: str, path: str, *, body: dict[str, Any] | None = None
+) -> Any:
     if not RISK_API_URL:
         raise HTTPException(
             status_code=503,
@@ -198,4 +200,49 @@ async def assess_risk_mandate(mandate_id: str, body: dict[str, Any]) -> Any:
     return payload
 
 
-__all__ = ["RISK_API_URL", "assess_risk_mandate", "router"]
+@router.get("/ui/risk/mandate-presets")
+async def get_risk_mandate_presets() -> Any:
+    """Project the Risk-owned versioned preset matrix to the operator UI."""
+
+    return await _risk_request("GET", "/risk/v1/mandate-presets")
+
+
+@router.post("/ui/risk/position-risk-plans/calculate")
+async def calculate_position_risk_plan(body: dict[str, Any]) -> Any:
+    """Proxy deterministic PAPER planning; this endpoint never submits an order."""
+
+    return await _risk_request(
+        "POST", "/risk/v1/position-risk-plans/calculate", body=body
+    )
+
+
+@router.post("/ui/risk/position-risk-plans/transitions")
+async def transition_position_risk_plan(body: dict[str, Any]):
+    return await _risk_request(
+        "POST", "/risk/v1/position-risk-plans/transitions", body=body
+    )
+
+
+async def activate_mandate_limits(body: dict[str, Any]) -> Any:
+    """Internal BFF orchestration helper used after Governance activation."""
+
+    return await _risk_request(
+        "POST", "/risk/v1/mandate-limits/activate-from-mandate", body=body
+    )
+
+
+async def validate_proposed_mandate_limits(body: dict[str, Any]) -> Any:
+    return await _risk_request(
+        "POST", "/risk/v1/mandate-limits/validate-proposed", body=body
+    )
+
+
+__all__ = [
+    "RISK_API_URL",
+    "activate_mandate_limits",
+    "assess_risk_mandate",
+    "calculate_position_risk_plan",
+    "get_risk_mandate_presets",
+    "router",
+    "validate_proposed_mandate_limits",
+]

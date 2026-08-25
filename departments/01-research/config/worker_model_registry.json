@@ -8,7 +8,7 @@
     "source": "/models/Qwen2.5-14B-Instruct-AWQ",
     "compatibility_alias": "Qwen2.5-14B-Instruct-AWQ",
     "quantization": "AWQ W4A16 (Marlin serving kernel)",
-    "context_length": 8192,
+    "context_length": 4096,
     "gpu_memory_utilization": 0.85,
     "kv_cache_dtype": "fp8"
   },
@@ -19,6 +19,19 @@
       "status": "available_for_explicit_route",
       "quality_gate": "FinanceBench_HOLD"
     }
+  },
+  "hybrid_runtime": {
+    "version": "awq-hybrid-upgrade-v1",
+    "status": "enabled",
+    "scope": "all-qwen14b-workers-selective-per-request",
+    "numeric_adapter_model": "hgfinance-awq-arithmetic-2epoch",
+    "unit_scale_normalization": true,
+    "glossary_enabled": true,
+    "glossary_path": "benchmarks/quantization/knowledge/bok800_2026/glossary_rag_v1.json",
+    "guided_json": true,
+    "semantic_repair_max_attempts": 1,
+    "deterministic_answer_fallback": false,
+    "quality_note": "Upgrade v1 paired A/B candidate enabled; FinanceBench diagnostic remains HOLD and is tracked separately."
   },
   "workers": {
     "executive-briefing-worker": {

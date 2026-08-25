@@ -54,6 +54,12 @@ LOG = logging.getLogger(__name__)
 
 ACTIVE_AGE_SECONDS = 24 * 60 * 60
 PURGE_AGE_SECONDS = 7 * 24 * 60 * 60
+# A blocked card is not the same as a completed card: it may still be waiting
+# for recovery or an explicit user answer.  Once a non-input block has been
+# quiet for seven days, it is safe to archive the board graph and retain only
+# the compact QA/HR capsule.  The existing purge window then removes the
+# archived graph seven days later.
+BLOCKED_ARCHIVE_AGE_SECONDS = 7 * 24 * 60 * 60
 ARCHIVED_STATUS = "archived"
 AUDIT_CAPSULE_SCHEMA_VERSION = "qa-hr.audit.v1"
 ACTIVE_RUN_STATUSES = frozenset({"running", "claimed", "spawned", "processing"})
@@ -370,6 +376,58 @@ def _has_recovery_pending(node: WorkflowNode) -> bool:
     return False
 
 
+def _blocked_at(node: WorkflowNode, *, fallback: int | None = None) -> int | None:
+    """Find the latest durable block timestamp without trusting free text."""
+
+    block_timestamps: list[int] = []
+    for key in ("blocked_at", "block_started_at"):
+        timestamp = _epoch(node.raw.get(key))
+        if timestamp is not None:
+            block_timestamps.append(timestamp)
+    events = node.raw.get("events")
+    if isinstance(events, Sequence) and not isinstance(events, (str, bytes, bytearray)):
+        for event in events:
+            if not isinstance(event, Mapping):
+                continue
+            kind = str(event.get("kind") or "").casefold().replace("-", "_")
+            if kind in {"blocked", "block", "status_blocked"}:
+                timestamp = _epoch(event.get("created_at"))
+                if timestamp is not None:
+                    block_timestamps.append(timestamp)
+    if block_timestamps:
+        return max(block_timestamps)
+    # Legacy rows may not have a block event or explicit blocked_at.  Their
+    # creation time is the only safe lower bound; updated_at is preferred when
+    # available because it is normally written at the state transition.
+    for key in ("updated_at", "created_at"):
+        timestamp = _epoch(node.raw.get(key))
+        if timestamp is not None:
+            return timestamp
+    return fallback
+
+
+def _block_kind(node: WorkflowNode) -> str:
+    value = _raw_value(node.raw, ("block_kind", "block_reason_kind"))
+    if value in (None, ""):
+        for text in (node.body, node.block_reason, node.error):
+            match = re.search(r"(?im)^(?:block_kind|block_reason_kind)=([^\s]+)", text)
+            if match:
+                value = match.group(1)
+                break
+    return str(value or "").strip().casefold().replace("-", "_")
+
+
+def _is_user_input_block(node: WorkflowNode) -> bool:
+    return _block_kind(node) in {
+        "needs_input",
+        "user_input",
+        "waiting_user",
+        "waiting_for_user",
+        "approval",
+        "clarification",
+    }
+
+
 def _correlation(workflow: Workflow) -> DiscordCorrelation:
     values: dict[str, str | None] = {}
     for node in (workflow.synthesis_node, workflow.root):
@@ -482,13 +540,46 @@ def evaluate_workflow(
 
     current = int(time.time()) if now is None else int(now)
     root = workflow.root
+    blocked_nodes = tuple(node for node in workflow.nodes if node.status == "blocked")
     terminal_at = _epoch(
         _raw_value(root.raw, ("terminal_at", "completed_at"))
     )
-    if terminal_at is None:
-        return RetentionDecision(workflow.root_task_id, False, "root_terminal_at_missing")
-    if current < terminal_at or current - terminal_at <= ACTIVE_AGE_SECONDS:
-        return RetentionDecision(workflow.root_task_id, False, "terminal_under_24h", terminal_at)
+    if blocked_nodes:
+        # A user-input/approval block is a live conversation boundary.  Keep
+        # it visible until the caller resolves it instead of silently deleting
+        # the only actionable card.
+        for node in blocked_nodes:
+            if _is_user_input_block(node):
+                return RetentionDecision(
+                    workflow.root_task_id,
+                    False,
+                    f"blocked_needs_input:{node.task_id}",
+                    terminal_at,
+                )
+        blocked_at = max(
+            (
+                timestamp
+                for node in blocked_nodes
+                for timestamp in (_blocked_at(node, fallback=terminal_at),)
+                if timestamp is not None
+            ),
+            default=terminal_at,
+        )
+        if blocked_at is None:
+            return RetentionDecision(workflow.root_task_id, False, "blocked_at_missing")
+        terminal_at = blocked_at
+        if current < blocked_at or current - blocked_at <= BLOCKED_ARCHIVE_AGE_SECONDS:
+            return RetentionDecision(
+                workflow.root_task_id,
+                False,
+                "blocked_under_7d",
+                terminal_at,
+            )
+    else:
+        if terminal_at is None:
+            return RetentionDecision(workflow.root_task_id, False, "root_terminal_at_missing")
+        if current < terminal_at or current - terminal_at <= ACTIVE_AGE_SECONDS:
+            return RetentionDecision(workflow.root_task_id, False, "terminal_under_24h", terminal_at)
     if root.status not in TERMINAL_STATUSES:
         return RetentionDecision(workflow.root_task_id, False, "root_not_terminal", terminal_at)
 
@@ -548,6 +639,12 @@ def retention_block_category(reason: str) -> str:
     normalized = str(reason or "")
     if normalized == "terminal_under_24h":
         return "TERMINAL_UNDER_24H"
+    if normalized == "blocked_under_7d":
+        return "BLOCKED_UNDER_7D"
+    if normalized.startswith("blocked_needs_input:"):
+        return "BLOCKED_NEEDS_INPUT"
+    if normalized == "blocked_at_missing":
+        return "BLOCKED_TIMESTAMP_MISSING"
     if normalized == "root_not_terminal" or normalized.startswith("unfinished:"):
         return "ACTIVE_DESCENDANT"
     if normalized.startswith("active_execution:"):
@@ -575,13 +672,40 @@ def _root_candidate(row: Mapping[str, Any]) -> bool:
     if is_ceo_root_body(body):
         return True
     roles = {match.group(1).casefold() for match in _ROOT_ROLE_RE.finditer(body)}
-    return bool(roles & {"root", "planning", "scope_and_planning"}) and (
-        f"workflow_root_task_id={task_id}" in body
-        or "root_task_role=scope_and_planning" in body
+    owns_marker = f"workflow_root_task_id={task_id}" in body
+    return owns_marker and (
+        bool(roles & {"root", "planning", "scope_and_planning"})
+        or not roles
     )
 
 
-def _archive_scan_root_ids(rows: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+def _standalone_candidate(row: Mapping[str, Any]) -> bool:
+    """Include old diagnostic cards that predate workflow-root markers.
+
+    The shared board contains legitimate one-card tests and factory diagnostics
+    created before the CEO workflow marker was introduced.  They have no
+    durable parent graph, so leaving them outside the retention scan makes an
+    old ``done``/``blocked`` card immortal.  A card carrying another root's
+    marker is deliberately excluded; its owning root must be archived
+    atomically with all descendants.
+    """
+
+    task_id = str(row.get("id") or row.get("task_id") or "").strip()
+    status = str(row.get("status") or "").casefold()
+    body = str(row.get("body") or "")
+    if not task_id or status not in TERMINAL_STATUSES or _root_candidate(row):
+        return False
+    marker = re.search(r"(?m)^workflow_root_task_id=(\S+)", body)
+    return marker is None
+
+
+def _archive_scan_root_ids(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    linked_root_ids: Iterable[str] = (),
+    linked_task_ids: Iterable[str] = (),
+    now: int | None = None,
+) -> tuple[str, ...]:
     """Order root inspection toward the oldest terminal workflows first.
 
     The authoritative workflow reconstruction remains the eligibility gate;
@@ -590,11 +714,33 @@ def _archive_scan_root_ids(rows: Sequence[Mapping[str, Any]]) -> tuple[str, ...]
     it can archive its first small batch.
     """
 
+    linked_roots = {str(value) for value in linked_root_ids if str(value).strip()}
+    linked_tasks = {str(value) for value in linked_task_ids if str(value).strip()}
     candidates: dict[str, Mapping[str, Any]] = {}
     for row in rows:
-        if not _root_candidate(row):
+        task_id = str(row.get("id") or row.get("task_id") or "").strip()
+        standalone = _standalone_candidate(row) and task_id not in linked_tasks
+        if not (_root_candidate(row) or standalone or task_id in linked_roots):
             continue
-        root_id = str(row.get("id") or row.get("task_id") or "").strip()
+        if now is not None:
+            status = str(row.get("status") or "").casefold()
+            observed_at = _epoch(
+                _raw_value(row, ("blocked_at", "block_started_at", "completed_at", "terminal_at", "created_at"))
+            )
+            age_limit = (
+                BLOCKED_ARCHIVE_AGE_SECONDS
+                if status == "blocked"
+                else ACTIVE_AGE_SECONDS
+            )
+            # A legacy/minimal row may not expose a durable timestamp.  Do
+            # not silently drop it from the scan; let the authoritative
+            # workflow evaluator fail closed (or recover the timestamp from
+            # the reconstructed nodes).
+            if status not in TERMINAL_STATUSES or (
+                observed_at is not None and now - observed_at <= age_limit
+            ):
+                continue
+        root_id = task_id
         if root_id:
             candidates.setdefault(root_id, row)
 
@@ -659,6 +805,44 @@ def _archived_at(workflow: Workflow, *, fallback: int) -> int:
                 if timestamp is not None:
                     timestamps.append(timestamp)
     return max(timestamps, default=int(fallback))
+
+
+def _evaluate_legacy_archived_workflow(
+    workflow: Workflow,
+    *,
+    now: int,
+    delivery: DeliveryState,
+) -> tuple[Workflow, RetentionDecision]:
+    """Use a durable archive event only for a legacy missing terminal time.
+
+    The repaired snapshot is then passed through the normal evaluator, so an
+    active run, recovery marker, delivery failure, or incomplete synthesis
+    still blocks retention. No separate legacy eligibility policy is created.
+    """
+
+    decision = evaluate_workflow(workflow, now=now, delivery=delivery)
+    if decision.reason != "root_terminal_at_missing":
+        return workflow, decision
+    if workflow.root.status != ARCHIVED_STATUS:
+        return workflow, decision
+
+    archived_at = _archived_at(workflow, fallback=now)
+    if archived_at >= now:
+        return workflow, decision
+    repaired_root = dict(workflow.root.raw, terminal_at=archived_at)
+    repaired_nodes = tuple(
+        WorkflowNode.from_hermes(repaired_root)
+        if node.task_id == workflow.root_task_id
+        else node
+        for node in workflow.nodes
+    )
+    repaired = Workflow(
+        root_task_id=workflow.root_task_id,
+        nodes=repaired_nodes,
+        metadata=workflow.metadata,
+        root_payload=repaired_root,
+    )
+    return repaired, evaluate_workflow(repaired, now=now, delivery=delivery)
 
 
 def build_audit_metadata(workflow: Workflow, delivery: DeliveryState) -> AuditMetadata:
@@ -841,6 +1025,52 @@ class SQLiteKanbanMaintenance:
                 "SELECT 1 FROM tasks WHERE id = ? LIMIT 1",
                 (str(root_id),),
             ).fetchone() is not None
+
+    def has_task_links(self, task_id: str) -> bool:
+        with closing(self._connect()) as conn:
+            return conn.execute(
+                "SELECT 1 FROM task_links WHERE parent_id = ? OR child_id = ? LIMIT 1",
+                (str(task_id), str(task_id)),
+            ).fetchone() is not None
+
+    def root_candidate_ids(self, task_ids: Sequence[str]) -> set[str]:
+        """Return marker-less graph roots so legacy workflows stay atomic."""
+
+        ids = tuple(dict.fromkeys(str(value) for value in task_ids if str(value)))
+        if not ids:
+            return set()
+        placeholders = ",".join("?" for _ in ids)
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"SELECT parent_id, child_id FROM task_links "
+                f"WHERE parent_id IN ({placeholders}) OR child_id IN ({placeholders})",
+                (*ids, *ids),
+            ).fetchall()
+        parents = {str(row[0]) for row in rows}
+        children = {str(row[1]) for row in rows}
+        task_id_set = set(ids)
+        return {value for value in parents if value in task_id_set and value not in children}
+
+    def linked_task_ids(self, task_ids: Sequence[str]) -> set[str]:
+        """Return every task in a durable legacy graph, including children."""
+
+        ids = tuple(dict.fromkeys(str(value) for value in task_ids if str(value)))
+        if not ids:
+            return set()
+        placeholders = ",".join("?" for _ in ids)
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                f"SELECT parent_id, child_id FROM task_links "
+                f"WHERE parent_id IN ({placeholders}) OR child_id IN ({placeholders})",
+                (*ids, *ids),
+            ).fetchall()
+        task_id_set = set(ids)
+        return {
+            str(value)
+            for row in rows
+            for value in (row[0], row[1])
+            if str(value) in task_id_set
+        }
 
     @staticmethod
     def _placeholders(values: Sequence[str]) -> str:
@@ -1123,6 +1353,26 @@ class RetentionWorker:
         include_archived: bool,
         listed_rows: Sequence[Mapping[str, Any]] | None = None,
     ) -> Workflow:
+        if listed_rows is not None:
+            row = next(
+                (
+                    item
+                    for item in listed_rows
+                    if str(item.get("id") or item.get("task_id") or "") == root_id
+                    and _standalone_candidate(item)
+                    and not bool(
+                        getattr(self.maintenance, "has_task_links", lambda _task_id: False)(root_id)
+                    )
+                ),
+                None,
+            )
+            if row is not None:
+                payload = dict(row)
+                return Workflow(
+                    root_task_id=root_id,
+                    nodes=(WorkflowNode.from_hermes(payload),),
+                    root_payload=payload,
+                )
         kwargs: dict[str, Any] = {"include_archived": include_archived}
         try:
             parameters = signature(self.workflow_loader).parameters.values()
@@ -1149,7 +1399,11 @@ class RetentionWorker:
         try:
             workflow = self._load(
                 root_id,
-                include_archived=False,
+                # A legacy pass can leave a terminal root with one or more
+                # already-archived descendants.  Include those descendants
+                # so the next pass can repair the graph atomically instead of
+                # treating the root as an incomplete workflow.
+                include_archived=True,
                 listed_rows=active_rows,
             )
             decision = evaluate_workflow(
@@ -1242,9 +1496,26 @@ class RetentionWorker:
                     continue
                 # Explicit success check required by policy: a purge cannot
                 # proceed merely because an earlier INSERT was attempted.
-                if self.audit.get(root_id) is None:
+                existing_audit = self.audit.get(root_id)
+                if existing_audit is None:
                     skipped.append((root_id, "audit_summary_missing"))
                     continue
+                # Legacy root repair or a late detached task can make the
+                # authoritative archived graph broader than the capsule saved
+                # during archive. Refresh the metadata-only capsule before
+                # deleting any detail so every purged task remains represented
+                # in the durable QA/HR evidence boundary.
+                self.audit.save_archive(
+                    build_audit_metadata(
+                        workflow,
+                        DeliveryState(
+                            "not_required",
+                            message_id=str(existing_audit["discord_message_id"] or "") or None,
+                            thread_id=str(existing_audit["discord_thread_id"] or "") or None,
+                        ),
+                    ),
+                    archived_at=int(existing_audit["archived_at"]),
+                )
                 task_ids = tuple(node.task_id for node in workflow.nodes)
                 if self.maintenance.purge_workflow(
                     root_id,
@@ -1298,7 +1569,18 @@ class RetentionWorker:
                 and str(row.get("status") or "").casefold() == ARCHIVED_STATUS
             )
         )
-        root_ids = _archive_scan_root_ids(active_rows)
+        linked_root_ids = getattr(self.maintenance, "root_candidate_ids", lambda _task_ids: set())(
+            tuple(str(row.get("id") or row.get("task_id") or "") for row in active_rows)
+        )
+        linked_task_ids = getattr(self.maintenance, "linked_task_ids", lambda _task_ids: set())(
+            tuple(str(row.get("id") or row.get("task_id") or "") for row in active_rows)
+        )
+        root_ids = _archive_scan_root_ids(
+            active_rows,
+            linked_root_ids=linked_root_ids,
+            linked_task_ids=linked_task_ids,
+            now=now,
+        )
         reconstruction_started = time.perf_counter()
         skipped: list[tuple[str, str]] = []
         blocked_reasons: Counter[str] = Counter()
@@ -1338,13 +1620,14 @@ class RetentionWorker:
                     include_archived=True,
                     listed_rows=archived_rows,
                 )
-                if any(node.status != ARCHIVED_STATUS for node in workflow.nodes):
-                    skipped.append((root_id, "legacy_not_fully_archived"))
-                    continue
-                decision = evaluate_workflow(
+                fully_archived = all(
+                    node.status == ARCHIVED_STATUS for node in workflow.nodes
+                )
+                delivery = self.delivery_reader.state(workflow)
+                workflow, decision = _evaluate_legacy_archived_workflow(
                     workflow,
                     now=now,
-                    delivery=self.delivery_reader.state(workflow),
+                    delivery=delivery,
                 )
                 if not decision.eligible:
                     skipped.append((root_id, f"legacy_{decision.reason}"))
@@ -1357,6 +1640,11 @@ class RetentionWorker:
                     metadata,
                     archived_at=_archived_at(workflow, fallback=now),
                 )
+                if not fully_archived and not self.maintenance.archive_workflow(
+                    root_id,
+                    [node.task_id for node in workflow.nodes if node.task_id != root_id],
+                ):
+                    skipped.append((root_id, "legacy_archive_cas_failed"))
             except (KanbanTaskNotFound, KanbanUnavailable, RetentionError, sqlite3.Error) as exc:
                 skipped.append((root_id, f"legacy_audit_error:{type(exc).__name__}"))
 

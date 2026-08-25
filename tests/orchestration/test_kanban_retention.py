@@ -17,6 +17,7 @@ from orchestration.kanban_retention import (
     FilesystemArtifactCleaner,
     RetentionWorker,
     SQLiteKanbanMaintenance,
+    _archive_scan_root_ids,
     build_qa_hr_capsule,
     evaluate_workflow,
 )
@@ -164,6 +165,106 @@ def test_terminal_over_24_hours_and_safe_archives() -> None:
     result = _decision(_workflow())
     assert result.eligible
     assert result.reason == "safe"
+
+
+def test_stale_non_input_block_is_archivable_after_seven_days() -> None:
+    workflow = _workflow(child_status="blocked")
+    blocked_raw = dict(
+        workflow.nodes[1].raw,
+        block_kind="capability",
+        blocked_at=NOW - 8 * 24 * 3600,
+        completed_at=None,
+    )
+    workflow = ceo_kanban_read.Workflow(
+        root_task_id=ROOT,
+        nodes=(
+            workflow.nodes[0],
+            ceo_kanban_read.WorkflowNode.from_hermes(blocked_raw),
+            workflow.nodes[2],
+        ),
+        metadata={},
+        root_payload=workflow.root_payload,
+    )
+
+    result = _decision(workflow)
+
+    assert result.eligible
+    assert result.reason == "safe"
+    assert result.terminal_at == NOW - 8 * 24 * 3600
+
+
+def test_recent_block_and_user_input_block_are_retained() -> None:
+    recent = _workflow(child_status="blocked")
+    recent_raw = dict(
+        recent.nodes[1].raw,
+        block_kind="capability",
+        blocked_at=NOW - 6 * 24 * 3600,
+        completed_at=None,
+    )
+    recent = ceo_kanban_read.Workflow(
+        root_task_id=ROOT,
+        nodes=(
+            recent.nodes[0],
+            ceo_kanban_read.WorkflowNode.from_hermes(recent_raw),
+            recent.nodes[2],
+        ),
+        metadata={},
+        root_payload=recent.root_payload,
+    )
+    recent_result = _decision(recent)
+    assert not recent_result.eligible
+    assert recent_result.reason == "blocked_under_7d"
+
+    waiting = _workflow(child_status="blocked")
+    waiting_raw = dict(
+        waiting.nodes[1].raw,
+        block_kind="needs_input",
+        blocked_at=NOW - 30 * 24 * 3600,
+        completed_at=None,
+    )
+    waiting = ceo_kanban_read.Workflow(
+        root_task_id=ROOT,
+        nodes=(
+            waiting.nodes[0],
+            ceo_kanban_read.WorkflowNode.from_hermes(waiting_raw),
+            waiting.nodes[2],
+        ),
+        metadata={},
+        root_payload=waiting.root_payload,
+    )
+    waiting_result = _decision(waiting)
+    assert not waiting_result.eligible
+    assert waiting_result.reason == f"blocked_needs_input:{PRIMARY}"
+
+
+def test_scan_includes_legacy_standalone_cards_without_stealing_children() -> None:
+    rows = [
+        {"id": "marked-root", "status": "done", "created_at": 30, "body": "root_task_role=scope_and_planning\nworkflow_root_task_id=marked-root\n"},
+        {"id": "marked-child", "status": "done", "created_at": 1, "body": "workflow_root_task_id=marked-root\n"},
+        {"id": "legacy-done", "status": "done", "created_at": 10, "body": "diagnostic only"},
+        {"id": "legacy-blocked", "status": "blocked", "created_at": 20, "body": "factory diagnostic"},
+        {"id": "triage-card", "status": "triage", "created_at": 0, "body": "not terminal"},
+    ]
+
+    assert _archive_scan_root_ids(rows) == (
+        "legacy-done",
+        "legacy-blocked",
+        "marked-root",
+    )
+
+
+def test_scan_excludes_markerless_linked_children_when_graph_roots_are_known() -> None:
+    rows = [
+        {"id": "legacy-root", "status": "done", "created_at": 10, "body": "root request"},
+        {"id": "legacy-child", "status": "done", "created_at": 1, "body": "department result"},
+        {"id": "legacy-standalone", "status": "done", "created_at": 5, "body": "diagnostic only"},
+    ]
+
+    assert _archive_scan_root_ids(
+        rows,
+        linked_root_ids=("legacy-root",),
+        linked_task_ids=("legacy-root", "legacy-child"),
+    ) == ("legacy-standalone", "legacy-root")
 
 
 def test_required_synthesis_missing_blocks_multi_stage_workflow() -> None:
@@ -339,6 +440,21 @@ def test_archive_then_purge_preserves_audit_and_forbids_under_7_days(tmp_path: P
     ).run_once()
     assert before_purge.purged_count == 0
 
+    with audit._connect() as conn:
+        conn.execute(
+            "UPDATE workflow_retention_audit SET qa_hr_capsule_json = ? WHERE root_id = ?",
+            (
+                json.dumps(
+                    {
+                        "schema_version": AUDIT_CAPSULE_SCHEMA_VERSION,
+                        "workflow": {"task_ids": ["stale-task-id"]},
+                    }
+                ),
+                ROOT,
+            ),
+        )
+        conn.commit()
+
     after_purge = RetentionWorker(
         maintenance=maintenance,
         audit=audit,
@@ -349,6 +465,8 @@ def test_archive_then_purge_preserves_audit_and_forbids_under_7_days(tmp_path: P
     assert after_purge.purged_count == 1
     assert audit.get(ROOT) is not None
     assert audit.get(ROOT)["purged_at"] == NOW + 5 * 24 * 3600 + 1
+    refreshed_capsule = json.loads(audit.get(ROOT)["qa_hr_capsule_json"])
+    assert refreshed_capsule["workflow"]["task_ids"] == [ROOT, PRIMARY, SYNTHESIS]
 
 
 def test_bounded_production_scan_stops_after_oldest_safe_batch(tmp_path: Path) -> None:
@@ -544,15 +662,25 @@ def test_filesystem_artifact_cleanup_is_task_scoped(tmp_path: Path) -> None:
 def test_legacy_archived_workflow_is_audited_before_old_purge(tmp_path: Path) -> None:
     maintenance = FakeMaintenance()
     audit = AuditStore(tmp_path / "retention-audit.db")
-    legacy = _workflow()
+    current = _workflow()
     legacy = ceo_kanban_read.Workflow(
+        root_task_id=ROOT,
+        nodes=tuple(
+            ceo_kanban_read.WorkflowNode.from_hermes(
+                dict(node.raw, completed_at=None)
+            )
+            for node in current.nodes
+        ),
+        root_payload=dict(current.root_payload, completed_at=None),
+    )
+    fully_archived = ceo_kanban_read.Workflow(
         root_task_id=ROOT,
         nodes=tuple(
             ceo_kanban_read.WorkflowNode.from_hermes(
                 dict(
                     node.raw,
                     status="archived",
-                    completed_at=NOW - 8 * 24 * 3600,
+                    completed_at=None,
                     events=[{"kind": "archived", "created_at": NOW - 8 * 24 * 3600}],
                 )
             )
@@ -560,19 +688,28 @@ def test_legacy_archived_workflow_is_audited_before_old_purge(tmp_path: Path) ->
         ),
         root_payload=dict(legacy.root_payload, status="archived"),
     )
+    partial_legacy = ceo_kanban_read.Workflow(
+        root_task_id=ROOT,
+        nodes=(fully_archived.nodes[0], *legacy.nodes[1:]),
+        root_payload=fully_archived.root_payload,
+    )
 
     def rows(*, include_archived: bool = False):
         return [{"id": ROOT, "body": legacy.root.body, "status": "archived"}] if include_archived else []
 
+    def loader(_root_id: str, **_):
+        return fully_archived if maintenance.archived else partial_legacy
+
     worker = RetentionWorker(
         maintenance=maintenance,
         audit=audit,
-        workflow_loader=lambda _root_id, **_: legacy,
+        workflow_loader=loader,
         row_lister=rows,
         clock=lambda: NOW,
     )
     result = worker.run_once()
     assert result.purged_count == 1
+    assert maintenance.archived == [(ROOT, (PRIMARY, SYNTHESIS))]
     assert maintenance.purged == [(ROOT, (PRIMARY, SYNTHESIS))]
     assert audit.get(ROOT)["archived_at"] == NOW - 8 * 24 * 3600
     assert audit.get(ROOT)["purged_at"] == NOW

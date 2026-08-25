@@ -38,13 +38,17 @@ COPY departments/07-agent-workforce/improvements ./improvements
 COPY departments/07-agent-workforce/scorecard ./scorecard
 COPY departments/07-agent-workforce/roster ./roster
 COPY departments/07-agent-workforce/workforce_events ./workforce_events
-# api/app.py 57~65행이 sys.path 에 넣는 디렉터리는 여섯 개다 - lifecycle/
-# improvements/scorecard/roster **+ planning + hiring**. 뒤의 둘이 빠져 있어서
+# api/app.py가 sys.path 에 넣는 디렉터리는 lifecycle/improvements/scorecard/
+# roster/planning/hiring/performance다. COPY 목록도 이 import root와 같이 움직인다.
+# planning/hiring이 빠져 있었을 때
 # `from hiring_request import ...` 가 죽고 workforce-api·improvement-worker 가
 # 둘 다 크래시 루프였다(2026-08-12 실측). sys.path 목록과 이 COPY 목록은
 # 같이 움직여야 한다.
 COPY departments/07-agent-workforce/planning ./planning
 COPY departments/07-agent-workforce/hiring ./hiring
+COPY departments/07-agent-workforce/performance ./performance
+# improvement-worker는 root loader로 api/app.py를 고유 모듈명에 로드한다.
+COPY departments/07-agent-workforce/workforce_api_loader.py ./workforce_api_loader.py
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 

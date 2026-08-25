@@ -20,6 +20,7 @@ from orchestration.adapters.ceo_supervisor import (
     _analysis_synthesis_decision,
     _department_progress_text,
     _initial_primary_materialization_decisions,
+    _single_primary_passthrough_child,
     decide_supervisor,
     cli_lane,
     parse_supervisor_output,
@@ -89,6 +90,49 @@ class NoAnalysisChildrenOriginGuardTest(unittest.TestCase):
         )
         self.assertIsNotNone(decision)
         self.assertEqual(decision.action, SupervisorAction.REQUEST_USER_INPUT)
+
+
+class UserPaperPrimaryPassthroughTest(unittest.TestCase):
+    def _state(self, *, qa_enabled: bool = False) -> SupervisorState:
+        primary = ChildTaskState(
+            task_id="trading",
+            profile="trading-department",
+            status="done",
+            result="trusted PAPER receipt",
+            final_answer="trusted PAPER receipt",
+            body=(
+                "workflow_root_task_id=root\n"
+                "workflow_role=primary\n"
+                "hgfinance.user-paper-order-request.v1"
+            ),
+        )
+        return SupervisorState(
+            "root",
+            (primary,),
+            workflow_mode="binding",
+            qa_enabled=qa_enabled,
+            qa_blocks_response=qa_enabled,
+            selected_primary_profiles=("trading-department",),
+            root_is_user_query=True,
+            allow_primary_passthrough=True,
+        )
+
+    def test_non_gated_user_paper_receipt_skips_redundant_ceo_llm(self) -> None:
+        state = self._state()
+
+        self.assertEqual(
+            _single_primary_passthrough_child(state).task_id,
+            "trading",
+        )
+        self.assertIsNone(decide_supervisor(state))
+
+    def test_qa_gated_binding_still_requires_normal_synthesis(self) -> None:
+        state = self._state(qa_enabled=True)
+
+        self.assertIsNone(_single_primary_passthrough_child(state))
+        decision = decide_supervisor(state)
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.action, SupervisorAction.RUN_QA)
 
 
 class UserQueryPriorityTest(unittest.TestCase):
@@ -1238,6 +1282,7 @@ class FakeClient:
         ]
         self.created: list[dict[str, object]] = []
         self.unblocked: list[str] = []
+        self.completed: list[dict[str, object]] = []
         self.blocked: list[str] = []
         self.comments: list[dict[str, str]] = []
         self.root_body = ""
@@ -1272,8 +1317,44 @@ class FakeClient:
     def unblock_task(self, task_id: str) -> None:
         self.unblocked.append(task_id)
 
+    def complete_task(self, task_id: str, **kwargs: object) -> None:
+        self.completed.append({"task_id": task_id, **kwargs})
+
     def block_task(self, task_id: str, reason: str) -> None:
         self.blocked.append(task_id)
+
+
+class WorkforceAdvisoryAttachmentTest(unittest.TestCase):
+    def test_hr_primary_receives_existing_snapshot_without_a_second_scorecard(self):
+        client = FakeClient()
+        client.payloads = []
+        service = CeoSupervisorService(client, qa_required=False)
+        state = SupervisorState(
+            "root",
+            (),
+            workflow_mode="analysis",
+            selected_primary_profiles=("hr-department",),
+            workforce_advisory_context=(
+                '{"contract":"hgfinance.workforce-advisory.v1",'
+                '"capacity":[{"department":"research","error_rate":0.13}]}'
+            ),
+        )
+        decision = SupervisorDecision(
+            SupervisorAction.CREATE_TASK,
+            "root",
+            assignee="hr-department",
+            title="CEO delegated hr analysis",
+            body="analysis_mode=fast_advisory\n가장 먼저 개선할 부서를 판단하십시오.",
+            parent_task_ids=(),
+        )
+
+        service._execute(decision, state)
+
+        body = str(client.created[0]["body"])
+        self.assertIn("Authoritative Workforce API snapshot", body)
+        self.assertIn("hgfinance.workforce-advisory.v1", body)
+        self.assertIn('"department":"research"', body)
+        self.assertIn("Do not repeat browser, terminal, file", body)
 
 
 class SynthesisTimingInstrumentationTest(unittest.TestCase):
@@ -2258,9 +2339,61 @@ class SupervisorWakeupTest(unittest.TestCase):
             [item["assignee"] for item in client.created], ["ceo-agent"]
         )
         synthesis_body = client.created[0]["body"]
-        self.assertIn('\\"order_submitted\\": false', synthesis_body)
-        self.assertIn('"final_answer": "market closed"', synthesis_body)
-        self.assertIn("must never be described as pending review", synthesis_body)
+        self.assertIn("synthesis_mode=structured_primary_template", synthesis_body)
+        self.assertEqual(client.created[0]["initial_status"], "blocked")
+        self.assertEqual(len(client.completed), 1)
+        self.assertEqual(client.completed[0]["result"], "market closed")
+        metadata = client.completed[0]["metadata"]
+        self.assertIsInstance(metadata, dict)
+        self.assertTrue(metadata["preserved_primary_final_answer_verbatim"])
+
+    def test_binding_template_failure_releases_same_synthesis_for_llm_fallback(self) -> None:
+        class CompletionFailureClient(FakeClient):
+            def complete_task(self, task_id: str, **kwargs: object) -> None:
+                del task_id, kwargs
+                raise RuntimeError("probe failure")
+
+        client = CompletionFailureClient()
+        client.root_body = build_root_body(
+            "삼성전자 조건주문",
+            "req-paper-template-fallback",
+            workflow_mode="binding",
+            user_paper_order_scope=UserPaperOrderScope(
+                order_request_id="order-request-fallback",
+                raw_instruction_sha256="b" * 64,
+                fund_id="fund-a",
+                book_id="book-a",
+            ),
+        )
+        client.payloads = [
+            {
+                "id": "trading",
+                "assignee": "trading-department",
+                "status": "done",
+                "result": "활성화 완료",
+                "final_answer": "조건주문이 활성화되었습니다.",
+                "body": "workflow_root_task_id=root\nworkflow_role=primary",
+            }
+        ]
+        client.comments = [
+            {
+                "task_id": "root",
+                "body": "selected_primary_profiles=trading-department",
+            }
+        ]
+
+        decision = CeoSupervisorService(client).handle_terminal_event(
+            {
+                "event_id": "paper-template-fallback",
+                "task_id": "trading",
+                "kind": "completed",
+            }
+        )
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
+        self.assertEqual(client.unblocked, ["new-1"])
+        self.assertEqual(len(client.created), 1)
 
     def test_root_body_declares_scope_only_planning_contract(self) -> None:
         body = build_root_body("Samsung", "req-1")
@@ -3161,6 +3294,45 @@ class InitialPrimaryMaterializationTest(unittest.TestCase):
                 for decision in decisions
             )
         )
+
+    def test_materializes_hr_for_workforce_improvement_analysis(self) -> None:
+        body = (
+            "origin=user-query\n"
+            "workflow_role=root\n"
+            "workflow_mode=analysis\n"
+            "analysis_mode=fast_advisory\n"
+            "selected_primary_profiles=hr-department\n"
+            "delegation_instruction.hr-department="
+            "Compare department improvement signals.\n"
+        )
+        state = SupervisorState(
+            parent_task_id="root",
+            children=(),
+            workflow_mode="analysis",
+            selected_primary_profiles=("hr-department",),
+            root_is_user_query=True,
+        )
+
+        decisions = _initial_primary_materialization_decisions(state, body)
+
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0].action, SupervisorAction.CREATE_TASK)
+        self.assertEqual(decisions[0].assignee, "hr-department")
+
+    def test_internal_workflow_failure_is_not_reported_as_provider_failure(self) -> None:
+        child = ChildTaskState(
+            task_id="control",
+            profile="ceo-agent",
+            status="blocked",
+            block_reason=(
+                "초기 실행 primary가 생성되지 않아 supervisor만 보완할 수 있습니다."
+            ),
+        )
+
+        content = CeoSupervisorService._terminal_failure_content(child)
+
+        self.assertIn("내부 작업이 중단", content)
+        self.assertNotIn("provider", content)
 
     def test_qa_department_is_not_materialized_as_analysis_primary(self) -> None:
         body = (

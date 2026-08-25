@@ -105,14 +105,13 @@ class ConditionalRuleRetentionStore:
     @classmethod
     def from_env(cls) -> ConditionalRuleRetentionStore:
         dsn = (
-            os.getenv("CONDITIONAL_RULE_RETENTION_DATABASE_URL", "").strip()
-            or os.getenv("CONDITIONAL_RULE_DATABASE_URL", "").strip()
+            os.getenv("CONDITIONAL_RULE_DATABASE_URL", "").strip()
             or os.getenv("DATABASE_URL", "").strip()
         )
         return cls(
             dsn,
             role=os.getenv(
-                "CONDITIONAL_RULE_RETENTION_DATABASE_ROLE",
+                "CONDITIONAL_RULE_WORKER_DATABASE_ROLE",
                 "svc_conditional_rule_worker",
             ).strip(),
             statement_timeout_ms=_env_int(

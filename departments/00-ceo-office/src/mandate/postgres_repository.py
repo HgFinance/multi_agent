@@ -614,7 +614,8 @@ class PostgresMandateVersionRepository(MandateVersionRepository):
                 cur.execute(
                     """
                     update governance.mandates
-                    set current_version = %s, status = %s, updated_at = now()
+                    set current_version = %s, status = %s, metadata = '{}'::jsonb,
+                        updated_at = now()
                     where mandate_id = %s
                     """,
                     (version, status, mandate_id),

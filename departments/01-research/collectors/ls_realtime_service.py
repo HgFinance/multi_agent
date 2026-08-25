@@ -86,9 +86,31 @@ STALE_UNMAPPED_REASON = "STALE_CONFIG_NO_CURRENT_TRADING_MAPPING"
 
 DEFAULT_OPEN = time(9, 0)
 DEFAULT_CLOSE = time(15, 30)
+CLOSING_CALL_AUCTION_START = time(15, 20)
 SESSION_RETRY_BACKOFF = 30.0
 IDLE_RECHECK_SECONDS = 4 * 3600.0  # 휴장일에 세션 판정을 다시 하는 주기
 DEFAULT_HEALTH_MAX_DATA_AGE_SECONDS = 180.0
+
+
+def _required_health_streams(now: datetime) -> tuple[str, ...]:
+    """Return streams expected to update in the current KRX market phase."""
+
+    local_time = now.astimezone(KST).time().replace(tzinfo=None)
+    if local_time >= DEFAULT_CLOSE:
+        # The collector intentionally keeps its websocket session open after
+        # the KRX regular close, but regular-session ticks and quotes need not
+        # advance.  Treating that expected silence as a dead feed causes a
+        # false unhealthy state until the next session.
+        return ()
+    if (
+        local_time < DEFAULT_OPEN
+        or CLOSING_CALL_AUCTION_START <= local_time < DEFAULT_CLOSE
+    ):
+        # Pre-open and the closing call auction can publish quotes without a
+        # trade for minutes. LAST_PRICE consumers still fail closed on a stale
+        # tick; container liveness should instead prove the feed itself moves.
+        return ("quote",)
+    return ("tick", "quote")
 
 
 @dataclass(frozen=True)
@@ -685,10 +707,12 @@ def runtime_healthcheck(environment: dict | None = None) -> None:
             if not in_capture_window:
                 return
             latest: dict[str, datetime | None] = {}
-            for label, table in (
-                ("tick", "market.market_ticks"),
-                ("quote", "market.market_quotes"),
-            ):
+            tables = {
+                "tick": "market.market_ticks",
+                "quote": "market.market_quotes",
+            }
+            for label in _required_health_streams(now):
+                table = tables[label]
                 cur.execute(
                     f"select event_time from {table} "
                     "order by event_time desc limit 1"
@@ -740,6 +764,11 @@ def _check_window():
     # Calendar 미상 + 주말 - 비거래
     w = resolve_window(date(2026, 8, 1), None, pre_open_minutes=35, post_close_minutes=10)
     assert not w.is_trading
+    assert _required_health_streams(kst(2026, 7, 31, 8, 50)) == ("quote",)
+    assert _required_health_streams(kst(2026, 7, 31, 15, 10)) == ("tick", "quote")
+    assert _required_health_streams(kst(2026, 7, 31, 15, 25)) == ("quote",)
+    assert _required_health_streams(kst(2026, 7, 31, 15, 30)) == ()
+    assert _required_health_streams(kst(2026, 7, 31, 19, 0)) == ()
     print("  세션 창 판정             OK")
 
 

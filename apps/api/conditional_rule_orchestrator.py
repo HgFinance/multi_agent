@@ -148,7 +148,8 @@ def _active_result(record: Any, *, assumptions: tuple[str, ...] = ()) -> dict[st
         if timeframe_fallback
         else ""
     ) + (
-        "조건주문이 PAPER 모드로 즉시 활성화되었습니다. "
+        "조건주문은 접수 처리 시점에 PAPER 모드 ACTIVE 전환이 완료되었습니다. "
+        "이 문구는 생성 영수증이며 현재 상태 조회 결과가 아닙니다. "
         f"종목 {spec.symbol}, {spec.action.side.value}, 수량 {sizing_text}, "
         f"주문유형 {spec.action.order_type}"
         + (
@@ -263,7 +264,9 @@ def _active_batch_result(
         "rules": [item["summary"] for item in items],
         "assumptions": [item["assumptions"] for item in items],
         "user_message": (
-            f"서로 독립적인 PAPER 조건주문 {len(records)}개가 즉시 활성화되었습니다. "
+            f"서로 독립적인 PAPER 조건주문 {len(records)}개는 접수 처리 시점에 "
+            "ACTIVE 전환이 완료되었습니다. 이 문구는 생성 영수증이며 현재 상태 "
+            "조회 결과가 아닙니다. "
             "각 규칙은 1회만 실행되며, 각 조건 충족 시 deterministic guard를 "
             "통과한 경우에만 PAPER OMS로 제출됩니다. 규칙별 추적 만료 시각은 "
             "요약의 expires_at에 기록했습니다."
@@ -564,7 +567,23 @@ def get_user_conditional_paper_rule_status(
         rule = rules.get(rule_id, user_id=admission.user_id)
         if rule is None:
             _reject("CONDITIONAL_RULE_NOT_FOUND")
+        rule_state = rule.state.value
         if not rule.directive_id:
+            workflow_state = (
+                "WAITING_FOR_TRIGGER"
+                if rule.state is RuleState.ACTIVE
+                else rule_state
+            )
+            if rule.state is RuleState.ACTIVE:
+                answer = (
+                    "PAPER 조건주문은 활성 상태이지만 Trading 제출 이벤트는 "
+                    "아직 발생하지 않았습니다."
+                )
+            else:
+                answer = (
+                    f"PAPER 조건주문 규칙은 현재 {rule_state} 상태이며 Trading "
+                    "제출 이벤트는 발생하지 않았습니다."
+                )
             statuses.append(
                 {
                     "schema_version": "conditional-paper-execution-status.v1",
@@ -572,13 +591,10 @@ def get_user_conditional_paper_rule_status(
                     "authority_verified": True,
                     "mode": "PAPER",
                     "rule_id": rule.rule_id,
-                    "rule_state": rule.state.value,
+                    "rule_state": rule_state,
                     "directive_id": None,
-                    "workflow_state": "WAITING_FOR_TRIGGER",
-                    "final_answer": (
-                        "PAPER 조건주문은 활성 상태이지만 Trading 제출 이벤트는 "
-                        "아직 발생하지 않았습니다."
-                    ),
+                    "workflow_state": workflow_state,
+                    "final_answer": answer,
                 }
             )
             continue
@@ -594,7 +610,12 @@ def get_user_conditional_paper_rule_status(
             expected_directive_id=rule.directive_id,
             workflow_state=_workflow_state_from_directive(directive),
         )
-        statuses.append(snapshot.model_dump(mode="json"))
+        projected = snapshot.model_dump(mode="json")
+        projected["rule_state"] = rule_state
+        projected["final_answer"] = (
+            f"조건 규칙 상태 : {rule_state}\n{projected['final_answer']}"
+        )
+        statuses.append(projected)
 
     if len(statuses) == 1:
         return statuses[0]

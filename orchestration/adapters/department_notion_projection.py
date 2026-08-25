@@ -11,6 +11,7 @@ duplicate cross-boundary upload while making the natural CEO path observable.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import urllib.error
 import urllib.request
@@ -150,6 +151,9 @@ class _NotionTransport:
             "PATCH", f"pages/{page_id}", {"properties": dict(properties)}
         )
 
+    def retrieve_page(self, page_id: str) -> Mapping[str, Any]:
+        return self._request("GET", f"pages/{page_id}")
+
     def append_blocks(
         self, page_id: str, children: Sequence[Mapping[str, Any]]
     ) -> Mapping[str, Any]:
@@ -166,6 +170,10 @@ class DepartmentProjectionResult:
     page_id: str | None = None
     duplicate: bool = False
     error: str | None = None
+    risk_plan_id: str | None = None
+    payload_hash: str | None = None
+    delivery_status: str | None = None
+    readback_status: str | None = None
 
 
 def _title(value: str) -> dict[str, Any]:
@@ -273,6 +281,28 @@ def _body_markdown(
                     default=str,
                 )[:12000],
                 "```",
+            ]
+        )
+
+    risk_plan = metadata.get("position_risk_plan") or metadata.get("risk_plan")
+    if department == "risk" and isinstance(risk_plan, Mapping):
+        parts.extend(
+            [
+                "",
+                "## Position Risk Plan (read-only projection)",
+                "",
+                f"- Risk Plan ID: `{risk_plan.get('risk_plan_id') or ''}`",
+                f"- Mandate Version: `{risk_plan.get('mandate_version_id') or ''}`",
+                f"- State / Action: `{risk_plan.get('state') or 'PROPOSED'}` / `{risk_plan.get('action') or ''}`",
+                f"- Regime / As Of: `{risk_plan.get('regime') or ''}` / `{risk_plan.get('as_of') or ''}`",
+                f"- Entry / Stop / Take Profit: `{risk_plan.get('entry_reference')}` / `{risk_plan.get('stop_price')}` / `{risk_plan.get('take_profit_price')}`",
+                f"- Quantity Cap / Loss Budget: `{risk_plan.get('quantity_cap')}` / `{risk_plan.get('position_risk_amount')}`",
+                f"- Trailing Activation / Distance: `{risk_plan.get('trailing_activation_price')}` / `{risk_plan.get('trailing_distance')}`",
+                f"- Expires At: `{risk_plan.get('expires_at') or ''}`",
+                f"- Calculation / Input Hash: `{risk_plan.get('calculation_version') or ''}` / `{risk_plan.get('input_hash') or ''}`",
+                f"- Data Quality: `{risk_plan.get('data_quality') or ''}`",
+                "",
+                "This page is not authoritative. Canonical state remains in the Risk database.",
             ]
         )
 
@@ -468,8 +498,43 @@ class DepartmentNotionProjection:
             department=department,
             result_text=result_text,
         )
+        payload_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        risk_plan = metadata.get("position_risk_plan") or metadata.get("risk_plan")
+        risk_plan_id = (
+            str(risk_plan.get("risk_plan_id") or "").strip()
+            if isinstance(risk_plan, Mapping)
+            else ""
+        )
 
         children = markdown_to_notion_blocks(body)
+
+        def projection_result(
+            status: str, page_id: str | None, *, duplicate: bool = False
+        ) -> DepartmentProjectionResult:
+            readback_status = "NOT_SUPPORTED"
+            retrieve = getattr(transport, "retrieve_page", None)
+            if page_id and callable(retrieve):
+                try:
+                    page = retrieve(page_id)
+                    readback_status = (
+                        "VERIFIED"
+                        if str(page.get("id") or "").replace("-", "")
+                        == page_id.replace("-", "")
+                        else "FAILED"
+                    )
+                except Exception:
+                    readback_status = "FAILED"
+            return DepartmentProjectionResult(
+                status,
+                department=department,
+                task_id=tid,
+                page_id=page_id,
+                duplicate=duplicate,
+                risk_plan_id=risk_plan_id or None,
+                payload_hash=payload_hash,
+                delivery_status="DELIVERED",
+                readback_status=readback_status,
+            )
 
         def lookup() -> Sequence[Mapping[str, Any]]:
             try:
@@ -507,18 +572,10 @@ class DepartmentNotionProjection:
                     and not correction_is_in_properties
                 ):
                     append_blocks(page_id, children)
-                return DepartmentProjectionResult(
-                    "updated",
-                    department=department,
-                    task_id=tid,
-                    page_id=page_id,
-                )
+                return projection_result("updated", page_id)
             created = create()
-            return DepartmentProjectionResult(
-                "created",
-                department=department,
-                task_id=tid,
-                page_id=str(created.get("id") or "") or None,
+            return projection_result(
+                "created", str(created.get("id") or "") or None
             )
 
         result = self._idempotency.execute(
@@ -528,10 +585,8 @@ class DepartmentNotionProjection:
             create=create,
         )
 
-        return DepartmentProjectionResult(
+        return projection_result(
             "duplicate" if result.duplicate else "created",
-            department=department,
-            task_id=tid,
-            page_id=result.page_id,
+            result.page_id,
             duplicate=result.duplicate,
         )

@@ -36,6 +36,7 @@ CANONICAL_PRIMARY_ASSIGNEES = frozenset(
         "trading-department",
         "accounting-portfolio-department",
         "risk-management",
+        "hr-department",
     }
 )
 
@@ -43,7 +44,9 @@ CANONICAL_PRIMARY_ASSIGNEES = frozenset(
 def is_analysis_primary_eligible(profile: Any) -> bool:
     """Return whether ``profile`` may execute an analysis primary task.
 
-    Governance QA deliberately is not in the primary allowlist.  The same
+    Governance QA deliberately is not in the primary allowlist. HR is eligible
+    because workforce/department-improvement analysis is its owned read path;
+    lifecycle mutations still use the separate governed HR workflow. The same
     helper is imported by the CEO-agent Kanban create boundary and by the
     supervisor so those two producers cannot drift.
     """

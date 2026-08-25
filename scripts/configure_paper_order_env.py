@@ -238,9 +238,7 @@ def _runtime_settings(runtime: str) -> dict[str, str]:
     common = {
         "USER_PAPER_ORDER_WORKFLOW_ENABLED": "true",
         "USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED": "true",
-        "LS_ENV": "LIVE",
         "TRADING_EXECUTION_MODE": "PAPER",
-        "TRADING_BROKER_ADAPTER": "paper",
     }
     if runtime == "local":
         return {
@@ -250,6 +248,8 @@ def _runtime_settings(runtime: str) -> dict[str, str]:
             # present and must match the explicit grant below.
             "PORTFOLIO_AUTH_REQUIRED": "false",
             "PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON": LOCAL_TRADING_GRANT,
+            "LS_ENV": "LIVE",
+            "TRADING_BROKER_ADAPTER": "paper",
             **common,
         }
     if runtime == "aws":
@@ -258,8 +258,12 @@ def _runtime_settings(runtime: str) -> dict[str, str]:
             "PORTFOLIO_AUTH_MODE": "fixture",
             "PORTFOLIO_AUTH_REQUIRED": "false",
             "PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON": "[]",
-            # LS market/account reads use LIVE; order execution remains
-            # independently pinned to the local PAPER adapter below.
+            # This deployment owns the LS mock-investment lane end to end.
+            # Both account reads and user-directive execution are pinned to
+            # PAPER so a generated runtime file cannot silently select the
+            # local in-memory adapter or LIVE credentials.
+            "LS_ENV": "PAPER",
+            "TRADING_BROKER_ADAPTER": "ls-paper",
             # The AWS Compose overlay builds the private control DSN from the
             # local Timescale/PostgreSQL service and this database name.  A
             # A hosted database URL must never be carried into the private

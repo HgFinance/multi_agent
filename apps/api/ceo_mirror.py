@@ -158,6 +158,10 @@ class MirrorStore(Protocol):
 
     def list_request_ids(self, *, limit: int = 1000) -> list[str]: ...
 
+    def get_projection_state(self, request_id: str) -> str | None: ...
+
+    def save_projection_state(self, request_id: str, fingerprint: str) -> None: ...
+
     def save_response(self, request_id: str, response: dict[str, Any]) -> None: ...
 
     def release_request(self, request: CanonicalIngress) -> bool: ...
@@ -210,6 +214,7 @@ class InMemoryMirrorStore:
         self._source_index: dict[str, str] = {}
         self._events: dict[str, MirrorEvent] = {}
         self._event_order: list[str] = []
+        self._projection_state: dict[str, str] = {}
 
     @staticmethod
     def _source_key(request: CanonicalIngress) -> str:
@@ -245,6 +250,15 @@ class InMemoryMirrorStore:
         with self._lock:
             bounded_limit = max(1, min(int(limit), 10_000))
             return list(self._requests)[-bounded_limit:]
+
+    def get_projection_state(self, request_id: str) -> str | None:
+        with self._lock:
+            return self._projection_state.get(request_id)
+
+    def save_projection_state(self, request_id: str, fingerprint: str) -> None:
+        with self._lock:
+            if request_id in self._requests:
+                self._projection_state[request_id] = str(fingerprint)
 
     def save_response(self, request_id: str, response: dict[str, Any]) -> None:
         with self._lock:
@@ -352,6 +366,7 @@ class RedisMirrorStore:
         self.request_prefix = "hf:ui-ceo-mirror:request:"
         self.source_prefix = "hf:ui-ceo-mirror:source:"
         self.event_prefix = "hf:ui-ceo-mirror:event:"
+        self.projection_state_prefix = "hf:ui-ceo-mirror:projection-state:"
         # SCAN is incremental. Keep the cursor on the long-lived worker store
         # so a large request backlog is visited over successive cycles instead
         # of returning the same first keys forever.
@@ -450,6 +465,17 @@ class RedisMirrorStore:
                 break
         self._request_scan_cursor = int(cursor)
         return request_ids
+
+    def get_projection_state(self, request_id: str) -> str | None:
+        value = self.client.get(self.projection_state_prefix + request_id)
+        return str(value) if value else None
+
+    def save_projection_state(self, request_id: str, fingerprint: str) -> None:
+        self.client.set(
+            self.projection_state_prefix + request_id,
+            str(fingerprint),
+            ex=self.ttl_seconds,
+        )
 
     def save_response(self, request_id: str, response: dict[str, Any]) -> None:
         key = self.request_prefix + request_id
@@ -575,6 +601,12 @@ class ResilientMirrorStore:
 
     def list_request_ids(self, *, limit: int = 1000) -> list[str]:
         return self._call("list_request_ids", limit=limit)
+
+    def get_projection_state(self, request_id: str) -> str | None:
+        return self._call("get_projection_state", request_id)
+
+    def save_projection_state(self, request_id: str, fingerprint: str) -> None:
+        self._call("save_projection_state", request_id, fingerprint)
 
     def save_response(self, request_id: str, response: dict[str, Any]) -> None:
         self._call("save_response", request_id, response)

@@ -138,6 +138,14 @@ def test_validate_primary_create_allows_governance_and_valid_primary() -> None:
         )
         is None
     )
+    assert (
+        validate_primary_create(
+            body("root", role="primary"),
+            "hr-department",
+            idempotency_key="root:primary:hr-department",
+        )
+        is None
+    )
     assert validate_primary_create("plain task", "research-department") is not None
     assert scoped_primary_identity(
         "plain production body",
@@ -157,6 +165,7 @@ def test_ceo_primary_create_requires_scope_marker() -> None:
 def test_primary_role_contract_excludes_governance_qa_only() -> None:
     assert is_analysis_primary_eligible("research-department")
     assert is_analysis_primary_eligible("RISK-MANAGEMENT")
+    assert is_analysis_primary_eligible("hr-department")
     assert not is_analysis_primary_eligible("qa-department")
 
 

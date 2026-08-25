@@ -13,6 +13,7 @@ sets so QA work cannot block CEO, Kanban, provider, or final-delivery paths.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -114,6 +115,40 @@ def canonical_department(value: Any) -> str:
 
     candidate = _bounded_text(value, 64).lower()
     return _DEPARTMENT_CANONICAL.get(candidate, candidate)
+
+
+def _feedback_semantic_key(
+    *,
+    department: Any,
+    decision: Any,
+    finding_codes: Any,
+    metadata: Mapping[str, Any],
+) -> str | None:
+    """Identify one actionable finding without conflating unrelated traces."""
+
+    request_id = _bounded_text(metadata.get("request_id"), 160)
+    findings = sorted(
+        {
+            _bounded_text(code, 96).upper()
+            for code in (finding_codes or ())
+            if _bounded_text(code, 96)
+        }
+    )
+    normalized_decision = _bounded_text(decision, 48).upper()
+    if not request_id or not findings or normalized_decision == "OBSERVED_PASS":
+        return None
+    identity = {
+        "schema": "hgfinance.qa-finding-identity.v1",
+        "request_id": request_id,
+        "department": canonical_department(department),
+        "decision": normalized_decision,
+        "finding_codes": findings,
+        "latency_scope": _bounded_text(metadata.get("latency_scope"), 64).lower(),
+    }
+    encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return "qa-finding:" + hashlib.sha256(encoded).hexdigest()
 
 
 def _bounded_int(value: Any, default: int = 0, maximum: int = 2_147_483_647) -> int:
@@ -388,9 +423,14 @@ class FeedbackLedger:
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=0.2)
+        # Evaluation completion, Discord review, and benchmark updates can
+        # briefly contend on the same small WAL database.  A 200ms budget made
+        # harmless bursts spill into the retry queue; this plane is isolated
+        # from business execution, so waiting up to two seconds is both safer
+        # and faster than re-running an evaluation job.
+        connection = sqlite3.connect(self.path, timeout=2.0)
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout=200")
+        connection.execute("PRAGMA busy_timeout=2000")
         connection.execute("PRAGMA journal_mode=WAL")
         return connection
 
@@ -454,6 +494,18 @@ class FeedbackLedger:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS langsmith_feedback_semantic_keys (
+                    semantic_key TEXT PRIMARY KEY,
+                    artifact_id TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS langsmith_feedback_artifact_sources (
+                    source_run_id TEXT PRIMARY KEY,
+                    artifact_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_feedback_artifact_sources_artifact
+                    ON langsmith_feedback_artifact_sources(artifact_id);
                 """
             )
             artifact_columns = {
@@ -483,6 +535,34 @@ class FeedbackLedger:
                 db.execute(
                     "ALTER TABLE langsmith_feedback_jobs ADD COLUMN lease_until TEXT"
                 )
+            # Seed the semantic index from existing artifacts.  If historical
+            # duplicates exist, the oldest artifact owns the key; no approval
+            # or audit row is deleted during migration.
+            for row in db.execute(
+                "SELECT * FROM langsmith_feedback_artifacts ORDER BY created_at"
+            ).fetchall():
+                try:
+                    metadata = json.loads(row["metadata"] or "{}")
+                    findings = json.loads(row["finding_codes"] or "[]")
+                except (TypeError, json.JSONDecodeError):
+                    metadata, findings = {}, ()
+                semantic_key = _feedback_semantic_key(
+                    department=row["department_key"] or row["department"],
+                    decision=row["decision"],
+                    finding_codes=findings,
+                    metadata=metadata if isinstance(metadata, Mapping) else {},
+                )
+                db.execute(
+                    """INSERT OR IGNORE INTO langsmith_feedback_artifact_sources
+                    (source_run_id, artifact_id, created_at) VALUES (?, ?, ?)""",
+                    (row["source_run_id"], row["artifact_id"], row["created_at"]),
+                )
+                if semantic_key:
+                    db.execute(
+                        """INSERT OR IGNORE INTO langsmith_feedback_semantic_keys
+                        (semantic_key, artifact_id, created_at) VALUES (?, ?, ?)""",
+                        (semantic_key, row["artifact_id"], row["created_at"]),
+                    )
 
     def enqueue(
         self,
@@ -573,12 +653,34 @@ class FeedbackLedger:
     def complete(self, source_run_id: str, eval_run_id: str, result: EvaluationResult) -> str:
         artifact_id = f"feedback-{uuid4().hex}"
         now = _now()
+        semantic_key = _feedback_semantic_key(
+            department=result.department,
+            decision=result.decision,
+            finding_codes=result.finding_codes,
+            metadata=result.metadata,
+        )
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             existing = db.execute(
                 "SELECT artifact_id FROM langsmith_feedback_artifacts WHERE source_run_id=?",
                 (source_run_id,),
             ).fetchone()
+            if existing is None and semantic_key:
+                existing = db.execute(
+                    """SELECT a.artifact_id
+                    FROM langsmith_feedback_semantic_keys semantic
+                    JOIN langsmith_feedback_artifacts a
+                      ON a.artifact_id=semantic.artifact_id
+                    WHERE semantic.semantic_key=?""",
+                    (semantic_key,),
+                ).fetchone()
             if existing is not None:
+                existing_artifact_id = str(existing["artifact_id"])
+                db.execute(
+                    """INSERT OR IGNORE INTO langsmith_feedback_artifact_sources
+                    (source_run_id, artifact_id, created_at) VALUES (?, ?, ?)""",
+                    (source_run_id, existing_artifact_id, now),
+                )
                 db.execute(
                     """UPDATE langsmith_feedback_jobs
                     SET status='COMPLETED', eval_run_id=?, last_error=NULL,
@@ -586,7 +688,7 @@ class FeedbackLedger:
                     WHERE source_run_id=?""",
                     (eval_run_id, now, source_run_id),
                 )
-                return str(existing["artifact_id"])
+                return existing_artifact_id
             db.execute(
                 """INSERT OR IGNORE INTO langsmith_feedback_artifacts
                 (artifact_id, source_run_id, eval_run_id, department, department_key,
@@ -610,6 +712,17 @@ class FeedbackLedger:
                 "UPDATE langsmith_feedback_jobs SET status='COMPLETED', eval_run_id=?, last_error=NULL, lease_until=NULL, updated_at=? WHERE source_run_id=?",
                 (eval_run_id, now, source_run_id),
             )
+            db.execute(
+                """INSERT OR IGNORE INTO langsmith_feedback_artifact_sources
+                (source_run_id, artifact_id, created_at) VALUES (?, ?, ?)""",
+                (source_run_id, artifact_id, now),
+            )
+            if semantic_key:
+                db.execute(
+                    """INSERT INTO langsmith_feedback_semantic_keys
+                    (semantic_key, artifact_id, created_at) VALUES (?, ?, ?)""",
+                    (semantic_key, artifact_id, now),
+                )
         return artifact_id
 
     def retry(self, source_run_id: str, error_code: str, attempts: int) -> None:
@@ -886,6 +999,20 @@ class FeedbackLedger:
             )
             db.execute(
                 """DELETE FROM langsmith_feedback_discord_deliveries
+                WHERE artifact_id IN (
+                    SELECT artifact_id FROM langsmith_feedback_artifacts WHERE created_at < ?
+                )""",
+                (cutoff,),
+            )
+            db.execute(
+                """DELETE FROM langsmith_feedback_semantic_keys
+                WHERE artifact_id IN (
+                    SELECT artifact_id FROM langsmith_feedback_artifacts WHERE created_at < ?
+                )""",
+                (cutoff,),
+            )
+            db.execute(
+                """DELETE FROM langsmith_feedback_artifact_sources
                 WHERE artifact_id IN (
                     SELECT artifact_id FROM langsmith_feedback_artifacts WHERE created_at < ?
                 )""",

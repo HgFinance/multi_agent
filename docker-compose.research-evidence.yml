@@ -1,0 +1,29 @@
+# portfolio-worker/bff 가 research-mcp 근거 조회면을 부를 수 있게 한다 (2026-08-25)
+#
+# 뉴스·공시 자격(NAVER/DART)은 research-mcp 에만 둔다 - 자격을 옮기지 않고
+# 조회면으로 물어보는 구조다. 여기서 주는 것은 그 조회면 주소와 토큰뿐이다.
+#
+# PORTFOLIO_WORKER_RUNTIME 이 없으면 `_configured_worker_runtime()` 이
+# "deterministic_test" 를 돌려주고 Worker 가 **가짜 LLM**을 쓴다
+# (실측: 답이 "TEST async qa context for holdings-analyst-worker" 였다).
+# "deterministic_test" 가 아닌 값이면 Worker Model Gateway(vLLM)로 나간다.
+#
+# 공유 docker-compose.yml 과 deploy/aws/docker-compose.paper-order.yml 은
+# 고치지 않는다 - 둘 다 다른 작업자가 수정 중이다(git status M).
+#
+# 띄울 때 -f 네 개가 필요하다:
+#   -f docker-compose.yml
+#   -f deploy/aws/docker-compose.paper-order.yml
+#   -f docker-compose.model.yml
+#   -f docker-compose.research-evidence.yml
+x-evidence-environment: &evidence-environment
+  RESEARCH_MCP_URL: http://research-mcp:8037
+  MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
+  MARKET_API_URL: http://market-api:8036
+  PORTFOLIO_WORKER_RUNTIME: ${PORTFOLIO_WORKER_RUNTIME:-live}
+
+services:
+  portfolio-worker:
+    environment: *evidence-environment
+  portfolio-bff:
+    environment: *evidence-environment

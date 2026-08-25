@@ -82,10 +82,12 @@ def format_qa_feedback_request(
     observation_text = "\n".join(f"- {line}" for line in observations) or "- 상세 관측값 없음"
     evidence_values = [
         ("project", metadata.get("source_project")),
+        ("trace_name", metadata.get("source_name")),
         ("source_run_id", metadata.get("source_run_id")),
         ("trace_id", metadata.get("trace_id")),
         ("request_id", metadata.get("request_id")),
         ("root_id", metadata.get("root_id")),
+        ("department_task_id", metadata.get("task_id")),
     ]
     evidence = [f"- {label}: {_bounded(value, 160)}" for label, value in evidence_values if value]
     if metadata.get("window_start") or metadata.get("window_end"):

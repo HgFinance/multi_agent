@@ -679,19 +679,45 @@ class LedgerRepository:
             )
             return cur.fetchone()[0]
 
-    def load_snapshots(self, fund_id: UUID, book_id: UUID) -> list[PortfolioSnapshot]:
-        """저장된 스냅샷을 도메인 객체로 되살린다. 일일 보고서가 기초·기말로 쓴다.
+    def load_snapshots(
+        self,
+        fund_id: UUID,
+        book_id: UUID,
+        *,
+        start_at: datetime | None = None,
+        end_at: datetime | None = None,
+        collapse_unchanged: bool = False,
+    ) -> list[PortfolioSnapshot]:
+        """저장된 스냅샷을 도메인 객체로 되살린다.
 
-        jsonb에는 NAV 같은 파생값도 들어 있지만 읽지 않는다 - 되살린 뒤 다시 계산해서
-        저장된 값과 갈라지면 계산이 틀린 것이고, jsonb를 믿으면 그걸 못 본다.
+        기간 필터는 SQL에서 먼저 적용한다. ``collapse_unchanged``는 연속된 동일
+        ``content_hash``만 접으므로 상태가 바뀌었다가 돌아온 경로와 Drawdown은
+        보존한다. 기본값은 기존 전체-history 계약을 그대로 유지한다.
         """
         with self.cursor() as cur:
             cur.execute(
                 """
-                select as_of, cash, positions from accounting.portfolio_snapshots
-                 where fund_id = %s and book_id = %s order by as_of, created_at
+                with bounded as (
+                    select as_of, cash, positions, content_hash, created_at,
+                           portfolio_snapshot_id
+                      from accounting.portfolio_snapshots
+                     where fund_id = %s and book_id = %s
+                       and (%s::timestamptz is null or as_of >= %s)
+                       and (%s::timestamptz is null or as_of < %s)
+                ), sequenced as (
+                    select *, lag(content_hash) over (
+                        order by as_of, created_at, portfolio_snapshot_id
+                    ) as previous_content_hash
+                      from bounded
+                )
+                select as_of, cash, positions
+                  from sequenced
+                 where not %s
+                    or content_hash is distinct from previous_content_hash
+                 order by as_of, created_at, portfolio_snapshot_id
                 """,
-                (fund_id, book_id),
+                (fund_id, book_id, start_at, start_at, end_at, end_at,
+                 collapse_unchanged),
             )
             rows = cur.fetchall()
 

@@ -103,6 +103,24 @@ from risk_events.redis_event_bus import (
     decision_event_id,
 )
 from risk_mandate_workers import RiskMandateAssessmentRequest, assess_mandate
+from mandate_limit_compiler import (
+    MandateLimitCompilationRequest,
+    compile_mandate_limits,
+)
+from mandate_presets import (
+    PRESET_VERSION,
+    RISK_PRESETS,
+    PresetAlignment,
+    resolve_risk_preset,
+    validate_preset_alignment,
+)
+from position_risk_lifecycle import RiskPlanTransition, validate_transition
+from position_risk_planner import PositionRiskPlanRequest, plan_position_risk
+from risk_observability import risk_span
+from risk_control_repository import (
+    RiskControlPersistenceError,
+    RiskControlRepository,
+)
 from risk_repository import RiskDecisionPersistenceError, RiskDecisionRepository
 from trading_state_store import (
     RedisTradingStateStore,
@@ -212,6 +230,30 @@ class RiskContextIn(BaseModel):
             trading_state=self.trading_state,
             as_of=self.as_of,
         )
+
+
+class ActivatedMandateCompilationIn(BaseModel):
+    """Governance-to-Risk activation handoff; all values remain untrusted."""
+
+    fund_id: UUID
+    mandate_id: UUID
+    mandate_version_id: UUID
+    mandate_version: int = Field(ge=1)
+    mindset: str
+    experience: str
+    preset_version: str
+    risk_bounds: dict
+    universe_policy: dict
+    allowed_assets: list[str] = []
+    effective_from: datetime
+    trace_id: str = Field(min_length=1, max_length=128)
+
+
+class ProposedMandateAlignmentIn(BaseModel):
+    mindset: str
+    experience: str
+    preset_version: str
+    risk_bounds: dict
 
 
 class P1RiskSnapshotIn(BaseModel):
@@ -334,6 +376,7 @@ engine = RiskEngine()
 _state_store: RedisTradingStateStore | None = None
 _decision_repository: RiskDecisionRepository | None = None
 _event_publisher: RedisEventPublisher | None = None
+_control_repository: RiskControlRepository | None = None
 
 
 def _canonical_database_url() -> str:
@@ -360,6 +403,23 @@ def _risk_decision_repository() -> RiskDecisionRepository | None:
                 "Canonical Risk DB connection failed; decision was not persisted"
             ) from exc
     return _decision_repository
+
+
+def _risk_control_repository() -> RiskControlRepository | None:
+    """Use the same canonical Risk DB for Mandate and Plan lifecycle state."""
+
+    global _control_repository
+    dsn = _canonical_database_url()
+    if not dsn:
+        return None
+    if _control_repository is None:
+        try:
+            _control_repository = RiskControlRepository.connect(dsn)
+        except Exception as exc:
+            raise RiskControlPersistenceError(
+                "Canonical Risk control DB connection failed"
+            ) from exc
+    return _control_repository
 
 
 def _risk_event_publisher() -> RedisEventPublisher | None:
@@ -635,6 +695,207 @@ def assess_mandate_for_risk_head(mandate_id: str, body: RiskMandateAssessmentReq
             },
         )
     return assess_mandate(body)
+
+
+@app.get("/risk/v1/mandate-presets")
+def mandate_presets():
+    """Return the versioned Risk-owned 3x3 preset matrix for UI projection."""
+
+    return {
+        "schema_version": "risk.mandate-presets.v1",
+        "preset_version": PRESET_VERSION,
+        "status": "ACTIVE",
+        "presets": [
+            preset.as_dict()
+            for _key, preset in sorted(RISK_PRESETS.items())
+        ],
+    }
+
+
+@app.post("/risk/v1/mandate-limits/compile")
+def compile_active_mandate_limits(body: MandateLimitCompilationRequest):
+    """Compile only an approved, versioned ACTIVE mandate; never auto-relax."""
+
+    result = compile_mandate_limits(body)
+    if result.status == "REQUIRES_USER_REVIEW":
+        return JSONResponse(status_code=409, content=jsonable_encoder(result))
+    repository = _risk_control_repository()
+    if repository is not None:
+        try:
+            repository.activate_compilation(result)
+        except RiskControlPersistenceError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error_code": "MANDATE_LIMIT_ACTIVATION_FAILED",
+                    "reason": str(exc),
+                },
+            ) from exc
+    return result
+
+
+@app.post("/risk/v1/mandate-limits/validate-proposed")
+def validate_proposed_mandate_limits(body: ProposedMandateAlignmentIn):
+    """Block a looser UI policy before Governance activates its Version."""
+
+    if body.preset_version != PRESET_VERSION:
+        raise HTTPException(
+            status_code=409,
+            detail={"error_code": "STALE_MANDATE_PRESET_VERSION"},
+        )
+    bounds = body.risk_bounds
+    preset = resolve_risk_preset(body.mindset, body.experience)
+    alignment, violations = validate_preset_alignment(
+        mindset=body.mindset,
+        experience=body.experience,
+        max_instrument_weight=Decimal(str(bounds.get("max_instrument_weight"))),
+        max_sector_weight=Decimal(str(bounds.get("max_sector_weight"))),
+        max_gross_exposure=Decimal(str(bounds.get("max_gross_exposure"))),
+        max_concurrent_positions=int(bounds.get("max_concurrent_positions")),
+        max_daily_loss_pct=Decimal(str(bounds.get("max_daily_loss"))),
+        max_drawdown_pct=Decimal(str(bounds.get("max_drawdown_pct"))),
+        trade_risk_budget_pct=preset.trade_risk_budget_max_pct,
+    )
+    if alignment is PresetAlignment.REQUIRES_RISK_REVIEW:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_code": "MANDATE_PRESET_ALIGNMENT_REQUIRED",
+                "violations": violations,
+            },
+        )
+    return {
+        "valid": True,
+        "alignment": alignment,
+        "preset_version": PRESET_VERSION,
+    }
+
+
+@app.post("/risk/v1/mandate-limits/activate-from-mandate")
+def activate_limits_from_mandate(body: ActivatedMandateCompilationIn):
+    """Validate one approved Governance Version against the Risk preset."""
+
+    if body.preset_version != PRESET_VERSION:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_code": "STALE_MANDATE_PRESET_VERSION",
+                "expected": PRESET_VERSION,
+                "received": body.preset_version,
+            },
+        )
+    preset = resolve_risk_preset(body.mindset, body.experience)
+    bounds = body.risk_bounds
+    universe = body.universe_policy
+    allowed_ids: list[UUID] = []
+    for value in body.allowed_assets:
+        try:
+            allowed_ids.append(UUID(value))
+        except ValueError:
+            # Symbols remain governed in mandate_versions; only canonical UUIDs
+            # can enter the Risk Engine's allowed_instrument_ids set.
+            continue
+    request = MandateLimitCompilationRequest(
+        fund_id=body.fund_id,
+        mandate_id=body.mandate_id,
+        mandate_version_id=body.mandate_version_id,
+        mandate_version=body.mandate_version,
+        mandate_status="ACTIVE",
+        approval_status="APPROVED",
+        mindset=body.mindset,
+        experience=body.experience,
+        limits={
+            "base_capital": bounds.get("base_capital"),
+            "max_instrument_weight": bounds.get("max_instrument_weight"),
+            "max_sector_weight": bounds.get("max_sector_weight"),
+            "max_gross_exposure": bounds.get("max_gross_exposure"),
+            "max_concurrent_positions": bounds.get("max_concurrent_positions"),
+            "max_daily_loss_pct": bounds.get("max_daily_loss"),
+            "max_drawdown_pct": bounds.get("max_drawdown_pct"),
+            # This is a hard ceiling, not a per-trade target. Dynamic planning
+            # may allocate less but can never exceed the preset ceiling.
+            "trade_risk_budget_pct": preset.trade_risk_budget_max_pct,
+            "allowed_instrument_ids": allowed_ids or None,
+            "allowed_asset_classes": universe.get("allowed_asset_classes"),
+            "forbidden_asset_classes": universe.get(
+                "forbidden_asset_classes", []
+            ),
+            "preferred_sectors": universe.get("preferred_sectors", []),
+            "excluded_sectors": universe.get("excluded_sectors", []),
+        },
+        effective_from=body.effective_from,
+        trace_id=body.trace_id,
+    )
+    return compile_active_mandate_limits(request)
+
+
+@app.post("/risk/v1/position-risk-plans/calculate")
+def calculate_position_risk_plan(body: PositionRiskPlanRequest):
+    """Calculate a deterministic PAPER proposal without creating an order."""
+
+    result = plan_position_risk(body)
+    with risk_span(
+        "risk.advisory",
+        {
+            "task_id": result.task_id,
+            "trace_id": result.trace_id,
+            "risk_plan_id": str(result.risk_plan_id),
+            "mandate_version_id": result.mandate_version_id,
+            "input_hash": result.input_hash,
+            "algorithm_version": result.calculation_version,
+            "status": result.action,
+        },
+    ):
+        repository = _risk_control_repository()
+        if repository is not None and result.action == "PROPOSE":
+            try:
+                repository.save_plan(result)
+            except RiskControlPersistenceError as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "error_code": "POSITION_RISK_PLAN_PERSISTENCE_FAILED",
+                        "reason": str(exc),
+                    },
+                ) from exc
+        return result
+
+
+@app.post("/risk/v1/position-risk-plans/transitions/validate")
+def validate_position_risk_plan_transition(body: RiskPlanTransition):
+    """Validate state/authority; persistence remains a Risk repository action."""
+
+    try:
+        validate_transition(body)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"error_code": "INVALID_RISK_PLAN_TRANSITION", "reason": str(exc)},
+        ) from exc
+    return {"valid": True, "transition": body}
+
+
+@app.post("/risk/v1/position-risk-plans/transitions")
+def transition_position_risk_plan(body: RiskPlanTransition):
+    """Apply an authority-checked lifecycle transition to the canonical row."""
+
+    repository = _risk_control_repository()
+    if repository is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"error_code": "CANONICAL_RISK_DB_NOT_CONFIGURED"},
+        )
+    try:
+        state = repository.transition_plan(body)
+    except (ValueError, RiskControlPersistenceError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_code": "RISK_PLAN_TRANSITION_REJECTED",
+                "reason": str(exc),
+            },
+        ) from exc
+    return {"risk_plan_id": body.risk_plan_id, "state": state}
 
 
 @app.get("/risk/v1/observability/rag")

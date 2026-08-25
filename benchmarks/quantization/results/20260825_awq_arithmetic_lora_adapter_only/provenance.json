@@ -1,0 +1,64 @@
+{
+  "schema_version": "awq-arithmetic-lora-adapter-only.v1",
+  "run_id": "20260825-awq-arithmetic-lora-adapter-only-replication-1",
+  "status": "MEASURED_WITH_RUNTIME_CONTEXT_DRIFT",
+  "variant": "AWQ+ArithmeticLoRA",
+  "base_model": "qwen2.5-14b-instruct-awq",
+  "adapter_model": "hgfinance-awq-arithmetic-2epoch",
+  "pipeline": [
+    "Qwen2.5-14B-Instruct-AWQ",
+    "hgfinance-awq-arithmetic-2epoch LoRA adapter"
+  ],
+  "excluded_components": [
+    "glossary RAG",
+    "gpt-4o-mini critic or reasoning",
+    "unit or scale normalization",
+    "deterministic calculator",
+    "guided JSON or Pydantic repair",
+    "hybrid routing"
+  ],
+  "runtime": {
+    "endpoint": "http://127.0.0.1:8000/v1/chat/completions",
+    "endpoint_models_status": "HTTP 200; base and arithmetic adapter listed",
+    "reported_max_model_len": 4096,
+    "historical_protocol_max_model_len": 8192,
+    "temperature": 0,
+    "stream": false,
+    "quality_execution": "sequential",
+    "comparison_note": "The frozen prompts and scorers match the historical comparison, but the currently served context limit is 4096 rather than 8192. This replication must not overwrite the historical 8192-runtime column."
+  },
+  "datasets": {
+    "internal50_v2": {
+      "path": "benchmarks/quantization/internal50_v2_reasoning.json",
+      "sha256": "ad2bdaf5ea381c2fc151fce1f1859f7f925b86fd03b830319cd97af17709e978"
+    },
+    "external50_v1": {
+      "path": "benchmarks/quantization/external50_v1.json",
+      "sha256": "197f0828fee37a8a0ca7551304efa722b005a3d26379a2cc613ece36b315956f"
+    }
+  },
+  "scores": {
+    "internal_quality": 0.74,
+    "internal_passed": 37,
+    "internal_total": 50,
+    "critical_failures": 2,
+    "critical_failed_ids": [
+      "v2-020",
+      "v2-046"
+    ],
+    "request_errors": 0,
+    "financial_arithmetic": 0.3,
+    "structured_output": 0.4,
+    "finqa": 0.75,
+    "tatqa": 0.8,
+    "financebench_status": "manual_required",
+    "financebench_diagnostic": 0.3982,
+    "external_auto_mean": 0.7612
+  },
+  "artifacts": {
+    "internal50_raw.json": "efb4a874e9a56e27f72ecbcd74c26a1e76eac50fba51af3bf6f44d8c0447c1ea",
+    "internal50_score.json": "13e55d01d73aa498877ea5ce3d26b9ccbf82b7d097eedbb69173f4f0c315b097",
+    "external50_raw.json": "17c2c8d92e7d6328174eea7c3d5d51fd7aaa4c7d591b1dc53253a69a9ffe3d2c",
+    "external50_score.json": "d0c24ccaa9cb6bd361b39d9369d8dc6fb959623123d8a478cd1e3ac4ea2c00d7"
+  }
+}

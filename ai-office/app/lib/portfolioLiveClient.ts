@@ -33,6 +33,19 @@ export type OrderEvent = {
   quantity: string | null;
   price: string | null;
   unfilled_quantity: string | null;
+  /** LS 주문번호를 기존 권위 주문 감사기록과 결합한 결과다. */
+  correlation_status?: "ATTRIBUTED" | "UNATTRIBUTED" | string;
+  correlation_source?: string | null;
+  origin?: string | null;
+  internal_broker_order_id?: string | null;
+  directive_id?: string | null;
+  directive_state?: string | null;
+  directive_leg_state?: string | null;
+  order_request_id?: string | null;
+  client_request_id?: string | null;
+  request_source?: string | null;
+  conditional_rule_id?: string | null;
+  conditional_rule_state?: string | null;
 };
 
 export type Holding = {
@@ -84,6 +97,13 @@ export type PortfolioLive = {
     recent: OrderEvent[];
     source?: string;
     error?: string | null;
+    correlation?: {
+      status: "READY" | "DEGRADED" | string;
+      source: string;
+      attributed: number;
+      unattributed: number;
+      error: string | null;
+    };
   };
   holdings: {
     as_of: string | null;

@@ -13,7 +13,7 @@ import json
 import os
 import threading
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Protocol
@@ -178,6 +178,98 @@ class UserOrderRequestRecord:
     mode: str = PAPER_ORDER_MODE
 
 
+@dataclass(frozen=True)
+class BrokerOrderCorrelation:
+    """Existing audit lineage for one raw LS PAPER order number."""
+
+    broker_order_no: str
+    broker_order_id: str
+    directive_id: str
+    order_request_id: str
+    user_id: str
+    fund_id: str
+    book_id: str
+    client_request_id: str
+    request_source: str
+    directive_state: str
+    leg_state: str
+    symbol: str
+    side: str
+    requested_quantity: str
+    filled_quantity: str
+    average_fill_price: str | None
+    recorded_at: datetime
+
+
+def _broker_correlations_from_rows(
+    rows: Iterable[tuple[UserOrderRequestRecord, Any, datetime]],
+    broker_order_nos: set[str],
+) -> dict[str, BrokerOrderCorrelation]:
+    """Build only unique, PAPER-bound correlations from existing audit rows."""
+
+    wanted = {str(value).strip() for value in broker_order_nos if str(value).strip()}
+    candidates: dict[str, list[BrokerOrderCorrelation]] = {}
+    for record, raw_payload, recorded_at in rows:
+        if record.mode != PAPER_ORDER_MODE or not isinstance(raw_payload, Mapping):
+            continue
+        payload = dict(raw_payload)
+        if (
+            payload.get("schema_version") != "paper-order-correlation.v1"
+            or str(payload.get("mode") or "").upper() != PAPER_ORDER_MODE
+        ):
+            continue
+        directive_id = str(payload.get("directive_id") or "").strip()
+        legs = payload.get("legs")
+        if not directive_id or not isinstance(legs, list):
+            continue
+        for raw_leg in legs:
+            if not isinstance(raw_leg, Mapping):
+                continue
+            broker_order_no = str(raw_leg.get("broker_order_no") or "").strip()
+            if broker_order_no not in wanted:
+                continue
+            broker_order_id = str(raw_leg.get("broker_order_id") or "").strip()
+            if broker_order_id != f"ls-paper:{broker_order_no}":
+                continue
+            candidates.setdefault(broker_order_no, []).append(
+                BrokerOrderCorrelation(
+                    broker_order_no=broker_order_no,
+                    broker_order_id=broker_order_id,
+                    directive_id=directive_id,
+                    order_request_id=record.order_request_id,
+                    user_id=record.user_id,
+                    fund_id=record.fund_id,
+                    book_id=record.book_id,
+                    client_request_id=record.client_request_id,
+                    request_source=str(payload.get("request_source") or "UNKNOWN"),
+                    directive_state=str(payload.get("directive_state") or "UNKNOWN"),
+                    leg_state=str(raw_leg.get("state") or "UNKNOWN"),
+                    symbol=str(raw_leg.get("symbol") or ""),
+                    side=str(raw_leg.get("side") or "").upper(),
+                    requested_quantity=str(raw_leg.get("requested_quantity") or "0"),
+                    filled_quantity=str(raw_leg.get("filled_quantity") or "0"),
+                    average_fill_price=(
+                        str(raw_leg.get("average_fill_price"))
+                        if raw_leg.get("average_fill_price") is not None
+                        else None
+                    ),
+                    recorded_at=recorded_at,
+                )
+            )
+
+    correlations: dict[str, BrokerOrderCorrelation] = {}
+    for broker_order_no, matches in candidates.items():
+        identities = {
+            (match.directive_id, match.order_request_id, match.broker_order_id)
+            for match in matches
+        }
+        # A raw LS order number can be attributed only when the durable audit
+        # lineage is unique. Ambiguity remains visibly unattributed.
+        if len(identities) == 1:
+            correlations[broker_order_no] = matches[0]
+    return correlations
+
+
 class UserOrderRequestRepository(Protocol):
     def admit(
         self,
@@ -190,6 +282,13 @@ class UserOrderRequestRepository(Protocol):
     ) -> UserOrderRequestRecord: ...
 
     def get(self, order_request_id: str) -> UserOrderRequestRecord | None: ...
+
+    def broker_correlations(
+        self,
+        broker_order_nos: set[str],
+        *,
+        recorded_after: datetime,
+    ) -> dict[str, BrokerOrderCorrelation]: ...
 
     def find_committed_directive(
         self, record: UserOrderRequestRecord
@@ -309,6 +408,27 @@ class InMemoryUserOrderRequestRepository:
     def get(self, order_request_id: str) -> UserOrderRequestRecord | None:
         with self._lock:
             return self._records.get(str(order_request_id))
+
+    def broker_correlations(
+        self,
+        broker_order_nos: set[str],
+        *,
+        recorded_after: datetime,
+    ) -> dict[str, BrokerOrderCorrelation]:
+        del recorded_after
+        with self._lock:
+            rows = [
+                (
+                    self._records[str(event["payload"].get("order_request_id"))],
+                    event["payload"],
+                    datetime.now(timezone.utc),
+                )
+                for event in reversed(self._events)
+                if event.get("event_type") == "BROKER_EXECUTION_SNAPSHOT"
+                and str(event.get("payload", {}).get("order_request_id") or "")
+                in self._records
+            ]
+        return _broker_correlations_from_rows(rows, broker_order_nos)
 
     def find_committed_directive(
         self, record: UserOrderRequestRecord
@@ -580,6 +700,65 @@ class PostgresUserOrderRequestRepository:
                 return self._row(cursor.fetchone())
         except (psycopg2.Error, TypeError, ValueError) as exc:
             raise UserOrderWorkflowUnavailable("could not read user PAPER order") from exc
+
+    def broker_correlations(
+        self,
+        broker_order_nos: set[str],
+        *,
+        recorded_after: datetime,
+    ) -> dict[str, BrokerOrderCorrelation]:
+        """Read the existing audit projection; never inspect or mutate broker state."""
+
+        wanted = {
+            str(value).strip()
+            for value in broker_order_nos
+            if str(value).strip()
+        }
+        if not wanted:
+            return {}
+        try:
+            with self._connect() as connection, connection.cursor() as cursor:
+                self._set_role(cursor)
+                cursor.execute(
+                    """
+                    select r.order_request_id,r.user_id,r.fund_id,r.book_id,
+                           r.client_request_id,r.mode,e.payload,e.created_at
+                      from execution.user_order_request_events e
+                      join execution.user_order_requests r
+                        on r.order_request_id=e.order_request_id
+                     where e.event_type='BROKER_EXECUTION_SNAPSHOT'
+                       and e.created_at >= %s
+                       and exists (
+                         select 1
+                           from jsonb_array_elements(
+                             case when jsonb_typeof(e.payload->'legs')='array'
+                                  then e.payload->'legs' else '[]'::jsonb end
+                           ) leg
+                          where leg->>'broker_order_no'=any(%s)
+                       )
+                     order by e.created_at desc,e.event_id desc
+                    """,
+                    (recorded_after, sorted(wanted)),
+                )
+                rows = []
+                for row in cursor.fetchall():
+                    record = UserOrderRequestRecord(
+                        order_request_id=str(row[0]),
+                        user_id=str(row[1]),
+                        fund_id=str(row[2]),
+                        book_id=str(row[3]),
+                        client_request_id=str(row[4]),
+                        raw_instruction="",
+                        normalized_instruction="",
+                        raw_instruction_sha256="",
+                        mode=str(row[5]),
+                    )
+                    rows.append((record, row[6], row[7]))
+                return _broker_correlations_from_rows(rows, wanted)
+        except (psycopg2.Error, TypeError, ValueError) as exc:
+            raise UserOrderWorkflowUnavailable(
+                "could not read PAPER broker order correlations"
+            ) from exc
 
     def find_committed_directive(
         self, record: UserOrderRequestRecord
@@ -978,6 +1157,7 @@ def user_order_repository() -> UserOrderRequestRepository:
 
 
 __all__ = [
+    "BrokerOrderCorrelation",
     "InMemoryUserOrderRequestRepository",
     "ORDER_REQUEST_STATES",
     "PAPER_ORDER_MODE",

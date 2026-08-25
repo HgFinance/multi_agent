@@ -29,6 +29,7 @@ from benchmarks.quantization.glossary_rag import (
     load_glossary,
     load_selective_v2_glossary,
 )
+from benchmarks.quantization.bok800_wiki_rag import Bok800WikiIndex, load_bok800_wiki
 from benchmarks.quantization.run_hybrid_generic import (
     ENDPOINT,
     EXTERNAL_DATA,
@@ -73,6 +74,170 @@ def _glossary_prompt(
         "matched_terms": terms,
         "hit": bool(terms),
     }
+
+
+def _wiki_fallback_prompt(
+    prompt: str,
+    wiki: Bok800WikiIndex | None,
+    *,
+    query: str,
+    glossary_hit: bool,
+    url: str,
+    model: str,
+    timeout: float,
+) -> tuple[str, dict[str, Any]]:
+    if wiki is None or glossary_hit:
+        return prompt, {
+            "hit": False,
+            "fallback_skipped": bool(glossary_hit),
+            "sha256": wiki.digest if wiki is not None else None,
+            "latency_ms": 0.0,
+            "pages": [],
+            "terms": [],
+            "context_chars": 0,
+            "planner": None,
+            "candidate_hit": False,
+            "candidates": [],
+            "grade": None,
+        }
+    planner_schema = {
+        "type": "object",
+        "properties": {
+            "applicable": {"type": "boolean"},
+            "search_query": {"type": "string"},
+        },
+        "required": ["applicable", "search_query"],
+        "additionalProperties": False,
+    }
+    planner_messages = [
+        {
+            "role": "system",
+            "content": (
+                "You route searches to the Bank of Korea Economic and Financial Terms 800 wiki. "
+                "For a general economics, finance, accounting, ratio, rate, currency, banking, "
+                "investment, or market concept, translate only its core terminology into a short "
+                "Korean search query. Set applicable false for application-specific controls, stale "
+                "data, or simple document value lookup with no concept to define. Do not answer the "
+                "question. Return only the requested JSON."
+            ),
+        },
+        {"role": "user", "content": query},
+    ]
+    try:
+        planned = call_model(
+            url=url,
+            model=model,
+            messages=planner_messages,
+            response_format=vllm_response_format(planner_schema, name="bok800_wiki_search_route"),
+            timeout=timeout,
+        )
+        validation = validate_json(planned["content"], planner_schema)
+        if not validation.valid:
+            raise RuntimeError(validation.error or "invalid BOK800 Wiki search route")
+        plan = validation.value
+        planned_query = str(plan["search_query"]).strip()
+        applicable = bool(plan["applicable"])
+        exact_term = bool(planned_query) and wiki.has_exact_term(planned_query)
+        planner_meta = {
+            "applicable": applicable,
+            "search_query": planned_query,
+            "exact_term": exact_term,
+            "latency_s": planned.get("latency_s"),
+            "prompt_tokens": planned.get("prompt_tokens"),
+            "completion_tokens": planned.get("completion_tokens"),
+            "error": None,
+        }
+    except RuntimeError as exc:
+        return prompt, {
+            "hit": False,
+            "fallback_skipped": False,
+            "sha256": wiki.digest,
+            "latency_ms": 0.0,
+            "pages": [],
+            "terms": [],
+            "context_chars": 0,
+            "planner": {"error": str(exc)},
+            "candidate_hit": False,
+            "candidates": [],
+            "grade": None,
+        }
+    # ``applicable`` is advisory only.  The small AWQ router can be overly
+    # conservative for translated terminology, so a non-empty query proceeds
+    # to deterministic retrieval and the separate relevance grader makes the
+    # fail-closed injection decision.
+    if not planned_query:
+        return prompt, {
+            "hit": False,
+            "fallback_skipped": False,
+            "sha256": wiki.digest,
+            "latency_ms": 0.0,
+            "pages": [],
+            "terms": [],
+            "context_chars": 0,
+            "planner": planner_meta,
+            "candidate_hit": False,
+            "candidates": [],
+            "grade": None,
+        }
+    injected, metadata = wiki.inject(prompt, query=planned_query, top_k=1, max_pages=3)
+    metadata["fallback_skipped"] = False
+    metadata["planner"] = planner_meta
+    metadata["candidate_hit"] = metadata["hit"]
+    metadata["candidates"] = list(metadata["pages"])
+    metadata["grade"] = None
+    if not metadata["hit"]:
+        return prompt, metadata
+
+    grade_schema = {
+        "type": "object",
+        "properties": {
+            "relevant": {"type": "boolean"},
+            "reason": {"type": "string"},
+        },
+        "required": ["relevant", "reason"],
+        "additionalProperties": False,
+    }
+    candidate_context = "\n".join(
+        f"{page['term']}: {wiki.pages[page['page_id']].definition[:600]}"
+        for page in metadata["pages"]
+    )
+    grade_messages = [
+        {
+            "role": "system",
+            "content": (
+                "Judge retrieval relevance only. Return relevant=true only if the supplied BOK "
+                "glossary definition directly clarifies a concept, formula, or accounting treatment "
+                "needed to answer the question. Return false for a merely shared generic word, a "
+                "company-specific fact lookup, an application control, or a definition that cannot "
+                "help derive the requested answer. Do not answer the question."
+            ),
+        },
+        {"role": "user", "content": f"QUESTION:\n{query}\n\nRETRIEVED BOK WIKI:\n{candidate_context}"},
+    ]
+    try:
+        graded = call_model(
+            url=url,
+            model=model,
+            messages=grade_messages,
+            response_format=vllm_response_format(grade_schema, name="bok800_wiki_relevance"),
+            timeout=timeout,
+        )
+        validation = validate_json(graded["content"], grade_schema)
+        if not validation.valid:
+            raise RuntimeError(validation.error or "invalid BOK800 Wiki relevance grade")
+        metadata["grade"] = {
+            **validation.value,
+            "latency_s": graded.get("latency_s"),
+            "prompt_tokens": graded.get("prompt_tokens"),
+            "completion_tokens": graded.get("completion_tokens"),
+            "error": None,
+        }
+    except RuntimeError as exc:
+        metadata["grade"] = {"relevant": False, "reason": "grade_failed", "error": str(exc)}
+    if not metadata["grade"]["relevant"]:
+        metadata.update({"hit": False, "pages": [], "terms": [], "context_chars": 0})
+        return prompt, metadata
+    return injected, metadata
 
 
 def _structured_envelope_messages(case: dict[str, Any], prompt: str) -> list[dict[str, str]]:
@@ -877,6 +1042,7 @@ def _run_internal_case(
     arithmetic_model: str,
     timeout: float,
     glossary: tuple[str, list[Any]] | None,
+    wiki: Bok800WikiIndex | None,
     stage: str,
 ) -> dict[str, Any]:
     internal_stage = "selective_unit_scale" if stage == "finqa_numeric_routing" else stage
@@ -894,6 +1060,11 @@ def _run_internal_case(
         contract = "Answer concisely using only the context."
 
     glossary_meta = {"version": None, "sha256": None, "matched_terms": [], "hit": False}
+    wiki_meta: dict[str, Any] = {
+        "hit": False, "fallback_skipped": False, "sha256": None, "latency_ms": 0.0,
+        "pages": [], "terms": [], "context_chars": 0, "planner": None,
+        "candidate_hit": False, "candidates": [], "grade": None,
+    }
     if case.get("category") == "accounting_reasoning":
         context, glossary_meta = _glossary_prompt(
             context,
@@ -904,6 +1075,10 @@ def _run_internal_case(
                 if internal_stage in {"selective_unit_scale", "finance_typed_routing"}
                 else "bok-800-arithmetic-glossary-v1"
             ),
+        )
+        context, wiki_meta = _wiki_fallback_prompt(
+            context, wiki, query=question, glossary_hit=glossary_meta["hit"],
+            url=url, model=base_model, timeout=timeout,
         )
     prompt = _base_prompt(context, question, contract)
     started = time.perf_counter()
@@ -974,6 +1149,17 @@ def _run_internal_case(
         "glossary_sha256": glossary_meta["sha256"],
         "matched_terms": glossary_meta["matched_terms"],
         "glossary_hit": glossary_meta["hit"],
+        "wiki_hit": wiki_meta["hit"],
+        "wiki_fallback_skipped": wiki_meta["fallback_skipped"],
+        "wiki_sha256": wiki_meta["sha256"],
+        "wiki_retrieval_latency_ms": wiki_meta["latency_ms"],
+        "wiki_pages": wiki_meta["pages"],
+        "wiki_terms": wiki_meta["terms"],
+        "wiki_context_chars": wiki_meta["context_chars"],
+        "wiki_planner": wiki_meta["planner"],
+        "wiki_candidate_hit": wiki_meta["candidate_hit"],
+        "wiki_candidates": wiki_meta["candidates"],
+        "wiki_grade": wiki_meta["grade"],
         "injected_content_sha256": hashlib.sha256(context.encode("utf-8")).hexdigest(),
         "latency_s": round(time.perf_counter() - started, 4),
     })
@@ -1532,12 +1718,18 @@ def _run_external_case(
     arithmetic_model: str,
     timeout: float,
     glossary: tuple[str, list[Any]] | None,
+    wiki: Bok800WikiIndex | None,
     stage: str,
 ) -> dict[str, Any]:
     """Keep FinQA/TAT-QA untouched; scope RAG/EXPR routing to FinanceBench."""
 
     context = case["context"]
     glossary_meta = {"version": None, "sha256": None, "matched_terms": [], "hit": False}
+    wiki_meta: dict[str, Any] = {
+        "hit": False, "fallback_skipped": False, "sha256": None, "latency_ms": 0.0,
+        "pages": [], "terms": [], "context_chars": 0, "planner": None,
+        "candidate_hit": False, "candidates": [], "grade": None,
+    }
     if case.get("source") == "FinanceBench" and stage not in {"finance_scoped_split", "finance_scoped_split_strict", "finance_scoped_split_strict_direct", "finance_scoped_context_rag", "finance_scoped_evidence_plan", "finance_selective_reasoning"}:
         context, glossary_meta = _glossary_prompt(
             context,
@@ -1548,6 +1740,10 @@ def _run_external_case(
                 if stage in {"selective_unit_scale", "finance_typed_routing"}
                 else "bok-800-arithmetic-glossary-v1"
             ),
+        )
+        context, wiki_meta = _wiki_fallback_prompt(
+            context, wiki, query=case["question"], glossary_hit=glossary_meta["hit"],
+            url=url, model=base_model, timeout=timeout,
         )
     prompt = _base_prompt(context, case["question"], "Answer concisely from the supplied evidence.")
     started = time.perf_counter()
@@ -1640,13 +1836,28 @@ def _run_external_case(
         "glossary_sha256": glossary_meta["sha256"],
         "matched_terms": glossary_meta["matched_terms"],
         "glossary_hit": glossary_meta["hit"],
+        "wiki_hit": wiki_meta["hit"],
+        "wiki_fallback_skipped": wiki_meta["fallback_skipped"],
+        "wiki_sha256": wiki_meta["sha256"],
+        "wiki_retrieval_latency_ms": wiki_meta["latency_ms"],
+        "wiki_pages": wiki_meta["pages"],
+        "wiki_terms": wiki_meta["terms"],
+        "wiki_context_chars": wiki_meta["context_chars"],
+        "wiki_planner": wiki_meta["planner"],
+        "wiki_candidate_hit": wiki_meta["candidate_hit"],
+        "wiki_candidates": wiki_meta["candidates"],
+        "wiki_grade": wiki_meta["grade"],
         "injected_content_sha256": hashlib.sha256(context.encode("utf-8")).hexdigest(),
         "latency_s": round(time.perf_counter() - started, 4),
     })
     return result
 
 
-def run_internal(args: argparse.Namespace, glossary: tuple[str, list[Any]] | None) -> dict[str, Any]:
+def run_internal(
+    args: argparse.Namespace,
+    glossary: tuple[str, list[Any]] | None,
+    wiki: Bok800WikiIndex | None,
+) -> dict[str, Any]:
     dataset = json.loads(args.internal.read_text(encoding="utf-8"))
     rows = []
     for index, case in enumerate(dataset["cases"], start=1):
@@ -1659,6 +1870,7 @@ def run_internal(args: argparse.Namespace, glossary: tuple[str, list[Any]] | Non
                 arithmetic_model=args.arithmetic_model,
                 timeout=args.timeout,
                 glossary=glossary,
+                wiki=wiki,
                 stage=args.stage,
             )
         )
@@ -1670,12 +1882,20 @@ def run_internal(args: argparse.Namespace, glossary: tuple[str, list[Any]] | Non
         "arithmetic_model": args.arithmetic_model,
         "ab_stage": args.stage,
         "pipeline_variant": "AWQ+HybridPipeline",
-        "policy": "selective_expr_ast_accounting_glossary_guided_json_envelope_awq_passthrough_no_fallback",
+        "policy": (
+            "selective_expr_ast_accounting_glossary_then_bok800_wiki_guided_json_awq_no_answer_fallback"
+            if args.wiki_fallback
+            else "selective_expr_ast_accounting_glossary_guided_json_envelope_awq_passthrough_no_fallback"
+        ),
         "results": rows,
     }
 
 
-def run_external(args: argparse.Namespace, glossary: tuple[str, list[Any]] | None) -> dict[str, Any]:
+def run_external(
+    args: argparse.Namespace,
+    glossary: tuple[str, list[Any]] | None,
+    wiki: Bok800WikiIndex | None,
+) -> dict[str, Any]:
     dataset = json.loads(args.external.read_text(encoding="utf-8"))
     rows = []
     for index, case in enumerate(dataset["cases"], start=1):
@@ -1687,6 +1907,7 @@ def run_external(args: argparse.Namespace, glossary: tuple[str, list[Any]] | Non
             arithmetic_model=args.arithmetic_model,
             timeout=args.timeout,
             glossary=glossary,
+            wiki=wiki,
             stage=args.stage,
         )
         rows.append({
@@ -1698,6 +1919,10 @@ def run_external(args: argparse.Namespace, glossary: tuple[str, list[Any]] | Non
                 "prediction", "raw_prediction", "final_source", "expression", "calculator_value", "numeric_metadata",
                 "route", "router", "finish_reason", "latency_s", "prompt_tokens", "completion_tokens",
                 "error", "glossary_version", "glossary_sha256", "matched_terms", "glossary_hit",
+                "wiki_hit", "wiki_fallback_skipped", "wiki_sha256", "wiki_retrieval_latency_ms",
+                "wiki_pages", "wiki_terms", "wiki_context_chars",
+                "wiki_planner",
+                "wiki_candidate_hit", "wiki_candidates", "wiki_grade",
                 "injected_content_sha256", "retrieval_hit", "retrieved_line_count",
                 "retrieved_terms", "retrieved_content_sha256", "attempts",
             )},
@@ -1711,7 +1936,11 @@ def run_external(args: argparse.Namespace, glossary: tuple[str, list[Any]] | Non
         "arithmetic_model": args.arithmetic_model,
         "ab_stage": args.stage,
         "pipeline_variant": "AWQ+HybridPipeline",
-        "policy": "FinanceBench_only_expr_ast_and_glossary; FinQA_TATQA_AWQ_text_passthrough; no_fallback",
+        "policy": (
+            "FinanceBench_only_expr_ast_glossary_then_bok800_wiki; FinQA_TATQA_AWQ_text_passthrough; no_answer_fallback"
+            if args.wiki_fallback
+            else "FinanceBench_only_expr_ast_and_glossary; FinQA_TATQA_AWQ_text_passthrough; no_fallback"
+        ),
         "results": rows,
     }
 
@@ -1730,6 +1959,12 @@ def main() -> int:
     parser.add_argument("--internal", type=Path, default=INTERNAL_DATA)
     parser.add_argument("--external", type=Path, default=EXTERNAL_DATA)
     parser.add_argument("--glossary", type=Path, default=GLOSSARY_DATA)
+    parser.add_argument(
+        "--wiki-root",
+        type=Path,
+        default=Path("benchmarks/quantization/knowledge/bok800_2026"),
+    )
+    parser.add_argument("--wiki-fallback", action="store_true")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--timeout", type=float, default=TIMEOUT_SECONDS)
     parser.add_argument("--only", choices=("all", "internal", "external"), default="all")
@@ -1743,9 +1978,10 @@ def main() -> int:
         if args.stage in {"selective_unit_scale", "finance_typed_routing"}
         else load_glossary(args.glossary)
     )
+    wiki = load_bok800_wiki(args.wiki_root) if args.wiki_fallback else None
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    internal = run_internal(args, glossary) if args.only in {"all", "internal"} else None
-    external = run_external(args, glossary) if args.only in {"all", "external"} else None
+    internal = run_internal(args, glossary, wiki) if args.only in {"all", "internal"} else None
+    external = run_external(args, glossary, wiki) if args.only in {"all", "external"} else None
     if internal is not None:
         (args.output_dir / "internal50_raw.json").write_text(json.dumps(internal, ensure_ascii=False, indent=2), encoding="utf-8")
     if external is not None:
@@ -1753,7 +1989,7 @@ def main() -> int:
 
     provenance = {
         "schema_version": "aws-hybrid-provenance.v2",
-        "variant": "AWQ+HybridPipeline",
+        "variant": "AWQ+HybridPipeline+WikiFallback" if args.wiki_fallback else "AWQ+HybridPipeline",
         "model": args.base_model,
         "base_model": args.base_model,
         "arithmetic_model": args.arithmetic_model,
@@ -1769,6 +2005,14 @@ def main() -> int:
             "scope": "internal accounting and FinanceBench only",
             "query_scoped": True,
             "version": "bok-800-arithmetic-glossary-v2-selective" if args.stage in {"selective_unit_scale", "finance_typed_routing"} else "bok-800-arithmetic-glossary-v1",
+        },
+        "wiki_fallback": {
+            "enabled": args.wiki_fallback,
+            "path": str(args.wiki_root) if args.wiki_fallback else None,
+            "sha256": wiki.digest if wiki is not None else None,
+            "documents": len(wiki.pages) if wiki is not None else 0,
+            "policy": "glossary exact match first; LLM query planner; BM25 top-1 seed; related-term traversal up to 3 pages; LLM relevance grade; inject accepted context only",
+            "max_chars_per_page": 600,
         },
         "arithmetic": {
             "llm_output": (

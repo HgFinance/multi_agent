@@ -71,6 +71,59 @@ def test_background_reconciliation_projects_terminal_workflow_idempotently() -> 
     assert len({event.event_id for event in events}) == 2
 
 
+def test_background_reconciliation_skips_unchanged_authoritative_rows() -> None:
+    store = InMemoryMirrorStore()
+    request = CanonicalIngress(
+        query="show status",
+        request_id="projection-checkpoint-1",
+        source="web",
+        source_message_id="web:projection-checkpoint-1",
+        actor_id="user-1",
+    )
+    store.claim_request(request)
+    store.save_response(request.request_id, {"task_id": "root-1"})
+    listed_rows = [
+        {
+            "id": "root-1",
+            "status": "done",
+            "body": "workflow_role=root",
+            "result": "accepted",
+        },
+        {
+            "id": "dept-1",
+            "status": "done",
+            "body": "workflow_root_task_id=root-1\nworkflow_role=primary",
+            "result": "research complete",
+        },
+    ]
+
+    with patch.object(
+        ceo_mirror_projection,
+        "load_workflow",
+        return_value=_workflow(),
+    ) as load:
+        first = ceo_mirror_projection.reconcile_workflow_projections(
+            store,
+            listed_rows=listed_rows,
+        )
+        second = ceo_mirror_projection.reconcile_workflow_projections(
+            store,
+            listed_rows=listed_rows,
+        )
+        changed = ceo_mirror_projection.reconcile_workflow_projections(
+            store,
+            listed_rows=[
+                listed_rows[0],
+                {**listed_rows[1], "result": "research revised"},
+            ],
+        )
+
+    assert first == {"scanned": 1, "projected": 2, "failed": 0}
+    assert second == {"scanned": 1, "projected": 0, "failed": 0}
+    assert changed == {"scanned": 1, "projected": 2, "failed": 0}
+    assert load.call_count == 2
+
+
 def test_in_memory_store_exposes_bounded_request_page() -> None:
     store = InMemoryMirrorStore()
     for index in range(3):

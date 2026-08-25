@@ -178,7 +178,6 @@ services:
         condition: service_started
     environment:
       APP_ENV: production
-      DATABASE_URL: *conditional-worker-database-url
       CONDITIONAL_RULE_DATABASE_URL: *conditional-worker-database-url
       CONDITIONAL_RULE_MARKET_DATABASE_URL: *market-database-url
       CONDITIONAL_RULE_MARKET_CONNECT_TIMEOUT_SECONDS: ${CONDITIONAL_RULE_MARKET_CONNECT_TIMEOUT_SECONDS:-2}
@@ -203,9 +202,8 @@ services:
         condition: service_healthy
     environment:
       APP_ENV: production
-      DATABASE_URL: *conditional-worker-database-url
-      CONDITIONAL_RULE_RETENTION_DATABASE_URL: *conditional-worker-database-url
-      CONDITIONAL_RULE_RETENTION_DATABASE_ROLE: svc_conditional_rule_worker
+      CONDITIONAL_RULE_DATABASE_URL: *conditional-worker-database-url
+      CONDITIONAL_RULE_WORKER_DATABASE_ROLE: svc_conditional_rule_worker
       CONDITIONAL_RULE_RETENTION_ENABLED: ${CONDITIONAL_RULE_RETENTION_ENABLED:-true}
       CONDITIONAL_RULE_RETENTION_INTERVAL_SECONDS: ${CONDITIONAL_RULE_RETENTION_INTERVAL_SECONDS:-86400}
       CONDITIONAL_RULE_RETENTION_BATCH_SIZE: ${CONDITIONAL_RULE_RETENTION_BATCH_SIZE:-500}
@@ -221,7 +219,6 @@ services:
         condition: service_healthy
     environment:
       APP_ENV: production
-      DATABASE_URL: *conditional-worker-database-url
       CONDITIONAL_RULE_DATABASE_URL: *conditional-worker-database-url
       CONDITIONAL_RULE_WORKER_DATABASE_ROLE: svc_conditional_rule_worker
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
@@ -239,9 +236,6 @@ services:
         condition: service_healthy
     environment:
       APP_ENV: production
-      PORTFOLIO_AUTH_MODE: fixture
-      PORTFOLIO_AUTH_REQUIRED: "false"
-      DATABASE_URL: *control-database-url
       ORDER_ORCHESTRATOR_DATABASE_URL: *order-database-url
       ORDER_ORCHESTRATOR_DATABASE_ROLE: svc_order_orchestrator
       CONDITIONAL_RULE_DATABASE_URL: *conditional-worker-database-url

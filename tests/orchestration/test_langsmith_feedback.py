@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from orchestration.ceo_workflow_scope import (
@@ -229,6 +230,90 @@ def test_ledger_is_idempotent_and_approval_creates_bounded_hint(tmp_path) -> Non
     assert hint is not None
     assert hint["items"][0]["source"] == "qa-approved-langsmith-feedback"
     assert "prompt" not in str(hint)
+
+
+def test_ledger_merges_same_request_department_and_finding(tmp_path) -> None:
+    ledger = FeedbackLedger(str(tmp_path / "feedback.sqlite3"))
+    common_metadata = {
+        "request_id": "discord:semantic-one",
+        "department": "ceo-ingress",
+        "latency_scope": "end_to_end",
+        "raw_payloads_sent": False,
+    }
+    first = evaluate_observation(
+        TraceObservation(
+            source_run_id="source-semantic-1",
+            name="worker.ceo",
+            status="completed",
+            started_at=None,
+            ended_at=None,
+            metadata={**common_metadata, "latency_ms": 70_000},
+        ),
+        latency_warn_ms=60_000,
+    )
+    second = evaluate_observation(
+        TraceObservation(
+            source_run_id="source-semantic-2",
+            name="worker.ceo",
+            status="completed",
+            started_at=None,
+            ended_at=None,
+            metadata={**common_metadata, "latency_ms": 80_000},
+        ),
+        latency_warn_ms=60_000,
+    )
+    for source in ("source-semantic-1", "source-semantic-2"):
+        assert ledger.enqueue(source, "First") is True
+
+    first_id = ledger.complete("source-semantic-1", "eval-1", first)
+    second_id = ledger.complete("source-semantic-2", "eval-2", second)
+
+    assert second_id == first_id
+    with sqlite3.connect(ledger.path) as db:
+        assert db.execute(
+            "SELECT count(*) FROM langsmith_feedback_artifacts"
+        ).fetchone()[0] == 1
+        assert db.execute(
+            "SELECT count(*) FROM langsmith_feedback_artifact_sources WHERE artifact_id=?",
+            (first_id,),
+        ).fetchone()[0] == 2
+    assert ledger.claim_discord_delivery(first_id) is True
+    assert ledger.claim_discord_delivery(second_id) is False
+
+
+def test_concurrent_semantic_completions_merge_without_lock_failures(tmp_path) -> None:
+    ledger = FeedbackLedger(str(tmp_path / "feedback.sqlite3"))
+
+    def complete(index: int) -> str:
+        source = f"source-concurrent-{index}"
+        assert ledger.enqueue(source, "First") is True
+        result = evaluate_observation(
+            TraceObservation(
+                source_run_id=source,
+                name="worker.ceo",
+                status="completed",
+                started_at=None,
+                ended_at=None,
+                metadata={
+                    "request_id": "discord:concurrent-one",
+                    "department": "ceo-ingress",
+                    "latency_scope": "end_to_end",
+                    "latency_ms": 70_000,
+                    "raw_payloads_sent": False,
+                },
+            ),
+            latency_warn_ms=60_000,
+        )
+        return ledger.complete(source, f"eval-{index}", result)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        artifact_ids = list(pool.map(complete, range(24)))
+
+    assert len(set(artifact_ids)) == 1
+    with sqlite3.connect(ledger.path) as db:
+        assert db.execute(
+            "SELECT count(*) FROM langsmith_feedback_artifact_sources"
+        ).fetchone()[0] == 24
 
 
 def test_active_hint_is_local_only_and_requires_passed_benchmark(tmp_path, monkeypatch) -> None:

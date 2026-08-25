@@ -452,6 +452,7 @@ class InMemoryMandateVersionRepository(MandateVersionRepository):
 
     def set_mandate_current(self, mandate_id: str, version: int, status: str) -> None:
         self._mandate_state[mandate_id] = (version, status)
+        self._metadata.pop(mandate_id, None)
 
     def set_effective_to(self, mandate_id: str, version: int, ts: datetime) -> None:
         for i, r in enumerate(self._rows):

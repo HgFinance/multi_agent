@@ -148,3 +148,29 @@ def test_observer_and_image_do_not_couple_to_department_runtime_modules() -> Non
         "departments/06-ai-qa-audit",
     ):
         assert f"COPY {department_path}" not in dockerfile
+
+
+def test_workforce_image_packages_api_import_roots_and_worker_loader() -> None:
+    dockerfile = (
+        ROOT / "departments/07-agent-workforce/Dockerfile"
+    ).read_text(encoding="utf-8")
+    for runtime_path in (
+        "api",
+        "lifecycle",
+        "improvements",
+        "scorecard",
+        "roster",
+        "workforce_events",
+        "planning",
+        "hiring",
+        "performance",
+    ):
+        assert (
+            f"COPY departments/07-agent-workforce/{runtime_path} ./{runtime_path}"
+            in dockerfile
+        )
+    assert (
+        "COPY departments/07-agent-workforce/workforce_api_loader.py "
+        "./workforce_api_loader.py"
+        in dockerfile
+    )

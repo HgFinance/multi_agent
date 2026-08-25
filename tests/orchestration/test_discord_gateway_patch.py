@@ -24,6 +24,108 @@ _PATCH_SPEC.loader.exec_module(gateway_patch)
 
 
 class DiscordGatewayPatchTests(unittest.TestCase):
+    def test_ceo_repeat_command_replays_prior_answer_without_handler(self) -> None:
+        class Sent:
+            id = "9004"
+
+        class Prior:
+            content = "기존 CEO 답변"
+
+        class Thread:
+            id = 9002
+
+            async def fetch_message(self, message_id):
+                self.requested = message_id
+                return Prior()
+
+        class Client:
+            user = type("Bot", (), {"id": 42})()
+
+            def __init__(self):
+                self.thread = Thread()
+
+            def get_channel(self, channel_id):
+                return self.thread if channel_id == 9002 else None
+
+        class Channel:
+            id = 9001
+            parent_id = None
+
+        class Guild:
+            id = 9000
+
+        class Author:
+            bot = False
+
+        class Message:
+            id = "9003"
+            content = "<@42> 대답"
+            channel = Channel()
+            guild = Guild()
+            author = Author()
+
+            def __init__(self):
+                self.replies = []
+
+            async def reply(self, content, mention_author=False):
+                self.replies.append((content, mention_author))
+                return Sent()
+
+        class Adapter:
+            def __init__(self):
+                self._client = Client()
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            "os.environ",
+            {"HERMES_HOME": directory, "HERMES_PROFILE": "ceo-agent"},
+            clear=False,
+        ):
+            adapter = Adapter()
+            store = gateway_patch._store(adapter)
+            prior_key = gateway_patch.canonical_discord_dedup_key(9000, 9001, "8999")
+            store.claim_inbound(
+                dedup_key=prior_key,
+                message_id="8999",
+                guild_id="9000",
+                channel_id="9001",
+                thread_id="9002",
+                profile="ceo-agent",
+                handler="live",
+            )
+            prior_response_key = "discord:9000:9002:8999:synthesis-detail:t_prior"
+            store.claim_outbound(
+                response_key=prior_response_key,
+                dedup_key="discord:9000:9002:8999",
+                profile="ceo-agent",
+            )
+            store.mark_outbound(
+                prior_response_key,
+                "COMPLETED",
+                "ceo-agent",
+                "8998",
+            )
+            current_key = gateway_patch.canonical_discord_dedup_key(9000, 9001, "9003")
+            store.claim_inbound(
+                dedup_key=current_key,
+                message_id="9003",
+                guild_id="9000",
+                channel_id="9001",
+                thread_id=None,
+                profile="ceo-agent",
+                handler="live",
+            )
+            message = Message()
+
+            handled = asyncio.run(
+                gateway_patch._maybe_handle_ceo_repeat_message(adapter, message)
+            )
+
+            self.assertTrue(handled)
+            self.assertEqual(len(message.replies), 1)
+            self.assertIn("기존 CEO 답변", message.replies[0][0])
+            self.assertIn("현재 주문 상태를 다시 조회한 결과는 아닙니다", message.replies[0][0])
+            self.assertEqual(store.inbound_state(current_key, "ceo-agent"), "COMPLETED")
+
     def test_live_and_history_claims_reach_fake_adapter_once(self) -> None:
         class Dedup:
             def __init__(self) -> None:

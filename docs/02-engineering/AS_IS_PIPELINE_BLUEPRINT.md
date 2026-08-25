@@ -136,7 +136,7 @@ flowchart TB
 
 ### 3.2 서비스 전체 표 (기본 기동 기준)
 
-**루트 compose (29개 정의, 기본 기동 25개):**
+**루트 compose (28개 정의, 기본 기동 25개):**
 
 | 서비스 | 이미지/빌드 | 커맨드 | 포트 | 역할 |
 |---|---|---|---|---|
@@ -164,7 +164,6 @@ flowchart TB
 | `card-watchdog` | `hedgefund-factory:latest` | `card_watchdog.py --loop --interval-min 3` | — | 죽은 부모 카드 release |
 | `hermes-dashboard` | hermes 이미지 | `dashboard :9119` | `127.0.0.1:9119` | **profiles 게이트 — 기본 미기동** |
 | `paper-search-mcp` `youtube-transcript-mcp` | uv 이미지 | uvx | — | **profiles 게이트 — 기본 미기동** |
-| `ui-bff` | factory 이미지 | uvicorn (레거시) | — | **profiles 게이트 — 레거시, 그대로 켜면 고장** (§12) |
 
 † `factory-experiment-worker`/`card-watchdog`은 `build:` 없이 `hedgefund-factory:latest`를 참조 — `factory-autopilot`이 같은 호스트에서 먼저 빌드해야만 뜬다 (`docker-compose.yml:1205, 1235`).
 
@@ -744,7 +743,7 @@ risk-api가 `risk.decision.v1`을 Redis `risk-qa-events`에 발행(결정 이벤
 - RAG 코퍼스 — 인덱서(`rag_librarian.py`)는 CLI 전용 + 원문 수집기 꺼짐 → `/evidence/search`는 동결 코퍼스 검색.
 - ~~`geopolitical_state` MCP 도구~~ — 08-18 제거. 굳은 테이블을 "현재"로 서빙하는 경로를 닫았다.
 - `macro` 테이블 — 수집 중단, 소비자(`data_resolution`, `narrative_guard` 등) 다수 생존 → 조용한 노화.
-- `hermes-dashboard`, `paper-search-mcp`, `youtube-transcript-mcp`, `ui-bff` — profiles 게이트로 기본 미기동. 특히 `ui-bff`는 켜도 이미지에 `hermes` 바이너리가 없고 읽기 함수들이 `HERMES_EXEC_MODE`를 무시해 **켜자마자 고장**.
+- `hermes-dashboard`, `paper-search-mcp`, `youtube-transcript-mcp` — profiles 게이트로 기본 미기동. 중복·고장 상태였던 `ui-bff` 정의는 제거했고 `portfolio-bff`만 HTTP 관문을 소유한다.
 - `kanban_tracker` — 플래그 기본 false + 어떤 compose도 안 켬 → 포트폴리오 런 부서 카드 생성 코드는 사실상 미작동.
 - QA `qa-check`, P1 analytics 게이트, 리스크 DB 컨텍스트, P1 영속, QA trace/incident 영속 — 전부 플래그 OFF.
 

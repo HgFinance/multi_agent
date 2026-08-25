@@ -1,0 +1,815 @@
+{
+  "schema_version": "awq-hybrid-bok800-wiki-paired.v1",
+  "paired_runs": 3,
+  "baseline_runs": [
+    {
+      "directory": "benchmarks/quantization/results/20260825_awq_hybrid_wiki_paired/baseline_run1",
+      "metrics": {
+        "Internal Quality": 0.88,
+        "Critical Failures": 1.0,
+        "Request Errors": 0.0,
+        "FinQA": 0.7,
+        "TAT-QA": 0.9333,
+        "FinanceBench diagnostic": 0.5436,
+        "Auto Mean": 0.7992,
+        "Financial Arithmetic": 0.9,
+        "Risk Reasoning": 1.0,
+        "Portfolio / Trading": 0.6666666666666666,
+        "Accounting": 1.0,
+        "Quant": 1.0,
+        "Evidence": 1.0,
+        "Structured Output": 0.4,
+        "Uncertainty / Fail-Closed": 1.0
+      },
+      "retrieval": {
+        "eligible_cases": 0,
+        "wiki_hits": 0,
+        "hit_rate": 0.0,
+        "candidate_hits": 0,
+        "candidate_hit_rate": 0.0,
+        "exact_term_hits": 0,
+        "related_traversal_hits": 0,
+        "candidate_related_traversal_hits": 0,
+        "avg_context_chars": 0.0,
+        "avg_retrieval_latency_ms": 0.0,
+        "avg_planner_latency_s": 0.0,
+        "avg_grade_latency_s_per_candidate": 0.0,
+        "avg_total_retrieval_overhead_s_per_eligible_case": 0.0,
+        "candidate_pages": [],
+        "pages": []
+      }
+    },
+    {
+      "directory": "benchmarks/quantization/results/20260825_awq_hybrid_wiki_paired/baseline_run2",
+      "metrics": {
+        "Internal Quality": 0.88,
+        "Critical Failures": 1.0,
+        "Request Errors": 0.0,
+        "FinQA": 0.7,
+        "TAT-QA": 0.9333,
+        "FinanceBench diagnostic": 0.5442,
+        "Auto Mean": 0.7992,
+        "Financial Arithmetic": 0.8,
+        "Risk Reasoning": 1.0,
+        "Portfolio / Trading": 0.8333333333333334,
+        "Accounting": 1.0,
+        "Quant": 1.0,
+        "Evidence": 1.0,
+        "Structured Output": 0.4,
+        "Uncertainty / Fail-Closed": 1.0
+      },
+      "retrieval": {
+        "eligible_cases": 0,
+        "wiki_hits": 0,
+        "hit_rate": 0.0,
+        "candidate_hits": 0,
+        "candidate_hit_rate": 0.0,
+        "exact_term_hits": 0,
+        "related_traversal_hits": 0,
+        "candidate_related_traversal_hits": 0,
+        "avg_context_chars": 0.0,
+        "avg_retrieval_latency_ms": 0.0,
+        "avg_planner_latency_s": 0.0,
+        "avg_grade_latency_s_per_candidate": 0.0,
+        "avg_total_retrieval_overhead_s_per_eligible_case": 0.0,
+        "candidate_pages": [],
+        "pages": []
+      }
+    },
+    {
+      "directory": "benchmarks/quantization/results/20260825_awq_hybrid_wiki_paired/baseline_run3",
+      "metrics": {
+        "Internal Quality": 0.88,
+        "Critical Failures": 1.0,
+        "Request Errors": 0.0,
+        "FinQA": 0.7,
+        "TAT-QA": 0.9333,
+        "FinanceBench diagnostic": 0.5442,
+        "Auto Mean": 0.7992,
+        "Financial Arithmetic": 0.8,
+        "Risk Reasoning": 1.0,
+        "Portfolio / Trading": 0.8333333333333334,
+        "Accounting": 1.0,
+        "Quant": 1.0,
+        "Evidence": 1.0,
+        "Structured Output": 0.4,
+        "Uncertainty / Fail-Closed": 1.0
+      },
+      "retrieval": {
+        "eligible_cases": 0,
+        "wiki_hits": 0,
+        "hit_rate": 0.0,
+        "candidate_hits": 0,
+        "candidate_hit_rate": 0.0,
+        "exact_term_hits": 0,
+        "related_traversal_hits": 0,
+        "candidate_related_traversal_hits": 0,
+        "avg_context_chars": 0.0,
+        "avg_retrieval_latency_ms": 0.0,
+        "avg_planner_latency_s": 0.0,
+        "avg_grade_latency_s_per_candidate": 0.0,
+        "avg_total_retrieval_overhead_s_per_eligible_case": 0.0,
+        "candidate_pages": [],
+        "pages": []
+      }
+    }
+  ],
+  "wiki_runs": [
+    {
+      "directory": "benchmarks/quantization/results/20260825_awq_hybrid_wiki_paired/wiki_run1",
+      "metrics": {
+        "Internal Quality": 0.88,
+        "Critical Failures": 1.0,
+        "Request Errors": 0.0,
+        "FinQA": 0.7,
+        "TAT-QA": 0.9333,
+        "FinanceBench diagnostic": 0.5442,
+        "Auto Mean": 0.7992,
+        "Financial Arithmetic": 0.8,
+        "Risk Reasoning": 1.0,
+        "Portfolio / Trading": 0.8333333333333334,
+        "Accounting": 1.0,
+        "Quant": 1.0,
+        "Evidence": 1.0,
+        "Structured Output": 0.4,
+        "Uncertainty / Fail-Closed": 1.0
+      },
+      "retrieval": {
+        "eligible_cases": 17,
+        "wiki_hits": 0,
+        "hit_rate": 0.0,
+        "candidate_hits": 7,
+        "candidate_hit_rate": 0.4117647058823529,
+        "exact_term_hits": 0,
+        "related_traversal_hits": 0,
+        "candidate_related_traversal_hits": 2,
+        "avg_context_chars": 0.0,
+        "avg_retrieval_latency_ms": 0.3635294117647059,
+        "avg_planner_latency_s": 0.875935294117647,
+        "avg_grade_latency_s_per_candidate": 2.4093714285714287,
+        "avg_total_retrieval_overhead_s_per_eligible_case": 1.8683929411764708,
+        "candidate_pages": [
+          {
+            "id": "v2-015",
+            "question": "Classify reconciliation.",
+            "search_query": "정산",
+            "pages": [
+              {
+                "page_id": "702-efc7b0fa26",
+                "term": "프로젝트 한강",
+                "score": 4.411665,
+                "relation": "bm25_seed"
+              },
+              {
+                "page_id": "593-9c5c1c1387",
+                "term": "중앙은행 디지털화폐(CBDC)",
+                "score": 0.0,
+                "relation": "related_from:프로젝트 한강"
+              },
+              {
+                "page_id": "436-75fe3561b8",
+                "term": "예금토큰",
+                "score": 0.0,
+                "relation": "related_from:프로젝트 한강"
+              }
+            ],
+            "grade": {
+              "relevant": false,
+              "reason": "The provided text does not define or clarify the concept of 'reconciliation'. Instead, it discusses specific financial technologies and projects related to digital currencies and tokens. This information is not directly useful in classifying the general accounting process of reconciliation.",
+              "latency_s": 2.2642,
+              "prompt_tokens": 1093,
+              "completion_tokens": 58,
+              "error": null
+            }
+          },
+          {
+            "id": "v2-016",
+            "question": "Calculate realized PnL in KRW.",
+            "search_query": "실현 손익 KRW",
+            "pages": [
+              {
+                "page_id": "488-9e09aa04bc",
+                "term": "은행경영공시제도",
+                "score": 6.51754,
+                "relation": "bm25_seed"
+              }
+            ],
+            "grade": {
+              "relevant": false,
+              "reason": "The provided BOK glossary definition does not clarify how to calculate realized PnL in KRW. It is about bank disclosure regulations and does not provide any information related to profit and loss calculations.",
+              "latency_s": 1.9307,
+              "prompt_tokens": 316,
+              "completion_tokens": 51,
+              "error": null
+            }
+          },
+          {
+            "id": "financebench_id_01079",
+            "question": "What are major acquisitions that AMCOR has done in FY2023, FY2022 and FY2021?",
+            "search_query": "AMCOR 인수합병",
+            "pages": [
+              {
+                "page_id": "773-1b6c1c4a7b",
+                "term": "M&A",
+                "score": 6.328877,
+                "relation": "bm25_seed"
+              }
+            ],
+            "grade": {
+              "relevant": false,
+              "reason": "The provided glossary explains general concepts of mergers and acquisitions (M&A), but does not provide specific information about AMCOR's major acquisitions in fiscal years 2023, 2022, and 2021.",
+              "latency_s": 2.3708,
+              "prompt_tokens": 391,
+              "completion_tokens": 64,
+              "error": null
+            }
+          },
+          {
+            "id": "financebench_id_00521",
+            "question": "What are major acquisitions that Ulta Beauty has done in FY2023 and FY2022?",
+            "search_query": "울타 뷰티 인수합병 2023년도 2022년도",
+            "pages": [
+              {
+                "page_id": "773-1b6c1c4a7b",
+                "term": "M&A",
+                "score": 6.328877,
+                "relation": "bm25_seed"
+              }
+            ],
+            "grade": {
+              "relevant": false,
+              "reason": "The provided BOK glossary definition explains general concepts of mergers and acquisitions (M&A), but it does not provide specific information about major acquisitions made by Ulta Beauty in fiscal years 2023 and 2022. The definition is too broad and does not clarify any specific accounting treatment, formula, or concept related to Ulta Beauty's acquisitions.",
+              "latency_s": 3.2932,
+              "prompt_tokens": 386,
+              "completion_tokens": 89,
+              "error": null
+            }
+          },
+          {
+            "id": "financebench_id_00206",
+            "question": "Are JPM's gross margins historically consistent (not fluctuating more than roughly 2% each year)? If gross margins are not a relevant metric for a company like this, then please state that and explain why.",
+            "search_query": "JP모건 총마진",
+            "pages": [
+              {
+                "page_id": "030-fdc8e8befa",
+                "term": "경제 서프라이즈 지수",
+                "score": 5.880821,
+                "relation": "bm25_seed"
+              }
+            ],
+            "grade": {
+              "relevant": false,
+              "reason": "The provided BOK glossary definition describes the Economic Surprise Index and its usage in financial markets, which is unrelated to the question about JPM's gross margins consistency.",
+              "latency_s": 1.6371,
+              "prompt_tokens": 454,
+              "completion_tokens": 44,
+              "error": null
+            }
+          },
+          {
+            "id": "financebench_id_08286",
+            "question": "By drawing conclusions from the information stated only in the income statement, what is Amazon's FY2019 net income attributable to shareholders (in USD millions)?",
+            "search_query": "아마존 2019년도 당기순이익",
+            "pages": [
+              {
+                "page_id": "583-78ddd466be",
+                "term": "주당순이익(EPS)",
+                "score": 8.603891,
+                "relation": "bm25_seed"
+              }
+            ],
+            "grade": {
+              "relevant": false,
+              "reason": "The provided glossary entry explains EPS (Earnings Per Share) and its relation to net income, but it does not provide a direct method to calculate Amazon's FY2019 net income attributable to shareholders. The question requires specific financial data from Amazon's income statement which is not covered by this general explanation of EPS.",
+              "latency_s": 3.1426,
+              "prompt_tokens": 499,
+              "completion_tokens": 79,
+              "error": null
+            }
+          },
+          {
+            "id": "financebench_id_01491",
+            "question": "What is the amount of the cash proceeds that JnJ realised from the separation of Kenvue (formerly Consumer Health business segment), as of August 30, 2023?",
+            "search_query": "Johnson & Johnson Kenvue 분할 현금 수익",
+            "pages": [
+              {
+                "page_id": "609-def99fe3bd",
+                "term": "지로(GIRO)",
+                "score": 6.402747,
+                "relation": "bm25_seed"
+              },
+              {
+                "page_id": "511-60f91644e9",
+                "term": "입금이체",
+                "score": 0.0,
+                "relation": "related_from:지로(GIRO)"
+              },
+              {
+                "page_id": "647-41b4694cd7",
+                "term": "출금이체",
+                "score": 0.0,
+                "relation": "related_from:지로(GIRO)"
+              }
+            ],
+            "grade": {
+              "relevant": false,
+              "reason": "The provided text describes various banking and financial transaction methods such as GIRO, credit transfer, and debit transfer. It does not provide any information related to Johnson & Johnson's (JnJ) cash proceeds from the separation of Kenvue.",
+              "latency_s": 2.227,
+              "prompt_tokens": 852,
+              "completion_tokens": 60,
+              "error": null
+            }
+          }
+        ],
+        "pages": []
+      }
+    },
+    {
+      "directory": "benchmarks/quantization/results/20260825_awq_hybrid_wiki_paired/wiki_run2",
+      "metrics": {
+        "Internal Quality": 0.88,
+        "Critical Failures": 1.0,
+        "Request Errors": 0.0,
+        "FinQA": 0.7,
+        "TAT-QA": 0.9333,
+        "FinanceBench diagnostic": 0.5442,
+        "Auto Mean": 0.7992,
+        "Financial Arithmetic": 0.8,
+        "Risk Reasoning": 1.0,
+        "Portfolio / Trading": 0.8333333333333334,
+        "Accounting": 1.0,
+        "Quant": 1.0,
+        "Evidence": 1.0,
+        "Structured Output": 0.4,
+        "Uncertainty / Fail-Closed": 1.0
+      },
+      "retrieval": {
+        "eligible_cases": 17,
+        "wiki_hits": 0,
+        "hit_rate": 0.0,
+        "candidate_hits": 7,
+        "candidate_hit_rate": 0.4117647058823529,
+        "exact_term_hits": 0,
+        "related_traversal_hits": 0,
+        "candidate_related_traversal_hits": 2,
+        "avg_context_chars": 0.0,
+        "avg_retrieval_latency_ms": 0.3583764705882353,
+        "avg_planner_latency_s": 0.8236764705882353,
+        "avg_grade_latency_s_per_candidate": 2.2076000000000002,
+        "avg_total_retrieval_overhead_s_per_eligible_case": 1.7330466117647059,
+        "candidate_pages": [
+          {
+            "id": "v2-015",
+            "question": "Classify reconciliation.",
+            "search_query": "정산",
+            "pages": [
+              {
+                "page_id": "702-efc7b0fa26",
+                "term": "프로젝트 한강",
+                "score": 4.411665,
+                "relation": "bm25_seed"
+              },
+              {
+                "page_id": "593-9c5c1c1387",
+                "term": "중앙은행 디지털화폐(CBDC)",
+                "score": 0.0,
+                "relation": "related_from:프로젝트 한강"
+              },
+              {
+                "page_id": "436-75fe3561b8",
+                "term": "예금토큰",
+                "score": 0.0,
+                "relation": "related_from:프로젝트 한강"
+              }
+            ],
+            "grade": {
+              "relevant": false,
+              "reason": "The provided text does not define or clarify the concept of 'reconciliation'. Instead, it discusses specific financial technologies and projects related to digital currencies and tokens. This information is not directly useful in classifying the general accounting process of reconciliation.",
+              "latency_s": 2.1804,
+              "prompt_tokens": 1093,
+              "completion_tokens": 58,
+              "error": null
+            }
+          },
+          {
+            "id": "v2-016",
+            "question": "Calculate realized PnL in KRW.",
+            "search_query": "실현 손익 KRW",
+            "pages": [
+              {
+                "page_id": "488-9e09aa04bc",
+                "term": "은행경영공시제도",
+                "score": 6.51754,
+                "relation": "bm25_seed"
+              }
+            ],
+            "grade": {
+              "relevant": false,
+              "reason": "The provided BOK glossary definition does not clarify how to calculate realized PnL in KRW. It is about bank disclosure regulations and does not provide any information related to profit and loss calculations.",
+              "latency_s": 2.0323,
+              "prompt_tokens": 316,
+              "completion_tokens": 51,
+              "error": null
+            }
+          },
+          {
+            "id": "financebench_id_01079",
+            "question": "What are major acquisitions that AMCOR has done in FY2023, FY2022 and FY2021?",
+            "search_query": "AMCOR 인수합병",
+            "pages": [
+              {
+                "page_id": "773-1b6c1c4a7b",
+                "term": "M&A",
+                "score": 6.328877,
+                "relation": "bm25_seed"
+              }
+            ],
+            "grade": {
+              "relevant": false,
+              "reason": "The provided glossary explains general concepts of mergers and acquisitions (M&A), but does not provide specific information about AMCOR's major acquisitions in fiscal years 2023, 2022, and 2021.",
+              "latency_s": 2.367,
+              "prompt_tokens": 391,
+              "completion_tokens": 64,
+              "error": null
+            }
+          },
+          {
+            "id": "financebench_id_00521",
+            "question": "What are major acquisitions that Ulta Beauty has done in FY2023 and FY2022?",
+            "search_query": "울타 뷰티 인수합병 2023년도 2022년도",
+            "pages": [
+              {
+                "page_id": "773-1b6c1c4a7b",
+                "term": "M&A",
+                "score": 6.328877,
+                "relation": "bm25_seed"
+              }
+            ],
+            "grade": {
+              "relevant": false,
+              "reason": "The provided BOK glossary definition explains general concepts of mergers and acquisitions (M&A), but it does not provide specific information about major acquisitions made by Ulta Beauty in fiscal years 2023 and 2022. The definition is too broad and does not clarify any specific accounting treatment, formula, or concept related to Ulta Beauty's acquisitions.",
+              "latency_s": 3.3195,
+              "prompt_tokens": 386,
+              "completion_tokens": 89,
+              "error": null
+            }
+          },
+          {
+            "id": "financebench_id_00206",
+            "question": "Are JPM's gross margins historically consistent (not fluctuating more than roughly 2% each year)? If gross margins are not a relevant metric for a company like this, then please state that and explain why.",
+            "search_query": "JP모건 총마진",
+            "pages": [
+              {
+                "page_id": "030-fdc8e8befa",
+                "term": "경제 서프라이즈 지수",
+                "score": 5.880821,
+                "relation": "bm25_seed"
+              }
+            ],
+            "grade": {
+              "relevant": false,
+              "reason": "The provided BOK glossary definition describes the Economic Surprise Index and its usage in financial markets, which is unrelated to the question about JPM's gross margins consistency.",
+              "latency_s": 1.7022,
+              "prompt_tokens": 454,
+              "completion_tokens": 44,
+              "error": null
+            }
+          },
+          {
+            "id": "financebench_id_08286",
+            "question": "By drawing conclusions from the information stated only in the income statement, what is Amazon's FY2019 net income attributable to shareholders (in USD millions)?",
+            "search_query": "아마존 2019년도 당기순이익",
+            "pages": [
+              {
+                "page_id": "583-78ddd466be",
+                "term": "주당순이익(EPS)",
+                "score": 8.603891,
+                "relation": "bm25_seed"
+              }
+            ],
+            "grade": {
+              "relevant": false,
+              "reason": "The provided glossary explains EPS (Earnings Per Share), which is not directly related to calculating Amazon's FY2019 net income attributable to shareholders.",
+              "latency_s": 1.6175,
+              "prompt_tokens": 499,
+              "completion_tokens": 43,
+              "error": null
+            }
+          },
+          {
+            "id": "financebench_id_01491",
+            "question": "What is the amount of the cash proceeds that JnJ realised from the separation of Kenvue (formerly Consumer Health business segment), as of August 30, 2023?",
+            "search_query": "Johnson & Johnson Kenvue 분할 현금 수익",
+            "pages": [
+              {
+                "page_id": "609-def99fe3bd",
+                "term": "지로(GIRO)",
+                "score": 6.402747,
+                "relation": "bm25_seed"
+              },
+              {
+                "page_id": "511-60f91644e9",
+                "term": "입금이체",
+                "score": 0.0,
+                "relation": "related_from:지로(GIRO)"
+              },
+              {
+                "page_id": "647-41b4694cd7",
+                "term": "출금이체",
+                "score": 0.0,
+                "relation": "related_from:지로(GIRO)"
+              }
+            ],
+            "grade": {
+              "relevant": false,
+              "reason": "The provided text describes various banking and financial transaction methods such as GIRO, credit transfer, and debit transfer. It does not provide any information related to Johnson & Johnson's (JnJ) cash proceeds from the separation of Kenvue.",
+              "latency_s": 2.2343,
+              "prompt_tokens": 852,
+              "completion_tokens": 60,
+              "error": null
+            }
+          }
+        ],
+        "pages": []
+      }
+    },
+    {
+      "directory": "benchmarks/quantization/results/20260825_awq_hybrid_wiki_paired/wiki_run3",
+      "metrics": {
+        "Internal Quality": 0.88,
+        "Critical Failures": 1.0,
+        "Request Errors": 0.0,
+        "FinQA": 0.7,
+        "TAT-QA": 0.9333,
+        "FinanceBench diagnostic": 0.5442,
+        "Auto Mean": 0.7992,
+        "Financial Arithmetic": 0.8,
+        "Risk Reasoning": 1.0,
+        "Portfolio / Trading": 0.8333333333333334,
+        "Accounting": 1.0,
+        "Quant": 1.0,
+        "Evidence": 1.0,
+        "Structured Output": 0.4,
+        "Uncertainty / Fail-Closed": 1.0
+      },
+      "retrieval": {
+        "eligible_cases": 17,
+        "wiki_hits": 0,
+        "hit_rate": 0.0,
+        "candidate_hits": 7,
+        "candidate_hit_rate": 0.4117647058823529,
+        "exact_term_hits": 0,
+        "related_traversal_hits": 0,
+        "candidate_related_traversal_hits": 2,
+        "avg_context_chars": 0.0,
+        "avg_retrieval_latency_ms": 0.3473823529411765,
+        "avg_planner_latency_s": 0.8043529411764706,
+        "avg_grade_latency_s_per_candidate": 2.1593285714285715,
+        "avg_total_retrieval_overhead_s_per_eligible_case": 1.6938356176470588,
+        "candidate_pages": [
+          {
+            "id": "v2-015",
+            "question": "Classify reconciliation.",
+            "search_query": "정산",
+            "pages": [
+              {
+                "page_id": "702-efc7b0fa26",
+                "term": "프로젝트 한강",
+                "score": 4.411665,
+                "relation": "bm25_seed"
+              },
+              {
+                "page_id": "593-9c5c1c1387",
+                "term": "중앙은행 디지털화폐(CBDC)",
+                "score": 0.0,
+                "relation": "related_from:프로젝트 한강"
+              },
+              {
+                "page_id": "436-75fe3561b8",
+                "term": "예금토큰",
+                "score": 0.0,
+                "relation": "related_from:프로젝트 한강"
+              }
+            ],
+            "grade": {
+              "relevant": false,
+              "reason": "The provided text does not define or clarify the concept of 'reconciliation'. Instead, it discusses specific financial technologies and projects related to digital currencies and tokens. This information is not directly useful in classifying the general accounting process of reconciliation.",
+              "latency_s": 2.1636,
+              "prompt_tokens": 1093,
+              "completion_tokens": 58,
+              "error": null
+            }
+          },
+          {
+            "id": "v2-016",
+            "question": "Calculate realized PnL in KRW.",
+            "search_query": "실현 손익 KRW",
+            "pages": [
+              {
+                "page_id": "488-9e09aa04bc",
+                "term": "은행경영공시제도",
+                "score": 6.51754,
+                "relation": "bm25_seed"
+              }
+            ],
+            "grade": {
+              "relevant": false,
+              "reason": "The provided BOK glossary definition does not clarify how to calculate realized PnL in KRW. It is about bank disclosure regulations and does not provide any information related to profit and loss calculations.",
+              "latency_s": 1.8851,
+              "prompt_tokens": 316,
+              "completion_tokens": 51,
+              "error": null
+            }
+          },
+          {
+            "id": "financebench_id_01079",
+            "question": "What are major acquisitions that AMCOR has done in FY2023, FY2022 and FY2021?",
+            "search_query": "AMCOR 인수합병",
+            "pages": [
+              {
+                "page_id": "773-1b6c1c4a7b",
+                "term": "M&A",
+                "score": 6.328877,
+                "relation": "bm25_seed"
+              }
+            ],
+            "grade": {
+              "relevant": false,
+              "reason": "The provided glossary explains general concepts of mergers and acquisitions (M&A), but does not provide specific information about AMCOR's major acquisitions in fiscal years 2023, 2022, and 2021.",
+              "latency_s": 2.3554,
+              "prompt_tokens": 391,
+              "completion_tokens": 64,
+              "error": null
+            }
+          },
+          {
+            "id": "financebench_id_00521",
+            "question": "What are major acquisitions that Ulta Beauty has done in FY2023 and FY2022?",
+            "search_query": "울타 뷰티 인수합병 2023년도 2022년도",
+            "pages": [
+              {
+                "page_id": "773-1b6c1c4a7b",
+                "term": "M&A",
+                "score": 6.328877,
+                "relation": "bm25_seed"
+              }
+            ],
+            "grade": {
+              "relevant": false,
+              "reason": "The provided BOK glossary definition explains general concepts of mergers and acquisitions (M&A), but it does not provide specific information about major acquisitions made by Ulta Beauty in fiscal years 2023 and 2022. The definition is too broad and does not clarify any specific accounting treatment, formula, or concept related to Ulta Beauty's acquisitions.",
+              "latency_s": 3.2573,
+              "prompt_tokens": 386,
+              "completion_tokens": 89,
+              "error": null
+            }
+          },
+          {
+            "id": "financebench_id_00206",
+            "question": "Are JPM's gross margins historically consistent (not fluctuating more than roughly 2% each year)? If gross margins are not a relevant metric for a company like this, then please state that and explain why.",
+            "search_query": "JP모건 총마진",
+            "pages": [
+              {
+                "page_id": "030-fdc8e8befa",
+                "term": "경제 서프라이즈 지수",
+                "score": 5.880821,
+                "relation": "bm25_seed"
+              }
+            ],
+            "grade": {
+              "relevant": false,
+              "reason": "The provided BOK glossary definition describes the Economic Surprise Index and its usage in financial markets, which is unrelated to the question about JPM's gross margins consistency.",
+              "latency_s": 1.6286,
+              "prompt_tokens": 454,
+              "completion_tokens": 44,
+              "error": null
+            }
+          },
+          {
+            "id": "financebench_id_08286",
+            "question": "By drawing conclusions from the information stated only in the income statement, what is Amazon's FY2019 net income attributable to shareholders (in USD millions)?",
+            "search_query": "아마존 2019년도 당기순이익",
+            "pages": [
+              {
+                "page_id": "583-78ddd466be",
+                "term": "주당순이익(EPS)",
+                "score": 8.603891,
+                "relation": "bm25_seed"
+              }
+            ],
+            "grade": {
+              "relevant": false,
+              "reason": "The provided glossary explains EPS (Earnings Per Share), which is not directly related to calculating Amazon's FY2019 net income attributable to shareholders.",
+              "latency_s": 1.6024,
+              "prompt_tokens": 499,
+              "completion_tokens": 43,
+              "error": null
+            }
+          },
+          {
+            "id": "financebench_id_01491",
+            "question": "What is the amount of the cash proceeds that JnJ realised from the separation of Kenvue (formerly Consumer Health business segment), as of August 30, 2023?",
+            "search_query": "Johnson & Johnson Kenvue 분할 현금 수익",
+            "pages": [
+              {
+                "page_id": "609-def99fe3bd",
+                "term": "지로(GIRO)",
+                "score": 6.402747,
+                "relation": "bm25_seed"
+              },
+              {
+                "page_id": "511-60f91644e9",
+                "term": "입금이체",
+                "score": 0.0,
+                "relation": "related_from:지로(GIRO)"
+              },
+              {
+                "page_id": "647-41b4694cd7",
+                "term": "출금이체",
+                "score": 0.0,
+                "relation": "related_from:지로(GIRO)"
+              }
+            ],
+            "grade": {
+              "relevant": false,
+              "reason": "The provided text describes various banking and financial transaction methods such as GIRO, credit transfer, and debit transfer. It does not provide any information related to Johnson & Johnson's (JnJ) cash proceeds from the separation of Kenvue.",
+              "latency_s": 2.2229,
+              "prompt_tokens": 852,
+              "completion_tokens": 60,
+              "error": null
+            }
+          }
+        ],
+        "pages": []
+      }
+    }
+  ],
+  "baseline_mean": {
+    "Internal Quality": 0.88,
+    "Critical Failures": 1.0,
+    "Request Errors": 0.0,
+    "FinQA": 0.7,
+    "TAT-QA": 0.9333,
+    "FinanceBench diagnostic": 0.544,
+    "Auto Mean": 0.7992,
+    "Financial Arithmetic": 0.8333333333333334,
+    "Risk Reasoning": 1.0,
+    "Portfolio / Trading": 0.7777777777777778,
+    "Accounting": 1.0,
+    "Quant": 1.0,
+    "Evidence": 1.0,
+    "Structured Output": 0.4,
+    "Uncertainty / Fail-Closed": 1.0
+  },
+  "wiki_mean": {
+    "Internal Quality": 0.88,
+    "Critical Failures": 1.0,
+    "Request Errors": 0.0,
+    "FinQA": 0.7,
+    "TAT-QA": 0.9333,
+    "FinanceBench diagnostic": 0.5442,
+    "Auto Mean": 0.7992,
+    "Financial Arithmetic": 0.8,
+    "Risk Reasoning": 1.0,
+    "Portfolio / Trading": 0.8333333333333334,
+    "Accounting": 1.0,
+    "Quant": 1.0,
+    "Evidence": 1.0,
+    "Structured Output": 0.4,
+    "Uncertainty / Fail-Closed": 1.0
+  },
+  "delta": {
+    "Internal Quality": 0.0,
+    "Critical Failures": 0.0,
+    "Request Errors": 0.0,
+    "FinQA": 0.0,
+    "TAT-QA": 0.0,
+    "FinanceBench diagnostic": 0.00019999999999997797,
+    "Auto Mean": 0.0,
+    "Financial Arithmetic": -0.033333333333333326,
+    "Risk Reasoning": 0.0,
+    "Portfolio / Trading": 0.05555555555555558,
+    "Accounting": 0.0,
+    "Quant": 0.0,
+    "Evidence": 0.0,
+    "Structured Output": 0.0,
+    "Uncertainty / Fail-Closed": 0.0
+  },
+  "early_stop_after_two": false,
+  "all_higher_is_better_metrics_lower": false,
+  "early_stop_rule": "after two paired runs, stop only if every higher-is-better quality metric is below baseline",
+  "retrieval_mean": {
+    "eligible_cases": 17,
+    "candidate_hits": 7,
+    "candidate_hit_rate": 0.4117647058823529,
+    "wiki_hits": 0,
+    "hit_rate": 0.0,
+    "exact_term_hits": 0,
+    "related_traversal_hits": 0,
+    "avg_context_chars": 0.0,
+    "candidate_related_traversal_hits": 2,
+    "avg_retrieval_latency_ms": 0.3564294117647059,
+    "avg_planner_latency_s": 0.8346549019607843,
+    "avg_grade_latency_s_per_candidate": 2.258766666666667,
+    "avg_total_retrieval_overhead_s_per_eligible_case": 1.765091723529412
+  }
+}

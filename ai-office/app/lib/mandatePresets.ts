@@ -4,18 +4,9 @@
  * 근거: docs/01-product/USER_INPUT_SPEC.md 3(계층 2 - 프리셋 자동 채움)
  *       docs/02-engineering/USER_INPUT_API_SPEC.md 2.2(온보딩 제출)
  *
- * ## 왜 프론트엔드 상수인가
- *
- * USER_INPUT_SPEC 3.3의 결정(**H**)이다 — 서버가 관리하는 상수가 아니고, 버전 관리
- * 대상도 아니다. 화면이 값을 채워 서버로 보내고, 서버는 여전히 완전한
- * `MandatePolicy`를 받아 `policy.py`로 전 필드를 검증한다.
- * **은닉은 화면의 표현일 뿐 전송 생략이 아니다** — 사용자에게 안 보여줘도 값은 보낸다.
- *
- * ## ⚠️ 이 수치는 잠정값이다 (PROVISIONAL)
- *
- * USER_INPUT_SPEC 3.2와 8절 미확정 1번: **프리셋 9칸 수치는 동규님(리스크) 확정
- * 사항**이며 이 파일이 정하지 않는다. 아래 값은 화면·API 배선을 먼저 검증하기 위한
- * 자리표시자이고, 리스크 관점 적정성 검토를 받지 않았다.
+ * Risk API의 버전 프리셋이 정본이다. 이 파일의 숫자는 Risk API가
+ * 일시적으로 불가용한 경우에만 쓰는 동일 버전 fail-safe 복사본이며,
+ * `installAuthoritativePresets()`가 3×3 ACTIVE 행렬을 설치하면 즉시 대체된다.
  *
  * 잠정값을 어떻게 골랐나: 위험 판단을 새로 만들지 않고, 스펙에 **이미 있는 유일한
  * 규칙**에서만 끌어냈다 — `effective_risk_score = min(mindset, experience)`
@@ -40,6 +31,13 @@ export interface MandatePreset {
   max_gross_exposure: string;
   /** 동시 보유 종목 수 상한. */
   max_concurrent_positions: number;
+  /** Risk-owned daily loss fraction. */
+  max_daily_loss_pct?: string;
+  /** Risk-owned portfolio drawdown fraction. */
+  max_drawdown_pct?: string;
+  /** Per-trade position loss-budget range. */
+  trade_risk_budget_min_pct?: string;
+  trade_risk_budget_max_pct?: string;
 }
 
 /** `suitability.py` `_MINDSET_SCORE`와 같은 순서. 표를 복제하지 않도록 점수만 맞춘다. */
@@ -74,26 +72,67 @@ const PROVISIONAL_BY_RISK_SCORE: Record<1 | 2 | 3, MandatePreset> = {
     // "레버리지 없음" 기본값은 1.00(원금만큼만 투자)이 의미상으로도 더 맞다.
     max_gross_exposure: "1.00",
     max_concurrent_positions: 5,
+    max_daily_loss_pct: "0.02",
+    max_drawdown_pct: "0.15",
+    trade_risk_budget_min_pct: "0.0025",
+    trade_risk_budget_max_pct: "0.0050",
   },
   // MEDIUM
   2: {
     max_instrument_weight: "0.15",
     max_sector_weight: "0.35",
-    max_gross_exposure: "1.00",
+    max_gross_exposure: "1.50",
     max_concurrent_positions: 8,
+    max_daily_loss_pct: "0.03",
+    max_drawdown_pct: "0.20",
+    trade_risk_budget_min_pct: "0.0050",
+    trade_risk_budget_max_pct: "0.0100",
   },
   // HIGH — gross가 1.0을 넘는 유일한 등급
   3: {
     max_instrument_weight: "0.25",
     max_sector_weight: "0.50",
-    max_gross_exposure: "1.20",
+    max_gross_exposure: "2.50",
     max_concurrent_positions: 12,
+    max_daily_loss_pct: "0.05",
+    max_drawdown_pct: "0.35",
+    trade_risk_budget_min_pct: "0.0100",
+    trade_risk_budget_max_pct: "0.0200",
   },
 };
 
+let authoritativePresets: Map<string, MandatePreset> | null = null;
+let authoritativePresetVersion = "risk-mandate-presets.2026-08-25.v1";
+
+export interface RiskPresetApiResponse {
+  schema_version: "risk.mandate-presets.v1";
+  preset_version: string;
+  status: "ACTIVE";
+  presets: Array<MandatePreset & { mindset: Mindset; experience: Experience }>;
+}
+
+/** Install only a complete 3x3 ACTIVE matrix returned by the Risk API. */
+export function installAuthoritativePresets(response: RiskPresetApiResponse): void {
+  if (response.status !== "ACTIVE" || response.presets.length !== 9) {
+    throw new Error("Risk preset response must contain one ACTIVE 3x3 matrix");
+  }
+  const matrix = new Map<string, MandatePreset>();
+  for (const row of response.presets) {
+    matrix.set(`${row.experience}:${row.mindset}`, { ...row });
+  }
+  if (matrix.size !== 9) throw new Error("Risk preset response contains duplicate cells");
+  authoritativePresets = matrix;
+  authoritativePresetVersion = response.preset_version;
+}
+
 /** 이 파일의 수치가 확정 전임을 화면이 표시할 수 있게 노출한다. */
-export const PRESETS_ARE_PROVISIONAL = true;
-export const PRESETS_PENDING_OWNER = "동규 (리스크) — USER_INPUT_SPEC.md 8절 미확정 1번";
+export const PRESETS_ARE_PROVISIONAL = false;
+export const PRESETS_PENDING_OWNER = "Risk API — risk-mandate-presets.2026-08-25.v1";
+
+/** Version bound to the values currently displayed by the UI. */
+export function activePresetVersion(): string {
+  return authoritativePresetVersion.replace(/^Risk API — /, "");
+}
 
 /**
  * USER_INPUT_SPEC 3.4 — 사용자에게 묻지도, 프리셋으로 다루지도 않는 고정값.
@@ -110,6 +149,8 @@ export const FIXED_POLICY_VALUES = {
 
 /** 성향·경험 조합의 프리셋. */
 export function presetFor(mindset: Mindset, experience: Experience): MandatePreset {
+  const authoritative = authoritativePresets?.get(`${experience}:${mindset}`);
+  if (authoritative) return { ...authoritative };
   const score = Math.min(
     MINDSET_SCORE[mindset],
     EXPERIENCE_SCORE[experience],
@@ -172,7 +213,18 @@ const SLIDER_DEFAULTS_BY_RISK_SCORE: Record<1 | 2 | 3, SliderDefaults> = {
 
 export function sliderDefaultsFor(mindset: Mindset, experience: Experience): SliderDefaults {
   const score = provisionalRiskScore(mindset, experience);
-  return { ...SLIDER_DEFAULTS_BY_RISK_SCORE[score] };
+  const fallback = SLIDER_DEFAULTS_BY_RISK_SCORE[score];
+  const preset = presetFor(mindset, experience);
+  return {
+    maxSingleWeightPct: Number(preset.max_instrument_weight) * 100,
+    grossExposurePct: Number(preset.max_gross_exposure) * 100,
+    maxDrawdownPct: preset.max_drawdown_pct
+      ? Number(preset.max_drawdown_pct) * 100
+      : fallback.maxDrawdownPct,
+    maxDailyLossPct: preset.max_daily_loss_pct
+      ? Number(preset.max_daily_loss_pct) * 100
+      : fallback.maxDailyLossPct,
+  };
 }
 
 export interface PolicyConstraintViolation {

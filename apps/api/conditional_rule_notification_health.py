@@ -17,11 +17,7 @@ from psycopg2 import sql
 
 def main() -> int:
     dsn = str(os.getenv("CONDITIONAL_RULE_DATABASE_URL") or "").strip()
-    redis_url = str(
-        os.getenv("CONDITIONAL_RULE_EVENT_REDIS_URL")
-        or os.getenv("REDIS_URL")
-        or ""
-    ).strip()
+    redis_url = str(os.getenv("REDIS_URL") or "").strip()
     role = str(
         os.getenv("CONDITIONAL_RULE_WORKER_DATABASE_ROLE")
         or "svc_conditional_rule_worker"

@@ -985,6 +985,7 @@ def load_workflow(
     max_workers: int | None = None,
     include_archived: bool | None = None,
     listed_rows: Sequence[Mapping[str, Any]] | None = None,
+    known_root: bool = False,
 ) -> Workflow:
     """Root를 찾고 그 아래 그래프 전체를 폭 우선으로 읽는다.
 
@@ -994,7 +995,11 @@ def load_workflow(
     동시 프로세스 수를 스스로 제한한다.
     """
 
-    root_id = resolve_root_id(task_id, fetch=fetch)
+    # `list_ceo_roots` already proved that these IDs are CEO roots. Avoid the
+    # extra `show` used by root discovery on the bounded task-list endpoint;
+    # callers that receive an arbitrary task ID keep the original resolution
+    # path by leaving this false.
+    root_id = task_id if known_root else resolve_root_id(task_id, fetch=fetch)
     root_payload = fetch(root_id)
     payloads: dict[str, dict[str, Any]] = {root_id: root_payload}
     # Active reconstruction must not pay for the historical board. An
@@ -1054,8 +1059,12 @@ def load_workflow(
 
 
 def list_ceo_roots(
-    *, limit: int, include_archived: bool = False, owner_id: str | None = None
-) -> list[dict[str, Any]]:
+    *,
+    limit: int,
+    include_archived: bool = False,
+    owner_id: str | None = None,
+    with_board_rows: bool = False,
+) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """사용자가 만든 CEO Root만 최신순으로. Supervisor 제어 Task는 뺀다.
 
     `owner_id`가 주어지면 `requested_by=` 줄이 그 값과 일치하는 Root만 남긴다
@@ -1064,7 +1073,20 @@ def list_ceo_roots(
     보고 어떤 `owner_id` 필터에도 포함하지 않는다.
     """
 
-    rows = list_tasks(assignee=CEO_PROFILE, include_archived=include_archived)
+    if with_board_rows:
+        # A full board snapshot is needed only by the rare legacy fallback in
+        # the task-list route. Reuse that one list call for root discovery too
+        # instead of issuing both an assignee-filtered and an unfiltered CLI
+        # command.
+        board_rows = list_tasks(include_archived=include_archived)
+        rows = [
+            row
+            for row in board_rows
+            if str(row.get("assignee") or "").strip() == CEO_PROFILE
+        ]
+    else:
+        board_rows = None
+        rows = list_tasks(assignee=CEO_PROFILE, include_archived=include_archived)
     roots: list[dict[str, Any]] = []
     for row in rows:
         body = _text(row.get("body"))
@@ -1075,6 +1097,14 @@ def list_ceo_roots(
         roots.append(row)
         if len(roots) >= limit:
             break
+    if with_board_rows:
+        # `load_workflow` needs the complete board snapshot to find legacy
+        # marker-only descendants. Supplying one snapshot to the list route
+        # prevents every root reconstruction from spawning another `kanban
+        # list` subprocess. The public/default return value remains the root
+        # list for existing callers.
+        assert board_rows is not None
+        return roots, board_rows
     return roots
 
 

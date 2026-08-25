@@ -106,6 +106,8 @@ COPY tests/e2e                          ./tests/e2e
 # 복사하면 패키지는 생기는데 이 파일들이 없어 임포트가 죽는다.
 COPY departments/employee_worker_runtime.py ./departments/employee_worker_runtime.py
 COPY departments/worker_model_gateway.py    ./departments/worker_model_gateway.py
+COPY departments/qwen_hybrid_runtime.py     ./departments/qwen_hybrid_runtime.py
+COPY benchmarks/quantization/knowledge/bok800_2026/glossary_rag_v1.json ./benchmarks/quantization/knowledge/bok800_2026/glossary_rag_v1.json
 COPY departments/notion_markdown.py         ./departments/notion_markdown.py
 COPY departments/risk_qa_worker_profiles.py ./departments/risk_qa_worker_profiles.py
 

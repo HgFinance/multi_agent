@@ -1,0 +1,23 @@
+{
+  "schema_version": "hgfinance.project-skill-provenance.v1",
+  "classification": "project-owned",
+  "slug": "mandate-dynamic-risk-controls",
+  "version": "1.0.0",
+  "owner_profile": "risk-management",
+  "authoring_department": "03-risk",
+  "source_request": "user-authorized-risk-department-upgrade-2026-08-25",
+  "generation_model": "not-applicable-project-owned",
+  "parent_version": null,
+  "created_at": "2026-08-25T00:00:00Z",
+  "content_hash": "05358851095a6e673c618270a285a6050134fd08c165942daf65d92600a888d9",
+  "validation": {
+    "skill_creator_quick_validate": "PENDING",
+    "planner_regression_tests": "PENDING",
+    "qa_verdict": "NOT_RUN"
+  },
+  "activation": {
+    "status": "project-owned",
+    "runtime_binding": "departments/03-risk/position_risk_planner.py",
+    "automatic_order_authority": false
+  }
+}

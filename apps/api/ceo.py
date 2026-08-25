@@ -282,15 +282,83 @@ _PROFILE_ALIASES = {
 }
 
 
-def _load(task_id: str, *, max_workers: int | None = None) -> Workflow:
+def _load(
+    task_id: str,
+    *,
+    max_workers: int | None = None,
+    listed_rows: Sequence[Mapping[str, object]] | None = None,
+    known_root: bool = False,
+) -> Workflow:
     """Load a root workflow and translate CLI failures to HTTP errors."""
 
     try:
-        return load_workflow(task_id, max_workers=max_workers)
+        return load_workflow(
+            task_id,
+            max_workers=max_workers,
+            listed_rows=listed_rows,
+            known_root=known_root,
+        )
     except KanbanTaskNotFound as exc:
         raise HTTPException(status_code=404, detail=f"Task를 찾을 수 없습니다: {task_id}") from exc
     except KanbanUnavailable as exc:
         raise HTTPException(status_code=503, detail=f"Hermes Kanban을 읽지 못했습니다: {exc}") from exc
+
+
+_TASK_LIST_STATUS = {
+    "done": "completed",
+    "completed": "completed",
+    "archived": "archived",
+    "blocked": "blocked",
+    "failed": "failed",
+    "error": "failed",
+    "running": "running",
+    "claimed": "running",
+    "processing": "running",
+    "review": "running",
+    "ready": "queued",
+    "queued": "queued",
+    "todo": "queued",
+    "triage": "queued",
+}
+
+
+def _task_list_item_from_row(row: Mapping[str, object]) -> TaskListItem | None:
+    """Build the bounded history projection without hydrating a full graph.
+
+    The detail/graph endpoints remain authoritative for descendant progress. A
+    list page only needs the root's durable status, query, owner, and declared
+    planner selection. Hydrating every root with repeated Hermes ``show``
+    subprocesses made a large history page time out before it could render.
+    Rows without a durable status (legacy/unit fixtures) deliberately fall
+    back to the full workflow loader below.
+    """
+
+    task_id = str(row.get("id") or row.get("task_id") or "").strip()
+    body = str(row.get("body") or "")
+    status = _TASK_LIST_STATUS.get(str(row.get("status") or "").casefold().strip())
+    if not task_id or not status:
+        return None
+    raw_selected = selected_primary_profiles_from_task(row)
+    selected, _planner_qa_requested = split_planner_selection(raw_selected)
+    created_at = row.get("created_at")
+    created_iso: str | None = None
+    if isinstance(created_at, (int, float)) and not isinstance(created_at, bool):
+        try:
+            created_iso = datetime.fromtimestamp(
+                float(created_at), tz=timezone.utc
+            ).isoformat().replace("+00:00", "Z")
+        except (OverflowError, OSError, ValueError):
+            created_iso = None
+    elif isinstance(created_at, str) and created_at.strip():
+        created_iso = created_at.strip()
+    return TaskListItem(
+        task_id=task_id,
+        query=extract_user_query(body),
+        status=status,
+        created_at=created_iso,
+        selected_departments=list(selected),
+        owner_id=requested_by_from_body(body),
+    )
 
 
 def _require_ceo_task_owner(body: str, authenticated_owner_id: str | None) -> None:
@@ -1422,10 +1490,12 @@ def _route_user_paper_order(
             langsmith_trace_context=langsmith_trace_context,
         ),
         idempotency_key=req.request_id,
-        # A running scope container cannot be claimed by the CEO dispatcher,
-        # and Hermes supports completing it without a worker run. Trading
-        # remains blocked until every SQL/Kanban binding is durable.
-        initial_status="running",
+        # Hermes' ``--initial-status running`` is a historical CLI spelling
+        # that creates a *ready* card.  A dispatcher can therefore claim it
+        # before this function finishes the SQL/Kanban bindings.  The root is
+        # only an immutable scope container, so park it blocked and complete
+        # it in place after the bindings are durable.
+        initial_status="blocked",
     )
     if not root or not root.get("task_id"):
         _mark_paper_order_failed(
@@ -1503,10 +1573,11 @@ def _route_user_paper_order(
         idempotency_key=primary_idempotency_key(
             root_task_id, "trading-department"
         ),
-        # A deterministic candidate is executed synchronously by this trusted
-        # BFF and must never be claimed by Hermes. Ambiguous language retains
-        # the durable blocked-then-release interpreter workflow.
-        initial_status="running" if deterministic_candidate is not None else "blocked",
+        # Keep every primary blocked while its authority binding is assembled.
+        # The asynchronous interpreter is explicitly released below. A future
+        # synchronous deterministic lane must also execute from this parked
+        # state rather than racing the dispatcher.
+        initial_status="blocked",
     )
     if not trading or not trading.get("task_id"):
         _mark_paper_order_failed(
@@ -1531,8 +1602,7 @@ def _route_user_paper_order(
             status_code=status, detail="paper_order_workflow_unavailable"
         ) from exc
 
-    # The root was created running (and therefore unclaimable) while the
-    # Trading card was created blocked. The root is only an immutable
+    # Both cards were created blocked. The root is only an immutable
     # authority/scope container in this lane, so complete it in place instead
     # of releasing it to a CEO worker.
     # Releasing both cards allowed the CEO worker to block the root while the
@@ -2067,11 +2137,21 @@ def ceo_task_list(
     # value remains only for explicit identity-free local/test fixtures.
     normalized_owner_id = authenticated_owner_id or normalized_owner_id
     try:
-        rows = list_ceo_roots(
-            limit=limit, include_archived=include_archived, owner_id=normalized_owner_id
+        listing = list_ceo_roots(
+            limit=limit,
+            include_archived=include_archived,
+            owner_id=normalized_owner_id,
+            with_board_rows=True,
         )
     except KanbanUnavailable as exc:
         raise HTTPException(status_code=503, detail=f"Hermes Kanban을 읽지 못했습니다: {exc}") from exc
+    if isinstance(listing, tuple):
+        rows, board_rows = listing
+    else:
+        # Keep direct/unit-test fixtures and older integrations that patch or
+        # call the root-list function returning only roots compatible.
+        rows = listing
+        board_rows = rows
     identified = [
         (str(row.get("id") or row.get("task_id") or ""), str(row.get("body") or ""))
         for row in rows
@@ -2079,28 +2159,50 @@ def ceo_task_list(
     identified = [(task_id, body) for task_id, body in identified if task_id]
     if not identified:
         return TaskListResponse(items=[])
+
+    # Normal Hermes list rows already contain everything needed by the bounded
+    # history projection. Only legacy/minimal rows go through the expensive
+    # graph reader, which keeps `/ui/ceo/tasks?limit=100` usable while the
+    # detailed task/graph endpoints retain their full workflow semantics.
+    projected: dict[str, TaskListItem] = {}
+    fallback: list[tuple[str, str]] = []
+    row_by_id = {
+        str(row.get("id") or row.get("task_id") or ""): row for row in rows
+    }
+    for task_id, body in identified:
+        item = _task_list_item_from_row(row_by_id.get(task_id, {}))
+        if item is None:
+            fallback.append((task_id, body))
+        else:
+            projected[task_id] = item
+
+    if not fallback:
+        return TaskListResponse(
+            items=[projected[task_id] for task_id, _body in identified]
+        )
+
     with ThreadPoolExecutor(max_workers=_LIST_WORKERS) as pool:
         workflows = list(
             pool.map(
-                lambda item: _load(item[0], max_workers=_LIST_GRAPH_WORKERS),
-                identified,
+                lambda item: _load(
+                    item[0],
+                    max_workers=_LIST_GRAPH_WORKERS,
+                    listed_rows=board_rows,
+                    known_root=True,
+                ),
+                fallback,
             )
         )
-    return TaskListResponse(
-        items=[
-            TaskListItem(
-                task_id=workflow.root_task_id,
-                query=extract_user_query(body),
-                status=workflow.status,
-                created_at=workflow.root.created_at,
-                selected_departments=list(workflow.selected_departments),
-                owner_id=requested_by_from_body(body),
-            )
-            for (task_id, body), workflow in zip(
-                identified, workflows, strict=True
-            )
-        ]
-    )
+    for (task_id, body), workflow in zip(fallback, workflows, strict=True):
+        projected[task_id] = TaskListItem(
+            task_id=workflow.root_task_id,
+            query=extract_user_query(body),
+            status=workflow.status,
+            created_at=workflow.root.created_at,
+            selected_departments=list(workflow.selected_departments),
+            owner_id=requested_by_from_body(body),
+        )
+    return TaskListResponse(items=[projected[task_id] for task_id, _body in identified])
 
 
 @router.get("/kanban", operation_id="ceo_kanban_board", response_model=KanbanBoardResponse)

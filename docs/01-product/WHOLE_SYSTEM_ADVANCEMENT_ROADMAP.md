@@ -492,7 +492,7 @@ P1:
 P0:
 
 - Hermes Kanban Status Bridge와 `agent.status.v1`
-- Supabase 공식 Read Model, Auth와 RLS
+- Supabase 공식 Read Model과 RLS/DB 권한
 - `/ui/snapshot`, `/ws/operations`, Sequence Gap과 Snapshot Recovery
 - `DEMO/PAPER/LIVE`, 데이터 신선도와 Degraded Mode 표시
 - Case, Position, Risk, Order, Break, Finding과 Incident Workbench
@@ -591,7 +591,7 @@ valid_from/to  참조 데이터가 유효한 기간
 | 주 LLM | Amazon Bedrock Claude | 통합 환경의 Deep Reasoning과 Model Gateway |
 | 로컬 LLM | Ollama | 개발, Offline Eval, 저비용 분류와 장애 대체 |
 | Domain API | FastAPI, Pydantic v2 | 계약 검증과 본부별 API |
-| Transaction DB | Supabase PostgreSQL | 업무, 결정, 주문, 장부, 감사와 Auth/RLS |
+| Transaction DB | Supabase PostgreSQL | 업무, 결정, 주문, 장부, 감사와 RLS/DB 권한 |
 | Vector Search | pgvector | 초기 Hybrid RAG와 Evidence Retrieval |
 | Time Series | TimescaleDB | Tick, Quote, Bar와 Feature |
 | Hot State/Event | Redis, Redis Streams | Rolling State, Queue와 초기 Event Transport |

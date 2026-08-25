@@ -13,6 +13,7 @@ import {
   capitalUnitFor,
   digitsOf,
   loadInvestorProfile,
+  loadAuthoritativeRiskPresets,
   loadMandateForFund,
   mergeLocalDraft,
   nextStep,
@@ -307,6 +308,10 @@ function MandateConfigForm({ userId, fundId }: { userId: string; fundId: string 
     let cancelled = false;
     async function hydrate() {
       try {
+        // Risk owns the numeric preset matrix.  Do not present editable
+        // defaults until its versioned matrix has been installed locally.
+        await loadAuthoritativeRiskPresets();
+        if (cancelled) return;
         let next = DEFAULT_DRAFT;
         let hasStoredMandate = false;
 

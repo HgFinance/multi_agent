@@ -64,8 +64,8 @@ def _install_successful_route(
         index = create.call_count
         create(**kwargs)
         if index == 0:
-            events.append("create-root-running")
-            return {"task_id": "t_root1", "status": "running"}
+            events.append("create-root-blocked")
+            return {"task_id": "t_root1", "status": "blocked"}
         events.append("create-trading-blocked")
         return {"task_id": "t_trade1", "status": "blocked"}
 
@@ -113,7 +113,7 @@ def test_exact_sample_is_durably_bound_before_either_card_is_released(
     assert events == [
         "authorize",
         "admit",
-        "create-root-running",
+        "create-root-blocked",
         "comment-root-scope",
         "bind-root",
         "create-trading-blocked",
@@ -123,7 +123,7 @@ def test_exact_sample_is_durably_bound_before_either_card_is_released(
     ]
     assert create.call_count == 2
     root_call, trading_call = create.call_args_list
-    assert root_call.kwargs["initial_status"] == "running"
+    assert root_call.kwargs["initial_status"] == "blocked"
     assert trading_call.kwargs["initial_status"] == "blocked"
 
     root_body = root_call.kwargs["body"]
@@ -216,13 +216,13 @@ def test_unambiguous_production_order_uses_deterministic_fast_path(
 
     assert create.call_count == 2
     _, trading_call = create.call_args_list
-    assert trading_call.kwargs["initial_status"] == "running"
+    assert trading_call.kwargs["initial_status"] == "blocked"
     assert "user-paper-order-deterministic.v1" in trading_call.kwargs["body"]
     assert "mcp_tool=process_user_paper_order" not in trading_call.kwargs["body"]
     assert events == [
         "authorize",
         "admit",
-        "create-root-running",
+        "create-root-blocked",
         "comment-root-scope",
         "bind-root",
         "create-trading-blocked",
@@ -269,7 +269,7 @@ def test_safe_natural_order_variants_enter_the_bound_paper_lane(
 
     assert create.call_count == 2
     root_call, trading_call = create.call_args_list
-    assert root_call.kwargs["initial_status"] == "running"
+    assert root_call.kwargs["initial_status"] == "blocked"
     assert trading_call.kwargs["initial_status"] == "blocked"
     assert raw in root_call.kwargs["body"]
     assert raw in trading_call.kwargs["body"]
@@ -310,7 +310,7 @@ def test_conditional_command_uses_only_the_precreated_trading_primary(
     root_call, trading_call = create.call_args_list
     assert root_call.kwargs["assignee"] == "ceo-agent"
     assert trading_call.kwargs["assignee"] == "trading-department"
-    assert root_call.kwargs["initial_status"] == "running"
+    assert root_call.kwargs["initial_status"] == "blocked"
     assert trading_call.kwargs["initial_status"] == "blocked"
     trading_body = trading_call.kwargs["body"]
     assert "langsmith_trace_context=trace-conditional-root" in root_call.kwargs["body"]

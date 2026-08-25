@@ -238,7 +238,14 @@ class ConditionalRuleNotificationConsumer:
         tid = _task_id(task)
         if not tid or _comments_contain(task, marker):
             return
-        self.kanban_client.comment_task(tid, f"{marker}\n{text}")
+        comment_task = getattr(self.kanban_client, "comment_task", None)
+        if not callable(comment_task):
+            LOG.warning("kanban comment projection unavailable task=%s", tid)
+            return
+        try:
+            comment_task(tid, f"{marker}\n{text}")
+        except Exception:  # noqa: BLE001 - a projection must not replay Discord/order audit
+            LOG.warning("kanban comment projection failed task=%s", tid, exc_info=True)
 
     def handle_event(self, event: Mapping[str, Any]) -> bool:
         """Project one event. Return true only at the accounting terminal state."""
@@ -534,9 +541,7 @@ def build_runner(
     dsn = str(env.get("CONDITIONAL_RULE_DATABASE_URL") or "").strip()
     if not dsn:
         raise RuntimeError("CONDITIONAL_RULE_DATABASE_URL is required")
-    redis_url = str(
-        env.get("CONDITIONAL_RULE_EVENT_REDIS_URL") or env.get("REDIS_URL") or ""
-    ).strip()
+    redis_url = str(env.get("REDIS_URL") or "").strip()
     if not redis_url:
         raise RuntimeError("REDIS_URL is required")
     kanban = HermesKanbanClient(environment=env) if mode != "delivery" else None

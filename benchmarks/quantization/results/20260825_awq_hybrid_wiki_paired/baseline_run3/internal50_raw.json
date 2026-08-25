@@ -1,0 +1,3751 @@
+{
+  "benchmark": "HgFinance-Internal50-v2-EmployeeReasoning",
+  "dataset_sha256": "ad2bdaf5ea381c2fc151fce1f1859f7f925b86fd03b830319cd97af17709e978",
+  "model": "qwen2.5-14b-instruct-awq",
+  "base_model": "qwen2.5-14b-instruct-awq",
+  "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+  "ab_stage": "selective_unit_scale",
+  "pipeline_variant": "AWQ+HybridPipeline",
+  "policy": "selective_expr_ast_accounting_glossary_guided_json_envelope_awq_passthrough_no_fallback",
+  "results": [
+    {
+      "id": "v2-001",
+      "category": "financial_arithmetic",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "A company reports:\n- Revenue: KRW 2,500 million\n- Cost of goods sold: KRW 1,750 million\n\nGross margin (%) = (Revenue - COGS) / Revenue * 100.",
+      "question": "Calculate the gross margin percentage.",
+      "expected": 30.0,
+      "scoring_type": "numeric",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "rel_tol": 0.0001,
+      "abs_tol": 1e-06,
+      "prediction": "30",
+      "raw_prediction": "{\n  \"expression\": \"(2500000000 - 1750000000) / 2500000000 * 100\"\n  , \"answer_type\": \"percentage\"\n  , \"result_unit\": \"\"\n  , \"scale\": \"1\"\n  , \"formula_name\": \"gross_margin_percentage\"\n  , \"explanation\": \"The gross margin percentage is calculated as the difference between revenue and cost of goods sold divided by revenue, then multiplied by 100.\"\n}",
+      "draft_prediction": "{\n  \"expression\": \"(2500000000 - 1750000000) / 2500000000 * 100\"\n  , \"answer_type\": \"percentage\"\n  , \"result_unit\": \"\"\n  , \"scale\": \"1\"\n  , \"formula_name\": \"gross_margin_percentage\"\n  , \"explanation\": \"The gross margin percentage is calculated as the difference between revenue and cost of goods sold divided by revenue, then multiplied by 100.\"\n}",
+      "final_source": "guided_numeric_metadata_ast",
+      "expression": "(2500000000 - 1750000000) / 2500000000 * 100",
+      "calculator_value": 30.0,
+      "numeric_metadata": {
+        "expression": "(2500000000 - 1750000000) / 2500000000 * 100",
+        "answer_type": "percentage",
+        "result_unit": "",
+        "scale": "1",
+        "formula_name": "gross_margin_percentage",
+        "explanation": "The gross margin percentage is calculated as the difference between revenue and cost of goods sold divided by revenue, then multiplied by 100."
+      },
+      "attempts": [
+        {
+          "content": "{\n  \"expression\": \"(2500000000 - 1750000000) / 2500000000 * 100\"\n  , \"answer_type\": \"percentage\"\n  , \"result_unit\": \"\"\n  , \"scale\": \"1\"\n  , \"formula_name\": \"gross_margin_percentage\"\n  , \"explanation\": \"The gross margin percentage is calculated as the difference between revenue and cost of goods sold divided by revenue, then multiplied by 100.\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 5.1796,
+          "prompt_tokens": 227,
+          "completion_tokens": 122,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "route": "expr_ast",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "8c098c9dd19cb89a42e602b518af2a298e747916eb5aa15616bab60bfa61e928",
+      "latency_s": 5.1846
+    },
+    {
+      "id": "v2-002",
+      "category": "financial_arithmetic",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "An employee evaluates a completed stock trade:\n- Bought 80 shares at KRW 48,000\n- Sold 80 shares at KRW 51,500\n- Total buy + sell fees: KRW 12,000\n\nRealized PnL = sale proceeds - purchase cost - total fees.",
+      "question": "Calculate realized PnL in KRW.",
+      "expected": 268000,
+      "scoring_type": "numeric",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "rel_tol": 0.0001,
+      "abs_tol": 1e-06,
+      "prediction": "268000",
+      "raw_prediction": "{\n  \"expression\": \"(80*51500)-(80*48000)-12000\"\n  , \"answer_type\": \"currency\"\n  , \"result_unit\": \"KRW\"\n  , \"scale\": \"1\"\n  , \"formula_name\": \"realized_pnl\"\n  , \"explanation\": \"Realized PnL is calculated as the difference between the sale proceeds and the purchase cost minus the total fees.\"\n}",
+      "draft_prediction": "{\n  \"expression\": \"(80*51500)-(80*48000)-12000\"\n  , \"answer_type\": \"currency\"\n  , \"result_unit\": \"KRW\"\n  , \"scale\": \"1\"\n  , \"formula_name\": \"realized_pnl\"\n  , \"explanation\": \"Realized PnL is calculated as the difference between the sale proceeds and the purchase cost minus the total fees.\"\n}",
+      "final_source": "guided_numeric_metadata_ast",
+      "expression": "(80*51500)-(80*48000)-12000",
+      "calculator_value": 268000,
+      "numeric_metadata": {
+        "expression": "(80*51500)-(80*48000)-12000",
+        "answer_type": "currency",
+        "result_unit": "KRW",
+        "scale": "1",
+        "formula_name": "realized_pnl",
+        "explanation": "Realized PnL is calculated as the difference between the sale proceeds and the purchase cost minus the total fees."
+      },
+      "attempts": [
+        {
+          "content": "{\n  \"expression\": \"(80*51500)-(80*48000)-12000\"\n  , \"answer_type\": \"currency\"\n  , \"result_unit\": \"KRW\"\n  , \"scale\": \"1\"\n  , \"formula_name\": \"realized_pnl\"\n  , \"explanation\": \"Realized PnL is calculated as the difference between the sale proceeds and the purchase cost minus the total fees.\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 4.482,
+          "prompt_tokens": 252,
+          "completion_tokens": 104,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "route": "expr_ast",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "506b065f81c0ccd21c40825fb4e958436757dad5b856240f17dfcbc18504c36e",
+      "latency_s": 4.4824
+    },
+    {
+      "id": "v2-003",
+      "category": "financial_arithmetic",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Available cash before an order is KRW 100,000,000.\nThe employee buys:\n- 500 shares\n- KRW 70,000 per share\n- transaction fee KRW 105\n\nProjected cash = initial cash - purchase notional - fee.",
+      "question": "Calculate projected cash after settlement.",
+      "expected": 64999895,
+      "scoring_type": "numeric",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "rel_tol": 0.0001,
+      "abs_tol": 1e-06,
+      "prediction": "64999895",
+      "raw_prediction": "{\"expression\": \"100000000 - (500 * 70000) - 105\", \"answer_type\": \"currency\", \"result_unit\": \"KRW\", \"scale\": \"1\", \"formula_name\": \"projected_cash_after_settlement\", \"explanation\": \"Initial cash minus purchase notional minus fee\"}",
+      "draft_prediction": "{\"expression\": \"100000000 - (500 * 70000) - 105\", \"answer_type\": \"currency\", \"result_unit\": \"KRW\", \"scale\": \"1\", \"formula_name\": \"projected_cash_after_settlement\", \"explanation\": \"Initial cash minus purchase notional minus fee\"}",
+      "final_source": "guided_numeric_metadata_ast",
+      "expression": "100000000 - (500 * 70000) - 105",
+      "calculator_value": 64999895,
+      "numeric_metadata": {
+        "expression": "100000000 - (500 * 70000) - 105",
+        "answer_type": "currency",
+        "result_unit": "KRW",
+        "scale": "1",
+        "formula_name": "projected_cash_after_settlement",
+        "explanation": "Initial cash minus purchase notional minus fee"
+      },
+      "attempts": [
+        {
+          "content": "{\"expression\": \"100000000 - (500 * 70000) - 105\", \"answer_type\": \"currency\", \"result_unit\": \"KRW\", \"scale\": \"1\", \"formula_name\": \"projected_cash_after_settlement\", \"explanation\": \"Initial cash minus purchase notional minus fee\"}",
+          "finish_reason": "stop",
+          "latency_s": 3.5259,
+          "prompt_tokens": 242,
+          "completion_tokens": 83,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "route": "expr_ast",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "435748d20caaac9e217232866dc67b07e010791bdee754ab384d80e92e4ea7b0",
+      "latency_s": 3.5263
+    },
+    {
+      "id": "v2-004",
+      "category": "financial_arithmetic",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "A KRW 12,000,000 stock sale has:\n- commission: 0.015% of notional\n- transaction tax: 0.18% of notional\n\nTotal transaction cost is commission plus tax.",
+      "question": "Calculate the total transaction cost in KRW.",
+      "expected": 23400,
+      "scoring_type": "numeric",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "rel_tol": 0.0001,
+      "abs_tol": 1e-06,
+      "prediction": "23400",
+      "raw_prediction": "{\n  \"expression\": \"(12000000*0.015/100)+(12000000*0.18/100)\",\n  \"answer_type\": \"currency\",\n  \"result_unit\": \"KRW\"\n  , \"scale\": \"1\"\n  , \"formula_name\": \"total_transaction_cost\"\n  , \"explanation\": \"The total transaction cost is calculated as the sum of the commission and the transaction tax.\"\n}",
+      "draft_prediction": "{\n  \"expression\": \"(12000000*0.015/100)+(12000000*0.18/100)\",\n  \"answer_type\": \"currency\",\n  \"result_unit\": \"KRW\"\n  , \"scale\": \"1\"\n  , \"formula_name\": \"total_transaction_cost\"\n  , \"explanation\": \"The total transaction cost is calculated as the sum of the commission and the transaction tax.\"\n}",
+      "final_source": "guided_numeric_metadata_ast",
+      "expression": "(12000000*0.015/100)+(12000000*0.18/100)",
+      "calculator_value": 23400.0,
+      "numeric_metadata": {
+        "expression": "(12000000*0.015/100)+(12000000*0.18/100)",
+        "answer_type": "currency",
+        "result_unit": "KRW",
+        "scale": "1",
+        "formula_name": "total_transaction_cost",
+        "explanation": "The total transaction cost is calculated as the sum of the commission and the transaction tax."
+      },
+      "attempts": [
+        {
+          "content": "{\n  \"expression\": \"(12000000*0.015/100)+(12000000*0.18/100)\",\n  \"answer_type\": \"currency\",\n  \"result_unit\": \"KRW\"\n  , \"scale\": \"1\"\n  , \"formula_name\": \"total_transaction_cost\"\n  , \"explanation\": \"The total transaction cost is calculated as the sum of the commission and the transaction tax.\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 4.5664,
+          "prompt_tokens": 232,
+          "completion_tokens": 108,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "route": "expr_ast",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "45eae2b379180825e787da24bd795a930a2faf6dc2974ddfe5bf8867789b009a",
+      "latency_s": 4.5668
+    },
+    {
+      "id": "v2-005",
+      "category": "financial_arithmetic",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "A stock rises from KRW 83,000 to KRW 91,300.\n\nReturn (%) = (new - old) / old * 100.",
+      "question": "Calculate the percentage return.",
+      "expected": 10.0,
+      "scoring_type": "numeric",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "rel_tol": 0.0001,
+      "abs_tol": 1e-06,
+      "prediction": "10",
+      "raw_prediction": "{\n  \"expression\": \"(91300-83000)/83000*100\"\n  , \"answer_type\": \"percentage\"\n  , \"result_unit\": \"%\"\n  , \"scale\": \"1\"\n  , \"formula_name\": \"return\"\n  , \"explanation\": \"The percentage return is calculated as the difference between the new price and the old price divided by the old price, then multiplied by 100.\"\n}",
+      "draft_prediction": "{\n  \"expression\": \"(91300-83000)/83000*100\"\n  , \"answer_type\": \"percentage\"\n  , \"result_unit\": \"%\"\n  , \"scale\": \"1\"\n  , \"formula_name\": \"return\"\n  , \"explanation\": \"The percentage return is calculated as the difference between the new price and the old price divided by the old price, then multiplied by 100.\"\n}",
+      "final_source": "guided_numeric_metadata_ast",
+      "expression": "(91300-83000)/83000*100",
+      "calculator_value": 10.0,
+      "numeric_metadata": {
+        "expression": "(91300-83000)/83000*100",
+        "answer_type": "percentage",
+        "result_unit": "%",
+        "scale": "1",
+        "formula_name": "return",
+        "explanation": "The percentage return is calculated as the difference between the new price and the old price divided by the old price, then multiplied by 100."
+      },
+      "attempts": [
+        {
+          "content": "{\n  \"expression\": \"(91300-83000)/83000*100\"\n  , \"answer_type\": \"percentage\"\n  , \"result_unit\": \"%\"\n  , \"scale\": \"1\"\n  , \"formula_name\": \"return\"\n  , \"explanation\": \"The percentage return is calculated as the difference between the new price and the old price divided by the old price, then multiplied by 100.\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 4.4096,
+          "prompt_tokens": 214,
+          "completion_tokens": 104,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "route": "expr_ast",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "22199054ae7049e34b7a0ea4481e6c2596d06b397e9abbdf37f5510aa1b70f4f",
+      "latency_s": 4.4099
+    },
+    {
+      "id": "v2-006",
+      "category": "financial_arithmetic",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Net income is KRW 36 billion.\nWeighted average shares outstanding are 120 million.\n\nEPS = net income / shares outstanding.\nUse consistent KRW units.",
+      "question": "Calculate EPS in KRW per share.",
+      "expected": 300.0,
+      "scoring_type": "numeric",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "rel_tol": 0.0001,
+      "abs_tol": 1e-06,
+      "prediction": "30",
+      "raw_prediction": "{\n\"expression\": \"3600000000/120000000\",\n\"answer_type\": \"currency\",\n\"result_unit\": \"KRW\"\n    ,\n\"scale\": \"percent\",\n\"formula_name\": \"EPS\"\n    ,\n\"explanation\": \"EPS is calculated as net income divided by weighted average shares outstanding.\"\n}",
+      "draft_prediction": "{\n\"expression\": \"3600000000/120000000\",\n\"answer_type\": \"currency\",\n\"result_unit\": \"KRW\"\n    ,\n\"scale\": \"percent\",\n\"formula_name\": \"EPS\"\n    ,\n\"explanation\": \"EPS is calculated as net income divided by weighted average shares outstanding.\"\n}",
+      "final_source": "guided_numeric_metadata_ast",
+      "expression": "3600000000/120000000",
+      "calculator_value": 30.0,
+      "numeric_metadata": {
+        "expression": "3600000000/120000000",
+        "answer_type": "currency",
+        "result_unit": "KRW",
+        "scale": "percent",
+        "formula_name": "EPS",
+        "explanation": "EPS is calculated as net income divided by weighted average shares outstanding."
+      },
+      "attempts": [
+        {
+          "content": "{\n\"expression\": \"3600000000/120000000\",\n\"answer_type\": \"currency\",\n\"result_unit\": \"KRW\"\n    ,\n\"scale\": \"percent\",\n\"formula_name\": \"EPS\"\n    ,\n\"explanation\": \"EPS is calculated as net income divided by weighted average shares outstanding.\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 3.4853,
+          "prompt_tokens": 213,
+          "completion_tokens": 82,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "route": "expr_ast",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "9a49f44a0a5f7f766a838357019663ee82f6ff5014743bd505f52987e7a077eb",
+      "latency_s": 3.4856
+    },
+    {
+      "id": "v2-007",
+      "category": "financial_arithmetic",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Share price is KRW 45,000.\nEPS is KRW 3,000.\n\nP/E = share price / EPS.",
+      "question": "Calculate the P/E ratio.",
+      "expected": 15.0,
+      "scoring_type": "numeric",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "rel_tol": 0.0001,
+      "abs_tol": 1e-06,
+      "prediction": "15",
+      "raw_prediction": "{\n  \"expression\": \"45000/3000\",\n  \"answer_type\": \"ratio\",\n  \"result_unit\": \"\",\n  \"scale\": \"1\"\n  , \"formula_name\": \"P/E ratio\"\n  , \"explanation\": \"The P/E ratio is calculated by dividing the share price by the earnings per share.\"\n}",
+      "draft_prediction": "{\n  \"expression\": \"45000/3000\",\n  \"answer_type\": \"ratio\",\n  \"result_unit\": \"\",\n  \"scale\": \"1\"\n  , \"formula_name\": \"P/E ratio\"\n  , \"explanation\": \"The P/E ratio is calculated by dividing the share price by the earnings per share.\"\n}",
+      "final_source": "guided_numeric_metadata_ast",
+      "expression": "45000/3000",
+      "calculator_value": 15.0,
+      "numeric_metadata": {
+        "expression": "45000/3000",
+        "answer_type": "ratio",
+        "result_unit": "",
+        "scale": "1",
+        "formula_name": "P/E ratio",
+        "explanation": "The P/E ratio is calculated by dividing the share price by the earnings per share."
+      },
+      "attempts": [
+        {
+          "content": "{\n  \"expression\": \"45000/3000\",\n  \"answer_type\": \"ratio\",\n  \"result_unit\": \"\",\n  \"scale\": \"1\"\n  , \"formula_name\": \"P/E ratio\"\n  , \"explanation\": \"The P/E ratio is calculated by dividing the share price by the earnings per share.\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 3.3273,
+          "prompt_tokens": 207,
+          "completion_tokens": 78,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "route": "expr_ast",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "d902cc1455c4e1913344c1544f4a115c8699139473b08c8b548c4569a4cdbcd0",
+      "latency_s": 3.3277
+    },
+    {
+      "id": "v2-008",
+      "category": "financial_arithmetic",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "A company has:\n- Total debt: KRW 240 billion\n- Equity: KRW 160 billion\n\nDebt-to-equity (%) = debt / equity * 100.",
+      "question": "Calculate debt-to-equity percentage.",
+      "expected": 150.0,
+      "scoring_type": "numeric",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "rel_tol": 0.0001,
+      "abs_tol": 1e-06,
+      "prediction": "1500",
+      "raw_prediction": "{\n\"expression\": \"240000000000/16000000000*100\"\n,\"answer_type\": \"percentage\"\n,\"result_unit\": \"%\"\n,\"scale\": \"1\"\n,\"formula_name\": \"debt-to-equity\"\n,\"explanation\": \"The debt-to-equity ratio is calculated by dividing total debt by equity and multiplying by 100.\"\n}",
+      "draft_prediction": "{\n\"expression\": \"240000000000/16000000000*100\"\n,\"answer_type\": \"percentage\"\n,\"result_unit\": \"%\"\n,\"scale\": \"1\"\n,\"formula_name\": \"debt-to-equity\"\n,\"explanation\": \"The debt-to-equity ratio is calculated by dividing total debt by equity and multiplying by 100.\"\n}",
+      "final_source": "guided_numeric_metadata_ast",
+      "expression": "240000000000/16000000000*100",
+      "calculator_value": 1500.0,
+      "numeric_metadata": {
+        "expression": "240000000000/16000000000*100",
+        "answer_type": "percentage",
+        "result_unit": "%",
+        "scale": "1",
+        "formula_name": "debt-to-equity",
+        "explanation": "The debt-to-equity ratio is calculated by dividing total debt by equity and multiplying by 100."
+      },
+      "attempts": [
+        {
+          "content": "{\n\"expression\": \"240000000000/16000000000*100\"\n,\"answer_type\": \"percentage\"\n,\"result_unit\": \"%\"\n,\"scale\": \"1\"\n,\"formula_name\": \"debt-to-equity\"\n,\"explanation\": \"The debt-to-equity ratio is calculated by dividing total debt by equity and multiplying by 100.\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 4.0815,
+          "prompt_tokens": 219,
+          "completion_tokens": 96,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "route": "expr_ast",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "ee68128e3017ef996f2db126447dbc0b5610ae477b17821eb8ceeea54d55a7d3",
+      "latency_s": 4.0819
+    },
+    {
+      "id": "v2-009",
+      "category": "financial_arithmetic",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "A two-asset portfolio has:\n- Asset A: 60% weight, +8% return\n- Asset B: 40% weight, -3% return\n\nPortfolio return is the weighted average return.",
+      "question": "Calculate the portfolio return percentage.",
+      "expected": 3.6,
+      "scoring_type": "numeric",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "rel_tol": 0.0001,
+      "abs_tol": 1e-06,
+      "prediction": "3.6",
+      "raw_prediction": "{ \"expression\": \"(0.6*8)+(0.4*(-3))\" , \"answer_type\": \"percentage\", \"result_unit\": \"%\", \"scale\": \"1\", \"formula_name\": \"portfolio_return\" , \"explanation\": \"The portfolio return is calculated as the weighted sum of the returns of the individual assets.\"}",
+      "draft_prediction": "{ \"expression\": \"(0.6*8)+(0.4*(-3))\" , \"answer_type\": \"percentage\", \"result_unit\": \"%\", \"scale\": \"1\", \"formula_name\": \"portfolio_return\" , \"explanation\": \"The portfolio return is calculated as the weighted sum of the returns of the individual assets.\"}",
+      "final_source": "guided_numeric_metadata_ast",
+      "expression": "(0.6*8)+(0.4*(-3))",
+      "calculator_value": 3.5999999999999996,
+      "numeric_metadata": {
+        "expression": "(0.6*8)+(0.4*(-3))",
+        "answer_type": "percentage",
+        "result_unit": "%",
+        "scale": "1",
+        "formula_name": "portfolio_return",
+        "explanation": "The portfolio return is calculated as the weighted sum of the returns of the individual assets."
+      },
+      "attempts": [
+        {
+          "content": "{ \"expression\": \"(0.6*8)+(0.4*(-3))\" , \"answer_type\": \"percentage\", \"result_unit\": \"%\", \"scale\": \"1\", \"formula_name\": \"portfolio_return\" , \"explanation\": \"The portfolio return is calculated as the weighted sum of the returns of the individual assets.\"}",
+          "finish_reason": "stop",
+          "latency_s": 3.1453,
+          "prompt_tokens": 220,
+          "completion_tokens": 74,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "route": "expr_ast",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "e4a14acd9dc3ccff79c509fb8fd138df5f7f1bd568f76151b81c791a4ad275b7",
+      "latency_s": 3.1456
+    },
+    {
+      "id": "v2-010",
+      "category": "financial_arithmetic",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "A stock is bought at KRW 50,000.\nBuy-side cost is 0.1% of purchase price.\nSell-side cost is 0.2% of sale price.\n\nBreak-even requires:\nsale_price * (1 - 0.002) = 50000 * (1 + 0.001).",
+      "question": "Calculate the break-even sale price in KRW.",
+      "expected": 50150.3006012,
+      "scoring_type": "numeric",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "rel_tol": 0.0001,
+      "abs_tol": 1e-06,
+      "prediction": "50150.3006012",
+      "raw_prediction": "{\n  \"expression\": \"50000 * (1 + 0.001) / (1 - 0.002)\"\n  , \"answer_type\": \"currency\"\n  , \"result_unit\": \"KRW\"\n  , \"scale\": \"1\"\n  , \"formula_name\": \"break_even_sale_price\"\n  , \"explanation\": \"The break-even sale price is calculated by adding the buy-side cost to the purchase price and then dividing by the sell-side cost.\"\n}",
+      "draft_prediction": "{\n  \"expression\": \"50000 * (1 + 0.001) / (1 - 0.002)\"\n  , \"answer_type\": \"currency\"\n  , \"result_unit\": \"KRW\"\n  , \"scale\": \"1\"\n  , \"formula_name\": \"break_even_sale_price\"\n  , \"explanation\": \"The break-even sale price is calculated by adding the buy-side cost to the purchase price and then dividing by the sell-side cost.\"\n}",
+      "final_source": "guided_numeric_metadata_ast",
+      "expression": "50000 * (1 + 0.001) / (1 - 0.002)",
+      "calculator_value": 50150.3006012024,
+      "numeric_metadata": {
+        "expression": "50000 * (1 + 0.001) / (1 - 0.002)",
+        "answer_type": "currency",
+        "result_unit": "KRW",
+        "scale": "1",
+        "formula_name": "break_even_sale_price",
+        "explanation": "The break-even sale price is calculated by adding the buy-side cost to the purchase price and then dividing by the sell-side cost."
+      },
+      "attempts": [
+        {
+          "content": "{\n  \"expression\": \"50000 * (1 + 0.001) / (1 - 0.002)\"\n  , \"answer_type\": \"currency\"\n  , \"result_unit\": \"KRW\"\n  , \"scale\": \"1\"\n  , \"formula_name\": \"break_even_sale_price\"\n  , \"explanation\": \"The break-even sale price is calculated by adding the buy-side cost to the purchase price and then dividing by the sell-side cost.\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 4.6673,
+          "prompt_tokens": 255,
+          "completion_tokens": 110,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "route": "expr_ast",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "93e3fbe5f3a5806c15a2067decfc1d0d8f1c7e0867e547124ffe3cc21aa102d2",
+      "latency_s": 4.6675
+    },
+    {
+      "id": "v2-011",
+      "category": "accounting_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "A buy fill produces this journal:\n- Debit Investment Asset: KRW 7,000,000\n- Debit Transaction Fee Expense: KRW 105\n- Credit Cash: KRW 7,000,105\n\nA journal is balanced when total debits equal total credits.",
+      "question": "Classify the journal.",
+      "expected": "BALANCED",
+      "scoring_type": "choice",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "allowed_labels": [
+        "BALANCED",
+        "UNBALANCED"
+      ],
+      "prediction": "BALANCED",
+      "raw_prediction": "{\n  \"label\": \"BALANCED\"\n}",
+      "final_raw_prediction": "{\n  \"label\": \"BALANCED\"\n}",
+      "final_source": "guided_choice_semantic_audit",
+      "route": "guided_choice",
+      "attempts": [
+        {
+          "content": "{\n  \"label\": \"BALANCED\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4212,
+          "prompt_tokens": 221,
+          "completion_tokens": 11,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"label\": \"BALANCED\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4376,
+          "prompt_tokens": 292,
+          "completion_tokens": 11,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "BALANCED",
+              "UNBALANCED"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "glossary_version": "bok-800-arithmetic-glossary-v2-selective",
+      "glossary_sha256": "32a7dd45d3b3db59597f8cceec0c27b4d7eda1a413c58d74e92dd8fc3c4f9d98",
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "667b6a3951ec74309bd090cc4af024bafbcabdef56784c8e450aa05050506850",
+      "latency_s": 0.8597
+    },
+    {
+      "id": "v2-012",
+      "category": "accounting_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Processing rule:\nEach broker_fill_id may create only one journal entry.\nIf the same broker_fill_id arrives again, no second journal may be posted.\n\nbroker_fill_id 'bf-100' has already been processed once.",
+      "question": "What should happen when 'bf-100' is received again?",
+      "expected": "REJECT",
+      "scoring_type": "choice",
+      "critical": true,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "allowed_labels": [
+        "ACCEPT",
+        "REJECT"
+      ],
+      "prediction": "REJECT",
+      "raw_prediction": "{\n  \"label\": \"REJECT\"\n}",
+      "final_raw_prediction": "{\n  \"label\": \"REJECT\"\n}",
+      "final_source": "guided_choice_semantic_audit",
+      "route": "guided_choice",
+      "attempts": [
+        {
+          "content": "{\n  \"label\": \"REJECT\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4316,
+          "prompt_tokens": 204,
+          "completion_tokens": 11,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"label\": \"REJECT\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4376,
+          "prompt_tokens": 275,
+          "completion_tokens": 11,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "ACCEPT",
+              "REJECT"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "glossary_version": "bok-800-arithmetic-glossary-v2-selective",
+      "glossary_sha256": "32a7dd45d3b3db59597f8cceec0c27b4d7eda1a413c58d74e92dd8fc3c4f9d98",
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "6c8abe82360138877fff0136ac4a2e30091a1bcddfae9a3bccb7bdffcf0db40c",
+      "latency_s": 0.8696
+    },
+    {
+      "id": "v2-013",
+      "category": "accounting_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Valuation rule:\nA held instrument needs a market price no more than 30 minutes old.\nIf the required mark is older than 30 minutes, official NAV must not be produced.\n\nThe only available mark is 45 minutes old.",
+      "question": "What should the employee do with official NAV production?",
+      "expected": "HOLD",
+      "scoring_type": "choice",
+      "critical": true,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "allowed_labels": [
+        "PRODUCE",
+        "HOLD"
+      ],
+      "prediction": "HOLD",
+      "raw_prediction": "{\n  \"label\": \"HOLD\"\n}",
+      "final_raw_prediction": "{\n  \"label\": \"HOLD\"\n}",
+      "final_source": "guided_choice_semantic_audit",
+      "route": "guided_choice",
+      "attempts": [
+        {
+          "content": "{\n  \"label\": \"HOLD\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.434,
+          "prompt_tokens": 205,
+          "completion_tokens": 11,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"label\": \"HOLD\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4375,
+          "prompt_tokens": 276,
+          "completion_tokens": 11,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "PRODUCE",
+              "HOLD"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "glossary_version": "bok-800-arithmetic-glossary-v2-selective",
+      "glossary_sha256": "32a7dd45d3b3db59597f8cceec0c27b4d7eda1a413c58d74e92dd8fc3c4f9d98",
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "bf9de3af100b310c1e26d41f0033c55d8a81bf72c59885196a72ed6bdad8e5e5",
+      "latency_s": 0.8719
+    },
+    {
+      "id": "v2-014",
+      "category": "accounting_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "A company pays a cash dividend:\n- 100 shares held\n- KRW 500 dividend per share\n- KRW 7,700 withholding tax\n\nNet dividend cash = gross dividend - withholding tax.",
+      "question": "Calculate the net cash received in KRW.",
+      "expected": 42300,
+      "scoring_type": "numeric",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "rel_tol": 0.0001,
+      "abs_tol": 1e-06,
+      "prediction": "42300",
+      "raw_prediction": "{\n\"expression\": \"100*500-7700\"\n,\"answer_type\": \"currency\"\n,\"result_unit\": \"KRW\"\n,\"scale\": \"1\"\n,\"formula_name\": \"net_dividend_cash\"\n,\"explanation\": \"Net dividend cash is calculated as the gross dividend minus the withholding tax.\"\n}",
+      "draft_prediction": "{\n\"expression\": \"100*500-7700\"\n,\"answer_type\": \"currency\"\n,\"result_unit\": \"KRW\"\n,\"scale\": \"1\"\n,\"formula_name\": \"net_dividend_cash\"\n,\"explanation\": \"Net dividend cash is calculated as the gross dividend minus the withholding tax.\"\n}",
+      "final_source": "guided_numeric_metadata_ast",
+      "expression": "100*500-7700",
+      "calculator_value": 42300,
+      "numeric_metadata": {
+        "expression": "100*500-7700",
+        "answer_type": "currency",
+        "result_unit": "KRW",
+        "scale": "1",
+        "formula_name": "net_dividend_cash",
+        "explanation": "Net dividend cash is calculated as the gross dividend minus the withholding tax."
+      },
+      "attempts": [
+        {
+          "content": "{\n\"expression\": \"100*500-7700\"\n,\"answer_type\": \"currency\"\n,\"result_unit\": \"KRW\"\n,\"scale\": \"1\"\n,\"formula_name\": \"net_dividend_cash\"\n,\"explanation\": \"Net dividend cash is calculated as the gross dividend minus the withholding tax.\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 3.107,
+          "prompt_tokens": 235,
+          "completion_tokens": 73,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "route": "expr_ast",
+      "glossary_version": "bok-800-arithmetic-glossary-v2-selective",
+      "glossary_sha256": "32a7dd45d3b3db59597f8cceec0c27b4d7eda1a413c58d74e92dd8fc3c4f9d98",
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "bf0e7dd0981fd07308f017d4d5f02d5b91b6bd6349ade0e903d3de7a70f246d0",
+      "latency_s": 3.1074
+    },
+    {
+      "id": "v2-015",
+      "category": "accounting_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Reconciliation compares internal and broker positions.\nA position matches only when both quantities are equal.\n\nInternal quantity: 100\nBroker quantity: 90",
+      "question": "Classify reconciliation.",
+      "expected": "BREAK",
+      "scoring_type": "choice",
+      "critical": true,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "allowed_labels": [
+        "MATCH",
+        "BREAK"
+      ],
+      "prediction": "BREAK",
+      "raw_prediction": "{\n  \"label\": \"BREAK\"\n}",
+      "final_raw_prediction": "{\n  \"label\": \"BREAK\"\n}",
+      "final_source": "guided_choice_semantic_audit",
+      "route": "guided_choice",
+      "attempts": [
+        {
+          "content": "{\n  \"label\": \"BREAK\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4058,
+          "prompt_tokens": 178,
+          "completion_tokens": 10,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"label\": \"BREAK\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4052,
+          "prompt_tokens": 248,
+          "completion_tokens": 10,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "MATCH",
+              "BREAK"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "glossary_version": "bok-800-arithmetic-glossary-v2-selective",
+      "glossary_sha256": "32a7dd45d3b3db59597f8cceec0c27b4d7eda1a413c58d74e92dd8fc3c4f9d98",
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "30860b57404fc912e63f153c341f483414b0ce90ccc50dfa9af8439e857be3b0",
+      "latency_s": 0.8114
+    },
+    {
+      "id": "v2-016",
+      "category": "accounting_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "FIFO inventory:\n- Lot 1: 50 shares at KRW 40,000\n- Lot 2: 70 shares at KRW 45,000\n\nThe employee sells 80 shares at KRW 50,000.\nTotal sell fee is KRW 10,000.\n\nRealized PnL =\nnet sale proceeds minus FIFO cost basis.",
+      "question": "Calculate realized PnL in KRW.",
+      "expected": 640000,
+      "scoring_type": "numeric",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "rel_tol": 0.0001,
+      "abs_tol": 1e-06,
+      "prediction": "640000",
+      "raw_prediction": "{\n\"expression\": \"((80*50000)-10000)-((50*40000)+(30*45000))\"\n,\"answer_type\": \"currency\"\n,\"result_unit\": \"KRW\"\n,\"scale\": \"1\"\n,\"formula_name\": \"realized_PnL\"\n,\"explanation\": \"Realized PnL = net sale proceeds - FIFO cost basis.\"\n}",
+      "draft_prediction": "{\n\"expression\": \"((80*50000)-10000)-((50*40000)+(30*45000))\"\n,\"answer_type\": \"currency\"\n,\"result_unit\": \"KRW\"\n,\"scale\": \"1\"\n,\"formula_name\": \"realized_PnL\"\n,\"explanation\": \"Realized PnL = net sale proceeds - FIFO cost basis.\"\n}",
+      "final_source": "guided_numeric_metadata_ast",
+      "expression": "((80*50000)-10000)-((50*40000)+(30*45000))",
+      "calculator_value": 640000,
+      "numeric_metadata": {
+        "expression": "((80*50000)-10000)-((50*40000)+(30*45000))",
+        "answer_type": "currency",
+        "result_unit": "KRW",
+        "scale": "1",
+        "formula_name": "realized_PnL",
+        "explanation": "Realized PnL = net sale proceeds - FIFO cost basis."
+      },
+      "attempts": [
+        {
+          "content": "{\n\"expression\": \"((80*50000)-10000)-((50*40000)+(30*45000))\"\n,\"answer_type\": \"currency\"\n,\"result_unit\": \"KRW\"\n,\"scale\": \"1\"\n,\"formula_name\": \"realized_PnL\"\n,\"explanation\": \"Realized PnL = net sale proceeds - FIFO cost basis.\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 4.0761,
+          "prompt_tokens": 277,
+          "completion_tokens": 96,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "route": "expr_ast",
+      "glossary_version": "bok-800-arithmetic-glossary-v2-selective",
+      "glossary_sha256": "32a7dd45d3b3db59597f8cceec0c27b4d7eda1a413c58d74e92dd8fc3c4f9d98",
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "51c65878d093fb6026bc5ee5239e48e5e5e2d47bb9708eaa719f45c181da1afa",
+      "latency_s": 4.0764
+    },
+    {
+      "id": "v2-017",
+      "category": "risk_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Risk rule:\nA market snapshot may be used for a new order only when its age is\n5 seconds or less.\n\nCurrent snapshot age: 8.3 seconds.",
+      "question": "Should the new order be approved?",
+      "expected": "REJECT",
+      "scoring_type": "choice",
+      "critical": true,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "allowed_labels": [
+        "APPROVE",
+        "REJECT"
+      ],
+      "prediction": "REJECT",
+      "raw_prediction": "{\n  \"label\": \"REJECT\"\n}",
+      "final_raw_prediction": "{\n  \"label\": \"REJECT\"\n}",
+      "final_source": "guided_choice_semantic_audit",
+      "route": "guided_choice",
+      "attempts": [
+        {
+          "content": "{\n  \"label\": \"REJECT\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4442,
+          "prompt_tokens": 178,
+          "completion_tokens": 11,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"label\": \"REJECT\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4439,
+          "prompt_tokens": 249,
+          "completion_tokens": 11,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "APPROVE",
+              "REJECT"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "74c289bbf6f786e97ee6759b1f18684af2c821519746b37ce4fc310d6ca76e0a",
+      "latency_s": 0.8885
+    },
+    {
+      "id": "v2-018",
+      "category": "risk_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Risk rule:\nA buy order must not exceed available buying power.\n\nAvailable buying power: KRW 2,000,000\nOrder notional: KRW 2,500,000",
+      "question": "Should the order be approved?",
+      "expected": "REJECT",
+      "scoring_type": "choice",
+      "critical": true,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "allowed_labels": [
+        "APPROVE",
+        "REJECT"
+      ],
+      "prediction": "REJECT",
+      "raw_prediction": "{\n  \"label\": \"REJECT\"\n}",
+      "final_raw_prediction": "{\n  \"label\": \"REJECT\"\n}",
+      "final_source": "guided_choice_semantic_audit",
+      "route": "guided_choice",
+      "attempts": [
+        {
+          "content": "{\n  \"label\": \"REJECT\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4372,
+          "prompt_tokens": 190,
+          "completion_tokens": 11,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"label\": \"REJECT\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4396,
+          "prompt_tokens": 261,
+          "completion_tokens": 11,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "APPROVE",
+              "REJECT"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "b77c89fa5b3d2cbf398332d4dbaaeb34ba48ee8a0ade87ef6d43bdc5dc8733de",
+      "latency_s": 0.8771
+    },
+    {
+      "id": "v2-019",
+      "category": "risk_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Issuer concentration rules:\n- Up to 25% after the trade: APPROVE\n- Above 25% but at or below 30%: RESIZE\n- Above 30%: REJECT\n\nCurrent issuer exposure: 22%\nProposed trade would raise it to 27%.",
+      "question": "Choose the appropriate action.",
+      "expected": "RESIZE",
+      "scoring_type": "choice",
+      "critical": true,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "allowed_labels": [
+        "APPROVE",
+        "RESIZE",
+        "REJECT"
+      ],
+      "prediction": "RESIZE",
+      "raw_prediction": "{\n  \"label\": \"RESIZE\"\n}",
+      "final_raw_prediction": "{\n  \"label\": \"RESIZE\"\n}",
+      "final_source": "guided_choice_semantic_audit",
+      "route": "guided_choice",
+      "attempts": [
+        {
+          "content": "{\n  \"label\": \"RESIZE\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4385,
+          "prompt_tokens": 213,
+          "completion_tokens": 11,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"label\": \"RESIZE\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4382,
+          "prompt_tokens": 284,
+          "completion_tokens": 11,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "APPROVE",
+              "RESIZE",
+              "REJECT"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "e2a9d960af865fec5aa81d97324adb26884f2b3b4c10dc8873ffbba734fe59fb",
+      "latency_s": 0.8771
+    },
+    {
+      "id": "v2-020",
+      "category": "risk_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Issuer concentration rules:\n- Up to 25% after the trade: APPROVE\n- Above 25% but at or below 30%: RESIZE\n- Above 30%: REJECT\n\nCurrent issuer exposure: 28%\nProposed trade would raise it to 33%.",
+      "question": "Choose the appropriate action.",
+      "expected": "REJECT",
+      "scoring_type": "choice",
+      "critical": true,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "allowed_labels": [
+        "APPROVE",
+        "RESIZE",
+        "REJECT"
+      ],
+      "prediction": "REJECT",
+      "raw_prediction": "{\n  \"label\": \"REJECT\"\n}",
+      "final_raw_prediction": "{\n  \"label\": \"REJECT\"\n}",
+      "final_source": "guided_choice_semantic_audit",
+      "route": "guided_choice",
+      "attempts": [
+        {
+          "content": "{\n  \"label\": \"REJECT\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4373,
+          "prompt_tokens": 213,
+          "completion_tokens": 11,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"label\": \"REJECT\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4388,
+          "prompt_tokens": 284,
+          "completion_tokens": 11,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "APPROVE",
+              "RESIZE",
+              "REJECT"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "a1ec8df9a532a68484e3e8dfa0743683e833b750de5a3a7940fa4b3963448476",
+      "latency_s": 0.8765
+    },
+    {
+      "id": "v2-021",
+      "category": "risk_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Long-only account rule:\nA sell quantity cannot exceed the shares currently held.\n\nCurrent position: 100 shares\nRequested sell quantity: 120 shares",
+      "question": "Should the sell order be approved?",
+      "expected": "REJECT",
+      "scoring_type": "choice",
+      "critical": true,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "allowed_labels": [
+        "APPROVE",
+        "REJECT"
+      ],
+      "prediction": "REJECT",
+      "raw_prediction": "{\n  \"label\": \"REJECT\"\n}",
+      "final_raw_prediction": "{\n  \"label\": \"REJECT\"\n}",
+      "final_source": "guided_choice_semantic_audit",
+      "route": "guided_choice",
+      "attempts": [
+        {
+          "content": "{\n  \"label\": \"REJECT\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4369,
+          "prompt_tokens": 178,
+          "completion_tokens": 11,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"label\": \"REJECT\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4415,
+          "prompt_tokens": 249,
+          "completion_tokens": 11,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "APPROVE",
+              "REJECT"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "d7490f794206624136c5c72124c19b835c1fa2dee3995b14fa20894895dd4d6f",
+      "latency_s": 0.8787
+    },
+    {
+      "id": "v2-022",
+      "category": "risk_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Mandate:\nAllowed asset classes are listed equities and government bonds only.\n\nThe requested new position is a cryptocurrency.",
+      "question": "Should the position be approved?",
+      "expected": "REJECT",
+      "scoring_type": "choice",
+      "critical": true,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "allowed_labels": [
+        "APPROVE",
+        "REJECT"
+      ],
+      "prediction": "REJECT",
+      "raw_prediction": "{\n  \"label\": \"REJECT\"\n}",
+      "final_raw_prediction": "{\n  \"label\": \"REJECT\"\n}",
+      "final_source": "guided_choice_semantic_audit",
+      "route": "guided_choice",
+      "attempts": [
+        {
+          "content": "{\n  \"label\": \"REJECT\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4366,
+          "prompt_tokens": 167,
+          "completion_tokens": 11,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"label\": \"REJECT\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4385,
+          "prompt_tokens": 238,
+          "completion_tokens": 11,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "APPROVE",
+              "REJECT"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "b41be427e270d1e1bd68ca5aec093765c56e245c96a835830a5db416ab1d84df",
+      "latency_s": 0.8754
+    },
+    {
+      "id": "v2-023",
+      "category": "risk_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Trading rule:\nNew orders are permitted only when market status is TRADABLE.\n\nCurrent market status: HALTED.",
+      "question": "Should a new order be approved?",
+      "expected": "REJECT",
+      "scoring_type": "choice",
+      "critical": true,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "allowed_labels": [
+        "APPROVE",
+        "REJECT"
+      ],
+      "prediction": "REJECT",
+      "raw_prediction": "{\n  \"label\": \"REJECT\"\n}",
+      "final_raw_prediction": "{\n  \"label\": \"REJECT\"\n}",
+      "final_source": "guided_choice_semantic_audit",
+      "route": "guided_choice",
+      "attempts": [
+        {
+          "content": "{\n  \"label\": \"REJECT\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4377,
+          "prompt_tokens": 167,
+          "completion_tokens": 11,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"label\": \"REJECT\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4392,
+          "prompt_tokens": 238,
+          "completion_tokens": 11,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "APPROVE",
+              "REJECT"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "2dc65cdb9f66a7db4b51e720a9059b140c28fb2d1a16b56b49678589e2e635cd",
+      "latency_s": 0.8773
+    },
+    {
+      "id": "v2-024",
+      "category": "portfolio_trading_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Order rules:\n- MARKET order does not require a limit price.\n- LIMIT order requires a limit price.\n\nAn employee creates a LIMIT order without a limit price.",
+      "question": "Is the order valid?",
+      "expected": "INVALID",
+      "scoring_type": "choice",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "allowed_labels": [
+        "VALID",
+        "INVALID"
+      ],
+      "prediction": "INVALID",
+      "raw_prediction": "{\n  \"label\": \"INVALID\"\n}",
+      "final_raw_prediction": "{\n  \"label\": \"INVALID\"\n}",
+      "final_source": "guided_choice_semantic_audit",
+      "route": "guided_choice",
+      "attempts": [
+        {
+          "content": "{\n  \"label\": \"INVALID\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4076,
+          "prompt_tokens": 170,
+          "completion_tokens": 10,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"label\": \"INVALID\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.404,
+          "prompt_tokens": 240,
+          "completion_tokens": 10,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "VALID",
+              "INVALID"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "cbc7c32272b69ca512418cd397d5bee94d51224f416cdbf59db3f4305d18072d",
+      "latency_s": 0.8119
+    },
+    {
+      "id": "v2-025",
+      "category": "portfolio_trading_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Order rules:\n- MARKET order does not require a limit price.\n- LIMIT order requires a limit price.\n\nAn employee creates a MARKET order without a limit price.",
+      "question": "Is the order valid?",
+      "expected": "VALID",
+      "scoring_type": "choice",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "allowed_labels": [
+        "VALID",
+        "INVALID"
+      ],
+      "prediction": "INVALID",
+      "raw_prediction": "{\n  \"label\": \"VALID\"\n}",
+      "final_raw_prediction": "{\n  \"label\": \"INVALID\"\n}",
+      "final_source": "guided_choice_semantic_audit",
+      "route": "guided_choice",
+      "attempts": [
+        {
+          "content": "{\n  \"label\": \"VALID\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4026,
+          "prompt_tokens": 171,
+          "completion_tokens": 10,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"label\": \"INVALID\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.398,
+          "prompt_tokens": 241,
+          "completion_tokens": 10,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "VALID",
+              "INVALID"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "87edad9395c60aea1f05e33584e02e888f9a805ce1734a76fab2f1fb540f5dc3",
+      "latency_s": 0.801
+    },
+    {
+      "id": "v2-026",
+      "category": "portfolio_trading_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "A valid order-book snapshot must satisfy:\nbest_bid <= best_ask.\n\nSnapshot:\nbest_bid = KRW 101\nbest_ask = KRW 99",
+      "question": "Is this snapshot valid?",
+      "expected": "INVALID",
+      "scoring_type": "choice",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "allowed_labels": [
+        "VALID",
+        "INVALID"
+      ],
+      "prediction": "INVALID",
+      "raw_prediction": "{\n  \"label\": \"INVALID\"\n}",
+      "final_raw_prediction": "{\n  \"label\": \"INVALID\"\n}",
+      "final_source": "guided_choice_semantic_audit",
+      "route": "guided_choice",
+      "attempts": [
+        {
+          "content": "{\n  \"label\": \"INVALID\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4019,
+          "prompt_tokens": 172,
+          "completion_tokens": 10,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"label\": \"INVALID\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4007,
+          "prompt_tokens": 242,
+          "completion_tokens": 10,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "VALID",
+              "INVALID"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "7ab94d8dbeed306e1200b5add33fbd2251a46e5398f71fff760864b247465cfc",
+      "latency_s": 0.803
+    },
+    {
+      "id": "v2-027",
+      "category": "portfolio_trading_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "The strategy is long-only.\nTarget weights must be between 0 and 1 inclusive.\n\nRequested target weight: -0.10.",
+      "question": "Is the target weight valid?",
+      "expected": "INVALID",
+      "scoring_type": "choice",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "allowed_labels": [
+        "VALID",
+        "INVALID"
+      ],
+      "prediction": "INVALID",
+      "raw_prediction": "{\n  \"label\": \"INVALID\"\n}",
+      "final_raw_prediction": "{\n  \"label\": \"INVALID\"\n}",
+      "final_source": "guided_choice_semantic_audit",
+      "route": "guided_choice",
+      "attempts": [
+        {
+          "content": "{\n  \"label\": \"INVALID\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4024,
+          "prompt_tokens": 166,
+          "completion_tokens": 10,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"label\": \"INVALID\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4029,
+          "prompt_tokens": 236,
+          "completion_tokens": 10,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "VALID",
+              "INVALID"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "ded39aeb089ba9f2b9e0c71fa7d94dca0f187f9177ab62c19314591f0a8b7306",
+      "latency_s": 0.8056
+    },
+    {
+      "id": "v2-028",
+      "category": "portfolio_trading_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "A fully invested long-only portfolio requires:\n- every target weight between 0 and 1\n- total target weights = 1.00\n\nTargets are 0.40, 0.35, and 0.25.",
+      "question": "Are the target weights valid?",
+      "expected": "VALID",
+      "scoring_type": "choice",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "allowed_labels": [
+        "VALID",
+        "INVALID"
+      ],
+      "prediction": "VALID",
+      "raw_prediction": "{\n  \"label\": \"VALID\"\n}",
+      "final_raw_prediction": "{\n  \"label\": \"VALID\"\n}",
+      "final_source": "guided_choice_semantic_audit",
+      "route": "guided_choice",
+      "attempts": [
+        {
+          "content": "{\n  \"label\": \"VALID\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4111,
+          "prompt_tokens": 189,
+          "completion_tokens": 10,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"label\": \"VALID\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.405,
+          "prompt_tokens": 259,
+          "completion_tokens": 10,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "VALID",
+              "INVALID"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "f3fd85c2905f6af92f252446b17590fb450154e7218a134a15aca34568e184c6",
+      "latency_s": 0.8165
+    },
+    {
+      "id": "v2-029",
+      "category": "portfolio_trading_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Portfolio NAV: KRW 100,000,000\nCurrent stock weight: 20%\nTarget stock weight: 30%\nStock price: KRW 50,000\n\nAssume no fees and use:\nrequired trade notional =\n(target weight - current weight) * NAV.",
+      "question": "How many additional shares should be bought?",
+      "expected": 200,
+      "scoring_type": "numeric",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "rel_tol": 0.0001,
+      "abs_tol": 1e-06,
+      "prediction": "200",
+      "raw_prediction": "{\n\"expression\": \"((0.3-0.2)*100000000)/50000\"\n,\"answer_type\": \"count\"\n,\"result_unit\": \"shares\"\n,\"scale\": \"1\"\n,\"formula_name\": \"additional_shares\"\n,\"explanation\": \"Calculate the number of additional shares needed to reach the target weight.\"\n}",
+      "draft_prediction": "{\n\"expression\": \"((0.3-0.2)*100000000)/50000\"\n,\"answer_type\": \"count\"\n,\"result_unit\": \"shares\"\n,\"scale\": \"1\"\n,\"formula_name\": \"additional_shares\"\n,\"explanation\": \"Calculate the number of additional shares needed to reach the target weight.\"\n}",
+      "final_source": "guided_numeric_metadata_ast",
+      "expression": "((0.3-0.2)*100000000)/50000",
+      "calculator_value": 199.99999999999997,
+      "numeric_metadata": {
+        "expression": "((0.3-0.2)*100000000)/50000",
+        "answer_type": "count",
+        "result_unit": "shares",
+        "scale": "1",
+        "formula_name": "additional_shares",
+        "explanation": "Calculate the number of additional shares needed to reach the target weight."
+      },
+      "attempts": [
+        {
+          "content": "{\n\"expression\": \"((0.3-0.2)*100000000)/50000\"\n,\"answer_type\": \"count\"\n,\"result_unit\": \"shares\"\n,\"scale\": \"1\"\n,\"formula_name\": \"additional_shares\"\n,\"explanation\": \"Calculate the number of additional shares needed to reach the target weight.\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 3.4972,
+          "prompt_tokens": 245,
+          "completion_tokens": 82,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "route": "expr_ast",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "3d1b0bf1637e39c41a91e77fd448985eca9ce4e5d08fa4c6d869d1fcea1ec297",
+      "latency_s": 3.4976
+    },
+    {
+      "id": "v2-030",
+      "category": "quant_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "An equity curve reaches a peak of 125 and later falls to 100.\n\nMaximum drawdown (%) =\n(peak - trough) / peak * 100.",
+      "question": "Calculate drawdown percentage.",
+      "expected": 20.0,
+      "scoring_type": "numeric",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "rel_tol": 0.0001,
+      "abs_tol": 1e-06,
+      "prediction": "20",
+      "raw_prediction": "{\n  \"expression\": \"(125-100)/125*100\",\n  \"answer_type\": \"percentage\"\n  , \"result_unit\": \"%\"\n  , \"scale\": \"1\"\n  , \"formula_name\": \"maximum_drawdown\"\n  , \"explanation\": \"The maximum drawdown is calculated as the difference between the peak and trough divided by the peak value, then multiplied by 100 to convert it into a percentage.\"\n}",
+      "draft_prediction": "{\n  \"expression\": \"(125-100)/125*100\",\n  \"answer_type\": \"percentage\"\n  , \"result_unit\": \"%\"\n  , \"scale\": \"1\"\n  , \"formula_name\": \"maximum_drawdown\"\n  , \"explanation\": \"The maximum drawdown is calculated as the difference between the peak and trough divided by the peak value, then multiplied by 100 to convert it into a percentage.\"\n}",
+      "final_source": "guided_numeric_metadata_ast",
+      "expression": "(125-100)/125*100",
+      "calculator_value": 20.0,
+      "numeric_metadata": {
+        "expression": "(125-100)/125*100",
+        "answer_type": "percentage",
+        "result_unit": "%",
+        "scale": "1",
+        "formula_name": "maximum_drawdown",
+        "explanation": "The maximum drawdown is calculated as the difference between the peak and trough divided by the peak value, then multiplied by 100 to convert it into a percentage."
+      },
+      "attempts": [
+        {
+          "content": "{\n  \"expression\": \"(125-100)/125*100\",\n  \"answer_type\": \"percentage\"\n  , \"result_unit\": \"%\"\n  , \"scale\": \"1\"\n  , \"formula_name\": \"maximum_drawdown\"\n  , \"explanation\": \"The maximum drawdown is calculated as the difference between the peak and trough divided by the peak value, then multiplied by 100 to convert it into a percentage.\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 4.3773,
+          "prompt_tokens": 212,
+          "completion_tokens": 103,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "route": "expr_ast",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "70b2fe93e77eba6809d06497d110e8f4a09e0f3dc4a519f3cfd8f7f2a339953e",
+      "latency_s": 4.3777
+    },
+    {
+      "id": "v2-031",
+      "category": "quant_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Price range:\n- low = 90\n- high = 110\n- current = 105\n\nRange position (%) =\n(current - low) / (high - low) * 100.",
+      "question": "Calculate range position percentage.",
+      "expected": 75.0,
+      "scoring_type": "numeric",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "rel_tol": 0.0001,
+      "abs_tol": 1e-06,
+      "prediction": "75",
+      "raw_prediction": "{\n\"expression\": \"(105 - 90) / (110 - 90) * 100\"\n,\"answer_type\": \"percentage\"\n,\"result_unit\": \"%\"\n,\"scale\": \"1\"\n,\"formula_name\": \"range_position_percentage\"\n,\"explanation\": \"Calculates the position of the current price within the given price range as a percentage.\"\n}",
+      "draft_prediction": "{\n\"expression\": \"(105 - 90) / (110 - 90) * 100\"\n,\"answer_type\": \"percentage\"\n,\"result_unit\": \"%\"\n,\"scale\": \"1\"\n,\"formula_name\": \"range_position_percentage\"\n,\"explanation\": \"Calculates the position of the current price within the given price range as a percentage.\"\n}",
+      "final_source": "guided_numeric_metadata_ast",
+      "expression": "(105 - 90) / (110 - 90) * 100",
+      "calculator_value": 75.0,
+      "numeric_metadata": {
+        "expression": "(105 - 90) / (110 - 90) * 100",
+        "answer_type": "percentage",
+        "result_unit": "%",
+        "scale": "1",
+        "formula_name": "range_position_percentage",
+        "explanation": "Calculates the position of the current price within the given price range as a percentage."
+      },
+      "attempts": [
+        {
+          "content": "{\n\"expression\": \"(105 - 90) / (110 - 90) * 100\"\n,\"answer_type\": \"percentage\"\n,\"result_unit\": \"%\"\n,\"scale\": \"1\"\n,\"formula_name\": \"range_position_percentage\"\n,\"explanation\": \"Calculates the position of the current price within the given price range as a percentage.\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 3.5802,
+          "prompt_tokens": 220,
+          "completion_tokens": 84,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "route": "expr_ast",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "91d9277f22b12b1a1e8fc15e96e694ea7ce9bb28259067f5c0d0f0151b8d29c8",
+      "latency_s": 3.5805
+    },
+    {
+      "id": "v2-032",
+      "category": "quant_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Market breadth:\nAdvancing stocks = 400\nDeclining stocks = 100\n\nAdvance/Decline ratio = advancers / decliners.",
+      "question": "Calculate the A/D ratio.",
+      "expected": 4.0,
+      "scoring_type": "numeric",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "rel_tol": 0.0001,
+      "abs_tol": 1e-06,
+      "prediction": "4",
+      "raw_prediction": "{\"expression\": \"400 / 100\", \"answer_type\": \"ratio\", \"result_unit\": \"\", \"scale\": \"none\", \"formula_name\": \"A/D ratio\", \"explanation\": \"The A/D ratio is calculated by dividing the number of advancing stocks by the number of declining stocks.\"}",
+      "draft_prediction": "{\"expression\": \"400 / 100\", \"answer_type\": \"ratio\", \"result_unit\": \"\", \"scale\": \"none\", \"formula_name\": \"A/D ratio\", \"explanation\": \"The A/D ratio is calculated by dividing the number of advancing stocks by the number of declining stocks.\"}",
+      "final_source": "guided_numeric_metadata_ast",
+      "expression": "400 / 100",
+      "calculator_value": 4.0,
+      "numeric_metadata": {
+        "expression": "400 / 100",
+        "answer_type": "ratio",
+        "result_unit": "",
+        "scale": "none",
+        "formula_name": "A/D ratio",
+        "explanation": "The A/D ratio is calculated by dividing the number of advancing stocks by the number of declining stocks."
+      },
+      "attempts": [
+        {
+          "content": "{\"expression\": \"400 / 100\", \"answer_type\": \"ratio\", \"result_unit\": \"\", \"scale\": \"none\", \"formula_name\": \"A/D ratio\", \"explanation\": \"The A/D ratio is calculated by dividing the number of advancing stocks by the number of declining stocks.\"}",
+          "finish_reason": "stop",
+          "latency_s": 3.0047,
+          "prompt_tokens": 208,
+          "completion_tokens": 70,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "route": "expr_ast",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "d1f1b5ecfdcb2af4c74acd54201b2a55dcade510dbec33ada76d6393f50c9695",
+      "latency_s": 3.005
+    },
+    {
+      "id": "v2-033",
+      "category": "quant_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Current factor value: 120\nHistorical mean: 100\nHistorical standard deviation: 10\n\nz-score = (current - mean) / standard deviation.",
+      "question": "Calculate the z-score.",
+      "expected": 2.0,
+      "scoring_type": "numeric",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "rel_tol": 0.0001,
+      "abs_tol": 1e-06,
+      "prediction": "2",
+      "raw_prediction": "{\n  \"expression\": \"(120-100)/10\",\n  \"answer_type\": \"scalar\",\n  \"result_unit\": \"unitless\"\n  , \"scale\": \"1\"\n  , \"formula_name\": \"z-score\"\n  , \"explanation\": \"The z-score formula subtracts the mean from the current value and divides by the standard deviation.\"\n}",
+      "draft_prediction": "{\n  \"expression\": \"(120-100)/10\",\n  \"answer_type\": \"scalar\",\n  \"result_unit\": \"unitless\"\n  , \"scale\": \"1\"\n  , \"formula_name\": \"z-score\"\n  , \"explanation\": \"The z-score formula subtracts the mean from the current value and divides by the standard deviation.\"\n}",
+      "final_source": "guided_numeric_metadata_ast",
+      "expression": "(120-100)/10",
+      "calculator_value": 2.0,
+      "numeric_metadata": {
+        "expression": "(120-100)/10",
+        "answer_type": "scalar",
+        "result_unit": "unitless",
+        "scale": "1",
+        "formula_name": "z-score",
+        "explanation": "The z-score formula subtracts the mean from the current value and divides by the standard deviation."
+      },
+      "attempts": [
+        {
+          "content": "{\n  \"expression\": \"(120-100)/10\",\n  \"answer_type\": \"scalar\",\n  \"result_unit\": \"unitless\"\n  , \"scale\": \"1\"\n  , \"formula_name\": \"z-score\"\n  , \"explanation\": \"The z-score formula subtracts the mean from the current value and divides by the standard deviation.\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 3.532,
+          "prompt_tokens": 213,
+          "completion_tokens": 83,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "route": "expr_ast",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "379c712544cb81dc8eec82a1631eeadd90f4863b39023ad251c5ed76454a8eb9",
+      "latency_s": 3.5323
+    },
+    {
+      "id": "v2-034",
+      "category": "quant_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Daily return standard deviation is 1.2%.\n\nAnnualized volatility (%) =\ndaily volatility (%) * sqrt(252).\nUse sqrt(252) = 15.8745.",
+      "question": "Calculate annualized volatility percentage.",
+      "expected": 19.0494,
+      "scoring_type": "numeric",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "rel_tol": 0.001,
+      "abs_tol": 1e-06,
+      "prediction": "19.0494",
+      "raw_prediction": "{\n\"expression\": \"1.2 * 15.8745\"\n,\"answer_type\": \"percentage\"\n,\"result_unit\": \"annualized volatility\"\n,\"scale\": \"percent\"\n,\"formula_name\": \"annualized_volatility\"\n,\"explanation\": \"The annualized volatility is calculated by multiplying the daily volatility by the square root of the number of trading days in a year.\"\n}",
+      "draft_prediction": "{\n\"expression\": \"1.2 * 15.8745\"\n,\"answer_type\": \"percentage\"\n,\"result_unit\": \"annualized volatility\"\n,\"scale\": \"percent\"\n,\"formula_name\": \"annualized_volatility\"\n,\"explanation\": \"The annualized volatility is calculated by multiplying the daily volatility by the square root of the number of trading days in a year.\"\n}",
+      "final_source": "guided_numeric_metadata_ast",
+      "expression": "1.2 * 15.8745",
+      "calculator_value": 19.0494,
+      "numeric_metadata": {
+        "expression": "1.2 * 15.8745",
+        "answer_type": "percentage",
+        "result_unit": "annualized volatility",
+        "scale": "percent",
+        "formula_name": "annualized_volatility",
+        "explanation": "The annualized volatility is calculated by multiplying the daily volatility by the square root of the number of trading days in a year."
+      },
+      "attempts": [
+        {
+          "content": "{\n\"expression\": \"1.2 * 15.8745\"\n,\"answer_type\": \"percentage\"\n,\"result_unit\": \"annualized volatility\"\n,\"scale\": \"percent\"\n,\"formula_name\": \"annualized_volatility\"\n,\"explanation\": \"The annualized volatility is calculated by multiplying the daily volatility by the square root of the number of trading days in a year.\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 3.6348,
+          "prompt_tokens": 217,
+          "completion_tokens": 85,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "route": "expr_ast",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "8904347e3154cf537a2436dd8b857c7e16c2707d9c097016fdd5544e511dca42",
+      "latency_s": 3.6352
+    },
+    {
+      "id": "v2-035",
+      "category": "quant_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Expected annual portfolio return: 12%\nRisk-free rate: 2%\nAnnual volatility: 20%\n\nSharpe ratio =\n(return - risk-free rate) / volatility.\nUse decimal or percentage units consistently.",
+      "question": "Calculate the Sharpe ratio.",
+      "expected": 0.5,
+      "scoring_type": "numeric",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "rel_tol": 0.0001,
+      "abs_tol": 1e-06,
+      "prediction": "0.5",
+      "raw_prediction": "{\n\"expression\": \"(0.12-0.02)/0.2\"\n,\"answer_type\": \"ratio\"\n,\"result_unit\": \"unitless\"\n,\"scale\": \"1\"\n,\"formula_name\": \"Sharpe ratio\"\n,\"explanation\": \"The Sharpe ratio measures the excess return per unit of deviation in an investment.\"\n}",
+      "draft_prediction": "{\n\"expression\": \"(0.12-0.02)/0.2\"\n,\"answer_type\": \"ratio\"\n,\"result_unit\": \"unitless\"\n,\"scale\": \"1\"\n,\"formula_name\": \"Sharpe ratio\"\n,\"explanation\": \"The Sharpe ratio measures the excess return per unit of deviation in an investment.\"\n}",
+      "final_source": "guided_numeric_metadata_ast",
+      "expression": "(0.12-0.02)/0.2",
+      "calculator_value": 0.49999999999999994,
+      "numeric_metadata": {
+        "expression": "(0.12-0.02)/0.2",
+        "answer_type": "ratio",
+        "result_unit": "unitless",
+        "scale": "1",
+        "formula_name": "Sharpe ratio",
+        "explanation": "The Sharpe ratio measures the excess return per unit of deviation in an investment."
+      },
+      "attempts": [
+        {
+          "content": "{\n\"expression\": \"(0.12-0.02)/0.2\"\n,\"answer_type\": \"ratio\"\n,\"result_unit\": \"unitless\"\n,\"scale\": \"1\"\n,\"formula_name\": \"Sharpe ratio\"\n,\"explanation\": \"The Sharpe ratio measures the excess return per unit of deviation in an investment.\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 3.1963,
+          "prompt_tokens": 218,
+          "completion_tokens": 75,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "route": "expr_ast",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "20eac6c868794531cdeb316b515b297b6122d101bc3599ea9809883936c8a3d8",
+      "latency_s": 3.1967
+    },
+    {
+      "id": "v2-036",
+      "category": "evidence_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Classification labels:\n- SUPPORTED: available evidence directly supports the claim\n- UNSUPPORTED: evidence contradicts the claim or required evidence is absent\n- UNCERTAIN: accessible evidence is materially conflicting and cannot be resolved\n\nClaim: Closing price was KRW 70,000.\nAuthoritative evidence: Closing price was KRW 70,000.",
+      "question": "Classify the claim.",
+      "expected": "SUPPORTED",
+      "scoring_type": "choice",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "allowed_labels": [
+        "SUPPORTED",
+        "UNSUPPORTED",
+        "UNCERTAIN"
+      ],
+      "prediction": "SUPPORTED",
+      "raw_prediction": "{\n  \"label\": \"SUPPORTED\"\n}",
+      "final_raw_prediction": "{\n  \"label\": \"SUPPORTED\"\n}",
+      "final_source": "guided_choice_semantic_audit",
+      "route": "guided_choice",
+      "attempts": [
+        {
+          "content": "{\n  \"label\": \"SUPPORTED\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4395,
+          "prompt_tokens": 225,
+          "completion_tokens": 11,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"label\": \"SUPPORTED\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4409,
+          "prompt_tokens": 296,
+          "completion_tokens": 11,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "SUPPORTED",
+              "UNSUPPORTED",
+              "UNCERTAIN"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "91a8690c6c21aa9575e821e4a50ee6620ba545851f083839130aeedab5de2e61",
+      "latency_s": 0.8808
+    },
+    {
+      "id": "v2-037",
+      "category": "evidence_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Classification labels:\n- SUPPORTED: available evidence directly supports the claim\n- UNSUPPORTED: evidence contradicts the claim or required evidence is absent\n- UNCERTAIN: accessible evidence is materially conflicting and cannot be resolved\n\nClaim: Closing price was KRW 70,000.\nAuthoritative evidence: Closing price was KRW 50,000.",
+      "question": "Classify the claim.",
+      "expected": "UNSUPPORTED",
+      "scoring_type": "choice",
+      "critical": true,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "allowed_labels": [
+        "SUPPORTED",
+        "UNSUPPORTED",
+        "UNCERTAIN"
+      ],
+      "prediction": "UNSUPPORTED",
+      "raw_prediction": "{\n  \"label\": \"UNSUPPORTED\"\n}",
+      "final_raw_prediction": "{\n  \"label\": \"UNSUPPORTED\"\n}",
+      "final_source": "guided_choice_semantic_audit",
+      "route": "guided_choice",
+      "attempts": [
+        {
+          "content": "{\n  \"label\": \"UNSUPPORTED\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4315,
+          "prompt_tokens": 225,
+          "completion_tokens": 11,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"label\": \"UNSUPPORTED\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4386,
+          "prompt_tokens": 296,
+          "completion_tokens": 11,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "SUPPORTED",
+              "UNSUPPORTED",
+              "UNCERTAIN"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "7e4951121bb8d6e77d02c28e5677a483b00bd3d4f8bf404c9d00646f8985e6ac",
+      "latency_s": 0.8706
+    },
+    {
+      "id": "v2-038",
+      "category": "evidence_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "A factual financial claim must have at least one usable evidence item.\nNo evidence is available for the claim.\n\nLabels: SUPPORTED, UNSUPPORTED, UNCERTAIN.",
+      "question": "Classify the factual claim.",
+      "expected": "UNSUPPORTED",
+      "scoring_type": "choice",
+      "critical": true,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "allowed_labels": [
+        "SUPPORTED",
+        "UNSUPPORTED",
+        "UNCERTAIN"
+      ],
+      "prediction": "UNSUPPORTED",
+      "raw_prediction": "{\n  \"label\": \"UNCERTAIN\"\n}",
+      "final_raw_prediction": "{\n  \"label\": \"UNSUPPORTED\"\n}",
+      "final_source": "guided_choice_semantic_audit",
+      "route": "guided_choice",
+      "attempts": [
+        {
+          "content": "{\n  \"label\": \"UNCERTAIN\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4722,
+          "prompt_tokens": 183,
+          "completion_tokens": 12,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"label\": \"UNSUPPORTED\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.439,
+          "prompt_tokens": 255,
+          "completion_tokens": 11,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "SUPPORTED",
+              "UNSUPPORTED",
+              "UNCERTAIN"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "b88e56fb7362f1c946ef08224fcb4c2f9057bf0f2feed44240186b0ea8ba0a9c",
+      "latency_s": 0.9116
+    },
+    {
+      "id": "v2-039",
+      "category": "evidence_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Two equally authoritative sources are accessible:\n- Source A: closing price KRW 70,000\n- Source B: closing price KRW 50,000\n\nNo tie-break rule or newer authoritative source exists.\n\nLabels: SUPPORTED, UNSUPPORTED, UNCERTAIN.",
+      "question": "Classify a claim that the closing price was exactly KRW 70,000.",
+      "expected": "UNCERTAIN",
+      "scoring_type": "choice",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "allowed_labels": [
+        "SUPPORTED",
+        "UNSUPPORTED",
+        "UNCERTAIN"
+      ],
+      "prediction": "UNCERTAIN",
+      "raw_prediction": "{\n  \"label\": \"UNCERTAIN\"\n}",
+      "final_raw_prediction": "{\n  \"label\": \"UNCERTAIN\"\n}",
+      "final_source": "guided_choice_semantic_audit",
+      "route": "guided_choice",
+      "attempts": [
+        {
+          "content": "{\n  \"label\": \"UNCERTAIN\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4702,
+          "prompt_tokens": 225,
+          "completion_tokens": 12,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"label\": \"UNCERTAIN\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4754,
+          "prompt_tokens": 297,
+          "completion_tokens": 12,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "SUPPORTED",
+              "UNSUPPORTED",
+              "UNCERTAIN"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "a03727eb13e945eec29637443fec7ac72c226fccf01d9c36388181dcaa615123",
+      "latency_s": 0.946
+    },
+    {
+      "id": "v2-040",
+      "category": "evidence_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Decision time: 10:00.\nA news article was published at 12:00.\n\nRule:\nEvidence published after the decision time may not be used to justify\nthe earlier decision.\n\nLabels: SUPPORTED, UNSUPPORTED.",
+      "question": "Can that article support the 10:00 decision?",
+      "expected": "UNSUPPORTED",
+      "scoring_type": "choice",
+      "critical": true,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "allowed_labels": [
+        "SUPPORTED",
+        "UNSUPPORTED"
+      ],
+      "prediction": "UNSUPPORTED",
+      "raw_prediction": "{\n  \"label\": \"UNSUPPORTED\"\n}",
+      "final_raw_prediction": "{\n  \"label\": \"UNSUPPORTED\"\n}",
+      "final_source": "guided_choice_semantic_audit",
+      "route": "guided_choice",
+      "attempts": [
+        {
+          "content": "{\n  \"label\": \"UNSUPPORTED\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4359,
+          "prompt_tokens": 199,
+          "completion_tokens": 11,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"label\": \"UNSUPPORTED\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4432,
+          "prompt_tokens": 270,
+          "completion_tokens": 11,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "SUPPORTED",
+              "UNSUPPORTED"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "d3b47fc24b7af4f235846d9dd798ca13391f6c4edb71cfdb29d0efbdbb967634",
+      "latency_s": 0.8795
+    },
+    {
+      "id": "v2-041",
+      "category": "evidence_reasoning",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Claim: Company revenue was KRW 500 billion.\nPrimary filing: revenue was KRW 500 billion.\nA secondary article also reports KRW 500 billion.\n\nThe primary filing is valid and authoritative.\n\nLabels: SUPPORTED, UNSUPPORTED, UNCERTAIN.",
+      "question": "Classify the claim.",
+      "expected": "SUPPORTED",
+      "scoring_type": "choice",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "allowed_labels": [
+        "SUPPORTED",
+        "UNSUPPORTED",
+        "UNCERTAIN"
+      ],
+      "prediction": "SUPPORTED",
+      "raw_prediction": "{\n  \"label\": \"SUPPORTED\"\n}",
+      "final_raw_prediction": "{\n  \"label\": \"SUPPORTED\"\n}",
+      "final_source": "guided_choice_semantic_audit",
+      "route": "guided_choice",
+      "attempts": [
+        {
+          "content": "{\n  \"label\": \"SUPPORTED\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.4409,
+          "prompt_tokens": 208,
+          "completion_tokens": 11,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"label\": \"SUPPORTED\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.439,
+          "prompt_tokens": 279,
+          "completion_tokens": 11,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "SUPPORTED",
+              "UNSUPPORTED",
+              "UNCERTAIN"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "c770e740468ed79604c6c33b80852de888b282020087de1f76d64ee9273025b8",
+      "latency_s": 0.8803
+    },
+    {
+      "id": "v2-042",
+      "category": "uncertainty_fail_closed",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "A calculation requires both current assets and current liabilities.\nCurrent assets are available.\nCurrent liabilities are missing.\n\nRule:\nDo not invent missing financial inputs.\n\nLabels: CALCULATE, INSUFFICIENT_DATA.",
+      "question": "What should the employee do?",
+      "expected": "INSUFFICIENT_DATA",
+      "scoring_type": "choice",
+      "critical": true,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "allowed_labels": [
+        "CALCULATE",
+        "INSUFFICIENT_DATA"
+      ],
+      "prediction": "INSUFFICIENT_DATA",
+      "raw_prediction": "{\n  \"label\": \"INSUFFICIENT_DATA\"\n}",
+      "final_raw_prediction": "{\n  \"label\": \"INSUFFICIENT_DATA\"\n}",
+      "final_source": "guided_choice_semantic_audit",
+      "route": "guided_choice",
+      "attempts": [
+        {
+          "content": "{\n  \"label\": \"INSUFFICIENT_DATA\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.5198,
+          "prompt_tokens": 186,
+          "completion_tokens": 13,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"label\": \"INSUFFICIENT_DATA\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.5081,
+          "prompt_tokens": 259,
+          "completion_tokens": 13,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "CALCULATE",
+              "INSUFFICIENT_DATA"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "4c5e4aaf1d4b06e8bbc81e1528e890fb4c2edb94040c316d0472b02dbf26968f",
+      "latency_s": 1.0282
+    },
+    {
+      "id": "v2-043",
+      "category": "uncertainty_fail_closed",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "For a trading decision, cached market data may be used only when it is\n15 minutes old or less.\n\nThe live API is unavailable.\nThe only cached snapshot is 2 hours old.\n\nLabels: USE_DATA, INSUFFICIENT_DATA.",
+      "question": "What should the employee do?",
+      "expected": "INSUFFICIENT_DATA",
+      "scoring_type": "choice",
+      "critical": true,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "allowed_labels": [
+        "USE_DATA",
+        "INSUFFICIENT_DATA"
+      ],
+      "prediction": "INSUFFICIENT_DATA",
+      "raw_prediction": "{\n  \"label\": \"INSUFFICIENT_DATA\"\n}",
+      "final_raw_prediction": "{\n  \"label\": \"INSUFFICIENT_DATA\"\n}",
+      "final_source": "guided_choice_semantic_audit",
+      "route": "guided_choice",
+      "attempts": [
+        {
+          "content": "{\n  \"label\": \"INSUFFICIENT_DATA\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.5092,
+          "prompt_tokens": 195,
+          "completion_tokens": 13,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"label\": \"INSUFFICIENT_DATA\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.5115,
+          "prompt_tokens": 268,
+          "completion_tokens": 13,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "USE_DATA",
+              "INSUFFICIENT_DATA"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "33595b43ec8915b0b49b407195392d046abe16370268650f70910dd72f16f23c",
+      "latency_s": 1.021
+    },
+    {
+      "id": "v2-044",
+      "category": "uncertainty_fail_closed",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "A deterministic calculation from verified prices gives +12% momentum.\nAn LLM-generated commentary says momentum is -8%.\n\nRule:\nWhen generated commentary conflicts with a verified deterministic metric,\nthe deterministic metric has authority.\n\nLabels: USE_DETERMINISTIC, USE_COMMENTARY.",
+      "question": "Which result should be used?",
+      "expected": "USE_DETERMINISTIC",
+      "scoring_type": "choice",
+      "critical": true,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "allowed_labels": [
+        "USE_DETERMINISTIC",
+        "USE_COMMENTARY"
+      ],
+      "prediction": "USE_DETERMINISTIC",
+      "raw_prediction": "{\n  \"label\": \"USE_DETERMINISTIC\"\n}",
+      "final_raw_prediction": "{\n  \"label\": \"USE_DETERMINISTIC\"\n}",
+      "final_source": "guided_choice_semantic_audit",
+      "route": "guided_choice",
+      "attempts": [
+        {
+          "content": "{\n  \"label\": \"USE_DETERMINISTIC\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.5458,
+          "prompt_tokens": 204,
+          "completion_tokens": 14,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"label\": \"USE_DETERMINISTIC\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.5451,
+          "prompt_tokens": 278,
+          "completion_tokens": 14,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "USE_DETERMINISTIC",
+              "USE_COMMENTARY"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "549509d64b83cdcc7808e39af534630d3c13cb3bc0171eacaa71748bdbcdcfc5",
+      "latency_s": 1.0913
+    },
+    {
+      "id": "v2-045",
+      "category": "uncertainty_fail_closed",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Two equally credible forecasts predict:\n- Forecast A: +5%\n- Forecast B: -4%\n\nThere is no rule for preferring one forecast.\n\nLabels: BULLISH, BEARISH, UNCERTAIN.",
+      "question": "What is the appropriate conclusion?",
+      "expected": "UNCERTAIN",
+      "scoring_type": "choice",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "allowed_labels": [
+        "BULLISH",
+        "BEARISH",
+        "UNCERTAIN"
+      ],
+      "prediction": "UNCERTAIN",
+      "raw_prediction": "{\"label\": \"UNCERTAIN\"}",
+      "final_raw_prediction": "{\"label\": \"UNCERTAIN\"}",
+      "final_source": "guided_choice_semantic_audit",
+      "route": "guided_choice",
+      "attempts": [
+        {
+          "content": "{\"label\": \"UNCERTAIN\"}",
+          "finish_reason": "stop",
+          "latency_s": 0.3656,
+          "prompt_tokens": 197,
+          "completion_tokens": 9,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\"label\": \"UNCERTAIN\"}",
+          "finish_reason": "stop",
+          "latency_s": 0.3664,
+          "prompt_tokens": 266,
+          "completion_tokens": 9,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "enum": [
+              "BULLISH",
+              "BEARISH",
+              "UNCERTAIN"
+            ]
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "additionalProperties": false
+      },
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "79d66119edd392fe2c4800920d1c0da4930c4c57e916941012bd2ff55ceea0c2",
+      "latency_s": 0.7324
+    },
+    {
+      "id": "v2-046",
+      "category": "structured_output",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Risk rule:\nA snapshot older than 5 seconds requires rejection.\nSnapshot age is 9 seconds.\n\nReturn JSON with exactly these keys:\n- decision: \"APPROVE\" or \"REJECT\"\n- reason: short snake_case reason",
+      "question": "Return the requested structured decision.",
+      "expected": {
+        "decision": "REJECT",
+        "reason": "stale_snapshot"
+      },
+      "scoring_type": "json_exact",
+      "critical": true,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "prediction": "{\n  \"decision\": \"REJECT\",\n  \"reason\": \"snapshot_age_exceeds_limit\"\n}",
+      "raw_prediction": "{\n  \"decision\": \"REJECT\",\n  \"reason\": \"snapshot_age_exceeds_limit\"\n}",
+      "final_source": "guided_json_semantic_audit",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "decision": {
+            "type": "string",
+            "enum": [
+              "APPROVE",
+              "REJECT"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision",
+          "reason"
+        ],
+        "additionalProperties": false
+      },
+      "semantic_audit": true,
+      "attempts": [
+        {
+          "content": "{\n  \"decision\": \"REJECT\",\n  \"reason\": \"snapshot_age_exceeds_limit\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.8694,
+          "prompt_tokens": 164,
+          "completion_tokens": 23,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"decision\": \"REJECT\",\n  \"reason\": \"snapshot_age_exceeds_limit\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.8744,
+          "prompt_tokens": 237,
+          "completion_tokens": 23,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "route": "guided_json_schema",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "aae1647c5d178b0196e1816ad1c92c5d0073bc76299695f293ea509e1fc0c6d9",
+      "latency_s": 1.7445
+    },
+    {
+      "id": "v2-047",
+      "category": "structured_output",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Trade:\n- Buy 80 shares at KRW 48,000\n- Sell 80 shares at KRW 51,500\n- Total fees KRW 12,000\n\nRealized PnL = sale proceeds - purchase cost - fees.\n\nReturn JSON with exactly:\n- pnl: integer KRW\n- profitable: boolean",
+      "question": "Return the calculation as JSON.",
+      "expected": {
+        "pnl": 268000,
+        "profitable": true
+      },
+      "scoring_type": "json_exact",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "prediction": "{\n  \"pnl\": 20000,\n  \"profitable\": true\n}",
+      "raw_prediction": "{\n  \"pnl\": 20000,\n  \"profitable\": true\n}",
+      "final_source": "guided_json_semantic_audit",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "pnl": {
+            "type": "integer"
+          },
+          "profitable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "pnl",
+          "profitable"
+        ],
+        "additionalProperties": false
+      },
+      "semantic_audit": true,
+      "attempts": [
+        {
+          "content": "{\n  \"pnl\": 20000,\n  \"profitable\": true\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.8345,
+          "prompt_tokens": 196,
+          "completion_tokens": 22,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"pnl\": 20000,\n  \"profitable\": true\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.8422,
+          "prompt_tokens": 268,
+          "completion_tokens": 22,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "route": "guided_json_schema",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "191a7388bfed47a1add222bb665946e7b0f2ec2eec6221f7a461e2728b06dcad",
+      "latency_s": 1.6772
+    },
+    {
+      "id": "v2-048",
+      "category": "structured_output",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Claim: price was KRW 70,000.\nAuthoritative evidence: price was KRW 50,000.\n\nReturn JSON with exactly:\n- supported: boolean\n- reason: one of \"match\", \"numeric_mismatch\", \"missing_evidence\"",
+      "question": "Return the evidence decision as JSON.",
+      "expected": {
+        "supported": false,
+        "reason": "numeric_mismatch"
+      },
+      "scoring_type": "json_exact",
+      "critical": true,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "prediction": "{\n  \"supported\": false,\n  \"reason\": \"numeric_mismatch\"\n}",
+      "raw_prediction": "{\n  \"supported\": false,\n  \"reason\": \"numeric_mismatch\"\n}",
+      "final_source": "guided_json_semantic_audit",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "supported": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "match",
+              "numeric_mismatch",
+              "missing_evidence"
+            ]
+          }
+        },
+        "required": [
+          "supported",
+          "reason"
+        ],
+        "additionalProperties": false
+      },
+      "semantic_audit": true,
+      "attempts": [
+        {
+          "content": "{\n  \"supported\": false,\n  \"reason\": \"numeric_mismatch\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.6894,
+          "prompt_tokens": 175,
+          "completion_tokens": 18,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"supported\": false,\n  \"reason\": \"numeric_mismatch\"\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.6912,
+          "prompt_tokens": 243,
+          "completion_tokens": 18,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "route": "guided_json_schema",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "4d7db43124a7016b7ca632e5593beee4493e13b0290921d4f95571dbae6ddade",
+      "latency_s": 1.3811
+    },
+    {
+      "id": "v2-049",
+      "category": "structured_output",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "Portfolio NAV: KRW 50,000,000\nSoft issuer limit: 25% of NAV\nCurrent issuer exposure: KRW 11,000,000\n\nThe employee may add exposure only up to the soft limit.\n\nReturn JSON with exactly:\n- action: \"APPROVE\" or \"RESIZE\"\n- max_additional_notional: integer KRW",
+      "question": "Return the permitted action and maximum additional notional.",
+      "expected": {
+        "action": "RESIZE",
+        "max_additional_notional": 1500000
+      },
+      "scoring_type": "json_exact",
+      "critical": false,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "prediction": "{\n  \"action\": \"RESIZE\",\n  \"max_additional_notional\": 8000000\n}",
+      "raw_prediction": "{\n  \"action\": \"APPROVE\",\n  \"max_additional_notional\": 8000000\n}",
+      "final_source": "guided_json_semantic_audit",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "APPROVE",
+              "RESIZE"
+            ]
+          },
+          "max_additional_notional": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "action",
+          "max_additional_notional"
+        ],
+        "additionalProperties": false
+      },
+      "semantic_audit": true,
+      "attempts": [
+        {
+          "content": "{\n  \"action\": \"APPROVE\",\n  \"max_additional_notional\": 8000000\n}",
+          "finish_reason": "stop",
+          "latency_s": 1.0539,
+          "prompt_tokens": 206,
+          "completion_tokens": 28,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"action\": \"RESIZE\",\n  \"max_additional_notional\": 8000000\n}",
+          "finish_reason": "stop",
+          "latency_s": 1.019,
+          "prompt_tokens": 284,
+          "completion_tokens": 27,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "route": "guided_json_schema",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "3907e88e0045583d2215a1560750c18b3d61a285e5c6cd363a52026b3053b374",
+      "latency_s": 2.0734
+    },
+    {
+      "id": "v2-050",
+      "category": "structured_output",
+      "system_prompt": "You are a financial operations assistant performing small employee-level tasks. Use only the rules and data supplied in the prompt. Do not assume unstated company policies or facts. Perform calculations carefully and follow the requested output format.",
+      "context": "A ratio calculation needs both numerator and denominator.\nThe numerator is available but the denominator is missing.\nMissing values must not be invented.\n\nReturn JSON with exactly:\n- status: \"OK\" or \"INSUFFICIENT_DATA\"\n- value: number or null",
+      "question": "Return the result as JSON.",
+      "expected": {
+        "status": "INSUFFICIENT_DATA",
+        "value": null
+      },
+      "scoring_type": "json_exact",
+      "critical": true,
+      "provenance": "synthetic_employee_reasoning_v2",
+      "prediction": "{\n  \"status\": \"INSUFFICIENT_DATA\",\n  \"value\": null\n}",
+      "raw_prediction": "{\n  \"status\": \"INSUFFICIENT_DATA\",\n  \"value\": null\n}",
+      "final_source": "guided_json_semantic_audit",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "OK",
+              "INSUFFICIENT_DATA"
+            ]
+          },
+          "value": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "value"
+        ],
+        "additionalProperties": false
+      },
+      "semantic_audit": true,
+      "attempts": [
+        {
+          "content": "{\n  \"status\": \"INSUFFICIENT_DATA\",\n  \"value\": null\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.7251,
+          "prompt_tokens": 167,
+          "completion_tokens": 19,
+          "phase": "initial",
+          "valid": true,
+          "validation_error": null
+        },
+        {
+          "content": "{\n  \"status\": \"INSUFFICIENT_DATA\",\n  \"value\": null\n}",
+          "finish_reason": "stop",
+          "latency_s": 0.7279,
+          "prompt_tokens": 236,
+          "completion_tokens": 19,
+          "phase": "semantic_audit",
+          "valid": true,
+          "validation_error": null
+        }
+      ],
+      "error": null,
+      "pipeline_variant": "AWQ+HybridPipeline",
+      "base_model": "qwen2.5-14b-instruct-awq",
+      "arithmetic_model": "hgfinance-awq-arithmetic-2epoch",
+      "ab_stage": "selective_unit_scale",
+      "source_dataset": "internal",
+      "route": "guided_json_schema",
+      "glossary_version": null,
+      "glossary_sha256": null,
+      "matched_terms": [],
+      "glossary_hit": false,
+      "wiki_hit": false,
+      "wiki_fallback_skipped": false,
+      "wiki_sha256": null,
+      "wiki_retrieval_latency_ms": 0.0,
+      "wiki_pages": [],
+      "wiki_terms": [],
+      "wiki_context_chars": 0,
+      "wiki_planner": null,
+      "wiki_candidate_hit": false,
+      "wiki_candidates": [],
+      "wiki_grade": null,
+      "injected_content_sha256": "7a7945d936ca5b1bdacc730664f3e81258724467c02a7839c4c18519d6a22fd0",
+      "latency_s": 1.4535
+    }
+  ]
+}

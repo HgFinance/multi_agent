@@ -52,7 +52,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-MODULE_VERSION = "worker-model-gateway-v1"
+MODULE_VERSION = "worker-model-gateway-v2-hybrid-upgrade-v1"
 REGISTRY_VERSION = "worker-model-registry.v1"
 
 DEFAULT_VLLM_MODEL = "qwen2.5-14b-instruct-awq"
@@ -62,6 +62,10 @@ DEFAULT_OLLAMA_MODEL = "qwen3:1.7b"
 DEFAULT_OLLAMA_TIMEOUT = 8.0
 
 WorkerLLM = Callable[..., str]
+
+
+class HybridStructuredOutputError(RuntimeError):
+    """The bounded guided-JSON repair still violated the output contract."""
 
 
 @dataclass(frozen=True)
@@ -80,6 +84,10 @@ class ModelBinding:
     adapter_version: str     # 계약 필수 필드 - 없으면 "none"
     api_key: str
     timeout_seconds: float
+    # Generic Qwen middleware configuration.  Worker routes still cannot pick
+    # an adapter directly; the gateway applies the registry-owned selective
+    # Hybrid Upgrade policy per request.
+    hybrid_config: Mapping | None = None
 
     def as_metadata(self) -> dict:
         """job 결과·telemetry 에 싣는 비밀 없는 요약."""
@@ -91,6 +99,12 @@ class ModelBinding:
             "adapter_id": self.adapter_id,
             "adapter_version": self.adapter_version,
             "timeout_seconds": self.timeout_seconds,
+            "hybrid_pipeline": (
+                str(self.hybrid_config.get("version"))
+                if isinstance(self.hybrid_config, Mapping)
+                and self.hybrid_config.get("status") == "enabled"
+                else None
+            ),
         }
 
 
@@ -169,6 +183,11 @@ def resolve(worker_id: str | None = None, *,
     reg_path = registry_path or e.get("WORKER_MODEL_REGISTRY_PATH") or ""
     registry = load_registry(reg_path)
     adapter_id, adapter_version = _adapter_for(registry, worker_id)
+    hybrid_config = (
+        registry.get("hybrid_runtime")
+        if isinstance(registry.get("hybrid_runtime"), Mapping)
+        else None
+    )
 
     vllm_base = (e.get("WORKER_MODEL_BASE_URL") or "").strip()
     # The same .env is used by host-side E2E jobs and containers.  Keep the
@@ -195,6 +214,7 @@ def resolve(worker_id: str | None = None, *,
             api_key=(e.get("WORKER_MODEL_API_KEY") or "vllm").strip() or "vllm",
             timeout_seconds=_float_env(e.get("WORKER_MODEL_TIMEOUT_SECONDS"),
                                        DEFAULT_VLLM_TIMEOUT),
+            hybrid_config=hybrid_config,
         )
 
     # DEV/TEST fallback - 기존 Ollama 경로와 같은 기본값.
@@ -209,6 +229,9 @@ def resolve(worker_id: str | None = None, *,
         api_key=(e.get("OLLAMA_API_KEY") or "ollama").strip() or "ollama",
         timeout_seconds=_float_env(e.get("OLLAMA_TIMEOUT_SECONDS"),
                                    DEFAULT_OLLAMA_TIMEOUT),
+        # The evaluated AWQ pipeline is a vLLM/Qwen production treatment.  Do
+        # not silently apply it to the small Ollama development fallback.
+        hybrid_config=None,
     )
 
 
@@ -243,11 +266,24 @@ def worker_llm(binding: ModelBinding) -> WorkerLLM:
 
     def call(system: str, prompt: str, *,
              json_schema: Mapping | None = None) -> str:
+        from departments.qwen_hybrid_runtime import (
+            prepare_request,
+            semantic_repair_prompt,
+            validate_structured_output,
+        )
+
+        prepared = prepare_request(
+            system=system,
+            prompt=prompt,
+            base_model=binding.model,
+            config=binding.hybrid_config,
+            json_schema=json_schema,
+        )
         payload = {
-            "model": binding.model,
+            "model": prepared.model,
             "temperature": 0,
-            "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": prompt}],
+            "messages": [{"role": "system", "content": prepared.system},
+                         {"role": "user", "content": prepared.prompt}],
         }
         if json_schema is not None:
             # vLLM and Ollama both implement the OpenAI-compatible JSON Schema
@@ -257,15 +293,43 @@ def worker_llm(binding: ModelBinding) -> WorkerLLM:
                 "type": "json_schema",
                 "json_schema": {"name": "worker_context", "schema": json_schema},
             }
-        req = urllib.request.Request(
-            binding.base_url + "/chat/completions", method="POST",
-            headers={"Content-Type": "application/json",
-                     "Authorization": f"Bearer {binding.api_key}"},
-            data=json.dumps(payload).encode())
         started = time.perf_counter()
+
+        def request(body: Mapping) -> dict:
+            req = urllib.request.Request(
+                binding.base_url + "/chat/completions", method="POST",
+                headers={"Content-Type": "application/json",
+                         "Authorization": f"Bearer {binding.api_key}"},
+                data=json.dumps(body).encode())
+            with urllib.request.urlopen(req, timeout=binding.timeout_seconds) as response:
+                return json.loads(response.read())
+
         try:
-            with urllib.request.urlopen(req, timeout=binding.timeout_seconds) as r:
-                out = json.loads(r.read())
+            out = request(payload)
+            content = str(out["choices"][0]["message"]["content"] or "")
+            # vLLM guided decoding handles syntax.  This second boundary catches
+            # schema/finite-number drift and gives the model one repair turn.
+            # It never calculates or supplies a replacement domain answer.
+            if json_schema is not None:
+                validation_error = validate_structured_output(content, json_schema)
+                if validation_error:
+                    repair_payload = dict(payload)
+                    repair_payload["messages"] = [
+                        {"role": "system", "content": prepared.system},
+                        {
+                            "role": "user",
+                            "content": semantic_repair_prompt(
+                                prepared.prompt, content, validation_error
+                            ),
+                        },
+                    ]
+                    out = request(repair_payload)
+                    content = str(out["choices"][0]["message"]["content"] or "")
+                    final_error = validate_structured_output(content, json_schema)
+                    if final_error:
+                        raise HybridStructuredOutputError(
+                            "guided JSON repair failed closed: " + final_error
+                        )
         except Exception:
             _record_llm_call(
                 latency_ms=int((time.perf_counter() - started) * 1000), error=True)
@@ -273,7 +337,7 @@ def worker_llm(binding: ModelBinding) -> WorkerLLM:
         _record_llm_call(
             usage=_UsageView(out.get("usage")),
             latency_ms=int((time.perf_counter() - started) * 1000))
-        return str(out["choices"][0]["message"]["content"] or "")
+        return content
 
     call._json_schema_capable = True  # type: ignore[attr-defined]
     return call

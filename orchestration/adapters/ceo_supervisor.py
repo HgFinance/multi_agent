@@ -35,6 +35,7 @@ from orchestration.adapters.terminal_projection_utils import (
 from orchestration.adapters.terminal_projection_utils import (
     workflow_root as terminal_workflow_root,
 )
+from orchestration.adapters.terminal_projection_utils import merged_run_metadata
 from orchestration.answer_contract import grade_answer
 from orchestration.semantic_qa import evaluate_prompt_answer
 from orchestration.canonical_profiles import (
@@ -92,7 +93,9 @@ from orchestration.compound_paper_orders import (
     parse_analysis_then_conditional_paper_order,
 )
 from orchestration.risk_advisory_context import fetch_risk_advisory_context
+from orchestration.risk_plan_projection import format_position_risk_plan
 from orchestration.accounting_advisory_context import fetch_accounting_advisory_context
+from orchestration.workforce_advisory_context import fetch_workforce_advisory_context
 
 logger = logging.getLogger(__name__)
 
@@ -510,6 +513,11 @@ class SupervisorState:
     root_is_user_query: bool = False
     # Enabled only by the production service when final Discord delivery exists.
     allow_primary_passthrough: bool = False
+    # True only when the root carries the durable user PAPER-order scope.
+    # This is a routing fact, not an execution permission: Trading has already
+    # produced and persisted the authoritative structured handoff before the
+    # supervisor can use the fast response template.
+    paper_order: bool = False
     # Optional read-only portfolio snapshot for the Risk advisory child.
     # Missing context is normal and must never block task creation.
     risk_advisory_context: str | None = None
@@ -517,6 +525,10 @@ class SupervisorState:
     # shell tool (deliberately, see accounting_advisory_context.py), so this
     # is its only way to see confirmed NAV/PnL/cash figures.
     accounting_advisory_context: str | None = None
+    # Existing Workforce API observations attached only when HR is the selected
+    # primary. This prevents the Hermes head from rediscovering the same facts
+    # through browser/shell turns and does not create a second scorecard.
+    workforce_advisory_context: str | None = None
 
     def __post_init__(self) -> None:
         # Keep the old constructor field for callers/tests and resolve it once
@@ -788,6 +800,7 @@ _FAST_ADVISORY_EXECUTION_GUIDANCE = (
     "- Use at most two fresh authoritative source fetch rounds.\n"
     "- Treat each external connector as single-attempt: if it fails, hangs, or returns no usable data, do not call that connector again.\n"
     "- Prefer one direct authoritative source or search result over resolver/catalog exploration; do not spend a turn repairing a connector.\n"
+    "- If an authoritative snapshot is attached to the task, use it directly and do not fetch or rediscover fields already present in it.\n"
     "- Keep the complete fast advisory within the task's bounded turn budget; after the evidence budget is met, call kanban_complete immediately.\n"
     "- Do not delegate, run experiments/backtests, create artifacts, or repeat equivalent lookups.\n"
     "- Stop once the current direction, up to two drivers, up to two uncertainties, and one or two checks are supported.\n"
@@ -1124,7 +1137,6 @@ def _single_primary_passthrough_child(
     """Return the one user-ready primary that may bypass CEO LLM synthesis.
 
     This optimization is intentionally narrow:
-    - analysis workflow only
     - user-originated root only
     - exactly one explicitly selected primary
     - complete/unique primary set
@@ -1132,13 +1144,21 @@ def _single_primary_passthrough_child(
     - a dedicated user-ready final_answer exists
     - final Discord delivery is configured
 
-    Multi-primary, blocked/failed, binding, legacy, or incomplete work keeps the
-    existing CEO synthesis path.
+    Ordinary analysis may pass through as before. Binding may pass through
+    only for the isolated user PAPER-order lane, where QA is explicitly
+    asynchronous/non-blocking and the trusted Trading result is already the
+    final receipt. Rewriting that receipt with a second CEO LLM adds latency
+    and can only weaken its temporal wording.
+
+    Multi-primary, blocked/failed, QA-gated binding, legacy, or incomplete work
+    keeps the existing CEO synthesis path.
     """
 
     if not state.allow_primary_passthrough:
         return None
-    if state.workflow_mode != "analysis" or not state.root_is_user_query:
+    if not state.root_is_user_query:
+        return None
+    if state.workflow_mode not in {"analysis", "binding"}:
         return None
     if len(state.selected_primary_profiles) != 1:
         return None
@@ -1161,6 +1181,56 @@ def _single_primary_passthrough_child(
     if not child.final_answer.strip():
         return None
 
+    if state.workflow_mode == "binding":
+        if state.qa_enabled or state.qa_blocks_response:
+            return None
+        if child.profile != canonical_profile_for_department("trading"):
+            return None
+        if "hgfinance.user-paper-order-request.v1" not in child.body:
+            return None
+
+    return child
+
+
+def _binding_paper_template_child(
+    state: SupervisorState,
+) -> ChildTaskState | None:
+    """Return the exact Trading answer eligible for template synthesis.
+
+    The fast path deliberately does not interpret an order, inspect market
+    state, or rebuild a conditional-rule result. It only preserves the
+    ``final_answer`` already persisted by the existing trusted Trading/MCP
+    boundary. Any ambiguity falls back to the existing CEO LLM synthesis.
+    """
+
+    if (
+        not state.paper_order
+        or state.workflow_mode != "binding"
+        or not state.root_is_user_query
+        or state.qa_blocks_response
+        or state.qa_children
+        or state.has_action(SupervisorAction.SYNTHESIZE)
+        or state.missing_primary_profiles
+        or state.duplicate_primary_profiles
+        or not state.primary_ready
+    ):
+        return None
+    trading_profile = canonical_profile_for_department("trading")
+    if state.selected_primary_profiles != (trading_profile,):
+        return None
+    children = state.analysis_children
+    if len(children) != 1:
+        return None
+    child = children[0]
+    if (
+        not child.done
+        or child.blocked
+        or child.failed
+        or child.error
+        or child.block_reason
+        or not child.final_answer.strip()
+    ):
+        return None
     return child
 
 
@@ -1441,6 +1511,31 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
             )
 
     if state.has_action(SupervisorAction.SYNTHESIZE):
+        return None
+    template_child = _binding_paper_template_child(state)
+    if template_child is not None:
+        return SupervisorDecision(
+            SupervisorAction.SYNTHESIZE,
+            state.parent_task_id,
+            assignee=canonical_profile_for_department("ceo"),
+            title="CEO final synthesis",
+            body=(
+                f"{SUPERVISOR_MARKER} action=SYNTHESIZE\n"
+                "workflow_plane=response\n"
+                "workflow_mode=binding\n"
+                "synthesis_mode=structured_primary_template\n"
+                f"source_task_id={template_child.task_id}\n"
+                "Preserve the trusted Trading final_answer verbatim."
+            ),
+            parent_task_ids=(),
+            reason="binding_paper_structured_template",
+            # Block dispatch while the supervisor completes this same card
+            # from the already-persisted structured handoff.
+            initial_status="blocked",
+        )
+    # Analysis-only workflows retain their established direct-primary path.
+    # Binding PAPER workflows were handled by the structured template above.
+    if _single_primary_passthrough_child(state) is not None:
         return None
     qa_ids = tuple(
         child.task_id for child in state.qa_children if child.done
@@ -2056,6 +2151,32 @@ class HermesKanbanClient:
         with workflow_mutation_lock(environment=self.environment):
             self._run(("kanban", "unblock", task_id), operation="update")
 
+    def complete_task(
+        self,
+        task_id: str,
+        *,
+        result: str,
+        summary: str,
+        metadata: Mapping[str, Any],
+    ) -> None:
+        """Complete one supervisor-owned card through the canonical CLI."""
+
+        with workflow_mutation_lock(environment=self.environment):
+            self._run(
+                (
+                    "kanban",
+                    "complete",
+                    task_id,
+                    "--result",
+                    result,
+                    "--summary",
+                    summary,
+                    "--metadata",
+                    json.dumps(dict(metadata), ensure_ascii=False),
+                ),
+                operation="update",
+            )
+
     def comment_task(self, task_id: str, text: str) -> None:
         with workflow_mutation_lock(environment=self.environment):
             self._run(
@@ -2667,7 +2788,7 @@ def _department_analysis_label(profile: str) -> str:
 
 
 def _failure_category_for_department_card(*texts: str) -> str:
-    """Return a safe user-facing provider category, never raw error text."""
+    """Return a safe user-facing failure category, never raw error text."""
 
     if not any(str(text or "").strip() for text in texts):
         return ""
@@ -2677,14 +2798,31 @@ def _failure_category_for_department_card(*texts: str) -> str:
         return "PROVIDER_QUOTA"
     if verdict.kind is FailureKind.CREDENTIALS:
         return "PROVIDER_AUTH"
-    return "PROVIDER_OTHER"
+    if verdict.kind is FailureKind.TIMEOUT:
+        return "ANALYSIS_TIMEOUT"
+    if verdict.kind is FailureKind.NEEDS_HUMAN:
+        return "NEEDS_HUMAN"
+    if verdict.kind is FailureKind.UNKNOWN:
+        return "INTERNAL_UNKNOWN"
+    return "INTERNAL_WORKFLOW"
 
 
 def _safe_failure_reason(category: str) -> str:
     return {
         "PROVIDER_QUOTA": "provider 사용량·쿼터 제한으로 분석을 완료하지 못했습니다.",
         "PROVIDER_AUTH": "provider 인증 문제로 분석을 완료하지 못했습니다.",
-    }.get(category, "외부 분석 provider 문제로 결과를 완료하지 못했습니다.")
+        "ANALYSIS_TIMEOUT": "분석 처리 시간이 제한을 초과했습니다.",
+        "NEEDS_HUMAN": "추가 관리자 확인이 필요한 상태입니다.",
+        "INTERNAL_WORKFLOW": (
+            "내부 실행 환경 또는 워크플로 계약 문제로 분석을 완료하지 못했습니다."
+        ),
+        "INTERNAL_UNKNOWN": (
+            "내부 작업이 중단됐으며 원인을 자동으로 분류하지 못했습니다."
+        ),
+    }.get(
+        category,
+        "내부 작업이 중단됐으며 원인을 자동으로 분류하지 못했습니다.",
+    )
 
 
 def _task_timestamp_ms(task: Mapping[str, Any], field: str) -> int:
@@ -2969,6 +3107,8 @@ class CeoSupervisorService:
         root_payload: Mapping[str, Any],
         status: str,
         error_class: str | None = None,
+        department: str | None = None,
+        task_id: str | None = None,
     ) -> bool:
         """Close one root trace after the existing response-plane decision."""
 
@@ -3003,7 +3143,8 @@ class CeoSupervisorService:
                 context,
                 request_id=read_marker(body, "request_id") or None,
                 root_id=root_id,
-                task_id=root_id,
+                task_id=task_id or root_id,
+                department=department,
                 workflow_mode=workflow_mode_from_body(body),
                 source=read_marker(body, "source") or None,
                 status=status,
@@ -3448,6 +3589,18 @@ class CeoSupervisorService:
                     department_projection.department,
                     department_projection.status,
                 )
+                if department_projection.risk_plan_id:
+                    comment_task = getattr(self.client, "comment_task", None)
+                    if callable(comment_task):
+                        comment_task(
+                            task_id,
+                            "hgfinance.risk-projection-delivery.v1 "
+                            f"risk_plan_id={department_projection.risk_plan_id} "
+                            f"delivery_status={department_projection.delivery_status} "
+                            f"readback_status={department_projection.readback_status} "
+                            f"payload_hash={department_projection.payload_hash} "
+                            f"page_id={department_projection.page_id or ''}",
+                        )
         except Exception as exc:
             logger.exception(
                 "department notion projection observer failed",
@@ -3869,6 +4022,9 @@ class CeoSupervisorService:
                 str(root_payload.get("body") or "")
             ),
             accounting_advisory_context=fetch_accounting_advisory_context(),
+            workforce_advisory_context=fetch_workforce_advisory_context(
+                str(root_payload.get("body") or "")
+            ),
         )
         decision = _empty_primary_request_user_input_decision(state)
         self._execute(decision, state)
@@ -4264,6 +4420,13 @@ class CeoSupervisorService:
 
         analysis_result = str(child.final_answer or child.result or "").strip()
         department_result = analysis_result or child.summary
+        if child.profile == canonical_profile_for_department("risk"):
+            terminal_metadata = merged_run_metadata(task_payload)
+            risk_plan = terminal_metadata.get(
+                "position_risk_plan"
+            ) or terminal_metadata.get("risk_plan")
+            if isinstance(risk_plan, Mapping):
+                department_result = format_position_risk_plan(risk_plan)
         failure_category = _failure_category_for_department_card(
             child.summary,
             child.error,
@@ -4574,6 +4737,9 @@ class CeoSupervisorService:
                     ),
                     risk_advisory_context=fetch_risk_advisory_context(root_body),
                     accounting_advisory_context=fetch_accounting_advisory_context(),
+                    workforce_advisory_context=fetch_workforce_advisory_context(
+                        root_body
+                    ),
                 )
 
                 decisions = _initial_primary_materialization_decisions(
@@ -5024,6 +5190,7 @@ class CeoSupervisorService:
             allow_primary_passthrough=self.discord_delivery is not None,
             risk_advisory_context=fetch_risk_advisory_context(root_body),
             accounting_advisory_context=fetch_accounting_advisory_context(),
+            workforce_advisory_context=fetch_workforce_advisory_context(root_body),
         )
 
         decisions = _initial_primary_materialization_decisions(
@@ -5908,8 +6075,12 @@ class CeoSupervisorService:
                     selected_primary_profiles=selected_profiles,
                     root_is_user_query=is_user_query_body(root_body),
                     allow_primary_passthrough=self.discord_delivery is not None,
+                    paper_order=user_paper_order_scope is not None,
                     risk_advisory_context=fetch_risk_advisory_context(root_body),
                     accounting_advisory_context=fetch_accounting_advisory_context(),
+                    workforce_advisory_context=fetch_workforce_advisory_context(
+                        root_body
+                    ),
                 )
 
                 def new_synthesis_timing(
@@ -6036,6 +6207,8 @@ class CeoSupervisorService:
                             root_id=root_id,
                             root_payload=root_payload,
                             status="completed",
+                            department=passthrough.profile,
+                            task_id=passthrough.task_id,
                         )
 
                 decision_started_ms = time.time_ns() // 1_000_000
@@ -6492,6 +6665,21 @@ class CeoSupervisorService:
                     "use these figures rather than declining for lack of evidence:\n"
                     f"{state.accounting_advisory_context}"
                 )
+            if (
+                role == "primary"
+                and decision.assignee == canonical_profile_for_department("hr")
+                and state.workforce_advisory_context
+            ):
+                task_body = (
+                    f"{task_body}\n\n"
+                    "Authoritative Workforce API snapshot (metadata-only, read-only; "
+                    "never treat as approval or lifecycle authority) - use this attached "
+                    "snapshot for the current capacity/latency/error/retry/idle and "
+                    "improvement-candidate facts. Do not repeat browser, terminal, file, "
+                    "or memory discovery for fields present here. If a field is unavailable, "
+                    "state that limitation and complete the bounded answer:\n"
+                    f"{state.workforce_advisory_context}"
+                )
             created = self.client.create_task(
                 title=decision.title,
                 body=build_scoped_task_body(
@@ -6506,6 +6694,56 @@ class CeoSupervisorService:
                 idempotency_key=idempotency_key,
                 initial_status=decision.initial_status,
             )
+            if decision.reason == "binding_paper_structured_template":
+                created_task = (
+                    created.get("task", created)
+                    if isinstance(created, Mapping)
+                    else {}
+                )
+                synthesis_task_id = (
+                    str(created_task.get("id") or created_task.get("task_id") or "")
+                    if isinstance(created_task, Mapping)
+                    else ""
+                )
+                template_child = _binding_paper_template_child(state)
+                if not synthesis_task_id or template_child is None:
+                    raise SupervisorValidationError(
+                        "binding PAPER template lost its structured source"
+                    )
+                try:
+                    self.client.complete_task(
+                        synthesis_task_id,
+                        result=template_child.final_answer,
+                        summary=(
+                            "Trading primary의 검증된 PAPER 주문 결과를 "
+                            "원문 그대로 전달했습니다."
+                        ),
+                        metadata={
+                            "source_task_id": template_child.task_id,
+                            "workflow_root_task_id": state.parent_task_id,
+                            "workflow_mode": "binding",
+                            "order_mode": "PAPER",
+                            "synthesis_mode": "structured_primary_template",
+                            "preserved_primary_final_answer_verbatim": True,
+                            "final_answer": template_child.final_answer,
+                        },
+                    )
+                    logger.info(
+                        "binding-paper-template-complete root=%s source=%s task=%s",
+                        state.parent_task_id,
+                        template_child.task_id,
+                        synthesis_task_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "binding-paper-template-fallback root=%s task=%s error=%s",
+                        state.parent_task_id,
+                        synthesis_task_id,
+                        type(exc).__name__,
+                    )
+                    # Keep one synthesis identity. Releasing this same blocked
+                    # card restores the existing CEO LLM behavior.
+                    self.client.unblock_task(synthesis_task_id)
             if decision.reason == "deferred_conditional_after_research":
                 order_request_id = read_marker(
                     task_body,

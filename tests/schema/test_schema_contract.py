@@ -286,6 +286,9 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  # 미리 고정한다는 규칙이 의미를 가지려면 그 기준이 하나여야 한다.
                  # 행 하나만 보는 check 로는 못 막아 부분 unique index 를 쓴다.
                  "20260825000600_workforce_probation_single_open.sql",
+                 # Risk-owned mandate version bindings and immutable dynamic
+                 # position-risk plans, lifecycle events, and projections.
+                 "20260825000700_dynamic_position_risk_plans.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 
@@ -306,6 +309,24 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             with self.subTest(path=path.name):
                 self.assertRegex(sql.lstrip().lower(), r"^begin;")
                 self.assertRegex(sql.rstrip().lower(), r"commit;$")
+
+    def test_capacity_snapshot_unique_index_uses_valid_nulls_syntax(self) -> None:
+        """PostgreSQL places NULLS NOT DISTINCT after the index column list."""
+        migration = (
+            SUPABASE_MIGRATIONS
+            / "20260825000400_workforce_capacity_snapshot_writer.sql"
+        ).read_text(encoding="utf-8").lower()
+        normalized = re.sub(r"\s+", " ", migration)
+        self.assertIn(
+            "on workforce.capacity_snapshots "
+            "(department_id, agent_id, window_start, window_end) "
+            "nulls not distinct;",
+            normalized,
+        )
+        self.assertNotIn(
+            "on workforce.capacity_snapshots nulls not distinct",
+            normalized,
+        )
 
     def test_fee_account_seed_respects_fund_scoped_uniqueness(self) -> None:
         """A clean database must replay the fee-account migration.
@@ -1102,7 +1123,9 @@ class SupabaseSchemaContractTest(unittest.TestCase):
             # +1 (2026-08-18): append-only authoritative outcome revisions;
             # legacy outcomes remain one row per experiment.
             "research": 28,
-            "risk": 19,
+            # +5 (2026-08-25): versioned mandate presets/bindings, immutable
+            # dynamic position-risk plans, lifecycle events, and projections.
+            "risk": 24,
             "strategy": 9,
             "workforce": 25,
         }
@@ -1291,6 +1314,23 @@ class TimescaleSchemaContractTest(unittest.TestCase):
         ):
             with self.subTest(hypertable=hypertable):
                 self.assertIn(f"'{hypertable}'", migration)
+
+    def test_market_database_has_bounded_query_memory(self) -> None:
+        migration = next(
+            content
+            for path, content in self.files
+            if path.name == "009_market_query_memory_guard.sql"
+        ).lower()
+        self.assertIn("alter database market set work_mem = '8mb'", migration)
+        self.assertIn("alter database market set maintenance_work_mem = '128mb'", migration)
+        self.assertIn("alter database market set temp_file_limit = '512mb'", migration)
+        self.assertIn(
+            "alter database market set idle_in_transaction_session_timeout = '60s'",
+            migration,
+        )
+        # The guard is data-plane configuration, not an authentication feature.
+        self.assertNotIn("create role", migration)
+        self.assertNotIn("create user", migration)
 
 
 if __name__ == "__main__":

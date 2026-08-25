@@ -200,10 +200,18 @@ class PostgresRiskContextRepository:
                        LIMIT 1
                    ) AS risk_bounds
             FROM risk.policies p
-            JOIN governance.approvals a ON a.approval_id = p.approval_id
+            LEFT JOIN governance.approvals a ON a.approval_id = p.approval_id
             WHERE p.fund_id = %s AND p.status = 'ACTIVE'
-              AND a.decision = 'APPROVED'
-              AND (a.expires_at IS NULL OR a.expires_at > %s)
+              AND (
+                (a.decision = 'APPROVED'
+                 AND (a.expires_at IS NULL OR a.expires_at > %s))
+                OR EXISTS (
+                  SELECT 1
+                  FROM governance.mandate_decisions md
+                  WHERE md.mandate_version_id = p.mandate_version_id
+                    AND md.decision = 'APPROVE'
+                )
+              )
               AND p.effective_from <= %s
               AND (p.effective_to IS NULL OR p.effective_to > %s)
               AND EXISTS (

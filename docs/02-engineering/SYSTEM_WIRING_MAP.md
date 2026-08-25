@@ -62,7 +62,6 @@
 |---|---|---|---|
 | `portfolio-bff` | **[main] 새 프런트 관문 (정본 프로덕션 BFF).** 호스트 8001 을 가져갔다. 온보딩 프록시 5종(`/ui/mandates`, `/ui/mandate-assistant/suggest`…→governance-api), InvestorProfile(`/ui/investor-profiles`→accounting-api), **CEO Web/Discord mirror**(Redis Stream `hf:ui-ceo-mirror:v1`, dedupe TTL 7일) | **8001→8000** | ai-office·Discord |
 | `portfolio-worker` | [main] portfolio-bff 의 백그라운드 워커 (`portfolio_worker.py`). LangSmith 트레이싱 옵션 | — | — |
-| `ui-bff` | 기존 관문. CEO 질의 접수(`/ui/ceo/ask`), 공식 수치(`/ui/snapshot`), 부서 API 프록시. 에이전트 텍스트는 전부 `binding:false`. **[main] 호스트 게시 제거 — 내부 전용으로 강등** (로컬 실행 스택은 아직 8001 게시 중) | [main] 내부 8001 | (내부) |
 | `market-api` | 시세 읽기 전용. 타 부서는 TSDB 자격 없이 이것만 본다. `/snapshot` `/bars` `/breadth` `/dq` `/microstructure` | **8036** (0.0.0.0, 팀원 공유) | 회계 Mark·퀀트·리서치 애널리스트·BFF |
 | `research-api` | 기존 `research.*` Evidence의 **레거시 읽기 전용 호환면**. 신규 뉴스·공시·재무를 적재하지 않으며 현재 정보 조회는 `research-mcp`가 맡는다 | 8035 | 레거시 감사·시장 보조 조회 |
 | `research-mcp` | Hermes ↔ 요청형 외부정보·가설 공장·등록된 직원 Worker의 도구 면. 외부 응답은 비영속이며 쓰기는 lead/proposal/검토 같은 공장 원장에 한정 | 내부 8037 | research-hermes |
@@ -174,7 +173,7 @@
 ## 3. 카드가 도는 길 — 사용자 질의 (CEO ask)
 
 ```
-사용자 → ai-office → POST /ui/ceo/ask (ui-bff)
+사용자 → ai-office → POST /ui/ceo/ask (portfolio-bff)
                           │ ①뿌리 카드만 만들고 즉시 202 (assignee=ceo-agent)
                           │   생성은 docker exec → qa-hermes 의 hermes kanban create
                           │   scope 마커 comment 실패 시 503 fail-closed
@@ -322,7 +321,7 @@
 
 | 포트 | 서비스 | 노출 |
 |---|---|---|
-| 8001 | **[main] portfolio-bff** (컨테이너 8000) / 로컬 현행은 ui-bff | 호스트 전체 (프런트 진입점) |
+| 8001 | **portfolio-bff** (컨테이너 8000) | 호스트 전체 (프런트 진입점) |
 | 8036 | market-api | 0.0.0.0 (팀원 공유, Tailscale 전제) |
 | 5434 | timescaledb | 0.0.0.0 (팀원 읽기 계정 `hedgefund_ro`) |
 | 8035 | research-api | 127.0.0.1 |

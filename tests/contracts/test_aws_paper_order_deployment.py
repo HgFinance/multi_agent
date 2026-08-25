@@ -102,7 +102,7 @@ def test_database_bootstrap_image_receives_canonical_migration_trees() -> None:
     assert "COPY . ." in dockerfile
 
 
-def test_legacy_bff_stays_fixture_only_beside_private_operational_data() -> None:
+def test_portfolio_bff_stays_fixture_only_beside_private_operational_data() -> None:
     services = _yaml(OVERLAY_PATH)["services"]
     environment = services["portfolio-bff"]["environment"]
 
@@ -161,6 +161,18 @@ def test_conditional_rule_runtime_uses_two_dedicated_logins() -> None:
     assert worker["CONDITIONAL_RULE_WORKER_DATABASE_ROLE"] == (
         "svc_conditional_rule_worker"
     )
+    for service_name, database_key in {
+        "conditional-rule-worker": "CONDITIONAL_RULE_DATABASE_URL",
+        "conditional-rule-retention-worker": "CONDITIONAL_RULE_DATABASE_URL",
+        "conditional-rule-outbox-relay": "CONDITIONAL_RULE_DATABASE_URL",
+        "conditional-rule-notification-consumer": "CONDITIONAL_RULE_DATABASE_URL",
+    }.items():
+        environment = services[service_name]["environment"]
+        assert "DATABASE_URL" not in environment
+        assert "postgresql://hgfinance_conditional_worker:" in environment[database_key]
+        assert environment["CONDITIONAL_RULE_WORKER_DATABASE_ROLE"] == (
+            "svc_conditional_rule_worker"
+        )
     assert worker["TRADING_API_URL"] == "http://trading-api:8000"
     assert worker["MARKET_API_URL"] == "http://market-api:8036"
     assert "TRADING_SERVICE_AUTH_SECRET" not in worker
@@ -169,6 +181,19 @@ def test_conditional_rule_runtime_uses_two_dedicated_logins() -> None:
     assert root["services"]["conditional-rule-worker"]["build"]["dockerfile"] == (
         "Dockerfile.conditional-rule-worker"
     )
+    for service_name in (
+        "conditional-rule-worker",
+        "conditional-rule-retention-worker",
+        "conditional-rule-outbox-relay",
+        "conditional-rule-notification-consumer",
+    ):
+        environment = root["services"][service_name]["environment"]
+        assert "postgresql://hgfinance_conditional_worker:" in environment[
+            "CONDITIONAL_RULE_DATABASE_URL"
+        ]
+        assert "role%3Dsvc_conditional_rule_worker" in environment[
+            "CONDITIONAL_RULE_DATABASE_URL"
+        ]
     worker_image = (ROOT / "Dockerfile.conditional-rule-worker").read_text(
         encoding="utf-8"
     )
@@ -330,8 +355,22 @@ def test_every_active_database_consumer_is_overridden_by_aws_overlay() -> None:
             consumers.add(service_name)
 
     assert consumers <= set(overlay_services)
+    dedicated_only = {
+        "conditional-rule-worker": ("CONDITIONAL_RULE_DATABASE_URL",),
+        "conditional-rule-retention-worker": ("CONDITIONAL_RULE_DATABASE_URL",),
+        "conditional-rule-outbox-relay": ("CONDITIONAL_RULE_DATABASE_URL",),
+        "conditional-rule-notification-consumer": (
+            "ORDER_ORCHESTRATOR_DATABASE_URL",
+            "CONDITIONAL_RULE_DATABASE_URL",
+        ),
+    }
     for service_name in consumers:
         environment = overlay_services[service_name].get("environment") or {}
+        if service_name in dedicated_only:
+            assert "DATABASE_URL" not in environment, service_name
+            for key in dedicated_only[service_name]:
+                assert "timescaledb:5432" in environment[key], (service_name, key)
+            continue
         assert "DATABASE_URL" in environment, service_name
         assert "timescaledb:5432" in environment["DATABASE_URL"], service_name
         assert not environment["DATABASE_URL"].endswith("/market"), service_name

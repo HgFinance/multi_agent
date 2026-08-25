@@ -102,8 +102,51 @@ from risk_worker_skill_runtime.rag_router import choose_rag_route
 from risk_worker_skill_runtime.tools import invoke_tool
 from risk_worker_skill_runtime.trace import SkillTrace
 
-WorkerLLM = Callable[[str, str], str]
+WorkerLLM = Callable[..., str]
 WorkerTool = Callable[[dict[str, Any]], dict[str, Any]]
+
+_QUERY_MODES = (
+    "MANDATE_REVIEW",
+    "RISK_POLICY_REVIEW",
+    "LEGAL_QUERY",
+    "MIXED_REVIEW",
+    "NOT_APPLICABLE",
+)
+
+_WORKER_OUTPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "summary": {"type": "string"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "evidence_refs": {"type": "array", "items": {"type": "string"}},
+        "escalate": {"type": "boolean"},
+    },
+    "required": ["summary", "confidence", "evidence_refs", "escalate"],
+}
+
+_ROUTE_OUTPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "query_mode": {"type": "string", "enum": list(_QUERY_MODES)},
+        "routing_rationale": {"type": "string"},
+    },
+    "required": ["query_mode", "routing_rationale"],
+}
+
+
+def _invoke_llm(
+    llm: WorkerLLM,
+    system: str,
+    prompt: str,
+    schema: dict[str, Any],
+) -> str:
+    """Use guided JSON on the Gateway while preserving injected test doubles."""
+
+    if llm is default_worker_llm or getattr(llm, "_json_schema_capable", False):
+        return llm(system, prompt, json_schema=schema)
+    return llm(system, prompt)
 
 
 class WorkerState(TypedDict, total=False):
@@ -210,14 +253,19 @@ def _base_url() -> str:
     return raw if raw.endswith("/v1") else f"{raw}/v1"
 
 
-def default_worker_llm(system: str, prompt: str) -> str:
+def default_worker_llm(
+    system: str,
+    prompt: str,
+    *,
+    json_schema: dict[str, Any] | None = None,
+) -> str:
     """Call the configured Worker Model Gateway, or the local Ollama fallback."""
 
     if (os.getenv("WORKER_MODEL_BASE_URL") or "").strip():
         from departments.worker_model_gateway import llm_for_worker
 
         worker_llm, _binding = llm_for_worker("compliance-policy-worker")
-        return worker_llm(system, prompt)
+        return worker_llm(system, prompt, json_schema=json_schema)
 
     from openai import OpenAI
 
@@ -456,7 +504,8 @@ def build_worker_graph(
         for attempt in range(1, spec.max_attempts + 1):
             try:
                 output, schema_valid = _parse_worker_output(
-                    worker_llm(system, prompt), spec.worker_id
+                    _invoke_llm(worker_llm, system, prompt, _WORKER_OUTPUT_SCHEMA),
+                    spec.worker_id,
                 )
                 if schema_valid:
                     # 라우팅 결과를 그대로 흘려보낸다 - 부서장은 이 worker가 왜 그
@@ -560,13 +609,6 @@ def _core_risk_tool(payload: dict[str, Any]) -> dict[str, Any]:
 # ── compliance-policy-worker의 자체 라우팅 (RISK_MANDATE_WORKER_FLOW.md §11) ──────
 # 부서장이 query_mode를 구조화된 필드로 이미 보냈으면 그걸 우선한다(§4). 없고 자연어
 # 질문만 있으면 이 worker의 모델(Ollama, call_llm과 동일 인스턴스)이 직접 분류한다.
-_QUERY_MODES = (
-    "MANDATE_REVIEW",
-    "RISK_POLICY_REVIEW",
-    "LEGAL_QUERY",
-    "MIXED_REVIEW",
-    "NOT_APPLICABLE",
-)
 _LEGAL_QUERY_MODES = ("LEGAL_QUERY", "MIXED_REVIEW")
 
 _ROUTE_SYSTEM = (
@@ -599,7 +641,12 @@ def _route_query_mode(
         # 기존 RISK_POLICY_REVIEW 계약으로 취급한다 - 무근거로 NOT_APPLICABLE 단정 안 함.
         mode = "RISK_POLICY_REVIEW" if compliance else "NOT_APPLICABLE"
         return mode, "no_question_supplied", False
-    raw = worker_llm(_ROUTE_SYSTEM, f"Question: {question}")
+    raw = _invoke_llm(
+        worker_llm,
+        _ROUTE_SYSTEM,
+        f"Question: {question}",
+        _ROUTE_OUTPUT_SCHEMA,
+    )
     try:
         candidate = raw.strip()
         if "```" in candidate:

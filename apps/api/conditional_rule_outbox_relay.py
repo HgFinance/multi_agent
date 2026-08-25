@@ -63,7 +63,7 @@ def _settings() -> tuple[PostgresRuleWorkerStore, RedisConditionalRulePublisher,
     dsn = os.getenv("CONDITIONAL_RULE_DATABASE_URL", "").strip()
     if not dsn:
         raise RuntimeError("CONDITIONAL_RULE_DATABASE_URL is required")
-    redis_url = (os.getenv("CONDITIONAL_RULE_EVENT_REDIS_URL") or os.getenv("REDIS_URL", "")).strip()
+    redis_url = os.getenv("REDIS_URL", "").strip()
     if not redis_url:
         raise RuntimeError("REDIS_URL is required")
     store = PostgresRuleWorkerStore(

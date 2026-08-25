@@ -133,6 +133,44 @@ class DiscordIdempotencyTests(unittest.TestCase):
                 key,
             )
 
+    def test_existing_outbound_ledger_backfills_indexed_source_message(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            gateway = home / "gateway"
+            gateway.mkdir()
+            path = gateway / "discord_message_recovery.db"
+            with closing(sqlite3.connect(path)) as conn:
+                conn.execute(
+                    """CREATE TABLE discord_idempotency_outbound (
+                    response_key TEXT NOT NULL, dedup_key TEXT NOT NULL,
+                    profile TEXT NOT NULL, state TEXT NOT NULL,
+                    response_message_id TEXT, attempts INTEGER NOT NULL DEFAULT 1,
+                    updated_at TEXT NOT NULL, PRIMARY KEY (profile, response_key))"""
+                )
+                conn.execute(
+                    """INSERT INTO discord_idempotency_outbound
+                    VALUES (?, ?, ?, 'COMPLETED', ?, 1, ?)""",
+                    (
+                        "discord:g:thread:message-old:synthesis-detail:t_old",
+                        "discord:g:thread:message-old",
+                        "ceo-agent",
+                        "reply-old",
+                        "2026-08-25T00:00:00+00:00",
+                    ),
+                )
+                conn.commit()
+
+            store = DiscordIdempotencyStore(home)
+            store.outbound_message_id(
+                "discord:g:thread:message-old:synthesis-detail:t_old",
+                "ceo-agent",
+            )
+            with closing(sqlite3.connect(path)) as conn:
+                row = conn.execute(
+                    "SELECT source_message_id FROM discord_idempotency_outbound"
+                ).fetchone()
+            self.assertEqual(row[0], "message-old")
+
     def test_history_backfill_and_live_delivery_share_claim(self) -> None:
         key = canonical_discord_dedup_key("guild", "channel", "m-backfill")
         self.assertTrue(
@@ -265,6 +303,39 @@ class DiscordIdempotencyTests(unittest.TestCase):
         self.assertFalse(duplicate.admitted)
         self.assertTrue(duplicate.dedup_hit)
         self.assertEqual(duplicate.response_message_id, "reply-1")
+
+    def test_latest_completed_response_uses_parent_thread_correlation(self) -> None:
+        key = canonical_discord_dedup_key("guild", "parent", "m-answer")
+        self.store.claim_inbound(
+            dedup_key=key,
+            message_id="m-answer",
+            guild_id="guild",
+            channel_id="parent",
+            thread_id="thread",
+            profile="ceo-agent",
+            handler="live",
+        )
+        response_key = "discord:guild:thread:m-answer:synthesis-detail:t_synth"
+        self.store.claim_outbound(
+            response_key=response_key,
+            dedup_key="discord:guild:thread:m-answer",
+            profile="ceo-agent",
+        )
+        self.store.mark_outbound(
+            response_key,
+            "COMPLETED",
+            "ceo-agent",
+            "reply-previous",
+        )
+
+        self.assertEqual(
+            self.store.latest_completed_response(
+                profile="ceo-agent",
+                guild_id="guild",
+                channel_id="parent",
+            ),
+            ("reply-previous", "thread"),
+        )
 
     def test_failed_claim_is_bounded(self) -> None:
         key = canonical_discord_dedup_key("guild", "channel", "m-7")

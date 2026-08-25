@@ -32,6 +32,18 @@
 
 name: hedgefund
 
+# LangChain/LangGraph automatic callbacks otherwise serialize the full graph
+# state even when a run is tagged "redacted".  Keep this as one shared mapping
+# so every LangSmith-enabled service applies the same data boundary.
+x-langsmith-redaction: &langsmith-redaction
+  LANGSMITH_HIDE_INPUTS: "true"
+  LANGSMITH_HIDE_OUTPUTS: "true"
+
+# One least-privilege login owns every conditional-worker read model. Keeping
+# the DSN here prevents one consumer from silently falling back to the generic
+# runtime login, which cannot assume svc_conditional_rule_worker.
+x-conditional-worker-database-url: &conditional-worker-database-url "postgresql://hgfinance_conditional_worker:${HEDGEFUND_CONDITIONAL_WORKER_DB_PASSWORD:?HEDGEFUND_CONDITIONAL_WORKER_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_conditional_rule_worker"
+
 # ▶ Compose Fragment 분리(계획서 10절, 2026-08-03) - "본부가 자기 Compose Fragment를
 #   소유하도록 한다"는 목표 구조의 첫 단계다. 지금은 영주 소유 2개 부서(CEO Office, Agent
 #   Workforce)만 옮겼다 - 남의 본부 서비스를 대신 옮기지 않는다(CLAUDE.md 원칙). 나머지
@@ -67,6 +79,10 @@ services:
       HERMES_KANBAN_DB: /opt/kanban/kanban.db
       HERMES_CEO_API_URL: http://ceo-hermes:8642/v1
       HERMES_CEO_API_KEY: ${CEO_HERMES_API_KEY:-}
+      # The history endpoint reconstructs independent roots in parallel. Keep
+      # the local mock UI responsive when the bounded page contains many
+      # completed roots; callers can lower this for constrained hosts.
+      CEO_TASK_LIST_WORKERS: ${CEO_TASK_LIST_WORKERS:-8}
       # Canonical operational/control PostgreSQL connection only. Supabase Auth,
       # browser login, OAuth, user sessions, and bearer-user tokens are unsupported.
       DATABASE_URL: ${DATABASE_URL:?.env needs the private operational PostgreSQL DATABASE_URL}
@@ -107,6 +123,7 @@ services:
       # Optional metadata-only LangSmith root observation.  The BFF already
       # carries the SDK transitively through LangGraph; this wiring does not
       # change CEO/Kanban or execution control flow.
+      <<: *langsmith-redaction
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
@@ -145,7 +162,7 @@ services:
       UI_MIRROR_SSE_SECONDS: ${UI_MIRROR_SSE_SECONDS:-25}
       # These are the internal read/proxy endpoints used by apps.api.main.
       # The production portfolio BFF stays on the pinned Hermes CLI/local
-      # boundary above; it does not inherit ui-bff's Docker-exec transport.
+      # boundary above; it does not gain a Docker-exec transport.
       MARKET_API_URL: ${MARKET_API_URL:-http://market-api:8036}
       RESEARCH_API_URL: ${RESEARCH_API_URL:-http://research-api:8035}
       RISK_API_URL: ${RISK_API_URL:-http://risk-api:8000}
@@ -282,8 +299,13 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       UI_MIRROR_REDIS_URL: ${UI_MIRROR_REDIS_URL:-${REDIS_URL:-redis://redis:6379/0}}
       UI_MIRROR_STREAM: ${UI_MIRROR_STREAM:-hf:ui-ceo-mirror:v1}
-      UI_MIRROR_PROJECTION_BATCH_SIZE: ${UI_MIRROR_PROJECTION_BATCH_SIZE:-2}
+      # Fingerprints make unchanged workflows O(1), so scan the bounded Redis
+      # request page and hydrate only roots whose Kanban rows changed.
+      # Bound cold-start hydration. Once checkpoints exist, the SQLite event
+      # watermark and per-workflow digest make unchanged cycles effectively free.
+      UI_MIRROR_PROJECTION_BATCH_SIZE: ${UI_MIRROR_PROJECTION_BATCH_SIZE:-25}
       UI_MIRROR_PROJECTION_POLL_SECONDS: ${UI_MIRROR_PROJECTION_POLL_SECONDS:-5}
+      UI_MIRROR_PROJECTION_FULL_RECONCILE_SECONDS: ${UI_MIRROR_PROJECTION_FULL_RECONCILE_SECONDS:-600}
     volumes:
       - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
     healthcheck:
@@ -321,8 +343,9 @@ services:
       PORTFOLIO_AUTH_MODE: fixture
       PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: ${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:-[]}
       DATABASE_URL: ${DATABASE_URL:?.env needs the private operational PostgreSQL DATABASE_URL}
+      ORDER_ORCHESTRATOR_DATABASE_URL: postgresql://hgfinance_order_runtime:${HEDGEFUND_ORDER_DB_PASSWORD:?HEDGEFUND_ORDER_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}
       ORDER_ORCHESTRATOR_DATABASE_ROLE: ${ORDER_ORCHESTRATOR_DATABASE_ROLE:-svc_order_orchestrator}
-      CONDITIONAL_RULE_DATABASE_URL: ${CONDITIONAL_RULE_DATABASE_URL:-${DATABASE_URL:-}}
+      CONDITIONAL_RULE_DATABASE_URL: postgresql://hgfinance_conditional_orchestrator:${HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD:?HEDGEFUND_CONDITIONAL_ORCHESTRATOR_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}?options=-c%20role%3Dsvc_conditional_rule_orchestrator
       CONDITIONAL_RULE_DATABASE_ROLE: ${CONDITIONAL_RULE_DATABASE_ROLE:-svc_conditional_rule_orchestrator}
       TRADING_API_URL: ${TRADING_API_URL:-http://trading-api:8000}
       TRADING_SERVICE_AUTH_SECRET: ${TRADING_SERVICE_AUTH_SECRET:?A 32-byte trading service proof secret is required}
@@ -342,7 +365,13 @@ services:
       - "8046"
     healthcheck:
       test: ["CMD", "python", "-m", "apps.api.paper_order_mcp", "--healthcheck"]
-      interval: 10s
+      # This is a deep readiness probe (two scoped DB logins + Kanban +
+      # Trading API), not a cheap TCP liveness check.  Running it every 10s
+      # consumed roughly 2.1-2.6 CPU-seconds per probe under the 0.5 CPU
+      # quota.  Keep fast startup detection, then avoid competing with PAPER
+      # requests once the service is healthy.
+      interval: 60s
+      start_interval: 10s
       timeout: 8s
       retries: 5
       start_period: 20s
@@ -371,7 +400,7 @@ services:
     environment:
       PYTHONPATH: /app:/app/apps/api
       APP_ENV: ${APP_ENV:-production}
-      CONDITIONAL_RULE_DATABASE_URL: ${CONDITIONAL_RULE_DATABASE_URL:-${DATABASE_URL:-}}
+      CONDITIONAL_RULE_DATABASE_URL: *conditional-worker-database-url
       CONDITIONAL_RULE_WORKER_DATABASE_ROLE: ${CONDITIONAL_RULE_WORKER_DATABASE_ROLE:-svc_conditional_rule_worker}
       TRADING_API_URL: ${TRADING_API_URL:-http://trading-api:8000}
       MARKET_API_URL: ${MARKET_API_URL:-http://market-api:8036}
@@ -424,7 +453,7 @@ services:
     environment:
       PYTHONPATH: /app
       APP_ENV: ${APP_ENV:-production}
-      CONDITIONAL_RULE_DATABASE_URL: ${CONDITIONAL_RULE_OUTBOX_DATABASE_URL:-${CONDITIONAL_RULE_DATABASE_URL:-${DATABASE_URL:-}}}
+      CONDITIONAL_RULE_DATABASE_URL: *conditional-worker-database-url
       CONDITIONAL_RULE_WORKER_DATABASE_ROLE: ${CONDITIONAL_RULE_WORKER_DATABASE_ROLE:-svc_conditional_rule_worker}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       CONDITIONAL_RULE_EVENT_STREAM: ${CONDITIONAL_RULE_EVENT_STREAM:-hf:conditional-rule-events:v1}
@@ -464,13 +493,9 @@ services:
     environment:
       PYTHONPATH: /app:/app/apps/api
       APP_ENV: ${APP_ENV:-production}
-      PORTFOLIO_AUTH_MODE: ${PORTFOLIO_AUTH_MODE:-fixture}
-      PORTFOLIO_AUTH_REQUIRED: ${PORTFOLIO_AUTH_REQUIRED:-false}
-      PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: ${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:-[]}
-      DATABASE_URL: ${DATABASE_URL:-}
       ORDER_ORCHESTRATOR_DATABASE_URL: ${ORDER_ORCHESTRATOR_DATABASE_URL:-${DATABASE_URL:-}}
       ORDER_ORCHESTRATOR_DATABASE_ROLE: ${ORDER_ORCHESTRATOR_DATABASE_ROLE:-svc_order_orchestrator}
-      CONDITIONAL_RULE_DATABASE_URL: ${CONDITIONAL_RULE_NOTIFICATION_DATABASE_URL:-${CONDITIONAL_RULE_WORKER_DATABASE_URL:-${CONDITIONAL_RULE_DATABASE_URL:-${DATABASE_URL:-}}}}
+      CONDITIONAL_RULE_DATABASE_URL: *conditional-worker-database-url
       CONDITIONAL_RULE_WORKER_DATABASE_ROLE: ${CONDITIONAL_RULE_WORKER_DATABASE_ROLE:-svc_conditional_rule_worker}
       TRADING_API_URL: ${TRADING_API_URL:-http://trading-api:8000}
       TRADING_SERVICE_AUTH_SECRET: ${TRADING_SERVICE_AUTH_SECRET:?A 32-byte trading service proof secret is required}
@@ -490,6 +515,7 @@ services:
       NOTION_TRADING_DB: ${NOTION_TRADING_DB:-}
       # Reuse the existing redacted workflow trace and feedback projects. The
       # consumer emits only bounded semantic-QA metadata, never answer text.
+      <<: *langsmith-redaction
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
@@ -527,8 +553,8 @@ services:
     environment:
       PYTHONPATH: /app
       APP_ENV: ${APP_ENV:-production}
-      CONDITIONAL_RULE_RETENTION_DATABASE_URL: ${CONDITIONAL_RULE_RETENTION_DATABASE_URL:-${CONDITIONAL_RULE_DATABASE_URL:-${DATABASE_URL:-}}}
-      CONDITIONAL_RULE_RETENTION_DATABASE_ROLE: svc_conditional_rule_worker
+      CONDITIONAL_RULE_DATABASE_URL: *conditional-worker-database-url
+      CONDITIONAL_RULE_WORKER_DATABASE_ROLE: ${CONDITIONAL_RULE_WORKER_DATABASE_ROLE:-svc_conditional_rule_worker}
       CONDITIONAL_RULE_RETENTION_ENABLED: ${CONDITIONAL_RULE_RETENTION_ENABLED:-true}
       CONDITIONAL_RULE_RETENTION_INTERVAL_SECONDS: ${CONDITIONAL_RULE_RETENTION_INTERVAL_SECONDS:-86400}
       CONDITIONAL_RULE_RETENTION_BATCH_SIZE: ${CONDITIONAL_RULE_RETENTION_BATCH_SIZE:-500}
@@ -584,6 +610,7 @@ services:
       # The queued worker is an existing LangSmith metric producer through
       # orchestration/workflows/portfolio_recommendation.py. Keep its
       # workflow traces and high-frequency metric runs in separate projects.
+      <<: *langsmith-redaction
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
@@ -939,6 +966,7 @@ services:
       # 컨테이너 안의 127.0.0.1(기본값)로는 못 간다 - host.docker.internal 이
       # 컨테이너에서 호스트 Ollama 에 도달하는 유일한 경로다.
       OLLAMA_BASE_URL: http://host.docker.internal:11434
+      <<: *langsmith-redaction
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
@@ -998,6 +1026,7 @@ services:
       # 도구 면 인증(2026-08-02). 비면 무인증으로 열리고 기동 로그에 경고가
       # 찍힌다 - '잊은 것'과 '일부러 연 것'을 구분되게 한다.
       MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
+      <<: *langsmith-redaction
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
@@ -1050,6 +1079,8 @@ services:
       # 독립 회의론자 서명을 만들 수 없어 기획안 접수가 영구 차단된다.
       - ./departments/employee_worker_runtime.py:/app/departments/employee_worker_runtime.py:ro
       - ./departments/worker_model_gateway.py:/app/departments/worker_model_gateway.py:ro
+      - ./departments/qwen_hybrid_runtime.py:/app/departments/qwen_hybrid_runtime.py:ro
+      - ./benchmarks/quantization/knowledge/bok800_2026/glossary_rag_v1.json:/app/benchmarks/quantization/knowledge/bok800_2026/glossary_rag_v1.json:ro
       - ./departments/01-research/employee_workers.py:/app/departments/01-research/employee_workers.py:ro
       # employee_worker_runtime의 LLM 호출 계측(record_llm_call)
       - ./orchestration:/app/orchestration:ro
@@ -1245,6 +1276,7 @@ services:
       # 이 값은 Provider 키가 아니라 Profile의 mcp_servers.research.headers가 싣는
       # MCP 서버 자체 인증이라 그대로 둔다.
       MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
+      <<: *langsmith-redaction
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
@@ -1364,6 +1396,7 @@ services:
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
       # Risk's independent Qwen compliance worker emits its LangGraph worker
       # trace here; the shared project keeps it attached to the request tree.
+      <<: *langsmith-redaction
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
@@ -1409,6 +1442,7 @@ services:
       RISK_QA_DATABASE_URL: ${AUDIT_API_DATABASE_URL:-postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD:?HEDGEFUND_RUNTIME_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}}
       DATABASE_SESSION_URL: ${RISK_QA_DATABASE_SESSION_URL:-}
       DATABASE_RUNTIME_ROLE: ${AUDIT_API_DATABASE_RUNTIME_ROLE:-svc_audit_api}
+      <<: *langsmith-redaction
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
@@ -1602,6 +1636,7 @@ services:
       HERMES_GID: 1000
       HERMES_HOME: /opt/data
       HERMES_PROFILE: qa-department
+      <<: *langsmith-redaction
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
@@ -1806,7 +1841,7 @@ services:
       # Fast user-facing control-plane tasks only; standard analysis and
       # experiments keep profile budgets. The wrapper preserves explicit
       # per-task overrides and clamps these defaults to bounded ranges.
-      HGFINANCE_FAST_ADVISORY_MAX_TURNS: ${HGFINANCE_FAST_ADVISORY_MAX_TURNS:-12}
+      HGFINANCE_FAST_ADVISORY_MAX_TURNS: ${HGFINANCE_FAST_ADVISORY_MAX_TURNS:-8}
       HGFINANCE_USER_RESPONSE_MAX_TURNS: ${HGFINANCE_USER_RESPONSE_MAX_TURNS:-12}
       HGFINANCE_USER_RESPONSE_REASONING: ${HGFINANCE_USER_RESPONSE_REASONING:-medium}
       # The dispatcher spawns the department workers, so MCP profile headers are
@@ -1932,6 +1967,7 @@ services:
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
       # Optional metadata-only LangSmith root lifecycle close. This is
       # fail-open and does not participate in Supervisor decisions.
+      <<: *langsmith-redaction
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
@@ -1949,9 +1985,15 @@ services:
       NOTION_ACCOUNTING_DB: ${NOTION_ACCOUNTING_DB:-}
       NOTION_QA_DB: ${NOTION_QA_DB:-}
       NOTION_HR_DB: ${NOTION_HR_DB:-}
-      DATABASE_URL: ${DATABASE_URL:-}
-      RISK_QA_DATABASE_URL: ${RISK_QA_DATABASE_URL:-}
+      # The supervisor's legacy generic DB slot is kept for compatibility,
+      # but it must point at the same private control database as D5.
+      DATABASE_URL: ${CEO_SUPERVISOR_DATABASE_URL:-postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD:?HEDGEFUND_RUNTIME_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}}
+      RISK_QA_DATABASE_URL: ${CEO_SUPERVISOR_DATABASE_URL:-postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD:?HEDGEFUND_RUNTIME_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}}
       ACCOUNTING_API_URL: ${ACCOUNTING_API_URL:-http://accounting-api:8000}
+      # HR fast-advisory tasks receive one bounded projection from the existing
+      # Workforce API, avoiding repeated browser/shell discovery by Hermes.
+      WORKFORCE_API_URL: ${WORKFORCE_API_URL:-http://workforce-api:8000}
+      WORKFORCE_ADVISORY_TIMEOUT_SECONDS: ${WORKFORCE_ADVISORY_TIMEOUT_SECONDS:-0.75}
       # Accounting/Portfolio primary tasks get a read-only snapshot attached
       # to their task body (orchestration/accounting_advisory_context.py) -
       # that profile has no shell tool, so this is its only path to confirmed
@@ -2272,9 +2314,9 @@ services:
 
   # 페이퍼 전략 컨테이너(mlpipe-paper) 상태·전원 제어. `portfolio-bff`가 이
   # 저장소에서 유일하게 외부에 노출되는 서비스라 거기에 docker 소켓을 직접
-  # 물리지 않는다(`ui-bff`의 "Docker-exec transport"를 물려받지 않기로 한
-  # 결정과 같은 이유, 아래 ui-bff 주석 참고) - card-watchdog과 같은
-  # docker-outside-of-docker 선례를 그대로 따른다. host 포트를 publish하지
+  # 물리지 않는다. 정식 `portfolio-bff`의 HTTP 경계를 유지하고
+  # card-watchdog과 같은 docker-outside-of-docker 선례를 그대로 따른다.
+  # host 포트를 publish하지
   # 않는다 - `portfolio-bff`만 내부 네트워크로 부른다
   # (`STRATEGY_RUNTIME_API_URL`).
   strategy-runtime-control:
@@ -2298,84 +2340,6 @@ services:
       # 읽기 전용 - 이 서비스는 원장·팩 파일을 읽기만 한다. 쓰기는 컨테이너
       # 자신(mlpipe-paper)만 한다.
       - /home/ubuntu/mlpipe-paper:/mlpipe-paper:ro
-
-  # BFF (apps/api). 프런트(ai-office)가 붙는 유일한 관문이다.
-  # 이것도 호스트 셸 프로세스였다 - 프런트가 "BFF 연결 대기 중" 만 띄우고
-  # 아무도 왜인지 몰랐다. 공장 상주와 같은 이유로 컨테이너에 올린다.
-  ui-bff:
-    # Legacy duplicate of apps.api.main:app. The canonical production ingress
-    # is portfolio-bff above; keep this profile only for explicit rollback or
-    # comparison and never enable it in the default Compose stack.
-    profiles: ["legacy-ui-bff"]
-    image: hedgefund-factory:latest
-    container_name: hedgefund-ui-bff
-    restart: unless-stopped
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-    command: ["python", "-m", "uvicorn", "apps.api.main:app",
-              "--host", "0.0.0.0", "--port", "8001"]
-    depends_on:
-      timescaledb:
-        condition: service_healthy
-    environment:
-      DATABASE_URL: ${DATABASE_URL:?}
-      # Web/Discord CEO 미러링은 기존 Compose Redis를 request/event dedup 저장소로 사용한다.
-      # [local/test] Redis가 없으면 테스트에서 InMemoryMirrorStore를 명시적으로 주입한다.
-      # [production] AWS에서는 이 값을 비우지 않는다. 저장소 장애 시 CEO 요청을 503으로 차단한다.
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      UI_MIRROR_REDIS_URL: ${UI_MIRROR_REDIS_URL:-}
-      UI_MIRROR_STREAM: ${UI_MIRROR_STREAM:-hf:ui-ceo-mirror:v1}
-      UI_MIRROR_DEDUPE_TTL_SECONDS: ${UI_MIRROR_DEDUPE_TTL_SECONDS:-604800}
-      TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
-      # 부서 호출·카드 생성이 전부 docker exec 로 나간다.
-      HERMES_EXEC_MODE: docker
-      KANBAN_ACCESS_MODE: docker
-      KANBAN_CLI_CONTAINER: ${KANBAN_CLI_CONTAINER:-hedgefund-qa-hermes}
-      KANBAN_READER_CONTAINER: ${KANBAN_READER_CONTAINER:-hedgefund-qa-hermes}
-      # CEO 질의를 CLI 로 돌린다(API 키 없이). 2026-08-11 결정.
-      CEO_TRANSPORT: ${CEO_TRANSPORT:-cli}
-      ENABLE_CEO_CLI: ${ENABLE_CEO_CLI:-true}
-      MARKET_API_URL: http://market-api:8036
-      RESEARCH_API_URL: http://research-api:8035
-      # ▶ 부서 API 주소. **컨테이너 DNS 이름**이어야 한다.
-      #   risk.py 의 기본값은 `http://127.0.0.1:8041`(호스트 포트 매핑)이라
-      #   컨테이너 안에서는 자기 자신을 가리켜 connection refused 가 된다.
-      #   qa.py·governance_client.py 의 기본값은 빈 문자열이라 각각 503 /
-      #   NOT_CONFIGURED 로 조용히 죽는다 - 2026-08-12 기동 시 실제로 셋 다
-      #   그 상태였다(/health/ready 가 governance NOT_CONFIGURED 로 보고).
-      #   부서 API 의 컨테이너 내부 포트는 전부 8000 이다(통합 계획 10.3절).
-      RISK_API_URL: ${RISK_API_URL:-http://risk-api:8000}
-      QA_API_URL: ${QA_API_URL:-http://audit-api:8000}
-      GOVERNANCE_API_URL: ${GOVERNANCE_API_URL:-http://governance-api:8000}
-      WORKFORCE_API_URL: ${WORKFORCE_API_URL:-http://workforce-api:8000}
-      # ▶ 포트폴리오 파이프라인 Worker 런타임.
-      #   이 둘이 없으면 `_configured_worker_runtime()` 이 `deterministic_test`
-      #   로 떨어져 **부서 Worker 응답이 전부 TEST 고정문자열**이 된다. 컨테이너로
-      #   옮기면서 빠져 있었다. risk-api/audit-api 와 같은 host ollama 를 쓴다.
-      OLLAMA_BASE_URL: ${OLLAMA_DOCKER_BASE_URL:-http://host.docker.internal:11434/v1}
-      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-qwen3:1.7b}
-      OLLAMA_TIMEOUT_SECONDS: ${OLLAMA_TIMEOUT_SECONDS:-8}
-      PORTFOLIO_WORKER_RUNTIME: ${PORTFOLIO_WORKER_RUNTIME:-ollama}
-      # ▶ CEO 종합이 부서 산출물을 읽는 경로 (2026-08-12)
-      #   apps/api/ceo.py 의 `_artifact_text()` 는 완료 카드의 **첨부·작업공간
-      #   파일**을 읽는다. `result` 만 보면 부서가 몇 분씩 일한 결과가 통째로
-      #   비어 보이기 때문이다(그 파일 주석의 2026-08-11 실측).
-      #   그런데 이 컨테이너에 칸반이 안 물려 있어서 기본값
-      #   `~/.hermes-shared-kanban/...` 가 **존재하지 않는 경로**였고, 결국
-      #   모든 부서 카드의 산출물이 빈 문자열로 읽혔다. 호스트에는 첨부 35개·
-      #   작업공간 18개가 실제로 쌓여 있었다.
-      KANBAN_ATTACH_ROOT: /opt/kanban/kanban/attachments
-      KANBAN_WORKSPACE_ROOT: /opt/kanban/kanban/workspaces
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      # 읽기 전용이다 - BFF 는 산출물을 **읽기만** 한다. 카드 생성·전이는
-      # `docker exec` 로 hermes CLI 를 통해 나간다(KANBAN_ACCESS_MODE=docker).
-      - /home/ubuntu/.hermes/shared-kanban:/opt/kanban:ro
 
 volumes:
   redis_data:

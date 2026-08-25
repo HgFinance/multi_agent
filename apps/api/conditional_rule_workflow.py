@@ -70,6 +70,10 @@ class ConditionalRuleRepository(Protocol):
 
     def list_for_user(self, user_id: str) -> list[ConditionalRuleRecord]: ...
 
+    def find_by_directive_ids(
+        self, directive_ids: set[str]
+    ) -> dict[str, ConditionalRuleRecord]: ...
+
     def activate(
         self, rule_id: str, *, user_id: str, confirmation_sha256: str
     ) -> ConditionalRuleRecord: ...
@@ -134,6 +138,16 @@ class InMemoryConditionalRuleRepository:
             key=lambda record: (record.created_at, record.rule_id),
             reverse=True,
         )
+
+    def find_by_directive_ids(
+        self, directive_ids: set[str]
+    ) -> dict[str, ConditionalRuleRecord]:
+        wanted = {str(value) for value in directive_ids}
+        return {
+            str(record.directive_id): record
+            for record in self._records.values()
+            if record.directive_id is not None and str(record.directive_id) in wanted
+        }
 
     def activate(
         self, rule_id: str, *, user_id: str, confirmation_sha256: str
@@ -411,6 +425,42 @@ class PostgresConditionalRuleRepository:
                 return [self._row(row) for row in cursor.fetchall()]  # type: ignore[misc]
         except (psycopg2.Error, TypeError, ValueError) as exc:
             raise ConditionalRuleUnavailable("could not list conditional rules") from exc
+
+    def find_by_directive_ids(
+        self, directive_ids: set[str]
+    ) -> dict[str, ConditionalRuleRecord]:
+        wanted = [UUID(value) for value in sorted({str(value) for value in directive_ids})]
+        if not wanted:
+            return {}
+        try:
+            with self._connect() as connection, connection.cursor() as cursor:
+                self._set_role(cursor)
+                cursor.execute(
+                    f"""
+                    select {_SELECT}
+                      from execution.conditional_trade_rules r
+                      join execution.conditional_trade_rule_versions v
+                        on v.rule_id=r.rule_id and v.rule_version=r.current_version
+                     where exists (
+                       select 1
+                         from execution.conditional_rule_executions execution
+                        where execution.rule_id=r.rule_id
+                          and execution.directive_id=any(%s)
+                     )
+                     order by r.created_at desc,r.rule_id
+                    """,
+                    (wanted,),
+                )
+                records = [self._row(row) for row in cursor.fetchall()]
+                return {
+                    str(record.directive_id): record
+                    for record in records
+                    if record is not None and record.directive_id is not None
+                }
+        except (psycopg2.Error, TypeError, ValueError) as exc:
+            raise ConditionalRuleUnavailable(
+                "could not correlate conditional rule directives"
+            ) from exc
 
     def activate(
         self, rule_id: str, *, user_id: str, confirmation_sha256: str

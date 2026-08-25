@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import unittest
+from uuid import uuid4
 from unittest import mock
 
 # The BFF must remain testable in DEMO mode without attempting a configured
@@ -24,18 +25,43 @@ os.environ["PORTFOLIO_RUNTIME_STORE_PATH"] = os.path.join(
 from fastapi.testclient import TestClient
 
 from apps.api.main import _repo, app
-from apps.api.operations_read_model import _profile_data, _registry
+from apps.api.operations_read_model import (
+    _profile_data,
+    _registry,
+    agent_status_snapshot,
+    runtime_snapshot,
+)
 
 
 class OperatorBffOperationsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         _repo.cache_clear()
+        # Other API tests import the app before this module is collected.  The
+        # runtime singleton is therefore already bound to their durable test
+        # store and may contain a completed run.  Isolate this read-model suite
+        # at the same singleton boundary instead of relying on an environment
+        # variable that was read too late during module import.
+        cls._previous_runtime = runtime_snapshot.__globals__["RUNTIME"]
+        cls._previous_store_path = os.environ.get("PORTFOLIO_RUNTIME_STORE_PATH")
+        cls._isolated_store_path = os.path.join(
+            tempfile.gettempdir(), f"hgfinance-portfolio-operations-{uuid4().hex}.sqlite3"
+        )
+        os.environ["PORTFOLIO_RUNTIME_STORE_PATH"] = cls._isolated_store_path
+        # Use the exact module globals captured by the imported read-model
+        # functions; apps/api is also importable under a legacy top-level name.
+        agent_status_snapshot.__globals__["AGENT_STATUS_PROJECTOR"].reset()
+        runtime_snapshot.__globals__["RUNTIME"] = type(cls._previous_runtime)()
         cls.client = TestClient(app)
 
     @classmethod
     def tearDownClass(cls) -> None:
         cls.client.close()
+        runtime_snapshot.__globals__["RUNTIME"] = cls._previous_runtime
+        if cls._previous_store_path is None:
+            os.environ.pop("PORTFOLIO_RUNTIME_STORE_PATH", None)
+        else:
+            os.environ["PORTFOLIO_RUNTIME_STORE_PATH"] = cls._previous_store_path
 
     def test_snapshot_projects_department_and_event_contracts(self) -> None:
         response = self.client.get("/ui/snapshot")

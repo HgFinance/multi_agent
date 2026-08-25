@@ -136,6 +136,7 @@ class DiscordIdempotencyStore:
             CREATE TABLE IF NOT EXISTS discord_idempotency_outbound (
                 response_key TEXT NOT NULL,
                 dedup_key TEXT NOT NULL,
+                source_message_id TEXT,
                 profile TEXT NOT NULL,
                 state TEXT NOT NULL,
                 response_message_id TEXT,
@@ -145,6 +146,32 @@ class DiscordIdempotencyStore:
             )
             """
         )
+        outbound_columns = {
+            str(row[1])
+            for row in conn.execute(
+                "PRAGMA table_info(discord_idempotency_outbound)"
+            ).fetchall()
+        }
+        if "source_message_id" not in outbound_columns:
+            conn.execute(
+                "ALTER TABLE discord_idempotency_outbound "
+                "ADD COLUMN source_message_id TEXT"
+            )
+        # Backfill the exact correlation already encoded in every canonical
+        # dedup key.  Discord ids contain no colon, so the final segment is
+        # deterministic and lets future lookups use an indexed equality join.
+        for row in conn.execute(
+            "SELECT profile, response_key, dedup_key "
+            "FROM discord_idempotency_outbound "
+            "WHERE source_message_id IS NULL OR source_message_id=''"
+        ).fetchall():
+            source_message_id = str(row[2] or "").rsplit(":", 1)[-1]
+            if source_message_id:
+                conn.execute(
+                    "UPDATE discord_idempotency_outbound "
+                    "SET source_message_id=? WHERE profile=? AND response_key=?",
+                    (source_message_id, row[0], row[1]),
+                )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_discord_idem_inbound_message "
             "ON discord_idempotency_inbound(message_id)"
@@ -156,6 +183,14 @@ class DiscordIdempotencyStore:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_discord_idem_inbound_updated "
             "ON discord_idempotency_inbound(updated_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_discord_idem_inbound_conversation "
+            "ON discord_idempotency_inbound(profile, guild_id, channel_id, thread_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_discord_idem_outbound_source "
+            "ON discord_idempotency_outbound(profile, source_message_id, updated_at)"
         )
         cutoff = (datetime.now(timezone.utc) - self._retention).isoformat()
         conn.execute(
@@ -435,6 +470,52 @@ class DiscordIdempotencyStore:
 
         return self._run(operation)
 
+    def latest_completed_response(
+        self,
+        *,
+        profile: str,
+        guild_id: str,
+        channel_id: str,
+    ) -> tuple[str, str] | None:
+        """Return the latest CEO answer in the same Discord conversation.
+
+        The outbound row owns the published message id while the inbound row
+        owns parent/thread correlation.  Joining those existing ledgers keeps
+        a short ``대답`` control message from creating another workflow or a
+        second response cache.
+        """
+
+        def operation(conn: sqlite3.Connection) -> tuple[str, str] | None:
+            row = conn.execute(
+                """
+                SELECT o.response_message_id,
+                       COALESCE(i.thread_id, i.channel_id) AS response_channel_id
+                  FROM discord_idempotency_outbound o
+                  JOIN discord_idempotency_inbound i
+                    ON i.profile=o.profile
+                   AND o.source_message_id=i.message_id
+                 WHERE o.profile=?
+                   AND o.state='COMPLETED'
+                   AND o.response_message_id IS NOT NULL
+                   AND i.guild_id=?
+                   AND (i.channel_id=? OR i.thread_id=?)
+                   AND (
+                        o.response_key LIKE '%:synthesis-detail:%'
+                        OR o.response_key LIKE '%:ceo-direct:%'
+                        OR o.response_key LIKE '%:ceo-blocked:%'
+                        OR o.response_key LIKE '%:final'
+                   )
+                 ORDER BY o.updated_at DESC
+                 LIMIT 1
+                """,
+                (profile, guild_id, channel_id, channel_id),
+            ).fetchone()
+            if row is None or not row[0] or not row[1]:
+                return None
+            return str(row[0]), str(row[1])
+
+        return self._run(operation)
+
     def claim_outbound(self, *, response_key: str, dedup_key: str, profile: str) -> ClaimResult:
         """Atomically reserve one final response publication."""
 
@@ -462,9 +543,15 @@ class DiscordIdempotencyStore:
                 return ClaimResult(True, False, "PROCESSING", row[1])
             conn.execute(
                 "INSERT INTO discord_idempotency_outbound "
-                "(response_key, dedup_key, profile, state, updated_at) "
-                "VALUES (?, ?, ?, 'PROCESSING', ?)",
-                (response_key, dedup_key, profile, now),
+                "(response_key, dedup_key, source_message_id, profile, state, updated_at) "
+                "VALUES (?, ?, ?, ?, 'PROCESSING', ?)",
+                (
+                    response_key,
+                    dedup_key,
+                    str(dedup_key).rsplit(":", 1)[-1],
+                    profile,
+                    now,
+                ),
             )
             return ClaimResult(True, False, "PROCESSING")
 

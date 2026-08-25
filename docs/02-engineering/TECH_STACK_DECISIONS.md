@@ -19,7 +19,7 @@
 | LangGraph | 필수 | 투자위원회, Strategy Promotion과 승인 가능한 상태 Workflow |
 | Amazon Bedrock Claude | 필수 | Production/통합 환경의 주 LLM |
 | Ollama | 필수 | 로컬 개발, Offline Test, 저비용 보조 모델과 Embedding |
-| Supabase | 필수 | PostgreSQL, pgvector, Auth, 문서·Artifact Storage |
+| Supabase PostgreSQL | 필수 | PostgreSQL, pgvector, 문서·Artifact Storage (사용자 Auth 제외) |
 | Docker | 필수 | 서비스별 Runtime 격리와 재현 가능한 개발 환경 |
 | Render | 보류 | 초기 Demo 배포 후보, 실시간 Worker 적합성 검증 전 미확정 |
 | Frontend | `ai-office` 기반 Next.js + React + TypeScript | Pixel Office와 운영 Dashboard를 결합한 Operator Control Plane |
@@ -549,7 +549,7 @@ LangSmith는 선택적 개발 추적 어댑터다. 기본 tracing은 `LANGSMITH_
 
 ## 17. 최종 결정
 
-> Hermes는 사용자-facing CIO Supervisor, LangGraph는 투자 Workflow, Bedrock Claude는 주 LLM, Ollama는 로컬·저비용 Model, Supabase는 Transaction·Vector·Auth·Storage, 별도 TimescaleDB는 리서치·퀀트 시계열, Redis는 Queue·Hot State, Docker는 Runtime 경계로 사용한다. FastAPI/Pydantic/SQLAlchemy가 Domain API를 구성하고 Polars/Parquet/DuckDB가 시장 데이터와 연구 Dataset을 처리한다. Frontend는 `ai-office` 기반 Next.js·React·TypeScript로 확정하며 Pixel Office와 업무 Dashboard를 결합한다. UI는 공식 Backend 상태의 Projection과 승인 요청만 담당하고 Risk, OMS와 거래 원장은 결정론적 Backend가 독점한다.
+> Hermes는 사용자-facing CIO Supervisor, LangGraph는 투자 Workflow, Bedrock Claude는 주 LLM, Ollama는 로컬·저비용 Model, Supabase PostgreSQL은 Transaction·Vector·Storage, 별도 TimescaleDB는 리서치·퀀트 시계열, Redis는 Queue·Hot State, Docker는 Runtime 경계로 사용한다. 이 로컬 모의투자 범위에는 사용자 Auth·로그인·세션을 구현하지 않는다. FastAPI/Pydantic/SQLAlchemy가 Domain API를 구성하고 Polars/Parquet/DuckDB가 시장 데이터와 연구 Dataset을 처리한다. Frontend는 `ai-office` 기반 Next.js·React·TypeScript로 확정하며 Pixel Office와 업무 Dashboard를 결합한다. UI는 공식 Backend 상태의 Projection과 승인 요청만 담당하고 Risk, OMS와 거래 원장은 결정론적 Backend가 독점한다.
 
 Kafka/Redpanda, Flink, ClickHouse, Feast, Neo4j, Ray와 Kubernetes는 현재 Core 확정 스택이 아니다.
 부하, Replay, Feature 일관성, Graph Query, 분산 연구 또는 배포 격리 문제가 실측되고 기존 스택이

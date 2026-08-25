@@ -14,7 +14,9 @@ import importlib.util
 import json
 import operator
 import os
+import re
 import sys
+import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -489,6 +491,124 @@ def _load_control_db_adapter() -> Any:
     return module
 
 
+_SYMBOL_CACHE: dict[str, str] | None = None
+
+
+def _symbol_lookup() -> dict[str, str]:
+    """회사명 -> 종목코드. control DB 에서 한 번만 읽는다.
+
+    실패해도 죽지 않는다 - 이름표가 없으면 종목을 못 찾을 뿐이고, 그건
+    "가격 근거 없음"으로 정직하게 이어진다.
+    """
+    global _SYMBOL_CACHE
+    if _SYMBOL_CACHE is not None:
+        return _SYMBOL_CACHE
+    table: dict[str, str] = {}
+    try:
+        import psycopg2
+
+        dsn = os.environ.get("DATABASE_URL", "")
+        if dsn:
+            with psycopg2.connect(dsn, connect_timeout=10) as conn, conn.cursor() as cur:
+                cur.execute(
+                    "SELECT i.display_name, s.symbol "
+                    "FROM reference.instruments AS i "
+                    "JOIN reference.instrument_symbols AS s "
+                    "  ON s.instrument_id = i.instrument_id AND s.is_primary "
+                    "WHERE i.display_name IS NOT NULL AND i.market = 'KRX'")
+                for name, symbol in cur:
+                    name = (name or "").strip()
+                    symbol = (symbol or "").strip()
+                    if len(name) >= 2 and len(symbol) == 6 and symbol.isdigit():
+                        table[name] = symbol
+    except Exception:  # noqa: BLE001, S110 - 이름표는 부가 기능이다
+        pass
+    _SYMBOL_CACHE = table
+    return table
+
+
+def _symbol_in_query(query: str) -> tuple[str, str] | None:
+    """질의에서 종목을 찾는다. (종목코드, 회사명) 또는 None."""
+    text = str(query or "")
+    match = re.search(r"\b(\d{6})\b", text)
+    table = _symbol_lookup()
+    if match:
+        code = match.group(1)
+        name = next((n for n, c in table.items() if c == code), code)
+        return code, name
+    # 긴 이름부터 본다 - "삼성전자우"가 "삼성전자"보다 먼저 잡혀야 한다.
+    for name in sorted(table, key=len, reverse=True):
+        if name in text:
+            return table[name], name
+    return None
+
+
+def _query_news_evidence(query: str) -> dict[str, Any]:
+    """질의 종목의 뉴스·공시. research-mcp 조회면 경유(자격은 거기 그대로).
+
+    portfolio-worker 는 NAVER/DART 자격이 **없다** - 그게 맞는 경계다. 결과만
+    받아 온다. 실패하면 사유를 남기고 뉴스 없이 진행한다.
+    """
+    found = _symbol_in_query(query)
+    if not found:
+        return {"status": "NO_SYMBOL",
+                "reason": "질의에서 상장 종목을 특정하지 못했다"}
+    symbol, name = found
+    base = os.environ.get("RESEARCH_MCP_URL", "").strip().rstrip("/")
+    if not base:
+        return {"status": "NOT_CONFIGURED", "symbol": symbol, "company": name,
+                "reason": "RESEARCH_MCP_URL 미설정 - 뉴스·공시 조회면이 배선되지 않았다"}
+    token = os.environ.get("MCP_RESEARCH_API_KEY", "").strip()
+    req = urllib.request.Request(f"{base}/evidence/holdings/{symbol}")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            data = json.loads(resp.read())
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "UNAVAILABLE", "symbol": symbol, "company": name,
+                "reason": f"research-mcp 조회 실패: {type(exc).__name__}"}
+    sources = data.get("sources") or {}
+    return {
+        "status": "OK",
+        "symbol": symbol,
+        "company": data.get("company") or name,
+        "source_status": {k: (v or {}).get("status") for k, v in sources.items()},
+        "headlines": [{"ref": h.get("ref"), "title": h.get("title"),
+                       "published_at": h.get("published_at"),
+                       "evidence_id": h.get("evidence_id")}
+                      for h in (data.get("news_headlines") or [])[:6]],
+        "disclosures": [{"ref": d.get("ref"), "title": d.get("title"),
+                         "published_at": d.get("published_at"),
+                         "evidence_id": d.get("evidence_id")}
+                        for d in (data.get("disclosures_7d") or [])[:5]],
+        "evidence_tier": "OBSERVED",
+        "note": "제목만 실었다. 호재/악재 판정은 하지 않았다.",
+    }
+
+def _query_price_levels(query: str) -> dict[str, Any]:
+    """질의가 가리키는 종목의 가격 근거. 실패는 사유를 남긴다."""
+    found = _symbol_in_query(query)
+    if not found:
+        return {"status": "NO_SYMBOL",
+                "reason": "질의에서 상장 종목을 특정하지 못했다"}
+    symbol, name = found
+    base = os.environ.get("MARKET_API_URL", "http://market-api:8036").rstrip("/")
+    try:
+        with urllib.request.urlopen(f"{base}/levels/{symbol}", timeout=25) as resp:
+            data = json.loads(resp.read())
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "UNAVAILABLE", "symbol": symbol, "company": name,
+                "reason": f"market-api /levels 실패: {type(exc).__name__}"}
+    keep = ("status", "last_close", "atr", "supports", "resistances",
+            "entry_low", "entry_high", "target", "stop", "reward_risk",
+            "risk_pct", "target_basis", "stop_basis", "reason", "caveat")
+    out = {k: data.get(k) for k in keep if data.get(k) is not None}
+    out.update(symbol=symbol, company=name, source="market-api /levels",
+               evidence_tier="DERIVED")
+    return out
+
+
 def _profile_context(profile: Mapping[str, Any]) -> dict[str, Any]:
     # User identity is not forwarded to employee Workers.
     return {key: value for key, value in profile.items() if key != "user_id"}
@@ -696,10 +816,19 @@ def _stage_payload(state: PortfolioPipelineState, stage: str) -> dict[str, Any]:
                 "incident_events": [],
             }
         )
+    # ▶ 가격 근거. 없으면 Worker 가 목표가를 스스로 지어낸다. 서버가 일봉에서
+    #   결정론으로 낸 값을 실어 **설명만** 하게 한다.
+    _q = _user_query(state)
+    price_levels = (_query_price_levels(_q) if _q
+                    else {"status": "NO_QUERY", "reason": "자유 질의가 아니다"})
+    news_evidence = (_query_news_evidence(_q) if _q
+                     else {"status": "NO_QUERY", "reason": "자유 질의가 아니다"})
+
     context: dict[str, Any] = {
         "trace_id": state.get("trace_id", ""),
         "case_id": state.get("case_id", ""),
         "as_of": state.get("as_of", ""),
+
         "input_hash": _hash(
             {
                 "trace_id": state.get("trace_id"),
@@ -743,11 +872,18 @@ def _stage_payload(state: PortfolioPipelineState, stage: str) -> dict[str, Any]:
             "status": accounting_context.get("status", default_status),
             "candidates": state.get("portfolio_candidates", []),
             "broker_account": _broker_account_context(),
+            # ▶ holdings-analyst-worker 의 input_fields 는
+            #   (holding_question, portfolio_state, news) 뿐이다. 최상단에
+            #   실으면 **워커에게 영원히 안 보인다** - MCP 경로에서 같은
+            #   함정에 한 번 빠졌다(2026-08-25).
+            "price_levels": price_levels,
         },
         "task_plan": state.get("task_plan", {}),
         "portfolio_suitability": state.get("suitability_context", {}),
         "portfolio_candidates": state.get("portfolio_candidates", []),
         "data_source": data_context.get("source", "TEST"),
+        "price_levels_status": price_levels.get("status"),
+        "news_evidence_status": news_evidence.get("status"),
         "worker_runtime": _configured_worker_runtime(),
         "data_quality": data_context.get("quality_status", "TEST"),
         "read_only": True,
@@ -764,7 +900,13 @@ def _stage_payload(state: PortfolioPipelineState, stage: str) -> dict[str, Any]:
         "price_history": {"status": default_status},
         "fundamentals": {"status": default_status},
         "filings": {"status": default_status},
-        "news": {"status": default_status},
+        # ▶ holdings-analyst-worker 의 input_fields 중 하나가 `news` 다.
+        #   여기 안 실으면 Worker 에게 영원히 안 보인다. 이 키는 dict 안에서
+        #   **한 번만** 정의해야 한다 - 앞에 따로 넣었다가 이 줄에 덮여
+        #   요청 시점 근거가 통째로 사라진 적이 있다(2026-08-25 실측:
+        #   payload 의 news 가 {"status": ...} 뿐이었다).
+        "news": {"status": default_status,
+                 "request_time_evidence": news_evidence},
         "macro": {"status": default_status},
         "geopolitical": {"status": default_status},
         "order_book": {"status": default_status},
@@ -956,7 +1098,7 @@ async def _invoke_worker(
             }
         )
     configured_runtime = _configured_worker_runtime()
-    use_ollama = configured_runtime in {"ollama", "live"}
+    deterministic_test = configured_runtime == "deterministic_test"
     # ▶ 2026-08-24: default_worker_llm(Ollama 하드코딩) 대신 Worker Model
     #   Gateway(departments/worker_model_gateway.py)로 모델 좌표를 해석한다.
     #   WORKER_MODEL_BASE_URL이 설정된 배포(vLLM/Qwen2.5-14B-AWQ)에서는 그
@@ -968,15 +1110,14 @@ async def _invoke_worker(
     #   원인이 여기였다(evidence-wiring-audit, 2026-08-24).
     gateway_llm, gateway_binding = llm_for_worker(spec.worker_id)
     worker_llm = gateway_llm
-    if str(payload.get("source", "TEST")).upper() == "TEST":
-        # Let the operator projection observe a real running Worker graph in
-        # local TEST mode; this does not create work or alter any result.
+    if deterministic_test:
+        # Explicit test mode is independent of the data adapter.  A control-DB
+        # snapshot is still a read-only fixture in this test contract; it must
+        # not accidentally turn the test into a network call to Ollama/vLLM.
+        # The generated report remains non-binding and is still validated by
+        # the same Worker graph and contract boundary.
         await asyncio.sleep(float(os.getenv("PORTFOLIO_WORKER_UI_YIELD_SECONDS", "0.15")))
-        worker_llm = (
-            gateway_llm
-            if use_ollama
-            else _deterministic_worker_llm
-        )
+        worker_llm = _deterministic_worker_llm
     metric_token = begin_worker_metric(
         worker_id=spec.worker_id,
         role=spec.role,
@@ -1285,15 +1426,51 @@ def build_portfolio_recommendation_graph(
             }
         }
 
-    def _live_worker_inputs_ready(state: PortfolioPipelineState) -> bool:
-        """Allow live workers only when the canonical PIT packet is usable."""
+    def _live_worker_mode(state: PortfolioPipelineState) -> str:
+        """이 실행이 포트폴리오 **구성**인가 종목 **자문**인가.
+
+        둘은 다른 산출물이고 필요한 입력도 다르다.
+
+        PORTFOLIO_BUILD - 후보 포트폴리오 중에서 고른다. `portfolio_candidates`
+          (strategy.versions 의 승격된 target_portfolio_schema)와 PIT 유니버스가
+          반드시 있어야 한다. 없는 후보 중에서 고를 수는 없다.
+
+        ADVISORY_BRIEF - 사용자가 특정 종목·시장을 물었다. Worker 가 실제로
+          읽는 것은 요청 시점 근거(뉴스·공시·가격레벨·시세문맥)뿐이고
+          `portfolio_candidates` 도 `market["snapshots"]` 도 **한 번도 안 읽는다**
+          (2026-08-25 확인: snapshots 는 이 게이트와 진단 카운트에만 등장한다).
+        """
         data_context = state.get("data_context", {})
         if data_context.get("source") == "TEST":
+            return "TEST"
+        return "ADVISORY_BRIEF" if _user_query(state) else "PORTFOLIO_BUILD"
+
+    def _live_worker_inputs_ready(state: PortfolioPipelineState) -> bool:
+        """Allow live workers when the inputs they actually read are usable.
+
+        예전에는 두 모드가 같은 엄격 게이트를 탔다. 그래서 "삼성전자 어때?"
+        라는 질문이 **아무도 채우지 않는 표 두 개** 때문에 차단됐다
+        (execution.market_snapshots·strategy.versions 는 저장소에 쓰는 코드가
+        없고 런타임 롤에 SELECT 권한만 있다).
+
+        **좁힌 것은 Worker 실행 조건뿐이다.** 적합성 판정·주문·구속력은 그대로다 -
+        후보가 비면 suitability 는 여전히 NO_MATCH 이고 safe_action 은 HOLD 다.
+        답변의 정직성은 근거 등급 계층이 진다(검증 안 된 것은 `[미검증]`,
+        예측력이 측정된 긍정 근거가 없으면 `정보제공` 이지 `투자권유` 가 아니다).
+        """
+        mode = _live_worker_mode(state)
+        if mode == "TEST":
+            return True
+        data_context = state.get("data_context", {})
+        if data_context.get("source") != "CONTROL_DB":
+            return False
+        if mode == "ADVISORY_BRIEF":
+            # 요청 시점 근거는 MCP 가 조회한다. control DB 에도 못 붙었으면
+            # 위에서 이미 걸러졌다.
             return True
         market = data_context.get("market", {})
         return (
-            data_context.get("source") == "CONTROL_DB"
-            and data_context.get("quality_status") == "PASS"
+            data_context.get("quality_status") == "PASS"
             and bool(state.get("portfolio_candidates"))
             and bool(market.get("snapshots"))
         )
@@ -1308,7 +1485,10 @@ def build_portfolio_recommendation_graph(
             f"시장 스냅샷 {diagnostics.get('market_snapshot_count', 0)}개 · "
             f"국내 종목 {diagnostics.get('domestic_instrument_count', 0)}개"
         )
-        return f"PIT 입력이 준비되지 않아 안전하게 실행을 차단했습니다. {counts} · 사유: {', '.join(map(str, reasons[:3]))}"
+        mode = _live_worker_mode(state)
+        return (f"PIT 입력이 준비되지 않아 안전하게 실행을 차단했습니다"
+                f"(mode={mode}). {counts} · "
+                f"사유: {', '.join(map(str, reasons[:3]))}")
 
 
     def _safe_skip_reports(

@@ -193,6 +193,33 @@ class CeoRootDiscordBridgeTest(unittest.TestCase):
 
             close.assert_called_once()
 
+    def test_root_trace_close_can_attribute_single_primary_department(self):
+        with tempfile.TemporaryDirectory() as home:
+            service = self.service(home, DeliverySpy())
+            root = {
+                "id": "root-hr-trace",
+                "status": "done",
+                "body": root_body("langsmith_trace_context=trace-root\n"),
+            }
+
+            with patch(
+                "orchestration.llm_observability.close_root_trace",
+                return_value=True,
+            ) as close:
+                self.assertTrue(
+                    service._close_root_trace(
+                        root_id="root-hr-trace",
+                        root_payload=root,
+                        status="completed",
+                        department="hr-department",
+                        task_id="t_hr_primary",
+                    )
+                )
+
+            kwargs = close.call_args.kwargs
+            self.assertEqual(kwargs["department"], "hr-department")
+            self.assertEqual(kwargs["task_id"], "t_hr_primary")
+
 
 class CeoRootFastPathTest(unittest.TestCase):
     class FastClient(FakeClient):

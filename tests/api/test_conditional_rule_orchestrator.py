@@ -230,6 +230,7 @@ def test_multiple_price_actions_activate_as_independent_one_shot_rules(
 
     assert result["binding"] is True
     assert result["rule_active"] is True
+    assert "현재 상태 조회 결과가 아닙니다" in result["user_message"]
     assert len(result["rule_ids"]) == 2
     stored = rules.list_for_user(USER_ID)
     assert len(stored) == 2
@@ -324,3 +325,29 @@ def test_status_reader_reuses_linked_rule_and_authoritative_directive(
     assert status["average_fill_price"] == "248250"
     assert "체결 수량 : 1주" in status["final_answer"]
     assert "평균 체결가 : 248,250원" in status["final_answer"]
+
+
+def test_status_reader_does_not_describe_expired_rule_as_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _orders, rules, _tasks = _install_workflow(monkeypatch)
+    activated = orchestrator.process_user_conditional_paper_rule(
+        root_task_id="t_root1",
+        trading_task_id="t_trade1",
+        candidate=_candidate(),
+    )
+    stored = rules.get(activated["rule_id"], user_id=USER_ID)
+    assert stored is not None
+    rules._records[stored.rule_id] = stored.__class__(
+        **{**stored.__dict__, "state": RuleState.EXPIRED}
+    )
+
+    status = orchestrator.get_user_conditional_paper_rule_status(
+        root_task_id="t_root1",
+        trading_task_id="t_trade1",
+    )
+
+    assert status["rule_state"] == "EXPIRED"
+    assert status["workflow_state"] == "EXPIRED"
+    assert "현재 EXPIRED 상태" in status["final_answer"]
+    assert "활성 상태" not in status["final_answer"]

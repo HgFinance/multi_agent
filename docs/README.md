@@ -55,7 +55,7 @@ config/code/test evidence를 먼저 확인한다.
 - Hermes Kanban을 Agent 상태 Source로 사용하는 [ADR-0001](02-engineering/adr/0001-hermes-kanban-agent-status-bridge.md)
 - 공식 X API 기반 유명 인사 Social Insight Watchlist와 교차 검증 계획(P1, 미구현)
 
-이 구현을 Production 준비 상태로 해석하면 안 된다. `ai-office`의 조직 화면은 8개 단위로 바뀌었지만 직원 업무는 여전히 Scripted Simulation이고 BFF Snapshot은 테스트 Paper Loop 기반 DEMO다. LS WebSocket Worker와 조회 API는 실행 중이지만 프로젝트 전용 Redis Event Bus, Trading·Risk·Accounting·QA Container, 공식 Read Model, Kanban Status Bridge, Auth와 10거래일 Paper Dry Run은 아직 남아 있다. Canonical Execution/Risk/Accounting DB에도 실제 Case 행이 없다. `/agent/ask`는 인증·Tool Allowlist 전까지 기본 비활성화한다. 루트 `db/` Prototype은 `supabase/migrations/` 통합 기준과 병행 적용하지 않는다.
+이 구현을 Production 준비 상태로 해석하면 안 된다. `ai-office`의 조직 화면은 8개 단위로 바뀌었지만 직원 업무는 여전히 Scripted Simulation이고 BFF Snapshot은 테스트 Paper Loop 기반 DEMO다. LS WebSocket Worker와 조회 API는 실행 중이지만 프로젝트 전용 Redis Event Bus, Trading·Risk·Accounting·QA Container, 공식 Read Model, Kanban Status Bridge와 10거래일 Paper Dry Run은 아직 남아 있다. 외부 사용자 Auth·로그인·세션은 이 로컬 모의투자 범위에 포함하지 않는다. Canonical Execution/Risk/Accounting DB에도 실제 Case 행이 없다. `/agent/ask`는 서비스 권한·Tool Allowlist 전까지 기본 비활성화한다. 루트 `db/` Prototype은 `supabase/migrations/` 통합 기준과 병행 적용하지 않는다.
 
 첫 번째 목표는 실제 자금 운용이 아니다. 단일 사용자와 단일 주식시장을 대상으로 다음 폐쇄 루프를 완성하는 것이다.
 
@@ -268,7 +268,7 @@ flowchart TB
 | LangGraph | 투자위원회와 Strategy Workflow 상태 관리 |
 | Bedrock Claude | 통합·Production 환경의 주 LLM |
 | Ollama | 로컬 개발, 테스트와 저비용 보조 모델 |
-| Supabase | PostgreSQL, pgvector, Auth와 Artifact Metadata |
+| Supabase PostgreSQL | PostgreSQL, pgvector와 Artifact Metadata (사용자 로그인/Auth는 구현하지 않음) |
 | Redis | Event Queue, 최신 상태 Cache와 Dedup |
 | Docker | 서비스별 Runtime 격리 |
 | FastAPI | 위험한 Command를 포함한 Backend API |

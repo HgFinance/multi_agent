@@ -348,6 +348,39 @@ def build_app(server, *, token: str | None):
                      "detail": "MCP_RESEARCH_API_KEY 가 필요하다"}, status_code=401)
             return await call_next(request)
 
+    # ── 종목 근거 REST 조회면 ────────────────────────────────────────
+    # 뉴스·공시 자격은 여기에만 있다. 다른 서비스가 자격을 갖는 대신
+    # 이 경로로 물어본다(market-api /levels 와 같은 패턴).
+    async def holdings_evidence(request):
+        symbol = request.path_params.get("symbol", "").strip()
+        if not (len(symbol) == 6 and symbol.isalnum()):
+            return JSONResponse({"error": "bad_symbol",
+                                 "detail": "6자리 종목코드가 필요하다"},
+                                status_code=400)
+        import anyio
+
+        try:
+            evidence = await anyio.to_thread.run_sync(
+                gather_holdings_evidence, symbol)
+        except Exception as exc:  # noqa: BLE001 - 경계에서 사유를 남긴다
+            return JSONResponse(
+                {"error": "evidence_failed",
+                 "detail": f"{type(exc).__name__}: {str(exc)[:160]}"},
+                status_code=502)
+        # 프롬프트 예산을 먹지 않게 필요한 것만 준다. 원문 좌표는 남긴다.
+        return JSONResponse({
+            "symbol": symbol,
+            "company": evidence.get("company", ""),
+            "sources": evidence.get("sources", {}),
+            "news_headlines": (evidence.get("news_headlines") or [])[:8],
+            "disclosures_7d": (evidence.get("disclosures_7d") or [])[:6],
+            "price_levels": evidence.get("price_levels"),
+            "price_context": evidence.get("price_context"),
+        })
+
+    app.router.add_route("/evidence/holdings/{symbol}", holdings_evidence,
+                         methods=["GET"], name="holdings_evidence")
+
     app.add_middleware(_Auth)
     return app
 

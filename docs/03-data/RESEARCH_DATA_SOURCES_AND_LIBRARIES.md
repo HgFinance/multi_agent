@@ -761,7 +761,7 @@ qa.finding.v1
 workforce.eval.v1
 ```
 
-DB Credential은 Collector, Domain Service와 Migration Job에만 발급한다. Hermes Head와 독립 LangGraph Worker에는 API Scope를 가진 짧은 수명의 Service Token만 제공하고, PostgreSQL/Supabase RLS와 API Authorization을 함께 적용한다.
+DB Credential은 Collector, Domain Service와 Migration Job에만 발급한다. Hermes Head와 독립 LangGraph Worker에는 API Scope를 가진 짧은 수명의 Service Token만 제공하고, PostgreSQL/Supabase RLS와 API Authorization을 함께 적용한다. 이는 서비스 권한 통제이며 사용자 로그인 구현이 아니다.
 
 ### 6.12 단계별 Library 도입 Matrix
 
@@ -1045,7 +1045,7 @@ workforce-api                Agent profile, skill, eval, lifecycle and budget
 
 redis                        hot state, event, dedup and lease
 timescaledb                  market and observation time series
-postgres-supabase            metadata, domain records, pgvector and auth
+postgres-supabase            metadata, domain records and pgvector (no user auth)
 object-storage               immutable raw, parquet, dataset and model artifacts
 ```
 

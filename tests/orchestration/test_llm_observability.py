@@ -430,6 +430,8 @@ def test_close_root_trace_updates_only_terminal_fields_without_renaming_root(
             "trace-root",
             request_id="discord:req-1",
             root_id="t_root",
+            task_id="t_hr_primary",
+            department="hr-department",
             workflow_mode="analysis",
             source="discord",
             status="completed",
@@ -440,6 +442,8 @@ def test_close_root_trace_updates_only_terminal_fields_without_renaming_root(
     kwargs = client.update_run.call_args.kwargs
     assert kwargs["run_id"] == "run-root-id"
     assert kwargs["extra"]["metadata"]["root_id"] == "t_root"
+    assert kwargs["extra"]["metadata"]["task_id"] == "t_hr_primary"
+    assert kwargs["extra"]["metadata"]["department"] == "hr-department"
     assert kwargs["extra"]["metadata"]["raw_payloads_sent"] is False
     assert kwargs["extra"]["metadata"]["latency_scope"] == "end_to_end"
     assert kwargs["error"] is None

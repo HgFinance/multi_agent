@@ -21,12 +21,35 @@ class PresetAlignment(StrEnum):
 
 @dataclass(frozen=True)
 class RiskPreset:
+    preset_version: str
     mindset: str
     experience: str
     max_instrument_weight: Decimal
     max_sector_weight: Decimal
     max_gross_exposure: Decimal
     max_concurrent_positions: int
+    max_daily_loss_pct: Decimal
+    max_drawdown_pct: Decimal
+    trade_risk_budget_min_pct: Decimal
+    trade_risk_budget_max_pct: Decimal
+
+    def as_dict(self) -> dict[str, str | int]:
+        return {
+            "preset_version": self.preset_version,
+            "mindset": self.mindset,
+            "experience": self.experience,
+            "max_instrument_weight": str(self.max_instrument_weight),
+            "max_sector_weight": str(self.max_sector_weight),
+            "max_gross_exposure": str(self.max_gross_exposure),
+            "max_concurrent_positions": self.max_concurrent_positions,
+            "max_daily_loss_pct": str(self.max_daily_loss_pct),
+            "max_drawdown_pct": str(self.max_drawdown_pct),
+            "trade_risk_budget_min_pct": str(self.trade_risk_budget_min_pct),
+            "trade_risk_budget_max_pct": str(self.trade_risk_budget_max_pct),
+        }
+
+
+PRESET_VERSION = "risk-mandate-presets.2026-08-25.v1"
 
 
 def _preset(
@@ -36,48 +59,49 @@ def _preset(
     sector: str,
     gross: str,
     positions: int,
+    daily_loss: str,
+    drawdown: str,
+    trade_risk_min: str,
+    trade_risk_max: str,
 ) -> RiskPreset:
     return RiskPreset(
+        preset_version=PRESET_VERSION,
         mindset=mindset,
         experience=experience,
         max_instrument_weight=Decimal(instrument),
         max_sector_weight=Decimal(sector),
         max_gross_exposure=Decimal(gross),
         max_concurrent_positions=positions,
+        max_daily_loss_pct=Decimal(daily_loss),
+        max_drawdown_pct=Decimal(drawdown),
+        trade_risk_budget_min_pct=Decimal(trade_risk_min),
+        trade_risk_budget_max_pct=Decimal(trade_risk_max),
     )
 
 
 # 3 x 3 matrix. Beginner + risk seeking is intentionally bounded by the
 # beginner ceiling because effective risk score is min(mindset, experience).
-RISK_PRESETS: Mapping[tuple[str, str], RiskPreset] = {
-    ("BEGINNER", "SAFETY_FIRST"): _preset(
-        "SAFETY_FIRST", "BEGINNER", "0.05", "0.20", "1.00", 8
-    ),
-    ("BEGINNER", "BALANCED"): _preset(
-        "BALANCED", "BEGINNER", "0.05", "0.20", "1.00", 10
-    ),
-    ("BEGINNER", "RISK_SEEKING"): _preset(
-        "RISK_SEEKING", "BEGINNER", "0.05", "0.20", "1.00", 8
-    ),
-    ("INTERMEDIATE", "SAFETY_FIRST"): _preset(
-        "SAFETY_FIRST", "INTERMEDIATE", "0.10", "0.25", "1.00", 12
-    ),
-    ("INTERMEDIATE", "BALANCED"): _preset(
-        "BALANCED", "INTERMEDIATE", "0.10", "0.30", "1.00", 15
-    ),
-    ("INTERMEDIATE", "RISK_SEEKING"): _preset(
-        "RISK_SEEKING", "INTERMEDIATE", "0.10", "0.35", "1.00", 12
-    ),
-    ("EXPERIENCED", "SAFETY_FIRST"): _preset(
-        "SAFETY_FIRST", "EXPERIENCED", "0.15", "0.30", "1.00", 15
-    ),
-    ("EXPERIENCED", "BALANCED"): _preset(
-        "BALANCED", "EXPERIENCED", "0.15", "0.40", "1.00", 20
-    ),
-    ("EXPERIENCED", "RISK_SEEKING"): _preset(
-        "RISK_SEEKING", "EXPERIENCED", "0.20", "0.50", "1.00", 25
-    ),
+_BY_EFFECTIVE_SCORE = {
+    1: ("0.10", "0.25", "1.00", 5, "0.02", "0.15", "0.0025", "0.0050"),
+    2: ("0.15", "0.35", "1.50", 8, "0.03", "0.20", "0.0050", "0.0100"),
+    3: ("0.25", "0.50", "2.50", 12, "0.05", "0.35", "0.0100", "0.0200"),
 }
+_MINDSET_SCORE = {"SAFETY_FIRST": 1, "BALANCED": 2, "RISK_SEEKING": 3}
+_EXPERIENCE_SCORE = {"BEGINNER": 1, "INTERMEDIATE": 2, "EXPERIENCED": 3}
+
+
+def _build_presets() -> Mapping[tuple[str, str], RiskPreset]:
+    presets: dict[tuple[str, str], RiskPreset] = {}
+    for experience, experience_score in _EXPERIENCE_SCORE.items():
+        for mindset, mindset_score in _MINDSET_SCORE.items():
+            values = _BY_EFFECTIVE_SCORE[min(experience_score, mindset_score)]
+            presets[(experience, mindset)] = _preset(
+                mindset, experience, *values
+            )
+    return presets
+
+
+RISK_PRESETS: Mapping[tuple[str, str], RiskPreset] = _build_presets()
 
 
 def resolve_risk_preset(mindset: str, experience: str) -> RiskPreset:
@@ -97,6 +121,9 @@ def validate_preset_alignment(
     max_sector_weight: Decimal,
     max_gross_exposure: Decimal,
     max_concurrent_positions: int,
+    max_daily_loss_pct: Decimal | None = None,
+    max_drawdown_pct: Decimal | None = None,
+    trade_risk_budget_pct: Decimal | None = None,
 ) -> tuple[PresetAlignment, tuple[str, ...]]:
     """Classify a mandate without changing any user value."""
 
@@ -110,6 +137,15 @@ def validate_preset_alignment(
         violations.append("max_gross_exposure")
     if max_concurrent_positions > preset.max_concurrent_positions:
         violations.append("max_concurrent_positions")
+    if max_daily_loss_pct is not None and max_daily_loss_pct > preset.max_daily_loss_pct:
+        violations.append("max_daily_loss_pct")
+    if max_drawdown_pct is not None and max_drawdown_pct > preset.max_drawdown_pct:
+        violations.append("max_drawdown_pct")
+    if (
+        trade_risk_budget_pct is not None
+        and trade_risk_budget_pct > preset.trade_risk_budget_max_pct
+    ):
+        violations.append("trade_risk_budget_pct")
     if violations:
         return PresetAlignment.REQUIRES_RISK_REVIEW, tuple(violations)
 
@@ -118,6 +154,18 @@ def validate_preset_alignment(
         or max_sector_weight < preset.max_sector_weight
         or max_gross_exposure < preset.max_gross_exposure
         or max_concurrent_positions < preset.max_concurrent_positions
+        or (
+            max_daily_loss_pct is not None
+            and max_daily_loss_pct < preset.max_daily_loss_pct
+        )
+        or (
+            max_drawdown_pct is not None
+            and max_drawdown_pct < preset.max_drawdown_pct
+        )
+        or (
+            trade_risk_budget_pct is not None
+            and trade_risk_budget_pct < preset.trade_risk_budget_max_pct
+        )
     )
     return (
         PresetAlignment.TIGHTER if tighter else PresetAlignment.MATCHED,
@@ -127,6 +175,7 @@ def validate_preset_alignment(
 
 __all__ = [
     "RISK_PRESETS",
+    "PRESET_VERSION",
     "PresetAlignment",
     "RiskPreset",
     "resolve_risk_preset",

@@ -71,6 +71,29 @@ def _run(argv, timeout=120):
     return r.returncode, (r.stdout or "") + (r.stderr or "")
 
 
+def build_in_progress() -> bool:
+    """지금 도커 빌드가 도는가.
+
+    `docker builder prune` 은 **도는 빌드의 캐시도 지운다.** 공유 호스트에서
+    남이 빌드하는 중에 이걸 때리면 그 빌드는 처음부터 다시 돌고, 디스크를 더
+    쓰고, 감시기가 또 지운다 - 증폭 고리다(2026-08-25 실측).
+
+    프로세스 목록으로 본다. 도커 API 로 빌드 상태를 묻는 깔끔한 방법이 없고,
+    `buildx bake`/`buildkit` 은 프로세스로 확실히 보인다. **판정에 실패하면
+    빌드 중이라고 본다** - 애매할 때 안 지우는 쪽이 안전하다.
+    """
+    rc, out = _run(["ps", "-eo", "args"], timeout=20)
+    if rc != 0:
+        return True
+    for line in out.splitlines():
+        if "grep" in line:
+            continue
+        if ("docker-buildx" in line or "buildkit" in line
+                or "--build" in line and "compose" in line):
+            return True
+    return False
+
+
 def free_gb(path: str = "/") -> float:
     st = shutil.disk_usage(path)
     return st.free / (1024 ** 3)
@@ -141,7 +164,11 @@ def reclaim(*, dry_run: bool = False) -> list[str]:
     done: list[str] = []
 
     # ① 빌드 캐시 - 순수 재생성 가능. 제일 안전하고 보통 제일 크다.
-    if dry_run:
+    #    **단, 빌드가 도는 중이면 손대지 않는다.** 만드는 중인 것을 지우는 건
+    #    회수가 아니라 방해고, 그 빌드가 다시 돌면서 디스크를 더 쓴다.
+    if build_in_progress():
+        done.append("빌드 진행 중 - 빌드 캐시 회수 건너뜀(증폭 방지)")
+    elif dry_run:
         done.append("[dry-run] docker builder prune -af")
     else:
         rc, out = _run(["docker", "builder", "prune", "-af"])
@@ -326,6 +353,27 @@ def _selfcheck() -> int:
         finally:
             globals()["TMP_ROOT"] = _saved_root
             globals()["mounted_sources"] = _saved_mounted
+
+    # 빌드 감지: 실제 ps 출력 모양으로 판정 로직을 확인한다
+    _saved = _run
+    try:
+        def _fake(argv, timeout=120):
+            return 0, ("docker compose up -d --build --force-recreate ai-office\n"
+                       "/usr/libexec/docker/cli-plugins/docker-buildx bake --file -\n")
+        globals()["_run"] = _fake
+        ok("빌드 중을 잡아낸다", build_in_progress() is True)
+
+        def _quiet(argv, timeout=120):
+            return 0, "/usr/bin/python3 disk_guard.py --loop\nsshd: ubuntu@pts/0\n"
+        globals()["_run"] = _quiet
+        ok("한가할 때는 회수한다", build_in_progress() is False)
+
+        def _broken(argv, timeout=120):
+            return 1, "ps 못 씀"
+        globals()["_run"] = _broken
+        ok("판정 실패하면 안 지운다", build_in_progress() is True)
+    finally:
+        globals()["_run"] = _saved
 
     ok("실제 여유를 읽는다", free_gb() > 0)
     print("자체점검 통과" if fails == 0 else f"자체점검 실패 {fails}건")

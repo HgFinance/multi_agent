@@ -18,4 +18,7 @@ test("트레이딩 상세는 오늘 거래 흐름을 사용자 관점으로 보�
   assert.match(panel, /총 거래금액/);
   assert.match(panel, /수수료/);
   assert.match(panel, /세금/);
+  assert.match(panel, /조건주문/);
+  assert.match(panel, /출처 미확인/);
+  assert.match(panel, /LS PAPER 계좌 기준/);
 });

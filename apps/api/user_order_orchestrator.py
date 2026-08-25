@@ -82,6 +82,7 @@ _TASK_ID_RE = re.compile(r"^t_[A-Za-z0-9]{4,64}$")
 _NO_DIRECTIVE_TERMINAL_STATES = frozenset({"FAILED", "REJECTED"})
 _ROOT_EXECUTION_STATUSES = frozenset({"ready", "running", "done"})
 _TRADING_EXECUTION_STATUSES = frozenset({"running"})
+_TRADING_DETERMINISTIC_EXECUTION_STATUSES = frozenset({"blocked", "running"})
 _TRADING_REPLAY_STATUSES = frozenset({"done"})
 _EXECUTION_STATE_REJECTION_CODES = frozenset(
     {
@@ -193,14 +194,17 @@ def _validate_task_execution_states(
     trading: Mapping[str, object],
     record: UserOrderRequestRecord,
     new_submission: bool,
+    deterministic: bool = False,
 ) -> None:
     """Fail closed unless both cards are in an observed executable state.
 
     A CEO root may already be ``done`` because its only responsibility in this
     lane is to confirm the pre-created Trading primary.  A new directive,
-    however, is accepted only while that Trading primary is actually
-    ``running``.  ``done`` is retained solely for an exact replay whose durable
-    request row proves that no first submission can occur.
+    however, is accepted while ``running`` for the Hermes interpreter. Only the
+    non-MCP deterministic entry may also execute a Trading card parked
+    ``blocked`` by the trusted BFF; that card cannot race into a Hermes worker.
+    ``done`` is retained solely for an exact replay whose durable request row
+    proves that no first submission can occur.
     """
 
     root_status = _task_status(root, rejection_code="CEO_ROOT_STATUS_MISSING")
@@ -208,7 +212,12 @@ def _validate_task_execution_states(
         _reject("CEO_ROOT_STATE_NOT_EXECUTABLE")
 
     trading_status = _task_status(trading, rejection_code="TRADING_TASK_STATUS_MISSING")
-    if trading_status in _TRADING_EXECUTION_STATUSES:
+    executable_statuses = (
+        _TRADING_DETERMINISTIC_EXECUTION_STATUSES
+        if deterministic
+        else _TRADING_EXECUTION_STATUSES
+    )
+    if trading_status in executable_statuses:
         return
     if (
         not new_submission
@@ -613,12 +622,14 @@ def _process_user_paper_order(
         root=root,
         trading=trading,
     )
+    deterministic = interpretation_source == "DETERMINISTIC"
     try:
         _validate_task_execution_states(
             root=root,
             trading=trading,
             record=record,
             new_submission=False,
+            deterministic=deterministic,
         )
     except PaperOrderOrchestrationRejected as exc:
         _record_execution_state_rejection(repository, record, exc)
@@ -714,6 +725,7 @@ def _process_user_paper_order(
             trading=current_trading,
             record=record,
             new_submission=True,
+            deterministic=deterministic,
         )
     except PaperOrderOrchestrationRejected as exc:
         _record_execution_state_rejection(repository, record, exc)

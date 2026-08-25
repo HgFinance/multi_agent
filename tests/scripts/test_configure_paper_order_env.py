@@ -40,6 +40,11 @@ def test_repository_uses_one_duplicate_free_environment_template() -> None:
     assert cli._duplicate_assignment_keys(template) == ()
     assert "저장소의 유일한 환경 변수 템플릿" in template
     assert ".env.aws.template" in template
+    assert "TRADING_BROKER_ADAPTER=ls-paper" in template
+    assert "CONDITIONAL_RULE_RETENTION_DATABASE_ROLE" not in template
+    assert "CONDITIONAL_RULE_RETENTION_DATABASE_URL" not in template
+    assert "PINECONE_NAMESPACE" not in template
+    assert "RISK_DATA_MODE" not in template
 
 
 def test_local_configures_exact_authenticated_fixture_grant(tmp_path: Path) -> None:
@@ -281,7 +286,8 @@ def test_aws_sets_production_contract_without_fixture_grants(
     assert values["USER_PAPER_ORDER_WORKFLOW_ENABLED"] == "true"
     assert values["USER_PAPER_ORDER_DETERMINISTIC_FAST_PATH_ENABLED"] == "true"
     assert values["PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON"] == "[]"
-    assert values["LS_ENV"] == "LIVE"
+    assert values["LS_ENV"] == "PAPER"
+    assert values["TRADING_BROKER_ADAPTER"] == "ls-paper"
     assert "LS_MARKET_ENV" not in values
     assert values["HEDGEFUND_CONTROL_DB_NAME"] == "control"
     assert values["HEDGEFUND_TSDB_PASSWORD"] == timescale_password

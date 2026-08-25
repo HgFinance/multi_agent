@@ -38,8 +38,10 @@ def test_qa_card_and_commands_keep_only_redacted_contract() -> None:
         summaries=("end-to-end latency exceeded threshold",),
         metadata={
             "source_project": "First",
+            "source_name": "hgfinance.user-query",
             "source_run_id": "run-redacted-1",
             "request_id": "request-redacted-1",
+            "task_id": "t_hr_primary",
             "latency_ms": 154_910,
             "latency_threshold_ms": 60_000,
             "latency_scope": "end_to_end",
@@ -55,6 +57,8 @@ def test_qa_card_and_commands_keep_only_redacted_contract() -> None:
     assert "보류:" in card and "`PENDING` 유지" in card
     assert "154.91s > 기준 60.00s (end_to_end)" in card
     assert "source_run_id: run-redacted-1" in card
+    assert "trace_name: hgfinance.user-query" in card
+    assert "department_task_id: t_hr_primary" in card
     assert "request_id: request-redacted-1" in card
     assert "must-not-appear" not in card
     approved = parse_qa_feedback_command(f"승인 {ARTIFACT_ID} 기준 충족")

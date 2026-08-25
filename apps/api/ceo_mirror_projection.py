@@ -8,7 +8,10 @@ so polling and worker retries are safe.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -30,6 +33,52 @@ except ImportError:  # pragma: no cover - direct module execution compatibility
 
 LOG = logging.getLogger("ceo-mirror-projection")
 _TERMINAL_STATUSES = frozenset({"done", "completed", "failed", "blocked"})
+_WORKFLOW_ROOT_RE = re.compile(r"(?m)^workflow_root_task_id=(\S+)\s*$")
+
+
+def workflow_projection_fingerprint(
+    root_task_id: str,
+    listed_rows: Sequence[Mapping[str, Any]],
+) -> str:
+    """Hash the list-row fields that can change the sanitized projection.
+
+    The board list is the discovery snapshot; authoritative hydration still
+    uses the existing ``load_workflow``/``kanban show`` path.  This fingerprint
+    only prevents repeatedly hydrating terminal workflows whose list rows did
+    not change.
+    """
+
+    root = str(root_task_id or "").strip()
+    projected_rows: list[dict[str, Any]] = []
+    for row in listed_rows:
+        if not isinstance(row, Mapping):
+            continue
+        row_id = str(row.get("id") or row.get("task_id") or "").strip()
+        body = str(row.get("body") or "")
+        marker = _WORKFLOW_ROOT_RE.search(body)
+        if row_id != root and (marker is None or marker.group(1) != root):
+            continue
+        projected_rows.append(
+            {
+                "id": row_id,
+                "assignee": row.get("assignee"),
+                "status": row.get("status"),
+                "started_at": row.get("started_at"),
+                "completed_at": row.get("completed_at"),
+                "result": row.get("result"),
+                # Role/action/root markers affect event classification.
+                "body": body,
+            }
+        )
+    projected_rows.sort(key=lambda item: str(item["id"]))
+    payload = json.dumps(
+        projected_rows,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def publish_workflow_projection(
@@ -112,16 +161,39 @@ def reconcile_workflow_projections(
     *,
     limit: int = 250,
     listed_rows: Sequence[Mapping[str, Any]] | None = None,
+    request_ids: Sequence[str] | None = None,
 ) -> dict[str, int]:
     """Reconcile accepted CEO requests without requiring a connected browser."""
 
     counts = {"scanned": 0, "projected": 0, "failed": 0}
-    for request_id in store.list_request_ids(limit=limit):
+    candidates = (
+        list(dict.fromkeys(str(item) for item in request_ids if str(item).strip()))[:limit]
+        if request_ids is not None
+        else store.list_request_ids(limit=limit)
+    )
+    for request_id in candidates:
         counts["scanned"] += 1
         try:
-            counts["projected"] += publish_workflow_projection(
+            fingerprint: str | None = None
+            record = store.get_request(request_id)
+            root_task_id = (
+                str(record.response.get("task_id") or "").strip()
+                if record is not None and record.response
+                else ""
+            )
+            if listed_rows is not None and root_task_id:
+                fingerprint = workflow_projection_fingerprint(
+                    root_task_id,
+                    listed_rows,
+                )
+                if store.get_projection_state(request_id) == fingerprint:
+                    continue
+            projected = publish_workflow_projection(
                 store, request_id, listed_rows=listed_rows
             )
+            counts["projected"] += projected
+            if fingerprint is not None and projected > 0:
+                store.save_projection_state(request_id, fingerprint)
         except Exception:
             counts["failed"] += 1
             LOG.warning(
@@ -135,4 +207,5 @@ def reconcile_workflow_projections(
 __all__ = [
     "publish_workflow_projection",
     "reconcile_workflow_projections",
+    "workflow_projection_fingerprint",
 ]

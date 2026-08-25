@@ -107,16 +107,8 @@ class BffConsolidationTest(unittest.TestCase):
                     owners.append(name)
         self.assertEqual(owners, ["portfolio-bff"])
 
-    def test_legacy_ui_bff_is_not_in_default_stack(self) -> None:
+    def test_removed_legacy_ui_bff_is_not_defined(self) -> None:
         self.assertNotIn("ui-bff", self.services)
-
-    def test_legacy_ui_bff_has_no_host_port_when_explicitly_loaded(self) -> None:
-        result = _run_compose(
-            "--profile", "legacy-ui-bff", "config", "--format", "json"
-        )
-        service = json.loads(result.stdout)["services"]["ui-bff"]
-        self.assertEqual(service.get("profiles"), ["legacy-ui-bff"])
-        self.assertNotIn("ports", service)
 
     def test_portfolio_runtime_volume_is_shared_by_bff_and_worker(self) -> None:
         for name in ("portfolio-bff", "portfolio-worker"):

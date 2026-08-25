@@ -1067,41 +1067,14 @@ def create_mandate(body: CreateMandateRequest):
 
 @app.put("/governance/v1/mandates/{mandate_id}")
 def replace_mandate_metadata(mandate_id: str, body: ReplaceMandateMetadataRequest):
-    """Replace the current Mandate metadata in place.
-
-    This is the user-input save path. It deliberately does not create a
-    mandate_versions row or run the version/activation workflow.
-    """
-    updater = getattr(_mandate_repo, "replace_mandate_metadata", None)
-    if not callable(updater):
-        raise HTTPException(status_code=503, detail="mandate_metadata_update_unavailable")
-
-    policy = body.policy.model_dump(mode="json")
-    now = datetime.now(timezone.utc)
-    metadata = {
-        "objective_text": body.objective_text,
-        "objective": body.objective,
-        "policy": {
-            **policy,
-            "execution_rules": body.execution_rules,
+    """Reject the retired unversioned write path."""
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "error_code": "MANDATE_VERSION_REQUIRED",
+            "message": "Use POST /governance/v1/mandates/{id}/versions",
         },
-        "content_hash": compute_content_hash(body.policy),
-        "updated_by": body.created_by,
-        "updated_at": now.isoformat(),
-    }
-    try:
-        updater(mandate_id, metadata)
-    except MandatePersistenceError:
-        raise
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    return {
-        "mandate_id": mandate_id,
-        "status": "ACTIVE",
-        "metadata": metadata,
-        "updated_at": metadata["updated_at"],
-    }
+    )
 
 
 @app.post("/governance/v1/mandates/{mandate_id}/versions")
@@ -1186,9 +1159,15 @@ def propose_version(mandate_id: str, body: ProposeVersionRequest):
 
     return {
         "mandate_id": mandate_id, "version": result.row.version,
+        "mandate_version_id": _mandate_repo.get_mandate_version_id(
+            mandate_id, result.row.version
+        ),
         "direction": result.direction.value, "requires_user_reapproval": result.requires_user_reapproval,
         "content_hash": result.row.content_hash,
         "activated": activation.activated,
+        "activation_trace_id": (
+            activation.decision.trace_id if activation.decision else None
+        ),
     }
 
 
@@ -1244,19 +1223,18 @@ def get_mandate_current(mandate_id: str):
     두 경로가 동일해야 하고, `postgres_repository.py`의 `get_mandate_current_snapshot`
     docstring에 그 계약이 적혀 있다.
     """
-    # 2026-08-14 UI 저장 경로(PUT .../mandates/{id})가 만드는 override다. 이
-    # metadata 행이 있으면 그게 사용자가 마지막으로 저장한 최신 상태이므로
-    # version 기반 경로보다 always 우선한다 - version 시스템은 이 override가
-    # 없을 때만 쓰는 레거시 경로다.
+    # Historical unversioned UI metadata is readable for migration only.  A
+    # subsequently activated Version always supersedes it.
     get_access_context = getattr(
         _mandate_repo, "get_mandate_access_context", None
     )
     access_context = (
         get_access_context(mandate_id) if callable(get_access_context) else None
     ) or {}
+    canonical_version, canonical_status = _mandate_repo.get_mandate_current(mandate_id)
     get_metadata = getattr(_mandate_repo, "get_mandate_metadata", None)
     metadata = get_metadata(mandate_id) if callable(get_metadata) else None
-    if metadata:
+    if metadata and canonical_version <= 0:
         policy = metadata.get("policy")
         return {
             "mandate_id": mandate_id,
@@ -1265,7 +1243,7 @@ def get_mandate_current(mandate_id: str):
             "current_version": 0,
             "mandate_version_id": None,
             "policy_hash": metadata.get("content_hash"),
-            "status": "ACTIVE",
+            "status": "REQUIRES_USER_REVIEW",
             "effective_from": None,
             "effective_to": None,
             "content_hash": metadata.get("content_hash"),
@@ -1287,7 +1265,7 @@ def get_mandate_current(mandate_id: str):
                 raise HTTPException(status_code=503, detail="canonical_mandate_binding_unavailable")
             return {**access_context, **response}
 
-    version, status = _mandate_repo.get_mandate_current(mandate_id)
+    version, status = canonical_version, canonical_status
     if version <= 0:
         return {
             "mandate_id": mandate_id,

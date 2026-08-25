@@ -12,6 +12,7 @@ import copy
 import functools
 import logging
 import os
+import re
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -952,6 +953,118 @@ async def _forward_to_ingress_async(message: Any, adapter: Any) -> bool:
     return await asyncio.to_thread(_forward_to_ingress, message, adapter)
 
 
+def _is_ceo_repeat_command(adapter: Any, message: Any) -> bool:
+    """Recognize only an explicit, otherwise-empty CEO re-response command."""
+
+    if _profile_name() != "ceo-agent" or _author_is_bot(message):
+        return False
+    content = str(getattr(message, "content", "") or "")
+    client_user = getattr(getattr(adapter, "_client", None), "user", None)
+    user_id = str(getattr(client_user, "id", "") or "")
+    if user_id:
+        content = re.sub(rf"<@!?{re.escape(user_id)}>", " ", content)
+    normalized = re.sub(r"[\s.!?。！？]+", "", content).casefold()
+    return normalized in {"대답", "답변", "다시대답", "다시답변"}
+
+
+async def _fetch_discord_message(
+    adapter: Any,
+    message: Any,
+    *,
+    channel_id: str,
+    message_id: str,
+) -> Any | None:
+    current = getattr(message, "channel", None)
+    channel = current if str(getattr(current, "id", "") or "") == channel_id else None
+    client = getattr(adapter, "_client", None)
+    if channel is None and client is not None:
+        get_channel = getattr(client, "get_channel", None)
+        if callable(get_channel):
+            channel = get_channel(int(channel_id))
+        if channel is None:
+            fetch_channel = getattr(client, "fetch_channel", None)
+            if callable(fetch_channel):
+                channel = await fetch_channel(int(channel_id))
+    fetch_message = getattr(channel, "fetch_message", None)
+    if not callable(fetch_message):
+        return None
+    return await fetch_message(int(message_id))
+
+
+async def _maybe_handle_ceo_repeat_message(adapter: Any, message: Any) -> bool:
+    """Replay one prior CEO Discord answer without invoking CEO/BFF again."""
+
+    if not _is_ceo_repeat_command(adapter, message):
+        return False
+    context = _message_context(message, adapter)
+    store = _store(adapter)
+    inbound_key = store.inbound_key_for_message(
+        str(getattr(message, "id", "") or ""),
+        _profile_name(),
+    )
+    if not inbound_key:
+        return False
+    response_key = f"{inbound_key}:ceo-repeat"
+    claim = store.claim_outbound(
+        response_key=response_key,
+        dedup_key=inbound_key,
+        profile=_profile_name(),
+    )
+    if not claim.admitted:
+        return True
+
+    reply_message_id: str | None = None
+    try:
+        previous = store.latest_completed_response(
+            profile=_profile_name(),
+            guild_id=str(context.get("guild_id") or "dm"),
+            channel_id=str(context.get("channel_id") or "unknown"),
+        )
+        if previous is None:
+            text = "직전에 완료된 CEO 답변을 찾지 못했습니다. 원 질문을 다시 보내 주세요."
+        else:
+            previous_message = await _fetch_discord_message(
+                adapter,
+                message,
+                channel_id=previous[1],
+                message_id=previous[0],
+            )
+            previous_content = str(getattr(previous_message, "content", "") or "").strip()
+            if previous_content:
+                text = (
+                    "🔁 **직전 CEO 답변 재전송**\n"
+                    "_당시 답변이며 현재 주문 상태를 다시 조회한 결과는 아닙니다._\n\n"
+                    f"{previous_content}"
+                )
+            else:
+                text = "직전 CEO 답변 본문을 불러오지 못했습니다. 원 질문을 다시 보내 주세요."
+        reply = getattr(message, "reply", None)
+        if callable(reply):
+            sent = await reply(text[:1900], mention_author=False)
+        else:
+            sent = await message.channel.send(text[:1900])
+        reply_message_id = str(getattr(sent, "id", "") or "") or None
+        store.mark_inbound(inbound_key, "COMPLETED", _profile_name())
+        return True
+    except Exception as exc:
+        logger.warning(
+            "ceo-repeat status=failed message_id=%s error_type=%s",
+            str(getattr(message, "id", "") or ""),
+            type(exc).__name__,
+        )
+        store.mark_inbound(inbound_key, "FAILED", _profile_name())
+        return True
+    finally:
+        # A Discord timeout is an ambiguous commit.  Close this one-shot claim
+        # instead of replaying the same control message and risking a duplicate.
+        store.mark_outbound(
+            response_key,
+            "COMPLETED",
+            _profile_name(),
+            reply_message_id,
+        )
+
+
 async def _ensure_request_thread(adapter: Any, message: Any) -> Any:
     """Create exactly one HgFinance request thread for a CEO Discord request.
 
@@ -1155,6 +1268,11 @@ def _wrap_handle_message(cls: type[Any]) -> None:
 
     @functools.wraps(original)
     async def wrapped(self: Any, message: Any, *args: Any, **kwargs: Any) -> bool:
+        # ``대답`` is a conversation control, not a new financial question.
+        # Handle it before request-thread creation and canonical BFF ingress.
+        if await _maybe_handle_ceo_repeat_message(self, message):
+            return True
+
         # hgfinance-bff-request-thread-v1
         #
         # HgFinance owns the request thread before choosing BFF ingress versus

@@ -1,0 +1,128 @@
+{
+  "schema_version": "awq-hybrid-bok800-wiki-paired.v1",
+  "paired_runs": 1,
+  "baseline_runs": [
+    {
+      "directory": "benchmarks/quantization/results/20260825_awq_hybrid_wiki_paired/baseline_run1",
+      "metrics": {
+        "Internal Quality": 0.88,
+        "Critical Failures": 1.0,
+        "Request Errors": 0.0,
+        "FinQA": 0.7,
+        "TAT-QA": 0.9333,
+        "FinanceBench diagnostic": 0.5436,
+        "Auto Mean": 0.7992,
+        "Financial Arithmetic": 0.9,
+        "Risk Reasoning": 1.0,
+        "Portfolio / Trading": 0.6666666666666666,
+        "Accounting": 1.0,
+        "Quant": 1.0,
+        "Evidence": 1.0,
+        "Structured Output": 0.4,
+        "Uncertainty / Fail-Closed": 1.0
+      },
+      "retrieval": {
+        "eligible_cases": 0,
+        "wiki_hits": 0,
+        "hit_rate": 0.0,
+        "candidate_hits": 0,
+        "candidate_hit_rate": 0.0,
+        "exact_term_hits": 0,
+        "related_traversal_hits": 0,
+        "avg_context_chars": 0.0,
+        "avg_retrieval_latency_ms": 0.0,
+        "avg_planner_latency_s": 0.0,
+        "pages": []
+      }
+    }
+  ],
+  "wiki_runs": [
+    {
+      "directory": "benchmarks/quantization/results/20260825_awq_hybrid_wiki_paired/wiki_run1",
+      "metrics": {
+        "Internal Quality": 0.88,
+        "Critical Failures": 1.0,
+        "Request Errors": 0.0,
+        "FinQA": 0.7,
+        "TAT-QA": 0.9333,
+        "FinanceBench diagnostic": 0.5442,
+        "Auto Mean": 0.7992,
+        "Financial Arithmetic": 0.8,
+        "Risk Reasoning": 1.0,
+        "Portfolio / Trading": 0.8333333333333334,
+        "Accounting": 1.0,
+        "Quant": 1.0,
+        "Evidence": 1.0,
+        "Structured Output": 0.4,
+        "Uncertainty / Fail-Closed": 1.0
+      },
+      "retrieval": {
+        "eligible_cases": 17,
+        "wiki_hits": 0,
+        "hit_rate": 0.0,
+        "candidate_hits": 7,
+        "candidate_hit_rate": 0.4117647058823529,
+        "exact_term_hits": 0,
+        "related_traversal_hits": 0,
+        "avg_context_chars": 0.0,
+        "avg_retrieval_latency_ms": 0.3635294117647059,
+        "avg_planner_latency_s": 0.875935294117647,
+        "pages": []
+      }
+    }
+  ],
+  "baseline_mean": {
+    "Internal Quality": 0.88,
+    "Critical Failures": 1.0,
+    "Request Errors": 0.0,
+    "FinQA": 0.7,
+    "TAT-QA": 0.9333,
+    "FinanceBench diagnostic": 0.5436,
+    "Auto Mean": 0.7992,
+    "Financial Arithmetic": 0.9,
+    "Risk Reasoning": 1.0,
+    "Portfolio / Trading": 0.6666666666666666,
+    "Accounting": 1.0,
+    "Quant": 1.0,
+    "Evidence": 1.0,
+    "Structured Output": 0.4,
+    "Uncertainty / Fail-Closed": 1.0
+  },
+  "wiki_mean": {
+    "Internal Quality": 0.88,
+    "Critical Failures": 1.0,
+    "Request Errors": 0.0,
+    "FinQA": 0.7,
+    "TAT-QA": 0.9333,
+    "FinanceBench diagnostic": 0.5442,
+    "Auto Mean": 0.7992,
+    "Financial Arithmetic": 0.8,
+    "Risk Reasoning": 1.0,
+    "Portfolio / Trading": 0.8333333333333334,
+    "Accounting": 1.0,
+    "Quant": 1.0,
+    "Evidence": 1.0,
+    "Structured Output": 0.4,
+    "Uncertainty / Fail-Closed": 1.0
+  },
+  "delta": {
+    "Internal Quality": 0.0,
+    "Critical Failures": 0.0,
+    "Request Errors": 0.0,
+    "FinQA": 0.0,
+    "TAT-QA": 0.0,
+    "FinanceBench diagnostic": 0.0006000000000000449,
+    "Auto Mean": 0.0,
+    "Financial Arithmetic": -0.09999999999999998,
+    "Risk Reasoning": 0.0,
+    "Portfolio / Trading": 0.16666666666666674,
+    "Accounting": 0.0,
+    "Quant": 0.0,
+    "Evidence": 0.0,
+    "Structured Output": 0.0,
+    "Uncertainty / Fail-Closed": 0.0
+  },
+  "early_stop_after_two": false,
+  "all_higher_is_better_metrics_lower": false,
+  "early_stop_rule": "after two paired runs, stop only if every higher-is-better quality metric is below baseline"
+}

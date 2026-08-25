@@ -28,7 +28,7 @@ alter table workforce.capacity_snapshots
   add column if not exists recorded_by text not null;
 
 create unique index if not exists capacity_snapshots_dept_agent_window_uk
-  on workforce.capacity_snapshots
-  nulls not distinct (department_id, agent_id, window_start, window_end);
+  on workforce.capacity_snapshots (department_id, agent_id, window_start, window_end)
+  nulls not distinct;
 
 commit;

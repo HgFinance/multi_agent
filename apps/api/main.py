@@ -173,10 +173,18 @@ except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` pat
     from qa import QA_API_URL
     from qa import router as qa_router
 try:
-    from .risk import RISK_API_URL
+    from .risk import (
+        RISK_API_URL,
+        activate_mandate_limits,
+        validate_proposed_mandate_limits,
+    )
     from .risk import router as risk_router
 except ImportError:  # pragma: no cover - direct ``python apps/api/main.py`` path
-    from risk import RISK_API_URL
+    from risk import (
+        RISK_API_URL,
+        activate_mandate_limits,
+        validate_proposed_mandate_limits,
+    )
     from risk import router as risk_router
 try:
     from .user_orders import router as user_orders_router
@@ -797,13 +805,52 @@ async def ui_propose_mandate_version(
     """정책 Version 제안. 저장은 여기가 아니라 활성화 단계에서 확정된다."""
 
     bound = _identity_bound_body(body, owner_id, inject=("created_by",))
+    risk_profile = bound.pop("risk_profile", None)
+    if not isinstance(risk_profile, dict):
+        raise HTTPException(status_code=422, detail="risk_profile_binding_required")
     canonical = await _canonical_mandate(mandate_id)
-    await _require_canonical_fund_access(
+    canonical_fund_id = await _require_canonical_fund_access(
         owner_id, canonical, submitted_fund_id=bound.get("fund_id")
     )
-    return await _governance_request(
+    proposed_policy = bound.get("policy")
+    if not isinstance(proposed_policy, dict):
+        raise HTTPException(status_code=422, detail="mandate_policy_required")
+    await validate_proposed_mandate_limits(
+        {
+            "mindset": risk_profile.get("mindset"),
+            "experience": risk_profile.get("experience"),
+            "preset_version": risk_profile.get("preset_version"),
+            "risk_bounds": proposed_policy.get("risk_bounds"),
+        }
+    )
+    result = await _governance_request(
         "POST", f"/governance/v1/mandates/{mandate_id}/versions", body=bound
     )
+    if not isinstance(result, dict) or not result.get("activated"):
+        return result
+    mandate_version_id = result.get("mandate_version_id")
+    if not mandate_version_id:
+        raise HTTPException(
+            status_code=503, detail="canonical_mandate_version_binding_unavailable"
+        )
+    policy = proposed_policy
+    await activate_mandate_limits(
+        {
+            "fund_id": canonical_fund_id,
+            "mandate_id": mandate_id,
+            "mandate_version_id": mandate_version_id,
+            "mandate_version": result.get("version"),
+            "mindset": risk_profile.get("mindset"),
+            "experience": risk_profile.get("experience"),
+            "preset_version": risk_profile.get("preset_version"),
+            "risk_bounds": policy.get("risk_bounds"),
+            "universe_policy": policy.get("universe_policy"),
+            "allowed_assets": policy.get("allowed_assets", []),
+            "effective_from": bound.get("effective_from"),
+            "trace_id": result.get("activation_trace_id") or str(mandate_version_id),
+        }
+    )
+    return {**result, "risk_limits_activated": True}
 
 
 @app.post("/ui/mandate-assistant/suggest")

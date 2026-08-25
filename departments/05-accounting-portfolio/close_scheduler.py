@@ -108,6 +108,15 @@ def _snapshots_between(repo: LedgerRepository, fund_id: UUID, book_id: UUID,
     회계일 판정은 **현지 시각 기준**이다. UTC 로 자르면 KST 09시 이전 스냅샷이
     전날로 밀려 기초 NAV 가 남의 날 값이 된다.
     """
+    if isinstance(repo, LedgerRepository):
+        start_at = datetime.combine(start, clock.min, tzinfo=zone).astimezone(timezone.utc)
+        end_at = datetime.combine(
+            end + timedelta(days=1), clock.min, tzinfo=zone
+        ).astimezone(timezone.utc)
+        return repo.load_snapshots(
+            fund_id, book_id, start_at=start_at, end_at=end_at,
+            collapse_unchanged=True,
+        )
     return [s for s in repo.load_snapshots(fund_id, book_id)
             if start <= s.as_of.astimezone(zone).date() <= end]
 
@@ -387,6 +396,23 @@ def _self_check() -> None:
     got = _snapshots_between(_OneRepo(), UUID(int=1), UUID(int=2),
                              date(2026, 8, 10), date(2026, 8, 10), KST)
     assert len(got) == 1, "KST 오전 스냅샷이 전날로 밀렸다"
+
+    # 8-2. 실 DB repository는 기간 제한과 연속 중복 축약을 SQL reader에 넘긴다.
+    bounded: dict = {}
+
+    class _BoundedRepo(LedgerRepository):
+        def __init__(self):
+            pass
+
+        def load_snapshots(self, fund_id, book_id, **kwargs):
+            bounded.update(kwargs)
+            return []
+
+    _snapshots_between(_BoundedRepo(), UUID(int=1), UUID(int=2),
+                       date(2026, 8, 10), date(2026, 8, 10), KST)
+    assert bounded["collapse_unchanged"] is True
+    assert bounded["start_at"] == datetime(2026, 8, 9, 15, 0, tzinfo=timezone.utc)
+    assert bounded["end_at"] == datetime(2026, 8, 10, 15, 0, tzinfo=timezone.utc)
 
     # 9. 보유 종목은 비중 순이고 상위 N 개만 간다. 비중은 NAV 대비다
     class _Pos:

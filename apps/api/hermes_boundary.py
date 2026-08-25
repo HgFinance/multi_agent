@@ -316,10 +316,10 @@ def complete_kanban_task(*, task_id: str, result: str) -> bool:
     """Close a non-executing scope card without exposing it to a worker.
 
     Direct PAPER-order roots are durable workflow containers, not executable
-    CEO prompts.  They are created running but unclaimed while the SQL bindings
-    and blocked Trading primary are assembled, then completed in place.  This
-    avoids the otherwise unavoidable race where the CEO dispatcher claims the
-    root before Trading invokes the trusted order tool.
+    CEO prompts. They are created blocked while the SQL bindings and blocked
+    Trading primary are assembled, then completed in place. Hermes maps the
+    legacy ``initial-status=running`` create option to a ready card, so blocked
+    is the only state that prevents a dispatcher claim during this window.
 
     A CLI timeout has unknown commit status, so verify the supported read model
     before reporting failure.  Replays are idempotent when the card is already

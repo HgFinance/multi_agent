@@ -24,7 +24,6 @@ EXPECTED_DEFAULT_CONTROL_DB_CONSUMERS = {
     "audit-api",
     "batch-collectors",
     "ceo-kanban-supervisor",
-    "conditional-rule-notification-consumer",
     "factory-autopilot",
     "factory-experiment-worker",
     "governance-api",
@@ -115,7 +114,7 @@ def test_eb_stack_has_the_exact_private_control_database_consumers() -> None:
 def test_local_override_keeps_the_user_order_pipeline_on_one_control_database() -> None:
     # The Windows override is intentionally gitignored and therefore absent in
     # CI clones. When present, its local cutover must cover the canonical pair
-    # and must not keep the disabled legacy BFF on the control DB mapping.
+    # and must not reintroduce the removed legacy BFF.
     path = ROOT / "docker-compose.override.yml"
     if not path.exists():
         return
@@ -137,4 +136,4 @@ def test_local_override_keeps_the_user_order_pipeline_on_one_control_database() 
     assert services["paper-order-orchestrator-mcp"]["volumes"][0].endswith(
         ":/opt/kanban"
     )
-    assert "DATABASE_URL" not in (services["ui-bff"].get("environment") or {})
+    assert "ui-bff" not in services

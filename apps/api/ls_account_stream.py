@@ -52,6 +52,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 # 자격 해석(PAPER/LIVE 접미사 규칙)은 리스크본부가 이미 갖고 있다(동규 소유).
 # 같은 규칙을 두 벌 두면 한쪽만 고쳐졌을 때 Live 자격으로 Paper에 붙는다.
 _LS_PATH = ROOT / "departments" / "03-risk" / "integrations"
@@ -60,7 +62,29 @@ if str(_LS_PATH) not in sys.path:
 
 from ledger_store import STORE as LEDGER_STORE
 
+try:
+    from .conditional_rule_workflow import (
+        ConditionalRuleUnavailable,
+        conditional_rule_repository,
+    )
+    from .user_order_workflow import (
+        BrokerOrderCorrelation,
+        UserOrderWorkflowUnavailable,
+        user_order_repository,
+    )
+except ImportError:  # pragma: no cover - direct module self-check compatibility
+    from conditional_rule_workflow import (  # type: ignore[no-redef]
+        ConditionalRuleUnavailable,
+        conditional_rule_repository,
+    )
+    from user_order_workflow import (  # type: ignore[no-redef]
+        BrokerOrderCorrelation,
+        UserOrderWorkflowUnavailable,
+        user_order_repository,
+    )
+
 router = APIRouter(tags=["portfolio-live"])
+KST = timezone(timedelta(hours=9))
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -1013,6 +1037,135 @@ def merge_order_events(
     return events
 
 
+def _event_broker_day(event: Mapping[str, Any]) -> date | None:
+    value = str(event.get("received_at") or "").strip()
+    if not value:
+        return None
+    try:
+        observed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if observed.tzinfo is not None:
+        observed = observed.astimezone(KST)
+    return observed.date()
+
+
+def _same_decimal(left: Any, right: Any) -> bool:
+    try:
+        return Decimal(str(left)) == Decimal(str(right))
+    except Exception:  # noqa: BLE001 - invalid evidence must not be attributed.
+        return False
+
+
+def _matches_internal_correlation(
+    event: Mapping[str, Any], correlation: BrokerOrderCorrelation
+) -> bool:
+    side = str(event.get("side") or "").upper()
+    normalized_side = "BUY" if "매수" in side or side == "BUY" else (
+        "SELL" if "매도" in side or side == "SELL" else ""
+    )
+    if (
+        str(event.get("symbol") or "") != correlation.symbol
+        or normalized_side != correlation.side
+        or not _same_decimal(event.get("quantity"), correlation.requested_quantity)
+    ):
+        return False
+    if event.get("kind") == "FILLED":
+        event_price = event.get("average_fill_price") or event.get("price")
+        if correlation.average_fill_price is None or not _same_decimal(
+            event_price, correlation.average_fill_price
+        ):
+            return False
+    return True
+
+
+def _project_internal_order_correlations(
+    events: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Join LS facts to the existing PAPER audit trail without mutating orders."""
+
+    broker_day = datetime.now(KST).date()
+    current_events = [
+        event
+        for event in events
+        if event.get("source") in {"LS_ORDER_HISTORY", "LS_REALTIME"}
+        and _event_broker_day(event) == broker_day
+    ]
+    order_nos = {
+        str(event.get("broker_order_id") or event.get("order_no") or "").strip()
+        for event in current_events
+        if str(event.get("broker_order_id") or event.get("order_no") or "").strip()
+    }
+    summary = {
+        "status": "READY",
+        "source": "execution.user_order_request_events",
+        "attributed": 0,
+        "unattributed": len(current_events),
+        "error": None,
+    }
+    if not order_nos:
+        return [dict(event) for event in events], summary
+
+    start_kst = datetime.combine(broker_day, datetime.min.time(), tzinfo=KST)
+    try:
+        correlations = user_order_repository().broker_correlations(
+            order_nos,
+            recorded_after=start_kst.astimezone(timezone.utc),
+        )
+    except UserOrderWorkflowUnavailable:
+        summary.update(status="DEGRADED", error="ORDER_AUTHORITY_UNAVAILABLE")
+        return [dict(event) for event in events], summary
+
+    rule_by_directive: dict[str, Any] = {}
+    try:
+        conditional_repository = conditional_rule_repository()
+        rule_by_directive = conditional_repository.find_by_directive_ids(
+            {item.directive_id for item in correlations.values()}
+        )
+    except ConditionalRuleUnavailable:
+        summary.update(status="DEGRADED", error="CONDITIONAL_AUTHORITY_UNAVAILABLE")
+
+    projected: list[dict[str, Any]] = []
+    attributed = 0
+    for raw_event in events:
+        event = dict(raw_event)
+        order_no = str(
+            event.get("broker_order_id") or event.get("order_no") or ""
+        ).strip()
+        correlation = correlations.get(order_no)
+        if correlation is None or not _matches_internal_correlation(event, correlation):
+            projected.append(event)
+            continue
+        rule = rule_by_directive.get(correlation.directive_id)
+        event.update(
+            {
+                "origin": (
+                    "INTERNAL_CONDITIONAL_ORDER"
+                    if rule is not None
+                    else "INTERNAL_USER_ORDER"
+                ),
+                "correlation_status": "ATTRIBUTED",
+                "correlation_source": "execution.user_order_request_events",
+                "internal_broker_order_id": correlation.broker_order_id,
+                "directive_id": correlation.directive_id,
+                "directive_state": correlation.directive_state,
+                "directive_leg_state": correlation.leg_state,
+                "order_request_id": correlation.order_request_id,
+                "client_request_id": correlation.client_request_id,
+                "request_source": correlation.request_source,
+                "conditional_rule_id": rule.rule_id if rule is not None else None,
+                "conditional_rule_state": (
+                    rule.state.value if rule is not None else None
+                ),
+            }
+        )
+        attributed += 1
+        projected.append(event)
+    summary["attributed"] = attributed
+    summary["unattributed"] = max(0, len(current_events) - attributed)
+    return projected, summary
+
+
 def apply_fill(local: dict[str, Decimal], event: dict[str, Any]) -> None:
     """체결 → 로컬 포지션 변경. 파이프라인의 'Position Event' 단계.
 
@@ -1524,6 +1677,13 @@ def _fixture_portfolio_live() -> dict[str, Any]:
             "counts": {kind: 0 for kind in KINDS},
             "source": "LOCAL_FIXTURE",
             "error": None,
+            "correlation": {
+                "status": "READY",
+                "source": "LOCAL_FIXTURE",
+                "attributed": 0,
+                "unattributed": 0,
+                "error": None,
+            },
             "recent": [],
         },
         "holdings": {
@@ -1592,6 +1752,13 @@ async def portfolio_live(limit: int = 50) -> dict[str, Any]:
         order_source = "SC_REALTIME_FALLBACK"
         recent_orders = list(FEED.events)[: max(1, min(limit, MAX_EVENTS))]
 
+    # LS 주문번호와 기존 BROKER_EXECUTION_SNAPSHOT을 읽기 전용으로 결합한다.
+    # DB 장애는 브로커 주문/잔고 화면을 막지 않고 출처만 DEGRADED로 남긴다.
+    recent_orders, correlation = await asyncio.to_thread(
+        _project_internal_order_correlations,
+        recent_orders,
+    )
+
     account_no = _registered_account()
     account_masked = mask_account(account_no)
     for event in recent_orders:
@@ -1620,6 +1787,7 @@ async def portfolio_live(limit: int = 50) -> dict[str, Any]:
             "counts": counts,
             "source": order_source,
             "error": history_error,
+            "correlation": correlation,
             "recent": recent_orders,
         },
         "holdings": {

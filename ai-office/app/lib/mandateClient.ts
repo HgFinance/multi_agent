@@ -1,13 +1,13 @@
 /**
- * Mandate 저장·조회·인터뷰 로직 — `POST /ui/mandates` + `PUT /ui/mandates/{id}`
+ * Mandate 저장·조회·인터뷰 로직 — `POST /ui/mandates` + `POST /ui/mandates/{id}/versions`
  * + `POST /ui/investor-profiles` + `POST /ui/mandate-assistant/suggest`.
  *
  * 근거: docs/02-engineering/USER_INPUT_API_SPEC.md 2.1~2.4
  *
  * ## 현재 Mandate 저장 의미론
  *
- * 이 화면은 Mandate 부모 행의 `metadata` JSONB를 한 행으로 갱신한다. 기존
- * `mandate_versions` 이력 경로는 이 화면에서 사용하지 않는다.
+ * 이 화면은 승인된 `mandate_versions` 이력을 만들며 unversioned metadata
+ * 덮어쓰기 경로를 사용하지 않는다.
  *
  * 이 호출의 성공은 현재 사용자 입력을 DB에 저장했다는 뜻이며, 주문 제출이나
  * 원장 변경을 수행하지 않는다.
@@ -22,14 +22,17 @@
 
 import { BFF, bffFetch } from "./bffClient";
 import {
+  activePresetVersion,
   presetFor,
   findConstraintViolations,
   sliderDefaultsFor,
   FIXED_POLICY_VALUES,
+  installAuthoritativePresets,
   type Experience,
   type Mindset,
   type MandatePreset,
   type PolicyConstraintViolation,
+  type RiskPresetApiResponse,
 } from "./mandatePresets";
 import type {
   AssetClassId,
@@ -57,6 +60,17 @@ export const RISK_PROFILE_BY_MINDSET: Record<Mindset, RiskProfile> = {
   BALANCED: "neutral",
   RISK_SEEKING: "aggressive",
 };
+
+/** Load the Risk-owned preset matrix before presenting editable defaults. */
+export async function loadAuthoritativeRiskPresets(): Promise<RiskPresetApiResponse> {
+  const response = await bffFetch("/ui/risk/mandate-presets");
+  if (!response.ok) {
+    throw new MandateSubmissionError(`Risk preset 조회 실패 (${response.status})`);
+  }
+  const payload = (await response.json()) as RiskPresetApiResponse;
+  installAuthoritativePresets(payload);
+  return payload;
+}
 
 /**
  * 자산군 코드. `USER_INPUT_SPEC.md` §8 미확정 2번 — **표준 코드값이 아직 없다.**
@@ -844,9 +858,11 @@ export async function submitMandateDraft(
   const nowIso = new Date().toISOString();
   const { status, body } = await bffJson<{
     mandate_id: string;
-    updated_at: string;
-  }>(`/ui/mandates/${mandateId}`, {
-    method: "PUT",
+    mandate_version_id: string;
+    version: number;
+    activated: boolean;
+  }>(`/ui/mandates/${mandateId}/versions`, {
+    method: "POST",
     body: JSON.stringify({
       policy,
       objective_text: objectiveText,
@@ -856,9 +872,16 @@ export async function submitMandateDraft(
       // 전달한다. policy 안에만 두면 기본값 `{}`가 기존 실행 규칙을 덮는다.
       execution_rules: policy.execution_rules ?? {},
       created_by: verifiedUserId,
+      effective_from: nowIso,
+      previous_policy: existing?.policy ?? null,
+      risk_profile: {
+        mindset: MINDSET_BY_RISK_PROFILE[draft.riskProfile],
+        experience: draft.experience,
+        preset_version: activePresetVersion(),
+      },
     }),
   });
-  if ((status !== 200 && status !== 201) || !body) {
+  if ((status !== 200 && status !== 201) || !body?.activated || !body.mandate_version_id) {
     throw new MandateSubmissionError(errorMessage(body, status));
   }
 
