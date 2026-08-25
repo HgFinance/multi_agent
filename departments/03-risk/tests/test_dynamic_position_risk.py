@@ -55,6 +55,7 @@ def _request(**overrides):
         "as_of": NOW.isoformat(),
         "task_id": "t-risk-1",
         "trace_id": "trace-risk-1",
+        "current_quantity": "3",
     }
     payload.update(overrides)
     return payload

@@ -1,5 +1,7 @@
 # 지금 이 시스템은 실제로 어떻게 돌아가는가 — 쉬운 해설판
 
+> **상태: HISTORICAL SNAPSHOT.** 현행 구조는 [Current Architecture](../../CURRENT_PROJECT_ARCHITECTURE.md)를 따른다.
+>
 > 이 문서는 개발 용어를 최대한 줄인 설명판이다. 정확한 코드 위치와 세부 근거는 [상세 기술판](./AS_IS_RUNTIME_BLUEPRINT_2026-08-17.md)에 있다.
 >
 > 기준 스냅샷: 2026-08-17, commit `5c85168b`. “현재”라는 표현은 이 시점의 상세 기술판을 뜻한다.

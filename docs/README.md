@@ -5,8 +5,8 @@
 > 구현 상태 표는 [PROJECT_IMPLEMENTATION_STATUS.md](PROJECT_IMPLEMENTATION_STATUS.md),
 > 상세 실행 계약은
 > [FINAL_RUNTIME_ARCHITECTURE.md](02-engineering/FINAL_RUNTIME_ARCHITECTURE.md)다.
-> `origin/main`과 현재 branch가 다르면 canonical current-state 문서의 source
-> audit를 우선한다.
+> 문서 상태·배치·충돌 규칙은
+> [DOCUMENTATION_GOVERNANCE.md](DOCUMENTATION_GOVERNANCE.md)를 따른다.
 
 <img width="1536" height="1024" alt="image" src="https://github.com/user-attachments/assets/46247b5e-0cbe-46d6-835f-7d129366c8f9" />
 
@@ -21,6 +21,8 @@
 | [Master Plan](HEDGE_FUND_MASTER_PLAN.md) | target state / long-term plan |
 | [Worker Role Boundaries](02-engineering/WORKER_ROLE_BOUNDARIES.md) | worker 권한과 책임의 세부 기준 |
 | [Contracts](02-engineering/contracts/README.md) | schema와 handoff 계약 |
+| [Documentation Governance](DOCUMENTATION_GOVERNANCE.md) | 문서 상태·배치·archive·충돌 처리 규칙 |
+| [Archive](archive/README.md) | 날짜와 commit에 고정된 과거 감사 기록 |
 
 아래의 날짜가 붙은 개요·실행 감사·roadmap은 historical 또는 planning
 자료일 수 있다. 현재 구현 여부를 판단할 때는 위 canonical 문서와 실제
@@ -41,7 +43,7 @@ config/code/test evidence를 먼저 확인한다.
 
 - CEO, 6개 본부장과 Agent Workforce 인사팀장용 Hermes Profile 8개와 `SOUL.md`
 - Mandate 정책·Version Lifecycle과 승인형 Workforce Improvement Candidate Prototype
-- [Engineering 문서 안내](02-engineering/README.md) · 루트 Docker Compose에서 관리하는 기본 26개 Service(Research 수집·조회·MCP·Hermes, TimescaleDB, Redis, Risk·QA, CEO·Trading·Accounting·Workforce)와 선택 Profile 3개 서비스(`portfolio` 2개, `dashboard` 1개). 선언 수와 실제 실행 상태는 [로컬 Compose Runtime 기준선](02-engineering/LOCAL_COMPOSE_RUNTIME_BASELINE.md)과 실행 현황 문서에서 구분한다.
+- [Engineering 문서 안내](02-engineering/README.md) · 루트 Docker Compose와 include fragment가 관리하는 Control Plane. 서비스 수와 profile은 자주 바뀌므로 `docker compose config --services`와 [로컬 Compose Runtime 기준선](02-engineering/LOCAL_COMPOSE_RUNTIME_BASELINE.md)에서 확인하고, 선언 수를 이 포털에 복사하지 않는다.
 - LS 종목 Master·구독 계획·실시간 Payload 정규화와 가격·거래가능성·Calendar 시장 데이터 수집기, DART·거시·뉴스 요청형 Research MCP
 - Timescale Market Repository, Supabase 운영 DB Migration, Workforce Seed, RLS와 Schema Test
 - 결정론적 Risk Engine, Redis Trading State, Order Contract, Paper OMS/Broker, Ledger·Portfolio·Reconciliation Prototype
@@ -248,8 +250,10 @@ flowchart TB
     UI["AI Office - Next.js + React + TypeScript"] --> API["FastAPI + Pydantic"]
     HERMES["Hermes Agent"] --> API
     API --> LANG["LangGraph"]
-    LANG --> BEDROCK["Amazon Bedrock Claude"]
-    LANG --> OLLAMA["Ollama"]
+    HERMES --> HEAD["Head Provider<br/>openai-codex / approved alternative"]
+    LANG --> WG["Worker Model Gateway"]
+    WG --> QWEN["Qwen2.5-14B-Instruct-AWQ + selective LoRA/Hybrid"]
+    WG -. "explicit local fallback" .-> OLLAMA["Ollama qwen3:1.7b"]
 
     API --> SUPA["Supabase PostgreSQL + pgvector"]
     MARKET["LS Open API WebSocket"] --> TSDB["TimescaleDB - Research/Quant"]
@@ -266,8 +270,9 @@ flowchart TB
 |---|---|
 | Hermes | 사용자 명령, CIO형 Supervisor, Tool과 Skill 실행 |
 | LangGraph | 투자위원회와 Strategy Workflow 상태 관리 |
-| Bedrock Claude | 통합·Production 환경의 주 LLM |
-| Ollama | 로컬 개발, 테스트와 저비용 보조 모델 |
+| Head Provider | 현재 8개 Hermes Head는 `openai-codex/gpt-5.6-luna`; 승인된 대체 provider는 별도 계약 |
+| Worker Model Gateway | 운영 Worker의 Qwen2.5-14B-Instruct-AWQ와 선택적 LoRA/Hybrid route |
+| Ollama | 명시적으로 선택한 로컬 개발·테스트 fallback |
 | Supabase PostgreSQL | PostgreSQL, pgvector와 Artifact Metadata (사용자 로그인/Auth는 구현하지 않음) |
 | Redis | Event Queue, 최신 상태 Cache와 Dedup |
 | Docker | 서비스별 Runtime 격리 |
@@ -476,7 +481,11 @@ docs/
 | [동규님 팀 가이드](05-teams/TEAM_DONGGYU_RISK_QA_GUIDE.md) | Risk Gate, QA, Audit와 Incident를 구현할 때 |
 | [영주님 팀 가이드](05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md) | CEO Agent, Mandate, 위원회와 Agent 인사팀을 구현할 때 |
 
-README, Master Plan, Implementation Status, AI Office Frontend, Accepted ADR, Repository Structure, Database 기준서와 ERD를 포함한 19개 Markdown이 현재 확정 기준 문서다. 별도로 `06-integrations/ls-openapi/`에는 공식 공개 API에서 생성한 43개 개발용 참조 Markdown과 `manifest.json`을, `06-integrations/opendart/`에는 85개 API를 분류한 7개 개발용 참조 Markdown을, `06-integrations/krx-openapi/`에는 31개 API를 분류한 8개 개발용 참조 Markdown을, `06-integrations/serpapi/`에는 공식 전체 엔진 지도와 프로젝트 적용 계약을 나눈 7개 개발용 참조 Markdown을 둔다. Cloud 공급자별 후보안과 추가 조직 확장 문서는 해당 결정이 승인될 때 ADR과 함께 새로 작성한다.
+현재 정본의 범위는 파일 개수로 고정하지 않고 위 canonical hierarchy와
+[문서 관리 기준](DOCUMENTATION_GOVERNANCE.md)으로 관리한다. `06-integrations/`의 외부 API
+참조와 BOK 800 Wiki entity처럼 생성되는 Markdown은 설계 정본 수에서 제외하며, 생성기와
+manifest를 기준으로 갱신한다. Cloud 공급자별 후보안과 추가 조직 확장 문서는 해당 결정이
+승인될 때 ADR과 함께 작성한다.
 
 ## 문서 우선순위와 변경 규칙
 

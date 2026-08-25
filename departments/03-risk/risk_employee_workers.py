@@ -265,7 +265,9 @@ def default_worker_llm(
         from departments.worker_model_gateway import llm_for_worker
 
         worker_llm, _binding = llm_for_worker("compliance-policy-worker")
-        return worker_llm(system, prompt, json_schema=json_schema)
+        if json_schema is not None:
+            return worker_llm(system, prompt, json_schema=json_schema)
+        return worker_llm(system, prompt)
 
     from openai import OpenAI
 

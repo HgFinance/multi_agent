@@ -1,5 +1,7 @@
 # AS-IS Runtime Blueprint — 실제 코드 기준 시스템 역설계
 
+> **상태: HISTORICAL SNAPSHOT.** 현행 구조는 [Current Architecture](../../CURRENT_PROJECT_ARCHITECTURE.md)를 따른다.
+>
 > 기준일: 2026-08-17 · 기준 커밋: `5c85168b062eaef667c3e11cafa1a114b77583cb` · 분석 대상: 해당 커밋의 실행 코드, Compose, DB migration, 테스트 · README/계획 문서는 코드 해석의 보조 근거로만 사용
 >
 > 문서 성격: 시점 고정 AS-IS 감사 스냅샷. 현재 정본은 코드·Compose·migration이며 이후 변경은 이 문서에 자동 반영되지 않는다.

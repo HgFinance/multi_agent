@@ -1,13 +1,14 @@
 # Engineering 문서 안내
 
-> 기준일: 2026-08-17
+> **상태:** CURRENT INDEX
+> **검토일:** 2026-08-25 UTC
+> 문서 상태와 archive 규칙: [DOCUMENTATION_GOVERNANCE.md](../DOCUMENTATION_GOVERNANCE.md)
 
 이 폴더는 모든 설계 초안을 모아두는 곳이 아니라, 현재 구현·계약·운영 계획을 찾는 진입점이다. 제품의 최상위 기준은 [`HEDGE_FUND_MASTER_PLAN.md`](../HEDGE_FUND_MASTER_PLAN.md)이며, 현재 로컬 Compose 서비스의 기준은 [`docker-compose.yml`](../../docker-compose.yml)과 [LOCAL_COMPOSE_RUNTIME_BASELINE.md](LOCAL_COMPOSE_RUNTIME_BASELINE.md)다.
 
-## 현재 구현 스냅샷
+## 과거 구현 스냅샷
 
-- [AS-IS Runtime Blueprint](AS_IS_RUNTIME_BLUEPRINT_2026-08-17.md) — `5c85168b` 기준 코드·Compose·DB migration 역추적 감사
-- [쉬운 해설판](AS_IS_RUNTIME_BLUEPRINT_EASY_2026-08-17.md) — 비개발자·운영자용 요약
+- [2026-08-17 Runtime 감사](../archive/2026-08-17/README.md) — `5c85168b` 기준 상세 기술판과 쉬운 해설판. 현행 구현 판단에는 사용하지 않는다.
 
 ## 먼저 읽을 문서
 
@@ -40,7 +41,7 @@
 - [RESEARCH_QUANT_AGENTIC_FRAMEWORK.md](RESEARCH_QUANT_AGENTIC_FRAMEWORK.md) — Research-to-Strategy Framework
 - [RESEARCH_OUTPUT_ADVANCEMENT_STRATEGY.md](RESEARCH_OUTPUT_ADVANCEMENT_STRATEGY.md) — Research 산출물 품질·승격
 - [INVESTMENT_DOCTRINE_MODEL_FACTORY.md](INVESTMENT_DOCTRINE_MODEL_FACTORY.md) — 조건부 Doctrine Model Factory
-- [OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md](OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md) — 로컬 Worker Model Build/Eval
+- [OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md](OLLAMA_DEPARTMENT_MODELFILE_GUIDE.md) — 로컬 fallback·호환 alias Build/Eval; 운영 Worker 정본 아님
 - [WORKER_SKILL_REGISTRY.md](WORKER_SKILL_REGISTRY.md) — Risk·QA Skill 제안·권한 경계
 
 ## 결정 기록·보조 설계

@@ -1,14 +1,12 @@
 # HgFinance Current Architecture
 
-> **Status:** current repository snapshot · **reviewed:** 2026-08-18 KST
+> **Status:** CANONICAL CURRENT · **reviewed:** 2026-08-25 UTC
 >
-> **Source audit:** this checkout is `qa-department` at `3a6607f`, 7 commits behind
-> `origin/main` at `4149454`. Current implementation claims in
-> this document follow the newer `origin/main` executable/config state where
-> the two differ. The model-serving files are identical between this branch
-> and `origin/main`; newer main changes are primarily forward-QA, quant
-> experiment, Compose, migration, and contract-test additions. Claims sourced
-> from main are labeled `TRACKED_MAIN`; branch-only facts are `TRACKED_BRANCH`.
+> **Source audit:** current checkout is `main` rooted at `8826a9c`; at review
+> time it is 1 commit ahead and 0 behind `origin/main` (`7b254c4`). Current
+> claims below were checked against this working tree's executable code,
+> Compose, registry and tests. Uncommitted files are repository evidence, not
+> proof of a running AWS process.
 >
 > This document is an implementation audit, not a target-state specification. The
 > repository, its contracts, tests, and tracked configuration are the source of
@@ -38,17 +36,16 @@ The repository currently verifies the following shape:
 - The Operator BFF contains a narrow local-fixture `USER_DIRECTIVE` PAPER lane.
   It does not create a LIVE lane or give Hermes/agents order authority; see
   [ADR-0007](02-engineering/adr/0007-authenticated-user-paper-directive-authority.md).
-- Both this checkout and `origin/main` track the promoted
-  **Qwen2.5-14B-Instruct-AWQ** worker model, served as
-  `qwen2.5-14b-instruct-awq`, with 8192/0.85 serving defaults and FP8 KV
+- The current checkout configures the promoted **Qwen2.5-14B-Instruct-AWQ**
+  worker model, served as `qwen2.5-14b-instruct-awq`, with 4096/0.85 defaults and FP8 KV
   cache. FP8/16384/0.90 is retained only where historical benchmark or
   runbook material explicitly describes the former baseline.
 - The serving image is pinned by digest and the only supported vLLM entrypoint
   is `scripts/model_plane/vllm_runtime.sh`. Its guard rejects non-Compose
   ownership, duplicate Qwen/vLLM containers, network drift, and image drift.
-- `origin/main` tracks FP8/AWQ quality result artifacts. Infrastructure VRAM,
-  KV-token, and throughput measurements are not present in the tracked result
-  files and are not inferred here.
+- Quantization and Hybrid score ownership belongs to each immutable result
+  directory under `benchmarks/quantization/results/`; this architecture does
+  not copy an execution-specific score table.
 
 ## 2. Why HgFinance Exists
 
@@ -229,7 +226,7 @@ The repository has two different, intentional execution topologies:
 | General response workflow | QA is an independent asynchronous governance lane. CEO may synthesize terminal primary results before QA completes; QA is not a response-synthesis prerequisite. | `orchestration/adapters/ceo_supervisor.py` (`governance_plane=async_qa`, `primary_results_ready_fast_path`); `orchestration/ceo_workflow_scope.py` |
 | QA department internals | Eligible conditional QA graphs fan out concurrently, then their reports are fanned in; deterministic `qa-runner` is added to the combined result. | `departments/06-ai-qa-audit/qa_employee_workers.py::run_employee_workers_async`, `asyncio.gather` |
 | Blocking decision / paper pipeline | Department stages use explicit barriers. QA remains a blocking gate after the upstream Risk stage for this graph; it is not made asynchronous merely because general responses have an async QA lane. | `orchestration/workflows/portfolio_recommendation.py::build_portfolio_graph` |
-| Intraday forward-QA lane (`origin/main`) | Accepted forward evidence is dispatched through a durable outbox/Redis stream, then independently reproduced by a lease-fenced QA worker. Scientific mismatches produce QA verdicts; this is separate from the general-response QA lane. | `departments/06-ai-qa-audit/qa_events/worker.py`, `reproduction_worker.py`, `docker-compose.yml`, `supabase/migrations/20260818000300_intraday_forward_qa_dispatch.sql` |
+| Intraday forward-QA lane | Accepted forward evidence is dispatched through a durable outbox/Redis stream, then independently reproduced by a lease-fenced QA worker. Scientific mismatches produce QA verdicts; this is separate from the general-response QA lane. | `departments/06-ai-qa-audit/qa_events/worker.py`, `reproduction_worker.py`, `docker-compose.yml`, `supabase/migrations/20260818000300_intraday_forward_qa_dispatch.sql` |
 
 Therefore “QA is asynchronous” is only correct for the general response
 governance lane. “QA is always after everything” is also incomplete: the
@@ -244,86 +241,52 @@ preserves its Risk → QA barrier.
 flowchart LR
     L[LLM-capable workers] --> G[worker_model_gateway.py]
     G --> V[vLLM OpenAI-compatible endpoint]
-    V --> F[TRACKED_MAIN: Qwen2.5-14B-Instruct-AWQ]
+    V --> F[Qwen2.5-14B-Instruct-AWQ]
     G --> A[Registry-selected LoRA adapter when enabled]
     A --> E[AWQ base + adapter request]
 ```
 
-`origin/main` commit `b3fb8c5` introduced the AWQ model plane in
-`docker-compose.model.yml`, `departments/worker_model_gateway.py`, and
-`departments/01-research/config/worker_model_registry.json`. The checked-out
-branch contains the same executable serving defaults. Both configurations
-enable LoRA with `max-loras=4`, `max-lora-rank=32`, and `max-cpu-loras=8`.
+The model plane is defined by `docker-compose.model.yml`,
+`departments/worker_model_gateway.py`, and
+`departments/01-research/config/worker_model_registry.json`. LoRA serving uses
+`max-loras=4`, `max-lora-rank=32`, and `max-cpu-loras=8`.
 
-| Setting | `origin/main` tracked value | `qa-department` branch value | Evidence/status |
-|---|---|---|---|
-| base model directory | `Qwen2.5-14B-Instruct-AWQ` | `Qwen2.5-14B-Instruct-AWQ` | TRACKED_MAIN / TRACKED_BRANCH |
-| served model name | `qwen2.5-14b-instruct-awq` | `qwen2.5-14b-instruct-awq` | TRACKED_MAIN / TRACKED_BRANCH |
-| max model length | `8192` | `8192` | TRACKED_MAIN / TRACKED_BRANCH |
-| GPU memory utilization | `0.85` | `0.85` | TRACKED_MAIN / TRACKED_BRANCH |
-| KV cache dtype | `fp8` | `fp8` | TRACKED_MAIN and TRACKED_BRANCH |
-| LoRA | enabled; 4/32/8 limits | enabled; 4/32/8 limits | IMPLEMENTED serving plumbing |
-| actual AWS process health | not proven by repository artifact | not inspected | RUNTIME_VERIFIED unavailable |
-
-`departments/worker_model_gateway.py`의 모듈 docstring에는 아직 FP8 표현이
-남아 있지만, 실행 기본값·Compose·registry는 AWQ로 일치한다. 해당 docstring은
-현재 model-plane source of truth가 아닌 stale comment로 분류한다.
+| Setting | Current checkout value | Evidence/status |
+|---|---|---|
+| base model directory | `Qwen2.5-14B-Instruct-AWQ` | Compose + registry |
+| served model name | `qwen2.5-14b-instruct-awq` | Compose + registry |
+| max model length | `4096` | default; environment may explicitly override |
+| GPU memory utilization | `0.85` | default |
+| KV cache dtype | `fp8` | default |
+| LoRA | enabled; 4/32/8 limits | serving plumbing implemented |
+| Hybrid policy | `awq-hybrid-upgrade-v1`, selective per request | registry + gateway; FinanceBench remains HOLD |
+| actual AWS process health | not established by this document | `RUNTIME_VERIFIED` unavailable |
 
 ## 8. FP8 → AWQ Optimization
 
-**Status: COMPLETED infrastructure promotion in `origin/main`; runtime health
-still requires external observation.**
+**Status: current configuration; runtime health still requires external observation.**
 
-Commit `b3fb8c5` (`deploy: promote AWQ worker model record v2 benchmark`) changes
-the tracked model plane from FP8 to AWQ. The serving configuration and registry
-are therefore `TRACKED_MAIN`; the older FP8 values remain `TRACKED_BRANCH` on
-this checkout and are retained as the comparison baseline.
-
-The repository tracks the following quality artifacts:
-
-- `benchmarks/quantization/results/fp8_external50_final_v1.json`
-- `benchmarks/quantization/results/awq_external50_final_v1.json`
-- `benchmarks/quantization/results/fp8_internal50_score_v1.json`
-- `benchmarks/quantization/results/awq_internal50_score_v1.json`
-- `benchmarks/quantization/results/fp8_internal50_v2_score.json`
-- `benchmarks/quantization/results/awq_internal50_v2_score.json`
-
-The requested infrastructure values for model-load GiB, KV-cache GiB/tokens,
-resident/free VRAM, C1/C2/C4 throughput, E2E, and restart/health were not found
-in the tracked Git artifacts or history inspected here. They must not be
-reconstructed from quality result files. “Theoretical concurrency” means a
-KV/memory-based 8192-token capacity estimate, never a number of agents.
+Commit `b3fb8c5` introduced the AWQ model plane. FP8 and 8K/16K measurements are
+historical comparison or rollback evidence; they do not override the current
+4K Compose default. Model-load, KV-cache, throughput, latency and quality must
+be read from the provenance-bearing benchmark run that measured them and must
+not be combined across unrelated runs.
 
 ## 9. Quality Evaluation
 
-Results below come from the immutable result files on `origin/main`; candidate
-JSON is not used to infer scores. `External-50`, `Internal-50 v1`, and
-`Internal-50 v2` remain held out from future LoRA train/dev data.
+Execution-specific scores live under `benchmarks/quantization/results/`. In
+particular, the 2026-08-25 adapter-only replication and Hybrid/BOK800 paired
+replay each keep their raw output, score and provenance beside their README.
+Historical and current runs are not averaged together.
 
-| Evaluation | FP8 | AWQ | Interpretation |
-|---|---:|---:|---|
-| External-50 | 37/50 (74%) | 37/50 (74%) | overall external accuracy preserved; derived subset, not an official leaderboard score |
-| Internal-50 v1 | 15/50 (30%) | 12/50 (24%) | HgFinance Production Contract Adherence Benchmark; not pure base-model capability |
-| Internal-50 v2 Employee Reasoning | 37/50 (74%) | 36/50 (72%) | employee reasoning decreased by 1 case; critical failures remained 1 → 1 with the same `v2-046` ID |
-
-Internal-v1 critical failures are `20/24` for both base variants, so the
-benchmark exposes substantial contract-adherence weakness rather than proving
-production readiness. Internal-v2 financial arithmetic is weak for both
-variants (`3/10` FP8, `2/10` AWQ); exact arithmetic should remain in
-deterministic tools.
-
-The tracked result paths are the benchmark evidence. No AWQ+LoRA result is
-tracked yet, so the final comparison remains `FP8 | AWQ | AWQ + LoRA` with the
-third column pending.
-
-The evaluation separation remains architecturally important: External-50,
-Internal-50 v1, and Internal-50 v2 must be held out from future adapter
-training. Exact arithmetic should be tested against deterministic tools and
-not used as evidence that an LLM is an accounting authority.
+`External-50`, `Internal-50 v1`, and `Internal-50 v2` remain evaluation-only.
+Exact arithmetic stays under deterministic validation and a model score never
+makes an LLM the accounting authority.
 
 ## 10. LoRA / QLoRA Training Architecture
 
-**Status: PLANNED; training pipeline not found in the repository.**
+**Status: adapter artifact and selective serving path exist; reusable training
+and promotion governance remains partial.**
 
 The desired future topology is one shared base with department-specific
 adapters, not one separately fine-tuned 14B model per department:
@@ -346,16 +309,19 @@ and no bypass of Risk/QA/accounting controls. Department data adds specialist
 behavior. The production AWQ checkpoint must not be described as the QLoRA
 training checkpoint unless an implementation file proves that workflow.
 
-`origin/main` implements serving/registration plumbing in
+The current checkout implements serving/registration plumbing in
 `docker-compose.model.yml`, `departments/worker_model_gateway.py`, and
 `departments/01-research/config/worker_model_registry.json`: vLLM LoRA is
 enabled, adapter resolution is registry-controlled, and base-model fallback is
-explicit. The registry currently records base-model entries rather than proving
-that a department adapter is enabled in the runtime.
+explicit. The arithmetic adapter `hgfinance-awq-arithmetic-2epoch` is available
+for an explicit route; worker entries stay on the base model unless the gateway's
+selective Hybrid policy chooses the numeric route. Availability is not a blanket
+quality promotion, and FinanceBench remains `HOLD`.
 
-That plumbing is not a reusable Colab QLoRA training pipeline. No training
-notebook, CSV schema validator, NF4 training script, or adapter promotion run
-was found in tracked source; QLoRA training remains `PLANNED`.
+Training data manifests and preparation scripts exist under the quantization
+training paths, but a generally reusable department-adapter training and
+promotion workflow is still partial. Evaluation-only datasets must remain
+excluded from train/dev data.
 
 ## 11. Data & Infrastructure
 
