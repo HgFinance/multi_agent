@@ -875,6 +875,36 @@ def _approved_feedback_section(
     )
 
 
+def approved_feedback_section_from_root(
+    root_body: str,
+    department: str,
+) -> str:
+    """Project only one department's already-gated root hint to its Hermes task."""
+
+    marker = "## QA-approved observability feedback (non-authoritative)"
+    lines = str(root_body or "").splitlines()
+    try:
+        payload_line = lines[lines.index(marker) + 1]
+        payload = json.loads(payload_line)
+    except (ValueError, IndexError, TypeError, json.JSONDecodeError):
+        return ""
+    items = payload.get("items") if isinstance(payload, Mapping) else None
+    if not isinstance(items, list):
+        return ""
+    from orchestration.langsmith_feedback import (
+        canonical_department,  # local: avoid import cycle
+    )
+
+    target = canonical_department(department)
+    selected = [
+        item
+        for item in items
+        if isinstance(item, Mapping)
+        and canonical_department(item.get("department")) == target
+    ]
+    return _approved_feedback_section({"items": selected})
+
+
 def _mandate_section(mandate: Mapping[str, Any] | None) -> str:
     """스냅샷 블록을 root body에 끼울 형태로 감싼다. 없으면 빈 문자열."""
 
@@ -1153,6 +1183,7 @@ __all__ = [
     "build_root_body",
     "build_root_comment",
     "build_scoped_task_body",
+    "approved_feedback_section_from_root",
     "build_user_paper_order_scope",
     "extract_scope_references",
     "infer_workflow_mode",

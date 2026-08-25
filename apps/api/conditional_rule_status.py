@@ -144,9 +144,9 @@ def build_conditional_execution_status(
     if effective_workflow_state == "COMPLETED":
         unknowns = "없음"
     elif filled > 0:
-        unknowns = "회계 원장 반영"
+        unknowns = "회계 원장 반영은 아직 확인되지 않음"
     else:
-        unknowns = "체결 및 회계 원장 반영"
+        unknowns = "체결 및 회계 원장 반영은 아직 확인되지 않음"
 
     lines = [
         f"Ticker : {symbol or '-'}",

@@ -10,13 +10,15 @@ RUN pip install --no-cache-dir \
     pydantic==2.13.3 \
     PyJWT==2.13.0 \
     psycopg2-binary==2.9.12 \
-    httpx==0.28.1
+    httpx==0.28.1 \
+    redis==5.2.1
 
 # Keep the evaluator image free of agent CLIs, browser/BFF code, broker adapters,
 # and department credentials. Only the loop entry point and deterministic
 # rule package are present.
 COPY apps/api/conditional_rule_worker.py /app/apps/api/conditional_rule_worker.py
 COPY apps/api/conditional_rule_retention.py /app/apps/api/conditional_rule_retention.py
+COPY apps/api/conditional_rule_outbox_relay.py /app/apps/api/conditional_rule_outbox_relay.py
 COPY orchestration/__init__.py /app/orchestration/__init__.py
 COPY orchestration/conditional_rules /app/orchestration/conditional_rules
 # Reuse the reviewed read-only LS REST client. No broker/order adapter is

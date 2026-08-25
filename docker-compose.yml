@@ -358,6 +358,109 @@ services:
     cpus: 0.5
     pids_limit: 96
 
+  # Transactional conditional-rule events are published only after the rule
+  # state transition commits. Redis is the delivery stream; event_id is the
+  # consumer idempotency key, so a crash between Redis and PostgreSQL commits
+  # remains at-least-once rather than silently losing an audit event.
+  conditional-rule-outbox-relay:
+    build:
+      context: .
+      dockerfile: Dockerfile.conditional-rule-worker
+    container_name: hedgefund-conditional-rule-outbox-relay
+    restart: unless-stopped
+    init: true
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: ["python", "-m", "apps.api.conditional_rule_outbox_relay"]
+    environment:
+      PYTHONPATH: /app
+      APP_ENV: ${APP_ENV:-production}
+      CONDITIONAL_RULE_DATABASE_URL: ${CONDITIONAL_RULE_OUTBOX_DATABASE_URL:-${CONDITIONAL_RULE_DATABASE_URL:-${DATABASE_URL:-}}}
+      CONDITIONAL_RULE_WORKER_DATABASE_ROLE: ${CONDITIONAL_RULE_WORKER_DATABASE_ROLE:-svc_conditional_rule_worker}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      CONDITIONAL_RULE_EVENT_STREAM: ${CONDITIONAL_RULE_EVENT_STREAM:-hf:conditional-rule-events:v1}
+      CONDITIONAL_RULE_EVENT_STREAM_MAXLEN: ${CONDITIONAL_RULE_EVENT_STREAM_MAXLEN:-10000}
+      CONDITIONAL_RULE_OUTBOX_POLL_SECONDS: ${CONDITIONAL_RULE_OUTBOX_POLL_SECONDS:-1}
+      CONDITIONAL_RULE_OUTBOX_BATCH_SIZE: ${CONDITIONAL_RULE_OUTBOX_BATCH_SIZE:-100}
+    healthcheck:
+      test: ["CMD", "python", "-m", "apps.api.conditional_rule_outbox_relay", "--healthcheck"]
+      interval: 15s
+      # The small image is CPU-capped and imports the shared deterministic
+      # rule package before the check runs; eight seconds made a healthy DB
+      # boundary report unhealthy during cold-start.
+      timeout: 30s
+      retries: 5
+      start_period: 30s
+    mem_limit: 128m
+    mem_reservation: 32m
+    cpus: 0.1
+
+  # Missing adapter only: consumes the existing conditional outbox stream,
+  # re-reads the existing Trading directive API, and calls the existing
+  # Discord/Kanban/Notion projection owners. It owns no bot or execution state.
+  conditional-rule-notification-consumer:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: hedgefund-conditional-rule-notification-consumer
+    restart: unless-stopped
+    init: true
+    user: "1000:1000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      trading-api:
+        condition: service_healthy
+    command: ["python", "-m", "apps.api.conditional_rule_notification_consumer"]
+    environment:
+      PYTHONPATH: /app:/app/apps/api
+      APP_ENV: ${APP_ENV:-production}
+      PORTFOLIO_AUTH_MODE: ${PORTFOLIO_AUTH_MODE:-fixture}
+      PORTFOLIO_AUTH_REQUIRED: ${PORTFOLIO_AUTH_REQUIRED:-false}
+      PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON: ${PORTFOLIO_FIXTURE_TRADING_BOOKS_JSON:-[]}
+      DATABASE_URL: ${DATABASE_URL:-}
+      ORDER_ORCHESTRATOR_DATABASE_URL: ${ORDER_ORCHESTRATOR_DATABASE_URL:-${DATABASE_URL:-}}
+      ORDER_ORCHESTRATOR_DATABASE_ROLE: ${ORDER_ORCHESTRATOR_DATABASE_ROLE:-svc_order_orchestrator}
+      CONDITIONAL_RULE_DATABASE_URL: ${CONDITIONAL_RULE_NOTIFICATION_DATABASE_URL:-${CONDITIONAL_RULE_WORKER_DATABASE_URL:-${CONDITIONAL_RULE_DATABASE_URL:-${DATABASE_URL:-}}}}
+      CONDITIONAL_RULE_WORKER_DATABASE_ROLE: ${CONDITIONAL_RULE_WORKER_DATABASE_ROLE:-svc_conditional_rule_worker}
+      TRADING_API_URL: ${TRADING_API_URL:-http://trading-api:8000}
+      TRADING_SERVICE_AUTH_SECRET: ${TRADING_SERVICE_AUTH_SECRET:?A 32-byte trading service proof secret is required}
+      TRADING_SERVICE_AUTH_ISSUER: ${TRADING_SERVICE_AUTH_ISSUER:-portfolio-bff}
+      TRADING_SERVICE_AUTH_AUDIENCE: ${TRADING_SERVICE_AUTH_AUDIENCE:-trading-api}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      CONDITIONAL_RULE_EVENT_STREAM: ${CONDITIONAL_RULE_EVENT_STREAM:-hf:conditional-rule-events:v1}
+      CONDITIONAL_RULE_NOTIFICATION_GROUP: ${CONDITIONAL_RULE_NOTIFICATION_GROUP:-conditional-paper-reporting-v1}
+      CONDITIONAL_RULE_NOTIFICATION_RETRY_MS: ${CONDITIONAL_RULE_NOTIFICATION_RETRY_MS:-2000}
+      HERMES_BIN: /usr/local/bin/hermes
+      HERMES_HOME: /opt/data
+      HERMES_KANBAN_HOME: /opt/kanban
+      HERMES_KANBAN_DB: /opt/kanban/kanban.db
+      NOTION_TOKEN: ${NOTION_TOKEN:-}
+      NOTION_CEO_DB: ${NOTION_CEO_DB:-}
+      NOTION_TRADING_DB: ${NOTION_TRADING_DB:-}
+      # Reuse the existing redacted workflow trace and feedback projects. The
+      # consumer emits only bounded semantic-QA metadata, never answer text.
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
+      LANGSMITH_METRICS_PROJECT: ${LANGSMITH_METRICS_PROJECT:-HgFinance-Metrics}
+      LANGSMITH_EVALS_PROJECT: ${LANGSMITH_EVALS_PROJECT:-HgFinance-Evals}
+    volumes:
+      - /home/ubuntu/.hermes:/opt/data
+      - /home/ubuntu/.hermes/shared-kanban:/opt/kanban
+    healthcheck:
+      test: ["CMD", "python", "-m", "apps.api.conditional_rule_notification_consumer", "--healthcheck"]
+      interval: 15s
+      timeout: 30s
+      retries: 5
+      start_period: 30s
+    mem_limit: 256m
+    mem_reservation: 64m
+    cpus: 0.25
+    pids_limit: 96
+
   # Conditional-rule retention is isolated from the hot evaluator.  It only
   # deletes terminal audit detail after the configured grace periods; active
   # rules and executions linked to PAPER directives are never touched.

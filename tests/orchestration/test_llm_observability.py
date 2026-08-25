@@ -7,15 +7,17 @@ import pytest
 
 from orchestration.llm_observability import (
     _metric_metadata,
+    close_root_trace,
     langfuse_enabled,
     langfuse_worker_event_name,
     langsmith_project,
-    close_root_trace,
-    publish_metric,
     publish_langfuse_metric,
+    publish_metric,
     publish_root_trace,
     redacted_trace,
     start_root_trace,
+    trace_correlation_metadata,
+    worker_graph_trace_config,
 )
 
 
@@ -71,11 +73,49 @@ def test_langsmith_root_trace_allowlist_keeps_only_safe_correlation_metadata() -
     }
 
 
+def test_worker_trace_config_carries_request_root_task_correlation() -> None:
+    correlation = trace_correlation_metadata(
+        {
+            "request_id": "req-1",
+            "root_task_id": "root-1",
+            "task_id": "task-1",
+            "trace_id": "trace-1",
+            "prompt": "must never be copied",
+        },
+        input_hash="sha256:ignored",
+    )
+    config = worker_graph_trace_config(
+        stage="qa",
+        worker_id="qa-worker",
+        role="auditor",
+        correlation=correlation,
+    )
+
+    assert config["metadata"]["request_id"] == "req-1"
+    assert config["metadata"]["root_id"] == "root-1"
+    assert config["metadata"]["task_id"] == "task-1"
+    assert config["metadata"]["trace_id"] == "trace-1"
+    assert "prompt" not in config["metadata"]
+
+
+def test_trace_correlation_has_deterministic_legacy_fallbacks() -> None:
+    correlation = trace_correlation_metadata({}, input_hash="sha256:abc123")
+
+    assert correlation["request_id"] == "local:sha256:abc123"
+    assert correlation["root_id"] == correlation["request_id"]
+    assert correlation["task_id"].endswith("-task")
+
+
 @pytest.fixture(autouse=True)
 def _clear_langfuse_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """매 테스트 기본값이 꺼짐이어야 한다 - 실행 셸에 남은 값의 영향을 받지 않는다."""
 
-    for key in ("LANGFUSE_TRACING", "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST"):
+    for key in (
+        "LANGFUSE_TRACING",
+        "LANGFUSE_PUBLIC_KEY",
+        "LANGFUSE_SECRET_KEY",
+        "LANGFUSE_HOST",
+    ):
         monkeypatch.delenv(key, raising=False)
     for key in (
         "LANGSMITH_TRACING",
@@ -92,7 +132,9 @@ def test_langfuse_worker_event_name_is_the_single_source_of_truth() -> None:
     """write 측(publish_langfuse_metric)과 read 측(HR observability.py)이 같은
     문자열을 조립해야 하므로, 포맷이 바뀌면 이 테스트가 먼저 깨져야 한다."""
 
-    name = langfuse_worker_event_name(stage="research", worker_id="research-data-worker")
+    name = langfuse_worker_event_name(
+        stage="research", worker_id="research-data-worker"
+    )
     assert name == "llm.performance.metric:research:research-data-worker"
 
 
@@ -106,7 +148,11 @@ def test_langfuse_disabled_by_default() -> None:
         {},  # 전부 미설정
         {"LANGFUSE_TRACING": "true"},  # key 없음
         {"LANGFUSE_TRACING": "true", "LANGFUSE_PUBLIC_KEY": "pk"},  # secret 없음
-        {"LANGFUSE_TRACING": "false", "LANGFUSE_PUBLIC_KEY": "pk", "LANGFUSE_SECRET_KEY": "sk"},  # 스위치 꺼짐
+        {
+            "LANGFUSE_TRACING": "false",
+            "LANGFUSE_PUBLIC_KEY": "pk",
+            "LANGFUSE_SECRET_KEY": "sk",
+        },  # 스위치 꺼짐
     ],
 )
 def test_langfuse_requires_tracing_and_both_keys(
@@ -117,7 +163,9 @@ def test_langfuse_requires_tracing_and_both_keys(
     assert langfuse_enabled() is False
 
 
-def test_langfuse_enabled_when_switch_and_both_keys_present(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_langfuse_enabled_when_switch_and_both_keys_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("LANGFUSE_TRACING", "true")
     monkeypatch.setenv("LANGFUSE_PUBLIC_KEY", "pk")
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk")
@@ -134,7 +182,9 @@ def test_publish_langfuse_metric_is_false_and_silent_when_disabled() -> None:
     assert result is False
 
 
-def test_publish_langfuse_metric_never_raises_on_unreachable_host(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_publish_langfuse_metric_never_raises_on_unreachable_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """자격증명은 있지만 host 가 존재하지 않을 때도 예외가 새어 나가면 안 된다 -
     관측 실패가 실제 파이프라인(portfolio_recommendation.py)을 죽이면 안 되기 때문."""
 
@@ -143,7 +193,13 @@ def test_publish_langfuse_metric_never_raises_on_unreachable_host(monkeypatch: p
     monkeypatch.setenv("LANGFUSE_SECRET_KEY", "sk-fake")
     monkeypatch.setenv("LANGFUSE_HOST", "http://127.0.0.1:1")
     result = publish_langfuse_metric(
-        {"worker_id": "w", "stage": "research", "status": "COMPLETED", "attempts": 1, "error_count": 0},
+        {
+            "worker_id": "w",
+            "stage": "research",
+            "status": "COMPLETED",
+            "attempts": 1,
+            "error_count": 0,
+        },
         trace_id="t1",
     )
     # create_event() 는 OTel 배치라 네트워크 실패와 무관하게 큐잉 성공 시 True 를
@@ -187,7 +243,9 @@ def test_publish_root_trace_swallows_client_failure(
     assert publish_root_trace(request_id="discord:req-1", root_id="t_root") is False
 
 
-def test_langsmith_projects_keep_workflow_and_metrics_separate(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_langsmith_projects_keep_workflow_and_metrics_separate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("LANGSMITH_PROJECT", "First")
     monkeypatch.setenv("LANGSMITH_METRICS_PROJECT", "HgFinance-Metrics")
     monkeypatch.setenv("LANGSMITH_EVALS_PROJECT", "HgFinance-Evals")
@@ -210,19 +268,25 @@ def test_publish_metric_uses_metrics_project_without_creating_a_second_run(
     client = Mock()
     monkeypatch.setattr(observability, "_safe_langsmith_client", lambda: client)
 
-    assert publish_metric(
-        {"worker_id": "qwen-risk-worker", "stage": "risk", "status": "COMPLETED"},
-        trace_id="t_worker",
-    ) is True
+    assert (
+        publish_metric(
+            {"worker_id": "qwen-risk-worker", "stage": "risk", "status": "COMPLETED"},
+            trace_id="t_worker",
+        )
+        is True
+    )
 
     assert client.create_run.call_count == 1
     kwargs = client.create_run.call_args.kwargs
     assert kwargs["project_name"] == "HgFinance-Metrics"
     assert kwargs["inputs"] == {}
     assert kwargs["outputs"] == {}
+    assert kwargs["end_time"] is not None
 
 
-def test_publish_metric_defaults_to_metrics_project(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_publish_metric_defaults_to_metrics_project(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("LANGSMITH_TRACING", "true")
     monkeypatch.setenv("LANGSMITH_API_KEY", "key-not-printed")
 
@@ -247,12 +311,15 @@ def test_publish_root_trace_sends_empty_payload_with_correlation_metadata(
     client = Mock()
     monkeypatch.setattr(observability, "_safe_langsmith_client", lambda: client)
 
-    assert publish_root_trace(
-        request_id="discord:req-1",
-        root_id="t_root",
-        workflow_mode="analysis",
-        source="discord",
-    ) is True
+    assert (
+        publish_root_trace(
+            request_id="discord:req-1",
+            root_id="t_root",
+            workflow_mode="analysis",
+            source="discord",
+        )
+        is True
+    )
 
     kwargs = client.create_run.call_args.kwargs
     assert kwargs["inputs"] == {}
@@ -264,6 +331,33 @@ def test_publish_root_trace_sends_empty_payload_with_correlation_metadata(
     assert metadata["source"] == "discord"
     assert "api_key" not in metadata
     assert "prompt" not in metadata
+
+
+def test_publish_completed_root_trace_includes_redacted_semantic_qa(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "key-not-printed")
+    import orchestration.llm_observability as observability
+
+    client = Mock()
+    monkeypatch.setattr(observability, "_safe_langsmith_client", lambda: client)
+
+    assert publish_root_trace(
+        request_id="discord:req-1",
+        root_id="t_root",
+        status="completed",
+        semantic_qa={
+            "semantic_qa_version": "hgfinance.semantic-qa.v1",
+            "semantic_qa_verdict": "PASS",
+            "semantic_qa_score": 1.0,
+            "raw_answer": "must not leave the boundary",
+        },
+    )
+    metadata = client.create_run.call_args.kwargs["extra"]["metadata"]
+    assert metadata["stage"] == "ceo-terminal"
+    assert metadata["semantic_qa_verdict"] == "PASS"
+    assert "raw_answer" not in metadata
 
 
 def test_start_root_trace_posts_and_returns_only_dotted_order_context(
@@ -301,12 +395,13 @@ def test_start_root_trace_posts_and_returns_only_dotted_order_context(
 
     assert handle is not None
     assert handle.context.startswith("trace-root.")
+    assert handle.run_id is None
     assert FakeRunTree.posted == 1
     assert FakeRunTree.instance.kwargs["project_name"] == "First"
     assert not hasattr(handle, "prompt")
 
 
-def test_close_root_trace_ends_and_patches_without_inputs_or_outputs(
+def test_close_root_trace_updates_only_terminal_fields_without_renaming_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("LANGSMITH_TRACING", "true")
@@ -317,8 +412,7 @@ def test_close_root_trace_ends_and_patches_without_inputs_or_outputs(
         instance = None
 
         def __init__(self, **kwargs):
-            self.end_kwargs = None
-            self.patch_kwargs = None
+            self.id = "run-root-id"
             type(self).instance = self
 
         @classmethod
@@ -326,30 +420,60 @@ def test_close_root_trace_ends_and_patches_without_inputs_or_outputs(
             assert headers == {"langsmith-trace": "trace-root"}
             return cls(**kwargs)
 
-        def end(self, **kwargs):
-            self.end_kwargs = kwargs
+    monkeypatch.setitem(sys.modules, "langsmith", SimpleNamespace(RunTree=FakeRunTree))
+    import orchestration.llm_observability as observability
 
-        def patch(self, **kwargs):
-            self.patch_kwargs = kwargs
+    client = Mock()
+    monkeypatch.setattr(observability, "_safe_langsmith_client", lambda: client)
+    assert (
+        close_root_trace(
+            "trace-root",
+            request_id="discord:req-1",
+            root_id="t_root",
+            workflow_mode="analysis",
+            source="discord",
+            status="completed",
+        )
+        is True
+    )
+
+    kwargs = client.update_run.call_args.kwargs
+    assert kwargs["run_id"] == "run-root-id"
+    assert kwargs["extra"]["metadata"]["root_id"] == "t_root"
+    assert kwargs["extra"]["metadata"]["raw_payloads_sent"] is False
+    assert kwargs["extra"]["metadata"]["latency_scope"] == "end_to_end"
+    assert kwargs["error"] is None
+    assert "name" not in kwargs
+    assert "start_time" not in kwargs
+    assert "inputs" not in kwargs
+    assert "outputs" not in kwargs
+
+
+def test_close_root_trace_prefers_explicit_start_run_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "key-not-printed")
+
+    class FakeRunTree:
+        @classmethod
+        def from_headers(cls, *_args, **_kwargs):
+            raise AssertionError("explicit run ID must bypass header reconstruction")
 
     monkeypatch.setitem(sys.modules, "langsmith", SimpleNamespace(RunTree=FakeRunTree))
     import orchestration.llm_observability as observability
 
-    monkeypatch.setattr(observability, "_safe_langsmith_client", lambda: Mock())
+    client = Mock()
+    monkeypatch.setattr(observability, "_safe_langsmith_client", lambda: client)
+
     assert close_root_trace(
         "trace-root",
+        run_id="run-from-start",
         request_id="discord:req-1",
-        root_id="t_root",
-        workflow_mode="analysis",
-        source="discord",
         status="completed",
-    ) is True
-
-    run = FakeRunTree.instance
-    assert run.end_kwargs["metadata"]["root_id"] == "t_root"
-    assert run.end_kwargs["metadata"]["raw_payloads_sent"] is False
-    assert run.end_kwargs["error"] is None
-    assert run.patch_kwargs == {"exclude_inputs": True}
+    )
+    assert client.update_run.call_args.kwargs["run_id"] == "run-from-start"
+    client.flush.assert_called_once_with()
 
 
 def test_redacted_trace_is_noop_when_langsmith_setup_fails(

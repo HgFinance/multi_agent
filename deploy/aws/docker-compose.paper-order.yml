@@ -204,6 +204,50 @@ services:
       CONDITIONAL_RULE_OUTBOX_RETENTION_DAYS: ${CONDITIONAL_RULE_OUTBOX_RETENTION_DAYS:-7}
       CONDITIONAL_RULE_RETENTION_STATEMENT_TIMEOUT_MS: ${CONDITIONAL_RULE_RETENTION_STATEMENT_TIMEOUT_MS:-1500}
 
+  conditional-rule-outbox-relay:
+    depends_on:
+      <<: *control-dependency
+      redis:
+        condition: service_healthy
+    environment:
+      APP_ENV: production
+      DATABASE_URL: *conditional-worker-database-url
+      CONDITIONAL_RULE_DATABASE_URL: *conditional-worker-database-url
+      CONDITIONAL_RULE_WORKER_DATABASE_ROLE: svc_conditional_rule_worker
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      CONDITIONAL_RULE_EVENT_STREAM: ${CONDITIONAL_RULE_EVENT_STREAM:-hf:conditional-rule-events:v1}
+      CONDITIONAL_RULE_EVENT_STREAM_MAXLEN: ${CONDITIONAL_RULE_EVENT_STREAM_MAXLEN:-10000}
+      CONDITIONAL_RULE_OUTBOX_POLL_SECONDS: ${CONDITIONAL_RULE_OUTBOX_POLL_SECONDS:-1}
+      CONDITIONAL_RULE_OUTBOX_BATCH_SIZE: ${CONDITIONAL_RULE_OUTBOX_BATCH_SIZE:-100}
+
+  conditional-rule-notification-consumer:
+    depends_on:
+      <<: *control-dependency
+      redis:
+        condition: service_healthy
+      trading-api:
+        condition: service_healthy
+    environment:
+      APP_ENV: production
+      PORTFOLIO_AUTH_MODE: fixture
+      PORTFOLIO_AUTH_REQUIRED: "false"
+      DATABASE_URL: *control-database-url
+      ORDER_ORCHESTRATOR_DATABASE_URL: *order-database-url
+      ORDER_ORCHESTRATOR_DATABASE_ROLE: svc_order_orchestrator
+      CONDITIONAL_RULE_DATABASE_URL: *conditional-worker-database-url
+      CONDITIONAL_RULE_WORKER_DATABASE_ROLE: svc_conditional_rule_worker
+      TRADING_API_URL: http://trading-api:8000
+      TRADING_SERVICE_AUTH_SECRET: ${TRADING_SERVICE_AUTH_SECRET:?A 32-byte trading service proof secret is required}
+      TRADING_SERVICE_AUTH_ISSUER: ${TRADING_SERVICE_AUTH_ISSUER:-portfolio-bff}
+      TRADING_SERVICE_AUTH_AUDIENCE: ${TRADING_SERVICE_AUTH_AUDIENCE:-trading-api}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      CONDITIONAL_RULE_EVENT_STREAM: ${CONDITIONAL_RULE_EVENT_STREAM:-hf:conditional-rule-events:v1}
+      CONDITIONAL_RULE_NOTIFICATION_GROUP: ${CONDITIONAL_RULE_NOTIFICATION_GROUP:-conditional-paper-reporting-v1}
+      CONDITIONAL_RULE_NOTIFICATION_RETRY_MS: ${CONDITIONAL_RULE_NOTIFICATION_RETRY_MS:-2000}
+      NOTION_TOKEN: ${NOTION_TOKEN:-}
+      NOTION_CEO_DB: ${NOTION_CEO_DB:-}
+      NOTION_TRADING_DB: ${NOTION_TRADING_DB:-}
+
   portfolio-worker:
     depends_on: *control-dependency
     environment:

@@ -7,7 +7,7 @@ import contextvars
 import os
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -29,7 +29,9 @@ class WorkerMetric:
     latency_ms: int = 0
     errors: int = 0
 
-    def as_dict(self, *, status: str, attempts: int, eval_score: float | None) -> dict[str, Any]:
+    def as_dict(
+        self, *, status: str, attempts: int, eval_score: float | None
+    ) -> dict[str, Any]:
         return {
             "schema_version": "llm.performance.v1",
             "worker_id": self.worker_id,
@@ -42,7 +44,8 @@ class WorkerMetric:
             "retries": max(attempts - 1, 0),
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
-            "latency_ms": self.latency_ms or int((time.perf_counter() - self.started_at) * 1000),
+            "latency_ms": self.latency_ms
+            or int((time.perf_counter() - self.started_at) * 1000),
             "eval_score": eval_score,
             "error_count": self.errors,
             "raw_payloads_sent": False,
@@ -54,24 +57,34 @@ _CURRENT_METRIC: contextvars.ContextVar[WorkerMetric | None] = contextvars.Conte
 )
 
 
-def begin_worker_metric(*, worker_id: str, role: str, stage: str, model_name: str) -> contextvars.Token:
+def begin_worker_metric(
+    *, worker_id: str, role: str, stage: str, model_name: str
+) -> contextvars.Token:
     return _CURRENT_METRIC.set(WorkerMetric(worker_id, role, stage, model_name))
 
 
-def end_worker_metric(token: contextvars.Token, *, status: str, attempts: int, eval_score: float | None) -> dict[str, Any]:
+def end_worker_metric(
+    token: contextvars.Token, *, status: str, attempts: int, eval_score: float | None
+) -> dict[str, Any]:
     metric = _CURRENT_METRIC.get()
     try:
-        return metric.as_dict(status=status, attempts=attempts, eval_score=eval_score) if metric else {
-            "schema_version": "llm.performance.v1",
-            "status": status,
-            "attempts": attempts,
-            "raw_payloads_sent": False,
-        }
+        return (
+            metric.as_dict(status=status, attempts=attempts, eval_score=eval_score)
+            if metric
+            else {
+                "schema_version": "llm.performance.v1",
+                "status": status,
+                "attempts": attempts,
+                "raw_payloads_sent": False,
+            }
+        )
     finally:
         _CURRENT_METRIC.reset(token)
 
 
-def record_llm_call(*, usage: Any = None, latency_ms: int = 0, error: bool = False) -> None:
+def record_llm_call(
+    *, usage: Any = None, latency_ms: int = 0, error: bool = False
+) -> None:
     metric = _CURRENT_METRIC.get()
     if metric is None:
         return
@@ -84,17 +97,28 @@ def record_llm_call(*, usage: Any = None, latency_ms: int = 0, error: bool = Fal
         ("prompt_tokens", ("prompt_tokens", "input_tokens")),
         ("completion_tokens", ("completion_tokens", "output_tokens")),
     ):
-        value = next((getattr(usage, name, None) for name in names if getattr(usage, name, None) is not None), None)
+        value = next(
+            (
+                getattr(usage, name, None)
+                for name in names
+                if getattr(usage, name, None) is not None
+            ),
+            None,
+        )
         if value is not None:
             setattr(metric, target, int(value) + int(getattr(metric, target) or 0))
 
 
 def langsmith_enabled() -> bool:
     tracing = os.getenv("LANGSMITH_TRACING", "")
-    return tracing.casefold() in {"1", "true", "yes", "on"} and bool(os.getenv("LANGSMITH_API_KEY", "").strip())
+    return tracing.casefold() in {"1", "true", "yes", "on"} and bool(
+        os.getenv("LANGSMITH_API_KEY", "").strip()
+    )
 
 
-def langsmith_project(scope: Literal["workflow", "metrics", "evals"] = "workflow") -> str | None:
+def langsmith_project(
+    scope: Literal["workflow", "metrics", "evals"] = "workflow",
+) -> str | None:
     """Return the single configured LangSmith project for an observability scope.
 
     Workflow/root/worker traces stay together in ``LANGSMITH_PROJECT`` so QA can
@@ -111,17 +135,51 @@ def langsmith_project(scope: Literal["workflow", "metrics", "evals"] = "workflow
     return os.getenv("LANGSMITH_PROJECT", "").strip() or None
 
 
-def _metric_metadata(metric: dict[str, Any], *, trace_id: str | None = None) -> dict[str, Any]:
+def _metric_metadata(
+    metric: dict[str, Any], *, trace_id: str | None = None
+) -> dict[str, Any]:
     allowed = {
-        "schema_version", "worker_id", "role", "stage", "model_name", "status",
-        "attempts", "llm_calls", "retries", "prompt_tokens", "completion_tokens",
+        "schema_version",
+        "worker_id",
+        "role",
+        "stage",
+        "model_name",
+        "status",
+        "attempts",
+        "llm_calls",
+        "retries",
+        "prompt_tokens",
+        "completion_tokens",
         # source: 같은 Agent 의 활동이라도 **어느 경로로 관측됐는지**가 다르다
         # (2026-08-20). bff_ask=BFF 가 직접 CLI 를 띄운 턴, kanban_card=CEO
         # 워크플로 카드가 끝난 것. 원인 추적이 안 되면 "왜 이 이벤트가 났지"에
         # 답할 수 없다. 값은 우리가 정한 고정 문자열이라 payload 유출이 아니다.
-        "source", "request_id", "root_id", "task_id", "department",
-        "workflow_role", "workflow_mode", "provider",
-        "latency_ms", "eval_score", "error_count", "raw_payloads_sent",
+        "source",
+        "request_id",
+        "root_id",
+        "task_id",
+        "department",
+        "workflow_role",
+        "workflow_mode",
+        "provider",
+        "trace_kind",
+        "latency_scope",
+        "latency_ms",
+        "eval_score",
+        "error_count",
+        "raw_payloads_sent",
+        "trace_id",
+        "semantic_qa_version",
+        "semantic_qa_evaluator",
+        "semantic_qa_verdict",
+        "semantic_qa_score",
+        "semantic_qa_completeness",
+        "semantic_qa_groundedness",
+        "semantic_qa_temporal_consistency",
+        "semantic_qa_uncertainty_honesty",
+        "semantic_qa_relevance",
+        "semantic_qa_finding_count",
+        "semantic_qa_finding_codes",
     }
     result = {key: metric[key] for key in allowed if key in metric}
     if trace_id:
@@ -129,7 +187,87 @@ def _metric_metadata(metric: dict[str, Any], *, trace_id: str | None = None) -> 
     return result
 
 
-def worker_graph_trace_config(*, stage: str, worker_id: str, role: str = "") -> dict[str, Any]:
+def trace_correlation_metadata(
+    payload: Mapping[str, Any] | None = None,
+    *,
+    input_hash: str | None = None,
+    request_id: str | None = None,
+    root_id: str | None = None,
+    task_id: str | None = None,
+    trace_id: str | None = None,
+    case_id: str | None = None,
+) -> dict[str, str]:
+    """Build one bounded correlation envelope for every worker trace.
+
+    Department runtimes historically each derived ``case_id``/``task_id`` /
+    ``trace_id`` for their worker-context output, while the LangGraph run was
+    created with none of those values.  Keep the derivation in one place and
+    use deterministic local fallbacks for legacy callers.  The fallback IDs
+    are hashes or existing opaque IDs; business payloads are never copied.
+    """
+
+    source = payload if isinstance(payload, Mapping) else {}
+
+    def _text(value: Any, limit: int = 160) -> str:
+        return " ".join(str(value or "").split())[:limit]
+
+    artifact = source.get("artifact")
+    artifact_trace = (
+        artifact.get("trace_id")
+        if isinstance(artifact, Mapping)
+        else getattr(artifact, "trace_id", None)
+    )
+    resolved_trace = _text(
+        trace_id
+        or artifact_trace
+        or source.get("trace_id")
+        or source.get("event_id")
+        or source.get("correlation_id")
+        or request_id
+        or root_id
+        or case_id
+    )
+    if not resolved_trace:
+        resolved_trace = f"local:{_text(input_hash, 32)[:24] or 'unknown'}"
+
+    resolved_request = _text(
+        request_id
+        or source.get("request_id")
+        or source.get("client_request_id")
+        or source.get("correlation_id")
+        or resolved_trace
+    )
+    resolved_root = _text(
+        root_id
+        or source.get("root_id")
+        or source.get("root_task_id")
+        or source.get("workflow_root_task_id")
+        or case_id
+        or source.get("case_id")
+        or source.get("mandate_id")
+        or resolved_request
+    )
+    resolved_task = _text(
+        task_id
+        or source.get("task_id")
+        or source.get("worker_task_id")
+        or f"{resolved_root}-task"
+    )
+    return {
+        "request_id": resolved_request,
+        "root_id": resolved_root,
+        "task_id": resolved_task,
+        "trace_id": resolved_trace,
+    }
+
+
+def worker_graph_trace_config(
+    *,
+    stage: str,
+    worker_id: str,
+    role: str = "",
+    correlation: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """LangGraph ``invoke()``/``ainvoke()`` config that tags a Worker's own root run.
 
     `redacted_trace()`의 ambient `tracing_context()`는 같은 코루틴 안에서 바로
@@ -143,16 +281,24 @@ def worker_graph_trace_config(*, stage: str, worker_id: str, role: str = "") -> 
     (`apps/api/langsmith_traces.py`)도 `extra.metadata.stage`만 본다.
     """
 
+    metadata: dict[str, Any] = {
+        "observability_schema": "llm.performance.v1",
+        "trace_kind": "worker_graph",
+        "latency_scope": "worker_execution",
+        "stage": stage,
+        "worker_id": worker_id,
+        "role": role,
+        "raw_payloads_sent": False,
+    }
+    if isinstance(correlation, Mapping):
+        for key in ("request_id", "root_id", "task_id", "trace_id"):
+            value = str(correlation.get(key) or "").strip()
+            if value:
+                metadata[key] = value[:160]
     return {
         "run_name": f"worker.{worker_id}",
         "tags": ["hgfinance", f"stage:{stage}", "redacted"],
-        "metadata": {
-            "observability_schema": "llm.performance.v1",
-            "stage": stage,
-            "worker_id": worker_id,
-            "role": role,
-            "raw_payloads_sent": False,
-        },
+        "metadata": metadata,
     }
 
 
@@ -164,7 +310,13 @@ def _safe_langsmith_client() -> Any:
 
 
 @contextlib.contextmanager
-def redacted_trace(*, trace_id: str, model_name: str, stage: str) -> Iterator[None]:
+def redacted_trace(
+    *,
+    trace_id: str,
+    model_name: str,
+    stage: str,
+    correlation: Mapping[str, Any] | None = None,
+) -> Iterator[None]:
     """Make every nested LangChain/LangGraph run redacted for this pipeline."""
 
     if not langsmith_enabled():
@@ -179,6 +331,11 @@ def redacted_trace(*, trace_id: str, model_name: str, stage: str) -> Iterator[No
             "model_name": model_name,
             "stage": stage,
         }
+        if isinstance(correlation, Mapping):
+            for key in ("request_id", "root_id", "task_id", "trace_id"):
+                value = str(correlation.get(key) or "").strip()
+                if value:
+                    metadata[key] = value[:160]
         observer = tracing_context(
             client=_safe_langsmith_client(),
             project_name=langsmith_project("workflow"),
@@ -235,8 +392,14 @@ def publish_metric(
             inputs={},
             outputs={},
             project_name=project_name or langsmith_project("metrics"),
-            tags=["hgfinance", "metric", "redacted", f"worker:{metric.get('worker_id', 'unknown')}"],
+            tags=[
+                "hgfinance",
+                "metric",
+                "redacted",
+                f"worker:{metric.get('worker_id', 'unknown')}",
+            ],
             extra={"metadata": safe},
+            end_time=datetime.now(timezone.utc),
             hide_inputs=True,
             hide_outputs=True,
         )
@@ -252,6 +415,7 @@ def publish_root_trace(
     workflow_mode: str | None = None,
     source: str | None = None,
     status: str = "accepted",
+    semantic_qa: Mapping[str, Any] | None = None,
 ) -> bool:
     """Publish one legacy redacted user-query observation.
 
@@ -263,19 +427,46 @@ def publish_root_trace(
     by :func:`publish_metric` and cannot change the CEO workflow result.
     """
 
+    normalized_status = str(status or "accepted")
+    terminal = normalized_status.casefold() in {
+        "completed",
+        "failed",
+        "error",
+        "blocked",
+        "degraded",
+    }
+    metadata: dict[str, Any] = {
+        "schema_version": "llm.workflow-root.v1",
+        "worker_id": "ceo-root",
+        "role": "workflow_root",
+        "stage": "ceo-terminal" if terminal else "ceo-ingress",
+        "status": normalized_status,
+        "trace_kind": "workflow_root",
+        "latency_scope": "standalone_observation",
+        "request_id": str(request_id),
+        "root_id": str(root_id) if root_id else None,
+        "workflow_mode": str(workflow_mode) if workflow_mode else None,
+        "source": str(source) if source else None,
+        "raw_payloads_sent": False,
+    }
+    if isinstance(semantic_qa, Mapping):
+        for key in (
+            "semantic_qa_version",
+            "semantic_qa_evaluator",
+            "semantic_qa_verdict",
+            "semantic_qa_score",
+            "semantic_qa_completeness",
+            "semantic_qa_groundedness",
+            "semantic_qa_temporal_consistency",
+            "semantic_qa_uncertainty_honesty",
+            "semantic_qa_relevance",
+            "semantic_qa_finding_count",
+            "semantic_qa_finding_codes",
+        ):
+            if key in semantic_qa and semantic_qa[key] not in (None, ""):
+                metadata[key] = semantic_qa[key]
     return publish_metric(
-        {
-            "schema_version": "llm.workflow-root.v1",
-            "worker_id": "ceo-root",
-            "role": "workflow_root",
-            "stage": "ceo-ingress",
-            "status": str(status or "accepted"),
-            "request_id": str(request_id),
-            "root_id": str(root_id) if root_id else None,
-            "workflow_mode": str(workflow_mode) if workflow_mode else None,
-            "source": str(source) if source else None,
-            "raw_payloads_sent": False,
-        },
+        metadata,
         trace_id=str(request_id),
         project_name=langsmith_project("workflow"),
     )
@@ -289,6 +480,7 @@ class RootTraceHandle:
     request_id: str
     workflow_mode: str
     source: str | None = None
+    run_id: str | None = None
 
 
 def start_root_trace(
@@ -311,6 +503,8 @@ def start_root_trace(
                 "role": "workflow_root",
                 "stage": "ceo-ingress",
                 "status": "accepted",
+                "trace_kind": "workflow_root",
+                "latency_scope": "end_to_end",
                 "request_id": str(request_id),
                 "workflow_mode": str(workflow_mode),
                 "source": str(source) if source else None,
@@ -336,6 +530,7 @@ def start_root_trace(
             request_id=str(request_id),
             workflow_mode=str(workflow_mode),
             source=str(source) if source else None,
+            run_id=str(getattr(run, "id", "") or "") or None,
         )
     except Exception:
         # Observability setup/post/serialization errors never become workflow
@@ -346,12 +541,15 @@ def start_root_trace(
 def close_root_trace(
     trace_context: str | None,
     *,
+    run_id: str | None = None,
     request_id: str | None = None,
     root_id: str | None = None,
     workflow_mode: str | None = None,
     source: str | None = None,
+    task_id: str | None = None,
     status: str,
     error_class: str | None = None,
+    semantic_qa: Mapping[str, Any] | None = None,
 ) -> bool:
     """Close a previously posted root run through its distributed context."""
 
@@ -360,13 +558,25 @@ def close_root_trace(
     try:
         from langsmith import RunTree
 
-        run = RunTree.from_headers(
-            {"langsmith-trace": str(trace_context)},
-            project_name=langsmith_project("workflow"),
-            ls_client=_safe_langsmith_client(),
-        )
-        if run is None:
-            return False
+        client = _safe_langsmith_client()
+        resolved_run_id = str(run_id or "").strip()
+        if resolved_run_id:
+            # ``RunTree.post`` may use the SDK background batcher. An
+            # immediate system answer can otherwise update the run before the
+            # ingress POST is flushed, and that delayed POST restores the old
+            # ``accepted`` metadata over the terminal QA result.
+            flush = getattr(client, "flush", None)
+            if callable(flush):
+                flush()
+        if not resolved_run_id:
+            run = RunTree.from_headers(
+                {"langsmith-trace": str(trace_context)},
+                project_name=langsmith_project("workflow"),
+                ls_client=client,
+            )
+            if run is None:
+                return False
+            resolved_run_id = str(run.id)
         metadata = _metric_metadata(
             {
                 "schema_version": "llm.workflow-root.v2",
@@ -374,18 +584,42 @@ def close_root_trace(
                 "role": "workflow_root",
                 "stage": "ceo-terminal",
                 "status": str(status),
+                "trace_kind": "workflow_root",
+                "latency_scope": "end_to_end",
                 "request_id": str(request_id) if request_id else None,
                 "root_id": str(root_id) if root_id else None,
+                "task_id": str(task_id or root_id) if (task_id or root_id) else None,
                 "workflow_mode": str(workflow_mode) if workflow_mode else None,
                 "source": str(source) if source else None,
                 "raw_payloads_sent": False,
             }
         )
-        run.end(
+        if isinstance(semantic_qa, Mapping):
+            for key in (
+                "semantic_qa_version",
+                "semantic_qa_evaluator",
+                "semantic_qa_verdict",
+                "semantic_qa_score",
+                "semantic_qa_completeness",
+                "semantic_qa_groundedness",
+                "semantic_qa_temporal_consistency",
+                "semantic_qa_uncertainty_honesty",
+                "semantic_qa_relevance",
+                "semantic_qa_finding_count",
+                "semantic_qa_finding_codes",
+            ):
+                if key in semantic_qa and semantic_qa[key] not in (None, ""):
+                    metadata[key] = semantic_qa[key]
+        # ``RunTree.from_headers()`` constructs a local placeholder named
+        # ``parent`` with a new start_time. Patching that object would overwrite
+        # the already-posted root's real name/timestamp. Update terminal fields
+        # only, preserving ``hgfinance.user-query`` and its original start.
+        client.update_run(
+            run_id=resolved_run_id,
+            end_time=datetime.now(timezone.utc),
             error=str(error_class) if error_class else None,
-            metadata=metadata,
+            extra={"metadata": metadata},
         )
-        run.patch(exclude_inputs=True)
         return True
     except Exception:
         # LangSmith must not delay or fail a durable finalization.
@@ -427,9 +661,11 @@ def langfuse_enabled() -> bool:
     """
 
     tracing = os.getenv("LANGFUSE_TRACING", "")
-    return tracing.casefold() in {"1", "true", "yes", "on"} and bool(
-        os.getenv("LANGFUSE_PUBLIC_KEY", "").strip()
-    ) and bool(os.getenv("LANGFUSE_SECRET_KEY", "").strip())
+    return (
+        tracing.casefold() in {"1", "true", "yes", "on"}
+        and bool(os.getenv("LANGFUSE_PUBLIC_KEY", "").strip())
+        and bool(os.getenv("LANGFUSE_SECRET_KEY", "").strip())
+    )
 
 
 @lru_cache(maxsize=1)
@@ -475,13 +711,19 @@ def _usage_details(usage: Any) -> dict[str, int]:
     if usage is None:
         return {}
     input_tokens = next(
-        (getattr(usage, name, None) for name in ("prompt_tokens", "input_tokens")
-         if getattr(usage, name, None) is not None),
+        (
+            getattr(usage, name, None)
+            for name in ("prompt_tokens", "input_tokens")
+            if getattr(usage, name, None) is not None
+        ),
         None,
     )
     output_tokens = next(
-        (getattr(usage, name, None) for name in ("completion_tokens", "output_tokens")
-         if getattr(usage, name, None) is not None),
+        (
+            getattr(usage, name, None)
+            for name in ("completion_tokens", "output_tokens")
+            if getattr(usage, name, None) is not None
+        ),
         None,
     )
     details: dict[str, int] = {}
@@ -575,7 +817,10 @@ def redacted_langfuse_worker_span(
         as_type="span",
         name="worker.run",
         metadata=_native_observation_metadata(
-            worker_id=worker_id, role=role, stage=stage, trace_id=trace_id,
+            worker_id=worker_id,
+            role=role,
+            stage=stage,
+            trace_id=trace_id,
         ),
     ):
         yield
@@ -583,7 +828,12 @@ def redacted_langfuse_worker_span(
 
 @contextlib.contextmanager
 def redacted_langfuse_generation(
-    *, worker_id: str, role: str, stage: str, model_name: str, trace_id: str | None = None
+    *,
+    worker_id: str,
+    role: str,
+    stage: str,
+    model_name: str,
+    trace_id: str | None = None,
 ) -> Iterator[_NativeLangfuseObservation]:
     """Native LLM generation with automatic duration and explicit token usage."""
 
@@ -592,7 +842,10 @@ def redacted_langfuse_generation(
         name="ollama.chat.completions",
         model_name=model_name,
         metadata=_native_observation_metadata(
-            worker_id=worker_id, role=role, stage=stage, trace_id=trace_id,
+            worker_id=worker_id,
+            role=role,
+            stage=stage,
+            trace_id=trace_id,
         ),
     ) as generation:
         yield generation
@@ -686,6 +939,9 @@ def publish_worker_activity(
     latency_ms: int = 0,
     error_count: int = 0,
     trace_id: str | None = None,
+    request_id: str | None = None,
+    root_id: str | None = None,
+    task_id: str | None = None,
     measured: dict[str, Any] | None = None,
 ) -> bool:
     """Worker 실행 한 건을 HR 유휴 관측용으로 기록한다(2026-08-20).
@@ -716,12 +972,28 @@ def publish_worker_activity(
     measured = measured or {}
     optional = {
         key: measured[key]
-        for key in ("llm_calls", "model_name", "prompt_tokens", "completion_tokens", "retries")
+        for key in (
+            "llm_calls",
+            "model_name",
+            "prompt_tokens",
+            "completion_tokens",
+            "retries",
+        )
         if measured.get(key) not in (None, "")
+    }
+    correlation = {
+        key: value
+        for key, value in (
+            ("request_id", request_id),
+            ("root_id", root_id),
+            ("task_id", task_id),
+        )
+        if value not in (None, "")
     }
     return publish_langfuse_metric(
         {
             **optional,
+            **correlation,
             "schema_version": "llm.performance.v1",
             "worker_id": worker_id,
             "role": role,
@@ -774,9 +1046,14 @@ def head_persona_for_profile(profile: str, repo_root: str | None = None) -> str:
     try:
         import yaml
 
-        config = yaml.safe_load(
-            (root / "departments" / directory / "hermes" / "config.yaml").read_text(encoding="utf-8")
-        ) or {}
+        config = (
+            yaml.safe_load(
+                (root / "departments" / directory / "hermes" / "config.yaml").read_text(
+                    encoding="utf-8"
+                )
+            )
+            or {}
+        )
         return str((config.get("agent") or {}).get("head_persona") or "").strip()
     except Exception:  # noqa: BLE001 - 계측 부재가 실행을 죽이지 않는다
         return ""
@@ -817,7 +1094,9 @@ def publish_worker_opportunity(
     try:
         client = _safe_langfuse_client()
         client.create_event(
-            name=langfuse_worker_opportunity_event_name(stage=stage, worker_id=worker_id),
+            name=langfuse_worker_opportunity_event_name(
+                stage=stage, worker_id=worker_id
+            ),
             input=None,
             output=None,
             metadata={

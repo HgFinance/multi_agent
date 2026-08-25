@@ -36,16 +36,19 @@ from dataclasses import dataclass, field
 #   citation=<sha16> / TR 코드(t1717) / rcept_no / URL / accession
 _EVIDENCE_PATTERNS = (
     re.compile(r"citation[\"'\s:=]+([0-9a-f]{8,})", re.I),
-    re.compile(r"\bt\d{4}\b"),                      # LS TR 코드
-    re.compile(r"\brcept_no\b", re.I),              # DART 접수번호
+    re.compile(r"\bt\d{4}\b"),  # LS TR 코드
+    re.compile(r"\brcept_no\b", re.I),  # DART 접수번호
     re.compile(r"https?://[^\s)\]]+"),
-    re.compile(r"\baccession\b", re.I),             # SEC
+    re.compile(r"\baccession\b", re.I),  # SEC
+    # PAPER execution reports cite the authoritative Trading row rather than
+    # a market-data TR or URL.  The UUID remains a coordinate, not a claim.
+    re.compile(r"\bdirective_id\s*[=:]\s*[0-9a-f]{8}-[0-9a-f-]{27,}", re.I),
 )
 
 # 시점 표기. "지금 기준"인지 "어느 거래일 기준"인지가 시세성 답의 생명이다.
 _ASOF_PATTERNS = (
     re.compile(r"\b20\d{2}[-/.]?\d{2}[-/.]?\d{2}\b"),
-    re.compile(r"queried_at|as[_\s-]?of|기준일|조회\s*시각|기준", re.I),
+    re.compile(r"queried_at|as[_\s-]?of|기준일|조회\s*시각|검증\s*시각|기준", re.I),
 )
 
 # "모르는 것을 밝힌" 흔적. 없음을 없다고 말하는 문장.

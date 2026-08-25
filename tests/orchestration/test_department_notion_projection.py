@@ -14,6 +14,8 @@ class FakeTransport:
         self.schema_calls = 0
         self.query_calls = 0
         self.create_calls = 0
+        self.updated = []
+        self.appended = []
 
     def database_schema(self, database_id):
         self.schema_calls += 1
@@ -27,6 +29,14 @@ class FakeTransport:
         self.create_calls += 1
         self.created.append((database_id, properties, children))
         return {"id": "page-1"}
+
+    def update_page(self, page_id, properties):
+        self.updated.append((page_id, properties))
+        return {"id": page_id}
+
+    def append_blocks(self, page_id, children):
+        self.appended.append((page_id, children))
+        return {"id": page_id}
 
 
 def _trading_task():
@@ -73,13 +83,8 @@ def test_trading_projection_uses_existing_schema_without_task_id_abuse():
 
     _, props, children = transport.created[0]
 
-    assert props["제목"]["title"][0]["text"]["content"].startswith(
-        "t_trade1 · "
-    )
-    assert (
-        props["trade_case_id"]["rich_text"][0]["text"]["content"]
-        == "case-77"
-    )
+    assert props["제목"]["title"][0]["text"]["content"].startswith("t_trade1 · ")
+    assert props["trade_case_id"]["rich_text"][0]["text"]["content"] == "case-77"
     assert "Task ID" not in props
     assert "workflow_root_task_id" not in props
     assert children
@@ -105,6 +110,57 @@ def test_duplicate_title_is_idempotent():
 
     assert result.duplicate is True
     assert not transport.created
+
+
+def test_correction_upserts_existing_department_page():
+    transport = FakeTransport(
+        {
+            "제목": {"type": "title"},
+            "서술": {"type": "rich_text"},
+            "원본 리포트": {"type": "rich_text"},
+        },
+        existing=({"id": "existing-page"},),
+    )
+    projection = DepartmentNotionProjection(
+        env={"NOTION_TOKEN": "x"}, transport=transport
+    )
+
+    result = projection.project(
+        root_task_id="t_root1",
+        task=_trading_task(),
+        event={
+            "force_upsert": True,
+            "correction": "권위 DB 확인: 삼성전자 1주 248250원 체결",
+        },
+    )
+
+    assert result.status == "updated"
+    assert result.page_id == "existing-page"
+    assert "248250" in str(transport.updated[0][1])
+    assert not transport.appended
+    assert not transport.created
+
+
+def test_correction_recreates_missing_department_page() -> None:
+    transport = FakeTransport(
+        {
+            "제목": {"type": "title"},
+            "서술": {"type": "rich_text"},
+        }
+    )
+    projection = DepartmentNotionProjection(
+        env={"NOTION_TOKEN": "x"}, transport=transport
+    )
+
+    result = projection.project(
+        root_task_id="t_root1",
+        task=_trading_task(),
+        event={"force_upsert": True, "correction": "248250원 체결 정정"},
+    )
+
+    assert result.status == "created"
+    assert result.page_id == "page-1"
+    assert "248250" in str(transport.created[0])
 
 
 def test_schema_is_reused_by_one_projection_owner():

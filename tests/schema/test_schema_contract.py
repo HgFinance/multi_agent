@@ -262,6 +262,9 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  # OMS와 USER_DIRECTIVE 양쪽 outbox를 발행하되 어느 쪽에도
                  # INSERT 권한이 없는 전용 relay 역할을 둔다.
                  "20260825000100_trading_outbox_relay_role.sql",
+                 # 조건주문 알림 소비자가 최소 outbox payload를 기존 사용자
+                 # 요청 권위와 읽기 전용으로 다시 연결할 수 있게 한다.
+                 "20260825000200_conditional_notification_context_read.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 
