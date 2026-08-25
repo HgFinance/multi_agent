@@ -3,7 +3,8 @@
 scorecard/cost.py를 감싸는 FastAPI 래퍼.
 
 소유: 영주 (Agent Workforce 인사팀)
-근거: docs/02-engineering/GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 3절(workforce-api),
+근거: docs/02-engineering/UNIFIED_DOMAIN_API_SPEC.md 5.4(Governance·Workforce·Reporting),
+      실행 Route 목록은 docs/02-engineering/contracts/route-registry.v1.json 이 정본이다,
       departments/03-risk/api/app.py·departments/06-ai-qa-audit/api/app.py 패턴.
 
 여기엔 새 판정 로직이 없다. access.py의 승인/부여/회수 상태 전이, workflow.py의
@@ -563,7 +564,7 @@ class ScorecardRequest(BaseModel):
 class ProfileVersionSubmissionIn(BaseModel):
     """POST /workforce/v1/agents/{agent_id}/profile-versions Request.
 
-    agent_profile_versions 컬럼과 1:1 (GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 3.1).
+    agent_profile_versions 컬럼과 1:1 (UNIFIED_DOMAIN_API_SPEC.md 5.4).
     """
 
     model_id: str

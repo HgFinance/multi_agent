@@ -13,7 +13,9 @@
 #       * LOOSEN   -> 사용자 재승인 필요 ("장중 Risk 확대는 사용자 재승인")
 #       * 혼합/모호 -> LOOSEN 취급 (CLAUDE.md 개발 원칙 9: 위험은 확대가 아니라 차단 방향)
 #   - Mandate 통화가 Fund 기준 통화(accounting.funds.base_currency)와 일치하는지 저장 시점에
-#     검증한다 (GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC 2.1 기준 자본 계약, 결정 4-A).
+#     검증한다 (2026-07-31 결정 4-A 기준 자본 계약. 근거였던
+#     GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC 2.1 은 UNIFIED_DOMAIN_API_SPEC 통합 때
+#     옮겨지지 않아, 지금 이 계약의 정본은 아래 docstring 과 자체 점검이다).
 #     Fund 통화를 확인할 수 없으면 저장하지 않는다.
 #
 # 이 모듈은 DB 에 직접 접근하지 않는다. Repository 는 인터페이스로만 두고, 값 매핑
@@ -488,7 +490,8 @@ class VersionResult:
 class CurrencyMismatchError(ValueError):
     """Mandate 통화가 Fund 기준 통화와 다르다.
 
-    GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC 2.1 기준 자본 계약(2026-07-31 결정 4-A):
+    기준 자본 계약(2026-07-31 결정 4-A. 구 GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC 2.1 -
+    UNIFIED_DOMAIN_API_SPEC 통합 때 옮겨지지 않아 여기가 정본이다):
     통화 일치는 governance 가 저장 시점에 검증한다. 한도는 전부 비율이고 기준 자본은
     회계의 Fund 통화로 표시되므로, 통화가 어긋나면 한도 금액이 잘못 계산된다.
     """

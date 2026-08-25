@@ -3,7 +3,7 @@
 
 소유: 영주 (CEO Office)
 근거: supabase/migrations/20260729000200_governance_workforce.sql (governance.approvals),
-      docs/02-engineering/GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 2.2절
+      docs/02-engineering/UNIFIED_DOMAIN_API_SPEC.md 5.4(Governance)
 
 approval.py의 도메인 규칙(권한 분리, 만료 거절, 자동 승인 금지)은 여기서 재구현하지 않는다 -
 이 모듈은 SQL 왕복만 담당한다. 규칙은 호출부(api/app.py)가 approval.py 함수로 먼저 적용한다.

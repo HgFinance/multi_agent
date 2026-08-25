@@ -97,7 +97,7 @@ def agent_ask(req: hermes_boundary.AgentAsk) -> dict:
 # --- portfolio-api -----------------------------------------------------------
 # CEO Daily Report(departments/00-ceo-office/src/reporting/daily_report.py)의
 # SnapshotRef(portfolio) 원천이다.
-# 근거: docs/02-engineering/GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 5.1
+# 근거: docs/02-engineering/UNIFIED_DOMAIN_API_SPEC.md 5.5(Accounting·Portfolio)
 #       "portfolio-api - Position/Cash/PnL/NAV | CEO | Daily Report, 자본 배분"
 #
 # **수치를 돌려주지 않는다.** snapshot_id와 as_of만 준다. NAV·Cash·PnL 값을 함께

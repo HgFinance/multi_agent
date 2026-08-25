@@ -2,7 +2,8 @@
 """HR-02: Profile·Tool Permission 공식 Read API의 도메인 계약.
 
 소유: 영주 (Agent Workforce 인사팀)
-근거: docs/02-engineering/GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 3.1절(Roster/Profile),
+근거: docs/02-engineering/UNIFIED_DOMAIN_API_SPEC.md 5.4(Workforce - Roster·Profile 소유),
+      실행 Route 는 docs/02-engineering/contracts/route-registry.v1.json,
       docs/PROJECT_IMPLEMENTATION_STATUS.md HR-02("QA와 Model Gateway가 같은 Profile
       Version을 조회할 Read API"),
       supabase/migrations/20260729000200_governance_workforce.sql
@@ -10,12 +11,18 @@
 
 여기엔 LLM이 없다. Roster 조회와 Profile Version 발급·상태 전이는 전부 결정론적 코드다.
 
+아래 dataclass 들은 원래 GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC 3.1 의 DTO 와 1:1 이었다.
+그 문서가 UNIFIED_DOMAIN_API_SPEC 로 통합되면서 **개별 응답 모양은 옮겨지지 않았으므로**
+(통합 문서는 Route Namespace 와 소유 경계까지만 정한다), 지금 응답 모양의 정본은
+이 모듈의 dataclass 와 자체 점검이다.
+
 불변식:
   1. `submit_profile`은 항상 새 Version을 만든다 - 기존 Version을 수정하는 경로를 두지
      않는다(TEAM_YOUNGJU §4.3 "Prompt만 바꾸고 Version 유지 금지"). Repository에 update가
      없고 insert만 있는 이유다.
   2. `to_status="ACTIVE"`로의 전이는 `qa_eval_run_id`와 `ceo_approval_id`가 **둘 다** 있어야
-     한다 - 하나라도 없으면 거절한다(API 설계서 3.1절 change_status 명시 규칙). 인사팀이
+     한다 - 하나라도 없으면 거절한다(구 API 설계서 3.1 규칙. 통합 문서 5.4 에는 "작성자와
+     승인자가 같으면 403"만 남아, 둘 다 요구하는 이 규칙의 정본은 validate_status_change 다). 인사팀이
      자기 후보를 자기가 ACTIVE로 못 올리는 권한 분리(CLAUDE.md)를 여기서 강제한다.
   3. Agent 개별 모델(agent_profile_versions.model_id)과 부서 Supervisor 모델
      (hermes/config.yaml의 model:)은 다른 레이어다 - 응답에서 섞지 않는다.
@@ -86,7 +93,7 @@ class ModelRef:
 
 @dataclass(frozen=True)
 class ProfileVersionSummary:
-    """workforce.agent_profile_versions 한 행의 Read View. API 설계서 3.1 current_profile_version과 1:1."""
+    """workforce.agent_profile_versions 한 행의 Read View (머리말 참고 - 이 모듈이 정본)."""
 
     profile_version_id: str
     version: int
@@ -97,7 +104,7 @@ class ProfileVersionSummary:
 
 @dataclass(frozen=True)
 class AgentSummary:
-    """workforce.agent_profiles + role_templates + 현재 Version의 Read View. API 설계서 3.1 get_roster와 1:1."""
+    """workforce.agent_profiles + role_templates + 현재 Version의 Read View (get_roster 응답)."""
 
     agent_id: str
     employee_code: str
@@ -113,7 +120,7 @@ class AgentSummary:
 
 @dataclass(frozen=True)
 class ProfileVersionSubmission:
-    """POST .../profile-versions Request. agent_profile_versions 컬럼과 1:1 (API 설계서 3.1)."""
+    """POST .../profile-versions Request. agent_profile_versions 컬럼과 1:1."""
 
     model_id: str
     prompt_artifact_path: str
@@ -147,7 +154,7 @@ class ProfileVersionRow:
 
 @dataclass(frozen=True)
 class StatusChangeRequest:
-    """POST .../status Request (API 설계서 3.1 change_status)."""
+    """POST .../status Request (change_status)."""
 
     to_status: EmploymentStatus
     profile_version_id: str

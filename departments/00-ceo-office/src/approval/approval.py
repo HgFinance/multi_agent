@@ -2,7 +2,7 @@
 """GOV-02 1단계: 승인(Approval) 도메인 계약.
 
 소유: 영주 (CEO Office)
-근거: docs/02-engineering/GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 2.2절
+근거: docs/02-engineering/UNIFIED_DOMAIN_API_SPEC.md 5.4(Governance)
       (`request_approval` ✅ 확정 — Request/Response JSON 그대로),
       supabase/migrations/20260729000200_governance_workforce.sql
       (governance.approvals — decision/object_type/required_role, unique 제약),
@@ -33,7 +33,8 @@
 부서 식별자는 **Hermes Profile 이름**을 쓴다 (`ceo-agent`, `risk-management`, `qa-department` 등).
 2026-08-04에 확정됐다 — 그 전에는 API 스펙이 대문자 표기(`RISK`/`QA`/`AGENT-WORKFORCE`)를
 예시로 썼지만 실제 코드 40개 파일이 전부 Profile 이름을 쓰고 있었고 대문자 표기를 쓰는 코드는
-없었으므로, 다수 쪽으로 스펙 문서를 맞췄다(GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 2.2절 주석).
+없었으므로, 다수 쪽으로 스펙 문서를 맞췄다(당시 GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 2.2절
+    주석 - 그 문서는 UNIFIED_DOMAIN_API_SPEC.md 로 통합되면서 이 결정 기록은 옮겨지지 않았다).
 normalize_department()는 대소문자·`_` 차이만 흡수하는 방어 코드로 남긴다.
 
 자체 점검: python departments/00-ceo-office/src/approval/approval.py

@@ -4,7 +4,8 @@
 소유: 영주 (Agent Workforce 인사팀)
 근거: docs/02-engineering/HEDGE_FUND_IMPLEMENTATION_BACKLOG.md F27,
       docs/05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md 3.2, 10.3(비용과 품질),
-      docs/02-engineering/GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 3.4(get_department_scorecard)
+      docs/02-engineering/UNIFIED_DOMAIN_API_SPEC.md 5.4(Workforce),
+      contracts/route-registry.v1.json(GET /workforce/v1/departments/{department_code}/scorecard)
 
 F27은 두 부서가 나눠 맡는다. 이 모듈은 **인사팀 절반**이다.
   플랫폼/인프라 : 토큰 측정, 과금, 성능 저하 차단 (집행)
@@ -201,7 +202,7 @@ def assess_budget(
 
 
 def _num(value: Decimal | None) -> str | None:
-    """numeric 은 부동소수점 오차를 피하려고 문자열로 직렬화한다 (API 설계서 3.4)."""
+    """numeric 은 부동소수점 오차를 피하려고 문자열로 직렬화한다."""
     return None if value is None else format(value, "f")
 
 
@@ -216,7 +217,11 @@ def build_department_scorecard(
     rework_rate: Decimal | None = None,
     quality_references: dict | None = None,
 ) -> dict:
-    """GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC 3.4 응답 형태로 조립한다.
+    """get_department_scorecard 응답을 조립한다.
+
+    응답 모양은 원래 GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC 3.4 가 정의했지만, 그 문서가
+    UNIFIED_DOMAIN_API_SPEC 로 통합되면서 개별 응답 모양은 옮겨지지 않았다 - 지금 정본은
+    이 함수와 아래 자체 점검이다.
 
     quality 의 Eval 원본은 QA/감사본부 소유(audit.eval_runs)다. 인사팀은 Reference 만
     싣고 값을 만들지 않는다 — eval_score 는 항상 None 으로 두고 audit-api 가 채운다.
@@ -334,7 +339,7 @@ if __name__ == "__main__":
     except ValueError:
         pass
 
-    # 7) Scorecard 응답이 API 설계서 3.4 형태와 맞는지.
+    # 7) Scorecard 응답 모양(이 함수가 정본이다 - 위 docstring 참고).
     cap = CapacitySnapshot(
         window_start=t0, window_end=t1, arrivals=120,
         queue_p95_ms=Decimal("45000.0000"), duration_p95_ms=Decimal("300000.0000"),

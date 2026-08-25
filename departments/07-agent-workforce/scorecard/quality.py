@@ -4,7 +4,7 @@
 소유: 영주 (Agent Workforce 인사팀)
 근거: docs/05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md P1-2("Quality Snapshot과 Workforce
       Plan을 실제 데이터에서 집계·저장한다. 빈 집계를 정상 운영 상태로 표시하지 않는다"),
-      GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 3.4/7절
+      UNIFIED_DOMAIN_API_SPEC.md 5.4(Workforce), 9(구현 상태)
       대응 테이블: supabase/migrations/20260731000800_workforce_plan_quality_probation.sql
       (workforce.quality_snapshots)
 

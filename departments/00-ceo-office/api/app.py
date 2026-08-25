@@ -3,7 +3,8 @@
 reporting/daily_report.py, notification/notification.py를 감싸는 FastAPI 래퍼.
 
 소유: 영주 (CEO Office)
-근거: docs/02-engineering/GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 2절(governance-api),
+근거: docs/02-engineering/UNIFIED_DOMAIN_API_SPEC.md 5.4(Governance·Workforce·Reporting),
+      실행 Route 목록은 docs/02-engineering/contracts/route-registry.v1.json 이 정본이다,
       4절(reporting-api), departments/03-risk/api/app.py·departments/06-ai-qa-audit/api/app.py 패턴
       (TECH_STACK_DECISIONS.md 7절 - Hermes는 Domain 서비스를 API 경계로만 부른다).
 

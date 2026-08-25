@@ -75,7 +75,7 @@ Scorecard 관찰의 실제 API 배선.
   (`workforce.cost_snapshots`), Scorecard, 조치 **권고**를 맡는다. 인사팀은 집행하지 않는다.
   - `assess_budget()` — 예산 대비 사용률과 조치 권고
   - `build_department_scorecard()` — `get_department_scorecard` 응답 조립
-    (GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC §3.4)
+    (UNIFIED_DOMAIN_API_SPEC §5.4 — 응답 모양 자체는 `cost.py`가 정본)
   - `append_cost_snapshot()`(`postgres_scorecard_repository.py`) — 플랫폼 과금 계측이
     보고한 비용 1건을 적는다. **집행이 아니라 보고 수납이다** — 토큰·금액은 여전히
     플랫폼이 만들고 인사팀은 계산하지 않는다. 그래서 `recorded_by`(2026-08-25 추가,

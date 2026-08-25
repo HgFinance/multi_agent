@@ -3,7 +3,8 @@
 
 소유: 영주 (Agent Workforce 인사팀)
 근거: docs/05-teams/TEAM_YOUNGJU_CEO_HR_GUIDE.md 4.3, 6.4(Joiner/Mover/Leaver), 10.1(Version/Effective Time),
-      docs/02-engineering/GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 3.5(request_access)
+      docs/02-engineering/UNIFIED_DOMAIN_API_SPEC.md 5.4(Workforce - Access Request 소유),
+      contracts/route-registry.v1.json(POST /workforce/v1/access-requests)
       대응 테이블: supabase/migrations/20260731000700_workforce_access_lifecycle.sql
 
 인사팀은 **요청까지만** 한다. 실제 Identity·권한 생성은 Platform/IAM Service 만 하고,

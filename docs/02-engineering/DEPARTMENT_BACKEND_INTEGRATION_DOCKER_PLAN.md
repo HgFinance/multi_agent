@@ -25,7 +25,7 @@
 - 한 서비스가 멈췄을 때 거래와 조직 운영을 어떻게 제한하는가
 - 현재 리서치 중심 Compose를 어떤 순서로 전 본부 구조로 확장하는가
 
-이 문서는 위 항목의 단일 구현 기준이다. 제품 범위는 [마스터 플랜](../HEDGE_FUND_MASTER_PLAN.md), 폴더 소유권은 [저장소 구조](REPOSITORY_DEPARTMENT_STRUCTURE.md), 세부 Domain 계약은 각 팀 가이드와 API 설계서를 따른다.
+이 문서는 위 항목의 단일 구현 기준이다. 제품 범위는 [마스터 플랜](../HEDGE_FUND_MASTER_PLAN.md), 폴더 소유권은 [저장소 구조](REPOSITORY_DEPARTMENT_STRUCTURE.md), 세부 Domain 계약은 각 팀 가이드와 [Unified Domain API Spec](UNIFIED_DOMAIN_API_SPEC.md)을 따른다.
 
 [기술 스택 결정 9절](TECH_STACK_DECISIONS.md#9-docker-구성)의 `api`, `streaming-worker`, `agent-worker`, `hermes`는 논리적 Runtime 종류를 뜻한다. 전 본부를 각각 하나의 거대 Container로 합친다는 의미가 아니며, 실제 Service 이름과 배포 단위는 이 문서가 구체화한다.
 

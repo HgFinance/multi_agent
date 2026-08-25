@@ -2,7 +2,7 @@
 """HR-02: roster.py의 RosterRepository 계약에 대한 실제 PostgreSQL 구현.
 
 소유: 영주 (Agent Workforce 인사팀)
-근거: docs/02-engineering/GOVERNANCE_WORKFORCE_DOMAIN_API_SPEC.md 3.1절,
+근거: docs/02-engineering/UNIFIED_DOMAIN_API_SPEC.md 5.4(Workforce - Roster·Profile 소유),
       supabase/migrations/20260729000200_governance_workforce.sql
       (workforce.agent_profiles/agent_profile_versions/role_templates/departments/models)
 
