@@ -6,7 +6,6 @@ from pathlib import Path
 
 import yaml
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 ROOT_COMPOSE_FILES = (
@@ -25,6 +24,7 @@ EXPECTED_DEFAULT_CONTROL_DB_CONSUMERS = {
     "audit-api",
     "batch-collectors",
     "ceo-kanban-supervisor",
+    "conditional-rule-notification-consumer",
     "factory-autopilot",
     "factory-experiment-worker",
     "governance-api",
@@ -84,9 +84,14 @@ def test_default_stack_has_the_exact_control_database_consumers() -> None:
 
     assert _default_database_consumers(services) == EXPECTED_DEFAULT_CONTROL_DB_CONSUMERS
     for name in ("portfolio-bff", "portfolio-worker"):
-        environment = services[name]["environment"]
-        assert "DATABASE_URL" in environment
-        assert environment["PORTFOLIO_DATA_MODE"] == "production"
+        assert "DATABASE_URL" in services[name]["environment"]
+    # The root stack serves the closed-network UI fixture, while the worker
+    # must always read the governed production catalog. AWS overrides the BFF
+    # to production explicitly after its private control DB is wired.
+    assert services["portfolio-bff"]["environment"]["PORTFOLIO_DATA_MODE"] == "test"
+    assert services["portfolio-worker"]["environment"]["PORTFOLIO_DATA_MODE"] == (
+        "production"
+    )
 
 
 def test_eb_stack_has_the_exact_private_control_database_consumers() -> None:

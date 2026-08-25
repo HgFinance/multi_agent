@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -19,6 +20,7 @@ def test_qa_image_contains_agentic_rag_runtime_dependency() -> None:
 
 def test_compose_selects_scoped_database_runtime_roles() -> None:
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    services = yaml.safe_load(compose)["services"]
 
     assert compose.count(
         "DATABASE_RUNTIME_ROLE: ${AUDIT_API_DATABASE_RUNTIME_ROLE:-svc_audit_api}"
@@ -38,9 +40,17 @@ def test_compose_selects_scoped_database_runtime_roles() -> None:
     )
     assert "QA_REPRODUCTION_TIMESCALE_DATABASE_URL:" in compose
     assert "${QA_DATABASE_RUNTIME_ROLE:-service_role}" not in compose
-    assert compose.count(
-        "DATABASE_URL: ${RISK_QA_DATABASE_URL:-${DATABASE_URL:-}}"
-    ) == 3
+    # The API is a control-plane owner and must not inherit the host's generic
+    # DATABASE_URL. Stream workers retain the scoped Risk/QA override chain.
+    audit_environment = services["audit-api"]["environment"]
+    assert audit_environment["DATABASE_URL"].startswith(
+        "${AUDIT_API_DATABASE_URL:-postgresql://hgfinance_runtime:"
+    )
+    assert audit_environment["RISK_QA_DATABASE_URL"] == audit_environment["DATABASE_URL"]
+    for worker in ("qa-worker", "qa-reproduction-worker"):
+        assert services[worker]["environment"]["DATABASE_URL"] == (
+            "${RISK_QA_DATABASE_URL:-${DATABASE_URL:-}}"
+        )
     assert compose.count(
         "DATABASE_RUNTIME_ROLE: ${QUANT_DATABASE_RUNTIME_ROLE:-svc_quant}"
     ) == 2

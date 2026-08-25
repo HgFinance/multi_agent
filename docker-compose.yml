@@ -1403,7 +1403,10 @@ services:
       redis:
         condition: service_healthy
     environment:
-      DATABASE_URL: ${RISK_QA_DATABASE_URL:-${DATABASE_URL:-}}
+      # QA/audit persistence belongs to the private control plane.  Do not
+      # inherit the host .env Supabase pooler URL in the local Compose path.
+      DATABASE_URL: ${AUDIT_API_DATABASE_URL:-postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD:?HEDGEFUND_RUNTIME_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}}
+      RISK_QA_DATABASE_URL: ${AUDIT_API_DATABASE_URL:-postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD:?HEDGEFUND_RUNTIME_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}}
       DATABASE_SESSION_URL: ${RISK_QA_DATABASE_SESSION_URL:-}
       DATABASE_RUNTIME_ROLE: ${AUDIT_API_DATABASE_RUNTIME_ROLE:-svc_audit_api}
       LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
