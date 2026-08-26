@@ -35,6 +35,7 @@ export const OBSERVABILITY_POLL_MS = 60_000;
  *   - UNOBSERVED: 조건부 Worker의 trigger가 이 창(lookback) 안에 발화하지 않았을
  *     수 있음 — 유휴로 단정하지 않는다.
  *   - UNAVAILABLE: Langfuse 조회 실패/자격증명 없음 — "쉬고 있다"가 아니라 "모른다".
+ *     이때 `reason`에 **왜 못 읽었는지**가 실린다(HTTP 상태·본문 포함).
  */
 export type IdleStatus = "ACTIVE" | "IDLE" | "UNOBSERVED" | "UNAVAILABLE";
 
@@ -45,9 +46,19 @@ export type WorkerIdleReport = {
   status: IdleStatus | string;
   last_seen_at: string | null;
   idle_hours: number | null;
+  /** UNAVAILABLE일 때만 채워진다 — 관측된 상태에서는 항상 null. */
+  reason: string | null;
 };
 
-export type CapacityObservationStatus = "MEASURED" | "UNAVAILABLE";
+/**
+ * NO_WORKERS_REGISTERED는 MEASURED/arrivals=0과 **다른 사실**이다 — "재 봤더니 0"이
+ * 아니라 "잴 대상이 아예 없다"(그 부서에 등록된 Worker가 0명). 같은 칸으로 만들면
+ * 인원이 없는 부서가 한가한 부서로 읽힌다.
+ */
+export type CapacityObservationStatus =
+  | "MEASURED"
+  | "UNAVAILABLE"
+  | "NO_WORKERS_REGISTERED";
 
 export type DepartmentCapacityReport = {
   department: string;
@@ -60,6 +71,7 @@ export type DepartmentCapacityReport = {
   error_rate: number | null;
   utilization: number | null;
   queue_p95_ms: null;
+  reason: string | null;
 };
 
 /**
@@ -82,6 +94,7 @@ export type DepartmentLlmUsageReport = {
   completion_tokens: number | null;
   avg_attempts: number | null;
   status_counts: Record<string, number> | null;
+  reason: string | null;
 };
 
 /**
@@ -103,6 +116,7 @@ export type WorkerTriggerRateReport = {
   execution_count: number | null;
   opportunity_count: number | null;
   fire_rate: number | null;
+  reason: string | null;
 };
 
 export type WorkforceObservability = {

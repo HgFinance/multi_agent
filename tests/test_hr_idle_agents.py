@@ -300,8 +300,43 @@ def test_json_output_matches_api_element_shape() -> None:
     )
     element = payload["idle_agents"][0]
     assert set(element) == {
-        "department", "worker_id", "trigger", "status", "last_seen_at", "idle_hours"
+        "department", "worker_id", "trigger", "status", "last_seen_at", "idle_hours",
+        # 2026-08-27 추가. UNAVAILABLE 이 **왜** 났는지가 없으면 읽는 쪽이 설정
+        # 미비·API 오류·네트워크 실패를 구분할 수 없다.
+        "reason",
     }
+
+
+def test_unavailable_carries_a_reason_and_observed_states_do_not() -> None:
+    """사유 없는 실패는 만들 수 없다 (2026-08-27 회귀 방지).
+
+    limit 상수 사고 때 네 리포트가 전부 UNAVAILABLE 이었는데 사유가 어디에도
+    없어서, HR Agent 는 "관측 실패 사유가 제공되지 않았다"고만 적을 수 있었고
+    사람은 원인이 상수 하나라는 걸 몇 주 동안 몰랐다.
+    """
+
+    reports = check_idle_agents(
+        reader=None, departments=("risk",), now=_NOW,
+        reader_unavailable_reason="langfuse_credentials_missing",
+    )
+    assert reports
+    for report in reports:
+        assert report.status is IdleStatus.UNAVAILABLE
+        assert report.reason == "langfuse_credentials_missing"
+        assert report.as_dict()["reason"] == "langfuse_credentials_missing"
+
+    # 관측된 상태는 반대로 사유를 못 가진다 - 붙으면 실패로 오독된다.
+    with pytest.raises(ValueError):
+        WorkerIdleReport(
+            department="risk", worker_id="w", trigger="t",
+            status=IdleStatus.UNOBSERVED, last_seen_at=None, idle_hours=None,
+            reason="아무거나",
+        )
+    with pytest.raises(ValueError):
+        WorkerIdleReport(
+            department="risk", worker_id="w", trigger="t",
+            status=IdleStatus.UNAVAILABLE, last_seen_at=None, idle_hours=None,
+        )
 
 
 # ---------------------------------------------------------------------------

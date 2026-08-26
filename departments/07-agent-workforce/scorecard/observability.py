@@ -166,6 +166,20 @@ def _percentile(values: list[float], fraction: float) -> float | None:
     return ordered[index]
 
 
+def _require_reason(status: Any, unavailable: Any, reason: str | None) -> None:
+    """UNAVAILABLE 에는 사유가 반드시 있고, 관측된 상태에는 없어야 한다.
+
+    네 리포트가 같은 규약을 쓰도록 한 자리에 모은다. "빈 응답은 ok=False + 사유"
+    라는 계약을 dataclass 생성 시점에 강제하는 것이 요점이다 - 나중에 리포트를
+    한 종류 더 만들 때 이 검사를 빼먹으면 그 종류만 조용히 사유 없이 나간다.
+    """
+
+    if status is unavailable and not reason:
+        raise ValueError(f"{status.value} 는 사유(reason) 없이 나올 수 없다")
+    if status is not unavailable and reason:
+        raise ValueError(f"{status.value} 는 관측된 상태라 사유(reason)를 가질 수 없다")
+
+
 class IdleStatus(str, Enum):
     ACTIVE = "ACTIVE"
     IDLE = "IDLE"
@@ -186,12 +200,18 @@ class WorkerIdleReport:
     status: IdleStatus
     last_seen_at: datetime | None
     idle_hours: float | None
+    # UNAVAILABLE 일 때 **왜 관측을 못 했는지**. 관측된 판정에는 없다.
+    reason: str | None = None
 
     def __post_init__(self) -> None:
         if self.status is IdleStatus.ACTIVE and self.last_seen_at is None:
             raise ValueError("ACTIVE 판정은 last_seen_at 없이 나올 수 없다")
         if self.status in (IdleStatus.UNOBSERVED, IdleStatus.UNAVAILABLE) and self.last_seen_at is not None:
             raise ValueError(f"{self.status.value} 판정은 last_seen_at 이 있으면 안 된다")
+        # 사유 없는 실패는 만들 수 없게 계약으로 막는다 - UNAVAILABLE 이 사유 없이
+        # 나가면 읽는 쪽(사람·HR Agent)이 "관측 실패"와 "설정 미비"와 "API 오류"를
+        # 구분할 수 없고, 그 상태로 몇 주가 지나간다(2026-08-27 limit 상수 사고).
+        _require_reason(self.status, IdleStatus.UNAVAILABLE, self.reason)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -201,11 +221,61 @@ class WorkerIdleReport:
             "status": self.status.value,
             "last_seen_at": self.last_seen_at.isoformat() if self.last_seen_at else None,
             "idle_hours": float(self.idle_hours) if self.idle_hours is not None else None,
+            "reason": self.reason,
         }
 
 
 class LangfuseQueryError(RuntimeError):
     """Langfuse 조회 자체가 실패함 (자격증명·네트워크·API 응답 이상)."""
+
+
+# reader 를 아예 만들지 못한 경우의 기본 사유. 호출부가 생성 시점 예외 메시지를
+# 넘겨주면(langfuse_credentials_missing / langfuse_not_installed) 그쪽이 이긴다 -
+# 이 값은 reader=None 이 외부에서 주입된 경우에만 남는다.
+_READER_UNAVAILABLE_REASON = "langfuse_reader_unavailable"
+
+# 사유 문자열에 실을 최대 길이. 관측 리포트는 사람이 읽는 표라 본문 전체를
+# 옮기면 셀이 무너진다 - 원인을 식별할 만큼만 남긴다.
+_REASON_MAX_CHARS = 200
+
+
+def _query_failure_reason(exc: Exception) -> str:
+    """조회 예외를 **행에 실을 수 있는 사유 문자열**로 바꾼다(2026-08-27).
+
+    이전에는 `langfuse_trace_list_failed:{type(exc).__name__}` 이었다. langfuse
+    SDK 의 4xx 는 클래스 이름이 전부 `Error` 라서 그 값이 늘 `...failed:Error`
+    였고, 정작 원인(HTTP 400 / 'limit must be <=100')은 예외 안에만 남고 리포트에
+    닿지 않았다. 그 결과 HR Agent 가 "관측 실패 사유가 핸드오프에 없다"고만
+    적었고, 사람은 상수 하나 때문이라는 걸 알 길이 없었다 - 진단 가능한 실패를
+    진단 불가능하게 만드는 자리였다.
+
+    body 원문은 Trace 내용이 아니라 **요청 검증 오류 메시지**다(우리가 보낸
+    쿼리 파라미터에 대한 서버 응답) - "Trace 원문을 읽지 않는다" 규약과 무관하다.
+    """
+
+    parts = [f"langfuse_trace_list_failed:{type(exc).__name__}"]
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int):
+        parts.append(f"http_{status_code}")
+    body = getattr(exc, "body", None)
+    detail = ""
+    if isinstance(body, dict):
+        messages = [str(body.get("message"))] if body.get("message") else []
+        errors = body.get("error")
+        if isinstance(errors, list):
+            messages.extend(
+                str(item.get("message")) for item in errors
+                if isinstance(item, dict) and item.get("message")
+            )
+        detail = "; ".join(m for m in messages if m)
+    elif body not in (None, ""):
+        detail = str(body)
+    if not detail:
+        detail = str(exc)
+    detail = " ".join(detail.split())
+    if detail:
+        parts.append(detail[:_REASON_MAX_CHARS])
+    return ":".join(parts)
 
 
 @dataclass(frozen=True)
@@ -231,11 +301,26 @@ class WorkerActivityRecord:
     completion_tokens: int | None
 
 
-DEFAULT_ACTIVITY_PAGE_LIMIT = 200
-# 한 Worker·한 창에서 실측으로 모을 최대 페이지 수(200 x 10 = 2000건). 이 상한을
-# 넘긴 창은 records 가 표본이 되지만 total_items 는 서버 meta 에서 오므로 건수는
-# 계속 정확하다 - 잘린 것을 "그만큼만 있었다"로 바꾸지 않는 것이 요점이다.
-MAX_ACTIVITY_PAGES = 10
+# Langfuse `GET /api/public/traces` 가 받는 limit 의 **서버 상한**이다. 넘기면
+# 200 이 아니라 400 을 돌려준다:
+#   {'message': 'Invalid request data', 'error': [{'code': 'too_big',
+#     'maximum': 100, 'path': ['limit'], 'message': 'Too big: expected number to be <=100'}]}
+#
+# ▶ 2026-08-27 실측. 이 값이 200 이던 동안 **HR 의 Langfuse 관측 질의가 단 한 번도
+#   성공한 적이 없다.** 400 이 LangfuseQueryError 로 접히고 그게 다시 UNAVAILABLE
+#   로 접혀서, 유휴·Capacity·LLM 사용량·발화율 네 리포트가 전부 "관측 불가"로만
+#   나왔다 - 예외도 로그도 없이 조용히 죽는 종류다. 재현: limit=100 OK,
+#   limit=101 부터 400. 테스트 대역(_FakeTraceApi)은 limit 을 검사하지 않아
+#   이 400 을 영원히 못 본다 - 그래서 아래 _assert_page_limit_within_api_max() 로
+#   상수 자체를 못 박는다.
+LANGFUSE_MAX_PAGE_LIMIT = 100
+DEFAULT_ACTIVITY_PAGE_LIMIT = LANGFUSE_MAX_PAGE_LIMIT
+# 한 Worker·한 창에서 실측으로 모을 최대 페이지 수(100 x 20 = 2000건). 페이지가
+# 작아진 만큼 페이지 수를 늘려 창당 수집 상한을 그대로 유지한다 - 상한을 같이
+# 줄이면 이번 수정이 조용한 표본 축소가 된다. 이 상한을 넘긴 창은 records 가
+# 표본이 되지만 total_items 는 서버 meta 에서 오므로 건수는 계속 정확하다 -
+# 잘린 것을 "그만큼만 있었다"로 바꾸지 않는 것이 요점이다.
+MAX_ACTIVITY_PAGES = 20
 
 
 @dataclass(frozen=True)
@@ -243,10 +328,10 @@ class WorkerActivityPage:
     """한 (event_name, 창) 조합에서 읽어온 실행 이벤트 묶음.
 
     total_items 가 records 길이와 따로 있는 이유: 이전 count_events() 는
-    len(page.data) 를 돌려줬고, 그래서 창 안에 limit(200) 이상이 쌓이면 실행·미발화
-    둘 다 200 으로 포화돼 fire_rate 가 실제와 무관하게 0.5 로 수렴했다 - 예외 없이
-    조용히 틀리는 종류의 실패다. total_items 는 서버 meta 에서 받아오므로 records
-    가 잘려도 건수는 정확하다.
+    len(page.data) 를 돌려줬고, 그래서 창 안에 limit(한 페이지 상한) 이상이 쌓이면
+    실행·미발화 둘 다 그 상한으로 포화돼 fire_rate 가 실제와 무관하게 0.5 로
+    수렴했다 - 예외 없이 조용히 틀리는 종류의 실패다. total_items 는 서버 meta 에서
+    받아오므로 records 가 잘려도 건수는 정확하다.
     """
 
     records: tuple[WorkerActivityRecord, ...]
@@ -336,7 +421,7 @@ class LangfuseApiTraceReader(LangfuseTraceReader):
                 name=event_name, from_timestamp=since, limit=limit, page=page,
             )
         except Exception as exc:  # noqa: BLE001 - 조회 실패는 항상 UNAVAILABLE 로 접힌다.
-            raise LangfuseQueryError(f"langfuse_trace_list_failed:{type(exc).__name__}") from exc
+            raise LangfuseQueryError(_query_failure_reason(exc)) from exc
 
     def fetch_worker_activity(
         self, *, event_name: str, since: datetime, max_pages: int = MAX_ACTIVITY_PAGES
@@ -446,6 +531,25 @@ def _activity_records(page: Any) -> list[WorkerActivityRecord]:
             )
         )
     return records
+
+
+def _resolve_reader(
+    reader: LangfuseTraceReader | None,
+) -> tuple[LangfuseTraceReader | None, str | None]:
+    """reader 를 확정하고, 못 만들었으면 **그 이유를 같이** 돌려준다(2026-08-27).
+
+    네 집계가 각자 `except LangfuseQueryError: reader = None` 을 쓰고 있었고, 그
+    except 절이 예외 메시지를 그 자리에서 버렸다. 그래서 자격증명 미설정
+    (langfuse_credentials_missing)과 SDK 미설치(langfuse_not_installed)가 리포트
+    상에서 똑같은 UNAVAILABLE 로 보였다 - 조치가 완전히 다른 두 상태인데도.
+    """
+
+    if reader is not None:
+        return reader, None
+    try:
+        return LangfuseApiTraceReader(), None
+    except LangfuseQueryError as exc:
+        return None, str(exc) or _READER_UNAVAILABLE_REASON
 
 
 class WindowedActivityReader(LangfuseTraceReader):
@@ -621,6 +725,7 @@ def check_idle_agents(
     now: datetime | None = None,
     repo_root: Path = ROOT,
     include_heads: bool = False,
+    reader_unavailable_reason: str | None = None,
 ) -> list[WorkerIdleReport]:
     """6개 투자본부(기본값)의 등록된 Worker 전원에 대해 유휴 여부를 판정한다.
 
@@ -647,11 +752,8 @@ def check_idle_agents(
     now = now or datetime.now(timezone.utc)
     since = now - timedelta(hours=lookback_hours)
 
-    if reader is None:
-        try:
-            reader = LangfuseApiTraceReader()
-        except LangfuseQueryError:
-            reader = None
+    reader, reader_reason = _resolve_reader(reader)
+    reader_reason = reader_unavailable_reason or reader_reason or _READER_UNAVAILABLE_REASON
 
     reports: list[WorkerIdleReport] = []
     for department in departments:
@@ -675,13 +777,14 @@ def check_idle_agents(
                         status=IdleStatus.UNAVAILABLE,
                         last_seen_at=None,
                         idle_hours=None,
+                        reason=reader_reason,
                     )
                 )
                 continue
             event_name = langfuse_worker_event_name(stage=stage, worker_id=spec.worker_id)
             try:
                 last_seen = reader.latest_event_timestamp(event_name=event_name, since=since)
-            except LangfuseQueryError:
+            except LangfuseQueryError as exc:
                 reports.append(
                     WorkerIdleReport(
                         department=department,
@@ -690,6 +793,7 @@ def check_idle_agents(
                         status=IdleStatus.UNAVAILABLE,
                         last_seen_at=None,
                         idle_hours=None,
+                        reason=str(exc) or _READER_UNAVAILABLE_REASON,
                     )
                 )
                 continue
@@ -725,6 +829,16 @@ class CapacityObservationStatus(str, Enum):
     # Langfuse 가 꺼져 있거나 조회 자체가 실패함 - IdleStatus.UNAVAILABLE 과 같은
     # 이유. "부하가 0이다"(측정됨)와 "모른다"(측정 실패)를 섞지 않는다.
     UNAVAILABLE = "UNAVAILABLE"
+    # 이 부서에 등록된 Worker 가 0명이다 - 질의를 낼 대상 자체가 없다(2026-08-27).
+    #
+    # ▶ 전에는 이것도 MEASURED/arrivals=0 이었다. specs 가 빈 튜플이면 조회 루프가
+    #   한 번도 안 돌아 records 가 비고, 그대로 `arrivals == 0` 분기에 떨어졌기
+    #   때문이다. 실측(2026-08-27): trading 은 등록 Worker 0명인데 응답에서 혼자
+    #   MEASURED/0 으로 나왔고, 나머지 5개 부서가 UNAVAILABLE 인 화면에서 그 행만
+    #   "관측됐고 부하가 없다"로 읽혔다. **"측정했더니 0"과 "잴 대상이 없다"는
+    #   다른 사실이다** - 인원 조치 판단이 이 둘을 뒤집어 읽으면 없는 부서를
+    #   한가하다고 결론짓는다.
+    NO_WORKERS_REGISTERED = "NO_WORKERS_REGISTERED"
 
 
 @dataclass(frozen=True)
@@ -753,6 +867,10 @@ class DepartmentCapacityReport:
     retry_rate: float | None
     error_rate: float | None
     utilization: float | None
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_reason(self.status, CapacityObservationStatus.UNAVAILABLE, self.reason)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -766,6 +884,7 @@ class DepartmentCapacityReport:
             "error_rate": self.error_rate,
             "utilization": self.utilization,
             "queue_p95_ms": None,
+            "reason": self.reason,
         }
 
 
@@ -776,6 +895,7 @@ def compute_department_capacity(
     since: datetime,
     now: datetime,
     repo_root: Path,
+    reader_unavailable_reason: str | None = None,
 ) -> DepartmentCapacityReport:
     """department 등록 Worker 전원의 실행 이벤트를 모아 Capacity 하나로 합친다."""
 
@@ -791,25 +911,35 @@ def compute_department_capacity(
     except WorkerRegistryError as exc:
         raise WorkerRegistryUnavailable(f"worker_registry_unavailable:{exc}") from exc
 
-    def _unavailable() -> DepartmentCapacityReport:
+    def _unavailable(reason: str) -> DepartmentCapacityReport:
         return DepartmentCapacityReport(
             department=department, window_start=since, window_end=now,
             status=CapacityObservationStatus.UNAVAILABLE,
             arrivals=None, duration_p95_ms=None, retry_rate=None, error_rate=None,
-            utilization=None,
+            utilization=None, reason=reason,
         )
 
     if reader is None:
-        return _unavailable()
+        return _unavailable(reader_unavailable_reason or _READER_UNAVAILABLE_REASON)
 
     specs = tuple(workers_for_department(registry, department))
+    # 등록 Worker 0명은 MEASURED/0 이 아니다 - 위 enum 주석 참고. 조회를 내기
+    # **전에** 갈라야 한다(뒤에서 arrivals==0 으로 만나면 "측정했더니 0"과
+    # 구분이 안 된다).
+    if not specs:
+        return DepartmentCapacityReport(
+            department=department, window_start=since, window_end=now,
+            status=CapacityObservationStatus.NO_WORKERS_REGISTERED,
+            arrivals=None, duration_p95_ms=None, retry_rate=None, error_rate=None,
+            utilization=None,
+        )
     records: list[WorkerActivityRecord] = []
     try:
         for spec in specs:
             event_name = langfuse_worker_event_name(stage=stage, worker_id=spec.worker_id)
             records.extend(reader.list_worker_activity(event_name=event_name, since=since))
-    except LangfuseQueryError:
-        return _unavailable()
+    except LangfuseQueryError as exc:
+        return _unavailable(str(exc))
 
     arrivals = len(records)
     if arrivals == 0:
@@ -843,6 +973,7 @@ def check_department_capacity(
     lookback_hours: float = 24.0,
     now: datetime | None = None,
     repo_root: Path = ROOT,
+    reader_unavailable_reason: str | None = None,
 ) -> list[DepartmentCapacityReport]:
     """6개 투자본부(기본값) 전체의 Capacity 를 부서 단위로 하나씩 돌려준다.
 
@@ -859,15 +990,13 @@ def check_department_capacity(
     now = now or datetime.now(timezone.utc)
     since = now - timedelta(hours=lookback_hours)
 
-    if reader is None:
-        try:
-            reader = LangfuseApiTraceReader()
-        except LangfuseQueryError:
-            reader = None
+    reader, resolved_reason = _resolve_reader(reader)
+    reader_unavailable_reason = reader_unavailable_reason or resolved_reason
 
     return [
         compute_department_capacity(
             department=department, reader=reader, since=since, now=now, repo_root=repo_root,
+            reader_unavailable_reason=reader_unavailable_reason,
         )
         for department in departments
     ]
@@ -885,6 +1014,8 @@ def check_department_capacity(
 class LlmUsageObservationStatus(str, Enum):
     MEASURED = "MEASURED"
     UNAVAILABLE = "UNAVAILABLE"
+    # CapacityObservationStatus.NO_WORKERS_REGISTERED 와 같은 이유·같은 규약이다.
+    NO_WORKERS_REGISTERED = "NO_WORKERS_REGISTERED"
 
 
 @dataclass(frozen=True)
@@ -909,6 +1040,10 @@ class DepartmentLlmUsageReport:
     completion_tokens: int | None
     avg_attempts: float | None
     status_counts: dict[str, int] | None
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_reason(self.status, LlmUsageObservationStatus.UNAVAILABLE, self.reason)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -922,6 +1057,7 @@ class DepartmentLlmUsageReport:
             "completion_tokens": self.completion_tokens,
             "avg_attempts": self.avg_attempts,
             "status_counts": self.status_counts,
+            "reason": self.reason,
         }
 
 
@@ -932,6 +1068,7 @@ def compute_department_llm_usage(
     since: datetime,
     now: datetime,
     repo_root: Path,
+    reader_unavailable_reason: str | None = None,
 ) -> DepartmentLlmUsageReport:
     """department 등록 Worker 전원의 실행 이벤트를 모아 LLM 사용량 하나로 합친다."""
 
@@ -947,25 +1084,34 @@ def compute_department_llm_usage(
     except WorkerRegistryError as exc:
         raise WorkerRegistryUnavailable(f"worker_registry_unavailable:{exc}") from exc
 
-    def _unavailable() -> DepartmentLlmUsageReport:
+    def _unavailable(reason: str) -> DepartmentLlmUsageReport:
         return DepartmentLlmUsageReport(
             department=department, window_start=since, window_end=now,
             status=LlmUsageObservationStatus.UNAVAILABLE,
             arrivals=None, llm_calls=None, prompt_tokens=None, completion_tokens=None,
-            avg_attempts=None, status_counts=None,
+            avg_attempts=None, status_counts=None, reason=reason,
         )
 
     if reader is None:
-        return _unavailable()
+        return _unavailable(reader_unavailable_reason or _READER_UNAVAILABLE_REASON)
 
     specs = tuple(workers_for_department(registry, department))
+    if not specs:
+        # compute_department_capacity 와 같은 규약 - 잴 대상이 없는 것을 "재 봤더니
+        # 0" 으로 바꾸지 않는다.
+        return DepartmentLlmUsageReport(
+            department=department, window_start=since, window_end=now,
+            status=LlmUsageObservationStatus.NO_WORKERS_REGISTERED,
+            arrivals=None, llm_calls=None, prompt_tokens=None, completion_tokens=None,
+            avg_attempts=None, status_counts=None,
+        )
     records: list[WorkerActivityRecord] = []
     try:
         for spec in specs:
             event_name = langfuse_worker_event_name(stage=stage, worker_id=spec.worker_id)
             records.extend(reader.list_worker_activity(event_name=event_name, since=since))
-    except LangfuseQueryError:
-        return _unavailable()
+    except LangfuseQueryError as exc:
+        return _unavailable(str(exc))
 
     arrivals = len(records)
     if arrivals == 0:
@@ -1007,6 +1153,7 @@ def check_department_llm_usage(
     lookback_hours: float = 24.0,
     now: datetime | None = None,
     repo_root: Path = ROOT,
+    reader_unavailable_reason: str | None = None,
 ) -> list[DepartmentLlmUsageReport]:
     """6개 투자본부(기본값) 전체의 LLM 사용량을 부서 단위로 하나씩 돌려준다.
 
@@ -1023,15 +1170,13 @@ def check_department_llm_usage(
     now = now or datetime.now(timezone.utc)
     since = now - timedelta(hours=lookback_hours)
 
-    if reader is None:
-        try:
-            reader = LangfuseApiTraceReader()
-        except LangfuseQueryError:
-            reader = None
+    reader, resolved_reason = _resolve_reader(reader)
+    reader_unavailable_reason = reader_unavailable_reason or resolved_reason
 
     return [
         compute_department_llm_usage(
             department=department, reader=reader, since=since, now=now, repo_root=repo_root,
+            reader_unavailable_reason=reader_unavailable_reason,
         )
         for department in departments
     ]
@@ -1071,6 +1216,10 @@ class WorkerTriggerRateReport:
     execution_count: int | None
     opportunity_count: int | None
     fire_rate: float | None
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_reason(self.status, TriggerRateObservationStatus.UNAVAILABLE, self.reason)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -1083,35 +1232,34 @@ class WorkerTriggerRateReport:
             "execution_count": self.execution_count,
             "opportunity_count": self.opportunity_count,
             "fire_rate": self.fire_rate,
+            "reason": self.reason,
         }
 
 
 def compute_worker_trigger_rate(
     *, department: str, stage: str, spec: Any, reader: LangfuseTraceReader | None,
-    since: datetime, now: datetime,
+    since: datetime, now: datetime, reader_unavailable_reason: str | None = None,
 ) -> WorkerTriggerRateReport:
     """Worker 한 명의 실행/미발화 이벤트를 세어 발화율 하나로 합친다."""
 
-    if reader is None:
+    def _unavailable(reason: str) -> WorkerTriggerRateReport:
         return WorkerTriggerRateReport(
             department=department, worker_id=spec.worker_id, trigger=spec.trigger,
             window_start=since, window_end=now,
             status=TriggerRateObservationStatus.UNAVAILABLE,
-            execution_count=None, opportunity_count=None, fire_rate=None,
+            execution_count=None, opportunity_count=None, fire_rate=None, reason=reason,
         )
+
+    if reader is None:
+        return _unavailable(reader_unavailable_reason or _READER_UNAVAILABLE_REASON)
 
     execution_name = langfuse_worker_event_name(stage=stage, worker_id=spec.worker_id)
     opportunity_name = langfuse_worker_opportunity_event_name(stage=stage, worker_id=spec.worker_id)
     try:
         execution_count = reader.count_events(event_name=execution_name, since=since)
         opportunity_count = reader.count_events(event_name=opportunity_name, since=since)
-    except LangfuseQueryError:
-        return WorkerTriggerRateReport(
-            department=department, worker_id=spec.worker_id, trigger=spec.trigger,
-            window_start=since, window_end=now,
-            status=TriggerRateObservationStatus.UNAVAILABLE,
-            execution_count=None, opportunity_count=None, fire_rate=None,
-        )
+    except LangfuseQueryError as exc:
+        return _unavailable(str(exc))
 
     denominator = execution_count + opportunity_count
     return WorkerTriggerRateReport(
@@ -1131,6 +1279,7 @@ def check_worker_trigger_rates(
     lookback_hours: float = 24.0,
     now: datetime | None = None,
     repo_root: Path = ROOT,
+    reader_unavailable_reason: str | None = None,
 ) -> list[WorkerTriggerRateReport]:
     """6개 투자본부(기본값)의 등록된 Worker 전원에 대해 발화율을 계산한다.
 
@@ -1155,11 +1304,8 @@ def check_worker_trigger_rates(
     now = now or datetime.now(timezone.utc)
     since = now - timedelta(hours=lookback_hours)
 
-    if reader is None:
-        try:
-            reader = LangfuseApiTraceReader()
-        except LangfuseQueryError:
-            reader = None
+    reader, resolved_reason = _resolve_reader(reader)
+    reader_unavailable_reason = reader_unavailable_reason or resolved_reason
 
     reports: list[WorkerTriggerRateReport] = []
     for department in departments:
@@ -1169,6 +1315,7 @@ def check_worker_trigger_rates(
                 compute_worker_trigger_rate(
                     department=department, stage=stage, spec=spec, reader=reader,
                     since=since, now=now,
+                    reader_unavailable_reason=reader_unavailable_reason,
                 )
             )
     return reports
@@ -1242,11 +1389,7 @@ def collect_workforce_observability(
     now = now or datetime.now(timezone.utc)
     since = now - timedelta(hours=lookback_hours)
 
-    if reader is None:
-        try:
-            reader = LangfuseApiTraceReader()
-        except LangfuseQueryError:
-            reader = None
+    reader, reader_unavailable_reason = _resolve_reader(reader)
 
     # 창이 같아야 캐시 키가 같다. 그래서 now 를 여기서 한 번 고정해 네 집계에
     # 그대로 넘긴다 - 각자 datetime.now() 를 부르게 두면 since 가 미세하게 어긋나
@@ -1260,6 +1403,9 @@ def collect_workforce_observability(
         "lookback_hours": lookback_hours,
         "now": now,
         "repo_root": repo_root,
+        # reader 를 못 만든 이유를 네 집계가 각자 다시 추측하지 않게 여기서 한 번
+        # 정해 내려보낸다 - shared 가 None 이면 네 리포트가 같은 사유를 단다.
+        "reader_unavailable_reason": reader_unavailable_reason,
     }
 
     head_profiles_unavailable: str | None = None
@@ -1553,3 +1699,82 @@ if __name__ == "__main__":
     print("  같은 창은 1회, 다른 창은 별도 조회 - OK")
 
     print("통합 관측(공용 fetch 층) 자체 점검 통과.")
+
+    # ── 2026-08-27 배선 사고 회귀 방지 ────────────────────────────────────────
+    #
+    # 아래 셋은 전부 "조용히 틀린" 상태를 붙잡는 검사다. 세 결함 모두 예외도 로그도
+    # 남기지 않았고, 리포트는 매번 200 OK 로 그럴듯하게 응답했다.
+
+    # ① limit 상한. 이 값이 100 을 넘으면 Langfuse 가 400 을 돌려주고 네 리포트가
+    #   전부 UNAVAILABLE 이 된다 - 대역(_FakeTraceApi)은 limit 을 검사하지 않으므로
+    #   상수 자체를 여기서 못 박는다.
+    assert DEFAULT_ACTIVITY_PAGE_LIMIT <= LANGFUSE_MAX_PAGE_LIMIT, (
+        f"limit {DEFAULT_ACTIVITY_PAGE_LIMIT} > Langfuse 상한 {LANGFUSE_MAX_PAGE_LIMIT} "
+        "- 서버가 400(too_big)을 돌려주고 관측이 전부 UNAVAILABLE 로 접힌다"
+    )
+    assert DEFAULT_ACTIVITY_PAGE_LIMIT * MAX_ACTIVITY_PAGES >= 2000, (
+        "창당 수집 상한이 줄었다 - 페이지를 작게 만들었으면 페이지 수로 보전해야 한다"
+    )
+    print("  limit 이 Langfuse 상한(100) 이내 - OK")
+
+    # ② 사유 없는 UNAVAILABLE 은 만들 수 없다.
+    try:
+        WorkerIdleReport(
+            department="research", worker_id="w", trigger="t",
+            status=IdleStatus.UNAVAILABLE, last_seen_at=None, idle_hours=None,
+        )
+        raise AssertionError("사유 없는 UNAVAILABLE 이 통과했다")
+    except ValueError:
+        pass
+    # 관측된 상태는 반대로 사유를 못 가진다(사유가 붙으면 실패로 오독된다).
+    try:
+        WorkerIdleReport(
+            department="research", worker_id="w", trigger="t",
+            status=IdleStatus.UNOBSERVED, last_seen_at=None, idle_hours=None,
+            reason="아무거나",
+        )
+        raise AssertionError("관측된 상태에 사유가 붙었는데 통과했다")
+    except ValueError:
+        pass
+    print("  UNAVAILABLE 은 사유 필수, 관측된 상태는 사유 금지 - OK")
+
+    # ③ HTTP 400 본문이 사유 문자열까지 살아 온다. 실제 사고 응답을 픽스처로 쓴다 -
+    #   가짜 문구로 만들면 이 검사가 자기가 막아야 할 사고를 못 잡는다.
+    class _ApiError(Exception):
+        status_code = 400
+        body = {
+            "message": "Invalid request data",
+            "error": [{"code": "too_big", "maximum": 100, "path": ["limit"],
+                       "message": "Too big: expected number to be <=100"}],
+        }
+
+    _reason = _query_failure_reason(_ApiError())
+    assert "http_400" in _reason, _reason
+    assert "<=100" in _reason, _reason
+    assert len(_reason) < 400, "사유가 길어 표를 무너뜨린다"
+    print(f"  조회 실패 사유에 HTTP 상태·본문이 실린다 - OK ({_reason[:70]}…)")
+
+    # ④ 등록 Worker 0명은 MEASURED/0 이 아니다. trading 은 실제로 0명이다.
+    _cap = compute_department_capacity(
+        department="trading", reader=_NoneReader(), since=now - timedelta(hours=24),
+        now=now, repo_root=ROOT,
+    )
+    assert _cap.status is CapacityObservationStatus.NO_WORKERS_REGISTERED, _cap.status
+    assert _cap.arrivals is None, "잴 대상이 없는데 arrivals 에 숫자가 들어갔다"
+    _usage = compute_department_llm_usage(
+        department="trading", reader=_NoneReader(), since=now - timedelta(hours=24),
+        now=now, repo_root=ROOT,
+    )
+    assert _usage.status is LlmUsageObservationStatus.NO_WORKERS_REGISTERED, _usage.status
+    print("  Worker 0명 부서는 NO_WORKERS_REGISTERED - OK")
+
+    # ⑤ reader 를 못 만든 사유가 리포트까지 내려온다.
+    _idle = check_idle_agents(
+        reader=None, departments=("research",), now=now,
+        reader_unavailable_reason="langfuse_credentials_missing",
+    )
+    assert _idle and all(r.status is IdleStatus.UNAVAILABLE for r in _idle)
+    assert all(r.reason == "langfuse_credentials_missing" for r in _idle), [r.reason for r in _idle]
+    print("  reader 생성 실패 사유가 행마다 실린다 - OK")
+
+    print("배선 사고 회귀 방지 자체 점검 통과.")

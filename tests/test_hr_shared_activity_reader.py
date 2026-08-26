@@ -26,7 +26,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "departments/07-agent-workforce/scorecard"))
 
 from observability import (  # noqa: E402
+    DEFAULT_ACTIVITY_PAGE_LIMIT,
     INVESTMENT_DEPARTMENT_STAGE,
+    LANGFUSE_MAX_PAGE_LIMIT,
+    MAX_ACTIVITY_PAGES,
     LangfuseApiTraceReader,
     LangfuseQueryError,
     LangfuseTraceReader,
@@ -214,16 +217,39 @@ class _FakePage:
         self.meta = meta
 
 
+class _TooBigError(Exception):
+    """limit 이 상한을 넘었을 때 Langfuse 가 실제로 돌려주는 400 (2026-08-27 실측).
+
+    본문을 그대로 옮겨 둔다 - 문구를 지어내면 이 대역이 자기가 막아야 할 사고를
+    못 잡는다. 원래 대역은 limit 을 아예 검사하지 않았고, 그래서 운영 상수가
+    200(>100)이던 몇 주 동안 이 테스트 파일 전체가 초록불이었다.
+    """
+
+    status_code = 400
+    body = {
+        "message": "Invalid request data",
+        "error": [{"origin": "number", "code": "too_big", "maximum": 100,
+                   "inclusive": True, "path": ["limit"],
+                   "message": "Too big: expected number to be <=100"}],
+    }
+
+
 class _FakeTraceApi:
-    """총 450건이 3페이지에 나뉘어 있는 서버."""
+    """총 450건을 limit 크기대로 페이지에 나눠 주는 서버.
+
+    limit 상한을 **실서버와 같이** 강제한다 - 넘기면 데이터가 아니라 400 이다.
+    """
 
     TOTAL = 450
+    MAX_LIMIT = 100
 
     def __init__(self) -> None:
         self.calls: list[tuple[int, int]] = []
 
     def list(self, *, name, from_timestamp, limit, page):
         self.calls.append((limit, page))
+        if limit > self.MAX_LIMIT:
+            raise _TooBigError()
         start = (page - 1) * limit
         size = max(0, min(limit, self.TOTAL - start))
         data = [_FakeTrace(from_timestamp + timedelta(minutes=i)) for i in range(start, start + size)]
@@ -248,7 +274,46 @@ def test_fetch_pages_past_the_limit_instead_of_stopping_at_one_page() -> None:
     assert page.total_items == _FakeTraceApi.TOTAL
     assert len(page.records) == _FakeTraceApi.TOTAL, "limit 한 장에서 끊겼다"
     assert page.truncated is False
-    assert [c[1] for c in trace_api.calls] == [1, 2, 3]
+    expected_pages = -(-_FakeTraceApi.TOTAL // DEFAULT_ACTIVITY_PAGE_LIMIT)
+    # 페이지 수를 상수에서 유도한다 - [1,2,3] 으로 박아 두면 페이지 크기를 바꿀 때
+    # 이 테스트가 "왜 깨졌는지"가 아니라 "몇으로 고칠지"만 알려준다.
+    assert [c[1] for c in trace_api.calls] == list(range(1, expected_pages + 1))
+
+
+def test_page_limit_stays_within_the_langfuse_server_maximum() -> None:
+    """limit 이 상한을 넘으면 조회가 400 으로 통째로 죽는다 (2026-08-27 회귀 방지).
+
+    이 값이 200 이던 동안 HR 의 Langfuse 관측 질의는 **한 번도 성공한 적이 없다.**
+    400 이 LangfuseQueryError -> UNAVAILABLE 로 접혀서, 네 리포트가 전부 "관측
+    불가"로만 나왔고 예외도 로그도 남지 않았다. 상수를 직접 못 박는다.
+    """
+
+    assert DEFAULT_ACTIVITY_PAGE_LIMIT <= LANGFUSE_MAX_PAGE_LIMIT
+    assert LANGFUSE_MAX_PAGE_LIMIT == _FakeTraceApi.MAX_LIMIT, "대역과 실서버 상한이 갈렸다"
+    # 페이지가 작아진 만큼 페이지 수로 보전했는지 - 조용한 표본 축소를 막는다.
+    assert DEFAULT_ACTIVITY_PAGE_LIMIT * MAX_ACTIVITY_PAGES >= 2000
+
+
+def test_over_limit_query_surfaces_the_http_reason_not_just_the_class_name() -> None:
+    """400 본문이 사유 문자열까지 살아 와야 사람이 원인을 볼 수 있다.
+
+    이전 사유는 `langfuse_trace_list_failed:Error` 였다 - langfuse SDK 의 4xx 는
+    클래스 이름이 전부 `Error` 라서 그 값으로는 아무것도 알 수 없었고, HR Agent 도
+    "실패 사유가 핸드오프에 없다"고만 적었다.
+    """
+
+    trace_api = _FakeTraceApi()
+    reader = _api_reader(trace_api)
+    with pytest.raises(LangfuseQueryError) as excinfo:
+        reader._list_page(
+            event_name="llm.performance.metric:research:w",
+            since=_NOW - timedelta(hours=24),
+            limit=LANGFUSE_MAX_PAGE_LIMIT + 1,
+            page=1,
+        )
+    reason = str(excinfo.value)
+    assert "http_400" in reason, reason
+    assert "<=100" in reason, reason
 
 
 def test_count_reads_total_items_in_one_round_trip() -> None:
@@ -288,3 +353,53 @@ def test_investment_department_scope_is_unchanged_by_the_merge() -> None:
         "accounting-portfolio",
         "qa",
     }
+
+
+# ── 등록 Worker 0명 (2026-08-27) ──────────────────────────────────────────────
+
+
+def test_zero_worker_department_is_not_reported_as_measured_zero() -> None:
+    """"잴 대상이 없다"를 "재 봤더니 0"으로 바꾸지 않는다.
+
+    trading 은 등록 Worker 가 0명이다. 이전 구현은 조회 루프가 한 번도 안 돌아
+    records 가 비고 그대로 `arrivals == 0` 분기에 떨어져 **MEASURED/0** 을 냈다.
+    실측(2026-08-27): 나머지 5개 부서가 UNAVAILABLE 인 응답에서 trading 만
+    MEASURED/0 이었고, 화면에서 그 행이 "관측됐고 한가하다"로 읽혔다.
+    """
+
+    from observability import (  # noqa: PLC0415
+        CapacityObservationStatus,
+        LlmUsageObservationStatus,
+        compute_department_capacity,
+        compute_department_llm_usage,
+    )
+
+    assert not tuple(
+        w for w in _registry_workers() if w.department == "trading"
+    ), "trading 에 Worker 가 생겼다 - 이 테스트의 전제를 다시 정해야 한다"
+
+    since = _NOW - timedelta(hours=24)
+    capacity = compute_department_capacity(
+        department="trading", reader=_CountingReader(), since=since, now=_NOW, repo_root=ROOT,
+    )
+    assert capacity.status is CapacityObservationStatus.NO_WORKERS_REGISTERED
+    assert capacity.arrivals is None, "잴 대상이 없는데 arrivals 에 숫자가 들어갔다"
+
+    usage = compute_department_llm_usage(
+        department="trading", reader=_CountingReader(), since=since, now=_NOW, repo_root=ROOT,
+    )
+    assert usage.status is LlmUsageObservationStatus.NO_WORKERS_REGISTERED
+    assert usage.arrivals is None
+
+    # 그리고 그 부서에는 질의를 내지 않는다 - 없는 대상에 왕복을 쓰지 않는다.
+    reader = _CountingReader()
+    compute_department_capacity(
+        department="trading", reader=reader, since=since, now=_NOW, repo_root=ROOT,
+    )
+    assert not reader.fetches, reader.fetches
+
+
+def _registry_workers():
+    from orchestration.contracts.worker_registry import load_worker_registry  # noqa: PLC0415
+
+    return load_worker_registry(ROOT)
