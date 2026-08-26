@@ -191,13 +191,21 @@ function IdleAgentRow({ report, rate }: { report: WorkerIdleReport; rate?: Worke
       <td className="px-2.5 py-1.5">
         <span
           className={`inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-[10px] font-semibold ${view.tone}`}
-          title={view.hint}
+          // 사유가 있으면 그걸 먼저 보여준다 — UNAVAILABLE의 일반 설명("모르는
+          // 상태")은 이미 아래 범례에 있고, 정작 필요한 건 이 행이 왜 실패했는지다.
+          // 사유가 없던 동안 자격증명 문제와 API 400이 화면에서 똑같아 보였다.
+          title={report.reason ? `${view.hint}\n${report.reason}` : view.hint}
         >
           <span className="material-symbols-outlined text-[12px]" aria-hidden="true">
             {view.icon}
           </span>
           {view.label}
         </span>
+        {report.reason ? (
+          <p className="mt-1 max-w-[22rem] break-words font-data-mono text-[10px] leading-tight text-on-surface-variant">
+            {report.reason}
+          </p>
+        ) : null}
       </td>
       <td className="px-2.5 py-1.5 font-data-mono">{formatLastSeen(report.last_seen_at)}</td>
       <td className="px-3 py-2 font-data-mono text-on-surface-variant">{formatIdleHours(report.idle_hours)}</td>

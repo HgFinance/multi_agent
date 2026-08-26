@@ -30,6 +30,14 @@ const STATUS_VIEW: Record<CapacityObservationStatus, { label: string; tone: stri
     tone: "border-error/40 bg-error-container text-on-error-container",
     icon: "cloud_off",
   },
+  // 장애가 아니다 — 그 부서에 등록된 Worker가 0명이라 잴 대상이 없다는 뜻이다.
+  // 그래서 error 톤을 쓰지 않는다. 이전에는 이 상태가 MEASURED/arrivals=0으로
+  // 나와서, 인원이 없는 부서가 화면에서 "관측됐고 한가하다"로 읽혔다.
+  NO_WORKERS_REGISTERED: {
+    label: "WORKER 없음",
+    tone: "border-outline-variant bg-surface-container text-on-surface-variant",
+    icon: "person_off",
+  },
 };
 
 function statusView(status: string) {

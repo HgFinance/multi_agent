@@ -26,7 +26,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "departments/07-agent-workforce/scorecard"))
 
 from observability import (  # noqa: E402
+    DEFAULT_ACTIVITY_PAGE_LIMIT,
     INVESTMENT_DEPARTMENT_STAGE,
+    LANGFUSE_MAX_PAGE_LIMIT,
+    MAX_ACTIVITY_PAGES,
     LangfuseApiTraceReader,
     LangfuseQueryError,
     LangfuseTraceReader,
@@ -99,7 +102,14 @@ def _registered_worker_count() -> int:
 
 
 def test_unified_collect_queries_langfuse_twice_per_worker() -> None:
-    """Worker 당 왕복은 실행 이벤트 1 + 미발화 건수 1, 그 이상이면 통합이 풀린 것이다."""
+    """왕복은 창당 2회다 - Worker 수가 늘어도 늘지 않는다 (2026-08-27 배치 전환).
+
+    Langfuse Public API 는 **분당 15 요청** 상한이다(429 응답의
+    `x-ratelimit-limit: 15` 실측). 왕복이 Worker 수에 비례하면 8명에서 이미
+    16 > 15 로 한도를 넘고, SDK 가 Retry-After 만큼 자면서(상한 60초) collect 가
+    41~62초로 늘어난다 - 실제로 그랬다. 그래서 여기서 세는 값은 "Worker 당"이
+    아니라 "창 당"이어야 한다.
+    """
 
     reader = _CountingReader()
     observed = collect_workforce_observability(reader=reader, now=_NOW)
@@ -117,7 +127,11 @@ def test_unified_collect_queries_langfuse_twice_per_worker() -> None:
     assert len(reader.counts) == workers
     assert set(reader.counts).isdisjoint(set(reader.fetches))
 
-    assert observed.langfuse_queries == workers * 2
+    # 논리 왕복은 프리페치 2회(실행 레코드 묶음 + 미발화 건수 묶음)뿐이다.
+    # 대역은 배치 메서드를 구현하지 않아 내부적으로 이름마다 부르지만, 실제
+    # reader(LangfuseApiTraceReader)에서는 이 2 가 곧 HTTP 왕복 2회다.
+    assert observed.langfuse_queries == 2, observed.langfuse_queries
+    assert observed.langfuse_queries < workers, "왕복이 Worker 수에 비례하면 한도를 넘는다"
 
 
 def test_unified_collect_is_cheaper_than_calling_four_checks_separately() -> None:
@@ -214,16 +228,39 @@ class _FakePage:
         self.meta = meta
 
 
+class _TooBigError(Exception):
+    """limit 이 상한을 넘었을 때 Langfuse 가 실제로 돌려주는 400 (2026-08-27 실측).
+
+    본문을 그대로 옮겨 둔다 - 문구를 지어내면 이 대역이 자기가 막아야 할 사고를
+    못 잡는다. 원래 대역은 limit 을 아예 검사하지 않았고, 그래서 운영 상수가
+    200(>100)이던 몇 주 동안 이 테스트 파일 전체가 초록불이었다.
+    """
+
+    status_code = 400
+    body = {
+        "message": "Invalid request data",
+        "error": [{"origin": "number", "code": "too_big", "maximum": 100,
+                   "inclusive": True, "path": ["limit"],
+                   "message": "Too big: expected number to be <=100"}],
+    }
+
+
 class _FakeTraceApi:
-    """총 450건이 3페이지에 나뉘어 있는 서버."""
+    """총 450건을 limit 크기대로 페이지에 나눠 주는 서버.
+
+    limit 상한을 **실서버와 같이** 강제한다 - 넘기면 데이터가 아니라 400 이다.
+    """
 
     TOTAL = 450
+    MAX_LIMIT = 100
 
     def __init__(self) -> None:
         self.calls: list[tuple[int, int]] = []
 
     def list(self, *, name, from_timestamp, limit, page):
         self.calls.append((limit, page))
+        if limit > self.MAX_LIMIT:
+            raise _TooBigError()
         start = (page - 1) * limit
         size = max(0, min(limit, self.TOTAL - start))
         data = [_FakeTrace(from_timestamp + timedelta(minutes=i)) for i in range(start, start + size)]
@@ -248,7 +285,46 @@ def test_fetch_pages_past_the_limit_instead_of_stopping_at_one_page() -> None:
     assert page.total_items == _FakeTraceApi.TOTAL
     assert len(page.records) == _FakeTraceApi.TOTAL, "limit 한 장에서 끊겼다"
     assert page.truncated is False
-    assert [c[1] for c in trace_api.calls] == [1, 2, 3]
+    expected_pages = -(-_FakeTraceApi.TOTAL // DEFAULT_ACTIVITY_PAGE_LIMIT)
+    # 페이지 수를 상수에서 유도한다 - [1,2,3] 으로 박아 두면 페이지 크기를 바꿀 때
+    # 이 테스트가 "왜 깨졌는지"가 아니라 "몇으로 고칠지"만 알려준다.
+    assert [c[1] for c in trace_api.calls] == list(range(1, expected_pages + 1))
+
+
+def test_page_limit_stays_within_the_langfuse_server_maximum() -> None:
+    """limit 이 상한을 넘으면 조회가 400 으로 통째로 죽는다 (2026-08-27 회귀 방지).
+
+    이 값이 200 이던 동안 HR 의 Langfuse 관측 질의는 **한 번도 성공한 적이 없다.**
+    400 이 LangfuseQueryError -> UNAVAILABLE 로 접혀서, 네 리포트가 전부 "관측
+    불가"로만 나왔고 예외도 로그도 남지 않았다. 상수를 직접 못 박는다.
+    """
+
+    assert DEFAULT_ACTIVITY_PAGE_LIMIT <= LANGFUSE_MAX_PAGE_LIMIT
+    assert LANGFUSE_MAX_PAGE_LIMIT == _FakeTraceApi.MAX_LIMIT, "대역과 실서버 상한이 갈렸다"
+    # 페이지가 작아진 만큼 페이지 수로 보전했는지 - 조용한 표본 축소를 막는다.
+    assert DEFAULT_ACTIVITY_PAGE_LIMIT * MAX_ACTIVITY_PAGES >= 2000
+
+
+def test_over_limit_query_surfaces_the_http_reason_not_just_the_class_name() -> None:
+    """400 본문이 사유 문자열까지 살아 와야 사람이 원인을 볼 수 있다.
+
+    이전 사유는 `langfuse_trace_list_failed:Error` 였다 - langfuse SDK 의 4xx 는
+    클래스 이름이 전부 `Error` 라서 그 값으로는 아무것도 알 수 없었고, HR Agent 도
+    "실패 사유가 핸드오프에 없다"고만 적었다.
+    """
+
+    trace_api = _FakeTraceApi()
+    reader = _api_reader(trace_api)
+    with pytest.raises(LangfuseQueryError) as excinfo:
+        reader._list_page(
+            event_name="llm.performance.metric:research:w",
+            since=_NOW - timedelta(hours=24),
+            limit=LANGFUSE_MAX_PAGE_LIMIT + 1,
+            page=1,
+        )
+    reason = str(excinfo.value)
+    assert "http_400" in reason, reason
+    assert "<=100" in reason, reason
 
 
 def test_count_reads_total_items_in_one_round_trip() -> None:
@@ -288,3 +364,220 @@ def test_investment_department_scope_is_unchanged_by_the_merge() -> None:
         "accounting-portfolio",
         "qa",
     }
+
+
+# ── 등록 Worker 0명 (2026-08-27) ──────────────────────────────────────────────
+
+
+def test_zero_worker_department_is_not_reported_as_measured_zero() -> None:
+    """"잴 대상이 없다"를 "재 봤더니 0"으로 바꾸지 않는다.
+
+    trading 은 등록 Worker 가 0명이다. 이전 구현은 조회 루프가 한 번도 안 돌아
+    records 가 비고 그대로 `arrivals == 0` 분기에 떨어져 **MEASURED/0** 을 냈다.
+    실측(2026-08-27): 나머지 5개 부서가 UNAVAILABLE 인 응답에서 trading 만
+    MEASURED/0 이었고, 화면에서 그 행이 "관측됐고 한가하다"로 읽혔다.
+    """
+
+    from observability import (  # noqa: PLC0415
+        CapacityObservationStatus,
+        LlmUsageObservationStatus,
+        compute_department_capacity,
+        compute_department_llm_usage,
+    )
+
+    assert not tuple(
+        w for w in _registry_workers() if w.department == "trading"
+    ), "trading 에 Worker 가 생겼다 - 이 테스트의 전제를 다시 정해야 한다"
+
+    since = _NOW - timedelta(hours=24)
+    capacity = compute_department_capacity(
+        department="trading", reader=_CountingReader(), since=since, now=_NOW, repo_root=ROOT,
+    )
+    assert capacity.status is CapacityObservationStatus.NO_WORKERS_REGISTERED
+    assert capacity.arrivals is None, "잴 대상이 없는데 arrivals 에 숫자가 들어갔다"
+
+    usage = compute_department_llm_usage(
+        department="trading", reader=_CountingReader(), since=since, now=_NOW, repo_root=ROOT,
+    )
+    assert usage.status is LlmUsageObservationStatus.NO_WORKERS_REGISTERED
+    assert usage.arrivals is None
+
+    # 그리고 그 부서에는 질의를 내지 않는다 - 없는 대상에 왕복을 쓰지 않는다.
+    reader = _CountingReader()
+    compute_department_capacity(
+        department="trading", reader=reader, since=since, now=_NOW, repo_root=ROOT,
+    )
+    assert not reader.fetches, reader.fetches
+
+
+def _registry_workers():
+    from orchestration.contracts.worker_registry import load_worker_registry  # noqa: PLC0415
+
+    return load_worker_registry(ROOT)
+
+
+# ── 배치 조회 (2026-08-27) ────────────────────────────────────────────────────
+#
+# Langfuse Public API 분당 15 요청 상한 대응. Worker 8명 × 2 = 16 요청이라 매번
+# 한 건이 429 를 맞고 SDK 가 최대 60초를 잤다(실측 collect 41~62초).
+
+
+class _FakeMetricsApi:
+    """Metrics API 대역. 건수 0 인 이름은 **행을 안 준다**(실서버와 같다)."""
+
+    def __init__(self, counts: dict[str, int]) -> None:
+        self._counts = counts
+        self.queries: list[dict] = []
+
+    def metrics(self, *, query: str):
+        import json as _json
+
+        parsed = _json.loads(query)
+        self.queries.append(parsed)
+        asked = parsed["filters"][0]["value"]
+        rows = [
+            {"name": n, "count_count": c}
+            for n, c in self._counts.items()
+            if n in asked and c > 0
+        ]
+        return type("_R", (), {"data": rows})()
+
+
+def _batch_reader(trace_api, metrics_api=None) -> LangfuseApiTraceReader:
+    reader = object.__new__(LangfuseApiTraceReader)
+    reader._client = type("_C", (), {"api": type("_A", (), {
+        "trace": trace_api, "metrics": metrics_api,
+    })()})()
+    return reader
+
+
+class _NamedTrace(_FakeTrace):
+    def __init__(self, name: str, timestamp: datetime) -> None:
+        super().__init__(timestamp)
+        self.name = name
+
+
+class _FilterTraceApi:
+    """`any of` 필터 하나로 여러 이름을 한 번에 주는 서버 대역."""
+
+    def __init__(self, per_name: dict[str, int]) -> None:
+        self._per_name = per_name
+        self.calls: list[list[str]] = []
+
+    def list(self, *, from_timestamp, limit, page, filter=None, name=None, **_kw):
+        import json as _json
+
+        assert name is None, "배치 경로는 name= 을 쓰지 않는다"
+        clause = _json.loads(filter)[0]
+        assert clause["operator"] == "any of", clause
+        self.calls.append(list(clause["value"]))
+        rows = [
+            _NamedTrace(n, from_timestamp + timedelta(minutes=i))
+            for n, count in self._per_name.items()
+            if n in clause["value"]
+            for i in range(count)
+        ]
+        start = (page - 1) * limit
+        chunk = rows[start:start + limit]
+        total_pages = max(1, -(-len(rows) // limit))
+        return _FakePage(chunk, _FakeMeta(len(rows), total_pages))
+
+
+def test_batch_fetch_returns_every_requested_name_even_with_zero_records() -> None:
+    """조회 성공 + 0건("관측했더니 없었다")과 조회 실패는 다른 사실이다.
+
+    키를 빼면 호출부가 UNOBSERVED 와 UNAVAILABLE 을 구분할 수 없다.
+    """
+
+    api = _FilterTraceApi({"a": 3})
+    pages = _batch_reader(api).fetch_many_worker_activity(
+        event_names=("a", "b"), since=_NOW - timedelta(hours=24)
+    )
+
+    assert set(pages) == {"a", "b"}
+    assert len(pages["a"].records) == 3
+    assert pages["b"].records == () and pages["b"].total_items == 0
+    assert len(api.calls) == 1, "이름 개수와 무관하게 요청 하나여야 한다"
+    assert api.calls[0] == ["a", "b"]
+
+
+def test_batch_fetch_groups_records_by_their_own_name() -> None:
+    """한 응답에 섞여 오는 레코드를 이름별로 갈라 담는다 - 여기서 뒤섞이면 조용히 틀린다."""
+
+    api = _FilterTraceApi({"a": 2, "b": 5})
+    pages = _batch_reader(api).fetch_many_worker_activity(
+        event_names=("a", "b"), since=_NOW - timedelta(hours=24)
+    )
+
+    assert (len(pages["a"].records), len(pages["b"].records)) == (2, 5)
+    assert (pages["a"].total_items, pages["b"].total_items) == (2, 5)
+
+
+def test_batch_count_fills_zero_for_names_the_metrics_api_omits() -> None:
+    """Metrics API 는 건수 0 인 이름의 행을 안 준다 - 0 으로 채워야 분모가 안 섞인다."""
+
+    metrics = _FakeMetricsApi({"x": 7})
+    counts = _batch_reader(None, metrics).count_many_worker_activity(
+        event_names=("x", "y"), since=_NOW - timedelta(hours=24), until=_NOW,
+    )
+
+    assert counts == {"x": 7, "y": 0}
+    assert len(metrics.queries) == 1, "이름 개수와 무관하게 요청 하나여야 한다"
+    assert metrics.queries[0]["view"] == "observations"
+
+
+def test_prefetch_makes_two_round_trips_regardless_of_worker_count() -> None:
+    """창 하나 = 왕복 2회. 이 수가 Worker 수를 따라 늘면 다시 한도를 넘는다."""
+
+    execution = tuple(f"llm.performance.metric:research:w{i}" for i in range(20))
+    opportunity = tuple(f"llm.performance.opportunity:research:w{i}" for i in range(20))
+    trace_api = _FilterTraceApi({execution[0]: 4})
+    metrics = _FakeMetricsApi({opportunity[0]: 9})
+    shared = WindowedActivityReader(_batch_reader(trace_api, metrics))
+    since = _NOW - timedelta(hours=24)
+
+    shared.prefetch(
+        execution_names=execution, opportunity_names=opportunity, since=since, until=_NOW,
+    )
+
+    assert shared.queries == 2, shared.queries
+    assert len(trace_api.calls) == 1 and len(metrics.queries) == 1
+
+    # 프리페치 후 단건 호출은 왕복을 더 내지 않는다 - 네 집계가 캐시에 맞아야
+    # 이 최적화가 실제 효과를 낸다.
+    before = (len(trace_api.calls), len(metrics.queries))
+    for name in execution:
+        shared.fetch_worker_activity(event_name=name, since=since)
+    for name in opportunity:
+        shared.count_worker_activity(event_name=name, since=since)
+    assert (len(trace_api.calls), len(metrics.queries)) == before, "캐시가 빗나갔다"
+    assert shared.queries == 2
+
+    assert len(shared.fetch_worker_activity(event_name=execution[0], since=since).records) == 4
+    assert shared.count_worker_activity(event_name=opportunity[0], since=since) == 9
+    assert shared.count_worker_activity(event_name=opportunity[1], since=since) == 0
+
+
+def test_prefetch_failure_becomes_a_cached_reason_not_a_per_name_retry_storm() -> None:
+    """묶음이 실패하면 단건 조회로 되돌아가지 않는다 - 그 폴백이 곧 16 요청이다."""
+
+    class _FailingTraceApi:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def list(self, **_kw):
+            self.calls += 1
+            raise RuntimeError("boom")
+
+    trace_api = _FailingTraceApi()
+    shared = WindowedActivityReader(_batch_reader(trace_api, _FakeMetricsApi({})))
+    since = _NOW - timedelta(hours=24)
+    names = tuple(f"llm.performance.metric:research:w{i}" for i in range(8))
+
+    shared.prefetch(execution_names=names, opportunity_names=(), since=since, until=_NOW)
+
+    assert trace_api.calls == 1, "실패 후 이름마다 다시 물었다"
+    for name in names:
+        with pytest.raises(LangfuseQueryError):
+            shared.fetch_worker_activity(event_name=name, since=since)
+    assert trace_api.calls == 1, "캐시된 실패가 아니라 재조회가 나갔다"

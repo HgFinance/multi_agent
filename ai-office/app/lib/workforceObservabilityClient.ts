@@ -35,6 +35,7 @@ export const OBSERVABILITY_POLL_MS = 60_000;
  *   - UNOBSERVED: 조건부 Worker의 trigger가 이 창(lookback) 안에 발화하지 않았을
  *     수 있음 — 유휴로 단정하지 않는다.
  *   - UNAVAILABLE: Langfuse 조회 실패/자격증명 없음 — "쉬고 있다"가 아니라 "모른다".
+ *     이때 `reason`에 **왜 못 읽었는지**가 실린다(HTTP 상태·본문 포함).
  */
 export type IdleStatus = "ACTIVE" | "IDLE" | "UNOBSERVED" | "UNAVAILABLE";
 
@@ -45,9 +46,19 @@ export type WorkerIdleReport = {
   status: IdleStatus | string;
   last_seen_at: string | null;
   idle_hours: number | null;
+  /** UNAVAILABLE일 때만 채워진다 — 관측된 상태에서는 항상 null. */
+  reason: string | null;
 };
 
-export type CapacityObservationStatus = "MEASURED" | "UNAVAILABLE";
+/**
+ * NO_WORKERS_REGISTERED는 MEASURED/arrivals=0과 **다른 사실**이다 — "재 봤더니 0"이
+ * 아니라 "잴 대상이 아예 없다"(그 부서에 등록된 Worker가 0명). 같은 칸으로 만들면
+ * 인원이 없는 부서가 한가한 부서로 읽힌다.
+ */
+export type CapacityObservationStatus =
+  | "MEASURED"
+  | "UNAVAILABLE"
+  | "NO_WORKERS_REGISTERED";
 
 export type DepartmentCapacityReport = {
   department: string;
@@ -60,6 +71,7 @@ export type DepartmentCapacityReport = {
   error_rate: number | null;
   utilization: number | null;
   queue_p95_ms: null;
+  reason: string | null;
 };
 
 /**
@@ -82,6 +94,7 @@ export type DepartmentLlmUsageReport = {
   completion_tokens: number | null;
   avg_attempts: number | null;
   status_counts: Record<string, number> | null;
+  reason: string | null;
 };
 
 /**
@@ -103,6 +116,31 @@ export type WorkerTriggerRateReport = {
   execution_count: number | null;
   opportunity_count: number | null;
   fire_rate: number | null;
+  reason: string | null;
+};
+
+/**
+ * Worker 개별 토큰·모델. `llm_usage`(부서 합산)와 **같은 Langfuse 이벤트를 같은
+ * 캐시에서** 읽고 집계 축만 바꾼 값이라 왕복이 늘지 않는다.
+ *
+ * 화면은 아직 이 목록을 그리지 않는다 — `workforce.cost_snapshots`가 agent_id를
+ * NOT NULL로 요구해서, 관측을 DB Scorecard로 옮기는 writer가 이 축을 필요로 한다
+ * (departments/07-agent-workforce/scorecard/snapshot_writer.py).
+ *
+ * model_names가 비어 있으면 "모델을 안 썼다"가 아니라 "모델을 못 읽었다"다.
+ */
+export type WorkerUsageReport = {
+  department: string;
+  worker_id: string;
+  window_start: string;
+  window_end: string;
+  status: "MEASURED" | "UNAVAILABLE" | string;
+  arrivals: number | null;
+  llm_calls: number | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  model_names: string[];
+  reason: string | null;
 };
 
 export type WorkforceObservability = {
@@ -111,6 +149,7 @@ export type WorkforceObservability = {
   idle_agents: WorkerIdleReport[];
   capacity: DepartmentCapacityReport[];
   llm_usage: DepartmentLlmUsageReport[];
+  worker_usage: WorkerUsageReport[];
   trigger_rates: WorkerTriggerRateReport[];
   /** 이 호출이 Langfuse에 실제로 낸 논리 질의 수 — 중복 제거가 풀리면 먼저 는다. */
   langfuse_queries: number;

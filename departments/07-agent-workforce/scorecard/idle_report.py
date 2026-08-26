@@ -149,8 +149,19 @@ def render_text(payload: dict[str, Any], reports: Sequence[WorkerIdleReport]) ->
         lines.append("")
         lines.append(
             "  ⚠ UNAVAILABLE 이 있으면 이 리포트로 인원 조치를 결정하지 않는다 - "
-            "관측 경로(LANGFUSE_* 자격증명)를 먼저 고친다."
+            "관측 경로를 먼저 고친다. 사유는 아래와 같다."
         )
+        # 사유를 여기 찍는 이유(2026-08-27): "관측 경로를 고쳐라"만 있으면 읽는
+        # 사람이 자격증명부터 의심한다. 실제 사고는 자격증명이 멀쩡한데 limit 상수가
+        # 서버 상한을 넘겨 매 질의가 HTTP 400 이던 것이었고, 그 사유가 표에 없어서
+        # 몇 주 동안 아무도 원인을 못 짚었다. 같은 사유는 한 줄로 접는다.
+        seen: list[str] = []
+        for report in reports:
+            reason = report.reason
+            if report.status is IdleStatus.UNAVAILABLE and reason and reason not in seen:
+                seen.append(reason)
+        for reason in seen:
+            lines.append(f"    · {reason}")
     return "\n".join(lines)
 
 
