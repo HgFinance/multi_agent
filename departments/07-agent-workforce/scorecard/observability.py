@@ -46,6 +46,7 @@ metadata 중 `latency_ms`/`error_count`/`retries`/`attempts`/`status`/`llm_calls
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from dataclasses import dataclass
@@ -392,6 +393,51 @@ class LangfuseTraceReader:
 
         raise NotImplementedError
 
+    # ── 배치 조회 (2026-08-27) ────────────────────────────────────────────────
+    #
+    # Langfuse Public API 는 **분당 15 요청** 상한이다(실측: 429 응답의
+    # `x-ratelimit-limit: 15`). 관측 1회는 Worker 8명 × 2 = 16 요청이라 매번
+    # 정확히 한 건이 429 를 맞고, SDK 가 `Retry-After` 만큼 잔다(상한 60초 -
+    # langfuse/api/core/http_client.py MAX_RETRY_DELAY_SECONDS). 실측 collect
+    # 41~62초 중 37~59초가 그 잠자는 시간이었다.
+    #
+    # 아래 둘은 그 16 요청을 2 로 접는다. 기본 구현은 이름마다 기존 단건
+    # 메서드를 부르는 것이라, 이 메서드를 모르는 테스트 대역도 그대로 동작한다
+    # (fetch_worker_activity 가 list_worker_activity 로 접히는 것과 같은 이유).
+
+    def fetch_many_worker_activity(
+        self, *, event_names: tuple[str, ...], since: datetime,
+        max_pages: int = MAX_ACTIVITY_PAGES,
+    ) -> dict[str, WorkerActivityPage]:
+        """여러 이벤트 이름의 실행 레코드를 한 번에 모은다. 요청한 이름은 전부 키로 온다.
+
+        ▶ 조회에 성공했는데 레코드가 0건인 이름도 **빈 페이지로 돌려준다.**
+          키를 빼면 호출부가 "관측했더니 없었다"(UNOBSERVED)와 "조회 못 했다"
+          (UNAVAILABLE)를 구분할 수 없다.
+        """
+
+        return {
+            name: self.fetch_worker_activity(
+                event_name=name, since=since, max_pages=max_pages
+            )
+            for name in event_names
+        }
+
+    def count_many_worker_activity(
+        self, *, event_names: tuple[str, ...], since: datetime,
+        until: datetime | None = None,
+    ) -> dict[str, int]:
+        """여러 이벤트 이름의 건수를 한 번에 센다. 요청한 이름은 전부 키로 온다.
+
+        ▶ 건수 0 인 이름도 **0 으로 돌려준다.** 발화율의 분모가 여기서 나오는데,
+          키가 빠지면 "기회 0건"(fire_rate=None)이 "조회 실패"와 섞인다.
+        """
+
+        return {
+            name: self.count_worker_activity(event_name=name, since=since)
+            for name in event_names
+        }
+
 
 class LangfuseApiTraceReader(LangfuseTraceReader):
     """실제 Langfuse API 조회 구현. LANGFUSE_* 자격증명이 있을 때만 만든다."""
@@ -476,6 +522,115 @@ class LangfuseApiTraceReader(LangfuseTraceReader):
         total_items = _meta_int(page, "total_items")
         return total_items if total_items is not None else len(page.data)
 
+    # ── 배치 조회 구현 ────────────────────────────────────────────────────────
+
+    def _list_page_many(self, *, event_names: tuple[str, ...], since: datetime, page: int):
+        """이름 여러 개를 `any of` 필터 하나로 묶어 한 페이지 받는다.
+
+        `name=` 파라미터는 값을 하나만 받지만, `filter=` 는 Metrics API 와 같은
+        필터 문법을 받아 `stringOptions`/`any of` 를 쓸 수 있다(langfuse
+        4.14.3 실측). 그래서 Worker 8명이 요청 하나가 된다.
+        """
+
+        payload = json.dumps(
+            [{"column": "name", "operator": "any of",
+              "value": list(event_names), "type": "stringOptions"}]
+        )
+        try:
+            return self._client.api.trace.list(
+                from_timestamp=since, limit=DEFAULT_ACTIVITY_PAGE_LIMIT,
+                page=page, filter=payload,
+            )
+        except Exception as exc:  # noqa: BLE001 - 조회 실패는 항상 UNAVAILABLE 로 접힌다.
+            raise LangfuseQueryError(_query_failure_reason(exc)) from exc
+
+    def fetch_many_worker_activity(
+        self, *, event_names: tuple[str, ...], since: datetime,
+        max_pages: int = MAX_ACTIVITY_PAGES,
+    ) -> dict[str, WorkerActivityPage]:
+        names = tuple(dict.fromkeys(event_names))
+        if not names:
+            return {}
+
+        grouped: dict[str, list[WorkerActivityRecord]] = {name: [] for name in names}
+        truncated = False
+        page_number = 1
+        while True:
+            page = self._list_page_many(event_names=names, since=since, page=page_number)
+            for item in page.data:
+                record = _activity_record(item)
+                if record is None:
+                    continue
+                bucket = grouped.get(getattr(item, "name", None))
+                if bucket is not None:
+                    bucket.append(record)
+            if not page.data:
+                break
+            total_pages = _meta_int(page, "total_pages")
+            if total_pages is not None and page_number >= total_pages:
+                break
+            if total_pages is None and len(page.data) < DEFAULT_ACTIVITY_PAGE_LIMIT:
+                break
+            if page_number >= max_pages:
+                truncated = True
+                break
+            page_number += 1
+
+        # ▶ 배치에서는 서버 meta.total_items 가 **묶음 전체**의 건수라 이름별
+        #   건수로 쓸 수 없다. 잘리지 않았으면 모은 레코드 수가 곧 정확한 건수다.
+        #   잘렸으면 그건 표본이므로 truncated 를 세워 호출부가 알게 한다
+        #   (정확한 이름별 건수는 count_many_worker_activity 가 따로 준다).
+        return {
+            name: WorkerActivityPage(
+                records=tuple(records), total_items=len(records), truncated=truncated,
+            )
+            for name, records in grouped.items()
+        }
+
+    def count_many_worker_activity(
+        self, *, event_names: tuple[str, ...], since: datetime,
+        until: datetime | None = None,
+    ) -> dict[str, int]:
+        """Metrics API 로 이름별 건수를 **요청 한 번**에 받는다.
+
+        레코드를 안 끌어오므로 건수가 아무리 커도 왕복 하나다 - 미발화 이벤트는
+        조건부 Worker 하나가 하루 수백 건을 쌓을 수 있어서 이 차이가 크다.
+
+        우리 실행·미발화 이벤트는 `create_event()` 산물이라 observations view 의
+        EVENT 로 잡힌다(실측 확인).
+        """
+
+        names = tuple(dict.fromkeys(event_names))
+        if not names:
+            return {}
+        query = {
+            "view": "observations",
+            "dimensions": [{"field": "name"}],
+            "metrics": [{"measure": "count", "aggregation": "count"}],
+            "filters": [{"column": "name", "operator": "any of",
+                         "value": list(names), "type": "stringOptions"}],
+            "fromTimestamp": since.isoformat(),
+            "toTimestamp": (until or datetime.now(timezone.utc)).isoformat(),
+            # 기본값 100 을 넘길 일은 없지만(이름 수만큼만 나온다) 명시해 둔다.
+            "config": {"row_limit": max(100, len(names) * 2)},
+        }
+        try:
+            response = self._client.api.metrics.metrics(query=json.dumps(query))
+        except Exception as exc:  # noqa: BLE001
+            raise LangfuseQueryError(_query_failure_reason(exc)) from exc
+
+        # ▶ 건수 0 인 이름은 응답에 **행이 아예 없다.** 0 으로 채워 둬야
+        #   "기회 0건"과 "조회 실패"가 안 섞인다.
+        counts = dict.fromkeys(names, 0)
+        for row in (getattr(response, "data", None) or []):
+            name = row.get("name") if isinstance(row, dict) else getattr(row, "name", None)
+            if name not in counts:
+                continue
+            raw = row.get("count_count") if isinstance(row, dict) else getattr(row, "count_count", None)
+            value = _safe_int(raw)
+            counts[name] = value if value is not None else 0
+        return counts
+
     # 아래 셋은 기존 호출부·테스트 대역과의 계약을 위해 남긴다. 전부 위의 두
     # 원시함수로 접히므로 Langfuse 를 실제로 부르는 자리는 _list_page 하나다.
 
@@ -508,29 +663,71 @@ def _meta_int(page: Any, field: str) -> int | None:
     return _safe_int(getattr(meta, field, None))
 
 
+def _activity_record(item: Any) -> WorkerActivityRecord | None:
+    """Trace 한 건에서 metadata 허용 목록만 뽑는다(input/output 은 안 읽는다).
+
+    timestamp 가 없으면 None - 유휴 판정이 timestamp 위에 서 있어서, 시각 없는
+    이벤트를 "관측됨"으로 세면 안 된다. 단건·배치 경로가 같은 변환을 쓰도록
+    여기 하나로 모은다(이름별로 갈리면 배치에서만 조용히 다른 값이 나온다).
+    """
+
+    if getattr(item, "timestamp", None) is None:
+        return None
+    metadata = item.metadata if isinstance(item.metadata, dict) else {}
+    return WorkerActivityRecord(
+        timestamp=item.timestamp,
+        latency_ms=_safe_int(metadata.get("latency_ms")),
+        error_count=_safe_int(metadata.get("error_count")),
+        retries=_safe_int(metadata.get("retries")),
+        attempts=_safe_int(metadata.get("attempts")),
+        status=_safe_str(metadata.get("status")),
+        llm_calls=_safe_int(metadata.get("llm_calls")),
+        model_name=_safe_str(metadata.get("model_name")),
+        prompt_tokens=_safe_int(metadata.get("prompt_tokens")),
+        completion_tokens=_safe_int(metadata.get("completion_tokens")),
+    )
+
+
 def _activity_records(page: Any) -> list[WorkerActivityRecord]:
     """Traces 한 페이지에서 metadata 허용 목록만 뽑는다(input/output 은 안 읽는다)."""
 
-    records: list[WorkerActivityRecord] = []
-    for item in page.data:
-        if item.timestamp is None:
-            continue
-        metadata = item.metadata if isinstance(item.metadata, dict) else {}
-        records.append(
-            WorkerActivityRecord(
-                timestamp=item.timestamp,
-                latency_ms=_safe_int(metadata.get("latency_ms")),
-                error_count=_safe_int(metadata.get("error_count")),
-                retries=_safe_int(metadata.get("retries")),
-                attempts=_safe_int(metadata.get("attempts")),
-                status=_safe_str(metadata.get("status")),
-                llm_calls=_safe_int(metadata.get("llm_calls")),
-                model_name=_safe_str(metadata.get("model_name")),
-                prompt_tokens=_safe_int(metadata.get("prompt_tokens")),
-                completion_tokens=_safe_int(metadata.get("completion_tokens")),
-            )
+    records = (_activity_record(item) for item in page.data)
+    return [record for record in records if record is not None]
+
+
+def _worker_event_names(
+    *, departments: tuple[str, ...], repo_root: Path
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """프리페치가 담을 (실행 이벤트 이름, 미발화 이벤트 이름).
+
+    이름을 여기서 새로 짓지 않는다 - 네 집계가 부르는 것과 **같은 함수**로
+    만든다. 규칙을 한 벌 더 만들면 프리페치만 조용히 다른 이름을 채우고, 캐시가
+    빗나가 왕복이 원래대로 돌아간다(그러면 이 최적화가 무효인 채로 초록불이다).
+    """
+
+    if load_worker_registry is None or workers_for_department is None:
+        raise WorkerRegistryUnavailable(
+            f"worker_registry_unavailable:{_WORKER_REGISTRY_IMPORT_ERROR}"
         )
-    return records
+    try:
+        registry = load_worker_registry(repo_root)
+    except WorkerRegistryError as exc:
+        raise WorkerRegistryUnavailable(f"worker_registry_unavailable:{exc}") from exc
+
+    executions: list[str] = []
+    opportunities: list[str] = []
+    for department in departments:
+        stage = INVESTMENT_DEPARTMENT_STAGE.get(department)
+        if stage is None:
+            raise ValueError(f"unknown_investment_department:{department}")
+        for spec in workers_for_department(registry, department):
+            executions.append(
+                langfuse_worker_event_name(stage=stage, worker_id=spec.worker_id)
+            )
+            opportunities.append(
+                langfuse_worker_opportunity_event_name(stage=stage, worker_id=spec.worker_id)
+            )
+    return tuple(executions), tuple(opportunities)
 
 
 def _resolve_reader(
@@ -579,8 +776,98 @@ class WindowedActivityReader(LangfuseTraceReader):
         self._counts: dict[tuple[str, str], int] = {}
         self._failures: dict[tuple[str, str], str] = {}
         # 실제로 나간 논리 질의 수. 테스트가 중복 제거를 관측하는 자리다
-        # (tests/test_hr_shared_activity_reader.py).
+        # (tests/test_hr_shared_activity_reader.py). 배치 프리페치는 이름 수와
+        # 무관하게 묶음당 1 로 센다 - Langfuse 왕복 수와 같은 뜻을 유지한다.
         self.queries = 0
+
+    def prefetch(
+        self,
+        *,
+        execution_names: tuple[str, ...],
+        opportunity_names: tuple[str, ...],
+        since: datetime,
+        until: datetime | None = None,
+    ) -> None:
+        """창 하나에 필요한 것을 **묶음 2회**로 미리 채운다 (2026-08-27).
+
+        왜: Langfuse Public API 는 분당 15 요청 상한인데(429 의 `x-ratelimit-limit`)
+        Worker 8명 × 2 = 16 요청이라 관측 1회가 매번 한 건씩 429 를 맞았다. SDK 가
+        `Retry-After` 만큼 자면서(상한 60초) collect 가 41~62초로 늘어났다. 여기서
+        16 을 2 로 줄여 한도 아래로 내려간다.
+
+        판정은 아무것도 안 한다 - 아래 네 집계 함수는 그대로 단건 메서드를 부르고,
+        그 호출이 여기서 채운 캐시에 맞으면 왕복이 없다. 그래서 집계 로직과 왕복
+        절약이 서로를 망가뜨리지 않는다(이 클래스 머리말과 같은 원칙).
+
+        ▶ 실패는 삼키지 않고 **이름별 캐시에 사유로 남긴다.** 그래야 뒤이은 단건
+          호출이 같은 LangfuseQueryError 로 떨어지고, 리포트가 UNAVAILABLE + 사유가
+          된다. 여기서 예외를 올리면 배치 도입이 실패 모양 자체를 바꾼다.
+
+        ▶ 실패했다고 단건 조회로 되돌아가지 않는다. 그 폴백은 정확히 우리가 없애려던
+          16 요청이고, 429 상황에서 되살리면 상태가 더 나빠진다.
+        """
+
+        execution_names = tuple(dict.fromkeys(execution_names))
+        opportunity_names = tuple(dict.fromkeys(opportunity_names))
+
+        # ① 미발화 건수 - 건수만 쓰는 축이라 레코드를 안 끌어온다. 조건부 Worker
+        #    하나가 하루 수백 건을 쌓을 수 있어서 이 차이가 크다.
+        #
+        #    실행 건수는 여기 안 담는다 - ②가 레코드를 끝까지 모으므로 그 길이가
+        #    곧 정확한 건수다. 굳이 같이 물으면 배치를 못 하는 reader(테스트 대역)
+        #    에서 왕복이 오히려 늘어난다.
+        if opportunity_names:
+            try:
+                counts = self._inner.count_many_worker_activity(
+                    event_names=opportunity_names, since=since, until=until,
+                )
+                self.queries += 1
+                for name, count in counts.items():
+                    self._counts.setdefault(self._key(name, since), count)
+            except LangfuseQueryError as exc:
+                for name in opportunity_names:
+                    self._failures.setdefault(self._key(name, since), str(exc))
+
+        # ② 실행 레코드 - 유휴·Capacity·LLM 사용량·Worker 사용량·발화율 분자가
+        #    전부 이 한 묶음에서 나온다.
+        if not execution_names:
+            return
+        try:
+            pages = self._inner.fetch_many_worker_activity(
+                event_names=execution_names, since=since,
+            )
+            self.queries += 1
+        except LangfuseQueryError as exc:
+            for name in execution_names:
+                self._failures.setdefault(self._key(name, since), str(exc))
+            return
+
+        # 잘린 묶음은 이름별 건수를 못 믿는다 - 서버 meta 는 묶음 전체 합이고
+        # len(records) 는 표본이다. 그때만 Metrics 로 정확한 건수를 따로 받는다
+        # (잘린 것을 "그만큼만 있었다"로 바꾸지 않는다). 흔한 경로가 아니라
+        # 왕복 하나를 더 쓰는 값이 있다.
+        truncated_names = tuple(n for n, p in pages.items() if p.truncated)
+        exact_counts: dict[str, int] = {}
+        if truncated_names:
+            try:
+                exact_counts = self._inner.count_many_worker_activity(
+                    event_names=truncated_names, since=since, until=until,
+                )
+                self.queries += 1
+            except LangfuseQueryError:
+                # 정확한 건수를 못 구했다 - 표본 길이를 건수로 승격시키지 않고
+                # 그대로 둔다(truncated 플래그가 이미 그 사실을 들고 있다).
+                exact_counts = {}
+
+        for name, page in pages.items():
+            key = self._key(name, since)
+            exact = exact_counts.get(name)
+            if exact is not None and exact != page.total_items:
+                page = WorkerActivityPage(
+                    records=page.records, total_items=exact, truncated=page.truncated,
+                )
+            self._pages.setdefault(key, page)
+            self._counts.setdefault(key, page.total_items)
 
     @staticmethod
     def _key(event_name: str, since: datetime) -> tuple[str, str]:
@@ -1553,6 +1840,19 @@ def collect_workforce_observability(
     shared: LangfuseTraceReader | None = (
         WindowedActivityReader(reader) if reader is not None else None
     )
+    if isinstance(shared, WindowedActivityReader):
+        # 네 집계가 부를 이름을 미리 알아내 묶음 2회로 채운다. 실패해도 여기서
+        # 예외가 나지 않는다 - 이름별 캐시에 사유가 남고 각 집계가 평소대로
+        # UNAVAILABLE + 사유로 떨어진다(prefetch 머리말 참고).
+        execution_names, opportunity_names = _worker_event_names(
+            departments=departments, repo_root=repo_root
+        )
+        shared.prefetch(
+            execution_names=execution_names,
+            opportunity_names=opportunity_names,
+            since=since,
+            until=now,
+        )
     common = {
         "reader": shared,
         "departments": departments,
@@ -1839,8 +2139,12 @@ if __name__ == "__main__":
     assert len(counting.fetches) == research_workers, counting.fetches
     assert len(set(counting.fetches)) == research_workers, "같은 실행 이벤트를 두 번 읽었다"
     assert len(counting.counts) == research_workers, counting.counts
-    assert merged.langfuse_queries == research_workers * 2, merged.langfuse_queries
-    print(f"  Worker 당 왕복 2회(실행 1 + 미발화 1) - OK ({research_workers}명)")
+    # ▶ 2026-08-27: 왕복이 Worker 수에 비례하지 않는다. 프리페치가 실행 레코드
+    #   묶음 1회 + 미발화 건수 묶음 1회로 창 하나를 통째로 채우기 때문이다.
+    #   Langfuse 는 분당 15 요청 상한이라, Worker 가 늘 때마다 왕복이 같이 늘면
+    #   8명에서 이미 한도를 넘는다(16 > 15) - 그게 실측 41~62초 스톨의 원인이었다.
+    assert merged.langfuse_queries == 2, merged.langfuse_queries
+    print(f"  왕복이 Worker 수와 무관하게 2회 - OK ({research_workers}명)")
 
     assert merged.idle_agents and merged.capacity and merged.llm_usage and merged.trigger_rates
     assert merged.window_start < merged.window_end
