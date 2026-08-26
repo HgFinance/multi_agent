@@ -289,6 +289,9 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  # Risk-owned mandate version bindings and immutable dynamic
                  # position-risk plans, lifecycle events, and projections.
                  "20260825000700_dynamic_position_risk_plans.sql",
+                 # Roster 프로필 미배정 13건에 Profile Version v1 배정
+                 # (부서장 openai-codex/gpt-5.6-luna, Worker vllm/qwen2.5:14b)
+                 "20260826000100_workforce_unassigned_profile_versions.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 
