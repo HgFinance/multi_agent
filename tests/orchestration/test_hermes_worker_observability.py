@@ -4,7 +4,10 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.hermes_worker_observability import publish_accounting_worker_trace
+from scripts.hermes_worker_observability import (
+    publish_accounting_worker_trace,
+    publish_department_worker_trace,
+)
 
 
 class _Response:
@@ -87,3 +90,58 @@ def test_accounting_worker_trace_is_fail_open_when_disabled():
         argv=["-p", "accounting-portfolio-department"],
         env={"LANGSMITH_TRACING": "false", "LANGSMITH_API_KEY": ""},
     )
+
+
+def test_qa_worker_trace_uses_the_same_task_correlated_redacted_contract(tmp_path: Path):
+    profile_dir = tmp_path / "profiles" / "qa-department"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "config.yaml").write_text(
+        "model:\n provider: openai-codex\n default: gpt-5.6-luna\n",
+        encoding="utf-8",
+    )
+    kanban_home = tmp_path / "shared-kanban"
+    log_dir = kanban_home / "kanban" / "logs"
+    log_dir.mkdir(parents=True)
+    (log_dir / "t_qa.log").write_text(
+        "┊ ⚡ kanban_show 0.1s\n"
+        "┊ ⚡ kanban_co 0.1s\n"
+        "Messages: 4 (1 user, 2 tool calls)\n",
+        encoding="utf-8",
+    )
+    env = {
+        "LANGSMITH_TRACING": "true",
+        "LANGSMITH_API_KEY": "test-key",
+        "LANGSMITH_ENDPOINT": "https://langsmith.invalid",
+        "LANGSMITH_PROJECT": "First",
+        "HERMES_HOME": str(tmp_path),
+        "HERMES_KANBAN_HOME": str(kanban_home),
+    }
+
+    with patch(
+        "scripts.hermes_worker_observability.urllib.request.urlopen",
+        return_value=_Response(),
+    ) as open_url:
+        assert publish_department_worker_trace(
+            task_id="t_qa",
+            task_body="workflow_root_task_id=t_root",
+            task_status="done",
+            run_id="42",
+            return_code=0,
+            started_ms=1_000,
+            ended_ms=4_000,
+            argv=["-p", "qa-department", "chat"],
+            env=env,
+        )
+
+    payload = json.loads(open_url.call_args.args[0].data.decode("utf-8"))
+    runs = payload["post"]
+    assert [run["name"] for run in runs] == [
+        "hgfinance.qa.worker",
+        "hgfinance.qa.llm",
+        "hgfinance.qa.tool.kanban_show",
+        "hgfinance.qa.tool.kanban_co",
+    ]
+    assert all(run["extra"]["metadata"]["department"] == "qa" for run in runs)
+    assert all(run["extra"]["metadata"]["task_id"] == "t_qa" for run in runs)
+    assert all(run["inputs"]["workflow_root_task_id"] == "t_root" for run in runs)
+    assert all(run["outputs"]["raw_payloads_sent"] is False for run in runs)

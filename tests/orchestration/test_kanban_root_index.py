@@ -212,6 +212,30 @@ def test_recovery_candidate_rows_are_discovery_only(tmp_path) -> None:
 
     assert [row["id"] for row in rows] == [ROOT]
     assert rows[0]["status"] == "done"
+    assert rows[0]["has_active_primary"] is False
+
+
+def test_recovery_candidates_mark_only_roots_with_active_primary(tmp_path) -> None:
+    path = tmp_path / "kanban.db"
+    _make_board(path)
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO tasks(id, body, status, created_at) VALUES (?, ?, ?, ?)",
+        (
+            "t_active_primary",
+            build_scoped_task_body("risk", ROOT, role="primary"),
+            "running",
+            9,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    index = SQLiteRootScopedIndex({"HERMES_KANBAN_DB": str(path)})
+    rows = index.recovery_candidate_rows()
+
+    assert [row["id"] for row in rows] == [ROOT]
+    assert rows[0]["has_active_primary"] is True
 
 
 def test_recovery_candidates_exclude_handled_empty_primary_root(tmp_path) -> None:

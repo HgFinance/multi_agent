@@ -107,7 +107,6 @@ def canonical_qa_contract(
     enabled = body_enabled
     # Legacy callers may still provide this marker. It must not restore the
     # old QA -> CEO blocking topology.
-    blocks = False
     source = "canonical-body" if body_enabled is not None or body_blocks is not None else ""
 
     if enabled is None:
@@ -158,8 +157,6 @@ def canonical_qa_contract(
                 )
                 enabled = legacy_async
                 source = source or ("legacy-async" if legacy_async else "legacy-disabled")
-        blocks = False
-
     enabled = bool(enabled)
     # Deliberately unconditional. This invariant prevents a future legacy
     # marker or workflow mode from recreating QA -> CEO.

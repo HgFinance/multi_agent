@@ -11,8 +11,10 @@ CEO 는 Trading·Risk·QA·Accounting 네 부서가 2026-08-06~07 에 거친 "LL
 Chief-of-Staff 8개 업무가 전부 들어 있던 상태다.
 
 **러너는 새 판정을 만들지 않는다.** 이미 다른 부서 결정론 엔진이 확정한 판정을
-옮기기만 한다 — Risk verdict 는 `RiskEngine.check_order()` 가, QA decision 은
-`EvidenceQaEngine` 이 이미 정했다. `desk_runner()`/`back_office_runner()` 와 같은 일이다.
+옮기기만 한다 — Risk verdict 는 `RiskEngine.check_order()` 가 정하고, QA decision 은
+CEO 응답 후 별도 audit 결과로 기록된다. 일반 CEO 응답에서 QA decision은 blocker가
+아니며, 전략 승격·권한 승인 같은 별도 governance workflow의 QA 선행 게이트는
+그 workflow가 소유한다. `desk_runner()`/`back_office_runner()` 와 같은 조회 경계다.
 
 **`missing_inputs` 가 이 러너의 핵심이다.** CEO 의 workflow 상 임무는 "각 결과를
 통합해 사용자 설명과 **미완료 상태**를 보고"(orchestration/workflows/investment-case.yaml:84)
@@ -183,8 +185,8 @@ def _risk_facts(decision: Any, at: datetime, blockers: list[str]) -> dict[str, A
     return facts
 
 
-def _qa_facts(assessment: Any, blockers: list[str]) -> dict[str, Any]:
-    """`EvidenceQaEngine` 이 확정한 판정을 옮긴다. **다시 판정하지 않는다.**
+def _qa_facts(assessment: Any) -> dict[str, Any]:
+    """QA audit 결과를 옮긴다. 일반 CEO 응답의 선행 blocker로 만들지 않는다.
 
     필드 이름이 둘이다 - 엔진 레코드는 `decision`
     (departments/06-ai-qa-audit/evidence/evidence_qa_engine.py:262), 파이프라인이
@@ -192,23 +194,22 @@ def _qa_facts(assessment: Any, blockers: list[str]) -> dict[str, Any]:
     하나만 보면 나머지 경로에서 눈이 먼다.
     """
     if not isinstance(assessment, Mapping):
-        blockers.append("qa_assessment_unreadable")
-        return {"decision": None}
+        return {"decision": None, "audit_status": "UNREADABLE"}
 
     decision = assessment.get("decision", assessment.get("verdict"))
-    if decision is None:
-        blockers.append("qa_decision_missing")
-    elif str(decision).upper() == "FAIL":
-        blockers.append("qa_decision_fail")
-    return {"decision": decision}
+    return {
+        "decision": decision,
+        "audit_status": "PENDING" if decision is None else "RECORDED",
+    }
 
 
 def ceo_runner(payload: Mapping[str, Any], *, at: datetime | None = None) -> dict[str, Any]:
     """부서 판정 집계와 미완료 단계 조회. **모델을 부르지 않는다.**
 
-    Risk/QA 가 이미 확정한 판정을 blocker 로 옮기고, 안 온 단계를 그대로 적는다 —
-    `summary` 필드가 없는 것이 이 직원의 요지다. 문장을 만들 자리가 없으면 그
-    자리에서 환각도 생기지 않는다. 서술 종합은 executive-briefing-worker 몫이다.
+    Risk가 이미 확정한 실행 전 판정을 blocker로 옮기고, QA는 사후 감사 관찰값으로
+    기록하며, 안 온 단계는 그대로 적는다 — `summary` 필드가 없는 것이 이 직원의
+    요지다. 문장을 만들 자리가 없으면 그 자리에서 환각도 생기지 않는다. 서술
+    종합은 executive-briefing-worker 몫이다.
     """
     at = at or datetime.now(timezone.utc)
     resolved, origin, missing = _resolve_stages(payload)
@@ -218,7 +219,7 @@ def ceo_runner(payload: Mapping[str, Any], *, at: datetime | None = None) -> dic
     if "risk_decision" in resolved:
         facts["risk"] = _risk_facts(resolved["risk_decision"], at, blockers)
     if "qa_assessment" in resolved:
-        facts["qa"] = _qa_facts(resolved["qa_assessment"], blockers)
+        facts["qa"] = _qa_facts(resolved["qa_assessment"])
 
     return {
         "worker_id": RUNNER_ID,
@@ -232,7 +233,8 @@ def ceo_runner(payload: Mapping[str, Any], *, at: datetime | None = None) -> dic
             "facts": facts,
             "missing_inputs": missing,
             "blockers": blockers,
-            # 미완료는 escalate 사유가 아니다 - Risk/QA 가 막았을 때만 올린다.
+            # 미완료와 QA 사후 감사 결과는 CEO 응답을 막는 사유가 아니다.
+            # 실행 전 안전성은 Risk/OMS가 소유한다.
             "escalate": bool(blockers),
             "decided_by": "deterministic",
             "authoritative": False,  # 판정은 Risk/QA/Accounting 이 한다
@@ -299,17 +301,20 @@ if __name__ == "__main__":
     assert "risk" not in bare["output"]["facts"] and "qa" not in bare["output"]["facts"]
     print("  미완료 표기 / escalate 안 함 OK")
 
-    # 4. Risk/QA 판정을 **옮긴다**. 새로 만들지 않는다
+    # 4. Risk 판정은 실행 전 blocker로 옮기고, QA 판정은 사후 audit 관찰값으로 옮긴다.
     rejected = ceo_runner({**payload, "risk_decision": {"verdict": "reject"}}, at=now)
     assert rejected["output"]["blockers"] == ["risk_verdict_reject"]
     assert rejected["output"]["escalate"] is True
     failed = ceo_runner({**payload, "qa_assessment": {"decision": "FAIL"}}, at=now)
-    assert failed["output"]["blockers"] == ["qa_decision_fail"]
+    assert failed["output"]["facts"]["qa"]["decision"] == "FAIL"
+    assert failed["output"]["blockers"] == []
+    assert failed["output"]["escalate"] is False
     # 파이프라인 봉투는 `verdict` 로 온다 - 이름 하나만 보면 눈이 먼다
     piped = ceo_runner({**payload, "qa_assessment": {"verdict": "FAIL"}}, at=now)
-    assert piped["output"]["blockers"] == ["qa_decision_fail"]
+    assert piped["output"]["facts"]["qa"]["decision"] == "FAIL"
+    assert piped["output"]["blockers"] == []
     warned = ceo_runner({**payload, "qa_assessment": {"verdict": "WARN"}}, at=now)
-    assert warned["output"]["blockers"] == [], "WARN 은 FAIL 이 아니다"
+    assert warned["output"]["blockers"] == [], "QA audit 결과는 응답 blocker가 아니다"
     print("  Risk/QA 판정 이관          OK")
 
     # 5. 만료 - 지났으면 지났다고, 못 재면 못 쟀다고 적는다

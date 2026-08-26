@@ -499,6 +499,30 @@ class ChildTaskState:
         return self.status in FAILURE_OUTCOMES or self.outcome in FAILURE_OUTCOMES
 
 
+def _terminal_payload_mapping(
+    payload: Mapping[str, Any] | ChildTaskState | None,
+) -> Mapping[str, Any]:
+    """Convert a hydrated child state to the mapping used by observers."""
+
+    if isinstance(payload, Mapping):
+        return payload
+    if isinstance(payload, ChildTaskState):
+        mapped = child_handoff_payload(payload)
+        mapped.update(
+            {
+                "id": payload.task_id,
+                "task_id": payload.task_id,
+                "assignee": payload.profile,
+                "status": payload.status,
+                "outcome": payload.outcome,
+                "body": payload.body,
+                "workflow_root_task_id": payload.workflow_root_task_id,
+            }
+        )
+        return mapped
+    return {}
+
+
 @dataclass(frozen=True)
 class SupervisorState:
     parent_task_id: str
@@ -1409,7 +1433,7 @@ def _binding_partial_defer_result(
             "🧠 **CEO 종합**",
             "",
             "**결론: DEFER**",
-            "필수 부서 또는 QA 결과가 완전하지 않아 투자 판단과 추가 실행을 "
+            "필수 부서 결과가 완전하지 않아 투자 판단과 추가 실행을 "
             "승인하지 않습니다. 확인된 부분 결과와 실패 범위를 그대로 전달합니다.",
             "",
             "### 확보된 부분 결과",
@@ -1418,7 +1442,7 @@ def _binding_partial_defer_result(
             "### 실패·미확보 부서",
             *(unavailable or ["- 없음"]),
             "",
-            "### QA 상태",
+            "### QA 사후 감사 상태",
             *(qa_lines or ["- 완료된 QA 결과 없음"]),
             "",
             f"- **Fail-closed 사유:** `{reason}`",
@@ -1450,8 +1474,11 @@ def _binding_partial_defer_decision(
             "The control plane completes this response from persisted terminal "
             "state; no model may reinterpret it."
         ),
+        # Even a deterministic partial DEFER is a CEO response. It must be
+        # based on terminal primary state, never on a QA child that belongs to
+        # the post-response audit lane.
         parent_task_ids=tuple(
-            child.task_id for child in state.qa_children if child.done
+            child.task_id for child in state.analysis_children if child.done
         ),
         reason="binding_partial_defer_template",
         initial_status="blocked",
@@ -3214,9 +3241,11 @@ class CeoSupervisorService:
         error_class: str | None = None,
         department: str | None = None,
         task_id: str | None = None,
-        terminal_payload: Mapping[str, Any] | None = None,
+        terminal_payload: Mapping[str, Any] | ChildTaskState | None = None,
     ) -> bool:
         """Close one root trace after the existing response-plane decision."""
+
+        terminal_payload = _terminal_payload_mapping(terminal_payload)
 
         self._record_discord_experience_once(
             root_id=root_id,
@@ -3259,10 +3288,14 @@ class CeoSupervisorService:
             semantic_qa = evaluate_prompt_answer(
                 prompt,
                 answer,
-                summary=str(
-                    answer_payload.get("summary")
-                    or answer_payload.get("latest_summary")
-                    or ""
+                summary=(
+                    answer_payload.summary
+                    if isinstance(answer_payload, ChildTaskState)
+                    else str(
+                        answer_payload.get("summary")
+                        or answer_payload.get("latest_summary")
+                        or ""
+                    )
                 ),
                 status=status,
             )
@@ -4332,7 +4365,7 @@ class CeoSupervisorService:
 
     @staticmethod
     def _root_explicit_response_content(
-        root_payload: Mapping[str, Any],
+        root_payload: Mapping[str, Any] | ChildTaskState,
     ) -> str:
         """Read only explicit answer fields, excluding planner summaries.
 
@@ -4341,6 +4374,9 @@ class CeoSupervisorService:
         repeats the planning/materialization mismatch to the user.  Explicit
         result/final_answer fields remain valid direct answers.
         """
+
+        if isinstance(root_payload, ChildTaskState):
+            return _text(root_payload.final_answer or root_payload.result)
 
         content = _text(
             root_payload.get("final_answer")
@@ -5553,6 +5589,13 @@ class CeoSupervisorService:
                 or status not in {"done", "completed", "archived"}
                 or not _is_planning_root_body(body)
                 or not selected_primary_profiles_from_task(row)
+                # SQLite discovery marks whether a non-terminal primary is
+                # actually present.  Fallback/list fakes may not provide the
+                # hint, so absence preserves their previous behavior.
+                or (
+                    "has_active_primary" in row
+                    and not bool(row.get("has_active_primary"))
+                )
                 or started_at <= 0
             ):
                 continue
@@ -7247,17 +7290,14 @@ class CeoSupervisorService:
             if not decision.assignee or not decision.title or not decision.body:
                 raise SupervisorValidationError(f"{decision.action.value} lacks create fields")
             if decision.action == SupervisorAction.RUN_QA:
-                expected = {
-                    child.task_id
-                    for child in state.analysis_children
-                    if child.done
-                }
-                if requested_parent_ids != expected:
-                    raise SupervisorValidationError(
-                        "RUN_QA dependencies must be the current root's "
-                        f"primary children: expected {sorted(expected)}, "
-                        f"got {sorted(requested_parent_ids)}"
-                    )
+                # QA task creation moved to the terminal response observer.
+                # Keeping RUN_QA in the parser preserves legacy event
+                # readability, but no supervisor action may materialize a
+                # pre-response QA child anymore.
+                raise SupervisorValidationError(
+                    "RUN_QA is post-response only; use the terminal response "
+                    "observer to schedule the QA audit"
+                )
             elif decision.action == SupervisorAction.SYNTHESIZE:
                 # CEO synthesis is always parented by terminal primary
                 # handoffs. QA is a child of the completed response and is
@@ -7276,12 +7316,12 @@ class CeoSupervisorService:
                 if decision.reason == "binding_paper_structured_template":
                     expected = set()
                 elif decision.reason == "binding_partial_defer_template":
-                    # A deterministic DEFER preserves completed QA/audit
-                    # evidence as its parent and must not pretend that a
-                    # failed primary was a successful response dependency.
+                    # A deterministic DEFER preserves completed primary
+                    # evidence as its parent. QA is post-response and must
+                    # never become a response dependency here.
                     expected = {
                         child.task_id
-                        for child in state.qa_children
+                        for child in state.analysis_children
                         if child.done
                     }
                 if requested_parent_ids != expected:

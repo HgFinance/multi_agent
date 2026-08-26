@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
 from orchestration.adapters import build_paper_e2e_handlers, build_test_handlers
+from orchestration.workflows import portfolio_recommendation
 from orchestration.workflows.contracts import SAFE_FAILURE_ACTIONS
 from orchestration.workflows.manifest import load_workflow, load_workflows
 from orchestration.workflows.routing import route_event
@@ -176,6 +178,54 @@ class EventRoutingContractTest(unittest.TestCase):
         unknown = route_event("not-registered")
         self.assertEqual(unknown.calls, ())
         self.assertEqual(unknown.action, "ENTRY_BLOCKED")
+
+
+class PostResponseQaWorkflowTest(unittest.TestCase):
+    def test_qa_audit_runs_after_response_with_same_ceo_input(self) -> None:
+        events: list[dict[str, object]] = []
+        observed: dict[str, object] = {}
+
+        class FakeQaModule:
+            async def run_employee_workers_async(self, payload):
+                observed.update(payload)
+                return {
+                    "input_hash": "qa-input-hash",
+                    "degraded": False,
+                    "failed": [],
+                    "workers": [
+                        {
+                            "worker_id": "qa-runner",
+                            "status": "COMPLETED",
+                            "decision": "PASS",
+                        }
+                    ],
+                }
+
+        result = {
+            "case_id": "case-post-response",
+            "trace_id": "trace-post-response",
+            "pipeline_status": "COMPLETED",
+            "user_query": "same input",
+            "ceo_input": {"root": "same", "primary_handoffs": ["research"]},
+            "data_context": {"as_of": "2026-08-26T00:00:00Z"},
+        }
+
+        with patch.object(portfolio_recommendation, "_load_module", return_value=FakeQaModule()):
+            thread = portfolio_recommendation.schedule_post_response_qa_audit(
+                result,
+                event_callback=lambda event: events.append(dict(event)),
+            )
+            thread.join(timeout=1)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(
+            [event["kind"] for event in events],
+            ["qa_audit_scheduled", "qa_audit_started", "qa_audit_completed"],
+        )
+        self.assertEqual(observed["ceo_input"], result["ceo_input"])
+        self.assertEqual(observed["ceo_response"], result)
+        self.assertEqual(events[-1]["qa_gate"]["phase"], "POST_RESPONSE")
+        self.assertFalse(events[-1]["qa_gate"]["binding"])
 
 
 class PaperE2EAdapterTest(unittest.TestCase):

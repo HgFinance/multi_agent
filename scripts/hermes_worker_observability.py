@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -25,10 +26,26 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 
 ACCOUNTING_PROFILE = "accounting-portfolio-department"
+QA_PROFILE = "qa-department"
+_PROFILE_SPECS = {
+    ACCOUNTING_PROFILE: {
+        "department": "accounting-portfolio",
+        "schema_version": "llm.accounting-worker.v1",
+        "name_prefix": "hgfinance.accounting",
+    },
+    QA_PROFILE: {
+        "department": "qa",
+        "schema_version": "llm.qa-worker.v1",
+        "name_prefix": "hgfinance.qa",
+    },
+}
 _PROFILE_RE = re.compile(r"(?:^|\s)-p\s+(?P<profile>[A-Za-z0-9._-]+)")
 _MODEL_RE = re.compile(r"^\s*default:\s*([^#\s]+)", re.MULTILINE)
 _PROVIDER_RE = re.compile(r"^\s*provider:\s*([^#\s]+)", re.MULTILINE)
 _TOOL_RE = re.compile(r"⚡\s+(?P<name>[A-Za-z0-9_.-]+)")
+_TOOL_DURATION_RE = re.compile(
+    r"⚡\s+(?P<name>[A-Za-z0-9_.-]+)\s+(?P<duration>\d+(?:\.\d+)?)s\b"
+)
 _TOOL_SUMMARY_RE = re.compile(r"(?:\(|,|\s)(?P<count>\d+)\s+tool calls?\b", re.IGNORECASE)
 _REASONING_RE = re.compile(r"Reasoning", re.IGNORECASE)
 _ROOT_RE = re.compile(r"(?:workflow_root_task_id|root_task_id)=(?P<id>t_[A-Za-z0-9_-]+)")
@@ -48,7 +65,7 @@ def _safe_id(value: Any, *, limit: int = 160) -> str:
 
 
 def _uuid(seed: str) -> UUID:
-    return uuid5(NAMESPACE_URL, f"hgfinance:accounting-worker:{seed}")
+    return uuid5(NAMESPACE_URL, f"hgfinance:department-worker:{seed}")
 
 
 def _ls_time(epoch_ms: int) -> str:
@@ -108,6 +125,42 @@ def _observed_tools(log_text: str) -> tuple[list[str], int | None]:
     return names[:32], tool_count
 
 
+def _observed_tool_stats(log_text: str) -> dict[str, tuple[int, int]]:
+    """Return ``tool_name -> (call_count, total_duration_ms)`` from Hermes logs."""
+
+    stats: dict[str, tuple[int, int]] = {}
+    for match in _TOOL_DURATION_RE.finditer(log_text):
+        name = _safe_id(match.group("name"), limit=80)
+        if not name:
+            continue
+        try:
+            duration_ms = max(0, int(float(match.group("duration")) * 1000))
+        except (TypeError, ValueError):
+            duration_ms = 0
+        count, total = stats.get(name, (0, 0))
+        stats[name] = (count + 1, total + duration_ms)
+    return dict(list(stats.items())[:32])
+
+
+def _task_attempt_count(
+    db_path: str | os.PathLike[str] | None,
+    task_id: str,
+) -> int:
+    """Read the bounded attempt count without changing the Kanban board."""
+
+    if not db_path or not task_id:
+        return 1
+    db_uri = f"file:{Path(db_path).resolve()}?mode=ro"
+    try:
+        with sqlite3.connect(db_uri, uri=True, timeout=1.0) as conn:
+            row = conn.execute(
+                "SELECT count(*) FROM task_runs WHERE task_id = ?", (task_id,)
+            ).fetchone()
+        return max(1, min(int(row[0] if row else 1), 100))
+    except (OSError, sqlite3.Error, TypeError, ValueError):
+        return 1
+
+
 def _root_id(*, task_id: str, task_body: str) -> str:
     match = _ROOT_RE.search(task_body)
     if match:
@@ -122,6 +175,8 @@ def _status(*, task_status: str, return_code: int) -> tuple[str, str | None]:
         return "completed", None
     if normalized in {"blocked", "gave_up", "timed_out", "crashed", "failed"}:
         return normalized, f"kanban_{normalized}"
+    if return_code < 0:
+        return "failed", f"worker_signal_{abs(int(return_code))}"
     if return_code != 0:
         return "failed", f"worker_exit_{abs(int(return_code))}"
     return normalized or "completed", None
@@ -144,15 +199,22 @@ def _metadata(
     llm_turn_count: int,
     observation_unit: str,
     return_code: int,
+    profile_spec: Mapping[str, str],
+    trace_id: str,
+    attempts: int,
+    tool_duration_total_ms: int,
 ) -> dict[str, Any]:
     return {
-        "schema_version": "llm.accounting-worker.v1",
+        "schema_version": profile_spec["schema_version"],
         "trace_kind": "department_worker",
         "observation_unit": observation_unit,
         "source": "kanban-dispatcher-worker-boundary",
-        "department": "accounting-portfolio",
+        "department": profile_spec["department"],
         "profile": profile,
         "task_id": task_id,
+        "request_id": root_id,
+        "root_id": root_id,
+        "trace_id": trace_id,
         "workflow_root_task_id": root_id,
         "kanban_run_id": run_id,
         "status": status,
@@ -161,7 +223,10 @@ def _metadata(
         "model_name": model,
         "tool_names": list(tool_names),
         "tool_call_count": tool_count,
+        "tool_duration_total_ms": max(0, int(tool_duration_total_ms)),
         "llm_turn_count_observed": llm_turn_count,
+        "attempts": max(1, int(attempts)),
+        "retries": max(0, int(attempts) - 1),
         "started_at_ms": int(started_ms),
         "completed_at_ms": int(ended_ms),
         "latency_ms": max(int(ended_ms) - int(started_ms), 0),
@@ -199,7 +264,12 @@ def _run_payload(
         "start_time": int(started_ms),
         "end_time": int(ended_ms),
         "extra": {"metadata": dict(metadata)},
-        "tags": ["hgfinance", "accounting", "redacted", "worker"],
+        "tags": [
+            "hgfinance",
+            str(metadata.get("department") or "department"),
+            "redacted",
+            "worker",
+        ],
     }
     if parent_run_id is not None:
         payload["parent_run_id"] = str(parent_run_id)
@@ -229,7 +299,7 @@ def _post_batch(*, env: Mapping[str, str], runs: list[dict[str, Any]]) -> bool:
         return False
 
 
-def publish_accounting_worker_trace(
+def publish_department_worker_trace(
     *,
     task_id: str,
     task_body: str,
@@ -250,7 +320,8 @@ def publish_accounting_worker_trace(
 
     runtime_env = env or os.environ
     profile = _profile_from_argv(argv) or str(runtime_env.get("HERMES_PROFILE", ""))
-    if profile != ACCOUNTING_PROFILE:
+    profile_spec = _PROFILE_SPECS.get(profile)
+    if profile_spec is None:
         return False
 
     root_id = _root_id(task_id=task_id, task_body=task_body)
@@ -260,13 +331,16 @@ def publish_accounting_worker_trace(
     except OSError:
         log_text = ""
     tool_names, tool_count = _observed_tools(log_text)
+    tool_stats = _observed_tool_stats(log_text)
+    attempts = _task_attempt_count(runtime_env.get("HERMES_KANBAN_DB"), task_id)
+    tool_duration_total_ms = sum(total for _count, total in tool_stats.values())
     llm_turn_count = len(_REASONING_RE.findall(log_text))
     if llm_turn_count == 0 and return_code == 0:
         # The Hermes log may omit reasoning blocks in quiet mode. One completed
         # worker still proves that at least one model turn was executed.
         llm_turn_count = 1
     status, error_code = _status(task_status=task_status, return_code=return_code)
-    base = _safe_id(f"{root_id}:{task_id}:{run_id}")
+    base = _safe_id(f"{profile}:{root_id}:{task_id}:{run_id}")
     # This worker trace is intentionally task/attempt scoped. The CEO root
     # has its own lifecycle metric; the shared Kanban root/task metadata below
     # is the durable join key between the two planes. Making the worker run
@@ -297,6 +371,10 @@ def publish_accounting_worker_trace(
         llm_turn_count=llm_turn_count,
         observation_unit="worker",
         return_code=return_code,
+        profile_spec=profile_spec,
+        trace_id=str(trace_uuid),
+        attempts=attempts,
+        tool_duration_total_ms=tool_duration_total_ms,
     )
     safe_inputs = {
         "task_id": task_id,
@@ -306,6 +384,8 @@ def publish_accounting_worker_trace(
         "task_body_present": bool(str(task_body).strip()),
         "task_body_length": len(str(task_body)),
         "raw_payloads_sent": False,
+        "attempts": attempts,
+        "retries": max(0, attempts - 1),
     }
     safe_outputs = {
         "status": status,
@@ -319,7 +399,7 @@ def publish_accounting_worker_trace(
             run_uuid=worker_uuid,
             trace_uuid=trace_uuid,
             dotted_order=worker_dotted,
-            name="hgfinance.accounting.worker",
+            name=f"{profile_spec['name_prefix']}.worker",
             run_type="chain",
             started_ms=started_ms,
             ended_ms=ended_ms,
@@ -332,7 +412,7 @@ def publish_accounting_worker_trace(
             run_uuid=model_uuid,
             trace_uuid=trace_uuid,
             dotted_order=f"{worker_dotted}.{_ls_time(started_ms)}{model_uuid}",
-            name="hgfinance.accounting.llm",
+            name=f"{profile_spec['name_prefix']}.llm",
             run_type="llm",
             started_ms=started_ms,
             ended_ms=ended_ms,
@@ -340,6 +420,11 @@ def publish_accounting_worker_trace(
                 **worker_metadata,
                 "observation_unit": "model",
                 "model_call_count_observed": llm_turn_count,
+                "model_latency_ms": max(
+                    0,
+                    max(int(ended_ms) - int(started_ms), 0)
+                    - tool_duration_total_ms,
+                ),
             },
             project_name=project_name,
             parent_run_id=worker_uuid,
@@ -347,23 +432,34 @@ def publish_accounting_worker_trace(
             outputs=safe_outputs,
         ),
     ]
+    tool_cursor_ms = int(started_ms)
     for index, tool_name in enumerate(tool_names):
         tool_uuid = _uuid(f"tool:{base}:{index}:{tool_name}")
+        tool_count_for_name, tool_duration_ms = tool_stats.get(tool_name, (1, 0))
+        tool_start_ms = tool_cursor_ms
+        tool_end_ms = min(
+            int(ended_ms),
+            tool_start_ms + max(0, int(tool_duration_ms)),
+        )
+        tool_cursor_ms = tool_end_ms
         runs.append(
             _run_payload(
                 run_uuid=tool_uuid,
                 trace_uuid=trace_uuid,
                 dotted_order=f"{worker_dotted}.{_ls_time(started_ms)}{tool_uuid}",
-                name=f"hgfinance.accounting.tool.{tool_name}",
+                name=f"{profile_spec['name_prefix']}.tool.{tool_name}",
                 run_type="tool",
-                started_ms=started_ms,
-                ended_ms=ended_ms,
+                started_ms=tool_start_ms,
+                ended_ms=tool_end_ms,
                 metadata={
                     **worker_metadata,
                     "observation_unit": "tool",
                     "tool_name": tool_name,
                     "tool_call_index": index,
-                    "tool_latency_available": False,
+                    "tool_call_count": tool_count_for_name,
+                    "tool_latency_ms": tool_duration_ms,
+                    "tool_latency_available": bool(tool_duration_ms),
+                    "tool_timing_source": "hermes-log-duration",
                 },
                 project_name=project_name,
                 parent_run_id=worker_uuid,
@@ -374,4 +470,15 @@ def publish_accounting_worker_trace(
     return _post_batch(env=runtime_env, runs=runs)
 
 
-__all__ = ["ACCOUNTING_PROFILE", "publish_accounting_worker_trace"]
+def publish_accounting_worker_trace(**kwargs: Any) -> bool:
+    """Backward-compatible Accounting entry point."""
+
+    return publish_department_worker_trace(**kwargs)
+
+
+__all__ = [
+    "ACCOUNTING_PROFILE",
+    "QA_PROFILE",
+    "publish_accounting_worker_trace",
+    "publish_department_worker_trace",
+]

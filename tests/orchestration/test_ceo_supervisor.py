@@ -21,6 +21,7 @@ from orchestration.adapters.ceo_supervisor import (
     _department_progress_text,
     _initial_primary_materialization_decisions,
     _single_primary_passthrough_child,
+    _terminal_payload_mapping,
     decide_supervisor,
     cli_lane,
     parse_supervisor_output,
@@ -67,6 +68,23 @@ def child(
         summary=summary,
         result=result,
     )
+
+
+def test_terminal_payload_mapping_accepts_hydrated_child_state() -> None:
+    state = child(
+        "t_risk",
+        "risk-management",
+        "done",
+        summary="요약",
+        result="최종 답변",
+    )
+
+    payload = _terminal_payload_mapping(state)
+
+    assert payload["id"] == "t_risk"
+    assert payload["assignee"] == "risk-management"
+    assert payload["status"] == "done"
+    assert payload["result"] == "최종 답변"
 
 
 class NoAnalysisChildrenOriginGuardTest(unittest.TestCase):
@@ -629,7 +647,7 @@ class SupervisorPolicyTest(unittest.TestCase):
         )
         self.assertEqual(wakeup_limit.action, SupervisorAction.BLOCK_ABORT)
 
-    def test_binding_partial_primary_runs_qa_with_successful_dependencies(self) -> None:
+    def test_binding_partial_primary_synthesizes_from_successful_dependencies(self) -> None:
         state = SupervisorState(
             "root",
             (
@@ -659,7 +677,7 @@ class SupervisorPolicyTest(unittest.TestCase):
         decision = decide_supervisor(state)
 
         self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
-        self.assertEqual(decision.parent_task_ids, ())
+        self.assertEqual(decision.parent_task_ids, ("research",))
         self.assertIn("defer_reason=primary_department_partial_failure", decision.body)
 
     def test_binding_partial_primary_becomes_deterministic_defer_after_qa(self) -> None:
@@ -699,7 +717,7 @@ class SupervisorPolicyTest(unittest.TestCase):
 
         self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
         self.assertEqual(decision.reason, "binding_partial_defer_template")
-        self.assertEqual(decision.parent_task_ids, ("qa",))
+        self.assertEqual(decision.parent_task_ids, ("research",))
         self.assertEqual(decision.initial_status, "blocked")
 
     def test_binding_qa_failure_still_returns_fail_closed_defer(self) -> None:
@@ -1462,6 +1480,26 @@ class FakeClient:
 
 
 class PostResponseQaAuditTest(unittest.TestCase):
+    def test_supervisor_cannot_materialize_pre_response_qa(self) -> None:
+        client = FakeClient()
+        service = CeoSupervisorService(client)
+        state = SupervisorState(
+            "root",
+            (child("research", "research-department", "done"),),
+        )
+        decision = SupervisorDecision(
+            SupervisorAction.RUN_QA,
+            "root",
+            assignee="qa-department",
+            title="legacy QA",
+            body="hgfinance.ceo-supervisor.v1 action=RUN_QA",
+            parent_task_ids=("research",),
+        )
+
+        with self.assertRaises(SupervisorValidationError):
+            service._execute(decision, state)
+        self.assertEqual(client.created, [])
+
     def test_qa_is_created_only_after_delivery_and_receives_ceo_input(self) -> None:
         timeline: list[str] = []
 

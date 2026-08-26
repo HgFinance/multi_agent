@@ -146,7 +146,7 @@ F(승인 세분화)·H(프리셋)·I(정렬도)는 위 결정에 종속되므로
 
 ## 4. 서비스 목적과 현재 계약의 간극
 
-목표는 "종목 정보가 없는 사용자에게, 에이전트가 차트 국면·재무·뉴스를 판단해 추천"이다. 마스터플랜과 일치하고 워크플로도 정의돼 있다([portfolio-recommendation.yaml](../../orchestration/workflows/portfolio-recommendation.yaml): `profile-suitability → research → trading → risk → qa → accounting → ceo`).
+목표는 "종목 정보가 없는 사용자에게, 에이전트가 차트 국면·재무·뉴스를 판단해 추천"이다. 마스터플랜과 일치하고 워크플로도 정의돼 있다([portfolio-recommendation.yaml](../../orchestration/workflows/portfolio-recommendation.yaml): `profile-suitability → research → trading → risk → accounting → ceo → qa-audit(비동기)`). QA는 CEO가 받은 동일 입력과 CEO 응답을 전달받아 응답 후 감사한다.
 
 **다만 현재 계약에는 결정적 제약이 있다.**
 

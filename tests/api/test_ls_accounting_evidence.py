@@ -222,3 +222,24 @@ def test_parameterized_credit_and_margin_trs_are_consumed_when_present() -> None
     assert evidence["margin_capacity"]["symbol"] == "005930"
     assert evidence["margin_capacity"]["orderable_quantity"] == "5"
     assert "secret" not in repr(evidence)
+
+
+def test_paper_completion_code_with_output_is_not_misclassified_as_error() -> None:
+    responses = _responses()
+    responses["CSPAQ12200"]["rsp_cd"] = "00136"
+    responses["CSPAQ12200"]["rsp_msg"] = "모의투자 조회가 완료되었습니다."
+    responses["FOCCQ33600"] = {
+        "rsp_cd": "01900",
+        "rsp_msg": "모의투자에서는 해당업무가 제공되지 않습니다.",
+    }
+
+    evidence = normalize_ls_accounting_evidence(
+        responses,
+        period_start="2026-07-28",
+        period_end="2026-08-26",
+        previous_date="2026-08-25",
+        environment="PAPER",
+    )
+
+    assert evidence["coverage"]["CSPAQ12200"]["status"] == "OK"
+    assert evidence["coverage"]["FOCCQ33600"]["status"] == "ERROR"

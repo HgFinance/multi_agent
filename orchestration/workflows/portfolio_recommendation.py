@@ -35,11 +35,6 @@ from departments.employee_worker_runtime import (
 )
 from departments.worker_model_gateway import llm_for_worker
 from orchestration.adapters.ceo_task_planner import build_task_plan
-from orchestration.experience_bank import (
-    ExperienceBank,
-    build_experience_record,
-    experience_case_type,
-)
 from orchestration.contracts.mas import (
     DepartmentHandoff,
     build_replay_metadata,
@@ -47,13 +42,18 @@ from orchestration.contracts.mas import (
     stable_hash,
     validate_worker_context,
 )
+from orchestration.experience_bank import (
+    ExperienceBank,
+    build_experience_record,
+    experience_case_type,
+)
 from orchestration.llm_observability import (
     begin_worker_metric,
     end_worker_metric,
     publish_langfuse_metric,
     publish_metric,
-    redacted_trace,
     redacted_langfuse_worker_span,
+    redacted_trace,
     trace_correlation_metadata,
     worker_graph_trace_config,
 )

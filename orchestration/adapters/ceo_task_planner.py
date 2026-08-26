@@ -39,10 +39,11 @@ class CeoTaskPlannerError(RuntimeError):
 
 
 # allow-list 는 **상한**만 정한다("이 부서 밖은 못 부른다"). 하한이 없으면 LLM 이
-# requested_departments 를 ["ceo"] 하나로 줄여도 통과하고, 그러면 인용·환각 검증
-# 없이 사용자에게 자문이 나간다. 결정론 표(CATEGORY_DEPARTMENTS)는 6개 카테고리
-# 전부에 qa 와 ceo 를 두고 있으므로 그 둘이 실질적 불변식이다 - LLM 경로에서도
-# 같은 하한을 강제한다. 프롬프트로 부탁하지 않고 파싱 단계에서 채운다.
+# requested_departments 를 ["ceo"] 하나로 줄여도 통과하고, 그러면 CEO 응답의
+# 감사 의도가 사라진다. QA는 이 하한으로 계획에 남기되 응답-plane primary로
+# materialize하지 않는다. 호출부가 CEO 응답을 저장·전달한 뒤 동일 입력과 응답을
+# 담은 post-response audit 카드로 QA를 생성한다. 프롬프트로 부탁하지 않고
+# 파싱 단계에서 감사 의도를 보존한다.
 REQUIRED_DEPARTMENTS: frozenset[str] = frozenset({"qa", "ceo"})
 
 
@@ -223,9 +224,10 @@ def _parse_plan(stdout: str, valid_departments: Sequence[str]) -> dict[str, Any]
     requested_set = {str(item) for item in requested}
     if not requested_set.issubset(allow_list):
         raise ValueError("CEO planner requested a department outside the allow-list")
-    # 하한 강제: 호출부가 실제로 가진 부서에 한해 필수 부서를 되살린다. 거부가 아니라
-    # 보강인 이유는 이것이 안전 방향이기 때문이다 - LLM 이 qa 를 빠뜨렸다고 요청 전체를
-    # 실패시키면 사용자 질문이 죽지만, 되살리면 검증만 한 단계 더 도는 것으로 끝난다.
+    # 하한 강제: 호출부가 실제로 가진 부서에 한해 CEO와 QA 감사 의도를 되살린다.
+    # QA는 응답-plane 자식으로 실행되지 않고, CEO 응답 전달 후 별도 audit task로
+    # materialize된다. LLM이 QA를 빠뜨려도 감사 의도를 잃지 않되 CEO 응답을
+    # QA 선행 결과에 묶지 않는 것이 이 경계의 핵심이다.
     requested_set |= REQUIRED_DEPARTMENTS & allow_list
     # Preserve the caller's canonical department order (same rule as the
     # deterministic planner's `ordered = [stage for stage in DEPARTMENTS ...]`).

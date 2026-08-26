@@ -86,7 +86,6 @@ def _payload() -> dict[str, Any]:
         # 거르는가" 가 아니다(후자는 QA본부 자체 테스트 몫). 그래서 **통과하는 케이스**를
         # 준다 - 판정 엔진에 원본 입력을 주면 engine 이 decision 을 계산한다.
         # 모양은 departments/06-ai-qa-audit/tests/test_qa_employee_workers.py 에서 가져왔다.
-        "assessment": {"decision": "PASS", "claim_checks": [{"result": "SUPPORTED"}]},
         "model_risk_input": {
             "model_id": "00000000-0000-0000-0000-000000000001",
             "model_version": "model-v1",
@@ -107,9 +106,6 @@ def _payload() -> dict[str, Any]:
                 "authorized": True,
             }
         ],
-        "ops_assessment": {"status": "HEALTHY"},
-        "permission_check": {"result": "ALLOWED"},
-        "incident": {"incident_id": "incident-test"},
         "order_book": {"spread": "0.01"},
         "price_history": [200.0],
         "filings": {"published_at": "2026-08-03"},
@@ -331,7 +327,7 @@ def test_paper_pipeline_passes_worker_context_to_department_head(monkeypatch: An
     class FakeCeoAdapter:
         def decide(self, *, case_request: dict[str, Any], department_reports: dict[str, Any]) -> dict[str, Any]:
             assert case_request["symbol"] == "AAPL"
-            for department in ("research", "trading", "risk", "qa", "accounting"):
+            for department in ("research", "trading", "risk", "accounting"):
                 assert department_reports[department]["employee_context"] is not None
             return {
                 "recommendation": "HOLD",
@@ -376,6 +372,16 @@ def test_paper_pipeline_passes_worker_context_to_department_head(monkeypatch: An
     )
     assert run.status == "COMPLETED"
     assert dispatched == ["research", "trading", "accounting-portfolio", "ceo"]
+    assert [step.status for step in run.steps] == [
+        "DISPATCHED",
+        "DISPATCHED",
+        "DISPATCHED",
+        "DISPATCHED",
+        "DISPATCHED",
+        "DISPATCHED",
+        "QUEUED_ASYNC",
+    ]
+    assert run.steps[-1].step_id == "qa-audit"
 
     for workflow_name in ("strategy-research", "workforce-management", "agent-evolution"):
         auxiliary_run = execute_workflow(

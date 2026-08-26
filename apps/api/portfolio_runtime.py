@@ -38,8 +38,8 @@ except ModuleNotFoundError:  # pragma: no cover - package import path
     from apps.api import kanban_tracker
 
 from portfolio_store import PortfolioRuntimeStore, _process_alive
-from orchestration.llm_observability import langsmith_project
 
+from orchestration.llm_observability import langsmith_project
 from orchestration.workflows.portfolio_recommendation import (
     run_portfolio_recommendation_pipeline_async,
     schedule_post_response_qa_audit,

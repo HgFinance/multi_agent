@@ -564,6 +564,7 @@ def _qa_findings_lines(value: Any) -> list[str]:
             severity = _humanize_qa(item.get("severity") or "확인 필요", 24)
             issue = _humanize_qa(
                 item.get("summary")
+                or item.get("statement")
                 or item.get("description")
                 or item.get("issue")
                 or item.get("message")
@@ -572,10 +573,18 @@ def _qa_findings_lines(value: Any) -> list[str]:
             )
             owner = _humanize_qa(item.get("owner") or item.get("responsible_party"), 100)
             block = _humanize_qa(item.get("block_condition") or item.get("impact"), 180)
+            finding_id = _humanize_qa(item.get("finding_id") or item.get("id"), 48)
+            status = _humanize_qa(item.get("status"), 32)
+            due_date = _humanize_qa(item.get("due_date"), 32)
+            prefix = f"{finding_id}: " if finding_id else ""
             suffix = f" 담당: {owner}" if owner else ""
             if block:
                 suffix += f" 영향: {block}"
-            lines.append(f"- [{severity}] {issue}{suffix}")
+            if status:
+                suffix += f" 상태: {status}"
+            if due_date:
+                suffix += f" 기한: {due_date}"
+            lines.append(f"- [{severity}] {prefix}{issue}{suffix}")
         elif item:
             lines.append(f"- {_humanize_qa(item)}")
     return lines

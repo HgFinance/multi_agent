@@ -343,7 +343,16 @@ def worker_graph_trace_config(
 def _safe_langsmith_client() -> Any:
     from langsmith import Client
 
-    return Client(hide_inputs=True, hide_outputs=True, hide_metadata=False)
+    return Client(
+        hide_inputs=True,
+        hide_outputs=True,
+        hide_metadata=False,
+        # The explicit metadata envelope below is the only runtime context
+        # this application needs.  Do not let the SDK append its own
+        # LANGSMITH_* environment snapshot (it is noisy and can expose local
+        # filesystem/configuration paths).
+        omit_traced_runtime_info=True,
+    )
 
 
 @lru_cache(maxsize=1)
@@ -352,7 +361,12 @@ def _structured_langsmith_client() -> Any:
 
     from langsmith import Client
 
-    return Client(hide_inputs=False, hide_outputs=False, hide_metadata=False)
+    return Client(
+        hide_inputs=False,
+        hide_outputs=False,
+        hide_metadata=False,
+        omit_traced_runtime_info=True,
+    )
 
 
 @contextlib.contextmanager
@@ -736,6 +750,7 @@ def close_root_trace(
                 "terminal_task_id",
                 "terminal_department",
                 "error_code",
+                "http_status",
                 "error_class",
             )
             if metadata.get(key) not in (None, "")

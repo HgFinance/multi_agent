@@ -13,7 +13,7 @@
 인증·승인·Audit가 붙기 전까지 BFF에 열지 않는다(계획 6절).
 
 엔드포인트 두 개다.
-  POST /accounting/agent/ask            회계본부 Hermes Agent 질의 (텍스트만)
+  POST /accounting/agent/ask            회계본부 질의 (L0 즉시, L1~L3 CEO/Kanban 접수)
   GET  /accounting/v1/portfolio-snapshot  portfolio-api. CEO Daily Report용 참조
 
 **질의는 Level 로 분류한 뒤 처리한다 (2026-08-05).** 난이도 편차가 커서 다 같은 값으로
@@ -51,23 +51,46 @@ if str(_DEPT_DIR) not in sys.path:
     sys.path.append(str(_DEPT_DIR))
 
 from query_router import classify, routing_note  # noqa: E402 - sys.path 조정 뒤
-from orchestration.accounting_advisory_context import (  # noqa: E402
-    fetch_accounting_advisory_context,
-)
-
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 router = APIRouter(prefix="/accounting", tags=["accounting-portfolio"])
+
+
+def _enqueue_accounting_via_ceo(req: hermes_boundary.AgentAsk) -> dict[str, object]:
+    """Send model-backed accounting questions through the canonical workflow.
+
+    The production BFF intentionally owns neither a department profile nor its
+    provider credentials.  The old synchronous CLI call therefore returned
+    502.  Reuse the existing CEO root producer instead: Kanban dispatch owns
+    the Accounting Hermes process and the supervisor attaches Accounting
+    Engine plus LS broker evidence at that boundary.
+    """
+
+    try:
+        from .ceo import CeoAsk, ceo_query
+    except ImportError:  # pragma: no cover - direct apps/api script path
+        from ceo import CeoAsk, ceo_query
+
+    return ceo_query(
+        CeoAsk(
+            query=req.query,
+            request_id=req.request_id,
+            source="accounting-agent-alias",
+        ),
+        owner_id=None,
+    )
 
 
 @router.post("/agent/ask")
 def agent_ask(req: hermes_boundary.AgentAsk) -> dict:
     """회계·포트폴리오본부 Agent 질의.
 
-    돌아오는 것은 텍스트뿐이다. Position·PnL·NAV는 여기서 읽지 않는다 -
+    Position·PnL·NAV는 여기서 읽지 않는다 -
     팀 가이드 원칙 5(회계 수치를 LLM 문장에서 추출해 확정하지 않는다).
 
     질의 Level 을 먼저 정하고, L0 은 모델을 부르지 않고 결정론 원천으로 돌려보낸다.
+    L1~L3은 BFF가 부서 인증을 소유하지 않는 원칙을 지키며 CEO/Kanban에 접수하고,
+    완료 결과는 반환된 `result_url`에서 읽는다.
     응답에 `routing` 이 항상 붙어 왜 그 등급이었는지가 감사에서 설명된다.
     """
     # **게이트가 라우팅보다 먼저다.** L0 이 모델을 안 부른다고 해서 비활성 엔드포인트가
@@ -93,19 +116,21 @@ def agent_ask(req: hermes_boundary.AgentAsk) -> dict:
             "routing": routing.as_dict(),
             "routing_note": routing_note(routing),
         }
-    advisory_context = fetch_accounting_advisory_context()
-    agent_query = req.query
-    if advisory_context:
-        agent_query = (
-            req.query
-            + "\n\n[서버가 첨부한 읽기 전용 회계·브로커 증거]\n"
-            + advisory_context
-            + "\n[첨부 끝]\n"
-            + "공식 수치는 Accounting Engine만 정본으로 취급하고, broker_evidence는 "
-            + "조정·설명 근거로만 사용하십시오."
-        )
-    result = hermes_boundary.ask(department=DEPARTMENT, config=CONFIG, query=agent_query)
-    return {**result, "routing": routing.as_dict(), "routing_note": routing_note(routing)}
+    accepted = _enqueue_accounting_via_ceo(req)
+    task_id = str(accepted.get("task_id") or "").strip() or None
+    return {
+        "department": DEPARTMENT,
+        "answer": "회계 질의를 CEO → Kanban → Accounting Hermes 경로로 접수했습니다.",
+        "session_id": None,
+        "task_id": task_id,
+        "status": accepted.get("status") or "accepted",
+        "result_url": f"/ui/ceo/tasks/{task_id}/result" if task_id else None,
+        "authoritative": False,
+        "source_of_record": "/accounting/v1/ledgers/{book_id}/advisory-snapshot",
+        "execution_path": "CEO_KANBAN_ACCOUNTING_HERMES",
+        "routing": routing.as_dict(),
+        "routing_note": routing_note(routing),
+    }
 
 
 # --- portfolio-api -----------------------------------------------------------

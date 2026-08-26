@@ -135,38 +135,34 @@ class LlmCeoTaskPlannerTest(unittest.TestCase):
                 valid_departments=VALID_DEPARTMENTS,
             )
         self.assertEqual(result["mode"], "llm_task_plan")
-        # qa·ceo 는 REQUIRED_DEPARTMENTS 하한으로 되살아난다.
+        # qa·ceo 감사/응답 의도는 REQUIRED_DEPARTMENTS 하한으로 되살아난다.
         self.assertEqual(result["requested_departments"], ["research", "risk", "qa", "ceo"])
         self.assertTrue(result["mandate_considered"])
         self.assertEqual(result["runtime"]["provider"], "openai-codex")
 
     def test_nonzero_exit_raises_planner_error(self) -> None:
         completed = subprocess.CompletedProcess(args=["fake-hermes"], returncode=1, stdout="", stderr="boom")
-        with mock.patch("orchestration.adapters.ceo_task_planner.subprocess.run", return_value=completed):
-            with self.assertRaises(CeoTaskPlannerError):
-                self._planner().plan(profile={"query": "q"}, mandate_policy=None, valid_departments=VALID_DEPARTMENTS)
+        with mock.patch("orchestration.adapters.ceo_task_planner.subprocess.run", return_value=completed), self.assertRaises(CeoTaskPlannerError):
+            self._planner().plan(profile={"query": "q"}, mandate_policy=None, valid_departments=VALID_DEPARTMENTS)
 
     def test_missing_executable_raises_planner_error(self) -> None:
         with mock.patch(
             "orchestration.adapters.ceo_task_planner.subprocess.run",
             side_effect=FileNotFoundError(),
-        ):
-            with self.assertRaises(CeoTaskPlannerError):
-                self._planner().plan(profile={"query": "q"}, mandate_policy=None, valid_departments=VALID_DEPARTMENTS)
+        ), self.assertRaises(CeoTaskPlannerError):
+            self._planner().plan(profile={"query": "q"}, mandate_policy=None, valid_departments=VALID_DEPARTMENTS)
 
     def test_timeout_raises_planner_error(self) -> None:
         with mock.patch(
             "orchestration.adapters.ceo_task_planner.subprocess.run",
             side_effect=subprocess.TimeoutExpired(cmd="fake-hermes", timeout=5),
-        ):
-            with self.assertRaises(CeoTaskPlannerError):
-                self._planner().plan(profile={"query": "q"}, mandate_policy=None, valid_departments=VALID_DEPARTMENTS)
+        ), self.assertRaises(CeoTaskPlannerError):
+            self._planner().plan(profile={"query": "q"}, mandate_policy=None, valid_departments=VALID_DEPARTMENTS)
 
     def test_invalid_json_raises_planner_error(self) -> None:
         completed = subprocess.CompletedProcess(args=["fake-hermes"], returncode=0, stdout="not json", stderr="")
-        with mock.patch("orchestration.adapters.ceo_task_planner.subprocess.run", return_value=completed):
-            with self.assertRaises(CeoTaskPlannerError):
-                self._planner().plan(profile={"query": "q"}, mandate_policy=None, valid_departments=VALID_DEPARTMENTS)
+        with mock.patch("orchestration.adapters.ceo_task_planner.subprocess.run", return_value=completed), self.assertRaises(CeoTaskPlannerError):
+            self._planner().plan(profile={"query": "q"}, mandate_policy=None, valid_departments=VALID_DEPARTMENTS)
 
 
 class BuildTaskPlanTest(unittest.TestCase):
@@ -231,14 +227,13 @@ class BuildTaskPlanTest(unittest.TestCase):
 
     def test_unresolvable_skill_is_not_silently_dropped_by_fallback(self) -> None:
         _FakePlanner.error = CanonicalSkillError("unknown skill")
-        with mock.patch.dict(os.environ, {"PORTFOLIO_CEO_TASK_PLANNER_MODE": "llm"}):
-            with self.assertRaises(CanonicalSkillError):
-                build_task_plan(
-                    {"query": "AAPL portfolio assessment"},
-                    deterministic_fallback=_fallback,
-                    valid_departments=VALID_DEPARTMENTS,
-                    planner_cls=_FakePlanner,
-                )
+        with mock.patch.dict(os.environ, {"PORTFOLIO_CEO_TASK_PLANNER_MODE": "llm"}), self.assertRaises(CanonicalSkillError):
+            build_task_plan(
+                {"query": "AAPL portfolio assessment"},
+                deterministic_fallback=_fallback,
+                valid_departments=VALID_DEPARTMENTS,
+                planner_cls=_FakePlanner,
+            )
 
     def test_missing_mandate_policy_is_passed_through_as_none(self) -> None:
         _FakePlanner.result = {

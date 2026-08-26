@@ -7,17 +7,17 @@ the read-only handoff path for one investment case:
 Research employees -> research_packet
 Trading contract   -> order_intent
 Risk employees + deterministic Risk Engine -> risk_decision
-QA employees + deterministic Evidence QA -> qa_assessment
 OMS/Fill projection -> execution_result (never submitted)
 Accounting projection -> accounting_snapshot (never posted)
 CEO Luna -> ceo_case_summary (always non-binding)
+CEO response delivery -> QA employees + deterministic Evidence QA (post-response audit, async)
 ```
 
 ## Execution modes
 
-- `test`: deterministic seven-step contract fixture. It runs the full
-  `research → trading → risk → qa → oms-fill-gate → accounting → ceo` chain
-  with schema-valid in-memory Worker/Risk/QA/CEO responses. It never calls
+- `test`: deterministic seven-boundary contract fixture. It runs the response
+  path `research → trading → risk → oms-fill-gate → accounting → CEO response`
+  and records `qa-audit` as `QUEUED_ASYNC` after that response. It never calls
   Ollama, Hermes, Notion, Redis, Postgres, a broker, or a ledger, and its CEO
   result is explicitly non-binding.
 - `paper`: invokes the configured LangGraph Workers and Hermes adapters where
@@ -61,9 +61,14 @@ runtime. The command never grants live order or ledger permissions:
 hermes --profile ceo-agent auth status openai-codex
 ```
 
-If Research, Risk, QA, or CEO dependencies fail, the adapter records a
+If Research, Risk, or CEO dependencies fail, the adapter records a
 degraded result and preserves `HOLD / ESCALATE`. It does not convert a
 fallback into approval.
+
+The QA audit receives the same CEO input and response after the response is
+persisted. QA findings are recorded as `PASS`/`WARN`/`FAIL` or `ESCALATE`; they
+do not delay, rewrite, or cancel the already delivered CEO response. Pre-submit
+safety remains the deterministic Risk/OMS boundary.
 
 ## Risk/QA runtime evidence
 

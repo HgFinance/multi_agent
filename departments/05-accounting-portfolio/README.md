@@ -114,9 +114,10 @@ curl http://127.0.0.1:8046/health
   전부 Preliminary이며 `is_official`은 항상 False다 — Official NAV 확정 권한이 회계본부에 없다
 - `portfolio/ui_read_model.py` — 공식 수치를 다시 계산하지 않고 화면 계약으로 옮기는 DEMO Projection
 - `apps/api/main.py` — 공통 Frontend Platform의 Read-only DEMO BFF (조립만)
-- `apps/api/accounting.py` — 회계본부 Router. `POST /accounting/agent/ask`가 이 본부 Hermes Profile
-  하나만 부른다. 부서 이름을 요청 Body로 받지 않으므로 다른 본부 Agent를 부를 경로가 없다(5.6).
-  Auth·Tool Allowlist 전까지 `ENABLE_AGENT_ASK` 없이는 503
+- `apps/api/accounting.py` — 회계본부 Router. `POST /accounting/agent/ask`의 L0는 결정론
+  읽기 경로를 즉시 안내하고, L1~L3는 CEO Root를 만들어 Kanban → Accounting Hermes로
+  비동기 처리한다. BFF에는 부서 Profile/Auth를 마운트하지 않는다. 부서 이름을 요청 Body로
+  받지 않으며, `ENABLE_AGENT_ASK` 없이는 503이다
 - `api/` — Domain API(FastAPI). 위 모듈을 감싸기만 하고 **새 회계 판정 로직이 없다.**
   Hermes는 이 API/MCP 경계로만 부른다(같은 프로세스에 import하지 않는다).
   **`PUT`·`PATCH`·`DELETE`가 하나도 없다** — 불변식 2를 라우팅 표로 집행한 것이고,

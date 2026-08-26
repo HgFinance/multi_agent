@@ -125,7 +125,7 @@ keywords = {
 
 **"어느 부서를 호출할 수 있는가"는 권한 경계 문제**다. LLM이 이 결정을 하면 프롬프트 조작으로 부서 호출 범위가 바뀔 수 있다. 그래서 **기본 경로에서는** 호출 가능 부서 집합을 결정론 코드가 정하고, LLM(CEO 부서장)은 그 결과를 설명하고 다듬는 역할만 한다.
 
-> 2026-08-10부터 CEO 프로필이 부서를 직접 고르는 opt-in 경로가 있다([3.5](#35-자연어-의도-분류는-표-앞에-두되-표-대신-두지-않는다)). 그 경로도 이 원칙을 버리지 않는다 — 상한(allow-list)과 하한(`qa`·`ceo` 필수)을 코드가 강제하고, 어떤 실패든 결정론으로 되돌아간다. 기본값은 여전히 결정론이다.
+> 2026-08-10부터 CEO 프로필이 부서를 직접 고르는 opt-in 경로가 있다([3.5](#35-자연어-의도-분류는-표-앞에-두되-표-대신-두지-않는다)). 그 경로도 이 원칙을 버리지 않는다 — 상한(allow-list)과 하한(CEO + QA 감사 의도)을 코드가 강제하고, 어떤 실패든 결정론으로 되돌아간다. QA는 CEO 응답 전달 후 별도 audit task로 materialize되며 응답 선행 조건이 아니다. 기본값은 여전히 결정론이다.
 
 ### 2.4 감사 추적
 
@@ -152,7 +152,7 @@ API의 `category`는 `Literal`이 아니라 `str`이다. 표에 없는 값이 �
 | 입력 | 결과 |
 |---|---|
 | 알 수 없는 카테고리 + 질의 없음 | 6개 부서 **전부** 호출, `category_recognized: false` |
-| 알 수 없는 카테고리 + 질의 있음 | 기본 4개(research·risk·qa·ceo), `category_recognized: false` |
+| 알 수 없는 카테고리 + 질의 있음 | 기본 3개(research·risk·ceo), `category_recognized: false`; QA audit은 CEO 응답 후 별도 생성 |
 
 **`Literal`로 좁히지 않은 이유**: 대화형 제품에서 새 의도는 표보다 먼저 도착한다. 표에 없다고 422를 던지면 사용자 질문이 통째로 실패하지만, fallback은 부서를 더 부를 뿐이고 이 그래프에는 주문·원장 권한이 없어 확대의 비용이 지연·비용에 그친다.
 
@@ -166,7 +166,7 @@ API의 `category`는 `Literal`이 아니라 `str`이다. 표에 없는 값이 �
 
 > **검토 중 정정된 항목.** 이 절의 초안은 해결책으로 *"`DEPARTMENTS` 튜플에 `quant-backtest`를 추가"*만 제시했는데, 그것만으로는 아키텍처 제약(아래 인용)을 만족하지 못한다. 부서 추가가 아니라 **Workflow 선택 계층**이 먼저라는 결론으로 대체했다.
 
-**현황**: `portfolio_recommendation.py`의 `DEPARTMENTS`는 `(research, trading, risk, qa, accounting, ceo)` 6개이고 quant가 없다. "이런 전략 어때?"가 백테스트 본부로 갈 경로가 없다.
+**현황**: `portfolio_recommendation.py`의 response-plane `DEPARTMENTS`는 `(research, quant, trading, risk, accounting, ceo)` 6개다. QA는 이 튜플에 넣지 않고 CEO 응답 후 별도 audit task로 생성한다. `STRATEGY_PROPOSAL`은 `quant`까지 연결됐고, 정식 승격은 별도 `strategy-research`가 소유한다.
 
 **주의해야 할 경계**: 두 문서가 제약을 건다.
 
@@ -282,7 +282,7 @@ CATEGORY_WORKFLOWS / CATEGORY_DEPARTMENTS 표    ← 권한 경계, 결정론 �
 | 장치 | 내용 |
 |---|---|
 | **상한** (allow-list) | 호출부가 넘긴 `valid_departments` 밖을 요청하면 `ValueError` → 결정론 fallback |
-| **하한** (`REQUIRED_DEPARTMENTS`) | `qa`·`ceo`가 빠지면 **되살린다.** 결정론 표가 6개 카테고리 전부에 이 둘을 두고 있어 실질적 불변식이고, 빠지면 인용·환각 검증 없이 자문이 나간다. 거부가 아니라 보강인 이유는 그쪽이 안전 방향이기 때문 |
+| **하한** (`REQUIRED_DEPARTMENTS`) | `ceo`와 QA 감사 의도가 빠지면 **되살린다.** QA는 응답-plane primary가 아니라 CEO 응답 전달 후 동일 입력·응답으로 생성되는 post-response audit task다. `valid_departments`에 있는 경우에만 감사 의도를 보강하며, QA 결과를 CEO 응답 선행 조건으로 사용하지 않는다. |
 | **fail-closed** | 바이너리 부재·타임아웃·JSON 오류·빈 rationale — 어떤 실패든 결정론 계획으로 되돌아가고 `planner_fallback_reason`에 이유를 남긴다 |
 
 **기본값은 결정론이다.** `PORTFOLIO_CEO_TASK_PLANNER_MODE=llm`일 때만 켜진다.

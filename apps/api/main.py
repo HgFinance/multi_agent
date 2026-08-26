@@ -1834,24 +1834,26 @@ if __name__ == "__main__":
         # 수치를 지어내지 않는다 - 어디서 읽으라는 안내만 한다
         assert "모델을 호출하지 않았습니다" in body["answer"]
 
-        # 마감·감사 질의는 등급이 올라가고 실제로 Hermes를 부른다(여기선 스텁으로 확인)
+        # 마감·감사 질의는 등급이 올라가고 CEO/Kanban 비동기 경로에 접수된다.
+        # BFF가 부서 Profile 자격을 직접 소유하거나 Hermes를 직접 실행하지 않는다.
         _called: list = []
-        _orig_ask = _accounting_router.hermes_boundary.ask
+        _orig_enqueue = _accounting_router._enqueue_accounting_via_ceo
 
-        def _fake_ask(*, department, config, query):
-            _called.append(query)
-            return {"department": department, "answer": "stub", "session_id": "s1",
-                    "authoritative": False, "source_of_record": "/ui/snapshot"}
+        def _fake_enqueue(req):
+            _called.append(req.query)
+            return {"task_id": "t_accounting123", "status": "accepted"}
 
-        _accounting_router.hermes_boundary.ask = _fake_ask
+        _accounting_router._enqueue_accounting_via_ceo = _fake_enqueue
         try:
             heavy = c.post("/accounting/agent/ask",
                            json={"query": "마감 확정해도 되는지 감사 근거와 함께 설명"}).json()
             assert heavy["routing"]["level"] == "L3" and heavy["routing"]["tier"] == "heavy"
             assert heavy["routing"]["calls_model"] is True and len(_called) == 1
+            assert heavy["execution_path"] == "CEO_KANBAN_ACCOUNTING_HERMES"
+            assert heavy["task_id"] == "t_accounting123" and heavy["session_id"] is None
             assert heavy["authoritative"] is False, "라우팅이 공식 수치 계약을 깼다"
         finally:
-            _accounting_router.hermes_boundary.ask = _orig_ask
+            _accounting_router._enqueue_accounting_via_ceo = _orig_enqueue
     finally:
         _hermes_boundary.ENABLE_AGENT_ASK = _saved_flag
     # 빈 질의는 스키마에서 걸린다

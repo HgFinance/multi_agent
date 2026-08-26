@@ -157,7 +157,7 @@
 | `risk-runner` | 리스크 | `RiskEngine.check_order` 의 verdict/check_results → blocker. core-risk + counterparty 2명 흡수(08-06) |
 | `qa-runner` | QA | 5개 결정론 엔진(Evidence/ModelRisk/InternalAudit/OpsHealth/권한)의 PASS·FAIL → 종합 decision. 3명 흡수(08-06) |
 | `back-office-runner` | 회계 | 포지션·자금·손익·보고·평가·수수료 6블록을 그대로 옮기고 없는 건 `missing_blocks` 로 명시. 5명 흡수(08-07) |
-| `ceo-runner` | CEO | 6단계 산출물 수집, Risk verdict 만료·QA decision → blocker, 안 온 단계는 `missing_inputs` |
+| `ceo-runner` | CEO | 6단계 산출물 수집, Risk/OMS 실행 전 상태와 `missing_inputs` 전달. 일반 CEO 응답은 QA post-response audit 결과를 blocker로 사용하지 않음 |
 
 **호출 경로가 둘로 갈린다** — 지도에서 가장 헷갈리는 부분:
 

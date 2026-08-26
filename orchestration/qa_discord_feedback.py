@@ -246,6 +246,7 @@ def format_qa_terminal_report(record: Any) -> str:
                 severity = _manager_label(item.get("severity") or "확인 필요", 24)
                 issue = _manager_label(
                     item.get("summary")
+                    or item.get("statement")
                     or item.get("description")
                     or item.get("issue")
                     or item.get("message")
@@ -254,10 +255,18 @@ def format_qa_terminal_report(record: Any) -> str:
                 )
                 owner = _manager_label(item.get("owner") or item.get("responsible_party"), 100)
                 impact = _manager_label(item.get("block_condition") or item.get("impact"), 150)
+                finding_id = _manager_label(item.get("finding_id") or item.get("id"), 48)
+                status = _manager_label(item.get("status"), 32)
+                due_date = _manager_label(item.get("due_date"), 32)
+                prefix = f"{finding_id}: " if finding_id else ""
                 suffix = f" 담당: {owner}" if owner else ""
                 if impact:
                     suffix += f" 영향: {impact}"
-                findings.append(f"- [{severity}] {issue}{suffix}")
+                if status:
+                    suffix += f" 상태: {status}"
+                if due_date:
+                    suffix += f" 기한: {due_date}"
+                findings.append(f"- [{severity}] {prefix}{issue}{suffix}")
 
     latency = evidence.get("latency_ms")
     latency_line = ""

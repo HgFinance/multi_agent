@@ -4,6 +4,7 @@ import asyncio
 import importlib.util
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import ClassVar
 from unittest.mock import patch
 
@@ -16,6 +17,7 @@ from orchestration.qa_discord_feedback import (
     QA_FEEDBACK_MARKER,
     SKILL_PROPOSAL_MARKER,
     artifact_id_from_text,
+    format_qa_terminal_report,
     format_qa_feedback_request,
     format_skill_proposal_request,
     parse_qa_feedback_command,
@@ -35,6 +37,33 @@ _SPEC.loader.exec_module(gateway_patch)
 
 
 ARTIFACT_ID = "feedback-0123456789abcdef0123456789abcdef"
+
+
+def test_qa_terminal_report_preserves_structured_finding_statement() -> None:
+    report = format_qa_terminal_report(
+        SimpleNamespace(
+            canonical_decision="FAIL",
+            evidence={"numerical_posture": "DEFER", "latency_ms": 1_000},
+            checks=[{"check": "nav_bridge", "result": "FAIL"}],
+            findings=[
+                {
+                    "id": "QA-F001",
+                    "severity": "BLOCKER",
+                    "statement": "NAV bridge has an unexplained residual",
+                    "owner": "accounting-portfolio-department",
+                    "block_condition": "공식 수치 확정 차단",
+                    "status": "OPEN",
+                }
+            ],
+            root_task_id="t_root",
+            qa_task_id="t_qa",
+            eval_run_id="eval-1",
+        )
+    )
+
+    assert "순자산 bridge has an unexplained residual" in report
+    assert "QA-F001" in report
+    assert "구체적인 문제 설명이 없습니다" not in report
 
 
 def test_qa_card_and_commands_keep_only_redacted_contract() -> None:

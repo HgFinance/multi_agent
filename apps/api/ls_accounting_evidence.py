@@ -137,8 +137,6 @@ def _entry(
     error = _text(raw.get("error"))
     meta = raw.get("meta") if isinstance(raw.get("meta"), Mapping) else {}
     rsp_cd = _text(body.get("rsp_cd"))
-    if not error and rsp_cd not in {None, "0000", "00000"}:
-        error = _text(body.get("rsp_msg")) or f"LS rsp_cd={rsp_cd}"
     output_suffixes = (
         "OutBlock",
         "OutBlock1",
@@ -148,6 +146,10 @@ def _entry(
         "OutBlock5",
     )
     has_output = any(str(key).endswith(output_suffixes) for key in body)
+    # PAPER의 정상 CSPAQ/CDPCQ 응답은 실측상 rsp_cd=00136("조회 완료")다.
+    # 성공 코드를 하드코딩하지 않고 출력 블록 존재 여부로 성공을 판별한다.
+    if not error and not has_output and rsp_cd not in {None, "0000", "00000"}:
+        error = _text(body.get("rsp_msg")) or f"LS rsp_cd={rsp_cd}"
     status = "ERROR" if error else ("OK" if has_output else "EMPTY")
     return body, {
         "status": status,

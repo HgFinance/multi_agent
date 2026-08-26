@@ -37,7 +37,7 @@ Trading·Accounting은 이미 이 필드를 갖고 있다.
 |---|---|---|
 | Mandate 해석, 6본부 라우팅, 예산·SLA 배분 | **Head 유지** | 같은 입력에 다른 출력이 나오는 것이 산출물 = 판단 |
 | 위원회 소집·정족수·veto | **이미 결정론** (`src/committee/`, Y2 완료) | Head는 API 호출만 |
-| 각 부서 결과의 미완료·차단 상태 집계 | **ceo-runner로 이관** (작업 A) | Risk/QA가 이미 verdict를 확정했다 — 옮기기만 하면 된다 |
+| 각 부서 결과의 미완료·차단 상태 집계 | **ceo-runner로 이관** (작업 A) | Risk의 실행 전 verdict와 미완료 상태를 옮긴다. 일반 CEO 응답의 QA 결과는 사후 audit 관찰값이며 blocker가 아니다 |
 | 만기 초과 항목 자동 escalate | **일반 결정론 모듈로 신설** (작업 B, 러너 아님) | 입력이 dispatch payload에 없다 (§4 참고) |
 | 부서 결과 서술 종합·설명 | **Worker 유지** | 서술은 결정론화 대상이 아니다 |
 | PM Pod/Book 실적 비교, capital efficiency | **보류** | 감쌀 결정론 모듈도, 계산할 원천 데이터도 아직 없다 (§5) |
@@ -72,7 +72,7 @@ Trading·Accounting은 이미 이 필드를 갖고 있다.
 | Risk 판정 | `risk_decision.verdict` | `!= "APPROVE"` | `RiskVerdict` (risk_engine.py) |
 | Risk 만료 | `risk_decision.expires_at` | 현재 시각 초과 | `RiskDecision` (contracts.py:232) |
 | ↳ 2026-08-11 실측 | — | **필드가 봉투에 없다** | `departments/03-risk/scripts.py`가 만드는 assessment dict에 `expires_at`이 없다. 러너는 이때 "기한 안"이라고 말하지 않고 `expiry_checked: false`로 적으며 blocker로도 올리지 않는다(매 케이스 걸리면 escalate가 곧 의미를 잃는다). 실제 만료 검사를 켜려면 **리스크본부가 봉투에 그 필드를 실어야 한다** — CEO Office가 대신 만들지 않는다 |
-| QA 판정 | `qa_assessment.decision` | `== "FAIL"` | `QaDecisionValue` (evidence_qa_engine.py:81) |
+| QA 감사 결과 | `qa_assessment.decision` | 일반 CEO 응답의 blocker로 사용하지 않음 | CEO 응답 후 `qa-audit`이 기록하는 관찰값. 전략 승격·권한 승인 같은 별도 governance workflow의 선행 게이트는 해당 workflow가 소유 |
 | 단계 누락 | 6개 `input_fields` | 값이 없음 → `missing_inputs` | — |
 
 **`missing_inputs`가 이 러너의 핵심이다.** CEO의 workflow상 임무는 "각 결과를 통합해 사용자 설명과

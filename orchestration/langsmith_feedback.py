@@ -96,9 +96,29 @@ _SAFE_METADATA_KEYS = frozenset(
         "worker_id",
         "role",
         "status",
+        "error_code",
         "error_class",
+        "http_status",
         "error_count",
         "latency_ms",
+        "attempts",
+        "retries",
+        "llm_calls",
+        "tool_calls",
+        "tool_error_count",
+        "profile",
+        "observation_unit",
+        "workflow_root_task_id",
+        "kanban_run_id",
+        "tool_call_count",
+        "llm_turn_count_observed",
+        "model_call_count_observed",
+        "tool_latency_ms",
+        "model_latency_ms",
+        "telemetry_completeness",
+        "observability_source",
+        "output_verdict",
+        "finding_count",
         "eval_score",
         "provider",
         "model_name",
@@ -130,6 +150,94 @@ _SAFE_METADATA_KEYS = frozenset(
         "semantic_qa_finding_codes",
     }
 )
+
+_TEXT_METADATA_KEYS = frozenset(
+    {
+        "request_id",
+        "root_id",
+        "task_id",
+        "trace_id",
+        "workflow_mode",
+        "workflow_role",
+        "department",
+        "stage",
+        "worker_id",
+        "role",
+        "status",
+        "error_code",
+        "error_class",
+        "provider",
+        "model_name",
+        "source",
+        "trace_kind",
+        "latency_scope",
+        "observation_point",
+        "primary_bottleneck_department",
+        "joint_improvement_targets",
+        "latency_attribution_status",
+        "latency_attribution_method",
+        "semantic_qa_version",
+        "semantic_qa_evaluator",
+        "semantic_qa_verdict",
+        "semantic_qa_finding_codes",
+        "profile",
+        "observation_unit",
+        "workflow_root_task_id",
+        "kanban_run_id",
+        "telemetry_completeness",
+        "observability_source",
+        "output_verdict",
+    }
+)
+_INT_METADATA_KEYS = frozenset(
+    {
+        "http_status",
+        "error_count",
+        "latency_ms",
+        "attempts",
+        "retries",
+        "llm_calls",
+        "tool_calls",
+        "tool_error_count",
+        "metric_count",
+        "p95_latency_ms",
+        "primary_bottleneck_duration_ms",
+        "semantic_qa_finding_count",
+        "finding_count",
+        "tool_call_count",
+        "llm_turn_count_observed",
+        "model_call_count_observed",
+        "tool_latency_ms",
+        "model_latency_ms",
+    }
+)
+_SCORE_METADATA_KEYS = frozenset(
+    {
+        "eval_score",
+        "semantic_qa_score",
+        "semantic_qa_completeness",
+        "semantic_qa_groundedness",
+        "semantic_qa_temporal_consistency",
+        "semantic_qa_uncertainty_honesty",
+        "semantic_qa_relevance",
+    }
+)
+
+
+def _normalized_metadata_value(key: str, value: Any) -> Any:
+    """Copy one safe scalar from a run without ever retaining payload text."""
+
+    if key in _TEXT_METADATA_KEYS:
+        return _bounded_text(value, 160)
+    if key in _INT_METADATA_KEYS:
+        return _bounded_int(value, maximum=3_600_000)
+    if key in {"window_start", "window_end"}:
+        return _bounded_text(value, 64)
+    if key in _SCORE_METADATA_KEYS:
+        return _bounded_score(value)
+    if key == "raw_payloads_sent":
+        return bool(value)
+    return None
 
 
 def _now() -> str:
@@ -315,23 +423,34 @@ def observation_from_run(run: Any) -> TraceObservation:
     extra = getattr(run, "extra", None) or {}
     raw_metadata = extra.get("metadata") if isinstance(extra, Mapping) else {}
     raw_metadata = raw_metadata if isinstance(raw_metadata, Mapping) else {}
+    # LangSmith accepts the terminal ``outputs`` and ``error`` fields on an
+    # existing run, but some deployments keep the original ``extra.metadata``
+    # snapshot immutable.  Merge only the bounded terminal envelope so an
+    # accepted root is not misclassified after it actually failed.  Unknown
+    # output keys (answers, prompts, tool payloads) are intentionally ignored.
+    raw_outputs = getattr(run, "outputs", None)
+    raw_outputs = raw_outputs if isinstance(raw_outputs, Mapping) else {}
     metadata: dict[str, Any] = {}
     for key in _SAFE_METADATA_KEYS:
-        if key not in raw_metadata:
-            continue
-        value = raw_metadata[key]
-        if key in {"request_id", "root_id", "task_id", "trace_id", "workflow_mode", "workflow_role", "department", "stage", "worker_id", "role", "status", "error_class", "provider", "model_name", "source", "trace_kind", "latency_scope", "observation_point", "primary_bottleneck_department", "joint_improvement_targets", "latency_attribution_status", "latency_attribution_method", "semantic_qa_version", "semantic_qa_evaluator", "semantic_qa_verdict", "semantic_qa_finding_codes"}:
-            metadata[key] = _bounded_text(value, 160)
-        elif key in {"error_count", "latency_ms", "metric_count", "p95_latency_ms", "primary_bottleneck_duration_ms", "semantic_qa_finding_count"}:
-            metadata[key] = _bounded_int(value)
-        elif key in {"window_start", "window_end"}:
-            metadata[key] = _bounded_text(value, 64)
-        elif key in {"eval_score", "semantic_qa_score", "semantic_qa_completeness", "semantic_qa_groundedness", "semantic_qa_temporal_consistency", "semantic_qa_uncertainty_honesty", "semantic_qa_relevance"}:
-            score = _bounded_score(value)
-            if score is not None:
-                metadata[key] = score
-        elif key == "raw_payloads_sent":
-            metadata[key] = bool(value)
+        value = raw_metadata.get(key, None)
+        if key in raw_metadata:
+            normalized = _normalized_metadata_value(key, value)
+            if normalized is not None or key == "raw_payloads_sent":
+                metadata[key] = normalized
+        if key in raw_outputs and raw_outputs[key] not in (None, ""):
+            normalized = _normalized_metadata_value(key, raw_outputs[key])
+            if normalized is not None:
+                # Terminal output is authoritative for status/error fields.
+                # It is also useful for worker counters when metadata was
+                # posted before the subprocess finished.
+                metadata[key] = normalized
+
+    run_status = _bounded_text(getattr(run, "status", ""), 32).lower()
+    if run_status in TERMINAL_STATUSES:
+        metadata["status"] = run_status
+    run_error = _bounded_text(getattr(run, "error", ""), 120)
+    if run_error:
+        metadata.setdefault("error_class", run_error)
     start_time = getattr(run, "start_time", None)
     end_time = getattr(run, "end_time", None)
     if "latency_ms" not in metadata and start_time is not None and end_time is not None:
@@ -464,6 +583,15 @@ def evaluate_observation(
     if status in ERROR_STATUSES or error_count > 0:
         findings.append("WORKER_OR_WORKFLOW_DEGRADED")
         summaries.append("worker or workflow reported a non-success status")
+        error_code = _bounded_text(
+            metadata.get("error_code") or metadata.get("error_class"), 96
+        )
+        http_status = _bounded_int(metadata.get("http_status"))
+        if error_code or http_status:
+            detail = f"error={error_code or 'unknown'}"
+            if http_status:
+                detail += f" http_status={http_status}"
+            summaries.append(detail)
     latency_ms = _bounded_int(metadata.get("latency_ms"))
     if latency_ms > latency_warn_ms:
         findings.append("LATENCY_ABOVE_THRESHOLD")
@@ -516,6 +644,9 @@ def evaluate_observation(
         "workflow_role": observation.workflow_role,
         "department": observation.department,
         "status": status,
+        "error_code": metadata.get("error_code"),
+        "error_class": metadata.get("error_class"),
+        "http_status": _bounded_int(metadata.get("http_status")) or None,
         "trace_kind": metadata.get("trace_kind"),
         "latency_scope": metadata.get("latency_scope"),
         "observation_point": metadata.get("observation_point"),
@@ -534,6 +665,17 @@ def evaluate_observation(
         "window_start": metadata.get("window_start"),
         "window_end": metadata.get("window_end"),
         "error_count": error_count,
+        "attempts": _bounded_int(metadata.get("attempts")) or None,
+        "retries": _bounded_int(metadata.get("retries")) or None,
+        "llm_calls": _bounded_int(metadata.get("llm_calls")) or None,
+        "tool_calls": _bounded_int(metadata.get("tool_calls")) or None,
+        "tool_error_count": _bounded_int(metadata.get("tool_error_count")) or None,
+        "telemetry_completeness": metadata.get("telemetry_completeness"),
+        "observability_source": metadata.get("observability_source"),
+        "observation_unit": metadata.get("observation_unit"),
+        "profile": metadata.get("profile"),
+        "output_verdict": metadata.get("output_verdict"),
+        "finding_count": _bounded_int(metadata.get("finding_count")) or None,
         "eval_score": score,
         "semantic_qa_version": metadata.get("semantic_qa_version"),
         "semantic_qa_evaluator": metadata.get("semantic_qa_evaluator"),
@@ -1524,7 +1666,12 @@ class LangSmithFeedbackService:
                 return {"discovered": 0, "completed": 0, "failed": 0, "dropped": 0}
             from langsmith import Client
 
-            client = Client(hide_inputs=True, hide_outputs=True, hide_metadata=False)
+            client = Client(
+                hide_inputs=True,
+                hide_outputs=True,
+                hide_metadata=False,
+                omit_traced_runtime_info=True,
+            )
             now = datetime.now(timezone.utc)
             since = now - timedelta(seconds=self.config.lookback_seconds)
             # A root may start before the observation window and finish inside
@@ -1543,7 +1690,21 @@ class LangSmithFeedbackService:
                 filter_expression=root_filter,
                 page_size=root_limit,
                 max_results=root_limit,
-                selects=["ID", "NAME", "STATUS", "START_TIME", "END_TIME", "EXTRA"],
+                # Root terminal outputs contain only the bounded error/status
+                # envelope written by close_root_trace.  Selecting OUTPUTS is
+                # required because LangSmith may retain initial metadata as
+                # immutable; observation_from_run ignores every other output
+                # key and never stores prompts or answers.
+                selects=[
+                    "ID",
+                    "NAME",
+                    "STATUS",
+                    "ERROR",
+                    "START_TIME",
+                    "END_TIME",
+                    "EXTRA",
+                    "OUTPUTS",
+                ],
             )
             for run in root_runs:
                 observation = observation_from_run(run)

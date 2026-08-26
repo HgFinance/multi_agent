@@ -129,18 +129,21 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
                             else:
                                 os.environ.pop(name, None)
 
-            def _observe_accounting_worker_after_exit(task, pid):
+            def _observe_department_worker_after_exit(task, pid):
                 """Attach task/model/tool metadata at the real spawn boundary.
 
                 Some Hermes releases resolve ``HERMES_BIN`` differently inside
                 the detached child. The dispatcher itself is the authoritative
                 process that knows both the claimed task/run and the spawned
                 PID, so keep this small fail-open observer here as the durable
-                Accounting fallback. It sends no task content.
+                department-worker fallback. It sends no task content.
                 """
 
-                if str(getattr(task, "assignee", "") or "").strip() != \
-                        "accounting-portfolio-department":
+                assignee = str(getattr(task, "assignee", "") or "").strip()
+                if assignee not in {
+                    "accounting-portfolio-department",
+                    "qa-department",
+                }:
                     return
                 task_id = str(getattr(task, "id", "") or "").strip()
                 run_id = getattr(task, "current_run_id", None)
@@ -178,7 +181,7 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
                         if scripts_dir not in sys.path:
                             sys.path.insert(0, scripts_dir)
                         from hermes_worker_observability import (
-                            publish_accounting_worker_trace,
+                            publish_department_worker_trace,
                         )
 
                         db_path = os.environ.get("HERMES_KANBAN_DB", "")
@@ -218,7 +221,7 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
                             return_code=int(return_code),
                             started_ms=int(float(started_at) * 1000),
                             ended_ms=int(time.time() * 1000),
-                            argv=["-p", "accounting-portfolio-department"],
+                            argv=["-p", assignee],
                             env=os.environ,
                         )
                     except Exception:
@@ -227,7 +230,7 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
 
                 threading.Thread(
                     target=_observe,
-                    name=f"accounting-trace-{task_id}",
+                    name=f"department-trace-{task_id}",
                     daemon=True,
                 ).start()
 
@@ -236,7 +239,7 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
             def _hgfinance_scoped_default_spawn_with_observation(
                     task, workspace, *, board=None):
                 pid = _original_spawn_for_observation(task, workspace, board=board)
-                _observe_accounting_worker_after_exit(task, pid)
+                _observe_department_worker_after_exit(task, pid)
                 return pid
 
             _hgfinance_scoped_default_spawn_with_observation._hgfinance_secret_scope_active = True

@@ -519,9 +519,11 @@ def test_qa_projection_is_korean_and_uses_explicit_qa_database():
                 "findings": [
                     {
                         "severity": "HIGH",
-                        "summary": "NAV bridge is unexplained",
+                        "finding_id": "QA-F001",
+                        "statement": "NAV bridge has an unexplained residual",
                         "owner": "Accounting Engine",
                         "block_condition": "공식 수치 확정 차단",
+                        "status": "OPEN",
                     }
                 ],
                 "checks": [{"check": "nav_bridge", "result": "FAIL"}],
@@ -540,6 +542,8 @@ def test_qa_projection_is_korean_and_uses_explicit_qa_database():
     rendered = str(children)
     assert "QA 감사 결과" in rendered
     assert "순자산 대사" in rendered
+    assert "순자산 bridge has an unexplained residual" in rendered
+    assert "QA-F001" in rendered
     assert "workflow_root_task_id" not in rendered
     assert props["판정"]["select"]["name"] == "FAIL"
     assert props["escalate"]["checkbox"] is True

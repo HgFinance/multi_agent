@@ -37,7 +37,7 @@ CEO도 HR처럼 **부서장(Hermes) + 직원(LangGraph Worker) 2계층**이다.
 
 ### 1-2. CEO 직원 (`executive-briefing-worker`, 1명, ALWAYS)
 
-**역할**: `research_packet`·`order_intent`·`risk_decision`·`qa_assessment`·`accounting_snapshot`·`strategy_report` — 5개 부서의 원본 보고서를 읽어 부서장이 소화할 수 있는 `ceo.worker-context.v1`(advisory_context)로 종합한다.
+**역할**: `research_packet`·`order_intent`·`risk_decision`·`accounting_snapshot`·`strategy_report` 등 primary 보고서를 읽어 부서장이 소화할 수 있는 `ceo.worker-context.v1`(advisory_context)로 종합한다. CEO 응답 후에는 같은 입력과 CEO 응답이 QA post-response audit으로 전달된다. QA 감사는 CEO 응답을 선행하거나 재작성하지 않는다.
 
 코드: [departments/00-ceo-office/employee_workers.py](../../departments/00-ceo-office/employee_workers.py)
 
@@ -56,13 +56,13 @@ CEO도 HR처럼 **부서장(Hermes) + 직원(LangGraph Worker) 2계층**이다.
 판단 잣대는 [2-6](#2-6-왜-부서장은-자율성-에이전트인가)에서 세운 것과 같다 — **무엇을 할지 스스로 선택하는가, 정해진 변환만 하는가, 규칙표를 적용만 하는가.** CEO 부서장도 첫 번째다.
 
 1. **할 일 자체가 매번 다르다.** SOUL.md가 나열한 책임이 7개다 — Mandate 번역, 라우팅·예산 배정, 위원회 소집, 부서 산출물 통합, 에스컬레이션, Chief-of-Staff(Pod 성과 요약·재배분 후보 생성·의제 초안·Drawdown 조사 등 그 자체로 여러 하위 판단), HR 예산·조직 승인. "입력 X → 출력 Y"가 아니라 이번 요청이 이 7개 중 무엇에 해당하는지부터 정하는 게 역할이다.
-2. **"무엇을 부를지" 자체가 선택이고, 이미 코드로 구현·실측됐다.** [CEO_CONVERSATIONAL_ROUTING_SPEC.md](CEO_CONVERSATIONAL_ROUTING_SPEC.md)의 `build_ceo_task_plan()`/`ceo_task_planner.py`가 정확히 이 선택을 다룬다 — 사용자가 "삼전 지금 사도 될까"라고 물으면 `research`·`qa`·`ceo` 3곳만, "전략 추천해줘"라면 `research`·`quant`·`risk`·`qa`·`ceo` 5곳을 부른다. 어느 부서를 부를지는 카테고리 기본값 + 자유 질의 해석으로 매번 다시 정해지며, opt-in LLM 라우터(`PORTFOLIO_CEO_TASK_PLANNER_MODE=llm`)를 켜면 이 선택 자체를 CEO Hermes 프로필이 직접 내린다.
+2. **"무엇을 부를지" 자체가 선택이고, 이미 코드로 구현·실측됐다.** [CEO_CONVERSATIONAL_ROUTING_SPEC.md](CEO_CONVERSATIONAL_ROUTING_SPEC.md)의 `build_ceo_task_plan()`/`ceo_task_planner.py`가 정확히 이 선택을 다룬다 — 사용자가 "삼전 지금 사도 될까"라고 물으면 response-plane은 `research`·`ceo`이고, CEO 응답 후 QA audit이 별도 생성된다. "전략 추천해줘"라면 response-plane은 `research`·`quant`·`ceo`이며 같은 방식으로 QA가 응답 후 감사한다. 어느 부서를 부를지는 카테고리 기본값 + 자유 질의 해석으로 매번 다시 정해지며, opt-in LLM 라우터(`PORTFOLIO_CEO_TASK_PLANNER_MODE=llm`)를 켜면 이 선택 자체를 CEO Hermes 프로필이 직접 내린다.
 3. **선택지가 규칙표로 미리 못 정해진다.** 사용자의 자유 질의는 조합이 무한해 `approve_request()`류의 "허용된 전이 목록"으로 미리 나열할 수 없다. 그래서 결정론 코드는 **최소한만** 강제하고(아래), 세부 선택은 부서장(또는 LLM 라우터)의 판단으로 남긴다.
 
 **이 자율성이 위험하지 않은 이유**는 두 겹으로 막혀 있다.
 
 - **바인딩 권한이 없다.** `forbidden_tools: [oms.submit, ledger.write, accounting.nav.confirm, audit.finding.close, workforce.permission.grant, iam.identity.create]` — 어느 부서를 부르든, 그 결과로 주문을 내거나 원장을 고치거나 NAV를 확정하는 힘 자체가 없다. 무엇을 볼지는 자유지만 무엇을 바꿀지는 자유가 아니다.
-- **부서 선택 자체에도 상·하한이 코드로 강제된다.** LLM 라우터를 켜도 `REQUIRED_DEPARTMENTS = frozenset({"qa", "ceo"})`(`ceo_task_planner.py:39`)가 `qa`·`ceo`를 항상 되살리고, allow-list가 정의 밖 부서 호출을 거부한다. "어느 부서를 부를지"라는 자율성과 "그 결과가 최종 판정이 되는 힘"이 분리되어 있다는 점에서 HR 부서장(2-6)과 같은 안전장치 패턴이다.
+- **부서 선택 자체에도 상·하한이 코드로 강제된다.** LLM 라우터를 켜도 `REQUIRED_DEPARTMENTS = frozenset({"qa", "ceo"})`(`ceo_task_planner.py`)가 CEO와 QA 감사 의도를 항상 보존하고, allow-list가 정의 밖 부서 호출을 거부한다. 다만 QA는 CEO 응답 전에 materialize되지 않고 응답 후 audit task가 된다. "어느 부서를 부를지"라는 자율성과 "그 결과가 최종 판정이 되는 힘"이 분리되어 있다는 점에서 HR 부서장(2-6)과 같은 안전장치 패턴이다.
 
 ---
 
