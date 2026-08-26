@@ -62,9 +62,9 @@ const OUTCOME_VIEW: Record<CardOutcome, { label: string; tone: string }> = {
 
 /** 방금 보낸 요청 하나. 누적하지 않는다 - 다음 전송이 이 값을 교체한다. */
 type SubmittedRequest = {
-  taskId: string;
+  taskId: string | null;
   query: string;
-  answer: string;
+  answer: string | null;
   planning: CeoQueryPlanning | null;
   orderRequestId: string | null;
   orderState: string | null;
@@ -153,14 +153,25 @@ function CeoControlRoomChatSession() {
   async function send(text: string) {
     const value = text.trim();
     if (!value || sendMutation.isPending) return;
-    setDraft("");
-    setLocalError("");
     if (PAPER_ORDER_LANGUAGE.test(value) && !selectedBookId) {
       setLocalError(
         "매매 지시를 보내려면 거래 가능한 PAPER 계좌를 선택하세요. 요청은 아직 전송하지 않았습니다.",
       );
       return;
     }
+
+    setDraft("");
+    setLocalError("");
+    // 서버의 최초 응답을 기다리지 않고 사용자 메시지를 먼저 보여준다.
+    setSubmitted({
+      taskId: null,
+      query: value,
+      answer: null,
+      planning: null,
+      orderRequestId: null,
+      orderState: null,
+    });
+
     try {
       const response = await sendMutation.mutateAsync({
         text: value,
@@ -261,7 +272,7 @@ function CeoControlRoomChatSession() {
             <div className="self-start max-w-[92%] rounded-lg border border-outline-variant bg-surface-container-low p-3">
               <div className="font-bold text-body-sm font-body-sm text-primary mb-1">CEO Hermes</div>
               <p className="text-body-sm font-body-sm text-on-surface m-0 whitespace-pre-line">
-                {submitted.answer}
+                {submitted.answer ?? "CEO Hermes가 답변을 준비하는 중입니다…"}
               </p>
               {submitted.planning ? (
                 <div className="mt-2 flex flex-wrap gap-1.5">
@@ -280,7 +291,9 @@ function CeoControlRoomChatSession() {
                   ) : null}
                 </div>
               ) : null}
-              <code className="block text-right text-[10px] text-outline mt-1">{submitted.taskId}</code>
+              {submitted.taskId ? (
+                <code className="block text-right text-[10px] text-outline mt-1">{submitted.taskId}</code>
+              ) : null}
             </div>
 
             {progress?.final_answer ? (
