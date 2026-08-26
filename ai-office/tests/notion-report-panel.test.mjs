@@ -65,7 +65,27 @@ test("행 전체가 하나의 버튼이라 키보드로도 리포트를 연다",
   assert.match(dashboard, /<button\s+type="button"\s+onClick=\{\(\) => setOpenReport\(row\)\}/);
   // `<tr onClick>`은 포커스를 못 받는다 - 표를 쓰지 않는 이유가 이것이다.
   assert.doesNotMatch(dashboard, /<tr[^>]*onClick/);
-  assert.match(dashboard, /grid w-full grid-cols-/);
+  assert.match(dashboard, /\$\{OUTPUT_ROW_GRID\} group w-full/);
+});
+
+test("헤더와 행이 같은 비율 grid를 써서 열이 어긋나지 않는다", () => {
+  // 헤더와 각 행은 서로 다른 grid 컨테이너라, `auto` 열은 각자 자기 글자
+  // 수만큼만 넓어진다 - 그래서 "구분"/"발행 시각" 헤더가 값과 다른 자리에
+  // 섰다. 글자 수가 아니라 가로 비율로 못 박아야 어느 행이든 같은 자리에서
+  // 열이 시작한다.
+  const grid = dashboard.match(/const OUTPUT_ROW_GRID =\s*"([^"]+)"/);
+  assert.ok(grid, "OUTPUT_ROW_GRID가 없다");
+  assert.doesNotMatch(grid[1], /_auto[_\]]/);
+  assert.match(grid[1], /%_/);
+  // 헤더와 행이 같은 상수를 안 쓰면 언젠가 다시 갈라진다.
+  assert.equal((dashboard.match(/\$\{OUTPUT_ROW_GRID\}/g) ?? []).length, 2);
+});
+
+test("각 행이 눌러볼 수 있는 줄이라는 걸 아이콘으로 알린다", () => {
+  // 글자만 있는 줄은 표처럼 보여서 아무도 누르지 않는다.
+  assert.match(dashboard, /chevron_right/);
+  assert.match(dashboard, /cursor-pointer/);
+  assert.match(dashboard, /group-hover:/);
 });
 
 test("모달은 Discord 스레드 모달과 같은 dialog 방식·같은 겉모습을 쓴다", () => {
