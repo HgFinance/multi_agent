@@ -21,7 +21,6 @@ export type NavKey = "dashboard" | "ai-office" | "mandate" | "agent-logs";
 
 const ITEMS: { key: NavKey; label: string; href?: string }[] = [
   { key: "mandate", label: "Mandate Configuration", href: "/mandate" },
-  { key: "ai-office", label: "AI Office", href: "/" },
   { key: "dashboard", label: "Dashboard", href: "/dashboard" },
   { key: "agent-logs", label: "Agent Logs", href: "/agent-logs" },
 ];
