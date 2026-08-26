@@ -183,6 +183,18 @@ function NotionReportDialog({
 }
 
 /**
+ * 결과물 목록의 열 폭 — 헤더 행과 각 버튼 행이 반드시 같은 문자열을 쓴다.
+ *
+ * 전에는 `auto`로 잡았는데, 헤더와 각 행이 서로 다른 grid 컨테이너라서
+ * `auto` 열은 각자 자기 글자 수만큼만 넓어졌다. 그래서 "구분"/"발행 시각"
+ * 헤더가 값과 다른 자리에 섰다. 글자 수가 아니라 가로 비율로 못 박아
+ * 어느 행이든 같은 위치에서 열이 시작하게 한다. 양 끝 고정폭 두 열은
+ * 아이콘 자리다.
+ */
+const OUTPUT_ROW_GRID =
+  "grid grid-cols-[1.25rem_minmax(0,1fr)_22%_24%_1.25rem] items-center gap-3 px-4";
+
+/**
  * 결과물 창고 — **Notion에 실제로 발행된 리포트만** 보여준다.
  *
  * 전에는 Hermes Kanban의 done 열을 그대로 실었는데, done 카드와 발행된
@@ -228,18 +240,20 @@ export function RecentOutputsPanel() {
         ) : (
           // 표가 아니라 헤더 + 버튼 목록이다. 행 전체가 하나의 손잡이여야 하는데
           // `<tr>`은 포커스를 못 받고 `<button>`으로 감쌀 수도 없다(HTML이
-          // 허용하지 않는다). 같은 grid 템플릿을 헤더와 각 버튼이 공유해서
-          // 열이 표처럼 맞는다.
+          // 허용하지 않는다). 헤더와 각 버튼이 `OUTPUT_ROW_GRID` 하나를
+          // 공유해서 열이 표처럼 맞는다.
           //
           // 목록이 길어지므로 세로 스크롤을 붙이고, 헤더는 sticky로 남긴다.
           <div className="border border-outline-variant rounded max-h-80 overflow-y-auto">
             <div
               aria-hidden="true"
-              className="sticky top-0 z-10 grid grid-cols-[minmax(0,1fr)_auto_auto] gap-4 bg-surface-container-low border-b border-outline-variant p-4 text-label-md font-label-md font-semibold text-secondary uppercase"
+              className={`${OUTPUT_ROW_GRID} sticky top-0 z-10 bg-surface-container-low border-b border-outline-variant py-3 text-label-md font-label-md font-semibold text-secondary uppercase`}
             >
+              <span />
               <span>결과물</span>
               <span>구분</span>
               <span className="text-right">발행 시각</span>
+              <span />
             </div>
             <ul className="m-0 list-none p-0">
               {reports.map((row) => (
@@ -248,12 +262,26 @@ export function RecentOutputsPanel() {
                     type="button"
                     onClick={() => setOpenReport(row)}
                     title={row.title}
-                    className="grid w-full grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-4 p-4 text-left text-body-sm font-body-sm hover:bg-surface focus-visible:bg-surface transition-colors"
+                    className={`${OUTPUT_ROW_GRID} group w-full cursor-pointer py-3 text-left text-body-sm font-body-sm hover:bg-surface-container focus-visible:bg-surface-container focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-primary transition-colors`}
                   >
-                    <span className="min-w-0 truncate text-on-surface">{row.title}</span>
-                    <span className="text-on-surface-variant">{row.category ?? "—"}</span>
-                    <span className="whitespace-nowrap text-right text-on-surface-variant">
+                    <span
+                      aria-hidden="true"
+                      className="material-symbols-outlined text-[20px] leading-none text-on-surface-variant group-hover:text-primary transition-colors"
+                    >
+                      description
+                    </span>
+                    <span className="min-w-0 truncate text-on-surface group-hover:text-primary group-hover:underline transition-colors">
+                      {row.title}
+                    </span>
+                    <span className="min-w-0 truncate text-on-surface-variant">{row.category ?? "—"}</span>
+                    <span className="truncate text-right text-on-surface-variant">
                       {formatPublishedAt(row.published_at)}
+                    </span>
+                    <span
+                      aria-hidden="true"
+                      className="material-symbols-outlined text-[20px] leading-none text-outline group-hover:translate-x-0.5 group-hover:text-primary transition-all"
+                    >
+                      chevron_right
                     </span>
                   </button>
                 </li>
