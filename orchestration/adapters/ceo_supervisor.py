@@ -20,6 +20,7 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar, copy_context
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -58,8 +59,10 @@ from orchestration.ceo_workflow_scope import (
     extract_scope_references,
     is_user_query_body,
     langsmith_trace_context_from_body,
+    langsmith_trace_run_id_from_body,
     mandate_snapshot_present,
     primary_idempotency_key,
+    previous_question_context_from_body,
     read_marker,
     selected_primary_profiles_from_task,
     user_paper_order_scope_from_body,
@@ -102,6 +105,7 @@ from orchestration.workforce_advisory_context import fetch_workforce_advisory_co
 logger = logging.getLogger(__name__)
 
 _CLI_LANE: ContextVar[str] = ContextVar("ceo_cli_lane", default="unknown")
+_LANGSMITH_DIRECT_ROOT_MARKER = "hgfinance.langsmith-direct-root.v1"
 
 
 def _record_full_board_fallback(*, lane: str, reason: str, root_id: str = "") -> None:
@@ -174,10 +178,13 @@ TERMINAL_STATUSES = frozenset(
         "crashed",
         "timed_out",
         "spawn_failed",
+        # Hermes moves a task here after a repeated block loop.  Triage is a
+        # terminal manual-review state and must never be auto-unblocked again.
+        "triage",
     }
 )
 FAILURE_OUTCOMES = frozenset(
-    {"gave_up", "crashed", "timed_out", "spawn_failed", "failed"}
+    {"gave_up", "crashed", "timed_out", "spawn_failed", "failed", "triage"}
 )
 PRIMARY_DEPARTMENTS = frozenset(
     {"research", "quant", "trading", "risk", "accounting"}
@@ -535,6 +542,10 @@ class SupervisorState:
     # primary. This prevents the Hermes head from rediscovering the same facts
     # through browser/shell turns and does not create a second scorecard.
     workforce_advisory_context: str | None = None
+    # Explicit Discord follow-up context copied from the current root only.
+    # This is a rendered, bounded section; it is never resolved from unrelated
+    # Kanban history.
+    previous_question_context: str = ""
 
     def __post_init__(self) -> None:
         # Keep the old constructor field for callers/tests and resolve it once
@@ -824,15 +835,29 @@ _SCOPED_REQUEST_CONTEXT_GUARD = (
     "- If the required target is absent, call kanban_block with needs_input "
     "instead of guessing."
 )
-_STARTUP_ROOT_RECOVERY_WINDOW_SECONDS = 10 * 60
-
-
 def _is_planning_root_body(body: str) -> bool:
     """Recognize current and legacy planning roots through one predicate."""
 
     return workflow_role_from_body(body) == "root" or (
         "root_task_role=scope_and_planning" in body
         and "planning_terminal_state=done_after_child_creation" in body
+    )
+
+
+def _legacy_root_selection_may_be_in_comment(body: str) -> bool:
+    """Identify legacy Discord roots whose plan lived in a CEO comment.
+
+    The direct Discord producer historically stored the selected departments
+    in a ``ceo-agent`` comment rather than the root body. Board/index rows do
+    not include comments, so these roots need one authoritative ``show`` read
+    before selection can be resolved. Discord coordinates keep this fallback
+    narrowly scoped and avoid probing unrelated old roots with no durable
+    routing signal.
+    """
+
+    return bool(
+        read_marker(body, "discord_message_id")
+        or read_marker(body, "discord_thread_id")
     )
 
 
@@ -1521,7 +1546,7 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
                 continue
             return blocked_decision
         if child.failed:
-            if child.retry_count < state.max_retries:
+            if child.status != "triage" and child.retry_count < state.max_retries:
                 return SupervisorDecision(
                     SupervisorAction.RETRY_TASK,
                     state.parent_task_id,
@@ -1626,7 +1651,7 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
             return None
         for child in state.qa_children:
             if child.blocked or child.failed:
-                if child.retry_count < state.max_retries:
+                if child.status != "triage" and child.retry_count < state.max_retries:
                     return SupervisorDecision(
                         SupervisorAction.RETRY_TASK,
                         state.parent_task_id,
@@ -2234,6 +2259,8 @@ class HermesKanbanClient:
         parent_task_ids: Sequence[str],
         idempotency_key: str,
         initial_status: str | None = None,
+        max_runtime_seconds: int | None = None,
+        max_retries: int | None = None,
     ) -> dict[str, Any]:
         # 사용자 발원(origin=user-query) 워크플로의 자식은 대기열에서 공장 카드보다
         # 앞선다. 루트만 앞세우면 소용이 없다 - 실제로 답을 만드는 것은 자식이고,
@@ -2266,6 +2293,28 @@ class HermesKanbanClient:
                 "--json",
             )
         )
+        workflow_role = terminal_workflow_role({"body": request.body}) or ""
+        if workflow_role in {"primary", "qa", "synthesis"}:
+            if max_runtime_seconds is None:
+                try:
+                    max_runtime_seconds = int(
+                        self.environment.get(
+                            "HGFINANCE_WORKER_MAX_RUNTIME_SECONDS", "600"
+                        )
+                    )
+                except (TypeError, ValueError):
+                    max_runtime_seconds = 600
+            if max_retries is None:
+                try:
+                    max_retries = int(
+                        self.environment.get("HGFINANCE_WORKER_MAX_RETRIES", "2")
+                    )
+                except (TypeError, ValueError):
+                    max_retries = 2
+            max_runtime_seconds = max(60, min(int(max_runtime_seconds), 1200))
+            max_retries = max(1, min(int(max_retries), 3))
+            args.extend(("--max-runtime", str(max_runtime_seconds)))
+            args.extend(("--max-retries", str(max_retries)))
         if initial_status:
             if initial_status not in {"blocked", "running"}:
                 raise SupervisorValidationError("invalid initial status")
@@ -3125,6 +3174,7 @@ class CeoSupervisorService:
         discord_delivery: DiscordFinalDelivery | None = None,
         department_notion_projection: Any | None = None,
         experience_bank: ExperienceBank | None = None,
+        terminal_observer_submit: Callable[[Callable[[], None]], bool] | None = None,
     ) -> None:
         self.client = client
         self.max_retries = max_retries
@@ -3136,6 +3186,10 @@ class CeoSupervisorService:
         self.qa_projection = qa_projection
         self.discord_delivery = discord_delivery
         self.experience_bank = experience_bank or ExperienceBank.from_env()
+        # Production supplies a bounded background queue so slow Discord and
+        # Notion projections do not hold an event worker. Tests and embedders
+        # default to synchronous execution for deterministic compatibility.
+        self._terminal_observer_submit = terminal_observer_submit
         self._department_notion_projection = (
             department_notion_projection
             if department_notion_projection is not None
@@ -3250,6 +3304,7 @@ class CeoSupervisorService:
         error_class: str | None = None,
         department: str | None = None,
         task_id: str | None = None,
+        terminal_payload: Mapping[str, Any] | None = None,
     ) -> bool:
         """Close one root trace after the existing response-plane decision."""
 
@@ -3265,11 +3320,117 @@ class CeoSupervisorService:
         body = str(root_payload.get("body") or "")
         context = langsmith_trace_context_from_body(body)
         if not context:
-            return False
+            # Direct CEO Hermes CLI roots do not carry the BFF-created trace
+            # marker. Preserve the workflow result, but still publish one
+            # redacted terminal observation for QA correlation.
+            try:
+                durable_root = self.client.show(root_id)
+                comments = durable_root.get("comments") or []
+                if any(
+                    _LANGSMITH_DIRECT_ROOT_MARKER in str(
+                        comment.get("body") if isinstance(comment, Mapping) else comment
+                    )
+                    for comment in comments
+                ):
+                    with self._closed_root_traces_lock:
+                        self._closed_root_traces.add(root_id)
+                    return True
+            except Exception:
+                # A read failure must not turn a completed CEO workflow into
+                # a business failure; the observer remains fail-open.
+                pass
+            answer_payload = terminal_payload or root_payload
+            answer = self._root_explicit_response_content(answer_payload)
+            prompt = (
+                body.split("\n## User request\n", 1)[1].strip()
+                if "\n## User request\n" in body
+                else ""
+            )
+            semantic_qa = evaluate_prompt_answer(
+                prompt,
+                answer,
+                summary=str(
+                    answer_payload.get("summary")
+                    or answer_payload.get("latest_summary")
+                    or ""
+                ),
+                status=status,
+            )
+            try:
+                from orchestration.llm_observability import publish_root_trace
+
+                started = float(root_payload.get("created_at") or 0)
+                ended = float(
+                    answer_payload.get("completed_at")
+                    or answer_payload.get("finished_at")
+                    or root_payload.get("completed_at")
+                    or time.time()
+                )
+                latency_ms = max(0, int((ended - started) * 1000)) if started else 0
+                started_at = (
+                    datetime.fromtimestamp(started, tz=timezone.utc)
+                    if started
+                    else None
+                )
+                ended_at = datetime.fromtimestamp(ended, tz=timezone.utc)
+                resolved_task_id = task_id or str(
+                    answer_payload.get("id")
+                    or answer_payload.get("task_id")
+                    or root_id
+                )
+                has_discord_context = any(
+                    read_marker(candidate_body, marker)
+                    for candidate_body in (
+                        body,
+                        str(answer_payload.get("body") or ""),
+                    )
+                    for marker in (
+                        "discord_request_id",
+                        "discord_message_id",
+                        "discord_channel_id",
+                        "discord_thread_id",
+                    )
+                )
+                published = publish_root_trace(
+                    request_id=root_id,
+                    root_id=root_id,
+                    task_id=resolved_task_id,
+                    department=department,
+                    workflow_mode=workflow_mode_from_body(body),
+                    source=read_marker(body, "source") or "ceo-hermes-direct",
+                    status=status,
+                    latency_ms=latency_ms,
+                    error_class=error_class if has_discord_context else None,
+                    semantic_qa=semantic_qa.as_metadata(),
+                    started_at=started_at,
+                    ended_at=ended_at,
+                )
+                if published:
+                    with self._closed_root_traces_lock:
+                        self._closed_root_traces.add(root_id)
+                    try:
+                        self.client.comment_task(
+                            root_id,
+                            f"{_LANGSMITH_DIRECT_ROOT_MARKER} status=published",
+                        )
+                    except Exception:
+                        logger.warning(
+                            "langsmith-direct-root-marker-failed root=%s",
+                            root_id,
+                        )
+                return published
+            except Exception as exc:  # noqa: BLE001 - observability is fail-open.
+                logger.warning(
+                    "langsmith-direct-root-observation-failed root=%s error=%s",
+                    root_id,
+                    type(exc).__name__,
+                )
+                return False
         # Evaluate the user-facing answer while it is still inside the
         # application boundary.  Only bounded dimensions/codes leave this
         # process; prompt/answer text is never sent to LangSmith.
-        answer = self._root_explicit_response_content(root_payload)
+        answer_payload = terminal_payload or root_payload
+        answer = self._root_explicit_response_content(answer_payload)
         prompt = body.split("\n## User request\n", 1)[1].strip() if "\n## User request\n" in body else ""
         semantic_qa = evaluate_prompt_answer(
             prompt,
@@ -3282,6 +3443,7 @@ class CeoSupervisorService:
 
             closed = close_root_trace(
                 context,
+                run_id=langsmith_trace_run_id_from_body(body) or None,
                 request_id=read_marker(body, "request_id") or None,
                 root_id=root_id,
                 task_id=task_id or root_id,
@@ -3290,6 +3452,12 @@ class CeoSupervisorService:
                 source=read_marker(body, "source") or None,
                 status=status,
                 error_class=error_class,
+                terminal_metadata={
+                    "terminal_status": status,
+                    "terminal_reason": error_class or "completed",
+                    "terminal_task_id": task_id or root_id,
+                    "terminal_department": department or "ceo-workflow",
+                },
                 semantic_qa=semantic_qa.as_metadata(),
             )
         except Exception as exc:  # noqa: BLE001 - observability is fail-open.
@@ -3299,6 +3467,12 @@ class CeoSupervisorService:
                 type(exc).__name__,
             )
             return False
+        if not closed:
+            logger.warning(
+                "langsmith-root-close-unconfirmed root=%s status=%s",
+                root_id,
+                status,
+            )
         if closed:
             with self._closed_root_traces_lock:
                 self._closed_root_traces.add(root_id)
@@ -3658,19 +3832,24 @@ class CeoSupervisorService:
                     _elapsed_ms(delivery_started_ms, delivery_completed_ms),
                 )
 
-        # The response-synthesis terminal is the existing finalization
-        # boundary. Close observability only after delivery succeeded (or when
-        # delivery is intentionally absent in non-Discord deployments).
-        if response_synthesis and (
-            self.discord_delivery is None
-            or delivery_status in {"sent", "deduped"}
-        ):
+        # The response-synthesis terminal is the finalization boundary. The
+        # trace must close even when a direct CLI root has no Discord thread;
+        # record that delivery gap as an observability error instead of
+        # leaving the LangSmith lifecycle open forever.
+        if response_synthesis:
             terminal_status = str(
                 task.get("status") or task.get("outcome") or "completed"
             ).casefold()
+            delivery_error = None
+            if self.discord_delivery is not None and delivery_status not in {
+                "sent",
+                "deduped",
+            }:
+                delivery_error = f"discord_{delivery_status or 'unconfirmed'}"
             self._close_root_trace(
                 root_id=root_task_id,
                 root_payload=root_payload,
+                terminal_payload=task,
                 status=(
                     "blocked"
                     if terminal_status in {"blocked", "gave_up", "failed", "crashed"}
@@ -3679,7 +3858,7 @@ class CeoSupervisorService:
                 error_class=(
                     terminal_status
                     if terminal_status in {"gave_up", "failed", "crashed", "timed_out"}
-                    else None
+                    else delivery_error
                 ),
             )
 
@@ -4037,6 +4216,16 @@ class CeoSupervisorService:
         if content:
             return content
 
+        # Hermes versions differ in whether the terminal answer is exposed as
+        # a task field or in the latest run metadata.  Read the same bounded
+        # metadata envelope used by the department projections so a direct
+        # root is evaluated against the actual terminal answer, not its
+        # planning acknowledgement.
+        metadata = merged_run_metadata(root_payload)
+        content = _text(metadata.get("final_answer") or metadata.get("result"))
+        if content:
+            return content
+
         runs = root_payload.get("runs")
         if not isinstance(runs, Sequence) or isinstance(runs, (str, bytes)):
             return ""
@@ -4182,6 +4371,9 @@ class CeoSupervisorService:
             workflow_mode="analysis",
             selected_primary_profiles=selected,
             root_is_user_query=True,
+            previous_question_context=previous_question_context_from_body(
+                str(root_payload.get("body") or "")
+            ),
             allow_primary_passthrough=self.discord_delivery is not None,
             risk_advisory_context=fetch_risk_advisory_context(
                 str(root_payload.get("body") or "")
@@ -4759,6 +4951,7 @@ class CeoSupervisorService:
         self,
         *,
         listed_rows: Sequence[Mapping[str, Any]] | None = None,
+        allow_historical_done: bool = False,
     ) -> tuple[SupervisorDecision, ...]:
         """Materialize complete CEO-authored analysis plans before root completion.
 
@@ -4829,6 +5022,7 @@ class CeoSupervisorService:
                 or status not in {"ready", "running", "done"}
                 or (
                     status == "done"
+                    and not allow_historical_done
                     and (
                         completed_at <= 0
                         or now - completed_at > done_recovery_window_seconds
@@ -4838,6 +5032,12 @@ class CeoSupervisorService:
                 or not is_user_query_body(body)
                 or workflow_mode_from_body(body) != "analysis"
                 or task_id in handled_empty_primary_roots
+                or (
+                    allow_historical_done
+                    and status == "done"
+                    and not selected_primary_profiles_from_task(row)
+                    and not _legacy_root_selection_may_be_in_comment(body)
+                )
             ):
                 continue
 
@@ -4935,6 +5135,9 @@ class CeoSupervisorService:
                     has_mandate=mandate_snapshot_present(root_body),
                     selected_primary_profiles=recovery_selected_profiles,
                     root_is_user_query=True,
+                    previous_question_context=previous_question_context_from_body(
+                        root_body
+                    ),
                     allow_primary_passthrough=(
                         self.discord_delivery is not None
                     ),
@@ -5048,11 +5251,12 @@ class CeoSupervisorService:
         """Reconcile terminal roots whose watch event was missed.
 
         The supervisor is normally event-driven, but a restart cannot replay
-        terminal events that happened before ``kanban watch`` subscribed. A
-        narrow startup reconciliation covers only completed planning roots
-        with a durable primary selection and at least one terminal primary.
-        It reuses ``handle_terminal_event`` so the normal scope validation,
-        idempotency comments, and action guards remain authoritative.
+        terminal events that happened before ``kanban watch`` subscribed. This
+        reconciliation is intentionally age-independent: a root with a missed
+        synthesis event can be hours old and still require one final response.
+        Candidate discovery remains cheap and root-local; authoritative
+        ``show``/``workflow`` reads and idempotent action guards remain the
+        final authority.
         """
 
         list_tasks = getattr(self.client, "list_tasks", None)
@@ -5075,7 +5279,6 @@ class CeoSupervisorService:
             )
             candidate_rows = list_tasks()
 
-        now = int(time.time())
         roots: dict[str, tuple[int, Mapping[str, Any]]] = {}
         for row in candidate_rows:
             task_id = str(row.get("id") or row.get("task_id") or "")
@@ -5088,10 +5291,13 @@ class CeoSupervisorService:
                 not task_id
                 or status not in {"done", "completed", "archived"}
                 or not _is_planning_root_body(body)
+                # Preserve the old test/compatibility behavior and avoid
+                # expensive authoritative reads for roots with no durable
+                # selection. Modern direct roots may still recover their
+                # selection from a CEO comment in the ready-plan lane.
                 or (
-                    recovery_timestamp > 0
-                    and now - recovery_timestamp
-                    > _STARTUP_ROOT_RECOVERY_WINDOW_SECONDS
+                    not selected_primary_profiles_from_task(row)
+                    and not _legacy_root_selection_may_be_in_comment(body)
                 )
             ):
                 continue
@@ -5120,6 +5326,15 @@ class CeoSupervisorService:
                 for payload in payloads
                 if payload.get("assignee") is not None
             )
+            if any(
+                child.is_in_workflow(root_id)
+                and child.workflow_role == "synthesis"
+                for child in children
+            ):
+                # A synthesis already exists, including one whose terminal
+                # event is still being handled by the dedicated reconciler.
+                # Never create a second response-plane task.
+                continue
             terminal_primary = tuple(
                 child
                 for child in children
@@ -5128,6 +5343,17 @@ class CeoSupervisorService:
                 and child.terminal
             )
             if not terminal_primary:
+                # A legacy direct root can be completed before its CEO-authored
+                # delegation comment is materialized into child cards. Reuse
+                # the normal idempotent materializer with this authoritative
+                # root payload so an old root is repaired without broadening
+                # the periodic recovery scan.
+                decisions.extend(
+                    self.materialize_ready_primary_plans(
+                        listed_rows=(root_payload,),
+                        allow_historical_done=True,
+                    )
+                )
                 continue
 
             wake_child = next(
@@ -5155,6 +5381,108 @@ class CeoSupervisorService:
             if decision is not None:
                 decisions.append(decision)
         return tuple(decisions)
+
+    def reconcile_expired_workflows(
+        self,
+        *,
+        listed_rows: Sequence[Mapping[str, Any]] | None = None,
+    ) -> tuple[str, ...]:
+        """Stop over-deadline workers and wake synthesis with partial state.
+
+        Hermes owns the actual SIGTERM/SIGKILL sequence when a task's
+        ``--max-runtime`` is exceeded. This lane owns the end-to-end ceiling:
+        once the root deadline is reached, still-running primary cards are
+        blocked and the normal supervisor path is replayed so the user gets a
+        bounded partial/failure answer instead of a root that remains pending.
+        """
+
+        list_tasks = getattr(self.client, "list_tasks", None)
+        show = getattr(self.client, "show", None)
+        if not callable(show):
+            return ()
+
+        if listed_rows is None:
+            if not callable(list_tasks):
+                return ()
+            board_rows = list_tasks()
+        else:
+            board_rows = listed_rows
+
+        now = int(time.time())
+        expired: list[tuple[int, str, Mapping[str, Any]]] = []
+        for row in board_rows:
+            root_id = str(row.get("id") or row.get("task_id") or "")
+            body = str(row.get("body") or "")
+            status = str(row.get("status") or "").casefold()
+            started_at = int(row.get("created_at") or 0)
+            if (
+                not root_id
+                or status not in {"done", "completed", "archived"}
+                or not _is_planning_root_body(body)
+                or not selected_primary_profiles_from_task(row)
+                or started_at <= 0
+            ):
+                continue
+            try:
+                timeout_seconds = int(read_marker(body, "workflow_timeout_seconds"))
+            except ValueError:
+                timeout_seconds = 1200
+            timeout_seconds = max(60, min(timeout_seconds, 86_400))
+            if now - started_at > timeout_seconds:
+                expired.append((started_at, root_id, row))
+
+        stopped: list[str] = []
+        for _started_at, root_id, row in sorted(expired, key=lambda item: item[:2]):
+            root_payload = show(root_id)
+            if str(root_payload.get("status") or "").casefold() not in {
+                "done",
+                "completed",
+                "archived",
+            }:
+                continue
+            if not selected_primary_profiles_from_task(root_payload):
+                continue
+            _root, payloads = self.client.workflow(root_id)
+            children = tuple(
+                ChildTaskState.from_hermes(payload)
+                for payload in payloads
+                if payload.get("assignee") is not None
+            )
+            if any(
+                child.is_in_workflow(root_id)
+                and child.workflow_role == "synthesis"
+                for child in children
+            ):
+                continue
+            active_primaries = tuple(
+                child
+                for child in children
+                if child.is_in_workflow(root_id)
+                and child.is_analysis
+                and not child.terminal
+            )
+            if not active_primaries:
+                continue
+            for child in active_primaries:
+                self.client.block_task(
+                    child.task_id,
+                    "workflow_timeout_exceeded: end-to-end CEO workflow deadline reached",
+                )
+            wake = active_primaries[0]
+            self.handle_terminal_event(
+                {
+                    "event_id": f"reconcile-timeout:{root_id}:{wake.task_id}",
+                    "task_id": wake.task_id,
+                    "kind": "blocked",
+                }
+            )
+            stopped.append(root_id)
+            logger.warning(
+                "workflow-timeout root=%s stopped_primary_count=%d timeout_reason=deadline_exceeded",
+                root_id,
+                len(active_primaries),
+            )
+        return tuple(stopped)
 
     def reconcile_completed_syntheses(
         self,
@@ -5414,6 +5742,7 @@ class CeoSupervisorService:
             has_mandate=mandate_snapshot_present(root_body),
             selected_primary_profiles=recovery_selected_profiles,
             root_is_user_query=True,
+            previous_question_context=previous_question_context_from_body(root_body),
             allow_primary_passthrough=self.discord_delivery is not None,
             risk_advisory_context=fetch_risk_advisory_context(root_body),
             accounting_advisory_context=fetch_accounting_advisory_context(),
@@ -5814,6 +6143,7 @@ class CeoSupervisorService:
                     type(exc).__name__,
                 )
 
+        deferred_terminal_observer: Callable[[], None] | None = None
         try:
             root_id = self._cached_workflow_root(task_id)
 
@@ -6033,14 +6363,53 @@ class CeoSupervisorService:
                     validation_completed_ms = time.time_ns() // 1_000_000
                 except WorkflowScopeViolation as exc:
                     reason = f"workflow_scope_validation: {exc}"
+                    scope_error_prefix = (
+                        "hgfinance.ceo-workflow-scope-error.v1 "
+                        f"event={event_key} "
+                    )
+                    comments = root_payload.get("comments")
+                    scope_error_comments = tuple(
+                        comment
+                        for comment in (comments or ())
+                        if isinstance(comment, Mapping)
+                        and str(comment.get("body") or "").startswith(
+                            "hgfinance.ceo-workflow-scope-error.v1 "
+                        )
+                    ) if (
+                        isinstance(comments, Sequence)
+                        and not isinstance(comments, (str, bytes))
+                    ) else ()
+                    already_recorded = any(
+                        str(comment.get("body") or "").startswith(scope_error_prefix)
+                        for comment in scope_error_comments
+                    )
                     comment_task = getattr(self.client, "comment_task", None)
-                    if callable(comment_task):
+                    if callable(comment_task) and not already_recorded:
                         comment_task(
                             root_id,
-                            f"hgfinance.ceo-workflow-scope-error.v1 "
-                            f"event={event_key} reason={reason}",
+                            f"{scope_error_prefix}reason={reason}",
                         )
-                    self._safe_abort(root_id, reason)
+                    root_status = str(root_payload.get("status") or "").casefold()
+                    if root_status in TERMINAL_STATUSES:
+                        # Planning roots are normally already done.  A late
+                        # legacy scope error is an audit finding, not authority
+                        # to mutate that terminal root back to blocked.  The
+                        # event-specific comment is the durable dedupe record.
+                        logger.warning(
+                            "workflow-scope-error-recorded root=%s event=%s "
+                            "root_status=%s mutation=skipped duplicate=%s",
+                            root_id,
+                            event_key,
+                            root_status,
+                            str(already_recorded).lower(),
+                        )
+                        # One root-level scope audit finding is enough for a
+                        # historical terminal workflow. Different old child
+                        # events must not emit the same recovery action again.
+                        if scope_error_comments:
+                            return None
+                    else:
+                        self._safe_abort(root_id, reason)
                     return SupervisorDecision(
                         SupervisorAction.BLOCK_ABORT,
                         root_id,
@@ -6064,77 +6433,75 @@ class CeoSupervisorService:
                 observer_completed_ms = 0
 
                 def project_terminal_observers() -> None:
+                    nonlocal deferred_terminal_observer
                     nonlocal terminal_observers_projected, terminal_task_payload
                     nonlocal terminal_progress_status
                     nonlocal observer_started_ms, observer_completed_ms
                     if terminal_observers_projected:
                         return
                     terminal_observers_projected = True
-                    observer_started_ms = time.time_ns() // 1_000_000
-                    try:
-                        terminal_projection_status = self._project_terminal_task(
-                            root_task_id=root_id,
-                            task_id=task_id,
-                            task_payloads=(root_payload, *payloads),
-                            event=event,
-                        )
-                        if (
-                            terminal_role == "synthesis"
-                            and terminal_projection_status not in {"sent", "deduped"}
-                        ):
-                            # A later recovery wakeup may retry a failed or
-                            # not-yet-correlatable delivery. Concurrent duplicates
-                            # remain coalesced because this runs after the response
-                            # attempt has completed.
-                            with self._seen_events_lock:
-                                self._seen_terminal_transitions.discard(
-                                    transition_key
-                                )
 
-                        if terminal_task_payload is not None:
-                            try:
-                                terminal_progress_status = (
-                                    self._deliver_department_progress(
+                    def run_observers() -> None:
+                        nonlocal terminal_progress_status
+                        nonlocal observer_started_ms, observer_completed_ms
+                        observer_started_ms = time.time_ns() // 1_000_000
+                        try:
+                            terminal_projection_status = self._project_terminal_task(
+                                root_task_id=root_id,
+                                task_id=task_id,
+                                task_payloads=(root_payload, *payloads),
+                                event=event,
+                            )
+                            if (
+                                terminal_role == "synthesis"
+                                and terminal_projection_status not in {"sent", "deduped"}
+                            ):
+                                with self._seen_events_lock:
+                                    self._seen_terminal_transitions.discard(transition_key)
+
+                            if terminal_task_payload is not None:
+                                try:
+                                    terminal_progress_status = self._deliver_department_progress(
                                         root_task_id=root_id,
                                         root_payload=root_payload,
                                         task_payload=terminal_task_payload,
                                         event=event,
                                     )
-                                )
-                            except Exception as exc:
-                                logger.warning(
-                                    "department-discord-progress-failed "
-                                    "task=%s kind=%s error=%s",
-                                    task_id,
-                                    kind,
-                                    type(exc).__name__,
-                                )
+                                except Exception as exc:
+                                    logger.warning(
+                                        "department-discord-progress-failed task=%s kind=%s error=%s",
+                                        task_id,
+                                        kind,
+                                        type(exc).__name__,
+                                    )
 
-                        self._reconcile_department_terminal_progress(
-                            root_task_id=root_id,
-                            root_payload=root_payload,
-                            task_payloads=payloads,
-                            payloads_are_authoritative=payloads_are_authoritative,
-                            skip_task_ids=(
-                                (task_id,)
-                                if terminal_progress_status
-                                in {"created", "updated", "unchanged", "deduped", "sent"}
-                                else ()
-                            ),
-                        )
-                    finally:
-                        observer_completed_ms = time.time_ns() // 1_000_000
-                        logger.info(
-                            "supervisor-observer-timing root=%s task=%s event=%s "
-                            "observer_started=%d observer_completed=%d "
-                            "observer_duration_ms=%d",
-                            root_id,
-                            task_id,
-                            event_key,
-                            observer_started_ms,
-                            observer_completed_ms,
-                            _elapsed_ms(observer_started_ms, observer_completed_ms),
-                        )
+                            self._reconcile_department_terminal_progress(
+                                root_task_id=root_id,
+                                root_payload=root_payload,
+                                task_payloads=payloads,
+                                payloads_are_authoritative=payloads_are_authoritative,
+                                skip_task_ids=(
+                                    (task_id,)
+                                    if terminal_progress_status
+                                    in {"created", "updated", "unchanged", "deduped", "sent"}
+                                    else ()
+                                ),
+                            )
+                        finally:
+                            observer_completed_ms = time.time_ns() // 1_000_000
+                            logger.info(
+                                "supervisor-observer-timing root=%s task=%s event=%s "
+                                "observer_started=%d observer_completed=%d "
+                                "observer_duration_ms=%d lock_held=false",
+                                root_id,
+                                task_id,
+                                event_key,
+                                observer_started_ms,
+                                observer_completed_ms,
+                                _elapsed_ms(observer_started_ms, observer_completed_ms),
+                            )
+
+                    deferred_terminal_observer = run_observers
 
                 terminal_role = (
                     terminal_workflow_role(terminal_task_payload)
@@ -6295,6 +6662,9 @@ class CeoSupervisorService:
                         planner_qa_requested=planner_qa_requested,
                     ).qa_blocks_response,
                     workflow_mode=workflow_mode,
+                    previous_question_context=previous_question_context_from_body(
+                        root_body
+                    ),
                     has_mandate=mandate_snapshot_present(root_body),
                     selected_primary_profiles=selected_profiles,
                     root_is_user_query=is_user_query_body(root_body),
@@ -6430,6 +6800,7 @@ class CeoSupervisorService:
                         self._close_root_trace(
                             root_id=root_id,
                             root_payload=root_payload,
+                            terminal_payload=passthrough,
                             status="completed",
                             department=passthrough.profile,
                             task_id=passthrough.task_id,
@@ -6719,6 +7090,36 @@ class CeoSupervisorService:
             raise SupervisorWorkflowError(
                 f"workflow {task_id} evaluation failed: {exc}"
             ) from exc
+        finally:
+            # Every path has left the per-root lock before this finalizer runs.
+            # Discord/Notion latency can therefore no longer serialize sibling
+            # terminal events for the same workflow root.
+            if deferred_terminal_observer is not None:
+                submitted = False
+                if self._terminal_observer_submit is not None:
+                    try:
+                        submitted = bool(
+                            self._terminal_observer_submit(deferred_terminal_observer)
+                        )
+                    except Exception as exc:  # queue failure remains fail-open
+                        logger.warning(
+                            "terminal observer queue rejected task=%s event=%s error=%s",
+                            task_id,
+                            event_key,
+                            type(exc).__name__,
+                        )
+                if not submitted:
+                    try:
+                        deferred_terminal_observer()
+                    except Exception as exc:  # observer failure is non-binding
+                        logger.exception(
+                            "deferred terminal observer failed",
+                            extra={
+                                "task_id": task_id,
+                                "event_id": event_key,
+                                "error": str(exc),
+                            },
+                        )
 
     def _qa_required_from_event(self, event: Mapping[str, Any]) -> bool:
         """Read an explicit CEO completion decision; default remains QA on."""
@@ -6796,6 +7197,7 @@ class CeoSupervisorService:
                     role="control",
                     workflow_mode=state.workflow_mode,
                     has_mandate=state.has_mandate,
+                    previous_question_context=state.previous_question_context,
                 ),
                 assignee=decision.assignee or canonical_profile_for_department("ceo"),
                 parent_task_ids=decision.parent_task_ids,
@@ -6904,8 +7306,8 @@ class CeoSupervisorService:
             ):
                 task_body = (
                     f"{task_body}\n\n"
-                    "Confirmed Accounting Engine snapshot (source_of_record=/ui/snapshot, "
-                    "authoritative=false pending official NAV close) - "
+                    "Confirmed Accounting Engine read-only advisory snapshot "
+                    "(authoritative=false; official NAV close pending) - "
                     "use these figures rather than declining for lack of evidence:\n"
                     f"{state.accounting_advisory_context}"
                 )
@@ -6932,6 +7334,7 @@ class CeoSupervisorService:
                     role=role,
                     workflow_mode=state.workflow_mode,
                     has_mandate=state.has_mandate,
+                    previous_question_context=state.previous_question_context,
                 ),
                 assignee=decision.assignee,
                 parent_task_ids=decision.parent_task_ids,

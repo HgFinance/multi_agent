@@ -8,6 +8,7 @@ one definition of legal routing and one LLM-Wiki implementation.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import sys
 from datetime import date
@@ -20,15 +21,20 @@ for _path in (str(_REPO_ROOT), str(_RISK_DIR)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
-from apps.security.mcp_bearer_auth import (  # noqa: E402
-    BearerAuthMiddleware,
-    validate_api_key,
-)
-from risk_mandate_workers import classify_compliance_query_mode  # noqa: E402
-from tools.legal_wiki_tool import (  # noqa: E402
+from risk_mandate_workers import classify_compliance_query_mode
+from tools.legal_wiki_tool import (
     LegalWikiAnswerFn,
     LegalWikiQueryInput,
     query_legal_wiki,
+)
+
+from apps.security.mcp_bearer_auth import (
+    BearerAuthMiddleware,
+    validate_api_key,
+)
+from orchestration.risk_observability import (
+    risk_span,
+    set_risk_span_outputs,
 )
 
 MCP_PORT = 8047
@@ -41,6 +47,7 @@ def execute_legal_query(
     question: str,
     as_of: str,
     *,
+    task_id: str | None = None,
     answer_fn: LegalWikiAnswerFn | None = None,
 ) -> dict[str, Any]:
     """Guard and execute one legal query without duplicating the Wiki path."""
@@ -53,31 +60,78 @@ def execute_legal_query(
     except ValueError as exc:
         raise ValueError("as_of must be an ISO date (YYYY-MM-DD)") from exc
 
-    query_mode, routing_rationale = classify_compliance_query_mode(
-        normalized_question
-    )
-    if query_mode not in _LEGAL_MODES:
-        return {
-            "schema_version": SCHEMA_VERSION,
-            "status": "NOT_APPLICABLE",
-            "query_mode": query_mode,
-            "routing_rationale": routing_rationale,
-            "llm_wiki_invoked": False,
-            "escalate": False,
-            "pages_visited": [],
-        }
-
-    result = query_legal_wiki(
-        LegalWikiQueryInput(query=normalized_question, as_of=effective_date),
-        answer_fn=answer_fn,
-    )
-    return {
-        "schema_version": SCHEMA_VERSION,
+    query_mode, routing_rationale = classify_compliance_query_mode(normalized_question)
+    correlation_id = str(task_id or "").strip()
+    input_hash = hashlib.sha256(
+        f"{effective_date.isoformat()}\n{normalized_question}".encode()
+    ).hexdigest()
+    span_metadata = {
+        "task_id": correlation_id or None,
+        "request_id": correlation_id or None,
+        "root_id": correlation_id or None,
+        "trace_id": correlation_id or input_hash,
+        "input_hash": input_hash,
+        "model": os.getenv("WORKER_MODEL_NAME", "qwen2.5-14b-instruct-awq"),
+        "tool": "query_risk_legal_wiki",
         "query_mode": query_mode,
-        "routing_rationale": routing_rationale,
-        "llm_wiki_invoked": True,
-        **result.model_dump(mode="json"),
+        "stage": "legal-wiki",
+        "status": "running",
     }
+    with risk_span(
+        "risk.legal-wiki",
+        span_metadata,
+        inputs={
+            "task_id": correlation_id or None,
+            "input_hash": input_hash,
+            "input_chars": len(normalized_question),
+            "as_of": effective_date.isoformat(),
+            "query_mode": query_mode,
+            "tool": "query_risk_legal_wiki",
+        },
+    ) as span:
+        if query_mode not in _LEGAL_MODES:
+            response = {
+                "schema_version": SCHEMA_VERSION,
+                "status": "NOT_APPLICABLE",
+                "query_mode": query_mode,
+                "routing_rationale": routing_rationale,
+                "llm_wiki_invoked": False,
+                "escalate": False,
+                "pages_visited": [],
+            }
+        else:
+            result = query_legal_wiki(
+                LegalWikiQueryInput(query=normalized_question, as_of=effective_date),
+                answer_fn=answer_fn,
+            )
+            response = {
+                "schema_version": SCHEMA_VERSION,
+                "query_mode": query_mode,
+                "routing_rationale": routing_rationale,
+                "llm_wiki_invoked": True,
+                **result.model_dump(mode="json"),
+            }
+
+        output_metadata = {
+            "task_id": correlation_id or None,
+            "status": response["status"],
+            "query_mode": query_mode,
+            "llm_wiki_invoked": response["llm_wiki_invoked"],
+            "document_count": len(response.get("cited_documents") or ()),
+            "page_count": len(response.get("pages_visited") or ()),
+            "source_reference_count": len(response.get("source_references") or ()),
+            "context_chars": response.get("context_chars", 0),
+            "verdict": response.get("verdict"),
+            "confidence": response.get("confidence"),
+            "escalate": response.get("escalate"),
+            "error_code": response.get("error_code"),
+            "model": span_metadata["model"],
+            "tool": "query_risk_legal_wiki",
+        }
+        if span is not None:
+            span.metadata.update(output_metadata)
+        set_risk_span_outputs(span, output_metadata)
+        return response
 
 
 def build_server(*, host: str = "0.0.0.0", port: int = MCP_PORT):
@@ -109,8 +163,12 @@ def build_server(*, host: str = "0.0.0.0", port: int = MCP_PORT):
         ),
         structured_output=True,
     )
-    async def query_risk_legal_wiki(question: str, as_of: str) -> dict[str, Any]:
-        return await asyncio.to_thread(execute_legal_query, question, as_of)
+    async def query_risk_legal_wiki(
+        question: str, as_of: str, task_id: str = ""
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            execute_legal_query, question, as_of, task_id=task_id
+        )
 
     return server
 

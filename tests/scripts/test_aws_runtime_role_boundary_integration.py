@@ -61,12 +61,11 @@ def test_fresh_aws_runtime_roles_support_bff_and_isolate_paper_mutations() -> No
             cursor.execute(
                 """
                 insert into governance.user_profiles (
-                  user_id,display_name,timezone,status,identity_provider,
-                  auth_subject_observed_at
+                  user_id,display_name,timezone,status
                 ) values (
-                  %s,'AWS PAPER Operator','Asia/Seoul','ACTIVE','supabase',now()
+                  %s,'AWS PAPER Operator','Asia/Seoul','ACTIVE'
                 ) on conflict (user_id) do update
-                  set auth_subject_observed_at=excluded.auth_subject_observed_at
+                  set status=excluded.status
                 """,
                 ("00000000-0000-4000-8000-00000000cec0",),
             )

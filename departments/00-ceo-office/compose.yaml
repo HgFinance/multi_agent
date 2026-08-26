@@ -28,34 +28,6 @@ services:
     cpus: 0.5
     pids_limit: 64
 
-  # notification-worker: governance-api와 같은 Image, command만 다르다(qa-worker와 같은 패턴).
-  # hf:governance Stream을 소비해 risk.breach.v1/qa.finding.v1/incident.opened.v1/
-  # governance.escalation.v1/report.ready.v1을 알림으로 바꾼다(governance_events/worker.py).
-  # governance.mandate.changed.v1 등 다른 Consumer Group용 Event는 조용히 넘긴다.
-  notification-worker:
-    build:
-      context: ../..
-      dockerfile: departments/00-ceo-office/Dockerfile
-    container_name: hedgefund-notification-worker
-    restart: unless-stopped
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-    command: ["python", "governance_events/worker.py"]
-    working_dir: /app/departments/00-ceo-office
-    depends_on:
-      - redis
-    environment:
-      DATABASE_URL: ${GOVERNANCE_WORKFORCE_DATABASE_URL:-${DATABASE_URL:-}}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      GOVERNANCE_EVENT_POLL_INTERVAL_SECONDS: ${GOVERNANCE_EVENT_POLL_INTERVAL_SECONDS:-1}
-    mem_limit: 256m
-    cpus: 0.3
-    pids_limit: 64
-    stop_grace_period: 20s
-
   # ceo-hermes: research-hermes/risk-hermes와 같은 패턴 - Hermes는 Backend Image에 안 넣고
   # 공식 Image를 별도 Container로 띄운다(계획서 3.1). Provider는 하드코딩하지 않는다 -
   # /opt/data/config.yaml(provider:)과 auth.json이 결정한다(CEO는 Codex 배정, 2026-08-10
@@ -69,6 +41,12 @@ services:
     image: hedgefund-ceo-hermes:primary-idempotency-v1
     container_name: hedgefund-ceo-hermes
     restart: unless-stopped
+    # Reuse portfolio-bff's existing /health/ready contract. This gates only
+    # initial CEO gateway admission; runtime BFF failures remain fail-closed in
+    # gateway_patch.py and do not trigger a direct Hermes fallback.
+    depends_on:
+      portfolio-bff:
+        condition: service_healthy
     command: ["sleep", "infinity"]
     logging:
       driver: "json-file"
@@ -92,6 +70,10 @@ services:
       # fail-closed 하며, 값 자체는 이미지나 프로필에 저장하지 않는다.
       HGFINANCE_DISCORD_INGRESS_URL: http://portfolio-bff:8000/ui/ceo/ingress
       CEO_DISCORD_INGRESS_API_KEY: ${CEO_DISCORD_INGRESS_API_KEY:?CEO_DISCORD_INGRESS_API_KEY is required}
+      # Optional operations-only alert sink for failed_closed events. It is
+      # separate from the user-facing mirror webhook and sent asynchronously.
+      CEO_INGRESS_ALERT_WEBHOOK_URL: ${CEO_INGRESS_ALERT_WEBHOOK_URL:-}
+      CEO_INGRESS_ALERT_COOLDOWN_SECONDS: ${CEO_INGRESS_ALERT_COOLDOWN_SECONDS:-60}
       # Reuse this existing CEO gateway as the authenticated internal API
       # runtime. No second CEO gateway is started in portfolio-bff.
       API_SERVER_ENABLED: "true"

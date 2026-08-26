@@ -107,9 +107,9 @@ JOBS: tuple[Job, ...] = (
     # 1분 뒤에 둬서 두 수집기가 같은 초에 LS 를 두드리지 않게 한다.
     Job("style-index", ("collectors/style_index_collector.py", "--collect"),
         daily_at=time(16, 6)),
-    # 관측 Calendar 갱신 - 오늘 세션을 역산에 반영해 선언 Calendar 검증 폭을 늘린다
+    # VKOSPI/style이 오늘 거래일을 fail-closed 판정하기 전에 갱신한다.
     Job("calendar-observed", ("collectors/calendar_collector.py", "--collect"),
-        daily_at=time(16, 20)),
+        daily_at=time(16, 0)),
     # 일별 시장 라벨 스냅샷. 가격·breadth에서 계산한 레짐만 기록한다.
     Job("label-snapshot", ("collectors/label_snapshot_collector.py", "--collect"),
         daily_at=time(16, 30)),

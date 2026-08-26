@@ -22,28 +22,24 @@ import os
 import urllib.error
 import urllib.request
 from typing import Any
+from uuid import UUID
 
 
 def _timeout_seconds() -> float:
     try:
-        return max(0.1, min(2.0, float(os.getenv("ACCOUNTING_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS", "0.75"))))
+        return max(0.1, min(10.0, float(os.getenv("ACCOUNTING_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS", "5"))))
     except ValueError:
-        return 0.75
+        return 5.0
 
 
-def _fund_id(explicit: str | None = None) -> str | None:
-    if explicit and str(explicit).strip():
-        return str(explicit).strip()
-    # Same demo-wide canonical PAPER fund/book used by the LS reconciliation
-    # loop (ACCOUNTING_DEFAULT_BOOK_ID) and the dashboard's own snapshot
-    # panel. Not a secret - a fixture identifier for this single-tenant demo.
-    return os.getenv("ACCOUNTING_ADVISORY_FUND_ID", "").strip() or None
-
-
-def _user_id() -> str:
-    return os.getenv(
-        "ACCOUNTING_ADVISORY_USER_ID", "00000000-0000-4000-8000-00000000cec0"
-    ).strip()
+def _book_id() -> str | None:
+    raw = os.getenv("ACCOUNTING_ADVISORY_BOOK_ID", "").strip()
+    if not raw:
+        return None
+    try:
+        return str(UUID(raw))
+    except ValueError:
+        return None
 
 
 def _compact_snapshot(payload: Any) -> str | None:
@@ -76,8 +72,8 @@ def _compact_snapshot(payload: Any) -> str | None:
         )
     context = {
         "contract": "hgfinance.accounting-advisory-portfolio.v1",
-        "source_of_record": "/ui/snapshot",
-        "authoritative": False,
+        "source_of_record": payload.get("source_of_record"),
+        "authoritative": bool(payload.get("authoritative", False)),
         "as_of": portfolio.get("as_of"),
         "quality_status": portfolio.get("quality_status"),
         "nav": portfolio.get("nav"),
@@ -95,16 +91,17 @@ def _compact_snapshot(payload: Any) -> str | None:
 def fetch_accounting_advisory_context(fund_id: str | None = None) -> str | None:
     """Fetch one bounded snapshot for an Accounting/Portfolio primary."""
 
-    fund_id = _fund_id(fund_id)
-    if not fund_id:
+    # Keep ``fund_id`` only for caller compatibility. Accounting authority is
+    # the pinned PAPER book, never the scripted dashboard fixture.
+    del fund_id
+    book_id = _book_id()
+    if not book_id:
         return None
-    base_url = os.getenv("PORTFOLIO_BFF_INTERNAL_URL", "http://portfolio-bff:8000").strip().rstrip("/")
+    base_url = os.getenv("ACCOUNTING_API_URL", "http://accounting-api:8000").strip().rstrip("/")
     if not base_url:
         return None
-    url = f"{base_url}/ui/snapshot?fund_id={fund_id}"
-    request = urllib.request.Request(
-        url, headers={"Accept": "application/json", "X-User-Id": _user_id()}
-    )
+    url = f"{base_url}/accounting/v1/ledgers/{book_id}/advisory-snapshot"
+    request = urllib.request.Request(url, headers={"Accept": "application/json"})
     try:
         with urllib.request.urlopen(request, timeout=_timeout_seconds()) as response:
             payload = json.loads(response.read().decode("utf-8"))

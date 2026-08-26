@@ -3,7 +3,6 @@
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -103,7 +102,9 @@ class DepartmentComposeWiringTests(unittest.TestCase):
         service = _service_block(compose, "trading-api")
 
         self.assertIn("PAPER_DB: ${PAPER_DB:-true}", service)
-        self.assertIn("DATABASE_URL: ${DATABASE_URL:-}", service)
+        self.assertIn("DATABASE_URL: *trading-database-url", service)
+        self.assertIn("x-trading-database-url: &trading-database-url", compose)
+        self.assertIn("role%3Dsvc_trading_api", compose)
 
     def test_trading_hermes_uses_standard_profile_path(self) -> None:
         compose = (ROOT / "departments/02-trading/compose.yaml").read_text(
@@ -167,7 +168,7 @@ class DepartmentComposeWiringTests(unittest.TestCase):
         )
         self.assertIn(
             "HGFINANCE_FAST_ADVISORY_MAX_TURNS: "
-            "${HGFINANCE_FAST_ADVISORY_MAX_TURNS:-8}",
+            "${HGFINANCE_FAST_ADVISORY_MAX_TURNS:-12}",
             service,
         )
         self.assertIn(

@@ -162,6 +162,23 @@ router = APIRouter(prefix="/ui/ceo", tags=["ceo-office"])
 logger = logging.getLogger(__name__)
 
 
+def _trace_error_metadata(exc: BaseException) -> dict[str, object]:
+    """Return bounded HTTP/error labels without copying request payloads."""
+
+    metadata: dict[str, object] = {"error_code": type(exc).__name__}
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int) and 100 <= status_code <= 599:
+        metadata["http_status"] = status_code
+    detail = getattr(exc, "detail", None)
+    if isinstance(detail, Mapping):
+        detail = detail.get("code")
+    if isinstance(detail, str):
+        candidate = detail.strip()
+        if re.fullmatch(r"[A-Za-z0-9_.:-]{1,96}", candidate):
+            metadata["error_code"] = candidate
+    return metadata
+
+
 def _compound_leg_request_id(request_id: str, suffix: str) -> str:
     value = f"{request_id}:{suffix}"
     if len(value) <= 128:
@@ -190,6 +207,11 @@ class CeoAsk(hermes_boundary.AgentAsk):
     # Ingress source is metadata-only observability context. It does not
     # participate in routing or execution semantics.
     source: str | None = None
+    # Bounded, explicit Discord thread context for follow-ups such as "위 질문".
+    # It is stored in the root body, never used as authorization, and is not
+    # copied into LangSmith inputs.
+    previous_question_context: str | None = None
+    previous_question_context_source_message_id: str | None = None
 
 
 # Hermes Task ID 형식(`t_` + hex). 경로 파라미터가 CLI 인자로 들어가므로
@@ -1142,6 +1164,7 @@ def _route_analysis_then_conditional_paper_order(
         plan.analysis_instruction,
         req.request_id,
         workflow_mode="analysis",
+        source=getattr(req, "source", None),
         mandate=mandate,
         requested_by=access["user_id"],
         user_paper_order_scope=scope,
@@ -1153,6 +1176,10 @@ def _route_analysis_then_conditional_paper_order(
         discord_thread_id=discord_thread_id,
         advisory_fund_id=access["fund_id"],
         advisory_book_id=access["book_id"],
+        previous_question_context=getattr(req, "previous_question_context", None),
+        previous_question_context_source_message_id=getattr(
+            req, "previous_question_context_source_message_id", None
+        ),
     )
     root_body = "\n".join(
         (
@@ -1466,6 +1493,7 @@ def _route_user_paper_order(
     conditional_rule: bool = False,
     pre_admitted_record: UserOrderRequestRecord | None = None,
     langsmith_trace_context: str | None = None,
+    langsmith_trace_run_id: str | None = None,
 ) -> dict[str, object]:
     """Durably route one direct user workflow to Trading Hermes, always PAPER."""
 
@@ -1544,10 +1572,16 @@ def _route_user_paper_order(
             req.query,
             req.request_id,
             workflow_mode="binding",
+            source=getattr(req, "source", None),
             mandate=mandate,
             requested_by=access["user_id"],
             user_paper_order_scope=scope,
             langsmith_trace_context=langsmith_trace_context,
+            langsmith_trace_run_id=langsmith_trace_run_id,
+            previous_question_context=getattr(req, "previous_question_context", None),
+            previous_question_context_source_message_id=getattr(
+                req, "previous_question_context_source_message_id", None
+            ),
         ),
         idempotency_key=req.request_id,
         # Hermes' ``--initial-status running`` is a historical CLI spelling
@@ -1850,6 +1884,11 @@ def _route_traced_user_paper_order(
             langsmith_trace_context=(
                 root_trace.context if root_trace is not None else None
             ),
+            langsmith_trace_run_id=(
+                getattr(root_trace, "run_id", None)
+                if root_trace is not None
+                else None
+            ),
         )
     except Exception as exc:
         if root_trace is not None:
@@ -1863,6 +1902,8 @@ def _route_traced_user_paper_order(
                     source=getattr(req, "source", None),
                     status="error",
                     error_class=type(exc).__name__,
+                    run_id=getattr(root_trace, "run_id", None),
+                    terminal_metadata=_trace_error_metadata(exc),
                 )
             except Exception:  # noqa: BLE001 - tracing cannot mask route failure.
                 pass
@@ -2013,6 +2054,7 @@ def ceo_query(
                 req.query,
                 req.request_id,
                 workflow_mode=workflow_mode,
+                source=getattr(req, "source", None),
                 mandate=mandate,
                 requested_by=owner_id,
                 discord_channel_id=discord_channel_id,
@@ -2022,8 +2064,19 @@ def ceo_query(
                 langsmith_trace_context=(
                     root_trace.context if root_trace is not None else None
                 ),
+                langsmith_trace_run_id=(
+                    getattr(root_trace, "run_id", None)
+                    if root_trace is not None
+                    else None
+                ),
                 advisory_fund_id=getattr(req, "fund_id", None),
                 advisory_book_id=getattr(req, "book_id", None),
+                previous_question_context=getattr(
+                    req, "previous_question_context", None
+                ),
+                previous_question_context_source_message_id=getattr(
+                    req, "previous_question_context_source_message_id", None
+                ),
                 experience_hint=d5_hint,
                 approved_feedback_hint=approved_feedback,
             ),
@@ -2035,11 +2088,13 @@ def ceo_query(
 
             close_root_trace(
                 root_trace.context,
+                run_id=getattr(root_trace, "run_id", None),
                 request_id=req.request_id,
                 workflow_mode=workflow_mode,
                 source=getattr(req, "source", None),
                 status="error",
                 error_class=type(exc).__name__,
+                terminal_metadata=_trace_error_metadata(exc),
             )
         raise
     if not task or not task.get("task_id"):
@@ -2048,11 +2103,13 @@ def ceo_query(
 
             close_root_trace(
                 root_trace.context,
+                run_id=getattr(root_trace, "run_id", None),
                 request_id=req.request_id,
                 workflow_mode=workflow_mode,
                 source=getattr(req, "source", None),
                 status="error",
                 error_class="root_create_failed",
+                terminal_metadata={"error_code": "root_create_failed"},
             )
         raise HTTPException(
             status_code=503,
@@ -2135,12 +2192,14 @@ def ceo_query(
 
             close_root_trace(
                 root_trace.context,
+                run_id=getattr(root_trace, "run_id", None),
                 request_id=req.request_id,
                 root_id=str(task["task_id"]),
                 workflow_mode=workflow_mode,
                 source=getattr(req, "source", None),
                 status="error",
                 error_class="root_scope_failed",
+                terminal_metadata={"error_code": "root_scope_failed"},
             )
         raise HTTPException(
             status_code=503,

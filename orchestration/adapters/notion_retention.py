@@ -3,8 +3,8 @@
 Only the configured HgFinance projection databases are touched.  Pages are
 archived through Notion's API (rather than hard-deleted), so an accidental
 retention decision remains recoverable.  The worker never reads page blocks or
-stores page content; it uses only page creation time and small structured
-property values needed to identify exact replay noise.
+stores page content; it uses only page timestamps and small structured
+property values needed to identify projection records and exact replay noise.
 """
 
 from __future__ import annotations
@@ -80,6 +80,9 @@ def _property_text(value: Mapping[str, Any]) -> str:
     if kind == "select":
         selected = value.get("select")
         return str(selected.get("name") or "")[:256] if isinstance(selected, Mapping) else ""
+    if kind == "status":
+        selected = value.get("status")
+        return str(selected.get("name") or "")[:256] if isinstance(selected, Mapping) else ""
     if kind == "number":
         number = value.get("number")
         return "" if number is None else str(number)[:64]
@@ -102,6 +105,9 @@ class NotionPage:
     title: str
     input_hash: str
     replay_id: str
+    last_edited_at: datetime | None = None
+    status: str = ""
+    projection_marker: str = ""
 
     @property
     def exact_replay_key(self) -> str | None:
@@ -109,6 +115,24 @@ class NotionPage:
         # replay_id covers older Risk records that predate input_hash.
         value = self.input_hash or self.replay_id
         return value or None
+
+    @property
+    def retention_key(self) -> str | None:
+        """Return a structured projection identity safe for archival decisions."""
+
+        return self.exact_replay_key or self.projection_marker or None
+
+    @property
+    def activity_at(self) -> datetime | None:
+        values = [value for value in (self.created_at, self.last_edited_at) if value]
+        return max(values) if values else None
+
+    @property
+    def terminal(self) -> bool:
+        # An absent status is supported for legacy projection schemas, but an
+        # explicit non-terminal/unknown status is never archived automatically.
+        normalized = self.status.strip().casefold()
+        return not normalized or normalized in TERMINAL_STATUSES
 
 
 @dataclass(frozen=True)
@@ -120,7 +144,43 @@ class RetentionSummary:
     old_archived: int = 0
     duplicate_archived: int = 0
     skipped: int = 0
+    limit_reached: bool = False
     error_code: str | None = None
+
+
+TERMINAL_STATUSES = {
+    "done",
+    "completed",
+    "complete",
+    "success",
+    "succeeded",
+    "failed",
+    "error",
+    "blocked",
+    "cancelled",
+    "canceled",
+    "archived",
+    "closed",
+    "finished",
+    "완료",
+    "성공",
+    "실패",
+    "차단",
+    "취소",
+    "종료",
+}
+
+
+def _property_value(values: Mapping[str, str], *names: str) -> str:
+    aliases = {
+        name.casefold().replace(" ", "").replace("_", "").replace("-", "")
+        for name in names
+    }
+    for name, value in values.items():
+        normalized = str(name).casefold().replace(" ", "").replace("_", "").replace("-", "")
+        if normalized in aliases and value:
+            return value
+    return ""
 
 
 class NotionRetentionWorker:
@@ -136,6 +196,7 @@ class NotionRetentionWorker:
         request_delay_seconds: float | None = None,
         enabled: bool | None = None,
         archive_duplicates: bool | None = None,
+        max_archives: int | None = None,
         opener: Any | None = None,
     ) -> None:
         self.token = (token or os.getenv("NOTION_TOKEN", "")).strip()
@@ -165,6 +226,9 @@ class NotionRetentionWorker:
             _env_bool("NOTION_RETENTION_DEDUPE_EXACT", True)
             if archive_duplicates is None
             else bool(archive_duplicates)
+        )
+        self.max_archives = max_archives or _env_int(
+            "NOTION_RETENTION_MAX_ARCHIVES", 100, minimum=1, maximum=500
         )
         self.opener = opener or urllib.request.urlopen
 
@@ -201,15 +265,21 @@ class NotionRetentionWorker:
                     raise RuntimeError("notion_non_object_response")
                 return decoded
             except urllib.error.HTTPError as exc:
-                if exc.code == 429 and attempt < 3:
+                if exc.code == 429 or 500 <= exc.code < 600:
+                    if attempt >= 3:
+                        raise
                     retry_after = exc.headers.get("Retry-After", "1")
                     try:
                         delay = min(10.0, max(0.5, float(retry_after)))
                     except (TypeError, ValueError):
-                        delay = 1.0
+                        delay = min(10.0, 0.5 * (2**attempt))
                     time.sleep(delay)
                     continue
                 raise
+            except urllib.error.URLError:
+                if attempt >= 3:
+                    raise
+                time.sleep(min(10.0, 0.5 * (2**attempt)))
         raise RuntimeError("notion_request_retry_exhausted")
 
     def _database_ids(self) -> list[tuple[str, str]]:
@@ -227,7 +297,10 @@ class NotionRetentionWorker:
         pages: list[NotionPage] = []
         cursor: str | None = None
         while True:
-            payload: dict[str, Any] = {"page_size": 100}
+            remaining = self.batch_size - len(pages)
+            if remaining <= 0:
+                break
+            payload: dict[str, Any] = {"page_size": min(100, remaining)}
             if cursor:
                 payload["start_cursor"] = cursor
             response = self._request("POST", f"databases/{database_id}/query", payload)
@@ -261,6 +334,13 @@ class NotionRetentionWorker:
                         ),
                         "",
                     )
+                    input_hash = _property_value(
+                        values, "input_hash", "source_input_hash"
+                    )
+                    if not replay_id:
+                        replay_id = _property_value(
+                            values, "risk_request_id", "replay_id"
+                        )
                     pages.append(
                         NotionPage(
                             page_id=str(raw.get("id") or ""),
@@ -268,18 +348,27 @@ class NotionRetentionWorker:
                             database_env=env_name,
                             created_at=_parse_time(raw.get("created_time")),
                             title=title,
-                            input_hash=next(
-                                (
-                                    value
-                                    for name, value in values.items()
-                                    if str(name).lower() in {"input_hash", "source_input_hash"}
-                                    and value
-                                ),
-                                "",
-                            ),
+                            input_hash=input_hash,
                             replay_id=replay_id,
+                            last_edited_at=_parse_time(raw.get("last_edited_time")),
+                            status=_property_value(values, "status", "상태", "처리 상태"),
+                            projection_marker=_property_value(
+                                values,
+                                "projection_key",
+                                "projection_marker",
+                                "task_id",
+                                "root_task_id",
+                                "synthesis_task_id",
+                                "trace_id",
+                                "trade_case_id",
+                                "risk_plan_id",
+                            ),
                         )
                     )
+                    if len(pages) >= self.batch_size:
+                        break
+                if len(pages) >= self.batch_size:
+                    break
             if not response.get("has_more"):
                 break
             cursor = str(response.get("next_cursor") or "") or None
@@ -309,6 +398,7 @@ class NotionRetentionWorker:
         current = now or datetime.now(timezone.utc)
         cutoff = current - timedelta(days=self.retention_days)
         scanned = archived = old_archived = duplicate_archived = skipped = 0
+        limit_reached = False
         try:
             for env_name, database_id in self._database_ids():
                 pages = self._query_database(env_name, database_id)
@@ -321,20 +411,31 @@ class NotionRetentionWorker:
                             continue
                         previous = duplicate_keep.get(key)
                         if previous is None or (
-                            page.created_at or datetime.min.replace(tzinfo=timezone.utc)
-                        ) > (previous.created_at or datetime.min.replace(tzinfo=timezone.utc)):
+                            page.activity_at or datetime.min.replace(tzinfo=timezone.utc)
+                        ) > (previous.activity_at or datetime.min.replace(tzinfo=timezone.utc)):
                             duplicate_keep[key] = page
                 for page in pages:
                     if not page.page_id:
                         skipped += 1
                         continue
-                    is_old = page.created_at is not None and page.created_at < cutoff
+                    is_old = page.activity_at is not None and page.activity_at < cutoff
                     is_duplicate = bool(
                         self.archive_duplicates
-                        and page.exact_replay_key
-                        and duplicate_keep.get(page.exact_replay_key) is not page
+                        and page.retention_key
+                        and duplicate_keep.get(page.retention_key) is not page
                     )
                     if not (is_old or is_duplicate):
+                        continue
+                    # Legacy/unrelated pages can exist in a configured database.
+                    # Without a structured identity, automatic archival would
+                    # be guesswork. Explicit active/unknown statuses are also
+                    # protected because this worker does not inspect page blocks.
+                    if not page.retention_key or not page.terminal:
+                        skipped += 1
+                        continue
+                    if archived >= self.max_archives:
+                        limit_reached = True
+                        skipped += 1
                         continue
                     self._archive(page, dry_run=dry_run)
                     archived += 1
@@ -354,6 +455,10 @@ class NotionRetentionWorker:
                 old_archived,
                 duplicate_archived,
             )
+            if limit_reached:
+                LOG.warning(
+                    "notion-retention archive-limit-reached limit=%d", self.max_archives
+                )
             return RetentionSummary(
                 enabled=True,
                 available=True,
@@ -362,6 +467,7 @@ class NotionRetentionWorker:
                 old_archived=old_archived,
                 duplicate_archived=duplicate_archived,
                 skipped=skipped,
+                limit_reached=limit_reached,
             )
         except Exception as exc:  # maintenance must not stop the app plane
             LOG.warning("notion-retention failed error=%s", type(exc).__name__)
@@ -373,6 +479,7 @@ class NotionRetentionWorker:
                 old_archived=old_archived,
                 duplicate_archived=duplicate_archived,
                 skipped=skipped,
+                limit_reached=limit_reached,
                 error_code=type(exc).__name__,
             )
 

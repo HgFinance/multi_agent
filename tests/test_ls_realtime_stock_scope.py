@@ -298,3 +298,29 @@ def test_realtime_shards_share_one_timescale_repository_connection():
     assert "repos = [repository]" in source
     assert "MarketSink(repository) for _ in shards" in source
     assert "TimescaleMarketRepository(dsn) for _ in shards" not in source
+
+
+def test_capture_scope_merges_active_rules_without_duplicates():
+    assert ls_realtime_service.merge_capture_symbols(
+        ("005930", "000660"), ("487400", "005930")
+    ) == ("000660", "005930", "487400")
+
+
+def test_symbol_change_waiter_reloads_only_when_authority_changes():
+    calls = []
+
+    def loader():
+        calls.append(True)
+        return ("005930", "487400")
+
+    result = ls_realtime_service.asyncio.run(
+        ls_realtime_service._wait_for_symbol_change(
+            ("005930",),
+            ls_realtime_service.asyncio.Event(),
+            loader=loader,
+            interval_seconds=0.001,
+        )
+    )
+
+    assert result == ("005930", "487400")
+    assert len(calls) == 1

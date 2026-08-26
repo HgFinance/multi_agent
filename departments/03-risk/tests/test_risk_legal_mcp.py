@@ -6,8 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from api.mcp_server import build_server, execute_legal_query  # noqa: E402
-from risk_mandate_workers import classify_compliance_query_mode  # noqa: E402
+from api.mcp_server import build_server, execute_legal_query
+from risk_mandate_workers import classify_compliance_query_mode
 
 
 def test_legal_query_reuses_llm_wiki_and_fails_closed() -> None:

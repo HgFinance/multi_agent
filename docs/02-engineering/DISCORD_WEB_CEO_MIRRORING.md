@@ -99,12 +99,30 @@ SSE는 짧은 연결 후 닫히며, 클라이언트는 마지막 `event_id`를 `
 
 ## Discord adapter 전달사항
 
-현재 저장소 안에는 Hermes Discord gateway의 inbound/outbound loop를 직접 호출하는 코드가 없다. 따라서 이 adapter 연결 전에는 BFF 공용 timeline까지만 구현된 상태다.
+`deploy/hermes-discord/gateway_patch.py`가 기존 Hermes Discord gateway의 수신
+경계에 설치된다. CEO/Trading 프로필의 사람 메시지는 이 shim이
+`/ui/ceo/ingress`로 전달하고, 성공(`200/202`) 또는 중복(`409`)이면 원래
+Hermes handler를 다시 호출하지 않는다. BFF가 runtime에서 응답하지 않으면
+기존의 제한된 재시도 후 `failed_closed`로 종료하며, 원래 Hermes 경로로
+우회하지 않는다. 따라서 애매한 네트워크 결과가 중복 workflow나 중복 주문으로
+이어지지 않는다.
 
-AWS에서 실제 Discord 양방향 E2E를 완료하려면 기존 Hermes bridge가 `/ui/ceo/ingress`와 `/ui/ceo/events/stream`을 사용하도록 연결해야 한다. Discord token/API key는 계속 AWS `~/.hermes/profiles/*/.env`에만 둔다.
+컨테이너 최초 기동 순서는 루트 `docker-compose.yml`의 기존 BFF
+`/health/ready` healthcheck를 `ceo-hermes`가 `service_healthy` 조건으로
+기다리도록 보장한다. 이는 startup race만 줄이며, runtime 장애의 fail-closed
+정책을 대신하지 않는다.
 
-현재 저장소는 Hermes Discord gateway 내부 token/수신 loop를 수정하지 않는다.
-AWS의 Discord adapter 또는 Hermes bridge가 다음 규칙으로 붙어야 한다.
+`failed_closed`는 `discord-ingress` 구조화 key-value 로그로 남는다. 운영 알림이
+필요한 경우 CEO 컨테이너에 전용 `CEO_INGRESS_ALERT_WEBHOOK_URL`을 설정한다.
+알림은 별도 daemon 작업으로 전송하고 기본 60초 cooldown을 적용하므로 ingress
+요청을 기다리게 하지 않는다. 웹훅이 비어 있어도 로그와 Discord 사용자 안내는
+그대로 남는다. 이 웹훅은 `DISCORD_WEBHOOK_URL`과 분리해 업무 채널로 장애
+알림이 잘못 전송되지 않게 한다.
+
+Discord token/API key는 계속 AWS `~/.hermes/profiles/*/.env`에만 둔다.
+프론트 번들, BFF response, event payload에 넣지 않는다.
+
+외부 adapter 또는 Hermes bridge는 다음 규칙을 유지해야 한다.
 
 1. 사람 메시지만 `/ui/ceo/ingress`에 전송한다.
 2. `request_id`를 생성하고 Discord 원본 message ID를 `source_message_id`로 보낸다.

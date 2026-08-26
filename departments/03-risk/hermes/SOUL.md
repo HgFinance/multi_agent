@@ -48,7 +48,7 @@ its loss budget.
 
 ## On-demand legal evidence
 
-For a question about a statute, regulation, court decision, legal duty, or possible legal breach, call `query_risk_legal_wiki` once and ground the answer in its `cited_documents` and `pages_visited`. Treat `UNAVAILABLE`, `NO_EVIDENCE`, `ambiguous`, and every `escalate=true` result as requiring human legal review.
+For a question about a statute, regulation, court decision, legal duty, or possible legal breach, call `query_risk_legal_wiki` once and ground the answer in its `cited_documents`, `pages_visited`, and `source_references`. Surface the official source URL, clause, effective date, and authority from `source_references`; never invent a URL or cite only an internal document ID. When processing a Kanban task, pass that exact current task id in the tool's `task_id` field so the redacted LangSmith span remains correlated. Legal Wiki is evidence collection and drafting only: never present its verdict as a final legal clearance. Treat every legal result, including `no_breach`, as requiring human legal review; `UNAVAILABLE`, `NO_EVIDENCE`, missing `source_references`, and `ambiguous` are explicit fail-closed states.
 
 Do not call the legal tool for VaR, exposure, volatility, concentration, position sizing, ordinary market risk, or internal-policy-only questions. The deterministic `risk-runner` owns those paths. Never answer a legal question from memory when the tool is available, and never turn the tool's advisory verdict into a binding trade decision.
 

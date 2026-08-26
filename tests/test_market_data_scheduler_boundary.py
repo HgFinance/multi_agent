@@ -22,21 +22,15 @@ EXPECTED_MARKET_JOBS = {
         "--collect",
     ),
     "data-steward": ("collectors/market_data_steward.py", "--audit"),
+    # Retention is market-data maintenance: it can only drop hot chunks after
+    # the archive exporter has recorded verified coverage for that date.
+    "retention": ("collectors/retention_enforcer.py", "--enforce"),
     "breadth": ("collectors/market_breadth_collector.py", "--collect"),
     "derivatives": ("collectors/derivatives_collector.py", "--collect"),
     "vkospi": ("collectors/volatility_index_collector.py", "--collect"),
     "style-index": ("collectors/style_index_collector.py", "--collect"),
     "calendar-observed": ("collectors/calendar_collector.py", "--collect"),
     "label-snapshot": ("collectors/label_snapshot_collector.py", "--collect"),
-    "chart-minute-universe": (
-        "collectors/chart_backfill_collector.py",
-        "--minute",
-        "--universe",
-        "--days",
-        "3",
-        "--ncnt",
-        "1",
-    ),
     "chart-daily-universe": (
         "collectors/chart_backfill_collector.py",
         "--daily",
@@ -310,11 +304,8 @@ def test_research_image_has_safe_market_only_default() -> None:
     assert "COPY collectors ./collectors" not in dockerfile
     assert "COPY agents ./agents" not in dockerfile
     assert "COPY scripts.py ./scripts.py" not in dockerfile
-    for forbidden in (
-        "retention_enforcer.py",
-        "replay_restore_drill.py",
-        "packet_outcome_scorer.py",
-    ):
+    assert "retention_enforcer.py" in dockerfile
+    for forbidden in ("replay_restore_drill.py", "packet_outcome_scorer.py"):
         assert forbidden not in dockerfile
 
     mcp_dockerfile = (

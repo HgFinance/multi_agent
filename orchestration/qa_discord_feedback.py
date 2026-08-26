@@ -17,6 +17,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 QA_FEEDBACK_MARKER = "[hgfinance-qa-feedback-request-v1]"
+QA_TERMINAL_MARKER = "[hgfinance-qa-terminal-discord-v1]"
 SKILL_PROPOSAL_MARKER = "[hgfinance-skill-proposal-review-v1]"
 QA_FEEDBACK_CHANNEL_DEFAULT = "1541636723006775477"
 _ARTIFACT_RE = re.compile(r"\bfeedback-[0-9a-f]{32}\b", re.IGNORECASE)
@@ -46,6 +47,54 @@ _ACTIONABLE_FINDINGS = frozenset(
         "SEMANTIC_QA_SCORE_LOW",
     }
 )
+
+_MANAGER_TERMS = (
+    (
+        "end-to-end latency exceeded the configured observation threshold",
+        "전체 처리 시간이 설정된 기준을 초과했습니다.",
+    ),
+    ("risk-management", "리스크 부서"),
+    ("trading-department", "트레이딩 부서"),
+    ("research-department", "리서치 부서"),
+    ("hr-department", "인사 부서"),
+    ("ceo-workflow", "CEO 업무 흐름"),
+    ("observability", "관측 시스템"),
+    ("ceo-ingress", "CEO 요청 접수 단계"),
+    ("ceo-terminal", "CEO 결과 전달 단계"),
+    ("end_to_end", "전체 처리 시간"),
+)
+
+_FINDING_LABELS = {
+    "LATENCY_ABOVE_THRESHOLD": "처리 지연 기준 초과",
+    "SEMANTIC_QA_FAILED": "결과 의미 검증 실패",
+    "SEMANTIC_QA_SCORE_LOW": "결과 의미 검증 점수 미달",
+    "STRUCTURED_EVAL_SCORE_LOW": "구조화 평가 점수 미달",
+    "WORKER_OR_WORKFLOW_DEGRADED": "부서 또는 업무 흐름 성능 저하",
+    "PRIVACY_PAYLOAD_PRESENT": "민감 원문 포함 감지",
+}
+
+QA_CHECK_LABELS = {
+    "arithmetic": "산술 일관성",
+    "nav_bridge": "순자산 대사",
+    "provenance": "자료 출처·계보",
+    "pit_valuation": "기준 시점·평가",
+    "independent_reconciliation": "독립 대사",
+    "prohibited_action_compliance": "금지 행위 준수",
+    "mandate_decision_eligibility": "투자 결정 적격성",
+    "long_short_direction": "롱·숏 방향",
+    "citation": "인용 근거",
+}
+
+
+def qa_check_label(value: Any) -> str:
+    return QA_CHECK_LABELS.get(str(value or "").strip().casefold(), _manager_label(value, 100))
+
+
+def _manager_label(value: Any, limit: int = 160) -> str:
+    rendered = _bounded(value, limit)
+    for internal, friendly in _MANAGER_TERMS:
+        rendered = rendered.replace(internal, friendly)
+    return rendered
 
 
 def _bounded(value: Any, limit: int) -> str:
@@ -89,6 +138,84 @@ def post_qa_discord_message(
     return message_id
 
 
+def format_qa_terminal_report(record: Any) -> str:
+    """Render a compact Korean QA/operations card from the audit record."""
+
+    evidence = getattr(record, "evidence", {})
+    evidence = evidence if isinstance(evidence, Mapping) else {}
+    decision = str(getattr(record, "canonical_decision", "WARN") or "WARN").upper()
+    decision_label = {
+        "PASS": "통과",
+        "WARN": "주의",
+        "CONDITIONAL": "조건부 통과",
+        "FAIL": "실패·투자 결정 차단",
+    }.get(decision, "확인 필요")
+    numerical = _manager_label(evidence.get("numerical_posture"), 40) or "확인 필요"
+    if numerical.upper() == "DEFER":
+        numerical = "판단 보류"
+
+    checks: list[str] = []
+    raw_checks = getattr(record, "checks", ())
+    if isinstance(raw_checks, (list, tuple)):
+        for item in raw_checks[:8]:
+            if isinstance(item, Mapping):
+                name = qa_check_label(item.get("check") or item.get("name"))
+                result = _manager_label(item.get("result") or item.get("status"), 32)
+                checks.append(f"- {name}: {result or '확인 필요'}")
+    findings: list[str] = []
+    raw_findings = getattr(record, "findings", ())
+    if isinstance(raw_findings, (list, tuple)):
+        for item in raw_findings[:5]:
+            if isinstance(item, Mapping):
+                severity = _manager_label(item.get("severity") or "확인 필요", 24)
+                issue = _manager_label(
+                    item.get("summary")
+                    or item.get("description")
+                    or item.get("issue")
+                    or item.get("message")
+                    or "근거 보완 필요",
+                    300,
+                )
+                owner = _manager_label(item.get("owner") or item.get("responsible_party"), 100)
+                impact = _manager_label(item.get("block_condition") or item.get("impact"), 150)
+                suffix = f" 담당: {owner}" if owner else ""
+                if impact:
+                    suffix += f" 영향: {impact}"
+                findings.append(f"- [{severity}] {issue}{suffix}")
+
+    latency = evidence.get("latency_ms")
+    latency_line = ""
+    if latency not in (None, ""):
+        try:
+            latency_line = f"- 처리 시간: {float(latency) / 1000:.2f}초"
+        except (TypeError, ValueError):
+            pass
+    actions = (
+        "실패·주의 항목의 원자료, 기준 시점 자료와 독립 대사 근거를 보완한 뒤 QA를 재실행합니다."
+        if decision != "PASS"
+        else "현재 확인 결과를 유지하고, 다음 변경 시 동일한 QA 점검을 다시 수행합니다."
+    )
+    return (
+        f"{QA_TERMINAL_MARKER}\n"
+        "## QA 감사 결과\n"
+        f"- 판정: **{decision_label}**\n"
+        f"- 수치 판단: **{numerical}**\n"
+        f"{latency_line}\n"
+        "\n### 확인된 사실\n"
+        f"{chr(10).join(checks) or '- 세부 점검 결과 없음'}\n"
+        "\n### 문제 위치와 영향\n"
+        f"{chr(10).join(findings) or '- 차단성 문제 없음'}\n"
+        "\n### 조치\n"
+        f"- {actions}\n"
+        "- QA 승인 전 공식 수치 확정과 투자 결정을 진행하지 않습니다.\n"
+        "\n### 추적 정보\n"
+        f"- 상위 업무: `{_bounded(getattr(record, 'root_task_id', ''), 80)}`\n"
+        f"- QA 업무: `{_bounded(getattr(record, 'qa_task_id', ''), 80)}`\n"
+        f"- 평가 기록: `{_bounded(getattr(record, 'eval_run_id', ''), 100)}`\n"
+        "\n> PAPER·읽기 전용 검토입니다. 주문 제출과 원장 변경은 수행하지 않았습니다."
+    )[:1900]
+
+
 def is_actionable_feedback(finding_codes: object) -> bool:
     if not isinstance(finding_codes, (list, tuple, set, frozenset)):
         return False
@@ -112,7 +239,7 @@ def format_qa_feedback_request(
         else []
     )
     summary_values = (
-        [_bounded(value, 180) for value in summaries]
+        [_manager_label(value, 180) for value in summaries]
         if isinstance(summaries, (list, tuple))
         else []
     )
@@ -123,24 +250,24 @@ def format_qa_feedback_request(
     if metric_count:
         observations.append(f"집계된 metric trace 수: {int(metric_count)}")
     if latency_ms:
-        latency = f"관측 지연: {float(latency_ms) / 1000:.2f}s"
+        latency = f"관측 지연: {float(latency_ms) / 1000:.2f}초"
         if latency_threshold_ms:
-            latency += f" > 기준 {float(latency_threshold_ms) / 1000:.2f}s"
+            latency += f" > 기준 {float(latency_threshold_ms) / 1000:.2f}초"
         if metadata.get("latency_scope"):
-            latency += f" ({_bounded(metadata['latency_scope'], 40)})"
+            latency += f" ({_manager_label(metadata['latency_scope'], 40)})"
         observations.append(latency)
     observations.extend(summary_values[:3])
     observation_text = (
         "\n".join(f"- {line}" for line in observations) or "- 상세 관측값 없음"
     )
     evidence_values = [
-        ("project", metadata.get("source_project")),
-        ("trace_name", metadata.get("source_name")),
-        ("source_run_id", metadata.get("source_run_id")),
-        ("trace_id", metadata.get("trace_id")),
-        ("request_id", metadata.get("request_id")),
-        ("root_id", metadata.get("root_id")),
-        ("department_task_id", metadata.get("task_id")),
+        ("관측 프로젝트", metadata.get("source_project")),
+        ("실행 기록 유형", metadata.get("source_name")),
+        ("실행 기록 ID", metadata.get("source_run_id")),
+        ("연결 추적 ID", metadata.get("trace_id")),
+        ("요청 ID", metadata.get("request_id")),
+        ("최상위 업무 ID", metadata.get("root_id")),
+        ("부서 업무 ID", metadata.get("task_id")),
     ]
     evidence = [
         f"- {label}: {_bounded(value, 160)}"
@@ -154,25 +281,27 @@ def format_qa_feedback_request(
             f"{_bounded(metadata.get('window_end'), 64) or '?'}"
         )
     evidence_text = "\n".join(evidence) or "- artifact metadata 참조"
-    code_text = ", ".join(codes[:8]) or "NONE"
-    primary_bottleneck = _bounded(
+    code_text = (
+        ", ".join(_FINDING_LABELS.get(code, code) for code in codes[:8]) or "없음"
+    )
+    primary_bottleneck = _manager_label(
         metadata.get("primary_bottleneck_department"), 64
     )
-    joint_targets = _bounded(metadata.get("joint_improvement_targets"), 120)
-    observation_point = _bounded(
+    joint_targets = _manager_label(metadata.get("joint_improvement_targets"), 120)
+    observation_point = _manager_label(
         metadata.get("observation_point") or metadata.get("stage"), 64
     )
     if primary_bottleneck:
         attribution_text = (
             f"- **주요 병목:** `{primary_bottleneck}`\n"
-            f"- **공동 개선 대상:** `{joint_targets or 'ceo-workflow / observability'}`\n"
-            f"- **관측 시작 지점:** `{observation_point or 'ceo-ingress'}` "
+            f"- **공동 개선 대상:** `{joint_targets or 'CEO 업무 흐름 / 관측 시스템'}`\n"
+            f"- **관측 시작 지점:** `{observation_point or 'CEO 요청 접수 단계'}` "
             "(원인 부서 아님)\n"
         )
     else:
         attribution_text = (
             "- **주요 병목:** `미확정` (단계별 실행시간 근거 필요)\n"
-            f"- **관측 시작 지점:** `{observation_point or _bounded(department, 64)}` "
+            f"- **관측 시작 지점:** `{observation_point or _manager_label(department, 64)}` "
             "(원인 부서로 간주하지 않음)\n"
         )
     return (
@@ -180,18 +309,18 @@ def format_qa_feedback_request(
         "## ① 자동 감지 · QA 검토 요청\n"
         f"feedback_artifact_id={_bounded(artifact_id, 80)}\n"
         f"{attribution_text}"
-        f"- **자동 분류:** `{_bounded(decision, 40)}`\n"
+        f"- **자동 분류:** `{_manager_label(decision, 40).replace('IMPROVEMENT_CANDIDATE', '개선 검토 대상')}`\n"
         f"- **감지 신호:** `{code_text}`\n\n"
         "### 관측\n"
         f"{observation_text}\n"
-        "\n### 증거 키 · 원문 payload 제외\n"
+        "\n### 문제 추적 정보 · 원문 제외\n"
         f"{evidence_text}\n\n"
         "> 다음 메시지 `② QA Hermes 검토 결과`에서 사실·한계·조치·판단 가이드를 제공합니다.\n\n"
         "### 관리자 결정\n"
-        "- QA 결과에 Reply: `승인 유형=<개선유형> <사유 필수>` 또는 `거부 <사유 필수>`\n"
-        f"- 직접 입력: `승인 {artifact_id} 유형=SKILL_CREATE <사유 필수>`\n"
-        "- 기존 스킬 개선: `유형=SKILL_EVOLVE 스킬=<slug>`를 함께 입력\n"
-        "- **보류:** 명령을 입력하지 않으면 `PENDING` 유지\n\n"
+        "- QA 결과에 답글: `승인 유형=<개선유형> <사유 필수>` 또는 `거부 <사유 필수>`\n"
+        f"- 새 개선안 생성: `승인 {artifact_id} 유형=SKILL_CREATE <사유 필수>`\n"
+        "- 기존 개선안 보완: `유형=SKILL_EVOLVE 스킬=<이름>`를 함께 입력\n"
+        "- **보류:** 명령을 입력하지 않으면 `대기` 상태 유지\n\n"
         "QA Hermes는 이 artifact 한 건만 검토하고 승인·거부·설정 변경을 직접 수행하지 마세요."
     )[:1900]
 

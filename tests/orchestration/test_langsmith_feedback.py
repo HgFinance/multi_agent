@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from orchestration.ceo_workflow_scope import (
     approved_feedback_section_from_root,
@@ -683,16 +684,38 @@ def test_feedback_config_bounds_concurrency_inputs(monkeypatch) -> None:
 
 
 def test_service_evaluates_allowlisted_snapshot_without_reading_run_payload(tmp_path, monkeypatch) -> None:
+    class _Paginator:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def __aiter__(self):
+            self._iterator = iter(self.rows)
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._iterator)
+            except StopIteration as exc:
+                raise StopAsyncIteration from exc
+
+    class _Runs:
+        def __init__(self, owner):
+            self.owner = owner
+
+        async def query(self, **kwargs):
+            self.owner.query_calls.append(kwargs)
+            if kwargs.get("project_ids") == ["project-First"]:
+                return _Paginator([_Run()])
+            return _Paginator([])
+
     class _Client:
         def __init__(self, **kwargs):
             self.read_called = False
-            self.list_calls = []
+            self.query_calls = []
+            self.runs = _Runs(self)
 
-        def list_runs(self, **kwargs):
-            self.list_calls.append(kwargs)
-            if kwargs.get("project_name") == "First":
-                return iter([_Run()])
-            return iter([])
+        async def aread_project(self, *, project_name):
+            return SimpleNamespace(id=f"project-{project_name}")
 
         def read_run(self, *_args, **_kwargs):
             self.read_called = True
@@ -725,10 +748,12 @@ def test_service_evaluates_allowlisted_snapshot_without_reading_run_payload(tmp_
 
     assert result["completed"] == 1
     assert fake_client.read_called is False
-    root_call = fake_client.list_calls[0]
-    assert "end_time" in root_call
-    assert "start_time" not in root_call
+    root_call = fake_client.query_calls[0]
+    assert root_call["project_ids"] == ["project-First"]
+    assert "max_start_time" in root_call
+    assert "min_start_time" in root_call
     assert "gt(end_time" in root_call["filter"]
+    assert "page_size" in root_call
 
 
 def test_service_is_noop_when_langsmith_is_disabled(tmp_path, monkeypatch) -> None:

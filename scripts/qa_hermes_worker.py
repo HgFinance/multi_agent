@@ -23,6 +23,7 @@ import json
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Sequence
 
@@ -33,7 +34,7 @@ REAL_HERMES = os.environ.get(
 )
 QA_PROFILE = "qa-department"
 FAST_ADVISORY_MODE = "analysis_mode=fast_advisory"
-DEFAULT_FAST_ADVISORY_MAX_TURNS = 8
+DEFAULT_FAST_ADVISORY_MAX_TURNS = 12
 MIN_FAST_ADVISORY_MAX_TURNS = 8
 MAX_FAST_ADVISORY_MAX_TURNS = 64
 DEFAULT_USER_RESPONSE_MAX_TURNS = 12
@@ -360,11 +361,54 @@ def _run_real_worker(argv: Sequence[str]) -> int:
         db_path=env.get("HERMES_KANBAN_DB"),
         task_id=env.get("HERMES_KANBAN_TASK"),
     )
+    worker_profile = ""
+    for index, value in enumerate(worker_argv):
+        if value in {"-p", "--profile"} and index + 1 < len(worker_argv):
+            worker_profile = str(worker_argv[index + 1]).strip()
+            break
+    task_id, run_id = _task_context()
+    started_ms = int(time.time() * 1000)
     completed = subprocess.run(
         [REAL_HERMES, *worker_argv],
         check=False,
         env=env,
     )
+    ended_ms = int(time.time() * 1000)
+
+    # The central dispatcher, not the department container, owns this worker
+    # process. Attach the Accounting task/root IDs at this exact boundary so
+    # LangSmith can correlate the model/tool observation with the Kanban task.
+    # This is a fail-open observer and never changes Hermes' return code.
+    if (
+        task_id
+        and run_id is not None
+        and (
+            worker_profile == "accounting-portfolio-department"
+            or env.get("HERMES_PROFILE", "").strip()
+            == "accounting-portfolio-department"
+        )
+    ):
+        try:
+            task_status, _current_run_id, outcome = _read_live_run_state(
+                env.get("HERMES_KANBAN_DB", ""), task_id, run_id
+            )
+            from hermes_worker_observability import publish_accounting_worker_trace
+
+            publish_accounting_worker_trace(
+                task_id=task_id,
+                task_body=_task_body(env.get("HERMES_KANBAN_DB"), task_id),
+                task_status=task_status or outcome or "",
+                run_id=str(run_id),
+                return_code=int(completed.returncode),
+                started_ms=started_ms,
+                ended_ms=ended_ms,
+                argv=worker_argv,
+                env=env,
+            )
+        except Exception:
+            # LangSmith is optional and must not turn a valid terminal handoff
+            # into a worker failure.
+            pass
     return int(completed.returncode)
 
 

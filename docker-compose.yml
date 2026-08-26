@@ -79,6 +79,42 @@ include:
   - departments/07-agent-workforce/compose.yaml
 
 services:
+  # One container supervises the two existing at-least-once consumers.  Each
+  # consumer remains a separate process with its original stream, group,
+  # handler, ACK, and dedupe semantics; only container lifecycle is shared.
+  control-event-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.control-event-worker
+    container_name: hedgefund-control-event-worker
+    restart: unless-stopped
+    init: true
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${GOVERNANCE_WORKFORCE_DATABASE_URL:-${DATABASE_URL:-}}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      GOVERNANCE_EVENT_POLL_INTERVAL_SECONDS: ${GOVERNANCE_EVENT_POLL_INTERVAL_SECONDS:-1}
+      WORKFORCE_EVENT_POLL_INTERVAL_SECONDS: ${WORKFORCE_EVENT_POLL_INTERVAL_SECONDS:-1}
+      CONTROL_EVENT_WORKER_HEALTH_PATH: /tmp/hgfinance-control-event-worker-health.json
+    healthcheck:
+      test: ["CMD", "python", "-m", "orchestration.control_event_worker", "--healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    mem_limit: 384m
+    mem_reservation: 96m
+    cpus: 0.5
+    pids_limit: 128
+    stop_grace_period: 30s
+
   # Portfolio advisory API and worker share only the durable queue volume.
   # The API never embeds a worker by default; the worker owns queue claims.
   portfolio-bff:
@@ -163,6 +199,9 @@ services:
       # reach a later CEO planning request.
       LANGSMITH_FEEDBACK_MODE: ${LANGSMITH_FEEDBACK_MODE:-shadow}
       LANGSMITH_FEEDBACK_STATE_PATH: /var/lib/portfolio/langsmith-feedback.sqlite3
+      # The root deadline is carried into every new CEO workflow so the
+      # supervisor can close stalled response planes deterministically.
+      HGFINANCE_WORKFLOW_TIMEOUT_SECONDS: ${HGFINANCE_WORKFLOW_TIMEOUT_SECONDS:-1200}
       PORTFOLIO_GOVERNANCE_BINDING_ENABLED: ${PORTFOLIO_GOVERNANCE_BINDING_ENABLED:-true}
       # 기본값이 비어 있으면 온보딩 프록시(/ui/mandates, /ui/mandate-assistant/suggest
       # 등)가 전부 503 governance_api_unavailable 이 된다. governance-api 는 같은
@@ -192,7 +231,7 @@ services:
       # The production portfolio BFF stays on the pinned Hermes CLI/local
       # boundary above; it does not gain a Docker-exec transport.
       ACCOUNTING_API_URL: ${ACCOUNTING_API_URL:-http://accounting-api:8000}
-      RISK_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS: ${RISK_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS:-2.0}
+      RISK_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS: ${RISK_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS:-5.0}
       MARKET_API_URL: ${MARKET_API_URL:-http://market-api:8036}
       RESEARCH_API_URL: ${RESEARCH_API_URL:-http://research-api:8035}
       # Host-side tools use RISK_API_URL=127.0.0.1:8041.  A container must not
@@ -434,7 +473,7 @@ services:
       trading-api:
         condition: service_healthy
       market-api:
-        condition: service_started
+        condition: service_healthy
     command: ["python", "-m", "apps.api.conditional_rule_worker"]
     environment:
       PYTHONPATH: /app:/app/apps/api
@@ -454,6 +493,7 @@ services:
       TRADING_INTERNAL_SERVICE_AUTH_ISSUER: ${TRADING_INTERNAL_SERVICE_AUTH_ISSUER:-hedgefund-service-issuer}
       TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE: ${TRADING_INTERNAL_SERVICE_AUTH_AUDIENCE:-trading-api}
       CONDITIONAL_RULE_WORKER_POLL_SECONDS: ${CONDITIONAL_RULE_WORKER_POLL_SECONDS:-1.0}
+      CONDITIONAL_RULE_FALLBACK_PRICE_CACHE_SECONDS: ${CONDITIONAL_RULE_FALLBACK_PRICE_CACHE_SECONDS:-5.0}
       CONDITIONAL_RULE_WORKER_BATCH_SIZE: ${CONDITIONAL_RULE_WORKER_BATCH_SIZE:-100}
       CONDITIONAL_RULE_WORKER_MAX_WORKERS: ${CONDITIONAL_RULE_WORKER_MAX_WORKERS:-8}
       CONDITIONAL_RULE_HTTP_TIMEOUT_SECONDS: ${CONDITIONAL_RULE_HTTP_TIMEOUT_SECONDS:-8}
@@ -800,13 +840,11 @@ services:
       # LS는 앱키당 활성 토큰 하나를 유지한다. Trading PAPER 주문기와 같은
       # 기존 파일 캐시 규격을 공유해 별도 발급이 서로를 무효화하지 않게 한다.
       LS_TOKEN_CACHE_DIR: /var/lib/ls-token-cache
-      # ▶ 전종목 구독 (2026-08-03, 재일님 지시)
-      #   ETF·ETN 은 instrument_type 이 달라 애초에 안 들어온다(STOCK 만).
-      #   거래정지·관리종목 등 제한 171 을 뺀 2,595종목 = 5,190구독 =
-      #   소켓 26개(소켓당 200). 실계좌 웹소켓 세션 한도는 미확인이라
-      #   전환 후 소켓 수와 유입을 반드시 확인한다. 거절되면 서비스가 실패하도록
-      #   두고, 검토된 시장 종목 파일을 LS_WATCH_SYMBOLS_FILE로 명시한다.
-      LS_WATCH_SYMBOLS_FILE: config/full_universe.txt
+      # 원시 호가/체결은 우선순위 바스켓으로 제한하고, ACTIVE PAPER
+      # 조건주문 종목은 최소권한 projection에서 자동 합류시킨다.
+      LS_WATCH_SYMBOLS_FILE: config/realtime_priority_universe.txt
+      LS_INCLUDE_ACTIVE_CONDITIONAL_SYMBOLS: "true"
+      LS_SYMBOL_REFRESH_SECONDS: ${LS_SYMBOL_REFRESH_SECONDS:-15}
       # 장중 두 권위 스트림이 이 시간보다 오래 멈추면 컨테이너를 unhealthy로 표시한다.
       LS_HEALTH_MAX_DATA_AGE_SECONDS: ${LS_HEALTH_MAX_DATA_AGE_SECONDS:-180}
 
@@ -997,10 +1035,19 @@ services:
       timescaledb:
         condition: service_healthy
     environment:
-      DATABASE_URL: ${DATABASE_URL:?}   # 심볼<->instrument 매핑(기동 시 1회)
+      # Generic DATABASE_URL can be expanded before its password variable is
+      # loaded from .env. Pin this read-only control-plane lookup directly so
+      # a superficially healthy API never serves 500 for every snapshot.
+      DATABASE_URL: ${MARKET_API_DATABASE_URL:-postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD:?HEDGEFUND_RUNTIME_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}}
       TIMESCALE_DATABASE_URL: postgresql://postgres:${HEDGEFUND_TSDB_PASSWORD:?}@timescaledb:5432/market
     ports:
       - "0.0.0.0:8036:8036"   # 팀원 조회용 - Tailscale/사설망 전제, 포트포워딩 금지
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8036/ready', timeout=4).read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     mem_limit: 256m
     cpus: 0.5
     pids_limit: 64
@@ -1885,6 +1932,8 @@ services:
     depends_on:
       paper-order-orchestrator-mcp:
         condition: service_healthy
+      risk-mcp:
+        condition: service_healthy
     logging:
       driver: "json-file"
       options:
@@ -1930,6 +1979,14 @@ services:
       HERMES_KANBAN_DB: /opt/data/shared-kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
       HERMES_BIN: /app/repo/scripts/qa_hermes_worker.py
+      # Accounting workers are spawned here, not by accounting-hermes. Keep
+      # the redacted LangSmith observer configuration on the actual process
+      # boundary that launches them.
+      <<: *langsmith-redaction
+      LANGSMITH_TRACING: ${LANGSMITH_TRACING:-false}
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
       # The live board has operated at a one-second tick without queue buildup;
       # keep that latency behavior on fresh deployments too. Hermes still
       # enforces the board-wide max_in_progress cap on every daemon tick.
@@ -1937,12 +1994,19 @@ services:
       # Fast user-facing control-plane tasks only; standard analysis and
       # experiments keep profile budgets. The wrapper preserves explicit
       # per-task overrides and clamps these defaults to bounded ranges.
-      HGFINANCE_FAST_ADVISORY_MAX_TURNS: ${HGFINANCE_FAST_ADVISORY_MAX_TURNS:-8}
+      HGFINANCE_FAST_ADVISORY_MAX_TURNS: ${HGFINANCE_FAST_ADVISORY_MAX_TURNS:-12}
       HGFINANCE_USER_RESPONSE_MAX_TURNS: ${HGFINANCE_USER_RESPONSE_MAX_TURNS:-12}
       HGFINANCE_USER_RESPONSE_REASONING: ${HGFINANCE_USER_RESPONSE_REASONING:-medium}
+      # Hermes enforces SIGTERM -> SIGKILL at the task boundary. One retry is
+      # enough for a transient provider/worker failure; the supervisor's
+      # 1200-second workflow deadline handles the aggregate response budget.
+      HGFINANCE_WORKER_MAX_RUNTIME_SECONDS: ${HGFINANCE_WORKER_MAX_RUNTIME_SECONDS:-600}
+      HGFINANCE_WORKER_MAX_RETRIES: ${HGFINANCE_WORKER_MAX_RETRIES:-2}
+      HGFINANCE_WORKFLOW_TIMEOUT_SECONDS: ${HGFINANCE_WORKFLOW_TIMEOUT_SECONDS:-1200}
       # The dispatcher spawns the department workers, so MCP profile headers are
       # expanded from this process environment rather than a gateway container.
       MCP_RESEARCH_API_KEY: ${MCP_RESEARCH_API_KEY:-}
+      MCP_RISK_API_KEY: ${MCP_RISK_API_KEY:?A generated 32-byte Risk legal MCP key is required}
       MCP_TRADING_ORDER_API_KEY: ${MCP_TRADING_ORDER_API_KEY:?A generated 32-byte PAPER-order MCP key is required}
       # ▶ 에이전트는 이 컨테이너 **안에서** 뜨므로 자격도 여기 있어야 한다
       #   (2026-08-14 실측). 프로필 config 의 `env:` 에 ANTHROPIC_API_KEY 가 적혀
@@ -2064,7 +2128,7 @@ services:
       # Risk advisory tasks receive one exact-symbol canonical quote alongside
       # the Accounting Book snapshot. This is read-only and never submits an order.
       MARKET_API_URL: ${MARKET_API_URL:-http://market-api:8036}
-      RISK_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS: ${RISK_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS:-2.0}
+      RISK_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS: ${RISK_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS:-5.0}
       PYTHONPATH: /opt/hgfinance
       # Langfuse(2026-08-20). Discord/웹 사용자 질의는 BFF 가 부서장을 직접 부르지
       # 않고 카드로 넘긴다 - 그 카드가 끝나는 것을 보는 유일한 프로세스가 여기다.
@@ -2080,6 +2144,12 @@ services:
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
+      # Hermes enforces SIGTERM -> SIGKILL for each worker task. The supervisor
+      # also passes these values to primary/QA/synthesis cards and applies the
+      # end-to-end root deadline independently.
+      HGFINANCE_WORKER_MAX_RUNTIME_SECONDS: ${HGFINANCE_WORKER_MAX_RUNTIME_SECONDS:-600}
+      HGFINANCE_WORKER_MAX_RETRIES: ${HGFINANCE_WORKER_MAX_RETRIES:-2}
+      HGFINANCE_WORKFLOW_TIMEOUT_SECONDS: ${HGFINANCE_WORKFLOW_TIMEOUT_SECONDS:-1200}
       MEMOHARNESS_D5_MODE: ${MEMOHARNESS_D5_MODE:-active}
       MEMOHARNESS_D5_DATABASE_URL: ${MEMOHARNESS_D5_DATABASE_URL:-postgresql://hgfinance_runtime:${HEDGEFUND_RUNTIME_DB_PASSWORD:?HEDGEFUND_RUNTIME_DB_PASSWORD is required}@timescaledb:5432/${HEDGEFUND_CONTROL_DB_NAME:-control}}
       MEMOHARNESS_D5_TOP_K: ${MEMOHARNESS_D5_TOP_K:-5}
@@ -2107,40 +2177,45 @@ services:
       # HR fast-advisory tasks receive one bounded projection from the existing
       # Workforce API, avoiding repeated browser/shell discovery by Hermes.
       WORKFORCE_API_URL: ${WORKFORCE_API_URL:-http://workforce-api:8000}
-      WORKFORCE_ADVISORY_TIMEOUT_SECONDS: ${WORKFORCE_ADVISORY_TIMEOUT_SECONDS:-0.75}
+      WORKFORCE_ADVISORY_TIMEOUT_SECONDS: ${WORKFORCE_ADVISORY_TIMEOUT_SECONDS:-5}
       # Accounting/Portfolio primary tasks get a read-only snapshot attached
       # to their task body (orchestration/accounting_advisory_context.py) -
       # that profile has no shell tool, so this is its only path to confirmed
       # NAV/PnL/cash figures. Same canonical demo PAPER fund the reconciler
       # and dashboard already use.
       ACCOUNTING_ADVISORY_FUND_ID: ${ACCOUNTING_ADVISORY_FUND_ID:-3838f7d6-0c7c-4e54-85f3-316a451e7eeb}
+      ACCOUNTING_ADVISORY_BOOK_ID: ${ACCOUNTING_ADVISORY_BOOK_ID:-07d913de-9a5b-4cf5-b893-31a625445761}
+      ACCOUNTING_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS: ${ACCOUNTING_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS:-5.0}
       PORTFOLIO_BFF_INTERNAL_URL: ${PORTFOLIO_BFF_INTERNAL_URL:-http://portfolio-bff:8000}
+      CEO_SUPERVISOR_OBSERVER_WORKERS: ${CEO_SUPERVISOR_OBSERVER_WORKERS:-2}
+      CEO_SUPERVISOR_OBSERVER_MAX_PENDING: ${CEO_SUPERVISOR_OBSERVER_MAX_PENDING:-128}
     mem_limit: 512m
     mem_reservation: 128m
     cpus: 0.5
     pids_limit: 128
     stop_grace_period: 20s
 
-  # Retention is deliberately a separate maintenance lane. It performs the
-  # expensive authoritative workflow reconstruction and owns no supervisor
-  # event/watch loop, so active request latency is not coupled to cleanup.
-  kanban-retention-worker:
+  # These four deterministic retention domains keep their existing run_once
+  # implementations and independent schedules. A small scheduler consolidates
+  # only their process lifecycle; one failed job cannot stop the other jobs.
+  maintenance-retention-scheduler:
     build:
       context: .
       dockerfile: Dockerfile.ceo-supervisor
     image: hedgefund-ceo-supervisor:latest
-    container_name: hedgefund-kanban-retention-worker
+    container_name: hedgefund-maintenance-retention-scheduler
     restart: unless-stopped
     init: true
-    # Purge is enabled only through the worker's audit + 7-day age gate. The
-    # root mutation remains bounded so one maintenance pass cannot drain the
-    # historical board or compete with the supervisor for a long interval.
-    command: ["python3", "/opt/hgfinance/orchestration/kanban_retention.py", "--interval", "${KANBAN_RETENTION_INTERVAL_SECONDS:-900}", "--max-archive-roots", "${KANBAN_RETENTION_MAX_ARCHIVE_ROOTS:-5}"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: ["python3", "-m", "orchestration.maintenance_retention"]
     volumes:
       - /home/ubuntu/.hermes:/opt/data
       - .:/opt/hgfinance:ro
     environment:
       HERMES_HOME: /opt/data
+      HERMES_PROFILE: ceo-agent
       HERMES_UID: 1000
       HERMES_GID: 1000
       HERMES_KANBAN_HOME: /opt/data/shared-kanban
@@ -2150,6 +2225,8 @@ services:
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
       PYTHONPATH: /opt/hgfinance
       KANBAN_RETENTION_INTERVAL_SECONDS: ${KANBAN_RETENTION_INTERVAL_SECONDS:-900}
+      KANBAN_RETENTION_MAX_ARCHIVE_ROOTS: ${KANBAN_RETENTION_MAX_ARCHIVE_ROOTS:-5}
+      KANBAN_RETENTION_MAX_RUN_SECONDS: ${KANBAN_RETENTION_MAX_RUN_SECONDS:-1800}
       KANBAN_RETENTION_ROOT_WORKERS: ${KANBAN_RETENTION_ROOT_WORKERS:-2}
       KANBAN_CLI_TIMEOUT_SECONDS: ${KANBAN_CLI_TIMEOUT_SECONDS:-30}
       # Retention reconstructs authoritative workflows in a long-lived
@@ -2158,28 +2235,6 @@ services:
       KANBAN_READ_CACHE_TTL_SECONDS: "0"
       KANBAN_DONE_CACHE_TTL_SECONDS: "0"
       CEO_KANBAN_FETCH_WORKERS: "1"
-    mem_limit: 256m
-    mem_reservation: 64m
-    cpus: 0.25
-    pids_limit: 64
-    stop_grace_period: 20s
-
-  # MemoHarness D5 owns a separate Postgres relation from Kanban's SQLite
-  # retention lane. Keep cleanup isolated from request/supervisor latency and
-  # limit it to the Experience Bank table.
-  memo-harness-retention-worker:
-    build:
-      context: .
-      dockerfile: Dockerfile.ceo-supervisor
-    image: hedgefund-ceo-supervisor:latest
-    container_name: hedgefund-memo-harness-retention-worker
-    restart: unless-stopped
-    init: true
-    command: ["python3", "/opt/hgfinance/orchestration/experience_retention.py", "--interval", "${MEMOHARNESS_D5_RETENTION_INTERVAL_SECONDS:-86400}"]
-    volumes:
-      - .:/opt/hgfinance:ro
-    environment:
-      PYTHONPATH: /opt/hgfinance
       # D5 is part of the private operational/control plane. Do not let a
       # stale hosted-Supabase D5 override point the maintenance worker at a
       # database that does not contain the Experience Bank relation.
@@ -2190,28 +2245,6 @@ services:
       MEMOHARNESS_D5_RETENTION_MAX_PRESSURE_BATCHES: ${MEMOHARNESS_D5_RETENTION_MAX_PRESSURE_BATCHES:-10}
       MEMOHARNESS_D5_RETENTION_VACUUM_ANALYZE: ${MEMOHARNESS_D5_RETENTION_VACUUM_ANALYZE:-true}
       MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS: ${MEMOHARNESS_D5_STATEMENT_TIMEOUT_MS:-1500}
-    mem_limit: 128m
-    mem_reservation: 32m
-    cpus: 0.1
-    pids_limit: 32
-    stop_grace_period: 20s
-
-  # Notion is a projection sink, not a source of truth.  Keep its free-tier
-  # workspace bounded in a separate maintenance lane; this worker archives
-  # pages through the API after seven days and removes exact replay records.
-  notion-retention-worker:
-    build:
-      context: .
-      dockerfile: Dockerfile.ceo-supervisor
-    image: hedgefund-ceo-supervisor:latest
-    container_name: hedgefund-notion-retention-worker
-    restart: unless-stopped
-    init: true
-    command: ["python3", "/opt/hgfinance/orchestration/adapters/notion_retention.py", "--interval", "${NOTION_RETENTION_INTERVAL_SECONDS:-86400}"]
-    volumes:
-      - .:/opt/hgfinance:ro
-    environment:
-      PYTHONPATH: /opt/hgfinance
       NOTION_TOKEN: ${NOTION_TOKEN:-}
       NOTION_CEO_DB: ${NOTION_CEO_DB:-}
       NOTION_BRIEFING_DB: ${NOTION_BRIEFING_DB:-}
@@ -2226,35 +2259,26 @@ services:
       NOTION_RETENTION_DAYS: ${NOTION_RETENTION_DAYS:-7}
       NOTION_RETENTION_DEDUPE_EXACT: ${NOTION_RETENTION_DEDUPE_EXACT:-true}
       NOTION_RETENTION_BATCH_SIZE: ${NOTION_RETENTION_BATCH_SIZE:-250}
+      # Archive only identified projection pages and cap one pass so a bad
+      # schema/mapping cannot turn maintenance into a bulk Notion mutation.
+      NOTION_RETENTION_MAX_ARCHIVES: ${NOTION_RETENTION_MAX_ARCHIVES:-100}
       NOTION_RETENTION_INTERVAL_SECONDS: ${NOTION_RETENTION_INTERVAL_SECONDS:-86400}
-    mem_limit: 128m
-    mem_reservation: 32m
-    cpus: 0.1
-    pids_limit: 32
-    stop_grace_period: 20s
-
-  # Discord cleanup is likewise isolated from ingress and mirror projection.
-  # The scheduled path has a seven-day age gate; current incident cleanup is
-  # an explicit one-shot command and is never enabled by this service default.
-  discord-retention-worker:
-    build:
-      context: .
-      dockerfile: apps/api/Dockerfile
-    image: hedgefund-portfolio-bff:latest
-    container_name: hedgefund-discord-retention-worker
-    restart: unless-stopped
-    init: true
-    depends_on:
-      redis:
-        condition: service_healthy
-    command: ["python", "/app/orchestration/discord_retention.py", "--interval", "${DISCORD_RETENTION_INTERVAL_SECONDS:-86400}"]
-    volumes:
-      - /home/ubuntu/.hermes:/opt/data:ro
-      - ./orchestration/discord_retention.py:/app/orchestration/discord_retention.py:ro
-    environment:
-      PYTHONPATH: /app:/app/apps/api
-      HERMES_HOME: /opt/data
-      HERMES_PROFILE: ceo-agent
+      # LangSmith cleanup is named-project-only and dry-run by default. Flip
+      # LANGSMITH_RETENTION_DRY_RUN=false only after reviewing one pass.
+      LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
+      LANGSMITH_METRICS_PROJECT: ${LANGSMITH_METRICS_PROJECT:-HgFinance-Metrics}
+      LANGSMITH_EVALS_PROJECT: ${LANGSMITH_EVALS_PROJECT:-HgFinance-Evals}
+      LANGSMITH_RETENTION_ENABLED: ${LANGSMITH_RETENTION_ENABLED:-true}
+      LANGSMITH_RETENTION_DRY_RUN: ${LANGSMITH_RETENTION_DRY_RUN:-true}
+      LANGSMITH_RETENTION_WORKFLOW_DAYS: ${LANGSMITH_RETENTION_WORKFLOW_DAYS:-30}
+      LANGSMITH_RETENTION_METRICS_DAYS: ${LANGSMITH_RETENTION_METRICS_DAYS:-7}
+      LANGSMITH_RETENTION_EVALS_DAYS: ${LANGSMITH_RETENTION_EVALS_DAYS:-30}
+      LANGSMITH_RETENTION_SCAN_WINDOW_DAYS: ${LANGSMITH_RETENTION_SCAN_WINDOW_DAYS:-90}
+      LANGSMITH_RETENTION_MAX_TRACES: ${LANGSMITH_RETENTION_MAX_TRACES:-100}
+      LANGSMITH_RETENTION_INTERVAL_SECONDS: ${LANGSMITH_RETENTION_INTERVAL_SECONDS:-86400}
+      LANGSMITH_RETENTION_MAX_RUN_SECONDS: ${LANGSMITH_RETENTION_MAX_RUN_SECONDS:-900}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       UI_MIRROR_REDIS_URL: ${UI_MIRROR_REDIS_URL:-${REDIS_URL:-redis://redis:6379/0}}
       UI_MIRROR_STREAM: ${UI_MIRROR_STREAM:-hf:ui-ceo-mirror:v1}
@@ -2266,11 +2290,19 @@ services:
       DISCORD_RETENTION_MAX_MESSAGES: ${DISCORD_RETENTION_MAX_MESSAGES:-500}
       DISCORD_RETENTION_MAX_REQUESTS: ${DISCORD_RETENTION_MAX_REQUESTS:-500}
       DISCORD_RETENTION_INTERVAL_SECONDS: ${DISCORD_RETENTION_INTERVAL_SECONDS:-86400}
-    mem_limit: 128m
-    mem_reservation: 32m
-    cpus: 0.1
-    pids_limit: 64
-    stop_grace_period: 20s
+      DISCORD_RETENTION_MAX_RUN_SECONDS: ${DISCORD_RETENTION_MAX_RUN_SECONDS:-900}
+      MAINTENANCE_RETENTION_HEALTH_PATH: /tmp/hgfinance-maintenance-retention-health.json
+    healthcheck:
+      test: ["CMD", "python3", "-m", "orchestration.maintenance_retention", "--healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    mem_limit: 384m
+    mem_reservation: 96m
+    cpus: 0.45
+    pids_limit: 96
+    stop_grace_period: 45s
 
   # 문헌·YouTube 스카우트 도구는 resident HTTP 서비스로 실행하지 않는다.
   # paper-search는 Hermes가 uvx stdio로 직접 연결하고, YouTube transcript는

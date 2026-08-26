@@ -223,18 +223,20 @@ class CeoMirrorExecutionTest(unittest.TestCase):
         self.assertEqual(ignored.reason, "bot_mirror_ignored")
 
     def test_discord_ingress_rejects_missing_reply_coordinates(self) -> None:
-        with patch.object(ceo_mirror_api, "_ceo_query") as ceo_query:
-            with self.assertRaises(ceo_mirror_api.HTTPException) as raised:
-                ceo_mirror_api.mirror_ingress(
-                    CanonicalIngress(
-                        query="discord query",
-                        request_id="discord:333333333333333333",
-                        source="discord",
-                        source_message_id="333333333333333333",
-                        actor_id="discord-user",
-                    ),
-                    _http_request(internal_discord=True),
-                )
+        with (
+            patch.object(ceo_mirror_api, "_ceo_query") as ceo_query,
+            self.assertRaises(ceo_mirror_api.HTTPException) as raised,
+        ):
+            ceo_mirror_api.mirror_ingress(
+                CanonicalIngress(
+                    query="discord query",
+                    request_id="discord:333333333333333333",
+                    source="discord",
+                    source_message_id="333333333333333333",
+                    actor_id="discord-user",
+                ),
+                _http_request(internal_discord=True),
+            )
 
         self.assertEqual(raised.exception.status_code, 422)
         self.assertEqual(
@@ -244,20 +246,22 @@ class CeoMirrorExecutionTest(unittest.TestCase):
         ceo_query.assert_not_called()
 
     def test_discord_ingress_rejects_request_id_not_bound_to_message(self) -> None:
-        with patch.object(ceo_mirror_api, "_ceo_query") as ceo_query:
-            with self.assertRaises(ceo_mirror_api.HTTPException) as raised:
-                ceo_mirror_api.mirror_ingress(
-                    CanonicalIngress(
-                        query="discord query",
-                        request_id="request-without-discord-binding",
-                        source="discord",
-                        source_message_id="444444444444444444",
-                        actor_id="discord-user",
-                        discord_channel_id="channel-1",
-                        discord_message_id="444444444444444444",
-                    ),
-                    _http_request(internal_discord=True),
-                )
+        with (
+            patch.object(ceo_mirror_api, "_ceo_query") as ceo_query,
+            self.assertRaises(ceo_mirror_api.HTTPException) as raised,
+        ):
+            ceo_mirror_api.mirror_ingress(
+                CanonicalIngress(
+                    query="discord query",
+                    request_id="request-without-discord-binding",
+                    source="discord",
+                    source_message_id="444444444444444444",
+                    actor_id="discord-user",
+                    discord_channel_id="channel-1",
+                    discord_message_id="444444444444444444",
+                ),
+                _http_request(internal_discord=True),
+            )
 
         self.assertEqual(raised.exception.status_code, 422)
         self.assertEqual(
@@ -415,6 +419,35 @@ class CeoMirrorExecutionTest(unittest.TestCase):
         forwarded = ceo_query.call_args.args[0]
         self.assertEqual(forwarded.source, "discord")
 
+    def test_ceo_query_carries_previous_question_context_in_request(self) -> None:
+        response = {"task_id": "t_context", "status": "planned", "binding": False}
+        with (
+            patch.object(ceo_mirror_api, "resolve_discord_actor", return_value=None),
+            patch("apps.api.ceo.ceo_query", return_value=response) as ceo_query,
+        ):
+            actual = ceo_mirror_api._ceo_query(
+                CanonicalIngress(
+                    query="위 질문을 다시 분석해줘",
+                    request_id="discord:context-message-1",
+                    source="discord",
+                    source_message_id="context-message-1",
+                    actor_id="discord-user",
+                    previous_question_context="삼성전자 리스크를 분석해줘",
+                    previous_question_context_source_message_id="starter-message-1",
+                )
+            )
+
+        self.assertIs(actual, response)
+        forwarded = ceo_query.call_args.args[0]
+        self.assertEqual(
+            forwarded.previous_question_context, "삼성전자 리스크를 분석해줘"
+        )
+        self.assertEqual(
+            forwarded.previous_question_context_source_message_id,
+            "starter-message-1",
+        )
+        self.assertNotIn("previous_question_context", ceo_query.call_args.kwargs)
+
     def test_binding_ceo_query_does_not_emit_langsmith_root_trace(self) -> None:
         response = {
             "task_id": "order-root",
@@ -439,7 +472,9 @@ class CeoMirrorExecutionTest(unittest.TestCase):
         self.assertIs(actual, response)
         publish.assert_not_called()
 
-    def test_web_scope_resolves_one_active_trading_book_when_book_is_omitted(self) -> None:
+    def test_web_scope_resolves_one_active_trading_book_when_book_is_omitted(
+        self,
+    ) -> None:
         from apps.api.ceo import CeoAsk
 
         user_id = str(uuid4())
@@ -511,9 +546,7 @@ class CeoMirrorExecutionTest(unittest.TestCase):
             patch.object(
                 ceo_mirror_api,
                 "authorized_trading_books",
-                return_value=[
-                    {"fund_id": fund_id, "book_id": book_id, "name": "MAIN"}
-                ],
+                return_value=[{"fund_id": fund_id, "book_id": book_id, "name": "MAIN"}],
             ),
             patch("apps.api.ceo.ceo_query", side_effect=fake_ceo_query),
         ):
@@ -599,9 +632,7 @@ class CeoMirrorExecutionTest(unittest.TestCase):
             patch.object(
                 ceo_mirror_api,
                 "resolve_discord_actor",
-                return_value=SimpleNamespace(
-                    user_id=user_id, fund_id=mapped_fund_id
-                ),
+                return_value=SimpleNamespace(user_id=user_id, fund_id=mapped_fund_id),
             ),
             patch.object(
                 ceo_mirror_api,

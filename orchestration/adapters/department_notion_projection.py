@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
@@ -40,6 +41,7 @@ from orchestration.adapters.terminal_projection_utils import (
     workflow_root,
 )
 from orchestration.canonical_profiles import department_for_canonical_profile
+from orchestration.qa_discord_feedback import qa_check_label
 from orchestration.risk_plan_projection import format_position_risk_plan
 
 DEFAULT_DATABASES = {
@@ -52,6 +54,8 @@ DATABASE_ENV = {
     "quant-backtest": "NOTION_QUANT_BACKTEST_DB",
     "research": "NOTION_RESEARCH_DB",
     "risk": "NOTION_RISK_DB",
+    "accounting": "NOTION_ACCOUNTING_DB",
+    "qa": "NOTION_QA_DB",
 }
 
 TITLE_PROPERTY = {
@@ -59,6 +63,8 @@ TITLE_PROPERTY = {
     "quant-backtest": "전략·백테스트 run",
     "research": "종목",
     "risk": "제목",
+    "accounting": "제목",
+    "qa": "제목",
 }
 
 PROJECTION_MARKER = "hgfinance.department-notion-projection.v1"
@@ -175,12 +181,12 @@ class _NotionTransport:
         existing: list[Mapping[str, Any]] = []
         cursor: str | None = None
         while True:
-            suffix = f"?page_size=100&start_cursor={cursor}" if cursor else "?page_size=100"
+            suffix = (
+                f"?page_size=100&start_cursor={cursor}" if cursor else "?page_size=100"
+            )
             page = self._request("GET", f"blocks/{page_id}/children{suffix}")
             existing.extend(
-                item
-                for item in page.get("results", [])
-                if isinstance(item, Mapping)
+                item for item in page.get("results", []) if isinstance(item, Mapping)
             )
             if not page.get("has_more"):
                 break
@@ -268,8 +274,15 @@ def _task_title(task: Mapping[str, Any], department: str) -> str:
         raw = (
             "Trading department result"
             if department == "trading"
-            else "Quant backtest result"
+            else (
+                "Quant backtest result"
+                if department == "quant-backtest"
+                else "회계·포트폴리오 검토 결과"
+            )
         )
+
+    if department == "qa":
+        raw = "QA 감사 결과"
 
     return f"{tid} · {raw}"[:1900]
 
@@ -284,6 +297,59 @@ def _result_text(task: Mapping[str, Any], metadata: Mapping[str, Any]) -> str:
     )
 
 
+def _humanize_risk_result(value: str) -> str:
+    """Remove runtime field names from the manager-facing Risk projection."""
+
+    replacements = (
+        (
+            "`unversioned·snapshot_resolvable=false`",
+            "현재 유효한 투자지침 스냅샷을 확인할 수 없는 상태",
+        ),
+        (
+            "unversioned·snapshot_resolvable=false",
+            "현재 유효한 투자지침 스냅샷을 확인할 수 없는 상태",
+        ),
+        ("판단 보류 (DEFER)", "판단 보류"),
+        ("적용 가능성 주의 (WARN)", "적용 가능성 주의"),
+        ("gross 노출", "총액 기준 노출"),
+        ("KOREA_EQUITY", "국내 주식"),
+        ("PROVISIONAL_ETF", "임시 허용 ETF"),
+        ("Mandate가", "투자지침이"),
+        ("Mandate를", "투자지침을"),
+        ("Mandate와", "투자지침과"),
+        ("Mandate의", "투자지침의"),
+        ("Mandate", "투자지침"),
+        ("MODERATE", "보통"),
+        ("NAV", "순자산 가치"),
+        ("위반 없음(no_breach)", "현재 입력만으로 위반을 확인하지 못함"),
+        ("no_breach", "현재 입력만으로 위반을 확인하지 못함"),
+        ("Risk 검증", "리스크 검증"),
+    )
+    humanized = value
+    for internal, friendly in replacements:
+        humanized = humanized.replace(internal, friendly)
+    humanized = re.sub(
+        r"(?:PAPER(?: 가상거래)? 기준 |PAPER만으로는 )?"
+        r"현재 입력만으로 위반을 확인하지 못함으로 "
+        r"(?:보았|회신되었)지만",
+        "법률 위반 여부를 확정할 수 없으며",
+        humanized,
+    )
+
+    lines: list[str] = []
+    for line in humanized.splitlines():
+        if re.fullmatch(r"\s*error\s*:\s*(?:null|none|\"\")\s*", line, re.IGNORECASE):
+            continue
+        blocked = re.fullmatch(r"\s*block_reason\s*:\s*[\"']?(.*?)[\"']?\s*", line)
+        if blocked:
+            reason = blocked.group(1).strip().rstrip("\"'")
+            if reason:
+                lines.append(f"판단 보류 사유: {reason}")
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
 def _risk_body_markdown(
     *,
     task: Mapping[str, Any],
@@ -293,7 +359,9 @@ def _risk_body_markdown(
 ) -> str:
     status = str(task.get("status") or "").casefold()
     status_label = "완료" if status in {"done", "completed"} else status or "미확인"
-    title = str(task.get("title") or task.get("name") or "리스크 검토").strip()
+    title = _humanize_risk_result(
+        str(task.get("title") or task.get("name") or "리스크 검토").strip()
+    )
     parts = [
         "# 리스크 부서 검토 결과",
         "",
@@ -328,11 +396,257 @@ def _risk_body_markdown(
     parts.extend(
         [
             "",
-            "> 이 페이지는 사람의 검토를 위한 읽기 전용 복사본입니다. "
-            "권위 상태와 집행 권한은 Risk 데이터베이스와 결정론적 Risk Engine에 남습니다.",
+            (
+                "> 이 페이지는 사람의 검토를 위한 읽기 전용 복사본입니다. "
+                "최종 상태와 실행 권한은 리스크 원본 시스템과 승인된 검증 절차에서 관리합니다."
+            ),
         ]
     )
     return "\n".join(parts)
+
+
+def _accounting_body_markdown(
+    *,
+    task: Mapping[str, Any],
+    root_task_id: str,
+    result_text: str,
+    metadata: Mapping[str, Any],
+) -> str:
+    """Render the CEO/Kanban accounting handoff for a human manager."""
+
+    status = str(task.get("status") or "").casefold()
+    status_label = "완료" if status in {"done", "completed"} else status or "미확인"
+    title = str(task.get("title") or task.get("name") or "회계·포트폴리오 검토").strip()
+    parts = [
+        "# 회계·포트폴리오 검토 결과",
+        "",
+        "## 검토 정보",
+        "",
+        f"- 검토 제목: {title}",
+        f"- 업무 번호: `{task_id(task)}`",
+        f"- 상위 요청 번호: `{root_task_id}`",
+        f"- 처리 상태: {status_label}",
+        "",
+        "## 검토 결과",
+        "",
+        result_text or "결과 본문이 없습니다.",
+    ]
+
+    structured = metadata.get("structured_summary")
+    if isinstance(structured, Mapping):
+        labels = {
+            "scope": "검토 범위",
+            "as_of": "기준 시각",
+            "source": "자료 기준",
+            "status": "수치 상태",
+            "nav": "순자산",
+            "cash": "현금",
+            "securities_value": "유가증권 평가액",
+            "realized_pnl": "실현손익",
+            "unrealized_pnl": "미실현손익",
+            "fees": "수수료",
+            "taxes": "세금",
+            "open_breaks": "미해결 대사 차이",
+            "valuation_evidence": "평가 근거",
+            "paper_boundary": "운영 경계",
+        }
+        rows = []
+        for key, label in labels.items():
+            value = structured.get(key)
+            if value not in (None, "", [], {}):
+                rows.append(f"- {label}: {value}")
+        if rows:
+            parts.extend(["", "## 주요 수치와 확인 사항", "", *rows])
+
+    parts.extend(
+        [
+            "",
+            "> 이 기록은 읽기 전용 PAPER 검토 결과입니다. 주문, 원장 수정, 공식 NAV 확정은 수행하지 않았습니다.",
+        ]
+    )
+    return "\n".join(parts)
+
+
+def _humanize_accounting_result(value: str) -> str:
+    """Keep runtime field names out of the manager-facing accounting page."""
+
+    replacements = (
+        ("기준시각(as_of)", "기준 시각"),
+        ("기준시각", "기준 시각"),
+        ("source_of_record", "자료 기준"),
+        ("authoritative=false", "공식 확정 아님"),
+        ("authoritative", "공식 확정 여부"),
+        ("quality_status", "자료 품질 상태"),
+        ("instrument_id", "종목 식별자"),
+        ("valuation confirmation", "평가 확정 여부"),
+        ("snapshot weight", "조회 자료 기준 비중"),
+        ("snapshot", "조회 자료"),
+        ("스냅샷", "조회 자료"),
+        ("as_of", "기준 시각"),
+        ("Reconciliation Break", "대사 차이"),
+        ("Break", "대사 차이"),
+        ("Long/Short", "롱/숏"),
+        ("Long", "롱"),
+        ("Short", "숏"),
+        ("NAV close", "공식 NAV 확정"),
+        ("contract=hgfinance.accounting-advisory-portfolio.v1", "회계 조회 자료 형식"),
+        ("accounting.journals (Supabase)", "Accounting Engine 원장"),
+        ("Fund/Book/Strategy", "펀드·장부·전략"),
+        ("Posted Journal", "게시 원장"),
+        ("reversing/additional entry", "역분개/추가 분개"),
+    )
+    humanized = value
+    for internal, friendly in replacements:
+        humanized = humanized.replace(internal, friendly)
+    return humanized
+
+
+def _humanize_qa(value: Any, limit: int = 320) -> str:
+    rendered = " ".join(str(value or "").split())
+    replacements = (
+        ("Accounting Engine", "회계 시스템"),
+        ("accounting system", "회계 시스템"),
+        ("Mandate", "투자지침"),
+        ("broker reconciliation", "브로커 대사"),
+        ("NAV", "순자산"),
+        ("PIT", "기준 시점"),
+        ("provenance", "자료 출처·계보"),
+        ("DEFER", "보류"),
+        ("FAIL", "실패"),
+        ("PASS", "통과"),
+        ("WARN", "주의"),
+    )
+    for internal, friendly in replacements:
+        rendered = rendered.replace(internal, friendly)
+    return rendered[:limit]
+
+
+def _qa_decision_label(value: Any) -> str:
+    return {
+        "PASS": "통과",
+        "WARN": "주의",
+        "CONDITIONAL": "조건부 통과",
+        "CONDITIONAL PASS": "조건부 통과",
+        "FAIL": "실패·결정 차단",
+        "DEFER": "판단 보류",
+    }.get(str(value or "").strip().upper(), "확인 필요")
+
+
+def _qa_findings_lines(value: Any) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return [f"- {_humanize_qa(value)}"] if value else []
+    lines: list[str] = []
+    for item in value[:8]:
+        if isinstance(item, Mapping):
+            severity = _humanize_qa(item.get("severity") or "확인 필요", 24)
+            issue = _humanize_qa(
+                item.get("summary")
+                or item.get("description")
+                or item.get("issue")
+                or item.get("message")
+                or "구체적인 문제 설명이 없습니다.",
+                300,
+            )
+            owner = _humanize_qa(item.get("owner") or item.get("responsible_party"), 100)
+            block = _humanize_qa(item.get("block_condition") or item.get("impact"), 180)
+            suffix = f" 담당: {owner}" if owner else ""
+            if block:
+                suffix += f" 영향: {block}"
+            lines.append(f"- [{severity}] {issue}{suffix}")
+        elif item:
+            lines.append(f"- {_humanize_qa(item)}")
+    return lines
+
+
+def _qa_check_lines(value: Any) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return [f"- {_humanize_qa(value)}"] if value else []
+    lines: list[str] = []
+    for item in value[:12]:
+        if isinstance(item, Mapping):
+            raw_name = str(item.get("check") or item.get("name") or "확인 항목")
+            name = qa_check_label(raw_name)
+            result = _qa_decision_label(item.get("result") or item.get("status"))
+            detail = _humanize_qa(item.get("detail") or item.get("reason"), 180)
+            lines.append(f"- {name}: {result}{f' ({detail})' if detail else ''}")
+        elif item:
+            lines.append(f"- {_humanize_qa(item)}")
+    return lines
+
+
+def _qa_body_markdown(
+    *,
+    task: Mapping[str, Any],
+    root_task_id: str,
+    result_text: str,
+    metadata: Mapping[str, Any],
+) -> str:
+    """Render a manager-readable QA decision without runtime field names."""
+
+    verdict = (
+        metadata.get("verdict")
+        or metadata.get("qa_verdict")
+        or metadata.get("overall")
+        or task.get("verdict")
+    )
+    numerical = metadata.get("numerical_posture") or metadata.get("decision")
+    findings = _qa_findings_lines(metadata.get("findings") or task.get("findings"))
+    checks = _qa_check_lines(metadata.get("checks") or task.get("checks"))
+    status = str(task.get("status") or "").casefold()
+    status_label = "완료" if status in {"done", "completed"} else "확인 필요"
+    parts = [
+        "# QA 감사 결과",
+        "",
+        "## 검토 정보",
+        "",
+        f"- 검토 업무: `{task_id(task)}`",
+        f"- 상위 업무: `{root_task_id}`",
+        f"- 처리 상태: {status_label}",
+        f"- 종합 판정: {_qa_decision_label(verdict)}",
+        f"- 수치 판단: {_qa_decision_label(numerical) if numerical else '확인 필요'}",
+        "",
+        "## 확인 결과",
+        "",
+    ]
+    parts.extend(checks or ["- 세부 점검 결과가 없습니다."])
+    parts.extend(["", "## 주요 문제와 영향", ""])
+    parts.extend(findings or ["- 중대한 문제 항목이 기록되지 않았습니다."])
+    if result_text:
+        parts.extend(["", "## QA 요약", "", _humanize_qa(result_text, 1800)])
+    parts.extend(
+        [
+            "",
+            "## 후속 조치",
+            "",
+            "- 실패·주의 항목의 원자료와 대사 근거를 보완한 뒤 QA를 다시 실행합니다.",
+            "- QA 승인 전에는 공식 수치 확정이나 투자 결정을 진행하지 않습니다.",
+            "",
+            "> PAPER·읽기 전용 검토입니다. 주문 제출과 원장 변경은 수행하지 않았습니다.",
+        ]
+    )
+    return "\n".join(parts)
+
+
+def _schema_select(
+    properties_schema: Mapping[str, Any], name: str, value: str
+) -> dict[str, Any] | None:
+    spec = properties_schema.get(name)
+    if not isinstance(spec, Mapping) or spec.get("type") != "select":
+        return None
+    options = spec.get("select", {}).get("options", [])
+    allowed = {
+        str(option.get("name"))
+        for option in options
+        if isinstance(option, Mapping) and option.get("name")
+    }
+    return {"select": {"name": value}} if value in allowed else None
+
+
+def _schema_checkbox(
+    properties_schema: Mapping[str, Any], name: str, value: bool
+) -> dict[str, Any] | None:
+    spec = properties_schema.get(name)
+    return {"checkbox": bool(value)} if isinstance(spec, Mapping) and spec.get("type") == "checkbox" else None
 
 
 def _body_markdown(
@@ -345,6 +659,20 @@ def _body_markdown(
     metadata = merged_run_metadata(task)
     if department == "risk":
         return _risk_body_markdown(
+            task=task,
+            root_task_id=root_task_id,
+            result_text=result_text,
+            metadata=metadata,
+        )
+    if department == "accounting":
+        return _accounting_body_markdown(
+            task=task,
+            root_task_id=root_task_id,
+            result_text=result_text,
+            metadata=metadata,
+        )
+    if department == "qa":
+        return _qa_body_markdown(
             task=task,
             root_task_id=root_task_id,
             result_text=result_text,
@@ -573,10 +901,80 @@ class DepartmentNotionProjection:
 
         metadata = merged_run_metadata(task)
         result_text = correction or _result_text(task, metadata)
+        if department == "risk":
+            result_text = _humanize_risk_result(result_text)
+        elif department == "accounting":
+            result_text = _humanize_accounting_result(result_text)
 
         props: dict[str, Any] = {
             title_property: _title(title),
         }
+
+        if department == "qa":
+            verdict = str(
+                metadata.get("verdict")
+                or metadata.get("qa_verdict")
+                or metadata.get("overall")
+                or task.get("verdict")
+                or "WARN"
+            ).strip().upper()
+            canonical_verdict = {
+                "CONDITIONAL PASS": "CONDITIONAL",
+                "CONDITIONAL_PASS": "CONDITIONAL",
+                "REJECT": "FAIL",
+                "BLOCK": "FAIL",
+            }.get(verdict, verdict)
+            decision_property = _schema_select(
+                properties_schema, "판정", canonical_verdict
+            )
+            if decision_property is not None:
+                props["판정"] = decision_property
+
+            severity = str(
+                metadata.get("highest_severity")
+                or task.get("highest_severity")
+                or "UNKNOWN"
+            ).strip().upper()
+            severity_property = _schema_select(
+                properties_schema, "findings severity", severity
+            )
+            if severity_property is not None:
+                props["findings severity"] = severity_property
+
+            findings_text = "\n".join(
+                _qa_findings_lines(
+                    metadata.get("findings") or task.get("findings")
+                )
+            )
+            checks_text = "\n".join(
+                _qa_check_lines(metadata.get("checks") or task.get("checks"))
+            )
+            qa_text_properties = {
+                "findings": findings_text,
+                "claim_checks": checks_text,
+                "claim_narrative": _humanize_qa(
+                    metadata.get("summary") or result_text, 1800
+                ),
+                "원본 리포트": result_text,
+            }
+            for property_name, value in qa_text_properties.items():
+                spec = properties_schema.get(property_name)
+                if value and isinstance(spec, Mapping) and spec.get("type") == "rich_text":
+                    props[property_name] = _rich_text(value)
+
+            escalate = canonical_verdict in {"FAIL", "CONDITIONAL"}
+            escalate_property = _schema_checkbox(properties_schema, "escalate", escalate)
+            if escalate_property is not None:
+                props["escalate"] = escalate_property
+
+            for property_name, metadata_key in (
+                ("input_hash", "input_hash"),
+                ("calculation_version", "calculation_version"),
+            ):
+                value = metadata.get(metadata_key)
+                spec = properties_schema.get(property_name)
+                if value and isinstance(spec, Mapping) and spec.get("type") == "rich_text":
+                    props[property_name] = _rich_text(value)
 
         narrative_property = (
             risk_property_name("narrative", properties_schema)
@@ -736,9 +1134,7 @@ class DepartmentNotionProjection:
                     append_blocks(page_id, children)
                 return projection_result("updated", page_id)
             created = create()
-            return projection_result(
-                "created", str(created.get("id") or "") or None
-            )
+            return projection_result("created", str(created.get("id") or "") or None)
 
         result = self._idempotency.execute(
             database_id,

@@ -73,12 +73,12 @@ def _timeout_seconds() -> float:
         return max(
             0.1,
             min(
-                2.0,
-                float(os.getenv("WORKFORCE_ADVISORY_TIMEOUT_SECONDS", "0.75")),
+                10.0,
+                float(os.getenv("WORKFORCE_ADVISORY_TIMEOUT_SECONDS", "5")),
             ),
         )
     except ValueError:
-        return 0.75
+        return 5.0
 
 
 def _get_json(base_url: str, path: str) -> dict[str, Any] | None:

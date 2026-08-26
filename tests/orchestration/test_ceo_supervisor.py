@@ -559,6 +559,38 @@ class SupervisorPolicyTest(unittest.TestCase):
         self.assertEqual(replan.action, SupervisorAction.CREATE_TASK)
         self.assertEqual(replan.assignee, "research-department")
 
+    def test_triage_qa_is_terminal_and_never_auto_unblocked(self) -> None:
+        state = SupervisorState(
+            "root",
+            (
+                child(
+                    "trading",
+                    "trading-department",
+                    "done",
+                    body="workflow_root_task_id=root\nworkflow_role=primary",
+                    result="공식 조회 결과",
+                ),
+                child(
+                    "qa",
+                    "qa-department",
+                    "triage",
+                    body="workflow_root_task_id=root\nworkflow_role=qa",
+                    block_reason="repeated provider credential failure",
+                ),
+            ),
+            workflow_mode="binding",
+            root_is_user_query=True,
+            selected_primary_profiles=("trading-department",),
+        )
+
+        decision = decide_supervisor(state)
+
+        self.assertTrue(state.qa_children[0].terminal)
+        self.assertTrue(state.qa_children[0].failed)
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
+        self.assertEqual(decision.reason, "binding_partial_defer_template")
+
     def test_blocked_needs_input_is_not_treated_as_failure(self) -> None:
         decision = decide_supervisor(
             SupervisorState(
@@ -2415,6 +2447,33 @@ class SupervisorWakeupTest(unittest.TestCase):
             ],
         )
 
+    def test_terminal_observer_runs_after_root_lock_is_released(self) -> None:
+        client = FakeClient()
+        service = CeoSupervisorService(client)
+        acquired_from_peer: list[bool] = []
+
+        def observe(**_kwargs) -> None:
+            root_lock = service._parent_lock("root")
+
+            def acquire_from_peer() -> None:
+                acquired = root_lock.acquire(timeout=0.2)
+                acquired_from_peer.append(acquired)
+                if acquired:
+                    root_lock.release()
+
+            peer = threading.Thread(target=acquire_from_peer)
+            peer.start()
+            peer.join(timeout=1)
+
+        service._project_terminal_task = observe
+        service._deliver_department_progress = lambda **kwargs: None
+        service._reconcile_department_terminal_progress = lambda **kwargs: None
+        service.handle_terminal_event(
+            {"event_id": "observer-after-root-lock", "task_id": "r", "kind": "completed"}
+        )
+
+        self.assertEqual(acquired_from_peer, [True])
+
     def test_synthesis_does_not_wait_for_qa_visibility_after_qa_create(self) -> None:
         class StaleWorkflowClient(FakeClient):
             def create_task(self, **kwargs):
@@ -2738,6 +2797,34 @@ class SupervisorWakeupTest(unittest.TestCase):
         self.assertTrue(
             any("ceo-workflow-scope-error" in comment["body"] for comment in client.comments)
         )
+
+    def test_legacy_scope_error_does_not_mutate_terminal_root_and_dedupes(self) -> None:
+        client = FakeClient()
+        client.root_body = (
+            "hgfinance.ceo-workflow-scope.v1\n"
+            "workflow_mode=unsupported\n"
+        )
+        original_show = client.show
+
+        def show(task_id: str):
+            payload = original_show(task_id)
+            if task_id == "root":
+                payload["status"] = "done"
+            return payload
+
+        client.show = show
+        event = {"event_id": "legacy-invalid-mode", "task_id": "r", "kind": "completed"}
+
+        first = CeoSupervisorService(client).handle_terminal_event(event)
+        second = CeoSupervisorService(client).handle_terminal_event(event)
+
+        self.assertEqual(first.action, SupervisorAction.BLOCK_ABORT)
+        self.assertIsNone(second)
+        self.assertEqual(client.blocked, [])
+        scope_comments = [
+            item for item in client.comments if "ceo-workflow-scope-error" in item["body"]
+        ]
+        self.assertEqual(len(scope_comments), 1)
 
     def test_reclaimed_does_not_wake_supervisor(self) -> None:
         client = FakeClient()

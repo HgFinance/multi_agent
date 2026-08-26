@@ -47,7 +47,18 @@ def _merge(base: dict[str, str], values: Mapping[str, Any]) -> None:
     }
     for key, value in values.items():
         normalized = aliases.get(str(key), str(key))
-        if normalized in {"request_id", "message_id", "guild_id", "channel_id", "thread_id", "session_id"} and value:
+        if (
+            normalized
+            in {
+                "request_id",
+                "message_id",
+                "guild_id",
+                "channel_id",
+                "thread_id",
+                "session_id",
+            }
+            and value
+        ):
             base.setdefault(normalized, str(value))
 
 
@@ -165,8 +176,10 @@ class DiscordFinalDelivery:
         self,
         *,
         environment: Mapping[str, str] | None = None,
-        sender: Callable[[str, str, Mapping[str, str]], Mapping[str, Any]] | None = None,
-        editor: Callable[[str, str, str, Mapping[str, str]], Mapping[str, Any]] | None = None,
+        sender: Callable[[str, str, Mapping[str, str]], Mapping[str, Any]]
+        | None = None,
+        editor: Callable[[str, str, str, Mapping[str, str]], Mapping[str, Any]]
+        | None = None,
         timeout: float = 5.0,
     ) -> None:
         self.environment = dict(environment or os.environ)
@@ -208,6 +221,41 @@ class DiscordFinalDelivery:
             body = response.read().decode("utf-8")
         decoded = json.loads(body) if body else {}
         return decoded if isinstance(decoded, Mapping) else {}
+
+    @staticmethod
+    def _humanize_content(content: str) -> str:
+        """Translate common runtime labels in manager/user-facing messages."""
+
+        replacements = (
+            ("snapshot_resolvable=false", "현재 투자지침 확인 불가"),
+            ("block_reason", "판단 보류 사유"),
+            ("Mandate가", "투자지침이"),
+            ("Mandate를", "투자지침을"),
+            ("Mandate와", "투자지침과"),
+            ("Mandate의", "투자지침의"),
+            ("Mandate", "투자지침"),
+            ("MODERATE", "보통"),
+            ("NAV", "순자산 가치"),
+            ("위반 없음(no_breach)", "현재 입력만으로 위반을 확인하지 못함"),
+            ("no_breach", "현재 입력만으로 위반을 확인하지 못함"),
+            ("확인된 위반 없음", "현재 입력만으로 위반을 확인하지 못함"),
+            ("**risk**", "**리스크 부서**"),
+            ("Risk 부서", "리스크 부서"),
+            ("HIGH 차단으로", "중요 차단 사유로"),
+            ("HIGH 차단", "중요 차단 사유"),
+            ("DEFER", "판단 보류"),
+        )
+        rendered = str(content or "")
+        for internal, friendly in replacements:
+            rendered = rendered.replace(internal, friendly)
+        rendered = re.sub(
+            r"(?:PAPER(?: 가상거래)? 기준 |PAPER만으로는 )?"
+            r"현재 입력만으로 위반을 확인하지 못함으로 "
+            r"(?:보았|회신되었)지만",
+            "법률 위반 여부를 확정할 수 없으며",
+            rendered,
+        )
+        return rendered
 
     @staticmethod
     def _detail_chunks(content: str, limit: int = 1700) -> tuple[str, ...]:
@@ -252,9 +300,8 @@ class DiscordFinalDelivery:
 
         correlation = _correlation_from_synthesis(source_task, root_task)
 
-        source_message_id = (
-            correlation.message_id
-            or _message_id_from_request_id(correlation.request_id)
+        source_message_id = correlation.message_id or _message_id_from_request_id(
+            correlation.request_id
         )
 
         thread_id = correlation.thread_id
@@ -302,7 +349,7 @@ class DiscordFinalDelivery:
             return "failed"
 
         # Keep one department card compact enough for a single Discord message.
-        rendered = str(content or "").strip()
+        rendered = self._humanize_content(content).strip()
         if not rendered:
             return "empty"
 
@@ -310,10 +357,7 @@ class DiscordFinalDelivery:
             rendered = rendered[:1897].rstrip() + "..."
 
         guild_id = correlation.guild_id or "unknown"
-        correlation_message_id = (
-            source_message_id
-            or root_task_id
-        )
+        correlation_message_id = source_message_id or root_task_id
 
         dedup_key = canonical_discord_dedup_key(
             guild_id,
@@ -442,17 +486,14 @@ class DiscordFinalDelivery:
         except (HTTPError, URLError, OSError, TimeoutError, ValueError):
             store.mark_outbound(response_key, "FAILED", profile)
             logger.exception(
-                "discord-thread-card root=%s profile=%s "
-                "status=failed operation=post",
+                "discord-thread-card root=%s profile=%s status=failed operation=post",
                 root_task_id,
                 profile,
             )
             return "failed"
 
         response_message_id = (
-            str(response.get("id") or "")
-            if isinstance(response, Mapping)
-            else ""
+            str(response.get("id") or "") if isinstance(response, Mapping) else ""
         )
 
         store.mark_outbound(
@@ -488,9 +529,8 @@ class DiscordFinalDelivery:
 
         correlation = _correlation_from_synthesis(source_task, root_task)
 
-        message_id = (
-            correlation.message_id
-            or _message_id_from_request_id(correlation.request_id)
+        message_id = correlation.message_id or _message_id_from_request_id(
+            correlation.request_id
         )
 
         # Resolve the request's EXISTING Discord thread.
@@ -551,7 +591,7 @@ class DiscordFinalDelivery:
             )
             return "failed"
 
-        chunks = self._detail_chunks(content)
+        chunks = self._detail_chunks(self._humanize_content(content))
         if not chunks:
             return "empty"
 
@@ -577,9 +617,7 @@ class DiscordFinalDelivery:
         total = len(chunks)
 
         for index, chunk in enumerate(chunks, start=1):
-            response_key = (
-                f"{dedup_key}:{safe_suffix}:chunk-{index}-of-{total}"
-            )
+            response_key = f"{dedup_key}:{safe_suffix}:chunk-{index}-of-{total}"
 
             try:
                 claim = store.claim_outbound(
@@ -631,9 +669,7 @@ class DiscordFinalDelivery:
                 return "failed"
 
             response_message_id = (
-                str(response.get("id") or "")
-                if isinstance(response, Mapping)
-                else ""
+                str(response.get("id") or "") if isinstance(response, Mapping) else ""
             )
 
             store.mark_outbound(
@@ -665,9 +701,8 @@ class DiscordFinalDelivery:
         response_key_suffix: str = "final",
     ) -> str:
         correlation = _correlation_from_synthesis(synthesis_task, root_task)
-        explicit_message_id = (
-            correlation.message_id
-            or _message_id_from_request_id(correlation.request_id)
+        explicit_message_id = correlation.message_id or _message_id_from_request_id(
+            correlation.request_id
         )
         message_id = explicit_message_id
         inbound_key: str | None = None
@@ -682,9 +717,7 @@ class DiscordFinalDelivery:
             message_id or "",
         )
         if not message_id and correlation.session_id:
-            inbound_key = store.inbound_key_for_session(
-                correlation.session_id, profile
-            )
+            inbound_key = store.inbound_key_for_session(correlation.session_id, profile)
             if inbound_key:
                 context = store.inbound_context(inbound_key, profile)
                 message_id = str(context.get("message_id") or "") or None
@@ -768,7 +801,7 @@ class DiscordFinalDelivery:
             )
             return "failed"
 
-        body: dict[str, Any] = {"content": content}
+        body: dict[str, Any] = {"content": self._humanize_content(content)}
         body["message_reference"] = {
             "message_id": message_id,
             "channel_id": channel_id,
@@ -792,8 +825,12 @@ class DiscordFinalDelivery:
             )
             return "failed"
 
-        response_message_id = str(response.get("id") or "") if isinstance(response, Mapping) else ""
-        store.mark_outbound(response_key, "COMPLETED", profile, response_message_id or None)
+        response_message_id = (
+            str(response.get("id") or "") if isinstance(response, Mapping) else ""
+        )
+        store.mark_outbound(
+            response_key, "COMPLETED", profile, response_message_id or None
+        )
         logger.info(
             "discord-final-delivery root=%s channel_id=%s message_id=%s status=sent",
             root_task_id,

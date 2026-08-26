@@ -28,6 +28,8 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
+from orchestration.langsmith_queries import query_runs
+
 LOGGER = logging.getLogger(__name__)
 
 WORKFLOW_PROJECT_DEFAULT = "First"
@@ -267,10 +269,9 @@ class FeedbackConfig:
             max_feedback_items=_int("LANGSMITH_FEEDBACK_MAX_ITEMS", 3, 1, 10),
             max_feedback_chars=_int("LANGSMITH_FEEDBACK_MAX_CHARS", 1_200, 200, 4_000),
             metrics_window_seconds=_int("LANGSMITH_FEEDBACK_METRICS_WINDOW_SECONDS", 300, 60, 3_600),
-            # LangSmith's /runs/query endpoint accepts at most 100 rows per
-            # request. Keep the bound below that server-side limit so a bad
-            # tuning value cannot turn the background, fail-open poller into
-            # a repeated 400 loop.
+            # SmithDB v2 accepts at most 100 rows per page. Keep the bound
+            # below that server-side limit so a bad tuning value cannot turn
+            # the background, fail-open poller into a repeated 400 loop.
             metrics_max_runs=_int("LANGSMITH_FEEDBACK_METRICS_MAX_RUNS", 100, 1, 100),
             kanban_db_path=os.getenv("LANGSMITH_FEEDBACK_KANBAN_DB_PATH", "").strip()
             or None,
@@ -1527,37 +1528,23 @@ class LangSmithFeedbackService:
             now = datetime.now(timezone.utc)
             since = now - timedelta(seconds=self.config.lookback_seconds)
             # A root may start before the observation window and finish inside
-            # it (the common case for a multi-worker advisory).  Filtering by
-            # start_time alone silently loses that root.  Use the server-side
-            # end_time filter and keep a bounded page; the SQLite source-run
-            # key makes repeated pages idempotent and the next poll catches
-            # older rows when the page is full.
+            # it (the common case for a multi-worker advisory). SmithDB v2
+            # bounds by start time, so retain a one-hour bounded prefix and
+            # keep the end_time filter for completed roots. The SQLite
+            # source-run key makes repeated pages idempotent.
             root_filter = f'gt(end_time, "{since.isoformat()}")'
             root_limit = min(100, max(self.config.batch_size * 4, self.config.batch_size))
-            try:
-                root_runs = client.list_runs(
-                    project_name=self.config.workflow_project,
-                    is_root=True,
-                    filter=root_filter,
-                    end_time=now,
-                    limit=root_limit,
-                    select=["id", "name", "status", "start_time", "end_time", "extra"],
-                )
-                root_runs = list(root_runs)
-            except Exception as exc:  # noqa: BLE001 - preserve SDK compatibility
-                LOGGER.warning(
-                    "langsmith_feedback_end_time_query_fallback error=%s",
-                    type(exc).__name__,
-                )
-                root_runs = list(
-                    client.list_runs(
-                        project_name=self.config.workflow_project,
-                        is_root=True,
-                        start_time=since,
-                        limit=root_limit,
-                        select=["id", "name", "status", "start_time", "end_time", "extra"],
-                    )
-                )
+            root_runs = query_runs(
+                client,
+                project_name=self.config.workflow_project,
+                min_start_time=since - timedelta(hours=1),
+                max_start_time=now,
+                is_root=True,
+                filter_expression=root_filter,
+                page_size=root_limit,
+                max_results=root_limit,
+                selects=["ID", "NAME", "STATUS", "START_TIME", "END_TIME", "EXTRA"],
+            )
             for run in root_runs:
                 observation = observation_from_run(run)
                 observation = attribute_workflow_bottleneck(
@@ -1590,13 +1577,15 @@ class LangSmithFeedbackService:
             )
             metrics_end = datetime.fromtimestamp(metrics_end_epoch, timezone.utc)
             metrics_observation = _aggregate_metric_window(
-                client.list_runs(
+                query_runs(
+                    client,
                     project_name=self.config.metrics_project,
+                    min_start_time=metrics_start,
+                    max_start_time=metrics_end,
                     is_root=True,
-                    start_time=metrics_start,
-                    end_time=metrics_end,
-                    limit=self.config.metrics_max_runs,
-                    select=["id", "name", "status", "start_time", "end_time", "extra"],
+                    page_size=self.config.metrics_max_runs,
+                    max_results=self.config.metrics_max_runs,
+                    selects=["ID", "NAME", "STATUS", "START_TIME", "END_TIME", "EXTRA"],
                 ),
                 project_name=self.config.metrics_project,
                 window_start=metrics_start,

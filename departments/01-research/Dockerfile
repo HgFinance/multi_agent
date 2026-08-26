@@ -56,6 +56,7 @@ COPY collectors/collector_scheduler.py \
 # 재사용한다. 전체 agents/ 실행면을 이미지에 되살리지 않고 정확히 한 파일만
 # allowlist에 포함한다.
 COPY agents/universe_manager.py ./agents/universe_manager.py
+COPY agents/sector_regime_analyst.py ./agents/sector_regime_analyst.py
 COPY contracts ./contracts
 COPY repository ./repository
 COPY api ./api

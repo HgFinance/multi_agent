@@ -10,7 +10,7 @@ FROM nousresearch/hermes-agent:latest
 # ceo-hermes와 동일한 B7 validator를 사용한다. repository adapter preflight와
 # 이미지 내부 durable-create guard가 서로 다른 role/key 해석을 갖지 않도록
 # build-time에 같은 installer를 적용한다.
-ENV PYTHONPATH="/opt/hgfinance:${PYTHONPATH}"
+ENV PYTHONPATH="/opt/hgfinance"
 
 COPY --chmod=0644 orchestration/__init__.py /opt/hgfinance/orchestration/__init__.py
 COPY --chmod=0644 orchestration/primary_task_idempotency.py /opt/hgfinance/orchestration/primary_task_idempotency.py
@@ -35,6 +35,7 @@ RUN test -x /opt/hermes/.venv/bin/python3 \
         psycopg2-binary==2.9.12 \
         fastapi \
         pydantic \
+        redis==7.0.1 \
         langfuse==4.14.3 \
-        langsmith==0.10.17 \
-    && /opt/hermes/.venv/bin/python3 -c "import fastapi, pydantic, psycopg2, langfuse, langsmith"
+        langsmith==0.11.1 \
+    && /opt/hermes/.venv/bin/python3 -c "import fastapi, pydantic, psycopg2, redis, langfuse, langsmith"

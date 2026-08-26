@@ -12,15 +12,18 @@ Arm A(plain RAG)를 verdict_acc(0.87 vs 0.53)·semantic_acc(0.73 vs 0.33) 전 �
 
 from __future__ import annotations
 
+import json
 import sys
 from collections.abc import Callable
 from datetime import date, datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 _LLM_WIKI_DIR = Path(__file__).resolve().parents[1] / "experiments" / "llm_wiki"
+_RAW_CORPUS_DIR = _LLM_WIKI_DIR / "data" / "raw"
 
 # golden_set.json의 고정 컴플라이언스 mandate 문구(실험에서 검증된 그대로) — 사용자의
 # 개인 투자 Mandate(investor_profile 등)가 아니라 펀드 차원의 상시 준수 선언이다.
@@ -41,6 +44,19 @@ class LegalWikiQueryInput(BaseModel):
     as_of: date
 
 
+class LegalSourceReference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    document_id: str
+    page_id: str
+    clause_id: str | None = None
+    title: str | None = None
+    authority: str | None = None
+    effective_from: str | None = None
+    origin_url: str
+    source_sha256: str | None = None
+
+
 class LegalWikiQueryOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -51,6 +67,7 @@ class LegalWikiQueryOutput(BaseModel):
     confidence: float | None = None
     escalate: bool = True
     pages_visited: list[str] = Field(default_factory=list)
+    source_references: list[LegalSourceReference] = Field(default_factory=list)
     context_chars: int = 0
     retrieved_at: datetime
     error_code: str | None = None
@@ -63,6 +80,41 @@ def _default_answer_fn() -> LegalWikiAnswerFn:
     from arms import llm_wiki_grep_bm25_answer
 
     return llm_wiki_grep_bm25_answer
+
+
+@lru_cache(maxsize=1)
+def _source_reference_index() -> dict[str, LegalSourceReference]:
+    references: dict[str, LegalSourceReference] = {}
+    for path in sorted(_RAW_CORPUS_DIR.glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            origin_url = str(payload.get("origin_url") or "")
+            page_id = str(payload.get("page_id") or "")
+            document_id = str(payload.get("doc_id") or "")
+            if (
+                not page_id
+                or not document_id
+                or not origin_url.startswith("https://www.law.go.kr/")
+            ):
+                continue
+            references[page_id] = LegalSourceReference(
+                document_id=document_id,
+                page_id=page_id,
+                clause_id=str(payload.get("clause_id") or "") or None,
+                title=str(payload.get("title") or "") or None,
+                authority=str(payload.get("authority") or "") or None,
+                effective_from=str(payload.get("effective_from") or "") or None,
+                origin_url=origin_url,
+                source_sha256=str(payload.get("source_sha256") or "") or None,
+            )
+        except (OSError, TypeError, ValueError):
+            continue
+    return references
+
+
+def _source_references(page_ids: list[str]) -> list[LegalSourceReference]:
+    index = _source_reference_index()
+    return [index[page_id] for page_id in dict.fromkeys(page_ids) if page_id in index]
 
 
 def query_legal_wiki(
@@ -86,29 +138,25 @@ def query_legal_wiki(
     pages = list(result.get("pages_visited") or [])
     verdict = answer.get("verdict")
     cited_documents = list(answer.get("cited_documents") or [])
+    source_references = _source_references([*cited_documents, *pages])
     try:
         confidence = float(answer["confidence"])
     except (KeyError, TypeError, ValueError):
         confidence = None
 
-    # Guided JSON guarantees shape and primitive types, not cross-field legal
-    # semantics.  Only a well-supported, sufficiently confident no-breach
-    # result may suppress escalation; every other state fails closed.
-    supported_no_breach = (
-        verdict == "no_breach"
-        and confidence is not None
-        and 0.6 <= confidence <= 1.0
-        and bool(cited_documents)
-        and bool(pages)
-    )
+    # Guided JSON and official source coordinates guarantee shape/provenance,
+    # not that a model correctly applied the law to complete facts. Legal Wiki
+    # is evidence collection and drafting only; it never grants an automatic
+    # no-breach clearance.
     return LegalWikiQueryOutput(
         status="OK" if pages else "NO_EVIDENCE",
         verdict=verdict,
         rationale=answer.get("rationale"),
         cited_documents=cited_documents,
         confidence=confidence,
-        escalate=bool(answer.get("escalate", True)) or not supported_no_breach,
+        escalate=True,
         pages_visited=pages,
+        source_references=source_references,
         context_chars=int(result.get("context_chars", 0)),
         retrieved_at=datetime.now(timezone.utc),
     )
@@ -116,6 +164,7 @@ def query_legal_wiki(
 
 __all__ = [
     "COMPLIANCE_MANDATE_CONTEXT",
+    "LegalSourceReference",
     "LegalWikiAnswerFn",
     "LegalWikiQueryInput",
     "LegalWikiQueryOutput",
@@ -159,10 +208,15 @@ if __name__ == "__main__":
     assert down.error_code == "RuntimeError"
 
     def _no_pages(query: str, as_of: str, mandate: str) -> dict[str, Any]:
-        return {"answer": {"verdict": "ambiguous", "escalate": True}, "context_chars": 0, "pages_visited": []}
+        return {
+            "answer": {"verdict": "ambiguous", "escalate": True},
+            "context_chars": 0,
+            "pages_visited": [],
+        }
 
     empty = query_legal_wiki(
-        LegalWikiQueryInput(query="코퍼스 밖 질문", as_of=_date(2026, 8, 7)), answer_fn=_no_pages
+        LegalWikiQueryInput(query="코퍼스 밖 질문", as_of=_date(2026, 8, 7)),
+        answer_fn=_no_pages,
     )
     assert empty.status == "NO_EVIDENCE"
 

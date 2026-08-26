@@ -175,7 +175,7 @@ services:
       trading-api:
         condition: service_healthy
       market-api:
-        condition: service_started
+        condition: service_healthy
     environment:
       APP_ENV: production
       CONDITIONAL_RULE_DATABASE_URL: *conditional-worker-database-url
@@ -371,9 +371,9 @@ services:
       ORDER_ORCHESTRATOR_DATABASE_URL: *order-database-url
       ORDER_ORCHESTRATOR_DATABASE_ROLE: svc_order_orchestrator
 
-  # MemoHarness retention must use the same private control database as the
-  # BFF and supervisor.
-  memo-harness-retention-worker:
+  # The consolidated maintenance scheduler keeps MemoHarness on the same
+  # private control database while its other jobs retain their own boundaries.
+  maintenance-retention-scheduler:
     depends_on: *control-dependency
     environment:
       DATABASE_URL: *control-database-url
@@ -410,18 +410,14 @@ services:
       <<: *control-environment
       GOVERNANCE_WORKFORCE_DATABASE_URL: *control-database-url
 
-  notification-worker:
-    environment:
-      <<: *control-environment
-      GOVERNANCE_WORKFORCE_DATABASE_URL: *control-database-url
-
   workforce-api:
     depends_on: *control-dependency
     environment:
       <<: *control-environment
       GOVERNANCE_WORKFORCE_DATABASE_URL: *control-database-url
 
-  improvement-worker:
+  control-event-worker:
+    depends_on: *control-dependency
     environment:
       <<: *control-environment
       GOVERNANCE_WORKFORCE_DATABASE_URL: *control-database-url
@@ -498,7 +494,7 @@ services:
       timescaledb:
         condition: service_healthy
       portfolio-bff:
-        condition: service_started
+        condition: service_healthy
     environment:
       DATABASE_URL: *accounting-database-url
       ACCOUNTING_MODE: PAPER_DB

@@ -24,6 +24,7 @@ COPY orchestration/conditional_rules /app/orchestration/conditional_rules
 # Reuse the reviewed read-only LS REST client. No broker/order adapter is
 # copied into this image.
 COPY departments/03-risk/integrations/ls_openapi.py /app/departments/03-risk/integrations/ls_openapi.py
+COPY departments/03-risk/integrations/ls_http.py /app/departments/03-risk/integrations/ls_http.py
 
 # Git worktrees can inherit restrictive directory modes from the deployment
 # host.  The worker deliberately runs as an unprivileged UID, so normalize the

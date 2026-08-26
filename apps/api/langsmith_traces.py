@@ -10,7 +10,7 @@ ledger, offline benchmark gate, CEO advisory의 source가 아니다. 새 평가 
 고빈도 성능 데이터이므로 `LANGSMITH_METRICS_PROJECT`(기본
 `HgFinance-Metrics`)로 분리된다. 따라서 이 QA 화면은 metric ping이 아니라
 `First`에 있는 실제 `stage=qa` Worker trace를 읽는다(prompt/output은 절대
-전송하지 않는다). run 자체의 `tags`는 실측(2026-08-24, `list_runs`) 결과
+전송하지 않는다). run 자체의 `tags`는 실측(2026-08-24) 결과
 비어 있고 - `redacted_trace()`가 여는 `tracing_context`의 태그가 LangGraph 자체
 root run까지 전파되지 않는다 - 부서 구분은 오직 `extra.metadata.stage`에만 있다.
 그래서 여기서는 `stage:qa` 태그가 아니라 이 metadata 필드로 판정한다.
@@ -45,6 +45,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from starlette.concurrency import run_in_threadpool
+
+from orchestration.langsmith_queries import query_runs
 
 _QA_STAGE = "qa"
 # AgentLogsView.tsx의 `degraded` 판정과 같은 집합 - 화면 전체에서 "실패"의 뜻을
@@ -108,17 +110,25 @@ def _latency_seconds(metadata: dict[str, Any], started: datetime, ended: datetim
 def _collect(days: int, project: str | None) -> dict[str, Any]:
     from langsmith import Client
 
-    since = datetime.now(timezone.utc) - timedelta(days=days)
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(days=days)
     client = Client()
-    # `limit=`은 페이지 크기로 그대로 전달돼 API의 페이지당 상한(100)을 넘기면
-    # 400을 낸다(실측, 2026-08-24) - 전체 상한은 여기서 직접(_MAX_RUNS) 끊는다.
+    # SmithDB v2 requires a project UUID and an explicit time window. The
+    # adapter resolves the configured name once per process and enforces the
+    # server page-size bound; the total result cap remains local.
     # 부서 구분이 태그가 아니라 metadata에 있어서(머리말) 서버 필터를 걸 수 없고,
     # root run을 받아 이 안에서 stage=="qa"만 추린다.
-    runs = client.list_runs(
-        project_name=project,
+    from orchestration.llm_observability import langsmith_project
+
+    runs = query_runs(
+        client,
+        project_name=project or langsmith_project("workflow") or "First",
+        min_start_time=since,
+        max_start_time=now,
         is_root=True,
-        start_time=since,
-        select=["start_time", "end_time", "extra"],
+        page_size=100,
+        max_results=_MAX_RUNS,
+        selects=["START_TIME", "END_TIME", "EXTRA"],
     )
 
     by_day: dict[str, dict[str, Any]] = defaultdict(lambda: {"success": 0, "error": 0, "latencies": []})

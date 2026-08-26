@@ -193,7 +193,7 @@ def test_stale_non_input_block_is_archivable_after_seven_days() -> None:
     assert result.terminal_at == NOW - 8 * 24 * 3600
 
 
-def test_recent_block_and_user_input_block_are_retained() -> None:
+def test_recent_block_is_retained_but_stale_user_input_block_is_archived() -> None:
     recent = _workflow(child_status="blocked")
     recent_raw = dict(
         recent.nodes[1].raw,
@@ -233,8 +233,9 @@ def test_recent_block_and_user_input_block_are_retained() -> None:
         root_payload=waiting.root_payload,
     )
     waiting_result = _decision(waiting)
-    assert not waiting_result.eligible
-    assert waiting_result.reason == f"blocked_needs_input:{PRIMARY}"
+    assert waiting_result.eligible
+    assert waiting_result.reason == "safe"
+    assert waiting_result.terminal_at == NOW - 30 * 24 * 3600
 
 
 def test_scan_includes_legacy_standalone_cards_without_stealing_children() -> None:
@@ -243,13 +244,14 @@ def test_scan_includes_legacy_standalone_cards_without_stealing_children() -> No
         {"id": "marked-child", "status": "done", "created_at": 1, "body": "workflow_root_task_id=marked-root\n"},
         {"id": "legacy-done", "status": "done", "created_at": 10, "body": "diagnostic only"},
         {"id": "legacy-blocked", "status": "blocked", "created_at": 20, "body": "factory diagnostic"},
-        {"id": "triage-card", "status": "triage", "created_at": 0, "body": "not terminal"},
+        {"id": "triage-card", "status": "triage", "created_at": 0, "body": "manual review terminal"},
     ]
 
     assert _archive_scan_root_ids(rows) == (
         "legacy-done",
         "legacy-blocked",
         "marked-root",
+        "triage-card",
     )
 
 
@@ -265,6 +267,34 @@ def test_scan_excludes_markerless_linked_children_when_graph_roots_are_known() -
         linked_root_ids=("legacy-root",),
         linked_task_ids=("legacy-root", "legacy-child"),
     ) == ("legacy-standalone", "legacy-root")
+
+
+def test_marker_descendant_disables_standalone_fast_path(tmp_path: Path) -> None:
+    root = {"id": ROOT, "status": "done", "created_at": 1, "body": "legacy root"}
+    child = {
+        "id": PRIMARY,
+        "status": "done",
+        "created_at": 2,
+        "body": f"workflow_root_task_id={ROOT}\nworkflow_role=primary\n",
+    }
+    loaded: list[tuple[str, tuple[str, ...]]] = []
+
+    def loader(root_id: str, **kwargs):
+        rows = tuple(str(row["id"]) for row in kwargs["listed_rows"])
+        loaded.append((root_id, rows))
+        return _workflow()
+
+    worker = RetentionWorker(
+        maintenance=FakeMaintenance(),
+        audit=AuditStore(tmp_path / "retention-audit.db"),
+        workflow_loader=loader,
+        row_lister=lambda *, include_archived=False: [],
+    )
+
+    workflow = worker._load(ROOT, include_archived=True, listed_rows=(root, child))
+
+    assert workflow.root_task_id == ROOT
+    assert loaded == [(ROOT, (ROOT, PRIMARY))]
 
 
 def test_required_synthesis_missing_blocks_multi_stage_workflow() -> None:
@@ -385,7 +415,7 @@ def test_legacy_root_pending_marker_resolves_to_existing_root() -> None:
     assert fetched == [ROOT]
 
 
-def test_archive_then_purge_preserves_audit_and_forbids_under_7_days(tmp_path: Path) -> None:
+def test_archive_then_purge_uses_terminal_age_and_preserves_audit(tmp_path: Path) -> None:
     maintenance = FakeMaintenance()
     audit = AuditStore(tmp_path / "retention-audit.db")
     active = [{"id": ROOT, "body": _workflow().root.body, "status": "done"}]
@@ -422,14 +452,14 @@ def test_archive_then_purge_preserves_audit_and_forbids_under_7_days(tmp_path: P
     assert "body" not in audit.get(ROOT).keys()
 
     state["archived"] = True
-    under_7_days = RetentionWorker(
+    under_7_days_since_completion = RetentionWorker(
         maintenance=maintenance,
         audit=audit,
         workflow_loader=loader,
         row_lister=rows,
         clock=lambda: NOW + 4 * 24 * 3600,
     ).run_once()
-    assert under_7_days.purged_count == 0
+    assert under_7_days_since_completion.purged_count == 0
 
     before_purge = RetentionWorker(
         maintenance=maintenance,

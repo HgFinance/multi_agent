@@ -1484,12 +1484,10 @@ def seed_paper_principal(control_dsn: str, *, top_up_cash: bool) -> None:
             cursor.execute(
                 """
                 insert into governance.user_profiles (
-                  user_id,display_name,timezone,status,identity_provider,
-                  auth_subject_observed_at
-                ) values (%s,'AWS PAPER Operator','Asia/Seoul','ACTIVE','supabase',now())
+                  user_id,display_name,timezone,status
+                ) values (%s,'AWS PAPER Operator','Asia/Seoul','ACTIVE')
                 on conflict (user_id) do update
-                  set status='ACTIVE', identity_provider='supabase',
-                      auth_subject_observed_at=now()
+                  set status='ACTIVE'
                 """,
                 (user_id,),
             )

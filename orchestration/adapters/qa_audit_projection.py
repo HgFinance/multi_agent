@@ -25,12 +25,25 @@ from orchestration.adapters.terminal_projection_utils import (
     terminal_success,
 )
 from orchestration.ceo_workflow_scope import selected_primary_profiles_from_task
+from orchestration.discord_delivery import _token_from_env
+from orchestration.discord_idempotency import (
+    DiscordIdempotencyStore,
+    IdempotencyStoreUnavailable,
+    canonical_discord_dedup_key,
+)
+from orchestration.qa_discord_feedback import (
+    QA_FEEDBACK_CHANNEL_DEFAULT,
+    format_qa_terminal_report,
+    post_qa_discord_message,
+)
 from orchestration.qa_contract import split_planner_selection
 
 logger = logging.getLogger(__name__)
 PROJECTION_VERSION = "v2"
 EVAL_SET_VERSION = 2
 PROJECTION_MARKER = f"hgfinance.qa-audit-projection.{PROJECTION_VERSION}"
+LANGSMITH_MARKER = "hgfinance.qa-langsmith-terminal.v1"
+DISCORD_MARKER = "hgfinance.qa-terminal-discord.v1"
 _UUID_NAMESPACE = uuid.UUID("b8a25c03-2d9d-5f4e-b542-9dcb36db3e91")
 _ALLOWED_DECISIONS = {"PASS", "WARN", "FAIL", "CONDITIONAL"}
 
@@ -70,6 +83,66 @@ def _canonical_decision(original: str) -> str:
     if original in {"FAIL", "REJECT", "BLOCK"}:
         return "FAIL"
     return "WARN"
+
+
+def _profile_model(env: Mapping[str, str]) -> tuple[str | None, str | None, str | None]:
+    """Read the QA profile's declared model without reading credentials."""
+
+    configured_home = Path(str(env.get("HERMES_HOME") or "/opt/data"))
+    candidates = (
+        configured_home / "profiles" / "qa-department" / "config.yaml",
+        configured_home / "config.yaml",
+    )
+    try:
+        lines = next(
+            path.read_text(encoding="utf-8").splitlines()
+            for path in candidates
+            if path.is_file()
+        )
+    except (OSError, UnicodeError, StopIteration):
+        return None, None, None
+
+    in_model = False
+    provider = model = source = None
+    for line in lines:
+        if line.strip() == "model:":
+            in_model = True
+            continue
+        if in_model and line and not line[0].isspace():
+            break
+        if not in_model:
+            continue
+        for key in ("provider", "default"):
+            prefix = f"{key}:"
+            if line.strip().startswith(prefix):
+                value = line.split(":", 1)[1].strip().strip("\"'")
+                if key == "provider":
+                    provider = value
+                else:
+                    model = value
+    if provider or model:
+        source = "qa-profile-config"
+    return provider, model, source
+
+
+def _timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _count_observed(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return max(0, int(value))
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return len(value)
+    return None
 
 
 @dataclass(frozen=True)
@@ -208,6 +281,7 @@ class QaAuditProjection:
         self.env = env if env is not None else os.environ
         self.repository = repository
         self.kanban_client = kanban_client
+        self._published_langsmith: set[str] = set()
 
     def _record(
         self,
@@ -263,8 +337,17 @@ class QaAuditProjection:
                 "tests_run": metadata.get("tests_run") or task.get("tests_run") or [],
                 "worker_session_id": metadata.get("worker_session_id") or task.get("worker_session_id") or "",
                 "summary": summary(task, metadata),
+                "numerical_posture": metadata.get("numerical_posture") or metadata.get("decision"),
             }
         )
+        started_at = iso_timestamp(task.get("started_at"))
+        completed_at = iso_timestamp(task.get("completed_at") or task.get("finished_at"))
+        started_dt = _timestamp(started_at)
+        completed_dt = _timestamp(completed_at)
+        if started_dt is not None and completed_dt is not None:
+            evidence["latency_ms"] = max(
+                0, int((completed_dt - started_dt).total_seconds() * 1000)
+            )
         return QaAuditProjectionRecord(
             eval_run_id=_uuid(
                 f"kanban-qa:{PROJECTION_VERSION}:{root_task_id}:{qa_task_id}"
@@ -285,8 +368,8 @@ class QaAuditProjection:
             artifacts=evidence.get("artifacts", []),
             tests_run=evidence.get("tests_run", []),
             worker_session_id=str(evidence.get("worker_session_id") or ""),
-            started_at=iso_timestamp(task.get("started_at")),
-            completed_at=iso_timestamp(task.get("completed_at") or task.get("finished_at")),
+            started_at=started_at,
+            completed_at=completed_at,
             evidence=evidence if isinstance(evidence, Mapping) else {},
         )
 
@@ -297,6 +380,189 @@ class QaAuditProjection:
                 f"{PROJECTION_MARKER} qa_task_id={record.qa_task_id} "
                 f"eval_run_id={record.eval_run_id} status=persisted",
             )
+
+    @staticmethod
+    def _has_marker(task: Mapping[str, Any], marker: str) -> bool:
+        comments = task.get("comments")
+        if isinstance(comments, Sequence) and not isinstance(
+            comments, (str, bytes, bytearray)
+        ):
+            return any(marker in str(item) for item in comments)
+        return marker in str(comments or "")
+
+    def _publish_langsmith(
+        self,
+        record: QaAuditProjectionRecord,
+        task: Mapping[str, Any],
+    ) -> str:
+        """Publish one correlated QA terminal envelope, never report text."""
+
+        if record.projection_key in self._published_langsmith or self._has_marker(
+            task, LANGSMITH_MARKER
+        ):
+            return "deduped"
+        try:
+            from orchestration.llm_observability import (
+                langsmith_enabled,
+                langsmith_project,
+                publish_metric,
+            )
+
+            if not langsmith_enabled():
+                return "disabled"
+            metadata = merged_run_metadata(task)
+            provider, model, model_source = _profile_model(self.env)
+            observed_llm_calls = _count_observed(
+                metadata.get("llm_calls") or metadata.get("llm_call_count")
+            )
+            observed_tool_calls = _count_observed(
+                metadata.get("tool_calls") or metadata.get("tool_call_count")
+            )
+            observed_tool_errors = _count_observed(
+                metadata.get("tool_error_count") or metadata.get("tool_errors")
+            )
+            runs = task.get("runs")
+            run_count = (
+                len(runs)
+                if isinstance(runs, Sequence)
+                and not isinstance(runs, (str, bytes, bytearray))
+                else None
+            )
+            try:
+                attempts = int(metadata.get("attempts") or run_count or 1)
+            except (TypeError, ValueError):
+                attempts = 1
+            attempts = max(1, attempts)
+            started_at = _timestamp(record.started_at)
+            ended_at = _timestamp(record.completed_at)
+            latency_ms = (
+                max(0, int((ended_at - started_at).total_seconds() * 1000))
+                if started_at is not None and ended_at is not None
+                else None
+            )
+            metric: dict[str, Any] = {
+                "schema_version": "llm.qa-terminal.v1",
+                "worker_id": "qa-department",
+                "role": "qa",
+                "stage": "qa-terminal",
+                "model_name": model,
+                "provider": provider,
+                "model_source": model_source,
+                "status": "COMPLETED",
+                "terminal_status": "COMPLETED",
+                "terminal_reason": "qa_audit_persisted",
+                "terminal_task_id": record.qa_task_id,
+                "terminal_department": "qa",
+                "request_id": metadata.get("request_id") or record.root_task_id,
+                "root_id": record.root_task_id,
+                "task_id": record.qa_task_id,
+                "workflow_role": "qa",
+                "workflow_mode": metadata.get("workflow_mode") or "analysis",
+                "trace_kind": "qa_worker_terminal",
+                "latency_scope": "worker_execution",
+                "latency_ms": latency_ms,
+                "attempts": attempts,
+                "retries": max(attempts - 1, 0),
+                "llm_calls": observed_llm_calls,
+                "tool_calls": observed_tool_calls,
+                "tool_error_count": observed_tool_errors,
+                "error_count": 0,
+                "error_class": None,
+                "output_verdict": record.original_verdict,
+                "finding_count": len(record.findings) if isinstance(record.findings, Sequence) else None,
+                "telemetry_completeness": (
+                    "runtime-and-terminal"
+                    if observed_llm_calls is not None or observed_tool_calls is not None
+                    else "terminal-handoff"
+                ),
+                "observability_source": "kanban_terminal_projection",
+                "raw_payloads_sent": False,
+            }
+            if metadata.get("input_hash"):
+                metric["input_hash"] = metadata["input_hash"]
+            published = publish_metric(
+                metric,
+                trace_id=record.trace_id,
+                project_name=langsmith_project("workflow"),
+                name="qa.hermes.terminal",
+                start_time=started_at,
+                end_time=ended_at,
+            )
+            if not published:
+                return "failed"
+            self._published_langsmith.add(record.projection_key)
+            if self.kanban_client is not None:
+                self.kanban_client.comment_task(
+                    record.qa_task_id,
+                    f"{LANGSMITH_MARKER} eval_run_id={record.eval_run_id} status=published",
+                )
+            return "published"
+        except Exception as exc:  # noqa: BLE001 - observer is fail-open
+            logger.warning(
+                "qa_langsmith_terminal_projection_failed",
+                extra={"error": type(exc).__name__},
+            )
+            return "failed"
+
+    def _publish_discord(
+        self,
+        record: QaAuditProjectionRecord,
+    ) -> str:
+        """Post one manager-facing QA card through the profile's own identity."""
+
+        channel_id = str(
+            self.env.get("QA_DISCORD_CHANNEL_ID") or QA_FEEDBACK_CHANNEL_DEFAULT
+        ).strip()
+        token = _token_from_env(self.env, "qa-department")
+        if not channel_id or not token:
+            return "not_configured"
+        home = Path(str(self.env.get("HERMES_HOME") or "/opt/data"))
+        profile_home = home / "profiles" / "qa-department"
+        delivery_home = profile_home if profile_home.is_dir() else home
+        store = DiscordIdempotencyStore(delivery_home)
+        profile = "qa-department"
+        response_key = f"qa-terminal:{record.eval_run_id}"
+        dedup_key = canonical_discord_dedup_key(
+            "qa", channel_id, record.eval_run_id
+        )
+        try:
+            claim = store.claim_outbound(
+                response_key=response_key,
+                dedup_key=dedup_key,
+                profile=profile,
+            )
+            if not claim.admitted:
+                return "deduped"
+            message_id = post_qa_discord_message(
+                format_qa_terminal_report(record),
+                token=token,
+                channel_id=channel_id,
+            )
+            store.mark_outbound(
+                response_key,
+                "COMPLETED",
+                profile,
+                response_message_id=message_id,
+            )
+            if self.kanban_client is not None:
+                self.kanban_client.comment_task(
+                    record.qa_task_id,
+                    f"{DISCORD_MARKER} eval_run_id={record.eval_run_id} "
+                    f"channel_id={channel_id} status=sent",
+                )
+            return "sent"
+        except IdempotencyStoreUnavailable:
+            return "failed"
+        except Exception as exc:  # noqa: BLE001 - observer is fail-open
+            try:
+                store.mark_outbound(response_key, "FAILED", profile)
+            except Exception:
+                pass
+            logger.warning(
+                "qa_discord_terminal_projection_failed",
+                extra={"error": type(exc).__name__},
+            )
+            return "failed"
 
     def project(
         self,
@@ -337,6 +603,8 @@ class QaAuditProjection:
                         "qa_audit_projection_marker_failed",
                         extra={"error": comment_error},
                     )
+            langsmith_status = self._publish_langsmith(record, task)
+            discord_status = self._publish_discord(record)
             return {
                 "status": "duplicate" if result.get("duplicate") else "persisted",
                 "eval_run_id": record.eval_run_id,
@@ -345,6 +613,8 @@ class QaAuditProjection:
                 "canonical_decision": record.canonical_decision,
                 "duplicate": bool(result.get("duplicate")),
                 "comment_error": comment_error,
+                "langsmith_status": langsmith_status,
+                "discord_status": discord_status,
             }
         except Exception as exc:  # noqa: BLE001 - async governance observer
             logger.warning("qa_audit_projection_failed", extra={"error": str(exc)})

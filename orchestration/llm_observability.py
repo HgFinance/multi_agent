@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import os
+import re
 import sys
 import time
 from collections.abc import Iterator, Mapping
@@ -56,6 +57,20 @@ class WorkerMetric:
 _CURRENT_METRIC: contextvars.ContextVar[WorkerMetric | None] = contextvars.ContextVar(
     "current_worker_metric", default=None
 )
+
+_LANGSMITH_ROOT_CONTEXT_RE = re.compile(
+    r"^\d{8}T\d{12}Z(?P<run_id>[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
+    re.IGNORECASE,
+)
+
+WORKFLOW_LANGSMITH_PROJECT = "First"
+
+
+def _root_run_id_from_trace_context(trace_context: str | None) -> str:
+    """Recover a root UUID from the legacy persisted LangSmith context."""
+
+    match = _LANGSMITH_ROOT_CONTEXT_RE.fullmatch(str(trace_context or "").strip())
+    return match.group("run_id") if match else ""
 
 
 def begin_worker_metric(
@@ -133,7 +148,10 @@ def langsmith_project(
         return os.getenv("LANGSMITH_METRICS_PROJECT", "").strip() or "HgFinance-Metrics"
     if scope == "evals":
         return os.getenv("LANGSMITH_EVALS_PROJECT", "").strip() or "HgFinance-Evals"
-    return os.getenv("LANGSMITH_PROJECT", "").strip() or None
+    # LangChain creates a project named ``default`` when tracing is enabled
+    # without an explicit project.  Keep the workflow scope deterministic even
+    # for local processes that do not load docker-compose/.env.
+    return os.getenv("LANGSMITH_PROJECT", "").strip() or WORKFLOW_LANGSMITH_PROJECT
 
 
 def _metric_metadata(
@@ -146,6 +164,15 @@ def _metric_metadata(
         "stage",
         "model_name",
         "status",
+        "http_status",
+        "error_code",
+        "error_detail",
+        "terminal_status",
+        "terminal_reason",
+        "terminal_task_id",
+        "terminal_department",
+        "observation_point",
+        "joint_improvement_targets",
         "attempts",
         "llm_calls",
         "retries",
@@ -163,11 +190,21 @@ def _metric_metadata(
         "workflow_role",
         "workflow_mode",
         "provider",
+        "model_source",
         "trace_kind",
         "latency_scope",
         "latency_ms",
+        "telemetry_completeness",
+        "observability_source",
+        "tool_calls",
+        "tool_error_count",
+        "finding_count",
+        "output_verdict",
+        "input_hash",
+        "output_hash",
         "eval_score",
         "error_count",
+        "error_class",
         "raw_payloads_sent",
         "trace_id",
         "semantic_qa_version",
@@ -309,6 +346,15 @@ def _safe_langsmith_client() -> Any:
     return Client(hide_inputs=True, hide_outputs=True, hide_metadata=False)
 
 
+@lru_cache(maxsize=1)
+def _structured_langsmith_client() -> Any:
+    """Expose only the root lifecycle's bounded operational envelope."""
+
+    from langsmith import Client
+
+    return Client(hide_inputs=False, hide_outputs=False, hide_metadata=False)
+
+
 @contextlib.contextmanager
 def redacted_trace(
     *,
@@ -331,9 +377,7 @@ def redacted_trace(
             "model_name": model_name,
             "stage": stage,
         }
-        metadata.update(
-            trace_correlation_metadata(correlation, trace_id=trace_id)
-        )
+        metadata.update(trace_correlation_metadata(correlation, trace_id=trace_id))
         observer = tracing_context(
             client=_safe_langsmith_client(),
             project_name=langsmith_project("workflow"),
@@ -342,7 +386,7 @@ def redacted_trace(
             enabled=True,
         )
         observer.__enter__()
-    except Exception:
+    except Exception:  # noqa: BLE001 - optional observer is fail-open.
         # Observability setup is optional; business execution must continue.
         yield
         return
@@ -354,13 +398,13 @@ def redacted_trace(
         # must never replace it or turn it into an observability failure.
         try:
             observer.__exit__(*sys.exc_info())
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - preserve business exception.
             pass
         raise
     else:
         try:
             observer.__exit__(None, None, None)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - observer close is fail-open.
             pass
 
 
@@ -369,6 +413,9 @@ def publish_metric(
     *,
     trace_id: str | None = None,
     project_name: str | None = None,
+    name: str = "llm.performance.metric",
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
 ) -> bool:
     """Send one empty-payload performance metric to the metrics project.
 
@@ -393,25 +440,33 @@ def publish_metric(
                 if not safe.get(key)
             }
         )
-        client.create_run(
-            name="llm.performance.metric",
-            run_type="chain",
-            inputs={},
-            outputs={},
-            project_name=project_name or langsmith_project("metrics"),
-            tags=[
+        completed_at = end_time or datetime.now(timezone.utc)
+        if start_time is not None and start_time > completed_at:
+            # A malformed clock/timestamp must not make the optional observer
+            # reject an otherwise useful terminal metric.
+            start_time = None
+        run_kwargs: dict[str, Any] = {
+            "name": str(name or "llm.performance.metric"),
+            "run_type": "chain",
+            "inputs": {},
+            "outputs": {},
+            "project_name": project_name or langsmith_project("metrics"),
+            "tags": [
                 "hgfinance",
                 "metric",
                 "redacted",
                 f"worker:{metric.get('worker_id', 'unknown')}",
             ],
-            extra={"metadata": safe},
-            end_time=datetime.now(timezone.utc),
-            hide_inputs=True,
-            hide_outputs=True,
-        )
+            "extra": {"metadata": safe},
+            "end_time": completed_at,
+            "hide_inputs": True,
+            "hide_outputs": True,
+        }
+        if start_time is not None:
+            run_kwargs["start_time"] = start_time
+        client.create_run(**run_kwargs)
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001 - optional metric publishing is fail-open.
         return False
 
 
@@ -419,10 +474,16 @@ def publish_root_trace(
     *,
     request_id: str,
     root_id: str | None = None,
+    task_id: str | None = None,
+    department: str | None = None,
     workflow_mode: str | None = None,
     source: str | None = None,
     status: str = "accepted",
+    latency_ms: int = 0,
+    error_class: str | None = None,
     semantic_qa: Mapping[str, Any] | None = None,
+    started_at: datetime | None = None,
+    ended_at: datetime | None = None,
 ) -> bool:
     """Publish one legacy redacted user-query observation.
 
@@ -445,7 +506,7 @@ def publish_root_trace(
     correlation = trace_correlation_metadata(
         request_id=request_id,
         root_id=root_id,
-        task_id=root_id,
+        task_id=task_id or root_id,
         trace_id=request_id,
     )
     metadata: dict[str, Any] = {
@@ -454,8 +515,12 @@ def publish_root_trace(
         "role": "workflow_root",
         "stage": "ceo-terminal" if terminal else "ceo-ingress",
         "status": normalized_status,
+        "error_code": str(error_class) if error_class else None,
         "trace_kind": "workflow_root",
-        "latency_scope": "standalone_observation",
+        "latency_scope": "end_to_end",
+        "latency_ms": int(latency_ms) if latency_ms else None,
+        "department": str(department) if department else None,
+        "task_id": str(task_id or root_id or ""),
         **correlation,
         "workflow_mode": str(workflow_mode) if workflow_mode else None,
         "source": str(source) if source else None,
@@ -481,6 +546,8 @@ def publish_root_trace(
         metadata,
         trace_id=str(request_id),
         project_name=langsmith_project("workflow"),
+        start_time=started_at,
+        end_time=ended_at,
     )
 
 
@@ -540,7 +607,7 @@ def start_root_trace(
             project_name=langsmith_project("workflow"),
             tags=["hgfinance", "workflow-root", "redacted"],
             extra={"metadata": metadata},
-            ls_client=_safe_langsmith_client(),
+            ls_client=_structured_langsmith_client(),
         )
         run.post()
         context = str(run.to_headers().get("langsmith-trace") or "")
@@ -553,7 +620,7 @@ def start_root_trace(
             source=str(source) if source else None,
             run_id=str(getattr(run, "id", "") or "") or None,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - root tracing is optional.
         # Observability setup/post/serialization errors never become workflow
         # errors and leave the caller without a propagation marker.
         return None
@@ -571,6 +638,7 @@ def close_root_trace(
     department: str | None = None,
     status: str,
     error_class: str | None = None,
+    terminal_metadata: Mapping[str, Any] | None = None,
     semantic_qa: Mapping[str, Any] | None = None,
 ) -> bool:
     """Close a previously posted root run through its distributed context."""
@@ -580,8 +648,14 @@ def close_root_trace(
     try:
         from langsmith import RunTree
 
-        client = _safe_langsmith_client()
+        client = _structured_langsmith_client()
         resolved_run_id = str(run_id or "").strip()
+        if not resolved_run_id:
+            # Older roots persisted only the LangSmith dotted-order context.
+            # Its timestamp-prefixed form contains the original root UUID;
+            # update that run directly instead of creating a new child
+            # placeholder through RunTree.from_headers().
+            resolved_run_id = _root_run_id_from_trace_context(trace_context)
         if resolved_run_id:
             # ``RunTree.post`` may use the SDK background batcher. An
             # immediate system answer can otherwise update the run before the
@@ -614,6 +688,8 @@ def close_root_trace(
                 "observation_point": "ceo-ingress",
                 "joint_improvement_targets": "ceo-workflow / observability",
                 "status": str(status),
+                "terminal_status": str(status),
+                "terminal_reason": str(error_class or "completed"),
                 "trace_kind": "workflow_root",
                 "latency_scope": "end_to_end",
                 **correlation,
@@ -623,6 +699,8 @@ def close_root_trace(
                 "raw_payloads_sent": False,
             }
         )
+        if isinstance(terminal_metadata, Mapping):
+            metadata.update(_metric_metadata(dict(terminal_metadata)))
         if isinstance(semantic_qa, Mapping):
             for key in (
                 "semantic_qa_version",
@@ -643,14 +721,34 @@ def close_root_trace(
         # ``parent`` with a new start_time. Patching that object would overwrite
         # the already-posted root's real name/timestamp. Update terminal fields
         # only, preserving ``hgfinance.user-query`` and its original start.
+        terminal_outputs = {
+            key: metadata.get(key)
+            for key in (
+                "request_id",
+                "root_id",
+                "task_id",
+                "department",
+                "workflow_mode",
+                "source",
+                "status",
+                "terminal_status",
+                "terminal_reason",
+                "terminal_task_id",
+                "terminal_department",
+                "error_code",
+                "error_class",
+            )
+            if metadata.get(key) not in (None, "")
+        }
         client.update_run(
             run_id=resolved_run_id,
             end_time=datetime.now(timezone.utc),
             error=str(error_class) if error_class else None,
+            outputs=terminal_outputs,
             extra={"metadata": metadata},
         )
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001 - root finalization is fail-open.
         # LangSmith must not delay or fail a durable finalization.
         return False
 
@@ -808,7 +906,7 @@ def _redacted_native_observation(
                 kwargs["model"] = model_name
             manager = _safe_langfuse_client().start_as_current_observation(**kwargs)
             handle.observation = manager.__enter__()
-        except Exception:
+        except Exception:  # noqa: BLE001 - Langfuse is an optional observer.
             # Observability remains non-binding.  An unavailable SDK/client
             # must not change a trading-adjacent Worker result.
             if manager is not None:
@@ -954,7 +1052,7 @@ def publish_langfuse_metric(
             with contextlib.suppress(Exception):
                 client.flush()
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001 - optional observer is fail-open.
         return False
 
 
@@ -1140,7 +1238,7 @@ def publish_worker_opportunity(
             level="DEFAULT",
         )
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001 - optional observer is fail-open.
         return False
 
 

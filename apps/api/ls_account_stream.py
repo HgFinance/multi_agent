@@ -769,6 +769,87 @@ def summarize_today_trade_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def reconcile_today_activity(
+    activity: dict[str, Any] | None,
+    events: list[dict[str, Any]],
+    business_day: str,
+) -> dict[str, Any] | None:
+    """Reconcile a zero broker diary with explicit fills for one business day."""
+
+    current = activity if isinstance(activity, dict) else {}
+    if int(current.get("trade_count") or 0) > 0:
+        return current
+
+    history_fills = [
+        event
+        for event in events
+        if event.get("kind") == "FILLED"
+        and event.get("source") == "LS_ORDER_HISTORY"
+        and str(event.get("received_at") or "").startswith(business_day)
+    ]
+    realtime_fills = [
+        event
+        for event in events
+        if event.get("kind") == "FILLED"
+        and event.get("source") == "LS_REALTIME"
+        and str(event.get("received_at") or "").startswith(business_day)
+    ]
+    fills = history_fills or realtime_fills
+    if not fills:
+        return activity
+
+    seen: set[str] = set()
+    buy_quantity = sell_quantity = Decimal(0)
+    buy_amount = sell_amount = Decimal(0)
+    trade_count = 0
+    for event in fills:
+        identity = str(
+            event.get("order_no")
+            or event.get("event_id")
+            or (
+                event.get("received_at"),
+                event.get("symbol"),
+                event.get("side"),
+                event.get("quantity"),
+                event.get("price"),
+            )
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        quantity = _dec(event.get("filled_quantity") or event.get("quantity"))
+        price = _dec(event.get("average_fill_price") or event.get("price"))
+        side = str(event.get("side") or "").upper()
+        if "매수" in side or side == "BUY":
+            buy_quantity += quantity
+            buy_amount += quantity * price
+        elif "매도" in side or side == "SELL":
+            sell_quantity += quantity
+            sell_amount += quantity * price
+        else:
+            continue
+        trade_count += 1
+
+    if trade_count == 0:
+        return activity
+    current_summary = current.get("summary")
+    current_summary = current_summary if isinstance(current_summary, dict) else {}
+    return {
+        "trade_count": trade_count,
+        "summary": {
+            "buy_quantity": _number(buy_quantity),
+            "sell_quantity": _number(sell_quantity),
+            "buy_amount": _number(buy_amount),
+            "sell_amount": _number(sell_amount),
+            "total_amount": _number(buy_amount + sell_amount),
+            "total_fee": _number(current_summary.get("total_fee")),
+            "total_tax": _number(current_summary.get("total_tax")),
+            "total_settlement": _number(sell_amount - buy_amount),
+        },
+        "source": "ORDER_HISTORY_RECONCILIATION",
+    }
+
+
 def _dec(value: Any) -> Decimal:
     """합계용. 해석 못 하는 값은 0으로 두되 행 자체는 버리지 않는다."""
     if value is None or value == "":
@@ -1788,6 +1869,11 @@ async def portfolio_live(limit: int = 50) -> dict[str, Any]:
         _project_internal_order_correlations,
         recent_orders,
     )
+    today_activity = reconcile_today_activity(
+        FEED.today_activity,
+        recent_orders,
+        datetime.now(KST).date().isoformat(),
+    )
 
     account_no = _registered_account()
     account_masked = mask_account(account_no)
@@ -1833,7 +1919,7 @@ async def portfolio_live(limit: int = 50) -> dict[str, Any]:
         "today_activity": {
             "as_of": FEED.today_activity_as_of,
             "error": FEED.today_activity_error,
-            "data": FEED.today_activity,
+            "data": today_activity,
         },
         "server_time": datetime.now(timezone.utc).isoformat(),
         # 브로커 값이 공식 NAV로 둔갑하지 않게 하는 계약 두 줄.

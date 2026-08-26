@@ -1,0 +1,70 @@
+from __future__ import annotations
+
+import json
+from unittest.mock import patch
+
+from orchestration.accounting_advisory_context import fetch_accounting_advisory_context
+
+
+def test_accounting_context_reads_the_canonical_fixed_book(monkeypatch) -> None:
+    book_id = "07d913de-9a5b-4cf5-b893-31a625445761"
+    monkeypatch.setenv("ACCOUNTING_ADVISORY_BOOK_ID", book_id)
+    monkeypatch.setenv("ACCOUNTING_API_URL", "http://accounting-api:8000")
+    payload = {
+        "source_of_record": "accounting.journals (Supabase)",
+        "authoritative": False,
+        "portfolio": {
+            "as_of": "2026-08-26T06:19:08+00:00",
+            "nav": "505532048",
+            "cash": "478730004",
+            "securities_value": "23822750",
+            "realized_pnl": "96660.73",
+            "unrealized_pnl": "757978.27",
+            "fees": "167706",
+            "taxes": "5105",
+            "quality_status": "WARN",
+            "positions": [{"symbol": "000660", "quantity": "6"}],
+        },
+    }
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps(payload).encode()
+
+    def fake_urlopen(request, timeout):
+        assert request.full_url == (
+            "http://accounting-api:8000/accounting/v1/ledgers/"
+            f"{book_id}/advisory-snapshot"
+        )
+        assert "/ui/snapshot" not in request.full_url
+        return Response()
+
+    with patch(
+        "orchestration.accounting_advisory_context.urllib.request.urlopen",
+        side_effect=fake_urlopen,
+    ):
+        context = fetch_accounting_advisory_context(
+            "3838f7d6-0c7c-4e54-85f3-316a451e7eeb"
+        )
+
+    assert context is not None
+    compact = json.loads(context)
+    assert compact["nav"] == "505532048"
+    assert compact["positions"][0]["symbol"] == "000660"
+    assert compact["source_of_record"] == "accounting.journals (Supabase)"
+
+
+def test_accounting_context_refuses_missing_or_invalid_book(monkeypatch) -> None:
+    for value in ("", "not-a-uuid"):
+        monkeypatch.setenv("ACCOUNTING_ADVISORY_BOOK_ID", value)
+        with patch(
+            "orchestration.accounting_advisory_context.urllib.request.urlopen"
+        ) as urlopen:
+            assert fetch_accounting_advisory_context() is None
+        urlopen.assert_not_called()

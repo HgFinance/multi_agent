@@ -533,6 +533,63 @@ def watch_events_sqlite(
         _close_watch_connection(connection)
 
 
+class TerminalObserverQueue:
+    """Bound slow Discord/Notion terminal projections off the event workers."""
+
+    def __init__(self, *, workers: int = 2, max_pending: int = 128) -> None:
+        self.worker_count = max(1, int(workers))
+        self._queue: queue.Queue[Callable[[], None] | None] = queue.Queue(
+            maxsize=max(1, int(max_pending))
+        )
+        self._threads = tuple(
+            threading.Thread(
+                target=self._run_worker,
+                name=f"ceo-terminal-observer-{index + 1}",
+                daemon=True,
+            )
+            for index in range(self.worker_count)
+        )
+        for thread in self._threads:
+            thread.start()
+
+    def submit(self, callback: Callable[[], None]) -> bool:
+        try:
+            self._queue.put_nowait(callback)
+        except queue.Full:
+            logging.warning(
+                "supervisor-observer-queue-full queue_depth=%d",
+                self._queue.qsize(),
+            )
+            return False
+        logging.info(
+            "supervisor-observer-queued queue_depth=%d",
+            self._queue.qsize(),
+        )
+        return True
+
+    def _run_worker(self) -> None:
+        while True:
+            callback = self._queue.get()
+            if callback is None:
+                self._queue.task_done()
+                return
+            try:
+                with cli_lane("observer"):
+                    callback()
+            except Exception:
+                logging.exception("supervisor-observer-worker-failed")
+            finally:
+                self._queue.task_done()
+
+    def close(self, *, drain: bool = True) -> None:
+        if drain:
+            self._queue.join()
+        for _thread in self._threads:
+            self._queue.put(None)
+        for thread in self._threads:
+            thread.join(timeout=5)
+
+
 class SupervisorEventQueue:
     """Keep watch stdout draining while prioritizing durable reconciliation.
 
@@ -991,6 +1048,24 @@ def run_recovery_reconciler(
                 listed_rows = None
 
         try:
+            reconcile_expired = getattr(service, "reconcile_expired_workflows", None)
+            if callable(reconcile_expired):
+                with cli_lane("workflow-timeout"):
+                    expired_roots = reconcile_expired(listed_rows=listed_rows)
+                for root_id in expired_roots:
+                    print(
+                        f"ceo-supervisor workflow-timeout-reconciled root={root_id}",
+                        flush=True,
+                    )
+        except (SupervisorWorkflowError, HermesKanbanCommandError) as exc:
+            print(
+                "ceo-supervisor workflow-timeout-reconcile-error="
+                f"{type(exc).__name__}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        try:
             with cli_lane("recovery"):
                 if listed_rows is None:
                     service.materialize_ready_primary_plans()
@@ -1044,6 +1119,10 @@ def main() -> int:
     signal.signal(signal.SIGTERM, shutdown_handler)
     environment = dict(os.environ)
     client = HermesKanbanClient(environment=environment)
+    observer_queue = TerminalObserverQueue(
+        workers=int(environment.get("CEO_SUPERVISOR_OBSERVER_WORKERS", "2")),
+        max_pending=int(environment.get("CEO_SUPERVISOR_OBSERVER_MAX_PENDING", "128")),
+    )
     service = CeoSupervisorService(
         client,
         max_retries=args.max_retries,
@@ -1051,6 +1130,7 @@ def main() -> int:
         synthesis_projection=CeoNotionProjection(kanban_client=client),
         qa_projection=QaAuditProjection(kanban_client=client),
         discord_delivery=DiscordFinalDelivery(environment=environment),
+        terminal_observer_submit=observer_queue.submit,
     )
     event_queue = SupervisorEventQueue(
         service,
@@ -1085,15 +1165,18 @@ def main() -> int:
     except GracefulShutdown as exc:
         recovery_stop.set()
         event_queue.close(drain=True)
+        observer_queue.close(drain=True)
         print(f"ceo-supervisor normal-shutdown={exc}", flush=True)
         return 0
     except (WatchOutputError, WatchProcessError) as exc:
         recovery_stop.set()
         event_queue.close(drain=True)
+        observer_queue.close(drain=True)
         print(f"ceo-supervisor fatal-watch-error={exc}", file=sys.stderr, flush=True)
         return 1
     recovery_stop.set()
     event_queue.close(drain=True)
+    observer_queue.close(drain=True)
     return 0
 
 

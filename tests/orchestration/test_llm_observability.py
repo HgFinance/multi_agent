@@ -1,4 +1,3 @@
-import os
 import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -263,6 +262,14 @@ def test_langsmith_projects_keep_workflow_and_metrics_separate(
     assert langsmith_project("evals") == "HgFinance-Evals"
 
 
+def test_langsmith_workflow_project_never_falls_back_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LANGSMITH_PROJECT", raising=False)
+
+    assert langsmith_project("workflow") == "First"
+
+
 def test_publish_metric_uses_metrics_project_without_creating_a_second_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -396,7 +403,7 @@ def test_start_root_trace_posts_and_returns_only_dotted_order_context(
     monkeypatch.setitem(sys.modules, "langsmith", SimpleNamespace(RunTree=FakeRunTree))
     import orchestration.llm_observability as observability
 
-    monkeypatch.setattr(observability, "_safe_langsmith_client", lambda: Mock())
+    monkeypatch.setattr(observability, "_structured_langsmith_client", lambda: Mock())
     handle = start_root_trace(
         request_id="discord:req-1",
         workflow_mode="analysis",
@@ -409,7 +416,9 @@ def test_start_root_trace_posts_and_returns_only_dotted_order_context(
     assert FakeRunTree.posted == 1
     assert FakeRunTree.instance.kwargs["project_name"] == "First"
     metadata = FakeRunTree.instance.kwargs["extra"]["metadata"]
-    assert all(metadata[key] for key in ("request_id", "root_id", "task_id", "trace_id"))
+    assert all(
+        metadata[key] for key in ("request_id", "root_id", "task_id", "trace_id")
+    )
     assert not hasattr(handle, "prompt")
 
 
@@ -436,7 +445,7 @@ def test_close_root_trace_updates_only_terminal_fields_without_renaming_root(
     import orchestration.llm_observability as observability
 
     client = Mock()
-    monkeypatch.setattr(observability, "_safe_langsmith_client", lambda: client)
+    monkeypatch.setattr(observability, "_structured_langsmith_client", lambda: client)
     assert (
         close_root_trace(
             "trace-root",
@@ -447,6 +456,11 @@ def test_close_root_trace_updates_only_terminal_fields_without_renaming_root(
             workflow_mode="analysis",
             source="discord",
             status="completed",
+            terminal_metadata={
+                "http_status": 503,
+                "error_code": "paper_order_hermes_runtime_unavailable",
+                "terminal_reason": "HTTPException",
+            },
         )
         is True
     )
@@ -458,11 +472,28 @@ def test_close_root_trace_updates_only_terminal_fields_without_renaming_root(
     assert kwargs["extra"]["metadata"]["department"] == "hr-department"
     assert kwargs["extra"]["metadata"]["raw_payloads_sent"] is False
     assert kwargs["extra"]["metadata"]["latency_scope"] == "end_to_end"
+    assert kwargs["extra"]["metadata"]["http_status"] == 503
+    assert (
+        kwargs["extra"]["metadata"]["error_code"]
+        == "paper_order_hermes_runtime_unavailable"
+    )
+    assert kwargs["extra"]["metadata"]["terminal_reason"] == "HTTPException"
     assert kwargs["error"] is None
     assert "name" not in kwargs
     assert "start_time" not in kwargs
     assert "inputs" not in kwargs
-    assert "outputs" not in kwargs
+    assert kwargs["outputs"] == {
+        "request_id": "discord:req-1",
+        "root_id": "t_root",
+        "task_id": "t_hr_primary",
+        "department": "hr-department",
+        "workflow_mode": "analysis",
+        "source": "discord",
+        "status": "completed",
+        "terminal_status": "completed",
+        "terminal_reason": "HTTPException",
+        "error_code": "paper_order_hermes_runtime_unavailable",
+    }
 
 
 def test_close_root_trace_prefers_explicit_start_run_id(
@@ -480,7 +511,7 @@ def test_close_root_trace_prefers_explicit_start_run_id(
     import orchestration.llm_observability as observability
 
     client = Mock()
-    monkeypatch.setattr(observability, "_safe_langsmith_client", lambda: client)
+    monkeypatch.setattr(observability, "_structured_langsmith_client", lambda: client)
 
     assert close_root_trace(
         "trace-root",
@@ -489,6 +520,37 @@ def test_close_root_trace_prefers_explicit_start_run_id(
         status="completed",
     )
     assert client.update_run.call_args.kwargs["run_id"] == "run-from-start"
+    client.flush.assert_called_once_with()
+
+
+def test_close_root_trace_recovers_legacy_root_id_from_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "key-not-printed")
+
+    class FakeRunTree:
+        @classmethod
+        def from_headers(cls, *_args, **_kwargs):
+            raise AssertionError("legacy root context should resolve its UUID")
+
+    monkeypatch.setitem(sys.modules, "langsmith", SimpleNamespace(RunTree=FakeRunTree))
+    import orchestration.llm_observability as observability
+
+    client = Mock()
+    monkeypatch.setattr(observability, "_structured_langsmith_client", lambda: client)
+
+    assert close_root_trace(
+        "20260826T052841584555Z01a03c8a-c170-72f1-ae24-b603a16f7dd6",
+        request_id="discord:req-1",
+        root_id="t_root",
+        status="blocked",
+        error_class="workflow_timeout_exceeded",
+    )
+    assert (
+        client.update_run.call_args.kwargs["run_id"]
+        == "01a03c8a-c170-72f1-ae24-b603a16f7dd6"
+    )
     client.flush.assert_called_once_with()
 
 

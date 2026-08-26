@@ -42,8 +42,14 @@ def test_ceo_gateway_exposes_only_authenticated_internal_api() -> None:
     compose = (ROOT / "departments/00-ceo-office/compose.yaml").read_text(
         encoding="utf-8"
     )
+    root_compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     ceo = _service_block(compose, "ceo-hermes")
+    bff = _service_block(root_compose, "portfolio-bff")
 
+    assert (
+        'portfolio-bff:\n        condition: service_healthy'
+    ) in ceo
+    assert "http://127.0.0.1:8000/health/ready" in bff
     assert 'API_SERVER_ENABLED: "true"' in ceo
     assert "API_SERVER_HOST: 0.0.0.0" in ceo
     assert 'API_SERVER_PORT: "8642"' in ceo
@@ -55,6 +61,14 @@ def test_ceo_gateway_exposes_only_authenticated_internal_api() -> None:
     assert (
         "CEO_DISCORD_INGRESS_API_KEY: "
         "${CEO_DISCORD_INGRESS_API_KEY:?CEO_DISCORD_INGRESS_API_KEY is required}"
+    ) in ceo
+    assert (
+        "CEO_INGRESS_ALERT_WEBHOOK_URL: "
+        "${CEO_INGRESS_ALERT_WEBHOOK_URL:-}"
+    ) in ceo
+    assert (
+        "CEO_INGRESS_ALERT_COOLDOWN_SECONDS: "
+        "${CEO_INGRESS_ALERT_COOLDOWN_SECONDS:-60}"
     ) in ceo
     assert "ports:" not in ceo
 
@@ -79,6 +93,7 @@ def test_example_environment_declares_private_discord_ingress_contract() -> None
     example = (ROOT / ".env.example").read_text(encoding="utf-8")
 
     assert "CEO_DISCORD_INGRESS_API_KEY=" in example
+    assert "CEO_INGRESS_ALERT_WEBHOOK_URL=" in example
     assert "DISCORD_ACTOR_MAP=" in example
 
 

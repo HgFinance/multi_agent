@@ -293,6 +293,7 @@ class ForwardToIngressTests(unittest.TestCase):
         values = {
             gateway_patch.INGRESS_URL_ENV: "http://bff/ui/ceo/ingress",
             gateway_patch.INGRESS_SECRET_ENV: self._INGRESS_SECRET,
+            gateway_patch.INGRESS_ALERT_WEBHOOK_ENV: "",
             "HERMES_PROFILE": "ceo-agent",
         }
         values.update(updates)
@@ -504,6 +505,80 @@ class ForwardToIngressTests(unittest.TestCase):
             getattr(message, gateway_patch._INGRESS_FAILURE_ATTRIBUTE), "transport"
         )
 
+    def test_failed_closed_alert_is_scheduled_without_blocking_ingress(self) -> None:
+        """운영 알림 전송은 fail-closed 판정과 별도 백그라운드 작업이어야 한다."""
+
+        class _Response:
+            def __init__(self, status: int) -> None:
+                self.status = status
+
+            def __enter__(self):  # noqa: ANN204 - 컨텍스트 매니저 대역
+                return self
+
+            def __exit__(self, *args: object) -> bool:
+                return False
+
+        scheduled: list[object] = []
+
+        class _Thread:
+            def __init__(self, **kwargs: object) -> None:
+                self.target = kwargs["target"]
+                self.args = kwargs.get("args", ())
+                self.kwargs = kwargs.get("kwargs", {})
+
+            def start(self) -> None:
+                scheduled.append(self)
+
+        responses = iter((_Response(400), _Response(204)))
+        opened: list[tuple[object, float | None]] = []
+
+        def fake_urlopen(request, timeout=None):  # noqa: ANN001
+            opened.append((request, timeout))
+            return next(responses)
+
+        alert_webhook = "https://alerts.example.test/discord-webhook"
+        env = self._env(
+            **{
+                gateway_patch.INGRESS_ALERT_WEBHOOK_ENV: alert_webhook,
+                gateway_patch.INGRESS_ALERT_COOLDOWN_ENV: "0",
+            }
+        )
+        with gateway_patch._ingress_alert_lock:
+            gateway_patch._ingress_alert_in_flight = False
+            gateway_patch._ingress_alert_last_attempt.clear()
+        try:
+            with patch.dict("os.environ", env), patch(
+                "urllib.request.urlopen", fake_urlopen
+            ), patch.object(gateway_patch.threading, "Thread", _Thread):
+                message = self._message()
+                self.assertTrue(gateway_patch._forward_to_ingress(message, None))
+
+                # Only the BFF request ran on the ingress caller. The alert
+                # worker is scheduled and is not awaited here.
+                self.assertEqual(len(opened), 1)
+                self.assertEqual(len(scheduled), 1)
+                scheduled_job = scheduled[0]
+                scheduled_job.target(
+                    *scheduled_job.args,
+                    **scheduled_job.kwargs,
+                )
+
+            self.assertEqual(len(opened), 2)
+            alert_request, alert_timeout = opened[1]
+            self.assertEqual(alert_timeout, 1.0)
+            self.assertEqual(
+                alert_request.get_full_url(),
+                alert_webhook,
+            )
+            alert_payload = alert_request.data.decode("utf-8")
+            self.assertIn("message_id=991", alert_payload)
+            self.assertNotIn("리서치 브리핑해줘", alert_payload)
+            self.assertNotIn("Authorization", str(alert_request.header_items()))
+        finally:
+            with gateway_patch._ingress_alert_lock:
+                gateway_patch._ingress_alert_in_flight = False
+                gateway_patch._ingress_alert_last_attempt.clear()
+
     def test_transport_retry_uses_one_idempotent_payload_and_completes_lease(self) -> None:
         class _Response:
             status = 202
@@ -652,9 +727,15 @@ class AsyncForwardToIngressTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNot(resolved, message)
         self.assertEqual(message.content, "지금 위 질문 다시 분석해줘")
-        self.assertIn("삼성전자 이거 4분 뒤에 1주 매수해줘", resolved.content)
-        self.assertIn("지금 위 질문 다시 분석해줘", resolved.content)
-        self.assertIn("never infer it from another Kanban task", resolved.content)
+        self.assertEqual(resolved.content, "지금 위 질문 다시 분석해줘")
+        self.assertEqual(
+            getattr(resolved, "_hgfinance_previous_question_context"),
+            "삼성전자 이거 4분 뒤에 1주 매수해줘",
+        )
+        self.assertEqual(
+            getattr(resolved, "_hgfinance_previous_question_context_source_message_id"),
+            "100",
+        )
         self.assertEqual(parent.fetch_count, 1)
         self.assertEqual(parent.requested_id, 100)
 

@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import signal
 import sys
 from collections import Counter
@@ -91,6 +92,9 @@ SESSION_RETRY_BACKOFF = 30.0
 DEFAULT_WS_CONNECT_STAGGER_SECONDS = 1.0
 IDLE_RECHECK_SECONDS = 4 * 3600.0  # 휴장일에 세션 판정을 다시 하는 주기
 DEFAULT_HEALTH_MAX_DATA_AGE_SECONDS = 180.0
+DEFAULT_SYMBOL_REFRESH_SECONDS = 15.0
+DEFAULT_ACTIVE_SYMBOL_LIMIT = 1_000
+_TRADING_SYMBOL_RE = re.compile(r"^[0-9A-Z]{6}$")
 
 
 def _required_health_streams(now: datetime) -> tuple[str, ...]:
@@ -400,6 +404,91 @@ def load_symbols(env: dict) -> tuple[str, ...]:
     return symbols
 
 
+def merge_capture_symbols(
+    base_symbols: tuple[str, ...], active_symbols: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Merge one bounded base basket with current conditional-rule authority."""
+
+    merged = tuple(sorted(set(base_symbols) | set(active_symbols)))
+    invalid = tuple(symbol for symbol in merged if not _TRADING_SYMBOL_RE.fullmatch(symbol))
+    if invalid:
+        raise LsRealtimeError(f"실시간 구독 심볼 형식이 잘못됐다: {invalid}")
+    if not merged:
+        raise LsRealtimeError("실시간 구독 종목이 0개다")
+    return merged
+
+
+def load_active_conditional_symbols(env: dict) -> tuple[str, ...]:
+    """Read only the one-column ACTIVE-rule projection from the control DB."""
+
+    enabled = str(env.get("LS_INCLUDE_ACTIVE_CONDITIONAL_SYMBOLS") or "").strip().lower()
+    if enabled not in {"1", "true", "yes", "on"}:
+        return ()
+    dsn = str(env.get("DATABASE_URL") or "").strip()
+    if not dsn:
+        raise LsRealtimeError("활성 조건주문 구독용 DATABASE_URL 이 없다")
+    try:
+        limit = int(env.get("LS_ACTIVE_CONDITIONAL_SYMBOL_LIMIT") or DEFAULT_ACTIVE_SYMBOL_LIMIT)
+    except (TypeError, ValueError) as exc:
+        raise LsRealtimeError("LS_ACTIVE_CONDITIONAL_SYMBOL_LIMIT 이 정수가 아니다") from exc
+    if not 1 <= limit <= DEFAULT_ACTIVE_SYMBOL_LIMIT:
+        raise LsRealtimeError(
+            f"활성 조건주문 구독 한도는 1~{DEFAULT_ACTIVE_SYMBOL_LIMIT} 이어야 한다"
+        )
+
+    import psycopg2
+
+    try:
+        connection = psycopg2.connect(dsn, connect_timeout=3)
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("set statement_timeout = '3s'")
+                cursor.execute(
+                    "select symbol from execution.active_conditional_subscription_symbols "
+                    "order by symbol limit %s",
+                    (limit,),
+                )
+                symbols = tuple(str(row[0]).strip() for row in cursor.fetchall())
+        finally:
+            connection.close()
+    except psycopg2.Error as exc:
+        raise LsRealtimeError("활성 조건주문 구독 종목을 읽을 수 없다") from exc
+
+    invalid = tuple(symbol for symbol in symbols if not _TRADING_SYMBOL_RE.fullmatch(symbol))
+    if invalid:
+        raise LsRealtimeError(f"조건주문 권위 뷰가 잘못된 심볼을 반환했다: {invalid}")
+    return symbols
+
+
+def load_capture_symbols(env: dict) -> tuple[str, ...]:
+    return merge_capture_symbols(load_symbols(env), load_active_conditional_symbols(env))
+
+
+async def _wait_for_symbol_change(
+    current: tuple[str, ...],
+    stop: asyncio.Event,
+    *,
+    loader,
+    interval_seconds: float,
+    log=print,
+) -> tuple[str, ...] | None:
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
+            return None
+        except asyncio.TimeoutError:
+            pass
+        try:
+            updated = await asyncio.to_thread(loader)
+        except Exception as exc:  # retain the last authoritative set
+            log(f"  ⚠ 구독 종목 갱신 실패: {type(exc).__name__}: {exc}")
+            continue
+        if updated != current:
+            log(f"  구독 종목 변경 감지: {len(current)} -> {len(updated)}종목")
+            return updated
+    return None
+
+
 async def _heartbeat(sinks, stop: asyncio.Event, *, interval_seconds: float,
                      log=print) -> None:
     """적재 증분을 주기적으로 로그에 찍는다. stop 이 서야 끝난다.
@@ -545,7 +634,14 @@ async def _run_worker_resilient(
     return worker.stats
 
 
-async def run_capture(window: SessionWindow, symbols: tuple[str, ...], stop: asyncio.Event) -> None:
+async def run_capture(
+    window: SessionWindow,
+    symbols: tuple[str, ...],
+    stop: asyncio.Event,
+    *,
+    symbol_loader=None,
+    symbol_refresh_seconds: float = DEFAULT_SYMBOL_REFRESH_SECONDS,
+) -> tuple[str, ...]:
     """세션 창 하나를 수집한다. 창이 끝나거나 stop 이 설 때까지."""
     from market_repository import TimescaleMarketRepository
 
@@ -577,7 +673,7 @@ async def run_capture(window: SessionWindow, symbols: tuple[str, ...], stop: asy
     while not stop.is_set():
         remaining = (window.ends_at - datetime.now(KST)).total_seconds()
         if remaining <= 0:
-            return
+            return symbols
         # WebSocket은 공급자 구독 한도 때문에 shard별로 필요하지만, 모든 worker는
         # 같은 asyncio event loop에서 동기식으로 flush한다. 따라서 DB 연결까지
         # shard마다 하나씩 만들 이유가 없다. 전 종목 26 sockets가 26개의 idle
@@ -620,8 +716,23 @@ async def run_capture(window: SessionWindow, symbols: tuple[str, ...], stop: asy
             # shard 장애는 _run_worker_resilient 안에서 해당 소켓만 재접속한다.
             # 한 handshake 실패로 정상 소켓까지 취소하면 전 종목 시세가 주기적으로
             # 비어 주문 검증도 함께 중단되므로, 정상 수집은 유지하고 오류를 드러낸다.
+            refresh_task = (
+                asyncio.create_task(
+                    _wait_for_symbol_change(
+                        symbols,
+                        stop,
+                        loader=symbol_loader,
+                        interval_seconds=max(symbol_refresh_seconds, 1.0),
+                    )
+                )
+                if symbol_loader is not None
+                else None
+            )
+            wait_tasks = {*run_tasks, stop_task, hb_task}
+            if refresh_task is not None:
+                wait_tasks.add(refresh_task)
             done, pending = await asyncio.wait(
-                {*run_tasks, stop_task, hb_task}, return_when=asyncio.FIRST_COMPLETED
+                wait_tasks, return_when=asyncio.FIRST_COMPLETED
             )
             for t in pending:
                 t.cancel()
@@ -634,17 +745,21 @@ async def run_capture(window: SessionWindow, symbols: tuple[str, ...], stop: asy
                     t.result()  # 재접속 소진 예외를 여기서 드러낸다
             if hb_task in done and not hb_task.cancelled():
                 hb_task.result()  # 심박 버그가 조용한 재구축 루프로 위장되지 않게
+            if refresh_task is not None and refresh_task in done:
+                updated_symbols = refresh_task.result()
+                if updated_symbols is not None:
+                    return updated_symbols
             for i, s in enumerate(sinks):
                 print(f"  소켓{i}: {s.stats.summary()}", flush=True)
             if stop.is_set():
-                return
+                return symbols
             # max_seconds 만료로 정상 반환 - 창도 끝났는지 위에서 재확인한다
         except Exception as e:  # noqa: BLE001 - intentional fallback boundary
             print(f"  ⚠ 수집 오류: {type(e).__name__}: {e} - "
                   f"{SESSION_RETRY_BACKOFF:.0f}초 후 재시작", flush=True)
             try:
                 await asyncio.wait_for(stop.wait(), timeout=SESSION_RETRY_BACKOFF)
-                return
+                return symbols
             except asyncio.TimeoutError:
                 pass
         finally:
@@ -680,7 +795,11 @@ async def main_async() -> int:
     #   275: 마감(15:30) + 275분 = 20:05 (NXT 애프터마켓 20:00 + 잔여 수신)
     pre = float(env.get("LS_PRE_OPEN_MINUTES") or 60)
     post = float(env.get("LS_POST_CLOSE_MINUTES") or 275)
-    symbols = load_symbols(env)
+    symbols = load_capture_symbols(env)
+    refresh_seconds = max(
+        float(env.get("LS_SYMBOL_REFRESH_SECONDS") or DEFAULT_SYMBOL_REFRESH_SECONDS),
+        1.0,
+    )
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -720,7 +839,13 @@ async def main_async() -> int:
             delay = (window.starts_at - now).total_seconds()
             print(f"  개장 대기 {delay / 60:.0f}분", flush=True)
         else:
-            await run_capture(window, symbols, stop)
+            symbols = await run_capture(
+                window,
+                symbols,
+                stop,
+                symbol_loader=lambda: load_capture_symbols(load_project_env()),
+                symbol_refresh_seconds=refresh_seconds,
+            )
             continue
 
         try:

@@ -51,7 +51,11 @@ class DiscordDeliveryTests(unittest.TestCase):
 
             def sender(channel: str, payload: str, headers: dict[str, str]):
                 sent.append(
-                    {"channel": channel, "payload": json.loads(payload), "headers": headers}
+                    {
+                        "channel": channel,
+                        "payload": json.loads(payload),
+                        "headers": headers,
+                    }
                 )
                 return {"id": "response-message"}
 
@@ -60,10 +64,7 @@ class DiscordDeliveryTests(unittest.TestCase):
             )
             task = {
                 "root_task": {
-                    "body": (
-                        "discord_message_id=message\n"
-                        "discord_channel_id=channel\n"
-                    )
+                    "body": ("discord_message_id=message\ndiscord_channel_id=channel\n")
                 }
             }
 
@@ -90,6 +91,43 @@ class DiscordDeliveryTests(unittest.TestCase):
             self.assertEqual(
                 sent[0]["payload"]["message_reference"]["message_id"],
                 "message",
+            )
+
+    def test_user_facing_content_translates_runtime_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = self._store_with_inbound(directory)
+            sent: list[dict[str, object]] = []
+
+            def sender(channel: str, payload: str, _headers: dict[str, str]):
+                sent.append({"channel": channel, "payload": json.loads(payload)})
+                return {"id": "response-message"}
+
+            result = DiscordFinalDelivery(
+                environment={"DISCORD_BOT_TOKEN": "test-token"}, sender=sender
+            ).deliver(
+                root_task_id="root-friendly",
+                synthesis_task={
+                    "body": ("discord_message_id=message\ndiscord_channel_id=channel\n")
+                },
+                content=(
+                    "Mandate가 없고 Mandate를 확인할 수 없어 위험도는 MODERATE, "
+                    "NAV 확인은 HIGH 차단으로 DEFER, 법률 판정은 no_breach, "
+                    "담당은 **risk**. 이번 법률 조회는 PAPER만으로는 "
+                    "no_breach으로 보았지만 추가 확인이 필요합니다."
+                ),
+                store=store,
+            )
+
+            self.assertEqual(result, "sent")
+            self.assertEqual(
+                sent[0]["payload"]["content"],
+                (
+                    "투자지침이 없고 투자지침을 확인할 수 없어 위험도는 보통, "
+                    "순자산 가치 확인은 중요 차단 사유로 판단 보류, "
+                    "법률 판정은 현재 입력만으로 위반을 확인하지 못함, "
+                    "담당은 **리스크 부서**. 이번 법률 조회는 "
+                    "법률 위반 여부를 확정할 수 없으며 추가 확인이 필요합니다."
+                ),
             )
 
     def test_missing_correlation_fails_closed_without_send(self) -> None:
@@ -136,7 +174,9 @@ class DiscordDeliveryTests(unittest.TestCase):
             self.assertEqual(result, "sent")
             self.assertEqual(sent[0]["channel"], "channel")
 
-    def test_explicit_message_and_channel_context_sends_without_ledger_row(self) -> None:
+    def test_explicit_message_and_channel_context_sends_without_ledger_row(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = DiscordIdempotencyStore(Path(directory))
             sent: list[dict[str, object]] = []
@@ -163,7 +203,9 @@ class DiscordDeliveryTests(unittest.TestCase):
             self.assertEqual(result, "sent")
             self.assertEqual(sent[0]["channel"], "explicit-channel")
 
-    def test_session_ledger_context_is_used_when_explicit_message_is_absent(self) -> None:
+    def test_session_ledger_context_is_used_when_explicit_message_is_absent(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = DiscordIdempotencyStore(Path(directory))
             key = canonical_discord_dedup_key("guild", "channel", "session-message")
@@ -218,6 +260,7 @@ class DiscordDeliveryTests(unittest.TestCase):
 
             self.assertEqual(result, "missing_context")
             self.assertEqual(sent, [])
+
     def test_department_detail_is_chunked_into_existing_thread(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = DiscordIdempotencyStore(Path(directory))
@@ -262,9 +305,7 @@ class DiscordDeliveryTests(unittest.TestCase):
 
             self.assertEqual(result, "sent")
             self.assertGreaterEqual(len(sent), 2)
-            self.assertTrue(
-                all(item["channel"] == "thread-123" for item in sent)
-            )
+            self.assertTrue(all(item["channel"] == "thread-123" for item in sent))
 
             # Re-delivery of the same task is idempotent.
             second = delivery.deliver_to_existing_thread(
@@ -280,14 +321,9 @@ class DiscordDeliveryTests(unittest.TestCase):
             self.assertEqual(second, "sent")
             self.assertGreaterEqual(len(sent), 2)
 
-
-
-
     def test_department_detail_uses_starter_message_as_existing_thread(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            store = DiscordIdempotencyStore(
-                Path(directory) / "discord.sqlite3"
-            )
+            store = DiscordIdempotencyStore(Path(directory) / "discord.sqlite3")
 
             sent: list[dict[str, object]] = []
 

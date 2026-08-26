@@ -477,6 +477,14 @@ def test_compose_keeps_authority_secrets_out_of_trading_hermes() -> None:
     ] == {"condition": "service_healthy"}
 
 
+def test_risk_legal_mcp_is_available_to_dispatcher_spawned_risk_hermes() -> None:
+    root = _yaml("docker-compose.yml")
+    dispatcher = root["services"]["kanban-dispatcher"]
+
+    assert "MCP_RISK_API_KEY" in dispatcher["environment"]
+    assert dispatcher["depends_on"]["risk-mcp"] == {"condition": "service_healthy"}
+
+
 def test_portfolio_image_is_readable_by_the_non_root_paper_mcp() -> None:
     dockerfile = (ROOT / "apps/api/Dockerfile").read_text(encoding="utf-8")
 

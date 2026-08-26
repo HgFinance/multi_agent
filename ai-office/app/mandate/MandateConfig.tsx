@@ -151,7 +151,7 @@ type ChatMessage = { from: "agent" | "user"; text: string };
  * 대본을 고쳤을 때 인사말만 옛 질문에 남는다.
  */
 const OPENING: ChatMessage[] = [
-  { from: "agent", text: "안녕하세요. 저는 김세리 AI 투자 어시스턴트입니다. 몇 가지 여쭤보면서 좌측 운용 지침을 함께 채워드릴게요." },
+  { from: "agent", text: "안녕하세요. 저는 Mandate Assistant입니다. 몇 가지 여쭤보면서 좌측 운용 지침을 함께 채워드릴게요." },
   { from: "agent", text: INTERVIEW[0].prompt },
 ];
 
@@ -1106,7 +1106,7 @@ function MandateConfigForm({ userId, fundId }: { userId: string; fundId: string 
                 <span className="absolute bottom-0 right-0 w-3 h-3 bg-tertiary-fixed-dim border-2 border-surface rounded-full" aria-hidden="true" />
               </div>
               <div>
-                <div className="font-bold text-body-sm font-body-sm text-on-surface">김세리</div>
+                <div className="font-bold text-body-sm font-body-sm text-on-surface">Mandate Assistant</div>
                 <div className="text-[10px] text-on-surface-variant">Mandate Interview Worker</div>
               </div>
             </div>
@@ -1127,7 +1127,7 @@ function MandateConfigForm({ userId, fundId }: { userId: string; fundId: string 
                 key={`${message.from}-${index}`}
                 className={`flex flex-col gap-1 max-w-[85%] ${message.from === "agent" ? "items-start" : "items-end self-end"}`}
               >
-                <span className="text-[10px] text-secondary mx-1 font-medium">{message.from === "agent" ? "김세리" : "대표님"}</span>
+                <span className="text-[10px] text-secondary mx-1 font-medium">{message.from === "agent" ? "Mandate Assistant" : "대표님"}</span>
                 <div
                   className={`p-3 text-body-sm font-body-sm shadow-sm rounded-2xl ${
                     message.from === "agent"
@@ -1147,7 +1147,7 @@ function MandateConfigForm({ userId, fundId }: { userId: string; fundId: string 
             */}
             {busy ? (
               <div className="flex flex-col gap-1 max-w-[85%] items-start">
-                <span className="text-[10px] text-secondary mx-1 font-medium">김세리</span>
+                <span className="text-[10px] text-secondary mx-1 font-medium">Mandate Assistant</span>
                 <div className="p-3 text-body-sm font-body-sm shadow-sm rounded-2xl rounded-tl-sm bg-surface-container border border-outline-variant text-on-surface-variant italic">
                   답변을 생각하고 있습니다…
                 </div>

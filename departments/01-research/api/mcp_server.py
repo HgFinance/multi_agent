@@ -91,13 +91,13 @@ ACTIVE_MARKET_COLLECTOR_JOB_NAMES = frozenset({
     "market-archive",
     "universe-restrictions",
     "data-steward",
+    "retention",
     "breadth",
     "derivatives",
     "vkospi",
     "style-index",
     "calendar-observed",
     "label-snapshot",
-    "chart-minute-universe",
     "chart-daily-universe",
 })
 
@@ -1098,17 +1098,50 @@ def merge_holdings_evidence(payload: dict, evidence: dict) -> dict:
 
 
 def summarize_health(rows: list[dict]) -> dict:
-    """collector_health 행 -> 한 눈에 보는 상태. SKIP 은 고장이 아니다."""
-    bad = [r for r in rows if (r.get("bad_24h") or 0) > 0]
+    """Separate current health from retained 24-hour failure history.
+
+    ``bad_24h`` is an audit counter, not the current state.  Treating any
+    recovered failure as a live outage kept the reference desk unhealthy for
+    a full day after a successful retry.  The latest status is authoritative
+    for current health; historical failures remain visible as recovery history.
+    """
+    healthy_statuses = {"OK", "SKIP"}
+    bad = [
+        r
+        for r in rows
+        if str(r.get("last_status") or "").strip().upper()
+        not in healthy_statuses | {""}
+    ]
+    recovered = [
+        r
+        for r in rows
+        if (r.get("bad_24h") or 0) > 0 and r not in bad
+    ]
     return {
         "jobs_seen_24h": len(rows),
         "jobs_failing": len(bad),
+        "jobs_with_failures_24h": sum(
+            1 for row in rows if (row.get("bad_24h") or 0) > 0
+        ),
         "healthy": not bad,
         "failing": [{"job": r["job_name"], "failures_24h": r["bad_24h"],
                      "last_status": r.get("last_status"),
                      "last_ok_at": str(r.get("last_ok_at")) if r.get("last_ok_at") else None,
                      "last_error": (r.get("last_error_tail") or "")[:200]}
                     for r in sorted(bad, key=lambda x: -(x.get("bad_24h") or 0))],
+        "recovered_or_skipped": [
+            {
+                "job": r["job_name"],
+                "failures_24h": r["bad_24h"],
+                "last_status": r.get("last_status"),
+                "last_ok_at": (
+                    str(r.get("last_ok_at")) if r.get("last_ok_at") else None
+                ),
+            }
+            for r in sorted(
+                recovered, key=lambda x: -(x.get("bad_24h") or 0)
+            )
+        ],
     }
 
 
@@ -2130,10 +2163,16 @@ def _check_health_summary():
         {"job_name": "geopolitical", "runs_24h": 3, "ok_24h": 0, "skip_24h": 0,
          "bad_24h": 3, "last_status": "FAILED", "last_ok_at": None,
          "last_error_tail": "FileNotFoundError"},
+        {"job_name": "label-snapshot", "runs_24h": 4, "ok_24h": 1,
+         "skip_24h": 0, "bad_24h": 3, "last_status": "OK",
+         "last_ok_at": "2026-08-26T07:40:32Z",
+         "last_error_tail": "old timeout"},
     ]
     s = summarize_health(rows)
     assert s["jobs_failing"] == 1 and not s["healthy"]
     assert s["failing"][0]["job"] == "geopolitical", s
+    assert s["jobs_with_failures_24h"] == 2, s
+    assert s["recovered_or_skipped"][0]["job"] == "label-snapshot", s
     assert summarize_health([])["healthy"] is True
     print("  건강 요약(SKIP 제외)     OK")
 

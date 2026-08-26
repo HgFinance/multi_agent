@@ -65,7 +65,7 @@ def test_hr_context_reuses_existing_observability_and_improvement_endpoints(
             return json.dumps(self.payload).encode("utf-8")
 
     def fake_urlopen(request, timeout):
-        assert timeout <= 2.0
+        assert timeout == 5.0
         path = request.full_url.split("?", 1)[0].removeprefix(
             "http://workforce-api:8000"
         )

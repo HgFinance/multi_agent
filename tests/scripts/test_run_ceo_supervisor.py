@@ -28,6 +28,7 @@ watch_events = runner.watch_events
 watch_events_sqlite = runner.watch_events_sqlite
 run_recovery_reconciler = runner.run_recovery_reconciler
 SupervisorEventQueue = runner.SupervisorEventQueue
+TerminalObserverQueue = runner.TerminalObserverQueue
 read_sqlite_watch_batch = runner._read_sqlite_watch_batch
 
 
@@ -51,6 +52,28 @@ class FakeWatchProcess:
 
 
 class SupervisorRunnerTest(unittest.TestCase):
+    def test_terminal_observer_queue_returns_before_slow_projection_finishes(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        completed = threading.Event()
+
+        def observer() -> None:
+            entered.set()
+            release.wait(1)
+            completed.set()
+
+        observer_queue = TerminalObserverQueue(workers=1, max_pending=2)
+        started = time.perf_counter()
+        self.assertTrue(observer_queue.submit(observer))
+        submit_elapsed = time.perf_counter() - started
+
+        self.assertLess(submit_elapsed, 0.1)
+        self.assertTrue(entered.wait(1))
+        self.assertFalse(completed.is_set())
+        release.set()
+        observer_queue.close()
+        self.assertTrue(completed.is_set())
+
     def test_event_queue_keeps_intake_non_blocking_and_runs_separate_roots(self) -> None:
         both_started = threading.Event()
         release = threading.Event()

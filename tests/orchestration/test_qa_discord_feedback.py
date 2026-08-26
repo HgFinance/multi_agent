@@ -4,6 +4,7 @@ import asyncio
 import importlib.util
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import patch
 
 from orchestration.langsmith_feedback import (
@@ -59,14 +60,14 @@ def test_qa_card_and_commands_keep_only_redacted_contract() -> None:
     assert card.startswith(QA_FEEDBACK_MARKER)
     assert "## ① 자동 감지 · QA 검토 요청" in card
     assert "### 관측" in card
-    assert "### 증거 키 · 원문 payload 제외" in card
+    assert "### 문제 추적 정보 · 원문 제외" in card
     assert "### 관리자 결정" in card
-    assert "보류:" in card and "`PENDING` 유지" in card
-    assert "154.91s > 기준 60.00s (end_to_end)" in card
-    assert "source_run_id: run-redacted-1" in card
-    assert "trace_name: hgfinance.user-query" in card
-    assert "department_task_id: t_hr_primary" in card
-    assert "request_id: request-redacted-1" in card
+    assert "보류:" in card and "`대기` 상태 유지" in card
+    assert "154.91초 > 기준 60.00초 (전체 처리 시간)" in card
+    assert "실행 기록 ID: run-redacted-1" in card
+    assert "실행 기록 유형: hgfinance.user-query" in card
+    assert "부서 업무 ID: t_hr_primary" in card
+    assert "요청 ID: request-redacted-1" in card
     assert "must-not-appear" not in card
     approved = parse_qa_feedback_command(
         f"승인 {ARTIFACT_ID} 유형=SKILL_CREATE 기준 충족"
@@ -102,10 +103,10 @@ def test_qa_card_separates_bottleneck_joint_owners_and_observation_point() -> No
         },
     )
 
-    assert "**주요 병목:** `trading-department`" in card
-    assert "**공동 개선 대상:** `ceo-workflow / observability`" in card
-    assert "**관측 시작 지점:** `ceo-ingress` (원인 부서 아님)" in card
-    assert "대상 부서:** `ceo-ingress`" not in card
+    assert "**주요 병목:** `트레이딩 부서`" in card
+    assert "**공동 개선 대상:** `CEO 업무 흐름 / 관측 시스템`" in card
+    assert "**관측 시작 지점:** `CEO 요청 접수 단계` (원인 부서 아님)" in card
+    assert "대상 부서:** `CEO 요청 접수 단계`" not in card
 
 
 def test_qa_hermes_profile_requires_distinct_structured_review() -> None:
@@ -129,7 +130,7 @@ def test_duration_is_used_when_trace_has_no_latency_metadata() -> None:
         status = "success"
         start_time = datetime(2026, 8, 25, tzinfo=timezone.utc)
         end_time = start_time + timedelta(seconds=154.91)
-        extra: dict[str, object] = {
+        extra: ClassVar[dict[str, object]] = {
             "metadata": {
                 "request_id": "discord:1",
                 "department": "ceo-terminal",

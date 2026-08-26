@@ -9,6 +9,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
+from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
 try:
@@ -122,9 +123,7 @@ def _validate_discord_correlation(request: CanonicalIngress) -> None:
         )
 
 
-def _require_mirror_request_owner(
-    request_id: str, owner_id: object
-) -> Any:
+def _require_mirror_request_owner(request_id: str, owner_id: object) -> Any:
     """Authorize a mirror journal by the immutable ingress actor and Fund."""
 
     owner = _resolved_owner(owner_id)
@@ -234,6 +233,10 @@ def _ceo_query(request: CanonicalIngress) -> dict[str, Any]:
             source=request.source,
             fund_id=fund_id,
             book_id=book_id,
+            previous_question_context=request.previous_question_context,
+            previous_question_context_source_message_id=(
+                request.previous_question_context_source_message_id
+            ),
         ),
         owner_id=owner_id,
         discord_channel_id=discord_channel_id,
@@ -317,7 +320,9 @@ def mirror_ingress(
 
     internal_discord = discord_ingress_authorized(http_request)
     if request.source == "discord" and not internal_discord:
-        raise HTTPException(status_code=401, detail="discord_ingress_authentication_required")
+        raise HTTPException(
+            status_code=401, detail="discord_ingress_authentication_required"
+        )
     if request.source != "discord" and internal_discord:
         raise HTTPException(status_code=403, detail="discord_ingress_source_forbidden")
     _validate_discord_correlation(request)
@@ -326,16 +331,11 @@ def mirror_ingress(
         raise HTTPException(status_code=401, detail="portfolio_authentication_required")
     canonical = request
     if owner is not None:
-        if (
-            request.actor_id not in _ANONYMOUS_ACTOR_IDS
-            and request.actor_id != owner
-        ):
+        if request.actor_id not in _ANONYMOUS_ACTOR_IDS and request.actor_id != owner:
             raise HTTPException(status_code=403, detail="ceo_mirror_actor_mismatch")
         if request.fund_id is not None:
             require_fund_membership(owner, request.fund_id)
-        canonical = request.model_copy(
-            update={"actor_id": owner, "actor_type": "user"}
-        )
+        canonical = request.model_copy(update={"actor_id": owner, "actor_type": "user"})
     execution = _execute(canonical)
     response = execution.response
     return MirrorIngressResponse(
@@ -410,7 +410,6 @@ def mirror_event_stream(
     )
 
 
-
 @router.get("/conversation/stream")
 def conversation_stream(
     after: str | None = Query(default=None, max_length=128),
@@ -459,7 +458,11 @@ def conversation_stream(
     async def generate():
         try:
             import redis
+        except ImportError:
+            yield 'event: error\ndata: {"detail":"conversation_stream_unavailable"}\n\n'
+            return
 
+        try:
             # Keep Redis socket failures bounded.  A synchronous generator is
             # particularly costly here because Starlette would reserve one
             # thread-pool token for every connected browser while XREAD waits.
@@ -471,8 +474,8 @@ def conversation_stream(
                 health_check_interval=30,
             )
             await run_in_threadpool(client.ping)
-        except Exception:
-            yield "event: error\ndata: {\"detail\":\"conversation_stream_unavailable\"}\n\n"
+        except (redis.RedisError, ValueError):
+            yield 'event: error\ndata: {"detail":"conversation_stream_unavailable"}\n\n'
             return
 
         cursor = after or "$"
@@ -489,8 +492,8 @@ def conversation_stream(
                     count=100,
                     block=1000,
                 )
-            except Exception:
-                yield "event: error\ndata: {\"detail\":\"conversation_stream_unavailable\"}\n\n"
+            except redis.RedisError:
+                yield 'event: error\ndata: {"detail":"conversation_stream_unavailable"}\n\n'
                 return
 
             emitted = False
@@ -505,7 +508,7 @@ def conversation_stream(
 
                     try:
                         event = MirrorEvent.model_validate_json(payload)
-                    except Exception:
+                    except ValidationError:
                         continue
 
                     if event.event_type not in allowed_event_types:
@@ -544,7 +547,9 @@ def publish_event(
     if _resolved_owner(owner_id) is not None:
         # Browser users cannot forge agent/supervisor timeline records. Runtime
         # producers publish through the internal store/service boundary.
-        raise HTTPException(status_code=403, detail="ceo_mirror_event_publish_forbidden")
+        raise HTTPException(
+            status_code=403, detail="ceo_mirror_event_publish_forbidden"
+        )
     MIRROR_STORE.publish_event(event)
     return event
 

@@ -365,7 +365,15 @@ def test_risk_projection_prefers_complete_result_and_human_labels():
         {
             "assignee": "risk-management",
             "title": "삼성전자 포지션 리스크 검토",
-            "result": "### 종합 위험도\nMODERATE\n\n완전한 리스크 검토 본문입니다.",
+            "result": (
+                "### 종합 위험도\nMODERATE\n\n"
+                "`unversioned·snapshot_resolvable=false` Mandate가 없어 "
+                "Mandate를 확인하지 못했고 gross 노출과 KOREA_EQUITY, NAV를 확인했습니다.\n"
+                "법률 판정: no_breach\n"
+                "이번 법률 조회는 PAPER만으로는 no_breach으로 보았지만 추가 확인이 필요합니다.\n"
+                "error: null\n"
+                'block_reason: "현재 포지션 자료가 없습니다."'
+            ),
             "run_metadata": {
                 "summary": "짧은 전달용 요약",
                 "analysis_mode": "fast_advisory",
@@ -384,15 +392,95 @@ def test_risk_projection_prefers_complete_result_and_human_labels():
     assert props["제목"]["title"][0]["text"]["content"].startswith(
         "t_trade1 · 삼성전자"
     )
-    assert "완전한 리스크 검토 본문" in str(
-        props["리스크 검토 요약"]
-    )
+    narrative = str(props["리스크 검토 요약"])
+    assert "현재 유효한 투자지침 스냅샷을 확인할 수 없는 상태" in narrative
+    assert "총액 기준 노출" in narrative
+    assert "국내 주식" in narrative
+    assert "투자지침이 없어 투자지침을 확인하지 못했고" in narrative
+    assert "순자산 가치" in narrative
+    assert "보통" in narrative
+    assert "현재 입력만으로 위반을 확인하지 못함" in narrative
+    assert "법률 위반 여부를 확정할 수 없으며" in narrative
+    assert "판단 보류 사유" in narrative
+    assert "snapshot_resolvable" not in narrative
+    assert "block_reason" not in narrative
+    assert "error: null" not in narrative
     assert "짧은 전달용 요약" not in str(props)
     rendered = str(children)
     assert "리스크 부서 검토 결과" in rendered
     assert "분석 방식" in rendered
+    assert "리스크 원본 시스템과 승인된 검증 절차" in rendered
     assert "포트폴리오 권위 데이터" in rendered
     assert "Department Task Result" not in rendered
     assert "Original Instruction" not in rendered
     assert "worker_session_id" not in rendered
     assert "workflow_root_task_id" not in rendered
+
+
+def test_accounting_projection_uses_accounting_database_and_manager_labels():
+    transport = FakeTransport(
+        {
+            "제목": {"type": "title"},
+            "서술": {"type": "rich_text"},
+        }
+    )
+    projection = DepartmentNotionProjection(
+        env={"NOTION_TOKEN": "x", "NOTION_ACCOUNTING_DB": "accounting-db"},
+        transport=transport,
+    )
+    task = _trading_task()
+    task.update(
+        {
+            "assignee": "accounting-portfolio-department",
+            "title": "PAPER 계정 NAV 및 대사 상태 검토",
+            "result": "기준 시각: 2026-08-26T07:54:25Z\n공식 NAV 확정 전 Preliminary입니다.",
+            "run_metadata": {
+                "structured_summary": {
+                    "nav": "999997007",
+                    "cash": "980047007",
+                    "open_breaks": "확인 자료 없음",
+                    "paper_boundary": "주문과 원장 변경 없음",
+                }
+            },
+        }
+    )
+
+    result = projection.project(root_task_id="t_root1", task=task)
+
+    assert result.status == "created"
+    assert transport.created[0][0] == "accounting-db"
+    rendered = str(transport.created[0][2])
+    assert "회계·포트폴리오 검토 결과" in rendered
+    assert "주요 수치와 확인 사항" in rendered
+    assert "Terminal Metadata" not in rendered
+    assert "workflow_root_task_id" not in rendered
+
+
+def test_accounting_projection_humanizes_runtime_field_names():
+    transport = FakeTransport({"제목": {"type": "title"}})
+    projection = DepartmentNotionProjection(
+        env={"NOTION_TOKEN": "x", "NOTION_ACCOUNTING_DB": "accounting-db"},
+        transport=transport,
+    )
+    task = _trading_task()
+    task.update(
+        {
+            "assignee": "accounting-portfolio-department",
+            "run_metadata": {},
+            "result": (
+                "as_of=2026-08-26; source_of_record=accounting.journals; "
+                "quality_status=WARN; instrument_id=abc; snapshot weight=1%"
+            ),
+        }
+    )
+
+    result = projection.project(root_task_id="t_root1", task=task)
+
+    assert result.status == "created"
+    rendered = str(transport.created[0][2])
+    assert "source_of_record" not in rendered
+    assert "quality_status" not in rendered
+    assert "instrument_id" not in rendered
+    assert "기준 시각" in rendered
+    assert "자료 기준" in rendered
+    assert "자료 품질 상태" in rendered

@@ -3,10 +3,13 @@
 Tests that use the portfolio BFF must opt into its explicit local fixture
 identity. The repository has no browser login or external user-auth mode.
 """
+
 from __future__ import annotations
 
 import os
 import tempfile
+
+import pytest
 
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("PORTFOLIO_AUTH_MODE", "fixture")
@@ -23,3 +26,15 @@ os.environ.setdefault(
 # setdefault 가 아니라 강제 설정이다(.env 를 export 한 셸에서 도는 경우가 막을 대상).
 # 계측 테스트는 monkeypatch 로 직접 켜므로 영향받지 않는다.
 os.environ["LANGFUSE_TRACING"] = "false"
+
+
+@pytest.fixture(autouse=True)
+def disable_external_langsmith_tracing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep pytest runs out of the production ``First`` project.
+
+    Tests that exercise observability explicitly opt in with their own
+    monkeypatches and use mocked clients. A normal test run must never inherit
+    ``.env``'s production tracing switch or upload a test trace.
+    """
+
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")

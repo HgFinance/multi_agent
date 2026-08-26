@@ -22,6 +22,7 @@ RISK_SPANS = frozenset(
         "risk.stop-calculation",
         "risk.take-profit-calculation",
         "risk.constraint-validation",
+        "risk.legal-wiki",
         "risk.discord-projection",
         "risk.notion-projection",
     }
@@ -29,6 +30,8 @@ RISK_SPANS = frozenset(
 _SAFE_KEYS = frozenset(
     {
         "task_id",
+        "request_id",
+        "root_id",
         "trace_id",
         "risk_plan_id",
         "mandate_version_id",
@@ -40,6 +43,20 @@ _SAFE_KEYS = frozenset(
         "payload_hash",
         "duration_ms",
         "error",
+        "error_code",
+        "model",
+        "tool",
+        "query_mode",
+        "input_chars",
+        "as_of",
+        "llm_wiki_invoked",
+        "document_count",
+        "page_count",
+        "source_reference_count",
+        "context_chars",
+        "verdict",
+        "confidence",
+        "escalate",
     }
 )
 
@@ -66,11 +83,26 @@ def _safe(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
 def _client():
     from langsmith import Client
 
-    return Client(hide_inputs=True, hide_outputs=True, hide_metadata=False)
+    # risk_span accepts only the scalar allowlist above. Keeping these safe
+    # structural fields visible makes the trace useful to QA without sending
+    # raw questions, answers, portfolio payloads, or credentials.
+    return Client(hide_inputs=False, hide_outputs=False, hide_metadata=False)
+
+
+def set_risk_span_outputs(run: Any, outputs: Mapping[str, Any]) -> None:
+    """Attach allowlisted output metadata without exposing model prose."""
+
+    if run is not None:
+        run.outputs = _safe(outputs)
 
 
 @contextlib.contextmanager
-def risk_span(name: str, metadata: Mapping[str, Any]) -> Iterator[Any]:
+def risk_span(
+    name: str,
+    metadata: Mapping[str, Any],
+    *,
+    inputs: Mapping[str, Any] | None = None,
+) -> Iterator[Any]:
     """Emit one redacted span without allowing telemetry to affect execution."""
 
     if name not in RISK_SPANS:
@@ -85,7 +117,7 @@ def risk_span(name: str, metadata: Mapping[str, Any]) -> Iterator[Any]:
         context = trace(
             name,
             run_type="chain",
-            inputs={},
+            inputs=_safe(inputs),
             project_name=os.getenv("LANGSMITH_PROJECT", "").strip() or None,
             tags=["hgfinance", "risk", "redacted"],
             metadata=_safe(metadata),
@@ -111,13 +143,13 @@ def risk_span(name: str, metadata: Mapping[str, Any]) -> Iterator[Any]:
             )
             context.__exit__(type(exc), exc, exc.__traceback__)
         except Exception as observer_exc:  # noqa: BLE001
-            logger.debug("Risk span error close failed: %s", type(observer_exc).__name__)
+            logger.debug(
+                "Risk span error close failed: %s", type(observer_exc).__name__
+            )
         raise
     else:
         try:
-            completion = {
-                "duration_ms": int((time.perf_counter() - started) * 1000)
-            }
+            completion = {"duration_ms": int((time.perf_counter() - started) * 1000)}
             if run.metadata.get("status") in {None, "", "running"}:
                 completion["status"] = "success"
             run.metadata.update(_safe(completion))
@@ -128,4 +160,4 @@ def risk_span(name: str, metadata: Mapping[str, Any]) -> Iterator[Any]:
             )
 
 
-__all__ = ["RISK_SPANS", "risk_span"]
+__all__ = ["RISK_SPANS", "risk_span", "set_risk_span_outputs"]

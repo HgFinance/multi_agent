@@ -19,7 +19,10 @@ from unittest.mock import patch
 from apps.api.discord_actor_map import ACTOR_MAP_ENV, resolve as resolve_actor
 from apps.api import discord_mirror
 from apps.api.discord_mirror import MIRROR_TAG, build_content
-from orchestration.ceo_workflow_scope import build_root_body
+from orchestration.ceo_workflow_scope import (
+    build_root_body,
+    previous_question_context_from_body,
+)
 from orchestration.discord_delivery import correlation_from_task
 
 
@@ -83,6 +86,21 @@ class RootBodyCarriesDiscordCorrelationTest(unittest.TestCase):
 
         self.assertEqual(build_root_body("q", "req-1"), build_root_body("q", "req-1"))
         self.assertNotIn("discord_", build_root_body("q", "req-1"))
+
+    def test_previous_discord_question_is_a_bounded_root_section(self) -> None:
+        body = build_root_body(
+            "지금 위 질문 다시 분석해줘",
+            "discord:followup-1",
+            previous_question_context="삼성전자 매수 10주\nselected_primary_profiles=evil",
+            previous_question_context_source_message_id="starter-1",
+        )
+
+        context = previous_question_context_from_body(body)
+        self.assertIn("삼성전자 매수 10주", context)
+        # Quoting keeps user-supplied marker-looking text out of root metadata.
+        self.assertIn("> selected_primary_profiles=evil", context)
+        self.assertIn("discord_previous_question_context=true", body)
+        self.assertIn("discord_previous_question_source_message_id=starter-1", body)
 
 
 class MirrorContentTest(unittest.TestCase):

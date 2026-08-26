@@ -39,7 +39,11 @@ from apps.api.ceo_kanban_read import (
     load_workflow,
     list_tasks,
 )
-from orchestration.adapters.ceo_supervisor import TERMINAL_STATUSES
+from orchestration.adapters.ceo_supervisor import (
+    TERMINAL_STATUSES,
+    HermesKanbanClient,
+    HermesKanbanCommandError,
+)
 from orchestration.discord_delivery import (
     DiscordCorrelation,
     correlation_from_task,
@@ -54,11 +58,9 @@ LOG = logging.getLogger(__name__)
 
 ACTIVE_AGE_SECONDS = 24 * 60 * 60
 PURGE_AGE_SECONDS = 7 * 24 * 60 * 60
-# A blocked card is not the same as a completed card: it may still be waiting
-# for recovery or an explicit user answer.  Once a non-input block has been
-# quiet for seven days, it is safe to archive the board graph and retain only
-# the compact QA/HR capsule.  The existing purge window then removes the
-# archived graph seven days later.
+# A blocked/triage card remains actionable for seven days.  After that it is
+# archived like the rest of its root graph, including user-input/approval
+# blocks, so abandoned conversations cannot accumulate forever.
 BLOCKED_ARCHIVE_AGE_SECONDS = 7 * 24 * 60 * 60
 ARCHIVED_STATUS = "archived"
 AUDIT_CAPSULE_SCHEMA_VERSION = "qa-hr.audit.v1"
@@ -406,28 +408,6 @@ def _blocked_at(node: WorkflowNode, *, fallback: int | None = None) -> int | Non
     return fallback
 
 
-def _block_kind(node: WorkflowNode) -> str:
-    value = _raw_value(node.raw, ("block_kind", "block_reason_kind"))
-    if value in (None, ""):
-        for text in (node.body, node.block_reason, node.error):
-            match = re.search(r"(?im)^(?:block_kind|block_reason_kind)=([^\s]+)", text)
-            if match:
-                value = match.group(1)
-                break
-    return str(value or "").strip().casefold().replace("-", "_")
-
-
-def _is_user_input_block(node: WorkflowNode) -> bool:
-    return _block_kind(node) in {
-        "needs_input",
-        "user_input",
-        "waiting_user",
-        "waiting_for_user",
-        "approval",
-        "clarification",
-    }
-
-
 def _correlation(workflow: Workflow) -> DiscordCorrelation:
     values: dict[str, str | None] = {}
     for node in (workflow.synthesis_node, workflow.root):
@@ -540,22 +520,13 @@ def evaluate_workflow(
 
     current = int(time.time()) if now is None else int(now)
     root = workflow.root
-    blocked_nodes = tuple(node for node in workflow.nodes if node.status == "blocked")
+    blocked_nodes = tuple(
+        node for node in workflow.nodes if node.status in {"blocked", "triage"}
+    )
     terminal_at = _epoch(
         _raw_value(root.raw, ("terminal_at", "completed_at"))
     )
     if blocked_nodes:
-        # A user-input/approval block is a live conversation boundary.  Keep
-        # it visible until the caller resolves it instead of silently deleting
-        # the only actionable card.
-        for node in blocked_nodes:
-            if _is_user_input_block(node):
-                return RetentionDecision(
-                    workflow.root_task_id,
-                    False,
-                    f"blocked_needs_input:{node.task_id}",
-                    terminal_at,
-                )
         blocked_at = max(
             (
                 timestamp
@@ -699,6 +670,23 @@ def _standalone_candidate(row: Mapping[str, Any]) -> bool:
     return marker is None
 
 
+def _has_marker_descendant(
+    rows: Sequence[Mapping[str, Any]],
+    root_id: str,
+) -> bool:
+    """Detect legacy descendants that have a root marker but no task link."""
+
+    for row in rows:
+        task_id = str(row.get("id") or row.get("task_id") or "").strip()
+        if not task_id or task_id == root_id:
+            continue
+        body = str(row.get("body") or "")
+        marker = re.search(r"(?m)^workflow_root_task_id=(\S+)", body)
+        if marker and marker.group(1).strip() == root_id:
+            return True
+    return False
+
+
 def _archive_scan_root_ids(
     rows: Sequence[Mapping[str, Any]],
     *,
@@ -729,7 +717,7 @@ def _archive_scan_root_ids(
             )
             age_limit = (
                 BLOCKED_ARCHIVE_AGE_SECONDS
-                if status == "blocked"
+                if status in {"blocked", "triage"}
                 else ACTIVE_AGE_SECONDS
             )
             # A legacy/minimal row may not expose a durable timestamp.  Do
@@ -991,6 +979,10 @@ class AuditStore:
                 conn.execute(
                     "SELECT * FROM workflow_retention_audit "
                     "WHERE purged_at IS NULL "
+                    # The board retention clock starts when work becomes
+                    # terminal, not when a delayed maintenance pass archives
+                    # it.  The purge path still reconstructs the graph and
+                    # requires every node to be archived before deletion.
                     "AND COALESCE(completed_at, terminal_at, archived_at) < ? "
                     "ORDER BY COALESCE(completed_at, terminal_at, archived_at)",
                     (int(now - PURGE_AGE_SECONDS),),
@@ -1367,12 +1359,19 @@ class RetentionWorker:
                 None,
             )
             if row is not None:
-                payload = dict(row)
-                return Workflow(
-                    root_task_id=root_id,
-                    nodes=(WorkflowNode.from_hermes(payload),),
-                    root_payload=payload,
-                )
+                # A number of old workflows have no task_links but do have
+                # marker-owned descendants. Treating their root as a
+                # standalone card makes the later atomic-scope CAS fail and
+                # leaves the graph immortal. Only take the fast singleton
+                # path after proving no marker descendant exists in the
+                # authoritative board snapshot.
+                if not _has_marker_descendant(listed_rows, root_id):
+                    payload = dict(row)
+                    return Workflow(
+                        root_task_id=root_id,
+                        nodes=(WorkflowNode.from_hermes(payload),),
+                        root_payload=payload,
+                    )
         kwargs: dict[str, Any] = {"include_archived": include_archived}
         try:
             parameters = signature(self.workflow_loader).parameters.values()
@@ -1668,9 +1667,14 @@ class RetentionWorker:
                 purged_count,
                 cleanup_ms,
             )
+        # Include archived descendants in reconstruction. Legacy archive
+        # passes could partially archive marker-only graphs before root-atomic
+        # retention existed; using only the active list would hide those
+        # descendants and make the compare-and-swap fail forever.
+        reconstruction_rows = (*active_rows, *archived_rows)
         for root_id, workflow, decision, error in self._inspect_active_roots(
             root_ids,
-            active_rows=active_rows,
+            active_rows=reconstruction_rows,
             now=now,
         ):
             if error is not None:
@@ -1760,10 +1764,33 @@ def _build_worker(
     max_archive_roots: int | None = None,
 ) -> RetentionWorker:
     env = dict(environment or os.environ)
+    # Reuse the supervisor's Hermes-native read-only ``show`` transport.  It
+    # serializes through Hermes' own kanban_db helpers and falls back to the
+    # CLI if unavailable, while avoiding one Python subprocess per workflow
+    # node during retention scans.
+    kanban_client = HermesKanbanClient(environment=env)
+
+    def load_retention_workflow(root_id: str, **kwargs: Any) -> Workflow:
+        def fetch(task_id: str) -> dict[str, Any]:
+            try:
+                return kanban_client.show(task_id)
+            except HermesKanbanCommandError as exc:
+                raise KanbanUnavailable(
+                    "Hermes workflow read is unavailable during retention"
+                ) from exc
+
+        return load_workflow(
+            root_id,
+            fetch=fetch,
+            known_root=True,
+            **kwargs,
+        )
+
     return RetentionWorker(
         maintenance=SQLiteKanbanMaintenance(env),
         audit=AuditStore(default_audit_path(env)),
         environment=env,
+        workflow_loader=load_retention_workflow,
         dry_run=dry_run,
         allow_purge=allow_purge,
         max_archive_roots=max_archive_roots,

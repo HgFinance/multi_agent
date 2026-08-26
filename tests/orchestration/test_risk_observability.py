@@ -12,6 +12,7 @@ def test_risk_span_uses_sdk_compatible_tags_and_closes_successfully(monkeypatch)
     class FakeRun:
         def __init__(self, metadata):
             self.metadata = dict(metadata)
+            self.outputs = {}
 
     class FakeContext:
         def __init__(self, run):
@@ -37,12 +38,18 @@ def test_risk_span_uses_sdk_compatible_tags_and_closes_successfully(monkeypatch)
     monkeypatch.setenv("LANGSMITH_API_KEY", "test-key")
 
     with risk_observability.risk_span(
-        "risk.advisory", {"task_id": "task-1", "status": "running"}
+        "risk.advisory",
+        {"task_id": "task-1", "status": "running"},
+        inputs={"task_id": "task-1", "input_chars": 12, "unsafe": "hidden"},
     ) as run:
         assert run is not None
+        risk_observability.set_risk_span_outputs(
+            run, {"status": "OK", "page_count": 1, "unsafe": "hidden"}
+        )
 
     assert recorded["name"] == "risk.advisory"
     assert recorded["tags"] == ["hgfinance", "risk", "redacted"]
+    assert run.outputs == {"status": "OK", "page_count": 1}
     assert run.metadata["status"] == "success"
     assert isinstance(run.metadata["duration_ms"], int)
     assert recorded["exit"] == (None, None, None)

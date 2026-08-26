@@ -18,9 +18,8 @@
 점검: python api/market_api.py          # DB 없이
       python api/market_api.py --probe  # 실 DB 관통
 """
-from __future__ import annotations
 
-from typing import Optional
+from __future__ import annotations
 
 import os
 import sys
@@ -60,12 +59,17 @@ try:
 except Exception as _e:
     _msg = f"Tool Gateway 미설치: {type(_e).__name__}: {_e}"
     print(f"⚠ {_msg}", file=sys.stderr)
-    if os.environ.get("TOOL_GATEWAY_ENFORCE_MARKET", "").lower() in ("1", "true", "yes"):
+    if os.environ.get("TOOL_GATEWAY_ENFORCE_MARKET", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
         raise RuntimeError(
             f"{_msg} - 강제 모드인데 게이트웨이가 없으면 전 경로가 무인증으로 "
-            f"열린다. 기동을 막는다(fail-closed).") from _e
+            f"열린다. 기동을 막는다(fail-closed)."
+        ) from _e
 
-_ts = None          # TimescaleDB 연결 (read-only)
+_ts = None  # TimescaleDB 연결 (read-only)
 _sym2iid: dict = {}  # symbol -> instrument_id (기동 시 1회)
 _iid2sym: dict = {}
 
@@ -85,7 +89,9 @@ def get_ts():
 
     if _ts is not None and not _ts.closed:
         return _ts
-    _ts = psycopg2.connect(load_project_env()["TIMESCALE_DATABASE_URL"], connect_timeout=10)
+    _ts = psycopg2.connect(
+        load_project_env()["TIMESCALE_DATABASE_URL"], connect_timeout=10
+    )
     return _ts
 
 
@@ -160,6 +166,72 @@ def health() -> dict:
     }
 
 
+def _deep_readiness() -> dict[str, object]:
+    """Probe both authoritative read paths with bounded, index-free queries."""
+    import psycopg2
+
+    settings = load_project_env()
+    control = psycopg2.connect(settings["DATABASE_URL"], connect_timeout=3)
+    try:
+        with control.cursor() as cur:
+            cur.execute("set transaction read only")
+            cur.execute("set local statement_timeout = '3000ms'")
+            cur.execute(
+                """
+                select exists (
+                    select 1
+                    from reference.instruments i
+                    join reference.instrument_symbols sy using (instrument_id)
+                    where i.market = 'KRX' and sy.is_primary
+                    limit 1
+                )
+                """
+            )
+            symbol_lookup_ready = bool(cur.fetchone()[0])
+        control.rollback()
+    finally:
+        control.close()
+    if not symbol_lookup_ready:
+        raise RuntimeError("SYMBOL_LOOKUP_EMPTY")
+
+    market = psycopg2.connect(settings["TIMESCALE_DATABASE_URL"], connect_timeout=3)
+    try:
+        with market.cursor() as cur:
+            cur.execute("set transaction read only")
+            cur.execute("set local statement_timeout = '3000ms'")
+            # Relation access is part of readiness; current market data is not.
+            # A stale or empty session must remain queryable and be reported by
+            # domain endpoints rather than turning process readiness into OOM-prone
+            # hypertable aggregation.
+            cur.execute("select 1 from market.market_bars limit 1")
+            cur.fetchone()
+        market.rollback()
+    finally:
+        market.close()
+    return {
+        "version": API_VERSION,
+        "read_only": True,
+        "status": "ready",
+        "control_symbol_lookup": True,
+        "market_query": True,
+    }
+
+
+@app.get("/ready")
+def ready() -> dict[str, object]:
+    """Deep, bounded readiness for orchestration and dependent workers."""
+    try:
+        return _deep_readiness()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "not_ready",
+                "error_code": type(exc).__name__,
+            },
+        ) from exc
+
+
 @app.get("/health/ready")
 def health_ready() -> dict:
     """Readiness. 시세 평면에 실제로 닿아 도메인별 적재 현황을 돌려준다.
@@ -167,7 +239,8 @@ def health_ready() -> dict:
     ⚠ 대용량 hypertable 집계라 **느리다.** 오케스트레이터 healthcheck 는 이쪽이
       아니라 `/health` 를 찔러야 한다. 이 경로는 사람이 상태를 확인할 때 쓴다.
     """
-    rows = _query("""
+    rows = _query(
+        """
         select 'ticks' as domain, count(*) as rows,
                max(event_time) as last_event
         from market.market_ticks where event_time > now() - interval '2 days'
@@ -182,15 +255,20 @@ def health_ready() -> dict:
         from market.market_bars where interval_code = '1M'
         union all
         select 'breadth', count(*), max(event_time) from market.market_breadth
-    """, ())
+    """,
+        (),
+    )
     return {"version": API_VERSION, "read_only": True, "domains": rows}
 
 
 @app.get("/snapshot/{symbol}")
-def snapshot(symbol: str,
-             as_of: Optional[str] = Query(
-                 None, description="이 시각까지의 마지막 체결·호가(PIT, "
-                                   "tz 포함 ISO8601). 없으면 최신")) -> dict:
+def snapshot(
+    symbol: str,
+    as_of: str | None = Query(
+        None,
+        description="이 시각까지의 마지막 체결·호가(PIT, tz 포함 ISO8601). 없으면 최신",
+    ),
+) -> dict:
     """마지막 체결 + 마지막 호가. 세션 밖에서는 마감 스냅샷이 나온다.
 
     ▶ **as_of 를 받는다.** market_ticks·market_quotes 는 event_time 으로 이력이
@@ -199,26 +277,34 @@ def snapshot(symbol: str,
       돌려볼 수 있어야 한다.
     """
     iid = _iid_or_404(symbol)
-    tick = _query("""
+    tick = _query(
+        """
         select event_time, price, quantity, cumulative_volume
         from market.market_ticks
         where instrument_id = %s
           and (%s::timestamptz is null or event_time <= %s::timestamptz)
         order by event_time desc limit 1
-    """, (iid, as_of, as_of))
-    quote = _query("""
+    """,
+        (iid, as_of, as_of),
+    )
+    quote = _query(
+        """
         select event_time, best_bid, best_ask, mid_price,
                total_bid_size, total_ask_size
         from market.market_quotes
         where instrument_id = %s
           and (%s::timestamptz is null or event_time <= %s::timestamptz)
         order by event_time desc limit 1
-    """, (iid, as_of, as_of))
+    """,
+        (iid, as_of, as_of),
+    )
     if not tick and not quote:
         raise HTTPException(404, f"{symbol} 의 시세가 아직 없다")
-    return {"symbol": symbol,
-            "last_trade": tick[0] if tick else None,
-            "last_quote": quote[0] if quote else None}
+    return {
+        "symbol": symbol,
+        "last_trade": tick[0] if tick else None,
+        "last_quote": quote[0] if quote else None,
+    }
 
 
 @app.get("/bars/{symbol}")
@@ -259,14 +345,17 @@ def bars(
             cond = " and bucket_time <= %s"
             params.append(to)
         params.append(limit)
-        return _query(f"""
+        return _query(
+            f"""
             select bucket_time, open, high, low, close, volume, notional,
                    'consolidated_1m'::text as source,
                    (bucket_time + interval '1 minute' <= now()) as is_final
               from market.bars_1m_consolidated
              where instrument_id = %s{cond}
              order by bucket_time desc limit %s
-        """, tuple(params))
+        """,
+            tuple(params),
+        )
     if interval in derived_intervals and realtime_intraday:
         # Higher intraday frames have one canonical implementation: aggregate
         # final 1M candles in Timescale. Rule/agent callers must not invent
@@ -279,7 +368,8 @@ def bars(
             cond = " and bucket_time <= %s"
             params.append(to)
         params.append(limit)
-        return _query(f"""
+        return _query(
+            f"""
             select time_bucket(interval '{interval_literal}', bucket_time)
                      as bucket_time,
                    first(open, bucket_time) as open,
@@ -299,7 +389,9 @@ def bars(
              where instrument_id = %s{cond}
              group by time_bucket(interval '{interval_literal}', bucket_time)
              order by bucket_time desc limit %s
-        """, tuple(params))
+        """,
+            tuple(params),
+        )
     cond, params = "", [iid, interval]
     if source:
         cond += " and source = %s"
@@ -310,7 +402,8 @@ def bars(
         cond += " and bucket_time <= %s"
         params.append(to)
     params.append(limit)
-    return _query(f"""
+    return _query(
+        f"""
         -- notional 추가(2026-08-03): 적재는 되는데 SELECT 에 없어서
         -- evidence/liquidity.py 의 Amihud 비유동성이 **영구 None** 이었다.
         -- 레지스트리에는 ADOPTED 로 등재돼 있는데 값이 안 나오던 상태.
@@ -319,14 +412,15 @@ def bars(
         from market.market_bars
         where instrument_id = %s and interval_code = %s{cond}
         order by bucket_time desc limit %s
-    """, tuple(params))
+    """,
+        tuple(params),
+    )
 
 
 @app.get("/levels/{symbol}")
 def levels(
     symbol: str,
-    lookback: int = Query(130, ge=60, le=400,
-                          description="레벨 계산에 쓸 일봉 수"),
+    lookback: int = Query(130, ge=60, le=400, description="레벨 계산에 쓸 일봉 수"),
 ):
     """지지·저항·진입·목표·손절. **일봉에서 결정론으로 계산한다.**
 
@@ -346,43 +440,67 @@ def levels(
         "bars_used": len(ordered),
         "last_close": plan.last_close,
         "atr": plan.atr,
-        "supports": [{"price": lv.price, "touches": lv.touches,
-                      "strength": lv.strength, "basis": lv.basis}
-                     for lv in plan.supports],
-        "resistances": [{"price": lv.price, "touches": lv.touches,
-                         "strength": lv.strength, "basis": lv.basis}
-                        for lv in plan.resistances],
+        "supports": [
+            {
+                "price": lv.price,
+                "touches": lv.touches,
+                "strength": lv.strength,
+                "basis": lv.basis,
+            }
+            for lv in plan.supports
+        ],
+        "resistances": [
+            {
+                "price": lv.price,
+                "touches": lv.touches,
+                "strength": lv.strength,
+                "basis": lv.basis,
+            }
+            for lv in plan.resistances
+        ],
         "caveat": CAVEAT,
         "evidence_tier": "DERIVED",
     }
     if plan.status == PLAN_OK:
-        out.update({
-            "entry_low": plan.entry_low, "entry_high": plan.entry_high,
-            "target": plan.target, "stop": plan.stop,
-            "reward_risk": plan.reward_risk, "risk_pct": plan.risk_pct,
-            "target_basis": plan.target_basis, "stop_basis": plan.stop_basis,
-        })
+        out.update(
+            {
+                "entry_low": plan.entry_low,
+                "entry_high": plan.entry_high,
+                "target": plan.target,
+                "stop": plan.stop,
+                "reward_risk": plan.reward_risk,
+                "risk_pct": plan.risk_pct,
+                "target_basis": plan.target_basis,
+                "stop_basis": plan.stop_basis,
+            }
+        )
     else:
         out["reason"] = plan.reason
     return out
 
 
 @app.get("/breadth")
-def breadth(market: str = Query("KOSPI"), limit: int = Query(20, gt=0, le=500),
-            as_of: Optional[str] = Query(
-                None, description="이 시각까지만 본다(PIT, tz 포함 ISO8601). "
-                                  "없으면 최신")):
+def breadth(
+    market: str = Query("KOSPI"),
+    limit: int = Query(20, gt=0, le=500),
+    as_of: str | None = Query(
+        None, description="이 시각까지만 본다(PIT, tz 포함 ISO8601). 없으면 최신"
+    ),
+):
     """시장 폭. **as_of 를 받는다** - 이력은 event_time 으로 원래 다 있었고
     컷오프만 없어서 Replay 금지였다. 금지는 도구를 없애지만 파라미터는 도구를
     살린다 - 에이전트가 값을 하는지 증명하려면 과거로 돌려볼 수 있어야 한다."""
-    return _query("""
+    return _query(
+        """
         select event_time, market, advancers, decliners, unchanged,
                up_volume, down_volume, total_value
         from market.market_breadth
         where market = %s
           and (%s::timestamptz is null or event_time <= %s::timestamptz)
         order by event_time desc limit %s
-    """, (market, as_of, as_of, limit))
+    """,
+        (market, as_of, as_of, limit),
+    )
 
 
 @app.get("/dq/bar_freshness")
@@ -400,25 +518,36 @@ def dq_bar_freshness(interval: str = Query("1D")):
       장이 통째로 빠져 있었다(350종목 전부). 일봉 수집기가 스케줄에 없어서다.
       틱 품질(/dq/windows)은 봤지만 **봉 신선도를 보는 곳이 없었다.**
     """
-    rows = _query("""
+    rows = _query(
+        """
         select max((bucket_time at time zone 'Asia/Seoul')::date) as last_bar_date,
                count(distinct instrument_id) as symbols
         from market.market_bars
         where interval_code = %s and source = 'ls_chart'
-    """, (interval,))
+    """,
+        (interval,),
+    )
     r = (rows or [{}])[0]
     # 행 0 을 신선함으로 위장하지 않는다 - 봉이 없는 것과 최신인 것은 다르다
     if not r or r.get("last_bar_date") is None:
-        return {"ok": False, "interval": interval, "last_bar_date": None,
-                "reason": f"{interval} 봉이 0건"}
-    return {"ok": True, "interval": interval,
-            "last_bar_date": str(r["last_bar_date"]),
-            "symbols": int(r.get("symbols") or 0)}
+        return {
+            "ok": False,
+            "interval": interval,
+            "last_bar_date": None,
+            "reason": f"{interval} 봉이 0건",
+        }
+    return {
+        "ok": True,
+        "interval": interval,
+        "last_bar_date": str(r["last_bar_date"]),
+        "symbols": int(r.get("symbols") or 0),
+    }
 
 
 @app.get("/dq/windows")
-def dq_windows(hours: int = Query(24, gt=0, le=168),
-               limit: int = Query(50, gt=0, le=500)):
+def dq_windows(
+    hours: int = Query(24, gt=0, le=168), limit: int = Query(50, gt=0, le=500)
+):
     """RES-02 Market Data Steward 의 감사 결과 (스트림별 품질 판정).
 
     ▶ **감사는 돌고 있었는데 아무도 못 읽었다.** collectors/market_data_steward.py
@@ -431,7 +560,8 @@ def dq_windows(hours: int = Query(24, gt=0, le=168),
     quality_status 는 PASS / WARN / FAIL. **행이 0건인 것은 PASS 가 아니다** -
     감사가 안 돌았다는 뜻이므로 호출부가 미확인으로 다뤄야 한다.
     """
-    return _query("""
+    return _query(
+        """
         select window_start, window_end, provider, stream_type,
                observed_count, duplicate_count, p95_latency_ms, max_latency_ms,
                quality_status, rule_version, metrics
@@ -439,48 +569,71 @@ def dq_windows(hours: int = Query(24, gt=0, le=168),
         where window_end > now() - make_interval(hours => %s)
         order by window_end desc, stream_type
         limit %s
-    """, (hours, limit))
+    """,
+        (hours, limit),
+    )
 
 
 @app.get("/dq/summary")
 def dq_summary() -> dict:
     """수집 건강 요약 - 오늘 심볼 커버리지와 최근 유입."""
-    rows = _query("""
+    rows = _query(
+        """
         select count(distinct instrument_id) as symbols_today,
                count(*) filter (where event_time > now() - interval '10 minutes') as ticks_10m,
                max(event_time) as last_tick
         from market.market_ticks
         where event_time::date = (now() at time zone 'Asia/Seoul')::date
-    """, ())
+    """,
+        (),
+    )
     return {"today": rows[0]}
 
 
 @app.get("/regime/daily")
-def regime_daily(days: int = Query(20, gt=0, le=120),
-                 as_of: Optional[str] = Query(
-                     None, pattern=r"^\d{4}-\d{2}-\d{2}$",
-                     description="이 거래일까지만 본다(PIT). 없으면 최신")):
+def regime_daily(
+    days: int = Query(20, gt=0, le=120),
+    as_of: str | None = Query(
+        None,
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+        description="이 거래일까지만 본다(PIT). 없으면 최신",
+    ),
+):
     """시장 레짐 집계 (RES-07 의 결정론 재료) - 일봉 단면 지표.
 
     등락 종목수·SMA20 상회 비율을 거래일별로 계산한다. SMA20 은 봉 20개가
     다 있는 종목만 분모에 넣는다(부족 종목을 하회로 세지 않는다 - coverage
     로 분모를 명시). 계산은 전부 이 SQL - LLM 은 이 결과를 서술만 한다.
     """
-    return _query("""
-        with b as (
+    return _query(
+        """
+        with bounds as (
+          select coalesce(
+                   %s::date,
+                   (now() at time zone 'Asia/Seoul')::date
+                 ) as cutoff,
+                 make_interval(days => greatest((%s + 30) * 2, 120))
+                   as lookback
+        ), b as (
           select instrument_id,
                  (bucket_time at time zone 'Asia/Seoul')::date as d,
                  close,
                  avg(close) over w20 as sma20,
                  count(*) over w20 as n20,
                  lag(close) over (partition by instrument_id order by bucket_time) as prev_close
-          from market.market_bars
+          from market.market_bars cross join bounds
           where interval_code = '1D' and source = 'ls_chart'
             -- ▶ PIT 컷오프. 없으면 최신까지(LIVE 에서는 '지금'이 곧 컷오프라
             --   아무것도 막지 않는다). **이력은 원래 다 있었다** - 컷오프를
             --   안 받아서 Replay 금지 목록에 올라 있었을 뿐이다.
-            and (%s::date is null
-                 or (bucket_time at time zone 'Asia/Seoul')::date <= %s::date)
+            and bucket_time >= (
+                  (bounds.cutoff - bounds.lookback)::timestamp
+                  at time zone 'Asia/Seoul'
+                )
+            and bucket_time < (
+                  (bounds.cutoff + 1)::timestamp
+                  at time zone 'Asia/Seoul'
+                )
           window w20 as (partition by instrument_id order by bucket_time
                          rows between 19 preceding and current row)
         )
@@ -493,13 +646,20 @@ def regime_daily(days: int = Query(20, gt=0, le=120),
                count(*) as symbols
         from b
         group by d order by d desc limit %s
-    """, (as_of, as_of, days))
+    """,
+        (as_of, days, days),
+    )
 
 
 @app.get("/microstructure/{symbol}")
-def microstructure(symbol: str, trade_date: str | None = Query(
-        None, pattern=r"^\d{4}-\d{2}-\d{2}$",
-        description="KST 거래일. 없으면 데이터가 있는 최근일")):
+def microstructure(
+    symbol: str,
+    trade_date: str | None = Query(
+        None,
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+        description="KST 거래일. 없으면 데이터가 있는 최근일",
+    ),
+):
     """미시구조 집계 (RES-03 의 결정론 재료) - 체결·호가 하루 요약.
 
     체결: VWAP·매수/매도 체결량(side 부호)·건수. 호가: 스프레드 bp 중앙값/
@@ -507,9 +667,14 @@ def microstructure(symbol: str, trade_date: str | None = Query(
     드러난다(없음과 조회 실패를 구분).
     """
     iid = _iid_or_404(symbol)
-    cond = "and (event_time at time zone 'Asia/Seoul')::date = %s::date" if trade_date else ""
+    cond = (
+        "and (event_time at time zone 'Asia/Seoul')::date = %s::date"
+        if trade_date
+        else ""
+    )
     params_t = (iid, trade_date) if trade_date else (iid,)
-    ticks = _query(f"""
+    ticks = _query(
+        f"""
         select (event_time at time zone 'Asia/Seoul')::date as trade_date,
                count(*) as trades,
                sum(quantity) as volume,
@@ -520,8 +685,11 @@ def microstructure(symbol: str, trade_date: str | None = Query(
         from market.market_ticks
         where instrument_id = %s {cond}
         group by 1 order by 1 desc limit 1
-    """, params_t)
-    quotes = _query(f"""
+    """,
+        params_t,
+    )
+    quotes = _query(
+        f"""
         select (event_time at time zone 'Asia/Seoul')::date as trade_date,
                count(*) as quotes,
                percentile_cont(0.5) within group
@@ -533,21 +701,28 @@ def microstructure(symbol: str, trade_date: str | None = Query(
         where instrument_id = %s {cond}
           and mid_price is not null and spread is not null
         group by 1 order by 1 desc limit 1
-    """, params_t)
-    return {"symbol": symbol, "ticks": ticks[0] if ticks else None,
-            "quotes": quotes[0] if quotes else None,
-            "note": None if ticks or quotes else "해당 일자 데이터 없음"}
+    """,
+        params_t,
+    )
+    return {
+        "symbol": symbol,
+        "ticks": ticks[0] if ticks else None,
+        "quotes": quotes[0] if quotes else None,
+        "note": None if ticks or quotes else "해당 일자 데이터 없음",
+    }
 
 
 # ---------------------------------------------------------------------------
 # 자체 점검 - DB 없이
 # ---------------------------------------------------------------------------
 
+
 def _check_readonly_surface():
     for route in app.routes:
         methods = getattr(route, "methods", set()) or set()
-        assert not (methods - {"GET", "HEAD", "OPTIONS"}), \
+        assert not (methods - {"GET", "HEAD", "OPTIONS"}), (
             f"읽기 전용 API 에 쓰기 메서드: {route.path}"
+        )
     print("  읽기 전용 표면           OK")
 
 
@@ -558,8 +733,9 @@ def _check_gateway_covers_all_routes():
     이 된다 - 새 엔드포인트를 추가하면서 ENDPOINT_SCOPES 를 안 고치면 그
     경로가 통째로 죽는다. 배포 전에 여기서 잡는다.
     """
-    assert GATEWAY_STATUS in ("enforce", "observe"), \
+    assert GATEWAY_STATUS in ("enforce", "observe"), (
         f"market-api 에 게이트웨이가 안 붙었다({GATEWAY_STATUS})"
+    )
     from tool_gateway import GatewayConfigError, is_open_path, scope_for
 
     missing = []
@@ -588,8 +764,13 @@ def _check_bar_params():
     global _sym2iid
     _sym2iid = {"005930": "00000000-0000-0000-0000-000000000000"}
     try:
-        bars("005930", interval="1D", limit=10, source=None,
-            to=datetime(2026, 7, 31, 9, 0))  # noqa: DTZ001 - intentionally invalid input
+        bars(
+            "005930",
+            interval="1D",
+            limit=10,
+            source=None,
+            to=datetime(2026, 7, 31, 9, 0),  # noqa: DTZ001 - intentionally invalid
+        )
         raise AssertionError("naive to 가 통과했다")
     except HE:
         pass
@@ -607,9 +788,13 @@ def _probe():
     lt = s["last_trade"]
     print(f"  /snapshot/005930: {lt['price']}원 @ {lt['event_time']}")
     b = bars("005930", interval="1D", limit=5, source="ls_chart", to=None)
-    print(f"  /bars/005930 1D(ls_chart) 최근 5: {[str(x['bucket_time'])[:10] for x in b]}")
+    print(
+        f"  /bars/005930 1D(ls_chart) 최근 5: {[str(x['bucket_time'])[:10] for x in b]}"
+    )
     bm = bars("005930", interval="1M", limit=3, source=None, to=None)
-    print(f"  /bars 1M 최근 3: {[(str(x['bucket_time'])[11:16], x['source']) for x in bm]}")
+    print(
+        f"  /bars 1M 최근 3: {[(str(x['bucket_time'])[11:16], x['source']) for x in bm]}"
+    )
     d = dq_summary()
     print(f"  /dq/summary: {d['today']}")
     return 0

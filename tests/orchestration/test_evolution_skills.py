@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -295,6 +296,56 @@ def test_promotion_registers_and_activates_without_runtime_writes(
     report = build_resolution_report(store, approved["proposal_id"])
     assert report["outcome_evidence"]["status"] == "ACTIVE_PENDING_FEEDBACK"
     assert report["problem_evidence"]["source_artifact_ids"]
+
+
+def test_project_owned_skill_is_part_of_the_canonical_runtime_contract(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    source = repo / "skills/risk/project-risk-control/SKILL.md"
+    provenance_path = source.with_name("provenance.json")
+    registry = repo / "skills/evolution-registry.json"
+    source.parent.mkdir(parents=True)
+    markdown = "# project-risk-control\n\n프로젝트 리스크 통제 절차.\n"
+    content_hash = hashlib.sha256(markdown.encode()).hexdigest()
+    source.write_text(markdown, encoding="utf-8")
+    provenance_path.write_text(
+        json.dumps(
+            {
+                "classification": "project-owned",
+                "slug": "project-risk-control",
+                "version": "1.0.0",
+                "owner_profile": "risk-management",
+                "content_hash": content_hash,
+            }
+        ),
+        encoding="utf-8",
+    )
+    registry.write_text(
+        json.dumps(
+            {
+                "registry_version": "hgfinance.evolution-skill-registry.v1",
+                "skills": {},
+                "project_skills": {
+                    "project-risk-control": {
+                        "classification": "project-owned",
+                        "status": "active",
+                        "owner_profiles": ["risk-management"],
+                        "current_version": "1.0.0",
+                        "source": str(source.relative_to(repo)),
+                        "provenance": str(provenance_path.relative_to(repo)),
+                        "content_hash": content_hash,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    active, owners = active_registry_bindings(registry)
+    assert active == {"project-risk-control"}
+    assert owners["project-risk-control"] == {"risk-management"}
+    assert validate_canonical_registry(repo, registry)["ok"] is True
 
 
 def test_resolution_report_requires_three_positive_post_activation_runs(

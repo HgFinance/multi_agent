@@ -1,0 +1,34 @@
+# Governance notification and Workforce improvement share a container only.
+# Each existing consumer runs in its own interpreter so department-local import
+# roots, Redis consumer groups, ACK semantics, and failure boundaries remain
+# unchanged.
+FROM python:3.12-slim
+
+RUN pip install --no-cache-dir \
+    fastapi==0.128.8 "uvicorn[standard]==0.39.0" pydantic==2.13.3 \
+    psycopg2-binary==2.9.12 redis==7.0.1 python-dotenv \
+    langgraph==0.6.11 langgraph-checkpoint-postgres langfuse==4.14.3
+
+WORKDIR /app
+
+COPY departments/00-ceo-office/api ./departments/00-ceo-office/api
+COPY departments/00-ceo-office/src ./departments/00-ceo-office/src
+COPY departments/00-ceo-office/governance_events ./departments/00-ceo-office/governance_events
+
+COPY departments/07-agent-workforce/api ./departments/07-agent-workforce/api
+COPY departments/07-agent-workforce/lifecycle ./departments/07-agent-workforce/lifecycle
+COPY departments/07-agent-workforce/improvements ./departments/07-agent-workforce/improvements
+COPY departments/07-agent-workforce/scorecard ./departments/07-agent-workforce/scorecard
+COPY departments/07-agent-workforce/roster ./departments/07-agent-workforce/roster
+COPY departments/07-agent-workforce/workforce_events ./departments/07-agent-workforce/workforce_events
+COPY departments/07-agent-workforce/planning ./departments/07-agent-workforce/planning
+COPY departments/07-agent-workforce/hiring ./departments/07-agent-workforce/hiring
+COPY departments/07-agent-workforce/performance ./departments/07-agent-workforce/performance
+COPY departments/07-agent-workforce/reporting.py ./departments/07-agent-workforce/reporting.py
+COPY departments/07-agent-workforce/workforce_api_loader.py ./departments/07-agent-workforce/workforce_api_loader.py
+
+COPY orchestration ./orchestration
+
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/app
+
+CMD ["python", "-m", "orchestration.control_event_worker"]

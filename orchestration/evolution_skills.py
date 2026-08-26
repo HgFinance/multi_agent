@@ -25,6 +25,10 @@ import yaml
 
 SCHEMA_VERSION = "hgfinance.evolution-skills.v1"
 REGISTRY_VERSION = "hgfinance.evolution-skill-registry.v1"
+_REGISTRY_SECTIONS = (
+    ("skills", "evolved"),
+    ("project_skills", "project-owned"),
+)
 PRODUCTION_GENERATION_MODEL = "qwen2.5-14b-instruct-awq"
 OWNED_DEPARTMENTS = {
     "00-ceo-office": "ceo-agent",
@@ -1172,12 +1176,18 @@ def build_resolution_report(
 
 def load_registry(path: Path) -> dict[str, Any]:
     if not path.exists():
-        return {"registry_version": REGISTRY_VERSION, "skills": {}}
+        return {
+            "registry_version": REGISTRY_VERSION,
+            "skills": {},
+            "project_skills": {},
+        }
     registry = json.loads(path.read_text(encoding="utf-8"))
     if registry.get("registry_version") != REGISTRY_VERSION or not isinstance(
         registry.get("skills"), dict
     ):
         raise EvolutionSkillError("invalid evolution skill registry")
+    if not isinstance(registry.setdefault("project_skills", {}), dict):
+        raise EvolutionSkillError("invalid project skill registry")
     return registry
 
 
@@ -1400,17 +1410,33 @@ def active_registry_bindings(
     registry = load_registry(path)
     active: set[str] = set()
     owners: dict[str, frozenset[str]] = {}
-    for slug, entry in registry["skills"].items():
-        if not _NAME_RE.fullmatch(slug):
-            raise EvolutionSkillError(f"invalid evolved skill name: {slug}")
-        if entry.get("classification") != "evolved":
-            raise EvolutionSkillError(f"invalid evolved skill classification: {slug}")
-        owner_set = frozenset(str(owner) for owner in entry.get("owner_profiles") or [])
-        if not owner_set or not owner_set.issubset(set(OWNED_DEPARTMENTS.values())):
-            raise EvolutionSkillError(f"invalid evolved skill owners: {slug}")
-        owners[slug] = owner_set
-        if entry.get("status") == "active":
-            active.add(slug)
+    for section, classification in _REGISTRY_SECTIONS:
+        for slug, entry in registry[section].items():
+            if slug in owners:
+                raise EvolutionSkillError(f"duplicate registered skill name: {slug}")
+            if not _NAME_RE.fullmatch(slug):
+                raise EvolutionSkillError(
+                    f"invalid {classification} skill name: {slug}"
+                )
+            if (
+                not isinstance(entry, Mapping)
+                or entry.get("classification") != classification
+            ):
+                raise EvolutionSkillError(
+                    f"invalid {classification} skill classification: {slug}"
+                )
+            owner_set = frozenset(
+                str(owner) for owner in entry.get("owner_profiles") or []
+            )
+            if not owner_set or not owner_set.issubset(
+                set(OWNED_DEPARTMENTS.values())
+            ):
+                raise EvolutionSkillError(
+                    f"invalid {classification} skill owners: {slug}"
+                )
+            owners[slug] = owner_set
+            if entry.get("status") == "active":
+                active.add(slug)
     return frozenset(active), owners
 
 
@@ -1418,41 +1444,77 @@ def validate_canonical_registry(
     repository_root: Path,
     registry_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Regression-check every registered evolved source and provenance hash."""
+    """Regression-check every registered source and provenance hash."""
 
     repo = repository_root.expanduser().resolve()
     registry_file = (registry_path or repo / "skills/evolution-registry.json").resolve()
     registry = load_registry(registry_file)
     errors: list[str] = []
     checked: list[str] = []
-    for slug, entry in sorted(registry["skills"].items()):
+    entries = [
+        (slug, entry, classification)
+        for section, classification in _REGISTRY_SECTIONS
+        for slug, entry in registry[section].items()
+    ]
+    if len({slug for slug, _entry, _classification in entries}) != len(entries):
+        errors.append("duplicate skill slug across registry sections")
+    for slug, entry, classification in sorted(entries, key=lambda item: item[0]):
         try:
             source = (repo / str(entry.get("source") or "")).resolve()
             source.relative_to(repo)
         except (ValueError, OSError):
             errors.append(f"{slug}: source escapes repository")
             continue
-        provenance_path = source.with_name("provenance.json")
+        raw_provenance = (
+            entry.get("provenance")
+            if classification == "project-owned"
+            else source.with_name("provenance.json").relative_to(repo)
+        )
+        try:
+            provenance_path = (repo / str(raw_provenance or "")).resolve()
+            provenance_path.relative_to(repo)
+        except (ValueError, OSError):
+            errors.append(f"{slug}: provenance escapes repository")
+            continue
         if not source.is_file() or not provenance_path.is_file():
             errors.append(f"{slug}: canonical source or provenance missing")
             continue
         try:
             provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+            markdown = source.read_text(encoding="utf-8")
+        except (OSError, ValueError, TypeError) as exc:
+            errors.append(f"{slug}: {type(exc).__name__}")
+            continue
+        if classification == "evolved":
             result = validate_artifacts(
-                source.read_text(encoding="utf-8"),
+                markdown,
                 provenance,
                 expected_slug=slug,
                 expected_version=int(entry.get("current_version") or 0),
             )
-        except (OSError, ValueError, TypeError) as exc:
-            errors.append(f"{slug}: {type(exc).__name__}")
-            continue
-        if not result["ok"]:
-            errors.extend(f"{slug}: {message}" for message in result["errors"])
-        if result.get("content_hash") != entry.get("content_hash"):
-            errors.append(f"{slug}: registry content hash mismatch")
-        if provenance.get("approved_by") != entry.get("approved_by"):
-            errors.append(f"{slug}: approval provenance mismatch")
+            if not result["ok"]:
+                errors.extend(f"{slug}: {message}" for message in result["errors"])
+            if result.get("content_hash") != entry.get("content_hash"):
+                errors.append(f"{slug}: registry content hash mismatch")
+            if provenance.get("approved_by") != entry.get("approved_by"):
+                errors.append(f"{slug}: approval provenance mismatch")
+        else:
+            content_hash = hashlib.sha256(markdown.encode()).hexdigest()
+            owner_profiles = set(entry.get("owner_profiles") or [])
+            if provenance.get("classification") != "project-owned":
+                errors.append(f"{slug}: project provenance classification mismatch")
+            if provenance.get("slug") != slug:
+                errors.append(f"{slug}: project provenance slug mismatch")
+            if provenance.get("owner_profile") not in owner_profiles:
+                errors.append(f"{slug}: project provenance owner mismatch")
+            if str(provenance.get("version") or "") != str(
+                entry.get("current_version") or ""
+            ):
+                errors.append(f"{slug}: project provenance version mismatch")
+            if content_hash != provenance.get("content_hash"):
+                errors.append(f"{slug}: project provenance content hash mismatch")
+            if content_hash != entry.get("content_hash"):
+                errors.append(f"{slug}: registry content hash mismatch")
         checked.append(slug)
     return {
         "ok": not errors,

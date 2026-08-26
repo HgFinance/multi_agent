@@ -15,7 +15,10 @@ from apps.api.conditional_rule_worker import (
     RuntimeDataError,
     RuntimeInputs,
 )
-from orchestration.conditional_rules.market_data import MarketPriceSnapshot
+from orchestration.conditional_rules.market_data import (
+    MarketPriceResolverError,
+    MarketPriceSnapshot,
+)
 from orchestration.conditional_rules import (
     ActiveRule,
     ConditionalRuleSpec,
@@ -234,6 +237,34 @@ def test_http_runtime_client_passes_canonical_instrument_to_shared_tick_resolver
 
     assert price == Decimal("258000")
     assert resolver.calls == [("005930", instrument_id)]
+
+
+def test_shared_tick_gap_uses_cached_existing_paper_quote_adapter() -> None:
+    instrument_id = UUID("40000000-0000-0000-0000-000000000002")
+
+    class EmptySharedResolver:
+        def snapshot_for_instrument(self, symbol, received_instrument_id):
+            raise MarketPriceResolverError(
+                "MARKET_PRICE_SHARED_DATA_GAP",
+                "no LS realtime tick is available for the instrument",
+            )
+
+    fallback = FakePriceResolver(price="70100")
+    client = HttpRuntimeClient(
+        trading_api_url="http://trading.test",
+        market_api_url="http://market.test",
+        price_resolver=EmptySharedResolver(),
+        fallback_price_resolver=fallback,
+    )
+
+    first = client._snapshot("487400", instrument_id)
+    client.begin_cycle()
+    second = client._snapshot("487400", instrument_id)
+
+    assert first[0] == Decimal("70100")
+    assert second == first
+    assert fallback.calls == ["487400"]
+    assert first[2]["source"] == "test-ls-t1102"
 
 
 class ContextRevokedClient(FakeClient):

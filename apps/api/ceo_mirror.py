@@ -85,6 +85,12 @@ class CanonicalIngress(BaseModel):
     discord_message_id: str | None = None
     discord_guild_id: str | None = None
     discord_thread_id: str | None = None
+    # Explicit bounded context for Discord follow-ups referring to the thread
+    # starter. This is request identity, not authority or delivery metadata.
+    previous_question_context: str | None = Field(default=None, max_length=3200)
+    previous_question_context_source_message_id: str | None = Field(
+        default=None, max_length=512
+    )
 
     @model_validator(mode="after")
     def default_source_message_id(self) -> CanonicalIngress:
@@ -195,6 +201,9 @@ def _canonical_request_identity(request: CanonicalIngress) -> tuple[object, ...]
         request.discord_channel_id,
         request.discord_message_id,
         request.discord_guild_id,
+        request.discord_thread_id,
+        request.previous_question_context,
+        request.previous_question_context_source_message_id,
         request.mirrored,
     )
 

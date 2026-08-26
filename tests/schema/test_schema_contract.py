@@ -303,6 +303,10 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  # Idempotent Kanban QA finding inserts may read only their
                  # deterministic conflict key, not full finding payloads.
                  "20260826000500_qa_projection_finding_conflict_read.sql",
+                 # ACTIVE PAPER 종목만 기존 실시간 수집기에 합류시킨다.
+                 "20260826000600_active_conditional_subscription_symbols.sql",
+                 # 로컬 고정 사용자에서 외부/Supabase Auth 투영 흔적을 제거한다.
+                 "20260826000650_remove_external_auth_subject_projection.sql",
          ]
         self.assertEqual([path.name for path, _ in self.files], expected)
 

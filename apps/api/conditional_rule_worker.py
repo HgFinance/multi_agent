@@ -377,6 +377,8 @@ class HttpRuntimeClient:
         market_api_url: str,
         timeout_seconds: float = 8.0,
         price_resolver: MarketPriceResolver | None = None,
+        fallback_price_resolver: MarketPriceResolver | None = None,
+        fallback_price_cache_seconds: float = 5.0,
         bar_resolver: BarResolver | None = None,
     ) -> None:
         if not trading_api_url.strip() or not market_api_url.strip():
@@ -389,10 +391,16 @@ class HttpRuntimeClient:
         self.market_api_url = market_api_url.rstrip("/")
         self.timeout_seconds = max(1.0, min(float(timeout_seconds), 30.0))
         self._price_resolver = price_resolver
+        self._fallback_price_resolver = fallback_price_resolver
+        self._fallback_price_cache_seconds = max(
+            0.0, min(float(fallback_price_cache_seconds), 30.0)
+        )
+        self._fallback_prices: dict[str, tuple[float, MarketPriceSnapshot]] = {}
         self._bar_resolver = bar_resolver
         self._cycle_prices: dict[str, tuple[Decimal, datetime, dict[str, Any]]] = {}
         self._cycle_prices_lock = threading.Lock()
         self._price_resolver_lock = threading.Lock()
+        self._fallback_price_lock = threading.Lock()
         self._bar_resolver_lock = threading.Lock()
 
     def begin_cycle(self) -> None:
@@ -529,7 +537,43 @@ class HttpRuntimeClient:
             else:
                 snapshot = resolver.snapshot(normalized)
         except MarketPriceResolverError as exc:
-            raise RuntimeDataError(exc.code, str(exc), retryable=exc.retryable) from exc
+            if exc.code != "MARKET_PRICE_SHARED_DATA_GAP":
+                raise RuntimeDataError(
+                    exc.code, str(exc), retryable=exc.retryable
+                ) from exc
+            # ACTIVE 종목이 자동 구독에 합류했어도 첫 체결 전에는 공유 tick이
+            # 없을 수 있다. 그 한 경우에만 기존 PAPER 읽기 전용 quote adapter를
+            # 사용한다. 5초 TTL로 1초 worker가 LS REST를 과호출하지 않으며,
+            # 원래 broker receipt timestamp를 그대로 보존해 freshness를 속이지 않는다.
+            with self._fallback_price_lock:
+                cached_fallback = self._fallback_prices.get(cache_key)
+                if (
+                    cached_fallback is not None
+                    and time.monotonic() - cached_fallback[0]
+                    <= self._fallback_price_cache_seconds
+                ):
+                    snapshot = cached_fallback[1]
+                else:
+                    fallback = self._fallback_price_resolver
+                    if fallback is None:
+                        try:
+                            fallback = LSPaperMarketPriceResolver.from_env()
+                        except MarketPriceResolverError as fallback_exc:
+                            raise RuntimeDataError(
+                                fallback_exc.code,
+                                str(fallback_exc),
+                                retryable=fallback_exc.retryable,
+                            ) from fallback_exc
+                        self._fallback_price_resolver = fallback
+                    try:
+                        snapshot = fallback.snapshot(normalized)
+                    except MarketPriceResolverError as fallback_exc:
+                        raise RuntimeDataError(
+                            fallback_exc.code,
+                            str(fallback_exc),
+                            retryable=fallback_exc.retryable,
+                        ) from fallback_exc
+                    self._fallback_prices[cache_key] = (time.monotonic(), snapshot)
         value = {
             "last_trade": {
                 "price": str(snapshot.price),
@@ -956,12 +1000,11 @@ class ConditionalRuleWorker:
                     },
                 )
                 return counts
+            error_code = getattr(exc, "code", "RUNTIME_DATA_INVALID")
             LOG.warning(
-                "conditional rule runtime data unavailable",
-                extra={
-                    "rule_id": str(rule.rule_id),
-                    "code": getattr(exc, "code", "RUNTIME_DATA_INVALID"),
-                },
+                "conditional rule runtime data unavailable rule=%s code=%s",
+                rule.rule_id,
+                error_code,
             )
             return counts
         self._history_backoff_until.pop(backoff_key, None)
@@ -1076,6 +1119,9 @@ def _settings() -> tuple[PostgresRuleWorkerStore, HttpRuntimeClient, float, int,
         trading_api_url=os.getenv("TRADING_API_URL", "http://trading-api:8000"),
         market_api_url=os.getenv("MARKET_API_URL", "http://market-api:8036"),
         timeout_seconds=float(os.getenv("CONDITIONAL_RULE_HTTP_TIMEOUT_SECONDS", "8")),
+        fallback_price_cache_seconds=float(
+            os.getenv("CONDITIONAL_RULE_FALLBACK_PRICE_CACHE_SECONDS", "5")
+        ),
     )
     poll = max(float(os.getenv("CONDITIONAL_RULE_WORKER_POLL_SECONDS", "30")), 0.1)
     batch = max(int(os.getenv("CONDITIONAL_RULE_WORKER_BATCH_SIZE", "100")), 1)
