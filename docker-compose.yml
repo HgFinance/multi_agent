@@ -1896,7 +1896,10 @@ services:
     volumes:
       - /home/ubuntu/.hermes/profiles:/opt/data/profiles
       - factory_kanban_data:/opt/factory-kanban
-      - ./skills:/opt/shared-skills:ro
+      # 2026-08-25: 스킬 축적이 헤르메스를 쓰는 이유다. 읽기전용이면
+      #   에이전트가 배운 것을 남길 데가 없다. 디스패처(에이전트가 실제로
+      #   뜨는 곳)만 쓰기 가능으로 연다 - 다른 부서 컨테이너는 :ro 유지.
+      - ./skills:/opt/shared-skills
       - .:/app/repo:ro
       - ./departments/04-quant-backtest:/app/departments/04-quant-backtest
       - ./quant-data:/app/quant-data

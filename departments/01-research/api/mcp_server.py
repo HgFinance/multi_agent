@@ -381,6 +381,47 @@ def build_app(server, *, token: str | None):
     app.router.add_route("/evidence/holdings/{symbol}", holdings_evidence,
                          methods=["GET"], name="holdings_evidence")
 
+    async def ownership_scan(request):
+        """매집 스캔 결과(캐시). 요청 시점에 새로 돌리지 않는다 - 84초짜리다."""
+        # 이 모듈은 json 을 최상단에서 import 하지 않는다(다른 함수들도
+        # 지역 import 를 쓴다). 스코프 밖이면 라우트가 500 이 된다.
+        import json
+        import os
+        import time as _time
+
+        path = os.environ.get("OWNERSHIP_SCAN_PATH", "/tmp/ownership_scan.json")
+        if not os.path.exists(path):
+            return JSONResponse(
+                {"status": "NO_SCAN",
+                 "reason": "매집 스캔 결과가 없다. scan_ownership.py 를 먼저 돌릴 것"},
+                status_code=200)
+        age = int(_time.time() - os.path.getmtime(path))
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError) as exc:
+            return JSONResponse(
+                {"status": "UNREADABLE",
+                 "reason": f"{type(exc).__name__}: {str(exc)[:120]}"},
+                status_code=200)
+        top = int(request.query_params.get("top", "6"))
+        return JSONResponse({
+            "status": "OK",
+            "age_seconds": age,
+            "window": data.get("window"),
+            # 유형별로 나눠 준다. 지배주주 거래와 외부 기관 거래는 성격이 다르다.
+            "by_institution": (data.get("by_institution") or [])[:top],
+            "by_controlling": (data.get("by_controlling") or [])[:top],
+            "by_holder": [b for b in (data.get("by_holder") or [])
+                          if b.get("position_count", 0) >= 2][:5],
+            "note": ("지분공시는 후행 지표다(5% 룰은 5영업일 내 보고). "
+                     "'기관이 샀다'가 '오른다'는 뜻이 아니며 그 관계는 "
+                     "측정하지 않았다."),
+        })
+
+    app.router.add_route("/evidence/ownership-scan", ownership_scan,
+                         methods=["GET"], name="ownership_scan")
+
     app.add_middleware(_Auth)
     return app
 

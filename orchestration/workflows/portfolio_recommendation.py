@@ -543,6 +543,58 @@ def _symbol_in_query(query: str) -> tuple[str, str] | None:
     return None
 
 
+def _query_ownership_scan() -> dict[str, Any]:
+    """매집 스캔(캐시). 종목이 특정되지 않은 추천 질의의 근거다.
+
+    요청 시점에 스캔을 돌리지 않는다 - 전수 스캔은 84초라 대화 응답성이
+    무너진다. 캐시가 없으면 없다고 하고, 나이를 같이 실어 읽는 쪽이
+    "언제 것인가"를 알게 한다.
+    """
+    base = os.environ.get("RESEARCH_MCP_URL", "").strip().rstrip("/")
+    if not base:
+        return {"status": "NOT_CONFIGURED",
+                "reason": "RESEARCH_MCP_URL 미설정"}
+    token = os.environ.get("MCP_RESEARCH_API_KEY", "").strip()
+    req = urllib.request.Request(f"{base}/evidence/ownership-scan?top=6")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = json.loads(resp.read())
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "UNAVAILABLE",
+                "reason": f"매집 스캔 조회 실패: {type(exc).__name__}"}
+    if raw.get("status") != "OK":
+        return raw
+
+    # ▶ 프롬프트 예산 때문에 **강하게 줄인다.** 공용 워커 런타임이 tool_output
+    #   직렬화를 8,000자에서 자르는데, 스캔 원본을 그대로 실었더니 프롬프트가
+    #   중간에서 끊겨 모델이 계약 밖 출력을 냈다(2026-08-25 실측:
+    #   worker_context_contract_invalid, schema_valid=false).
+    #   중첩된 evidence/positions 는 버리고 한 줄 요약만 남긴다.
+    def _line(item: dict, key: str) -> str:
+        buyers = ", ".join(item.get("buyers", [])[:2])
+        return (f"{item.get('symbol')} {item.get('company', '')[:12]} "
+                f"{item.get(key, 0):+.2f}%p ({buyers[:24]})")
+
+    return {
+        "status": "OK",
+        "age_seconds": raw.get("age_seconds"),
+        "window": raw.get("window"),
+        "외부기관_매수": [_line(x, "institution_ratio_pp")
+                     for x in (raw.get("by_institution") or [])[:5]],
+        "지배주주_매수": [_line(x, "net_market_buy_ratio_pp")
+                     for x in (raw.get("by_controlling") or [])[:4]],
+        "여러종목_매수자": [
+            f"{b.get('holder', '')[:24]} [{b.get('buyer_type')}] "
+            f"{b.get('position_count')}종목: "
+            + ", ".join(q.get("company", "")[:10]
+                        for q in (b.get("positions") or [])[:3])
+            for b in (raw.get("by_holder") or [])[:3]
+        ],
+        "note": raw.get("note", ""),
+    }
+
 def _query_news_evidence(query: str) -> dict[str, Any]:
     """질의 종목의 뉴스·공시. research-mcp 조회면 경유(자격은 거기 그대로).
 
@@ -823,6 +875,12 @@ def _stage_payload(state: PortfolioPipelineState, stage: str) -> dict[str, Any]:
                     else {"status": "NO_QUERY", "reason": "자유 질의가 아니다"})
     news_evidence = (_query_news_evidence(_q) if _q
                      else {"status": "NO_QUERY", "reason": "자유 질의가 아니다"})
+    # 종목이 특정되지 않았는데 질의가 있으면 "무엇을 살까" 를 묻는 것이다.
+    # 그 답은 시장 전체 지분공시에서 뽑은 **관측된 매집**이다.
+    ownership_scan = (_query_ownership_scan()
+                      if _q and price_levels.get("status") == "NO_SYMBOL"
+                      else {"status": "NOT_REQUESTED",
+                            "reason": "종목이 특정된 질의다"})
 
     context: dict[str, Any] = {
         "trace_id": state.get("trace_id", ""),
@@ -877,6 +935,8 @@ def _stage_payload(state: PortfolioPipelineState, stage: str) -> dict[str, Any]:
             #   실으면 **워커에게 영원히 안 보인다** - MCP 경로에서 같은
             #   함정에 한 번 빠졌다(2026-08-25).
             "price_levels": price_levels,
+            # 종목이 없는 추천 질의의 근거. 관측된 매집이지 예측이 아니다.
+            "ownership_scan": ownership_scan,
         },
         "task_plan": state.get("task_plan", {}),
         "portfolio_suitability": state.get("suitability_context", {}),
@@ -884,6 +944,7 @@ def _stage_payload(state: PortfolioPipelineState, stage: str) -> dict[str, Any]:
         "data_source": data_context.get("source", "TEST"),
         "price_levels_status": price_levels.get("status"),
         "news_evidence_status": news_evidence.get("status"),
+        "ownership_scan_status": ownership_scan.get("status"),
         "worker_runtime": _configured_worker_runtime(),
         "data_quality": data_context.get("quality_status", "TEST"),
         "read_only": True,

@@ -43,6 +43,7 @@ import argparse
 import json
 import os
 import re
+import py_compile
 import subprocess
 import sys
 import time
@@ -54,6 +55,8 @@ if str(_HERE) not in sys.path:
 
 import research_log as rlog                                    # noqa: E402
 
+DB_CONTAINER = os.getenv("BENCH_DB_CONTAINER",
+                        "hedgefund-timescaledb")
 MODULE_VERSION = "research-bench-v1"
 
 # f-string 안에서 줄바꿈을 안전하게 쓰기 위한 상수.
@@ -173,6 +176,229 @@ def pick_question() -> tuple[str, str, str, str]:
 
 
 # ── 카드 본문 = 계약 ────────────────────────────────────────────────────────
+def _watched_sources() -> list:
+    """자기 자신과 로그 모듈. 카드 본문과 규칙이 여기서 나온다."""
+    here = Path(__file__).resolve().parent
+    return [Path(__file__).resolve(), here / "research_log.py"]
+
+
+def _source_stamp() -> tuple:
+    """감시 파일들의 (경로, mtime, 크기). 못 읽는 파일은 None 으로 둔다."""
+    out = []
+    for f in _watched_sources():
+        try:
+            st = f.stat()
+            out.append((str(f), st.st_mtime_ns, st.st_size))
+        except OSError:
+            out.append((str(f), None, None))
+    return tuple(out)
+
+
+def _restart_if_source_changed(stamp: tuple) -> None:
+    """소스가 바뀌었으면 자기 자신으로 갈아탄다.
+
+    **고치는 사람과 도는 프로세스가 분리돼 있으면 매번 어긋난다**(2026-08-25
+    에 두 번 어긋났다 - 패치는 디스크에 있는데 상주 루프는 옛 코드로 계속
+    카드를 냈다). 그래서 프로세스가 자기 소스를 본다.
+
+    문법 오류가 있는 상태로 갈아타면 루프가 통째로 멎으므로 **컴파일이
+    통과할 때만** 간다. 편집 도중이면 다음 주기에 다시 본다.
+    """
+    if _source_stamp() == stamp:
+        return
+    for f in _watched_sources():
+        # **파일을 만들 이유가 없다.** py_compile 에 /dev/null 을 주면
+        # "non-regular file" 로 실패해서, 소스가 바뀌어도 영원히 안 갈아탄다
+        # (2026-08-25 실측: 카드 두 장이 옛 본문을 받았다).
+        try:
+            compile(f.read_text(encoding="utf-8"), str(f), "exec")
+        except (SyntaxError, OSError, UnicodeDecodeError) as e:
+            print(f"  소스가 바뀌었지만 아직 성하지 않다 - 이번 주기는 건너뛴다: "
+                  f"{str(e)[:120]}", flush=True)
+            return
+    print("  소스가 바뀌었다 - 루프를 갈아탄다", flush=True)
+    sys.stdout.flush()
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+def dev_session_count() -> tuple:
+    """(탐색 가용 세션수, 전체 세션수, 시작, 끝).
+
+    **청크 카탈로그만 읽는다** - 원천을 훑으면 그 자체가 사고다. 청크 하나가
+    하루라 개수가 곧 세션 수다.
+
+    호스트에서 도는 루프라 `docker exec psql` 로 간다. `.env` 의 DSN 은
+    `timescaledb:5432`(컨테이너 네트워크 이름)이고 DB 는 포트를 퍼블리시하지
+    않아 **호스트에서는 안 닿는다**.
+
+    실패하면 (0, 0, "", "") 을 준다 - 세션 수를 못 세는 것이 카드를 못 내는
+    사유가 되면 연구가 통째로 선다.
+    """
+    sql = ("select count(*) filter (where range_start::date < '"
+           + rlog.HOLDOUT_FROM + "'::date), count(*), "
+           "min(range_start)::date, max(range_end)::date "
+           "from timescaledb_information.chunks "
+           "where hypertable_schema='ext_src' and hypertable_name='quotes'")
+    rc, out = _run(["docker", "exec", DB_CONTAINER, "psql", "-U", "postgres",
+                    "-d", "market", "-tAc", sql], timeout=45)
+    if rc != 0:
+        return (0, 0, "", "")
+    parts = out.strip().splitlines()[-1].split("|") if out.strip() else []
+    if len(parts) != 4:
+        return (0, 0, "", "")
+    try:
+        return (int(parts[0]), int(parts[1]), parts[2], parts[3])
+    except ValueError:
+        return (0, 0, "", "")
+
+
+def sample_budget_block() -> str:
+    """표본 하한을 카드에 명시한다.
+
+    예산(무엇을 쓰면 안 되는가)만 주고 커버리지(무엇을 써야 하는가)를 안
+    주면 **가장 싼 답이 최적해가 된다.** 2026-08-25 에 66세션이 있는데 모든
+    실험이 4세션만 쓴 것이 그 결과다.
+    """
+    dev, total, lo, hi = dev_session_count()
+    if not total:
+        return ""
+    return _NL.join([
+        "## 쓸 수 있는 표본 - **이만큼 있다**",
+        "",
+        f"  원천 `ext_src` 에 **{total}세션**({lo} ~ {hi})이 있고, 그중 "
+        f"**{dev}세션**이 홀드아웃 이전이라 탐색에 쓸 수 있다.",
+        "",
+        f"  **{dev}세션을 다 쓰는 것이 기본값이다.** 덜 쓰려면 근거를 대라 - "
+        "금지가 아니라, 적게 쓴 것이 결론을 바꾸지 않는다는 **주장**이므로 "
+        "검사가 붙는다는 뜻이다. 적게 썼다면 **표본을 늘렸을 때 결론이 "
+        "흔들리는지 한 번은 보여라**(예: 4세션 대 16세션 대 전체).",
+        "",
+        "  종목축·날짜축을 쪼개서 이어붙이는 것은 권장한다 - 그건 표본을 "
+        "줄이는 게 아니라 **같은 표본을 나눠 재는 것**이다. 줄이는 것과 "
+        "나누는 것을 혼동하지 마라.",
+        "",
+        f"  발견에 **몇 세션 중 몇 세션을 썼는지 반드시 적어라.** "
+        f"`4/{dev}` 와 `{dev}/{dev}` 는 완전히 다른 문장이다.",
+        "",
+    ])
+
+
+def agent_powers_block() -> str:
+    """에이전트가 가진 것을 카드에 명시한다.
+
+    **카드가 에이전트의 세계 전부다.** 로컬 CLI 는 사람이 옆에서 계속 방향을
+    주지만 여기는 카드 한 장으로 끝난다. 그래서 "네가 이런 걸 쓸 수 있다" 를
+    적어 두지 않으면 있는 것도 안 쓴다(2026-08-25: 스킬 104개가 깔려 있는데
+    카드가 0번 언급).
+    """
+    return _NL.join([
+        "## 네가 쓸 수 있는 것 - **맨손으로 시작하지 마라**",
+        "",
+        "**① 스킬을 먼저 찾아봐라.** 이 프로필에 이미 100개 넘게 깔려 있다.",
+        "",
+        "```",
+        "hermes skills list | grep -i <주제>        # 깔린 것",
+        "hermes skills inspect <이름>               # 내용 보기",
+        "```",
+        "",
+        "**② 없으면 받아와라.** 레지스트리에서 검색·설치가 된다.",
+        "",
+        "```",
+        "hermes skills search <주제>",
+        "hermes skills install <이름>",
+        "```",
+        "",
+        "**③ 같은 문제를 세 번째 만나면 스킬로 만들어라.** 저장소 "
+        "`skills/` 는 읽기 전용이다(정본을 워커가 직접 고치지 않는 것이 규약).",
+        "네 홈(`/opt/data`)에 쓰고, **무엇이 몇 번 반복됐는지**를 발견에 적어라 -",
+        "그게 승격 심사의 근거가 된다. 한 번 겪은 사고는 스킬이 아니다.",
+        "",
+        "**④ 판단은 기억에 남겨라.** 원장에는 *무슨 일이 있었는지*가 남지만,",
+        "*그래서 무엇을 결정했는지*는 안 남는다 - 어느 축이 소진됐는지, 어떤 "
+        "틀의 질문이 계속 실패하는지, 어떤 출처가 근거 없이 수익만 말하는지. "
+        "다음 카드의 너는 이걸 안 적으면 맨손으로 시작한다.",
+        "",
+        "**⑤ 막히면 도구를 늘려라.** 필요한 CLI 가 없으면 깔아도 된다. "
+        "MCP 서버가 필요하면 `mcporter config add` 로 붙여도 된다. "
+        "**\"도구가 없어서 못 했다\" 는 결론이 아니다** - 도구를 만드는 것까지가 "
+        "일이다.",
+        "",
+    ])
+
+
+def workspace_block() -> str:
+    """작업실 지도. **이 폴더는 카드가 끝나도 남는다.**
+
+    이걸 안 적어서 스크립트 26개가 서로를 한 번도 참조하지 않았다(2026-08-25).
+    """
+    return _NL.join([
+        "## 네 작업실 - **카드가 끝나도 남는다**",
+        "",
+        "  `/app/quant-data/research/` 가 네 폴더다. 매번 새로 시작하는 게 "
+        "아니다 - 지난 카드의 네가 여기에 남겨둔 것이 있다.",
+        "",
+        "```",
+        "  lib/factory.py   정본 정의와 공용 함수. **여기부터 봐라.**",
+        "  scripts/         지난 실험 스크립트 전부. 비슷한 걸 이미 쟀을 수 있다.",
+        "  out/             지난 산출물 JSON.",
+        "  log.jsonl        지난 발견 전부(읽기 전용으로 다뤄라).",
+        "```",
+        "",
+        "**① 쓰기 전에 읽어라.** `ls scripts/` 로 지난 것을 훑고, 비슷한 질문을 "
+        "이미 쟀으면 그 스크립트를 **고쳐 써라.** 처음부터 다시 쓰지 마라.",
+        "",
+        "**② 정의는 `lib` 에서 가져다 써라.** 스프레드·mid·체결방향·파티션·"
+        "홀드아웃 검사가 거기 있다. 스크립트마다 다시 정의하면 **숫자가 갈린다** "
+        "- 실제로 갈렸다(0 호가를 한쪽은 세고 한쪽은 뺐다).",
+        "",
+        "```python",
+        "import sys; sys.path.insert(0, '/app/quant-data/research/lib')",
+        "from factory import (market_conn, budgeted, MID, SPREAD_BPS, QUOTE_OK,",
+        "                     SELL_INITIATED, partitions, partition_filter,",
+        "                     dev_sessions, assert_no_holdout, save)",
+        "```",
+        "",
+        "**③ `lib` 이 모자라면 고치고 늘려라.** 박제된 파일이 아니다 - 다음 "
+        "카드의 네가 쓴다. 다만 **이미 있는 정의를 바꿀 때는 발견에 적어라.** "
+        "앞선 실험과 비교가 깨진다.",
+        "",
+        "**④ 반복되는 일은 함수로 올려라.** 같은 코드를 세 번째 쓰고 있으면 "
+        "그건 `lib` 에 올라갈 것이다. 그게 이 폴더가 쌓이는 방식이다.",
+        "",
+    ])
+
+
+def closed_lines_block() -> str:
+    """닫힌 줄기를 카드 머리에 싣는다.
+
+    **발견은 로그에 쌓이지만 "묻지 마라" 는 로그에 안 쌓인다.** 다음 카드는
+    이전 카드 본문을 보지 못하므로, 한 번 닫은 줄기도 규칙으로 매번 실어야
+    다시 안 열린다 - 2026-08-25 에 L3 줄기가 세 번 열렸다.
+
+    파일이 없거나 깨졌으면 **빈 문자열**을 준다. 닫힌 줄기를 못 읽는 것이
+    카드를 못 내는 사유가 되면 안 된다 - 그건 연구를 통째로 세운다.
+    """
+    f = rlog.ROOT / "closed_lines.json"
+    try:
+        items = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not items:
+        return ""
+    out = ["## 이미 닫힌 줄기 - **여기로 다시 가지 마라**", ""]
+    for it in items:
+        out.append(f"- **{it.get('line', '')}**")
+        out.append(f"  - 무엇이 닫았나: {it.get('closed_by', '')} - "
+                   f"{it.get('evidence', '')}")
+        out.append(f"  - 왜 다시 안 여나: {it.get('why_not_reopen', '')}")
+    out += ["",
+            "닫힌 줄기를 다시 열려면 **새 증거**가 있어야 한다. 같은 질문을 "
+            "다시 묻는 것은 증거가 아니다. 영구 금지가 아니라, 이미 답이 "
+            "나온 곳을 또 파지 말라는 뜻이다.",
+            ""]
+    return _NL.join(out)
+
+
 def card_body(entry_id: str, question: str, parent: str) -> str:
     findings = rlog.recent_findings(limit=4)
     prior = ""
@@ -193,7 +419,7 @@ factory_assignee={BENCH_ASSIGNEE}
 research_entry_id={entry_id}
 research_parent={parent or '(없음)'}
 
-## 이번 질문
+{closed_lines_block()}{workspace_block()}{sample_budget_block()}{agent_powers_block()}## 이번 질문
 
 {question}
 
@@ -253,7 +479,7 @@ research_parent={parent or '(없음)'}
   - 쿼리가 `temp file limit exceeded` 로 죽으면 **범위를 반으로 줄여라.**
     같은 쿼리를 다시 던지지 마라 - 같은 자리에서 또 죽는다.
 
-  **표본으로 답할 수 있으면 표본으로 답해라.** 결정론 표본(md5 접두)으로
+  **표본으로 답할 수 있으면 표본으로 답해라 - 단 위 표본 하한을 먼저 읽어라.** 싸게 재라는 말은 **적게 재라는 말이 아니다.** 쪼개서 이어붙여라. 결정론 표본(md5 접두)으로
   모양을 잡고, 결론이 표본에 민감할 때만 전수로 간다. r0002 가 1/256 표본으로
   165만 사건을 재서 답을 냈다 - 전수가 필요했던 게 아니다.
 
@@ -356,7 +582,7 @@ research_entry_id={entry_id}
 research_parent={parent or '(없음)'}
 research_kind=literature
 
-## 이번에 읽을 것
+{closed_lines_block()}{agent_powers_block()}## 이번에 읽을 것
 
 {question}
 
@@ -607,6 +833,14 @@ def _no_double_literature() -> bool:
     return k2 == "measure"                 # 연속 문헌이면 실패
 
 
+def _stamp_detects_change() -> bool:
+    """지문이 실제 변경에 반응하는가. 같은 파일이면 안정적이어야 한다."""
+    a = _source_stamp()
+    if a != _source_stamp():
+        return False                       # 안 바뀌었는데 달라지면 재기동 폭주
+    return all(len(x) == 3 for x in a) and len(a) >= 2
+
+
 def _selfcheck() -> int:
     import tempfile
     fails = 0
@@ -697,6 +931,12 @@ def _selfcheck() -> int:
         ok("문헌 카드가 측정 질문을 요구한다", "다음에 잴 것" in lit)
         ok("문헌 카드가 우리 숫자와 대조를 요구한다", "우리 숫자와 대조" in lit)
 
+        # 닫힌줄기 대장 픽스처. 실물을 읽으면 대장이 비었을 때 점검이
+        # 깨진다 - 점검은 실물 상태가 아니라 **렌더링 로직**을 본다.
+        (rlog.ROOT / "closed_lines.json").write_text(json.dumps(
+            [{"line": "막다른 줄기", "closed_by": "r0000",
+              "evidence": "표 0개", "why_not_reopen": "같은 0 이 나온다"}],
+            ensure_ascii=False), encoding="utf-8")
         body = card_body("r0002", "측정 질문", e.id)
         ok("카드에 이전 발견 원문이 실린다", "알아낸 것" in body)
         ok("카드에 홀드아웃 경고가 있다", rlog.HOLDOUT_FROM in body)
@@ -704,6 +944,28 @@ def _selfcheck() -> int:
         ok("카드가 측정 설계를 맡긴다", "측정을 직접 설계한다" in body)
         ok("카드에 종료 명령이 있다", "research_log.py close" in body)
         ok("카드가 비싼 쿼리를 금지한다", "싸게 먼저 재라" in body)
+        ok("소스 지문이 변경을 잡아낸다", _stamp_detects_change())
+        ok("표본 하한 블록이 DB 없이도 안 죽는다",
+           isinstance(sample_budget_block(), str))
+        ok("세션 수를 못 세도 0 튜플로 살아난다",
+           len(dev_session_count()) == 4)
+        ok("카드가 작업실이 남는다고 알린다",
+           "카드가 끝나도 남는다" in body)
+        ok("카드가 lib 를 먼저 보라고 한다",
+           "lib/factory.py" in body and "여기부터 봐라" in body)
+        ok("카드가 지난 스크립트를 읽으라고 한다",
+           "처음부터 다시 쓰지 마라" in body)
+        ok("카드가 lib 수정을 허용한다", "고치고 늘려라" in body)
+        ok("카드가 스킬 존재를 알린다",
+           "hermes skills list" in body and "hermes skills list" in lit)
+        ok("카드가 스킬 설치를 허용한다", "hermes skills install" in body)
+        ok("카드가 스킬 작성 조건을 준다", "세 번째" in body)
+        ok("카드가 기억을 쓰라고 한다", "판단은 기억에" in body)
+        ok("카드가 도구 확장을 허용한다",
+           "도구를 만드는 것까지가" in body)
+        ok("카드가 닫힌 줄기를 싣는다",
+           "이미 닫힌 줄기" in body and "막다른 줄기" in body)
+        ok("닫힌 줄기가 재개 조건을 밝힌다", "새 증거" in body)
         ok("카드가 후보 지목 입구를 연다",
            "--candidate" in body and "후보 지목" in body)
         ok("카드가 후보 기준을 숫자로 준다",
@@ -750,7 +1012,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     interval = max(2, a.interval_min) * 60
     print(f"{MODULE_VERSION} 반복 시작 - {a.interval_min}분마다", flush=True)
+    stamp = _source_stamp()
     while True:
+        # **주기 시작 전에만** 갈아탄다. 카드를 내는 도중에 갈아타면
+        # 로그에 열린 항목이 주인 없이 남는다.
+        _restart_if_source_changed(stamp)
         try:
             run_once(dry_run=a.dry_run)
         except Exception as e:                  # 벤치가 죽어도 공장은 산다

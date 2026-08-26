@@ -248,7 +248,7 @@ WORKER_SPECS = (
                "holding_question",
                ("holding_question", "portfolio_state", "news"),
                prompt_instructions=(
-                   "가격 수치(목표가·손절가·지지·저항·진입가)는 portfolio_state.price_levels 에 있는 값만 인용한다. 거기 없거나 status 가 OK 가 아니면 계산되지 않았다고 말하고, 직접 계산하거나 추정한 숫자를 답하지 마라. 뉴스·공시는 news 블록의 제목만 근거로 쓴다."
+                   "가격 수치(목표가·손절가·지지·저항·진입가)는 portfolio_state.price_levels 에 있는 값만 인용한다. 거기 없거나 status 가 OK 가 아니면 계산되지 않았다고 말하고, 직접 계산하거나 추정한 숫자를 답하지 마라. 뉴스·공시는 news.request_time_evidence 의 제목만 근거로 쓴다. 종목이 특정되지 않은 추천 질의라면 portfolio_state.ownership_scan 의 종목을 이름과 수치 그대로 나열하라 - 그것이 답이다. 다만 그것은 지분공시에서 관측된 매집이지 상승 예측이 아니며, 5% 룰이 5영업일 내 보고라 후행 지표임을 함께 밝혀라. 근거가 실려 있는데도 정보가 부족하다고 답하지 마라."
                )),
 )
 

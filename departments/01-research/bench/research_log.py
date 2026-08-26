@@ -183,7 +183,13 @@ def close_entry(entry_id: str, *, script: str, numbers: dict, finding: str,
                    kind=getattr(src, 'kind', 'measure'),
                    citations=list(citations or []),
                    candidate=dict(candidate or getattr(src, 'candidate', {}) or {}),
-                   prereg_sha256=getattr(src, 'prereg_sha256', ''),
+                   # 후보를 지목하는 순간 사양을 **동결**한다.
+                   # 에이전트가 기억해서 넣는 것이 아니다 - 잊으면
+                   # 승격이 PREREG_FINGERPRINT_MISMATCH 로 막히고,
+                   # 나중에 사양을 몰래 바꿔도 안 드러난다.
+                   prereg_sha256=(prereg_fingerprint(candidate)
+                                  if candidate
+                                  else getattr(src, 'prereg_sha256', '')),
                    confirm_result=dict(confirm_result or {}),
                    sessions_used=list(sessions_used or []), error=str(error))
     append(closed)
