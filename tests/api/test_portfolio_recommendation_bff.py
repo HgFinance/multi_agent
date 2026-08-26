@@ -689,7 +689,7 @@ class PortfolioRecommendationBffTest(unittest.TestCase):
         # 단순 종목 질문(MARKET_RESEARCH)은 응답성 때문에 여전히 quant 를 부르지 않는다.
         self.assertEqual(
             result["task_plan"]["requested_departments"],
-            ["research", "quant", "risk", "qa", "ceo"],
+            ["research", "quant", "risk", "ceo"],
         )
         self.assertEqual(result["task_plan"]["workflow"], "portfolio-recommendation")
         self.assertTrue(result["task_plan"]["category_recognized"])

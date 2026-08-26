@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 from orchestration.maintenance_retention import (
     HealthLedger,
     MaintenanceJob,
+    _job_loop,
     build_jobs,
     healthcheck,
 )
@@ -74,3 +77,21 @@ def test_scheduler_keeps_existing_retention_domains(monkeypatch) -> None:
         "langsmith",
     ]
     assert jobs[-1].interval_seconds == 123
+
+
+def test_scheduler_projects_worker_error_code_into_health(tmp_path: Path) -> None:
+    path = tmp_path / "health.json"
+    ledger = HealthLedger(path)
+    job = MaintenanceJob(
+        "langsmith",
+        10,
+        lambda: SimpleNamespace(error_code="TRACE_DELETE_HOURLY_LIMIT"),
+        30,
+    )
+
+    _job_loop(job, threading.Event(), ledger, once=True)
+
+    state = json.loads(path.read_text(encoding="utf-8"))
+    assert state["jobs"]["langsmith"]["status"] == "failed"
+    assert state["jobs"]["langsmith"]["error"] == "MaintenanceResultError"
+    assert state["jobs"]["langsmith"]["error_code"] == "TRACE_DELETE_HOURLY_LIMIT"

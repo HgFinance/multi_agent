@@ -24,6 +24,7 @@
 한 장부의 실패가 다른 장부의 분개를 막지 않는다.
 
 실행:      python departments/05-accounting-portfolio/ledger/consumer.py --serve
+자체 점검: python departments/05-accounting-portfolio/ledger/consumer.py --healthcheck
 자체 점검: python departments/05-accounting-portfolio/ledger/consumer.py
 """
 from __future__ import annotations
@@ -49,6 +50,8 @@ from repository import (  # noqa: E402
     LedgerPersistenceError,
     LedgerRepository,
 )
+
+from orchestration.service_health import probe_postgres
 
 # 종가 평가로 돌리려면 `1D`. 기본은 장중 체결가라 봉을 기다리지 않는다.
 # 종가 봉은 valuation 시각과 몇 시간 벌어지므로 max_staleness도 같이 넓혀야 한다.
@@ -178,6 +181,21 @@ def serve() -> None:
         time.sleep(idle)
 
 
+def healthcheck() -> None:
+    """Probe the durable ledger authority without polling or writing journals."""
+
+    configured_role = os.environ.get("ACCOUNTING_DATABASE_ROLE", "").strip()
+    if configured_role != ACCOUNTING_LEDGER_DATABASE_ROLE:
+        raise LedgerPersistenceError(
+            "accounting ledger consumer requires "
+            "ACCOUNTING_DATABASE_ROLE=svc_accounting_ledger"
+        )
+    probe_postgres(
+        dsn_env="DATABASE_URL",
+        role=ACCOUNTING_LEDGER_DATABASE_ROLE,
+    )
+
+
 def _self_check() -> None:
     global active_books
     from decimal import Decimal
@@ -281,7 +299,9 @@ def _self_check() -> None:
 
 
 if __name__ == "__main__":
-    if "--serve" in sys.argv:
+    if "--healthcheck" in sys.argv:
+        healthcheck()
+    elif "--serve" in sys.argv:
         serve()
     else:
         _self_check()

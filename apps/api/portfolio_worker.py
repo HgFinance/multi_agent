@@ -7,14 +7,41 @@ reclaim an expired claim without creating a second active execution.
 
 from __future__ import annotations
 
+import argparse
 import os
 import time
+from pathlib import Path
 
-from portfolio_runtime import PortfolioRuntime
-from orchestration.langsmith_feedback import LangSmithFeedbackService
+from orchestration.service_health import probe_postgres, probe_sqlite
+
+
+def _runtime_store_path() -> str:
+    configured = os.getenv("PORTFOLIO_RUNTIME_STORE_PATH", "").strip()
+    if configured:
+        return configured
+    store_dir = os.getenv("PORTFOLIO_RUNTIME_STORE_DIR", "/tmp").strip() or "/tmp"
+    return str(Path(store_dir) / "hgfinance-portfolio.sqlite3")
+
+
+def healthcheck() -> None:
+    """Probe the durable queue store and control database without claiming work."""
+
+    probe_postgres(dsn_env="DATABASE_URL")
+    probe_sqlite(
+        _runtime_store_path(),
+        required_tables=(
+            "portfolio_runtime_snapshots",
+            "portfolio_runtime_active",
+            "portfolio_runtime_queue",
+        ),
+    )
 
 
 def main() -> None:
+    from portfolio_runtime import PortfolioRuntime
+
+    from orchestration.langsmith_feedback import LangSmithFeedbackService
+
     runtime = PortfolioRuntime()
     feedback = LangSmithFeedbackService()
     feedback.start()
@@ -30,4 +57,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--healthcheck", action="store_true")
+    args = parser.parse_args()
+    if args.healthcheck:
+        healthcheck()
+    else:
+        main()

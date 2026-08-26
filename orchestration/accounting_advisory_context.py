@@ -88,6 +88,172 @@ def _compact_snapshot(payload: Any) -> str | None:
     return json.dumps(context, ensure_ascii=False, separators=(",", ":"))
 
 
+def _safe_dict(value: Any, keys: tuple[str, ...]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return {key: value[key] for key in keys if key in value}
+
+
+def _safe_rows(value: Any, keys: tuple[str, ...], limit: int = 25) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [_safe_dict(row, keys) for row in value[:limit] if isinstance(row, dict)]
+
+
+def _compact_broker(payload: Any) -> dict[str, Any] | None:
+    """Whitelist a bounded subset of the already credential-free BFF contract."""
+
+    if not isinstance(payload, dict) or payload.get("schema_version") != "accounting.broker-evidence.v1":
+        return None
+    coverage = payload.get("coverage") if isinstance(payload.get("coverage"), dict) else {}
+    safe_coverage = {
+        str(code): _safe_dict(
+            status,
+            (
+                "name",
+                "status",
+                "pages",
+                "complete",
+                "truncated",
+                "rsp_cd",
+                "rsp_msg",
+                "error",
+                "required_parameters",
+            ),
+        )
+        for code, status in coverage.items()
+        if isinstance(status, dict)
+    }
+    activity = payload.get("activity") if isinstance(payload.get("activity"), dict) else {}
+    safe_activity: dict[str, Any] = {}
+    activity_row_keys = (
+        "trade_date",
+        "order_date",
+        "trade_no",
+        "order_no",
+        "original_order_no",
+        "category",
+        "summary",
+        "symbol",
+        "name",
+        "side",
+        "status",
+        "order_type",
+        "quantity",
+        "order_quantity",
+        "executed_quantity",
+        "unexecuted_quantity",
+        "unit_price",
+        "price",
+        "order_price",
+        "executed_price",
+        "trade_amount",
+        "contract_amount",
+        "settlement_amount",
+        "commission",
+        "tax_total",
+        "transaction_tax",
+        "agricultural_tax",
+        "realized_pnl",
+        "dividend",
+        "interest_fee",
+        "loan_interest",
+        "cash_before",
+        "cash_after",
+        "execution_time",
+        "order_time",
+        "channel",
+        "currency",
+    )
+    for name in ("settled_period", "today", "previous_day", "order_history", "execution_status"):
+        section = activity.get(name)
+        if not isinstance(section, dict):
+            continue
+        safe_activity[name] = {
+            "summary": section.get("summary") if isinstance(section.get("summary"), dict) else {},
+            "rows": _safe_rows(section.get("rows"), activity_row_keys),
+            "source_tr": section.get("source_tr"),
+        }
+
+    performance = payload.get("performance") if isinstance(payload.get("performance"), dict) else {}
+    position_keys = (
+        "symbol",
+        "name",
+        "market_code",
+        "security_balance_type",
+        "quantity",
+        "sellable_quantity",
+        "unit_cost_bep",
+        "average_unit_price",
+        "current_price",
+        "purchase_amount",
+        "market_value",
+        "unrealized_pnl",
+        "pnl_rate",
+        "realized_sell_pnl",
+        "unexecuted_quantity",
+        "unsettled_quantity",
+        "credit_amount",
+        "loan_date",
+        "due_date",
+        "fee",
+        "tax",
+        "credit_interest",
+        "source_tr",
+        "cost_basis_mode",
+    )
+    return {
+        "schema_version": payload.get("schema_version"),
+        "as_of": payload.get("as_of"),
+        "environment": payload.get("environment"),
+        "source": payload.get("source"),
+        "account": _safe_dict(payload.get("account"), ("masked",)),
+        "period": _safe_dict(payload.get("period"), ("start", "end", "previous_date")),
+        "coverage": safe_coverage,
+        "account_summary": payload.get("account_summary"),
+        "account_cross_checks": payload.get("account_cross_checks"),
+        "positions": _safe_rows(payload.get("positions"), position_keys, limit=50),
+        "position_check": _safe_rows(payload.get("position_check"), position_keys, limit=50),
+        "position_reconciliation": payload.get("position_reconciliation"),
+        "activity": safe_activity,
+        "performance": {
+            "summary": performance.get("summary") if isinstance(performance.get("summary"), dict) else {},
+            "series": _safe_rows(
+                performance.get("series"),
+                (
+                    "date",
+                    "opening_value",
+                    "closing_value",
+                    "average_investment_principal",
+                    "contract_amount",
+                    "cash_and_securities_in",
+                    "cash_and_securities_out",
+                    "evaluation_pnl",
+                    "return_rate",
+                    "index",
+                ),
+                limit=40,
+            ),
+            "source_tr": performance.get("source_tr"),
+        },
+        "credit_limit": payload.get("credit_limit"),
+        "margin_capacity": payload.get("margin_capacity"),
+        "exceptions": payload.get("exceptions") if isinstance(payload.get("exceptions"), list) else [],
+        "reporting_view": payload.get("reporting_view"),
+        "evidence_refs": payload.get("evidence_refs"),
+        "authoritative": False,
+        "is_official": False,
+        "usage": "reconciliation_and_reporting_evidence_only",
+        "official_nav_source": payload.get("official_nav_source"),
+    }
+
+
+def _fetch_json(url: str) -> Any:
+    request = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(request, timeout=_timeout_seconds()) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
 def fetch_accounting_advisory_context(fund_id: str | None = None) -> str | None:
     """Fetch one bounded snapshot for an Accounting/Portfolio primary."""
 
@@ -101,11 +267,8 @@ def fetch_accounting_advisory_context(fund_id: str | None = None) -> str | None:
     if not base_url:
         return None
     url = f"{base_url}/accounting/v1/ledgers/{book_id}/advisory-snapshot"
-    request = urllib.request.Request(url, headers={"Accept": "application/json"})
     try:
-        with urllib.request.urlopen(request, timeout=_timeout_seconds()) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-        return _compact_snapshot(payload)
+        compact = _compact_snapshot(_fetch_json(url))
     except (
         OSError,
         ValueError,
@@ -114,6 +277,29 @@ def fetch_accounting_advisory_context(fund_id: str | None = None) -> str | None:
         urllib.error.URLError,
     ):
         return None
+    if compact is None:
+        return None
+
+    context = json.loads(compact)
+    portfolio_bff_url = os.getenv(
+        "PORTFOLIO_BFF_INTERNAL_URL", "http://portfolio-bff:8000"
+    ).strip().rstrip("/")
+    if portfolio_bff_url:
+        try:
+            broker = _compact_broker(
+                _fetch_json(f"{portfolio_bff_url}/internal/accounting/broker-evidence")
+            )
+        except (
+            OSError,
+            ValueError,
+            TypeError,
+            json.JSONDecodeError,
+            urllib.error.URLError,
+        ):
+            broker = None
+        if broker is not None:
+            context["broker_evidence"] = broker
+    return json.dumps(context, ensure_ascii=False, separators=(",", ":"))
 
 
 __all__ = ["fetch_accounting_advisory_context"]

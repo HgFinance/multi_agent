@@ -189,7 +189,7 @@ def test_stale_non_input_block_is_archivable_after_seven_days() -> None:
     result = _decision(workflow)
 
     assert result.eligible
-    assert result.reason == "safe"
+    assert result.reason == "safe_expired"
     assert result.terminal_at == NOW - 8 * 24 * 3600
 
 
@@ -234,8 +234,55 @@ def test_recent_block_is_retained_but_stale_user_input_block_is_archived() -> No
     )
     waiting_result = _decision(waiting)
     assert waiting_result.eligible
-    assert waiting_result.reason == "safe"
+    assert waiting_result.reason == "safe_expired"
     assert waiting_result.terminal_at == NOW - 30 * 24 * 3600
+
+
+def test_expired_root_is_not_revived_by_recent_block_noise() -> None:
+    workflow = _workflow(child_status="blocked", completed_at=NOW - 8 * 24 * 3600)
+    blocked_raw = dict(
+        workflow.nodes[1].raw,
+        blocked_at=NOW - 60,
+        completed_at=None,
+    )
+    workflow = ceo_kanban_read.Workflow(
+        root_task_id=ROOT,
+        nodes=(
+            workflow.nodes[0],
+            ceo_kanban_read.WorkflowNode.from_hermes(blocked_raw),
+            workflow.nodes[2],
+        ),
+        metadata=workflow.metadata,
+        root_payload=workflow.root_payload,
+    )
+
+    result = _decision(workflow)
+
+    assert result.eligible
+    assert result.reason == "safe_expired"
+    assert result.terminal_at == NOW - 8 * 24 * 3600
+
+
+def test_terminal_graph_over_seven_days_expires_despite_pending_delivery() -> None:
+    workflow = _workflow()
+    old_root = ceo_kanban_read.WorkflowNode.from_hermes(
+        dict(workflow.root.raw, completed_at=NOW - 8 * 24 * 3600)
+    )
+    workflow = ceo_kanban_read.Workflow(
+        root_task_id=ROOT,
+        nodes=(old_root, *workflow.nodes[1:]),
+        metadata=workflow.metadata,
+        root_payload=dict(workflow.root_payload, completed_at=NOW - 8 * 24 * 3600),
+    )
+
+    result = evaluate_workflow(
+        workflow,
+        now=NOW,
+        delivery=DeliveryState("pending"),
+    )
+
+    assert result.eligible
+    assert result.reason == "safe_expired"
 
 
 def test_scan_includes_legacy_standalone_cards_without_stealing_children() -> None:
@@ -245,9 +292,11 @@ def test_scan_includes_legacy_standalone_cards_without_stealing_children() -> No
         {"id": "legacy-done", "status": "done", "created_at": 10, "body": "diagnostic only"},
         {"id": "legacy-blocked", "status": "blocked", "created_at": 20, "body": "factory diagnostic"},
         {"id": "triage-card", "status": "triage", "created_at": 0, "body": "manual review terminal"},
+        {"id": "placeholder-root", "status": "done", "created_at": 5, "body": "workflow_root_task_id=ROOT_PENDING\nworkflow_role=root\n"},
     ]
 
     assert _archive_scan_root_ids(rows) == (
+        "placeholder-root",
         "legacy-done",
         "legacy-blocked",
         "marked-root",

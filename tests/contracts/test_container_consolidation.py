@@ -66,3 +66,41 @@ def test_factory_init_remains_a_separate_one_shot_permission_boundary() -> None:
     assert factory_init["network_mode"] == "none"
     assert factory_init["user"] == "0:0"
     assert factory_init["restart"] == "no"
+
+
+def test_priority_runtime_services_have_explicit_healthchecks() -> None:
+    root = _services(ROOT / "docker-compose.yml")
+    ceo = _services(ROOT / "departments/00-ceo-office/compose.yaml")
+    trading = _services(ROOT / "departments/02-trading/compose.yaml")
+    accounting = _services(ROOT / "departments/05-accounting-portfolio/compose.yaml")
+    workforce = _services(ROOT / "departments/07-agent-workforce/compose.yaml")
+
+    services = {
+        **root,
+        **ceo,
+        **trading,
+        **accounting,
+        **workforce,
+    }
+    expected = {
+        "factory-autopilot",
+        "portfolio-worker",
+        "research-api",
+        "trading-directive-worker",
+        "accounting-ledger-consumer",
+        "accounting-ls-paper-reconciler",
+        "governance-api",
+        "workforce-api",
+    }
+    assert expected <= services.keys()
+    assert all(services[name].get("healthcheck") for name in expected)
+    assert services["factory-autopilot"]["healthcheck"]["test"] == [
+        "CMD",
+        "python",
+        "scripts/factory_runtime_contract.py",
+        "check",
+    ]
+    assert "--healthcheck" in services["accounting-ledger-consumer"]["healthcheck"]["test"]
+    assert "--healthcheck" in services["accounting-ls-paper-reconciler"]["healthcheck"]["test"]
+    assert "--healthcheck" in services["trading-directive-worker"]["healthcheck"]["test"]
+    assert "--healthcheck" in services["portfolio-worker"]["healthcheck"]["test"]

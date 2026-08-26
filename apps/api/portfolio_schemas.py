@@ -90,8 +90,13 @@ class PortfolioRiskGate(_ApiModel):
 class PortfolioQaGate(_ApiModel):
     status: str = Field(min_length=1)
     decision: str = Field(min_length=1)
-    reason: str = Field(min_length=1)
+    phase: str = "POST_RESPONSE"
+    reason: str = "awaiting_post_response_audit"
     binding: bool
+    response_task_id: str | None = None
+    input_hash: str | None = None
+    failed_workers: list[str] = Field(default_factory=list)
+    worker_count: int = Field(default=0, ge=0)
 
 
 class PortfolioDepartmentReport(_ApiModel):
@@ -294,6 +299,10 @@ class PortfolioRecommendationResult(BaseModel):
     forecast_notice: str = ""
     risk_gate: PortfolioRiskGate | None = None
     qa_gate: PortfolioQaGate | None = None
+    # Exact CEO response-plane input retained so the asynchronous QA audit can
+    # inspect the same envelope without rebuilding it from a lossy projection.
+    ceo_input: dict[str, Any] | None = None
+    ceo_response_delivered: bool = False
     degraded_departments: list[str] = Field(default_factory=list)
     worker_reports: list[PortfolioWorkerReport] = Field(default_factory=list)
     department_reports: dict[str, PortfolioDepartmentReport] = Field(default_factory=dict)

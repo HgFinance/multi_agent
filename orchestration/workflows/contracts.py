@@ -51,6 +51,7 @@ class StepSpec:
     failure_action: str
     owner: str
     forbidden_actions: tuple[str, ...] = ()
+    async_post_response: bool = False
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,17 @@ class WorkflowSpec:
             if step.failure_action not in SAFE_FAILURE_ACTIONS:
                 raise WorkflowContractError(
                     f"{self.name}/{step.id}: 안전하지 않은 failure action {step.failure_action!r}"
+                )
+
+        async_steps = [step for step in self.steps if step.async_post_response]
+        if async_steps:
+            if async_steps != [self.steps[-1]]:
+                raise WorkflowContractError(
+                    f"{self.name}: post-response async step은 마지막이어야 합니다"
+                )
+            if async_steps[0].department != "qa-department":
+                raise WorkflowContractError(
+                    f"{self.name}: post-response async step은 QA가 소유해야 합니다"
                 )
 
         for previous, current in zip(

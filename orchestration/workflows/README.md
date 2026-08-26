@@ -4,10 +4,10 @@
 
 ## Canonical flows
 
-- `portfolio-recommendation.yaml`: `user profile → suitability → research → trading → risk → QA → accounting → CEO` (async TEST/Supabase-read-only fan-out/fan-in)
+- `portfolio-recommendation.yaml`: `user profile → suitability → research → trading → risk → accounting → CEO → QA audit(async)` (TEST/Supabase-read-only response plane + post-response audit)
 
-- `investment-case.yaml`: `research → trading → risk → QA → OMS/Fill → accounting → CEO`
-- `strategy-research.yaml`: `quant-backtest → QA → CEO`
+- `investment-case.yaml`: `research → trading → risk → OMS/Fill → accounting → CEO → QA audit(async)`
+- `strategy-research.yaml`: `quant-backtest → QA release gate → CEO promotion approval` (별도 권한 승인 흐름; 일반 CEO 응답 레인과 분리)
 - `workforce-management.yaml`: `HR 설계 → HR 평가 → QA 권한 검증 → CEO 승인 → HR lifecycle`
 - `agent-evolution.yaml`: `HR 개선 후보 → HR 개정 → QA 검증 → CEO 승인 → HR Shadow/Rollback`
 - `event-routing.yaml`: 이벤트별 allow-list 라우팅. 순차 Workflow가 아니며 결정론적 이벤트는 `ENTRY_BLOCKED`로 처리한다.
@@ -31,5 +31,5 @@ Paper 주문·브로커 제출·Ledger/DB/Notion 쓰기는 수행하지 않는�
 
 - Risk/QA/Trading/Accounting의 `scripts.py`와 도메인 엔진은 이 디렉터리에서 수정하지 않는다.
 - Risk 승인 전에는 OMS/Fill로 넘어갈 수 없다.
-- QA 실패는 `ESCALATE`, Risk 실패는 `REJECT`, 체결·원장 반영 실패는 `HOLD`/`BREAK` 방향이다.
+- QA 감사 실패는 `ESCALATE`로 기록하되 이미 전달된 CEO 응답을 되돌리지 않는다. Risk 실패는 `REJECT`, 체결·원장 반영 실패는 `HOLD`/`BREAK` 방향이다.
 - Workflow 계약 변경은 이 디렉터리의 YAML, `multi-agent-workflow.yaml` registry, 계약 테스트를 함께 검토한다.

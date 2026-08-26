@@ -18,6 +18,12 @@
 
 사용자는 **최초 1회 Mandate를 입력**하고, 이후에는 등록된 Mandate와 현재 포트폴리오를 기반으로 **비서 챗봇과 상시 소통**한다. 사용자 입력의 성격에 따라 호출해야 할 본부가 달라지므로, **CEO 에이전트(Hermes 통합장)가 의도를 해석해 필요한 본부만 호출**한다.
 
+이 문서에서 `CEO 응답`은 사용자에게 먼저 전달되는 response-plane 결과를
+뜻한다. QA는 CEO가 받은 동일한 입력과 CEO 응답을 전달받아 그 이후 별도
+`qa-audit`으로 비동기 감사한다. QA→CEO는 일반 대화 응답의 실행 순서가 아니다.
+다만 실제 권한·프로필·Production 승격을 결정하는 별도 governance approval
+workflow의 QA→CEO 게이트는 안전 경계를 위해 유지한다.
+
 ```
 [최초 1회]  온보딩 → Mandate 확정            ← USER_INPUT_SPEC.md 담당
                     ↓
@@ -32,13 +38,13 @@
 
 | 사용자 입력 예시 | 성격 | 필요한 본부 | 결과물 |
 |---|---|---|---|
-| "이 주식 지금 사도 될까?" | 단건 조회 | research → qa → ceo | 리서치 결과 설명 (advisory) |
-| "요즘 반도체 어때?" | 시장 조사 | research → qa → ceo | 시장 분석 설명 |
-| "내 포트폴리오 위험한가?" | 리스크 점검 | research → risk → qa → ceo | 리스크 평가 설명 |
-| "세금 얼마나 나와?" | 세무·유동성 | research → risk → accounting → qa → ceo | 회계 분석 설명 |
-| "리밸런싱 해줘" | 전체 검토 | research → trading → risk → accounting → qa → ceo | 리밸런싱 제안 (advisory) |
-| **"이런 전략 어때?"** | **전략 검증** | **quant-backtest → qa → ceo** | **백테스트 결과 + 편입 제안** |
-| **"전략 추천해줘"** | **전략 발굴** | **quant-backtest → qa → ceo** | **전략 후보 + 편입 제안** |
+| "이 주식 지금 사도 될까?" | 단건 조회 | research → ceo → qa-audit(비동기) | 리서치 결과 설명 (advisory) |
+| "요즘 반도체 어때?" | 시장 조사 | research → ceo → qa-audit(비동기) | 시장 분석 설명 |
+| "내 포트폴리오 위험한가?" | 리스크 점검 | research → risk → ceo → qa-audit(비동기) | 리스크 평가 설명 |
+| "세금 얼마나 나와?" | 세무·유동성 | research → risk → accounting → ceo → qa-audit(비동기) | 회계 분석 설명 |
+| "리밸런싱 해줘" | 전체 검토 | research → trading → risk → accounting → ceo → qa-audit(비동기) | 리밸런싱 제안 (advisory) |
+| **"이런 전략 어때?"** | **전략 검증** | **quant-backtest → ceo → qa-audit(비동기)** | **백테스트 결과 + 편입 제안** |
+| **"전략 추천해줘"** | **전략 발굴** | **quant-backtest → ceo → qa-audit(비동기)** | **전략 후보 + 편입 제안** |
 
 **굵게 표시한 두 줄이 현재 라우터에 연결되어 있지 않다** (§3).
 
@@ -73,12 +79,12 @@ CATEGORY_WORKFLOWS = {
 
 ```python
 CATEGORY_DEPARTMENTS = {
-    "PORTFOLIO_RECOMMENDATION": ("research", "risk", "qa", "ceo"),
-    "MARKET_RESEARCH":          ("research", "qa", "ceo"),
-    "RISK_REVIEW":              ("research", "risk", "qa", "ceo"),
-    "TAX_LIQUIDITY":            ("research", "risk", "accounting", "qa", "ceo"),
-    "REBALANCING_PROPOSAL":     ("research", "trading", "risk", "accounting", "qa", "ceo"),
-    "STRATEGY_PROPOSAL":        ("research", "qa", "ceo"),   # 자문 전용 축소 집합
+    "PORTFOLIO_RECOMMENDATION": ("research", "risk", "ceo"),
+    "MARKET_RESEARCH":          ("research", "ceo"),
+    "RISK_REVIEW":              ("research", "risk", "ceo"),
+    "TAX_LIQUIDITY":            ("research", "risk", "accounting", "ceo"),
+    "REBALANCING_PROPOSAL":     ("research", "trading", "risk", "accounting", "ceo"),
+    "STRATEGY_PROPOSAL":        ("research", "quant", "ceo"),   # QA는 응답 후 감사
 }
 ```
 
@@ -175,8 +181,8 @@ API의 `category`는 `Literal`이 아니라 `str`이다. 표에 없는 값이 �
 사용자 질의
     ↓
 [1] CATEGORY_WORKFLOWS  — 어느 흐름이 소유하는가?
-    ├─ portfolio-recommendation → research/trading/risk/qa/accounting/ceo
-    └─ strategy-research        → quant-backtest → qa → ceo   (별도 그래프)
+    ├─ portfolio-recommendation → research/trading/risk/accounting → ceo → qa-audit
+    └─ strategy-research        → quant-backtest → ceo → qa-audit (별도 그래프)
     ↓
 [2] CATEGORY_DEPARTMENTS — 그 흐름 안에서 어느 부서를 부를까?
 ```
@@ -187,7 +193,7 @@ API의 `category`는 `Literal`이 아니라 `str`이다. 표에 없는 값이 �
 - `STRATEGY_PROPOSAL` 카테고리 추가 → `strategy-research` 소속으로 선언
 - `task_plan.workflow`로 호출부에 소속 흐름을 전달
 - quant-backtest를 `DEPARTMENTS`·`_MODULE_PATHS`·그래프 엣지에 **선언된 단계**로 배선([3.6](#36-요청-시점-quant-호출--2026-08-10-팀-합의로-해결))
-- `STRATEGY_PROPOSAL`은 `research → quant → qa → ceo`로 실행 — 백테스트 근거는 만들되 주문·원장 부서는 넣지 않는다
+- `STRATEGY_PROPOSAL`은 `research → quant → ceo → qa-audit(비동기)`로 실행 — 백테스트 근거는 만들되 주문·원장 부서는 넣지 않는다
 
 **남은 것 — BFF 디스패치**: `task_plan.workflow`가 `strategy-research`여도 **현재 BFF는 여전히 portfolio-recommendation 그래프를 실행한다.** 실제로 다른 그래프로 보내려면 두 가지가 더 필요하다.
 
@@ -198,7 +204,9 @@ API의 `category`는 `Literal`이 아니라 `str`이다. 표에 없는 값이 �
 
 ### 3.2 전략 → 포트폴리오 편입 승인 흐름이 없다
 
-**현황**: `strategy-research.yaml`은 3단계로 끝난다.
+**현황**: `strategy-research.yaml`은 전략 **승격 승인**을 위한 3단계 별도
+거버넌스 흐름이다. 이는 사용자에게 답하는 일반 CEO response plane이 아니므로
+QA→CEO release gate를 유지한다.
 
 ```
 quant-backtest → qa-release-review → ceo-promotion-review
@@ -307,7 +315,7 @@ CATEGORY_WORKFLOWS / CATEGORY_DEPARTMENTS 표    ← 권한 경계, 결정론 �
 
 **MAS_PIPELINE_CONTRACTS와 충돌하지 않는 이유**: 그 문서가 금지한 것은 *"**암묵적으로** 끼워 넣는 것"*이다. 여기서는 `DEPARTMENTS` 튜플과 그래프 엣지에 **선언된 단계**로 넣었다. `strategy_research_cycle`(전략 승격용 quant → qa → ceo)은 그대로 별도 흐름으로 남으며, 한 부서가 두 흐름에 등장하는 것은 research·risk도 마찬가지다.
 
-**실행 순서**: `research → quant → trading → risk → qa → accounting → ceo`. quant가 research 바로 다음인 이유는 백테스트 입력(가격·유니버스·피처)이 리서치 산출물이고, 그 결과가 trading/risk/qa 판단의 근거가 되어야 하기 때문이다.
+**응답 plane 실행 순서**: `research → quant → trading → risk → accounting → ceo → qa-audit(비동기)`. quant가 research 바로 다음인 이유는 백테스트 입력(가격·유니버스·피처)이 리서치 산출물이고, 그 결과가 trading/risk 판단의 근거가 되어야 하기 때문이다. QA는 CEO 응답 후 동일 입력·응답을 감사한다.
 
 **실제로 도는 quant 워커는 2명**이다 — `strategy-hypothesis-worker`, `dataset-feature-worker`(둘 다 `trigger: always`). 나머지 5명은 `backtest_request`·`release_candidate` 같은 전용 신호가 있을 때만 켜지며, 자유 질의에서는 `not_executed`로 기록된다.
 

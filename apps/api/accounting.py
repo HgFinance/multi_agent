@@ -51,6 +51,9 @@ if str(_DEPT_DIR) not in sys.path:
     sys.path.append(str(_DEPT_DIR))
 
 from query_router import classify, routing_note  # noqa: E402 - sys.path 조정 뒤
+from orchestration.accounting_advisory_context import (  # noqa: E402
+    fetch_accounting_advisory_context,
+)
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
@@ -90,7 +93,18 @@ def agent_ask(req: hermes_boundary.AgentAsk) -> dict:
             "routing": routing.as_dict(),
             "routing_note": routing_note(routing),
         }
-    result = hermes_boundary.ask(department=DEPARTMENT, config=CONFIG, query=req.query)
+    advisory_context = fetch_accounting_advisory_context()
+    agent_query = req.query
+    if advisory_context:
+        agent_query = (
+            req.query
+            + "\n\n[서버가 첨부한 읽기 전용 회계·브로커 증거]\n"
+            + advisory_context
+            + "\n[첨부 끝]\n"
+            + "공식 수치는 Accounting Engine만 정본으로 취급하고, broker_evidence는 "
+            + "조정·설명 근거로만 사용하십시오."
+        )
+    result = hermes_boundary.ask(department=DEPARTMENT, config=CONFIG, query=agent_query)
     return {**result, "routing": routing.as_dict(), "routing_note": routing_note(routing)}
 
 

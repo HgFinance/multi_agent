@@ -53,6 +53,9 @@ def _step_from_mapping(raw: Any, workflow_name: str) -> StepSpec:
         failure_action=str(item.get("failure_action", "")),
         owner=str(item.get("owner", "")),
         forbidden_actions=tuple(str(value) for value in forbidden),
+        async_post_response=bool(
+            item.get("async_post_response", item.get("async", False))
+        ),
     )
 
 

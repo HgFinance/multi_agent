@@ -231,6 +231,9 @@ services:
       # The production portfolio BFF stays on the pinned Hermes CLI/local
       # boundary above; it does not gain a Docker-exec transport.
       ACCOUNTING_API_URL: ${ACCOUNTING_API_URL:-http://accounting-api:8000}
+      ACCOUNTING_ADVISORY_BOOK_ID: ${ACCOUNTING_ADVISORY_BOOK_ID:-07d913de-9a5b-4cf5-b893-31a625445761}
+      ACCOUNTING_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS: ${ACCOUNTING_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS:-5.0}
+      PORTFOLIO_BFF_INTERNAL_URL: ${PORTFOLIO_BFF_INTERNAL_URL:-http://portfolio-bff:8000}
       RISK_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS: ${RISK_ADVISORY_SNAPSHOT_TIMEOUT_SECONDS:-5.0}
       MARKET_API_URL: ${MARKET_API_URL:-http://market-api:8036}
       RESEARCH_API_URL: ${RESEARCH_API_URL:-http://research-api:8035}
@@ -296,6 +299,12 @@ services:
       BROKER_SNAPSHOT_CACHE_SECONDS: ${BROKER_SNAPSHOT_CACHE_SECONDS:-10}
       ENABLE_LS_MARKET_DATA: "true"
       ENABLE_LS_ACCOUNT_DATA: "true"
+      # Accounting Hermes cannot call the broker itself. Preload and cache the
+      # ten account-wide TRs here; the two symbol/price TRs remain on-demand.
+      LS_ACCOUNTING_EVIDENCE_CACHE_SECONDS: ${LS_ACCOUNTING_EVIDENCE_CACHE_SECONDS:-300}
+      LS_ACCOUNTING_EVIDENCE_REFRESH_SECONDS: ${LS_ACCOUNTING_EVIDENCE_REFRESH_SECONDS:-300}
+      LS_ACCOUNTING_EVIDENCE_MAX_PAGES: ${LS_ACCOUNTING_EVIDENCE_MAX_PAGES:-10}
+      LS_ACCOUNTING_EVIDENCE_DAYS: ${LS_ACCOUNTING_EVIDENCE_DAYS:-30}
       # portfolio-bff owns read-only market/account observations. PAPER order
       # execution is isolated behind Trading's separately authenticated lane.
       LS_ENV: PAPER
@@ -732,6 +741,12 @@ services:
       - portfolio_runtime_data:/var/lib/portfolio
       - /home/ubuntu/.hermes/shared-kanban:/var/lib/kanban:ro
       - ${EVOLUTION_SKILLS_HOST_DIR:-/home/ubuntu/.hermes/evolution-skills}:/var/lib/evolution-skills
+    healthcheck:
+      test: ["CMD", "python", "apps/api/portfolio_worker.py", "--healthcheck"]
+      interval: 15s
+      timeout: 8s
+      retries: 5
+      start_period: 30s
 
   timescaledb:
     # A mutable pg17 tag caused an unrelated application deployment to pull a
@@ -1098,6 +1113,15 @@ services:
 
     ports:
       - "127.0.0.1:8035:8035"   # 로컬 전용 - 외부 노출 금지
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8035/health/ready', timeout=4).read()"]
+      # /health/ready intentionally includes the read-only evidence summary.
+      # Keep this deep probe bounded and infrequent so the healthcheck itself
+      # cannot become recurring aggregate load on the research database.
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 30s
 
     mem_limit: 256m
     cpus: 0.5
@@ -1928,6 +1952,11 @@ services:
   kanban-dispatcher:
     image: nousresearch/hermes-agent:latest
     container_name: hedgefund-kanban-dispatcher
+    # Hermes claim ownership is ``hostname:pid``. Keep the hostname stable
+    # across Compose replacement so the replacement daemon can immediately
+    # detect the previous container's dead worker instead of waiting for the
+    # full foreign-host claim lease.
+    hostname: hedgefund-kanban-dispatcher
     restart: unless-stopped
     depends_on:
       paper-order-orchestrator-mcp:
@@ -1978,6 +2007,10 @@ services:
       HERMES_KANBAN_HOME: /opt/data/shared-kanban
       HERMES_KANBAN_DB: /opt/data/shared-kanban/kanban.db
       HERMES_KANBAN_DISPATCH_IN_GATEWAY: "false"
+      # Heartbeats run every 60s. A 180s lease preserves three heartbeat
+      # intervals for healthy long work while bounding recovery if a complete
+      # container replacement also changes the execution namespace.
+      HERMES_KANBAN_CLAIM_TTL_SECONDS: ${HERMES_KANBAN_CLAIM_TTL_SECONDS:-180}
       HERMES_BIN: /app/repo/scripts/qa_hermes_worker.py
       # Accounting workers are spawned here, not by accounting-hermes. Keep
       # the redacted LangSmith observer configuration on the actual process
@@ -2263,21 +2296,27 @@ services:
       # schema/mapping cannot turn maintenance into a bulk Notion mutation.
       NOTION_RETENTION_MAX_ARCHIVES: ${NOTION_RETENTION_MAX_ARCHIVES:-100}
       NOTION_RETENTION_INTERVAL_SECONDS: ${NOTION_RETENTION_INTERVAL_SECONDS:-86400}
-      # LangSmith cleanup is named-project-only and dry-run by default. Flip
-      # LANGSMITH_RETENTION_DRY_RUN=false only after reviewing one pass.
+      # LangSmith cleanup is named-project-only; default is intentionally never
+      # queried. Deletion is bounded to the newest 1,000 roots per named
+      # project and automatically defers when LangSmith's hourly limit is hit.
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_PROJECT: ${LANGSMITH_PROJECT:-First}
       LANGSMITH_METRICS_PROJECT: ${LANGSMITH_METRICS_PROJECT:-HgFinance-Metrics}
       LANGSMITH_EVALS_PROJECT: ${LANGSMITH_EVALS_PROJECT:-HgFinance-Evals}
       LANGSMITH_RETENTION_ENABLED: ${LANGSMITH_RETENTION_ENABLED:-true}
-      LANGSMITH_RETENTION_DRY_RUN: ${LANGSMITH_RETENTION_DRY_RUN:-true}
+      # This cleanup request is scoped to First. `default` and other named
+      # projects remain untouched unless an operator explicitly opts in.
+      LANGSMITH_RETENTION_SCOPES: ${LANGSMITH_RETENTION_SCOPES:-workflow}
+      LANGSMITH_RETENTION_DRY_RUN: ${LANGSMITH_RETENTION_DRY_RUN:-false}
       LANGSMITH_RETENTION_WORKFLOW_DAYS: ${LANGSMITH_RETENTION_WORKFLOW_DAYS:-30}
       LANGSMITH_RETENTION_METRICS_DAYS: ${LANGSMITH_RETENTION_METRICS_DAYS:-7}
       LANGSMITH_RETENTION_EVALS_DAYS: ${LANGSMITH_RETENTION_EVALS_DAYS:-30}
-      LANGSMITH_RETENTION_SCAN_WINDOW_DAYS: ${LANGSMITH_RETENTION_SCAN_WINDOW_DAYS:-90}
-      LANGSMITH_RETENTION_MAX_TRACES: ${LANGSMITH_RETENTION_MAX_TRACES:-100}
-      LANGSMITH_RETENTION_INTERVAL_SECONDS: ${LANGSMITH_RETENTION_INTERVAL_SECONDS:-86400}
+      LANGSMITH_RETENTION_SCAN_WINDOW_DAYS: ${LANGSMITH_RETENTION_SCAN_WINDOW_DAYS:-400}
+      LANGSMITH_RETENTION_MAX_TRACES: ${LANGSMITH_RETENTION_MAX_TRACES:-1000}
+      # Retry on the next provider quota window without repeatedly hammering
+      # the deletion endpoint during the same hourly limit window.
+      LANGSMITH_RETENTION_INTERVAL_SECONDS: ${LANGSMITH_RETENTION_INTERVAL_SECONDS:-3600}
       LANGSMITH_RETENTION_MAX_RUN_SECONDS: ${LANGSMITH_RETENTION_MAX_RUN_SECONDS:-900}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       UI_MIRROR_REDIS_URL: ${UI_MIRROR_REDIS_URL:-${REDIS_URL:-redis://redis:6379/0}}
@@ -2366,6 +2405,12 @@ services:
       #   컨테이너 안에만 쓰고 사라져, 워커가 읽을 때는 파일이 없다 -
       #   "게이트는 통과했는데 로드에서 죽는" 상태가 매일 재생산된다.
       - ./quant-data:/app/quant-data
+    healthcheck:
+      test: ["CMD", "python", "scripts/factory_runtime_contract.py", "check"]
+      interval: 60s
+      timeout: 10s
+      retries: 1
+      start_period: 10s
 
   factory-experiment-worker:
     image: hedgefund-factory:latest

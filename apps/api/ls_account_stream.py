@@ -43,7 +43,8 @@ import re
 import sys
 import time
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -60,7 +61,15 @@ _LS_PATH = ROOT / "departments" / "03-risk" / "integrations"
 if str(_LS_PATH) not in sys.path:
     sys.path.insert(0, str(_LS_PATH))
 
-from ledger_store import STORE as LEDGER_STORE
+try:
+    from .ledger_store import STORE as LEDGER_STORE
+except ImportError:  # pragma: no cover - direct module self-check compatibility
+    from ledger_store import STORE as LEDGER_STORE
+
+try:
+    from .ls_accounting_evidence import normalize_ls_accounting_evidence
+except ImportError:  # pragma: no cover - direct module self-check compatibility
+    from ls_accounting_evidence import normalize_ls_accounting_evidence
 
 try:
     from .conditional_rule_workflow import (
@@ -83,7 +92,17 @@ except ImportError:  # pragma: no cover - direct module self-check compatibility
         user_order_repository,
     )
 
-router = APIRouter(tags=["portfolio-live"])
+
+@asynccontextmanager
+async def _portfolio_live_lifespan(_app: Any) -> AsyncIterator[None]:
+    await _start_accounting_evidence_refresh()
+    try:
+        yield
+    finally:
+        await _stop_accounting_evidence_refresh()
+
+
+router = APIRouter(tags=["portfolio-live"], lifespan=_portfolio_live_lifespan)
 KST = timezone(timedelta(hours=9))
 
 
@@ -111,6 +130,20 @@ ACCOUNT_PROJECTION_RESYNC_SECONDS = max(
 )
 MARKET_RANKING_CACHE_SECONDS = int(os.getenv("LS_MARKET_RANKING_CACHE_SECONDS", "15"))
 MARKET_RANKING_LIMIT = 5
+# 회계 Agent는 셸·웹 도구가 없으므로 이 프로세스가 12개 계좌 TR을 미리 읽고
+# 정규화한 증거를 붙인다. 정기 갱신은 초당 1건 제한을 지키며 백그라운드에서 돈다.
+ACCOUNTING_EVIDENCE_CACHE_SECONDS = max(
+    30, int(os.getenv("LS_ACCOUNTING_EVIDENCE_CACHE_SECONDS", "300"))
+)
+ACCOUNTING_EVIDENCE_REFRESH_SECONDS = max(
+    60, int(os.getenv("LS_ACCOUNTING_EVIDENCE_REFRESH_SECONDS", "300"))
+)
+ACCOUNTING_EVIDENCE_MAX_PAGES = max(
+    1, min(50, int(os.getenv("LS_ACCOUNTING_EVIDENCE_MAX_PAGES", "10")))
+)
+ACCOUNTING_EVIDENCE_DAYS = max(
+    1, min(365, int(os.getenv("LS_ACCOUNTING_EVIDENCE_DAYS", "30")))
+)
 
 MARKET_RANKINGS: dict[str, dict[str, Any]] = {
     "volume": {
@@ -1473,6 +1506,21 @@ async def _post_tr(
     payload: dict[str, Any],
     path: str = "/stock/accno",
 ) -> dict[str, Any]:
+    body, _ = await _post_tr_page(config, token, tr_cd, payload, path=path)
+    return body
+
+
+async def _post_tr_page(
+    config: Any,
+    token: str,
+    tr_cd: str,
+    payload: dict[str, Any],
+    path: str = "/stock/accno",
+    *,
+    tr_cont: str = "N",
+    tr_cont_key: str = "",
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Call one LS page and retain only non-sensitive continuation metadata."""
     # 일반 httpx 클라이언트가 아니다 - LS는 `tr_cont_key`를 NUL로 패딩해 돌려주고
     # h11은 그런 헤더를 가진 응답을 통째로 버린다. 근거는 `ls_http` docstring.
     from ls_http import ls_async_client  # type: ignore[import-not-found]
@@ -1485,14 +1533,27 @@ async def _post_tr(
                 "content-type": "application/json; charset=UTF-8",
                 "authorization": "Bearer " + token,
                 "tr_cd": tr_cd,
-                "tr_cont": "N",
-                "tr_cont_key": "",
+                "tr_cont": tr_cont,
+                "tr_cont_key": tr_cont_key,
             },
         )
     response.raise_for_status()
     # JSON number는 double이라 Decimal이 깨진다. 금액·수량은 Decimal로 받는다.
     body = json.loads(response.text, parse_float=Decimal)
-    return body if isinstance(body, dict) else {}
+    headers = getattr(response, "headers", {})
+
+    def _clean_header(name: str) -> str:
+        try:
+            value = headers.get(name, "")
+        except (AttributeError, TypeError):
+            value = ""
+        return str(value or "").replace("\x00", "").strip()
+
+    metadata = {
+        "tr_cont": _clean_header("tr_cont").upper(),
+        "tr_cont_key": _clean_header("tr_cont_key"),
+    }
+    return (body if isinstance(body, dict) else {}), metadata
 
 
 def _ls_error_detail(exc: Exception) -> str:
@@ -1948,6 +2009,363 @@ async def _tr_slot() -> None:
     _tr_last_call = time.monotonic()
 
 
+def _accounting_tr_requests(
+    start: date,
+    end: date,
+    previous: date,
+    *,
+    symbol: str | None = None,
+    order_price: str | None = None,
+    side: str | None = None,
+    loan_detail_class: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Official `/stock/accno` request shapes used by the accounting view."""
+
+    requests: dict[str, dict[str, Any]] = {
+        "CDPCQ04700": {
+            "payload": {
+                "CDPCQ04700InBlock1": {
+                    "QryTp": "0",
+                    "QrySrtDt": start.strftime("%Y%m%d"),
+                    "QryEndDt": end.strftime("%Y%m%d"),
+                    "SrtNo": 0,
+                    "PdptnCode": "01",
+                    "IsuLgclssCode": "00",
+                    "IsuNo": "",
+                }
+            },
+            "list_blocks": ("CDPCQ04700OutBlock3",),
+        },
+        "CSPAQ12200": {
+            "payload": {"CSPAQ12200InBlock1": {"BalCreTp": "0"}},
+            "list_blocks": (),
+        },
+        "CSPAQ12300": {
+            "payload": {
+                "CSPAQ12300InBlock1": {
+                    "BalCreTp": "0",
+                    "CmsnAppTpCode": "1",
+                    "D2balBaseQryTp": "0",
+                    "UprcTpCode": "1",
+                }
+            },
+            "list_blocks": ("CSPAQ12300OutBlock3",),
+        },
+        "CSPAQ13700": {
+            "payload": {
+                "CSPAQ13700InBlock1": {
+                    "OrdMktCode": "00",
+                    "BnsTpCode": "0",
+                    "IsuNo": "",
+                    "ExecYn": "0",
+                    "OrdDt": end.strftime("%Y%m%d"),
+                    "SrtOrdNo2": 0,
+                    "BkseqTpCode": "0",
+                    "OrdPtnCode": "00",
+                }
+            },
+            "list_blocks": ("CSPAQ13700OutBlock3",),
+        },
+        "CSPAQ22200": {
+            "payload": {"CSPAQ22200InBlock1": {"BalCreTp": "0"}},
+            "list_blocks": (),
+        },
+        "FOCCQ33600": {
+            "payload": {
+                "FOCCQ33600InBlock1": {
+                    "QrySrtDt": start.strftime("%Y%m%d"),
+                    "QryEndDt": end.strftime("%Y%m%d"),
+                    "TermTp": "1",
+                }
+            },
+            "list_blocks": ("FOCCQ33600OutBlock3",),
+        },
+        "t0150": {
+            "payload": {
+                "t0150InBlock": {
+                    "cts_medosu": "",
+                    "cts_expcode": "",
+                    "cts_price": "",
+                    "cts_middiv": "",
+                }
+            },
+            "list_blocks": ("t0150OutBlock1",),
+            "continuation": (
+                "t0150InBlock",
+                "t0150OutBlock",
+                ("cts_medosu", "cts_expcode", "cts_price", "cts_middiv"),
+            ),
+        },
+        "t0151": {
+            "payload": {
+                "t0151InBlock": {
+                    "date": previous.strftime("%Y%m%d"),
+                    "cts_medosu": "",
+                    "cts_expcode": "",
+                    "cts_price": "",
+                    "cts_middiv": "",
+                }
+            },
+            "list_blocks": ("t0151OutBlock1",),
+            "continuation": (
+                "t0151InBlock",
+                "t0151OutBlock",
+                ("cts_medosu", "cts_expcode", "cts_price", "cts_middiv"),
+            ),
+        },
+        "t0424": {
+            "payload": {
+                "t0424InBlock": {
+                    "prcgb": "1",
+                    "chegb": "2",
+                    "dangb": "0",
+                    "charge": "1",
+                    "cts_expcode": "",
+                }
+            },
+            "list_blocks": ("t0424OutBlock1",),
+            "continuation": ("t0424InBlock", "t0424OutBlock", ("cts_expcode",)),
+        },
+        "t0425": {
+            "payload": {
+                "t0425InBlock": {
+                    "expcode": "",
+                    "chegb": "0",
+                    "medosu": "0",
+                    "sortgb": "1",
+                    "cts_ordno": "",
+                }
+            },
+            "list_blocks": ("t0425OutBlock1",),
+            "continuation": ("t0425InBlock", "t0425OutBlock", ("cts_ordno",)),
+        },
+    }
+    clean_symbol = str(symbol or "").strip()
+    clean_price = str(order_price or "").replace(",", "").strip()
+    if clean_symbol and clean_price and loan_detail_class:
+        requests["CSPAQ00600"] = {
+            "payload": {
+                "CSPAQ00600InBlock1": {
+                    "LoanDtlClssCode": str(loan_detail_class).strip(),
+                    "IsuNo": clean_symbol,
+                    "OrdPrc": clean_price,
+                    "CommdaCode": "41",
+                }
+            },
+            "list_blocks": (),
+        }
+    if clean_symbol and clean_price and side:
+        requests["CSPBQ00200"] = {
+            "payload": {
+                "CSPBQ00200InBlock1": {
+                    "BnsTpCode": str(side).strip(),
+                    "IsuNo": clean_symbol,
+                    "OrdPrc": clean_price,
+                }
+            },
+            "list_blocks": (),
+        }
+    return requests
+
+
+async def _fetch_tr_pages(
+    config: Any,
+    token: str,
+    tr_cd: str,
+    definition: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Read and merge an LS continuation chain without leaking its headers."""
+
+    source_payload = definition.get("payload")
+    if not isinstance(source_payload, Mapping):
+        raise ValueError(f"{tr_cd}: payload가 없습니다")
+    payload = {
+        str(key): dict(value) if isinstance(value, Mapping) else value
+        for key, value in source_payload.items()
+    }
+    list_blocks = tuple(str(item) for item in definition.get("list_blocks", ()))
+    continuation = definition.get("continuation")
+    merged: dict[str, Any] = {}
+    tr_cont = "N"
+    tr_cont_key = ""
+    seen_tokens: set[tuple[str, tuple[str, ...]]] = set()
+    more = False
+    pages = 0
+
+    for _ in range(ACCOUNTING_EVIDENCE_MAX_PAGES):
+        async with _tr_gate:
+            await _tr_slot()
+            body, headers = await _post_tr_page(
+                config,
+                token,
+                tr_cd,
+                payload,
+                tr_cont=tr_cont,
+                tr_cont_key=tr_cont_key,
+            )
+        pages += 1
+        for key, value in body.items():
+            if key in list_blocks and isinstance(value, list):
+                merged.setdefault(key, []).extend(value)
+            elif key not in merged or value not in (None, "", [], {}):
+                merged[key] = value
+
+        tr_cont_key = headers.get("tr_cont_key", "")
+        more = headers.get("tr_cont", "") in {"Y", "F", "M"}
+        cts_values: tuple[str, ...] = ()
+        if continuation:
+            input_block, output_block, fields = continuation
+            output = body.get(output_block)
+            target = payload.get(input_block)
+            if isinstance(output, Mapping) and isinstance(target, dict):
+                cts_values = tuple(str(output.get(field) or "").strip() for field in fields)
+                for field, value in zip(fields, cts_values, strict=True):
+                    target[field] = value
+        if not more:
+            break
+        token_marker = (tr_cont_key, cts_values)
+        if token_marker in seen_tokens or (not tr_cont_key and not any(cts_values)):
+            break
+        seen_tokens.add(token_marker)
+        tr_cont = "Y"
+
+    return {
+        "body": merged,
+        "meta": {
+            "pages": pages,
+            "complete": not more,
+            "truncated": more,
+        },
+    }
+
+
+async def _collect_accounting_evidence(
+    start: date,
+    end: date,
+    previous: date,
+    *,
+    symbol: str | None = None,
+    order_price: str | None = None,
+    side: str | None = None,
+    loan_detail_class: str | None = None,
+) -> dict[str, Any]:
+    config, _ = _config(require_ws=False)
+    token = await _access_token(config)
+    requests = _accounting_tr_requests(
+        start,
+        end,
+        previous,
+        symbol=symbol,
+        order_price=order_price,
+        side=side,
+        loan_detail_class=loan_detail_class,
+    )
+    responses: dict[str, Any] = {}
+    for tr_cd, definition in requests.items():
+        try:
+            responses[tr_cd] = await _fetch_tr_pages(config, token, tr_cd, definition)
+        except Exception as exc:  # noqa: BLE001 - 한 TR 실패가 나머지 증거를 지우면 안 된다
+            responses[tr_cd] = {
+                "error": _ls_error_detail(exc)[:200],
+                "meta": {"pages": 0, "complete": False, "truncated": False},
+            }
+    return normalize_ls_accounting_evidence(
+        responses,
+        period_start=start,
+        period_end=end,
+        previous_date=previous,
+        environment=config.environment,
+    )
+
+
+_accounting_evidence_cache: dict[
+    tuple[str, str, str, str, str, str, str], tuple[float, dict[str, Any]]
+] = {}
+_accounting_evidence_refresh_gate = asyncio.Lock()
+_accounting_evidence_refresh_task: asyncio.Task[None] | None = None
+
+
+async def _load_accounting_evidence(
+    *,
+    days: int = ACCOUNTING_EVIDENCE_DAYS,
+    previous_date: date | None = None,
+    symbol: str | None = None,
+    order_price: str | None = None,
+    side: str | None = None,
+    loan_detail_class: str | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    span = max(1, min(365, days))
+    end = datetime.now(KST).date()
+    start = end - timedelta(days=span - 1)
+    previous = previous_date or (end - timedelta(days=1))
+    key = (
+        start.isoformat(),
+        end.isoformat(),
+        previous.isoformat(),
+        str(symbol or ""),
+        str(order_price or ""),
+        str(side or ""),
+        str(loan_detail_class or ""),
+    )
+    cached = _accounting_evidence_cache.get(key)
+    if not force and cached and time.time() - cached[0] < ACCOUNTING_EVIDENCE_CACHE_SECONDS:
+        return cached[1]
+    # 백그라운드 갱신은 10개 TR의 호출간격 때문에 수 초 걸린다. 이미 한 번 본
+    # 증거가 있으면 그동안 Agent 요청을 막지 않고 직전 관측치를 돌려준다.
+    if not force and cached and _accounting_evidence_refresh_gate.locked():
+        return cached[1]
+
+    async with _accounting_evidence_refresh_gate:
+        cached = _accounting_evidence_cache.get(key)
+        if not force and cached and time.time() - cached[0] < ACCOUNTING_EVIDENCE_CACHE_SECONDS:
+            return cached[1]
+        try:
+            evidence = await _collect_accounting_evidence(
+                start,
+                end,
+                previous,
+                symbol=symbol,
+                order_price=order_price,
+                side=side,
+                loan_detail_class=loan_detail_class,
+            )
+        except Exception:
+            if cached:
+                return cached[1]
+            raise
+        _accounting_evidence_cache[key] = (time.time(), evidence)
+        return evidence
+
+
+async def _accounting_evidence_refresh_loop() -> None:
+    while True:
+        try:
+            await _load_accounting_evidence(force=True)
+        except Exception:  # noqa: BLE001 - 다음 주기에 다시 시도한다
+            pass
+        await asyncio.sleep(ACCOUNTING_EVIDENCE_REFRESH_SECONDS)
+
+
+async def _start_accounting_evidence_refresh() -> None:
+    global _accounting_evidence_refresh_task
+    if ENABLE_LS_ACCOUNT_DATA and _accounting_evidence_refresh_task is None:
+        _accounting_evidence_refresh_task = asyncio.create_task(
+            _accounting_evidence_refresh_loop(), name="ls-accounting-evidence-refresh"
+        )
+
+
+async def _stop_accounting_evidence_refresh() -> None:
+    global _accounting_evidence_refresh_task
+    if _accounting_evidence_refresh_task is not None:
+        _accounting_evidence_refresh_task.cancel()
+        try:
+            await _accounting_evidence_refresh_task
+        except asyncio.CancelledError:
+            pass
+        _accounting_evidence_refresh_task = None
+
+
 async def _load_ledger(
     days: int = LEDGER_DAYS,
     *,
@@ -2064,6 +2482,51 @@ async def _load_market_ranking(ranking: str) -> dict[str, Any]:
         result = await _fetch_market_ranking(config, token, ranking)
         _market_ranking_cache[ranking] = (time.time(), result)
         return result
+
+
+@router.get(
+    "/internal/accounting/broker-evidence",
+    operation_id="accounting_broker_evidence",
+)
+async def accounting_broker_evidence(
+    days: int = ACCOUNTING_EVIDENCE_DAYS,
+    previous_date: date | None = None,
+    symbol: str | None = None,
+    order_price: str | None = None,
+    side: str | None = None,
+    loan_detail_class: str | None = None,
+    refresh: bool = False,
+) -> dict[str, Any]:
+    """Bounded, credential-free LS evidence for the Accounting Hermes context."""
+
+    if not ENABLE_LS_ACCOUNT_DATA:
+        raise HTTPException(
+            503,
+            "브로커 계좌 조회는 기본 비활성화 상태입니다 "
+            "(ENABLE_LS_ACCOUNT_DATA=true 로 엽니다).",
+        )
+    parameter_values = (symbol, order_price, side, loan_detail_class)
+    if any(value is not None for value in parameter_values):
+        if not symbol or not order_price:
+            raise HTTPException(400, "종목별 한도 조회에는 symbol과 order_price가 필요합니다.")
+        if side is not None and side not in {"1", "2"}:
+            raise HTTPException(400, "side는 1(매도) 또는 2(매수)여야 합니다.")
+        if loan_detail_class is not None and loan_detail_class not in {"01", "03", "05", "07"}:
+            raise HTTPException(400, "loan_detail_class는 01, 03, 05, 07 중 하나여야 합니다.")
+    try:
+        return await _load_accounting_evidence(
+            days=days,
+            previous_date=previous_date,
+            symbol=symbol,
+            order_price=order_price,
+            side=side,
+            loan_detail_class=loan_detail_class,
+            force=refresh,
+        )
+    except Exception as exc:  # noqa: BLE001 - 빈 증거가 아니라 명시적 실패로 전달한다
+        raise HTTPException(
+            502, ("회계용 브로커 증거 조회 실패: " + _ls_error_detail(exc))[:400]
+        ) from exc
 
 
 @router.get("/ui/market/rankings", operation_id="market_rankings")

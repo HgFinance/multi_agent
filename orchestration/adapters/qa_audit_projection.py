@@ -33,6 +33,7 @@ from orchestration.discord_idempotency import (
 )
 from orchestration.qa_discord_feedback import (
     QA_FEEDBACK_CHANNEL_DEFAULT,
+    edit_qa_discord_message,
     format_qa_terminal_report,
     post_qa_discord_message,
 )
@@ -337,7 +338,11 @@ class QaAuditProjection:
                 "tests_run": metadata.get("tests_run") or task.get("tests_run") or [],
                 "worker_session_id": metadata.get("worker_session_id") or task.get("worker_session_id") or "",
                 "summary": summary(task, metadata),
-                "numerical_posture": metadata.get("numerical_posture") or metadata.get("decision"),
+                "numerical_posture": (
+                    metadata.get("numerical_posture")
+                    or metadata.get("numeric_posture")
+                    or metadata.get("decision")
+                ),
             }
         )
         started_at = iso_timestamp(task.get("started_at"))
@@ -525,7 +530,18 @@ class QaAuditProjection:
         dedup_key = canonical_discord_dedup_key(
             "qa", channel_id, record.eval_run_id
         )
+        existing_message_id: str | None = None
         try:
+            content = format_qa_terminal_report(record)
+            existing_message_id = store.outbound_message_id(response_key, profile)
+            if existing_message_id:
+                edit_qa_discord_message(
+                    content,
+                    token=token,
+                    channel_id=channel_id,
+                    message_id=existing_message_id,
+                )
+                return "deduped"
             claim = store.claim_outbound(
                 response_key=response_key,
                 dedup_key=dedup_key,
@@ -534,7 +550,7 @@ class QaAuditProjection:
             if not claim.admitted:
                 return "deduped"
             message_id = post_qa_discord_message(
-                format_qa_terminal_report(record),
+                content,
                 token=token,
                 channel_id=channel_id,
             )
@@ -554,10 +570,11 @@ class QaAuditProjection:
         except IdempotencyStoreUnavailable:
             return "failed"
         except Exception as exc:  # noqa: BLE001 - observer is fail-open
-            try:
-                store.mark_outbound(response_key, "FAILED", profile)
-            except Exception:
-                pass
+            if not existing_message_id:
+                try:
+                    store.mark_outbound(response_key, "FAILED", profile)
+                except Exception:
+                    pass
             logger.warning(
                 "qa_discord_terminal_projection_failed",
                 extra={"error": type(exc).__name__},

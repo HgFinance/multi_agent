@@ -73,6 +73,18 @@ RECOVERY_TERMINAL_EVENTS = frozenset(
 )
 _ROOT_ROLE_RE = re.compile(r"(?m)^(?:workflow_role|root_task_role)=([\w-]+)")
 _REQUEST_ID_RE = re.compile(r"(?m)^request_id=(\S+)\s*$")
+_LEGACY_ROOT_PLACEHOLDERS = frozenset(
+    {
+        "assigned-on-create",
+        "pending",
+        "root_pending",
+        "root_task_id_to_be_filled_by_system",
+        "root_to_be_filled",
+        "this-task",
+        "this_task_id",
+        "to_be_filled",
+    }
+)
 
 
 class RetentionError(RuntimeError):
@@ -523,9 +535,15 @@ def evaluate_workflow(
     blocked_nodes = tuple(
         node for node in workflow.nodes if node.status in {"blocked", "triage"}
     )
-    terminal_at = _epoch(
+    root_terminal_at = _epoch(
         _raw_value(root.raw, ("terminal_at", "completed_at"))
     )
+    root_expired = bool(
+        root_terminal_at is not None
+        and current >= root_terminal_at
+        and current - root_terminal_at > PURGE_AGE_SECONDS
+    )
+    terminal_at = root_terminal_at
     if blocked_nodes:
         blocked_at = max(
             (
@@ -539,13 +557,21 @@ def evaluate_workflow(
         if blocked_at is None:
             return RetentionDecision(workflow.root_task_id, False, "blocked_at_missing")
         terminal_at = blocked_at
-        if current < blocked_at or current - blocked_at <= BLOCKED_ARCHIVE_AGE_SECONDS:
+        if (
+            not root_expired
+            and (current < blocked_at or current - blocked_at <= BLOCKED_ARCHIVE_AGE_SECONDS)
+        ):
             return RetentionDecision(
                 workflow.root_task_id,
                 False,
                 "blocked_under_7d",
                 terminal_at,
             )
+        if root_expired:
+            # A terminal root must not be revived indefinitely by late retry
+            # noise. Active runs and explicit recovery state are still checked
+            # below before archive is allowed.
+            terminal_at = root_terminal_at
     else:
         if terminal_at is None:
             return RetentionDecision(workflow.root_task_id, False, "root_terminal_at_missing")
@@ -563,6 +589,18 @@ def evaluate_workflow(
             return RetentionDecision(workflow.root_task_id, False, f"recovery_pending:{node.task_id}", terminal_at)
 
     observed_delivery = delivery or DeliveryState("unknown")
+    # After the explicit seven-day board TTL, stale delivery/synthesis state
+    # must not keep an otherwise terminal graph forever. Active executions and
+    # recovery work were still checked above; preserve the last known delivery
+    # metadata in the compact audit capsule and allow archive/purge to proceed.
+    if terminal_at is not None and current - terminal_at > PURGE_AGE_SECONDS:
+        return RetentionDecision(
+            workflow.root_task_id,
+            True,
+            "safe_expired",
+            terminal_at,
+            observed_delivery,
+        )
     if observed_delivery.status not in {"completed", "not_required", "deduped"}:
         return RetentionDecision(
             workflow.root_task_id,
@@ -643,11 +681,13 @@ def _root_candidate(row: Mapping[str, Any]) -> bool:
     if is_ceo_root_body(body):
         return True
     roles = {match.group(1).casefold() for match in _ROOT_ROLE_RE.finditer(body)}
+    if roles & {"root", "planning", "scope", "scope_and_planning"}:
+        # Several legacy producers persisted a placeholder or omitted the
+        # workflow_root_task_id while still declaring the authoritative root
+        # role. The role line is sufficient to keep those graphs collectible.
+        return True
     owns_marker = f"workflow_root_task_id={task_id}" in body
-    return owns_marker and (
-        bool(roles & {"root", "planning", "scope_and_planning"})
-        or not roles
-    )
+    return owns_marker and not roles
 
 
 def _standalone_candidate(row: Mapping[str, Any]) -> bool:
@@ -667,7 +707,7 @@ def _standalone_candidate(row: Mapping[str, Any]) -> bool:
     if not task_id or status not in TERMINAL_STATUSES or _root_candidate(row):
         return False
     marker = re.search(r"(?m)^workflow_root_task_id=(\S+)", body)
-    return marker is None
+    return marker is None or marker.group(1).strip().casefold() in _LEGACY_ROOT_PLACEHOLDERS
 
 
 def _has_marker_descendant(
@@ -983,8 +1023,8 @@ class AuditStore:
                     # terminal, not when a delayed maintenance pass archives
                     # it.  The purge path still reconstructs the graph and
                     # requires every node to be archived before deletion.
-                    "AND COALESCE(completed_at, terminal_at, archived_at) < ? "
-                    "ORDER BY COALESCE(completed_at, terminal_at, archived_at)",
+                    "AND COALESCE(terminal_at, completed_at, archived_at) < ? "
+                    "ORDER BY COALESCE(terminal_at, completed_at, archived_at)",
                     (int(now - PURGE_AGE_SECONDS),),
                 ).fetchall()
             )
@@ -1064,6 +1104,23 @@ class SQLiteKanbanMaintenance:
             if str(value) in task_id_set
         }
 
+    def existing_task_ids(self, task_ids: Sequence[str]) -> set[str]:
+        """Filter stale Hermes list rows with one bounded SQLite lookup."""
+
+        ids = tuple(dict.fromkeys(str(value) for value in task_ids if str(value)))
+        if not ids:
+            return set()
+        existing: set[str] = set()
+        with closing(self._connect()) as conn:
+            for offset in range(0, len(ids), 500):
+                chunk = ids[offset : offset + 500]
+                rows = conn.execute(
+                    f"SELECT id FROM tasks WHERE id IN ({self._placeholders(chunk)})",
+                    chunk,
+                ).fetchall()
+                existing.update(str(row[0]) for row in rows)
+        return existing
+
     @staticmethod
     def _placeholders(values: Sequence[str]) -> str:
         return ",".join("?" for _ in values)
@@ -1126,10 +1183,18 @@ class SQLiteKanbanMaintenance:
         expected = set(task_ids)
         discovered = {root_id}
         links = conn.execute(
-            "WITH RECURSIVE descendants(id) AS ("
-            "SELECT ? UNION SELECT task_links.child_id FROM task_links "
-            "JOIN descendants ON task_links.parent_id = descendants.id) "
-            "SELECT id FROM descendants",
+            # Dependency edges are directional, but legacy roots and marker-
+            # only primaries were not always linked from the owning root.
+            # Root-atomic maintenance therefore validates the entire connected
+            # component in both directions; the later outside-link guard uses
+            # the same complete mutation set.
+            "WITH RECURSIVE connected(id) AS ("
+            "SELECT ? UNION SELECT CASE "
+            "WHEN task_links.parent_id = connected.id THEN task_links.child_id "
+            "ELSE task_links.parent_id END FROM task_links "
+            "JOIN connected ON task_links.parent_id = connected.id "
+            "OR task_links.child_id = connected.id) "
+            "SELECT id FROM connected",
             (root_id,),
         ).fetchall()
         discovered.update(str(row[0]) for row in links)
@@ -1483,6 +1548,14 @@ class RetentionWorker:
         for row in purge_rows:
             root_id = str(row["root_id"])
             try:
+                # Audit can lag a committed purge if the process exits after
+                # deleting the board graph. Resolve that idempotent case with
+                # the local existence check instead of invoking the slow CLI
+                # fallback for a root that is already gone.
+                if not self.maintenance.workflow_exists(root_id):
+                    self.audit.mark_purged(root_id, purged_at=now)
+                    purged_count += 1
+                    continue
                 # Do not trust the audit row's old graph membership. The
                 # archived board is reconstructed again before purge.
                 workflow = self._load(
@@ -1560,6 +1633,29 @@ class RetentionWorker:
         # archived by the legacy per-task CLI: they receive a minimal audit row
         # before they can become purge candidates.
         archived_rows = self.row_lister(include_archived=True)
+        # Hermes' archived list can briefly retain rows whose DB graph was
+        # purged in an earlier pass. Remove those stale projections in one
+        # local query so parent traversal never falls back to a guaranteed-
+        # missing CLI ``show`` call.
+        listed_task_ids = tuple(
+            str(row.get("id") or row.get("task_id") or "")
+            for row in (*active_rows, *archived_rows)
+        )
+        existing_task_ids = getattr(
+            self.maintenance,
+            "existing_task_ids",
+            lambda task_ids: {task_id for task_id in task_ids if task_id},
+        )(listed_task_ids)
+        active_rows = [
+            row
+            for row in active_rows
+            if str(row.get("id") or row.get("task_id") or "") in existing_task_ids
+        ]
+        archived_rows = [
+            row
+            for row in archived_rows
+            if str(row.get("id") or row.get("task_id") or "") in existing_task_ids
+        ]
         archived_root_ids = tuple(
             dict.fromkeys(
                 str(row.get("id") or row.get("task_id"))

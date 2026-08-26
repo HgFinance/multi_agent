@@ -42,6 +42,7 @@ from orchestration.llm_observability import langsmith_project
 
 from orchestration.workflows.portfolio_recommendation import (
     run_portfolio_recommendation_pipeline_async,
+    schedule_post_response_qa_audit,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,9 +60,11 @@ STAGE_DEPARTMENT = {
     "quant": "quant-backtest-department",
     "trading": "trading-department",
     "risk": "risk-management",
-    "qa": "qa-department",
     "accounting": "accounting-portfolio-department",
     "ceo": "ceo-agent",
+    # QA is an audit consumer of the completed CEO response, not a response
+    # dependency. Keep it last so the runtime projection cannot imply QA -> CEO.
+    "qa": "qa-department",
 }
 STAGE_ORDER = tuple(STAGE_DEPARTMENT)
 
@@ -482,7 +485,58 @@ class PortfolioRuntime:
             job["started_at"] = job["started_at"] or _now()
             job["updated_at"] = _now()
 
-            if kind == "department_started" and department:
+            if kind in {"qa_audit_scheduled", "qa_audit_started"}:
+                # QA is a post-response observer. Do not move a completed
+                # response back to RUNNING while the audit is in flight.
+                job["status"] = str(
+                    (job.get("result") or {}).get("pipeline_status")
+                    or job.get("status")
+                    or "COMPLETED"
+                )
+                job["phase"] = (
+                    "CEO 응답 완료 — QA 비동기 감사 대기"
+                    if kind == "qa_audit_scheduled"
+                    else "CEO 응답 완료 — QA 비동기 감사 실행 중"
+                )
+                job["departments"]["qa-department"].update(
+                    {
+                        "status": "QUEUED" if kind == "qa_audit_scheduled" else "RUNNING",
+                        "current_stage": "qa",
+                        "active_worker_ids": [],
+                        "updated_at": _now(),
+                    }
+                )
+                self._message(
+                    job,
+                    str(event.get("summary") or "CEO 응답 이후 QA 감사를 분리 실행합니다."),
+                    kind=kind,
+                    department=department,
+                )
+            elif kind in {"qa_audit_completed", "qa_audit_failed"}:
+                qa_gate = event.get("qa_gate")
+                if isinstance(job.get("result"), dict) and isinstance(qa_gate, Mapping):
+                    job["result"]["qa_gate"] = dict(qa_gate)
+                job["status"] = str(
+                    (job.get("result") or {}).get("pipeline_status")
+                    or "COMPLETED"
+                )
+                job["phase"] = "CEO 응답 완료 — QA 비동기 감사 완료"
+                job["departments"]["qa-department"].update(
+                    {
+                        "status": "COMPLETED" if kind == "qa_audit_completed" else "DEGRADED",
+                        "current_stage": None,
+                        "active_worker_ids": [],
+                        "last_message": _one_line(event.get("summary")),
+                        "updated_at": _now(),
+                    }
+                )
+                self._message(
+                    job,
+                    str(event.get("summary") or "QA 비동기 감사 결과가 기록되었습니다."),
+                    kind=kind,
+                    department=department,
+                )
+            elif kind == "department_started" and department:
                 worker_ids = [str(item) for item in event.get("worker_ids", [])]
                 row = job["departments"][department]
                 row.update(
@@ -827,6 +881,13 @@ class PortfolioRuntime:
                     self._message(job, "LangGraph 실행은 끝났지만 Worker 또는 Gate 검증이 안전 보류되어 추천 결과를 확정하지 않았습니다.", kind="run_degraded")
                 self._save_job(job)
                 self._store.release_active_run(job_id, self._owner_token)
+            # The response has been persisted before QA is queued. This
+            # scheduler returns immediately; QA findings are projected later
+            # and cannot delay or rewrite the CEO response.
+            schedule_post_response_qa_audit(
+                result,
+                event_callback=lambda event: self._event(job_id, event),
+            )
         except Exception as exc:  # noqa: BLE001 - BFF boundary fails closed.
             with self._lock:
                 job = self._job_for(job_id)

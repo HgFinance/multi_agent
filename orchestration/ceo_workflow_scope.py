@@ -749,24 +749,13 @@ def build_root_body(
 
     if workflow_mode not in WORKFLOW_MODES:
         raise ValueError("workflow_mode must be analysis or binding")
-    # New roots carry the split QA intent explicitly.  PAPER roots are never
-    # put through the governance lane; their legacy ``qa_required=false``
-    # marker remains below for external compatibility.
-    canonical_qa_enabled = (
-        False
-        if user_paper_order_scope is not None and not deferred_conditional_analysis
-        else True
-        if qa_enabled is None
-        else bool(qa_enabled)
-    )
-    canonical_qa_blocks = (
-        False
-        if user_paper_order_scope is not None
-        else workflow_mode == "binding"
-        if qa_blocks_response is None
-        else bool(qa_blocks_response)
-    )
-    canonical_qa_blocks = canonical_qa_blocks and canonical_qa_enabled
+    # New roots carry the split QA intent explicitly. QA is a post-response
+    # governance audit for every response lane, including PAPER. Its legacy
+    # blocking marker remains readable below but is always normalized false.
+    canonical_qa_enabled = True if qa_enabled is None else bool(qa_enabled)
+    # Deterministic Risk/OMS admission remains the pre-execution safety
+    # boundary; QA never blocks CEO response delivery.
+    canonical_qa_blocks = False
     requested_by_line = f"requested_by={requested_by}\n" if requested_by else ""
     normalized_source = str(source or "").strip()
     source_line = (

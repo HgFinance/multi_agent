@@ -1,6 +1,6 @@
 """Read-only paper adapter for the complete investment-case handoff.
 
-The adapter invokes the existing Research, Risk, and QA department entry
+The adapter invokes the existing Research and Risk department entry
 points when their runtime dependencies are available. Trading contract
 creation, OMS/Fill, and Accounting are in-memory projections. Notion,
 Postgres, Redis writes, broker submission, and ledger posting are disabled or
@@ -332,15 +332,13 @@ class PaperPipelineAdapter:
         context: MutableMapping[str, object],
     ) -> str:
         risk = _artifact(context, "risk_decision")
-        qa = _artifact(context, "qa_assessment")
         risk_verdict = str(
             risk.get("verdict", risk.get("candidate_verdict", "reject"))
         ).lower()
-        qa_verdict = str(qa.get("verdict", "FAIL")).upper()
-        approved = risk_verdict in {"approve", "resize"} and qa_verdict in {
-            "PASS",
-            "WARN",
-        }
+        # QA is a post-response audit. Execution safety before this boundary
+        # belongs to the deterministic Risk/OMS contract; requiring a QA
+        # artifact here would recreate the forbidden QA -> CEO/OMS edge.
+        approved = risk_verdict in {"approve", "resize"}
         result = {
             "status": "PAPER_NOT_SUBMITTED" if approved else "BLOCKED",
             "submitted": False,
@@ -348,9 +346,9 @@ class PaperPipelineAdapter:
             "broker": "paper",
             "reason": "paper adapter never submits orders"
             if approved
-            else "Risk or QA gate did not permit paper submission",
+            else "Risk gate did not permit paper submission",
             "risk_verdict": risk_verdict,
-            "qa_verdict": qa_verdict,
+            "qa_verdict": "PENDING_POST_RESPONSE_AUDIT",
             "binding": False,
         }
         report = {

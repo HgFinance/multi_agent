@@ -143,6 +143,7 @@ def _metadata(
     tool_count: int | None,
     llm_turn_count: int,
     observation_unit: str,
+    return_code: int,
 ) -> dict[str, Any]:
     return {
         "schema_version": "llm.accounting-worker.v1",
@@ -166,6 +167,7 @@ def _metadata(
         "latency_ms": max(int(ended_ms) - int(started_ms), 0),
         "latency_scope": "worker_execution",
         "latency_available": True,
+        "return_code": int(return_code),
         "raw_payloads_sent": False,
     }
 
@@ -182,6 +184,8 @@ def _run_payload(
     metadata: Mapping[str, Any],
     project_name: str,
     parent_run_id: UUID | None = None,
+    inputs: Mapping[str, Any] | None = None,
+    outputs: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "id": str(run_uuid),
@@ -190,8 +194,8 @@ def _run_payload(
         "name": name,
         "run_type": run_type,
         "session_name": project_name,
-        "inputs": {},
-        "outputs": {},
+        "inputs": dict(inputs or {}),
+        "outputs": dict(outputs or {}),
         "start_time": int(started_ms),
         "end_time": int(ended_ms),
         "extra": {"metadata": dict(metadata)},
@@ -292,7 +296,24 @@ def publish_accounting_worker_trace(
         tool_count=tool_count,
         llm_turn_count=llm_turn_count,
         observation_unit="worker",
+        return_code=return_code,
     )
+    safe_inputs = {
+        "task_id": task_id,
+        "workflow_root_task_id": root_id,
+        "kanban_run_id": run_id,
+        "profile": profile,
+        "task_body_present": bool(str(task_body).strip()),
+        "task_body_length": len(str(task_body)),
+        "raw_payloads_sent": False,
+    }
+    safe_outputs = {
+        "status": status,
+        "error_code": error_code,
+        "return_code": int(return_code),
+        "latency_ms": max(int(ended_ms) - int(started_ms), 0),
+        "raw_payloads_sent": False,
+    }
     runs = [
         _run_payload(
             run_uuid=worker_uuid,
@@ -304,6 +325,8 @@ def publish_accounting_worker_trace(
             ended_ms=ended_ms,
             metadata=worker_metadata,
             project_name=project_name,
+            inputs=safe_inputs,
+            outputs=safe_outputs,
         ),
         _run_payload(
             run_uuid=model_uuid,
@@ -320,6 +343,8 @@ def publish_accounting_worker_trace(
             },
             project_name=project_name,
             parent_run_id=worker_uuid,
+            inputs=safe_inputs,
+            outputs=safe_outputs,
         ),
     ]
     for index, tool_name in enumerate(tool_names):
@@ -342,6 +367,8 @@ def publish_accounting_worker_trace(
                 },
                 project_name=project_name,
                 parent_run_id=worker_uuid,
+                inputs=safe_inputs,
+                outputs=safe_outputs,
             )
         )
     return _post_batch(env=runtime_env, runs=runs)

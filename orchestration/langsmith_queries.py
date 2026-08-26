@@ -14,9 +14,15 @@ metadata-only by contract.
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import threading
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime
+from datetime import timezone
+from types import SimpleNamespace
 from typing import Any, Sequence
 
 
@@ -66,12 +72,108 @@ async def _resolve_project_id(client: Any, project_name: str) -> str:
     reader = getattr(client, "aread_project", None)
     if not callable(reader):
         raise RuntimeError("langsmith_sdk_missing_aread_project")
-    project = await reader(project_name=name)
+    try:
+        project = await reader(project_name=name)
+    except Exception:
+        # langsmith 0.11.x can load a workspace through the synchronous
+        # client while its generated async transport fails under some
+        # httpx2/anyio combinations. Project listing is not a run-query path;
+        # use it only to resolve the UUID and keep the v2 query boundary below.
+        def _read_sync() -> Any:
+            projects = list(client.list_projects(name=name, limit=1))
+            return projects[0] if projects else None
+
+        project = await asyncio.to_thread(_read_sync)
+    if project is None:
+        raise RuntimeError("langsmith_project_not_found")
     project_id = str(getattr(project, "id", "") or "").strip()
     if not project_id:
         raise RuntimeError("langsmith_project_id_missing")
     _cache_project_id(client, name, project_id)
     return project_id
+
+
+def _api_url(client: Any, path: str) -> str:
+    base = str(
+        os.getenv("LANGSMITH_ENDPOINT", "").strip()
+        or getattr(client, "api_url", "")
+        or "https://api.smith.langchain.com"
+    ).rstrip("/")
+    if base.endswith("/api/v2"):
+        return f"{base}{path}"
+    if base.endswith("/api"):
+        return f"{base}/v2{path}"
+    return f"{base}/api/v2{path}"
+
+
+def _as_datetime(value: Any) -> Any:
+    if not isinstance(value, str) or not value:
+        return value
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _run_record(item: Any) -> Any:
+    if not isinstance(item, dict):
+        return item
+    values = {str(key).lower(): value for key, value in item.items()}
+    for key in ("start_time", "end_time"):
+        if key in values:
+            values[key] = _as_datetime(values[key])
+    return SimpleNamespace(**values)
+
+
+def _direct_v2_query(
+    client: Any,
+    kwargs: dict[str, Any],
+    *,
+    max_results: int,
+) -> list[Any]:
+    """Use the documented v2 REST route when generated async transport is broken."""
+
+    api_key = os.getenv("LANGSMITH_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("langsmith_api_key_missing")
+    payload = dict(kwargs)
+    cursor: str | None = None
+    rows: list[Any] = []
+    while len(rows) < max(1, int(max_results)):
+        if cursor:
+            payload["cursor"] = cursor
+        encoded = json.dumps(
+            payload,
+            default=lambda value: value.isoformat() if isinstance(value, datetime) else str(value),
+            separators=(",", ":"),
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            _api_url(client, "/runs/query"),
+            data=encoded,
+            headers={
+                "X-API-KEY": api_key,
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                decoded = json.loads(response.read() or b"{}")
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(f"langsmith_v2_query_http_{exc.code}") from exc
+        if not isinstance(decoded, dict):
+            raise RuntimeError("langsmith_v2_query_non_object_response")
+        items = decoded.get("items") or []
+        if not isinstance(items, list):
+            raise RuntimeError("langsmith_v2_query_items_invalid")
+        rows.extend(_run_record(item) for item in items)
+        if len(rows) >= max(1, int(max_results)):
+            break
+        cursor = str(decoded.get("next_cursor") or "") or None
+        if not cursor or not items:
+            break
+    return rows[: max(1, int(max_results))]
 
 
 async def _query_runs_async(
@@ -104,15 +206,26 @@ async def _query_runs_async(
     if filter_expression:
         kwargs["filter"] = filter_expression
 
-    # SmithDB v2 returns an awaitable async paginator.  Awaiting it is
-    # required before consuming pages and avoids the v1 compatibility layer.
-    paginator = await query(**kwargs)
-    results: list[Any] = []
-    async for run in paginator:
-        results.append(run)
-        if len(results) >= max(1, int(max_results)):
-            break
-    return results
+    # SmithDB v2 returns an awaitable async paginator. Await it first so the
+    # normal SDK path never touches the retired v1 compatibility layer.
+    try:
+        paginator = await query(**kwargs)
+        results: list[Any] = []
+        async for run in paginator:
+            results.append(run)
+            if len(results) >= max(1, int(max_results)):
+                break
+        return results
+    except Exception:
+        # Some deployed langsmith/httpx2 combinations fail before an HTTP
+        # request is made. The fallback is still exactly /api/v2/runs/query;
+        # it is never a list_runs/read_run compatibility path.
+        return await asyncio.to_thread(
+            _direct_v2_query,
+            client,
+            kwargs,
+            max_results=max_results,
+        )
 
 
 def query_runs(

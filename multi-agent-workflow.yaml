@@ -50,12 +50,13 @@ model:
 workflow:
   name: "AI 트레이딩 신호 검증 및 집행 프로세스"
   manifest: orchestration/workflows/investment-case.yaml
-  order: [research, trading, risk, qa, oms-fill-gate, accounting, ceo]
+  # CEO response closes the response plane. QA is a post-response audit.
+  order: [research, trading, risk, oms-fill-gate, accounting, ceo, qa-audit]
   timeout_seconds: 450
 
 portfolio_recommendation_cycle:
   manifest: orchestration/workflows/portfolio-recommendation.yaml
-  order: [profile-suitability, research, trading, risk, qa, accounting, ceo]
+  order: [profile-suitability, research, trading, risk, accounting, ceo, qa-audit]
   timeout_seconds: 300
   mode: test
   external_writes: false

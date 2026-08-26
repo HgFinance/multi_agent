@@ -6,11 +6,11 @@
 
 | 경로 | 실행 부서 | 안전 스킵/분리 정책 |
 | --- | --- | --- |
-| 기본 포트폴리오 추천 | research → quant → risk → qa → ceo | trading/accounting은 주문·원장 변경이 없어 `SKIPPED_SAFE` |
-| 단순 종목 질의(`MARKET_RESEARCH`) | research → qa → ceo | 새 후보를 구성하지 않으므로 quant도 `SKIPPED_SAFE` |
-| 전체 투자 검토(`REBALANCING_PROPOSAL` 또는 구조화 테스트 입력) | research → quant → trading → risk → qa → accounting → ceo | 각 단계는 독립 Worker fan-out/fan-in |
-| 대화형 전략 제안(`STRATEGY_PROPOSAL`) | research → quant → qa → ceo | 백테스트 근거는 만들되 주문·원장 부서는 제외 |
-| 전략 승격 | quant-backtest → qa → ceo | `strategy-research` 별도 체인, Trading 승격·주문 제출 금지 |
+| 기본 포트폴리오 추천 | research → quant → risk → ceo → qa-audit(비동기) | trading/accounting은 주문·원장 변경이 없어 `SKIPPED_SAFE` |
+| 단순 종목 질의(`MARKET_RESEARCH`) | research → ceo → qa-audit(비동기) | 새 후보를 구성하지 않으므로 quant도 `SKIPPED_SAFE` |
+| 전체 투자 검토(`REBALANCING_PROPOSAL` 또는 구조화 테스트 입력) | research → quant → trading → risk → accounting → ceo → qa-audit(비동기) | 각 단계는 독립 Worker fan-out/fan-in |
+| 대화형 전략 제안(`STRATEGY_PROPOSAL`) | research → quant → ceo → qa-audit(비동기) | 백테스트 근거는 만들되 주문·원장 부서는 제외 |
+| 전략 승격/승인 | 별도 governance workflow | QA가 승인 전 안전 게이트를 소유하며 일반 CEO 응답 레인과 혼동하지 않음 |
 | HR/Agent 생명주기 | `workforce-management`/`agent-evolution` | 투자 포트폴리오 파이프라인과 혼합하지 않음 |
 
 따라서 “전체 부서 연결”의 검증 기준은 모든 경로를 무조건 실행하는 것이 아니라, 각 경로의 선택·스킵·실패 전파가 계약대로 동작하는 것이다.
@@ -93,10 +93,12 @@ TEST fixture는 계약/결정론적 replay 대상이며, Supabase·실시간 시
 
 ## 현재 실행 순서
 
-기본 `PORTFOLIO_RECOMMENDATION` 요청은 `research → risk → qa → ceo`다.
+기본 `PORTFOLIO_RECOMMENDATION` 요청은 선택된 primary 부서가 먼저 실행되고,
+`CEO response`가 완료된 뒤 `qa-audit`이 별도 비동기로 실행된다. QA는 CEO가
+받은 동일한 root 입력·primary handoff와 CEO 응답을 함께 받아 감사한다.
 트레이딩과 회계는 주문·원장 작업이 필요한 카테고리에서만 task plan에 포함된다.
-모든 부서 노드는 그래프에 존재하지만, 선택되지 않은 노드를 Worker 실행으로
-오인하지 않도록 `department_skipped`와 `SKIPPED_SAFE`를 남긴다.
+QA를 포함해 선택되지 않은 부서는 `department_skipped`와 `SKIPPED_SAFE`를
+남긴다. QA가 생성되더라도 이미 전달된 CEO 응답을 지연·재작성·취소하지 않는다.
 
 현재 저장소의 실행은 TEST fixture 또는 read-only Supabase 입력에 한정된다.
 Hermes 외부 Queue/Stream과 운영 Agent Status 저장소를 연결하기 전까지 BFF의

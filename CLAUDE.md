@@ -36,12 +36,17 @@ python -m unittest discover -s tests/schema -p "test_*.py" -v
 
 | 흐름 | 순서 |
 |---|---|
-| `workflow`(실시간 신호) | research → trading → risk → qa → accounting → ceo |
-| `strategy_research_cycle`(전략 연구) | quant-backtest → qa → ceo |
+| `workflow`(실시간 신호) | research → trading → risk → accounting → ceo → qa-audit(비동기) |
+| `strategy_research_cycle`(전략 승격 승인) | quant-backtest → qa-release-review → ceo-promotion-review (별도 승인 게이트) |
 | `workforce_management_cycle`(신규 채용)/`agent_evolution_cycle`(기존 Agent 개선) | hr → hr → qa → ceo → hr |
 | `event_routing`(동적 라우팅) | 이벤트별 필요 페르소나만, 고정 순서 없음 |
 
 검증된 Strategy Bundle만 트레이딩으로 넘어가고, 이미 배포된 Agent 개선(`agent_evolution_cycle`)도 QA·CEO 승인을 건너뛰지 않는다. 모든 step은 실패 시 안전한 기본값(REJECT/HOLD/DENY/ESCALATE/ROLLBACK)으로 떨어진다. `hr-department`는 투자 본부가 아니라 CEO 직속 Shared Service다.
+
+CEO 응답 경계는 `primary results → CEO response`다. QA는 CEO가 받은 동일한 입력과
+CEO 응답을 전달받아 응답 이후 `qa-audit`으로 비동기 감사한다. QA는 일반 CEO 응답을
+선행하거나 지연·재작성하지 않는다. 주문·집행의 선행 안전성은 QA가 아니라 결정론적
+Risk Engine·OMS admission이 소유한다.
 
 **Hermes(부서) vs LangGraph(직원)**: Hermes Profile 8개가 부서 오케스트레이션을 맡고, 소속 직원(**LLM Worker 10명**)은 각자 독립 LangGraph Worker + 운영 Qwen AWQ v1(`qwen2.5-14b-instruct-awq`)로 동작한다. Worker는 읽기 결과만 부서장에게 전달할 뿐 주문·판정·원장·권한 변경은 하지 않는다. 로컬 Ollama `qwen3:1.7b`는 개발 fallback이고, AWS vLLM은 `scripts/model_plane/vllm_runtime.sh` 단일 진입점으로만 관리한다. **결정론 러너 5개**(`desk-runner`/`risk-runner`/`qa-runner`/`back-office-runner`/`ceo-runner`)는 모델을 부르지 않으므로 따로 센다.
 

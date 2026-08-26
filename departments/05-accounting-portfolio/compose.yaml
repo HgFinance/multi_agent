@@ -89,6 +89,12 @@ services:
       MARKET_API_URL: ${MARKET_API_URL:-http://market-api:8036}
       # 비우면 장중 체결가, `1D`면 종가 봉. 종가로 돌릴 때는 max_staleness도 넓혀야 한다.
       ACCOUNTING_MARK_INTERVAL: ${ACCOUNTING_MARK_INTERVAL:-}
+    healthcheck:
+      test: ["CMD", "python", "departments/05-accounting-portfolio/ledger/consumer.py", "--healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     mem_limit: 256m
     cpus: 0.5
     pids_limit: 64
@@ -123,6 +129,12 @@ services:
       PORTFOLIO_BFF_INTERNAL_URL: ${PORTFOLIO_BFF_INTERNAL_URL:-http://portfolio-bff:8000}
       LS_PAPER_RECONCILE_INTERVAL_SECONDS: ${LS_PAPER_RECONCILE_INTERVAL_SECONDS:-60}
       LS_PAPER_RECONCILE_GRACE_SECONDS: ${LS_PAPER_RECONCILE_GRACE_SECONDS:-10}
+    healthcheck:
+      test: ["CMD", "python", "departments/05-accounting-portfolio/reconciliation/ls_paper_alignment.py", "--healthcheck"]
+      interval: 15s
+      timeout: 8s
+      retries: 5
+      start_period: 25s
     mem_limit: 256m
     cpus: 0.5
     pids_limit: 64

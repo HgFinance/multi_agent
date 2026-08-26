@@ -52,6 +52,11 @@ def test_dispatcher_routes_workers_through_qa_terminal_boundary() -> None:
     assert "- .:/app/repo:ro" in dispatcher
     assert "mem_limit: 3g" in dispatcher
     assert "mem_reservation: 512m" in dispatcher
+    assert "hostname: hedgefund-kanban-dispatcher" in dispatcher
+    assert (
+        "HERMES_KANBAN_CLAIM_TTL_SECONDS: "
+        "${HERMES_KANBAN_CLAIM_TTL_SECONDS:-180}" in dispatcher
+    )
 
 
 def test_supervisor_qa_projection_uses_audit_runtime_role() -> None:

@@ -75,8 +75,8 @@ governance components but must not be collapsed into one claimed E2E pipeline:
 
 | Flow | Current boundary |
 |---|---|
-| General CEO request | mirror/dedup → one `/ui/ceo/ask` implementation → root Kanban card → selected departments → topology-specific QA → CEO synthesis |
-| Portfolio advisory | profile validation → Research → Quant → Trading → Risk → QA → Accounting → CEO; all order/risk outputs remain non-binding and default to HOLD/manual review |
+| General CEO request | mirror/dedup → one `/ui/ceo/ask` implementation → root Kanban card → selected primary departments → CEO response → QA post-response audit (async) |
+| Portfolio advisory | profile validation → Research → Quant → Trading → Risk → Accounting → CEO response → QA post-response audit (async); all order/risk outputs remain non-binding and default to HOLD/manual review |
 | Research–Quant strategy factory | lead → proposal → Gate 0 → PIT experiment → release decision → lesson feedback; SUPPORTED is not automatic promotion or execution |
 | Automated strategy execution | StrategySignal → OrderIntent → deterministic Risk → OMS is implemented in parts; a continuously operated end-to-end lifecycle is not established |
 | Explicit user PAPER directive | exact local-fixture user instruction → deterministic verification → Trading directive service → LS PAPER adapter → durable status/reconciliation; no LIVE route and no login |
@@ -96,7 +96,8 @@ flowchart LR
     T --> P[Validated packet or report]
     P --> C
     C --> U
-    W -. fail-closed / escalate .-> Q[Risk and QA gates]
+    C --> Q[QA post-response audit]
+    W -. fail-closed / escalate .-> R[Deterministic Risk/OMS gates]
 ```
 
 The persisted handoff boundary is `worker-context.v1`; cross-department
@@ -232,15 +233,15 @@ The repository has two different, intentional execution topologies:
 
 | Topology | QA behavior | Evidence |
 |---|---|---|
-| General response workflow | QA is an independent asynchronous governance lane. CEO may synthesize terminal primary results before QA completes; QA is not a response-synthesis prerequisite. | `orchestration/adapters/ceo_supervisor.py` (`governance_plane=async_qa`, `primary_results_ready_fast_path`); `orchestration/ceo_workflow_scope.py` |
+| General response workflow | QA is created only after CEO response delivery. It receives the same root input/primary handoffs that CEO received plus the CEO response; QA is not a response-synthesis prerequisite and cannot rewrite the delivered answer. | `orchestration/adapters/ceo_supervisor.py` (`qa_phase=post_response`, `response_delivered=true`); `orchestration/ceo_workflow_scope.py` |
 | QA department internals | Eligible conditional QA graphs fan out concurrently, then their reports are fanned in; deterministic `qa-runner` is added to the combined result. | `departments/06-ai-qa-audit/qa_employee_workers.py::run_employee_workers_async`, `asyncio.gather` |
-| Blocking decision / paper pipeline | Department stages use explicit barriers. QA remains a blocking gate after the upstream Risk stage for this graph; it is not made asynchronous merely because general responses have an async QA lane. | `orchestration/workflows/portfolio_recommendation.py::build_portfolio_graph` |
+| Blocking decision / paper pipeline | Pre-execution safety uses explicit deterministic Risk/OMS/ledger barriers. Any QA finding is a separate audit result; it does not delay, rewrite, or cancel an already delivered CEO response. | `orchestration/workflows/portfolio_recommendation.py::build_portfolio_graph`, `orchestration/adapters/ceo_supervisor.py` |
 | Intraday forward-QA lane | Accepted forward evidence is dispatched through a durable outbox/Redis stream, then independently reproduced by a lease-fenced QA worker. Scientific mismatches produce QA verdicts; this is separate from the general-response QA lane. | `departments/06-ai-qa-audit/qa_events/worker.py`, `reproduction_worker.py`, `docker-compose.yml`, `supabase/migrations/20260818000300_intraday_forward_qa_dispatch.sql` |
 
-Therefore “QA is asynchronous” is only correct for the general response
-governance lane. “QA is always after everything” is also incomplete: the
-conditional QA workers themselves are parallelized, while the blocking graph
-preserves its Risk → QA barrier.
+Therefore the response-plane rule is deterministic: CEO response delivery comes
+first, then QA runs as a separate asynchronous audit. The conditional QA workers
+themselves are parallelized internally, while pre-execution financial safety is
+owned by deterministic Risk/OMS/ledger barriers.
 
 ## 7. Model Serving Architecture
 

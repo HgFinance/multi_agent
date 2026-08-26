@@ -51,12 +51,13 @@
 
 - 투자 본부는 리서치, 트레이딩, 리스크, 퀀트/백테스트, 회계·포트폴리오, AI QA·감사의 6개다.
 - `hr-department`는 제7 투자 본부가 아니라 CEO 직속 Shared Service다.
-- `workflow`: research → trading → risk → qa → accounting → ceo
-- `strategy_research_cycle`: quant-backtest → qa → ceo
+- `workflow`: research → trading → risk → accounting → ceo → qa-audit (비동기)
+- `strategy_research_cycle`: quant-backtest → qa-release-review → ceo-promotion-review (별도 승격 승인 게이트)
 - `workforce_management_cycle`: 신규 Agent 채용
 - `agent_evolution_cycle`: 기존 Agent Profile 개선
 - `event_routing`: 이벤트 유형에 따라 필요한 페르소나만 동적으로 호출
 - 모든 Step은 실패를 통과로 취급하지 않으며, 실패 시 REJECT/HOLD/DENY/ESCALATE/ROLLBACK 같은 안전한 방향으로 처리한다. 자동으로 승인·승격·권한부여하는 fallback을 만들지 않는다.
+- CEO 응답은 primary 결과가 준비되면 먼저 완료한다. QA는 CEO가 받은 동일 입력과 CEO 응답을 대상으로 하는 별도 비동기 `qa-audit`이며, CEO 응답의 선행 조건·재작성 단계가 아니다. 주문·집행 안전성은 결정론적 Risk Engine과 OMS admission이 담당한다.
 
 ### 절대적인 권한·데이터 경계
 

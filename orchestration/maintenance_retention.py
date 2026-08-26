@@ -39,6 +39,14 @@ class MaintenanceJob:
     max_run_seconds: float
 
 
+class MaintenanceResultError(RuntimeError):
+    """A domain worker completed with a structured, non-exception error."""
+
+    def __init__(self, error_code: str) -> None:
+        self.error_code = str(error_code)
+        super().__init__(self.error_code)
+
+
 class HealthLedger:
     """Thread-safe, atomic scheduler health projection."""
 
@@ -86,6 +94,9 @@ class HealthLedger:
                     "status": "failed" if error is not None else "ok",
                     "finished_at": now,
                     "error": type(error).__name__ if error is not None else None,
+                    "error_code": (
+                        getattr(error, "error_code", None) if error is not None else None
+                    ),
                     "max_run_seconds": job.max_run_seconds,
                 }
             )
@@ -106,7 +117,15 @@ def _job_loop(
         health.started(job)
         error: BaseException | None = None
         try:
-            job.run_once()
+            result = job.run_once()
+            result_error = getattr(result, "error_code", None)
+            if result_error:
+                error = MaintenanceResultError(str(result_error))
+                LOG.warning(
+                    "maintenance-retention-job-reported-error job=%s error_code=%s",
+                    job.name,
+                    result_error,
+                )
         except Exception as exc:  # each maintenance domain remains fail-open
             error = exc
             LOG.exception("maintenance-retention-job-failed job=%s", job.name)

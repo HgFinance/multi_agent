@@ -17,22 +17,24 @@ budgets; standard analysis and experiment tasks do not.
 
 from __future__ import annotations
 
+import json
 import os
 import re
-import json
 import sqlite3
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
-
 
 REAL_HERMES = os.environ.get(
     "HGFINANCE_QA_REAL_HERMES",
     "/opt/hermes/.venv/bin/hermes",
 )
 QA_PROFILE = "qa-department"
+RISK_PROFILE = "risk-management"
+RISK_USER_PRIMARY_TOOLSETS = "kanban,risk-legal"
+_TASK_ID_RE = re.compile(r"\bt_[A-Za-z0-9_-]+\b")
 FAST_ADVISORY_MODE = "analysis_mode=fast_advisory"
 DEFAULT_FAST_ADVISORY_MAX_TURNS = 12
 MIN_FAST_ADVISORY_MAX_TURNS = 8
@@ -65,6 +67,41 @@ def _task_context() -> tuple[str | None, int | None]:
     return task_id, run_id
 
 
+def _task_id_from_argv(argv: Sequence[str]) -> str | None:
+    """Recover the Kanban task when Hermes did not export its task marker."""
+
+    for value in reversed(tuple(str(item) for item in argv)):
+        match = _TASK_ID_RE.fullmatch(value.strip())
+        if match:
+            return match.group(0)
+    return None
+
+
+def _latest_run_id(
+    db_path: str | os.PathLike[str] | None,
+    task_id: str | None,
+) -> int | None:
+    """Read the last attempt ID without relying on worker environment state."""
+
+    if not db_path or not task_id:
+        return None
+    db_uri = f"file:{Path(db_path).resolve()}?mode=ro"
+    try:
+        conn = sqlite3.connect(db_uri, uri=True, timeout=1.0)
+    except (OSError, sqlite3.Error):
+        return None
+    try:
+        row = conn.execute(
+            "SELECT id FROM task_runs WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+    except (TypeError, ValueError, sqlite3.Error):
+        return None
+    finally:
+        conn.close()
+
+
 def _read_live_run_state(
     db_path: str | os.PathLike[str],
     task_id: str,
@@ -88,9 +125,7 @@ def _read_live_run_state(
         ).fetchone()
         if task is None:
             return None, None, None
-        current_run_id = (
-            int(task[1]) if task[1] is not None else None
-        )
+        current_run_id = int(task[1]) if task[1] is not None else None
         outcome = str(run[0]) if run and run[0] is not None else None
         return str(task[0]) if task[0] is not None else None, current_run_id, outcome
     except sqlite3.Error:
@@ -170,10 +205,14 @@ def _user_response_max_turns() -> int:
 
 
 def _user_response_reasoning() -> str:
-    configured = os.environ.get(
-        "HGFINANCE_USER_RESPONSE_REASONING",
-        DEFAULT_USER_RESPONSE_REASONING,
-    ).strip().casefold()
+    configured = (
+        os.environ.get(
+            "HGFINANCE_USER_RESPONSE_REASONING",
+            DEFAULT_USER_RESPONSE_REASONING,
+        )
+        .strip()
+        .casefold()
+    )
     return (
         configured
         if configured in _REASONING_LEVELS
@@ -181,7 +220,7 @@ def _user_response_reasoning() -> str:
     )
 
 
-def _response_task_kind(body: str) -> str | None:
+def _response_task_kind(body: str, *, profile: str = "") -> str | None:
     """Classify only bounded tasks on the user-facing response plane."""
 
     if FAST_ADVISORY_MODE in body:
@@ -190,7 +229,24 @@ def _response_task_kind(body: str) -> str | None:
         return "user_query_planning"
     if "workflow_role=synthesis" in body and "workflow_plane=response" in body:
         return "response_synthesis"
+    if (
+        profile == RISK_PROFILE
+        and "origin=user-query" in body
+        and "workflow_role=primary" in body
+    ):
+        return "risk_user_primary"
     return None
+
+
+def _profile_from_argv(argv: Sequence[str]) -> str:
+    """Read the dispatcher-selected profile before Hermes consumes ``-p``."""
+
+    for index, value in enumerate(argv):
+        if value in {"-p", "--profile"} and index + 1 < len(argv):
+            return str(argv[index + 1]).strip()
+        if value.startswith("--profile="):
+            return value.partition("=")[2].strip()
+    return ""
 
 
 def _bounded_worker_argv(
@@ -198,12 +254,13 @@ def _bounded_worker_argv(
     *,
     db_path: str | os.PathLike[str] | None = None,
     task_id: str | None = None,
+    profile: str = "",
 ) -> list[str]:
     """Bound only dispatcher-owned tasks on the user response plane."""
 
     args = list(argv)
     body = _task_body(db_path, task_id)
-    task_kind = _response_task_kind(body)
+    task_kind = _response_task_kind(body, profile=profile)
     if task_kind is None:
         return args
     try:
@@ -211,12 +268,18 @@ def _bounded_worker_argv(
     except ValueError:
         return args
     has_turn_budget = any(
-        arg == "--max-turns" or arg.startswith("--max-turns=")
-        for arg in args
+        arg == "--max-turns" or arg.startswith("--max-turns=") for arg in args
     )
     has_reasoning = any(
-        arg == "--reasoning" or arg.startswith("--reasoning=")
-        for arg in args
+        arg == "--reasoning" or arg.startswith("--reasoning=") for arg in args
+    )
+    toolsets_index = next(
+        (
+            index
+            for index, arg in enumerate(args)
+            if arg in {"-t", "--toolsets"} or arg.startswith("--toolsets=")
+        ),
+        None,
     )
     additions: list[str] = []
     if not has_turn_budget:
@@ -232,6 +295,18 @@ def _bounded_worker_argv(
         )
     if not has_reasoning:
         additions.extend(["--reasoning", _user_response_reasoning()])
+    if task_kind == "risk_user_primary" and toolsets_index is None:
+        # The Risk response plane needs only the Kanban handoff and the
+        # on-demand Legal Wiki edge. Excluding general skills, shell/code and
+        # web tools prevents mandatory-skill expansion and arithmetic shell
+        # fallbacks without weakening the legal evidence path.
+        additions.extend(["--toolsets", RISK_USER_PRIMARY_TOOLSETS])
+    elif task_kind == "risk_user_primary" and toolsets_index is not None:
+        option = args[toolsets_index]
+        if option in {"-t", "--toolsets"} and toolsets_index + 1 < len(args):
+            args[toolsets_index + 1] = RISK_USER_PRIMARY_TOOLSETS
+        elif option.startswith("--toolsets="):
+            args[toolsets_index] = f"--toolsets={RISK_USER_PRIMARY_TOOLSETS}"
     if not additions:
         return args
     return [
@@ -246,14 +321,8 @@ def _still_owned_and_unfinished(
     task_id: str,
     run_id: int,
 ) -> bool:
-    status, current_run_id, outcome = _read_live_run_state(
-        db_path, task_id, run_id
-    )
-    return (
-        status == "running"
-        and current_run_id == run_id
-        and outcome is None
-    )
+    status, current_run_id, outcome = _read_live_run_state(db_path, task_id, run_id)
+    return status == "running" and current_run_id == run_id and outcome is None
 
 
 def _configured_provider(home: str | os.PathLike[str]) -> str | None:
@@ -273,7 +342,7 @@ def _configured_provider(home: str | os.PathLike[str]) -> str | None:
         if in_model:
             match = re.match(r"^\s+provider:\s*([^\s#]+)", line)
             if match:
-                return match.group(1).strip().strip('"\'')
+                return match.group(1).strip().strip("\"'")
     return None
 
 
@@ -338,8 +407,7 @@ def _block_owned_task(task_id: str, *, reason: str = BLOCK_REASON) -> bool:
             check=False,
             env=env,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
             timeout=10,
         )
@@ -356,17 +424,16 @@ def _run_real_worker(argv: Sequence[str]) -> int:
     # process must see the real binary so any nested Hermes resolution cannot
     # recurse back into the wrapper.
     env["HERMES_BIN"] = REAL_HERMES
+    worker_profile = _profile_from_argv(argv) or env.get("HERMES_PROFILE", "")
     worker_argv = _bounded_worker_argv(
         argv,
         db_path=env.get("HERMES_KANBAN_DB"),
         task_id=env.get("HERMES_KANBAN_TASK"),
+        profile=worker_profile,
     )
-    worker_profile = ""
-    for index, value in enumerate(worker_argv):
-        if value in {"-p", "--profile"} and index + 1 < len(worker_argv):
-            worker_profile = str(worker_argv[index + 1]).strip()
-            break
     task_id, run_id = _task_context()
+    task_id = task_id or _task_id_from_argv(worker_argv)
+    run_id = run_id or _latest_run_id(env.get("HERMES_KANBAN_DB"), task_id)
     started_ms = int(time.time() * 1000)
     completed = subprocess.run(
         [REAL_HERMES, *worker_argv],
@@ -394,7 +461,7 @@ def _run_real_worker(argv: Sequence[str]) -> int:
             )
             from hermes_worker_observability import publish_accounting_worker_trace
 
-            publish_accounting_worker_trace(
+            published = publish_accounting_worker_trace(
                 task_id=task_id,
                 task_body=_task_body(env.get("HERMES_KANBAN_DB"), task_id),
                 task_status=task_status or outcome or "",
@@ -405,10 +472,20 @@ def _run_real_worker(argv: Sequence[str]) -> int:
                 argv=worker_argv,
                 env=env,
             )
-        except Exception:
+            if not published:
+                print(
+                    f"accounting-observability task={task_id} status=not_published",
+                    file=sys.stderr,
+                )
+        except Exception as exc:  # noqa: BLE001 - observer is strictly fail-open.
             # LangSmith is optional and must not turn a valid terminal handoff
             # into a worker failure.
-            pass
+            print(
+                "accounting-observability "
+                f"task={task_id or 'unknown'} status=failed "
+                f"error={type(exc).__name__}",
+                file=sys.stderr,
+            )
     return int(completed.returncode)
 
 
@@ -440,9 +517,7 @@ def _drop_dispatcher_terminal_cwd() -> None:
     to the task workspace before invoking this entry point.
     """
 
-    if os.environ.get("HERMES_KANBAN_TASK") and os.environ.get(
-        "HERMES_KANBAN_RUN_ID"
-    ):
+    if os.environ.get("HERMES_KANBAN_TASK"):
         os.environ.pop("TERMINAL_CWD", None)
 
 
@@ -469,6 +544,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             args,
             db_path=env.get("HERMES_KANBAN_DB"),
             task_id=env.get("HERMES_KANBAN_TASK"),
+            profile=(
+                _profile_from_argv(args) or env.get("HERMES_PROFILE", "")
+            ),
         )
         os.execvpe(REAL_HERMES, [REAL_HERMES, *worker_argv], env)
         raise AssertionError("os.execvpe returned unexpectedly")
@@ -495,11 +573,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         child_rc == 0
         and db_path
         and _still_owned_and_unfinished(db_path, task_id, run_id)
+        and not _block_owned_task(task_id)
     ):
-        if not _block_owned_task(task_id):
-            # Do not claim success when the safety handoff itself failed.  The
-            # dispatcher will retain its existing crash/recovery semantics.
-            return 78
+        # Do not claim success when the safety handoff itself failed.  The
+        # dispatcher will retain its existing crash/recovery semantics.
+        return 78
 
     return child_rc
 

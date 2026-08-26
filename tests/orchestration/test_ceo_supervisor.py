@@ -127,13 +127,14 @@ class UserPaperCanonicalSynthesisTest(unittest.TestCase):
         self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
         self.assertEqual(decision.reason, "binding_paper_structured_template")
 
-    def test_qa_gated_binding_still_requires_normal_synthesis(self) -> None:
+    def test_qa_does_not_gate_binding_response(self) -> None:
         state = self._state(qa_enabled=True)
 
         self.assertIsNone(_single_primary_passthrough_child(state))
         decision = decide_supervisor(state)
         self.assertIsNotNone(decision)
-        self.assertEqual(decision.action, SupervisorAction.RUN_QA)
+        self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
+        self.assertEqual(decision.reason, "binding_paper_structured_template")
 
 
 class UserQueryPriorityTest(unittest.TestCase):
@@ -402,8 +403,8 @@ class SupervisorPolicyTest(unittest.TestCase):
         )
         decision = decide_supervisor(state)
         self.assertIsNotNone(decision)
-        self.assertEqual(decision.action, SupervisorAction.RUN_QA)
-        self.assertEqual(decision.assignee, "qa-department")
+        self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
+        self.assertEqual(decision.assignee, "ceo-agent")
         self.assertEqual(decision.parent_task_ids, ("r", "risk"))
 
     def test_primary_results_ready_creates_async_qa_and_fast_synthesis(self) -> None:
@@ -435,8 +436,11 @@ class SupervisorPolicyTest(unittest.TestCase):
 
         first = decide_supervisor(state)
         self.assertIsNotNone(first)
-        self.assertEqual(first.action, SupervisorAction.RUN_QA)
-        self.assertEqual(first.reason, "primary_results_ready_async_audit")
+        self.assertEqual(first.action, SupervisorAction.SYNTHESIZE)
+        self.assertEqual(first.reason, "primary_results_ready_fast_path")
+        self.assertEqual(first.parent_task_ids, ("research", "accounting"))
+        self.assertIn("QA runs independently", first.body)
+        self.assertIn("not a synthesis prerequisite", first.body)
 
         with_qa = SupervisorState(
             "root",
@@ -589,7 +593,7 @@ class SupervisorPolicyTest(unittest.TestCase):
         self.assertTrue(state.qa_children[0].failed)
         self.assertIsNotNone(decision)
         self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
-        self.assertEqual(decision.reason, "binding_partial_defer_template")
+        self.assertEqual(decision.reason, "binding_primary_completed_final_synthesis")
 
     def test_blocked_needs_input_is_not_treated_as_failure(self) -> None:
         decision = decide_supervisor(
@@ -654,9 +658,9 @@ class SupervisorPolicyTest(unittest.TestCase):
 
         decision = decide_supervisor(state)
 
-        self.assertEqual(decision.action, SupervisorAction.RUN_QA)
-        self.assertEqual(decision.parent_task_ids, ("research",))
-        self.assertIn('"status": "blocked"', decision.body)
+        self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
+        self.assertEqual(decision.parent_task_ids, ())
+        self.assertIn("defer_reason=primary_department_partial_failure", decision.body)
 
     def test_binding_partial_primary_becomes_deterministic_defer_after_qa(self) -> None:
         state = SupervisorState(
@@ -719,8 +723,8 @@ class SupervisorPolicyTest(unittest.TestCase):
         decision = decide_supervisor(state)
 
         self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
-        self.assertEqual(decision.reason, "binding_partial_defer_template")
-        self.assertEqual(decision.parent_task_ids, ())
+        self.assertEqual(decision.reason, "binding_primary_completed_final_synthesis")
+        self.assertEqual(decision.parent_task_ids, ("research",))
 
     def test_qa_done_triggers_final_synthesis(self) -> None:
         decision = decide_supervisor(
@@ -783,10 +787,10 @@ class SupervisorPolicyTest(unittest.TestCase):
                 selected_primary_profiles=("research-department",),
             )
         )
-        self.assertEqual(decision.action, SupervisorAction.RUN_QA)
+        self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
         self.assertEqual(decision.parent_task_ids, ("research",))
 
-    def test_binding_synthesis_keeps_qa_gate(self) -> None:
+    def test_binding_synthesis_does_not_wait_for_qa(self) -> None:
         decision = decide_supervisor(
             SupervisorState(
                 "root",
@@ -797,7 +801,10 @@ class SupervisorPolicyTest(unittest.TestCase):
                 workflow_mode="binding",
             )
         )
-        self.assertIsNone(decision)
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
+        self.assertEqual(decision.parent_task_ids, ("r",))
+        self.assertIn("post-response asynchronous", decision.body)
 
     def test_analysis_qa_failure_does_not_block_response_synthesis(self) -> None:
         decision = decide_supervisor(
@@ -961,7 +968,7 @@ class SupervisorPolicyTest(unittest.TestCase):
             selected_primary_profiles=selected,
         )
         decision = decide_supervisor(state)
-        self.assertEqual(decision.action, SupervisorAction.RUN_QA)
+        self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
         self.assertEqual(decision.parent_task_ids, ("research", "risk", "accounting"))
 
     def test_duplicate_primary_set_is_not_hidden_by_readiness_selector(self) -> None:
@@ -1177,7 +1184,7 @@ class SupervisorPolicyTest(unittest.TestCase):
 
         self.assertEqual(len(state.analysis_children), 4)
         first = decide_supervisor(state)
-        self.assertEqual(first.action, SupervisorAction.RUN_QA)
+        self.assertEqual(first.action, SupervisorAction.SYNTHESIZE)
         self.assertEqual(first.parent_task_ids, tuple(f"marked-{i}" for i in range(4)))
 
         with_qa = SupervisorState(
@@ -1239,7 +1246,7 @@ class SupervisorPolicyTest(unittest.TestCase):
             [item.task_id for item in state.analysis_children], ["request-research"]
         )
         decision = decide_supervisor(state)
-        self.assertEqual(decision.action, SupervisorAction.RUN_QA)
+        self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
         self.assertEqual(decision.parent_task_ids, ("request-research",))
 
         fast_path = decide_supervisor(
@@ -1285,7 +1292,7 @@ class SupervisorPolicyTest(unittest.TestCase):
         )
 
         decision = decide_supervisor(state)
-        self.assertEqual(decision.action, SupervisorAction.RUN_QA)
+        self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
         self.assertEqual(decision.parent_task_ids, ("request-research",))
 
 
@@ -1452,6 +1459,82 @@ class FakeClient:
 
     def block_task(self, task_id: str, reason: str) -> None:
         self.blocked.append(task_id)
+
+
+class PostResponseQaAuditTest(unittest.TestCase):
+    def test_qa_is_created_only_after_delivery_and_receives_ceo_input(self) -> None:
+        timeline: list[str] = []
+
+        class DeliverySpy:
+            def deliver(self, **_kwargs):
+                timeline.append("deliver")
+                return "sent"
+
+            def deliver_to_existing_thread(self, **_kwargs):
+                timeline.append("deliver")
+                return "sent"
+
+        class OrderingClient(FakeClient):
+            def create_task(self, **kwargs):
+                timeline.append(f"create:{kwargs['assignee']}")
+                return super().create_task(**kwargs)
+
+        client = OrderingClient()
+        root_id = "root"
+        root = {
+            "id": root_id,
+            "assignee": "ceo-agent",
+            "status": "done",
+            "body": build_root_body("삼성전자 위험과 근거를 설명해줘", "req-post-response"),
+        }
+        primary = {
+            "id": "research",
+            "assignee": "research-department",
+            "status": "done",
+            "result": "공식 연구 근거",
+            "final_answer": "공식 연구 근거",
+            "body": (
+                f"workflow_root_task_id={root_id}\n"
+                "workflow_role=primary"
+            ),
+        }
+        synthesis_body = (
+            f"workflow_root_task_id={root_id}\n"
+            "workflow_role=synthesis\n"
+            "workflow_mode=analysis\n"
+            "hgfinance.ceo-supervisor.v1 action=SYNTHESIZE\n"
+            "CEO가 받은 연구 결과"
+        )
+        synthesis = {
+            "id": "ceo-response",
+            "assignee": "ceo-agent",
+            "status": "done",
+            "result": "CEO 최종 응답",
+            "final_answer": "CEO 최종 응답",
+            "body": synthesis_body,
+        }
+
+        service = CeoSupervisorService(
+            client,
+            discord_delivery=DeliverySpy(),
+        )
+        service._project_terminal_task(
+            root_task_id=root_id,
+            task_id="ceo-response",
+            task_payloads=(root, primary, synthesis),
+            event={"event_id": "post-response-1", "task_id": "ceo-response", "kind": "completed"},
+        )
+
+        self.assertEqual(timeline, ["deliver", "create:qa-department"])
+        self.assertEqual(len(client.created), 1)
+        qa = client.created[0]
+        self.assertEqual(qa["parent_task_ids"], ("ceo-response",))
+        self.assertIn("qa_phase=post_response", qa["body"])
+        self.assertIn("qa_timing=after_ceo_response", qa["body"])
+        self.assertIn("ceo_input_is_identical=true", qa["body"])
+        self.assertIn("CEO가 받은 연구 결과", qa["body"])
+        self.assertIn(synthesis_body.replace("\n", "\\n"), qa["body"])
+        self.assertIn("CEO 최종 응답", qa["body"])
 
 
 class WorkforceAdvisoryAttachmentTest(unittest.TestCase):
@@ -1993,10 +2076,10 @@ class SupervisorWakeupTest(unittest.TestCase):
         decisions = CeoSupervisorService(client).reconcile_existing_workflows()
 
         self.assertEqual(len(decisions), 1)
-        self.assertEqual(decisions[0].action, SupervisorAction.RUN_QA)
-        self.assertEqual([item["assignee"] for item in client.created], ["qa-department", "ceo-agent"])
+        self.assertEqual(decisions[0].action, SupervisorAction.SYNTHESIZE)
+        self.assertEqual([item["assignee"] for item in client.created], ["ceo-agent"])
         self.assertEqual(
-            set(client.created[1]["parent_task_ids"]),
+            set(client.created[0]["parent_task_ids"]),
             {
                 "research-department-task",
                 "quant-backtest-department-task",
@@ -2400,14 +2483,14 @@ class SupervisorWakeupTest(unittest.TestCase):
             {"event_id": "e1", "task_id": "r", "kind": "completed"}
         )
 
-        self.assertEqual(first.action, SupervisorAction.RUN_QA)
-        self.assertEqual(client.created[0]["assignee"], "qa-department")
+        self.assertEqual(first.action, SupervisorAction.SYNTHESIZE)
+        self.assertEqual(client.created[0]["assignee"], "ceo-agent")
         self.assertEqual(client.created[0]["parent_task_ids"], ("r", "risk"))
-        self.assertEqual(client.created[1]["assignee"], "ceo-agent")
-        self.assertEqual(client.created[1]["parent_task_ids"], ("r", "risk"))
-        self.assertNotIn("qa", client.created[1]["parent_task_ids"])
-        self.assertIn("workflow_role=qa", client.created[0]["body"])
-        self.assertIn("workflow_role=synthesis", client.created[1]["body"])
+        self.assertIn("workflow_role=synthesis", client.created[0]["body"])
+        self.assertNotIn(
+            "qa-department",
+            [item["assignee"] for item in client.created],
+        )
         self.assertEqual(
             sum(item["assignee"] == "ceo-agent" for item in client.created),
             1,
@@ -2437,15 +2520,8 @@ class SupervisorWakeupTest(unittest.TestCase):
             }
         )
 
-        self.assertEqual(decision.action, SupervisorAction.RUN_QA)
-        self.assertEqual(
-            timeline,
-            [
-                "create:qa-department",
-                "create:ceo-agent",
-                "terminal-observer",
-            ],
-        )
+        self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
+        self.assertEqual(timeline, ["create:ceo-agent", "terminal-observer"])
 
     def test_terminal_observer_runs_after_root_lock_is_released(self) -> None:
         client = FakeClient()
@@ -2492,12 +2568,12 @@ class SupervisorWakeupTest(unittest.TestCase):
             }
         )
 
-        self.assertEqual(decision.action, SupervisorAction.RUN_QA)
+        self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
         self.assertEqual(
             [item["assignee"] for item in client.created],
-            ["qa-department", "ceo-agent"],
+            ["ceo-agent"],
         )
-        self.assertNotIn("qa", client.created[1]["parent_task_ids"])
+        self.assertNotIn("qa", client.created[0]["parent_task_ids"])
 
     def test_supervisor_restores_selected_set_from_root_comment(self) -> None:
         client = FakeClient()
@@ -2525,13 +2601,9 @@ class SupervisorWakeupTest(unittest.TestCase):
         )
 
         self.assertIsNotNone(decision)
-        self.assertEqual(decision.action, SupervisorAction.RUN_QA)
+        self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
         self.assertEqual(
             client.created[0]["parent_task_ids"],
-            ("r", "risk", "accounting"),
-        )
-        self.assertEqual(
-            client.created[1]["parent_task_ids"],
             ("r", "risk", "accounting"),
         )
 
@@ -2576,10 +2648,10 @@ class SupervisorWakeupTest(unittest.TestCase):
         )
 
         self.assertIsNotNone(decision)
-        self.assertEqual(decision.action, SupervisorAction.RUN_QA)
+        self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
         self.assertEqual(
             [item["assignee"] for item in client.created],
-            ["qa-department"],
+            ["ceo-agent"],
         )
 
     def test_indexed_synthesis_duplicate_check_does_not_list_board(self) -> None:
@@ -2602,11 +2674,10 @@ class SupervisorWakeupTest(unittest.TestCase):
         )
 
         self.assertIsNotNone(decision)
-        self.assertEqual(client.created[0]["assignee"], "qa-department")
+        self.assertEqual(client.created[0]["assignee"], "ceo-agent")
         self.assertEqual(client.list_calls, 0)
-        self.assertEqual(client.asserted_root, "root")
 
-    def test_binding_synthesis_is_parented_by_completed_qa(self) -> None:
+    def test_binding_synthesis_is_parented_by_primary_not_qa(self) -> None:
         client = FakeClient()
         client.root_body = build_root_body(
             "Samsung order request", "req-binding", workflow_mode="binding"
@@ -2627,7 +2698,9 @@ class SupervisorWakeupTest(unittest.TestCase):
 
         self.assertIsNotNone(decision)
         self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
-        self.assertEqual(client.created[0]["parent_task_ids"], ("qa",))
+        self.assertEqual(
+            client.created[0]["parent_task_ids"], ("r", "risk")
+        )
         self.assertIn("workflow_mode=binding", client.created[0]["body"])
 
     def test_user_paper_order_skips_strategy_qa_even_if_event_requests_it(self) -> None:
@@ -2874,10 +2947,10 @@ class SupervisorWakeupTest(unittest.TestCase):
             decisions = list(executor.map(service.handle_terminal_event, events))
 
         self.assertEqual(sum(decision is not None for decision in decisions), 1)
-        self.assertEqual(len(client.created), 2)
+        self.assertEqual(len(client.created), 1)
         self.assertEqual(
             [item["assignee"] for item in client.created],
-            ["qa-department", "ceo-agent"],
+            ["ceo-agent"],
         )
 
     def test_duplicate_event_is_idempotent_across_service_restart(self) -> None:
@@ -2887,12 +2960,12 @@ class SupervisorWakeupTest(unittest.TestCase):
         first = CeoSupervisorService(client).handle_terminal_event(event)
         second = CeoSupervisorService(client).handle_terminal_event(event)
 
-        self.assertEqual(first.action, SupervisorAction.RUN_QA)
+        self.assertEqual(first.action, SupervisorAction.SYNTHESIZE)
         self.assertIsNone(second)
-        self.assertEqual(len(client.created), 2)
+        self.assertEqual(len(client.created), 1)
         self.assertEqual(
             [item["assignee"] for item in client.created],
-            ["qa-department", "ceo-agent"],
+            ["ceo-agent"],
         )
         self.assertEqual(
             sum("event=duplicate-1" in comment["body"] and "state=done" in comment["body"] for comment in client.comments),
@@ -2950,7 +3023,7 @@ class SupervisorWakeupTest(unittest.TestCase):
             }
         )
 
-        self.assertEqual(decision.action, SupervisorAction.RUN_QA)
+        self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
         self.assertEqual(client.root_lookup_calls, 1)
         self.assertEqual(
             client.workflow_calls,
@@ -2959,7 +3032,7 @@ class SupervisorWakeupTest(unittest.TestCase):
         )
         self.assertEqual(
             [item["assignee"] for item in client.created],
-            ["qa-department", "ceo-agent"],
+            ["ceo-agent"],
             "the optimization must not change synthesis fan-out",
         )
 
@@ -2978,7 +3051,7 @@ class SupervisorWakeupTest(unittest.TestCase):
         )
 
         self.assertIsNotNone(decision)
-        self.assertEqual(decision.action, SupervisorAction.RUN_QA)
+        self.assertEqual(decision.action, SupervisorAction.SYNTHESIZE)
         self.assertEqual(client.blocked, [])
 
     def test_retry_budget_still_blocks_after_restart(self) -> None:

@@ -3,14 +3,14 @@ version: portfolio-recommendation-full-v1
 kind: advisory-portfolio
 description: >-
   사용자 투자 성향과 경험으로 적합 포트폴리오 후보를 계산하고,
-  Research·Trading·Risk·QA·Accounting·CEO의 비바인딩 Context를
-  async LangGraph fan-out/fan-in으로 연결한다.
+  Research·Trading·Risk·Accounting·CEO의 비바인딩 Context를 응답 plane으로
+  연결한 뒤, CEO가 받은 동일 입력과 CEO 응답을 QA 비동기 감사로 보낸다.
 input_sources: [TEST, SUPABASE_READ_ONLY]
 production_enabled: false
 external_writes: false
 boundary_rules:
   - User profile and portfolio suitability are advisory inputs, not OrderIntent or Order.
-  - Risk and QA results remain independent non-binding gates for this TEST flow.
+  - Risk is an advisory safety result and QA is a post-response non-binding audit.
   - Department failure never upgrades a recommendation and ends in HOLD/ESCALATE.
   - No broker submission, ledger posting, credential use, or production promotion is allowed.
 steps:
@@ -58,30 +58,19 @@ steps:
     retry: {max_attempts: 2}
     failure_action: HOLD
     forbidden_actions: [risk_override, order_submission]
-  - id: qa
-    sequence: 5
-    department: qa-department
-    owner: qa
-    task: Independent evidence and reproducibility review
-    input_contract: risk_context
-    output_contract: qa_context
-    timeout_seconds: 60
-    retry: {max_attempts: 3}
-    failure_action: ESCALATE
-    forbidden_actions: [risk_override, order_submission, qa_gate_bypass]
   - id: accounting
-    sequence: 6
+    sequence: 5
     department: accounting-portfolio-department
     owner: accounting
     task: Read-only portfolio projection context
-    input_contract: qa_context
+    input_contract: risk_context
     output_contract: accounting_context
     timeout_seconds: 60
     retry: {max_attempts: 3}
     failure_action: HOLD
     forbidden_actions: [ledger_write, nav_finalize]
   - id: ceo
-    sequence: 7
+    sequence: 6
     department: ceo-agent
     owner: ceo
     task: Explain recommendation and unresolved review state
@@ -91,3 +80,15 @@ steps:
     retry: {max_attempts: 2}
     failure_action: ESCALATE
     forbidden_actions: [order_submission, risk_approval, ledger_write]
+  - id: qa-audit
+    sequence: 7
+    department: qa-department
+    owner: qa
+    task: CEO가 받은 동일 입력과 CEO 응답의 근거·재현성 비동기 감사
+    input_contract: portfolio_recommendation_summary
+    output_contract: post_response_qa_assessment
+    timeout_seconds: 60
+    retry: {max_attempts: 3}
+    failure_action: ESCALATE
+    async_post_response: true
+    forbidden_actions: [risk_override, order_submission, response_rewrite]

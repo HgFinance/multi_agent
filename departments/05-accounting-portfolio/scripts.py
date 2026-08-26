@@ -224,9 +224,10 @@ def _prompt_version(persona_name: str) -> str:
 # 외부(LangSmith)로 나간다 - 회계 Trace 에는 NAV·Position·현금이 그대로 담기므로
 # 금융 데이터 외부 전송 정책 검토 전까지 로컬 개발에서만 켠다.
 def _ls_project() -> str:
-    """부서별 Project 로 격리한다. 한 Project 에 8개 부서를 섞으면 회계 Trace 를
-    다른 본부가 그대로 열람하게 된다 - 부서 경계가 관측성에서만 무너진다."""
-    return f"{os.environ.get('LANGSMITH_PROJECT') or 'hedgefund'}-05-accounting"
+    """Return the canonical workflow project shared by all department traces."""
+    from orchestration.llm_observability import langsmith_project
+
+    return langsmith_project("workflow") or "First"
 
 
 def _langsmith_handoff(trace_id: str) -> dict[str, Any]:
@@ -1344,12 +1345,12 @@ def _check_langsmith_observability():
         os.environ["LANGSMITH_TRACING"] = "true"
         os.environ["LANGSMITH_PROJECT"] = "First"
         on = _langsmith_handoff("t1")["langsmith"]
-        assert on == {"enabled": True, "project": "First-05-accounting",
+        assert on == {"enabled": True, "project": "First",
                       "run_id": None, "handoff_status": "configured"}, on
-        # 다른 부서 Project 를 그대로 쓰지 않는다 (부서 경계).
-        assert _ls_project().endswith("-05-accounting"), _ls_project()
+        # All workflow traces stay in the canonical request-tree project.
+        assert _ls_project() == "First", _ls_project()
         os.environ.pop("LANGSMITH_PROJECT")
-        assert _ls_project() == "hedgefund-05-accounting", _ls_project()
+        assert _ls_project() == "First", _ls_project()
     finally:
         for k, v in saved.items():
             os.environ.pop(k, None)

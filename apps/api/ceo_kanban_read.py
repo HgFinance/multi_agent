@@ -1025,6 +1025,11 @@ def load_workflow(
             listed = list_tasks(include_archived=include_archived)
         except (KanbanTaskNotFound, KanbanUnavailable):
             listed = []
+    listed_ids = {
+        str(row.get("id") or row.get("task_id") or "").strip()
+        for row in listed
+        if str(row.get("id") or row.get("task_id") or "").strip()
+    }
     for row in listed:
         if _workflow_root_id(row) != root_id:
             continue
@@ -1035,6 +1040,12 @@ def load_workflow(
     with ThreadPoolExecutor(max_workers=max_workers or _FETCH_WORKERS) as pool:
         while frontier and len(payloads) < _MAX_NODES:
             pending = [child_id for child_id in dict.fromkeys(frontier) if child_id not in payloads]
+            if listed_rows is not None:
+                # A supplied board snapshot is the authoritative membership
+                # boundary. Legacy link/run metadata can reference a task
+                # already purged by retention; do not turn that stale edge
+                # into a slow CLI fallback or fail the whole graph read.
+                pending = [child_id for child_id in pending if child_id in listed_ids]
             pending = pending[: max(0, _MAX_NODES - len(payloads))]
             if not pending:
                 break
@@ -1043,6 +1054,16 @@ def load_workflow(
             for child_id, payload in zip(pending, fetched, strict=True):
                 payloads[child_id] = payload
                 frontier.extend(_ids(payload.get("children")))
+                # Legacy workflows sometimes persisted a synthesis marker but
+                # omitted the root marker and root->primary link on its input
+                # tasks. Those parents are still durable graph members. Walk
+                # both directions so projections and root-atomic retention do
+                # not silently drop them.
+                frontier.extend(
+                    parent_id
+                    for parent_id in _ids(payload.get("parents"))
+                    if parent_id in listed_ids
+                )
 
     nodes = [WorkflowNode.from_hermes(payloads[root_id])]
     nodes.extend(

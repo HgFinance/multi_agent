@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import io
 import json
 import sys
+import urllib.error
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+
 import orchestration.langsmith_retention as retention
-from orchestration.langsmith_retention import LangSmithRetentionWorker
+from orchestration.langsmith_retention import (
+    LangSmithRetentionRateLimited,
+    LangSmithRetentionWorker,
+)
 
 
 class _Response:
@@ -41,7 +48,13 @@ def test_retention_dry_run_targets_only_named_projects(monkeypatch) -> None:
 
     def fake_query(_client, **kwargs):
         project_names.append(kwargs["project_name"])
-        return [SimpleNamespace(id=f"trace-{kwargs['project_name']}")]
+        return [
+            SimpleNamespace(
+                id=f"trace-{kwargs['project_name']}-{index}",
+                start_time=datetime(2026, 8, 26 - index, tzinfo=timezone.utc),
+            )
+            for index in range(3)
+        ]
 
     monkeypatch.setattr(retention, "query_runs", fake_query)
     worker = LangSmithRetentionWorker(
@@ -56,10 +69,10 @@ def test_retention_dry_run_targets_only_named_projects(monkeypatch) -> None:
         now=datetime(2026, 8, 26, tzinfo=timezone.utc),
     )
 
-    assert project_names == ["First", "HgFinance-Metrics"]
+    assert project_names == ["First", "HgFinance-Metrics", "HgFinance-Evals"]
     assert "default" not in project_names
-    assert summary.scanned == 2
-    assert summary.eligible == 2
+    assert summary.scanned == 9
+    assert summary.eligible == 3
     assert summary.deleted == 0
     assert summary.dry_run is True
 
@@ -74,7 +87,10 @@ def test_retention_delete_is_bounded_and_uses_trace_delete_endpoint(monkeypatch)
     monkeypatch.setattr(
         retention,
         "query_runs",
-        lambda _client, **kwargs: [SimpleNamespace(id="trace-1")],
+        lambda _client, **kwargs: [
+            SimpleNamespace(id="trace-new", start_time=datetime(2026, 8, 26, tzinfo=timezone.utc)),
+            SimpleNamespace(id="trace-old", start_time=datetime(2026, 8, 25, tzinfo=timezone.utc)),
+        ],
     )
     requests = []
     worker = LangSmithRetentionWorker(
@@ -88,9 +104,57 @@ def test_retention_delete_is_bounded_and_uses_trace_delete_endpoint(monkeypatch)
 
     summary = worker.run_once(now=datetime(2026, 8, 26, tzinfo=timezone.utc))
 
-    assert summary.deleted == 1
-    assert len(requests) == 1
+    assert summary.deleted == 3
+    assert len(requests) == 3
     request = requests[0]
     assert request.full_url == "https://example.test/api/v1/runs/delete"
     body = json.loads(request.data)
-    assert body == {"trace_ids": ["trace-1"], "session_id": "id-First"}
+    assert body == {"trace_ids": ["trace-old"], "session_id": "id-First"}
+
+
+def test_retention_delete_splits_large_batches(monkeypatch) -> None:
+    requests = []
+    worker = LangSmithRetentionWorker(
+        api_key="key",
+        endpoint="https://example.test",
+        enabled=True,
+        dry_run=False,
+        opener=lambda request, timeout: requests.append(request) or _Response(),
+    )
+
+    deleted = worker._delete_trace_ids(
+        "id-First",
+        [f"trace-{index}" for index in range(205)],
+    )
+
+    assert deleted == 205
+    assert [len(json.loads(request.data)["trace_ids"]) for request in requests] == [100, 100, 5]
+
+
+def test_retention_stops_retrying_hourly_delete_limit() -> None:
+    def rate_limited(_request, timeout):
+        raise urllib.error.HTTPError(
+            "https://example.test/api/v1/runs/delete",
+            429,
+            "rate limited",
+            {},
+            io.BytesIO(b'{"detail":"Hourly trace deletion limit exceeded"}'),
+        )
+
+    worker = LangSmithRetentionWorker(
+        api_key="key",
+        endpoint="https://example.test",
+        enabled=True,
+        dry_run=False,
+        opener=rate_limited,
+    )
+
+    with pytest.raises(LangSmithRetentionRateLimited, match="TRACE_DELETE_HOURLY_LIMIT"):
+        worker._delete_trace_ids("id-First", ["trace-old"])
+
+
+def test_retention_scope_can_be_restricted_to_first(monkeypatch) -> None:
+    monkeypatch.setenv("LANGSMITH_RETENTION_SCOPES", "workflow")
+    worker = LangSmithRetentionWorker(api_key="key", enabled=True, dry_run=True)
+
+    assert [project_name for _, project_name, _ in worker._projects()] == ["First"]

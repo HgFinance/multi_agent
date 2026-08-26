@@ -58,7 +58,30 @@ def execute_workflow(
                     output_contract=step.output_contract,
                     failure_action=step.failure_action,
                     attempts=0,
-                    detail="boundary validated; department adapter was not called",
+                    detail=(
+                        "post-response QA audit is queued after CEO response; "
+                        "department adapter was not called"
+                        if step.async_post_response
+                        else "boundary validated; department adapter was not called"
+                    ),
+                )
+            )
+            continue
+
+        if step.async_post_response:
+            # The synchronous boundary runner must never turn a post-response
+            # audit into a response dependency. A production queue/worker owns
+            # this dispatch; the contract runner records it as queued.
+            step_runs.append(
+                StepRun(
+                    step_id=step.id,
+                    sequence=step.sequence,
+                    status="QUEUED_ASYNC",
+                    input_contract=step.input_contract,
+                    output_contract=step.output_contract,
+                    failure_action=step.failure_action,
+                    attempts=0,
+                    detail="queued after CEO response; not on response critical path",
                 )
             )
             continue

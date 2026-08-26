@@ -37,8 +37,8 @@ The runtime chain is:
 
 `API → CEO Hermes → Task/Kanban → Department Head Hermes → Runner →
 Tool/Evidence → Worker LLM when applicable → Worker Model Gateway → Worker
-Result → deterministic validation → Department Synthesis → Risk/QA Gate → CEO
-Synthesis`.
+Result → deterministic validation → Department Synthesis → CEO Response →
+QA post-response audit (async)`.
 
 The chain is a contract, not an assertion that every environment or department
 has a complete production implementation. Department heads, employee Workers,
@@ -48,29 +48,25 @@ LLM supplies interpretation or explanation.
 
 ### QA execution topology clarification
 
-QA has two different paths and must not be described as either always blocking or
-always asynchronous:
+일반 CEO 응답 레인에서 QA는 CEO 응답 이후의 독립 감사 레인이다. CEO가 받은
+동일한 root 입력·primary handoff와 CEO 최종 응답을 QA task에 함께 전달하며,
+응답을 만들기 전 QA task를 생성하거나 QA 결과를 기다리지 않는다.
 
-1. In the general response workflow, the supervisor can synthesize terminal
-   primary department results while QA runs independently in an asynchronous
-   governance lane. `orchestration/adapters/ceo_supervisor.py` records
-   `governance_plane=async_qa` and explicitly states that QA is not a synthesis
-   prerequisite.
-2. Inside the QA department, eligible conditional LangGraph workers are
-   concurrently fanned out and gathered by
-   `qa_employee_workers.py::run_employee_workers_async`; the deterministic
-   `qa-runner` result is then combined with the worker reports.
-3. The blocking `portfolio_recommendation` graph is different: its explicit
-   barriers preserve `research → quant → trading → risk → qa → accounting → ceo`.
-   For that graph, QA remains a gate after Risk precheck and is not converted to
-   async merely because the general response lane is async.
+1. `orchestration/adapters/ceo_supervisor.py`는 CEO 응답 전달이 확인된 뒤에만
+   `qa_phase=post_response` task를 만든다. 해당 task의 유일한 부모는 CEO 응답
+   task이며, 실패해도 이미 전달된 응답을 지연·재작성·취소하지 않는다.
+2. 포트폴리오 BFF는 CEO 응답을 먼저 durable projection으로 저장한 뒤
+   `schedule_post_response_qa_audit()`를 daemon audit thread로 실행한다.
+3. QA 내부의 LangGraph worker fan-out/fan-in과 결정론 `qa-runner`는 감사 task
+   안에서 수행된다. 주문·체결·원장 안전성은 QA가 아니라 결정론 Risk/OMS/
+   Ledger admission이 응답 전에 소유한다.
 
 ```mermaid
 flowchart LR
-    P[Primary department results] --> C[CEO synthesis]
-    P --> Q[QA async governance lane]
+    P[Primary department results] --> C[CEO response]
+    C --> Q[QA post-response audit async]
     Q --> F[Post-hoc feedback / audit finding]
-    C -. high-risk or decision request .-> B[Blocking Risk/QA gate]
+    P -. execution request .-> B[Deterministic Risk/OMS gate]
 ```
 
 ## 2. 환경 분리
@@ -123,9 +119,9 @@ CEO Hermes
   → Trading Head(주문 없는 Context)
   → Risk Head
   → Accounting Head(읽기 전용)
-  → QA Head
   → HR Head(Workforce 요청일 때만)
-  → CEO Synthesis
+  → CEO Response
+  → QA Head (post-response audit, async)
 ```
 
 Integration Supabase는 개발자 Local DB와 Production Supabase와 분리한다. Integration에서 생성한 Case, Task, Artifact, Event는 Production으로 복사하지 않는다.
@@ -328,9 +324,10 @@ User Query + Mandate
   → Worker LLM 추론(Model Gateway 호출) 또는 Deterministic Runner 실행
   → Worker Result 검증
   → Department Synthesis
-  → Risk/QA Gate
-  → CEO Synthesis
+  → deterministic Risk/OMS admission when execution is requested
+  → CEO Response
   → API Response
+  → QA post-response audit (async, same CEO input + response)
 ```
 
 CEO는 종목 분석·백테스트·VaR 계산을 직접 하지 않는다. CEO는 필요한 부서와 선후관계를 결정하고, 부서 결과를 최종 설명으로 통합한다.
@@ -345,24 +342,24 @@ flowchart LR
     T --> R
     R --> W["⑦ Worker LLM<br/>Qwen2.5-14B + LoRA"]
     W --> V["⑧ 결정론 Validation<br/>Schema/Risk/PIT Gate"]
-    V --> Q["⑨ QA Gate"]
-    Q --> F["⑩ CEO Synthesis"]
-    F --> O["⑪ 사용자 응답"]
+    V --> F["⑨ CEO Response"]
+    F --> O["⑩ 사용자 응답"]
+    F --> Q["⑪ QA post-response audit (async)"]
     Q -.->|Feedback| H
 ```
 
-Worker(⑦)는 Tool 결과(⑥)를 근거로 구조화된 비구속 결과만 만들고, 승인·거부·주문·원장 판정은 전부 결정론 Validation(⑧)이 소유한다. QA(⑨)의 Feedback은 CEO Synthesis를 거치지 않고 곧바로 담당 Head(④)로 돌아가 재작업을 요청할 수 있다 — CEO가 QA 지적을 대신 걸러내지 않는다.
+Worker(⑦)는 Tool 결과(⑥)를 근거로 구조화된 비구속 결과만 만들고, 승인·거부·주문·원장 판정은 전부 결정론 Validation(⑧)이 소유한다. CEO 응답(⑨)이 사용자에게 전달된 뒤 같은 CEO 입력과 응답을 QA(⑪)가 감사한다. QA finding은 CEO 응답을 재작성하거나 이미 전달된 응답을 되돌리지 않으며, 별도 feedback/audit consumer로 환류한다.
 
 ### 4.2 Route 예시
 
 | Query Intent | 기본 부서 | 조건부 부서 | 주문 |
 |---|---|---|---|
-| `STOCK_RECOMMENDATION` | Research, Risk, QA, CEO | Quant, Accounting/Portfolio | 없음 |
-| `PORTFOLIO_RECOMMENDATION` | Accounting/Portfolio, Research, Quant, Risk, QA, CEO | Trading은 실행 요청 때만 | 없음 |
-| `RISK_REVIEW` | Research, Risk, QA, CEO | Accounting/Portfolio | 없음 |
-| `REBALANCING_PROPOSAL` | Accounting/Portfolio, Research, Quant, Risk, QA, CEO | Trading은 OrderIntent 생성 후 | 없음 |
-| `ORDER_REQUEST` | Trading, Risk, QA, Accounting, CEO | Research/Quant | 별도 Gate 필요 |
-| `WORKFORCE_REQUEST` | HR, QA, CEO | 해당 부서 | 없음 |
+| `STOCK_RECOMMENDATION` | Research, Risk, CEO → QA audit(async) | Quant, Accounting/Portfolio | 없음 |
+| `PORTFOLIO_RECOMMENDATION` | Accounting/Portfolio, Research, Quant, Risk, CEO → QA audit(async) | Trading은 실행 요청 때만 | 없음 |
+| `RISK_REVIEW` | Research, Risk, CEO → QA audit(async) | Accounting/Portfolio | 없음 |
+| `REBALANCING_PROPOSAL` | Accounting/Portfolio, Research, Quant, Risk, CEO → QA audit(async) | Trading은 OrderIntent 생성 후 | 없음 |
+| `ORDER_REQUEST` | Trading, Risk, Accounting, CEO → QA audit(async) | Research/Quant | 별도 deterministic Gate 필요 |
+| `WORKFORCE_REQUEST` | HR, QA, CEO | 해당 부서 | 승인 workflow 예외 |
 
 LLM Head가 제안한 Route는 결정론 Allowlist와 Mandate Policy로 검증한다. LLM Planner가 실패하거나 허용되지 않은 부서를 제안하면 안전한 Fallback Route 또는 `ESCALATE`를 반환하며 자동 승인하지 않는다.
 
@@ -377,11 +374,12 @@ Query: "삼성전자, SK하이닉스 중 지금 어떤 걸 사는 게 나아?"
 
 | STEP | 담당 | 내용 | Decision |
 |---|---|---|---|
-| 1 | CEO | Intent=`STOCK_RECOMMENDATION` 분류, `case_id` 발급, Research/Quant/Risk/QA Task 생성 | — |
+| 1 | CEO | Intent=`STOCK_RECOMMENDATION` 분류, `case_id` 발급, Research/Quant/Risk primary Task 생성 | — |
 | 2 | Research | 005930·000660 실적·뉴스·밸류에이션 Evidence 수집 | `RECOMMEND`(둘 다 근거 확보) |
 | 3 | Quant | 두 종목의 수익률·변동성·Drawdown을 Factor/Strategy 관점에서 비교 | `RECOMMEND` |
 | 4 | Risk | 현재 포트폴리오 반도체 섹터 비중 28%. SK하이닉스를 제안 규모대로 편입하면 36%로 Mandate 섹터 한도(30%) 초과. 단일 종목 10% 한도는 준수 | `RESIZE`(SK하이닉스 편입 규모 축소 권고) |
-| 5 | QA | Evidence 인용, Quant 수치 재현성, Risk 계산 근거 재검증 | `PASS` |
+| 5 | CEO | primary 결과를 종합해 사용자 응답을 먼저 전달 | `HOLD`/`ESCALATE` |
+| 6 | QA | CEO가 받은 동일 입력과 CEO 응답의 Evidence·수치·재현성을 사후 비동기 재검증 | `PASS`/`WARN`/`FAIL` |
 | 6 | CEO | 삼성전자는 원안, SK하이닉스는 Risk의 `RESIZE`를 보존한 축소 비중으로 종합. Trading/OMS 미호출 | — |
 
 STEP 4(Risk) Task의 `agent-task-result.v1` 예시:
@@ -416,8 +414,8 @@ Risk가 `RESIZE` 또는 `HOLD`를 반환하면 CEO는 이를 보존한다. CEO�
 CEO
   → Research
   → Risk
-  → QA
-  → CEO
+  → CEO Response
+  → QA post-response audit (async)
 ```
 
 Quant·Trading·OMS·Broker는 호출하지 않는다. 이 Query는 `RISK_REVIEW` Intent로, 매수·매도 의사가 없는 순수 조회이기 때문이다.
@@ -430,8 +428,8 @@ CEO
   → Risk: OrderIntent를 결정론 Risk Engine에 통과 → APPROVE/RESIZE/REJECT
   → Trading: Risk APPROVE/RESIZE 결과대로만 desk-runner가 Order 생성 → oms.submit
   → Accounting: Fill 반영(읽기 전용 조회가 아니라 실제 Ledger Posting 대상)
-  → QA: 사후 Evidence·한도 준수 재검증
-  → CEO: 체결 결과 종합
+  → CEO Response: 체결 결과 종합·전달
+  → QA: 동일 입력·CEO 응답의 사후 Evidence·한도 준수 재검증(비동기)
 ```
 
 `trader-pm-agent`는 Risk Gate를 통과하기 전 Order를 만들지 않고, Risk가 `REJECT`하면 Trading은 `NOT_EXECUTED`로 끝난다. CEO는 이 어느 단계에서도 승인·거부를 대신하지 않는다 — 이 예시만 §4.2 Route 표의 `ORDER_REQUEST` 행에 해당하고, 4.3·4.4는 주문을 만들지 않는다.
@@ -896,7 +894,7 @@ The runtime-specific boot and execution dependency order remains:
 3. Case, task, dependency, and idempotent event state must exist before Kanban execution.
 4. Department Head, runner, tool/evidence, and Worker Gateway/adapter resolution must be initialized before a Worker result is accepted.
 5. Result schema validation, timeout/retry/replay recording, and deterministic gates must complete before synthesis or any state mutation.
-6. Risk, QA, accounting, OMS, and read-only production-advisory boundaries must remain enforced before a response is released.
+6. Risk, accounting, OMS, and read-only production-advisory boundaries must remain enforced before a response is released; QA post-response audit is recorded after delivery and is not a response prerequisite.
 
 These are runtime contracts and dependency constraints, not implementation phases. Acceptance Scenarios below remain the validation examples for these contracts.
 ## 13. Acceptance Scenarios
@@ -913,7 +911,7 @@ Mandate: single_stock <= 10%, sector(반도체) <= 30%, risk=medium
 통과 조건:
 
 - CEO가 `STOCK_RECOMMENDATION`으로 분류
-- Research·Risk·QA Task 생성
+- Research·Risk Task 생성 후 CEO 응답을 먼저 전달하고 QA post-response audit Task 생성
 - Quant는 Route Policy에 따라 조건부 또는 실행
 - 모든 Task가 같은 `case_id`, `trace_id` 사용
 - Evidence가 없는 결론은 `HOLD` 또는 `ESCALATE`
@@ -926,7 +924,7 @@ Mandate: single_stock <= 10%, sector(반도체) <= 30%, risk=medium
 - Research가 후보와 Evidence 생성
 - Quant가 필요한 경우 배분·변동성·Drawdown 검증
 - Risk가 Mandate·Concentration 검증
-- QA가 Evidence·수치·재현성 검증
+- QA가 CEO가 받은 동일 입력과 CEO 응답의 Evidence·수치·재현성을 사후 비동기로 검증
 - CEO가 추천과 제외 이유를 종합
 - Ledger/NAV/Order 변경 0건
 
@@ -935,7 +933,7 @@ Mandate: single_stock <= 10%, sector(반도체) <= 30%, risk=medium
 - Model Timeout: Worker `DEGRADED`
 - Tool Scope 거부: `REJECTED` 또는 `ESCALATE`
 - Schema 실패: 성공 처리 금지
-- Evidence 부족: QA `WARN/FAIL`, CEO `HOLD/ESCALATE`
+- Evidence 부족: CEO는 응답 시 `HOLD/ESCALATE`, QA는 사후 `WARN/FAIL` finding 기록
 - Redis 중복 Event: `idempotency_key`로 한 번만 상태 반영
 - Trace/Replay Manifest 누락: Production 성공으로 승격 금지
 

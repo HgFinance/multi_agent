@@ -40,6 +40,8 @@ from ledger import (  # noqa: E402
     Ledger,
 )
 
+from orchestration.service_health import probe_http, probe_postgres
+
 
 def _load_ledger_repository():
     """Resolve the accounting repository without cross-department collisions."""
@@ -374,9 +376,18 @@ def reconcile_once(repo: LedgerRepository, snapshot: BrokerAccountSnapshot) -> d
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--healthcheck", action="store_true")
     args = parser.parse_args()
     interval = max(10, int(os.environ.get("LS_PAPER_RECONCILE_INTERVAL_SECONDS", "60")))
     base_url = os.environ.get("PORTFOLIO_BFF_INTERNAL_URL", "http://portfolio-bff:8000")
+    if args.healthcheck:
+        repo = LedgerRepository.from_env(required=True)
+        if repo is None:  # pragma: no cover - required=True is the contract
+            raise LSPaperAlignmentError("durable accounting repository is unavailable")
+        repo.close()
+        probe_postgres(dsn_env="DATABASE_URL", role_env="ACCOUNTING_DATABASE_ROLE")
+        probe_http(base_url.rstrip("/") + "/health/ready")
+        return 0
     repo = LedgerRepository.from_env(required=True)
     assert repo is not None
     try:

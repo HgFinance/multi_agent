@@ -1,6 +1,8 @@
 import os
 import inspect
+import sqlite3
 import threading
+import time
 
 
 _SENSITIVE_WORKER_ENV = (
@@ -127,8 +129,118 @@ if os.environ.get("HGFINANCE_DISPATCH_GUARD") == "1":
                             else:
                                 os.environ.pop(name, None)
 
-            _hgfinance_scoped_default_spawn._hgfinance_secret_scope_active = True
-            kb._default_spawn = _hgfinance_scoped_default_spawn
+            def _observe_accounting_worker_after_exit(task, pid):
+                """Attach task/model/tool metadata at the real spawn boundary.
+
+                Some Hermes releases resolve ``HERMES_BIN`` differently inside
+                the detached child. The dispatcher itself is the authoritative
+                process that knows both the claimed task/run and the spawned
+                PID, so keep this small fail-open observer here as the durable
+                Accounting fallback. It sends no task content.
+                """
+
+                if str(getattr(task, "assignee", "") or "").strip() != \
+                        "accounting-portfolio-department":
+                    return
+                task_id = str(getattr(task, "id", "") or "").strip()
+                run_id = getattr(task, "current_run_id", None)
+                if not task_id or pid is None:
+                    return
+
+                def _observe():
+                    max_runtime = getattr(task, "max_runtime_seconds", None)
+                    try:
+                        timeout = max(60.0, min(float(max_runtime or 600) + 30.0, 1800.0))
+                    except (TypeError, ValueError):
+                        timeout = 630.0
+                    deadline = time.monotonic() + timeout
+                    return_code = 0
+                    while time.monotonic() < deadline:
+                        try:
+                            waited_pid, wait_status = os.waitpid(int(pid), os.WNOHANG)
+                        except (ChildProcessError, OSError):
+                            return
+                        if waited_pid == int(pid):
+                            try:
+                                return_code = os.waitstatus_to_exitcode(wait_status)
+                            except (AttributeError, ValueError):
+                                return_code = 0
+                            break
+                        time.sleep(0.5)
+                    else:
+                        return
+
+                    try:
+                        import sys
+                        from pathlib import Path
+
+                        scripts_dir = str(Path(__file__).resolve().parents[2] / "scripts")
+                        if scripts_dir not in sys.path:
+                            sys.path.insert(0, scripts_dir)
+                        from hermes_worker_observability import (
+                            publish_accounting_worker_trace,
+                        )
+
+                        db_path = os.environ.get("HERMES_KANBAN_DB", "")
+                        task_status = ""
+                        latest_run_id = run_id
+                        try:
+                            connection = sqlite3.connect(
+                                f"file:{Path(db_path).resolve()}?mode=ro",
+                                uri=True,
+                                timeout=1.0,
+                            )
+                            try:
+                                row = connection.execute(
+                                    "SELECT status FROM tasks WHERE id = ?",
+                                    (task_id,),
+                                ).fetchone()
+                                task_status = str(row[0] or "") if row else ""
+                                if latest_run_id is None:
+                                    row = connection.execute(
+                                        "SELECT id FROM task_runs WHERE task_id = ? "
+                                        "ORDER BY id DESC LIMIT 1",
+                                        (task_id,),
+                                    ).fetchone()
+                                    latest_run_id = row[0] if row else None
+                            finally:
+                                connection.close()
+                        except (OSError, TypeError, ValueError, sqlite3.Error):
+                            pass
+
+                        started_at = getattr(task, "started_at", None) or \
+                            getattr(task, "created_at", None) or time.time()
+                        publish_accounting_worker_trace(
+                            task_id=task_id,
+                            task_body=str(getattr(task, "body", "") or ""),
+                            task_status=task_status,
+                            run_id=str(latest_run_id or "unknown"),
+                            return_code=int(return_code),
+                            started_ms=int(float(started_at) * 1000),
+                            ended_ms=int(time.time() * 1000),
+                            argv=["-p", "accounting-portfolio-department"],
+                            env=os.environ,
+                        )
+                    except Exception:
+                        # Observability must never change dispatcher behavior.
+                        return
+
+                threading.Thread(
+                    target=_observe,
+                    name=f"accounting-trace-{task_id}",
+                    daemon=True,
+                ).start()
+
+            _original_spawn_for_observation = _hgfinance_scoped_default_spawn
+
+            def _hgfinance_scoped_default_spawn_with_observation(
+                    task, workspace, *, board=None):
+                pid = _original_spawn_for_observation(task, workspace, board=board)
+                _observe_accounting_worker_after_exit(task, pid)
+                return pid
+
+            _hgfinance_scoped_default_spawn_with_observation._hgfinance_secret_scope_active = True
+            kb._default_spawn = _hgfinance_scoped_default_spawn_with_observation
             os.environ["HGFINANCE_DISPATCH_SECRET_SCOPE_STATUS"] = "ACTIVE_V1"
         else:
             _fail_closed_secret_scope("NO_DEFAULT_SPAWN_HOOK")

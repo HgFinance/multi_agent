@@ -61,8 +61,8 @@ from orchestration.ceo_workflow_scope import (
     langsmith_trace_context_from_body,
     langsmith_trace_run_id_from_body,
     mandate_snapshot_present,
-    primary_idempotency_key,
     previous_question_context_from_body,
+    primary_idempotency_key,
     read_marker,
     selected_primary_profiles_from_task,
     user_paper_order_scope_from_body,
@@ -549,17 +549,14 @@ class SupervisorState:
 
     def __post_init__(self) -> None:
         # Keep the old constructor field for callers/tests and resolve it once
-        # into the canonical policy used by decisions. Binding remains the
-        # historical fail-closed gate unless a caller supplies an explicit
-        # canonical policy (PAPER passes qa_enabled=false).
+        # into the canonical policy used by decisions. QA is post-response in
+        # every workflow mode; deterministic Risk/OMS admission owns execution
+        # safety before any state-changing operation.
         enabled = self.qa_enabled
         if enabled is None:
             enabled = True if self.workflow_mode == "binding" else bool(self.qa_required)
-        blocks = self.qa_blocks_response
-        if blocks is None:
-            blocks = self.workflow_mode == "binding" and bool(enabled)
         object.__setattr__(self, "qa_enabled", bool(enabled))
-        object.__setattr__(self, "qa_blocks_response", bool(blocks) and bool(enabled))
+        object.__setattr__(self, "qa_blocks_response", False)
 
     @property
     def analysis_children(self) -> tuple[ChildTaskState, ...]:
@@ -1252,8 +1249,6 @@ def _binding_paper_template_child(
         not state.paper_order
         or state.workflow_mode != "binding"
         or not state.root_is_user_query
-        or state.qa_blocks_response
-        or state.qa_children
         or state.has_action(SupervisorAction.SYNTHESIZE)
         or state.missing_primary_profiles
         or state.duplicate_primary_profiles
@@ -1573,101 +1568,15 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
         child.task_id for child in state.analysis_children if child.done
     )
 
+    # QA is deliberately absent from this decision tree. CEO receives the
+    # terminal primary/Risk handoffs first and can create its response. The
+    # terminal response observer then schedules a separate QA audit containing
+    # the same CEO input plus the CEO response.
     if state.workflow_mode == "analysis":
-        if state.qa_enabled and not state.qa_children:
-            usable_primary_count = len(state.usable_analysis_children)
-            all_primary_blocked = bool(state.analysis_children) and all(
-                child.blocked for child in state.analysis_children
-            )
-            if usable_primary_count == 0 and all_primary_blocked:
-                logger.info(
-                    "qa-readiness root=%s usable_primary_results=0 "
-                    "blocked_primary_results=%d qa_skip_reason=all_primary_blocked",
-                    state.parent_task_id,
-                    len(state.analysis_children),
-                )
-                # There is no analysis body for QA to audit. Preserve the
-                # existing analysis synthesis path, which already carries the
-                # blocked primary summaries to the CEO failure-aware result.
-                return _analysis_synthesis_decision(state)
-            return SupervisorDecision(
-                SupervisorAction.RUN_QA,
-                state.parent_task_id,
-                assignee=canonical_profile_for_department("qa"),
-                title="QA audit completed primary analysis",
-                body=(
-                    f"{SUPERVISOR_MARKER} action=RUN_QA\n"
-                    "workflow_plane=governance\n"
-                    "evaluation_sink=audit.eval_runs\n"
-                    "feedback_consumer=hr-department\n"
-                    "store_reasoning_trace=false\n"
-                    + json.dumps(
-                        [
-                            child_handoff_payload(
-                                child,
-                                department=child.department,
-                                actor_type="department_head",
-                            )
-                            for child in state.analysis_children
-                        ],
-                        ensure_ascii=False,
-                    )
-                ),
-                parent_task_ids=primary_ids,
-                reason="primary_results_ready_async_audit",
-            )
         synthesis = _analysis_synthesis_decision(state)
         if synthesis is not None:
             return synthesis
         return None
-    # Binding/high-risk workflows retain the existing fail-closed QA path.
-    if state.qa_blocks_response:
-        if not state.qa_children:
-            return SupervisorDecision(
-                SupervisorAction.RUN_QA,
-                state.parent_task_id,
-                assignee=canonical_profile_for_department("qa"),
-                title="QA and audit completed primary analysis",
-                body=(
-                    f"{SUPERVISOR_MARKER} action=RUN_QA\n"
-                    "Audit the completed primary analysis. Preserve citations,"
-                    " reject unsupported claims, and report blocked findings.\n"
-                    + json.dumps(
-                        [
-                            child_handoff_payload(
-                                child,
-                                profile=child.profile,
-                                status=child.status,
-                            )
-                            for child in state.analysis_children
-                        ],
-                        ensure_ascii=False,
-                    )
-                ),
-                parent_task_ids=primary_ids,
-                reason="primary_analysis_terminal",
-            )
-        if any(not child.terminal for child in state.qa_children):
-            return None
-        for child in state.qa_children:
-            if child.blocked or child.failed:
-                if child.status != "triage" and child.retry_count < state.max_retries:
-                    return SupervisorDecision(
-                        SupervisorAction.RETRY_TASK,
-                        state.parent_task_id,
-                        target_task_id=child.task_id,
-                        retry_count=child.retry_count,
-                        reason="qa_failed_retry",
-                    )
-                return _binding_partial_defer_decision(
-                    state,
-                    reason="qa_retry_limit_reached",
-                )
-        if not all(child.done for child in state.qa_children):
-            return _binding_partial_defer_decision(
-                state,
-                reason="qa_terminal_without_success",
-            )
 
     if state.has_action(SupervisorAction.SYNTHESIZE):
         return None
@@ -1703,8 +1612,8 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
     # Binding PAPER workflows were handled by the structured template above.
     if _single_primary_passthrough_child(state) is not None:
         return None
-    qa_ids = tuple(
-        child.task_id for child in state.qa_children if child.done
+    primary_ids = tuple(
+        child.task_id for child in state.analysis_children if child.done
     )
     return SupervisorDecision(
         SupervisorAction.SYNTHESIZE,
@@ -1714,7 +1623,8 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
         body=(
             f"{SUPERVISOR_MARKER} action=SYNTHESIZE\n"
             "workflow_plane=response\nworkflow_mode=binding\n"
-            "Synthesize only after existing QA/Risk/approval gate. For a marked "
+            "Synthesize the terminal primary/Risk result immediately. QA is a "
+            "post-response asynchronous audit and is never a response gate. For a marked "
             "user PAPER-order result, preserve the primary final_answer verbatim; "
             "a non-binding or rejected result must explicitly say no order was "
             "submitted and must never be described as pending review.\n"
@@ -1725,13 +1635,13 @@ def decide_supervisor(state: SupervisorState) -> SupervisorDecision | None:
                         profile=child.profile,
                         status=child.status,
                     )
-                    for child in state.analysis_children + state.qa_children
+                    for child in state.analysis_children
                 ],
                 ensure_ascii=False,
             )
         ),
-        parent_task_ids=qa_ids,
-        reason="binding_qa_completed_final_synthesis",
+        parent_task_ids=primary_ids,
+        reason="binding_primary_completed_final_synthesis",
     )
 
 
@@ -3656,6 +3566,160 @@ class CeoSupervisorService:
                 f"workflow {task_id} canonical abort failed: {exc}"
             ) from exc
 
+    def _schedule_post_response_qa(
+        self,
+        *,
+        root_task_id: str,
+        root_payload: Mapping[str, Any],
+        response_task: Mapping[str, Any],
+        task_payloads: Sequence[Mapping[str, Any]],
+        delivery_status: str | None,
+    ) -> str | None:
+        """Create the QA audit only after the CEO response is delivered.
+
+        QA is deliberately not a supervisor decision dependency. The response
+        task is the sole parent of this audit task, while the audit body carries
+        the exact root input and primary handoffs that the CEO received plus
+        the CEO response itself. A stable idempotency key makes retries safe.
+        """
+
+        response_id = str(
+            response_task.get("id") or response_task.get("task_id") or ""
+        ).strip()
+        if not response_id:
+            logger.warning(
+                "post-response-qa-skipped root=%s reason=response_task_id_missing",
+                root_task_id,
+            )
+            return None
+
+        root_body = str(root_payload.get("body") or "")
+        workflow_mode = workflow_mode_from_body(root_body)
+        raw_selected = selected_primary_profiles_from_task(root_payload)
+        _, planner_qa_requested = split_planner_selection(raw_selected)
+        contract = canonical_qa_contract(
+            workflow_mode=workflow_mode,
+            body=root_body,
+            metadata=merged_run_metadata(root_payload),
+            legacy_qa_required=self.qa_required,
+            planner_qa_requested=planner_qa_requested,
+        )
+        if not contract.qa_enabled:
+            logger.info(
+                "post-response-qa-skipped root=%s reason=qa_disabled",
+                root_task_id,
+            )
+            return None
+
+        for payload in task_payloads:
+            body = str(payload.get("body") or "")
+            if (
+                terminal_workflow_role(payload) == "qa"
+                and read_marker(body, "qa_phase") == "post_response"
+            ):
+                return str(payload.get("id") or payload.get("task_id") or "") or None
+
+        response_state = ChildTaskState.from_hermes(response_task)
+        primary_handoffs: list[dict[str, Any]] = []
+        for payload in task_payloads:
+            payload_id = str(payload.get("id") or payload.get("task_id") or "")
+            if payload_id in {root_task_id, response_id}:
+                continue
+            # The root is included in the observer snapshot for input
+            # recovery, but it is not a department handoff and may not carry
+            # a canonical Hermes assignee.
+            if terminal_workflow_role(payload) != "primary":
+                continue
+            task = ChildTaskState.from_hermes(payload)
+            if (
+                task.is_in_workflow(root_task_id)
+                and task.workflow_role == "primary"
+            ):
+                primary_handoffs.append(
+                    child_handoff_payload(
+                        task,
+                        profile=task.profile,
+                        status=task.status,
+                    )
+                )
+
+        # The root body is the immutable user input/mandate snapshot. The
+        # primary handoff list is the exact content supplied to CEO synthesis;
+        # the response payload is the output QA must audit.
+        audit_input = {
+            "root_task_id": root_task_id,
+            "root_input": root_body,
+            "ceo_input": str(response_task.get("body") or ""),
+            "primary_handoffs": primary_handoffs,
+            "ceo_response": child_handoff_payload(
+                response_state,
+                response_task_id=response_id,
+                delivery_status=delivery_status or "completed",
+            ),
+        }
+        body = (
+            f"{SUPERVISOR_MARKER} action=RUN_QA\n"
+            "workflow_plane=governance\n"
+            "response_plane=completed\n"
+            "qa_phase=post_response\n"
+            "qa_timing=after_ceo_response\n"
+            "response_delivered=true\n"
+            f"response_task_id={response_id}\n"
+            f"ceo_input_root_task_id={root_task_id}\n"
+            "ceo_input_is_identical=true\n"
+            "qa_blocks_response=false\n"
+            "evaluation_sink=audit.eval_runs\n"
+            "feedback_consumer=hr-department\n"
+            "store_reasoning_trace=false\n"
+            "Audit the exact CEO input and final response below. Check evidence,"
+            " citations, unsupported claims, scope, and reproducibility. This is"
+            " an independent post-response audit; do not rewrite, delay, or gate"
+            " the already delivered CEO response.\n"
+            + json.dumps(audit_input, ensure_ascii=False)
+        )
+        try:
+            created = self.client.create_task(
+                title="QA post-response audit",
+                body=build_scoped_task_body(
+                    body,
+                    root_task_id,
+                    role="qa",
+                    workflow_mode=workflow_mode,
+                    has_mandate=mandate_snapshot_present(root_body),
+                    previous_question_context=previous_question_context_from_body(
+                        root_body
+                    ),
+                ),
+                assignee=canonical_profile_for_department("qa"),
+                parent_task_ids=(response_id,),
+                idempotency_key=f"{root_task_id}:post-response-qa",
+            )
+        except Exception as exc:  # noqa: BLE001 - audit is non-binding post-response work.
+            logger.warning(
+                "post-response-qa-create-failed root=%s response=%s error=%s",
+                root_task_id,
+                response_id,
+                type(exc).__name__,
+            )
+            return None
+
+        created_task = created.get("task", created) if isinstance(created, Mapping) else created
+        created_id = (
+            str(created_task.get("id") or created_task.get("task_id") or "")
+            if isinstance(created_task, Mapping)
+            else ""
+        )
+        logger.info(
+            "post-response-qa-scheduled root=%s response=%s qa_task=%s "
+            "delivery_status=%s primary_count=%d",
+            root_task_id,
+            response_id,
+            created_id or "deduped",
+            delivery_status or "completed",
+            len(primary_handoffs),
+        )
+        return created_id or None
+
     def _project_terminal_task(
         self,
         *,
@@ -3861,6 +3925,75 @@ class CeoSupervisorService:
                     else delivery_error
                 ),
             )
+            response_confirmed = (
+                terminal_status not in {"blocked", "gave_up", "failed", "crashed", "timed_out"}
+                and (
+                    self.discord_delivery is None
+                    or delivery_status in {"sent", "deduped"}
+                )
+            )
+            if response_confirmed:
+                self._schedule_post_response_qa(
+                    root_task_id=root_task_id,
+                    root_payload=root_payload,
+                    response_task=task,
+                    task_payloads=task_payloads,
+                    delivery_status=delivery_status,
+                )
+
+        # Risk Hermes owns a separate orchestration LLM from the on-demand
+        # Qwen Legal Wiki span. Profile that orchestration session after the
+        # primary is terminal so QA can distinguish model turns, tool latency,
+        # context growth and blocked-tool attempts. This observer is redacted,
+        # idempotent and fail-open; it never delays the user response lane.
+        if (
+            role == "primary"
+            and str(task.get("assignee") or "").strip() == "risk-management"
+        ):
+            try:
+                risk_metadata = merged_run_metadata(task)
+                risk_session_id = str(
+                    risk_metadata.get("worker_session_id") or ""
+                ).strip()
+                risk_started_ms = _task_timestamp_ms(task, "started_at")
+                risk_ended_ms = _task_timestamp_ms(task, "completed_at")
+                if risk_session_id and risk_started_ms and risk_ended_ms:
+                    from orchestration.risk_observability import (
+                        publish_risk_hermes_profile,
+                    )
+
+                    observer_environment = getattr(
+                        self.client, "environment", os.environ
+                    )
+                    risk_log_dir = os.path.join(
+                        observer_environment.get("HERMES_HOME", "/opt/data"),
+                        "profiles",
+                        "risk-management",
+                        "logs",
+                    )
+                    published = publish_risk_hermes_profile(
+                        task_id=task_id,
+                        root_id=root_task_id,
+                        session_id=risk_session_id,
+                        log_dir=risk_log_dir,
+                        started_ms=risk_started_ms,
+                        ended_ms=risk_ended_ms,
+                        status=str(task.get("status") or "completed"),
+                        environment=observer_environment,
+                    )
+                    logger.info(
+                        "risk-hermes-worker-profile task=%s session=%s "
+                        "published=%s",
+                        task_id,
+                        risk_session_id,
+                        published,
+                    )
+            except Exception as exc:  # noqa: BLE001 - observer is fail-open.
+                logger.warning(
+                    "risk-hermes-worker-profile-failed task=%s error=%s",
+                    task_id,
+                    type(exc).__name__,
+                )
 
         # Non-binding observers run after the user response lane. Their
         # filesystem/HTTP work must not delay completed synthesis delivery.
@@ -6805,6 +6938,13 @@ class CeoSupervisorService:
                             department=passthrough.profile,
                             task_id=passthrough.task_id,
                         )
+                        self._schedule_post_response_qa(
+                            root_task_id=root_id,
+                            root_payload=root_payload,
+                            response_task=primary_payload,
+                            task_payloads=(root_payload, *payloads),
+                            delivery_status=delivery_status,
+                        )
 
                 decision_started_ms = time.time_ns() // 1_000_000
                 deferred_decision = _deferred_conditional_decision(
@@ -6928,114 +7068,6 @@ class CeoSupervisorService:
                     state,
                     synthesis_timing=synthesis_timing,
                 )
-                if (
-                    decision.action == SupervisorAction.RUN_QA
-                    and state.workflow_mode == "analysis"
-                ):
-                    # FAST path with race protection.
-                    #
-                    # Synthesis depends only on the already-terminal primary
-                    # results, not QA. We still need to observe a synthesis that
-                    # may have been created concurrently while RUN_QA was being
-                    # created, but rebuilding the complete workflow is expensive
-                    # because it launches multiple Hermes CLI subprocesses.
-                    #
-                    # Prefer one board-list read and inspect only durable workflow
-                    # markers. Production clients use indexed candidate IDs and
-                    # authoritative targeted show() calls. Small test/fake
-                    # clients and uncertain indexes retain the old fallback.
-                    synthesis_exists = False
-                    indexed_synthesis = getattr(
-                        self.client,
-                        "authoritative_synthesis_exists",
-                        None,
-                    )
-
-                    if callable(indexed_synthesis):
-                        try:
-                            synthesis_exists = indexed_synthesis(root_id)
-                        except (
-                            RootScopedIndexUnavailable,
-                            HermesKanbanCommandError,
-                            KeyError,
-                        ) as exc:
-                            _record_full_board_fallback(
-                                lane=current_cli_lane(),
-                                reason=(
-                                    "synthesis-index-uncertain-"
-                                    f"{type(exc).__name__}"
-                                ),
-                                root_id=root_id,
-                            )
-                            indexed_synthesis = None
-
-                    if indexed_synthesis is None:
-                        list_tasks = getattr(self.client, "list_tasks", None)
-                        if callable(list_tasks):
-                            for row in list_tasks():
-                                body = str(row.get("body") or "")
-                                row_role = terminal_workflow_role(row) or ""
-                                row_action = (
-                                    terminal_action(row)
-                                    or terminal_action({"body": body})
-                                    or ""
-                                )
-                                row_roots = extract_scope_references(row).root_ids
-
-                                if (
-                                    root_id in row_roots
-                                    and row_role == "synthesis"
-                                    and (
-                                        row_action == "SYNTHESIZE"
-                                        or _is_direct_ceo_response_synthesis(
-                                            role=row_role,
-                                            body=body,
-                                        )
-                                    )
-                                ):
-                                    synthesis_exists = True
-                                    break
-                        else:
-                            # Small/fake clients without list_tasks retain the
-                            # previous full-workflow fallback.
-                            _, refreshed_payloads = self.client.workflow(root_id)
-                            synthesis_exists = any(
-                                child.is_in_workflow(root_id)
-                                and child.workflow_role == "synthesis"
-                                and (
-                                    (
-                                        SUPERVISOR_MARKER in child.body
-                                        and "action=SYNTHESIZE" in child.body
-                                    )
-                                    or _is_direct_ceo_response_synthesis(
-                                        role=child.workflow_role,
-                                        body=child.body,
-                                    )
-                                )
-                                for child in (
-                                    ChildTaskState.from_hermes(payload)
-                                    for payload in refreshed_payloads
-                                    if payload.get("assignee") is not None
-                                )
-                            )
-
-                    if not synthesis_exists:
-                        synthesis = _analysis_synthesis_decision(state)
-                        if (
-                            synthesis is not None
-                            and synthesis.action == SupervisorAction.SYNTHESIZE
-                        ):
-                            synthesis_timing = new_synthesis_timing(
-                                state,
-                                time.time_ns() // 1_000_000,
-                                time.perf_counter_ns(),
-                            )
-                            execute_timed(
-                                synthesis,
-                                state,
-                                synthesis_timing=synthesis_timing,
-                            )
-                            action = f"{action},SYNTHESIZE"
                 if decision.action == SupervisorAction.CREATE_TASK:
                     self._replans[root_id] = self._replans.get(root_id, 0) + 1
                 project_terminal_observers()
@@ -7227,15 +7259,31 @@ class CeoSupervisorService:
                         f"got {sorted(requested_parent_ids)}"
                     )
             elif decision.action == SupervisorAction.SYNTHESIZE:
-                expected = (
-                    {
+                # CEO synthesis is always parented by terminal primary
+                # handoffs. QA is a child of the completed response and is
+                # therefore never a synthesis dependency, including binding
+                # workflows and late QA terminal events.
+                expected = {
+                    child.task_id
+                    for child in state.analysis_children
+                    if child.done
+                }
+                # The trusted PAPER template is completed from the persisted
+                # Trading handoff immediately after the card is created. It
+                # intentionally has no Kanban parent edge because the source
+                # task is recorded in the template metadata and the card is
+                # kept blocked until that deterministic completion succeeds.
+                if decision.reason == "binding_paper_structured_template":
+                    expected = set()
+                elif decision.reason == "binding_partial_defer_template":
+                    # A deterministic DEFER preserves completed QA/audit
+                    # evidence as its parent and must not pretend that a
+                    # failed primary was a successful response dependency.
+                    expected = {
                         child.task_id
-                        for child in state.analysis_children
+                        for child in state.qa_children
                         if child.done
                     }
-                    if state.workflow_mode == "analysis"
-                    else {child.task_id for child in state.qa_children if child.done}
-                )
                 if requested_parent_ids != expected:
                     raise SupervisorValidationError(
                         "SYNTHESIZE dependencies do not match workflow mode: "

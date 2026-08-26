@@ -104,7 +104,7 @@
 | 서비스 | 하는 일 |
 |---|---|
 | `kanban-dispatcher` | **카드를 실제로 돌리는 유일한 엔진.** 60초 tick 으로 ready 카드를 집어 자기 컨테이너 안에서 `profiles/<assignee>` 를 HERMES_HOME 삼아 에이전트 subprocess 를 띄운다. 8개 프로필 전체를 보는 유일한 고권한 컨테이너 — 포트 절대 미게시. **이게 죽으면 카드는 ready 로 영원히 앉는다** |
-| `ceo-kanban-supervisor` | CEO 종결 감시자. `kanban watch` 로 종결 이벤트를 구독해, primary 자식이 다 끝나면 QA 카드를, QA 가 끝나면 SYNTHESIZE 카드를 만든다. 이벤트당 최대 1개 bounded action, wakeup 은 root comment 로 durable 기록 |
+| `ceo-kanban-supervisor` | CEO 종결 감시자. `kanban watch` 로 종결 이벤트를 구독해, primary 자식이 다 끝나면 CEO 응답 카드를 먼저 만든다. CEO 응답 전달이 확인된 뒤 동일 입력·응답을 담은 QA post-response audit 카드를 별도 생성한다. 이벤트당 최대 1개 bounded action, wakeup 은 root comment 로 durable 기록 |
 
 ### 🏭 전략 공장 (3)
 
@@ -191,9 +191,9 @@
                           ▼
                  dispatcher 가 부서 카드 실행 ④부서 에이전트가 일하고 kanban_complete
                           ▼
-                 ceo-kanban-supervisor ⑤primary 전부 종결 감지 → QA 카드 생성
-                          ▼            ⑥QA done → SYNTHESIZE 카드 생성 (assignee=ceo-agent)
-                 dispatcher 가 SYNTHESIZE 실행 ⑦CEO 가 부서 산출을 두 번째 턴에서 종합
+                 ceo-kanban-supervisor ⑤primary 전부 종결 감지 → SYNTHESIZE CEO 응답 카드 생성
+                          ▼            ⑥CEO 응답 전달 완료 → QA post-response audit 카드 생성
+                 dispatcher 가 SYNTHESIZE 실행 ⑦CEO 가 부서 산출을 종합·전달
                           ▼
 사용자 ← ai-office ← GET /ui/ceo/tasks/{id} 폴링(2~5초) ← ceo_kanban_read (CLI 경유, DB 직접 안 염)
 ```
@@ -207,10 +207,10 @@
 1. **입구가 하나 더 생겼다: Web/Discord 공용 mirror ingress.** `apps/api/ceo_mirror.py` + `ceo_mirror_api.py` — `POST /ui/ceo/ingress`(202) 로 들어오면 채널(Web/Discord)이 달라도 **한 사용자 메시지 = CEO 실행 하나**가 되게 dedupe 경계(Redis, TTL 7일)를 통과한다. 결과는 `GET /ui/ceo/events` + `/events/stream`(SSE) 로 미러링. 기존 `/ui/ceo/ask` 폴링 경로도 유지.
 2. **당시 다계정 fixture가 있었다.** `apps/api/current_user.py`가 `X-User-Id` 헤더 판정의 단일 지점이었다. **인증이 아니다** — 서명·만료 없음, 폐쇄망 팀 테스트 전제라고 모듈 스스로 명시했다. Mandate 소유자 판정이 여기 걸렸다.
 3. **뿌리 카드 body 에 Mandate 스냅샷 블록이 실린다**(cd57f41) — CEO 플래너가 질의와 함께 사용자의 위임 조건을 읽는다.
-4. **QA·SYNTHESIS 직렬 규칙이 갈라졌다** (SOUL.md + `ceo_supervisor.py` `workflow_mode`):
-   - **non-binding 분석**: primary 종결 후 QA 와 SYNTHESIS 를 **병렬** 생성 — 종합이 QA 를 기다리지 않는다 (§3 그림의 ⑤→⑥→⑦ 직렬은 binding 경로에만 해당).
-   - **binding/고위험**: 기존 fail-closed Risk→QA→승인 게이트 유지.
-   - QA 카드는 governance plane 으로 감: `evaluation_sink=audit.eval_runs`, `feedback_consumer=hr-department` — **QA 평가 결과가 HR(에이전트 개선 루프)로 환류**되는 배선이 생겼다.
+4. **CEO 응답과 QA 감사를 분리했다** (`ceo_supervisor.py`):
+   - **일반 CEO 응답**: primary 종결 → CEO 응답 생성·전달 → QA post-response audit 생성. QA는 응답을 기다리게 하거나 재작성하지 않는다.
+   - QA audit body에는 CEO가 받은 동일한 root 입력·primary handoff와 CEO 응답을 함께 넣고, QA task의 부모는 완료된 CEO 응답 task 하나로 고정한다.
+   - **binding/고위험 실행**: Risk Engine·OMS admission이 주문·체결 전 fail-closed 안전성을 소유한다. QA 감사 결과는 이미 전달된 CEO 응답을 되돌리는 게 아니라 `audit.eval_runs`와 `feedback_consumer=hr-department`로 환류한다.
 
 ---
 

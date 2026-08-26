@@ -506,8 +506,31 @@ def _humanize_qa(value: Any, limit: int = 320) -> str:
     replacements = (
         ("Accounting Engine", "회계 시스템"),
         ("accounting system", "회계 시스템"),
+        ("Unexplained", "설명되지 않은"),
+        ("Missing source coordinates and", "출처 식별자와"),
+        ("source IDs", "출처 식별자"),
+        ("pricing evidence", "가격 근거"),
+        ("price timestamps", "가격 시각"),
+        ("quality and effective/as-of validation", "자료 품질과 기준 시점 확인"),
+        ("bridge difference", "대사 차이"),
+        ("Keep official", "공식"),
+        ("close and decision blocked until", "확정과 결정을 보류하고"),
+        (
+            "ledger/cash/valuation/fee-tax reconciliation evidence agrees",
+            "원장·현금·평가·수수료·세금 대사 근거가 일치할 때까지",
+        ),
+        ("snapshot and broker independent reconciliation absent", "스냅샷과 브로커 독립 대사가 없음"),
+        (
+            "No investment/trading eligibility decision until evidence is independently verified",
+            "근거를 독립적으로 확인하기 전에는 투자·거래 적격성을 결정하지 않음",
+        ),
         ("Mandate", "투자지침"),
+        ("Risk owner", "리스크 담당자"),
+        ("and 회계 시스템", "및 회계 시스템"),
+        ("and Accounting", "및 회계"),
         ("broker reconciliation", "브로커 대사"),
+        ("snapshot", "조회 자료"),
+        ("Require ", "필요: "),
         ("NAV", "순자산"),
         ("PIT", "기준 시점"),
         ("provenance", "자료 출처·계보"),
@@ -559,6 +582,18 @@ def _qa_findings_lines(value: Any) -> list[str]:
 
 
 def _qa_check_lines(value: Any) -> list[str]:
+    if isinstance(value, Mapping):
+        lines: list[str] = []
+        for key, item in list(value.items())[:12]:
+            if isinstance(item, Mapping):
+                result = _qa_decision_label(item.get("result") or item.get("status"))
+                detail = _humanize_qa(item.get("detail") or item.get("reason"), 180)
+            else:
+                result = _qa_decision_label(item)
+                detail = ""
+            name = qa_check_label(key)
+            lines.append(f"- {name}: {result}{f' ({detail})' if detail else ''}")
+        return lines
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return [f"- {_humanize_qa(value)}"] if value else []
     lines: list[str] = []
@@ -572,6 +607,33 @@ def _qa_check_lines(value: Any) -> list[str]:
         elif item:
             lines.append(f"- {_humanize_qa(item)}")
     return lines
+
+
+def _qa_summary_text(
+    *, task: Mapping[str, Any], metadata: Mapping[str, Any]
+) -> str:
+    """Create a Korean summary from structured QA fields, not raw run prose."""
+
+    verdict = (
+        metadata.get("verdict")
+        or metadata.get("qa_verdict")
+        or metadata.get("overall")
+        or task.get("verdict")
+    )
+    numerical = (
+        metadata.get("numerical_posture")
+        or metadata.get("numeric_posture")
+        or metadata.get("decision")
+    )
+    checks = _qa_check_lines(metadata.get("checks") or task.get("checks"))
+    findings = _qa_findings_lines(metadata.get("findings") or task.get("findings"))
+    passed = sum("통과" in line for line in checks)
+    return (
+        f"QA 검토를 완료했습니다. 종합 판정은 {_qa_decision_label(verdict)}이며, "
+        f"수치 판단은 {_qa_decision_label(numerical) if numerical else '확인 필요'}입니다. "
+        f"세부 점검 {len(checks)}건 중 통과 {passed}건, 보완이 필요한 문제 {len(findings)}건을 확인했습니다. "
+        "실패·주의 항목을 해소하기 전에는 공식 수치 확정과 투자 결정을 진행하지 않습니다."
+    )
 
 
 def _qa_body_markdown(
@@ -589,7 +651,11 @@ def _qa_body_markdown(
         or metadata.get("overall")
         or task.get("verdict")
     )
-    numerical = metadata.get("numerical_posture") or metadata.get("decision")
+    numerical = (
+        metadata.get("numerical_posture")
+        or metadata.get("numeric_posture")
+        or metadata.get("decision")
+    )
     findings = _qa_findings_lines(metadata.get("findings") or task.get("findings"))
     checks = _qa_check_lines(metadata.get("checks") or task.get("checks"))
     status = str(task.get("status") or "").casefold()
@@ -611,8 +677,14 @@ def _qa_body_markdown(
     parts.extend(checks or ["- 세부 점검 결과가 없습니다."])
     parts.extend(["", "## 주요 문제와 영향", ""])
     parts.extend(findings or ["- 중대한 문제 항목이 기록되지 않았습니다."])
-    if result_text:
-        parts.extend(["", "## QA 요약", "", _humanize_qa(result_text, 1800)])
+    parts.extend(
+        [
+            "",
+            "## QA 요약",
+            "",
+            _qa_summary_text(task=task, metadata=metadata),
+        ]
+    )
     parts.extend(
         [
             "",
@@ -952,10 +1024,10 @@ class DepartmentNotionProjection:
             qa_text_properties = {
                 "findings": findings_text,
                 "claim_checks": checks_text,
-                "claim_narrative": _humanize_qa(
-                    metadata.get("summary") or result_text, 1800
+                "claim_narrative": _qa_summary_text(
+                    task=task, metadata=metadata
                 ),
-                "원본 리포트": result_text,
+                "원본 리포트": _qa_summary_text(task=task, metadata=metadata),
             }
             for property_name, value in qa_text_properties.items():
                 spec = properties_schema.get(property_name)
@@ -990,7 +1062,11 @@ class DepartmentNotionProjection:
             else "원본 리포트"
         )
         if original_report_property in properties_schema:
-            props[original_report_property] = _rich_text(result_text)
+            props[original_report_property] = _rich_text(
+                _qa_summary_text(task=task, metadata=metadata)
+                if department == "qa"
+                else result_text
+            )
 
         created = (
             task.get("completed_at") or task.get("updated_at") or task.get("created_at")

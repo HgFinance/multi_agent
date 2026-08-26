@@ -22,7 +22,7 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertEqual(registry["workflow"]["manifest"], "orchestration/workflows/investment-case.yaml")
         self.assertEqual(
             registry["workflow"]["order"],
-            ["research", "trading", "risk", "qa", "oms-fill-gate", "accounting", "ceo"],
+            ["research", "trading", "risk", "oms-fill-gate", "accounting", "ceo", "qa-audit"],
         )
         self.assertEqual(
             registry["portfolio_recommendation_cycle"]["manifest"],
@@ -56,16 +56,17 @@ class WorkflowContractTest(unittest.TestCase):
                 "research-department",
                 "trading-department",
                 "risk-management",
-                "qa-department",
                 "trading-department",
                 "accounting-portfolio-department",
                 "ceo-agent",
+                "qa-department",
             ],
         )
-        self.assertEqual(spec.steps[4].id, "oms-fill-gate")
+        self.assertEqual(spec.steps[3].id, "oms-fill-gate")
         self.assertNotIn("quant-backtest-department", [step.department for step in spec.steps])
         self.assertEqual(spec.steps[2].output_contract, spec.steps[3].input_contract)
-        self.assertEqual(spec.steps[3].output_contract, spec.steps[4].input_contract)
+        self.assertEqual(spec.steps[5].output_contract, spec.steps[6].input_contract)
+        self.assertTrue(spec.steps[6].async_post_response)
 
     def test_strategy_research_is_a_separate_chain(self) -> None:
         spec = load_workflow("strategy-research")
@@ -123,7 +124,8 @@ class WorkflowContractTest(unittest.TestCase):
         )
 
         self.assertEqual(run.status, "COMPLETED")
-        self.assertTrue(all(step.status == "DISPATCHED" for step in run.steps))
+        self.assertTrue(all(step.status == "DISPATCHED" for step in run.steps[:-1]))
+        self.assertEqual(run.steps[-1].status, "QUEUED_ASYNC")
         self.assertFalse(run.metadata["external_writes"])
         self.assertFalse(run.metadata["orders_submitted"])
         self.assertFalse(run.metadata["ledger_posted"])
@@ -204,8 +206,9 @@ class PaperE2EAdapterTest(unittest.TestCase):
             run_id="paper-e2e-test",
         )
         self.assertEqual(run.status, "COMPLETED")
-        self.assertEqual(len(fake.calls), 7)
-        self.assertTrue(all(step.status == "DISPATCHED" for step in run.steps))
+        self.assertEqual(len(fake.calls), 6)
+        self.assertTrue(all(step.status == "DISPATCHED" for step in run.steps[:-1]))
+        self.assertEqual(run.steps[-1].status, "QUEUED_ASYNC")
 
 
 

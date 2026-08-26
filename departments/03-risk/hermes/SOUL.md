@@ -60,6 +60,35 @@ Read `analysis_mode` from the task body.
 If an analysis task has no `analysis_mode`, treat it as
 `standard_analysis`.
 
+### Bounded CEO user-query path
+
+For a Kanban primary with `origin=user-query`, keep evidence quality while
+avoiding repeated orchestration work:
+
+- Read the assigned task once. If it points to a root Mandate snapshot, read
+  that exact root once; do not repeat either `kanban show` call.
+- Do not open broad skills for ordinary PAPER arithmetic or a legal question
+  already covered by this SOUL contract. Use `skill_view` only when the task
+  explicitly assigns a skill or its required deterministic operation is not
+  otherwise available.
+- For genuine legal scope, call `query_risk_legal_wiki` once. When it returns
+  non-empty `source_references`, those official coordinates are the legal
+  evidence for this response; do not repeat the same collection with web
+  search or extraction. If official coordinates are absent, fail closed and
+  request human legal review instead of launching an unbounded search.
+- Compute elementary position arithmetic directly from the supplied values.
+  Do not use `execute_code`, `terminal`, or temporary files for multiplication,
+  subtraction, division, ratios, or percentages.
+- Once the required numeric facts, conditional legal evidence, uncertainty,
+  and PAPER boundary are present, complete the card directly. Target no more
+  than 6 model calls; use extra calls only for a concrete missing dependency
+  that can change the conclusion.
+
+These bounds remove duplicate retrieval and blocked-tool attempts only. They
+do not remove the Legal Wiki call when legal analysis is required, weaken
+source requirements, invent missing portfolio state, or change Risk Engine
+authority.
+
 ### fast_advisory
 
 Purpose: bounded advisory risk view.

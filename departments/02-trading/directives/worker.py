@@ -8,9 +8,16 @@ import time
 from datetime import datetime, timezone
 
 from broker.ls_paper_broker import LSPaperBroker
+
+from orchestration.service_health import probe_http, probe_postgres
+
 from .market_data import HttpMarketDataProvider
 from .repository import PostgresDirectiveRepository
-from .service import DirectiveServiceError, UserDirectiveService, require_paper_execution_mode
+from .service import (
+    DirectiveServiceError,
+    UserDirectiveService,
+    require_paper_execution_mode,
+)
 
 
 def _settings() -> tuple[float, int]:
@@ -82,10 +89,31 @@ def run_once(
     }
 
 
+def healthcheck() -> None:
+    """Probe the directive database and market read surface without reconciling."""
+
+    _settings()
+    require_paper_execution_mode()
+    if os.environ.get("TRADING_DIRECTIVE_REPOSITORY", "").strip().lower() != "postgres":
+        raise DirectiveServiceError(
+            "TRADING_DIRECTIVE_REPOSITORY_INVALID",
+            "directive worker requires the durable postgres repository",
+            503,
+        )
+    dsn_env = "PAPER_DATABASE_URL" if os.environ.get("PAPER_DATABASE_URL") else "DATABASE_URL"
+    probe_postgres(dsn_env=dsn_env, role_env="TRADING_DATABASE_ROLE")
+    provider = HttpMarketDataProvider.from_env()
+    probe_http(provider.base_url.rstrip("/") + "/health")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--healthcheck", action="store_true")
     args = parser.parse_args()
+    if args.healthcheck:
+        healthcheck()
+        return 0
     poll, batch = _settings()
     service = build_service()
     while True:

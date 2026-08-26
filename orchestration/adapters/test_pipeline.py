@@ -103,7 +103,12 @@ class DeterministicTestCeoAdapter:
 
 
 def build_test_handlers(repo_root: Path) -> dict[str, Any]:
-    """Build the complete seven-step pipeline with zero external side effects."""
+    """Build the complete pipeline with zero external side effects.
+
+    The final QA manifest step is recorded as a post-response async audit by
+    the workflow runner; it is intentionally not invoked on this response
+    critical path.
+    """
 
     return build_paper_handlers(
         repo_root,

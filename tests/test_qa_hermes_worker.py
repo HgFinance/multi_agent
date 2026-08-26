@@ -5,7 +5,6 @@ import os
 import sqlite3
 from pathlib import Path
 
-
 MODULE_PATH = Path(__file__).parents[1] / "scripts" / "qa_hermes_worker.py"
 SPEC = importlib.util.spec_from_file_location("qa_hermes_worker", MODULE_PATH)
 assert SPEC and SPEC.loader
@@ -224,12 +223,12 @@ def test_response_budget_does_not_change_standard_or_explicit_budget(tmp_path):
     standard = ["chat", "-q", "work"]
     explicit = ["chat", "--max-turns", "80", "-q", "work"]
 
-    assert qa_worker._bounded_worker_argv(
-        standard, db_path=db, task_id="t_qa"
-    ) == standard
-    assert qa_worker._bounded_worker_argv(
-        explicit, db_path=db, task_id="t_qa"
-    ) == explicit
+    assert (
+        qa_worker._bounded_worker_argv(standard, db_path=db, task_id="t_qa") == standard
+    )
+    assert (
+        qa_worker._bounded_worker_argv(explicit, db_path=db, task_id="t_qa") == explicit
+    )
 
 
 def test_user_query_planning_and_synthesis_receive_bounded_budget(tmp_path):
@@ -246,11 +245,101 @@ def test_user_query_planning_and_synthesis_receive_bounded_budget(tmp_path):
         )
 
     assert bounded("origin=user-query\nroot_task_role=scope_and_planning") == [
-        "chat", "--max-turns", "12", "--reasoning", "medium", "-q", "work"
+        "chat",
+        "--max-turns",
+        "12",
+        "--reasoning",
+        "medium",
+        "-q",
+        "work",
     ]
     assert bounded("workflow_role=synthesis\nworkflow_plane=response") == [
-        "chat", "--max-turns", "12", "--reasoning", "medium", "-q", "work"
+        "chat",
+        "--max-turns",
+        "12",
+        "--reasoning",
+        "medium",
+        "-q",
+        "work",
     ]
+
+
+def test_risk_user_primary_receives_budget_without_changing_other_profiles(tmp_path):
+    db = tmp_path / "kanban.db"
+    _db_with_running_run(db)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE tasks SET body = ? WHERE id = 't_qa'",
+        ("origin=user-query\nworkflow_role=primary\nanalysis_mode=standard_analysis",),
+    )
+    conn.commit()
+    conn.close()
+    argv = ["chat", "-q", "work"]
+
+    assert qa_worker._bounded_worker_argv(
+        argv,
+        db_path=db,
+        task_id="t_qa",
+        profile="risk-management",
+    ) == [
+        "chat",
+        "--max-turns",
+        "12",
+        "--reasoning",
+        "medium",
+        "--toolsets",
+        "kanban,risk-legal",
+        "-q",
+        "work",
+    ]
+    assert (
+        qa_worker._bounded_worker_argv(
+            argv,
+            db_path=db,
+            task_id="t_qa",
+            profile="research-department",
+        )
+        == argv
+    )
+
+
+def test_risk_user_primary_restricts_dispatcher_toolsets(tmp_path):
+    db = tmp_path / "kanban.db"
+    _db_with_running_run(db)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE tasks SET body = ? WHERE id = 't_qa'",
+        ("origin=user-query\nworkflow_role=primary",),
+    )
+    conn.commit()
+    conn.close()
+    argv = ["chat", "--toolsets", "kanban", "-q", "work"]
+
+    bounded = qa_worker._bounded_worker_argv(
+        argv,
+        db_path=db,
+        task_id="t_qa",
+        profile="risk-management",
+    )
+
+    assert bounded.count("--toolsets") == 1
+    assert (
+        bounded[bounded.index("--toolsets") + 1]
+        == qa_worker.RISK_USER_PRIMARY_TOOLSETS
+    )
+
+
+def test_profile_is_read_from_dispatcher_argv():
+    assert (
+        qa_worker._profile_from_argv(
+            ["chat", "-q", "work", "-p", "risk-management"]
+        )
+        == "risk-management"
+    )
+    assert (
+        qa_worker._profile_from_argv(["--profile=risk-management", "chat"])
+        == "risk-management"
+    )
 
 
 def test_explicit_response_reasoning_and_turn_budget_are_preserved(tmp_path):
@@ -264,12 +353,10 @@ def test_explicit_response_reasoning_and_turn_budget_are_preserved(tmp_path):
     conn.commit()
     conn.close()
 
-    explicit = [
-        "chat", "--max-turns", "9", "--reasoning", "high", "-q", "work"
-    ]
-    assert qa_worker._bounded_worker_argv(
-        explicit, db_path=db, task_id="t_qa"
-    ) == explicit
+    explicit = ["chat", "--max-turns", "9", "--reasoning", "high", "-q", "work"]
+    assert (
+        qa_worker._bounded_worker_argv(explicit, db_path=db, task_id="t_qa") == explicit
+    )
 
 
 def test_dispatch_worker_uses_process_cwd_instead_of_deprecated_terminal_env(
@@ -284,6 +371,16 @@ def test_dispatch_worker_uses_process_cwd_instead_of_deprecated_terminal_env(
 
     assert "TERMINAL_CWD" not in env
     assert env["UNCHANGED_SENTINEL"] == "preserved"
+
+
+def test_dispatch_worker_without_run_env_drops_deprecated_terminal_cwd(monkeypatch):
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_12345678")
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
+    monkeypatch.setenv("TERMINAL_CWD", "/opt/data/shared-kanban/workspace")
+
+    qa_worker._drop_dispatcher_terminal_cwd()
+
+    assert "TERMINAL_CWD" not in os.environ
 
 
 def test_interactive_worker_keeps_explicit_terminal_env(monkeypatch) -> None:

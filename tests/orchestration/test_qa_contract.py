@@ -14,7 +14,7 @@ from orchestration.qa_contract import (
 
 
 class QaContractTest(unittest.TestCase):
-    def test_analysis_and_binding_have_separate_intent_flags(self) -> None:
+    def test_all_response_modes_use_post_response_qa(self) -> None:
         analysis = canonical_qa_contract(workflow_mode="analysis")
         binding = canonical_qa_contract(workflow_mode="binding")
         excluded = canonical_qa_contract(
@@ -22,7 +22,7 @@ class QaContractTest(unittest.TestCase):
         )
 
         self.assertEqual((analysis.qa_enabled, analysis.qa_blocks_response), (True, False))
-        self.assertEqual((binding.qa_enabled, binding.qa_blocks_response), (True, True))
+        self.assertEqual((binding.qa_enabled, binding.qa_blocks_response), (True, False))
         self.assertEqual((excluded.qa_enabled, excluded.qa_blocks_response), (False, False))
 
     def test_legacy_false_preserves_explicit_async_marker_only(self) -> None:
@@ -37,6 +37,15 @@ class QaContractTest(unittest.TestCase):
         self.assertTrue(async_legacy.qa_enabled)
         self.assertFalse(async_legacy.qa_blocks_response)
         self.assertFalse(excluded.qa_enabled)
+
+    def test_legacy_blocking_marker_is_normalized_to_post_response(self) -> None:
+        contract = canonical_qa_contract(
+            workflow_mode="binding",
+            body="qa_enabled=true\nqa_blocks_response=true",
+        )
+
+        self.assertTrue(contract.qa_enabled)
+        self.assertFalse(contract.qa_blocks_response)
 
     def test_planner_qa_is_not_an_analysis_primary(self) -> None:
         primary, qa_requested = split_planner_selection(
@@ -110,7 +119,7 @@ class QaContractTest(unittest.TestCase):
         self.assertIn("qa_enabled=true", analysis)
         self.assertIn("qa_blocks_response=false", analysis)
         self.assertIn("qa_enabled=true", binding)
-        self.assertIn("qa_blocks_response=true", binding)
+        self.assertIn("qa_blocks_response=false", binding)
         self.assertIn("qa_enabled=false", excluded)
         self.assertIn("qa_blocks_response=false", excluded)
 

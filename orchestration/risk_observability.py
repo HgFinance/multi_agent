@@ -3,14 +3,23 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
+import re
 import time
 from collections.abc import Iterator, Mapping
+from datetime import datetime, timezone
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
+from urllib import error as urllib_error
+from urllib import request as urllib_request
+from uuid import NAMESPACE_URL, uuid5
 
 logger = logging.getLogger(__name__)
+
+from orchestration.llm_observability import langsmith_project
 
 RISK_SPANS = frozenset(
     {
@@ -59,6 +68,224 @@ _SAFE_KEYS = frozenset(
         "escalate",
     }
 )
+
+_SESSION_RE = re.compile(r"\[(?P<session>\d{8}_\d{6}_[A-Za-z0-9]+)\]")
+_LLM_CALL_RE = re.compile(
+    r"API call #(?P<call>\d+): model=(?P<model>[^ ]+) "
+    r"provider=(?P<provider>[^ ]+) in=(?P<input>\d+) out=(?P<output>\d+) "
+    r"total=\d+ latency=(?P<latency>[0-9.]+)s"
+)
+_TOOL_RE = re.compile(
+    r"agent\.tool_executor: [Tt]ool (?P<tool>[A-Za-z0-9_.-]+) "
+    r"(?P<outcome>completed|returned error) "
+    r"\((?P<latency>[0-9.]+)s"
+)
+_LOG_TIME_RE = re.compile(r"^(?P<stamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})")
+
+
+def _log_epoch_ms(line: str) -> int | None:
+    match = _LOG_TIME_RE.match(line)
+    if not match:
+        return None
+    try:
+        parsed = datetime.strptime(
+            match.group("stamp"), "%Y-%m-%d %H:%M:%S,%f"
+        ).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return int(parsed.timestamp() * 1000)
+
+
+def profile_risk_hermes_session(
+    log_dir: str | os.PathLike[str], session_id: str
+) -> dict[str, Any]:
+    """Extract bounded timing counters for one Risk Hermes session.
+
+    Prompts, model responses, tool arguments and tool results are never
+    returned. Session-less parallel tool completion lines are attributed only
+    when no second Hermes session overlaps the selected log window.
+    """
+
+    session = str(session_id or "").strip()
+    if not session:
+        return {}
+    records: list[str] = []
+    source_files = 0
+    try:
+        paths = sorted(
+            Path(log_dir).glob("agent.log*"),
+            key=lambda path: path.stat().st_mtime,
+        )
+    except OSError:
+        return {}
+    for path in paths:
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        if any(session in line for line in lines):
+            source_files += 1
+            records.extend(lines)
+    selected = [index for index, line in enumerate(records) if f"[{session}]" in line]
+    if not selected:
+        return {}
+    window = records[min(selected) : max(selected) + 1]
+    overlapping_sessions = {
+        match.group("session")
+        for line in window
+        for match in _SESSION_RE.finditer(line)
+        if match.group("session") != session
+    }
+
+    llm_calls: list[dict[str, Any]] = []
+    tools: list[dict[str, Any]] = []
+    for line in window:
+        tagged = f"[{session}]" in line
+        llm_match = _LLM_CALL_RE.search(line) if tagged else None
+        if llm_match:
+            llm_calls.append(
+                {
+                    "call": int(llm_match.group("call")),
+                    "model": llm_match.group("model")[:120],
+                    "provider": llm_match.group("provider")[:120],
+                    "input_tokens": int(llm_match.group("input")),
+                    "output_tokens": int(llm_match.group("output")),
+                    "latency_ms": round(float(llm_match.group("latency")) * 1000),
+                    "completed_at_ms": _log_epoch_ms(line),
+                }
+            )
+        tool_match = _TOOL_RE.search(line)
+        if tool_match and (tagged or not overlapping_sessions):
+            tools.append(
+                {
+                    "tool": tool_match.group("tool")[:120],
+                    "status": (
+                        "error"
+                        if tool_match.group("outcome") == "returned error"
+                        else "success"
+                    ),
+                    "latency_ms": round(float(tool_match.group("latency")) * 1000),
+                }
+            )
+    if not llm_calls:
+        return {}
+
+    llm_latencies = [int(call["latency_ms"]) for call in llm_calls]
+    tool_latencies = [int(tool["latency_ms"]) for tool in tools]
+    tool_names = [str(tool["tool"]) for tool in tools]
+    first_input = int(llm_calls[0]["input_tokens"])
+    last_input = int(llm_calls[-1]["input_tokens"])
+    return {
+        "session_id": session,
+        "provider": str(llm_calls[-1]["provider"]),
+        "model": str(llm_calls[-1]["model"]),
+        "llm_call_count": len(llm_calls),
+        "llm_latency_ms_total": sum(llm_latencies),
+        "llm_latency_ms_max": max(llm_latencies),
+        "llm_input_tokens_first": first_input,
+        "llm_input_tokens_last": last_input,
+        "llm_context_growth_tokens": max(last_input - first_input, 0),
+        "llm_output_tokens_total": sum(
+            int(call["output_tokens"]) for call in llm_calls
+        ),
+        "tool_call_count": len(tools),
+        "tool_latency_ms_total": sum(tool_latencies),
+        "tool_latency_ms_max": max(tool_latencies, default=0),
+        "tool_error_count": sum(tool["status"] == "error" for tool in tools),
+        "legal_wiki_call_count": sum(
+            "query_risk_legal_wiki" in name for name in tool_names
+        ),
+        "web_tool_call_count": sum(
+            name in {"web_search", "web_extract"} for name in tool_names
+        ),
+        "code_tool_block_count": sum(
+            tool["status"] == "error" and tool["tool"] in {"execute_code", "terminal"}
+            for tool in tools
+        ),
+        "source_file_count": source_files,
+        "concurrent_session_detected": bool(overlapping_sessions),
+    }
+
+
+def publish_risk_hermes_profile(
+    *,
+    task_id: str,
+    root_id: str,
+    session_id: str,
+    log_dir: str | os.PathLike[str],
+    started_ms: int,
+    ended_ms: int,
+    status: str,
+    environment: Mapping[str, str] | None = None,
+) -> bool:
+    """Publish one idempotent, redacted Risk worker profile to LangSmith."""
+
+    env = environment or os.environ
+    if not (
+        str(env.get("LANGSMITH_TRACING", "")).casefold() in {"1", "true", "yes", "on"}
+        and str(env.get("LANGSMITH_API_KEY", "")).strip()
+    ):
+        return False
+    profile = profile_risk_hermes_session(log_dir, session_id)
+    if not profile:
+        return False
+    run_id = uuid5(NAMESPACE_URL, f"hgfinance:risk-hermes:{task_id}:{session_id}")
+    started = max(int(started_ms), 0)
+    ended = max(int(ended_ms), started)
+    stamp = datetime.fromtimestamp(started / 1000, tz=timezone.utc).strftime(
+        "%Y%m%dT%H%M%S%fZ"
+    )
+    safe_status = str(status or "completed")[:80]
+    metadata = {
+        "schema_version": "risk.hermes-worker-profile.v1",
+        "trace_kind": "department_worker_profile",
+        "source": "risk-hermes-agent-log",
+        "department": "risk-management",
+        "task_id": str(task_id)[:160],
+        "root_id": str(root_id)[:160],
+        "status": safe_status,
+        "latency_ms": ended - started,
+        "raw_payloads_sent": False,
+        **profile,
+    }
+    payload = {
+        "id": str(run_id),
+        "trace_id": str(run_id),
+        "dotted_order": f"{stamp}{run_id}",
+        "name": "risk.hermes-worker-profile",
+        "run_type": "chain",
+        "session_name": str(env.get("LANGSMITH_PROJECT", "First"))[:120] or "First",
+        "inputs": {
+            "task_id": str(task_id)[:160],
+            "root_id": str(root_id)[:160],
+            "session_id": str(session_id)[:160],
+        },
+        "outputs": profile,
+        "start_time": started,
+        "end_time": ended,
+        "extra": {"metadata": metadata},
+        "tags": ["hgfinance", "risk", "hermes", "redacted", "worker-profile"],
+    }
+    endpoint = str(
+        env.get("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com")
+    ).rstrip("/")
+    request = urllib_request.Request(
+        f"{endpoint}/runs/batch",
+        data=json.dumps(
+            {"post": [payload], "patch": []}, separators=(",", ":")
+        ).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "x-api-key": str(env.get("LANGSMITH_API_KEY", "")),
+        },
+        method="POST",
+    )
+    try:
+        with urllib_request.urlopen(request, timeout=3.0) as response:
+            return 200 <= int(response.status) < 300
+    except (OSError, urllib_error.URLError, ValueError):
+        return False
 
 
 def _enabled() -> bool:
@@ -118,7 +345,7 @@ def risk_span(
             name,
             run_type="chain",
             inputs=_safe(inputs),
-            project_name=os.getenv("LANGSMITH_PROJECT", "").strip() or None,
+            project_name=langsmith_project("workflow"),
             tags=["hgfinance", "risk", "redacted"],
             metadata=_safe(metadata),
             client=_client(),

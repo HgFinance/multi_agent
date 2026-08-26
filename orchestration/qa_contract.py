@@ -2,8 +2,9 @@
 
 The historical ``qa_required`` flag mixed three different facts: whether QA
 was enabled, whether it blocked the response, and whether a QA task happened
-to exist.  This module keeps the compatibility conversion in one place while
-leaving durable materialization as a fact derived from task roles.
+to exist. QA is now a post-response governance audit: it may be enabled or
+disabled, but it can never block CEO response synthesis. Durable materialization
+remains a fact derived from task roles.
 """
 
 from __future__ import annotations
@@ -90,31 +91,31 @@ def canonical_qa_contract(
 ) -> QaContract:
     """Resolve canonical QA intent without using child existence as intent.
 
-    Explicit canonical markers win.  Binding retains its historical fail
-    closed gate unless an explicit canonical policy says otherwise.  For old
-    analysis roots, the durable async-governance markers preserve the old
-    non-blocking QA lane; a bare legacy ``qa_required=false`` is treated as an
-    explicit QA exclusion.  New roots always carry canonical markers.
+    Explicit canonical markers win. ``qa_blocks_response`` is accepted for
+    read compatibility but is normalized to ``False``: CEO response delivery
+    is the response-plane boundary, and QA is scheduled afterwards in the
+    asynchronous governance plane. A bare legacy ``qa_required=false`` still
+    explicitly disables the audit for old roots.
     """
 
     if paper_order:
-        return QaContract(False, False, source="paper-order")
+        return QaContract(True, False, source="paper-order-post-response-audit")
 
     metadata_values = _metadata_values(metadata or {})
     body_enabled = parse_bool(_marker(body, "qa_enabled"))
     body_blocks = parse_bool(_marker(body, "qa_blocks_response"))
     enabled = body_enabled
-    blocks = body_blocks
+    # Legacy callers may still provide this marker. It must not restore the
+    # old QA -> CEO blocking topology.
+    blocks = False
     source = "canonical-body" if body_enabled is not None or body_blocks is not None else ""
 
     if enabled is None:
         enabled = parse_bool(metadata_values.get("qa_enabled"))
         if enabled is not None:
             source = "canonical-metadata"
-    if blocks is None:
-        blocks = parse_bool(metadata_values.get("qa_blocks_response"))
-        if blocks is not None:
-            source = source or "canonical-metadata"
+    if body_blocks is not None or metadata_values.get("qa_blocks_response") is not None:
+        source = source or "canonical-post-response"
 
     legacy = parse_bool(legacy_qa_required)
     if legacy is None:
@@ -136,8 +137,6 @@ def canonical_qa_contract(
     if mode == "binding":
         if enabled is None:
             enabled = True
-        if blocks is None:
-            blocks = True
         source = source or ("legacy-binding" if legacy is not None else "binding-default")
     else:
         if enabled is None:
@@ -159,12 +158,12 @@ def canonical_qa_contract(
                 )
                 enabled = legacy_async
                 source = source or ("legacy-async" if legacy_async else "legacy-disabled")
-        if blocks is None:
-            blocks = False
+        blocks = False
 
     enabled = bool(enabled)
-    blocks = bool(blocks) and enabled
-    return QaContract(enabled, blocks, source=source or "default")
+    # Deliberately unconditional. This invariant prevents a future legacy
+    # marker or workflow mode from recreating QA -> CEO.
+    return QaContract(enabled, False, source=source or "default")
 
 
 def split_planner_selection(values: Sequence[Any]) -> tuple[tuple[str, ...], bool]:

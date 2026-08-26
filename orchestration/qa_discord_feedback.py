@@ -62,6 +62,32 @@ _MANAGER_TERMS = (
     ("ceo-ingress", "CEO 요청 접수 단계"),
     ("ceo-terminal", "CEO 결과 전달 단계"),
     ("end_to_end", "전체 처리 시간"),
+    ("Unexplained", "설명되지 않은"),
+    ("Missing source coordinates and", "출처 식별자와"),
+    ("source IDs", "출처 식별자"),
+    ("pricing evidence", "가격 근거"),
+    ("price timestamps", "가격 시각"),
+    ("quality and effective/as-of validation", "자료 품질과 기준 시점 확인"),
+    ("bridge difference", "대사 차이"),
+    ("Keep official", "공식"),
+    ("close and decision blocked until", "확정과 결정을 보류하고"),
+    (
+        "ledger/cash/valuation/fee-tax reconciliation evidence agrees",
+        "원장·현금·평가·수수료·세금 대사 근거가 일치할 때까지",
+    ),
+    ("snapshot and broker independent reconciliation absent", "스냅샷과 브로커 독립 대사가 없음"),
+    (
+        "No investment/trading eligibility decision until evidence is independently verified",
+        "근거를 독립적으로 확인하기 전에는 투자·거래 적격성을 결정하지 않음",
+    ),
+    ("Risk owner", "리스크 담당자"),
+    ("and Accounting", "및 회계"),
+    ("Accounting Engine", "회계 시스템"),
+    ("NAV", "순자산"),
+    ("PIT", "기준 시점"),
+    ("Mandate", "투자지침"),
+    ("snapshot", "조회 자료"),
+    ("Require ", "필요: "),
 )
 
 _FINDING_LABELS = {
@@ -88,6 +114,15 @@ QA_CHECK_LABELS = {
 
 def qa_check_label(value: Any) -> str:
     return QA_CHECK_LABELS.get(str(value or "").strip().casefold(), _manager_label(value, 100))
+
+
+def _qa_result_label(value: Any) -> str:
+    return {
+        "PASS": "통과",
+        "WARN": "주의",
+        "FAIL": "실패",
+        "DEFER": "보류",
+    }.get(str(value or "").strip().upper(), _manager_label(value, 32) or "확인 필요")
 
 
 def _manager_label(value: Any, limit: int = 160) -> str:
@@ -138,6 +173,42 @@ def post_qa_discord_message(
     return message_id
 
 
+def edit_qa_discord_message(
+    content: str,
+    *,
+    token: str,
+    channel_id: str,
+    message_id: str,
+    timeout: float = 8.0,
+) -> str:
+    """Update the one existing QA card without creating a duplicate."""
+
+    if not token.strip() or not channel_id.strip() or not message_id.strip():
+        raise ValueError("QA Discord edit transport is not configured")
+    request = Request(
+        f"https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}",
+        data=json.dumps(
+            {"content": content[:1900], "allowed_mentions": {"parse": []}},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+        headers={
+            "Authorization": f"Bot {token.strip()}",
+            "Content-Type": "application/json",
+            "User-Agent": "HgFinance-QA-Feedback/1.0",
+        },
+        method="PATCH",
+    )
+    with urlopen(request, timeout=timeout) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    returned_id = (
+        str(payload.get("id") or message_id)
+        if isinstance(payload, Mapping)
+        else message_id
+    )
+    return returned_id or message_id
+
+
 def format_qa_terminal_report(record: Any) -> str:
     """Render a compact Korean QA/operations card from the audit record."""
 
@@ -150,7 +221,9 @@ def format_qa_terminal_report(record: Any) -> str:
         "CONDITIONAL": "조건부 통과",
         "FAIL": "실패·투자 결정 차단",
     }.get(decision, "확인 필요")
-    numerical = _manager_label(evidence.get("numerical_posture"), 40) or "확인 필요"
+    numerical = _manager_label(
+        evidence.get("numerical_posture") or evidence.get("numeric_posture"), 40
+    ) or "확인 필요"
     if numerical.upper() == "DEFER":
         numerical = "판단 보류"
 
@@ -160,8 +233,11 @@ def format_qa_terminal_report(record: Any) -> str:
         for item in raw_checks[:8]:
             if isinstance(item, Mapping):
                 name = qa_check_label(item.get("check") or item.get("name"))
-                result = _manager_label(item.get("result") or item.get("status"), 32)
+                result = _qa_result_label(item.get("result") or item.get("status"))
                 checks.append(f"- {name}: {result or '확인 필요'}")
+    elif isinstance(raw_checks, Mapping):
+        for key, value in list(raw_checks.items())[:8]:
+            checks.append(f"- {qa_check_label(key)}: {_qa_result_label(value)}")
     findings: list[str] = []
     raw_findings = getattr(record, "findings", ())
     if isinstance(raw_findings, (list, tuple)):

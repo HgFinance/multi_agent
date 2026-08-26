@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Any
 
+from orchestration.llm_observability import langsmith_project
+
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _SENSITIVE_METADATA_PARTS = (
@@ -150,7 +152,7 @@ def redacted_span(
             name,
             run_type=run_type,
             inputs={},
-            project_name=os.getenv("LANGSMITH_PROJECT", "").strip() or None,
+            project_name=langsmith_project("workflow"),
             tags=("hgfinance", "research", "redacted", *tags),
             metadata=_safe_metadata(metadata),
             client=_langsmith_client(),

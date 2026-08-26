@@ -262,8 +262,10 @@ class TerminalProjectionWiringTests(unittest.TestCase):
             {"event_id": "s1", "task_id": SYNTHESIS, "kind": "completed"}
         )
 
-        self.assertIsNotNone(first)
-        self.assertEqual(first.action.value, "RUN_QA")
+        # QA is now an idempotent post-response observer; a completed
+        # synthesis must not return a second supervisor RUN_QA decision that
+        # could create a duplicate audit task.
+        self.assertIsNone(first)
         self.assertIsNone(second)
         self.assertEqual(projection.calls, [SYNTHESIS])
 

@@ -655,17 +655,13 @@ def _planning_acknowledgement(task: Mapping[str, object]) -> dict[str, object]:
     if synthesis_present:
         answer += " CEO가 최종 종합합니다."
     steps = [_PROFILE_LABEL[p] for p in selected]
-    binding = workflow_mode == "binding"
-    if binding:
-        if qa_required:
-            steps.append("QA (blocking gate)")
-        if synthesis_present:
-            steps.append("CEO Synthesis")
-    else:
-        if synthesis_present:
-            steps.append("CEO Synthesis")
-        if qa_required:
-            steps.append("QA (async evaluation)")
+    # QA audits the exact CEO input and response after the response boundary
+    # in every mode. Binding execution safety remains owned by deterministic
+    # Risk/OMS admission; the UI must never project QA as CEO's prerequisite.
+    if synthesis_present:
+        steps.append("CEO Synthesis")
+    if qa_required:
+        steps.append("QA (async evaluation)")
     materialized = bool(selected or qa_required or synthesis_present)
     return {
         "status": "planned" if materialized else "accepted",

@@ -108,7 +108,7 @@ class PaperPipelineAdapterTest(unittest.TestCase):
 
         self.assertEqual(run.status, "COMPLETED")
         self.assertEqual(len(run.steps), 7)
-        self.assertEqual(run.steps[-1].status, "DISPATCHED")
+        self.assertEqual(run.steps[-1].status, "QUEUED_ASYNC")
         self.assertEqual(run.metadata["ceo_decision"]["binding"], False)
         self.assertEqual(
             run.metadata["ceo_decision"]["binding_decision"], "HOLD / ESCALATE"
@@ -116,7 +116,7 @@ class PaperPipelineAdapterTest(unittest.TestCase):
         self.assertIsNotNone(ceo.received)
         self.assertEqual(
             set(ceo.received["department_reports"]),
-            {"research", "trading", "risk", "qa", "oms-fill-gate", "accounting"},
+            {"research", "trading", "risk", "oms-fill-gate", "accounting"},
         )
         self.assertFalse(run.metadata["external_writes"])
         self.assertFalse(run.metadata["orders_submitted"])

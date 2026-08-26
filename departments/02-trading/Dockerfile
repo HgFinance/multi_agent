@@ -38,6 +38,10 @@ COPY departments/02-trading/rules ./rules
 # The PAPER broker reuses the shared LS response-header sanitizer.
 COPY departments/03-risk/integrations/ls_http.py /app/departments/03-risk/integrations/ls_http.py
 COPY orchestration/conditional_rules /app/orchestration/conditional_rules
+# Worker healthchecks use the same bounded, read-only transport probes as the
+# accounting and portfolio images. Keep this single utility shared; do not
+# reimplement database/HTTP checks in each worker.
+COPY orchestration/service_health.py /app/orchestration/service_health.py
 
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app:/app/departments/02-trading:/app/departments/02-trading/api

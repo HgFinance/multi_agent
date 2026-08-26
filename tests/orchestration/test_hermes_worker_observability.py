@@ -68,7 +68,11 @@ def test_accounting_worker_trace_correlates_task_model_and_tools(tmp_path: Path)
     assert metadata[0]["tool_names"] == ["kanban_sh", "skill", "kanban_co"]
     assert metadata[0]["tool_call_count"] == 7
     assert all(item["raw_payloads_sent"] is False for item in metadata)
-    assert all(run["inputs"] == {} and run["outputs"] == {} for run in runs)
+    assert all(run["inputs"]["task_id"] == "t_primary" for run in runs)
+    assert all(run["inputs"]["workflow_root_task_id"] == "t_root" for run in runs)
+    assert all(run["inputs"]["task_body_present"] is True for run in runs)
+    assert all(run["outputs"]["status"] == "completed" for run in runs)
+    assert all(run["outputs"]["raw_payloads_sent"] is False for run in runs)
 
 
 def test_accounting_worker_trace_is_fail_open_when_disabled():

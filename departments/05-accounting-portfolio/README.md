@@ -32,6 +32,9 @@ Engine으로 흡수됐다. 공식 수치 계산·Journal Posting·Official NAV �
 ## 입력·출력 계약
 
 - 입력: OMS/브로커 체결(Fill) — 트레이딩본부(`departments/02-trading/`)가 소유하는 계약을 소비
+- 입력: `accounting.broker-evidence.v1` — `portfolio-bff`가 LS 계좌 TR 12종을
+  자격정보 없이 정규화해 부서장 task에 첨부한다. Accounting Engine 정본과의 대사·보고
+  설명에만 쓰며 공식 원장/NAV를 대체하지 않는다. [회계 소비 계약](../../docs/06-integrations/ls-openapi/03-stock/14-37d22d4d-accounting-consumption.md)
 - 출력: 분개(Journal), Position/Cash Projection, Reconciliation Break → `workflow` step 6 CEO로 전달
 - 출력: `portfolio-api` — `GET /accounting/v1/portfolio-snapshot?fund_id=&as_of=` →
   `{snapshot_id, as_of}`. CEO Daily Report의 `SnapshotRef(portfolio)` 원천이다.

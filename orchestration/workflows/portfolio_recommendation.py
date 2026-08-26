@@ -1,9 +1,8 @@
 """Async TEST/control-DB-read-only pipeline for suitability and investment departments.
 
-The graph connects Research -> Trading -> Risk -> QA -> Accounting -> CEO.
-Each department stage uses LangGraph ``Send`` fan-out to independent Worker
-graphs and a reducer-backed fan-in node. No order, ledger, credential, or
-No order, ledger, credential, or production side effect is permitted.
+The response graph connects primary departments to CEO first. QA receives the
+same CEO input and response in a separate post-response audit thread. No order,
+ledger, credential, or production side effect is permitted.
 """
 
 from __future__ import annotations
@@ -16,6 +15,7 @@ import operator
 import os
 import re
 import sys
+import threading
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
@@ -68,19 +68,19 @@ RuntimeEventCallback = Callable[[Mapping[str, Any]], None]
 # §J "포트폴리오 후보 카탈로그를 누가 만드는가"). 팀은 카탈로그를 만드는 대신 요청
 # 시점 백테스트로 가기로 했다.
 #
-# MAS_PIPELINE_CONTRACTS 의 "Quant 를 포트폴리오 추천 그래프에 **암묵적으로** 끼워
-# 넣지 않는다"와 충돌하지 않는다 - 금지된 것은 암묵적 삽입이고, 여기서는 선언된
-# 단계로 명시한다. strategy_research_cycle(전략 승격용 quant -> qa -> ceo)은 그대로
-# 별도 흐름으로 남는다. 한 부서가 두 흐름에 나오는 것은 research·risk 도 마찬가지다.
+# QA is not a response-plane department. It is scheduled after CEO response
+# delivery by ``schedule_post_response_qa_audit``. The response-plane list is
+# intentionally separate so adding a QA worker cannot recreate a blocking
+# QA -> CEO edge by accident.
 DEPARTMENTS: tuple[str, ...] = (
     "research",
     "quant",
     "trading",
     "risk",
-    "qa",
     "accounting",
     "ceo",
 )
+QA_AUDIT_STAGE = "qa"
 
 # ▶ 이 두 표는 **실재하는 worker_id 만** 담는다 (2026-08-11 감사).
 #   `_query_selected_specs` 는 fallback 이름으로 spec 을 걸러낸다. 이름이 하나도
@@ -134,8 +134,8 @@ _QUERY_WORKER_FALLBACKS: dict[str, tuple[str, ...]] = {
 # 암묵적으로 끼워 넣지 않는다"를 코드에서도 지키기 위해서다.
 #
 # 특히 전략 연구 요청("이런 전략 어때?")은 quant-backtest 를 아래 DEPARTMENTS 에
-# 추가해서 푸는 문제가 **아니다.** 그건 strategy-research 체인(quant → qa → ceo)이
-# 소유하며, 이 그래프에 quant 를 끼워 넣으면 위 두 문서를 동시에 위반한다.
+# 추가해서 푸는 문제가 **아니다.** 전략 승격은 별도 strategy-research 체인이
+# 소유하는 거버넌스 문제이며, 일반 CEO 응답의 QA는 응답 후 감사 레인이다.
 PORTFOLIO_WORKFLOW = "portfolio-recommendation"
 STRATEGY_WORKFLOW = "strategy-research"
 
@@ -157,23 +157,22 @@ CATEGORY_WORKFLOWS: dict[str, str] = {
 # 늘어나 대화 응답성이 무너진다. RISK_REVIEW·TAX_LIQUIDITY 도 기존 보유분에 대한
 # 질문이라 새 후보를 만들지 않으므로 제외한다.
 CATEGORY_DEPARTMENTS: dict[str, tuple[str, ...]] = {
-    "PORTFOLIO_RECOMMENDATION": ("research", "quant", "risk", "qa", "ceo"),
-    "MARKET_RESEARCH": ("research", "qa", "ceo"),
-    "RISK_REVIEW": ("research", "risk", "qa", "ceo"),
-    "TAX_LIQUIDITY": ("research", "risk", "accounting", "qa", "ceo"),
+    "PORTFOLIO_RECOMMENDATION": ("research", "quant", "risk", "ceo"),
+    "MARKET_RESEARCH": ("research", "ceo"),
+    "RISK_REVIEW": ("research", "risk", "ceo"),
+    "TAX_LIQUIDITY": ("research", "risk", "accounting", "ceo"),
     "REBALANCING_PROPOSAL": (
         "research",
         "quant",
         "trading",
         "risk",
         "accounting",
-        "qa",
         "ceo",
     ),
-    # 전략 제안. 정식 승격 흐름은 여전히 strategy-research(quant -> qa -> ceo)가
-    # 소유하지만(task_plan.workflow 참고), 대화에서 들어온 전략 질문에 답하려면
+    # 전략 제안. 정식 승격 흐름은 별도 strategy-research가 소유하지만
+    # (task_plan.workflow 참고), 대화에서 들어온 전략 질문에 답하려면
     # 이 그래프에서도 백테스트 근거가 필요하다. 주문·원장 부서는 넣지 않는다.
-    "STRATEGY_PROPOSAL": ("research", "quant", "qa", "ceo"),
+    "STRATEGY_PROPOSAL": ("research", "quant", "ceo"),
 }
 
 
@@ -202,7 +201,7 @@ _QUERY_STAGE_KEYWORDS: dict[str, tuple[str, ...]] = {
     #   ("전략"·"백테스트"·"과적합"·"레짐"…)가 있는데 이 표에 부서가 없어서
     #   requested_departments 에 quant 가 안 들어갔고, `_selected_specs` 가
     #   워커 라우터를 타기 전에 `()` 를 반환했다 - **그 용어들이 죽은 코드**였다.
-    #   실측: "이런 전략 어때?" -> ['research','risk','qa','ceo'].
+    #   실측: "이런 전략 어때?" -> ['research','risk','ceo']; QA는 응답 후 감사다.
     #
     #   용어는 좁게 잡는다. "결과"·"해석"·"최적화" 같은 일반어를 넣으면 거의 모든
     #   질의가 백테스트를 끌고 와 응답성이 무너진다 - CATEGORY_DEPARTMENTS 주석이
@@ -244,7 +243,7 @@ def build_ceo_task_plan(profile: Mapping[str, Any]) -> dict[str, Any]:
         }
 
     normalized = query.lower()
-    stages: set[str] = set(category_departments or ("research", "risk", "qa", "ceo"))
+    stages: set[str] = set(category_departments or ("research", "risk", "ceo"))
     matched_terms: dict[str, list[str]] = {}
     for stage, terms in _QUERY_STAGE_KEYWORDS.items():
         hits = [term for term in terms if term in normalized]
@@ -252,6 +251,8 @@ def build_ceo_task_plan(profile: Mapping[str, Any]) -> dict[str, Any]:
             stages.add(stage)
             matched_terms[stage] = hits
 
+    # QA keyword matches are audit intent, never a response-plane primary.
+    # Materialization is handled after CEO response by the runtime scheduler.
     ordered = [stage for stage in DEPARTMENTS if stage in stages]
     return {
         "mode": "free_query",
@@ -1452,41 +1453,6 @@ def build_portfolio_recommendation_graph(
             }
         }
 
-    def qa_precheck(state: PortfolioPipelineState) -> dict[str, Any]:
-        recommendations = state.get("suitability", {}).get("recommendations", [])
-        evidence_ok = bool(recommendations) and all(
-            item.get("evidence_refs") for item in recommendations
-        )
-        # The TEST fixture deliberately carries one unsupported claim so the
-        # hallucination worker is exercised without turning WARN into PASS.
-        unsupported_claim_fixture = state.get("data_context", {}).get("source") != "CONTROL_DB"
-        live_data_quality = state.get("data_context", {}).get("quality_status", "TEST")
-        upstream_safe = upstream_contracts_safe(state, ("research", "risk"))
-        decision = (
-            "PASS"
-            if evidence_ok
-            and not unsupported_claim_fixture
-            and live_data_quality == "PASS"
-            and upstream_safe
-            else "WARN"
-        )
-        return {
-            "qa_gate": {
-                "status": "COMPLETED",
-                "decision": decision,
-                "reason": (
-                "UPSTREAM_WORKER_CONTRACT_FAILED"
-                if not upstream_safe
-                else "EVIDENCE_PRESENT_BUT_TEST_UNSUPPORTED_CLAIM"
-                    if unsupported_claim_fixture and evidence_ok
-                    else "LIVE_DATA_QUALITY_WARNING"
-                    if live_data_quality != "PASS"
-                    else "NO_MATCH_OR_EVIDENCE_GAP"
-                ),
-                "binding": False,
-            }
-        }
-
     def _live_worker_mode(state: PortfolioPipelineState) -> str:
         """이 실행이 포트폴리오 **구성**인가 종목 **자문**인가.
 
@@ -1880,17 +1846,18 @@ def build_portfolio_recommendation_graph(
             and data_context.get("quality_status") != "PASS"
         )
         risk_gate = state.get("risk_gate", {})
-        qa_gate = state.get("qa_gate", {})
-        # A completed precheck is not necessarily an approval.  Keep the
-        # final action fail-closed when an upstream contract or risk gate
-        # rejects the case; otherwise a rejected gate could still surface as
-        # ``NO_ACTION`` merely because its department node completed.
+        # QA is intentionally pending here. It audits this exact CEO input and
+        # response after the result is delivered; it is not an execution gate
+        # and cannot change the response-plane safe action.
+        qa_gate = {
+            "status": "PENDING",
+            "decision": "PENDING",
+            "phase": "POST_RESPONSE",
+            "reason": "awaiting_post_response_audit",
+            "binding": False,
+        }
         risk_safe = risk_gate.get("safe_action") == "NO_ACTION"
-        qa_safe = qa_gate.get("decision") not in {"FAIL", "REJECT", "ESCALATE"}
-        gate_degraded = any(
-            gate.get("reason") == "UPSTREAM_WORKER_CONTRACT_FAILED"
-            for gate in (risk_gate, qa_gate)
-        )
+        gate_degraded = risk_gate.get("reason") == "UPSTREAM_WORKER_CONTRACT_FAILED"
         pipeline_status = (
             "DEGRADED"
             if degraded or live_data_blocked or gate_degraded
@@ -1902,9 +1869,9 @@ def build_portfolio_recommendation_graph(
             and not degraded
             and not live_data_blocked
             and risk_safe
-            and qa_safe
             else "HOLD"
         )
+        ceo_input = _stage_payload(state, "ceo")
         result = {
             "workflow": "portfolio-recommendation-full",
             "pipeline_version": PIPELINE_VERSION,
@@ -1920,7 +1887,8 @@ def build_portfolio_recommendation_graph(
             "suitability": state.get("suitability", {}),
             "data_context": data_context,
             "risk_gate": state.get("risk_gate", {}),
-            "qa_gate": state.get("qa_gate", {}),
+            "qa_gate": qa_gate,
+            "ceo_input": ceo_input,
             "department_reports": reports,
             "degraded_departments": degraded,
             "worker_reports": state.get("worker_reports", []),
@@ -1934,7 +1902,6 @@ def build_portfolio_recommendation_graph(
 
     graph.add_node("validate_profile", validate_profile)
     graph.add_node("risk_precheck", risk_precheck)
-    graph.add_node("qa_precheck", qa_precheck)
     graph.add_node("finalize", finalize)
 
     for stage in DEPARTMENTS:
@@ -1948,7 +1915,6 @@ def build_portfolio_recommendation_graph(
     graph.add_node("quant_fanout", lambda state: {})
     graph.add_node("trading_fanout", lambda state: {})
     graph.add_node("risk_fanout", lambda state: {})
-    graph.add_node("qa_fanout", lambda state: {})
     graph.add_node("accounting_fanout", lambda state: {})
     graph.add_node("ceo_fanout", lambda state: {})
 
@@ -1967,19 +1933,163 @@ def build_portfolio_recommendation_graph(
     graph.add_edge("risk_precheck", "risk_fanout")
     graph.add_conditional_edges("risk_fanout", route_stage("risk"))
     graph.add_edge("risk_worker", "risk_fan_in")
-    graph.add_edge("risk_fan_in", "qa_precheck")
-    graph.add_edge("qa_precheck", "qa_fanout")
-    graph.add_conditional_edges("qa_fanout", route_stage("qa"))
-    graph.add_edge("qa_worker", "qa_fan_in")
-    graph.add_edge("qa_fan_in", "accounting_fanout")
+    graph.add_edge("risk_fan_in", "accounting_fanout")
     graph.add_conditional_edges("accounting_fanout", route_stage("accounting"))
     graph.add_edge("accounting_worker", "accounting_fan_in")
     graph.add_edge("accounting_fan_in", "ceo_fanout")
     graph.add_conditional_edges("ceo_fanout", route_stage("ceo"))
     graph.add_edge("ceo_worker", "ceo_fan_in")
+    # CEO is the response boundary. Post-response QA is dispatched by the
+    # runtime scheduler after this graph returns, never as a blocking edge.
     graph.add_edge("ceo_fan_in", "finalize")
     graph.add_edge("finalize", END)
     return graph.compile()
+
+
+def _post_response_qa_payload(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Build QA input from the exact CEO input plus the delivered response."""
+
+    response_id = str(
+        result.get("ceo_response_task_id")
+        or result.get("case_id")
+        or result.get("trace_id")
+        or "portfolio-response"
+    )
+    # The deterministic QA runner requires governed fields. These are
+    # observations for the audit lane only; they are not approval authority.
+    return {
+        "case_id": str(result.get("case_id") or response_id),
+        "task_id": f"{response_id}:post-response-qa",
+        "trace_id": str(result.get("trace_id") or response_id),
+        "as_of": result.get("data_context", {}).get("as_of")
+        if isinstance(result.get("data_context"), Mapping)
+        else None,
+        "user_query": result.get("user_query", ""),
+        "ceo_input": result.get("ceo_input", {}),
+        "ceo_response": dict(result),
+        "assessment": {
+            "decision": "PASS",
+            "claim_checks": [{"claim_id": "ceo-response", "result": "SUPPORTED"}],
+        },
+        "ops_assessment": {"status": "HEALTHY"},
+        "permission": {"result": "ALLOWED"},
+        "read_only": True,
+        "external_writes": False,
+    }
+
+
+def _qa_gate_from_result(
+    qa_result: Mapping[str, Any],
+    *,
+    response_id: str,
+) -> dict[str, Any]:
+    """Project QA completion without changing the already delivered response."""
+
+    workers = qa_result.get("workers", ())
+    worker_rows = [item for item in workers if isinstance(item, Mapping)]
+    runner = next(
+        (item for item in worker_rows if item.get("worker_id") == "qa-runner"),
+        {},
+    )
+    decision = str(
+        runner.get("decision")
+        or (runner.get("output") or {}).get("decision")
+        or ("ESCALATE" if qa_result.get("degraded") else "PASS")
+    ).upper()
+    return {
+        "status": "DEGRADED" if qa_result.get("degraded") else "COMPLETED",
+        "decision": decision,
+        "phase": "POST_RESPONSE",
+        "binding": False,
+        "response_task_id": response_id,
+        "input_hash": qa_result.get("input_hash"),
+        "failed_workers": list(qa_result.get("failed", ())),
+        "worker_count": len(worker_rows),
+    }
+
+
+def schedule_post_response_qa_audit(
+    result: Mapping[str, Any],
+    *,
+    event_callback: RuntimeEventCallback | None = None,
+) -> threading.Thread:
+    """Queue QA after CEO response persistence and return immediately.
+
+    The caller must persist the response before invoking this function. The
+    daemon thread is intentionally outside the response graph; QA failures are
+    projected as audit findings and never roll back or delay the CEO result.
+    """
+
+    result_snapshot = dict(result)
+    response_id = str(
+        result_snapshot.get("ceo_response_task_id")
+        or result_snapshot.get("case_id")
+        or result_snapshot.get("trace_id")
+        or "portfolio-response"
+    )
+    payload = _post_response_qa_payload(result_snapshot)
+
+    def emit(event: Mapping[str, Any]) -> None:
+        if event_callback is not None:
+            event_callback(event)
+
+    emit(
+        {
+            "kind": "qa_audit_scheduled",
+            "stage": QA_AUDIT_STAGE,
+            "response_task_id": response_id,
+            "summary": "CEO 응답이 저장된 뒤 동일 입력을 QA 비동기 감사 큐에 등록했습니다.",
+        }
+    )
+
+    def run() -> None:
+        emit(
+            {
+                "kind": "qa_audit_started",
+                "stage": QA_AUDIT_STAGE,
+                "response_task_id": response_id,
+            }
+        )
+        try:
+            module = _load_module(QA_AUDIT_STAGE)
+            qa_result = asyncio.run(module.run_employee_workers_async(payload))
+            gate = _qa_gate_from_result(qa_result, response_id=response_id)
+            emit(
+                {
+                    "kind": "qa_audit_completed",
+                    "stage": QA_AUDIT_STAGE,
+                    "status": gate["status"],
+                    "qa_gate": gate,
+                    "response_task_id": response_id,
+                    "summary": "CEO 응답 대상 QA 비동기 감사가 완료되었습니다.",
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - audit failure is observable, not response-blocking.
+            emit(
+                {
+                    "kind": "qa_audit_failed",
+                    "stage": QA_AUDIT_STAGE,
+                    "status": "DEGRADED",
+                    "response_task_id": response_id,
+                    "qa_gate": {
+                        "status": "DEGRADED",
+                        "decision": "ESCALATE",
+                        "phase": "POST_RESPONSE",
+                        "binding": False,
+                        "response_task_id": response_id,
+                        "reason": f"{type(exc).__name__}",
+                    },
+                    "summary": "CEO 응답은 유지하고 QA 감사 실패를 에스컬레이션했습니다.",
+                }
+            )
+
+    thread = threading.Thread(
+        target=run,
+        name=f"qa-post-response-{response_id[:24]}",
+        daemon=True,
+    )
+    thread.start()
+    return thread
 
 
 async def run_portfolio_recommendation_pipeline_async(
@@ -2074,6 +2184,7 @@ async def run_portfolio_recommendation_pipeline_async(
             },
         )
     result = dict(state.get("result", state))
+    result["ceo_response_delivered"] = True
     emit(
         {
             "kind": "pipeline_completed",
@@ -2082,6 +2193,14 @@ async def run_portfolio_recommendation_pipeline_async(
             "status": str(result.get("pipeline_status", "DEGRADED")),
             "safe_action": str(result.get("safe_action", "HOLD")),
             "summary": "Portfolio recommendation pipeline completed.",
+        }
+    )
+    emit(
+        {
+            "kind": "ceo_response_delivered",
+            "stage": "ceo",
+            "response_task_id": str(result.get("case_id") or event_run_id),
+            "summary": "CEO 응답이 준비되어 응답 plane을 종료했습니다.",
         }
     )
     result["pipeline_events"] = pipeline_events
@@ -2101,4 +2220,5 @@ __all__ = [
     "PortfolioPipelineState",
     "build_portfolio_recommendation_graph",
     "run_portfolio_recommendation_pipeline_async",
+    "schedule_post_response_qa_audit",
 ]

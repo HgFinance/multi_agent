@@ -117,6 +117,42 @@ def _production_board(*, qa_status: str = "done", synthesis_status: str = "runni
 
 
 class CeoWorkflowProjectionRegressionTest(unittest.TestCase):
+    def test_supplied_board_snapshot_ignores_purged_stale_edge(self) -> None:
+        board = _production_board()
+        board[ROOT]["children"] = ["t_already_purged", RESEARCH]
+        fetched: list[str] = []
+
+        def fetch(task_id: str) -> dict[str, object]:
+            fetched.append(task_id)
+            return board[task_id]
+
+        workflow = ceo_kanban_read.load_workflow(
+            ROOT,
+            fetch=fetch,
+            listed_rows=list(board.values()),
+        )
+
+        self.assertIn(RESEARCH, {node.task_id for node in workflow.nodes})
+        self.assertNotIn("t_already_purged", fetched)
+
+    def test_marker_synthesis_recovers_unmarked_legacy_parent(self) -> None:
+        board = _production_board()
+        board[RESEARCH]["body"] = "legacy primary without workflow marker"
+        board[SYNTHESIS]["parents"] = [RESEARCH]
+        board[ROOT]["metadata"] = {}
+        board[ROOT]["runs"] = []
+
+        def fetch(task_id: str) -> dict[str, object]:
+            return board[task_id]
+
+        workflow = ceo_kanban_read.load_workflow(
+            ROOT,
+            fetch=fetch,
+            listed_rows=list(board.values()),
+        )
+
+        self.assertIn(RESEARCH, {node.task_id for node in workflow.nodes})
+
     def test_parentless_primary_and_async_lanes_are_discovered_by_marker(self) -> None:
         board = _production_board(qa_status="running", synthesis_status="running")
 
