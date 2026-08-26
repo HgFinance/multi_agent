@@ -320,7 +320,6 @@ def _humanize_risk_result(value: str) -> str:
         ("Mandate의", "투자지침의"),
         ("Mandate", "투자지침"),
         ("MODERATE", "보통"),
-        ("NAV", "순자산 가치"),
         ("위반 없음(no_breach)", "현재 입력만으로 위반을 확인하지 못함"),
         ("no_breach", "현재 입력만으로 위반을 확인하지 못함"),
         ("Risk 검증", "리스크 검증"),
@@ -328,6 +327,10 @@ def _humanize_risk_result(value: str) -> str:
     humanized = value
     for internal, friendly in replacements:
         humanized = humanized.replace(internal, friendly)
+    # NAV 만 정규식이다 - str.replace 는 부분 문자열도 바꿔서 UNAVAILABLE 이
+    # "U순자산 가치AILABLE" 로 깨졌다(2026-08-26 HR 유휴 리포트 실측). `\b` 는
+    # 한글이 \w 라 "NAV가" 를 놓치므로 ASCII 문자만 배제한다.
+    humanized = re.sub(r"(?<![A-Za-z])NAV(?![A-Za-z])", "순자산 가치", humanized)
     humanized = re.sub(
         r"(?:PAPER(?: 가상거래)? 기준 |PAPER만으로는 )?"
         r"현재 입력만으로 위반을 확인하지 못함으로 "
