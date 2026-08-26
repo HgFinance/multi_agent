@@ -484,3 +484,62 @@ def test_accounting_projection_humanizes_runtime_field_names():
     assert "기준 시각" in rendered
     assert "자료 기준" in rendered
     assert "자료 품질 상태" in rendered
+
+
+def test_qa_projection_is_korean_and_uses_explicit_qa_database():
+    transport = FakeTransport(
+        {
+            "제목": {"type": "title"},
+            "판정": {"type": "select", "select": {"options": [{"name": "FAIL"}]}},
+            "findings severity": {
+                "type": "select",
+                "select": {"options": [{"name": "HIGH"}]},
+            },
+            "findings": {"type": "rich_text"},
+            "claim_checks": {"type": "rich_text"},
+            "claim_narrative": {"type": "rich_text"},
+            "원본 리포트": {"type": "rich_text"},
+            "escalate": {"type": "checkbox"},
+            "생성 시각": {"type": "date"},
+        }
+    )
+    task = _trading_task()
+    task.update(
+        {
+            "assignee": "qa-department",
+            "body": (
+                "workflow_root_task_id=t_root1\n"
+                "workflow_role=qa\n"
+                "action=RUN_QA"
+            ),
+            "run_metadata": {
+                "overall": "FAIL",
+                "numerical_posture": "DEFER",
+                "highest_severity": "HIGH",
+                "findings": [
+                    {
+                        "severity": "HIGH",
+                        "summary": "NAV bridge is unexplained",
+                        "owner": "Accounting Engine",
+                        "block_condition": "공식 수치 확정 차단",
+                    }
+                ],
+                "checks": [{"check": "nav_bridge", "result": "FAIL"}],
+            },
+        }
+    )
+
+    result = DepartmentNotionProjection(
+        env={"NOTION_TOKEN": "x", "NOTION_QA_DB": "qa-db"},
+        transport=transport,
+    ).project(root_task_id="t_root1", task=task)
+
+    assert result.status == "created"
+    database_id, props, children = transport.created[0]
+    assert database_id == "qa-db"
+    rendered = str(children)
+    assert "QA 감사 결과" in rendered
+    assert "순자산 대사" in rendered
+    assert "workflow_root_task_id" not in rendered
+    assert props["판정"]["select"]["name"] == "FAIL"
+    assert props["escalate"]["checkbox"] is True

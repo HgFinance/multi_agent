@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 from typing import Any
+from unittest.mock import patch
 
 from orchestration.adapters.ceo_notion_projection import (
     CeoNotionProjection,
@@ -551,6 +552,31 @@ class TerminalProjectionTests(unittest.TestCase):
         self.assertEqual(record.canonical_decision, "WARN")
         self.assertEqual(record.evaluated_primary_task_ids, (RESEARCH, RISK))
         self.assertEqual(record.findings[0]["finding_id"], "f1")
+
+    def test_qa_terminal_publishes_correlated_langsmith_metadata(self) -> None:
+        repository = FakeAuditRepository()
+        client = FakeSupervisorClient(self.root, self.workflow[1:])
+        with patch(
+            "orchestration.llm_observability.langsmith_enabled", return_value=True
+        ), patch(
+            "orchestration.llm_observability.publish_metric", return_value=True
+        ) as publish:
+            result = QaAuditProjection(
+                repository=repository,
+                kanban_client=client,
+                env={"HERMES_HOME": "/nonexistent"},
+            ).project(
+                root_task_id=ROOT, task=self.qa, workflow_tasks=self.workflow
+            )
+
+        self.assertEqual(result["langsmith_status"], "published")
+        metric = publish.call_args.args[0]
+        self.assertEqual(metric["root_id"], ROOT)
+        self.assertEqual(metric["task_id"], QA)
+        self.assertEqual(metric["workflow_role"], "qa")
+        self.assertEqual(metric["output_verdict"], "CONDITIONAL PASS")
+        self.assertEqual(metric["telemetry_completeness"], "terminal-handoff")
+        self.assertNotIn("findings", metric)
 
     def test_qa_accepts_worker_overall_as_the_verdict(self) -> None:
         repository = FakeAuditRepository()

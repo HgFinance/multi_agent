@@ -1,4 +1,5 @@
 import sys
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -312,6 +313,34 @@ def test_publish_metric_defaults_to_metrics_project(
 
     assert publish_metric({"worker_id": "qwen-research-worker"}) is True
     assert client.create_run.call_args.kwargs["project_name"] == "HgFinance-Metrics"
+
+
+def test_publish_metric_preserves_explicit_name_and_terminal_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "key-not-printed")
+
+    import orchestration.llm_observability as observability
+
+    client = Mock()
+    monkeypatch.setattr(observability, "_safe_langsmith_client", lambda: client)
+    started = datetime(2026, 8, 26, 8, 30, tzinfo=timezone.utc)
+    ended = started + timedelta(seconds=121)
+
+    assert publish_metric(
+        {"worker_id": "qa-department", "status": "COMPLETED"},
+        project_name="First",
+        name="qa.hermes.terminal",
+        start_time=started,
+        end_time=ended,
+    )
+
+    kwargs = client.create_run.call_args.kwargs
+    assert kwargs["name"] == "qa.hermes.terminal"
+    assert kwargs["project_name"] == "First"
+    assert kwargs["start_time"] == started
+    assert kwargs["end_time"] == ended
 
 
 def test_publish_root_trace_sends_empty_payload_with_correlation_metadata(
