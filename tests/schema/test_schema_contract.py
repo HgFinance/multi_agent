@@ -292,6 +292,9 @@ class SupabaseSchemaContractTest(unittest.TestCase):
                  # Roster 프로필 미배정 13건에 Profile Version v1 배정
                  # (부서장 openai-codex/gpt-5.6-luna, Worker vllm/qwen2.5:14b)
                  "20260826000100_workforce_unassigned_profile_versions.sql",
+                 # 기존 Ollama Worker의 현재 Profile을 운영 vLLM Worker
+                 # model로 version-up한다.
+                 "20260826000150_workforce_worker_model_v2.sql",
                  # Advisory Accounting view access, dynamic Risk policies,
                  # and the batch collector each retain separate service roles.
                  "20260826000200_accounting_advisory_view_grants.sql",
