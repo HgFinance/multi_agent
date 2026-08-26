@@ -150,6 +150,7 @@ from governance_client import (
     governance_request as _governance_request,
 )
 from ls_account_stream import router as portfolio_live_router
+from notion_read import router as notion_read_router
 from operations_read_model import build_operations_snapshot
 from portfolio_profile_client import (
     PortfolioProxyError,
@@ -443,6 +444,9 @@ app.include_router(account_snapshot_router)
 # Discord 대화 원문 읽기. 봇 토큰이 브라우저에 내려가면 발송 권한까지 같이
 # 나가므로 토큰은 이 프로세스에만 둔다.
 app.include_router(discord_read_router)
+# CEO 오피스 Notion 리포트 읽기. 같은 이유로 `NOTION_TOKEN`도 이 프로세스에만
+# 둔다 - 그 토큰은 읽기 전용이 아니라 페이지 생성·수정 권한까지 갖는다.
+app.include_router(notion_read_router)
 # 브로커 계좌 실시간(계좌등록 → 주문상태·체결 → 잔고 확인). 브로커 푸시라
 # 우리 원장이 아니다 — 응답의 `authoritative: false`가 그 경계다.
 app.include_router(portfolio_live_router)

@@ -1134,6 +1134,14 @@
         },
         {
           "method": "GET",
+          "path": "/ui/notion/reports"
+        },
+        {
+          "method": "GET",
+          "path": "/ui/notion/reports/{page_id}"
+        },
+        {
+          "method": "GET",
           "path": "/ui/integrations"
         },
         {

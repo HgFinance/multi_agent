@@ -237,6 +237,13 @@ services:
       DISCORD_CEO_CHANNEL_ID: ${DISCORD_CEO_CHANNEL_ID:-}
       DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
       DISCORD_ACTOR_MAP: ${DISCORD_ACTOR_MAP:-}
+      # 결과물 창고(apps/api/notion_read.py)가 CEO 오피스 리포트를 읽는다.
+      # 같은 토큰이 페이지 생성·수정 권한도 가지므로 브라우저에 내려보내지
+      # 않는다 - 화면은 정규화된 목록과 마크다운 본문만 받는다. 둘 중 하나라도
+      # 비면 그 패널만 503으로 "못 읽었다"를 표시하고 나머지는 그대로 돈다.
+      NOTION_TOKEN: ${NOTION_TOKEN:-}
+      NOTION_CEO_DB: ${NOTION_CEO_DB:-}
+      NOTION_READ_CACHE_SECONDS: ${NOTION_READ_CACHE_SECONDS:-30}
       # LS 브로커 조회 배선(2026-08-19). `.env`는 `.dockerignore`에 걸려 이미지에
       # 들어가지 않으므로 apps/api/main.py의 load_dotenv가 컨테이너 안에서는
       # 아무것도 읽지 못한다 - 여기 나열한 키만 프로세스에 도달한다.
