@@ -47,6 +47,9 @@ COPY departments/07-agent-workforce/workforce_events ./workforce_events
 COPY departments/07-agent-workforce/planning ./planning
 COPY departments/07-agent-workforce/hiring ./hiring
 COPY departments/07-agent-workforce/performance ./performance
+# scorecard_brief imports the shared Markdown-cell renderer from the
+# department root. A warm image masked this missing explicit dependency.
+COPY departments/07-agent-workforce/reporting.py ./reporting.py
 # improvement-worker는 root loader로 api/app.py를 고유 모듈명에 로드한다.
 COPY departments/07-agent-workforce/workforce_api_loader.py ./workforce_api_loader.py
 

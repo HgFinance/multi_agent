@@ -149,7 +149,7 @@ class DiscordGatewayWiringTests(unittest.TestCase):
     def test_dispatcher_and_supervisor_keep_official_runtime_image(self) -> None:
         source = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         dispatcher_block = source[source.index("kanban-dispatcher:") : source.index("ceo-kanban-supervisor:")]
-        supervisor_block = source[source.index("ceo-kanban-supervisor:") : source.index("paper-search-mcp:")]
+        supervisor_block = _service_block(source, "ceo-kanban-supervisor")
         self.assertIn("image: nousresearch/hermes-agent:latest", dispatcher_block)
         self.assertIn("image: hedgefund-ceo-supervisor:latest", supervisor_block)
         self.assertIn("dockerfile: Dockerfile.ceo-supervisor", supervisor_block)

@@ -228,7 +228,7 @@ flowchart LR
 | `prometheus` | Metric 저장 | `observability`, `full` | 관리망만 |
 | `grafana` | 운영 Dashboard | `observability`, `full` | 관리자 Auth 필요 |
 | `research-mcp` | 리서치 도구면(HTTP MCP). Hermes가 서비스 이름으로 부른다 | 기본 Core | 공개 금지 |
-| `*-mcp` (외부 데이터) | DART·FRED·KOSIS 등 **요청시 조회면**. §6.2.1의 선적재 대체 | `research-skills` | 공개 금지 |
+| `*-mcp` (외부 데이터) | DART·FRED·KOSIS 등 **요청시 조회면**. §6.2.1의 선적재 대체 | 소유 Hermes의 HTTP/stdio 계약 | 공개 금지 |
 | `ollama` | 로컬 추론 | `local-llm` | 공개 금지 |
 | `ollama-model-init` | 8개 `Modelfile`의 모델 별칭 생성·Version 확인 | `local-llm`, `tools` | One-shot |
 | `migration-runner` | Supabase·Timescale Migration 검증·적용 | `tools` | One-shot |
@@ -762,14 +762,14 @@ Redis Stream 보존은 Canonical DB와 Audit Vault 보존 정책을 대체하지
 §6.2.1로 외부 데이터 일부가 선적재에서 **요청시 조회**로 바뀌면서 MCP가 정식 통신
 방식이 됐다. 다음을 지킨다.
 
-**전송은 HTTP다.** Hermes 프로필의 `mcp_servers`는 `url: http://<서비스>:<포트>/mcp`
-형식만 받는다(`departments/*/hermes/config.yaml`). stdio 전용 MCP는 그대로 붙일 수 없고,
-쓰려면 HTTP를 노출하는 컨테이너로 감싸야 한다.
+**전송 방식은 도구 계약에 따른다.** 상주 서비스는 Hermes 프로필의
+`url: http://<서비스>:<포트>/mcp` 형식을 사용한다. 반대로 stdio 전용 도구는
+Hermes 프로필의 `command`/`args`로 직접 실행하며, 이를 HTTP 컨테이너로 감싸지 않는다.
 
-**검증 전에는 `enabled: false`다.** 선례는 `paper-search-mcp`다 — 컨테이너를 띄우고
+**검증 전에는 `enabled: false`다.** HTTP 상주 MCP는 컨테이너를 띄우고
 `hermes -p <부서> mcp test <이름>`으로 계약을 확인한 뒤에야 프로필에서 켠다. 검증 안 된
-서버가 기존 스택 기동을 깨뜨리지 않게 하려는 것이다. 새 MCP는 `profiles:`로 격리해
-기본 `docker compose up`에서 뜨지 않게 한다.
+서버가 기존 스택 기동을 깨뜨리지 않게 하려는 것이다. stdio 도구도 먼저 단독 계약 검증을
+통과시킨 뒤 프로필에서 켠다.
 
 **해석 프레임은 가져다 쓰지 않는다.** 외부 MCP가 제공하는 자체 분석 도구
 (스코어·시그널·요약 프레임)는 **채점에 쓰지 않는다.** `evidence/methods.py`의

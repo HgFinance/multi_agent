@@ -19,16 +19,14 @@
 
 | 명령 | 서비스 수 | 추가 서비스 |
 |---|---:|---|
-| `docker compose config --services` | 55 | 기본 통합 Runtime; `portfolio-bff`와 `portfolio-worker` 포함 |
-| `docker compose --profile dashboard config --services` | 56 | `hermes-dashboard` 추가 |
-| `docker compose --profile research-skills config --services` | 57 | `paper-search-mcp`, `youtube-transcript-mcp` 추가 |
-| `docker compose --profile dashboard --profile research-skills config --services` | 58 | 선택 서비스 전체 |
+| `docker compose config --services` | 56 | 기본 통합 Runtime; `portfolio-bff`와 `portfolio-worker` 포함 |
+| `docker compose --profile dashboard config --services` | 57 | `hermes-dashboard` 추가 |
 
 `config --services`는 선언·include·interpolation 검증일 뿐 컨테이너가 실행 중이라는 뜻은 아니다. 실행 여부는 `docker compose ps`, Healthcheck, API smoke test로 확인한다.
 
 ## 3. 서비스 배치
 
-아래 표는 책임 경계를 설명하는 대표 서비스 목록이다. 55개 전체 inventory의 정본은
+아래 표는 책임 경계를 설명하는 대표 서비스 목록이다. 56개 전체 inventory의 정본은
 `docker compose config --services`이며, 신규 relay·scheduler·retention worker를 이 표에
 일일이 복사해 전체 목록처럼 관리하지 않는다.
 
@@ -42,7 +40,7 @@
 | `market-api` | TimescaleDB Snapshot·Bar·Breadth·DQ Read API. 호스트 `0.0.0.0:8036` |
 | `research-api` | Evidence·PIT Read API. 호스트 `127.0.0.1:8035` |
 | `research-mcp` | 뉴스·공시·재무·거시·웹을 요청 시 조회하는 Research Tool Gateway. 호스트 포트 미공개, 장기 수집 없음 |
-| `paper-search-mcp`, `youtube-transcript-mcp` | Research 방법론 스카우트 도구. `research-skills` Profile 전용 |
+| `paper-search` | Research Hermes가 `uvx` stdio로 직접 실행하는 방법론 검색 도구 |
 
 시장 데이터 Collector와 Research Data Plane만 TimescaleDB Credential을 가진다. 다른 부서는 `market-api`와 `research-api`를 사용한다. 정성 정보 API Key는 `research-mcp`에만 주입하고 `batch-collectors`와 `ls-realtime`에는 주입하지 않는다.
 
@@ -123,8 +121,6 @@ Dashboard 화면은 `NEXT_PUBLIC_HERMES_DASHBOARD_URL`에 있는 Hermes 공식 D
 docker compose up -d
 docker compose logs -f timescaledb
 docker compose --profile dashboard up -d
-docker compose --profile research-skills up -d
-docker compose --profile dashboard --profile research-skills up -d
 docker compose ps
 docker compose down       # 컨테이너만 제거, named volume 유지
 docker compose down -v    # 데이터까지 삭제

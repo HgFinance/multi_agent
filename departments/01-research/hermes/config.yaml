@@ -210,9 +210,10 @@ mcp_servers:
     command: uvx
     args: [paper-search-mcp]
     enabled: true
-  youtube-transcript:
-    url: http://youtube-transcript-mcp:8042/mcp
-    enabled: false
+  # YouTube transcript remains disabled until its upstream package is
+  # compatible with the pinned MCP runtime. Do not point a profile at a
+  # resident HTTP container: the package is stdio-only and the old service
+  # definition exited or crashed during startup.
 scout_operations:
   mode: resident_scheduled
   cadence:
