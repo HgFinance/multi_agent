@@ -39,10 +39,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
+import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable, Protocol
@@ -176,12 +178,17 @@ class WriteOutcome:
     capacity_written: int = 0
     cost_written: int = 0
     skipped: list[dict[str, str]] = field(default_factory=list)
+    # 어느 버킷을 적었는지. 로그만 보고 "지금 것"으로 오해하지 않게 같이 낸다.
+    window_start: datetime | None = None
+    window_end: datetime | None = None
 
     def skip(self, *, kind: str, subject: str, reason: str) -> None:
         self.skipped.append({"kind": kind, "subject": subject, "reason": reason})
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            "window_start": self.window_start.isoformat() if self.window_start else None,
+            "window_end": self.window_end.isoformat() if self.window_end else None,
             "capacity_written": self.capacity_written,
             "cost_written": self.cost_written,
             "skipped_count": len(self.skipped),
@@ -319,34 +326,218 @@ def write_observability_snapshots(
     return outcome
 
 
+# ── 관측 창 ───────────────────────────────────────────────────────────────────
+#
+# ⚠ 창은 **겹치면 안 된다.** 두 리더의 집계 방식이 다르기 때문이다:
+#
+#   get_capacity_snapshot()            창 안에서 window_end 가 가장 늦은 행 **1개**
+#   list_cost_snapshots_by_department() 창 안의 행을 **전부 합산** (assess_budget)
+#
+# 그래서 "지금부터 24시간 전" 같은 **이동 창**으로 매번 적으면, 실행할 때마다
+# window 가 달라 새 행이 되고, 24시간 Scorecard 질의가 그 행들을 전부 더한다 -
+# 사용량이 실행 횟수만큼 부풀어 예산 판정이 뒤집힌다(append_cost_snapshot 머리말의
+# "재보고가 새 행이 되면 사용량이 조용히 두 배가 된다"와 같은 사고를, 재보고가
+# 아니라 창 설계로 일으키는 경우다).
+#
+# 그래서 **정시에 정렬된 고정 길이 버킷**만 적는다. 같은 시간대에 몇 번을 다시
+# 돌려도 창이 글자 그대로 같아서 행이 늘지 않고 갱신되고(unique index), 서로 다른
+# 버킷은 겹치지 않아 합산이 정확하다.
+DEFAULT_WINDOW_HOURS = 1
+
+
+def aligned_window(*, now: datetime, window_hours: int = DEFAULT_WINDOW_HOURS) -> tuple[datetime, datetime]:
+    """`now` 직전의 **완료된** 버킷 하나. 부분 버킷은 절대 적지 않는다.
+
+    진행 중인 시간대를 적으면 그 값이 "그 시간대의 전부"로 읽히고, 다음 실행이
+    같은 창에 더 큰 값을 덮어쓴다 - 중간에 그 값을 인용한 판단은 과소 집계를
+    본 것이 된다. 끝난 버킷만 적으면 한 번 적힌 값이 변하지 않는다.
+    """
+
+    if window_hours <= 0:
+        raise ValueError("window_hours 는 양수여야 한다")
+    if now.tzinfo is None:
+        raise ValueError("now 는 timezone-aware 여야 한다 - 창 경계가 흔들린다")
+    floored = now.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    # window_hours 배수 경계로 내린다(1이면 매시 정각).
+    floored = floored.replace(hour=(floored.hour // window_hours) * window_hours)
+    return floored - timedelta(hours=window_hours), floored
+
+
 def run_once(
     *,
     repository: ScorecardWriteRepository,
-    lookback_hours: float = 24.0,
+    window_hours: int = DEFAULT_WINDOW_HOURS,
+    now: datetime | None = None,
     dry_run: bool = False,
     observability: WorkforceObservability | None = None,
 ) -> WriteOutcome:
-    """관측 1회 → Snapshot 기록 1회. cron/스케줄러가 부르는 진입점."""
+    """완료된 버킷 하나를 관측해 Snapshot 으로 적는다. 스케줄러가 부르는 진입점.
 
+    같은 버킷을 다시 돌리는 것은 안전하다(멱등 갱신). 그래서 실행 주기를 버킷
+    길이보다 짧게 잡아도 되고, 그 편이 컨테이너 재시작에 강하다.
+    """
+
+    window_start, window_end = aligned_window(
+        now=now or datetime.now(timezone.utc), window_hours=window_hours
+    )
     observed = observability or collect_workforce_observability(
-        lookback_hours=lookback_hours,
+        # now/lookback 조합으로 창을 **정확히 그 버킷**에 맞춘다.
+        now=window_end,
+        lookback_hours=float(window_hours),
         # 유휴 임계는 이 경로와 무관하다(Snapshot 두 종류는 유휴 판정을 안 쓴다).
-        # 기본값을 그대로 두어 관측 창이 화면 쪽과 같게 유지된다.
         idle_threshold_hours=4.0,
     )
-    return write_observability_snapshots(observed, repository, dry_run=dry_run)
+    outcome = write_observability_snapshots(observed, repository, dry_run=dry_run)
+    outcome.window_start = window_start
+    outcome.window_end = window_end
+    return outcome
+
+
+def run_backfill(
+    *,
+    repository: ScorecardWriteRepository,
+    buckets: int,
+    window_hours: int = DEFAULT_WINDOW_HOURS,
+    now: datetime | None = None,
+    dry_run: bool = False,
+    pace_seconds: float = 10.0,
+    sleep: Any = time.sleep,
+) -> list[WriteOutcome]:
+    """직전 N 개 버킷을 순서대로 메운다. 컨테이너가 죽어 있던 구간용.
+
+    ▶ 버킷 하나당 Langfuse 왕복 2회인데 Public API 는 분당 15 요청 상한이라
+      (429 의 x-ratelimit-limit), 연달아 쏘면 스스로 한도를 넘긴다. 버킷 사이에
+      간격을 둔다 - 백필은 급한 작업이 아니고, 여기서 429 를 맞으면 SDK 가
+      최대 60초를 자서 오히려 더 느려진다.
+    """
+
+    if buckets <= 0:
+        raise ValueError("buckets 는 양수여야 한다")
+    anchor = now or datetime.now(timezone.utc)
+    outcomes: list[WriteOutcome] = []
+    for index in range(buckets):
+        # 오래된 버킷부터 채운다 - 중간에 멈춰도 최신 구간이 비는 편이 낫다
+        # (최신은 다음 정기 실행이 곧 다시 적는다).
+        offset = timedelta(hours=window_hours * (buckets - 1 - index))
+        outcomes.append(
+            run_once(
+                repository=repository, window_hours=window_hours,
+                now=anchor - offset, dry_run=dry_run,
+            )
+        )
+        if index < buckets - 1 and pace_seconds > 0:
+            sleep(pace_seconds)
+    return outcomes
+
+
+# ── 스케줄러 ─────────────────────────────────────────────────────────────────
+
+LOGGER = logging.getLogger("workforce.snapshot_writer")
+DEFAULT_HEALTH_PATH = "/tmp/workforce-snapshot-writer.health"
+# 버킷 길이(1시간)보다 짧게 돈다. 같은 버킷 재보고는 멱등 갱신이라 손해가 없고,
+# 컨테이너가 잠깐 죽었다 살아나도 그 버킷을 놓치지 않는다.
+DEFAULT_INTERVAL_SECONDS = 600.0
+# 이 파일이 이보다 오래 안 바뀌면 healthcheck 가 실패한다. 주기의 3배 - 한 번
+# 걸러 뛰는 것으로 컨테이너를 재시작시키지 않는다.
+HEALTH_STALE_MULTIPLIER = 3
+
+
+def _heartbeat(path: Path) -> None:
+    """살아 있다는 사실만 남긴다 - 성공/실패는 로그가 들고 있다.
+
+    ▶ 기록 0건도 heartbeat 는 찍는다. Worker 가 한 시간 동안 아무것도 안 한
+      정상 상태(arrivals=0)와 writer 가 죽은 상태를 healthcheck 가 구분해야
+      한다 - 전자로 컨테이너를 재시작하면 진짜 장애만 가려진다.
+    """
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(datetime.now(timezone.utc).isoformat(), encoding="utf-8")
+    except OSError as exc:  # noqa: BLE001 - 계측이 본 작업을 막지 않는다
+        LOGGER.warning("heartbeat 기록 실패: %s", exc)
+
+
+def healthcheck(path: Path, *, interval_seconds: float = DEFAULT_INTERVAL_SECONDS) -> bool:
+    try:
+        stamp = datetime.fromisoformat(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return False
+    if stamp.tzinfo is None:
+        return False
+    age = (datetime.now(timezone.utc) - stamp).total_seconds()
+    return age <= interval_seconds * HEALTH_STALE_MULTIPLIER
+
+
+def run_scheduler(
+    *,
+    repository: ScorecardWriteRepository,
+    window_hours: int = DEFAULT_WINDOW_HOURS,
+    interval_seconds: float = DEFAULT_INTERVAL_SECONDS,
+    health_path: Path = Path(DEFAULT_HEALTH_PATH),
+    dry_run: bool = False,
+    once: bool = False,
+    sleep: Any = time.sleep,
+) -> int:
+    """완료된 버킷을 주기적으로 적는다.
+
+    ▶ 한 번의 실패로 루프를 끝내지 않는다. Langfuse 가 잠깐 죽거나 DB 가 끊겨도
+      다음 주기에 같은 버킷을 다시 적으면 그만이다(멱등 갱신) - 여기서 예외를
+      올려 컨테이너가 재시작하면, 재시작 루프가 오히려 관측 공백을 만든다.
+    """
+
+    while True:
+        try:
+            outcome = run_once(
+                repository=repository, window_hours=window_hours, dry_run=dry_run
+            )
+            LOGGER.info("snapshot %s", json.dumps(outcome.as_dict(), ensure_ascii=False))
+        except Exception as exc:  # noqa: BLE001 - 주기 작업은 다음 주기에 다시 온다
+            LOGGER.exception("snapshot 기록 실패 - 다음 주기에 다시 시도한다: %s", exc)
+        _heartbeat(health_path)
+        if once:
+            return 0
+        sleep(interval_seconds)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Langfuse 관측을 workforce capacity/cost Snapshot 으로 기록한다.",
     )
-    parser.add_argument("--lookback-hours", type=float, default=24.0)
+    parser.add_argument(
+        "--window-hours", type=int, default=DEFAULT_WINDOW_HOURS,
+        help="정시 정렬 버킷 길이(시간). 겹치지 않는 창만 적는다",
+    )
+    parser.add_argument(
+        "--interval-seconds", type=float,
+        default=_env_float("WORKFORCE_SNAPSHOT_INTERVAL_SECONDS", DEFAULT_INTERVAL_SECONDS),
+    )
+    parser.add_argument(
+        "--once", action="store_true",
+        help="한 버킷만 적고 끝낸다(기본은 주기 실행)",
+    )
+    parser.add_argument(
+        "--backfill-hours", type=int, default=0,
+        help="직전 N 개 버킷을 메우고 끝낸다. 컨테이너가 죽어 있던 구간용",
+    )
     parser.add_argument(
         "--dry-run", action="store_true",
         help="무엇을 적을지만 출력하고 DB 에 쓰지 않는다",
     )
+    parser.add_argument("--healthcheck", action="store_true")
+    parser.add_argument(
+        "--health-path",
+        default=os.getenv("WORKFORCE_SNAPSHOT_HEALTH_PATH", DEFAULT_HEALTH_PATH),
+    )
     args = parser.parse_args(argv)
+
+    health_path = Path(args.health_path)
+    if args.healthcheck:
+        return 0 if healthcheck(health_path, interval_seconds=args.interval_seconds) else 1
+
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "INFO"),
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
 
     dsn = (os.getenv("GOVERNANCE_WORKFORCE_DATABASE_URL") or os.getenv("DATABASE_URL") or "").strip()
     if not dsn:
@@ -357,16 +548,34 @@ def main(argv: list[str] | None = None) -> int:
 
     repository = PostgresScorecardRepository.connect(dsn)
     try:
-        outcome = run_once(
-            repository=repository,
-            lookback_hours=args.lookback_hours,
+        if args.backfill_hours:
+            outcomes = run_backfill(
+                repository=repository, buckets=args.backfill_hours,
+                window_hours=args.window_hours, dry_run=args.dry_run,
+            )
+            print(json.dumps([o.as_dict() for o in outcomes], ensure_ascii=False, indent=2))
+            return 0 if any(o.capacity_written or o.cost_written for o in outcomes) else 1
+        if args.once:
+            outcome = run_once(
+                repository=repository, window_hours=args.window_hours, dry_run=args.dry_run,
+            )
+            print(json.dumps(outcome.as_dict(), ensure_ascii=False, indent=2))
+            # 한 버킷도 못 적었으면 성공으로 끝내지 않는다 - cron 이 조용히 도는 것을 막는다.
+            return 0 if (outcome.capacity_written or outcome.cost_written) else 1
+        return run_scheduler(
+            repository=repository, window_hours=args.window_hours,
+            interval_seconds=args.interval_seconds, health_path=health_path,
             dry_run=args.dry_run,
         )
     finally:
         repository.close()
-    print(json.dumps(outcome.as_dict(), ensure_ascii=False, indent=2))
-    # 하나도 못 적었으면 성공으로 끝내지 않는다 - cron 이 조용히 도는 것을 막는다.
-    return 0 if (outcome.capacity_written or outcome.cost_written) else 1
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, "") or default)
+    except ValueError:
+        return default
 
 
 __all__ = [
@@ -377,12 +586,16 @@ __all__ = [
     "UnknownDepartmentKey",
     "UnpricedModel",
     "WriteOutcome",
+    "aligned_window",
     "build_capacity_snapshot",
     "build_cost_snapshot",
     "department_code_for",
     "main",
+    "healthcheck",
     "model_cost_usd",
+    "run_backfill",
     "run_once",
+    "run_scheduler",
     "write_observability_snapshots",
 ]
 

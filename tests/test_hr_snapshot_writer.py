@@ -312,3 +312,189 @@ def test_builders_refuse_unmeasured_reports_directly() -> None:
         build_cost_snapshot(
             _usage(prompt=None, completion=None), agent_id="a-1", profile_version_id="v-1",
         )
+
+
+# ── 관측 창: 겹치면 비용이 부풀어 오른다 ──────────────────────────────────────
+#
+# get_capacity_snapshot 은 창 안의 **1행**을 고르고, list_cost_snapshots_by_department
+# 는 창 안의 행을 **전부 합산**한다(assess_budget). 그래서 "지금부터 24시간 전"
+# 같은 이동 창으로 매번 적으면 24시간 Scorecard 질의가 그 행들을 다 더해 사용량이
+# 실행 횟수만큼 부풀고 예산 판정이 뒤집힌다.
+
+
+def test_window_is_aligned_and_covers_only_completed_buckets() -> None:
+    from snapshot_writer import aligned_window  # noqa: PLC0415
+
+    start, end = aligned_window(now=datetime(2026, 8, 27, 12, 34, 56, tzinfo=timezone.utc))
+    assert end == datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
+    assert start == datetime(2026, 8, 27, 11, 0, tzinfo=timezone.utc)
+
+    # 진행 중인 시간대는 절대 안 적는다 - 부분 값이 "그 시간대 전부"로 읽히고
+    # 다음 실행이 더 큰 값으로 덮어써서, 중간에 인용한 판단이 과소 집계가 된다.
+    assert end <= datetime(2026, 8, 27, 12, 34, 56, tzinfo=timezone.utc)
+
+
+def test_reruns_within_the_same_hour_target_the_identical_window() -> None:
+    """멱등 갱신의 전제 - 창이 조금이라도 다르면 unique index 를 비껴가 새 행이 된다."""
+
+    from snapshot_writer import aligned_window  # noqa: PLC0415
+
+    base = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    windows = {
+        aligned_window(now=base + timedelta(minutes=m)) for m in (0, 7, 31, 59)
+    }
+    assert len(windows) == 1, windows
+
+
+def test_consecutive_buckets_do_not_overlap() -> None:
+    """비용은 창 안의 행을 합산한다 - 겹치면 그만큼 이중 계상된다."""
+
+    from snapshot_writer import aligned_window  # noqa: PLC0415
+
+    base = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    first = aligned_window(now=base)
+    second = aligned_window(now=base + timedelta(hours=1))
+    assert first[1] == second[0], "버킷 사이에 틈이나 겹침이 있다"
+
+
+def test_naive_datetime_is_rejected() -> None:
+    from snapshot_writer import aligned_window  # noqa: PLC0415
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        aligned_window(now=datetime(2026, 8, 27, 12))
+
+
+def test_run_once_observes_exactly_the_bucket_it_writes() -> None:
+    """관측 창과 기록 창이 어긋나면 한 시간짜리 행에 다른 시간의 수치가 들어간다."""
+
+    import snapshot_writer as sw  # noqa: PLC0415
+
+    captured: dict = {}
+
+    def _fake_collect(*, now, lookback_hours, idle_threshold_hours):
+        captured.update(now=now, lookback_hours=lookback_hours)
+        return _Observability()
+
+    original = sw.collect_workforce_observability
+    sw.collect_workforce_observability = _fake_collect
+    try:
+        outcome = sw.run_once(
+            repository=_FakeRepo(), now=datetime(2026, 8, 27, 12, 40, tzinfo=timezone.utc),
+        )
+    finally:
+        sw.collect_workforce_observability = original
+
+    assert captured["now"] == datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+    assert captured["lookback_hours"] == 1.0
+    assert outcome.window_start == datetime(2026, 8, 27, 11, tzinfo=timezone.utc)
+    assert outcome.window_end == datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+
+
+# ── 스케줄러 ─────────────────────────────────────────────────────────────────
+
+
+def test_scheduler_survives_a_failing_cycle() -> None:
+    """한 번 실패했다고 루프를 끝내면, 재시작 루프가 오히려 관측 공백을 만든다."""
+
+    import snapshot_writer as sw  # noqa: PLC0415
+
+    calls = {"n": 0}
+
+    def _boom(*, repository, window_hours, dry_run):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("langfuse down")
+        return sw.WriteOutcome(capacity_written=1)
+
+    original, sw.run_once = sw.run_once, _boom
+    slept: list[float] = []
+    try:
+        # 두 번째 주기에서 멈추도록 sleep 이 한 번 불린 뒤 once 처럼 빠져나온다.
+        def _sleep(seconds):
+            slept.append(seconds)
+            raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            sw.run_scheduler(
+                repository=_FakeRepo(), health_path=Path(_tmp_health()),
+                interval_seconds=5.0, sleep=_sleep,
+            )
+    finally:
+        sw.run_once = original
+
+    assert calls["n"] == 1, "첫 주기가 예외를 올려 루프가 끊겼다"
+    assert slept == [5.0]
+
+
+def test_heartbeat_is_written_even_when_nothing_was_recorded() -> None:
+    """기록 0건(정상)과 writer 사망을 healthcheck 가 구분해야 한다."""
+
+    import snapshot_writer as sw  # noqa: PLC0415
+
+    path = Path(_tmp_health())
+    original, sw.run_once = sw.run_once, (
+        lambda *, repository, window_hours, dry_run: sw.WriteOutcome()
+    )
+    try:
+        assert sw.run_scheduler(repository=_FakeRepo(), health_path=path, once=True) == 0
+    finally:
+        sw.run_once = original
+
+    assert path.exists()
+    assert sw.healthcheck(path, interval_seconds=60.0) is True
+
+
+def test_healthcheck_fails_when_the_heartbeat_goes_stale_or_missing() -> None:
+    import snapshot_writer as sw  # noqa: PLC0415
+
+    missing = Path(_tmp_health())
+    assert sw.healthcheck(missing) is False
+
+    stale = Path(_tmp_health())
+    stale.write_text(
+        (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(), encoding="utf-8"
+    )
+    assert sw.healthcheck(stale, interval_seconds=60.0) is False
+
+
+def test_backfill_fills_oldest_first_and_paces_between_buckets() -> None:
+    """버킷당 Langfuse 왕복 2회 - 분당 15 상한이라 연달아 쏘면 스스로 429 를 만든다."""
+
+    import snapshot_writer as sw  # noqa: PLC0415
+
+    seen: list[datetime] = []
+    original = sw.run_once
+
+    def _record(*, repository, window_hours, now, dry_run):
+        outcome = sw.WriteOutcome(capacity_written=1)
+        outcome.window_end = sw.aligned_window(now=now, window_hours=window_hours)[1]
+        seen.append(outcome.window_end)
+        return outcome
+
+    sw.run_once = _record
+    slept: list[float] = []
+    try:
+        sw.run_backfill(
+            repository=_FakeRepo(), buckets=3,
+            now=datetime(2026, 8, 27, 12, 30, tzinfo=timezone.utc),
+            pace_seconds=10.0, sleep=slept.append,
+        )
+    finally:
+        sw.run_once = original
+
+    assert seen == sorted(seen), "최신부터 채우면 중간에 멈췄을 때 과거가 빈다"
+    assert seen == [
+        datetime(2026, 8, 27, 10, tzinfo=timezone.utc),
+        datetime(2026, 8, 27, 11, tzinfo=timezone.utc),
+        datetime(2026, 8, 27, 12, tzinfo=timezone.utc),
+    ]
+    assert slept == [10.0, 10.0], "버킷 사이 간격이 없다"
+
+
+def _tmp_health() -> str:
+    import tempfile  # noqa: PLC0415
+
+    handle = tempfile.NamedTemporaryFile(delete=False, suffix=".health")
+    handle.close()
+    Path(handle.name).unlink(missing_ok=True)
+    return handle.name
